@@ -24,6 +24,13 @@ pub(crate) fn within_limit(bytes: usize) -> SqlResult<()> {
     }
 }
 
+fn grown_within_limit(most_bytes: usize, exact_bytes: impl FnOnce() -> usize) -> SqlResult<()> {
+    if most_bytes <= MAX_TEXT_BYTES {
+        return crate::memory::check_grown_value_bytes(most_bytes, exact_bytes);
+    }
+    within_limit(exact_bytes())
+}
+
 fn invalid_hex_number() -> SqlError {
     SqlError::new(SqlState::INVALID_TEXT_REPRESENTATION, "invalid hex number")
         .with_oracle_code(1465)
@@ -397,6 +404,43 @@ fn position_of(values: &[Value]) -> SqlResult<Value> {
         }
     }
     Ok(Value::BigInt(0))
+}
+
+fn uppercase_char_bytes(character: char) -> usize {
+    character.to_uppercase().map(char::len_utf8).sum()
+}
+
+fn lowercase_char_bytes(character: char) -> usize {
+    character.to_lowercase().map(char::len_utf8).sum()
+}
+
+fn uppercase_bytes(text: &str) -> usize {
+    text.chars()
+        .map(uppercase_char_bytes)
+        .fold(0, usize::saturating_add)
+}
+
+fn lowercase_bytes(text: &str) -> usize {
+    text.chars()
+        .map(lowercase_char_bytes)
+        .fold(0, usize::saturating_add)
+}
+
+fn initial_capitals_bytes(text: &str) -> usize {
+    let mut bytes = 0usize;
+    let mut in_word = false;
+    for character in text.chars() {
+        let changed = if !character.is_alphanumeric() {
+            character.len_utf8()
+        } else if in_word {
+            lowercase_char_bytes(character)
+        } else {
+            uppercase_char_bytes(character)
+        };
+        bytes = bytes.saturating_add(changed);
+        in_word = character.is_alphanumeric();
+    }
+    bytes
 }
 
 fn initial_capitals(text: &str) -> String {
@@ -800,13 +844,22 @@ fn date_unit(values: &[Value]) -> Option<String> {
 }
 
 pub(crate) fn call(name: &str, values: &[Value], declared: &[Option<SqlType>]) -> SqlResult<Value> {
-    let unary_text = |change: fn(&str) -> String| -> SqlResult<Value> {
-        let Some(text) = text_of(&values[0]) else {
-            return Ok(Value::Null);
+    if values
+        .iter()
+        .any(|value| crate::temporal::infinity_sign(value).is_some())
+    {
+        return Err(crate::oracle_datetime::year_out_of_range());
+    }
+    let unary_text =
+        |change: fn(&str) -> String, changed_bytes: fn(&str) -> usize| -> SqlResult<Value> {
+            let Some(text) = text_of(&values[0]) else {
+                return Ok(Value::Null);
+            };
+            grown_within_limit(text.len().saturating_mul(MAX_CASE_CHANGE_GROWTH), || {
+                changed_bytes(&text)
+            })?;
+            Ok(text_or_null(change(&text)))
         };
-        within_limit(text.len().saturating_mul(MAX_CASE_CHANGE_GROWTH))?;
-        Ok(text_or_null(change(&text)))
-    };
     match (name, values) {
         (name, [left, right]) if crate::oracle_collections::is_operator(name) => {
             crate::oracle_collections::call(name, left, right)
@@ -821,9 +874,9 @@ pub(crate) fn call(name: &str, values: &[Value], declared: &[Option<SqlType>]) -
             })),
         ("oracle_substr", _) => substring(values),
         ("oracle_instr", _) => position_of(values),
-        ("oracle_upper", [_]) => unary_text(str::to_uppercase),
-        ("oracle_lower", [_]) => unary_text(str::to_lowercase),
-        ("oracle_initcap", [_]) => unary_text(initial_capitals),
+        ("oracle_upper", [_]) => unary_text(str::to_uppercase, uppercase_bytes),
+        ("oracle_lower", [_]) => unary_text(str::to_lowercase, lowercase_bytes),
+        ("oracle_initcap", [_]) => unary_text(initial_capitals, initial_capitals_bytes),
         ("oracle_ltrim", _) => trimmed(values, true, false),
         ("oracle_rtrim", _) => trimmed(values, false, true),
         ("oracle_trim_leading", [_, _]) => trim_one(values, true, false),
@@ -957,12 +1010,38 @@ mod tests {
 
     #[test]
     fn case_changes_past_the_length_limit_are_refused_before_they_are_built() {
-        let long = text(&"a".repeat(340_000_000));
-        for name in ["oracle_upper", "oracle_lower", "oracle_initcap"] {
-            let error = call(name, std::slice::from_ref(&long)).expect_err(name);
-            assert_eq!(error.vendor_code(), Some(1489), "{name}");
-        }
+        let error = super::grown_within_limit(3_000_000_000, || 1_000_000_001).expect_err("over");
+        assert_eq!(error.vendor_code(), Some(1489));
+        assert_eq!(super::grown_within_limit(3_000_000_000, || 10), Ok(()));
         assert_eq!(call("oracle_initcap", &[text("ab cd")]), Ok(text("Ab Cd")));
+    }
+
+    #[test]
+    fn case_changes_count_the_exact_result_against_the_session_value_limit() {
+        let _limit = crate::memory::enter_value_limit(1000);
+        let ascii = "a".repeat(400);
+        for name in ["oracle_upper", "oracle_lower", "oracle_initcap"] {
+            let changed = call(name, &[text(&ascii)]).expect(name);
+            let Value::Text(changed) = changed else {
+                panic!("{name} returned {changed:?}");
+            };
+            assert_eq!(changed.len(), 400, "{name}");
+        }
+        let grows_on_upper = "\u{390}".repeat(400);
+        let error = call("oracle_upper", &[text(&grows_on_upper)]).expect_err("upper");
+        assert_eq!(error.state().code(), "54000");
+        let capitalized = "\u{390} ".repeat(400);
+        let error = call("oracle_initcap", &[text(&capitalized)]).expect_err("initcap");
+        assert_eq!(error.state().code(), "54000");
+        let grows_on_lower = "\u{130}".repeat(400);
+        let error = call("oracle_lower", &[text(&grows_on_lower)]).expect_err("lower");
+        assert_eq!(error.state().code(), "54000");
+        let mixed = "\u{390}b \u{130}x";
+        assert_eq!(super::initial_capitals_bytes(mixed), 6 + 1 + 1 + 2 + 1);
+        assert_eq!(
+            super::initial_capitals_bytes(mixed),
+            super::initial_capitals(mixed).len()
+        );
     }
 
     #[test]

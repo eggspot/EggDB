@@ -511,17 +511,22 @@ impl<'a> Session<'a> {
             (None, false) => transaction.scan((start, end)),
         };
         let limit = self.request.scan.limit.unwrap_or(u64::MAX);
+        let keys_only = self.request.scan.keys_only;
         let mut entries = 0u64;
         while entries < limit {
             if self.request.scan.reverse {
                 match scan.next_back() {
-                    Some(Ok((key, value))) => self.entry(&key, &value),
+                    Some(Ok((key, value))) => {
+                        scan_entry(&mut self.out, self.format, keys_only, &key, &value);
+                    }
                     Some(Err(error)) => return Err(scan_failure(error, &self.file)),
                     None => break,
                 }
             } else {
                 match scan.next_entry() {
-                    Ok(Some((key, value))) => self.entry(key, value),
+                    Ok(Some((key, value))) => {
+                        scan_entry(&mut self.out, self.format, keys_only, key, value);
+                    }
                     Ok(None) => break,
                     Err(error) => return Err(scan_failure(error, &self.file)),
                 }
@@ -535,54 +540,6 @@ impl<'a> Session<'a> {
             self.messages.text("\n");
         }
         Ok(Exit::Done)
-    }
-
-    fn entry(&mut self, key: &[u8], value: &[u8]) {
-        let keys_only = self.request.scan.keys_only;
-        match self.format {
-            Format::Text => {
-                self.out.styled(Style::Bold, &render::text(key));
-                if !keys_only {
-                    self.out.text("\t");
-                    match render::text_cut(value, SCAN_VALUE_SHOWN_BYTES) {
-                        Some(shown) => {
-                            self.out.text(&shown);
-                            self.out.styled(
-                                Style::Dim,
-                                &format!(" … ({} bytes)", render::count(value.len() as u64)),
-                            );
-                        }
-                        None => self.out.text(&render::text(value)),
-                    }
-                }
-                self.out.text("\n");
-            }
-            Format::Json => {
-                let object = JsonObject::new().bytes("key", key);
-                let object = if keys_only {
-                    object
-                } else {
-                    object.bytes("value", value)
-                };
-                self.out.text(&object.line());
-            }
-            Format::Hex => {
-                self.out.text(&render::hex(key));
-                if !keys_only {
-                    self.out.text("\t");
-                    self.out.text(&render::hex(value));
-                }
-                self.out.text("\n");
-            }
-            Format::Raw => {
-                self.out.bytes(key);
-                if !keys_only {
-                    self.out.text("\t");
-                    self.out.bytes(value);
-                }
-                self.out.text("\n");
-            }
-        }
     }
 
     fn check(&mut self) -> Result<Exit, Failure> {
@@ -638,11 +595,23 @@ impl<'a> Session<'a> {
         let stats = db.stats().map_err(|error| {
             operation_failure(&error, &format!("cannot read the stats of {}", self.file))
         })?;
+        let collections = if self.request.collection_stats {
+            Some(db.collection_stats().map_err(|error| {
+                operation_failure(
+                    &error,
+                    &format!("cannot count the collections of {}", self.file),
+                )
+            })?)
+        } else {
+            None
+        };
         match self.format {
-            Format::Json => self
-                .out
-                .text(&reports::stats_json(&self.file_display, &stats)),
-            _ => reports::stats_text(&mut self.out, &self.file, &stats),
+            Format::Json => self.out.text(&reports::stats_json(
+                &self.file_display,
+                &stats,
+                collections.as_deref(),
+            )),
+            _ => reports::stats_text(&mut self.out, &self.file, &stats, collections.as_deref()),
         }
         Ok(Exit::Done)
     }
@@ -780,19 +749,23 @@ impl<'a> Session<'a> {
         Database::open_with(&self.request.file, options)
     }
 
+    fn busy_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(
+            self.request
+                .busy_timeout_ms
+                .unwrap_or(DEFAULT_BUSY_TIMEOUT_MS),
+        )
+    }
+
     fn database_options(&self, access: Access, cache_for_command: Option<usize>) -> Options {
         let cache = self
             .request
             .cache_bytes
             .or(cache_for_command)
             .unwrap_or(DEFAULT_CACHE_BYTES);
-        let busy_timeout = self
-            .request
-            .busy_timeout_ms
-            .unwrap_or(DEFAULT_BUSY_TIMEOUT_MS);
         let mut options = Options::new()
             .cache_bytes(cache)
-            .busy_timeout(std::time::Duration::from_millis(busy_timeout));
+            .busy_timeout(self.busy_timeout());
         options = match access {
             Access::ReadOnly => options.read_only(true).create_if_missing(false),
             Access::Write { create } => options.create_if_missing(create),
@@ -820,6 +793,53 @@ impl<'a> Session<'a> {
 
     fn open_failure(&self, error: &Error, access: Access) -> Failure {
         open_failure(&self.file, &self.file_display, error, access)
+    }
+}
+
+fn scan_entry(out: &mut Output<'_>, format: Format, keys_only: bool, key: &[u8], value: &[u8]) {
+    match format {
+        Format::Text => {
+            out.styled(Style::Bold, &render::text(key));
+            if !keys_only {
+                out.text("\t");
+                match render::text_cut(value, SCAN_VALUE_SHOWN_BYTES) {
+                    Some(shown) => {
+                        out.text(&shown);
+                        out.styled(
+                            Style::Dim,
+                            &format!(" … ({} bytes)", render::count(value.len() as u64)),
+                        );
+                    }
+                    None => out.text(&render::text(value)),
+                }
+            }
+            out.text("\n");
+        }
+        Format::Json => {
+            let object = JsonObject::new().bytes("key", key);
+            let object = if keys_only {
+                object
+            } else {
+                object.bytes("value", value)
+            };
+            out.text(&object.line());
+        }
+        Format::Hex => {
+            out.text(&render::hex(key));
+            if !keys_only {
+                out.text("\t");
+                out.text(&render::hex(value));
+            }
+            out.text("\n");
+        }
+        Format::Raw => {
+            out.bytes(key);
+            if !keys_only {
+                out.text("\t");
+                out.bytes(value);
+            }
+            out.text("\n");
+        }
     }
 }
 

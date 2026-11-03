@@ -276,3 +276,171 @@ fn merge_needs_the_privilege_of_each_action() {
     )
     .unwrap();
 }
+
+fn owned_documents(store: &MemoryStore, policies: &[&str]) {
+    crate::memory_store::use_seeded_random_bytes();
+    let mut admin = Session::new(store);
+    let setup = [
+        "CREATE TABLE docs (id integer PRIMARY KEY, owner text, body text)",
+        "INSERT INTO docs VALUES (1, 'ada', 'a1'), (2, 'grace', 'g1')",
+        "CREATE USER ada LOGIN",
+        "CREATE USER grace LOGIN",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON docs TO ada, grace",
+        "ALTER TABLE docs ENABLE ROW LEVEL SECURITY",
+    ];
+    for sql in setup.iter().chain(policies) {
+        run(&mut admin, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
+}
+
+fn violates(session: &mut Session<'_>, sql: &str) {
+    let error = run(session, sql).expect_err(sql);
+    assert_eq!(
+        error.state(),
+        SqlState::INSUFFICIENT_PRIVILEGE,
+        "{sql}: {error}"
+    );
+    assert_eq!(
+        error.message(),
+        "new row violates row-level security policy for table \"docs\"",
+        "{sql}"
+    );
+}
+
+fn stored_rows(store: &MemoryStore) -> String {
+    let mut admin = Session::new(store);
+    run(&mut admin, "SELECT id, owner, body FROM docs ORDER BY id").unwrap()
+}
+
+#[test]
+fn using_is_the_check_when_a_policy_has_no_with_check() {
+    let store = MemoryStore::default();
+    owned_documents(
+        &store,
+        &["CREATE POLICY own ON docs USING (owner = current_user)"],
+    );
+    let mut ada = as_role(&store, "ada");
+    assert_eq!(
+        run(&mut ada, "INSERT INTO docs VALUES (3, 'ada', 'a2')").unwrap(),
+        "INSERT 0 1"
+    );
+    assert_eq!(
+        run(
+            &mut ada,
+            "INSERT INTO docs VALUES (4, 'ada', 'a3') RETURNING id"
+        )
+        .unwrap(),
+        "id\n4\nINSERT 0 1"
+    );
+    assert_eq!(
+        run(&mut ada, "UPDATE docs SET body = 'edited' WHERE id = 1").unwrap(),
+        "UPDATE 1"
+    );
+    let before = stored_rows(&store);
+    for sql in [
+        "INSERT INTO docs VALUES (5, 'grace', 'forged')",
+        "INSERT INTO docs VALUES (5, NULL, 'unowned')",
+        "INSERT INTO docs VALUES (5, 'ada', 'ok'), (6, 'grace', 'forged')",
+        "INSERT INTO docs SELECT 7, 'grace', 'copied'",
+        "UPDATE docs SET owner = 'grace' WHERE id = 1",
+        "UPDATE docs SET owner = NULL",
+        "UPDATE docs SET owner = 'grace' WHERE id = 1 RETURNING id",
+        "WITH moved AS (UPDATE docs SET owner = 'grace' RETURNING id) SELECT count(*) FROM moved",
+        "WITH added AS (INSERT INTO docs VALUES (8, 'grace', 'x') RETURNING id) SELECT * FROM added",
+        "DO $$ BEGIN INSERT INTO docs VALUES (9, 'grace', 'x'); END $$",
+        "DO $$ BEGIN UPDATE docs SET owner = 'grace'; END $$",
+    ] {
+        violates(&mut ada, sql);
+    }
+    for sql in [
+        "INSERT INTO docs VALUES (10, 'grace', 'x') RETURNING true AS \"\u{2}row security check\"",
+        "INSERT INTO docs VALUES (10, 'grace', 'x') RETURNING true AS \"\u{2}row security check alone\"",
+    ] {
+        assert!(run(&mut ada, sql).is_err(), "{sql}");
+    }
+    assert_eq!(stored_rows(&store), before);
+}
+
+#[test]
+fn each_command_checks_its_own_policies_and_restrictive_ones_all_hold() {
+    let store = MemoryStore::default();
+    owned_documents(
+        &store,
+        &[
+            "CREATE POLICY readable ON docs FOR SELECT USING (true)",
+            "CREATE POLICY short ON docs FOR INSERT WITH CHECK (length(body) < 5)",
+            "CREATE POLICY clean ON docs FOR UPDATE USING (true) WITH CHECK (body <> 'bad')",
+            "CREATE POLICY mine ON docs AS RESTRICTIVE FOR ALL USING (owner = current_user)",
+        ],
+    );
+    let mut ada = as_role(&store, "ada");
+    assert_eq!(
+        run(&mut ada, "INSERT INTO docs VALUES (3, 'ada', 'ok')").unwrap(),
+        "INSERT 0 1"
+    );
+    assert_eq!(
+        run(
+            &mut ada,
+            "UPDATE docs SET body = 'long enough' WHERE id = 3"
+        )
+        .unwrap(),
+        "UPDATE 1"
+    );
+    for sql in [
+        "INSERT INTO docs VALUES (4, 'ada', 'too long')",
+        "INSERT INTO docs VALUES (4, 'grace', 'ok')",
+        "UPDATE docs SET body = 'bad' WHERE id = 3",
+        "UPDATE docs SET owner = 'grace' WHERE id = 3",
+    ] {
+        violates(&mut ada, sql);
+    }
+    assert_eq!(
+        run(&mut ada, "UPDATE docs SET body = 'x' WHERE id = 2").unwrap(),
+        "UPDATE 0"
+    );
+}
+
+#[test]
+fn a_before_trigger_cannot_move_a_new_row_out_of_the_policy() {
+    let store = MemoryStore::default();
+    owned_documents(
+        &store,
+        &[
+            "CREATE POLICY own ON docs USING (owner = current_user)",
+            "CREATE FUNCTION give_away() RETURNS trigger AS $$ BEGIN NEW.owner := 'grace'; RETURN NEW; END $$ LANGUAGE plpgsql",
+            "CREATE TRIGGER give_away BEFORE INSERT ON docs FOR EACH ROW EXECUTE FUNCTION give_away()",
+        ],
+    );
+    let mut ada = as_role(&store, "ada");
+    violates(&mut ada, "INSERT INTO docs VALUES (3, 'ada', 'a2')");
+    assert!(!stored_rows(&store).contains("a2"));
+}
+
+#[test]
+fn returned_new_rows_must_also_be_visible() {
+    let store = MemoryStore::default();
+    owned_documents(
+        &store,
+        &[
+            "CREATE POLICY anyone_writes ON docs FOR INSERT WITH CHECK (true)",
+            "CREATE POLICY own_reads ON docs FOR SELECT USING (owner = current_user)",
+        ],
+    );
+    let mut ada = as_role(&store, "ada");
+    assert_eq!(
+        run(&mut ada, "INSERT INTO docs VALUES (3, 'grace', 'gift')").unwrap(),
+        "INSERT 0 1"
+    );
+    violates(
+        &mut ada,
+        "INSERT INTO docs VALUES (4, 'grace', 'peek') RETURNING body",
+    );
+    assert_eq!(
+        run(
+            &mut ada,
+            "INSERT INTO docs VALUES (5, 'ada', 'mine') RETURNING body"
+        )
+        .unwrap(),
+        "body\nmine\nINSERT 0 1"
+    );
+}

@@ -1,9 +1,10 @@
 import { Wasi, compile } from "./eggdb.js";
 
-const ACTIONS = ["none", "open", "browse", "cancel", "show-layout-picker", "load-sample-dataset", "quit"];
+const ACTIONS = ["none", "open", "browse", "cancel", "show-layout-picker", "load-sample-dataset", "quit", "stop-opening", "copy-selection", "paste"];
+const CLIPBOARD_ACTIONS = new Set([ACTIONS.indexOf("copy-selection"), ACTIONS.indexOf("paste")]);
 const KEY_IGNORED = 0xffffffff;
 const THEMES = { light: 0, dark: 1, "high-contrast": 2 };
-const SHORTCUT_LETTERS = new Set(["a", "o", "q"]);
+const SHORTCUT_LETTERS = new Set(["a", "c", "o", "q", "v"]);
 const CONTAINERS = new Set(["document", "group", "tablist", "tabpanel"]);
 
 function modifierBits(event) {
@@ -83,6 +84,16 @@ function describe(element, node) {
   }
   if (node.role === "button" || node.role === "tab") element.disabled = node.disabled;
   if (node.role === "button" && node.default) element.type = "submit";
+  setOptional(element, "aria-expanded", node.expanded);
+  setOptional(element, "aria-invalid", node.invalid ? true : null);
+  setOptional(element, "aria-readonly", node.readonly ? true : null);
+  setOptional(element, "aria-description", node.description);
+  setOptional(element, "aria-keyshortcuts", node.shortcut);
+}
+
+function setOptional(element, name, value) {
+  if (value === null || value === undefined) element.removeAttribute(name);
+  else element.setAttribute(name, String(value));
 }
 
 export class ConnectCard {
@@ -124,6 +135,8 @@ export class ConnectCard {
     this.mirror.addEventListener("focusin", (event) => this.onFocus(event));
     this.mirror.addEventListener("click", (event) => this.onClick(event));
     this.mirror.addEventListener("input", () => this.update());
+    this.mirror.addEventListener("copy", (event) => this.onCopy(event));
+    this.mirror.addEventListener("paste", (event) => this.onPaste(event));
     if (typeof ResizeObserver === "function") new ResizeObserver(() => this.update()).observe(container);
   }
 
@@ -236,7 +249,21 @@ export class ConnectCard {
     if (event.isComposing) return;
     const primary = event.ctrlKey || event.metaKey;
     if (primary && !SHORTCUT_LETTERS.has(event.key.toLowerCase())) return;
-    if (this.key(event.key, modifierBits(event)) !== KEY_IGNORED) event.preventDefault();
+    const code = this.key(event.key, modifierBits(event));
+    if (code !== KEY_IGNORED && !CLIPBOARD_ACTIONS.has(code)) event.preventDefault();
+  }
+
+  onCopy(event) {
+    event.preventDefault();
+    if (this.exports.eggdb_wasm_card_copied_text() !== 1) return;
+    event.clipboardData?.setData("text/plain", new TextDecoder().decode(this.output()));
+  }
+
+  onPaste(event) {
+    event.preventDefault();
+    const text = event.clipboardData?.getData("text/plain") ?? "";
+    this.send(text);
+    if (this.exports.eggdb_wasm_card_paste() !== 0) this.update();
   }
 
   onFocus(event) {

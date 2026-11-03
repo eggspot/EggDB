@@ -391,3 +391,91 @@ fn serve_answers_postgresql_clients_on_a_unix_socket_and_removes_it_at_stop() {
         stderr(&refused)
     );
 }
+
+#[test]
+fn max_connection_memory_needs_a_size_of_at_least_one_mebibyte() {
+    let file = TempPath::new("serve-memory-size");
+    let path = file.path().to_str().unwrap();
+    for refused in ["10k", "lots", "0"] {
+        let output = eggdb(
+            &[
+                "serve",
+                path,
+                "--create",
+                "--max-connection-memory",
+                refused,
+            ],
+            Some("secret"),
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{refused}: {}",
+            stderr(&output)
+        );
+        assert!(
+            stderr(&output).contains("--max-connection-memory"),
+            "{refused}: {}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+fn max_connection_memory_bounds_what_a_resp_client_may_send_and_others_go_on() {
+    let file = TempPath::new("serve-memory-resp");
+    let path = file.path().to_str().unwrap().to_owned();
+    let resp_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let resp_address = format!("127.0.0.1:{resp_port}");
+    let mut server = Command::new(env!("CARGO_BIN_EXE_eggdb"))
+        .args([
+            "serve",
+            &path,
+            "--create",
+            "--listen",
+            "0",
+            "--resp-listen",
+            &resp_address,
+            "--max-connection-memory",
+            "1m",
+        ])
+        .env("EGGDB_PASSWORD", "secret")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(server.stdout.take().unwrap());
+    let mut first = String::new();
+    stdout.read_line(&mut first).unwrap();
+    assert!(first.starts_with("{\"listening\":"), "{first}");
+
+    let mut greedy = TcpStream::connect(&resp_address).unwrap();
+    greedy
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    greedy
+        .write_all(
+            b"*2\r\n$4\r\nAUTH\r\n$6\r\nsecret\r\n*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$2097152\r\n",
+        )
+        .unwrap();
+    let mut answer = String::new();
+    greedy.read_to_string(&mut answer).unwrap();
+    assert!(answer.starts_with("+OK\r\n-OOM "), "{answer}");
+
+    let mut other = TcpStream::connect(&resp_address).unwrap();
+    other
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    other
+        .write_all(b"*2\r\n$4\r\nAUTH\r\n$6\r\nsecret\r\nPING\r\nQUIT\r\n")
+        .unwrap();
+    let mut answer = String::new();
+    other.read_to_string(&mut answer).unwrap();
+    assert_eq!(answer, "+OK\r\n+PONG\r\n+OK\r\n");
+    stop(&mut server);
+    let _ = server.wait();
+}

@@ -130,6 +130,7 @@ name = "eggdb-cql"
 version = "0.1.0"
 dependencies = [
  "eggdb-crypto",
+ "eggdb-platform",
  "eggdb-sql",
 ]
 
@@ -218,6 +219,7 @@ name = "eggdb-memcached"
 version = "0.1.0"
 dependencies = [
  "eggdb-keyspace",
+ "eggdb-platform",
 ]
 
 [[package]]
@@ -228,6 +230,7 @@ dependencies = [
  "eggdb-bson",
  "eggdb-documents",
  "eggdb-keyspace",
+ "eggdb-platform",
 ]
 
 [[package]]
@@ -301,6 +304,7 @@ version = "0.1.0"
 dependencies = [
  "eggdb-crypto",
  "eggdb-keyspace",
+ "eggdb-platform",
 ]
 
 [[package]]

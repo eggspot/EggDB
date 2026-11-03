@@ -4,6 +4,7 @@ pub(crate) mod database_switch;
 mod mysql;
 mod nonatomic;
 mod oracle;
+mod oracle_over_tds;
 mod restore;
 mod savepoints;
 mod sqlite;
@@ -11,11 +12,13 @@ pub(crate) mod sqlserver;
 mod triggers;
 mod tsql;
 
+pub use oracle_over_tds::{PlsqlParameter, PlsqlProcedure};
 pub use sqlserver::{BatchStep, NamedParameter, ParameterDeclaration, StoredProcedure};
 
 pub(crate) use oracle::create_text as oracle_create_text;
 
 pub(crate) use sqlite::create_text as sqlite_create_text;
+pub(crate) use sqlite::{index_text as sqlite_index_text, view_text as sqlite_view_text};
 
 use crate::ast::{
     CopyDirection, CopySource, CopyStatement, DiscardTarget, Explain, MySqlStatement, Name,
@@ -38,6 +41,31 @@ use crate::settings::{DIALECT_SETTING, Settings};
 use crate::store::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection};
 use crate::types::{SqlType, Value};
 use std::sync::Arc;
+
+fn check_copied_columns(
+    reader: &dyn KeyValueRead,
+    settings: &Settings,
+    table: &str,
+    listed: &[crate::ast::Name],
+    privilege: crate::roles::Privilege,
+) -> SqlResult<()> {
+    let columns: Vec<String> = if listed.is_empty() {
+        crate::roles::relation_columns(reader, table)?
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|column| !crate::temp_tables::is_hidden_column(column))
+            .collect()
+    } else {
+        listed.iter().map(|name| name.text.clone()).collect()
+    };
+    crate::roles::check_columns(
+        reader,
+        settings,
+        table,
+        privilege,
+        columns.iter().map(String::as_str),
+    )
+}
 
 fn walks_expressions(tokens: &[Token<'_>]) -> bool {
     let mut selects = 0;
@@ -171,7 +199,7 @@ pub struct PreparedStatement {
     pub is_empty: bool,
 }
 
-fn highest_parameter(tokens: &[Token<'_>]) -> usize {
+pub(crate) fn highest_parameter(tokens: &[Token<'_>]) -> usize {
     let placeholders = tokens
         .iter()
         .filter(|token| token.kind == TokenKind::Placeholder)
@@ -446,6 +474,7 @@ pub struct Session<'s> {
     served_databases: Option<&'s dyn crate::served_databases::ServedDatabases>,
     database_switch: Option<String>,
     database_listing_version: Option<u64>,
+    protocol: Option<&'static str>,
 }
 
 impl std::fmt::Debug for Session<'_> {
@@ -524,6 +553,7 @@ impl<'s> Session<'s> {
             served_databases: None,
             database_switch: None,
             database_listing_version: None,
+            protocol: None,
         }
     }
 
@@ -652,6 +682,45 @@ impl<'s> Session<'s> {
         let settings = Arc::make_mut(&mut self.settings);
         settings.mysql.connection_id = id;
         settings.sqlserver.connection_id = id;
+    }
+
+    /// Names the protocol this session's statements arrive on, which the slow-statement log
+    /// reports (D286); by default it is the connection's dialect, such as `postgresql`,
+    /// `mysql` or `sqlserver`.
+    pub fn set_protocol(&mut self, protocol: &'static str) {
+        self.protocol = Some(protocol);
+    }
+
+    fn protocol(&self) -> &'static str {
+        self.protocol
+            .unwrap_or_else(|| self.connection_dialect.name())
+    }
+
+    fn record_statement(
+        &self,
+        tokens: Option<&[crate::lexer::Token<'_>]>,
+        text: &str,
+        started: Option<std::time::Instant>,
+        result: &SqlResult<QueryResult>,
+    ) {
+        let (Some(tokens), Some(started), Ok(result)) = (tokens, started, result) else {
+            return;
+        };
+        let user = self
+            .settings
+            .get("session_authorization")
+            .unwrap_or_default();
+        crate::statement_statistics::record(
+            tokens,
+            text,
+            &crate::statement_statistics::RecordedStatement {
+                database: &self.settings.database,
+                user: &user,
+                protocol: self.protocol(),
+                duration: started.elapsed(),
+                rows: crate::statement_statistics::rows_of(result),
+            },
+        );
     }
 
     /// The warnings and notes of the last statement, as MySQL's `SHOW WARNINGS` lists them.
@@ -1778,7 +1847,10 @@ impl<'s> Session<'s> {
             let _plsql = self
                 .oracle()
                 .then(|| crate::plsql::enter_session(&self.plsql));
-            if let Some(mut rows) = parser.literal_rows() {
+            let literal_start = parser.resume_point().0;
+            if self.settings.checked_role.is_none()
+                && let Some(mut rows) = parser.literal_rows()
+            {
                 let _catalog = crate::pg_catalog::enter_statement(false, &settings);
                 resume = parser.resume_point();
                 if self.batch_resume.is_some() {
@@ -1786,7 +1858,10 @@ impl<'s> Session<'s> {
                 }
                 self.enter_sequences(false);
                 crate::deferred_checks::enter(&self.deferred.modes);
+                let started = crate::statement_statistics::wanted().then(std::time::Instant::now);
                 let result = self.insert_literal_rows(&mut rows);
+                let literal_tokens = tokens.get(literal_start..resume.0.min(tokens.len()));
+                self.record_statement(literal_tokens, text, started, &result);
                 let result = self.keep_deferred(result);
                 self.leave_sequences();
                 let settled = self.settle_sequences();
@@ -1902,7 +1977,9 @@ impl<'s> Session<'s> {
             self.extra_results.clear();
             crate::deferred_checks::enter(&self.deferred.modes);
             crate::portals::install(std::mem::take(&mut self.portals));
+            let started = crate::statement_statistics::wanted().then(std::time::Instant::now);
             let result = with_raised_notices(self.run(&mut statement, &mut io));
+            self.record_statement(statement_tokens, text, started, &result);
             self.portals = crate::portals::take();
             if matches!(self.block, Block::None) {
                 self.portals.close_at_transaction_end();
@@ -2466,17 +2543,18 @@ impl<'s> Session<'s> {
         }
         match copy.direction {
             CopyDirection::FromClient => self.write("COPY FROM", |writer, tables| {
-                if let CopySource::Table { name, .. } = &mut copy.source {
+                if let CopySource::Table { name, columns } = &mut copy.source {
                     if let Some(relation) =
                         crate::pg_catalog::catalog_reference(writer, &name.text)?
                     {
                         return Err(crate::pg_catalog::read_only(relation.name()).at(name.position));
                     }
                     binding.names(writer, tables, std::slice::from_mut(name))?;
-                    crate::roles::check_table(
+                    check_copied_columns(
                         writer,
                         binding.settings,
                         &name.text,
+                        columns,
                         crate::roles::Privilege::Insert,
                     )?;
                     if crate::row_security::visible_rows(
@@ -2513,12 +2591,13 @@ impl<'s> Session<'s> {
                 let channel = &mut *io.channel;
                 if matches!(copy.source, CopySource::Table { .. }) {
                     return self.read(|reader, tables| {
-                        if let CopySource::Table { name, .. } = &mut copy.source {
+                        if let CopySource::Table { name, columns } = &mut copy.source {
                             binding.names(reader, tables, std::slice::from_mut(name))?;
-                            crate::roles::check_table(
+                            check_copied_columns(
                                 reader,
                                 binding.settings,
                                 &name.text,
+                                columns,
                                 crate::roles::Privilege::Select,
                             )?;
                             if crate::row_security::visible_rows(
@@ -2573,29 +2652,45 @@ impl<'s> Session<'s> {
             walk_expressions: true,
             target_privilege: Some(crate::roles::target_privilege(&explain.statement)),
         };
+        let store = self.store;
+        let lookups = || {
+            explain
+                .buffers
+                .then(|| store.erased_page_lookups())
+                .flatten()
+        };
         let planning = std::time::Instant::now();
+        let before_planning = lookups();
         let mut planned = (*explain.statement).clone();
         let plan = self.read(|reader, tables| {
             binding.statement(reader, tables, &mut planned)?;
             execute::explain(reader, tables, &planned)
         })?;
         let planning = planning.elapsed();
+        let before_execution = lookups();
         let started = std::time::Instant::now();
         let mut statement = (*explain.statement).clone();
         let result = self.run(&mut statement, io)?;
         let execution = started.elapsed();
-        let rows = if result.columns.is_some() {
-            result.rows.len() as u64
-        } else {
-            result
-                .tag
-                .rsplit(' ')
-                .next()
-                .and_then(|count| count.parse().ok())
-                .unwrap_or(0)
+        let after_execution = lookups();
+        let rows = crate::statement_statistics::rows_of(&result);
+        let buffers = match (before_planning, before_execution, after_execution) {
+            (Some(planning_start), Some(execution_start), Some(execution_end)) => {
+                Some(crate::explain::Buffers {
+                    planning: execution_start.since(planning_start),
+                    execution: execution_end.since(execution_start),
+                })
+            }
+            _ => None,
         };
         Ok(crate::explain::render_analyzed(
-            &plan, rows, planning, execution,
+            &plan,
+            crate::explain::Analyzed {
+                rows,
+                planning,
+                execution,
+                buffers,
+            },
         ))
     }
 
@@ -2921,7 +3016,7 @@ impl<'s> Session<'s> {
                     settings: Some(&settings),
                     dialect,
                 };
-                crate::views::create_view(writer, tables, create, &context)
+                crate::sqlite_schema_text::create_view(writer, tables, create, &context)
             }),
             Statement::DropView {
                 names,
@@ -2966,7 +3061,7 @@ impl<'s> Session<'s> {
             }),
             Statement::CreateIndex(create) => self.write("CREATE INDEX", |writer, tables| {
                 binding.names(writer, tables, std::slice::from_mut(&mut create.table))?;
-                crate::indexes::create_index(writer, tables, create, dialect)
+                crate::sqlite_schema_text::create_index(writer, tables, create, dialect)
             }),
             Statement::DropIndex(drop) => self.write("DROP INDEX", |writer, tables| {
                 if let Some(table) = &mut drop.table {

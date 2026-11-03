@@ -25,6 +25,7 @@ fn config() -> ServerConfig {
         unknown_user_secret: [9; 32],
         max_connections: 4,
         random: fill,
+        memory_budget: std::sync::Arc::default(),
     }
 }
 
@@ -32,7 +33,7 @@ fn shared<'s>(store: &'s Store<'s>, config: &'s ServerConfig) -> Shared<'s> {
     Shared {
         store,
         config,
-        cursors: Mutex::new(Cursors::new(7)),
+        cursors: Mutex::new(Cursors::new(7, &config.memory_budget)),
         started: Instant::now(),
     }
 }
@@ -746,4 +747,123 @@ fn hostile_messages_close_the_connection_without_panicking() {
         let mut output = Vec::new();
         let _ = serve_stream(&shared, &mut session, case.as_slice(), &mut output);
     }
+}
+
+#[test]
+fn messages_and_cursors_past_the_memory_budget_fail_with_exceeded_memory_limit() {
+    let keyspace = MemoryKeyspace::default();
+    let store = Store::new(&keyspace, [1; 8]);
+    let budget = std::sync::Arc::new(eggdb_platform::connection_limits::MemoryBudget::new(
+        256 * 1024,
+    ));
+    let config = ServerConfig {
+        memory_budget: std::sync::Arc::clone(&budget),
+        ..config()
+    };
+    let shared = shared(&store, &config);
+
+    let mut oversized = Vec::new();
+    oversized.extend_from_slice(&(300 * 1024i32).to_le_bytes());
+    oversized.extend_from_slice(&9i32.to_le_bytes());
+    oversized.extend_from_slice(&0i32.to_le_bytes());
+    oversized.extend_from_slice(&OP_MSG.to_le_bytes());
+    let mut output = Vec::new();
+    serve_stream(
+        &shared,
+        &mut session(true),
+        oversized.as_slice(),
+        &mut output,
+    )
+    .unwrap();
+    let refused = replies(&output);
+    assert_eq!(refused.len(), 1);
+    assert_eq!(refused[0].1, 9);
+    assert_eq!(refused[0].2.get("code"), Some(&Bson::Int32(146)));
+    assert_eq!(budget.used_bytes(), 0);
+
+    let value = "x".repeat(10 * 1024);
+    let mut input = Vec::new();
+    for round in 0..4 {
+        let documents: Vec<Document> = (0..10)
+            .map(|index| {
+                doc(vec![
+                    ("_id", Bson::Int32(round * 10 + index)),
+                    ("v", text(&value)),
+                ])
+            })
+            .collect();
+        input.extend(op_msg(
+            10 + round,
+            &doc(vec![("insert", text("t")), ("$db", text("app"))]),
+            0,
+            Some(("documents", &documents)),
+        ));
+    }
+    input.extend(op_msg(
+        20,
+        &doc(vec![
+            ("find", text("t")),
+            ("batchSize", Bson::Int32(1)),
+            ("$db", text("app")),
+        ]),
+        0,
+        None,
+    ));
+    let mut output = Vec::new();
+    serve_stream(&shared, &mut session(true), input.as_slice(), &mut output).unwrap();
+    let answered = replies(&output);
+    assert_eq!(answered.len(), 5);
+    for inserted in &answered[..4] {
+        assert_eq!(
+            inserted.2.get("n"),
+            Some(&Bson::Int32(10)),
+            "{:?}",
+            inserted.2
+        );
+    }
+    assert_eq!(answered[4].2.get("code"), Some(&Bson::Int32(146)));
+    assert_eq!(budget.used_bytes(), 0);
+
+    let mut input = op_msg(
+        30,
+        &doc(vec![
+            ("find", text("t")),
+            ("batchSize", Bson::Int32(30)),
+            ("$db", text("app")),
+        ]),
+        0,
+        None,
+    );
+    input.extend(op_msg(
+        31,
+        &doc(vec![("count", text("t")), ("$db", text("app"))]),
+        0,
+        None,
+    ));
+    let mut output = Vec::new();
+    serve_stream(&shared, &mut session(true), input.as_slice(), &mut output).unwrap();
+    let answered = replies(&output);
+    assert_eq!(answered.len(), 2);
+    let Some(Bson::Document(cursor)) = answered[0].2.get("cursor") else {
+        panic!("{:?}", answered[0].2);
+    };
+    let Some(Bson::Int64(id)) = cursor.get("id") else {
+        panic!("{cursor:?}");
+    };
+    assert_ne!(*id, 0);
+    assert!(budget.used_bytes() >= 10 * 10 * 1024);
+    assert_eq!(answered[1].2.get("n"), Some(&Bson::Int32(40)));
+    let kill = op_msg(
+        32,
+        &doc(vec![
+            ("killCursors", text("t")),
+            ("cursors", Bson::Array(vec![Bson::Int64(*id)])),
+            ("$db", text("app")),
+        ]),
+        0,
+        None,
+    );
+    let mut output = Vec::new();
+    serve_stream(&shared, &mut session(true), kill.as_slice(), &mut output).unwrap();
+    assert_eq!(budget.used_bytes(), 0);
 }

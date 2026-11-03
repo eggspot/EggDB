@@ -1,6 +1,8 @@
 //! A server started with `--tables` over an in-memory database: only the listed tables and
 //! views exist for the agent, in every tool, dialect and catalog, the key-value tools are
-//! withdrawn, the instructions and the audit say so, and the gap between calls holds.
+//! withdrawn, the instructions and the audit say so, and the gap between calls holds. A table
+//! listed with columns shows only those and cannot be changed, a table an unlisted one
+//! references takes inserts but not deletes, and a new policy cannot call a user routine.
 
 mod common;
 
@@ -9,8 +11,8 @@ use common::{
     tables_config, text_at,
 };
 use eggdb_mcp::{Server, ServerConfig};
-use eggdb_sql::Dialect;
 use eggdb_sql::json::{Json, Node};
+use eggdb_sql::{Dialect, Session};
 use std::time::{Duration, Instant};
 
 const INITIALIZE: &[u8] = br#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test-client","version":"1.0"}}}"#;
@@ -190,6 +192,8 @@ fn the_key_value_tools_are_withdrawn_and_refused() {
     for (id, tool, arguments) in [
         (2, "kv_get", r#"{"key":"session:1"}"#),
         (3, "kv_scan", r#"{"prefix":"session:"}"#),
+        (4, "kv_get", r#"{"key":"s:1","collection":"sessions"}"#),
+        (5, "kv_scan", r#"{"collection":"sessions"}"#),
     ] {
         let answer = call(&mut server, id, tool, arguments);
         assert_eq!(error_code(&answer), "limited_to_tables", "{tool}");
@@ -282,11 +286,11 @@ fn a_writing_agent_limited_to_tables_changes_only_those() {
         write_refused(&mut server, 4, "INSERT INTO salaries VALUES (3, 300)").0,
         "42P01"
     );
-    let (state, message) = write_refused(&mut server, 5, "INSERT INTO users VALUES (3, 'Hedy')");
+    let (state, message) = write_refused(&mut server, 5, "DELETE FROM users WHERE id = 2");
     assert_eq!(state, "42501");
-    assert!(
-        message.contains("table \"salaries\" has a foreign key to \"users\""),
-        "{message}"
+    assert_eq!(
+        message,
+        "cannot delete a row of \"users\" or change a column a foreign key points at: table \"salaries\" has a foreign key to \"users\", and this session may neither change nor check \"salaries\" (--tables)"
     );
     let (state, message) = write_refused(&mut server, 6, "CREATE TABLE elsewhere (id integer)");
     assert_eq!(state, "42501");
@@ -395,4 +399,159 @@ fn the_next_call_waits_for_the_gap_after_the_last_one() {
     let lines = audit.lines();
     assert!(lines[0].contains(r#""call_gap_ms":150"#), "{}", lines[0]);
     assert!(!lines[0].contains(r#""tables""#), "{}", lines[0]);
+}
+
+#[test]
+fn a_table_listed_with_columns_shows_only_those_to_every_tool() {
+    let audit = TempAudit::new("tables-columns");
+    let store = shop();
+    store.sql(
+        Dialect::PostgreSql,
+        "CREATE TABLE people (id integer PRIMARY KEY, name text, ssn text); \
+         CREATE VIEW people_ssn AS SELECT ssn FROM people; \
+         CREATE FUNCTION ssn_of(person integer) RETURNS text LANGUAGE sql STABLE AS $$ SELECT ssn FROM people WHERE id = person $$; \
+         CREATE FUNCTION ssn_now(person integer) RETURNS text LANGUAGE sql AS $$ SELECT ssn FROM people WHERE id = person $$; \
+         INSERT INTO people VALUES (1, 'Ada', '123-45-6789')",
+    );
+    let opener = MapOpener::new(store);
+    let mut server = limited(
+        &opener,
+        ServerConfig {
+            allow_write: true,
+            ..tables_config(&audit, &["people(id,name)", "people_ssn"])
+        },
+    );
+    assert_eq!(
+        rows(&mut server, 1, "postgresql", "SELECT name FROM people"),
+        vec!["Ada"]
+    );
+    let all = call(
+        &mut server,
+        2,
+        "run_sql",
+        r#"{"sql":"SELECT * FROM people","dialect":"postgresql"}"#,
+    );
+    let shown = format!("{all:?}");
+    assert!(!shown.contains("123-45-6789"), "{shown}");
+    assert!(!shown.contains("ssn"), "{shown}");
+    for (id, dialect, sql) in [
+        (3, "postgresql", "SELECT ssn FROM people"),
+        (4, "mysql", "SELECT ssn FROM people"),
+        (5, "postgresql", "SELECT id FROM people WHERE ssn LIKE '1%'"),
+        (
+            6,
+            "postgresql",
+            "WITH p AS (SELECT ssn FROM people) SELECT * FROM p",
+        ),
+        (
+            7,
+            "postgresql",
+            "SELECT name FROM people WHERE id IN (SELECT id FROM people WHERE ssn IS NOT NULL)",
+        ),
+    ] {
+        let message = sql_error(&mut server, id, dialect, sql);
+        assert!(message.contains("ssn"), "{sql}: {message}");
+    }
+    let through_view = sql_error(&mut server, 8, "postgresql", "SELECT * FROM people_ssn");
+    assert!(through_view.contains("ssn"), "{through_view}");
+    let through_function = sql_error(&mut server, 9, "postgresql", "SELECT ssn_of(1)");
+    assert!(through_function.contains("ssn"), "{through_function}");
+    let (state, through_volatile) = write_refused(&mut server, 15, "SELECT ssn_now(1)");
+    assert_eq!(state, "42703");
+    assert!(through_volatile.contains("ssn"), "{through_volatile}");
+    assert!(!through_volatile.contains("123-45"), "{through_volatile}");
+    let described = call(&mut server, 10, "describe_table", r#"{"table":"people"}"#);
+    let described = format!("{described:?}");
+    assert!(described.contains("name"), "{described}");
+    assert!(!described.contains("ssn"), "{described}");
+    let sampled = call(&mut server, 11, "sample_rows", r#"{"table":"people"}"#);
+    let sampled = format!("{sampled:?}");
+    assert!(
+        sampled.contains("Ada") && !sampled.contains("123-45-6789"),
+        "{sampled}"
+    );
+    let (state, message) = write_refused(&mut server, 12, "UPDATE people SET name = 'Grace'");
+    assert_eq!(state, "42501");
+    assert_eq!(
+        message,
+        "cannot change \"people\": this session may read only some of its columns (--tables), so it may not change its rows or its definition"
+    );
+    assert_eq!(
+        write_refused(&mut server, 13, "INSERT INTO people VALUES (2, 'Grace')").0,
+        "42501"
+    );
+    assert_eq!(
+        write_refused(&mut server, 14, "UPDATE people SET ssn = 'x'").0,
+        "42703"
+    );
+    assert_eq!(
+        count(
+            &opener.store,
+            Dialect::PostgreSql,
+            "SELECT count(*) FROM people WHERE name = 'Ada' AND ssn = '123-45-6789'"
+        ),
+        1
+    );
+    assert!(
+        audit.lines()[0].contains(r#""tables":["people(id,name)","people_ssn"]"#),
+        "{}",
+        audit.lines()[0]
+    );
+}
+
+#[test]
+fn a_policy_the_agent_writes_cannot_call_a_user_routine() {
+    let audit = TempAudit::new("tables-policies");
+    let store = shop();
+    store.sql(
+        Dialect::PostgreSql,
+        "CREATE TABLE tags (id integer PRIMARY KEY, label text); \
+         CREATE FUNCTION pay_total() RETURNS integer LANGUAGE sql AS $$ SELECT sum(amount) FROM salaries $$",
+    );
+    let opener = MapOpener::new(store);
+    let mut server = limited(
+        &opener,
+        ServerConfig {
+            allow_write: true,
+            ..tables_config(&audit, &["tags"])
+        },
+    );
+    let (state, message) = write_refused(
+        &mut server,
+        1,
+        "CREATE POLICY leak ON tags USING (pay_total() > 0)",
+    );
+    assert_eq!(state, "42501");
+    assert_eq!(
+        message,
+        "cannot write a row-security policy that calls the routine \"pay_total\": it runs in every later session that reads or writes the table, where --tables does not confine it"
+    );
+    let (state, message) = write_refused(
+        &mut server,
+        2,
+        "CREATE POLICY nested ON tags USING (label IN (SELECT label FROM tags))",
+    );
+    assert_eq!(state, "42501");
+    assert_eq!(
+        message,
+        "cannot write a row-security policy with a subquery: it runs in every later session that reads or writes the table, where --tables does not confine it"
+    );
+    let (state, message) = write_refused(
+        &mut server,
+        3,
+        "ALTER TABLE tags ALTER COLUMN label SET DEFAULT pay_total()::text",
+    );
+    assert_eq!(state, "42501");
+    assert_eq!(
+        message,
+        "cannot write a default, check or generated expression that calls the routine \"pay_total\": it runs in every later session that writes the table, where --tables does not confine it"
+    );
+    let plain = write(&mut server, 4, "CREATE POLICY own ON tags USING (id > 0)");
+    assert_eq!(text_at(structured(&plain), &["committed"]), "true");
+    let mut session = Session::with_dialect(&opener.store, Dialect::PostgreSql);
+    for (policy, stored) in [("own", true), ("leak", false), ("nested", false)] {
+        let dropped = session.execute(&format!("DROP POLICY {policy} ON tags"), &mut |_| {});
+        assert_eq!(dropped.is_ok(), stored, "{policy}: {dropped:?}");
+    }
+    session.close().unwrap();
 }

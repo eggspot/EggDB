@@ -65,6 +65,26 @@ const COLLECTION_DELETED_FIELDS: &[FieldDefinition] = &[
     field("deleted", FieldType::Boolean),
 ];
 
+const COLLECTION_MOVED_FIELDS: &[FieldDefinition] = &[
+    field("file", FieldType::Text),
+    field("collection", FieldType::Text),
+    field("new_name", FieldType::Text),
+    field("moved", FieldType::Boolean),
+];
+
+const COLLECTION_MOVE_ERRORS: &[CommandError] = &[
+    OPENING_ERRORS[0],
+    OPENING_ERRORS[1],
+    OPENING_ERRORS[2],
+    OPENING_ERRORS[3],
+    OPENING_ERRORS[4],
+    OPENING_ERRORS[5],
+    OPENING_ERRORS[6],
+    OPENING_ERRORS[7],
+    OPENING_ERRORS[8],
+    command_error("already_exists", 3),
+];
+
 const VALUE: OperandDefinition = OperandDefinition {
     name: "value",
     kind: OperandType::Bytes,
@@ -89,21 +109,34 @@ const COLLECTION_NAME: OperandDefinition = OperandDefinition {
     standard_stream: false,
 };
 
+const NEW_COLLECTION_NAME: OperandDefinition = OperandDefinition {
+    name: "new-name",
+    kind: OperandType::Text,
+    count: Count::One,
+    standard_stream: false,
+};
+
 const COLLECTION_HELP: &str = "\
 A collection is a named key space inside the database file, beside the default key space that
 every command uses unless given -C <name>. Names are 1 to 128 bytes of UTF-8 with no spaces or
-control characters. Deleting a collection removes every key in it, in one commit, and asks nothing.
+control characters. Deleting a collection asks nothing: the first commit takes its name away, so
+nothing sees it again, and its keys go in commits of 512, so a collection of any size deletes in
+a small page cache; keys a crash leaves behind are removed by the next commits.
 
   list     print the collections, one per line, in byte order (the default key space is not one)
   add      make an empty collection (exit 1 if it is already there)
   delete   remove a collection and every key in it (exit 1 if it is not there)
+  move     rename a collection, keeping its keys, in one commit (alias: rename; exit 1 if it is
+           not there, 3 if a collection already has the new name)
 
 Examples:
   eggdb collection add app.db sessions
   eggdb put app.db -C sessions s:1 '{\"user\":1}'
   eggdb scan app.db -C sessions
   eggdb collection list app.db
-  eggdb collection delete app.db sessions
+  eggdb collection move app.db sessions old-sessions
+  eggdb collection delete app.db old-sessions
+  eggdb stats app.db --collections          # each collection's entries and bytes
   eggdb export app.db backup.jsonl          # the default key space, then every collection
 ";
 
@@ -519,7 +552,7 @@ pub(super) const COLLECTION_DELETE: CommandDefinition = CommandDefinition {
     aliases: &["del"],
     synopsis: "<file> <name>",
     summary: "remove a collection and every key in it (exit 1 if it is not there)",
-    description: "Removes a collection and every key in it in one commit, and asks nothing; exits 1 when it is not there. What it removes cannot be brought back.",
+    description: "Removes a collection and every key in it, and asks nothing; exits 1 when it is not there. The first commit takes the name away, the keys go in commits of 512. What it removes cannot be brought back.",
     usage: "eggdb collection delete <file> <name>",
     help: COLLECTION_HELP,
     options: &[],
@@ -527,8 +560,25 @@ pub(super) const COLLECTION_DELETE: CommandDefinition = CommandDefinition {
     outputs: &text_and_json(OutputKind::Nothing, COLLECTION_DELETED_FIELDS),
     max_effect: Effect::Destroy,
     errors: READING_ERRORS,
-    examples: &["eggdb collection delete app.db sessions"],
+    examples: &["eggdb collection delete app.db old-sessions"],
     surfaces: "eggdb ui: the collection picker (d)",
+};
+
+pub(super) const COLLECTION_MOVE: CommandDefinition = CommandDefinition {
+    words: &["collection", "move"],
+    aliases: &["rename"],
+    synopsis: "<file> <name> <new-name>",
+    summary: "rename a collection, keeping its keys (exit 1 if it is not there)",
+    description: "Gives a collection a new name, with every key in it and their times to live, in one commit; exits 1 when it is not there and 3 when a collection already has the new name, which is never replaced.",
+    usage: "eggdb collection move <file> <name> <new-name>",
+    help: COLLECTION_HELP,
+    options: &[],
+    operands: &[FILE, COLLECTION_NAME, NEW_COLLECTION_NAME],
+    outputs: &text_and_json(OutputKind::Nothing, COLLECTION_MOVED_FIELDS),
+    max_effect: Effect::Change,
+    errors: COLLECTION_MOVE_ERRORS,
+    examples: &["eggdb collection move app.db sessions old-sessions"],
+    surfaces: "none yet: the GUI client (D15) brings renaming in its object browser",
 };
 
 pub(super) const GET: CommandDefinition = CommandDefinition {

@@ -58,6 +58,11 @@ try {
   press(" ");
   check(readOnly.checked, "Space did not check Open read-only");
   check(pixel(387, 362) !== unchecked, "the checked box is not drawn");
+  file.focus();
+  const clipboard = new DataTransfer();
+  clipboard.setData("text/plain", "pasted.eggdb");
+  file.dispatchEvent(new ClipboardEvent("paste", { clipboardData: clipboard, bubbles: true, cancelable: true }));
+  check(file.value.endsWith("pasted.eggdb"), `the paste left the File value ${file.value}`);
   result.textContent = "eggdb-card-test: passed";
 } catch (error) {
   result.textContent = `eggdb-card-test: failed ${error}`;

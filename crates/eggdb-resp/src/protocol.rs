@@ -11,6 +11,9 @@ pub enum ProtocolError {
     Closed,
     /// The bytes are not a RESP request, with what was wrong as the server says it.
     Invalid(String),
+    /// The request declares more bytes than the reader was allowed to hold, so the rest of it
+    /// was not read; the value is the bytes it declared so far.
+    OverBudget(usize),
 }
 
 impl From<io::Error> for ProtocolError {
@@ -229,6 +232,16 @@ impl<R: Read> RequestReader<R> {
 
     /// The next request's arguments.
     pub fn next_request(&mut self) -> Result<Vec<Vec<u8>>, ProtocolError> {
+        self.next_request_within(&mut |_| true)
+    }
+
+    /// The next request's arguments, asking `admit` before each bulk string is read whether
+    /// the request may hold the bytes it has declared so far; when `admit` says no, the rest
+    /// is left unread and [`ProtocolError::OverBudget`] is returned.
+    pub fn next_request_within(
+        &mut self,
+        admit: &mut dyn FnMut(usize) -> bool,
+    ) -> Result<Vec<Vec<u8>>, ProtocolError> {
         loop {
             let line = self.line()?;
             match line.first() {
@@ -243,6 +256,7 @@ impl<R: Read> RequestReader<R> {
                         ));
                     }
                     let mut arguments = Vec::with_capacity((count as usize).min(1024));
+                    let mut declared = 0usize;
                     for _ in 0..count {
                         let header = self.line()?;
                         if header.first() != Some(&b'$') {
@@ -256,6 +270,10 @@ impl<R: Read> RequestReader<R> {
                             return Err(ProtocolError::Invalid(
                                 "Protocol error: invalid bulk length".to_owned(),
                             ));
+                        }
+                        declared = declared.saturating_add(length as usize);
+                        if !admit(declared) {
+                            return Err(ProtocolError::OverBudget(declared));
                         }
                         arguments.push(self.exact(length as usize)?);
                     }
@@ -295,6 +313,25 @@ mod tests {
         );
         assert_eq!(reader.next_request().unwrap(), vec![b"PING".to_vec()]);
         assert_eq!(reader.next_request(), Err(ProtocolError::Closed));
+    }
+
+    #[test]
+    fn a_request_past_what_admit_allows_stops_before_its_bulk_is_read() {
+        let input = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$100\r\n".to_vec();
+        let mut reader = RequestReader::new(&input[..]);
+        let mut asked = Vec::new();
+        let outcome = reader.next_request_within(&mut |bytes| {
+            asked.push(bytes);
+            bytes < 50
+        });
+        assert_eq!(outcome, Err(ProtocolError::OverBudget(104)));
+        assert_eq!(asked, [3, 4, 104]);
+        let small = b"*1\r\n$4\r\nPING\r\n".to_vec();
+        let mut reader = RequestReader::new(&small[..]);
+        assert_eq!(
+            reader.next_request_within(&mut |bytes| bytes < 50),
+            Ok(vec![b"PING".to_vec()])
+        );
     }
 
     #[test]

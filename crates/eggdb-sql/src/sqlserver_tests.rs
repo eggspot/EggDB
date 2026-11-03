@@ -1619,3 +1619,171 @@ fn hostile_sequences_descriptions_and_xact_abort_return_errors_and_never_panic()
         vec![vec![Value::Integer(1)]]
     );
 }
+
+#[test]
+fn merge_when_not_matched_by_source_updates_or_deletes_target_rows_the_source_lacks() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(
+        &mut session,
+        "CREATE TABLE stock (id INT PRIMARY KEY, qty INT, active BIT)",
+    );
+    values(
+        &mut session,
+        "INSERT INTO stock VALUES (1, 10, 1), (2, 20, 1), (3, 30, 1), (4, 0, 1)",
+    );
+    let changed = values(
+        &mut session,
+        "MERGE stock AS t USING (VALUES (1, 11), (5, 50)) AS s (id, qty) ON t.id = s.id \
+         WHEN MATCHED THEN UPDATE SET qty = s.qty \
+         WHEN NOT MATCHED BY TARGET THEN INSERT (id, qty, active) VALUES (s.id, s.qty, 1) \
+         WHEN NOT MATCHED BY SOURCE AND t.qty = 0 THEN DELETE \
+         WHEN NOT MATCHED BY SOURCE THEN UPDATE SET active = 0 \
+         OUTPUT inserted.id, deleted.id, s.id",
+    );
+    assert_eq!(changed.len(), 5);
+    assert!(changed.contains(&vec![Value::Null, Value::Integer(4), Value::Null]));
+    assert!(changed.contains(&vec![Value::Integer(2), Value::Integer(2), Value::Null]));
+    assert!(changed.contains(&vec![Value::Integer(5), Value::Null, Value::Integer(5)]));
+    assert_eq!(
+        values(
+            &mut session,
+            "SELECT id, qty, CAST(active AS INT) FROM stock ORDER BY id"
+        ),
+        vec![
+            vec![Value::Integer(1), Value::Integer(11), Value::Integer(1)],
+            vec![Value::Integer(2), Value::Integer(20), Value::Integer(0)],
+            vec![Value::Integer(3), Value::Integer(30), Value::Integer(0)],
+            vec![Value::Integer(5), Value::Integer(50), Value::Integer(1)],
+        ]
+    );
+    values(
+        &mut session,
+        "MERGE stock USING (SELECT 1 AS id) AS s ON stock.id = s.id WHEN NOT MATCHED BY SOURCE THEN DELETE",
+    );
+    assert_eq!(
+        values(&mut session, "SELECT id FROM stock"),
+        vec![vec![Value::Integer(1)]]
+    );
+}
+
+#[test]
+fn merge_refuses_by_source_clauses_sql_server_refuses() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(&mut session, "CREATE TABLE m (id INT PRIMARY KEY, v INT)");
+    for text in [
+        "MERGE m USING (SELECT 1 AS id) s ON m.id = s.id WHEN NOT MATCHED BY SOURCE THEN DELETE WHEN NOT MATCHED BY SOURCE THEN UPDATE SET v = 1",
+        "MERGE m USING (SELECT 1 AS id) s ON m.id = s.id WHEN NOT MATCHED BY SOURCE AND v = 1 THEN DELETE WHEN NOT MATCHED BY SOURCE THEN DELETE",
+        "MERGE m USING (SELECT 1 AS id) s ON m.id = s.id WHEN NOT MATCHED BY SOURCE AND v = 1 THEN DELETE WHEN NOT MATCHED BY SOURCE AND v = 2 THEN UPDATE SET v = 3 WHEN NOT MATCHED BY SOURCE THEN DELETE",
+    ] {
+        let error = session
+            .execute(text, &mut |_| {})
+            .expect_err("a refused MERGE");
+        assert_eq!(error.vendor_code(), Some(10714), "{text}");
+    }
+}
+
+#[test]
+fn openjson_without_with_returns_key_value_and_type() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    assert_eq!(
+        values(
+            &mut session,
+            "SELECT [key], [value], [type] FROM OPENJSON(N'{\"s\":\"egg\",\"n\":1.5,\"b\":true,\"z\":null,\"a\":[1,2],\"o\":{\"k\":1}}')"
+        ),
+        vec![
+            vec![
+                Value::Text("s".to_owned()),
+                Value::Text("egg".to_owned()),
+                Value::Integer(1)
+            ],
+            vec![
+                Value::Text("n".to_owned()),
+                Value::Text("1.5".to_owned()),
+                Value::Integer(2)
+            ],
+            vec![
+                Value::Text("b".to_owned()),
+                Value::Text("true".to_owned()),
+                Value::Integer(3)
+            ],
+            vec![Value::Text("z".to_owned()), Value::Null, Value::Integer(0)],
+            vec![
+                Value::Text("a".to_owned()),
+                Value::Text("[1,2]".to_owned()),
+                Value::Integer(4)
+            ],
+            vec![
+                Value::Text("o".to_owned()),
+                Value::Text("{\"k\":1}".to_owned()),
+                Value::Integer(5)
+            ],
+        ]
+    );
+    assert_eq!(
+        values(
+            &mut session,
+            "SELECT j.[key], j.value FROM OPENJSON(N'{\"list\":[\"x\",\"y\"]}', '$.list') AS j"
+        ),
+        vec![
+            vec![Value::Text("0".to_owned()), Value::Text("x".to_owned())],
+            vec![Value::Text("1".to_owned()), Value::Text("y".to_owned())],
+        ]
+    );
+    assert!(values(&mut session, "SELECT * FROM OPENJSON(NULL)").is_empty());
+    assert!(
+        values(
+            &mut session,
+            "SELECT * FROM OPENJSON(N'{\"a\":1}', '$.missing')"
+        )
+        .is_empty()
+    );
+    let error = session
+        .execute("SELECT * FROM OPENJSON(N'{')", &mut |_| {})
+        .expect_err("bad JSON");
+    assert_eq!(error.vendor_code(), Some(13609));
+}
+
+const SQLCLIENT_DATABASES: &str = "IF OBJECT_ID('master..sysdatabases') IS NULL EXEC sp_executesql N'select name as database_name, dbid, crdate as create_date from sysdatabases where (name = @Name or (@Name is null))',N'@Name NVARCHAR(128)',@Name=@Name ELSE EXEC sp_executesql N'select name as database_name, dbid, crdate as create_date from master..sysdatabases where (name = @Name or (@Name is null))',N'@Name NVARCHAR(128)',@Name=@Name";
+
+#[test]
+fn sqlclient_get_schema_databases_lists_the_databases() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    let current = values(&mut session, "SELECT DB_NAME()");
+    let current = current[0][0].clone();
+    let rows = |session: &mut Session<'_>, name: &str| -> Vec<Vec<Value>> {
+        let text = format!(
+            "EXEC sp_executesql N'{}', N'@Name nvarchar(4000)', @Name = {name}",
+            SQLCLIENT_DATABASES.replace('\'', "''")
+        );
+        batch(session, &text)
+            .unwrap_or_else(|error| panic!("{error}"))
+            .into_iter()
+            .filter_map(|step| step.outcome.ok())
+            .filter(|result| result.columns.is_some())
+            .flat_map(|result| result.rows)
+            .collect()
+    };
+    let every = rows(&mut session, "NULL");
+    assert!(every.iter().any(|row| row[0] == current), "{every:?}");
+    assert!(every.iter().all(|row| row.len() == 3));
+    let Value::Text(current_name) = &current else {
+        panic!("{current:?}");
+    };
+    let one = rows(&mut session, &format!("N'{current_name}'"));
+    assert_eq!(one.len(), 1);
+    assert_eq!(one[0][0], current);
+    assert!(rows(&mut session, "N'nowhere'").is_empty());
+    assert_eq!(
+        values(
+            &mut session,
+            "SELECT COUNT(*) FROM sysdatabases WHERE dbid = DB_ID()"
+        ),
+        vec![vec![Value::Integer(1)]]
+    );
+    assert!(!values(&mut session, "SELECT name FROM dbo.sysdatabases").is_empty());
+    assert!(!values(&mut session, "SELECT name FROM sys.sysdatabases").is_empty());
+}

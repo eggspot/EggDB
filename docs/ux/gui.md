@@ -141,12 +141,16 @@ Tree rows in the first frame (y is the row top; label text is at `y + 3`):
 |---|-------|---------|------|-------|------|
 | 88 | 0 | down at (8, 96) | database at (24, 94) | `shop` (`bodyBold`) | `read-write` |
 | 112 | 1 | down at (24, 120) | folder at (40, 118) | `Tables` | `3` |
-| 136 | 2 | none | table at (56, 142) | `customers` **selected** | |
-| 160 | 2 | none | table at (56, 166) | `orders` | |
-| 184 | 2 | none | table at (56, 190) | `products` | |
-| 208 | 1 | right at (24, 216) | folder at (40, 214) | `Views` | `0` |
+| 136 | 2 | right at (40, 144) | table at (56, 142) | `customers` **selected** | |
+| 160 | 2 | right at (40, 168) | table at (56, 166) | `orders` | |
+| 184 | 2 | right at (40, 192) | table at (56, 190) | `products` | |
+| 208 | 1 | right at (24, 216) | folder at (40, 214) | `Views` | `1` |
 | 232 | 1 | right at (24, 240) | folder at (40, 238) | `Indexes` | `3` |
-| 256 | 1 | right at (24, 264) | folder at (40, 262) | `Keys` | |
+| 256 | 1 | right at (24, 264) | key at (40, 262) | `Keys` | `1` |
+
+The rows come from the catalog (`docs/ux/workspace.md` 4.1, D276): the sample `shop` has one
+view, three indexes and one key collection, so those are its groups; a database without views
+or key spaces draws no `Views` or `Keys` row.
 
 The selected row is a rounded rect (4, 136, 252, 24) r 4 `selectionInactive` (the tree is not
 focused). Icons, 1 px `textSecondary` strokes: **database** rounded rects (0, 0, 12, 5) and
@@ -337,8 +341,14 @@ Reduced motion follows the OS setting (macOS Reduce Motion, Windows "Show animat
   sidebar → tabs → editor → results → status bar; dialogs trap `Tab` and close on `Esc`.
 - Nothing by colour alone: `Error:`/`Warning:`/`Committed` words, the `NULL` word, text beside the
   connection dot, stripe plus bold label on the active tab.
-- Screen readers: the accessibility tree (names, roles, values, the status strings) is the platform
-  layer's next step after real windows; until then every state is text on screen.
+- Screen readers: each screen's accessibility tree carries names, roles, values (text with its
+  caret and selection), states (checked, expanded, selected, focused, disabled, invalid, read-only),
+  the actions a node offers (invoke, toggle, expand/collapse, set value, select, focus), grid and
+  tree structure (row and column counts and indices, level, position and set size) and the
+  shortcut, and the platform bridges (UI Automation's patterns, AT-SPI2's `Action`, `Text`,
+  `EditableText`, `Selection`, `Table` and `GrabFocus`, NSAccessibility's press, value, focus and
+  text range, ARIA attributes in the browser) expose them. A screen reader's action reaches the GUI
+  as the focus move and the keys a person would press (D278); every state is text on screen too.
 
 ## Later (one line each)
 - Familiar layouts (D15), each a `docs/ux/layouts/<name>.md` arranging the same regions with its shortcuts.

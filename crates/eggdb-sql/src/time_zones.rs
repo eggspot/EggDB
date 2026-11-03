@@ -1,6 +1,7 @@
 mod abbreviations;
 mod compile;
 mod posix;
+mod windows;
 
 use crate::datetime::{self, MICROS_PER_SECOND};
 pub(crate) use abbreviations::abbreviation_rows;
@@ -88,6 +89,10 @@ fn region(name: &str) -> Option<&'static Region> {
     Some(found)
 }
 
+pub(crate) fn windows_zone_names() -> impl Iterator<Item = &'static str> {
+    windows::WINDOWS_ZONES.iter().map(|(name, _)| *name)
+}
+
 pub(crate) fn region_names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = source().zone_names().collect();
     names.sort_unstable();
@@ -155,6 +160,17 @@ impl TimeZone {
     /// [`TimeZone::named`] reads it.
     pub fn abbreviation_or_named(name: &str) -> Option<Self> {
         abbreviations::abbreviation_zone(name).or_else(|| Self::named(name))
+    }
+
+    /// The zone a Windows time zone name names, as SQL Server's `AT TIME ZONE` reads it (any
+    /// letter case, trailing spaces ignored): the name as SQL Server lists it and the IANA region
+    /// the Unicode CLDR mapping gives for it.
+    pub(crate) fn windows(name: &str) -> Option<(&'static str, Self)> {
+        let wanted = name.trim_end_matches(' ');
+        let (listed, iana) = windows::WINDOWS_ZONES
+            .iter()
+            .find(|(listed, _)| listed.eq_ignore_ascii_case(wanted))?;
+        Some((*listed, Self::region(iana)?))
     }
 
     pub(crate) fn abbreviation(name: &str) -> Option<Self> {
@@ -234,6 +250,25 @@ impl TimeZone {
     pub(crate) fn utc_of_local(self, local_micros: i64) -> i128 {
         i128::from(local_micros)
             - i128::from(self.offset_of_local(local_micros)) * i128::from(MICROS_PER_SECOND)
+    }
+
+    /// The UTC instant of `local_micros` as SQL Server's `AT TIME ZONE` gives it: a local time
+    /// the clocks pass twice is the earlier instant (the offset before the change), and a local
+    /// time they skip takes the offset before the change, as [`TimeZone::utc_of_local`] does.
+    pub(crate) fn utc_of_local_earlier(self, local_micros: i64) -> i128 {
+        let day = 86_400 * MICROS_PER_SECOND;
+        let local = i128::from(local_micros);
+        let usual = self.utc_of_local(local_micros);
+        [
+            local_micros.saturating_sub(day),
+            local_micros.saturating_add(day),
+        ]
+        .into_iter()
+        .map(|probe| local - i128::from(self.offset_at(probe)) * i128::from(MICROS_PER_SECOND))
+        .chain([usual])
+        .filter(|&utc| i64::try_from(utc).is_ok_and(|utc| self.local_of_utc(utc) == local))
+        .min()
+        .unwrap_or(usual)
     }
 
     pub(crate) fn local_of_utc(self, utc_micros: i64) -> i128 {
@@ -379,5 +414,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn every_windows_zone_name_follows_a_region_of_the_database() {
+        assert_eq!(super::windows_zone_names().count(), 142);
+        for name in super::windows_zone_names() {
+            assert!(TimeZone::windows(name).is_some(), "{name} has a region");
+        }
+        let (listed, pacific) = TimeZone::windows("pacific standard time  ").unwrap();
+        assert_eq!(listed, "Pacific Standard Time");
+        assert_eq!(pacific.region_name(), Some("America/Los_Angeles"));
+        let (_, berlin) = TimeZone::windows("W. Europe Standard Time").unwrap();
+        assert_eq!(berlin.region_name(), Some("Europe/Berlin"));
+        assert!(TimeZone::windows("Europe/Paris").is_none());
+        assert!(TimeZone::windows("PST").is_none());
+        assert!(TimeZone::windows("").is_none());
+    }
+
+    #[test]
+    fn sql_server_takes_the_offset_before_the_change_in_gaps_and_overlaps() {
+        let (_, central) = TimeZone::windows("Central European Standard Time").unwrap();
+        let local = |day: i64, hour: i64, minute: i64| utc(2022, 3, day, hour, minute);
+        assert_eq!(
+            central.utc_of_local_earlier(local(27, 2, 1)),
+            i128::from(utc(2022, 3, 27, 1, 1))
+        );
+        let overlap = utc(2022, 10, 30, 2, 0);
+        assert_eq!(
+            central.utc_of_local_earlier(overlap),
+            i128::from(utc(2022, 10, 30, 0, 0))
+        );
+        let summer = utc(2022, 7, 1, 12, 0);
+        assert_eq!(
+            central.utc_of_local_earlier(summer),
+            i128::from(utc(2022, 7, 1, 10, 0))
+        );
+        assert_eq!(
+            TimeZone::UTC.utc_of_local_earlier(i64::MAX),
+            i128::from(i64::MAX)
+        );
     }
 }

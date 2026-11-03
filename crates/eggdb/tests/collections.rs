@@ -6,6 +6,7 @@ mod common;
 use common::TempPath;
 use eggdb::{Database, ErrorKind, Options};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 type Entries = BTreeMap<Vec<u8>, Vec<u8>>;
 
@@ -461,4 +462,180 @@ fn random_changes_to_three_key_spaces_agree_with_three_maps() {
         assert_eq!(&scan_all(&db, *space), model, "after reopening, {space:?}");
     }
     assert_eq!(db.check().unwrap().leaked_pages, 0);
+}
+
+fn stored_entries(db: &Database) -> u64 {
+    db.check().unwrap().entries
+}
+
+#[test]
+fn a_rename_moves_every_key_and_time_to_live_at_once_and_never_replaces_a_collection() {
+    let file = TempPath::new("collections-rename");
+    let db = Database::open(file.path()).unwrap();
+    db.create_collection("cache").unwrap();
+    db.create_collection("users").unwrap();
+    db.write(|tx| {
+        let mut cache = tx.collection("cache")?;
+        cache.put("a", "1")?;
+        cache.put_with_expiry("b", "2", Duration::from_secs(3600))?;
+        tx.collection("users")?.put("u", "kept")?;
+        Ok(())
+    })
+    .unwrap();
+    let before = db.begin_read().unwrap();
+    let mut renaming = db.begin_write().unwrap();
+    renaming.rename_collection("cache", "hot").unwrap();
+    assert_eq!(renaming.collection_names().unwrap(), ["hot", "users"]);
+    assert_eq!(
+        renaming.collection("cache").unwrap_err().kind(),
+        ErrorKind::CollectionNotFound
+    );
+    renaming.commit().unwrap();
+    assert_eq!(before.collection_names().unwrap(), ["cache", "users"]);
+    assert_eq!(
+        before.collection("cache").unwrap().get("a").unwrap(),
+        Some(b"1".to_vec())
+    );
+    drop(before);
+
+    assert_eq!(db.collection_names().unwrap(), ["hot", "users"]);
+    assert_eq!(
+        scan_all(&db, Some("hot")),
+        entries(&[("a", "1"), ("b", "2")])
+    );
+    assert!(db.collection("hot").time_to_live("b").unwrap().is_some());
+    assert_eq!(db.collection("hot").time_to_live("a").unwrap(), None);
+
+    let taken = db.rename_collection("hot", "users").unwrap_err();
+    assert_eq!(taken.kind(), ErrorKind::AlreadyExists);
+    assert!(taken.to_string().contains("\"users\""), "{taken}");
+    assert_eq!(
+        db.rename_collection("hot", "hot").unwrap_err().kind(),
+        ErrorKind::AlreadyExists
+    );
+    assert_eq!(
+        db.rename_collection("cache", "fresh").unwrap_err().kind(),
+        ErrorKind::CollectionNotFound
+    );
+    assert_eq!(
+        db.rename_collection("hot", "two words").unwrap_err().kind(),
+        ErrorKind::InvalidCollectionName
+    );
+    assert_eq!(db.collection_names().unwrap(), ["hot", "users"]);
+    assert_eq!(
+        db.collection("users").get("u").unwrap(),
+        Some(b"kept".to_vec())
+    );
+    drop(db);
+
+    let db = Database::open(file.path()).unwrap();
+    assert_eq!(db.collection_names().unwrap(), ["hot", "users"]);
+    assert!(db.create_collection("cache").unwrap());
+    assert_eq!(scan_all(&db, Some("cache")), Entries::new());
+    assert_eq!(db.check().unwrap().leaked_pages, 0);
+}
+
+#[test]
+fn a_collection_larger_than_the_page_cache_drops_in_steps_and_is_gone_from_the_first() {
+    let file = TempPath::new("collections-large-drop");
+    let options = Options::new().cache_bytes(1 << 20);
+    let db = Database::open_with(file.path(), options.clone()).unwrap();
+    db.put("kept", "default").unwrap();
+    db.create_collection("big").unwrap();
+    for batch in 0..40u32 {
+        db.write(|tx| {
+            let mut big = tx.collection("big")?;
+            for n in 0..500u32 {
+                big.put((batch * 500 + n).to_be_bytes(), [7u8; 100])?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+    assert_eq!(stored_entries(&db), 1 + 1 + 1 + 20_000);
+    assert!(db.drop_collection("big").unwrap());
+    assert_eq!(db.collection_names().unwrap(), Vec::<String>::new());
+    assert_eq!(stored_entries(&db), 1 + 1);
+    assert!(!db.drop_collection("big").unwrap());
+    assert_eq!(db.get("kept").unwrap(), Some(b"default".to_vec()));
+    assert_eq!(db.check().unwrap().leaked_pages, 0);
+    drop(db);
+    let db = Database::open_with(file.path(), options).unwrap();
+    assert_eq!(db.finish_collection_drops().unwrap(), 0);
+    assert_eq!(stored_entries(&db), 1 + 1);
+}
+
+#[test]
+fn a_drop_left_unfinished_is_invisible_and_later_commits_and_a_reopen_finish_it() {
+    let file = TempPath::new("collections-drop-resume");
+    let db = Database::open(file.path()).unwrap();
+    db.create_collection("old").unwrap();
+    db.write(|tx| {
+        let mut old = tx.collection("old")?;
+        for n in 0..1000u32 {
+            old.put(n.to_be_bytes(), "v")?;
+        }
+        for n in 0..10u32 {
+            old.put_with_expiry(format!("ttl:{n}"), "v", Duration::from_secs(3600))?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let before = db.begin_read().unwrap();
+    let mut first_step = db.begin_write().unwrap();
+    assert!(first_step.drop_collection("old").unwrap());
+    assert!(first_step.create_collection("old").unwrap());
+    assert_eq!(first_step.collection("old").unwrap().scan(..).count(), 0);
+    first_step.commit().unwrap();
+    assert_eq!(before.collection("old").unwrap().scan(..).count(), 1010);
+    drop(before);
+    assert_eq!(scan_all(&db, Some("old")), Entries::new());
+    assert_eq!(db.collection_names().unwrap(), ["old"]);
+
+    let left = stored_entries(&db);
+    db.put("x", "y").unwrap();
+    assert_eq!(stored_entries(&db), left - 32 + 1);
+    drop(db);
+
+    let db = Database::open(file.path()).unwrap();
+    assert_eq!(db.collection_names().unwrap(), ["old"]);
+    let removed = db.finish_collection_drops().unwrap();
+    assert!(removed > 0 && removed < 1010, "{removed}");
+    assert_eq!(db.finish_collection_drops().unwrap(), 0);
+    assert_eq!(stored_entries(&db), 1 + 1 + 1);
+    assert_eq!(db.check().unwrap().leaked_pages, 0);
+    db.put("z", "z").unwrap();
+    assert_eq!(stored_entries(&db), 1 + 1 + 1 + 1);
+}
+
+#[test]
+fn collection_stats_count_each_collection_s_entries_and_bytes() {
+    let file = TempPath::new("collections-stats");
+    let db = Database::open(file.path()).unwrap();
+    assert_eq!(db.collection_stats().unwrap(), Vec::new());
+    db.put("default", "not counted").unwrap();
+    db.create_collection("b").unwrap();
+    db.create_collection("a").unwrap();
+    db.write(|tx| {
+        let mut a = tx.collection("a")?;
+        a.put("k1", "12345")?;
+        a.put("key2", "")?;
+        Ok(())
+    })
+    .unwrap();
+    let stats = db.collection_stats().unwrap();
+    let shown: Vec<(&str, u64, u64, u64)> = stats
+        .iter()
+        .map(|one| {
+            (
+                one.name.as_str(),
+                one.entries,
+                one.key_bytes,
+                one.value_bytes,
+            )
+        })
+        .collect();
+    assert_eq!(shown, [("a", 2, 6, 5), ("b", 0, 0, 0)]);
+    let unchanged = db.stats().unwrap();
+    assert_eq!(db.stats().unwrap().page_count, unchanged.page_count);
 }

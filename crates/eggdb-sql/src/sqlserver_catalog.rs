@@ -218,6 +218,20 @@ impl ObjectKind {
         self.is_routine() && self != Self::Procedure
     }
 
+    fn of_listed_routine(definition: &crate::routines::RoutineDefinition) -> Option<Self> {
+        if let Some(tsql) = definition.tsql.as_deref() {
+            return Some(Self::of_routine(&tsql.returns));
+        }
+        if definition.language != crate::routines::RoutineLanguage::PlSql {
+            return None;
+        }
+        Some(match definition.kind {
+            crate::routines::RoutineKind::Procedure => Self::Procedure,
+            _ if definition.returns.is_set() => Self::TableFunction,
+            _ => Self::ScalarFunction,
+        })
+    }
+
     pub(crate) fn of_routine(returns: &crate::tsql::TsqlReturns) -> Self {
         match returns {
             crate::tsql::TsqlReturns::Status => Self::Procedure,
@@ -452,13 +466,12 @@ impl SqlServerObjects {
             });
         }
         for (at, routine) in snapshot.routines.iter().enumerate() {
-            let Some(tsql) = routine.definition.tsql.as_deref() else {
+            let Some(kind) = ObjectKind::of_listed_routine(&routine.definition) else {
                 continue;
             };
             let Some(schema_id) = schema_id_of(&routine.schema) else {
                 continue;
             };
-            let kind = ObjectKind::of_routine(&tsql.returns);
             pending.push(PendingObject {
                 request: OidRequest {
                     kind: kind.request_kind(),

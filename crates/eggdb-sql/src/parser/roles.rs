@@ -215,15 +215,24 @@ impl Parser<'_> {
             }
         }
         let mut privileges = Vec::new();
+        let mut columns = Vec::new();
         let mut role_names = Vec::new();
         loop {
             if self.take_word("all") {
                 self.take_word("privileges");
-                privileges.extend(Privilege::ALL);
-            } else if let Some(privilege) = self.privilege_word() {
-                privileges.push(privilege);
                 if self.peek_kind() == &TokenKind::LeftParen {
-                    return Err(self.not_supported("column privileges"));
+                    let names = self.privilege_columns()?;
+                    for privilege in crate::roles::COLUMN_PRIVILEGES {
+                        columns.push((privilege, names.clone()));
+                    }
+                } else {
+                    privileges.extend(Privilege::ALL);
+                }
+            } else if let Some(privilege) = self.privilege_word() {
+                if self.peek_kind() == &TokenKind::LeftParen {
+                    columns.push((privilege, self.privilege_columns()?));
+                } else {
+                    privileges.push(privilege);
                 }
             } else {
                 role_names.push(self.role_name()?.text);
@@ -232,7 +241,7 @@ impl Parser<'_> {
                 break;
             }
         }
-        if !role_names.is_empty() && !privileges.is_empty() {
+        if !role_names.is_empty() && !(privileges.is_empty() && columns.is_empty()) {
             return Err(self.unexpected());
         }
         if role_names.is_empty() {
@@ -286,6 +295,7 @@ impl Parser<'_> {
             RoleStatement::Privileges {
                 granting,
                 privileges,
+                columns,
                 tables,
                 grantees,
             }
@@ -296,6 +306,16 @@ impl Parser<'_> {
                 members: grantees,
             }
         }))
+    }
+
+    fn privilege_columns(&mut self) -> SqlResult<Vec<Name>> {
+        self.expect(&TokenKind::LeftParen)?;
+        let mut names = vec![self.name()?];
+        while self.take(&TokenKind::Comma) {
+            names.push(self.name()?);
+        }
+        self.expect(&TokenKind::RightParen)?;
+        Ok(names)
     }
 
     fn privilege_word(&mut self) -> Option<Privilege> {

@@ -1,9 +1,10 @@
-use crate::ast::{Expr, ExprKind, Name};
+use crate::ast::{Expr, ExprKind, Name, SelectItem};
 use crate::encoding::{NAMESPACE, prefix_end};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::session::QueryResult;
 use crate::settings::Settings;
 use crate::store::{KeyValueRead, KeyValueWrite, ScanDirection};
+use crate::types::Value;
 
 pub(crate) const POLICY_SPACE: u8 = 0x13;
 pub(crate) const ROW_SECURITY_SPACE: u8 = 0x14;
@@ -192,31 +193,50 @@ fn decode(name: &str, bytes: &[u8]) -> SqlResult<Policy> {
     })
 }
 
-pub(crate) fn policies(reader: &dyn KeyValueRead, table: &str) -> SqlResult<Vec<Policy>> {
+pub(crate) fn stored_conditions(key: &[u8], value: &[u8]) -> Option<SqlResult<Vec<String>>> {
+    let (&space, rest) = key.strip_prefix(NAMESPACE)?.split_first()?;
+    if space != POLICY_SPACE {
+        return None;
+    }
+    let name = match rest.iter().rposition(|&byte| byte == 0) {
+        Some(end) => String::from_utf8_lossy(rest.get(end + 1..).unwrap_or_default()),
+        None => return Some(Err(corrupt())),
+    };
+    Some(decode(&name, value).map(|policy| policy.using.into_iter().chain(policy.check).collect()))
+}
+
+fn policy_records(reader: &dyn KeyValueRead, table: &str) -> SqlResult<Vec<(String, Vec<u8>)>> {
     let prefix = policy_prefix(table);
     let mut found = Vec::new();
-    let mut failure = None;
+    let mut damaged = false;
     reader.scan(
         &prefix,
         &prefix_end(&prefix),
         ScanDirection::Forward,
         &mut |key, value| {
-            let decoded = std::str::from_utf8(&key[prefix.len()..])
-                .map_err(|_| corrupt())
-                .and_then(|name| decode(name, value));
-            match decoded {
-                Ok(policy) => {
-                    found.push(policy);
-                    Ok(true)
-                }
-                Err(error) => {
-                    failure = Some(error);
-                    Ok(false)
-                }
+            let name = key.get(prefix.len()..).unwrap_or_default();
+            if name.contains(&0) {
+                return Ok(true);
             }
+            let Ok(name) = std::str::from_utf8(name) else {
+                damaged = true;
+                return Ok(false);
+            };
+            found.push((name.to_owned(), value.to_vec()));
+            Ok(true)
         },
     )?;
-    failure.map_or(Ok(found), Err)
+    if damaged {
+        return Err(corrupt());
+    }
+    Ok(found)
+}
+
+pub(crate) fn policies(reader: &dyn KeyValueRead, table: &str) -> SqlResult<Vec<Policy>> {
+    policy_records(reader, table)?
+        .into_iter()
+        .map(|(name, value)| decode(&name, &value))
+        .collect()
 }
 
 pub(crate) fn is_enabled(reader: &dyn KeyValueRead, table: &str) -> SqlResult<bool> {
@@ -258,6 +278,12 @@ pub(crate) fn run(
     }
     match statement {
         RowSecurityStatement::CreatePolicy { table, policy } => {
+            if policy.name.is_empty() || policy.name.contains('\0') {
+                return Err(SqlError::new(
+                    SqlState::INVALID_NAME,
+                    format!("invalid policy name \"{}\"", policy.name.escape_default()),
+                ));
+            }
             let key = policy_key(&table.text, &policy.name);
             if writer.get(&key)?.is_some() {
                 return Err(SqlError::new(
@@ -313,7 +339,9 @@ pub(crate) fn run(
 }
 
 pub(crate) fn forget_table(writer: &mut dyn KeyValueWrite, table: &str) -> SqlResult<()> {
-    crate::store::delete_prefix(writer, &policy_prefix(table))?;
+    for (name, _) in policy_records(writer, table)? {
+        writer.delete(&policy_key(table, &name))?;
+    }
     writer.delete(&switch_key(table)).map(|_| ())
 }
 
@@ -371,8 +399,8 @@ pub(crate) fn visible_rows(
         .map(|policies| combined(&policies, |policy| policy.using.clone())))
 }
 
-/// Refuses an `INSERT` or `UPDATE` under row security unless the role's policies let every new
-/// row through (`WITH CHECK (true)`): checks on new rows are not evaluated yet.
+/// Refuses a `MERGE` (and any write that does not evaluate its new rows) under row security
+/// unless the role's policies let every new row through (`WITH CHECK (true)`).
 pub(crate) fn check_new_rows(
     reader: &dyn KeyValueRead,
     settings: &Settings,
@@ -393,14 +421,124 @@ pub(crate) fn check_new_rows(
     if open {
         return Ok(());
     }
-    Err(SqlError::new(
+    Err(new_row_violation(table).with_hint(
+        "MERGE checks new rows only against policies WITH CHECK (true) so far; use INSERT and UPDATE, which evaluate each policy.",
+    ))
+}
+
+fn new_row_violation(table: &str) -> SqlError {
+    SqlError::new(
         SqlState::INSUFFICIENT_PRIVILEGE,
         format!(
             "new row violates row-level security policy for table \"{}\"",
             crate::schemas::display(table)
         ),
     )
-    .with_hint("EggDB checks new rows only against policies WITH CHECK (true) so far."))
+}
+
+const NEW_ROW_CHECK: &str = "\u{2}row security check";
+const NEW_ROW_CHECK_ALONE: &str = "\u{2}row security check alone";
+
+/// The condition every row an `INSERT` or `UPDATE` writes must meet under the session's
+/// policies, as PostgreSQL's `CREATE POLICY` defines it: each policy's `WITH CHECK`, or its
+/// `USING` when it has none, permissive policies joined by `OR` and restrictive ones by `AND`.
+/// When the statement returns rows, the new rows must also be ones the role may see. `None`
+/// when row security does not apply.
+pub(crate) fn new_row_condition(
+    reader: &dyn KeyValueRead,
+    settings: &Settings,
+    table: &str,
+    command: PolicyCommand,
+    returns_rows: bool,
+) -> SqlResult<Option<String>> {
+    let Some(policies) = applicable(reader, settings, table, command)? else {
+        return Ok(None);
+    };
+    let check = combined(&policies, |policy| {
+        policy.check.clone().or_else(|| policy.using.clone())
+    });
+    let mut condition = format!("({check})");
+    if returns_rows
+        && let Some(visible) = visible_rows(reader, settings, table, PolicyCommand::Select)?
+    {
+        condition = format!("{condition} AND ({visible})");
+    }
+    Ok(Some(condition))
+}
+
+/// Appends `check` to a write's `RETURNING` list under a label [`checked_new_rows`] finds, so
+/// the executor evaluates it on each new row after `BEFORE` triggers ran.
+pub(crate) fn append_new_row_check(returning: &mut Option<Vec<SelectItem>>, check: Expr) {
+    let label = if returning.is_some() {
+        NEW_ROW_CHECK
+    } else {
+        NEW_ROW_CHECK_ALONE
+    };
+    returning
+        .get_or_insert_with(Vec::new)
+        .push(SelectItem::Expr {
+            expr: check,
+            alias: Some(label.to_owned()),
+        });
+}
+
+/// Whether [`append_new_row_check`] added its check to `returning`.
+pub(crate) fn has_new_row_check(returning: Option<&[SelectItem]>) -> bool {
+    matches!(
+        returning.and_then(<[SelectItem]>::last),
+        Some(SelectItem::Expr { alias: Some(label), .. })
+            if label == NEW_ROW_CHECK || label == NEW_ROW_CHECK_ALONE
+    )
+}
+
+/// Fails with `42501 new row violates row-level security policy` unless every row `result`
+/// returns met the check [`append_new_row_check`] added, then removes the check's column (and
+/// the rows, when the statement had no `RETURNING` of its own). When `check_appended` is true
+/// and the result lacks the check's column, the write is refused as well.
+pub(crate) fn checked_new_rows(
+    mut result: QueryResult,
+    table: &str,
+    check_appended: bool,
+) -> SqlResult<QueryResult> {
+    if !check_appended {
+        return Ok(result);
+    }
+    let Some(columns) = &mut result.columns else {
+        return Err(new_row_violation(table));
+    };
+    let alone = match columns.last().map(|column| column.name.as_str()) {
+        Some(name) if name.eq_ignore_ascii_case(NEW_ROW_CHECK_ALONE) => true,
+        Some(name) if name.eq_ignore_ascii_case(NEW_ROW_CHECK) => false,
+        _ => return Err(new_row_violation(table)),
+    };
+    columns.pop();
+    for row in &mut result.rows {
+        if row.pop() != Some(Value::Boolean(true)) {
+            return Err(new_row_violation(table));
+        }
+    }
+    if alone {
+        result.columns = None;
+        result.rows.clear();
+    }
+    Ok(result)
+}
+
+/// Moves the policies and the row security switch of `from` to `to`, when the table is
+/// renamed. The policies of the tables in a schema named like `from` stay where they are.
+pub(crate) fn move_table(writer: &mut dyn KeyValueWrite, from: &str, to: &str) -> SqlResult<()> {
+    if from == to {
+        return Ok(());
+    }
+    for (name, value) in policy_records(writer, from)? {
+        writer.delete(&policy_key(from, &name))?;
+        writer.put(&policy_key(to, &name), &value)?;
+    }
+    if let Some(switch) = writer.get(&switch_key(from))? {
+        writer.delete(&switch_key(from))?;
+        writer.put(&switch_key(to), &switch)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn condition_expression(text: &str, settings: &Settings) -> SqlResult<Expr> {

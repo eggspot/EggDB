@@ -15,13 +15,17 @@ const KEY_POSITIVE: u8 = 0x03;
 const KEY_NAN: u8 = 0x04;
 const ROW_NEGATIVE: u8 = 0x01;
 const ROW_NAN: u8 = 0x02;
+const ROW_INFINITE: u8 = 0x04;
+const KEY_POSITIVE_INFINITY: [u8; 4] = [KEY_POSITIVE, 0xFF, 0xFF, 0x00];
+const KEY_NEGATIVE_INFINITY: [u8; 4] = [KEY_NEGATIVE, 0x00, 0x00, 0xFF];
 
 /// An exact decimal number of the `numeric` type: up to 1000 digits before the decimal point
-/// and 1000 after it, or `NaN`. It keeps the number of digits after the point it was given
+/// and 1000 after it, `Infinity`, `-Infinity` or `NaN`, as PostgreSQL 14 has them. It keeps the number of digits after the point it was given
 /// (its scale), which its text shows, while `1.5` and `1.50` compare equal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Numeric {
     nan: bool,
+    infinite: bool,
     negative: bool,
     scale: u16,
     limbs: Box<[u32]>,
@@ -287,7 +291,18 @@ impl Numeric {
     pub(crate) fn nan() -> Self {
         Self {
             nan: true,
+            infinite: false,
             negative: false,
+            scale: 0,
+            limbs: Box::new([]),
+        }
+    }
+
+    pub(crate) fn infinity(negative: bool) -> Self {
+        Self {
+            nan: false,
+            infinite: true,
+            negative,
             scale: 0,
             limbs: Box::new([]),
         }
@@ -296,6 +311,7 @@ impl Numeric {
     fn zero(scale: usize) -> Self {
         Self {
             nan: false,
+            infinite: false,
             negative: false,
             scale: scale.min(MAX_SCALE) as u16,
             limbs: Box::new([]),
@@ -314,6 +330,7 @@ impl Numeric {
         }
         Ok(Self {
             nan: false,
+            infinite: false,
             negative: negative && !limbs.is_empty(),
             scale: scale as u16,
             limbs: limbs.into_boxed_slice(),
@@ -325,18 +342,28 @@ impl Numeric {
         self.nan
     }
 
+    /// Whether the value is `Infinity` or `-Infinity`.
+    pub fn is_infinite(&self) -> bool {
+        self.infinite
+    }
+
+    fn is_special(&self) -> bool {
+        self.nan || self.infinite
+    }
+
     /// The number of digits after the decimal point the value shows.
     pub fn scale(&self) -> u16 {
         self.scale
     }
 
     pub(crate) fn is_zero(&self) -> bool {
-        !self.nan && self.limbs.is_empty()
+        !self.is_special() && self.limbs.is_empty()
     }
 
     pub(crate) fn from_i128(value: i128) -> Self {
         Self {
             nan: false,
+            infinite: false,
             negative: value < 0,
             scale: 0,
             limbs: magnitude_of(value.unsigned_abs()).into_boxed_slice(),
@@ -346,6 +373,7 @@ impl Numeric {
     pub(crate) fn from_scaled(units: i128, scale: u16) -> Self {
         Self {
             nan: false,
+            infinite: false,
             negative: units < 0,
             scale,
             limbs: magnitude_of(units.unsigned_abs()).into_boxed_slice(),
@@ -426,6 +454,21 @@ impl Numeric {
         Self::finite(negative, magnitude_from_digits(&digits), scale)
     }
 
+    /// Reads `text` as PostgreSQL 14's `numeric` input does: [`Numeric::parse`], and also
+    /// `Infinity`, `inf` and their signed forms in any letter case.
+    pub fn parse_with_infinity(text: &str) -> SqlResult<Self> {
+        let trimmed = text.trim_matches(|c: char| c.is_ascii_whitespace());
+        let (negative, unsigned) = match trimmed.as_bytes().first() {
+            Some(b'-') => (true, &trimmed[1..]),
+            Some(b'+') => (false, &trimmed[1..]),
+            _ => (false, trimmed),
+        };
+        if unsigned.eq_ignore_ascii_case("infinity") || unsigned.eq_ignore_ascii_case("inf") {
+            return Ok(Self::infinity(negative));
+        }
+        Self::parse(text)
+    }
+
     pub(crate) fn from_f64(value: f64, significant_digits: usize) -> SqlResult<Self> {
         if value.is_nan() {
             return Ok(Self::nan());
@@ -450,11 +493,18 @@ impl Numeric {
         if self.nan {
             return f64::NAN;
         }
+        if self.infinite {
+            return if self.negative {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
+        }
         self.to_string().parse().unwrap_or(f64::NAN)
     }
 
     pub(crate) fn to_i128_rounded(&self) -> Option<i128> {
-        if self.nan {
+        if self.is_special() {
             return None;
         }
         let rounded = round_off(&self.limbs, usize::from(self.scale));
@@ -463,7 +513,7 @@ impl Numeric {
     }
 
     pub(crate) fn integral_value(&self) -> Option<i128> {
-        if self.nan {
+        if self.is_special() {
             return None;
         }
         let (whole, rest) = cut_off(&self.limbs, usize::from(self.scale));
@@ -480,7 +530,7 @@ impl Numeric {
 
     pub(crate) fn negated(&self) -> Self {
         let mut out = self.clone();
-        out.negative = !self.negative && !self.limbs.is_empty() && !self.nan;
+        out.negative = !self.negative && (!self.limbs.is_empty() || self.infinite) && !self.nan;
         out
     }
 
@@ -493,6 +543,12 @@ impl Numeric {
     pub(crate) fn add(&self, other: &Self) -> SqlResult<Self> {
         if self.nan || other.nan {
             return Ok(Self::nan());
+        }
+        match (self.infinite, other.infinite) {
+            (true, true) if self.negative != other.negative => return Ok(Self::nan()),
+            (true, _) => return Ok(self.clone()),
+            (false, true) => return Ok(other.clone()),
+            (false, false) => {}
         }
         let scale = usize::from(self.scale.max(other.scale));
         let left = self.aligned(scale);
@@ -518,6 +574,12 @@ impl Numeric {
     pub(crate) fn multiply(&self, other: &Self) -> SqlResult<Self> {
         if self.nan || other.nan {
             return Ok(Self::nan());
+        }
+        if self.infinite || other.infinite {
+            if self.is_zero() || other.is_zero() {
+                return Ok(Self::nan());
+            }
+            return Ok(Self::infinity(self.negative != other.negative));
         }
         let scale = usize::from(self.scale) + usize::from(other.scale);
         if self.is_zero() || other.is_zero() {
@@ -577,6 +639,9 @@ impl Numeric {
                 "division by zero",
             ));
         }
+        if let Some(quotient) = self.infinite_quotient(other) {
+            return Ok(quotient);
+        }
         let scale = self.division_scale(other);
         self.divide_to_scale(other, scale)
     }
@@ -590,6 +655,9 @@ impl Numeric {
                 SqlState::DIVISION_BY_ZERO,
                 "division by zero",
             ));
+        }
+        if let Some(quotient) = self.infinite_quotient(other) {
+            return Ok(quotient);
         }
         let scale = scale.min(MAX_SCALE);
         if self.is_zero() {
@@ -613,6 +681,15 @@ impl Numeric {
         };
         let (quotient, _) = divide_magnitudes(&dividend, &divisor);
         Self::finite(self.negative != other.negative, quotient, scale)
+    }
+
+    fn infinite_quotient(&self, other: &Self) -> Option<Self> {
+        match (self.infinite, other.infinite) {
+            (true, true) => Some(Self::nan()),
+            (true, false) => Some(Self::infinity(self.negative != other.negative)),
+            (false, true) => Some(Self::zero(0)),
+            (false, false) => None,
+        }
     }
 
     fn divide_to_scale(&self, other: &Self, scale: usize) -> SqlResult<Self> {
@@ -650,6 +727,12 @@ impl Numeric {
                 "division by zero",
             ));
         }
+        if self.infinite {
+            return Ok(Self::nan());
+        }
+        if other.infinite {
+            return Ok(self.clone());
+        }
         let scale = usize::from(self.scale.max(other.scale));
         let (_, remainder) = divide_magnitudes(&self.aligned(scale), &other.aligned(scale));
         Self::finite(self.negative, remainder, scale)
@@ -661,6 +744,15 @@ impl Numeric {
             (true, false) => return Ordering::Greater,
             (false, true) => return Ordering::Less,
             _ => {}
+        }
+        let infinity_rank = |value: &Self| match (value.infinite, value.negative) {
+            (false, _) => 0,
+            (true, false) => 1,
+            (true, true) => -1,
+        };
+        match (infinity_rank(self), infinity_rank(other)) {
+            (0, 0) => {}
+            (left, right) => return left.cmp(&right),
         }
         let sign = |value: &Self| {
             if value.limbs.is_empty() {
@@ -698,8 +790,8 @@ impl Numeric {
     }
 
     fn rescaled(&self, places: i64, round: bool) -> SqlResult<Self> {
-        if self.nan {
-            return Ok(Self::nan());
+        if self.is_special() {
+            return Ok(self.clone());
         }
         let places = places.clamp(-(MAX_INTEGRAL_DIGITS as i64) - 1, MAX_SCALE as i64);
         let current = i64::from(self.scale);
@@ -733,8 +825,8 @@ impl Numeric {
     }
 
     fn to_integer_toward(&self, down: bool) -> SqlResult<Self> {
-        if self.nan {
-            return Ok(Self::nan());
+        if self.is_special() {
+            return Ok(self.clone());
         }
         let (whole, cut) = cut_off(&self.limbs, usize::from(self.scale));
         let away = cut && (self.negative == down);
@@ -749,6 +841,15 @@ impl Numeric {
     pub(crate) fn with_modifier(&self, precision: i64, scale: i64) -> SqlResult<Self> {
         if self.nan {
             return Ok(Self::nan());
+        }
+        if self.infinite {
+            return Err(SqlError::new(
+                SqlState::NUMERIC_VALUE_OUT_OF_RANGE,
+                "numeric field overflow",
+            )
+            .with_detail(format!(
+                "A field with precision {precision}, scale {scale} cannot hold an infinite value."
+            )));
         }
         let rounded = self.rounded(scale)?;
         if rounded.is_zero() {
@@ -775,6 +876,9 @@ impl Numeric {
 
     pub(crate) fn power(&self, exponent: &Self) -> SqlResult<Self> {
         let invalid = |message: &str| SqlError::new(SqlState::INVALID_ARGUMENT_FOR_POWER, message);
+        if (self.infinite || exponent.infinite) && !self.nan && !exponent.nan {
+            return self.infinite_power(exponent);
+        }
         if exponent.is_zero() && !self.nan {
             return Self::from_i64(1).rescaled(MIN_SIGNIFICANT_DIGITS, true);
         }
@@ -843,11 +947,45 @@ impl Numeric {
         signed.rounded(scale as i64)
     }
 
+    fn infinite_power(&self, exponent: &Self) -> SqlResult<Self> {
+        let invalid = |message: &str| SqlError::new(SqlState::INVALID_ARGUMENT_FOR_POWER, message);
+        if self.is_zero() && exponent.negative {
+            return Err(invalid("zero raised to a negative power is undefined"));
+        }
+        if self.negative && !exponent.is_integral() {
+            return Err(invalid(
+                "a negative number raised to a non-integer power yields a complex result",
+            ));
+        }
+        if exponent.infinite {
+            let magnitude = self.absolute().compare(&Self::from_i64(1));
+            if magnitude == Ordering::Equal {
+                return Ok(Self::from_i64(1));
+            }
+            let grows = (magnitude == Ordering::Greater) != exponent.negative;
+            return Ok(if grows {
+                Self::infinity(false)
+            } else {
+                Self::zero(0)
+            });
+        }
+        if exponent.is_zero() {
+            return Ok(Self::from_i64(1));
+        }
+        if exponent.negative {
+            return Ok(Self::zero(0));
+        }
+        Ok(Self::infinity(self.negative && exponent.is_odd()))
+    }
+
     fn is_integral(&self) -> bool {
-        !self.nan && !cut_off(&self.limbs, usize::from(self.scale)).1
+        !self.nan && (self.infinite || !cut_off(&self.limbs, usize::from(self.scale)).1)
     }
 
     fn is_odd(&self) -> bool {
+        if self.is_special() {
+            return false;
+        }
         let (whole, _) = cut_off(&self.limbs, usize::from(self.scale));
         whole.first().is_some_and(|limb| limb % 2 == 1)
     }
@@ -889,6 +1027,7 @@ impl Numeric {
         if count >= 0 {
             let value = Self {
                 nan: false,
+                infinite: false,
                 negative: negative && !result.is_empty(),
                 scale: 0,
                 limbs: result.into_boxed_slice(),
@@ -902,6 +1041,7 @@ impl Numeric {
         }
         let denominator = Self {
             nan: false,
+            infinite: false,
             negative,
             scale: exact_scale as u16,
             limbs: result.into_boxed_slice(),
@@ -914,6 +1054,14 @@ impl Numeric {
     pub(crate) fn encode_key(&self, out: &mut Vec<u8>) {
         if self.nan {
             out.push(KEY_NAN);
+            return;
+        }
+        if self.infinite {
+            out.extend_from_slice(if self.negative {
+                &KEY_NEGATIVE_INFINITY
+            } else {
+                &KEY_POSITIVE_INFINITY
+            });
             return;
         }
         let Some(exponent) = self.decimal_exponent() else {
@@ -959,6 +1107,12 @@ impl Numeric {
             KEY_NAN => return Some((Self::nan(), 1)),
             KEY_ZERO => return Some((Self::zero(0), 1)),
             _ => {}
+        }
+        if key.get(..length) == Some(&KEY_POSITIVE_INFINITY[..]) {
+            return Some((Self::infinity(false), length));
+        }
+        if key.get(..length) == Some(&KEY_NEGATIVE_INFINITY[..]) {
+            return Some((Self::infinity(true), length));
         }
         let negative = class == KEY_NEGATIVE;
         let mut exponent = u16::from_be_bytes([*key.get(1)?, *key.get(2)?]);
@@ -1006,6 +1160,9 @@ impl Numeric {
         if self.nan {
             flags |= ROW_NAN;
         }
+        if self.infinite {
+            flags |= ROW_INFINITE;
+        }
         out.push(flags);
         out.extend_from_slice(&self.scale.to_le_bytes());
         out.push(self.limbs.len() as u8);
@@ -1018,7 +1175,7 @@ impl Numeric {
         let flags = *bytes.first()?;
         let scale = u16::from_le_bytes([*bytes.get(1)?, *bytes.get(2)?]);
         let count = usize::from(*bytes.get(3)?);
-        if flags & !(ROW_NEGATIVE | ROW_NAN) != 0
+        if flags & !(ROW_NEGATIVE | ROW_NAN | ROW_INFINITE) != 0
             || usize::from(scale) > MAX_SCALE
             || count > MAX_LIMBS
         {
@@ -1039,6 +1196,10 @@ impl Numeric {
             return (flags == ROW_NAN && scale == 0 && limbs.is_empty())
                 .then(|| (Self::nan(), end));
         }
+        if flags & ROW_INFINITE != 0 {
+            return (scale == 0 && limbs.is_empty())
+                .then(|| (Self::infinity(flags & ROW_NEGATIVE != 0), end));
+        }
         let negative = flags & ROW_NEGATIVE != 0;
         if negative && limbs.is_empty() {
             return None;
@@ -1049,6 +1210,7 @@ impl Numeric {
         Some((
             Self {
                 nan: false,
+                infinite: false,
                 negative,
                 scale,
                 limbs: limbs.into_boxed_slice(),
@@ -1060,6 +1222,9 @@ impl Numeric {
     pub(crate) fn exact_double(&self) -> Option<f64> {
         if self.nan {
             return None;
+        }
+        if self.infinite {
+            return Some(self.to_f64());
         }
         let digits = magnitude_digits(&self.limbs);
         let significant = digits.trim_end_matches('0');
@@ -1094,6 +1259,9 @@ impl Numeric {
         if self.nan {
             return "NaN".into();
         }
+        if self.infinite {
+            return self.to_string();
+        }
         let Some(exponent) = self.decimal_exponent() else {
             return "0".into();
         };
@@ -1110,6 +1278,9 @@ impl fmt::Display for Numeric {
         }
         if self.negative {
             f.write_str("-")?;
+        }
+        if self.infinite {
+            return f.write_str("Infinity");
         }
         let digits = magnitude_digits(&self.limbs);
         let scale = usize::from(self.scale);
@@ -1549,9 +1720,11 @@ mod tests {
             "0.00",
             "-1.5",
             "NaN",
+            "Infinity",
+            "-Infinity",
             "123456789012345678901234567890.5",
         ] {
-            let value = n(text);
+            let value = Numeric::parse_with_infinity(text).unwrap();
             let mut bytes = Vec::new();
             value.encode_row(&mut bytes);
             assert_eq!(
@@ -1562,7 +1735,18 @@ mod tests {
                 assert!(Numeric::decode_row(&bytes[..cut]).is_none());
             }
         }
-        assert!(Numeric::decode_row(&[0x04, 0, 0, 0]).is_none());
+        assert_eq!(
+            Numeric::decode_row(&[0x04, 0, 0, 0]),
+            Some((Numeric::infinity(false), 4))
+        );
+        assert_eq!(
+            Numeric::decode_row(&[0x05, 0, 0, 0]),
+            Some((Numeric::infinity(true), 4))
+        );
+        assert!(Numeric::decode_row(&[0x08, 0, 0, 0]).is_none());
+        assert!(Numeric::decode_row(&[0x06, 0, 0, 0]).is_none());
+        assert!(Numeric::decode_row(&[0x04, 1, 0, 0]).is_none());
+        assert!(Numeric::decode_row(&[0x04, 0, 0, 1, 1, 0, 0, 0]).is_none());
         assert!(Numeric::decode_row(&[0, 0xFF, 0xFF, 0]).is_none());
         assert!(Numeric::decode_row(&[0, 0, 0, 1, 0xFF, 0xFF, 0xFF, 0xFF]).is_none());
         assert!(Numeric::decode_row(&[0, 0, 0, 1, 0, 0, 0, 0]).is_none());
@@ -1632,5 +1816,141 @@ mod tests {
             let _ = n(&base).power(&n(&exponent));
             let _ = n(&base).power(&n(&negative));
         }
+    }
+
+    fn infinity(negative: bool) -> Numeric {
+        Numeric::infinity(negative)
+    }
+
+    #[test]
+    fn infinities_read_print_and_order_like_postgresql_14() {
+        for text in ["Infinity", "+infinity", " inf ", "+INF"] {
+            assert_eq!(shown(Numeric::parse_with_infinity(text)), "Infinity");
+        }
+        for text in ["-Infinity", "-inf"] {
+            assert_eq!(shown(Numeric::parse_with_infinity(text)), "-Infinity");
+        }
+        assert!(Numeric::parse("Infinity").is_err());
+        assert!(Numeric::parse_with_infinity("infinit").is_err());
+        assert_eq!(shown(Numeric::parse_with_infinity("1.50")), "1.50");
+        let ordered = [
+            infinity(true),
+            n("-1e900"),
+            n("0"),
+            n("1e900"),
+            infinity(false),
+            Numeric::nan(),
+        ];
+        for (at, left) in ordered.iter().enumerate() {
+            for (other, right) in ordered.iter().enumerate() {
+                assert_eq!(left.compare(right), at.cmp(&other), "{left} vs {right}");
+            }
+        }
+        assert!(infinity(false).is_infinite() && !infinity(false).is_zero());
+        assert_eq!(infinity(true).to_f64(), f64::NEG_INFINITY);
+        assert_eq!(infinity(false).exact_double(), Some(f64::INFINITY));
+        assert_eq!(infinity(false).integral_value(), None);
+        assert_eq!(infinity(true).to_i128_rounded(), None);
+        assert_eq!(infinity(true).equality_text(), "-Infinity");
+    }
+
+    #[test]
+    fn infinite_arithmetic_follows_postgresql_14() {
+        let plus = infinity(false);
+        let minus = infinity(true);
+        assert_eq!(shown(plus.add(&n("5"))), "Infinity");
+        assert_eq!(shown(n("5").subtract(&plus)), "-Infinity");
+        assert_eq!(shown(plus.add(&minus)), "NaN");
+        assert_eq!(shown(plus.subtract(&plus)), "NaN");
+        assert_eq!(shown(minus.add(&minus)), "-Infinity");
+        assert_eq!(shown(plus.negated().negated().add(&plus)), "Infinity");
+        assert_eq!(shown(minus.multiply(&n("-2"))), "Infinity");
+        assert_eq!(shown(plus.multiply(&n("0"))), "NaN");
+        assert_eq!(shown(plus.divide(&n("-3"))), "-Infinity");
+        assert_eq!(shown(n("7").divide(&minus)), "0");
+        assert_eq!(shown(plus.divide(&minus)), "NaN");
+        assert_eq!(shown(plus.divide(&n("0"))), "error: division by zero");
+        assert_eq!(shown(plus.divide_truncated(&n("2"), 0)), "Infinity");
+        assert_eq!(shown(plus.remainder(&n("2"))), "NaN");
+        assert_eq!(shown(n("2.5").remainder(&minus)), "2.5");
+        assert_eq!(shown(minus.rounded(2)), "-Infinity");
+        assert_eq!(shown(plus.floor()), "Infinity");
+        assert_eq!(shown(minus.absolute().ceiling()), "Infinity");
+        assert_eq!(
+            shown(plus.with_modifier(5, 2)),
+            "error: numeric field overflow"
+        );
+    }
+
+    #[test]
+    fn powers_of_and_to_infinity_follow_postgresql_14() {
+        let plus = infinity(false);
+        let minus = infinity(true);
+        assert_eq!(shown(n("2").power(&plus)), "Infinity");
+        assert_eq!(shown(n("0.5").power(&plus)), "0");
+        assert_eq!(shown(n("2").power(&minus)), "0");
+        assert_eq!(shown(n("0.5").power(&minus)), "Infinity");
+        assert_eq!(shown(n("-1").power(&plus)), "1");
+        assert_eq!(shown(n("-2").power(&plus)), "Infinity");
+        assert_eq!(
+            shown(n("0").power(&minus)),
+            "error: zero raised to a negative power is undefined"
+        );
+        assert_eq!(shown(plus.power(&n("0"))), "1");
+        assert_eq!(shown(plus.power(&n("-2"))), "0");
+        assert_eq!(shown(minus.power(&n("3"))), "-Infinity");
+        assert_eq!(shown(minus.power(&n("2"))), "Infinity");
+        assert_eq!(
+            shown(minus.power(&n("0.5"))),
+            "error: a negative number raised to a non-integer power yields a complex result"
+        );
+        assert_eq!(shown(minus.power(&plus)), "Infinity");
+        assert_eq!(shown(plus.power(&minus)), "0");
+        assert_eq!(shown(Numeric::nan().power(&plus)), "NaN");
+    }
+
+    #[test]
+    fn infinities_get_new_key_and_row_forms_that_older_decoders_refuse() {
+        let mut keys = Vec::new();
+        for value in [
+            infinity(true),
+            n("-5"),
+            n("0"),
+            n("5"),
+            infinity(false),
+            Numeric::nan(),
+        ] {
+            let mut key = Vec::new();
+            value.encode_key(&mut key);
+            key.push(0x7F);
+            assert_eq!(Numeric::key_length(&key), Some(key.len() - 1));
+            let (decoded, used) = Numeric::decode_key(&key).unwrap();
+            assert_eq!(
+                (decoded.to_string(), used),
+                (value.to_string(), key.len() - 1)
+            );
+            keys.push(key);
+        }
+        assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
+        let mut finite = Vec::new();
+        n("1e999").encode_key(&mut finite);
+        assert!(finite < keys[4]);
+        let mut before = Vec::new();
+        n("-1e999").encode_key(&mut before);
+        assert!(keys[0] < before);
+        for value in [infinity(false), infinity(true)] {
+            let mut row = Vec::new();
+            value.encode_row(&mut row);
+            assert_eq!(row.len(), 4);
+            assert_ne!(row[0] & !0x03, 0, "an older decoder must refuse the flags");
+            let (decoded, used) = Numeric::decode_row(&row).unwrap();
+            assert_eq!((decoded.to_string(), used), (value.to_string(), 4));
+        }
+        assert!(Numeric::decode_row(&[0x04, 1, 0, 0]).is_none());
+        assert!(Numeric::decode_row(&[0x04, 0, 0, 1, 1, 0, 0, 0]).is_none());
+        assert!(Numeric::decode_row(&[0x06, 0, 0, 0]).is_none());
+        let mut row = Vec::new();
+        n("-12.5").encode_row(&mut row);
+        assert_eq!(row, [0x01, 1, 0, 1, 125, 0, 0, 0]);
     }
 }

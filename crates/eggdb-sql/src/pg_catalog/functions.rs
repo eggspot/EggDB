@@ -78,7 +78,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         | "pg_get_function_result"
         | "pg_get_partkeydef" => SqlType::Text,
         "to_regclass" => SqlType::Catalog(CatalogType::Reg(RegKind::Class)),
-        "to_regtype" => SqlType::Catalog(CatalogType::Reg(RegKind::Type)),
+        "to_regtype" | "pg_typeof" => SqlType::Catalog(CatalogType::Reg(RegKind::Type)),
         _ => return None,
     })
 }

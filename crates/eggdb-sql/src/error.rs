@@ -109,6 +109,15 @@ impl SqlState {
     pub const SQL_JSON_OBJECT_NOT_FOUND: Self = Self(*b"2203C");
     /// `2203G` sql_json_item_cannot_be_cast_to_target_type.
     pub const SQL_JSON_ITEM_CANNOT_BE_CAST_TO_TARGET_TYPE: Self = Self(*b"2203G");
+    /// `22031` invalid_argument_for_sql_json_datetime_function: a `.datetime()` input that is
+    /// not a recognized date or time.
+    pub const INVALID_ARGUMENT_FOR_SQL_JSON_DATETIME_FUNCTION: Self = Self(*b"22031");
+    /// `22034` more_than_one_sql_json_item: a path that must yield one item yielded several.
+    pub const MORE_THAN_ONE_SQL_JSON_ITEM: Self = Self(*b"22034");
+    /// `22035` no_sql_json_item: a path with `ERROR ON EMPTY` yielded nothing.
+    pub const NO_SQL_JSON_ITEM: Self = Self(*b"22035");
+    /// `2203F` sql_json_scalar_required: `JSON_VALUE` found an object or an array.
+    pub const SQL_JSON_SCALAR_REQUIRED: Self = Self(*b"2203F");
     /// `22019` invalid_escape_character.
     pub const INVALID_ESCAPE_CHARACTER: Self = Self(*b"22019");
     /// `2201F` invalid_argument_for_power_function.

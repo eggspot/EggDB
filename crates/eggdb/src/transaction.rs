@@ -342,6 +342,10 @@ impl<'db> WriteTransaction<'db> {
         self.tree
     }
 
+    pub(crate) fn database(&self) -> &'db Database {
+        self.database
+    }
+
     pub(crate) fn max_key_bytes(&self) -> usize {
         self.database.max_key_bytes()
     }
@@ -484,7 +488,8 @@ impl<'db> WriteTransaction<'db> {
     /// Commits every change atomically and returns the commit's stamp, which is above every
     /// earlier commit's. Read transactions that begin afterwards see the changes. In a
     /// database that has keys with a time to live, the commit also removes up to 32 keys
-    /// whose time has run out.
+    /// whose time has run out, and while a dropped collection still has keys (see
+    /// [`WriteTransaction::drop_collection`]) up to 32 of them.
     ///
     /// On an error nothing is committed, except after a failed write or sync of the file:
     /// then the commit may or may not have reached the disk, and the database refuses
@@ -493,6 +498,9 @@ impl<'db> WriteTransaction<'db> {
     pub fn commit(mut self) -> Result<CommitStamp> {
         if self.sweeps_on_commit && self.database.has_expiring_keys() {
             self.sweep_before_commit()?;
+        }
+        if self.sweeps_on_commit {
+            self.finish_drops_before_commit()?;
         }
         if self.adds_expiring_keys {
             self.inner.add_features(Features {

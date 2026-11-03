@@ -112,6 +112,14 @@ to each CI runner's processor: seven runs gave point gets from 0.60 to 0.83 and 
 to 0.52. Workloads that wait for the disk measure the disk more than either engine, so they are
 reported only.
 
+The Linux `sqlite_compare.scan` line rose from 0.390 to 0.550 on 2026-11-03 (D80): main with no
+code change measured 0.551 (bc4dd40) and 0.714 (the same job re-run that day) on
+`ubuntu-latest`, as SQLite's own time per entry varied from 58 to 122 ns between runners, and an
+interleaved run of bc4dd40 against the D274 to D296 batch on one Mac gave the same ratios (0.70 to
+0.75 both). 0.550 is main's lowest current CI measurement; the weekly performance pass (D101)
+traces main's drift from 0.39 through the per-PR `sqlite-compare-*` artifacts and lowers the line
+again when a cause is fixed.
+
 ## The `eggdb` binary
 
 | Benchmark | Metric | Gate (D101) |
@@ -187,3 +195,15 @@ Budgets raised under D253, with their reasons:
   fixes. The GUI toolkit's window code in `eggdb-platform` (D256) is linked only into
   `eggdb-gui`: the release `eggdb` binary and the C API library link no window system and hold
   none of its strings.
+- 2026-11-03, the third batch (D274 to D296): column privileges and evaluated row-security
+  `WITH CHECK` (D285), `pg_stat_statements`, the slow-statement log and `EXPLAIN` buffers
+  (D286), SQL/JSON `JSON_TABLE`, `JSON_VALUE`, `JSON_QUERY` and jsonpath date methods (D289),
+  Windows time zone names and `numeric` infinity (D290), SQL Server `MERGE` by source,
+  `OPENJSON` and application-lock return codes (D291), stepped collection drops (D292), the C
+  API's row stepping and streamed `COPY` (D293), PL/SQL over TDS RPC (D295), pgoutput protocol 2
+  streaming with its spill file and binary tuples (D296), and the memory budget in the RESP,
+  MongoDB-compatible, CQL and memcached servers (D284). Measured sizes in CI, before (the
+  previous budgets) and after: the `full` binary 15,270,000 to 15,739,392 bytes on Linux and
+  11,730,000 to 12,089,896 on macOS; the C API library 9,160,000 to 9,442,464 on Linux and
+  7,215,000 to 7,423,408 on macOS. The new budgets are those sizes plus about 1%. The GUI work of
+  this batch (D274 to D279) is linked only into `eggdb-gui`.

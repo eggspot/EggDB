@@ -442,9 +442,14 @@ Recovery is analysis and redo from `checkpoint_lsn`, with no undo pass:
   | prefix, `0x03`, number (4 bytes, big-endian), key | the value stored under `key` in that collection |
   | prefix, `0x04`, stored key | the deadline of a key with a time to live (D140): a version byte (1) and the deadline in microseconds since the Unix epoch (8 bytes, big-endian) |
   | prefix, `0x05`, deadline (8 bytes, big-endian), stored key | empty: the index of keys by deadline, which commits sweep in order |
+  | prefix, `0x06`, number (4 bytes, big-endian) | a collection being dropped in steps (D292): a version byte (1) and its last name (UTF-8), kept until every `0x03` key of that number is gone |
 
   Numbers start at 1 and are never reused, so a key of a dropped collection can never be read
-  as a key of a later one. The *stored key* of `0x04` and `0x05` is the key as the tree holds it:
+  as a key of a later one. A drop removes the name record and writes the `0x06` mark in one
+  commit, then removes the collection's keys in commits of up to 512 and the mark with the last
+  of them; every commit removes up to 32 keys of a marked number, so a crash between steps only
+  delays the rest. A release before D292 ignores the mark and leaves the keys, which no read
+  ever sees. The *stored key* of `0x04` and `0x05` is the key as the tree holds it:
   a default key space key as it is, a collection's key with its `0x03` prefix and number. A key
   is expired once the transaction's time, the clock or the last commit's stamp, whichever is
   later, has reached its deadline; the two records and the key are written and removed
@@ -689,7 +694,10 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
   keeps its version and bytes, so older releases refuse only what holds these types. A SQLite
   table's `CREATE TABLE` text as written is one record per table (catalog prefix, `0x15`, the
   table's internal name) with record version 1: the generated text's length (32-bit
-  little-endian), the generated text and the original text (D273). All of these are in
+  little-endian), the generated text and the original text (D273). A SQLite view's text is a
+  record of the same layout under the view's internal name, and an index's under its table's
+  internal name, `0xFF`, `i` and the index name (D294); a file without them shows generated
+  text. All of these are in
   [sql.md](sql.md) "How SQL is stored".
 - Overflow pages (type 4, layout 1) and the overflow reference arrive within version 1 before
   v0.2.0 ships, with no feature flag (D88). From the v0.2.0 sample file on, a change to their

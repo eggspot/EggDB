@@ -62,6 +62,7 @@ impl Parser<'_> {
         } else {
             Some(self.table_name()?)
         };
+        let name_start = self.previous_start();
         if self.mysql() {
             self.index_method()?;
         }
@@ -107,6 +108,13 @@ impl Parser<'_> {
             },
             table,
             if_not_exists,
+            sqlite_text: self.sqlite().then(|| {
+                let kind = if unique { "UNIQUE INDEX" } else { "INDEX" };
+                format!(
+                    "CREATE {kind} {}",
+                    self.slice(name_start, self.previous_end())
+                )
+            }),
         }))
     }
 
@@ -333,21 +341,27 @@ impl Parser<'_> {
         }))
     }
 
-    fn explain_options(&mut self) -> SqlResult<bool> {
+    fn explain_switch(&mut self) -> bool {
+        let off = self.take_word("false") || self.take_word("off");
+        let _ = off || self.take_word("true") || self.take_word("on");
+        !off
+    }
+
+    fn explain_options(&mut self) -> SqlResult<(bool, bool)> {
         let mut analyze = false;
+        let mut buffers = false;
         loop {
             if self.take_word("analyze") || self.take_word("analyse") {
-                analyze = !(self.take_word("false") || self.take_word("off"));
-                let _ = self.take_word("true") || self.take_word("on");
+                analyze = self.explain_switch();
+            } else if self.take_word("buffers") {
+                buffers = self.explain_switch();
             } else if self.take_word("format") {
                 if !self.take_word("text") {
                     return Err(self.not_supported("EXPLAIN formats other than TEXT"));
                 }
-            } else if [
-                "verbose", "costs", "timing", "buffers", "summary", "settings", "wal",
-            ]
-            .iter()
-            .any(|word| self.is_word(word))
+            } else if ["verbose", "costs", "timing", "summary", "settings", "wal"]
+                .iter()
+                .any(|word| self.is_word(word))
             {
                 self.at += 1;
                 let _ = self.take_word("true")
@@ -362,12 +376,13 @@ impl Parser<'_> {
             }
         }
         self.expect(&TokenKind::RightParen)?;
-        Ok(analyze)
+        Ok((analyze, buffers))
     }
 
     pub(super) fn explain(&mut self) -> SqlResult<Statement> {
         self.expect_word("explain")?;
         let mut analyze = false;
+        let mut buffers = false;
         let style = if self.sqlite() {
             if !(self.is_word("query") && self.is_word_at(1, "plan")) {
                 return Err(self.not_supported("EXPLAIN without QUERY PLAN (bytecode listings)"));
@@ -381,7 +396,7 @@ impl Parser<'_> {
             if self.postgresql() && (self.take_word("analyze") || self.take_word("analyse")) {
                 analyze = true;
             } else if self.postgresql() && self.take(&TokenKind::LeftParen) {
-                analyze = self.explain_options()?;
+                (analyze, buffers) = self.explain_options()?;
             } else if self.peek_kind() == &TokenKind::LeftParen
                 || self.is_word("analyze")
                 || self.is_word("verbose")
@@ -401,6 +416,7 @@ impl Parser<'_> {
         Ok(Statement::Explain(Explain {
             style,
             analyze,
+            buffers,
             statement: Box::new(statement),
         }))
     }

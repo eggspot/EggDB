@@ -1,10 +1,12 @@
 use crate::cql::{Operator, Selection, Statement, Term, parse};
 use crate::frame::{
     AUTH_RESPONSE, AUTH_SUCCESS, AUTHENTICATE, BATCH, Body, ERROR, EXECUTE, OPTIONS, Out, PREPARE,
-    QUERY, READY, REGISTER, RESULT, Request, STARTUP, SUPPORTED, VERSION, response, take_request,
+    QUERY, READY, REGISTER, RESULT, Request, STARTUP, SUPPORTED, VERSION, declared_request_bytes,
+    declared_stream, response, take_request,
 };
 use crate::translate::{Catalog, Outcome, TableInfo, literal, translate};
 use crate::types::{CqlType, encode_value, parameter_text};
+use eggdb_platform::connection_limits::MemoryBudget;
 use eggdb_sql::{Dialect, KeyValueStore, QueryResult, Session, SqlError};
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
@@ -21,6 +23,7 @@ const SYSTEM_KEYSPACES: [&str; 2] = ["system", "system_schema"];
 
 const SERVER_ERROR: i32 = 0x0000;
 const PROTOCOL_ERROR: i32 = 0x000a;
+const OVERLOADED: i32 = 0x1001;
 const BAD_CREDENTIALS: i32 = 0x0100;
 const SYNTAX_ERROR: i32 = 0x2000;
 const INVALID: i32 = 0x2200;
@@ -28,7 +31,7 @@ const ALREADY_EXISTS: i32 = 0x2400;
 const UNPREPARED: i32 = 0x2500;
 
 /// How the CQL server runs.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ServerConfig {
     /// The user clients log in as with Cassandra's password authenticator.
     pub user: String,
@@ -38,6 +41,18 @@ pub struct ServerConfig {
     pub database: String,
     /// The most connections served at once.
     pub max_connections: usize,
+    /// The memory every connection's frames and results hold together, shared with the
+    /// server's other listeners.
+    pub memory_budget: std::sync::Arc<MemoryBudget>,
+}
+
+fn overloaded(what: &str) -> Failure {
+    failure(
+        OVERLOADED,
+        format!(
+            "{what} does not fit: the server's connections already hold their memory budget; retry later or ask for fewer rows"
+        ),
+    )
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -966,6 +981,7 @@ pub(crate) fn serve_stream<S: KeyValueStore>(
 ) -> io::Result<()> {
     let mut session = Session::with_dialect(store, Dialect::PostgreSql);
     session.identify(&config.user, &config.database);
+    session.set_protocol("cql");
     let mut connection = Connection {
         config,
         session,
@@ -978,6 +994,7 @@ pub(crate) fn serve_stream<S: KeyValueStore>(
     };
     let mut buffer = Vec::new();
     let mut chunk = vec![0u8; 64 * 1024];
+    let mut held = config.memory_budget.empty_reservation();
     loop {
         loop {
             match take_request(&mut buffer) {
@@ -1007,6 +1024,13 @@ pub(crate) fn serve_stream<S: KeyValueStore>(
                             Err(failure) => (ERROR, error_body(&failure)),
                         }
                     };
+                    let (opcode, body) =
+                        if held.hold_if_large(request.body.len().saturating_add(body.len())) {
+                            (opcode, body)
+                        } else {
+                            let refusal = overloaded(&format!("a result of {} bytes", body.len()));
+                            (ERROR, error_body(&refusal))
+                        };
                     writer.write_all(&response(version, request.stream, opcode, &body))?;
                 }
                 Ok(None) => break,
@@ -1020,6 +1044,19 @@ pub(crate) fn serve_stream<S: KeyValueStore>(
                     return Ok(());
                 }
             }
+        }
+        if !held.hold_if_large(declared_request_bytes(&buffer)) {
+            let refusal = overloaded(&format!(
+                "a frame of {} bytes",
+                declared_request_bytes(&buffer)
+            ));
+            writer.write_all(&response(
+                VERSION,
+                declared_stream(&buffer),
+                ERROR,
+                &error_body(&refusal),
+            ))?;
+            return Ok(());
         }
         if stop() {
             return Ok(());

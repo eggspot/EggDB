@@ -6,6 +6,9 @@ use crate::types::{SqlType, Value};
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::cmp::Ordering;
+use temporal::{Moment, Temporal, TemporalArgument};
+
+mod temporal;
 
 pub(crate) const FUNCTIONS: [&str; 8] = [
     "jsonb_path_exists",
@@ -80,6 +83,7 @@ enum Step {
     Recursive { from: Level, to: Level },
     Filter(Box<Predicate>),
     Method(Method),
+    Temporal(Temporal, Option<TemporalArgument>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -843,6 +847,12 @@ impl Parser {
             Token::Star => Ok(Step::AnyMember),
             Token::StarStar => self.recursive_step(),
             Token::String(key) => Ok(Step::Member(key)),
+            Token::Word(name)
+                if self.peek() == Some(&Token::LeftParen) && Temporal::named(&name).is_some() =>
+            {
+                self.at += 1;
+                self.temporal_step(&name)
+            }
             Token::Word(name) if self.peek() == Some(&Token::LeftParen) => {
                 let method = Method::named(&name).ok_or_else(|| self.unexpected())?;
                 self.at += 1;
@@ -858,6 +868,25 @@ impl Parser {
                 Err(self.unexpected())
             }
         }
+    }
+
+    fn temporal_step(&mut self, name: &str) -> SqlResult<Step> {
+        let method = Temporal::named(name).ok_or_else(|| self.unexpected())?;
+        let argument = match self.peek().cloned() {
+            Some(Token::String(template)) if method == Temporal::DateTime => {
+                self.at += 1;
+                Some(TemporalArgument::Template(template))
+            }
+            Some(Token::Number(text)) if method.takes_precision() => {
+                self.at += 1;
+                Some(TemporalArgument::Precision(temporal::precision_argument(
+                    method, &text,
+                )?))
+            }
+            _ => None,
+        };
+        self.expect(&Token::RightParen)?;
+        Ok(Step::Temporal(method, argument))
     }
 
     fn level(&mut self) -> SqlResult<Level> {
@@ -975,8 +1004,12 @@ pub(crate) fn parse(text: &str) -> SqlResult<JsonPath> {
     Ok(JsonPath { mode, expr })
 }
 
-enum Failure {
+/// A failed path evaluation: one that lax mode, `silent` and SQL/JSON's `ON ERROR` clauses
+/// suppress, or one that nothing suppresses (a limit, an undefined variable).
+pub(crate) enum Failure {
+    /// A structural or conversion error that may be suppressed.
     Suppressible(SqlError),
+    /// An error that is always reported.
     Fatal(SqlError),
 }
 
@@ -1045,14 +1078,20 @@ fn elements(json: &Json) -> Vec<&Json> {
 
 fn member_values(json: &Json) -> Vec<&Json> {
     match json {
-        Json::Object(members) => members.iter().map(|(_, item)| &item.value).collect(),
+        Json::Object(members) if Moment::of(json).is_none() => {
+            members.iter().map(|(_, item)| &item.value).collect()
+        }
         _ => Vec::new(),
     }
 }
 
+fn is_object(json: &Json) -> bool {
+    matches!(json, Json::Object(_)) && Moment::of(json).is_none()
+}
+
 fn member<'j>(json: &'j Json, key: &str) -> Option<&'j Json> {
     match json {
-        Json::Object(members) => members
+        Json::Object(members) if Moment::of(json).is_none() => members
             .iter()
             .rev()
             .find(|(name, _)| name == key)
@@ -1090,6 +1129,7 @@ struct Evaluator<'a> {
     vars: Option<&'a Json>,
     mode: Mode,
     produced: Cell<u64>,
+    with_zone: bool,
 }
 
 impl<'a> Evaluator<'a> {
@@ -1268,7 +1308,7 @@ impl<'a> Evaluator<'a> {
     ) -> Run<()> {
         match step {
             Step::Member(key) => match item.as_ref() {
-                Json::Object(_) => {
+                json if is_object(json) => {
                     let found =
                         borrowed_children(item, |json| member(json, key).into_iter().collect());
                     if found.is_empty() && !self.lax() {
@@ -1295,7 +1335,7 @@ impl<'a> Evaluator<'a> {
                 }
             },
             Step::AnyMember => match item.as_ref() {
-                Json::Object(_) => out.extend(borrowed_children(item, member_values)),
+                json if is_object(json) => out.extend(borrowed_children(item, member_values)),
                 Json::Array(_) if self.lax() => {
                     for element in borrowed_children(item, elements) {
                         out.extend(borrowed_children(&element, member_values));
@@ -1354,6 +1394,21 @@ impl<'a> Evaluator<'a> {
                         }
                         result => out.push(Cow::Owned(result)),
                     }
+                }
+            }
+            Step::Temporal(method, argument) => {
+                let targets = if self.lax() && matches!(item.as_ref(), Json::Array(_)) {
+                    borrowed_children(item, elements)
+                } else {
+                    vec![item.clone()]
+                };
+                for target in &targets {
+                    out.push(Cow::Owned(temporal::apply(
+                        *method,
+                        argument.as_ref(),
+                        target,
+                        self.with_zone,
+                    )?));
                 }
             }
         }
@@ -1449,6 +1504,17 @@ impl<'a> Evaluator<'a> {
                 message,
             )
         };
+        if let Some(moment) = Moment::of(item) {
+            return match method {
+                Method::Type => Ok(Json::String(moment.type_name().to_owned())),
+                Method::String => Ok(Json::String(moment.text())),
+                Method::Size if self.lax() => Ok(number_json(&Numeric::from_i64(1))),
+                _ => Err(suppressible(
+                    SqlState::SQL_JSON_ITEM_CANNOT_BE_CAST_TO_TARGET_TYPE,
+                    format!("jsonpath item method .{name}() cannot be applied to a datetime value"),
+                )),
+            };
+        }
         Ok(match method {
             Method::Type => Json::String(json::type_of(item).to_owned()),
             Method::Size => match item {
@@ -1700,11 +1766,13 @@ impl<'a> Evaluator<'a> {
                     return Ok(Truth::Unknown);
                 };
                 self.charge(left.len().saturating_mul(right.len()))?;
-                self.existential(left.iter().flat_map(|first| {
-                    right
-                        .iter()
-                        .map(move |second| compare_items(*comparison, first, second))
-                }))
+                let mut truths = Vec::new();
+                for first in &left {
+                    for second in &right {
+                        truths.push(self.compare(*comparison, first, second)?);
+                    }
+                }
+                self.existential(truths.into_iter())
             }
             Predicate::LikeRegex {
                 subject,
@@ -1751,6 +1819,25 @@ impl<'a> Evaluator<'a> {
     }
 }
 
+impl Evaluator<'_> {
+    fn compare(&self, comparison: Comparison, left: &Json, right: &Json) -> Run<Truth> {
+        match (Moment::of(left), Moment::of(right)) {
+            (Some(first), Some(second)) => {
+                Ok(match temporal::compare(first, second, self.with_zone)? {
+                    Some(ordering) => Truth::of(comparison.holds(ordering)),
+                    None => Truth::Unknown,
+                })
+            }
+            (Some(_), None) | (None, Some(_))
+                if !matches!(left, Json::Null) && !matches!(right, Json::Null) =>
+            {
+                Ok(Truth::Unknown)
+            }
+            _ => Ok(compare_items(comparison, left, right)),
+        }
+    }
+}
+
 fn compare_items(comparison: Comparison, left: &Json, right: &Json) -> Truth {
     let ordering = match (left, right) {
         (Json::Null, Json::Null) => Ordering::Equal,
@@ -1773,9 +1860,11 @@ struct Call {
     path: JsonPath,
     vars: Option<Json>,
     silent: bool,
+    with_zone: bool,
 }
 
-fn document_tree(value: &Value) -> Option<SqlResult<Json>> {
+/// Parses a `json`, `jsonb` or text value as a document; `None` for a value of another type.
+pub(crate) fn document_tree(value: &Value) -> Option<SqlResult<Json>> {
     let text = match value {
         Value::Jsonb(text) | Value::Json(text) | Value::Text(text) => text,
         _ => return None,
@@ -1825,24 +1914,39 @@ fn call_of(values: &[Value]) -> Option<SqlResult<Call>> {
             path,
             vars,
             silent,
+            with_zone: false,
         })
     })())
 }
 
-fn run(document: &Json, path: &JsonPath, vars: Option<&Json>) -> Run<Vec<Json>> {
+fn run(document: &Json, path: &JsonPath, vars: Option<&Json>, with_zone: bool) -> Run<Vec<Json>> {
     let evaluator = Evaluator {
         root: document,
         vars,
         mode: path.mode,
         produced: Cell::new(0),
+        with_zone,
     };
     let items = evaluator.eval(&path.expr, None, None)?;
-    Ok(items.into_iter().map(Cow::into_owned).collect())
+    Ok(items
+        .into_iter()
+        .map(|item| temporal::plain(item.into_owned()))
+        .collect())
+}
+
+/// Evaluates `path` over `document` for the SQL/JSON query functions, with the session's time
+/// zone available to datetime comparisons; datetime items come back as their ISO text.
+pub(crate) fn evaluate(
+    document: &Json,
+    path: &JsonPath,
+    vars: Option<&Json>,
+) -> Result<Vec<Json>, Failure> {
+    run(document, path, vars, true)
 }
 
 impl Call {
     fn items(&self) -> SqlResult<Option<Vec<Json>>> {
-        match run(&self.target, &self.path, self.vars.as_ref()) {
+        match run(&self.target, &self.path, self.vars.as_ref(), self.with_zone) {
             Ok(items) => Ok(Some(items)),
             Err(Failure::Suppressible(_)) if self.silent => Ok(None),
             Err(Failure::Suppressible(error) | Failure::Fatal(error)) => Err(error),
@@ -1882,10 +1986,11 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     if values.iter().any(Value::is_null) {
         return Some(Ok(Value::Null));
     }
-    let call = match call_of(values)? {
+    let mut call = match call_of(values)? {
         Ok(call) => call,
         Err(error) => return Some(Err(error)),
     };
+    call.with_zone = name.ends_with("_tz");
     Some(match base_name(name) {
         "jsonb_path_exists" => call
             .items()
@@ -1932,6 +2037,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
 /// The rows of `jsonb_path_query`: each item the path selects, as `jsonb`.
 pub(crate) fn query_rows(
     values: &[Value],
+    with_zone: bool,
     sink: &mut dyn FnMut(Value) -> SqlResult<()>,
 ) -> SqlResult<()> {
     if values.iter().any(Value::is_null) {
@@ -1943,7 +2049,9 @@ pub(crate) fn query_rows(
             "function jsonb_path_query does not exist",
         ));
     };
-    for item in call?.items()?.unwrap_or_default() {
+    let mut call = call?;
+    call.with_zone = with_zone;
+    for item in call.items()?.unwrap_or_default() {
         sink(jsonb(&item)?)?;
     }
     Ok(())
@@ -1990,7 +2098,7 @@ mod tests {
     use super::*;
 
     fn select(document: &Json, path: &JsonPath, vars: Option<&Json>) -> SqlResult<Vec<Json>> {
-        run(document, path, vars).map_err(|failure| match failure {
+        run(document, path, vars, false).map_err(|failure| match failure {
             Failure::Suppressible(error) | Failure::Fatal(error) => error,
         })
     }

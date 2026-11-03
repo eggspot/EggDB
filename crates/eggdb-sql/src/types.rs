@@ -725,7 +725,7 @@ pub(crate) fn parse_input(text: &str, sql_type: SqlType) -> SqlResult<Value> {
             .map(Value::Interval),
         SqlType::Bytea => crate::bytea::from_text(text).map(Value::Bytea),
         SqlType::Uuid => crate::bytea::parse_uuid(text).map(Value::Uuid),
-        SqlType::Numeric(modifier) => numeric_value(Numeric::parse(text)?, modifier),
+        SqlType::Numeric(modifier) => numeric_value(numeric_input(text)?, modifier),
         SqlType::Date => datetime::parse_date(text).map(Value::Date),
         SqlType::Timestamp(precision) => {
             timestamp_value(datetime::parse_timestamp(text, false)?, precision, false)
@@ -781,6 +781,21 @@ fn different_storage_classes(left: &Value, right: &Value) -> Option<Ordering> {
     let (left_rank, right_rank) = (storage_class_rank(left)?, storage_class_rank(right)?);
     (left_rank != right_rank && crate::constraints::current_dialect() == crate::Dialect::Sqlite)
         .then(|| left_rank.cmp(&right_rank))
+}
+
+fn numeric_input(text: &str) -> SqlResult<Numeric> {
+    if crate::constraints::current_dialect() == crate::Dialect::PostgreSql {
+        Numeric::parse_with_infinity(text)
+    } else {
+        Numeric::parse(text)
+    }
+}
+
+fn exact_of_double(number: f64) -> SqlResult<Numeric> {
+    if number.is_infinite() && crate::constraints::current_dialect() == crate::Dialect::PostgreSql {
+        return Ok(Numeric::infinity(number < 0.0));
+    }
+    Numeric::from_f64(number, 15)
 }
 
 pub(crate) fn numeric_value(value: Numeric, modifier: Option<NumericModifier>) -> SqlResult<Value> {
@@ -1028,17 +1043,19 @@ pub(crate) fn convert(value: Value, target: SqlType, conversion: Conversion) -> 
         (SqlType::Numeric(modifier), _) if source.is_numeric() => {
             let exact = match &value {
                 Value::Numeric(number) => number.clone(),
+                Value::Real(number) if number.is_infinite() => exact_of_double(f64::from(*number))?,
                 Value::Real(number) => Numeric::from_f64(f64::from(*number), 6)?,
-                Value::Double(number) => Numeric::from_f64(*number, 15)?,
+                Value::Double(number) => exact_of_double(*number)?,
                 other => Numeric::from_i64(other.as_integer().unwrap_or(0)),
             };
             numeric_value(exact, modifier)
         }
         (SqlType::SmallInt | SqlType::Integer | SqlType::BigInt, Value::Numeric(number)) => {
-            if number.is_nan() {
+            if number.is_nan() || number.is_infinite() {
+                let special = if number.is_nan() { "NaN" } else { "infinity" };
                 return Err(SqlError::new(
                     SqlState::FEATURE_NOT_SUPPORTED,
-                    format!("cannot convert NaN to {}", target.name()),
+                    format!("cannot convert {special} to {}", target.name()),
                 ));
             }
             match number
@@ -1051,7 +1068,7 @@ pub(crate) fn convert(value: Value, target: SqlType, conversion: Conversion) -> 
         }
         (SqlType::Real | SqlType::Double, Value::Numeric(number)) => {
             let float = number.to_f64();
-            if float.is_infinite() {
+            if float.is_infinite() && !number.is_infinite() {
                 return Err(float_overflow());
             }
             if target == SqlType::Real {

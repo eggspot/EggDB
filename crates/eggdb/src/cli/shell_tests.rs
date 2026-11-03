@@ -392,8 +392,7 @@ fn a_failed_block_refuses_key_value_writes_until_rollback() {
         "{stderr}"
     );
     assert!(
-        stderr
-            .contains("expire cannot run inside a transaction block yet; COMMIT or ROLLBACK first"),
+        stderr.contains("nothing to expire: k is not in "),
         "{stderr}"
     );
     assert!(stderr.contains("key not found: k"), "{stderr}");
@@ -435,6 +434,232 @@ fn key_value_writes_are_refused_while_a_savepoint_is_set() {
         text(&ran.stdout),
         "BEGIN\nSAVEPOINT\nROLLBACK\nbefore\nRELEASE\nCOMMIT\nafter\n"
     );
+}
+
+#[test]
+fn a_time_to_live_set_in_a_block_applies_at_commit_and_vanishes_at_rollback() {
+    let directory = TempDirectory::new("shell-block-expiry");
+    let file = created(&directory);
+    let script = "put session:7 Ada\n\
+        begin;\n\
+        expire session:7 1h\n\
+        ttl session:7\n\
+        ttl session:7 --json\n\
+        rollback;\n\
+        ttl session:7\n\
+        begin;\n\
+        expire session:7 1h\n\
+        commit;\n\
+        ttl session:7\n\
+        begin;\n\
+        persist session:7\n\
+        ttl session:7\n\
+        rollback;\n\
+        begin;\n\
+        persist session:7\n\
+        commit;\n\
+        ttl session:7\n";
+    let ran = shell(&file, &[], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    let out = text(&ran.stdout);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[..2], ["BEGIN", "1h"], "{out}");
+    assert!(
+        lines[2].starts_with("{\"key\":\"session:7\",\"ttl_ms\":3600000,\"expires_at\":\""),
+        "{out}"
+    );
+    assert_eq!(
+        lines[3..7],
+        ["ROLLBACK", "never", "BEGIN", "COMMIT"],
+        "{out}"
+    );
+    assert!(lines[7].starts_with("59m") || lines[7] == "1h", "{out}");
+    assert_eq!(
+        lines[8..],
+        ["BEGIN", "never", "ROLLBACK", "BEGIN", "COMMIT", "never"],
+        "{out}"
+    );
+}
+
+#[test]
+fn expire_and_persist_in_a_block_see_the_keys_the_block_wrote_and_deleted() {
+    let directory = TempDirectory::new("shell-block-expiry-own-writes");
+    let file = created(&directory);
+    let script = "put gone 1\n\
+        begin;\n\
+        put fresh 2\n\
+        expire fresh 10m\n\
+        ttl fresh\n\
+        del gone\n\
+        expire gone 10m\n\
+        persist gone\n\
+        ttl gone\n\
+        persist fresh --json\n\
+        commit;\n\
+        get gone\n\
+        ttl fresh\n";
+    let ran = shell(&file, &["--keep-going"], script);
+    let stderr = text(&ran.stderr);
+    assert!(
+        stderr.contains("nothing to expire: gone is not in "),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("nothing to persist: gone is not in "),
+        "{stderr}"
+    );
+    assert_eq!(
+        text(&ran.stdout),
+        "BEGIN\n10m\n{\"key\":\"fresh\",\"persisted\":true}\nCOMMIT\nnever\n",
+        "{stderr}"
+    );
+    assert!(stderr.contains("key not found: gone"), "{stderr}");
+}
+
+#[test]
+fn scan_in_a_block_lists_the_keys_the_block_put_and_leaves_out_the_ones_it_deleted() {
+    let directory = TempDirectory::new("shell-block-scan");
+    let file = created(&directory);
+    let script = "put a 1\n\
+        put b 2\n\
+        begin;\n\
+        put c 3\n\
+        del a\n\
+        scan\n\
+        scan --prefix c\n\
+        scan -r -n 1 -k\n\
+        scan --json\n\
+        rollback;\n\
+        scan -k\n";
+    let ran = shell(&file, &[], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    assert_eq!(
+        text(&ran.stdout),
+        "BEGIN\nb\t2\nc\t3\nc\t3\nc\n{\"key\":\"b\",\"value\":\"2\"}\n{\"key\":\"c\",\"value\":\"3\"}\n\
+         ROLLBACK\na\nb\n"
+    );
+    let stderr = text(&ran.stderr);
+    assert_eq!(stderr.matches("2 entries").count(), 2, "{stderr}");
+    assert_eq!(stderr.matches("1 entry").count(), 2, "{stderr}");
+}
+
+#[test]
+fn scan_and_ttl_in_a_block_read_the_blocks_collection() {
+    let directory = TempDirectory::new("shell-block-collection");
+    let file = created(&directory);
+    let script = "put --collection sessions --create s:1 Ada\n\
+        .collection sessions\n\
+        begin;\n\
+        put s:2 Grace --ttl 1h\n\
+        scan -k\n\
+        ttl s:2\n\
+        cas s:1 Ada Linus\n\
+        commit;\n\
+        get s:1\n\
+        .collection -\n\
+        scan -k\n";
+    let ran = shell(&file, &[], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    assert_eq!(
+        text(&ran.stdout),
+        "collection: sessions\nBEGIN\ns:1\ns:2\n1h\nCOMMIT\nLinus\ncollection: default key space\n"
+    );
+    let stderr = text(&ran.stderr);
+    assert!(
+        stderr.contains("2 entries") && stderr.contains("no entries"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn cas_in_a_block_compares_against_the_blocks_own_value() {
+    let directory = TempDirectory::new("shell-block-cas");
+    let file = created(&directory);
+    let script = "put lock old\n\
+        begin;\n\
+        put lock mine\n\
+        cas lock old next\n\
+        cas lock old next --json\n\
+        cas lock mine next\n\
+        get lock\n\
+        cas --if-absent fresh 1\n\
+        cas --if-absent fresh 2\n\
+        commit;\n\
+        get lock\n\
+        get fresh\n\
+        begin;\n\
+        cas lock next --delete\n\
+        get lock\n\
+        rollback;\n\
+        get lock\n";
+    let ran = shell(&file, &["--keep-going"], script);
+    let stderr = text(&ran.stderr);
+    assert!(
+        stderr.contains("not swapped: lock in ") && stderr.contains(" holds mine, not old."),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("not swapped: fresh is already in ") && stderr.contains("(holding 1)"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("key not found: lock"), "{stderr}");
+    assert_eq!(
+        text(&ran.stdout),
+        "BEGIN\n{\"key\":\"lock\",\"swapped\":false,\"value\":\"mine\"}\nnext\nCOMMIT\nnext\n1\n\
+         BEGIN\nROLLBACK\nnext\n",
+        "{stderr}"
+    );
+}
+
+#[test]
+fn expire_persist_and_cas_are_refused_while_a_savepoint_is_set_and_reads_still_run() {
+    let directory = TempDirectory::new("shell-block-savepoint-expiry");
+    let file = created(&directory);
+    let script = "put k v\n\
+        begin;\n\
+        savepoint s;\n\
+        expire k 1h\n\
+        persist k\n\
+        cas k v w\n\
+        ttl k\n\
+        scan -k\n\
+        commit;\n";
+    let ran = shell(&file, &["--keep-going"], script);
+    let stderr = text(&ran.stderr);
+    for command in ["expire", "persist", "cas"] {
+        assert!(
+            stderr.contains(&format!(
+                "{command} cannot run while a savepoint is set, since ROLLBACK TO SAVEPOINT \
+                 would not undo it; RELEASE SAVEPOINT, COMMIT or ROLLBACK first"
+            )),
+            "{stderr}"
+        );
+    }
+    assert_eq!(text(&ran.stdout), "BEGIN\nSAVEPOINT\nnever\nk\nCOMMIT\n");
+}
+
+#[test]
+fn a_read_only_block_refuses_expiry_changes_and_reads_the_last_commit() {
+    let directory = TempDirectory::new("shell-block-read-only-expiry");
+    let file = created(&directory);
+    let script = "put k v\n\
+        begin read only;\n\
+        expire k 1h\n\
+        cas k v w\n\
+        ttl k\n\
+        scan -k\n\
+        commit;\n\
+        get k\n";
+    let ran = shell(&file, &["--keep-going"], script);
+    let stderr = text(&ran.stderr);
+    for command in ["expire", "cas"] {
+        assert!(
+            stderr.contains(&format!("cannot run {command} in "))
+                && stderr.contains("the transaction block is read-only"),
+            "{stderr}"
+        );
+    }
+    assert_eq!(text(&ran.stdout), "BEGIN\nnever\nk\nCOMMIT\nv\n");
 }
 
 #[test]

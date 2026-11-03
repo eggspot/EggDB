@@ -73,7 +73,7 @@ linux sql_copy.to_stdout ratio_to_select 0.964
 linux sql_copy.to_stdout_binary ratio_to_text_copy 1.181
 linux sqlite_compare.batch_put ratio_to_sqlite 0.606
 linux sqlite_compare.get ratio_to_sqlite 0.691
-linux sqlite_compare.scan ratio_to_sqlite 0.390
+linux sqlite_compare.scan ratio_to_sqlite 0.550
 linux sqlite_compare.sql_bulk_insert ratio_to_sqlite 0.833
 linux sqlite_compare.sql_group_by ratio_to_sqlite 0.900
 linux sqlite_compare.sql_join ratio_to_sqlite 1.396

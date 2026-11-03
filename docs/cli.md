@@ -65,7 +65,7 @@ eggdb <command> <file> [arguments] [options]
 | `restore <file> [<dump.sql> \| -]` | for writing; `--create` makes it | restores a PostgreSQL dump in plain SQL form (`pg_dump`'s), or with `--dialect sqlserver` an SSMS or sqlpackage script, or with `--dialect oracle` a SQL*Plus-style script, or with `--dialect mysql` a `mysqldump` file, into the file, with a report (below, and [migrate.md](migrate.md)) |
 | `mcp <file>` | read-only, for each call; `--allow-write`: read-write for each `write_sql` call | serves the file to an AI agent over MCP on stdin and stdout, read-only unless `--allow-write` (below, and [mcp.md](mcp.md)) |
 | `audit <file> [--verify]` | never: reads `<file>.mcp-audit.jsonl` | lists the calls AI agents made through `eggdb mcp` (below); `--verify` checks that every record links to the one before it by its SHA-256, so a record changed, removed or inserted since it was written is found (exit 3, `audit_changed`) (D231) |
-| `collection list\|add\|delete <file> [<name>]` | read-only for `list`, for writing otherwise | lists, adds or deletes the named key spaces in the file (below) |
+| `collection list\|add\|delete\|move <file> [<name>] [<new-name>]` | read-only for `list`, for writing otherwise | lists, adds, deletes or renames the named key spaces in the file (below) |
 | `help [<command>]` | | the help, or one command's help; `--help` and `-h` work after any command |
 | `version` | | the version; also `--version` and `-V`; `--json` prints `{"version":…}` |
 
@@ -144,7 +144,7 @@ lowercase hex, instead of `key` or `value`. Numbers are plain integers. The fiel
 | `create` | `{"file":"app.db","page_size":4096}` |
 | `scan` | `{"key":…,"value":…}` per entry, `{"key":…}` with `--keys-only` |
 | `check` | `{"ok":true,"file","commit_stamp","commit_time","page_size","pages","file_bytes","entries","key_bytes","value_bytes","tree_height","tree_pages","overflow_values","overflow_pages","free_pages","log_pages","leaked_pages"}`; when damaged `{"ok":false,"file","problem","page","what_to_do"}`, `page` only when the problem names one |
-| `stats` | `{"file","page_size","pages","free_pages","file_bytes","last_commit_stamp","last_commit_time","log_bytes_since_checkpoint"}`; the commit fields are `null` before the first commit |
+| `stats` | `{"file","page_size","pages","free_pages","file_bytes","last_commit_stamp","last_commit_time","log_bytes_since_checkpoint"}`, and `"collections"` with `--collections`; the commit fields are `null` before the first commit |
 | `export` | `{"file","out","entries","collections"}` when the export goes to a file; to stdout, the export itself |
 | `sql` | with `--json`, one line per statement: `{"tag","columns","rows","row_count","notices"}`, the last four only when the statement has them, as MCP's `run_sql` returns them without its envelope |
 | `explain` | one `sql --json` line, `{"tag":"EXPLAIN","columns","rows","row_count"}` |
@@ -618,6 +618,7 @@ never appear in a scan of the default key space.
 eggdb collection list <file>
 eggdb collection add <file> <name>
 eggdb collection delete <file> <name>
+eggdb collection move <file> <name> <new-name>      # alias: rename
 ```
 
 ```sh
@@ -633,8 +634,16 @@ eggdb collection delete app.db cache
 - `list` prints the names in byte order, one per line, and the count on stderr (`3 collections`,
   `no collections`); in a pipe, `{"file":"app.db","collections":["cache","sessions"]}`.
 - `add` prints `added collection sessions to app.db`; `delete` removes the collection and every
-  key in it in one commit, asks nothing, and prints `deleted collection cache from app.db`. In a
-  pipe they print `{"file":…,"collection":…,"added":true}` and `…"deleted":true}`.
+  key in it, asks nothing, and prints `deleted collection cache from app.db`. In a pipe they print
+  `{"file":…,"collection":…,"added":true}` and `…"deleted":true}`. The first commit of a delete
+  takes the name away, so nothing sees the collection again, and its keys go in commits of 512,
+  so a collection of millions of keys deletes in the default page cache; keys a crash leaves
+  behind are never read and the next commits remove them (D292).
+- `move` (or `rename`) gives a collection a new name with all its keys in one commit, and prints
+  `renamed collection sessions to old-sessions in app.db` (in a pipe
+  `{"file":…,"collection":…,"new_name":…,"moved":true}`). A missing collection exits 1
+  (`nothing to rename: …`); a new name a collection already has exits 3 (`already_exists`) and
+  changes nothing.
 - `add` of a collection already there, and `delete` of one that is not, exit 1 with
   `nothing to add: …` or `nothing to delete: …`, as `del` of a missing key does.
 - `-C` on a collection that does not exist exits 1, with the command that adds it:
@@ -651,7 +660,10 @@ eggdb collection delete app.db cache
   choice (`app[sessions]=> `). `eggdb ui` shows one key space at a time too: `C` opens the
   collection picker, which also adds collections, and from 110 columns a sidebar lists them
   ([ux/ui.md](ux/ui.md) "Collections").
-- SQL does not see collections in this release, and `check` and `stats` report the whole file.
+- `stats --collections` adds each collection's entries, key bytes and value bytes, read from
+  every key (`"collections":[{"name","entries","key_bytes","value_bytes"}]` in JSON); plain
+  `stats` stays instant.
+- SQL does not see collections in this release, and `check` reports the whole file.
 
 ## Expiring keys and counters
 
@@ -982,13 +994,16 @@ one continues, `app'>` and `app">` inside an unfinished string or quoted name, `
 `BEGIN` block and `app=!>` in a failed one (every statement answers `25P02` until `ROLLBACK`).
 `BEGIN` holds the database's write transaction across prompts until `COMMIT` or `ROLLBACK`; a
 block still open when the shell ends is rolled back with a `WARNING:`. Inside a block, `put`,
-`get`, `del`, `incr` and `decr` run in the block's own transaction, so key-value writes and SQL
-are all-or-nothing together: `COMMIT` keeps both, `ROLLBACK` (or a block left open at the end)
-drops both, and `get` sees what the block wrote. In a failed block they are refused until
-`ROLLBACK`, in a `BEGIN READ ONLY` block the writes are refused, while a `SAVEPOINT` is set
-`put`, `del`, `incr` and `decr` are refused (a `ROLLBACK TO SAVEPOINT` would not undo them;
-`RELEASE SAVEPOINT` lifts it), and `expire`, `persist` and `cas` are refused inside a block for
-now; `scan`, `ttl`, `check`, `stats` and `backup` read the last commit (D266).
+`get`, `del`, `incr`, `decr`, `expire`, `persist`, `cas`, `scan` and `ttl` run in the block's
+own transaction, so key-value writes and SQL are all-or-nothing together: `COMMIT` keeps both,
+`ROLLBACK` (or a block left open at the end) drops both. Reads see what the block wrote: `get`
+and `ttl` its values and times to live, `scan` the keys it put and not the ones it deleted, and
+`cas` compares against the block's value. A time to live set in the block counts from the
+moment the block's transaction began, takes effect at `COMMIT` and is gone after `ROLLBACK`
+(D266, D283). In a failed block they are refused until `ROLLBACK`, in a `BEGIN READ ONLY` block
+the writes are refused while `get`, `scan` and `ttl` read the last commit, and while a
+`SAVEPOINT` is set the writes are refused (a `ROLLBACK TO SAVEPOINT` would not undo them;
+`RELEASE SAVEPOINT` lifts it); `check`, `stats` and `backup` read the last commit.
 
 ```
 app=> begin;
@@ -1056,7 +1071,7 @@ eggdb shell app.db --mode csv -c "select * from items" > items.csv
 ## `eggdb serve`
 
 ```
-eggdb serve <file|directory> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--idle-timeout <seconds>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--auth-rules <file>] [--metrics-listen <address>] [--mcp-listen <address> --mcp-token-file <file>] [--resp-listen <address> [--resp-max-memory <size>] [--resp-eviction <policy>]] [--memcached-listen <address>] [--es-listen <address>] [--mongo-listen <address>] [--bolt-listen <address>] [--cdc-webhook <url>] [--kafka-listen <address>] [--amqp-listen <address>] [--mqtt-listen <address>] [--sqs-listen <address>] [--nats-listen <address>] [--stomp-listen <address>] [--cql-listen <address>] [--s3-listen <address>] [--dynamodb-listen <address>] [--observability-listen <address>] [--rest-listen <address>] [--restore-from s3://bucket/prefix] [--cdc-queue <name>] [--read-only] [--create]
+eggdb serve <file|directory> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--max-connection-memory <size>] [--idle-timeout <seconds>] [--log-slow-statements <milliseconds>] [--statement-statistics <count>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--auth-rules <file>] [--metrics-listen <address>] [--mcp-listen <address> --mcp-token-file <file>] [--resp-listen <address> [--resp-max-memory <size>] [--resp-eviction <policy>]] [--memcached-listen <address>] [--es-listen <address>] [--mongo-listen <address>] [--bolt-listen <address>] [--cdc-webhook <url>] [--kafka-listen <address>] [--amqp-listen <address>] [--mqtt-listen <address>] [--sqs-listen <address>] [--nats-listen <address>] [--stomp-listen <address>] [--cql-listen <address>] [--s3-listen <address>] [--dynamodb-listen <address>] [--observability-listen <address>] [--rest-listen <address>] [--restore-from s3://bucket/prefix] [--cdc-queue <name>] [--read-only] [--create]
 ```
 
 Serves the file over the PostgreSQL wire protocol v3, so psql, pgAdmin-style tools and every
@@ -1091,7 +1106,13 @@ Server's error 3702) while any connection uses the database, including the one d
 the default database is never dropped. A name is 1 to 63 letters, digits, `_`, `-` or `$`
 (`42602` otherwise). Serving a single file, or `--read-only`, creates and drops nothing
 (`0A000`). Statements after a `USE` that changes the database in the same batch fail with
-`0A000`: send them in the next batch (D270).
+`0A000`: send them in the next batch (D270). A connection holding a temporary table (`#work`,
+`CREATE TEMPORARY TABLE`) or a session-level lock (`pg_advisory_lock`, `sp_getapplock` with
+`@LockOwner = 'Session'`) does not move: `USE` and `COM_INIT_DB` fail with `0A000` (SQL
+Server's error 40508, MySQL's 1235) naming what it holds, because the switch would drop and
+release them; drop and release them first, or open another connection (D294). This is a
+compatibility gap: SQL Server and MySQL keep temporary tables and session locks across a
+`USE`, so an application relying on that needs the change described in D294.
 
 | Option | Meaning |
 |--------|---------|
@@ -1125,8 +1146,11 @@ the default database is never dropped. A name is 1 to 63 letters, digits, `_`, `
 | `--stomp-listen <address>` | serves STOMP 1.2, 1.1 and 1.0 (default port 61613): `CONNECT` or `STOMP` with `login` as `--user` and `passcode` as the server's password, `SEND`, `SUBSCRIBE` with `ack:auto`, `client` (cumulative) or `client-individual` and an optional `prefetch-count`, `ACK`, `NACK`, transactions (`BEGIN`, `COMMIT`, `ABORT`; a commit's queue messages are stored all or none), receipts and `DISCONNECT`; `/queue/<name>` destinations are the durable queues `--amqp-listen` and `--sqs-listen` serve, `/topic/<name>` destinations go to every current subscriber; no heart-beats yet; loopback only for now (D217) |
 | `--cql-listen <address>` | serves Cassandra's CQL native protocol v4 (default port 9042) for Cassandra drivers: the password authenticator with `--user` and the server's password, `QUERY`, `PREPARE`, `EXECUTE` and `BATCH`, and the `system.local`, `system.peers` and `system_schema` tables drivers read; a keyspace is a SQL schema and a CQL table is a SQL table of the same name, so SQL reads and writes the same rows; `CREATE`/`DROP KEYSPACE`, `CREATE`/`DROP TABLE` (with partition and clustering keys and `CLUSTERING ORDER`), `TRUNCATE`, `INSERT` and `UPDATE` as upserts (counters with `c = c + n`), `INSERT ... IF NOT EXISTS`, `DELETE` of rows or columns, `SELECT` with `WHERE`, `IN`, `ORDER BY`, `LIMIT` and `count(*)`, and batches as one transaction; scalar types only (no collections, user-defined types, TTL, `USING TIMESTAMP` or other lightweight transactions yet), every result in one page; loopback only for now (D218) |
 | `--database <name>` | the name clients connect to; default the file name without its extension (`app.db` is `app`). Any other name gets `3D000` |
-| `--max-connections <count>` | connections served at once, one thread each; default 64. The next one gets `53300 sorry, too many clients already`. At most 16 of them may still be logging in at once, and each has 5 seconds to finish its login. When all 16 are taken, a new connection takes the slot of the oldest that has waited a second or more, and that one is dropped, so idle sockets from another program cannot lock real logins out; only when every one is younger is the new connection refused with `53300` (MySQL 1040, SQL Server 17809). A peer on another machine (over TLS) holds at most 8 of the 16, an IPv6 peer counted by its `/64`. The same limits hold on `--mysql-listen` and `--tds-listen`. A PostgreSQL connection keeps at most 4,096 prepared statements, 4,096 portals and 1 GiB of their text and bound parameters; one more is refused with `54000` and the connection goes on. Messages over 64 KiB, prepared statements and portals of every connection on every SQL listener share one memory budget of 4 GiB (all of memory on 32-bit machines): a request past it gets `53200 out of memory` (MySQL 1041, SQL Server 701), and a message too large for what is left ends its connection (D254) |
+| `--max-connections <count>` | connections served at once, one thread each; default 64. The next one gets `53300 sorry, too many clients already`. At most 16 of them may still be logging in at once, and each has 5 seconds to finish its login. When all 16 are taken, a new connection takes the slot of the oldest that has waited a second or more, and that one is dropped, so idle sockets from another program cannot lock real logins out; only when every one is younger is the new connection refused with `53300` (MySQL 1040, SQL Server 17809). A peer on another machine (over TLS) holds at most 8 of the 16, an IPv6 peer counted by its `/64`. The same limits hold on `--mysql-listen` and `--tds-listen`. A PostgreSQL connection keeps at most 4,096 prepared statements, 4,096 portals and 1 GiB of their text and bound parameters; one more is refused with `54000` and the connection goes on. Messages over 64 KiB, prepared statements, portals and the rows a suspended portal still holds share one memory budget across every listener, `--max-connection-memory` (D254, D284) |
+| `--max-connection-memory <size>` | the memory the connections of every listener may hold together, such as `512m` or `8g`; default `4g` (all of memory on 32-bit machines), at least `1m`. It counts what a connection holds beyond its small buffers: requests and messages over 64 KiB, PostgreSQL prepared statements and portals and the rows a suspended portal (`Execute` with a row limit) has not sent yet, MongoDB cursors' remaining documents, and RESP, CQL and memcached replies over 64 KiB. Past it, PostgreSQL answers `53200 out of memory` (MySQL 1041, SQL Server 701), RESP `-OOM`, MongoDB `ExceededMemoryLimit` (146), CQL `Overloaded` (`0x1001`) and memcached `SERVER_ERROR out of memory`; a message too large for what is left ends its connection (memcached skips the value and goes on), and a refused reply or result leaves the connection open. Kafka, MQTT, AMQP, NATS, STOMP, Bolt and the HTTP listeners keep their own per-message caps and do not count against it yet (D284) |
 | `--idle-timeout <seconds>` | close a logged-in connection that sends nothing for that long; default 3600 (one hour), `0` never closes it. PostgreSQL clients get `FATAL 57P05 terminating connection due to idle-session timeout`, MySQL clients error 4031, and a TDS connection is closed; the log gets a line. The same value holds on every SQL listener (D254) |
+| `--log-slow-statements <milliseconds>` | log every statement that runs at least that long, on any protocol, to stderr as one line after the UTC time: `slow statement duration_ms=12.345 database=app user=eggdb protocol=postgresql rows=1 query="SELECT * FROM t WHERE id = $1"`; the text has each literal replaced by `$1`, `$2`, ..., so values and passwords never reach the log. `0` logs every statement; off by default. The `log_min_duration_statement` setting still logs a PostgreSQL session's own slow simple queries in full (D286) |
+| `--statement-statistics <count>` | how many statement shapes `pg_stat_statements` keeps calls, times and rows for, across every database served; default 5000, as PostgreSQL's `pg_stat_statements.max`, and `0` keeps none. A full table drops its least-called twentieth to take a new statement and counts it in `pg_stat_statements_info.dealloc` (D286) |
 | `--socket-dir <directory>` | also accept PostgreSQL connections on a Unix socket in that directory, named `.s.PGSQL.<port>` after `--listen`'s port, so `psql -h <directory> -p <port>` connects; the socket is readable and writable by its owner only, a stale socket file is replaced, and it is removed at stop. On Windows (10 version 1803 or later) it is an `AF_UNIX` socket file whose access list lets only the user running the server in, the stand-in for mode 0600; libpq 14 and later reach it with `psql -h C:\path\to\directory -p <port>`; older Windows gets exit 2 (D267) |
 | `--mysql-socket <file>` | also accept MySQL connections on that Unix socket (`mysql --socket=<file>`); needs `--mysql-listen`. On Windows (10 version 1803 or later) it is an owner-only `AF_UNIX` socket file; the mysql client there reads `--socket` as a named pipe, so only drivers that open `AF_UNIX` paths reach it (D267) |
 | `--tls-certificate <file>` | PEM certificate chain, the server's first, for TLS on every listener; needs `--tls-key` |
@@ -1354,8 +1378,12 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --time-limit 30
   tables: creating, renaming to or changing anything else (a table, view, sequence, schema, type,
   routine or role) is refused with `42501`, a trigger or routine that reaches an unlisted table
   fails as missing, and a listed table that a foreign key or an unlisted view ties to an unlisted
-  table cannot change where the change could reach it; the banner lists those ties
-  (D257).
+  table cannot change where the change could reach it (a table an unlisted one references
+  still takes inserts and changes to other columns); the banner lists those ties (D257, D281).
+  A name may carry the only columns to show, `--tables 'orders(id,total)'`: the list must hold
+  the primary key, the other columns are unknown to the agent everywhere (`42703`), and that
+  table cannot be changed; a list the server cannot serve stops it (exit 1,
+  `column_not_found`) (D281).
 - **`--call-gap <ms>`** (default 100, 0 to 10000, 0 for none): after each call the next one that
   opens the file waits that long, so your own writers get the file between an agent's calls.
 - **Tools:** `list_tables`, `describe_table`, `run_sql` (one statement, in `postgresql`, `mysql`,

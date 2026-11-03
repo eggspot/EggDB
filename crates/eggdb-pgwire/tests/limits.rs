@@ -237,3 +237,80 @@ fn a_large_message_gives_its_budget_back_once_it_is_handled() {
         budget.used_bytes()
     );
 }
+
+fn execute(portal: &str, max_rows: i32) -> Vec<u8> {
+    let mut body = cstring(portal);
+    body.extend_from_slice(&max_rows.to_be_bytes());
+    body
+}
+
+fn close_portal(portal: &str) -> Vec<u8> {
+    let mut body = vec![b'P'];
+    body.extend(cstring(portal));
+    body
+}
+
+fn suspend_big_portal(client: &mut Client, portal: &str) -> Vec<Message> {
+    client.send(b'P', &parse("", "SELECT id, v FROM big ORDER BY id"));
+    client.send(b'B', &bind_none(portal));
+    client.send(b'E', &execute(portal, 1));
+    client.send(b'S', b"");
+    client.read_until_ready()
+}
+
+fn bind_none(portal: &str) -> Vec<u8> {
+    let mut body = cstring(portal);
+    body.extend(cstring(""));
+    body.extend_from_slice(&0i16.to_be_bytes());
+    body.extend_from_slice(&0i16.to_be_bytes());
+    body.extend_from_slice(&0i16.to_be_bytes());
+    body
+}
+
+#[test]
+fn rows_a_suspended_portal_holds_count_against_the_budget_until_it_closes() {
+    let budget = Arc::new(MemoryBudget::new(1024 * 1024));
+    let server = TestServer::start_limited(
+        8,
+        Limits {
+            idle_timeout: None,
+            memory_budget: Arc::clone(&budget),
+        },
+    );
+    let (mut first, _) = Client::login(server.address);
+    let created = first.query(
+        "CREATE TABLE big (id integer PRIMARY KEY, v text); \
+         INSERT INTO big SELECT g, repeat('x', 10000) FROM generate_series(1, 60) AS g",
+    );
+    assert!(error_codes(&created).is_empty(), "{created:?}");
+    assert_eq!(tags(&first.query("BEGIN READ ONLY")), "CZ");
+    let answer = suspend_big_portal(&mut first, "rows");
+    assert_eq!(tags(&answer), "12DsZ", "{answer:?}");
+    let held = budget.used_bytes();
+    assert!(held >= 59 * 10_000, "{held}");
+
+    let (mut second, _) = Client::login(server.address);
+    assert_eq!(tags(&second.query("BEGIN READ ONLY")), "CZ");
+    let refused = suspend_big_portal(&mut second, "rows");
+    assert_eq!(tags(&refused), "12DEZ", "{refused:?}");
+    assert_eq!(error_codes(&refused), ["53200"]);
+    assert!(budget.used_bytes() <= budget.limit_bytes());
+    assert_eq!(tags(&second.query("ROLLBACK")), "CZ");
+    assert_eq!(tags(&second.query("SELECT 1")), "TDCZ");
+
+    first.send(b'E', &execute("rows", 10));
+    first.send(b'S', b"");
+    let next = first.read_until_ready();
+    assert_eq!(tags(&next), "DDDDDDDDDDsZ", "{next:?}");
+    assert!(budget.used_bytes() < held, "{} {held}", budget.used_bytes());
+    first.send(b'C', &close_portal("rows"));
+    first.send(b'S', b"");
+    assert_eq!(tags(&first.read_until_ready()), "3Z");
+    assert!(budget.used_bytes() < 64 * 1024, "{}", budget.used_bytes());
+
+    assert_eq!(tags(&second.query("BEGIN READ ONLY")), "CZ");
+    let accepted = suspend_big_portal(&mut second, "rows");
+    assert_eq!(tags(&accepted), "12DsZ", "{accepted:?}");
+    assert_eq!(tags(&second.query("COMMIT")), "CZ");
+    assert!(wait_until(|| budget.used_bytes() < 64 * 1024));
+}

@@ -46,6 +46,49 @@ impl CacheSize {
     }
 }
 
+/// The page lookups one thread has made in every page cache of the process since it started:
+/// the difference between two readings is what the work between them looked up, which
+/// `EXPLAIN (ANALYZE, BUFFERS)` reports as `shared hit` and `read`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct PageLookups {
+    /// Lookups answered from memory.
+    pub hits: u64,
+    /// Lookups that read the page from its file, including reads that failed.
+    pub reads: u64,
+}
+
+impl PageLookups {
+    /// What was looked up since `earlier`, a reading taken before this one on the same thread.
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            hits: self.hits.saturating_sub(earlier.hits),
+            reads: self.reads.saturating_sub(earlier.reads),
+        }
+    }
+}
+
+struct ThreadLookups {
+    hits: Cell<u64>,
+    reads: Cell<u64>,
+}
+
+thread_local! {
+    static THREAD_LOOKUPS: ThreadLookups = const {
+        ThreadLookups {
+            hits: Cell::new(0),
+            reads: Cell::new(0),
+        }
+    };
+}
+
+/// The page lookups this thread has made so far.
+pub fn thread_page_lookups() -> PageLookups {
+    THREAD_LOOKUPS.with(|lookups| PageLookups {
+        hits: lookups.hits.get(),
+        reads: lookups.reads.get(),
+    })
+}
+
 /// What a [`PageCache`] holds and has done since it was created.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -640,6 +683,7 @@ impl<F: File> PageCache<F> {
     #[inline(always)]
     fn hit(&self, frame: usize) {
         self.hits.set(self.hits.get() + 1);
+        THREAD_LOOKUPS.with(|lookups| lookups.hits.set(lookups.hits.get() + 1));
         self.states[frame].set(self.states[frame].get() | REFERENCED);
     }
 
@@ -652,6 +696,7 @@ impl<F: File> PageCache<F> {
         drop(file);
         let (frame, mut bytes) = self.claim_frame()?;
         self.misses.set(self.misses.get() + 1);
+        THREAD_LOOKUPS.with(|lookups| lookups.reads.set(lookups.reads.get() + 1));
         let header = self.file.borrow().read_page(page_id, &mut bytes)?;
         drop(bytes);
         self.install(frame, page_id, header, REFERENCED);
@@ -987,7 +1032,7 @@ impl DerefMut for PageMut<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CacheSize, PageCache};
+    use super::{CacheSize, PageCache, PageLookups, thread_page_lookups};
     use crate::error::{FormatError, StorageError};
     use crate::format::{Access, FileId, PageHeader, PageSize, PageType, Superblock};
     use crate::page_file::{CreateOptions, PageFile};
@@ -1045,6 +1090,20 @@ mod tests {
         let page = cache.read(page_id).unwrap();
         assert!(page.iter().all(|&byte| byte == page[0]));
         page[0]
+    }
+
+    #[test]
+    fn this_threads_lookups_count_a_read_then_a_hit() {
+        let fs = SimFileSystem::new();
+        let pages = committed_pages(&fs, 3, 4);
+        let cache = open(&fs, Access::ReadOnly, 4);
+        let before = thread_page_lookups();
+        assert_eq!(fill_of(&cache, pages[1]), 1);
+        assert_eq!(fill_of(&cache, pages[1]), 1);
+        let looked_up = thread_page_lookups().since(before);
+        assert_eq!(looked_up, PageLookups { hits: 1, reads: 1 });
+        let elsewhere = std::thread::spawn(thread_page_lookups).join().unwrap();
+        assert_eq!(elsewhere, PageLookups::default());
     }
 
     #[test]

@@ -208,11 +208,17 @@ expect_exit 0 "$eggdb" export app.db collections.jsonl
 head -n 1 collections.jsonl | grep -q '"version":2' || fail "an export with collections is not version 2"
 expect_exit 0 "$eggdb" import --create restored.db collections.jsonl
 expect_output alice "$eggdb" get restored.db -C sessions s:1
+expect_exit 0 "$eggdb" collection move app.db sessions logins
+expect_output alice "$eggdb" get app.db -C logins s:1
+expect_exit 3 "$eggdb" collection rename app.db logins cache
+expect_exit 0 "$eggdb" collection rename app.db logins sessions
+expect_exit 0 "$eggdb" stats app.db --collections --format json
+grep -q '"collections":\[{"name":"cache",' last.out || fail "stats --collections printed $(cat last.out)"
 expect_exit 0 "$eggdb" collection delete app.db cache
 expect_exit 1 "$eggdb" get app.db -C cache c:1
 expect_exit 0 "$eggdb" check app.db --format json
 grep -q '"leaked_pages":0}' last.out || fail "check after collections found $(cat last.out)"
-pass "collections: add, put, get, list, export, import and delete"
+pass "collections: add, put, get, list, export, import, move, stats and delete"
 
 expect_exit 0 "$eggdb" put --create expiry.db s:1 alice --ttl 1h
 expect_exit 0 "$eggdb" ttl expiry.db s:1 --format text

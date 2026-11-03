@@ -210,6 +210,108 @@ fn like_and_ilike_on_citext_ignore_case() {
 }
 
 #[test]
+fn citext_and_hstore_array_columns_store_compare_and_read_back_after_reopening() {
+    let store = MemoryStore::default();
+    {
+        let mut session = Session::new(&store);
+        ok(
+            &mut session,
+            "CREATE TABLE tagged (id integer, tags citext[], attrs hstore[])",
+        );
+        ok(
+            &mut session,
+            "INSERT INTO tagged VALUES (1, '{Red,BLUE}', ARRAY['a=>1', 'b=>NULL']::hstore[]), \
+             (2, ARRAY['green']::citext[], '{\"x=>2\"}')",
+        );
+    }
+    let mut session = Session::new(&store);
+    assert_eq!(
+        ok(
+            &mut session,
+            "SELECT id, tags, attrs FROM tagged ORDER BY id"
+        ),
+        "id|tags|attrs\n\
+         1|{Red,BLUE}|{\"\\\"a\\\"=>\\\"1\\\"\",\"\\\"b\\\"=>NULL\"}\n\
+         2|{green}|{\"\\\"x\\\"=>\\\"2\\\"\"}\nSELECT 2"
+    );
+    assert_eq!(
+        ok(
+            &mut session,
+            "SELECT pg_typeof(tags) AS t, pg_typeof(attrs) AS h, tags[1] AS first, \
+             attrs[1] -> 'a' AS a FROM tagged WHERE id = 1"
+        ),
+        "t|h|first|a\ncitext[]|hstore[]|Red|1\nSELECT 1"
+    );
+    assert_eq!(
+        ok(
+            &mut session,
+            "SELECT id FROM tagged WHERE 'RED'::citext = ANY(tags) ORDER BY id"
+        ),
+        "id\n1\nSELECT 1"
+    );
+    assert_eq!(
+        ok(
+            &mut session,
+            "SELECT ARRAY['a', 'B']::citext[] = ARRAY['A', 'b']::citext[] AS same"
+        ),
+        "same\nt\nSELECT 1"
+    );
+    assert_eq!(
+        ok(
+            &mut session,
+            "SELECT typname FROM pg_type WHERE oid = (SELECT atttypid FROM pg_attribute \
+             WHERE attrelid = 'tagged'::regclass AND attname = 'tags')"
+        ),
+        "typname\n_citext\nSELECT 1"
+    );
+    assert_eq!(
+        state(
+            &mut session,
+            "INSERT INTO tagged VALUES (3, NULL, '{\"a=>\"}')"
+        ),
+        "42601"
+    );
+}
+
+#[test]
+fn regular_expressions_on_a_citext_subject_ignore_case() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    ok(
+        &mut session,
+        "CREATE TABLE account (id integer, email citext)",
+    );
+    ok(
+        &mut session,
+        "INSERT INTO account VALUES (1, 'Alice@Example.com'), (2, 'bob@example.COM')",
+    );
+    assert_eq!(
+        ok(
+            &mut session,
+            "SELECT id FROM account WHERE email ~ '^ALICE' ORDER BY id"
+        ),
+        "id\n1\nSELECT 1"
+    );
+    assert_eq!(
+        ok(
+            &mut session,
+            "SELECT id FROM account WHERE email !~ 'com$' ORDER BY id"
+        ),
+        "id\nSELECT 0"
+    );
+    assert_eq!(
+        ok(
+            &mut session,
+            "SELECT 'ABC'::citext ~ 'b' AS a, 'ABC'::citext ~* 'b' AS b, \
+             'ABC'::citext !~ 'b' AS c, 'ABC'::citext !~* 'x' AS d, \
+             'ABC'::citext ~ 'b'::citext AS e, 'ABC'::text ~ 'b'::citext AS f, \
+             NULL::citext ~ 'b' AS g"
+        ),
+        "a|b|c|d|e|f|g\nt|t|f|t|t|f|NULL\nSELECT 1"
+    );
+}
+
+#[test]
 fn a_view_over_a_citext_column_reads_back_after_reopening() {
     let store = MemoryStore::default();
     {
@@ -360,5 +462,80 @@ fn hstore_functions_list_test_cut_build_and_convert() {
     assert_eq!(
         state(&mut session, "SELECT hstore(ARRAY[NULL::text], ARRAY['1'])"),
         "22004"
+    );
+}
+
+#[test]
+fn hstore_prefix_operators_and_populate_record_follow_postgresql() {
+    let store = MemoryStore::default();
+    let mut session = item_session(&store);
+    ok(&mut session, "CREATE TYPE pair AS (a integer, b text)");
+    let cases = [
+        (
+            "SELECT %% attrs AS a FROM item WHERE id = 2",
+            "a\n{color,blue,weight,NULL}\nSELECT 1",
+        ),
+        (
+            "SELECT %% attrs FROM item WHERE id = 1",
+            "?column?\n{size,L,color,red}\nSELECT 1",
+        ),
+        (
+            "SELECT %% 'a=>foo, b=>bar'::hstore AS a, %% NULL::hstore AS n",
+            "a|n\n{a,foo,b,bar}|NULL\nSELECT 1",
+        ),
+        (
+            "SELECT pg_typeof(%% attrs) AS a, pg_typeof(%# ''::hstore) AS m FROM item WHERE id = 1",
+            "a|m\ntext[]|text[]\nSELECT 1",
+        ),
+        (
+            "SELECT hstore_to_matrix(''::hstore) AS m, %# ''::hstore AS n",
+            "m|n\n{}|{}\nSELECT 1",
+        ),
+        (
+            "SELECT populate_record(NULL::pair, 'a=>456, b=>zzz') AS r",
+            "r\n(456,zzz)\nSELECT 1",
+        ),
+        (
+            "SELECT populate_record(NULL::pair, 'a=>7') AS r",
+            "r\n(7,)\nSELECT 1",
+        ),
+        (
+            "SELECT ROW(1, 'x')::pair #= 'b=>y'::hstore AS r",
+            "r\n(1,y)\nSELECT 1",
+        ),
+        (
+            "SELECT ROW(1, 'x')::pair #= 'a=>NULL, c=>9'::hstore AS r",
+            "r\n(,x)\nSELECT 1",
+        ),
+        (
+            "SELECT ROW(1, 'x')::pair #= NULL::hstore AS r",
+            "r\n(1,x)\nSELECT 1",
+        ),
+        (
+            "SELECT ROW(1, 3) #= 'f1=>11'::hstore AS r",
+            "r\n(11,3)\nSELECT 1",
+        ),
+        (
+            "SELECT pg_typeof(populate_record(NULL::pair, 'a=>1')) AS t",
+            "t\npair\nSELECT 1",
+        ),
+    ];
+    for (sql, expected) in cases {
+        assert_eq!(ok(&mut session, sql), expected, "{sql}");
+    }
+    assert_eq!(
+        state(&mut session, "SELECT hstore_to_matrix(attrs) FROM item"),
+        "0A000"
+    );
+    assert_eq!(
+        state(&mut session, "SELECT populate_record(1, 'a=>1'::hstore)"),
+        "22023"
+    );
+    assert_eq!(
+        state(
+            &mut session,
+            "SELECT ROW(1, 'x')::pair #= 'a=>many'::hstore"
+        ),
+        "22P02"
     );
 }

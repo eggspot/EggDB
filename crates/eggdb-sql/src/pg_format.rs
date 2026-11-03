@@ -921,21 +921,22 @@ fn format_number(value: &Value, template_text: &str) -> SqlResult<String> {
     {
         return Ok(roman_text(&number, *lower, template.fill));
     }
-    if template.pieces.contains(&NumberPiece::Exponent) {
+    let special = number.is_nan() || number.is_infinite();
+    if template.pieces.contains(&NumberPiece::Exponent) && !number.is_infinite() {
         return exponent_text(&number, &template);
     }
-    let shifted = if template.shift > 0 && !number.is_nan() {
+    let shifted = if template.shift > 0 && !special {
         number.multiply(&power_of_ten(template.shift)?)?
     } else {
         number.clone()
     };
-    let rounded = if number.is_nan() {
+    let rounded = if special {
         shifted
     } else {
         shifted.rounded(template.fraction_digits as i64)?
     };
     let (negative, whole, fraction) = digits_of(&rounded);
-    let overflow = number.is_nan() || whole.len() > template.integer_digits;
+    let overflow = special || whole.len() > template.integer_digits;
     let whole_digits: Vec<char> = whole.chars().collect();
     let fraction_digits: Vec<char> = fraction.chars().collect();
     let first_zero = first_zero_position(&template.pieces);
@@ -1585,6 +1586,41 @@ fn assembled(parts: &Parts, text: &str) -> SqlResult<(i64, Option<i64>)> {
                 .map(|zone| i64::from(zone.offset_of_local(local)))
         });
     Ok((local, offset))
+}
+
+/// A date or time read through a `to_timestamp` template, with which kinds of fields the
+/// template held, so a SQL/JSON `.datetime(template)` can choose its result type.
+pub(crate) struct TemplateMoment {
+    /// The local date and time, in microseconds since 2000-01-01.
+    pub(crate) local: i64,
+    /// The time zone offset the text gave, in seconds east of UTC.
+    pub(crate) offset: Option<i64>,
+    /// Whether the template read a year, month, day, day of the year or Julian day.
+    pub(crate) has_date: bool,
+    /// Whether the template read an hour, minute, second or fraction.
+    pub(crate) has_time: bool,
+}
+
+/// Reads `text` through the `to_timestamp` `template`.
+pub(crate) fn template_moment(text: &str, template: &str) -> SqlResult<TemplateMoment> {
+    let parts = fill_parts(text, template)?;
+    let (local, offset) = assembled(&parts, text)?;
+    let has_date = parts.year.is_some()
+        || parts.century.is_some()
+        || parts.month.is_some()
+        || parts.day.is_some()
+        || parts.day_of_year.is_some()
+        || parts.julian.is_some();
+    let has_time = parts.hour.is_some()
+        || parts.minute.is_some()
+        || parts.second.is_some()
+        || parts.micros.is_some();
+    Ok(TemplateMoment {
+        local,
+        offset,
+        has_date,
+        has_time,
+    })
 }
 
 pub(crate) fn to_date(values: &[Value]) -> Option<SqlResult<Value>> {

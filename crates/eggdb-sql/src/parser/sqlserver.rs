@@ -1927,7 +1927,7 @@ impl<'t> Parser<'t> {
     pub(super) fn sqlserver_qualified_name(&mut self, first: Name) -> SqlResult<Name> {
         if self.take(&TokenKind::Dot) {
             self.check_sqlserver_database(&first)?;
-            return self.name();
+            return Ok(compatibility_view(self.name()?));
         }
         let second = self.name()?;
         if self.take(&TokenKind::Dot) {
@@ -1940,7 +1940,7 @@ impl<'t> Parser<'t> {
 
     fn sqlserver_schema_object(&self, schema: Name, object: Name) -> SqlResult<Name> {
         if schema.text == "dbo" {
-            return Ok(object);
+            return Ok(compatibility_view(object));
         }
         if schema.text.contains(crate::schemas::QUALIFIER)
             || object.text.contains(crate::schemas::QUALIFIER)
@@ -1974,6 +1974,24 @@ impl<'t> Parser<'t> {
         )
         .at(database.position))
     }
+}
+
+const COMPATIBILITY_VIEWS: [&str; 1] = ["sysdatabases"];
+
+pub(super) fn compatibility_view(name: Name) -> Name {
+    if COMPATIBILITY_VIEWS
+        .iter()
+        .any(|view| name.text.eq_ignore_ascii_case(view))
+    {
+        return Name {
+            text: crate::schemas::written_qualified(
+                crate::sqlserver_catalog::SYS_SCHEMA,
+                &name.text.to_ascii_lowercase(),
+            ),
+            position: name.position,
+        };
+    }
+    name
 }
 
 pub(crate) fn parameter_declarations(text: &str) -> SqlResult<Vec<ParameterDeclaration>> {

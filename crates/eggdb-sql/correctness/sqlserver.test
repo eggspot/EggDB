@@ -1603,8 +1603,17 @@ SELECT 2
 error 42601 10713
 MERGE Blogs48 USING (VALUES (1)) AS s (id) ON 1=0;
 
-error 0A000 40517
+rows
+BEGIN TRAN;
 MERGE Blogs48 USING (VALUES (1)) AS s (id) ON Blogs48.Id = s.id WHEN NOT MATCHED BY SOURCE THEN DELETE;
+SELECT Id FROM Blogs48 ORDER BY Id
+----
+id
+1
+SELECT 1
+
+ok
+ROLLBACK
 
 chapter "INSERT (Transact-SQL)"
 rows
@@ -1660,8 +1669,12 @@ a|b
 7|{"c":true}
 SELECT 1
 
-error 0A000 40517
+rows
 SELECT * FROM OPENJSON(N'[1]')
+----
+key|value|type
+0|1|2
+SELECT 1
 
 error 22023 13607
 SELECT * FROM OPENJSON(N'[1]') WITH (a int 'a') AS o

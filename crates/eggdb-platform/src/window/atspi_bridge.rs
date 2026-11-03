@@ -4,8 +4,8 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-use super::AccessNode;
 use super::atspi::{self, AtspiApplication};
+use super::{AccessNode, AccessRequest};
 use crate::dbus::{self, BusAddress, Message, MessageKind};
 
 const SETUP_WAIT: Duration = Duration::from_millis(500);
@@ -267,6 +267,10 @@ impl AtspiBridge {
         self.application.set_geometry(scale, origin);
     }
 
+    pub(crate) fn take_requests(&mut self) -> Vec<AccessRequest> {
+        self.application.take_requests()
+    }
+
     fn send(&mut self, messages: Vec<Message>) -> bool {
         for message in messages {
             self.bus.queue(message);
@@ -406,6 +410,7 @@ mod tests {
                 ..AccessState::default()
             },
             bounds: AccessRect::default(),
+            ..AccessNode::default()
         };
         assert!(bridge.set_tree(&[window]));
         let added = read_message(&mut peer);

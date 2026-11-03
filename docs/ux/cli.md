@@ -249,7 +249,7 @@ is the moment of the call, and would only mislead.
 | 2 | usage | unknown command or option, missing argument, bad hex, a reserved command |
 | 3 | database error | file missing (no `--create`), not an EggDB file, newer format, permission denied, I/O failure, key or value too large, disk full |
 | 4 | damaged | `check` found corruption, or any command hit `Corrupt` while reading |
-| 5 | busy | the file is open elsewhere and the lock could not be had |
+| 5 | busy | the file is open elsewhere and stayed so for the busy timeout (`--busy-timeout`, five seconds by default) |
 | 130 | interrupted | Ctrl-C; a write in progress is rolled back by the engine, nothing is half-written |
 
 Errors go to stderr as `eggdb: <what happened>: <why>. <what to do>`, one or two sentences,
@@ -268,7 +268,10 @@ eggdb: cannot open app.db: another program has it open for writing. Close it, or
 eggdb: cannot open app.db: another program has it open. Close it before writing, or read with `eggdb get`, `scan`, `check` or `stats`, which work alongside readers.
 ```
 The busy message names which side is blocked: a read-only command blocked by a writer gets
-the first busy line; a `put`/`del` blocked by any open gets the second.
+the first busy line; a `put`/`del` blocked by any open gets the second. Every command,
+`backup`, `compact`, `restore`, `import` and `export` included, first tries again for up to
+`--busy-timeout <ms>` (five seconds by default, `0` for not at all) and prints the busy line
+only when the file is still taken after it (D258, D287).
 
 Interrupt handling: the CLI keeps the operating system's default for Ctrl-C, so the process
 ends at once with the shell's interrupted status (130 on POSIX shells; 0xC000013A on Windows).
@@ -333,6 +336,8 @@ Options for every command:
   -F, --format <text|json|hex|raw>   default: text on a terminal, json in a pipe (raw for get)
       --color <auto|always|never>    default: auto (a terminal, unless NO_COLOR is set)
       --cache <bytes>                page cache size, e.g. 64m (default fits the value)
+      --busy-timeout <ms>            wait this long for a file another program has open
+                                     (default 5000; 0 fails at once)
   -h, --help                         help for eggdb or for one command
   -V, --version                      print the version
 
@@ -511,11 +516,24 @@ Fable. The choices:
 6. **stderr is a log** while serving: failures only (authentication, unknown database, too many
    connections), each with a UTC time, the client address and PostgreSQL's own wording,
    without the `eggdb:` prefix, which stays for the server's own errors.
+   `--log-slow-statements <milliseconds>` adds one line per statement that took at least that
+   long (D286): `slow statement` and then `key=value` pairs (`duration_ms`, `database`, `user`,
+   `protocol`, `rows`, `query`) in a fixed order, values with spaces or quotes in double
+   quotes, so `grep` finds the lines and a log shipper splits them without a custom parser.
+   The query is the normalized text, literals as `$1`, `$2`, ..., so the log never holds the
+   values a client sent. `--statement-statistics <count>` sizes what `pg_stat_statements`
+   keeps; the flags are named for what they do, as `--log-batches` is, not after PostgreSQL's
+   setting names, which stay settings.
 7. **Stopping is success**: Ctrl-C or SIGTERM finishes statements, rolls back open
    transactions, prints `stopped` and exits 0, so a supervising script's `wait` sees a clean
    stop; a second Ctrl-C ends the process at once (exit 130).
 8. **The file is open for writing the whole time**, so every other `eggdb` command gets the
    busy message and exit 5 meanwhile; `--read-only` serves beside readers instead.
+9. **Limits read as `--max-<what>`**: `--max-connections <count>` for the logged-in
+   connections and `--max-connection-memory <size>` for the memory they hold together on every
+   listener (default `4g`, at least `1m`, D284). Sizes take the `64k`, `16m`, `1g` forms that
+   `--resp-max-memory` takes; the name says "connection" because the budget counts what
+   connections hold (requests, portals, cursors, replies), not the page cache or the keyspace.
 
 ## 15. `eggdb shell`: the interactive prompt (item 20)
 
@@ -723,6 +741,31 @@ until `COMMIT` or `ROLLBACK`, exactly as a `psql` session on `eggdb serve`; the 
 until `ROLLBACK`. Key-value commands inside a block run inside it (so a `put` is committed by
 the `COMMIT`, or rolled back), which is the one place the two worlds meet. `.quit`, `Ctrl-D`
 and the end of a batch roll an open block back with the `WARNING:` above.
+
+As built (D266, D283): `put`, `get`, `del`, `incr`, `decr`, `expire`, `persist`, `cas`, `scan`
+and `ttl` run in the block's transaction and print what they print outside it (`scan` ends with
+its dim `n entries` line on stderr). Reads see the block: `scan` lists the keys put earlier in
+the block and leaves out the ones it deleted, `ttl` shows a time set by an `expire` in the
+block, and `cas` compares against the value the block holds. A time to live counts from the
+moment the block began and is kept by `COMMIT` and dropped by `ROLLBACK`. While a `SAVEPOINT`
+is set the writes are refused, naming `RELEASE SAVEPOINT`, `COMMIT` and `ROLLBACK`; in a
+`BEGIN READ ONLY` block the writes are refused and `get`, `scan` and `ttl` read the last
+commit; `check`, `stats` and `backup` always read the last commit.
+
+```
+app=> begin;
+BEGIN
+app=*> put session:7 Ada
+app=*> expire session:7 1h
+app=*> ttl session:7
+1h
+app=*> cas session:7 Ada Grace
+app=*> scan --prefix session:
+session:7	Grace
+1 entry
+app=*> commit;
+COMMIT
+```
 
 ### Exit codes
 Interactive: 0, or 130 from a `Ctrl-C` during a statement. Batch, from section 7's table: 0 when
@@ -1381,8 +1424,11 @@ commands to the parser. `add`, not `create`, because `create` is the file comman
 the UI's word; `del` is accepted as an alias of `delete`, as `delete` is of `del`. `list` opens
 the file read-only; `add` and `delete` open it for writing (section 7's busy rules, so an open
 `eggdb ui` or `eggdb shell` must quit first, which both say). `delete` removes the collection and
-every key in it in one commit and asks nothing, as `del` asks nothing: the command line is for
-scripts, and the shell and the UI name the command rather than offering it.
+every key in it and asks nothing, as `del` asks nothing: the command line is for scripts, and the
+shell and the UI name the command rather than offering it. Its first commit takes the name away,
+so nothing sees the collection again, and the keys go in commits of 512 (D292), so a collection
+of millions of keys deletes in the default page cache; keys a crash leaves behind are invisible
+and the next commits remove them.
 
 **`text`** (a terminal):
 ```
@@ -1411,6 +1457,39 @@ the shape of `del`'s: `nothing to add: sessions is already a collection in app.d
 ```
 Names are always JSON strings (a name is UTF-8 by definition, so there is no `_hex` form).
 `hex` and `raw` are usage errors here, as for `check` (section 13, item 4).
+
+### `eggdb collection move` (D292)
+```
+eggdb collection move <file> <name> <new-name>
+eggdb collection rename <file> <name> <new-name>     # the same command
+```
+`move`, the core verb, gives a collection a new name with every key in it and their times to
+live, in one commit, so no reader ever sees it under both names or under neither; it takes the
+same time for any size. `rename` is an alias, as `del` is of `delete`. A missing collection is
+exit 1 in `delete`'s shape (`nothing to rename: cache is not a collection in app.db`); a new name
+a collection already has is exit 3 with code `already_exists`, and nothing changes:
+```
+$ eggdb collection move app.db sessions old-sessions
+renamed collection sessions to old-sessions in app.db
+$ eggdb collection move app.db cache users
+eggdb: cannot rename the collection cache to users in app.db: users is already a collection there, and a rename never replaces one. Choose another name, or delete users first.
+```
+```
+{"file":"app.db","collection":"sessions","new_name":"old-sessions","moved":true}   false with exit 1
+```
+
+### Per-collection counts in `eggdb stats --collections` (D292)
+`stats` stays instant and reads no page; `--collections` adds one line per collection, counted by
+reading every key of every collection (keys whose time to live has run out are left out):
+```
+$ eggdb stats app.db --collections
+...
+collections      2
+  cache: 1,204 entries, 18.8 KiB of keys, 2.3 MiB of values
+  sessions: no entries, 0 B of keys, 0 B of values
+```
+In JSON it adds `"collections":[{"name":"cache","entries":1204,"key_bytes":19264,"value_bytes":2411724},…]`,
+`[]` for a file without collections; without the flag the object is unchanged.
 
 ### Errors for a missing collection
 A `-C` on a collection that does not exist is **exit 1**, not found, the kind's own name
@@ -1470,7 +1549,7 @@ key, so a restore gives an application the collections it expects:
 The command list of section 9 gains, after `restore`, two lines (the usage does not fit the
 description column, so the description takes the line below, at the column):
 ```
-  collection list|add|delete <file> [name]
+  collection list|add|delete|move <file> [name] [new-name]
                                 a named key space inside the file; see eggdb help collection
 ```
 Each of `get`, `put`, `del`, `scan` adds to its options
@@ -1579,8 +1658,9 @@ and, under Shell commands, before `.mode`,
 7. `collection list` prints names on stdout and the count on stderr, as `scan` does; JSON is one
    object with an array.
 
-Not in this release: `eggdb ui -C <name>` to open on a collection, `collection rename`, a
-per-collection key count in `list` and `stats`, `-C` on `check`, and collections in SQL.
+Not in this release: `eggdb ui -C <name>` to open on a collection, a per-collection key count in
+`list`, `-C` on `check`, and collections in SQL. `collection move` (alias `rename`) and
+`stats --collections` came with D292.
 
 ### As built (D139)
 - The shell's "collection dropped by another program" warning is left out: the shell holds the
@@ -3357,6 +3437,15 @@ eggdb mcp <file> [--allow-write] [--tables <names>]... [--time-limit <seconds>] 
   table fails as that table would: `relation ... does not exist`.
 - Nothing else in the file exists for the agent: other tables, views and sequences, and the keys
   outside SQL (`kv_get` and `kv_scan`, below).
+- **A column list limits a table to some columns** (D281): `--tables "orders(id,total),customers"`
+  shows `orders` with only `id` and `total`. Commas inside the parentheses separate columns, not
+  names, blanks around them are stripped and a column given twice counts once; the list must
+  hold the table's primary key, the table must exist at start, and a view takes no list (list the
+  columns of the tables it reads). Every other column does not exist for the agent: `SELECT *`,
+  `describe_table`, `sample_rows` and every catalog leave it out, and naming it fails as an
+  unknown column (`42703`), directly, through a view, a function, a CTE or a subquery. A table
+  listed with columns cannot be changed, even with `--allow-write`. Giving the same table twice
+  with different columns is a usage error; quote the option in a shell, since `(` is special.
 
 Usage errors, exit 2, section 7's shape (`eggdb: <message>`, then the `usage:` and `try: eggdb
 help mcp` lines):
@@ -3365,6 +3454,10 @@ help mcp` lines):
 | `--tables ""` | `--tables needs at least one name, such as --tables users,orders` |
 | an empty entry or a trailing comma | `--tables has an empty name in 'users,,orders'` |
 | more than one dot, or a dot with nothing on one side | `--tables takes name or schema.name, not 'a.b.c'` |
+| a `(` with no `)` | `--tables has a column list with no ')' in 'orders(id'` |
+| an empty column, as in `orders(id,)` | `--tables has an empty column name in 'orders(id,)'` |
+| nested parentheses, text after `)`, or a `)` alone | `--tables takes columns as name(a,b), not 'orders(id)x'` |
+| one table twice with different columns | `--tables names 'orders' twice with different columns: give it once, with every column it needs, such as orders(a,b)` |
 | a bad `--call-gap` | `--call-gap must be a whole number of milliseconds from 0 to 10000, not '20s'` |
 
 ### The startup check: refuse, don't warn
@@ -3387,6 +3480,20 @@ eggdb: --tables names 'ordres' and 'Users' (stored as 'users'): no table, view o
   try: eggdb table list app.db
 ```
 Three or more: `'a', 'b' and 'c'`. A schema-qualified name is shown as given, `'archive.ordres'`.
+
+A column list the server cannot serve also stops it, exit 1, code `column_not_found`, every
+reason in one message (D281): a column the table does not have, a primary-key column left out,
+an empty list, a list on a view, or a table that does not exist yet:
+```
+eggdb: --tables lists columns eggdb mcp cannot serve from app.db: 'orders' has no column "totl"; 'users' leaves out its primary key column "id": list it too. Fix the column list.
+  try: eggdb table show app.db orders
+```
+With a column list the banner gains a line after `tables`, and the `add it` line quotes the
+option:
+```
+  columns      orders(id,total): the agent sees only the columns listed, and may not change these tables
+  add it       claude mcp add mydb -- eggdb mcp app.db --tables 'orders(id,total),customers'
+```
 
 ### What the agent sees
 - `list_tables`, `describe_table`, `sample_rows`, `row_list`, `explain_query`, `run_sql` in every
@@ -3450,8 +3557,11 @@ is named itself. Every name must be a table, view or sequence of the file when t
 or it does not start; with --allow-write a name not there yet is one the agent may create. With
 --allow-write and --tables the agent changes only the tables named: creating, changing or dropping
 anything else (a table, view, sequence, schema, type, routine or role) is refused, and so is a
-change to a named table that a foreign key or a view ties to a table not named; the server lists
-those ties when it starts. After each call the server waits --call-gap milliseconds before the
+change that could reach a table not named through a foreign key or a view (a named table that
+one not named references still takes inserts and changes to other columns); the server lists
+those ties when it starts. A name may list the only columns the agent sees, as orders(id,total)
+with its primary key: the other columns do not exist for the agent, and it cannot change that
+table. After each call the server waits --call-gap milliseconds before the
 next call opens the file, so your own programs, which are refused while a call holds the file, get their
 turn between an agent's calls; 0 turns the gap off.
 ```
@@ -3460,7 +3570,8 @@ The option lines, in this order (the text column stays at column 32, as `--time-
       --allow-write            add write_sql: one statement per call that may change the file
       --tables <names>         only these tables and views exist for the agent, and with
                                --allow-write only these change: comma-separated, name or
-                               schema.name; repeat it for more
+                               schema.name, or name(a,b) for only some columns; repeat it for
+                               more
       --time-limit <seconds>   the longest one call may run, 1 to 300 (default 5)
       --call-gap <ms>          the pause after each call before the next, so other programs can write;
                                milliseconds, 0 to 10000 (default 100)
@@ -3554,7 +3665,7 @@ $ eggdb mcp app.db --tables users,orders --allow-write
 eggdb mcp app.db: a read-write MCP server on stdin and stdout, for an AI agent's client to start; nothing to type here.
   writes       allowed (--allow-write): write_sql runs one statement per call, in its own transaction
   tables       users, orders only (--tables): the agent reads and changes only these; other tables do not exist for it, a change that would reach one is refused, and kv_get and kv_scan are off
-  tied         table "order_lines" has a foreign key to "orders", so the agent cannot change the rows and definition of orders; add order_lines to --tables to allow it
+  tied         table "order_lines" has a foreign key to "orders", so the agent may not delete its rows, change the columns that foreign key points at, or change its definition on orders; add order_lines to --tables to allow it
   ...
 $ eggdb mcp app.db --tables users --tables orders,archive.orders --call-gap 250
 eggdb mcp app.db: a read-only MCP server on stdin and stdout, for an AI agent's client to start; nothing to type here.
@@ -3911,14 +4022,24 @@ A password inside the URL is a usage error, because every user's `ps` would show
 ### Progress and summary
 Each phase prints one fixed line to stderr, in the 16-column label block that restore's report
 uses: `connected`, `publication`, `slot`, `schema`, one `copied` line per table, the `copied`
-total, and then a `following` line with the lag. The summary goes to stdout, with `tables`,
+total, a `stream` line (the `pgoutput` protocol and tuple format), a `table added` line for each
+table the source creates or publishes during the follow (D296), and then a `following` line with
+the lag. The summary goes to stdout, with `tables`,
 `transactions`, `sequences`, `position` and `cleaned up`, then a verdict: `ok: … point
 applications at it now`, or `stopped: the source closed the connection; …` with exit 3.
 
 ### JSON
-One line per event: `connected`, `slot`, `schema`, `table_copied`, `copied`, `stopped`. The last
+One line per event: `connected`, `slot`, `schema`, `table_copied`, `copied`, `stopped`. A
+PostgreSQL follow also writes `stream` (`protocol`, `streaming`, `binary`: what it asked `pgoutput`
+for, again after a switch to text tuples) and `table_added` (`table`, `copied`, `rows`,
+`snapshot_lsn`: a table created or published on the source during the follow) (D296). The last
 carries `ok`, `reason` (`interrupt`, `caught_up` or `source_closed`), the counts, `lsn` or
-`change_version`, `slot_dropped`, `publication_dropped` and `verdict`.
+`change_version`, `slot_dropped`, `publication_dropped` and `verdict`. A SQL Server follow's
+`table_copied` also carries `changes` (`cdc` or `change_tracking`), `net_changes` and, for a CDC
+capture instance of some of the columns, `left_out` (the columns not copied or followed). Its
+column events are `columns_left_out` (a column added on the source that the capture instance does
+not capture, with `try`, the command for a second instance), `columns_dropped` and
+`capture_switched` (`from`, `to`, `added`, `dropped`); `stopped` carries `schema_changes` (D282).
 
 ### Errors
 Every precondition is checked before the first row is copied, and each check names every table
@@ -3933,9 +4054,13 @@ that fails it, not only the first. Each message says what is wrong and how to fi
 - SQL Server's change tracking and CDC are off for the database (try `ALTER DATABASE … SET
   CHANGE_TRACKING = ON …`), CDC is off with `--changes cdc` (try `EXEC sys.sp_cdc_enable_db;`),
   or some tables have neither (try `ALTER TABLE … ENABLE CHANGE_TRACKING;` or
-  `EXEC sys.sp_cdc_enable_table …`), or a table read through CDC has no primary key;
+  `EXEC sys.sp_cdc_enable_table …`), or a table's only capture instance leaves out a primary key
+  column (named, with a second instance's command), or a table read through CDC has no primary
+  key;
 - the change retention was exceeded, or CDC's cleanup removed changes not yet applied, while
-  following.
+  following;
+- a CDC table's primary key column was dropped on the source, or its old capture instance was
+  dropped before the follow reached the start of the new one (the lost LSN range is named).
 
 Usage errors (exit 2) cover a password in the URL, an unknown scheme, `--poll`, `--changes` or
 `--publication` for the wrong kind of source, `--changes` with any value but `cdc` or
@@ -3956,8 +4081,16 @@ stdin as the file.
 - **Second Ctrl-C.** A second Ctrl-C is not handled separately yet.
 - **Failed first copies.** With `--create`, a PostgreSQL copy that fails removes the new file.
   The file is not built as `<file>.following` and renamed into place.
-- **SQL Server sources.** A SQL Server copy reads change tracking only; CDC is a later item. The
-  changes of one poll are applied as one transaction.
+- **SQL Server sources.** Each table is read through CDC or change tracking (D261). A capture
+  instance of some of the columns is used when nothing covers every column: only its columns are
+  copied and followed, and the rest are named. An instance that supports net changes, keyed by
+  the primary key, is read with `cdc.fn_cdc_get_net_changes_<instance>` once every change the copy
+  could have seen has been applied one by one; there is no flag for it. A column dropped on the
+  source is dropped from the file; a column added is named until a second capture instance
+  includes it, and the follow then reads the old instance up to the new one's first LSN and
+  switches, adding the column and filling it from the source. A connection lost in the middle of
+  a poll is retried like one lost between polls, and the poll is read again from the last
+  applied position (D282). The changes of one poll are applied as one transaction.
 
 ## 31. `eggdb serve` on Unix sockets (part 4.M1-1)
 

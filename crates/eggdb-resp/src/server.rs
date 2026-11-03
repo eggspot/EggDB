@@ -3,6 +3,7 @@ use crate::keyspace::Keyspace;
 use crate::protocol::{ProtocolError, Reply, RequestReader};
 use crate::pubsub::{Hub, Kind};
 use crate::transactions::execute_with_transactions;
+use eggdb_platform::connection_limits::{MemoryBudget, UNCOUNTED_BUFFER_BYTES};
 use std::io::{self, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -14,13 +15,28 @@ const ACCEPT_POLL: Duration = Duration::from_millis(100);
 const READ_POLL: Duration = Duration::from_millis(200);
 
 /// How the RESP server runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ServerConfig {
     /// The SHA-256 of the password clients give with `AUTH` (as `requirepass` asks), or
     /// `None` for none; the password itself is not kept.
     pub password_sha256: Option<[u8; 32]>,
     /// The most connections served at once.
     pub max_connections: usize,
+    /// The memory every connection's requests and replies hold together, shared with the
+    /// server's other listeners.
+    pub memory_budget: Arc<MemoryBudget>,
+}
+
+const OUT_OF_BUDGET: &str =
+    "OOM command not allowed: the server's connections already hold their memory budget";
+
+fn reply_room(budget: &MemoryBudget, held_bytes: usize, pending_bytes: usize) -> usize {
+    budget
+        .limit_bytes()
+        .saturating_sub(budget.used_bytes())
+        .saturating_add(held_bytes)
+        .saturating_sub(pending_bytes)
+        .max(UNCOUNTED_BUFFER_BYTES)
 }
 
 fn now_ms() -> u64 {
@@ -152,10 +168,18 @@ fn serve_connection(
         ..Client::default()
     };
     let mut out = Vec::new();
+    let mut held = config.memory_budget.empty_reservation();
     loop {
-        let arguments = match reader.next_request() {
+        let read = reader
+            .next_request_within(&mut |declared| held.hold_if_large(declared.saturating_mul(2)));
+        let arguments = match read {
             Ok(arguments) => arguments,
             Err(ProtocolError::Closed) => break,
+            Err(ProtocolError::OverBudget(_)) => {
+                Reply::Error(OUT_OF_BUDGET.to_owned()).encode(&mut out, client.resp3);
+                let _ = connection.send(&out);
+                break;
+            }
             Err(ProtocolError::Invalid(message)) => {
                 Reply::Error(format!("ERR {message}")).encode(&mut out, client.resp3);
                 let _ = connection.send(&out);
@@ -185,11 +209,20 @@ fn serve_connection(
                 keyspace,
                 password_sha256: config.password_sha256.as_ref(),
                 now_ms: now_ms(),
+                reply_room_bytes: reply_room(&config.memory_budget, held.bytes(), out.len()),
             };
             vec![execute_with_transactions(&context, &mut client, &arguments)]
         };
+        let replied_from = out.len();
         for reply in &replies {
             reply.encode(&mut out, client.resp3);
+        }
+        drop(arguments);
+        if !held.hold_if_large(out.len()) {
+            out.truncate(replied_from);
+            Reply::Error(OUT_OF_BUDGET.to_owned()).encode(&mut out, client.resp3);
+            out.shrink_to(UNCOUNTED_BUFFER_BYTES);
+            held.hold_if_large(out.len());
         }
         let quitting = name == "quit";
         if quitting || !reader.has_buffered() {
@@ -197,6 +230,8 @@ fn serve_connection(
                 break;
             }
             out.clear();
+            out.shrink_to(UNCOUNTED_BUFFER_BYTES);
+            held.hold_if_large(0);
         }
         if quitting {
             break;

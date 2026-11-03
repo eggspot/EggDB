@@ -179,7 +179,7 @@ impl Session<'_> {
             self.out.text(&object.line());
         }
         if !swap.swapped && self.request.format != Some(Format::Json) {
-            let message = self.not_swapped(&key, swap.found.as_deref(), expected.as_deref());
+            let message = not_swapped(&key, swap.found.as_deref(), expected.as_deref(), &self.file);
             self.error_message(&message);
         }
         Ok(if swap.swapped {
@@ -187,23 +187,6 @@ impl Session<'_> {
         } else {
             Exit::NotFound
         })
-    }
-
-    fn not_swapped(&self, key: &[u8], found: Option<&[u8]>, expected: Option<&[u8]>) -> String {
-        let key = render::text(key);
-        let file = &self.file;
-        match (found, expected) {
-            (None, _) => format!("not swapped: {key} is not in {file}. Nothing changed."),
-            (Some(found), None) => format!(
-                "not swapped: {key} is already in {file} (holding {}). Nothing changed.",
-                shown_value(found)
-            ),
-            (Some(found), Some(expected)) => format!(
-                "not swapped: {key} in {file} holds {}, not {}. Nothing changed.",
-                shown_value(found),
-                shown_value(expected)
-            ),
-        }
     }
 
     fn not_a_counter(&self, key: &[u8], current: &[u8], step: u64, decrement: bool) -> Failure {
@@ -297,6 +280,27 @@ fn swap_in(
         transaction.rollback()?;
     }
     Ok(swap)
+}
+
+pub(super) fn not_swapped(
+    key: &[u8],
+    found: Option<&[u8]>,
+    expected: Option<&[u8]>,
+    file: &str,
+) -> String {
+    let key = render::text(key);
+    match (found, expected) {
+        (None, _) => format!("not swapped: {key} is not in {file}. Nothing changed."),
+        (Some(found), None) => format!(
+            "not swapped: {key} is already in {file} (holding {}). Nothing changed.",
+            shown_value(found)
+        ),
+        (Some(found), Some(expected)) => format!(
+            "not swapped: {key} in {file} holds {}, not {}. Nothing changed.",
+            shown_value(found),
+            shown_value(expected)
+        ),
+    }
 }
 
 fn is_counter(value: &[u8]) -> bool {

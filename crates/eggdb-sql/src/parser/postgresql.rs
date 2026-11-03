@@ -38,6 +38,18 @@ fn no_operator(symbol: &str, position: usize) -> SqlError {
 }
 
 impl Parser<'_> {
+    pub(super) fn prefix_operator_function(&self) -> Option<&'static str> {
+        let TokenKind::Operator(symbol) = self.peek_kind() else {
+            return None;
+        };
+        Some(match *symbol {
+            "~" => crate::ranges::INTEGER_NOT,
+            "%%" => crate::hstore_functions::TO_ARRAY_OPERATOR,
+            "%#" => crate::hstore_functions::TO_MATRIX_OPERATOR,
+            _ => return None,
+        })
+    }
+
     pub(super) fn regex_operator(&self) -> Option<BinaryOperator> {
         let TokenKind::Operator(symbol) = self.peek_kind() else {
             return None;
@@ -306,9 +318,14 @@ impl Parser<'_> {
         }
         self.expect(&TokenKind::LeftParen)?;
         let mut arguments = Vec::new();
+        let populates = crate::sql_json::POPULATE.contains(&name.text.as_str());
         if !self.take(&TokenKind::RightParen) {
             loop {
-                arguments.push(self.expression()?);
+                arguments.push(if populates && arguments.is_empty() {
+                    self.populate_base()?
+                } else {
+                    self.expression()?
+                });
                 if !self.take(&TokenKind::Comma) {
                     break;
                 }

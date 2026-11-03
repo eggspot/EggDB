@@ -900,6 +900,33 @@ impl Parser<'_> {
         written.to_owned()
     }
 
+    fn openjson_default_schema(
+        &mut self,
+        document: Expr,
+        position: usize,
+    ) -> SqlResult<TableReference> {
+        let alias = if self.take_word("as") || self.at_bare_alias() {
+            Some(self.name()?.text)
+        } else {
+            None
+        };
+        Ok(TableReference {
+            name: Name {
+                text: crate::json_functions::OPENJSON_PAIRS.to_owned(),
+                position,
+            },
+            alias,
+            derived: None,
+            generated: Some(Box::new(GeneratedTable::Function(TableFunction {
+                name: crate::json_functions::OPENJSON_PAIRS.to_owned(),
+                arguments: vec![document],
+                ordinality: false,
+                column_names: Vec::new(),
+                position,
+            }))),
+        })
+    }
+
     pub(super) fn sqlserver_openjson(&mut self) -> SqlResult<TableReference> {
         let position = self.position();
         self.at += 1;
@@ -919,7 +946,7 @@ impl Parser<'_> {
         }
         self.expect(&TokenKind::RightParen)?;
         if !self.take_word("with") {
-            return Err(not_supported("OPENJSON without a WITH clause").at(position));
+            return self.openjson_default_schema(document, position);
         }
         self.expect(&TokenKind::LeftParen)?;
         let element = Expr {

@@ -20,6 +20,20 @@ fn within_limit(bytes: usize) -> SqlResult<()> {
     }
 }
 
+enum AsciiCase {
+    Upper,
+    Lower,
+}
+
+fn ascii_case_changed(mut text: String, case: AsciiCase) -> SqlResult<Value> {
+    within_limit(text.len())?;
+    match case {
+        AsciiCase::Upper => text.make_ascii_uppercase(),
+        AsciiCase::Lower => text.make_ascii_lowercase(),
+    }
+    Ok(Value::Text(text))
+}
+
 pub(crate) fn real_text(value: f64) -> Option<String> {
     if value.is_nan() {
         return None;
@@ -294,8 +308,8 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
             let length = values.get(2).and_then(integer_of);
             Value::Text(chars_between(&text(0).unwrap_or_default(), start, length))
         }
-        "sqlite_upper" => Value::Text(text(0).unwrap_or_default().to_ascii_uppercase()),
-        "sqlite_lower" => Value::Text(text(0).unwrap_or_default().to_ascii_lowercase()),
+        "sqlite_upper" => ascii_case_changed(text(0).unwrap_or_default(), AsciiCase::Upper)?,
+        "sqlite_lower" => ascii_case_changed(text(0).unwrap_or_default(), AsciiCase::Lower)?,
         "sqlite_trim" | "sqlite_ltrim" | "sqlite_rtrim" => {
             let characters = text(1).unwrap_or_else(|| " ".to_owned());
             Value::Text(trimmed(
@@ -603,6 +617,30 @@ fn printf(format: &str, arguments: &[Value]) -> SqlResult<String> {
 mod tests {
     use super::{call, chars_between, printf, real_text};
     use crate::types::Value;
+
+    #[test]
+    fn upper_and_lower_change_ascii_only_and_check_the_value_limit() {
+        let mixed = Value::Text("a\u{390}b\u{130}".to_owned());
+        assert_eq!(
+            call("sqlite_upper", std::slice::from_ref(&mixed)),
+            Ok(Value::Text("A\u{390}B\u{130}".to_owned()))
+        );
+        assert_eq!(
+            call("sqlite_lower", &[Value::Text("AB\u{130}".to_owned())]),
+            Ok(Value::Text("ab\u{130}".to_owned()))
+        );
+        let _limit = crate::memory::enter_value_limit(1000);
+        let fits = Value::Text("a".repeat(1000));
+        assert_eq!(
+            call("sqlite_upper", &[fits]),
+            Ok(Value::Text("A".repeat(1000)))
+        );
+        let over = Value::Text("a".repeat(1001));
+        for name in ["sqlite_upper", "sqlite_lower"] {
+            let error = call(name, std::slice::from_ref(&over)).expect_err(name);
+            assert_eq!(error.state().code(), "54000", "{name}");
+        }
+    }
 
     #[test]
     fn reals_print_with_fifteen_digits_and_a_point() {

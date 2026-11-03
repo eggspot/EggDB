@@ -185,6 +185,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
     fn run(&self, sql: &str) -> Result<Vec<QueryResult>, eggdb_sql::SqlError> {
         let mut session = Session::with_dialect(self.store, Dialect::PostgreSql);
         session.identify(&self.user, &self.database);
+        session.set_protocol("rest");
         let mut results = Vec::new();
         session.execute(sql, &mut |result| results.push(result))?;
         Ok(results)

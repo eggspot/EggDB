@@ -2,9 +2,13 @@
 //! translating virtual-key codes and `WM_CHAR` UTF-16 units into the GUI's keys, reading the
 //! modifier state, packing the words of a message's parameters, turning a monitor's DPI into a
 //! scale, and converting an RGBA frame into the BGRA rows a 32-bit device-independent bitmap
-//! holds. The values come from Microsoft's public Win32 documentation.
+//! holds, the filter list and path buffers of the open-file dialog, the pointer's position and
+//! wheel steps in mouse messages, and clipboard text as `CF_UNICODETEXT`. The values come from
+//! Microsoft's public Win32 documentation.
 
-use super::{Key, KeyPress, Modifiers};
+use std::path::PathBuf;
+
+use super::{FileFilter, Key, KeyPress, Modifiers};
 
 /// The DPI Windows treats as a scale of 1.
 pub const BASE_DPI: u32 = 96;
@@ -25,6 +29,10 @@ pub const VK_MENU: i32 = 0x12;
 pub const VK_ESCAPE: usize = 0x1B;
 /// `VK_SPACE`.
 pub const VK_SPACE: usize = 0x20;
+/// `VK_PRIOR` (Page Up).
+pub const VK_PRIOR: usize = 0x21;
+/// `VK_NEXT` (Page Down).
+pub const VK_NEXT: usize = 0x22;
 /// `VK_END`.
 pub const VK_END: usize = 0x23;
 /// `VK_HOME`.
@@ -39,8 +47,12 @@ pub const VK_RIGHT: usize = 0x27;
 pub const VK_DOWN: usize = 0x28;
 /// `VK_DELETE`.
 pub const VK_DELETE: usize = 0x2E;
+/// `VK_F2`.
+pub const VK_F2: usize = 0x71;
 /// `VK_F4`.
 pub const VK_F4: usize = 0x73;
+/// `VK_F5`.
+pub const VK_F5: usize = 0x74;
 
 /// The modifiers from `GetKeyState` results for Shift, Control and Alt: a key is held when
 /// the high bit of its state is set.
@@ -72,6 +84,10 @@ pub fn key_from_virtual_key(virtual_key: usize, modifiers: Modifiers) -> Option<
         VK_HOME => Key::Home,
         VK_END => Key::End,
         VK_F4 => Key::F4,
+        VK_F2 => Key::F2,
+        VK_F5 => Key::F5,
+        VK_PRIOR => Key::PageUp,
+        VK_NEXT => Key::PageDown,
         0x30..=0x39 | 0x41..=0x5A if modifiers.control && !modifiers.alt => {
             let code = u8::try_from(virtual_key).ok()?;
             let character = char::from(code);
@@ -155,6 +171,51 @@ pub fn client_size_from_lparam(lparam: isize) -> (u32, u32) {
     (u32::from(low_word(bits)), u32::from(high_word(bits)))
 }
 
+/// The pointer's position in a mouse message's `lparam` (`GET_X_LPARAM`, `GET_Y_LPARAM`):
+/// signed, since a captured pointer outside the window has negative coordinates.
+pub fn point_from_lparam(lparam: isize) -> (i32, i32) {
+    let bits = lparam as usize;
+    (
+        i32::from(low_word(bits) as i16),
+        i32::from(high_word(bits) as i16),
+    )
+}
+
+/// The wheel's travel in a `WM_MOUSEWHEEL` or `WM_MOUSEHWHEEL` `wparam`, in notches of
+/// `WHEEL_DELTA` (120): positive away from the user (up) or to the right.
+pub fn wheel_notches(wparam: usize) -> f32 {
+    f32::from(high_word(wparam) as i16) / WHEEL_DELTA
+}
+
+const WHEEL_DELTA: f32 = 120.0;
+
+/// `text` as `CF_UNICODETEXT` wants it: UTF-16 with `\r\n` line breaks and a closing NUL.
+pub fn clipboard_units(text: &str) -> Vec<u16> {
+    let mut units = Vec::with_capacity(text.len() + 1);
+    let mut previous = '\0';
+    for character in text.chars() {
+        if character == '\n' && previous != '\r' {
+            units.push(u16::from(b'\r'));
+        }
+        if character != '\0' {
+            let mut buffer = [0u16; 2];
+            units.extend_from_slice(character.encode_utf16(&mut buffer));
+        }
+        previous = character;
+    }
+    units.push(0);
+    units
+}
+
+/// The text of `CF_UNICODETEXT` units, up to the first NUL, with unpaired surrogates replaced.
+pub fn text_from_clipboard_units(units: &[u16]) -> String {
+    let end = units
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(units.len());
+    String::from_utf16_lossy(units.get(..end).unwrap_or(&[]))
+}
+
 /// Device pixels per logical pixel for a DPI: the DPI over 96, and 1 for a DPI of 0 (what
 /// `GetDpiForWindow` answers for an invalid window).
 pub fn scale_from_dpi(dpi: u32) -> f32 {
@@ -196,11 +257,78 @@ pub fn wide_string(text: &str) -> Vec<u16> {
         .collect()
 }
 
+/// The `lpstrFilter` of an `OPENFILENAMEW`: each filter's name and its patterns joined by
+/// `;`, each string NUL-terminated, the list ended by a second NUL. NULs inside a name or a
+/// pattern are dropped; an empty list is a lone pair of NULs.
+pub fn open_file_filter(filters: &[FileFilter]) -> Vec<u16> {
+    let mut wide = Vec::new();
+    for filter in filters {
+        let patterns = filter.patterns.join(";");
+        for text in [filter.name.as_str(), patterns.as_str()] {
+            wide.extend(text.encode_utf16().filter(|&unit| unit != 0));
+            wide.push(0);
+        }
+    }
+    if wide.is_empty() {
+        wide.push(0);
+    }
+    wide.push(0);
+    wide
+}
+
+/// The path the dialog wrote into `buffer`: the UTF-16 units before the first NUL, or `None`
+/// when the buffer holds no path or the units are not valid UTF-16.
+pub fn path_from_wide_buffer(buffer: &[u16]) -> Option<PathBuf> {
+    let length = buffer
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(buffer.len());
+    let units = buffer.get(..length)?;
+    if units.is_empty() {
+        return None;
+    }
+    String::from_utf16(units).ok().map(PathBuf::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const HELD: i16 = i16::MIN;
+
+    #[test]
+    fn the_dialog_filter_is_name_and_patterns_pairs_ending_in_two_nuls() {
+        let filters = [
+            FileFilter {
+                name: "EggDB databases".to_owned(),
+                patterns: vec!["*.eggdb".to_owned()],
+            },
+            FileFilter {
+                name: "All files".to_owned(),
+                patterns: vec!["*.*".to_owned(), "*\0x".to_owned()],
+            },
+        ];
+        let expected: Vec<u16> = "EggDB databases\0*.eggdb\0All files\0*.*;*x\0\0"
+            .encode_utf16()
+            .collect();
+        assert_eq!(open_file_filter(&filters), expected);
+        assert_eq!(open_file_filter(&[]), vec![0, 0]);
+    }
+
+    #[test]
+    fn a_dialog_buffer_reads_up_to_its_first_nul() {
+        let mut buffer = vec![0u16; 16];
+        for (slot, unit) in buffer.iter_mut().zip("C:\\a.eggdb".encode_utf16()) {
+            *slot = unit;
+        }
+        assert_eq!(
+            path_from_wide_buffer(&buffer),
+            Some(PathBuf::from("C:\\a.eggdb"))
+        );
+        assert_eq!(path_from_wide_buffer(&[0; 4]), None);
+        assert_eq!(path_from_wide_buffer(&[0xD800, 0]), None);
+        assert_eq!(path_from_wide_buffer(&[]), None);
+    }
 
     fn with(shift: bool, control: bool, alt: bool) -> Modifiers {
         Modifiers {
@@ -241,6 +369,10 @@ mod tests {
             (VK_HOME, Key::Home),
             (VK_END, Key::End),
             (VK_F4, Key::F4),
+            (VK_F2, Key::F2),
+            (VK_F5, Key::F5),
+            (VK_PRIOR, Key::PageUp),
+            (VK_NEXT, Key::PageDown),
         ];
         for (virtual_key, key) in cases {
             assert_eq!(key_from_virtual_key(virtual_key, plain), Some(key));
@@ -365,5 +497,33 @@ mod tests {
         assert_eq!(wide_string("Eg"), [0x45, 0x67, 0]);
         assert_eq!(wide_string("a\0b"), [0x61, 0x62, 0]);
         assert_eq!(wide_string(""), [0]);
+    }
+
+    #[test]
+    fn mouse_parameters_give_signed_points_and_wheel_notches() {
+        let lparam = ((0xFFF6usize << 16) | 300) as isize;
+        assert_eq!(point_from_lparam(lparam), (300, -10));
+        assert_eq!(wheel_notches(120 << 16), 1.0);
+        assert_eq!(wheel_notches(0xFF88 << 16), -1.0);
+        assert_eq!(wheel_notches(60 << 16), 0.5);
+    }
+
+    #[test]
+    fn clipboard_text_round_trips_through_unicode_units() {
+        let units = clipboard_units("SELECT 1;\nSELECT 'é😀';\r\n");
+        assert_eq!(units.last(), Some(&0));
+        assert_eq!(
+            units
+                .iter()
+                .filter(|&&unit| unit == u16::from(b'\r'))
+                .count(),
+            2
+        );
+        assert_eq!(
+            text_from_clipboard_units(&units),
+            "SELECT 1;\r\nSELECT 'é😀';\r\n"
+        );
+        assert_eq!(text_from_clipboard_units(&[0x61, 0, 0x62]), "a");
+        assert_eq!(text_from_clipboard_units(&[0xD800, 0x61]), "\u{FFFD}a");
     }
 }

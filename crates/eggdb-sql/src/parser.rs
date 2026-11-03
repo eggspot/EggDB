@@ -20,6 +20,7 @@ mod roles;
 mod routines;
 mod row_security;
 mod schemas;
+mod sql_json;
 mod sqlite;
 mod sqlserver;
 mod sqlserver_batch;
@@ -748,6 +749,19 @@ impl<'t> Parser<'t> {
                     position: name.position,
                 });
             }
+            if name
+                .text
+                .eq_ignore_ascii_case(crate::schemas::CATALOG_SCHEMA)
+                && self.check_database(&name).is_err()
+            {
+                return Ok(Name {
+                    text: crate::schemas::written_qualified(
+                        crate::schemas::CATALOG_SCHEMA,
+                        &table.text.to_ascii_lowercase(),
+                    ),
+                    position: name.position,
+                });
+            }
             self.check_database(&name)?;
             return Ok(table);
         }
@@ -801,6 +815,9 @@ impl<'t> Parser<'t> {
         if self.peek_kind() == &TokenKind::Dot {
             self.at += 1;
             return self.qualified_part(&name);
+        }
+        if self.sqlserver() {
+            return Ok(sqlserver::compatibility_view(name));
         }
         Ok(name)
     }
@@ -2428,7 +2445,10 @@ impl<'t> Parser<'t> {
             },
             "boolean" | "bool" => SqlType::Boolean,
             "text" => SqlType::Text,
-            "refcursor" | "jsonpath" if self.postgresql() => SqlType::Text,
+            "refcursor" if self.postgresql() => {
+                SqlType::Catalog(crate::pg_catalog::CatalogType::RefCursor)
+            }
+            "jsonpath" if self.postgresql() => SqlType::Text,
             "varchar" => SqlType::Varchar(self.varchar_length(token.start)?),
             "character" | "char" if self.is_word("varying") => {
                 self.at += 1;
@@ -2655,6 +2675,9 @@ impl<'t> Parser<'t> {
                     position,
                 )),
             };
+        }
+        if self.at_json_table() {
+            return self.json_table();
         }
         if self.postgresql() && self.at_table_function() {
             return self.table_function();
@@ -3393,6 +3416,19 @@ impl<'t> Parser<'t> {
                 position,
             });
         }
+        if self.postgresql()
+            && let Some(function) = self.prefix_operator_function()
+        {
+            self.at += 1;
+            let operand = self.expression_above(Level::Additive)?;
+            return Ok(Expr {
+                kind: ExprKind::Function {
+                    name: function.to_owned(),
+                    arguments: vec![operand],
+                },
+                position,
+            });
+        }
         let operator = if self.take_operator("-") {
             UnaryOperator::Minus
         } else if self.take_operator("+") {
@@ -3532,6 +3568,17 @@ impl<'t> Parser<'t> {
                     self.at += 1;
                     let right = self.expression_above(Level::Additive)?;
                     return Ok(Self::binary(left, operator, right));
+                }
+                if self.postgresql() && self.take_operator("#=") {
+                    let right = self.expression_above(Level::Additive)?;
+                    let position = left.position;
+                    return Ok(Expr {
+                        kind: ExprKind::Function {
+                            name: crate::hstore_functions::POPULATE_OPERATOR.to_owned(),
+                            arguments: vec![left, right],
+                        },
+                        position,
+                    });
                 }
                 if self.postgresql()
                     && let TokenKind::Operator(symbol) = self.peek_kind()
@@ -3845,6 +3892,22 @@ impl<'t> Parser<'t> {
                     kind: ExprKind::Function {
                         name: "timezone".to_owned(),
                         arguments: vec![zone, expr],
+                    },
+                    position,
+                };
+            } else if self.is_word("at") && self.is_word_at(1, "time") && self.sqlserver() {
+                self.at += 2;
+                self.expect_word("zone")?;
+                self.depth += 1;
+                if self.depth > MAX_NESTING {
+                    return Err(too_deep(self.position()));
+                }
+                let zone = self.primary()?;
+                let position = expr.position;
+                expr = Expr {
+                    kind: ExprKind::SqlServerFunction {
+                        function: crate::sqlserver_functions::Function::AtTimeZone,
+                        arguments: vec![expr, zone],
                     },
                     position,
                 };
@@ -4355,6 +4418,9 @@ impl<'t> Parser<'t> {
     fn function_call(&mut self, name: Name) -> SqlResult<Expr> {
         if name.text == "extract" && !self.sqlite() {
             return self.extract(name);
+        }
+        if let Some(expr) = self.sql_json_function(&name)? {
+            return Ok(expr);
         }
         if self.mysql()
             && let Some(expr) = self.mysql_function(&name)?

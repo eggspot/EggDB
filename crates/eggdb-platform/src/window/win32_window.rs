@@ -3,12 +3,14 @@ mod automation;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use super::win32::{self, Utf16Characters};
 use super::{
-    AccessNode, KeyPress, Modifiers, Window, WindowError, WindowEvent, WindowOptions, check_frame,
+    AccessNode, KeyPress, MAX_CLIPBOARD_TEXT_BYTES, Modifiers, OpenFileDialog, PointerButton,
+    Window, WindowError, WindowEvent, WindowOptions, check_clipboard_text, check_frame,
 };
 use automation::Automation;
 
@@ -53,12 +55,44 @@ const WM_KEYDOWN: u32 = 0x0100;
 const WM_CHAR: u32 = 0x0102;
 const WM_SYSKEYDOWN: u32 = 0x0104;
 const WM_DPICHANGED: u32 = 0x02E0;
+const WM_DROPFILES: u32 = 0x0233;
+const WM_MOUSEMOVE: u32 = 0x0200;
+const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_LBUTTONUP: u32 = 0x0202;
+const WM_RBUTTONDOWN: u32 = 0x0204;
+const WM_RBUTTONUP: u32 = 0x0205;
+const WM_MBUTTONDOWN: u32 = 0x0207;
+const WM_MBUTTONUP: u32 = 0x0208;
+const WM_MOUSEWHEEL: u32 = 0x020A;
+const WM_MOUSEHWHEEL: u32 = 0x020E;
+const WM_MOUSELEAVE: u32 = 0x02A3;
+const TME_LEAVE: u32 = 0x0000_0002;
+const CF_UNICODETEXT: u32 = 13;
+const GMEM_MOVEABLE: u32 = 0x0002;
+const CLIPBOARD_OPEN_ATTEMPTS: u32 = 10;
+const CLIPBOARD_RETRY: Duration = Duration::from_millis(10);
+const DRAG_QUERY_COUNT: u32 = u32::MAX;
+const MOST_DROPPED_FILES: u32 = 1024;
+const OFN_NOCHANGEDIR: u32 = 0x0000_0008;
+const OFN_PATHMUSTEXIST: u32 = 0x0000_0800;
+const OFN_FILEMUSTEXIST: u32 = 0x0000_1000;
+const OFN_EXPLORER: u32 = 0x0008_0000;
+const DIALOG_PATH_UNITS: usize = 32_768;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct Point {
     x: i32,
     y: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TrackMouseEventParams {
+    size: u32,
+    flags: u32,
+    window: Handle,
+    hover_time: u32,
 }
 
 #[repr(C)]
@@ -129,13 +163,95 @@ struct BitmapInfo {
     colors: [u32; 1],
 }
 
+#[repr(C)]
+struct OpenFileName {
+    struct_size: u32,
+    owner: Handle,
+    instance: Handle,
+    filter: *const u16,
+    custom_filter: *mut u16,
+    custom_filter_units: u32,
+    filter_index: u32,
+    file: *mut u16,
+    file_units: u32,
+    file_title: *mut u16,
+    file_title_units: u32,
+    initial_directory: *const u16,
+    title: *const u16,
+    flags: u32,
+    file_offset: u16,
+    file_extension: u16,
+    default_extension: *const u16,
+    custom_data: isize,
+    hook: *const c_void,
+    template_name: *const u16,
+    reserved_pointer: *mut c_void,
+    reserved_word: u32,
+    flags_ex: u32,
+}
+
 #[link(name = "kernel32")]
 unsafe extern "system" {
+    fn GlobalAlloc(flags: u32, bytes: usize) -> Handle;
+    fn GlobalLock(memory: Handle) -> *mut c_void;
+    fn GlobalUnlock(memory: Handle) -> i32;
+    fn GlobalFree(memory: Handle) -> Handle;
+    fn GlobalSize(memory: Handle) -> usize;
     fn GetModuleHandleW(name: *const u16) -> Handle;
+}
+
+#[link(name = "comdlg32")]
+unsafe extern "system" {
+    fn GetOpenFileNameW(dialog: *mut OpenFileName) -> i32;
+    fn CommDlgExtendedError() -> u32;
+}
+
+#[link(name = "shell32")]
+unsafe extern "system" {
+    fn DragAcceptFiles(window: Handle, accept: i32);
+    fn DragQueryFileW(drop: Handle, index: u32, file: *mut u16, units: u32) -> u32;
+    fn DragFinish(drop: Handle);
+}
+
+fn dropped_files(drop: Handle) -> Vec<PathBuf> {
+    // SAFETY: `drop` is the `HDROP` of the `WM_DROPFILES` being handled; asking for the
+    // count with a null buffer writes nothing.
+    let count = unsafe { DragQueryFileW(drop, DRAG_QUERY_COUNT, std::ptr::null_mut(), 0) };
+    let mut paths = Vec::new();
+    for index in 0..count.min(MOST_DROPPED_FILES) {
+        // SAFETY: as above; a null buffer asks for the path's length in UTF-16 units.
+        let units = unsafe { DragQueryFileW(drop, index, std::ptr::null_mut(), 0) };
+        let Some(capacity) = (units as usize).checked_add(1) else {
+            continue;
+        };
+        if capacity > DIALOG_PATH_UNITS {
+            continue;
+        }
+        let mut buffer = vec![0u16; capacity];
+        // SAFETY: `buffer` holds `capacity` writable units, the path's length plus its NUL,
+        // which is the size passed.
+        unsafe { DragQueryFileW(drop, index, buffer.as_mut_ptr(), capacity as u32) };
+        if let Some(path) = win32::path_from_wide_buffer(&buffer) {
+            paths.push(path);
+        }
+    }
+    // SAFETY: `drop` is released once, after the last query.
+    unsafe { DragFinish(drop) };
+    paths
 }
 
 #[link(name = "user32")]
 unsafe extern "system" {
+    fn SetCapture(window: Handle) -> Handle;
+    fn ReleaseCapture() -> i32;
+    fn TrackMouseEvent(track: *mut TrackMouseEventParams) -> i32;
+    fn ScreenToClient(window: Handle, point: *mut Point) -> i32;
+    fn OpenClipboard(owner: Handle) -> i32;
+    fn CloseClipboard() -> i32;
+    fn EmptyClipboard() -> i32;
+    fn SetClipboardData(format: u32, memory: Handle) -> Handle;
+    fn GetClipboardData(format: u32) -> Handle;
+    fn IsClipboardFormatAvailable(format: u32) -> i32;
     fn RegisterClassExW(class: *const WindowClass) -> u16;
     fn CreateWindowExW(
         ex_style: u32,
@@ -245,6 +361,7 @@ struct WindowState {
     dpi: Cell<u32>,
     min_size: (u32, u32),
     automation: Automation,
+    tracking_leave: Cell<bool>,
 }
 
 impl WindowState {
@@ -261,6 +378,188 @@ impl WindowState {
     fn scale(&self) -> f32 {
         win32::scale_from_dpi(self.dpi.get())
     }
+}
+
+fn track_leave(window: Handle, state: &WindowState) {
+    if state.tracking_leave.get() {
+        return;
+    }
+    let mut track = TrackMouseEventParams {
+        size: std::mem::size_of::<TrackMouseEventParams>() as u32,
+        flags: TME_LEAVE,
+        window,
+        hover_time: 0,
+    };
+    // SAFETY: `track` is a filled `TRACKMOUSEEVENT` with its size, live for the call; the
+    // system copies it.
+    let tracking = unsafe { TrackMouseEvent(&mut track) } != 0;
+    state.tracking_leave.set(tracking);
+}
+
+fn pointer_button(message: u32) -> Option<(PointerButton, bool)> {
+    Some(match message {
+        WM_LBUTTONDOWN => (PointerButton::Primary, true),
+        WM_LBUTTONUP => (PointerButton::Primary, false),
+        WM_RBUTTONDOWN => (PointerButton::Secondary, true),
+        WM_RBUTTONUP => (PointerButton::Secondary, false),
+        WM_MBUTTONDOWN => (PointerButton::Middle, true),
+        WM_MBUTTONUP => (PointerButton::Middle, false),
+        _ => return None,
+    })
+}
+
+fn pointer_message(
+    window: Handle,
+    state: &WindowState,
+    message: u32,
+    wparam: usize,
+    lparam: isize,
+) {
+    let (x, y) = win32::point_from_lparam(lparam);
+    let (x, y) = (x as f32, y as f32);
+    match message {
+        WM_MOUSEMOVE => {
+            track_leave(window, state);
+            state.push(WindowEvent::PointerMoved { x, y });
+        }
+        WM_MOUSELEAVE => {
+            state.tracking_leave.set(false);
+            state.push(WindowEvent::PointerLeft);
+        }
+        WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
+            let (screen_x, screen_y) = win32::point_from_lparam(lparam);
+            let mut point = Point {
+                x: screen_x,
+                y: screen_y,
+            };
+            // SAFETY: `window` is ours and `point` a writable `POINT` for the call.
+            unsafe { ScreenToClient(window, &mut point) };
+            let notches = win32::wheel_notches(wparam);
+            let (lines_down, lines_right) = if message == WM_MOUSEWHEEL {
+                (-notches, 0.0)
+            } else {
+                (0.0, notches)
+            };
+            state.push(WindowEvent::Wheel {
+                x: point.x as f32,
+                y: point.y as f32,
+                lines_down,
+                lines_right,
+                modifiers: held_modifiers(),
+            });
+        }
+        _ => {
+            let Some((button, down)) = pointer_button(message) else {
+                return;
+            };
+            let modifiers = held_modifiers();
+            if down {
+                // SAFETY: `window` is ours; capturing keeps the release coming to it when the
+                // pointer leaves the window with the button held.
+                unsafe { SetCapture(window) };
+                state.push(WindowEvent::PointerPressed {
+                    x,
+                    y,
+                    button,
+                    modifiers,
+                });
+            } else {
+                // SAFETY: the call takes no arguments and only ends this thread's capture.
+                unsafe { ReleaseCapture() };
+                state.push(WindowEvent::PointerReleased {
+                    x,
+                    y,
+                    button,
+                    modifiers,
+                });
+            }
+        }
+    }
+}
+
+struct OpenedClipboard;
+
+impl OpenedClipboard {
+    fn open(owner: Handle) -> Result<Self, WindowError> {
+        for _ in 0..CLIPBOARD_OPEN_ATTEMPTS {
+            // SAFETY: `owner` is this live window, passed by value; another program holding
+            // the clipboard makes the call fail, and it is tried again.
+            if unsafe { OpenClipboard(owner) } != 0 {
+                return Ok(Self);
+            }
+            std::thread::sleep(CLIPBOARD_RETRY);
+        }
+        Err(last_error("OpenClipboard"))
+    }
+}
+
+impl Drop for OpenedClipboard {
+    fn drop(&mut self) {
+        // SAFETY: this thread opened the clipboard in `OpenedClipboard::open`.
+        unsafe { CloseClipboard() };
+    }
+}
+
+fn put_clipboard_units(owner: Handle, units: &[u16]) -> Result<(), WindowError> {
+    let _open = OpenedClipboard::open(owner)?;
+    // SAFETY: the clipboard is open on this thread.
+    if unsafe { EmptyClipboard() } == 0 {
+        return Err(last_error("EmptyClipboard"));
+    }
+    let bytes = std::mem::size_of_val(units);
+    // SAFETY: the call takes flags and a size by value and returns a new block or null.
+    let memory = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) };
+    if memory.is_null() {
+        return Err(last_error("GlobalAlloc"));
+    }
+    // SAFETY: `memory` is the movable block just allocated.
+    let target = unsafe { GlobalLock(memory) }.cast::<u16>();
+    if target.is_null() {
+        // SAFETY: the block is still ours: the clipboard has not taken it.
+        unsafe { GlobalFree(memory) };
+        return Err(last_error("GlobalLock"));
+    }
+    // SAFETY: `target` points at the locked block of `bytes` bytes, aligned for `u16`
+    // (global blocks are 8-byte aligned), which `units` does not overlap.
+    unsafe { std::ptr::copy_nonoverlapping(units.as_ptr(), target, units.len()) };
+    // SAFETY: the block was locked once above.
+    unsafe { GlobalUnlock(memory) };
+    // SAFETY: the clipboard is open and emptied by this thread; on success the system owns
+    // `memory`.
+    if unsafe { SetClipboardData(CF_UNICODETEXT, memory) }.is_null() {
+        let error = last_error("SetClipboardData");
+        // SAFETY: the clipboard refused the block, so it is still ours.
+        unsafe { GlobalFree(memory) };
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn clipboard_units(owner: Handle) -> Result<Option<Vec<u16>>, WindowError> {
+    let _open = OpenedClipboard::open(owner)?;
+    // SAFETY: the call takes a format by value.
+    if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT) } == 0 {
+        return Ok(None);
+    }
+    // SAFETY: the clipboard is open on this thread; the block stays the clipboard's.
+    let memory = unsafe { GetClipboardData(CF_UNICODETEXT) };
+    if memory.is_null() {
+        return Ok(None);
+    }
+    // SAFETY: `memory` is the clipboard's live block while the clipboard is open.
+    let size = unsafe { GlobalSize(memory) };
+    // SAFETY: as above; locking only pins it for reading.
+    let source = unsafe { GlobalLock(memory) }.cast::<u16>().cast_const();
+    if source.is_null() {
+        return Ok(None);
+    }
+    let count = (size / 2).min(MAX_CLIPBOARD_TEXT_BYTES);
+    // SAFETY: `source` points at the locked block of `size` bytes, aligned for `u16`, and
+    // `count` units fit in it; the slice is copied before the block is unlocked.
+    let units = unsafe { std::slice::from_raw_parts(source, count) }.to_vec();
+    // SAFETY: the block was locked once above.
+    unsafe { GlobalUnlock(memory) };
+    Ok(Some(units))
 }
 
 fn held_modifiers() -> Modifiers {
@@ -428,6 +727,16 @@ fn handle_message(
         WM_ERASEBKGND => return Some(1),
         WM_GETOBJECT => return state.automation.answer_get_object(window, wparam, lparam),
         WM_CLOSE => state.push(WindowEvent::CloseRequested),
+        WM_DROPFILES => {
+            let paths = dropped_files(std::ptr::without_provenance_mut(wparam));
+            if !paths.is_empty() {
+                state.push(WindowEvent::FilesDropped(paths));
+            }
+        }
+        WM_MOUSEMOVE | WM_MOUSELEAVE | WM_MOUSEWHEEL | WM_MOUSEHWHEEL | WM_LBUTTONDOWN
+        | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN | WM_MBUTTONUP => {
+            pointer_message(window, state, message, wparam, lparam);
+        }
         WM_SETFOCUS => state.push(WindowEvent::Focused(true)),
         WM_KILLFOCUS => state.push(WindowEvent::Focused(false)),
         WM_SIZE => {
@@ -596,6 +905,7 @@ impl Win32Window {
             dpi: Cell::new(win32::BASE_DPI),
             min_size: (options.min_width, options.min_height),
             automation: Automation::default(),
+            tracking_leave: Cell::new(false),
         });
         // SAFETY: the class is registered, both strings are NUL-terminated and alive for the
         // call, and the creation parameter points to `state`, which this `Win32Window` keeps
@@ -621,6 +931,9 @@ impl Win32Window {
         }
         let this = Self { window, state };
         this.state.automation.attach(this.window);
+        // SAFETY: `window` was just created by this backend; the call only lets it receive
+        // `WM_DROPFILES`.
+        unsafe { DragAcceptFiles(this.window, 1) };
         // SAFETY: `window` was just created by this backend.
         let dpi = unsafe { GetDpiForWindow(this.window) };
         this.state
@@ -737,6 +1050,9 @@ impl Window for Win32Window {
                 return Ok(Some(event));
             }
             self.pump();
+            for request in self.state.automation.take_requests() {
+                self.state.push(WindowEvent::AccessRequested(request));
+            }
             if let Some(event) = self.state.pop() {
                 return Ok(Some(event));
             }
@@ -761,6 +1077,76 @@ impl Window for Win32Window {
                 )
             };
         }
+    }
+
+    fn choose_file_to_open(
+        &mut self,
+        dialog: &OpenFileDialog,
+    ) -> Result<Option<PathBuf>, WindowError> {
+        let filter = win32::open_file_filter(&dialog.filters);
+        let initial = dialog
+            .start_in
+            .as_ref()
+            .map(|directory| win32::wide_string(&directory.to_string_lossy()));
+        let mut file = vec![0u16; DIALOG_PATH_UNITS];
+        let mut request = OpenFileName {
+            struct_size: std::mem::size_of::<OpenFileName>() as u32,
+            owner: self.window,
+            instance: std::ptr::null_mut(),
+            filter: filter.as_ptr(),
+            custom_filter: std::ptr::null_mut(),
+            custom_filter_units: 0,
+            filter_index: 1,
+            file: file.as_mut_ptr(),
+            file_units: DIALOG_PATH_UNITS as u32,
+            file_title: std::ptr::null_mut(),
+            file_title_units: 0,
+            initial_directory: initial
+                .as_ref()
+                .map_or(std::ptr::null(), |wide| wide.as_ptr()),
+            title: std::ptr::null(),
+            flags: OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+            file_offset: 0,
+            file_extension: 0,
+            default_extension: std::ptr::null(),
+            custom_data: 0,
+            hook: std::ptr::null(),
+            template_name: std::ptr::null(),
+            reserved_pointer: std::ptr::null_mut(),
+            reserved_word: 0,
+            flags_ex: 0,
+        };
+        // SAFETY: `request` is a complete `OPENFILENAMEW` of its own size; the filter, the
+        // initial directory and the file buffer it points to stay alive for the call, and the
+        // buffer holds `file_units` writable units. The dialog runs its own message loop,
+        // which reaches this window's procedure through shared references only.
+        let chosen = unsafe { GetOpenFileNameW(&mut request) };
+        if chosen != 0 {
+            return Ok(win32::path_from_wide_buffer(&file));
+        }
+        // SAFETY: the call has no parameters and reads the thread's last dialog error.
+        let error = unsafe { CommDlgExtendedError() };
+        if error == 0 {
+            Ok(None)
+        } else {
+            Err(WindowError::Io(format!(
+                "the open-file dialog failed with error {error:#06x}"
+            )))
+        }
+    }
+
+    fn put_clipboard_text(&mut self, text: &str) -> Result<(), WindowError> {
+        check_clipboard_text(text)?;
+        put_clipboard_units(self.window, &win32::clipboard_units(text))
+    }
+
+    fn clipboard_text(&mut self) -> Result<Option<String>, WindowError> {
+        let Some(units) = clipboard_units(self.window)? else {
+            return Ok(None);
+        };
+        let text = win32::text_from_clipboard_units(&units);
+        check_clipboard_text(&text)?;
+        Ok(Some(text))
     }
 }
 

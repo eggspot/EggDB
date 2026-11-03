@@ -54,7 +54,7 @@ impl FrameVariable {
     pub(crate) fn sql_type(&self) -> Option<SqlType> {
         match &self.slot {
             Slot::Typed(sql_type) => Some(*sql_type),
-            Slot::Cursor(_) => Some(SqlType::Text),
+            Slot::Cursor(_) => Some(SqlType::Catalog(crate::pg_catalog::CatalogType::RefCursor)),
             Slot::Untyped | Slot::Record | Slot::Row(_) | Slot::Collection(_) => {
                 self.value.sql_type()
             }

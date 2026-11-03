@@ -1,7 +1,10 @@
+use crate::ast::{Expr, ExprKind};
 use crate::encoding::{
-    CommentKind, KeyOwner, NAMESPACE, SequenceDefinition, TableDefinition, every_dependency_prefix,
-    every_reference_prefix, is_temporary_key, is_view_record, key_owner, meta_key, prefix_end,
-    sequence_key, sequences_prefix, split_comment_key, table_key, trigger_key, triggers_prefix,
+    Column, CommentKind, ForeignKey, IndexDefinition, KeyOwner, NAMESPACE, SequenceDefinition,
+    TableDefinition, decode_row, encode_row, every_dependency_prefix, every_reference_prefix,
+    is_temporary_key, is_view_record, key_owner, meta_key, prefix_end, rows_prefix, sequence_key,
+    sequences_prefix, split_comment_key, table_indexes_prefix, table_key, trigger_key,
+    triggers_prefix,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::schemas::{DEFAULT_SCHEMA, QUALIFIER};
@@ -16,10 +19,12 @@ use std::collections::{HashMap, HashSet};
 /// records read as absent, so every dialect, every catalog (`pg_catalog`,
 /// `information_schema`, SQL Server's `sys` views, Oracle's dictionary) and every name
 /// resolution, a view's query included, finds them missing. A sequence stays visible when it
-/// is named or when a visible table owns it.
+/// is named or when a visible table owns it. A table named with a column list, such as
+/// `orders(id,total)`, shows only those columns (D281).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisibleTables {
     internal: Vec<String>,
+    columns: Vec<Option<Vec<String>>>,
 }
 
 /// A name of a [`VisibleTables`] that no table, view or sequence of the database has.
@@ -31,24 +36,108 @@ pub struct UnknownTableName {
     pub stored_as: Option<String>,
 }
 
+/// A column list of a [`VisibleTables`] that cannot be served as given, so the table it
+/// names stays hidden (D281).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnservableColumnList {
+    /// The table or view, shown as [`VisibleTables::names`] shows names, without its columns.
+    pub table: String,
+    /// Why, in words, such as `has no column "totl"`.
+    pub reason: String,
+}
+
 impl VisibleTables {
     /// The tables and views with these names, each `name` or `schema.name`, split at the first
-    /// dot; `public.` and `dbo.` name the default schema. Names match exactly as stored, and a
-    /// name given twice counts once, in the order first given.
+    /// dot, and optionally followed by the columns to show in parentheses, as in
+    /// `orders(id,total)`; `public.` and `dbo.` name the default schema. Names match exactly as
+    /// stored, and a table given twice counts once, in the order and with the columns first
+    /// given.
     pub fn new<'n>(names: impl IntoIterator<Item = &'n str>) -> Self {
         let mut internal: Vec<String> = Vec::new();
-        for name in names {
+        let mut columns = Vec::new();
+        for entry in names {
+            let (name, listed_columns) = split_column_list(entry);
             let stored = internal_name(name);
             if !internal.contains(&stored) {
                 internal.push(stored);
+                columns.push(listed_columns);
             }
         }
-        Self { internal }
+        Self { internal, columns }
     }
 
-    /// The names, in order: the default schema's bare, others as `schema.name`.
+    /// The names, in order: the default schema's bare, others as `schema.name`, each followed
+    /// by its column list when it has one, as in `orders(id,total)`.
     pub fn names(&self) -> Vec<String> {
-        self.internal.iter().map(|name| shown_name(name)).collect()
+        self.internal
+            .iter()
+            .zip(&self.columns)
+            .map(|(name, columns)| match columns {
+                Some(columns) => format!("{}({})", shown_name(name), columns.join(",")),
+                None => shown_name(name),
+            })
+            .collect()
+    }
+
+    /// Whether some name has a column list.
+    pub fn limits_columns(&self) -> bool {
+        self.columns.iter().any(Option::is_some)
+    }
+
+    /// The column lists that cannot be served as `reader` sees the database: a column the
+    /// table does not have, a primary-key column left out, no column at all, or a list on a
+    /// view, or a table that does not exist yet (only a table listed without columns may be
+    /// created by a confined writer).
+    pub fn unservable_column_lists(
+        &self,
+        reader: &dyn KeyValueRead,
+    ) -> SqlResult<Vec<UnservableColumnList>> {
+        let mut unservable = Vec::new();
+        for (name, columns) in self.internal.iter().zip(&self.columns) {
+            let Some(columns) = columns else {
+                continue;
+            };
+            let table = shown_name(name);
+            let Some(stored) = reader.get(&table_key(name))? else {
+                unservable.push(UnservableColumnList {
+                    table,
+                    reason: "does not exist yet: a table listed with columns must exist when the session starts".to_owned(),
+                });
+                continue;
+            };
+            let mut reasons = Vec::new();
+            if is_view_record(&stored) {
+                reasons.push("is a view: list it without columns, or list the columns of the tables it reads".to_owned());
+            } else if columns.is_empty() {
+                reasons.push("has an empty column list".to_owned());
+            } else {
+                let definition = TableDefinition::decode(name, &stored)?;
+                for column in columns {
+                    if !definition
+                        .columns
+                        .iter()
+                        .any(|stored| &stored.name == column)
+                    {
+                        reasons.push(format!("has no column \"{column}\""));
+                    }
+                }
+                for &at in &definition.primary_key {
+                    if let Some(key) = definition.columns.get(at)
+                        && !columns.contains(&key.name)
+                    {
+                        reasons.push(format!(
+                            "leaves out its primary key column \"{}\": list it too",
+                            key.name
+                        ));
+                    }
+                }
+            }
+            unservable.extend(reasons.into_iter().map(|reason| UnservableColumnList {
+                table: table.clone(),
+                reason,
+            }));
+        }
+        Ok(unservable)
     }
 
     /// The names no table, view or sequence that `reader` sees has.
@@ -79,7 +168,7 @@ impl VisibleTables {
     /// `inner` with every table, view and sequence but these hidden, as of the snapshot
     /// `inner` reads.
     pub fn read<R: KeyValueRead>(&self, inner: R) -> SqlResult<VisibleRead<R>> {
-        let shown = Shown::of(&self.internal, &inner, false)?;
+        let shown = Shown::of(self, &inner, false)?;
         Ok(VisibleRead {
             inner,
             shown: Some(shown),
@@ -93,30 +182,71 @@ impl VisibleTables {
     /// table, a schema, type, routine, package or role, and keys outside SQL; a new table, view
     /// or sequence may be created only under a listed name, or as a sequence a listed table
     /// owns. A listed table that an [`OutsideLink`] ties to another relation cannot be changed
-    /// where the change could reach that relation: its rows and definition when a foreign key
-    /// joins them, its definition when a view reads it. A transaction with a refused change
-    /// rolls back at commit even when the refusal was caught along the way.
+    /// where the change could reach that relation: its rows and definition when it has a
+    /// foreign key to it; its definition, row deletions and changes to the columns the foreign
+    /// key points at when the other relation has a foreign key to it (inserts and changes to
+    /// other columns go through, D281); its definition when a view reads it. A table listed
+    /// with columns cannot be changed at all, nor can a default, check, generated expression or
+    /// row-security policy be written that calls a user-defined routine or holds a subquery. A
+    /// transaction with a refused change rolls back at commit even when the refusal was caught
+    /// along the way.
     pub fn write<W: KeyValueWrite>(&self, inner: W) -> SqlResult<VisibleWrite<W>> {
-        let shown = Shown::of(&self.internal, &inner, true)?;
+        let shown = Shown::of(self, &inner, true)?;
         let links = links_of(&shown, &inner)?;
-        let rows_blocked = shown
-            .table_names
-            .iter()
-            .filter(|(id, name)| {
-                shown.tables.contains(*id)
-                    && links
-                        .iter()
-                        .any(|link| link.kind.blocks_rows() && &link.listed == *name)
-            })
-            .map(|(id, _)| *id)
-            .collect();
+        let mut rows_blocked = HashSet::new();
+        let mut keys_guarded: HashMap<u32, KeyGuard> = HashMap::new();
+        for (&id, name) in &shown.table_names {
+            if !shown.tables.contains(&id) {
+                continue;
+            }
+            for (at, link) in links.iter().enumerate() {
+                if &link.listed != name {
+                    continue;
+                }
+                match link.kind {
+                    OutsideLinkKind::References => {
+                        rows_blocked.insert(id);
+                    }
+                    OutsideLinkKind::ReferencedBy => {
+                        match referenced_positions(&inner, name, &link.outside)? {
+                            Some((columns, positions)) => {
+                                let guard = keys_guarded.entry(id).or_insert_with(|| KeyGuard {
+                                    columns,
+                                    positions: Vec::new(),
+                                    link: at,
+                                });
+                                for position in positions {
+                                    if !guard.positions.contains(&position) {
+                                        guard.positions.push(position);
+                                    }
+                                }
+                            }
+                            None => {
+                                rows_blocked.insert(id);
+                            }
+                        }
+                    }
+                    OutsideLinkKind::ReadByView | OutsideLinkKind::Reads => {}
+                }
+            }
+        }
+        for id in &rows_blocked {
+            keys_guarded.remove(id);
+        }
         Ok(VisibleWrite {
             inner,
             confined: Some(Confined {
-                listed: self.internal.clone(),
+                listed: self
+                    .internal
+                    .iter()
+                    .zip(&self.columns)
+                    .filter(|(_, columns)| columns.is_none())
+                    .map(|(name, _)| name.clone())
+                    .collect(),
                 shown,
                 links,
                 rows_blocked,
+                keys_guarded,
                 refused: false,
                 dropped_trigger_records: Vec::new(),
                 dropped_definitions: Vec::new(),
@@ -129,7 +259,7 @@ impl VisibleTables {
     /// by [`VisibleTables::write`] cannot change what they tie, so `eggdb mcp` names them at
     /// start.
     pub fn outside_links(&self, reader: &dyn KeyValueRead) -> SqlResult<Vec<OutsideLink>> {
-        let shown = Shown::of(&self.internal, reader, false)?;
+        let shown = Shown::of(self, reader, false)?;
         Ok(links_of(&shown, reader)?
             .into_iter()
             .map(|link| link.shown())
@@ -169,13 +299,15 @@ pub struct OutsideLink {
 }
 
 impl OutsideLink {
-    /// What a confined writer cannot change because of this tie, in words, such as `rows and
-    /// definition`.
+    /// What a confined writer may not do to the listed relation because of this tie, in
+    /// words, such as `change its rows or its definition`.
     pub fn blocked_changes(&self) -> &'static str {
-        if self.kind.blocks_rows() {
-            "rows and definition"
-        } else {
-            "definition"
+        match self.kind {
+            OutsideLinkKind::References => "change its rows or its definition",
+            OutsideLinkKind::ReferencedBy => {
+                "delete its rows, change the columns that foreign key points at, or change its definition"
+            }
+            OutsideLinkKind::ReadByView | OutsideLinkKind::Reads => "change its definition",
         }
     }
 
@@ -234,7 +366,11 @@ fn links_of(shown: &Shown, reader: &dyn KeyValueRead) -> SqlResult<Vec<Link>> {
                 let KeyOwner::Relations(target, source) = key_owner(key) else {
                     return Ok(true);
                 };
-                if shown.relations.contains(target) && shown.hidden.contains(source) {
+                let hidden_source = shown.hidden.contains(source)
+                    || (toward_listed == OutsideLinkKind::ReferencedBy
+                        && source != target
+                        && shown.references_through_hidden_columns(source, target));
+                if shown.relations.contains(target) && hidden_source {
                     links.push(Link {
                         listed: target.to_vec(),
                         outside: source.to_vec(),
@@ -293,21 +429,242 @@ fn relation_names(reader: &dyn KeyValueRead) -> SqlResult<Vec<String>> {
     Ok(names)
 }
 
+fn split_column_list(entry: &str) -> (&str, Option<Vec<String>>) {
+    let Some((name, rest)) = entry.split_once('(') else {
+        return (entry, None);
+    };
+    let Some(inside) = rest.strip_suffix(')') else {
+        return (entry, None);
+    };
+    let mut columns: Vec<String> = Vec::new();
+    for column in inside.split(',').map(str::trim) {
+        if !column.is_empty() && !columns.iter().any(|kept| kept == column) {
+            columns.push(column.to_owned());
+        }
+    }
+    (name.trim_end(), Some(columns))
+}
+
+fn referenced_positions(
+    reader: &dyn KeyValueRead,
+    parent: &[u8],
+    child: &[u8],
+) -> SqlResult<Option<(Vec<Column>, Vec<usize>)>> {
+    let (Ok(parent_name), Ok(child_name)) =
+        (std::str::from_utf8(parent), std::str::from_utf8(child))
+    else {
+        return Ok(None);
+    };
+    let (Some(parent_stored), Some(child_stored)) = (
+        reader.get(&table_key(parent_name))?,
+        reader.get(&table_key(child_name))?,
+    ) else {
+        return Ok(None);
+    };
+    if is_view_record(&parent_stored) || is_view_record(&child_stored) {
+        return Ok(None);
+    }
+    let (Ok(parent_table), Ok(child_table)) = (
+        TableDefinition::decode(parent_name, &parent_stored),
+        TableDefinition::decode(child_name, &child_stored),
+    ) else {
+        return Ok(None);
+    };
+    let mut positions = Vec::new();
+    let mut references = child_table
+        .foreign_keys
+        .iter()
+        .filter(|key| key.parent == parent_name)
+        .peekable();
+    if references.peek().is_none() {
+        return Ok(None);
+    }
+    for key in references {
+        if key.parent_columns.is_empty() {
+            positions.extend(parent_table.primary_key.iter().copied());
+        }
+        for column in &key.parent_columns {
+            match parent_table.column_index(column) {
+                Some(at) => positions.push(at),
+                None => return Ok(None),
+            }
+        }
+    }
+    if positions.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((parent_table.columns, positions)))
+}
+
+#[derive(Debug)]
+struct Narrowed {
+    name: Vec<u8>,
+    parents_through_hidden_columns: Vec<Vec<u8>>,
+    columns: Vec<Column>,
+    kept: Vec<usize>,
+    kept_names: Vec<String>,
+    hidden_indexes: HashSet<u32>,
+    definition: Vec<u8>,
+}
+
+impl Narrowed {
+    fn of(table: &TableDefinition, wanted: &[String]) -> Option<Self> {
+        let kept: Vec<usize> = table
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, column)| wanted.contains(&column.name))
+            .map(|(at, _)| at)
+            .collect();
+        if kept.is_empty() || table.primary_key.iter().any(|at| !kept.contains(at)) {
+            return None;
+        }
+        let mut shown = table.clone();
+        for at in (0..table.columns.len()).rev() {
+            if !kept.contains(&at) {
+                shown = without_column(&shown, at);
+            }
+        }
+        let hidden_indexes = table
+            .indexes
+            .iter()
+            .map(|index| index.id)
+            .filter(|id| !shown.indexes.iter().any(|index| index.id == *id))
+            .collect();
+        let parents_through_hidden_columns = table
+            .foreign_keys
+            .iter()
+            .filter(|key| key.columns.iter().any(|at| !kept.contains(at)))
+            .map(|key| key.parent.as_bytes().to_vec())
+            .collect();
+        Some(Self {
+            name: table.name.as_bytes().to_vec(),
+            parents_through_hidden_columns,
+            columns: table.columns.clone(),
+            kept_names: kept
+                .iter()
+                .map(|&at| table.columns[at].name.clone())
+                .collect(),
+            kept,
+            hidden_indexes,
+            definition: shown.encode(),
+        })
+    }
+
+    fn row(&self, stored: &[u8]) -> SqlResult<Vec<u8>> {
+        let values = decode_row(stored, &self.columns)?;
+        let shown: Vec<_> = self
+            .kept
+            .iter()
+            .take_while(|&&at| at < values.len())
+            .map(|&at| values[at].clone())
+            .collect();
+        Ok(encode_row(&shown))
+    }
+
+    fn hides_index_entry(&self, key: &[u8], id: u32) -> bool {
+        let prefix = table_indexes_prefix(id);
+        let Some(rest) = key.strip_prefix(prefix.as_slice()) else {
+            return false;
+        };
+        rest.get(..4)
+            .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+            .is_none_or(|bytes| self.hidden_indexes.contains(&u32::from_be_bytes(bytes)))
+    }
+}
+
+fn without_column(table: &TableDefinition, removed: usize) -> TableDefinition {
+    let mut shown = table.clone();
+    let name = shown.columns.remove(removed).name;
+    shown.primary_key = shifted(&table.primary_key, removed).unwrap_or_default();
+    if shown.primary_key.is_empty() {
+        shown.primary_key_name = None;
+    }
+    shown.identities = table.identities_without_column(removed);
+    shown.default_dialects = table.default_dialects_without_column(removed);
+    shown.domains = table.domains_without_column(removed);
+    if shown.auto_increment_column().is_none() {
+        shown.identity_seed = None;
+    }
+    shown.indexes = table
+        .indexes
+        .iter()
+        .filter_map(|index| {
+            shifted(&index.columns, removed).map(|columns| IndexDefinition {
+                columns,
+                ..index.clone()
+            })
+        })
+        .collect();
+    shown.checks.retain(|check| {
+        crate::constraints::parse_check(check).is_ok_and(|expr| !mentions_column(&expr, &name))
+    });
+    shown.foreign_keys = table
+        .foreign_keys
+        .iter()
+        .filter(|key| key.parent != table.name || !key.parent_columns.contains(&name))
+        .filter_map(|key| {
+            shifted(&key.columns, removed).map(|columns| ForeignKey {
+                columns,
+                ..key.clone()
+            })
+        })
+        .collect();
+    shown.forget_missing_statuses();
+    shown
+}
+
+fn shifted(positions: &[usize], removed: usize) -> Option<Vec<usize>> {
+    if positions.contains(&removed) {
+        return None;
+    }
+    Some(
+        positions
+            .iter()
+            .map(|&at| if at > removed { at - 1 } else { at })
+            .collect(),
+    )
+}
+
+fn mentions_column(expr: &Expr, column: &str) -> bool {
+    if let ExprKind::Column { name, .. } = &expr.kind
+        && name == column
+    {
+        return true;
+    }
+    crate::eval::children(expr)
+        .into_iter()
+        .any(|child| mentions_column(child, column))
+}
+
 #[derive(Debug)]
 struct Shown {
     relations: HashSet<Vec<u8>>,
     hidden: HashSet<Vec<u8>>,
     tables: HashSet<u32>,
     table_names: HashMap<u32, Vec<u8>>,
+    narrowed: HashMap<u32, Narrowed>,
+    narrowed_names: HashMap<Vec<u8>, u32>,
 }
 
 impl Shown {
-    fn of(listed: &[String], reader: &dyn KeyValueRead, name_tables: bool) -> SqlResult<Self> {
+    fn references_through_hidden_columns(&self, child: &[u8], parent: &[u8]) -> bool {
+        self.narrowed_named(child).is_some_and(|narrowed| {
+            narrowed
+                .parents_through_hidden_columns
+                .iter()
+                .any(|listed| listed == parent)
+        })
+    }
+
+    fn of(tables: &VisibleTables, reader: &dyn KeyValueRead, name_tables: bool) -> SqlResult<Self> {
         let mut shown = Self {
             relations: HashSet::new(),
             hidden: HashSet::new(),
             tables: HashSet::new(),
             table_names: HashMap::new(),
+            narrowed: HashMap::new(),
+            narrowed_names: HashMap::new(),
         };
         let tables_prefix = table_key("");
         let mut failure = None;
@@ -319,12 +676,17 @@ impl Shown {
                 let Some(name) = key.get(tables_prefix.len()..) else {
                     return Ok(true);
                 };
-                let visible = std::str::from_utf8(name)
-                    .is_ok_and(|text| listed.iter().any(|wanted| wanted == text));
-                if !visible {
+                let position = std::str::from_utf8(name)
+                    .ok()
+                    .and_then(|text| tables.internal.iter().position(|wanted| wanted == text));
+                let column_list = position
+                    .and_then(|at| tables.columns.get(at))
+                    .and_then(Option::as_ref);
+                let view = is_view_record(value);
+                if position.is_none() || (view && column_list.is_some()) {
                     shown.hidden.insert(name.to_vec());
                     if name_tables
-                        && !is_view_record(value)
+                        && !view
                         && let Ok(table) =
                             TableDefinition::decode(&String::from_utf8_lossy(name), value)
                     {
@@ -332,22 +694,31 @@ impl Shown {
                     }
                     return Ok(true);
                 }
-                shown.relations.insert(name.to_vec());
-                if !is_view_record(value) {
-                    let text = String::from_utf8_lossy(name);
-                    match TableDefinition::decode(&text, value) {
-                        Ok(table) => {
-                            shown.tables.insert(table.id);
-                            if name_tables {
-                                shown.table_names.insert(table.id, name.to_vec());
-                            }
-                        }
-                        Err(error) => {
-                            failure = Some(error);
-                            return Ok(false);
-                        }
-                    }
+                if view {
+                    shown.relations.insert(name.to_vec());
+                    return Ok(true);
                 }
+                let text = String::from_utf8_lossy(name);
+                let table = match TableDefinition::decode(&text, value) {
+                    Ok(table) => table,
+                    Err(error) => {
+                        failure = Some(error);
+                        return Ok(false);
+                    }
+                };
+                if name_tables {
+                    shown.table_names.insert(table.id, name.to_vec());
+                }
+                if let Some(columns) = column_list {
+                    let Some(narrowed) = Narrowed::of(&table, columns) else {
+                        shown.hidden.insert(name.to_vec());
+                        return Ok(true);
+                    };
+                    shown.narrowed_names.insert(name.to_vec(), table.id);
+                    shown.narrowed.insert(table.id, narrowed);
+                }
+                shown.relations.insert(name.to_vec());
+                shown.tables.insert(table.id);
                 Ok(true)
             },
         )?;
@@ -363,12 +734,20 @@ impl Shown {
                 let Some(name) = key.get(sequences.len()..) else {
                     return Ok(true);
                 };
-                let listed_itself = std::str::from_utf8(name)
-                    .is_ok_and(|text| listed.iter().any(|wanted| wanted == text));
+                let listed_itself = std::str::from_utf8(name).is_ok_and(|text| {
+                    tables
+                        .internal
+                        .iter()
+                        .zip(&tables.columns)
+                        .any(|(wanted, columns)| wanted == text && columns.is_none())
+                });
                 let owned_by_visible = SequenceDefinition::decode(value)
                     .ok()
                     .and_then(|sequence| sequence.owned_by)
-                    .is_some_and(|(owner, _)| shown.relations.contains(owner.as_bytes()));
+                    .is_some_and(|(owner, column)| {
+                        shown.relations.contains(owner.as_bytes())
+                            && shown.shows_column(owner.as_bytes(), &column)
+                    });
                 if listed_itself || owned_by_visible {
                     shown.relations.insert(name.to_vec());
                 } else {
@@ -380,8 +759,20 @@ impl Shown {
         Ok(shown)
     }
 
+    fn narrowed_named(&self, name: &[u8]) -> Option<&Narrowed> {
+        self.narrowed_names
+            .get(name)
+            .and_then(|id| self.narrowed.get(id))
+    }
+
+    fn shows_column(&self, table: &[u8], column: &str) -> bool {
+        self.narrowed_named(table)
+            .is_none_or(|narrowed| narrowed.kept_names.iter().any(|kept| kept == column))
+    }
+
     fn hides(&self, key: &[u8]) -> bool {
-        match key_owner(key) {
+        let owner = key_owner(key);
+        let hidden = match owner {
             KeyOwner::Everyone => false,
             KeyOwner::Relation(name) => !self.relations.contains(name),
             KeyOwner::Table(id) => !self.tables.contains(&id),
@@ -390,12 +781,142 @@ impl Shown {
             }
             KeyOwner::CommentOn(owner) => self.hidden.contains(owner),
             KeyOwner::Unreadable => true,
+        };
+        hidden || (!self.narrowed.is_empty() && self.hides_narrowed_part(key, owner))
+    }
+
+    fn hides_narrowed_part(&self, key: &[u8], owner: KeyOwner<'_>) -> bool {
+        match owner {
+            KeyOwner::Table(id) => self
+                .narrowed
+                .get(&id)
+                .is_some_and(|narrowed| narrowed.hides_index_entry(key, id)),
+            KeyOwner::CommentOn(owner) => {
+                self.narrowed_named(owner).is_some()
+                    && key
+                        .get(NAMESPACE.len() + 1..)
+                        .and_then(split_comment_key)
+                        .is_none_or(|(_, kind, _)| kind != CommentKind::Relation)
+            }
+            KeyOwner::Everyone => match crate::roles::column_grant_target(key) {
+                Some((table, column)) => std::str::from_utf8(column)
+                    .is_ok_and(|column| !self.shows_column(table, column)),
+                None => narrowed_setting_owner(key)
+                    .is_some_and(|owner| self.narrowed_named(owner).is_some()),
+            },
+            KeyOwner::Relation(_) | KeyOwner::Relations(..) | KeyOwner::Unreadable => false,
+        }
+    }
+
+    fn reshapes(&self, key: &[u8]) -> bool {
+        if self.narrowed.is_empty() {
+            return false;
+        }
+        match key_owner(key) {
+            KeyOwner::Relation(name) => {
+                self.narrowed_named(name).is_some()
+                    && std::str::from_utf8(name).is_ok_and(|text| key == table_key(text).as_slice())
+            }
+            KeyOwner::Table(id) => {
+                self.narrowed.contains_key(&id) && key.starts_with(&rows_prefix(id))
+            }
+            _ => false,
+        }
+    }
+
+    fn reshaped(&self, key: &[u8], value: &[u8]) -> SqlResult<Option<Vec<u8>>> {
+        if !self.reshapes(key) {
+            return Ok(None);
+        }
+        match key_owner(key) {
+            KeyOwner::Relation(name) => Ok(self
+                .narrowed_named(name)
+                .map(|narrowed| narrowed.definition.clone())),
+            KeyOwner::Table(id) => match self.narrowed.get(&id) {
+                Some(narrowed) => narrowed.row(value).map(Some),
+                None => Ok(None),
+            },
+            _ => Ok(None),
         }
     }
 }
 
+fn narrowed_setting_owner(key: &[u8]) -> Option<&[u8]> {
+    let (&space, rest) = key.strip_prefix(NAMESPACE)?.split_first()?;
+    if space == crate::statistics::STATISTICS_SPACE {
+        Some(rest)
+    } else if space == crate::sqlite_schema_text::SQLITE_TEXT_SPACE {
+        Some(crate::sqlite_schema_text::owning_relation(rest))
+    } else {
+        None
+    }
+}
+
+fn get_through(
+    shown: Option<&Shown>,
+    inner: &dyn KeyValueRead,
+    key: &[u8],
+) -> SqlResult<Option<Vec<u8>>> {
+    let Some(shown) = shown else {
+        return inner.get(key);
+    };
+    if shown.hides(key) {
+        return Ok(None);
+    }
+    let Some(value) = inner.get(key)? else {
+        return Ok(None);
+    };
+    Ok(Some(shown.reshaped(key, &value)?.unwrap_or(value)))
+}
+
+fn get_with_through(
+    shown: Option<&Shown>,
+    inner: &dyn KeyValueRead,
+    key: &[u8],
+    read: &mut dyn FnMut(&[u8]) -> SqlResult<()>,
+) -> SqlResult<bool> {
+    let Some(shown) = shown else {
+        return inner.get_with(key, read);
+    };
+    if shown.hides(key) {
+        return Ok(false);
+    }
+    if !shown.reshapes(key) {
+        return inner.get_with(key, read);
+    }
+    match get_through(Some(shown), inner, key)? {
+        Some(value) => {
+            read(&value)?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+fn scan_through(
+    shown: Option<&Shown>,
+    inner: &dyn KeyValueRead,
+    start: &[u8],
+    end: &[u8],
+    direction: ScanDirection,
+    visit: &mut EntryVisitor<'_>,
+) -> SqlResult<()> {
+    let Some(shown) = shown else {
+        return inner.scan(start, end, direction, visit);
+    };
+    inner.scan(start, end, direction, &mut |key, value| {
+        if shown.hides(key) {
+            return Ok(true);
+        }
+        match shown.reshaped(key, value)? {
+            Some(reshaped) => visit(key, &reshaped),
+            None => visit(key, value),
+        }
+    })
+}
+
 /// A read of a store through [`VisibleTables`]: what it hides reads as absent, and scans
-/// pass over it. Made by [`VisibleTables::read`], or by [`VisibleRead::everything`] to hide
+/// pass over it; a table listed with columns reads with only those columns. Made by [`VisibleTables::read`], or by [`VisibleRead::everything`] to hide
 /// nothing.
 #[derive(Debug)]
 pub struct VisibleRead<R> {
@@ -408,18 +929,11 @@ impl<R: KeyValueRead> VisibleRead<R> {
     pub fn everything(inner: R) -> Self {
         Self { inner, shown: None }
     }
-
-    fn hides(&self, key: &[u8]) -> bool {
-        self.shown.as_ref().is_some_and(|shown| shown.hides(key))
-    }
 }
 
 impl<R: KeyValueRead> KeyValueRead for VisibleRead<R> {
     fn get(&self, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
-        if self.hides(key) {
-            return Ok(None);
-        }
-        self.inner.get(key)
+        get_through(self.shown.as_ref(), &self.inner, key)
     }
 
     fn get_with(
@@ -427,10 +941,7 @@ impl<R: KeyValueRead> KeyValueRead for VisibleRead<R> {
         key: &[u8],
         read: &mut dyn FnMut(&[u8]) -> SqlResult<()>,
     ) -> SqlResult<bool> {
-        if self.hides(key) {
-            return Ok(false);
-        }
-        self.inner.get_with(key, read)
+        get_with_through(self.shown.as_ref(), &self.inner, key, read)
     }
 
     fn scan(
@@ -440,19 +951,55 @@ impl<R: KeyValueRead> KeyValueRead for VisibleRead<R> {
         direction: ScanDirection,
         visit: &mut EntryVisitor<'_>,
     ) -> SqlResult<()> {
-        let Some(shown) = &self.shown else {
-            return self.inner.scan(start, end, direction, visit);
-        };
-        self.inner.scan(start, end, direction, &mut |key, value| {
-            if shown.hides(key) {
-                return Ok(true);
-            }
-            visit(key, value)
-        })
+        scan_through(
+            self.shown.as_ref(),
+            &self.inner,
+            start,
+            end,
+            direction,
+            visit,
+        )
     }
 
     fn committed_version(&self) -> Option<u64> {
         self.inner.committed_version()
+    }
+
+    fn collection_names(&self) -> SqlResult<Vec<String>> {
+        match self.shown {
+            None => self.inner.collection_names(),
+            Some(_) => Ok(Vec::new()),
+        }
+    }
+
+    fn has_collection(&self, name: &str) -> SqlResult<bool> {
+        match self.shown {
+            None => self.inner.has_collection(name),
+            Some(_) => Ok(false),
+        }
+    }
+
+    fn collection_get(&self, name: &str, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
+        match self.shown {
+            None => self.inner.collection_get(name, key),
+            Some(_) => Ok(None),
+        }
+    }
+
+    fn collection_scan(
+        &self,
+        name: &str,
+        start: &[u8],
+        end: &[u8],
+        direction: ScanDirection,
+        visit: &mut EntryVisitor<'_>,
+    ) -> SqlResult<()> {
+        match self.shown {
+            None => self
+                .inner
+                .collection_scan(name, start, end, direction, visit),
+            Some(_) => Ok(()),
+        }
     }
 }
 
@@ -470,9 +1017,31 @@ struct Confined {
     shown: Shown,
     links: Vec<Link>,
     rows_blocked: HashSet<u32>,
+    keys_guarded: HashMap<u32, KeyGuard>,
     refused: bool,
     dropped_trigger_records: Vec<Vec<u8>>,
     dropped_definitions: Vec<Vec<u8>>,
+}
+
+#[derive(Debug)]
+struct KeyGuard {
+    columns: Vec<Column>,
+    positions: Vec<usize>,
+    link: usize,
+}
+
+impl KeyGuard {
+    fn keeps_referenced_columns(&self, old: &[u8], new: &[u8]) -> bool {
+        let (Ok(old), Ok(new)) = (
+            decode_row(old, &self.columns),
+            decode_row(new, &self.columns),
+        ) else {
+            return false;
+        };
+        self.positions
+            .iter()
+            .all(|&at| old.get(at).is_some() && old.get(at) == new.get(at))
+    }
 }
 
 enum Written<'k> {
@@ -486,10 +1055,36 @@ enum Written<'k> {
 enum Refusal {
     Outside(String),
     OutsideTable(u32),
-    Linked(OutsideLink),
+    Linked { link: OutsideLink, rows: bool },
+    ReferencedRow(OutsideLink),
+    Narrowed(String),
     Shared,
     Trigger,
-    Code(String),
+    Code { routine: String, place: StoredCode },
+    Subquery(StoredCode),
+    UnreadablePolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoredCode {
+    TableExpression,
+    Policy,
+}
+
+impl StoredCode {
+    fn what(self) -> &'static str {
+        match self {
+            Self::TableExpression => "a default, check or generated expression",
+            Self::Policy => "a row-security policy",
+        }
+    }
+
+    fn runs_when(self) -> &'static str {
+        match self {
+            Self::TableExpression => "every later session that writes the table",
+            Self::Policy => "every later session that reads or writes the table",
+        }
+    }
 }
 
 impl Refusal {
@@ -510,11 +1105,11 @@ impl Refusal {
                 ),
             )
             .with_hint(hint),
-            Self::Linked(link) => SqlError::new(
+            Self::Linked { link, rows } => SqlError::new(
                 SqlState::INSUFFICIENT_PRIVILEGE,
                 format!(
                     "cannot change the {} of \"{}\": {}, and this session may not change \"{}\" (--tables), so the change could reach it",
-                    link.blocked_changes(),
+                    if rows { "rows" } else { "definition" },
                     link.listed,
                     link.describe(),
                     link.outside
@@ -524,6 +1119,26 @@ impl Refusal {
                 "Ask the user to add \"{}\" to the tables this session is limited to (--tables).",
                 link.outside
             )),
+            Self::ReferencedRow(link) => SqlError::new(
+                SqlState::INSUFFICIENT_PRIVILEGE,
+                format!(
+                    "cannot delete a row of \"{}\" or change a column a foreign key points at: {}, and this session may neither change nor check \"{}\" (--tables)",
+                    link.listed,
+                    link.describe(),
+                    link.outside
+                ),
+            )
+            .with_hint(format!(
+                "Inserting rows and changing other columns works. To delete rows or change those columns, ask the user to add \"{}\" to the tables this session is limited to (--tables).",
+                link.outside
+            )),
+            Self::Narrowed(name) => SqlError::new(
+                SqlState::INSUFFICIENT_PRIVILEGE,
+                format!(
+                    "cannot change \"{name}\": this session may read only some of its columns (--tables), so it may not change its rows or its definition"
+                ),
+            )
+            .with_hint("Ask the user to list the table without a column list (--tables) to let this session change it."),
             Self::Shared => SqlError::new(
                 SqlState::INSUFFICIENT_PRIVILEGE,
                 "cannot change a schema, type, routine, package, role or other object outside a table: this session may change only the tables it is limited to (--tables)",
@@ -534,39 +1149,104 @@ impl Refusal {
                 "cannot create, change or drop a trigger: a trigger runs its function in every later session that changes the table, where --tables does not confine it, and dropping one switches off what it guards",
             )
             .with_hint("Ask the user to change the trigger."),
-            Self::Code(function) => SqlError::new(
+            Self::Code { routine, place } => SqlError::new(
                 SqlState::INSUFFICIENT_PRIVILEGE,
                 format!(
-                    "cannot write a default, check or generated expression that calls the routine \"{function}\": it runs in every later session that writes the table, where --tables does not confine it"
+                    "cannot write {} that calls the routine \"{routine}\": it runs in {}, where --tables does not confine it",
+                    place.what(),
+                    place.runs_when()
                 ),
+            )
+            .with_hint("Ask the user to make this change."),
+            Self::Subquery(place) => SqlError::new(
+                SqlState::INSUFFICIENT_PRIVILEGE,
+                format!(
+                    "cannot write {} with a subquery: it runs in {}, where --tables does not confine it",
+                    place.what(),
+                    place.runs_when()
+                ),
+            )
+            .with_hint("Ask the user to make this change."),
+            Self::UnreadablePolicy => SqlError::new(
+                SqlState::INSUFFICIENT_PRIVILEGE,
+                "cannot write a row-security policy whose expressions cannot be read back: this session writes only policies it can check (--tables)",
             )
             .with_hint("Ask the user to make this change."),
         }
     }
 }
 
-fn user_routine_in_new_expressions(
+fn new_stored_code(
     reader: &dyn KeyValueRead,
     key: &[u8],
     value: &[u8],
-) -> SqlResult<Option<String>> {
+) -> SqlResult<Option<Refusal>> {
+    let (expressions, place) = match new_policy_conditions(key, value) {
+        Some(Some(expressions)) => (expressions, StoredCode::Policy),
+        Some(None) => return Ok(Some(Refusal::UnreadablePolicy)),
+        None => (
+            new_table_expressions(reader, key, value)?,
+            StoredCode::TableExpression,
+        ),
+    };
+    if expressions.iter().any(has_subquery) {
+        return Ok(Some(Refusal::Subquery(place)));
+    }
+    let mut called = Vec::new();
+    for expr in &expressions {
+        called_names(expr, &mut called);
+    }
+    let mut tables = crate::execute::TableCache::default();
+    for function in called {
+        let found = crate::routines::resolve(reader, &mut tables, &function);
+        if !matches!(found, Ok(None)) {
+            return Ok(Some(Refusal::Code {
+                routine: shown_name(&function),
+                place,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+fn new_policy_conditions(key: &[u8], value: &[u8]) -> Option<Option<Vec<Expr>>> {
+    let conditions = crate::row_security::stored_conditions(key, value)?;
+    let Ok(conditions) = conditions else {
+        return Some(None);
+    };
+    let settings = crate::settings::Settings::default();
+    let mut expressions = Vec::with_capacity(conditions.len());
+    for condition in conditions {
+        match crate::row_security::condition_expression(&condition, &settings) {
+            Ok(expr) => expressions.push(expr),
+            Err(_) => return Some(None),
+        }
+    }
+    Some(Some(expressions))
+}
+
+fn new_table_expressions(
+    reader: &dyn KeyValueRead,
+    key: &[u8],
+    value: &[u8],
+) -> SqlResult<Vec<Expr>> {
+    let mut expressions = Vec::new();
     let Written::Definition(name) = written(key) else {
-        return Ok(None);
+        return Ok(expressions);
     };
     let Ok(text) = std::str::from_utf8(name) else {
-        return Ok(None);
+        return Ok(expressions);
     };
     if key != table_key(text).as_slice() || is_view_record(value) {
-        return Ok(None);
+        return Ok(expressions);
     }
     let Ok(table) = TableDefinition::decode(text, value) else {
-        return Ok(None);
+        return Ok(expressions);
     };
     let before = match reader.get(key)? {
         Some(stored) if !is_view_record(&stored) => TableDefinition::decode(text, &stored).ok(),
         _ => None,
     };
-    let mut expressions = Vec::new();
     for (at, column) in table.columns.iter().enumerate() {
         let kept = before.as_ref().is_some_and(|before| {
             before
@@ -592,25 +1272,19 @@ fn user_routine_in_new_expressions(
             expressions.push(expr);
         }
     }
-    let mut called = Vec::new();
-    for expr in &expressions {
-        called_names(expr, &mut called);
-    }
-    let mut tables = crate::execute::TableCache::default();
-    for function in called {
-        let found = crate::routines::resolve(reader, &mut tables, &function);
-        if !matches!(found, Ok(None)) {
-            return Ok(Some(shown_name(&function)));
-        }
-    }
-    Ok(None)
+    Ok(expressions)
 }
 
-fn called_names(expr: &crate::ast::Expr, called: &mut Vec<String>) {
-    if let crate::ast::ExprKind::Function { name, arguments } = &expr.kind {
+fn has_subquery(expr: &Expr) -> bool {
+    matches!(expr.kind, ExprKind::Subquery(_))
+        || crate::eval::children(expr).into_iter().any(has_subquery)
+}
+
+fn called_names(expr: &Expr, called: &mut Vec<String>) {
+    if let ExprKind::Function { name, arguments } = &expr.kind {
         if name == crate::routines::ROUTINE_CALL {
-            if let Some(crate::ast::Expr {
-                kind: crate::ast::ExprKind::Literal(crate::ast::Literal::String(routine)),
+            if let Some(Expr {
+                kind: ExprKind::Literal(crate::ast::Literal::String(routine)),
                 ..
             }) = arguments.first()
             {
@@ -660,12 +1334,15 @@ fn table_setting_owner(key: &[u8]) -> Option<&[u8]> {
     let (&space, rest) = key.strip_prefix(NAMESPACE)?.split_first()?;
     if space == crate::statistics::STATISTICS_SPACE
         || space == crate::row_security::ROW_SECURITY_SPACE
-        || space == crate::sqlite_schema_text::SQLITE_TEXT_SPACE
     {
         Some(rest)
+    } else if space == crate::sqlite_schema_text::SQLITE_TEXT_SPACE {
+        Some(crate::sqlite_schema_text::owning_relation(rest))
     } else if space == crate::roles::GRANT_SPACE || space == crate::row_security::POLICY_SPACE {
-        let end = rest.iter().position(|&byte| byte == 0)?;
+        let end = rest.iter().rposition(|&byte| byte == 0)?;
         rest.get(..end)
+    } else if space == crate::roles::COLUMN_GRANT_SPACE {
+        crate::roles::column_grant_target(key).map(|(table, _)| table)
     } else {
         None
     }
@@ -715,9 +1392,15 @@ impl Confined {
         key: &[u8],
         value: Option<&[u8]>,
     ) -> Result<(), Refusal> {
+        if self.shown.narrowed_named(name).is_some() {
+            return Err(Refusal::Narrowed(Self::shown(name)));
+        }
         if self.may_use(name) {
             return match self.links.iter().find(|link| link.listed == name) {
-                Some(link) => Err(Refusal::Linked(link.shown())),
+                Some(link) => Err(Refusal::Linked {
+                    link: link.shown(),
+                    rows: false,
+                }),
                 None => Ok(()),
             };
         }
@@ -748,6 +1431,9 @@ impl Confined {
                 None => Refusal::OutsideTable(id),
             });
         }
+        if let Some(narrowed) = self.shown.narrowed.get(&id) {
+            return Err(Refusal::Narrowed(Self::shown(&narrowed.name)));
+        }
         if !self.rows_blocked.contains(&id) {
             return Ok(());
         }
@@ -757,7 +1443,10 @@ impl Confined {
                 .find(|link| link.kind.blocks_rows() && &link.listed == name)
         });
         match link {
-            Some(link) => Err(Refusal::Linked(link.shown())),
+            Some(link) => Err(Refusal::Linked {
+                link: link.shown(),
+                rows: true,
+            }),
             None => Err(Refusal::OutsideTable(id)),
         }
     }
@@ -818,15 +1507,46 @@ impl Confined {
 }
 
 impl<W: KeyValueWrite> VisibleWrite<W> {
-    fn admit(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
+    fn admit(&mut self, key: &[u8], value: &[u8], replaces: bool) -> SqlResult<()> {
         let Some(confined) = &mut self.confined else {
             return Ok(());
         };
-        if let Some(function) = user_routine_in_new_expressions(&self.inner, key, value)? {
+        if let Some(refusal) = new_stored_code(&self.inner, key, value)? {
             confined.refused = true;
-            return Err(Refusal::Code(function).error());
+            return Err(refusal.error());
         }
-        confined.admit(key, value)
+        confined.admit(key, value)?;
+        if replaces {
+            self.guard_referenced_columns(key, Some(value))?;
+        }
+        Ok(())
+    }
+
+    fn guard_referenced_columns(&mut self, key: &[u8], new: Option<&[u8]>) -> SqlResult<()> {
+        let Some(confined) = &mut self.confined else {
+            return Ok(());
+        };
+        let KeyOwner::Table(id) = key_owner(key) else {
+            return Ok(());
+        };
+        let Some(guard) = confined.keys_guarded.get(&id) else {
+            return Ok(());
+        };
+        if !key.starts_with(&rows_prefix(id)) {
+            return Ok(());
+        }
+        let Some(old) = self.inner.get(key)? else {
+            return Ok(());
+        };
+        if new.is_some_and(|new| guard.keeps_referenced_columns(&old, new)) {
+            return Ok(());
+        }
+        let refusal = match confined.links.get(guard.link) {
+            Some(link) => Refusal::ReferencedRow(link.shown()),
+            None => Refusal::OutsideTable(id),
+        };
+        confined.refused = true;
+        Err(refusal.error())
     }
 
     /// `inner` with nothing hidden and nothing refused.
@@ -837,19 +1557,14 @@ impl<W: KeyValueWrite> VisibleWrite<W> {
         }
     }
 
-    fn hides(&self, key: &[u8]) -> bool {
-        self.confined
-            .as_ref()
-            .is_some_and(|confined| confined.shown.hides(key))
+    fn shown(&self) -> Option<&Shown> {
+        self.confined.as_ref().map(|confined| &confined.shown)
     }
 }
 
 impl<W: KeyValueWrite> KeyValueRead for VisibleWrite<W> {
     fn get(&self, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
-        if self.hides(key) {
-            return Ok(None);
-        }
-        self.inner.get(key)
+        get_through(self.shown(), &self.inner, key)
     }
 
     fn get_with(
@@ -857,10 +1572,7 @@ impl<W: KeyValueWrite> KeyValueRead for VisibleWrite<W> {
         key: &[u8],
         read: &mut dyn FnMut(&[u8]) -> SqlResult<()>,
     ) -> SqlResult<bool> {
-        if self.hides(key) {
-            return Ok(false);
-        }
-        self.inner.get_with(key, read)
+        get_with_through(self.shown(), &self.inner, key, read)
     }
 
     fn scan(
@@ -870,15 +1582,7 @@ impl<W: KeyValueWrite> KeyValueRead for VisibleWrite<W> {
         direction: ScanDirection,
         visit: &mut EntryVisitor<'_>,
     ) -> SqlResult<()> {
-        let Some(confined) = &self.confined else {
-            return self.inner.scan(start, end, direction, visit);
-        };
-        self.inner.scan(start, end, direction, &mut |key, value| {
-            if confined.shown.hides(key) {
-                return Ok(true);
-            }
-            visit(key, value)
-        })
+        scan_through(self.shown(), &self.inner, start, end, direction, visit)
     }
 
     fn committed_version(&self) -> Option<u64> {
@@ -888,12 +1592,12 @@ impl<W: KeyValueWrite> KeyValueRead for VisibleWrite<W> {
 
 impl<W: KeyValueWrite> KeyValueWrite for VisibleWrite<W> {
     fn put(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
-        self.admit(key, value)?;
+        self.admit(key, value, true)?;
         self.inner.put(key, value)
     }
 
     fn put_if_absent(&mut self, key: &[u8], value: &[u8]) -> SqlResult<bool> {
-        self.admit(key, value)?;
+        self.admit(key, value, false)?;
         self.inner.put_if_absent(key, value)
     }
 
@@ -908,8 +1612,9 @@ impl<W: KeyValueWrite> KeyValueWrite for VisibleWrite<W> {
             confined.refused = true;
             return Err(refusal.error());
         }
+        self.guard_referenced_columns(key, None)?;
         let deleted = self.inner.delete(key)?;
-        if deleted {
+        if deleted && let Some(confined) = &mut self.confined {
             confined.note_deleted(key);
         }
         Ok(deleted)

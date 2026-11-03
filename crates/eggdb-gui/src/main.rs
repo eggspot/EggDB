@@ -1,24 +1,42 @@
 //! `eggdb-gui`: EggDB's desktop client (D15, D256), a binary of its own so the server's
 //! size never carries the GUI. It shows the first screen's connect card in a native window, or
-//! renders it offscreen to a PNG file for scripts and tests.
+//! renders it offscreen to a PNG file for scripts and tests. `--open` opens a database file
+//! the way typing its path and pressing `Enter` does, so a PNG shows the outcome: the main
+//! window on it, or the card with the failure's lines.
 
+use std::cell::RefCell;
 use std::ffi::OsString;
+use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use eggdb_gui::clipboard::SystemClipboard;
 use eggdb_gui::connect_screen::{
-    self, ConnectAction, ConnectCard, DEFAULT_HEIGHT, DEFAULT_WIDTH, MIN_HEIGHT, MIN_WIDTH, TITLE,
+    self, DEFAULT_HEIGHT, DEFAULT_WIDTH, MIN_HEIGHT, MIN_WIDTH, TITLE,
 };
-use eggdb_gui::main_window::Faces;
+use eggdb_gui::connection::{EngineConnector, home_directory};
+use eggdb_gui::main_window::{self, Faces};
 use eggdb_gui::png::encode_png;
-use eggdb_gui::{BoxFace, SystemFaces, Theme, ThemeKind};
-use eggdb_platform::window::{WindowEvent, WindowOptions, open_window};
+use eggdb_gui::pointer::clamp_to_minimum;
+use eggdb_gui::workspace::{Screen, Workspace, WorkspaceCommand};
+use eggdb_gui::{BoxFace, Canvas, SystemFaces, Theme, ThemeKind};
+use eggdb_platform::window::{
+    AccessNode, Window, WindowEvent, WindowOptions, has_file_dialog, open_window,
+};
 
-const USAGE: &str = "Usage: eggdb-gui [--window] [--png <file>] [--theme light|dark|high-contrast] [--scale <n>] [--size <width>x<height>] [--box-text] [--frames <n>]
+const USAGE: &str = "Usage: eggdb-gui [--window] [--png <file>] [--open <path>] [--no-create] [--read-only] [--no-file-dialog] [--run <sql>] [--explain <sql>] [--theme light|dark|high-contrast] [--scale <n>] [--size <width>x<height>] [--box-text] [--frames <n>]
 
 Shows EggDB's connect screen.
   --window          open it in a native window (the default without --png)
   --png <file>      render it offscreen and write it to <file> as PNG
+  --open <path>     open the database file at <path> as the connect card's Open does
+  --no-create       uncheck \"Create the file if it does not exist\" (checked by default)
+  --read-only       check \"Open read-only\"
+  --no-file-dialog  lay the card out as on a system without an open-file dialog (with --png)
+  --run <sql>       after --open, put <sql> in the editor and run it as Ctrl/Cmd+Enter does (with --png)
+  --explain <sql>   after --open and --run, put <sql> in the editor and explain it as Ctrl/Cmd+E does (with --png)
   --theme <theme>   light (the default), dark or high-contrast
   --scale <n>       device pixels per logical pixel for --png (default 1)
   --size <w>x<h>    the logical size for --png (default 1280x800)
@@ -27,6 +45,8 @@ Shows EggDB's connect screen.
 ";
 
 const SCRIPTED_FRAME_INTERVAL: Duration = Duration::from_millis(50);
+const OPENING_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const SCRIPTED_OPEN_LIMIT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq)]
 struct Options {
@@ -37,6 +57,12 @@ struct Options {
     size: (u32, u32),
     box_text: bool,
     frames: Option<u32>,
+    open: Option<OsString>,
+    run: Option<OsString>,
+    explain: Option<OsString>,
+    create_if_missing: bool,
+    read_only: bool,
+    file_dialog: bool,
 }
 
 fn parse_size(text: &str) -> Option<(u32, u32)> {
@@ -54,6 +80,12 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<Option<Opti
         size: (DEFAULT_WIDTH, DEFAULT_HEIGHT),
         box_text: false,
         frames: None,
+        open: None,
+        run: None,
+        explain: None,
+        create_if_missing: true,
+        read_only: false,
+        file_dialog: true,
     };
     while let Some(arg) = args.next() {
         let name = arg
@@ -65,6 +97,12 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<Option<Opti
             "-h" | "--help" => return Ok(None),
             "--window" => options.window = true,
             "--box-text" => options.box_text = true,
+            "--no-create" => options.create_if_missing = false,
+            "--read-only" => options.read_only = true,
+            "--no-file-dialog" => options.file_dialog = false,
+            "--open" => options.open = Some(value("a path")?),
+            "--run" => options.run = Some(value("a statement")?),
+            "--explain" => options.explain = Some(value("a statement")?),
             "--frames" => {
                 let frames = value("a number")?;
                 options.frames = Some(
@@ -140,10 +178,53 @@ fn with_faces<T>(box_text: bool, run: impl FnOnce(Faces<'_>) -> T) -> T {
     }
 }
 
+fn workspace(options: &Options, file_dialog: bool) -> Workspace {
+    let current = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut workspace = Workspace::new(
+        Arc::new(EngineConnector),
+        home_directory(),
+        current,
+        file_dialog,
+    );
+    if let Some(card) = workspace.card_mut() {
+        card.create_if_missing = options.create_if_missing;
+        card.read_only = options.read_only;
+    }
+    workspace
+}
+
+fn render(
+    workspace: &Workspace,
+    theme: Theme,
+    faces: Faces<'_>,
+    size: (u32, u32),
+    scale: f32,
+) -> Canvas {
+    match workspace.screen() {
+        Screen::Connect(card) => connect_screen::draw(card, theme, faces, size, scale),
+        Screen::Main(window) => main_window::draw(window, theme, faces),
+    }
+}
+
 fn write_png(options: &Options, path: &OsString, faces: Faces<'_>) -> Result<(), String> {
-    let card = ConnectCard::first_start();
-    let frame = connect_screen::draw(
-        &card,
+    let mut workspace = workspace(options, options.file_dialog);
+    if let Some(open) = &options.open {
+        workspace.open_typed(&open.to_string_lossy(), Instant::now());
+        workspace.wait_for_open(SCRIPTED_OPEN_LIMIT);
+    }
+    if let Some(window) = workspace.main_window_mut() {
+        window.set_width(options.size.0 as usize);
+    }
+    if let Some(sql) = &options.run {
+        workspace.run_text(&sql.to_string_lossy(), false, Instant::now());
+        workspace.wait_for_run(SCRIPTED_OPEN_LIMIT);
+    }
+    if let Some(sql) = &options.explain {
+        workspace.explain_text(&sql.to_string_lossy(), false, Instant::now());
+        workspace.wait_for_run(SCRIPTED_OPEN_LIMIT);
+    }
+    let frame = render(
+        &workspace,
         Theme::of(options.theme),
         faces,
         options.size,
@@ -158,63 +239,175 @@ fn logical_size(device: (u32, u32), scale: f32) -> (u32, u32) {
     (logical(device.0), logical(device.1))
 }
 
+fn relayout(workspace: &mut Workspace, logical: (u32, u32)) {
+    let (width, _) = clamp_to_minimum(logical);
+    if let Some(window) = workspace.main_window_mut()
+        && window.width != (width as usize).max(main_window::WIDTH)
+    {
+        window.set_width(width as usize);
+    }
+}
+
+fn screen_tree(workspace: &Workspace, faces: Faces<'_>, logical: (u32, u32)) -> Vec<AccessNode> {
+    match workspace.screen() {
+        Screen::Connect(card) => connect_screen::accessibility_tree(card, faces, logical),
+        Screen::Main(main) => main_window::accessibility_tree(main),
+    }
+}
+
 fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
-    let mut window = open_window(&WindowOptions {
-        title: TITLE.to_owned(),
-        width: DEFAULT_WIDTH,
-        height: DEFAULT_HEIGHT,
-        min_width: MIN_WIDTH,
-        min_height: MIN_HEIGHT,
-    })
-    .map_err(|error| error.to_string())?;
+    let window: Rc<RefCell<Box<dyn Window>>> = Rc::new(RefCell::new(
+        open_window(&WindowOptions {
+            title: TITLE.to_owned(),
+            width: DEFAULT_WIDTH,
+            height: DEFAULT_HEIGHT,
+            min_width: MIN_WIDTH,
+            min_height: MIN_HEIGHT,
+        })
+        .map_err(|error| error.to_string())?,
+    ));
     let theme = Theme::of(options.theme);
-    let mut card = ConnectCard::first_start();
-    let mut scale = window.scale();
-    let mut size = window.size();
+    let mut workspace = workspace(options, has_file_dialog());
+    workspace.set_clipboard(Box::new(SystemClipboard::new(Rc::clone(&window))));
+    workspace.start_caret_blink(Instant::now());
+    if let Some(open) = &options.open {
+        workspace.open_typed(&open.to_string_lossy(), Instant::now());
+    }
+    let mut scale = window.borrow().scale();
+    let mut size = window.borrow().size();
     let mut dirty = true;
     let mut presented: u32 = 0;
-    let timeout = options.frames.map(|_| SCRIPTED_FRAME_INTERVAL);
+    let scripted = options.frames.map(|_| SCRIPTED_FRAME_INTERVAL);
     loop {
+        if workspace.tick(Instant::now()) {
+            dirty = true;
+        }
+        let logical = logical_size(size, scale);
         if dirty {
-            let logical = logical_size(size, scale);
-            let frame = connect_screen::draw(&card, theme, faces, logical, scale);
+            relayout(&mut workspace, logical);
+            let frame = render(&workspace, theme, faces, logical, scale);
             let (width, height) = (frame.width() as u32, frame.height() as u32);
             window
+                .borrow_mut()
                 .present(width, height, &frame.rgba_bytes())
                 .map_err(|error| error.to_string())?;
-            window
-                .set_accessibility_tree(&connect_screen::accessibility_tree(&card, faces, logical));
+            let tree = screen_tree(&workspace, faces, logical);
+            window.borrow_mut().set_accessibility_tree(&tree);
             dirty = false;
             presented = presented.saturating_add(1);
             if options.frames.is_some_and(|limit| presented >= limit) {
                 return Ok(());
             }
         }
-        match window
+        let polling = workspace.is_opening() || workspace.is_running();
+        let timeout = [
+            scripted,
+            polling.then_some(OPENING_POLL_INTERVAL),
+            workspace.until_caret_changes(Instant::now()),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        let event = window
+            .borrow_mut()
             .next_event(timeout)
-            .map_err(|error| error.to_string())?
-        {
-            Some(WindowEvent::Key(press)) => {
-                let (next, action) = connect_screen::handle_key(card, press);
-                card = next;
-                if action == ConnectAction::Quit {
-                    return Ok(());
-                }
+            .map_err(|error| error.to_string())?;
+        let now = Instant::now();
+        let at = move |x: f32, y: f32| (x / scale, y / scale);
+        let command = match event {
+            Some(WindowEvent::AccessRequested(request)) => {
+                let tree = screen_tree(&workspace, faces, logical);
+                workspace.access(&request, &tree, now)
+            }
+            Some(WindowEvent::Key(press)) => workspace.key(press, now),
+            Some(WindowEvent::PointerPressed {
+                x,
+                y,
+                button,
+                modifiers,
+            }) => {
+                let (x, y) = at(x, y);
+                workspace.pointer_pressed(x, y, button, modifiers, faces, logical, now)
+            }
+            Some(WindowEvent::PointerReleased { x, y, button, .. }) => {
+                let (x, y) = at(x, y);
+                workspace.pointer_released(x, y, button, faces, logical, now)
+            }
+            Some(WindowEvent::PointerMoved { x, y }) => {
+                let (x, y) = at(x, y);
+                dirty |= workspace.pointer_moved(x, y, faces, logical);
+                continue;
+            }
+            Some(WindowEvent::Wheel {
+                x,
+                y,
+                lines_down,
+                lines_right,
+                modifiers,
+            }) => {
+                let (x, y) = at(x, y);
+                dirty |= workspace.wheel(x, y, lines_down, lines_right, modifiers, faces, logical);
+                continue;
+            }
+            Some(WindowEvent::PointerLeft) => {
+                dirty |= workspace.pointer_left();
+                continue;
+            }
+            Some(WindowEvent::FileDragEntered(paths)) => {
+                workspace.drag_entered(&paths);
                 dirty = true;
+                continue;
+            }
+            Some(WindowEvent::FileDragLeft) => {
+                workspace.drag_left();
+                dirty = true;
+                continue;
+            }
+            Some(WindowEvent::FilesDropped(paths)) => {
+                workspace.drag_left();
+                workspace.dropped(&paths, now);
+                dirty = true;
+                continue;
             }
             Some(WindowEvent::Resized { width, height }) => {
                 size = (width, height);
                 dirty = true;
+                continue;
             }
             Some(WindowEvent::ScaleChanged(new_scale)) => {
                 scale = new_scale;
                 dirty = true;
+                continue;
             }
-            Some(WindowEvent::Redraw) => dirty = true,
+            Some(WindowEvent::Redraw) => {
+                dirty = true;
+                continue;
+            }
             Some(WindowEvent::CloseRequested) => return Ok(()),
-            Some(WindowEvent::Focused(_)) => {}
-            None => dirty = timeout.is_some(),
+            Some(WindowEvent::Focused(active)) => {
+                dirty |= workspace.set_window_active(active, now);
+                continue;
+            }
+            None => {
+                dirty |= scripted.is_some();
+                continue;
+            }
+        };
+        match command {
+            WorkspaceCommand::Quit => return Ok(()),
+            WorkspaceCommand::ChooseFile(dialog) => {
+                let chosen = window
+                    .borrow_mut()
+                    .choose_file_to_open(&dialog)
+                    .unwrap_or_else(|error| {
+                        eprintln!("eggdb-gui: {error}");
+                        None
+                    });
+                workspace.file_chosen(chosen.as_deref());
+            }
+            WorkspaceCommand::None => {}
         }
+        dirty = true;
     }
 }
 
@@ -261,6 +454,20 @@ mod tests {
         let window = parse(&[]).unwrap().unwrap();
         assert!(window.window && window.png.is_none());
         assert!(!window.box_text && window.frames.is_none());
+        assert!(window.create_if_missing && !window.read_only && window.file_dialog);
+        let opening = parse(&[
+            "--png",
+            "a.png",
+            "--open",
+            "shop.eggdb",
+            "--no-create",
+            "--read-only",
+            "--no-file-dialog",
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(opening.open, Some(OsString::from("shop.eggdb")));
+        assert!(!opening.create_if_missing && opening.read_only && !opening.file_dialog);
         let scripted = parse(&["--window", "--frames", "3", "--box-text"])
             .unwrap()
             .unwrap();
@@ -294,6 +501,7 @@ mod tests {
             &["--frames", "0"],
             &["--frames", "-1"],
             &["--frames"],
+            &["--open"],
             &["--frobnicate"],
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");

@@ -182,7 +182,10 @@ impl<'s> Session<'s> {
     /// its step. The batch also stops before the next statement once `on_step` returns
     /// `false`. Errors carry SQL Server's numbers ([`SqlError::vendor_code`]) and severities
     /// ([`SqlError::severity`]). In the other dialects every statement runs as
-    /// [`Session::execute_while`] would run it, and the first error ends the batch.
+    /// [`Session::execute_while`] would run it, and the first error ends the batch. On a
+    /// Transact-SQL connection that chose another dialect, a batch that executes one of SQL
+    /// Server's catalog procedures (`EXEC sp_tables ...`, `INSERT ... EXEC sp_columns_100
+    /// ...`) runs as Transact-SQL, as drivers' metadata calls expect.
     pub fn execute_batch(
         &mut self,
         text: &str,
@@ -350,6 +353,11 @@ impl<'s> Session<'s> {
         bulk_rows: Option<&mut dyn BulkRows>,
         on_step: &mut dyn FnMut(BatchStep) -> bool,
     ) -> SqlResult<()> {
+        if self.runs_sqlserver_catalog_procedure(text) {
+            return self.in_connection_dialect(|session| {
+                session.run_batch(text, parameters, bulk_rows, on_step)
+            });
+        }
         self.statement_start = 0;
         self.pending_bulk_load = None;
         let tokens =

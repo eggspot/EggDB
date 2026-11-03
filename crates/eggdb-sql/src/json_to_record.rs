@@ -155,7 +155,14 @@ fn source_text(document: &str, node: &Node, binary: bool) -> SqlResult<String> {
     }
 }
 
-fn field(document: &str, node: &Node, sql_type: Option<SqlType>, binary: bool) -> SqlResult<Value> {
+/// Reads one member as a column of `sql_type`, through the type's text input, as PostgreSQL's
+/// `populate_record` machinery does.
+pub(crate) fn field(
+    document: &str,
+    node: &Node,
+    sql_type: Option<SqlType>,
+    binary: bool,
+) -> SqlResult<Value> {
     match (&node.value, sql_type) {
         (Json::Null, _) => Ok(Value::Null),
         (_, Some(SqlType::Json)) => Ok(Value::Json(source_text(document, node, binary)?)),

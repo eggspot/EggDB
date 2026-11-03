@@ -70,6 +70,7 @@ fn exec(context: &Context<'_>, client: &mut Client) -> Reply {
             keyspace: &open,
             password_sha256: context.password_sha256,
             now_ms: context.now_ms,
+            reply_room_bytes: context.reply_room_bytes,
         };
         let mut gathered = Vec::with_capacity(queued.len());
         for arguments in &queued {

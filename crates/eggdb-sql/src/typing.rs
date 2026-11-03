@@ -124,6 +124,9 @@ fn added_function_type(
     if let Some(sql_type) = crate::json_path::result_type(name) {
         return Some(Some(sql_type));
     }
+    if let Some(sql_type) = crate::sql_json::query_result_type(name, arguments, scope) {
+        return Some(Some(sql_type));
+    }
     if matches!(name, "pg_sleep" | "pg_notify") {
         return Some(Some(SqlType::VOID));
     }
@@ -295,6 +298,11 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
     }
     if let Some(sql_type) = crate::arrays::function_type(name, arguments, scope) {
         return sql_type;
+    }
+    if crate::hstore_functions::is_populate(name) {
+        return arguments
+            .first()
+            .and_then(|argument| static_type(argument, scope));
     }
     if let Some(sql_type) = crate::hstore_functions::result_type(name, arguments.len()) {
         return Some(sql_type);

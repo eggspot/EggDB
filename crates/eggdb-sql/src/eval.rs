@@ -11,6 +11,8 @@ use crate::types::{
 };
 use std::cmp::Ordering;
 
+const UNKNOWN_TYPE_OID: u32 = 705;
+
 #[derive(Clone, Copy)]
 pub(crate) struct Source<'a> {
     pub(crate) table: &'a TableDefinition,
@@ -437,13 +439,16 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
             (crate::schemas::base_name(name).to_owned(), true)
         }
         ExprKind::Function { name, .. }
-            if crate::ranges::OPERATORS
-                .iter()
-                .any(|(_, internal)| *internal == name.as_str()) =>
+            if crate::ranges::is_operator_function(name)
+                || crate::hstore_functions::is_operator_function(name) =>
         {
             ("?column?".into(), false)
         }
-        ExprKind::Column { name, .. } | ExprKind::Function { name, .. } => (name.clone(), true),
+        ExprKind::Function { name, .. } => (
+            crate::sql_json::column_name(name).map_or_else(|| name.clone(), str::to_owned),
+            true,
+        ),
+        ExprKind::Column { name, .. } => (name.clone(), true),
         ExprKind::SessionValue { name, .. }
         | ExprKind::SqliteFunction { name, .. }
         | ExprKind::OracleFunction { name, .. } => ((*name).to_owned(), true),
@@ -752,6 +757,34 @@ impl Evaluator<'_> {
         value.sql_type().or_else(|| self.declared_type(expr))
     }
 
+    fn pg_typeof(&self, arguments: &[Expr]) -> SqlResult<Value> {
+        let [argument] = arguments else {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_FUNCTION,
+                format!(
+                    "function pg_typeof({}) does not exist",
+                    vec!["unknown"; arguments.len()].join(", ")
+                ),
+            ));
+        };
+        let value = self.eval(argument, None)?;
+        let oid = match &argument.kind {
+            ExprKind::Literal(Literal::String(_)) => UNKNOWN_TYPE_OID,
+            _ => crate::typing::static_type(argument, self.scope)
+                .or_else(|| self.type_of(&value, argument))
+                .map_or(UNKNOWN_TYPE_OID, crate::pg_catalog::type_oid),
+        };
+        let name = match oid {
+            UNKNOWN_TYPE_OID => "unknown".to_owned(),
+            oid => crate::pg_catalog::format_type(oid, None),
+        };
+        Ok(Value::Reg(Box::new(crate::pg_catalog::RegValue {
+            kind: crate::pg_catalog::RegKind::Type,
+            oid,
+            name,
+        })))
+    }
+
     pub(crate) fn declared_type(&self, expr: &Expr) -> Option<SqlType> {
         match &expr.kind {
             ExprKind::Column { qualifier, name } => {
@@ -983,6 +1016,12 @@ impl Evaluator<'_> {
             | BinaryOperator::RegexNoMatchFolded => {
                 let text = self.eval(left, Some(SqlType::Text))?;
                 let pattern = self.eval(right, Some(SqlType::Text))?;
+                let (text, pattern, folded) = crate::citext::regex_operands(text, pattern);
+                let operator = match operator {
+                    BinaryOperator::RegexMatch if folded => BinaryOperator::RegexMatchFolded,
+                    BinaryOperator::RegexNoMatch if folded => BinaryOperator::RegexNoMatchFolded,
+                    other => other,
+                };
                 crate::regex::operator(operator, &text, &pattern)
             }
             BinaryOperator::JsonField
@@ -1190,6 +1229,7 @@ impl Evaluator<'_> {
             ExprKind::Literal(Literal::Decimal(text)) => decimal_literal(text, target, true),
             _ => {
                 let value = self.eval(expr, None)?;
+                refuse_infinite_date_without_infinities(&value)?;
                 if let Value::Text(text) = &value
                     && let Some(converted) = oracle_datetime_of(text, target)
                 {
@@ -1327,6 +1367,9 @@ impl Evaluator<'_> {
                 .map(Value::Numeric)
                 .ok_or_else(invalid_extract_field);
         }
+        if infinite_instant(&value).is_some() {
+            return Err(crate::oracle_datetime::year_out_of_range());
+        }
         let Some((kind, local, offset)) = local_instant(&value)? else {
             return if value.is_null() {
                 Ok(Value::Null)
@@ -1394,6 +1437,10 @@ impl Evaluator<'_> {
             "array_any" => return crate::arrays::quantified(self, arguments, false),
             "array_all" => return crate::arrays::quantified(self, arguments, true),
             "collate" => return crate::string_functions::collated(self, arguments),
+            "pg_typeof" => return self.pg_typeof(arguments),
+            name if crate::hstore_functions::is_populate(name) => {
+                return crate::hstore_functions::populate_record(self, name, arguments);
+            }
             "to_tsvector"
             | "to_tsquery"
             | "plainto_tsquery"
@@ -1415,6 +1462,9 @@ impl Evaluator<'_> {
             }
             crate::json_functions::WHOLE_ROW => {
                 return crate::json_functions::whole_row(self, arguments);
+            }
+            name if crate::sql_json::is_query_function(name) => {
+                return crate::sql_json::query_function(self, name, arguments);
             }
             crate::json_functions::ROW_OBJECT => {
                 return crate::json_functions::row_object(self, arguments);
@@ -1913,6 +1963,19 @@ fn read_by_dialect(sql_type: SqlType) -> Option<crate::Dialect> {
     }
 }
 
+fn refuse_infinite_date_without_infinities(value: &Value) -> SqlResult<()> {
+    if crate::temporal::infinity_sign(value).is_none() {
+        return Ok(());
+    }
+    match crate::constraints::current_dialect() {
+        crate::Dialect::Oracle => Err(crate::oracle_datetime::year_out_of_range()),
+        crate::Dialect::SqlServer => {
+            crate::sqlserver_conversion::refuse_infinite(value, "datetime2")
+        }
+        _ => Ok(()),
+    }
+}
+
 fn oracle_datetime_of(text: &str, target: SqlType) -> Option<SqlResult<Value>> {
     let readable = target.is_datetime() || matches!(target, SqlType::Interval { .. });
     if !readable || crate::constraints::current_dialect() != crate::Dialect::Oracle {
@@ -1998,6 +2061,9 @@ fn infinite_instant(value: &Value) -> Option<(DateTimeKind, bool)> {
 
 fn extract_of_infinity(name: &str, field: &str, value: &Value) -> Option<SqlResult<Value>> {
     let (kind, positive) = infinite_instant(value)?;
+    if crate::constraints::current_dialect() == crate::Dialect::Oracle {
+        return Some(Err(crate::oracle_datetime::year_out_of_range()));
+    }
     Some(
         match datetime::extract_of_infinity_is_infinite(field, kind) {
             Err(error) => Err(error),
@@ -2007,10 +2073,7 @@ fn extract_of_infinity(name: &str, field: &str, value: &Value) -> Option<SqlResu
             } else {
                 f64::NEG_INFINITY
             })),
-            Ok(true) => Err(SqlError::new(
-                SqlState::FEATURE_NOT_SUPPORTED,
-                "numeric does not hold infinity yet; date_part gives it as double precision",
-            )),
+            Ok(true) => Ok(Value::Numeric(Numeric::infinity(!positive))),
         },
     )
 }
@@ -2326,6 +2389,8 @@ pub(crate) fn arithmetic(
     {
         return result;
     }
+    refuse_infinite_date_without_infinities(left)?;
+    refuse_infinite_date_without_infinities(right)?;
     if crate::constraints::current_dialect() == crate::Dialect::Oracle
         && (matches!(left, Value::Interval(_)) || matches!(right, Value::Interval(_)))
         && let Some(result) = crate::oracle_intervals::arithmetic(operator, left, right)
@@ -2333,8 +2398,14 @@ pub(crate) fn arithmetic(
         return result;
     }
     if operator == BinaryOperator::Subtract
-        && matches!(left, Value::Timestamp(_) | Value::TimestampTz(_))
-        && matches!(right, Value::Timestamp(_) | Value::TimestampTz(_))
+        && matches!(
+            left,
+            Value::Timestamp(_) | Value::TimestampTz(_) | Value::Date(_)
+        )
+        && matches!(
+            right,
+            Value::Timestamp(_) | Value::TimestampTz(_) | Value::Date(_)
+        )
         && crate::constraints::current_dialect() == crate::Dialect::Oracle
         && let Some(days) = crate::oracle_conversion::arithmetic(operator, left, right)
     {

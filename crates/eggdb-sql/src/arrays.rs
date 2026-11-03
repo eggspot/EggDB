@@ -2,7 +2,9 @@ use crate::ast::{Expr, ExprKind, Literal};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Concatenated, Evaluator, Scope, and, compare_truth, or, truth_value};
 use crate::pg_catalog::CatalogType;
-use crate::types::{Conversion, SqlType, Value, compare_values, convert, equality_key};
+use crate::types::{
+    Conversion, DefinedType, SqlType, Value, compare_values, convert, equality_key,
+};
 use std::cmp::Ordering;
 
 const MAX_ITEMS: usize = 1 << 27;
@@ -63,9 +65,13 @@ pub enum ArrayElement {
     Jsonb,
     /// `bytea[]`.
     Bytea,
+    /// `citext[]`.
+    Citext,
+    /// `hstore[]`.
+    Hstore,
 }
 
-const ELEMENT_CODES: [(ArrayElement, u8); 26] = [
+const ELEMENT_CODES: [(ArrayElement, u8); 28] = [
     (ArrayElement::SmallInt, 1),
     (ArrayElement::Integer, 2),
     (ArrayElement::BigInt, 3),
@@ -92,6 +98,8 @@ const ELEMENT_CODES: [(ArrayElement, u8); 26] = [
     (ArrayElement::Json, 24),
     (ArrayElement::Jsonb, 25),
     (ArrayElement::Bytea, 26),
+    (ArrayElement::Citext, 27),
+    (ArrayElement::Hstore, 28),
 ];
 
 impl ArrayElement {
@@ -123,6 +131,8 @@ impl ArrayElement {
             Self::Json => SqlType::Json,
             Self::Jsonb => SqlType::Jsonb,
             Self::Bytea => SqlType::Bytea,
+            Self::Citext => SqlType::Defined(DefinedType::CITEXT),
+            Self::Hstore => SqlType::Defined(DefinedType::HSTORE),
         }
     }
 
@@ -188,6 +198,8 @@ impl ArrayElement {
             SqlType::Json => Self::Json,
             SqlType::Jsonb => Self::Jsonb,
             SqlType::Bytea => Self::Bytea,
+            SqlType::Defined(defined) if defined == DefinedType::CITEXT => Self::Citext,
+            SqlType::Defined(defined) if defined == DefinedType::HSTORE => Self::Hstore,
             _ => return None,
         })
     }
@@ -282,6 +294,23 @@ fn too_many_items() -> SqlError {
         SqlState::PROGRAM_LIMIT_EXCEEDED,
         format!("an array may hold at most {MAX_ITEMS} elements"),
     )
+}
+
+/// Refuses an array starting at `lower_bound` with `length` elements when its upper bound would
+/// pass `i32::MAX`, with PostgreSQL's `54000`.
+pub(crate) fn check_upper_bound(lower_bound: i32, length: usize) -> SqlResult<()> {
+    let length = i64::try_from(length).unwrap_or(i64::MAX);
+    if i64::from(lower_bound)
+        .saturating_add(length)
+        .saturating_sub(1)
+        > i64::from(i32::MAX)
+    {
+        return Err(SqlError::new(
+            SqlState::PROGRAM_LIMIT_EXCEEDED,
+            "array size exceeds the maximum allowed",
+        ));
+    }
+    Ok(())
 }
 
 fn multidimensional() -> SqlError {
@@ -441,12 +470,15 @@ pub(crate) fn parse_text(text: &str, element: ArrayElement) -> SqlResult<ArrayVa
         }
     };
     skip_spaces(&mut at);
+    let bounds = if characters.get(at) == Some(&'[') {
+        let (bounds, next) = dimension_bounds(text, &characters, at)?;
+        at = next;
+        skip_spaces(&mut at);
+        Some(bounds)
+    } else {
+        None
+    };
     match characters.get(at) {
-        Some('[') => {
-            return Err(SqlError::not_supported(
-                "array bounds such as [1:2]= in an array literal are not supported yet",
-            ));
-        }
         Some('{') => at += 1,
         _ => {
             return Err(malformed(
@@ -551,7 +583,86 @@ pub(crate) fn parse_text(text: &str, element: ArrayElement) -> SqlResult<ArrayVa
     if at < characters.len() {
         return Err(malformed(text, "Junk after closing right brace."));
     }
-    Ok(builder.finish())
+    let mut array = builder.finish();
+    if let Some((lower, upper)) = bounds {
+        let declared = i64::from(upper) - i64::from(lower) + 1;
+        if declared != array.items.len() as i64 {
+            return Err(malformed(
+                text,
+                "Specified array dimensions do not match array contents.",
+            ));
+        }
+        array.lower_bound = lower;
+    }
+    Ok(array)
+}
+
+fn dimension_number(text: &str, characters: &[char], at: &mut usize) -> SqlResult<i32> {
+    while characters.get(*at).copied().is_some_and(is_array_space) {
+        *at += 1;
+    }
+    let start = *at;
+    if matches!(characters.get(*at), Some('+' | '-')) {
+        *at += 1;
+    }
+    let digits_start = *at;
+    while characters.get(*at).is_some_and(char::is_ascii_digit) {
+        *at += 1;
+    }
+    if *at == digits_start {
+        return Err(malformed(
+            text,
+            "\"[\" must introduce explicitly-specified array dimensions.",
+        ));
+    }
+    let number: String = characters
+        .get(start..*at)
+        .unwrap_or_default()
+        .iter()
+        .collect();
+    let parsed = number.parse::<i32>().map_err(|_| {
+        SqlError::new(
+            SqlState::NUMERIC_VALUE_OUT_OF_RANGE,
+            "array bound is out of integer range",
+        )
+    })?;
+    while characters.get(*at).copied().is_some_and(is_array_space) {
+        *at += 1;
+    }
+    Ok(parsed)
+}
+
+fn dimension_bounds(
+    text: &str,
+    characters: &[char],
+    start: usize,
+) -> SqlResult<((i32, i32), usize)> {
+    let mut at = start + 1;
+    let first = dimension_number(text, characters, &mut at)?;
+    let (lower, upper) = if characters.get(at) == Some(&':') {
+        at += 1;
+        (first, dimension_number(text, characters, &mut at)?)
+    } else {
+        (1, first)
+    };
+    if characters.get(at) != Some(&']') {
+        return Err(malformed(text, "Missing \"]\" after array dimensions."));
+    }
+    at += 1;
+    if upper < lower {
+        return Err(SqlError::new(
+            SqlState::INVALID_TEXT_REPRESENTATION,
+            "upper bound cannot be less than lower bound",
+        ));
+    }
+    while characters.get(at).copied().is_some_and(is_array_space) {
+        at += 1;
+    }
+    match characters.get(at) {
+        Some('[') => Err(multidimensional()),
+        Some('=') => Ok(((lower, upper), at + 1)),
+        _ => Err(malformed(text, "Missing \"=\" after array dimensions.")),
+    }
 }
 
 pub(crate) fn convert_to(
@@ -1102,6 +1213,7 @@ fn concatenate(
         }
     }
     let mut joined = builder.finish();
+    check_upper_bound(lower_bound, joined.items.len())?;
     joined.lower_bound = lower_bound;
     Ok(Value::Array(Box::new(joined)))
 }

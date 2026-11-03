@@ -25,6 +25,7 @@ const DEFAULT_SAMPLE_ROWS: u64 = 10;
 const LARGEST_SAMPLE_ROWS: u64 = 1_000;
 const DEFAULT_MAX_ENTRIES: u64 = 100;
 const LARGEST_MAX_ENTRIES: u64 = 1_000;
+const MOST_LISTED_COLLECTIONS: usize = 20;
 const DEFAULT_PAGE_ROWS: u64 = 100;
 const LARGEST_PAGE_ROWS: u64 = 1_000;
 const BUSY_RETRY: Duration = Duration::from_secs(1);
@@ -1398,6 +1399,50 @@ fn entry(out: &mut JsonOut, key: &[u8], value: Option<&[u8]>) {
     out.end_object();
 }
 
+fn missing_collection(read: &impl KeyValueRead, name: &str, database: &str) -> ToolError {
+    let names = read.collection_names().unwrap_or_default();
+    let known = if names.is_empty() {
+        "it has no collections".to_owned()
+    } else {
+        let listed: Vec<String> = names
+            .iter()
+            .take(MOST_LISTED_COLLECTIONS)
+            .map(|known| shown_name(known))
+            .collect();
+        let more = names.len().saturating_sub(MOST_LISTED_COLLECTIONS);
+        let rest = if more == 0 {
+            String::new()
+        } else {
+            format!(" and {more} more")
+        };
+        format!("its collections are {}{rest}", listed.join(", "))
+    };
+    ToolError::new(
+        "collection_not_found",
+        format!(
+            "{database} has no collection named {}; {known}.",
+            shown_name(name)
+        ),
+    )
+    .with_fix("Name one of its collections, or leave collection out to read the default key space.")
+}
+
+fn require_collection<O: DatabaseOpener>(
+    read: &impl KeyValueRead,
+    name: &str,
+    call: &Call<'_, O>,
+    limits: &CallLimits,
+) -> Result<(), ToolError> {
+    let found = read
+        .has_collection(name)
+        .map_err(|error| call.sql_failure(limits, error))?;
+    if found {
+        Ok(())
+    } else {
+        Err(missing_collection(read, name, call.database_name))
+    }
+}
+
 fn kv_get<O: DatabaseOpener>(
     arguments: &Arguments<'_>,
     call: &Call<'_, O>,
@@ -1406,24 +1451,31 @@ fn kv_get<O: DatabaseOpener>(
     let key = arguments
         .bytes("key", "key_hex")?
         .ok_or_else(|| ToolError::invalid("give key or key_hex"))?;
-    if in_sql_key_space(&key) {
+    let collection = arguments.string("collection")?;
+    if collection.is_none() && in_sql_key_space(&key) {
         return Err(ToolError::invalid(
             "that key is in SQL's key space; read tables with run_sql",
         ));
     }
     let value = call.with_database(|store, limits| {
-        store
+        let read = store
             .begin_read()
-            .and_then(|read| read.get(&key))
-            .map_err(|error| call.sql_failure(limits, error))
+            .map_err(|error| call.sql_failure(limits, error))?;
+        match collection {
+            None => read.get(&key),
+            Some(name) => {
+                require_collection(&read, name, call, limits)?;
+                read.collection_get(name, &key)
+            }
+        }
+        .map_err(|error| call.sql_failure(limits, error))
     })?;
     let mut out = JsonOut::new();
-    out.begin_object()
-        .key("notice")
-        .string(NOTICE)
-        .key("found")
-        .boolean(value.is_some())
-        .key("entry");
+    out.begin_object().key("notice").string(NOTICE);
+    if let Some(name) = collection {
+        out.key("collection").string(name);
+    }
+    out.key("found").boolean(value.is_some()).key("entry");
     entry(&mut out, &key, value.as_deref());
     out.end_object();
     Ok(ToolSuccess {
@@ -1466,28 +1518,37 @@ fn kv_scan<O: DatabaseOpener>(
             high = prefix_end;
         }
     }
-    let reserved_end = after_prefix(RESERVED_KEY_PREFIX).unwrap_or_else(|| far_end.clone());
-    let ranges = [
-        (low.clone(), high.clone().min(RESERVED_KEY_PREFIX.to_vec())),
-        (low.max(reserved_end), high),
-    ];
+    let collection = arguments.string("collection")?;
+    let ranges = match collection {
+        Some(_) => vec![(low, high)],
+        None => {
+            let reserved_end = after_prefix(RESERVED_KEY_PREFIX).unwrap_or_else(|| far_end.clone());
+            vec![
+                (low.clone(), high.clone().min(RESERVED_KEY_PREFIX.to_vec())),
+                (low.max(reserved_end), high),
+            ]
+        }
+    };
     let mut out = JsonOut::new();
-    out.begin_object()
-        .key("notice")
-        .string(NOTICE)
-        .key("entries")
-        .begin_array();
+    out.begin_object().key("notice").string(NOTICE);
+    if let Some(name) = collection {
+        out.key("collection").string(name);
+    }
+    out.key("entries").begin_array();
     let mut listed = 0u64;
     let mut next_start: Option<Vec<u8>> = None;
     call.with_database(|store, limits| {
         let read = store
             .begin_read()
             .map_err(|error| call.sql_failure(limits, error))?;
+        if let Some(name) = collection {
+            require_collection(&read, name, call, limits)?;
+        }
         for (from, to) in &ranges {
             if from >= to || next_start.is_some() {
                 continue;
             }
-            read.scan(from, to, ScanDirection::Forward, &mut |key, value| {
+            let mut visit = |key: &[u8], value: &[u8]| -> Result<bool, SqlError> {
                 if listed >= max_entries {
                     next_start = Some(key.to_vec());
                     return Ok(false);
@@ -1502,7 +1563,13 @@ fn kv_scan<O: DatabaseOpener>(
                 out.encoded(&one);
                 listed += 1;
                 Ok(true)
-            })
+            };
+            match collection {
+                Some(name) => {
+                    read.collection_scan(name, from, to, ScanDirection::Forward, &mut visit)
+                }
+                None => read.scan(from, to, ScanDirection::Forward, &mut visit),
+            }
             .map_err(|error| call.sql_failure(limits, error))?;
         }
         Ok(())
@@ -1546,6 +1613,9 @@ mod tests {
         };
         use crate::json_out::JsonOut;
         use eggdb_sql::Dialect;
+
+        const COLLECTION_DESCRIPTION: &str =
+            "A collection's name: read that named key space instead of the default one.";
 
         fn name(tool: Tool) -> &'static str {
             match tool {
@@ -1618,10 +1688,10 @@ mod tests {
                     "Returns the first rows of a table or view as they are stored, to see what its data looks like: a table's in primary-key order, a view's in the order its query gives them. Not a random sample."
                 }
                 Tool::KvGet => {
-                    "Reads the value stored under one key of the database's key-value store (the keys outside SQL's tables). Give the key as text (key) or as hexadecimal bytes (key_hex)."
+                    "Reads the value stored under one key of the database's key-value store (the keys outside SQL's tables). Give the key as text (key) or as hexadecimal bytes (key_hex), and a collection to read that named key space instead of the default one."
                 }
                 Tool::KvScan => {
-                    "Lists keys of the database's key-value store in key order with their values, by prefix or by range, a page at a time: pass a cut result's next_start_hex as start_hex to read on. Keys under SQL's tables are left out; read tables with run_sql."
+                    "Lists keys of the database's key-value store in key order with their values, by prefix or by range, a page at a time: pass a cut result's next_start_hex as start_hex to read on. Give a collection to list that named key space instead of the default one. Keys under SQL's tables are left out; read tables with run_sql."
                 }
                 Tool::RowList => not_shipped(),
             }
@@ -1702,6 +1772,7 @@ mod tests {
                         "string",
                         "The key's bytes in hexadecimal, such as 7573657231.",
                     );
+                    property(out, "collection", "string", COLLECTION_DESCRIPTION);
                 }
                 Tool::KvScan => {
                     property(
@@ -1746,6 +1817,7 @@ mod tests {
                         .key("description")
                         .string("Leave the values out.")
                         .end_object();
+                    property(out, "collection", "string", COLLECTION_DESCRIPTION);
                 }
                 Tool::RowList => not_shipped(),
             }
@@ -1949,7 +2021,7 @@ mod tests {
         let limited = instructions(false, true);
         assert!(limited.is_ascii() && !limited.contains('\n'), "{limited}");
         assert!(
-            limited.contains(" The user limited this session to some tables (--tables): list_tables shows exactly those, any other table does not exist here and a query naming one fails as missing; kv_get and kv_scan are not offered. To reach more, ask the user to widen --tables. Start with list_tables"),
+            limited.contains(" The user limited this session to some tables (--tables): list_tables shows exactly those, any other table does not exist here and a query naming one fails as missing; kv_get and kv_scan are not offered. A table listed with some of its columns shows only those, and naming another of its columns fails as missing. To reach more, ask the user to widen --tables. Start with list_tables"),
             "{limited}"
         );
         assert!(shipped.contains("oracle); kv_get and kv_scan read keys. A write"));
@@ -1963,6 +2035,7 @@ mod tests {
         assert!(
             writing.contains("needs the user's confirmation. The user limited this session to some tables (--tables): you may read and change only those")
                 && writing.contains("is refused with SQLSTATE 42501 and rolled back")
+                && writing.contains("A table listed with some of its columns shows only those, naming another of its columns fails as missing, and its rows cannot be changed.")
                 && writing.contains("To reach more, ask the user to widen --tables. Start with list_tables"),
             "{writing}"
         );

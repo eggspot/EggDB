@@ -138,20 +138,41 @@ fn sqlite_schema_keeps_the_create_table_text_as_written() {
 }
 
 #[test]
-fn sqlite_schema_shows_the_current_definition_after_a_change() {
+fn sqlite_schema_edits_the_kept_text_after_add_column_and_rename() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Sqlite);
-    last(&mut session, "CREATE TABLE pets(id integer primary key)");
-    last(&mut session, "ALTER TABLE pets ADD COLUMN age integer");
-    let altered = sqlite_text(&mut session, "pets");
-    assert!(
-        altered.starts_with("sql\nCREATE TABLE pets (") && altered.contains("age"),
-        "{altered}"
+    last(
+        &mut session,
+        "CREATE TABLE pets(id integer primary key, name text, UNIQUE (name))",
+    );
+    last(&mut session, "create index  by_name on pets(name  desc)");
+    last(
+        &mut session,
+        "ALTER TABLE pets ADD COLUMN age  integer DEFAULT 0",
+    );
+    assert_eq!(
+        sqlite_text(&mut session, "pets"),
+        "sql\nCREATE TABLE pets(id integer primary key, name text, age  integer DEFAULT 0, UNIQUE (name))\nSELECT 1"
     );
     last(&mut session, "ALTER TABLE pets RENAME TO animals");
+    assert_eq!(
+        sqlite_text(&mut session, "animals"),
+        "sql\nCREATE TABLE \"animals\"(id integer primary key, name text, age  integer DEFAULT 0, UNIQUE (name))\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT tbl_name, sql FROM sqlite_schema WHERE name = 'by_name'"
+        ),
+        "tbl_name|sql\nanimals|CREATE INDEX by_name on \"animals\"(name  desc)\nSELECT 1"
+    );
+    last(
+        &mut session,
+        "ALTER TABLE animals RENAME COLUMN age TO years",
+    );
     let renamed = sqlite_text(&mut session, "animals");
     assert!(
-        renamed.starts_with("sql\nCREATE TABLE animals ("),
+        renamed.starts_with("sql\nCREATE TABLE animals (") && renamed.contains("years"),
         "{renamed}"
     );
     last(&mut session, "DROP TABLE animals");
@@ -160,6 +181,106 @@ fn sqlite_schema_shows_the_current_definition_after_a_change() {
         sqlite_text(&mut session, "animals"),
         "sql\nCREATE TABLE animals(kind text)\nSELECT 1"
     );
+}
+
+#[test]
+fn sqlite_schema_keeps_index_view_and_trigger_texts_as_written() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Sqlite);
+    last(&mut session, "CREATE TABLE t(a int, b text)");
+    last(
+        &mut session,
+        "create unique index if not exists main.t_ab on t(a,b)",
+    );
+    last(
+        &mut session,
+        "CREATE VIEW IF NOT EXISTS main.big(x) AS select a from t where a > 10",
+    );
+    last(
+        &mut session,
+        "CREATE TRIGGER IF NOT EXISTS t_added AFTER INSERT ON t BEGIN SELECT 1; END",
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT type, name, tbl_name, rootpage, sql FROM sqlite_schema WHERE type <> 'table'"
+        ),
+        "type|name|tbl_name|rootpage|sql\n\
+         index|t_ab|t|3|CREATE UNIQUE INDEX t_ab on t(a,b)\n\
+         view|big|big|0|CREATE VIEW big(x) AS select a from t where a > 10\n\
+         trigger|t_added|t|0|CREATE TRIGGER t_added AFTER INSERT ON t BEGIN SELECT 1; END\n\
+         SELECT 3"
+    );
+    last(&mut session, "DROP INDEX t_ab");
+    last(&mut session, "DROP VIEW big");
+    last(&mut session, "CREATE INDEX t_ab ON t (a, b)");
+    let mut postgres = Session::new(&store);
+    last(
+        &mut postgres,
+        "CREATE VIEW big AS select a from t where a > 10",
+    );
+    drop(postgres);
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT type, sql FROM sqlite_schema WHERE name IN ('t_ab', 'big') ORDER BY type"
+        ),
+        "type|sql\nindex|CREATE INDEX t_ab ON t (a, b)\nview|CREATE VIEW big AS select a from t where a > 10\nSELECT 2"
+    );
+}
+
+#[test]
+fn a_catalog_written_before_the_index_and_view_texts_shows_generated_text_and_alters() {
+    use crate::store::{KeyValueRead, KeyValueStore, KeyValueWrite};
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Sqlite);
+    last(&mut session, "CREATE TABLE t(a int)");
+    last(&mut session, "CREATE INDEX t_a ON t(a)");
+    last(&mut session, "CREATE VIEW v AS SELECT a FROM t");
+    drop(session);
+    let mut prefix = crate::encoding::NAMESPACE.to_vec();
+    prefix.push(crate::sqlite_schema_text::SQLITE_TEXT_SPACE);
+    let mut table_record = prefix.clone();
+    table_record.extend_from_slice(b"t");
+    let mut keep_table_only = store.begin_write().unwrap();
+    let record = keep_table_only
+        .get(&table_record)
+        .unwrap()
+        .expect("the table's text as written");
+    crate::store::delete_prefix(&mut keep_table_only, &prefix).unwrap();
+    keep_table_only.put(&table_record, &record).unwrap();
+    keep_table_only.commit().unwrap();
+    let mut session = Session::with_dialect(&store, Dialect::Sqlite);
+    let shown = last(
+        &mut session,
+        "SELECT type, name, sql FROM sqlite_schema ORDER BY type",
+    );
+    assert!(
+        shown.contains("index|t_a|CREATE INDEX t_a ON t (a)")
+            && shown.contains("table|t|CREATE TABLE t(a int)")
+            && shown.contains("view|v|CREATE VIEW v AS SELECT a FROM t"),
+        "{shown}"
+    );
+    last(&mut session, "DROP VIEW v");
+    last(&mut session, "ALTER TABLE t ADD COLUMN b text");
+    last(&mut session, "ALTER TABLE t RENAME TO u");
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT sql FROM sqlite_schema WHERE name = 'u'"
+        ),
+        "sql\nCREATE TABLE \"u\"(a int, b text)\nSELECT 1"
+    );
+    let index = last(
+        &mut session,
+        "SELECT sql FROM sqlite_schema WHERE name = 't_a'",
+    );
+    assert!(index.contains("CREATE INDEX t_a ON u (a)"), "{index}");
+    let mut wiped = store.begin_write().unwrap();
+    crate::store::delete_prefix(&mut wiped, &prefix).unwrap();
+    wiped.commit().unwrap();
+    let text = sqlite_text(&mut session, "u");
+    assert!(text.starts_with("sql\nCREATE TABLE u ("), "{text}");
 }
 
 #[test]

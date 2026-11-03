@@ -20,7 +20,7 @@ pub(super) fn after_statement(result: &mut QueryResult) {
     }
 }
 
-fn identifier(name: &str) -> String {
+pub(super) fn identifier(name: &str) -> String {
     let shown = swap_uniform_case(name);
     let plain = shown
         .chars()

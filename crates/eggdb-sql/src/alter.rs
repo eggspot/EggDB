@@ -94,7 +94,8 @@ pub(crate) fn alter_table(
         )
         .at(alter.name.position));
     }
-    crate::sqlite_schema_text::forget(writer, &alter.name.text)?;
+    let sqlite_texts =
+        crate::sqlite_schema_text::AlteredTexts::take(writer, &alter.name.text, dialect)?;
     let mut name = alter.name.text.clone();
     for action in &alter.actions {
         if let Some(notice) = apply(writer, tables, &mut name, action, dialect)? {
@@ -107,8 +108,10 @@ pub(crate) fn alter_table(
         }
         if let AlterAction::DropColumn { name: column, .. } = action {
             crate::comments::forget_part(writer, &name, CommentKind::Column, &column.text)?;
+            crate::roles::forget_column(writer, &name, &column.text)?;
         }
     }
+    sqlite_texts.save(writer, &name, &alter.actions)?;
     Ok(result)
 }
 
@@ -143,6 +146,7 @@ fn apply(
         AlterAction::AddColumn {
             column,
             if_not_exists,
+            ..
         } => add_column(writer, tables, name, column, *if_not_exists, dialect),
         AlterAction::DropColumn {
             name: column,
@@ -152,6 +156,7 @@ fn apply(
         AlterAction::RenameColumn { from, to } => {
             rename_column(writer, tables, name, from, to, dialect)?;
             crate::comments::move_part(writer, name, CommentKind::Column, &from.text, &to.text)?;
+            crate::roles::move_column(writer, name, &from.text, &to.text)?;
             Ok(None)
         }
         AlterAction::RenameTable(to) => {
@@ -572,6 +577,7 @@ fn add_column(
         };
         rewrite_in_place(writer, &table, &old_columns, &mut map)?;
     }
+    crate::roles::forget_column(writer, &table.name, &definition.name.text)?;
     save(writer, &table)?;
     if definition.unique.is_some() {
         add_constraint(
@@ -1195,6 +1201,9 @@ fn rename_table(
     crate::sequences::rename_owner(writer, &old_name, None, &to.text)?;
     crate::comments::move_owner(writer, &old_name, &to.text)?;
     crate::triggers::move_table_triggers(writer, &old_name, &to.text)?;
+    crate::roles::forget_relation_access(writer, &to.text)?;
+    crate::roles::move_table(writer, &old_name, &to.text)?;
+    crate::row_security::move_table(writer, &old_name, &to.text)?;
     crate::partitions::rename(writer, &old_name, &to.text)?;
     crate::statistics::rename(writer, &old_name, &to.text)?;
     constraints::refresh_flags(writer, tables, &to.text)
@@ -1800,6 +1809,7 @@ fn add_constraint(
                     position: spec.position,
                 },
                 if_not_exists: false,
+                sqlite_text: None,
             };
             indexes::create_index_as(writer, tables, &create, dialect, true).map(|_| ())
         }

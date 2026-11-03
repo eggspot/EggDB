@@ -1,4 +1,4 @@
-use crate::commands::{Shared, run};
+use crate::commands::{Shared, exceeded_memory_limit, run};
 use crate::cursors::Cursors;
 use crate::message::{
     HEADER_BYTES, OP_MSG, OP_QUERY, Request, message_reply, query_reply, read_header, read_message,
@@ -7,6 +7,7 @@ use crate::message::{
 use eggdb_auth::scram::{ScramExchange, ScramVerifier};
 use eggdb_bson::{Bson, Document};
 use eggdb_documents::Store;
+use eggdb_platform::connection_limits::MemoryBudget;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Mutex;
@@ -29,6 +30,9 @@ pub struct ServerConfig {
     pub max_connections: usize,
     /// Fills a buffer with unpredictable bytes, for SCRAM nonces.
     pub random: fn(&mut [u8]) -> io::Result<()>,
+    /// The memory every connection's messages and open cursors hold together,
+    /// shared with the server's other listeners.
+    pub memory_budget: std::sync::Arc<MemoryBudget>,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -107,6 +111,14 @@ fn without_generic_fields(body: &Document) -> Document {
     )
 }
 
+fn refusal_reply(op_code: i32, reply_id: i32, request_id: i32, refusal: &Document) -> Vec<u8> {
+    if op_code == OP_QUERY {
+        query_reply(reply_id, request_id, refusal, false)
+    } else {
+        message_reply(reply_id, request_id, refusal)
+    }
+}
+
 /// Serves one connection: reads requests from `reader` and writes replies to `writer` until
 /// the client closes it or sends something that is not a valid message.
 pub(crate) fn serve_stream(
@@ -116,6 +128,7 @@ pub(crate) fn serve_stream(
     writer: &mut impl Write,
 ) -> io::Result<()> {
     let mut next_reply_id = 1i32;
+    let mut held = shared.config.memory_budget.empty_reservation();
     loop {
         let mut header_bytes = [0u8; HEADER_BYTES];
         match reader.read_exact(&mut header_bytes) {
@@ -126,6 +139,16 @@ pub(crate) fn serve_stream(
         let Ok(header) = read_header(&header_bytes) else {
             return Ok(());
         };
+        if !held.hold_if_large(header.length) {
+            let refusal = exceeded_memory_limit(&format!("a message of {} bytes", header.length));
+            writer.write_all(&refusal_reply(
+                header.op_code,
+                next_reply_id,
+                header.request_id,
+                &refusal,
+            ))?;
+            return Ok(());
+        }
         let mut body = vec![0u8; header.length - HEADER_BYTES];
         reader.read_exact(&mut body)?;
         let request = match header.op_code {
@@ -178,6 +201,7 @@ pub(crate) fn serve_stream(
         if let Some(reply) = reply {
             writer.write_all(&reply)?;
         }
+        held.hold_if_large(0);
     }
 }
 
@@ -195,7 +219,10 @@ pub fn serve(
     let shared = Shared {
         store,
         config,
-        cursors: Mutex::new(Cursors::new(u64::from_le_bytes(seed))),
+        cursors: Mutex::new(Cursors::new(
+            u64::from_le_bytes(seed),
+            &config.memory_budget,
+        )),
         started: Instant::now(),
     };
     let active = AtomicUsize::new(0);

@@ -269,6 +269,56 @@ fn integer_bitwise_and_and_or_keep_postgresql_types() {
 }
 
 #[test]
+fn integer_xor_and_not_keep_postgresql_types_and_precedence() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        ok(
+            &mut session,
+            "SELECT 5 # 3 AS a, 5::smallint # 3::smallint AS b, 12::bigint # 10 AS c, \
+             NULL::integer # 1 AS d, ~5 AS e, ~0::bigint AS f, ~NULL::smallint AS g"
+        ),
+        "a|b|c|d|e|f|g\n6|6|6|NULL|-6|-1|NULL\nSELECT 1"
+    );
+    assert_eq!(
+        ok(
+            &mut session,
+            "SELECT pg_typeof(5::smallint # 3::smallint) AS a, pg_typeof(1::smallint # 1) AS b, \
+             pg_typeof(~5::smallint) AS c, pg_typeof(~5) AS d, pg_typeof(~5::bigint) AS e"
+        ),
+        "a|b|c|d|e\nsmallint|integer|smallint|integer|bigint\nSELECT 1"
+    );
+    assert_eq!(
+        ok(
+            &mut session,
+            "SELECT ~ 1 + 2 AS a, 1 + ~1 AS b, 1 # 2 & 3 AS c, 6 # 3 = 5 AS d, \
+             1 + ~1 * 2 AS e, (~1) # 1 AS f"
+        ),
+        "a|b|c|d|e|f\n-4|-1|3|t|-2|-1\nSELECT 1"
+    );
+    assert_eq!(ok(&mut session, "SELECT ~7"), "?column?\n-8\nSELECT 1");
+    assert_eq!(
+        ok(&mut session, "SELECT 'abc' ~ 'b' AS a, 'abc' !~ 'b' AS b"),
+        "a|b\nt|f\nSELECT 1"
+    );
+    ok(
+        &mut session,
+        "CREATE TABLE flags (id integer, bits smallint)",
+    );
+    ok(&mut session, "INSERT INTO flags VALUES (1, 6), (2, 9)");
+    assert_eq!(
+        ok(
+            &mut session,
+            "SELECT id, bits # 3::smallint AS x, ~bits AS n FROM flags WHERE bits # 1 = 7 ORDER BY id"
+        ),
+        "id|x|n\n1|5|-7\nSELECT 1"
+    );
+    assert_eq!(state(&mut session, "SELECT 'a'::text # 1"), "42883");
+    assert_eq!(state(&mut session, "SELECT ~'a'::text"), "42883");
+    assert_eq!(state(&mut session, "SELECT ~1.5"), "42883");
+}
+
+#[test]
 fn pgjdbc_get_index_info_lists_every_index_column_in_order() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);

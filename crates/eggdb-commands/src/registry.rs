@@ -128,7 +128,7 @@ pub const ERROR_CODES: &[ErrorCode] = &[
     code(
         "already_exists",
         Category::Exists,
-        "a file is already where a new one would go, and it is never replaced",
+        "a file is already where a new one would go, or a collection already has the name a rename gives, and neither is ever replaced",
     ),
     code(
         "source_failed",
@@ -411,6 +411,7 @@ const STATS_FIELDS: &[FieldDefinition] = &[
     field("file_bytes", FieldType::Integer),
     field("last_commit_stamp", FieldType::Text),
     field("last_commit_time", FieldType::Time),
+    field("collections", FieldType::Array),
 ];
 
 const EXPORT_FIELDS: &[FieldDefinition] = &[
@@ -587,6 +588,7 @@ pub const COMMANDS: &[CommandDefinition] = &[
     keys::COLLECTION_LIST,
     keys::COLLECTION_ADD,
     keys::COLLECTION_DELETE,
+    keys::COLLECTION_MOVE,
     programs::MCP,
     programs::AUDIT,
     programs::HELP,
@@ -644,6 +646,12 @@ const fn text_argument(
 }
 
 const NOTICE: FieldDefinition = field("notice", FieldType::Text);
+
+const COLLECTION_ARGUMENT: ArgumentDefinition = text_argument(
+    "collection",
+    "A collection's name: read that named key space instead of the default one.",
+    ArgumentTarget::Option("collection"),
+);
 
 const STATEMENT_RESULT: &[FieldDefinition] = &[
     NOTICE,
@@ -835,7 +843,7 @@ pub const TOOLS: &[ToolDefinition] = &[
     ToolDefinition {
         name: "kv_get",
         title: "Get a key",
-        description: "Reads the value stored under one key of the database's key-value store (the keys outside SQL's tables). Give the key as text (key) or as hexadecimal bytes (key_hex).",
+        description: "Reads the value stored under one key of the database's key-value store (the keys outside SQL's tables). Give the key as text (key) or as hexadecimal bytes (key_hex), and a collection to read that named key space instead of the default one.",
         read_only_server_description: None,
         command: Some(&["get"]),
         fixed: &["--format", "json"],
@@ -846,6 +854,7 @@ pub const TOOLS: &[ToolDefinition] = &[
                 "The key's bytes in hexadecimal, such as 7573657231.",
                 ArgumentTarget::OperandHex("key"),
             ),
+            COLLECTION_ARGUMENT,
         ],
         max_effect: Effect::Read,
         grant: Grant::KeyValueStore,
@@ -854,6 +863,7 @@ pub const TOOLS: &[ToolDefinition] = &[
         confirm: None,
         result: &[
             NOTICE,
+            field("collection", FieldType::Text),
             field("found", FieldType::Boolean),
             field("entry", FieldType::Object),
         ],
@@ -862,7 +872,7 @@ pub const TOOLS: &[ToolDefinition] = &[
     ToolDefinition {
         name: "kv_scan",
         title: "Scan keys",
-        description: "Lists keys of the database's key-value store in key order with their values, by prefix or by range, a page at a time: pass a cut result's next_start_hex as start_hex to read on. Keys under SQL's tables are left out; read tables with run_sql.",
+        description: "Lists keys of the database's key-value store in key order with their values, by prefix or by range, a page at a time: pass a cut result's next_start_hex as start_hex to read on. Give a collection to list that named key space instead of the default one. Keys under SQL's tables are left out; read tables with run_sql.",
         read_only_server_description: None,
         command: Some(&["scan"]),
         fixed: &["--format", "json"],
@@ -915,6 +925,7 @@ pub const TOOLS: &[ToolDefinition] = &[
                 required: false,
                 maps_to: ArgumentTarget::Option("keys-only"),
             },
+            COLLECTION_ARGUMENT,
         ],
         max_effect: Effect::Read,
         grant: Grant::KeyValueStore,
@@ -923,6 +934,7 @@ pub const TOOLS: &[ToolDefinition] = &[
         confirm: None,
         result: &[
             NOTICE,
+            field("collection", FieldType::Text),
             field("entries", FieldType::Array),
             field("returned_entries", FieldType::Integer),
             field("truncated", FieldType::Boolean),

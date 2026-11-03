@@ -140,7 +140,7 @@ pub(super) const SERVE: CommandDefinition = CommandDefinition {
     synopsis: "<file>",
     summary: "serve the file to PostgreSQL, MySQL and SQL Server clients; see --listen",
     description: "Serves the file to PostgreSQL clients, and with options to MySQL and SQL Server (TDS) clients, until stopped: on this machine's loopback address without TLS, and on any address with TLS, which other machines must then use; clients log in with a password and may run any statement. The first line says where it listens.",
-    usage: "eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--idle-timeout <seconds>] [--socket-dir <directory>] [--mysql-socket <file>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--read-only] [--create]",
+    usage: "eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--max-connection-memory <size>] [--idle-timeout <seconds>] [--log-slow-statements <milliseconds>] [--statement-statistics <count>] [--socket-dir <directory>] [--mysql-socket <file>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--read-only] [--create]",
     help: "\
 Serves the file to PostgreSQL clients: psql and PostgreSQL drivers connect to it unchanged and
 run the SQL of eggdb sql. Clients log in as one user with a password (SCRAM-SHA-256), which
@@ -168,8 +168,20 @@ the running statements, rolls back open transactions and stops with exit 0.
       --database <name>           the name clients connect to (default: the file name
                                   without its extension, so app.db is app)
       --max-connections <count>   connections open at once, one thread each (default 64)
+      --max-connection-memory <size>
+                                  memory every listener's connections may hold together for
+                                  requests, prepared statements, portals and results
+                                  (default 4g; at least 1m)
       --idle-timeout <seconds>    close a logged-in connection that sends nothing for that
                                   long (default 3600; 0 never closes it)
+      --log-slow-statements <milliseconds>
+                                  log every statement that runs at least that long, on any
+                                  protocol, as one line with its time, database, user,
+                                  protocol, rows and text with each literal as $1, $2, ...
+                                  (0 logs every statement; off by default)
+      --statement-statistics <count>
+                                  how many statement shapes pg_stat_statements keeps calls,
+                                  times and rows for (default 5000; 0 keeps none)
       --socket-dir <directory>    also accept PostgreSQL connections on a Unix socket there,
                                   .s.PGSQL.<port> (psql -h <directory>); Windows 10 1803+
       --mysql-socket <file>       also accept MySQL connections on that Unix socket
@@ -241,11 +253,32 @@ Examples:
             )
         },
         OptionDefinition {
+            default: Some("4g"),
+            ..valued(
+                "max-connection-memory",
+                "size",
+                "memory every listener's connections may hold together for requests, prepared statements, portals and results; at least 1m",
+            )
+        },
+        OptionDefinition {
             default: Some("3600"),
             ..valued(
                 "idle-timeout",
                 "seconds",
                 "close a logged-in connection that sends nothing for that long; 0 never closes it",
+            )
+        },
+        valued(
+            "log-slow-statements",
+            "milliseconds",
+            "log every statement that runs at least that long, with its literals as $1, $2, ...; 0 logs every statement",
+        ),
+        OptionDefinition {
+            default: Some("5000"),
+            ..valued(
+                "statement-statistics",
+                "count",
+                "how many statement shapes pg_stat_statements keeps statistics for; 0 keeps none",
             )
         },
         valued(
@@ -411,8 +444,11 @@ is named itself. Every name must be a table, view or sequence of the file when t
 or it does not start; with --allow-write a name not there yet is one the agent may create. With
 --allow-write and --tables the agent changes only the tables named: creating, changing or dropping
 anything else (a table, view, sequence, schema, type, routine or role) is refused, and so is a
-change to a named table that a foreign key or a view ties to a table not named; the server lists
-those ties when it starts. After each call the server waits --call-gap milliseconds before the
+change that could reach a table not named through a foreign key or a view (a named table that
+one not named references still takes inserts and changes to other columns); the server lists
+those ties when it starts. A name may list the only columns the agent sees, as orders(id,total)
+with its primary key: the other columns do not exist for the agent, and it cannot change that
+table. After each call the server waits --call-gap milliseconds before the
 next call opens the file, so your own programs, which wait for a call that holds the file
 (--busy-timeout), get their turn between an agent's calls; 0 turns the gap off.
 Every call is appended to <file>.mcp-audit.jsonl next to the file (readable by its owner only),
@@ -425,7 +461,8 @@ stdout carries the protocol only; every message goes to stderr.
       --allow-write            add write_sql: one statement per call that may change the file
       --tables <names>         only these tables and views exist for the agent, and with
                                --allow-write only these change: comma-separated, name or
-                               schema.name; repeat it for more
+                               schema.name, or name(a,b) for only some columns; repeat it for
+                               more
       --time-limit <seconds>   the longest one call may run, 1 to 300 (default 5)
       --call-gap <ms>          the pause after each call before the next, so other programs can write;
                                milliseconds, 0 to 10000 (default 100)

@@ -30,6 +30,7 @@ mod cancel;
 mod catalog;
 pub mod cdc;
 mod citext;
+mod column_privileges;
 mod comments;
 mod console;
 mod constraints;
@@ -122,6 +123,7 @@ mod session;
 mod set_operations;
 mod set_returning;
 mod settings;
+mod sql_json;
 mod sqlite_datetime;
 mod sqlite_errors;
 mod sqlite_functions;
@@ -136,6 +138,7 @@ mod sqlserver_strings;
 mod sqlserver_types;
 mod stack_depth;
 mod standards;
+pub mod statement_statistics;
 mod statistics;
 mod store;
 mod string_functions;
@@ -211,6 +214,8 @@ mod schema_tests;
 #[cfg(test)]
 mod set_returning_tests;
 #[cfg(test)]
+mod sql_json_tests;
+#[cfg(test)]
 mod sql_speed_tests;
 #[cfg(test)]
 mod sqlserver_tests;
@@ -256,7 +261,7 @@ pub use foreign::{ForeignSource, set_foreign_source};
 pub use hstore::HstoreValue;
 pub use indexes::IndexCheck;
 pub use interval::{Interval, IntervalFields};
-pub use memory::{MAX_ROW_BYTES, MAX_VALUE_BYTES};
+pub use memory::{MAX_ROW_BYTES, MAX_VALUE_BYTES, held_row_bytes};
 pub use mysql_errors::Warning;
 pub use mysql_variables::MYSQL_COMPATIBLE_VERSION;
 pub use notifications::Notification;
@@ -288,20 +293,22 @@ pub use served_databases::{
 pub use session::database_switch::DatabaseSwitch;
 pub use session::{
     BatchStep, InfoMessage, NamedParameter, OneStatementError, OneStatementRefusal, OutputColumn,
-    Parameter, ParameterDeclaration, PreparedStatement, QueryResult, Session, StatementDescription,
-    StoredProcedure, TransactionStatus,
+    Parameter, ParameterDeclaration, PlsqlParameter, PlsqlProcedure, PreparedStatement,
+    QueryResult, Session, StatementDescription, StoredProcedure, TransactionStatus,
 };
 pub use settings::POSTGRESQL_COMPATIBLE_VERSION;
 pub use sqlite_errors::sqlite_result_code_name;
 pub use sqlserver_catalog::is_catalog_procedure;
 pub use stack_depth::{SESSION_STACK_BYTES, set_thread_stack_size};
 pub use store::{
-    EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection, StoreFailure,
+    EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, PageLookups, ScanDirection,
+    StoreFailure,
 };
 pub use time_zones::TimeZone;
 pub use types::{DefinedKind, DefinedType, DefinedValue, NumericModifier, SqlType, Value};
 pub use visible_tables::{
-    OutsideLink, OutsideLinkKind, UnknownTableName, VisibleRead, VisibleTables, VisibleWrite,
+    OutsideLink, OutsideLinkKind, UnknownTableName, UnservableColumnList, VisibleRead,
+    VisibleTables, VisibleWrite,
 };
 
 /// The first bytes of every key that SQL keeps in a database: the catalog and every table's

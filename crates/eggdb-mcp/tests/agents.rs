@@ -72,6 +72,8 @@ fn an_agent_reads_only_what_its_role_may_and_through_its_policies() {
     for (id, tool, arguments) in [
         (4, "kv_get", r#"{"key":"session:1"}"#),
         (5, "kv_scan", r#"{"prefix":""}"#),
+        (6, "kv_get", r#"{"key":"s:1","collection":"sessions"}"#),
+        (7, "kv_scan", r#"{"collection":"sessions"}"#),
     ] {
         let answer = call(&mut server, id, tool, arguments);
         assert_eq!(error_code(&answer), "limited_to_role", "{tool}: {answer:?}");

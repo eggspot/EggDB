@@ -1747,6 +1747,7 @@ fn prepare_select(
             )
         });
     }
+    let most_generated_rows = rows_a_lone_function_needs(select);
     if let Some(from) = &mut select.from {
         for index in 0..=from.joins.len() {
             if is_lateral(env, tables, prepared, from, index, ctes) {
@@ -1765,8 +1766,13 @@ fn prepare_select(
             let Some(reference) = reference_mut(from, index) else {
                 continue;
             };
-            correlated_from |=
-                prepare_reference(env, tables, reference, parent, ctes, prepared, &siblings)?;
+            let surroundings = Surroundings {
+                parent,
+                ctes,
+                siblings: &siblings,
+                most_generated_rows,
+            };
+            correlated_from |= prepare_reference(env, tables, reference, prepared, surroundings)?;
         }
     }
     let overlay = Overlay::new(env.reader, &prepared.temp);
@@ -1852,24 +1858,12 @@ fn prepare_reference(
     env: &Env<'_>,
     tables: &mut TableCache,
     reference: &mut TableReference,
-    parent: Option<&Outer<'_>>,
-    ctes: Option<&CteScope<'_>>,
     prepared: &mut Prepared,
-    siblings: &[Sibling],
+    surroundings: Surroundings<'_>,
 ) -> SqlResult<bool> {
+    let ctes = surroundings.ctes;
     if let Some(generated) = reference.generated.take() {
-        return prepare_generated(
-            env,
-            tables,
-            reference,
-            *generated,
-            Surroundings {
-                parent,
-                ctes,
-                siblings,
-            },
-            prepared,
-        );
+        return prepare_generated(env, tables, reference, *generated, surroundings, prepared);
     }
     if let Some(derived) = reference.derived.take() {
         let result = {
@@ -1905,6 +1899,39 @@ struct Surroundings<'s> {
     parent: Option<&'s Outer<'s>>,
     ctes: Option<&'s CteScope<'s>>,
     siblings: &'s [Sibling],
+    most_generated_rows: Option<u64>,
+}
+
+fn rows_a_lone_function_needs(select: &Select) -> Option<u64> {
+    let from = select.from.as_ref()?;
+    let reads_only_a_function = from.joins.is_empty()
+        && from
+            .first
+            .generated
+            .as_deref()
+            .is_some_and(|generated| matches!(generated, GeneratedTable::Function(_)));
+    let keeps_rows_as_they_come = !select.distinct
+        && select.filter.is_none()
+        && select.order_by.is_empty()
+        && select.source_row_limit.is_none()
+        && !crate::aggregate::is_aggregate_query(select)
+        && !crate::set_returning::select_mentions_window(select);
+    if !reads_only_a_function || !keeps_rows_as_they_come {
+        return None;
+    }
+    let limit = literal_row_count(select.limit.as_ref()?)?;
+    let offset = match &select.offset {
+        None => 0,
+        Some(offset) => literal_row_count(offset)?,
+    };
+    Some(limit.saturating_add(offset))
+}
+
+fn literal_row_count(expr: &Expr) -> Option<u64> {
+    match expr.kind {
+        ExprKind::Literal(Literal::Integer(count)) => u64::try_from(count).ok(),
+        _ => None,
+    }
 }
 
 struct Sibling {
@@ -2562,6 +2589,7 @@ fn prepare_generated(
         parent,
         ctes,
         siblings,
+        most_generated_rows,
     } = surroundings;
     let alias_given = reference.alias.is_some();
     let label = reference
@@ -2693,9 +2721,9 @@ fn prepare_generated(
         position,
     };
     let temp = match streamed {
-        Some(function) => prepared
-            .temp
-            .add_streamed(env.names, shape, |store| function.generate(store))?,
+        Some(function) => prepared.temp.add_streamed(env.names, shape, |store| {
+            function.generate_at_most(most_generated_rows, store)
+        })?,
         None => prepared.temp.add(env.names, shape, rows)?,
     };
     drop(charge);

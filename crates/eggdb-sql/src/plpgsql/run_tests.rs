@@ -171,7 +171,7 @@ END $$"],
     );
     let (returned, notices) =
         invoked(&store, "noisy", vec![Value::Integer(1)], None).expect("noisy(1)");
-    assert_eq!(returned, Returned::Value(Value::Null));
+    assert_eq!(returned, Returned::Value(Value::Text(String::new())));
     assert_eq!(notices, vec!["NOTICE:  value is 1".to_owned()]);
     let error = failure(&store, "noisy", vec![Value::Integer(-1)]);
     assert_eq!(error.state(), SqlState::INVALID_PARAMETER_VALUE);

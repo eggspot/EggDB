@@ -864,9 +864,14 @@ fn changed_routines(names: Vec<String>) -> Option<DestructiveStatement> {
 }
 
 fn merged(merge: &MergeStatement, keys: &mut CatalogLookup<'_>) -> Option<DestructiveStatement> {
-    let found = match &merge.update {
-        Some(update) => {
-            let kind = if update.delete_condition.is_some() {
+    let deletes = merge
+        .update
+        .iter()
+        .chain(&merge.by_source)
+        .any(|clause| clause.delete_condition.is_some());
+    let found = match merge.update.as_ref().or(merge.by_source.first()) {
+        Some(_) => {
+            let kind = if deletes {
                 DestructiveKind::DeleteOfManyRows
             } else {
                 DestructiveKind::UpdateOfManyRows
@@ -895,6 +900,12 @@ fn merged(merge: &MergeStatement, keys: &mut CatalogLookup<'_>) -> Option<Destru
             user_functions(expr, keys, &mut functions);
         }
         optional_user_functions(insert.condition.as_ref(), keys, &mut functions);
+    }
+    for clause in &merge.by_source {
+        for (_, expr) in &clause.assignments {
+            user_functions(expr, keys, &mut functions);
+        }
+        optional_user_functions(clause.condition.as_ref(), keys, &mut functions);
     }
     returning_user_functions(merge.output.as_deref(), keys, &mut functions);
     DestructiveStatement::combined(found, running(functions.user))

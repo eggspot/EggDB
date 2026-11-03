@@ -6,6 +6,7 @@ use crate::types::Value;
 use std::time::Duration;
 
 const CALL_FAILED: i32 = -999;
+const CANCELED: i32 = -2;
 const NOT_HELD: u16 = 1223;
 const INVALID_RESOURCE: u16 = 1224;
 const INVALID_MODE: u16 = 1225;
@@ -235,6 +236,7 @@ impl Session<'_> {
         let outcome = self.application_lock_status(procedure, call);
         let status = match &outcome {
             Ok(status) => *status,
+            Err(error) if error.state() == SqlState::QUERY_CANCELED => CANCELED,
             Err(_) => CALL_FAILED,
         };
         if let Some(variable) = &call.status_variable {

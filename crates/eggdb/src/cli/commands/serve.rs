@@ -69,6 +69,11 @@ impl Session<'_> {
             .unwrap_or_else(|| DEFAULT_USER.to_owned());
         let password = self.serve_password(&user)?;
         let max_connections = options.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS);
+        let memory_budget = Arc::new(
+            options
+                .max_connection_memory
+                .map_or_else(MemoryBudget::default, MemoryBudget::new),
+        );
         if !password.is_ascii() {
             return Err(usage(
                 "the password must be ASCII in this release: SASLprep, which normalizes other characters for SCRAM, is not implemented yet".to_owned(),
@@ -380,6 +385,7 @@ impl Session<'_> {
             password_sha256: eggdb_crypto::sha256(password.as_bytes()),
             database: String::new(),
             max_connections,
+            memory_budget: Arc::clone(&memory_budget),
         };
         let stomp_listener = match options.stomp_listen {
             Some(address) => {
@@ -440,12 +446,13 @@ impl Session<'_> {
         };
         let mongo_config = match &mongo_listener {
             Some(_) => Some(
-                super::serve_mongo::config(&user, &password, max_connections).map_err(|error| {
-                    Failure::database(
-                        format!("cannot prepare the MongoDB-compatible listener: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?,
+                super::serve_mongo::config(&user, &password, max_connections, &memory_budget)
+                    .map_err(|error| {
+                        Failure::database(
+                            format!("cannot prepare the MongoDB-compatible listener: {error}"),
+                            Exit::DatabaseError,
+                        )
+                    })?,
             ),
             None => None,
         };
@@ -546,7 +553,6 @@ impl Session<'_> {
             Some(0) => None,
             Some(seconds) => Some(std::time::Duration::from_secs(seconds)),
         };
-        let memory_budget = Arc::new(MemoryBudget::default());
         let config = ServerConfig {
             user,
             verifier,
@@ -608,6 +614,20 @@ impl Session<'_> {
         let (events, received) = std::sync::mpsc::channel::<String>();
         let mysql_events = events.clone();
         let tds_events = events.clone();
+        eggdb_sql::statement_statistics::collect(
+            options
+                .statement_statistics
+                .unwrap_or(eggdb_sql::statement_statistics::DEFAULT_CAPACITY),
+        );
+        if let Some(milliseconds) = options.log_slow_statements_ms {
+            let slow_events = events.clone();
+            eggdb_sql::statement_statistics::log_slow_statements(
+                std::time::Duration::from_millis(milliseconds),
+                Box::new(move |statement| {
+                    let _ = slow_events.send(stamped(&statement.to_string()));
+                }),
+            );
+        }
         let observability_endpoint = eggdb_observability::Endpoint::new(
             &store,
             &config.user,
@@ -711,20 +731,23 @@ impl Session<'_> {
         let resp_config = eggdb_resp::ServerConfig {
             password_sha256: resp_password,
             max_connections: config.max_connections,
+            memory_budget: Arc::clone(&memory_budget),
         };
         let served = std::thread::scope(|scope| {
             let server = scope.spawn(|| {
                 let log = move |line: &str| {
                     let _ = events.send(stamped(line));
                 };
-                eggdb_pgwire::serve_directory(
+                let served = eggdb_pgwire::serve_directory(
                     &served_databases,
                     &listener,
                     local_listener.as_ref(),
                     &config,
                     &stop_signals::requested,
                     &log,
-                )
+                );
+                eggdb_sql::statement_statistics::stop_logging_slow_statements();
+                served
             });
             let mysql_server = scope.spawn(|| match (&mysql_listener, &mysql_config) {
                 (Some(listener), Some(config)) => {
@@ -809,6 +832,7 @@ impl Session<'_> {
                     listener,
                     eggdb_memcached::ServerConfig {
                         max_connections: config.max_connections,
+                        memory_budget: Arc::clone(&memory_budget),
                     },
                     &stop_signals::requested,
                 ),

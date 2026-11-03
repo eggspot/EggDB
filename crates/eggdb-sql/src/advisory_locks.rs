@@ -15,6 +15,18 @@ enum Key {
     Application(String),
 }
 
+impl Key {
+    fn shown(&self) -> String {
+        match self {
+            Self::Single(key) => format!("advisory lock {key}"),
+            Self::Pair(first, second) => format!("advisory lock ({first}, {second})"),
+            Self::Application(resource) => {
+                format!("application lock '{}'", resource.replace('\'', "''"))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct LockName {
     database: usize,
@@ -181,7 +193,76 @@ impl Hold {
 #[derive(Default)]
 struct Registry {
     held: Mutex<HashMap<LockName, Vec<Hold>>>,
+    application_waits: Mutex<HashMap<u64, (LockName, Mode)>>,
     released: Condvar,
+}
+
+fn application_waits() -> MutexGuard<'static, HashMap<u64, (LockName, Mode)>> {
+    registry()
+        .application_waits
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+fn blockers(
+    held: &HashMap<LockName, Vec<Hold>>,
+    name: &LockName,
+    owner: u64,
+    mode: Mode,
+) -> Vec<u64> {
+    held.get(name).map_or_else(Vec::new, |holds| {
+        holds
+            .iter()
+            .filter(|hold| hold.owner != owner && !hold.mode.admits(mode))
+            .map(|hold| hold.owner)
+            .collect()
+    })
+}
+
+fn closes_a_cycle(
+    held: &HashMap<LockName, Vec<Hold>>,
+    waits: &HashMap<u64, (LockName, Mode)>,
+    owner: u64,
+) -> bool {
+    let Some((name, mode)) = waits.get(&owner) else {
+        return false;
+    };
+    let mut seen = vec![owner];
+    let mut next = blockers(held, name, owner, *mode);
+    while let Some(blocker) = next.pop() {
+        if blocker == owner {
+            return true;
+        }
+        if seen.contains(&blocker) {
+            continue;
+        }
+        seen.push(blocker);
+        if let Some((name, mode)) = waits.get(&blocker) {
+            next.extend(blockers(held, name, blocker, *mode));
+        }
+    }
+    false
+}
+
+struct ApplicationWait {
+    owner: u64,
+}
+
+impl ApplicationWait {
+    fn start(owner: u64, name: LockName, mode: Mode) -> Self {
+        application_waits().insert(owner, (name, mode));
+        Self { owner }
+    }
+
+    fn is_deadlocked(&self, held: &HashMap<LockName, Vec<Hold>>) -> bool {
+        closes_a_cycle(held, &application_waits(), self.owner)
+    }
+}
+
+impl Drop for ApplicationWait {
+    fn drop(&mut self) {
+        application_waits().remove(&self.owner);
+    }
 }
 
 fn registry() -> &'static Registry {
@@ -217,6 +298,21 @@ impl AdvisoryLocks {
 
     pub(crate) fn release_transaction_locks(&self) {
         release(self.database, self.owner, |hold| hold.transaction_count = 0);
+    }
+
+    pub(crate) fn session_lock_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = held()
+            .iter()
+            .filter(|(name, holds)| {
+                name.database == self.database
+                    && holds
+                        .iter()
+                        .any(|hold| hold.owner == self.owner && hold.session_count > 0)
+            })
+            .map(|(name, _)| name.key.shown())
+            .collect();
+        names.sort();
+        names
     }
 
     fn release_everything(&self) {
@@ -293,6 +389,14 @@ pub(crate) fn enter(locks: &AdvisoryLocks, in_transaction: bool) -> EnteredLocks
     };
     let previous = ACTIVE.with(|active| active.borrow_mut().replace(entered));
     EnteredLocks { entered, previous }
+}
+
+pub(crate) fn release_active_transaction_locks() {
+    if let Some(active) = ACTIVE.with(|active| *active.borrow()) {
+        release(active.database, active.owner, |hold| {
+            hold.transaction_count = 0;
+        });
+    }
 }
 
 fn active() -> SqlResult<ActiveOwner> {
@@ -485,6 +589,9 @@ pub(crate) enum ApplicationLockGrant {
     AfterWaiting,
     /// Not granted before the time-out (status -1).
     TimedOut,
+    /// Not granted because waiting for it would never end: a session this one waits for
+    /// waits, directly or through others, for an application lock this one holds (status -3).
+    DeadlockVictim,
 }
 
 impl ApplicationLockGrant {
@@ -494,6 +601,7 @@ impl ApplicationLockGrant {
             Self::AtOnce => 0,
             Self::AfterWaiting => 1,
             Self::TimedOut => -1,
+            Self::DeadlockVictim => -3,
         }
     }
 }
@@ -522,7 +630,14 @@ pub(crate) fn take_application_lock(
     if take(&mut held, name.clone(), owner.owner, mode, lasts) {
         return Ok(ApplicationLockGrant::AtOnce);
     }
+    if timeout.is_some_and(|timeout| timeout.is_zero()) {
+        return Ok(ApplicationLockGrant::TimedOut);
+    }
+    let waiting = ApplicationWait::start(owner.owner, name.clone(), mode);
     loop {
+        if waiting.is_deadlocked(&held) {
+            return Ok(ApplicationLockGrant::DeadlockVictim);
+        }
         let slice = match deadline {
             None => WAIT_SLICE,
             Some(deadline) => {
@@ -629,7 +744,7 @@ pub(crate) fn application_lock_free(resource: &str, mode: Mode) -> SqlResult<boo
 
 #[cfg(test)]
 mod tests {
-    use super::{AdvisoryLocks, enter, function};
+    use super::{AdvisoryLocks, enter, function, release_active_transaction_locks};
     use crate::types::Value;
     use std::time::Duration;
 
@@ -671,6 +786,67 @@ mod tests {
         }
         let _entered = enter(&second, false);
         assert_eq!(call("pg_try_advisory_lock", &key), Value::Boolean(true));
+    }
+
+    #[test]
+    fn a_procedures_commit_releases_the_transaction_locks_and_keeps_the_session_locks() {
+        let first = AdvisoryLocks::new(3);
+        let second = AdvisoryLocks::new(3);
+        let transaction_key = [Value::Integer(31)];
+        let session_key = [Value::Integer(32)];
+        {
+            let _entered = enter(&first, true);
+            assert_eq!(
+                call("pg_try_advisory_xact_lock", &transaction_key),
+                Value::Boolean(true)
+            );
+            assert_eq!(
+                call("pg_try_advisory_lock", &session_key),
+                Value::Boolean(true)
+            );
+            release_active_transaction_locks();
+        }
+        {
+            let _entered = enter(&second, true);
+            assert_eq!(
+                call("pg_try_advisory_xact_lock", &transaction_key),
+                Value::Boolean(true)
+            );
+            assert_eq!(
+                call("pg_try_advisory_lock", &session_key),
+                Value::Boolean(false)
+            );
+        }
+        second.release_transaction_locks();
+        let _entered = enter(&first, false);
+        assert_eq!(
+            call("pg_advisory_unlock", &session_key),
+            Value::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn a_session_names_only_its_own_session_locks() {
+        let first = AdvisoryLocks::new(41);
+        let second = AdvisoryLocks::new(41);
+        {
+            let _entered = enter(&first, true);
+            call("pg_advisory_lock", &[Value::Integer(9)]);
+            call("pg_advisory_lock", &[Value::Integer(1), Value::Integer(2)]);
+            call("pg_try_advisory_xact_lock", &[Value::Integer(5)]);
+        }
+        {
+            let _entered = enter(&second, false);
+            call("pg_advisory_lock", &[Value::Integer(7)]);
+        }
+        assert_eq!(
+            first.session_lock_names(),
+            ["advisory lock (1, 2)", "advisory lock 9"]
+        );
+        assert_eq!(second.session_lock_names(), ["advisory lock 7"]);
+        first.release_transaction_locks();
+        drop(first);
+        assert_eq!(second.session_lock_names(), ["advisory lock 7"]);
     }
 
     #[test]
@@ -773,5 +949,110 @@ mod tests {
         assert!(!waiter.is_finished());
         drop(holder);
         assert_eq!(waiter.join().unwrap(), Value::Text(String::new()));
+    }
+
+    #[test]
+    fn an_application_lock_wait_that_closes_a_cycle_is_the_deadlock_victim() {
+        use super::{
+            ApplicationLockGrant, Lasts, Mode, application_waits, release_application_lock,
+            take_application_lock,
+        };
+        let second = AdvisoryLocks::new(9_291);
+        let entered = enter(&second, false);
+        assert_eq!(
+            take_application_lock("b", Mode::Exclusive, Lasts::Session, None).unwrap(),
+            ApplicationLockGrant::AtOnce
+        );
+        let (holding, held) = std::sync::mpsc::channel();
+        let first = std::thread::spawn(move || {
+            let locks = AdvisoryLocks::new(9_291);
+            let _entered = enter(&locks, false);
+            let taken = take_application_lock("a", Mode::Exclusive, Lasts::Session, None).unwrap();
+            holding.send(locks.owner).unwrap();
+            let waited = take_application_lock(
+                "b",
+                Mode::Exclusive,
+                Lasts::Session,
+                Some(Duration::from_secs(30)),
+            )
+            .unwrap();
+            (taken, waited)
+        });
+        let first_owner = held.recv().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !application_waits().contains_key(&first_owner) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            take_application_lock(
+                "a",
+                Mode::Shared,
+                Lasts::Session,
+                Some(Duration::from_secs(30))
+            )
+            .unwrap(),
+            ApplicationLockGrant::DeadlockVictim
+        );
+        assert_eq!(ApplicationLockGrant::DeadlockVictim.status(), -3);
+        assert!(release_application_lock("b", Lasts::Session).unwrap());
+        assert_eq!(
+            first.join().unwrap(),
+            (
+                ApplicationLockGrant::AtOnce,
+                ApplicationLockGrant::AfterWaiting
+            )
+        );
+        assert!(!application_waits().contains_key(&first_owner));
+        drop(entered);
+    }
+
+    #[test]
+    fn a_zero_lock_timeout_times_out_at_once_before_any_deadlock_check() {
+        use super::{
+            ApplicationLockGrant, Lasts, Mode, application_waits, release_application_lock,
+            take_application_lock,
+        };
+        let second = AdvisoryLocks::new(9_292);
+        let entered = enter(&second, false);
+        assert_eq!(
+            take_application_lock("b", Mode::Exclusive, Lasts::Session, None).unwrap(),
+            ApplicationLockGrant::AtOnce
+        );
+        let (holding, held) = std::sync::mpsc::channel();
+        let first = std::thread::spawn(move || {
+            let locks = AdvisoryLocks::new(9_292);
+            let _entered = enter(&locks, false);
+            let taken = take_application_lock("a", Mode::Exclusive, Lasts::Session, None).unwrap();
+            holding.send(locks.owner).unwrap();
+            let waited = take_application_lock(
+                "b",
+                Mode::Exclusive,
+                Lasts::Session,
+                Some(Duration::from_secs(30)),
+            )
+            .unwrap();
+            (taken, waited)
+        });
+        let first_owner = held.recv().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !application_waits().contains_key(&first_owner) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let refused =
+            take_application_lock("a", Mode::Shared, Lasts::Session, Some(Duration::ZERO)).unwrap();
+        assert_eq!(refused, ApplicationLockGrant::TimedOut);
+        assert_eq!(refused.status(), -1);
+        assert!(!application_waits().contains_key(&second.owner));
+        assert!(release_application_lock("b", Lasts::Session).unwrap());
+        assert_eq!(
+            first.join().unwrap(),
+            (
+                ApplicationLockGrant::AtOnce,
+                ApplicationLockGrant::AfterWaiting
+            )
+        );
+        drop(entered);
     }
 }

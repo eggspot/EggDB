@@ -29,6 +29,10 @@ pub fn key_from_dom(key: &str) -> Option<Key> {
         "Home" => Key::Home,
         "End" => Key::End,
         "F4" => Key::F4,
+        "F2" => Key::F2,
+        "F5" => Key::F5,
+        "PageUp" => Key::PageUp,
+        "PageDown" => Key::PageDown,
         _ => {
             let mut characters = key.chars();
             let character = characters.next()?;
@@ -61,7 +65,8 @@ pub fn theme_from_code(code: u32) -> ThemeKind {
 }
 
 /// The number a host receives for an action: 0 none, 1 open, 2 browse, 3 cancel, 4 show the
-/// layout picker, 5 load the sample dataset, 6 quit.
+/// layout picker, 5 load the sample dataset, 6 quit, 7 stop the open in progress, 8 copy the
+/// focused input's selection, 9 paste into the focused input.
 pub fn action_code(action: ConnectAction) -> u32 {
     match action {
         ConnectAction::None => 0,
@@ -71,6 +76,9 @@ pub fn action_code(action: ConnectAction) -> u32 {
         ConnectAction::ShowLayoutPicker => 4,
         ConnectAction::LoadSampleDataset => 5,
         ConnectAction::Quit => 6,
+        ConnectAction::StopOpening => 7,
+        ConnectAction::CopySelection => 8,
+        ConnectAction::Paste => 9,
     }
 }
 
@@ -88,6 +96,15 @@ pub fn aria_role(role: AccessRole) -> &'static str {
         AccessRole::Button => "button",
         AccessRole::CheckBox => "checkbox",
         AccessRole::Link => "link",
+        AccessRole::Toolbar => "toolbar",
+        AccessRole::ComboBox => "combobox",
+        AccessRole::TextArea => "textbox",
+        AccessRole::Alert => "alert",
+        AccessRole::Tree => "tree",
+        AccessRole::TreeItem => "treeitem",
+        AccessRole::Grid => "grid",
+        AccessRole::ColumnHeader => "columnheader",
+        AccessRole::Cell => "gridcell",
     }
 }
 
@@ -125,15 +142,15 @@ fn json_number(value: f32) -> String {
 
 /// The accessibility tree as the JSON array the browser loader mirrors into ARIA elements:
 /// one object per node with `id`, `parent`, `role` (ARIA), `name`, `value`, `placeholder`,
-/// `focused`, `checked`, `disabled`, `selected`, `default` and `x`, `y`, `width`, `height` in
-/// CSS pixels.
+/// `focused`, `checked`, `disabled`, `selected`, `default`, `x`, `y`, `width`, `height` in
+/// CSS pixels, then `expanded`, `invalid`, `readonly`, `description` and `shortcut` (D278).
 pub fn accessibility_json(nodes: &[AccessNode]) -> String {
     let objects: Vec<String> = nodes
         .iter()
         .map(|node| {
             let state = node.state;
             format!(
-                "{{\"id\":{},\"parent\":{},\"role\":{},\"name\":{},\"value\":{},\"placeholder\":{},\"focused\":{},\"checked\":{},\"disabled\":{},\"selected\":{},\"default\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{}}}",
+                "{{\"id\":{},\"parent\":{},\"role\":{},\"name\":{},\"value\":{},\"placeholder\":{},\"focused\":{},\"checked\":{},\"disabled\":{},\"selected\":{},\"default\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"expanded\":{},\"invalid\":{},\"readonly\":{},\"description\":{},\"shortcut\":{}}}",
                 node.id,
                 node.parent
                     .map_or_else(|| "null".to_owned(), |parent| parent.to_string()),
@@ -152,6 +169,13 @@ pub fn accessibility_json(nodes: &[AccessNode]) -> String {
                 json_number(node.bounds.y),
                 json_number(node.bounds.width),
                 json_number(node.bounds.height),
+                state
+                    .expanded
+                    .map_or_else(|| "null".to_owned(), |expanded| expanded.to_string()),
+                state.invalid,
+                state.read_only,
+                json_optional(node.description.as_deref()),
+                json_optional(node.shortcut.as_deref()),
             )
         })
         .collect();
@@ -174,7 +198,8 @@ mod tests {
         assert_eq!(key_from_dom("q"), Some(Key::Character('q')));
         assert_eq!(key_from_dom("é"), Some(Key::Character('é')));
         assert_eq!(key_from_dom("Shift"), None);
-        assert_eq!(key_from_dom("F5"), None);
+        assert_eq!(key_from_dom("F5"), Some(Key::F5));
+        assert_eq!(key_from_dom("F6"), None);
         assert_eq!(key_from_dom(""), None);
         assert_eq!(key_from_dom("\u{7}"), None);
     }
@@ -198,6 +223,8 @@ mod tests {
         assert_eq!(theme_from_code(9), ThemeKind::Light);
         assert_eq!(action_code(ConnectAction::None), 0);
         assert_eq!(action_code(ConnectAction::Open), 1);
+        assert_eq!(action_code(ConnectAction::CopySelection), 8);
+        assert_eq!(action_code(ConnectAction::Paste), 9);
         assert_eq!(action_code(ConnectAction::Quit), 6);
     }
 
@@ -218,7 +245,7 @@ mod tests {
             json.starts_with("[{\"id\":1,\"parent\":null,\"role\":\"document\",\"name\":\"EggDB\"")
         );
         assert!(json.contains(
-            "{\"id\":9,\"parent\":7,\"role\":\"textbox\",\"name\":\"File\",\"value\":\"~/eggdb/quickstart.eggdb\",\"placeholder\":\"/path/to/shop.eggdb\",\"focused\":true,\"checked\":null,\"disabled\":false,\"selected\":false,\"default\":false,\"x\":384,\"y\":282,\"width\":420,\"height\":28}"
+            "{\"id\":9,\"parent\":7,\"role\":\"textbox\",\"name\":\"File\",\"value\":\"~/eggdb/quickstart.eggdb\",\"placeholder\":\"/path/to/shop.eggdb\",\"focused\":true,\"checked\":null,\"disabled\":false,\"selected\":false,\"default\":false,\"x\":384,\"y\":282,\"width\":420,\"height\":28,\"expanded\":null,\"invalid\":false,\"readonly\":false,\"description\":null,\"shortcut\":null}"
         ), "{json}");
         assert!(json.contains("\"role\":\"checkbox\",\"name\":\"Open read-only\",\"value\":null,\"placeholder\":null,\"focused\":false,\"checked\":false"));
         assert!(json.contains("\"role\":\"button\",\"name\":\"Cancel\",\"value\":null,\"placeholder\":null,\"focused\":false,\"checked\":null,\"disabled\":true"));

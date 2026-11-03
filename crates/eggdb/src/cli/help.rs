@@ -42,7 +42,7 @@ Commands:
   shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
   restore <file> [dump]         restore a PostgreSQL dump, or a SQL Server or Oracle script
   follow <file> <source-url>    copy a running PostgreSQL or SQL Server database into the file and keep it in step
-  collection list|add|delete <file> [name]
+  collection list|add|delete|move <file> [name] [new-name]
                                 a named key space inside the file; see eggdb help collection
   mcp    <file>                 serve the file to an AI agent over MCP; read-only unless --allow-write
   audit  <file>                 list the calls AI agents made through eggdb mcp

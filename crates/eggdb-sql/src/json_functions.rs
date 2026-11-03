@@ -41,6 +41,8 @@ pub(crate) const WHOLE_ROW: &str = "whole_row";
 pub(crate) const ROW_OBJECT: &str = "json_row";
 pub(crate) const OPENJSON_VALUE: &str = "*openjson value*";
 pub(crate) const OPENJSON_JSON: &str = "*openjson json*";
+pub(crate) const OPENJSON_PAIRS: &str = "*openjson pairs*";
+pub(crate) const OPENJSON_PAIR_COLUMNS: [&str; 3] = ["key", "value", "type"];
 
 const WHOLE_ROW_CALLERS: [&str; 7] = [
     "row_to_json",
@@ -99,7 +101,9 @@ pub(crate) fn to_json_text(value: &Value) -> SqlResult<String> {
         Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_) | Value::Oid(_) => {
             value.to_text().unwrap_or_default()
         }
-        Value::Numeric(number) if number.is_nan() => quoted("NaN"),
+        Value::Numeric(number) if number.is_nan() || number.is_infinite() => {
+            quoted(&number.to_string())
+        }
         Value::Numeric(number) => number.to_string(),
         Value::Real(_) | Value::Double(_) => {
             let number = value.as_float().unwrap_or(f64::NAN);
@@ -960,6 +964,56 @@ pub(crate) fn openjson_rows(values: &[Value], sink: &mut RecordSink<'_>) -> SqlR
     Ok(())
 }
 
+fn openjson_type_code(value: &Json) -> i32 {
+    match value {
+        Json::Null => 0,
+        Json::String(_) => 1,
+        Json::Number(_) => 2,
+        Json::Boolean(_) => 3,
+        Json::Array(_) => 4,
+        Json::Object(_) => 5,
+    }
+}
+
+fn openjson_pair(document: &Document, key: String, node: &Node) -> SqlResult<Vec<Value>> {
+    Ok(vec![
+        Value::Text(key),
+        rendered(document, node, true)?,
+        Value::Integer(openjson_type_code(&node.value)),
+    ])
+}
+
+/// The rows SQL Server's `OPENJSON` without a `WITH` clause reads from `values[0]`: one row
+/// per array element or object member, with its `key` (the array index or the member name),
+/// its `value` as text and its JSON `type` (0 null, 1 string, 2 number, 3 boolean, 4 array,
+/// 5 object); NULL gives no rows.
+pub(crate) fn openjson_pair_rows(values: &[Value], sink: &mut RecordSink<'_>) -> SqlResult<()> {
+    let Some(value) = values.first() else {
+        return Ok(());
+    };
+    if value.is_null() {
+        return Ok(());
+    }
+    let document = match document(value, false) {
+        Some(Ok(document)) => document,
+        Some(Err(_)) | None => return Err(not_sqlserver_json()),
+    };
+    match &document.root.value {
+        Json::Array(items) => {
+            for (index, node) in items.iter().enumerate() {
+                sink(openjson_pair(&document, index.to_string(), node)?)?;
+            }
+        }
+        Json::Object(members) => {
+            for (key, node) in members {
+                sink(openjson_pair(&document, key.clone(), node)?)?;
+            }
+        }
+        _ => return Err(not_sqlserver_json()),
+    }
+    Ok(())
+}
+
 fn openjson_extracted(values: &[Value], as_json: bool) -> Option<SqlResult<Value>> {
     let (first, steps) = values.split_first()?;
     if first.is_null() {
@@ -1059,6 +1113,9 @@ pub(crate) fn sqlserver_path_steps(path: &str) -> SqlResult<Vec<String>> {
 }
 
 pub(crate) fn record_types(name: &str) -> Vec<SqlType> {
+    if name == OPENJSON_PAIRS {
+        return vec![SqlType::Text, SqlType::Text, SqlType::Integer];
+    }
     let binary = name.starts_with("jsonb");
     let document_type = if name.ends_with("_text") {
         SqlType::Text
@@ -1077,7 +1134,9 @@ pub(crate) fn record_types(name: &str) -> Vec<SqlType> {
 }
 
 pub(crate) fn record_names(name: &str) -> &'static [&'static str] {
-    if name.contains("_each") {
+    if name == OPENJSON_PAIRS {
+        &OPENJSON_PAIR_COLUMNS
+    } else if name.contains("_each") {
         &["key", "value"]
     } else if name.contains("_array_elements") {
         &["value"]

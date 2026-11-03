@@ -108,7 +108,9 @@ pub(crate) struct BuiltinType {
     pub(crate) collation: u32,
 }
 
-pub(crate) const BUILTIN_TYPES: [BuiltinType; 77] = [
+pub(crate) const REFCURSOR_TYPE: u32 = 1790;
+
+pub(crate) const BUILTIN_TYPES: [BuiltinType; 78] = [
     BuiltinType {
         oid: 16,
         typname: "bool",
@@ -905,6 +907,21 @@ pub(crate) const BUILTIN_TYPES: [BuiltinType; 77] = [
         collation: 0,
     },
     BuiltinType {
+        oid: REFCURSOR_TYPE,
+        typname: "refcursor",
+        shown: "refcursor",
+        length: -1,
+        by_value: false,
+        kind: 'b',
+        category: 'U',
+        preferred: false,
+        element: 0,
+        array: 0,
+        align: 'i',
+        storage: 'x',
+        collation: 0,
+    },
+    BuiltinType {
         oid: 2205,
         typname: "regclass",
         shown: "regclass",
@@ -1333,6 +1350,7 @@ fn catalog_type_oid(kind: CatalogType) -> u32 {
         CatalogType::Reg(RegKind::Namespace) => 4089,
         CatalogType::Reg(RegKind::Role) => 4096,
         CatalogType::Reg(RegKind::Proc) => 24,
+        CatalogType::RefCursor => REFCURSOR_TYPE,
     }
 }
 

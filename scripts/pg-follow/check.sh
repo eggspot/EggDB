@@ -7,7 +7,8 @@ Starts PostgreSQL 17 in Docker with wal_level=logical, fills a database, and fol
 eggdb follow while writes keep arriving: inserts, updates, deletes and a truncate, during the
 copy and after it. Then it stops the follow with SIGTERM and compares every table and sequence
 value in EggDB with PostgreSQL. It resumes that follow after columns were added while it was
-stopped, drops and adds columns while it follows, cuts its connection and checks it reconnects,
+stopped, drops and adds columns, creates a table and runs large streamed transactions (one with a
+rolled-back savepoint, one aborted) while it follows, cuts its connection and checks it reconnects,
 then resumes it once more with --until caught-up, which drops its slot. A last run uses
 --until caught-up from the start. Fails on the first difference. PSQL names the psql command
 (default: psql inside the container)."
@@ -35,7 +36,7 @@ trap cleanup EXIT
 
 docker rm -f "$container" > /dev/null 2>&1 || true
 docker run -d --name "$container" -e POSTGRES_PASSWORD="$PGPASSWORD" -p "$port:5432" postgres:17 \
-  -c wal_level=logical -c max_replication_slots=4 -c max_wal_senders=4 > /dev/null
+  -c wal_level=logical -c max_replication_slots=4 -c max_wal_senders=4 -c logical_decoding_work_mem=64kB > /dev/null
 psql() {
   docker exec -i -e PGPASSWORD "$container" psql -U postgres -d app -X -q -A -t -v ON_ERROR_STOP=1 "$@"
 }
@@ -141,7 +142,27 @@ ALTER TABLE notes DROP COLUMN extra;
 INSERT INTO notes VALUES (4, 'four');
 ALTER TABLE customers ADD COLUMN tier text;
 UPDATE customers SET tier = 'gold' WHERE id <= 5;
+CREATE TABLE late_arrivals (id int PRIMARY KEY, label text, customer_id int REFERENCES customers (id));
+INSERT INTO late_arrivals SELECT i, 'row ' || i, 1 + i % 5 FROM generate_series(1, 50) i;
+BEGIN;
+INSERT INTO notes SELECT i, repeat('streamed ', 40) FROM generate_series(100, 3099) i;
+SAVEPOINT half;
+INSERT INTO notes SELECT i, 'rolled back' FROM generate_series(5000, 5999) i;
+ROLLBACK TO SAVEPOINT half;
+UPDATE late_arrivals SET label = 'in a streamed transaction' WHERE id = 1;
+COMMIT;
+BEGIN;
+INSERT INTO notes SELECT i, repeat('aborted ', 40) FROM generate_series(7000, 9999) i;
+ROLLBACK;
 SQL
+for _ in $(seq 1 60); do
+  grep -q '"event":"table_added"' "$work/resume.out" 2> /dev/null && break
+  sleep 0.5
+done
+grep -q '"event":"table_added","table":"public.late_arrivals","copied":true' "$work/resume.out" \
+  || fail "the table created during the follow was not added: $(cat "$work/resume.out")"
+grep -q '"event":"stream","protocol":2,"streaming":true' "$work/resume.out" \
+  || fail "the follow did not ask for streamed transactions: $(cat "$work/resume.out")"
 for _ in $(seq 1 60); do
   [ "$(grep -c '"event":"schema_changed"' "$work/resume.out" 2> /dev/null)" -ge 3 ] && break
   sleep 0.5
@@ -164,7 +185,8 @@ follow_pid=
 grep -q '"slot_dropped":true' "$work/resume-caught-up.out" || fail "the finished follow kept its slot"
 compare "$work/follow.db" \
   "SELECT id, coalesce(priority, -1) FROM orders ORDER BY id" \
-  "SELECT id, coalesce(tier, '<null>') FROM customers ORDER BY id"
+  "SELECT id, coalesce(tier, '<null>') FROM customers ORDER BY id" \
+  "SELECT * FROM late_arrivals ORDER BY id"
 
 rm -f "$work/caught-up.db"
 "$eggdb" follow --create "$work/caught-up.db" "$url" --until caught-up --format json > "$work/caught-up.out" 2> "$work/follow.err" \
@@ -173,4 +195,4 @@ grep -q '"reason":"caught_up"' "$work/caught-up.out" || fail "no caught_up stop"
 compare "$work/caught-up.db"
 docker exec -i "$container" psql -U postgres -d app -X -q -A -t -c "SELECT count(*) FROM pg_replication_slots" > "$work/slots.out"
 [ "$(cat "$work/slots.out")" = "0" ] || fail "a replication slot was left behind"
-echo "pg-follow check passed: copy, live changes (insert, update, delete, truncate), sequences, SIGTERM, resuming, column changes, reconnecting and --until caught-up"
+echo "pg-follow check passed: copy, live changes (insert, update, delete, truncate), sequences, SIGTERM, resuming, column changes, a table created during the follow, streamed and aborted transactions, reconnecting and --until caught-up"

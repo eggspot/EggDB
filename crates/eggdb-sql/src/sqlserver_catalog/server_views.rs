@@ -43,6 +43,7 @@ pub(crate) enum ServerView {
     Synonyms,
     AssemblyTypes,
     TableTypes,
+    TimeZoneInfo,
 }
 
 const CONFIGURATIONS: &[CatalogColumn] = &[
@@ -148,6 +149,12 @@ const CHANGE_TRACKING_DATABASES: &[CatalogColumn] = &[
     column("retention_period_units_desc", SYSNAME),
 ];
 
+const TIME_ZONE_INFO: &[CatalogColumn] = &[
+    column("name", SYSNAME),
+    column("current_utc_offset", SqlType::Varchar(Some(12))),
+    column("is_currently_dst", BIT),
+];
+
 const TYPE_COLUMNS: &[CatalogColumn] = &[
     column("name", SYSNAME),
     column("user_type_id", INT),
@@ -156,7 +163,7 @@ const TYPE_COLUMNS: &[CatalogColumn] = &[
 ];
 
 impl ServerView {
-    pub(crate) const ALL: [Self; 19] = [
+    pub(crate) const ALL: [Self; 20] = [
         Self::Configurations,
         Self::ExecSessions,
         Self::ServerPrincipals,
@@ -176,6 +183,7 @@ impl ServerView {
         Self::Synonyms,
         Self::AssemblyTypes,
         Self::TableTypes,
+        Self::TimeZoneInfo,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -199,6 +207,7 @@ impl ServerView {
             Self::Synonyms => "synonyms",
             Self::AssemblyTypes => "assembly_types",
             Self::TableTypes => "table_types",
+            Self::TimeZoneInfo => "time_zone_info",
         }
     }
 
@@ -225,6 +234,7 @@ impl ServerView {
             Self::ChangeTrackingTables => CHANGE_TRACKING_TABLES,
             Self::ChangeTrackingDatabases => CHANGE_TRACKING_DATABASES,
             Self::AssemblyTypes | Self::TableTypes => TYPE_COLUMNS,
+            Self::TimeZoneInfo => TIME_ZONE_INFO,
         }
     }
 }
@@ -282,6 +292,29 @@ fn file(
         .set("is_percent_growth", bit(false))
         .set("is_read_only", bit(false))
         .done()
+}
+
+fn utc_offset_text(offset_seconds: i32) -> String {
+    let sign = if offset_seconds < 0 { '-' } else { '+' };
+    let minutes = offset_seconds.unsigned_abs() / 60;
+    format!("{sign}{:02}:{:02}", minutes / 60, minutes % 60)
+}
+
+fn time_zone_rows(columns: &'static [CatalogColumn]) -> Vec<Vec<Value>> {
+    let now = crate::datetime::statement_now();
+    crate::time_zones::windows_zone_names()
+        .filter_map(crate::time_zones::TimeZone::windows)
+        .map(|(name, zone)| {
+            CatalogRow::new(columns)
+                .set("name", text(name))
+                .set(
+                    "current_utc_offset",
+                    text(&utc_offset_text(zone.offset_at(now))),
+                )
+                .set("is_currently_dst", bit(zone.is_dst_at(now)))
+                .done()
+        })
+        .collect()
 }
 
 pub(crate) fn rows(snapshot: &CatalogSnapshot, view: ServerView) -> Vec<Vec<Value>> {
@@ -434,5 +467,6 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, view: ServerView) -> Vec<Vec<Valu
         | ServerView::Synonyms
         | ServerView::AssemblyTypes
         | ServerView::TableTypes => Vec::new(),
+        ServerView::TimeZoneInfo => time_zone_rows(columns),
     }
 }

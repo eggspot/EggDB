@@ -414,6 +414,7 @@ pub(crate) struct MergeStatement {
     pub(crate) on: Expr,
     pub(crate) update: Option<MergeUpdate>,
     pub(crate) insert: Option<MergeInsert>,
+    pub(crate) by_source: Vec<MergeUpdate>,
     pub(crate) output: Option<Vec<SelectItem>>,
 }
 
@@ -612,6 +613,7 @@ pub(crate) struct CreateView {
     pub(crate) text: String,
     pub(crate) check_option: Option<crate::encoding::CheckOption>,
     pub(crate) temporary: bool,
+    pub(crate) sqlite_text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -754,6 +756,7 @@ pub(crate) enum AlterAction {
     AddColumn {
         column: ColumnDefinition,
         if_not_exists: bool,
+        sqlite_text: Option<String>,
     },
     DropColumn {
         name: Name,
@@ -849,6 +852,7 @@ pub(crate) struct CreateIndex {
     pub(crate) index: IndexSpec,
     pub(crate) table: Name,
     pub(crate) if_not_exists: bool,
+    pub(crate) sqlite_text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -868,6 +872,7 @@ pub(crate) enum ExplainStyle {
 pub(crate) struct Explain {
     pub(crate) style: ExplainStyle,
     pub(crate) analyze: bool,
+    pub(crate) buffers: bool,
     pub(crate) statement: Box<Statement>,
 }
 

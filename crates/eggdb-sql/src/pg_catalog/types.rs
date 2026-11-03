@@ -29,6 +29,8 @@ pub enum CatalogType {
     Void,
     /// A `reg*` type: an object identifier shown as the name of the object it identifies.
     Reg(RegKind),
+    /// `refcursor`: the name of a cursor (a portal), held as text.
+    RefCursor,
 }
 
 /// A polymorphic pseudo-type a PostgreSQL routine declares for a parameter or its result,
@@ -145,6 +147,7 @@ impl CatalogType {
             Self::Void => "void",
             Self::Pseudo(pseudo) => pseudo.name(),
             Self::Reg(kind) => kind.type_name(),
+            Self::RefCursor => "refcursor",
         }
     }
 
@@ -156,7 +159,10 @@ impl CatalogType {
     }
 
     pub(crate) fn is_text_like(self) -> bool {
-        matches!(self, Self::Name | Self::InternalChar | Self::NodeTree)
+        matches!(
+            self,
+            Self::Name | Self::InternalChar | Self::NodeTree | Self::RefCursor
+        )
     }
 
     pub(crate) fn is_identifier(self) -> bool {
@@ -280,6 +286,7 @@ pub(crate) fn parse_input(text: &str, kind: CatalogType) -> SqlResult<Value> {
         CatalogType::Oid => parse_identifier(text, "oid").map(Value::Oid),
         CatalogType::Xid => parse_identifier(text, "xid").map(Value::Oid),
         CatalogType::Name => Ok(Value::Text(truncated_name(text.to_owned()))),
+        CatalogType::RefCursor => Ok(Value::Text(text.to_owned())),
         CatalogType::InternalChar => Ok(Value::Text(first_character(text))),
         CatalogType::NodeTree => Err(node_tree_input()),
         CatalogType::AclItem | CatalogType::AnyArray | CatalogType::Pseudo(_) => {
@@ -372,7 +379,10 @@ pub(crate) fn convert(value: Value, kind: CatalogType, conversion: Conversion) -
         return Ok(Value::Null);
     }
     match kind {
-        CatalogType::Name | CatalogType::InternalChar | CatalogType::NodeTree => {
+        CatalogType::Name
+        | CatalogType::InternalChar
+        | CatalogType::NodeTree
+        | CatalogType::RefCursor => {
             let text = match value {
                 Value::Text(text) => text,
                 Value::Bpchar(text) => crate::types::without_trailing_spaces(&text).to_owned(),
@@ -384,6 +394,7 @@ pub(crate) fn convert(value: Value, kind: CatalogType, conversion: Conversion) -
             match kind {
                 CatalogType::Name => Ok(Value::Text(truncated_name(text))),
                 CatalogType::InternalChar => Ok(Value::Text(first_character(&text))),
+                CatalogType::RefCursor => Ok(Value::Text(text)),
                 _ if conversion == Conversion::Assignment => Ok(Value::Text(text)),
                 _ => Err(SqlError::new(
                     SqlState::CANNOT_COERCE,

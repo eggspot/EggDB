@@ -73,6 +73,42 @@ fn refused_database(role: &str, database: &str, dialect: Dialect) -> SqlError {
     .with_hint(hint)
 }
 
+const MOST_NAMED_HOLDINGS: usize = 8;
+
+fn listed(held: &[String]) -> String {
+    let named = &held[..held.len().min(MOST_NAMED_HOLDINGS)];
+    let mut text = match named {
+        [] => String::new(),
+        [only] => only.clone(),
+        [first @ .., last] => format!("{} and {last}", first.join(", ")),
+    };
+    if held.len() > named.len() {
+        text.push_str(&format!(" (and {} more)", held.len() - named.len()));
+    }
+    text
+}
+
+fn refused_while_held(database: &str, held: &[String], dialect: Dialect) -> SqlError {
+    let error = SqlError::new(
+        SqlState::FEATURE_NOT_SUPPORTED,
+        format!(
+            "cannot switch to database \"{database}\" while this session holds {}",
+            listed(held)
+        ),
+    )
+    .with_detail(
+        "Temporary tables and session locks live in the session a switch closes, so they would be dropped and released without a word.",
+    )
+    .with_hint(format!(
+        "Drop the temporary tables and release the session locks first, or open another connection to \"{database}\"."
+    ));
+    match dialect {
+        Dialect::SqlServer => error.with_sqlserver_code(40508),
+        Dialect::MySql => error.with_vendor_code(1235),
+        _ => error,
+    }
+}
+
 impl DatabaseSwitch {
     /// The session over `store`, the database the switch went to, with what the old session
     /// carried. The server gives it its databases again
@@ -99,8 +135,12 @@ impl Session<'_> {
     /// store is `store`. Only the server's own user moves between databases: a session that
     /// logged in as a stored role was authenticated by its own database's roles, and another
     /// database's role of the same name is a different role, so the switch fails with `42501`
-    /// (MySQL's `1044`, SQL Server's `916`) for it. The caller closes this session and builds
-    /// the new one with [`DatabaseSwitch::into_session`].
+    /// (MySQL's `1044`, SQL Server's `916`) for it. A session holding a temporary table or a
+    /// session-level lock (an advisory lock, or an application lock of `@LockOwner = 'Session'`)
+    /// does not move either: the switch fails with `0A000` (SQL Server's `40508`, MySQL's
+    /// `1235`), naming what it holds, since closing the session would drop and release them.
+    /// The caller closes this session and builds the new one with
+    /// [`DatabaseSwitch::into_session`].
     pub fn switch_to<S: KeyValueStore>(
         &self,
         _store: &S,
@@ -109,6 +149,7 @@ impl Session<'_> {
         if let Some(role) = self.stored_login_role() {
             return Err(refused_database(role, database, self.connection_dialect));
         }
+        self.refuse_switch_while_holding(database)?;
         Ok(DatabaseSwitch {
             settings: moved_settings(&self.settings, database),
             connection_settings: self
@@ -131,6 +172,29 @@ impl Session<'_> {
     /// `0A000` until then.
     pub fn take_database_switch(&mut self) -> Option<String> {
         self.database_switch.take()
+    }
+
+    fn held_by_session(&self) -> Vec<String> {
+        let mut held: Vec<String> = self
+            .temporary
+            .relations()
+            .into_iter()
+            .map(|relation| {
+                let kind = if relation.is_view { "view" } else { "table" };
+                format!("temporary {kind} {}", relation.name)
+            })
+            .collect();
+        held.extend(self.advisory_locks.session_lock_names());
+        held
+    }
+
+    fn refuse_switch_while_holding(&self, database: &str) -> SqlResult<()> {
+        let held = self.held_by_session();
+        if held.is_empty() {
+            Ok(())
+        } else {
+            Err(refused_while_held(database, &held, self.connection_dialect))
+        }
     }
 
     fn stored_login_role(&self) -> Option<&str> {
@@ -159,7 +223,9 @@ impl Session<'_> {
     /// [taken](Session::take_database_switch) by the server; inside a transaction it fails
     /// with `25001`, and for a session logged in as a stored role with `42501`: a stored role
     /// is trusted only in the database that authenticated it, so it connects to another one
-    /// directly.
+    /// directly. While the session holds a temporary table or a session-level lock it fails
+    /// with `0A000` (SQL Server's `40508`, MySQL's `1235`), naming them, as
+    /// [`Session::switch_to`] does.
     pub fn use_database(&mut self, name: &str) -> SqlResult<Option<String>> {
         if name.eq_ignore_ascii_case(&self.settings.database) {
             return Ok(Some(self.settings.database.clone()));
@@ -180,6 +246,7 @@ impl Session<'_> {
             )
             .with_hint("COMMIT or ROLLBACK first."));
         }
+        self.refuse_switch_while_holding(&database)?;
         self.database_switch = Some(database.clone());
         Ok(Some(database))
     }
@@ -307,6 +374,91 @@ mod tests {
         );
         run(&mut keeper, "USE main").unwrap();
         assert_eq!(keeper.take_database_switch(), None);
+    }
+
+    fn served() -> Logins {
+        Logins {
+            databases: ["main", "ours", "theirs"],
+            superusers: [("main", "nobody"), ("theirs", "nobody")],
+        }
+    }
+
+    #[test]
+    fn use_refuses_to_leave_a_temporary_table_or_a_session_lock_behind() {
+        let databases = three_databases();
+        let served = served();
+        let mut session = Session::with_dialect(&databases.main, Dialect::SqlServer);
+        session.set_served_databases(&served);
+        run(&mut session, "CREATE TABLE #work (id INT)").unwrap();
+        run(
+            &mut session,
+            "EXEC sp_getapplock @Resource = 'nightly', @LockMode = 'Exclusive', @LockOwner = 'Session'",
+        )
+        .unwrap();
+        let refused = run(&mut session, "USE theirs").unwrap_err();
+        assert_eq!(refused.state(), SqlState::FEATURE_NOT_SUPPORTED);
+        assert_eq!(refused.vendor_code(), Some(40508));
+        assert!(
+            refused.message().contains("temporary table #work")
+                && refused.message().contains("application lock 'nightly'"),
+            "{refused}"
+        );
+        assert!(
+            refused
+                .hint()
+                .is_some_and(|hint| hint.contains("another connection")),
+            "{refused:?}"
+        );
+        assert_eq!(session.take_database_switch(), None);
+        assert!(session.switch_to(&databases.theirs, "theirs").is_err());
+        run(&mut session, "DROP TABLE #work").unwrap();
+        let refused = run(&mut session, "USE theirs").unwrap_err();
+        assert!(
+            !refused.message().contains("#work")
+                && refused.message().contains("application lock 'nightly'"),
+            "{refused}"
+        );
+        run(
+            &mut session,
+            "EXEC sp_releaseapplock @Resource = 'nightly', @LockOwner = 'Session'",
+        )
+        .unwrap();
+        run(&mut session, "USE theirs").unwrap();
+        assert_eq!(session.take_database_switch().as_deref(), Some("theirs"));
+        assert!(session.switch_to(&databases.theirs, "theirs").is_ok());
+        let _ = session.close();
+    }
+
+    #[test]
+    fn mysql_use_names_a_held_temporary_table_with_its_own_number() {
+        let databases = three_databases();
+        let served = served();
+        let mut session = Session::with_dialect(&databases.main, Dialect::MySql);
+        session.identify("root", "main");
+        session.set_served_databases(&served);
+        run(&mut session, "CREATE TEMPORARY TABLE scratch (id INT)").unwrap();
+        let refused = run(&mut session, "USE ours").unwrap_err();
+        assert_eq!(refused.vendor_code(), Some(1235));
+        assert!(
+            refused.message().contains("temporary table scratch"),
+            "{refused}"
+        );
+        run(&mut session, "USE main").unwrap();
+        assert_eq!(session.take_database_switch(), None);
+        let _ = session.close();
+    }
+
+    #[test]
+    fn a_long_list_of_holdings_is_cut_short() {
+        let held: Vec<String> = (1..=10).map(|n| format!("advisory lock {n}")).collect();
+        let error = refused_while_held("ours", &held, Dialect::PostgreSql);
+        assert!(
+            error
+                .message()
+                .ends_with("advisory lock 7 and advisory lock 8 (and 2 more)"),
+            "{error}"
+        );
+        assert_eq!(listed(&held[..1]), "advisory lock 1");
     }
 
     #[test]

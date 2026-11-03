@@ -12,6 +12,7 @@ const LARGEST_PAGE_SIZE: usize = 65536;
 const MOST_TIME_LIMIT_SECONDS: u64 = 300;
 const MOST_CALL_GAP_MS: u64 = 10_000;
 const MOST_BUSY_TIMEOUT_MS: u64 = 3_600_000;
+const SMALLEST_CONNECTION_MEMORY: usize = 1 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandName {
@@ -51,6 +52,7 @@ pub(crate) enum CollectionAction {
     List,
     Add,
     Delete,
+    Move,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,6 +248,9 @@ impl CommandName {
             | OptionName::User
             | OptionName::Database
             | OptionName::MaxConnections
+            | OptionName::MaxConnectionMemory
+            | OptionName::LogSlowStatements
+            | OptionName::StatementStatistics
             | OptionName::IdleTimeout
             | OptionName::SocketDir
             | OptionName::MysqlSocket
@@ -313,6 +318,7 @@ impl CommandName {
             | OptionName::To
             | OptionName::Reverse
             | OptionName::KeysOnly => self == Self::Scan,
+            OptionName::Collections => self == Self::Stats,
         }
     }
 
@@ -383,6 +389,7 @@ enum OptionName {
     Reverse,
     Limit,
     KeysOnly,
+    Collections,
     Mono,
     Ascii,
     ReadOnly,
@@ -424,6 +431,9 @@ enum OptionName {
     PasswordFile,
     Database,
     MaxConnections,
+    MaxConnectionMemory,
+    LogSlowStatements,
+    StatementStatistics,
     IdleTimeout,
     SocketDir,
     MysqlSocket,
@@ -486,6 +496,7 @@ impl OptionName {
             b"reverse" => Self::Reverse,
             b"limit" => Self::Limit,
             b"keys-only" => Self::KeysOnly,
+            b"collections" => Self::Collections,
             b"mono" => Self::Mono,
             b"ascii" => Self::Ascii,
             b"read-only" => Self::ReadOnly,
@@ -527,6 +538,9 @@ impl OptionName {
             b"password-file" => Self::PasswordFile,
             b"database" => Self::Database,
             b"max-connections" => Self::MaxConnections,
+            b"max-connection-memory" => Self::MaxConnectionMemory,
+            b"log-slow-statements" => Self::LogSlowStatements,
+            b"statement-statistics" => Self::StatementStatistics,
             b"idle-timeout" => Self::IdleTimeout,
             b"socket-dir" => Self::SocketDir,
             b"mysql-socket" => Self::MysqlSocket,
@@ -596,6 +610,7 @@ impl OptionName {
                 | Self::Create
                 | Self::Reverse
                 | Self::KeysOnly
+                | Self::Collections
                 | Self::Mono
                 | Self::Ascii
                 | Self::ReadOnly
@@ -689,6 +704,8 @@ pub(crate) struct Request {
     pub(crate) tables: Vec<String>,
     pub(crate) call_gap_ms: Option<u64>,
     pub(crate) collection: Option<String>,
+    pub(crate) new_collection_name: Option<String>,
+    pub(crate) collection_stats: bool,
     pub(crate) collection_action: Option<CollectionAction>,
     pub(crate) table_action: Option<TableAction>,
     pub(crate) table: Option<OsString>,
@@ -817,7 +834,10 @@ pub(crate) struct ServeOptions {
     pub(crate) password_file: Option<ExportFile>,
     pub(crate) database: Option<String>,
     pub(crate) max_connections: Option<usize>,
+    pub(crate) max_connection_memory: Option<usize>,
     pub(crate) idle_timeout_seconds: Option<u64>,
+    pub(crate) log_slow_statements_ms: Option<u64>,
+    pub(crate) statement_statistics: Option<usize>,
     pub(crate) socket_dir: Option<PathBuf>,
     pub(crate) mysql_socket: Option<PathBuf>,
     pub(crate) tls_certificate: Option<PathBuf>,
@@ -1115,6 +1135,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         tables: Vec::new(),
         call_gap_ms: None,
         collection: None,
+        new_collection_name: None,
+        collection_stats: false,
         collection_action: None,
         table_action: None,
         table: None,
@@ -1179,6 +1201,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 request.scan.limit = Some(parse_limit(&option.spelled, value).map_err(usage)?);
             }
             OptionName::KeysOnly => request.scan.keys_only = true,
+            OptionName::Collections => request.collection_stats = true,
             OptionName::Mono => request.mono = true,
             OptionName::Ascii => request.ascii = true,
             OptionName::ReadOnly => request.read_only = true,
@@ -1419,6 +1442,17 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     })?;
                 request.serve.max_connections = Some(count);
             }
+            OptionName::MaxConnectionMemory => {
+                let bytes = parse_size(&option.spelled, value).map_err(usage)?;
+                if bytes < SMALLEST_CONNECTION_MEMORY {
+                    return Err(usage(format!(
+                        "{} needs at least 1m, so a client can still send its usual requests, not '{}'",
+                        option.spelled,
+                        shown(value)
+                    )));
+                }
+                request.serve.max_connection_memory = Some(bytes);
+            }
             OptionName::IdleTimeout => {
                 let seconds = parse_whole_number(value.as_encoded_bytes()).ok_or_else(|| {
                     usage(format!(
@@ -1428,6 +1462,29 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     ))
                 })?;
                 request.serve.idle_timeout_seconds = Some(seconds);
+            }
+            OptionName::LogSlowStatements => {
+                let milliseconds =
+                    parse_whole_number(value.as_encoded_bytes()).ok_or_else(|| {
+                        usage(format!(
+                            "{} needs a whole number of milliseconds, 0 to log every statement, not '{}'",
+                            option.spelled,
+                            shown(value)
+                        ))
+                    })?;
+                request.serve.log_slow_statements_ms = Some(milliseconds);
+            }
+            OptionName::StatementStatistics => {
+                let count = parse_whole_number(value.as_encoded_bytes())
+                    .and_then(|count| usize::try_from(count).ok())
+                    .ok_or_else(|| {
+                        usage(format!(
+                            "{} needs a whole number of statements, 0 to keep none, not '{}'",
+                            option.spelled,
+                            shown(value)
+                        ))
+                    })?;
+                request.serve.statement_statistics = Some(count);
             }
             OptionName::Csv => request.csv.source = Some(export_file(value)),
             OptionName::Parquet => request.csv.parquet = Some(PathBuf::from(value)),
@@ -1483,9 +1540,22 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             }
             OptionName::Tables => {
                 for name in parse_table_names(&option.spelled, value).map_err(usage)? {
-                    if !request.tables.contains(&name) {
-                        request.tables.push(name);
+                    if request.tables.contains(&name) {
+                        continue;
                     }
+                    if request
+                        .tables
+                        .iter()
+                        .any(|given| table_part(given) == table_part(&name))
+                    {
+                        return Err(usage(format!(
+                            "{} names '{}' twice with different columns: give it once, with every column it needs, such as {}(a,b)",
+                            option.spelled,
+                            table_part(&name),
+                            table_part(&name)
+                        )));
+                    }
+                    request.tables.push(name);
                 }
             }
             OptionName::CallGap => {
@@ -1792,16 +1862,21 @@ fn collection_request(mut request: Request, arguments: &[&OsStr]) -> Result<Requ
         b"list" => CollectionAction::List,
         b"add" => CollectionAction::Add,
         b"delete" | b"del" => CollectionAction::Delete,
+        b"move" | b"rename" => CollectionAction::Move,
         _ => return Err(usage(COLLECTION_NEEDS_A_VERB.to_owned())),
     };
     let (verb, needed) = match action {
         CollectionAction::List => ("list", 2),
         CollectionAction::Add => ("add", 3),
         CollectionAction::Delete => ("delete", 3),
+        CollectionAction::Move => ("move", 4),
     };
     if arguments.len() < needed {
         let needs = match (action, arguments.len()) {
             (CollectionAction::List, _) => "a file",
+            (CollectionAction::Move, 1) => "a file, a collection name and its new name",
+            (CollectionAction::Move, 2) => "a collection name and its new name",
+            (CollectionAction::Move, _) => "the collection's new name",
             (_, 1) => "a file and a collection name",
             _ => "a collection name",
         };
@@ -1814,6 +1889,9 @@ fn collection_request(mut request: Request, arguments: &[&OsStr]) -> Result<Requ
     request.file = PathBuf::from(arguments[1]);
     if let Some(name) = arguments.get(2) {
         request.collection = Some(parse_collection_name(None, name).map_err(usage)?);
+    }
+    if let Some(new_name) = arguments.get(3) {
+        request.new_collection_name = Some(parse_collection_name(None, new_name).map_err(usage)?);
     }
     Ok(request)
 }
@@ -1963,7 +2041,7 @@ const READ_ONLY_CANNOT_CREATE: &str =
     "--read-only cannot be combined with --create: a read-only open never creates a file";
 const TABLE_NEEDS_A_VERB: &str = "table needs list, show or sample";
 const ROW_NEEDS_A_VERB: &str = "row needs list";
-const COLLECTION_NEEDS_A_VERB: &str = "collection needs list, add or delete";
+const COLLECTION_NEEDS_A_VERB: &str = "collection needs list, add, delete or move";
 pub(crate) const MOST_SAMPLE_ROWS: u64 = 1_000;
 
 const MOST_COLLECTION_NAME_BYTES: usize = 128;
@@ -2379,17 +2457,89 @@ fn parse_table_names(spelled: &str, value: &OsStr) -> Result<Vec<String>, String
         ));
     }
     let mut names = Vec::new();
-    for name in text.split(',').map(str::trim) {
-        if name.is_empty() {
+    for entry in split_table_entries(spelled, text)? {
+        let entry = entry.trim();
+        if entry.is_empty() {
             return Err(format!("{spelled} has an empty name in '{text}'"));
         }
+        let (name, columns) = match entry.split_once('(') {
+            Some((name, rest)) => {
+                let inside = rest.strip_suffix(')').ok_or_else(|| {
+                    format!("{spelled} takes columns as name(a,b), not '{entry}'")
+                })?;
+                (
+                    name.trim(),
+                    Some(parse_column_list(spelled, entry, inside)?),
+                )
+            }
+            None if entry.contains(')') => {
+                return Err(format!(
+                    "{spelled} takes columns as name(a,b), not '{entry}'"
+                ));
+            }
+            None => (entry, None),
+        };
         let parts: Vec<&str> = name.split('.').collect();
         if parts.len() > 2 || parts.iter().any(|part| part.is_empty()) {
             return Err(format!("{spelled} takes name or schema.name, not '{name}'"));
         }
-        names.push(name.to_owned());
+        names.push(match columns {
+            Some(columns) => format!("{name}({})", columns.join(",")),
+            None => name.to_owned(),
+        });
     }
     Ok(names)
+}
+
+fn split_table_entries<'t>(spelled: &str, text: &'t str) -> Result<Vec<&'t str>, String> {
+    let mut entries = Vec::new();
+    let mut start = 0;
+    let mut open = false;
+    for (at, character) in text.char_indices() {
+        match character {
+            '(' if open => {
+                return Err(format!(
+                    "{spelled} takes columns as name(a,b), not '{text}'"
+                ));
+            }
+            '(' => open = true,
+            ')' if !open => {
+                return Err(format!(
+                    "{spelled} takes columns as name(a,b), not '{text}'"
+                ));
+            }
+            ')' => open = false,
+            ',' if !open => {
+                entries.push(&text[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    if open {
+        return Err(format!(
+            "{spelled} has a column list with no ')' in '{text}'"
+        ));
+    }
+    entries.push(&text[start..]);
+    Ok(entries)
+}
+
+fn parse_column_list(spelled: &str, entry: &str, inside: &str) -> Result<Vec<String>, String> {
+    let mut columns: Vec<String> = Vec::new();
+    for column in inside.split(',').map(str::trim) {
+        if column.is_empty() {
+            return Err(format!("{spelled} has an empty column name in '{entry}'"));
+        }
+        if !columns.iter().any(|kept| kept == column) {
+            columns.push(column.to_owned());
+        }
+    }
+    Ok(columns)
+}
+
+fn table_part(entry: &str) -> &str {
+    entry.split_once('(').map_or(entry, |(name, _)| name)
 }
 
 fn parse_whole_number(digits: &[u8]) -> Option<u64> {
@@ -2483,6 +2633,39 @@ mod tests {
             "--call-gap must be a whole number of milliseconds from 0 to 10000, not '10001'"
         );
         assert!(usage_message("get app.db k --tables users").contains("--tables"));
+    }
+
+    #[test]
+    fn mcp_tables_take_column_lists() {
+        let limited =
+            request("mcp app.db --tables orders(id,total),customers --tables orders(id,total)");
+        assert_eq!(limited.tables, vec!["orders(id,total)", "customers"]);
+        let spaced = request("mcp app.db --tables archive.orders(id,id,total)");
+        assert_eq!(spaced.tables, vec!["archive.orders(id,total)"]);
+        assert_eq!(
+            usage_message("mcp app.db --tables orders(id --tables x"),
+            "--tables has a column list with no ')' in 'orders(id'"
+        );
+        assert_eq!(
+            usage_message("mcp app.db --tables orders(id,)"),
+            "--tables has an empty column name in 'orders(id,)'"
+        );
+        assert_eq!(
+            usage_message("mcp app.db --tables orders(id)x"),
+            "--tables takes columns as name(a,b), not 'orders(id)x'"
+        );
+        assert_eq!(
+            usage_message("mcp app.db --tables orders((id))"),
+            "--tables takes columns as name(a,b), not 'orders((id))'"
+        );
+        assert_eq!(
+            usage_message("mcp app.db --tables id)"),
+            "--tables takes columns as name(a,b), not 'id)'"
+        );
+        assert_eq!(
+            usage_message("mcp app.db --tables orders(id) --tables orders"),
+            "--tables names 'orders' twice with different columns: give it once, with every column it needs, such as orders(a,b)"
+        );
     }
 
     #[test]
@@ -2774,11 +2957,38 @@ mod tests {
         }
         assert_eq!(
             usage_message("collection"),
-            "collection needs list, add or delete"
+            "collection needs list, add, delete or move"
         );
         assert_eq!(
+            usage_message("collection copy app.db a b"),
+            "collection needs list, add, delete or move"
+        );
+        for verb in ["move", "rename"] {
+            let moved = request(&format!("collection {verb} app.db cache sessions"));
+            assert_eq!(moved.collection_action, Some(CollectionAction::Move));
+            assert_eq!(moved.collection.as_deref(), Some("cache"));
+            assert_eq!(moved.new_collection_name.as_deref(), Some("sessions"));
+        }
+        assert_eq!(
             usage_message("collection rename app.db a"),
-            "collection needs list, add or delete"
+            "eggdb collection move needs the collection's new name"
+        );
+        assert_eq!(
+            usage_message("collection move app.db"),
+            "eggdb collection move needs a collection name and its new name"
+        );
+        assert_eq!(
+            usage_message("collection move"),
+            "eggdb collection move needs a file, a collection name and its new name"
+        );
+        assert_eq!(
+            usage_message("collection move app.db a b c"),
+            "too many arguments for eggdb collection: 'c'"
+        );
+        let too_long = "x".repeat(129);
+        assert!(
+            usage_message(&format!("collection move app.db a {too_long}"))
+                .starts_with("a collection name is 1 to 128 bytes")
         );
         assert_eq!(
             usage_message("collection list"),

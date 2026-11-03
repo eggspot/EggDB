@@ -51,8 +51,8 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --allow-write
 | `run_sql` | runs **one** SQL statement that reads, in a dialect: `postgresql` (the default), `mysql`, `sqlite` or `oracle`, all on the same tables; returns at most `max_rows` rows (100 by default, at most 10,000) and 1 MiB |
 | `explain_query` | the plan for one `SELECT`, `UPDATE` or `DELETE`, without running it; give the statement without `EXPLAIN` (Oracle has no `EXPLAIN` yet) |
 | `sample_rows` | the first rows of a table or view as stored: a table's in primary-key order, a view's in its query's order; not a random sample (10 by default, at most 1,000) |
-| `kv_get` | the value under one key of the key-value store, by text or hexadecimal key |
-| `kv_scan` | keys and values in key order, by prefix or range, a page at a time |
+| `kv_get` | the value under one key of the key-value store, by text or hexadecimal key; `collection` reads a named collection instead of the default key space (D292) |
+| `kv_scan` | keys and values in key order, by prefix or range, a page at a time; `collection` lists a named collection instead of the default key space (D292) |
 | `row_list` | the rows of one table in the order they are stored, a page at a time: `limit` rows (100 by default, at most 1,000) and at most 1 MiB, then `next_cursor` to send back as `after`; pages neither repeat nor skip rows while others write (D145) |
 
 The tools, their arguments, descriptions and annotations come from EggDB's command registry
@@ -138,7 +138,7 @@ or is named itself.
   listed too; a view over an unlisted table fails as missing, so listing a view never exposes the
   table behind it.
 - **The keys are off.** `kv_get` and `kv_scan` are not offered, and a call to either answers
-  `limited_to_tables`.
+  `limited_to_tables`, with or without a `collection`: collections are keys too (D292).
 - **What it still shows.** The names of schemas and of user-defined types, and what a listed
   table's own definition says: a foreign key or a listed view's text names the table it refers
   to, though that table stays unreadable. Internal numbers are not renumbered, so gaps in them
@@ -147,6 +147,33 @@ or is named itself.
   starts (skipped while another program has the file open for writing); otherwise it exits 1
   with `table_not_found`, naming the stored name when only the letter case differs.
 - **With `--allow-write`, only the listed tables change.** See below.
+
+### Letting the agent see only some columns
+
+```sh
+claude mcp add mydb -- eggdb mcp /path/to/app.db --tables 'people(id,name),orders'
+```
+
+A name followed by a column list in parentheses shows that table with only those columns
+(D281). The other columns do not exist for the agent: `SELECT *`, `describe_table`,
+`sample_rows`, `information_schema` and every other catalog leave them out, and a query that
+names one fails as an unknown column (`42703`), whether directly, through a listed view, a
+function's body, a CTE or a subquery. Their values, comments, statistics and the indexes over
+them are hidden below the SQL engine, as hidden tables are.
+
+- **The list must hold the primary key**, and the table must exist when the server starts; a
+  view takes no list (list the columns of the tables it reads). A column the table does not
+  have, a primary-key column left out, an empty list or a list on a view stops the server, exit
+  1, with `column_not_found`.
+- **A table listed with columns cannot be changed**, even with `--allow-write`: rows written
+  without the hidden columns would lose them, so an `INSERT`, `UPDATE`, `DELETE`, `ALTER`,
+  comment, policy or `ANALYZE` on it is refused (`42501`).
+- **What it still shows.** Hidden column names can appear in definitions the agent may read: a
+  listed table's column default, a generated column, a row-security policy, or another table's
+  foreign key that points at them. A row-security policy that names a hidden column makes the
+  table fail to read, never read unfiltered.
+- In a shell, quote the option, since parentheses are special there. Listing the same table
+  twice with different columns is a usage error.
 
 The audit's `server_started` record lists the names (`"tables"`), and `eggdb audit` shows them.
 
@@ -173,20 +200,27 @@ can reach another table is covered, not a list of statement kinds:
   dropping a trigger, even on a listed table, since its function would run in your own later
   sessions, unfiltered, and dropping it switches off what it guards; dropping the table takes
   its triggers with it.
-- **Ties to unlisted tables freeze what they tie.** When an unlisted table has a foreign key to a
-  listed one, or a listed one has a foreign key to an unlisted one, the listed table's rows and
-  definition cannot change, since a delete could cascade or a check would read the other table;
-  when an unlisted view reads a listed table, its definition (`ALTER`, `DROP`) cannot change.
-  The refusal (`42501`) names both tables, and the banner lists these ties when the server
-  starts: list the other table too to allow the change.
+- **Ties to unlisted tables limit what they tie.** When a listed table has a foreign key to an
+  unlisted one, its rows and definition cannot change, since the check would read the other
+  table. When an unlisted table has a foreign key to a listed one, the listed table still takes
+  inserts and changes to the columns that foreign key does not point at (D281), but deleting a
+  row, changing a column it points at and changing the definition are refused, whatever the
+  foreign key's action: `CASCADE`, `SET NULL` and `SET DEFAULT` would write the other table, and
+  `NO ACTION` and `RESTRICT` would have to read it. When an unlisted view reads a listed table,
+  its definition (`ALTER`, `DROP`) cannot change. The refusal (`42501`) names both tables, and
+  the banner lists these ties when the server starts: list the other table too to allow the
+  change.
 - **A refusal rolls everything back.** A transaction in which any change was refused is rolled
   back at commit, even when a procedure caught the error.
 - **The keys stay off**, and listed tables may be granted and analyzed as usual.
-- **Not covered yet.** A new or changed column default, generated column or `CHECK` that calls
-  a user-defined routine is refused (`42501`, D257), but the ones a listed table already had are
-  not checked again, nor are its row security policies: such a definition may call a function
-  that already exists, which then runs in your own sessions when they change that table. Review
-  those definitions before trusting the data. Indexes have no expressions, so none calls one.
+- **No new code that runs later.** A new or changed column default, generated column, `CHECK`
+  or row-security policy that calls a user-defined routine, or that holds a subquery, is refused
+  (`42501`, D257, D281): it would run in your own later sessions, where `--tables` does not
+  confine it. Built-in functions are fine. The defaults, checks and policies a listed table
+  already had are yours and keep working: in the agent's session they run under the same
+  filter, so a routine they call finds unlisted tables missing too. A routine that catches that
+  error and carries on may take a different path there than in your sessions. Indexes have no
+  expressions, so none calls one.
 
 A server that acts as a stored role (D190) limits an agent through `GRANT`s instead; `--tables`
 needs no role in the file, follows triggers and routines, and also stops DDL outside the list.

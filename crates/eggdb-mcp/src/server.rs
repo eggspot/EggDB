@@ -79,7 +79,8 @@ pub struct ServerConfig {
     /// Whether agents may change the database through `write_sql` (`--allow-write`).
     pub allow_write: bool,
     /// The only tables and views agents see and, with [`ServerConfig::allow_write`], change
-    /// (`--tables`), or `None` for every table and the key-value store.
+    /// (`--tables`), each table perhaps with the only columns they see, or `None` for every
+    /// table and the key-value store.
     pub tables: Option<VisibleTables>,
     /// The pause after a call before the next call opens the database (`--call-gap`), so
     /// other programs get the file between an agent's calls; zero for none.
@@ -920,7 +921,7 @@ pub(crate) fn instructions(allow_write: bool, limited_to_tables: bool) -> String
     let (read, change, destroy) = (Effect::Read, Effect::Change, Effect::Destroy);
     if allow_write {
         let limit = if limited_to_tables {
-            " The user limited this session to some tables (--tables): you may read and change only those, and list_tables shows exactly those. Any other table does not exist here and a statement naming one fails as missing; a change that would reach another table through a foreign key or a view, or that creates a table, view, schema, type, routine or role under another name, is refused with SQLSTATE 42501 and rolled back; kv_get and kv_scan are not offered. To reach more, ask the user to widen --tables."
+            " The user limited this session to some tables (--tables): you may read and change only those, and list_tables shows exactly those. Any other table does not exist here and a statement naming one fails as missing; a change that would reach another table through a foreign key or a view, or that creates a table, view, schema, type, routine or role under another name, is refused with SQLSTATE 42501 and rolled back; kv_get and kv_scan are not offered. A table listed with some of its columns shows only those, naming another of its columns fails as missing, and its rows cannot be changed. Deleting a row of a listed table that an unlisted table references, or changing the columns that reference points at, is refused too. To reach more, ask the user to widen --tables."
         } else {
             ""
         };
@@ -935,7 +936,7 @@ pub(crate) fn instructions(allow_write: bool, limited_to_tables: bool) -> String
     } else {
         let (limit, keys) = if limited_to_tables {
             (
-                " The user limited this session to some tables (--tables): list_tables shows exactly those, any other table does not exist here and a query naming one fails as missing; kv_get and kv_scan are not offered. To reach more, ask the user to widen --tables.",
+                " The user limited this session to some tables (--tables): list_tables shows exactly those, any other table does not exist here and a query naming one fails as missing; kv_get and kv_scan are not offered. A table listed with some of its columns shows only those, and naming another of its columns fails as missing. To reach more, ask the user to widen --tables.",
                 "",
             )
         } else {

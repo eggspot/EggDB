@@ -205,6 +205,7 @@ impl Session<'_> {
                 .unwrap_or(0);
             file = Some(opened);
         }
+        let busy_timeout = self.busy_timeout();
         let raw: &mut dyn Read = match &mut file {
             Some(file) => file,
             None => &mut *self.stdin,
@@ -275,6 +276,7 @@ impl Session<'_> {
                 &self.file_display,
                 &target,
                 self.request.cache_bytes,
+                busy_timeout,
                 staging,
             )?;
         }
@@ -282,6 +284,7 @@ impl Session<'_> {
         let cache = self.request.cache_bytes.unwrap_or_else(|| bulk_cache(size));
         let options = Options::new()
             .cache_bytes(cache)
+            .busy_timeout(busy_timeout)
             .durability(Durability::Normal)
             .create_if_missing(!exists);
         let db = Database::open_with(&open_path, options).map_err(|error| {
@@ -486,9 +489,13 @@ fn copy_for_dry_run(
     file_display: &str,
     source: &Path,
     cache_bytes: Option<usize>,
+    busy_timeout: Duration,
     copy: &Path,
 ) -> Result<(), Failure> {
-    let mut options = Options::new().read_only(true).create_if_missing(false);
+    let mut options = Options::new()
+        .read_only(true)
+        .create_if_missing(false)
+        .busy_timeout(busy_timeout);
     if let Some(cache_bytes) = cache_bytes {
         options = options.cache_bytes(cache_bytes);
     }

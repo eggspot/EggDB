@@ -1,6 +1,6 @@
 use crate::ast::{
-    BinaryOperator, Expr, ExprKind, Insert, InsertSource, InsertValue, MergeStatement, Name,
-    OnDuplicate, SelectItem,
+    BinaryOperator, Expr, ExprKind, Insert, InsertSource, InsertValue, MergeStatement, MergeUpdate,
+    Name, OnDuplicate, SelectItem,
 };
 use crate::constraints::PreparedChecks;
 use crate::encoding::{Column, TableDefinition};
@@ -80,7 +80,27 @@ fn clause_exprs(merge: &MergeStatement) -> Vec<&Expr> {
         exprs.extend(insert.values.iter());
         exprs.extend(insert.condition.iter());
     }
+    for clause in &merge.by_source {
+        exprs.extend(clause.assignments.iter().map(|(_, expr)| expr));
+        exprs.extend(clause.condition.iter());
+    }
     exprs
+}
+
+fn assigned_columns(table: &TableDefinition, update: &MergeUpdate) -> SqlResult<Vec<usize>> {
+    let mut columns = Vec::with_capacity(update.assignments.len());
+    for (name, _) in &update.assignments {
+        let index = target_index(table, name)?;
+        if columns.contains(&index) {
+            return Err(
+                SqlError::new(SqlState::DUPLICATE_COLUMN, "duplicate column name")
+                    .with_oracle_code(957)
+                    .at(name.position),
+            );
+        }
+        columns.push(index);
+    }
+    Ok(columns)
 }
 
 fn target_index(table: &TableDefinition, name: &Name) -> SqlResult<usize> {
@@ -278,21 +298,18 @@ pub(crate) fn merge(
     if let Some(update) = &merge.update {
         let mut on_columns = Vec::new();
         target_columns_in(&merge.on, joined.scope, target_width, &mut on_columns);
-        for (name, _) in &update.assignments {
-            let index = target_index(&table, name)?;
-            if on_columns.contains(&index) {
+        updated_columns = assigned_columns(&table, update)?;
+        for ((name, _), index) in update.assignments.iter().zip(&updated_columns) {
+            if on_columns.contains(index) {
                 return Err(on_column_updated(&name.text, name.position));
             }
-            if updated_columns.contains(&index) {
-                return Err(
-                    SqlError::new(SqlState::DUPLICATE_COLUMN, "duplicate column name")
-                        .with_oracle_code(957)
-                        .at(name.position),
-                );
-            }
-            updated_columns.push(index);
         }
     }
+    let by_source_columns = merge
+        .by_source
+        .iter()
+        .map(|clause| assigned_columns(&table, clause))
+        .collect::<SqlResult<Vec<_>>>()?;
     let target_rows = execute::every_row(writer, &table)?;
     for (key, row) in &target_rows {
         memory.charge(WorkMemory::row_bytes(row) + key.len())?;
@@ -305,6 +322,7 @@ pub(crate) fn merge(
     let candidates = SourceIndex::build(&equalities, &source.rows, &mut memory)?;
     let every_source: Vec<usize> = (0..source.rows.len()).collect();
     let mut matched_sources = vec![false; source.rows.len()];
+    let mut matched_targets = vec![false; target_rows.len()];
     let mut pairs: Vec<(usize, usize)> = Vec::new();
     for (target_index, (_, target_row)) in target_rows.iter().enumerate() {
         let mut chosen = None;
@@ -319,6 +337,7 @@ pub(crate) fn merge(
                 continue;
             }
             matched_sources[source_index] = true;
+            matched_targets[target_index] = true;
             let Some(update) = &merge.update else {
                 continue;
             };
@@ -338,86 +357,40 @@ pub(crate) fn merge(
     let mut affected = 0usize;
     let mut outputs: Vec<OutputRow> = Vec::new();
     if let Some(update) = &merge.update {
-        let checks = PreparedChecks::of(&table)?.with_partitions(writer, tables, &table)?;
-        let rule = execute::assignment_rule(crate::constraints::current_dialect());
-        let mut changes: Vec<execute::RowUpdate> = Vec::with_capacity(pairs.len());
-        let mut old_rows = Vec::with_capacity(pairs.len());
-        let mut updated_pairs = Vec::with_capacity(pairs.len());
-        let mut firing = Firing::for_table(
-            &mut *writer,
+        let mut planned = Vec::with_capacity(pairs.len());
+        for &(target_index, source_index) in &pairs {
+            let old_row = &target_rows[target_index].1;
+            let row = joined.row(old_row, &source.rows[source_index]);
+            let new_row = assigned_row(&joined, &table, update, &updated_columns, old_row, &row)?;
+            planned.push(PlannedUpdate {
+                target_index,
+                new_row,
+                source_index: Some(source_index),
+            });
+        }
+        let stored = store_updates(
+            writer,
             tables,
             &table,
-            TriggerEvent::Update,
+            &target_rows,
             &updated_columns,
+            planned,
+            &mut memory,
         )?;
-        for &(target_index, source_index) in &pairs {
-            let (old_key, old_row) = &target_rows[target_index];
-            let row = joined.row(old_row, &source.rows[source_index]);
-            let mut new_row = old_row.clone();
-            for ((_, expr), &index) in update.assignments.iter().zip(&updated_columns) {
-                let column = &table.columns[index];
-                let value = joined.value(expr, &row, Some(column.sql_type))?;
-                new_row[index] =
-                    rule(value, column).map_err(|error| error.at_if_unplaced(expr.position))?;
-            }
-            if let Some(firing) = firing.as_mut()
-                && firing.has_before()
-                && firing.before_row(
-                    writer,
-                    tables,
-                    Some(old_row.as_slice()),
-                    Some(&mut new_row),
-                )? == RowOutcome::Skip
-            {
-                continue;
-            }
-            execute::check_not_null_of(&table, &new_row)?;
-            if !checks.is_empty() {
-                checks.check(&table, &new_row)?;
-            }
-            let new_key = if table.primary_key.is_empty() {
-                old_key.clone()
-            } else {
-                execute::row_key(&table, &new_row)
-            };
-            memory.charge_row(&new_row)?;
-            memory.charge_row(old_row)?;
-            old_rows.push(old_row.clone());
-            changes.push((old_key.clone(), new_key, new_row));
-            updated_pairs.push((target_index, source_index));
-        }
-        execute::write_updated_rows(writer, tables, &table, &changes, &old_rows, &mut |_| Ok(()))?;
-        if let Some(mut firing) = firing {
-            for ((_, _, new_row), old_row) in changes.iter().zip(&old_rows) {
-                firing.after_row(
-                    writer,
-                    tables,
-                    Some(old_row.as_slice()),
-                    Some(new_row.as_slice()),
-                )?;
-            }
-            firing.finish();
-        }
-        affected += changes.len();
+        affected += stored.changes.len();
+        let first_output = outputs.len();
         if merge.output.is_some() {
-            for (((_, _, new_row), old_row), &(_, source_index)) in
-                changes.iter().zip(&old_rows).zip(&updated_pairs)
-            {
-                outputs.push(OutputRow {
-                    inserted: Some(new_row.clone()),
-                    deleted: Some(old_row.clone()),
-                    source_index,
-                });
-            }
+            push_update_outputs(&stored, &mut outputs);
         }
         if let Some(condition) = &update.delete_condition {
             let mut deleted = Vec::new();
-            for (at, ((_, new_key, new_row), &(_, source_index))) in
-                changes.into_iter().zip(&updated_pairs).enumerate()
+            for (at, ((_, new_key, new_row), source_index)) in
+                stored.changes.into_iter().zip(&stored.sources).enumerate()
             {
-                let row = joined.row(&new_row, &source.rows[source_index]);
+                let source_row = source_index.and_then(|index| source.rows.get(index));
+                let row = joined.row(&new_row, source_row.map_or(&[][..], Vec::as_slice));
                 if joined.holds(Some(condition), &row, "DELETE WHERE")? {
-                    if let Some(output) = outputs.get_mut(at) {
+                    if let Some(output) = outputs.get_mut(first_output + at) {
                         output.inserted = None;
                     }
                     deleted.push((new_key, new_row));
@@ -425,6 +398,73 @@ pub(crate) fn merge(
             }
             execute::delete_rows(writer, tables, &table, deleted, &mut |_| Ok(()))?;
         }
+    }
+    if !merge.by_source.is_empty() {
+        let absent_source = vec![Value::Null; source_table.columns.len()];
+        let mut planned: Vec<Vec<PlannedUpdate>> =
+            merge.by_source.iter().map(|_| Vec::new()).collect();
+        let mut deleted = Vec::new();
+        for (target_index, (key, target_row)) in target_rows.iter().enumerate() {
+            if matched_targets[target_index] {
+                continue;
+            }
+            let row = joined.row(target_row, &absent_source);
+            let mut chosen = None;
+            for (clause_index, clause) in merge.by_source.iter().enumerate() {
+                if joined.holds(clause.condition.as_ref(), &row, "AND")? {
+                    chosen = Some(clause_index);
+                    break;
+                }
+            }
+            let Some(clause_index) = chosen else {
+                continue;
+            };
+            let clause = &merge.by_source[clause_index];
+            if clause.delete_condition.is_some() {
+                memory.charge(WorkMemory::row_bytes(target_row) + key.len())?;
+                if merge.output.is_some() {
+                    outputs.push(OutputRow {
+                        inserted: None,
+                        deleted: Some(target_row.clone()),
+                        source_index: None,
+                    });
+                }
+                deleted.push((key.clone(), target_row.clone()));
+                continue;
+            }
+            let new_row = assigned_row(
+                &joined,
+                &table,
+                clause,
+                &by_source_columns[clause_index],
+                target_row,
+                &row,
+            )?;
+            planned[clause_index].push(PlannedUpdate {
+                target_index,
+                new_row,
+                source_index: None,
+            });
+        }
+        for (clause_planned, columns) in planned.into_iter().zip(&by_source_columns) {
+            if clause_planned.is_empty() {
+                continue;
+            }
+            let stored = store_updates(
+                writer,
+                tables,
+                &table,
+                &target_rows,
+                columns,
+                clause_planned,
+                &mut memory,
+            )?;
+            affected += stored.changes.len();
+            if merge.output.is_some() {
+                push_update_outputs(&stored, &mut outputs);
+            }
+        }
+        affected += execute::delete_rows(writer, tables, &table, deleted, &mut |_| Ok(()))?;
     }
     if let Some(insert) = &merge.insert {
         let targets: Vec<usize> = match &insert.columns {
@@ -516,7 +556,7 @@ pub(crate) fn merge(
                 outputs.push(OutputRow {
                     inserted: Some(inserted),
                     deleted: None,
-                    source_index,
+                    source_index: Some(source_index),
                 });
             }
         }
@@ -541,7 +581,126 @@ pub(crate) fn merge(
 struct OutputRow {
     inserted: Option<Vec<Value>>,
     deleted: Option<Vec<Value>>,
-    source_index: usize,
+    source_index: Option<usize>,
+}
+
+struct PlannedUpdate {
+    target_index: usize,
+    new_row: Vec<Value>,
+    source_index: Option<usize>,
+}
+
+struct StoredUpdates {
+    changes: Vec<execute::RowUpdate>,
+    old_rows: Vec<Vec<Value>>,
+    sources: Vec<Option<usize>>,
+}
+
+fn assigned_row(
+    joined: &Joined<'_>,
+    table: &TableDefinition,
+    update: &MergeUpdate,
+    columns: &[usize],
+    old_row: &[Value],
+    row: &[Value],
+) -> SqlResult<Vec<Value>> {
+    let rule = execute::assignment_rule(crate::constraints::current_dialect());
+    let mut new_row = old_row.to_vec();
+    for ((_, expr), &index) in update.assignments.iter().zip(columns) {
+        let column = &table.columns[index];
+        let value = joined.value(expr, row, Some(column.sql_type))?;
+        new_row[index] =
+            rule(value, column).map_err(|error| error.at_if_unplaced(expr.position))?;
+    }
+    Ok(new_row)
+}
+
+fn store_updates(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    table: &std::sync::Arc<TableDefinition>,
+    target_rows: &[(Vec<u8>, Vec<Value>)],
+    updated_columns: &[usize],
+    planned: Vec<PlannedUpdate>,
+    memory: &mut WorkMemory,
+) -> SqlResult<StoredUpdates> {
+    let checks = PreparedChecks::of(table)?.with_partitions(writer, tables, table)?;
+    let mut stored = StoredUpdates {
+        changes: Vec::with_capacity(planned.len()),
+        old_rows: Vec::with_capacity(planned.len()),
+        sources: Vec::with_capacity(planned.len()),
+    };
+    let mut firing = Firing::for_table(
+        &mut *writer,
+        tables,
+        table,
+        TriggerEvent::Update,
+        updated_columns,
+    )?;
+    for PlannedUpdate {
+        target_index,
+        mut new_row,
+        source_index,
+    } in planned
+    {
+        let (old_key, old_row) = &target_rows[target_index];
+        if let Some(firing) = firing.as_mut()
+            && firing.has_before()
+            && firing.before_row(writer, tables, Some(old_row.as_slice()), Some(&mut new_row))?
+                == RowOutcome::Skip
+        {
+            continue;
+        }
+        execute::check_not_null_of(table, &new_row)?;
+        if !checks.is_empty() {
+            checks.check(table, &new_row)?;
+        }
+        let new_key = if table.primary_key.is_empty() {
+            old_key.clone()
+        } else {
+            execute::row_key(table, &new_row)
+        };
+        memory.charge_row(&new_row)?;
+        memory.charge_row(old_row)?;
+        stored.old_rows.push(old_row.clone());
+        stored.changes.push((old_key.clone(), new_key, new_row));
+        stored.sources.push(source_index);
+    }
+    execute::write_updated_rows(
+        writer,
+        tables,
+        table,
+        &stored.changes,
+        &stored.old_rows,
+        &mut |_| Ok(()),
+    )?;
+    if let Some(mut firing) = firing {
+        for ((_, _, new_row), old_row) in stored.changes.iter().zip(&stored.old_rows) {
+            firing.after_row(
+                writer,
+                tables,
+                Some(old_row.as_slice()),
+                Some(new_row.as_slice()),
+            )?;
+        }
+        firing.finish();
+    }
+    Ok(stored)
+}
+
+fn push_update_outputs(stored: &StoredUpdates, outputs: &mut Vec<OutputRow>) {
+    for (((_, _, new_row), old_row), source_index) in stored
+        .changes
+        .iter()
+        .zip(&stored.old_rows)
+        .zip(&stored.sources)
+    {
+        outputs.push(OutputRow {
+            inserted: Some(new_row.clone()),
+            deleted: Some(old_row.clone()),
+            source_index: *source_index,
+        });
+    }
 }
 
 fn output_rows(
@@ -584,8 +743,9 @@ fn output_rows(
                 None => row.resize(row.len() + width, Value::Null),
             }
         }
-        if let Some(source_row) = source_rows.get(output.source_index) {
-            row.extend_from_slice(source_row);
+        match output.source_index.and_then(|index| source_rows.get(index)) {
+            Some(source_row) => row.extend_from_slice(source_row),
+            None => row.resize(row.len() + source_table.columns.len(), Value::Null),
         }
         rows.push(row);
     }

@@ -7,7 +7,9 @@ use eggdb::sql::OwnedStore;
 use eggdb::{Database, ErrorKind, Options};
 use eggdb_mcp::audit::{AuditLog, audit_path_for};
 use eggdb_mcp::{DatabaseOpener, OpenRefusal, Server, ServerConfig, StartFailure};
-use eggdb_sql::{KeyValueStore, OutsideLink, UnknownTableName, VisibleTables};
+use eggdb_sql::{
+    KeyValueStore, OutsideLink, UnknownTableName, UnservableColumnList, VisibleTables,
+};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -95,12 +97,15 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
                     Exit::DatabaseError,
                 )
             })?;
-            if let Some((unknown, links)) = checked {
+            if let Some((unknown, unservable, links)) = checked {
                 let (creatable, refused): (Vec<UnknownTableName>, Vec<UnknownTableName>) = unknown
                     .into_iter()
                     .partition(|name| request.allow_write && name.stored_as.is_none());
                 if !refused.is_empty() {
                     return Err(unknown_tables_failure(&file, &refused));
+                }
+                if !unservable.is_empty() {
+                    return Err(unservable_columns_failure(&file, &unservable));
                 }
                 not_there_yet = creatable
                     .iter()
@@ -171,7 +176,12 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
         add_options.push_str(" --allow-write");
     }
     if !shown_tables.is_empty() {
-        add_options.push_str(&format!(" --tables {}", shown_tables.join(",")));
+        let joined = shown_tables.join(",");
+        if joined.contains('(') {
+            add_options.push_str(&format!(" --tables '{joined}'"));
+        } else {
+            add_options.push_str(&format!(" --tables {joined}"));
+        }
     }
     if time_limit_seconds != DEFAULT_TIME_LIMIT_SECONDS {
         add_options.push_str(&format!(" --time-limit {time_limit_seconds}"));
@@ -190,6 +200,19 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
         "call gap off".to_owned()
     } else {
         format!("call gap {call_gap_ms} ms")
+    };
+    let columns_line = if shown_tables.iter().any(|name| name.contains('(')) {
+        format!(
+            "  columns      {}: the agent sees only the columns listed, and may not change these tables\n",
+            shown_tables
+                .iter()
+                .filter(|name| name.contains('('))
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        String::new()
     };
     let tables_line = match (shown_tables.is_empty(), request.allow_write) {
         (true, _) => String::new(),
@@ -215,7 +238,7 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
             }
             for link in &outside_links {
                 line.push_str(&format!(
-                    "  tied         {}, so the agent cannot change the {} of {}; add {} to --tables to allow it\n",
+                    "  tied         {}, so the agent may not {} on {}; add {} to --tables to allow it\n",
                     render::text(link.describe().as_bytes()),
                     link.blocked_changes(),
                     render::text(link.listed.as_bytes()),
@@ -232,10 +255,10 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
     };
     let mut banner = match (console.terminal.stderr, request.allow_write) {
         (true, false) => format!(
-            "eggdb mcp {file}: a read-only MCP server on stdin and stdout, for an AI agent's client to start; nothing to type here.\n{tables_line}  audit        {audit_shown} (eggdb audit {file} shows it)\n  time limit   {time_limit_seconds} s per call\n{gap_line}  add it       claude mcp add mydb -- eggdb mcp {file}{add_options}\n  stop         Ctrl-C, or close stdin\n"
+            "eggdb mcp {file}: a read-only MCP server on stdin and stdout, for an AI agent's client to start; nothing to type here.\n{tables_line}{columns_line}  audit        {audit_shown} (eggdb audit {file} shows it)\n  time limit   {time_limit_seconds} s per call\n{gap_line}  add it       claude mcp add mydb -- eggdb mcp {file}{add_options}\n  stop         Ctrl-C, or close stdin\n"
         ),
         (true, true) => format!(
-            "eggdb mcp {file}: a read-write MCP server on stdin and stdout, for an AI agent's client to start; nothing to type here.\n  writes       allowed (--allow-write): write_sql runs one statement per call, in its own transaction\n{tables_line}  confirm      DROP, TRUNCATE, a DELETE or UPDATE not pinned by a key, an upsert, dropping or retyping a column: only after you say yes\n  audit        {audit_shown} (eggdb audit {file} shows it)\n  time limit   {time_limit_seconds} s per call\n{gap_line}  add it       claude mcp add mydb -- eggdb mcp {file}{add_options}\n  stop         Ctrl-C, or close stdin\n"
+            "eggdb mcp {file}: a read-write MCP server on stdin and stdout, for an AI agent's client to start; nothing to type here.\n  writes       allowed (--allow-write): write_sql runs one statement per call, in its own transaction\n{tables_line}{columns_line}  confirm      DROP, TRUNCATE, a DELETE or UPDATE not pinned by a key, an upsert, dropping or retyping a column: only after you say yes\n  audit        {audit_shown} (eggdb audit {file} shows it)\n  time limit   {time_limit_seconds} s per call\n{gap_line}  add it       claude mcp add mydb -- eggdb mcp {file}{add_options}\n  stop         Ctrl-C, or close stdin\n"
         ),
         (false, false) => format!(
             "eggdb {} mcp: serving {file} read-only{tables_words}; audit {audit_shown}; time limit {time_limit_seconds} s; {gap_words}\n",
@@ -264,14 +287,23 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
     Ok(Exit::Done)
 }
 
+type CheckedTables = (
+    Vec<UnknownTableName>,
+    Vec<UnservableColumnList>,
+    Vec<OutsideLink>,
+);
+
 fn check_tables(
     store: &OwnedStore,
     tables: &VisibleTables,
     allow_write: bool,
-) -> Result<(Vec<UnknownTableName>, Vec<OutsideLink>), String> {
+) -> Result<CheckedTables, String> {
     let read = store.begin_read().map_err(|error| error.to_string())?;
     let unknown = tables
         .unknown_names(&read)
+        .map_err(|error| error.to_string())?;
+    let unservable = tables
+        .unservable_column_lists(&read)
         .map_err(|error| error.to_string())?;
     let links = if allow_write {
         tables
@@ -280,7 +312,33 @@ fn check_tables(
     } else {
         Vec::new()
     };
-    Ok((unknown, links))
+    Ok((unknown, unservable, links))
+}
+
+fn unservable_columns_failure(file: &str, unservable: &[UnservableColumnList]) -> Failure {
+    let reasons: Vec<String> = unservable
+        .iter()
+        .map(|list| {
+            format!(
+                "'{}' {}",
+                render::text(list.table.as_bytes()),
+                render::text(list.reason.as_bytes())
+            )
+        })
+        .collect();
+    let first = unservable
+        .first()
+        .map(|list| render::text(list.table.as_bytes()))
+        .unwrap_or_default();
+    Failure::Database {
+        message: format!(
+            "--tables lists columns eggdb mcp cannot serve from {file}: {}. Fix the column list.",
+            reasons.join("; ")
+        ),
+        try_command: Some(format!("eggdb table show {file} {first}")),
+        exit: Exit::NotFound,
+        code: "column_not_found",
+    }
 }
 
 fn quoted_list(names: &[String]) -> String {

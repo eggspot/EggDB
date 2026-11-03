@@ -87,6 +87,7 @@ pub(crate) fn column_storage(
         SqlType::Array(element) if !element.is_storable() => {
             Err(crate::arrays::unsupported_element(element.sql_type()).at(position))
         }
+        SqlType::Catalog(crate::pg_catalog::CatalogType::RefCursor) => Ok((SqlType::Text, None)),
         other => Ok((other, None)),
     }
 }
@@ -460,6 +461,7 @@ pub(crate) fn create_table(
     }
     crate::comments::forget_owner(writer, &table.name)?;
     crate::triggers::remove_table_triggers(writer, &table.name)?;
+    crate::roles::forget_relation_access(writer, &table.name)?;
     crate::comments::store_created(writer, &table.name, create)?;
     writer.put(&table_key(&table.name), &table.encode())?;
     constraints::register_references(writer, tables, &table)?;
@@ -637,8 +639,7 @@ pub(crate) fn drop_tables(
         crate::partitions::forget(writer, &table.name)?;
         crate::statistics::forget(writer, &table.name)?;
         crate::sqlite_schema_text::forget(writer, &table.name)?;
-        crate::roles::forget_table(writer, &table.name)?;
-        crate::row_security::forget_table(writer, &table.name)?;
+        crate::roles::forget_relation_access(writer, &table.name)?;
         writer.delete(&table_key(&table.name))?;
     }
     Ok(result)
@@ -1150,6 +1151,16 @@ fn with_selected_rows(
 }
 
 pub(crate) fn insert(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    insert: &Insert,
+) -> SqlResult<QueryResult> {
+    let check_appended = crate::row_security::has_new_row_check(insert.returning.as_deref());
+    let result = insert_rows(writer, tables, insert)?;
+    crate::row_security::checked_new_rows(result, &insert.table.name.text, check_appended)
+}
+
+fn insert_rows(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
     insert: &Insert,
@@ -3812,6 +3823,16 @@ fn check_sortable(order_by: &[OrderItem], rows: &[(Vec<Value>, Vec<Value>)]) -> 
 }
 
 pub(crate) fn update(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    update: &Update,
+) -> SqlResult<QueryResult> {
+    let check_appended = crate::row_security::has_new_row_check(update.returning.as_deref());
+    let result = update_rows(writer, tables, update)?;
+    crate::row_security::checked_new_rows(result, &update.table.name.text, check_appended)
+}
+
+fn update_rows(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
     update: &Update,

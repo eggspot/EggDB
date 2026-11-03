@@ -161,24 +161,51 @@ pub fn get(
     touch: Option<i64>,
     now: u64,
 ) -> Result<Vec<(Vec<u8>, Item)>, String> {
-    let fetch = |keys: &dyn KeysRead| -> Result<Vec<(Vec<u8>, Item)>, String> {
-        let mut found = Vec::new();
-        for key in keys_wanted {
-            if let Some(item) = load(keys, key, now)? {
-                found.push((key.clone(), item));
-            }
-        }
-        Ok(found)
-    };
+    let mut found = Vec::new();
+    get_each(shared, keys_wanted, touch, now, &mut |key, item| {
+        found.push((key.to_vec(), item.clone()));
+        true
+    })?;
+    Ok(found)
+}
+
+/// The reply to a read that `accept` refused to take one more item into.
+pub const OUT_OF_MEMORY_READING: &str = "SERVER_ERROR out of memory";
+
+/// Hands each item of `keys` that exists to `accept`, one at a time, so the caller can stop
+/// before taking more than it may hold: when `accept` returns false the read stops with
+/// [`OUT_OF_MEMORY_READING`] and a touch changes nothing. With `touch`, each item's new expiry
+/// is set before `accept` sees it.
+pub fn get_each(
+    shared: &Shared<'_>,
+    keys_wanted: &[Vec<u8>],
+    touch: Option<i64>,
+    now: u64,
+    accept: &mut dyn FnMut(&[u8], &Item) -> bool,
+) -> Result<(), String> {
     match touch {
-        None => read(shared, fetch),
-        Some(exptime) => write(shared, |keys| {
-            let mut found = fetch(keys)?;
-            for (key, item) in &mut found {
-                item.expires_at_ms = expiry_of(exptime, now);
-                store(keys, key, item)?;
+        None => read(shared, |keys| {
+            for key in keys_wanted {
+                if let Some(item) = load(keys, key, now)?
+                    && !accept(key, &item)
+                {
+                    return Err(OUT_OF_MEMORY_READING.to_owned());
+                }
             }
-            Ok(found)
+            Ok(())
+        }),
+        Some(exptime) => write(shared, |keys| {
+            for key in keys_wanted {
+                let Some(mut item) = load(keys, key, now)? else {
+                    continue;
+                };
+                item.expires_at_ms = expiry_of(exptime, now);
+                if !accept(key, &item) {
+                    return Err(OUT_OF_MEMORY_READING.to_owned());
+                }
+                store(keys, key, &item)?;
+            }
+            Ok(())
         }),
     }
 }

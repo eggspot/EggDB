@@ -18,11 +18,21 @@ pub(crate) struct SetReturningFunction {
     fields: bool,
 }
 
-const FUNCTIONS: [SetReturningFunction; 29] = [
+const FUNCTIONS: [SetReturningFunction; 35] = [
     to_records("json_to_record"),
     to_records("jsonb_to_record"),
     to_records("json_to_recordset"),
     to_records("jsonb_to_recordset"),
+    populates(crate::sql_json::POPULATE[0]),
+    populates(crate::sql_json::POPULATE[1]),
+    populates(crate::sql_json::POPULATE[2]),
+    populates(crate::sql_json::POPULATE[3]),
+    SetReturningFunction {
+        name: crate::sql_json::TABLE,
+        result_type: crate::sql_json::table_type,
+        rows: to_record_rows,
+        fields: true,
+    },
     SetReturningFunction {
         name: "jsonb_path_query",
         result_type: json_path_query_type,
@@ -32,7 +42,7 @@ const FUNCTIONS: [SetReturningFunction; 29] = [
     SetReturningFunction {
         name: "jsonb_path_query_tz",
         result_type: json_path_query_type,
-        rows: json_path_query_rows,
+        rows: json_path_query_tz_rows,
         fields: false,
     },
     SetReturningFunction {
@@ -108,6 +118,12 @@ const FUNCTIONS: [SetReturningFunction; 29] = [
         result_type: openjson_type,
         rows: openjson_rows,
         fields: false,
+    },
+    SetReturningFunction {
+        name: crate::json_functions::OPENJSON_PAIRS,
+        result_type: openjson_pairs_type,
+        rows: openjson_pair_rows,
+        fields: true,
     },
     SetReturningFunction {
         name: STRING_SPLIT_FUNCTION,
@@ -200,6 +216,8 @@ fn record_rows(
 ) -> SqlResult<()> {
     if name == crate::hstore_functions::EACH {
         crate::hstore_functions::each_records(values, sink)
+    } else if name == crate::json_functions::OPENJSON_PAIRS {
+        crate::json_functions::openjson_pair_rows(values, sink)
     } else {
         crate::json_functions::record_rows(name, values, sink)
     }
@@ -229,10 +247,29 @@ fn openjson_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
     }
 }
 
+fn openjson_pairs_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    openjson_type(types).map(|_| SqlType::Text)
+}
+
+fn openjson_pair_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::json_functions::openjson_pair_rows(values, &mut |record| {
+        sink(crate::json_functions::record_text(&record))
+    })
+}
+
 fn openjson_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
     crate::json_functions::openjson_rows(values, &mut |record| {
         sink(crate::json_functions::record_text(&record))
     })
+}
+
+const fn populates(name: &'static str) -> SetReturningFunction {
+    SetReturningFunction {
+        name,
+        result_type: crate::sql_json::populate_type,
+        rows: to_record_rows,
+        fields: true,
+    }
 }
 
 const fn to_records(name: &'static str) -> SetReturningFunction {
@@ -380,7 +417,11 @@ fn json_path_query_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
 }
 
 fn json_path_query_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
-    crate::json_path::query_rows(values, sink)
+    crate::json_path::query_rows(values, false, sink)
+}
+
+fn json_path_query_tz_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::json_path::query_rows(values, true, sink)
 }
 
 fn text_arguments(name: &str, types: &[Option<SqlType>]) -> SqlResult<()> {
@@ -1190,6 +1231,8 @@ fn function_columns(
 ) -> Vec<OutputColumn> {
     let mut columns: Vec<OutputColumn> = if crate::json_to_record::is_to_record(found.name) {
         crate::json_to_record::columns(&defined_names(function), types)
+    } else if crate::sql_json::defines_columns(found.name) {
+        crate::sql_json::columns(found.name, &defined_names(function), types)
     } else if found.fields {
         record_columns(found.name)
     } else {
@@ -1309,6 +1352,37 @@ impl BoundFunction {
         )
     }
 
+    pub(crate) fn generate_at_most(
+        &self,
+        most_rows: Option<u64>,
+        store: &mut dyn FnMut(Vec<Value>) -> SqlResult<()>,
+    ) -> SqlResult<()> {
+        let Some(most_rows) = most_rows else {
+            return self.generate(store);
+        };
+        if most_rows == 0 {
+            return Ok(());
+        }
+        let mut stored: u64 = 0;
+        let mut enough = false;
+        let generated = self.generate(&mut |row| {
+            store(row)?;
+            stored += 1;
+            if stored < most_rows {
+                return Ok(());
+            }
+            enough = true;
+            Err(SqlError::new(
+                SqlState::QUERY_CANCELED,
+                "the outer LIMIT has all its rows",
+            ))
+        });
+        match generated {
+            Err(_) if enough => Ok(()),
+            generated => generated,
+        }
+    }
+
     pub(crate) fn generate(
         &self,
         store: &mut dyn FnMut(Vec<Value>) -> SqlResult<()>,
@@ -1324,6 +1398,14 @@ impl BoundFunction {
             };
             let produced = if crate::json_to_record::is_to_record(self.found.name) {
                 crate::json_to_record::rows(
+                    self.found.name,
+                    &self.values,
+                    &self.defined_names,
+                    &self.types,
+                    &mut numbered,
+                )
+            } else if crate::sql_json::defines_columns(self.found.name) {
+                crate::sql_json::rows(
                     self.found.name,
                     &self.values,
                     &self.defined_names,

@@ -21,7 +21,7 @@ const MAX_WRITE_BATCH: usize = 100_000;
 pub(crate) struct Shared<'s> {
     pub(crate) store: &'s Store<'s>,
     pub(crate) config: &'s ServerConfig,
-    pub(crate) cursors: Mutex<Cursors>,
+    pub(crate) cursors: Mutex<Cursors<'s>>,
     pub(crate) started: Instant,
 }
 
@@ -124,7 +124,7 @@ fn count_of(body: &Document, name: &str) -> Result<Option<i64>, DocumentError> {
     }
 }
 
-fn batch(remaining: &mut VecDeque<Document>, most: usize) -> Vec<Bson> {
+fn batch(remaining: &mut VecDeque<Document>, most: usize) -> (Vec<Bson>, usize) {
     let mut out = Vec::new();
     let mut bytes = 0;
     while out.len() < most {
@@ -140,7 +140,19 @@ fn batch(remaining: &mut VecDeque<Document>, most: usize) -> Vec<Bson> {
             out.push(Bson::Document(next));
         }
     }
-    out
+    (out, bytes)
+}
+
+pub(crate) const EXCEEDED_MEMORY_LIMIT: i32 = 146;
+
+pub(crate) fn exceeded_memory_limit(what: &str) -> Document {
+    command_failure(
+        EXCEEDED_MEMORY_LIMIT,
+        "ExceededMemoryLimit",
+        format!(
+            "{what} does not fit: the server's connections already hold their memory budget; retry once other clients close their cursors, or ask for a smaller batch"
+        ),
+    )
 }
 
 pub(crate) fn cursor_reply(
@@ -150,15 +162,19 @@ pub(crate) fn cursor_reply(
     first_batch: usize,
     single: bool,
 ) -> Document {
-    let first = batch(&mut remaining, first_batch);
+    let (first, _) = batch(&mut remaining, first_batch);
     let id = if remaining.is_empty() || single {
         0
     } else {
-        shared
+        let opened = shared
             .cursors
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .open(namespace.clone(), remaining)
+            .open(namespace.clone(), remaining);
+        match opened {
+            Some(id) => id,
+            None => return exceeded_memory_limit("the cursor's remaining documents"),
+        }
     };
     ok(document(vec![(
         "cursor",
@@ -713,7 +729,8 @@ fn get_more(
             message,
         });
     }
-    let next = batch(&mut cursor.remaining, batch_size);
+    let (next, sent_bytes) = batch(&mut cursor.remaining, batch_size);
+    cursor.release_sent(sent_bytes);
     let id = if cursor.remaining.is_empty() {
         0
     } else {

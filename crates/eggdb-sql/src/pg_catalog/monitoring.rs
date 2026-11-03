@@ -2,7 +2,8 @@
 //! administration tools such as pgAdmin read on every connection and dashboard refresh. EggDB
 //! answers them truthfully: one database, one user with every privilege, this session as the
 //! only activity, no foreign data, no replication, and as extensions `plpgsql` and the built-in
-//! types of `citext` and `hstore`.
+//! types of `citext` and `hstore`. `pg_stat_statements` and `pg_stat_statements_info` read the
+//! process's statement statistics (D286) for this database.
 
 use super::snapshot::{self, CatalogSnapshot};
 use super::types::{RegKind, RegValue};
@@ -63,7 +64,29 @@ pub(crate) enum MonitoringRelation {
     Views,
     Matviews,
     Sequences,
+    StatStatements,
+    StatStatementsInfo,
 }
+
+const STAT_STATEMENTS: [CatalogColumn; 12] = [
+    column("userid", OID),
+    column("dbid", OID),
+    column("toplevel", SqlType::Boolean),
+    column("queryid", SqlType::BigInt),
+    column("query", SqlType::Text),
+    column("calls", SqlType::BigInt),
+    column("total_exec_time", SqlType::Double),
+    column("min_exec_time", SqlType::Double),
+    column("max_exec_time", SqlType::Double),
+    column("mean_exec_time", SqlType::Double),
+    column("stddev_exec_time", SqlType::Double),
+    column("rows", SqlType::BigInt),
+];
+
+const STAT_STATEMENTS_INFO: [CatalogColumn; 2] = [
+    column("dealloc", SqlType::BigInt),
+    column("stats_reset", STAMP),
+];
 
 const TABLES: [CatalogColumn; 8] = [
     column("schemaname", NAME),
@@ -410,7 +433,7 @@ const OPFAMILY: [CatalogColumn; 5] = [
 ];
 
 impl MonitoringRelation {
-    pub(crate) const ALL: [Self; 31] = [
+    pub(crate) const ALL: [Self; 33] = [
         Self::StatActivity,
         Self::StatDatabase,
         Self::Locks,
@@ -442,6 +465,8 @@ impl MonitoringRelation {
         Self::Views,
         Self::Matviews,
         Self::Sequences,
+        Self::StatStatements,
+        Self::StatStatementsInfo,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -477,6 +502,8 @@ impl MonitoringRelation {
             Self::Views => "pg_views",
             Self::Matviews => "pg_matviews",
             Self::Sequences => "pg_sequences",
+            Self::StatStatements => "pg_stat_statements",
+            Self::StatStatementsInfo => "pg_stat_statements_info",
         }
     }
 
@@ -527,6 +554,8 @@ impl MonitoringRelation {
             Self::Views => &VIEWS,
             Self::Matviews => &MATVIEWS,
             Self::Sequences => &SEQUENCES,
+            Self::StatStatements => &STAT_STATEMENTS,
+            Self::StatStatementsInfo => &STAT_STATEMENTS_INFO,
         }
     }
 
@@ -546,6 +575,8 @@ impl MonitoringRelation {
                 | Self::Matviews
                 | Self::Sequences
                 | Self::StatUserIndexes
+                | Self::StatStatements
+                | Self::StatStatementsInfo
         )
     }
 }
@@ -669,8 +700,101 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MonitoringRelation) -> 
         MonitoringRelation::Tables => table_rows(snapshot),
         MonitoringRelation::Views => view_rows(snapshot),
         MonitoringRelation::Sequences => sequence_rows(snapshot),
+        MonitoringRelation::StatStatements => statement_rows(snapshot),
+        MonitoringRelation::StatStatementsInfo => {
+            let info = crate::statement_statistics::info();
+            vec![
+                row()
+                    .set(
+                        "dealloc",
+                        Value::BigInt(i64::try_from(info.deallocations).unwrap_or(i64::MAX)),
+                    )
+                    .set("stats_reset", Value::TimestampTz(info.reset_at))
+                    .done(),
+            ]
+        }
         _ => Vec::new(),
     }
+}
+
+const STATISTICS_READER_ROLES: [&str; 2] = ["pg_read_all_stats", "pg_monitor"];
+const HIDDEN_STATEMENT: &str = "<insufficient privilege>";
+
+fn belongs_to_any(roles: &[crate::roles::StoredRole], user: &str, wanted: &[&str]) -> bool {
+    let mut held: Vec<&str> = vec![user];
+    let mut at = 0;
+    while let Some(&name) = held.get(at) {
+        if wanted.contains(&name) {
+            return true;
+        }
+        for role in roles.iter().filter(|role| role.name == name) {
+            for parent in &role.member_of {
+                if !held.contains(&parent.as_str()) {
+                    held.push(parent);
+                }
+            }
+        }
+        at += 1;
+    }
+    false
+}
+
+fn sees_every_statement(snapshot: &CatalogSnapshot) -> bool {
+    snapshot
+        .settings
+        .checked_role
+        .as_deref()
+        .is_none_or(|role| belongs_to_any(&snapshot.stored_roles, role, &STATISTICS_READER_ROLES))
+}
+
+fn statement_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let count = |count: u64| Value::BigInt(i64::try_from(count).unwrap_or(i64::MAX));
+    let sees_every_statement = sees_every_statement(snapshot);
+    crate::statement_statistics::statistics()
+        .into_iter()
+        .filter(|entry| entry.database == snapshot.database)
+        .map(|entry| {
+            let own = entry.user == snapshot.user;
+            let user = if own {
+                oids::SESSION_USER
+            } else {
+                crate::roles::role_oid(&entry.user)
+            };
+            let (query_id, query) = if own || sees_every_statement {
+                (Value::BigInt(entry.query_id), Value::Text(entry.query))
+            } else {
+                (Value::Null, Value::Text(HIDDEN_STATEMENT.to_owned()))
+            };
+            CatalogRow::new(&STAT_STATEMENTS)
+                .set("userid", Value::Oid(user))
+                .set("dbid", Value::Oid(oids::DATABASE))
+                .set("toplevel", Value::Boolean(true))
+                .set("queryid", query_id)
+                .set("query", query)
+                .set("calls", count(entry.calls))
+                .set("total_exec_time", Value::Double(entry.total_ms))
+                .set("min_exec_time", Value::Double(entry.min_ms))
+                .set("max_exec_time", Value::Double(entry.max_ms))
+                .set("mean_exec_time", Value::Double(entry.mean_ms))
+                .set("stddev_exec_time", Value::Double(entry.stddev_ms))
+                .set("rows", count(entry.rows))
+                .done()
+        })
+        .collect()
+}
+
+fn reset_statement_statistics(values: &[Value]) -> SqlResult<Value> {
+    if values.len() > 3 {
+        return Err(SqlError::new(
+            SqlState::UNDEFINED_FUNCTION,
+            "pg_stat_statements_reset takes a user OID, a database OID and a query ID, all optional",
+        ));
+    }
+    match values.get(2).and_then(Value::as_integer) {
+        Some(query_id) if query_id != 0 => crate::statement_statistics::reset_query(query_id),
+        _ => crate::statement_statistics::reset(),
+    }
+    Ok(Value::Text(String::new()))
 }
 
 fn table_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
@@ -776,6 +900,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         | "pg_is_in_recovery"
         | "pg_is_wal_replay_paused" => SqlType::Boolean,
         "pg_backend_pid" => SqlType::Integer,
+        "pg_stat_statements_reset" => SqlType::VOID,
         "pg_postmaster_start_time" | "pg_conf_load_time" => STAMP,
         "pg_size_pretty" | "pg_tablespace_location" | "pg_current_wal_lsn" => SqlType::Text,
         "pg_database_size"
@@ -811,6 +936,9 @@ fn size_pretty(bytes: i64) -> String {
 /// The value of an administration function, if `name` is one.
 pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
     let result_type = result_type(name)?;
+    if name == "pg_stat_statements_reset" {
+        return Some(reset_statement_statistics(values));
+    }
     if values.iter().any(Value::is_null) && name != "pg_size_pretty" {
         return Some(Ok(Value::Null));
     }
@@ -844,6 +972,39 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn role(name: &str, member_of: &[&str]) -> crate::roles::StoredRole {
+        crate::roles::StoredRole {
+            name: name.to_owned(),
+            login: true,
+            superuser: false,
+            create_database: false,
+            scram_verifier: None,
+            member_of: member_of
+                .iter()
+                .map(|parent| (*parent).to_owned())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn statistics_readers_are_found_through_nested_and_circular_memberships() {
+        let roles = [
+            role("alice", &["staff"]),
+            role("staff", &["pg_monitor", "alice"]),
+            role("bob", &["clerks"]),
+            role("clerks", &["bob"]),
+        ];
+        assert!(belongs_to_any(&roles, "alice", &STATISTICS_READER_ROLES));
+        assert!(belongs_to_any(&roles, "staff", &STATISTICS_READER_ROLES));
+        assert!(!belongs_to_any(&roles, "bob", &STATISTICS_READER_ROLES));
+        assert!(!belongs_to_any(&roles, "nobody", &STATISTICS_READER_ROLES));
+        assert!(belongs_to_any(
+            &roles,
+            "pg_read_all_stats",
+            &STATISTICS_READER_ROLES
+        ));
+    }
 
     #[test]
     fn sizes_print_like_pg_size_pretty() {

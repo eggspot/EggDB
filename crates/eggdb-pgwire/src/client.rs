@@ -1,7 +1,8 @@
 //! A client for PostgreSQL's wire protocol v3, so EggDB can read a running PostgreSQL database:
 //! TCP with TLS as libpq's `sslmode` asks, SCRAM-SHA-256 (with `-PLUS` channel binding over TLS)
-//! or a cleartext password over TLS, the simple query protocol, `COPY ... TO STDOUT`, and the
-//! copy-both stream of logical replication.
+//! or a cleartext password over TLS, the simple query protocol, the extended one with named
+//! prepared statements and answers read a row at a time, `COPY ... TO STDOUT` and `COPY ... FROM
+//! STDIN`, cancel requests, and the copy-both stream of logical replication.
 
 use eggdb_crypto::{
     SHA256_DIGEST_BYTES, base64_decode, base64_encode, constant_time_eq, hmac_sha256,
@@ -16,9 +17,11 @@ use std::time::Duration;
 
 const PROTOCOL_3_0: u32 = 196_608;
 const SSL_REQUEST_CODE: u32 = 80_877_103;
+const CANCEL_REQUEST_CODE: u32 = 80_877_102;
+const NOT_A_COPY_SQLSTATE: &str = "0A000";
 const DEFAULT_PORT: u16 = 5432;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_MESSAGE_BYTES: usize = 1 << 30;
+pub(crate) const MAX_MESSAGE_BYTES: usize = 1 << 30;
 const CLIENT_NONCE_BYTES: usize = 18;
 
 /// How the client uses TLS, as libpq's `sslmode` names it, ordered from the least protection to
@@ -227,7 +230,9 @@ pub enum ClientError {
     TimedOut,
     /// TLS failed, or the server refused it where the mode requires it.
     Tls(String),
-    /// Logging in failed.
+    /// Logging in failed on this side: an authentication method the client cannot use or a
+    /// malformed exchange. A login the server refuses arrives as [`ClientError::Server`] with its
+    /// `28` SQLSTATE.
     Authentication(String),
     /// The server reported an error.
     Server {
@@ -326,6 +331,8 @@ pub struct PgClient {
     incoming: Vec<u8>,
     server_version: String,
     tls_version: Option<u16>,
+    options: ConnectOptions,
+    backend_key: Option<(i32, Vec<u8>)>,
 }
 
 impl std::fmt::Debug for PgClient {
@@ -395,6 +402,27 @@ fn tls_config(options: &ConnectOptions) -> Result<ClientConfig, ClientError> {
 impl PgClient {
     /// Connects, starts TLS as `options.ssl_mode` asks, and logs in.
     pub fn connect(options: &ConnectOptions) -> Result<Self, ClientError> {
+        let transport = Self::open_transport(options)?;
+        let mut client = Self {
+            transport,
+            incoming: Vec::new(),
+            server_version: String::new(),
+            tls_version: None,
+            options: ConnectOptions {
+                password: None,
+                ..options.clone()
+            },
+            backend_key: None,
+        };
+        if let Transport::Tls(stream) = &client.transport {
+            client.tls_version = Some(stream.info().version);
+        }
+        client.start_up(options)?;
+        client.transport.tcp().set_read_timeout(None)?;
+        Ok(client)
+    }
+
+    fn open_transport(options: &ConnectOptions) -> Result<Transport, ClientError> {
         let address = (options.host.as_str(), options.port)
             .to_socket_addrs()?
             .next()
@@ -407,19 +435,7 @@ impl PgClient {
         let tcp = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)?;
         tcp.set_nodelay(true)?;
         tcp.set_read_timeout(Some(CONNECT_TIMEOUT))?;
-        let transport = Self::start_tls(tcp, options)?;
-        let mut client = Self {
-            transport,
-            incoming: Vec::new(),
-            server_version: String::new(),
-            tls_version: None,
-        };
-        if let Transport::Tls(stream) = &client.transport {
-            client.tls_version = Some(stream.info().version);
-        }
-        client.start_up(options)?;
-        client.transport.tcp().set_read_timeout(None)?;
-        Ok(client)
+        Self::start_tls(tcp, options)
     }
 
     fn start_tls(mut tcp: TcpStream, options: &ConnectOptions) -> Result<Transport, ClientError> {
@@ -544,15 +560,17 @@ impl PgClient {
                         self.server_version = String::from_utf8_lossy(value).into_owned();
                     }
                 }
-                b'K' | b'N' => {}
+                b'K' => {
+                    if let Some((process_id, secret_key)) = body.split_first_chunk::<4>() {
+                        self.backend_key =
+                            Some((i32::from_be_bytes(*process_id), secret_key.to_vec()));
+                    }
+                }
+                b'N' => {}
                 b'Z' => return Ok(()),
                 b'E' => {
                     let (code, message) = error_fields(&body);
-                    return Err(if code.starts_with("28") {
-                        ClientError::Authentication(message)
-                    } else {
-                        ClientError::Server { code, message }
-                    });
+                    return Err(ClientError::Server { code, message });
                 }
                 other => {
                     return Err(ClientError::Protocol(format!(
@@ -699,8 +717,8 @@ impl PgClient {
     fn sasl_message(&mut self, expected_kind: i32) -> Result<String, ClientError> {
         let (tag, body) = self.read_message()?;
         if tag == b'E' {
-            let (_, message) = error_fields(&body);
-            return Err(ClientError::Authentication(message));
+            let (code, message) = error_fields(&body);
+            return Err(ClientError::Server { code, message });
         }
         let kind = body
             .first_chunk::<4>()
@@ -759,88 +777,68 @@ impl PgClient {
         sql: &str,
         parameters: &[Option<&[u8]>],
     ) -> Result<Vec<QueryRows>, ClientError> {
-        let count = u16::try_from(parameters.len())
-            .map_err(|_| ClientError::Protocol("more than 65,535 parameters".to_owned()))?;
         let mut parse = cstring("");
         parse.extend_from_slice(&cstring(sql));
         parse.extend_from_slice(&0u16.to_be_bytes());
-        let mut bind = cstring("");
-        bind.extend_from_slice(&cstring(""));
-        bind.extend_from_slice(&0u16.to_be_bytes());
-        bind.extend_from_slice(&count.to_be_bytes());
-        for parameter in parameters {
-            match parameter {
-                None => bind.extend_from_slice(&(-1i32).to_be_bytes()),
-                Some(bytes) => {
-                    let length = i32::try_from(bytes.len()).map_err(|_| {
-                        ClientError::Protocol("a parameter of 2 GiB or more".to_owned())
-                    })?;
-                    bind.extend_from_slice(&length.to_be_bytes());
-                    bind.extend_from_slice(bytes);
-                }
-            }
-        }
-        bind.extend_from_slice(&0u16.to_be_bytes());
-        let mut describe = vec![b'P'];
-        describe.extend_from_slice(&cstring(""));
-        let mut execute = cstring("");
-        execute.extend_from_slice(&0u32.to_be_bytes());
         let mut messages = frontend_message(b'P', &parse);
-        messages.extend_from_slice(&frontend_message(b'B', &bind));
-        messages.extend_from_slice(&frontend_message(b'D', &describe));
-        messages.extend_from_slice(&frontend_message(b'E', &execute));
-        messages.extend_from_slice(&frontend_message(b'S', &[]));
+        messages.extend_from_slice(&bind_message("", parameters)?);
+        messages.extend_from_slice(&run_portal_messages());
         self.send(&messages)?;
-        let mut current = QueryRows::default();
-        let mut results = Vec::new();
+        self.collect_answers()
+    }
+
+    /// Starts `sql`, a `COPY ... TO STDOUT`; read its data with [`PgClient::read_copy_out`]
+    /// or [`PgClient::next_copy_out_piece`]. A statement that is not one runs, leaves the
+    /// connection ready for the next query and fails with [`ClientError::Server`] and SQLSTATE
+    /// `0A000`.
+    pub fn start_copy_out(&mut self, sql: &str) -> Result<(), ClientError> {
+        self.start_copy(sql, b'H', "COPY ... TO STDOUT")
+    }
+
+    /// Starts `sql`, a `COPY ... FROM STDIN`: send its data with [`PgClient::send_copy_data`],
+    /// then end it with [`PgClient::finish_copy_in`] or [`PgClient::fail_copy_in`]. A
+    /// statement that is not one runs, leaves the connection ready for the next query and
+    /// fails with [`ClientError::Server`] and SQLSTATE `0A000`.
+    pub fn start_copy_in(&mut self, sql: &str) -> Result<(), ClientError> {
+        self.start_copy(sql, b'G', "COPY ... FROM STDIN")
+    }
+
+    fn start_copy(&mut self, sql: &str, expected: u8, wanted: &str) -> Result<(), ClientError> {
+        self.send(&frontend_message(b'Q', &cstring(sql)))?;
+        let not_a_copy = || ClientError::Server {
+            code: NOT_A_COPY_SQLSTATE.to_owned(),
+            message: format!("the statement is not a {wanted}; run it as a query instead"),
+        };
         let mut failure = None;
         loop {
             let (tag, body) = self.read_message()?;
             match tag {
-                b'1' | b'2' | b'n' | b'I' | b'N' | b'S' | b's' => {}
-                b'T' => (current.columns, current.column_types) = row_description(&body)?,
-                b'D' => current.rows.push(data_row(&body)?),
-                b'C' => {
-                    current.tag = String::from_utf8_lossy(body.strip_suffix(&[0]).unwrap_or(&body))
-                        .into_owned();
-                    results.push(std::mem::take(&mut current));
+                found if found == expected && failure.is_none() => return Ok(()),
+                b'G' => {
+                    self.send(&frontend_message(
+                        b'f',
+                        &cstring("the client expected a COPY ... TO STDOUT"),
+                    ))?;
+                    if failure.is_none() {
+                        failure = Some(not_a_copy());
+                    }
                 }
+                b'H' => {
+                    if failure.is_none() {
+                        failure = Some(not_a_copy());
+                    }
+                }
+                b'N' | b'S' | b'T' | b'D' | b'C' | b'I' | b'd' | b'c' => {}
                 b'E' => {
-                    let (code, message) = error_fields(&body);
-                    failure = Some(ClientError::Server { code, message });
+                    if failure.is_none() {
+                        let (code, message) = error_fields(&body);
+                        failure = Some(ClientError::Server { code, message });
+                    }
                 }
-                b'Z' => {
-                    return match failure {
-                        Some(error) => Err(error),
-                        None => Ok(results),
-                    };
-                }
+                b'Z' => return Err(failure.unwrap_or_else(not_a_copy)),
                 other => {
                     return Err(ClientError::Protocol(format!(
-                        "unexpected message {} in an extended query's answer",
-                        char::from(other)
-                    )));
-                }
-            }
-        }
-    }
-
-    /// Starts `sql`, a `COPY ... TO STDOUT`; read its data with [`PgClient::read_copy_out`].
-    pub fn start_copy_out(&mut self, sql: &str) -> Result<(), ClientError> {
-        self.send(&frontend_message(b'Q', &cstring(sql)))?;
-        loop {
-            let (tag, body) = self.read_message()?;
-            match tag {
-                b'H' => return Ok(()),
-                b'N' => {}
-                b'E' => {
-                    let (code, message) = error_fields(&body);
-                    self.wait_ready()?;
-                    return Err(ClientError::Server { code, message });
-                }
-                other => {
-                    return Err(ClientError::Protocol(format!(
-                        "expected a copy-out response, got {}",
+                        "expected a copy response, got {}",
                         char::from(other)
                     )));
                 }
@@ -933,6 +931,324 @@ impl PgClient {
     /// Ends the session politely.
     pub fn terminate(mut self) {
         let _ = self.send(&frontend_message(b'X', &[]));
+    }
+}
+
+/// What a server answers to a statement run with [`PgClient::start_prepared`], one message at a
+/// time from [`PgClient::next_answer`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Answer {
+    /// The columns of the rows that follow.
+    Columns {
+        /// The column names.
+        names: Vec<String>,
+        /// The columns' type OIDs, in the same order.
+        types: Vec<u32>,
+    },
+    /// One row's values as text, `None` for null.
+    Row(Vec<Option<String>>),
+    /// The statement ended with this command tag.
+    Complete(String),
+    /// The answer has ended and the connection is ready for the next query.
+    Ready,
+}
+
+/// A piece of a `COPY ... TO STDOUT`, from [`PgClient::next_copy_out_piece`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopyOutPiece {
+    /// The next bytes of the data (one row in the text and CSV formats).
+    Data(Vec<u8>),
+    /// The copy has ended with this command tag, such as `COPY 3`, and the connection is ready
+    /// for the next query.
+    Done(String),
+}
+
+/// A statement the server prepared with [`PgClient::prepare_named`]: what its Describe step
+/// told.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PreparedOutline {
+    /// The type OIDs of its parameters, `$1` first.
+    pub parameter_types: Vec<u32>,
+    /// The names of the columns of the rows it returns; empty when it returns none.
+    pub columns: Vec<String>,
+    /// The columns' type OIDs, in the same order.
+    pub column_types: Vec<u32>,
+}
+
+/// What a cancel request for one connection needs: where its server is, and the process ID and
+/// secret key the server gave the connection in its `BackendKeyData`. It may be sent from any
+/// thread while the connection runs a statement.
+#[derive(Debug, Clone)]
+pub struct CancelRequest {
+    options: ConnectOptions,
+    process_id: i32,
+    secret_key: Vec<u8>,
+}
+
+impl CancelRequest {
+    /// Asks the server, over a new connection with the same TLS mode, to stop the statement
+    /// the connection is running, and waits until the server has read the request. The server
+    /// answers nothing: a statement it stops fails with SQLSTATE `57014`, and a request that
+    /// comes while nothing runs does nothing.
+    pub fn send(&self) -> Result<(), ClientError> {
+        let mut transport = PgClient::open_transport(&self.options)?;
+        let length = u32::try_from(12 + self.secret_key.len())
+            .map_err(|_| ClientError::Protocol("a cancel key too long to send".to_owned()))?;
+        let mut packet = length.to_be_bytes().to_vec();
+        packet.extend_from_slice(&CANCEL_REQUEST_CODE.to_be_bytes());
+        packet.extend_from_slice(&self.process_id.to_be_bytes());
+        packet.extend_from_slice(&self.secret_key);
+        transport.write_all(&packet)?;
+        transport.flush()?;
+        let mut rest = [0u8; 64];
+        let _ = transport.read(&mut rest);
+        Ok(())
+    }
+}
+
+fn statement_target(kind: u8, name: &str) -> Vec<u8> {
+    let mut body = vec![kind];
+    body.extend_from_slice(&cstring(name));
+    body
+}
+
+fn parameter_types(body: &[u8]) -> Result<Vec<u32>, ClientError> {
+    let malformed = || ClientError::Protocol("a malformed parameter description".to_owned());
+    let count = usize::from(u16::from_be_bytes(
+        *body.first_chunk::<2>().ok_or_else(malformed)?,
+    ));
+    let types = body.get(2..).ok_or_else(malformed)?;
+    if types.len() != count * 4 {
+        return Err(malformed());
+    }
+    Ok(types
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|oid| u32::from_be_bytes(*oid))
+        .collect())
+}
+
+fn command_tag(body: &[u8]) -> String {
+    String::from_utf8_lossy(body.strip_suffix(&[0]).unwrap_or(body)).into_owned()
+}
+
+fn bind_message(statement: &str, parameters: &[Option<&[u8]>]) -> Result<Vec<u8>, ClientError> {
+    let count = u16::try_from(parameters.len())
+        .map_err(|_| ClientError::Protocol("more than 65,535 parameters".to_owned()))?;
+    let mut bind = cstring("");
+    bind.extend_from_slice(&cstring(statement));
+    bind.extend_from_slice(&0u16.to_be_bytes());
+    bind.extend_from_slice(&count.to_be_bytes());
+    for parameter in parameters {
+        match parameter {
+            None => bind.extend_from_slice(&(-1i32).to_be_bytes()),
+            Some(bytes) => {
+                let length = i32::try_from(bytes.len()).map_err(|_| {
+                    ClientError::Protocol("a parameter of 2 GiB or more".to_owned())
+                })?;
+                bind.extend_from_slice(&length.to_be_bytes());
+                bind.extend_from_slice(bytes);
+            }
+        }
+    }
+    bind.extend_from_slice(&0u16.to_be_bytes());
+    Ok(frontend_message(b'B', &bind))
+}
+
+fn run_portal_messages() -> Vec<u8> {
+    let mut messages = frontend_message(b'D', &statement_target(b'P', ""));
+    let mut execute = cstring("");
+    execute.extend_from_slice(&0u32.to_be_bytes());
+    messages.extend_from_slice(&frontend_message(b'E', &execute));
+    messages.extend_from_slice(&frontend_message(b'S', &[]));
+    messages
+}
+
+impl PgClient {
+    /// What a cancel request for this connection needs, when the server sent its
+    /// `BackendKeyData` while logging in.
+    pub fn cancel_request(&self) -> Option<CancelRequest> {
+        let (process_id, secret_key) = self.backend_key.as_ref()?;
+        Some(CancelRequest {
+            options: self.options.clone(),
+            process_id: *process_id,
+            secret_key: secret_key.clone(),
+        })
+    }
+
+    /// Prepares `sql`, one statement with `$1`, `$2`, ... placeholders, on the server as the
+    /// statement `name` (Parse, Describe, Sync), with the parameters' types left to the
+    /// server, and returns what its Describe step told. The statement lives until
+    /// [`PgClient::close_statement`] or the end of the connection.
+    pub fn prepare_named(&mut self, name: &str, sql: &str) -> Result<PreparedOutline, ClientError> {
+        let mut parse = cstring(name);
+        parse.extend_from_slice(&cstring(sql));
+        parse.extend_from_slice(&0u16.to_be_bytes());
+        let mut messages = frontend_message(b'P', &parse);
+        messages.extend_from_slice(&frontend_message(b'D', &statement_target(b'S', name)));
+        messages.extend_from_slice(&frontend_message(b'S', &[]));
+        self.send(&messages)?;
+        let mut outline = PreparedOutline::default();
+        let mut failure = None;
+        loop {
+            let (tag, body) = self.read_message()?;
+            match tag {
+                b'1' | b'n' | b'N' | b'S' => {}
+                b't' => outline.parameter_types = parameter_types(&body)?,
+                b'T' => (outline.columns, outline.column_types) = row_description(&body)?,
+                b'E' => {
+                    let (code, message) = error_fields(&body);
+                    failure = Some(ClientError::Server { code, message });
+                }
+                b'Z' => {
+                    return match failure {
+                        Some(error) => Err(error),
+                        None => Ok(outline),
+                    };
+                }
+                other => {
+                    return Err(ClientError::Protocol(format!(
+                        "unexpected message {} in a Describe's answer",
+                        char::from(other)
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Closes the prepared statement `name` on the server (Close, Sync).
+    pub fn close_statement(&mut self, name: &str) -> Result<(), ClientError> {
+        let mut messages = frontend_message(b'C', &statement_target(b'S', name));
+        messages.extend_from_slice(&frontend_message(b'S', &[]));
+        self.send(&messages)?;
+        let mut failure = None;
+        loop {
+            let (tag, body) = self.read_message()?;
+            match tag {
+                b'3' | b'N' | b'S' => {}
+                b'E' => {
+                    let (code, message) = error_fields(&body);
+                    failure = Some(ClientError::Server { code, message });
+                }
+                b'Z' => {
+                    return match failure {
+                        Some(error) => Err(error),
+                        None => Ok(()),
+                    };
+                }
+                other => {
+                    return Err(ClientError::Protocol(format!(
+                        "unexpected message {} in a Close's answer",
+                        char::from(other)
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Runs the prepared statement `name` with `parameters` bound in text form (`None` for
+    /// null) and its rows asked for as text (Bind, Describe, Execute, Sync). Nothing is read:
+    /// read the answer with [`PgClient::next_answer`] until [`Answer::Ready`] or an error, as
+    /// fast as it is wanted, before anything else is sent.
+    pub fn start_prepared(
+        &mut self,
+        name: &str,
+        parameters: &[Option<&[u8]>],
+    ) -> Result<(), ClientError> {
+        let mut messages = bind_message(name, parameters)?;
+        messages.extend_from_slice(&run_portal_messages());
+        self.send(&messages)
+    }
+
+    /// The next part of the answer to [`PgClient::start_prepared`] or
+    /// [`PgClient::finish_copy_in`]. A [`ClientError::Server`] ends the answer, with the
+    /// connection ready for the next query; any other error leaves the connection unusable.
+    pub fn next_answer(&mut self) -> Result<Answer, ClientError> {
+        loop {
+            let (tag, body) = self.read_message()?;
+            match tag {
+                b'1' | b'2' | b'3' | b'n' | b'I' | b'N' | b'S' | b's' | b't' => {}
+                b'T' => {
+                    let (names, types) = row_description(&body)?;
+                    return Ok(Answer::Columns { names, types });
+                }
+                b'D' => return Ok(Answer::Row(data_row(&body)?)),
+                b'C' => return Ok(Answer::Complete(command_tag(&body))),
+                b'Z' => return Ok(Answer::Ready),
+                b'E' => {
+                    let (code, message) = error_fields(&body);
+                    self.wait_ready()?;
+                    return Err(ClientError::Server { code, message });
+                }
+                other => {
+                    return Err(ClientError::Protocol(format!(
+                        "unexpected message {} in an extended query's answer",
+                        char::from(other)
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Reads the rest of an answer with [`PgClient::next_answer`] and returns each
+    /// statement's rows.
+    pub fn collect_answers(&mut self) -> Result<Vec<QueryRows>, ClientError> {
+        let mut current = QueryRows::default();
+        let mut results = Vec::new();
+        loop {
+            match self.next_answer()? {
+                Answer::Columns { names, types } => {
+                    current.columns = names;
+                    current.column_types = types;
+                }
+                Answer::Row(row) => current.rows.push(row),
+                Answer::Complete(tag) => {
+                    current.tag = tag;
+                    results.push(std::mem::take(&mut current));
+                }
+                Answer::Ready => return Ok(results),
+            }
+        }
+    }
+
+    /// Ends a [`PgClient::start_copy_in`] (CopyDone) and returns the statement's result, whose
+    /// tag is `COPY <rows>`.
+    pub fn finish_copy_in(&mut self) -> Result<Vec<QueryRows>, ClientError> {
+        self.send(&frontend_message(b'c', &[]))?;
+        self.collect_answers()
+    }
+
+    /// Abandons a [`PgClient::start_copy_in`] (CopyFail with `reason`): the `COPY` loads
+    /// nothing, and the connection is ready for the next query.
+    pub fn fail_copy_in(&mut self, reason: &str) -> Result<(), ClientError> {
+        self.send(&frontend_message(b'f', &cstring(reason)))?;
+        self.wait_ready()
+    }
+
+    /// The next piece of a [`PgClient::start_copy_out`], or its end with the command tag.
+    pub fn next_copy_out_piece(&mut self) -> Result<CopyOutPiece, ClientError> {
+        let mut tag = String::new();
+        loop {
+            let (kind, body) = self.read_message()?;
+            match kind {
+                b'd' => return Ok(CopyOutPiece::Data(body)),
+                b'c' | b'N' | b'S' => {}
+                b'C' => tag = command_tag(&body),
+                b'Z' => return Ok(CopyOutPiece::Done(tag)),
+                b'E' => {
+                    let (code, message) = error_fields(&body);
+                    self.wait_ready()?;
+                    return Err(ClientError::Server { code, message });
+                }
+                other => {
+                    return Err(ClientError::Protocol(format!(
+                        "unexpected message {} in a copy",
+                        char::from(other)
+                    )));
+                }
+            }
+        }
     }
 }
 
@@ -1082,5 +1398,43 @@ mod tests {
             vec!["answer".to_owned()]
         );
         assert!(row_description_names(&description[..5]).is_err());
+    }
+
+    #[test]
+    fn parameter_descriptions_decode_and_refuse_truncation() {
+        let mut description = 2u16.to_be_bytes().to_vec();
+        description.extend_from_slice(&20u32.to_be_bytes());
+        description.extend_from_slice(&25u32.to_be_bytes());
+        assert_eq!(parameter_types(&description).unwrap(), vec![20, 25]);
+        for cut in 0..description.len() {
+            assert!(parameter_types(&description[..cut]).is_err());
+        }
+        let mut longer = description.clone();
+        longer.push(0);
+        assert!(parameter_types(&longer).is_err());
+        assert_eq!(
+            parameter_types(&0u16.to_be_bytes()).unwrap(),
+            Vec::<u32>::new()
+        );
+    }
+
+    #[test]
+    fn binds_carry_text_values_and_nulls_for_a_named_statement() {
+        let message = bind_message("s1", &[Some(&b"42"[..]), None]).unwrap();
+        assert_eq!(message[0], b'B');
+        let length = u32::from_be_bytes([message[1], message[2], message[3], message[4]]);
+        assert_eq!(length as usize, message.len() - 1);
+        let body = &message[5..];
+        let mut expected = b"\0s1\0".to_vec();
+        expected.extend_from_slice(&0u16.to_be_bytes());
+        expected.extend_from_slice(&2u16.to_be_bytes());
+        expected.extend_from_slice(&2i32.to_be_bytes());
+        expected.extend_from_slice(b"42");
+        expected.extend_from_slice(&(-1i32).to_be_bytes());
+        expected.extend_from_slice(&0u16.to_be_bytes());
+        assert_eq!(body, expected.as_slice());
+        let too_many: Vec<Option<&[u8]>> = vec![None; 65_536];
+        assert!(bind_message("", &too_many).is_err());
+        assert_eq!(command_tag(b"COPY 3\0"), "COPY 3");
     }
 }

@@ -10,7 +10,7 @@ use eggdb_storage::{
 };
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -79,6 +79,7 @@ pub struct Database {
     write_timeout: Duration,
     clock: ClockHandle,
     expiring_keys: AtomicBool,
+    collection_drops: AtomicU8,
 }
 
 struct ClockHandle(Arc<dyn Clock>);
@@ -336,6 +337,7 @@ impl Database {
             write_timeout: options.write_timeout,
             clock: ClockHandle(clock),
             expiring_keys: AtomicBool::new(expiring_keys),
+            collection_drops: AtomicU8::new(crate::collection::DROPS_UNKNOWN),
         })
     }
 
@@ -827,6 +829,14 @@ impl Database {
 
     pub(crate) fn note_expiring_keys(&self) {
         self.expiring_keys.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn collection_drops(&self) -> u8 {
+        self.collection_drops.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn note_collection_drops(&self, state: u8) {
+        self.collection_drops.store(state, Ordering::Release);
     }
 
     pub(crate) fn now_after(&self, last_commit: CommitStamp) -> Moment {

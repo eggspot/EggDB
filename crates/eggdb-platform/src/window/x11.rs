@@ -2,11 +2,12 @@
 //! decoded from the public specification ("X Window System Protocol", X Consortium Standard):
 //! the display name, `MIT-MAGIC-COOKIE-1` from an Xauthority file, connection setup, the
 //! requests `CreateWindow`, `ChangeProperty`, `MapWindow`, `InternAtom`, `GetProperty`,
-//! `CreateGC`, `PutImage` and `GetKeyboardMapping`, their replies, and the events a window
-//! reads. Every message is little-endian (the client chooses the byte order at setup). Parsing
+//! `CreateGC`, `PutImage`, `GetKeyboardMapping`, and for the `CLIPBOARD` selection
+//! `SetSelectionOwner`, `ConvertSelection` and `SendEvent`, their replies, and the events a
+//! window reads (keys, buttons, motion, selections). Every message is little-endian (the client chooses the byte order at setup). Parsing
 //! never panics: a short or inconsistent message is a [`WindowError::Protocol`].
 
-use super::{Key, Modifiers, WindowError};
+use super::{Key, Modifiers, PointerButton, WindowError};
 
 /// The protocol's major version.
 pub const PROTOCOL_MAJOR: u16 = 11;
@@ -36,12 +37,30 @@ pub const EVENT_EXPOSURE: u32 = 0x0000_8000;
 pub const EVENT_STRUCTURE_NOTIFY: u32 = 0x0002_0000;
 /// The event mask bit for `FocusIn` and `FocusOut`.
 pub const EVENT_FOCUS_CHANGE: u32 = 0x0020_0000;
+/// The event mask bit for `ButtonPress`.
+pub const EVENT_BUTTON_PRESS: u32 = 0x0000_0004;
+/// The event mask bit for `ButtonRelease`.
+pub const EVENT_BUTTON_RELEASE: u32 = 0x0000_0008;
+/// The event mask bit for `LeaveNotify`.
+pub const EVENT_LEAVE_WINDOW: u32 = 0x0000_0020;
+/// The event mask bit for `MotionNotify` with or without a button held.
+pub const EVENT_POINTER_MOTION: u32 = 0x0000_0040;
+/// The `Time` value `CurrentTime`.
+pub const CURRENT_TIME: u32 = 0;
+/// The atom value `None`, as in a refused `SelectionNotify`.
+pub const ATOM_NONE: u32 = 0;
+/// The code of a `SelectionNotify` event.
+pub const EVENT_CODE_SELECTION_NOTIFY: u8 = 31;
 
 const OPCODE_CREATE_WINDOW: u8 = 1;
 const OPCODE_MAP_WINDOW: u8 = 8;
 const OPCODE_INTERN_ATOM: u8 = 16;
 const OPCODE_CHANGE_PROPERTY: u8 = 18;
+const OPCODE_DELETE_PROPERTY: u8 = 19;
 const OPCODE_GET_PROPERTY: u8 = 20;
+const OPCODE_SET_SELECTION_OWNER: u8 = 22;
+const OPCODE_CONVERT_SELECTION: u8 = 24;
+const OPCODE_SEND_EVENT: u8 = 25;
 const OPCODE_TRANSLATE_COORDINATES: u8 = 40;
 const OPCODE_CREATE_GC: u8 = 55;
 const OPCODE_PUT_IMAGE: u8 = 72;
@@ -527,6 +546,15 @@ pub enum PropertyData<'d> {
     Words(&'d [u32]),
 }
 
+/// Whether an error the server sent about request `sequence` with `major_opcode` came from
+/// answering another client's selection request: a `ChangeProperty` on its window or the
+/// `SendEvent` that notifies it, among the requests in `serving`. That window may be gone
+/// already, so the error is the other client's and must not end this one's event loop.
+pub fn is_selection_serving_error(major_opcode: u8, sequence: u16, serving: &[u16]) -> bool {
+    matches!(major_opcode, OPCODE_CHANGE_PROPERTY | OPCODE_SEND_EVENT)
+        && serving.contains(&sequence)
+}
+
 /// `ChangeProperty` in mode `Replace`: sets `property` of `window` to `data` of type `kind`.
 pub fn change_property(
     window: u32,
@@ -573,6 +601,138 @@ pub fn get_property(window: u32, property: u32, max_units: u32) -> Result<Vec<u8
     body.extend_from_slice(&0u32.to_le_bytes());
     body.extend_from_slice(&max_units.to_le_bytes());
     request(OPCODE_GET_PROPERTY, 0, &body)
+}
+
+/// `GetProperty` with `delete` set: like [`get_property`], and the server deletes the
+/// property once all of it was read, as a selection's requestor does.
+pub fn get_property_deleting(
+    window: u32,
+    property: u32,
+    max_units: u32,
+) -> Result<Vec<u8>, WindowError> {
+    let mut bytes = get_property(window, property, max_units)?;
+    if let Some(delete) = bytes.get_mut(1) {
+        *delete = 1;
+    }
+    Ok(bytes)
+}
+
+/// `DeleteProperty`: removes `property` from `window`.
+pub fn delete_property(window: u32, property: u32) -> Result<Vec<u8>, WindowError> {
+    let mut body = Vec::with_capacity(8);
+    body.extend_from_slice(&window.to_le_bytes());
+    body.extend_from_slice(&property.to_le_bytes());
+    request(OPCODE_DELETE_PROPERTY, 0, &body)
+}
+
+/// `SetSelectionOwner`: makes `owner` the owner of `selection` (`None` gives it up).
+pub fn set_selection_owner(owner: u32, selection: u32, time: u32) -> Result<Vec<u8>, WindowError> {
+    let mut body = Vec::with_capacity(12);
+    body.extend_from_slice(&owner.to_le_bytes());
+    body.extend_from_slice(&selection.to_le_bytes());
+    body.extend_from_slice(&time.to_le_bytes());
+    request(OPCODE_SET_SELECTION_OWNER, 0, &body)
+}
+
+/// `ConvertSelection`: asks `selection`'s owner to put it, as `target`, in `property` of
+/// `requestor` and answer with a `SelectionNotify`.
+pub fn convert_selection(
+    requestor: u32,
+    selection: u32,
+    target: u32,
+    property: u32,
+    time: u32,
+) -> Result<Vec<u8>, WindowError> {
+    let mut body = Vec::with_capacity(20);
+    for value in [requestor, selection, target, property, time] {
+        body.extend_from_slice(&value.to_le_bytes());
+    }
+    request(OPCODE_CONVERT_SELECTION, 0, &body)
+}
+
+/// A `SelectionNotify` event telling `requestor` that `selection` is in `property` as
+/// `target`, or, with `property` [`ATOM_NONE`], that it could not be converted.
+pub fn selection_notify_event(
+    time: u32,
+    requestor: u32,
+    selection: u32,
+    target: u32,
+    property: u32,
+) -> [u8; 32] {
+    let mut event = [0u8; 32];
+    event[0] = EVENT_CODE_SELECTION_NOTIFY;
+    for (at, value) in [
+        (4, time),
+        (8, requestor),
+        (12, selection),
+        (16, target),
+        (20, property),
+    ] {
+        event[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    event
+}
+
+/// `SendEvent` with no propagation and an empty event mask: delivers `event` to the client
+/// that created `destination`.
+pub fn send_event(destination: u32, event: &[u8; 32]) -> Result<Vec<u8>, WindowError> {
+    let mut body = Vec::with_capacity(40);
+    body.extend_from_slice(&destination.to_le_bytes());
+    body.extend_from_slice(&0u32.to_le_bytes());
+    body.extend_from_slice(event);
+    request(OPCODE_SEND_EVENT, 0, &body)
+}
+
+/// The type atom of a `GetProperty` reply (`None` when the property does not exist).
+pub fn parse_property_type(reply: &[u8]) -> Result<u32, WindowError> {
+    if u8_at(reply, 0)? != 1 {
+        return Err(protocol("a GetProperty answer is not a reply"));
+    }
+    u32_at(reply, 8)
+}
+
+/// What a pointer button's code means: one of the three buttons, a wheel step, or a button
+/// the GUI does not use.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ButtonCode {
+    /// Button 1, 2 or 3.
+    Button(PointerButton),
+    /// Buttons 4 to 7: one wheel step up, down, left or right, in lines.
+    Wheel {
+        /// Lines down (negative: up).
+        lines_down: f32,
+        /// Lines right (negative: left).
+        lines_right: f32,
+    },
+    /// Any other button.
+    Other,
+}
+
+/// The meaning of button code `detail` in a `ButtonPress` or `ButtonRelease`: 1 primary,
+/// 2 middle, 3 secondary, and 4 to 7 the wheel's steps up, down, left and right.
+pub fn button_code(detail: u8) -> ButtonCode {
+    match detail {
+        1 => ButtonCode::Button(PointerButton::Primary),
+        2 => ButtonCode::Button(PointerButton::Middle),
+        3 => ButtonCode::Button(PointerButton::Secondary),
+        4 => ButtonCode::Wheel {
+            lines_down: -1.0,
+            lines_right: 0.0,
+        },
+        5 => ButtonCode::Wheel {
+            lines_down: 1.0,
+            lines_right: 0.0,
+        },
+        6 => ButtonCode::Wheel {
+            lines_down: 0.0,
+            lines_right: -1.0,
+        },
+        7 => ButtonCode::Wheel {
+            lines_down: 0.0,
+            lines_right: 1.0,
+        },
+        _ => ButtonCode::Other,
+    }
 }
 
 /// `CreateGC`: a graphics context `gc` for `drawable` with every value at its default.
@@ -806,6 +966,75 @@ pub enum Packet {
         /// Its first 32-bit value.
         first: u32,
     },
+    /// A pointer button went down in the window.
+    ButtonPress {
+        /// The button's code (see [`button_code`]).
+        detail: u8,
+        /// The pointer's position in the window.
+        x: i16,
+        /// The pointer's vertical position in the window.
+        y: i16,
+        /// The modifier and button state.
+        state: u16,
+    },
+    /// A pointer button went up.
+    ButtonRelease {
+        /// The button's code.
+        detail: u8,
+        /// The pointer's position in the window.
+        x: i16,
+        /// The pointer's vertical position in the window.
+        y: i16,
+        /// The modifier and button state.
+        state: u16,
+    },
+    /// The pointer moved.
+    MotionNotify {
+        /// The pointer's position in the window.
+        x: i16,
+        /// The pointer's vertical position in the window.
+        y: i16,
+    },
+    /// The pointer left a window.
+    LeaveNotify {
+        /// The window it left.
+        window: u32,
+        /// 0 for a normal leave, 1 and 2 for leaves caused by grabs.
+        mode: u8,
+    },
+    /// Another client took a selection this one owned.
+    SelectionClear {
+        /// The window that owned it.
+        owner: u32,
+        /// The selection's atom.
+        selection: u32,
+    },
+    /// Another client asks for a selection this one owns.
+    SelectionRequest {
+        /// The request's time.
+        time: u32,
+        /// The owner window.
+        owner: u32,
+        /// The window to answer.
+        requestor: u32,
+        /// The selection's atom.
+        selection: u32,
+        /// The type asked for, such as `UTF8_STRING` or `TARGETS`.
+        target: u32,
+        /// The requestor's property to write it into (`None` from obsolete clients).
+        property: u32,
+    },
+    /// The answer to this client's `ConvertSelection`.
+    SelectionNotify {
+        /// The window that asked.
+        requestor: u32,
+        /// The selection's atom.
+        selection: u32,
+        /// The type it was converted to.
+        target: u32,
+        /// The property holding it, `None` when it could not be converted.
+        property: u32,
+    },
     /// The window got the keyboard focus.
     FocusIn,
     /// The window lost the keyboard focus.
@@ -832,6 +1061,50 @@ pub fn parse_packet(header: &[u8; 32]) -> Packet {
         2 => Packet::KeyPress {
             keycode: header[1],
             state: half(28),
+        },
+        4 | 5 => {
+            let (detail, x, y, state) = (header[1], half(24) as i16, half(26) as i16, half(28));
+            if header[0] & 0x7F == 4 {
+                Packet::ButtonPress {
+                    detail,
+                    x,
+                    y,
+                    state,
+                }
+            } else {
+                Packet::ButtonRelease {
+                    detail,
+                    x,
+                    y,
+                    state,
+                }
+            }
+        }
+        6 => Packet::MotionNotify {
+            x: half(24) as i16,
+            y: half(26) as i16,
+        },
+        8 => Packet::LeaveNotify {
+            window: word(12),
+            mode: header[30],
+        },
+        29 => Packet::SelectionClear {
+            owner: word(8),
+            selection: word(12),
+        },
+        30 => Packet::SelectionRequest {
+            time: word(4),
+            owner: word(8),
+            requestor: word(12),
+            selection: word(16),
+            target: word(20),
+            property: word(24),
+        },
+        31 => Packet::SelectionNotify {
+            requestor: word(8),
+            selection: word(12),
+            target: word(16),
+            property: word(20),
         },
         9 => Packet::FocusIn,
         10 => Packet::FocusOut,
@@ -880,6 +1153,10 @@ pub fn key_from_keysym(keysym: u32) -> Option<Key> {
         0xFF50 => Key::Home,
         0xFF57 => Key::End,
         0xFFC1 => Key::F4,
+        0xFFBF => Key::F2,
+        0xFFC2 => Key::F5,
+        0xFF55 => Key::PageUp,
+        0xFF56 => Key::PageDown,
         0x21..=0x7E | 0xA0..=0xFF => Key::Character(char::from_u32(keysym)?),
         0x0100_0000..=0x0110_FFFF => Key::Character(char::from_u32(keysym - 0x0100_0000)?),
         _ => return None,
@@ -902,6 +1179,28 @@ pub fn scale_from_resources(resources: &[u8]) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_selection_serving_errors_are_ignored() {
+        let serving = [7, 9];
+        assert!(is_selection_serving_error(
+            OPCODE_CHANGE_PROPERTY,
+            7,
+            &serving
+        ));
+        assert!(is_selection_serving_error(OPCODE_SEND_EVENT, 9, &serving));
+        assert!(!is_selection_serving_error(
+            OPCODE_CHANGE_PROPERTY,
+            8,
+            &serving
+        ));
+        assert!(!is_selection_serving_error(
+            OPCODE_GET_PROPERTY,
+            7,
+            &serving
+        ));
+        assert!(!is_selection_serving_error(OPCODE_SEND_EVENT, 9, &[]));
+    }
 
     #[test]
     fn display_names_parse_to_a_socket_and_tcp_is_refused() {
@@ -1297,5 +1596,115 @@ mod tests {
             let _ = parse_property_reply(&bytes);
             let _ = parse_keyboard_mapping_reply(&bytes, 8);
         }
+    }
+
+    #[test]
+    fn selection_requests_are_encoded_byte_for_byte() {
+        assert_eq!(
+            set_selection_owner(0x0040_0001, 0x1A2, CURRENT_TIME).unwrap(),
+            vec![22, 0, 4, 0, 1, 0, 0x40, 0, 0xA2, 1, 0, 0, 0, 0, 0, 0]
+        );
+        let convert = convert_selection(7, 8, 9, 10, 0).unwrap();
+        assert_eq!(&convert[..4], &[24, 0, 6, 0]);
+        assert_eq!(&convert[4..8], &7u32.to_le_bytes());
+        assert_eq!(&convert[16..20], &10u32.to_le_bytes());
+        assert_eq!(convert.len(), 24);
+        let notify = selection_notify_event(5, 6, 7, 8, ATOM_NONE);
+        assert_eq!(notify[0], EVENT_CODE_SELECTION_NOTIFY);
+        assert_eq!(&notify[8..12], &6u32.to_le_bytes());
+        assert_eq!(&notify[20..24], &[0, 0, 0, 0]);
+        let sent = send_event(6, &notify).unwrap();
+        assert_eq!(&sent[..4], &[25, 0, 11, 0]);
+        assert_eq!(&sent[12..44], &notify);
+        let deleting = get_property_deleting(1, 2, 3).unwrap();
+        assert_eq!(&deleting[..2], &[20, 1]);
+        assert_eq!(
+            delete_property(1, 2).unwrap(),
+            vec![19, 0, 3, 0, 1, 0, 0, 0, 2, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn pointer_and_selection_events_parse() {
+        let mut press = [0u8; 32];
+        press[0] = 4;
+        press[1] = 1;
+        press[24..26].copy_from_slice(&(-3i16).to_le_bytes());
+        press[26..28].copy_from_slice(&120i16.to_le_bytes());
+        press[28..30].copy_from_slice(&0x0005u16.to_le_bytes());
+        assert_eq!(
+            parse_packet(&press),
+            Packet::ButtonPress {
+                detail: 1,
+                x: -3,
+                y: 120,
+                state: 5
+            }
+        );
+        press[0] = 5;
+        assert!(matches!(
+            parse_packet(&press),
+            Packet::ButtonRelease { detail: 1, .. }
+        ));
+        press[0] = 6;
+        assert_eq!(parse_packet(&press), Packet::MotionNotify { x: -3, y: 120 });
+        let mut request = [0u8; 32];
+        request[0] = 30;
+        for (at, value) in [(4, 1u32), (8, 2), (12, 3), (16, 4), (20, 5), (24, 6)] {
+            request[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        assert_eq!(
+            parse_packet(&request),
+            Packet::SelectionRequest {
+                time: 1,
+                owner: 2,
+                requestor: 3,
+                selection: 4,
+                target: 5,
+                property: 6,
+            }
+        );
+        let notify = selection_notify_event(0, 9, 10, 11, 12);
+        assert_eq!(
+            parse_packet(&notify),
+            Packet::SelectionNotify {
+                requestor: 9,
+                selection: 10,
+                target: 11,
+                property: 12
+            }
+        );
+        let mut leave = [0u8; 32];
+        leave[0] = 8;
+        leave[12..16].copy_from_slice(&77u32.to_le_bytes());
+        assert_eq!(
+            parse_packet(&leave),
+            Packet::LeaveNotify {
+                window: 77,
+                mode: 0
+            }
+        );
+    }
+
+    #[test]
+    fn button_codes_are_buttons_and_wheel_steps() {
+        assert_eq!(button_code(1), ButtonCode::Button(PointerButton::Primary));
+        assert_eq!(button_code(3), ButtonCode::Button(PointerButton::Secondary));
+        assert_eq!(button_code(2), ButtonCode::Button(PointerButton::Middle));
+        assert_eq!(
+            button_code(5),
+            ButtonCode::Wheel {
+                lines_down: 1.0,
+                lines_right: 0.0
+            }
+        );
+        assert_eq!(
+            button_code(6),
+            ButtonCode::Wheel {
+                lines_down: 0.0,
+                lines_right: -1.0
+            }
+        );
+        assert_eq!(button_code(9), ButtonCode::Other);
     }
 }

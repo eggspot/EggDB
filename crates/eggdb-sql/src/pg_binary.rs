@@ -52,6 +52,8 @@ const MAX_OFFSET: i32 = 15 * 3600 + 59 * 60 + 59;
 const NUMERIC_POSITIVE: u16 = 0x0000;
 const NUMERIC_NEGATIVE: u16 = 0x4000;
 const NUMERIC_NAN: u16 = 0xC000;
+const NUMERIC_POSITIVE_INFINITY: u16 = 0xD000;
+const NUMERIC_NEGATIVE_INFINITY: u16 = 0xF000;
 const MAX_NUMERIC_GROUPS: usize = 1000;
 const JSONB_VERSION: u8 = 1;
 const MAX_BYTEA_BYTES: usize = 1_000_000_000;
@@ -299,14 +301,21 @@ fn array_binary(array: &ArrayValue, zone: TimeZone) -> SqlResult<Vec<u8>> {
     Ok(out)
 }
 
+fn special_numeric_binary(sign: u16) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8);
+    out.extend_from_slice(&0i16.to_be_bytes());
+    out.extend_from_slice(&0i16.to_be_bytes());
+    out.extend_from_slice(&sign.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out
+}
+
 fn numeric_binary(text: &str) -> Vec<u8> {
-    if text == "NaN" {
-        let mut out = Vec::with_capacity(8);
-        out.extend_from_slice(&0i16.to_be_bytes());
-        out.extend_from_slice(&0i16.to_be_bytes());
-        out.extend_from_slice(&NUMERIC_NAN.to_be_bytes());
-        out.extend_from_slice(&0u16.to_be_bytes());
-        return out;
+    match text {
+        "NaN" => return special_numeric_binary(NUMERIC_NAN),
+        "Infinity" => return special_numeric_binary(NUMERIC_POSITIVE_INFINITY),
+        "-Infinity" => return special_numeric_binary(NUMERIC_NEGATIVE_INFINITY),
+        _ => {}
     }
     let (sign, unsigned) = match text.strip_prefix('-') {
         Some(rest) => (NUMERIC_NEGATIVE, rest),
@@ -373,6 +382,14 @@ fn numeric_text(bytes: &[u8]) -> Option<String> {
     }
     if sign == NUMERIC_NAN {
         return (count == 0).then(|| "NaN".to_owned());
+    }
+    if sign == NUMERIC_POSITIVE_INFINITY || sign == NUMERIC_NEGATIVE_INFINITY {
+        let text = if sign == NUMERIC_POSITIVE_INFINITY {
+            "Infinity"
+        } else {
+            "-Infinity"
+        };
+        return (count == 0).then(|| text.to_owned());
     }
     if sign != NUMERIC_POSITIVE && sign != NUMERIC_NEGATIVE {
         return None;
@@ -559,7 +576,7 @@ pub(crate) fn reads_binary(sql_type: SqlType) -> bool {
         SqlType::Array(element) => {
             !matches!(element.sql_type(), SqlType::Array(_)) && reads_binary(element.sql_type())
         }
-        SqlType::Catalog(CatalogType::Name) | SqlType::Dynamic => true,
+        SqlType::Catalog(CatalogType::Name | CatalogType::RefCursor) | SqlType::Dynamic => true,
         SqlType::Catalog(_) => false,
         _ => true,
     }
@@ -664,6 +681,20 @@ pub(crate) fn decode_array_texts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numeric_infinities_take_postgresql_14_special_signs() {
+        for (value, sign) in [("Infinity", [0xD0, 0x00]), ("-Infinity", [0xF0, 0x00])] {
+            let number =
+                Value::Numeric(crate::numeric::Numeric::parse_with_infinity(value).unwrap());
+            let bytes = encode_pg_binary(&number, NUMERIC_OID, TimeZone::UTC)
+                .unwrap()
+                .unwrap();
+            assert_eq!(bytes, [0, 0, 0, 0, sign[0], sign[1], 0, 0]);
+            assert_eq!(decode_pg_binary_text(&bytes, NUMERIC_OID).unwrap(), value);
+        }
+        assert!(decode_pg_binary_text(&[0, 1, 0, 0, 0xD0, 0, 0, 0, 0, 1], NUMERIC_OID).is_err());
+    }
 
     #[test]
     fn arrays_read_back_what_they_write() {

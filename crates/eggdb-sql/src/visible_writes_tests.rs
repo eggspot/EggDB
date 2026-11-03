@@ -250,12 +250,12 @@ fn a_foreign_key_or_a_view_across_the_list_keeps_the_listed_table_from_changing(
     let store = shop();
     let limited = confined(&store);
     let mut session = Session::new(&limited);
-    let referenced = refused(&mut session, "INSERT INTO parents VALUES (2)");
+    runs(&mut session, "INSERT INTO parents VALUES (2)");
+    let referenced = refused(&mut session, "DELETE FROM parents WHERE id = 1");
     assert!(
         referenced.contains("table \"children\" has a foreign key to \"parents\""),
         "{referenced}"
     );
-    refused(&mut session, "DELETE FROM parents WHERE id = 1");
     refused(&mut session, "TRUNCATE parents");
     refused(&mut session, "DROP TABLE parents");
     fails(&mut session, "INSERT INTO orders VALUES (2, 1, 'second')");
@@ -279,8 +279,8 @@ fn a_foreign_key_or_a_view_across_the_list_keeps_the_listed_table_from_changing(
         "count\n1\nSELECT 1"
     );
     assert_eq!(
-        shown(&store, "SELECT count(*) FROM parents"),
-        "count\n1\nSELECT 1"
+        shown(&store, "SELECT id FROM parents ORDER BY id"),
+        "id\n1\n2\nSELECT 2"
     );
     assert_eq!(shown(&store, "SELECT v FROM peek"), "v\n1\nSELECT 1");
     assert_eq!(
@@ -315,12 +315,27 @@ fn the_ties_across_the_list_are_named() {
         assert!(links.contains(&expected), "{expected:?} in {links:?}");
     }
     assert_eq!(links.len(), 3, "{links:?}");
-    assert_eq!(links[0].blocked_changes(), "rows and definition");
+    let referenced = links
+        .iter()
+        .find(|link| link.kind == OutsideLinkKind::ReferencedBy)
+        .unwrap();
+    assert_eq!(
+        referenced.blocked_changes(),
+        "delete its rows, change the columns that foreign key points at, or change its definition"
+    );
+    let referencing = links
+        .iter()
+        .find(|link| link.kind == OutsideLinkKind::References)
+        .unwrap();
+    assert_eq!(
+        referencing.blocked_changes(),
+        "change its rows or its definition"
+    );
     let view = links
         .iter()
         .find(|link| link.kind == OutsideLinkKind::ReadByView)
         .unwrap();
-    assert_eq!(view.blocked_changes(), "definition");
+    assert_eq!(view.blocked_changes(), "change its definition");
 }
 
 #[test]
@@ -450,6 +465,248 @@ fn a_default_or_check_calling_a_user_routine_cannot_be_written() {
         "ALTER TABLE items RENAME COLUMN name TO title",
     );
     session.close().unwrap();
+    assert_eq!(
+        shown(&store, "SELECT code FROM secrets"),
+        "code\nswordfish\nSELECT 1"
+    );
+}
+
+fn ledger() -> MemoryStore {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    session
+        .execute(
+            "CREATE TABLE accounts (id integer PRIMARY KEY, note text);
+             CREATE TABLE ledger (id integer PRIMARY KEY, account integer REFERENCES accounts (id) ON DELETE CASCADE ON UPDATE CASCADE);
+             CREATE TABLE holds (id integer PRIMARY KEY, account integer REFERENCES accounts (id) ON DELETE SET NULL);
+             CREATE TABLE checks (id integer PRIMARY KEY, account integer REFERENCES accounts (id));
+             INSERT INTO accounts VALUES (1, 'first'), (2, 'spare');
+             INSERT INTO ledger VALUES (1, 1);
+             INSERT INTO holds VALUES (1, 1);
+             INSERT INTO checks VALUES (1, 1)",
+            &mut |_| {},
+        )
+        .unwrap();
+    session.close().unwrap();
+    store
+}
+
+#[test]
+fn a_table_another_table_references_takes_inserts_and_other_columns_but_not_deletes_or_key_changes()
+{
+    let store = ledger();
+    let limited = ConfinedStore {
+        store: &store,
+        tables: VisibleTables::new(["accounts"]),
+    };
+    let mut session = Session::new(&limited);
+    runs(&mut session, "INSERT INTO accounts VALUES (3, 'third')");
+    runs(
+        &mut session,
+        "UPDATE accounts SET note = 'changed' WHERE id = 1",
+    );
+    runs(
+        &mut session,
+        "INSERT INTO accounts VALUES (1, 'upserted') ON CONFLICT (id) DO UPDATE SET note = excluded.note",
+    );
+    let deleted = refused(&mut session, "DELETE FROM accounts WHERE id = 1");
+    assert!(
+        deleted.starts_with("cannot delete a row of \"accounts\" or change a column a foreign key points at: table \""),
+        "{deleted}"
+    );
+    assert!(
+        deleted.ends_with("\" has a foreign key to \"accounts\", and this session may neither change nor check \"checks\" (--tables)")
+            || deleted.ends_with("\" has a foreign key to \"accounts\", and this session may neither change nor check \"holds\" (--tables)")
+            || deleted.ends_with("\" has a foreign key to \"accounts\", and this session may neither change nor check \"ledger\" (--tables)"),
+        "{deleted}"
+    );
+    for sql in [
+        "DELETE FROM accounts WHERE id = 2",
+        "DELETE FROM accounts WHERE id = 3",
+        "UPDATE accounts SET id = 10 WHERE id = 1",
+        "UPDATE accounts SET id = id + 100",
+        "TRUNCATE accounts",
+        "DELETE FROM accounts",
+    ] {
+        let message = refused(&mut session, sql);
+        assert!(
+            message.starts_with(
+                "cannot delete a row of \"accounts\" or change a column a foreign key points at"
+            ),
+            "{sql}: {message}"
+        );
+    }
+    let altered = refused(
+        &mut session,
+        "ALTER TABLE accounts ADD COLUMN extra integer",
+    );
+    assert!(
+        altered.starts_with("cannot change the definition of \"accounts\": table \""),
+        "{altered}"
+    );
+    session.close().unwrap();
+    assert_eq!(
+        shown(&store, "SELECT id, note FROM accounts ORDER BY id"),
+        "id|note\n1|upserted\n2|spare\n3|third\nSELECT 3"
+    );
+    assert_eq!(
+        shown(&store, "SELECT account FROM ledger"),
+        "account\n1\nSELECT 1"
+    );
+    assert_eq!(
+        shown(&store, "SELECT account FROM holds"),
+        "account\n1\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_table_listed_with_columns_cannot_be_changed() {
+    let store = shop();
+    let limited = ConfinedStore {
+        store: &store,
+        tables: VisibleTables::new(["secrets(id)", "items"]),
+    };
+    let mut session = Session::new(&limited);
+    assert_eq!(
+        refused(&mut session, "INSERT INTO secrets VALUES (2)"),
+        "cannot change \"secrets\": this session may read only some of its columns (--tables), so it may not change its rows or its definition"
+    );
+    for sql in [
+        "UPDATE secrets SET id = 5",
+        "DELETE FROM secrets",
+        "TRUNCATE secrets",
+        "ALTER TABLE secrets ADD COLUMN extra integer",
+        "COMMENT ON TABLE secrets IS 'changed'",
+        "DROP TABLE secrets",
+        "ANALYZE secrets",
+        "CREATE POLICY p ON secrets USING (true)",
+    ] {
+        let message = refused(&mut session, sql);
+        assert!(
+            message.starts_with("cannot change \"secrets\""),
+            "{sql}: {message}"
+        );
+    }
+    for sql in [
+        "INSERT INTO items (name) SELECT code FROM secrets",
+        "UPDATE secrets SET code = 'gone'",
+    ] {
+        let error = fails(&mut session, sql);
+        assert_eq!(error.state(), SqlState::UNDEFINED_COLUMN, "{sql}: {error}");
+    }
+    let created = refused(
+        &mut session,
+        "CREATE TABLE secrets2 (id integer PRIMARY KEY)",
+    );
+    assert!(
+        created.starts_with("cannot change \"secrets2\""),
+        "{created}"
+    );
+    session.close().unwrap();
+    assert_eq!(
+        shown(&store, "SELECT id, code FROM secrets"),
+        "id|code\n1|swordfish\nSELECT 1"
+    );
+    let limited = ConfinedStore {
+        store: &store,
+        tables: VisibleTables::new(["drafts(id)"]),
+    };
+    let mut session = Session::new(&limited);
+    let message = refused(&mut session, "CREATE TABLE drafts (id integer PRIMARY KEY)");
+    assert!(message.starts_with("cannot change \"drafts\""), "{message}");
+}
+
+#[test]
+fn a_foreign_key_on_a_hidden_column_keeps_the_listed_parent_from_losing_rows() {
+    let store = shop();
+    let limited = ConfinedStore {
+        store: &store,
+        tables: VisibleTables::new(["children(id)", "parents"]),
+    };
+    let links = limited
+        .tables
+        .outside_links(&store.begin_read().unwrap())
+        .unwrap();
+    assert!(
+        links.iter().any(|link| link.listed == "parents"
+            && link.outside == "children"
+            && link.kind == OutsideLinkKind::ReferencedBy),
+        "{links:?}"
+    );
+    let mut session = Session::new(&limited);
+    runs(&mut session, "INSERT INTO parents VALUES (2)");
+    for sql in [
+        "DELETE FROM parents WHERE id = 1",
+        "DELETE FROM parents",
+        "UPDATE parents SET id = 10 WHERE id = 1",
+    ] {
+        let message = refused(&mut session, sql);
+        assert!(
+            message.starts_with(
+                "cannot delete a row of \"parents\" or change a column a foreign key points at"
+            ),
+            "{sql}: {message}"
+        );
+    }
+    fails(&mut session, "TRUNCATE parents");
+    session.close().unwrap();
+    assert_eq!(
+        shown(&store, "SELECT id, parent FROM children"),
+        "id|parent\n1|1\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_policy_calling_a_user_routine_or_holding_a_subquery_cannot_be_written() {
+    let store = shop();
+    let mut owner = Session::new(&store);
+    runs(
+        &mut owner,
+        "CREATE FUNCTION wipe_secrets() RETURNS integer LANGUAGE plpgsql AS $$ BEGIN UPDATE secrets SET code = 'gone'; RETURN 1; END $$",
+    );
+    runs(
+        &mut owner,
+        "CREATE FUNCTION always() RETURNS boolean LANGUAGE sql AS $$ SELECT true $$",
+    );
+    runs(
+        &mut owner,
+        "CREATE POLICY owners_own ON items USING (always())",
+    );
+    owner.close().unwrap();
+    let limited = confined(&store);
+    let mut session = Session::new(&limited);
+    assert_eq!(
+        refused(
+            &mut session,
+            "CREATE POLICY wipe ON items USING (wipe_secrets() = 1)"
+        ),
+        "cannot write a row-security policy that calls the routine \"wipe_secrets\": it runs in every later session that reads or writes the table, where --tables does not confine it"
+    );
+    assert_eq!(
+        refused(
+            &mut session,
+            "CREATE POLICY checked ON items FOR INSERT WITH CHECK (wipe_secrets() = 1)"
+        ),
+        "cannot write a row-security policy that calls the routine \"wipe_secrets\": it runs in every later session that reads or writes the table, where --tables does not confine it"
+    );
+    assert_eq!(
+        refused(
+            &mut session,
+            "CREATE POLICY nested ON items USING (EXISTS (SELECT wipe_secrets()))"
+        ),
+        "cannot write a row-security policy with a subquery: it runs in every later session that reads or writes the table, where --tables does not confine it"
+    );
+    runs(&mut session, "CREATE POLICY plain ON items USING (id > 0)");
+    runs(&mut session, "INSERT INTO items (name) VALUES ('kept')");
+    session.close().unwrap();
+    let mut names: Vec<String> =
+        crate::row_security::policies(&store.begin_read().unwrap(), "items")
+            .unwrap()
+            .into_iter()
+            .map(|policy| policy.name)
+            .collect();
+    names.sort();
+    assert_eq!(names, ["owners_own", "plain"]);
     assert_eq!(
         shown(&store, "SELECT code FROM secrets"),
         "code\nswordfish\nSELECT 1"

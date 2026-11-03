@@ -321,3 +321,185 @@ fn one_listed_table_is_read_and_the_store_itself_keeps_everything() {
         .unwrap();
     assert_eq!(rendered.last().unwrap(), "secret\nswordfish\nSELECT 1");
 }
+
+fn narrowed() -> VisibleTables {
+    VisibleTables::new(["users", "secrets(id,owner)", "notes", "secret_view(secret)"])
+}
+
+fn narrowed_store(store: &MemoryStore) -> ShownStore<'_> {
+    ShownStore {
+        store,
+        tables: narrowed(),
+    }
+}
+
+fn narrowed_shop() -> MemoryStore {
+    let store = shop();
+    let mut session = Session::new(&store);
+    session
+        .execute(
+            "CREATE VIEW secret_view AS SELECT secret FROM secrets;
+             CREATE VIEW owners AS SELECT id, owner FROM secrets;
+             COMMENT ON COLUMN secrets.secret IS 'the hidden column';
+             ANALYZE secrets",
+            &mut |_| {},
+        )
+        .unwrap();
+    session.close().unwrap();
+    store
+}
+
+#[test]
+fn a_table_listed_with_columns_shows_only_those_columns() {
+    let store = narrowed_shop();
+    let limited = narrowed_store(&store);
+    let mut session = Session::new(&limited);
+    assert_eq!(
+        last(&mut session, "SELECT * FROM secrets"),
+        "id|owner\n1|1\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT s.* FROM secrets s JOIN users u ON u.id = s.owner"
+        ),
+        "id|owner\n1|1\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT count(*) FROM notes JOIN secrets ON secrets.id = notes.secret_id"
+        ),
+        "count\n1\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'secrets' ORDER BY ordinal_position"
+        ),
+        "column_name\nid\nowner\nSELECT 2"
+    );
+    for sql in [
+        "SELECT secret FROM secrets",
+        "SELECT s.secret FROM secrets s",
+        "SELECT id FROM secrets WHERE secret = 'swordfish'",
+        "SELECT * FROM users WHERE name IN (SELECT secret FROM secrets)",
+        "WITH s AS (SELECT secret FROM secrets) SELECT * FROM s",
+        "SELECT upper(secret) FROM secrets",
+        "SELECT count(*) FROM secrets GROUP BY secret",
+        "SELECT id FROM secrets ORDER BY secret",
+    ] {
+        let error = fails(&mut session, sql);
+        assert_eq!(error.state().code(), "42703", "{sql}: {error}");
+    }
+    for sql in ["SELECT * FROM secret_view", "SELECT * FROM owners"] {
+        let error = fails(&mut session, sql);
+        assert_eq!(error.state().code(), "42P01", "{sql}: {error}");
+    }
+}
+
+#[test]
+fn nothing_of_a_left_out_column_can_be_read_by_any_key() {
+    let store = narrowed_shop();
+    let read = narrowed().read(store.begin_read().unwrap()).unwrap();
+    let mut rows = 0;
+    read.scan(
+        NAMESPACE,
+        &crate::encoding::prefix_end(NAMESPACE),
+        ScanDirection::Forward,
+        &mut |key, value| {
+            let holds = |bytes: &[u8], wanted: &[u8]| {
+                bytes.windows(wanted.len()).any(|window| window == wanted)
+            };
+            assert!(!holds(value, b"swordfish"), "{key:?}");
+            assert!(!holds(key, b"swordfish"), "{key:?}");
+            assert!(!holds(value, b"the hidden column"), "{key:?}");
+            assert!(!holds(key, b"secrets_by_text"), "{key:?}");
+            assert!(!holds(value, b"secrets_by_text"), "{key:?}");
+            rows += 1;
+            Ok(true)
+        },
+    )
+    .unwrap();
+    assert!(rows > 0);
+    let definition = read
+        .get(&crate::encoding::table_key("secrets"))
+        .unwrap()
+        .unwrap();
+    let table = crate::encoding::TableDefinition::decode("secrets", &definition).unwrap();
+    let names: Vec<&str> = table
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect();
+    assert_eq!(names, ["id", "owner"]);
+    assert!(table.indexes.is_empty());
+}
+
+#[test]
+fn column_lists_that_cannot_be_served_are_reported_and_hide_their_table() {
+    let store = narrowed_shop();
+    let tables = VisibleTables::new([
+        "secrets(owner,secret)",
+        "users(id,nme)",
+        "user_names(name)",
+        "notes()",
+        "drafts(id)",
+    ]);
+    assert_eq!(
+        tables.names(),
+        vec![
+            "secrets(owner,secret)",
+            "users(id,nme)",
+            "user_names(name)",
+            "notes()",
+            "drafts(id)",
+        ]
+    );
+    assert!(tables.limits_columns());
+    assert!(!listed().limits_columns());
+    let reasons: Vec<(String, String)> = tables
+        .unservable_column_lists(&store.begin_read().unwrap())
+        .unwrap()
+        .into_iter()
+        .map(|list| (list.table, list.reason))
+        .collect();
+    assert_eq!(
+        reasons,
+        vec![
+            (
+                "secrets".to_owned(),
+                "leaves out its primary key column \"id\": list it too".to_owned()
+            ),
+            ("users".to_owned(), "has no column \"nme\"".to_owned()),
+            (
+                "user_names".to_owned(),
+                "is a view: list it without columns, or list the columns of the tables it reads"
+                    .to_owned()
+            ),
+            ("notes".to_owned(), "has an empty column list".to_owned()),
+            (
+                "drafts".to_owned(),
+                "does not exist yet: a table listed with columns must exist when the session starts"
+                    .to_owned()
+            ),
+        ]
+    );
+    let limited = ShownStore {
+        store: &store,
+        tables,
+    };
+    let mut session = Session::new(&limited);
+    for sql in [
+        "SELECT * FROM secrets",
+        "SELECT * FROM user_names",
+        "SELECT * FROM notes",
+    ] {
+        let error = fails(&mut session, sql);
+        assert_eq!(error.state().code(), "42P01", "{sql}: {error}");
+    }
+    assert_eq!(
+        last(&mut session, "SELECT * FROM users ORDER BY id"),
+        "id\n1\n2\nSELECT 2"
+    );
+}

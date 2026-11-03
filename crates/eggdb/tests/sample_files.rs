@@ -267,6 +267,46 @@ fn a_v0_2_0_file_takes_collections_and_keeps_its_default_key_space() {
 }
 
 #[test]
+fn a_v0_2_0_file_drops_a_collection_in_steps_across_a_reopen_and_renames_one() {
+    let dir = TempDirectory::new("collection-steps");
+    let path = dir.copy_of(CHECKPOINTED_SAMPLE);
+    let expected = v0_2_0_entries();
+    let db = Database::open(&path).unwrap();
+    assert_eq!(db.finish_collection_drops().unwrap(), 0);
+    assert_eq!(db.check().unwrap().entries, expected.len() as u64);
+    db.create_collection("big").unwrap();
+    db.create_collection("kept").unwrap();
+    db.write(|tx| {
+        let mut big = tx.collection("big")?;
+        for n in 0..1500u32 {
+            big.put(n.to_be_bytes(), "v")?;
+        }
+        tx.collection("kept")?.put("k", "v")?;
+        Ok(())
+    })
+    .unwrap();
+    let mut first_step = db.begin_write().unwrap();
+    assert!(first_step.drop_collection("big").unwrap());
+    first_step.commit().unwrap();
+    drop(db);
+
+    let db = Database::open(&path).unwrap();
+    assert_holds(&db, &expected);
+    assert_eq!(db.collection_names().unwrap(), ["kept"]);
+    assert_eq!(db.finish_collection_drops().unwrap(), 1500 - 512 - 32);
+    assert_eq!(db.finish_collection_drops().unwrap(), 0);
+    db.rename_collection("kept", "renamed").unwrap();
+    assert_eq!(db.collection_names().unwrap(), ["renamed"]);
+    assert_eq!(
+        db.collection("renamed").get("k").unwrap(),
+        Some(b"v".to_vec())
+    );
+    assert_eq!(db.check().unwrap().entries, expected.len() as u64 + 3);
+    assert_eq!(db.check().unwrap().leaked_pages, 0);
+    db.close().unwrap();
+}
+
+#[test]
 fn a_v0_2_0_file_takes_expiring_keys_and_then_carries_their_feature_flag() {
     let dir = TempDirectory::new("expiring");
     let path = dir.copy_of(CHECKPOINTED_SAMPLE);
