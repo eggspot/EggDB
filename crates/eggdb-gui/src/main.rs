@@ -336,6 +336,7 @@ fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
             polling.then_some(OPENING_POLL_INTERVAL),
             workspace.until_caret_changes(Instant::now()),
             workspace.until_fade_changes(),
+            workspace.until_plan_tooltip(Instant::now()),
         ]
         .into_iter()
         .flatten()

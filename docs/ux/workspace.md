@@ -347,8 +347,11 @@ the tab's dialect, read-only, never the statement itself (cli.md 24); `Ctrl/Cmd+
 `EXPLAIN ANALYZE` (it does run the statement, inside a transaction that is rolled back for a
 statement that writes, and the toolbar's `Explain` menu says `Explain (analyze) runs the
 statement`). The results header gains a `Plan` segment after `Messages`, active when a plan came
-back; `Results` keeps the previous rows. A dialect without a plan (`Oracle` for now) shows the
-CLI's `not_supported` message in `Messages`.
+back; `Results` keeps the previous rows. A dialect without a plan shows the CLI's `not_supported`
+message in `Messages`. Oracle's dialect explains with `EXPLAIN PLAN FOR` and
+`DBMS_XPLAN.DISPLAY` (rolled back) and SQL Server's with `SET SHOWPLAN_ALL` (analyze: `SET
+STATISTICS PROFILE`, rolled back); their nodes read as the engine names them (`TABLE ACCESS FULL
+EMP`, `Clustered Index Seek [t].[t_pkey]`), SQL Server's statement row is the root (D312).
 
 ### 5.2 Layout
 The plan is a tree drawn top-down in the `results` body: the root node at the top centre, children

@@ -784,7 +784,8 @@ impl Connection {
 
     /// Runs `statement` in `dialect` so that nothing it writes stays, whatever it is: on a
     /// session that already has a transaction open, between `SAVEPOINT` and
-    /// `ROLLBACK TO SAVEPOINT`, so the session's own work stays; else inside `BEGIN` and
+    /// `ROLLBACK TO SAVEPOINT` (SQL Server's `SAVE TRANSACTION` and `ROLLBACK TRANSACTION`),
+    /// so the session's own work stays; else inside `BEGIN` (`BEGIN TRANSACTION`) and
     /// `ROLLBACK`. The outcomes start with the opening statement's, then the statement's,
     /// then the closing statements'; a session whose transaction already failed gets that
     /// failure and runs nothing. With `session` it runs on that kept session, else as
@@ -795,7 +796,7 @@ impl Connection {
         statement: &str,
         cancel: &CancelHandle,
     ) -> Outcomes {
-        self.run_rolled_back_on(None, dialect, statement, cancel)
+        self.run_rolled_back_on(None, dialect, &[statement.to_owned()], cancel)
     }
 
     /// [`Connection::run_rolled_back`] on the kept session `session`.
@@ -806,7 +807,44 @@ impl Connection {
         statement: &str,
         cancel: &CancelHandle,
     ) -> Outcomes {
-        self.run_rolled_back_on(Some(session), dialect, statement, cancel)
+        self.run_rolled_back_on(Some(session), dialect, &[statement.to_owned()], cancel)
+    }
+
+    /// Runs `run` on the kept session `session`: its `before` statements, then, when they
+    /// all succeeded, its statements (rolled back as [`Connection::run_rolled_back`] does
+    /// when `run.rolled_back`), then its `after` statements whatever happened, which `cancel`
+    /// does not stop. The outcomes are those of every statement that ran, in order.
+    pub fn run_bracketed_in_session(
+        &mut self,
+        session: SessionId,
+        dialect: QueryDialect,
+        run: &BracketedRun,
+        cancel: &CancelHandle,
+    ) -> Outcomes {
+        let mut outcomes = if run.before.is_empty() {
+            Vec::new()
+        } else {
+            self.run_in_session(session, dialect, &run.before, cancel)
+        };
+        let ready =
+            outcomes.len() == run.before.len() && outcomes.iter().all(Result::is_ok);
+        if ready {
+            let ran = if run.rolled_back {
+                self.run_rolled_back_on(Some(session), dialect, &run.statements, cancel)
+            } else {
+                self.run_in_session(session, dialect, &run.statements, cancel)
+            };
+            outcomes.extend(ran);
+        }
+        if !run.after.is_empty() {
+            outcomes.extend(self.run_in_session(
+                session,
+                dialect,
+                &run.after,
+                &CancelHandle::default(),
+            ));
+        }
+        outcomes
     }
 
     fn run_on(
@@ -826,32 +864,19 @@ impl Connection {
         &mut self,
         session: Option<SessionId>,
         dialect: QueryDialect,
-        statement: &str,
+        statements: &[String],
         cancel: &CancelHandle,
     ) -> Outcomes {
         let undo = CancelHandle::default();
+        let words = UndoWords::of(dialect);
         let keeps_transactions = session.is_some() || matches!(self.link, Link::Server(_));
         if keeps_transactions {
-            let savepoint = format!("SAVEPOINT {ROLLED_BACK_SAVEPOINT}");
-            let mut opened = self.run_on(session, dialect, &[savepoint], &undo);
+            let mut opened = self.run_on(session, dialect, &[words.savepoint()], &undo);
             match opened.pop() {
                 Some(Ok(tables)) => {
                     let mut outcomes = vec![Ok(tables)];
-                    outcomes.extend(self.run_on(
-                        session,
-                        dialect,
-                        &[statement.to_owned()],
-                        cancel,
-                    ));
-                    outcomes.extend(self.run_on(
-                        session,
-                        dialect,
-                        &[
-                            format!("ROLLBACK TO SAVEPOINT {ROLLED_BACK_SAVEPOINT}"),
-                            format!("RELEASE SAVEPOINT {ROLLED_BACK_SAVEPOINT}"),
-                        ],
-                        &undo,
-                    ));
+                    outcomes.extend(self.run_on(session, dialect, statements, cancel));
+                    outcomes.extend(self.run_on(session, dialect, &words.back_to_savepoint(), &undo));
                     return outcomes;
                 }
                 Some(Err(failure)) if failure.code != NO_ACTIVE_TRANSACTION => {
@@ -860,17 +885,74 @@ impl Connection {
                 _ => {}
             }
         }
-        let script = [
-            "BEGIN".to_owned(),
-            statement.to_owned(),
-            "ROLLBACK".to_owned(),
-        ];
+        let mut script = Vec::with_capacity(statements.len() + 2);
+        script.push(words.begin.to_owned());
+        script.extend(statements.iter().cloned());
+        script.push(words.rollback.to_owned());
         let mut outcomes = self.run_on(session, dialect, &script, cancel);
         let began = outcomes.first().is_some_and(Result::is_ok);
         if began && outcomes.len() < script.len() && keeps_transactions {
-            outcomes.extend(self.run_on(session, dialect, &["ROLLBACK".to_owned()], &undo));
+            outcomes.extend(self.run_on(session, dialect, &[words.rollback.to_owned()], &undo));
         }
         outcomes
+    }
+}
+
+/// Statements run with set-up before and clean-up after them, as `Explain` runs in SQL
+/// Server's dialect: `SET SHOWPLAN_ALL ON`, the statement, then `SET SHOWPLAN_ALL OFF` even
+/// when the statement failed.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BracketedRun {
+    /// Run first; the statements run only when all of these succeed.
+    pub before: Vec<String>,
+    /// The statements.
+    pub statements: Vec<String>,
+    /// Run last, whatever happened before.
+    pub after: Vec<String>,
+    /// Whether the statements run so that nothing they write stays.
+    pub rolled_back: bool,
+}
+
+struct UndoWords {
+    begin: &'static str,
+    rollback: &'static str,
+    sqlserver: bool,
+}
+
+impl UndoWords {
+    fn of(dialect: QueryDialect) -> Self {
+        if dialect == QueryDialect::SqlServer {
+            Self {
+                begin: "BEGIN TRANSACTION",
+                rollback: "ROLLBACK",
+                sqlserver: true,
+            }
+        } else {
+            Self {
+                begin: "BEGIN",
+                rollback: "ROLLBACK",
+                sqlserver: false,
+            }
+        }
+    }
+
+    fn savepoint(&self) -> String {
+        if self.sqlserver {
+            format!("SAVE TRANSACTION {ROLLED_BACK_SAVEPOINT}")
+        } else {
+            format!("SAVEPOINT {ROLLED_BACK_SAVEPOINT}")
+        }
+    }
+
+    fn back_to_savepoint(&self) -> Vec<String> {
+        if self.sqlserver {
+            vec![format!("ROLLBACK TRANSACTION {ROLLED_BACK_SAVEPOINT}")]
+        } else {
+            vec![
+                format!("ROLLBACK TO SAVEPOINT {ROLLED_BACK_SAVEPOINT}"),
+                format!("RELEASE SAVEPOINT {ROLLED_BACK_SAVEPOINT}"),
+            ]
+        }
     }
 }
 
@@ -1337,6 +1419,76 @@ mod tests {
                 "{statement} left its table"
             );
         }
+    }
+
+    #[test]
+    fn bracketed_runs_explain_in_sql_server_and_oracle_and_leave_nothing_behind() {
+        let path = scratch("bracketed").join("shop.eggdb");
+        let _ = std::fs::remove_file(&path);
+        let mut connection = EngineConnector.connect(&file(path, true, false)).unwrap();
+        connection.run("CREATE TABLE t (id integer PRIMARY KEY, b integer)").unwrap();
+        connection.run("INSERT INTO t VALUES (1, 10), (2, 20)").unwrap();
+        let cancel = CancelHandle::default();
+        let tab = SessionId(3);
+        let showplan = BracketedRun {
+            before: vec!["SET SHOWPLAN_ALL ON".to_owned()],
+            statements: vec!["SELECT * FROM t WHERE id = 1".to_owned()],
+            after: vec!["SET SHOWPLAN_ALL OFF".to_owned()],
+            rolled_back: false,
+        };
+        let outcomes =
+            connection.run_bracketed_in_session(tab, QueryDialect::SqlServer, &showplan, &cancel);
+        assert_eq!(outcomes.len(), 3, "{outcomes:?}");
+        let plan = outcomes[1].as_ref().ok().and_then(|tables| tables.last()).cloned();
+        assert!(
+            plan.is_some_and(|table| table.columns.iter().any(|column| column == "NodeId")),
+            "{outcomes:?}"
+        );
+        let failing = BracketedRun {
+            statements: vec!["SELECT * FROM missing".to_owned()],
+            ..showplan.clone()
+        };
+        let outcomes =
+            connection.run_bracketed_in_session(tab, QueryDialect::SqlServer, &failing, &cancel);
+        assert!(outcomes.last().is_some_and(Result::is_ok), "{outcomes:?}");
+        let ran = connection.run_in_session(
+            tab,
+            QueryDialect::SqlServer,
+            &["SELECT b FROM t WHERE id = 2".to_owned()],
+            &cancel,
+        );
+        let rows = ran.last().and_then(|outcome| outcome.as_ref().ok()).and_then(|tables| tables.last()).map(|table| table.rows.clone());
+        assert_eq!(rows, Some(vec![vec![Some("20".to_owned())]]), "showplan is off again");
+        let profile = BracketedRun {
+            before: vec!["SET STATISTICS PROFILE ON".to_owned()],
+            statements: vec!["DELETE FROM t WHERE id = 1".to_owned()],
+            after: vec!["SET STATISTICS PROFILE OFF".to_owned()],
+            rolled_back: true,
+        };
+        let outcomes =
+            connection.run_bracketed_in_session(tab, QueryDialect::SqlServer, &profile, &cancel);
+        assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
+        assert_eq!(count_of(&mut connection, "t").as_deref(), Some("2"));
+        let oracle = BracketedRun {
+            statements: vec![
+                "EXPLAIN PLAN FOR SELECT * FROM t".to_owned(),
+                "SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)".to_owned(),
+            ],
+            rolled_back: true,
+            ..BracketedRun::default()
+        };
+        let outcomes =
+            connection.run_bracketed_in_session(SessionId(4), QueryDialect::Oracle, &oracle, &cancel);
+        assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
+        let display = outcomes[2].as_ref().ok().and_then(|tables| tables.last()).cloned();
+        assert!(
+            display.is_some_and(|table| table.columns == ["PLAN_TABLE_OUTPUT"]),
+            "{outcomes:?}"
+        );
+        assert_eq!(
+            connection.transaction_status(SessionId(4)),
+            TransactionStatus::Idle
+        );
     }
 
     #[test]

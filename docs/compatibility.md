@@ -123,3 +123,25 @@ buttons fade over 80 ms. They change at once, and the caret stops blinking, when
 reduce motion (macOS `Reduce motion`, Windows `Animation effects` off, X11 XSETTINGS
 `Gtk/EnableAnimations` off; read at start and whenever the window gains the focus) or when
 `eggdb-gui --reduced-motion` is given.
+
+## Plans in Oracle's and SQL Server's dialects in EggDB's desktop client
+
+`Ctrl/Cmd+E` in `eggdb-gui` (D312, `docs/ux/workspace.md` 5) explains in each dialect's own form.
+In Oracle's it runs `EXPLAIN PLAN FOR <statement>` and `SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)`
+in a transaction that is rolled back, so no `PLAN_TABLE` row stays, and draws the display's
+`Id | Operation | Name` rows as the tree (`TABLE ACCESS FULL CUSTOMERS`, with `Rows`, `Cost` and
+the `Predicate Information` lines when a plan carries them). In SQL Server's it runs
+`SET SHOWPLAN_ALL ON`, the statement and `SET SHOWPLAN_ALL OFF` (off again even when the
+statement fails), with the statement's row as the root and each `PLAN_ROW` under its `Parent`
+(`Clustered Index Seek [customers].[customers_pkey]`). `Ctrl/Cmd+Shift+E` in SQL Server's dialect
+runs the statement under `SET STATISTICS PROFILE ON`, rolled back, and shows the rows it measured;
+in Oracle's it says `not_supported`, since Oracle measures through `DBMS_XPLAN.DISPLAY_CURSOR`,
+which EggDB does not have yet. `SHOWPLAN_TEXT`'s `StmtText` tree, pasted or run by hand, reads too.
+`eggdb explain --dialect oracle|sqlserver` and MCP's `explain_query` print the same forms on a
+read-only file: Oracle's `DBMS_XPLAN.DISPLAY` lines with no `PLAN_TABLE` written, SQL Server's
+`SHOWPLAN_TEXT` tree.
+
+Hovering a plan node fills it `bg2`; after 600 ms (or at once with `Ctrl/Cmd+Shift+Space` on the
+current node) a tooltip shows its operation and second row uncut and the engine's extra lines,
+wrapped at 480 px, under the node or over it near the panel's bottom; `Esc` hides it. A click
+selects the node and highlights its table in the editor, as `Enter` does.

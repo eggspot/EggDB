@@ -2425,7 +2425,7 @@ fn results(paint: &mut Painter<'_, '_>, window: &MainWindow) {
         theme.text_primary,
     );
     if let Some(plan) = tab.plan.as_ref().filter(|_| tab.view == ResultView::Plan) {
-        plan_body(paint, plan);
+        plan_body(paint, plan, window.hovered_plan_node());
         return;
     }
     if messages {
@@ -2539,7 +2539,7 @@ fn plan_toggle_x(centre_right: f32) -> f32 {
     centre_right - 88.0 - PLAN_TOGGLE_WIDTH
 }
 
-fn plan_body(paint: &mut Painter<'_, '_>, plan: &PlanView) {
+fn plan_body(paint: &mut Painter<'_, '_>, plan: &PlanView, hovered: Option<usize>) {
     let theme = paint.theme;
     let faces = paint.faces;
     let (centre_width, centre_right) = (paint.centre_width(), paint.centre_right);
@@ -2567,7 +2567,7 @@ fn plan_body(paint: &mut Painter<'_, '_>, plan: &PlanView) {
         }
         return;
     }
-    plan_view::draw(paint, plan, plan_area(centre_width));
+    plan_view::draw(paint, plan, plan_area(centre_width), hovered);
 }
 
 fn plan_area(centre_width: f32) -> Rect {
@@ -3735,6 +3735,18 @@ fn editor_caret(editor: &crate::editor::Editor) -> AccessCaret {
 }
 
 impl MainWindow {
+    /// The plan node under the pointer while the plan's tree shows (`docs/ux/workspace.md`
+    /// 5.4).
+    pub fn hovered_plan_node(&self) -> Option<usize> {
+        let plan = self
+            .tab
+            .plan
+            .as_ref()
+            .filter(|plan| self.tab.view == ResultView::Plan && !plan.text_shown)?;
+        let index = usize::try_from(self.pointer.hovered?.checked_sub(NODE_FIRST_PLAN_NODE)?).ok()?;
+        (index < plan.plan.nodes.len()).then_some(index)
+    }
+
     /// Moves the keyboard focus to the element of accessibility node `node`, as when a screen
     /// reader focuses it: the editor, the dialect pill, the filter, a tree row, a grid cell or a
     /// plan node; returns whether that node can take the focus.

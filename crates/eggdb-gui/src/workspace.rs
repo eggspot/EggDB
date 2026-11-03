@@ -13,8 +13,8 @@ use crate::catalog::Catalog;
 use crate::clipboard::{Clipboard, MemoryClipboard};
 use crate::connect_screen::{self, ConnectAction, ConnectCard, Segment, handle_key};
 use crate::connection::{
-    CancelHandle, ConnectFailure, ConnectTarget, Connection, Connector, ResultTable, SessionId,
-    StatementFailure,
+    BracketedRun, CancelHandle, ConnectFailure, ConnectTarget, Connection, Connector, ResultTable,
+    SessionId, StatementFailure,
 };
 use crate::dialect::QueryDialect;
 use crate::inspector;
@@ -24,6 +24,7 @@ use crate::main_window::{self, Faces, MainWindow, WindowAction};
 use crate::settings::ClientSettings;
 use crate::splitters::RegionSizes;
 use crate::object_browser::TreeItem;
+use crate::plan_view;
 use crate::pointer::{self, ClickCounter, PointerLook};
 use crate::query_tab::{RunRequest, TabAction};
 
@@ -136,6 +137,7 @@ pub struct Workspace {
     window_active: bool,
     reduced_motion: bool,
     fill_targets: (Option<u32>, Option<u32>),
+    plan_hover: Option<(usize, Instant)>,
     layout: Layout,
     settings_path: Option<PathBuf>,
 }
@@ -186,6 +188,7 @@ impl Workspace {
             window_active: true,
             reduced_motion: false,
             fill_targets: (None, None),
+            plan_hover: None,
             layout: Layout::EggDb,
             settings_path: None,
         }
@@ -315,6 +318,42 @@ impl Workspace {
         let changed = look.advance(now);
         self.fill_targets = targets;
         changed
+    }
+
+    fn tick_plan_tooltip(&mut self, now: Instant) -> bool {
+        let hovered = match &self.screen {
+            Screen::Main(window) => window.hovered_plan_node(),
+            Screen::Connect(_) => None,
+        };
+        match (self.plan_hover, hovered) {
+            (Some((node, _)), Some(current)) if node == current => {}
+            (_, current) => self.plan_hover = current.map(|node| (node, now)),
+        }
+        let due = self
+            .plan_hover
+            .filter(|&(_, since)| now.saturating_duration_since(since) >= plan_view::TOOLTIP_DELAY)
+            .map(|(node, _)| node);
+        self.main_window_mut()
+            .and_then(|window| window.tab.plan.as_mut())
+            .is_some_and(|plan| plan.show_pointer_tooltip(due))
+    }
+
+    /// How long until the pointer has rested on a plan node long enough for its tooltip,
+    /// `None` when it rests on none or the tooltip already shows (`docs/ux/workspace.md` 5.4).
+    pub fn until_plan_tooltip(&self, now: Instant) -> Option<Duration> {
+        let (node, since) = self.plan_hover?;
+        let Screen::Main(window) = &self.screen else {
+            return None;
+        };
+        let shown = window
+            .tab
+            .plan
+            .as_ref()
+            .is_some_and(|plan| plan.tooltip.is_some_and(|(shown, _)| shown == node));
+        if shown {
+            return None;
+        }
+        Some(plan_view::TOOLTIP_DELAY.saturating_sub(now.saturating_duration_since(since)))
     }
 
     /// How long until a fading fill needs a new frame, `None` when nothing fades
@@ -1136,23 +1175,24 @@ impl Workspace {
         let dialect = request.dialect;
         let session = request.session;
         let scan = request.scan.clone();
-        let rolled_back = request
-            .explain
-            .as_ref()
-            .is_some_and(|explain| explain.rolled_back);
+        let bracketed = request.explain.as_ref().map(|explain| BracketedRun {
+            before: explain.before.clone(),
+            statements: statements.clone(),
+            after: explain.after.clone(),
+            rolled_back: explain.rolled_back,
+        });
         std::thread::spawn(move || {
             let Ok(mut connection) = handed.recv() else {
                 return;
             };
-            let outcomes = match (&scan, statements.first()) {
+            let outcomes = match (&scan, &bracketed) {
                 (Some(scan), _) => vec![connection.scan_keys(scan).map(|table| vec![table])],
-                (None, Some(statement)) if rolled_back => connection.run_rolled_back_in_session(
-                    session,
-                    dialect,
-                    statement,
-                    &worker_cancel,
-                ),
-                _ => connection.run_in_session(session, dialect, &statements, &worker_cancel),
+                (None, Some(run)) => {
+                    connection.run_bracketed_in_session(session, dialect, run, &worker_cancel)
+                }
+                (None, None) => {
+                    connection.run_in_session(session, dialect, &statements, &worker_cancel)
+                }
             };
             let transaction = connection.transaction_status(session);
             let _ = send.send((connection, outcomes, transaction));
@@ -1404,11 +1444,13 @@ impl Workspace {
     }
 
     /// Moves time on to `now`: starts and moves on the 80 ms hover and pressed fades (none
-    /// under reduced motion), takes a finished open's answer, shows the progress state after
+    /// under reduced motion), shows a plan node's tooltip once the pointer has rested on it
+    /// for 600 ms, takes a finished open's answer, shows the progress state after
     /// [`PROGRESS_DELAY`] and clears `Cancelled` after [`CANCELLED_SHOWN_FOR`]. Returns
     /// whether the screen changed.
     pub fn tick(&mut self, now: Instant) -> bool {
         let mut changed = self.tick_fades(now);
+        changed |= self.tick_plan_tooltip(now);
         changed |= self.tick_read();
         changed |= self.tick_run(now);
         if self.caret_blinks || !self.window_active {

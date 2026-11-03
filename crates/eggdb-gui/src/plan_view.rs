@@ -6,7 +6,7 @@ use eggdb_platform::window::{Key, KeyPress};
 use crate::canvas::Rect;
 use crate::connection::ResultTable;
 use crate::dialect::QueryDialect;
-use crate::main_window::{BODY, Painter, SMALL, elided};
+use crate::main_window::{BODY, CODE, Painter, SMALL, elided};
 use crate::status_line::thousands;
 
 /// A node's height in the drawn tree.
@@ -35,8 +35,21 @@ pub const MAX_DEPTH: usize = 64;
 pub const MAX_LINES: usize = 20_000;
 const MAX_DETAILS: usize = 64;
 const NODE_PADDING: f32 = 12.0;
+const TOOLTIP_GAP: f32 = 4.0;
+const TOOLTIP_PADDING: f32 = 8.0;
+const MOST_TOOLTIP_LINES: usize = 24;
 const RADIUS: f32 = 4.0;
 const EXPLAIN_WORD: &str = "explain";
+const XPLAN_COLUMN: &str = "PLAN_TABLE_OUTPUT";
+const SHOWPLAN_TEXT_COLUMN: &str = "StmtText";
+const SHOWPLAN_BRANCH: &str = "|--";
+const SHOWPLAN_OBJECT: &str = "OBJECT:(";
+const ORACLE_EXPLAIN: &str = "EXPLAIN PLAN FOR ";
+const ORACLE_DISPLAY: &str = "SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)";
+/// How long the pointer rests on a node before its tooltip shows (`docs/ux/workspace.md` 5.4).
+pub const TOOLTIP_DELAY: std::time::Duration = std::time::Duration::from_millis(600);
+/// The widest a node's tooltip is drawn.
+pub const TOOLTIP_MAX_WIDTH: f32 = 480.0;
 
 /// Why the engine's answer could not be read as a plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,7 +169,9 @@ pub struct Plan {
 
 impl Plan {
     /// Reads a statement's answer to `EXPLAIN`: PostgreSQL's one-column text form, SQLite's
-    /// `id, parent, notused, detail` rows or MySQL's tabular rows.
+    /// `id, parent, notused, detail` rows, MySQL's tabular rows, Oracle's
+    /// `DBMS_XPLAN.DISPLAY` lines (`PLAN_TABLE_OUTPUT`), SQL Server's `SHOWPLAN_ALL` and
+    /// `STATISTICS PROFILE` rows or its `SHOWPLAN_TEXT` tree (`StmtText`).
     pub fn from_result(table: &ResultTable) -> Result<Self, PlanError> {
         let column = |name: &str| {
             table
@@ -169,6 +184,9 @@ impl Plan {
         {
             return Self::from_sqlite_rows(&table.rows, (id, parent, detail));
         }
+        if column("NodeId").is_some() && column("Parent").is_some() {
+            return Self::from_showplan_rows(table);
+        }
         if let (Some(name), Some(kind)) = (column("table"), column("type")) {
             return Self::from_mysql_rows(&table.rows, (name, kind, column("key"), column("rows")));
         }
@@ -178,9 +196,235 @@ impl Plan {
                 .iter()
                 .map(|row| row.first().cloned().flatten().unwrap_or_default())
                 .collect();
+            if column(XPLAN_COLUMN).is_some() {
+                return Self::from_xplan_lines(&lines);
+            }
+            if column(SHOWPLAN_TEXT_COLUMN).is_some() {
+                return Self::from_showplan_text(&lines);
+            }
             return Self::from_postgresql_text(&lines);
         }
         Err(PlanError::NotAPlan)
+    }
+
+    /// Reads Oracle's `DBMS_XPLAN.DISPLAY` lines: the rows of the `Id | Operation | Name`
+    /// table, each operation's depth its indent, with the `Rows` and `Cost (%CPU)` columns
+    /// when the format shows them, and each `Predicate Information` line under its node.
+    pub fn from_xplan_lines(lines: &[String]) -> Result<Self, PlanError> {
+        if lines.len() > MAX_LINES {
+            return Err(PlanError::TooManyLines);
+        }
+        let mut plan = Self {
+            text: lines.to_vec(),
+            ..Self::default()
+        };
+        let mut header: Option<Vec<String>> = None;
+        let mut open: Vec<(usize, usize)> = Vec::new();
+        let mut ids: Vec<(u64, usize)> = Vec::new();
+        let mut predicates = false;
+        let mut last_predicate: Option<usize> = None;
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed.starts_with('|') {
+                let inner = trimmed.strip_prefix('|').unwrap_or(trimmed);
+                let cells: Vec<&str> = inner.strip_suffix('|').unwrap_or(inner).split('|').collect();
+                let Some(names) = &header else {
+                    if cells.iter().any(|cell| cell.trim().eq_ignore_ascii_case("Operation")) {
+                        header = Some(cells.iter().map(|cell| cell.trim().to_owned()).collect());
+                    }
+                    continue;
+                };
+                let Some(row) = XplanRow::read(names, &cells) else {
+                    continue;
+                };
+                while open.last().is_some_and(|&(indent, _)| indent >= row.indent) {
+                    open.pop();
+                }
+                let parent = open
+                    .last()
+                    .map(|&(_, index)| index)
+                    .or_else(|| (!plan.nodes.is_empty()).then_some(0));
+                let index = plan.push_node(row.node(parent))?;
+                open.push((row.indent, index));
+                ids.push((row.id, index));
+                continue;
+            }
+            if trimmed.starts_with("Predicate Information") {
+                predicates = true;
+                continue;
+            }
+            if trimmed == "Note" {
+                predicates = false;
+                continue;
+            }
+            if !predicates || trimmed.is_empty() || trimmed.starts_with('-') {
+                continue;
+            }
+            let numbered = trimmed.split_once(" - ").and_then(|(id, rest)| {
+                let id = id.trim().trim_start_matches('*').trim().parse::<u64>().ok()?;
+                let index = ids.iter().find(|(known, _)| *known == id)?.1;
+                Some((index, rest.trim()))
+            });
+            let (owner, text) = match numbered {
+                Some((index, rest)) => (Some(index), rest),
+                None => (last_predicate, trimmed),
+            };
+            if let Some(node) = owner.and_then(|index| plan.nodes.get_mut(index))
+                && node.details.len() < MAX_DETAILS
+            {
+                node.details.push(text.to_owned());
+            }
+            last_predicate = owner;
+        }
+        if plan.nodes.is_empty() {
+            return Err(PlanError::Empty);
+        }
+        Ok(plan)
+    }
+
+    /// Reads SQL Server's `SHOWPLAN_ALL` rows, and its `STATISTICS PROFILE` rows with `Rows`
+    /// and `Executes` first: the statement's row is the root, and each `PLAN_ROW` hangs under
+    /// the row whose `NodeId` is its `Parent`.
+    pub fn from_showplan_rows(table: &ResultTable) -> Result<Self, PlanError> {
+        let column = |name: &str| {
+            table
+                .columns
+                .iter()
+                .position(|column| column.eq_ignore_ascii_case(name))
+        };
+        let (Some(node_at), Some(parent_at)) = (column("NodeId"), column("Parent")) else {
+            return Err(PlanError::NotAPlan);
+        };
+        if table.rows.len() > MAX_NODES {
+            return Err(PlanError::TooManyNodes);
+        }
+        let at = ShowplanColumns {
+            text: column(SHOWPLAN_TEXT_COLUMN),
+            physical: column("PhysicalOp"),
+            logical: column("LogicalOp"),
+            argument: column("Argument"),
+            kind: column("Type"),
+            estimated_rows: column("EstimateRows"),
+            cost: column("TotalSubtreeCost"),
+            rows: column("Rows"),
+            executes: column("Executes"),
+        };
+        let mut plan = Self {
+            analyze: at.rows.is_some(),
+            ..Self::default()
+        };
+        let mut ids: Vec<(String, usize)> = Vec::new();
+        for row in &table.rows {
+            let cell = |place: Option<usize>| place.and_then(|place| row.get(place).cloned().flatten());
+            let text = cell(at.text).unwrap_or_default();
+            plan.text.extend(text.lines().map(str::to_owned));
+            let parent_id = cell(Some(parent_at)).unwrap_or_default();
+            let parent = ids
+                .iter()
+                .find(|(known, _)| *known == parent_id)
+                .map(|&(_, index)| index)
+                .or_else(|| (!plan.nodes.is_empty()).then_some(0));
+            let operator = cell(at.kind).is_none_or(|kind| kind.eq_ignore_ascii_case("PLAN_ROW"));
+            let mut node = if operator {
+                let argument = cell(at.argument);
+                let physical = cell(at.physical)
+                    .unwrap_or_else(|| showplan_physical(&text).to_owned());
+                let (operation, relation) = sqlserver_operation(&physical, argument.as_deref());
+                let mut details: Vec<String> = cell(at.logical)
+                    .filter(|logical| *logical != physical)
+                    .into_iter()
+                    .collect();
+                details.extend(argument);
+                PlanNode {
+                    operation,
+                    relation,
+                    details,
+                    ..PlanNode::default()
+                }
+            } else {
+                PlanNode {
+                    operation: cell(at.kind).unwrap_or_else(|| "Statement".to_owned()),
+                    details: vec![text.trim().to_owned()],
+                    ..PlanNode::default()
+                }
+            };
+            let executes = cell(at.executes).as_deref().and_then(number);
+            let rows = cell(at.rows).as_deref().and_then(number);
+            node.estimated_rows = cell(at.estimated_rows).as_deref().and_then(number);
+            node.cost = cell(at.cost).as_deref().and_then(number).map(|total| (0.0, total));
+            node.loops = executes.filter(|executes| *executes > 0.0);
+            node.never_executed = executes == Some(0.0);
+            node.actual_rows = rows.map(|rows| rows / node.loops.unwrap_or(1.0));
+            node.parent = parent;
+            let index = plan.push_node(node)?;
+            ids.push((cell(Some(node_at)).unwrap_or_default(), index));
+        }
+        if plan.nodes.is_empty() {
+            return Err(PlanError::Empty);
+        }
+        Ok(plan)
+    }
+
+    /// Reads SQL Server's `SHOWPLAN_TEXT` tree: one operator per `|--` line, its depth five
+    /// columns per level; lines without `|--`, such as the statement's text, are left out.
+    pub fn from_showplan_text(lines: &[String]) -> Result<Self, PlanError> {
+        if lines.len() > MAX_LINES {
+            return Err(PlanError::TooManyLines);
+        }
+        let mut plan = Self {
+            text: lines.to_vec(),
+            ..Self::default()
+        };
+        let mut open: Vec<usize> = Vec::new();
+        for line in lines {
+            let Some(at) = line.find(SHOWPLAN_BRANCH) else {
+                continue;
+            };
+            let level = at.saturating_sub(2) / 5;
+            let body = line[at + SHOWPLAN_BRANCH.len()..].trim();
+            open.truncate(level);
+            let parent = open
+                .last()
+                .copied()
+                .or_else(|| (!plan.nodes.is_empty()).then_some(0));
+            let physical = showplan_physical(body);
+            let (operation, relation) = sqlserver_operation(physical, Some(body));
+            let details = if body.len() > physical.len() {
+                vec![body.to_owned()]
+            } else {
+                Vec::new()
+            };
+            let index = plan.push_node(PlanNode {
+                operation,
+                relation,
+                details,
+                parent,
+                ..PlanNode::default()
+            })?;
+            open.push(index);
+        }
+        if plan.nodes.is_empty() {
+            return Err(PlanError::Empty);
+        }
+        Ok(plan)
+    }
+
+    fn push_node(&mut self, mut node: PlanNode) -> Result<usize, PlanError> {
+        if self.nodes.len() >= MAX_NODES {
+            return Err(PlanError::TooManyNodes);
+        }
+        let parent = node.parent.filter(|&parent| parent < self.nodes.len());
+        node.parent = parent;
+        node.depth = parent.map_or(0, |parent| self.nodes[parent].depth + 1);
+        if node.depth > MAX_DEPTH {
+            return Err(PlanError::TooDeep);
+        }
+        let index = self.nodes.len();
+        if let Some(parent) = parent {
+            self.nodes[parent].children.push(index);
+        }
+        self.nodes.push(node);
+        Ok(index)
     }
 
     /// Reads PostgreSQL's text form: the root on the first line, each child on a line with
@@ -586,6 +830,162 @@ impl Plan {
     }
 }
 
+struct ShowplanColumns {
+    text: Option<usize>,
+    physical: Option<usize>,
+    logical: Option<usize>,
+    argument: Option<usize>,
+    kind: Option<usize>,
+    estimated_rows: Option<usize>,
+    cost: Option<usize>,
+    rows: Option<usize>,
+    executes: Option<usize>,
+}
+
+struct XplanRow {
+    id: u64,
+    indent: usize,
+    operation: String,
+    name: Option<String>,
+    rows: Option<f64>,
+    cost: Option<f64>,
+}
+
+impl XplanRow {
+    fn read(names: &[String], cells: &[&str]) -> Option<Self> {
+        let cell = |name: &str| {
+            names
+                .iter()
+                .position(|known| known.eq_ignore_ascii_case(name))
+                .and_then(|place| cells.get(place).copied())
+        };
+        let id = cell("Id")?.trim().trim_start_matches('*').trim().parse().ok()?;
+        let raw = cell("Operation")?;
+        let operation = raw.trim();
+        if operation.is_empty() {
+            return None;
+        }
+        let indent = (raw.len() - raw.trim_start_matches(' ').len()).saturating_sub(1);
+        let cost = names
+            .iter()
+            .position(|known| known.starts_with("Cost"))
+            .and_then(|place| cells.get(place))
+            .and_then(|text| text.split_whitespace().next())
+            .and_then(oracle_number);
+        Some(Self {
+            id,
+            indent,
+            operation: operation.to_owned(),
+            name: cell("Name")
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned),
+            rows: cell("Rows").and_then(|text| oracle_number(text.trim())),
+            cost,
+        })
+    }
+
+    fn node(&self, parent: Option<usize>) -> PlanNode {
+        let reads_table = self.operation.starts_with("TABLE ACCESS");
+        PlanNode {
+            operation: match &self.name {
+                Some(name) => format!("{} {name}", self.operation),
+                None => self.operation.clone(),
+            },
+            relation: self.name.clone().filter(|_| reads_table),
+            estimated_rows: self.rows,
+            cost: self.cost.map(|total| (0.0, total)),
+            parent,
+            ..PlanNode::default()
+        }
+    }
+}
+
+fn oracle_number(text: &str) -> Option<f64> {
+    let (digits, scale) = match text.char_indices().last()? {
+        (at, 'K') => (&text[..at], 1e3),
+        (at, 'M') => (&text[..at], 1e6),
+        (at, 'G') => (&text[..at], 1e9),
+        (at, 'T') => (&text[..at], 1e12),
+        (at, 'P') => (&text[..at], 1e15),
+        (at, 'E') => (&text[..at], 1e18),
+        _ => (text, 1.0),
+    };
+    number(digits).map(|value| value * scale)
+}
+
+fn showplan_physical(body: &str) -> &str {
+    body.split('(').next().unwrap_or(body).trim()
+}
+
+fn sqlserver_operation(physical: &str, argument: Option<&str>) -> (String, Option<String>) {
+    let Some(object) = argument.and_then(showplan_object) else {
+        return (physical.to_owned(), None);
+    };
+    let parts = bracketed_parts(&object);
+    let table_only = physical.starts_with("Table ");
+    let relation = if table_only || parts.len() < 2 {
+        parts.last().cloned()
+    } else {
+        parts.get(parts.len() - 2).cloned()
+    };
+    (format!("{physical} {object}"), relation)
+}
+
+fn showplan_object(argument: &str) -> Option<String> {
+    let start = argument.find(SHOWPLAN_OBJECT)? + SHOWPLAN_OBJECT.len();
+    let rest = &argument[start..];
+    let mut quoted = false;
+    let mut end = rest.len();
+    let mut characters = rest.char_indices().peekable();
+    while let Some((at, character)) = characters.next() {
+        match character {
+            '[' if !quoted => quoted = true,
+            ']' if quoted => {
+                if characters.peek().is_some_and(|&(_, next)| next == ']') {
+                    characters.next();
+                } else {
+                    quoted = false;
+                }
+            }
+            ')' if !quoted => {
+                end = at;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let object = &rest[..end];
+    let object = object.rfind(" AS [").map_or(object, |at| &object[..at]);
+    let object = object.trim();
+    (!object.is_empty()).then(|| object.to_owned())
+}
+
+fn bracketed_parts(object: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut characters = object.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '[' if !quoted => quoted = true,
+            ']' if quoted => {
+                if characters.peek() == Some(&']') {
+                    characters.next();
+                    current.push(']');
+                } else {
+                    quoted = false;
+                }
+            }
+            '.' if !quoted => parts.push(std::mem::take(&mut current)),
+            character => current.push(character),
+        }
+    }
+    parts.push(current);
+    parts.retain(|part| !part.is_empty());
+    parts
+}
+
 fn lift_only_child(nodes: Vec<PlanNode>) -> Vec<PlanNode> {
     nodes
         .into_iter()
@@ -719,25 +1119,34 @@ pub fn milliseconds_text(milliseconds: f64) -> String {
 /// The statements `Explain` runs for one statement in a dialect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExplainStatements {
+    /// What runs first, such as `SET SHOWPLAN_ALL ON`.
+    pub before: Vec<String>,
     /// What runs, in order.
     pub statements: Vec<String>,
-    /// Which outcome answers with the plan: `1` when the run is rolled back, after the
-    /// outcome of the `BEGIN` or `SAVEPOINT` that opens it.
+    /// What runs last whatever happened, such as `SET SHOWPLAN_ALL OFF`.
+    pub after: Vec<String>,
+    /// Which outcome answers with the plan, counting the `before` statements and, when the
+    /// run is rolled back, the `BEGIN` or `SAVEPOINT` that opens it.
     pub plan_at: usize,
+    /// Which outcome is the statement's own, whose error points into the editor.
+    pub statement_at: usize,
     /// How many bytes were put before the statement, to move an error's position back.
     pub prefix_len: usize,
-    /// Whether the statement runs through [`crate::connection::Connection::run_rolled_back`],
-    /// so nothing it writes stays.
+    /// Whether the statements run through [`crate::connection::Connection::run_rolled_back`],
+    /// so nothing they write stays.
     pub rolled_back: bool,
 }
 
 /// The statements that explain `statement` in `dialect` (`docs/ux/workspace.md` 5.1):
 /// `EXPLAIN`, or `EXPLAIN (ANALYZE, BUFFERS)` with `analyze`, which is always rolled back
 /// whatever the statement is, since a leading comment, `CREATE TABLE … AS`, `SELECT … INTO`,
-/// `EXECUTE` or a function can write; SQLite's `EXPLAIN QUERY PLAN`. A statement that already
-/// starts with `EXPLAIN` runs as it is, rolled back too since it may say `ANALYZE`, except in a
-/// dialect without `EXPLAIN` (SQL Server, Oracle). The error is the `Messages` text for a
-/// dialect EggDB cannot explain in yet.
+/// `EXECUTE` or a function can write; SQLite's `EXPLAIN QUERY PLAN`; Oracle's `EXPLAIN PLAN
+/// FOR` then `SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)`, rolled back so no `PLAN_TABLE` row
+/// stays; SQL Server's `SET SHOWPLAN_ALL ON`, or with `analyze` `SET STATISTICS PROFILE ON`
+/// around a rolled-back run, turned off again after. A statement that already starts with
+/// `EXPLAIN` runs as it is, rolled back too since it may say `ANALYZE` (in Oracle's dialect
+/// it is followed by the display). The error is the `Messages` text for what EggDB cannot
+/// explain in a dialect yet.
 pub fn explain_statements(
     dialect: QueryDialect,
     statement: &str,
@@ -749,23 +1158,18 @@ pub fn explain_statements(
         .take(1)
         .map(str::to_ascii_lowercase)
         .collect();
-    let first = words.first().map_or("", String::as_str);
-    let not_yet = match dialect {
-        QueryDialect::Oracle => Some(("Oracle's", "Oracle's EXPLAIN PLAN")),
-        QueryDialect::SqlServer => Some(("SQL Server's", "SQL Server's showplan")),
-        _ => None,
-    };
-    if let Some((dialect_name, feature)) = not_yet {
-        return Err(format!(
-            "not_supported: cannot explain in {dialect_name} dialect: {feature} is not in EggDB yet. Switch the dialect to PostgreSQL to explain the query; every dialect sees the same tables."
-        ));
+    let typed = words.first().is_some_and(|word| word == EXPLAIN_WORD);
+    match dialect {
+        QueryDialect::Oracle => return oracle_explain(statement, typed, analyze),
+        QueryDialect::SqlServer => return Ok(sqlserver_explain(statement, analyze)),
+        _ => {}
     }
-    if first == EXPLAIN_WORD {
+    if typed {
         return Ok(rolled_back(statement.to_owned(), 0));
     }
     if analyze && dialect != QueryDialect::PostgreSql {
         return Err(format!(
-            "not_supported: cannot explain (analyze) in {}'s dialect: EggDB measures plans in PostgreSQL's dialect only for now. Switch the dialect to PostgreSQL to analyze the query; every dialect sees the same tables.",
+            "not_supported: cannot explain (analyze) in {}'s dialect: EggDB measures plans in PostgreSQL's and SQL Server's dialects only for now. Switch the dialect to PostgreSQL to analyze the query; every dialect sees the same tables.",
             dialect.label()
         ));
     }
@@ -780,18 +1184,66 @@ pub fn explain_statements(
         rolled_back(explained, prefix_len)
     } else {
         ExplainStatements {
+            before: Vec::new(),
             statements: vec![explained],
+            after: Vec::new(),
             plan_at: 0,
+            statement_at: 0,
             prefix_len,
             rolled_back: false,
         }
     })
 }
 
+fn oracle_explain(
+    statement: &str,
+    typed: bool,
+    analyze: bool,
+) -> Result<ExplainStatements, String> {
+    if analyze {
+        return Err("not_supported: cannot explain (analyze) in Oracle's dialect: Oracle measures a run through DBMS_XPLAN.DISPLAY_CURSOR, which is not in EggDB yet. Explain (Ctrl/Cmd+E) shows the plan; switch the dialect to PostgreSQL to analyze the query; every dialect sees the same tables.".to_owned());
+    }
+    let (explained, prefix_len) = if typed {
+        (statement.to_owned(), 0)
+    } else {
+        (format!("{ORACLE_EXPLAIN}{statement}"), ORACLE_EXPLAIN.len())
+    };
+    Ok(ExplainStatements {
+        before: Vec::new(),
+        statements: vec![explained, ORACLE_DISPLAY.to_owned()],
+        after: Vec::new(),
+        plan_at: 2,
+        statement_at: 1,
+        prefix_len,
+        rolled_back: true,
+    })
+}
+
+fn sqlserver_explain(statement: &str, analyze: bool) -> ExplainStatements {
+    let option = if analyze {
+        "STATISTICS PROFILE"
+    } else {
+        "SHOWPLAN_ALL"
+    };
+    let at = 1 + usize::from(analyze);
+    ExplainStatements {
+        before: vec![format!("SET {option} ON")],
+        statements: vec![statement.to_owned()],
+        after: vec![format!("SET {option} OFF")],
+        plan_at: at,
+        statement_at: at,
+        prefix_len: 0,
+        rolled_back: analyze,
+    }
+}
+
 fn rolled_back(statement: String, prefix_len: usize) -> ExplainStatements {
     ExplainStatements {
+        before: Vec::new(),
         statements: vec![statement],
+        after: Vec::new(),
         plan_at: 1,
+        statement_at: 1,
         prefix_len,
         rolled_back: true,
     }
@@ -898,8 +1350,19 @@ pub enum PlanAnswer {
     LeaveForward,
     /// `Shift+Tab` leaves the plan back.
     LeaveBack,
+    /// `Ctrl/Cmd+Shift+Space` showed or hid the current node's tooltip, or `Esc` hid it.
+    Tooltip,
     /// The plan does not use the key.
     Ignored,
+}
+
+/// What showed a node's tooltip (`docs/ux/workspace.md` 5.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TooltipCause {
+    /// The pointer rested on the node for [`TOOLTIP_DELAY`]; it hides when the pointer leaves.
+    Pointer,
+    /// `Ctrl/Cmd+Shift+Space`; it hides on `Esc`, the same chord or a move.
+    Keyboard,
 }
 
 /// The `Plan` segment of the results (`docs/ux/workspace.md` 5): the plan, its layout, the
@@ -927,6 +1390,8 @@ pub struct PlanView {
     pub text_shown: bool,
     /// Whether the plan has the keyboard focus.
     pub focused: bool,
+    /// The node whose tooltip shows, and what showed it.
+    pub tooltip: Option<(usize, TooltipCause)>,
 }
 
 impl PlanView {
@@ -958,6 +1423,7 @@ impl PlanView {
             scroll: (0.0, 0.0),
             text_shown: false,
             focused: false,
+            tooltip: None,
         }
     }
 
@@ -972,6 +1438,18 @@ impl PlanView {
             None => &[],
         };
         let place = siblings.iter().position(|&sibling| sibling == self.current);
+        let primary = press.modifiers.control || press.modifiers.command;
+        if press.key == Key::Space && primary && press.modifiers.shift {
+            self.tooltip = match self.tooltip {
+                Some((node, _)) if node == self.current => None,
+                _ => Some((self.current, TooltipCause::Keyboard)),
+            };
+            return PlanAnswer::Tooltip;
+        }
+        if press.key == Key::Escape && self.tooltip.is_some() {
+            self.tooltip = None;
+            return PlanAnswer::Tooltip;
+        }
         let next = match press.key {
             Key::Up => node.parent,
             Key::Down => node.children.first().copied(),
@@ -997,6 +1475,12 @@ impl PlanView {
         match next.filter(|&next| next < self.plan.nodes.len()) {
             Some(next) => {
                 self.current = next;
+                if self
+                    .tooltip
+                    .is_some_and(|(_, cause)| cause == TooltipCause::Keyboard)
+                {
+                    self.tooltip = None;
+                }
                 self.scroll_into_view(panel);
                 PlanAnswer::Moved
             }
@@ -1056,6 +1540,55 @@ impl PlanView {
         self.scroll = (x.max(0.0), y.max(0.0));
     }
 
+    /// Shows the tooltip of `node`, the node the pointer has rested on for
+    /// [`TOOLTIP_DELAY`], or hides a tooltip the pointer showed when `node` is `None`; a
+    /// tooltip the keyboard showed stays. Returns whether the tooltip changed.
+    pub fn show_pointer_tooltip(&mut self, node: Option<usize>) -> bool {
+        let wanted = match (node.filter(|&node| node < self.plan.nodes.len()), self.tooltip) {
+            (Some(node), _) => Some((node, TooltipCause::Pointer)),
+            (None, Some((_, TooltipCause::Keyboard))) => self.tooltip,
+            (None, _) => None,
+        };
+        let changed = wanted != self.tooltip;
+        self.tooltip = wanted;
+        changed
+    }
+
+    /// The lines of node `index`'s tooltip: its operation and its second row, neither cut,
+    /// then the engine's extra lines such as `Filter: (total > 100)`.
+    pub fn tooltip_lines(&self, index: usize) -> Vec<String> {
+        let Some(node) = self.plan.nodes.get(index) else {
+            return Vec::new();
+        };
+        let second: String = self
+            .plan
+            .second_row(index)
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect();
+        let mut lines = vec![node.operation.clone()];
+        if !second.is_empty() {
+            lines.push(second);
+        }
+        lines.extend(node.details.iter().cloned());
+        lines
+    }
+
+    /// Where node `index`'s tooltip of `size` (width, height) is drawn in `panel`: under the
+    /// node, or over it when there is no room below, kept inside the panel.
+    pub fn tooltip_rect(&self, index: usize, panel: Rect, size: (f32, f32)) -> Option<Rect> {
+        let node = self.node_rect(index, panel)?;
+        let (w, h) = (size.0.min(TOOLTIP_MAX_WIDTH).min(panel.w), size.1.min(panel.h));
+        let x = node.x.clamp(panel.x, (panel.x + panel.w - w).max(panel.x));
+        let below = node.y + NODE_HEIGHT + TOOLTIP_GAP;
+        let y = if below + h <= panel.y + panel.h {
+            below
+        } else {
+            (node.y - TOOLTIP_GAP - h).max(panel.y)
+        };
+        Some(Rect::new(x, y, w, h))
+    }
+
     /// Node `index`'s rectangle on the window when the tree is drawn in `panel`.
     pub fn node_rect(&self, index: usize, panel: Rect) -> Option<Rect> {
         let node = self.layout.boxes.get(index)?;
@@ -1096,9 +1629,15 @@ fn point_inside(point: (f32, f32), area: Rect) -> bool {
 }
 
 /// Draws the plan's tree in `area` (`docs/ux/workspace.md` 5.2 to 5.4): the links, each
-/// node's two rows and share bar, the heat's border, the selection and the focus ring. Nodes
-/// not wholly inside `area` are left out until scrolled to.
-pub(crate) fn draw(paint: &mut Painter<'_, '_>, view: &PlanView, area: Rect) {
+/// node's two rows and share bar, the heat's border, the selection, the `hovered` node's
+/// fill, the focus ring and the tooltip. Nodes not wholly inside `area` are left out until
+/// scrolled to.
+pub(crate) fn draw(
+    paint: &mut Painter<'_, '_>,
+    view: &PlanView,
+    area: Rect,
+    hovered: Option<usize>,
+) {
     let theme = paint.theme;
     let faces = paint.faces;
     let rects: Vec<Option<Rect>> = (0..view.plan.nodes.len())
@@ -1136,6 +1675,8 @@ pub(crate) fn draw(paint: &mut Painter<'_, '_>, view: &PlanView, area: Rect) {
         };
         let fill = if view.selected == Some(index) {
             theme.selection
+        } else if hovered == Some(index) {
+            theme.bg2
         } else {
             theme.bg0
         };
@@ -1199,6 +1740,79 @@ pub(crate) fn draw(paint: &mut Painter<'_, '_>, view: &PlanView, area: Rect) {
                 .canvas
                 .stroke_outside_rounded_rect(rect, RADIUS, 2.0, theme.focus_ring);
         }
+    }
+    if let Some((index, _)) = view.tooltip {
+        draw_tooltip(paint, view, index, area);
+    }
+}
+
+/// `line` cut into pieces of at most `per_line` characters, at least one character each.
+pub fn wrapped(line: &str, per_line: usize) -> Vec<String> {
+    let characters: Vec<char> = line.chars().collect();
+    if characters.is_empty() {
+        return vec![String::new()];
+    }
+    characters
+        .chunks(per_line.max(1))
+        .map(|piece| piece.iter().collect())
+        .collect()
+}
+
+fn draw_tooltip(paint: &mut Painter<'_, '_>, view: &PlanView, index: usize, area: Rect) {
+    let theme = paint.theme;
+    let faces = paint.faces;
+    let advance = faces.mono.width("M", CODE.0).max(1.0);
+    let room = TOOLTIP_MAX_WIDTH.min(area.w) - 2.0 * TOOLTIP_PADDING;
+    let per_line = (room / advance).floor().max(1.0) as usize;
+    let lines: Vec<String> = view
+        .tooltip_lines(index)
+        .iter()
+        .flat_map(|line| wrapped(line, per_line))
+        .take(MOST_TOOLTIP_LINES)
+        .collect();
+    let widest = lines
+        .iter()
+        .map(|line| faces.mono.width(line, CODE.0))
+        .fold(0.0_f32, f32::max);
+    let size = (
+        widest + 2.0 * TOOLTIP_PADDING,
+        lines.len() as f32 * CODE.1 + 2.0 * TOOLTIP_PADDING,
+    );
+    let Some(rect) = view.tooltip_rect(index, area, size) else {
+        return;
+    };
+    for (spread, alpha) in [(8.0, 10u8), (4.0, 14), (0.0, 16)] {
+        let shadow = Rect::new(
+            rect.x - spread / 2.0,
+            rect.y + 4.0 - spread / 2.0,
+            rect.w + spread,
+            rect.h + spread,
+        );
+        let color = crate::color::Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: alpha,
+        };
+        paint.canvas.fill_rounded_rect(shadow, 6.0 + spread / 2.0, color);
+    }
+    paint.canvas.fill_rounded_rect(rect, 6.0, theme.border);
+    let inner = Rect::new(rect.x + 1.0, rect.y + 1.0, rect.w - 2.0, rect.h - 2.0);
+    paint.canvas.fill_rounded_rect(inner, 5.0, theme.bg0);
+    for (row, line) in lines.iter().enumerate() {
+        let top = rect.y + TOOLTIP_PADDING + row as f32 * CODE.1;
+        if top + CODE.1 > rect.y + rect.h {
+            break;
+        }
+        let shown = elided(faces.mono, line, rect.w - 2.0 * TOOLTIP_PADDING, CODE.0);
+        paint.text(
+            faces.mono,
+            &shown,
+            rect.x + TOOLTIP_PADDING,
+            top,
+            CODE,
+            theme.text_primary,
+        );
     }
 }
 
@@ -1406,6 +2020,183 @@ Execution Time: 10.400 ms";
         );
     }
 
+    fn table(columns: &[&str], rows: Vec<Vec<Option<&str>>>) -> ResultTable {
+        ResultTable {
+            columns: columns.iter().map(|column| (*column).to_owned()).collect(),
+            kinds: vec![crate::grid::ValueKind::Text; columns.len()],
+            row_count: rows.len(),
+            rows: rows
+                .into_iter()
+                .map(|row| row.into_iter().map(|cell| cell.map(str::to_owned)).collect())
+                .collect(),
+            tag: "SELECT".to_owned(),
+        }
+    }
+
+    #[test]
+    fn oracle_display_lines_become_a_tree_by_indent_with_rows_costs_and_predicates() {
+        let display = lines(
+            "Plan hash value: 3956160932
+
+---------------------------------------------------------------------------------------
+| Id  | Operation                    | Name        | Rows  | Bytes | Cost (%CPU)| Time     |
+---------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT             |             |    14K|   532 |     4   (0)| 00:00:01 |
+|   1 |  NESTED LOOPS                |             |    14 |   532 |     4   (0)| 00:00:01 |
+|   2 |   TABLE ACCESS FULL          | DEPT        |     4 |    52 |     3   (0)| 00:00:01 |
+|*  3 |   TABLE ACCESS BY INDEX ROWID| EMP         |     4 |    52 |     1   (0)| 00:00:01 |
+|*  4 |    INDEX RANGE SCAN          | EMP_DEPT_IX |     4 |       |     0   (0)| 00:00:01 |
+---------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   3 - filter(\"E\".\"SAL\">100)
+   4 - access(\"E\".\"DEPTNO\"=\"D\".\"DEPTNO\")
+
+Note
+-----
+   - EggDB gives no cost, row or time estimates in a plan",
+        );
+        let plan = Plan::from_result(&table(
+            &["PLAN_TABLE_OUTPUT"],
+            display.iter().map(|line| vec![Some(line.as_str())]).collect(),
+        ))
+        .unwrap();
+        assert_eq!(plan.nodes.len(), 5);
+        assert_eq!(plan.nodes[0].operation, "SELECT STATEMENT");
+        assert_eq!(plan.nodes[0].estimated_rows, Some(14_000.0));
+        assert_eq!(plan.nodes[1].children, [2, 3]);
+        assert_eq!(plan.nodes[2].operation, "TABLE ACCESS FULL DEPT");
+        assert_eq!(plan.nodes[2].relation.as_deref(), Some("DEPT"));
+        assert_eq!((plan.nodes[4].parent, plan.nodes[4].depth), (Some(3), 3));
+        assert_eq!(plan.nodes[4].relation, None);
+        assert_eq!(plan.nodes[3].details, ["filter(\"E\".\"SAL\">100)"]);
+        assert_eq!(plan.nodes[0].cost, Some((0.0, 4.0)));
+        assert_eq!(plan.own_cost(3), Some(1.0));
+        assert_eq!(plan.text, display);
+        assert!(!plan.analyze);
+        let missing = lines("Error: cannot fetch last explain plan from PLAN_TABLE");
+        assert_eq!(Plan::from_xplan_lines(&missing), Err(PlanError::Empty));
+        for hostile in ["|", "||||", "| Id | Operation |", "|*x| y |", "   - - -"] {
+            let _ = Plan::from_xplan_lines(&lines(&format!("| Id | Operation | Name |\n{hostile}")));
+        }
+    }
+
+    #[test]
+    fn showplan_all_rows_hang_under_their_parent_node_with_the_statement_as_root() {
+        let columns = [
+            "Rows", "Executes", "StmtText", "StmtId", "NodeId", "Parent", "PhysicalOp",
+            "LogicalOp", "Argument", "EstimateRows", "TotalSubtreeCost", "Type",
+        ];
+        let row = |rows: Option<&'static str>,
+                   text: &'static str,
+                   node: &'static str,
+                   parent: &'static str,
+                   physical: Option<&'static str>,
+                   logical: Option<&'static str>,
+                   argument: Option<&'static str>,
+                   kind: &'static str| {
+            vec![
+                rows,
+                rows.map(|_| "1"),
+                Some(text),
+                Some("1"),
+                Some(node),
+                Some(parent),
+                physical,
+                logical,
+                argument,
+                None,
+                None,
+                Some(kind),
+            ]
+        };
+        let profiled = table(
+            &columns,
+            vec![
+                row(Some("1"), "SELECT * FROM t WHERE id = 1", "1", "0", None, None, None, "SELECT"),
+                row(
+                    Some("1"),
+                    "  |--Nested Loops(Inner Join)",
+                    "2",
+                    "1",
+                    Some("Nested Loops"),
+                    Some("Inner Join"),
+                    None,
+                    "PLAN_ROW",
+                ),
+                row(
+                    None,
+                    "       |--Clustered Index Seek(OBJECT:([t].[t_pkey] AS [t]), ORDERED FORWARD)",
+                    "3",
+                    "2",
+                    Some("Clustered Index Seek"),
+                    Some("Clustered Index Seek"),
+                    Some("OBJECT:([t].[t_pkey] AS [t]), ORDERED FORWARD"),
+                    "PLAN_ROW",
+                ),
+                row(
+                    None,
+                    "       |--Table Scan(OBJECT:([odd]]name] AS [o]))",
+                    "4",
+                    "2",
+                    Some("Table Scan"),
+                    Some("Table Scan"),
+                    Some("OBJECT:([odd]]name] AS [o])"),
+                    "PLAN_ROW",
+                ),
+            ],
+        );
+        let plan = Plan::from_result(&profiled).unwrap();
+        assert!(plan.analyze);
+        assert_eq!(plan.nodes[0].operation, "SELECT");
+        assert_eq!(plan.nodes[0].details, ["SELECT * FROM t WHERE id = 1"]);
+        assert_eq!(plan.nodes[1].details, ["Inner Join"]);
+        assert_eq!(plan.nodes[1].children, [2, 3]);
+        assert_eq!(plan.nodes[2].operation, "Clustered Index Seek [t].[t_pkey]");
+        assert_eq!(plan.nodes[2].relation.as_deref(), Some("t"));
+        assert_eq!(plan.nodes[3].relation.as_deref(), Some("odd]name"));
+        assert_eq!(plan.actual_rows_total(0), Some(1.0));
+        assert_eq!(plan.actual_rows_total(2), None);
+        assert_eq!(plan.facts(0), "rows 1");
+        assert_eq!(plan.text[1], "  |--Nested Loops(Inner Join)");
+        let mut orphan = profiled.clone();
+        orphan.rows[2][5] = Some("99".to_owned());
+        assert_eq!(Plan::from_result(&orphan).unwrap().nodes[2].parent, Some(0));
+    }
+
+    #[test]
+    fn showplan_text_reads_the_tree_by_its_branch_columns() {
+        let text = lines(
+            "SELECT * FROM t JOIN u ON u.id = t.u
+  |--Hash Match(Inner Join)
+       |--Clustered Index Scan(OBJECT:([t].[t_pkey] AS [t]))
+       |--Clustered Index Scan(OBJECT:([u].[u_pkey] AS [u]))",
+        );
+        let plan = Plan::from_result(&table(
+            &["StmtText"],
+            text.iter().map(|line| vec![Some(line.as_str())]).collect(),
+        ))
+        .unwrap();
+        assert_eq!(plan.nodes.len(), 3);
+        assert_eq!(plan.nodes[0].operation, "Hash Match");
+        assert_eq!(plan.nodes[0].children, [1, 2]);
+        assert_eq!(plan.nodes[2].relation.as_deref(), Some("u"));
+        assert_eq!(
+            plan.nodes[1].details,
+            ["Clustered Index Scan(OBJECT:([t].[t_pkey] AS [t]))"]
+        );
+        assert_eq!(
+            Plan::from_showplan_text(&lines("SELECT 1")),
+            Err(PlanError::Empty)
+        );
+        let deep: Vec<String> = (0..80)
+            .map(|level| format!("  {}|--Sort", "     ".repeat(level)))
+            .collect();
+        assert_eq!(Plan::from_showplan_text(&deep), Err(PlanError::TooDeep));
+    }
+
     #[test]
     fn mysql_rows_join_by_nested_loops() {
         let rows = vec![
@@ -1540,23 +2331,44 @@ Execution Time: 10.400 ms";
             (typed.statements, typed.prefix_len),
             (vec!["explain select 1".to_owned()], 0)
         );
-        for (dialect, name) in [
-            (QueryDialect::Oracle, "Oracle's"),
-            (QueryDialect::SqlServer, "SQL Server's"),
-        ] {
-            let typed = explain_statements(dialect, "explain select 1", false).unwrap_err();
-            assert!(
-                typed.starts_with(&format!("not_supported: cannot explain in {name} dialect")),
-                "{typed}"
-            );
-        }
-        let oracle =
-            explain_statements(QueryDialect::Oracle, "SELECT 1 FROM dual", false).unwrap_err();
-        assert!(
-            oracle.starts_with("not_supported: cannot explain in Oracle's dialect"),
-            "{oracle}"
+        let oracle = explain_statements(QueryDialect::Oracle, "SELECT 1 FROM dual", false).unwrap();
+        assert_eq!(
+            oracle.statements,
+            [
+                "EXPLAIN PLAN FOR SELECT 1 FROM dual",
+                "SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)"
+            ]
         );
-        assert!(explain_statements(QueryDialect::SqlServer, "SELECT 1", false).is_err());
+        assert_eq!(
+            (oracle.plan_at, oracle.statement_at, oracle.prefix_len),
+            (2, 1, 17)
+        );
+        assert!(oracle.rolled_back && oracle.before.is_empty() && oracle.after.is_empty());
+        let typed = explain_statements(
+            QueryDialect::Oracle,
+            "explain plan for select 1 from dual",
+            false,
+        )
+        .unwrap();
+        assert_eq!(typed.statements[0], "explain plan for select 1 from dual");
+        assert_eq!(typed.prefix_len, 0);
+        let analyzed = explain_statements(QueryDialect::Oracle, "SELECT 1 FROM dual", true);
+        assert!(analyzed.is_err_and(|message| message.contains("DBMS_XPLAN.DISPLAY_CURSOR")));
+        let shown = explain_statements(QueryDialect::SqlServer, "SELECT 1", false).unwrap();
+        assert_eq!(
+            (shown.before, shown.statements, shown.after),
+            (
+                vec!["SET SHOWPLAN_ALL ON".to_owned()],
+                vec!["SELECT 1".to_owned()],
+                vec!["SET SHOWPLAN_ALL OFF".to_owned()]
+            )
+        );
+        assert_eq!((shown.plan_at, shown.statement_at, shown.rolled_back), (1, 1, false));
+        let profiled =
+            explain_statements(QueryDialect::SqlServer, "DELETE FROM t", true).unwrap();
+        assert_eq!(profiled.before, ["SET STATISTICS PROFILE ON"]);
+        assert_eq!(profiled.after, ["SET STATISTICS PROFILE OFF"]);
+        assert_eq!((profiled.plan_at, profiled.rolled_back), (2, true));
         assert!(explain_statements(QueryDialect::MySql, "SELECT 1", true).is_err());
     }
 

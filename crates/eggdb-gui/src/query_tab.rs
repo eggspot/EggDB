@@ -135,8 +135,14 @@ pub struct ExplainRun {
     pub statement: Range<usize>,
     /// The statement's text.
     pub statement_text: String,
+    /// What runs before the statements, such as `SET SHOWPLAN_ALL ON`.
+    pub before: Vec<String>,
+    /// What runs after them whatever happened, such as `SET SHOWPLAN_ALL OFF`.
+    pub after: Vec<String>,
     /// Which of the run's outcomes answers with the plan.
     pub plan_at: usize,
+    /// Which of the run's outcomes is the explained statement's own.
+    pub statement_at: usize,
     /// How many bytes were put before the statement.
     pub prefix_len: usize,
     /// Whether the run goes through [`crate::connection::Connection::run_rolled_back`], so
@@ -334,8 +340,9 @@ impl QueryTab {
     }
 
     /// What `Explain` (or, with `analyze`, `Explain (analyze)`) runs now: the first
-    /// statement of the selection, else the statement under the caret, as `EXPLAIN` in the
-    /// tab's dialect. The error is the `Messages` text for a dialect EggDB cannot explain in.
+    /// statement of the selection, else the statement under the caret, explained in the
+    /// tab's dialect's own form ([`explain_statements`]). The error is the `Messages` text
+    /// for what EggDB cannot explain in the dialect yet.
     pub fn explain_request(&self, analyze: bool) -> Result<Option<RunRequest>, String> {
         if self.is_keys() {
             return Ok(None);
@@ -360,7 +367,10 @@ impl QueryTab {
                 analyze,
                 statement: start..start + statement.len(),
                 statement_text: statement.clone(),
+                before: explained.before,
+                after: explained.after,
                 plan_at: explained.plan_at,
+                statement_at: explained.statement_at,
                 prefix_len: explained.prefix_len,
                 rolled_back: explained.rolled_back,
             }),
@@ -515,6 +525,7 @@ impl QueryTab {
             PlanAnswer::Moved
             | PlanAnswer::Selected
             | PlanAnswer::Cleared
+            | PlanAnswer::Tooltip
             | PlanAnswer::Ignored => {}
         }
         TabAction::None
@@ -806,7 +817,10 @@ impl QueryTab {
                         }
                     }
                 }
-                Err(statement_failure) => failure = Some((statement_failure, index)),
+                Err(statement_failure) if failure.is_none() => {
+                    failure = Some((statement_failure, index));
+                }
+                Err(_) => {}
             }
         }
         match last_rows {
@@ -899,7 +913,7 @@ impl QueryTab {
             self.summary = "Error".to_owned();
             self.status_tags = "Error".to_owned();
             self.view = ResultView::Messages;
-            if index == explain.plan_at {
+            if index == explain.statement_at {
                 let mut shifted = statement_failure;
                 shifted.position = shifted
                     .position
@@ -1413,14 +1427,43 @@ mod tests {
         let mut oracle = QueryTab::with_text("Query 1", "SELECT 1 FROM dual");
         oracle.set_dialect(QueryDialect::Oracle);
         assert_eq!(
-            oracle.key(press(Key::Character('e'), false, true)),
+            oracle.key(press(Key::Character('E'), true, true)),
             TabAction::None
         );
         assert_eq!(oracle.view, ResultView::Messages);
         assert!(
-            oracle.messages[0].starts_with("not_supported: "),
+            oracle.messages[0].starts_with("not_supported: cannot explain (analyze) in Oracle's"),
             "{:?}",
             oracle.messages
+        );
+        let TabAction::Run(request) = oracle.key(press(Key::Character('e'), false, true)) else {
+            panic!("Ctrl+E explains in Oracle's dialect");
+        };
+        assert_eq!(
+            request.statements,
+            [
+                "EXPLAIN PLAN FOR SELECT 1 FROM dual",
+                "SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)"
+            ]
+        );
+        let explain = request.explain.clone().expect("an explain run");
+        assert!(explain.rolled_back);
+        assert_eq!((explain.statement_at, explain.plan_at), (1, 2));
+        let mut sqlserver = QueryTab::with_text("Query 1", "SELECT 1");
+        sqlserver.set_dialect(QueryDialect::SqlServer);
+        let TabAction::Run(request) = sqlserver.key(press(Key::Character('e'), false, true))
+        else {
+            panic!("Ctrl+E explains in SQL Server's dialect");
+        };
+        let explain = request.explain.clone().expect("an explain run");
+        assert_eq!(request.statements, ["SELECT 1"]);
+        assert_eq!(
+            (explain.before, explain.after, explain.rolled_back),
+            (
+                vec!["SET SHOWPLAN_ALL ON".to_owned()],
+                vec!["SET SHOWPLAN_ALL OFF".to_owned()],
+                false
+            )
         );
     }
 
