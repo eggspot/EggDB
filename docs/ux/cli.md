@@ -3482,8 +3482,9 @@ eggdb: --tables names 'ordres' and 'Users' (stored as 'users'): no table, view o
 Three or more: `'a', 'b' and 'c'`. A schema-qualified name is shown as given, `'archive.ordres'`.
 
 A column list the server cannot serve also stops it, exit 1, code `column_not_found`, every
-reason in one message (D281): a column the table does not have, a primary-key column left out,
-an empty list, a list on a view, or a table that does not exist yet:
+reason in one message (D281, D306): a column the table or view does not have, a primary-key
+column left out, an empty list, a SQL Server view whose query starts with `WITH`, or a table that
+does not exist yet:
 ```
 eggdb: --tables lists columns eggdb mcp cannot serve from app.db: 'orders' has no column "totl"; 'users' leaves out its primary key column "id": list it too. Fix the column list.
   try: eggdb table show app.db orders
@@ -3491,7 +3492,7 @@ eggdb: --tables lists columns eggdb mcp cannot serve from app.db: 'orders' has n
 With a column list the banner gains a line after `tables`, and the `add it` line quotes the
 option:
 ```
-  columns      orders(id,total): the agent sees only the columns listed, and may not change these tables
+  columns      orders(id,total): the agent sees only the columns listed, and may not delete their rows or change their definitions
   add it       claude mcp add mydb -- eggdb mcp app.db --tables 'orders(id,total),customers'
 ```
 
