@@ -1207,7 +1207,10 @@ fn an_agent_limited_to_some_columns_sees_and_changes_nothing_else() {
             "{dialect} {sql}: {message}"
         );
     }
-    let volatile = mcp.call("write_sql", r#"{"sql":"SELECT email_now(1)","confirm":true}"#);
+    let volatile = mcp.call(
+        "write_sql",
+        r#"{"sql":"SELECT email_now(1)","confirm":true}"#,
+    );
     let (state, message) = sql_failure(&volatile);
     assert_eq!(state, "42703");
     assert!(

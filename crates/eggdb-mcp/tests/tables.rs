@@ -11,8 +11,8 @@ use common::{
     tables_config, text_at,
 };
 use eggdb_mcp::{Server, ServerConfig};
-use eggdb_sql::{Dialect, Session};
 use eggdb_sql::json::{Json, Node};
+use eggdb_sql::{Dialect, Session};
 use std::time::{Duration, Instant};
 
 const INITIALIZE: &[u8] = br#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test-client","version":"1.0"}}}"#;
