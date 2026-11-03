@@ -17,6 +17,19 @@ pub trait KeysRead {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String>;
     /// Every key, in byte order.
     fn keys(&self) -> Result<Vec<Vec<u8>>, String>;
+    /// Calls `visit` with each key in byte order, one at a time, until it returns `false` or an
+    /// error, so a caller that keeps only some keys never holds them all.
+    fn visit_keys(
+        &self,
+        visit: &mut dyn FnMut(Vec<u8>) -> Result<bool, String>,
+    ) -> Result<(), String> {
+        for key in self.keys()? {
+            if !visit(key)? {
+                break;
+            }
+        }
+        Ok(())
+    }
     /// Every key starting with `prefix` and its stored bytes, in key order.
     fn scan(&self, prefix: &[u8]) -> Result<Entries, String> {
         let mut found = Vec::new();
@@ -75,6 +88,18 @@ impl KeysRead for MemoryKeys<'_> {
 
     fn keys(&self) -> Result<Vec<Vec<u8>>, String> {
         Ok(self.map.keys().cloned().collect())
+    }
+
+    fn visit_keys(
+        &self,
+        visit: &mut dyn FnMut(Vec<u8>) -> Result<bool, String>,
+    ) -> Result<(), String> {
+        for key in self.map.keys() {
+            if !visit(key.clone())? {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {

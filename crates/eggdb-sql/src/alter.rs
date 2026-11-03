@@ -577,6 +577,7 @@ fn add_column(
         };
         rewrite_in_place(writer, &table, &old_columns, &mut map)?;
     }
+    crate::roles::forget_column(writer, &table.name, &definition.name.text)?;
     save(writer, &table)?;
     if definition.unique.is_some() {
         add_constraint(
@@ -1200,6 +1201,7 @@ fn rename_table(
     crate::sequences::rename_owner(writer, &old_name, None, &to.text)?;
     crate::comments::move_owner(writer, &old_name, &to.text)?;
     crate::triggers::move_table_triggers(writer, &old_name, &to.text)?;
+    crate::roles::forget_relation_access(writer, &to.text)?;
     crate::roles::move_table(writer, &old_name, &to.text)?;
     crate::row_security::move_table(writer, &old_name, &to.text)?;
     crate::partitions::rename(writer, &old_name, &to.text)?;

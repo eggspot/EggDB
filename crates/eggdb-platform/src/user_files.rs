@@ -221,6 +221,15 @@ pub fn open_private_rewrite(path: &Path) -> io::Result<File> {
     owner_only(private_options().write(true).truncate(true).open(path)?)
 }
 
+/// Creates `path` for reading and writing, refusing with [`io::ErrorKind::AlreadyExists`] when
+/// anything is at the path already (a file, or a symbolic link even when it dangles), so nothing
+/// planted there receives the writes; on Unix the file is created with mode 0600.
+pub fn create_private_new(path: &Path) -> io::Result<File> {
+    let mut options = private_options();
+    options.read(true).write(true).create_new(true);
+    options.open(path)
+}
+
 fn owner_only(file: File) -> io::Result<File> {
     #[cfg(unix)]
     {
@@ -243,8 +252,8 @@ fn private_options() -> OpenOptions {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_private_directory, open_private_append, open_private_append_no_follow,
-        open_private_rewrite,
+        create_private_directory, create_private_new, open_private_append,
+        open_private_append_no_follow, open_private_rewrite,
     };
     use std::io::Write;
 
@@ -278,6 +287,37 @@ mod tests {
             drop(open_private_append(&path).unwrap());
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_new_private_file_is_owner_only_and_never_replaces_what_is_there() {
+        let directory =
+            std::env::temp_dir().join(format!("eggdb-create-new-{}", std::process::id()));
+        create_private_directory(&directory).unwrap();
+        let path = directory.join("spill");
+        let _ = std::fs::remove_file(&path);
+        create_private_new(&path)
+            .unwrap()
+            .write_all(b"first")
+            .unwrap();
+        assert_eq!(
+            create_private_new(&path).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+            let link = directory.join("planted");
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            assert!(create_private_new(&link).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), b"first");
+            let _ = std::fs::remove_file(&link);
         }
         let _ = std::fs::remove_file(&path);
     }

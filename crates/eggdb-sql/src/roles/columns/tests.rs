@@ -525,3 +525,156 @@ fn a_table_named_like_a_schema_keeps_only_its_own_grants_and_policies() {
     assert_eq!(policy_names(&store, "s\0t"), ["on_st"]);
     assert!(policy_names(&store, "u").is_empty());
 }
+
+fn plant_leftover_grants(store: &MemoryStore, relation: &str, grantee: &str, columns: &[&str]) {
+    let mut writer = store.begin_write().unwrap();
+    writer
+        .put(
+            &grant_key(relation, grantee),
+            &[RECORD_VERSION, Privilege::Select.bit()],
+        )
+        .unwrap();
+    for column in columns {
+        writer
+            .put(
+                &column_grant_key(relation, grantee, column),
+                &[COLUMN_RECORD_VERSION, Privilege::Select.bit()],
+            )
+            .unwrap();
+    }
+    writer.commit().unwrap();
+}
+
+#[test]
+fn a_dropped_view_takes_its_grants_with_it() {
+    let store = MemoryStore::default();
+    setup(&store);
+    admin_runs(
+        &store,
+        &[
+            "CREATE USER eve LOGIN",
+            "CREATE VIEW v AS SELECT id FROM teams",
+            "GRANT SELECT (id) ON v TO eve",
+            "GRANT SELECT ON v TO clerk",
+        ],
+    );
+    assert_eq!(
+        run(&mut as_role(&store, "eve"), "SELECT id FROM v").unwrap(),
+        "id\n1\nSELECT 1"
+    );
+    admin_runs(
+        &store,
+        &[
+            "DROP VIEW v",
+            "CREATE VIEW v AS SELECT salary AS id FROM staff",
+        ],
+    );
+    denied(&mut as_role(&store, "eve"), "SELECT id FROM v");
+    denied(&mut as_role(&store, "clerk"), "SELECT * FROM v");
+}
+
+#[test]
+fn a_renamed_view_keeps_its_grants_and_leaves_none_behind() {
+    let store = MemoryStore::default();
+    setup(&store);
+    admin_runs(
+        &store,
+        &[
+            "CREATE USER eve LOGIN",
+            "CREATE SCHEMA s",
+            "CREATE VIEW v AS SELECT id FROM teams",
+            "GRANT SELECT (id) ON v TO eve",
+            "GRANT SELECT ON v TO clerk",
+            "ALTER VIEW v RENAME TO w",
+        ],
+    );
+    assert_eq!(
+        run(&mut as_role(&store, "eve"), "SELECT id FROM w").unwrap(),
+        "id\n1\nSELECT 1"
+    );
+    assert_eq!(
+        run(&mut as_role(&store, "clerk"), "SELECT * FROM w").unwrap(),
+        "id\n1\nSELECT 1"
+    );
+    admin_runs(
+        &store,
+        &[
+            "CREATE VIEW v AS SELECT salary AS id FROM staff",
+            "ALTER VIEW w SET SCHEMA s",
+        ],
+    );
+    denied(&mut as_role(&store, "eve"), "SELECT id FROM v");
+    denied(&mut as_role(&store, "clerk"), "SELECT * FROM v");
+    assert_eq!(
+        run(&mut as_role(&store, "eve"), "SELECT id FROM s.w").unwrap(),
+        "id\n1\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_new_relation_name_never_inherits_leftover_grants() {
+    let store = MemoryStore::default();
+    setup(&store);
+    admin_runs(&store, &["CREATE USER eve LOGIN"]);
+    plant_leftover_grants(&store, "ghost", "eve", &["id"]);
+    admin_runs(&store, &["CREATE TABLE ghost (id integer)"]);
+    denied(&mut as_role(&store, "eve"), "SELECT id FROM ghost");
+
+    plant_leftover_grants(&store, "spectre", "eve", &["id"]);
+    admin_runs(&store, &["CREATE VIEW spectre AS SELECT id FROM staff"]);
+    denied(&mut as_role(&store, "eve"), "SELECT id FROM spectre");
+
+    plant_leftover_grants(&store, "target", "eve", &["id", "salary"]);
+    admin_runs(&store, &["ALTER TABLE teams RENAME TO target"]);
+    denied(&mut as_role(&store, "eve"), "SELECT id FROM target");
+    assert_eq!(
+        run(&mut as_role(&store, "clerk"), "SELECT id FROM target").unwrap(),
+        "id\n1\nSELECT 1"
+    );
+
+    plant_leftover_grants(&store, "view_target", "eve", &["id"]);
+    admin_runs(&store, &["ALTER VIEW spectre RENAME TO view_target"]);
+    denied(&mut as_role(&store, "eve"), "SELECT id FROM view_target");
+
+    plant_leftover_grants(&store, "summary", "eve", &["id"]);
+    admin_runs(
+        &store,
+        &["CREATE MATERIALIZED VIEW summary AS SELECT id FROM staff"],
+    );
+    denied(&mut as_role(&store, "eve"), "SELECT id FROM summary");
+}
+
+#[test]
+fn an_added_column_never_inherits_a_leftover_column_grant() {
+    let store = MemoryStore::default();
+    setup(&store);
+    admin_runs(&store, &["CREATE USER eve LOGIN"]);
+    let mut writer = store.begin_write().unwrap();
+    writer
+        .put(
+            &column_grant_key("teams", "eve", "extra"),
+            &[COLUMN_RECORD_VERSION, Privilege::Select.bit()],
+        )
+        .unwrap();
+    writer
+        .put(
+            &column_grant_key("teams", "eve", "later"),
+            &[COLUMN_RECORD_VERSION, Privilege::Select.bit()],
+        )
+        .unwrap();
+    writer.commit().unwrap();
+    admin_runs(
+        &store,
+        &[
+            "ALTER TABLE teams ADD COLUMN extra integer",
+            "GRANT SELECT (id) ON teams TO eve",
+            "ALTER TABLE teams RENAME COLUMN id TO later",
+        ],
+    );
+    denied(&mut as_role(&store, "eve"), "SELECT extra FROM teams");
+    assert_eq!(
+        run(&mut as_role(&store, "eve"), "SELECT later FROM teams").unwrap(),
+        "later\n1\nSELECT 1"
+    );
+    denied(&mut as_role(&store, "eve"), "SELECT salary FROM teams");
+}

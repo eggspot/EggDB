@@ -323,6 +323,7 @@ pub(crate) fn move_column(
     if from == to {
         return Ok(());
     }
+    forget_column(writer, table, to)?;
     for grant in column_grants_of(writer, table)? {
         if grant.column == from {
             writer.delete(&grant.key)?;

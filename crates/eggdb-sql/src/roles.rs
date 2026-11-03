@@ -463,6 +463,18 @@ pub(crate) fn forget_table(writer: &mut dyn KeyValueWrite, table: &str) -> SqlRe
     columns::forget_table_columns(writer, table)
 }
 
+/// Removes every grant, column grant and row-security policy stored under `relation`: when a
+/// relation is dropped, and before a name comes into existence, so a new table or view never
+/// inherits what a dropped one left behind (an older release that dropped it may not have known
+/// every key space).
+pub(crate) fn forget_relation_access(
+    writer: &mut dyn KeyValueWrite,
+    relation: &str,
+) -> SqlResult<()> {
+    forget_table(writer, relation)?;
+    crate::row_security::forget_table(writer, relation)
+}
+
 fn table_grant_records(
     reader: &dyn KeyValueRead,
     table: &str,

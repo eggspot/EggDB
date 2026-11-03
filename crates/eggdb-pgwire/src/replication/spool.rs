@@ -4,12 +4,13 @@
 
 use super::ReplicationError;
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 const SPILL_SUFFIX: &str = ".spool";
 const LENGTH_BYTES: usize = 4;
+const MAX_RECORD_BYTES: usize = crate::client::MAX_MESSAGE_BYTES;
 
 #[derive(Debug)]
 struct Subtransaction {
@@ -77,7 +78,16 @@ impl Iterator for SpooledChanges {
                 *remaining -= 1;
                 let mut length = [0u8; LENGTH_BYTES];
                 let read = reader.read_exact(&mut length).and_then(|()| {
-                    let mut message = vec![0u8; u32::from_be_bytes(length) as usize];
+                    let length = usize::try_from(u32::from_be_bytes(length))
+                        .ok()
+                        .filter(|length| *length <= MAX_RECORD_BYTES)
+                        .ok_or_else(|| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "a record is longer than any streamed change can be",
+                            )
+                        })?;
+                    let mut message = vec![0u8; length];
                     reader.read_exact(&mut message).map(|()| message)
                 });
                 return Some(read.map_err(|error| spill_failed(path, error)));
@@ -187,12 +197,7 @@ impl StreamedTransactions {
         let Some(spool) = self.spools.get_mut(&xid) else {
             return Ok(());
         };
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .read(true)
-            .write(true)
-            .open(&path)
+        let file = eggdb_platform::user_files::create_private_new(&path)
             .map_err(|error| spill_failed(&path, error))?;
         let mut spill = SpillFile {
             path,
@@ -325,7 +330,11 @@ impl Drop for StreamedTransactions {
 
 fn write_record(file: &mut SpillFile, message: &[u8]) -> Result<(), ReplicationError> {
     let length = u32::try_from(message.len())
-        .map_err(|_| ReplicationError("a streamed change is larger than 4 GiB".to_owned()))?;
+        .ok()
+        .filter(|_| message.len() <= MAX_RECORD_BYTES)
+        .ok_or_else(|| {
+            ReplicationError("a streamed change is larger than a protocol message".to_owned())
+        })?;
     file.writer
         .write_all(&length.to_be_bytes())
         .and_then(|()| file.writer.write_all(message))
@@ -410,6 +419,52 @@ mod tests {
             vec![vec![1; 10], vec![2; 10]]
         );
         assert!(!spill_directory.join("follow-5.spool").exists());
+    }
+
+    #[test]
+    fn a_spill_never_writes_through_what_is_already_at_its_path() {
+        let spill_directory = directory("planted");
+        let mut transactions =
+            StreamedTransactions::new(spill_directory.clone(), "follow-".to_owned(), 4);
+        let planted = spill_directory.join("follow-6.spool");
+        std::fs::write(&planted, b"theirs").unwrap();
+        transactions.start(6, true);
+        assert!(transactions.push(6, 6, vec![1; 10]).is_err());
+        assert_eq!(std::fs::read(&planted).unwrap(), b"theirs");
+        std::fs::remove_file(&planted).unwrap();
+        #[cfg(unix)]
+        {
+            let target = spill_directory.join("target");
+            std::fs::write(&target, b"kept").unwrap();
+            std::os::unix::fs::symlink(&target, &planted).unwrap();
+            transactions.start(6, true);
+            assert!(transactions.push(6, 6, vec![1; 10]).is_err());
+            assert_eq!(std::fs::read(&target).unwrap(), b"kept");
+            std::fs::remove_file(&planted).unwrap();
+            std::fs::remove_file(&target).unwrap();
+        }
+        transactions.start(6, true);
+        transactions.push(6, 6, vec![2; 10]).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&planted).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert_eq!(committed(&mut transactions, 6), vec![vec![2; 10]]);
+    }
+
+    #[test]
+    fn an_overlong_record_length_is_an_error_before_anything_is_allocated() {
+        let path = directory("overlong").join("follow-7.spool");
+        std::fs::write(&path, u32::MAX.to_be_bytes()).unwrap();
+        let mut changes = SpooledChanges {
+            memory: Vec::new().into_iter(),
+            file: Some((path.clone(), BufReader::new(File::open(&path).unwrap()), 1)),
+        };
+        assert!(changes.next().unwrap().is_err());
+        drop(changes);
+        assert!(!path.exists());
     }
 
     #[test]

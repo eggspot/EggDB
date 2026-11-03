@@ -461,6 +461,7 @@ pub(crate) fn create_table(
     }
     crate::comments::forget_owner(writer, &table.name)?;
     crate::triggers::remove_table_triggers(writer, &table.name)?;
+    crate::roles::forget_relation_access(writer, &table.name)?;
     crate::comments::store_created(writer, &table.name, create)?;
     writer.put(&table_key(&table.name), &table.encode())?;
     constraints::register_references(writer, tables, &table)?;
@@ -638,8 +639,7 @@ pub(crate) fn drop_tables(
         crate::partitions::forget(writer, &table.name)?;
         crate::statistics::forget(writer, &table.name)?;
         crate::sqlite_schema_text::forget(writer, &table.name)?;
-        crate::roles::forget_table(writer, &table.name)?;
-        crate::row_security::forget_table(writer, &table.name)?;
+        crate::roles::forget_relation_access(writer, &table.name)?;
         writer.delete(&table_key(&table.name))?;
     }
     Ok(result)

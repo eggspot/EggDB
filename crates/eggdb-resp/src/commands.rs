@@ -670,13 +670,14 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
         ("keys", 1) => reading(context, db, |keys| {
             let mut matched = Vec::new();
             let mut reply_bytes = 0usize;
-            for key in live_keys(keys, now)? {
-                if glob(&args[0], &key) {
+            keys.visit_keys(&mut |key| {
+                if glob(&args[0], &key) && load(keys, &key, now)?.is_some() {
                     reply_bytes = reply_bytes.saturating_add(bulk_reply_bytes(&key));
                     context.check_reply_room(reply_bytes)?;
                     matched.push(Reply::bulk(key));
                 }
-            }
+                Ok(true)
+            })?;
             Ok(Reply::Array(Some(matched)))
         }),
         ("scan", count) if count >= 1 => scan(context, db, args),

@@ -112,6 +112,13 @@ impl KeysRead for TrackedRead<'_, '_> {
     fn keys(&self) -> Result<Vec<Vec<u8>>, String> {
         self.inner.keys()
     }
+
+    fn visit_keys(
+        &self,
+        visit: &mut dyn FnMut(Vec<u8>) -> Result<bool, String>,
+    ) -> Result<(), String> {
+        self.inner.visit_keys(visit)
+    }
 }
 
 impl KeysRead for Tracked<'_, '_> {
@@ -122,6 +129,13 @@ impl KeysRead for Tracked<'_, '_> {
 
     fn keys(&self) -> Result<Vec<Vec<u8>>, String> {
         self.inner.keys()
+    }
+
+    fn visit_keys(
+        &self,
+        visit: &mut dyn FnMut(Vec<u8>) -> Result<bool, String>,
+    ) -> Result<(), String> {
+        self.inner.visit_keys(visit)
     }
 }
 

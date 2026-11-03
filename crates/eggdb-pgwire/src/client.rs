@@ -21,7 +21,7 @@ const CANCEL_REQUEST_CODE: u32 = 80_877_102;
 const NOT_A_COPY_SQLSTATE: &str = "0A000";
 const DEFAULT_PORT: u16 = 5432;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_MESSAGE_BYTES: usize = 1 << 30;
+pub(crate) const MAX_MESSAGE_BYTES: usize = 1 << 30;
 const CLIENT_NONCE_BYTES: usize = 18;
 
 /// How the client uses TLS, as libpq's `sslmode` names it, ordered from the least protection to
