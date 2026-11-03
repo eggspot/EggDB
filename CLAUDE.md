@@ -245,7 +245,10 @@ Semantic versioning, tags `vMAJOR.MINOR.PATCH`. Until 1.0, each finished milesto
 fixes in between bump PATCH; M1 is the first release, v0.1.0 (M0 was never released). Cut the
 release as soon as a milestone is merged and `main` is green: a version bump PR with
 `docs/releases/vX.Y.Z.md`, then push the tag; `.github/workflows/release.yml` builds the binaries
-and publishes the GitHub Release (D75).
+and publishes the GitHub Release (D75). Since the batch flow, every merged batch is a release (owner,
+2026-11-03): the scheduled coordinator (`eggdb-build-loop`), not the coding worker, cuts it with a
+MINOR bump, so coding never waits on a release. The bump also updates the excluded compare crates'
+lock files, the version test in `crates/eggdb/src/lib.rs` and the Helm chart (v0.2.0, #92).
 Publishing to package registries (crates.io and others) needs accounts and tokens, so the owner sets
 those up first.
 
