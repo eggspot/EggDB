@@ -720,7 +720,7 @@ const PATTERN_INTERFACES: [(i32, Guid, usize); 9] = [
 
 enum Lookup {
     Root(usize),
-    Node(usize, AccessNode, f32),
+    Node(usize, Box<AccessNode>, f32),
 }
 
 impl Provider {
@@ -788,7 +788,7 @@ impl Provider {
         match self.element {
             Element::Root => Ok(Lookup::Root(tree.window)),
             Element::Node(id) => uia::exposed_node(&tree.nodes, id)
-                .map(|node| Lookup::Node(tree.window, node.clone(), tree.scale))
+                .map(|node| Lookup::Node(tree.window, Box::new(node.clone()), tree.scale))
                 .ok_or(UIA_E_ELEMENTNOTAVAILABLE),
         }
     }
@@ -796,7 +796,7 @@ impl Provider {
     fn node(&self) -> Result<AccessNode, HResult> {
         match self.lookup()? {
             Lookup::Root(_) => Err(UIA_E_ELEMENTNOTENABLED),
-            Lookup::Node(_, node, _) => Ok(node),
+            Lookup::Node(_, node, _) => Ok(*node),
         }
     }
 
@@ -1690,10 +1690,8 @@ mod tests {
         assert!(!toggle_pattern.is_null());
         let mut state = -1;
         // SAFETY: `toggle_pattern` is the provider's `IToggleProvider`; `state` is writable.
-        assert_eq!(
-            unsafe { get_toggle_state(toggle_pattern, &mut state) },
-            S_OK
-        );
+        let result = unsafe { get_toggle_state(toggle_pattern, &mut state) };
+        assert_eq!(result, S_OK);
         assert_eq!(state, uia::TOGGLE_ON);
         let mut variant = Variant::empty();
         // SAFETY: `simple` is the provider's simple interface and `variant` is writable.
@@ -1725,25 +1723,19 @@ mod tests {
         assert_eq!(take_bstr(string), "shop");
         let mut read_only = -1;
         // SAFETY: as above.
-        assert_eq!(
-            unsafe { get_is_read_only(value_pattern, &mut read_only) },
-            S_OK
-        );
+        let result = unsafe { get_is_read_only(value_pattern, &mut read_only) };
+        assert_eq!(result, S_OK);
         assert_eq!(read_only, 0);
         let text = wide("shop.eggdb");
         // SAFETY: as above; `text` is NUL-terminated.
         assert_eq!(unsafe { set_value(value_pattern, text.as_ptr()) }, S_OK);
         // SAFETY: a null string is refused before it is read.
-        assert_eq!(
-            unsafe { set_value(value_pattern, std::ptr::null()) },
-            E_INVALIDARG
-        );
+        let result = unsafe { set_value(value_pattern, std::ptr::null()) };
+        assert_eq!(result, E_INVALIDARG);
         let unpaired = [0xD800, 0];
         // SAFETY: `unpaired` is NUL-terminated.
-        assert_eq!(
-            unsafe { set_value(value_pattern, unpaired.as_ptr()) },
-            E_INVALIDARG
-        );
+        let result = unsafe { set_value(value_pattern, unpaired.as_ptr()) };
+        assert_eq!(result, E_INVALIDARG);
         assert_eq!(
             automation.take_requests(),
             [AccessRequest {
@@ -1788,15 +1780,11 @@ mod tests {
         assert_eq!(unsafe { get_item(grid_pattern, 0, 0, &mut missing) }, S_OK);
         assert!(missing.is_null());
         // SAFETY: as above.
-        assert_eq!(
-            unsafe { get_item(grid_pattern, 2, 0, &mut missing) },
-            E_INVALIDARG
-        );
+        let result = unsafe { get_item(grid_pattern, 2, 0, &mut missing) };
+        assert_eq!(result, E_INVALIDARG);
         // SAFETY: as above.
-        assert_eq!(
-            unsafe { get_item(grid_pattern, -1, 0, &mut missing) },
-            E_INVALIDARG
-        );
+        let result = unsafe { get_item(grid_pattern, -1, 0, &mut missing) };
+        assert_eq!(result, E_INVALIDARG);
 
         let item = pattern(found, uia::GRID_ITEM_PATTERN);
         assert!(!item.is_null());

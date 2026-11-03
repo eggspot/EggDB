@@ -410,6 +410,7 @@ mod tests {
                 ..AccessState::default()
             },
             bounds: AccessRect::default(),
+            ..AccessNode::default()
         };
         assert!(bridge.set_tree(&[window]));
         let added = read_message(&mut peer);
