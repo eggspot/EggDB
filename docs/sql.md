@@ -4097,13 +4097,14 @@ And more, not in the suite yet:
   name or the actual length. A `CHAR` compared with a `VARCHAR2` value ignores the `CHAR`'s
   trailing blanks (PostgreSQL's rule) where Oracle pads the shorter value only between two
   `CHAR`s. A string given to a `RAW` or `BLOB` is read as hexadecimal digits, as `HEXTORAW`
-  does (an odd count gets a leading zero, another character is `ORA-01465`); the functions
-  `HEXTORAW`, `RAWTOHEX`, `UTL_RAW` and `DBMS_LOB` are missing.
+  does (an odd count gets a leading zero, another character is `ORA-01465`). `HEXTORAW` and
+  `RAWTOHEX` work; the packages `UTL_RAW` and `DBMS_LOB` are missing.
 - A statement that fails after it wrote rows rolls back the whole transaction, where Oracle
   rolls back only the statement (no statement savepoints yet); a failing single-row `INSERT`,
   `UPDATE` or `DELETE` that wrote nothing leaves the transaction as it was, as in Oracle.
-- `GENERATED ALWAYS` accepts a given value, and an identity column reuses the number of a
-  deleted last row (Oracle's identity is a sequence that never goes back).
+- `GENERATED ALWAYS` refuses a given value with `ORA-32795` and an `UPDATE` of the column with
+  `ORA-32796` (D150), but an identity column reuses the number of a deleted last row (Oracle's
+  identity is a sequence that never goes back).
 - Result columns of expressions are named after the expression in upper case with spaces
   removed outside quotes, close to SQL*Plus's headings; `SELECT *` from `USER_TABLES` shows the
   twenty columns apps read (`TABLE_NAME`, `TABLESPACE_NAME`, `STATUS`, `NUM_ROWS`, ...), not
@@ -4141,7 +4142,10 @@ And more, not in the suite yet:
 - `SYS_CONTEXT` takes only text constants as its arguments, and a third argument (the length)
   is accepted and ignored.
 - Not supported yet: `CONNECT BY`, outer joins with `(+)`, `INSERT ALL`, `RETURNING ... INTO`,
-  synonyms, database links, `ROWID`, and the regular-expression, analytic and XML functions.
+  synonyms, database links, `ROWID`, the XML functions, Oracle-only analytic forms
+  (`RATIO_TO_REPORT`, `KEEP (DENSE_RANK FIRST|LAST)`) and Oracle's own regular-expression
+  semantics. The shared regular-expression functions and window functions (D130, D151) run in
+  Oracle's dialect.
   `SAVEPOINT` works as in every dialect (D173), and views `WITH CHECK OPTION` refuse rows they
   would not show ([Schemas, views and comments](#schemas-views-and-comments)).
 - `NUMBER`'s range ends are not Oracle's: `TO_NUMBER('1e126')` gives a 127-digit value where

@@ -250,8 +250,8 @@ From the third gap review (D47–D58), each after its foundations:
 What each milestone still has to build: the vision (CLAUDE.md, D1 to D58) compared with what is
 built (the tables above, D59 to D296 and PR #86), with every "Left:", "Next:" and "Not yet" line
 of the decisions. Work from the tracks is listed under the milestone it builds on. Left out: D45's
-"not planned" list, Oracle's own wire protocol (D10), a license change (X12, D50), and publishing
-to package registries and other release steps. Items that need money or accounts are in the last
+"not planned" list, Oracle's own wire protocol (D10), and publishing to package registries and
+other release steps. Items that need money, accounts or a paid license (X12, D50) are in the last
 list, [Needs the owner](#needs-the-owner-money-or-accounts-d58). Each bullet is one buildable
 item; "Check:" names what proves it. API compatibility with Google, Amazon, Snowflake,
 Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check.
@@ -282,14 +282,16 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   that cancel a pending connect and mix port and worker operations (Where we are).
 - The M1 review's other follow-ups: `NotConnected` after a reset in simulation, and no readiness
   call in a reap that is already satisfied (Where we are).
-- Optional accelerators behind build features: first the log on persistent memory through a
-  DAX-mapped file, then GPUs and CXL memory (D40, D45). Check: commit latency with and without.
+- Optional accelerators behind build features: first CXL memory placed as a NUMA node for the
+  page cache, with no `mmap`, on D65 and the NUMA item above (D40, D45). Check: cache benchmarks.
+- Persistent memory and GPUs, each after a decision that fits D60 and D77 (no `mmap`, the log in
+  the file) (D40, D45).
 
 ### M2 Storage engine
 - Users can choose the LSM tree per table with `WITH (storage = lsm)`, kept in the catalog (D170).
   Check: the B-tree and LSM bake-off in the benchmarks, recorded as a decision.
-- Dirty pages spill to the file before commit, so a write transaction no longer has to fit in
-  the page cache (D86, D167). Check: a 1 GiB `put_reader` peaks near 32 MiB (D167).
+- Dirty pages spill before commit, so a write needn't fit the cache (D86, D167). Check: a 1 GiB
+  `put_reader` peaks near 32 MiB, the 16 MiB default cache plus snapshots (`eggdb/src/options.rs`).
 - A Zstandard-class codec of our own (RFC 8878) for cold data (D171). Check: RFC test vectors and
   a fuzzer.
 - Compressed leaf pages and log records, with compression chosen per column and page (D40, D171).
@@ -303,8 +305,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   the upgrade, downgrade and mixed-version file tests in CI.
 - Online schema changes and reindexing that block neither reads nor writes (D20). Check: a
   concurrent workload test across an `ALTER TABLE` and a reindex.
-- Learned indexes, first over the sealed runs of the LSM tree, kept only where they beat the
-  B+tree search (D40, D170). Check: the point-get benchmark with and without them.
+- Learned indexes, first over the LSM tree's sealed runs, after the per-table LSM switch above,
+  with a D35 review if they are stored (D40, D170). Check: point gets with and without them.
 
 ### M3 Transactions
 - Users can run SQL sessions on concurrent transactions, with each dialect's isolation levels and
@@ -316,7 +318,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Waiting on a predicate lock instead of failing at commit (D172).
 - Row locks that hold other writers: `FOR UPDATE`/`FOR SHARE` with `NOWAIT` and `SKIP LOCKED`
   across concurrent sessions (D32, D173).
-- Deadlock detection between row and advisory locks, failing with `40P01` (D173).
+- Deadlocks between PostgreSQL advisory locks and row locks detected with `40P01`, as SQL Server's
+  application locks already are (D173, D291).
 - Two-phase commit and XA: `PREPARE TRANSACTION`, `COMMIT PREPARED`, MySQL's `XA` and TDS's
   distributed transactions (D32, D173).
 - Statement-level rollback in MySQL, SQLite, Oracle and SQL Server: a failing statement undoes
@@ -330,8 +333,6 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 ### M4 Embedded key-value and the single file
 - A benchmark against SQLite's `:memory:` in the compare job (D175).
 - `ATTACH` of in-memory, EggDB and SQLite files, in every dialect that has it (D175, sql.md).
-- An ordered, transactional key-value API in the style of FoundationDB, LevelDB and RocksDB for
-  every driver (D48).
 - SQL tables kept in their own collection, named `sql` (D139: "SQL in collections is later work").
 - Collections in the C API and the language drivers beyond D139 (D292).
 - Renaming and per-collection counts in `eggdb ui` and `eggdb shell`, with counts kept up to date
@@ -344,8 +345,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (D230, D253). Check: `benchmarks/footprint.txt`.
 - YCSB workloads against SQLite and Redis (D7).
 - A published branch-coverage target for the core, rising every release toward SQLite's (D41).
-- Published descriptions of the CI runners the benchmarks use, a public results page, and
-  conformance and benchmark dashboards for every dialect, protocol, type and driver (D32, D252).
+- Published descriptions of the CI runners the benchmarks use, a public results page, conformance
+  and benchmark dashboards, and the farm's matrix of every driver and ORM version (D32, D252).
 - Joules per query per workload and idle wake-ups, reported and then gated (D44, D252).
 
 ### M5 SQL engine, SQLite, C API and embedded drivers
@@ -360,10 +361,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   come (D284, D287, D293).
 - Set-returning functions stopped by a `LIMIT` given as a parameter or an expression, joined with
   other tables, or filtered as their rows arrive (D287).
-- Vectorized scans, filters and projections, float and numeric kernels and grouped aggregates,
-  with SIMD chosen at runtime (D40, D179).
-- A query compiler, first for the `WHERE` and select-list expressions of hot prepared statements,
-  compiled to a flat program instead of walking the tree (D40). Check: TPC-H Q1 and Q6 times.
+- Vectorized scans, filters and projections over rows and columnar chunks, float and numeric
+  kernels and grouped aggregates, with SIMD chosen at runtime (D40, D179, D201).
+- A query compiler for hot prepared statements' expressions, compiled to a flat program, after
+  parsed plans are kept in prepared statements (below) (D40). Check: TPC-H Q1 and Q6 times.
 - `TABLESAMPLE`, t-digest and the other `APPROX_*` functions (D40).
 - TPC-C against PostgreSQL and MySQL (D7).
 - Partial, expression and covering (`INCLUDE`) indexes, `CREATE INDEX CONCURRENTLY` and `NULLS NOT
@@ -372,7 +373,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   reverse-key indexes (D32, sql.md).
 - `ROLLUP`, `CUBE`, `GROUPING SETS`, `DISTINCT ON`, `NATURAL` joins, `stddev`, `variance` and
   hypothetical-set aggregates (sql.md, Next parts).
-- `SEARCH` and `CYCLE`, row constructors and `VALUES` as a query (D32, sql.md).
+- `SEARCH` and `CYCLE`, row constructors with `(a, b) IN (SELECT ...)`, and `VALUES` as a query
+  outside PostgreSQL (MySQL's `VALUES ROW(...)`, SQLite, SQL Server) (D32, D128, sql.md).
+- `CREATE RECURSIVE VIEW`, and a data-modifying `WITH` query that resolves conflicts (sql.md).
 - Multidimensional arrays and array slices (D19, D288).
 - Generated columns (D32).
 - The rest of `ALTER TABLE`: `ALTER COLUMN ... TYPE ... USING`, adding a serial or identity
@@ -431,7 +434,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - HTTP/1.1 keep-alive and chunked bodies in `eggdb-http` (D34, D188).
 - PostgreSQL's function call protocol (D103).
 - PostgreSQL's network address, geometric, bit string, `money`, `xml` and multirange types (D19).
-- `tsvector`, `tsquery`, `jsonpath` and `refcursor` as types of their own (D195, D280, D289).
+- `tsvector`, `tsquery` and `jsonpath` as types of their own (D195, D289).
+- `regprocedure`, transition tables in row-level triggers, and `pg_sequences.last_value` for
+  identity columns (D158, D264, sql.md).
+- `ON CONFLICT ON CONSTRAINT`, and `ON CONFLICT (...) WHERE` (sql.md).
 - `scale()`, `min_scale()` and `trim_scale()` (D290).
 - SQL/JSON: a non-NULL base record in `json_populate_record`, the functions in a select list and
   with column alias lists, and `JSON_TABLE`'s `PLAN` clause (D289).
@@ -498,12 +504,13 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Evidence reports for SOC 2, HIPAA and PCI DSS audits (D26).
 - Ledger tables: `TRUNCATE` and `DROP` refused, digests published outside the database and checked
   against backups, Merkle proofs, SQL Server's `WITH (LEDGER = ON)` (D38, D236).
+- A ledger on a table that already has rows (D236).
 - Retention: holds over some rows, engine-level WORM, records schedules and eDiscovery export in
   the EDRM style (D53, D246).
 - Sovereignty: customer-held keys kept in-country, limits on operator access and logs of
   cross-border transfers (D53, D246).
-- Delta Sharing server and client, and zero-copy shares between organizations on branches with
-  entitlements (D52, D245).
+- Delta Sharing server and client after D58's legal check, and zero-copy shares between
+  organizations on branches with entitlements (D52, D245).
 - Marketplace listings of shared data inside EggDB, with no payments and no external marketplace
   account (D52).
 - Clean rooms: query-output policies and private set intersection (D52, D245).
@@ -528,6 +535,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   PLAN` and `DBMS_XPLAN` (D25, D277).
 - `EXPLAIN` with costs, conditions and formats other than text; per-node buffers and times,
   `I/O Timings` and planning time (D286, sql.md).
+- `EXPLAIN` of statements with subqueries (sql.md).
 - `lock_timeout`, and memory, CPU and I/O limits per user, role, tenant and query (D25, PR #86).
 - Quotas by bytes and requests per tenant, and admission control (D25, D234).
 - An index and plan advisor, and automatic tuning of indexes and configuration (D25, D31).
@@ -543,8 +551,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Data profiling and data-quality rules at scale (D42, D51).
 
 ### M6d The built-in MCP server
-- MCP over HTTP beyond loopback with TLS, and OAuth as the MCP specification describes for
-  remote servers (D189).
+- OAuth for MCP over HTTP, as the MCP specification describes for remote servers; TLS comes with
+  the M6a item for every listener (D189).
 - Writes with confirmation over HTTP (D189, D190).
 - Server-sent event streams (D189).
 - Per-agent time limits and quotas, and the agent's role in each audit record (D190).
@@ -559,8 +567,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Text-to-SQL in every dialect through the MCP server (D31, D205).
 
 ### M6e The GUI client and the console
-- The rest of the client track opened by issue #29, first the screens of `docs/ux/gui.md` not
-  drawn yet (D15, #29). Check: golden frames for each, on Linux, macOS and Windows.
+- Issue #29 (the client track) is the GUI bullets below; it closes when they are done (#29).
 - A hand check with VoiceOver, Narrator, Orca and a browser screen reader on every screen (D278).
 - UI Automation's Text and Selection patterns, NSAccessibility rows and live regions, AT-SPI2's
   text attributes, and selection announcements (D278).
@@ -593,8 +600,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   ux/gui-layouts.md). Check: each layout's spec tests in `docs/ux/`.
 - GPU-accelerated drawing on the desktop (D15).
 - Hinting, kerning, right-to-left and complex scripts, and CFF outlines (D191).
-- The GUI and its docs localized, first a GUI message catalog in English and Arabic (mirrored);
-  research picks the next languages (D42). Check: golden frames of the connect card in Arabic.
+- The GUI and its docs localized, first English and Arabic (mirrored), after right-to-left text
+  above and with a pinned Arabic font (D42). Check: golden frames of the connect card in Arabic.
 - The client's speed measured like the engine's: opening a database, running a query and
   scrolling a large result (D15).
 - Small screens, remembered window size and position, and the OS's theme (D15, D256).
@@ -619,8 +626,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   them, and gated (D17).
 - A research decision on the PostgreSQL protocol or an EggDB-native one for the official
   drivers, and a pure-language server path where benchmarks need one (D17).
-- Every model and dialect, and the MCP tools, exposed through the drivers, first the dialect per
-  connection and key-value get, put and scan (D16). Check: each driver's tests in both modes.
+- Every model and dialect and the MCP tools in the drivers, first the dialect per connection and
+  an ordered key-value API in FoundationDB's style (D16, D48). Check: driver tests, both modes.
 - The EF Core provider, with Dapper and NHibernate checked (D16, D182). Check: EF Core's
   provider specification tests.
 - The Hibernate dialect, R2DBC, and jOOQ, Spring Data and Exposed checked (D16, D182).
@@ -631,11 +638,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - ActiveRecord and Sequel for Ruby (D16, D182).
 - The Swift and Dart/Flutter drivers with their mobile frameworks (D16).
 - An ODBC driver (D12, D46).
-- The `compatibility` job with Azure Data Studio, DataGrip, MySQL Workbench, Redis Insight, MongoDB
-  Compass, Kibana, Grafana, Metabase, Superset, Power BI, Airbyte, Liquibase, Alembic (D12, D239).
-- The compatibility farm's matrix of every driver and ORM version (D44, D252).
-- Our own connectors in each tool's plugin system: a Power BI connector, and Excel, Superset,
-  Metabase and Grafana data source plugins (D46, D239).
+- The `compatibility` job with DataGrip, MySQL Workbench, Redis Insight, MongoDB Compass, Kibana,
+  Grafana, Metabase, Superset, Power BI, Airbyte, Liquibase and Alembic (D12, D239).
+- Our own connectors in each tool's plugin system: a Power BI connector, and Superset, Metabase
+  and Grafana data source plugins (D46, D239).
 - A dbt adapter, an Airbyte source and destination, a Debezium connector and Airflow operators
   (D46, D239).
 - Spark, Flink, Trino and Presto connectors (D46, D239).
@@ -735,11 +741,12 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - EF Core 9 in the `tds-apps` job, and mssql-jdbc's `getSchemas()` (D291).
 - Oracle's `CONNECT BY`, `(+)` outer joins, `INSERT ALL` and `INSERT FIRST`, `RETURNING ... INTO`,
   synonyms, database links and `ROWID` (sql.md).
-- Oracle's analytic, regular-expression and XML functions, `LISTAGG ... OVER` and `TO_DATE(...
-  DEFAULT ... ON CONVERSION ERROR)` (sql.md).
+- Oracle-only analytic forms (`RATIO_TO_REPORT`, `KEEP (DENSE_RANK FIRST|LAST)`, `LISTAGG ...
+  OVER`), Oracle's regex semantics and XML functions, and `TO_DATE(... DEFAULT ...)` (sql.md).
+  First slice: Oracle-dialect tests for the shared regexp and window functions (D130, D151).
 - Oracle's types: `TIMESTAMP WITH TIME ZONE` keeping its offset, `BFILE`, `UROWID`, `XMLType`,
   object types and schema-level collection types (D19).
-- `HEXTORAW`, `RAWTOHEX`, `UTL_RAW`, `DBMS_LOB` and the other Oracle-supplied packages (sql.md).
+- `UTL_RAW`, `DBMS_LOB` and the other Oracle-supplied packages (sql.md).
 - PL/SQL: autonomous transactions, compound triggers, the mutating-table check, `IS A SET`,
   `MULTISET` and `SET()` (roadmap item 33e).
 - `DBMS_SCHEDULER` jobs on the job scheduler (D27, D200).
@@ -772,8 +779,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 ### M11 Columnar analytics and time series
 - Columnar table storage: row groups of chunks, deletes as bitmaps, `CREATE TABLE ... USING
   columnar` (D201).
-- A vectorized executor over chunks, float and string chunks, and compression beyond the
-  encodings (D201).
+- Float and string chunks, and compression beyond the encodings (D201).
 - ClickBench-style queries and TPC-H against DuckDB and ClickHouse in the compare job (D7, D201).
 - Analytical replicas: columnar copies kept in step with row tables (HTAP) (D18).
 - Gap filling, `first` and `last`, and hypertables partitioned by time automatically (D202,
@@ -784,15 +790,16 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Bitemporal tables (D50).
 - Order-book and double-entry ledger primitives, with microsecond tail-latency targets in the
   benchmarks (D50).
-- Parquet: nested columns, GZIP and ZSTD, statistics and dictionaries when writing, several row
-  groups and streaming of large files (D202). Check: a benchmark against DuckDB's reader.
-- `read_parquet` and the other file readers in SQL (D29, D202).
+- Parquet: nested columns, GZIP (on D249's DEFLATE) and ZSTD, statistics and dictionaries when
+  writing, several row groups, streaming (D202). Check: a benchmark against DuckDB's reader.
+- `read_parquet` and the other file readers in SQL, after D202's decision on which files a
+  server's SQL may open (D29, D202).
 - Arrow IPC reading, the `.arrow` file format, several batches, dictionaries and nested types
   (D240).
 - Arrow Flight SQL and ADBC (D29).
 - NDJSON, ORC and Avro (D29).
-- Apache Iceberg, Delta Lake and Hudi tables, read and written, with an Iceberg REST catalog (D29,
-  D46).
+- Apache Iceberg and Hudi tables, and Delta Lake after D58's legal check, read and written, with
+  an Iceberg REST catalog (D29, D46).
 - Excel files read and written as tables: `.xlsx` (OOXML), and `.xls` (MS-XLS) after D58's
   legal check (D49).
 - Mainframe loaders: COBOL copybooks, EBCDIC, packed decimal, and VSAM and IMS exports (D49, D242).
@@ -859,11 +866,14 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   restoring to a stamp.
 - Incremental and parallel backups, encrypted, with retention (D24, D208).
 - Instant snapshots, and copy-on-write clones and branches of a whole database (D24, D28).
-- `eggdb dump` in EggDB's own logical format (D24).
+- `eggdb dump`: one logical file of the whole database (schemas, rows, collections, roles,
+  routines), where `eggdb export`'s eggdb-jsonl copies raw key-value entries (D24, D93).
 - `eggdb export --sql` with views, sequences, comments and every constraint (D24, PR #86).
 - Immutable (WORM) backups that ransomware can't alter (D53).
 - Backups through `eggdb serve`'s clients, compaction of a file `serve` holds, and progress
   reports (D141).
+- Compaction's lock window closed: the platform layer tells whether a file it locked is still
+  linked at its path (D141).
 - Tenant-aware backup and restore (D234).
 - Replication wired into the engine: the commit hook and its change log, a transport with TLS and
   authentication, and `eggdb serve --replica-of` (D209).
@@ -876,8 +886,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Logical replication to other EggDB clusters, across versions, for upgrades without downtime
   (D18).
 - PostgreSQL's replication protocol served, so other systems can follow EggDB (D18, D103).
-- Change streams to Kafka topics, AMQP exchanges, MQTT and NATS, and webhooks over `https://`
-  (D28, D210).
+- Change streams to Kafka topics, AMQP exchanges, MQTT and NATS, and `https://` webhooks;
+  `--cdc-queue` already feeds AMQP, STOMP and SQS queues (D28, D210, D217).
 - Retries with backoff and a dead-letter table, Debezium's `schema` section and transaction
   metadata (D210). Check: a consumer test that receives every commit of a workload.
 - Change capture without triggers (D210).
@@ -924,7 +934,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A benchmark against Kafka (D33, D213).
 - AMQP 0-9-1: durable exchanges and bindings, headers exchanges, exclusive and auto-delete queues
   (D33, D214).
-- AMQP 0-9-1 `tx` transactions and publisher confirms (D33, D214).
+- AMQP 0-9-1 `tx` transactions (D33, D214).
 - Dead-letter exchanges, message and queue TTL, delayed messages and priorities (D33, D214).
 - Heartbeats sent by the server (D214).
 - Replicated (quorum-style) queues (D33).
@@ -933,14 +943,14 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - MQTT 5's topic aliases, shared subscriptions, message expiry and reason strings (D33, D215).
 - MQTT over WebSockets (D215).
 - A benchmark against Mosquitto and EMQX (D33, D215).
-- SQS FIFO queues, message attributes, batch actions, long polling, dead-letter queues and
-  visibility timeouts (D33, D216).
+- SQS, after D58's legal check: FIFO queues, attributes, batches, long polling, dead-letter
+  queues and a non-zero `ChangeMessageVisibility` (D33, D216).
 - NATS JetStream: durable streams and consumers (D33, D216).
 - NATS no-responders, token and NKey authentication, clusters and leaf nodes (D216).
 - Benchmarks against ElasticMQ and nats-server (D216).
 - AMQP 1.0: annotations and properties end to end, transactions, dynamic nodes, link resumption,
   `amqp:modified` and an enforced idle timeout (D217).
-- JMS clients and Azure Service Bus-style use over AMQP 1.0 (D33).
+- JMS clients over AMQP 1.0, and Azure Service Bus-style use after D58's legal check (D33).
 - STOMP heart-beats, `/exchange/` destinations and selectors (D217).
 - A dead-letter queue for rejected messages, and an in-process inbox for embedded consumers
   (D217).
@@ -950,14 +960,14 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - CQL secondary indexes, materialized views, `ALTER TABLE`, schema events and prepared statements
   shared between connections (D218).
 - A benchmark against ScyllaDB and Cassandra (D7, D218).
-- DynamoDB: secondary indexes, filter and projection expressions, batches, transactions, streams,
-  TTL, all conditions, and PartiQL (D48, D241).
+- DynamoDB, after D58's legal check: secondary indexes, filter and projection expressions,
+  batches, transactions, streams, TTL, all conditions, and PartiQL (D48, D241).
 - The Bigtable and HBase APIs, and Cosmos DB's Table API, after D58's legal check (D48).
-- S3 versioning, object lock, ACLs and bucket policies, tagging, lifecycle rules and server-side
-  encryption headers (D219).
-- S3 `aws-chunked` uploads, `ListParts`, `ListMultipartUploads`, virtual-hosted buckets and
-  conditional requests (D219).
-- Large objects streamed instead of read whole, and listing without loading a bucket's
+- S3, after D58's legal check: versioning, object lock, ACLs and bucket policies, tagging,
+  lifecycle rules and server-side encryption headers (D219).
+- S3, after D58's legal check: `aws-chunked` uploads, `ListParts`, `ListMultipartUploads`,
+  virtual-hosted buckets and conditional requests (D219).
+- S3, after D58's legal check: large objects streamed, and listing without loading a bucket's
   descriptions (D219). Check: a benchmark against MinIO.
 - InfluxQL and Flux, gzip bodies, and points with the same series and time deduplicated (D220).
 - Remote write 2.0, native histograms and exemplars (D220).
@@ -1000,14 +1010,12 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `wasm32-unknown-unknown` without WASI, and size budgets for the module (D6, D221).
 - An IndexedDB-compatible API in the browser build (D48).
 - Android emulator runs, a Gradle module and Android Archive, and the 32-bit ABIs in CI (D222).
-- iOS Simulator runs and a Swift package that pulls the XCFramework (D222).
+- iOS Simulator runs, and a Swift package once a release publishes the XCFramework (D222).
 - Prepared statements and transactions in the mobile bindings, benchmarked against SQLite's
   Android and iOS bindings (D17, D222).
 - The rest of the crates tested on i686, armv7 and s390x under QEMU (PR #86).
 - Builds and tests on riscv64, powerpc64le and loongarch64 under QEMU (D8). Check: the
   emulated-CPU CI job on `main`.
-- ECS, Azure Kubernetes Service and private-networking variants of the cloud templates, and a
-  managed-disk option on Azure (D224).
 - The container image's size and pull time measured and kept from growing (D14, D224).
 
 ### M18 The other ways of scaling
@@ -1022,8 +1030,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `https://` object storage endpoints, multipart copies of large archives, and uploads without a
   staging file (D226). Check: a simulator test of restoring under failures.
 - Stateless compute nodes over shared storage, scaling apart from storage (D18).
-- Serverless, first `eggdb serve` that stops when idle and starts from object storage on the next
-  connection (D18, D226). Check: a timed cold start from an archive.
+- Serverless: `eggdb serve` archives and exits when idle, and starts again through
+  `--restore-from` (D226); research decides what wakes it (D18). Check: a timed cold start.
 - Tiered storage: hot, warm and cold pages by age across memory, disk and object storage (D18,
   D227).
 - An edge server on an edge copy, refreshed as its manifest grows, with cache limits and eviction
@@ -1049,5 +1057,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A Looker data source (D46).
 - A Fivetran source and destination (D46).
 - Dataverse's Web API and SharePoint lists as sources and targets (D49).
+- An Excel data source plugin, which needs paid Excel to test (D46, D239).
+- ECS, Azure Kubernetes Service and private-networking variants of the cloud templates, and a
+  managed-disk option on Azure, which need paid cloud accounts to test (D224).
+- ASC X12 support, once its paid license is bought (D50, D58).
 - Dedicated, pinned benchmark hardware with published descriptions (D44, D58).
 - Community: GitHub Discussions, a release blog and roadmap voting (D44).
