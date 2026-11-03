@@ -749,7 +749,9 @@ impl<'t> Parser<'t> {
                     position: name.position,
                 });
             }
-            if name.text.eq_ignore_ascii_case(crate::schemas::CATALOG_SCHEMA)
+            if name
+                .text
+                .eq_ignore_ascii_case(crate::schemas::CATALOG_SCHEMA)
                 && self.check_database(&name).is_err()
             {
                 return Ok(Name {
