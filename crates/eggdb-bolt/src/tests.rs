@@ -1,6 +1,8 @@
 use crate::packstream::{Packed, Reader};
 use crate::server::{ServerConfig, encode_request, serve_stream};
 use eggdb_keyspace::MemoryKeyspace;
+use eggdb_platform::connection_limits::MemoryBudget;
+use std::sync::Arc;
 
 fn config() -> ServerConfig {
     ServerConfig {
@@ -192,4 +194,89 @@ fn hostile_bytes_end_the_connection_without_panicking() {
     deep.extend([0, 0]);
     let mut output = Vec::new();
     let _ = serve_stream(&keyspace, &config(), 1, deep.as_slice(), &mut output);
+}
+
+fn budgeted(limit_bytes: usize) -> (Arc<MemoryBudget>, ServerConfig) {
+    let budget = Arc::new(MemoryBudget::new(limit_bytes));
+    let config = ServerConfig {
+        memory_budget: Arc::clone(&budget),
+        ..config()
+    };
+    (budget, config)
+}
+
+fn signatures(messages: &[Packed]) -> Vec<u8> {
+    messages
+        .iter()
+        .map(|message| match message {
+            Packed::Struct(signature, _) => *signature,
+            _ => 0,
+        })
+        .collect()
+}
+
+fn is_out_of_memory(message: &Packed) -> bool {
+    matches!(message, Packed::Struct(0x7f, fields) if fields[0].get("code") == Some(&text("Neo.TransientError.General.MemoryPoolOutOfMemoryError")))
+}
+
+#[test]
+fn a_message_past_the_memory_budget_ends_its_connection_before_it_is_read() {
+    let keyspace = MemoryKeyspace::default();
+    let (budget, config) = budgeted(200_000);
+    let mut input = handshake([[0, 0, 0, 5], [0; 4], [0; 4], [0; 4]]);
+    input.extend(hello("secret"));
+    input.extend(encode_request(
+        0x10,
+        &[
+            text("RETURN $x AS x"),
+            map(vec![("x", text(&"a".repeat(300_000)))]),
+            map(vec![]),
+        ],
+    ));
+    input.extend(encode_request(0x3f, &[map(vec![])]));
+    let mut output = Vec::new();
+    serve_stream(&keyspace, &config, 1, input.as_slice(), &mut output).unwrap();
+    let (_, messages) = responses(&output);
+    assert_eq!(signatures(&messages), [0x70, 0x7f]);
+    assert!(is_out_of_memory(&messages[1]));
+    assert_eq!(budget.used_bytes(), 0);
+}
+
+#[test]
+fn records_past_the_memory_budget_fail_their_pull_and_the_connection_goes_on_after_reset() {
+    let keyspace = MemoryKeyspace::default();
+    let (budget, config) = budgeted(200_000);
+    let mut input = handshake([[0, 0, 0, 5], [0; 4], [0; 4], [0; 4]]);
+    input.extend(hello("secret"));
+    input.extend(encode_request(
+        0x10,
+        &[
+            text("UNWIND range(1, 40) AS i RETURN $x AS x"),
+            map(vec![("x", text(&"b".repeat(10_000)))]),
+            map(vec![]),
+        ],
+    ));
+    input.extend(encode_request(
+        0x3f,
+        &[map(vec![("n", Packed::Integer(-1))])],
+    ));
+    input.extend(encode_request(0x0f, &[]));
+    input.extend(encode_request(
+        0x10,
+        &[text("RETURN 1 AS one"), map(vec![]), map(vec![])],
+    ));
+    input.extend(encode_request(
+        0x3f,
+        &[map(vec![("n", Packed::Integer(-1))])],
+    ));
+    input.extend(encode_request(0x02, &[]));
+    let mut output = Vec::new();
+    serve_stream(&keyspace, &config, 1, input.as_slice(), &mut output).unwrap();
+    let (_, messages) = responses(&output);
+    assert_eq!(
+        signatures(&messages),
+        [0x70, 0x70, 0x7f, 0x70, 0x70, 0x71, 0x70]
+    );
+    assert!(is_out_of_memory(&messages[2]));
+    assert_eq!(budget.used_bytes(), 0);
 }

@@ -3,7 +3,7 @@ use crate::packstream::{
 };
 use eggdb_graph::{QueryResult, Value};
 use eggdb_keyspace::Keyspace;
-use eggdb_platform::connection_limits::MemoryBudget;
+use eggdb_platform::connection_limits::{MemoryBudget, Reservation};
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
@@ -16,6 +16,8 @@ const ACCEPT_POLL: Duration = Duration::from_millis(100);
 const READ_POLL: Duration = Duration::from_millis(200);
 const FAILED_LOGIN_PAUSE: Duration = Duration::from_millis(250);
 const SERVER_AGENT: &str = "Neo4j/5.0.0 (EggDB)";
+const OUT_OF_MEMORY_CODE: &str = "Neo.TransientError.General.MemoryPoolOutOfMemoryError";
+const OUT_OF_MEMORY_BUDGET: &str = "the server's connections already hold their memory budget";
 
 const HELLO: u8 = 0x01;
 const GOODBYE: u8 = 0x02;
@@ -67,6 +69,7 @@ struct Connection<'s> {
     in_transaction: bool,
     wrote_in_transaction: bool,
     read_only_transaction: bool,
+    replies_held: Reservation<'s>,
 }
 
 fn choose_version(proposals: &[u8; 16]) -> Option<(u8, u8)> {
@@ -122,7 +125,11 @@ fn write_chunked(writer: &mut impl Write, payload: &[u8]) -> io::Result<()> {
     writer.write_all(&[0, 0])
 }
 
-fn read_message(reader: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
+fn read_message(
+    reader: &mut impl Read,
+    held: &mut Reservation<'_>,
+) -> io::Result<Option<Vec<u8>>> {
+    held.resize(0);
     let mut payload = Vec::new();
     loop {
         let mut size = [0u8; 2];
@@ -147,6 +154,12 @@ fn read_message(reader: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
             ));
         }
         let start = payload.len();
+        if !held.hold_if_large(start.saturating_add(size).saturating_mul(2)) {
+            return Err(io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                OUT_OF_MEMORY_BUDGET,
+            ));
+        }
         payload.resize(start + size, 0);
         reader.read_exact(&mut payload[start..])?;
     }
@@ -191,8 +204,11 @@ impl Connection<'_> {
             return;
         };
         let taken = wanted.min(result.rows.len());
+        let first_record = replies.len();
+        let mut reply_bytes = replies.iter().map(Vec::len).fold(0, usize::saturating_add);
+        let mut out_of_budget = false;
         for row in result.rows.drain(..taken) {
-            replies.push(message(
+            let record = message(
                 RECORD,
                 |out| {
                     write_list_header(out, row.len());
@@ -201,9 +217,20 @@ impl Connection<'_> {
                     }
                 },
                 1,
-            ));
+            );
+            reply_bytes = reply_bytes.saturating_add(record.len());
+            if !self.replies_held.hold_if_large(reply_bytes) {
+                out_of_budget = true;
+                break;
+            }
+            replies.push(record);
         }
-        if result.rows.is_empty() {
+        if out_of_budget {
+            replies.truncate(first_record);
+            self.replies_held.resize(0);
+            self.failed = true;
+            replies.push(failure(OUT_OF_MEMORY_CODE, OUT_OF_MEMORY_BUDGET));
+        } else if result.rows.is_empty() {
             replies.push(self.summary());
         } else {
             self.pending = Some(result);
@@ -377,8 +404,18 @@ pub(crate) fn serve_stream(
         in_transaction: false,
         wrote_in_transaction: false,
         read_only_transaction: false,
+        replies_held: config.memory_budget.empty_reservation(),
     };
-    while let Some(payload) = read_message(&mut reader)? {
+    let mut read_held = config.memory_budget.empty_reservation();
+    loop {
+        let payload = match read_message(&mut reader, &mut read_held) {
+            Ok(Some(payload)) => payload,
+            Ok(None) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::OutOfMemory => {
+                return write_chunked(writer, &failure(OUT_OF_MEMORY_CODE, OUT_OF_MEMORY_BUDGET));
+            }
+            Err(error) => return Err(error),
+        };
         let mut parser = Reader::new(&payload);
         let (signature, fields) = match parser.value(0) {
             Ok(Packed::Struct(signature, fields)) if parser.finished() => (signature, fields),
@@ -398,11 +435,11 @@ pub(crate) fn serve_stream(
         for reply in replies {
             write_chunked(writer, &reply)?;
         }
+        connection.replies_held.resize(0);
         if !keep_going {
             return Ok(());
         }
     }
-    Ok(())
 }
 
 struct StopAware<'s> {
