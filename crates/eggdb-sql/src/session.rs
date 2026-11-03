@@ -2770,6 +2770,7 @@ impl<'s> Session<'s> {
                 Statement::SqlServer(SqlServerStatement::InsertBulk(bulk)) => {
                     return self.run_insert_bulk(bulk, io);
                 }
+                Statement::SqlServer(SqlServerStatement::OutputInto(_)) => {}
                 Statement::SqlServer(statement) => return self.run_sqlserver(statement),
                 _ => {}
             }
@@ -3280,6 +3281,12 @@ impl<'s> Session<'s> {
             }),
             Statement::SetConstraints { names, deferred } => {
                 self.set_constraints(names.as_deref(), *deferred)
+            }
+            Statement::CreateTableAs(create) => self.write("SELECT INTO", |writer, tables| {
+                crate::create_table_as::run(writer, tables, binding, dialect, create)
+            }),
+            Statement::SqlServer(SqlServerStatement::OutputInto(output)) => {
+                self.run_output_into(output, binding)
             }
             Statement::Begin { .. }
             | Statement::Commit

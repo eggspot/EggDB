@@ -2,7 +2,8 @@ use super::Parser;
 use super::sqlserver::not_supported;
 use crate::ast::{
     AggregateFunction, DerivedTable, Expr, ExprKind, FromClause, GeneratedTable, Literal, Name,
-    Query, Select, SelectItem, TableFunction, TableReference,
+    OutputDestination, OutputInto, OutputTarget, Query, Select, SelectItem, SqlServerStatement,
+    Statement, TableFunction, TableReference,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
@@ -13,6 +14,26 @@ use crate::sqlserver_types::{Length, SqlServerType};
 use crate::types::{SqlType, Value};
 
 const MOST_CONCAT_ARGUMENTS: usize = 254;
+
+pub(super) struct OutputClause {
+    pub(super) items: Vec<SelectItem>,
+    pub(super) into: Option<OutputDestination>,
+}
+
+pub(super) fn with_output_into(
+    statement: Statement,
+    destination: Option<OutputDestination>,
+) -> Statement {
+    match destination {
+        Some(destination) => Statement::SqlServer(SqlServerStatement::OutputInto(Box::new(
+            OutputInto {
+                statement,
+                destination,
+            },
+        ))),
+        None => statement,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OutputStatement {
@@ -751,21 +772,60 @@ impl Parser<'_> {
     pub(super) fn sqlserver_output(
         &mut self,
         statement: OutputStatement,
-    ) -> SqlResult<Option<Vec<SelectItem>>> {
-        self.sqlserver_output_items()?
-            .map(|items| bound_output(items, statement, None))
-            .transpose()
+    ) -> SqlResult<Option<OutputClause>> {
+        let Some(clause) = self.sqlserver_output_items()? else {
+            return Ok(None);
+        };
+        Ok(Some(OutputClause {
+            items: bound_output(clause.items, statement, None)?,
+            into: clause.into,
+        }))
     }
 
-    pub(super) fn sqlserver_output_items(&mut self) -> SqlResult<Option<Vec<SelectItem>>> {
+    pub(super) fn sqlserver_output_items(&mut self) -> SqlResult<Option<OutputClause>> {
         if !self.take_word("output") {
             return Ok(None);
         }
-        let items = self.select_items()?;
-        if self.is_word("into") {
-            return Err(not_supported("OUTPUT ... INTO").at(self.position()));
+        let mut items = self.select_items()?;
+        let position = self.position();
+        if !self.take_word("into") {
+            return Ok(Some(OutputClause { items, into: None }));
         }
-        Ok(Some(items))
+        let destination = self.output_destination()?;
+        items.push(SelectItem::Expr {
+            expr: Expr {
+                kind: ExprKind::Literal(Literal::Null),
+                position,
+            },
+            alias: Some(crate::output_into::END_OF_OUTPUT_INTO.to_owned()),
+        });
+        if self.take_word("output") {
+            items.extend(self.select_items()?);
+            if self.is_word("into") {
+                return Err(self.unexpected());
+            }
+        }
+        Ok(Some(OutputClause {
+            items,
+            into: Some(destination),
+        }))
+    }
+
+    fn output_destination(&mut self) -> SqlResult<OutputDestination> {
+        let target = if matches!(self.peek_kind(), TokenKind::Variable(_)) {
+            OutputTarget::Variable(self.variable_name()?)
+        } else {
+            OutputTarget::Table(TableReference::named(self.table_name()?, None))
+        };
+        let columns = if self.peek_kind() == &TokenKind::LeftParen
+            && !self.is_word_at(1, "select")
+            && !self.is_word_at(1, "with")
+        {
+            Some(self.name_list()?)
+        } else {
+            None
+        };
+        Ok(OutputDestination { target, columns })
     }
 
     pub(super) fn sqlserver_offset_fetch(

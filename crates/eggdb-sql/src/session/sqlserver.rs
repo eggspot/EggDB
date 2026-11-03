@@ -582,6 +582,10 @@ impl<'s> Session<'s> {
             SqlServerStatement::CloseCursor(cursor) => self.run_close_cursor(cursor),
             SqlServerStatement::DeallocateCursor(cursor) => self.run_deallocate_cursor(cursor),
             SqlServerStatement::WaitFor { until_time, time } => self.run_waitfor(*until_time, time),
+            SqlServerStatement::OutputInto(_) => Err(SqlError::new(
+                SqlState::INTERNAL_ERROR,
+                "an OUTPUT ... INTO statement reached the SQL Server statement runner",
+            )),
         }
     }
 

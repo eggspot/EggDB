@@ -36,6 +36,7 @@ mod console;
 mod constraints;
 mod coordination;
 mod copy;
+mod create_table_as;
 mod datetime;
 mod deferred_checks;
 mod destructive;
@@ -89,6 +90,7 @@ mod oracle_listagg;
 mod oracle_nls;
 mod oracle_number_model;
 mod oracle_numerals;
+mod output_into;
 mod parser;
 mod partition_ddl;
 mod partition_dml;
@@ -214,6 +216,8 @@ mod one_statement_tests;
 #[cfg(test)]
 mod oracle_tests;
 #[cfg(test)]
+mod output_into_tests;
+#[cfg(test)]
 mod partition_tests;
 #[cfg(test)]
 mod regex_tests;
@@ -221,6 +225,8 @@ mod regex_tests;
 mod savepoint_tests;
 #[cfg(test)]
 mod schema_tests;
+#[cfg(test)]
+mod select_into_tests;
 #[cfg(test)]
 mod set_returning_tests;
 #[cfg(test)]

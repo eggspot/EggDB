@@ -772,6 +772,7 @@ pub(crate) fn check_statement(settings: &Settings, statement: &Statement) -> Sql
     let defines = matches!(
         statement,
         Statement::CreateTable(_)
+            | Statement::CreateTableAs(_)
             | Statement::AlterTable(_)
             | Statement::CreateIndex(_)
             | Statement::CreateView(_)

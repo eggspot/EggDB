@@ -390,6 +390,7 @@ pub(crate) fn classify(
         )),
         Statement::With(with) => crate::with_statement::classify(with, keys),
         Statement::Merge(merge) => merged(merge, keys),
+        Statement::CreateTableAs(create) => classify(&create.query, keys),
     }
 }
 
@@ -418,6 +419,7 @@ fn sqlserver(
         }
         | SqlServerStatement::SelectAssign { query, .. } => classify(query, keys),
         SqlServerStatement::DeclareCursor(cursor) => classify(&cursor.query, keys),
+        SqlServerStatement::OutputInto(output) => classify(&output.statement, keys),
         SqlServerStatement::InsertBulk(bulk) => insert_runs_code(&bulk.table, keys),
         SqlServerStatement::Use(_)
         | SqlServerStatement::NoCount(_)
@@ -877,11 +879,11 @@ fn changed_routines(names: Vec<String>) -> Option<DestructiveStatement> {
 
 fn merged(merge: &MergeStatement, keys: &mut CatalogLookup<'_>) -> Option<DestructiveStatement> {
     let deletes = merge
-        .update
+        .matched
         .iter()
         .chain(&merge.by_source)
         .any(|clause| clause.delete_condition.is_some());
-    let found = match merge.update.as_ref().or(merge.by_source.first()) {
+    let found = match merge.matched.first().or(merge.by_source.first()) {
         Some(_) => {
             let kind = if deletes {
                 DestructiveKind::DeleteOfManyRows
@@ -900,7 +902,7 @@ fn merged(merge: &MergeStatement, keys: &mut CatalogLookup<'_>) -> Option<Destru
     let mut functions = CalledFunctions::default();
     select_user_functions(&merge.source, keys, &mut functions);
     user_functions(&merge.on, keys, &mut functions);
-    if let Some(update) = &merge.update {
+    for update in &merge.matched {
         for (_, expr) in &update.assignments {
             user_functions(expr, keys, &mut functions);
         }

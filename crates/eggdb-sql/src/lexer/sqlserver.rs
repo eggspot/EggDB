@@ -60,6 +60,9 @@ impl<'t> Lexer<'t> {
             b'"' => self.delimited_sqlserver_identifier(b'"'),
             b'[' => self.delimited_sqlserver_identifier(b']'),
             b'@' => self.sqlserver_variable(),
+            b'$' if self.peek(1).is_some_and(|next| next.is_ascii_alphabetic()) => {
+                self.sqlserver_word()
+            }
             b':' if self.peek(1) == Some(b':') => Err(incorrect_syntax("::", self.at)),
             b':' => {
                 self.at += 1;
@@ -236,6 +239,18 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn merge_pseudo_columns_with_a_dollar_sign_are_words() {
+        assert_eq!(
+            kinds("OUTPUT $ACTION"),
+            vec![
+                TokenKind::Word("output".into()),
+                TokenKind::Word("$action".into()),
+                TokenKind::End,
+            ]
+        );
     }
 
     #[test]

@@ -1382,11 +1382,14 @@ pub(crate) fn resolve_view_body(
 
 fn merge_privileges(merge: &MergeStatement) -> Vec<crate::roles::Privilege> {
     let mut privileges = Vec::new();
-    if let Some(update) = &merge.update {
-        if !update.assignments.is_empty() {
+    for update in &merge.matched {
+        if !update.assignments.is_empty() && !privileges.contains(&crate::roles::Privilege::Update)
+        {
             privileges.push(crate::roles::Privilege::Update);
         }
-        if update.delete_condition.is_some() {
+        if update.delete_condition.is_some()
+            && !privileges.contains(&crate::roles::Privilege::Delete)
+        {
             privileges.push(crate::roles::Privilege::Delete);
         }
     }
@@ -1607,7 +1610,7 @@ impl Binding<'_> {
             return Ok(());
         }
         let mut exprs: Vec<&mut Expr> = vec![&mut merge.on];
-        if let Some(update) = &mut merge.update {
+        for update in &mut merge.matched {
             exprs.extend(update.assignments.iter_mut().map(|(_, expr)| expr));
             exprs.extend(update.condition.iter_mut());
             exprs.extend(update.delete_condition.iter_mut());

@@ -25,9 +25,9 @@ pub(crate) use row_assignment::{
     ASSIGNED_VARIABLE, RowAssignment, reads_assigned_variables, refuses_per_row,
 };
 pub(crate) use statements::{
-    MatchingRow, apply_changes, changed_rows, columns_mismatch, combined, declare, every_row,
-    filled_rows, matching_of, matching_select, remove_rows, scalar_select, undeclared, value_items,
-    variable_column, variable_columns,
+    MatchingRow, apply_changes, changed_rows, columns_mismatch, combined, constant, declare,
+    every_row, filled_rows, matching_of, matching_select, remove_rows, scalar_select, undeclared,
+    value_items, variable_column, variable_columns,
 };
 pub(crate) use variables::{BatchContext, DynamicBatch, ScalarVariable, procedure_object_name};
 

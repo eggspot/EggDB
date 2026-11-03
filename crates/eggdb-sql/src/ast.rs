@@ -90,6 +90,7 @@ pub(crate) enum Statement {
     MaterializedView(MaterializedViewCommand),
     SqlServer(SqlServerStatement),
     Merge(Box<MergeStatement>),
+    CreateTableAs(Box<CreateTableAs>),
     AlterSession(Vec<(String, String)>),
     Discard(DiscardTarget),
     Cursor(CursorCommand),
@@ -413,10 +414,42 @@ pub(crate) struct MergeStatement {
     pub(crate) source: Select,
     pub(crate) source_label: Option<String>,
     pub(crate) on: Expr,
-    pub(crate) update: Option<MergeUpdate>,
+    pub(crate) matched: Vec<MergeUpdate>,
     pub(crate) insert: Option<MergeInsert>,
     pub(crate) by_source: Vec<MergeUpdate>,
     pub(crate) output: Option<Vec<SelectItem>>,
+    pub(crate) top: Option<Expr>,
+}
+
+impl MergeUpdate {
+    pub(crate) fn only_deletes(&self) -> bool {
+        self.assignments.is_empty() && self.delete_condition.is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreateTableAs {
+    pub(crate) name: Name,
+    pub(crate) temporary: bool,
+    pub(crate) query: Statement,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OutputInto {
+    pub(crate) statement: Statement,
+    pub(crate) destination: OutputDestination,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OutputDestination {
+    pub(crate) target: OutputTarget,
+    pub(crate) columns: Option<Vec<Name>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum OutputTarget {
+    Variable(Name),
+    Table(TableReference),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -496,6 +529,7 @@ pub(crate) enum SqlServerStatement {
         until_time: bool,
         time: Expr,
     },
+    OutputInto(Box<OutputInto>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

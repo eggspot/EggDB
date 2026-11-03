@@ -171,11 +171,15 @@ pub(crate) fn refused_in_function(
             | SqlServerStatement::CloseCursor(_)
             | SqlServerStatement::DeallocateCursor(_) => first_word,
             SqlServerStatement::WaitFor { .. } => "WAITFOR",
+            SqlServerStatement::OutputInto(output) => {
+                return refused_in_function(&output.statement, first_word, position);
+            }
         },
         Statement::Insert(_) => "INSERT",
         Statement::Update(_) => "UPDATE",
         Statement::Delete(_) => "DELETE",
         Statement::Merge(_) => "MERGE",
+        Statement::CreateTableAs(_) => "SELECT INTO",
         Statement::Truncate(_) => "TRUNCATE TABLE",
         Statement::Begin { .. } => "BEGIN TRANSACTION",
         Statement::Commit => "COMMIT TRANSACTION",

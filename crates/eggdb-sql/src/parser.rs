@@ -22,6 +22,7 @@ mod roles;
 mod routines;
 mod row_security;
 mod schemas;
+mod select_into;
 mod sql_json;
 mod sqlite;
 mod sqlserver;
@@ -321,6 +322,7 @@ pub(crate) struct Parser<'t> {
     routine_frame: Option<&'t crate::plpgsql::RoutineFrame>,
     returns_values: bool,
     function_body: bool,
+    select_into: Option<Option<select_into::SelectIntoTable>>,
 }
 
 #[derive(Clone, Copy)]
@@ -445,6 +447,7 @@ impl<'t> Parser<'t> {
             routine_frame: None,
             returns_values: false,
             function_body: false,
+            select_into: None,
         }
     }
 
@@ -865,7 +868,7 @@ impl<'t> Parser<'t> {
             return Ok(statement);
         }
         if !self.sqlite() && self.peek_kind() == &TokenKind::LeftParen {
-            return self.query_statement();
+            return self.query_or_select_into();
         }
         let TokenKind::Word(word) = self.peek_kind() else {
             return Err(self.unexpected());
@@ -877,7 +880,7 @@ impl<'t> Parser<'t> {
             "create" => self.create(),
             "drop" => self.drop(),
             "insert" => self.insert(),
-            "select" | "with" => self.query_statement(),
+            "select" | "with" => self.query_or_select_into(),
             "update" => self.update(),
             "delete" => self.delete(),
             "begin" | "start" => self.begin(),
@@ -2809,6 +2812,10 @@ impl<'t> Parser<'t> {
         } else {
             None
         };
+        let (output, output_into) = match output {
+            Some(clause) => (Some(clause.items), clause.into),
+            None => (None, None),
+        };
         let overriding = if self.take_word("overriding") {
             if !self.postgresql() {
                 return Err(self.not_supported("OVERRIDING"));
@@ -2870,7 +2877,7 @@ impl<'t> Parser<'t> {
         } else {
             self.returning()?
         };
-        Ok(Statement::Insert(Insert {
+        let statement = Statement::Insert(Insert {
             table,
             columns,
             source,
@@ -2879,7 +2886,8 @@ impl<'t> Parser<'t> {
             conflict_target,
             rollback_on_conflict,
             overriding,
-        }))
+        });
+        Ok(sqlserver_functions::with_output_into(statement, output_into))
     }
 
     fn insert_value(&mut self) -> SqlResult<InsertValue> {
@@ -2940,21 +2948,25 @@ impl<'t> Parser<'t> {
             }
         };
         let filter = self.filter()?;
-        let returning = match output {
-            Some(items) => Some(sqlserver_functions::bound_output(
-                items,
-                sqlserver_functions::OutputStatement::Update,
-                joined_dml::joined_label(&table, from.as_ref()),
-            )?),
-            None => self.returning()?,
+        let (returning, output_into) = match output {
+            Some(clause) => (
+                Some(sqlserver_functions::bound_output(
+                    clause.items,
+                    sqlserver_functions::OutputStatement::Update,
+                    joined_dml::joined_label(&table, from.as_ref()),
+                )?),
+                clause.into,
+            ),
+            None => (self.returning()?, None),
         };
-        Ok(Statement::Update(Update {
+        let statement = Statement::Update(Update {
             table,
             assignments,
             filter,
             returning,
             from,
-        }))
+        });
+        Ok(sqlserver_functions::with_output_into(statement, output_into))
     }
 
     fn delete(&mut self) -> SqlResult<Statement> {
@@ -2989,20 +3001,24 @@ impl<'t> Parser<'t> {
             using = Some(self.joined_target(&mut table, tables, &[])?);
         }
         let filter = self.filter()?;
-        let returning = match output {
-            Some(items) => Some(sqlserver_functions::bound_output(
-                items,
-                sqlserver_functions::OutputStatement::Delete,
-                joined_dml::joined_label(&table, using.as_ref()),
-            )?),
-            None => self.returning()?,
+        let (returning, output_into) = match output {
+            Some(clause) => (
+                Some(sqlserver_functions::bound_output(
+                    clause.items,
+                    sqlserver_functions::OutputStatement::Delete,
+                    joined_dml::joined_label(&table, using.as_ref()),
+                )?),
+                clause.into,
+            ),
+            None => (self.returning()?, None),
         };
-        Ok(Statement::Delete(Delete {
+        let statement = Statement::Delete(Delete {
             table,
             filter,
             returning,
             using,
-        }))
+        });
+        Ok(sqlserver_functions::with_output_into(statement, output_into))
     }
 
     fn filter(&mut self) -> SqlResult<Option<Expr>> {
@@ -3045,7 +3061,7 @@ impl<'t> Parser<'t> {
             self.select_items()?
         };
         if self.is_word("into") {
-            return Err(self.not_supported("SELECT INTO"));
+            self.select_into_table()?;
         }
         let mut items = items;
         let from = if self.take_word("from") {

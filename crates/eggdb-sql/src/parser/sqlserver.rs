@@ -386,7 +386,7 @@ pub(super) fn outside_a_batch(what: &str) -> SqlError {
     not_supported(&format!("{what} outside a Transact-SQL batch"))
 }
 
-fn top_limit(count: Expr, percent: bool, with_ties: bool, position: usize) -> Expr {
+pub(super) fn top_limit(count: Expr, percent: bool, with_ties: bool, position: usize) -> Expr {
     let name = match (percent, with_ties) {
         (false, false) => return count,
         (false, true) => "oracle_fetch_with_ties",
