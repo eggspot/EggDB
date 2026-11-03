@@ -38,6 +38,15 @@ pub struct SystemClipboard {
     fallback: MemoryClipboard,
 }
 
+impl std::fmt::Debug for SystemClipboard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SystemClipboard")
+            .field("fallback", &self.fallback)
+            .finish_non_exhaustive()
+    }
+}
+
 impl SystemClipboard {
     /// The clipboard of `window`.
     pub fn new(window: Rc<RefCell<Box<dyn Window>>>) -> Self {

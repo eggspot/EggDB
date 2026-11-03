@@ -1734,8 +1734,8 @@ mod tests {
         );
         let mut shown = card.clone();
         shown.error = Some(CardError {
-            message: "the file is locked".into(),
-            fix: "close the other program".into(),
+            line: "Error: the file is locked".into(),
+            fix: Some("close the other program".into()),
         });
         let (cleared, action) = handle_key(shown, press(Key::Escape));
         assert_eq!(action, ConnectAction::None);

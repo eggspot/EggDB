@@ -62,6 +62,7 @@ pub struct StreamedTransactions {
 
 /// One committed streamed transaction's changes, in order, each a `pgoutput` message without
 /// its transaction ID.
+#[derive(Debug)]
 pub struct SpooledChanges {
     memory: std::vec::IntoIter<Vec<u8>>,
     file: Option<(PathBuf, BufReader<File>, usize)>,

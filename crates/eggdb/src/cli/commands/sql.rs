@@ -874,7 +874,6 @@ fn table_line(cells: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::line_of;
     use eggdb::Database;
     use eggdb::sql::Store as DatabaseStore;
     use eggdb_sql::{QueryResult, Session};

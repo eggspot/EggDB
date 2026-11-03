@@ -46,7 +46,6 @@ impl CacheSize {
     }
 }
 
-/// What a [`PageCache`] holds and has done since it was created.
 /// The page lookups one thread has made in every page cache of the process since it started:
 /// the difference between two readings is what the work between them looked up, which
 /// `EXPLAIN (ANALYZE, BUFFERS)` reports as `shared hit` and `read`.
@@ -90,6 +89,7 @@ pub fn thread_page_lookups() -> PageLookups {
     })
 }
 
+/// What a [`PageCache`] holds and has done since it was created.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct CacheStats {

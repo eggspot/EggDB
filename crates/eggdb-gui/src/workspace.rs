@@ -1317,7 +1317,8 @@ mod tests {
         let mut workspace = workspace(Arc::new(SlowConnector(Duration::ZERO)), directory.clone());
         let now = Instant::now();
         workspace.card_mut().expect("the card").file.set(&directory.join("clicked.eggdb").display().to_string());
-        click(&mut workspace, centre_of(&workspace, connect_screen::NODE_OPEN), now);
+        let open = centre_of(&workspace, connect_screen::NODE_OPEN);
+        click(&mut workspace, open, now);
         workspace.wait_for_open(Duration::from_secs(10));
         assert!(matches!(workspace.screen(), Screen::Main(_)), "a click on Open opens");
         workspace.main_window_mut().expect("the main window").tab.editor = crate::editor::Editor::new("SELECT 1;\nSELECT 22;");

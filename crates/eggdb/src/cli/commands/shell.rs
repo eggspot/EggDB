@@ -4,7 +4,8 @@ use super::shell_block::{BlockState, InBlock, key_value_in_block};
 use super::shell_copy::{
     CopyEnd, CopyLines, ShellCopy, backslash_copy_arguments, parse_backslash_copy,
 };
-use super::sql::{error_lines, exit_for, result_text};
+use super::sql::{exit_for, result_text};
+use eggdb::sql::error_lines;
 use super::{Access, execute_on, session_for, uses_color};
 use crate::cli::args::{self, CommandName, Invocation, Request, ResultMode};
 use crate::cli::failure::{Exit, Failure};

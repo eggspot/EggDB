@@ -1637,7 +1637,6 @@ mod tests {
         binary.extend_from_slice(&u32::MAX.to_be_bytes());
         assert!(parse_logical_message(&binary).is_err());
     }
-}
 
     #[test]
     fn changes_outside_the_followed_schemas_are_skipped() {

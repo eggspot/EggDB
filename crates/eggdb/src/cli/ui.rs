@@ -1,4 +1,5 @@
-use super::commands::sql::{error_lines, result_cells};
+use super::commands::sql::result_cells;
+use eggdb::sql::error_lines;
 use super::render::{self, TimeStyle};
 use eggdb::sql::Store as DatabaseStore;
 use eggdb::{CheckReport, CommitStamp, Database, Options, Scan};

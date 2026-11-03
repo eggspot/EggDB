@@ -230,6 +230,7 @@ impl Session<'_> {
             Some(_) => render::text(source_display.as_bytes()),
             None => "stdin".to_owned(),
         };
+        let busy_timeout = self.busy_timeout();
         let mut input = match &source {
             Some(path) => open_source(path, &source_shown)?,
             None => Input::ReadOnce(Box::new(&mut *self.stdin)),
@@ -242,7 +243,7 @@ impl Session<'_> {
             policy: self.request.on_conflict,
             target_collection: self.request.collection.clone(),
             cache_bytes: self.request.cache_bytes,
-            busy_timeout: self.busy_timeout(),
+            busy_timeout,
             requested_page_size: self.request.page_size,
             staging_opened: false,
             messages: &mut self.messages,

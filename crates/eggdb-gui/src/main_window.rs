@@ -1476,7 +1476,7 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
     nodes.push(node(NODE_QUERIES, NODE_MAIN_WINDOW, AccessRole::TabList, "Queries", (260.0, 44.0, centre_width, 36.0)));
     for (index, other) in window.background_tabs.iter().enumerate() {
         let left = 260.0 + TAB_WIDTH * index as f32;
-        let mut background = node(NODE_FIRST_BACKGROUND_TAB + index as u32 % 1000, NODE_QUERIES, AccessRole::Tab, &other.title, (left, 44.0, TAB_WIDTH, 36.0));
+        let background = node(NODE_FIRST_BACKGROUND_TAB + index as u32 % 1000, NODE_QUERIES, AccessRole::Tab, &other.title, (left, 44.0, TAB_WIDTH, 36.0));
         nodes.push(background);
     }
     let title = if tab.running { format!("{}, running", tab.title) } else { tab.title.clone() };
