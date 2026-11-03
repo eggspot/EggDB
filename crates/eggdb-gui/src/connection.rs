@@ -785,8 +785,9 @@ impl Connection {
     /// Runs `statement` in `dialect` so that nothing it writes stays, whatever it is: on a
     /// session that already has a transaction open, between `SAVEPOINT` and
     /// `ROLLBACK TO SAVEPOINT` (SQL Server's `SAVE TRANSACTION` and `ROLLBACK TRANSACTION`),
-    /// so the session's own work stays; else inside `BEGIN` (`BEGIN TRANSACTION`) and
-    /// `ROLLBACK`. The outcomes start with the opening statement's, then the statement's,
+    /// so the session's own work stays; an idle Oracle session, whose `SAVEPOINT` opens the
+    /// transaction, between `SAVEPOINT` and `ROLLBACK`; else inside `BEGIN`
+    /// (`BEGIN TRANSACTION`) and `ROLLBACK`. The outcomes start with the opening statement's, then the statement's,
     /// then the closing statements'; a session whose transaction already failed gets that
     /// failure and runs nothing. With `session` it runs on that kept session, else as
     /// [`Connection::run_script`] does.
@@ -869,18 +870,21 @@ impl Connection {
         let undo = CancelHandle::default();
         let words = UndoWords::of(dialect);
         let keeps_transactions = session.is_some() || matches!(self.link, Link::Server(_));
-        if keeps_transactions {
+        let idle = session
+            .is_some_and(|session| self.transaction_status(session) == TransactionStatus::Idle);
+        let savepoint_opens_transaction = dialect == QueryDialect::Oracle;
+        if keeps_transactions && (!idle || savepoint_opens_transaction) {
             let mut opened = self.run_on(session, dialect, &[words.savepoint()], &undo);
             match opened.pop() {
                 Some(Ok(tables)) => {
+                    let closing = if idle {
+                        vec![words.rollback.to_owned()]
+                    } else {
+                        words.back_to_savepoint()
+                    };
                     let mut outcomes = vec![Ok(tables)];
                     outcomes.extend(self.run_on(session, dialect, statements, cancel));
-                    outcomes.extend(self.run_on(
-                        session,
-                        dialect,
-                        &words.back_to_savepoint(),
-                        &undo,
-                    ));
+                    outcomes.extend(self.run_on(session, dialect, &closing, &undo));
                     return outcomes;
                 }
                 Some(Err(failure)) if failure.code != NO_ACTIVE_TRANSACTION => {
