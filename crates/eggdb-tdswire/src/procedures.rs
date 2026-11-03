@@ -1,5 +1,5 @@
 use crate::connection::{
-    Connection, LOGGED_BATCH_CHARACTERS, NOT_SUPPORTED, printable, report_wire_error,
+    Connection, LOGGED_BATCH_CHARACTERS, NOT_SUPPORTED, Ran, printable, report_wire_error,
 };
 use crate::rpc::{
     Procedure, ProcedureCall, RpcError, RpcParameter, SystemProcedure, parse_rpc_request,
@@ -10,8 +10,8 @@ use crate::tokens::{
 use crate::types::{declared_wire_columns, push_value};
 use crate::wire::WireError;
 use eggdb_sql::{
-    NamedParameter, OutputColumn, ParameterDeclaration, Session, SqlError, SqlType,
-    StoredProcedure, TransactionStatus, Value,
+    BatchStep, Dialect, NamedParameter, OutputColumn, ParameterDeclaration, PlsqlProcedure,
+    Session, SqlError, SqlType, StoredProcedure, TransactionStatus, Value,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,10 +25,12 @@ const WRONG_STATEMENT_TYPE: u32 = 214;
 const MISSING_ARGUMENT: u32 = 201;
 const TOO_MANY_ARGUMENTS: u32 = 8144;
 const NOT_A_PARAMETER: u32 = 8145;
+const SUPPLIED_MULTIPLE_TIMES: u32 = 8143;
 const NOT_DECLARED_OUTPUT: u32 = 8162;
 const PARAMETER_NOT_SUPPLIED: u32 = 8178;
 const UNKNOWN_HANDLE: u32 = 8179;
 const STATUS_PARAMETER: &str = "@eggdb_rpc_return_status";
+const PLSQL_CALL_TAG: &str = "CALL";
 const INTN: u8 = 0x26;
 
 pub(crate) struct PreparedBatch {
@@ -306,6 +308,21 @@ fn catalog_procedure_name(procedure: &Procedure) -> Option<String> {
     eggdb_sql::is_catalog_procedure(&bare).then_some(bare)
 }
 
+fn plsql_procedure_named(
+    session: &mut Session<'_>,
+    procedure: &Procedure,
+) -> Result<Option<PlsqlProcedure>, CallError> {
+    let Procedure::Name(name) = procedure else {
+        return Ok(None);
+    };
+    if session.dialect() != Dialect::Oracle {
+        return Ok(None);
+    }
+    session
+        .plsql_procedure(name)
+        .map_err(|error| CallError::from_sql(&error))
+}
+
 fn unknown_procedure(procedure: &Procedure) -> CallError {
     CallError::new(
         UNKNOWN_PROCEDURE,
@@ -372,6 +389,149 @@ fn stored_procedure_call(
         });
     }
     Ok((text, bound))
+}
+
+struct PlsqlCall {
+    text: String,
+    bound: Vec<NamedParameter>,
+    returned: Vec<ReturnedParameter>,
+}
+
+#[derive(Debug, PartialEq)]
+struct ReturnedParameter {
+    ordinal: usize,
+    declaration: usize,
+}
+
+fn plsql_parameter_index(
+    procedure: &PlsqlProcedure,
+    shown: &str,
+    parameter: &RpcParameter,
+    next_position: &mut usize,
+) -> Result<usize, CallError> {
+    if parameter.name.is_empty() {
+        let index = *next_position;
+        *next_position += 1;
+        if index >= procedure.parameters.len() {
+            return Err(CallError::new(
+                TOO_MANY_ARGUMENTS,
+                format!(
+                    "Procedure or function {} has too many arguments specified.",
+                    printable(shown)
+                ),
+            ));
+        }
+        return Ok(index);
+    }
+    procedure
+        .parameters
+        .iter()
+        .position(|declaration| declaration.is_named(&parameter.name))
+        .ok_or_else(|| {
+            CallError::new(
+                NOT_A_PARAMETER,
+                format!(
+                    "{} is not a parameter for procedure {}.",
+                    printable(&parameter.name),
+                    printable(shown)
+                ),
+            )
+        })
+}
+
+fn plsql_procedure_call(
+    procedure: &PlsqlProcedure,
+    shown: &str,
+    parameters: &[RpcParameter],
+) -> Result<PlsqlCall, CallError> {
+    let mut text = format!("CALL {}(", procedure.call_name);
+    let mut bound = Vec::new();
+    let mut returned = Vec::new();
+    let mut supplied = vec![false; procedure.parameters.len()];
+    let mut next_position = 0usize;
+    for (ordinal, parameter) in parameters.iter().enumerate() {
+        let index = plsql_parameter_index(procedure, shown, parameter, &mut next_position)?;
+        let (Some(declaration), Some(seen)) =
+            (procedure.parameters.get(index), supplied.get_mut(index))
+        else {
+            continue;
+        };
+        if std::mem::replace(seen, true) {
+            return Err(CallError::new(
+                SUPPLIED_MULTIPLE_TIMES,
+                format!(
+                    "Parameter '@{}' was supplied multiple times.",
+                    printable(&declaration.name)
+                ),
+            ));
+        }
+        if parameter.output {
+            if !declaration.output {
+                return Err(CallError::new(
+                    NOT_DECLARED_OUTPUT,
+                    format!(
+                        "The formal parameter \"{}\" was not declared as an OUTPUT parameter, but the actual parameter passed in requested output.",
+                        printable(&declaration.name)
+                    ),
+                ));
+            }
+            returned.push(ReturnedParameter {
+                ordinal,
+                declaration: index,
+            });
+        }
+        if !declaration.input || parameter.uses_default {
+            continue;
+        }
+        let placeholder = format!("@eggdb_rpc_argument_{ordinal}");
+        if !bound.is_empty() {
+            text.push_str(", ");
+        }
+        text.push_str(&declaration.call_name);
+        text.push_str(" => ");
+        text.push_str(&placeholder);
+        bound.push(NamedParameter {
+            name: placeholder,
+            declared_type: Some(declaration.sql_type),
+            value: parameter.value.clone(),
+        });
+    }
+    text.push(')');
+    Ok(PlsqlCall {
+        text,
+        bound,
+        returned,
+    })
+}
+
+fn plsql_returned_values(
+    procedure: &PlsqlProcedure,
+    parameters: &[RpcParameter],
+    returned: &[ReturnedParameter],
+    outputs: Option<&[Value]>,
+) -> Vec<Vec<u8>> {
+    returned
+        .iter()
+        .filter_map(|returned| {
+            let parameter = parameters.get(returned.ordinal)?;
+            let sent = parameter.sent.as_deref()?;
+            let declaration = procedure.parameters.get(returned.declaration)?;
+            let output_at = procedure
+                .parameters
+                .iter()
+                .take(returned.declaration)
+                .filter(|earlier| earlier.output)
+                .count();
+            let assigned = outputs
+                .and_then(|values| values.get(output_at))
+                .and_then(|value| output_value(declaration.sql_type, value));
+            Some(tokens::return_value(
+                u16::try_from(returned.ordinal).ok()?,
+                &parameter.name,
+                assigned.as_deref().unwrap_or(sent),
+            ))
+        })
+        .collect()
 }
 
 fn is_parameter_name(name: &str) -> bool {
@@ -515,6 +675,10 @@ impl Connection<'_> {
         parameters: &[NamedParameter],
     ) -> Called {
         let ran = self.run_statements(session, &batch.text, Some(parameters), DONE_IN_PROC);
+        self.called_after(ran)
+    }
+
+    fn called_after(&mut self, ran: Ran) -> Called {
         let mut failed_write = ran.failed_write;
         if !failed_write && let Some(last) = ran.last {
             let token = tokens::done(
@@ -715,9 +879,41 @@ impl Connection<'_> {
         procedure: &Procedure,
         parameters: &[RpcParameter],
     ) -> Result<Called, CallError> {
+        if let Some(found) = plsql_procedure_named(session, procedure)? {
+            return self.plsql_procedure(session, &found, &procedure.shown(), parameters);
+        }
         session.in_connection_dialect(|session| {
             self.transact_sql_procedure(session, procedure, parameters)
         })
+    }
+
+    fn plsql_procedure(
+        &mut self,
+        session: &mut Session<'_>,
+        procedure: &PlsqlProcedure,
+        shown: &str,
+        parameters: &[RpcParameter],
+    ) -> Result<Called, CallError> {
+        let call = plsql_procedure_call(procedure, shown, parameters)?;
+        let mut outputs: Option<Vec<Value>> = None;
+        let ran = self.run_statements_inspecting(
+            session,
+            &call.text,
+            Some(call.bound.as_slice()),
+            DONE_IN_PROC,
+            &mut |step: &mut BatchStep| {
+                if let Ok(result) = &mut step.outcome
+                    && result.tag == PLSQL_CALL_TAG
+                {
+                    result.columns = None;
+                    outputs = std::mem::take(&mut result.rows).into_iter().next();
+                }
+            },
+        );
+        let mut called = self.called_after(ran);
+        called.returned =
+            plsql_returned_values(procedure, parameters, &call.returned, outputs.as_deref());
+        Ok(called)
     }
 
     fn transact_sql_procedure(
@@ -771,11 +967,14 @@ impl Connection<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PreparedBatch, PreparedBatches, STATUS_PARAMETER, bound_parameters, catalog_procedure_name,
-        is_parameter_name, stored_procedure_call,
+        PreparedBatch, PreparedBatches, ReturnedParameter, STATUS_PARAMETER, bound_parameters,
+        catalog_procedure_name, is_parameter_name, plsql_procedure_call, plsql_returned_values,
+        stored_procedure_call,
     };
     use crate::rpc::{Procedure, RpcParameter, SystemProcedure};
-    use eggdb_sql::{ParameterDeclaration, SqlType, StoredProcedure, Value};
+    use eggdb_sql::{
+        ParameterDeclaration, PlsqlParameter, PlsqlProcedure, SqlType, StoredProcedure, Value,
+    };
 
     fn batch() -> PreparedBatch {
         PreparedBatch {
@@ -986,5 +1185,149 @@ mod tests {
             ],
         );
         assert_eq!(extra.err().map(|error| error.number), Some(8144));
+    }
+
+    fn plsql_parameter(name: &str, input: bool, output: bool) -> PlsqlParameter {
+        PlsqlParameter {
+            name: name.into(),
+            call_name: name.to_ascii_uppercase(),
+            sql_type: SqlType::Integer,
+            input,
+            output,
+        }
+    }
+
+    fn split_it() -> PlsqlProcedure {
+        PlsqlProcedure {
+            call_name: "hr.split_it".into(),
+            parameters: vec![
+                plsql_parameter("total", true, false),
+                plsql_parameter("half", false, true),
+                plsql_parameter("note", true, true),
+            ],
+        }
+    }
+
+    #[test]
+    fn plsql_calls_name_every_input_and_leave_out_parameters_to_the_procedure() {
+        let positional = plsql_procedure_call(
+            &split_it(),
+            "hr.split_it",
+            &[
+                argument("", false, Value::Integer(9)),
+                argument("", true, Value::Null),
+                argument("", true, Value::Text("a".into())),
+            ],
+        )
+        .ok()
+        .unwrap();
+        assert_eq!(
+            positional.text,
+            "CALL hr.split_it(TOTAL => @eggdb_rpc_argument_0, NOTE => @eggdb_rpc_argument_2)"
+        );
+        assert_eq!(positional.bound.len(), 2);
+        assert_eq!(positional.bound[0].declared_type, Some(SqlType::Integer));
+        assert_eq!(
+            positional.returned,
+            [
+                ReturnedParameter {
+                    ordinal: 1,
+                    declaration: 1
+                },
+                ReturnedParameter {
+                    ordinal: 2,
+                    declaration: 2
+                }
+            ]
+        );
+        let named = plsql_procedure_call(
+            &split_it(),
+            "hr.split_it",
+            &[
+                argument("@HALF", true, Value::Null),
+                argument("@total", false, Value::Integer(4)),
+            ],
+        )
+        .ok()
+        .unwrap();
+        assert_eq!(
+            named.text,
+            "CALL hr.split_it(TOTAL => @eggdb_rpc_argument_1)"
+        );
+        assert_eq!(
+            named.returned,
+            [ReturnedParameter {
+                ordinal: 0,
+                declaration: 1
+            }]
+        );
+        let none = plsql_procedure_call(&split_it(), "hr.split_it", &[]).ok().unwrap();
+        assert_eq!(none.text, "CALL hr.split_it()");
+    }
+
+    #[test]
+    fn plsql_calls_refuse_unknown_repeated_extra_and_wrongly_output_arguments() {
+        let number = |parameters: &[RpcParameter]| {
+            plsql_procedure_call(&split_it(), "hr.split_it", parameters)
+                .err()
+                .map(|error| error.number)
+        };
+        assert_eq!(number(&[argument("@other", false, Value::Null)]), Some(8145));
+        assert_eq!(
+            number(&[
+                argument("@total", false, Value::Null),
+                argument("@TOTAL", false, Value::Null)
+            ]),
+            Some(8143)
+        );
+        assert_eq!(
+            number(&[
+                argument("", false, Value::Null),
+                argument("", true, Value::Null),
+                argument("", true, Value::Null),
+                argument("", false, Value::Null)
+            ]),
+            Some(8144)
+        );
+        assert_eq!(number(&[argument("@total", true, Value::Null)]), Some(8162));
+    }
+
+    #[test]
+    fn plsql_out_values_return_in_the_order_the_call_listed_them() {
+        let mut half = argument("@half", true, Value::Null);
+        half.sent = Some(vec![0x26, 4, 0]);
+        let unsent = argument("@note", true, Value::Null);
+        let returned = plsql_returned_values(
+            &split_it(),
+            &[half, unsent],
+            &[
+                ReturnedParameter {
+                    ordinal: 0,
+                    declaration: 1,
+                },
+                ReturnedParameter {
+                    ordinal: 1,
+                    declaration: 2,
+                },
+            ],
+            Some(&[Value::Integer(2), Value::Text("a!".into())]),
+        );
+        assert_eq!(returned.len(), 1);
+        let fallback = plsql_returned_values(
+            &split_it(),
+            &[{
+                let mut half = argument("@half", true, Value::Null);
+                half.sent = Some(vec![0x26, 4, 0]);
+                half
+            }],
+            &[ReturnedParameter {
+                ordinal: 0,
+                declaration: 1,
+            }],
+            None,
+        );
+        assert_eq!(fallback.len(), 1);
+        assert!(fallback[0].ends_with(&[0x26, 4, 0]));
+        assert_ne!(returned[0], fallback[0]);
     }
 }

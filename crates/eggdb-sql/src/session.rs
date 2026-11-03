@@ -4,6 +4,7 @@ pub(crate) mod database_switch;
 mod mysql;
 mod nonatomic;
 mod oracle;
+mod oracle_over_tds;
 mod restore;
 mod savepoints;
 mod sqlite;
@@ -11,6 +12,7 @@ pub(crate) mod sqlserver;
 mod triggers;
 mod tsql;
 
+pub use oracle_over_tds::{PlsqlParameter, PlsqlProcedure};
 pub use sqlserver::{BatchStep, NamedParameter, ParameterDeclaration, StoredProcedure};
 
 pub(crate) use oracle::create_text as oracle_create_text;

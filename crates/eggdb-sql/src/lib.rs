@@ -293,8 +293,8 @@ pub use served_databases::{
 pub use session::database_switch::DatabaseSwitch;
 pub use session::{
     BatchStep, InfoMessage, NamedParameter, OneStatementError, OneStatementRefusal, OutputColumn,
-    Parameter, ParameterDeclaration, PreparedStatement, QueryResult, Session, StatementDescription,
-    StoredProcedure, TransactionStatus,
+    Parameter, ParameterDeclaration, PlsqlParameter, PlsqlProcedure, PreparedStatement,
+    QueryResult, Session, StatementDescription, StoredProcedure, TransactionStatus,
 };
 pub use settings::POSTGRESQL_COMPATIBLE_VERSION;
 pub use sqlite_errors::sqlite_result_code_name;

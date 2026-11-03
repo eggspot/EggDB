@@ -1295,9 +1295,21 @@ Connection connection = DriverManager.getConnection("jdbc:postgresql://127.0.0.1
 - **Parameters and values**: pgjdbc's and libpq's `$1` placeholders work in Oracle's dialect
   next to Oracle's `:name` and `:1`, and over TDS the `@name` parameters of `sp_executesql`,
   `sp_prepare` and `sp_prepexec` (`@P0`, as mssql-jdbc and SqlClient write them) are bound by
-  name in Oracle SQL too. A stored procedure called by name over RPC runs as Transact-SQL
-  whichever dialect the connection chose, its parameters given by position or by name in any
-  order and the omitted ones taking their defaults. Values go out with the protocol's closest types (`NUMBER`
+  name in Oracle SQL too. A stored procedure called by name over RPC (mssql-jdbc's
+  `{call p(?, ?)}`, SqlClient's `CommandType.StoredProcedure`) runs the PL/SQL procedure of that
+  name when the connection reads Oracle SQL and one exists (`log_it`, `hr.log_it`,
+  `"HR"."LOG_IT"`, `pkg.proc`), and otherwise the Transact-SQL procedure, its parameters given
+  by position or by name (`@p_n` for `p_n`, in any case and order) and the omitted ones taking
+  their defaults; a PL/SQL procedure's `OUT` and `IN OUT` parameters that the call marks as
+  output come back as RPC return values, as SQL Server's output parameters do. Over the
+  PostgreSQL protocol, Oracle's `CALL p(...)` binds by position or with `=>`, `$1` included, and
+  returns the `OUT` and `IN OUT` parameters as one row, as PostgreSQL does. A TDS batch that
+  executes one of SQL Server's catalog procedures (`EXEC sp_tables ...`, mssql-jdbc's
+  `INSERT ... EXEC sp_columns_100 ...` for `getColumns`, and the same procedures called by name
+  over RPC) runs as Transact-SQL whichever dialect the connection chose, so mssql-jdbc's
+  `DatabaseMetaData` (`getTables`, `getColumns`, `getPrimaryKeys`, `getProcedures`,
+  `getProcedureColumns`) works while the connection reads Oracle SQL, and `sp_stored_procedures`,
+  `sp_sproc_columns` and `sys.objects` list PL/SQL procedures and functions too. Values go out with the protocol's closest types (`NUMBER`
   as `numeric`, `DATE` as `timestamp(0)`, `VARCHAR2` as `text` or `varchar`, over TDS as SQL
   Server's), so the drivers read them unchanged. A pooled TDS connection's reset returns to
   Transact-SQL.

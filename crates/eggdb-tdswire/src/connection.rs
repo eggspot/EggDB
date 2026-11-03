@@ -1045,11 +1045,30 @@ impl Connection<'_> {
         parameters: Option<&[NamedParameter]>,
         done_token: u8,
     ) -> Ran {
+        self.run_statements_inspecting(session, text, parameters, done_token, &mut |_| {})
+    }
+
+    pub(crate) fn run_statements_inspecting(
+        &mut self,
+        session: &mut Session<'_>,
+        text: &str,
+        parameters: Option<&[NamedParameter]>,
+        done_token: u8,
+        inspect: &mut dyn FnMut(&mut BatchStep),
+    ) -> Ran {
         let database = session.database().to_owned();
         self.attention.begin();
-        let ran = self.write_steps(text, database, done_token, |on_step| match parameters {
-            None => session.execute_batch(text, on_step),
-            Some(parameters) => session.execute_parameterized_batch(text, parameters, on_step),
+        let ran = self.write_steps(text, database, done_token, |on_step| {
+            let mut inspected = |mut step: BatchStep| {
+                inspect(&mut step);
+                on_step(step)
+            };
+            match parameters {
+                None => session.execute_batch(text, &mut inspected),
+                Some(parameters) => {
+                    session.execute_parameterized_batch(text, parameters, &mut inspected)
+                }
+            }
         });
         self.attention.end();
         self.forget_unprepared(session);

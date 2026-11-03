@@ -701,6 +701,7 @@ fn read_value(body: &[u8], at: &mut usize, column: ColumnType) -> Option<String>
             (length != 0).then_some(hex)
         }
         0xE7 if column.length == 0xFFFF => read_plp(body, at).map(|data| from_utf16(&data)),
+        0xE7 if column.length == 0xFFFF => read_plp(body, at).map(|data| from_utf16(&data)),
         0xE7 => {
             let length = u16_at(body, *at);
             *at += 2;
