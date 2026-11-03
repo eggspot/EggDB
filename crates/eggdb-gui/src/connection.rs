@@ -1,3 +1,4 @@
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -22,14 +23,50 @@ const NO_ACTIVE_TRANSACTION: &str = "25P01";
 const ROLLED_BACK_SAVEPOINT: &str = "eggdb_explain_analyze";
 const DATABASE_MISSING: &str = "3D000";
 
-/// What the connect card asks to open: a database file or a server.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What the connect card asks to open: a database file or a server. Its `Debug` shows a
+/// password as `***`.
+#[derive(Clone, PartialEq, Eq)]
 pub enum ConnectTarget {
     /// A database file on this computer.
     File(FileTarget),
     /// A server speaking the PostgreSQL protocol, such as `eggdb serve`.
     Server(ConnectOptions),
 }
+
+impl fmt::Debug for ConnectTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::File(file) => formatter.debug_tuple("File").field(file).finish(),
+            Self::Server(options) => formatter
+                .debug_tuple("Server")
+                .field(&RedactedConnectOptions(options))
+                .finish(),
+        }
+    }
+}
+
+/// [`ConnectOptions`] for `Debug` output, with the password shown as `***`.
+pub struct RedactedConnectOptions<'a>(pub &'a ConnectOptions);
+
+impl fmt::Debug for RedactedConnectOptions<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let options = self.0;
+        formatter
+            .debug_struct("ConnectOptions")
+            .field("host", &options.host)
+            .field("port", &options.port)
+            .field("user", &options.user)
+            .field("database", &options.database)
+            .field("password", &options.password.as_ref().map(|_| REDACTED))
+            .field("ssl_mode", &options.ssl_mode)
+            .field("ssl_root_cert", &options.ssl_root_cert)
+            .field("replication", &options.replication)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What `Debug` output shows in place of a password.
+pub const REDACTED: &str = "***";
 
 /// A database file to open, with the card's two checkboxes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -762,6 +799,20 @@ pub fn url_failure() -> ConnectFailure {
     ConnectFailure::new(
         "the URL is not a database URL".to_owned(),
         Some("postgresql://user@host:5432/database".to_owned()),
+        FailureField::Url,
+    )
+}
+
+/// The failure shown when a server URL asks for the server's certificate to be checked
+/// (`sslmode=verify-ca`, `sslmode=verify-full` or `sslrootcert`), which the client cannot do
+/// yet: it never connects with a weaker check than the URL asked for.
+pub fn certificate_verification_failure() -> ConnectFailure {
+    ConnectFailure::new(
+        "the client cannot verify server certificates yet".to_owned(),
+        Some(
+            "sslmode=require, which encrypts the connection without checking the certificate"
+                .to_owned(),
+        ),
         FailureField::Url,
     )
 }

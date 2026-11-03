@@ -735,8 +735,9 @@ pub struct ExplainStatements {
 /// `EXPLAIN`, or `EXPLAIN (ANALYZE, BUFFERS)` with `analyze`, which is always rolled back
 /// whatever the statement is, since a leading comment, `CREATE TABLE … AS`, `SELECT … INTO`,
 /// `EXECUTE` or a function can write; SQLite's `EXPLAIN QUERY PLAN`. A statement that already
-/// starts with `EXPLAIN` runs as it is, rolled back too since it may say `ANALYZE`. The error
-/// is the `Messages` text for a dialect EggDB cannot explain in yet.
+/// starts with `EXPLAIN` runs as it is, rolled back too since it may say `ANALYZE`, except in a
+/// dialect without `EXPLAIN` (SQL Server, Oracle). The error is the `Messages` text for a
+/// dialect EggDB cannot explain in yet.
 pub fn explain_statements(
     dialect: QueryDialect,
     statement: &str,
@@ -749,9 +750,6 @@ pub fn explain_statements(
         .map(str::to_ascii_lowercase)
         .collect();
     let first = words.first().map_or("", String::as_str);
-    if first == EXPLAIN_WORD {
-        return Ok(rolled_back(statement.to_owned(), 0));
-    }
     let not_yet = match dialect {
         QueryDialect::Oracle => Some(("Oracle's", "Oracle's EXPLAIN PLAN")),
         QueryDialect::SqlServer => Some(("SQL Server's", "SQL Server's showplan")),
@@ -761,6 +759,9 @@ pub fn explain_statements(
         return Err(format!(
             "not_supported: cannot explain in {dialect_name} dialect: {feature} is not in EggDB yet. Switch the dialect to PostgreSQL to explain the query; every dialect sees the same tables."
         ));
+    }
+    if first == EXPLAIN_WORD {
+        return Ok(rolled_back(statement.to_owned(), 0));
     }
     if analyze && dialect != QueryDialect::PostgreSql {
         return Err(format!(
@@ -1533,12 +1534,22 @@ Execution Time: 10.400 ms";
         assert!(typed.rolled_back);
         let sqlite = explain_statements(QueryDialect::Sqlite, "SELECT 1", false).unwrap();
         assert_eq!(sqlite.statements, ["EXPLAIN QUERY PLAN SELECT 1"]);
-        let typed = explain_statements(QueryDialect::Oracle, "explain select 1", false).unwrap();
+        let typed = explain_statements(QueryDialect::MySql, "explain select 1", false).unwrap();
         assert_eq!(typed.plan_at, 1);
         assert_eq!(
             (typed.statements, typed.prefix_len),
             (vec!["explain select 1".to_owned()], 0)
         );
+        for (dialect, name) in [
+            (QueryDialect::Oracle, "Oracle's"),
+            (QueryDialect::SqlServer, "SQL Server's"),
+        ] {
+            let typed = explain_statements(dialect, "explain select 1", false).unwrap_err();
+            assert!(
+                typed.starts_with(&format!("not_supported: cannot explain in {name} dialect")),
+                "{typed}"
+            );
+        }
         let oracle =
             explain_statements(QueryDialect::Oracle, "SELECT 1 FROM dual", false).unwrap_err();
         assert!(

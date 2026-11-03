@@ -104,6 +104,8 @@ pub const ROLE_TOOL_BAR: u32 = 63;
 pub const ROLE_TREE: u32 = 65;
 /// `ATSPI_ROLE_APPLICATION`.
 pub const ROLE_APPLICATION: u32 = 75;
+/// `ATSPI_ROLE_PASSWORD_TEXT`.
+pub const ROLE_PASSWORD_TEXT: u32 = 40;
 /// `ATSPI_ROLE_ENTRY`.
 pub const ROLE_ENTRY: u32 = 79;
 /// `ATSPI_ROLE_HEADING`.
@@ -243,6 +245,24 @@ pub fn role_name(role: AccessRole) -> &'static str {
         AccessRole::Grid => "table",
         AccessRole::ColumnHeader => "table column header",
         AccessRole::Cell => "table cell",
+    }
+}
+
+/// The AT-SPI role of `node`: password text for a password field, else its role's.
+pub fn node_role(node: &AccessNode) -> u32 {
+    if node.state.password {
+        ROLE_PASSWORD_TEXT
+    } else {
+        role(node.role)
+    }
+}
+
+/// The role name of `node`, matching [`node_role`].
+pub fn node_role_name(node: &AccessNode) -> &'static str {
+    if node.state.password {
+        "password text"
+    } else {
+        role_name(node.role)
     }
 }
 
@@ -1014,6 +1034,7 @@ fn editable_text_request(
     let length = chars.len();
     Ok(match member {
         "SetTextContents" => Some(AccessAction::SetValue(str_argument(body, 0)?.to_owned())),
+        "InsertText" | "DeleteText" if node.state.password => None,
         "InsertText" => {
             let position = offset_from_start(i32_argument(body, 0)?, length);
             let inserted = byte_prefix(str_argument(body, 1)?, i32_argument(body, 2)?);
@@ -1378,11 +1399,10 @@ impl AtspiApplication {
                 Value::Int32(node.map_or(-1, |node| index_in_parent(&self.nodes, node)))
             }
             "GetRelationSet" => Value::Array("(ua(so))".to_owned(), Vec::new()),
-            "GetRole" => Value::UInt32(node.map_or(ROLE_APPLICATION, |node| role(node.role))),
-            "GetRoleName" | "GetLocalizedRoleName" => Value::String(
-                node.map_or("application", |node| role_name(node.role))
-                    .to_owned(),
-            ),
+            "GetRole" => Value::UInt32(node.map_or(ROLE_APPLICATION, node_role)),
+            "GetRoleName" | "GetLocalizedRoleName" => {
+                Value::String(node.map_or("application", node_role_name).to_owned())
+            }
             "GetState" => {
                 let states = node.map_or_else(Vec::new, |node| states(node, self.window_active));
                 Value::Array(
@@ -3378,5 +3398,39 @@ mod tests {
             assert_eq!(signature_of_body(&decoded), "siiva{sv}");
         }
         assert!(application.set_tree(&nodes).is_empty());
+    }
+
+    #[test]
+    fn a_password_field_is_password_text_and_takes_only_a_whole_new_value() {
+        let mut password = node(5, Some(1), AccessRole::TextField, "Password");
+        password.value = Some("\u{2022}\u{2022}\u{2022}".to_owned());
+        password.state.password = true;
+        assert_eq!(node_role(&password), ROLE_PASSWORD_TEXT);
+        assert_eq!(node_role_name(&password), "password text");
+        let insert = [
+            Value::Int32(1),
+            Value::String("x".to_owned()),
+            Value::Int32(1),
+        ];
+        assert_eq!(
+            editable_text_request(&password, "InsertText", &insert).ok(),
+            Some(None)
+        );
+        let delete = [Value::Int32(0), Value::Int32(2)];
+        assert_eq!(
+            editable_text_request(&password, "DeleteText", &delete).ok(),
+            Some(None)
+        );
+        let whole = [Value::String("new secret".to_owned())];
+        assert_eq!(
+            editable_text_request(&password, "SetTextContents", &whole).ok(),
+            Some(Some(AccessAction::SetValue("new secret".to_owned())))
+        );
+        password.state.password = false;
+        assert_eq!(node_role(&password), ROLE_ENTRY);
+        assert!(matches!(
+            editable_text_request(&password, "DeleteText", &delete),
+            Ok(Some(AccessAction::SetValue(_)))
+        ));
     }
 }

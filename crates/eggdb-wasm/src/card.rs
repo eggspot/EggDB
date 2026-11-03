@@ -5,6 +5,7 @@ use eggdb_gui::browser::{
 };
 use eggdb_gui::connect_screen::{self, ConnectCard, DEFAULT_HEIGHT, DEFAULT_WIDTH, frame_size};
 use eggdb_gui::main_window::Faces;
+use eggdb_gui::pointer;
 use eggdb_gui::{BoxFace, Canvas, Theme, TrueTypeFont};
 use eggdb_platform::window::KeyPress;
 
@@ -114,8 +115,9 @@ fn input_key() -> Option<eggdb_platform::window::Key> {
 
 /// Answers the key whose DOM `KeyboardEvent.key` value is in the input, with `modifiers` an OR
 /// of 1 Shift, 2 Control, 4 Alt and 8 Meta. Returns the action for the host (0 none, 1 open,
-/// 2 browse, 3 cancel, 4 show the layout picker, 5 load the sample dataset, 6 quit), or
-/// [`KEY_IGNORED`] when the card does not use the key.
+/// 2 browse, 3 cancel, 4 show the layout picker, 5 load the sample dataset, 6 quit, 7 stop
+/// opening, 8 copy the selection with [`eggdb_wasm_card_copied_text`], 9 paste with
+/// [`eggdb_wasm_card_paste`]), or [`KEY_IGNORED`] when the card does not use the key.
 #[unsafe(no_mangle)]
 pub extern "C" fn eggdb_wasm_card_key(modifiers: u32) -> u32 {
     let Some(key) = input_key() else {
@@ -171,6 +173,39 @@ pub extern "C" fn eggdb_wasm_card_font(role: u32) -> u32 {
             _ => return 0,
         }
         1
+    })
+}
+
+/// Answers the text `Ctrl/Cmd+C` copies, the focused input's selection (never the
+/// password's), and returns 1; returns 0 with nothing to copy.
+#[unsafe(no_mangle)]
+pub extern "C" fn eggdb_wasm_card_copied_text() -> u32 {
+    match CARD.with(|card| card.borrow().copied_text()) {
+        Some(text) => {
+            super::answer(text);
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Pastes the UTF-8 text in the input into the focused input, made one line. Returns 1 when
+/// an input took it, 2 when it is over 1 MB and refused (the status line says so), and 0 when
+/// no input has the focus or the text is not UTF-8.
+#[unsafe(no_mangle)]
+pub extern "C" fn eggdb_wasm_card_paste() -> u32 {
+    let Ok(raw) = super::input_text() else {
+        return 0;
+    };
+    CARD.with(|card| {
+        let mut card = card.borrow_mut();
+        match pointer::paste_text(&raw) {
+            Ok(text) => u32::from(card.paste(&text)),
+            Err(refused) => {
+                card.status = Some(refused.to_owned());
+                2
+            }
+        }
     })
 }
 
@@ -251,7 +286,7 @@ mod tests {
         assert!(tree().contains("\"role\":\"button\",\"name\":\"Browse\",\"value\":null,\"placeholder\":null,\"focused\":true"));
         assert_eq!(key("Enter", 0), 2);
         assert_eq!(key("Shift", 0), KEY_IGNORED);
-        assert_eq!(key("F5", 0), KEY_IGNORED);
+        assert_eq!(key("F6", 0), KEY_IGNORED);
         write_input(&[0xff, 0xfe]);
         assert_eq!(eggdb_wasm_card_key(0), KEY_IGNORED);
         assert_eq!(eggdb_wasm_card_focus(NODE_FILE), 1);
@@ -271,5 +306,25 @@ mod tests {
         write_input(b"not a font");
         assert_eq!(eggdb_wasm_card_font(0), 0);
         assert_eq!(eggdb_wasm_card_font(5), 0);
+    }
+
+    #[test]
+    fn the_host_copies_and_pastes_through_the_card() {
+        eggdb_wasm_card_reset();
+        eggdb_wasm_card_render(1280, 800, 1.0, 0);
+        assert_eq!(key("c", 2), 8);
+        assert_eq!(eggdb_wasm_card_copied_text(), 1);
+        assert_eq!(output(), b"~/eggdb/quickstart.eggdb");
+        assert_eq!(key("v", 2), 9);
+        write_input(b"shop\n.eggdb");
+        assert_eq!(eggdb_wasm_card_paste(), 1);
+        assert!(tree().contains("\"value\":\"shop .eggdb\""));
+        assert_eq!(eggdb_wasm_card_copied_text(), 0);
+        write_input(&vec![b'x'; pointer::MAX_PASTE_BYTES + 1]);
+        assert_eq!(eggdb_wasm_card_paste(), 2);
+        assert!(tree().contains(pointer::PASTE_TOO_LARGE));
+        write_input(&[0xff]);
+        assert_eq!(eggdb_wasm_card_paste(), 0);
+        eggdb_wasm_card_reset();
     }
 }

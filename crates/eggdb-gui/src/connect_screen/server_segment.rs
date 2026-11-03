@@ -1,3 +1,5 @@
+use std::fmt;
+
 use eggdb_pgwire::client::ConnectOptions;
 
 use super::{
@@ -6,7 +8,8 @@ use super::{
 };
 use crate::canvas::Rect;
 use crate::connection::{
-    ConnectFailure, FailureField, ssl_mode, unsupported_protocol_failure, url_failure,
+    ConnectFailure, FailureField, REDACTED, certificate_verification_failure, ssl_mode,
+    unsupported_protocol_failure, url_failure,
 };
 
 /// The user `eggdb serve` logs in as when the User input is empty.
@@ -152,6 +155,9 @@ pub struct ServerUrl {
     pub database: String,
     /// `Use TLS`: off only for `?sslmode=disable`, or `?tls=false` for the other protocols.
     pub use_tls: bool,
+    /// Whether the URL asks for the server's certificate to be checked: `?sslmode=verify-ca`,
+    /// `?sslmode=verify-full` or an `sslrootcert`, which the client cannot do yet.
+    pub verifies_certificate: bool,
     /// Whether every part is whole: a host, a port that is a number from 1 to 65535, whole
     /// %-escapes and a known `sslmode` or `tls` value.
     pub well_formed: bool,
@@ -242,15 +248,24 @@ pub fn parse_server_url(text: &str) -> Option<ServerUrl> {
         well_formed = false;
     }
     let mut use_tls = true;
+    let mut verifies_certificate = false;
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
         let value = value.to_ascii_lowercase();
         let tls = match (protocol, name) {
             (Protocol::PostgreSql, "sslmode") => match value.as_str() {
                 "disable" => Some(false),
-                "allow" | "prefer" | "require" | "verify-ca" | "verify-full" => Some(true),
+                "allow" | "prefer" | "require" => Some(true),
+                "verify-ca" | "verify-full" => {
+                    verifies_certificate = true;
+                    Some(true)
+                }
                 _ => None,
             },
+            (Protocol::PostgreSql, "sslrootcert") => {
+                verifies_certificate = true;
+                continue;
+            }
             (Protocol::MySql | Protocol::SqlServer | Protocol::Redis, "tls") => {
                 match value.as_str() {
                     "false" | "0" | "no" | "off" => Some(false),
@@ -274,13 +289,15 @@ pub fn parse_server_url(text: &str) -> Option<ServerUrl> {
         port,
         database,
         use_tls,
+        verifies_certificate,
         well_formed,
     })
 }
 
 /// The server segment's fields, kept in step: editing the `URL` input fills the fields below
-/// it, and editing a field rewrites the URL (`docs/ux/workspace.md` 1.4).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// it, and editing a field rewrites the URL (`docs/ux/workspace.md` 1.4). Its `Debug` shows
+/// the password, in the Password input or typed into the URL, as `***`.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ServerForm {
     /// The `URL` input; it never holds the password.
     pub url: TextField,
@@ -299,6 +316,41 @@ pub struct ServerForm {
     /// `Use TLS`.
     pub use_tls: bool,
     scheme: &'static str,
+}
+
+impl fmt::Debug for ServerForm {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let password = if self.password.value().is_empty() {
+            ""
+        } else {
+            REDACTED
+        };
+        formatter
+            .debug_struct("ServerForm")
+            .field("url", &url_with_password_redacted(self.url.value()))
+            .field("protocol", &self.protocol)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("database", &self.database)
+            .field("user", &self.user)
+            .field("password", &password)
+            .field("use_tls", &self.use_tls)
+            .field("scheme", &self.scheme)
+            .finish()
+    }
+}
+
+fn url_with_password_redacted(text: &str) -> String {
+    let Some((scheme, rest)) = text.split_once("://") else {
+        return text.to_owned();
+    };
+    let Some((user_info, after)) = rest.rsplit_once('@') else {
+        return text.to_owned();
+    };
+    let Some((user, _)) = user_info.split_once(':') else {
+        return text.to_owned();
+    };
+    format!("{scheme}://{user}:{REDACTED}@{after}")
 }
 
 impl Default for ServerForm {
@@ -429,15 +481,19 @@ impl ServerForm {
     /// Where `Connect` goes: the fields as connect options, with libpq's defaults for what is
     /// left empty (host `localhost`, user `eggdb`, the user's name as the database). Fails
     /// with the URL's lines when a typed URL (one the fields did not write) does not parse or
-    /// the port is not a number, and
-    /// with the protocol's when the client cannot speak it yet.
+    /// the port is not a number, with the certificate's when the URL asks for a check the
+    /// client cannot make yet, and with the protocol's when the client cannot speak it yet.
     pub fn connect_options(&self) -> Result<ConnectOptions, ConnectFailure> {
         let typed = self.url.value().trim();
+        let read = parse_server_url(typed);
         if !typed.is_empty()
             && typed != self.written_url()
-            && !parse_server_url(typed).is_some_and(|url| url.well_formed)
+            && !read.as_ref().is_some_and(|url| url.well_formed)
         {
             return Err(url_failure());
+        }
+        if read.is_some_and(|url| url.verifies_certificate) {
+            return Err(certificate_verification_failure());
         }
         if self.protocol != Protocol::PostgreSql {
             return Err(unsupported_protocol_failure(self.protocol.label()));
@@ -847,5 +903,57 @@ mod tests {
             .connect_options()
             .expect("a URL the fields wrote is theirs");
         assert_eq!(options.host, "localhost");
+    }
+
+    #[test]
+    fn a_url_asking_for_a_certificate_check_is_refused_never_downgraded() {
+        for text in [
+            "postgresql://ada@db/shop?sslmode=verify-full",
+            "postgresql://ada@db/shop?sslmode=VERIFY-CA",
+            "postgresql://ada@db/shop?sslmode=require&sslrootcert=/etc/ca.pem",
+        ] {
+            assert!(read(text).verifies_certificate, "{text}");
+            let mut form = ServerForm::new();
+            typed(&mut form, text);
+            let failure = form.connect_options().unwrap_err();
+            assert_eq!(
+                failure.error_line(),
+                "Error: the client cannot verify server certificates yet",
+                "{text}"
+            );
+            assert!(
+                failure
+                    .try_line()
+                    .is_some_and(|fix| fix.starts_with("Try: sslmode=require")),
+                "{text}"
+            );
+            assert_eq!(failure.field, FailureField::Url);
+        }
+        assert!(!read("postgresql://db?sslmode=require").verifies_certificate);
+        let mut form = ServerForm::new();
+        typed(&mut form, "postgresql://ada@db/shop?sslmode=require");
+        assert_eq!(form.connect_options().unwrap().ssl_mode, SslMode::Require);
+    }
+
+    #[test]
+    fn debug_output_never_shows_a_password() {
+        let mut form = ServerForm::new();
+        typed(&mut form, "postgresql://ada:hunter2@db/shop");
+        let shown = format!("{form:?}");
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert!(shown.contains("ada:***@db/shop"), "{shown}");
+        form.forget_url_password();
+        let shown = format!("{form:?}");
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert!(shown.contains("password: \"***\""), "{shown}");
+        let options = form.connect_options().unwrap();
+        let target = crate::connection::ConnectTarget::Server(options);
+        let shown = format!("{target:?}");
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert!(shown.contains("Some(\"***\")"), "{shown}");
+        assert_eq!(
+            url_with_password_redacted("postgresql://ada:s?cr@et@db/shop"),
+            "postgresql://ada:***@db/shop"
+        );
     }
 }

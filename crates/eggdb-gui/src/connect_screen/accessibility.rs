@@ -353,6 +353,7 @@ fn text_field(
     tree.add(id, Some(NODE_PANEL), AccessRole::TextField, name, rect);
     if let Some(node) = tree.nodes.last_mut() {
         node.value = Some(value);
+        node.state.password = id == NODE_PASSWORD;
         node.placeholder = (!placeholder.is_empty()).then(|| placeholder.to_owned());
         node.caret = Some(crate::accessibility::field_caret(
             text.caret(),
@@ -559,7 +560,7 @@ impl ConnectCard {
             NODE_SAMPLE => Focus::SampleLink,
             _ => return false,
         };
-        self.focus = focus;
+        self.move_focus(focus);
         true
     }
 }

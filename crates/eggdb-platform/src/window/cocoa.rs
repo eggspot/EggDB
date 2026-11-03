@@ -216,6 +216,9 @@ pub struct AxRole {
     pub name_is_value: bool,
 }
 
+/// The NSAccessibility subrole of a password field.
+pub const SECURE_TEXT_FIELD_SUBROLE: &str = "AXSecureTextField";
+
 /// The NSAccessibility role for `role`, `None` for the window, which `NSWindow` already exposes.
 pub fn ax_role(role: AccessRole) -> Option<AxRole> {
     let (role, name_is_value) = match role {

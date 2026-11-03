@@ -483,6 +483,13 @@ impl WindowState {
         }
         self.send_flag_to(element, c"setAccessibilityElement:", YES);
         self.set_string(element, c"setAccessibilityRole:", ax.role);
+        if node.state.password {
+            self.set_string(
+                element,
+                c"setAccessibilitySubrole:",
+                cocoa::SECURE_TEXT_FIELD_SUBROLE,
+            );
+        }
         element
     }
 

@@ -41,6 +41,8 @@ pub const LIVE_SETTING_POLITE: i32 = 1;
 pub const LIVE_SETTING_ASSERTIVE: i32 = 2;
 /// `UIA_AcceleratorKeyPropertyId`: the bridge gives a node's shortcut here.
 pub const ACCELERATOR_KEY_PROPERTY: i32 = 30006;
+/// `UIA_IsPasswordPropertyId`.
+pub const IS_PASSWORD_PROPERTY: i32 = 30019;
 /// `UIA_ValueValuePropertyId`.
 pub const VALUE_VALUE_PROPERTY: i32 = 30045;
 /// `UIA_ValueIsReadOnlyPropertyId`.

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use eggdb_platform::window::{FileFilter, Key, KeyPress, OpenFileDialog};
+use eggdb_platform::window::{FileFilter, Key, KeyPress, MAX_ACCESS_VALUE_CHARS, OpenFileDialog};
 
 use crate::canvas::{Canvas, Rect};
 use crate::color::{Rgba, Theme};
@@ -342,6 +342,15 @@ impl CardError {
     }
 }
 
+/// A path a drop or the open-file dialog gave, kept exactly as the system returned it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChosenFile {
+    /// The path, never trimmed, `~`-expanded or turned into text and back.
+    pub path: PathBuf,
+    /// The File input's text it shows as; any other text there is typed, and resolved.
+    pub shown: String,
+}
+
 /// The connect card's state (`docs/ux/first-screen.md`): the `Open a file` segment's fields
 /// and which element has the keyboard focus.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -381,6 +390,9 @@ pub struct ConnectCard {
     pub pointer: PointerLook,
     /// How the focused input's caret draws at this moment of its blink.
     pub caret: CaretLook,
+    /// The path the last drop or dialog put in the File input: it opens as it is, and is
+    /// never created, while the input still shows it.
+    pub chosen_file: Option<ChosenFile>,
 }
 
 impl ConnectCard {
@@ -404,6 +416,7 @@ impl ConnectCard {
             failed_field: None,
             pointer: PointerLook::default(),
             caret: CaretLook::On,
+            chosen_file: None,
         }
     }
 
@@ -504,14 +517,53 @@ impl ConnectCard {
         true
     }
 
-    /// The file the card asks to open: the File input resolved against `home` and `current`
+    /// The file the card asks to open: a dropped or dialog-chosen path exactly as given and
+    /// never created, otherwise the typed File input resolved against `home` and `current`
     /// (`docs/ux/workspace.md` 1.1), with the two checkboxes.
     pub fn file_target(&self, home: Option<&Path>, current: &Path) -> FileTarget {
-        FileTarget {
-            path: resolve_typed_path(self.file.value(), home, current),
-            create_if_missing: self.create_if_missing,
-            read_only: self.read_only,
+        match self.shown_chosen_file() {
+            Some(chosen) => FileTarget {
+                path: chosen.to_path_buf(),
+                create_if_missing: false,
+                read_only: self.read_only,
+            },
+            None => FileTarget {
+                path: resolve_typed_path(self.file.value(), home, current),
+                create_if_missing: self.create_if_missing,
+                read_only: self.read_only,
+            },
         }
+    }
+
+    fn shown_chosen_file(&self) -> Option<&Path> {
+        self.chosen_file
+            .as_ref()
+            .filter(|chosen| chosen.shown == self.file.value())
+            .map(|chosen| chosen.path.as_path())
+    }
+
+    fn show_chosen_file(&mut self, path: &Path) {
+        let shown = path.display().to_string();
+        self.file.set(&shown);
+        self.chosen_file = Some(ChosenFile {
+            path: path.to_path_buf(),
+            shown,
+        });
+    }
+
+    /// Replaces the focused input's text with `text` in one edit, as a screen reader's
+    /// set-value asks: control characters dropped, at most [`MAX_ACCESS_VALUE_CHARS`] kept.
+    /// Returns whether an input took it; none does while an open runs.
+    pub fn set_focused_value(&mut self, text: &str) -> bool {
+        if self.busy {
+            return false;
+        }
+        let line: String = text
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(MAX_ACCESS_VALUE_CHARS)
+            .collect();
+        self.edit_focused_field(|field| field.set(&line))
     }
 
     /// Starts an open: clears the error lines, and takes only `Esc` until
@@ -555,12 +607,12 @@ impl ConnectCard {
         match server_segment::failure_focus(failure.field) {
             None => {
                 self.segment = Segment::File;
-                self.focus = Focus::FileInput;
+                self.move_focus(Focus::FileInput);
                 self.file.select_all();
             }
             Some(focus) => {
                 self.segment = Segment::Server;
-                self.focus = focus;
+                self.move_focus(focus);
                 if let Some(field) = self.server.field_mut(focus) {
                     field.select_all();
                 }
@@ -580,6 +632,7 @@ impl ConnectCard {
     /// the error lines of the other segment's attempt go.
     pub fn show_segment(&mut self, segment: Segment) {
         if self.segment != segment {
+            self.server.forget_url_password();
             self.segment = segment;
             self.error = None;
             self.failed_field = None;
@@ -610,10 +663,10 @@ impl ConnectCard {
         self.busy = false;
         self.progress = None;
         self.status = Some("Cancelled".to_owned());
-        self.focus = match self.segment {
+        self.move_focus(match self.segment {
             Segment::File => Focus::FileInput,
             Segment::Server => Focus::Url,
-        };
+        });
     }
 
     /// Takes the file the OS dialog returned: its path in the input, nothing selected, the
@@ -622,17 +675,20 @@ impl ConnectCard {
     pub fn choose_file(&mut self, chosen: Option<&Path>) {
         match chosen {
             Some(path) => {
-                self.file.set(&path.display().to_string());
-                self.focus = Focus::FileInput;
+                self.show_chosen_file(path);
+                self.move_focus(Focus::FileInput);
             }
-            None => self.focus = Focus::Browse,
+            None => self.move_focus(Focus::Browse),
         }
     }
 
     /// What `Browse…` asks the OS dialog for: `*.eggdb` first and `All files` second,
     /// starting in the input's directory when it exists, otherwise in `home`.
     pub fn file_dialog_request(&self, home: Option<&Path>, current: &Path) -> OpenFileDialog {
-        let typed = resolve_typed_path(self.file.value(), home, current);
+        let typed = self.shown_chosen_file().map_or_else(
+            || resolve_typed_path(self.file.value(), home, current),
+            Path::to_path_buf,
+        );
         let start_in = if typed.is_dir() {
             Some(typed)
         } else {
@@ -674,9 +730,9 @@ impl ConnectCard {
         if self.busy {
             return ConnectAction::None;
         }
-        self.file.set(&first.display().to_string());
+        self.show_chosen_file(first);
         self.show_segment(Segment::File);
-        self.focus = Focus::FileInput;
+        self.move_focus(Focus::FileInput);
         self.status = None;
         if paths.len() > 1 {
             self.status = Some(format!("Opened the first of {} files", paths.len()));
@@ -718,10 +774,16 @@ impl ConnectCard {
         order
     }
 
-    fn step_focus(&mut self, backwards: bool) {
-        if self.focus == Focus::Url {
+    /// Moves the keyboard focus to `focus`, by key, click or screen reader alike: leaving the
+    /// `URL` input takes a password typed into it out of the URL.
+    pub fn move_focus(&mut self, focus: Focus) {
+        if self.focus == Focus::Url && focus != Focus::Url {
             self.server.forget_url_password();
         }
+        self.focus = focus;
+    }
+
+    fn step_focus(&mut self, backwards: bool) {
         let order = self.focus_order();
         let at = order
             .iter()
@@ -732,7 +794,7 @@ impl ConnectCard {
         } else {
             (at + 1) % order.len()
         };
-        self.focus = order.get(next).copied().unwrap_or(Focus::FileInput);
+        self.move_focus(order.get(next).copied().unwrap_or(Focus::FileInput));
     }
 
     fn activate(&self) -> ConnectAction {
@@ -785,7 +847,7 @@ pub fn handle_key(mut card: ConnectCard, press: KeyPress) -> (ConnectCard, Conne
         Key::F4 if modifiers.alt => ConnectAction::Quit,
         Key::Character('o' | 'O') if primary => {
             card.show_segment(Segment::File);
-            card.focus = Focus::FileInput;
+            card.move_focus(Focus::FileInput);
             ConnectAction::None
         }
         Key::Left | Key::Home if card.focus == Focus::Segments => {
@@ -2091,5 +2153,27 @@ mod tests {
         assert_eq!(on.pixel(x, y), Some(theme.accent));
         assert_ne!(off.pixel(x, y), Some(theme.accent));
         assert_eq!(inactive.pixel(x, y), Some(theme.text_disabled));
+    }
+
+    #[test]
+    fn a_chosen_or_dropped_path_is_kept_exactly_and_typed_text_is_resolved() {
+        let home = Path::new("/home/ada");
+        let current = Path::new("/work");
+        let mut card = ConnectCard::first_start();
+        let chosen = PathBuf::from("/data/shop.eggdb ");
+        card.choose_file(Some(&chosen));
+        let target = card.file_target(Some(home), current);
+        assert_eq!(target.path, chosen);
+        assert!(!target.create_if_missing);
+        let tilde = PathBuf::from("~/literal.eggdb");
+        assert_eq!(
+            card.drop_files(std::slice::from_ref(&tilde)),
+            ConnectAction::Open
+        );
+        assert_eq!(card.file_target(Some(home), current).path, tilde);
+        card.file.set(" ~/typed.eggdb ");
+        let typed = card.file_target(Some(home), current);
+        assert_eq!(typed.path, home.join("typed.eggdb"));
+        assert!(typed.create_if_missing);
     }
 }

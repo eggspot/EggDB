@@ -549,6 +549,14 @@ impl Workspace {
                 if !card.focus_node(node.id) {
                     return WorkspaceCommand::None;
                 }
+                if let AccessAction::SetValue(text) = &request.action
+                    && node.role == AccessRole::TextField
+                {
+                    if card.set_focused_value(text) {
+                        self.input_at(now);
+                    }
+                    return WorkspaceCommand::None;
+                }
                 crate::accessibility::action_keys(node, &request.action)
             }
             Screen::Main(window) => window.access_keys(node, &request.action),
@@ -588,6 +596,7 @@ impl Workspace {
             .as_ref()
             .is_some_and(|reading| reading.read == CatalogRead::Sample(name.clone()));
         if shown || being_read {
+            self.sample_wanted = None;
             return;
         }
         self.sample_wanted = Some(name);
@@ -931,6 +940,7 @@ impl Workspace {
         if let Some(card) = self.card_mut() {
             card.show_segment(Segment::File);
             card.file.set(typed);
+            card.chosen_file = None;
         }
         self.start_open(now);
     }
@@ -1434,6 +1444,10 @@ mod tests {
         let directory = scratch("drop");
         let first = directory.join("dropped.eggdb");
         let _ = std::fs::remove_file(&first);
+        drop(
+            eggdb::Database::open_with(&first, eggdb::Options::new().create_if_missing(true))
+                .expect("the dropped file is made first"),
+        );
         let now = Instant::now();
         let mut workspace = workspace(Arc::new(EngineConnector), directory.clone());
         workspace.drag_entered(std::slice::from_ref(&directory));
@@ -1776,5 +1790,135 @@ mod tests {
         workspace.set_reduced_motion(true);
         workspace.tick(start + Duration::from_millis(2_800));
         assert_eq!(card(&mut workspace).caret, pointer::CaretLook::On);
+    }
+
+    fn with_url_password(workspace: &mut Workspace) {
+        let card = workspace.card_mut().expect("the card");
+        card.show_segment(Segment::Server);
+        card.move_focus(Focus::Url);
+        card.server.url.set("postgresql://ada:hunter2@db/shop");
+        card.server.url_edited();
+    }
+
+    #[test]
+    fn leaving_the_url_input_by_click_screen_reader_or_segment_forgets_its_password() {
+        let mut workspace = workspace(
+            Arc::new(SlowConnector(Duration::ZERO)),
+            scratch("url-password"),
+        );
+        let now = Instant::now();
+        with_url_password(&mut workspace);
+        let host = centre_of(&workspace, connect_screen::NODE_HOST);
+        let _ = click(&mut workspace, host, now);
+        let shown = card(&mut workspace);
+        assert_eq!(shown.focus, Focus::Host);
+        assert_eq!(shown.server.url.value(), "postgresql://ada@db:5432/shop");
+        assert_eq!(shown.server.password.value(), "hunter2");
+        with_url_password(&mut workspace);
+        let tree = workspace.pointer_tree(POINTER_FACES, WINDOW);
+        let _ = workspace.access(
+            &request(connect_screen::NODE_DATABASE, AccessAction::Focus),
+            &tree,
+            now,
+        );
+        let shown = card(&mut workspace);
+        assert_eq!(shown.focus, Focus::Database);
+        assert_eq!(shown.server.url.value(), "postgresql://ada@db:5432/shop");
+        with_url_password(&mut workspace);
+        workspace
+            .card_mut()
+            .expect("the card")
+            .show_segment(Segment::File);
+        assert!(!card(&mut workspace).server.url.value().contains("hunter2"));
+    }
+
+    #[test]
+    fn a_screen_reader_sets_a_card_field_in_one_edit() {
+        let mut workspace = workspace(
+            Arc::new(SlowConnector(Duration::ZERO)),
+            scratch("set-value"),
+        );
+        let now = Instant::now();
+        if let Some(card) = workspace.card_mut() {
+            card.show_segment(Segment::Server);
+        }
+        let tree = workspace.pointer_tree(POINTER_FACES, WINDOW);
+        let spoken = "postgresql://ada@db:5433/shop\u{7}".to_owned();
+        let _ = workspace.access(
+            &request(connect_screen::NODE_URL, AccessAction::SetValue(spoken)),
+            &tree,
+            now,
+        );
+        let shown = card(&mut workspace);
+        assert_eq!(shown.server.url.value(), "postgresql://ada@db:5433/shop");
+        assert_eq!(
+            (shown.server.host.value(), shown.server.port.value()),
+            ("db", "5433")
+        );
+        assert_eq!(shown.server.url.caret(), shown.server.url.value().len());
+    }
+
+    #[test]
+    fn a_dropped_path_opens_exactly_as_given_and_is_never_created() {
+        let directory = scratch("dropped");
+        let missing = directory.join("missing.eggdb ");
+        let _ = std::fs::remove_file(&missing);
+        let now = Instant::now();
+        let mut workspace = workspace(Arc::new(EngineConnector), directory.clone());
+        assert!(card(&mut workspace).create_if_missing);
+        workspace.dropped(std::slice::from_ref(&missing), now);
+        workspace.wait_for_open(Duration::from_secs(10));
+        let shown = card(&mut workspace);
+        let error = shown.error.expect("a missing dropped file fails");
+        assert!(
+            error.line.ends_with("missing.eggdb : no such file"),
+            "{}",
+            error.line
+        );
+        assert!(!missing.exists());
+        assert!(!directory.join("missing.eggdb").exists());
+    }
+
+    #[derive(Debug)]
+    struct TwoTables;
+
+    impl Connector for TwoTables {
+        fn connect(&self, _: &ConnectTarget) -> Result<Connection, ConnectFailure> {
+            let mut connection = Connection::in_memory("two.eggdb")?;
+            connection
+                .run("CREATE TABLE alpha (x INT); CREATE TABLE beta (x INT)")
+                .map_err(|failure| ConnectFailure {
+                    code: None,
+                    message: failure.message,
+                    fix: None,
+                    field: FailureField::File,
+                })?;
+            Ok(connection)
+        }
+    }
+
+    #[test]
+    fn returning_to_the_table_being_sampled_drops_the_one_wanted_next() {
+        let mut workspace = workspace(Arc::new(TwoTables), scratch("samples"));
+        workspace.open_typed("two.eggdb", Instant::now());
+        workspace.wait_for_open(Duration::from_secs(10));
+        let window = workspace.main_window_mut().expect("the main window");
+        let names: Vec<_> = (0..2)
+            .map(|table| inspector::sampled_name(&window.tree, TreeItem::Table(table)))
+            .collect();
+        assert!(names.iter().all(Option::is_some), "{names:?}");
+        assert!(workspace.reading.is_none());
+        workspace.inspect(TreeItem::Table(0));
+        let first = CatalogRead::Sample(names[0].clone().unwrap_or_default());
+        assert!(
+            workspace
+                .reading
+                .as_ref()
+                .is_some_and(|reading| reading.read == first)
+        );
+        workspace.inspect(TreeItem::Table(1));
+        assert_eq!(workspace.sample_wanted, names[1]);
+        workspace.inspect(TreeItem::Table(0));
+        assert_eq!(workspace.sample_wanted, None);
     }
 }

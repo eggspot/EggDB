@@ -386,6 +386,10 @@ pub struct AccessState {
     pub invalid: bool,
     /// The value can be read but not changed (the DDL box).
     pub read_only: bool,
+    /// The value is a password, given masked: bridges flag it as one (UIA `IsPassword`,
+    /// AT-SPI's password-text role, the `AXSecureTextField` subrole) and take only a whole
+    /// new value for it, never an edit of part of the mask.
+    pub password: bool,
 }
 
 /// What a screen reader may ask a node to do; each bridge offers only these.

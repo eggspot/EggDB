@@ -1007,6 +1007,7 @@ fn node_property(node: &AccessNode, property: i32) -> Option<Variant> {
         uia::FULL_DESCRIPTION_PROPERTY => Variant::string(node.description.as_deref()?)?,
         uia::ACCELERATOR_KEY_PROPERTY => Variant::string(node.shortcut.as_deref()?)?,
         uia::IS_DATA_VALID_FOR_FORM_PROPERTY => Variant::boolean(!node.state.invalid),
+        uia::IS_PASSWORD_PROPERTY => Variant::boolean(node.state.password),
         uia::HEADING_LEVEL_PROPERTY if node.role == AccessRole::Heading => {
             Variant::integer(uia::HEADING_LEVEL_1)
         }
