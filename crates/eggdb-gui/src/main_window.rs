@@ -127,7 +127,6 @@ pub struct MainWindow {
     pub chord_started: bool,
 }
 
-/// A region of the main window, as EggDB's own layout draws it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Area {
     Toolbar,
@@ -202,8 +201,6 @@ impl MainWindow {
         }
     }
 
-    /// Where `area`, drawn as EggDB's own layout draws it, goes in this window's layout: the
-    /// shift from EggDB's place and the rect it is cut to; `None` when the layout hides it.
     fn placed(&self, area: Area) -> Option<Placed> {
         let width = self.width.max(WIDTH) as f32;
         if self.layout == Layout::EggDb {
@@ -239,8 +236,6 @@ impl MainWindow {
         }
     }
 
-    /// Puts the bounds of `nodes`, laid out as EggDB's own layout places them, where this
-    /// window's layout draws them; a hidden region's nodes get empty bounds.
     fn place_nodes(&self, nodes: &mut [AccessNode]) {
         if self.layout == Layout::EggDb {
             return;
