@@ -407,7 +407,7 @@ impl Session<'_> {
         let stomp_config = eggdb_stomp::ServerConfig {
             user: user.clone(),
             password_sha256: eggdb_crypto::sha256(password.as_bytes()),
-            max_connections,            max_connections,
+            max_connections,
             memory_budget: Arc::clone(&memory_budget),
         };
         let nats_listener = match options.nats_listen {
