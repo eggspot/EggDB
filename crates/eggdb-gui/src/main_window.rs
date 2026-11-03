@@ -4858,7 +4858,7 @@ mod tests {
             format!("    button \"Run\" actions=invoke shortcut={primary}+Enter\n"),
             "    button \"Stop\" [disabled] actions=invoke shortcut=Esc\n".to_owned(),
             "  grid \"Results\" description=\"3 rows, 2 columns; 1 row by 1 column selected\" table=3x2\n".to_owned(),
-            "    columnheader \"id\" cell=0,0\n".to_owned(),
+            "    columnheader \"id\" description=\"width 80 px\" cell=0,0\n".to_owned(),
             "    cell \"name\" value=\"Ada Lovelace\" actions=select,focus cell=0,1\n".to_owned(),
         ] {
             assert!(dump.contains(&line), "{line} in\n{dump}");
@@ -5290,6 +5290,8 @@ mod tests {
         assert_eq!(window.tab.title, "Query 3");
         let _ = window.key(primary('w'), now);
         assert_eq!(window.tab.title, "Query 1");
+        assert!(window.close_prompt.is_none());
+        let _ = window.key(primary('w'), now);
         assert!(window.close_prompt.is_some(), "Query 1 holds text");
     }
 

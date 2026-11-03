@@ -698,7 +698,7 @@ mod tests {
         );
         assert_eq!(picker.click_row(99, 2), PickerOutcome::Open);
         assert_eq!(
-            press_at(&mut picker, size, 400.0, 200.0, 1),
+            press_at(&mut picker, size, 400.0, 250.0, 1),
             PickerOutcome::Open
         );
         assert_eq!(picker.highlighted, 1);

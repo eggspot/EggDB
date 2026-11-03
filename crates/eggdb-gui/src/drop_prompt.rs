@@ -518,7 +518,7 @@ mod tests {
         );
         assert_eq!(
             drop_statement(&trigger, QueryDialect::Oracle),
-            "DROP TRIGGER orders_audit;"
+            "DROP TRIGGER \"orders_audit\";"
         );
         assert_eq!(
             drop_statement(&target(DropKind::View, "Order Totals"), QueryDialect::MySql),
