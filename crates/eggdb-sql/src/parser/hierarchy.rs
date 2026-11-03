@@ -367,7 +367,7 @@ fn builder_of(select: &mut Select) -> Option<HierarchyBuilder<'_>> {
         return None;
     };
     Some(HierarchyBuilder {
-        inner: &mut **inner,
+        inner,
         hierarchy,
     })
 }

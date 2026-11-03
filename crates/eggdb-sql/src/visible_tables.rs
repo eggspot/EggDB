@@ -526,11 +526,13 @@ fn referenced_positions(
     Ok(Some((parent_table.columns, positions)))
 }
 
+type ParentKey = (ForeignKey, TableDefinition);
+
 fn parents_outside_of(
     reader: &dyn KeyValueRead,
     child: &[u8],
     parent: &[u8],
-) -> SqlResult<Option<(TableDefinition, Vec<(ForeignKey, TableDefinition)>)>> {
+) -> SqlResult<Option<(TableDefinition, Vec<ParentKey>)>> {
     let (Ok(child_name), Ok(parent_name)) =
         (std::str::from_utf8(child), std::str::from_utf8(parent))
     else {

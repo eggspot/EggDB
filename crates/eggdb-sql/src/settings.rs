@@ -1,5 +1,6 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 
 /// The PostgreSQL release whose behaviour EggDB's PostgreSQL dialect follows, as clients read it
 /// from `server_version`.
@@ -374,9 +375,11 @@ impl TransactionSettings {
                 self.at_commit.remove(&name);
             }
             SettingScope::Transaction => {
-                if !self.at_commit.contains_key(&name) {
-                    let value = settings.get(&name).ok();
-                    self.at_commit.insert(name, value);
+                if let Entry::Vacant(entry) =
+                    self.at_commit.entry(name)
+                {
+                    let value = settings.get(entry.key()).ok();
+                    entry.insert(value);
                 }
             }
         }

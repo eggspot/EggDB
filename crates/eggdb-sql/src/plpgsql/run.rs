@@ -989,9 +989,9 @@ impl<'r> Run<'r> {
                 inner: self.writer.get(),
                 log: &mut self.undo,
             };
-            body(&mut writer, self.tables, &*self.settings)
+            body(&mut writer, self.tables, &self.settings)
         } else {
-            body(self.writer.get(), self.tables, &*self.settings)
+            body(self.writer.get(), self.tables, &self.settings)
         }
     }
 
@@ -1118,7 +1118,7 @@ impl<'r> Run<'r> {
             && let RoutineWriter::Nonatomic(control) = &mut self.writer
         {
             let binding = crate::name_resolution::Binding {
-                settings: &*self.settings,
+                settings: &self.settings,
                 walk_expressions: true,
                 target_privilege: None,
             };

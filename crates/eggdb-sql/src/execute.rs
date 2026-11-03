@@ -2400,7 +2400,7 @@ pub(crate) fn returned_rows(
     items: &Option<Vec<SelectItem>>,
     scope: Scope<'_>,
     rows: &[Vec<Value>],
-) -> SqlResult<Option<(Vec<OutputColumn>, Vec<Vec<Value>>)>> {
+) -> SqlResult<Option<ReturnedRows>> {
     let Some(projection) = returning(items, scope)? else {
         return Ok(None);
     };
@@ -4289,6 +4289,7 @@ fn update_rows(
 }
 
 pub(crate) type RowUpdate = (Vec<u8>, Vec<u8>, Vec<Value>);
+pub(crate) type ReturnedRows = (Vec<OutputColumn>, Vec<Vec<Value>>);
 
 struct Upsert<'u> {
     updates: &'u [(usize, Expr)],

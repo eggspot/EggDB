@@ -44,6 +44,7 @@ impl std::fmt::Debug for ServerConfig {
 }
 
 type SharedWriter = Arc<Mutex<dyn Write + Send>>;
+type RetainedMessage = (String, u8, Vec<u8>);
 
 const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -150,7 +151,7 @@ impl<'k> Broker<'k> {
         &self,
         filter: &str,
         budget: &'b MemoryBudget,
-    ) -> Result<(Vec<(String, u8, Vec<u8>)>, Reservation<'b>), String> {
+    ) -> Result<(Vec<RetainedMessage>, Reservation<'b>), String> {
         let mut found = Vec::new();
         let mut held = budget.empty_reservation();
         let mut found_bytes = 0usize;

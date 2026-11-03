@@ -85,6 +85,7 @@ pub enum WindowFocus {
 
 /// What a key in the main window asks the workspace to do.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum WindowAction {
     /// The query tab's answer.
     Tab(TabAction),

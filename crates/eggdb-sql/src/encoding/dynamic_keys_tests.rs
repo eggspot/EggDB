@@ -236,12 +236,12 @@ fn hostile_dynamic_keys_are_errors_never_panics_and_only_canonical_keys_are_acce
         let length = (random.next() % 24) as usize;
         let mut bytes: Vec<u8> = (0..length).map(|_| random.next() as u8).collect();
         if let Some(first) = bytes.first_mut()
-            && random.next() % 4 != 0
+            && !random.next().is_multiple_of(4)
         {
             *first = PRESENT;
         }
         if let Some(second) = bytes.get_mut(1)
-            && random.next() % 4 != 0
+            && !random.next().is_multiple_of(4)
         {
             *second = 1 + (random.next() % 3) as u8;
         }

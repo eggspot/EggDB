@@ -236,7 +236,7 @@ fn grouping_sets_keep_postgresql_errors() {
         ),
         "CUBE is limited to 12 elements"
     );
-    let twelve = vec!["brand"; 12].join(", ");
+    let twelve = ["brand"; 12].join(", ");
     assert_eq!(
         refused(
             &mut session,

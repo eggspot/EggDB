@@ -406,11 +406,13 @@ fn with_target_row(joined_row: &[Value], item: &Item, target_row: &[Value]) -> V
     row
 }
 
+type KeyedRow = (Vec<u8>, Vec<Value>);
+
 fn current_rows(
     reader: &dyn KeyValueRead,
     table: &TableDefinition,
     matched: Vec<Matched>,
-) -> SqlResult<(Vec<(Vec<u8>, Vec<Value>)>, Vec<usize>)> {
+) -> SqlResult<(Vec<KeyedRow>, Vec<usize>)> {
     let mut rows = Vec::with_capacity(matched.len());
     let mut joined = Vec::with_capacity(matched.len());
     for Matched { key, joined_row } in matched {
