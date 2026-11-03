@@ -1,7 +1,7 @@
 use crate::commands::{Client, Context};
 use crate::keyspace::Keyspace;
 use crate::protocol::{ProtocolError, Reply, RequestReader};
-use crate::pubsub::{Hub, Kind};
+use crate::pubsub::{Hub, Kind, Queued};
 use crate::transactions::execute_with_transactions;
 use eggdb_platform::connection_limits::{MemoryBudget, UNCOUNTED_BUFFER_BYTES};
 use std::io::{self, Write};
@@ -85,7 +85,7 @@ struct Connection<'s> {
     id: u64,
     hub: &'s Hub,
     writer: Arc<Mutex<TcpStream>>,
-    outbox: Option<(Sender<Vec<u8>>, Arc<AtomicUsize>)>,
+    outbox: Option<(Sender<Queued>, Arc<AtomicUsize>)>,
 }
 
 impl Connection<'_> {
@@ -101,19 +101,19 @@ impl Connection<'_> {
         if self.outbox.is_some() {
             return;
         }
-        let (sender, receiver) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (sender, receiver) = std::sync::mpsc::channel::<Queued>();
         let pending = Arc::new(AtomicUsize::new(0));
         let writer = Arc::clone(&self.writer);
         let forwarded = Arc::clone(&pending);
         let started = std::thread::Builder::new()
             .name("eggdb-resp-push".to_owned())
             .spawn(move || {
-                for frame in receiver {
+                for queued in receiver {
                     forwarded.fetch_sub(1, Ordering::AcqRel);
                     let mut stream = writer
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if stream.write_all(&frame).is_err() {
+                    if stream.write_all(&queued.frame).is_err() {
                         return;
                     }
                 }
@@ -262,7 +262,7 @@ pub fn serve(
 ) -> io::Result<usize> {
     listener.set_nonblocking(true)?;
     let active = AtomicUsize::new(0);
-    let hub = Hub::default();
+    let hub = Hub::new(Arc::clone(&config.memory_budget));
     let next_id = AtomicU64::new(1);
     std::thread::scope(|scope| {
         while !stop() {
