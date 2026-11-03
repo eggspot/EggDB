@@ -1362,9 +1362,13 @@ fn view_rows(dictionary: &Dictionary<'_>) -> Vec<Vec<Value>> {
                 .row()
                 .set("owner", dictionary.owner(&entry.schema))
                 .set("view_name", shown(&entry.name))
-                .set("text_length", number(view.query.len() as i64))
-                .set("text", text(&view.query))
-                .set("text_vc", text(&view.query))
+                .set(
+                    "text_length",
+                    view.shown_query()
+                        .map_or(Value::Null, |query| number(query.len() as i64)),
+                )
+                .set("text", view.shown_query().map_or(Value::Null, text))
+                .set("text_vc", view.shown_query().map_or(Value::Null, text))
                 .set("read_only", text("N"))
                 .set("editioning_view", text("N"))
                 .set("bequeath", text("DEFINER"))

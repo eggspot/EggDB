@@ -186,7 +186,7 @@ fn kept_index_text(
 
 struct ListedView {
     name: String,
-    text: String,
+    text: Option<String>,
 }
 
 fn listed_views(reader: &dyn KeyValueRead) -> SqlResult<Vec<ListedView>> {
@@ -195,12 +195,16 @@ fn listed_views(reader: &dyn KeyValueRead) -> SqlResult<Vec<ListedView>> {
         if crate::temporary::is_temporary_name(&view.name) {
             continue;
         }
-        let generated = view_text(&view);
-        let text = if crate::schemas::schema_of(&view.name) == crate::schemas::DEFAULT_SCHEMA {
-            crate::sqlite_schema_text::original_text(reader, &view.name, &generated)?
-                .unwrap_or(generated)
+        let text = if view.shown_query().is_none() {
+            None
+        } else if crate::schemas::schema_of(&view.name) == crate::schemas::DEFAULT_SCHEMA {
+            let generated = view_text(&view);
+            Some(
+                crate::sqlite_schema_text::original_text(reader, &view.name, &generated)?
+                    .unwrap_or(generated),
+            )
         } else {
-            generated
+            Some(view_text(&view))
         };
         listed.push(ListedView {
             name: crate::schemas::base_name(&view.name).to_owned(),
@@ -619,7 +623,7 @@ impl<'s> Session<'s> {
                     text_literal(view.name.clone()),
                     text_literal(view.name),
                     integer_literal(0),
-                    text_literal(view.text),
+                    view.text.map_or_else(null_literal, text_literal),
                 ]);
             }
             for listed in &triggers {

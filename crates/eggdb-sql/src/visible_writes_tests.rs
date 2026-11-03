@@ -763,6 +763,50 @@ fn a_change_to_a_listed_column_moves_the_hidden_index_entries_with_it() {
 }
 
 #[test]
+fn a_tied_column_changed_to_an_equal_value_written_differently_is_refused() {
+    let store = MemoryStore::default();
+    let mut owner = Session::new(&store);
+    runs(
+        &mut owner,
+        "CREATE TABLE prices (
+             id integer PRIMARY KEY,
+             amount numeric,
+             label text,
+             places integer,
+             widest integer,
+             CHECK (scale(amount) <= places),
+             CHECK (length(label) <= widest)
+         );
+         INSERT INTO prices VALUES (1, 1.0, 'a', 1, 3)",
+    );
+    owner.close().unwrap();
+    let limited = ConfinedStore {
+        store: &store,
+        tables: VisibleTables::new(["prices(id,amount,label)"]),
+    };
+    let mut session = Session::new(&limited);
+    runs(
+        &mut session,
+        "UPDATE prices SET amount = 1.0, label = 'a' WHERE id = 1",
+    );
+    for (sql, column) in [
+        ("UPDATE prices SET amount = 1.00 WHERE id = 1", "amount"),
+        ("UPDATE prices SET label = 'a   ' WHERE id = 1", "label"),
+    ] {
+        let message = refused(&mut session, sql);
+        assert!(
+            message.starts_with(&format!("cannot change column \"{column}\" of \"prices\"")),
+            "{sql}: {message}"
+        );
+    }
+    session.close().unwrap();
+    assert_eq!(
+        shown(&store, "SELECT amount, label FROM prices"),
+        "amount|label\n1.0|a\nSELECT 1"
+    );
+}
+
+#[test]
 fn a_write_whose_outcome_would_test_a_hidden_value_is_refused_whatever_that_value_is() {
     let store = staff();
     let limited = staff_limited(&store);
@@ -953,6 +997,232 @@ fn a_view_listed_with_columns_shows_only_those_and_cannot_be_changed() {
     assert_eq!(
         shown(&store, "SELECT count(*) FROM staff"),
         "count\n1\nSELECT 1"
+    );
+}
+
+fn rendered_in(store: &ConfinedStore<'_>, dialect: crate::Dialect, sql: &str) -> String {
+    let mut session = Session::with_dialect(store, dialect);
+    let mut outputs = Vec::new();
+    if let Err(error) = session.execute(sql, &mut |result| outputs.push(render(&result))) {
+        panic!("{sql}: {error}");
+    }
+    session.close().unwrap();
+    outputs.join("\n")
+}
+
+#[test]
+fn a_view_listed_with_columns_shows_no_query_text_in_any_dialects_catalog() {
+    let store = staff();
+    for (dialect, view) in [
+        (crate::Dialect::PostgreSql, "roster"),
+        (crate::Dialect::MySql, "roster_my"),
+        (crate::Dialect::SqlServer, "roster_ms"),
+        (crate::Dialect::Sqlite, "roster_lite"),
+    ] {
+        let mut owner = Session::with_dialect(&store, dialect);
+        runs(
+            &mut owner,
+            &format!("CREATE VIEW {view} AS SELECT id, name, salary * 2 AS doubled FROM staff"),
+        );
+        owner.close().unwrap();
+    }
+    let limited = ConfinedStore {
+        store: &store,
+        tables: VisibleTables::new([
+            "staff",
+            "roster(id,name)",
+            "roster_my(id,name)",
+            "roster_ms(id,name)",
+            "roster_lite(id,name)",
+        ]),
+    };
+    assert_eq!(
+        rendered_in(&limited, crate::Dialect::PostgreSql, "SELECT * FROM roster_ms"),
+        "id|name\n1|Ada\nSELECT 1"
+    );
+    let listings = [
+        (crate::Dialect::PostgreSql, "SELECT viewname, definition FROM pg_views"),
+        (
+            crate::Dialect::PostgreSql,
+            "SELECT table_name, view_definition FROM information_schema.views",
+        ),
+        (
+            crate::Dialect::PostgreSql,
+            "SELECT pg_get_viewdef('roster'::regclass), pg_get_viewdef('roster_my'::regclass)",
+        ),
+        (
+            crate::Dialect::MySql,
+            "SELECT TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS",
+        ),
+        (crate::Dialect::Sqlite, "SELECT name, sql FROM sqlite_schema"),
+        (
+            crate::Dialect::SqlServer,
+            "SELECT object_id, definition FROM sys.sql_modules",
+        ),
+        (
+            crate::Dialect::SqlServer,
+            "SELECT OBJECT_DEFINITION(OBJECT_ID('roster_ms')), OBJECT_DEFINITION(OBJECT_ID('roster'))",
+        ),
+        (
+            crate::Dialect::SqlServer,
+            "SELECT TABLE_NAME, VIEW_DEFINITION FROM INFORMATION_SCHEMA.VIEWS",
+        ),
+        (
+            crate::Dialect::Oracle,
+            "SELECT view_name, text, text_vc, text_length FROM all_views",
+        ),
+    ];
+    for (dialect, sql) in listings {
+        let text = rendered_in(&limited, dialect, sql);
+        for hidden in ["doubled", "* 2", "eggdb_shown_columns"] {
+            assert!(!text.contains(hidden), "{dialect:?} {sql}: {text}");
+        }
+    }
+    let counts = [
+        (
+            crate::Dialect::PostgreSql,
+            "SELECT count(*) FROM pg_views WHERE definition IS NULL",
+        ),
+        (
+            crate::Dialect::PostgreSql,
+            "SELECT count(*) FROM information_schema.views WHERE view_definition IS NULL",
+        ),
+        (
+            crate::Dialect::MySql,
+            "SELECT count(*) FROM information_schema.VIEWS WHERE VIEW_DEFINITION = ''",
+        ),
+        (
+            crate::Dialect::Sqlite,
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'view' AND sql IS NULL",
+        ),
+        (
+            crate::Dialect::SqlServer,
+            "SELECT count(*) FROM sys.sql_modules WHERE definition IS NULL",
+        ),
+        (
+            crate::Dialect::SqlServer,
+            "SELECT count(*) FROM INFORMATION_SCHEMA.VIEWS WHERE VIEW_DEFINITION IS NULL",
+        ),
+        (
+            crate::Dialect::Oracle,
+            "SELECT count(*) FROM all_views WHERE text IS NULL AND text_length IS NULL",
+        ),
+    ];
+    for (dialect, sql) in counts {
+        let text = rendered_in(&limited, dialect, sql);
+        assert!(text.contains("\n4\n"), "{dialect:?} {sql}: {text}");
+    }
+    let mut mysql = Session::with_dialect(&limited, crate::Dialect::MySql);
+    let error = fails(&mut mysql, "SHOW CREATE VIEW roster_my");
+    assert_eq!(error.vendor_code(), Some(1142), "{error}");
+    assert!(!error.message().contains("doubled"), "{error}");
+    mysql.close().unwrap();
+    let whole = ConfinedStore {
+        store: &store,
+        tables: VisibleTables::new(["staff", "roster"]),
+    };
+    let text = rendered_in(
+        &whole,
+        crate::Dialect::PostgreSql,
+        "SELECT definition FROM pg_views WHERE viewname = 'roster'",
+    );
+    assert!(text.contains("doubled"), "{text}");
+}
+
+#[test]
+fn oracle_multi_table_inserts_hierarchical_queries_and_plans_cannot_reach_an_unlisted_table() {
+    let store = shop();
+    let limited = confined(&store);
+    let mut oracle = Session::with_dialect(&limited, crate::Dialect::Oracle);
+    for sql in [
+        "INSERT ALL INTO secrets (id, code) VALUES (5, 'x') SELECT 1 FROM dual",
+        "INSERT ALL INTO items (name) VALUES (code) SELECT code FROM secrets",
+        "INSERT FIRST WHEN id > 0 THEN INTO items (name) VALUES (code) SELECT id, code FROM secrets",
+        "INSERT FIRST WHEN 1 = 1 THEN INTO secrets (id, code) VALUES (6, 'y') SELECT 1 FROM dual",
+        "SELECT code FROM secrets CONNECT BY LEVEL <= 2",
+        "SELECT code, LEVEL FROM secrets START WITH id = 1 CONNECT BY NOCYCLE PRIOR id = id",
+        "SELECT name FROM items WHERE id IN (SELECT id FROM secrets CONNECT BY LEVEL <= 2)",
+    ] {
+        let error = fails(&mut oracle, sql);
+        assert!(
+            error.state() == SqlState::UNDEFINED_TABLE || error.vendor_code() == Some(942),
+            "{sql}: {error}"
+        );
+        assert!(!error.message().contains("swordfish"), "{sql}: {error}");
+    }
+    let refusal = fails(&mut oracle, "EXPLAIN PLAN FOR SELECT name FROM items");
+    assert_eq!(
+        refusal.state(),
+        SqlState::INSUFFICIENT_PRIVILEGE,
+        "{refusal}"
+    );
+    oracle.close().unwrap();
+    let mut owner = Session::with_dialect(&store, crate::Dialect::Oracle);
+    runs(&mut owner, "EXPLAIN PLAN FOR SELECT code FROM secrets");
+    owner.close().unwrap();
+    let display = rendered_in(
+        &limited,
+        crate::Dialect::Oracle,
+        "SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)",
+    );
+    assert!(
+        !display.to_ascii_lowercase().contains("secrets"),
+        "{display}"
+    );
+    let mut oracle = Session::with_dialect(&limited, crate::Dialect::Oracle);
+    let refusal = fails(&mut oracle, "EXPLAIN PLAN FOR SELECT name FROM items");
+    assert_eq!(
+        refusal.state(),
+        SqlState::INSUFFICIENT_PRIVILEGE,
+        "{refusal}"
+    );
+    oracle.close().unwrap();
+    assert_eq!(
+        shown(&store, "SELECT id, code FROM secrets"),
+        "id|code\n1|swordfish\nSELECT 1"
+    );
+    assert_eq!(
+        shown(&store, "SELECT count(*) FROM items"),
+        "count\n0\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_foreign_key_to_a_hidden_column_of_a_listed_table_is_refused_rather_than_reported_damaged() {
+    let store = MemoryStore::default();
+    let mut owner = Session::new(&store);
+    runs(
+        &mut owner,
+        "CREATE TABLE accounts (id integer PRIMARY KEY, email text UNIQUE);
+         CREATE TABLE invites (id integer PRIMARY KEY, email text REFERENCES accounts (email), note text);
+         INSERT INTO accounts VALUES (1, 'ada@example.com');
+         INSERT INTO invites VALUES (1, 'ada@example.com', 'first')",
+    );
+    owner.close().unwrap();
+    let limited = ConfinedStore {
+        store: &store,
+        tables: VisibleTables::new(["accounts(id)", "invites"]),
+    };
+    let mut session = Session::new(&limited);
+    runs(&mut session, "INSERT INTO invites VALUES (2, NULL, 'none')");
+    runs(&mut session, "UPDATE invites SET note = 'kept' WHERE id = 1");
+    for sql in [
+        "INSERT INTO invites VALUES (3, 'ada@example.com', 'known')",
+        "INSERT INTO invites VALUES (4, 'bob@example.com', 'unknown')",
+        "UPDATE invites SET email = 'bob@example.com' WHERE id = 2",
+    ] {
+        let message = refused(&mut session, sql);
+        assert!(
+            message.starts_with(
+                "cannot add or change a foreign key value of \"invites\": that foreign key points at a column of \"accounts\" this session cannot see"
+            ),
+            "{sql}: {message}"
+        );
+    }
+    session.close().unwrap();
+    assert_eq!(
+        shown(&store, "SELECT id, email, note FROM invites ORDER BY id"),
+        "id|email|note\n1|ada@example.com|kept\n2|NULL|none\nSELECT 2"
     );
 }
 

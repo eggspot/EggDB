@@ -257,8 +257,18 @@ impl VisibleTables {
         for (&id, narrowed) in &shown.narrowed {
             narrowed_writes.insert(id, NarrowedWrites::of(&inner, &shown, narrowed)?);
         }
-        for &id in parents_outside.keys() {
-            shown.leave_outside_foreign_keys_to_the_writer(&inner, id)?;
+        let keys_to_hidden_columns =
+            foreign_keys_to_hidden_columns(&inner, &shown, &rows_blocked)?;
+        let mut left_to_the_writer: Vec<u32> = parents_outside.keys().copied().collect();
+        left_to_the_writer.extend(keys_to_hidden_columns.keys().copied());
+        left_to_the_writer.sort_unstable();
+        left_to_the_writer.dedup();
+        for id in left_to_the_writer {
+            let refused_keys: Vec<String> = keys_to_hidden_columns
+                .get(&id)
+                .map(|refused| refused.keys.iter().map(|(key, _)| key.name.clone()).collect())
+                .unwrap_or_default();
+            shown.leave_outside_foreign_keys_to_the_writer(&inner, id, &refused_keys)?;
         }
         Ok(VisibleWrite {
             inner,
@@ -275,6 +285,7 @@ impl VisibleTables {
                 rows_blocked,
                 keys_guarded,
                 parents_outside,
+                keys_to_hidden_columns,
                 narrowed_writes,
                 inserted_here: HashSet::new(),
                 refused: false,
@@ -571,6 +582,46 @@ struct ParentsOutside {
     keys: Vec<(ForeignKey, TableDefinition)>,
 }
 
+#[derive(Debug)]
+struct KeysToHiddenColumns {
+    child: TableDefinition,
+    keys: Vec<(ForeignKey, String)>,
+}
+
+fn foreign_keys_to_hidden_columns(
+    reader: &dyn KeyValueRead,
+    shown: &Shown,
+    rows_blocked: &HashSet<u32>,
+) -> SqlResult<HashMap<u32, KeysToHiddenColumns>> {
+    let mut found = HashMap::new();
+    for (&id, name) in &shown.table_names {
+        if !shown.tables.contains(&id) || rows_blocked.contains(&id) {
+            continue;
+        }
+        let text = String::from_utf8_lossy(name).into_owned();
+        let Some(stored) = reader.get(&table_key(&text))? else {
+            continue;
+        };
+        let child = TableDefinition::decode(&text, &stored)?;
+        let keys: Vec<(ForeignKey, String)> = child
+            .foreign_keys
+            .iter()
+            .filter(|key| {
+                shown.narrowed_named(key.parent.as_bytes()).is_some_and(|parent| {
+                    key.parent_columns
+                        .iter()
+                        .any(|column| !parent.kept_names.contains(column))
+                })
+            })
+            .map(|key| (key.clone(), Confined::shown(key.parent.as_bytes())))
+            .collect();
+        if !keys.is_empty() {
+            found.insert(id, KeysToHiddenColumns { child, keys });
+        }
+    }
+    Ok(found)
+}
+
 const SHOWN_COLUMNS_LABEL: &str = "eggdb_shown_columns";
 
 #[derive(Debug)]
@@ -649,6 +700,22 @@ fn shown_columns_query(view: &ViewDefinition, kept: &[ViewColumn]) -> Option<Str
         view.query,
         shown.join(", ")
     ))
+}
+
+fn shown_columns_prefix(dialect: Dialect) -> String {
+    format!("WITH {} (", quoted_in(dialect, SHOWN_COLUMNS_LABEL))
+}
+
+impl ViewDefinition {
+    /// The query text a catalog shows for this view: `None` for a view a session lists with
+    /// columns (D306), whose query would name and compute the columns it hides.
+    pub(crate) fn shown_query(&self) -> Option<&str> {
+        if self.query.starts_with(&shown_columns_prefix(self.dialect)) {
+            None
+        } else {
+            Some(&self.query)
+        }
+    }
 }
 
 fn unservable_view_columns(name: &str, stored: &[u8], columns: &[String]) -> Vec<String> {
@@ -899,6 +966,16 @@ fn row_of_width(bytes: &[u8], columns: &[Column]) -> SqlResult<Vec<Value>> {
     Ok(row)
 }
 
+fn same_stored_value(old: Option<&Value>, new: Option<&Value>) -> bool {
+    match (old, new) {
+        (Some(old), Some(new)) => {
+            encode_row(std::slice::from_ref(old)) == encode_row(std::slice::from_ref(new))
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 fn narrowed_update(
     narrowed: &Narrowed,
     writes: &NarrowedWrites,
@@ -916,7 +993,7 @@ fn narrowed_update(
     if let Some(&at) = writes
         .tied
         .iter()
-        .find(|&&at| !crate::constraints::same_value(old.get(at), new.get(at)))
+        .find(|&&at| !same_stored_value(old.get(at), new.get(at)))
     {
         return Err(Refusal::TiedColumn {
             table,
@@ -1134,6 +1211,7 @@ impl Shown {
         &mut self,
         reader: &dyn KeyValueRead,
         id: u32,
+        refused_keys: &[String],
     ) -> SqlResult<()> {
         let Some(name) = self.table_names.get(&id).cloned() else {
             return Ok(());
@@ -1150,7 +1228,9 @@ impl Shown {
         let hidden = &self.hidden;
         definition
             .foreign_keys
-            .retain(|key| !hidden.contains(key.parent.as_bytes()));
+            .retain(|key| {
+                !hidden.contains(key.parent.as_bytes()) && !refused_keys.contains(&key.name)
+            });
         definition.forget_missing_statuses();
         let encoded = definition.encode();
         match self.narrowed.get_mut(&id) {
@@ -1564,6 +1644,7 @@ struct Confined {
     rows_blocked: HashSet<u32>,
     keys_guarded: HashMap<u32, KeyGuard>,
     parents_outside: HashMap<u32, ParentsOutside>,
+    keys_to_hidden_columns: HashMap<u32, KeysToHiddenColumns>,
     narrowed_writes: HashMap<u32, NarrowedWrites>,
     inserted_here: HashSet<Vec<u8>>,
     refused: bool,
@@ -1611,6 +1692,7 @@ enum Refusal {
     HiddenInsert { table: String, reason: &'static str },
     HiddenUpdate { table: String, reason: &'static str },
     TiedColumn { table: String, column: String },
+    KeyToHiddenColumn { table: String, parent: String },
     Shared,
     Trigger,
     Code { routine: String, place: StoredCode },
@@ -1723,6 +1805,13 @@ impl Refusal {
                 ),
             )
             .with_hint("Ask the user to list the other columns of that check, index or foreign key too (--tables)."),
+            Self::KeyToHiddenColumn { table, parent } => SqlError::new(
+                SqlState::INSUFFICIENT_PRIVILEGE,
+                format!(
+                    "cannot add or change a foreign key value of \"{table}\": that foreign key points at a column of \"{parent}\" this session cannot see (--tables), so the check would test that column's values"
+                ),
+            )
+            .with_hint("Leave the foreign key's columns NULL, or ask the user to list the columns of the other table it points at (--tables)."),
             Self::Shared => SqlError::new(
                 SqlState::INSUFFICIENT_PRIVILEGE,
                 "cannot change a schema, type, routine, package, role or other object outside a table: this session may change only the tables it is limited to (--tables)",
@@ -2272,6 +2361,50 @@ impl<W: KeyValueWrite> VisibleWrite<W> {
         Ok(())
     }
 
+    fn refuse_keys_to_hidden_columns(&mut self, key: &[u8], row: &[u8]) -> SqlResult<()> {
+        let Some(confined) = &self.confined else {
+            return Ok(());
+        };
+        let KeyOwner::Table(id) = key_owner(key) else {
+            return Ok(());
+        };
+        let Some(refused) = confined.keys_to_hidden_columns.get(&id) else {
+            return Ok(());
+        };
+        if !key.starts_with(&rows_prefix(id)) {
+            return Ok(());
+        }
+        let new = row_of_width(row, &refused.child.columns)?;
+        let old = match self.inner.get(key)? {
+            Some(stored) => Some(row_of_width(&stored, &refused.child.columns)?),
+            None => None,
+        };
+        let checked = refused.keys.iter().find(|(foreign_key, _)| {
+            let complete = foreign_key
+                .columns
+                .iter()
+                .all(|&at| !matches!(new.get(at), None | Some(Value::Null)));
+            let changed = old.as_ref().is_none_or(|old| {
+                foreign_key
+                    .columns
+                    .iter()
+                    .any(|&at| !same_stored_value(old.get(at), new.get(at)))
+            });
+            complete && changed
+        });
+        let Some((_, parent)) = checked else {
+            return Ok(());
+        };
+        let refusal = Refusal::KeyToHiddenColumn {
+            table: Confined::shown(refused.child.name.as_bytes()),
+            parent: parent.clone(),
+        };
+        if let Some(confined) = &mut self.confined {
+            confined.refused = true;
+        }
+        Err(refusal.error())
+    }
+
     fn put_checked(&mut self, key: &[u8], value: &[u8], replaces: bool) -> SqlResult<bool> {
         let narrowed = match self.narrowed_id(key) {
             Some(id) => {
@@ -2286,6 +2419,7 @@ impl<W: KeyValueWrite> VisibleWrite<W> {
         let stored = merged.as_deref().unwrap_or(value);
         self.admit(key, stored, replaces)?;
         self.check_parents_outside(key, stored)?;
+        self.refuse_keys_to_hidden_columns(key, stored)?;
         if let Some((id, row)) = &narrowed {
             self.write_hidden_entries(*id, key, row)?;
         }

@@ -834,7 +834,11 @@ fn view_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                     .set("schemaname", Value::Text(entry.schema.clone()))
                     .set("viewname", Value::Text(entry.name.clone()))
                     .set("viewowner", Value::Text(session_user_name()))
-                    .set("definition", Value::Text(view.query.clone()))
+                    .set(
+                        "definition",
+                        view.shown_query()
+                            .map_or(Value::Null, |query| Value::Text(query.to_owned())),
+                    )
                     .done(),
             ),
             _ => None,

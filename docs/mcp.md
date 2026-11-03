@@ -166,7 +166,13 @@ them are hidden below the SQL engine, as hidden tables are.
   list on a SQL Server view whose query starts with `WITH` stops the server, exit 1, with
   `column_not_found`.
 - **A view listed with columns** reads its query as before and shows only the listed columns;
-  it cannot be replaced, dropped or written through (`42501`).
+  it cannot be replaced, dropped or written through (`42501`). No catalog shows its query text,
+  which would name and compute the hidden columns: `pg_views.definition`,
+  `pg_get_viewdef` and `information_schema.views` give NULL, as PostgreSQL does for a view you
+  do not own; MySQL's `information_schema.VIEWS` gives an empty definition and `SHOW CREATE
+  VIEW` is refused (1142), as without the `SHOW VIEW` privilege; `sqlite_schema.sql`, SQL
+  Server's `sys.sql_modules`, `OBJECT_DEFINITION` and `INFORMATION_SCHEMA.VIEWS`, and Oracle's
+  `ALL_VIEWS.TEXT` give NULL.
 - **Writes with `--allow-write` keep the hidden columns** (D306). An `INSERT` gives them their
   defaults, and an `UPDATE` or upsert of the listed columns keeps their values; the indexes over
   them are kept up to date, and their checks and `NOT NULL` run on the new row, with errors that
@@ -180,7 +186,8 @@ them are hidden below the SQL engine, as hidden tables are.
   column that a check, unique index or foreign key ties to a hidden one, whatever the values, so
   that no answer depends on a value the agent cannot see. A partitioned table or a partition
   takes no writes, and a table another listed table references through a hidden column takes
-  no changes to its rows.
+  no changes to its rows. That other table takes no new or changed foreign-key values either,
+  other than NULL, since checking one would test the hidden column.
 - **What it still shows.** Hidden column names can appear in definitions the agent may read: a
   listed table's column default, a generated column, a row-security policy, or another table's
   foreign key that points at them. A row-security policy that names a hidden column makes the
@@ -219,7 +226,10 @@ can reach another table is covered, not a list of statement kinds:
   unlisted one, its new rows and changed keys are checked against the other table below the SQL
   engine (D306): a missing parent fails with the usual foreign-key error (`23503`), which names
   the other table and the agent's own key values but none of its rows or columns, and its
-  definition cannot change. Such a foreign key is checked at once even when it is deferrable,
+  definition cannot change. It does tell the agent whether a value exists in the other table:
+  trying an email as the key shows whether that email is in the column the foreign key points
+  at. When that matters, list the table without the foreign key's columns; the banner names
+  each such tie on a `reveals` line. Such a foreign key is checked at once even when it is deferrable,
   and a writing session does not show it in the catalogs. When an unlisted table has a foreign key to a listed one, the listed table still takes
   inserts and changes to the columns that foreign key does not point at (D281), but deleting a
   row, changing a column it points at and changing the definition are refused, whatever the
