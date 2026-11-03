@@ -1847,6 +1847,7 @@ impl<'s> Session<'s> {
             let _plsql = self
                 .oracle()
                 .then(|| crate::plsql::enter_session(&self.plsql));
+            let literal_start = parser.resume_point().0;
             if self.settings.checked_role.is_none()
                 && let Some(mut rows) = parser.literal_rows()
             {
@@ -1857,7 +1858,10 @@ impl<'s> Session<'s> {
                 }
                 self.enter_sequences(false);
                 crate::deferred_checks::enter(&self.deferred.modes);
+                let started = crate::statement_statistics::wanted().then(std::time::Instant::now);
                 let result = self.insert_literal_rows(&mut rows);
+                let literal_tokens = tokens.get(literal_start..resume.0.min(tokens.len()));
+                self.record_statement(literal_tokens, text, started, &result);
                 let result = self.keep_deferred(result);
                 self.leave_sequences();
                 let settled = self.settle_sequences();

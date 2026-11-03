@@ -97,7 +97,7 @@ fn a_rolled_back_block_drops_its_expiry_swap_deletes_and_sql() {
         get lock\n\
         expire cart:1 1h\n\
         del cart:3\n\
-        scan -k\n\
+        scan --to m -k\n\
         rollback;\n";
     let ran = eggdb(&["shell"], file.path(), script.as_bytes());
     assert_eq!(ran.status.code(), Some(0), "{}", text(&ran.stderr));

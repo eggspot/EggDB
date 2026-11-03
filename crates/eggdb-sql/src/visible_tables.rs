@@ -940,6 +940,43 @@ impl<R: KeyValueRead> KeyValueRead for VisibleRead<R> {
     fn committed_version(&self) -> Option<u64> {
         self.inner.committed_version()
     }
+
+    fn collection_names(&self) -> SqlResult<Vec<String>> {
+        match self.shown {
+            None => self.inner.collection_names(),
+            Some(_) => Ok(Vec::new()),
+        }
+    }
+
+    fn has_collection(&self, name: &str) -> SqlResult<bool> {
+        match self.shown {
+            None => self.inner.has_collection(name),
+            Some(_) => Ok(false),
+        }
+    }
+
+    fn collection_get(&self, name: &str, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
+        match self.shown {
+            None => self.inner.collection_get(name, key),
+            Some(_) => Ok(None),
+        }
+    }
+
+    fn collection_scan(
+        &self,
+        name: &str,
+        start: &[u8],
+        end: &[u8],
+        direction: ScanDirection,
+        visit: &mut EntryVisitor<'_>,
+    ) -> SqlResult<()> {
+        match self.shown {
+            None => self
+                .inner
+                .collection_scan(name, start, end, direction, visit),
+            Some(_) => Ok(()),
+        }
+    }
 }
 
 /// A write transaction confined by [`VisibleTables::write`], or by

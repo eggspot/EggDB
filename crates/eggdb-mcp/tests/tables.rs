@@ -11,7 +11,7 @@ use common::{
     tables_config, text_at,
 };
 use eggdb_mcp::{Server, ServerConfig};
-use eggdb_sql::Dialect;
+use eggdb_sql::{Dialect, Session};
 use eggdb_sql::json::{Json, Node};
 use std::time::{Duration, Instant};
 
@@ -409,7 +409,8 @@ fn a_table_listed_with_columns_shows_only_those_to_every_tool() {
         Dialect::PostgreSql,
         "CREATE TABLE people (id integer PRIMARY KEY, name text, ssn text); \
          CREATE VIEW people_ssn AS SELECT ssn FROM people; \
-         CREATE FUNCTION ssn_of(person integer) RETURNS text LANGUAGE sql AS $$ SELECT ssn FROM people WHERE id = person $$; \
+         CREATE FUNCTION ssn_of(person integer) RETURNS text LANGUAGE sql STABLE AS $$ SELECT ssn FROM people WHERE id = person $$; \
+         CREATE FUNCTION ssn_now(person integer) RETURNS text LANGUAGE sql AS $$ SELECT ssn FROM people WHERE id = person $$; \
          INSERT INTO people VALUES (1, 'Ada', '123-45-6789')",
     );
     let opener = MapOpener::new(store);
@@ -455,6 +456,10 @@ fn a_table_listed_with_columns_shows_only_those_to_every_tool() {
     assert!(through_view.contains("ssn"), "{through_view}");
     let through_function = sql_error(&mut server, 9, "postgresql", "SELECT ssn_of(1)");
     assert!(through_function.contains("ssn"), "{through_function}");
+    let (state, through_volatile) = write_refused(&mut server, 15, "SELECT ssn_now(1)");
+    assert_eq!(state, "42703");
+    assert!(through_volatile.contains("ssn"), "{through_volatile}");
+    assert!(!through_volatile.contains("123-45"), "{through_volatile}");
     let described = call(&mut server, 10, "describe_table", r#"{"table":"people"}"#);
     let described = format!("{described:?}");
     assert!(described.contains("name"), "{described}");
@@ -543,12 +548,10 @@ fn a_policy_the_agent_writes_cannot_call_a_user_routine() {
     );
     let plain = write(&mut server, 4, "CREATE POLICY own ON tags USING (id > 0)");
     assert_eq!(text_at(structured(&plain), &["committed"]), "true");
-    assert_eq!(
-        count(
-            &opener.store,
-            Dialect::PostgreSql,
-            "SELECT count(*) FROM pg_policies WHERE tablename = 'tags'"
-        ),
-        1
-    );
+    let mut session = Session::with_dialect(&opener.store, Dialect::PostgreSql);
+    for (policy, stored) in [("own", true), ("leak", false), ("nested", false)] {
+        let dropped = session.execute(&format!("DROP POLICY {policy} ON tags"), &mut |_| {});
+        assert_eq!(dropped.is_ok(), stored, "{policy}: {dropped:?}");
+    }
+    session.close().unwrap();
 }

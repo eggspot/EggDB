@@ -560,7 +560,7 @@ pub(super) const COLLECTION_DELETE: CommandDefinition = CommandDefinition {
     outputs: &text_and_json(OutputKind::Nothing, COLLECTION_DELETED_FIELDS),
     max_effect: Effect::Destroy,
     errors: READING_ERRORS,
-    examples: &["eggdb collection delete app.db sessions"],
+    examples: &["eggdb collection delete app.db old-sessions"],
     surfaces: "eggdb ui: the collection picker (d)",
 };
 

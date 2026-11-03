@@ -1156,7 +1156,8 @@ fn an_agent_limited_to_some_columns_sees_and_changes_nothing_else() {
         &path,
         "-c",
         "CREATE VIEW contact AS SELECT name, email FROM users; \
-         CREATE FUNCTION email_of(person integer) RETURNS text LANGUAGE sql AS $$ SELECT email FROM users WHERE id = person $$",
+         CREATE FUNCTION email_of(person integer) RETURNS text LANGUAGE sql STABLE AS $$ SELECT email FROM users WHERE id = person $$; \
+         CREATE FUNCTION email_now(person integer) RETURNS text LANGUAGE sql AS $$ SELECT email FROM users WHERE id = person $$",
     ]);
     assert!(setup.status.success(), "{}", stderr(&setup));
     let mut mcp = Mcp::start(
@@ -1206,6 +1207,13 @@ fn an_agent_limited_to_some_columns_sees_and_changes_nothing_else() {
             "{dialect} {sql}: {message}"
         );
     }
+    let volatile = mcp.call("write_sql", r#"{"sql":"SELECT email_now(1)","confirm":true}"#);
+    let (state, message) = sql_failure(&volatile);
+    assert_eq!(state, "42703");
+    assert!(
+        message.contains("email") && !message.contains("example.com"),
+        "{message}"
+    );
     let changed = mcp.call(
         "write_sql",
         r#"{"sql":"UPDATE users SET name = 'Hedy' WHERE id = 2"}"#,
