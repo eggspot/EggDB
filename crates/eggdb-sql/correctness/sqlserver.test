@@ -2347,3 +2347,24 @@ DROP PROCEDURE dbo.uspGetEmployees315, dbo.uspGetEmployees2_315, dbo.usp_GetSale
 
 ok
 DROP TABLE Staff315, Products315, Inventory315
+
+chapter "LIKE (Transact-SQL)": the ESCAPE clause
+ok
+CREATE TABLE codes299 (code varchar(10))
+
+ok
+INSERT INTO codes299 VALUES ('A_B'), ('AxB'), ('10%'), ('100')
+
+rows
+SELECT code FROM codes299 WHERE code LIKE 'A!_B' ESCAPE '!'
+----
+code
+A_B
+SELECT 1
+
+rows
+SELECT code FROM codes299 WHERE code LIKE '10!%' ESCAPE '!'
+----
+code
+10%
+SELECT 1

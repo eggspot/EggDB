@@ -26,7 +26,7 @@ fn filters_rows_only(query: &Query) -> Option<&Select> {
         && query.order_by.is_empty()
         && query.limit.is_none()
         && query.offset.is_none()
-        && !select.distinct
+        && !select.removes_duplicates()
         && select.group_by.is_empty()
         && select.having.is_none()
         && select.limit.is_none()

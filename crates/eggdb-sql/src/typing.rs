@@ -156,6 +156,7 @@ fn added_function_type(
         | "quote_nullable"
         | "regexp_replace"
         | "regexp_substr"
+        | "like_escape"
         | "similar_to_escape"
         | "similar_substring_pattern"
         | "to_char"

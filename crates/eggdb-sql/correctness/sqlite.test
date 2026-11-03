@@ -1254,3 +1254,55 @@ DROP VIEW w33
 
 ok
 DROP TABLE t33
+
+chapter "SELECT", "The LIKE, GLOB, REGEXP, MATCH, and extract operators": NATURAL joins, LIKE ... ESCAPE and GLOB character classes
+ok
+CREATE TABLE letters299 (num INTEGER, name TEXT)
+
+ok
+INSERT INTO letters299 VALUES (1, 'a'), (2, 'b'), (3, 'c')
+
+ok
+CREATE TABLE values299 (num INTEGER, value TEXT)
+
+ok
+INSERT INTO values299 VALUES (1, 'xxx'), (3, 'yyy'), (5, 'zzz')
+
+rows
+SELECT * FROM letters299 NATURAL JOIN values299 ORDER BY num
+----
+num|name|value
+1|a|xxx
+3|c|yyy
+SELECT 2
+
+rows
+SELECT * FROM letters299 NATURAL LEFT JOIN values299 ORDER BY num
+----
+num|name|value
+1|a|xxx
+2|b|NULL
+3|c|yyy
+SELECT 3
+
+rows
+SELECT 'A_C' LIKE 'a#_c' ESCAPE '#', 'abc' LIKE 'a#_c' ESCAPE '#', like('a#%', 'A%', '#'), like('a#%', 'ab', '#')
+----
+'A_C' LIKE 'a#_c' ESCAPE '#'|'abc' LIKE 'a#_c' ESCAPE '#'|like('a#%', 'A%', '#')|like('a#%', 'ab', '#')
+1|0|1|0
+SELECT 1
+
+rows
+SELECT 'cat' GLOB '[a-c]*', 'dog' GLOB '[a-c]*', 'dog' GLOB '[^a-c]*', 'x' NOT GLOB '[abc]', glob('*[0-9][0-9]', 'room 42')
+----
+'cat' GLOB '[a-c]*'|'dog' GLOB '[a-c]*'|'dog' GLOB '[^a-c]*'|'x' NOT GLOB '[abc]'|glob('*[0-9][0-9]', 'room 42')
+1|0|1|1|1
+SELECT 1
+
+rows
+SELECT name FROM letters299 WHERE name GLOB (SELECT '[ab]') ORDER BY name
+----
+name
+a
+b
+SELECT 2

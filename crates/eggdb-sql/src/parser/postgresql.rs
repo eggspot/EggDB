@@ -458,6 +458,7 @@ impl Parser<'_> {
             offset: None,
             source_row_limit: None,
             grouping_sets: None,
+            distinct_on: Vec::new(),
         })
     }
 
@@ -674,7 +675,7 @@ fn is_values_select(select: &Select) -> bool {
     let Some(from) = &select.from else {
         return false;
     };
-    !select.distinct
+    !select.removes_duplicates()
         && matches!(
             select.items.as_slice(),
             [SelectItem::Wildcard {

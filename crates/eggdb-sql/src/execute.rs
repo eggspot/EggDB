@@ -3071,6 +3071,95 @@ fn sort_keys<'e>(
     Ok(keys)
 }
 
+fn distinct_on_keys<'e>(
+    select: &'e Select,
+    sort_keys: &[SortKey<'_>],
+    projection: &Projection<'_>,
+    scope: Scope<'_>,
+    grouped: bool,
+) -> SqlResult<Vec<SortKey<'e>>> {
+    let keys = select
+        .distinct_on
+        .iter()
+        .map(|expr| distinct_on_key(expr, projection, scope, grouped))
+        .collect::<SqlResult<Vec<_>>>()?;
+    let leading = sort_keys.len().min(keys.len());
+    let matches_order = sort_keys[..leading]
+        .iter()
+        .all(|ordered| keys.iter().any(|key| same_sort_key(key, ordered, projection)));
+    if !matches_order {
+        return Err(SqlError::new(
+            SqlState::INVALID_COLUMN_REFERENCE,
+            "SELECT DISTINCT ON expressions must match initial ORDER BY expressions",
+        )
+        .at(select.distinct_on.first().map_or(0, |expr| expr.position)));
+    }
+    Ok(keys)
+}
+
+fn distinct_on_key<'e>(
+    expr: &'e Expr,
+    projection: &Projection<'_>,
+    scope: Scope<'_>,
+    grouped: bool,
+) -> SqlResult<SortKey<'e>> {
+    match &expr.kind {
+        ExprKind::Literal(crate::ast::Literal::Integer(position)) => usize::try_from(*position)
+            .ok()
+            .filter(|&index| index >= 1 && index <= projection.columns.len())
+            .map(|index| SortKey::Output(index - 1))
+            .ok_or_else(|| {
+                SqlError::new(
+                    SqlState::INVALID_COLUMN_REFERENCE,
+                    format!("DISTINCT ON position {position} is not in select list"),
+                )
+                .at(expr.position)
+            }),
+        ExprKind::Column {
+            qualifier: None,
+            name,
+        } if projection.columns.iter().any(|column| &column.name == name) => Ok(
+            SortKey::Output(projection.output_named(name, expr.position)?),
+        ),
+        _ if grouped => projection.output_of(expr).map(SortKey::Output).ok_or_else(|| {
+            SqlError::not_supported(
+                "DISTINCT ON an expression outside the select list of a grouped query",
+            )
+            .with_hint("Name the output column, or its position, in DISTINCT ON.")
+            .at(expr.position)
+        }),
+        _ => {
+            check_columns(expr, scope)?;
+            Ok(SortKey::Expr(expr))
+        }
+    }
+}
+
+fn same_sort_key(left: &SortKey<'_>, right: &SortKey<'_>, projection: &Projection<'_>) -> bool {
+    let output = |key: &SortKey<'_>| match key {
+        SortKey::Output(index) => Some(*index),
+        SortKey::Expr(expr) => projection.output_of(expr),
+    };
+    match (output(left), output(right), left, right) {
+        (Some(left), Some(right), _, _) => left == right,
+        (None, None, SortKey::Expr(left), SortKey::Expr(right)) => shape_of(left) == shape_of(right),
+        _ => false,
+    }
+}
+
+fn distinct_on_values(
+    keys: &[SortKey<'_>],
+    evaluator: &Evaluator<'_>,
+    output: &[Value],
+) -> SqlResult<Vec<Value>> {
+    keys.iter()
+        .map(|key| match key {
+            SortKey::Output(index) => Ok(output.get(*index).cloned().unwrap_or(Value::Null)),
+            SortKey::Expr(expr) => evaluator.eval(expr, None),
+        })
+        .collect()
+}
+
 pub(crate) fn returning_columns(
     reader: &dyn KeyValueRead,
     tables: &mut TableCache,
@@ -3350,6 +3439,13 @@ fn select_or_explain(
         post_scope,
         select.distinct,
     )?;
+    let distinct_on = distinct_on_keys(
+        select,
+        &sort_keys,
+        &projection,
+        post_scope,
+        grouping.is_some(),
+    )?;
     if columns_only {
         return Ok(QueryResult::rows(
             "SELECT 0".to_owned(),
@@ -3486,13 +3582,16 @@ fn select_or_explain(
         };
     }
     let output = if sort_keys.is_empty() || (ordered && !limit.with_ties) {
-        unsorted_rows(&mut source, &projection, window, &mut memory)?
+        unsorted_rows(&mut source, &projection, window, &distinct_on, &mut memory)?
     } else {
         sorted_rows(
             &mut source,
             &select.order_by,
             &projection,
-            &sort_keys,
+            SortedKeys {
+                sort: &sort_keys,
+                distinct_on: &distinct_on,
+            },
             window,
             &mut memory,
         )?
@@ -3704,6 +3803,7 @@ fn unsorted_rows(
     source: &mut SourceRows<'_>,
     projection: &Projection<'_>,
     window: Window,
+    distinct_on: &[SortKey<'_>],
     memory: &mut WorkMemory,
 ) -> SqlResult<Vec<Vec<Value>>> {
     let mut output = Vec::new();
@@ -3711,10 +3811,27 @@ fn unsorted_rows(
     if take == 0 && source.has_rows_to_read() {
         return Ok(output);
     }
+    let scope = source.scope;
+    let correlation = source.correlation;
     let mut skipped = 0;
     let mut seen = window.distinct.then(HashSet::new);
+    let mut seen_on = HashSet::new();
     source.for_each(&mut |row| {
-        let projected = projection.project_owned(row)?;
+        let projected = if distinct_on.is_empty() {
+            projection.project_owned(row)?
+        } else {
+            let projected = projection.project(&row)?;
+            let evaluator = Evaluator {
+                scope,
+                row: &row,
+                correlation,
+            };
+            let key = distinct_on_values(distinct_on, &evaluator, &projected)?;
+            if !first_time_seen(&mut seen_on, &key, memory)? {
+                return Ok(true);
+            }
+            projected
+        };
         if let Some(seen) = &mut seen
             && !first_time_seen(seen, &projected, memory)?
         {
@@ -3736,14 +3853,37 @@ fn unsorted_rows(
     Ok(output)
 }
 
+#[derive(Clone, Copy)]
+struct SortedKeys<'k, 'e> {
+    sort: &'k [SortKey<'e>],
+    distinct_on: &'k [SortKey<'e>],
+}
+
+fn first_of_each_distinct_on(
+    rows: Vec<(Vec<Value>, Vec<Value>)>,
+    sort_key_count: usize,
+    memory: &mut WorkMemory,
+) -> SqlResult<Vec<(Vec<Value>, Vec<Value>)>> {
+    let mut seen = HashSet::new();
+    let mut kept = Vec::new();
+    for (mut keys, output) in rows {
+        let distinct_on = keys.split_off(sort_key_count.min(keys.len()));
+        if first_time_seen(&mut seen, &distinct_on, memory)? {
+            kept.push((keys, output));
+        }
+    }
+    Ok(kept)
+}
+
 fn sorted_rows(
     source: &mut SourceRows<'_>,
     order_by: &[OrderItem],
     projection: &Projection<'_>,
-    sort_keys: &[SortKey<'_>],
+    keys_of: SortedKeys<'_, '_>,
     window: Window,
     memory: &mut WorkMemory,
 ) -> SqlResult<Vec<Vec<Value>>> {
+    let sort_keys = keys_of.sort;
     let scope = source.scope;
     let correlation = source.correlation;
     let mut rows = Vec::new();
@@ -3773,6 +3913,10 @@ fn sorted_rows(
             bytes.add(&value)?;
             keys.push(value);
         }
+        for value in distinct_on_values(keys_of.distinct_on, &evaluator, &output)? {
+            bytes.add(&value)?;
+            keys.push(value);
+        }
         memory.charge_row(&output)?;
         memory.charge_row(&keys)?;
         rows.push((keys, output));
@@ -3780,6 +3924,9 @@ fn sorted_rows(
     })?;
     check_sortable(order_by, &rows)?;
     rows.sort_by(|(left, _), (right, _)| compare_sort_keys(order_by, left, right));
+    if !keys_of.distinct_on.is_empty() {
+        rows = first_of_each_distinct_on(rows, sort_keys.len(), memory)?;
+    }
     let take = window.limit.rows_to_take(rows.len());
     let tied = |left: &Vec<Value>, right: &Vec<Value>| {
         compare_sort_keys(order_by, left, right) == Ordering::Equal

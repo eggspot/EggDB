@@ -184,9 +184,7 @@ impl<'t> Parser<'t> {
         }
         let temporary = (self.postgresql() || self.sqlite())
             && (self.take_word("temp") || self.take_word("temporary"));
-        if self.is_word("recursive") {
-            return Err(self.not_supported("CREATE RECURSIVE VIEW"));
-        }
+        let recursive = self.postgresql() && self.take_word("recursive");
         if self.is_word("materialized") {
             return Err(self.not_supported("CREATE MATERIALIZED VIEW"));
         }
@@ -211,6 +209,8 @@ impl<'t> Parser<'t> {
         let name_start = self.previous_start();
         let columns = if self.peek_kind() == &TokenKind::LeftParen {
             self.name_list()?
+        } else if recursive {
+            return Err(self.unexpected());
         } else {
             Vec::new()
         };
@@ -235,6 +235,11 @@ impl<'t> Parser<'t> {
             .get(self.at.saturating_sub(1))
             .map_or(first, |token| token.end);
         let text = self.text.get(first..last).unwrap_or("").to_owned();
+        let (query, text) = if recursive {
+            self.recursive_view_query(&name, &columns, &text)?
+        } else {
+            (query, text)
+        };
         let mut check_option = None;
         if self.is_word("with") {
             self.at += 1;
@@ -277,6 +282,35 @@ impl<'t> Parser<'t> {
             }),
             temporary,
         })))
+    }
+
+    fn recursive_view_query(
+        &self,
+        name: &Name,
+        columns: &[Name],
+        body: &str,
+    ) -> SqlResult<(Query, String)> {
+        let common_table = crate::pg_keywords::quote_ident(crate::schemas::base_name(&name.text));
+        let column_list = columns
+            .iter()
+            .map(|column| crate::pg_keywords::quote_ident(&column.text))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let text = format!(
+            "WITH RECURSIVE {common_table} ({column_list}) AS ({body}) SELECT {column_list} FROM {common_table}"
+        );
+        let query = {
+            let tokens = crate::lexer::tokenize_in(&text, self.dialect)?;
+            let defaults = crate::settings::Settings::default();
+            let settings = self.settings.unwrap_or(&defaults);
+            let (query, _) = Parser::new(&text, &tokens)
+                .with_context(super::Parameters::Absent, settings)
+                .in_dialect(self.dialect)
+                .view_query()
+                .map_err(|error| error.at(name.position))?;
+            query
+        };
+        Ok((query, text))
     }
 
     fn mysql_view_options(&mut self) -> SqlResult<()> {

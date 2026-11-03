@@ -1422,6 +1422,7 @@ pub(crate) enum JoinCondition {
     Always,
     On(Expr),
     Using(Vec<Name>),
+    Natural,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1445,11 +1446,19 @@ pub(crate) struct Select {
     pub(crate) filter: Option<Expr>,
     pub(crate) group_by: Vec<Expr>,
     pub(crate) grouping_sets: Option<GroupingSets>,
+    pub(crate) distinct_on: Vec<Expr>,
     pub(crate) having: Option<Expr>,
     pub(crate) order_by: Vec<OrderItem>,
     pub(crate) limit: Option<Expr>,
     pub(crate) offset: Option<Expr>,
     pub(crate) source_row_limit: Option<u64>,
+}
+
+impl Select {
+    /// Whether the query keeps one row of each set of duplicates, by `DISTINCT` or `DISTINCT ON`.
+    pub(crate) fn removes_duplicates(&self) -> bool {
+        self.distinct || !self.distinct_on.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

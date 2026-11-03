@@ -1100,6 +1100,12 @@ pub(crate) fn expand_select_list(select: &mut Select) -> SqlResult<()> {
     let Some(position) = position else {
         return Ok(());
     };
+    if let Some(on) = select.distinct_on.first() {
+        return Err(SqlError::not_supported(
+            "DISTINCT ON with a window or set-returning function in the select list is not supported yet",
+        )
+        .at(on.position));
+    }
     let mut builder = ExpansionBuilder::default();
     for item in std::mem::take(&mut select.items) {
         builder.add(item)?;
@@ -1130,6 +1136,7 @@ pub(crate) fn expand_select_list(select: &mut Select) -> SqlResult<()> {
         offset: None,
         source_row_limit: select.source_row_limit.take(),
         grouping_sets: select.grouping_sets.take(),
+        distinct_on: Vec::new(),
     };
     select.items = vec![SelectItem::Wildcard {
         qualifier: None,

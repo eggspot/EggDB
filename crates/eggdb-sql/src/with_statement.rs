@@ -117,6 +117,7 @@ fn replace_in_select(select: &mut Select, materialized: &[Materialized]) -> SqlR
         .iter_mut()
         .chain(select.group_by.iter_mut())
         .chain(select.having.iter_mut())
+        .chain(select.distinct_on.iter_mut())
         .chain(select.order_by.iter_mut().map(|item| &mut item.expr))
         .chain(select.limit.iter_mut())
         .chain(select.offset.iter_mut());
@@ -246,6 +247,7 @@ fn table_query(table: &CommonTable, recursive: bool) -> Query {
         offset: None,
         source_row_limit: None,
         grouping_sets: None,
+        distinct_on: Vec::new(),
     };
     Query {
         with: vec![table.clone()],

@@ -3238,3 +3238,43 @@ DROP TABLE log316
 
 ok
 DROP TABLE emp316
+
+chapter "Joins", "Pattern-matching Conditions": NATURAL joins and LIKE ... ESCAPE
+ok
+CREATE TABLE letters299 (num NUMBER, name VARCHAR2(10))
+
+ok
+INSERT INTO letters299 VALUES (1, 'a')
+
+ok
+INSERT INTO letters299 VALUES (2, 'b')
+
+ok
+CREATE TABLE values299 (num NUMBER, value VARCHAR2(10))
+
+ok
+INSERT INTO values299 VALUES (1, 'xxx')
+
+rows
+SELECT num, name, value FROM letters299 NATURAL LEFT OUTER JOIN values299 ORDER BY num
+----
+NUM|NAME|VALUE
+1|a|xxx
+2|b|NULL
+SELECT 2
+
+ok
+CREATE TABLE codes299 (code VARCHAR2(10))
+
+ok
+INSERT INTO codes299 VALUES ('A_B')
+
+ok
+INSERT INTO codes299 VALUES ('AxB')
+
+rows
+SELECT code FROM codes299 WHERE code LIKE 'A\_B' ESCAPE '\'
+----
+CODE
+A_B
+SELECT 1

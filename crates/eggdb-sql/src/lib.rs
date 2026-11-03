@@ -182,6 +182,8 @@ mod correctness;
 #[cfg(test)]
 mod destructive_tests;
 #[cfg(test)]
+mod distinct_on_and_natural_join_tests;
+#[cfg(test)]
 mod engine_limits_tests;
 #[cfg(test)]
 mod geo_tests;

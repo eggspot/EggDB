@@ -4612,3 +4612,148 @@ id|span
 3|1 day
 1|infinity
 SELECT 3
+
+chapter sql-select, "DISTINCT Clause": DISTINCT ON keeps the first row of each set in ORDER BY order
+ok
+CREATE TABLE weather299 (location text, day int, report text)
+
+ok
+INSERT INTO weather299 VALUES ('Oslo', 1, 'snow'), ('Oslo', 2, 'sun'), ('Rome', 1, 'rain'), ('Rome', 3, 'clouds')
+
+rows
+SELECT DISTINCT ON (location) location, day, report FROM weather299 ORDER BY location, day DESC
+----
+location|day|report
+Oslo|2|sun
+Rome|3|clouds
+SELECT 2
+
+rows
+SELECT DISTINCT ON (location) report FROM weather299 ORDER BY location, day
+----
+report
+snow
+rain
+SELECT 2
+
+rows
+SELECT DISTINCT ON (1) location, report FROM weather299 ORDER BY 1, day DESC
+----
+location|report
+Oslo|sun
+Rome|clouds
+SELECT 2
+
+rows
+SELECT count(*) FROM (SELECT DISTINCT ON (location) report FROM weather299) AS latest
+----
+count
+2
+SELECT 1
+
+error 42P10
+SELECT DISTINCT ON (location) location, day FROM weather299 ORDER BY day
+
+chapter queries-table-expressions, "Joined Tables": NATURAL joins use every column name both tables have
+ok
+CREATE TABLE letters299 (num int, name text)
+
+ok
+INSERT INTO letters299 VALUES (1, 'a'), (2, 'b'), (3, 'c')
+
+ok
+CREATE TABLE values299 (num int, value text)
+
+ok
+INSERT INTO values299 VALUES (1, 'xxx'), (3, 'yyy'), (5, 'zzz')
+
+rows
+SELECT * FROM letters299 NATURAL INNER JOIN values299 ORDER BY num
+----
+num|name|value
+1|a|xxx
+3|c|yyy
+SELECT 2
+
+rows
+SELECT * FROM letters299 NATURAL LEFT JOIN values299 ORDER BY num
+----
+num|name|value
+1|a|xxx
+2|b|NULL
+3|c|yyy
+SELECT 3
+
+rows
+SELECT * FROM letters299 NATURAL RIGHT JOIN values299 ORDER BY num
+----
+num|name|value
+1|a|xxx
+3|c|yyy
+5|NULL|zzz
+SELECT 3
+
+rows
+SELECT * FROM letters299 NATURAL FULL JOIN values299 ORDER BY num
+----
+num|name|value
+1|a|xxx
+2|b|NULL
+3|c|yyy
+5|NULL|zzz
+SELECT 4
+
+rows
+SELECT count(*) FROM letters299 NATURAL JOIN (SELECT 'other' AS label) AS unrelated
+----
+count
+3
+SELECT 1
+
+error 42601
+SELECT * FROM letters299 NATURAL JOIN values299 USING (num)
+
+chapter functions-matching, "LIKE": ESCAPE names another escape character, or none
+rows
+SELECT 'a_c' LIKE 'a#_c' ESCAPE '#', 'abc' LIKE 'a#_c' ESCAPE '#', '50%' NOT LIKE '50!%' ESCAPE '!', 'a\b' LIKE 'a\b' ESCAPE ''
+----
+?column?|?column?|?column?|?column?
+t|f|f|t
+SELECT 1
+
+rows
+SELECT 'A%' ILIKE 'a$%' ESCAPE '$', 'x' LIKE 'x' ESCAPE NULL
+----
+?column?|?column?
+t|NULL
+SELECT 1
+
+rows
+SELECT like_escape('a#_b\c', '#')
+----
+like_escape
+a\_b\\c
+SELECT 1
+
+error 22025
+SELECT 'a' LIKE 'a#' ESCAPE '#'
+
+error 22025
+SELECT 'a' LIKE 'a' ESCAPE '##'
+
+chapter sql-createview, "CREATE VIEW": a RECURSIVE view is a WITH RECURSIVE query over its own name
+ok
+CREATE RECURSIVE VIEW public.nums_1_100 (n) AS VALUES (1) UNION ALL SELECT n+1 FROM nums_1_100 WHERE n < 100
+
+rows
+SELECT count(*), sum(n) FROM nums_1_100
+----
+count|sum
+100|5050
+SELECT 1
+
+error 42601
+CREATE RECURSIVE VIEW no_columns299 AS SELECT 1
+
+ok
+DROP VIEW nums_1_100

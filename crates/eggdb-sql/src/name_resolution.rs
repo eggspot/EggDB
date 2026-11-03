@@ -628,6 +628,7 @@ impl<'a> Resolver<'a> {
         let mut others: Vec<&mut Expr> = select.filter.iter_mut().collect();
         others.extend(select.group_by.iter_mut());
         others.extend(select.having.iter_mut());
+        others.extend(select.distinct_on.iter_mut());
         others.extend(select.order_by.iter_mut().map(|item| &mut item.expr));
         others.extend(select.limit.iter_mut());
         others.extend(select.offset.iter_mut());
@@ -658,9 +659,11 @@ impl<'a> Resolver<'a> {
             }
         }
         if let Some(from) = &select.from {
-            for join in &from.joins {
-                if let JoinCondition::Using(columns) = &join.condition {
-                    self.columns.check_using(columns)?;
+            for (at, join) in from.joins.iter().enumerate() {
+                match &join.condition {
+                    JoinCondition::Using(columns) => self.columns.check_using(columns)?,
+                    JoinCondition::Natural => self.columns.check_natural(at + 1)?,
+                    JoinCondition::On(_) | JoinCondition::Always => {}
                 }
             }
         }
@@ -951,6 +954,7 @@ impl<'a> Resolver<'a> {
                 offset: None,
                 source_row_limit: None,
                 grouping_sets: None,
+                distinct_on: Vec::new(),
             }))
         };
         let mut body = branch(&leaves[0]);
@@ -1344,6 +1348,7 @@ fn select_from(
         offset: None,
         source_row_limit: None,
         grouping_sets: None,
+        distinct_on: Vec::new(),
     }
 }
 
@@ -1873,6 +1878,7 @@ impl Binding<'_> {
             offset: None,
             source_row_limit: None,
             grouping_sets: None,
+            distinct_on: Vec::new(),
         };
         self.select(reader, tables, &mut select)?;
         let mut resolved = select.items.into_iter();

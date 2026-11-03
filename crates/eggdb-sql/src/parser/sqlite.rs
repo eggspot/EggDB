@@ -191,37 +191,28 @@ fn is_boolean_valued(expr: &Expr) -> bool {
         | ExprKind::InList { .. }
         | ExprKind::Like { .. }
         | ExprKind::Literal(Literal::Null | Literal::Boolean(_)) => true,
-        ExprKind::SqliteFunction { name, .. } => *name == "sqlite_truth",
+        ExprKind::SqliteFunction { name, .. } => matches!(*name, "sqlite_truth" | "sqlite_glob"),
         _ => false,
     }
 }
 
 pub(super) fn glob(expr: Expr, pattern: Expr, negated: bool) -> SqlResult<Expr> {
     let position = expr.position;
-    let ExprKind::Literal(Literal::String(text)) = &pattern.kind else {
-        return Err(
-            SqlError::not_supported("GLOB with a pattern other than a constant string")
-                .at(pattern.position),
-        );
+    let converted = match &pattern.kind {
+        ExprKind::Literal(Literal::String(text)) => glob_as_like(text),
+        _ => None,
     };
-    let mut converted = String::with_capacity(text.len());
-    for character in text.chars() {
-        match character {
-            '*' => converted.push('%'),
-            '?' => converted.push('_'),
-            '%' | '_' | '\\' => {
-                converted.push('\\');
-                converted.push(character);
+    let Some(converted) = converted else {
+        let matched = sqlite_function("sqlite_glob", vec![pattern, expr], position);
+        return Ok(if negated {
+            Expr {
+                kind: ExprKind::Unary(UnaryOperator::Not, Box::new(matched)),
+                position,
             }
-            '[' => {
-                return Err(
-                    SqlError::not_supported("character classes ([...]) in GLOB patterns")
-                        .at(pattern.position),
-                );
-            }
-            other => converted.push(other),
-        }
-    }
+        } else {
+            matched
+        });
+    };
     Ok(Expr {
         kind: ExprKind::Like {
             expr: Box::new(expr),
@@ -231,6 +222,23 @@ pub(super) fn glob(expr: Expr, pattern: Expr, negated: bool) -> SqlResult<Expr> 
         },
         position,
     })
+}
+
+fn glob_as_like(text: &str) -> Option<String> {
+    let mut converted = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '*' => converted.push('%'),
+            '?' => converted.push('_'),
+            '%' | '_' | '\\' => {
+                converted.push('\\');
+                converted.push(character);
+            }
+            '[' => return None,
+            other => converted.push(other),
+        }
+    }
+    Some(converted)
 }
 
 fn point_excluded_values(expr: &mut Expr) {
@@ -755,7 +763,7 @@ impl<'t> Parser<'t> {
             "hex" => ("sqlite_hex", &[1]),
             "quote" => ("sqlite_quote", &[1]),
             "printf" | "format" => ("sqlite_printf", &[]),
-            "like" => ("like", &[2]),
+            "like" => ("like", &[2, 3]),
             "glob" => ("glob", &[2]),
             "date" => ("sqlite_date", &[]),
             "time" => ("sqlite_time", &[]),
@@ -819,9 +827,14 @@ impl<'t> Parser<'t> {
                 let (Some(pattern), Some(subject)) = (arguments.next(), arguments.next()) else {
                     return Err(wrong_argument_count(name));
                 };
+                let escape = arguments.next();
                 if internal == "glob" {
                     glob(subject, pattern, false)?
                 } else {
+                    let pattern = match escape {
+                        Some(escape) => crate::parser::like_escape(pattern, escape),
+                        None => pattern,
+                    };
                     Expr {
                         kind: ExprKind::Like {
                             expr: Box::new(subject),

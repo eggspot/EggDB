@@ -219,6 +219,17 @@ const POSTGRESQL_ONLY_SET_RETURNING: [&str; 3] = [
 
 const POSTGRESQL_FORMAT_FUNCTIONS: [&str; 4] = ["to_char", "to_date", "to_timestamp", "to_number"];
 
+pub(crate) fn like_escape(pattern: Expr, escape: Expr) -> Expr {
+    let position = pattern.position;
+    Expr {
+        kind: ExprKind::Function {
+            name: "like_escape".to_owned(),
+            arguments: vec![pattern, escape],
+        },
+        position,
+    }
+}
+
 fn is_postgresql_only(name: &str) -> bool {
     POSTGRESQL_ONLY_FUNCTIONS.contains(&name)
         || POSTGRESQL_ONLY_SET_RETURNING.contains(&name)
@@ -2997,10 +3008,13 @@ impl<'t> Parser<'t> {
     fn select_clauses(&mut self) -> SqlResult<Select> {
         self.at += 1;
         let distinct = self.take_word("distinct");
-        if distinct && self.is_word("on") {
-            return Err(self.not_supported("DISTINCT ON"));
-        }
-        if !distinct {
+        let distinct_on = if distinct && self.is_word("on") {
+            self.distinct_on()?
+        } else {
+            Vec::new()
+        };
+        let distinct = distinct && distinct_on.is_empty();
+        if !distinct && distinct_on.is_empty() {
             self.take_word("all");
         }
         let top = if self.sqlserver() && self.is_word("top") {
@@ -3090,7 +3104,22 @@ impl<'t> Parser<'t> {
             offset: None,
             source_row_limit,
             grouping_sets,
+            distinct_on,
         })
+    }
+
+    fn distinct_on(&mut self) -> SqlResult<Vec<Expr>> {
+        if !self.postgresql() {
+            return Err(self.unexpected());
+        }
+        self.at += 1;
+        self.expect(&TokenKind::LeftParen)?;
+        let mut expressions = vec![self.expression()?];
+        while self.take(&TokenKind::Comma) {
+            expressions.push(self.expression()?);
+        }
+        self.expect(&TokenKind::RightParen)?;
+        Ok(expressions)
     }
 
     fn leading_join_group(&mut self) -> SqlResult<FromClause> {
@@ -3119,6 +3148,24 @@ impl<'t> Parser<'t> {
             .at(position));
         }
         Ok(group)
+    }
+
+    fn natural_join_kind(&mut self) -> SqlResult<JoinKind> {
+        let kind = if self.take_word("left") {
+            JoinKind::Left
+        } else if self.take_word("right") {
+            JoinKind::Right
+        } else if !self.mysql() && self.take_word("full") {
+            JoinKind::Full
+        } else {
+            self.take_word("inner");
+            JoinKind::Inner
+        };
+        if kind != JoinKind::Inner {
+            self.take_word("outer");
+        }
+        self.expect_word("join")?;
+        Ok(kind)
     }
 
     fn joined_tables(&mut self) -> SqlResult<FromClause> {
@@ -3168,6 +3215,7 @@ impl<'t> Parser<'t> {
                 });
                 continue;
             }
+            let mut natural = false;
             let kind = if self.take(&TokenKind::Comma) {
                 JoinKind::Comma
             } else if self.take_word("cross") {
@@ -3190,8 +3238,9 @@ impl<'t> Parser<'t> {
                 self.take_word("outer");
                 self.expect_word("join")?;
                 JoinKind::Full
-            } else if self.is_word("natural") {
-                return Err(self.not_supported("NATURAL joins"));
+            } else if !self.sqlserver() && self.take_word("natural") {
+                natural = true;
+                self.natural_join_kind()?
             } else {
                 break;
             };
@@ -3204,6 +3253,7 @@ impl<'t> Parser<'t> {
             }
             let table = self.table_or_function()?;
             let condition = match kind {
+                _ if natural => JoinCondition::Natural,
                 JoinKind::Comma | JoinKind::Cross => JoinCondition::Always,
                 JoinKind::Inner | JoinKind::Left | JoinKind::Right | JoinKind::Full => {
                     if self.take_word("on") {
@@ -3798,9 +3848,10 @@ impl<'t> Parser<'t> {
         } else if self.is_word("like") || (self.is_word("ilike") && !self.sqlserver()) {
             let case_insensitive = self.is_word("ilike") || self.sqlite();
             self.at += 1;
-            let pattern = self.expression_above(Level::Other)?;
-            if self.is_word("escape") {
-                return Err(self.not_supported("LIKE ... ESCAPE"));
+            let mut pattern = self.expression_above(Level::Other)?;
+            if self.take_word("escape") {
+                let escape = self.expression_above(Level::Other)?;
+                pattern = like_escape(pattern, escape);
             }
             ExprKind::Like {
                 expr: Box::new(expr),

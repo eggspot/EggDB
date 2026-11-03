@@ -1079,6 +1079,7 @@ fn derived_rows(
         offset: None,
         source_row_limit: None,
         grouping_sets: None,
+        distinct_on: Vec::new(),
     };
     TableReference {
         name: Name {

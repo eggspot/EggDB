@@ -176,59 +176,12 @@ pub(crate) fn resolve<'a>(
             }
             JoinCondition::Using(names) => {
                 let left = sources_between(&list, group_start..right_index, &merged);
-                for (at, name) in names.iter().enumerate() {
-                    if names[..at].iter().any(|earlier| earlier.text == name.text) {
-                        return Err(SqlError::new(
-                            SqlState::DUPLICATE_COLUMN,
-                            format!(
-                                "column name \"{}\" appears more than once in USING clause",
-                                name.text
-                            ),
-                        )
-                        .at(name.position));
-                    }
-                    let left_offset = Scope::Many(&left)
-                        .column(None, &name.text, name.position)
-                        .map_err(|error| {
-                            if error.state() == SqlState::AMBIGUOUS_COLUMN {
-                                SqlError::new(
-                                    SqlState::AMBIGUOUS_COLUMN,
-                                    format!(
-                                        "common column name \"{}\" appears more than once in left table",
-                                        name.text
-                                    ),
-                                )
-                                .at(name.position)
-                            } else {
-                                SqlError::new(
-                                    SqlState::UNDEFINED_COLUMN,
-                                    format!(
-                                        "column \"{}\" specified in USING clause does not exist in left table",
-                                        name.text
-                                    ),
-                                )
-                                .at(name.position)
-                            }
-                        })?;
-                    let right_column = right.table.column_index(&name.text).ok_or_else(|| {
-                        SqlError::new(
-                            SqlState::UNDEFINED_COLUMN,
-                            format!(
-                                "column \"{}\" specified in USING clause does not exist in right table",
-                                name.text
-                            ),
-                        )
-                        .at(name.position)
-                    })?;
-                    let left_type = Scope::Many(&left).column_type(left_offset);
-                    let right_type = right.table.columns[right_column].sql_type;
-                    if let Some(left_type) = left_type
-                        && !comparable(left_type, right_type)
-                    {
-                        return Err(no_equality(left_type, right_type, name.position));
-                    }
-                    using.push((left_offset, right.offset + right_column));
-                }
+                using = using_pairs(&left, right, names)?;
+            }
+            JoinCondition::Natural => {
+                let left = sources_between(&list, group_start..right_index, &merged);
+                let names = natural_columns(&list, &group_star, right, join.table.name.position);
+                using = using_pairs(&left, right, &names)?;
             }
             JoinCondition::Always => {}
         }
@@ -273,9 +226,112 @@ pub(crate) fn resolve<'a>(
     Ok(joined)
 }
 
+fn using_pairs(
+    left: &Sources<'_>,
+    right: Source<'_>,
+    names: &[crate::ast::Name],
+) -> SqlResult<Vec<(usize, usize)>> {
+    let mut using = Vec::with_capacity(names.len());
+    for (at, name) in names.iter().enumerate() {
+        if names[..at].iter().any(|earlier| earlier.text == name.text) {
+            return Err(SqlError::new(
+                SqlState::DUPLICATE_COLUMN,
+                format!(
+                    "column name \"{}\" appears more than once in USING clause",
+                    name.text
+                ),
+            )
+            .at(name.position));
+        }
+        let left_offset = Scope::Many(left)
+            .column(None, &name.text, name.position)
+            .map_err(|error| {
+                if error.state() == SqlState::AMBIGUOUS_COLUMN {
+                    SqlError::new(
+                        SqlState::AMBIGUOUS_COLUMN,
+                        format!(
+                            "common column name \"{}\" appears more than once in left table",
+                            name.text
+                        ),
+                    )
+                    .at(name.position)
+                } else {
+                    SqlError::new(
+                        SqlState::UNDEFINED_COLUMN,
+                        format!(
+                            "column \"{}\" specified in USING clause does not exist in left table",
+                            name.text
+                        ),
+                    )
+                    .at(name.position)
+                }
+            })?;
+        let right_column = right.table.column_index(&name.text).ok_or_else(|| {
+            SqlError::new(
+                SqlState::UNDEFINED_COLUMN,
+                format!(
+                    "column \"{}\" specified in USING clause does not exist in right table",
+                    name.text
+                ),
+            )
+            .at(name.position)
+        })?;
+        let left_type = Scope::Many(left).column_type(left_offset);
+        let right_type = right.table.columns[right_column].sql_type;
+        if let Some(left_type) = left_type
+            && !comparable(left_type, right_type)
+        {
+            return Err(no_equality(left_type, right_type, name.position));
+        }
+        using.push((left_offset, right.offset + right_column));
+    }
+    Ok(using)
+}
+
+fn column_name_at<'t>(list: &[Source<'t>], offset: usize) -> Option<&'t str> {
+    list.iter().find_map(|source| {
+        offset
+            .checked_sub(source.offset)
+            .and_then(|at| source.table.columns.get(at))
+            .map(|column| column.name.as_str())
+    })
+}
+
+fn natural_columns(
+    list: &[Source<'_>],
+    left_star: &[usize],
+    right: Source<'_>,
+    position: usize,
+) -> Vec<crate::ast::Name> {
+    let mut names: Vec<crate::ast::Name> = Vec::new();
+    for &offset in left_star {
+        let Some(name) = column_name_at(list, offset) else {
+            continue;
+        };
+        let shared = shown_columns_of(&right).any(|at| {
+            right
+                .table
+                .columns
+                .get(at - right.offset)
+                .is_some_and(|column| column.name == name)
+        });
+        if shared && !names.iter().any(|known| known.text == name) {
+            names.push(crate::ast::Name {
+                text: name.to_owned(),
+                position,
+            });
+        }
+    }
+    names
+}
+
 pub(crate) fn has_full_using(from: &FromClause) -> bool {
     from.joins.iter().any(|join| {
-        join.kind == JoinKind::Full && matches!(join.condition, JoinCondition::Using(_))
+        join.kind == JoinKind::Full
+            && matches!(
+                join.condition,
+                JoinCondition::Using(_) | JoinCondition::Natural
+            )
     })
 }
 
@@ -438,6 +494,9 @@ pub(crate) fn merge_full_using(
     }
     if let Some(having) = &select.having {
         select.having = Some(with_merged_columns(having, &merged)?);
+    }
+    for key in &mut select.distinct_on {
+        *key = with_merged_columns(key, &merged)?;
     }
     for item in &mut select.order_by {
         item.expr = with_merged_columns(&item.expr, &merged)?;
@@ -1666,18 +1725,26 @@ impl JoinedFrom<'_> {
         }
         output_exprs.extend(select.group_by.iter());
         output_exprs.extend(select.having.iter());
+        output_exprs.extend(select.distinct_on.iter());
         output_exprs.extend(select.order_by.iter().map(|item| &item.expr));
         output_exprs.extend(late);
         mark_exprs(list, &mut needed, &output_exprs);
         let output = needed.clone();
         let mut condition_exprs: Vec<&Expr> = select.filter.iter().collect();
         if let Some(from) = &select.from {
-            for join in &from.joins {
+            for (join, shape) in from.joins.iter().zip(&self.shapes) {
                 match &join.condition {
                     JoinCondition::On(expr) => condition_exprs.push(expr),
                     JoinCondition::Using(names) => {
                         for name in names {
                             mark_column(list, &mut needed, None, &name.text);
+                        }
+                    }
+                    JoinCondition::Natural => {
+                        for &(_, right) in &shape.using {
+                            if let Some(name) = column_name_at(list, right) {
+                                mark_column(list, &mut needed, None, name);
+                            }
                         }
                     }
                     JoinCondition::Always => {}

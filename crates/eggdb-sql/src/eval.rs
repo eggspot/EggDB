@@ -1780,6 +1780,7 @@ fn function_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         "regexp_like"
         | "regexp_match"
         | "regexp_split_to_array"
+        | "like_escape"
         | "similar_to_escape"
         | "similar_substring_pattern" => &[TEXT, TEXT, TEXT],
         "regexp_replace" => &[TEXT, TEXT, TEXT],

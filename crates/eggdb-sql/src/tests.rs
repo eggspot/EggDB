@@ -583,9 +583,7 @@ fn not_supported_yet_answers_0a000_with_a_hint() {
     let store = MemoryStore::default();
     let mut session = with_people(&store);
     for sql in [
-        "SELECT * FROM people a NATURAL JOIN people b",
         "SELECT age FROM people GROUP BY ROLLUP (age)",
-        "SELECT DISTINCT ON (age) age FROM people",
         "SELECT '{{1}}'::int[]",
         "CREATE TABLE ts (t money)",
         "CREATE TABLE js (j inet)",
@@ -1500,7 +1498,6 @@ fn join_errors_follow_postgresql() {
             "SELECT * FROM a JOIN b ON b.k = c.k JOIN people c ON true",
             "42P01",
         ),
-        ("SELECT * FROM a NATURAL JOIN b", "0A000"),
         ("SELECT * FROM a JOIN (a JOIN b ON true) ON true", "0A000"),
         ("SELECT * FROM nope JOIN a ON true", "42P01"),
         ("SELECT * FROM a JOIN nope ON true", "42P01"),
@@ -1677,7 +1674,6 @@ fn grouping_errors_follow_postgresql() {
             "SELECT DISTINCT person_id FROM orders ORDER BY amount",
             "42P10",
         ),
-        ("SELECT DISTINCT ON (person_id) amount FROM orders", "0A000"),
         ("SELECT age FROM people GROUP BY ROLLUP (age)", "0A000"),
         ("SELECT age FROM people GROUP BY ()", "0A000"),
         ("UPDATE people SET age = count(*)", "42803"),

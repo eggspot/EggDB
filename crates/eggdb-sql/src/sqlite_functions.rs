@@ -334,6 +334,10 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
                 Value::Text(subject.replace(&pattern, &replacement))
             }
         }
+        "sqlite_glob" => Value::Boolean(glob_matches(
+            &text(0).unwrap_or_default(),
+            &text(1).unwrap_or_default(),
+        )),
         "sqlite_instr" => {
             let haystack = text(0).unwrap_or_default();
             let needle = text(1).unwrap_or_default();
@@ -387,6 +391,110 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
             ));
         }
     })
+}
+
+enum GlobToken {
+    Any,
+    One,
+    Literal(char),
+    Class {
+        negated: bool,
+        ranges: Vec<(char, char)>,
+    },
+}
+
+impl GlobToken {
+    fn matches(&self, character: char) -> bool {
+        match self {
+            Self::Any | Self::One => true,
+            Self::Literal(expected) => *expected == character,
+            Self::Class { negated, ranges } => {
+                ranges
+                    .iter()
+                    .any(|&(low, high)| low <= character && character <= high)
+                    != *negated
+            }
+        }
+    }
+}
+
+fn glob_class(characters: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<GlobToken> {
+    let negated = characters.next_if_eq(&'^').is_some();
+    let mut ranges = Vec::new();
+    if let Some(bracket) = characters.next_if_eq(&']') {
+        ranges.push((bracket, bracket));
+    }
+    loop {
+        let low = characters.next()?;
+        if low == ']' {
+            return Some(GlobToken::Class { negated, ranges });
+        }
+        let high = if characters.peek() == Some(&'-') {
+            let mut ahead = characters.clone();
+            ahead.next();
+            match ahead.next() {
+                Some(high) if high != ']' => {
+                    characters.next();
+                    characters.next();
+                    high
+                }
+                _ => low,
+            }
+        } else {
+            low
+        };
+        ranges.push((low, high));
+    }
+}
+
+fn glob_tokens(pattern: &str) -> Option<Vec<GlobToken>> {
+    let mut tokens = Vec::new();
+    let mut characters = pattern.chars().peekable();
+    while let Some(character) = characters.next() {
+        tokens.push(match character {
+            '*' => GlobToken::Any,
+            '?' => GlobToken::One,
+            '[' => glob_class(&mut characters)?,
+            other => GlobToken::Literal(other),
+        });
+    }
+    Some(tokens)
+}
+
+pub(crate) fn glob_matches(pattern: &str, text: &str) -> bool {
+    let Some(tokens) = glob_tokens(pattern) else {
+        return false;
+    };
+    let text: Vec<char> = text.chars().collect();
+    let mut text_at = 0;
+    let mut token_at = 0;
+    let mut backtrack: Option<(usize, usize)> = None;
+    while text_at < text.len() {
+        match tokens.get(token_at) {
+            Some(GlobToken::Any) => {
+                backtrack = Some((token_at, text_at));
+                token_at += 1;
+                continue;
+            }
+            Some(token) if token.matches(text[text_at]) => {
+                text_at += 1;
+                token_at += 1;
+                continue;
+            }
+            _ => {}
+        }
+        match backtrack {
+            Some((star, matched)) => {
+                token_at = star + 1;
+                text_at = matched + 1;
+                backtrack = Some((star, matched + 1));
+            }
+            None => return false,
+        }
+    }
+    tokens[token_at..]
+        .iter()
+        .all(|token| matches!(token, GlobToken::Any))
 }
 
 struct Spec {
@@ -615,7 +723,7 @@ fn printf(format: &str, arguments: &[Value]) -> SqlResult<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{call, chars_between, printf, real_text};
+    use super::{call, chars_between, glob_matches, printf, real_text};
     use crate::types::Value;
 
     #[test]
@@ -662,6 +770,33 @@ mod tests {
             assert_eq!(real_text(value).as_deref(), Some(text), "{value}");
         }
         assert_eq!(real_text(f64::NAN), None);
+    }
+
+    #[test]
+    fn glob_matches_stars_marks_and_character_classes_case_sensitively() {
+        let cases = [
+            ("a*", "abc", true),
+            ("A*", "abc", false),
+            ("a?c", "abc", true),
+            ("[abc]x", "bx", true),
+            ("[abc]x", "dx", false),
+            ("[a-c]*", "cat", true),
+            ("[a-c]*", "dog", false),
+            ("[^a-c]*", "dog", true),
+            ("[^a-c]*", "cat", false),
+            ("[]]", "]", true),
+            ("[a-]", "-", true),
+            ("[*]", "*", true),
+            ("[*]", "x", false),
+            ("*[0-9][0-9]", "room 42", true),
+            ("*[0-9][0-9]", "room 4", false),
+            ("[abc", "a", false),
+            ("", "", true),
+            ("*", "", true),
+        ];
+        for (pattern, text, expected) in cases {
+            assert_eq!(glob_matches(pattern, text), expected, "{text} GLOB {pattern}");
+        }
     }
 
     #[test]
