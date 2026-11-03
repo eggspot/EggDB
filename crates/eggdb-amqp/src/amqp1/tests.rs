@@ -2,8 +2,10 @@ use super::value::{Value, decode_all, decode_first, encode};
 use super::{AMQP_HEADER, SASL_HEADER};
 use crate::server::{Broker, ServerConfig, serve_stream};
 use eggdb_keyspace::MemoryKeyspace;
+use eggdb_platform::connection_limits::MemoryBudget;
 use std::collections::VecDeque;
-use std::io::Read;
+use std::io::{Read, Write};
+use std::sync::Arc;
 
 fn config() -> ServerConfig {
     ServerConfig {
@@ -106,6 +108,202 @@ fn run(keyspace: &MemoryKeyspace, chunks: Vec<Vec<u8>>) -> Vec<(u64, Value, Vec<
     )
     .unwrap();
     performatives(&output)
+}
+
+struct Writes(Vec<Vec<u8>>);
+
+impl Write for Writes {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.push(bytes.to_vec());
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn run_writes(
+    keyspace: &MemoryKeyspace,
+    config: &ServerConfig,
+    chunks: Vec<Vec<u8>>,
+) -> Vec<Vec<(u64, Value, Vec<u8>)>> {
+    let broker = Broker::new(keyspace);
+    let mut writes = Writes(Vec::new());
+    serve_stream(&broker, config, Chunks(chunks.into()), &mut writes, &|| false).unwrap();
+    writes.0.iter().map(|write| performatives(write)).collect()
+}
+
+fn budgeted(limit_bytes: usize) -> (Arc<MemoryBudget>, ServerConfig) {
+    let budget = Arc::new(MemoryBudget::new(limit_bytes));
+    let config = ServerConfig {
+        memory_budget: Arc::clone(&budget),
+        ..config()
+    };
+    (budget, config)
+}
+
+fn opened_session() -> Vec<u8> {
+    let mut connect = AMQP_HEADER.to_vec();
+    connect.extend(frame(
+        0,
+        0,
+        0x10,
+        vec![
+            Value::String("client".to_owned()),
+            Value::Null,
+            Value::Uint(1 << 16),
+        ],
+        &[],
+    ));
+    connect.extend(frame(
+        0,
+        0,
+        0x11,
+        vec![
+            Value::Null,
+            Value::Uint(0),
+            Value::Uint(100),
+            Value::Uint(100),
+        ],
+        &[],
+    ));
+    connect
+}
+
+#[test]
+fn a_message_past_the_memory_budget_closes_its_connection_with_resource_limit_exceeded() {
+    let keyspace = MemoryKeyspace::default();
+    let (budget, config) = budgeted(100_000);
+    let mut connect = opened_session();
+    connect.extend(frame(
+        0,
+        0,
+        0x12,
+        vec![
+            Value::String("out".to_owned()),
+            Value::Uint(0),
+            Value::Bool(false),
+            Value::Ubyte(2),
+            Value::Ubyte(0),
+            Value::Null,
+            terminus(0x29, "big"),
+            Value::Null,
+            Value::Null,
+            Value::Uint(0),
+        ],
+        &[],
+    ));
+    let message = data(&vec![b'x'; 150_000]);
+    let pieces: Vec<&[u8]> = message.chunks(60_000).collect();
+    let transfers: Vec<Vec<u8>> = pieces
+        .iter()
+        .enumerate()
+        .map(|(index, piece)| {
+            let first = index == 0;
+            frame(
+                0,
+                0,
+                0x14,
+                vec![
+                    Value::Uint(0),
+                    if first { Value::Uint(0) } else { Value::Null },
+                    if first {
+                        Value::Binary(b"t0".to_vec())
+                    } else {
+                        Value::Null
+                    },
+                    Value::Null,
+                    Value::Null,
+                    Value::Bool(index + 1 < pieces.len()),
+                ],
+                piece,
+            )
+        })
+        .collect();
+    let mut chunks = vec![sasl("secret"), connect];
+    chunks.extend(transfers);
+    let replies: Vec<(u64, Value, Vec<u8>)> = run_writes(&keyspace, &config, chunks)
+        .into_iter()
+        .flatten()
+        .collect();
+    let (code, close, _) = replies.last().unwrap();
+    assert_eq!(*code, 0x18, "{replies:?}");
+    assert_eq!(
+        close.field(0).field(0),
+        &Value::Symbol("amqp:resource-limit-exceeded".to_owned())
+    );
+    assert_eq!(budget.used_bytes(), 0);
+    assert_eq!(
+        eggdb_queues::Queues::new(&keyspace)
+            .depth("big", u64::MAX)
+            .unwrap(),
+        eggdb_queues::Depth::default()
+    );
+}
+
+#[test]
+fn deliveries_past_the_memory_budget_wait_until_the_ones_before_them_are_written() {
+    let keyspace = MemoryKeyspace::default();
+    let queues = eggdb_queues::Queues::new(&keyspace);
+    queues.declare("jobs").unwrap();
+    queues.send("jobs", &vec![b'a'; 50_000], 0, 0).unwrap();
+    queues.send("jobs", &vec![b'b'; 50_000], 0, 0).unwrap();
+    let (budget, config) = budgeted(100_000);
+    let mut connect = opened_session();
+    connect.extend(frame(
+        0,
+        0,
+        0x12,
+        vec![
+            Value::String("in".to_owned()),
+            Value::Uint(0),
+            Value::Bool(true),
+            Value::Ubyte(1),
+            Value::Ubyte(0),
+            terminus(0x28, "jobs"),
+            Value::Null,
+        ],
+        &[],
+    ));
+    connect.extend(frame(
+        0,
+        0,
+        0x13,
+        vec![
+            Value::Uint(0),
+            Value::Uint(100),
+            Value::Uint(0),
+            Value::Uint(100),
+            Value::Uint(0),
+            Value::Uint(0),
+            Value::Uint(5),
+        ],
+        &[],
+    ));
+    let heartbeat = vec![0, 0, 0, 8, 2, 0, 0, 0];
+    let close = frame(0, 0, 0x18, Vec::new(), &[]);
+    let writes = run_writes(
+        &keyspace,
+        &config,
+        vec![sasl("secret"), connect, heartbeat, close],
+    );
+    let transfers_per_write: Vec<usize> = writes
+        .iter()
+        .map(|replies| {
+            replies
+                .iter()
+                .filter(|(code, _, _)| *code == 0x14)
+                .count()
+        })
+        .filter(|&count| count > 0)
+        .collect();
+    assert_eq!(transfers_per_write, [1, 1], "{writes:?}");
+    assert_eq!(budget.used_bytes(), 0);
+    assert_eq!(
+        queues.depth("jobs", u64::MAX).unwrap(),
+        eggdb_queues::Depth::default()
+    );
 }
 
 #[test]
