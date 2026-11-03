@@ -444,3 +444,49 @@ fn returned_new_rows_must_also_be_visible() {
         "body\nmine\nINSERT 0 1"
     );
 }
+
+#[test]
+fn a_joined_table_with_row_security_joins_only_the_visible_rows() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    for sql in [
+        "CREATE TABLE marks (id integer PRIMARY KEY, note text)",
+        "INSERT INTO marks VALUES (1, 'm1'), (2, 'm2'), (3, 'm3')",
+        "GRANT SELECT, UPDATE, DELETE ON marks TO ada",
+    ] {
+        run(&mut admin, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
+    let mut ada = as_role(&store, "ada");
+    assert_eq!(
+        run(
+            &mut ada,
+            "UPDATE marks SET note = n.body FROM notes AS n WHERE marks.id = n.id"
+        )
+        .unwrap(),
+        "UPDATE 2"
+    );
+    assert_eq!(
+        run(
+            &mut ada,
+            "DELETE FROM marks USING notes WHERE marks.id = notes.id AND notes.body = 'g1'"
+        )
+        .unwrap(),
+        "DELETE 0"
+    );
+    let refused = run(
+        &mut ada,
+        "DELETE FROM notes USING marks WHERE notes.id = marks.id",
+    )
+    .expect_err("a joined DELETE of a table with row-level security");
+    assert_eq!(refused.state(), SqlState::FEATURE_NOT_SUPPORTED);
+    assert!(refused.message().contains("row-level security"), "{refused}");
+    assert_eq!(
+        run(&mut admin, "SELECT id, note FROM marks ORDER BY id").unwrap(),
+        "id|note\n1|a1\n2|m2\n3|a2\nSELECT 3"
+    );
+    assert_eq!(
+        run(&mut admin, "SELECT count(*) FROM notes").unwrap(),
+        "count\n3\nSELECT 1"
+    );
+}

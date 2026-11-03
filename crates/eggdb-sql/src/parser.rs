@@ -2994,7 +2994,7 @@ impl<'t> Parser<'t> {
         let mut table = self.table_reference()?;
         let mut using = if self.is_word("using") {
             if !self.postgresql() {
-                return Err(self.not_supported("DELETE ... USING"));
+                return Err(self.unexpected());
             }
             self.at += 1;
             Some(JoinedTables::beside_target(self.joined_tables()?))

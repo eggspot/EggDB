@@ -183,15 +183,18 @@ Users can now change and delete rows through joins in every dialect that has the
 `UPDATE t1 JOIN t2 ... SET t1.a = ..., t2.b = ...` and `DELETE t1, t2 FROM ...`, and Transact-SQL's
 `UPDATE ... FROM` and `DELETE ... FROM ... JOIN` with `OUTPUT`, with `RETURNING` reading the joined
 tables (D297). Next for joined `UPDATE` and `DELETE`: subqueries in their `SET` and `RETURNING`
-clauses, a view, a partitioned table or a table with row-level security as their target, and
-`EXPLAIN` of them.
+clauses, a view, a partitioned table or a table with row-level security as their target,
+`EXPLAIN` of them, SQLite's refusal of `FROM` tables in `RETURNING` of `UPDATE ... FROM`, and
+Transact-SQL `OUTPUT deleted.` of a joined `UPDATE` (Msg 40517 today).
 Users can now summarise at several levels in one query in every dialect that has it:
 `GROUP BY ROLLUP`, `CUBE`, `GROUPING SETS` and `()` in PostgreSQL (with `GROUP BY DISTINCT`),
 SQL Server (also `WITH ROLLUP` and `WITH CUBE`) and Oracle, MySQL's `WITH ROLLUP`, `GROUPING()`
 everywhere but SQLite, `GROUPING_ID()` and Oracle's `GROUP_ID()`, in one pass over the rows
 (D298). Next for grouping sets: SQL Server's and Oracle's one-argument limit for `GROUPING`
-and their own error numbers for grouping-set mistakes, and grouping sets in a query with window
-functions checked against each manual.
+and their own error numbers for grouping-set mistakes, grouping sets in a query with window
+functions checked against each manual, `GROUPING` of an outer query's keys inside a subquery
+(`42803` today), and MySQL's NULL ordering (NULL first for `ASC`), so MySQL's `WITH ROLLUP ...
+ORDER BY year DESC` example puts the super-aggregate row last as MySQL's manual shows.
 Users can now keep one row per key with PostgreSQL's `DISTINCT ON (...)` in `ORDER BY` order,
 join by every shared column name with `NATURAL [INNER | LEFT | RIGHT | FULL] JOIN` (PostgreSQL,
 MySQL, SQLite, Oracle), name their own escape character with `LIKE ... ESCAPE` in every dialect
@@ -437,13 +440,18 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   reverse-key indexes (D32, sql.md).
 - `stddev`, `variance` and hypothetical-set aggregates (sql.md).
 - Grouping sets: SQL Server's and Oracle's one-argument `GROUPING` and their own error numbers
-  for grouping-set mistakes, and grouping sets beside window functions checked against each
-  manual; `ROLLUP`, `CUBE`, `GROUPING SETS` and `WITH ROLLUP` are built (D298).
+  for grouping-set mistakes, grouping sets beside window functions checked against each manual,
+  and `GROUPING` of outer references in a subquery; `ROLLUP`, `CUBE`, `GROUPING SETS` and
+  `WITH ROLLUP` are built (D298).
+- MySQL's NULL ordering: NULL sorts first for `ASC` and last for `DESC` in MySQL, the opposite
+  of the MySQL dialect today.
 - `DISTINCT ON` an expression outside the select list of a grouped query or beside a window
   function, `NATURAL` joins with a `LATERAL` item, SQLite's and Oracle's own errors for a wrong
   `ESCAPE`, and Transact-SQL's `[...]` classes in `LIKE` (D299).
 - Joined `UPDATE` and `DELETE` with subqueries in `SET` and `RETURNING`, a view, a partitioned
-  table or a table with row-level security as the target, and `EXPLAIN` of them (D297).
+  table or a table with row-level security as the target, `EXPLAIN` of them, SQLite's refusal
+  of `FROM` tables in `RETURNING`, and `OUTPUT deleted.` of a joined Transact-SQL `UPDATE`
+  (D297).
 - `CREATE TABLE ... AS` and `CREATE TABLE ... AS ... WITH [NO] DATA` in PostgreSQL, MySQL, SQLite
   and Oracle; `SELECT ... INTO` is built (D303).
 - PostgreSQL's `2201W` for a NULL `WITH TIES` count (D300).

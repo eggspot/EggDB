@@ -1847,8 +1847,19 @@ impl Resolver<'_> {
         &mut self,
         reference: &mut TableReference,
         command: crate::row_security::PolicyCommand,
+        updated_columns: Option<&[String]>,
     ) -> SqlResult<()> {
-        self.target(reference)?;
+        match updated_columns {
+            Some(columns) => {
+                self.resolve_target(reference)?;
+                if self.target_privilege.is_some() {
+                    let privilege = crate::roles::Privilege::Update;
+                    self.check_written_columns(&reference.name.text, privilege, columns)?;
+                    self.check_new_rows(&reference.name.text, privilege)?;
+                }
+            }
+            None => self.target(reference)?,
+        }
         if self
             .row_security_filter(&reference.name.text, command)?
             .is_some()
@@ -2001,29 +2012,28 @@ impl Binding<'_> {
                 written_at.push(*at);
             }
         }
-        let mut resolver = self.resolver(reader, tables)?;
-        let update_command = crate::row_security::PolicyCommand::Update;
-        resolver.joined_target(&mut update.table, update_command)?;
-        if resolver.target_privilege.is_some() {
-            let written_columns: Vec<String> = update
+        let written_columns = |target: Option<usize>| -> Vec<String> {
+            update
                 .assignments
                 .iter()
                 .enumerate()
-                .filter(|(at, _)| joined.assigned_at.get(*at).copied().flatten().or(main) == main)
+                .filter(|(at, _)| {
+                    joined.assigned_at.get(*at).copied().flatten().or(main) == target
+                })
                 .map(|(_, (name, _))| name.text.clone())
-                .collect();
-            resolver.check_written_columns(
-                &update.table.name.text,
-                crate::roles::Privilege::Update,
-                &written_columns,
-            )?;
-        }
+                .collect()
+        };
+        let main_columns = written_columns(main);
+        let mut resolver = self.resolver(reader, tables)?;
+        let update_command = crate::row_security::PolicyCommand::Update;
+        resolver.joined_target(&mut update.table, update_command, Some(&main_columns))?;
         for at in written_at.into_iter().flatten() {
             if Some(at) == main {
                 continue;
             }
             if let Some(mut reference) = listed_reference(&written, at).cloned() {
-                resolver.joined_target(&mut reference, update_command)?;
+                let columns = written_columns(Some(at));
+                resolver.joined_target(&mut reference, update_command, Some(&columns))?;
             }
         }
         Ok(())
@@ -2048,10 +2058,10 @@ impl Binding<'_> {
         self.joined_reads(reader, tables, table, joined, Vec::new(), returning, filter)?;
         let mut resolver = self.resolver(reader, tables)?;
         let delete_command = crate::row_security::PolicyCommand::Delete;
-        resolver.joined_target(table, delete_command)?;
+        resolver.joined_target(table, delete_command, None)?;
         for &at in &joined.more_targets_at {
             if let Some(mut reference) = listed_reference(&written, at).cloned() {
-                resolver.joined_target(&mut reference, delete_command)?;
+                resolver.joined_target(&mut reference, delete_command, None)?;
             }
         }
         Ok(())

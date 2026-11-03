@@ -12,6 +12,7 @@ use crate::session::{OutputColumn, QueryResult};
 use crate::store::{KeyValueRead, KeyValueWrite};
 use crate::triggers::{Firing, RowOutcome, TriggerEvent};
 use crate::types::Value;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -86,6 +87,29 @@ pub(crate) fn from_position(joined: &JoinedTables, listed_at: usize) -> usize {
 
 fn target_position(joined: &JoinedTables) -> usize {
     joined.target_at.unwrap_or(0)
+}
+
+fn without_null_extension(from: &FromClause, at: usize) -> Option<FromClause> {
+    let mut kept = from.clone();
+    let mut changed = false;
+    for (index, join) in kept.joins.iter_mut().enumerate() {
+        let kind = match (index + 1).cmp(&at) {
+            Ordering::Equal => match join.kind {
+                JoinKind::Left => JoinKind::Inner,
+                JoinKind::Full => JoinKind::Right,
+                _ => continue,
+            },
+            Ordering::Greater => match join.kind {
+                JoinKind::Right => JoinKind::Inner,
+                JoinKind::Full => JoinKind::Left,
+                _ => continue,
+            },
+            Ordering::Less => continue,
+        };
+        join.kind = kind;
+        changed = true;
+    }
+    changed.then_some(kept)
 }
 
 fn references(from: &FromClause) -> impl Iterator<Item = &TableReference> {
@@ -224,7 +248,7 @@ impl JoinedSource {
         }
     }
 
-    fn selection(&self, filter: Option<&Expr>, position: usize) -> Select {
+    fn selection(&self, from: &FromClause, filter: Option<&Expr>, position: usize) -> Select {
         let mut items = Vec::with_capacity(self.width());
         for item in &self.items {
             if !item.stored {
@@ -247,7 +271,7 @@ impl JoinedSource {
                 });
             }
         }
-        every_column_select(self.from.clone(), items, filter.cloned())
+        every_column_select(from.clone(), items, filter.cloned())
     }
 
     fn joined_rows(
@@ -258,7 +282,42 @@ impl JoinedSource {
         position: usize,
         memory: &mut WorkMemory,
     ) -> SqlResult<Vec<Vec<Value>>> {
-        let selected = execute::select(reader, tables, &self.selection(filter, position), false)?;
+        self.rows_over(reader, tables, &self.from, filter, position, memory)
+    }
+
+    fn rows_where_present(
+        &self,
+        reader: &dyn KeyValueRead,
+        tables: &mut TableCache,
+        at: usize,
+        filter: Option<&Expr>,
+        position: usize,
+        memory: &mut WorkMemory,
+    ) -> SqlResult<Option<Vec<Vec<Value>>>> {
+        let keyless = self
+            .items
+            .get(at)
+            .is_some_and(|item| item.definition.primary_key.is_empty());
+        if !keyless {
+            return Ok(None);
+        }
+        let Some(from) = without_null_extension(&self.from, at) else {
+            return Ok(None);
+        };
+        self.rows_over(reader, tables, &from, filter, position, memory).map(Some)
+    }
+
+    fn rows_over(
+        &self,
+        reader: &dyn KeyValueRead,
+        tables: &mut TableCache,
+        from: &FromClause,
+        filter: Option<&Expr>,
+        position: usize,
+        memory: &mut WorkMemory,
+    ) -> SqlResult<Vec<Vec<Value>>> {
+        let selection = self.selection(from, filter, position);
+        let selected = execute::select(reader, tables, &selection, false)?;
         let width = self.width();
         for row in &selected.rows {
             if row.len() != width {
@@ -483,18 +542,25 @@ pub(crate) fn update(
         &mut memory,
     )?;
     let mut matches = Vec::with_capacity(targets.len());
+    let mut present_rows = Vec::with_capacity(targets.len());
     for &at in &targets {
-        matches.push(matched_rows(
+        let present = source.rows_where_present(
             &*writer,
-            &source.items[at],
-            &joined_rows,
+            tables,
+            at,
+            update.filter.as_ref(),
+            position,
             &mut memory,
-        )?);
+        )?;
+        let rows = present.as_deref().unwrap_or(joined_rows.as_slice());
+        matches.push(matched_rows(&*writer, &source.items[at], rows, &mut memory)?);
+        present_rows.push(present);
     }
     let rule = execute::assignment_rule(crate::constraints::current_dialect());
     let mut affected = 0usize;
     let mut returned_rows = Vec::new();
-    for (&at, matched) in targets.iter().zip(matches) {
+    for ((&at, matched), present) in targets.iter().zip(matches).zip(&present_rows) {
+        let rows = present.as_deref().unwrap_or(joined_rows.as_slice());
         let item = &source.items[at];
         let table = &item.definition;
         let written: Vec<usize> = (0..assigned.len())
@@ -512,7 +578,7 @@ pub(crate) fn update(
         for (target_index, ((_, old_row), &joined_row)) in
             target_rows.iter().zip(&joined_at).enumerate()
         {
-            let row = with_target_row(&joined_rows[joined_row], item, old_row);
+            let row = with_target_row(&rows[joined_row], item, old_row);
             let evaluator = Evaluator {
                 scope,
                 row: &row,
@@ -541,7 +607,7 @@ pub(crate) fn update(
         affected += stored.changes.len();
         if at == main && update.returning.is_some() {
             for ((_, _, new_row), joined_row) in stored.changes.iter().zip(&stored.sources) {
-                let Some(joined_row) = joined_row.and_then(|at| joined_rows.get(at)) else {
+                let Some(joined_row) = joined_row.and_then(|at| rows.get(at)) else {
                     continue;
                 };
                 returned_rows.push(with_target_row(joined_row, item, new_row));
@@ -625,24 +691,31 @@ pub(crate) fn delete(
         &mut memory,
     )?;
     let mut matches = Vec::with_capacity(targets.len());
+    let mut present_rows = Vec::with_capacity(targets.len());
     for &at in &targets {
-        matches.push(matched_rows(
+        let present = source.rows_where_present(
             &*writer,
-            &source.items[at],
-            &joined_rows,
+            tables,
+            at,
+            delete.filter.as_ref(),
+            position,
             &mut memory,
-        )?);
+        )?;
+        let rows = present.as_deref().unwrap_or(joined_rows.as_slice());
+        matches.push(matched_rows(&*writer, &source.items[at], rows, &mut memory)?);
+        present_rows.push(present);
     }
     let mut affected = 0usize;
     let mut returned_rows = Vec::new();
-    for (&at, matched) in targets.iter().zip(matches) {
+    for ((&at, matched), present) in targets.iter().zip(matches).zip(&present_rows) {
+        let rows = present.as_deref().unwrap_or(joined_rows.as_slice());
         let deleted = delete_matched(writer, tables, &source.items[at].definition, matched)?;
         affected += deleted.len();
         if at == main && delete.returning.is_some() {
             returned_rows.extend(
                 deleted
                     .into_iter()
-                    .filter_map(|joined_row| joined_rows.get(joined_row).cloned()),
+                    .filter_map(|joined_row| rows.get(joined_row).cloned()),
             );
         }
     }

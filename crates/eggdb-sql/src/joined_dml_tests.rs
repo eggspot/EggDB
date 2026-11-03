@@ -447,3 +447,179 @@ fn sqlserver_delete_from_removes_the_target_rows_its_second_from_joins() {
         "n\n0\nSELECT 1"
     );
 }
+
+fn error_of(session: &mut Session<'_>, sql: &str) -> SqlError {
+    match run(session, sql) {
+        Ok(outputs) => panic!("{sql} succeeded: {outputs:?}"),
+        Err(error) => error,
+    }
+}
+
+fn with_keyless_target(store: &MemoryStore, dialect: Dialect) -> Session<'_> {
+    let mut session = Session::with_dialect(store, dialect);
+    last(
+        &mut session,
+        "CREATE TABLE t (a INT, b INT); \
+         CREATE TABLE u (a INT); \
+         INSERT INTO t VALUES (NULL, NULL), (1, 10); \
+         INSERT INTO u VALUES (2)",
+    );
+    session
+}
+
+#[test]
+fn mysql_outer_joined_keyless_target_never_touches_its_all_null_row() {
+    let store = MemoryStore::default();
+    let mut session = with_keyless_target(&store, Dialect::MySql);
+    assert_eq!(
+        last(&mut session, "DELETE t FROM u LEFT JOIN t ON t.a = u.a"),
+        "DELETE 0"
+    );
+    assert_eq!(
+        last(&mut session, "UPDATE u LEFT JOIN t ON t.a = u.a SET t.b = 99"),
+        "UPDATE 0"
+    );
+    last(&mut session, "INSERT INTO u VALUES (1)");
+    assert_eq!(
+        last(&mut session, "DELETE t FROM u LEFT JOIN t ON t.a = u.a"),
+        "DELETE 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT a, b FROM t"),
+        "a|b\nNULL|NULL\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "DELETE t, u FROM u LEFT JOIN t ON t.a = u.a"),
+        "DELETE 2"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT COUNT(*) AS n FROM t"),
+        "n\n1\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT COUNT(*) AS n FROM u"),
+        "n\n0\nSELECT 1"
+    );
+}
+
+#[test]
+fn sqlserver_outer_joined_keyless_target_never_touches_its_all_null_row() {
+    let store = MemoryStore::default();
+    let mut session = with_keyless_target(&store, Dialect::SqlServer);
+    assert_eq!(
+        last(
+            &mut session,
+            "UPDATE t SET b = 99 FROM u LEFT JOIN t ON t.a = u.a"
+        ),
+        "UPDATE 0"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "UPDATE t SET b = 99 FROM t RIGHT JOIN u ON t.a = u.a"
+        ),
+        "UPDATE 0"
+    );
+    assert_eq!(
+        last(&mut session, "DELETE FROM t FROM u LEFT JOIN t ON t.a = u.a"),
+        "DELETE 0"
+    );
+    last(&mut session, "INSERT INTO u VALUES (1)");
+    assert_eq!(
+        last(
+            &mut session,
+            "UPDATE t SET b = 99 FROM u LEFT JOIN t ON t.a = u.a"
+        ),
+        "UPDATE 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT b FROM t WHERE a = 1"),
+        "b\n99\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT COUNT(*) AS n FROM t WHERE a IS NULL AND b IS NULL"
+        ),
+        "n\n1\nSELECT 1"
+    );
+}
+
+#[test]
+fn sqlserver_target_listed_twice_under_aliases_is_ambiguous() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    last(
+        &mut session,
+        "CREATE TABLE t (id INT PRIMARY KEY, v INT); \
+         INSERT INTO t VALUES (1, 10), (2, 20), (3, 30)",
+    );
+    for sql in [
+        "UPDATE t SET v = 0 FROM t AS a JOIN t AS b ON a.id = b.id WHERE a.id = 1",
+        "DELETE FROM t FROM t AS a JOIN t AS b ON a.id = b.id WHERE a.id = 1",
+    ] {
+        let error = error_of(&mut session, sql);
+        assert_eq!(error.sqlserver_number(), Some(8154), "{sql}");
+        assert_eq!(error.message(), "The table 't' is ambiguous.", "{sql}");
+    }
+    assert_eq!(
+        last(&mut session, "SELECT COUNT(*) AS n FROM t WHERE v = 0"),
+        "n\n0\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "UPDATE a SET v = 0 FROM t AS a JOIN t AS b ON a.id = b.id WHERE a.id = 1"
+        ),
+        "UPDATE 1"
+    );
+}
+
+#[test]
+fn joined_update_and_delete_fire_the_targets_row_triggers() {
+    let store = MemoryStore::default();
+    let mut session = with_employees(&store);
+    last(
+        &mut session,
+        "CREATE TABLE changes (note TEXT); \
+         CREATE FUNCTION note_change() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN INSERT INTO changes VALUES ('row'); RETURN NULL; END $$; \
+         CREATE TRIGGER employees_updated AFTER UPDATE ON employees \
+         FOR EACH ROW EXECUTE FUNCTION note_change(); \
+         CREATE TRIGGER employees_deleted AFTER DELETE ON employees \
+         FOR EACH ROW EXECUTE FUNCTION note_change()",
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "UPDATE employees SET sales_count = sales_count + 1 FROM accounts \
+             WHERE accounts.sales_person = employees.id"
+        ),
+        "UPDATE 2"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "DELETE FROM employees USING accounts \
+             WHERE accounts.sales_person = employees.id AND accounts.name = 'Initech'"
+        ),
+        "DELETE 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT COUNT(*) AS n FROM changes"),
+        "n\n3\nSELECT 1"
+    );
+}
+
+#[test]
+fn sqlite_delete_using_is_a_syntax_error() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Sqlite);
+    last(
+        &mut session,
+        "CREATE TABLE t (id INT); CREATE TABLE u (id INT)",
+    );
+    let error = error_of(&mut session, "DELETE FROM t USING u WHERE t.id = u.id");
+    assert_eq!(error.state().code(), "42601");
+    assert!(error.message().contains("USING"), "{error}");
+}

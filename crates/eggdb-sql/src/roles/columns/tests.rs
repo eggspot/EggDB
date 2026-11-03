@@ -678,3 +678,43 @@ fn an_added_column_never_inherits_a_leftover_column_grant() {
     );
     denied(&mut as_role(&store, "eve"), "SELECT salary FROM teams");
 }
+
+#[test]
+fn a_joined_update_needs_only_the_written_columns_and_select_on_what_it_reads() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut clerk = as_role(&store, "clerk");
+    assert_eq!(
+        run(
+            &mut clerk,
+            "UPDATE staff SET name = 'kim' FROM teams WHERE staff.id = teams.id"
+        )
+        .unwrap(),
+        "UPDATE 1"
+    );
+    denied(
+        &mut clerk,
+        "UPDATE staff SET salary = 1 FROM teams WHERE staff.id = teams.id",
+    );
+    denied(
+        &mut clerk,
+        "UPDATE staff SET name = 'x' FROM teams WHERE staff.salary = teams.salary",
+    );
+    denied(
+        &mut clerk,
+        "DELETE FROM staff USING teams WHERE staff.id = teams.id",
+    );
+    let mut boss = as_role(&store, "boss");
+    denied(
+        &mut boss,
+        "DELETE FROM staff USING teams WHERE staff.id = teams.id",
+    );
+    assert_eq!(
+        run(
+            &mut Session::new(&store),
+            "SELECT id, name FROM staff ORDER BY id"
+        )
+        .unwrap(),
+        "id|name\n1|kim\n2|lin\nSELECT 2"
+    );
+}

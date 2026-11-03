@@ -661,7 +661,7 @@ impl Analyzer<'_> {
         } else {
             if arguments.len() > crate::grouping_sets::MAX_GROUPING_ARGUMENTS {
                 return Err(SqlError::new(
-                    SqlState::PROGRAM_LIMIT_EXCEEDED,
+                    SqlState::TOO_MANY_ARGUMENTS,
                     "GROUPING must have fewer than 32 arguments",
                 )
                 .at(position));
@@ -882,6 +882,15 @@ fn group_key(key: &Expr, outputs: &[OutputItem], scope: Scope<'_>) -> SqlResult<
     Ok(key.clone())
 }
 
+fn first_equal_keys(key_shapes: &[Expr]) -> Vec<usize> {
+    let mut first_with_shape: HashMap<String, usize> = HashMap::with_capacity(key_shapes.len());
+    key_shapes
+        .iter()
+        .enumerate()
+        .map(|(at, shape)| *first_with_shape.entry(format!("{shape:?}")).or_insert(at))
+        .collect()
+}
+
 pub(crate) fn analyze(select: &Select, scope: Scope<'_>) -> SqlResult<Grouping> {
     let outputs = output_items(&select.items, scope)?;
     let keys: Vec<Expr> = select
@@ -902,21 +911,9 @@ pub(crate) fn analyze(select: &Select, scope: Scope<'_>) -> SqlResult<Grouping> 
         .iter()
         .map(|key| bind(key, scope).map(|bound| shape_of(&bound)))
         .collect::<SqlResult<_>>()?;
-    let same_key_as: Vec<usize> = key_shapes
-        .iter()
-        .enumerate()
-        .map(|(at, shape)| {
-            key_shapes
-                .iter()
-                .take(at)
-                .position(|earlier| earlier == shape)
-                .unwrap_or(at)
-        })
-        .collect();
-    let sets = select
-        .grouping_sets
-        .as_ref()
-        .map(|written| crate::grouping_sets::ExpandedSets::new(written, &same_key_as));
+    let sets = select.grouping_sets.as_ref().map(|written| {
+        crate::grouping_sets::ExpandedSets::new(written, &first_equal_keys(&key_shapes))
+    });
     let always_grouped: Vec<Option<usize>> = key_offsets
         .iter()
         .enumerate()

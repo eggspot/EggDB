@@ -1,4 +1,5 @@
 use crate::ast::GroupingSets;
+use std::collections::HashMap;
 
 pub(crate) const GROUPING: &str = "grouping";
 pub(crate) const GROUPING_ID: &str = "grouping_id";
@@ -10,7 +11,8 @@ pub(crate) fn is_operation(name: &str) -> bool {
 }
 
 pub(crate) struct ExpandedSets {
-    present: Vec<Vec<bool>>,
+    members: Vec<Vec<usize>>,
+    same_key_as: Vec<usize>,
     group_ids: Vec<i32>,
     pub(crate) hierarchical: bool,
 }
@@ -22,6 +24,8 @@ fn first_keys(set: &[usize], order: &[usize]) -> bool {
 impl ExpandedSets {
     pub(crate) fn new(written: &GroupingSets, same_key_as: &[usize]) -> Self {
         let mut chosen: Vec<Vec<usize>> = Vec::with_capacity(written.sets.len());
+        let mut group_ids = Vec::with_capacity(written.sets.len());
+        let mut earlier_equal: HashMap<Vec<usize>, i32> = HashMap::new();
         for set in &written.sets {
             let mut members: Vec<usize> = set
                 .iter()
@@ -29,53 +33,35 @@ impl ExpandedSets {
                 .collect();
             members.sort_unstable();
             members.dedup();
-            if written.distinct && chosen.contains(&members) {
+            let earlier = earlier_equal.entry(members.clone()).or_insert(0);
+            if written.distinct && *earlier > 0 {
                 continue;
             }
+            group_ids.push(*earlier);
+            *earlier = earlier.saturating_add(1);
             chosen.push(members);
         }
-        let group_ids = chosen
-            .iter()
-            .enumerate()
-            .map(|(at, members)| {
-                let earlier = chosen
-                    .iter()
-                    .take(at)
-                    .filter(|other| *other == members)
-                    .count();
-                i32::try_from(earlier).unwrap_or(i32::MAX)
-            })
-            .collect();
         let mut order: Vec<usize> = same_key_as.to_vec();
         order.sort_unstable();
         order.dedup();
         let hierarchical = chosen.iter().all(|members| first_keys(members, &order));
-        let present = chosen
-            .iter()
-            .map(|members| {
-                same_key_as
-                    .iter()
-                    .map(|key| members.binary_search(key).is_ok())
-                    .collect()
-            })
-            .collect();
         Self {
-            present,
+            members: chosen,
+            same_key_as: same_key_as.to_vec(),
             group_ids,
             hierarchical,
         }
     }
 
     pub(crate) fn count(&self) -> usize {
-        self.present.len()
+        self.members.len()
     }
 
     pub(crate) fn keeps(&self, set: usize, key: usize) -> bool {
-        self.present
-            .get(set)
-            .and_then(|present| present.get(key))
-            .copied()
-            .unwrap_or(true)
+        match (self.members.get(set), self.same_key_as.get(key)) {
+            (Some(members), Some(key)) => members.binary_search(key).is_ok(),
+            _ => true,
+        }
     }
 
     pub(crate) fn keeps_in_every_set(&self, key: usize) -> bool {
@@ -83,9 +69,7 @@ impl ExpandedSets {
     }
 
     pub(crate) fn keeps_none(&self, set: usize) -> bool {
-        self.present
-            .get(set)
-            .is_some_and(|present| present.iter().all(|kept| !kept))
+        self.members.get(set).is_some_and(Vec::is_empty)
     }
 
     pub(crate) fn group_id(&self, set: usize) -> i32 {

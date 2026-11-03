@@ -686,9 +686,11 @@ SELECT @@VERSION
   `DELETE [FROM] target [OUTPUT ...] FROM table_source [WHERE ...]` (D297): the target is the
   table in `FROM` whose alias it names, or the one reference to it there; otherwise it joins the
   `FROM` list as one more table, as in PostgreSQL. A target row that joins several rows is
-  changed once, from one of them, as SQL Server's manual warns. `OUTPUT inserted.` and
-  `deleted.` name the target's row and the other tables' columns can be output too; a column
-  qualified by another name is Msg 4104.
+  changed once, from one of them, as SQL Server's manual warns. `OUTPUT inserted.` (and, in a
+  `DELETE`, `deleted.`) names the target's row and the other tables' columns can be output too;
+  `deleted.` in a joined `UPDATE` is Msg 40517 for now, as in a single-table one. A column
+  qualified by another name is Msg 4104, and a target named by its table name when the `FROM`
+  lists that table more than once, each under an alias, is Msg 8154.
 - **`MERGE`** (D138): `MERGE [TOP (n) [PERCENT]] [INTO] target [[AS] alias] USING source [[AS]
   alias [(columns)]] ON condition`, then up to two `WHEN MATCHED [AND condition] THEN UPDATE SET
   ... | DELETE` (D303), one `WHEN NOT MATCHED [BY TARGET] [AND condition] THEN INSERT [(columns)]
@@ -1686,8 +1688,9 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   of the one before) returns its rows sorted by the keys, each subtotal after its rows and the
   total last, as PostgreSQL's sorted plan and MySQL do; other sets come out one set after the
   other. A primary key determines its table's other columns only when every set groups by it.
-  More than 4096 sets is `54001`, a `CUBE` of more than 12 keys and `GROUPING` with more than
-  31 arguments are `54000`, as in PostgreSQL.
+  More than 4096 sets is `54001`, a `CUBE` of more than 12 keys `54000` and `GROUPING` with
+  more than 31 arguments `54023`, as in PostgreSQL; the sets times the `GROUP BY` keys may be at
+  most 1,048,576 (`54001`, EggDB's own bound on the work per row).
 - **Aggregates**: `count(*)`, `count(expr)`, `sum`, `avg`, `min`, `max`,
   `string_agg(text, delimiter)` (also over `bytea`; a NULL delimiter joins with nothing),
   `json_agg`, `jsonb_agg`, `json_object_agg(key, value)`, `jsonb_object_agg(key, value)`,

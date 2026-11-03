@@ -1262,3 +1262,53 @@ fn a_merge_calling_a_user_function_in_its_source_condition_or_actions_runs_code(
         );
     }
 }
+
+#[test]
+fn a_mysql_multiple_table_update_names_every_table_it_writes() {
+    for (text, expected) in [
+        (
+            "UPDATE t1 JOIN t2 ON t1.id = t2.id SET t1.a = 1, t2.b = 2",
+            vec!["t1", "t2"],
+        ),
+        (
+            "UPDATE t1 JOIN t2 ON t1.id = t2.id SET t2.b = 2",
+            vec!["t2"],
+        ),
+        (
+            "UPDATE t1, t2, t3 SET t1.a = 1, t3.c = 3 WHERE t1.id = t2.id AND t2.id = t3.id",
+            vec!["t1", "t3"],
+        ),
+        (
+            "UPDATE t1 JOIN t2 ON t1.id = t2.id SET a = 1",
+            vec!["t1", "t2"],
+        ),
+    ] {
+        let found = statement(Dialect::MySql, text);
+        assert_eq!(found.parts[0].objects, expected, "{text}");
+    }
+    let found = statement(
+        Dialect::MySql,
+        "DELETE t1, t2 FROM t1 JOIN t2 ON t1.id = t2.id WHERE t1.id > 0",
+    );
+    assert_eq!(found.parts[0].objects, vec!["t1", "t2"]);
+}
+
+#[test]
+fn a_joined_update_or_delete_calling_a_user_function_in_its_from_list_runs_code() {
+    let store = reaching_store();
+    for text in [
+        "UPDATE t SET name = 'x' FROM (SELECT wipe_now() AS id) AS d WHERE t.id = d.id",
+        "UPDATE t SET name = 'x' FROM u JOIN t AS other ON other.id = wipe_now() WHERE t.id = u.id",
+        "UPDATE t SET name = 'x' FROM generate_series(1, wipe_now()) AS n WHERE t.id = n",
+        "DELETE FROM t USING (SELECT wipe_now() AS id) AS d WHERE t.id = d.id",
+        "DELETE FROM t USING u JOIN t AS other ON other.id = wipe_now() WHERE t.id = u.id",
+    ] {
+        assert!(
+            runs_function(
+                classified_with_keys(&store, Dialect::PostgreSql, text),
+                "wipe_now"
+            ),
+            "{text}"
+        );
+    }
+}

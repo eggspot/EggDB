@@ -1,7 +1,8 @@
 use crate::ast::{
     AlterAction, AlterRoutine, AlterRoutineAction, AlterTriggerAction, AssignedValue,
     BinaryOperator, CopySource, CreateRoutine, CursorCommand, Delete, DropRoutine, Expr, ExprKind,
-    GeneratedTable, Insert, InsertSource, InsertValue, Literal, MaterializedViewCommand,
+    FromClause, GeneratedTable, Insert, InsertSource, InsertValue, JoinCondition, Literal,
+    MaterializedViewCommand,
     MergeStatement, MultitableInsert, MySqlStatement, Name, OnDuplicate, Query, ReferentialAction,
     RoutineTarget, Select, SelectItem, SetExpr, SqlServerStatement, Statement, TableReference,
     UnaryOperator, Update, VariableSource,
@@ -545,6 +546,7 @@ fn deleted(delete: &Delete, keys: &mut CatalogLookup<'_>) -> Option<DestructiveS
     returning_user_functions(delete.returning.as_deref(), keys, &mut functions);
     let mut names = vec![shown(&delete.table.name)];
     if let Some(joined) = &delete.using {
+        from_user_functions(&joined.tables, keys, &mut functions);
         for &at in &joined.more_targets_at {
             if let Some(reference) = joined.references().nth(at) {
                 names.push(shown(&reference.name));
@@ -575,10 +577,29 @@ fn updated(update: &Update, keys: &mut CatalogLookup<'_>) -> Option<DestructiveS
     }
     optional_user_functions(update.filter.as_ref(), keys, &mut functions);
     returning_user_functions(update.returning.as_deref(), keys, &mut functions);
+    if let Some(joined) = &update.from {
+        from_user_functions(&joined.tables, keys, &mut functions);
+    }
     DestructiveStatement::combined(
-        kind.map(|kind| DestructiveStatement::new(kind, vec![shown(&update.table.name)], false)),
+        kind.map(|kind| DestructiveStatement::new(kind, updated_tables(update), false)),
         running(functions.user),
     )
+}
+
+fn updated_tables(update: &Update) -> Vec<String> {
+    let mut names = vec![shown(&update.table.name)];
+    let Some(joined) = update.from.as_ref().filter(|joined| joined.writes_any_table) else {
+        return names;
+    };
+    let unqualified = (0..update.assignments.len())
+        .any(|at| joined.assigned_at.get(at).copied().flatten().is_none());
+    for (at, reference) in joined.references().enumerate() {
+        let written = unqualified || joined.assigned_at.contains(&Some(at));
+        if written && reference.derived.is_none() && reference.generated.is_none() {
+            push_new(&mut names, shown(&reference.name));
+        }
+    }
+    names
 }
 
 fn inserted(insert: &Insert, keys: &mut CatalogLookup<'_>) -> Option<DestructiveStatement> {
@@ -693,9 +714,36 @@ fn select_user_functions(
     for expr in crate::subquery::select_expressions(select) {
         user_functions(expr, catalog, functions);
     }
-    let Some(from) = &select.from else {
-        return;
-    };
+    if let Some(from) = &select.from {
+        listed_user_functions(from, catalog, functions);
+    }
+}
+
+fn from_user_functions(
+    from: &FromClause,
+    catalog: &mut CatalogLookup<'_>,
+    functions: &mut CalledFunctions,
+) {
+    for table in std::iter::once(&from.first).chain(from.joins.iter().map(|join| &join.table)) {
+        if let Some(generated) = &table.generated {
+            for expr in crate::set_returning::expressions(generated) {
+                user_functions(expr, catalog, functions);
+            }
+        }
+    }
+    for join in &from.joins {
+        if let JoinCondition::On(expr) = &join.condition {
+            user_functions(expr, catalog, functions);
+        }
+    }
+    listed_user_functions(from, catalog, functions);
+}
+
+fn listed_user_functions(
+    from: &FromClause,
+    catalog: &mut CatalogLookup<'_>,
+    functions: &mut CalledFunctions,
+) {
     for table in std::iter::once(&from.first).chain(from.joins.iter().map(|join| &join.table)) {
         if let Some(derived) = &table.derived {
             query_user_functions(&derived.query, catalog, functions);

@@ -243,6 +243,8 @@ impl SqlState {
     pub const OUT_OF_MEMORY: Self = Self(*b"53200");
     /// `54000` program_limit_exceeded.
     pub const PROGRAM_LIMIT_EXCEEDED: Self = Self(*b"54000");
+    /// `54023` too_many_arguments.
+    pub const TOO_MANY_ARGUMENTS: Self = Self(*b"54023");
     /// `54011` too_many_columns.
     pub const TOO_MANY_COLUMNS: Self = Self(*b"54011");
     /// `54001` statement_too_complex.

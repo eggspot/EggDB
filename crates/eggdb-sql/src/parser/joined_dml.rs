@@ -58,6 +58,22 @@ fn position_of(tables: &FromClause, label: &str, by_table_name: bool) -> Option<
     }
 }
 
+fn times_listed(tables: &FromClause, label: &str) -> usize {
+    std::iter::once(&tables.first)
+        .chain(tables.joins.iter().map(|join| &join.table))
+        .filter(|reference| same_table(&reference.name.text, label))
+        .count()
+}
+
+fn ambiguous_table(table: &Name) -> SqlError {
+    SqlError::new(
+        SqlState::DUPLICATE_ALIAS,
+        format!("The table '{}' is ambiguous.", table.text),
+    )
+    .with_sqlserver_code(8154)
+    .at(table.position)
+}
+
 fn unbound_column(table: &Name, column: &Name, sqlserver: bool) -> SqlError {
     if sqlserver {
         return SqlError::new(
@@ -184,7 +200,11 @@ impl Parser<'_> {
     ) -> SqlResult<JoinedTables> {
         let written_name = table.name.text.clone();
         let target_at = if self.sqlserver() && table.alias.is_none() {
-            position_of(&tables, &written_name, true)
+            let at = position_of(&tables, &written_name, true);
+            if at.is_none() && times_listed(&tables, &written_name) > 1 {
+                return Err(ambiguous_table(&table.name));
+            }
+            at
         } else {
             None
         };

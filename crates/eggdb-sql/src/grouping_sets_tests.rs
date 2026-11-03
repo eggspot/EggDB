@@ -448,3 +448,62 @@ fn oracle_grouping_id_and_cube() {
          20|NULL|1|50\nNULL|CLERK|2|150\nNULL|MANAGER|2|300\nNULL|NULL|3|450\nSELECT 8"
     );
 }
+
+fn refused_state(session: &mut Session<'_>, sql: &str) -> (String, String) {
+    match run(session, sql) {
+        Ok(outputs) => panic!("{sql} succeeded: {outputs:?}"),
+        Err(error) => (error.state().code().to_owned(), error.message().to_owned()),
+    }
+}
+
+#[test]
+fn a_hostile_group_by_is_refused_before_its_sets_are_built() {
+    let store = MemoryStore::default();
+    let mut session = with_items_sold(&store);
+    let many = ["brand"; 20000].join(", ");
+    let twelve = ["brand"; 12].join(", ");
+    let (state, message) = refused_state(
+        &mut session,
+        &format!("SELECT count(*) FROM items_sold GROUP BY {many}, CUBE ({twelve})"),
+    );
+    assert_eq!(state, "54001");
+    assert!(message.starts_with("too many grouping set keys present"), "{message}");
+    let two_thousand = ["brand"; 2000].join(", ");
+    let (state, _) = refused_state(
+        &mut session,
+        &format!("SELECT count(*) FROM items_sold GROUP BY ROLLUP ({two_thousand})"),
+    );
+    assert_eq!(state, "54001");
+    let (state, _) = refused_state(
+        &mut session,
+        &format!(
+            "SELECT count(*) FROM items_sold GROUP BY GROUPING SETS (({two_thousand}), {})",
+            ["()"; 600].join(", ")
+        ),
+    );
+    assert_eq!(state, "54001");
+    assert_eq!(
+        last(
+            &mut session,
+            &format!("SELECT count(*) AS n FROM (SELECT count(*) FROM items_sold GROUP BY {many}) AS g")
+        ),
+        "n\n2\nSELECT 1"
+    );
+    let five_thousand = ["brand"; 5000].join(", ");
+    assert_eq!(
+        last(
+            &mut session,
+            &format!(
+                "SELECT count(*) AS n FROM (SELECT brand FROM items_sold GROUP BY {five_thousand}, ROLLUP (size)) AS g"
+            )
+        ),
+        "n\n6\nSELECT 1"
+    );
+    let thirty_two = ["brand"; 32].join(", ");
+    let (state, message) = refused_state(
+        &mut session,
+        &format!("SELECT GROUPING({thirty_two}) FROM items_sold GROUP BY ROLLUP (brand)"),
+    );
+    assert_eq!(state, "54023");
+    assert_eq!(message, "GROUPING must have fewer than 32 arguments");
+}
