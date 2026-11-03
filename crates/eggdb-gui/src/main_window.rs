@@ -35,6 +35,7 @@ use crate::scrollbar::{self, Axis, Extent};
 use crate::value_view;
 use crate::tree_menu::{self, TreeMenu, TreeMenuAnswer, TreeMenuItem, TreeMenuOrigin};
 use crate::drop_prompt::{self, DropAnswer, DropKind, DropPrompt, DropTarget};
+use crate::key_scan::KeySpaceScan;
 
 /// The width of the results grid's body, right of the row gutter, at the golden frame's size.
 pub const GRID_BODY_WIDTH: f32 = 972.0;
@@ -630,7 +631,7 @@ impl MainWindow {
             TreeAction::None => none,
             TreeAction::Open(item) => self.open_object(item),
             TreeAction::InsertName(item) => {
-                if let Some(name) = self.tree.name_of(item) {
+                if let Some(name) = self.tree.name_of(item).filter(|_| !self.tab.is_keys()) {
                     for letter in quote_name(&name, self.tab.dialect).chars() {
                         self.tab.editor.apply(crate::editor::Key::Char(letter));
                     }
@@ -662,6 +663,9 @@ impl MainWindow {
     /// 100;` in the tab's dialect, run at once. While a run is going the tab is not opened
     /// and the status bar says why.
     pub fn open_object(&mut self, item: TreeItem) -> WindowAction {
+        if let TreeItem::KeySpace(space) = item {
+            return self.open_keys(space);
+        }
         let Some(name) = self.tree.name_of(item) else {
             return WindowAction::Tab(TabAction::None);
         };
@@ -669,13 +673,65 @@ impl MainWindow {
             self.tab.notice = Some(OPEN_WHILE_RUNNING.to_owned());
             return WindowAction::Tab(TabAction::None);
         }
-        let dialect = self.tab.dialect;
+        let dialect = self.nearest_query_dialect();
         self.new_tab();
         self.tab.editor = crate::editor::Editor::new(&open_statement(&name, dialect));
         match self.tab.run_request(true) {
             Some(request) => WindowAction::Tab(TabAction::Run(request)),
             None => WindowAction::Tab(TabAction::None),
         }
+    }
+
+    /// `Enter` on a key space (`docs/ux/workspace.md` 10.4): shows its keys tab, opening one
+    /// when it has none, and scans the space again from the start.
+    pub fn open_keys(&mut self, space: usize) -> WindowAction {
+        let none = WindowAction::Tab(TabAction::None);
+        let Some(key_space) = self.tree.catalog.key_spaces.get(space) else {
+            return none;
+        };
+        if self.tab.running {
+            self.tab.notice = Some(OPEN_WHILE_RUNNING.to_owned());
+            return none;
+        }
+        let scan = KeySpaceScan {
+            collection: key_space.collection.clone(),
+            total: key_space.keys,
+        };
+        let open = (0..self.tab_count()).find(|&position| {
+            self.tab_at(position)
+                .and_then(|tab| tab.keys.as_ref())
+                .is_some_and(|keys| keys.collection == scan.collection)
+        });
+        match open {
+            Some(position) => {
+                self.show_tab(position);
+                self.tab.keys = Some(scan);
+            }
+            None => {
+                let session = self.take_session();
+                self.insert_tab(QueryTab {
+                    session,
+                    ..QueryTab::keys(scan)
+                });
+            }
+        }
+        self.tab
+            .run_request(false)
+            .map_or(none, |request| WindowAction::Tab(TabAction::Run(request)))
+    }
+
+    /// The dialect a new query tab starts in: the showing tab's, or from a keys tab the
+    /// nearest query tab's to its left, else to its right, else PostgreSQL's.
+    pub fn nearest_query_dialect(&self) -> QueryDialect {
+        if !self.tab.is_keys() {
+            return self.tab.dialect;
+        }
+        (0..self.tab_position)
+            .rev()
+            .chain(self.tab_position + 1..self.tab_count())
+            .filter_map(|position| self.tab_at(position))
+            .find(|tab| !tab.is_keys())
+            .map_or(QueryDialect::PostgreSql, |tab| tab.dialect)
     }
 }
 
@@ -729,9 +785,14 @@ impl MainWindow {
         }
     }
 
-    fn fresh_tab(&mut self, title: &str) -> QueryTab {
+    fn take_session(&mut self) -> SessionId {
         let session = self.next_session;
         self.next_session = SessionId(session.0 + 1);
+        session
+    }
+
+    fn fresh_tab(&mut self, title: &str) -> QueryTab {
+        let session = self.take_session();
         QueryTab {
             session,
             ..QueryTab::new(title)
@@ -771,9 +832,13 @@ impl MainWindow {
 
     fn new_tab(&mut self) {
         let title = tab_strip::lowest_free_title(self.tab_titles().into_iter());
-        let dialect = self.tab.dialect;
+        let dialect = self.nearest_query_dialect();
         let mut tab = self.fresh_tab(&title);
         tab.set_dialect(dialect);
+        self.insert_tab(tab);
+    }
+
+    fn insert_tab(&mut self, tab: QueryTab) {
         let position = self.tab_position + 1;
         let mut strip = self.take_strip();
         strip.insert(position.min(strip.len()), tab);
@@ -1373,13 +1438,18 @@ fn toolbar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
         Rect::new(width - 224.0, 8.0, 120.0, 28.0),
         under_pointer(window, NODE_DIALECT, Button::Secondary),
     );
+    let pill_ink = if window.tab.is_keys() {
+        theme.text_disabled
+    } else {
+        theme.text_primary
+    };
     paint.text(
         faces.ui,
-        window.tab.dialect.label(),
+        window.tab.pill_label(),
         width - 212.0,
         13.0,
         BODY,
-        theme.text_primary,
+        pill_ink,
     );
     paint.polyline(
         &[
@@ -1888,17 +1958,19 @@ fn results(paint: &mut Painter<'_, '_>, window: &MainWindow) {
         paint.rect(260.0, 418.0, centre_width, 28.0, theme.bg1);
         paint.rect(260.0, 445.0, centre_width, 1.0, theme.border);
         warning_icon(paint, 272.0, 426.0);
-        let banner = status_line::truncated_banner(grid.rows.len(), grid.row_count);
+        let banner = grid.banner_text();
         let shown = elided(faces.ui, &banner, centre_right - 140.0 - 292.0, BODY.0);
         paint.text(faces.ui, &shown, 292.0, 423.0, BODY, theme.text_primary);
-        paint.text_right(
-            faces.ui,
-            "Export…",
-            centre_right - 44.0,
-            423.0,
-            BODY,
-            theme.text_primary,
-        );
+        if grid.key_scan.is_none() {
+            paint.text_right(
+                faces.ui,
+                "Export…",
+                centre_right - 44.0,
+                423.0,
+                BODY,
+                theme.text_primary,
+            );
+        }
         let close = centre_right - 28.0;
         paint.canvas.line(
             (close, 428.0),
@@ -2171,11 +2243,12 @@ fn status_bar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     }
     let caret = window.tab.editor.caret();
     let mut right = paint.width - 12.0;
-    for item in [
-        window.tab.dialect.label().to_owned(),
-        format!("Ln {}, Col {}", caret.line + 1, caret.column + 1),
-        "UTF-8".to_owned(),
-    ] {
+    let mut items = vec![window.tab.pill_label().to_owned()];
+    if !window.tab.is_keys() {
+        items.push(format!("Ln {}, Col {}", caret.line + 1, caret.column + 1));
+    }
+    items.push("UTF-8".to_owned());
+    for item in items {
         let width = faces.ui.width(&item, SMALL.0);
         paint.text(
             faces.ui,
@@ -3356,7 +3429,8 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
         "Dialect",
         (toolbar_width - 224.0, 8.0, 120.0, 28.0),
     );
-    pill.value = Some(tab.dialect.label().to_owned());
+    pill.value = Some(tab.pill_label().to_owned());
+    pill.state.disabled = tab.is_keys();
     pill.state.expanded = Some(tab.dialect_menu.is_some());
     pill.state.focused = tab_focused && tab.focus == TabFocus::DialectPill;
     nodes.push(pill);
@@ -3763,7 +3837,7 @@ fn grid_nodes(nodes: &mut Vec<AccessNode>, grid: &ResultGrid, centre_width: f32)
             NODE_BANNER,
             NODE_MAIN_WINDOW,
             AccessRole::Status,
-            &status_line::truncated_banner(grid.rows.len(), grid.row_count),
+            &grid.banner_text(),
             (260.0, 418.0, centre_width, 28.0),
         ));
         top = 446.0;
@@ -4915,5 +4989,37 @@ mod tests {
         assert!(read_only.drop_prompt.is_none());
         read_only.open_tree_menu(TreeItem::Table(1), TreeMenuOrigin::CurrentRow);
         assert_eq!(read_only.tree_menu.map(|menu| menu.enabled[5]), Some(false));
+    }
+
+    #[test]
+    fn enter_on_a_key_space_opens_its_keys_tab_once_and_scans_it_again() {
+        let mut window = MainWindow::sample();
+        window.tab.set_dialect(QueryDialect::MySql);
+        let WindowAction::Tab(TabAction::Run(request)) = window.open_keys(0) else {
+            panic!("a key space opens a keys tab that scans it");
+        };
+        assert_eq!(window.tab.title, "Keys in sessions");
+        assert_eq!(window.tab.editor.text(), "SCAN sessions LIMIT 100");
+        assert_eq!(request.scan.as_ref().map(|scan| scan.title()).as_deref(), Some("Keys in sessions"));
+        assert_eq!(window.tab.pill_label(), "Keys");
+        assert_eq!(window.tab.run_request(true), None, "Run all is disabled in a keys tab");
+        assert_eq!(window.tab.explain_request(false), Ok(None));
+        assert_eq!(
+            window.tab.key(KeyPress::plain(Key::Character('x'))),
+            TabAction::None
+        );
+        assert_eq!(window.tab.editor.text(), "SCAN sessions LIMIT 100", "the editor is read-only");
+        assert!(ClosePrompt::for_tab(&window.tab).is_none(), "a keys tab closes without asking");
+        window.show_tab(0);
+        assert!(matches!(window.open_keys(0), WindowAction::Tab(TabAction::Run(_))));
+        assert_eq!(window.tab_count(), 2, "the second Enter reuses the keys tab");
+        assert_eq!(window.tab.title, "Keys in sessions");
+        window.add_tab();
+        assert_eq!(window.tab.title, "Query 2");
+        assert_eq!(
+            window.tab.dialect,
+            QueryDialect::MySql,
+            "a tab added from a keys tab takes the nearest query tab's dialect"
+        );
     }
 }

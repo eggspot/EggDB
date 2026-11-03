@@ -174,6 +174,17 @@ impl StatementFailure {
         }
     }
 
+    pub(crate) fn from_engine(error: &eggdb::Error) -> Self {
+        let message = error.to_string();
+        Self {
+            code: String::new(),
+            report: vec![format!("ERROR:  {message}")],
+            message,
+            hint: None,
+            position: None,
+        }
+    }
+
     pub(crate) fn dialect_in_transaction(open: QueryDialect, wanted: QueryDialect) -> Self {
         let message = transaction_dialect_message(open, wanted);
         Self {
@@ -664,6 +675,19 @@ impl Connection {
         match &mut self.link {
             Link::File(file) => crate::catalog::read_file(&file.database),
             Link::Server(server) => crate::catalog::read_server(&mut server.client),
+        }
+    }
+
+    /// A keys tab's scan of `scan`'s key space (`docs/ux/workspace.md` 10.4): its first
+    /// [`crate::key_scan::KEY_SCAN_LIMIT`] keys in key order, in one read transaction and no
+    /// session. A server lists no key spaces yet, so its answer is an empty scan.
+    pub fn scan_keys(
+        &self,
+        scan: &crate::key_scan::KeySpaceScan,
+    ) -> Result<ResultTable, StatementFailure> {
+        match &self.link {
+            Link::File(file) => scan.scan_file(&file.database),
+            Link::Server(_) => Ok(scan.table(&[])),
         }
     }
 

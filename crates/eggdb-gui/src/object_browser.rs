@@ -635,7 +635,7 @@ impl ObjectTree {
                 }
             }
             Key::Enter => match row.item {
-                TreeItem::Table(_) | TreeItem::View(_) => {
+                TreeItem::Table(_) | TreeItem::View(_) | TreeItem::KeySpace(_) => {
                     self.selected = Some(row.item);
                     TreeAction::Open(row.item)
                 }
@@ -1202,6 +1202,11 @@ mod tests {
         assert_eq!(
             tree.key(press(Key::Space), now),
             TreeAction::Inspect(TreeItem::KeySpace(0))
+        );
+        assert_eq!(
+            tree.key(press(Key::Enter), now),
+            TreeAction::Open(TreeItem::KeySpace(0)),
+            "Enter on a key space opens its keys tab"
         );
         assert_eq!(
             tree.name_of(TreeItem::KeySpace(0)),

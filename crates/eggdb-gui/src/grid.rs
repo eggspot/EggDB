@@ -97,6 +97,9 @@ pub enum ValueKind {
     Vector,
     /// A key's time to live, right-aligned.
     Ttl,
+    /// A key-value key or value spelled as text (`docs/ux/ui.md`), drawn as it is and an
+    /// empty one as `(empty)`.
+    SpelledBytes,
 }
 
 impl ValueKind {
@@ -115,6 +118,7 @@ impl ValueKind {
             Self::Blob => "binary",
             Self::Vector => "vector",
             Self::Ttl => "ttl",
+            Self::SpelledBytes => "bytes",
         }
     }
 }
@@ -193,6 +197,8 @@ pub fn cell_text(value: Option<&str>, kind: ValueKind) -> (String, CellLook) {
         ValueKind::Blob => (blob_text(text), CellLook::Secondary),
         ValueKind::Vector => (vector_text(text), CellLook::Secondary),
         ValueKind::Ttl => (ttl_text(text), CellLook::Primary),
+        ValueKind::SpelledBytes if text.is_empty() => ("(empty)".to_owned(), CellLook::Null),
+        ValueKind::SpelledBytes => (printable(text), CellLook::Primary),
         ValueKind::Number | ValueKind::Text | ValueKind::Boolean | ValueKind::Json => {
             (printable(text), CellLook::Primary)
         }
@@ -262,6 +268,9 @@ pub struct ResultGrid {
     pub source_table: Option<String>,
     /// The tab's dialect, for `Copy as INSERT`'s quoting.
     pub dialect: QueryDialect,
+    /// The key space a keys tab scanned, when the grid shows one (`docs/ux/workspace.md`
+    /// 10.4).
+    pub key_scan: Option<crate::key_scan::KeySpaceScan>,
 }
 
 fn primary(press: &KeyPress) -> bool {
@@ -290,6 +299,14 @@ impl ResultGrid {
     /// Whether the result has more rows than were fetched into the grid.
     pub fn truncated(&self) -> bool {
         self.row_count > self.rows.len()
+    }
+
+    /// The banner's text over a cut result (`docs/ux/workspace.md` 3.7, 10.4).
+    pub fn banner_text(&self) -> String {
+        match &self.key_scan {
+            Some(scan) => scan.banner(self.rows.len()),
+            None => crate::status_line::truncated_banner(self.rows.len(), self.row_count),
+        }
     }
 
     /// The kind of column `column`.

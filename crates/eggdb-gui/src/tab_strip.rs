@@ -143,7 +143,7 @@ impl ClosePrompt {
     pub fn for_tab(tab: &QueryTab) -> Option<Self> {
         let name = &tab.title;
         let transaction = tab.transaction != TransactionStatus::Idle;
-        let unsaved = !tab.editor.text().is_empty();
+        let unsaved = !tab.is_keys() && !tab.editor.text().is_empty();
         let (reason, title, body) = if tab.running {
             let mut body = "The running statement is cancelled and the rows fetched so far are discarded.".to_owned();
             if transaction {

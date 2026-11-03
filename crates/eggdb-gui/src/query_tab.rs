@@ -9,6 +9,7 @@ use crate::dialect::QueryDialect;
 use crate::editor::{self, Editor};
 use crate::grid::{GridAnswer, GridMenuItem, ResultGrid, cell_text, column_widths};
 use crate::grid_menu::{GridMenu, MenuAnswer};
+use crate::key_scan::KeySpaceScan;
 use crate::plan_view::{Plan, PlanAnswer, PlanView, explain_statements};
 use crate::statements::{source_table, statement_at, statements};
 use crate::status_line;
@@ -120,6 +121,9 @@ pub struct RunRequest {
     pub source_text: String,
     /// The tab's kept session the statements run on.
     pub session: SessionId,
+    /// For a keys tab, the key space to scan instead of running the statements
+    /// (`docs/ux/workspace.md` 10.4).
+    pub scan: Option<KeySpaceScan>,
 }
 
 /// The statement an `Explain` run explains and how its answer is read.
@@ -213,6 +217,8 @@ pub struct QueryTab {
     pub value_view: Option<ValueView>,
     /// The grid's open right-click menu (`docs/ux/workspace.md` 9.4).
     pub grid_menu: Option<GridMenu>,
+    /// The key space a keys tab scans; `None` for a query tab (`docs/ux/workspace.md` 10.4).
+    pub keys: Option<KeySpaceScan>,
 }
 
 impl QueryTab {
@@ -243,6 +249,30 @@ impl QueryTab {
             transaction: TransactionStatus::Idle,
             value_view: None,
             grid_menu: None,
+            keys: None,
+        }
+    }
+
+    /// A keys tab on `scan`'s key space: titled `Keys in users`, its read-only editor holding
+    /// the scan's one line.
+    pub fn keys(scan: KeySpaceScan) -> Self {
+        Self {
+            keys: Some(scan.clone()),
+            ..Self::with_text(&scan.title(), &scan.statement())
+        }
+    }
+
+    /// Whether this is a keys tab, whose editor is read-only and whose dialect is fixed.
+    pub fn is_keys(&self) -> bool {
+        self.keys.is_some()
+    }
+
+    /// What the dialect pill and the status bar name: the dialect, or `Keys` in a keys tab.
+    pub fn pill_label(&self) -> &'static str {
+        if self.is_keys() {
+            "Keys"
+        } else {
+            self.dialect.label()
         }
     }
 
@@ -260,6 +290,18 @@ impl QueryTab {
     /// nothing to run.
     pub fn run_request(&self, all: bool) -> Option<RunRequest> {
         let text = self.editor.text();
+        if let Some(scan) = &self.keys {
+            return (!all).then(|| RunRequest {
+                statements: vec![text.clone()],
+                starts: vec![0],
+                dialect: self.dialect,
+                all: false,
+                explain: None,
+                source_text: text.clone(),
+                session: self.session,
+                scan: Some(scan.clone()),
+            });
+        }
         let ranges: Vec<Range<usize>> = if all {
             statements(&text, self.dialect)
         } else if let Some(selected) = self.editor.selected_bytes() {
@@ -287,6 +329,7 @@ impl QueryTab {
             explain: None,
             source_text: text,
             session: self.session,
+            scan: None,
         })
     }
 
@@ -294,6 +337,9 @@ impl QueryTab {
     /// statement of the selection, else the statement under the caret, as `EXPLAIN` in the
     /// tab's dialect. The error is the `Messages` text for a dialect EggDB cannot explain in.
     pub fn explain_request(&self, analyze: bool) -> Result<Option<RunRequest>, String> {
+        if self.is_keys() {
+            return Ok(None);
+        }
         let Some(base) = self.run_request(false) else {
             return Ok(None);
         };
@@ -309,6 +355,7 @@ impl QueryTab {
             all: false,
             source_text: base.source_text.clone(),
             session: self.session,
+            scan: None,
             explain: Some(ExplainRun {
                 analyze,
                 statement: start..start + statement.len(),
@@ -398,6 +445,7 @@ impl QueryTab {
             _ => {}
         }
         match self.focus {
+            TabFocus::Editor | TabFocus::DialectPill if self.is_keys() => TabAction::None,
             TabFocus::Editor => self.editor_key(press),
             TabFocus::DialectPill => self.pill_key(press),
             TabFocus::Grid => self.grid_key(press),
@@ -533,6 +581,9 @@ impl QueryTab {
 
     /// Opens the dialect menu on the current dialect; while the switch is refused it says why.
     pub fn open_dialect_menu(&mut self) {
+        if self.is_keys() {
+            return;
+        }
         self.dialect_menu = Some(self.dialect.index());
         if !self.dialect_switch_allowed() {
             self.notice = Some(self.dialect_locked_toast());
@@ -683,6 +734,9 @@ impl QueryTab {
     /// Inserts `text` at the editor's caret, replacing the selection (`docs/ux/workspace.md`
     /// 6.3): `text` is already cleaned by [`crate::pointer::paste_text`].
     pub fn paste(&mut self, text: &str) {
+        if self.is_keys() {
+            return;
+        }
         let line = self.editor.caret().line;
         self.editor.paste(text);
         self.edited(line);
@@ -799,6 +853,12 @@ impl QueryTab {
             ),
             _ => status_line::tag_summary(&last_tag, elapsed),
         };
+        if let Some(scan) = &request.scan {
+            self.summary = scan.summary(shown_rows, elapsed);
+            if let Some(grid) = &mut self.grid {
+                grid.key_scan = Some(scan.clone());
+            }
+        }
     }
 
     fn finish_explain(
@@ -852,6 +912,7 @@ impl QueryTab {
                     explain: None,
                     source_text: source_text.to_owned(),
                     session: self.session,
+                    scan: None,
                 };
                 self.show_error(&shifted, &original, 0);
             }

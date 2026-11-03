@@ -70,6 +70,9 @@ pub mod tree_menu;
 /// The dialog that confirms dropping an object from the tree, with its statement in the
 /// active tab's dialect (`docs/ux/workspace.md` 10.2).
 pub mod drop_prompt;
+/// A keys tab's scan of a key space's first keys, spelled for the keys grid
+/// (`docs/ux/workspace.md` 10.4).
+pub mod key_scan;
 /// PNG encoding of rendered frames, for screenshots and tests.
 pub mod png;
 /// The pointer and the caret (`docs/ux/workspace.md` 6): hit testing on the accessibility

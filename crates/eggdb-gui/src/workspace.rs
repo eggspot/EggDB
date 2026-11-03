@@ -1066,6 +1066,7 @@ impl Workspace {
         let statements = request.statements.clone();
         let dialect = request.dialect;
         let session = request.session;
+        let scan = request.scan.clone();
         let rolled_back = request
             .explain
             .as_ref()
@@ -1074,8 +1075,9 @@ impl Workspace {
             let Ok(mut connection) = handed.recv() else {
                 return;
             };
-            let outcomes = match statements.first() {
-                Some(statement) if rolled_back => connection.run_rolled_back_in_session(
+            let outcomes = match (&scan, statements.first()) {
+                (Some(scan), _) => vec![connection.scan_keys(scan).map(|table| vec![table])],
+                (None, Some(statement)) if rolled_back => connection.run_rolled_back_in_session(
                     session,
                     dialect,
                     statement,

@@ -1,7 +1,7 @@
 use eggdb_platform::window::{AccessNode, AccessRect, AccessRole, Key, KeyPress};
 
 use crate::canvas::Rect;
-use crate::grid::{Cell, ResultGrid, ValueKind, full_hex, pretty_json};
+use crate::grid::{Cell, ResultGrid, ValueKind, full_hex, is_json, pretty_json};
 use crate::main_window::{BODY, CODE, Painter, elided, focus_ring};
 use crate::scrollbar::{self, Axis, Extent};
 use crate::status_line;
@@ -85,6 +85,7 @@ pub fn shown_value(value: Option<&str>, kind: ValueKind) -> (String, bool) {
         Some("") => ("\"\"".to_owned(), true),
         Some(text) => match kind {
             ValueKind::Json | ValueKind::Vector => (pretty_json(text), false),
+            ValueKind::SpelledBytes if is_json(text) => (pretty_json(text), false),
             ValueKind::Blob => (full_hex(text), false),
             _ => (text.to_owned(), false),
         },
