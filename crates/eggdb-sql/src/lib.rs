@@ -49,6 +49,7 @@ mod execute;
 mod explain;
 mod foreign;
 mod geo_functions;
+mod grouping_sets;
 mod hash_index;
 mod hstore;
 mod hstore_functions;
@@ -184,6 +185,8 @@ mod destructive_tests;
 mod engine_limits_tests;
 #[cfg(test)]
 mod geo_tests;
+#[cfg(test)]
+mod grouping_sets_tests;
 #[cfg(test)]
 mod implicit_transaction_tests;
 #[cfg(test)]

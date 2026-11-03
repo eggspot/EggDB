@@ -337,5 +337,6 @@ fn every_column_of(source: TableReference, position: usize) -> Select {
         limit: None,
         offset: None,
         source_row_limit: None,
+        grouping_sets: None,
     }
 }

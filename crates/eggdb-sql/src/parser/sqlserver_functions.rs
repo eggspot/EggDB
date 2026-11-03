@@ -1078,6 +1078,7 @@ fn derived_rows(
         limit: None,
         offset: None,
         source_row_limit: None,
+        grouping_sets: None,
     };
     TableReference {
         name: Name {

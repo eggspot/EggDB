@@ -2,6 +2,7 @@ mod constraints;
 mod copy;
 mod cursors;
 mod databases;
+mod grouping_sets;
 mod indexes;
 mod joined_dml;
 mod merge;
@@ -3040,11 +3041,11 @@ impl<'t> Parser<'t> {
         } else {
             (self.filter()?, None)
         };
-        let group_by = if self.take_word("group") {
+        let (group_by, grouping_sets) = if self.take_word("group") {
             self.expect_word("by")?;
             self.group_by()?
         } else {
-            Vec::new()
+            (Vec::new(), None)
         };
         let having = if self.take_word("having") {
             let condition = self.expression()?;
@@ -3088,6 +3089,7 @@ impl<'t> Parser<'t> {
             limit: None,
             offset: None,
             source_row_limit,
+            grouping_sets,
         })
     }
 
@@ -3225,27 +3227,6 @@ impl<'t> Parser<'t> {
             });
         }
         Ok(FromClause { first, joins })
-    }
-
-    fn group_by(&mut self) -> SqlResult<Vec<Expr>> {
-        if self.is_word("all") || self.is_word("distinct") {
-            return Err(self.not_supported("GROUP BY ALL and GROUP BY DISTINCT"));
-        }
-        let mut keys = Vec::new();
-        loop {
-            let grouping_set = (["rollup", "cube"].iter().any(|word| self.is_word(word))
-                && self.peek_kind_at(1) == &TokenKind::LeftParen)
-                || (self.is_word("grouping") && self.is_word_at(1, "sets"))
-                || (self.peek_kind() == &TokenKind::LeftParen
-                    && self.peek_kind_at(1) == &TokenKind::RightParen);
-            if grouping_set {
-                return Err(self.not_supported("ROLLUP, CUBE and GROUPING SETS"));
-            }
-            keys.push(self.expression()?);
-            if !self.take(&TokenKind::Comma) {
-                return Ok(keys);
-            }
-        }
     }
 
     fn is_clause_end(&self) -> bool {
@@ -4454,6 +4435,9 @@ impl<'t> Parser<'t> {
     }
 
     fn function_call(&mut self, name: Name) -> SqlResult<Expr> {
+        if let Some(expr) = self.grouping_operation(&name)? {
+            return Ok(expr);
+        }
         if name.text == "extract" && !self.sqlite() {
             return self.extract(name);
         }

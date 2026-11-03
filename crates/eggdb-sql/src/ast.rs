@@ -1444,11 +1444,18 @@ pub(crate) struct Select {
     pub(crate) from: Option<FromClause>,
     pub(crate) filter: Option<Expr>,
     pub(crate) group_by: Vec<Expr>,
+    pub(crate) grouping_sets: Option<GroupingSets>,
     pub(crate) having: Option<Expr>,
     pub(crate) order_by: Vec<OrderItem>,
     pub(crate) limit: Option<Expr>,
     pub(crate) offset: Option<Expr>,
     pub(crate) source_row_limit: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GroupingSets {
+    pub(crate) sets: Vec<Vec<usize>>,
+    pub(crate) distinct: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

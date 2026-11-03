@@ -950,6 +950,7 @@ impl<'a> Resolver<'a> {
                 limit: None,
                 offset: None,
                 source_row_limit: None,
+                grouping_sets: None,
             }))
         };
         let mut body = branch(&leaves[0]);
@@ -1342,6 +1343,7 @@ fn select_from(
         limit: None,
         offset: None,
         source_row_limit: None,
+        grouping_sets: None,
     }
 }
 
@@ -1870,6 +1872,7 @@ impl Binding<'_> {
             limit: None,
             offset: None,
             source_row_limit: None,
+            grouping_sets: None,
         };
         self.select(reader, tables, &mut select)?;
         let mut resolved = select.items.into_iter();

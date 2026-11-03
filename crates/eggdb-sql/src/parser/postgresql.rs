@@ -457,6 +457,7 @@ impl Parser<'_> {
             limit: None,
             offset: None,
             source_row_limit: None,
+            grouping_sets: None,
         })
     }
 
@@ -689,6 +690,7 @@ fn is_values_select(select: &Select) -> bool {
         )
         && select.filter.is_none()
         && select.group_by.is_empty()
+        && select.grouping_sets.is_none()
         && select.having.is_none()
         && select.order_by.is_empty()
         && select.limit.is_none()

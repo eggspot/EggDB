@@ -303,6 +303,7 @@ pub(crate) fn first_aggregate(expr: &Expr) -> Option<&Expr> {
             pattern: right,
             ..
         } => first_aggregate(left).or_else(|| first_aggregate(right)),
+        ExprKind::Function { name, .. } if crate::grouping_sets::is_operation(name) => Some(expr),
         _ => children(expr).into_iter().find_map(first_aggregate),
     }
 }

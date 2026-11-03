@@ -245,6 +245,7 @@ fn table_query(table: &CommonTable, recursive: bool) -> Query {
         limit: None,
         offset: None,
         source_row_limit: None,
+        grouping_sets: None,
     };
     Query {
         with: vec![table.clone()],

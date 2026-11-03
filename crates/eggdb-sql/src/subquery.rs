@@ -619,6 +619,7 @@ fn key_query(query: &Query, shape: LookupShape) -> Option<KeyQueries> {
                 limit: None,
                 offset: None,
                 source_row_limit: None,
+                grouping_sets: None,
             },
             query.position,
         )),
@@ -641,6 +642,7 @@ fn key_query(query: &Query, shape: LookupShape) -> Option<KeyQueries> {
         limit: None,
         offset: None,
         source_row_limit: None,
+        grouping_sets: None,
     };
     Some(KeyQueries {
         keys: Query::of_select(keys, query.position),
@@ -2192,6 +2194,7 @@ fn lateral_source(reference: &TableReference) -> Option<LateralSource> {
         limit: None,
         offset: None,
         source_row_limit: None,
+        grouping_sets: None,
     };
     Some(LateralSource {
         query: Query::of_select(select, position),
@@ -2351,6 +2354,7 @@ fn lateral_rows(
             limit: None,
             offset: None,
             source_row_limit: None,
+            grouping_sets: None,
         };
         run_query(
             &outer_env,
