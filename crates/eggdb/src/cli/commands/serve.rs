@@ -436,16 +436,19 @@ impl Session<'_> {
             user: user.clone(),
             password_sha256: eggdb_crypto::sha256(password.as_bytes()),
             max_connections,
+            memory_budget: Arc::clone(&memory_budget),
         };
         let amqp_config = eggdb_amqp::ServerConfig {
             user: user.clone(),
             password_sha256: eggdb_crypto::sha256(password.as_bytes()),
             max_connections,
+            memory_budget: Arc::clone(&memory_budget),
         };
         let bolt_config = eggdb_bolt::ServerConfig {
             user: user.clone(),
             password_sha256: eggdb_crypto::sha256(password.as_bytes()),
             max_connections,
+            memory_budget: Arc::clone(&memory_budget),
         };
         let mongo_config = match &mongo_listener {
             Some(_) => Some(

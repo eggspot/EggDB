@@ -23,6 +23,21 @@ pub(crate) struct Packet {
     pub(crate) body: Vec<u8>,
 }
 
+/// The bytes the packet at the front of `buffer` takes once whole: what its fixed header's
+/// remaining length declares once that has arrived, or what `buffer` already holds.
+pub(crate) fn pending_packet_bytes(buffer: &[u8]) -> usize {
+    let mut length = 0usize;
+    let mut multiplier = 1usize;
+    for (at, &byte) in buffer.iter().enumerate().skip(1).take(4) {
+        length = length.saturating_add(usize::from(byte & 0x7f).saturating_mul(multiplier));
+        if byte & 0x80 == 0 {
+            return (at + 1).saturating_add(length).max(buffer.len());
+        }
+        multiplier = multiplier.saturating_mul(128);
+    }
+    buffer.len()
+}
+
 /// Takes one packet from the front of `buffer`, or `None` when more bytes are needed.
 pub(crate) fn take_packet(buffer: &mut Vec<u8>) -> Result<Option<Packet>, String> {
     let Some(&first) = buffer.first() else {
