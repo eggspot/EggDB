@@ -216,6 +216,8 @@ fn insert_into_table(
     binding.insert(&*writer, tables, &mut insert)?;
     if filled {
         execute::insert(writer, tables, &insert)?;
+    } else {
+        tables.require_target(&*writer, &insert.table.name, "insert into")?;
     }
     Ok(())
 }

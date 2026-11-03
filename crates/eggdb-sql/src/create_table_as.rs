@@ -34,7 +34,7 @@ pub(crate) fn run(
     let count = selected.rows.len();
     if count > 0 {
         let mut insert = Insert {
-            table: TableReference::named(create.name.clone(), None),
+            table: TableReference::named(definition.name.clone(), None),
             columns: None,
             source: InsertSource::Values(selected.rows.into_iter().map(constant_row).collect()),
             returning: None,
