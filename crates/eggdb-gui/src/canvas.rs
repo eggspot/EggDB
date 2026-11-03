@@ -133,7 +133,8 @@ impl Canvas {
     pub fn blend(&mut self, x: i64, y: i64, color: Rgba, coverage: f32) {
         let (x, y) = (x.saturating_add(self.shift.0), y.saturating_add(self.shift.1));
         let (left, top, right, bottom) = self.clip;
-        if coverage <= 0.0 || x < left.max(0) || y < top.max(0) || x >= right || y >= bottom {
+        let inside = (left.max(0)..right).contains(&x) && (top.max(0)..bottom).contains(&y);
+        if coverage <= 0.0 || !inside {
             return;
         }
         let (x, y) = (x as usize, y as usize);

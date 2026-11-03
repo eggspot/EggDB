@@ -8,6 +8,8 @@ use crate::connection::{
     ConnectFailure, ConnectTarget, FailureField, FileTarget, resolve_typed_path,
 };
 use crate::font::{TextStyle, Typeface};
+use crate::layout::Layout;
+use crate::layout_picker::LayoutPicker;
 use crate::main_window::Faces;
 use crate::pointer::{self, CaretLook, PointerLook};
 
@@ -76,6 +78,9 @@ const RADIUS_CARD: f32 = 8.0;
 const FOCUS_GAP: f32 = 2.0;
 const HEADLINE: (f32, f32) = (20.0, 26.0);
 const BODY: (f32, f32) = (13.0, 18.0);
+const SMALL: (f32, f32) = (11.0, 14.0);
+const LAYOUT_LINE_RIGHT: f32 = 536.0;
+const LAYOUT_LINE_TOP: f32 = 30.0;
 
 const OPEN_A_FILE_LABEL: &str = "Open a file";
 const CONNECT_TO_A_SERVER_LABEL: &str = "Connect to a server";
@@ -393,6 +398,10 @@ pub struct ConnectCard {
     /// The path the last drop or dialog put in the File input: it opens as it is, and is
     /// never created, while the input still shows it.
     pub chosen_file: Option<ChosenFile>,
+    /// The layout the main window opens in: the card's title row names a familiar one.
+    pub layout: Layout,
+    /// The layout picker, while it is open over the card.
+    pub layout_picker: Option<LayoutPicker>,
 }
 
 impl ConnectCard {
@@ -417,6 +426,8 @@ impl ConnectCard {
             pointer: PointerLook::default(),
             caret: CaretLook::On,
             chosen_file: None,
+            layout: Layout::EggDb,
+            layout_picker: None,
         }
     }
 
@@ -1190,9 +1201,19 @@ pub fn draw(
         let at = (origin.0 + DROP_HINT.0, origin.1 + DROP_HINT.1);
         pen.text(faces.ui, DROP_HINT_LABEL, at, BODY, theme.accent);
     }
-    if !card.disabled() && card.ring_shown() {
+    if let Some(item) = card.layout.status_item() {
+        let text = format!("Layout: {item}");
+        let width = pen.width(faces.ui, &text, SMALL);
+        let at = (origin.0 + LAYOUT_LINE_RIGHT - width, origin.1 + LAYOUT_LINE_TOP);
+        pen.text(faces.ui, &text, at, SMALL, theme.text_secondary);
+    }
+    if card.layout_picker.is_none() && !card.disabled() && card.ring_shown() {
         let (rect, radius) = focus_target(card, faces, size);
         pen.focus_ring(rect, radius);
+    }
+    if let Some(picker) = &card.layout_picker {
+        let logical = (size.0 as f32, size.1 as f32);
+        crate::layout_picker::draw(&mut canvas, picker, theme, faces, logical, scale);
     }
     canvas
 }

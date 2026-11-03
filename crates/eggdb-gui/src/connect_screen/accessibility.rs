@@ -338,6 +338,17 @@ pub fn accessibility_tree(
             }
         }
     }
+    if let Some(picker) = &card.layout_picker {
+        for node in &mut tree.nodes {
+            node.state.focused = false;
+        }
+        let logical = (size.0 as f32, size.1 as f32);
+        tree.nodes.extend(crate::layout_picker::accessibility_nodes(
+            picker,
+            NODE_WINDOW,
+            logical,
+        ));
+    }
     tree.nodes
 }
 

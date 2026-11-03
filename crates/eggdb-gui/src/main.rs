@@ -18,7 +18,9 @@ use eggdb_gui::connect_screen::{
 };
 use eggdb_gui::connection::{EngineConnector, home_directory};
 use eggdb_gui::main_window::{self, Faces};
+use eggdb_gui::layout::Layout;
 use eggdb_gui::png::encode_png;
+use eggdb_gui::settings::{SETTINGS_VARIABLE, settings_path};
 use eggdb_gui::pointer::clamp_to_minimum;
 use eggdb_gui::workspace::{Screen, Workspace, WorkspaceCommand};
 use eggdb_gui::{BoxFace, Canvas, SystemFaces, Theme, ThemeKind};
@@ -26,7 +28,7 @@ use eggdb_platform::window::{
     AccessNode, Window, WindowEvent, WindowOptions, has_file_dialog, open_window,
 };
 
-const USAGE: &str = "Usage: eggdb-gui [--window] [--png <file>] [--open <path>] [--no-create] [--read-only] [--no-file-dialog] [--run <sql>] [--explain <sql>] [--theme light|dark|high-contrast] [--scale <n>] [--size <width>x<height>] [--box-text] [--frames <n>]
+const USAGE: &str = "Usage: eggdb-gui [--window] [--png <file>] [--open <path>] [--no-create] [--read-only] [--no-file-dialog] [--run <sql>] [--explain <sql>] [--theme light|dark|high-contrast] [--layout <layout>] [--scale <n>] [--size <width>x<height>] [--box-text] [--frames <n>]
 
 Shows EggDB's connect screen.
   --window          open it in a native window (the default without --png)
@@ -38,6 +40,9 @@ Shows EggDB's connect screen.
   --run <sql>       after --open, put <sql> in the editor and run it as Ctrl/Cmd+Enter does (with --png)
   --explain <sql>   after --open and --run, put <sql> in the editor and explain it as Ctrl/Cmd+E does (with --png)
   --theme <theme>   light (the default), dark or high-contrast
+  --layout <layout> lay the main window out as eggdb, ssms, pgadmin, dbeaver, datagrip,
+                    mysql-workbench, mongodb-compass or redis-insight for this run, without
+                    keeping it in the settings
   --scale <n>       device pixels per logical pixel for --png (default 1)
   --size <w>x<h>    the logical size for --png (default 1280x800)
   --box-text        draw text as boxes, the same pixels on every OS (for pixel tests)
@@ -63,6 +68,7 @@ struct Options {
     create_if_missing: bool,
     read_only: bool,
     file_dialog: bool,
+    layout: Option<Layout>,
 }
 
 fn parse_size(text: &str) -> Option<(u32, u32)> {
@@ -86,6 +92,7 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<Option<Opti
         create_if_missing: true,
         read_only: false,
         file_dialog: true,
+        layout: None,
     };
     while let Some(arg) = args.next() {
         let name = arg
@@ -119,6 +126,15 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<Option<Opti
                 );
             }
             "--png" => options.png = Some(value("a file")?),
+            "--layout" => {
+                let layout = value("a layout")?;
+                options.layout = Some(layout.to_str().and_then(Layout::from_key).ok_or_else(|| {
+                    format!(
+                        "--layout {} is not eggdb, ssms, pgadmin, dbeaver, datagrip, mysql-workbench, mongodb-compass or redis-insight",
+                        layout.to_string_lossy()
+                    )
+                })?);
+            }
             "--theme" => {
                 let theme = value("a theme")?;
                 options.theme = theme.to_str().and_then(ThemeKind::parse).ok_or_else(|| {
@@ -178,7 +194,7 @@ fn with_faces<T>(box_text: bool, run: impl FnOnce(Faces<'_>) -> T) -> T {
     }
 }
 
-fn workspace(options: &Options, file_dialog: bool) -> Workspace {
+fn workspace(options: &Options, file_dialog: bool, keep_settings: bool) -> Workspace {
     let current = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut workspace = Workspace::new(
         Arc::new(EngineConnector),
@@ -189,6 +205,12 @@ fn workspace(options: &Options, file_dialog: bool) -> Workspace {
     if let Some(card) = workspace.card_mut() {
         card.create_if_missing = options.create_if_missing;
         card.read_only = options.read_only;
+    }
+    if keep_settings {
+        workspace.use_settings(settings_path());
+    }
+    if let Some(layout) = options.layout {
+        workspace.show_layout(layout);
     }
     workspace
 }
@@ -207,7 +229,8 @@ fn render(
 }
 
 fn write_png(options: &Options, path: &OsString, faces: Faces<'_>) -> Result<(), String> {
-    let mut workspace = workspace(options, options.file_dialog);
+    let explicit_settings = std::env::var_os(SETTINGS_VARIABLE).is_some();
+    let mut workspace = workspace(options, options.file_dialog, explicit_settings);
     if let Some(open) = &options.open {
         workspace.open_typed(&open.to_string_lossy(), Instant::now());
         workspace.wait_for_open(SCRIPTED_OPEN_LIMIT);
@@ -267,7 +290,7 @@ fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
         .map_err(|error| error.to_string())?,
     ));
     let theme = Theme::of(options.theme);
-    let mut workspace = workspace(options, has_file_dialog());
+    let mut workspace = workspace(options, has_file_dialog(), true);
     workspace.set_clipboard(Box::new(SystemClipboard::new(Rc::clone(&window))));
     workspace.start_caret_blink(Instant::now());
     if let Some(open) = &options.open {
@@ -467,6 +490,13 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(opening.open, Some(OsString::from("shop.eggdb")));
+        assert_eq!(opening.layout, None);
+        let laid_out = parse(&["--png", "a.png", "--layout", "MySQL-Workbench"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(laid_out.layout, Some(Layout::Workbench));
+        assert!(parse(&["--layout", "toad"]).is_err());
+        assert!(parse(&["--layout"]).is_err());
         assert!(!opening.create_if_missing && opening.read_only && !opening.file_dialog);
         let scripted = parse(&["--window", "--frames", "3", "--box-text"])
             .unwrap()

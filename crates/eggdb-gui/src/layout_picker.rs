@@ -1,5 +1,5 @@
 use eggdb_platform::window::{
-    AccessNode, AccessRect, AccessRole, AccessTreePosition, Key, KeyPress,
+    AccessAction, AccessNode, AccessRect, AccessRole, AccessTreePosition, Key, KeyPress,
 };
 
 use crate::canvas::{Canvas, Rect};
@@ -182,6 +182,10 @@ pub fn dialog_origin(size: (f32, f32)) -> (f32, f32) {
     )
 }
 
+fn contains(rect: Rect, x: f32, y: f32) -> bool {
+    (rect.x..rect.x + rect.w).contains(&x) && (rect.y..rect.y + rect.h).contains(&y)
+}
+
 /// Row `index`'s rect in a window of `size`.
 pub fn row_rect(size: (f32, f32), index: usize) -> Rect {
     let (dx, dy) = dialog_origin(size);
@@ -196,9 +200,32 @@ pub fn row_rect(size: (f32, f32), index: usize) -> Rect {
 /// The row under (`x`, `y`) in a window of `size`, if any.
 pub fn row_at(size: (f32, f32), x: f32, y: f32) -> Option<usize> {
     (0..Layout::ALL.len()).find(|index| {
-        let rect = row_rect(size, *index);
-        x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h
+        contains(row_rect(size, *index), x, y)
     })
+}
+
+/// Answers a press of the pointer at (`x`, `y`) in a window of `size` with `clicks` counted:
+/// a row is highlighted or (double click) applied, `Cancel` keeps, `Apply` applies, and a
+/// press on the scrim outside the dialog keeps the layout.
+pub fn press_at(picker: &mut LayoutPicker, size: (f32, f32), x: f32, y: f32, clicks: u8) -> PickerOutcome {
+    if let Some(row) = row_at(size, x, y) {
+        return picker.click_row(row, clicks);
+    }
+    let origin = dialog_origin(size);
+    let inside = |rect: Rect| {
+        contains(offset(rect, origin), x, y)
+    };
+    if inside(CANCEL) {
+        return PickerOutcome::Keep;
+    }
+    if inside(APPLY) {
+        return picker.apply();
+    }
+    if inside(Rect::new(0.0, 0.0, DIALOG_SIZE.0, DIALOG_SIZE.1)) {
+        PickerOutcome::Open
+    } else {
+        PickerOutcome::Keep
+    }
 }
 
 struct Ink<'c, 'f> {
@@ -489,6 +516,33 @@ pub fn accessibility_nodes(picker: &LayoutPicker, parent: u32, size: (f32, f32))
     nodes
 }
 
+/// The keys that do a screen reader's `action` on the picker's `node`: a row is
+/// highlighted (and applied on invoke), `Cancel` keeps and `Apply` applies. Nodes outside the
+/// picker get nothing, as the window under it takes no input.
+pub fn access_keys(picker: &mut LayoutPicker, node: &AccessNode, action: &AccessAction) -> Vec<KeyPress> {
+    let invoke = *action == AccessAction::Invoke;
+    match node.id {
+        NODE_CANCEL if invoke => vec![KeyPress::plain(Key::Escape)],
+        NODE_APPLY if invoke => {
+            picker.focus = PickerFocus::Apply;
+            vec![KeyPress::plain(Key::Enter)]
+        }
+        id if (NODE_FIRST_ROW..NODE_FIRST_ROW + Layout::ALL.len() as u32).contains(&id) => {
+            picker.highlighted = (id - NODE_FIRST_ROW) as usize;
+            picker.focus = PickerFocus::List;
+            match action {
+                AccessAction::Invoke => vec![KeyPress::plain(Key::Enter)],
+                _ => Vec::new(),
+            }
+        }
+        NODE_LIST if *action == AccessAction::Focus => {
+            picker.focus = PickerFocus::List;
+            Vec::new()
+        }
+        _ => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,6 +627,12 @@ mod tests {
         assert_eq!(picker.focus, PickerFocus::List);
         assert_eq!(picker.click_row(5, 2), PickerOutcome::Apply(Layout::Workbench));
         assert_eq!(picker.click_row(99, 2), PickerOutcome::Open);
+        assert_eq!(press_at(&mut picker, size, 400.0, 200.0, 1), PickerOutcome::Open);
+        assert_eq!(picker.highlighted, 1);
+        assert_eq!(press_at(&mut picker, size, 380.0, 170.0, 1), PickerOutcome::Open);
+        assert_eq!(press_at(&mut picker, size, 820.0, 610.0, 1), PickerOutcome::Apply(Layout::Ssms));
+        assert_eq!(press_at(&mut picker, size, 730.0, 610.0, 1), PickerOutcome::Keep);
+        assert_eq!(press_at(&mut picker, size, 10.0, 10.0, 1), PickerOutcome::Keep);
     }
 
     #[test]
@@ -593,5 +653,18 @@ mod tests {
         assert_eq!(rows[7].tree_position.map(|position| position.position), Some(8));
         let apply = nodes.iter().find(|node| node.id == NODE_APPLY).expect("Apply");
         assert!(apply.state.default_button);
+        let row = nodes
+            .iter()
+            .find(|node| node.id == NODE_FIRST_ROW + 6)
+            .expect("row 7")
+            .clone();
+        assert!(access_keys(&mut picker, &row, &AccessAction::Select).is_empty());
+        assert_eq!(picker.highlighted_layout(), Layout::Compass);
+        assert_eq!(
+            access_keys(&mut picker, &row, &AccessAction::Invoke),
+            vec![KeyPress::plain(Key::Enter)]
+        );
+        assert_eq!(picker.key(KeyPress::plain(Key::Enter)), PickerOutcome::Apply(Layout::Compass));
+        assert!(access_keys(&mut picker, &nodes[0], &AccessAction::Invoke).is_empty());
     }
 }

@@ -18,6 +18,7 @@ use eggdb_gui::connect_screen::{
 };
 use eggdb_gui::connection::{CancelHandle, EngineConnector};
 use eggdb_gui::dialect::QueryDialect;
+use eggdb_gui::layout::Layout;
 use eggdb_gui::main_window::{self, Faces, MainWindow};
 use eggdb_gui::png::encode_png;
 use eggdb_gui::workspace::{Screen, Workspace};
@@ -101,6 +102,44 @@ fn a_typed_path_opens_the_main_window_on_the_file() {
         "the main window says read-only"
     );
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn layout_opens_the_main_window_in_a_familiar_layout_and_the_settings_file_keeps_one() {
+    let directory = scratch("layout");
+    let frame = binary_png(&directory, &["--open", "layout.eggdb", "--layout", "mysql-workbench"]);
+    let opened = MainWindow::opened("layout", "layout.eggdb", true, Vec::new());
+    let workbench = MainWindow {
+        layout: Layout::Workbench,
+        ..opened.clone()
+    };
+    let library = main_window::draw(&workbench, Theme::of(ThemeKind::Light), BOX_FACES);
+    assert_eq!(frame, encode_png(&library), "the main window works like MySQL Workbench");
+    let settings = directory.join("gui-settings");
+    std::fs::write(&settings, "layout = ssms\n").expect("the settings file is written");
+    let output = directory.join("kept.png");
+    let status = Command::new(env!("CARGO_BIN_EXE_eggdb-gui"))
+        .env(eggdb_gui::settings::SETTINGS_VARIABLE, &settings)
+        .args(["--box-text", "--open", "layout.eggdb", "--png"])
+        .arg(&output)
+        .current_dir(&directory)
+        .status()
+        .expect("eggdb-gui runs");
+    assert!(status.success());
+    let ssms = MainWindow {
+        layout: Layout::Ssms,
+        ..opened
+    };
+    let library = main_window::draw(&ssms, Theme::of(ThemeKind::Light), BOX_FACES);
+    assert_eq!(
+        std::fs::read(&output).expect("the PNG is written"),
+        encode_png(&library),
+        "the kept layout applies at the next start"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&settings).expect("the settings stay"),
+        "layout = ssms\n"
+    );
 }
 
 fn missing_file_card(path: &str) -> ConnectCard {

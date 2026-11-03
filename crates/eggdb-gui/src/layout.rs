@@ -129,6 +129,27 @@ impl Shortcut {
             && held.alt == self.alt
     }
 
+    /// The key press that is this shortcut on this system.
+    pub fn press(&self) -> KeyPress {
+        let (control, command) = match self.held {
+            Held::Nothing => (false, false),
+            Held::Primary => {
+                let primary = primary_modifiers();
+                (primary.control, primary.command)
+            }
+            Held::Control => (true, false),
+        };
+        KeyPress {
+            key: self.key,
+            modifiers: Modifiers {
+                shift: self.shift,
+                control,
+                alt: self.alt,
+                command,
+            },
+        }
+    }
+
     /// How the shortcut reads on this system, as `Ctrl+Shift+E` or `F5`.
     pub fn label(&self) -> String {
         let mac = cfg!(target_os = "macos");
@@ -327,6 +348,14 @@ impl Layout {
             (self, action),
             (Self::Ssms, LayoutAction::Explain) | (Self::RedisInsight, LayoutAction::RunStatement)
         )
+    }
+
+    /// The key that does `action` in this layout: its own first key, else EggDB's.
+    pub fn key_for(self, action: LayoutAction) -> KeyPress {
+        self.shortcuts()
+            .iter()
+            .find(|shortcut| shortcut.action == action)
+            .map_or_else(|| eggdb_key(action), Shortcut::press)
     }
 
     /// The key the layout shows for `action`: its own first key, else EggDB's, or `None`
@@ -596,6 +625,7 @@ mod tests {
         assert_eq!(Layout::from_key(" SSMS "), Some(Layout::Ssms));
         assert_eq!(Layout::from_key("pgadmin3"), None);
         assert_eq!(Layout::from_key(""), None);
+        keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), 8);
         assert_eq!(Layout::EggDb.status_item(), None);
@@ -628,6 +658,21 @@ mod tests {
             Layout::RedisInsight.shortcut_label(LayoutAction::RunStatement),
             None
         );
+        for layout in Layout::ALL {
+            for action in [
+                LayoutAction::RunStatement,
+                LayoutAction::RunAll,
+                LayoutAction::Explain,
+            ] {
+                let pressed = layout.key_for(action);
+                let wanted = if layout.moves_to_palette(action) {
+                    layout.translate(pressed)
+                } else {
+                    eggdb_key(action)
+                };
+                assert_eq!(layout.translate(pressed), wanted, "{layout:?} {action:?}");
+            }
+        }
     }
 
     #[test]

@@ -18,6 +18,8 @@ use crate::grid::{
 };
 use crate::highlight::{Carry, TokenKind, tokens};
 use crate::inspector::{self, Inspector, InspectorBlock};
+use crate::layout::{Layout, LayoutAction};
+use crate::layout_picker::{self, LayoutPicker, PickerOutcome};
 use crate::object_browser::{
     self, ObjectTree, ROW_HEIGHT, ROWS_IN_VIEW, ROWS_TOP, SidebarFocus, TreeAction, TreeItem,
 };
@@ -79,6 +81,8 @@ pub enum WindowAction {
     Inspect(TreeItem),
     /// Read the catalog again.
     RefreshCatalog,
+    /// The layout picker applied this layout: the client keeps it in its settings.
+    LayoutChosen(Layout),
 }
 
 /// The status bar's notice while a run keeps the tree from opening another tab.
@@ -114,6 +118,60 @@ pub struct MainWindow {
     /// The rows and columns the wheel moved by that did not add up to a whole step yet, down
     /// and right, so a touchpad's small deltas still scroll.
     pub wheel_carry: (f32, f32),
+    /// The layout of the regions, labels and keys (`docs/ux/gui-layouts.md`).
+    pub layout: Layout,
+    /// The layout picker, while it is open over the window.
+    pub layout_picker: Option<LayoutPicker>,
+    /// Whether `Ctrl/Cmd+K` was pressed and the next key finishes the chord (`L` opens the
+    /// layout picker).
+    pub chord_started: bool,
+}
+
+/// A region of the main window, as EggDB's own layout draws it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Area {
+    Toolbar,
+    Sidebar,
+    Tabs,
+    Editor,
+    Results,
+    StatusBar,
+}
+
+const AREAS: [Area; 6] = [
+    Area::Toolbar,
+    Area::Sidebar,
+    Area::Tabs,
+    Area::Editor,
+    Area::Results,
+    Area::StatusBar,
+];
+const SIDEBAR_RIGHT: f32 = 260.0;
+const EDITOR_TOP: f32 = 80.0;
+const EDITOR_HEIGHT: f32 = 300.0;
+const SPLITTER_TOP: f32 = 380.0;
+const TOOLBAR_HEIGHT: f32 = 44.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Placed {
+    shift: (f32, f32),
+    clip: Rect,
+}
+
+fn area_at(x: f32, y: f32) -> Area {
+    if y < TOOLBAR_HEIGHT {
+        Area::Toolbar
+    } else if y >= BODY_BOTTOM {
+        Area::StatusBar
+    } else if x < SIDEBAR_RIGHT {
+        Area::Sidebar
+    } else if y < EDITOR_TOP {
+        Area::Tabs
+    } else if y < SPLITTER_TOP {
+        Area::Editor
+    } else {
+        Area::Results
+    }
 }
 
 impl MainWindow {
@@ -138,6 +196,100 @@ impl MainWindow {
             pointer: PointerLook::default(),
             caret: CaretLook::On,
             wheel_carry: (0.0, 0.0),
+            layout: Layout::EggDb,
+            layout_picker: None,
+            chord_started: false,
+        }
+    }
+
+    /// Where `area`, drawn as EggDB's own layout draws it, goes in this window's layout: the
+    /// shift from EggDB's place and the rect it is cut to; `None` when the layout hides it.
+    fn placed(&self, area: Area) -> Option<Placed> {
+        let width = self.width.max(WIDTH) as f32;
+        if self.layout == Layout::EggDb {
+            return Some(Placed {
+                shift: (0.0, 0.0),
+                clip: Rect::new(0.0, 0.0, width, HEIGHT as f32),
+            });
+        }
+        let regions = self.layout.regions_at(width);
+        let (target, from) = match area {
+            Area::Toolbar => (regions.toolbar?, (0.0, 0.0)),
+            Area::Sidebar => (regions.sidebar?, (0.0, TOOLBAR_HEIGHT)),
+            Area::Tabs => (regions.tabs?, (SIDEBAR_RIGHT, TOOLBAR_HEIGHT)),
+            Area::Editor => {
+                let editor = regions.editor;
+                let shown = Rect::new(editor.x, editor.y, editor.w, editor.h.min(EDITOR_HEIGHT));
+                (shown, (SIDEBAR_RIGHT, EDITOR_TOP))
+            }
+            Area::Results => (regions.results, (SIDEBAR_RIGHT, SPLITTER_TOP)),
+            Area::StatusBar => (regions.statusbar?, (0.0, BODY_BOTTOM)),
+        };
+        Some(Placed {
+            shift: (target.x - from.0, target.y - from.1),
+            clip: target,
+        })
+    }
+
+    fn area_width(&self, area: Area) -> f32 {
+        let width = self.width.max(WIDTH) as f32;
+        match self.placed(area) {
+            Some(placed) if self.layout != Layout::EggDb => placed.clip.w,
+            _ => width,
+        }
+    }
+
+    /// Puts the bounds of `nodes`, laid out as EggDB's own layout places them, where this
+    /// window's layout draws them; a hidden region's nodes get empty bounds.
+    fn place_nodes(&self, nodes: &mut [AccessNode]) {
+        if self.layout == Layout::EggDb {
+            return;
+        }
+        let mut inspector = vec![NODE_INSPECTOR];
+        for node in nodes {
+            if inspector.contains(&node.id) || node.parent.is_some_and(|parent| inspector.contains(&parent)) {
+                inspector.push(node.id);
+                continue;
+            }
+            let area = area_at(node.bounds.x, node.bounds.y);
+            match self.placed(area) {
+                Some(placed) => {
+                    node.bounds.x += placed.shift.0;
+                    node.bounds.y += placed.shift.1;
+                    let right = (node.bounds.x + node.bounds.width).min(placed.clip.x + placed.clip.w);
+                    let bottom =
+                        (node.bounds.y + node.bounds.height).min(placed.clip.y + placed.clip.h);
+                    node.bounds.width = (right - node.bounds.x).max(0.0);
+                    node.bounds.height = (bottom - node.bounds.y).max(0.0);
+                }
+                None => {
+                    node.bounds.width = 0.0;
+                    node.bounds.height = 0.0;
+                }
+            }
+        }
+    }
+
+    /// Opens the layout picker over the window, the current layout highlighted.
+    pub fn open_layout_picker(&mut self) {
+        self.layout_picker = Some(LayoutPicker::opened(self.layout));
+        self.chord_started = false;
+    }
+
+    /// Answers the picker's outcome: it closes, and an applied layout takes effect at once,
+    /// keeping every tab, caret, result and the connection.
+    pub fn picker_outcome(&mut self, outcome: PickerOutcome) -> WindowAction {
+        match outcome {
+            PickerOutcome::Open => WindowAction::Tab(TabAction::None),
+            PickerOutcome::Keep => {
+                self.layout_picker = None;
+                WindowAction::Tab(TabAction::None)
+            }
+            PickerOutcome::Apply(layout) => {
+                self.layout_picker = None;
+                self.layout = layout;
+                WindowAction::LayoutChosen(layout)
+            }
         }
     }
 
@@ -145,6 +297,8 @@ impl MainWindow {
     /// under it (the first or last one above or below the text) and the nearest character
     /// boundary on it.
     pub fn editor_position_at(&self, faces: Faces<'_>, x: f32, y: f32) -> Position {
+        let shift = self.placed(Area::Editor).map_or((0.0, 0.0), |placed| placed.shift);
+        let (x, y) = (x - shift.0, y - shift.1);
         let tab = &self.tab;
         let lines = tab.editor.lines();
         let visible =
@@ -274,11 +428,16 @@ impl MainWindow {
 
     /// The right edge of the main area: the window's, or the docked inspector's left edge.
     pub fn centre_right(&self) -> f32 {
-        if self.inspector.docked {
-            self.width as f32 - inspector::INSPECTOR_WIDTH
+        let docked = if self.inspector.docked {
+            inspector::INSPECTOR_WIDTH
         } else {
-            self.width as f32
+            0.0
+        };
+        if self.layout == Layout::EggDb {
+            return self.width as f32 - docked;
         }
+        let editor = self.layout.regions_at(self.width.max(WIDTH) as f32).editor;
+        SIDEBAR_RIGHT + editor.w - docked
     }
 
     /// The tree row the inspector describes: the selected one, else the current one.
@@ -291,6 +450,29 @@ impl MainWindow {
     /// key goes to the region with the focus.
     pub fn key(&mut self, press: KeyPress, now: Instant) -> WindowAction {
         let primary = press.modifiers.control || press.modifiers.command;
+        if let Some(picker) = &mut self.layout_picker {
+            let outcome = picker.key(press);
+            return self.picker_outcome(outcome);
+        }
+        if std::mem::take(&mut self.chord_started)
+            && matches!(press.key, Key::Character('l' | 'L'))
+            && !primary
+        {
+            self.open_layout_picker();
+            return WindowAction::Tab(TabAction::None);
+        }
+        if primary && !press.modifiers.shift && matches!(press.key, Key::Character('k' | 'K')) {
+            self.chord_started = true;
+            return WindowAction::Tab(TabAction::None);
+        }
+        let press = if self.focus == WindowFocus::Tab
+            && self.tab.focus == TabFocus::Editor
+            && self.tab.dialect_menu.is_none()
+        {
+            self.layout.translate(press)
+        } else {
+            press
+        };
         match press.key {
             Key::Character('1') if primary => {
                 self.focus_tree();
@@ -617,16 +799,15 @@ pub fn draw(window: &MainWindow, theme: Theme, faces: Faces<'_>) -> Canvas {
         width: window.width.max(WIDTH) as f32,
         centre_right: window.centre_right(),
     };
-    toolbar(&mut paint, window);
-    let sidebar_focus = match window.focus {
-        WindowFocus::Tab => SidebarFocus::None,
-        WindowFocus::Tree => SidebarFocus::Tree,
-        WindowFocus::Filter => SidebarFocus::Filter,
-    };
-    object_browser::draw(&mut paint, &window.tree, access_text(window), sidebar_focus);
-    tabs(&mut paint, window);
-    editor(&mut paint, &window.tab, window.caret);
-    results(&mut paint, &window.tab);
+    if window.layout == Layout::EggDb {
+        toolbar(&mut paint, window);
+        object_browser::draw(&mut paint, &window.tree, access_text(window), sidebar_focus(window));
+        tabs(&mut paint, window);
+        editor(&mut paint, &window.tab, window.caret);
+        results(&mut paint, &window.tab, window.layout);
+    } else {
+        placed_regions(&mut paint, window);
+    }
     if window.inspector.is_open() {
         let description = inspector::describe(
             &window.tree,
@@ -635,9 +816,160 @@ pub fn draw(window: &MainWindow, theme: Theme, faces: Faces<'_>) -> Canvas {
         );
         inspector::draw(&mut paint, &window.inspector, &description);
     }
-    status_bar(&mut paint, window);
-    dialect_menu(&mut paint, &window.tab);
+    if window.layout == Layout::EggDb {
+        status_bar(&mut paint, window);
+        dialect_menu(&mut paint, &window.tab);
+    } else {
+        if let Some(placed) = window.placed(Area::StatusBar) {
+            paint.width = placed.clip.w;
+            place(paint.canvas, placed);
+            status_bar(&mut paint, window);
+            paint.canvas.draw_anywhere();
+        }
+        if let Some(placed) = window.placed(Area::Toolbar) {
+            paint.width = placed.clip.w;
+            let anywhere = Placed {
+                shift: placed.shift,
+                clip: Rect::new(0.0, 0.0, window.width.max(WIDTH) as f32, HEIGHT as f32),
+            };
+            place(paint.canvas, anywhere);
+            dialect_menu(&mut paint, &window.tab);
+            paint.canvas.draw_anywhere();
+        }
+    }
+    if let Some(picker) = &window.layout_picker {
+        let size = (window.width.max(WIDTH) as f32, HEIGHT as f32);
+        layout_picker::draw(&mut canvas, picker, theme, faces, size, 1.0);
+    }
     canvas
+}
+
+fn sidebar_focus(window: &MainWindow) -> SidebarFocus {
+    match window.focus {
+        WindowFocus::Tab => SidebarFocus::None,
+        WindowFocus::Tree => SidebarFocus::Tree,
+        WindowFocus::Filter => SidebarFocus::Filter,
+    }
+}
+
+fn place(canvas: &mut Canvas, placed: Placed) {
+    canvas.draw_placed(
+        (placed.shift.0.round() as i64, placed.shift.1.round() as i64),
+        placed.clip,
+    );
+}
+
+fn placed_regions(paint: &mut Painter<'_, '_>, window: &MainWindow) {
+    let full_width = paint.width;
+    let theme = paint.theme;
+    for area in AREAS {
+        let Some(placed) = window.placed(area) else {
+            continue;
+        };
+        match area {
+            Area::Toolbar => {
+                paint.width = placed.clip.w;
+                place(paint.canvas, placed);
+                toolbar(paint, window);
+            }
+            Area::Sidebar => {
+                let target = placed.clip;
+                paint.rect(target.x, target.y, target.w, target.h, theme.bg1);
+                paint.rect(target.x + target.w - 1.0, target.y, 1.0, target.h, theme.border);
+                if target.w < SIDEBAR_RIGHT {
+                    rail(paint, target);
+                    continue;
+                }
+                let inside = if target.w > SIDEBAR_RIGHT {
+                    SIDEBAR_RIGHT - 1.0
+                } else {
+                    target.w
+                };
+                let clip = Rect::new(target.x, target.y, inside, target.h);
+                place(paint.canvas, Placed { clip, ..placed });
+                object_browser::draw(paint, &window.tree, access_text(window), sidebar_focus(window));
+            }
+            Area::Tabs => {
+                place(paint.canvas, placed);
+                tabs(paint, window);
+            }
+            Area::Editor => {
+                place(paint.canvas, placed);
+                editor(paint, &window.tab, window.caret);
+            }
+            Area::Results => {
+                place(paint.canvas, placed);
+                splitter(paint);
+                results(paint, &window.tab, window.layout);
+            }
+            Area::StatusBar => continue,
+        }
+        paint.canvas.draw_anywhere();
+        paint.width = full_width;
+    }
+    paint.width = full_width;
+    let regions = window.layout.regions_at(full_width);
+    if let Some((name, rect)) = regions.extra {
+        extra_region(paint, name, rect);
+    }
+}
+
+const RAIL_ITEMS: [&str; 4] = ["Browser", "Workbench", "Analysis", "Pub/Sub"];
+const RAIL_ITEM_HEIGHT: f32 = 64.0;
+const RAIL_SELECTED: usize = 1;
+
+fn rail(paint: &mut Painter<'_, '_>, target: Rect) {
+    let theme = paint.theme;
+    let faces = paint.faces;
+    for (index, label) in RAIL_ITEMS.into_iter().enumerate() {
+        let top = target.y + RAIL_ITEM_HEIGHT * index as f32;
+        if index == RAIL_SELECTED {
+            paint.canvas.fill_rounded_rect(
+                Rect::new(target.x + 4.0, top + 4.0, target.w - 9.0, RAIL_ITEM_HEIGHT - 8.0),
+                4.0,
+                theme.selection,
+            );
+        }
+        let width = faces.ui.width(label, SMALL.0);
+        let left = target.x + ((target.w - 1.0 - width) / 2.0).max(2.0);
+        let ink = if index == RAIL_SELECTED {
+            theme.text_primary
+        } else {
+            theme.text_secondary
+        };
+        let shown = elided(faces.ui, label, target.w - 5.0, SMALL.0);
+        paint.text(faces.ui, &shown, left, top + 25.0, SMALL, ink);
+    }
+}
+
+fn extra_region(paint: &mut Painter<'_, '_>, name: &str, rect: Rect) {
+    let theme = paint.theme;
+    let faces = paint.faces;
+    paint.rect(rect.x, rect.y, rect.w, rect.h, theme.bg1);
+    paint.rect(rect.x, rect.y, rect.w, 1.0, theme.border);
+    paint.rect(rect.x + rect.w - 1.0, rect.y, 1.0, rect.h, theme.border);
+    let title = extra_title(name);
+    let top = rect.y + ((rect.h.min(32.0) - BODY.1) / 2.0).floor();
+    paint.text(faces.ui_bold, &title, rect.x + 12.0, top, BODY, theme.text_primary);
+}
+
+fn extra_title(name: &str) -> String {
+    match name {
+        "shell" => ">_MONGOSH".to_owned(),
+        _ => {
+            let mut characters = name.chars();
+            characters.next().map_or_else(String::new, |first| {
+                first.to_uppercase().chain(characters).collect()
+            })
+        }
+    }
+}
+
+fn splitter(paint: &mut Painter<'_, '_>) {
+    let theme = paint.theme;
+    let centre_width = paint.centre_width();
+    paint.rect(SIDEBAR_RIGHT, SPLITTER_TOP, centre_width, 6.0, theme.bg2);
+    paint.rect(SIDEBAR_RIGHT, SPLITTER_TOP + 2.0, centre_width, 1.0, theme.border);
 }
 
 fn access_text(window: &MainWindow) -> &'static str {
@@ -675,6 +1007,7 @@ fn toolbar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
         theme.text_secondary,
     );
     paint.rect(220.0, 12.0, 1.0, 20.0, theme.border);
+    let dx = run_button_extra(window.layout);
     let running = window.tab.running;
     let (run_look, run_ink) = if running {
         (Button::Disabled, theme.text_disabled)
@@ -687,7 +1020,7 @@ fn toolbar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
         (Button::Secondary, theme.text_primary)
     };
     paint.button(
-        Rect::new(232.0, 8.0, 72.0, 28.0),
+        Rect::new(232.0, 8.0, 72.0 + dx, 28.0),
         under_pointer(window, NODE_RUN, run_look),
     );
     paint.polyline(
@@ -695,40 +1028,40 @@ fn toolbar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
         1.5,
         run_ink,
     );
-    paint.text(faces.ui, "Run", 260.0, 13.0, BODY, run_ink);
+    paint.text(faces.ui, window.layout.run_label(), 260.0, 13.0, BODY, run_ink);
     paint.button(
-        Rect::new(312.0, 8.0, 88.0, 28.0),
+        Rect::new(312.0 + dx, 8.0, 88.0, 28.0),
         under_pointer(window, NODE_RUN_ALL, other_look),
     );
     paint.polyline(
-        &[(324.0, 17.0), (324.0, 27.0), (333.0, 22.0), (324.0, 17.0)],
+        &[(324.0 + dx, 17.0), (324.0 + dx, 27.0), (333.0 + dx, 22.0), (324.0 + dx, 17.0)],
         1.5,
         other_ink,
     );
-    paint.rect(335.0, 17.0, 2.0, 10.0, other_ink);
-    paint.text(faces.ui, "Run all", 342.0, 13.0, BODY, other_ink);
+    paint.rect(335.0 + dx, 17.0, 2.0, 10.0, other_ink);
+    paint.text(faces.ui, "Run all", 342.0 + dx, 13.0, BODY, other_ink);
     paint.button(
-        Rect::new(408.0, 8.0, 84.0, 28.0),
+        Rect::new(408.0 + dx, 8.0, 84.0, 28.0),
         under_pointer(window, NODE_EXPLAIN, other_look),
     );
-    for (x, y, w) in [(420.0, 17.0, 10.0), (424.0, 21.0, 6.0), (428.0, 25.0, 2.0)] {
+    for (x, y, w) in [(420.0 + dx, 17.0, 10.0), (424.0 + dx, 21.0, 6.0), (428.0 + dx, 25.0, 2.0)] {
         paint.rect(x, y, w, 2.0, other_ink);
     }
-    paint.rect(421.0, 19.0, 1.0, 7.0, other_ink);
-    paint.text(faces.ui, "Explain", 436.0, 13.0, BODY, other_ink);
+    paint.rect(421.0 + dx, 19.0, 1.0, 7.0, other_ink);
+    paint.text(faces.ui, "Explain", 436.0 + dx, 13.0, BODY, other_ink);
     let (stop_look, stop_icon, stop_ink) = if running {
         (Button::Secondary, theme.error, theme.text_primary)
     } else {
         (Button::Disabled, theme.text_disabled, theme.text_disabled)
     };
     paint.button(
-        Rect::new(500.0, 8.0, 68.0, 28.0),
+        Rect::new(500.0 + dx, 8.0, 68.0, 28.0),
         under_pointer(window, NODE_STOP, stop_look),
     );
     paint
         .canvas
-        .fill_rounded_rect(Rect::new(512.0, 17.0, 10.0, 10.0), 2.0, stop_icon);
-    paint.text(faces.ui, "Stop", 528.0, 13.0, BODY, stop_ink);
+        .fill_rounded_rect(Rect::new(512.0 + dx, 17.0, 10.0, 10.0), 2.0, stop_icon);
+    paint.text(faces.ui, "Stop", 528.0 + dx, 13.0, BODY, stop_ink);
     paint.button(
         Rect::new(width - 224.0, 8.0, 120.0, 28.0),
         under_pointer(window, NODE_DIALECT, Button::Secondary),
@@ -759,6 +1092,14 @@ fn toolbar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     paint.button(Rect::new(width - 40.0, 8.0, 28.0, 28.0), Button::Ghost);
     for x in [width - 31.0, width - 26.0, width - 21.0] {
         paint.canvas.fill_circle(x, 22.0, 3.0, theme.text_primary);
+    }
+}
+
+fn run_button_extra(layout: Layout) -> f32 {
+    if layout.run_label().chars().count() > 4 {
+        24.0
+    } else {
+        0.0
     }
 }
 
@@ -1067,8 +1408,7 @@ fn editor(paint: &mut Painter<'_, '_>, tab: &QueryTab, caret_look: CaretLook) {
     if let Some(error) = tab.error.as_ref().filter(|error| error.strip_shown) {
         error_strip(paint, &error.strip_text(), error.fix_label().as_deref());
     }
-    paint.rect(260.0, 380.0, centre_width, 6.0, theme.bg2);
-    paint.rect(260.0, 382.0, centre_width, 1.0, theme.border);
+    splitter(paint);
 }
 
 fn zigzag(paint: &mut Painter<'_, '_>, left: f32, right: f32, top: f32) {
@@ -1127,14 +1467,14 @@ fn warning_icon(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
     paint.rect(x + 5.5, y + 4.0, 1.0, 4.0, color);
 }
 
-fn results(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
+fn results(paint: &mut Painter<'_, '_>, tab: &QueryTab, layout: Layout) {
     let theme = paint.theme;
     let faces = paint.faces;
     let (centre_width, centre_right) = (paint.centre_width(), paint.centre_right);
     paint.rect(260.0, 386.0, centre_width, 32.0, theme.bg1);
     paint.rect(260.0, 417.0, centre_width, 1.0, theme.border);
     let messages = tab.view == ResultView::Messages;
-    for (name, view, x, underline) in result_segments(tab) {
+    for (name, view, x, underline) in result_segments(tab, layout) {
         let (face, ink) = if tab.view == view {
             (faces.ui_bold, theme.text_primary)
         } else {
@@ -1148,7 +1488,7 @@ fn results(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
     paint.text(
         faces.ui,
         &tab.summary,
-        summary_x(tab),
+        summary_x(tab, layout),
         393.0,
         BODY,
         theme.text_secondary,
@@ -1217,18 +1557,51 @@ fn results(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
 const PLAN_SEGMENT_X: f32 = 428.0;
 const PLAN_TOGGLE_WIDTH: f32 = 44.0;
 
-fn result_segments(tab: &QueryTab) -> Vec<(&'static str, ResultView, f32, f32)> {
-    let mut segments = vec![
-        ("Results", ResultView::Results, 272.0, 48.0),
-        ("Messages", ResultView::Messages, 344.0, 64.0),
-    ];
-    if tab.plan.is_some() {
-        segments.push(("Plan", ResultView::Plan, PLAN_SEGMENT_X, 32.0));
+fn result_segments(tab: &QueryTab, layout: Layout) -> Vec<(&'static str, ResultView, f32, f32)> {
+    let [results, messages, plan] = layout.view_labels();
+    if layout == Layout::EggDb {
+        let mut segments = vec![
+            (results, ResultView::Results, 272.0, 48.0),
+            (messages, ResultView::Messages, 344.0, 64.0),
+        ];
+        if tab.plan.is_some() {
+            segments.push((plan, ResultView::Plan, PLAN_SEGMENT_X, 32.0));
+        }
+        return segments;
     }
-    segments
+    let mut views = vec![(results, ResultView::Results), (messages, ResultView::Messages)];
+    if tab.plan.is_some() {
+        views.push((plan, ResultView::Plan));
+    }
+    let mut x = 272.0;
+    views
+        .into_iter()
+        .map(|(name, view)| {
+            let underline = SEGMENT_ADVANCE * name.chars().count() as f32;
+            let segment = (name, view, x, underline);
+            x += underline + SEGMENT_GAP;
+            segment
+        })
+        .collect()
 }
 
-fn summary_x(tab: &QueryTab) -> f32 {
+const SEGMENT_ADVANCE: f32 = 7.5;
+const SEGMENT_GAP: f32 = 24.0;
+
+fn segment_width(layout: Layout, underline: f32) -> f32 {
+    if layout == Layout::EggDb {
+        72.0
+    } else {
+        underline + 16.0
+    }
+}
+
+fn summary_x(tab: &QueryTab, layout: Layout) -> f32 {
+    if layout != Layout::EggDb {
+        return result_segments(tab, layout)
+            .last()
+            .map_or(PLAN_SEGMENT_X, |(_, _, x, underline)| x + underline + SEGMENT_GAP);
+    }
     if tab.plan.is_some() {
         PLAN_SEGMENT_X + 56.0
     } else {
@@ -1400,6 +1773,17 @@ fn status_bar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
         SMALL,
         theme.text_secondary,
     );
+    if let Some(item) = window.layout.status_item() {
+        let shown = elided(faces.ui, item, LAYOUT_ITEM_WIDTH, SMALL.0);
+        paint.text_right(
+            faces.ui,
+            &shown,
+            paint.width - LAYOUT_ITEM_RIGHT,
+            781.0,
+            SMALL,
+            theme.accent,
+        );
+    }
     let caret = window.tab.editor.caret();
     let mut right = paint.width - 12.0;
     for item in [
@@ -1541,6 +1925,8 @@ pub const NODE_FIRST_CELL: u32 = 1000;
 pub const NODE_FIRST_TREE_ROW: u32 = 60_000;
 /// The background query tabs, in the strip's order.
 pub const NODE_FIRST_BACKGROUND_TAB: u32 = 61_000;
+/// The status bar's `Works like <product>` item, while a familiar layout is active.
+pub const NODE_LAYOUT_ITEM: u32 = 63_100;
 
 fn node(
     id: u32,
@@ -1572,30 +1958,37 @@ fn primary_name() -> &'static str {
     }
 }
 
-fn toolbar_shortcut(id: u32) -> Option<String> {
-    let primary = primary_name();
-    Some(match id {
-        NODE_RUN => format!("{primary}+Enter"),
-        NODE_RUN_ALL => format!("{primary}+Shift+Enter"),
-        NODE_EXPLAIN => format!("{primary}+E"),
-        NODE_STOP => "Esc".to_owned(),
-        _ => return None,
-    })
+fn toolbar_action(id: u32) -> Option<LayoutAction> {
+    match id {
+        NODE_RUN => Some(LayoutAction::RunStatement),
+        NODE_RUN_ALL => Some(LayoutAction::RunAll),
+        NODE_EXPLAIN => Some(LayoutAction::Explain),
+        _ => None,
+    }
 }
 
-fn toolbar_chord(id: u32) -> Option<KeyPress> {
-    let primary = crate::accessibility::primary();
-    let with = |key: Key, shift: bool| KeyPress {
-        key,
-        modifiers: eggdb_platform::window::Modifiers { shift, ..primary },
-    };
-    Some(match id {
-        NODE_RUN => with(Key::Enter, false),
-        NODE_RUN_ALL => with(Key::Enter, true),
-        NODE_EXPLAIN => with(Key::Character('e'), false),
-        NODE_STOP => KeyPress::plain(Key::Escape),
-        _ => return None,
-    })
+fn toolbar_shortcut(id: u32, layout: Layout) -> Option<String> {
+    if id == NODE_STOP {
+        return Some("Esc".to_owned());
+    }
+    layout.shortcut_label(toolbar_action(id)?)
+}
+
+fn toolbar_chord(id: u32, layout: Layout) -> Option<KeyPress> {
+    if id == NODE_STOP {
+        return Some(KeyPress::plain(Key::Escape));
+    }
+    Some(layout.key_for(toolbar_action(id)?))
+}
+
+fn layout_item_chord() -> [KeyPress; 2] {
+    [
+        KeyPress {
+            key: Key::Character('k'),
+            modifiers: crate::accessibility::primary(),
+        },
+        KeyPress::plain(Key::Character('l')),
+    ]
 }
 
 fn editor_caret(editor: &crate::editor::Editor) -> AccessCaret {
@@ -1685,7 +2078,17 @@ impl MainWindow {
     /// ([`MainWindow::focus_node`]): the toolbar's buttons give their shortcut from the editor,
     /// and the editor takes a new text or caret at once; nothing when the node cannot do it.
     pub fn access_keys(&mut self, node: &AccessNode, action: &AccessAction) -> Vec<KeyPress> {
-        if let Some(chord) = toolbar_chord(node.id) {
+        if let Some(picker) = &mut self.layout_picker {
+            return layout_picker::access_keys(picker, node, action);
+        }
+        if node.id == NODE_LAYOUT_ITEM {
+            return if *action == AccessAction::Invoke {
+                layout_item_chord().to_vec()
+            } else {
+                Vec::new()
+            };
+        }
+        if let Some(chord) = toolbar_chord(node.id, self.layout) {
             if *action != AccessAction::Invoke {
                 return Vec::new();
             }
@@ -1750,6 +2153,8 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
         (0.0, 0.0, width, 800.0),
     );
     root.parent = None;
+    let toolbar_width = window.area_width(Area::Toolbar);
+    let dx = run_button_extra(window.layout);
     let mut nodes = vec![
         root,
         node(
@@ -1757,14 +2162,14 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
             NODE_MAIN_WINDOW,
             AccessRole::Toolbar,
             "Toolbar",
-            (0.0, 0.0, width, 44.0),
+            (0.0, 0.0, toolbar_width, 44.0),
         ),
     ];
     for (id, name, x, w) in [
-        (NODE_RUN, "Run", 232.0, 72.0),
-        (NODE_RUN_ALL, "Run all", 312.0, 88.0),
-        (NODE_EXPLAIN, "Explain", 408.0, 84.0),
-        (NODE_STOP, "Stop", 500.0, 68.0),
+        (NODE_RUN, window.layout.run_label(), 232.0, 72.0 + dx),
+        (NODE_RUN_ALL, "Run all", 312.0 + dx, 88.0),
+        (NODE_EXPLAIN, "Explain", 408.0 + dx, 84.0),
+        (NODE_STOP, "Stop", 500.0 + dx, 68.0),
     ] {
         let mut button = node(
             id,
@@ -1778,7 +2183,7 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
         } else {
             tab.running
         };
-        button.shortcut = toolbar_shortcut(id);
+        button.shortcut = toolbar_shortcut(id, window.layout);
         button.actions.invoke = true;
         nodes.push(button);
     }
@@ -1787,7 +2192,7 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
         NODE_TOOLBAR,
         AccessRole::ComboBox,
         "Dialect",
-        (width - 224.0, 8.0, 120.0, 28.0),
+        (toolbar_width - 224.0, 8.0, 120.0, 28.0),
     );
     pill.value = Some(tab.dialect.label().to_owned());
     pill.state.expanded = Some(tab.dialect_menu.is_some());
@@ -1855,13 +2260,16 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
         "Result views",
         (260.0, 386.0, centre_width, 32.0),
     ));
-    for (offset, (name, view, x, _)) in result_segments(tab).into_iter().enumerate() {
+    for (offset, (name, view, x, underline)) in result_segments(tab, window.layout)
+        .into_iter()
+        .enumerate()
+    {
         let mut segment = node(
             NODE_RESULTS_SEGMENT + offset as u32,
             NODE_RESULT_VIEWS,
             AccessRole::Tab,
             name,
-            (x, 386.0, 72.0, 32.0),
+            (x, 386.0, segment_width(window.layout, underline), 32.0),
         );
         segment.state.selected = tab.view == view;
         nodes.push(segment);
@@ -1871,7 +2279,7 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
         NODE_MAIN_WINDOW,
         AccessRole::Status,
         &status_line::spoken(&tab.summary),
-        (summary_x(tab), 386.0, 760.0, 32.0),
+        (summary_x(tab, window.layout), 386.0, 760.0, 32.0),
     ));
     if let Some(plan) = tab
         .plan
@@ -1895,21 +2303,54 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
     if window.inspector.is_open() {
         inspector_nodes(&mut nodes, window);
     }
+    let status_width = window.area_width(Area::StatusBar);
     let mut bar = node(
         NODE_STATUS_BAR,
         NODE_MAIN_WINDOW,
         AccessRole::Group,
         "Status",
-        (0.0, 776.0, width, 24.0),
+        (0.0, 776.0, status_width, 24.0),
     );
     bar.value = Some(status_bar_left(tab));
     nodes.push(bar);
+    if let Some(item) = window.layout.status_item() {
+        let mut button = node(
+            NODE_LAYOUT_ITEM,
+            NODE_STATUS_BAR,
+            AccessRole::Button,
+            item,
+            (
+                status_width - LAYOUT_ITEM_RIGHT - LAYOUT_ITEM_WIDTH,
+                776.0,
+                LAYOUT_ITEM_WIDTH,
+                24.0,
+            ),
+        );
+        button.description = Some(crate::layout::TRADEMARK_NOTE.to_owned());
+        button.shortcut = Some(format!("{}+K L", primary_name()));
+        button.actions.invoke = true;
+        nodes.push(button);
+    }
+    window.place_nodes(&mut nodes[1..]);
     crate::accessibility::fill_default_actions(&mut nodes);
     for node in nodes.iter_mut().filter(|node| no_keys_reach_it_yet(node)) {
         node.actions = AccessActions::default();
     }
+    if let Some(picker) = &window.layout_picker {
+        for node in &mut nodes {
+            node.state.focused = false;
+        }
+        nodes.extend(layout_picker::accessibility_nodes(
+            picker,
+            NODE_MAIN_WINDOW,
+            (width, HEIGHT as f32),
+        ));
+    }
     nodes
 }
+
+const LAYOUT_ITEM_RIGHT: f32 = 240.0;
+const LAYOUT_ITEM_WIDTH: f32 = 260.0;
 
 fn no_keys_reach_it_yet(node: &AccessNode) -> bool {
     let background_tab = (NODE_FIRST_BACKGROUND_TAB..NODE_FIRST_PLAN_NODE).contains(&node.id);
@@ -1992,7 +2433,7 @@ fn sidebar_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
         NODE_OBJECTS,
         NODE_MAIN_WINDOW,
         AccessRole::Tree,
-        "Objects",
+        window.layout.sidebar_title(),
         (0.0, ROWS_TOP, 260.0, 776.0 - ROWS_TOP),
     ));
     let rows = tree.rows();
@@ -2482,7 +2923,7 @@ mod tests {
             Some(crate::grid::Cell { row: 1, column: 1 })
         );
         let run = window.access_keys(&find(NODE_RUN), &AccessAction::Invoke);
-        assert_eq!(run, vec![toolbar_chord(NODE_RUN).unwrap()]);
+        assert_eq!(run, vec![toolbar_chord(NODE_RUN, Layout::EggDb).unwrap()]);
         assert_eq!(
             (window.focus, window.tab.focus),
             (WindowFocus::Tab, TabFocus::Editor)
@@ -2573,5 +3014,170 @@ mod tests {
         );
         assert_eq!(first_visible_line(0, 14), 0);
         assert_eq!(first_visible_line(12, 14), 3);
+    }
+
+    fn laid_out(layout: Layout) -> MainWindow {
+        MainWindow {
+            layout,
+            ..MainWindow::sample()
+        }
+    }
+
+    fn bounds(window: &MainWindow, id: u32) -> (f32, f32, f32, f32) {
+        let tree = accessibility_tree(window);
+        let found = tree
+            .iter()
+            .find(|node| node.id == id)
+            .expect("the node is in the tree");
+        (
+            found.bounds.x,
+            found.bounds.y,
+            found.bounds.width,
+            found.bounds.height,
+        )
+    }
+
+    fn faces() -> Faces<'static> {
+        Faces {
+            ui: &BoxFace,
+            ui_bold: &BoxFace,
+            mono: &BoxFace,
+        }
+    }
+
+    #[test]
+    fn a_familiar_layout_moves_the_regions_and_their_nodes_to_its_rects() {
+        let ssms = laid_out(Layout::Ssms);
+        assert_eq!(ssms.centre_right(), 260.0 + 980.0);
+        assert_eq!(bounds(&ssms, NODE_EDITOR), (300.0, 80.0, 980.0, 300.0));
+        assert_eq!(bounds(&ssms, NODE_RESULT_VIEWS), (300.0, 426.0, 980.0, 32.0));
+        assert_eq!(bounds(&ssms, NODE_QUERIES), (300.0, 44.0, 980.0, 36.0));
+        let run = bounds(&ssms, NODE_RUN);
+        assert_eq!((run.0, run.2), (232.0, 96.0));
+        assert_eq!(bounds(&ssms, NODE_RUN_ALL).0, 336.0);
+        let eggdb = MainWindow::sample();
+        assert_eq!(bounds(&eggdb, NODE_EDITOR), (260.0, 80.0, 1020.0, 300.0));
+        assert_eq!(bounds(&eggdb, NODE_RUN), (232.0, 8.0, 72.0, 28.0));
+        assert!(
+            accessibility_tree(&eggdb)
+                .iter()
+                .all(|node| node.id != NODE_LAYOUT_ITEM)
+        );
+        let tree = accessibility_tree(&ssms);
+        let item = tree
+            .iter()
+            .find(|node| node.id == NODE_LAYOUT_ITEM)
+            .expect("the status bar names the layout");
+        assert_eq!(item.name, "Works like SQL Server Management Studio");
+        assert_eq!(item.description.as_deref(), Some(crate::layout::TRADEMARK_NOTE));
+        let names: Vec<&str> = tree
+            .iter()
+            .filter(|node| node.parent == Some(NODE_RESULT_VIEWS))
+            .map(|node| node.name.as_str())
+            .collect();
+        assert_eq!(names[..2], ["Results", "Messages"]);
+        let objects = tree.iter().find(|node| node.id == NODE_OBJECTS).expect("tree");
+        assert_eq!(objects.name, "Object Explorer");
+        let compass = laid_out(Layout::Compass);
+        assert_eq!(bounds(&compass, NODE_STATUS_BAR).2, 0.0);
+        assert_eq!(bounds(&compass, NODE_DIALECT).0, 300.0 + 980.0 - 224.0);
+        assert_eq!(bounds(&compass, NODE_EDITOR), (300.0, 108.0, 980.0, 92.0));
+        let redis = laid_out(Layout::RedisInsight);
+        assert_eq!(bounds(&redis, NODE_QUERIES).2, 0.0);
+        let names: Vec<String> = accessibility_tree(&laid_out(Layout::PgAdmin))
+            .into_iter()
+            .filter(|node| node.parent == Some(NODE_RESULT_VIEWS))
+            .map(|node| node.name)
+            .collect();
+        assert_eq!(names[0], "Data Output");
+    }
+
+    #[test]
+    fn a_familiar_layout_draws_its_regions_where_its_rects_are() {
+        let theme = Theme::of(ThemeKind::Light);
+        let eggdb = draw(&MainWindow::sample(), theme, faces());
+        let ssms = draw(&laid_out(Layout::Ssms), theme, faces());
+        assert_ne!(eggdb, ssms);
+        assert_eq!(ssms.pixel(280, 600), Some(theme.bg1));
+        assert_eq!(ssms.pixel(299, 600), Some(theme.border));
+        assert_eq!(ssms.pixel(640, 423), Some(theme.bg2));
+        let workbench = draw(&laid_out(Layout::Workbench), theme, faces());
+        assert_eq!(workbench.pixel(900, 700), Some(theme.bg1));
+        let compass = draw(&laid_out(Layout::Compass), theme, faces());
+        assert_eq!(compass.pixel(150, 790), Some(theme.bg1));
+        assert_eq!(
+            draw(&MainWindow::sample(), theme, faces()),
+            eggdb,
+            "EggDB's own frame is the same frame as before"
+        );
+    }
+
+    #[test]
+    fn ctrl_k_l_opens_the_picker_and_its_keys_switch_the_layout_keeping_the_tab() {
+        let mut window = MainWindow::sample();
+        window.tab.editor = crate::editor::Editor::new("SELECT 1;");
+        let now = Instant::now();
+        let chord = layout_item_chord();
+        assert_eq!(window.key(chord[0], now), WindowAction::Tab(TabAction::None));
+        assert!(window.chord_started && window.layout_picker.is_none());
+        window.key(chord[1], now);
+        assert!(!window.chord_started);
+        assert_eq!(
+            window.layout_picker.map(|picker| picker.highlighted),
+            Some(0)
+        );
+        assert_eq!(
+            window.key(KeyPress::plain(Key::Escape), now),
+            WindowAction::Tab(TabAction::None)
+        );
+        assert!(window.layout_picker.is_none());
+        window.key(chord[0], now);
+        window.key(KeyPress::plain(Key::Right), now);
+        assert!(window.layout_picker.is_none() && !window.chord_started);
+        window.open_layout_picker();
+        window.key(KeyPress::plain(Key::Down), now);
+        assert_eq!(
+            window.key(KeyPress::plain(Key::Enter), now),
+            WindowAction::LayoutChosen(Layout::Ssms)
+        );
+        assert_eq!(window.layout, Layout::Ssms);
+        assert_eq!(window.tab.editor.text(), "SELECT 1;");
+        window.open_layout_picker();
+        let tree = accessibility_tree(&window);
+        assert!(tree.iter().any(|node| node.id == layout_picker::NODE_DIALOG));
+        assert!(
+            tree.iter()
+                .filter(|node| node.id < layout_picker::NODE_DIALOG)
+                .all(|node| !node.state.focused)
+        );
+        let theme = Theme::of(ThemeKind::Dark);
+        let covered = draw(&window, theme, faces());
+        assert_ne!(covered.pixel(20, 20), draw(&laid_out(Layout::Ssms), theme, faces()).pixel(20, 20));
+        let item = AccessNode {
+            id: NODE_LAYOUT_ITEM,
+            ..AccessNode::default()
+        };
+        window.layout_picker = None;
+        assert_eq!(
+            window.access_keys(&item, &AccessAction::Invoke),
+            chord.to_vec()
+        );
+    }
+
+    #[test]
+    fn a_layout_s_keys_reach_the_actions_from_the_editor_only() {
+        let mut window = laid_out(Layout::Ssms);
+        window.tab.editor = crate::editor::Editor::new("SELECT 1;");
+        let now = Instant::now();
+        let WindowAction::Tab(TabAction::Run(request)) = window.key(KeyPress::plain(Key::F5), now)
+        else {
+            panic!("F5 executes in the SQL Server Management Studio layout");
+        };
+        assert!(request.all && request.statements.len() == 1);
+        let shortcut = accessibility_tree(&window)
+            .into_iter()
+            .find(|node| node.id == NODE_RUN_ALL)
+            .and_then(|node| node.shortcut);
+        assert_eq!(shortcut.as_deref(), Some("F5"));
     }
 }

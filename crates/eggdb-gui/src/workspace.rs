@@ -16,7 +16,10 @@ use crate::connection::{
     StatementFailure,
 };
 use crate::inspector;
+use crate::layout::Layout;
+use crate::layout_picker::{self, LayoutPicker, PickerOutcome};
 use crate::main_window::{self, Faces, MainWindow, WindowAction};
+use crate::settings::ClientSettings;
 use crate::object_browser::TreeItem;
 use crate::pointer::{self, ClickCounter, PointerLook};
 use crate::query_tab::{RunRequest, TabAction};
@@ -114,6 +117,8 @@ pub struct Workspace {
     caret_blinks: bool,
     window_active: bool,
     reduced_motion: bool,
+    layout: Layout,
+    settings_path: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for Workspace {
@@ -159,6 +164,99 @@ impl Workspace {
             caret_blinks: false,
             window_active: true,
             reduced_motion: false,
+            layout: Layout::EggDb,
+            settings_path: None,
+        }
+    }
+
+    /// Keeps the client's settings in the file at `path` (`None`: nowhere) and shows the
+    /// layout they name.
+    pub fn use_settings(&mut self, path: Option<PathBuf>) {
+        if let Some(layout) = path
+            .as_deref()
+            .and_then(|path| ClientSettings::load(path).layout)
+        {
+            self.show_layout(layout);
+        }
+        self.settings_path = path;
+    }
+
+    /// The layout the main window shows, or opens in.
+    pub fn layout(&self) -> Layout {
+        self.layout
+    }
+
+    /// Shows `layout` on the card and in the main window, without keeping it in the settings;
+    /// for scripted runs.
+    pub fn show_layout(&mut self, layout: Layout) {
+        self.layout = layout;
+        match &mut self.screen {
+            Screen::Connect(card) => card.layout = layout,
+            Screen::Main(window) => window.layout = layout,
+        }
+    }
+
+    fn keep_layout(&mut self, layout: Layout, now: Instant) {
+        self.show_layout(layout);
+        let Some(path) = self.settings_path.clone() else {
+            return;
+        };
+        let settings = ClientSettings {
+            layout: Some(layout),
+            ..ClientSettings::load(&path)
+        };
+        if let Err(error) = settings.save(&path) {
+            let notice = format!("{} applies to this window only: {error}", layout.label());
+            match &mut self.screen {
+                Screen::Connect(card) => {
+                    card.status = Some(notice);
+                    self.status_until = Some(now + NOTICE_SHOWN_FOR);
+                }
+                Screen::Main(window) => {
+                    window.tab.notice = Some(notice);
+                    self.notice_until = Some(now + NOTICE_SHOWN_FOR);
+                }
+            }
+        }
+    }
+
+    fn picker_outcome(&mut self, outcome: PickerOutcome, now: Instant) {
+        let chosen = match &mut self.screen {
+            Screen::Connect(card) => match outcome {
+                PickerOutcome::Open => None,
+                PickerOutcome::Keep => {
+                    card.layout_picker = None;
+                    None
+                }
+                PickerOutcome::Apply(layout) => {
+                    card.layout_picker = None;
+                    Some(layout)
+                }
+            },
+            Screen::Main(window) => match window.picker_outcome(outcome) {
+                WindowAction::LayoutChosen(layout) => Some(layout),
+                _ => None,
+            },
+        };
+        if let Some(layout) = chosen {
+            self.keep_layout(layout, now);
+        }
+    }
+
+    fn picker_mut(&mut self) -> Option<&mut LayoutPicker> {
+        match &mut self.screen {
+            Screen::Connect(card) => card.layout_picker.as_mut(),
+            Screen::Main(window) => window.layout_picker.as_mut(),
+        }
+    }
+
+    fn picker_size(&self, size: (u32, u32)) -> (f32, f32) {
+        match &self.screen {
+            Screen::Connect(_) => (size.0 as f32, size.1 as f32),
+            Screen::Main(window) => (
+                window.width.max(main_window::WIDTH) as f32,
+                main_window::HEIGHT as f32,
+            ),
         }
     }
 
@@ -283,6 +381,12 @@ impl Workspace {
         }
         self.input_at(now);
         let clicks = self.clicks.press(now, x, y);
+        let logical = self.picker_size(size);
+        if let Some(picker) = self.picker_mut() {
+            let outcome = layout_picker::press_at(picker, logical, x, y, clicks);
+            self.picker_outcome(outcome, now);
+            return WorkspaceCommand::None;
+        }
         let tree = self.pointer_tree(faces, size);
         let Some(node) = pointer::hit_test(&tree, x, y).cloned() else {
             return WorkspaceCommand::None;
@@ -514,6 +618,14 @@ impl Workspace {
     /// Answers a key press.
     pub fn key(&mut self, press: KeyPress, now: Instant) -> WorkspaceCommand {
         self.input_at(now);
+        let card_picked = match &mut self.screen {
+            Screen::Connect(card) => card.layout_picker.as_mut().map(|picker| picker.key(press)),
+            Screen::Main(_) => None,
+        };
+        if let Some(outcome) = card_picked {
+            self.picker_outcome(outcome, now);
+            return WorkspaceCommand::None;
+        }
         if let Screen::Main(window) = &mut self.screen {
             let action = window.key(press, now);
             self.window_action(action, now);
@@ -545,6 +657,11 @@ impl Workspace {
             return WorkspaceCommand::None;
         };
         let keys = match &mut self.screen {
+            Screen::Connect(card) if card.layout_picker.is_some() => card
+                .layout_picker
+                .as_mut()
+                .map(|picker| layout_picker::access_keys(picker, node, &request.action))
+                .unwrap_or_default(),
             Screen::Connect(card) => {
                 if !card.focus_node(node.id) {
                     return WorkspaceCommand::None;
@@ -576,6 +693,7 @@ impl Workspace {
             WindowAction::Tab(action) => self.tab_action(action, now),
             WindowAction::Inspect(item) => self.inspect(item),
             WindowAction::RefreshCatalog => self.refresh_catalog(),
+            WindowAction::LayoutChosen(layout) => self.keep_layout(layout, now),
         }
     }
 
@@ -927,10 +1045,16 @@ impl Workspace {
                 }
                 WorkspaceCommand::None
             }
-            ConnectAction::None
-            | ConnectAction::Cancel
-            | ConnectAction::ShowLayoutPicker
-            | ConnectAction::LoadSampleDataset => WorkspaceCommand::None,
+            ConnectAction::ShowLayoutPicker => {
+                let layout = self.layout;
+                if let Some(card) = self.card_mut() {
+                    card.layout_picker = Some(LayoutPicker::opened(layout));
+                }
+                WorkspaceCommand::None
+            }
+            ConnectAction::None | ConnectAction::Cancel | ConnectAction::LoadSampleDataset => {
+                WorkspaceCommand::None
+            }
         }
     }
 
@@ -1081,7 +1205,9 @@ impl Workspace {
         self.opening = None;
         match answer {
             Ok((connection, catalog)) => {
-                self.screen = Screen::Main(Box::new(main_window_for(&connection, catalog)));
+                let mut window = main_window_for(&connection, catalog);
+                window.layout = self.layout;
+                self.screen = Screen::Main(Box::new(window));
                 self.connection = Some(connection);
             }
             Err(failure) => {
@@ -1920,5 +2046,102 @@ mod tests {
         assert_eq!(workspace.sample_wanted, names[1]);
         workspace.inspect(TreeItem::Table(0));
         assert_eq!(workspace.sample_wanted, None);
+    }
+
+    #[test]
+    fn the_card_s_layout_picker_keeps_the_choice_and_the_main_window_opens_in_it() {
+        let directory = scratch("layout-picker");
+        let settings = directory.join("gui-settings");
+        std::fs::write(&settings, "theme = dark\n").expect("settings are written");
+        let mut workspace = workspace(Arc::new(EngineConnector), directory.clone());
+        workspace.use_settings(Some(settings.clone()));
+        assert_eq!(workspace.layout(), Layout::EggDb);
+        let now = Instant::now();
+        workspace.act(ConnectAction::ShowLayoutPicker, now);
+        assert!(card(&mut workspace).layout_picker.is_some());
+        assert!(
+            card_tree(&workspace)
+                .iter()
+                .any(|node| node.id == layout_picker::NODE_DIALOG)
+        );
+        workspace.key(KeyPress::plain(Key::Down), now);
+        workspace.key(KeyPress::plain(Key::Escape), now);
+        assert!(card(&mut workspace).layout_picker.is_none());
+        assert_eq!(workspace.layout(), Layout::EggDb);
+        workspace.act(ConnectAction::ShowLayoutPicker, now);
+        workspace.key(KeyPress::plain(Key::Down), now);
+        workspace.key(KeyPress::plain(Key::Down), now);
+        workspace.key(KeyPress::plain(Key::Enter), now);
+        assert_eq!(workspace.layout(), Layout::PgAdmin);
+        assert_eq!(card(&mut workspace).layout, Layout::PgAdmin);
+        assert_eq!(
+            std::fs::read_to_string(&settings).expect("settings are kept"),
+            "layout = pgadmin\ntheme = dark\n"
+        );
+        let mut again = workspace_with_settings(&directory, &settings);
+        assert_eq!(again.layout(), Layout::PgAdmin);
+        again.open_typed("layouts.eggdb", now);
+        again.wait_for_open(Duration::from_secs(30));
+        let window = again.main_window_mut().expect("the main window shows");
+        assert_eq!(window.layout, Layout::PgAdmin);
+        let primary = crate::accessibility::primary();
+        again.key(
+            KeyPress {
+                key: Key::Character('k'),
+                modifiers: primary,
+            },
+            now,
+        );
+        again.key(KeyPress::plain(Key::Character('l')), now);
+        again.key(KeyPress::plain(Key::Up), now);
+        again.key(KeyPress::plain(Key::Enter), now);
+        assert_eq!(again.layout(), Layout::Ssms);
+        assert_eq!(
+            ClientSettings::load(&settings).layout,
+            Some(Layout::Ssms)
+        );
+    }
+
+    fn workspace_with_settings(directory: &Path, settings: &Path) -> Workspace {
+        let mut workspace = workspace(Arc::new(EngineConnector), directory.to_path_buf());
+        workspace.use_settings(Some(settings.to_path_buf()));
+        workspace
+    }
+
+    #[test]
+    fn a_press_on_the_picker_s_scrim_keeps_the_layout_and_a_double_click_applies_a_row() {
+        let directory = scratch("layout-pointer");
+        let mut workspace = workspace(Arc::new(EngineConnector), directory);
+        let faces = crate::main_window::Faces {
+            ui: &crate::font::BoxFace,
+            ui_bold: &crate::font::BoxFace,
+            mono: &crate::font::BoxFace,
+        };
+        let size = (
+            crate::connect_screen::DEFAULT_WIDTH,
+            crate::connect_screen::DEFAULT_HEIGHT,
+        );
+        let now = Instant::now();
+        let press = |workspace: &mut Workspace, x: f32, y: f32, at: Instant| {
+            workspace.pointer_pressed(
+                x,
+                y,
+                PointerButton::Primary,
+                Modifiers::default(),
+                faces,
+                size,
+                at,
+            )
+        };
+        workspace.act(ConnectAction::ShowLayoutPicker, now);
+        press(&mut workspace, 10.0, 10.0, now);
+        assert!(card(&mut workspace).layout_picker.is_none());
+        workspace.act(ConnectAction::ShowLayoutPicker, now);
+        let row = layout_picker::row_rect((1280.0, 800.0), 7);
+        let later = now + Duration::from_secs(5);
+        press(&mut workspace, row.x + 10.0, row.y + 10.0, later);
+        press(&mut workspace, row.x + 10.0, row.y + 10.0, later + Duration::from_millis(50));
+        assert_eq!(workspace.layout(), Layout::RedisInsight);
+        assert!(card(&mut workspace).layout_picker.is_none());
     }
 }
