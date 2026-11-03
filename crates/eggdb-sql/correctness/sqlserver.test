@@ -30,11 +30,49 @@ id
 4
 SELECT 4
 
-error 0A000 40517
-SELECT TOP 50 PERCENT Name FROM Products
+rows
+SELECT TOP 50 PERCENT Name FROM Products ORDER BY Price
+----
+name
+Tea
+Bread
+SELECT 2
 
-error 0A000 40517
-SELECT TOP 1 WITH TIES Name FROM Products ORDER BY Price
+rows
+SELECT TOP (30) PERCENT Name FROM Products ORDER BY Price DESC
+----
+name
+Jam
+Eggs
+SELECT 2
+
+rows
+SELECT TOP (12.5) PERCENT Name FROM Products ORDER BY Price
+----
+name
+Tea
+SELECT 1
+
+rows
+SELECT Name FROM (SELECT TOP 1 WITH TIES Name, Price FROM Products ORDER BY CASE WHEN Price > 3 THEN 1 ELSE 0 END) AS cheap ORDER BY Name
+----
+name
+Bread
+Tea
+SELECT 2
+
+rows
+SELECT count(*) AS n FROM (SELECT TOP 25 PERCENT WITH TIES Name FROM Products ORDER BY CASE WHEN Price > 3 THEN 1 ELSE 0 END DESC) AS dear
+----
+n
+2
+SELECT 1
+
+error 42601 1062
+SELECT TOP 1 WITH TIES Name FROM Products
+
+error 2201W 1031
+SELECT TOP (101) PERCENT Name FROM Products ORDER BY Price
 
 error 42601 102
 SELECT Name FROM Products LIMIT 1
@@ -1258,14 +1296,28 @@ id
 5
 SELECT 3
 
-error 0A000 40517
-SELECT TOP 100 PERCENT StockID FROM Stock40 ORDER BY StockID
-
-error 0A000 40517
-CREATE VIEW vHalf40 AS SELECT TOP (50) PERCENT StockID FROM Stock40 ORDER BY StockID
+rows
+SELECT TOP 100 PERCENT StockID AS id FROM Stock40 ORDER BY StockID
+----
+id
+1
+4
+5
+SELECT 3
 
 ok
-DROP VIEW vStock40, vStockAll40
+CREATE VIEW vHalf40 AS SELECT TOP (50) PERCENT StockID FROM Stock40 ORDER BY StockID
+
+rows
+SELECT StockID AS id FROM vHalf40 ORDER BY StockID
+----
+id
+1
+4
+SELECT 2
+
+ok
+DROP VIEW vStock40, vStockAll40, vHalf40
 
 ok
 DROP TABLE Stock40, Log40
@@ -2368,3 +2420,32 @@ SELECT code FROM codes299 WHERE code LIKE '10!%' ESCAPE '!'
 code
 10%
 SELECT 1
+
+chapter "SELECT - ORDER BY Clause", "STRING_AGG (Transact-SQL)": STRING_AGG ... OVER (PARTITION BY ...)
+ok
+CREATE TABLE Staff300 (id INT PRIMARY KEY, team VARCHAR(10), name VARCHAR(10))
+
+ok
+INSERT INTO Staff300 VALUES (1, 'red', 'Cy'), (2, 'red', 'Al'), (3, 'blue', 'Bo'), (4, 'red', 'Di')
+
+rows
+SELECT name, STRING_AGG(name, ',') WITHIN GROUP (ORDER BY name) OVER (PARTITION BY team) AS team_names FROM Staff300 ORDER BY id
+----
+name|team_names
+Cy|Al,Cy,Di
+Al|Al,Cy,Di
+Bo|Bo
+Di|Al,Cy,Di
+SELECT 4
+
+rows
+SELECT id, STRING_AGG(name, '-') WITHIN GROUP (ORDER BY id DESC) OVER () AS everyone FROM Staff300 WHERE team = 'red' ORDER BY id
+----
+id|everyone
+1|Di-Al-Cy
+2|Di-Al-Cy
+4|Di-Al-Cy
+SELECT 3
+
+ok
+DROP TABLE Staff300

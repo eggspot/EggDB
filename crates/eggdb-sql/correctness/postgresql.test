@@ -4757,3 +4757,67 @@ CREATE RECURSIVE VIEW no_columns299 AS SELECT 1
 
 ok
 DROP VIEW nums_1_100
+
+chapter sql-select, "LIMIT Clause": FETCH { FIRST | NEXT } [ count ] { ROW | ROWS } { ONLY | WITH TIES }
+ok
+CREATE TABLE scores300 (name text, score int)
+
+ok
+INSERT INTO scores300 VALUES ('a', 10), ('b', 20), ('c', 20), ('d', 30)
+
+rows
+SELECT name FROM scores300 ORDER BY score DESC, name FETCH FIRST 2 ROWS ONLY
+----
+name
+d
+b
+SELECT 2
+
+rows
+SELECT name FROM (SELECT name FROM scores300 ORDER BY score DESC FETCH FIRST 2 ROWS WITH TIES) AS top_scores ORDER BY name
+----
+name
+b
+c
+d
+SELECT 3
+
+rows
+SELECT name FROM scores300 ORDER BY score FETCH NEXT ROW ONLY
+----
+name
+a
+SELECT 1
+
+rows
+SELECT name FROM scores300 ORDER BY score, name OFFSET 1 ROWS FETCH FIRST 1 ROW ONLY
+----
+name
+b
+SELECT 1
+
+rows
+SELECT count(*) FROM (SELECT name FROM scores300 ORDER BY score OFFSET 1 ROW FETCH FIRST 1 ROW WITH TIES) AS tied
+----
+count
+2
+SELECT 1
+
+rows
+SELECT name FROM scores300 WHERE score > 15 UNION SELECT name FROM scores300 WHERE score < 15 ORDER BY name FETCH FIRST 1 ROW WITH TIES
+----
+name
+a
+SELECT 1
+
+error 42601
+SELECT name FROM scores300 FETCH FIRST 1 ROW WITH TIES
+
+error 42601
+SELECT name FROM scores300 ORDER BY score LIMIT 1 FETCH FIRST 1 ROW ONLY
+
+error 2201W
+SELECT name FROM scores300 ORDER BY score FETCH FIRST -1 ROWS ONLY
+
+ok
+DROP TABLE scores300

@@ -1,5 +1,5 @@
 use super::Parser;
-use crate::ast::{AggregateFunction, Expr, ExprKind, Name};
+use crate::ast::{AggregateFunction, Expr, ExprKind, Name, OrderItem};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
 use crate::window::{
@@ -193,6 +193,56 @@ impl Parser<'_> {
             .at(name.position));
         }
         self.windowed(function, arguments, None, name.position)
+    }
+
+    pub(super) fn whole_partition_aggregate(
+        &mut self,
+        function: AggregateFunction,
+        arguments: Vec<Expr>,
+        order: Vec<OrderItem>,
+        position: usize,
+    ) -> SqlResult<Expr> {
+        self.expect_word("over")?;
+        self.expect(&TokenKind::LeftParen)?;
+        let mut partition = Vec::new();
+        if self.take_word("partition") {
+            self.expect_word("by")?;
+            loop {
+                partition.push(self.expression()?);
+                if !self.take(&TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        if self.oracle() && self.is_word("order") {
+            return Err(
+                SqlError::syntax("ORDER BY not allowed here", self.position())
+                    .with_oracle_code(30487),
+            );
+        }
+        self.expect(&TokenKind::RightParen)?;
+        let frame = FrameClause {
+            frame: Frame {
+                units: FrameUnits::Rows,
+                start: FrameBound::UnboundedPreceding,
+                end: FrameBound::UnboundedFollowing,
+                exclusion: FrameExclusion::NoOthers,
+            },
+            start_offset: None,
+            end_offset: None,
+        };
+        Ok(crate::window::call(WindowCall {
+            function: WindowFunction::Aggregate(function),
+            arguments,
+            filter: None,
+            window: WindowReference::Inline(WindowDefinition {
+                base: None,
+                partition,
+                order,
+                frame: Some(frame),
+            }),
+            position,
+        }))
     }
 
     fn windowed(

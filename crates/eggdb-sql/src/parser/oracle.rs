@@ -888,22 +888,26 @@ impl<'t> Parser<'t> {
             order = self.order_items()?;
             self.expect(&TokenKind::RightParen)?;
         }
-        if self.is_word("over") {
-            return Err(self.not_supported("LISTAGG as an analytic function (OVER)"));
-        }
         let text = oracle_function("oracle_concat", vec![measure], position);
-        let argument = if order.is_empty() {
-            text
+        let parts = if self.is_word("over") {
+            if distinct {
+                return Err(self.not_supported("LISTAGG (DISTINCT ...) OVER"));
+            }
+            self.whole_partition_aggregate(AggregateFunction::ArrayAgg, vec![text], order, position)?
         } else {
-            crate::aggregate::ordered_arguments(text, order)
-        };
-        let parts = Expr {
-            kind: ExprKind::Aggregate {
-                function: AggregateFunction::ArrayAgg,
-                argument: Some(Box::new(argument)),
-                distinct,
-            },
-            position,
+            let argument = if order.is_empty() {
+                text
+            } else {
+                crate::aggregate::ordered_arguments(text, order)
+            };
+            Expr {
+                kind: ExprKind::Aggregate {
+                    function: AggregateFunction::ArrayAgg,
+                    argument: Some(Box::new(argument)),
+                    distinct,
+                },
+                position,
+            }
         };
         Ok(oracle_function(
             "oracle_listagg",

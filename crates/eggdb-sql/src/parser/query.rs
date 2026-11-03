@@ -202,6 +202,9 @@ impl Parser<'_> {
                 .with_sqlserver_code(10741)
                 .at(top.position));
             }
+            if tail.order_by.is_empty() && super::sqlserver::top_has_ties(&top) {
+                return Err(super::sqlserver::ties_without_order_by(top.position));
+            }
             tail.limit = Some(top);
         }
         let (body, tail) = match body {
@@ -544,6 +547,14 @@ impl Parser<'_> {
                     }
                 }
                 let _ = self.take_word("rows") || self.take_word("row");
+            } else if self.postgresql() && self.is_word("fetch") {
+                if limit.is_some() {
+                    return Err(SqlError::syntax(
+                        "multiple LIMIT clauses not allowed",
+                        self.position(),
+                    ));
+                }
+                limit = Some(self.postgresql_fetch(!order_by.is_empty())?);
             } else if self.is_word("fetch") {
                 return Err(self.not_supported("FETCH FIRST"));
             } else if self.is_word("for")

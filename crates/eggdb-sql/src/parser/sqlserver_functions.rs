@@ -454,9 +454,6 @@ impl Parser<'_> {
         } else {
             Vec::new()
         };
-        if self.is_word("over") {
-            return Err(not_supported("STRING_AGG with OVER").at(self.position()));
-        }
         let value_position = value.position;
         let text_value = call(
             Function::Convert {
@@ -466,6 +463,14 @@ impl Parser<'_> {
             vec![value],
             value_position,
         );
+        if self.is_word("over") {
+            return self.whole_partition_aggregate(
+                AggregateFunction::StringAgg,
+                vec![text_value, separator],
+                order,
+                name.position,
+            );
+        }
         let joined = Expr {
             kind: ExprKind::Function {
                 name: "string_agg_arguments".to_owned(),

@@ -2952,6 +2952,19 @@ fn fetch_percent(expr: &Expr) -> SqlResult<f64> {
     Ok(crate::oracle_functions::decimal_of(&value)?.map_or(0.0, |percent| percent.to_f64()))
 }
 
+fn top_percent(expr: &Expr) -> SqlResult<f64> {
+    let percent = fetch_percent(expr)?;
+    if (0.0..=100.0).contains(&percent) {
+        return Ok(percent);
+    }
+    Err(SqlError::new(
+        SqlState::INVALID_ROW_COUNT_IN_LIMIT_CLAUSE,
+        "Percent values must be between 0 and 100.",
+    )
+    .with_sqlserver_code(1031)
+    .at(expr.position))
+}
+
 pub(crate) fn row_limit(expr: Option<&Expr>) -> SqlResult<RowLimit> {
     let unlimited = RowLimit {
         count: None,
@@ -2977,6 +2990,13 @@ pub(crate) fn row_limit(expr: Option<&Expr>) -> SqlResult<RowLimit> {
                     count: None,
                     percent: Some(fetch_percent(count)?),
                     with_ties: *name == "oracle_fetch_percent_with_ties",
+                });
+            }
+            "sqlserver_top_percent" | "sqlserver_top_percent_with_ties" => {
+                return Ok(RowLimit {
+                    count: None,
+                    percent: Some(top_percent(count)?),
+                    with_ties: *name == "sqlserver_top_percent_with_ties",
                 });
             }
             _ => {}
