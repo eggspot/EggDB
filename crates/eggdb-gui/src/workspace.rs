@@ -22,6 +22,7 @@ use crate::layout::Layout;
 use crate::layout_picker::{self, LayoutPicker, PickerOutcome};
 use crate::main_window::{self, Faces, MainWindow, WindowAction};
 use crate::settings::ClientSettings;
+use crate::splitters::RegionSizes;
 use crate::object_browser::TreeItem;
 use crate::pointer::{self, ClickCounter, PointerLook};
 use crate::query_tab::{RunRequest, TabAction};
@@ -217,6 +218,10 @@ impl Workspace {
 
     fn keep_layout(&mut self, layout: Layout, now: Instant) {
         self.show_layout(layout);
+        let sizes = self.saved_sizes(layout);
+        if let Some(window) = self.main_window_mut() {
+            window.use_sizes(sizes);
+        }
         let Some(path) = self.settings_path.clone() else {
             return;
         };
@@ -273,7 +278,7 @@ impl Workspace {
         match &self.screen {
             Screen::Connect(_) => (size.0 as f32, size.1 as f32),
             Screen::Main(window) => (
-                window.width.max(main_window::WIDTH) as f32,
+                window.width as f32,
                 main_window::HEIGHT as f32,
             ),
         }
@@ -424,10 +429,12 @@ impl Workspace {
         {
             return WorkspaceCommand::None;
         }
-        if let Some(handle) = self
-            .main_window_mut()
-            .and_then(|window| window.press_grid_handle(x, y, clicks))
-        {
+        if let Some(handle) = self.main_window_mut().and_then(|window| {
+            window
+                .press_layout_handle(x, y, clicks)
+                .or_else(|| window.press_grid_handle(x, y, clicks))
+        }) {
+            self.keep_sizes(now);
             if handle != main_window::GridHandle::Done {
                 self.drag = Some(Drag::Handle(handle));
             }
@@ -590,6 +597,7 @@ impl Workspace {
         if let Some(window) = self.main_window_mut() {
             window.release_grid_handle();
         }
+        self.keep_sizes(now);
         let Some(pressed) = self.pointer_look_mut().pressed.take() else {
             return WorkspaceCommand::None;
         };
@@ -827,6 +835,37 @@ impl Workspace {
             WindowAction::LayoutChosen(layout) => self.keep_layout(layout, now),
             WindowAction::CloseSession { session, stop } => self.close_session(session, stop),
         }
+        self.keep_sizes(now);
+    }
+
+    fn keep_sizes(&mut self, now: Instant) {
+        let path = self.settings_path.clone();
+        let Some(window) = self.main_window_mut() else {
+            return;
+        };
+        if !std::mem::take(&mut window.sizes_changed) {
+            return;
+        }
+        let (sizes, layout) = (window.sizes, window.layout);
+        self.notice_until = Some(now + NOTICE_SHOWN_FOR);
+        let Some(path) = path else {
+            return;
+        };
+        let mut settings = ClientSettings::load(&path);
+        sizes.write_to(&mut settings, layout);
+        if let Err(error) = settings.save(&path)
+            && let Some(window) = self.main_window_mut()
+        {
+            window.tab.notice = Some(format!("The new sizes apply to this window only: {error}"));
+        }
+    }
+
+    fn saved_sizes(&self, layout: Layout) -> RegionSizes {
+        self.settings_path
+            .as_deref()
+            .map_or_else(RegionSizes::default, |path| {
+                RegionSizes::from_settings(&ClientSettings::load(path), layout)
+            })
     }
 
     fn close_session(&mut self, session: SessionId, stop: bool) {
@@ -1405,6 +1444,7 @@ impl Workspace {
             Ok((connection, catalog)) => {
                 let mut window = main_window_for(&connection, catalog);
                 window.layout = self.layout;
+                window.use_sizes(self.saved_sizes(self.layout));
                 self.screen = Screen::Main(Box::new(window));
                 self.connection = Some(connection);
             }

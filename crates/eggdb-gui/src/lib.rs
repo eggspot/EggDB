@@ -73,6 +73,9 @@ pub mod drop_prompt;
 /// A keys tab's scan of a key space's first keys, spelled for the keys grid
 /// (`docs/ux/workspace.md` 10.4).
 pub mod key_scan;
+/// The splitters between the window's regions and the sizes they set, kept in the client's
+/// settings (`docs/ux/workspace.md` 10.5).
+pub mod splitters;
 /// PNG encoding of rendered frames, for screenshots and tests.
 pub mod png;
 /// The pointer and the caret (`docs/ux/workspace.md` 6): hit testing on the accessibility

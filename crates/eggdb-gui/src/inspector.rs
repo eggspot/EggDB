@@ -348,9 +348,9 @@ pub fn fetch_sample(connection: &mut Connection, name: &str) -> Sample {
     }
 }
 
-/// The inspector's rect in a window `width` wide.
-pub fn region(width: f32) -> Rect {
-    Rect::new(width - INSPECTOR_WIDTH, TOP, INSPECTOR_WIDTH, BOTTOM - TOP)
+/// The inspector's rect, `inspector_width` wide, in a window `width` wide.
+pub fn region(width: f32, inspector_width: f32) -> Rect {
+    Rect::new(width - inspector_width, TOP, inspector_width, BOTTOM - TOP)
 }
 
 /// Where each block's heading is drawn, top to bottom, for the accessibility tree.
@@ -409,12 +409,17 @@ fn badge(paint: &mut Painter<'_, '_>, text: &str, right: f32, top: f32) -> f32 {
     rect.x
 }
 
-/// Draws the inspector for `description` at the window's right edge; as an overlay it casts
-/// a shadow on the main area.
-pub(crate) fn draw(paint: &mut Painter<'_, '_>, inspector: &Inspector, description: &Description) {
+/// Draws the inspector for `description`, `width` wide, at the window's right edge; as an
+/// overlay it casts a shadow on the main area.
+pub(crate) fn draw(
+    paint: &mut Painter<'_, '_>,
+    inspector: &Inspector,
+    description: &Description,
+    width: f32,
+) {
     let theme = paint.theme;
     let faces = paint.faces;
-    let area = region(paint.width);
+    let area = region(paint.width, width);
     if inspector.overlay {
         for step in 0..12 {
             let alpha = (41 * (step + 1) / 12) as u8;

@@ -271,7 +271,7 @@ fn logical_size(device: (u32, u32), scale: f32) -> (u32, u32) {
 fn relayout(workspace: &mut Workspace, logical: (u32, u32)) {
     let (width, _) = clamp_to_minimum(logical);
     if let Some(window) = workspace.main_window_mut()
-        && window.width != (width as usize).max(main_window::WIDTH)
+        && window.width != (width as usize).max(MIN_WIDTH as usize)
     {
         window.set_width(width as usize);
     }

@@ -820,12 +820,13 @@ pub(crate) fn draw(
     tree: &ObjectTree,
     access: &str,
     focus: SidebarFocus,
+    width: f32,
 ) {
     let theme = paint.theme;
     let faces = paint.faces;
-    paint.rect(0.0, 44.0, SIDEBAR_WIDTH, 732.0, theme.bg1);
-    paint.rect(SIDEBAR_WIDTH - 1.0, 44.0, 1.0, 732.0, theme.border);
-    let filter_box = Rect::new(8.0, 52.0, 244.0, 28.0);
+    paint.rect(0.0, 44.0, width, 732.0, theme.bg1);
+    paint.rect(width - 1.0, 44.0, 1.0, 732.0, theme.border);
+    let filter_box = Rect::new(8.0, 52.0, width - 16.0, 28.0);
     paint.button(filter_box, Button::Secondary);
     paint
         .canvas
@@ -843,11 +844,11 @@ pub(crate) fn draw(
             theme.text_secondary,
         );
     } else {
-        let shown = crate::main_window::elided(faces.ui, &tree.filter, 212.0, BODY.0);
+        let shown = crate::main_window::elided(faces.ui, &tree.filter, width - 48.0, BODY.0);
         paint.text(faces.ui, &shown, 32.0, 57.0, BODY, theme.text_primary);
     }
     if focus == SidebarFocus::Filter {
-        focus_ring(paint, Rect::new(6.0, 50.0, 248.0, 32.0));
+        focus_ring(paint, Rect::new(6.0, 50.0, width - 12.0, 32.0));
     }
     let rows = tree.rows();
     for (offset, row) in rows
@@ -857,7 +858,18 @@ pub(crate) fn draw(
         .take(ROWS_IN_VIEW)
     {
         let y = ROWS_TOP + ROW_HEIGHT * (offset - tree.first_row) as f32;
-        draw_row(paint, tree, row, y, access, focus == SidebarFocus::Tree);
+        draw_row(paint, tree, row, (y, width), access, focus == SidebarFocus::Tree);
+    }
+}
+
+pub(crate) fn draw_icon(paint: &mut Painter<'_, '_>, icon: RowIcon, x: f32, y: f32) {
+    match icon {
+        RowIcon::Database => icon_database(paint, x, y),
+        RowIcon::Folder => icon_folder(paint, x, y),
+        RowIcon::Key => icon_key(paint, x, y),
+        RowIcon::Table => icon_table(paint, x, y),
+        RowIcon::Bolt => icon_bolt(paint, x, y),
+        RowIcon::Blank => {}
     }
 }
 
@@ -865,7 +877,7 @@ fn draw_row(
     paint: &mut Painter<'_, '_>,
     tree: &ObjectTree,
     row: &TreeRow,
-    y: f32,
+    (y, width): (f32, f32),
     access: &str,
     focused: bool,
 ) {
@@ -880,20 +892,12 @@ fn draw_row(
         };
         paint
             .canvas
-            .fill_rounded_rect(Rect::new(4.0, y, 252.0, ROW_HEIGHT), 4.0, fill);
+            .fill_rounded_rect(Rect::new(4.0, y, width - 8.0, ROW_HEIGHT), 4.0, fill);
     }
     if let Some(open) = row.expanded {
         chevron(paint, 8.0 + indent, y + 8.0, open);
     }
-    let icon_x = 24.0 + indent;
-    match row.icon {
-        RowIcon::Database => icon_database(paint, icon_x, y + 6.0),
-        RowIcon::Folder => icon_folder(paint, icon_x, y + 6.0),
-        RowIcon::Key => icon_key(paint, icon_x, y + 6.0),
-        RowIcon::Table => icon_table(paint, icon_x, y + 6.0),
-        RowIcon::Bolt => icon_bolt(paint, icon_x, y + 6.0),
-        RowIcon::Blank => {}
-    }
+    draw_icon(paint, row.icon, 24.0 + indent, y + 6.0);
     let detail = if row.item == TreeItem::Connection {
         Some(access.to_owned())
     } else {
@@ -908,20 +912,21 @@ fn draw_row(
         faces.ui
     };
     let left = 44.0 + indent;
-    let shown = crate::main_window::elided(face, &row.label, 244.0 - detail_width - left, BODY.0);
+    let shown =
+        crate::main_window::elided(face, &row.label, width - 16.0 - detail_width - left, BODY.0);
     paint.text(face, &shown, left, y + 3.0, BODY, theme.text_primary);
     if let Some(detail) = detail {
         paint.text_right(
             faces.ui,
             &detail,
-            244.0,
+            width - 16.0,
             y + 5.0,
             SMALL,
             theme.text_secondary,
         );
     }
     if focused && tree.current == row.item {
-        focus_ring(paint, Rect::new(4.0, y, 252.0, ROW_HEIGHT));
+        focus_ring(paint, Rect::new(4.0, y, width - 8.0, ROW_HEIGHT));
     }
 }
 

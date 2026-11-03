@@ -51,6 +51,28 @@ impl ClientSettings {
     }
 
     /// The settings in the file at `path`; none when it is missing or unreadable.
+    /// The value of the `name = value` line named `name`, when the file has one.
+    pub fn value(&self, name: &str) -> Option<&str> {
+        self.other_lines.iter().find_map(|line| {
+            line.split_once('=')
+                .filter(|(key, _)| key.trim() == name)
+                .map(|(_, value)| value.trim())
+        })
+    }
+
+    /// Sets the `name = value` line named `name`, adding it when the file has none.
+    pub fn set(&mut self, name: &str, value: &str) {
+        let line = format!("{name} = {value}");
+        let at = self.other_lines.iter().position(|kept| {
+            kept.split_once('=')
+                .is_some_and(|(key, _)| key.trim() == name)
+        });
+        match at {
+            Some(at) => self.other_lines[at] = line,
+            None => self.other_lines.push(line),
+        }
+    }
+
     pub fn load(path: &Path) -> Self {
         std::fs::read(path)
             .map(|bytes| Self::parse(&String::from_utf8_lossy(&bytes)))
@@ -97,6 +119,19 @@ mod tests {
             ..ClientSettings::parse("layout=dbeaver")
         };
         assert_eq!(changed.render(), "layout = ssms\n");
+    }
+
+    #[test]
+    fn a_named_line_is_read_replaced_or_added_and_the_others_are_kept() {
+        let mut settings = ClientSettings::parse("theme = dark\neggdb.sidebar_width = 300\n");
+        assert_eq!(settings.value("eggdb.sidebar_width"), Some("300"));
+        assert_eq!(settings.value("eggdb.results_ratio"), None);
+        settings.set("eggdb.sidebar_width", "268");
+        settings.set("eggdb.results_ratio", "0.4000");
+        assert_eq!(
+            settings.render(),
+            "theme = dark\neggdb.sidebar_width = 268\neggdb.results_ratio = 0.4000\n"
+        );
     }
 
     #[test]

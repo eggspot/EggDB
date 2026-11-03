@@ -23,7 +23,8 @@ use crate::inspector::{self, Inspector, InspectorBlock};
 use crate::layout::{Layout, LayoutAction};
 use crate::layout_picker::{self, LayoutPicker, PickerOutcome};
 use crate::object_browser::{
-    self, ObjectTree, ROW_HEIGHT, ROWS_IN_VIEW, ROWS_TOP, SidebarFocus, TreeAction, TreeItem,
+    self, Group, ObjectTree, ROW_HEIGHT, ROWS_IN_VIEW, ROWS_TOP, RowIcon, SidebarFocus,
+    TreeAction, TreeItem,
 };
 use crate::plan_view::{self, PlanView};
 use crate::pointer::{self, CaretLook, PointerLook};
@@ -36,6 +37,7 @@ use crate::value_view;
 use crate::tree_menu::{self, TreeMenu, TreeMenuAnswer, TreeMenuItem, TreeMenuOrigin};
 use crate::drop_prompt::{self, DropAnswer, DropKind, DropPrompt, DropTarget};
 use crate::key_scan::KeySpaceScan;
+use crate::splitters::{self, RAIL_WIDTH, RegionSizes, Splitter};
 
 /// The width of the results grid's body, right of the row gutter, at the golden frame's size.
 pub const GRID_BODY_WIDTH: f32 = 972.0;
@@ -176,7 +178,48 @@ pub struct MainWindow {
     /// The dialog confirming a drop, while it is open (10.2), with the row selected after
     /// the drop succeeds.
     pub drop_prompt: Option<(DropPrompt, TreeItem)>,
+    /// The sizes the splitters and `Ctrl/Cmd+B` set (`docs/ux/workspace.md` 10.5, 10.6).
+    pub sizes: RegionSizes,
+    /// Whether the sizes changed since the client last kept them in its settings.
+    pub sizes_changed: bool,
+    /// The splitter with the keyboard focus.
+    pub focused_splitter: Option<Splitter>,
+    /// The splitter the pointer is over or drags.
+    pub hot_splitter: Option<Splitter>,
+    /// The splitter being dragged.
+    pub dragged_splitter: Option<Splitter>,
+    /// Whether the sidebar's drawer is open over the rail and the centre (10.6).
+    pub drawer_open: bool,
+    /// The rail item the drawer was opened from.
+    pub drawer_from: Option<RailItem>,
 }
+
+/// One of the rail's buttons while the sidebar is collapsed (`docs/ux/workspace.md` 10.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RailItem {
+    /// Opens the drawer with the tree focused.
+    Objects,
+    /// Opens the drawer with the filter field focused.
+    Filter,
+    /// Opens the drawer with this group selected and expanded.
+    Group(Group),
+}
+
+impl RailItem {
+    /// The item's name, as its tooltip and a screen reader give it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Objects => "Objects",
+            Self::Filter => "Filter objects",
+            Self::Group(Group::Keys) => "Keys",
+            Self::Group(_) => "Tables",
+        }
+    }
+}
+
+const RAIL_FIRST_TOP: f32 = 52.0;
+const RAIL_BUTTON_HEIGHT: f32 = 32.0;
+const RAIL_SEPARATOR_SPACE: f32 = 9.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Area {
@@ -261,11 +304,233 @@ impl MainWindow {
             scrollbar_hot: None,
             tree_menu: None,
             drop_prompt: None,
+            sizes: RegionSizes::default(),
+            sizes_changed: false,
+            focused_splitter: None,
+            hot_splitter: None,
+            dragged_splitter: None,
+            drawer_open: false,
+            drawer_from: None,
         }
     }
 
+    /// Whether the sidebar shows as the 36 px rail: collapsed by `Ctrl/Cmd+B`, or always in
+    /// a viewport narrower than 800 px.
+    pub fn rail_shown(&self) -> bool {
+        self.layout == Layout::EggDb
+            && (!self.sizes.sidebar_shown || self.width < crate::connect_screen::MIN_WIDTH as usize)
+    }
+
+    /// Where the centre starts: the sidebar's or the rail's right edge.
+    pub fn sidebar_right(&self) -> f32 {
+        if self.layout != Layout::EggDb {
+            SIDEBAR_RIGHT
+        } else if self.rail_shown() {
+            RAIL_WIDTH
+        } else {
+            self.sizes.sidebar_width
+        }
+    }
+
+    fn centre_shift(&self) -> f32 {
+        self.sidebar_right() - SIDEBAR_RIGHT
+    }
+
+    fn results_lift(&self) -> f32 {
+        if self.layout == Layout::EggDb {
+            self.sizes.results_band_top() - SPLITTER_TOP
+        } else {
+            0.0
+        }
+    }
+
+    fn sizes_moved(&self) -> bool {
+        self.layout == Layout::EggDb && (self.centre_shift() != 0.0 || self.results_lift() != 0.0)
+    }
+
+    fn docked_width(&self) -> f32 {
+        if self.inspector.docked {
+            self.sizes.inspector_width
+        } else {
+            0.0
+        }
+    }
+
+    fn sized_placement(&self, area: Area) -> Placed {
+        let left = self.sidebar_right();
+        let dx = left - SIDEBAR_RIGHT;
+        let right = self.centre_right() + dx;
+        let band = self.sizes.results_band_top();
+        let centre = (right - left).max(0.0);
+        let full = Rect::new(0.0, 0.0, self.width as f32, HEIGHT as f32);
+        let (shift, clip) = match area {
+            Area::Toolbar | Area::StatusBar => ((0.0, 0.0), full),
+            Area::Sidebar => (
+                (0.0, 0.0),
+                Rect::new(0.0, TOOLBAR_HEIGHT, left, BODY_BOTTOM - TOOLBAR_HEIGHT),
+            ),
+            Area::Tabs => (
+                (dx, 0.0),
+                Rect::new(left, TOOLBAR_HEIGHT, centre, EDITOR_TOP - TOOLBAR_HEIGHT),
+            ),
+            Area::Editor => ((dx, 0.0), Rect::new(left, EDITOR_TOP, centre, band - EDITOR_TOP)),
+            Area::Results => (
+                (dx, band - SPLITTER_TOP),
+                Rect::new(left, band, centre, BODY_BOTTOM - band),
+            ),
+        };
+        Placed { shift, clip }
+    }
+
+    /// The band `splitter` is grabbed by, in window coordinates; `None` while it does not
+    /// show (the sidebar's under the rail, the inspector's unless it is docked).
+    pub fn splitter_band(&self, splitter: Splitter) -> Option<Rect> {
+        if self.layout != Layout::EggDb {
+            return None;
+        }
+        let width = self.width as f32;
+        let body = BODY_BOTTOM - TOOLBAR_HEIGHT;
+        match splitter {
+            Splitter::Sidebar if !self.rail_shown() => Some(Rect::new(
+                self.sizes.sidebar_width - 4.0,
+                TOOLBAR_HEIGHT,
+                splitters::BAND,
+                body,
+            )),
+            Splitter::Results => {
+                let left = self.sidebar_right();
+                let right = self.centre_right() + self.centre_shift();
+                Some(Rect::new(
+                    left,
+                    self.sizes.results_band_top(),
+                    (right - left).max(0.0),
+                    splitters::BAND,
+                ))
+            }
+            Splitter::Inspector if self.inspector.docked => Some(Rect::new(
+                width - self.sizes.inspector_width - 3.0,
+                TOOLBAR_HEIGHT,
+                splitters::BAND,
+                body,
+            )),
+            Splitter::Sidebar | Splitter::Inspector => None,
+        }
+    }
+
+    /// The splitter whose band holds (`x`, `y`).
+    pub fn splitter_at(&self, x: f32, y: f32) -> Option<Splitter> {
+        [Splitter::Inspector, Splitter::Sidebar, Splitter::Results]
+            .into_iter()
+            .find(|&splitter| {
+                self.splitter_band(splitter)
+                    .is_some_and(|band| rect_contains(band, x, y))
+            })
+    }
+
+    /// The rail's buttons, top to bottom: `Objects`, `Filter objects`, then the groups the
+    /// connection has.
+    pub fn rail_items(&self) -> Vec<RailItem> {
+        let mut items = vec![RailItem::Objects, RailItem::Filter];
+        if !self.tree.catalog.tables.is_empty() {
+            items.push(RailItem::Group(Group::Tables));
+        }
+        if !self.tree.catalog.key_spaces.is_empty() {
+            items.push(RailItem::Group(Group::Keys));
+        }
+        items
+    }
+
+    /// Where the rail's item at `index` starts.
+    pub fn rail_item_top(index: usize) -> f32 {
+        let separator = if index >= 2 { RAIL_SEPARATOR_SPACE } else { 0.0 };
+        RAIL_FIRST_TOP + RAIL_BUTTON_HEIGHT * index as f32 + separator
+    }
+
+    fn rail_item_at(&self, y: f32) -> Option<RailItem> {
+        self.rail_items()
+            .into_iter()
+            .enumerate()
+            .find(|&(index, _)| {
+                let top = Self::rail_item_top(index);
+                y >= top && y < top + RAIL_BUTTON_HEIGHT
+            })
+            .map(|(_, item)| item)
+    }
+
+    /// Opens the drawer from the rail's `item` (`docs/ux/workspace.md` 10.6).
+    pub fn open_drawer(&mut self, item: RailItem) {
+        self.drawer_open = true;
+        self.drawer_from = Some(item);
+        match item {
+            RailItem::Objects => self.focus_tree(),
+            RailItem::Filter => {
+                self.focus_tree();
+                self.focus = WindowFocus::Filter;
+            }
+            RailItem::Group(group) => {
+                self.focus_tree();
+                let row = TreeItem::Group(group);
+                self.tree.expanded.insert(row);
+                self.tree.current = row;
+                self.tree.selected = Some(row);
+            }
+        }
+    }
+
+    /// Closes the drawer, the focus going back to the editor.
+    pub fn close_drawer(&mut self) {
+        if std::mem::take(&mut self.drawer_open) {
+            self.drawer_from = None;
+            self.focus_tab();
+        }
+    }
+
+    /// `Ctrl/Cmd+B`: collapses the sidebar to the rail and back; under 800 px, where the rail
+    /// always shows, opens and closes the drawer.
+    pub fn toggle_sidebar(&mut self) {
+        if self.width < crate::connect_screen::MIN_WIDTH as usize {
+            if self.drawer_open {
+                self.close_drawer();
+            } else {
+                self.open_drawer(RailItem::Objects);
+            }
+            return;
+        }
+        self.drawer_open = false;
+        self.drawer_from = None;
+        self.sizes.sidebar_shown = !self.sizes.sidebar_shown;
+        self.sizes_changed = true;
+        if !self.sizes.sidebar_shown && self.focus != WindowFocus::Tab {
+            self.focus_tab();
+        }
+        if self.focused_splitter == Some(Splitter::Sidebar) {
+            self.focused_splitter = None;
+        }
+    }
+
+    fn splitter_key(&mut self, splitter: Splitter, press: KeyPress) -> WindowAction {
+        let none = WindowAction::Tab(TabAction::None);
+        let back = press.key == Key::Escape || (press.key == Key::Tab && press.modifiers.shift);
+        if back && splitter == Splitter::Sidebar {
+            self.focus_tree();
+            return none;
+        }
+        if back || press.key == Key::Tab {
+            self.focus_tab();
+            return none;
+        }
+        if let Some(changed) = self.sizes.key(splitter, press) {
+            self.tab.notice = Some(self.sizes.notice(splitter));
+            self.sizes_changed |= changed;
+        }
+        none
+    }
+
     fn placed(&self, area: Area) -> Option<Placed> {
-        let width = self.width.max(WIDTH) as f32;
+        let width = self.width as f32;
+        if self.sizes_moved() {
+            return Some(self.sized_placement(area));
+        }
         if self.layout == Layout::EggDb {
             return Some(Placed {
                 shift: (0.0, 0.0),
@@ -292,7 +557,7 @@ impl MainWindow {
     }
 
     fn area_width(&self, area: Area) -> f32 {
-        let width = self.width.max(WIDTH) as f32;
+        let width = self.width as f32;
         match self.placed(area) {
             Some(placed) if self.layout != Layout::EggDb => placed.clip.w,
             _ => width,
@@ -300,9 +565,14 @@ impl MainWindow {
     }
 
     fn place_nodes(&self, nodes: &mut [AccessNode]) {
-        if self.layout == Layout::EggDb {
+        if self.layout == Layout::EggDb && !self.sizes_moved() {
             return;
         }
+        let widened = if self.layout == Layout::EggDb {
+            self.centre_shift().max(0.0)
+        } else {
+            0.0
+        };
         let mut inspector = vec![NODE_INSPECTOR];
         for node in nodes {
             if inspector.contains(&node.id) || node.parent.is_some_and(|parent| inspector.contains(&parent)) {
@@ -310,7 +580,26 @@ impl MainWindow {
                 continue;
             }
             let area = area_at(node.bounds.x, node.bounds.y);
-            match self.placed(area) {
+            if area == Area::Sidebar && node.bounds.x + node.bounds.width >= SIDEBAR_RIGHT - 16.0 {
+                node.bounds.width += widened;
+            }
+            let hidden_by_drawer = self.drawer_open
+                && matches!(area, Area::Tabs | Area::Editor | Area::Results)
+                && node.bounds.x + self.centre_shift() < splitters::SIDEBAR_DEFAULT;
+            let placed = match area {
+                _ if hidden_by_drawer => None,
+                Area::Sidebar if self.drawer_open => Some(Placed {
+                    shift: (0.0, 0.0),
+                    clip: Rect::new(
+                        0.0,
+                        TOOLBAR_HEIGHT,
+                        splitters::SIDEBAR_DEFAULT,
+                        BODY_BOTTOM - TOOLBAR_HEIGHT,
+                    ),
+                }),
+                _ => self.placed(area),
+            };
+            match placed {
                 Some(placed) => {
                     node.bounds.x += placed.shift.0;
                     node.bounds.y += placed.shift.1;
@@ -486,28 +775,33 @@ impl MainWindow {
 
     /// Sets the window's width, opening the inspector by default from 1440 px.
     pub fn set_width(&mut self, width: usize) {
-        let width = width.max(WIDTH);
-        if (width >= inspector::DOCKED_FROM_WIDTH) != (self.width >= inspector::DOCKED_FROM_WIDTH) {
-            self.inspector = Inspector {
-                collapsed: std::mem::take(&mut self.inspector.collapsed),
-                sample: self.inspector.sample.take(),
-                ..Inspector::for_width(width)
-            };
+        let width = width.max(crate::connect_screen::MIN_WIDTH as usize);
+        let wide = |width: usize| width >= inspector::DOCKED_FROM_WIDTH;
+        if wide(width) && !wide(self.width) {
+            self.inspector.docked = self.sizes.inspector_shown || self.inspector.overlay;
+            self.inspector.overlay = false;
+        } else if !wide(width) && wide(self.width) {
+            self.inspector.docked = false;
         }
         self.width = width;
     }
 
+    /// Applies sizes read from the settings: a wide window docks the inspector only when
+    /// they keep it shown.
+    pub fn use_sizes(&mut self, sizes: RegionSizes) {
+        self.sizes = sizes;
+        if self.width >= inspector::DOCKED_FROM_WIDTH {
+            self.inspector.docked = sizes.inspector_shown;
+        }
+    }
+
     /// The right edge of the main area: the window's, or the docked inspector's left edge.
     pub fn centre_right(&self) -> f32 {
-        let docked = if self.inspector.docked {
-            inspector::INSPECTOR_WIDTH
-        } else {
-            0.0
-        };
+        let docked = self.docked_width();
         if self.layout == Layout::EggDb {
-            return self.width as f32 - docked;
+            return self.width as f32 - docked - self.centre_shift();
         }
-        let editor = self.layout.regions_at(self.width.max(WIDTH) as f32).editor;
+        let editor = self.layout.regions_at(self.width as f32).editor;
         SIDEBAR_RIGHT + editor.w - docked
     }
 
@@ -540,6 +834,17 @@ impl MainWindow {
         if self.tab.value_view.is_some() || self.tab.grid_menu.is_some() {
             return WindowAction::Tab(self.tab.key(press));
         }
+        if let Some(splitter) = self.focused_splitter {
+            return self.splitter_key(splitter, press);
+        }
+        if primary && !press.modifiers.shift && matches!(press.key, Key::Character('b' | 'B')) {
+            self.toggle_sidebar();
+            return WindowAction::Tab(TabAction::None);
+        }
+        if self.drawer_open && press.key == Key::Escape {
+            self.close_drawer();
+            return WindowAction::Tab(TabAction::None);
+        }
         if let Some(action) = self.tab_key(press) {
             return action;
         }
@@ -564,11 +869,19 @@ impl MainWindow {
         };
         match press.key {
             Key::Character('1') if primary => {
-                self.focus_tree();
+                if self.rail_shown() {
+                    self.open_drawer(RailItem::Objects);
+                } else {
+                    self.focus_tree();
+                }
                 return WindowAction::Tab(TabAction::None);
             }
             Key::Character('i' | 'I') if primary && !press.modifiers.shift => {
                 self.inspector.toggle(self.width);
+                if self.width >= inspector::DOCKED_FROM_WIDTH {
+                    self.sizes.inspector_shown = self.inspector.docked;
+                    self.sizes_changed = true;
+                }
                 return self.inspect_selected();
             }
             Key::Escape if self.inspector.overlay && self.focus != WindowFocus::Filter => {
@@ -612,6 +925,7 @@ impl MainWindow {
 
     /// Moves the focus to the object tree.
     pub fn focus_tree(&mut self) {
+        self.focused_splitter = None;
         self.focus = WindowFocus::Tree;
         self.tab.dialect_menu = None;
         self.tab.focus = TabFocus::Editor;
@@ -621,6 +935,7 @@ impl MainWindow {
     }
 
     fn focus_tab(&mut self) {
+        self.focused_splitter = None;
         self.focus = WindowFocus::Tab;
         self.tab.focus = TabFocus::Editor;
     }
@@ -629,7 +944,12 @@ impl MainWindow {
         let none = WindowAction::Tab(TabAction::None);
         match action {
             TreeAction::None => none,
-            TreeAction::Open(item) => self.open_object(item),
+            TreeAction::Open(item) => {
+                let action = self.open_object(item);
+                self.drawer_open = false;
+                self.drawer_from = None;
+                action
+            }
             TreeAction::InsertName(item) => {
                 if let Some(name) = self.tree.name_of(item).filter(|_| !self.tab.is_keys()) {
                     for letter in quote_name(&name, self.tab.dialect).chars() {
@@ -646,6 +966,9 @@ impl MainWindow {
             }
             TreeAction::LeaveForward => {
                 self.focus_tab();
+                if self.splitter_band(Splitter::Sidebar).is_some() && !self.drawer_open {
+                    self.focused_splitter = Some(Splitter::Sidebar);
+                }
                 none
             }
             TreeAction::LeaveBack if from == WindowFocus::Tree => {
@@ -1154,20 +1477,30 @@ fn under_pointer(window: &MainWindow, id: u32, look: Button) -> Button {
 /// Draws `window` into a new canvas of its width and [`HEIGHT`] in `theme`, as
 /// `docs/ux/gui.md` and `docs/ux/workspace.md` lay it out.
 pub fn draw(window: &MainWindow, theme: Theme, faces: Faces<'_>) -> Canvas {
-    let mut canvas = Canvas::new(window.width.max(WIDTH), HEIGHT, theme.bg0);
+    let mut canvas = Canvas::new(window.width, HEIGHT, theme.bg0);
     let mut paint = Painter {
         canvas: &mut canvas,
         theme,
         faces,
-        width: window.width.max(WIDTH) as f32,
+        width: window.width as f32,
         centre_right: window.centre_right(),
     };
-    if window.layout == Layout::EggDb {
+    if window.layout == Layout::EggDb && window.sizes_moved() {
         toolbar(&mut paint, window);
-        object_browser::draw(&mut paint, &window.tree, access_text(window), sidebar_focus(window));
+        sized_regions(&mut paint, window);
+    } else if window.layout == Layout::EggDb {
+        toolbar(&mut paint, window);
+        object_browser::draw(
+            &mut paint,
+            &window.tree,
+            access_text(window),
+            sidebar_focus(window),
+            window.sizes.sidebar_width,
+        );
         tabs(&mut paint, window);
         editor(&mut paint, &window.tab, window.caret);
         results(&mut paint, window);
+        splitter_marks(&mut paint, window);
     } else {
         placed_regions(&mut paint, window);
     }
@@ -1177,7 +1510,12 @@ pub fn draw(window: &MainWindow, theme: Theme, faces: Faces<'_>) -> Canvas {
             window.inspected(),
             window.inspector.sample.as_ref(),
         );
-        inspector::draw(&mut paint, &window.inspector, &description);
+        inspector::draw(
+            &mut paint,
+            &window.inspector,
+            &description,
+            window.sizes.inspector_width,
+        );
     }
     if window.layout == Layout::EggDb {
         status_bar(&mut paint, window);
@@ -1193,7 +1531,7 @@ pub fn draw(window: &MainWindow, theme: Theme, faces: Faces<'_>) -> Canvas {
             paint.width = placed.clip.w;
             let anywhere = Placed {
                 shift: placed.shift,
-                clip: Rect::new(0.0, 0.0, window.width.max(WIDTH) as f32, HEIGHT as f32),
+                clip: Rect::new(0.0, 0.0, window.width as f32, HEIGHT as f32),
             };
             place(paint.canvas, anywhere);
             dialect_menu(&mut paint, &window.tab);
@@ -1202,18 +1540,138 @@ pub fn draw(window: &MainWindow, theme: Theme, faces: Faces<'_>) -> Canvas {
     }
     popovers(&mut paint, window);
     if let Some(prompt) = &window.close_prompt {
-        let size = (window.width.max(WIDTH) as f32, HEIGHT as f32);
+        let size = (window.width as f32, HEIGHT as f32);
         tab_strip::draw_prompt(&mut paint, prompt, size);
     }
     if let Some((prompt, _)) = &window.drop_prompt {
-        let size = (window.width.max(WIDTH) as f32, HEIGHT as f32);
+        let size = (window.width as f32, HEIGHT as f32);
         drop_prompt::draw(&mut paint, prompt, size);
     }
     if let Some(picker) = &window.layout_picker {
-        let size = (window.width.max(WIDTH) as f32, HEIGHT as f32);
+        let size = (window.width as f32, HEIGHT as f32);
         layout_picker::draw(&mut canvas, picker, theme, faces, size, 1.0);
     }
     canvas
+}
+
+fn sized_regions(paint: &mut Painter<'_, '_>, window: &MainWindow) {
+    let theme = paint.theme;
+    if window.rail_shown() {
+        objects_rail(paint, window);
+    } else {
+        object_browser::draw(
+            paint,
+            &window.tree,
+            access_text(window),
+            sidebar_focus(window),
+            window.sizes.sidebar_width,
+        );
+    }
+    for area in [Area::Tabs, Area::Editor, Area::Results] {
+        let Some(placed) = window.placed(area) else {
+            continue;
+        };
+        let clip = placed.clip;
+        paint.rect(clip.x, clip.y, clip.w, clip.h, theme.bg0);
+        place(paint.canvas, placed);
+        match area {
+            Area::Tabs => tabs(paint, window),
+            Area::Editor => editor(paint, &window.tab, window.caret),
+            _ => results(paint, window),
+        }
+        paint.canvas.draw_anywhere();
+    }
+    splitter_marks(paint, window);
+    if window.drawer_open {
+        drawer(paint, window);
+    }
+}
+
+fn splitter_marks(paint: &mut Painter<'_, '_>, window: &MainWindow) {
+    let theme = paint.theme;
+    for splitter in [Splitter::Sidebar, Splitter::Results, Splitter::Inspector] {
+        let Some(band) = window.splitter_band(splitter) else {
+            continue;
+        };
+        let focused = window.focused_splitter == Some(splitter);
+        let active = focused
+            || window.hot_splitter == Some(splitter)
+            || window.dragged_splitter == Some(splitter);
+        if !active {
+            continue;
+        }
+        if splitter.is_vertical() {
+            paint.rect(band.x + 2.0, band.y, 2.0, band.h, theme.accent);
+        } else {
+            paint.rect(band.x, band.y + 2.0, band.w, 2.0, theme.accent);
+        }
+        if focused {
+            let ring = if splitter.is_vertical() {
+                Rect::new(band.x - 2.0, band.y, band.w + 4.0, band.h)
+            } else {
+                Rect::new(band.x, band.y - 2.0, band.w, band.h + 4.0)
+            };
+            focus_ring(paint, ring);
+        }
+    }
+}
+
+fn objects_rail(paint: &mut Painter<'_, '_>, window: &MainWindow) {
+    let theme = paint.theme;
+    let body = BODY_BOTTOM - TOOLBAR_HEIGHT;
+    paint.rect(0.0, TOOLBAR_HEIGHT, RAIL_WIDTH, body, theme.bg1);
+    paint.rect(RAIL_WIDTH - 1.0, TOOLBAR_HEIGHT, 1.0, body, theme.border);
+    for (index, item) in window.rail_items().into_iter().enumerate() {
+        let top = MainWindow::rail_item_top(index);
+        if window.drawer_from == Some(item) {
+            paint.rect(0.0, top, RAIL_WIDTH, RAIL_BUTTON_HEIGHT, theme.selection);
+            paint.rect(0.0, top, 2.0, RAIL_BUTTON_HEIGHT, theme.accent);
+        }
+        let (x, y) = (12.0, top + 10.0);
+        match item {
+            RailItem::Objects => object_browser::draw_icon(paint, RowIcon::Database, x, y),
+            RailItem::Filter => {
+                paint
+                    .canvas
+                    .stroke_circle(x + 5.0, y + 5.0, 8.0, 1.5, theme.text_secondary);
+                paint
+                    .canvas
+                    .line((x + 8.5, y + 8.5), (x + 12.0, y + 12.0), 1.5, theme.text_secondary);
+            }
+            RailItem::Group(Group::Keys) => object_browser::draw_icon(paint, RowIcon::Key, x, y),
+            RailItem::Group(_) => object_browser::draw_icon(paint, RowIcon::Table, x, y),
+        }
+        if index == 1 {
+            let separator = top + RAIL_BUTTON_HEIGHT + 4.0;
+            paint.rect(8.0, separator, 20.0, 1.0, theme.border);
+        }
+    }
+}
+
+fn drawer(paint: &mut Painter<'_, '_>, window: &MainWindow) {
+    let width = splitters::SIDEBAR_DEFAULT;
+    for step in 0..12 {
+        let alpha = (41 * (step + 1) / 12) as u8;
+        paint.rect(
+            width + 11.0 - step as f32,
+            TOOLBAR_HEIGHT + 4.0,
+            1.0,
+            BODY_BOTTOM - TOOLBAR_HEIGHT - 4.0,
+            Rgba {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: alpha / 3,
+            },
+        );
+    }
+    object_browser::draw(
+        paint,
+        &window.tree,
+        access_text(window),
+        sidebar_focus(window),
+        width,
+    );
 }
 
 fn sidebar_focus(window: &MainWindow) -> SidebarFocus {
@@ -1259,7 +1717,13 @@ fn placed_regions(paint: &mut Painter<'_, '_>, window: &MainWindow) {
                 };
                 let clip = Rect::new(target.x, target.y, inside, target.h);
                 place(paint.canvas, Placed { clip, ..placed });
-                object_browser::draw(paint, &window.tree, access_text(window), sidebar_focus(window));
+                object_browser::draw(
+                    paint,
+                    &window.tree,
+                    access_text(window),
+                    sidebar_focus(window),
+                    object_browser::SIDEBAR_WIDTH,
+                );
             }
             Area::Tabs => {
                 place(paint.canvas, placed);
@@ -2385,7 +2849,7 @@ impl MainWindow {
         let view = self.tab.value_view.as_ref()?;
         let grid = self.tab.grid.as_ref()?;
         let cell = grid_cell_rect(grid, view.cell);
-        let rect = value_view::popover_rect(cell, self.width.max(WIDTH) as f32);
+        let rect = value_view::popover_rect(cell, self.width as f32);
         Some(shifted(rect, self.results_shift()))
     }
 
@@ -2393,7 +2857,7 @@ impl MainWindow {
     pub fn grid_menu_rect(&self) -> Option<Rect> {
         let menu = self.tab.grid_menu.as_ref()?;
         let grid = self.tab.grid.as_ref()?;
-        let width = self.width.max(WIDTH) as f32;
+        let width = self.width as f32;
         let cell = shifted(grid_cell_rect(grid, grid.current), self.results_shift());
         Some(grid_menu::rect_for(menu.origin, cell, width))
     }
@@ -2558,7 +3022,7 @@ impl MainWindow {
         Some(tree_menu::rect_for(
             menu.origin,
             label,
-            self.width.max(WIDTH) as f32,
+            self.width as f32,
         ))
     }
 
@@ -2793,7 +3257,10 @@ pub enum GridHandle {
         /// Where the pointer is from the thumb's start.
         grab: f32,
     },
-    /// A double-click auto-fitted a column, or a press on a track paged; nothing to drag.
+    /// A splitter between regions (`docs/ux/workspace.md` 10.5).
+    Splitter(Splitter),
+    /// A double-click auto-fitted a column or reset a splitter, a press on a track paged, or
+    /// a press opened or closed the drawer; nothing to drag.
     Done,
 }
 
@@ -2912,13 +3379,65 @@ impl MainWindow {
     /// The pointer moved to (`x`, `y`) with no drag: the column edge and the scrollbar under
     /// it light up. Returns whether that changed.
     pub fn hover_grid_handles(&mut self, x: f32, y: f32) -> bool {
-        if self.resizing {
+        if self.resizing || self.dragged_splitter.is_some() {
             return false;
         }
-        let before = (self.column_edge, self.scrollbar_hot);
+        let before = (self.column_edge, self.scrollbar_hot, self.hot_splitter);
         self.column_edge = self.column_edge_at(x, y);
         self.scrollbar_hot = self.grid_track_at(x, y).map(|(axis, _)| axis);
-        (self.column_edge, self.scrollbar_hot) != before
+        self.hot_splitter = if self.drawer_open {
+            None
+        } else {
+            self.splitter_at(x, y)
+        };
+        (self.column_edge, self.scrollbar_hot, self.hot_splitter) != before
+    }
+
+    /// A press at (`x`, `y`) on the window's own handles (`docs/ux/workspace.md` 10.5, 10.6):
+    /// outside the open drawer it closes it; on a rail item it opens the drawer; on a
+    /// splitter it starts a drag, or resets the size on a double-click. `None` when the press
+    /// is on none of them.
+    pub fn press_layout_handle(&mut self, x: f32, y: f32, clicks: u8) -> Option<GridHandle> {
+        if self.layout != Layout::EggDb || y < TOOLBAR_HEIGHT || y >= BODY_BOTTOM {
+            return None;
+        }
+        if self.drawer_open {
+            if x < splitters::SIDEBAR_DEFAULT {
+                return None;
+            }
+            self.close_drawer();
+            return Some(GridHandle::Done);
+        }
+        if self.rail_shown() && x < RAIL_WIDTH {
+            if let Some(item) = self.rail_item_at(y) {
+                self.open_drawer(item);
+            }
+            return Some(GridHandle::Done);
+        }
+        let splitter = self.splitter_at(x, y)?;
+        self.focused_splitter = None;
+        if clicks == 2 {
+            self.sizes_changed |= self
+                .sizes
+                .set_size(splitter, RegionSizes::default().size(splitter));
+            self.tab.notice = Some(self.sizes.notice(splitter));
+            return Some(GridHandle::Done);
+        }
+        self.dragged_splitter = Some(splitter);
+        self.hot_splitter = Some(splitter);
+        self.tab.notice = Some(self.sizes.notice(splitter));
+        Some(GridHandle::Splitter(splitter))
+    }
+
+    fn drag_splitter(&mut self, splitter: Splitter, x: f32, y: f32) -> bool {
+        let size = match splitter {
+            Splitter::Sidebar => x + 1.0,
+            Splitter::Results => BODY_BOTTOM - y - splitters::BAND / 2.0,
+            Splitter::Inspector => self.width as f32 - x,
+        };
+        let changed = self.sizes.set_size(splitter, size);
+        self.tab.notice = Some(self.sizes.notice(splitter));
+        changed
     }
 
     /// A press at (`x`, `y`), `clicks` of a multi-click (`docs/ux/workspace.md` 9.5, 9.6): on
@@ -2964,6 +3483,7 @@ impl MainWindow {
     /// pointer, or the thumb follows it. Returns whether the frame changed.
     pub fn drag_grid_handle(&mut self, handle: GridHandle, x: f32, y: f32) -> bool {
         match handle {
+            GridHandle::Splitter(splitter) => self.drag_splitter(splitter, x, y),
             GridHandle::ColumnEdge { column, grab } => {
                 let Some(grid) = self.tab.grid.as_ref() else {
                     return false;
@@ -2997,6 +3517,9 @@ impl MainWindow {
     /// The button went up: a resize or a thumb drag ends.
     pub fn release_grid_handle(&mut self) {
         self.resizing = false;
+        if self.dragged_splitter.take().is_some() {
+            self.sizes_changed = true;
+        }
     }
 }
 
@@ -3377,7 +3900,7 @@ pub fn spoken_cell(value: Option<&str>, kind: ValueKind) -> String {
 /// (`docs/ux/workspace.md` 7), in reading order.
 pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
     let tab = &window.tab;
-    let width = window.width.max(WIDTH) as f32;
+    let width = window.width as f32;
     let centre_width = window.centre_right() - 260.0;
     let tab_focused = window.focus == WindowFocus::Tab;
     let mut root = node(
@@ -3776,7 +4299,7 @@ fn sidebar_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
 }
 
 fn inspector_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
-    let area = inspector::region(window.width.max(WIDTH) as f32);
+    let area = inspector::region(window.width as f32, window.sizes.inspector_width);
     let description = inspector::describe(
         &window.tree,
         window.inspected(),
@@ -5021,5 +5544,89 @@ mod tests {
             QueryDialect::MySql,
             "a tab added from a keys tab takes the nearest query tab's dialect"
         );
+    }
+
+    #[test]
+    fn splitters_move_the_regions_and_the_rail_collapses_the_sidebar() {
+        let theme = Theme::of(crate::color::ThemeKind::Light);
+        let mut window = MainWindow::sample();
+        let now = Instant::now();
+        let primary = |key: Key| KeyPress {
+            key,
+            modifiers: eggdb_platform::window::Modifiers {
+                control: true,
+                ..Default::default()
+            },
+        };
+        window.focus_tree();
+        let _ = window.key(KeyPress::plain(Key::Tab), now);
+        assert_eq!(window.focused_splitter, Some(Splitter::Sidebar));
+        let _ = window.key(KeyPress::plain(Key::Right), now);
+        assert_eq!(window.sizes.sidebar_width, 268.0);
+        assert!(window.sizes_changed);
+        assert_eq!(window.tab.notice.as_deref(), Some("Sidebar · 268 px"));
+        assert_eq!(window.centre_right() + 8.0, 1280.0);
+        assert_eq!(window.splitter_at(266.0, 300.0), Some(Splitter::Sidebar));
+        let _ = window.key(KeyPress::plain(Key::Escape), now);
+        assert_eq!(window.focus, WindowFocus::Tree);
+        assert_eq!(window.focused_splitter, None);
+        let canvas = draw(&window, theme, box_faces());
+        assert_eq!(canvas.pixel(267, 600), Some(theme.border), "the sidebar ends at 268 px");
+        let handle = window.press_layout_handle(400.0, 382.0, 1);
+        assert_eq!(handle, Some(GridHandle::Splitter(Splitter::Results)));
+        assert!(window.drag_grid_handle(GridHandle::Splitter(Splitter::Results), 400.0, 300.0));
+        assert_eq!(window.sizes.results_band_top(), 297.0);
+        window.release_grid_handle();
+        assert_eq!(window.dragged_splitter, None);
+        assert_eq!(window.press_layout_handle(400.0, 299.0, 2), Some(GridHandle::Done));
+        assert_eq!(window.sizes.results_band_top(), 380.0, "a double-click resets it");
+        let _ = window.key(primary(Key::Character('b')), now);
+        assert!(window.rail_shown() && !window.sizes.sidebar_shown);
+        assert_eq!(window.sidebar_right(), RAIL_WIDTH);
+        let canvas = draw(&window, theme, box_faces());
+        assert_eq!(canvas.pixel(35, 600), Some(theme.border), "the rail is 36 px wide");
+        assert_eq!(window.press_layout_handle(10.0, 60.0, 1), Some(GridHandle::Done));
+        assert!(window.drawer_open);
+        assert_eq!(window.drawer_from, Some(RailItem::Objects));
+        assert_eq!(window.focus, WindowFocus::Tree);
+        let _ = draw(&window, theme, box_faces());
+        assert_eq!(window.press_layout_handle(600.0, 300.0, 1), Some(GridHandle::Done));
+        assert!(!window.drawer_open, "a click outside closes the drawer");
+        let _ = window.key(primary(Key::Character('b')), now);
+        assert!(!window.rail_shown());
+        assert_eq!(window.sidebar_right(), 268.0);
+    }
+
+    #[test]
+    fn the_inspector_closes_below_1440_and_reopens_as_it_was_and_windows_go_down_to_800() {
+        let mut window = MainWindow::sample();
+        let now = Instant::now();
+        let control_i = KeyPress {
+            key: Key::Character('i'),
+            modifiers: eggdb_platform::window::Modifiers {
+                control: true,
+                ..Default::default()
+            },
+        };
+        window.set_width(1500);
+        assert!(window.inspector.docked);
+        assert!(window.splitter_band(Splitter::Inspector).is_some());
+        window.set_width(1300);
+        assert!(!window.inspector.is_open());
+        assert!(window.splitter_band(Splitter::Inspector).is_none());
+        let _ = window.key(control_i, now);
+        assert!(window.inspector.overlay);
+        window.set_width(1500);
+        assert!(window.inspector.docked && !window.inspector.overlay);
+        let _ = window.key(control_i, now);
+        assert!(!window.inspector.docked && !window.sizes.inspector_shown);
+        window.set_width(1300);
+        window.set_width(1500);
+        assert!(!window.inspector.docked, "a closed inspector stays closed");
+        window.set_width(900);
+        assert_eq!(window.width, 900);
+        window.set_width(500);
+        assert_eq!(window.width, 800);
+        let _ = draw(&window, Theme::of(crate::color::ThemeKind::Light), box_faces());
     }
 }
