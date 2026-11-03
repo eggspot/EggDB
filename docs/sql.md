@@ -2209,7 +2209,12 @@ full-text index yet, so `@@` reads every row.
 
 `EXPLAIN ANALYZE` (or `EXPLAIN (ANALYZE[, COSTS OFF, ...])`) runs the statement and prints its
 plan with the rows it returned or changed, and the planning and execution times, as
-PostgreSQL does; an `UPDATE` or `DELETE` under it changes the data. `EXPLAIN (ANALYZE,
+PostgreSQL does. Each step the executor measures carries PostgreSQL's
+`(actual time=a..b rows=n loops=1)`: the top node, a scan, the top of a join, a `Sort` and each
+branch of an `Append`, with times in milliseconds from the start of execution to the step's
+first and last row, and `(never executed)` on a step it never read (a scan under `LIMIT 0`).
+The steps inside a join and an `UPDATE` or `DELETE`'s scan carry none yet, and the timing costs
+nothing when the statement is not analyzed (D312); an `UPDATE` or `DELETE` under it changes the data. `EXPLAIN (ANALYZE,
 BUFFERS)` adds the page cache's lookups in PostgreSQL's form: `Buffers: shared hit=N read=M`
 under the top node for the whole statement (pages found in memory, pages read from the file;
 a count of zero is left out) and the same under `Planning:` for planning, counted on the
