@@ -92,6 +92,38 @@ fn unescape(text: &str) -> Result<String, &'static str> {
     Ok(out)
 }
 
+fn declared_frame_bytes(buffer: &[u8]) -> Option<usize> {
+    let mut line_start = buffer
+        .iter()
+        .position(|&byte| byte != b'\n' && byte != b'\r')?;
+    let mut length: Option<usize> = None;
+    loop {
+        let offset = buffer
+            .get(line_start..)?
+            .iter()
+            .position(|&byte| byte == b'\n')?;
+        let line = buffer.get(line_start..line_start + offset)?;
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        line_start += offset + 1;
+        if line.is_empty() {
+            return length.map(|length| line_start.saturating_add(length).saturating_add(1));
+        }
+        if length.is_none()
+            && let Some(value) = line.strip_prefix(b"content-length:")
+        {
+            length = std::str::from_utf8(value)
+                .ok()
+                .and_then(|value| value.trim().parse().ok());
+        }
+    }
+}
+
+/// The bytes the frame at the start of `buffer` takes once whole: what its `content-length`
+/// header declares once the headers have arrived, or what `buffer` already holds.
+pub(crate) fn pending_frame_bytes(buffer: &[u8]) -> usize {
+    declared_frame_bytes(buffer).unwrap_or(0).max(buffer.len())
+}
+
 /// The next whole frame at the start of `buffer` and how many bytes it used (heart-beat end of
 /// lines before it included), `None` when more bytes are needed, or why the input is refused.
 pub(crate) fn next_frame(buffer: &[u8]) -> Result<Option<(Frame, usize)>, &'static str> {
