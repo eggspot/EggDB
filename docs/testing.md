@@ -167,7 +167,10 @@ session's portal past the budget fails with `53200` while the first goes on (D28
 protocol servers test the same budget in their own crates (D284): RESP (`-OOM`, a request too
 large ends its connection, a reply too large is replaced), MongoDB (`ExceededMemoryLimit`, 146, for
 a message or a cursor), CQL (`Overloaded`, `0x1001`, for a frame or a result) and memcached
-(`SERVER_ERROR out of memory`, the connection goes on); `crates/eggdb/tests/serve.rs` checks
+(`SERVER_ERROR out of memory`, the connection goes on), and so do the HTTP listeners
+(Elasticsearch, S3, DynamoDB and `eggdb-http`'s plain `503`), Kafka, NATS, STOMP, MQTT, AMQP 0-9-1
+and 1.0, Bolt and RESP pub/sub's queued messages, each checking that the budget returns to zero
+(D307); `crates/eggdb/tests/serve.rs` checks
 `--max-connection-memory` through the real binary. The login slots and the budget have unit tests
 in `eggdb-platform`'s `connection_limits`. The T-SQL lexer, parser, functions and batches have a seeded mutator in
 `crates/eggdb-sql/src/tests.rs` (`hostile_tsql_input_returns_errors_and_never_panics`, 35,000
