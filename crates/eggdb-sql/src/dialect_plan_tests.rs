@@ -131,6 +131,32 @@ fn explain_plan_of_an_update_plans_it_without_changing_a_row() {
 }
 
 #[test]
+fn a_session_that_displays_plans_answers_explain_plan_with_the_display_and_writes_nothing() {
+    let store = MemoryStore::default();
+    let mut session = oracle_emp(&store);
+    session.set_explain_plan_displays(true);
+    let shown = last(&mut session, "EXPLAIN PLAN FOR SELECT * FROM emp");
+    assert!(
+        shown.starts_with("PLAN_TABLE_OUTPUT\nPlan hash value: "),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("\n|   0 | SELECT STATEMENT  |      |\n|   1 |  TABLE ACCESS FULL| EMP  |\n"),
+        "{shown}"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)"),
+        "PLAN_TABLE_OUTPUT\nError: cannot fetch last explain plan from PLAN_TABLE\nSELECT 1"
+    );
+    session.set_explain_plan_displays(false);
+    last(&mut session, "EXPLAIN PLAN FOR SELECT * FROM emp");
+    assert_eq!(
+        last(&mut session, "SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)"),
+        shown
+    );
+}
+
+#[test]
 fn explain_plan_refuses_what_it_cannot_plan_and_a_missing_into_table() {
     let store = MemoryStore::default();
     let mut session = oracle_emp(&store);

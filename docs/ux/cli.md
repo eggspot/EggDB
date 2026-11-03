@@ -2420,8 +2420,9 @@ exit 1, the same `try:`.
 
 ### 24.4 `eggdb explain <file> -c <sql> [--dialect postgresql|mysql|sqlite|oracle|sqlserver]`
 
-Twin of `explain_query`. The statement comes from `-c` only. EggDB puts `EXPLAIN` (or `EXPLAIN
-QUERY PLAN` for sqlite) in front and runs it read-only, never the statement itself.
+Twin of `explain_query`. The statement comes from `-c` only. EggDB puts `EXPLAIN` (`EXPLAIN
+QUERY PLAN` for sqlite, `EXPLAIN PLAN FOR` for oracle) in front, or runs `SET SHOWPLAN_TEXT ON`
+before it for sqlserver, and runs it read-only, never the statement itself (D312).
 
 **Text**: the result as `sql` prints a SELECT (the psql-style table, the `(n rows)` line, a blank
 line), and no tag line: `sql -c "EXPLAIN ..."` prints `EXPLAIN` after the table as the
@@ -2438,7 +2439,10 @@ $ eggdb explain app.db -c "SELECT * FROM users WHERE id = 2"
 
 The columns are the dialect's own: `QUERY PLAN` for postgresql, MySQL's twelve (`id`,
 `select_type`, `table`, `partitions`, `type`, `possible_keys`, `key`, `key_len`, `ref`, `rows`,
-`filtered`, `Extra`) for mysql, `id`, `parent`, `notused`, `detail` for sqlite.
+`filtered`, `Extra`) for mysql, `id`, `parent`, `notused`, `detail` for sqlite,
+`PLAN_TABLE_OUTPUT` for oracle (the lines `SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)` shows after
+`EXPLAIN PLAN`, with no `PLAN_TABLE` written, since the file is read-only) and `StmtText` for
+sqlserver (SHOWPLAN_TEXT's second result, the operator tree).
 
 **JSON**: one `sql --json` statement line, 23.2's shape, `"tag":"EXPLAIN"`:
 
@@ -2454,21 +2458,11 @@ eggdb help explain` lines for the usage ones, as every usage error does:
 | no `-c`, or `-c ""` | `eggdb explain needs a statement: give it with -c` | `invalid_arguments`, usage, 2 |
 | the text starts with `EXPLAIN` (any case, after spaces) | `cannot explain the statement: it starts with EXPLAIN, which eggdb explain adds itself. Give the statement without it.` | `invalid_arguments`, usage, 2 |
 | a second statement | `cannot explain more than one statement: another one starts at byte 23. Give eggdb explain one statement.` | `one_statement_per_call`, usage, 2 |
-| `--dialect oracle` | `cannot explain in Oracle's dialect: Oracle's EXPLAIN PLAN is not in EggDB yet. Explain the query with --dialect postgresql; every dialect sees the same tables.` | `not_supported`, refused, 3 |
-| `--dialect sqlserver` | `cannot explain in SQL Server's dialect: SQL Server's showplan is not in EggDB yet. Explain the query with --dialect postgresql; every dialect sees the same tables.` | `not_supported`, refused, 3 |
 | the statement fails (syntax, a missing table, a statement EXPLAIN does not take) | the dialect's error lines exactly as `eggdb sql` prints them | `sql_error`, failed, 3 (4 or 5 by SQLSTATE) |
 
-`not_supported` exits 3, not 2: the command line is well formed and EggDB refuses the work, as
-every `refused` code does (`not_a_database`, `incompatible`, `permission_denied`); the dialects
-are checked before the file is opened, so a missing file is not reported first. The
-`not_supported` errors print no `try:` line and carry no `fix_command`: the fix repeats the
-statement, and a command built around a user's quoted SQL is 23.4's half-right command. A bad
-`--dialect` value is `sql`'s existing message.
-
-```
-$ eggdb explain app.db -c "SELECT 1" --dialect oracle --json
-{"error":{"code":"not_supported","category":"refused","message":"cannot explain in Oracle's dialect: Oracle's EXPLAIN PLAN is not in EggDB yet. Explain the query with --dialect postgresql; every dialect sees the same tables."}}
-```
+A statement the dialect's form refuses (`EXPLAIN PLAN FOR INSERT …` in oracle, for one) is the
+dialect's `not_supported` error, printed as `eggdb sql` prints it. A bad `--dialect` value is
+`sql`'s existing message.
 
 `eggdb help explain`:
 
@@ -2476,11 +2470,12 @@ $ eggdb explain app.db -c "SELECT 1" --dialect oracle --json
 Usage: eggdb explain <file> -c <sql> [--dialect postgresql|mysql|sqlite|oracle|sqlserver]
 
 Shows the plan EggDB would use for one SELECT, UPDATE or DELETE, without running it. EggDB puts
-EXPLAIN in front of the statement (EXPLAIN QUERY PLAN with --dialect sqlite) and prints the
-result as eggdb sql prints a SELECT, in the dialect's own EXPLAIN form: postgresql's QUERY PLAN
-lines, mysql's EXPLAIN columns, sqlite's query plan rows. Oracle's EXPLAIN PLAN and SQL Server's
-showplan are not in EggDB yet; every dialect sees the same tables, so explain with postgresql.
-The file is opened read-only, so it works beside other readers. One statement per call.
+EXPLAIN in front of the statement (EXPLAIN QUERY PLAN with --dialect sqlite, EXPLAIN PLAN FOR
+with oracle, SET SHOWPLAN_TEXT ON before it with sqlserver) and prints the result as eggdb sql
+prints a SELECT, in the dialect's own form: postgresql's QUERY PLAN lines, mysql's EXPLAIN
+columns, sqlite's query plan rows, oracle's DBMS_XPLAN.DISPLAY lines (no PLAN_TABLE is written),
+sqlserver's StmtText plan rows. The file is opened read-only, so it works beside other readers.
+One statement per call.
 
   -c, --command <sql>   the statement to explain, without EXPLAIN
       --dialect <name>  postgresql (default), mysql, sqlite, oracle or sqlserver

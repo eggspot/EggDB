@@ -145,6 +145,9 @@ impl Session<'_> {
         let statement = crate::explain::PlannedStatement::of(&explain.statement)
             .unwrap_or(crate::explain::PlannedStatement::Select);
         let rows = crate::explain::plan_rows(&query, statement);
+        if self.explain_plan_displays {
+            return Ok(crate::explain::display_result(&rows));
+        }
         let table = plan_table_name(target);
         match &target.table {
             Some(name) => {

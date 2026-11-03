@@ -891,9 +891,10 @@ $ eggdb explain app.db -c "SELECT * FROM users WHERE id = 2"
 - `<table>` is a name or `schema.name`, matched as typed and then lower-cased. A table that is
   not there is exit 1, `table_not_found`, with `try: eggdb table list <file>`.
 - `explain -c <sql> [--dialect …]`: one statement, without `EXPLAIN`, which it adds (`EXPLAIN
-  QUERY PLAN` in SQLite's dialect); the plan prints as a table. Oracle's `EXPLAIN PLAN` and SQL
-  Server's showplan are not in EggDB yet (`not_supported`, exit 3); a second statement is a
-  usage error. The full design is [ux/cli.md](ux/cli.md) section 24.
+  QUERY PLAN` in SQLite's dialect, `EXPLAIN PLAN FOR` in Oracle's, which prints
+  `DBMS_XPLAN.DISPLAY`'s lines and writes no `PLAN_TABLE`, and `SET SHOWPLAN_TEXT ON` before it
+  in SQL Server's, which prints the `StmtText` tree); the plan prints as a table. A second
+  statement is a usage error (D312). The full design is [ux/cli.md](ux/cli.md) section 24.
 - `table list -n <count> [--after <cursor>]`: a page of tables and views; the next page's
   command goes to stderr, and in JSON a last line `{"truncated":true,"next_cursor":"t1.…"}`
   follows the records.

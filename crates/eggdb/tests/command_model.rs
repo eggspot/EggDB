@@ -580,6 +580,8 @@ fn explain_query_and_run_sql_return_what_explain_and_sql_read_only_print() {
         ("postgresql", "SELECT * FROM users WHERE id = 2"),
         ("sqlite", "SELECT name FROM users WHERE id = 2"),
         ("mysql", "SELECT name FROM users WHERE id = 2"),
+        ("oracle", "SELECT name FROM users WHERE id = 2"),
+        ("sqlserver", "SELECT name FROM users WHERE id = 2"),
     ] {
         let answer = mcp.call(
             "explain_query",
@@ -604,7 +606,7 @@ fn explain_query_and_run_sql_return_what_explain_and_sql_read_only_print() {
     }
     for (arguments, args) in [
         (
-            r#"{"sql":"SELECT 1","dialect":"oracle"}"#,
+            r#"{"sql":"INSERT INTO users (id) VALUES (3)","dialect":"oracle"}"#,
             vec![
                 "explain",
                 path.as_str(),
@@ -612,7 +614,7 @@ fn explain_query_and_run_sql_return_what_explain_and_sql_read_only_print() {
                 "--dialect",
                 "oracle",
                 "-c",
-                "SELECT 1",
+                "INSERT INTO users (id) VALUES (3)",
             ],
         ),
         (
@@ -635,6 +637,30 @@ fn explain_query_and_run_sql_return_what_explain_and_sql_read_only_print() {
             "{arguments}"
         );
     }
+    let oracle_plan = succeeded(&eggdb(&[
+        "explain",
+        &path,
+        "--dialect",
+        "oracle",
+        "-c",
+        "SELECT * FROM users",
+    ]));
+    assert!(
+        oracle_plan.contains("PLAN_TABLE_OUTPUT") && oracle_plan.contains("TABLE ACCESS FULL"),
+        "{oracle_plan}"
+    );
+    let sqlserver_plan = succeeded(&eggdb(&[
+        "explain",
+        &path,
+        "--dialect",
+        "sqlserver",
+        "-c",
+        "SELECT * FROM users",
+    ]));
+    assert!(
+        sqlserver_plan.contains("StmtText") && sqlserver_plan.contains("|--"),
+        "{sqlserver_plan}"
+    );
     let doubled = eggdb(&["explain", &path, "-c", "EXPLAIN SELECT 1"]);
     assert_eq!(doubled.status.code(), Some(2));
     let text_plan = succeeded(&eggdb(&[

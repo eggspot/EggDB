@@ -3,6 +3,8 @@ use crate::dialect::Dialect;
 use crate::execute::{ExplainedQuery, ExplainedSource};
 use crate::lexer::swap_uniform_case;
 use crate::plan::{KeyChoice, Use};
+use crate::session::{OutputColumn, QueryResult};
+use crate::types::{SqlType, Value};
 
 /// The table `EXPLAIN PLAN` writes to when it names none, created on demand.
 pub(crate) const PLAN_TABLE: &str = "plan_table";
@@ -425,6 +427,36 @@ pub(crate) fn display_lines(rows: &[DisplayedRow]) -> Vec<String> {
     lines
 }
 
+/// The rows `DBMS_XPLAN.DISPLAY` reads back for `rows` once they are in a plan table.
+pub(crate) fn displayed_rows(rows: &[PlanRow]) -> Vec<DisplayedRow> {
+    rows.iter()
+        .map(|row| DisplayedRow {
+            id: u64::try_from(row.id).unwrap_or(u64::MAX),
+            depth: u64::try_from(row.depth).unwrap_or(u64::MAX),
+            operation: row.operation.to_owned(),
+            options: row.options.map(str::to_owned),
+            name: row.object.as_ref().map(|object| object.name.clone()),
+        })
+        .collect()
+}
+
+/// The answer `SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)` gives right after `EXPLAIN PLAN`
+/// wrote `rows`: one `PLAN_TABLE_OUTPUT` row per line.
+pub(crate) fn display_result(rows: &[PlanRow]) -> QueryResult {
+    let lines = display_lines(&displayed_rows(rows));
+    QueryResult::rows(
+        format!("SELECT {}", lines.len()),
+        vec![OutputColumn {
+            name: "plan_table_output".to_owned(),
+            sql_type: Some(SqlType::Text),
+        }],
+        lines
+            .into_iter()
+            .map(|line| vec![Value::Text(line)])
+            .collect(),
+    )
+}
+
 /// The line `DBMS_XPLAN.DISPLAY` returns when the plan table holds no plan to show.
 pub(crate) fn missing_plan_lines(statement_id: Option<&str>) -> Vec<String> {
     vec![match statement_id {
@@ -475,6 +507,45 @@ mod tests {
             ]
         );
         assert_eq!(display_lines(&rows)[0], lines[0]);
+    }
+
+    #[test]
+    fn a_plan_shown_without_a_plan_table_reads_as_the_written_one_does() {
+        let rows = [
+            PlanRow {
+                id: 0,
+                parent_id: None,
+                depth: 0,
+                position: None,
+                operation: "SELECT STATEMENT",
+                options: None,
+                object: None,
+            },
+            PlanRow {
+                id: 1,
+                parent_id: Some(0),
+                depth: 1,
+                position: Some(1),
+                operation: "TABLE ACCESS",
+                options: Some("FULL"),
+                object: Some(object("emp", "emp", "SEL$1", "TABLE")),
+            },
+        ];
+        let written = [
+            displayed(0, 0, "SELECT STATEMENT", None, None),
+            displayed(1, 1, "TABLE ACCESS", Some("FULL"), Some("EMP")),
+        ];
+        assert_eq!(displayed_rows(&rows), written);
+        let result = display_result(&rows);
+        let expected: Vec<Vec<Value>> = display_lines(&written)
+            .into_iter()
+            .map(|line| vec![Value::Text(line)])
+            .collect();
+        assert_eq!(result.rows, expected);
+        assert_eq!(
+            result.columns.as_ref().map(|columns| columns[0].name.as_str()),
+            Some("plan_table_output")
+        );
     }
 
     #[test]

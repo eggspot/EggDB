@@ -798,7 +798,7 @@ pub const TOOLS: &[ToolDefinition] = &[
     ToolDefinition {
         name: "explain_query",
         title: "Explain a query",
-        description: "Shows the plan EggDB would use for one SELECT, UPDATE or DELETE, without running it, in the dialect's own EXPLAIN form (postgresql, mysql or sqlite; oracle has no EXPLAIN yet).",
+        description: "Shows the plan EggDB would use for one SELECT, UPDATE or DELETE, without running it, in the dialect's own form: EXPLAIN in postgresql and mysql, EXPLAIN QUERY PLAN in sqlite, DBMS_XPLAN.DISPLAY's lines in oracle, SHOWPLAN_TEXT's rows in sqlserver.",
         read_only_server_description: None,
         command: Some(&["explain"]),
         fixed: &["--format", "json"],

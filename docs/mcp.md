@@ -49,7 +49,7 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --allow-write
 | `describe_table` | one table's or view's columns (types, `NOT NULL`, defaults, comments), primary key, indexes, comment, and its row count (exact up to 10,000) |
 | `write_sql` | only with `--allow-write`: runs **one** statement that may change the database, in its own transaction (below) |
 | `run_sql` | runs **one** SQL statement that reads, in a dialect: `postgresql` (the default), `mysql`, `sqlite`, `sqlserver` or `oracle`, all on the same tables; returns at most `max_rows` rows (100 by default, at most 10,000) and 1 MiB |
-| `explain_query` | the plan for one `SELECT`, `UPDATE` or `DELETE`, without running it; give the statement without `EXPLAIN` (Oracle's `EXPLAIN PLAN` and SQL Server's showplan are not in EggDB yet, so those two dialects are refused) |
+| `explain_query` | the plan for one `SELECT`, `UPDATE` or `DELETE`, without running it; give the statement without `EXPLAIN`; `oracle` answers with `DBMS_XPLAN.DISPLAY`'s lines (no `PLAN_TABLE` is written) and `sqlserver` with `SHOWPLAN_TEXT`'s `StmtText` rows (D312) |
 | `sample_rows` | the first rows of a table or view as stored: a table's in primary-key order, a view's in its query's order; not a random sample (10 by default, at most 1,000) |
 | `kv_get` | the value under one key of the key-value store, by text or hexadecimal key; `collection` reads a named collection instead of the default key space (D292) |
 | `kv_scan` | keys and values in key order, by prefix or range, a page at a time; `collection` lists a named collection instead of the default key space (D292) |
@@ -370,7 +370,7 @@ agent can act on it whatever the code; every code's category is in
 | `time_limit` | the call ran past the time limit | narrow the statement, or raise `--time-limit` |
 | `damaged` | the file is damaged | `eggdb check` |
 | `invalid_arguments` | an argument is missing, unknown or of the wrong type | |
-| `not_supported` | Oracle's `EXPLAIN PLAN` or SQL Server's showplan | explain it in `postgresql` |
+| `not_supported` | a statement the dialect cannot do yet, such as Oracle's `EXPLAIN PLAN` of an `INSERT` | send it in `postgresql` |
 | `audit_unavailable` | the call could not be recorded, so its result is withheld | make the audit file writable |
 | `database_unavailable` | the file cannot be opened for another reason (not an EggDB file, written by a newer EggDB, an I/O error) | ask the user |
 

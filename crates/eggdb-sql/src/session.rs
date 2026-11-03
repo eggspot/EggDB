@@ -445,6 +445,7 @@ pub struct Session<'s> {
     keeps_identity_values: bool,
     statement_start: usize,
     shown_statement: Option<String>,
+    explain_plan_displays: bool,
     table_variables: crate::table_variables::TableVariables,
     extra_results: Vec<QueryResult>,
     cancel: crate::cancel::CancelSignal,
@@ -525,6 +526,7 @@ impl<'s> Session<'s> {
             keeps_identity_values: false,
             statement_start: 0,
             shown_statement: None,
+            explain_plan_displays: false,
             table_variables: crate::table_variables::TableVariables::default(),
             extra_results: Vec::new(),
             cancel: crate::cancel::CancelSignal::default(),
@@ -598,6 +600,14 @@ impl<'s> Session<'s> {
     /// sets `n + 1`, so it can tell the client the result was cut.
     pub fn set_max_result_rows(&mut self, rows: Option<u64>) {
         self.max_result_rows = rows;
+    }
+
+    /// With `true`, Oracle's `EXPLAIN PLAN` writes no plan table and answers with the
+    /// `PLAN_TABLE_OUTPUT` lines `SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)` would show right
+    /// after it, so a caller that opens the database read-only (the CLI's `eggdb explain`,
+    /// MCP's `explain_query`) can explain in Oracle's dialect. `false` is the default.
+    pub fn set_explain_plan_displays(&mut self, displays: bool) {
+        self.explain_plan_displays = displays;
     }
 
     /// The dialect this session reads: the one it was opened in, or the one a client chose
