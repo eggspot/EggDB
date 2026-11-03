@@ -145,3 +145,21 @@ Hovering a plan node fills it `bg2`; after 600 ms (or at once with `Ctrl/Cmd+Shi
 current node) a tooltip shows its operation and second row uncut and the engine's extra lines,
 wrapped at 480 px, under the node or over it near the panel's bottom; `Esc` hides it. A click
 selects the node and highlights its table in the editor, as `Enter` does.
+
+## The pointer, the clipboard and dropped files in EggDB's client on every platform
+
+The browser build's connect card (`web/card.js`, D313) answers the mouse, the pen and a touch tap
+or drag as the desktop windows do: hover and pressed fills, a click on a button, link, checkbox or
+segment acts on release, a press in an input puts the caret there, a drag selects, a double-click
+selects a word and a triple-click the value. The right button keeps the browser's own context
+menu. `Ctrl/Cmd+C` and `Ctrl/Cmd+V` use the browser's clipboard events, and fall back to the
+async clipboard API (`navigator.clipboard`, which some browsers ask permission for once) when the
+browser sends none; a page that embeds the card can call `card.copy()` and `card.paste()` from its
+own menus.
+
+On X11, text larger than one X11 request (about 256 KB on most servers) is copied to and pasted
+from other programs with the ICCCM's `INCR` transfers, up to the 8 MB clipboard limit, so pasting
+a long script from a terminal or an editor works. Dropping a file on the connect card shows its
+`accent` ring while the file is over the window and opens it on the drop on Windows (through
+OLE's drag and drop, as Explorer does it) and on X11 (through the XDND protocol that GNOME's Files,
+KDE's Dolphin and other file managers speak), as it already did on macOS.
