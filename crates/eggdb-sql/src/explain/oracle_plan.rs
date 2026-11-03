@@ -279,9 +279,10 @@ pub(crate) fn plan_rows(query: &ExplainedQuery, statement: PlannedStatement) -> 
     rows
 }
 
-fn written_name(name: &str) -> String {
+/// `name`, a plan table's catalog name, written as Oracle SQL names it.
+pub(crate) fn written_plan_table(name: &str) -> String {
     name.split(crate::schemas::QUALIFIER)
-        .map(crate::schema::quoted)
+        .map(crate::session::oracle_identifier)
         .collect::<Vec<_>>()
         .join(".")
 }
@@ -301,11 +302,11 @@ fn number_literal(number: Option<usize>) -> String {
 pub(crate) fn create_plan_table(table: &str) -> String {
     let columns: Vec<String> = PLAN_TABLE_COLUMNS
         .iter()
-        .map(|(name, sql_type)| format!("{} {sql_type}", crate::schema::quoted(name)))
+        .map(|(name, sql_type)| format!("{} {sql_type}", crate::session::oracle_identifier(name)))
         .collect();
     format!(
         "CREATE TABLE {} ({})",
-        written_name(table),
+        written_plan_table(table),
         columns.join(", ")
     )
 }
@@ -319,7 +320,7 @@ pub(crate) fn insert_plan_row(
 ) -> String {
     let columns: Vec<String> = WRITTEN_COLUMNS
         .iter()
-        .map(|name| crate::schema::quoted(name))
+        .map(|name| crate::session::oracle_identifier(name))
         .collect();
     let object = row.object.as_ref();
     let values = [
@@ -340,7 +341,7 @@ pub(crate) fn insert_plan_row(
     ];
     format!(
         "INSERT INTO {} ({}) VALUES ({})",
-        written_name(table),
+        written_plan_table(table),
         columns.join(", "),
         values.join(", ")
     )

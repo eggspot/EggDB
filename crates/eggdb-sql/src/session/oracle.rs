@@ -20,7 +20,7 @@ pub(super) fn after_statement(result: &mut QueryResult) {
     }
 }
 
-pub(super) fn identifier(name: &str) -> String {
+pub(crate) fn identifier(name: &str) -> String {
     let shown = swap_uniform_case(name);
     let plain = shown
         .chars()
@@ -105,12 +105,6 @@ fn plan_table_name(target: &crate::ast::PlanTableTarget) -> String {
     )
 }
 
-fn written(name: &str) -> String {
-    name.split(crate::schemas::QUALIFIER)
-        .map(crate::schema::quoted)
-        .collect::<Vec<_>>()
-        .join(".")
-}
 
 fn constant_text(expr: &crate::ast::Expr) -> crate::error::SqlResult<Option<String>> {
     use crate::ast::{ExprKind, Literal};
@@ -162,8 +156,8 @@ impl Session<'_> {
             }
         }
         let plan_id = first_text(self.run_quietly(&format!(
-            "SELECT TO_CHAR(NVL(MAX(\"plan_id\"), 0) + 1) FROM {}",
-            written(&table)
+            "SELECT TO_CHAR(NVL(MAX(plan_id), 0) + 1) FROM {}",
+            crate::explain::written_plan_table(&table)
         ))?)
         .and_then(|text| text.trim().parse::<u64>().ok())
         .unwrap_or(1);
@@ -235,25 +229,25 @@ impl Session<'_> {
     ) -> crate::error::SqlResult<Vec<String>> {
         let table = table.map_or_else(
             || crate::explain::PLAN_TABLE.to_owned(),
-            |table| table.to_ascii_lowercase(),
+            swap_uniform_case,
         );
         let exists = self.read(|reader, tables| Ok(tables.table(reader, &table)?.is_some()))?;
         if !exists {
             return Ok(crate::explain::missing_plan_lines(statement_id));
         }
         let chosen = statement_id.map_or_else(String::new, |id| {
-            format!(" WHERE \"statement_id\" = '{}'", id.replace('\'', "''"))
+            format!(" WHERE statement_id = '{}'", id.replace('\'', "''"))
         });
         let plan_id = first_text(self.run_quietly(&format!(
-            "SELECT TO_CHAR(MAX(\"plan_id\")) FROM {}{chosen}",
-            written(&table)
+            "SELECT TO_CHAR(MAX(plan_id)) FROM {}{chosen}",
+            crate::explain::written_plan_table(&table)
         ))?);
         let Some(plan_id) = plan_id.and_then(|text| text.trim().parse::<u64>().ok()) else {
             return Ok(crate::explain::missing_plan_lines(statement_id));
         };
         let results = self.run_quietly(&format!(
-            "SELECT TO_CHAR(\"id\"), TO_CHAR(\"depth\"), \"operation\", \"options\", \"object_name\" FROM {} WHERE \"plan_id\" = {plan_id} ORDER BY \"id\"",
-            written(&table)
+            "SELECT TO_CHAR(id), TO_CHAR(depth), operation, options, object_name FROM {} WHERE plan_id = {plan_id} ORDER BY id",
+            crate::explain::written_plan_table(&table)
         ))?;
         let text = |value: Option<&crate::types::Value>| match value {
             Some(crate::types::Value::Text(text)) => Some(text.clone()),

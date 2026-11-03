@@ -17,6 +17,7 @@ pub use oracle_over_tds::{PlsqlParameter, PlsqlProcedure};
 pub use sqlserver::{BatchStep, NamedParameter, ParameterDeclaration, StoredProcedure};
 
 pub(crate) use oracle::create_text as oracle_create_text;
+pub(crate) use oracle::identifier as oracle_identifier;
 
 pub(crate) use sqlite::create_text as sqlite_create_text;
 pub(crate) use sqlite::{index_text as sqlite_index_text, view_text as sqlite_view_text};
@@ -2338,7 +2339,7 @@ impl<'s> Session<'s> {
     }
 
     fn atomically(&mut self, body: impl FnOnce(&mut Self) -> SqlResult<()>) -> SqlResult<()> {
-        if !self.autocommit() {
+        if !self.autocommit() || !matches!(self.block, Block::None) {
             return body(self);
         }
         self.run_quietly("BEGIN")?;

@@ -4,6 +4,7 @@ mod showplan;
 pub(crate) use oracle_plan::{
     DisplayedRow, MOST_DISPLAYED_ROWS, PLAN_DISPLAY_FUNCTION, PLAN_TABLE, create_plan_table,
     display_lines, display_result, insert_plan_row, missing_plan_lines, plan_rows,
+    written_plan_table,
 };
 pub(crate) use showplan::{showplan_all, showplan_text};
 
