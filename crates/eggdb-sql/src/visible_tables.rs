@@ -366,7 +366,11 @@ fn links_of(shown: &Shown, reader: &dyn KeyValueRead) -> SqlResult<Vec<Link>> {
                 let KeyOwner::Relations(target, source) = key_owner(key) else {
                     return Ok(true);
                 };
-                if shown.relations.contains(target) && shown.hidden.contains(source) {
+                let hidden_source = shown.hidden.contains(source)
+                    || (toward_listed == OutsideLinkKind::ReferencedBy
+                        && source != target
+                        && shown.references_through_hidden_columns(source, target));
+                if shown.relations.contains(target) && hidden_source {
                     links.push(Link {
                         listed: target.to_vec(),
                         outside: source.to_vec(),
@@ -495,6 +499,7 @@ fn referenced_positions(
 #[derive(Debug)]
 struct Narrowed {
     name: Vec<u8>,
+    parents_through_hidden_columns: Vec<Vec<u8>>,
     columns: Vec<Column>,
     kept: Vec<usize>,
     kept_names: Vec<String>,
@@ -526,8 +531,15 @@ impl Narrowed {
             .map(|index| index.id)
             .filter(|id| !shown.indexes.iter().any(|index| index.id == *id))
             .collect();
+        let parents_through_hidden_columns = table
+            .foreign_keys
+            .iter()
+            .filter(|key| key.columns.iter().any(|at| !kept.contains(at)))
+            .map(|key| key.parent.as_bytes().to_vec())
+            .collect();
         Some(Self {
             name: table.name.as_bytes().to_vec(),
+            parents_through_hidden_columns,
             columns: table.columns.clone(),
             kept_names: kept
                 .iter()
@@ -636,6 +648,15 @@ struct Shown {
 }
 
 impl Shown {
+    fn references_through_hidden_columns(&self, child: &[u8], parent: &[u8]) -> bool {
+        self.narrowed_named(child).is_some_and(|narrowed| {
+            narrowed
+                .parents_through_hidden_columns
+                .iter()
+                .any(|listed| listed == parent)
+        })
+    }
+
     fn of(tables: &VisibleTables, reader: &dyn KeyValueRead, name_tables: bool) -> SqlResult<Self> {
         let mut shown = Self {
             relations: HashSet::new(),
@@ -777,8 +798,12 @@ impl Shown {
                         .and_then(split_comment_key)
                         .is_none_or(|(_, kind, _)| kind != CommentKind::Relation)
             }
-            KeyOwner::Everyone => narrowed_setting_owner(key)
-                .is_some_and(|owner| self.narrowed_named(owner).is_some()),
+            KeyOwner::Everyone => match crate::roles::column_grant_target(key) {
+                Some((table, column)) => std::str::from_utf8(column)
+                    .is_ok_and(|column| !self.shows_column(table, column)),
+                None => narrowed_setting_owner(key)
+                    .is_some_and(|owner| self.narrowed_named(owner).is_some()),
+            },
             KeyOwner::Relation(_) | KeyOwner::Relations(..) | KeyOwner::Unreadable => false,
         }
     }
@@ -1314,8 +1339,10 @@ fn table_setting_owner(key: &[u8]) -> Option<&[u8]> {
     } else if space == crate::sqlite_schema_text::SQLITE_TEXT_SPACE {
         Some(crate::sqlite_schema_text::owning_relation(rest))
     } else if space == crate::roles::GRANT_SPACE || space == crate::row_security::POLICY_SPACE {
-        let end = rest.iter().position(|&byte| byte == 0)?;
+        let end = rest.iter().rposition(|&byte| byte == 0)?;
         rest.get(..end)
+    } else if space == crate::roles::COLUMN_GRANT_SPACE {
+        crate::roles::column_grant_target(key).map(|(table, _)| table)
     } else {
         None
     }

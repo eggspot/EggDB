@@ -90,4 +90,39 @@ mod tests {
         assert_eq!(budget.used_bytes(), 0);
         assert_eq!(converse(&shared, b"get c\r\n"), "END|");
     }
+    #[test]
+    fn a_multi_get_of_many_items_past_the_memory_budget_stops_before_copying_them_all() {
+        let keyspace = MemoryKeyspace::default();
+        let shared = Shared {
+            keyspace: &keyspace,
+            next_cas: AtomicU64::new(1),
+        };
+        let budget = MemoryBudget::new(256 * 1024);
+        let value = "v".repeat(60 * 1024);
+        let keys: Vec<String> = (0..12).map(|at| format!("k{at}")).collect();
+        let mut input = Vec::new();
+        for key in &keys {
+            input.extend(format!("set {key} 0 0 {}\r\n{value}\r\n", value.len()).into_bytes());
+        }
+        input.extend(format!("get {}\r\n", keys.join(" ")).into_bytes());
+        input.extend(format!("gat 100 {}\r\n", keys.join(" ")).into_bytes());
+        input.extend(b"get k0\r\nversion\r\n".to_vec());
+        let answer = converse_within(&shared, &budget, &input);
+        let expected = format!(
+            "{}SERVER_ERROR out of memory|SERVER_ERROR out of memory|VALUE k0 0 {}|{value}|END|VERSION 1.6.0 EggDB|",
+            "STORED|".repeat(keys.len()),
+            value.len()
+        );
+        assert!(
+            answer == expected,
+            "{}",
+            &answer[answer.len().saturating_sub(200)..]
+        );
+        assert_eq!(budget.used_bytes(), 0);
+        assert_eq!(
+            converse(&shared, b"mg k0 t\r\n"),
+            "HD t-1|",
+            "a refused gat touches nothing"
+        );
+    }
 }

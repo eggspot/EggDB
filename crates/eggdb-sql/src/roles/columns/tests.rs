@@ -430,3 +430,98 @@ fn damaged_column_grants_fail_closed() {
         );
     }
 }
+
+fn policy_names(store: &MemoryStore, table: &str) -> Vec<String> {
+    let reader = store.begin_read().unwrap();
+    crate::row_security::policies(&reader, table)
+        .unwrap()
+        .into_iter()
+        .map(|policy| policy.name)
+        .collect()
+}
+
+#[test]
+fn a_table_named_like_a_schema_keeps_only_its_own_grants_and_policies() {
+    let store = MemoryStore::default();
+    setup(&store);
+    admin_runs(
+        &store,
+        &[
+            "CREATE SCHEMA s",
+            "CREATE TABLE s.t (id integer, x integer)",
+            "INSERT INTO s.t VALUES (1, 10)",
+            "CREATE TABLE s (id integer, t integer, x integer)",
+            "INSERT INTO s VALUES (1, 2, 3)",
+            "CREATE USER t LOGIN",
+            "CREATE USER x LOGIN",
+            "GRANT SELECT (x) ON s TO t",
+            "CREATE POLICY on_s ON s USING (true)",
+            "CREATE POLICY on_st ON s.t USING (true)",
+        ],
+    );
+    denied(&mut as_role(&store, "x"), "SELECT x FROM s.t");
+    admin_runs(&store, &["GRANT SELECT ON s.t TO x"]);
+    let mut t = as_role(&store, "t");
+    assert_eq!(run(&mut t, "SELECT x FROM s").unwrap(), "x\n3\nSELECT 1");
+    denied(&mut t, "SELECT id FROM s");
+    denied(&mut t, "SELECT x FROM s.t");
+    assert_eq!(policy_names(&store, "s"), ["on_s"]);
+    assert_eq!(policy_names(&store, "s\0t"), ["on_st"]);
+
+    admin_runs(&store, &["ALTER TABLE s RENAME TO u"]);
+    assert_eq!(
+        run(&mut as_role(&store, "x"), "SELECT x FROM s.t").unwrap(),
+        "x\n10\nSELECT 1"
+    );
+    assert_eq!(
+        run(&mut as_role(&store, "t"), "SELECT x FROM u").unwrap(),
+        "x\n3\nSELECT 1"
+    );
+    assert_eq!(policy_names(&store, "u"), ["on_s"]);
+    assert_eq!(policy_names(&store, "s\0t"), ["on_st"]);
+    let reader = store.begin_read().unwrap();
+    let table_grants: Vec<(String, String)> = every_grant(&reader)
+        .unwrap()
+        .into_iter()
+        .map(|grant| (grant.table, grant.grantee))
+        .filter(|(table, _)| table != "staff" && table != "teams")
+        .collect();
+    assert_eq!(table_grants, [("s\0t".to_owned(), "x".to_owned())]);
+    let column_grants: Vec<(String, String, String)> = every_column_grant(&reader)
+        .unwrap()
+        .into_iter()
+        .map(|grant| (grant.table, grant.grantee, grant.column))
+        .filter(|(table, _, _)| table != "staff")
+        .collect();
+    assert_eq!(
+        column_grants,
+        [("u".to_owned(), "t".to_owned(), "x".to_owned())]
+    );
+    drop(reader);
+
+    admin_runs(&store, &["ALTER TABLE s.t DROP COLUMN x"]);
+    assert_eq!(
+        run(&mut as_role(&store, "t"), "SELECT x FROM u").unwrap(),
+        "x\n3\nSELECT 1"
+    );
+    admin_runs(&store, &["REVOKE SELECT ON s.t FROM x"]);
+    denied(&mut as_role(&store, "x"), "SELECT id FROM s.t");
+    assert_eq!(
+        run(&mut as_role(&store, "t"), "SELECT x FROM u").unwrap(),
+        "x\n3\nSELECT 1"
+    );
+    admin_runs(
+        &store,
+        &[
+            "GRANT SELECT ON s.t TO x",
+            "REVOKE SELECT ON u FROM t",
+            "DROP TABLE u",
+        ],
+    );
+    assert_eq!(
+        run(&mut as_role(&store, "x"), "SELECT id FROM s.t").unwrap(),
+        "id\n1\nSELECT 1"
+    );
+    assert_eq!(policy_names(&store, "s\0t"), ["on_st"]);
+    assert!(policy_names(&store, "u").is_empty());
+}

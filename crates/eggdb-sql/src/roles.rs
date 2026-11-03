@@ -438,7 +438,10 @@ fn drop_roles(writer: &mut dyn KeyValueWrite, names: &[Name], if_exists: bool) -
                     name.text
                 ),
             )
-            .with_detail(format!("privileges for table {table}"))
+            .with_detail(format!(
+                "privileges for table {}",
+                crate::schemas::display(table)
+            ))
             .at(name.position));
         }
         writer.delete(&role_key(&name.text))?;
@@ -454,30 +457,47 @@ fn drop_roles(writer: &mut dyn KeyValueWrite, names: &[Name], if_exists: bool) -
 }
 
 pub(crate) fn forget_table(writer: &mut dyn KeyValueWrite, table: &str) -> SqlResult<()> {
-    crate::store::delete_prefix(writer, &grant_prefix(table))
+    for (grantee, _) in table_grant_records(writer, table)? {
+        writer.delete(&grant_key(table, &grantee))?;
+    }
+    columns::forget_table_columns(writer, table)
 }
 
-fn granted_tables(reader: &dyn KeyValueRead, grantee: &str) -> SqlResult<Vec<String>> {
-    let mut prefix = NAMESPACE.to_vec();
-    prefix.push(GRANT_SPACE);
-    let mut tables = Vec::new();
+fn table_grant_records(
+    reader: &dyn KeyValueRead,
+    table: &str,
+) -> SqlResult<Vec<(String, Vec<u8>)>> {
+    let prefix = grant_prefix(table);
+    let mut records = Vec::new();
     reader.scan(
         &prefix,
         &prefix_end(&prefix),
         ScanDirection::Forward,
-        &mut |key, _| {
-            let rest = &key[prefix.len()..];
-            if let Some(split) = rest.iter().position(|byte| *byte == 0)
-                && rest[split + 1..]
-                    .split(|byte| *byte == 0)
-                    .next()
-                    .is_some_and(|holder| holder == grantee.as_bytes())
+        &mut |key, value| {
+            let grantee = key.get(prefix.len()..).unwrap_or_default();
+            if !grantee.contains(&0)
+                && let Ok(grantee) = std::str::from_utf8(grantee)
             {
-                tables.push(String::from_utf8_lossy(&rest[..split]).into_owned());
+                records.push((grantee.to_owned(), value.to_vec()));
             }
             Ok(true)
         },
     )?;
+    Ok(records)
+}
+
+fn granted_tables(reader: &dyn KeyValueRead, grantee: &str) -> SqlResult<Vec<String>> {
+    let mut tables: Vec<String> = every_grant(reader)?
+        .into_iter()
+        .filter(|grant| grant.grantee == grantee)
+        .map(|grant| grant.table)
+        .collect();
+    tables.extend(
+        every_column_grant(reader)?
+            .into_iter()
+            .filter(|grant| grant.grantee == grantee)
+            .map(|grant| grant.table),
+    );
     Ok(tables)
 }
 
@@ -551,9 +571,8 @@ pub(crate) fn every_grant(reader: &dyn KeyValueRead) -> SqlResult<Vec<TableGrant
         ScanDirection::Forward,
         &mut |key, value| {
             let rest = key.get(prefix.len()..).unwrap_or_default();
-            if let Some(split) = rest.iter().position(|byte| *byte == 0)
+            if let Some(split) = rest.iter().rposition(|byte| *byte == 0)
                 && let (Some(table), Some(grantee)) = (rest.get(..split), rest.get(split + 1..))
-                && !grantee.contains(&0)
                 && let [RECORD_VERSION, held] = value
             {
                 grants.push(TableGrant {
@@ -801,8 +820,9 @@ pub fn login_verifier(reader: &dyn KeyValueRead, user: &str) -> SqlResult<Option
 mod columns;
 
 pub(crate) use columns::{
-    COLUMN_PRIVILEGES, ColumnGrant, ColumnReach, check_columns, column_reach, every_column_grant,
-    forget_column, move_column, move_table, relation_columns,
+    COLUMN_GRANT_SPACE, COLUMN_PRIVILEGES, ColumnGrant, ColumnReach, check_columns,
+    column_grant_target, column_reach, every_column_grant, forget_column, move_column, move_table,
+    relation_columns,
 };
 
 #[cfg(test)]

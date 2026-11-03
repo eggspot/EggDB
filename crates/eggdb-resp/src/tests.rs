@@ -29,6 +29,7 @@ impl Harness {
             keyspace: &self.keyspace,
             password_sha256: self.password.as_ref(),
             now_ms: self.now_ms,
+            reply_room_bytes: usize::MAX,
         };
         execute(&context, &mut self.client, &arguments)
     }
@@ -180,6 +181,7 @@ fn transactions_queue_and_run_together_and_watch_aborts_them() {
             keyspace: &redis.keyspace,
             password_sha256: None,
             now_ms: redis.now_ms,
+            reply_room_bytes: usize::MAX,
         };
         let mut out = Vec::new();
         execute_with_transactions(&context, &mut redis.client, &arguments).encode(&mut out, false);
@@ -303,4 +305,36 @@ fn requests_and_replies_past_the_memory_budget_get_oom_and_other_clients_go_on()
         writer.write_all(b"QUIT\r\n").unwrap();
         stopped.store(true, std::sync::atomic::Ordering::Release);
     });
+}
+
+#[test]
+fn replies_of_many_keys_stop_with_oom_once_they_pass_the_reply_room() {
+    let mut redis = Harness::new();
+    let value = "v".repeat(1000);
+    for key in ["a", "b", "c", "d"] {
+        assert_eq!(redis.text(&format!("SET {key} {value}")), "+OK|");
+        assert_eq!(redis.text(&format!("SADD s{key} {key}{value}")), ":1|");
+    }
+    let mut run = |line: &str, reply_room_bytes: usize| {
+        let arguments: Vec<Vec<u8>> = line
+            .split(' ')
+            .map(|word| word.as_bytes().to_vec())
+            .collect();
+        let context = Context {
+            keyspace: &redis.keyspace,
+            password_sha256: None,
+            now_ms: redis.now_ms,
+            reply_room_bytes,
+        };
+        let mut out = Vec::new();
+        execute(&context, &mut redis.client, &arguments).encode(&mut out, false);
+        String::from_utf8(out).unwrap()
+    };
+    for line in ["MGET a b c d", "SUNION sa sb sc sd"] {
+        let refused = run(line, 2500);
+        assert!(refused.starts_with("-OOM "), "{line}: {refused}");
+        assert!(run(line, 8000).starts_with('*'), "{line}");
+    }
+    assert!(run("KEYS *", 20).starts_with("-OOM "));
+    assert!(run("MGET a b", 2500).starts_with("*2\r\n"));
 }

@@ -617,6 +617,46 @@ fn a_table_listed_with_columns_cannot_be_changed() {
 }
 
 #[test]
+fn a_foreign_key_on_a_hidden_column_keeps_the_listed_parent_from_losing_rows() {
+    let store = shop();
+    let limited = ConfinedStore {
+        store: &store,
+        tables: VisibleTables::new(["children(id)", "parents"]),
+    };
+    let links = limited
+        .tables
+        .outside_links(&store.begin_read().unwrap())
+        .unwrap();
+    assert!(
+        links.iter().any(|link| link.listed == "parents"
+            && link.outside == "children"
+            && link.kind == OutsideLinkKind::ReferencedBy),
+        "{links:?}"
+    );
+    let mut session = Session::new(&limited);
+    runs(&mut session, "INSERT INTO parents VALUES (2)");
+    for sql in [
+        "DELETE FROM parents WHERE id = 1",
+        "DELETE FROM parents",
+        "UPDATE parents SET id = 10 WHERE id = 1",
+    ] {
+        let message = refused(&mut session, sql);
+        assert!(
+            message.starts_with(
+                "cannot delete a row of \"parents\" or change a column a foreign key points at"
+            ),
+            "{sql}: {message}"
+        );
+    }
+    fails(&mut session, "TRUNCATE parents");
+    session.close().unwrap();
+    assert_eq!(
+        shown(&store, "SELECT id, parent FROM children"),
+        "id|parent\n1|1\nSELECT 1"
+    );
+}
+
+#[test]
 fn a_policy_calling_a_user_routine_or_holding_a_subquery_cannot_be_written() {
     let store = shop();
     let mut owner = Session::new(&store);

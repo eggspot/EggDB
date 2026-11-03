@@ -57,6 +57,7 @@ impl<'k> AofReplay<'k> {
                 keyspace,
                 password_sha256: None,
                 now_ms,
+                reply_room_bytes: usize::MAX,
             },
             client: Client {
                 authenticated: true,
@@ -136,6 +137,7 @@ mod tests {
             keyspace: &keyspace,
             password_sha256: None,
             now_ms: 0,
+            reply_room_bytes: usize::MAX,
         };
         let reply =
             crate::commands::execute(&context, &mut client, &[b"LLEN".to_vec(), b"l".to_vec()]);
@@ -168,6 +170,7 @@ mod tests {
             keyspace: &keyspace,
             password_sha256: None,
             now_ms: 0,
+            reply_room_bytes: usize::MAX,
         };
         let reply =
             crate::commands::execute(&context, &mut client, &[b"GET".to_vec(), b"k".to_vec()]);

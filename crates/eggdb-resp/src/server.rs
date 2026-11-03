@@ -30,6 +30,15 @@ pub struct ServerConfig {
 const OUT_OF_BUDGET: &str =
     "OOM command not allowed: the server's connections already hold their memory budget";
 
+fn reply_room(budget: &MemoryBudget, held_bytes: usize, pending_bytes: usize) -> usize {
+    budget
+        .limit_bytes()
+        .saturating_sub(budget.used_bytes())
+        .saturating_add(held_bytes)
+        .saturating_sub(pending_bytes)
+        .max(UNCOUNTED_BUFFER_BYTES)
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -200,6 +209,7 @@ fn serve_connection(
                 keyspace,
                 password_sha256: config.password_sha256.as_ref(),
                 now_ms: now_ms(),
+                reply_room_bytes: reply_room(&config.memory_budget, held.bytes(), out.len()),
             };
             vec![execute_with_transactions(&context, &mut client, &arguments)]
         };

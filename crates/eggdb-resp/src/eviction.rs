@@ -320,6 +320,7 @@ mod tests {
                 keyspace,
                 password_sha256: None,
                 now_ms: 1000,
+                reply_room_bytes: usize::MAX,
             },
             client,
             &arguments,

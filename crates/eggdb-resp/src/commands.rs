@@ -37,6 +37,27 @@ pub struct Context<'k> {
     pub password_sha256: Option<&'k [u8; 32]>,
     /// The time now, in milliseconds since 1970.
     pub now_ms: u64,
+    /// The most bytes one reply may take: a command that reads many keys stops with `-OOM`
+    /// before it copies past it. `usize::MAX` for no limit.
+    pub reply_room_bytes: usize,
+}
+
+const REPLY_OVER_BUDGET: &str =
+    "OOM command not allowed: the reply would pass the server's memory budget";
+const BULK_FRAMING_BYTES: usize = 32;
+
+impl Context<'_> {
+    pub(crate) fn check_reply_room(&self, reply_bytes: usize) -> Result<(), String> {
+        if reply_bytes > self.reply_room_bytes {
+            Err(REPLY_OVER_BUDGET.to_owned())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+pub(crate) fn bulk_reply_bytes(bytes: &[u8]) -> usize {
+    bytes.len().saturating_add(BULK_FRAMING_BYTES)
 }
 
 impl std::fmt::Debug for Context<'_> {
@@ -428,6 +449,7 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
         }
         ("mget", count) if count >= 1 => reading(context, db, |keys| {
             let mut values = Vec::with_capacity(args.len());
+            let mut reply_bytes = 0usize;
             for key in args {
                 let value = match load(keys, key, now)? {
                     Some(Entry {
@@ -436,6 +458,9 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
                     }) => Some(bytes),
                     _ => None,
                 };
+                reply_bytes = reply_bytes
+                    .saturating_add(bulk_reply_bytes(value.as_deref().unwrap_or_default()));
+                context.check_reply_room(reply_bytes)?;
                 values.push(Reply::Bulk(value));
             }
             Ok(Reply::Array(Some(values)))
@@ -643,11 +668,15 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
             })
         }),
         ("keys", 1) => reading(context, db, |keys| {
-            let matched = live_keys(keys, now)?
-                .into_iter()
-                .filter(|key| glob(&args[0], key))
-                .map(Reply::bulk)
-                .collect();
+            let mut matched = Vec::new();
+            let mut reply_bytes = 0usize;
+            for key in live_keys(keys, now)? {
+                if glob(&args[0], &key) {
+                    reply_bytes = reply_bytes.saturating_add(bulk_reply_bytes(&key));
+                    context.check_reply_room(reply_bytes)?;
+                    matched.push(Reply::bulk(key));
+                }
+            }
             Ok(Reply::Array(Some(matched)))
         }),
         ("scan", count) if count >= 1 => scan(context, db, args),

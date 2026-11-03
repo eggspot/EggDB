@@ -1,6 +1,6 @@
 use super::{
-    GRANT_SPACE, PUBLIC, Privilege, acl_text, grant_key, grant_prefix, missing_role,
-    permission_denied, role_closure, stored_role, table_level_held,
+    PUBLIC, Privilege, acl_text, grant_key, missing_role, permission_denied, role_closure,
+    stored_role, table_grant_records, table_level_held,
 };
 use crate::ast::Name;
 use crate::encoding::{NAMESPACE, prefix_end};
@@ -19,11 +19,54 @@ pub(crate) const COLUMN_PRIVILEGES: [Privilege; 4] = [
     Privilege::References,
 ];
 
+pub(crate) const COLUMN_GRANT_SPACE: u8 = 0x16;
+
+fn column_grant_prefix(table: &str) -> Vec<u8> {
+    let mut key = NAMESPACE.to_vec();
+    key.push(COLUMN_GRANT_SPACE);
+    key.extend_from_slice(&(table.len() as u32).to_be_bytes());
+    key.extend_from_slice(table.as_bytes());
+    key
+}
+
 fn column_grant_key(table: &str, grantee: &str, column: &str) -> Vec<u8> {
-    let mut key = grant_key(table, grantee);
+    let mut key = column_grant_prefix(table);
+    key.extend_from_slice(grantee.as_bytes());
     key.push(0);
     key.extend_from_slice(column.as_bytes());
     key
+}
+
+struct ColumnGrantKey<'k> {
+    table: &'k [u8],
+    grantee: &'k [u8],
+    column: &'k [u8],
+}
+
+fn split_column_grant_key(rest: &[u8]) -> Option<ColumnGrantKey<'_>> {
+    let (length, rest) = rest.split_first_chunk::<4>()?;
+    let length = usize::try_from(u32::from_be_bytes(*length)).ok()?;
+    let (table, rest) = rest.split_at_checked(length)?;
+    let (grantee, column) = split_grantee_and_column(rest)?;
+    Some(ColumnGrantKey {
+        table,
+        grantee,
+        column,
+    })
+}
+
+fn split_grantee_and_column(rest: &[u8]) -> Option<(&[u8], &[u8])> {
+    let split = rest.iter().position(|byte| *byte == 0)?;
+    Some((rest.get(..split)?, rest.get(split + 1..)?))
+}
+
+/// The table and the column a stored column grant's key names, or `None` for any other key.
+pub(crate) fn column_grant_target(key: &[u8]) -> Option<(&[u8], &[u8])> {
+    let (&space, rest) = key.strip_prefix(NAMESPACE)?.split_first()?;
+    if space != COLUMN_GRANT_SPACE {
+        return None;
+    }
+    split_column_grant_key(rest).map(|parts| (parts.table, parts.column))
 }
 
 struct StoredColumnGrant {
@@ -38,7 +81,7 @@ fn damaged_grant() -> SqlError {
 }
 
 fn column_grants_of(reader: &dyn KeyValueRead, table: &str) -> SqlResult<Vec<StoredColumnGrant>> {
-    let prefix = grant_prefix(table);
+    let prefix = column_grant_prefix(table);
     let mut found = Vec::new();
     let mut damaged = false;
     reader.scan(
@@ -47,11 +90,9 @@ fn column_grants_of(reader: &dyn KeyValueRead, table: &str) -> SqlResult<Vec<Sto
         ScanDirection::Forward,
         &mut |key, value| {
             let rest = key.get(prefix.len()..).unwrap_or_default();
-            let Some(split) = rest.iter().position(|byte| *byte == 0) else {
-                return Ok(true);
-            };
-            let (Some(grantee), Some(column)) = (rest.get(..split), rest.get(split + 1..)) else {
-                return Ok(true);
+            let Some((grantee, column)) = split_grantee_and_column(rest) else {
+                damaged = true;
+                return Ok(false);
             };
             let (Ok(grantee), Ok(column), [COLUMN_RECORD_VERSION, privileges]) = (
                 std::str::from_utf8(grantee),
@@ -295,33 +336,28 @@ pub(crate) fn move_column(
 }
 
 /// Moves every grant on `from`, on the table and on its columns, to `to`, when the table is
-/// renamed.
+/// renamed. The grants of the tables in a schema named like `from` stay where they are.
 pub(crate) fn move_table(writer: &mut dyn KeyValueWrite, from: &str, to: &str) -> SqlResult<()> {
     if from == to {
         return Ok(());
     }
-    let old = grant_prefix(from);
-    let mut moved = Vec::new();
-    writer.scan(
-        &old,
-        &prefix_end(&old),
-        ScanDirection::Forward,
-        &mut |key, value| {
-            moved.push((key.to_vec(), value.to_vec()));
-            Ok(true)
-        },
-    )?;
-    let new = grant_prefix(to);
-    for (key, value) in moved {
-        let Some(rest) = key.get(old.len()..) else {
-            continue;
-        };
-        let mut renamed = new.clone();
-        renamed.extend_from_slice(rest);
-        writer.delete(&key)?;
-        writer.put(&renamed, &value)?;
+    for (grantee, value) in table_grant_records(writer, from)? {
+        writer.delete(&grant_key(from, &grantee))?;
+        writer.put(&grant_key(to, &grantee), &value)?;
+    }
+    for grant in column_grants_of(writer, from)? {
+        writer.delete(&grant.key)?;
+        writer.put(
+            &column_grant_key(to, &grant.grantee, &grant.column),
+            &[COLUMN_RECORD_VERSION, grant.privileges],
+        )?;
     }
     Ok(())
+}
+
+/// Removes every column grant on `table`, when the table is dropped.
+pub(super) fn forget_table_columns(writer: &mut dyn KeyValueWrite, table: &str) -> SqlResult<()> {
+    crate::store::delete_prefix(writer, &column_grant_prefix(table))
 }
 
 /// One grantee's privileges on one column, as `GRANT ... (column)` stored them.
@@ -347,29 +383,33 @@ impl ColumnGrant {
 /// Every stored column grant, in table, grantee and then column order.
 pub(crate) fn every_column_grant(reader: &dyn KeyValueRead) -> SqlResult<Vec<ColumnGrant>> {
     let mut prefix = NAMESPACE.to_vec();
-    prefix.push(GRANT_SPACE);
+    prefix.push(COLUMN_GRANT_SPACE);
     let mut grants = Vec::new();
+    let mut damaged = false;
     reader.scan(
         &prefix,
         &prefix_end(&prefix),
         ScanDirection::Forward,
         &mut |key, value| {
             let rest = key.get(prefix.len()..).unwrap_or_default();
-            let mut parts = rest.splitn(3, |byte| *byte == 0);
-            if let (Some(table), Some(grantee), Some(column)) =
-                (parts.next(), parts.next(), parts.next())
-                && let [COLUMN_RECORD_VERSION, held] = value
-            {
-                grants.push(ColumnGrant {
-                    table: String::from_utf8_lossy(table).into_owned(),
-                    grantee: String::from_utf8_lossy(grantee).into_owned(),
-                    column: String::from_utf8_lossy(column).into_owned(),
-                    privileges: *held,
-                });
-            }
+            let (Some(parts), [COLUMN_RECORD_VERSION, held]) =
+                (split_column_grant_key(rest), value)
+            else {
+                damaged = true;
+                return Ok(false);
+            };
+            grants.push(ColumnGrant {
+                table: String::from_utf8_lossy(parts.table).into_owned(),
+                grantee: String::from_utf8_lossy(parts.grantee).into_owned(),
+                column: String::from_utf8_lossy(parts.column).into_owned(),
+                privileges: *held,
+            });
             Ok(true)
         },
     )?;
+    if damaged {
+        return Err(damaged_grant());
+    }
     Ok(grants)
 }
 

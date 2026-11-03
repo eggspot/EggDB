@@ -1155,8 +1155,9 @@ pub(crate) fn insert(
     tables: &mut TableCache,
     insert: &Insert,
 ) -> SqlResult<QueryResult> {
+    let check_appended = crate::row_security::has_new_row_check(insert.returning.as_deref());
     let result = insert_rows(writer, tables, insert)?;
-    crate::row_security::checked_new_rows(result, &insert.table.name.text)
+    crate::row_security::checked_new_rows(result, &insert.table.name.text, check_appended)
 }
 
 fn insert_rows(
@@ -3826,8 +3827,9 @@ pub(crate) fn update(
     tables: &mut TableCache,
     update: &Update,
 ) -> SqlResult<QueryResult> {
+    let check_appended = crate::row_security::has_new_row_check(update.returning.as_deref());
     let result = update_rows(writer, tables, update)?;
-    crate::row_security::checked_new_rows(result, &update.table.name.text)
+    crate::row_security::checked_new_rows(result, &update.table.name.text, check_appended)
 }
 
 fn update_rows(

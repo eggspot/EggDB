@@ -1,6 +1,6 @@
 use crate::commands::{
-    MAX_ITEM_BYTES, Mode, Shared, Stored, arithmetic, check_key, delete, flush_all, get, storage,
-    touch,
+    MAX_ITEM_BYTES, Mode, Shared, Stored, arithmetic, check_key, delete, flush_all, get, get_each,
+    storage, touch,
 };
 use eggdb_platform::connection_limits::MemoryBudget;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -77,6 +77,13 @@ fn value_block(out: &mut Vec<u8>, key: &[u8], flags: u32, data: &[u8], cas: Opti
     out.extend_from_slice(b"\r\n");
     out.extend_from_slice(data);
     out.extend_from_slice(b"\r\n");
+}
+
+const END: &[u8] = b"END\r\n";
+const VALUE_BLOCK_FRAMING_BYTES: usize = 64;
+
+fn value_block_bound(key: &[u8], data: &[u8]) -> usize {
+    key.len() + data.len() + VALUE_BLOCK_FRAMING_BYTES
 }
 
 fn server_error(message: String) -> Vec<u8> {
@@ -201,19 +208,24 @@ pub fn serve_stream(
                 }
                 let keys: Vec<Vec<u8>> =
                     words[first_key..].iter().map(|key| key.to_vec()).collect();
-                match get(shared, &keys, exptime, now) {
-                    Ok(found) => {
-                        let mut out = Vec::new();
-                        for (key, item) in found {
-                            value_block(
-                                &mut out,
-                                &key,
-                                item.flags,
-                                &item.data,
-                                with_cas.then_some(item.cas),
-                            );
-                        }
-                        out.extend_from_slice(b"END\r\n");
+                let mut out = Vec::new();
+                let read = get_each(shared, &keys, exptime, now, &mut |key, item| {
+                    let room = out.len() + value_block_bound(key, &item.data) + END.len();
+                    if !held.hold_if_large(room) {
+                        return false;
+                    }
+                    value_block(
+                        &mut out,
+                        key,
+                        item.flags,
+                        &item.data,
+                        with_cas.then_some(item.cas),
+                    );
+                    true
+                });
+                match read {
+                    Ok(()) => {
+                        out.extend_from_slice(END);
                         out
                     }
                     Err(error) => server_error(error),

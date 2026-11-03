@@ -1,6 +1,6 @@
 use crate::commands::{
-    Context, NOT_INTEGER, SYNTAX, WRONG_TYPE, float, integer, load, range_of, reading, save,
-    writing,
+    Context, NOT_INTEGER, SYNTAX, WRONG_TYPE, bulk_reply_bytes, float, integer, load, range_of,
+    reading, save, writing,
 };
 use crate::protocol::{Reply, format_double};
 use crate::value::{Data, Entry, SortedSet};
@@ -474,8 +474,14 @@ pub(crate) fn execute(
         }),
         ("sinter" | "sunion" | "sdiff", count) if count >= 1 => reading(context, db, |keys| {
             let mut sets = Vec::with_capacity(args.len());
+            let mut reply_bytes = 0usize;
             for key in args {
-                sets.push(set_of(load(keys, key, now)?.as_ref())?);
+                let set = set_of(load(keys, key, now)?.as_ref())?;
+                for member in &set {
+                    reply_bytes = reply_bytes.saturating_add(bulk_reply_bytes(member));
+                }
+                context.check_reply_room(reply_bytes)?;
+                sets.push(set);
             }
             let mut result = sets.remove(0);
             for other in sets {
