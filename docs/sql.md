@@ -2238,6 +2238,33 @@ protocol, as one line: `slow statement duration_ms=... database=... user=... pro
 rows=... query="..."` after the UTC time, with the same normalized text. `lock_timeout` and
 limits per role are not there yet.
 
+## Plans in Oracle's and SQL Server's dialects
+
+In Oracle's dialect, `EXPLAIN PLAN [SET STATEMENT_ID = 'id'] [INTO table] FOR <SELECT, UPDATE
+or DELETE>` plans the statement without running it and writes one row per operation to
+`PLAN_TABLE` (created on first use with the columns of Oracle's reference) or to the table
+`INTO` names, which must exist. `SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)` (with optional
+`table`, `statement_id` and `format` arguments) returns the last plan as `PLAN_TABLE_OUTPUT`
+lines:
+
+```
+Plan hash value: <the same number for the same plan>
+
+----------------------------------
+| Id  | Operation         | Name |
+----------------------------------
+|   0 | SELECT STATEMENT  |      |
+|   1 |  TABLE ACCESS FULL| EMP  |
+----------------------------------
+```
+
+In SQL Server's dialect, `SET SHOWPLAN_TEXT ON` and `SET SHOWPLAN_ALL ON` make every later
+statement return its plan instead of running (the statement's text, then the `|--` tree; or
+SQL Server's 18 `SHOWPLAN_ALL` columns), and `SET STATISTICS PROFILE ON` runs each statement
+and adds that result with `Rows` and `Executes`. EggDB has no estimates, so costs and row
+estimates are NULL, and it measures whole statements, so only the top operator's rows are
+filled in (D312).
+
 ## LISTEN and NOTIFY
 
 Sessions of `eggdb serve` can signal each other as PostgreSQL's do: `LISTEN channel`,
@@ -4253,8 +4280,9 @@ And more, not in the suite yet:
 ## Known differences from Oracle
 The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 610 cases from Oracle's SQL
 Language Reference and PL/SQL Language Reference, never Oracle's software) marks these as differing until they are fixed:
-- `EXPLAIN PLAN FOR` and `DBMS_XPLAN`, bitmap, function-based and reverse-key indexes, and the
-  primary key's index in `USER_INDEXES` (EggDB keeps the primary key as the table's own order).
+- `EXPLAIN PLAN` and `DBMS_XPLAN.DISPLAY` give no costs, cardinalities or predicates and only
+  the `Id`, `Operation` and `Name` columns (D312); bitmap, function-based and reverse-key
+  indexes, and the primary key's index in `USER_INDEXES` (EggDB keeps the primary key as the table's own order).
 - `ROWNUM` in the select list, `ORDER BY` or anywhere but `WHERE` conditions joined by `AND`.
 - Division that does not end keeps `numeric`'s scale (about 20 digits; Oracle has 38), so `2 /
   3 * 3` is not exactly 2, `date - date` of 8 hours shows fewer 3s and `MONTHS_BETWEEN` fewer
