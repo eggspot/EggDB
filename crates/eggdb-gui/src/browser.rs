@@ -571,9 +571,10 @@ mod tests {
         assert!(card.read_only);
         assert!(card.pointer.focus_by_pointer);
         assert_eq!(card.pointer.pressed, None);
-        let open = centre_of(&card, NODE_OPEN);
+        let mut fresh = ConnectCard::first_start();
+        let open = centre_of(&fresh, NODE_OPEN);
         let later = now + Duration::from_secs(1);
-        let answer = click(&mut pointer, &mut card, open, later);
+        let answer = click(&mut pointer, &mut fresh, open, later);
         assert_eq!(answer.action, ConnectAction::Open);
     }
 
