@@ -80,17 +80,15 @@ pub(crate) fn is_citext_type(sql_type: SqlType) -> bool {
     matches!(sql_type, SqlType::Defined(defined) if is_citext(defined))
 }
 
-const CASE_INSENSITIVE_FUNCTIONS: [&str; 9] = [
+const CASE_INSENSITIVE_REGEXP_FUNCTIONS: [&str; 5] = [
     "regexp_match",
     "regexp_matches",
     "regexp_replace",
     "regexp_split_to_array",
     "regexp_split_to_table",
-    "replace",
-    "split_part",
-    "strpos",
-    "translate",
 ];
+
+const CASE_INSENSITIVE_STRING_FUNCTIONS: [&str; 4] = ["replace", "split_part", "strpos", "translate"];
 
 fn as_text(value: &Value) -> Value {
     match text_of(value) {
@@ -124,7 +122,7 @@ pub(crate) fn regexp_arguments<'v>(name: &str, values: &'v [Value]) -> Cow<'v, [
         return Cow::Borrowed(values);
     }
     let mut texts: Vec<Value> = values.iter().map(as_text).collect();
-    if subject_is_citext(values) && CASE_INSENSITIVE_FUNCTIONS.contains(&name) {
+    if subject_is_citext(values) && CASE_INSENSITIVE_REGEXP_FUNCTIONS.contains(&name) {
         add_case_insensitive_flag(name, &mut texts);
     }
     Cow::Owned(texts)
@@ -210,7 +208,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         return None;
     }
     let regexp = crate::regexp_functions::FUNCTIONS.contains(&name);
-    if !regexp && !CASE_INSENSITIVE_FUNCTIONS.contains(&name) {
+    if !regexp && !CASE_INSENSITIVE_STRING_FUNCTIONS.contains(&name) {
         return None;
     }
     if values.iter().any(Value::is_null) {
