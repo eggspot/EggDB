@@ -310,6 +310,42 @@ fn column_names(stmt: *mut EggdbStmt) -> Vec<String> {
         .collect()
 }
 
+fn name_pointer(stmt: *mut EggdbStmt, column: usize) -> *const c_char {
+    let mut name: *const c_char = ptr::null();
+    // SAFETY: a live statement, a column in range and a place for the name.
+    ok(unsafe { eggdb_stmt_column_name(stmt, column, &mut name) });
+    name
+}
+
+fn read_name(name: *const c_char) -> String {
+    // SAFETY: the statement lends a NUL-terminated name until it is finalized, and the
+    // statement this pointer came from has not been finalized yet.
+    unsafe { CStr::from_ptr(name) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[test]
+fn a_column_name_read_before_the_run_stays_valid_until_finalize() {
+    Fixture::both("names", |sql| {
+        load_numbers(sql, 3);
+        let select = prepared(sql, "SELECT id, label FROM numbers ORDER BY id");
+        let label = name_pointer(select, 1);
+        assert_eq!(read_name(label), "label");
+        let (status, found) = step(select);
+        ok(status);
+        assert!(found);
+        assert_eq!(read_name(label), "label");
+        assert_eq!(name_pointer(select, 1), label);
+        reset(select);
+        let (status, found) = step(select);
+        ok(status);
+        assert!(found);
+        assert_eq!(read_name(label), "label");
+        finalize(select);
+    });
+}
+
 fn load_numbers(sql: *mut EggdbSql, count: usize) {
     ok(execute(
         sql,

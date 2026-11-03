@@ -630,6 +630,9 @@ pub(crate) fn take_application_lock(
     if take(&mut held, name.clone(), owner.owner, mode, lasts) {
         return Ok(ApplicationLockGrant::AtOnce);
     }
+    if timeout.is_some_and(|timeout| timeout.is_zero()) {
+        return Ok(ApplicationLockGrant::TimedOut);
+    }
     let waiting = ApplicationWait::start(owner.owner, name.clone(), mode);
     loop {
         if waiting.is_deadlocked(&held) {
@@ -1001,6 +1004,55 @@ mod tests {
             )
         );
         assert!(!application_waits().contains_key(&first_owner));
+        drop(entered);
+    }
+
+    #[test]
+    fn a_zero_lock_timeout_times_out_at_once_before_any_deadlock_check() {
+        use super::{
+            ApplicationLockGrant, Lasts, Mode, application_waits, release_application_lock,
+            take_application_lock,
+        };
+        let second = AdvisoryLocks::new(9_292);
+        let entered = enter(&second, false);
+        assert_eq!(
+            take_application_lock("b", Mode::Exclusive, Lasts::Session, None).unwrap(),
+            ApplicationLockGrant::AtOnce
+        );
+        let (holding, held) = std::sync::mpsc::channel();
+        let first = std::thread::spawn(move || {
+            let locks = AdvisoryLocks::new(9_292);
+            let _entered = enter(&locks, false);
+            let taken = take_application_lock("a", Mode::Exclusive, Lasts::Session, None).unwrap();
+            holding.send(locks.owner).unwrap();
+            let waited = take_application_lock(
+                "b",
+                Mode::Exclusive,
+                Lasts::Session,
+                Some(Duration::from_secs(30)),
+            )
+            .unwrap();
+            (taken, waited)
+        });
+        let first_owner = held.recv().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !application_waits().contains_key(&first_owner) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let refused =
+            take_application_lock("a", Mode::Shared, Lasts::Session, Some(Duration::ZERO)).unwrap();
+        assert_eq!(refused, ApplicationLockGrant::TimedOut);
+        assert_eq!(refused.status(), -1);
+        assert!(!application_waits().contains_key(&second.owner));
+        assert!(release_application_lock("b", Lasts::Session).unwrap());
+        assert_eq!(
+            first.join().unwrap(),
+            (
+                ApplicationLockGrant::AtOnce,
+                ApplicationLockGrant::AfterWaiting
+            )
+        );
         drop(entered);
     }
 }

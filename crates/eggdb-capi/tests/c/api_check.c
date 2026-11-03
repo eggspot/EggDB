@@ -287,6 +287,9 @@ static void check_stepping_and_streaming_copy(eggdb_db *db) {
     const char *text = "SELECT id, word, weight FROM lines ORDER BY id";
     eggdb_stmt *select = NULL;
     CHECK_OK(eggdb_sql_prepare(sql, text, strlen(text), &select));
+    const char *word_name = NULL;
+    CHECK_OK(eggdb_stmt_column_name(select, 1, &word_name));
+    CHECK(strcmp(word_name, "word") == 0);
     int has_row = 0;
     int64_t total = 0;
     size_t rows = 0;
@@ -324,11 +327,13 @@ static void check_stepping_and_streaming_copy(eggdb_db *db) {
         rows++;
     }
     CHECK(rows == 3 && total == 6);
+    CHECK(strcmp(word_name, "word") == 0);
     CHECK_OK(eggdb_stmt_step(select, &has_row));
     CHECK(has_row == 0);
     CHECK_OK(eggdb_stmt_reset(select));
     CHECK_OK(eggdb_stmt_step(select, &has_row));
     CHECK(has_row == 1);
+    CHECK(strcmp(word_name, "word") == 0);
     CHECK_OK(eggdb_stmt_finalize(select));
 
     CHECK_OK(eggdb_sql_copy_out_begin(sql, "COPY lines (id, word) TO STDOUT", &copy));

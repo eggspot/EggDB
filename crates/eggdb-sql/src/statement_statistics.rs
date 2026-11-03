@@ -90,6 +90,9 @@ impl fmt::Display for Quoted<'_> {
                 '"' => formatter.write_str("\\\"")?,
                 '\\' => formatter.write_str("\\\\")?,
                 '\n' | '\r' | '\t' => formatter.write_str(" ")?,
+                control if control.is_control() || matches!(control, '\u{2028}' | '\u{2029}') => {
+                    write!(formatter, "\\u{{{:04x}}}", u32::from(control))?
+                }
                 other => write!(formatter, "{other}")?,
             }
         }
@@ -100,6 +103,8 @@ impl fmt::Display for Quoted<'_> {
 /// What one statement shape has cost since the statistics were last reset.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StatementStatistics {
+    /// The user the statements ran as.
+    pub user: String,
     /// The database the statements ran in.
     pub database: String,
     /// A stable 64-bit hash of the full normalized text.
@@ -134,6 +139,7 @@ pub struct StatisticsInfo {
 
 #[derive(Debug, Clone, PartialEq)]
 struct Entry {
+    user: Box<str>,
     database: Box<str>,
     query_id: i64,
     query: Box<str>,
@@ -167,6 +173,7 @@ impl Entry {
             0.0
         };
         StatementStatistics {
+            user: self.user.to_string(),
             database: self.database.to_string(),
             query_id: self.query_id,
             query: self.query.to_string(),
@@ -204,6 +211,7 @@ impl Shard {
             self.drop_least_called(capacity.max(1));
         }
         let mut entry = Entry {
+            user: statement.user.into(),
             database: statement.database.into(),
             query_id: normalized.query_id,
             query: normalized.text.as_str().into(),
@@ -351,7 +359,7 @@ pub(crate) fn record(tokens: &[Token<'_>], text: &str, statement: &RecordedState
         return;
     }
     if capacity > 0 {
-        let key = keyed(statement.database, normalized.query_id);
+        let key = keyed(statement.user, statement.database, normalized.query_id);
         let shard = &table()[(key % SHARDS as u64) as usize];
         if locked(shard).record(shard_capacity(capacity), key, statement, &normalized) {
             DEALLOCATIONS.fetch_add(1, Ordering::Relaxed);
@@ -376,8 +384,10 @@ pub(crate) fn record(tokens: &[Token<'_>], text: &str, statement: &RecordedState
     }
 }
 
-fn keyed(database: &str, query_id: i64) -> u64 {
+fn keyed(user: &str, database: &str, query_id: i64) -> u64 {
     let mut hash = Fnv::new();
+    hash.write(user.as_bytes());
+    hash.write(&[0]);
     hash.write(database.as_bytes());
     hash.write(&[0]);
     hash.write(&query_id.to_le_bytes());
@@ -485,6 +495,34 @@ mod tests {
     fn normalized(text: &str) -> Normalized {
         let tokens = crate::lexer::tokenize(text).unwrap_or_default();
         normalize(&tokens, text)
+    }
+
+    #[test]
+    fn the_same_statement_counts_apart_per_user_and_database() {
+        let id = normalized("SELECT 1").query_id;
+        let first = keyed("alice", "main", id);
+        assert_ne!(first, keyed("bob", "main", id));
+        assert_ne!(first, keyed("alice", "other", id));
+        assert_ne!(keyed("ab", "c", id), keyed("a", "bc", id));
+        assert_eq!(first, keyed("alice", "main", id));
+    }
+
+    #[test]
+    fn slow_lines_escape_every_control_character() {
+        let line = SlowStatement {
+            duration: Duration::from_millis(1),
+            database: "main\u{1b}[2J",
+            user: "eggdb",
+            protocol: "postgresql",
+            rows: 0,
+            query: "SELECT 1\u{0}\u{7f}\u{85}\u{2028}",
+        }
+        .to_string();
+        assert_eq!(
+            line,
+            "slow statement duration_ms=1.000 database=\"main\\u{001b}[2J\" user=eggdb protocol=postgresql rows=0 query=\"SELECT 1\\u{0000}\\u{007f}\\u{0085}\\u{2028}\""
+        );
+        assert!(!line.chars().any(char::is_control));
     }
 
     fn statement(database: &str, milliseconds: u64, rows: u64) -> RecordedStatement<'_> {

@@ -42,6 +42,7 @@ pub struct EggdbStmt {
     remote_name: Option<String>,
     parameters: Vec<Parameter>,
     columns: Vec<StatementColumn>,
+    retired_names: Vec<CString>,
     results: ResultBatch,
     stepping: Stepping,
     row: ResultBatch,
@@ -88,6 +89,28 @@ fn remote_columns(names: &[String], types: &[u32]) -> Vec<StatementColumn> {
             kind: remote_kind(types.get(index).copied().unwrap_or(0)),
         })
         .collect()
+}
+
+fn adopt_columns(
+    columns: &mut Vec<StatementColumn>,
+    retired_names: &mut Vec<CString>,
+    fresh: Vec<StatementColumn>,
+) {
+    let mut previous = std::mem::take(columns).into_iter();
+    for column in fresh {
+        match previous.next() {
+            Some(kept) if kept.name == column.name => columns.push(StatementColumn {
+                name: kept.name,
+                kind: column.kind,
+            }),
+            Some(superseded) => {
+                retired_names.push(superseded.name);
+                columns.push(column);
+            }
+            None => columns.push(column),
+        }
+    }
+    retired_names.extend(previous.map(|superseded| superseded.name));
 }
 
 fn not_convertible(column: usize, kind: i32, wanted: &str) -> Failure {
@@ -181,7 +204,11 @@ impl EggdbStmt {
                     return Ok(());
                 };
                 let columns = result.columns.unwrap_or_default();
-                self.columns = statement_columns(&columns);
+                adopt_columns(
+                    &mut self.columns,
+                    &mut self.retired_names,
+                    statement_columns(&columns),
+                );
                 self.stepping = Stepping::Local {
                     columns,
                     dialect,
@@ -237,7 +264,11 @@ impl EggdbStmt {
                     let answer = remote.client().map(|client| client.next_answer());
                     match answer {
                         Ok(Ok(Answer::Columns { names, types })) => {
-                            self.columns = remote_columns(&names, &types);
+                            adopt_columns(
+                                &mut self.columns,
+                                &mut self.retired_names,
+                                remote_columns(&names, &types),
+                            );
                             *column_types = types;
                         }
                         Ok(Ok(Answer::Row(values))) => {
@@ -379,6 +410,7 @@ pub unsafe extern "C" fn eggdb_sql_prepare(
             remote_name,
             parameters: vec![NULL_PARAMETER; parameter_count],
             columns,
+            retired_names: Vec::new(),
             results: ResultBatch::default(),
             stepping: Stepping::Idle,
             row: ResultBatch::default(),
@@ -934,7 +966,7 @@ pub unsafe extern "C" fn eggdb_stmt_finalize(stmt: *mut EggdbStmt) -> c_int {
 
 #[cfg(test)]
 mod tests {
-    use super::{bytea_text, double_text, kind_of, remote_columns, whole_number};
+    use super::{adopt_columns, bytea_text, double_text, kind_of, remote_columns, whole_number};
     use crate::sql::{EGGDB_BLOB, EGGDB_INTEGER, EGGDB_NULL, EGGDB_REAL, EGGDB_TEXT};
     use eggdb::sql::SqlType;
 
@@ -983,6 +1015,32 @@ mod tests {
         let unknown = remote_columns(&names[..1], &[]);
         assert_eq!(unknown[0].kind, EGGDB_NULL);
         assert_eq!(unknown[0].name.to_bytes(), b"id");
+    }
+
+    #[test]
+    fn names_lent_before_a_run_outlive_the_run_columns_replacing_them() {
+        let outline = |names: &[&str]| {
+            let names: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
+            remote_columns(&names, &[])
+        };
+        let mut columns = outline(&["id", "label", "gone"]);
+        let mut retired = Vec::new();
+        let id = columns[0].name.as_ptr();
+        let label = columns[1].name.as_ptr();
+        let gone = columns[2].name.as_ptr();
+        adopt_columns(
+            &mut columns,
+            &mut retired,
+            remote_columns(&["id".to_owned()], &[20]),
+        );
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].name.as_ptr(), id);
+        assert_eq!(columns[0].kind, EGGDB_INTEGER);
+        let kept: Vec<*const std::ffi::c_char> = retired.iter().map(|name| name.as_ptr()).collect();
+        assert_eq!(kept, [label, gone]);
+        adopt_columns(&mut columns, &mut retired, outline(&["id"]));
+        assert_eq!(columns[0].name.as_ptr(), id);
+        assert_eq!(retired.len(), 2);
     }
 
     #[test]

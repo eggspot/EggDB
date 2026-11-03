@@ -257,7 +257,13 @@ fn successor_of<'a>(
     instances: &'a [CaptureInstance],
     table: &SourceTable,
     current: &str,
+    now: &[String],
 ) -> Option<&'a CaptureInstance> {
+    let still_followed: Vec<String> = table
+        .followed_names()
+        .into_iter()
+        .filter(|name| now.contains(name))
+        .collect();
     let theirs: Vec<&CaptureInstance> = instances
         .iter()
         .filter(|instance| instance.is_of(table))
@@ -266,11 +272,11 @@ fn successor_of<'a>(
         Some(at) => &theirs[..at],
         None => &theirs[..],
     };
-    newer
-        .iter()
-        .rev()
-        .copied()
-        .find(|instance| instance.captures(&table.key) && instance.minimum.is_some())
+    newer.iter().rev().copied().find(|instance| {
+        instance.captures(&table.key)
+            && instance.captures(&still_followed)
+            && instance.minimum.is_some()
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1460,7 +1466,7 @@ fn poll(
                 let current_exists = instances
                     .iter()
                     .any(|other| other.name == instance && other.is_of(table));
-                let successor = successor_of(&instances, table, &instance).cloned();
+                let successor = successor_of(&instances, table, &instance, &now).cloned();
                 let starts = successor.as_ref().and_then(|successor| successor.minimum);
                 if let (Some(successor), Some(starts)) = (&successor, starts)
                     && starts <= next
@@ -3092,33 +3098,59 @@ mod tests {
         let table = orders();
         let old = instance("dbo_orders", &["id", "note", "tag"], Some(5));
         let new = instance("dbo_orders_2", &["id", "note", "tag", "extra"], Some(9));
+        let now = names(&["id", "note", "tag", "extra"]);
         let both = vec![new.clone(), old.clone()];
-        assert_eq!(successor_of(&both, &table, "dbo_orders"), Some(&new));
-        assert_eq!(successor_of(&both, &table, "dbo_orders_2"), None);
-        let not_started = vec![instance("dbo_orders_2", &["id"], None), old.clone()];
-        assert_eq!(successor_of(&not_started, &table, "dbo_orders"), None);
-        let keyless = vec![instance("dbo_orders_2", &["note"], Some(9)), old.clone()];
-        assert_eq!(successor_of(&keyless, &table, "dbo_orders"), None);
+        assert_eq!(successor_of(&both, &table, "dbo_orders", &now), Some(&new));
+        assert_eq!(successor_of(&both, &table, "dbo_orders_2", &now), None);
+        let not_started = vec![
+            instance("dbo_orders_2", &["id", "note", "tag"], None),
+            old.clone(),
+        ];
+        assert_eq!(successor_of(&not_started, &table, "dbo_orders", &now), None);
+        let keyless = vec![
+            instance("dbo_orders_2", &["note", "tag"], Some(9)),
+            old.clone(),
+        ];
+        assert_eq!(successor_of(&keyless, &table, "dbo_orders", &now), None);
         assert_eq!(
-            successor_of(std::slice::from_ref(&new), &table, "dbo_orders"),
+            successor_of(std::slice::from_ref(&new), &table, "dbo_orders", &now),
             Some(&new)
         );
         let mut elsewhere = new.clone();
         elsewhere.table = "other".to_owned();
-        assert_eq!(successor_of(&[elsewhere, old], &table, "dbo_orders"), None);
+        assert_eq!(
+            successor_of(&[elsewhere, old], &table, "dbo_orders", &now),
+            None
+        );
+    }
+
+    #[test]
+    fn a_newer_capture_instance_that_leaves_out_a_followed_column_still_on_the_source_is_no_successor()
+     {
+        let table = orders();
+        let old = instance("dbo_orders", &["id", "note", "tag"], Some(5));
+        let partial = instance("dbo_orders_2", &["id", "note"], Some(9));
+        let both = vec![partial.clone(), old];
+        let now = names(&["id", "note", "tag"]);
+        assert_eq!(successor_of(&both, &table, "dbo_orders", &now), None);
+        let tag_dropped = names(&["id", "note"]);
+        assert_eq!(
+            successor_of(&both, &table, "dbo_orders", &tag_dropped),
+            Some(&partial)
+        );
     }
 
     #[test]
     fn switching_instances_adds_the_new_captured_columns_and_drops_the_ones_it_leaves_out() {
         let table = orders();
         let new = instance("dbo_orders_2", &["id", "note", "extra"], Some(9));
-        let now = names(&["note", "id", "tag", "extra", "secret"]);
+        let now = names(&["note", "id", "extra", "secret"]);
         assert_eq!(
             switch_plan(&table, &new, &now),
             SwitchPlan {
                 dropped: names(&["tag"]),
                 added: names(&["extra"]),
-                left_out: names(&["tag", "secret"]),
+                left_out: names(&["secret"]),
             }
         );
         let same = instance("dbo_orders_2", &["id", "note", "tag"], Some(9));

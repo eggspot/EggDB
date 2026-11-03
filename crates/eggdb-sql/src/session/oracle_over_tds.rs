@@ -13,8 +13,9 @@ const CATALOG_PROCEDURE_PREFIX: &[u8] = b"sp_";
 /// request naming it in a session that reads Oracle SQL ([`Session::plsql_procedure`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlsqlProcedure {
-    /// The name as the client wrote it, checked to hold only identifiers joined by `.`, so
-    /// that it reads back as this procedure after Oracle's `CALL`.
+    /// The name as the client wrote it, rebuilt from its identifiers joined by `.` (quoted
+    /// ones quoted again, comments and spacing left out), so that it reads back as this
+    /// procedure after Oracle's `CALL`.
     pub call_name: String,
     /// Its parameters in the order declared.
     pub parameters: Vec<PlsqlParameter>,
@@ -45,22 +46,26 @@ impl PlsqlParameter {
     }
 }
 
-fn is_plain_name(text: &str) -> bool {
-    let Ok(tokens) = tokenize_in(text, Dialect::Oracle) else {
-        return false;
-    };
+fn plain_name(text: &str) -> Option<String> {
+    let tokens = tokenize_in(text, Dialect::Oracle).ok()?;
+    let mut parts: Vec<String> = Vec::new();
     let mut expects_part = true;
     for token in &tokens {
         match &token.kind {
-            TokenKind::End => return !expects_part,
-            TokenKind::Word(_) | TokenKind::QuotedIdentifier(_) if expects_part => {
+            TokenKind::End if !expects_part => return Some(parts.join(".")),
+            TokenKind::Word(word) if expects_part => {
+                parts.push(identifier(word));
+                expects_part = false;
+            }
+            TokenKind::QuotedIdentifier(name) if expects_part => {
+                parts.push(identifier(name));
                 expects_part = false;
             }
             TokenKind::Dot if !expects_part => expects_part = true,
-            _ => return false,
+            _ => return None,
         }
     }
-    false
+    None
 }
 
 fn mentions_catalog_procedure_prefix(text: &str) -> bool {
@@ -124,9 +129,9 @@ impl Session<'_> {
     /// `name` is not only a name or names a function or a procedure of another language. Of
     /// overloaded procedures, the first one declared is described.
     pub fn plsql_procedure(&mut self, name: &str) -> SqlResult<Option<PlsqlProcedure>> {
-        if !is_plain_name(name) {
+        let Some(call_name) = plain_name(name) else {
             return Ok(None);
-        }
+        };
         let settings = Arc::clone(&self.settings);
         let Ok(parsed) = crate::parser::oracle_table_name(name, &settings) else {
             return Ok(None);
@@ -161,7 +166,7 @@ impl Session<'_> {
             })
             .collect();
         Ok(Some(PlsqlProcedure {
-            call_name: name.to_owned(),
+            call_name,
             parameters,
         }))
     }
@@ -169,22 +174,37 @@ impl Session<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{executes_sqlserver_catalog_procedure, is_plain_name};
+    use super::{executes_sqlserver_catalog_procedure, plain_name};
     use crate::memory_store::MemoryStore;
     use crate::{Dialect, QueryResult, Session};
 
     #[test]
     fn only_dotted_identifiers_are_procedure_names() {
-        assert!(is_plain_name("log_it"));
-        assert!(is_plain_name("hr.log_it"));
-        assert!(is_plain_name("\"HR\".\"LOG IT\""));
-        assert!(!is_plain_name(""));
-        assert!(!is_plain_name("hr."));
-        assert!(!is_plain_name(".log_it"));
-        assert!(!is_plain_name("log_it; DROP TABLE t"));
-        assert!(!is_plain_name("log_it(1)"));
-        assert!(!is_plain_name("log_it;"));
-        assert!(!is_plain_name("[dbo].[p]"));
+        let plain = |text: &str| plain_name(text);
+        assert_eq!(plain("log_it").as_deref(), Some("LOG_IT"));
+        assert_eq!(plain("hr . log_it").as_deref(), Some("HR.LOG_IT"));
+        assert_eq!(plain("\"HR\".\"LOG IT\"").as_deref(), Some("HR.\"LOG IT\""));
+        assert_eq!(plain(""), None);
+        assert_eq!(plain("hr."), None);
+        assert_eq!(plain(".log_it"), None);
+        assert_eq!(plain("log_it; DROP TABLE t"), None);
+        assert_eq!(plain("log_it(1)"), None);
+        assert_eq!(plain("log_it;"), None);
+        assert_eq!(plain("[dbo].[p]"), None);
+    }
+
+    #[test]
+    fn comments_after_a_procedure_name_are_left_out_of_its_call_name() {
+        assert_eq!(plain_name("log_it --x").as_deref(), Some("LOG_IT"));
+        assert_eq!(plain_name("log_it /* x */").as_deref(), Some("LOG_IT"));
+        assert_eq!(
+            plain_name("hr/*a*/.log_it --b").as_deref(),
+            Some("HR.LOG_IT")
+        );
+        assert_eq!(
+            plain_name("\"log--it\".\"a/*b\"").as_deref(),
+            Some("\"log--it\".\"a/*b\"")
+        );
     }
 
     #[test]
@@ -254,5 +274,15 @@ mod tests {
         assert_eq!(session.plsql_procedure("no_such_procedure").unwrap(), None);
         assert_eq!(session.plsql_procedure("split_it; COMMIT").unwrap(), None);
         assert_eq!(session.plsql_procedure("[dbo].[split_it]").unwrap(), None);
+        let commented = session
+            .plsql_procedure("SPLIT_IT --(1, 2)")
+            .unwrap()
+            .unwrap();
+        assert_eq!(commented.call_name, "SPLIT_IT");
+        let block_commented = session
+            .plsql_procedure("split_it /* note */")
+            .unwrap()
+            .unwrap();
+        assert_eq!(block_commented.call_name, "SPLIT_IT");
     }
 }

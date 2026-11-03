@@ -717,18 +717,60 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MonitoringRelation) -> 
     }
 }
 
+const STATISTICS_READER_ROLES: [&str; 2] = ["pg_read_all_stats", "pg_monitor"];
+const HIDDEN_STATEMENT: &str = "<insufficient privilege>";
+
+fn belongs_to_any(roles: &[crate::roles::StoredRole], user: &str, wanted: &[&str]) -> bool {
+    let mut held: Vec<&str> = vec![user];
+    let mut at = 0;
+    while let Some(&name) = held.get(at) {
+        if wanted.contains(&name) {
+            return true;
+        }
+        for role in roles.iter().filter(|role| role.name == name) {
+            for parent in &role.member_of {
+                if !held.contains(&parent.as_str()) {
+                    held.push(parent);
+                }
+            }
+        }
+        at += 1;
+    }
+    false
+}
+
+fn sees_every_statement(snapshot: &CatalogSnapshot) -> bool {
+    snapshot
+        .settings
+        .checked_role
+        .as_deref()
+        .is_none_or(|role| belongs_to_any(&snapshot.stored_roles, role, &STATISTICS_READER_ROLES))
+}
+
 fn statement_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     let count = |count: u64| Value::BigInt(i64::try_from(count).unwrap_or(i64::MAX));
+    let sees_every_statement = sees_every_statement(snapshot);
     crate::statement_statistics::statistics()
         .into_iter()
         .filter(|entry| entry.database == snapshot.database)
         .map(|entry| {
+            let own = entry.user == snapshot.user;
+            let user = if own {
+                oids::SESSION_USER
+            } else {
+                crate::roles::role_oid(&entry.user)
+            };
+            let (query_id, query) = if own || sees_every_statement {
+                (Value::BigInt(entry.query_id), Value::Text(entry.query))
+            } else {
+                (Value::Null, Value::Text(HIDDEN_STATEMENT.to_owned()))
+            };
             CatalogRow::new(&STAT_STATEMENTS)
-                .set("userid", Value::Oid(oids::SESSION_USER))
+                .set("userid", Value::Oid(user))
                 .set("dbid", Value::Oid(oids::DATABASE))
                 .set("toplevel", Value::Boolean(true))
-                .set("queryid", Value::BigInt(entry.query_id))
-                .set("query", Value::Text(entry.query))
+                .set("queryid", query_id)
+                .set("query", query)
                 .set("calls", count(entry.calls))
                 .set("total_exec_time", Value::Double(entry.total_ms))
                 .set("min_exec_time", Value::Double(entry.min_ms))
@@ -930,6 +972,39 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn role(name: &str, member_of: &[&str]) -> crate::roles::StoredRole {
+        crate::roles::StoredRole {
+            name: name.to_owned(),
+            login: true,
+            superuser: false,
+            create_database: false,
+            scram_verifier: None,
+            member_of: member_of
+                .iter()
+                .map(|parent| (*parent).to_owned())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn statistics_readers_are_found_through_nested_and_circular_memberships() {
+        let roles = [
+            role("alice", &["staff"]),
+            role("staff", &["pg_monitor", "alice"]),
+            role("bob", &["clerks"]),
+            role("clerks", &["bob"]),
+        ];
+        assert!(belongs_to_any(&roles, "alice", &STATISTICS_READER_ROLES));
+        assert!(belongs_to_any(&roles, "staff", &STATISTICS_READER_ROLES));
+        assert!(!belongs_to_any(&roles, "bob", &STATISTICS_READER_ROLES));
+        assert!(!belongs_to_any(&roles, "nobody", &STATISTICS_READER_ROLES));
+        assert!(belongs_to_any(
+            &roles,
+            "pg_read_all_stats",
+            &STATISTICS_READER_ROLES
+        ));
+    }
 
     #[test]
     fn sizes_print_like_pg_size_pretty() {

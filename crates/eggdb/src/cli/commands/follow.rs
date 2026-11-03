@@ -1625,10 +1625,11 @@ impl Session<'_> {
                             } => streamed
                                 .push(xid, subtransaction, message)
                                 .map_err(unreadable)?,
-                            StreamedMessage::Control(LogicalMessage::StreamStop) => {
-                                in_stream = None
+                            StreamedMessage::Control(message) => {
+                                if ends_stream_block(&message).map_err(source_failed)? {
+                                    in_stream = None;
+                                }
                             }
-                            StreamedMessage::Control(_) => {}
                         }
                         Applied::Done
                     } else {
@@ -2337,6 +2338,21 @@ impl Applying<'_> {
     }
 }
 
+fn ends_stream_block(message: &LogicalMessage) -> Result<bool, String> {
+    let misplaced = match message {
+        LogicalMessage::StreamStop => return Ok(true),
+        LogicalMessage::Begin { .. } => "Begin",
+        LogicalMessage::Commit { .. } => "Commit",
+        LogicalMessage::StreamStart { .. } => "Stream Start",
+        LogicalMessage::StreamCommit { .. } => "Stream Commit",
+        LogicalMessage::StreamAbort { .. } => "Stream Abort",
+        _ => return Ok(false),
+    };
+    Err(format!(
+        "the source sent a {misplaced} message inside a block of streamed changes, before the block's Stream Stop"
+    ))
+}
+
 fn spill_directory(file: &std::path::Path) -> std::path::PathBuf {
     file.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -2570,6 +2586,55 @@ fn table_definition(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn control_in_stream_block(bytes: &[u8]) -> Result<bool, String> {
+        match parse_streamed_message(bytes).map_err(|error| error.to_string())? {
+            StreamedMessage::Control(message) => ends_stream_block(&message),
+            StreamedMessage::Change { .. } => Err("a change, not a control message".to_owned()),
+        }
+    }
+
+    #[test]
+    fn a_transaction_boundary_inside_a_stream_block_is_a_protocol_error() {
+        assert_eq!(control_in_stream_block(b"E"), Ok(true));
+        let mut origin = b"O".to_vec();
+        origin.extend_from_slice(&7u64.to_be_bytes());
+        origin.extend_from_slice(b"node\0");
+        assert_eq!(control_in_stream_block(&origin), Ok(false));
+        let mut begin = b"B".to_vec();
+        begin.extend_from_slice(&16u64.to_be_bytes());
+        begin.extend_from_slice(&0u64.to_be_bytes());
+        begin.extend_from_slice(&42u32.to_be_bytes());
+        let mut commit = b"C\0".to_vec();
+        commit.extend_from_slice(&16u64.to_be_bytes());
+        commit.extend_from_slice(&32u64.to_be_bytes());
+        commit.extend_from_slice(&0u64.to_be_bytes());
+        let mut stream_start = b"S".to_vec();
+        stream_start.extend_from_slice(&42u32.to_be_bytes());
+        stream_start.push(0);
+        let mut stream_commit = b"c".to_vec();
+        stream_commit.extend_from_slice(&42u32.to_be_bytes());
+        stream_commit.push(0);
+        stream_commit.extend_from_slice(&16u64.to_be_bytes());
+        stream_commit.extend_from_slice(&32u64.to_be_bytes());
+        stream_commit.extend_from_slice(&0u64.to_be_bytes());
+        let mut stream_abort = b"A".to_vec();
+        stream_abort.extend_from_slice(&42u32.to_be_bytes());
+        stream_abort.extend_from_slice(&43u32.to_be_bytes());
+        for (bytes, name) in [
+            (begin, "Begin"),
+            (commit, "Commit"),
+            (stream_start, "Stream Start"),
+            (stream_commit, "Stream Commit"),
+            (stream_abort, "Stream Abort"),
+        ] {
+            let refused = control_in_stream_block(&bytes).unwrap_err();
+            assert!(
+                refused.contains(&format!("a {name} message inside a block")),
+                "{refused}"
+            );
+        }
+    }
 
     fn answer(rows: Vec<Vec<Option<String>>>) -> Vec<QueryRows> {
         vec![QueryRows {

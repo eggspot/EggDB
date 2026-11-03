@@ -1110,7 +1110,9 @@ the default database is never dropped. A name is 1 to 63 letters, digits, `_`, `
 `CREATE TEMPORARY TABLE`) or a session-level lock (`pg_advisory_lock`, `sp_getapplock` with
 `@LockOwner = 'Session'`) does not move: `USE` and `COM_INIT_DB` fail with `0A000` (SQL
 Server's error 40508, MySQL's 1235) naming what it holds, because the switch would drop and
-release them; drop and release them first, or open another connection (D294).
+release them; drop and release them first, or open another connection (D294). This is a
+compatibility gap: SQL Server and MySQL keep temporary tables and session locks across a
+`USE`, so an application relying on that needs the change described in D294.
 
 | Option | Meaning |
 |--------|---------|

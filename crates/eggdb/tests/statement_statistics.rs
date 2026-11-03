@@ -1,6 +1,7 @@
 //! `eggdb serve`'s statement statistics, slow-statement log and `EXPLAIN (ANALYZE, BUFFERS)`
 //! (D286), driven over the PostgreSQL protocol: `pg_stat_statements` counts each statement
-//! shape with its literals as placeholders, `--log-slow-statements 0` logs every statement as
+//! shape with its literals as placeholders and hides other users' statements from a role that
+//! is not a superuser, `--log-slow-statements 0` logs every statement as
 //! one line on stderr without its values, and `BUFFERS` prints the page cache's hits and reads.
 
 mod common;
@@ -49,8 +50,12 @@ fn serve(file: &TempPath, extra: &[&str]) -> Server {
 }
 
 fn connect(server: &Server) -> PgClient {
+    connect_as(server, "eggdb", PASSWORD)
+}
+
+fn connect_as(server: &Server, user: &str, password: &str) -> PgClient {
     let options = parse_postgres_url_with_password(&format!(
-        "postgres://eggdb:{PASSWORD}@127.0.0.1:{}/stats?sslmode=disable",
+        "postgres://{user}:{password}@127.0.0.1:{}/stats?sslmode=disable",
         server.port
     ))
     .unwrap();
@@ -153,6 +158,49 @@ fn pg_stat_statements_counts_each_shape_without_its_literals_and_resets() {
         vec!["SELECT pg_stat_statements_reset()".to_owned()]
     );
     client.terminate();
+}
+
+#[test]
+fn a_role_that_is_not_a_superuser_sees_other_users_statements_hidden() {
+    let file = TempPath::new("statement-statistics-roles");
+    let server = serve(&file, &[]);
+    let mut admin = connect(&server);
+    rows(&mut admin, "CREATE USER alice WITH PASSWORD 'pencil'");
+    rows(&mut admin, "SELECT 1717 AS admin_probe");
+    let mut alice = connect_as(&server, "alice", "pencil");
+    rows(&mut alice, "SELECT 4242 AS alice_probe");
+    let seen_by_alice = rows(
+        &mut alice,
+        "SELECT query, queryid IS NULL FROM pg_stat_statements \
+         WHERE query LIKE '%probe' OR query = '<insufficient privilege>' ORDER BY query",
+    );
+    assert!(
+        seen_by_alice.contains(&vec!["SELECT $1 AS alice_probe".to_owned(), "f".to_owned()]),
+        "{seen_by_alice:?}"
+    );
+    assert!(
+        seen_by_alice.contains(&vec!["<insufficient privilege>".to_owned(), "t".to_owned()]),
+        "{seen_by_alice:?}"
+    );
+    assert!(
+        !seen_by_alice
+            .iter()
+            .any(|row| row[0].contains("admin_probe")),
+        "{seen_by_alice:?}"
+    );
+    let seen_by_admin = first_column(
+        &mut admin,
+        "SELECT query FROM pg_stat_statements WHERE query LIKE '%probe' ORDER BY query",
+    );
+    assert_eq!(
+        seen_by_admin,
+        vec![
+            "SELECT $1 AS admin_probe".to_owned(),
+            "SELECT $1 AS alice_probe".to_owned()
+        ]
+    );
+    alice.terminate();
+    admin.terminate();
 }
 
 #[test]
