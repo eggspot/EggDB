@@ -447,7 +447,7 @@ as written, it did this, and the sections above were updated where they changed:
    opening the file read its header, free list and log; it stopped at the damage`. The
    library's closing advice (restore from a backup, or run eggdb check) is removed from the
    `damaged:` line and the JSON `problem`, since the `what to do` line replaces it.
-3. **`--version`** prints the crate version, so `eggdb 0.1.0` until the v0.2.0 bump.
+3. **`--version`** prints the crate version, for example `eggdb 0.2.0`.
 4. **`hex` and `raw`** are for `get` and `scan`; another command with them is a usage error:
    `--format hex is for get and scan; eggdb check prints text or json`.
 5. **Usage errors** print `eggdb: <message>`, then `  usage: <the command's one-line usage>`
@@ -2549,7 +2549,7 @@ The help body, the main help's `sql` line and every `sql` output stay as they ar
 --json` print one object on one line, exit 0:
 
 ```
-{"version":"0.1.0"}
+{"version":"0.2.0"}
 ```
 
 `version` is the crate version at build time, the same string the text form prints after `eggdb `

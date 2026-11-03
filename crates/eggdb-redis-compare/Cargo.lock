@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "eggdb"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-amqp",
  "eggdb-api",
@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-ai"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-search",
  "eggdb-vector",
@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-amqp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-crypto",
  "eggdb-keyspace",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-crypto",
  "eggdb-http",
@@ -72,21 +72,21 @@ dependencies = [
 
 [[package]]
 name = "eggdb-arrow"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-parquet",
 ]
 
 [[package]]
 name = "eggdb-auth"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-crypto",
 ]
 
 [[package]]
 name = "eggdb-bolt"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-crypto",
  "eggdb-graph",
@@ -95,23 +95,23 @@ dependencies = [
 
 [[package]]
 name = "eggdb-bson"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "eggdb-columnar"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "eggdb-commands"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "eggdb-content"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "eggdb-cql"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-crypto",
  "eggdb-platform",
@@ -120,11 +120,11 @@ dependencies = [
 
 [[package]]
 name = "eggdb-crypto"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "eggdb-documents"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-bson",
  "eggdb-crypto",
@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-dynamodb"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-auth",
  "eggdb-http",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-esrest"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-crypto",
  "eggdb-http",
@@ -155,15 +155,15 @@ dependencies = [
 
 [[package]]
 name = "eggdb-format"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "eggdb-geo"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "eggdb-graph"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-bson",
  "eggdb-keyspace",
@@ -171,26 +171,26 @@ dependencies = [
 
 [[package]]
 name = "eggdb-http"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "eggdb-kafka"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-keyspace",
 ]
 
 [[package]]
 name = "eggdb-keyspace"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "eggdb-kql"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "eggdb-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-commands",
  "eggdb-crypto",
@@ -200,7 +200,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-memcached"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-keyspace",
  "eggdb-platform",
@@ -208,7 +208,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-mongowire"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-auth",
  "eggdb-bson",
@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-mqtt"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-crypto",
  "eggdb-keyspace",
@@ -227,7 +227,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-mysqlwire"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-crypto",
  "eggdb-platform",
@@ -237,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-nats"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-crypto",
  "eggdb-sql",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-observability"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-columnar",
  "eggdb-crypto",
@@ -255,14 +255,14 @@ dependencies = [
 
 [[package]]
 name = "eggdb-parquet"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-columnar",
 ]
 
 [[package]]
 name = "eggdb-pgwire"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-auth",
  "eggdb-crypto",
@@ -273,11 +273,11 @@ dependencies = [
 
 [[package]]
 name = "eggdb-platform"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "eggdb-queues"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-keyspace",
 ]
@@ -291,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-resp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-crypto",
  "eggdb-keyspace",
@@ -300,7 +300,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-s3"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-auth",
  "eggdb-crypto",
@@ -310,11 +310,11 @@ dependencies = [
 
 [[package]]
 name = "eggdb-search"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "eggdb-sql"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-ai",
  "eggdb-auth",
@@ -328,11 +328,11 @@ dependencies = [
 
 [[package]]
 name = "eggdb-sqlite-format"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "eggdb-sqs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-auth",
  "eggdb-crypto",
@@ -344,7 +344,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-stomp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-crypto",
  "eggdb-keyspace",
@@ -353,7 +353,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-crypto",
  "eggdb-format",
@@ -362,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-tdswire"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-crypto",
  "eggdb-platform",
@@ -372,11 +372,11 @@ dependencies = [
 
 [[package]]
 name = "eggdb-text"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "eggdb-tls"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-crypto",
  "eggdb-platform",
@@ -384,11 +384,11 @@ dependencies = [
 
 [[package]]
 name = "eggdb-ui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-platform",
 ]
 
 [[package]]
 name = "eggdb-vector"
-version = "0.1.0"
+version = "0.2.0"
