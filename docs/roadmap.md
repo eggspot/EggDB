@@ -318,8 +318,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Waiting on a predicate lock instead of failing at commit (D172).
 - Row locks that hold other writers: `FOR UPDATE`/`FOR SHARE` with `NOWAIT` and `SKIP LOCKED`
   across concurrent sessions (D32, D173).
-- Deadlocks between PostgreSQL advisory locks and row locks detected with `40P01`, as SQL Server's
-  application locks already are (D173, D291).
+- Deadlocks between PostgreSQL advisory locks and row locks detected with `40P01` (D173); SQL
+  Server's application locks already detect cycles among themselves (D291), the start to build on.
 - Two-phase commit and XA: `PREPARE TRANSACTION`, `COMMIT PREPARED`, MySQL's `XA` and TDS's
   distributed transactions (D32, D173).
 - Statement-level rollback in MySQL, SQLite, Oracle and SQL Server: a failing statement undoes
@@ -741,9 +741,11 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - EF Core 9 in the `tds-apps` job, and mssql-jdbc's `getSchemas()` (D291).
 - Oracle's `CONNECT BY`, `(+)` outer joins, `INSERT ALL` and `INSERT FIRST`, `RETURNING ... INTO`,
   synonyms, database links and `ROWID` (sql.md).
-- Oracle-only analytic forms (`RATIO_TO_REPORT`, `KEEP (DENSE_RANK FIRST|LAST)`, `LISTAGG ...
-  OVER`), Oracle's regex semantics and XML functions, and `TO_DATE(... DEFAULT ...)` (sql.md).
-  First slice: Oracle-dialect tests for the shared regexp and window functions (D130, D151).
+- Oracle's window functions (`ROW_NUMBER`, `RANK`, `LAG`, ...) and `REGEXP_*`, which now fail
+  with `ORA-00904`; then the Oracle-only analytic forms (`RATIO_TO_REPORT`,
+  `KEEP (DENSE_RANK FIRST|LAST)`, `LISTAGG ... OVER`), Oracle's regex semantics, the XML functions
+  and `TO_DATE(... DEFAULT ...)` (sql.md). First slice: route Oracle's window functions and
+  `REGEXP_*` to the shared ones (D130, D151). Check: Oracle-dialect tests of each.
 - Oracle's types: `TIMESTAMP WITH TIME ZONE` keeping its offset, `BFILE`, `UROWID`, `XMLType`,
   object types and schema-level collection types (D19).
 - `UTL_RAW`, `DBMS_LOB` and the other Oracle-supplied packages (sql.md).

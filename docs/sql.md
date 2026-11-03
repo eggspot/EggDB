@@ -4142,10 +4142,10 @@ And more, not in the suite yet:
 - `SYS_CONTEXT` takes only text constants as its arguments, and a third argument (the length)
   is accepted and ignored.
 - Not supported yet: `CONNECT BY`, outer joins with `(+)`, `INSERT ALL`, `RETURNING ... INTO`,
-  synonyms, database links, `ROWID`, the XML functions, Oracle-only analytic forms
-  (`RATIO_TO_REPORT`, `KEEP (DENSE_RANK FIRST|LAST)`) and Oracle's own regular-expression
-  semantics. The shared regular-expression functions and window functions (D130, D151) run in
-  Oracle's dialect.
+  synonyms, database links, `ROWID`, the XML functions, the regular-expression functions
+  (`REGEXP_LIKE`, `REGEXP_SUBSTR`, ...), and the ranking and offset window functions
+  (`ROW_NUMBER`, `RANK`, `LAG`, ...: `ORA-00904`), and Oracle-only analytic forms such as
+  `RATIO_TO_REPORT`. Aggregates with `OVER` work.
   `SAVEPOINT` works as in every dialect (D173), and views `WITH CHECK OPTION` refuse rows they
   would not show ([Schemas, views and comments](#schemas-views-and-comments)).
 - `NUMBER`'s range ends are not Oracle's: `TO_NUMBER('1e126')` gives a 127-digit value where
