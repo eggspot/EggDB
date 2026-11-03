@@ -112,6 +112,14 @@ to each CI runner's processor: seven runs gave point gets from 0.60 to 0.83 and 
 to 0.52. Workloads that wait for the disk measure the disk more than either engine, so they are
 reported only.
 
+The Linux `sqlite_compare.scan` line rose from 0.390 to 0.550 on 2026-11-03 (D80): main with no
+code change measured 0.551 (bc4dd40) and 0.714 (the same job re-run that day) on
+`ubuntu-latest`, as SQLite's own time per entry varied from 58 to 122 ns between runners, and an
+interleaved run of bc4dd40 against the D274 to D296 batch on one Mac gave the same ratios (0.70 to
+0.75 both). 0.550 is main's lowest current CI measurement; the weekly performance pass (D101)
+traces main's drift from 0.39 through the per-PR `sqlite-compare-*` artifacts and lowers the line
+again when a cause is fixed.
+
 ## The `eggdb` binary
 
 | Benchmark | Metric | Gate (D101) |
