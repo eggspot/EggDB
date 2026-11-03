@@ -127,7 +127,11 @@ What it reads, on top of the statements of "What runs today":
   `lower_case_table_names` is 1), `"..."` strings, backslash escapes in strings, `#` and `-- `
   comments, `/*! ... */` run as SQL, `?` placeholders, `X'0102'` hex literals.
 - **Statements**: `LIMIT offset, count`, `AUTO_INCREMENT`, `INSERT IGNORE`, `REPLACE`,
-  `INSERT ... ON DUPLICATE KEY UPDATE` with `VALUES(col)`, `SHOW TABLES`, `SHOW DATABASES`,
+  `INSERT ... ON DUPLICATE KEY UPDATE` with `VALUES(col)`, multiple-table `UPDATE t1 [JOIN t2
+  ...] | t1, t2 SET t1.a = ..., t2.b = ... [WHERE ...]` and `DELETE t1[.*], t2 FROM ... | DELETE
+  FROM t1, t2 USING ...` (each listed table is changed or deleted once per row that joins, an
+  unqualified `SET` column is the one table's that has it or error 1052, an unknown table is
+  1109; D297), `SHOW TABLES`, `SHOW DATABASES`,
   `DESCRIBE`/`SHOW COLUMNS`, `SHOW CREATE TABLE`, `SHOW VARIABLES [LIKE ...]`, `SHOW WARNINGS`,
   `SHOW COUNT(*) WARNINGS`, `USE`, `SET` of session and user variables (`SET NAMES`, `SET
   autocommit`, `SET @x = ...`), `START TRANSACTION`, `LOCK TABLES`/`UNLOCK TABLES` (accepted),
@@ -225,7 +229,8 @@ What it reads, on top of the statements of "What runs today":
   `REFERENCES` and `FOREIGN KEY` accepted and not enforced (SQLite's default, `PRAGMA
   foreign_keys` off), `ON CONFLICT ABORT|FAIL` in constraints; `INSERT OR
   REPLACE|IGNORE|ABORT|FAIL|ROLLBACK`, `REPLACE INTO`, upserts (`ON CONFLICT [(cols)] DO
-  NOTHING` and `DO UPDATE SET ... excluded.col`), `RETURNING`; `LIMIT n OFFSET m`, `LIMIT m, n`
+  NOTHING` and `DO UPDATE SET ... excluded.col`), `RETURNING`, `UPDATE ... SET ... FROM ...`
+  as in PostgreSQL (D297); `LIMIT n OFFSET m`, `LIMIT m, n`
   and a negative `LIMIT` for no limit; `BEGIN [DEFERRED|IMMEDIATE|EXCLUSIVE] [TRANSACTION]`,
   `COMMIT`, `END`, `ROLLBACK`, with SQLite's errors for a `BEGIN` inside a transaction and a
   `COMMIT` or `ROLLBACK` outside one; a failing statement inside a transaction leaves it open,
@@ -634,6 +639,13 @@ SELECT @@VERSION
   `INSERT` and `UPDATE` and `OUTPUT deleted.*` on `DELETE` (columns, expressions and constants
   such as EF Core's `OUTPUT 1`), `INSERT ... [OUTPUT ...] SELECT ...`, `(VALUES (...), ...) AS
   alias (columns)` as a table, and `SELECT total = qty * price`.
+- `UPDATE target SET [alias.]column = expr, ... [OUTPUT ...] FROM table_source [WHERE ...]` and
+  `DELETE [FROM] target [OUTPUT ...] FROM table_source [WHERE ...]` (D297): the target is the
+  table in `FROM` whose alias it names, or the one reference to it there; otherwise it joins the
+  `FROM` list as one more table, as in PostgreSQL. A target row that joins several rows is
+  changed once, from one of them, as SQL Server's manual warns. `OUTPUT inserted.` and
+  `deleted.` name the target's row and the other tables' columns can be output too; a column
+  qualified by another name is Msg 4104.
 - **`MERGE`** (D138): `MERGE [INTO] target [[AS] alias] USING source [[AS] alias [(columns)]] ON
   condition`, then `WHEN MATCHED [AND condition] THEN UPDATE SET ... | DELETE` and `WHEN NOT
   MATCHED [BY TARGET] [AND condition] THEN INSERT [(columns)] VALUES (...)`, up to two `WHEN NOT
@@ -1626,11 +1638,20 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   `WHERE`, `GROUP BY`, `HAVING`, `JOIN ... ON` or `LIMIT` they are `42P20`, nested ones are
   `42P20`, and one inside an aggregate is `42803`, as PostgreSQL reports them. MySQL, SQLite,
   Oracle and Transact-SQL take the same syntax.
-- `UPDATE name [[AS] alias] SET column = expr | DEFAULT, ... [WHERE expr] [RETURNING items]`.
-  Changing a primary key moves the row; the uniqueness check runs after every row moved, so
-  `UPDATE t SET id = id + 1` succeeds (PostgreSQL may refuse it, depending on the order it
-  visits rows).
-- `DELETE FROM name [[AS] alias] [WHERE expr] [RETURNING items]`.
+- `UPDATE name [[AS] alias] SET column = expr | DEFAULT, ... [FROM from_list] [WHERE expr]
+  [RETURNING items]`. Changing a primary key moves the row; the uniqueness check runs after every
+  row moved, so `UPDATE t SET id = id + 1` succeeds (PostgreSQL may refuse it, depending on the
+  order it visits rows).
+- `DELETE FROM name [[AS] alias] [USING from_list] [WHERE expr] [RETURNING items]`.
+- **Joined `UPDATE` and `DELETE`** (D297): `FROM` and `USING` take any `FROM` list (joins,
+  subqueries, `VALUES`, functions); `WHERE` joins it to the target, and a target row is changed
+  or deleted when at least one combination of rows matches. A target row that matches several
+  rows is changed once, from one of them, as PostgreSQL's manual says (which one is not defined).
+  `SET`, `WHERE` and `RETURNING` read the other tables' columns, `RETURNING *` returns the
+  target's columns and then theirs, and naming the target again in the list without an alias is
+  `42712`, as in PostgreSQL. Subqueries in `SET` and `RETURNING` of a joined statement, a view,
+  partitioned table or table with row-level security as its target, and `EXPLAIN` of it are
+  `0A000`.
 - `BEGIN [WORK | TRANSACTION] [READ ONLY | READ WRITE] [ISOLATION LEVEL ...]`,
   `START TRANSACTION`, `COMMIT`/`END`, `ROLLBACK`/`ABORT`. `SET SESSION CHARACTERISTICS AS
   TRANSACTION ...` and `SET TRANSACTION ...` take every isolation level, `[NOT] DEFERRABLE` and

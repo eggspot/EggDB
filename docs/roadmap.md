@@ -176,6 +176,13 @@ Users can now read a sequence as a one-row relation (`SELECT last_value, is_call
 Users' row triggers now fire for rows that cascading foreign keys and MySQL's `REPLACE` change or
 remove, so tables captured by `eggdb_cdc` and isolated by `eggdb_tenancy` can have cascades
 (D260, item 33b).
+Users can now change and delete rows through joins in every dialect that has them: PostgreSQL's
+`UPDATE ... FROM` and `DELETE ... USING`, SQLite's `UPDATE ... FROM`, MySQL's multiple-table
+`UPDATE t1 JOIN t2 ... SET t1.a = ..., t2.b = ...` and `DELETE t1, t2 FROM ...`, and Transact-SQL's
+`UPDATE ... FROM` and `DELETE ... FROM ... JOIN` with `OUTPUT`, with `RETURNING` reading the joined
+tables (D297). Next for joined `UPDATE` and `DELETE`: subqueries in their `SET` and `RETURNING`
+clauses, a view, a partitioned table or a table with row-level security as their target, and
+`EXPLAIN` of them.
 
 More tracks that run alongside the milestones, each starting where its dependencies land:
 - **The project (D21):** contributing guide, code of conduct, security policy, the stability
