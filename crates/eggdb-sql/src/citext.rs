@@ -2,7 +2,9 @@
 //! orders, groups and indexes by one full case fold (D259), with no tie-break, so
 //! `'A'` and `'a'` are the same value to every operation that compares.
 
-use crate::types::{DefinedType, DefinedValue, Value};
+use crate::error::SqlResult;
+use crate::types::{DefinedType, DefinedValue, SqlType, Value};
+use std::borrow::Cow;
 use std::cmp::Ordering;
 
 pub(crate) const CITEXT_OID: u32 = 9000;
@@ -74,9 +76,170 @@ pub(crate) fn regex_operands(text: Value, pattern: Value) -> (Value, Value, bool
     (as_text(text), as_text(pattern), folded)
 }
 
+pub(crate) fn is_citext_type(sql_type: SqlType) -> bool {
+    matches!(sql_type, SqlType::Defined(defined) if is_citext(defined))
+}
+
+const CASE_INSENSITIVE_FUNCTIONS: [&str; 9] = [
+    "regexp_match",
+    "regexp_matches",
+    "regexp_replace",
+    "regexp_split_to_array",
+    "regexp_split_to_table",
+    "replace",
+    "split_part",
+    "strpos",
+    "translate",
+];
+
+fn as_text(value: &Value) -> Value {
+    match text_of(value) {
+        Some(text) => Value::Text(text.to_owned()),
+        None => value.clone(),
+    }
+}
+
+fn subject_is_citext(values: &[Value]) -> bool {
+    values.first().and_then(text_of).is_some()
+}
+
+fn flags_position(name: &str) -> usize {
+    if name == "regexp_replace" {
+        3
+    } else {
+        2
+    }
+}
+
+fn add_case_insensitive_flag(name: &str, values: &mut Vec<Value>) {
+    let flags_at = flags_position(name);
+    if values.len() == flags_at {
+        values.push(Value::Text("i".to_owned()));
+    } else if values.len() == flags_at + 1
+        && let Some(Value::Text(flags)) = values.last_mut()
+        && !flags.contains('c')
+    {
+        flags.push('i');
+    }
+}
+
+pub(crate) fn regexp_arguments<'v>(name: &str, values: &'v [Value]) -> Cow<'v, [Value]> {
+    if !values.iter().any(|value| text_of(value).is_some()) {
+        return Cow::Borrowed(values);
+    }
+    let mut texts: Vec<Value> = values.iter().map(as_text).collect();
+    if subject_is_citext(values) && CASE_INSENSITIVE_FUNCTIONS.contains(&name) {
+        add_case_insensitive_flag(name, &mut texts);
+    }
+    Cow::Owned(texts)
+}
+
+fn literal_pattern(text: &str) -> String {
+    let mut pattern = String::with_capacity(text.len());
+    for character in text.chars() {
+        if !(character.is_ascii_alphanumeric() || character == '_') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern
+}
+
+fn text_argument(values: &[Value], at: usize) -> Option<&str> {
+    values.get(at).and_then(Value::character_text)
+}
+
+fn case_mapped(text: &str, upper: bool) -> SqlResult<String> {
+    crate::string_functions::case_mapped(text, upper)
+        .map(|value| value.to_text().unwrap_or_default())
+}
+
+fn text_value(text: &str) -> Value {
+    Value::Text(text.to_owned())
+}
+
+fn replaced(values: &[Value]) -> Option<SqlResult<Value>> {
+    let [text, from, to] = [0, 1, 2].map(|at| text_argument(values, at));
+    let arguments = [
+        text_value(text?),
+        Value::Text(literal_pattern(from?)),
+        text_value(to?),
+        text_value("gi"),
+    ];
+    crate::regexp_functions::function("regexp_replace", &arguments)
+}
+
+fn split_part(values: &[Value]) -> Option<SqlResult<Value>> {
+    let (text, delimiter) = (text_argument(values, 0)?, text_argument(values, 1)?);
+    let field = values.get(2)?.as_integer()?;
+    let pieces = crate::regexp_functions::split_pieces(
+        text,
+        &literal_pattern(delimiter),
+        "i",
+        "regexp_split_to_array",
+    );
+    Some(pieces.map(|pieces| {
+        usize::try_from(field)
+            .ok()
+            .and_then(|field| field.checked_sub(1))
+            .and_then(|at| pieces.into_iter().nth(at))
+            .unwrap_or(Value::Null)
+    }))
+}
+
+fn position(values: &[Value]) -> Option<SqlResult<Value>> {
+    let (text, wanted) = (text_argument(values, 0)?, text_argument(values, 1)?);
+    let lowered = case_mapped(text, false)
+        .and_then(|text| Ok((text, case_mapped(wanted, false)?)));
+    Some(lowered.and_then(|(text, wanted)| {
+        crate::string_functions::function("strpos", &[Value::Text(text), Value::Text(wanted)])
+            .unwrap_or(Ok(Value::Null))
+    }))
+}
+
+fn translated(values: &[Value]) -> Option<SqlResult<Value>> {
+    let [text, from, to] = [0, 1, 2].map(|at| text_argument(values, at));
+    let (text, from, to) = (text?, from?, to?);
+    let translate = |text: Value, from: SqlResult<String>| -> SqlResult<Value> {
+        let arguments = [text, Value::Text(from?), text_value(to)];
+        crate::string_functions::function("translate", &arguments).unwrap_or(Ok(Value::Null))
+    };
+    Some(
+        translate(text_value(text), case_mapped(from, false))
+            .and_then(|once| translate(once, case_mapped(from, true))),
+    )
+}
+
+pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
+    if !values.iter().any(|value| text_of(value).is_some()) {
+        return None;
+    }
+    let regexp = crate::regexp_functions::FUNCTIONS.contains(&name);
+    if !regexp && !CASE_INSENSITIVE_FUNCTIONS.contains(&name) {
+        return None;
+    }
+    if values.iter().any(Value::is_null) {
+        return Some(Ok(Value::Null));
+    }
+    let texts = regexp_arguments(name, values);
+    if regexp {
+        return crate::regexp_functions::function(name, &texts);
+    }
+    if !subject_is_citext(values) {
+        return crate::string_functions::function(name, &texts);
+    }
+    match name {
+        "replace" => replaced(&texts),
+        "split_part" => split_part(&texts),
+        "strpos" => position(&texts),
+        "translate" => translated(&texts),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{compare, compare_with_text, fold, text_of, value};
+    use super::{compare, compare_with_text, fold, literal_pattern, regexp_arguments, text_of, value};
     use crate::types::Value;
     use std::cmp::Ordering;
 
@@ -130,5 +293,43 @@ mod tests {
             Ordering::Equal
         );
         assert_eq!(text_of(&Value::Text("plain".to_owned())), None);
+    }
+
+    #[test]
+    fn citext_subjects_add_the_case_insensitive_flag_unless_c_is_given() {
+        let text = |text: &str| Value::Text(text.to_owned());
+        let flags = |name: &str, values: &[Value]| {
+            regexp_arguments(name, values)
+                .iter()
+                .map(|value| value.to_text().unwrap_or_default())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(flags("regexp_match", &[value("A".to_owned()), text("a")]), ["A", "a", "i"]);
+        assert_eq!(
+            flags("regexp_match", &[value("A".to_owned()), text("a"), text("g")]),
+            ["A", "a", "gi"]
+        );
+        assert_eq!(
+            flags("regexp_match", &[value("A".to_owned()), text("a"), text("c")]),
+            ["A", "a", "c"]
+        );
+        assert_eq!(
+            flags("regexp_replace", &[value("A".to_owned()), text("a"), text("b")]),
+            ["A", "a", "b", "i"]
+        );
+        assert_eq!(
+            flags("regexp_replace", &[value("A".to_owned()), text("a"), text("b"), Value::Integer(1)]),
+            ["A", "a", "b", "1"]
+        );
+        assert_eq!(flags("regexp_match", &[text("A"), value("a".to_owned())]), ["A", "a"]);
+        assert_eq!(flags("regexp_like", &[value("A".to_owned()), text("a")]), ["A", "a"]);
+    }
+
+    #[test]
+    fn literal_patterns_escape_everything_but_ascii_word_characters() {
+        assert_eq!(literal_pattern("a.b_9"), "a\\.b_9");
+        assert_eq!(literal_pattern("(x)*"), "\\(x\\)\\*");
+        assert_eq!(literal_pattern("é "), "\\é\\ ");
+        assert_eq!(literal_pattern(""), "");
     }
 }

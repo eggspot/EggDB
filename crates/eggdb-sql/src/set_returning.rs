@@ -427,7 +427,11 @@ fn json_path_query_tz_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>)
 fn text_arguments(name: &str, types: &[Option<SqlType>]) -> SqlResult<()> {
     let texts = types
         .iter()
-        .all(|sql_type| sql_type.is_none_or(SqlType::is_character));
+        .all(|sql_type| {
+            sql_type.is_none_or(|sql_type| {
+                sql_type.is_character() || crate::citext::is_citext_type(sql_type)
+            })
+        });
     if (2..=3).contains(&types.len()) && texts {
         Ok(())
     } else {
@@ -445,11 +449,17 @@ fn regexp_split_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
 }
 
 fn regexp_matches_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
-    crate::regexp_functions::matches_rows(values, sink)
+    crate::regexp_functions::matches_rows(
+        &crate::citext::regexp_arguments("regexp_matches", values),
+        sink,
+    )
 }
 
 fn regexp_split_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
-    crate::regexp_functions::split_rows(values, sink)
+    crate::regexp_functions::split_rows(
+        &crate::citext::regexp_arguments("regexp_split_to_table", values),
+        sink,
+    )
 }
 
 pub(crate) const VALUES_LABEL: &str = "*VALUES*";

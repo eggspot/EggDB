@@ -1554,6 +1554,9 @@ impl Evaluator<'_> {
         if let Some(result) = crate::json_path::function(name, &values) {
             return result;
         }
+        if let Some(result) = crate::citext::function(name, &values) {
+            return result;
+        }
         if let Some(result) = crate::regexp_functions::function(name, &values) {
             return result;
         }

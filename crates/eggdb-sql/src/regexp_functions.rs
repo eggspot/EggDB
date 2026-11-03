@@ -199,7 +199,12 @@ pub(crate) fn matches_rows(
     })
 }
 
-fn split_pieces(text: &str, pattern: &str, flags: &str, function: &str) -> SqlResult<Vec<Value>> {
+pub(crate) fn split_pieces(
+    text: &str,
+    pattern: &str,
+    flags: &str,
+    function: &str,
+) -> SqlResult<Vec<Value>> {
     let options = single_match_flags(function, flags, None)?;
     let regex = compiled_with(pattern, options)?;
     let chars = chars_of(text);

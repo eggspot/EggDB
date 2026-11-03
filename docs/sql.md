@@ -2636,7 +2636,14 @@ parameters, D288) and its text and binary forms on the wire.
 - `citext` keeps the text as written and compares, orders, groups, hashes and indexes by one
   full case fold, so a unique `citext` index refuses `'Ann'` next to `'ANN'`, and `LIKE` and
   `ILIKE` on a `citext` value ignore case, and so do the regular expression operators `~`, `~*`,
-  `!~` and `!~*` when the value they test is `citext` (D288). Full case folding differs from PostgreSQL's
+  `!~` and `!~*` when the value they test is `citext` (D288). As in the citext extension,
+  `regexp_match`, `regexp_matches`, `regexp_replace`, `regexp_split_to_array`,
+  `regexp_split_to_table`, `replace`, `split_part`, `strpos` and `translate` ignore case when their
+  first argument is `citext`: the regular expression ones add the `i` flag unless the flags hold
+  `c`, `replace` and `split_part` match the search text literally without case (`split_part`
+  gives NULL for a field that does not exist, as the extension's array subscript does), and
+  `strpos` and `translate` compare `lower()` and `upper()` forms (D302). A `citext` argument
+  anywhere else is read as `text`. Full case folding differs from PostgreSQL's
   `lower()`-based `citext`: `'ß'::citext = 'SS'` is true in EggDB and false in PostgreSQL (D259).
 - `hstore` keeps its pairs sorted as PostgreSQL does and prints `"a"=>"1", "b"=>NULL`. Its
   operators `->` (a key or an array of keys), `?`, `?|`, `?&`, `@>`, `<@`, `||` and `-` (a key,
@@ -2650,8 +2657,7 @@ parameters, D288) and its text and binary forms on the wire.
   argument is not a row) (D288).
 
 Not yet: `hstore_to_matrix` and `%#` of a non-empty `hstore` (they need multidimensional arrays,
-`0A000`; an empty one gives `{}`), and the `citext` versions of `regexp_match`, `regexp_replace`,
-`replace`, `split_part`, `strpos` and `translate` (D288).
+`0A000`; an empty one gives `{}`) (D288).
 
 ## Vectors (pgvector)
 
