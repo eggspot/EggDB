@@ -3,10 +3,13 @@
 //! turning a view's size in points and its backing scale factor into device pixels, and placing
 //! a frame's image at the top left of a view whose origin is at the bottom left, and mapping
 //! accessibility nodes to NSAccessibility roles, frames, values, ranges, actions and
-//! notifications. The values come from Apple's public AppKit, Core Graphics and
+//! notifications, and turning mouse events' positions, button numbers and scroll deltas into
+//! the GUI's pointer events. The values come from Apple's public AppKit, Core Graphics and
 //! NSAccessibility documentation.
 
-use super::{AccessAction, AccessCaret, AccessNode, AccessRect, AccessRole, Key, Modifiers};
+use super::{
+    AccessAction, AccessCaret, AccessNode, AccessRect, AccessRole, Key, Modifiers, PointerButton,
+};
 
 /// `NSEventModifierFlagShift`.
 pub const FLAG_SHIFT: u64 = 1 << 17;
@@ -512,6 +515,43 @@ pub fn selection_change_notifications(
         AccessRole::Tab => &[(None, SELECTED_CHILDREN_CHANGED)],
         _ => &[],
     }
+}
+
+/// `NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved | NSTrackingActiveInKeyWindow |
+/// NSTrackingInVisibleRect`: a tracking area that follows the view's visible rectangle and
+/// reports moves and exits while the window is the key window.
+pub const TRACKING_OPTIONS: u64 = 0x01 | 0x02 | 0x20 | 0x200;
+
+/// Points of precise (touchpad) scrolling that make one line.
+pub const PRECISE_SCROLL_POINTS_PER_LINE: f64 = 20.0;
+
+/// The position of an event's `locationInWindow` (points, from the bottom left of a window
+/// whose content view fills it) in device pixels from the view's top-left corner.
+pub fn pointer_position(location: CgPoint, view_height: f64, scale: f32) -> (f32, f32) {
+    let scale = f64::from(scale);
+    let x = location.x * scale;
+    let y = (view_height - location.y) * scale;
+    (x as f32, y as f32)
+}
+
+/// The button of an `otherMouseDown:`'s `buttonNumber`: 2 is the middle button; others are
+/// not used.
+pub fn other_button(number: isize) -> Option<PointerButton> {
+    (number == 2).then_some(PointerButton::Middle)
+}
+
+/// Lines down and right for a `scrollWheel:` event's `scrollingDeltaX` and `scrollingDeltaY`:
+/// AppKit's deltas are positive when the content should move down or right (showing what is
+/// above or left), already turned by the natural-scrolling setting, so they change sign;
+/// precise (touchpad) deltas are in points and become lines of
+/// [`PRECISE_SCROLL_POINTS_PER_LINE`].
+pub fn wheel_lines(delta_x: f64, delta_y: f64, precise: bool) -> (f32, f32) {
+    let per_line = if precise { PRECISE_SCROLL_POINTS_PER_LINE } else { 1.0 };
+    let finite = |value: f64| if value.is_finite() { value } else { 0.0 };
+    (
+        (-finite(delta_y) / per_line) as f32,
+        (-finite(delta_x) / per_line) as f32,
+    )
 }
 
 #[cfg(test)]
@@ -1046,5 +1086,18 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn mouse_positions_buttons_and_scrolls_become_pointer_events() {
+        assert_eq!(
+            pointer_position(CgPoint { x: 100.0, y: 700.0 }, 800.0, 2.0),
+            (200.0, 200.0)
+        );
+        assert_eq!(other_button(2), Some(PointerButton::Middle));
+        assert_eq!(other_button(4), None);
+        assert_eq!(wheel_lines(0.0, 3.0, false), (-3.0, 0.0));
+        assert_eq!(wheel_lines(-40.0, -20.0, true), (1.0, 2.0));
+        assert_eq!(wheel_lines(f64::NAN, f64::INFINITY, false), (0.0, 0.0));
     }
 }

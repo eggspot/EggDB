@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
-use super::cocoa::{self, CgRect, CgSize};
+use super::cocoa::{self, CgPoint, CgRect, CgSize};
 use super::{
-    AccessNode, KeyPress, OpenFileDialog, Window, WindowError, WindowEvent, WindowOptions,
-    check_frame,
+    AccessNode, KeyPress, Modifiers, OpenFileDialog, PointerButton, Window, WindowError,
+    WindowEvent, WindowOptions, check_clipboard_text, check_frame,
 };
 
 mod accessibility;
@@ -17,6 +17,8 @@ mod accessibility;
 use accessibility::AccessElements;
 
 type Id = *mut c_void;
+
+const PASTEBOARD_TYPE_STRING: &str = "public.utf8-plain-text";
 type Sel = *const c_void;
 
 #[cfg(target_arch = "x86_64")]
@@ -108,6 +110,12 @@ type SendIdIdBool = unsafe extern "C" fn(Id, Sel, Id, ObjcBool) -> Id;
 type SendBoolId = unsafe extern "C" fn(Id, Sel, Id) -> ObjcBool;
 type PostNotification = unsafe extern "C" fn(Id, Id);
 type SendIdF64 = unsafe extern "C" fn(Id, Sel, f64) -> Id;
+type SendPoint = unsafe extern "C" fn(Id, Sel) -> CgPoint;
+type SendIsize = unsafe extern "C" fn(Id, Sel) -> isize;
+type SendBool = unsafe extern "C" fn(Id, Sel) -> ObjcBool;
+type SendIdId = unsafe extern "C" fn(Id, Sel, Id) -> Id;
+type SendBoolIdId = unsafe extern "C" fn(Id, Sel, Id, Id) -> ObjcBool;
+type SendInitTracking = unsafe extern "C" fn(Id, Sel, CgRect, u64, Id, Id) -> Id;
 type SendIdRect = unsafe extern "C" fn(Id, Sel, CgRect) -> Id;
 type SendNextEvent = unsafe extern "C" fn(Id, Sel, u64, Id, Id, ObjcBool) -> Id;
 type SendInitWindow = unsafe extern "C" fn(Id, Sel, CgRect, u64, u64, ObjcBool) -> Id;
@@ -220,6 +228,12 @@ struct Runtime {
     send_bool_id: SendBoolId,
     post_notification: PostNotification,
     send_id_f64: SendIdF64,
+    send_point: SendPoint,
+    send_isize: SendIsize,
+    send_bool: SendBool,
+    send_id_id: SendIdId,
+    send_bool_id_id: SendBoolIdId,
+    send_init_tracking: SendInitTracking,
     send_id_rect: SendIdRect,
     send_next_event: SendNextEvent,
     send_init_window: SendInitWindow,
@@ -283,6 +297,12 @@ impl Runtime {
             send_bool_id: load!(objc, c"objc_msgSend", SendBoolId),
             post_notification: load!(appkit, c"NSAccessibilityPostNotification", PostNotification),
             send_id_f64: load!(objc, c"objc_msgSend", SendIdF64),
+            send_point: load!(objc, c"objc_msgSend", SendPoint),
+            send_isize: load!(objc, c"objc_msgSend", SendIsize),
+            send_bool: load!(objc, c"objc_msgSend", SendBool),
+            send_id_id: load!(objc, c"objc_msgSend", SendIdId),
+            send_bool_id_id: load!(objc, c"objc_msgSend", SendBoolIdId),
+            send_init_tracking: load!(objc, c"objc_msgSend", SendInitTracking),
             send_id_rect: load!(objc, c"objc_msgSend", SendIdRect),
             send_next_event: load!(objc, c"objc_msgSend", SendNextEvent),
             send_init_window: load!(objc, c"objc_msgSend", SendInitWindow),
@@ -448,7 +468,26 @@ impl Runtime {
         let drag_entered: extern "C" fn(Id, Sel, Id) -> u64 = dragging_entered;
         let drag_exited: extern "C" fn(Id, Sel, Id) = dragging_exited;
         let drag_performed: extern "C" fn(Id, Sel, Id) -> ObjcBool = perform_drag_operation;
-        let methods: [(&CStr, *const c_void, &CStr); 14] = [
+        let pointer: [(&CStr, extern "C" fn(Id, Sel, Id)); 11] = [
+            (c"mouseDown:", mouse_down),
+            (c"mouseUp:", mouse_up),
+            (c"rightMouseDown:", right_mouse_down),
+            (c"rightMouseUp:", right_mouse_up),
+            (c"otherMouseDown:", other_mouse_down),
+            (c"otherMouseUp:", other_mouse_up),
+            (c"mouseMoved:", mouse_moved),
+            (c"mouseDragged:", mouse_moved),
+            (c"rightMouseDragged:", mouse_moved),
+            (c"otherMouseDragged:", mouse_moved),
+            (c"scrollWheel:", scroll_wheel),
+        ];
+        let exited: extern "C" fn(Id, Sel, Id) = mouse_exited;
+        let mut methods: Vec<(&CStr, *const c_void, &CStr)> = pointer
+            .iter()
+            .map(|(name, method)| (*name, *method as *const c_void, VOID_OBJECT_TYPES))
+            .collect();
+        methods.push((c"mouseExited:", exited as *const c_void, VOID_OBJECT_TYPES));
+        methods.extend([
             (c"drawRect:", draw as *const c_void, DRAW_RECT_TYPES),
             (c"keyDown:", key as *const c_void, VOID_OBJECT_TYPES),
             (
@@ -507,7 +546,7 @@ impl Runtime {
                 drag_performed as *const c_void,
                 BOOL_DELEGATE_TYPES,
             ),
-        ];
+        ]);
         self.register_class(VIEW_CLASS, c"NSView", &methods)
     }
 }
@@ -576,6 +615,61 @@ extern "C" fn draw_rect(view: Id, _selector: Sel, _dirty: CgRect) {
 extern "C" fn key_down(view: Id, _selector: Sel, event: Id) {
     if let Some(state) = state_for(view) {
         state.key_down(event);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MouseChange {
+    Pressed(PointerButton),
+    Released(PointerButton),
+    OtherPressed,
+    OtherReleased,
+    Moved,
+}
+
+fn mouse(view: Id, event: Id, change: MouseChange) {
+    if let Some(state) = state_for(view) {
+        state.mouse(event, change);
+    }
+}
+
+extern "C" fn mouse_down(view: Id, _selector: Sel, event: Id) {
+    mouse(view, event, MouseChange::Pressed(PointerButton::Primary));
+}
+
+extern "C" fn mouse_up(view: Id, _selector: Sel, event: Id) {
+    mouse(view, event, MouseChange::Released(PointerButton::Primary));
+}
+
+extern "C" fn right_mouse_down(view: Id, _selector: Sel, event: Id) {
+    mouse(view, event, MouseChange::Pressed(PointerButton::Secondary));
+}
+
+extern "C" fn right_mouse_up(view: Id, _selector: Sel, event: Id) {
+    mouse(view, event, MouseChange::Released(PointerButton::Secondary));
+}
+
+extern "C" fn other_mouse_down(view: Id, _selector: Sel, event: Id) {
+    mouse(view, event, MouseChange::OtherPressed);
+}
+
+extern "C" fn other_mouse_up(view: Id, _selector: Sel, event: Id) {
+    mouse(view, event, MouseChange::OtherReleased);
+}
+
+extern "C" fn mouse_moved(view: Id, _selector: Sel, event: Id) {
+    mouse(view, event, MouseChange::Moved);
+}
+
+extern "C" fn scroll_wheel(view: Id, _selector: Sel, event: Id) {
+    if let Some(state) = state_for(view) {
+        state.scroll(event);
+    }
+}
+
+extern "C" fn mouse_exited(view: Id, _selector: Sel, _event: Id) {
+    if let Some(state) = state_for(view) {
+        state.push(WindowEvent::PointerLeft);
     }
 }
 
@@ -867,6 +961,166 @@ impl WindowState {
         }
     }
 
+    fn event_position(&self, event: Id) -> (f32, f32) {
+        let runtime = &self.runtime;
+        // SAFETY: `event` is the mouse `NSEvent` AppKit passed to the view; `locationInWindow`
+        // returns an `NSPoint`.
+        let location = unsafe { (runtime.send_point)(event, runtime.selector(c"locationInWindow")) };
+        cocoa::pointer_position(location, self.bounds().size.height, self.scale.get())
+    }
+
+    fn event_modifiers(&self, event: Id) -> Modifiers {
+        let runtime = &self.runtime;
+        // SAFETY: `event` is a live `NSEvent`; `modifierFlags` returns an `NSUInteger`.
+        let flags = unsafe { (runtime.send_u64)(event, runtime.selector(c"modifierFlags")) };
+        cocoa::modifiers_from_flags(flags)
+    }
+
+    fn mouse(&self, event: Id, change: MouseChange) {
+        let (x, y) = self.event_position(event);
+        let modifiers = self.event_modifiers(event);
+        let other = || {
+            let runtime = &self.runtime;
+            // SAFETY: `event` is a live mouse `NSEvent`; `buttonNumber` returns an `NSInteger`.
+            let number = unsafe { (runtime.send_isize)(event, runtime.selector(c"buttonNumber")) };
+            cocoa::other_button(number)
+        };
+        let (button, pressed) = match change {
+            MouseChange::Moved => {
+                self.push(WindowEvent::PointerMoved { x, y });
+                return;
+            }
+            MouseChange::Pressed(button) => (Some(button), true),
+            MouseChange::Released(button) => (Some(button), false),
+            MouseChange::OtherPressed => (other(), true),
+            MouseChange::OtherReleased => (other(), false),
+        };
+        let Some(button) = button else {
+            return;
+        };
+        self.push(if pressed {
+            WindowEvent::PointerPressed {
+                x,
+                y,
+                button,
+                modifiers,
+            }
+        } else {
+            WindowEvent::PointerReleased {
+                x,
+                y,
+                button,
+                modifiers,
+            }
+        });
+    }
+
+    fn scroll(&self, event: Id) {
+        let runtime = &self.runtime;
+        // SAFETY: `event` is the `NSEvent` AppKit passed to `scrollWheel:`; both deltas are
+        // `CGFloat`s.
+        let delta_x = unsafe { (runtime.send_f64)(event, runtime.selector(c"scrollingDeltaX")) };
+        // SAFETY: as above.
+        let delta_y = unsafe { (runtime.send_f64)(event, runtime.selector(c"scrollingDeltaY")) };
+        // SAFETY: as above; `hasPreciseScrollingDeltas` returns a `BOOL`.
+        let precise =
+            unsafe { (runtime.send_bool)(event, runtime.selector(c"hasPreciseScrollingDeltas")) };
+        let (lines_down, lines_right) = cocoa::wheel_lines(delta_x, delta_y, precise != NO);
+        if lines_down == 0.0 && lines_right == 0.0 {
+            return;
+        }
+        let (x, y) = self.event_position(event);
+        self.push(WindowEvent::Wheel {
+            x,
+            y,
+            lines_down,
+            lines_right,
+            modifiers: self.event_modifiers(event),
+        });
+    }
+
+    fn track_pointer(&self, view: Id) -> Result<(), WindowError> {
+        let runtime = &self.runtime;
+        let class = runtime.class(c"NSTrackingArea")?;
+        // SAFETY: `alloc` on a class returns a new, uninitialized instance.
+        let area = unsafe { (runtime.send_id)(class, runtime.selector(c"alloc")) };
+        if area.is_null() {
+            return Ok(());
+        }
+        // SAFETY: `area` is a fresh `NSTrackingArea`; `initWithRect:options:owner:userInfo:`
+        // takes an `NSRect` (ignored with `NSTrackingInVisibleRect`), the options, the owning
+        // view and a nil dictionary.
+        let area = unsafe {
+            (runtime.send_init_tracking)(
+                area,
+                runtime.selector(c"initWithRect:options:owner:userInfo:"),
+                CgRect::default(),
+                cocoa::TRACKING_OPTIONS,
+                view,
+                std::ptr::null_mut(),
+            )
+        };
+        if area.is_null() {
+            return Ok(());
+        }
+        self.send_object_to(view, c"addTrackingArea:", area);
+        self.send_to(area, c"release");
+        Ok(())
+    }
+
+    fn pasteboard(&self) -> Result<Id, WindowError> {
+        let runtime = &self.runtime;
+        let class = runtime.class(c"NSPasteboard")?;
+        // SAFETY: `generalPasteboard` is a class method returning the shared pasteboard.
+        let board = unsafe { (runtime.send_id)(class, runtime.selector(c"generalPasteboard")) };
+        if board.is_null() {
+            Err(WindowError::Protocol(
+                "the general pasteboard is not available".to_owned(),
+            ))
+        } else {
+            Ok(board)
+        }
+    }
+
+    fn put_clipboard(&self, text: &str) -> Result<(), WindowError> {
+        let runtime = &self.runtime;
+        let board = self.pasteboard()?;
+        // SAFETY: `board` is the live general pasteboard; `clearContents` returns an
+        // `NSInteger`, the new change count.
+        unsafe { (runtime.send_isize)(board, runtime.selector(c"clearContents")) };
+        let string = runtime.string(text)?;
+        let kind = runtime.string(PASTEBOARD_TYPE_STRING)?;
+        // SAFETY: `board` is live; `setString:forType:` takes two `NSString`s and returns a
+        // `BOOL`.
+        let done = unsafe {
+            (runtime.send_bool_id_id)(board, runtime.selector(c"setString:forType:"), string, kind)
+        };
+        self.send_to(string, c"release");
+        self.send_to(kind, c"release");
+        if done == NO {
+            return Err(WindowError::Io(
+                "the pasteboard refused the text".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn clipboard(&self) -> Result<Option<String>, WindowError> {
+        let runtime = &self.runtime;
+        let board = self.pasteboard()?;
+        let kind = runtime.string(PASTEBOARD_TYPE_STRING)?;
+        // SAFETY: `board` is live; `stringForType:` takes an `NSString` and returns an
+        // autoreleased `NSString` or nil.
+        let string = unsafe { (runtime.send_id_id)(board, runtime.selector(c"stringForType:"), kind) };
+        self.send_to(kind, c"release");
+        if string.is_null() {
+            return Ok(None);
+        }
+        let text = runtime.text(string);
+        check_clipboard_text(&text)?;
+        Ok(Some(text))
+    }
+
     fn key_down(&self, event: Id) {
         let runtime = &self.runtime;
         // SAFETY: `event` is the `NSEvent` AppKit passed to `keyDown:`; `keyCode` returns an
@@ -1079,6 +1333,7 @@ impl WindowState {
         state.view.set(view);
         register_view(view, state);
         state.accept_file_drops(view)?;
+        state.track_pointer(view)?;
         state.send_object_to(window, c"setContentView:", view);
         state.send_object_to(window, c"setDelegate:", view);
         state.send_to(window, c"center");
@@ -1233,6 +1488,17 @@ impl Window for CocoaWindow {
     ) -> Result<Option<PathBuf>, WindowError> {
         let state = &self.state;
         state.runtime.with_pool(|| state.choose_file(dialog))
+    }
+
+    fn put_clipboard_text(&mut self, text: &str) -> Result<(), WindowError> {
+        check_clipboard_text(text)?;
+        let state = &self.state;
+        state.runtime.with_pool(|| state.put_clipboard(text))
+    }
+
+    fn clipboard_text(&mut self) -> Result<Option<String>, WindowError> {
+        let state = &self.state;
+        state.runtime.with_pool(|| state.clipboard())
     }
 
     fn next_event(

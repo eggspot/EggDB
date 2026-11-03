@@ -1,5 +1,6 @@
 //! Native windows for EggDB's GUI (D8, D191, D256): open a window of a logical size,
-//! present RGBA frames into it, and read its keyboard, resize, scale and close events.
+//! present RGBA frames into it, read its keyboard, pointer, resize, scale and close events,
+//! and put text on and read it from the system clipboard.
 //!
 //! Every operating system's window API stays behind [`open_window`] and the [`Window`] trait,
 //! so the GUI toolkit draws frames without knowing which system shows them. On Linux and the
@@ -169,6 +170,81 @@ pub enum WindowEvent {
     FilesDropped(Vec<PathBuf>),
     /// A screen reader asked a node of the accessibility tree to do something.
     AccessRequested(AccessRequest),
+    /// The pointer moved to (`x`, `y`) device pixels from the drawable area's top-left
+    /// corner, with or without a button held.
+    PointerMoved {
+        /// The horizontal position in device pixels.
+        x: f32,
+        /// The vertical position in device pixels, growing downwards.
+        y: f32,
+    },
+    /// A pointer button went down at (`x`, `y`) device pixels.
+    PointerPressed {
+        /// The horizontal position in device pixels.
+        x: f32,
+        /// The vertical position in device pixels.
+        y: f32,
+        /// The button.
+        button: PointerButton,
+        /// The modifier keys held.
+        modifiers: Modifiers,
+    },
+    /// A pointer button went up at (`x`, `y`) device pixels, inside the window or, while
+    /// the button was held since a press inside it, outside it.
+    PointerReleased {
+        /// The horizontal position in device pixels.
+        x: f32,
+        /// The vertical position in device pixels.
+        y: f32,
+        /// The button.
+        button: PointerButton,
+        /// The modifier keys held.
+        modifiers: Modifiers,
+    },
+    /// The wheel or the touchpad scrolled at (`x`, `y`) device pixels, by lines: positive
+    /// `lines_down` asks to see what is further down, positive `lines_right` what is further
+    /// right (already turned the way the user's scrolling direction setting says).
+    Wheel {
+        /// The horizontal position in device pixels.
+        x: f32,
+        /// The vertical position in device pixels.
+        y: f32,
+        /// Lines to scroll down (negative: up).
+        lines_down: f32,
+        /// Lines to scroll right (negative: left).
+        lines_right: f32,
+        /// The modifier keys held.
+        modifiers: Modifiers,
+    },
+    /// The pointer left the window. Backends that cannot tell never send it.
+    PointerLeft,
+}
+
+/// A pointer button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerButton {
+    /// The primary button: the left one, or the only one of a touchpad.
+    Primary,
+    /// The secondary button: the right one, or a two-finger click.
+    Secondary,
+    /// The middle button or wheel click.
+    Middle,
+}
+
+/// The most text, in bytes of UTF-8, the platform layer reads from or puts on the system
+/// clipboard; longer text is refused with [`WindowError::InvalidInput`].
+pub const MAX_CLIPBOARD_TEXT_BYTES: usize = 8 << 20;
+
+/// Refuses `text` when it is longer than [`MAX_CLIPBOARD_TEXT_BYTES`].
+pub fn check_clipboard_text(text: &str) -> Result<(), WindowError> {
+    if text.len() > MAX_CLIPBOARD_TEXT_BYTES {
+        Err(WindowError::InvalidInput(format!(
+            "{} bytes is more text than the clipboard takes ({MAX_CLIPBOARD_TEXT_BYTES} at most)",
+            text.len()
+        )))
+    } else {
+        Ok(())
+    }
 }
 
 /// One choice of an open-file dialog's file-type menu: its name and the patterns it shows,
@@ -553,6 +629,23 @@ pub trait Window: fmt::Debug {
             "this system has no open-file dialog in the platform layer yet",
         ))
     }
+
+    /// Replaces the system clipboard's contents with `text`, as plain Unicode text. Backends
+    /// without a clipboard answer [`WindowError::Unsupported`].
+    fn put_clipboard_text(&mut self, text: &str) -> Result<(), WindowError> {
+        let _ = text;
+        Err(WindowError::Unsupported(
+            "this system has no clipboard in the platform layer yet",
+        ))
+    }
+
+    /// The system clipboard's text, `None` when it holds no text. Backends without a
+    /// clipboard answer [`WindowError::Unsupported`].
+    fn clipboard_text(&mut self) -> Result<Option<String>, WindowError> {
+        Err(WindowError::Unsupported(
+            "this system has no clipboard in the platform layer yet",
+        ))
+    }
 }
 
 /// Checks that `rgba` holds exactly `width` × `height` pixels of four bytes.
@@ -719,5 +812,15 @@ mod tests {
             min_height: 100,
         };
         assert!(open_window(&options).is_err());
+    }
+
+    #[test]
+    fn clipboard_text_up_to_the_limit_is_taken_and_longer_text_refused() {
+        assert!(check_clipboard_text("SELECT 1;").is_ok());
+        assert!(check_clipboard_text(&"x".repeat(MAX_CLIPBOARD_TEXT_BYTES)).is_ok());
+        assert!(matches!(
+            check_clipboard_text(&"x".repeat(MAX_CLIPBOARD_TEXT_BYTES + 1)),
+            Err(WindowError::InvalidInput(_))
+        ));
     }
 }

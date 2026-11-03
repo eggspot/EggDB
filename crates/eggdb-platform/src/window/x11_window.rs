@@ -6,13 +6,37 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use super::atspi_bridge::{self, AtspiBridge};
-use super::x11::{self, ImageTarget, KeyboardMapping, Packet, PixelLayout, PropertyData};
-use super::{AccessNode, KeyPress, Window, WindowError, WindowEvent, WindowOptions, check_frame};
+use super::x11::{
+    self, ButtonCode, ImageTarget, KeyboardMapping, Packet, PixelLayout, PropertyData,
+};
+use super::{
+    AccessNode, KeyPress, MAX_CLIPBOARD_TEXT_BYTES, Window, WindowError, WindowEvent,
+    WindowOptions, check_clipboard_text, check_frame,
+};
 
 const LARGEST_REPLY: usize = 16 << 20;
 const RESOURCES_UNITS: u32 = 1 << 16;
 const SHORTEST_WAIT: Duration = Duration::from_millis(1);
 const BACKLOG_RETRY: Duration = Duration::from_millis(10);
+const CLIPBOARD_ANSWER_LIMIT: Duration = Duration::from_secs(2);
+const CLIPBOARD_REPLY_UNITS: u32 = (MAX_CLIPBOARD_TEXT_BYTES / 4 + 1) as u32;
+const SELECTION_REQUEST_HEADER_BYTES: usize = 24;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ClipboardAtoms {
+    clipboard: u32,
+    targets: u32,
+    utf8_string: u32,
+    text_plain_utf8: u32,
+    incr: u32,
+    landing: u32,
+}
+
+impl ClipboardAtoms {
+    fn text_targets(&self) -> [u32; 3] {
+        [self.utf8_string, self.text_plain_utf8, x11::ATOM_STRING]
+    }
+}
 
 fn io_error(error: &std::io::Error) -> WindowError {
     WindowError::Io(error.to_string())
@@ -59,6 +83,8 @@ pub(crate) struct X11Window {
     scale: f32,
     accessibility: Option<AtspiBridge>,
     origin_stale: bool,
+    atoms: ClipboardAtoms,
+    owned_clipboard: Option<String>,
 }
 
 impl X11Window {
@@ -120,12 +146,22 @@ impl X11Window {
             scale: 1.0,
             accessibility: None,
             origin_stale: false,
+            atoms: ClipboardAtoms::default(),
+            owned_clipboard: None,
         };
         this.scale = this.read_scale(screen.root)?;
         this.wm_protocols = this.intern("WM_PROTOCOLS")?;
         this.wm_delete_window = this.intern("WM_DELETE_WINDOW")?;
         let net_wm_name = this.intern("_NET_WM_NAME")?;
         let utf8_string = this.intern("UTF8_STRING")?;
+        this.atoms = ClipboardAtoms {
+            clipboard: this.intern("CLIPBOARD")?,
+            targets: this.intern("TARGETS")?,
+            utf8_string,
+            text_plain_utf8: this.intern("text/plain;charset=utf-8")?,
+            incr: this.intern("INCR")?,
+            landing: this.intern("EGGDB_CLIPBOARD")?,
+        };
         this.refresh_keyboard()?;
         let scale = this.scale;
         let device = |logical: u32| {
@@ -138,7 +174,11 @@ impl X11Window {
         let event_mask = x11::EVENT_KEY_PRESS
             | x11::EVENT_EXPOSURE
             | x11::EVENT_STRUCTURE_NOTIFY
-            | x11::EVENT_FOCUS_CHANGE;
+            | x11::EVENT_FOCUS_CHANGE
+            | x11::EVENT_BUTTON_PRESS
+            | x11::EVENT_BUTTON_RELEASE
+            | x11::EVENT_POINTER_MOTION
+            | x11::EVENT_LEAVE_WINDOW;
         this.send(&x11::create_window(
             window,
             screen.root,
@@ -399,13 +439,163 @@ impl X11Window {
                 self.keyboard_stale = true;
                 None
             }
+            Packet::ButtonPress { detail, x, y, state } => {
+                let (x, y) = (f32::from(x), f32::from(y));
+                let modifiers = x11::modifiers_from_state(state);
+                match x11::button_code(detail) {
+                    ButtonCode::Button(button) => Some(WindowEvent::PointerPressed {
+                        x,
+                        y,
+                        button,
+                        modifiers,
+                    }),
+                    ButtonCode::Wheel {
+                        lines_down,
+                        lines_right,
+                    } => Some(WindowEvent::Wheel {
+                        x,
+                        y,
+                        lines_down,
+                        lines_right,
+                        modifiers,
+                    }),
+                    ButtonCode::Other => None,
+                }
+            }
+            Packet::ButtonRelease { detail, x, y, state } => match x11::button_code(detail) {
+                ButtonCode::Button(button) => Some(WindowEvent::PointerReleased {
+                    x: f32::from(x),
+                    y: f32::from(y),
+                    button,
+                    modifiers: x11::modifiers_from_state(state),
+                }),
+                ButtonCode::Wheel { .. } | ButtonCode::Other => None,
+            },
+            Packet::MotionNotify { x, y } => Some(WindowEvent::PointerMoved {
+                x: f32::from(x),
+                y: f32::from(y),
+            }),
+            Packet::LeaveNotify { window, mode } if window == self.window && mode == 0 => {
+                Some(WindowEvent::PointerLeft)
+            }
+            Packet::SelectionClear { owner, selection }
+                if owner == self.window && selection == self.atoms.clipboard =>
+            {
+                self.owned_clipboard = None;
+                None
+            }
+            Packet::SelectionRequest {
+                time,
+                owner,
+                requestor,
+                selection,
+                target,
+                property,
+            } => {
+                let property = if property == x11::ATOM_NONE { target } else { property };
+                let answered = if owner == self.window && selection == self.atoms.clipboard {
+                    self.serve_clipboard(requestor, target, property)?
+                } else {
+                    false
+                };
+                let answer = if answered { property } else { x11::ATOM_NONE };
+                let event = x11::selection_notify_event(time, requestor, selection, target, answer);
+                self.send(&x11::send_event(requestor, &event)?)?;
+                self.stream.flush().map_err(|error| io_error(&error))?;
+                None
+            }
             Packet::Reply { .. }
             | Packet::Expose { .. }
             | Packet::ConfigureNotify { .. }
             | Packet::ClientMessage { .. }
+            | Packet::LeaveNotify { .. }
+            | Packet::SelectionClear { .. }
+            | Packet::SelectionNotify { .. }
             | Packet::Other(_) => None,
         })
     }
+
+    fn serve_clipboard(
+        &mut self,
+        requestor: u32,
+        target: u32,
+        property: u32,
+    ) -> Result<bool, WindowError> {
+        let atoms = self.atoms;
+        if target == atoms.targets {
+            let mut offered = vec![atoms.targets];
+            offered.extend(atoms.text_targets());
+            self.send(&x11::change_property(
+                requestor,
+                property,
+                x11::ATOM_ATOM,
+                PropertyData::Words(&offered),
+            )?)?;
+            return Ok(true);
+        }
+        let Some(text) = self.owned_clipboard.clone() else {
+            return Ok(false);
+        };
+        if !atoms.text_targets().contains(&target) {
+            return Ok(false);
+        }
+        let largest = usize::from(self.maximum_request_length)
+            .saturating_mul(4)
+            .saturating_sub(SELECTION_REQUEST_HEADER_BYTES);
+        if text.len() > largest {
+            return Ok(false);
+        }
+        let bytes = if target == x11::ATOM_STRING {
+            latin1(&text)
+        } else {
+            text.into_bytes()
+        };
+        self.send(&x11::change_property(
+            requestor,
+            property,
+            target,
+            PropertyData::Bytes(&bytes),
+        )?)?;
+        Ok(true)
+    }
+
+    fn wait_for_selection(&mut self, deadline: Instant) -> Result<Option<u32>, WindowError> {
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(WindowError::Io(
+                    "the clipboard's owner did not answer in time".to_owned(),
+                ));
+            }
+            let Some(packet) = self.read_packet(Some(left))? else {
+                continue;
+            };
+            let mut header = [0u8; 32];
+            header.copy_from_slice(packet.get(..32).unwrap_or(&[0; 32]));
+            match x11::parse_packet(&header) {
+                Packet::SelectionNotify {
+                    requestor,
+                    selection,
+                    property,
+                    ..
+                } if requestor == self.window && selection == self.atoms.clipboard => {
+                    return Ok((property != x11::ATOM_NONE).then_some(property));
+                }
+                Packet::Reply { .. } => {}
+                packet => {
+                    if let Some(event) = self.translate(packet)? {
+                        self.pending.push_back(event);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn latin1(text: &str) -> Vec<u8> {
+    text.chars()
+        .map(|character| u8::try_from(u32::from(character)).unwrap_or(b'?'))
+        .collect()
 }
 
 impl Window for X11Window {
@@ -488,5 +678,56 @@ impl Window for X11Window {
 
     fn set_accessibility_tree(&mut self, nodes: &[AccessNode]) {
         self.update_accessibility(|bridge| bridge.set_tree(nodes));
+    }
+
+    fn put_clipboard_text(&mut self, text: &str) -> Result<(), WindowError> {
+        check_clipboard_text(text)?;
+        self.send(&x11::set_selection_owner(
+            self.window,
+            self.atoms.clipboard,
+            x11::CURRENT_TIME,
+        )?)?;
+        self.stream.flush().map_err(|error| io_error(&error))?;
+        self.owned_clipboard = Some(text.to_owned());
+        Ok(())
+    }
+
+    fn clipboard_text(&mut self) -> Result<Option<String>, WindowError> {
+        if let Some(text) = &self.owned_clipboard {
+            return Ok(Some(text.clone()));
+        }
+        let atoms = self.atoms;
+        self.send(&x11::delete_property(self.window, atoms.landing)?)?;
+        self.send(&x11::convert_selection(
+            self.window,
+            atoms.clipboard,
+            atoms.utf8_string,
+            atoms.landing,
+            x11::CURRENT_TIME,
+        )?)?;
+        self.stream.flush().map_err(|error| io_error(&error))?;
+        let deadline = Instant::now() + CLIPBOARD_ANSWER_LIMIT;
+        let Some(property) = self.wait_for_selection(deadline)? else {
+            return Ok(None);
+        };
+        let sequence = self.send(&x11::get_property_deleting(
+            self.window,
+            property,
+            CLIPBOARD_REPLY_UNITS,
+        )?)?;
+        let reply = self.reply(sequence)?;
+        let kind = x11::parse_property_type(&reply)?;
+        if kind == atoms.incr {
+            return Err(WindowError::Unsupported(
+                "the clipboard's owner sends its text in increments, which is not read yet",
+            ));
+        }
+        let bytes = x11::parse_property_reply(&reply)?;
+        if bytes.len() > MAX_CLIPBOARD_TEXT_BYTES {
+            return Err(WindowError::InvalidInput(format!(
+                "the clipboard holds more than {MAX_CLIPBOARD_TEXT_BYTES} bytes of text"
+            )));
+        }
+        Ok(Some(String::from_utf8_lossy(bytes).into_owned()))
     }
 }

@@ -2,7 +2,8 @@
 //! translating virtual-key codes and `WM_CHAR` UTF-16 units into the GUI's keys, reading the
 //! modifier state, packing the words of a message's parameters, turning a monitor's DPI into a
 //! scale, and converting an RGBA frame into the BGRA rows a 32-bit device-independent bitmap
-//! holds, the filter list and path buffers of the open-file dialog. The values come from
+//! holds, the filter list and path buffers of the open-file dialog, the pointer's position and
+//! wheel steps in mouse messages, and clipboard text as `CF_UNICODETEXT`. The values come from
 //! Microsoft's public Win32 documentation.
 
 use std::path::PathBuf;
@@ -168,6 +169,48 @@ pub fn high_word(value: usize) -> u16 {
 pub fn client_size_from_lparam(lparam: isize) -> (u32, u32) {
     let bits = lparam as usize;
     (u32::from(low_word(bits)), u32::from(high_word(bits)))
+}
+
+/// The pointer's position in a mouse message's `lparam` (`GET_X_LPARAM`, `GET_Y_LPARAM`):
+/// signed, since a captured pointer outside the window has negative coordinates.
+pub fn point_from_lparam(lparam: isize) -> (i32, i32) {
+    let bits = lparam as usize;
+    (
+        i32::from(low_word(bits) as i16),
+        i32::from(high_word(bits) as i16),
+    )
+}
+
+/// The wheel's travel in a `WM_MOUSEWHEEL` or `WM_MOUSEHWHEEL` `wparam`, in notches of
+/// `WHEEL_DELTA` (120): positive away from the user (up) or to the right.
+pub fn wheel_notches(wparam: usize) -> f32 {
+    f32::from(high_word(wparam) as i16) / WHEEL_DELTA
+}
+
+const WHEEL_DELTA: f32 = 120.0;
+
+/// `text` as `CF_UNICODETEXT` wants it: UTF-16 with `\r\n` line breaks and a closing NUL.
+pub fn clipboard_units(text: &str) -> Vec<u16> {
+    let mut units = Vec::with_capacity(text.len() + 1);
+    let mut previous = '\0';
+    for character in text.chars() {
+        if character == '\n' && previous != '\r' {
+            units.push(u16::from(b'\r'));
+        }
+        if character != '\0' {
+            let mut buffer = [0u16; 2];
+            units.extend_from_slice(character.encode_utf16(&mut buffer));
+        }
+        previous = character;
+    }
+    units.push(0);
+    units
+}
+
+/// The text of `CF_UNICODETEXT` units, up to the first NUL, with unpaired surrogates replaced.
+pub fn text_from_clipboard_units(units: &[u16]) -> String {
+    let end = units.iter().position(|&unit| unit == 0).unwrap_or(units.len());
+    String::from_utf16_lossy(units.get(..end).unwrap_or(&[]))
 }
 
 /// Device pixels per logical pixel for a DPI: the DPI over 96, and 1 for a DPI of 0 (what
@@ -451,5 +494,27 @@ mod tests {
         assert_eq!(wide_string("Eg"), [0x45, 0x67, 0]);
         assert_eq!(wide_string("a\0b"), [0x61, 0x62, 0]);
         assert_eq!(wide_string(""), [0]);
+    }
+
+    #[test]
+    fn mouse_parameters_give_signed_points_and_wheel_notches() {
+        let lparam = ((0xFFF6usize << 16) | 300) as isize;
+        assert_eq!(point_from_lparam(lparam), (300, -10));
+        assert_eq!(wheel_notches(120 << 16), 1.0);
+        assert_eq!(wheel_notches(0xFF88 << 16), -1.0);
+        assert_eq!(wheel_notches(60 << 16), 0.5);
+    }
+
+    #[test]
+    fn clipboard_text_round_trips_through_unicode_units() {
+        let units = clipboard_units("SELECT 1;\nSELECT 'é😀';\r\n");
+        assert_eq!(units.last(), Some(&0));
+        assert_eq!(units.iter().filter(|&&unit| unit == u16::from(b'\r')).count(), 2);
+        assert_eq!(
+            text_from_clipboard_units(&units),
+            "SELECT 1;\r\nSELECT 'é😀';\r\n"
+        );
+        assert_eq!(text_from_clipboard_units(&[0x61, 0, 0x62]), "a");
+        assert_eq!(text_from_clipboard_units(&[0xD800, 0x61]), "\u{FFFD}a");
     }
 }
