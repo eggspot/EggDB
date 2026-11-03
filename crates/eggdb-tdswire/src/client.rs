@@ -706,7 +706,7 @@ mod tests {
 
     #[test]
     fn debug_output_never_shows_the_password() {
-        let mut options = parse_sql_server_url("sqlserver://sa@sql.example.com/Shop").unwrap();
+        let mut options = parse_sql_server_url("sqlserver://sa@sql.example.com/Shop?trustServerCertificate=true").unwrap();
         options.password = Some("Str0ng!secret".to_owned());
         let shown = format!("{options:?}");
         assert!(!shown.contains("Str0ng!secret"), "{shown}");

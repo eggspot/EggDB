@@ -583,7 +583,6 @@ fn not_supported_yet_answers_0a000_with_a_hint() {
     let store = MemoryStore::default();
     let mut session = with_people(&store);
     for sql in [
-        "SELECT age FROM people GROUP BY ROLLUP (age)",
         "SELECT '{{1}}'::int[]",
         "CREATE TABLE ts (t money)",
         "CREATE TABLE js (j inet)",
@@ -1674,8 +1673,7 @@ fn grouping_errors_follow_postgresql() {
             "SELECT DISTINCT person_id FROM orders ORDER BY amount",
             "42P10",
         ),
-        ("SELECT age FROM people GROUP BY ROLLUP (age)", "0A000"),
-        ("SELECT age FROM people GROUP BY ()", "0A000"),
+        ("SELECT age FROM people GROUP BY ()", "42803"),
         ("UPDATE people SET age = count(*)", "42803"),
         ("UPDATE people SET age = 1 WHERE count(*) > 1", "42803"),
         ("DELETE FROM people WHERE count(*) > 1", "42803"),

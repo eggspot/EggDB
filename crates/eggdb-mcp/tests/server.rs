@@ -363,7 +363,11 @@ fn list_describe_sample_and_the_schema_resource() {
         "explain_query",
         r#"{"sql":"SELECT 1 FROM dual","dialect":"oracle"}"#,
     );
-    assert_eq!(error_code(&oracle), "not_supported");
+    assert!(!is_error(&oracle), "{oracle:?}");
+    assert_eq!(
+        text_at(structured(&oracle), &["columns", "0", "name"]),
+        "PLAN_TABLE_OUTPUT"
+    );
     let sneaky = call(
         &mut server,
         13,

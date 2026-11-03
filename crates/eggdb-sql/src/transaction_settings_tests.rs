@@ -146,7 +146,10 @@ fn rolling_back_to_a_savepoint_undoes_the_settings_changed_after_it() {
     answer(&mut session, "SET app.b = '3'");
     answer(&mut session, "ROLLBACK TO SAVEPOINT s");
     assert_eq!(shown(&mut session, "app.a"), "1");
-    assert_eq!(state(&mut session, "SHOW app.b"), "42704");
+    assert_eq!(
+        answer(&mut session, "SELECT current_setting('app.b', true) AS b"),
+        "b\nNULL\nSELECT 1"
+    );
     answer(&mut session, "SET LOCAL app.a = '4'");
     answer(&mut session, "RELEASE SAVEPOINT s");
     answer(&mut session, "COMMIT");

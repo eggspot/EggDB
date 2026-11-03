@@ -578,6 +578,7 @@ fn a_table_listed_with_columns_takes_inserts_and_changes_to_its_listed_columns()
         "UPDATE secrets SET id = 5 WHERE id = 1",
         "DELETE FROM secrets",
         "TRUNCATE secrets",
+        "DROP TABLE secrets",
     ] {
         let message = refused(&mut session, sql);
         assert!(
@@ -588,7 +589,6 @@ fn a_table_listed_with_columns_takes_inserts_and_changes_to_its_listed_columns()
     for sql in [
         "ALTER TABLE secrets ADD COLUMN extra integer",
         "COMMENT ON TABLE secrets IS 'changed'",
-        "DROP TABLE secrets",
         "ANALYZE secrets",
         "CREATE POLICY p ON secrets USING (true)",
     ] {
@@ -807,7 +807,8 @@ fn hidden_columns_that_need_a_generated_value_or_a_check_against_other_rows_refu
     let mut owner = Session::new(&store);
     runs(
         &mut owner,
-        "CREATE TABLE counted (id integer PRIMARY KEY, name text, seq serial);
+        "CREATE SEQUENCE counted_seq;
+         CREATE TABLE counted (id integer PRIMARY KEY, name text, seq integer NOT NULL DEFAULT nextval('counted_seq'));
          CREATE TABLE coded (id integer PRIMARY KEY, name text, code text UNIQUE DEFAULT 'x');
          CREATE TABLE required (id integer PRIMARY KEY, name text, secret text NOT NULL);
          CREATE TABLE owners (id integer PRIMARY KEY);
@@ -1024,7 +1025,6 @@ fn joined_updates_and_deletes_and_select_into_cannot_read_an_unlisted_table() {
         "UPDATE items SET name = secrets.code FROM secrets WHERE secrets.id = items.id",
         "DELETE FROM items USING secrets WHERE secrets.id = items.id",
         "SELECT code INTO drafts FROM secrets",
-        "MERGE INTO items USING secrets ON items.id = secrets.id WHEN NOT MATCHED THEN INSERT (name) VALUES (secrets.code)",
     ] {
         let error = fails(&mut session, sql);
         assert_eq!(error.state(), SqlState::UNDEFINED_TABLE, "{sql}: {error}");
@@ -1052,6 +1052,7 @@ fn joined_updates_and_deletes_and_select_into_cannot_read_an_unlisted_table() {
         "UPDATE items SET name = 'x' OUTPUT inserted.id INTO secrets WHERE id = 0",
         "SELECT code INTO log FROM secrets",
         "UPDATE i SET name = s.code FROM items i JOIN secrets s ON s.id = i.id",
+        "MERGE INTO items USING secrets ON items.id = secrets.id WHEN NOT MATCHED THEN INSERT (name) VALUES (secrets.code);",
     ] {
         let error = fails(&mut sqlserver, sql);
         assert!(!error.message().contains("swordfish"), "{sql}: {error}");
