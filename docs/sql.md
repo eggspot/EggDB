@@ -465,6 +465,26 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   THEN INSERT [(columns)] VALUES (...) [WHERE ...]`, in either order; `ORA-30926` when a target
   row matches more than one source row, `ORA-38104` for an updated `ON` column, `ORA-00918`
   for an ambiguous name; the result is `MERGE n`.
+- **Hierarchical queries** (D304): `[START WITH condition] CONNECT BY [NOCYCLE] condition` (in
+  either order, after `WHERE`) walks the rows of the `FROM` table, view, subquery or `DUAL` depth
+  first from the rows `START WITH` finds (every row without it), as Oracle returns them. `PRIOR
+  expr` reads the parent row in `CONNECT BY` and the select list (NULL for a root); `LEVEL` (also
+  in `CONNECT BY`: `SELECT LEVEL FROM dual CONNECT BY LEVEL <= 10`), `CONNECT_BY_ROOT expr`,
+  `CONNECT_BY_ISLEAF`, `CONNECT_BY_ISCYCLE` (`ORA-30930` without `NOCYCLE`) and
+  `SYS_CONNECT_BY_PATH(expr, 'separator')` (a constant separator, `ORA-30003`; a value holding it
+  is `ORA-30004`) can be selected, filtered, grouped and sorted. `WHERE` filters after the walk,
+  so a filtered-out row's descendants stay. `ORDER SIBLINGS BY` sorts the rows under each parent
+  (and the roots) and keeps the hierarchy; elsewhere it is `ORA-30929`. A loop (a child with the
+  `PRIOR` values of one of its ancestors) is `ORA-01436`; with `NOCYCLE` the walk stops there and
+  marks the row with `CONNECT_BY_ISCYCLE = 1`. The pseudo-columns without `CONNECT BY` are
+  `ORA-01788`. `CONNECT BY` over a join, `PRIOR` beside a subquery and `ORDER SIBLINGS BY` a
+  pseudo-column answer `0A000` for now.
+- **Multitable inserts** (D304): `INSERT ALL INTO t [(columns)] [VALUES (...)] [INTO ...]
+  subquery`, `INSERT ALL WHEN condition THEN INTO ... [WHEN ...] [ELSE INTO ...] subquery` (every
+  `WHEN` that holds) and `INSERT FIRST WHEN ... THEN INTO ... [ELSE INTO ...] subquery` (the first
+  that holds). The subquery runs once; `WHEN` and `VALUES` read its columns, `VALUES` takes
+  `DEFAULT`, and an `INTO` without `VALUES` takes the subquery's columns in order. It is one
+  statement: a failing target undoes them all, and the result counts every row inserted.
 - **Indexes**: `CREATE [UNIQUE] INDEX name ON t (...)` with `TABLESPACE`, `ONLINE`, `LOGGING`
   and `COMPUTE STATISTICS` accepted, `DROP INDEX name`, `UNIQUE` columns and `CONSTRAINT name
   UNIQUE (...)` (an unnamed one is `SYS_C` and seven digits), `USER_INDEXES`/`ALL_INDEXES`
@@ -4280,7 +4300,10 @@ And more, not in the suite yet:
   fire themselves again and the mutating-table check (`ORA-04091`) is not made.
 - `SYS_CONTEXT` takes only text constants as its arguments, and a third argument (the length)
   is accepted and ignored.
-- Not supported yet: `CONNECT BY`, outer joins with `(+)`, `SAVEPOINT`, `INSERT ALL`, `RETURNING ... INTO`, synonyms, database
+- `SEQUENCE.NEXTVAL` in a multitable insert's `VALUES` advances once per use, where Oracle
+  advances it once per source row; rows go into an `INSERT ALL`'s targets one `INTO` clause at a
+  time, so identity values follow that order (D304).
+- Not supported yet: outer joins with `(+)`, `SAVEPOINT`, `RETURNING ... INTO`, synonyms, database
   links, `ROWID`, the regular-expression, analytic and XML functions, and views `WITH CHECK
   OPTION` (refused).
 - `NUMBER`'s range ends are not Oracle's: `TO_NUMBER('1e126')` gives a 127-digit value where

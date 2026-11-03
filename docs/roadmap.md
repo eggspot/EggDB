@@ -215,6 +215,14 @@ a query with `SELECT ... INTO new_table` in Transact-SQL (`#temporary` included)
 `OUTPUT`, `CREATE TABLE ... AS`, `SELECT ... INTO` keeping the source columns' `NOT NULL` and
 identity, `DELETE` triggers fired by `MERGE`'s deletes, SQL Server's refusal of an `OUTPUT ...
 INTO` target with triggers, checks or foreign keys, PostgreSQL's `MERGE`, and describing a prepared `OUTPUT ... INTO` that still returns rows.
+Users can now walk hierarchies in Oracle SQL with `START WITH ... CONNECT BY [NOCYCLE] PRIOR
+...`, `LEVEL`, `SYS_CONNECT_BY_PATH`, `CONNECT_BY_ROOT`, `CONNECT_BY_ISLEAF`, `CONNECT_BY_ISCYCLE`
+and `ORDER SIBLINGS BY` (with `ORA-01436` for a loop and `SELECT LEVEL FROM dual CONNECT BY LEVEL
+<= n` for counting), and fill several tables from one query with `INSERT ALL` and `INSERT FIRST
+WHEN ... THEN INTO ... ELSE INTO ...` (D304). Next for these: `CONNECT BY` over a join (with the
+join's conditions in `WHERE` applied first), `PRIOR` beside a subquery, `ORDER SIBLINGS BY` a
+pseudo-column, a sequence's `NEXTVAL` advancing once per source row of a multitable insert, and a
+benchmark of a deep hierarchy against a recursive `WITH` on SQLite.
 
 More tracks that run alongside the milestones, each starting where its dependencies land:
 - **The project (D21):** contributing guide, code of conduct, security policy, the stability
