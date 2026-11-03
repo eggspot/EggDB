@@ -1352,6 +1352,7 @@ pub(crate) struct Update {
     pub(crate) assignments: Vec<(Name, InsertValue)>,
     pub(crate) filter: Option<Expr>,
     pub(crate) returning: Option<Vec<SelectItem>>,
+    pub(crate) from: Option<JoinedTables>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1359,6 +1360,32 @@ pub(crate) struct Delete {
     pub(crate) table: TableReference,
     pub(crate) filter: Option<Expr>,
     pub(crate) returning: Option<Vec<SelectItem>>,
+    pub(crate) using: Option<JoinedTables>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct JoinedTables {
+    pub(crate) tables: FromClause,
+    pub(crate) target_at: Option<usize>,
+    pub(crate) more_targets_at: Vec<usize>,
+    pub(crate) assigned_at: Vec<Option<usize>>,
+    pub(crate) writes_any_table: bool,
+}
+
+impl JoinedTables {
+    pub(crate) fn beside_target(tables: FromClause) -> Self {
+        Self {
+            tables,
+            target_at: None,
+            more_targets_at: Vec::new(),
+            assigned_at: Vec::new(),
+            writes_any_table: false,
+        }
+    }
+
+    pub(crate) fn references(&self) -> impl Iterator<Item = &TableReference> {
+        std::iter::once(&self.tables.first).chain(self.tables.joins.iter().map(|join| &join.table))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

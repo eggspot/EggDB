@@ -1363,11 +1363,11 @@ impl<'s> Session<'s> {
             }),
             Statement::Update(update) => self.read(|reader, tables| {
                 binding.update(reader, tables, update)?;
-                execute::returning_columns(reader, tables, &update.table, &update.returning)
+                crate::joined_dml::update_columns(reader, tables, update)
             }),
             Statement::Delete(delete) => self.read(|reader, tables| {
                 binding.delete(reader, tables, delete)?;
-                execute::returning_columns(reader, tables, &delete.table, &delete.returning)
+                crate::joined_dml::delete_columns(reader, tables, delete)
             }),
             Statement::With(with) => self.read(|reader, tables| {
                 crate::with_statement::describe(reader, tables, with, binding)

@@ -1,7 +1,8 @@
 use crate::OutputColumn;
 use crate::ast::{
     AlterAction, AlterTable, ConstraintKind, CreateTable, Delete, DerivedTable, Expr, ExprKind,
-    FromClause, GeneratedTable, Insert, InsertSource, InsertValue, JoinCondition, MergeStatement,
+    FromClause, GeneratedTable, Insert, InsertSource, InsertValue, JoinCondition, JoinedTables,
+    MergeStatement,
     Name, OnDuplicate, Query, Select, SelectItem, SetExpr, Statement, TableReference, Update,
 };
 use crate::column_privileges::{ColumnScopes, ScopeItem};
@@ -1517,6 +1518,9 @@ impl Binding<'_> {
         tables: &mut TableCache,
         update: &mut Update,
     ) -> SqlResult<()> {
+        if update.from.is_some() {
+            return self.joined_update(reader, tables, update);
+        }
         let mut resolver = self.resolver(reader, tables)?;
         resolver.resolve_target(&mut update.table)?;
         let table = update.table.name.text.clone();
@@ -1619,6 +1623,9 @@ impl Binding<'_> {
         tables: &mut TableCache,
         delete: &mut Delete,
     ) -> SqlResult<()> {
+        if delete.using.is_some() {
+            return self.joined_delete(reader, tables, delete);
+        }
         let mut resolver = self.resolver(reader, tables)?;
         resolver.target(&mut delete.table)?;
         let table = delete.table.name.text.clone();
@@ -1802,5 +1809,229 @@ impl Binding<'_> {
                 Ok(())
             }
         }
+    }
+}
+
+fn listed_reference(tables: &FromClause, at: usize) -> Option<&TableReference> {
+    match at.checked_sub(1) {
+        None => Some(&tables.first),
+        Some(join) => tables.joins.get(join).map(|join| &join.table),
+    }
+}
+
+fn joined_row_security_refused() -> SqlError {
+    SqlError::not_supported(
+        "UPDATE or DELETE joined with other tables on a table with row-level security for this role",
+    )
+}
+
+impl Resolver<'_> {
+    fn joined_target(
+        &mut self,
+        reference: &mut TableReference,
+        command: crate::row_security::PolicyCommand,
+    ) -> SqlResult<()> {
+        self.target(reference)?;
+        if self.row_security_filter(&reference.name.text, command)?.is_some() {
+            return Err(joined_row_security_refused());
+        }
+        Ok(())
+    }
+}
+
+impl Binding<'_> {
+    #[allow(clippy::too_many_arguments)]
+    fn joined_reads(
+        &self,
+        reader: &dyn KeyValueRead,
+        tables: &mut TableCache,
+        target: &TableReference,
+        joined: &mut JoinedTables,
+        exprs: Vec<&mut Expr>,
+        returning: &mut Option<Vec<SelectItem>>,
+        filter: &mut Option<Expr>,
+    ) -> SqlResult<()> {
+        let mut items: Vec<SelectItem> = exprs
+            .iter()
+            .map(|expr| SelectItem::Expr {
+                expr: (**expr).clone(),
+                alias: None,
+            })
+            .collect();
+        items.extend(returning.iter().flatten().cloned());
+        let mut select = Select {
+            distinct: false,
+            items,
+            from: Some(crate::joined_dml::full_from(target, joined)),
+            filter: filter.take(),
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            source_row_limit: None,
+        };
+        self.select(reader, tables, &mut select)?;
+        let mut resolved = select.items.into_iter();
+        for expr in exprs {
+            if let Some(SelectItem::Expr {
+                expr: resolved_expr,
+                ..
+            }) = resolved.next()
+            {
+                *expr = resolved_expr;
+            }
+        }
+        for item in returning.iter_mut().flatten() {
+            if let Some(resolved_item) = resolved.next() {
+                *item = resolved_item;
+            }
+        }
+        *filter = select.filter;
+        let Some(from) = select.from else {
+            return Ok(());
+        };
+        joined.tables = match joined.target_at {
+            Some(_) => from,
+            None => {
+                let mut joins = from.joins.into_iter();
+                let Some(first) = joins.next() else {
+                    return Ok(());
+                };
+                FromClause {
+                    first: first.table,
+                    joins: joins.collect(),
+                }
+            }
+        };
+        Ok(())
+    }
+
+    fn written_tables(
+        &self,
+        reader: &dyn KeyValueRead,
+        tables: &mut TableCache,
+        update: &mut Update,
+    ) -> SqlResult<()> {
+        let Some(joined) = &mut update.from else {
+            return Ok(());
+        };
+        if !joined.writes_any_table {
+            return Ok(());
+        }
+        let mut candidates = Vec::new();
+        for (at, reference) in joined.references().enumerate() {
+            if let Some(table) = crate::joined_dml::stored_table(reader, tables, reference)? {
+                candidates.push((at, table));
+            }
+        }
+        joined.assigned_at.resize(update.assignments.len(), None);
+        for ((name, _), assigned) in update.assignments.iter().zip(&mut joined.assigned_at) {
+            if assigned.is_none() {
+                *assigned = Some(crate::joined_dml::column_owner(&candidates, name)?);
+            }
+        }
+        joined.target_at = joined.assigned_at.iter().flatten().next().copied();
+        Ok(())
+    }
+
+    fn joined_update(
+        &self,
+        reader: &dyn KeyValueRead,
+        tables: &mut TableCache,
+        update: &mut Update,
+    ) -> SqlResult<()> {
+        let written = match &update.from {
+            Some(joined) => joined.tables.clone(),
+            None => return Ok(()),
+        };
+        {
+            let Update {
+                table,
+                assignments,
+                filter,
+                returning,
+                from,
+            } = &mut *update;
+            let Some(joined) = from else {
+                return Ok(());
+            };
+            let exprs: Vec<&mut Expr> = assignments
+                .iter_mut()
+                .filter_map(|(_, value)| match value {
+                    InsertValue::Expr(expr) => Some(expr),
+                    InsertValue::Default => None,
+                })
+                .collect();
+            self.joined_reads(reader, tables, table, joined, exprs, returning, filter)?;
+        }
+        self.written_tables(reader, tables, update)?;
+        let Some(joined) = &update.from else {
+            return Ok(());
+        };
+        let main = joined.target_at;
+        if let Some(reference) = main.and_then(|at| listed_reference(&written, at)) {
+            update.table = reference.clone();
+        }
+        let mut written_at: Vec<Option<usize>> = Vec::new();
+        for at in &joined.assigned_at {
+            if !written_at.contains(at) {
+                written_at.push(*at);
+            }
+        }
+        let mut resolver = self.resolver(reader, tables)?;
+        let update_command = crate::row_security::PolicyCommand::Update;
+        resolver.joined_target(&mut update.table, update_command)?;
+        if resolver.target_privilege.is_some() {
+            let written_columns: Vec<String> = update
+                .assignments
+                .iter()
+                .enumerate()
+                .filter(|(at, _)| joined.assigned_at.get(*at).copied().flatten().or(main) == main)
+                .map(|(_, (name, _))| name.text.clone())
+                .collect();
+            resolver.check_written_columns(
+                &update.table.name.text,
+                crate::roles::Privilege::Update,
+                &written_columns,
+            )?;
+        }
+        for at in written_at.into_iter().flatten() {
+            if Some(at) == main {
+                continue;
+            }
+            if let Some(mut reference) = listed_reference(&written, at).cloned() {
+                resolver.joined_target(&mut reference, update_command)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn joined_delete(
+        &self,
+        reader: &dyn KeyValueRead,
+        tables: &mut TableCache,
+        delete: &mut Delete,
+    ) -> SqlResult<()> {
+        let Delete {
+            table,
+            filter,
+            returning,
+            using,
+        } = delete;
+        let Some(joined) = using else {
+            return Ok(());
+        };
+        let written = joined.tables.clone();
+        self.joined_reads(reader, tables, table, joined, Vec::new(), returning, filter)?;
+        let mut resolver = self.resolver(reader, tables)?;
+        let delete_command = crate::row_security::PolicyCommand::Delete;
+        resolver.joined_target(table, delete_command)?;
+        for &at in &joined.more_targets_at {
+            if let Some(mut reference) = listed_reference(&written, at).cloned() {
+                resolver.joined_target(&mut reference, delete_command)?;
+            }
+        }
+        Ok(())
     }
 }

@@ -58,6 +58,7 @@ mod information_schema;
 mod interval;
 pub mod jobs;
 mod join;
+mod joined_dml;
 pub mod json;
 mod json_functions;
 mod json_path;
@@ -189,6 +190,8 @@ mod implicit_transaction_tests;
 mod index_tests;
 #[cfg(test)]
 mod insert_select_tests;
+#[cfg(test)]
+mod joined_dml_tests;
 #[cfg(test)]
 mod json_path_tests;
 #[cfg(test)]

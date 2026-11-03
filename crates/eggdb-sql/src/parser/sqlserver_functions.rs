@@ -117,11 +117,19 @@ pub(super) fn now_with_offset(position: usize) -> Expr {
     }
 }
 
-fn unqualified(expr: &mut Expr, statement: OutputStatement) -> SqlResult<()> {
+fn bound_output_column(
+    expr: &mut Expr,
+    statement: OutputStatement,
+    target: Option<&str>,
+) -> SqlResult<()> {
     if let ExprKind::Column { qualifier, name } = &mut expr.kind {
         match qualifier.as_deref() {
-            Some("inserted") if statement != OutputStatement::Delete => *qualifier = None,
-            Some("deleted") if statement == OutputStatement::Delete => *qualifier = None,
+            Some("inserted") if statement != OutputStatement::Delete => {
+                *qualifier = target.map(str::to_owned);
+            }
+            Some("deleted") if statement == OutputStatement::Delete => {
+                *qualifier = target.map(str::to_owned);
+            }
             Some("deleted") => {
                 return Err(not_supported("OUTPUT deleted. in UPDATE").at(expr.position));
             }
@@ -131,9 +139,38 @@ fn unqualified(expr: &mut Expr, statement: OutputStatement) -> SqlResult<()> {
         return Ok(());
     }
     for child in crate::eval::children_mut(expr) {
-        unqualified(child, statement)?;
+        bound_output_column(child, statement, target)?;
     }
     Ok(())
+}
+
+pub(super) fn bound_output(
+    mut items: Vec<SelectItem>,
+    statement: OutputStatement,
+    target: Option<&str>,
+) -> SqlResult<Vec<SelectItem>> {
+    for item in &mut items {
+        match item {
+            SelectItem::Wildcard {
+                qualifier,
+                position,
+            } => match qualifier.as_deref() {
+                Some("inserted") if statement != OutputStatement::Delete => {
+                    *qualifier = target.map(str::to_owned);
+                }
+                Some("deleted") if statement == OutputStatement::Delete => {
+                    *qualifier = target.map(str::to_owned);
+                }
+                Some("deleted") => {
+                    return Err(not_supported("OUTPUT deleted. in UPDATE").at(*position));
+                }
+                Some(other) => return Err(not_bound(other, "*", *position)),
+                None => {}
+            },
+            SelectItem::Expr { expr, .. } => bound_output_column(expr, statement, target)?,
+        }
+    }
+    Ok(items)
 }
 
 impl Parser<'_> {
@@ -710,29 +747,18 @@ impl Parser<'_> {
         &mut self,
         statement: OutputStatement,
     ) -> SqlResult<Option<Vec<SelectItem>>> {
+        self.sqlserver_output_items()?
+            .map(|items| bound_output(items, statement, None))
+            .transpose()
+    }
+
+    pub(super) fn sqlserver_output_items(&mut self) -> SqlResult<Option<Vec<SelectItem>>> {
         if !self.take_word("output") {
             return Ok(None);
         }
-        let mut items = self.select_items()?;
+        let items = self.select_items()?;
         if self.is_word("into") {
             return Err(not_supported("OUTPUT ... INTO").at(self.position()));
-        }
-        for item in &mut items {
-            match item {
-                SelectItem::Wildcard {
-                    qualifier,
-                    position,
-                } => match qualifier.as_deref() {
-                    Some("inserted") if statement != OutputStatement::Delete => *qualifier = None,
-                    Some("deleted") if statement == OutputStatement::Delete => *qualifier = None,
-                    Some("deleted") => {
-                        return Err(not_supported("OUTPUT deleted. in UPDATE").at(*position));
-                    }
-                    Some(other) => return Err(not_bound(other, "*", *position)),
-                    None => {}
-                },
-                SelectItem::Expr { expr, .. } => unqualified(expr, statement)?,
-            }
         }
         Ok(Some(items))
     }

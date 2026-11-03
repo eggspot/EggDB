@@ -533,14 +533,22 @@ fn shown_text(name: &str) -> String {
 fn deleted(delete: &Delete, keys: &mut CatalogLookup<'_>) -> Option<DestructiveStatement> {
     let kind = match row_reach(delete.filter.as_ref(), &delete.table, keys) {
         RowReach::WholeTable => Some(DestructiveKind::DeleteWithoutFilter),
-        RowReach::Pinned(table) if !table.delete_reaches_further => None,
+        RowReach::Pinned(table) if !table.delete_reaches_further && delete.using.is_none() => None,
         RowReach::Pinned(_) | RowReach::Many => Some(DestructiveKind::DeleteOfManyRows),
     };
     let mut functions = CalledFunctions::default();
     optional_user_functions(delete.filter.as_ref(), keys, &mut functions);
     returning_user_functions(delete.returning.as_deref(), keys, &mut functions);
+    let mut names = vec![shown(&delete.table.name)];
+    if let Some(joined) = &delete.using {
+        for &at in &joined.more_targets_at {
+            if let Some(reference) = joined.references().nth(at) {
+                names.push(shown(&reference.name));
+            }
+        }
+    }
     DestructiveStatement::combined(
-        kind.map(|kind| DestructiveStatement::new(kind, vec![shown(&delete.table.name)], false)),
+        kind.map(|kind| DestructiveStatement::new(kind, names, false)),
         running(functions.user),
     )
 }
@@ -548,7 +556,11 @@ fn deleted(delete: &Delete, keys: &mut CatalogLookup<'_>) -> Option<DestructiveS
 fn updated(update: &Update, keys: &mut CatalogLookup<'_>) -> Option<DestructiveStatement> {
     let kind = match row_reach(update.filter.as_ref(), &update.table, keys) {
         RowReach::WholeTable => Some(DestructiveKind::UpdateWithoutFilter),
-        RowReach::Pinned(table) if !table.update_reaches_further_with(update) => None,
+        RowReach::Pinned(table)
+            if !table.update_reaches_further_with(update) && update.from.is_none() =>
+        {
+            None
+        }
         RowReach::Pinned(_) | RowReach::Many => Some(DestructiveKind::UpdateOfManyRows),
     };
     let mut functions = CalledFunctions::default();

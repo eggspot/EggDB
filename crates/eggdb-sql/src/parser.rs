@@ -3,6 +3,7 @@ mod copy;
 mod cursors;
 mod databases;
 mod indexes;
+mod joined_dml;
 mod merge;
 mod mysql;
 mod mysql_routines;
@@ -52,7 +53,7 @@ pub(crate) use sqlite::is_schema_table;
 use crate::ast::{
     AggregateFunction, BinaryOperator, ColumnDefinition, CreateTable, Delete, DiscardTarget, Expr,
     ExprKind, FromClause, IndexSpec, Insert, InsertSource, InsertValue, Join, JoinCondition,
-    JoinKind, Literal, Name, OnDuplicate, Overriding, Select, SelectItem, Statement,
+    JoinKind, JoinedTables, Literal, Name, OnDuplicate, Overriding, Select, SelectItem, Statement,
     TableReference, TruthTest, UnaryOperator, Update,
 };
 use crate::dialect::Dialect;
@@ -2875,36 +2876,52 @@ impl<'t> Parser<'t> {
 
     fn update(&mut self) -> SqlResult<Statement> {
         self.at += 1;
-        let table = self.table_reference()?;
+        let (mut table, listed) = self.update_target()?;
         self.expect_word("set")?;
         let mut assignments = Vec::new();
+        let mut written = Vec::new();
         loop {
             if self.peek_kind() == &TokenKind::LeftParen {
                 return Err(self.not_supported("multiple-column assignment in UPDATE"));
             }
-            let column = self.name()?;
+            let column = self.written_column()?;
             if self.peek_kind() == &TokenKind::Dot || self.peek_kind() == &TokenKind::LeftBracket {
                 return Err(self.not_supported("assigning to a field or element"));
             }
             if !self.take_operator("=") {
                 return Err(self.unexpected());
             }
-            assignments.push((column, self.insert_value()?));
+            assignments.push((column.column.clone(), self.insert_value()?));
+            written.push(column);
             if !self.take(&TokenKind::Comma) {
                 break;
             }
         }
         let output = if self.sqlserver() {
-            self.sqlserver_output(sqlserver_functions::OutputStatement::Update)?
+            self.sqlserver_output_items()?
         } else {
             None
         };
-        if self.is_word("from") {
-            return Err(self.not_supported("UPDATE ... FROM"));
-        }
+        let from = match listed {
+            Some(tables) => Some(self.listed_update(&mut table, tables, &written)?),
+            None if self.is_word("from") && !self.oracle() && !self.mysql() => {
+                self.at += 1;
+                let tables = self.joined_tables()?;
+                Some(self.joined_target(&mut table, tables, &written)?)
+            }
+            None if self.is_word("from") => return Err(self.not_supported("UPDATE ... FROM")),
+            None => {
+                self.check_single_target(&table, &written)?;
+                None
+            }
+        };
         let filter = self.filter()?;
         let returning = match output {
-            Some(output) => Some(output),
+            Some(items) => Some(sqlserver_functions::bound_output(
+                items,
+                sqlserver_functions::OutputStatement::Update,
+                joined_dml::joined_label(&table, from.as_ref()),
+            )?),
             None => self.returning()?,
         };
         Ok(Statement::Update(Update {
@@ -2912,34 +2929,55 @@ impl<'t> Parser<'t> {
             assignments,
             filter,
             returning,
+            from,
         }))
     }
 
     fn delete(&mut self) -> SqlResult<Statement> {
         self.at += 1;
-        if self.oracle() {
+        if self.mysql()
+            && let Some(statement) = self.mysql_multiple_table_delete()?
+        {
+            return Ok(statement);
+        }
+        if self.oracle() || self.sqlserver() {
             self.take_word("from");
         } else {
             self.expect_word("from")?;
         }
-        let table = self.table_reference()?;
-        if self.is_word("using") {
-            return Err(self.not_supported("DELETE ... USING"));
-        }
-        let output = if self.sqlserver() {
-            self.sqlserver_output(sqlserver_functions::OutputStatement::Delete)?
+        let mut table = self.table_reference()?;
+        let mut using = if self.is_word("using") {
+            if !self.postgresql() {
+                return Err(self.not_supported("DELETE ... USING"));
+            }
+            self.at += 1;
+            Some(JoinedTables::beside_target(self.joined_tables()?))
         } else {
             None
         };
+        let output = if self.sqlserver() {
+            self.sqlserver_output_items()?
+        } else {
+            None
+        };
+        if self.sqlserver() && self.take_word("from") {
+            let tables = self.joined_tables()?;
+            using = Some(self.joined_target(&mut table, tables, &[])?);
+        }
         let filter = self.filter()?;
         let returning = match output {
-            Some(output) => Some(output),
+            Some(items) => Some(sqlserver_functions::bound_output(
+                items,
+                sqlserver_functions::OutputStatement::Delete,
+                joined_dml::joined_label(&table, using.as_ref()),
+            )?),
             None => self.returning()?,
         };
         Ok(Statement::Delete(Delete {
             table,
             filter,
             returning,
+            using,
         }))
     }
 

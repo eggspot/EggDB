@@ -39,7 +39,7 @@ fn subquery_refused(position: usize) -> SqlError {
         .at(position)
 }
 
-fn source_definition(columns: &[crate::session::OutputColumn], label: &str) -> TableDefinition {
+pub(crate) fn source_definition(columns: &[crate::session::OutputColumn], label: &str) -> TableDefinition {
     TableDefinition {
         name: label.to_owned(),
         columns: columns
@@ -584,16 +584,16 @@ struct OutputRow {
     source_index: Option<usize>,
 }
 
-struct PlannedUpdate {
-    target_index: usize,
-    new_row: Vec<Value>,
-    source_index: Option<usize>,
+pub(crate) struct PlannedUpdate {
+    pub(crate) target_index: usize,
+    pub(crate) new_row: Vec<Value>,
+    pub(crate) source_index: Option<usize>,
 }
 
-struct StoredUpdates {
-    changes: Vec<execute::RowUpdate>,
-    old_rows: Vec<Vec<Value>>,
-    sources: Vec<Option<usize>>,
+pub(crate) struct StoredUpdates {
+    pub(crate) changes: Vec<execute::RowUpdate>,
+    pub(crate) old_rows: Vec<Vec<Value>>,
+    pub(crate) sources: Vec<Option<usize>>,
 }
 
 fn assigned_row(
@@ -615,7 +615,7 @@ fn assigned_row(
     Ok(new_row)
 }
 
-fn store_updates(
+pub(crate) fn store_updates(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
     table: &std::sync::Arc<TableDefinition>,

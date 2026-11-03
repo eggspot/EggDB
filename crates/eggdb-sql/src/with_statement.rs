@@ -92,15 +92,20 @@ fn replace_in_expr(expr: &mut Expr, materialized: &[Materialized]) -> SqlResult<
     Ok(())
 }
 
+fn replace_in_from(from: &mut FromClause, materialized: &[Materialized]) -> SqlResult<()> {
+    replace_reference(&mut from.first, materialized)?;
+    for join in &mut from.joins {
+        replace_reference(&mut join.table, materialized)?;
+        if let crate::ast::JoinCondition::On(on) = &mut join.condition {
+            replace_in_expr(on, materialized)?;
+        }
+    }
+    Ok(())
+}
+
 fn replace_in_select(select: &mut Select, materialized: &[Materialized]) -> SqlResult<()> {
     if let Some(from) = &mut select.from {
-        replace_reference(&mut from.first, materialized)?;
-        for join in &mut from.joins {
-            replace_reference(&mut join.table, materialized)?;
-            if let crate::ast::JoinCondition::On(on) = &mut join.condition {
-                replace_in_expr(on, materialized)?;
-            }
-        }
+        replace_in_from(from, materialized)?;
     }
     for item in &mut select.items {
         if let SelectItem::Expr { expr, .. } = item {
@@ -189,11 +194,17 @@ fn replace_in_statement(statement: &mut Statement, materialized: &[Materialized]
             if let Some(filter) = &mut update.filter {
                 replace_in_expr(filter, materialized)?;
             }
+            if let Some(joined) = &mut update.from {
+                replace_in_from(&mut joined.tables, materialized)?;
+            }
             replace_in_returning(&mut update.returning, materialized)
         }
         Statement::Delete(delete) => {
             if let Some(filter) = &mut delete.filter {
                 replace_in_expr(filter, materialized)?;
+            }
+            if let Some(joined) = &mut delete.using {
+                replace_in_from(&mut joined.tables, materialized)?;
             }
             replace_in_returning(&mut delete.returning, materialized)
         }
@@ -337,12 +348,8 @@ fn described(
         Statement::Insert(insert) => {
             execute::returning_columns(reader, tables, &insert.table, &insert.returning)
         }
-        Statement::Update(update) => {
-            execute::returning_columns(reader, tables, &update.table, &update.returning)
-        }
-        Statement::Delete(delete) => {
-            execute::returning_columns(reader, tables, &delete.table, &delete.returning)
-        }
+        Statement::Update(update) => crate::joined_dml::update_columns(reader, tables, update),
+        Statement::Delete(delete) => crate::joined_dml::delete_columns(reader, tables, delete),
         _ => Ok(None),
     }
 }

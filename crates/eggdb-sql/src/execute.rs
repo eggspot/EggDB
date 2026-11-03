@@ -900,7 +900,7 @@ pub(crate) fn assignment_rule(dialect: Dialect) -> Assignment {
     }
 }
 
-fn assigned_value(
+pub(crate) fn assigned_value(
     evaluator: &Evaluator<'_>,
     value: &InsertValue,
     table: &TableDefinition,
@@ -1045,13 +1045,26 @@ pub(crate) fn update_exprs(update: &mut Update) -> Vec<&mut Expr> {
     }
     exprs.extend(update.filter.iter_mut());
     exprs.extend(returning_exprs(&mut update.returning));
+    exprs.extend(update.from.iter_mut().flat_map(join_conditions));
     exprs
 }
 
 pub(crate) fn delete_exprs(delete: &mut Delete) -> Vec<&mut Expr> {
     let mut exprs: Vec<&mut Expr> = delete.filter.iter_mut().collect();
     exprs.extend(returning_exprs(&mut delete.returning));
+    exprs.extend(delete.using.iter_mut().flat_map(join_conditions));
     exprs
+}
+
+fn join_conditions(joined: &mut crate::ast::JoinedTables) -> impl Iterator<Item = &mut Expr> {
+    joined
+        .tables
+        .joins
+        .iter_mut()
+        .filter_map(|join| match &mut join.condition {
+            crate::ast::JoinCondition::On(on) => Some(on),
+            _ => None,
+        })
 }
 
 fn with_subqueries_run<T: Clone>(
@@ -1547,7 +1560,7 @@ fn generated_always_detail(name: &str) -> String {
     format!("Column \"{name}\" is an identity column defined as GENERATED ALWAYS.")
 }
 
-fn check_updated_to_default(
+pub(crate) fn check_updated_to_default(
     table: &TableDefinition,
     targets: &[usize],
     assignments: &[(Name, InsertValue)],
@@ -2379,6 +2392,28 @@ pub(crate) fn project_rows(
     Ok((projection.columns, projected))
 }
 
+pub(crate) fn returned_rows(
+    items: &Option<Vec<SelectItem>>,
+    scope: Scope<'_>,
+    rows: &[Vec<Value>],
+) -> SqlResult<Option<(Vec<OutputColumn>, Vec<Vec<Value>>)>> {
+    let Some(projection) = returning(items, scope)? else {
+        return Ok(None);
+    };
+    let mut projected = Vec::with_capacity(rows.len());
+    for row in rows {
+        projected.push(projection.project(row)?);
+    }
+    Ok(Some((projection.columns, projected)))
+}
+
+pub(crate) fn returned_columns(
+    items: &Option<Vec<SelectItem>>,
+    scope: Scope<'_>,
+) -> SqlResult<Option<Vec<OutputColumn>>> {
+    Ok(returning(items, scope)?.map(|projection| projection.columns))
+}
+
 fn returning<'a>(
     items: &'a Option<Vec<SelectItem>>,
     scope: Scope<'a>,
@@ -3200,6 +3235,14 @@ pub(crate) fn explain(
             select_or_explain(reader, tables, query, false, Some(&mut out), None)?;
             return Ok(out);
         }
+        crate::ast::Statement::Update(update) if update.from.is_some() => {
+            return Err(SqlError::not_supported("EXPLAIN of UPDATE ... FROM"));
+        }
+        crate::ast::Statement::Delete(delete) if delete.using.is_some() => {
+            return Err(SqlError::not_supported(
+                "EXPLAIN of DELETE that joins other tables",
+            ));
+        }
         crate::ast::Statement::Update(update) => (&update.table, update.filter.as_ref()),
         crate::ast::Statement::Delete(delete) => (&delete.table, delete.filter.as_ref()),
         _ => {
@@ -3837,6 +3880,9 @@ fn update_rows(
     tables: &mut TableCache,
     update: &Update,
 ) -> SqlResult<QueryResult> {
+    if let Some(joined) = &update.from {
+        return crate::joined_dml::update(writer, tables, update, joined);
+    }
     if crate::updatable_views::is_view(writer, tables, &update.table)? {
         if let Some(result) = crate::triggers::update_instead_of_view(writer, tables, update)? {
             return Ok(result);
@@ -4150,6 +4196,7 @@ pub(crate) fn truncate(
         table: table.clone(),
         filter: None,
         returning: None,
+        using: None,
     };
     delete_matching(writer, tables, &every_row, false)?;
     if let Some(firing) = firing {
@@ -4163,6 +4210,9 @@ pub(crate) fn delete(
     tables: &mut TableCache,
     delete: &Delete,
 ) -> SqlResult<QueryResult> {
+    if let Some(joined) = &delete.using {
+        return crate::joined_dml::delete(writer, tables, delete, joined);
+    }
     delete_matching(writer, tables, delete, true)
 }
 
