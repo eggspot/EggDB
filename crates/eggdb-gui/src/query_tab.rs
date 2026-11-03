@@ -361,7 +361,9 @@ impl QueryTab {
         }
     }
 
-    fn focus(&mut self, focus: TabFocus) {
+    /// Moves the focus to `focus`: the grid or the plan only when they show something,
+    /// the editor otherwise.
+    pub fn focus(&mut self, focus: TabFocus) {
         let results = matches!(focus, TabFocus::Grid | TabFocus::Plan);
         if results && self.view == ResultView::Plan && self.plan.is_some() {
             self.focus_plan();

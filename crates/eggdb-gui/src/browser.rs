@@ -93,6 +93,15 @@ pub fn aria_role(role: AccessRole) -> &'static str {
         AccessRole::Button => "button",
         AccessRole::CheckBox => "checkbox",
         AccessRole::Link => "link",
+        AccessRole::Toolbar => "toolbar",
+        AccessRole::ComboBox => "combobox",
+        AccessRole::TextArea => "textbox",
+        AccessRole::Alert => "alert",
+        AccessRole::Tree => "tree",
+        AccessRole::TreeItem => "treeitem",
+        AccessRole::Grid => "grid",
+        AccessRole::ColumnHeader => "columnheader",
+        AccessRole::Cell => "gridcell",
     }
 }
 
@@ -130,15 +139,15 @@ fn json_number(value: f32) -> String {
 
 /// The accessibility tree as the JSON array the browser loader mirrors into ARIA elements:
 /// one object per node with `id`, `parent`, `role` (ARIA), `name`, `value`, `placeholder`,
-/// `focused`, `checked`, `disabled`, `selected`, `default` and `x`, `y`, `width`, `height` in
-/// CSS pixels.
+/// `focused`, `checked`, `disabled`, `selected`, `default`, `x`, `y`, `width`, `height` in
+/// CSS pixels, then `expanded`, `invalid`, `readonly`, `description` and `shortcut` (D278).
 pub fn accessibility_json(nodes: &[AccessNode]) -> String {
     let objects: Vec<String> = nodes
         .iter()
         .map(|node| {
             let state = node.state;
             format!(
-                "{{\"id\":{},\"parent\":{},\"role\":{},\"name\":{},\"value\":{},\"placeholder\":{},\"focused\":{},\"checked\":{},\"disabled\":{},\"selected\":{},\"default\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{}}}",
+                "{{\"id\":{},\"parent\":{},\"role\":{},\"name\":{},\"value\":{},\"placeholder\":{},\"focused\":{},\"checked\":{},\"disabled\":{},\"selected\":{},\"default\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"expanded\":{},\"invalid\":{},\"readonly\":{},\"description\":{},\"shortcut\":{}}}",
                 node.id,
                 node.parent
                     .map_or_else(|| "null".to_owned(), |parent| parent.to_string()),
@@ -157,6 +166,13 @@ pub fn accessibility_json(nodes: &[AccessNode]) -> String {
                 json_number(node.bounds.y),
                 json_number(node.bounds.width),
                 json_number(node.bounds.height),
+                state
+                    .expanded
+                    .map_or_else(|| "null".to_owned(), |expanded| expanded.to_string()),
+                state.invalid,
+                state.read_only,
+                json_optional(node.description.as_deref()),
+                json_optional(node.shortcut.as_deref()),
             )
         })
         .collect();
@@ -223,7 +239,7 @@ mod tests {
             json.starts_with("[{\"id\":1,\"parent\":null,\"role\":\"document\",\"name\":\"EggDB\"")
         );
         assert!(json.contains(
-            "{\"id\":9,\"parent\":7,\"role\":\"textbox\",\"name\":\"File\",\"value\":\"~/eggdb/quickstart.eggdb\",\"placeholder\":\"/path/to/shop.eggdb\",\"focused\":true,\"checked\":null,\"disabled\":false,\"selected\":false,\"default\":false,\"x\":384,\"y\":282,\"width\":420,\"height\":28}"
+            "{\"id\":9,\"parent\":7,\"role\":\"textbox\",\"name\":\"File\",\"value\":\"~/eggdb/quickstart.eggdb\",\"placeholder\":\"/path/to/shop.eggdb\",\"focused\":true,\"checked\":null,\"disabled\":false,\"selected\":false,\"default\":false,\"x\":384,\"y\":282,\"width\":420,\"height\":28,\"expanded\":null,\"invalid\":false,\"readonly\":false,\"description\":null,\"shortcut\":null}"
         ), "{json}");
         assert!(json.contains("\"role\":\"checkbox\",\"name\":\"Open read-only\",\"value\":null,\"placeholder\":null,\"focused\":false,\"checked\":false"));
         assert!(json.contains("\"role\":\"button\",\"name\":\"Cancel\",\"value\":null,\"placeholder\":null,\"focused\":false,\"checked\":null,\"disabled\":true"));

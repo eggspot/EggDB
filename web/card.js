@@ -83,6 +83,16 @@ function describe(element, node) {
   }
   if (node.role === "button" || node.role === "tab") element.disabled = node.disabled;
   if (node.role === "button" && node.default) element.type = "submit";
+  setOptional(element, "aria-expanded", node.expanded);
+  setOptional(element, "aria-invalid", node.invalid ? true : null);
+  setOptional(element, "aria-readonly", node.readonly ? true : null);
+  setOptional(element, "aria-description", node.description);
+  setOptional(element, "aria-keyshortcuts", node.shortcut);
+}
+
+function setOptional(element, name, value) {
+  if (value === null || value === undefined) element.removeAttribute(name);
+  else element.setAttribute(name, String(value));
 }
 
 export class ConnectCard {

@@ -2,10 +2,11 @@
 //! system: translating `NSEvent` key codes, modifier flags and characters into the GUI's keys,
 //! turning a view's size in points and its backing scale factor into device pixels, and placing
 //! a frame's image at the top left of a view whose origin is at the bottom left, and mapping
-//! accessibility nodes to NSAccessibility roles and frames. The values come from Apple's public
-//! AppKit, Core Graphics and NSAccessibility documentation.
+//! accessibility nodes to NSAccessibility roles, frames, values, ranges, actions and
+//! notifications. The values come from Apple's public AppKit, Core Graphics and
+//! NSAccessibility documentation.
 
-use super::{AccessRect, AccessRole, Key, Modifiers};
+use super::{AccessAction, AccessCaret, AccessNode, AccessRect, AccessRole, Key, Modifiers};
 
 /// `NSEventModifierFlagShift`.
 pub const FLAG_SHIFT: u64 = 1 << 17;
@@ -82,6 +83,33 @@ pub struct CgRect {
     /// The width and height.
     pub size: CgSize,
 }
+
+/// A range of characters or indexes (`NSRange` on 64-bit systems).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NsRange {
+    /// The first index.
+    pub location: usize,
+    /// How many indexes it covers.
+    pub length: usize,
+}
+
+/// `NSAccessibilityFocusedUIElementChangedNotification`.
+pub const FOCUSED_ELEMENT_CHANGED: &str = "AXFocusedUIElementChanged";
+/// `NSAccessibilityValueChangedNotification`.
+pub const VALUE_CHANGED: &str = "AXValueChanged";
+/// `NSAccessibilitySelectedTextChangedNotification`.
+pub const SELECTED_TEXT_CHANGED: &str = "AXSelectedTextChanged";
+/// `NSAccessibilitySelectedChildrenChangedNotification`.
+pub const SELECTED_CHILDREN_CHANGED: &str = "AXSelectedChildrenChanged";
+/// `NSAccessibilitySelectedRowsChangedNotification`.
+pub const SELECTED_ROWS_CHANGED: &str = "AXSelectedRowsChanged";
+/// `NSAccessibilitySelectedCellsChangedNotification`.
+pub const SELECTED_CELLS_CHANGED: &str = "AXSelectedCellsChanged";
+/// `NSAccessibilityRowExpandedNotification`.
+pub const ROW_EXPANDED: &str = "AXRowExpanded";
+/// `NSAccessibilityRowCollapsedNotification`.
+pub const ROW_COLLAPSED: &str = "AXRowCollapsed";
 
 /// The modifiers held, from an `NSEvent`'s `modifierFlags`.
 pub fn modifiers_from_flags(flags: u64) -> Modifiers {
@@ -198,6 +226,14 @@ pub fn ax_role(role: AccessRole) -> Option<AxRole> {
         AccessRole::Button => ("AXButton", false),
         AccessRole::CheckBox => ("AXCheckBox", false),
         AccessRole::Link => ("AXLink", false),
+        AccessRole::Toolbar => ("AXToolbar", false),
+        AccessRole::ComboBox => ("AXPopUpButton", false),
+        AccessRole::TextArea => ("AXTextArea", false),
+        AccessRole::Alert => ("AXGroup", false),
+        AccessRole::Tree => ("AXOutline", false),
+        AccessRole::TreeItem => ("AXRow", false),
+        AccessRole::Grid => ("AXTable", false),
+        AccessRole::ColumnHeader | AccessRole::Cell => ("AXCell", false),
     };
     Some(AxRole {
         role,
@@ -234,9 +270,591 @@ pub fn frame_in_parent_space(
     }
 }
 
+/// What a node's `accessibilityValue` is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AxValue<'a> {
+    /// An `NSString`.
+    Text(&'a str),
+    /// An `NSNumber` of 1 for true and 0 for false.
+    Flag(bool),
+}
+
+/// A node's `accessibilityValue`: the name of static text, a text node's value, a checkbox's
+/// checked state or a tab's selected state; `None` for the window and nodes without a value.
+pub fn ax_value(node: &AccessNode) -> Option<AxValue<'_>> {
+    let ax = ax_role(node.role)?;
+    if ax.name_is_value {
+        return Some(AxValue::Text(&node.name));
+    }
+    if let Some(value) = &node.value {
+        return Some(AxValue::Text(value));
+    }
+    if let Some(checked) = node.state.checked {
+        return Some(AxValue::Flag(checked));
+    }
+    (node.role == AccessRole::Tab).then_some(AxValue::Flag(node.state.selected))
+}
+
+/// The request `accessibilityPerformPress` makes of a node: toggle a checkbox, invoke a
+/// button, select a tab, tree item or cell, or flip an expandable node that offers nothing
+/// else; `None` when the node offers none of them or is disabled.
+pub fn press_action(node: &AccessNode) -> Option<AccessAction> {
+    let actions = node.actions;
+    let action = if actions.toggle {
+        AccessAction::Toggle
+    } else if actions.invoke {
+        AccessAction::Invoke
+    } else if actions.select {
+        AccessAction::Select
+    } else if actions.expand_collapse {
+        match node.state.expanded {
+            Some(true) => AccessAction::Collapse,
+            Some(false) => AccessAction::Expand,
+            None => return None,
+        }
+    } else {
+        return None;
+    };
+    node.allows(&action).then_some(action)
+}
+
+/// The request `setAccessibilityExpanded:` and `setAccessibilityDisclosed:` make.
+pub fn expand_action(expand: bool) -> AccessAction {
+    if expand {
+        AccessAction::Expand
+    } else {
+        AccessAction::Collapse
+    }
+}
+
+/// A text node's `accessibilitySelectedTextRange`, counted in characters (`AccessCaret`'s
+/// unit); `None` for a node without a caret.
+pub fn selected_text_range(node: &AccessNode) -> Option<NsRange> {
+    let (start, end) = node.caret?.range();
+    Some(NsRange {
+        location: start,
+        length: end - start,
+    })
+}
+
+/// The caret a screen reader's `setAccessibilitySelectedTextRange:` asks for, counted in
+/// characters and kept within the node's value, with the caret at the range's end; `None`
+/// for a node without a caret.
+pub fn caret_from_selected_text_range(node: &AccessNode, range: NsRange) -> Option<AccessCaret> {
+    node.caret?;
+    let count = node
+        .value
+        .as_deref()
+        .map_or(0, |value| value.chars().count());
+    Some(AccessCaret {
+        anchor: range.location.min(count),
+        caret: range.location.saturating_add(range.length).min(count),
+    })
+}
+
+/// The NSAccessibility selectors that only some nodes answer: the ones through which a
+/// screen reader changes a node, and the getters of values only some roles have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AxSelector {
+    /// `accessibilityPerformPress`.
+    PerformPress,
+    /// `setAccessibilityFocused:`.
+    SetFocused,
+    /// `accessibilityValue`.
+    Value,
+    /// `setAccessibilityValue:`.
+    SetValue,
+    /// `accessibilitySelectedTextRange`.
+    SelectedTextRange,
+    /// `setAccessibilitySelectedTextRange:`.
+    SetSelectedTextRange,
+    /// `isAccessibilityExpanded` and `isAccessibilityDisclosed`.
+    Expanded,
+    /// `setAccessibilityExpanded:` and `setAccessibilityDisclosed:`.
+    SetExpanded,
+    /// `accessibilityHelp`.
+    Help,
+    /// `accessibilityRowCount` and `accessibilityColumnCount`.
+    RowAndColumnCount,
+    /// `accessibilityRowIndexRange` and `accessibilityColumnIndexRange`.
+    IndexRanges,
+    /// `accessibilityDisclosureLevel`.
+    DisclosureLevel,
+    /// `accessibilityCellForColumn:row:` and `accessibilityColumnHeaderUIElements`.
+    GridCells,
+}
+
+/// `isAccessibilitySelectorAllowed:` for a selector only some nodes answer.
+pub fn ax_selector_allowed(node: &AccessNode, selector: AxSelector) -> bool {
+    match selector {
+        AxSelector::PerformPress => press_action(node).is_some(),
+        AxSelector::SetFocused => node.allows(&AccessAction::Focus),
+        AxSelector::Value => ax_value(node).is_some(),
+        AxSelector::SetValue => node.allows(&AccessAction::SetValue(String::new())),
+        AxSelector::SelectedTextRange => node.caret.is_some(),
+        AxSelector::SetSelectedTextRange => {
+            node.allows(&AccessAction::SetCaret(AccessCaret::default()))
+        }
+        AxSelector::Expanded => node.state.expanded.is_some(),
+        AxSelector::SetExpanded => {
+            node.state.expanded.is_some() && node.allows(&AccessAction::Expand)
+        }
+        AxSelector::Help => node.description.is_some(),
+        AxSelector::RowAndColumnCount => node.table.is_some(),
+        AxSelector::IndexRanges => node.cell.is_some(),
+        AxSelector::DisclosureLevel => node.tree_position.is_some(),
+        AxSelector::GridCells => node.role == AccessRole::Grid,
+    }
+}
+
+/// A count or index as an `NSInteger`, saturating at its maximum.
+pub fn ns_integer(count: usize) -> isize {
+    isize::try_from(count).unwrap_or(isize::MAX)
+}
+
+/// A tree item's `accessibilityDisclosureLevel`: `0` for a top-level item.
+pub fn disclosure_level(node: &AccessNode) -> usize {
+    node.tree_position
+        .map_or(0, |position| position.level.saturating_sub(1))
+}
+
+/// A cell's or column header's `accessibilityRowIndexRange`: its data row, one row long.
+pub fn row_index_range(node: &AccessNode) -> NsRange {
+    node.cell.map_or(NsRange::default(), |cell| NsRange {
+        location: cell.row,
+        length: 1,
+    })
+}
+
+/// A cell's or column header's `accessibilityColumnIndexRange`: its column, one column wide.
+pub fn column_index_range(node: &AccessNode) -> NsRange {
+    node.cell.map_or(NsRange::default(), |cell| NsRange {
+        location: cell.column,
+        length: 1,
+    })
+}
+
+/// The index in `nodes` of the parent of the node at `at`.
+pub fn parent_index(nodes: &[AccessNode], at: usize) -> Option<usize> {
+    let parent = nodes.get(at)?.parent?;
+    nodes.iter().position(|node| node.id == parent)
+}
+
+/// The index in `nodes` of the closest ancestor of the node at `at` that has `role`.
+pub fn nearest_ancestor(nodes: &[AccessNode], at: usize, role: AccessRole) -> Option<usize> {
+    let mut current = at;
+    for _ in 0..nodes.len() {
+        current = parent_index(nodes, current)?;
+        if nodes[current].role == role {
+            return Some(current);
+        }
+    }
+    None
+}
+
+/// The index in `nodes` of the cell at `column` and `row` of the grid at `grid`
+/// (`accessibilityCellForColumn:row:`).
+pub fn cell_at(nodes: &[AccessNode], grid: usize, column: usize, row: usize) -> Option<usize> {
+    (0..nodes.len()).find(|&at| {
+        let node = &nodes[at];
+        node.role == AccessRole::Cell
+            && node
+                .cell
+                .is_some_and(|cell| cell.row == row && cell.column == column)
+            && nearest_ancestor(nodes, at, AccessRole::Grid) == Some(grid)
+    })
+}
+
+/// The indexes in `nodes` of the column headers of the grid at `grid`, in order
+/// (`accessibilityColumnHeaderUIElements`).
+pub fn column_headers(nodes: &[AccessNode], grid: usize) -> Vec<usize> {
+    (0..nodes.len())
+        .filter(|&at| {
+            nodes[at].role == AccessRole::ColumnHeader
+                && nearest_ancestor(nodes, at, AccessRole::Grid) == Some(grid)
+        })
+        .collect()
+}
+
+/// The notifications a node's own element posts when it changes from `old` to `new`.
+pub fn change_notifications(old: &AccessNode, new: &AccessNode) -> Vec<&'static str> {
+    let mut names = Vec::new();
+    if ax_value(old) != ax_value(new) {
+        names.push(VALUE_CHANGED);
+    }
+    if old.caret != new.caret && new.caret.is_some() {
+        names.push(SELECTED_TEXT_CHANGED);
+    }
+    if old.state.expanded != new.state.expanded {
+        match new.state.expanded {
+            Some(true) => names.push(ROW_EXPANDED),
+            Some(false) => names.push(ROW_COLLAPSED),
+            None => {}
+        }
+    }
+    names
+}
+
+/// The notifications a node's containers post when its selected state changes: the role of
+/// the closest ancestor that posts each one, `None` for the parent itself.
+pub fn selection_change_notifications(
+    role: AccessRole,
+) -> &'static [(Option<AccessRole>, &'static str)] {
+    match role {
+        AccessRole::TreeItem => &[
+            (None, SELECTED_CHILDREN_CHANGED),
+            (Some(AccessRole::Tree), SELECTED_ROWS_CHANGED),
+        ],
+        AccessRole::Cell => &[
+            (None, SELECTED_CHILDREN_CHANGED),
+            (Some(AccessRole::Grid), SELECTED_CELLS_CHANGED),
+        ],
+        AccessRole::Tab => &[(None, SELECTED_CHILDREN_CHANGED)],
+        _ => &[],
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::{AccessActions, AccessCell, AccessState, AccessTreePosition};
     use super::*;
+
+    fn node(id: u32, parent: Option<u32>, role: AccessRole) -> AccessNode {
+        AccessNode {
+            id,
+            parent,
+            role,
+            ..AccessNode::default()
+        }
+    }
+
+    fn cell(id: u32, parent: u32, role: AccessRole, row: usize, column: usize) -> AccessNode {
+        AccessNode {
+            cell: Some(AccessCell { row, column }),
+            ..node(id, Some(parent), role)
+        }
+    }
+
+    fn text_area(value: &str, anchor: usize, caret: usize) -> AccessNode {
+        AccessNode {
+            value: Some(value.to_owned()),
+            caret: Some(AccessCaret { anchor, caret }),
+            actions: AccessActions {
+                set_value: true,
+                focus: true,
+                ..AccessActions::default()
+            },
+            ..node(1, None, AccessRole::TextArea)
+        }
+    }
+
+    #[test]
+    fn the_d278_roles_map_to_their_ax_roles() {
+        let cases = [
+            (AccessRole::Toolbar, "AXToolbar"),
+            (AccessRole::ComboBox, "AXPopUpButton"),
+            (AccessRole::TextArea, "AXTextArea"),
+            (AccessRole::Alert, "AXGroup"),
+            (AccessRole::Tree, "AXOutline"),
+            (AccessRole::TreeItem, "AXRow"),
+            (AccessRole::Grid, "AXTable"),
+            (AccessRole::ColumnHeader, "AXCell"),
+            (AccessRole::Cell, "AXCell"),
+        ];
+        for (role, expected) in cases {
+            assert_eq!(
+                ax_role(role),
+                Some(AxRole {
+                    role: expected,
+                    name_is_value: false
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn values_come_from_static_text_text_checkboxes_and_tabs() {
+        let status = AccessNode {
+            name: "Connected".to_owned(),
+            ..node(1, None, AccessRole::Status)
+        };
+        assert_eq!(ax_value(&status), Some(AxValue::Text("Connected")));
+        assert_eq!(
+            ax_value(&text_area("select 1", 0, 0)),
+            Some(AxValue::Text("select 1"))
+        );
+        let checkbox = AccessNode {
+            state: AccessState {
+                checked: Some(true),
+                ..AccessState::default()
+            },
+            ..node(2, None, AccessRole::CheckBox)
+        };
+        assert_eq!(ax_value(&checkbox), Some(AxValue::Flag(true)));
+        assert_eq!(
+            ax_value(&node(3, None, AccessRole::Tab)),
+            Some(AxValue::Flag(false))
+        );
+        assert_eq!(ax_value(&node(4, None, AccessRole::Button)), None);
+        assert_eq!(ax_value(&node(5, None, AccessRole::Window)), None);
+    }
+
+    #[test]
+    fn a_press_toggles_invokes_selects_or_flips_what_the_node_offers() {
+        let with = |actions: AccessActions, expanded: Option<bool>| AccessNode {
+            actions,
+            state: AccessState {
+                expanded,
+                ..AccessState::default()
+            },
+            ..node(1, None, AccessRole::TreeItem)
+        };
+        let toggle = AccessActions {
+            toggle: true,
+            invoke: true,
+            ..AccessActions::default()
+        };
+        assert_eq!(
+            press_action(&with(toggle, None)),
+            Some(AccessAction::Toggle)
+        );
+        let invoke = AccessActions {
+            invoke: true,
+            select: true,
+            ..AccessActions::default()
+        };
+        assert_eq!(
+            press_action(&with(invoke, None)),
+            Some(AccessAction::Invoke)
+        );
+        let select = AccessActions {
+            select: true,
+            expand_collapse: true,
+            ..AccessActions::default()
+        };
+        assert_eq!(
+            press_action(&with(select, Some(false))),
+            Some(AccessAction::Select)
+        );
+        let expand = AccessActions {
+            expand_collapse: true,
+            ..AccessActions::default()
+        };
+        assert_eq!(
+            press_action(&with(expand, Some(false))),
+            Some(AccessAction::Expand)
+        );
+        assert_eq!(
+            press_action(&with(expand, Some(true))),
+            Some(AccessAction::Collapse)
+        );
+        assert_eq!(press_action(&with(expand, None)), None);
+        assert_eq!(press_action(&with(AccessActions::default(), None)), None);
+        let mut disabled = with(toggle, None);
+        disabled.state.disabled = true;
+        assert_eq!(press_action(&disabled), None);
+        assert_eq!(expand_action(true), AccessAction::Expand);
+        assert_eq!(expand_action(false), AccessAction::Collapse);
+    }
+
+    #[test]
+    fn selected_text_ranges_count_characters_start_first() {
+        assert_eq!(
+            selected_text_range(&text_area("héllo", 4, 1)),
+            Some(NsRange {
+                location: 1,
+                length: 3
+            })
+        );
+        assert_eq!(
+            selected_text_range(&text_area("héllo", 2, 2)),
+            Some(NsRange {
+                location: 2,
+                length: 0
+            })
+        );
+        assert_eq!(
+            selected_text_range(&node(1, None, AccessRole::Button)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_requested_text_range_becomes_a_caret_within_the_value() {
+        let area = text_area("héllo", 0, 0);
+        let caret =
+            |location, length| caret_from_selected_text_range(&area, NsRange { location, length });
+        assert_eq!(
+            caret(1, 2),
+            Some(AccessCaret {
+                anchor: 1,
+                caret: 3
+            })
+        );
+        assert_eq!(
+            caret(4, 10),
+            Some(AccessCaret {
+                anchor: 4,
+                caret: 5
+            })
+        );
+        assert_eq!(
+            caret(usize::MAX, usize::MAX),
+            Some(AccessCaret {
+                anchor: 5,
+                caret: 5
+            })
+        );
+        let button = node(2, None, AccessRole::Button);
+        assert_eq!(
+            caret_from_selected_text_range(&button, NsRange::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn selectors_are_allowed_only_for_what_the_node_offers() {
+        let mut area = text_area("x", 0, 0);
+        assert!(ax_selector_allowed(&area, AxSelector::SetValue));
+        assert!(ax_selector_allowed(&area, AxSelector::SetFocused));
+        assert!(ax_selector_allowed(&area, AxSelector::SetSelectedTextRange));
+        assert!(ax_selector_allowed(&area, AxSelector::Value));
+        assert!(ax_selector_allowed(&area, AxSelector::SelectedTextRange));
+        assert!(!ax_selector_allowed(&area, AxSelector::PerformPress));
+        assert!(!ax_selector_allowed(&area, AxSelector::SetExpanded));
+        assert!(!ax_selector_allowed(&area, AxSelector::Expanded));
+        assert!(!ax_selector_allowed(&area, AxSelector::Help));
+        assert!(!ax_selector_allowed(&area, AxSelector::RowAndColumnCount));
+        assert!(!ax_selector_allowed(&area, AxSelector::IndexRanges));
+        assert!(!ax_selector_allowed(&area, AxSelector::DisclosureLevel));
+        assert!(!ax_selector_allowed(&area, AxSelector::GridCells));
+        area.description = Some("Query editor".to_owned());
+        assert!(ax_selector_allowed(&area, AxSelector::Help));
+        area.state.read_only = true;
+        assert!(!ax_selector_allowed(&area, AxSelector::SetValue));
+        let item = AccessNode {
+            actions: AccessActions {
+                expand_collapse: true,
+                ..AccessActions::default()
+            },
+            state: AccessState {
+                expanded: Some(false),
+                ..AccessState::default()
+            },
+            ..node(3, None, AccessRole::TreeItem)
+        };
+        assert!(ax_selector_allowed(&item, AxSelector::SetExpanded));
+        assert!(ax_selector_allowed(&item, AxSelector::Expanded));
+        assert!(!ax_selector_allowed(&item, AxSelector::Value));
+        assert!(ax_selector_allowed(&item, AxSelector::PerformPress));
+        let leaf = AccessNode {
+            state: AccessState::default(),
+            ..item.clone()
+        };
+        assert!(!ax_selector_allowed(&leaf, AxSelector::SetExpanded));
+    }
+
+    #[test]
+    fn grids_and_trees_report_levels_indexes_cells_and_headers() {
+        let item = AccessNode {
+            tree_position: Some(AccessTreePosition {
+                level: 3,
+                position: 1,
+                set_size: 2,
+            }),
+            ..node(1, None, AccessRole::TreeItem)
+        };
+        assert_eq!(disclosure_level(&item), 2);
+        assert_eq!(disclosure_level(&node(2, None, AccessRole::Button)), 0);
+        let nodes = [
+            node(10, None, AccessRole::Window),
+            node(11, Some(10), AccessRole::Grid),
+            cell(12, 11, AccessRole::ColumnHeader, 0, 0),
+            cell(13, 11, AccessRole::ColumnHeader, 0, 1),
+            node(14, Some(11), AccessRole::Group),
+            cell(15, 14, AccessRole::Cell, 0, 0),
+            cell(16, 14, AccessRole::Cell, 0, 1),
+            node(17, Some(10), AccessRole::Grid),
+            cell(18, 17, AccessRole::Cell, 0, 1),
+        ];
+        assert_eq!(
+            row_index_range(&nodes[6]),
+            NsRange {
+                location: 0,
+                length: 1
+            }
+        );
+        assert_eq!(
+            column_index_range(&nodes[6]),
+            NsRange {
+                location: 1,
+                length: 1
+            }
+        );
+        assert_eq!(row_index_range(&nodes[1]), NsRange::default());
+        assert_eq!(parent_index(&nodes, 5), Some(4));
+        assert_eq!(parent_index(&nodes, 0), None);
+        assert_eq!(nearest_ancestor(&nodes, 5, AccessRole::Grid), Some(1));
+        assert_eq!(nearest_ancestor(&nodes, 1, AccessRole::Grid), None);
+        assert_eq!(cell_at(&nodes, 1, 1, 0), Some(6));
+        assert_eq!(cell_at(&nodes, 7, 1, 0), Some(8));
+        assert_eq!(cell_at(&nodes, 1, 2, 0), None);
+        assert_eq!(column_headers(&nodes, 1), [2, 3]);
+        assert!(column_headers(&nodes, 7).is_empty());
+        assert!(ax_selector_allowed(&nodes[1], AxSelector::GridCells));
+        assert!(ax_selector_allowed(&nodes[6], AxSelector::IndexRanges));
+        assert!(ax_selector_allowed(&item, AxSelector::DisclosureLevel));
+        assert_eq!(ns_integer(7), 7);
+        assert_eq!(ns_integer(usize::MAX), isize::MAX);
+    }
+
+    #[test]
+    fn ancestors_of_a_parent_cycle_end() {
+        let nodes = [
+            node(1, Some(2), AccessRole::Group),
+            node(2, Some(1), AccessRole::Group),
+        ];
+        assert_eq!(nearest_ancestor(&nodes, 0, AccessRole::Grid), None);
+    }
+
+    #[test]
+    fn changes_post_value_caret_and_expansion_notifications() {
+        let old = text_area("select", 6, 6);
+        let mut new = old.clone();
+        assert!(change_notifications(&old, &new).is_empty());
+        new.value = Some("select 1".to_owned());
+        new.caret = Some(AccessCaret {
+            anchor: 8,
+            caret: 8,
+        });
+        assert_eq!(
+            change_notifications(&old, &new),
+            [VALUE_CHANGED, SELECTED_TEXT_CHANGED]
+        );
+        let collapsed = AccessNode {
+            state: AccessState {
+                expanded: Some(false),
+                ..AccessState::default()
+            },
+            ..node(2, None, AccessRole::TreeItem)
+        };
+        let mut expanded = collapsed.clone();
+        expanded.state.expanded = Some(true);
+        assert_eq!(change_notifications(&collapsed, &expanded), [ROW_EXPANDED]);
+        assert_eq!(change_notifications(&expanded, &collapsed), [ROW_COLLAPSED]);
+        assert_eq!(
+            selection_change_notifications(AccessRole::Cell),
+            [
+                (None, SELECTED_CHILDREN_CHANGED),
+                (Some(AccessRole::Grid), SELECTED_CELLS_CHANGED)
+            ]
+        );
+        assert_eq!(
+            selection_change_notifications(AccessRole::TreeItem)[1],
+            (Some(AccessRole::Tree), SELECTED_ROWS_CHANGED)
+        );
+        assert!(selection_change_notifications(AccessRole::Button).is_empty());
+    }
 
     #[test]
     fn every_role_but_the_window_has_an_ax_role() {

@@ -277,8 +277,21 @@ fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
             .next_event(timeout)
             .map_err(|error| error.to_string())?
         {
-            Some(WindowEvent::Key(press)) => {
-                match workspace.key(press, Instant::now()) {
+            Some(event @ (WindowEvent::Key(_) | WindowEvent::AccessRequested(_))) => {
+                let now = Instant::now();
+                let command = match event {
+                    WindowEvent::AccessRequested(request) => {
+                        let logical = logical_size(size, scale);
+                        let tree = match workspace.screen() {
+                            Screen::Connect(card) => connect_screen::accessibility_tree(card, faces, logical),
+                            Screen::Main(main) => main_window::accessibility_tree(main),
+                        };
+                        workspace.access(&request, &tree, now)
+                    }
+                    WindowEvent::Key(press) => workspace.key(press, now),
+                    _ => WorkspaceCommand::None,
+                };
+                match command {
                     WorkspaceCommand::Quit => return Ok(()),
                     WorkspaceCommand::ChooseFile(dialog) => {
                         let chosen = window.choose_file_to_open(&dialog).unwrap_or_else(|error| {

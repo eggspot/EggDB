@@ -341,8 +341,14 @@ Reduced motion follows the OS setting (macOS Reduce Motion, Windows "Show animat
   sidebar → tabs → editor → results → status bar; dialogs trap `Tab` and close on `Esc`.
 - Nothing by colour alone: `Error:`/`Warning:`/`Committed` words, the `NULL` word, text beside the
   connection dot, stripe plus bold label on the active tab.
-- Screen readers: the accessibility tree (names, roles, values, the status strings) is the platform
-  layer's next step after real windows; until then every state is text on screen.
+- Screen readers: each screen's accessibility tree carries names, roles, values (text with its
+  caret and selection), states (checked, expanded, selected, focused, disabled, invalid, read-only),
+  the actions a node offers (invoke, toggle, expand/collapse, set value, select, focus), grid and
+  tree structure (row and column counts and indices, level, position and set size) and the
+  shortcut, and the platform bridges (UI Automation's patterns, AT-SPI2's `Action`, `Text`,
+  `EditableText`, `Selection`, `Table` and `GrabFocus`, NSAccessibility's press, value, focus and
+  text range, ARIA attributes in the browser) expose them. A screen reader's action reaches the GUI
+  as the focus move and the keys a person would press (D278); every state is text on screen too.
 
 ## Later (one line each)
 - Familiar layouts (D15), each a `docs/ux/layouts/<name>.md` arranging the same regions with its shortcuts.

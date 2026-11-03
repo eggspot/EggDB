@@ -210,8 +210,10 @@ fn down_right_enter_selects_the_hot_child_and_highlights_its_table() {
     let tree = accessibility_tree(&window);
     let node = tree.iter().find(|node| node.id == NODE_FIRST_PLAN_NODE + 2).unwrap();
     assert_eq!(node.name, "Seq Scan on customers c");
-    let description = node.value.clone().unwrap_or_default();
+    let description = node.description.clone().unwrap_or_default();
     assert!(description.contains("62 percent, hot"), "{description}");
+    assert_eq!(node.role, eggdb_platform::window::AccessRole::TreeItem);
+    assert!(node.tree_position.is_some());
     assert!(node.state.focused && node.state.selected);
     let rect = plan.node_rect(2, PLAN_AREA).unwrap();
     let (canvas, theme) = draw(&window);

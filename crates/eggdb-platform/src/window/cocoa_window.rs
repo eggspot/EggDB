@@ -30,6 +30,10 @@ const BOOL_GETTER_TYPES: &CStr = c"c@:";
 #[cfg(target_arch = "x86_64")]
 const BOOL_DELEGATE_TYPES: &CStr = c"c@:@";
 #[cfg(target_arch = "x86_64")]
+const BOOL_SETTER_TYPES: &CStr = c"v@:c";
+#[cfg(target_arch = "x86_64")]
+const BOOL_SELECTOR_TYPES: &CStr = c"c@::";
+#[cfg(target_arch = "x86_64")]
 const RECT_SENDER: &CStr = c"objc_msgSend_stret";
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -42,6 +46,10 @@ const NO: ObjcBool = false;
 const BOOL_GETTER_TYPES: &CStr = c"B@:";
 #[cfg(not(target_arch = "x86_64"))]
 const BOOL_DELEGATE_TYPES: &CStr = c"B@:@";
+#[cfg(not(target_arch = "x86_64"))]
+const BOOL_SETTER_TYPES: &CStr = c"v@:B";
+#[cfg(not(target_arch = "x86_64"))]
+const BOOL_SELECTOR_TYPES: &CStr = c"B@::";
 #[cfg(not(target_arch = "x86_64"))]
 const RECT_SENDER: &CStr = c"objc_msgSend";
 
@@ -97,6 +105,7 @@ type SendIdInteger = unsafe extern "C" fn(Id, Sel, isize) -> Id;
 type SendIdObjects = unsafe extern "C" fn(Id, Sel, *const Id, usize) -> Id;
 type SendIdIdId = unsafe extern "C" fn(Id, Sel, Id, Id) -> Id;
 type SendIdIdBool = unsafe extern "C" fn(Id, Sel, Id, ObjcBool) -> Id;
+type SendBoolId = unsafe extern "C" fn(Id, Sel, Id) -> ObjcBool;
 type PostNotification = unsafe extern "C" fn(Id, Id);
 type SendIdF64 = unsafe extern "C" fn(Id, Sel, f64) -> Id;
 type SendIdRect = unsafe extern "C" fn(Id, Sel, CgRect) -> Id;
@@ -208,6 +217,7 @@ struct Runtime {
     send_id_objects: SendIdObjects,
     send_id_id_id: SendIdIdId,
     send_id_id_bool: SendIdIdBool,
+    send_bool_id: SendBoolId,
     post_notification: PostNotification,
     send_id_f64: SendIdF64,
     send_id_rect: SendIdRect,
@@ -270,6 +280,7 @@ impl Runtime {
             send_id_objects: load!(objc, c"objc_msgSend", SendIdObjects),
             send_id_id_id: load!(objc, c"objc_msgSend", SendIdIdId),
             send_id_id_bool: load!(objc, c"objc_msgSend", SendIdIdBool),
+            send_bool_id: load!(objc, c"objc_msgSend", SendBoolId),
             post_notification: load!(appkit, c"NSAccessibilityPostNotification", PostNotification),
             send_id_f64: load!(objc, c"objc_msgSend", SendIdF64),
             send_id_rect: load!(objc, c"objc_msgSend", SendIdRect),
@@ -374,6 +385,7 @@ impl Runtime {
     fn add_method(
         &self,
         class: Id,
+        class_name: &CStr,
         name: &CStr,
         implementation: *const c_void,
         types: &CStr,
@@ -387,27 +399,42 @@ impl Runtime {
             return Err(WindowError::Protocol(format!(
                 "the method {} could not be added to {}",
                 name.to_string_lossy(),
-                VIEW_CLASS.to_string_lossy()
+                class_name.to_string_lossy()
             )));
         }
         Ok(())
     }
 
-    fn view_class(&self) -> Result<Id, WindowError> {
+    fn register_class(
+        &self,
+        name: &CStr,
+        superclass: &CStr,
+        methods: &[(&CStr, *const c_void, &CStr)],
+    ) -> Result<Id, WindowError> {
         // SAFETY: the name is NUL-terminated; the lookup only reads the runtime's class table.
-        let existing = unsafe { (self.get_class)(VIEW_CLASS.as_ptr()) };
+        let existing = unsafe { (self.get_class)(name.as_ptr()) };
         if !existing.is_null() {
             return Ok(existing);
         }
-        let superclass = self.class(c"NSView")?;
-        // SAFETY: `superclass` is `NSView` and the name is NUL-terminated and not registered.
-        let class = unsafe { (self.allocate_class_pair)(superclass, VIEW_CLASS.as_ptr(), 0) };
+        let superclass = self.class(superclass)?;
+        // SAFETY: `superclass` is a registered class and the name is NUL-terminated and not
+        // registered.
+        let class = unsafe { (self.allocate_class_pair)(superclass, name.as_ptr(), 0) };
         if class.is_null() {
             return Err(WindowError::Protocol(format!(
                 "the class {} could not be created",
-                VIEW_CLASS.to_string_lossy()
+                name.to_string_lossy()
             )));
         }
+        for &(method, implementation, types) in methods {
+            self.add_method(class, name, method, implementation, types)?;
+        }
+        // SAFETY: `class` was allocated above, has all its methods and is registered once.
+        unsafe { (self.register_class_pair)(class) };
+        Ok(class)
+    }
+
+    fn view_class(&self) -> Result<Id, WindowError> {
         let draw: extern "C" fn(Id, Sel, CgRect) = draw_rect;
         let key: extern "C" fn(Id, Sel, Id) = key_down;
         let yes: extern "C" fn(Id, Sel) -> ObjcBool = answer_yes;
@@ -481,12 +508,7 @@ impl Runtime {
                 BOOL_DELEGATE_TYPES,
             ),
         ];
-        for (name, implementation, types) in methods {
-            self.add_method(class, name, implementation, types)?;
-        }
-        // SAFETY: `class` was allocated above, has all its methods and is registered once.
-        unsafe { (self.register_class_pair)(class) };
-        Ok(class)
+        self.register_class(VIEW_CLASS, c"NSView", &methods)
     }
 }
 
@@ -640,7 +662,8 @@ impl WindowState {
         };
         // SAFETY: `sender` is the `NSDraggingInfo` AppKit passed to the drag method being
         // answered; `draggingPasteboard` returns its pasteboard.
-        let pasteboard = unsafe { (runtime.send_id)(sender, runtime.selector(c"draggingPasteboard")) };
+        let pasteboard =
+            unsafe { (runtime.send_id)(sender, runtime.selector(c"draggingPasteboard")) };
         if pasteboard.is_null() {
             return Vec::new();
         }
@@ -749,7 +772,11 @@ impl WindowState {
         // SAFETY: `panel` is live; `runModal` runs the panel's own event loop on this, the
         // main, thread and returns an `NSModalResponse`.
         let response = unsafe { (runtime.send_u64)(panel, runtime.selector(c"runModal")) };
-        self.send_object_to(self.window.get(), c"makeKeyAndOrderFront:", std::ptr::null_mut());
+        self.send_object_to(
+            self.window.get(),
+            c"makeKeyAndOrderFront:",
+            std::ptr::null_mut(),
+        );
         if response != MODAL_RESPONSE_OK {
             return Ok(None);
         }
@@ -1264,6 +1291,10 @@ mod tests {
         let second = runtime.view_class();
         assert!(first.is_ok());
         assert_eq!(first, second);
+        let element = runtime.element_class();
+        assert!(element.is_ok());
+        assert_eq!(element, runtime.element_class());
+        assert_ne!(element, first);
         let text = runtime.with_pool(|| {
             let string = runtime.string("EggDB é").ok()?;
             let text = runtime.text(string);

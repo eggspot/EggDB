@@ -8,6 +8,9 @@
 //! and the scale, so they are tested offscreen; the `eggdb-gui` binary presents them in a
 //! native window from the platform layer (`eggdb_platform::window`).
 
+/// What screen readers get beyond names and roles (D278): each role's actions, a text dump of
+/// a tree, and a request turned into the focus move and keys that do the same thing.
+pub mod accessibility;
 /// The browser build's glue: DOM key names, modifier bits, theme and action numbers, and the
 /// accessibility tree as JSON for the ARIA mirror over the canvas (D256).
 pub mod browser;

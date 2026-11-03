@@ -1,6 +1,9 @@
 use std::time::Instant;
 
-use eggdb_platform::window::{AccessNode, AccessRect, AccessRole, AccessState, Key, KeyPress};
+use eggdb_platform::window::{
+    AccessAction, AccessActions, AccessCaret, AccessCell, AccessNode, AccessRect, AccessRole, AccessTable, AccessTreePosition, Key,
+    KeyPress,
+};
 
 use crate::canvas::{Canvas, Rect};
 use crate::catalog::{Catalog, CatalogColumn, CatalogIndex, CatalogTable, CatalogView, KeyCount, KeySpace};
@@ -1189,15 +1192,144 @@ fn node(id: u32, parent: u32, role: AccessRole, name: &str, bounds: (f32, f32, f
         parent: Some(parent),
         role,
         name: name.to_owned(),
-        value: None,
-        placeholder: None,
-        state: AccessState::default(),
         bounds: AccessRect {
             x: bounds.0,
             y: bounds.1,
             width: bounds.2,
             height: bounds.3,
         },
+        ..AccessNode::default()
+    }
+}
+
+fn primary_name() -> &'static str {
+    if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }
+}
+
+fn toolbar_shortcut(id: u32) -> Option<String> {
+    let primary = primary_name();
+    Some(match id {
+        NODE_RUN => format!("{primary}+Enter"),
+        NODE_RUN_ALL => format!("{primary}+Shift+Enter"),
+        NODE_EXPLAIN => format!("{primary}+E"),
+        NODE_STOP => "Esc".to_owned(),
+        _ => return None,
+    })
+}
+
+fn toolbar_chord(id: u32) -> Option<KeyPress> {
+    let primary = crate::accessibility::primary();
+    let with = |key: Key, shift: bool| KeyPress {
+        key,
+        modifiers: eggdb_platform::window::Modifiers { shift, ..primary },
+    };
+    Some(match id {
+        NODE_RUN => with(Key::Enter, false),
+        NODE_RUN_ALL => with(Key::Enter, true),
+        NODE_EXPLAIN => with(Key::Character('e'), false),
+        NODE_STOP => KeyPress::plain(Key::Escape),
+        _ => return None,
+    })
+}
+
+fn editor_caret(editor: &crate::editor::Editor) -> AccessCaret {
+    let lines = editor.lines();
+    let offset = |at: crate::editor::Position| crate::accessibility::char_offset(lines, at.line, at.column);
+    let caret = editor.caret();
+    let selection = editor.selection().map(|(start, end)| (offset(start), offset(end)));
+    crate::accessibility::field_caret(offset(caret), selection)
+}
+
+impl MainWindow {
+    /// Moves the keyboard focus to the element of accessibility node `node`, as when a screen
+    /// reader focuses it: the editor, the dialect pill, the filter, a tree row, a grid cell or a
+    /// plan node; returns whether that node can take the focus.
+    pub fn focus_node(&mut self, node: &AccessNode) -> bool {
+        let id = node.id;
+        match id {
+            NODE_EDITOR | NODE_QUERY_TAB => self.focus_tab(),
+            NODE_DIALECT => {
+                self.focus = WindowFocus::Tab;
+                self.tab.focus(TabFocus::DialectPill);
+            }
+            NODE_FILTER => {
+                self.focus_tree();
+                self.focus = WindowFocus::Filter;
+            }
+            _ if (NODE_FIRST_TREE_ROW..NODE_FIRST_TREE_ROW + ROWS_IN_VIEW as u32).contains(&id) => {
+                let offset = self.tree.first_row + (id - NODE_FIRST_TREE_ROW) as usize;
+                let Some(row) = self.tree.rows().into_iter().nth(offset) else {
+                    return false;
+                };
+                self.focus_tree();
+                self.tree.current = row.item;
+            }
+            _ if (NODE_FIRST_PLAN_NODE..NODE_FIRST_PLAN_NODE + plan_view::MAX_NODES as u32).contains(&id) => {
+                let index = (id - NODE_FIRST_PLAN_NODE) as usize;
+                if self.tab.plan.as_ref().is_none_or(|plan| index >= plan.plan.nodes.len()) {
+                    return false;
+                }
+                self.focus = WindowFocus::Tab;
+                self.tab.view = ResultView::Plan;
+                self.tab.focus(TabFocus::Plan);
+                if let Some(plan) = &mut self.tab.plan {
+                    plan.current = index;
+                }
+            }
+            _ if node.role == AccessRole::Cell => {
+                let Some(at) = node.cell else {
+                    return false;
+                };
+                if self.tab.grid.as_ref().is_none_or(|grid| at.row >= grid.rows.len() || at.column >= grid.columns.len()) {
+                    return false;
+                }
+                self.focus = WindowFocus::Tab;
+                self.tab.view = ResultView::Results;
+                self.tab.focus(TabFocus::Grid);
+                if let Some(grid) = &mut self.tab.grid {
+                    let cell = crate::grid::Cell { row: at.row, column: at.column };
+                    grid.current = cell;
+                    grid.anchor = cell;
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// The keys that do a screen reader's `action` on `node`, after moving the focus there
+    /// ([`MainWindow::focus_node`]): the toolbar's buttons give their shortcut from the editor,
+    /// and the editor takes a new text or caret at once; nothing when the node cannot do it.
+    pub fn access_keys(&mut self, node: &AccessNode, action: &AccessAction) -> Vec<KeyPress> {
+        if let Some(chord) = toolbar_chord(node.id) {
+            if *action != AccessAction::Invoke {
+                return Vec::new();
+            }
+            self.focus_tab();
+            return vec![chord];
+        }
+        if !self.focus_node(node) {
+            return Vec::new();
+        }
+        match action {
+            AccessAction::SetValue(text) if node.id == NODE_EDITOR => {
+                self.tab.editor = crate::editor::Editor::new(text);
+                Vec::new()
+            }
+            AccessAction::SetCaret(caret) if node.id == NODE_EDITOR => {
+                let lines = self.tab.editor.lines();
+                let (line, column) = crate::accessibility::line_and_column(lines, caret.anchor);
+                let length = crate::accessibility::char_offset(lines, usize::MAX, usize::MAX);
+                let (anchor, to) = (caret.anchor.min(length), caret.caret.min(length));
+                self.tab.editor.place_caret(crate::editor::Position { line, column });
+                let shift = KeyPress {
+                    key: if to >= anchor { Key::Right } else { Key::Left },
+                    modifiers: eggdb_platform::window::Modifiers { shift: true, ..Default::default() },
+                };
+                std::iter::repeat_n(shift, to.abs_diff(anchor)).collect()
+            }
+            _ => crate::accessibility::action_keys(node, action),
+        }
     }
 }
 
@@ -1223,7 +1355,7 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
     let tab_focused = window.focus == WindowFocus::Tab;
     let mut root = node(NODE_MAIN_WINDOW, 0, AccessRole::Window, "EggDB", (0.0, 0.0, width, 800.0));
     root.parent = None;
-    let mut nodes = vec![root, node(NODE_TOOLBAR, NODE_MAIN_WINDOW, AccessRole::Group, "Toolbar", (0.0, 0.0, width, 44.0))];
+    let mut nodes = vec![root, node(NODE_TOOLBAR, NODE_MAIN_WINDOW, AccessRole::Toolbar, "Toolbar", (0.0, 0.0, width, 44.0))];
     for (id, name, x, w) in [
         (NODE_RUN, "Run", 232.0, 72.0),
         (NODE_RUN_ALL, "Run all", 312.0, 88.0),
@@ -1232,29 +1364,35 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
     ] {
         let mut button = node(id, NODE_TOOLBAR, AccessRole::Button, name, (x, 8.0, w, 28.0));
         button.state.disabled = if id == NODE_STOP { !tab.running } else { tab.running };
+        button.shortcut = toolbar_shortcut(id);
+        button.actions.invoke = true;
         nodes.push(button);
     }
-    let mut pill = node(NODE_DIALECT, NODE_TOOLBAR, AccessRole::Button, "Dialect", (width - 224.0, 8.0, 120.0, 28.0));
+    let mut pill = node(NODE_DIALECT, NODE_TOOLBAR, AccessRole::ComboBox, "Dialect", (width - 224.0, 8.0, 120.0, 28.0));
     pill.value = Some(tab.dialect.label().to_owned());
+    pill.state.expanded = Some(tab.dialect_menu.is_some());
     pill.state.focused = tab_focused && tab.focus == TabFocus::DialectPill;
     nodes.push(pill);
     sidebar_nodes(&mut nodes, window);
     nodes.push(node(NODE_QUERIES, NODE_MAIN_WINDOW, AccessRole::TabList, "Queries", (260.0, 44.0, centre_width, 36.0)));
     for (index, other) in window.background_tabs.iter().enumerate() {
         let left = 260.0 + TAB_WIDTH * index as f32;
-        nodes.push(node(NODE_FIRST_BACKGROUND_TAB + index as u32 % 1000, NODE_QUERIES, AccessRole::Tab, &other.title, (left, 44.0, TAB_WIDTH, 36.0)));
+        let mut background = node(NODE_FIRST_BACKGROUND_TAB + index as u32 % 1000, NODE_QUERIES, AccessRole::Tab, &other.title, (left, 44.0, TAB_WIDTH, 36.0));
+        nodes.push(background);
     }
     let title = if tab.running { format!("{}, running", tab.title) } else { tab.title.clone() };
     let left = 260.0 + TAB_WIDTH * window.background_tabs.len() as f32;
     let mut query = node(NODE_QUERY_TAB, NODE_QUERIES, AccessRole::Tab, &title, (left, 44.0, TAB_WIDTH, 36.0));
     query.state.selected = true;
     nodes.push(query);
-    let mut text = node(NODE_EDITOR, NODE_MAIN_WINDOW, AccessRole::TextField, "Query", (260.0, 80.0, centre_width, 300.0));
+    let mut text = node(NODE_EDITOR, NODE_MAIN_WINDOW, AccessRole::TextArea, "Query", (260.0, 80.0, centre_width, 300.0));
     text.value = Some(tab.editor.text());
+    text.caret = Some(editor_caret(&tab.editor));
+    text.state.invalid = tab.error.is_some();
     text.state.focused = tab_focused && tab.focus == TabFocus::Editor;
     nodes.push(text);
     if let Some(error) = tab.error.as_ref().filter(|error| error.strip_shown) {
-        nodes.push(node(NODE_ERROR_STRIP, NODE_MAIN_WINDOW, AccessRole::Status, &error.strip_text(), (260.0, 352.0, centre_width, 28.0)));
+        nodes.push(node(NODE_ERROR_STRIP, NODE_MAIN_WINDOW, AccessRole::Alert, &error.strip_text(), (260.0, 352.0, centre_width, 28.0)));
     }
     nodes.push(node(NODE_RESULT_VIEWS, NODE_MAIN_WINDOW, AccessRole::TabList, "Result views", (260.0, 386.0, centre_width, 32.0)));
     for (offset, (name, view, x, _)) in result_segments(tab).into_iter().enumerate() {
@@ -1275,21 +1413,44 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
     let mut bar = node(NODE_STATUS_BAR, NODE_MAIN_WINDOW, AccessRole::Group, "Status", (0.0, 776.0, width, 24.0));
     bar.value = Some(status_bar_left(tab));
     nodes.push(bar);
+    crate::accessibility::fill_default_actions(&mut nodes);
+    for node in nodes.iter_mut().filter(|node| no_keys_reach_it_yet(node)) {
+        node.actions = AccessActions::default();
+    }
     nodes
+}
+
+fn no_keys_reach_it_yet(node: &AccessNode) -> bool {
+    let background_tab = (NODE_FIRST_BACKGROUND_TAB..NODE_FIRST_PLAN_NODE).contains(&node.id);
+    let result_segment = (NODE_RESULTS_SEGMENT..NODE_PLAN).contains(&node.id);
+    let inspector_part = node.parent == Some(NODE_INSPECTOR);
+    background_tab || result_segment || inspector_part
 }
 
 fn plan_nodes(nodes: &mut Vec<AccessNode>, plan: &PlanView, focused: bool, centre_width: f32) {
     let area = plan_area(centre_width);
-    let mut tree = node(NODE_PLAN, NODE_MAIN_WINDOW, AccessRole::Group, "Plan", (area.x, area.y, area.w, area.h));
+    let mut tree = node(NODE_PLAN, NODE_MAIN_WINDOW, AccessRole::Tree, "Plan", (area.x, area.y, area.w, area.h));
     let count = plan.plan.nodes.len();
-    tree.value = Some(format!("{} {}", status_line::thousands(count), if count == 1 { "node" } else { "nodes" }));
+    tree.description = Some(format!("{} {}", status_line::thousands(count), if count == 1 { "node" } else { "nodes" }));
     nodes.push(tree);
     for (index, plan_node) in plan.plan.nodes.iter().enumerate().take(plan_view::MAX_NODES) {
         let Some(rect) = plan.node_rect(index, area) else {
             continue;
         };
-        let mut item = node(NODE_FIRST_PLAN_NODE + index as u32, NODE_PLAN, AccessRole::Button, &plan_node.operation, (rect.x, rect.y, rect.w, rect.h));
-        item.value = Some(plan.plan.spoken(index));
+        let mut item = node(NODE_FIRST_PLAN_NODE + index as u32, NODE_PLAN, AccessRole::TreeItem, &plan_node.operation, (rect.x, rect.y, rect.w, rect.h));
+        item.description = Some(plan.plan.spoken(index));
+        let siblings = plan_node.parent.and_then(|parent| plan.plan.nodes.get(parent)).map(|parent| parent.children.as_slice());
+        item.tree_position = Some(AccessTreePosition {
+            level: plan_node.depth + 1,
+            position: siblings.and_then(|list| list.iter().position(|&child| child == index)).map_or(1, |at| at + 1),
+            set_size: siblings.map_or(1, <[usize]>::len),
+        });
+        item.state.expanded = (!plan_node.children.is_empty()).then_some(true);
+        item.actions = AccessActions {
+            select: true,
+            focus: true,
+            ..AccessActions::default()
+        };
         item.state.focused = focused && plan.current == index;
         item.state.selected = plan.selected == Some(index);
         nodes.push(item);
@@ -1303,14 +1464,16 @@ fn sidebar_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
     filter.placeholder = Some("Filter objects".to_owned());
     filter.state.focused = window.focus == WindowFocus::Filter;
     nodes.push(filter);
-    nodes.push(node(NODE_OBJECTS, NODE_MAIN_WINDOW, AccessRole::Group, "Objects", (0.0, ROWS_TOP, 260.0, 776.0 - ROWS_TOP)));
+    nodes.push(node(NODE_OBJECTS, NODE_MAIN_WINDOW, AccessRole::Tree, "Objects", (0.0, ROWS_TOP, 260.0, 776.0 - ROWS_TOP)));
     let rows = tree.rows();
     for (offset, row) in rows.iter().enumerate().skip(tree.first_row).take(ROWS_IN_VIEW) {
         let visible = offset - tree.first_row;
         let y = ROWS_TOP + ROW_HEIGHT * visible as f32;
         let detail = if row.item == TreeItem::Connection { Some(access_text(window).to_owned()) } else { row.detail.clone() };
-        let mut item = node(NODE_FIRST_TREE_ROW + visible as u32, NODE_OBJECTS, AccessRole::Button, &row.label, (4.0, y, 252.0, ROW_HEIGHT));
-        item.value = Some(object_browser::row_description(row, detail.as_deref()));
+        let mut item = node(NODE_FIRST_TREE_ROW + visible as u32, NODE_OBJECTS, AccessRole::TreeItem, &row.label, (4.0, y, 252.0, ROW_HEIGHT));
+        item.description = Some(object_browser::row_description(row, detail.as_deref()));
+        item.tree_position = Some(AccessTreePosition { level: row.level, position: row.position, set_size: row.set_size });
+        item.state.expanded = row.expanded;
         item.state.selected = tree.selected == Some(row.item);
         item.state.focused = window.focus == WindowFocus::Tree && tree.current == row.item;
         nodes.push(item);
@@ -1330,11 +1493,12 @@ fn inspector_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
         let open = window.inspector.is_expanded(block);
         let mut button = node(NODE_FIRST_BLOCK + index as u32, NODE_INSPECTOR, AccessRole::Button, &title, (area.x + 12.0, top, area.w - 24.0, 24.0));
         button.value = Some(if open { "expanded" } else { "collapsed" }.to_owned());
+        button.state.expanded = Some(open);
         nodes.push(button);
         if block == InspectorBlock::Ddl && open {
-            let mut ddl = node(NODE_DDL, NODE_INSPECTOR, AccessRole::TextField, "DDL", (area.x + 12.0, top + 28.0, area.w - 24.0, 120.0));
+            let mut ddl = node(NODE_DDL, NODE_INSPECTOR, AccessRole::TextArea, "DDL", (area.x + 12.0, top + 28.0, area.w - 24.0, 120.0));
             ddl.value = description.ddl.clone();
-            ddl.state.disabled = true;
+            ddl.state.read_only = true;
             nodes.push(ddl);
         }
     }
@@ -1353,8 +1517,9 @@ fn grid_nodes(nodes: &mut Vec<AccessNode>, grid: &ResultGrid, centre_width: f32)
         top = 446.0;
     }
     let (rows, columns) = grid.selection_size();
-    let mut table = node(NODE_GRID, NODE_MAIN_WINDOW, AccessRole::Group, "Results", (260.0, top, centre_width, BODY_BOTTOM - top));
-    table.value = Some(format!(
+    let mut table = node(NODE_GRID, NODE_MAIN_WINDOW, AccessRole::Grid, "Results", (260.0, top, centre_width, BODY_BOTTOM - top));
+    table.table = Some(AccessTable { rows: grid.row_count, columns: grid.columns.len() });
+    table.description = Some(format!(
         "{} rows, {} columns; {} by {} selected",
         grid.row_count,
         grid.columns.len(),
@@ -1368,7 +1533,9 @@ fn grid_nodes(nodes: &mut Vec<AccessNode>, grid: &ResultGrid, centre_width: f32)
     for column in visible.clone() {
         let name = grid.columns.get(column).map_or("", String::as_str);
         let width = x_of(column + 1) - x_of(column);
-        nodes.push(node(NODE_FIRST_HEADER + column as u32 % 800, NODE_GRID, AccessRole::Heading, name, (x_of(column), top, width, 28.0)));
+        let mut header = node(NODE_FIRST_HEADER + column as u32 % 800, NODE_GRID, AccessRole::ColumnHeader, name, (x_of(column), top, width, 28.0));
+        header.cell = Some(AccessCell { row: 0, column });
+        nodes.push(header);
     }
     let body_top = top + 28.0;
     let mut id = NODE_FIRST_CELL;
@@ -1377,8 +1544,9 @@ fn grid_nodes(nodes: &mut Vec<AccessNode>, grid: &ResultGrid, centre_width: f32)
             let cell = crate::grid::Cell { row, column };
             let y = body_top + 24.0 * (row - grid.first_row) as f32;
             let name = grid.columns.get(column).map_or("", String::as_str);
-            let mut item = node(id, NODE_GRID, AccessRole::Group, name, (x_of(column), y, x_of(column + 1) - x_of(column), 24.0));
+            let mut item = node(id, NODE_GRID, AccessRole::Cell, name, (x_of(column), y, x_of(column + 1) - x_of(column), 24.0));
             item.value = Some(spoken_cell(grid.value(cell), grid.kind(column)));
+            item.cell = Some(AccessCell { row, column });
             item.state.selected = grid.is_selected(cell) && (grid.focused || rows * columns > 1);
             item.state.focused = grid.focused && grid.current == cell;
             nodes.push(item);
@@ -1533,8 +1701,65 @@ mod tests {
         let names: Vec<&str> = rows.iter().map(|node| node.name.as_str()).collect();
         assert_eq!(names, ["shop", "Tables", "customers", "orders", "products", "Views", "Indexes", "Keys"]);
         assert!(rows[2].state.selected && !rows[2].state.focused);
-        assert_eq!(rows[1].value.as_deref(), Some("3, level 2, 1 of 4, expanded"));
+        assert_eq!(rows[1].description.as_deref(), Some("3, level 2, 1 of 4, expanded"));
+        assert_eq!(rows[1].role, AccessRole::TreeItem);
+        assert_eq!(rows[1].tree_position, Some(AccessTreePosition { level: 2, position: 1, set_size: 4 }));
+        assert_eq!(rows[1].state.expanded, Some(true));
         assert!(tree.iter().filter(|node| node.state.focused).all(|node| node.id == NODE_EDITOR));
+    }
+
+    #[test]
+    fn the_dump_shows_the_workspace_values_states_actions_and_grid() {
+        let dump = crate::accessibility::describe(&accessibility_tree(&MainWindow::sample()));
+        let primary = primary_name();
+        for line in [
+            "  toolbar \"Toolbar\"\n".to_owned(),
+            format!("    button \"Run\" actions=invoke shortcut={primary}+Enter\n"),
+            "    button \"Stop\" [disabled] actions=invoke shortcut=Esc\n".to_owned(),
+            "  grid \"Results\" description=\"3 rows, 2 columns; 1 row by 1 column selected\" table=3x2\n".to_owned(),
+            "    columnheader \"id\" cell=0,0\n".to_owned(),
+            "    cell \"name\" value=\"Ada Lovelace\" actions=select,focus cell=0,1\n".to_owned(),
+        ] {
+            assert!(dump.contains(&line), "{line} in\n{dump}");
+        }
+        let combo = dump.lines().find(|line| line.contains("combobox \"Dialect\"")).unwrap_or_default();
+        assert!(combo.contains("[collapsed] actions=expand,focus"), "{combo}");
+        let editor = dump.lines().find(|line| line.contains("textarea \"Query\"")).unwrap_or_default();
+        assert!(editor.contains(" caret=") && editor.contains("[focused]") && editor.contains("actions=set-value,focus"), "{editor}");
+        let row = dump.lines().find(|line| line.contains("treeitem \"Tables\"")).unwrap_or_default();
+        assert!(row.contains("[expanded] actions=invoke,expand,select,focus level=2 1/4"), "{row}");
+    }
+
+    #[test]
+    fn screen_reader_requests_move_the_focus_and_press_the_same_keys() {
+        let mut window = MainWindow::sample();
+        let tree = accessibility_tree(&window);
+        let find = |id: u32| tree.iter().find(|node| node.id == id).cloned().unwrap();
+        let cell = tree.iter().find(|node| node.cell == Some(AccessCell { row: 1, column: 1 }) && node.role == AccessRole::Cell).cloned().unwrap();
+        assert!(window.access_keys(&cell, &AccessAction::Focus).is_empty());
+        assert_eq!(window.tab.focus, TabFocus::Grid);
+        assert_eq!(window.tab.grid.as_ref().map(|grid| grid.current), Some(crate::grid::Cell { row: 1, column: 1 }));
+        let run = window.access_keys(&find(NODE_RUN), &AccessAction::Invoke);
+        assert_eq!(run, vec![toolbar_chord(NODE_RUN).unwrap()]);
+        assert_eq!((window.focus, window.tab.focus), (WindowFocus::Tab, TabFocus::Editor));
+        assert!(window.access_keys(&find(NODE_RUN), &AccessAction::Focus).is_empty());
+        let editor = find(NODE_EDITOR);
+        assert!(window.access_keys(&editor, &AccessAction::SetValue("SELECT 1".to_owned())).is_empty());
+        assert_eq!(window.tab.editor.text(), "SELECT 1");
+        let caret = AccessCaret { anchor: 0, caret: 6 };
+        let keys = window.access_keys(&editor, &AccessAction::SetCaret(caret));
+        assert_eq!(keys.len(), 6);
+        for press in keys {
+            let _ = window.key(press, Instant::now());
+        }
+        assert_eq!(editor_caret(&window.tab.editor), caret);
+        let filter = find(NODE_FILTER);
+        assert!(window.access_keys(&filter, &AccessAction::Focus).is_empty());
+        assert_eq!(window.focus, WindowFocus::Filter);
+        let tables = tree.iter().find(|node| node.name == "Tables" && node.role == AccessRole::TreeItem).cloned().unwrap();
+        assert_eq!(window.access_keys(&tables, &AccessAction::Collapse), vec![KeyPress::plain(Key::Left)]);
+        assert_eq!(window.focus, WindowFocus::Tree);
+        assert!(!window.focus_node(&find(NODE_STATUS_BAR)));
     }
 
     #[test]
@@ -1542,11 +1767,13 @@ mod tests {
         let mut window = MainWindow::sample();
         let tree = accessibility_tree(&window);
         let grid = tree.iter().find(|node| node.id == NODE_GRID).unwrap();
-        assert_eq!(grid.value.as_deref(), Some("3 rows, 2 columns; 1 row by 1 column selected"));
-        let headers: Vec<&str> = tree.iter().filter(|node| node.role == AccessRole::Heading).map(|node| node.name.as_str()).collect();
+        assert_eq!(grid.description.as_deref(), Some("3 rows, 2 columns; 1 row by 1 column selected"));
+        assert_eq!(grid.table, Some(AccessTable { rows: 3, columns: 2 }));
+        let headers: Vec<&str> = tree.iter().filter(|node| node.role == AccessRole::ColumnHeader).map(|node| node.name.as_str()).collect();
         assert_eq!(headers, ["id", "name"]);
         let first = tree.iter().find(|node| node.id == NODE_FIRST_CELL + 1).unwrap();
         assert_eq!(first.value.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(first.cell, Some(AccessCell { row: 0, column: 1 }));
         let status = tree.iter().find(|node| node.id == NODE_STATUS_LINE).unwrap();
         assert_eq!(status.name, "3 rows, 0.4 milliseconds");
         window.tab.focus = TabFocus::Grid;

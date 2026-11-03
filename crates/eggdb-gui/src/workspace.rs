@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use eggdb_platform::window::{KeyPress, OpenFileDialog};
+use eggdb_platform::window::{AccessNode, AccessRequest, KeyPress, OpenFileDialog};
 
 use crate::clipboard::{Clipboard, MemoryClipboard};
 use crate::connect_screen::{ConnectAction, ConnectCard, Segment, handle_key};
@@ -172,6 +172,42 @@ impl Workspace {
         let (next, action) = handle_key(card.clone(), press);
         *card = next;
         self.act(action, now)
+    }
+
+    /// Answers a screen reader's request on a node of `tree`, the screen's accessibility tree
+    /// as last built: the node takes the focus, then gets the keys a person would press for
+    /// the same result, through [`Workspace::key`]. A node that is gone, cannot take the focus
+    /// or does not offer the action changes nothing.
+    pub fn access(
+        &mut self,
+        request: &AccessRequest,
+        tree: &[AccessNode],
+        now: Instant,
+    ) -> WorkspaceCommand {
+        let Some(node) = tree
+            .iter()
+            .find(|node| node.id == request.node)
+            .filter(|node| node.allows(&request.action))
+        else {
+            return WorkspaceCommand::None;
+        };
+        let keys = match &mut self.screen {
+            Screen::Connect(card) => {
+                if !card.focus_node(node.id) {
+                    return WorkspaceCommand::None;
+                }
+                crate::accessibility::action_keys(node, &request.action)
+            }
+            Screen::Main(window) => window.access_keys(node, &request.action),
+        };
+        let mut command = WorkspaceCommand::None;
+        for press in keys {
+            let answer = self.key(press, now);
+            if answer != WorkspaceCommand::None {
+                command = answer;
+            }
+        }
+        command
     }
 
     fn window_action(&mut self, action: WindowAction, now: Instant) {
@@ -585,6 +621,70 @@ mod tests {
 
     fn card(workspace: &mut Workspace) -> ConnectCard {
         workspace.card_mut().cloned().expect("the card is shown")
+    }
+
+    fn card_tree(workspace: &Workspace) -> Vec<AccessNode> {
+        let Screen::Connect(card) = workspace.screen() else {
+            panic!("the card is shown");
+        };
+        let faces = crate::main_window::Faces {
+            ui: &crate::font::BoxFace,
+            ui_bold: &crate::font::BoxFace,
+            mono: &crate::font::BoxFace,
+        };
+        crate::connect_screen::accessibility_tree(
+            card,
+            faces,
+            (crate::connect_screen::DEFAULT_WIDTH, crate::connect_screen::DEFAULT_HEIGHT),
+        )
+    }
+
+    fn request(node: u32, action: eggdb_platform::window::AccessAction) -> AccessRequest {
+        AccessRequest { node, action }
+    }
+
+    #[test]
+    fn screen_reader_requests_act_on_the_card_like_the_keys_do() {
+        use crate::connect_screen::{
+            NODE_CONNECT_TO_A_SERVER, NODE_FILE, NODE_OPEN, NODE_OPEN_A_FILE, NODE_READ_ONLY,
+            NODE_TITLE,
+        };
+        use eggdb_platform::window::AccessAction;
+        let directory = scratch("access");
+        let path = directory.join("spoken.eggdb");
+        let _ = std::fs::remove_file(&path);
+        let now = Instant::now();
+        let mut workspace = workspace(Arc::new(EngineConnector), directory.clone());
+        let tree = card_tree(&workspace);
+        workspace.access(&request(NODE_READ_ONLY, AccessAction::Toggle), &tree, now);
+        assert!(card(&mut workspace).read_only);
+        assert_eq!(card(&mut workspace).focus, Focus::ReadOnly);
+        let tree = card_tree(&workspace);
+        workspace.access(&request(NODE_READ_ONLY, AccessAction::Invoke), &tree, now);
+        assert!(!card(&mut workspace).read_only, "invoking a checkbox flips it back");
+        let tree = card_tree(&workspace);
+        assert_eq!(
+            workspace.access(&request(NODE_TITLE, AccessAction::Focus), &tree, now),
+            WorkspaceCommand::None
+        );
+        assert_eq!(card(&mut workspace).focus, Focus::ReadOnly, "a heading takes no focus");
+        workspace.access(&request(NODE_FILE, AccessAction::SetValue("spoken.eggdb".to_owned())), &tree, now);
+        let typed = card(&mut workspace);
+        assert_eq!((typed.focus, typed.file.value()), (Focus::FileInput, "spoken.eggdb"));
+        let tree = card_tree(&workspace);
+        let caret = eggdb_platform::window::AccessCaret { anchor: 0, caret: 7 };
+        workspace.access(&request(NODE_FILE, AccessAction::SetCaret(caret)), &tree, now);
+        assert_eq!(card(&mut workspace).file.selection(), Some((0, 7)));
+        let tree = card_tree(&workspace);
+        workspace.access(&request(NODE_CONNECT_TO_A_SERVER, AccessAction::Select), &tree, now);
+        assert_eq!(card(&mut workspace).segment, Segment::Server);
+        workspace.access(&request(NODE_OPEN_A_FILE, AccessAction::Select), &card_tree(&workspace), now);
+        let tree = card_tree(&workspace);
+        workspace.access(&request(NODE_FILE, AccessAction::SetValue("spoken.eggdb".to_owned())), &tree, now);
+        let tree = card_tree(&workspace);
+        workspace.access(&request(NODE_OPEN, AccessAction::Invoke), &tree, now);
+        workspace.wait_for_open(Duration::from_secs(10));
+        assert!(matches!(workspace.screen(), Screen::Main(_)), "invoking Open opens the file");
     }
 
     #[test]

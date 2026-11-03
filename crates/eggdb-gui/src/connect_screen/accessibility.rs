@@ -114,13 +114,12 @@ impl TreeBuilder {
             parent,
             role,
             name: name.to_owned(),
-            value: None,
-            placeholder: None,
             state: AccessState {
                 focused: self.focused == Some(id),
                 ..state
             },
             bounds: access_rect(rect),
+            ..AccessNode::default()
         });
     }
 }
@@ -131,6 +130,13 @@ fn focused_node_id(card: &ConnectCard) -> u32 {
             Segment::File => NODE_OPEN_A_FILE,
             Segment::Server => NODE_CONNECT_TO_A_SERVER,
         },
+        focus => focus_node_id(focus),
+    }
+}
+
+fn focus_node_id(focus: Focus) -> u32 {
+    match focus {
+        Focus::Segments => NODE_SEGMENTS,
         Focus::FileInput => NODE_FILE,
         Focus::Browse => NODE_BROWSE,
         Focus::CreateIfMissing => NODE_CREATE_IF_MISSING,
@@ -299,12 +305,25 @@ pub fn accessibility_tree(
     {
         tree.add(id, Some(NODE_WINDOW), AccessRole::Link, label, rect);
     }
+    if let Some(id) = card.failed_focus().map(focus_node_id) {
+        for node in tree.nodes.iter_mut().filter(|node| node.id == id) {
+            node.state.invalid = true;
+        }
+    }
+    if let Some(node) = tree.nodes.iter_mut().find(|node| node.id == NODE_PROTOCOL) {
+        node.state.expanded = Some(false);
+    }
+    crate::accessibility::fill_default_actions(&mut tree.nodes);
+    if let Some(node) = tree.nodes.iter_mut().find(|node| node.id == NODE_OPEN) {
+        node.shortcut = Some("Enter".to_owned());
+    }
     if card.disabled() {
         for node in &mut tree.nodes {
             let control = matches!(
                 node.role,
                 AccessRole::Tab
                     | AccessRole::TextField
+                    | AccessRole::ComboBox
                     | AccessRole::Button
                     | AccessRole::CheckBox
                     | AccessRole::Link
@@ -322,13 +341,15 @@ fn text_field(
     id: u32,
     name: &str,
     rect: Rect,
-    value: String,
+    field: (String, &TextField),
     placeholder: &str,
 ) {
+    let (value, text) = field;
     tree.add(id, Some(NODE_PANEL), AccessRole::TextField, name, rect);
     if let Some(node) = tree.nodes.last_mut() {
         node.value = Some(value);
         node.placeholder = (!placeholder.is_empty()).then(|| placeholder.to_owned());
+        node.caret = Some(crate::accessibility::field_caret(text.caret(), text.selection()));
     }
 }
 
@@ -371,31 +392,30 @@ fn server_nodes(
 ) {
     let form = &card.server;
     let plain = |field: &TextField| field.value().to_owned();
-    text_field(tree, NODE_URL, "URL", at(down(URL_INPUT, shift)), plain(&form.url), URL_PLACEHOLDER);
+    text_field(tree, NODE_URL, "URL", at(down(URL_INPUT, shift)), (plain(&form.url), &form.url), URL_PLACEHOLDER);
     tree.add(
         NODE_PROTOCOL,
         Some(NODE_PANEL),
-        AccessRole::Button,
+        AccessRole::ComboBox,
         "Protocol",
         at(down(PROTOCOL_MENU, shift)),
     );
     if let Some(node) = tree.nodes.last_mut() {
         node.value = Some(form.protocol.label().to_owned());
     }
-    for (id, name, rect, value, placeholder) in [
-        (NODE_HOST, "Host", HOST_INPUT, plain(&form.host), DEFAULT_HOST),
-        (NODE_PORT, "Port", PORT_INPUT, plain(&form.port), ""),
-        (NODE_DATABASE, "Database", DATABASE_INPUT, plain(&form.database), ""),
-        (NODE_USER, "User", USER_INPUT, plain(&form.user), DEFAULT_SERVER_USER),
-        (
-            NODE_PASSWORD,
-            "Password",
-            PASSWORD_INPUT,
-            std::iter::repeat_n(MASK, form.password.value().chars().count()).collect(),
-            "",
-        ),
+    for (id, name, rect, field, placeholder) in [
+        (NODE_HOST, "Host", HOST_INPUT, &form.host, DEFAULT_HOST),
+        (NODE_PORT, "Port", PORT_INPUT, &form.port, ""),
+        (NODE_DATABASE, "Database", DATABASE_INPUT, &form.database, ""),
+        (NODE_USER, "User", USER_INPUT, &form.user, DEFAULT_SERVER_USER),
+        (NODE_PASSWORD, "Password", PASSWORD_INPUT, &form.password, ""),
     ] {
-        text_field(tree, id, name, at(down(rect, shift)), value, placeholder);
+        let value = if id == NODE_PASSWORD {
+            std::iter::repeat_n(MASK, field.value().chars().count()).collect()
+        } else {
+            plain(field)
+        };
+        text_field(tree, id, name, at(down(rect, shift)), (value, field), placeholder);
     }
     let tls_row = CheckBoxRow {
         id: NODE_USE_TLS,
@@ -423,7 +443,7 @@ fn file_nodes(
         NODE_FILE,
         FILE_NAME,
         at(down(file_input(card), shift)),
-        card.file.value().to_owned(),
+        (card.file.value().to_owned(), &card.file),
         PLACEHOLDER,
     );
     if card.file_dialog {
@@ -620,6 +640,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_first_start_dump_shows_values_carets_states_and_actions() {
+        let expected = "\
+window \"EggDB\"
+  group \"Connect\"
+    heading \"Connect\"
+    tablist \"Connection kind\"
+      tab \"Open a file\" [selected] actions=select,focus
+      tab \"Connect to a server\" actions=select,focus
+    tabpanel \"Open a file\"
+      textfield \"File\" value=\"~/eggdb/quickstart.eggdb\" caret=0..24 [focused] actions=set-value,focus
+      button \"Browse\" actions=invoke,focus
+      checkbox \"Create the file if it does not exist\" [checked] actions=toggle,focus
+      checkbox \"Open read-only\" [unchecked] actions=toggle,focus
+    button \"Cancel\" [disabled] actions=invoke,focus
+    button \"Open\" [default] actions=invoke,focus shortcut=Enter
+  link \"Where are you coming from?\" actions=invoke,focus
+  link \"Load a sample dataset\" actions=invoke,focus
+";
+        assert_eq!(crate::accessibility::describe(&tree(&ConnectCard::first_start())), expected);
+    }
+
+    #[test]
+    fn the_server_segment_dump_shows_the_combo_box_and_the_failed_field() {
+        let mut card = ConnectCard::first_start();
+        assert!(card.focus_node(NODE_CONNECT_TO_A_SERVER));
+        let nodes = tree(&card);
+        let protocol = node(&nodes, NODE_PROTOCOL);
+        assert_eq!(protocol.role, AccessRole::ComboBox);
+        assert_eq!(protocol.state.expanded, Some(false));
+        assert!(protocol.actions.expand_collapse && protocol.actions.focus);
+        let url = node(&nodes, NODE_URL);
+        assert!(url.actions.set_value);
+        assert!(url.caret.is_some());
+        let password = node(&nodes, NODE_PASSWORD);
+        assert!(password.value.as_deref().is_some_and(|value| value.chars().all(|letter| letter == MASK)));
+        card.failed_field = Some(crate::connection::FailureField::Host);
+        let failed = tree(&card);
+        assert!(node(&failed, NODE_HOST).state.invalid);
+        assert!(!node(&failed, NODE_URL).state.invalid);
+        assert!(crate::accessibility::describe(&failed).contains("textfield \"Host\""));
     }
 
     #[test]

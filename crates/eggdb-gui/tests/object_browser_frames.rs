@@ -171,8 +171,8 @@ fn keys_move_expand_type_ahead_and_open_a_table_in_a_new_tab() {
     let rows: Vec<&AccessNode> = tree.iter().filter(|node| node.parent == Some(NODE_OBJECTS)).collect();
     let orders = rows.iter().find(|node| node.name == "orders").expect("orders is a tree row");
     assert!(orders.state.focused);
-    assert_eq!(orders.value.as_deref(), Some("level 3, 2 of 3, collapsed"));
-    assert_eq!(rows[0].value.as_deref(), Some("read-write, level 1, 1 of 1, expanded"));
+    assert_eq!(orders.description.as_deref(), Some("level 3, 2 of 3, collapsed"));
+    assert_eq!(rows[0].description.as_deref(), Some("read-write, level 1, 1 of 1, expanded"));
     press(&mut workspace, Key::Enter);
     workspace.wait_for_run(LIMIT);
     let shown = window(&mut workspace);
@@ -234,8 +234,8 @@ fn the_inspector_docks_from_1440_px_and_shows_the_selected_table() {
     assert_eq!((panel.bounds.x, panel.bounds.y, panel.bounds.width, panel.bounds.height), (1160.0, 44.0, 280.0, 732.0));
     assert_eq!(node(&tree, NODE_FIRST_BLOCK).name, "Columns (3)");
     assert_eq!(node(&tree, NODE_FIRST_BLOCK).value.as_deref(), Some("expanded"));
-    assert!(node(&tree, NODE_DDL).state.disabled, "the DDL is read-only");
-    assert_eq!(node(&tree, NODE_DDL).role, AccessRole::TextField);
+    assert!(node(&tree, NODE_DDL).state.read_only, "the DDL is read-only");
+    assert_eq!(node(&tree, NODE_DDL).role, AccessRole::TextArea);
     window(&mut workspace).set_width(1280);
     assert!(!window(&mut workspace).inspector.is_open(), "closed again at 1280");
     let closed = main_window::draw(window(&mut workspace), theme, BOX_FACES);

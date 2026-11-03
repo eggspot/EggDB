@@ -114,7 +114,7 @@ fn ctrl_enter_runs_the_statement_under_the_caret_and_shift_runs_them_all() {
     assert!(null_ink > 0, "the third row's NULL is drawn in textDisabled");
     let tree = accessibility_tree(window(&mut workspace));
     let grid_node = tree.iter().find(|node| node.id == NODE_GRID).expect("the grid node");
-    assert!(grid_node.value.as_deref().is_some_and(|value| value.starts_with("3 rows, 2 columns")));
+    assert!(grid_node.description.as_deref().is_some_and(|value| value.starts_with("3 rows, 2 columns")));
     let cell = tree
         .iter()
         .find(|node| node.id == NODE_FIRST_CELL + 5)
@@ -139,7 +139,7 @@ fn the_grid_moves_selects_and_copies_tsv_and_inserts() {
     key(&mut workspace, chord(Key::Down, true, false));
     let tree = accessibility_tree(window(&mut workspace));
     let grid = tree.iter().find(|node| node.id == NODE_GRID).unwrap();
-    assert!(grid.value.as_deref().is_some_and(|value| value.ends_with("2 rows by 2 columns selected")));
+    assert!(grid.description.as_deref().is_some_and(|value| value.ends_with("2 rows by 2 columns selected")));
     let focused = tree.iter().find(|node| node.state.focused).expect("the current cell");
     assert_eq!(focused.value.as_deref(), Some("O'Hara\u{2409}Grace"));
     key(&mut workspace, chord(Key::Character('c'), false, true));
@@ -191,7 +191,7 @@ fn an_error_shows_the_squiggle_the_strip_and_the_engines_lines() {
     assert!(squiggle > 10, "the squiggle is under users");
     let tree = accessibility_tree(window(&mut workspace));
     let strip = tree.iter().find(|node| node.id == NODE_ERROR_STRIP).expect("the strip node");
-    assert_eq!(strip.role, AccessRole::Status);
+    assert_eq!(strip.role, AccessRole::Alert);
     key(&mut workspace, chord(Key::Escape, false, false));
     let (canvas, theme) = frame(&mut workspace);
     assert_eq!(canvas.pixel(1270, 370), Some(theme.bg0), "Esc hides the strip");
@@ -213,7 +213,7 @@ fn a_result_past_the_fetch_limit_shows_the_banner() {
     assert!(banner.name.starts_with("Showing the first 100,000 rows of 100,001."));
     let drawn = tree
         .iter()
-        .filter(|node| node.parent == Some(NODE_GRID) && node.role == AccessRole::Group)
+        .filter(|node| node.parent == Some(NODE_GRID) && node.role == AccessRole::Cell)
         .count();
     assert_eq!(drawn, 12, "only the rows in view are in the tree");
     key(&mut workspace, chord(Key::Character('3'), false, true));
