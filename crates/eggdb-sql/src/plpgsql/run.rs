@@ -1024,9 +1024,10 @@ impl<'r> Run<'r> {
                 "SET eggdb.dialect inside a PL/pgSQL or SQL function",
             ));
         }
+        self.sync_settings();
         let changed = crate::routine_settings::change(&self.settings, name, value, scope)?;
         self.settings = RoutineSettings::Changed(Arc::new(changed));
-        self.settings_version = crate::routine_settings::NEVER_SYNCED;
+        self.settings_version = crate::routine_settings::version();
         Ok(())
     }
 
@@ -1423,6 +1424,7 @@ impl<'r> Run<'r> {
         let error = match self.steps(&block.steps) {
             Ok(flow) => {
                 self.undo.release();
+                crate::routine_settings::release(settings_mark);
                 return Ok(flow);
             }
             Err(error) => error,
@@ -1433,10 +1435,11 @@ impl<'r> Run<'r> {
             .find(|handler| handler.catches(error.state()))
         else {
             self.undo.release();
+            crate::routine_settings::release(settings_mark);
             return Err(error);
         };
-        self.undo.roll_back(self.writer.get(), mark)?;
         crate::routine_settings::undo_since(settings_mark);
+        self.undo.roll_back(self.writer.get(), mark)?;
         self.cursors.truncate(cursors);
         self.failure = None;
         self.handle(handler, error)

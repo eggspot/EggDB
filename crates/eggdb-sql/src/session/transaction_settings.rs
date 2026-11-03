@@ -25,6 +25,11 @@ impl Session<'_> {
         if scope == SettingScope::Transaction && !follows {
             return Ok(false);
         }
+        let remembered = match value {
+            Some(_) => None,
+            None => self.connection_value(name),
+        };
+        let value = value.or(remembered.as_deref());
         if follows {
             self.transaction_settings
                 .before_change(&self.settings, name, scope);
@@ -53,15 +58,7 @@ impl Session<'_> {
             if is_dialect_setting(&change.name) {
                 continue;
             }
-            let _ = match change.value {
-                Some(value) => self
-                    .change_setting(&change.name, Some(value.as_str()), change.scope)
-                    .map(drop),
-                None if change.scope == SettingScope::Session => self.reset_setting(&change.name),
-                None => self
-                    .change_setting(&change.name, None, change.scope)
-                    .map(drop),
-            };
+            let _ = self.change_setting(&change.name, change.value.as_deref(), change.scope);
         }
     }
 

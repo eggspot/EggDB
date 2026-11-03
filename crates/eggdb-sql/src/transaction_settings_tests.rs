@@ -171,3 +171,125 @@ fn set_local_in_an_implicit_transaction_lasts_until_it_ends() {
     session.commit_implicit_transaction().unwrap();
     assert_eq!(state(&mut session, "SHOW app.mode"), "42704");
 }
+
+fn with_deferred_child(session: &mut Session<'_>) {
+    answer(session, "CREATE TABLE parent (id integer PRIMARY KEY)");
+    answer(
+        session,
+        "CREATE TABLE child (id integer PRIMARY KEY, parent_id integer REFERENCES parent DEFERRABLE INITIALLY DEFERRED)",
+    );
+}
+
+#[test]
+fn a_commit_that_fails_its_deferred_checks_undoes_the_settings_of_its_transaction() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    with_deferred_child(&mut session);
+    answer(&mut session, "SET app.k = 'before'");
+    answer(&mut session, "SET app.c = 'before'");
+    let search_path = shown(&mut session, "search_path");
+    answer(&mut session, "BEGIN");
+    answer(&mut session, "SET app.k = 'inside'");
+    answer(&mut session, "SET search_path = evil, public");
+    answer(&mut session, "SELECT set_config('app.c', 'inside', false)");
+    answer(&mut session, "INSERT INTO child VALUES (5, 99)");
+    assert_eq!(state(&mut session, "COMMIT"), "23503");
+    assert_eq!(shown(&mut session, "app.k"), "before");
+    assert_eq!(shown(&mut session, "search_path"), search_path);
+    assert_eq!(shown(&mut session, "app.c"), "before");
+    answer(&mut session, "BEGIN");
+    answer(&mut session, "SET app.k = 'kept'");
+    answer(&mut session, "COMMIT");
+    assert_eq!(shown(&mut session, "app.k"), "kept");
+}
+
+#[test]
+fn an_implicit_transaction_that_fails_its_deferred_checks_undoes_its_settings() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    with_deferred_child(&mut session);
+    answer(&mut session, "SET app.k = 'before'");
+    session.start_implicit_transaction();
+    answer(
+        &mut session,
+        "SET app.k = 'implicit'; INSERT INTO child VALUES (1, 99)",
+    );
+    let committed = session.commit_implicit_transaction();
+    assert_eq!(
+        committed.map_err(|error| error.state().code().to_owned()),
+        Err("23503".to_owned())
+    );
+    assert_eq!(shown(&mut session, "app.k"), "before");
+}
+
+#[test]
+fn a_function_setting_one_name_many_times_runs_in_linear_time() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    answer(
+        &mut session,
+        "CREATE FUNCTION many_sets(n integer) RETURNS text LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           FOR i IN 1..n LOOP \
+             SET app.n = 'x'; \
+             SET LOCAL app.n = 'y'; \
+             BEGIN \
+               PERFORM set_config('app.n', 'z', false); \
+             EXCEPTION WHEN OTHERS THEN NULL; \
+             END; \
+           END LOOP; \
+           RETURN current_setting('app.n'); \
+         END $$",
+    );
+    answer(
+        &mut session,
+        "CREATE FUNCTION calls_many(n integer) RETURNS text LANGUAGE plpgsql AS $$ \
+         DECLARE got text; \
+         BEGIN \
+           FOR i IN 1..n LOOP got := many_sets(1); END LOOP; \
+           RETURN got; \
+         END $$",
+    );
+    let started = std::time::Instant::now();
+    assert_eq!(
+        answer(&mut session, "SELECT many_sets(10000)"),
+        "many_sets\nz\nSELECT 1"
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT calls_many(2000)"),
+        "calls_many\nz\nSELECT 1"
+    );
+    assert_eq!(shown(&mut session, "app.n"), "z");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(60),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn set_to_default_returns_to_the_value_sent_when_connecting_in_every_scope() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    session.set_parameter("application_name", "npgsql").unwrap();
+    session.remember_connection_settings();
+    answer(&mut session, "SET application_name = 'other'");
+    answer(&mut session, "SET application_name TO DEFAULT");
+    assert_eq!(session.parameter("application_name").unwrap(), "npgsql");
+    answer(&mut session, "SET application_name = 'other'");
+    answer(&mut session, "BEGIN");
+    answer(&mut session, "SET LOCAL application_name TO DEFAULT");
+    assert_eq!(session.parameter("application_name").unwrap(), "npgsql");
+    answer(&mut session, "COMMIT");
+    assert_eq!(session.parameter("application_name").unwrap(), "other");
+    answer(
+        &mut session,
+        "CREATE FUNCTION local_default() RETURNS text LANGUAGE plpgsql AS $$ \
+         BEGIN SET LOCAL application_name TO DEFAULT; RETURN 'done'; END $$",
+    );
+    answer(&mut session, "BEGIN");
+    answer(&mut session, "SELECT local_default()");
+    assert_eq!(session.parameter("application_name").unwrap(), "npgsql");
+    answer(&mut session, "COMMIT");
+    assert_eq!(session.parameter("application_name").unwrap(), "other");
+}

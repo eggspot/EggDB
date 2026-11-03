@@ -386,6 +386,32 @@ fn citext_string_and_regexp_functions_ignore_case_as_the_extension_defines_them(
 }
 
 #[test]
+fn citext_string_functions_fold_case_beyond_ascii_and_regexps_fold_ascii_letters() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        ok(
+            &mut session,
+            "SELECT replace('CAFÉ'::citext, 'é', 'e') AS a, \
+             split_part('aÉb'::citext, 'é', 2) AS b, \
+             strpos('Café'::citext, 'É') AS c, \
+             translate('ÉTÉ'::citext, 'é', 'e') AS d, \
+             replace('Straße'::citext, 'SS', 's') AS e, \
+             'CAFÉ'::citext = 'café' AS f"
+        ),
+        "a|b|c|d|e|f\nCAFe|b|4|eTe|Strase|t\nSELECT 1"
+    );
+    assert_eq!(
+        ok(
+            &mut session,
+            "SELECT regexp_replace('CAFÉ'::citext, 'é', 'e') AS a, \
+             regexp_replace('CAFÉ'::citext, 'f', 'p') AS b"
+        ),
+        "a|b\nCAFÉ|CApÉ\nSELECT 1"
+    );
+}
+
+#[test]
 fn a_view_over_a_citext_column_reads_back_after_reopening() {
     let store = MemoryStore::default();
     {

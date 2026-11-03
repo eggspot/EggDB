@@ -1060,11 +1060,14 @@ impl<'s> Session<'s> {
 
     fn end_implicit_transaction(&mut self, commit: bool) -> SqlResult<()> {
         self.implicit_transaction = false;
-        if !self.in_block() {
+        let ends_settings = !self.in_block();
+        if ends_settings {
             self.advisory_locks.release_transaction_locks();
-            self.end_transaction_settings(commit);
         }
         if !std::mem::take(&mut self.block_is_implicit) {
+            if ends_settings {
+                self.end_transaction_settings(commit);
+            }
             return Ok(());
         }
         let pending = std::mem::take(&mut self.deferred.pending);
@@ -1086,6 +1089,9 @@ impl<'s> Session<'s> {
                 Ok(())
             }
         };
+        if ends_settings {
+            self.end_transaction_settings(commit && ended.is_ok());
+        }
         let settled = self.settle_sequences();
         ended.and(settled)
     }
@@ -1149,13 +1155,14 @@ impl<'s> Session<'s> {
         }
     }
 
-    fn reset_setting(&mut self, name: &str) -> SqlResult<()> {
-        let remembered = self
-            .connection_settings
+    fn connection_value(&self, name: &str) -> Option<String> {
+        self.connection_settings
             .as_ref()
-            .and_then(|settings| settings.get(name).ok());
-        self.change_setting(name, remembered.as_deref(), SettingScope::Session)
-            .map(drop)
+            .and_then(|settings| settings.get(name).ok())
+    }
+
+    fn reset_setting(&mut self, name: &str) -> SqlResult<()> {
+        self.change_setting(name, None, SettingScope::Session).map(drop)
     }
 
     fn discard(&mut self, target: DiscardTarget) -> SqlResult<QueryResult> {
@@ -3767,12 +3774,21 @@ impl<'s> Session<'s> {
         self.advisory_locks.release_transaction_locks();
         let implicit = std::mem::take(&mut self.block_is_implicit);
         let failed = matches!(self.block, Block::Failed);
-        self.end_transaction_settings(!failed);
         let pending = std::mem::take(&mut self.deferred.pending);
         self.deferred.clear();
+        let ended = self.end_block_for_commit(implicit, &pending);
+        self.end_transaction_settings(!failed && ended.is_ok());
+        ended
+    }
+
+    fn end_block_for_commit(
+        &mut self,
+        implicit: bool,
+        pending: &[crate::deferred_checks::PendingCheck],
+    ) -> SqlResult<QueryResult> {
         match std::mem::replace(&mut self.block, Block::None) {
             Block::Writing(writer) => {
-                self.commit_writes(writer, &pending)?;
+                self.commit_writes(writer, pending)?;
                 let committed = QueryResult::command("COMMIT");
                 Ok(if implicit && self.dialect == Dialect::PostgreSql {
                     committed.with_notice(NO_TRANSACTION_WARNING.into())

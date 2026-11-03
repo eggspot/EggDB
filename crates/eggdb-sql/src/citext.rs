@@ -2,10 +2,15 @@
 //! orders, groups and indexes by one full case fold (D259), with no tie-break, so
 //! `'A'` and `'a'` are the same value to every operation that compares.
 
+mod folded;
+
 use crate::error::SqlResult;
 use crate::types::{DefinedType, DefinedValue, SqlType, Value};
+use folded::FoldedText;
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
+use std::ops::Range;
 
 pub(crate) const CITEXT_OID: u32 = 9000;
 
@@ -129,79 +134,101 @@ pub(crate) fn regexp_arguments<'v>(name: &str, values: &'v [Value]) -> Cow<'v, [
     Cow::Owned(texts)
 }
 
-fn literal_pattern(text: &str) -> String {
-    let mut pattern = String::with_capacity(text.len());
-    for character in text.chars() {
-        if !(character.is_ascii_alphanumeric() || character == '_') {
-            pattern.push('\\');
-        }
-        pattern.push(character);
-    }
-    pattern
-}
-
 fn text_argument(values: &[Value], at: usize) -> Option<&str> {
     values.get(at).and_then(Value::character_text)
 }
 
-fn case_mapped(text: &str, upper: bool) -> SqlResult<String> {
-    crate::string_functions::case_mapped(text, upper)
-        .map(|value| value.to_text().unwrap_or_default())
-}
-
-fn text_value(text: &str) -> Value {
-    Value::Text(text.to_owned())
+fn spliced(text: &str, found: &[Range<usize>], to: &str) -> SqlResult<String> {
+    let removed: usize = found.iter().map(|range| range.end - range.start).sum();
+    let length = text
+        .len()
+        .saturating_sub(removed)
+        .saturating_add(to.len().saturating_mul(found.len()));
+    crate::string_functions::checked_length(length)?;
+    let mut out = String::with_capacity(length);
+    let mut copied = 0;
+    for range in found {
+        out.push_str(text.get(copied..range.start).unwrap_or_default());
+        out.push_str(to);
+        copied = range.end;
+    }
+    out.push_str(text.get(copied..).unwrap_or_default());
+    Ok(out)
 }
 
 fn replaced(values: &[Value]) -> Option<SqlResult<Value>> {
     let [text, from, to] = [0, 1, 2].map(|at| text_argument(values, at));
-    let arguments = [
-        text_value(text?),
-        Value::Text(literal_pattern(from?)),
-        text_value(to?),
-        text_value("gi"),
-    ];
-    crate::regexp_functions::function("regexp_replace", &arguments)
+    let (text, from, to) = (text?, from?, to?);
+    let found = FoldedText::new(text).matches(from, usize::MAX);
+    Some(spliced(text, &found, to).map(Value::Text))
 }
 
 fn split_part(values: &[Value]) -> Option<SqlResult<Value>> {
     let (text, delimiter) = (text_argument(values, 0)?, text_argument(values, 1)?);
     let field = values.get(2)?.as_integer()?;
-    let pieces = crate::regexp_functions::split_pieces(
-        text,
-        &literal_pattern(delimiter),
-        "i",
-        "regexp_split_to_array",
-    );
-    Some(pieces.map(|pieces| {
-        usize::try_from(field)
-            .ok()
-            .and_then(|field| field.checked_sub(1))
-            .and_then(|at| pieces.into_iter().nth(at))
-            .unwrap_or(Value::Null)
-    }))
+    let Some(at) = usize::try_from(field)
+        .ok()
+        .and_then(|field| field.checked_sub(1))
+    else {
+        return Some(Ok(Value::Null));
+    };
+    if delimiter.is_empty() {
+        let character = text.chars().nth(at);
+        return Some(Ok(character.map_or(Value::Null, |character| {
+            Value::Text(character.to_string())
+        })));
+    }
+    let found = FoldedText::new(text).matches(delimiter, at.saturating_add(1));
+    let start = match at.checked_sub(1) {
+        None => Some(0),
+        Some(before) => found.get(before).map(|range| range.end),
+    };
+    let end = found.get(at).map_or(text.len(), |range| range.start);
+    let piece = start.and_then(|start| text.get(start..end));
+    Some(Ok(piece.map_or(Value::Null, |piece| Value::Text(piece.to_owned()))))
 }
 
 fn position(values: &[Value]) -> Option<SqlResult<Value>> {
     let (text, wanted) = (text_argument(values, 0)?, text_argument(values, 1)?);
-    let lowered = case_mapped(text, false).and_then(|text| Ok((text, case_mapped(wanted, false)?)));
-    Some(lowered.and_then(|(text, wanted)| {
-        crate::string_functions::function("strpos", &[Value::Text(text), Value::Text(wanted)])
-            .unwrap_or(Ok(Value::Null))
-    }))
+    let start = if wanted.is_empty() {
+        Some(0)
+    } else {
+        FoldedText::new(text)
+            .matches(wanted, 1)
+            .first()
+            .map(|range| range.start)
+    };
+    let position = start
+        .and_then(|start| text.get(..start))
+        .map_or(0, |head| {
+            i64::try_from(head.chars().count())
+                .unwrap_or(i64::MAX)
+                .saturating_add(1)
+        });
+    Some(crate::types::integer_value(position, SqlType::Integer))
 }
 
 fn translated(values: &[Value]) -> Option<SqlResult<Value>> {
     let [text, from, to] = [0, 1, 2].map(|at| text_argument(values, at));
     let (text, from, to) = (text?, from?, to?);
-    let translate = |text: Value, from: SqlResult<String>| -> SqlResult<Value> {
-        let arguments = [text, Value::Text(from?), text_value(to)];
-        crate::string_functions::function("translate", &arguments).unwrap_or(Ok(Value::Null))
-    };
-    Some(
-        translate(text_value(text), case_mapped(from, false))
-            .and_then(|once| translate(once, case_mapped(from, true))),
-    )
+    let to: Vec<char> = to.chars().collect();
+    let mut first_of: BTreeMap<String, usize> = BTreeMap::new();
+    let mut key = String::new();
+    for (index, character) in from.chars().enumerate() {
+        key.clear();
+        eggdb_text::case_fold_into(character, &mut key);
+        first_of.entry(key.clone()).or_insert(index);
+    }
+    let mut out = String::with_capacity(text.len());
+    for character in text.chars() {
+        key.clear();
+        eggdb_text::case_fold_into(character, &mut key);
+        match first_of.get(key.as_str()) {
+            Some(index) => out.extend(to.get(*index)),
+            None => out.push(character),
+        }
+    }
+    Some(Ok(Value::Text(out)))
 }
 
 pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
@@ -233,9 +260,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        compare, compare_with_text, fold, literal_pattern, regexp_arguments, text_of, value,
-    };
+    use super::{compare, compare_with_text, fold, function, regexp_arguments, text_of, value};
     use crate::types::Value;
     use std::cmp::Ordering;
 
@@ -347,11 +372,42 @@ mod tests {
         );
     }
 
+    fn called(name: &str, arguments: &[Value]) -> String {
+        match function(name, arguments) {
+            Some(Ok(value)) => value.to_text().unwrap_or_else(|| "NULL".to_owned()),
+            Some(Err(error)) => format!("error {}", error.state().code()),
+            None => "none".to_owned(),
+        }
+    }
+
+    fn texts(subject: &str, rest: &[&str]) -> Vec<Value> {
+        let mut values = vec![value(subject.to_owned())];
+        values.extend(rest.iter().map(|text| Value::Text((*text).to_owned())));
+        values
+    }
+
     #[test]
-    fn literal_patterns_escape_everything_but_ascii_word_characters() {
-        assert_eq!(literal_pattern("a.b_9"), "a\\.b_9");
-        assert_eq!(literal_pattern("(x)*"), "\\(x\\)\\*");
-        assert_eq!(literal_pattern("é "), "\\é\\ ");
-        assert_eq!(literal_pattern(""), "");
+    fn string_functions_on_citext_fold_case_beyond_ascii_like_equality() {
+        assert_eq!(called("replace", &texts("CAFÉ café", &["é", "e"])), "CAFe cafe");
+        assert_eq!(called("replace", &texts("Straße", &["SS", "s"])), "Strase");
+        assert_eq!(called("replace", &texts("ß", &["s", "x"])), "ß");
+        assert_eq!(called("replace", &texts("abc", &["", "x"])), "abc");
+        let mut split = texts("aÉbéc", &["é"]);
+        split.push(Value::Integer(2));
+        assert_eq!(called("split_part", &split), "b");
+        split[2] = Value::Integer(3);
+        assert_eq!(called("split_part", &split), "c");
+        split[2] = Value::Integer(4);
+        assert_eq!(called("split_part", &split), "NULL");
+        split[2] = Value::Integer(0);
+        assert_eq!(called("split_part", &split), "NULL");
+        assert_eq!(called("strpos", &texts("Café", &["É"])), "4");
+        assert_eq!(called("strpos", &texts("Straße", &["SS"])), "5");
+        assert_eq!(called("strpos", &texts("Straße", &["s"])), "1");
+        assert_eq!(called("strpos", &texts("ß", &["s"])), "0");
+        assert_eq!(called("strpos", &texts("abc", &[""])), "1");
+        assert_eq!(called("translate", &texts("ÉCOLE école", &["é", "e"])), "eCOLE ecole");
+        assert_eq!(called("translate", &texts("İa", &["İA", "XY"])), "XY");
+        assert_eq!(called("translate", &texts("abc", &["B", ""])), "ac");
     }
 }

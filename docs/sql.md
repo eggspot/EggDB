@@ -1764,9 +1764,11 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   `max_index_keys` and `max_function_args` are fixed, as PostgreSQL's server limits. Settings
   follow transactions as in PostgreSQL (D301): a `SET` inside a transaction is undone by its
   `ROLLBACK` (and by `ROLLBACK TO SAVEPOINT` to a savepoint set before it) and kept by its
-  `COMMIT`; `SET LOCAL` and `set_config(name, value, true)` last to the end of the transaction
+  `COMMIT`, unless the `COMMIT` itself fails (a deferred constraint), which undoes them with the
+  data; `SET LOCAL` and `set_config(name, value, true)` last to the end of the transaction
   whether it commits or not (a later `SET` of the same parameter in the transaction is what
-  stays after its `COMMIT`). Outside a transaction block `SET LOCAL` warns `SET LOCAL can only be
+  stays after its `COMMIT`). `SET [LOCAL] name TO DEFAULT` is `RESET name`: the value the client
+  sent when it connected, else the built-in default. Outside a transaction block `SET LOCAL` warns `SET LOCAL can only be
   used in transaction blocks` and changes nothing, and `set_config(..., true)` lasts for its own
   statement; in an implicit transaction (a multi-statement `Query` message, a pipeline up to its
   `Sync`) both last until it ends.
@@ -2742,10 +2744,15 @@ parameters, D288) and its text and binary forms on the wire.
   `!~` and `!~*` when the value they test is `citext` (D288). As in the citext extension,
   `regexp_match`, `regexp_matches`, `regexp_replace`, `regexp_split_to_array`,
   `regexp_split_to_table`, `replace`, `split_part`, `strpos` and `translate` ignore case when their
-  first argument is `citext`: the regular expression ones add the `i` flag unless the flags hold
-  `c`, `replace` and `split_part` match the search text literally without case (`split_part`
-  gives NULL for a field that does not exist, as the extension's array subscript does), and
-  `strpos` and `translate` compare `lower()` and `upper()` forms (D302). A `citext` argument
+  first argument is `citext`. `replace`, `split_part`, `strpos` and `translate` fold case the
+  way `citext`'s `=` does, by the same full case fold over all of Unicode: they match the search
+  text literally on the folded forms and return slices of the original text, so
+  `replace('CAFÉ'::citext, 'é', 'e')` gives `CAFe` and `strpos('Straße'::citext, 'SS')` gives 5;
+  a match that would start or end inside one character's fold (the `s` of `ß`) does not count.
+  `split_part` gives NULL for a field that does not exist, as the extension's array subscript
+  does. The regular expression ones add the `i` flag unless the flags hold `c`, and that flag
+  ignores the case of ASCII letters only, so `regexp_replace('CAFÉ'::citext, 'é', 'e')` gives
+  `CAFÉ` (D302). A `citext` argument
   anywhere else is read as `text`. Full case folding differs from PostgreSQL's
   `lower()`-based `citext`: `'ß'::citext = 'SS'` is true in EggDB and false in PostgreSQL (D259).
 - `hstore` keeps its pairs sorted as PostgreSQL does and prints `"a"=>"1", "b"=>NULL`. Its
@@ -4075,7 +4082,8 @@ two, `COPY` in the binary format and in another encoding, now match). The other 
 - `to_json`, `to_jsonb` and `json_build_*` take a whole row only as a `FROM` item's name;
   `json_object(text[])`, `json_populate_record` in a select list and `JSON_TABLE`'s `PLAN`
   clause are missing, and Oracle's `IS JSON` (lax syntax, `STRICT`), `JSON_SERIALIZE` options and
-  `JSON_SCALAR` are not parsed in Oracle's dialect yet.
+  `JSON_SCALAR` are not parsed in Oracle's dialect yet. `IS JSON` on a document nested deeper
+  than the JSON parser's 256 levels is false (PostgreSQL says true).
 - `interval` (D113): only the `postgres` `IntervalStyle` is printed. PostgreSQL 17's `infinity`
   and `-infinity` intervals read, print, compare, add, multiply, divide, `justify`, and give
   `isfinite` false and `date_part` an infinite double as PostgreSQL's do (D153), but a time stamp
