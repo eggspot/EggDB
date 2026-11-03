@@ -12,6 +12,11 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
 jobs:
   matrix:
     runs-on: ubuntu-latest
@@ -25,13 +30,14 @@ jobs:
           python-version: "3.12"
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-compatibility-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: cargo-v2-compatibility-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-v2-compatibility-${{ runner.os }}-
       - name: Install dbt-postgres (test tool only, never shipped)
         run: |
           python3 -m venv "$RUNNER_TEMP/tools"
