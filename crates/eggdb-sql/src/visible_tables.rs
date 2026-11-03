@@ -814,9 +814,13 @@ impl Shown {
 
 fn narrowed_setting_owner(key: &[u8]) -> Option<&[u8]> {
     let (&space, rest) = key.strip_prefix(NAMESPACE)?.split_first()?;
-    (space == crate::statistics::STATISTICS_SPACE
-        || space == crate::sqlite_schema_text::SQLITE_TEXT_SPACE)
-        .then_some(rest)
+    if space == crate::statistics::STATISTICS_SPACE {
+        Some(rest)
+    } else if space == crate::sqlite_schema_text::SQLITE_TEXT_SPACE {
+        Some(crate::sqlite_schema_text::owning_relation(rest))
+    } else {
+        None
+    }
 }
 
 fn get_through(
