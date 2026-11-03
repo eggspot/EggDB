@@ -1702,11 +1702,19 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   `SHOW transaction_isolation` says; `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` sets
   `default_transaction_read_only`. `SET TRANSACTION READ ONLY` and `SET TRANSACTION SNAPSHOT`
   are `0A000`.
-- `SET [SESSION] name {TO | =} value | DEFAULT`, `SET TIME ZONE`, `SET NAMES`, `RESET name | ALL`,
-  `SHOW name | ALL`: PostgreSQL's run-time parameters (D104). `client_encoding` takes `UTF8`
-  (and `SQL_ASCII`, which passes bytes through) only; settings EggDB does not apply yet, such as `statement_timeout` and `search_path`, are
-  remembered and shown; `SET LOCAL` is not supported yet. `max_identifier_length`,
-  `max_index_keys` and `max_function_args` are fixed, as PostgreSQL's server limits.
+- `SET [SESSION | LOCAL] name {TO | =} value | DEFAULT`, `SET [LOCAL] TIME ZONE`, `SET NAMES`,
+  `RESET name | ALL`, `SHOW name | ALL`: PostgreSQL's run-time parameters (D104). `client_encoding`
+  takes `UTF8` (and `SQL_ASCII`, which passes bytes through) only; settings EggDB does not apply
+  yet, such as `lock_timeout`, are remembered and shown. `max_identifier_length`,
+  `max_index_keys` and `max_function_args` are fixed, as PostgreSQL's server limits. Settings
+  follow transactions as in PostgreSQL (D301): a `SET` inside a transaction is undone by its
+  `ROLLBACK` (and by `ROLLBACK TO SAVEPOINT` to a savepoint set before it) and kept by its
+  `COMMIT`; `SET LOCAL` and `set_config(name, value, true)` last to the end of the transaction
+  whether it commits or not (a later `SET` of the same parameter in the transaction is what
+  stays after its `COMMIT`). Outside a transaction block `SET LOCAL` warns `SET LOCAL can only be
+  used in transaction blocks` and changes nothing, and `set_config(..., true)` lasts for its own
+  statement; in an implicit transaction (a multi-statement `Query` message, a pipeline up to its
+  `Sync`) both last until it ends.
 - `$1`, `$2`, …: parameters, given through the PostgreSQL protocol's extended query messages
   (D104); outside it, `$1` is `42P02` (there is no parameter `$1`).
 - `version()`, `current_user`, `session_user`, `user`, `current_database()`, `current_schema`
@@ -3107,7 +3115,21 @@ In the PostgreSQL dialect (D158), users create and call their own functions and 
   cursor's rows are read when it is opened. `refcursor` is a type of its own holding the
   cursor's name (D280): `pg_typeof` names it, results send it with type OID 1790, it converts
   to and from `text`, and a parameter declared with OID 1790 reads as text. A table column
-  declared `refcursor` is stored and shown as `text`.
+  declared `refcursor` is stored and shown as `text`. `refcursor[]` (OID 2201) is an array of
+  cursor names (D301): `ARRAY[c1, c2]` of `refcursor` variables, `'{a,b}'::refcursor[]`,
+  variables, parameters and results of that type; a table column declared `refcursor[]` is
+  stored and shown as `text[]`.
+- Settings in routines (D301): a function's or procedure's `SET name {TO | =} value` and `SET
+  name FROM CURRENT` (the value the parameter has at `CREATE`, written into the definition as
+  `SET name TO 'value'`) apply while it runs, `search_path` and `TimeZone` included, and the old
+  value comes back when it returns, also on an error. `SET`, `SET LOCAL`, `RESET name` and
+  `set_config(...)` inside a PL/pgSQL or `sql` routine apply to the statements after them and to
+  the routines they call: a plain `SET` lasts for the session after the routine (also over a
+  `SET` clause of the same parameter), `SET LOCAL` lasts to the end of the transaction, except
+  for a parameter the routine's own `SET` clause names, which comes back at its exit. A
+  procedure's `COMMIT` ends its `SET LOCAL` values and its `ROLLBACK` also undoes the plain `SET`s
+  made since the last `COMMIT`; an exception handler that catches an error undoes the settings
+  its block changed. `RESET ALL` and `SET eggdb.dialect` inside a routine are `0A000`.
 - Polymorphic types (D264): parameters and results of `sql` and PL/pgSQL functions and
   procedures may be `anyelement`, `anyarray`, `anynonarray`, `anyenum`, `anycompatible`,
   `anycompatiblearray` and `anycompatiblenonarray`, also in `OUT` parameters, `RETURNS SETOF`,
@@ -3151,7 +3173,8 @@ qualified names as `app.t`.
 
 Unqualified names follow `search_path`, a session setting (default `"$user", public`): `SET
 search_path [TO | =] app, public`, `RESET search_path`, `SHOW search_path`, `SELECT
-pg_catalog.set_config('search_path', '', false)` (constants or parameters, not `true` for local), `current_schema()`
+pg_catalog.set_config('search_path', '', false)` (constants or parameters; `true` for a
+transaction's setting, D301), `current_schema()`
 and `current_schemas(bool)` (shown as `{pg_catalog,app,public}`). A name is looked up in each
 schema of the path that exists, in order; `pg_catalog` is searched first for functions
 (`pg_catalog.nextval`, `pg_catalog.set_config` and the other functions that exist). New objects
