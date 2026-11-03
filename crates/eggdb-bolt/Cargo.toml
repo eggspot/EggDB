@@ -13,3 +13,4 @@ workspace = true
 eggdb-crypto = { path = "../eggdb-crypto" }
 eggdb-graph = { path = "../eggdb-graph" }
 eggdb-keyspace = { path = "../eggdb-keyspace" }
+eggdb-platform = { path = "../eggdb-platform" }

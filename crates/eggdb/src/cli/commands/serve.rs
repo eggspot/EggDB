@@ -247,6 +247,7 @@ impl Session<'_> {
                 .and_then(|listener| listener.local_addr().ok())
                 .unwrap_or(address),
             max_connections,
+            memory_budget: Arc::clone(&memory_budget),
         };
         let amqp_listener = match options.amqp_listen {
             Some(address) => {
@@ -428,6 +429,7 @@ impl Session<'_> {
             user: user.clone(),
             password_sha256: eggdb_crypto::sha256(password.as_bytes()),
             max_connections,
+            memory_budget: Arc::clone(&memory_budget),
         };
         let mqtt_config = eggdb_mqtt::ServerConfig {
             user: user.clone(),

@@ -1,11 +1,14 @@
-use crate::server::{ServerConfig, answer};
+use crate::server::{ServerConfig, answer, serve_stream};
 use crate::wire::{Reader, Writer, crc32c};
 use eggdb_keyspace::MemoryKeyspace;
+use eggdb_platform::connection_limits::MemoryBudget;
+use std::sync::Arc;
 
 fn config() -> ServerConfig {
     ServerConfig {
         advertised: "127.0.0.1:9092".parse().unwrap(),
         max_connections: 4,
+        memory_budget: Arc::default(),
     }
 }
 
@@ -238,4 +241,38 @@ fn corrupt_batches_and_hostile_frames_are_refused() {
     });
     huge.extend_from_slice(&[0; 8]);
     assert!(answer(&keyspace, &config(), &huge).is_none());
+}
+
+fn framed(frame: &[u8]) -> Vec<u8> {
+    let mut bytes = u32::try_from(frame.len()).unwrap().to_be_bytes().to_vec();
+    bytes.extend_from_slice(frame);
+    bytes
+}
+
+#[test]
+fn a_request_past_the_memory_budget_ends_its_connection_before_it_is_read() {
+    let keyspace = MemoryKeyspace::default();
+    let budget = Arc::new(MemoryBudget::new(100_000));
+    let config = ServerConfig {
+        memory_budget: Arc::clone(&budget),
+        ..config()
+    };
+    let versions = framed(&request(18, 0, |_| {}));
+    let mut oversized = 200_000u32.to_be_bytes().to_vec();
+    oversized.extend_from_slice(&versions);
+    let mut answered = Vec::new();
+    serve_stream(&keyspace, &config, &oversized[..], &mut answered).unwrap();
+    assert!(answered.is_empty());
+    assert_eq!(budget.used_bytes(), 0);
+    let mut answered = Vec::new();
+    serve_stream(&keyspace, &config, &versions[..], &mut answered).unwrap();
+    assert!(!answered.is_empty());
+    let held = budget.reserve(90_000).unwrap();
+    let mut large = request(18, 0, |_| {});
+    large.resize(70_000, 0);
+    let mut answered = Vec::new();
+    serve_stream(&keyspace, &config, &framed(&large)[..], &mut answered).unwrap();
+    assert!(answered.is_empty());
+    drop(held);
+    assert_eq!(budget.used_bytes(), 0);
 }
