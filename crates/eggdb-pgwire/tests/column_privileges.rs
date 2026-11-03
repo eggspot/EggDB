@@ -120,7 +120,10 @@ fn a_policy_check_refuses_new_rows_outside_it_over_both_query_protocols() {
         ],
     );
     let mut ada = logged_in(&server, "ada");
-    assert_eq!(error_code(&ada.query("INSERT INTO docs VALUES (1, 'ada')")), None);
+    assert_eq!(
+        error_code(&ada.query("INSERT INTO docs VALUES (1, 'ada')")),
+        None
+    );
     for sql in [
         "INSERT INTO docs VALUES (2, 'grace')",
         "UPDATE docs SET owner = 'grace'",
@@ -169,7 +172,10 @@ fn a_policy_check_refuses_new_rows_outside_it_over_both_query_protocols() {
     let answer = ada.read_until_ready();
     assert_eq!(error_code(&answer).as_deref(), Some("42501"));
     let mut grace = logged_in(&server, "grace");
-    assert_eq!(rows(&grace.query("SELECT id FROM docs")), Vec::<Vec<Option<String>>>::new());
+    assert_eq!(
+        rows(&grace.query("SELECT id FROM docs")),
+        Vec::<Vec<Option<String>>>::new()
+    );
     assert_eq!(
         rows(&admin.query("SELECT id, owner FROM docs ORDER BY id")),
         [

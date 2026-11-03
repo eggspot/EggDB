@@ -259,13 +259,16 @@ impl TimeZone {
         let day = 86_400 * MICROS_PER_SECOND;
         let local = i128::from(local_micros);
         let usual = self.utc_of_local(local_micros);
-        [local_micros.saturating_sub(day), local_micros.saturating_add(day)]
-            .into_iter()
-            .map(|probe| local - i128::from(self.offset_at(probe)) * i128::from(MICROS_PER_SECOND))
-            .chain([usual])
-            .filter(|&utc| i64::try_from(utc).is_ok_and(|utc| self.local_of_utc(utc) == local))
-            .min()
-            .unwrap_or(usual)
+        [
+            local_micros.saturating_sub(day),
+            local_micros.saturating_add(day),
+        ]
+        .into_iter()
+        .map(|probe| local - i128::from(self.offset_at(probe)) * i128::from(MICROS_PER_SECOND))
+        .chain([usual])
+        .filter(|&utc| i64::try_from(utc).is_ok_and(|utc| self.local_of_utc(utc) == local))
+        .min()
+        .unwrap_or(usual)
     }
 
     pub(crate) fn local_of_utc(self, utc_micros: i64) -> i128 {

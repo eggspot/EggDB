@@ -626,7 +626,14 @@ fn collection_stats_count_each_collection_s_entries_and_bytes() {
     let stats = db.collection_stats().unwrap();
     let shown: Vec<(&str, u64, u64, u64)> = stats
         .iter()
-        .map(|one| (one.name.as_str(), one.entries, one.key_bytes, one.value_bytes))
+        .map(|one| {
+            (
+                one.name.as_str(),
+                one.entries,
+                one.key_bytes,
+                one.value_bytes,
+            )
+        })
         .collect();
     assert_eq!(shown, [("a", 2, 6, 5), ("b", 0, 0, 0)]);
     let unchanged = db.stats().unwrap();

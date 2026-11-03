@@ -530,11 +530,16 @@ fn a_table_another_table_references_takes_inserts_and_other_columns_but_not_dele
     ] {
         let message = refused(&mut session, sql);
         assert!(
-            message.starts_with("cannot delete a row of \"accounts\" or change a column a foreign key points at"),
+            message.starts_with(
+                "cannot delete a row of \"accounts\" or change a column a foreign key points at"
+            ),
             "{sql}: {message}"
         );
     }
-    let altered = refused(&mut session, "ALTER TABLE accounts ADD COLUMN extra integer");
+    let altered = refused(
+        &mut session,
+        "ALTER TABLE accounts ADD COLUMN extra integer",
+    );
     assert!(
         altered.starts_with("cannot change the definition of \"accounts\": table \""),
         "{altered}"
@@ -589,8 +594,14 @@ fn a_table_listed_with_columns_cannot_be_changed() {
         let error = fails(&mut session, sql);
         assert_eq!(error.state(), SqlState::UNDEFINED_COLUMN, "{sql}: {error}");
     }
-    let created = refused(&mut session, "CREATE TABLE secrets2 (id integer PRIMARY KEY)");
-    assert!(created.starts_with("cannot change \"secrets2\""), "{created}");
+    let created = refused(
+        &mut session,
+        "CREATE TABLE secrets2 (id integer PRIMARY KEY)",
+    );
+    assert!(
+        created.starts_with("cannot change \"secrets2\""),
+        "{created}"
+    );
     session.close().unwrap();
     assert_eq!(
         shown(&store, "SELECT id, code FROM secrets"),
@@ -617,7 +628,10 @@ fn a_policy_calling_a_user_routine_or_holding_a_subquery_cannot_be_written() {
         &mut owner,
         "CREATE FUNCTION always() RETURNS boolean LANGUAGE sql AS $$ SELECT true $$",
     );
-    runs(&mut owner, "CREATE POLICY owners_own ON items USING (always())");
+    runs(
+        &mut owner,
+        "CREATE POLICY owners_own ON items USING (always())",
+    );
     owner.close().unwrap();
     let limited = confined(&store);
     let mut session = Session::new(&limited);
@@ -646,7 +660,10 @@ fn a_policy_calling_a_user_routine_or_holding_a_subquery_cannot_be_written() {
     runs(&mut session, "INSERT INTO items (name) VALUES ('kept')");
     session.close().unwrap();
     assert_eq!(
-        shown(&store, "SELECT policyname FROM pg_policies ORDER BY policyname"),
+        shown(
+            &store,
+            "SELECT policyname FROM pg_policies ORDER BY policyname"
+        ),
         "policyname\nowners_own\nplain\nSELECT 2"
     );
     assert_eq!(

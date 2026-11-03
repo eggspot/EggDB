@@ -114,7 +114,11 @@ impl VisibleTables {
                     reasons.push("has an empty column list".to_owned());
                 }
                 for column in columns {
-                    if !definition.columns.iter().any(|stored| &stored.name == column) {
+                    if !definition
+                        .columns
+                        .iter()
+                        .any(|stored| &stored.name == column)
+                    {
                         reasons.push(format!("has no column \"{column}\""));
                     }
                 }
@@ -443,7 +447,8 @@ fn referenced_positions(
     parent: &[u8],
     child: &[u8],
 ) -> SqlResult<Option<(Vec<Column>, Vec<usize>)>> {
-    let (Ok(parent_name), Ok(child_name)) = (std::str::from_utf8(parent), std::str::from_utf8(child))
+    let (Ok(parent_name), Ok(child_name)) =
+        (std::str::from_utf8(parent), std::str::from_utf8(child))
     else {
         return Ok(None);
     };
@@ -922,7 +927,14 @@ impl<R: KeyValueRead> KeyValueRead for VisibleRead<R> {
         direction: ScanDirection,
         visit: &mut EntryVisitor<'_>,
     ) -> SqlResult<()> {
-        scan_through(self.shown.as_ref(), &self.inner, start, end, direction, visit)
+        scan_through(
+            self.shown.as_ref(),
+            &self.inner,
+            start,
+            end,
+            direction,
+            visit,
+        )
     }
 
     fn committed_version(&self) -> Option<u64> {

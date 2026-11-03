@@ -60,11 +60,7 @@ impl<'b> Cursors<'b> {
         }
     }
 
-    pub(crate) fn open(
-        &mut self,
-        namespace: String,
-        remaining: VecDeque<Document>,
-    ) -> Option<i64> {
+    pub(crate) fn open(&mut self, namespace: String, remaining: VecDeque<Document>) -> Option<i64> {
         let now = Instant::now();
         self.sweep(now);
         let bytes = remaining
@@ -121,10 +117,16 @@ mod tests {
     fn open_cursors_hold_their_documents_until_sent_or_killed() {
         let budget = MemoryBudget::new(10_000);
         let mut cursors = Cursors::new(1, &budget);
-        let first = cursors.open("app.t".to_owned(), documents(4, 1_000)).unwrap();
+        let first = cursors
+            .open("app.t".to_owned(), documents(4, 1_000))
+            .unwrap();
         let held = budget.used_bytes();
         assert!(held > 4_000, "{held}");
-        assert!(cursors.open("app.t".to_owned(), documents(8, 1_000)).is_none());
+        assert!(
+            cursors
+                .open("app.t".to_owned(), documents(8, 1_000))
+                .is_none()
+        );
         assert_eq!(budget.used_bytes(), held);
         let mut cursor = cursors.take(first).unwrap();
         cursor.remaining.pop_front();
@@ -133,7 +135,9 @@ mod tests {
         cursors.put_back(first, cursor);
         assert!(cursors.kill(first));
         assert_eq!(budget.used_bytes(), 0);
-        let taken = cursors.open("app.t".to_owned(), documents(8, 1_000)).unwrap();
+        let taken = cursors
+            .open("app.t".to_owned(), documents(8, 1_000))
+            .unwrap();
         drop(cursors.take(taken));
         assert_eq!(budget.used_bytes(), 0);
     }

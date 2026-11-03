@@ -39,12 +39,12 @@ fn datetime_methods_read_iso_strings_and_templates() {
     let cases = [
         (r#""2017-03-10""#, "$.datetime()", r#""2017-03-10""#),
         (r#""2017-03-10""#, "$.datetime().type()", r#""date""#),
-        (r#""12:34:56""#, "$.datetime().type()", r#""time without time zone""#),
         (
-            r#""12:34:56+05:30""#,
-            "$.time_tz()",
-            r#""12:34:56+05:30""#,
+            r#""12:34:56""#,
+            "$.datetime().type()",
+            r#""time without time zone""#,
         ),
+        (r#""12:34:56+05:30""#, "$.time_tz()", r#""12:34:56+05:30""#),
         (
             r#""2017-03-10 12:34:56+3""#,
             "$.datetime()",
@@ -66,7 +66,11 @@ fn datetime_methods_read_iso_strings_and_templates() {
             r#""2017-03-10T12:34:56.8""#,
         ),
         (r#""2017-03-10 12:34:56""#, "$.date()", r#""2017-03-10""#),
-        (r#""2017-03-10""#, "$.datetime().string()", r#""2017-03-10""#),
+        (
+            r#""2017-03-10""#,
+            "$.datetime().string()",
+            r#""2017-03-10""#,
+        ),
     ];
     for (document, path, expected) in cases {
         assert_eq!(
@@ -92,7 +96,10 @@ fn datetime_failures_are_soft_and_zone_comparisons_need_the_tz_functions() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
     assert_eq!(
-        state(&mut session, r#"SELECT jsonb_path_query('"x"', '$.datetime()')"#),
+        state(
+            &mut session,
+            r#"SELECT jsonb_path_query('"x"', '$.datetime()')"#
+        ),
         "22031"
     );
     assert_eq!(
@@ -115,15 +122,24 @@ fn datetime_failures_are_soft_and_zone_comparisons_need_the_tz_functions() {
     );
     let comparison = r#"'"2017-03-10"', '$.datetime() < "2017-03-11 00:00:00+00".datetime()'"#;
     assert_eq!(
-        state(&mut session, &format!("SELECT jsonb_path_match({comparison})")),
+        state(
+            &mut session,
+            &format!("SELECT jsonb_path_match({comparison})")
+        ),
         "22031"
     );
     assert_eq!(
-        one(&mut session, &format!("SELECT jsonb_path_match_tz({comparison})")),
+        one(
+            &mut session,
+            &format!("SELECT jsonb_path_match_tz({comparison})")
+        ),
         "t"
     );
     assert_eq!(
-        state(&mut session, r#"SELECT jsonb_path_query('"x"', '$.datetime(1)')"#),
+        state(
+            &mut session,
+            r#"SELECT jsonb_path_query('"x"', '$.datetime(1)')"#
+        ),
         "42601"
     );
 }
@@ -143,7 +159,10 @@ fn json_exists_answers_each_on_error_behavior() {
     ];
     for (rest, expected) in cases {
         assert_eq!(
-            one(&mut session, &format!("SELECT JSON_EXISTS({document}, {rest})")),
+            one(
+                &mut session,
+                &format!("SELECT JSON_EXISTS({document}, {rest})")
+            ),
             expected,
             "{rest}"
         );
@@ -167,7 +186,11 @@ fn json_exists_answers_each_on_error_behavior() {
         "NULL"
     );
     run(&mut session, "CREATE TABLE v (j jsonb)").expect("create");
-    run(&mut session, r#"INSERT INTO v VALUES ('{"a": 1}'), ('{"b": 1}')"#).expect("insert");
+    run(
+        &mut session,
+        r#"INSERT INTO v VALUES ('{"a": 1}'), ('{"b": 1}')"#,
+    )
+    .expect("insert");
     assert_eq!(
         one(
             &mut session,
@@ -222,7 +245,10 @@ fn json_value_returns_one_scalar_with_on_empty_and_on_error() {
         (r#"'[1, 2]'::jsonb, '$[*]' ERROR ON ERROR"#, "22034"),
         (r#"'{"a": [1]}'::jsonb, '$.a' ERROR ON ERROR"#, "2203F"),
         (r#"'{}'::jsonb, '$.a' ERROR ON EMPTY"#, "22035"),
-        (r#"'{"a": "abc"}'::jsonb, '$.a' RETURNING int ERROR ON ERROR"#, "22P02"),
+        (
+            r#"'{"a": "abc"}'::jsonb, '$.a' RETURNING int ERROR ON ERROR"#,
+            "22P02",
+        ),
         (r#"'{}'::jsonb, '$.a' EMPTY ON ERROR"#, "42601"),
         (r#"'{}'::jsonb, '$.a' NULL ON EMPTY NULL ON EMPTY"#, "42601"),
         (r#"'{'::jsonb, '$.a'"#, "22P02"),
@@ -243,11 +269,20 @@ fn json_query_wraps_and_keeps_or_omits_quotes() {
     let cases = [
         (r#"'{"a": [1, 2]}'::jsonb, '$.a'"#, "[1, 2]"),
         (r#"'{"a": "x"}'::jsonb, '$.a'"#, r#""x""#),
-        (r#"'{"a": "x"}'::jsonb, '$.a' RETURNING text OMIT QUOTES"#, "x"),
-        (r#"'{"a": "x"}'::jsonb, '$.a' RETURNING text KEEP QUOTES"#, r#""x""#),
+        (
+            r#"'{"a": "x"}'::jsonb, '$.a' RETURNING text OMIT QUOTES"#,
+            "x",
+        ),
+        (
+            r#"'{"a": "x"}'::jsonb, '$.a' RETURNING text KEEP QUOTES"#,
+            r#""x""#,
+        ),
         (r#"'[1, 2]'::jsonb, '$[*]'"#, "NULL"),
         (r#"'[1, 2]'::jsonb, '$[*]' WITH WRAPPER"#, "[1, 2]"),
-        (r#"'[1, 2]'::jsonb, '$[0]' WITH UNCONDITIONAL ARRAY WRAPPER"#, "[1]"),
+        (
+            r#"'[1, 2]'::jsonb, '$[0]' WITH UNCONDITIONAL ARRAY WRAPPER"#,
+            "[1]",
+        ),
         (
             r#"'[1, [2, 3], null]'::jsonb, 'lax $[*][$off]' PASSING 1 AS off WITH CONDITIONAL WRAPPER"#,
             "3",
@@ -258,7 +293,10 @@ fn json_query_wraps_and_keeps_or_omits_quotes() {
         (r#"'{}'::jsonb, '$.a' EMPTY OBJECT ON EMPTY"#, "{}"),
         (r#"'{"a": null}'::jsonb, '$.a'"#, "null"),
         (r#"'{"a": 3}'::jsonb, '$.a' RETURNING int"#, "3"),
-        (r#"'[1, 2]'::jsonb, '$[*]' DEFAULT '"many"' ON ERROR"#, r#""many""#),
+        (
+            r#"'[1, 2]'::jsonb, '$[*]' DEFAULT '"many"' ON ERROR"#,
+            r#""many""#,
+        ),
     ];
     for (arguments, expected) in cases {
         assert_eq!(
@@ -480,12 +518,18 @@ fn json_populate_record_fills_a_table_row_type_or_a_composite_type() {
             r#"SELECT * FROM json_populate_record(null::missing, '{}')"#,
             "42704",
         ),
-        (r#"SELECT * FROM json_populate_record(null::t, '[1]')"#, "22023"),
+        (
+            r#"SELECT * FROM json_populate_record(null::t, '[1]')"#,
+            "22023",
+        ),
         (
             r#"SELECT * FROM json_populate_recordset(null::t, '{"a": 1}')"#,
             "22023",
         ),
-        (r#"SELECT * FROM json_populate_record(null::int, '{}')"#, "42804"),
+        (
+            r#"SELECT * FROM json_populate_record(null::int, '{}')"#,
+            "42804",
+        ),
         (
             r#"SELECT * FROM json_populate_record(null::t, '{"a": "x"}')"#,
             "22P02",

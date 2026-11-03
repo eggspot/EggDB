@@ -437,8 +437,16 @@ fn a_table_listed_with_columns_shows_only_those_to_every_tool() {
         (3, "postgresql", "SELECT ssn FROM people"),
         (4, "mysql", "SELECT ssn FROM people"),
         (5, "postgresql", "SELECT id FROM people WHERE ssn LIKE '1%'"),
-        (6, "postgresql", "WITH p AS (SELECT ssn FROM people) SELECT * FROM p"),
-        (7, "postgresql", "SELECT name FROM people WHERE id IN (SELECT id FROM people WHERE ssn IS NOT NULL)"),
+        (
+            6,
+            "postgresql",
+            "WITH p AS (SELECT ssn FROM people) SELECT * FROM p",
+        ),
+        (
+            7,
+            "postgresql",
+            "SELECT name FROM people WHERE id IN (SELECT id FROM people WHERE ssn IS NOT NULL)",
+        ),
     ] {
         let message = sql_error(&mut server, id, dialect, sql);
         assert!(message.contains("ssn"), "{sql}: {message}");
@@ -453,7 +461,10 @@ fn a_table_listed_with_columns_shows_only_those_to_every_tool() {
     assert!(!described.contains("ssn"), "{described}");
     let sampled = call(&mut server, 11, "sample_rows", r#"{"table":"people"}"#);
     let sampled = format!("{sampled:?}");
-    assert!(sampled.contains("Ada") && !sampled.contains("123-45-6789"), "{sampled}");
+    assert!(
+        sampled.contains("Ada") && !sampled.contains("123-45-6789"),
+        "{sampled}"
+    );
     let (state, message) = write_refused(&mut server, 12, "UPDATE people SET name = 'Grace'");
     assert_eq!(state, "42501");
     assert_eq!(

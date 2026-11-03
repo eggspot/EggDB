@@ -5,7 +5,6 @@ use super::shell_copy::{
     CopyEnd, CopyLines, ShellCopy, backslash_copy_arguments, parse_backslash_copy,
 };
 use super::sql::{exit_for, result_text};
-use eggdb::sql::error_lines;
 use super::{Access, execute_on, session_for, uses_color};
 use crate::cli::args::{self, CommandName, Invocation, Request, ResultMode};
 use crate::cli::failure::{Exit, Failure};
@@ -13,6 +12,7 @@ use crate::cli::output::{Output, Style};
 use crate::cli::{Console, Terminal, help, report};
 use eggdb::Database;
 use eggdb::sql::SharedWriteStore;
+use eggdb::sql::error_lines;
 use eggdb_platform::user_files;
 use eggdb_sql::{
     Dialect, QueryResult, ServerOutputSetting, TableSchema, TransactionStatus, starts_plsql_unit,

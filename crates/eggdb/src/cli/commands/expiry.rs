@@ -179,12 +179,7 @@ impl Session<'_> {
             self.out.text(&object.line());
         }
         if !swap.swapped && self.request.format != Some(Format::Json) {
-            let message = not_swapped(
-                &key,
-                swap.found.as_deref(),
-                expected.as_deref(),
-                &self.file,
-            );
+            let message = not_swapped(&key, swap.found.as_deref(), expected.as_deref(), &self.file);
             self.error_message(&message);
         }
         Ok(if swap.swapped {

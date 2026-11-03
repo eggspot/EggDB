@@ -571,7 +571,9 @@ fn nested_batches_and_oversized_numbers_are_refused() {
 #[test]
 fn frames_and_results_past_the_memory_budget_get_overloaded_and_other_sessions_go_on() {
     let store = MemoryStore::default();
-    let budget = Arc::new(eggdb_platform::connection_limits::MemoryBudget::new(256 * 1024));
+    let budget = Arc::new(eggdb_platform::connection_limits::MemoryBudget::new(
+        256 * 1024,
+    ));
     let config = ServerConfig {
         memory_budget: Arc::clone(&budget),
         ..config()

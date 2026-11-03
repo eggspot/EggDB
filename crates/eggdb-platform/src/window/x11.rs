@@ -652,7 +652,13 @@ pub fn selection_notify_event(
 ) -> [u8; 32] {
     let mut event = [0u8; 32];
     event[0] = EVENT_CODE_SELECTION_NOTIFY;
-    for (at, value) in [(4, time), (8, requestor), (12, selection), (16, target), (20, property)] {
+    for (at, value) in [
+        (4, time),
+        (8, requestor),
+        (12, selection),
+        (16, target),
+        (20, property),
+    ] {
         event[at..at + 4].copy_from_slice(&value.to_le_bytes());
     }
     event
@@ -700,10 +706,22 @@ pub fn button_code(detail: u8) -> ButtonCode {
         1 => ButtonCode::Button(PointerButton::Primary),
         2 => ButtonCode::Button(PointerButton::Middle),
         3 => ButtonCode::Button(PointerButton::Secondary),
-        4 => ButtonCode::Wheel { lines_down: -1.0, lines_right: 0.0 },
-        5 => ButtonCode::Wheel { lines_down: 1.0, lines_right: 0.0 },
-        6 => ButtonCode::Wheel { lines_down: 0.0, lines_right: -1.0 },
-        7 => ButtonCode::Wheel { lines_down: 0.0, lines_right: 1.0 },
+        4 => ButtonCode::Wheel {
+            lines_down: -1.0,
+            lines_right: 0.0,
+        },
+        5 => ButtonCode::Wheel {
+            lines_down: 1.0,
+            lines_right: 0.0,
+        },
+        6 => ButtonCode::Wheel {
+            lines_down: 0.0,
+            lines_right: -1.0,
+        },
+        7 => ButtonCode::Wheel {
+            lines_down: 0.0,
+            lines_right: 1.0,
+        },
         _ => ButtonCode::Other,
     }
 }
@@ -1038,9 +1056,19 @@ pub fn parse_packet(header: &[u8; 32]) -> Packet {
         4 | 5 => {
             let (detail, x, y, state) = (header[1], half(24) as i16, half(26) as i16, half(28));
             if header[0] & 0x7F == 4 {
-                Packet::ButtonPress { detail, x, y, state }
+                Packet::ButtonPress {
+                    detail,
+                    x,
+                    y,
+                    state,
+                }
             } else {
-                Packet::ButtonRelease { detail, x, y, state }
+                Packet::ButtonRelease {
+                    detail,
+                    x,
+                    y,
+                    state,
+                }
             }
         }
         6 => Packet::MotionNotify {
@@ -1559,7 +1587,10 @@ mod tests {
         assert_eq!(&sent[12..44], &notify);
         let deleting = get_property_deleting(1, 2, 3).unwrap();
         assert_eq!(&deleting[..2], &[20, 1]);
-        assert_eq!(delete_property(1, 2).unwrap(), vec![19, 0, 3, 0, 1, 0, 0, 0, 2, 0, 0, 0]);
+        assert_eq!(
+            delete_property(1, 2).unwrap(),
+            vec![19, 0, 3, 0, 1, 0, 0, 0, 2, 0, 0, 0]
+        );
     }
 
     #[test]
@@ -1572,10 +1603,18 @@ mod tests {
         press[28..30].copy_from_slice(&0x0005u16.to_le_bytes());
         assert_eq!(
             parse_packet(&press),
-            Packet::ButtonPress { detail: 1, x: -3, y: 120, state: 5 }
+            Packet::ButtonPress {
+                detail: 1,
+                x: -3,
+                y: 120,
+                state: 5
+            }
         );
         press[0] = 5;
-        assert!(matches!(parse_packet(&press), Packet::ButtonRelease { detail: 1, .. }));
+        assert!(matches!(
+            parse_packet(&press),
+            Packet::ButtonRelease { detail: 1, .. }
+        ));
         press[0] = 6;
         assert_eq!(parse_packet(&press), Packet::MotionNotify { x: -3, y: 120 });
         let mut request = [0u8; 32];
@@ -1597,12 +1636,23 @@ mod tests {
         let notify = selection_notify_event(0, 9, 10, 11, 12);
         assert_eq!(
             parse_packet(&notify),
-            Packet::SelectionNotify { requestor: 9, selection: 10, target: 11, property: 12 }
+            Packet::SelectionNotify {
+                requestor: 9,
+                selection: 10,
+                target: 11,
+                property: 12
+            }
         );
         let mut leave = [0u8; 32];
         leave[0] = 8;
         leave[12..16].copy_from_slice(&77u32.to_le_bytes());
-        assert_eq!(parse_packet(&leave), Packet::LeaveNotify { window: 77, mode: 0 });
+        assert_eq!(
+            parse_packet(&leave),
+            Packet::LeaveNotify {
+                window: 77,
+                mode: 0
+            }
+        );
     }
 
     #[test]
@@ -1610,8 +1660,20 @@ mod tests {
         assert_eq!(button_code(1), ButtonCode::Button(PointerButton::Primary));
         assert_eq!(button_code(3), ButtonCode::Button(PointerButton::Secondary));
         assert_eq!(button_code(2), ButtonCode::Button(PointerButton::Middle));
-        assert_eq!(button_code(5), ButtonCode::Wheel { lines_down: 1.0, lines_right: 0.0 });
-        assert_eq!(button_code(6), ButtonCode::Wheel { lines_down: 0.0, lines_right: -1.0 });
+        assert_eq!(
+            button_code(5),
+            ButtonCode::Wheel {
+                lines_down: 1.0,
+                lines_right: 0.0
+            }
+        );
+        assert_eq!(
+            button_code(6),
+            ButtonCode::Wheel {
+                lines_down: 0.0,
+                lines_right: -1.0
+            }
+        );
         assert_eq!(button_code(9), ButtonCode::Other);
     }
 }

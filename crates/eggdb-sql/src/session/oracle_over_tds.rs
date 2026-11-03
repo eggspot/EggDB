@@ -207,7 +207,9 @@ mod tests {
         assert!(!executes_sqlserver_catalog_procedure(
             "SELECT sp_tables FROM t"
         ));
-        assert!(!executes_sqlserver_catalog_procedure("EXEC sp_unknown_one 1"));
+        assert!(!executes_sqlserver_catalog_procedure(
+            "EXEC sp_unknown_one 1"
+        ));
         assert!(!executes_sqlserver_catalog_procedure("SELECT 1 FROM dual"));
         assert!(!executes_sqlserver_catalog_procedure("EXEC 'unterminated"));
     }

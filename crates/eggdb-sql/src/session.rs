@@ -706,7 +706,10 @@ impl<'s> Session<'s> {
         let (Some(tokens), Some(started), Ok(result)) = (tokens, started, result) else {
             return;
         };
-        let user = self.settings.get("session_authorization").unwrap_or_default();
+        let user = self
+            .settings
+            .get("session_authorization")
+            .unwrap_or_default();
         crate::statement_statistics::record(
             tokens,
             text,

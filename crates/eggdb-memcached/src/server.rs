@@ -390,12 +390,8 @@ pub fn serve(
                 .name("eggdb-memcached".to_owned())
                 .spawn_scoped(scope, move || {
                     if let Ok(mut writer) = stream.try_clone() {
-                        let _ = serve_stream(
-                            shared,
-                            budget,
-                            StopAware { stream, stop },
-                            &mut writer,
-                        );
+                        let _ =
+                            serve_stream(shared, budget, StopAware { stream, stop }, &mut writer);
                     }
                     active.fetch_sub(1, Ordering::AcqRel);
                 });

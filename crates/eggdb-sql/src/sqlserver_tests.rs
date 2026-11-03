@@ -1644,11 +1644,7 @@ fn merge_when_not_matched_by_source_updates_or_deletes_target_rows_the_source_la
     assert_eq!(changed.len(), 5);
     assert!(changed.contains(&vec![Value::Null, Value::Integer(4), Value::Null]));
     assert!(changed.contains(&vec![Value::Integer(2), Value::Integer(2), Value::Null]));
-    assert!(changed.contains(&vec![
-        Value::Integer(5),
-        Value::Null,
-        Value::Integer(5)
-    ]));
+    assert!(changed.contains(&vec![Value::Integer(5), Value::Null, Value::Integer(5)]));
     assert_eq!(
         values(
             &mut session,

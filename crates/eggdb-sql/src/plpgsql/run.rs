@@ -2380,7 +2380,8 @@ impl<'r> Run<'r> {
 
     fn close_ended_cursors(&mut self) {
         let current = crate::portals::transactions_ended();
-        self.cursors.retain(|cursor| cursor.holdable || cursor.opened_in == current);
+        self.cursors
+            .retain(|cursor| cursor.holdable || cursor.opened_in == current);
     }
 
     fn hand_over_cursors(&mut self) {

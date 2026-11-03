@@ -134,8 +134,15 @@ fn use_is_refused_while_a_temp_table_or_a_session_lock_would_be_left_behind() {
     assert!(errors(&client.batch("CREATE TABLE #work (id INT)")).is_empty());
     let refused = client.batch("USE audit");
     let refusal = errors(&refused);
-    assert_eq!(refusal.first().map(|error| error.0), Some(40508), "{refused:?}");
-    assert!(refusal[0].2.contains("temporary table #work"), "{refusal:?}");
+    assert_eq!(
+        refusal.first().map(|error| error.0),
+        Some(40508),
+        "{refused:?}"
+    );
+    assert!(
+        refusal[0].2.contains("temporary table #work"),
+        "{refusal:?}"
+    );
     assert!(!changed_to(&refused, "audit"), "{refused:?}");
     assert!(errors(&client.batch("INSERT INTO #work VALUES (1)")).is_empty());
     assert!(errors(&client.batch("DROP TABLE #work")).is_empty());
@@ -151,9 +158,9 @@ fn use_is_refused_while_a_temp_table_or_a_session_lock_would_be_left_behind() {
         "{refused:?}"
     );
     assert!(
-        errors(&client.batch(
-            "EXEC sp_releaseapplock @Resource = 'nightly', @LockOwner = 'Session'"
-        ))
+        errors(
+            &client.batch("EXEC sp_releaseapplock @Resource = 'nightly', @LockOwner = 'Session'")
+        )
         .is_empty()
     );
     let used = client.batch("USE audit");

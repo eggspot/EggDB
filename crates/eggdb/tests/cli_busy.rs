@@ -86,7 +86,12 @@ fn waited_then_busy(directory: &std::path::Path, args: &[&str], busy_line: &str)
     let started = std::time::Instant::now();
     let refused = eggdb(directory, args);
     let waited = started.elapsed();
-    assert_eq!(refused.status.code(), Some(5), "{args:?}: {}", stderr(&refused));
+    assert_eq!(
+        refused.status.code(),
+        Some(5),
+        "{args:?}: {}",
+        stderr(&refused)
+    );
     assert!(
         waited >= std::time::Duration::from_millis(200),
         "{args:?} gave up after {waited:?}"

@@ -199,9 +199,11 @@ fn numeric_text(bytes: &[u8]) -> Result<String, ReplicationError> {
         return Err(malformed(NUMERIC));
     }
     let digits = body
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
-            let digit = u16::from_be_bytes([pair[0], pair[1]]);
+            let digit = u16::from_be_bytes(*pair);
             (digit < NUMERIC_BASE)
                 .then_some(digit)
                 .ok_or_else(|| malformed(NUMERIC))
@@ -343,7 +345,10 @@ mod tests {
 
     #[test]
     fn integers_booleans_and_text_read_back() {
-        assert_eq!(binary_value_text(INT4, &(-42i32).to_be_bytes()).unwrap(), "-42");
+        assert_eq!(
+            binary_value_text(INT4, &(-42i32).to_be_bytes()).unwrap(),
+            "-42"
+        );
         assert_eq!(binary_value_text(INT2, &7i16.to_be_bytes()).unwrap(), "7");
         assert_eq!(
             binary_value_text(INT8, &i64::MIN.to_be_bytes()).unwrap(),
@@ -351,7 +356,10 @@ mod tests {
         );
         assert_eq!(binary_value_text(BOOL, &[1]).unwrap(), "true");
         assert_eq!(binary_value_text(TEXT, "it's".as_bytes()).unwrap(), "it's");
-        assert_eq!(binary_value_text(JSONB, b"\x01{\"n\": 1}").unwrap(), "{\"n\": 1}");
+        assert_eq!(
+            binary_value_text(JSONB, b"\x01{\"n\": 1}").unwrap(),
+            "{\"n\": 1}"
+        );
         assert_eq!(binary_value_text(BYTEA, &[0xDE, 0xAD]).unwrap(), "\\xdead");
     }
 
@@ -362,8 +370,7 @@ mod tests {
             "12.34"
         );
         assert_eq!(
-            binary_value_text(NUMERIC, &numeric(&[1, 2345, 6789], 1, NUMERIC_NEGATIVE, 4))
-                .unwrap(),
+            binary_value_text(NUMERIC, &numeric(&[1, 2345, 6789], 1, NUMERIC_NEGATIVE, 4)).unwrap(),
             "-12345.6789"
         );
         assert_eq!(
@@ -388,9 +395,18 @@ mod tests {
 
     #[test]
     fn dates_and_times_print_as_postgresql_reads_them() {
-        assert_eq!(binary_value_text(DATE, &0i32.to_be_bytes()).unwrap(), "2000-01-01");
-        assert_eq!(binary_value_text(DATE, &9_497i32.to_be_bytes()).unwrap(), "2026-01-01");
-        assert_eq!(binary_value_text(DATE, &i32::MAX.to_be_bytes()).unwrap(), "infinity");
+        assert_eq!(
+            binary_value_text(DATE, &0i32.to_be_bytes()).unwrap(),
+            "2000-01-01"
+        );
+        assert_eq!(
+            binary_value_text(DATE, &9_497i32.to_be_bytes()).unwrap(),
+            "2026-01-01"
+        );
+        assert_eq!(
+            binary_value_text(DATE, &i32::MAX.to_be_bytes()).unwrap(),
+            "infinity"
+        );
         assert_eq!(
             binary_value_text(DATE, &(-730_120i32).to_be_bytes()).unwrap(),
             "0001-12-31 BC"
@@ -406,7 +422,10 @@ mod tests {
         );
         let mut timetz = 3_600_000_000i64.to_be_bytes().to_vec();
         timetz.extend_from_slice(&(-19_800i32).to_be_bytes());
-        assert_eq!(binary_value_text(TIMETZ, &timetz).unwrap(), "01:00:00+05:30");
+        assert_eq!(
+            binary_value_text(TIMETZ, &timetz).unwrap(),
+            "01:00:00+05:30"
+        );
         let mut interval = (-5_000_000i64).to_be_bytes().to_vec();
         interval.extend_from_slice(&3i32.to_be_bytes());
         interval.extend_from_slice(&14i32.to_be_bytes());
@@ -418,13 +437,22 @@ mod tests {
 
     #[test]
     fn floats_and_uuids_read_back() {
-        assert_eq!(binary_value_text(FLOAT8, &1.5f64.to_be_bytes()).unwrap(), "1.5");
+        assert_eq!(
+            binary_value_text(FLOAT8, &1.5f64.to_be_bytes()).unwrap(),
+            "1.5"
+        );
         assert_eq!(
             binary_value_text(FLOAT8, &f64::INFINITY.to_be_bytes()).unwrap(),
             "Infinity"
         );
-        assert_eq!(binary_value_text(FLOAT8, &1e300f64.to_be_bytes()).unwrap(), "1e300");
-        assert_eq!(binary_value_text(FLOAT4, &0.25f32.to_be_bytes()).unwrap(), "0.25");
+        assert_eq!(
+            binary_value_text(FLOAT8, &1e300f64.to_be_bytes()).unwrap(),
+            "1e300"
+        );
+        assert_eq!(
+            binary_value_text(FLOAT4, &0.25f32.to_be_bytes()).unwrap(),
+            "0.25"
+        );
         let uuid: Vec<u8> = (0u8..16).collect();
         assert_eq!(
             binary_value_text(UUID, &uuid).unwrap(),

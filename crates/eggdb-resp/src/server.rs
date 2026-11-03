@@ -161,9 +161,8 @@ fn serve_connection(
     let mut out = Vec::new();
     let mut held = config.memory_budget.empty_reservation();
     loop {
-        let read = reader.next_request_within(&mut |declared| {
-            held.hold_if_large(declared.saturating_mul(2))
-        });
+        let read = reader
+            .next_request_within(&mut |declared| held.hold_if_large(declared.saturating_mul(2)));
         let arguments = match read {
             Ok(arguments) => arguments,
             Err(ProtocolError::Closed) => break,

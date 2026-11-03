@@ -796,13 +796,7 @@ impl<'a> Session<'a> {
     }
 }
 
-fn scan_entry(
-    out: &mut Output<'_>,
-    format: Format,
-    keys_only: bool,
-    key: &[u8],
-    value: &[u8],
-) {
+fn scan_entry(out: &mut Output<'_>, format: Format, keys_only: bool, key: &[u8], value: &[u8]) {
     match format {
         Format::Text => {
             out.styled(Style::Bold, &render::text(key));

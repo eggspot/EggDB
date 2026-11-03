@@ -35,8 +35,8 @@ mod status;
 mod transaction;
 
 pub use copy::{
-    EggdbCopy, eggdb_copy_end, eggdb_copy_free, eggdb_copy_put, eggdb_copy_read,
-    eggdb_sql_copy_in, eggdb_sql_copy_in_begin, eggdb_sql_copy_out_begin,
+    EggdbCopy, eggdb_copy_end, eggdb_copy_free, eggdb_copy_put, eggdb_copy_read, eggdb_sql_copy_in,
+    eggdb_sql_copy_in_begin, eggdb_sql_copy_out_begin,
 };
 pub use database::{
     EGGDB_DURABILITY_FULL, EGGDB_DURABILITY_NORMAL, EGGDB_DURABILITY_OFF, EGGDB_OPEN_NO_CREATE,

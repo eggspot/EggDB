@@ -61,9 +61,15 @@ fn granted_columns_read_and_write_as_postgresql_allows() {
     setup(&store);
     let mut clerk = as_role(&store, "clerk");
     for (sql, expected) in [
-        ("SELECT id, name FROM staff ORDER BY id", "id|name\n1|ada\n2|lin\nSELECT 2"),
+        (
+            "SELECT id, name FROM staff ORDER BY id",
+            "id|name\n1|ada\n2|lin\nSELECT 2",
+        ),
         ("SELECT count(*) FROM staff", "count\n2\nSELECT 1"),
-        ("SELECT s.name FROM staff s WHERE s.id = 2", "name\nlin\nSELECT 1"),
+        (
+            "SELECT s.name FROM staff s WHERE s.id = 2",
+            "name\nlin\nSELECT 1",
+        ),
         (
             "SELECT name FROM staff WHERE id IN (SELECT id FROM staff WHERE name = 'ada')",
             "name\nada\nSELECT 1",
@@ -72,13 +78,19 @@ fn granted_columns_read_and_write_as_postgresql_allows() {
             "SELECT s.name, t.salary FROM staff s JOIN teams t ON s.id = t.id",
             "name|salary\nada|7\nSELECT 1",
         ),
-        ("INSERT INTO staff (id, name) VALUES (3, 'kim')", "INSERT 0 1"),
+        (
+            "INSERT INTO staff (id, name) VALUES (3, 'kim')",
+            "INSERT 0 1",
+        ),
         ("UPDATE staff SET name = 'kim2' WHERE id = 3", "UPDATE 1"),
         (
             "INSERT INTO staff (id, name) VALUES (4, 'joe') RETURNING id, name",
             "id|name\n4|joe\nINSERT 0 1",
         ),
-        ("UPDATE staff SET name = upper(name) WHERE id = 4 RETURNING name", "name\nJOE\nUPDATE 1"),
+        (
+            "UPDATE staff SET name = upper(name) WHERE id = 4 RETURNING name",
+            "name\nJOE\nUPDATE 1",
+        ),
     ] {
         assert_eq!(run(&mut clerk, sql).unwrap(), expected, "{sql}");
     }
@@ -155,10 +167,17 @@ fn table_level_privileges_still_cover_every_column() {
         "salary\n100\nSELECT 1"
     );
     assert_eq!(
-        run(&mut boss, "UPDATE staff SET salary = salary + 1 WHERE id = 1 RETURNING salary").unwrap(),
+        run(
+            &mut boss,
+            "UPDATE staff SET salary = salary + 1 WHERE id = 1 RETURNING salary"
+        )
+        .unwrap(),
         "salary\n101\nUPDATE 1"
     );
-    assert_eq!(run(&mut boss, "DELETE FROM staff WHERE id = 2").unwrap(), "DELETE 1");
+    assert_eq!(
+        run(&mut boss, "DELETE FROM staff WHERE id = 2").unwrap(),
+        "DELETE 1"
+    );
 }
 
 #[test]
@@ -167,14 +186,20 @@ fn a_write_without_select_may_not_read_through_where_or_returning() {
     setup(&store);
     admin_runs(
         &store,
-        &["CREATE USER writer LOGIN", "GRANT INSERT, UPDATE, DELETE ON staff TO writer"],
+        &[
+            "CREATE USER writer LOGIN",
+            "GRANT INSERT, UPDATE, DELETE ON staff TO writer",
+        ],
     );
     let mut writer = as_role(&store, "writer");
     assert_eq!(
         run(&mut writer, "INSERT INTO staff VALUES (7, 'w', 1, 'z')").unwrap(),
         "INSERT 0 1"
     );
-    assert_eq!(run(&mut writer, "UPDATE staff SET notes = 'all'").unwrap(), "UPDATE 3");
+    assert_eq!(
+        run(&mut writer, "UPDATE staff SET notes = 'all'").unwrap(),
+        "UPDATE 3"
+    );
     for sql in [
         "INSERT INTO staff VALUES (8, 'w', 1, 'z') RETURNING id",
         "UPDATE staff SET notes = 'x' WHERE salary = 100",
@@ -194,7 +219,10 @@ fn revoking_takes_column_privileges_away() {
     setup(&store);
     admin_runs(&store, &["REVOKE SELECT (name) ON staff FROM clerk"]);
     let mut clerk = as_role(&store, "clerk");
-    assert_eq!(run(&mut clerk, "SELECT id FROM staff WHERE id = 1").unwrap(), "id\n1\nSELECT 1");
+    assert_eq!(
+        run(&mut clerk, "SELECT id FROM staff WHERE id = 1").unwrap(),
+        "id\n1\nSELECT 1"
+    );
     denied(&mut clerk, "SELECT name FROM staff");
     admin_runs(&store, &["REVOKE SELECT ON staff FROM clerk"]);
     let mut clerk = as_role(&store, "clerk");
@@ -228,14 +256,23 @@ fn column_grants_follow_renames_and_go_with_drops() {
     denied(&mut clerk, "SELECT salary FROM people");
     admin_runs(
         &store,
-        &["ALTER TABLE people DROP COLUMN full_name", "CREATE TABLE staff (id integer, name text)"],
+        &[
+            "ALTER TABLE people DROP COLUMN full_name",
+            "CREATE TABLE staff (id integer, name text)",
+        ],
     );
     let mut clerk = as_role(&store, "clerk");
     denied(&mut clerk, "SELECT name FROM staff");
     let reader = store.begin_read().unwrap();
     let grants = every_column_grant(&reader).unwrap();
-    assert!(grants.iter().all(|grant| grant.table != "staff"), "{grants:?}");
-    assert!(grants.iter().all(|grant| grant.column != "full_name"), "{grants:?}");
+    assert!(
+        grants.iter().all(|grant| grant.table != "staff"),
+        "{grants:?}"
+    );
+    assert!(
+        grants.iter().all(|grant| grant.column != "full_name"),
+        "{grants:?}"
+    );
 }
 
 #[test]
@@ -244,11 +281,26 @@ fn grant_on_columns_refuses_what_postgresql_refuses() {
     setup(&store);
     let mut admin = Session::new(&store);
     for (sql, state) in [
-        ("GRANT SELECT (nope) ON staff TO clerk", SqlState::UNDEFINED_COLUMN),
-        ("GRANT DELETE (id) ON staff TO clerk", SqlState::INVALID_GRANT_OPERATION),
-        ("GRANT TRUNCATE (id) ON staff TO clerk", SqlState::INVALID_GRANT_OPERATION),
-        ("GRANT SELECT (id) ON nowhere TO clerk", SqlState::UNDEFINED_TABLE),
-        ("GRANT SELECT (id) ON staff TO nobody", SqlState::UNDEFINED_OBJECT),
+        (
+            "GRANT SELECT (nope) ON staff TO clerk",
+            SqlState::UNDEFINED_COLUMN,
+        ),
+        (
+            "GRANT DELETE (id) ON staff TO clerk",
+            SqlState::INVALID_GRANT_OPERATION,
+        ),
+        (
+            "GRANT TRUNCATE (id) ON staff TO clerk",
+            SqlState::INVALID_GRANT_OPERATION,
+        ),
+        (
+            "GRANT SELECT (id) ON nowhere TO clerk",
+            SqlState::UNDEFINED_TABLE,
+        ),
+        (
+            "GRANT SELECT (id) ON staff TO nobody",
+            SqlState::UNDEFINED_OBJECT,
+        ),
         ("DROP ROLE clerk", SqlState::DEPENDENT_OBJECTS_STILL_EXIST),
     ] {
         let error = run(&mut admin, sql).expect_err(sql);
@@ -299,7 +351,9 @@ fn files_without_column_grants_open_unchanged_and_older_readers_skip_them() {
     let reader = store.begin_read().unwrap();
     let table_grants = every_grant(&reader).unwrap();
     assert!(
-        table_grants.iter().all(|grant| !grant.grantee.contains('\0')),
+        table_grants
+            .iter()
+            .all(|grant| !grant.grantee.contains('\0')),
         "{table_grants:?}"
     );
     assert_eq!(
@@ -347,7 +401,12 @@ fn files_without_column_grants_open_unchanged_and_older_readers_skip_them() {
 
 #[test]
 fn damaged_column_grants_fail_closed() {
-    for value in [&[][..], &[COLUMN_RECORD_VERSION][..], &[9, 1][..], &[COLUMN_RECORD_VERSION, 1, 1][..]] {
+    for value in [
+        &[][..],
+        &[COLUMN_RECORD_VERSION][..],
+        &[9, 1][..],
+        &[COLUMN_RECORD_VERSION, 1, 1][..],
+    ] {
         let store = MemoryStore::default();
         setup(&store);
         let mut writer = store.begin_write().unwrap();
@@ -356,7 +415,13 @@ fn damaged_column_grants_fail_closed() {
             .unwrap();
         writer.commit().unwrap();
         let mut clerk = as_role(&store, "clerk");
-        assert!(run(&mut clerk, "SELECT salary FROM staff").is_err(), "{value:?}");
-        assert!(run(&mut clerk, "SELECT id FROM staff").is_err(), "{value:?}");
+        assert!(
+            run(&mut clerk, "SELECT salary FROM staff").is_err(),
+            "{value:?}"
+        );
+        assert!(
+            run(&mut clerk, "SELECT id FROM staff").is_err(),
+            "{value:?}"
+        );
     }
 }

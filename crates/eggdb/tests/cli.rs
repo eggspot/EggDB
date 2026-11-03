@@ -860,7 +860,10 @@ fn collections_are_renamed_counted_by_stats_and_deleted_in_steps_by_the_binary()
     for name in ["cache", "users"] {
         assert_exit(&dir.eggdb(&["collection", "add", "app.db", name]), 0);
     }
-    assert_exit(&dir.eggdb(&["put", "app.db", "-C", "cache", "c:1", "hot"]), 0);
+    assert_exit(
+        &dir.eggdb(&["put", "app.db", "-C", "cache", "c:1", "hot"]),
+        0,
+    );
     let moved = dir.eggdb(&["collection", "move", "app.db", "cache", "warm"]);
     assert_exit(&moved, 0);
     assert_eq!(
@@ -870,7 +873,15 @@ fn collections_are_renamed_counted_by_stats_and_deleted_in_steps_by_the_binary()
     let got = dir.eggdb(&["get", "app.db", "-C", "warm", "c:1"]);
     assert_exit(&got, 0);
     assert_eq!(stdout(&got), "hot");
-    let renamed = dir.eggdb(&["collection", "rename", "app.db", "warm", "cache", "-F", "text"]);
+    let renamed = dir.eggdb(&[
+        "collection",
+        "rename",
+        "app.db",
+        "warm",
+        "cache",
+        "-F",
+        "text",
+    ]);
     assert_exit(&renamed, 0);
     assert_eq!(
         stdout(&renamed),
@@ -893,7 +904,11 @@ fn collections_are_renamed_counted_by_stats_and_deleted_in_steps_by_the_binary()
 
     let plain = dir.eggdb(&["stats", "app.db"]);
     assert_exit(&plain, 0);
-    assert!(!stdout(&plain).contains("collections"), "{}", stdout(&plain));
+    assert!(
+        !stdout(&plain).contains("collections"),
+        "{}",
+        stdout(&plain)
+    );
     let counted = dir.eggdb(&["stats", "app.db", "--collections"]);
     assert_exit(&counted, 0);
     assert!(
@@ -903,7 +918,15 @@ fn collections_are_renamed_counted_by_stats_and_deleted_in_steps_by_the_binary()
         "{}",
         stdout(&counted)
     );
-    let text = dir.eggdb(&["stats", "app.db", "--collections", "-F", "text", "--color", "never"]);
+    let text = dir.eggdb(&[
+        "stats",
+        "app.db",
+        "--collections",
+        "-F",
+        "text",
+        "--color",
+        "never",
+    ]);
     assert_exit(&text, 0);
     assert!(
         stdout(&text).contains("  cache: 1 entry, 3 B of keys, 3 B of values\n"),

@@ -160,7 +160,9 @@ impl Entry {
 
     fn statistics(&self) -> StatementStatistics {
         let stddev_ms = if self.calls > 1 {
-            (self.squared_deviations / self.calls as f64).max(0.0).sqrt()
+            (self.squared_deviations / self.calls as f64)
+                .max(0.0)
+                .sqrt()
         } else {
             0.0
         };
@@ -269,10 +271,7 @@ pub fn reset() {
         locked(shard).entries.clear();
     }
     DEALLOCATIONS.store(0, Ordering::Relaxed);
-    RESET_AT.store(
-        crate::datetime::statement_now() as u64,
-        Ordering::Relaxed,
-    );
+    RESET_AT.store(crate::datetime::statement_now() as u64, Ordering::Relaxed);
 }
 
 /// Drops the statistics of the statements whose query ID is `query_id`, in every database, as
@@ -525,14 +524,23 @@ mod tests {
         let second = normalized("SELECT name FROM users WHERE password = 'swordfish'");
         assert_eq!(first, second);
         assert!(!first.text.contains("hunter2"));
-        assert_ne!(first.query_id, normalized("SELECT name FROM users").query_id);
+        assert_ne!(
+            first.query_id,
+            normalized("SELECT name FROM users").query_id
+        );
     }
 
     #[test]
     fn long_texts_are_cut_at_a_character_boundary_but_hashed_whole() {
-        let shape = normalized(&format!("SELECT \"{}\" FROM t", "é".repeat(MAX_QUERY_BYTES)));
+        let shape = normalized(&format!(
+            "SELECT \"{}\" FROM t",
+            "é".repeat(MAX_QUERY_BYTES)
+        ));
         assert!(shape.text.len() <= MAX_QUERY_BYTES);
-        let other = normalized(&format!("SELECT \"{}\" FROM u", "é".repeat(MAX_QUERY_BYTES)));
+        let other = normalized(&format!(
+            "SELECT \"{}\" FROM u",
+            "é".repeat(MAX_QUERY_BYTES)
+        ));
         assert_eq!(shape.text, other.text);
         assert_ne!(shape.query_id, other.query_id);
     }

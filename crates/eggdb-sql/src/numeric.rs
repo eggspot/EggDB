@@ -1899,13 +1899,23 @@ mod tests {
     #[test]
     fn infinities_get_new_key_and_row_forms_that_older_decoders_refuse() {
         let mut keys = Vec::new();
-        for value in [infinity(true), n("-5"), n("0"), n("5"), infinity(false), Numeric::nan()] {
+        for value in [
+            infinity(true),
+            n("-5"),
+            n("0"),
+            n("5"),
+            infinity(false),
+            Numeric::nan(),
+        ] {
             let mut key = Vec::new();
             value.encode_key(&mut key);
             key.push(0x7F);
             assert_eq!(Numeric::key_length(&key), Some(key.len() - 1));
             let (decoded, used) = Numeric::decode_key(&key).unwrap();
-            assert_eq!((decoded.to_string(), used), (value.to_string(), key.len() - 1));
+            assert_eq!(
+                (decoded.to_string(), used),
+                (value.to_string(), key.len() - 1)
+            );
             keys.push(key);
         }
         assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));

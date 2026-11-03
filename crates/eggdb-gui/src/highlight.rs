@@ -193,7 +193,8 @@ fn dollar_tag_at(text: &str, at: usize) -> Option<&str> {
         if byte == b'$' {
             return Some(&text[at..=end]);
         }
-        let allowed = byte.is_ascii_alphabetic() || byte == b'_' || (end > at + 1 && byte.is_ascii_digit());
+        let allowed =
+            byte.is_ascii_alphabetic() || byte == b'_' || (end > at + 1 && byte.is_ascii_digit());
         if !allowed {
             return None;
         }
@@ -207,7 +208,9 @@ fn next_char_end(text: &str, at: usize) -> usize {
 }
 
 fn word_byte(byte: u8, dialect: QueryDialect) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_' || (byte == b'$' && dialect != QueryDialect::PostgreSql)
+    byte.is_ascii_alphanumeric()
+        || byte == b'_'
+        || (byte == b'$' && dialect != QueryDialect::PostgreSql)
 }
 
 fn starts_word(byte: u8, dialect: QueryDialect) -> bool {
@@ -216,7 +219,12 @@ fn starts_word(byte: u8, dialect: QueryDialect) -> bool {
         || (dialect == QueryDialect::SqlServer && matches!(byte, b'@' | b'#'))
 }
 
-fn continue_carry(text: &str, at: usize, dialect: QueryDialect, carry: &mut Carry) -> (usize, Lexeme) {
+fn continue_carry(
+    text: &str,
+    at: usize,
+    dialect: QueryDialect,
+    carry: &mut Carry,
+) -> (usize, Lexeme) {
     let bytes = text.as_bytes();
     match carry.clone() {
         Carry::Code => (at, Lexeme::Other),
@@ -363,7 +371,11 @@ pub(crate) fn lex(
 
 /// Splits one line of SQL in `dialect` into runs of the same kind, as byte ranges; `carry`
 /// says what a previous line left open and is updated for the next line.
-pub fn tokens(line: &str, dialect: QueryDialect, carry: &mut Carry) -> Vec<(Range<usize>, TokenKind)> {
+pub fn tokens(
+    line: &str,
+    dialect: QueryDialect,
+    carry: &mut Carry,
+) -> Vec<(Range<usize>, TokenKind)> {
     let mut out: Vec<(Range<usize>, TokenKind)> = Vec::new();
     lex(line, dialect, carry, &mut |range, lexeme| {
         let kind = match lexeme {
@@ -371,10 +383,14 @@ pub fn tokens(line: &str, dialect: QueryDialect, carry: &mut Carry) -> Vec<(Rang
             Lexeme::String => TokenKind::String,
             Lexeme::Number => TokenKind::Number,
             Lexeme::Comment => TokenKind::Comment,
-            Lexeme::Word | Lexeme::QuotedName | Lexeme::Semicolon | Lexeme::Other => TokenKind::Plain,
+            Lexeme::Word | Lexeme::QuotedName | Lexeme::Semicolon | Lexeme::Other => {
+                TokenKind::Plain
+            }
         };
         match out.last_mut() {
-            Some((last, previous)) if *previous == kind && kind == TokenKind::Plain => last.end = range.end,
+            Some((last, previous)) if *previous == kind && kind == TokenKind::Plain => {
+                last.end = range.end
+            }
             _ => out.push((range, kind)),
         }
     });
@@ -395,7 +411,10 @@ mod tests {
 
     #[test]
     fn keywords_strings_numbers_and_comments_are_told_apart() {
-        let found = kinds("SELECT 'it''s', 42 FROM t -- note", QueryDialect::PostgreSql);
+        let found = kinds(
+            "SELECT 'it''s', 42 FROM t -- note",
+            QueryDialect::PostgreSql,
+        );
         assert_eq!(found[0], ("SELECT", TokenKind::Keyword));
         assert!(found.contains(&("'it''s'", TokenKind::String)));
         assert!(found.contains(&("42", TokenKind::Number)));
@@ -409,7 +428,9 @@ mod tests {
         let mut carry = Carry::Code;
         let dialect = QueryDialect::PostgreSql;
         assert_eq!(
-            tokens("a /* b", dialect, &mut carry).last().map(|(_, kind)| *kind),
+            tokens("a /* b", dialect, &mut carry)
+                .last()
+                .map(|(_, kind)| *kind),
             Some(TokenKind::Comment)
         );
         assert_eq!(carry, Carry::Comment { depth: 1 });
@@ -428,13 +449,31 @@ mod tests {
         assert!(postgres.contains(&("order", TokenKind::Keyword)));
         let mysql = kinds(line, QueryDialect::MySql);
         assert!(mysql.contains(&("LIMIT", TokenKind::Keyword)));
-        assert!(mysql.iter().all(|(text, kind)| !text.contains("order") || *kind == TokenKind::Plain));
-        assert!(kinds("SELECT TOP 1 [order]", QueryDialect::SqlServer).contains(&("TOP", TokenKind::Keyword)));
-        assert!(!kinds("SELECT TOP 1", QueryDialect::PostgreSql).contains(&("TOP", TokenKind::Keyword)));
-        assert_eq!(kinds("# note", QueryDialect::MySql), vec![("# note", TokenKind::Comment)]);
+        assert!(
+            mysql
+                .iter()
+                .all(|(text, kind)| !text.contains("order") || *kind == TokenKind::Plain)
+        );
+        assert!(
+            kinds("SELECT TOP 1 [order]", QueryDialect::SqlServer)
+                .contains(&("TOP", TokenKind::Keyword))
+        );
+        assert!(
+            !kinds("SELECT TOP 1", QueryDialect::PostgreSql).contains(&("TOP", TokenKind::Keyword))
+        );
+        assert_eq!(
+            kinds("# note", QueryDialect::MySql),
+            vec![("# note", TokenKind::Comment)]
+        );
         assert!(kinds("SELECT \"a\"", QueryDialect::MySql).contains(&("\"a\"", TokenKind::String)));
-        assert!(!kinds("SELECT \"a\"", QueryDialect::PostgreSql).contains(&("\"a\"", TokenKind::String)));
-        assert!(kinds("SELECT $$a;b$$", QueryDialect::PostgreSql).contains(&("$$a;b$$", TokenKind::String)));
+        assert!(
+            !kinds("SELECT \"a\"", QueryDialect::PostgreSql)
+                .contains(&("\"a\"", TokenKind::String))
+        );
+        assert!(
+            kinds("SELECT $$a;b$$", QueryDialect::PostgreSql)
+                .contains(&("$$a;b$$", TokenKind::String))
+        );
         let mut carry = Carry::Code;
         let _ = tokens("/* a /* b */", QueryDialect::PostgreSql, &mut carry);
         assert_eq!(carry, Carry::Comment { depth: 1 });
@@ -445,7 +484,9 @@ mod tests {
 
     #[test]
     fn hostile_bytes_never_stop_the_lexer() {
-        for line in ["'\\", "\"é", "[é", "$a", "$$", "/*/", "--", "é$tag$x", "\\'é", "`"] {
+        for line in [
+            "'\\", "\"é", "[é", "$a", "$$", "/*/", "--", "é$tag$x", "\\'é", "`",
+        ] {
             for dialect in QueryDialect::ALL {
                 let mut carry = Carry::Code;
                 let runs = tokens(line, dialect, &mut carry);

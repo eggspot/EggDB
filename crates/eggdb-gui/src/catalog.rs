@@ -139,7 +139,9 @@ impl Catalog {
 
     /// The secondary indexes of `table`, in name order.
     pub fn indexes_of<'c>(&'c self, table: &'c str) -> impl Iterator<Item = &'c CatalogIndex> + 'c {
-        self.indexes.iter().filter(move |index| index.table == table)
+        self.indexes
+            .iter()
+            .filter(move |index| index.table == table)
     }
 }
 
@@ -150,7 +152,7 @@ pub fn compact_count(count: u64) -> String {
     for (size, unit) in UNITS {
         if count >= size {
             let tenths = count / (size / 10);
-            return if tenths < 100 && tenths % 10 != 0 {
+            return if tenths < 100 && !tenths.is_multiple_of(10) {
                 format!("{}.{}{unit}", tenths / 10, tenths % 10)
             } else {
                 format!("{}{unit}", count / size)
@@ -243,7 +245,10 @@ fn file_table(schema: &TableSchema) -> CatalogTable {
     }
 }
 
-fn file_rows(session: &mut Session<'_>, sql: &str) -> Result<Vec<Vec<Option<String>>>, StatementFailure> {
+fn file_rows(
+    session: &mut Session<'_>,
+    sql: &str,
+) -> Result<Vec<Vec<Option<String>>>, StatementFailure> {
     let mut rows = Vec::new();
     session
         .execute(sql, &mut |result| rows.extend(file_result(result).rows))
@@ -273,7 +278,11 @@ fn read_key_spaces(database: &Database) -> eggdb::Result<Vec<KeySpace>> {
 
 fn count_keys<T>(scan: impl Iterator<Item = eggdb::Result<T>>) -> KeyCount {
     let counted = scan
-        .take(usize::try_from(KEY_COUNT_LIMIT).unwrap_or(usize::MAX).saturating_add(1))
+        .take(
+            usize::try_from(KEY_COUNT_LIMIT)
+                .unwrap_or(usize::MAX)
+                .saturating_add(1),
+        )
         .filter(Result::is_ok)
         .count() as u64;
     if counted > KEY_COUNT_LIMIT {
@@ -287,9 +296,12 @@ fn count_keys<T>(scan: impl Iterator<Item = eggdb::Result<T>>) -> KeyCount {
 /// tables must answer; views, indexes, sequences and primary keys are left empty when the
 /// server cannot list them.
 pub fn read_server(client: &mut PgClient) -> Result<Catalog, StatementFailure> {
-    let tables = server_rows(client, &format!(
-        "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname {USER_SCHEMAS} ORDER BY tablename"
-    ))?;
+    let tables = server_rows(
+        client,
+        &format!(
+            "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname {USER_SCHEMAS} ORDER BY tablename"
+        ),
+    )?;
     let columns = server_rows(client, &format!(
         "SELECT table_name, column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema {USER_SCHEMAS} ORDER BY table_name, ordinal_position"
     ))
@@ -352,7 +364,10 @@ pub fn read_server(client: &mut PgClient) -> Result<Catalog, StatementFailure> {
     Ok(catalog)
 }
 
-fn server_rows(client: &mut PgClient, sql: &str) -> Result<Vec<Vec<Option<String>>>, StatementFailure> {
+fn server_rows(
+    client: &mut PgClient,
+    sql: &str,
+) -> Result<Vec<Vec<Option<String>>>, StatementFailure> {
     let results = client
         .simple_query(sql)
         .map_err(|error| StatementFailure::from_client(&error))?;
@@ -360,11 +375,15 @@ fn server_rows(client: &mut PgClient, sql: &str) -> Result<Vec<Vec<Option<String
 }
 
 fn view_definitions_query() -> String {
-    format!("SELECT viewname, definition FROM pg_catalog.pg_views WHERE schemaname {USER_SCHEMAS} ORDER BY viewname")
+    format!(
+        "SELECT viewname, definition FROM pg_catalog.pg_views WHERE schemaname {USER_SCHEMAS} ORDER BY viewname"
+    )
 }
 
 fn sequences_query() -> String {
-    format!("SELECT sequencename, last_value FROM pg_catalog.pg_sequences WHERE schemaname {USER_SCHEMAS} ORDER BY sequencename")
+    format!(
+        "SELECT sequencename, last_value FROM pg_catalog.pg_sequences WHERE schemaname {USER_SCHEMAS} ORDER BY sequencename"
+    )
 }
 
 fn sequence_rows(rows: &[Vec<Option<String>>]) -> Vec<CatalogSequence> {
@@ -488,7 +507,11 @@ mod tests {
         let catalog = read_file(&database).expect("the catalog reads");
         let names = |list: Vec<&str>| list.into_iter().map(str::to_owned).collect::<Vec<_>>();
         assert_eq!(
-            catalog.tables.iter().map(|table| table.name.clone()).collect::<Vec<_>>(),
+            catalog
+                .tables
+                .iter()
+                .map(|table| table.name.clone())
+                .collect::<Vec<_>>(),
             names(vec!["customers", "orders", "products"])
         );
         let customers = &catalog.tables[0];
@@ -496,24 +519,54 @@ mod tests {
         assert!(customers.columns[0].primary_key);
         assert_eq!(customers.columns[0].type_name, "integer");
         assert!(customers.columns[1].not_null);
-        assert!(customers.ddl.starts_with("CREATE TABLE"), "{}", customers.ddl);
-        assert!(customers.ddl.contains("customers_name_idx"), "{}", customers.ddl);
+        assert!(
+            customers.ddl.starts_with("CREATE TABLE"),
+            "{}",
+            customers.ddl
+        );
+        assert!(
+            customers.ddl.contains("customers_name_idx"),
+            "{}",
+            customers.ddl
+        );
         assert_eq!(
-            catalog.views.iter().map(|view| view.name.clone()).collect::<Vec<_>>(),
+            catalog
+                .views
+                .iter()
+                .map(|view| view.name.clone())
+                .collect::<Vec<_>>(),
             names(vec!["big_orders"])
         );
-        assert!(catalog.views[0].ddl.starts_with("CREATE VIEW big_orders AS"), "{}", catalog.views[0].ddl);
+        assert!(
+            catalog.views[0]
+                .ddl
+                .starts_with("CREATE VIEW big_orders AS"),
+            "{}",
+            catalog.views[0].ddl
+        );
         assert_eq!(catalog.views[0].columns.len(), 2);
         assert_eq!(
-            catalog.indexes.iter().map(|index| index.name.clone()).collect::<Vec<_>>(),
-            names(vec!["customers_name_idx", "orders_customer_id_idx", "products_name_key"])
+            catalog
+                .indexes
+                .iter()
+                .map(|index| index.name.clone())
+                .collect::<Vec<_>>(),
+            names(vec![
+                "customers_name_idx",
+                "orders_customer_id_idx",
+                "products_name_key"
+            ])
         );
         assert!(catalog.indexes[2].unique && !catalog.indexes[0].unique);
         assert_eq!(catalog.indexes[1].table, "orders");
         assert_eq!(catalog.indexes[1].columns, names(vec!["customer_id"]));
         assert_eq!(catalog.indexes_of("orders").count(), 1);
         assert_eq!(
-            catalog.sequences.iter().map(|sequence| sequence.name.clone()).collect::<Vec<_>>(),
+            catalog
+                .sequences
+                .iter()
+                .map(|sequence| sequence.name.clone())
+                .collect::<Vec<_>>(),
             names(vec!["invoice_numbers", "ticket_numbers"])
         );
         assert_eq!(catalog.key_spaces.len(), 2);
@@ -549,13 +602,26 @@ mod tests {
     #[test]
     fn a_server_table_is_described_by_its_columns() {
         let columns = vec![
-            CatalogColumn { name: "id".into(), type_name: "integer".into(), primary_key: true, not_null: true },
-            CatalogColumn { name: "order date".into(), type_name: "date".into(), primary_key: false, not_null: true },
+            CatalogColumn {
+                name: "id".into(),
+                type_name: "integer".into(),
+                primary_key: true,
+                not_null: true,
+            },
+            CatalogColumn {
+                name: "order date".into(),
+                type_name: "date".into(),
+                primary_key: false,
+                not_null: true,
+            },
         ];
         assert_eq!(
             table_ddl("orders", &columns),
             "CREATE TABLE orders (\n    id integer,\n    \"order date\" date NOT NULL,\n    PRIMARY KEY (id)\n);"
         );
-        assert_eq!(index_columns("CREATE INDEX i ON public.orders USING btree (customer_id, \"day\")"), vec!["customer_id", "day"]);
+        assert_eq!(
+            index_columns("CREATE INDEX i ON public.orders USING btree (customer_id, \"day\")"),
+            vec!["customer_id", "day"]
+        );
     }
 }

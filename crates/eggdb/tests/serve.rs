@@ -398,10 +398,21 @@ fn max_connection_memory_needs_a_size_of_at_least_one_mebibyte() {
     let path = file.path().to_str().unwrap();
     for refused in ["10k", "lots", "0"] {
         let output = eggdb(
-            &["serve", path, "--create", "--max-connection-memory", refused],
+            &[
+                "serve",
+                path,
+                "--create",
+                "--max-connection-memory",
+                refused,
+            ],
             Some("secret"),
         );
-        assert_eq!(output.status.code(), Some(2), "{refused}: {}", stderr(&output));
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{refused}: {}",
+            stderr(&output)
+        );
         assert!(
             stderr(&output).contains("--max-connection-memory"),
             "{refused}: {}",
@@ -447,7 +458,9 @@ fn max_connection_memory_bounds_what_a_resp_client_may_send_and_others_go_on() {
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
     greedy
-        .write_all(b"*2\r\n$4\r\nAUTH\r\n$6\r\nsecret\r\n*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$2097152\r\n")
+        .write_all(
+            b"*2\r\n$4\r\nAUTH\r\n$6\r\nsecret\r\n*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$2097152\r\n",
+        )
         .unwrap();
     let mut answer = String::new();
     greedy.read_to_string(&mut answer).unwrap();

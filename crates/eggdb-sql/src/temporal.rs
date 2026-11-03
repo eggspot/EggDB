@@ -891,12 +891,27 @@ mod tests {
             assert_eq!(value(&mut session, sql).unwrap(), shown, "{sql}");
         }
         for (sql, shown) in [
-            ("SELECT extract(epoch FROM 'infinity'::timestamp)", "Infinity"),
-            ("SELECT extract(year FROM '-infinity'::timestamptz)", "-Infinity"),
+            (
+                "SELECT extract(epoch FROM 'infinity'::timestamp)",
+                "Infinity",
+            ),
+            (
+                "SELECT extract(year FROM '-infinity'::timestamptz)",
+                "-Infinity",
+            ),
             ("SELECT extract(julian FROM 'infinity'::date)", "Infinity"),
-            ("SELECT extract(century FROM '-infinity'::date)", "-Infinity"),
-            ("SELECT extract(epoch FROM 'infinity'::interval)", "Infinity"),
-            ("SELECT extract(epoch FROM '-infinity'::interval)", "-Infinity"),
+            (
+                "SELECT extract(century FROM '-infinity'::date)",
+                "-Infinity",
+            ),
+            (
+                "SELECT extract(epoch FROM 'infinity'::interval)",
+                "Infinity",
+            ),
+            (
+                "SELECT extract(epoch FROM '-infinity'::interval)",
+                "-Infinity",
+            ),
             (
                 "SELECT pg_typeof(extract(epoch FROM 'infinity'::timestamp))::text",
                 "numeric",
@@ -1036,7 +1051,10 @@ mod tests {
             assert_eq!(vendor_code(&mut session, sql), Some(1841), "{sql}");
         }
         assert_eq!(
-            rows(&mut session, "SELECT TO_CHAR(d, 'YYYY') FROM moments WHERE id = 2"),
+            rows(
+                &mut session,
+                "SELECT TO_CHAR(d, 'YYYY') FROM moments WHERE id = 2"
+            ),
             vec![vec![crate::Value::Text("2024".into())]]
         );
     }
@@ -1095,7 +1113,10 @@ mod tests {
             ),
             ("SELECT '2022-01-01' AT TIME ZONE 'UTC'", 8116),
             ("SELECT CAST('2022-01-01' AS date) AT TIME ZONE 'UTC'", 8116),
-            ("SELECT CAST('2022-01-01' AS datetime2) AT TIME ZONE 5", 8116),
+            (
+                "SELECT CAST('2022-01-01' AS datetime2) AT TIME ZONE 5",
+                8116,
+            ),
         ] {
             assert_eq!(vendor_code(&mut session, sql), Some(code), "{sql}");
         }
@@ -1115,10 +1136,22 @@ mod tests {
                 "SELECT current_utc_offset, is_currently_dst FROM sys.time_zone_info WHERE name IN ('UTC', 'India Standard Time', 'Nepal Standard Time', 'Dateline Standard Time') ORDER BY name"
             ),
             vec![
-                vec![crate::Value::Text("-12:00".into()), crate::Value::Boolean(false)],
-                vec![crate::Value::Text("+05:30".into()), crate::Value::Boolean(false)],
-                vec![crate::Value::Text("+05:45".into()), crate::Value::Boolean(false)],
-                vec![crate::Value::Text("+00:00".into()), crate::Value::Boolean(false)],
+                vec![
+                    crate::Value::Text("-12:00".into()),
+                    crate::Value::Boolean(false)
+                ],
+                vec![
+                    crate::Value::Text("+05:30".into()),
+                    crate::Value::Boolean(false)
+                ],
+                vec![
+                    crate::Value::Text("+05:45".into()),
+                    crate::Value::Boolean(false)
+                ],
+                vec![
+                    crate::Value::Text("+00:00".into()),
+                    crate::Value::Boolean(false)
+                ],
             ]
         );
     }

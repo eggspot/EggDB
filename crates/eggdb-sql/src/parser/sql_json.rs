@@ -167,8 +167,7 @@ impl Parser<'_> {
         let position = self.position();
         let mut given = false;
         let mut wrapper = Wrapper::Without;
-        if self.is_word("without")
-            && (self.is_word_at(1, "wrapper") || self.is_word_at(1, "array"))
+        if self.is_word("without") && (self.is_word_at(1, "wrapper") || self.is_word_at(1, "array"))
         {
             self.at += 1;
             self.take_word("array");
@@ -212,7 +211,8 @@ impl Parser<'_> {
     }
 
     fn json_behavior(&mut self) -> SqlResult<Option<BehaviorClause>> {
-        let before_on = |parser: &Self, word: &str| parser.is_word(word) && parser.is_word_at(1, "on");
+        let before_on =
+            |parser: &Self, word: &str| parser.is_word(word) && parser.is_word_at(1, "on");
         let simple = [
             ("error", Behavior::Error),
             ("null", Behavior::Null),
@@ -577,10 +577,7 @@ impl Parser<'_> {
             {
                 self.at = start;
                 let marker = self.row_type_marker();
-                let ends = matches!(
-                    self.peek_kind(),
-                    TokenKind::Comma | TokenKind::RightParen
-                );
+                let ends = matches!(self.peek_kind(), TokenKind::Comma | TokenKind::RightParen);
                 match marker {
                     Some(marker) if ends => Ok(marker),
                     _ => Err(error),

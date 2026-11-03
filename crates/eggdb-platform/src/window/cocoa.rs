@@ -546,7 +546,11 @@ pub fn other_button(number: isize) -> Option<PointerButton> {
 /// precise (touchpad) deltas are in points and become lines of
 /// [`PRECISE_SCROLL_POINTS_PER_LINE`].
 pub fn wheel_lines(delta_x: f64, delta_y: f64, precise: bool) -> (f32, f32) {
-    let per_line = if precise { PRECISE_SCROLL_POINTS_PER_LINE } else { 1.0 };
+    let per_line = if precise {
+        PRECISE_SCROLL_POINTS_PER_LINE
+    } else {
+        1.0
+    };
     let finite = |value: f64| if value.is_finite() { value } else { 0.0 };
     (
         (-finite(delta_y) / per_line) as f32,

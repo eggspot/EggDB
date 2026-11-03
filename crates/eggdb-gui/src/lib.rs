@@ -28,9 +28,6 @@ pub mod connect_screen;
 /// The GUI's link to a database: opening files and connecting to servers, with failures in
 /// the card's words (`docs/ux/workspace.md` 1).
 pub mod connection;
-/// The client's screens in order: the connect card until a database opens, then the main
-/// window on it (`docs/ux/workspace.md` 1.5 to 1.7).
-pub mod workspace;
 /// The SQL dialects a query tab runs in.
 pub mod dialect;
 /// The query editor: text, cursor, selection and editing commands.
@@ -40,6 +37,9 @@ mod font;
 pub mod grid;
 /// SQL syntax highlighting for the editor.
 pub mod highlight;
+/// The inspector: the selected object's columns, indexes, DDL and sample rows
+/// (`docs/ux/workspace.md` 4.3).
+pub mod inspector;
 /// The window layout: panes, splitters and their sizes.
 pub mod layout;
 /// The main window: what it draws and how it answers input.
@@ -47,18 +47,15 @@ pub mod main_window;
 /// The object browser: the sidebar's tree of the catalog, its filter and keys
 /// (`docs/ux/workspace.md` 4.1, 4.2).
 pub mod object_browser;
+/// The plan view: `EXPLAIN`'s answer read into a tree, laid out top-down with each node's
+/// cost, rows, time and buffers, its hot nodes tinted and its keys (`docs/ux/workspace.md` 5).
+pub mod plan_view;
 /// PNG encoding of rendered frames, for screenshots and tests.
 pub mod png;
 /// The pointer and the caret (`docs/ux/workspace.md` 6): hit testing on the accessibility
 /// tree's bounds, double and triple clicks, hover and pressed states, the caret's blink, the
 /// window's minimum size and how pasted text is cleaned.
 pub mod pointer;
-/// The plan view: `EXPLAIN`'s answer read into a tree, laid out top-down with each node's
-/// cost, rows, time and buffers, its hot nodes tinted and its keys (`docs/ux/workspace.md` 5).
-pub mod plan_view;
-/// The inspector: the selected object's columns, indexes, DDL and sample rows
-/// (`docs/ux/workspace.md` 4.3).
-pub mod inspector;
 /// The query tab: its editor, dialect, runs, results and inline errors
 /// (`docs/ux/workspace.md` 2).
 pub mod query_tab;
@@ -67,6 +64,9 @@ pub mod statements;
 /// The status line's and status bar's strings (`docs/ux/workspace.md` 2.4).
 pub mod status_line;
 mod system_faces;
+/// The client's screens in order: the connect card until a database opens, then the main
+/// window on it (`docs/ux/workspace.md` 1.5 to 1.7).
+pub mod workspace;
 
 pub use canvas::{Canvas, Rect};
 pub use color::{Rgba, Theme, ThemeKind};

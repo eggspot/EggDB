@@ -768,7 +768,13 @@ fn messages_and_cursors_past_the_memory_budget_fail_with_exceeded_memory_limit()
     oversized.extend_from_slice(&0i32.to_le_bytes());
     oversized.extend_from_slice(&OP_MSG.to_le_bytes());
     let mut output = Vec::new();
-    serve_stream(&shared, &mut session(true), oversized.as_slice(), &mut output).unwrap();
+    serve_stream(
+        &shared,
+        &mut session(true),
+        oversized.as_slice(),
+        &mut output,
+    )
+    .unwrap();
     let refused = replies(&output);
     assert_eq!(refused.len(), 1);
     assert_eq!(refused[0].1, 9);
@@ -808,7 +814,12 @@ fn messages_and_cursors_past_the_memory_budget_fail_with_exceeded_memory_limit()
     let answered = replies(&output);
     assert_eq!(answered.len(), 5);
     for inserted in &answered[..4] {
-        assert_eq!(inserted.2.get("n"), Some(&Bson::Int32(10)), "{:?}", inserted.2);
+        assert_eq!(
+            inserted.2.get("n"),
+            Some(&Bson::Int32(10)),
+            "{:?}",
+            inserted.2
+        );
     }
     assert_eq!(answered[4].2.get("code"), Some(&Bson::Int32(146)));
     assert_eq!(budget.used_bytes(), 0);

@@ -159,7 +159,10 @@ impl CatalogType {
     }
 
     pub(crate) fn is_text_like(self) -> bool {
-        matches!(self, Self::Name | Self::InternalChar | Self::NodeTree | Self::RefCursor)
+        matches!(
+            self,
+            Self::Name | Self::InternalChar | Self::NodeTree | Self::RefCursor
+        )
     }
 
     pub(crate) fn is_identifier(self) -> bool {

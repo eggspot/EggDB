@@ -13,8 +13,8 @@ use eggdb::sql::Dialect;
 use eggdb_gui::connection::EngineConnector;
 use eggdb_gui::inspector;
 use eggdb_gui::main_window::{
-    self, Faces, MainWindow, NODE_DDL, NODE_FILTER, NODE_FIRST_BLOCK, NODE_INSPECTOR, NODE_OBJECTS, WindowFocus,
-    accessibility_tree,
+    self, Faces, MainWindow, NODE_DDL, NODE_FILTER, NODE_FIRST_BLOCK, NODE_INSPECTOR, NODE_OBJECTS,
+    WindowFocus, accessibility_tree,
 };
 use eggdb_gui::object_browser::{Group, TreeItem};
 use eggdb_gui::png::encode_png;
@@ -76,10 +76,18 @@ fn make_shop(path: &Path) {
 fn opened(directory: &Path) -> Workspace {
     let path = directory.join("shop.eggdb");
     make_shop(&path);
-    let mut workspace = Workspace::new(Arc::new(EngineConnector), None, directory.to_path_buf(), false);
+    let mut workspace = Workspace::new(
+        Arc::new(EngineConnector),
+        None,
+        directory.to_path_buf(),
+        false,
+    );
     workspace.open_typed(&path.display().to_string(), Instant::now());
     workspace.wait_for_open(LIMIT);
-    assert!(matches!(workspace.screen(), Screen::Main(_)), "the file opened");
+    assert!(
+        matches!(workspace.screen(), Screen::Main(_)),
+        "the file opened"
+    );
     workspace
 }
 
@@ -104,11 +112,19 @@ fn chord(workspace: &mut Workspace, key: Key, shift: bool, primary: bool) {
 }
 
 fn labels(window: &MainWindow) -> Vec<String> {
-    window.tree.rows().into_iter().map(|row| row.label).collect()
+    window
+        .tree
+        .rows()
+        .into_iter()
+        .map(|row| row.label)
+        .collect()
 }
 
 fn node(nodes: &[AccessNode], id: u32) -> &AccessNode {
-    nodes.iter().find(|node| node.id == id).unwrap_or_else(|| panic!("node {id} is in the tree"))
+    nodes
+        .iter()
+        .find(|node| node.id == id)
+        .unwrap_or_else(|| panic!("node {id} is in the tree"))
 }
 
 #[test]
@@ -116,7 +132,10 @@ fn the_tree_lists_every_model_in_order_with_counts_and_filters() {
     let directory = scratch("groups");
     let mut workspace = opened(&directory);
     let shown = window(&mut workspace).tree.rows();
-    let pairs: Vec<(String, Option<String>)> = shown.iter().map(|row| (row.label.clone(), row.detail.clone())).collect();
+    let pairs: Vec<(String, Option<String>)> = shown
+        .iter()
+        .map(|row| (row.label.clone(), row.detail.clone()))
+        .collect();
     let expected: Vec<(String, Option<String>)> = [
         ("shop", None),
         ("Tables", Some("3")),
@@ -145,7 +164,11 @@ fn the_tree_lists_every_model_in_order_with_counts_and_filters() {
     assert!(labels(window(&mut workspace)).contains(&"orders".to_owned()));
     assert!(!labels(window(&mut workspace)).contains(&"customers".to_owned()));
     let filtered = main_window::draw(window(&mut workspace), theme, BOX_FACES);
-    assert_eq!(filtered.pixel(6, 50), Some(theme.focus_ring), "the filter has the ring");
+    assert_eq!(
+        filtered.pixel(6, 50),
+        Some(theme.focus_ring),
+        "the filter has the ring"
+    );
     let tree = accessibility_tree(window(&mut workspace));
     assert_eq!(node(&tree, NODE_FILTER).value.as_deref(), Some("ord"));
     assert!(node(&tree, NODE_FILTER).state.focused);
@@ -161,18 +184,38 @@ fn keys_move_expand_type_ahead_and_open_a_table_in_a_new_tab() {
     chord(&mut workspace, Key::Character('1'), false, true);
     press(&mut workspace, Key::Down);
     press(&mut workspace, Key::Left);
-    assert_eq!(labels(window(&mut workspace))[2], "Views", "Left collapsed Tables");
+    assert_eq!(
+        labels(window(&mut workspace))[2],
+        "Views",
+        "Left collapsed Tables"
+    );
     press(&mut workspace, Key::Right);
-    assert_eq!(labels(window(&mut workspace))[2], "customers", "Right expanded it");
+    assert_eq!(
+        labels(window(&mut workspace))[2],
+        "customers",
+        "Right expanded it"
+    );
     press(&mut workspace, Key::Down);
     press(&mut workspace, Key::Down);
     assert_eq!(window(&mut workspace).tree.current, TreeItem::Table(1));
     let tree = accessibility_tree(window(&mut workspace));
-    let rows: Vec<&AccessNode> = tree.iter().filter(|node| node.parent == Some(NODE_OBJECTS)).collect();
-    let orders = rows.iter().find(|node| node.name == "orders").expect("orders is a tree row");
+    let rows: Vec<&AccessNode> = tree
+        .iter()
+        .filter(|node| node.parent == Some(NODE_OBJECTS))
+        .collect();
+    let orders = rows
+        .iter()
+        .find(|node| node.name == "orders")
+        .expect("orders is a tree row");
     assert!(orders.state.focused);
-    assert_eq!(orders.description.as_deref(), Some("level 3, 2 of 3, collapsed"));
-    assert_eq!(rows[0].description.as_deref(), Some("read-write, level 1, 1 of 1, expanded"));
+    assert_eq!(
+        orders.description.as_deref(),
+        Some("level 3, 2 of 3, collapsed")
+    );
+    assert_eq!(
+        rows[0].description.as_deref(),
+        Some("read-write, level 1, 1 of 1, expanded")
+    );
     press(&mut workspace, Key::Enter);
     workspace.wait_for_run(LIMIT);
     let shown = window(&mut workspace);
@@ -181,12 +224,22 @@ fn keys_move_expand_type_ahead_and_open_a_table_in_a_new_tab() {
     assert_eq!(shown.tab.editor.text(), "SELECT * FROM orders LIMIT 100;");
     assert_eq!(shown.tab.grid.as_ref().map(|grid| grid.rows.len()), Some(3));
     chord(&mut workspace, Key::Enter, true, false);
-    assert_eq!(window(&mut workspace).tab.editor.text(), "SELECT * FROM orders LIMIT 100;orders");
+    assert_eq!(
+        window(&mut workspace).tab.editor.text(),
+        "SELECT * FROM orders LIMIT 100;orders"
+    );
     press(&mut workspace, Key::Character('p'));
     press(&mut workspace, Key::Character('r'));
-    assert_eq!(window(&mut workspace).tree.current, TreeItem::Table(2), "`pr` moves to products");
+    assert_eq!(
+        window(&mut workspace).tree.current,
+        TreeItem::Table(2),
+        "`pr` moves to products"
+    );
     press(&mut workspace, Key::End);
-    assert_eq!(window(&mut workspace).tree.current, TreeItem::Group(Group::Keys));
+    assert_eq!(
+        window(&mut workspace).tree.current,
+        TreeItem::Group(Group::Keys)
+    );
     press(&mut workspace, Key::Tab);
     assert_eq!(window(&mut workspace).focus, WindowFocus::Tab);
 }
@@ -199,7 +252,10 @@ fn ddl_in_the_query_tab_refreshes_the_tree() {
     workspace.wait_for_run(LIMIT);
     let shown = labels(window(&mut workspace));
     assert!(shown.contains(&"zebras".to_owned()), "{shown:?}");
-    assert_eq!(window(&mut workspace).tree.rows()[1].detail.as_deref(), Some("4"));
+    assert_eq!(
+        window(&mut workspace).tree.rows()[1].detail.as_deref(),
+        Some("4")
+    );
 }
 
 #[test]
@@ -207,7 +263,10 @@ fn the_inspector_docks_from_1440_px_and_shows_the_selected_table() {
     let directory = scratch("inspector");
     let mut workspace = opened(&directory);
     let theme = Theme::of(ThemeKind::Light);
-    assert!(!window(&mut workspace).inspector.is_open(), "closed at 1280");
+    assert!(
+        !window(&mut workspace).inspector.is_open(),
+        "closed at 1280"
+    );
     window(&mut workspace).set_width(1440);
     assert!(window(&mut workspace).inspector.docked);
     chord(&mut workspace, Key::Character('1'), false, true);
@@ -217,37 +276,100 @@ fn the_inspector_docks_from_1440_px_and_shows_the_selected_table() {
     press(&mut workspace, Key::Space);
     let shown = window(&mut workspace);
     assert_eq!(shown.tree.selected, Some(TreeItem::Table(1)));
-    let sample = shown.inspector.sample.clone().expect("the sample was fetched");
-    assert_eq!((sample.of.as_str(), sample.row_count, sample.rows.rows.len()), ("orders", Some(3), 3));
+    let sample = shown
+        .inspector
+        .sample
+        .clone()
+        .expect("the sample was fetched");
+    assert_eq!(
+        (sample.of.as_str(), sample.row_count, sample.rows.rows.len()),
+        ("orders", Some(3), 3)
+    );
     let description = inspector::describe(&shown.tree, TreeItem::Table(1), Some(&sample));
     assert_eq!(description.subtitle, "Table · 3 rows");
-    let headings: Vec<String> = description.blocks().into_iter().map(|(_, heading)| heading).collect();
-    assert_eq!(headings, ["Columns (3)", "Indexes (1)", "DDL", "Sample rows"]);
-    assert!(description.ddl.as_deref().is_some_and(|ddl| ddl.starts_with("CREATE TABLE")));
+    let headings: Vec<String> = description
+        .blocks()
+        .into_iter()
+        .map(|(_, heading)| heading)
+        .collect();
+    assert_eq!(
+        headings,
+        ["Columns (3)", "Indexes (1)", "DDL", "Sample rows"]
+    );
+    assert!(
+        description
+            .ddl
+            .as_deref()
+            .is_some_and(|ddl| ddl.starts_with("CREATE TABLE"))
+    );
     let docked = main_window::draw(shown, theme, BOX_FACES);
     assert_eq!(docked.width(), 1440);
-    assert_eq!(docked.pixel(1160, 400), Some(theme.border), "the inspector's left border");
-    assert_eq!(docked.pixel(1300, 60), Some(theme.bg1), "the inspector's background");
-    assert_eq!(docked.pixel(1100, 250), Some(theme.bg0), "the editor ends before it");
+    assert_eq!(
+        docked.pixel(1160, 400),
+        Some(theme.border),
+        "the inspector's left border"
+    );
+    assert_eq!(
+        docked.pixel(1300, 60),
+        Some(theme.bg1),
+        "the inspector's background"
+    );
+    assert_eq!(
+        docked.pixel(1100, 250),
+        Some(theme.bg0),
+        "the editor ends before it"
+    );
     let tree = accessibility_tree(shown);
     let panel = node(&tree, NODE_INSPECTOR);
-    assert_eq!((panel.bounds.x, panel.bounds.y, panel.bounds.width, panel.bounds.height), (1160.0, 44.0, 280.0, 732.0));
+    assert_eq!(
+        (
+            panel.bounds.x,
+            panel.bounds.y,
+            panel.bounds.width,
+            panel.bounds.height
+        ),
+        (1160.0, 44.0, 280.0, 732.0)
+    );
     assert_eq!(node(&tree, NODE_FIRST_BLOCK).name, "Columns (3)");
-    assert_eq!(node(&tree, NODE_FIRST_BLOCK).value.as_deref(), Some("expanded"));
-    assert!(node(&tree, NODE_DDL).state.read_only, "the DDL is read-only");
+    assert_eq!(
+        node(&tree, NODE_FIRST_BLOCK).value.as_deref(),
+        Some("expanded")
+    );
+    assert!(
+        node(&tree, NODE_DDL).state.read_only,
+        "the DDL is read-only"
+    );
     assert_eq!(node(&tree, NODE_DDL).role, AccessRole::TextArea);
     window(&mut workspace).set_width(1280);
-    assert!(!window(&mut workspace).inspector.is_open(), "closed again at 1280");
+    assert!(
+        !window(&mut workspace).inspector.is_open(),
+        "closed again at 1280"
+    );
     let closed = main_window::draw(window(&mut workspace), theme, BOX_FACES);
     chord(&mut workspace, Key::Character('i'), false, true);
     assert!(window(&mut workspace).inspector.overlay);
     let overlay = main_window::draw(window(&mut workspace), theme, BOX_FACES);
     assert_eq!(overlay.width(), 1280);
-    assert_eq!(overlay.pixel(1000, 400), Some(theme.border), "the overlay's left border");
-    assert_eq!(overlay.pixel(1100, 250), Some(theme.bg1), "the overlay covers the editor");
-    assert_ne!(overlay.pixel(995, 250), closed.pixel(995, 250), "the shadow darkens the editor");
+    assert_eq!(
+        overlay.pixel(1000, 400),
+        Some(theme.border),
+        "the overlay's left border"
+    );
+    assert_eq!(
+        overlay.pixel(1100, 250),
+        Some(theme.bg1),
+        "the overlay covers the editor"
+    );
+    assert_ne!(
+        overlay.pixel(995, 250),
+        closed.pixel(995, 250),
+        "the shadow darkens the editor"
+    );
     press(&mut workspace, Key::Escape);
-    assert!(!window(&mut workspace).inspector.is_open(), "Esc closes the overlay");
+    assert!(
+        !window(&mut workspace).inspector.is_open(),
+        "Esc closes the overlay"
+    );
 }
 
 #[test]
@@ -269,6 +391,14 @@ fn the_binary_draws_the_docked_inspector_at_1440() {
     workspace.open_typed("shop.eggdb", Instant::now());
     workspace.wait_for_open(LIMIT);
     window(&mut workspace).set_width(1440);
-    let library = main_window::draw(window(&mut workspace), Theme::of(ThemeKind::Light), BOX_FACES);
-    assert_eq!(frame, encode_png(&library), "the binary's frame is the library's");
+    let library = main_window::draw(
+        window(&mut workspace),
+        Theme::of(ThemeKind::Light),
+        BOX_FACES,
+    );
+    assert_eq!(
+        frame,
+        encode_png(&library),
+        "the binary's frame is the library's"
+    );
 }

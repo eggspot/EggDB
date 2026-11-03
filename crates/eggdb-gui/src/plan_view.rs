@@ -58,10 +58,14 @@ impl fmt::Display for PlanError {
         let text = match self {
             Self::Empty => "The engine's plan has no node.".to_owned(),
             Self::TooManyNodes => {
-                format!("The plan has more than {MAX_NODES} nodes: switch to Text (Alt+T) to read it.")
+                format!(
+                    "The plan has more than {MAX_NODES} nodes: switch to Text (Alt+T) to read it."
+                )
             }
             Self::TooDeep => {
-                format!("The plan is deeper than {MAX_DEPTH} levels: switch to Text (Alt+T) to read it.")
+                format!(
+                    "The plan is deeper than {MAX_DEPTH} levels: switch to Text (Alt+T) to read it."
+                )
             }
             Self::TooManyLines => format!("The plan has more than {MAX_LINES} lines."),
             Self::NotAPlan => "The statement's answer is not a plan.".to_owned(),
@@ -154,8 +158,15 @@ impl Plan {
     /// Reads a statement's answer to `EXPLAIN`: PostgreSQL's one-column text form, SQLite's
     /// `id, parent, notused, detail` rows or MySQL's tabular rows.
     pub fn from_result(table: &ResultTable) -> Result<Self, PlanError> {
-        let column = |name: &str| table.columns.iter().position(|column| column.eq_ignore_ascii_case(name));
-        if let (Some(id), Some(parent), Some(detail)) = (column("id"), column("parent"), column("detail")) {
+        let column = |name: &str| {
+            table
+                .columns
+                .iter()
+                .position(|column| column.eq_ignore_ascii_case(name))
+        };
+        if let (Some(id), Some(parent), Some(detail)) =
+            (column("id"), column("parent"), column("detail"))
+        {
             return Self::from_sqlite_rows(&table.rows, (id, parent, detail));
         }
         if let (Some(name), Some(kind)) = (column("table"), column("type")) {
@@ -192,7 +203,11 @@ impl Plan {
                 continue;
             }
             if plan.nodes.is_empty() {
-                plan.nodes.push(node_from_text(body.strip_prefix("->").unwrap_or(body).trim_start(), None, 0));
+                plan.nodes.push(node_from_text(
+                    body.strip_prefix("->").unwrap_or(body).trim_start(),
+                    None,
+                    0,
+                ));
                 open.push((0, 0));
                 continue;
             }
@@ -216,7 +231,8 @@ impl Plan {
                     return Err(PlanError::TooManyNodes);
                 }
                 let index = plan.nodes.len();
-                plan.nodes.push(node_from_text(rest.trim_start(), Some(parent), depth));
+                plan.nodes
+                    .push(node_from_text(rest.trim_start(), Some(parent), depth));
                 plan.nodes[parent].children.push(index);
                 open.push((indent, index));
                 continue;
@@ -237,21 +253,25 @@ impl Plan {
             return Err(PlanError::Empty);
         }
         plan.analyze = plan.execution_ms.is_some()
-            || plan
-                .nodes
-                .iter()
-                .any(|node| node.actual_rows.is_some() || node.actual_time_ms.is_some() || node.never_executed);
+            || plan.nodes.iter().any(|node| {
+                node.actual_rows.is_some() || node.actual_time_ms.is_some() || node.never_executed
+            });
         Ok(plan)
     }
 
     /// Reads SQLite's `EXPLAIN QUERY PLAN` rows, `columns` being the places of `id`,
     /// `parent` and `detail`: a row whose parent is no earlier row's id hangs under the root,
     /// which is `QUERY PLAN` when more than one row has none.
-    pub fn from_sqlite_rows(rows: &[Vec<Option<String>>], columns: (usize, usize, usize)) -> Result<Self, PlanError> {
+    pub fn from_sqlite_rows(
+        rows: &[Vec<Option<String>>],
+        columns: (usize, usize, usize),
+    ) -> Result<Self, PlanError> {
         if rows.len() > MAX_NODES {
             return Err(PlanError::TooManyNodes);
         }
-        let cell = |row: &Vec<Option<String>>, at: usize| row.get(at).cloned().flatten().unwrap_or_default();
+        let cell = |row: &Vec<Option<String>>, at: usize| {
+            row.get(at).cloned().flatten().unwrap_or_default()
+        };
         let mut text = Vec::with_capacity(rows.len() + 1);
         text.push("QUERY PLAN".to_owned());
         let mut ids: Vec<(String, usize)> = Vec::with_capacity(rows.len());
@@ -260,7 +280,11 @@ impl Plan {
             ..PlanNode::default()
         }];
         for row in rows {
-            let (id, parent_id, detail) = (cell(row, columns.0), cell(row, columns.1), cell(row, columns.2));
+            let (id, parent_id, detail) = (
+                cell(row, columns.0),
+                cell(row, columns.1),
+                cell(row, columns.2),
+            );
             let parent = ids
                 .iter()
                 .find(|(known, _)| *known == parent_id)
@@ -270,7 +294,10 @@ impl Plan {
                 return Err(PlanError::TooDeep);
             }
             let branch = if depth > 1 { "`--" } else { "" };
-            text.push(format!("{}{branch}{detail}", "   ".repeat(depth.saturating_sub(1))));
+            text.push(format!(
+                "{}{branch}{detail}",
+                "   ".repeat(depth.saturating_sub(1))
+            ));
             let index = nodes.len();
             nodes.push(PlanNode {
                 relation: sqlite_relation(&detail),
@@ -307,7 +334,9 @@ impl Plan {
         if rows.len() >= MAX_NODES {
             return Err(PlanError::TooManyNodes);
         }
-        let cell = |row: &Vec<Option<String>>, at: Option<usize>| at.and_then(|at| row.get(at).cloned().flatten());
+        let cell = |row: &Vec<Option<String>>, at: Option<usize>| {
+            at.and_then(|at| row.get(at).cloned().flatten())
+        };
         let reads: Vec<PlanNode> = rows
             .iter()
             .map(|row| {
@@ -350,7 +379,10 @@ impl Plan {
 
     fn read_footer(&mut self, body: &str) {
         let milliseconds = |rest: &str| number(rest.trim().trim_end_matches("ms").trim());
-        if let Some(rest) = body.strip_prefix("Planning Time:").or_else(|| body.strip_prefix("Planning time:")) {
+        if let Some(rest) = body
+            .strip_prefix("Planning Time:")
+            .or_else(|| body.strip_prefix("Planning time:"))
+        {
             self.planning_ms = milliseconds(rest);
         } else if let Some(rest) = body
             .strip_prefix("Execution Time:")
@@ -404,10 +436,19 @@ impl Plan {
             Some(self.own_time_ms(index)? / root)
         };
         let by_cost = || {
-            let root = self.nodes.first()?.cost.map(|(_, total)| total).filter(|total| *total > 0.0)?;
+            let root = self
+                .nodes
+                .first()?
+                .cost
+                .map(|(_, total)| total)
+                .filter(|total| *total > 0.0)?;
             Some(self.own_cost(index)? / root)
         };
-        let share = if self.analyze { by_time().or_else(by_cost) } else { by_cost() };
+        let share = if self.analyze {
+            by_time().or_else(by_cost)
+        } else {
+            by_cost()
+        };
         share.map(|share| share.clamp(0.0, 1.0))
     }
 
@@ -426,8 +467,12 @@ impl Plan {
     pub fn misestimate(&self, index: usize) -> Option<(f64, f64)> {
         let node = self.nodes.get(index)?;
         let (estimated, actual) = (node.estimated_rows?, node.actual_rows?);
-        let (high, low) = (estimated.max(actual).max(1.0), estimated.min(actual).max(1.0));
-        (high / low >= MISESTIMATE_FACTOR).then(|| (estimated, self.actual_rows_total(index).unwrap_or(actual)))
+        let (high, low) = (
+            estimated.max(actual).max(1.0),
+            estimated.min(actual).max(1.0),
+        );
+        (high / low >= MISESTIMATE_FACTOR)
+            .then(|| (estimated, self.actual_rows_total(index).unwrap_or(actual)))
     }
 
     /// The node's second row without its share: `cost 0.29..8.31 · rows 1` under `EXPLAIN`,
@@ -446,7 +491,10 @@ impl Plan {
                 parts.push(format!("rows {}", rows_count(rows)));
             }
             if let Some(pages) = node.buffers {
-                parts.push(format!("buffers {}", thousands(usize::try_from(pages).unwrap_or(usize::MAX))));
+                parts.push(format!(
+                    "buffers {}",
+                    thousands(usize::try_from(pages).unwrap_or(usize::MAX))
+                ));
             }
         } else {
             if let Some((startup, total)) = node.cost {
@@ -468,7 +516,11 @@ impl Plan {
             pieces.push((facts, Ink::Secondary));
         }
         let mut add = |text: String, ink: Ink| {
-            let text = if pieces.is_empty() { text } else { format!(" · {text}") };
+            let text = if pieces.is_empty() {
+                text
+            } else {
+                format!(" · {text}")
+            };
             pieces.push((text, ink));
         };
         let share = self.share(index);
@@ -478,7 +530,10 @@ impl Plan {
             _ => {}
         }
         if let Some((estimated, actual)) = self.misestimate(index) {
-            add(format!("est. {} → {}", rows_count(estimated), rows_count(actual)), Ink::Warning);
+            add(
+                format!("est. {} → {}", rows_count(estimated), rows_count(actual)),
+                Ink::Warning,
+            );
         }
         pieces
     }
@@ -498,7 +553,10 @@ impl Plan {
                 parts.push(format!("rows {}", rows_count(rows)));
             }
             if let Some(pages) = node.buffers {
-                parts.push(format!("buffers {}", thousands(usize::try_from(pages).unwrap_or(usize::MAX))));
+                parts.push(format!(
+                    "buffers {}",
+                    thousands(usize::try_from(pages).unwrap_or(usize::MAX))
+                ));
             }
         } else {
             if let Some((startup, total)) = node.cost {
@@ -592,7 +650,10 @@ fn read_group(node: &mut PlanNode, group: &str) {
 }
 
 fn number(text: &str) -> Option<f64> {
-    text.trim().parse::<f64>().ok().filter(|value| value.is_finite() && *value >= 0.0)
+    text.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value >= 0.0)
 }
 
 fn range_of(text: &str) -> Option<(f64, f64)> {
@@ -673,7 +734,11 @@ pub struct ExplainStatements {
 /// rolled back when the statement writes; SQLite's `EXPLAIN QUERY PLAN`. A statement that
 /// already starts with `EXPLAIN` runs as it is. The error is the `Messages` text for a
 /// dialect EggDB cannot explain in yet.
-pub fn explain_statements(dialect: QueryDialect, statement: &str, analyze: bool) -> Result<ExplainStatements, String> {
+pub fn explain_statements(
+    dialect: QueryDialect,
+    statement: &str,
+    analyze: bool,
+) -> Result<ExplainStatements, String> {
     let words: Vec<String> = statement
         .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
         .filter(|word| !word.is_empty())
@@ -773,7 +838,11 @@ pub fn layout(plan: &Plan, widths: &[f32]) -> PlanLayout {
     let mut subtree = vec![0.0_f32; count];
     for index in (0..count).rev() {
         let children = &plan.nodes[index].children;
-        let together: f32 = children.iter().filter(|&&child| child > index && child < count).map(|&child| subtree[child]).sum::<f32>()
+        let together: f32 = children
+            .iter()
+            .filter(|&&child| child > index && child < count)
+            .map(|&child| subtree[child])
+            .sum::<f32>()
             + SIBLING_GAP * children.len().saturating_sub(1) as f32;
         subtree[index] = width_of(index).max(together);
     }
@@ -789,7 +858,12 @@ pub fn layout(plan: &Plan, widths: &[f32]) -> PlanLayout {
             y: node.depth as f32 * LEVEL_SPACING,
             w,
         });
-        let children: Vec<usize> = node.children.iter().copied().filter(|&child| child > index && child < count).collect();
+        let children: Vec<usize> = node
+            .children
+            .iter()
+            .copied()
+            .filter(|&child| child > index && child < count)
+            .collect();
         let together: f32 = children.iter().map(|&child| subtree[child]).sum::<f32>()
             + SIBLING_GAP * children.len().saturating_sub(1) as f32;
         let mut pen = left[index] + (subtree[index] - together) / 2.0;
@@ -801,7 +875,11 @@ pub fn layout(plan: &Plan, widths: &[f32]) -> PlanLayout {
     PlanLayout {
         boxes,
         width: subtree.first().copied().unwrap_or(0.0),
-        height: if count == 0 { 0.0 } else { deepest as f32 * LEVEL_SPACING + NODE_HEIGHT },
+        height: if count == 0 {
+            0.0
+        } else {
+            deepest as f32 * LEVEL_SPACING + NODE_HEIGHT
+        },
     }
 }
 
@@ -855,7 +933,11 @@ impl PlanView {
     pub fn new(plan: Plan, statement: Range<usize>, statement_text: String) -> Self {
         let widths: Vec<f32> = (0..plan.nodes.len())
             .map(|index| {
-                let second: String = plan.second_row(index).into_iter().map(|(text, _)| text).collect();
+                let second: String = plan
+                    .second_row(index)
+                    .into_iter()
+                    .map(|(text, _)| text)
+                    .collect();
                 node_width(
                     estimated_width(&plan.nodes[index].operation, BODY.0),
                     estimated_width(&second, SMALL.0),
@@ -891,7 +973,9 @@ impl PlanView {
         let next = match press.key {
             Key::Up => node.parent,
             Key::Down => node.children.first().copied(),
-            Key::Left => place.and_then(|place| place.checked_sub(1)).and_then(|place| siblings.get(place).copied()),
+            Key::Left => place
+                .and_then(|place| place.checked_sub(1))
+                .and_then(|place| siblings.get(place).copied()),
             Key::Right => place.and_then(|place| siblings.get(place + 1).copied()),
             Key::Home => Some(0),
             Key::Enter | Key::Space => {
@@ -921,7 +1005,11 @@ impl PlanView {
     /// The editor's bytes node `index` is about: the first whole-word mention of the table
     /// it reads in the statement, else the whole statement.
     pub fn node_range(&self, index: usize) -> Range<usize> {
-        let relation = self.plan.nodes.get(index).and_then(|node| node.relation.as_deref());
+        let relation = self
+            .plan
+            .nodes
+            .get(index)
+            .and_then(|node| node.relation.as_deref());
         match relation.and_then(|name| find_word(&self.statement_text, name)) {
             Some(at) => {
                 let start = self.statement.start + at;
@@ -992,11 +1080,17 @@ fn find_word(haystack: &str, word: &str) -> Option<usize> {
 }
 
 fn inside(rect: Rect, area: Rect) -> bool {
-    rect.x >= area.x && rect.y >= area.y && rect.x + rect.w <= area.x + area.w && rect.y + rect.h <= area.y + area.h
+    rect.x >= area.x
+        && rect.y >= area.y
+        && rect.x + rect.w <= area.x + area.w
+        && rect.y + rect.h <= area.y + area.h
 }
 
 fn point_inside(point: (f32, f32), area: Rect) -> bool {
-    point.0 >= area.x && point.1 >= area.y && point.0 <= area.x + area.w && point.1 <= area.y + area.h
+    point.0 >= area.x
+        && point.1 >= area.y
+        && point.0 <= area.x + area.w
+        && point.1 <= area.y + area.h
 }
 
 /// Draws the plan's tree in `area` (`docs/ux/workspace.md` 5.2 to 5.4): the links, each
@@ -1005,7 +1099,9 @@ fn point_inside(point: (f32, f32), area: Rect) -> bool {
 pub(crate) fn draw(paint: &mut Painter<'_, '_>, view: &PlanView, area: Rect) {
     let theme = paint.theme;
     let faces = paint.faces;
-    let rects: Vec<Option<Rect>> = (0..view.plan.nodes.len()).map(|index| view.node_rect(index, area)).collect();
+    let rects: Vec<Option<Rect>> = (0..view.plan.nodes.len())
+        .map(|index| view.node_rect(index, area))
+        .collect();
     for (index, node) in view.plan.nodes.iter().enumerate() {
         let Some(Some(parent)) = rects.get(index) else {
             continue;
@@ -1016,7 +1112,12 @@ pub(crate) fn draw(paint: &mut Painter<'_, '_>, view: &PlanView, area: Rect) {
                 continue;
             };
             let to_x = child.x + (child.w / 2.0).floor();
-            let points = [from, (from.0, from.1 + 8.0), (to_x, from.1 + 8.0), (to_x, child.y)];
+            let points = [
+                from,
+                (from.0, from.1 + 8.0),
+                (to_x, from.1 + 8.0),
+                (to_x, child.y),
+            ];
             if points.iter().all(|&point| point_inside(point, area)) {
                 paint.polyline(&points, 1.0, theme.border_strong);
             }
@@ -1031,7 +1132,11 @@ pub(crate) fn draw(paint: &mut Painter<'_, '_>, view: &PlanView, area: Rect) {
             Heat::Warm => (theme.warning, 2.0),
             Heat::Hot => (theme.error, 2.0),
         };
-        let fill = if view.selected == Some(index) { theme.selection } else { theme.bg0 };
+        let fill = if view.selected == Some(index) {
+            theme.selection
+        } else {
+            theme.bg0
+        };
         paint.canvas.fill_rounded_rect(rect, RADIUS, border);
         let inner = Rect::new(
             rect.x + border_width,
@@ -1039,10 +1144,24 @@ pub(crate) fn draw(paint: &mut Painter<'_, '_>, view: &PlanView, area: Rect) {
             rect.w - 2.0 * border_width,
             rect.h - 2.0 * border_width,
         );
-        paint.canvas.fill_rounded_rect(inner, RADIUS - border_width, fill);
+        paint
+            .canvas
+            .fill_rounded_rect(inner, RADIUS - border_width, fill);
         let text_width = rect.w - 2.0 * NODE_PADDING;
-        let operation = elided(faces.ui, &view.plan.nodes[index].operation, text_width, BODY.0);
-        paint.text(faces.ui, &operation, rect.x + NODE_PADDING, rect.y + 4.0, BODY, theme.text_primary);
+        let operation = elided(
+            faces.ui,
+            &view.plan.nodes[index].operation,
+            text_width,
+            BODY.0,
+        );
+        paint.text(
+            faces.ui,
+            &operation,
+            rect.x + NODE_PADDING,
+            rect.y + 4.0,
+            BODY,
+            theme.text_primary,
+        );
         let mut pen = rect.x + NODE_PADDING;
         let right = rect.x + rect.w - NODE_PADDING;
         for (text, ink) in view.plan.second_row(index) {
@@ -1057,12 +1176,26 @@ pub(crate) fn draw(paint: &mut Painter<'_, '_>, view: &PlanView, area: Rect) {
             }
             pen = paint.text(faces.ui, &shown, pen, rect.y + 22.0, SMALL, color);
         }
-        paint.rect(rect.x + NODE_PADDING, rect.y + 34.0, text_width, 4.0, theme.bg2);
+        paint.rect(
+            rect.x + NODE_PADDING,
+            rect.y + 34.0,
+            text_width,
+            4.0,
+            theme.bg2,
+        );
         if let Some(share) = view.plan.share(index) {
-            paint.rect(rect.x + NODE_PADDING, rect.y + 34.0, text_width * share as f32, 4.0, theme.accent);
+            paint.rect(
+                rect.x + NODE_PADDING,
+                rect.y + 34.0,
+                text_width * share as f32,
+                4.0,
+                theme.accent,
+            );
         }
         if view.focused && view.current == index {
-            paint.canvas.stroke_outside_rounded_rect(rect, RADIUS, 2.0, theme.focus_ring);
+            paint
+                .canvas
+                .stroke_outside_rounded_rect(rect, RADIUS, 2.0, theme.focus_ring);
         }
     }
 }
@@ -1119,7 +1252,10 @@ Planning Time: 0.120 ms
 Execution Time: 10.400 ms";
         let plan = Plan::from_postgresql_text(&lines(text)).unwrap();
         assert!(plan.analyze);
-        assert_eq!((plan.planning_ms, plan.execution_ms), (Some(0.12), Some(10.4)));
+        assert_eq!(
+            (plan.planning_ms, plan.execution_ms),
+            (Some(0.12), Some(10.4))
+        );
         assert_eq!(plan.nodes[0].buffers, Some(38));
         let index_scan = plan.total_time_ms(2).unwrap();
         assert!((index_scan - 3.0).abs() < 1e-9, "{index_scan}");
@@ -1132,7 +1268,11 @@ Execution Time: 10.400 ms";
         assert_eq!(pieces[2], (" · est. 10 → 1,204".to_owned(), Ink::Warning));
         assert_eq!(plan.heat(2), Heat::Warm);
         assert_eq!(plan.heat(0), Heat::Plain);
-        assert!(plan.spoken(1).contains("62 percent, hot, misestimated"), "{}", plan.spoken(1));
+        assert!(
+            plan.spoken(1).contains("62 percent, hot, misestimated"),
+            "{}",
+            plan.spoken(1)
+        );
     }
 
     #[test]
@@ -1148,7 +1288,9 @@ Execution Time: 10.400 ms";
 
     #[test]
     fn a_plan_without_costs_has_no_share_and_no_cost_row() {
-        let plan = Plan::from_postgresql_text(&lines("Index Scan using customers_pkey on customers")).unwrap();
+        let plan =
+            Plan::from_postgresql_text(&lines("Index Scan using customers_pkey on customers"))
+                .unwrap();
         assert_eq!(plan.share(0), None);
         assert_eq!(plan.heat(0), Heat::Plain);
         assert_eq!(plan.facts(0), "");
@@ -1192,27 +1334,48 @@ Execution Time: 10.400 ms";
         }
         assert_eq!(Plan::from_postgresql_text(&[]), Err(PlanError::Empty));
         let deep: Vec<String> = std::iter::once("Root".to_owned())
-            .chain((1..=MAX_DEPTH + 1).map(|level| format!("{}->  Node", " ".repeat(2 + 6 * (level - 1)))))
+            .chain(
+                (1..=MAX_DEPTH + 1)
+                    .map(|level| format!("{}->  Node", " ".repeat(2 + 6 * (level - 1)))),
+            )
             .collect();
         assert_eq!(Plan::from_postgresql_text(&deep), Err(PlanError::TooDeep));
         let wide: Vec<String> = std::iter::once("Append".to_owned())
             .chain((0..MAX_NODES).map(|_| "  ->  Seq Scan on t".to_owned()))
             .collect();
-        assert_eq!(Plan::from_postgresql_text(&wide), Err(PlanError::TooManyNodes));
+        assert_eq!(
+            Plan::from_postgresql_text(&wide),
+            Err(PlanError::TooManyNodes)
+        );
         let long = vec!["x".to_owned(); MAX_LINES + 1];
-        assert_eq!(Plan::from_postgresql_text(&long), Err(PlanError::TooManyLines));
+        assert_eq!(
+            Plan::from_postgresql_text(&long),
+            Err(PlanError::TooManyLines)
+        );
         let broken = Plan::from_postgresql_text(&lines("Sort (cost=1..x rows=-3)")).unwrap();
-        assert_eq!((broken.nodes[0].cost, broken.nodes[0].estimated_rows), (None, None));
+        assert_eq!(
+            (broken.nodes[0].cost, broken.nodes[0].estimated_rows),
+            (None, None)
+        );
     }
 
     #[test]
     fn sqlite_rows_become_a_tree_by_parent() {
         let row = |id: &str, parent: &str, detail: &str| {
-            vec![Some(id.to_owned()), Some(parent.to_owned()), Some("0".to_owned()), Some(detail.to_owned())]
+            vec![
+                Some(id.to_owned()),
+                Some(parent.to_owned()),
+                Some("0".to_owned()),
+                Some(detail.to_owned()),
+            ]
         };
         let rows = vec![
             row("2", "0", "SCAN orders"),
-            row("5", "0", "SEARCH customers USING INTEGER PRIMARY KEY (rowid=?)"),
+            row(
+                "5",
+                "0",
+                "SEARCH customers USING INTEGER PRIMARY KEY (rowid=?)",
+            ),
             row("9", "5", "USE TEMP B-TREE FOR ORDER BY"),
         ];
         let plan = Plan::from_sqlite_rows(&rows, (0, 1, 3)).unwrap();
@@ -1223,15 +1386,28 @@ Execution Time: 10.400 ms";
         let single = Plan::from_sqlite_rows(&[row("2", "0", "SCAN t")], (0, 1, 3)).unwrap();
         assert_eq!(single.nodes.len(), 1);
         assert_eq!((single.nodes[0].parent, single.nodes[0].depth), (None, 0));
-        assert_eq!(Plan::from_sqlite_rows(&[], (0, 1, 3)), Err(PlanError::Empty));
+        assert_eq!(
+            Plan::from_sqlite_rows(&[], (0, 1, 3)),
+            Err(PlanError::Empty)
+        );
         let _ = Plan::from_sqlite_rows(&[vec![None]], (0, 1, 3));
     }
 
     #[test]
     fn mysql_rows_join_by_nested_loops() {
         let rows = vec![
-            vec![Some("o".to_owned()), Some("ALL".to_owned()), None, Some("10".to_owned())],
-            vec![Some("c".to_owned()), Some("eq_ref".to_owned()), Some("PRIMARY".to_owned()), Some("1".to_owned())],
+            vec![
+                Some("o".to_owned()),
+                Some("ALL".to_owned()),
+                None,
+                Some("10".to_owned()),
+            ],
+            vec![
+                Some("c".to_owned()),
+                Some("eq_ref".to_owned()),
+                Some("PRIMARY".to_owned()),
+                Some("1".to_owned()),
+            ],
         ];
         let plan = Plan::from_mysql_rows(&rows, (0, 1, Some(2), Some(3))).unwrap();
         assert_eq!(plan.nodes[0].operation, "Nested Loop");
@@ -1248,7 +1424,10 @@ Execution Time: 10.400 ms";
         assert_eq!(boxes[3].y, 2.0 * LEVEL_SPACING);
         assert_eq!(layout.width, 150.0 + SIBLING_GAP + 260.0);
         assert_eq!(layout.height, 2.0 * LEVEL_SPACING + NODE_HEIGHT);
-        assert_eq!(boxes[2].x - (boxes[1].x + boxes[1].w), SIBLING_GAP + (260.0 - 120.0) / 2.0);
+        assert_eq!(
+            boxes[2].x - (boxes[1].x + boxes[1].w),
+            SIBLING_GAP + (260.0 - 120.0) / 2.0
+        );
         let centre = |b: &NodeBox| b.x + b.w / 2.0;
         assert_eq!(centre(&boxes[0]), layout.width / 2.0);
         assert_eq!(centre(&boxes[2]), centre(&boxes[3]));
@@ -1260,7 +1439,8 @@ Execution Time: 10.400 ms";
     #[test]
     fn keys_walk_the_tree_select_a_node_and_highlight_its_table() {
         let plan = Plan::from_postgresql_text(&lines(POSTGRESQL_PLAN)).unwrap();
-        let statement = "SELECT * FROM orders o JOIN customers c ON o.customer_id = c.id WHERE total > 100";
+        let statement =
+            "SELECT * FROM orders o JOIN customers c ON o.customer_id = c.id WHERE total > 100";
         let mut view = PlanView::new(plan, 10..10 + statement.len(), statement.to_owned());
         let panel = (1020.0, 358.0);
         assert_eq!(view.key(press(Key::Up), panel), PlanAnswer::Ignored);
@@ -1275,7 +1455,11 @@ Execution Time: 10.400 ms";
         assert_eq!(view.highlight, Some(10 + at..10 + at + "customers".len()));
         assert_eq!(view.key(press(Key::Up), panel), PlanAnswer::Moved);
         assert_eq!(view.key(press(Key::Enter), panel), PlanAnswer::Selected);
-        assert_eq!(view.highlight, Some(10..10 + statement.len()), "Hash reads no table");
+        assert_eq!(
+            view.highlight,
+            Some(10..10 + statement.len()),
+            "Hash reads no table"
+        );
         assert_eq!(view.key(press(Key::Escape), panel), PlanAnswer::Cleared);
         assert_eq!((view.selected, view.highlight.clone()), (None, None));
         assert_eq!(view.key(press(Key::Home), panel), PlanAnswer::Moved);
@@ -1286,7 +1470,9 @@ Execution Time: 10.400 ms";
     #[test]
     fn a_wide_tree_scrolls_to_the_current_node() {
         let text: String = std::iter::once("Append  (cost=0.00..10.00 rows=1 width=4)".to_owned())
-            .chain((0..12).map(|n| format!("  ->  Seq Scan on table_number_{n}  (cost=0.00..0.50 rows=1 width=4)")))
+            .chain((0..12).map(|n| {
+                format!("  ->  Seq Scan on table_number_{n}  (cost=0.00..0.50 rows=1 width=4)")
+            }))
             .collect::<Vec<_>>()
             .join("\n");
         let plan = Plan::from_postgresql_text(&lines(&text)).unwrap();
@@ -1305,11 +1491,19 @@ Execution Time: 10.400 ms";
     #[test]
     fn explain_statements_follow_the_dialect() {
         let plain = explain_statements(QueryDialect::PostgreSql, "SELECT 1", false).unwrap();
-        assert_eq!((plain.statements, plain.prefix_len), (vec!["EXPLAIN SELECT 1".to_owned()], 8));
-        let analyzed = explain_statements(QueryDialect::PostgreSql, "UPDATE t SET a = 1", true).unwrap();
+        assert_eq!(
+            (plain.statements, plain.prefix_len),
+            (vec!["EXPLAIN SELECT 1".to_owned()], 8)
+        );
+        let analyzed =
+            explain_statements(QueryDialect::PostgreSql, "UPDATE t SET a = 1", true).unwrap();
         assert_eq!(
             analyzed.statements,
-            ["BEGIN", "EXPLAIN (ANALYZE, BUFFERS) UPDATE t SET a = 1", "ROLLBACK"]
+            [
+                "BEGIN",
+                "EXPLAIN (ANALYZE, BUFFERS) UPDATE t SET a = 1",
+                "ROLLBACK"
+            ]
         );
         assert!(analyzed.rolled_back);
         assert_eq!(analyzed.plan_at, 1);
@@ -1318,16 +1512,26 @@ Execution Time: 10.400 ms";
         let sqlite = explain_statements(QueryDialect::Sqlite, "SELECT 1", false).unwrap();
         assert_eq!(sqlite.statements, ["EXPLAIN QUERY PLAN SELECT 1"]);
         let typed = explain_statements(QueryDialect::Oracle, "explain select 1", false).unwrap();
-        assert_eq!((typed.statements, typed.prefix_len), (vec!["explain select 1".to_owned()], 0));
-        let oracle = explain_statements(QueryDialect::Oracle, "SELECT 1 FROM dual", false).unwrap_err();
-        assert!(oracle.starts_with("not_supported: cannot explain in Oracle's dialect"), "{oracle}");
+        assert_eq!(
+            (typed.statements, typed.prefix_len),
+            (vec!["explain select 1".to_owned()], 0)
+        );
+        let oracle =
+            explain_statements(QueryDialect::Oracle, "SELECT 1 FROM dual", false).unwrap_err();
+        assert!(
+            oracle.starts_with("not_supported: cannot explain in Oracle's dialect"),
+            "{oracle}"
+        );
         assert!(explain_statements(QueryDialect::SqlServer, "SELECT 1", false).is_err());
         assert!(explain_statements(QueryDialect::MySql, "SELECT 1", true).is_err());
     }
 
     #[test]
     fn find_word_matches_whole_words_only() {
-        assert_eq!(find_word("SELECT * FROM orders_old, Orders", "orders"), Some(26));
+        assert_eq!(
+            find_word("SELECT * FROM orders_old, Orders", "orders"),
+            Some(26)
+        );
         assert_eq!(find_word("é orders", "orders"), Some(3));
         assert_eq!(find_word("x", "orders"), None);
         assert_eq!(find_word("abc", ""), None);

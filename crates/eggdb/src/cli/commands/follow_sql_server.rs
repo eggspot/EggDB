@@ -3100,7 +3100,7 @@ mod tests {
         let keyless = vec![instance("dbo_orders_2", &["note"], Some(9)), old.clone()];
         assert_eq!(successor_of(&keyless, &table, "dbo_orders"), None);
         assert_eq!(
-            successor_of(&[new.clone()], &table, "dbo_orders"),
+            successor_of(std::slice::from_ref(&new), &table, "dbo_orders"),
             Some(&new)
         );
         let mut elsewhere = new.clone();

@@ -140,7 +140,9 @@ mod tests {
         assert_eq!(clipboard.text(), None);
         clipboard.put_text("1\tAda\n");
         assert_eq!(clipboard.text().as_deref(), Some("1\tAda\n"));
-        let _ = window.borrow_mut().put_clipboard_text("from another program");
+        let _ = window
+            .borrow_mut()
+            .put_clipboard_text("from another program");
         assert_eq!(clipboard.text().as_deref(), Some("from another program"));
     }
 

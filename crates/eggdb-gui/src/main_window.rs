@@ -1,22 +1,28 @@
 use std::time::Instant;
 
 use eggdb_platform::window::{
-    AccessAction, AccessActions, AccessCaret, AccessCell, AccessNode, AccessRect, AccessRole, AccessTable, AccessTreePosition, Key,
-    KeyPress,
+    AccessAction, AccessActions, AccessCaret, AccessCell, AccessNode, AccessRect, AccessRole,
+    AccessTable, AccessTreePosition, Key, KeyPress,
 };
 
 use crate::canvas::{Canvas, Rect};
-use crate::catalog::{Catalog, CatalogColumn, CatalogIndex, CatalogTable, CatalogView, KeyCount, KeySpace};
+use crate::catalog::{
+    Catalog, CatalogColumn, CatalogIndex, CatalogTable, CatalogView, KeyCount, KeySpace,
+};
 use crate::color::{Rgba, Theme};
 use crate::dialect::QueryDialect;
 use crate::editor::Position;
 use crate::font::{TextStyle, Typeface};
-use crate::grid::{CellLook, ResultGrid, ValueKind, cell_text, quote_name, visible_columns, visible_rows};
+use crate::grid::{
+    CellLook, ResultGrid, ValueKind, cell_text, quote_name, visible_columns, visible_rows,
+};
 use crate::highlight::{Carry, TokenKind, tokens};
 use crate::inspector::{self, Inspector, InspectorBlock};
+use crate::object_browser::{
+    self, ObjectTree, ROW_HEIGHT, ROWS_IN_VIEW, ROWS_TOP, SidebarFocus, TreeAction, TreeItem,
+};
 use crate::plan_view::{self, PlanView};
 use crate::pointer::{self, CaretLook, PointerLook};
-use crate::object_browser::{self, ObjectTree, ROW_HEIGHT, ROWS_IN_VIEW, ROWS_TOP, SidebarFocus, TreeAction, TreeItem};
 use crate::query_tab::{QueryTab, ResultView, TabAction, TabFocus};
 use crate::status_line;
 
@@ -76,7 +82,8 @@ pub enum WindowAction {
 }
 
 /// The status bar's notice while a run keeps the tree from opening another tab.
-pub const OPEN_WHILE_RUNNING: &str = "A query is running: press Esc to stop it, then open the table again";
+pub const OPEN_WHILE_RUNNING: &str =
+    "A query is running: press Esc to stop it, then open the table again";
 
 /// What the main window shows: a connection, its object tree and inspector, and the query
 /// tabs.
@@ -136,8 +143,10 @@ impl MainWindow {
     pub fn editor_position_at(&self, faces: Faces<'_>, x: f32, y: f32) -> Position {
         let tab = &self.tab;
         let lines = tab.editor.lines();
-        let visible = (((editor_bottom(tab) - EDITOR_TEXT_TOP) / LINE_HEIGHT).floor() as usize).max(1);
-        let first = first_visible_line(tab.editor.caret().line, visible).min(lines.len().saturating_sub(1));
+        let visible =
+            (((editor_bottom(tab) - EDITOR_TEXT_TOP) / LINE_HEIGHT).floor() as usize).max(1);
+        let first =
+            first_visible_line(tab.editor.caret().line, visible).min(lines.len().saturating_sub(1));
         let row = ((y - EDITOR_TEXT_TOP) / LINE_HEIGHT).floor().max(0.0) as usize;
         let line = (first + row.min(visible - 1)).min(lines.len().saturating_sub(1));
         let text = lines.get(line).map_or("", String::as_str);
@@ -171,16 +180,33 @@ impl MainWindow {
     /// Scrolls what is under (`x`, `y`) by the wheel's `lines_down` and `lines_right`
     /// (`Shift` turns vertical steps horizontal): the grid by three rows or columns a notch,
     /// the object tree by three rows. Returns whether anything moved.
-    pub fn wheel(&mut self, tree: &[AccessNode], x: f32, y: f32, lines_down: f32, lines_right: f32, shift: bool) -> bool {
+    pub fn wheel(
+        &mut self,
+        tree: &[AccessNode],
+        x: f32,
+        y: f32,
+        lines_down: f32,
+        lines_right: f32,
+        shift: bool,
+    ) -> bool {
         let over = |id: u32| {
             tree.iter()
                 .find(|node| node.id == id)
                 .is_some_and(|node| pointer::contains(node.bounds, x, y))
         };
-        let (down, right) = if shift { (0.0, lines_right + lines_down) } else { (lines_down, lines_right) };
+        let (down, right) = if shift {
+            (0.0, lines_right + lines_down)
+        } else {
+            (lines_down, lines_right)
+        };
         let steps = |lines: f32| (lines * pointer::WHEEL_ROWS_PER_NOTCH).round() as isize;
         if over(NODE_GRID) {
-            if let Some(grid) = self.tab.grid.as_mut().filter(|_| self.tab.view == ResultView::Results) {
+            if let Some(grid) = self
+                .tab
+                .grid
+                .as_mut()
+                .filter(|_| self.tab.view == ResultView::Results)
+            {
                 let before = (grid.first_row, grid.scroll_x);
                 grid.scroll_by(steps(down), steps(right), crate::query_tab::ROWS_IN_VIEW);
                 return (grid.first_row, grid.scroll_x) != before;
@@ -189,7 +215,11 @@ impl MainWindow {
         }
         if over(NODE_OBJECTS) {
             let before = self.tree.first_row;
-            let last = self.tree.rows().len().saturating_sub(object_browser::ROWS_IN_VIEW);
+            let last = self
+                .tree
+                .rows()
+                .len()
+                .saturating_sub(object_browser::ROWS_IN_VIEW);
             self.tree.first_row = before.saturating_add_signed(steps(down)).min(last);
             return self.tree.first_row != before;
         }
@@ -199,10 +229,14 @@ impl MainWindow {
     /// The sample of `docs/ux/gui.md`'s golden frame: the `shop` database.
     pub fn sample() -> Self {
         let mut tab = QueryTab::with_text("Query 1", "SELECT id, name FROM customers ORDER BY id;");
-        let rows = [("1", "Ada Lovelace"), ("2", "Grace Hopper"), ("3", "Alan Turing")]
-            .iter()
-            .map(|(id, name)| vec![Some((*id).to_owned()), Some((*name).to_owned())])
-            .collect();
+        let rows = [
+            ("1", "Ada Lovelace"),
+            ("2", "Grace Hopper"),
+            ("3", "Alan Turing"),
+        ]
+        .iter()
+        .map(|(id, name)| vec![Some((*id).to_owned()), Some((*name).to_owned())])
+        .collect();
         tab.grid = Some(ResultGrid::new(
             vec!["id".into(), "name".into()],
             vec![ValueKind::Number, ValueKind::Text],
@@ -498,9 +532,16 @@ impl Painter<'_, '_> {
         match kind {
             Button::Primary => self.canvas.fill_rounded_rect(rect, 4.0, theme.accent),
             Button::PrimaryHovered => self.canvas.fill_rounded_rect(rect, 4.0, theme.accent_hover),
-            Button::PrimaryPressed => self.canvas.fill_rounded_rect(rect, 4.0, theme.accent_pressed),
+            Button::PrimaryPressed => {
+                self.canvas
+                    .fill_rounded_rect(rect, 4.0, theme.accent_pressed)
+            }
             Button::SecondaryHovered | Button::SecondaryPressed => {
-                let edge = if kind == Button::SecondaryPressed { theme.border_strong } else { theme.border };
+                let edge = if kind == Button::SecondaryPressed {
+                    theme.border_strong
+                } else {
+                    theme.border
+                };
                 self.canvas.fill_rounded_rect(rect, 4.0, edge);
                 let inner = Rect::new(rect.x + 1.0, rect.y + 1.0, rect.w - 2.0, rect.h - 2.0);
                 self.canvas.fill_rounded_rect(inner, 3.0, theme.bg2);
@@ -571,7 +612,11 @@ pub fn draw(window: &MainWindow, theme: Theme, faces: Faces<'_>) -> Canvas {
     editor(&mut paint, &window.tab, window.caret);
     results(&mut paint, &window.tab);
     if window.inspector.is_open() {
-        let description = inspector::describe(&window.tree, window.inspected(), window.inspector.sample.as_ref());
+        let description = inspector::describe(
+            &window.tree,
+            window.inspected(),
+            window.inspector.sample.as_ref(),
+        );
         inspector::draw(&mut paint, &window.inspector, &description);
     }
     status_bar(&mut paint, window);
@@ -580,7 +625,11 @@ pub fn draw(window: &MainWindow, theme: Theme, faces: Faces<'_>) -> Canvas {
 }
 
 fn access_text(window: &MainWindow) -> &'static str {
-    if window.writable { "read-write" } else { "read-only" }
+    if window.writable {
+        "read-write"
+    } else {
+        "read-only"
+    }
 }
 
 fn toolbar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
@@ -621,14 +670,20 @@ fn toolbar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     } else {
         (Button::Secondary, theme.text_primary)
     };
-    paint.button(Rect::new(232.0, 8.0, 72.0, 28.0), under_pointer(window, NODE_RUN, run_look));
+    paint.button(
+        Rect::new(232.0, 8.0, 72.0, 28.0),
+        under_pointer(window, NODE_RUN, run_look),
+    );
     paint.polyline(
         &[(244.0, 17.0), (244.0, 27.0), (253.0, 22.0), (244.0, 17.0)],
         1.5,
         run_ink,
     );
     paint.text(faces.ui, "Run", 260.0, 13.0, BODY, run_ink);
-    paint.button(Rect::new(312.0, 8.0, 88.0, 28.0), under_pointer(window, NODE_RUN_ALL, other_look));
+    paint.button(
+        Rect::new(312.0, 8.0, 88.0, 28.0),
+        under_pointer(window, NODE_RUN_ALL, other_look),
+    );
     paint.polyline(
         &[(324.0, 17.0), (324.0, 27.0), (333.0, 22.0), (324.0, 17.0)],
         1.5,
@@ -636,7 +691,10 @@ fn toolbar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     );
     paint.rect(335.0, 17.0, 2.0, 10.0, other_ink);
     paint.text(faces.ui, "Run all", 342.0, 13.0, BODY, other_ink);
-    paint.button(Rect::new(408.0, 8.0, 84.0, 28.0), under_pointer(window, NODE_EXPLAIN, other_look));
+    paint.button(
+        Rect::new(408.0, 8.0, 84.0, 28.0),
+        under_pointer(window, NODE_EXPLAIN, other_look),
+    );
     for (x, y, w) in [(420.0, 17.0, 10.0), (424.0, 21.0, 6.0), (428.0, 25.0, 2.0)] {
         paint.rect(x, y, w, 2.0, other_ink);
     }
@@ -647,12 +705,18 @@ fn toolbar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     } else {
         (Button::Disabled, theme.text_disabled, theme.text_disabled)
     };
-    paint.button(Rect::new(500.0, 8.0, 68.0, 28.0), under_pointer(window, NODE_STOP, stop_look));
+    paint.button(
+        Rect::new(500.0, 8.0, 68.0, 28.0),
+        under_pointer(window, NODE_STOP, stop_look),
+    );
     paint
         .canvas
         .fill_rounded_rect(Rect::new(512.0, 17.0, 10.0, 10.0), 2.0, stop_icon);
     paint.text(faces.ui, "Stop", 528.0, 13.0, BODY, stop_ink);
-    paint.button(Rect::new(width - 224.0, 8.0, 120.0, 28.0), under_pointer(window, NODE_DIALECT, Button::Secondary));
+    paint.button(
+        Rect::new(width - 224.0, 8.0, 120.0, 28.0),
+        under_pointer(window, NODE_DIALECT, Button::Secondary),
+    );
     paint.text(
         faces.ui,
         window.tab.dialect.label(),
@@ -662,7 +726,11 @@ fn toolbar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
         theme.text_primary,
     );
     paint.polyline(
-        &[(width - 124.0, 20.0), (width - 120.0, 24.0), (width - 116.0, 20.0)],
+        &[
+            (width - 124.0, 20.0),
+            (width - 120.0, 24.0),
+            (width - 116.0, 20.0),
+        ],
         1.5,
         theme.text_primary,
     );
@@ -754,13 +822,27 @@ fn tabs(paint: &mut Painter<'_, '_>, window: &MainWindow) {
         let left = 260.0 + TAB_WIDTH * index as f32;
         paint.rect(left + TAB_WIDTH - 1.0, 52.0, 1.0, 20.0, theme.border);
         let title = elided(faces.ui, &other.title, TAB_WIDTH - 40.0, BODY.0);
-        paint.text(faces.ui, &title, left + 12.0, 53.0, BODY, theme.text_secondary);
+        paint.text(
+            faces.ui,
+            &title,
+            left + 12.0,
+            53.0,
+            BODY,
+            theme.text_secondary,
+        );
     }
     let tab = &window.tab;
     let left = 260.0 + TAB_WIDTH * window.background_tabs.len() as f32;
     paint.rect(left, 44.0, TAB_WIDTH, 36.0, theme.bg0);
     paint.rect(left, 44.0, TAB_WIDTH, 2.0, theme.accent);
-    paint.text(faces.ui, &tab.title, left + 12.0, 53.0, BODY, theme.text_primary);
+    paint.text(
+        faces.ui,
+        &tab.title,
+        left + 12.0,
+        53.0,
+        BODY,
+        theme.text_primary,
+    );
     let close = left + 124.0;
     if tab.running {
         paint
@@ -768,17 +850,26 @@ fn tabs(paint: &mut Painter<'_, '_>, window: &MainWindow) {
             .stroke_circle(close, 62.0, 12.0, 1.5, theme.accent);
         paint.canvas.fill_circle(close, 57.0, 3.0, theme.accent);
     } else {
-        paint
-            .canvas
-            .line((close - 4.0, 58.0), (close + 4.0, 66.0), 1.5, theme.text_secondary);
-        paint
-            .canvas
-            .line((close + 4.0, 58.0), (close - 4.0, 66.0), 1.5, theme.text_secondary);
+        paint.canvas.line(
+            (close - 4.0, 58.0),
+            (close + 4.0, 66.0),
+            1.5,
+            theme.text_secondary,
+        );
+        paint.canvas.line(
+            (close + 4.0, 58.0),
+            (close - 4.0, 66.0),
+            1.5,
+            theme.text_secondary,
+        );
     }
     let plus = left + TAB_WIDTH + 22.0;
-    paint
-        .canvas
-        .line((plus - 5.0, 62.0), (plus + 5.0, 62.0), 1.5, theme.text_primary);
+    paint.canvas.line(
+        (plus - 5.0, 62.0),
+        (plus + 5.0, 62.0),
+        1.5,
+        theme.text_primary,
+    );
     paint
         .canvas
         .line((plus, 57.0), (plus, 67.0), 1.5, theme.text_primary);
@@ -834,7 +925,12 @@ fn editor(paint: &mut Painter<'_, '_>, tab: &QueryTab, caret_look: CaretLook) {
         .plan
         .as_ref()
         .and_then(|plan| plan.highlight.clone())
-        .map(|range| (tab.editor.position_at(range.start), tab.editor.position_at(range.end)));
+        .map(|range| {
+            (
+                tab.editor.position_at(range.start),
+                tab.editor.position_at(range.end),
+            )
+        });
     let squiggle = tab.error.as_ref().map(|error| {
         (
             tab.editor.position_at(error.range.start),
@@ -847,16 +943,36 @@ fn editor(paint: &mut Painter<'_, '_>, tab: &QueryTab, caret_look: CaretLook) {
         if number == caret.line {
             paint.rect(308.0, top, centre_width - 48.0, LINE_HEIGHT, theme.bg1);
         }
-        if let Some((start, end)) = plan_highlight.filter(|(start, end)| (start.line..=end.line).contains(&number)) {
-            let from = if number == start.line { start.column } else { 0 };
-            let to = if number == end.line { end.column } else { line.chars().count() + 1 };
+        if let Some((start, end)) =
+            plan_highlight.filter(|(start, end)| (start.line..=end.line).contains(&number))
+        {
+            let from = if number == start.line {
+                start.column
+            } else {
+                0
+            };
+            let to = if number == end.line {
+                end.column
+            } else {
+                line.chars().count() + 1
+            };
             let left = column_x(faces.mono, line, from);
             let right = column_x(faces.mono, line, to).max(left + 4.0);
             paint.rect(left, top, right - left, LINE_HEIGHT, theme.selection);
         }
-        if let Some((start, end)) = selection.filter(|(start, end)| (start.line..=end.line).contains(&number)) {
-            let from = if number == start.line { start.column } else { 0 };
-            let to = if number == end.line { end.column } else { line.chars().count() + 1 };
+        if let Some((start, end)) =
+            selection.filter(|(start, end)| (start.line..=end.line).contains(&number))
+        {
+            let from = if number == start.line {
+                start.column
+            } else {
+                0
+            };
+            let to = if number == end.line {
+                end.column
+            } else {
+                line.chars().count() + 1
+            };
             let left = column_x(faces.mono, line, from);
             let right = column_x(faces.mono, line, to).max(left + 4.0);
             paint.rect(left, top, right - left, LINE_HEIGHT, theme.selection);
@@ -884,14 +1000,31 @@ fn editor(paint: &mut Painter<'_, '_>, tab: &QueryTab, caret_look: CaretLook) {
             if let Some(at) = caret_byte.filter(|at| range.contains(at)) {
                 caret_x = pen + faces.mono.width(&line[range.start..at], CODE.0);
             }
-            pen = paint.text(faces.mono, &line[range], pen, top, CODE, token_color(theme, kind));
+            pen = paint.text(
+                faces.mono,
+                &line[range],
+                pen,
+                top,
+                CODE,
+                token_color(theme, kind),
+            );
         }
         if caret_byte == Some(line.len()) {
             caret_x = pen;
         }
-        if let Some((start, end)) = squiggle.filter(|(start, end)| (start.line..=end.line).contains(&number)) {
-            let from = if number == start.line { start.column } else { 0 };
-            let to = if number == end.line { end.column } else { line.chars().count() };
+        if let Some((start, end)) =
+            squiggle.filter(|(start, end)| (start.line..=end.line).contains(&number))
+        {
+            let from = if number == start.line {
+                start.column
+            } else {
+                0
+            };
+            let to = if number == end.line {
+                end.column
+            } else {
+                line.chars().count()
+            };
             let left = column_x(faces.mono, line, from);
             let right = column_x(faces.mono, line, to).max(left + 4.0);
             zigzag(paint, left, right, top + LINE_HEIGHT - 2.0);
@@ -899,7 +1032,11 @@ fn editor(paint: &mut Painter<'_, '_>, tab: &QueryTab, caret_look: CaretLook) {
     }
     if caret_look.shown() && (first..first + visible).contains(&caret.line) {
         let caret_top = EDITOR_TEXT_TOP + LINE_HEIGHT * (caret.line - first) as f32;
-        let color = if caret_look == CaretLook::Inactive { theme.text_disabled } else { theme.accent };
+        let color = if caret_look == CaretLook::Inactive {
+            theme.text_disabled
+        } else {
+            theme.accent
+        };
         paint.rect(caret_x.round(), caret_top, 2.0, LINE_HEIGHT, color);
     }
     if let Some(error) = tab.error.as_ref().filter(|error| error.strip_shown) {
@@ -924,9 +1061,15 @@ fn zigzag(paint: &mut Painter<'_, '_>, left: f32, right: f32, top: f32) {
 
 fn error_icon(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
     let color = paint.theme.error;
-    paint.canvas.stroke_circle(x + 6.0, y + 6.0, 12.0, 1.5, color);
-    paint.canvas.line((x + 4.0, y + 4.0), (x + 8.0, y + 8.0), 1.5, color);
-    paint.canvas.line((x + 8.0, y + 4.0), (x + 4.0, y + 8.0), 1.5, color);
+    paint
+        .canvas
+        .stroke_circle(x + 6.0, y + 6.0, 12.0, 1.5, color);
+    paint
+        .canvas
+        .line((x + 4.0, y + 4.0), (x + 8.0, y + 8.0), 1.5, color);
+    paint
+        .canvas
+        .line((x + 8.0, y + 4.0), (x + 4.0, y + 8.0), 1.5, color);
 }
 
 fn error_strip(paint: &mut Painter<'_, '_>, text: &str, fix: Option<&str>) {
@@ -947,7 +1090,12 @@ fn error_strip(paint: &mut Painter<'_, '_>, text: &str, fix: Option<&str>) {
 fn warning_icon(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
     let color = paint.theme.warning;
     paint.polyline(
-        &[(x + 6.0, y), (x + 12.0, y + 11.0), (x, y + 11.0), (x + 6.0, y)],
+        &[
+            (x + 6.0, y),
+            (x + 12.0, y + 11.0),
+            (x, y + 11.0),
+            (x + 6.0, y),
+        ],
         1.5,
         color,
     );
@@ -972,8 +1120,22 @@ fn results(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
             paint.rect(x, 414.0, underline, 2.0, theme.accent);
         }
     }
-    paint.text(faces.ui, &tab.summary, summary_x(tab), 393.0, BODY, theme.text_secondary);
-    paint.text(faces.ui, "Export…", centre_right - 76.0, 393.0, BODY, theme.text_primary);
+    paint.text(
+        faces.ui,
+        &tab.summary,
+        summary_x(tab),
+        393.0,
+        BODY,
+        theme.text_secondary,
+    );
+    paint.text(
+        faces.ui,
+        "Export…",
+        centre_right - 76.0,
+        393.0,
+        BODY,
+        theme.text_primary,
+    );
     if let Some(plan) = tab.plan.as_ref().filter(|_| tab.view == ResultView::Plan) {
         plan_body(paint, plan);
         return;
@@ -1001,10 +1163,27 @@ fn results(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
         let banner = status_line::truncated_banner(grid.rows.len(), grid.row_count);
         let shown = elided(faces.ui, &banner, centre_right - 140.0 - 292.0, BODY.0);
         paint.text(faces.ui, &shown, 292.0, 423.0, BODY, theme.text_primary);
-        paint.text_right(faces.ui, "Export…", centre_right - 44.0, 423.0, BODY, theme.text_primary);
+        paint.text_right(
+            faces.ui,
+            "Export…",
+            centre_right - 44.0,
+            423.0,
+            BODY,
+            theme.text_primary,
+        );
         let close = centre_right - 28.0;
-        paint.canvas.line((close, 428.0), (close + 8.0, 436.0), 1.5, theme.text_secondary);
-        paint.canvas.line((close + 8.0, 428.0), (close, 436.0), 1.5, theme.text_secondary);
+        paint.canvas.line(
+            (close, 428.0),
+            (close + 8.0, 436.0),
+            1.5,
+            theme.text_secondary,
+        );
+        paint.canvas.line(
+            (close + 8.0, 428.0),
+            (close, 436.0),
+            1.5,
+            theme.text_secondary,
+        );
         top = 446.0;
     }
     grid_body(paint, grid, top);
@@ -1014,7 +1193,10 @@ const PLAN_SEGMENT_X: f32 = 428.0;
 const PLAN_TOGGLE_WIDTH: f32 = 44.0;
 
 fn result_segments(tab: &QueryTab) -> Vec<(&'static str, ResultView, f32, f32)> {
-    let mut segments = vec![("Results", ResultView::Results, 272.0, 48.0), ("Messages", ResultView::Messages, 344.0, 64.0)];
+    let mut segments = vec![
+        ("Results", ResultView::Results, 272.0, 48.0),
+        ("Messages", ResultView::Messages, 344.0, 64.0),
+    ];
     if tab.plan.is_some() {
         segments.push(("Plan", ResultView::Plan, PLAN_SEGMENT_X, 32.0));
     }
@@ -1022,7 +1204,11 @@ fn result_segments(tab: &QueryTab) -> Vec<(&'static str, ResultView, f32, f32)> 
 }
 
 fn summary_x(tab: &QueryTab) -> f32 {
-    if tab.plan.is_some() { PLAN_SEGMENT_X + 56.0 } else { PLAN_SEGMENT_X }
+    if tab.plan.is_some() {
+        PLAN_SEGMENT_X + 56.0
+    } else {
+        PLAN_SEGMENT_X
+    }
 }
 
 fn plan_toggle_x(centre_right: f32) -> f32 {
@@ -1035,9 +1221,20 @@ fn plan_body(paint: &mut Painter<'_, '_>, plan: &PlanView) {
     let (centre_width, centre_right) = (paint.centre_width(), paint.centre_right);
     let toggle = plan_toggle_x(centre_right);
     if plan.text_shown {
-        paint.canvas.fill_rounded_rect(Rect::new(toggle, 390.0, PLAN_TOGGLE_WIDTH, 24.0), 4.0, theme.bg2);
+        paint.canvas.fill_rounded_rect(
+            Rect::new(toggle, 390.0, PLAN_TOGGLE_WIDTH, 24.0),
+            4.0,
+            theme.bg2,
+        );
     }
-    paint.text(faces.ui, "Text", toggle + 8.0, 393.0, BODY, theme.text_primary);
+    paint.text(
+        faces.ui,
+        "Text",
+        toggle + 8.0,
+        393.0,
+        BODY,
+        theme.text_primary,
+    );
     if plan.text_shown {
         for (index, line) in plan.plan.text.iter().enumerate().take(17) {
             let top = 426.0 + LINE_HEIGHT * index as f32;
@@ -1061,7 +1258,8 @@ fn grid_body(paint: &mut Painter<'_, '_>, grid: &ResultGrid, top: f32) {
     paint.rect(260.0, top + 27.0, centre_width, 1.0, theme.border);
     let edges = grid.column_edges();
     let columns = visible_columns(&grid.widths, grid.scroll_x, centre_width - 48.0);
-    let x_of = |column: usize| GRID_LEFT + edges.get(column).copied().unwrap_or(0.0) - grid.scroll_x;
+    let x_of =
+        |column: usize| GRID_LEFT + edges.get(column).copied().unwrap_or(0.0) - grid.scroll_x;
     let marked = grid.focused || grid.selection_size() != (1, 1);
     let (selected_rows, selected_columns) = grid.selection();
     for column in columns.clone() {
@@ -1072,9 +1270,23 @@ fn grid_body(paint: &mut Painter<'_, '_>, grid: &ResultGrid, top: f32) {
         let name = grid.columns.get(column).map_or("", String::as_str);
         let name = elided(faces.ui, name, right - left - 24.0, BODY.0);
         if grid.kind(column).right_aligned() {
-            paint.text_right(faces.ui, &name, right - 12.0, top + 5.0, BODY, theme.text_primary);
+            paint.text_right(
+                faces.ui,
+                &name,
+                right - 12.0,
+                top + 5.0,
+                BODY,
+                theme.text_primary,
+            );
         } else {
-            paint.text(faces.ui, &name, left + 12.0, top + 5.0, BODY, theme.text_primary);
+            paint.text(
+                faces.ui,
+                &name,
+                left + 12.0,
+                top + 5.0,
+                BODY,
+                theme.text_primary,
+            );
         }
         paint.rect(right - 1.0, top, 1.0, 27.0, theme.border_strong);
     }
@@ -1092,7 +1304,11 @@ fn grid_body(paint: &mut Painter<'_, '_>, grid: &ResultGrid, top: f32) {
             let (left, right) = (x_of(column), x_of(column + 1));
             let cell = crate::grid::Cell { row, column };
             if marked && grid.is_selected(cell) {
-                let color = if grid.focused { theme.selection } else { theme.selection_inactive };
+                let color = if grid.focused {
+                    theme.selection
+                } else {
+                    theme.selection_inactive
+                };
                 paint.rect(left, y, right - left, 24.0, color);
             }
             let kind = grid.kind(column);
@@ -1201,7 +1417,12 @@ fn dialect_menu(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
     };
     let theme = paint.theme;
     let faces = paint.faces;
-    let menu = Rect::new(paint.width - 224.0, 40.0, 160.0, 28.0 * QueryDialect::ALL.len() as f32);
+    let menu = Rect::new(
+        paint.width - 224.0,
+        40.0,
+        160.0,
+        28.0 * QueryDialect::ALL.len() as f32,
+    );
     paint.rect(menu.x + 2.0, menu.y + 4.0, menu.w, menu.h, theme.border);
     paint.canvas.fill_rounded_rect(menu, 6.0, theme.border);
     paint.canvas.fill_rounded_rect(
@@ -1216,12 +1437,23 @@ fn dialect_menu(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
         }
         if *dialect == tab.dialect {
             paint.polyline(
-                &[(menu.x + 10.0, top + 14.0), (menu.x + 14.0, top + 18.0), (menu.x + 22.0, top + 10.0)],
+                &[
+                    (menu.x + 10.0, top + 14.0),
+                    (menu.x + 14.0, top + 18.0),
+                    (menu.x + 22.0, top + 10.0),
+                ],
                 1.5,
                 theme.accent,
             );
         }
-        paint.text(faces.ui, dialect.label(), menu.x + 32.0, top + 5.0, BODY, theme.text_primary);
+        paint.text(
+            faces.ui,
+            dialect.label(),
+            menu.x + 32.0,
+            top + 5.0,
+            BODY,
+            theme.text_primary,
+        );
     }
 }
 
@@ -1285,7 +1517,13 @@ pub const NODE_FIRST_TREE_ROW: u32 = 60_000;
 /// The background query tabs, in the strip's order.
 pub const NODE_FIRST_BACKGROUND_TAB: u32 = 61_000;
 
-fn node(id: u32, parent: u32, role: AccessRole, name: &str, bounds: (f32, f32, f32, f32)) -> AccessNode {
+fn node(
+    id: u32,
+    parent: u32,
+    role: AccessRole,
+    name: &str,
+    bounds: (f32, f32, f32, f32),
+) -> AccessNode {
     AccessNode {
         id,
         parent: Some(parent),
@@ -1302,7 +1540,11 @@ fn node(id: u32, parent: u32, role: AccessRole, name: &str, bounds: (f32, f32, f
 }
 
 fn primary_name() -> &'static str {
-    if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }
+    if cfg!(target_os = "macos") {
+        "Cmd"
+    } else {
+        "Ctrl"
+    }
 }
 
 fn toolbar_shortcut(id: u32) -> Option<String> {
@@ -1333,9 +1575,12 @@ fn toolbar_chord(id: u32) -> Option<KeyPress> {
 
 fn editor_caret(editor: &crate::editor::Editor) -> AccessCaret {
     let lines = editor.lines();
-    let offset = |at: crate::editor::Position| crate::accessibility::char_offset(lines, at.line, at.column);
+    let offset =
+        |at: crate::editor::Position| crate::accessibility::char_offset(lines, at.line, at.column);
     let caret = editor.caret();
-    let selection = editor.selection().map(|(start, end)| (offset(start), offset(end)));
+    let selection = editor
+        .selection()
+        .map(|(start, end)| (offset(start), offset(end)));
     crate::accessibility::field_caret(offset(caret), selection)
 }
 
@@ -1363,9 +1608,16 @@ impl MainWindow {
                 self.focus_tree();
                 self.tree.current = row.item;
             }
-            _ if (NODE_FIRST_PLAN_NODE..NODE_FIRST_PLAN_NODE + plan_view::MAX_NODES as u32).contains(&id) => {
+            _ if (NODE_FIRST_PLAN_NODE..NODE_FIRST_PLAN_NODE + plan_view::MAX_NODES as u32)
+                .contains(&id) =>
+            {
                 let index = (id - NODE_FIRST_PLAN_NODE) as usize;
-                if self.tab.plan.as_ref().is_none_or(|plan| index >= plan.plan.nodes.len()) {
+                if self
+                    .tab
+                    .plan
+                    .as_ref()
+                    .is_none_or(|plan| index >= plan.plan.nodes.len())
+                {
                     return false;
                 }
                 self.focus = WindowFocus::Tab;
@@ -1379,14 +1631,22 @@ impl MainWindow {
                 let Some(at) = node.cell else {
                     return false;
                 };
-                if self.tab.grid.as_ref().is_none_or(|grid| at.row >= grid.rows.len() || at.column >= grid.columns.len()) {
+                if self
+                    .tab
+                    .grid
+                    .as_ref()
+                    .is_none_or(|grid| at.row >= grid.rows.len() || at.column >= grid.columns.len())
+                {
                     return false;
                 }
                 self.focus = WindowFocus::Tab;
                 self.tab.view = ResultView::Results;
                 self.tab.focus(TabFocus::Grid);
                 if let Some(grid) = &mut self.tab.grid {
-                    let cell = crate::grid::Cell { row: at.row, column: at.column };
+                    let cell = crate::grid::Cell {
+                        row: at.row,
+                        column: at.column,
+                    };
                     grid.current = cell;
                     grid.anchor = cell;
                 }
@@ -1420,10 +1680,15 @@ impl MainWindow {
                 let (line, column) = crate::accessibility::line_and_column(lines, caret.anchor);
                 let length = crate::accessibility::char_offset(lines, usize::MAX, usize::MAX);
                 let (anchor, to) = (caret.anchor.min(length), caret.caret.min(length));
-                self.tab.editor.place_caret(crate::editor::Position { line, column });
+                self.tab
+                    .editor
+                    .place_caret(crate::editor::Position { line, column });
                 let shift = KeyPress {
                     key: if to >= anchor { Key::Right } else { Key::Left },
-                    modifiers: eggdb_platform::window::Modifiers { shift: true, ..Default::default() },
+                    modifiers: eggdb_platform::window::Modifiers {
+                        shift: true,
+                        ..Default::default()
+                    },
                 };
                 std::iter::repeat_n(shift, to.abs_diff(anchor)).collect()
             }
@@ -1452,64 +1717,166 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
     let width = window.width.max(WIDTH) as f32;
     let centre_width = window.centre_right() - 260.0;
     let tab_focused = window.focus == WindowFocus::Tab;
-    let mut root = node(NODE_MAIN_WINDOW, 0, AccessRole::Window, "EggDB", (0.0, 0.0, width, 800.0));
+    let mut root = node(
+        NODE_MAIN_WINDOW,
+        0,
+        AccessRole::Window,
+        "EggDB",
+        (0.0, 0.0, width, 800.0),
+    );
     root.parent = None;
-    let mut nodes = vec![root, node(NODE_TOOLBAR, NODE_MAIN_WINDOW, AccessRole::Toolbar, "Toolbar", (0.0, 0.0, width, 44.0))];
+    let mut nodes = vec![
+        root,
+        node(
+            NODE_TOOLBAR,
+            NODE_MAIN_WINDOW,
+            AccessRole::Toolbar,
+            "Toolbar",
+            (0.0, 0.0, width, 44.0),
+        ),
+    ];
     for (id, name, x, w) in [
         (NODE_RUN, "Run", 232.0, 72.0),
         (NODE_RUN_ALL, "Run all", 312.0, 88.0),
         (NODE_EXPLAIN, "Explain", 408.0, 84.0),
         (NODE_STOP, "Stop", 500.0, 68.0),
     ] {
-        let mut button = node(id, NODE_TOOLBAR, AccessRole::Button, name, (x, 8.0, w, 28.0));
-        button.state.disabled = if id == NODE_STOP { !tab.running } else { tab.running };
+        let mut button = node(
+            id,
+            NODE_TOOLBAR,
+            AccessRole::Button,
+            name,
+            (x, 8.0, w, 28.0),
+        );
+        button.state.disabled = if id == NODE_STOP {
+            !tab.running
+        } else {
+            tab.running
+        };
         button.shortcut = toolbar_shortcut(id);
         button.actions.invoke = true;
         nodes.push(button);
     }
-    let mut pill = node(NODE_DIALECT, NODE_TOOLBAR, AccessRole::ComboBox, "Dialect", (width - 224.0, 8.0, 120.0, 28.0));
+    let mut pill = node(
+        NODE_DIALECT,
+        NODE_TOOLBAR,
+        AccessRole::ComboBox,
+        "Dialect",
+        (width - 224.0, 8.0, 120.0, 28.0),
+    );
     pill.value = Some(tab.dialect.label().to_owned());
     pill.state.expanded = Some(tab.dialect_menu.is_some());
     pill.state.focused = tab_focused && tab.focus == TabFocus::DialectPill;
     nodes.push(pill);
     sidebar_nodes(&mut nodes, window);
-    nodes.push(node(NODE_QUERIES, NODE_MAIN_WINDOW, AccessRole::TabList, "Queries", (260.0, 44.0, centre_width, 36.0)));
+    nodes.push(node(
+        NODE_QUERIES,
+        NODE_MAIN_WINDOW,
+        AccessRole::TabList,
+        "Queries",
+        (260.0, 44.0, centre_width, 36.0),
+    ));
     for (index, other) in window.background_tabs.iter().enumerate() {
         let left = 260.0 + TAB_WIDTH * index as f32;
-        let background = node(NODE_FIRST_BACKGROUND_TAB + index as u32 % 1000, NODE_QUERIES, AccessRole::Tab, &other.title, (left, 44.0, TAB_WIDTH, 36.0));
+        let background = node(
+            NODE_FIRST_BACKGROUND_TAB + index as u32 % 1000,
+            NODE_QUERIES,
+            AccessRole::Tab,
+            &other.title,
+            (left, 44.0, TAB_WIDTH, 36.0),
+        );
         nodes.push(background);
     }
-    let title = if tab.running { format!("{}, running", tab.title) } else { tab.title.clone() };
+    let title = if tab.running {
+        format!("{}, running", tab.title)
+    } else {
+        tab.title.clone()
+    };
     let left = 260.0 + TAB_WIDTH * window.background_tabs.len() as f32;
-    let mut query = node(NODE_QUERY_TAB, NODE_QUERIES, AccessRole::Tab, &title, (left, 44.0, TAB_WIDTH, 36.0));
+    let mut query = node(
+        NODE_QUERY_TAB,
+        NODE_QUERIES,
+        AccessRole::Tab,
+        &title,
+        (left, 44.0, TAB_WIDTH, 36.0),
+    );
     query.state.selected = true;
     nodes.push(query);
-    let mut text = node(NODE_EDITOR, NODE_MAIN_WINDOW, AccessRole::TextArea, "Query", (260.0, 80.0, centre_width, 300.0));
+    let mut text = node(
+        NODE_EDITOR,
+        NODE_MAIN_WINDOW,
+        AccessRole::TextArea,
+        "Query",
+        (260.0, 80.0, centre_width, 300.0),
+    );
     text.value = Some(tab.editor.text());
     text.caret = Some(editor_caret(&tab.editor));
     text.state.invalid = tab.error.is_some();
     text.state.focused = tab_focused && tab.focus == TabFocus::Editor;
     nodes.push(text);
     if let Some(error) = tab.error.as_ref().filter(|error| error.strip_shown) {
-        nodes.push(node(NODE_ERROR_STRIP, NODE_MAIN_WINDOW, AccessRole::Alert, &error.strip_text(), (260.0, 352.0, centre_width, 28.0)));
+        nodes.push(node(
+            NODE_ERROR_STRIP,
+            NODE_MAIN_WINDOW,
+            AccessRole::Alert,
+            &error.strip_text(),
+            (260.0, 352.0, centre_width, 28.0),
+        ));
     }
-    nodes.push(node(NODE_RESULT_VIEWS, NODE_MAIN_WINDOW, AccessRole::TabList, "Result views", (260.0, 386.0, centre_width, 32.0)));
+    nodes.push(node(
+        NODE_RESULT_VIEWS,
+        NODE_MAIN_WINDOW,
+        AccessRole::TabList,
+        "Result views",
+        (260.0, 386.0, centre_width, 32.0),
+    ));
     for (offset, (name, view, x, _)) in result_segments(tab).into_iter().enumerate() {
-        let mut segment = node(NODE_RESULTS_SEGMENT + offset as u32, NODE_RESULT_VIEWS, AccessRole::Tab, name, (x, 386.0, 72.0, 32.0));
+        let mut segment = node(
+            NODE_RESULTS_SEGMENT + offset as u32,
+            NODE_RESULT_VIEWS,
+            AccessRole::Tab,
+            name,
+            (x, 386.0, 72.0, 32.0),
+        );
         segment.state.selected = tab.view == view;
         nodes.push(segment);
     }
-    nodes.push(node(NODE_STATUS_LINE, NODE_MAIN_WINDOW, AccessRole::Status, &status_line::spoken(&tab.summary), (summary_x(tab), 386.0, 760.0, 32.0)));
-    if let Some(plan) = tab.plan.as_ref().filter(|plan| tab.view == ResultView::Plan && !plan.text_shown) {
-        plan_nodes(&mut nodes, plan, tab_focused && tab.focus == TabFocus::Plan, centre_width);
+    nodes.push(node(
+        NODE_STATUS_LINE,
+        NODE_MAIN_WINDOW,
+        AccessRole::Status,
+        &status_line::spoken(&tab.summary),
+        (summary_x(tab), 386.0, 760.0, 32.0),
+    ));
+    if let Some(plan) = tab
+        .plan
+        .as_ref()
+        .filter(|plan| tab.view == ResultView::Plan && !plan.text_shown)
+    {
+        plan_nodes(
+            &mut nodes,
+            plan,
+            tab_focused && tab.focus == TabFocus::Plan,
+            centre_width,
+        );
     }
-    if let Some(grid) = tab.grid.as_ref().filter(|_| tab.view == ResultView::Results) {
+    if let Some(grid) = tab
+        .grid
+        .as_ref()
+        .filter(|_| tab.view == ResultView::Results)
+    {
         grid_nodes(&mut nodes, grid, centre_width);
     }
     if window.inspector.is_open() {
         inspector_nodes(&mut nodes, window);
     }
-    let mut bar = node(NODE_STATUS_BAR, NODE_MAIN_WINDOW, AccessRole::Group, "Status", (0.0, 776.0, width, 24.0));
+    let mut bar = node(
+        NODE_STATUS_BAR,
+        NODE_MAIN_WINDOW,
+        AccessRole::Group,
+        "Status",
+        (0.0, 776.0, width, 24.0),
+    );
     bar.value = Some(status_bar_left(tab));
     nodes.push(bar);
     crate::accessibility::fill_default_actions(&mut nodes);
@@ -1528,20 +1895,47 @@ fn no_keys_reach_it_yet(node: &AccessNode) -> bool {
 
 fn plan_nodes(nodes: &mut Vec<AccessNode>, plan: &PlanView, focused: bool, centre_width: f32) {
     let area = plan_area(centre_width);
-    let mut tree = node(NODE_PLAN, NODE_MAIN_WINDOW, AccessRole::Tree, "Plan", (area.x, area.y, area.w, area.h));
+    let mut tree = node(
+        NODE_PLAN,
+        NODE_MAIN_WINDOW,
+        AccessRole::Tree,
+        "Plan",
+        (area.x, area.y, area.w, area.h),
+    );
     let count = plan.plan.nodes.len();
-    tree.description = Some(format!("{} {}", status_line::thousands(count), if count == 1 { "node" } else { "nodes" }));
+    tree.description = Some(format!(
+        "{} {}",
+        status_line::thousands(count),
+        if count == 1 { "node" } else { "nodes" }
+    ));
     nodes.push(tree);
-    for (index, plan_node) in plan.plan.nodes.iter().enumerate().take(plan_view::MAX_NODES) {
+    for (index, plan_node) in plan
+        .plan
+        .nodes
+        .iter()
+        .enumerate()
+        .take(plan_view::MAX_NODES)
+    {
         let Some(rect) = plan.node_rect(index, area) else {
             continue;
         };
-        let mut item = node(NODE_FIRST_PLAN_NODE + index as u32, NODE_PLAN, AccessRole::TreeItem, &plan_node.operation, (rect.x, rect.y, rect.w, rect.h));
+        let mut item = node(
+            NODE_FIRST_PLAN_NODE + index as u32,
+            NODE_PLAN,
+            AccessRole::TreeItem,
+            &plan_node.operation,
+            (rect.x, rect.y, rect.w, rect.h),
+        );
         item.description = Some(plan.plan.spoken(index));
-        let siblings = plan_node.parent.and_then(|parent| plan.plan.nodes.get(parent)).map(|parent| parent.children.as_slice());
+        let siblings = plan_node
+            .parent
+            .and_then(|parent| plan.plan.nodes.get(parent))
+            .map(|parent| parent.children.as_slice());
         item.tree_position = Some(AccessTreePosition {
             level: plan_node.depth + 1,
-            position: siblings.and_then(|list| list.iter().position(|&child| child == index)).map_or(1, |at| at + 1),
+            position: siblings
+                .and_then(|list| list.iter().position(|&child| child == index))
+                .map_or(1, |at| at + 1),
             set_size: siblings.map_or(1, <[usize]>::len),
         });
         item.state.expanded = (!plan_node.children.is_empty()).then_some(true);
@@ -1558,20 +1952,51 @@ fn plan_nodes(nodes: &mut Vec<AccessNode>, plan: &PlanView, focused: bool, centr
 
 fn sidebar_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
     let tree = &window.tree;
-    let mut filter = node(NODE_FILTER, NODE_MAIN_WINDOW, AccessRole::TextField, "Filter objects", (8.0, 52.0, 244.0, 28.0));
+    let mut filter = node(
+        NODE_FILTER,
+        NODE_MAIN_WINDOW,
+        AccessRole::TextField,
+        "Filter objects",
+        (8.0, 52.0, 244.0, 28.0),
+    );
     filter.value = Some(tree.filter.clone());
     filter.placeholder = Some("Filter objects".to_owned());
     filter.state.focused = window.focus == WindowFocus::Filter;
     nodes.push(filter);
-    nodes.push(node(NODE_OBJECTS, NODE_MAIN_WINDOW, AccessRole::Tree, "Objects", (0.0, ROWS_TOP, 260.0, 776.0 - ROWS_TOP)));
+    nodes.push(node(
+        NODE_OBJECTS,
+        NODE_MAIN_WINDOW,
+        AccessRole::Tree,
+        "Objects",
+        (0.0, ROWS_TOP, 260.0, 776.0 - ROWS_TOP),
+    ));
     let rows = tree.rows();
-    for (offset, row) in rows.iter().enumerate().skip(tree.first_row).take(ROWS_IN_VIEW) {
+    for (offset, row) in rows
+        .iter()
+        .enumerate()
+        .skip(tree.first_row)
+        .take(ROWS_IN_VIEW)
+    {
         let visible = offset - tree.first_row;
         let y = ROWS_TOP + ROW_HEIGHT * visible as f32;
-        let detail = if row.item == TreeItem::Connection { Some(access_text(window).to_owned()) } else { row.detail.clone() };
-        let mut item = node(NODE_FIRST_TREE_ROW + visible as u32, NODE_OBJECTS, AccessRole::TreeItem, &row.label, (4.0, y, 252.0, ROW_HEIGHT));
+        let detail = if row.item == TreeItem::Connection {
+            Some(access_text(window).to_owned())
+        } else {
+            row.detail.clone()
+        };
+        let mut item = node(
+            NODE_FIRST_TREE_ROW + visible as u32,
+            NODE_OBJECTS,
+            AccessRole::TreeItem,
+            &row.label,
+            (4.0, y, 252.0, ROW_HEIGHT),
+        );
         item.description = Some(object_browser::row_description(row, detail.as_deref()));
-        item.tree_position = Some(AccessTreePosition { level: row.level, position: row.position, set_size: row.set_size });
+        item.tree_position = Some(AccessTreePosition {
+            level: row.level,
+            position: row.position,
+            set_size: row.set_size,
+        });
         item.state.expanded = row.expanded;
         item.state.selected = tree.selected == Some(row.item);
         item.state.focused = window.focus == WindowFocus::Tree && tree.current == row.item;
@@ -1581,21 +2006,52 @@ fn sidebar_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
 
 fn inspector_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
     let area = inspector::region(window.width.max(WIDTH) as f32);
-    let description = inspector::describe(&window.tree, window.inspected(), window.inspector.sample.as_ref());
-    let mut panel = node(NODE_INSPECTOR, NODE_MAIN_WINDOW, AccessRole::Group, "Inspector", (area.x, area.y, area.w, area.h));
+    let description = inspector::describe(
+        &window.tree,
+        window.inspected(),
+        window.inspector.sample.as_ref(),
+    );
+    let mut panel = node(
+        NODE_INSPECTOR,
+        NODE_MAIN_WINDOW,
+        AccessRole::Group,
+        "Inspector",
+        (area.x, area.y, area.w, area.h),
+    );
     panel.value = Some(description.name.clone());
     nodes.push(panel);
-    let mut heading = node(NODE_INSPECTOR_NAME, NODE_INSPECTOR, AccessRole::Heading, &description.name, (area.x + 12.0, area.y + 12.0, area.w - 24.0, 20.0));
+    let mut heading = node(
+        NODE_INSPECTOR_NAME,
+        NODE_INSPECTOR,
+        AccessRole::Heading,
+        &description.name,
+        (area.x + 12.0, area.y + 12.0, area.w - 24.0, 20.0),
+    );
     heading.value = Some(description.subtitle.clone());
     nodes.push(heading);
-    for (index, (block, title, top)) in inspector::heading_tops(&description, &window.inspector).into_iter().enumerate() {
+    for (index, (block, title, top)) in inspector::heading_tops(&description, &window.inspector)
+        .into_iter()
+        .enumerate()
+    {
         let open = window.inspector.is_expanded(block);
-        let mut button = node(NODE_FIRST_BLOCK + index as u32, NODE_INSPECTOR, AccessRole::Button, &title, (area.x + 12.0, top, area.w - 24.0, 24.0));
+        let mut button = node(
+            NODE_FIRST_BLOCK + index as u32,
+            NODE_INSPECTOR,
+            AccessRole::Button,
+            &title,
+            (area.x + 12.0, top, area.w - 24.0, 24.0),
+        );
         button.value = Some(if open { "expanded" } else { "collapsed" }.to_owned());
         button.state.expanded = Some(open);
         nodes.push(button);
         if block == InspectorBlock::Ddl && open {
-            let mut ddl = node(NODE_DDL, NODE_INSPECTOR, AccessRole::TextArea, "DDL", (area.x + 12.0, top + 28.0, area.w - 24.0, 120.0));
+            let mut ddl = node(
+                NODE_DDL,
+                NODE_INSPECTOR,
+                AccessRole::TextArea,
+                "DDL",
+                (area.x + 12.0, top + 28.0, area.w - 24.0, 120.0),
+            );
             ddl.value = description.ddl.clone();
             ddl.state.read_only = true;
             nodes.push(ddl);
@@ -1616,23 +2072,43 @@ fn grid_nodes(nodes: &mut Vec<AccessNode>, grid: &ResultGrid, centre_width: f32)
         top = 446.0;
     }
     let (rows, columns) = grid.selection_size();
-    let mut table = node(NODE_GRID, NODE_MAIN_WINDOW, AccessRole::Grid, "Results", (260.0, top, centre_width, BODY_BOTTOM - top));
-    table.table = Some(AccessTable { rows: grid.row_count, columns: grid.columns.len() });
+    let mut table = node(
+        NODE_GRID,
+        NODE_MAIN_WINDOW,
+        AccessRole::Grid,
+        "Results",
+        (260.0, top, centre_width, BODY_BOTTOM - top),
+    );
+    table.table = Some(AccessTable {
+        rows: grid.row_count,
+        columns: grid.columns.len(),
+    });
     table.description = Some(format!(
         "{} rows, {} columns; {} by {} selected",
         grid.row_count,
         grid.columns.len(),
         status_line::rows_text(rows),
-        if columns == 1 { "1 column".to_owned() } else { format!("{columns} columns") }
+        if columns == 1 {
+            "1 column".to_owned()
+        } else {
+            format!("{columns} columns")
+        }
     ));
     nodes.push(table);
     let edges = grid.column_edges();
     let visible = visible_columns(&grid.widths, grid.scroll_x, centre_width - 48.0);
-    let x_of = |column: usize| GRID_LEFT + edges.get(column).copied().unwrap_or(0.0) - grid.scroll_x;
+    let x_of =
+        |column: usize| GRID_LEFT + edges.get(column).copied().unwrap_or(0.0) - grid.scroll_x;
     for column in visible.clone() {
         let name = grid.columns.get(column).map_or("", String::as_str);
         let width = x_of(column + 1) - x_of(column);
-        let mut header = node(NODE_FIRST_HEADER + column as u32 % 800, NODE_GRID, AccessRole::ColumnHeader, name, (x_of(column), top, width, 28.0));
+        let mut header = node(
+            NODE_FIRST_HEADER + column as u32 % 800,
+            NODE_GRID,
+            AccessRole::ColumnHeader,
+            name,
+            (x_of(column), top, width, 28.0),
+        );
         header.cell = Some(AccessCell { row: 0, column });
         nodes.push(header);
     }
@@ -1643,7 +2119,13 @@ fn grid_nodes(nodes: &mut Vec<AccessNode>, grid: &ResultGrid, centre_width: f32)
             let cell = crate::grid::Cell { row, column };
             let y = body_top + 24.0 * (row - grid.first_row) as f32;
             let name = grid.columns.get(column).map_or("", String::as_str);
-            let mut item = node(id, NODE_GRID, AccessRole::Cell, name, (x_of(column), y, x_of(column + 1) - x_of(column), 24.0));
+            let mut item = node(
+                id,
+                NODE_GRID,
+                AccessRole::Cell,
+                name,
+                (x_of(column), y, x_of(column + 1) - x_of(column), 24.0),
+            );
             item.value = Some(spoken_cell(grid.value(cell), grid.kind(column)));
             item.cell = Some(AccessCell { row, column });
             item.state.selected = grid.is_selected(cell) && (grid.focused || rows * columns > 1);
@@ -1718,9 +2200,17 @@ mod tests {
         let mut window = MainWindow::sample();
         window.tab.dialect_menu = Some(1);
         let canvas = draw(&window, theme, box_faces());
-        assert_eq!(canvas.pixel(1200, 42 + 28), Some(theme.bg2), "the highlighted row");
+        assert_eq!(
+            canvas.pixel(1200, 42 + 28),
+            Some(theme.bg2),
+            "the highlighted row"
+        );
         assert_eq!(canvas.pixel(1200, 42), Some(theme.bg0), "the first row");
-        assert_eq!(canvas.pixel(1200, 40 + 140 + 2), Some(theme.border), "the shadow under the last row");
+        assert_eq!(
+            canvas.pixel(1200, 40 + 140 + 2),
+            Some(theme.border),
+            "the shadow under the last row"
+        );
     }
 
     #[test]
@@ -1742,17 +2232,38 @@ mod tests {
 
     #[test]
     fn a_table_opens_in_each_dialects_form() {
-        assert_eq!(open_statement("orders", QueryDialect::PostgreSql), "SELECT * FROM orders LIMIT 100;");
-        assert_eq!(open_statement("Order Lines", QueryDialect::MySql), "SELECT * FROM `Order Lines` LIMIT 100;");
-        assert_eq!(open_statement("orders", QueryDialect::SqlServer), "SELECT TOP 100 * FROM orders;");
-        assert_eq!(open_statement("orders", QueryDialect::Oracle), "SELECT * FROM orders FETCH FIRST 100 ROWS ONLY;");
+        assert_eq!(
+            open_statement("orders", QueryDialect::PostgreSql),
+            "SELECT * FROM orders LIMIT 100;"
+        );
+        assert_eq!(
+            open_statement("Order Lines", QueryDialect::MySql),
+            "SELECT * FROM `Order Lines` LIMIT 100;"
+        );
+        assert_eq!(
+            open_statement("orders", QueryDialect::SqlServer),
+            "SELECT TOP 100 * FROM orders;"
+        );
+        assert_eq!(
+            open_statement("orders", QueryDialect::Oracle),
+            "SELECT * FROM orders FETCH FIRST 100 ROWS ONLY;"
+        );
     }
 
     #[test]
     fn enter_in_the_tree_opens_query_2_and_runs_it() {
         let mut window = MainWindow::sample();
         let now = Instant::now();
-        let _ = window.key(KeyPress { key: Key::Character('1'), modifiers: eggdb_platform::window::Modifiers { control: true, ..Default::default() } }, now);
+        let _ = window.key(
+            KeyPress {
+                key: Key::Character('1'),
+                modifiers: eggdb_platform::window::Modifiers {
+                    control: true,
+                    ..Default::default()
+                },
+            },
+            now,
+        );
         assert_eq!(window.focus, WindowFocus::Tree);
         for _ in 0..3 {
             let _ = window.key(KeyPress::plain(Key::Down), now);
@@ -1768,8 +2279,16 @@ mod tests {
         let blocked = window.open_object(TreeItem::Table(0));
         assert_eq!(blocked, WindowAction::Tab(TabAction::None));
         assert_eq!(window.tab.notice.as_deref(), Some(OPEN_WHILE_RUNNING));
-        let canvas = draw(&window, Theme::of(crate::color::ThemeKind::Light), box_faces());
-        assert_eq!(canvas.pixel(450, 45), Some(Theme::of(crate::color::ThemeKind::Light).accent), "the second tab is the active one");
+        let canvas = draw(
+            &window,
+            Theme::of(crate::color::ThemeKind::Light),
+            box_faces(),
+        );
+        assert_eq!(
+            canvas.pixel(450, 45),
+            Some(Theme::of(crate::color::ThemeKind::Light).accent),
+            "the second tab is the active one"
+        );
     }
 
     #[test]
@@ -1782,29 +2301,66 @@ mod tests {
         assert_eq!(canvas.width(), 1440);
         assert_eq!(canvas.pixel(1160, 300), Some(theme.border));
         assert_eq!(canvas.pixel(1300, 600), Some(theme.bg1));
-        assert_eq!(canvas.pixel(1400, 790), Some(theme.bg2), "the status bar spans the window");
+        assert_eq!(
+            canvas.pixel(1400, 790),
+            Some(theme.bg2),
+            "the status bar spans the window"
+        );
         let tree = accessibility_tree(&window);
         assert!(tree.iter().any(|node| node.id == NODE_INSPECTOR));
         let editor = tree.iter().find(|node| node.id == NODE_EDITOR).unwrap();
         assert_eq!(editor.bounds.width, 900.0);
         window.set_width(1280);
         assert!(!window.inspector.is_open());
-        assert!(!accessibility_tree(&window).iter().any(|node| node.id == NODE_INSPECTOR));
+        assert!(
+            !accessibility_tree(&window)
+                .iter()
+                .any(|node| node.id == NODE_INSPECTOR)
+        );
     }
 
     #[test]
     fn the_sidebar_rows_are_tree_items_with_their_state() {
         let window = MainWindow::sample();
         let tree = accessibility_tree(&window);
-        let rows: Vec<&AccessNode> = tree.iter().filter(|node| node.parent == Some(NODE_OBJECTS)).collect();
+        let rows: Vec<&AccessNode> = tree
+            .iter()
+            .filter(|node| node.parent == Some(NODE_OBJECTS))
+            .collect();
         let names: Vec<&str> = rows.iter().map(|node| node.name.as_str()).collect();
-        assert_eq!(names, ["shop", "Tables", "customers", "orders", "products", "Views", "Indexes", "Keys"]);
+        assert_eq!(
+            names,
+            [
+                "shop",
+                "Tables",
+                "customers",
+                "orders",
+                "products",
+                "Views",
+                "Indexes",
+                "Keys"
+            ]
+        );
         assert!(rows[2].state.selected && !rows[2].state.focused);
-        assert_eq!(rows[1].description.as_deref(), Some("3, level 2, 1 of 4, expanded"));
+        assert_eq!(
+            rows[1].description.as_deref(),
+            Some("3, level 2, 1 of 4, expanded")
+        );
         assert_eq!(rows[1].role, AccessRole::TreeItem);
-        assert_eq!(rows[1].tree_position, Some(AccessTreePosition { level: 2, position: 1, set_size: 4 }));
+        assert_eq!(
+            rows[1].tree_position,
+            Some(AccessTreePosition {
+                level: 2,
+                position: 1,
+                set_size: 4
+            })
+        );
         assert_eq!(rows[1].state.expanded, Some(true));
-        assert!(tree.iter().filter(|node| node.state.focused).all(|node| node.id == NODE_EDITOR));
+        assert!(
+            tree.iter()
+                .filter(|node| node.state.focused)
+                .all(|node| node.id == NODE_EDITOR)
+        );
     }
 
     #[test]
@@ -1821,12 +2377,32 @@ mod tests {
         ] {
             assert!(dump.contains(&line), "{line} in\n{dump}");
         }
-        let combo = dump.lines().find(|line| line.contains("combobox \"Dialect\"")).unwrap_or_default();
-        assert!(combo.contains("[collapsed] actions=expand,focus"), "{combo}");
-        let editor = dump.lines().find(|line| line.contains("textarea \"Query\"")).unwrap_or_default();
-        assert!(editor.contains(" caret=") && editor.contains("[focused]") && editor.contains("actions=set-value,focus"), "{editor}");
-        let row = dump.lines().find(|line| line.contains("treeitem \"Tables\"")).unwrap_or_default();
-        assert!(row.contains("[expanded] actions=invoke,expand,select,focus level=2 1/4"), "{row}");
+        let combo = dump
+            .lines()
+            .find(|line| line.contains("combobox \"Dialect\""))
+            .unwrap_or_default();
+        assert!(
+            combo.contains("[collapsed] actions=expand,focus"),
+            "{combo}"
+        );
+        let editor = dump
+            .lines()
+            .find(|line| line.contains("textarea \"Query\""))
+            .unwrap_or_default();
+        assert!(
+            editor.contains(" caret=")
+                && editor.contains("[focused]")
+                && editor.contains("actions=set-value,focus"),
+            "{editor}"
+        );
+        let row = dump
+            .lines()
+            .find(|line| line.contains("treeitem \"Tables\""))
+            .unwrap_or_default();
+        assert!(
+            row.contains("[expanded] actions=invoke,expand,select,focus level=2 1/4"),
+            "{row}"
+        );
     }
 
     #[test]
@@ -1834,18 +2410,41 @@ mod tests {
         let mut window = MainWindow::sample();
         let tree = accessibility_tree(&window);
         let find = |id: u32| tree.iter().find(|node| node.id == id).cloned().unwrap();
-        let cell = tree.iter().find(|node| node.cell == Some(AccessCell { row: 1, column: 1 }) && node.role == AccessRole::Cell).cloned().unwrap();
+        let cell = tree
+            .iter()
+            .find(|node| {
+                node.cell == Some(AccessCell { row: 1, column: 1 }) && node.role == AccessRole::Cell
+            })
+            .cloned()
+            .unwrap();
         assert!(window.access_keys(&cell, &AccessAction::Focus).is_empty());
         assert_eq!(window.tab.focus, TabFocus::Grid);
-        assert_eq!(window.tab.grid.as_ref().map(|grid| grid.current), Some(crate::grid::Cell { row: 1, column: 1 }));
+        assert_eq!(
+            window.tab.grid.as_ref().map(|grid| grid.current),
+            Some(crate::grid::Cell { row: 1, column: 1 })
+        );
         let run = window.access_keys(&find(NODE_RUN), &AccessAction::Invoke);
         assert_eq!(run, vec![toolbar_chord(NODE_RUN).unwrap()]);
-        assert_eq!((window.focus, window.tab.focus), (WindowFocus::Tab, TabFocus::Editor));
-        assert!(window.access_keys(&find(NODE_RUN), &AccessAction::Focus).is_empty());
+        assert_eq!(
+            (window.focus, window.tab.focus),
+            (WindowFocus::Tab, TabFocus::Editor)
+        );
+        assert!(
+            window
+                .access_keys(&find(NODE_RUN), &AccessAction::Focus)
+                .is_empty()
+        );
         let editor = find(NODE_EDITOR);
-        assert!(window.access_keys(&editor, &AccessAction::SetValue("SELECT 1".to_owned())).is_empty());
+        assert!(
+            window
+                .access_keys(&editor, &AccessAction::SetValue("SELECT 1".to_owned()))
+                .is_empty()
+        );
         assert_eq!(window.tab.editor.text(), "SELECT 1");
-        let caret = AccessCaret { anchor: 0, caret: 6 };
+        let caret = AccessCaret {
+            anchor: 0,
+            caret: 6,
+        };
         let keys = window.access_keys(&editor, &AccessAction::SetCaret(caret));
         assert_eq!(keys.len(), 6);
         for press in keys {
@@ -1855,8 +2454,15 @@ mod tests {
         let filter = find(NODE_FILTER);
         assert!(window.access_keys(&filter, &AccessAction::Focus).is_empty());
         assert_eq!(window.focus, WindowFocus::Filter);
-        let tables = tree.iter().find(|node| node.name == "Tables" && node.role == AccessRole::TreeItem).cloned().unwrap();
-        assert_eq!(window.access_keys(&tables, &AccessAction::Collapse), vec![KeyPress::plain(Key::Left)]);
+        let tables = tree
+            .iter()
+            .find(|node| node.name == "Tables" && node.role == AccessRole::TreeItem)
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            window.access_keys(&tables, &AccessAction::Collapse),
+            vec![KeyPress::plain(Key::Left)]
+        );
         assert_eq!(window.focus, WindowFocus::Tree);
         assert!(!window.focus_node(&find(NODE_STATUS_BAR)));
     }
@@ -1866,14 +2472,33 @@ mod tests {
         let mut window = MainWindow::sample();
         let tree = accessibility_tree(&window);
         let grid = tree.iter().find(|node| node.id == NODE_GRID).unwrap();
-        assert_eq!(grid.description.as_deref(), Some("3 rows, 2 columns; 1 row by 1 column selected"));
-        assert_eq!(grid.table, Some(AccessTable { rows: 3, columns: 2 }));
-        let headers: Vec<&str> = tree.iter().filter(|node| node.role == AccessRole::ColumnHeader).map(|node| node.name.as_str()).collect();
+        assert_eq!(
+            grid.description.as_deref(),
+            Some("3 rows, 2 columns; 1 row by 1 column selected")
+        );
+        assert_eq!(
+            grid.table,
+            Some(AccessTable {
+                rows: 3,
+                columns: 2
+            })
+        );
+        let headers: Vec<&str> = tree
+            .iter()
+            .filter(|node| node.role == AccessRole::ColumnHeader)
+            .map(|node| node.name.as_str())
+            .collect();
         assert_eq!(headers, ["id", "name"]);
-        let first = tree.iter().find(|node| node.id == NODE_FIRST_CELL + 1).unwrap();
+        let first = tree
+            .iter()
+            .find(|node| node.id == NODE_FIRST_CELL + 1)
+            .unwrap();
         assert_eq!(first.value.as_deref(), Some("Ada Lovelace"));
         assert_eq!(first.cell, Some(AccessCell { row: 0, column: 1 }));
-        let status = tree.iter().find(|node| node.id == NODE_STATUS_LINE).unwrap();
+        let status = tree
+            .iter()
+            .find(|node| node.id == NODE_STATUS_LINE)
+            .unwrap();
         assert_eq!(status.name, "3 rows, 0.4 milliseconds");
         window.tab.focus = TabFocus::Grid;
         if let Some(grid) = &mut window.tab.grid {
@@ -1884,7 +2509,10 @@ mod tests {
         let focused = tree.iter().find(|node| node.state.focused).unwrap();
         assert_eq!(focused.value.as_deref(), Some("Grace Hopper"));
         assert_eq!(spoken_cell(None, ValueKind::Text), "null");
-        assert_eq!(spoken_cell(Some("\\x0102"), ValueKind::Blob), "blob, 2 bytes");
+        assert_eq!(
+            spoken_cell(Some("\\x0102"), ValueKind::Blob),
+            "blob, 2 bytes"
+        );
         assert_eq!(first_visible_line(0, 14), 0);
         assert_eq!(first_visible_line(12, 14), 3);
     }

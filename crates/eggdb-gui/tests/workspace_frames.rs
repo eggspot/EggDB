@@ -78,17 +78,27 @@ fn a_typed_path_opens_the_main_window_on_the_file() {
     let path = directory.join("shop.eggdb");
     let _ = std::fs::remove_file(&path);
     let frame = binary_png(&directory, &["--open", "shop.eggdb"]);
-    assert!(path.exists(), "Create is checked by default, so the file was created");
+    assert!(
+        path.exists(),
+        "Create is checked by default, so the file was created"
+    );
     let expected = MainWindow::opened("shop", "shop.eggdb", true, Vec::new());
     let library = main_window::draw(&expected, Theme::of(ThemeKind::Light), BOX_FACES);
     assert_eq!(frame, encode_png(&library), "the main window on shop.eggdb");
-    let reopened = binary_png(&directory, &["--open", "shop.eggdb", "--no-create", "--read-only"]);
+    let reopened = binary_png(
+        &directory,
+        &["--open", "shop.eggdb", "--no-create", "--read-only"],
+    );
     let read_only = MainWindow {
         writable: false,
         ..expected
     };
     let library = main_window::draw(&read_only, Theme::of(ThemeKind::Light), BOX_FACES);
-    assert_eq!(reopened, encode_png(&library), "the main window says read-only");
+    assert_eq!(
+        reopened,
+        encode_png(&library),
+        "the main window says read-only"
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -122,7 +132,11 @@ fn a_missing_file_with_create_unchecked_shows_the_two_error_lines() {
     let theme = Theme::of(ThemeKind::Light);
     let canvas = connect_screen::draw(&card, theme, BOX_FACES, SIZE, 1.0);
     let (cx, cy) = ORIGIN;
-    assert_eq!(canvas.pixel(cx + 200, cy + 142 + 36), Some(theme.error), "error border");
+    assert_eq!(
+        canvas.pixel(cx + 200, cy + 142 + 36),
+        Some(theme.error),
+        "error border"
+    );
     let line_ink = |top: usize, color| {
         (cx + 24..cx + 300)
             .filter(|&x| (top..top + 18).any(|y| canvas.pixel(x, y) == Some(color)))
@@ -134,7 +148,11 @@ fn a_missing_file_with_create_unchecked_shows_the_two_error_lines() {
     let error = node(&nodes, NODE_ERROR);
     assert_eq!(error.role, AccessRole::Status);
     assert!(error.name.starts_with("Error: cannot open "));
-    assert!(error.name.contains("\nTry: check \"Create the file if it does not exist\""));
+    assert!(
+        error
+            .name
+            .contains("\nTry: check \"Create the file if it does not exist\"")
+    );
     let file = node(&nodes, NODE_FILE);
     assert!(file.state.focused);
     assert_eq!(file.value.as_deref(), Some(shown.as_str()));
@@ -155,7 +173,10 @@ fn without_an_open_file_dialog_browse_is_absent_and_the_input_is_512_wide() {
     assert_eq!(node(&nodes, NODE_FILE).bounds.width, 512.0);
     let with_dialog = accessibility_tree(&ConnectCard::first_start(), BOX_FACES, SIZE);
     let browse = node(&with_dialog, NODE_BROWSE);
-    assert_eq!((browse.bounds.x, browse.bounds.y), (360.0 + 452.0, 140.0 + 142.0));
+    assert_eq!(
+        (browse.bounds.x, browse.bounds.y),
+        (360.0 + 452.0, 140.0 + 142.0)
+    );
     assert_eq!(
         eggdb_platform::window::has_file_dialog(),
         cfg!(any(target_os = "macos", windows))
@@ -171,8 +192,16 @@ fn a_drag_over_the_window_draws_the_accent_border_and_drop_to_open() {
     };
     let canvas = connect_screen::draw(&card, theme, BOX_FACES, SIZE, 1.0);
     let (cx, cy) = ORIGIN;
-    assert_eq!(canvas.pixel(cx + 280, cy), Some(theme.accent), "outer border");
-    assert_eq!(canvas.pixel(cx + 280, cy + 1), Some(theme.accent), "2 px wide");
+    assert_eq!(
+        canvas.pixel(cx + 280, cy),
+        Some(theme.accent),
+        "outer border"
+    );
+    assert_eq!(
+        canvas.pixel(cx + 280, cy + 1),
+        Some(theme.accent),
+        "2 px wide"
+    );
     let hint = (cx + 400..cx + 536)
         .filter(|&x| (cy + 28..cy + 46).any(|y| canvas.pixel(x, y) == Some(theme.accent)))
         .count();
@@ -267,12 +296,7 @@ fn type_text(workspace: &mut Workspace, text: &str) {
 }
 
 fn server_workspace() -> Workspace {
-    let mut workspace = Workspace::new(
-        Arc::new(EngineConnector),
-        None,
-        std::env::temp_dir(),
-        true,
-    );
+    let mut workspace = Workspace::new(Arc::new(EngineConnector), None, std::env::temp_dir(), true);
     workspace.key(shift_tab(), Instant::now());
     press(&mut workspace, Key::Right);
     press(&mut workspace, Key::Tab);
@@ -294,13 +318,19 @@ fn connect(workspace: &mut Workspace, url: &str, password: &str) {
 }
 
 fn shown_card(workspace: &mut Workspace) -> ConnectCard {
-    workspace.card_mut().cloned().expect("the card is still shown")
+    workspace
+        .card_mut()
+        .cloned()
+        .expect("the card is still shown")
 }
 
 #[test]
 fn the_server_segment_fills_its_fields_from_the_typed_url() {
     let mut workspace = server_workspace();
-    type_text(&mut workspace, "postgresql://ada@db:5433/shop?sslmode=disable");
+    type_text(
+        &mut workspace,
+        "postgresql://ada@db:5433/shop?sslmode=disable",
+    );
     let card = shown_card(&mut workspace);
     assert_eq!(card.segment, Segment::Server);
     assert_eq!(card.focus, Focus::Url);
@@ -317,13 +347,28 @@ fn the_server_segment_fills_its_fields_from_the_typed_url() {
     assert_eq!(node(&nodes, NODE_TLS_WARNING).name, TLS_WARNING);
     assert_eq!(node(&nodes, NODE_OPEN).name, "Connect");
     let url = node(&nodes, NODE_URL);
-    assert_eq!((url.bounds.x, url.bounds.y, url.bounds.width), (384.0, 282.0, 512.0));
+    assert_eq!(
+        (url.bounds.x, url.bounds.y, url.bounds.width),
+        (384.0, 282.0, 512.0)
+    );
     let theme = Theme::of(ThemeKind::Light);
     let canvas = connect_screen::draw(&card, theme, BOX_FACES, SIZE, 1.0);
     let (cx, cy) = ORIGIN;
-    assert_eq!(canvas.pixel(cx + 290, cy + 80), Some(theme.bg2), "the server segment is active");
-    assert_eq!(canvas.pixel(cx + 40, cy + 80), Some(theme.bg0), "the file segment is not");
-    assert_eq!(canvas.pixel(cx + 300, cy + 142), Some(theme.accent), "the focused URL input");
+    assert_eq!(
+        canvas.pixel(cx + 290, cy + 80),
+        Some(theme.bg2),
+        "the server segment is active"
+    );
+    assert_eq!(
+        canvas.pixel(cx + 40, cy + 80),
+        Some(theme.bg0),
+        "the file segment is not"
+    );
+    assert_eq!(
+        canvas.pixel(cx + 300, cy + 142),
+        Some(theme.accent),
+        "the focused URL input"
+    );
     let warning = (cx + 24..cx + 356)
         .filter(|&x| (cy + 406..cy + 424).any(|y| canvas.pixel(x, y) == Some(theme.warning)))
         .count();
@@ -339,7 +384,10 @@ fn the_server_segment_fills_its_fields_from_the_typed_url() {
 fn connecting_to_a_running_server_opens_the_main_window_on_its_database() {
     let server = start_server();
     let mut workspace = server_workspace();
-    let url = format!("postgresql://{SERVER_USER}@127.0.0.1:{}/shop?sslmode=disable", server.port);
+    let url = format!(
+        "postgresql://{SERVER_USER}@127.0.0.1:{}/shop?sslmode=disable",
+        server.port
+    );
     connect(&mut workspace, &url, SERVER_PASSWORD);
     let place = format!("127.0.0.1:{}", server.port);
     match workspace.screen() {
@@ -352,9 +400,14 @@ fn connecting_to_a_running_server_opens_the_main_window_on_its_database() {
     }
     let connection = workspace.connection_mut().expect("the connection is held");
     assert!(connection.is_server());
-    assert_eq!(connection.status_text(), format!("Connected · {place} · no TLS"));
+    assert_eq!(
+        connection.status_text(),
+        format!("Connected · {place} · no TLS")
+    );
     assert_eq!(connection.toast(), "Connected to 127.0.0.1");
-    let tables = connection.run("SELECT 1 AS one").expect("the session answers");
+    let tables = connection
+        .run("SELECT 1 AS one")
+        .expect("the session answers");
     assert_eq!(tables.len(), 1);
     connection
         .run("CREATE TABLE parts (id integer PRIMARY KEY, name text NOT NULL)")
@@ -363,18 +416,33 @@ fn connecting_to_a_running_server_opens_the_main_window_on_its_database() {
         .run("CREATE UNIQUE INDEX parts_name_key ON parts (name)")
         .expect("the index is made");
     let catalog = connection.catalog().expect("the server lists its catalog");
-    let parts = catalog.tables.iter().find(|table| table.name == "parts").expect("parts is listed");
+    let parts = catalog
+        .tables
+        .iter()
+        .find(|table| table.name == "parts")
+        .expect("parts is listed");
     let columns: Vec<(&str, bool, bool)> = parts
         .columns
         .iter()
         .map(|column| (column.name.as_str(), column.primary_key, column.not_null))
         .collect();
     assert_eq!(columns, [("id", true, true), ("name", false, true)]);
-    assert!(parts.ddl.starts_with("CREATE TABLE parts ("), "{}", parts.ddl);
-    let index = catalog.indexes.iter().find(|index| index.name == "parts_name_key").expect("the index is listed");
+    assert!(
+        parts.ddl.starts_with("CREATE TABLE parts ("),
+        "{}",
+        parts.ddl
+    );
+    let index = catalog
+        .indexes
+        .iter()
+        .find(|index| index.name == "parts_name_key")
+        .expect("the index is listed");
     assert_eq!((index.table.as_str(), index.unique), ("parts", true));
     assert_eq!(index.columns, ["name"]);
-    assert!(catalog.key_spaces.is_empty(), "a server lists no key spaces");
+    assert!(
+        catalog.key_spaces.is_empty(),
+        "a server lists no key spaces"
+    );
 }
 
 #[test]
@@ -408,7 +476,11 @@ fn a_refused_port_shows_the_error_lines_and_focuses_host() {
         Some(theme.error),
         "the Host input has the error border, moved down by the two lines"
     );
-    assert_ne!(canvas.pixel(cx + 100, cy + 142 + 36), Some(theme.error), "the URL does not");
+    assert_ne!(
+        canvas.pixel(cx + 100, cy + 142 + 36),
+        Some(theme.error),
+        "the URL does not"
+    );
     let nodes = accessibility_tree(&card, BOX_FACES, SIZE);
     assert!(node(&nodes, NODE_HOST).state.focused);
     assert!(node(&nodes, NODE_ERROR).name.contains("connection refused"));
@@ -424,33 +496,52 @@ fn tls_a_wrong_password_and_a_missing_database_say_the_engine_lines() {
     let error = card.error.expect("the TLS failure");
     assert_eq!(
         error.line,
-        format!("Error: cannot connect to 127.0.0.1:{}: the server does not offer TLS", server.port)
+        format!(
+            "Error: cannot connect to 127.0.0.1:{}: the server does not offer TLS",
+            server.port
+        )
     );
     assert_eq!(
         error.fix.as_deref(),
         Some("Try: uncheck \"Use TLS\" only on a network you trust")
     );
     let mut wrong = server_workspace();
-    connect(&mut wrong, &format!("{base}/shop?sslmode=disable"), "not it");
+    connect(
+        &mut wrong,
+        &format!("{base}/shop?sslmode=disable"),
+        "not it",
+    );
     let card = shown_card(&mut wrong);
     let error = card.error.clone().expect("the authentication failure");
     assert_eq!(
         error.line,
         format!("Error 28P01: password authentication failed for user \"{SERVER_USER}\"")
     );
-    assert_eq!(error.fix.as_deref(), Some("Try: check the user name and password"));
+    assert_eq!(
+        error.fix.as_deref(),
+        Some("Try: check the user name and password")
+    );
     assert_eq!(card.focus, Focus::Password);
     let nodes = accessibility_tree(&card, BOX_FACES, SIZE);
     assert!(
-        node(&nodes, NODE_PASSWORD).value.as_deref().is_some_and(|value| !value.contains("not it")),
+        node(&nodes, NODE_PASSWORD)
+            .value
+            .as_deref()
+            .is_some_and(|value| !value.contains("not it")),
         "the password is never in the tree"
     );
     let mut missing = server_workspace();
-    connect(&mut missing, &format!("{base}/nowhere?sslmode=disable"), SERVER_PASSWORD);
+    connect(
+        &mut missing,
+        &format!("{base}/nowhere?sslmode=disable"),
+        SERVER_PASSWORD,
+    );
     let card = shown_card(&mut missing);
     let error = card.error.clone().expect("the missing database");
     assert!(
-        error.line.starts_with("Error 3D000: database \"nowhere\" does not exist"),
+        error
+            .line
+            .starts_with("Error 3D000: database \"nowhere\" does not exist"),
         "{}",
         error.line
     );
@@ -470,7 +561,13 @@ fn a_url_that_does_not_parse_fails_at_once_and_focuses_the_url() {
     let card = shown_card(&mut workspace);
     let error = card.error.clone().expect("the URL failure");
     assert_eq!(error.line, "Error: the URL is not a database URL");
-    assert_eq!(error.fix.as_deref(), Some("Try: postgresql://user@host:5432/database"));
+    assert_eq!(
+        error.fix.as_deref(),
+        Some("Try: postgresql://user@host:5432/database")
+    );
     assert_eq!(card.focus, Focus::Url);
-    assert_eq!(card.server.url.selection(), Some((0, "postgresql://db:port/shop".len())));
+    assert_eq!(
+        card.server.url.selection(),
+        Some((0, "postgresql://db:port/shop".len()))
+    );
 }

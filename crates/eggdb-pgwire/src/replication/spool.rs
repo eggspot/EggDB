@@ -324,9 +324,8 @@ impl Drop for StreamedTransactions {
 }
 
 fn write_record(file: &mut SpillFile, message: &[u8]) -> Result<(), ReplicationError> {
-    let length = u32::try_from(message.len()).map_err(|_| {
-        ReplicationError("a streamed change is larger than 4 GiB".to_owned())
-    })?;
+    let length = u32::try_from(message.len())
+        .map_err(|_| ReplicationError("a streamed change is larger than 4 GiB".to_owned()))?;
     file.writer
         .write_all(&length.to_be_bytes())
         .and_then(|()| file.writer.write_all(message))
@@ -341,10 +340,7 @@ mod tests {
     use super::*;
 
     fn directory(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "eggdb-spool-{name}-{}",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("eggdb-spool-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&path).unwrap();
         path
     }
@@ -365,7 +361,9 @@ mod tests {
         transactions.push(700, 701, b"sub 701".to_vec()).unwrap();
         transactions.push(700, 700, b"top 2".to_vec()).unwrap();
         transactions.push(700, 702, b"sub 702".to_vec()).unwrap();
-        transactions.push(700, 702, b"sub 702 again".to_vec()).unwrap();
+        transactions
+            .push(700, 702, b"sub 702 again".to_vec())
+            .unwrap();
         transactions.start(800, true);
         transactions.push(800, 800, b"other".to_vec()).unwrap();
         transactions.abort(700, 702).unwrap();

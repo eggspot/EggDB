@@ -3,9 +3,9 @@ use crate::ast::{
     ColumnDefinition, CreateTable, Expr, ExprKind, Insert, InsertSource, InsertValue, Literal,
     Name, OnDuplicate, Pragma, Select, TableReference,
 };
+use crate::encoding::ViewDefinition;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::{self, TableCache};
-use crate::encoding::ViewDefinition;
 use crate::schema::{ColumnSchema, IndexSchema, TableSchema, read_tables};
 use crate::store::{EntryVisitor, KeyValueRead, KeyValueWrite, ScanDirection};
 use crate::types::{SqlType, Value};
@@ -174,8 +174,13 @@ fn kept_index_text(
         return Ok(Some(generated));
     }
     Ok(Some(
-        crate::sqlite_schema_text::original_index_text(reader, &table.name, &index.name, &generated)?
-            .unwrap_or(generated),
+        crate::sqlite_schema_text::original_index_text(
+            reader,
+            &table.name,
+            &index.name,
+            &generated,
+        )?
+        .unwrap_or(generated),
     ))
 }
 

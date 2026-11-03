@@ -235,7 +235,9 @@ pub fn parse_server_url(text: &str) -> Option<ServerUrl> {
     if host.is_empty()
         || host.chars().any(char::is_whitespace)
         || database.contains('/')
-        || port.as_deref().is_some_and(|port| valid_port(port).is_none())
+        || port
+            .as_deref()
+            .is_some_and(|port| valid_port(port).is_none())
     {
         well_formed = false;
     }
@@ -535,7 +537,13 @@ pub(super) fn draw_panel(pen: &mut Pen<'_, '_>, card: &ConnectCard, origin: (f32
         ("User", USER_LABEL),
         ("Password", PASSWORD_LABEL),
     ] {
-        pen.text(face, text, (origin.0 + x, origin.1 + y + shift), BODY, label_color);
+        pen.text(
+            face,
+            text,
+            (origin.0 + x, origin.1 + y + shift),
+            BODY,
+            label_color,
+        );
     }
     let form = &card.server;
     for (focus, field, rect, placeholder, masked) in [
@@ -543,7 +551,13 @@ pub(super) fn draw_panel(pen: &mut Pen<'_, '_>, card: &ConnectCard, origin: (f32
         (Focus::Host, &form.host, HOST_INPUT, DEFAULT_HOST, false),
         (Focus::Port, &form.port, PORT_INPUT, "", false),
         (Focus::Database, &form.database, DATABASE_INPUT, "", false),
-        (Focus::User, &form.user, USER_INPUT, DEFAULT_SERVER_USER, false),
+        (
+            Focus::User,
+            &form.user,
+            USER_INPUT,
+            DEFAULT_SERVER_USER,
+            false,
+        ),
         (Focus::Password, &form.password, PASSWORD_INPUT, "", true),
     ] {
         let look = InputLook {
@@ -568,7 +582,13 @@ pub(super) fn draw_panel(pen: &mut Pen<'_, '_>, card: &ConnectCard, origin: (f32
     if tls_warning_shown(card) {
         let shown = pen.elided(face, TLS_WARNING, TLS_WARNING_WIDTH);
         let top = origin.1 + TLS_WARNING_AT.1 + shift;
-        pen.text(face, &shown, (origin.0 + TLS_WARNING_AT.0, top), BODY, theme.warning);
+        pen.text(
+            face,
+            &shown,
+            (origin.0 + TLS_WARNING_AT.0, top),
+            BODY,
+            theme.warning,
+        );
     }
 }
 
@@ -638,7 +658,12 @@ mod tests {
         let url = read("postgresql://ada@db:5433/shop");
         assert_eq!(url.protocol, Protocol::PostgreSql);
         assert_eq!(
-            (url.user.as_str(), url.host.as_str(), url.port.as_deref(), url.database.as_str()),
+            (
+                url.user.as_str(),
+                url.host.as_str(),
+                url.port.as_deref(),
+                url.database.as_str()
+            ),
             ("ada", "db", Some("5433"), "shop")
         );
         assert!(url.use_tls);
@@ -679,9 +704,15 @@ mod tests {
         assert!(!read("postgresql://db?sslmode=sometimes").well_formed);
         assert!(!read("postgresql://[::1/shop").well_formed);
         let ipv6 = read("postgresql://ada@[::1]:6000/shop");
-        assert_eq!((ipv6.host.as_str(), ipv6.port.as_deref()), ("::1", Some("6000")));
+        assert_eq!(
+            (ipv6.host.as_str(), ipv6.port.as_deref()),
+            ("::1", Some("6000"))
+        );
         let escaped = read("postgresql://a%40b@db/my%20shop");
-        assert_eq!((escaped.user.as_str(), escaped.database.as_str()), ("a@b", "my shop"));
+        assert_eq!(
+            (escaped.user.as_str(), escaped.database.as_str()),
+            ("a@b", "my shop")
+        );
     }
 
     #[test]
@@ -702,7 +733,11 @@ mod tests {
         assert_eq!(form.protocol, Protocol::Redis);
         assert_eq!(form.port.value(), "6379");
         typed(&mut form, "not a url");
-        assert_eq!(form.host.value(), "cache", "an unknown scheme leaves the fields");
+        assert_eq!(
+            form.host.value(),
+            "cache",
+            "an unknown scheme leaves the fields"
+        );
     }
 
     #[test]
@@ -713,7 +748,10 @@ mod tests {
         form.database.set("shop");
         form.password.set("hunter2");
         form.field_edited();
-        assert_eq!(form.url.value(), "postgresql://a%40b@db.example.com:5432/shop");
+        assert_eq!(
+            form.url.value(),
+            "postgresql://a%40b@db.example.com:5432/shop"
+        );
         form.toggle_tls();
         assert_eq!(
             form.url.value(),
@@ -721,17 +759,27 @@ mod tests {
         );
         form.choose_protocol(Protocol::MySql);
         assert_eq!(form.port.value(), "3306");
-        assert_eq!(form.url.value(), "mysql://a%40b@db.example.com:3306/shop?tls=false");
+        assert_eq!(
+            form.url.value(),
+            "mysql://a%40b@db.example.com:3306/shop?tls=false"
+        );
         form.port.set("4000");
         form.choose_protocol(Protocol::SqlServer);
         assert_eq!(form.port.value(), "4000", "a port the user chose stays");
         form.host.set("::1");
         form.field_edited();
-        assert!(form.url.value().starts_with("sqlserver://a%40b@[::1]:4000/"));
+        assert!(
+            form.url
+                .value()
+                .starts_with("sqlserver://a%40b@[::1]:4000/")
+        );
         let mut aliased = ServerForm::new();
         typed(&mut aliased, "eggdb://ada@db/shop");
         aliased.toggle_tls();
-        assert_eq!(aliased.url.value(), "eggdb://ada@db:5432/shop?sslmode=disable");
+        assert_eq!(
+            aliased.url.value(),
+            "eggdb://ada@db:5432/shop?sslmode=disable"
+        );
     }
 
     #[test]
@@ -748,7 +796,12 @@ mod tests {
         let mut form = ServerForm::new();
         let options = form.connect_options().unwrap();
         assert_eq!(
-            (options.host.as_str(), options.port, options.user.as_str(), options.database.as_str()),
+            (
+                options.host.as_str(),
+                options.port,
+                options.user.as_str(),
+                options.database.as_str()
+            ),
             ("localhost", 5432, "eggdb", "eggdb")
         );
         assert_eq!(options.ssl_mode, SslMode::Require);
@@ -757,7 +810,12 @@ mod tests {
         form.password.set("pw");
         let options = form.connect_options().unwrap();
         assert_eq!(
-            (options.host.as_str(), options.port, options.user.as_str(), options.database.as_str()),
+            (
+                options.host.as_str(),
+                options.port,
+                options.user.as_str(),
+                options.database.as_str()
+            ),
             ("db", 5433, "ada", "shop")
         );
         assert_eq!(options.ssl_mode, SslMode::Disable);
@@ -785,7 +843,9 @@ mod tests {
         let mut written = ServerForm::new();
         written.toggle_tls();
         assert_eq!(written.url.value(), "postgresql://:5432?sslmode=disable");
-        let options = written.connect_options().expect("a URL the fields wrote is theirs");
+        let options = written
+            .connect_options()
+            .expect("a URL the fields wrote is theirs");
         assert_eq!(options.host, "localhost");
     }
 }

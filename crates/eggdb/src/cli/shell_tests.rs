@@ -391,7 +391,10 @@ fn a_failed_block_refuses_key_value_writes_until_rollback() {
         stderr.contains("the transaction block failed; ROLLBACK ends it"),
         "{stderr}"
     );
-    assert!(stderr.contains("nothing to expire: k is not in "), "{stderr}");
+    assert!(
+        stderr.contains("nothing to expire: k is not in "),
+        "{stderr}"
+    );
     assert!(stderr.contains("key not found: k"), "{stderr}");
     assert!(
         !text(&ran.stdout).contains("before"),
@@ -465,7 +468,11 @@ fn a_time_to_live_set_in_a_block_applies_at_commit_and_vanishes_at_rollback() {
         lines[2].starts_with("{\"key\":\"session:7\",\"ttl_ms\":3600000,\"expires_at\":\""),
         "{out}"
     );
-    assert_eq!(lines[3..7], ["ROLLBACK", "never", "BEGIN", "COMMIT"], "{out}");
+    assert_eq!(
+        lines[3..7],
+        ["ROLLBACK", "never", "BEGIN", "COMMIT"],
+        "{out}"
+    );
     assert!(lines[7].starts_with("59m") || lines[7] == "1h", "{out}");
     assert_eq!(
         lines[8..],
@@ -493,8 +500,14 @@ fn expire_and_persist_in_a_block_see_the_keys_the_block_wrote_and_deleted() {
         ttl fresh\n";
     let ran = shell(&file, &["--keep-going"], script);
     let stderr = text(&ran.stderr);
-    assert!(stderr.contains("nothing to expire: gone is not in "), "{stderr}");
-    assert!(stderr.contains("nothing to persist: gone is not in "), "{stderr}");
+    assert!(
+        stderr.contains("nothing to expire: gone is not in "),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("nothing to persist: gone is not in "),
+        "{stderr}"
+    );
     assert_eq!(
         text(&ran.stdout),
         "BEGIN\n10m\n{\"key\":\"fresh\",\"persisted\":true}\nCOMMIT\nnever\n",
@@ -552,7 +565,10 @@ fn scan_and_ttl_in_a_block_read_the_blocks_collection() {
         "collection: sessions\nBEGIN\ns:1\ns:2\n1h\nCOMMIT\nLinus\ncollection: default key space\n"
     );
     let stderr = text(&ran.stderr);
-    assert!(stderr.contains("2 entries") && stderr.contains("no entries"), "{stderr}");
+    assert!(
+        stderr.contains("2 entries") && stderr.contains("no entries"),
+        "{stderr}"
+    );
 }
 
 #[test]

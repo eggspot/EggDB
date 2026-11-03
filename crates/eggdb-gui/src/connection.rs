@@ -483,9 +483,7 @@ pub fn type_oid_kind(oid: u32) -> ValueKind {
         20 | 21 | 23 | 26 | 700 | 701 | 790 | 1700 => ValueKind::Number,
         16 => ValueKind::Boolean,
         17 => ValueKind::Blob,
-        114 | 3802 | 199 | 1000..=1041 | 1115 | 1182 | 1183 | 1185 | 1231 | 3807 => {
-            ValueKind::Json
-        }
+        114 | 3802 | 199 | 1000..=1041 | 1115 | 1182 | 1183 | 1185 | 1231 | 3807 => ValueKind::Json,
         _ => ValueKind::Text,
     }
 }
@@ -788,7 +786,9 @@ mod tests {
     fn a_created_file_opens_read_write_and_reopens_read_only() {
         let path = scratch("create").join("shop.eggdb");
         let _ = std::fs::remove_file(&path);
-        let mut created = EngineConnector.connect(&file(path.clone(), true, false)).unwrap();
+        let mut created = EngineConnector
+            .connect(&file(path.clone(), true, false))
+            .unwrap();
         assert_eq!(created.name(), "shop");
         assert_eq!(created.location(), "shop.eggdb");
         assert_eq!(created.status_text(), "Connected · shop.eggdb · read-write");
@@ -796,10 +796,15 @@ mod tests {
         created.run("CREATE TABLE orders (id integer)").unwrap();
         created.run("CREATE TABLE customers (id integer)").unwrap();
         let tables = created.run("SELECT 1 AS one").unwrap();
-        assert_eq!(tables.last().map(|table| table.columns.clone()), Some(vec!["one".to_owned()]));
+        assert_eq!(
+            tables.last().map(|table| table.columns.clone()),
+            Some(vec!["one".to_owned()])
+        );
         assert_eq!(created.table_names().unwrap(), vec!["customers", "orders"]);
         drop(created);
-        let reader = EngineConnector.connect(&file(path.clone(), false, true)).unwrap();
+        let reader = EngineConnector
+            .connect(&file(path.clone(), false, true))
+            .unwrap();
         assert!(reader.read_only());
         assert_eq!(reader.status_text(), "Connected · shop.eggdb · read-only");
         drop(reader);
@@ -811,7 +816,10 @@ mod tests {
         let path = scratch("missing").join("nothing.eggdb");
         let shown = path.display().to_string();
         let error = failure(&file(path, false, false));
-        assert_eq!(error.error_line(), format!("Error: cannot open {shown}: no such file"));
+        assert_eq!(
+            error.error_line(),
+            format!("Error: cannot open {shown}: no such file")
+        );
         assert_eq!(
             error.try_line(),
             Some(format!(
@@ -844,7 +852,10 @@ mod tests {
         for target in [path.clone(), directory.clone()] {
             let shown = target.display().to_string();
             let error = failure(&file(target, false, false));
-            assert_eq!(error.error_line(), format!("Error: {shown} is not an EggDB file"));
+            assert_eq!(
+                error.error_line(),
+                format!("Error: {shown} is not an EggDB file")
+            );
             assert_eq!(
                 error.try_line().as_deref(),
                 Some("Try: open an .eggdb file, or restore this file with eggdb restore")
@@ -857,10 +868,15 @@ mod tests {
     fn a_file_open_for_writing_elsewhere_is_locked() {
         let path = scratch("locked").join("shop.eggdb");
         let _ = std::fs::remove_file(&path);
-        let holder = EngineConnector.connect(&file(path.clone(), true, false)).unwrap();
+        let holder = EngineConnector
+            .connect(&file(path.clone(), true, false))
+            .unwrap();
         let shown = path.display().to_string();
         let error = failure(&file(path.clone(), false, false));
-        assert_eq!(error.error_line(), format!("Error: {shown} is open in another process"));
+        assert_eq!(
+            error.error_line(),
+            format!("Error: {shown} is open in another process")
+        );
         assert_eq!(
             error.try_line().as_deref(),
             Some("Try: close the other program, or check \"Open read-only\"")
@@ -928,7 +944,9 @@ mod tests {
         assert_eq!(missing.field, FailureField::Database);
         let tls = server_failure(
             &options,
-            &ClientError::Tls("the server does not support TLS and the URL says sslmode=require".to_owned()),
+            &ClientError::Tls(
+                "the server does not support TLS and the URL says sslmode=require".to_owned(),
+            ),
         );
         assert_eq!(
             tls.error_line(),

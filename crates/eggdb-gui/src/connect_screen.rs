@@ -21,8 +21,8 @@ pub use accessibility::{
     error_announcement,
 };
 pub use accessibility::{
-    NODE_DATABASE, NODE_HOST, NODE_PASSWORD, NODE_PORT, NODE_PROTOCOL, NODE_TLS_WARNING,
-    NODE_URL, NODE_USE_TLS, NODE_USER,
+    NODE_DATABASE, NODE_HOST, NODE_PASSWORD, NODE_PORT, NODE_PROTOCOL, NODE_TLS_WARNING, NODE_URL,
+    NODE_USE_TLS, NODE_USER,
 };
 pub use server_segment::{
     DEFAULT_HOST, DEFAULT_SERVER_USER, Protocol, Segment, ServerForm, ServerUrl, TLS_WARNING,
@@ -466,7 +466,14 @@ impl ConnectCard {
     /// box starts at `box_left`: the nearest character boundary, the word on a double-click,
     /// the whole value on a triple-click, extending the selection when `extend` is set (a
     /// drag or `Shift`+click). Nothing happens when no input has the focus.
-    pub fn place_caret_at(&mut self, faces: Faces<'_>, box_left: f32, x: f32, clicks: u8, extend: bool) {
+    pub fn place_caret_at(
+        &mut self,
+        faces: Faces<'_>,
+        box_left: f32,
+        x: f32,
+        clicks: u8,
+        extend: bool,
+    ) {
         let masked = self.focus == Focus::Password;
         let Some(value) = self.focused_field().map(|field| field.value().to_owned()) else {
             return;
@@ -887,9 +894,9 @@ fn grow(rect: Rect, by: f32) -> Rect {
 }
 
 fn panel_shift(card: &ConnectCard) -> f32 {
-    card.error
-        .as_ref()
-        .map_or(0.0, |error| ERROR_LINE_HEIGHT * error.lines().count() as f32)
+    card.error.as_ref().map_or(0.0, |error| {
+        ERROR_LINE_HEIGHT * error.lines().count() as f32
+    })
 }
 
 fn file_input(card: &ConnectCard) -> Rect {
@@ -1853,7 +1860,10 @@ mod tests {
         };
         let (card, action) = handle_key(card, press(Key::Right));
         assert_eq!(action, ConnectAction::None);
-        assert_eq!((card.segment, card.focus), (Segment::Server, Focus::Segments));
+        assert_eq!(
+            (card.segment, card.focus),
+            (Segment::Server, Focus::Segments)
+        );
         assert_eq!(
             card.focus_order(),
             vec![
@@ -1894,9 +1904,15 @@ mod tests {
         };
         let (card, _) = handle_key(card, press(Key::Character('h')));
         assert_eq!(card.server.host.value(), "h");
-        assert_eq!(card.server.url.value(), "postgresql://h:5432?sslmode=disable");
+        assert_eq!(
+            card.server.url.value(),
+            "postgresql://h:5432?sslmode=disable"
+        );
         let (rect, _) = focus_target(&card, BOXES, SIZE);
-        assert_eq!((rect.x, rect.y, rect.w, rect.h), (560.0, 348.0, 224.0, 28.0));
+        assert_eq!(
+            (rect.x, rect.y, rect.w, rect.h),
+            (560.0, 348.0, 224.0, 28.0)
+        );
         let card = ConnectCard {
             focus: Focus::Segments,
             ..card
@@ -1905,7 +1921,10 @@ mod tests {
         assert_eq!(card.segment, Segment::File);
         let (card, _) = handle_key(card, press(Key::End));
         let (card, _) = handle_key(card, with(Key::Character('o'), CONTROL));
-        assert_eq!((card.segment, card.focus), (Segment::File, Focus::FileInput));
+        assert_eq!(
+            (card.segment, card.focus),
+            (Segment::File, Focus::FileInput)
+        );
     }
 
     #[test]
@@ -1930,14 +1949,26 @@ mod tests {
             (Segment::File, Focus::FileInput)
         );
         let (canvas, theme) = frame(&card, ThemeKind::Light, 1.0);
-        assert_eq!(canvas.pixel(360 + 100, 140 + 142 + 36), Some(theme.error), "URL border");
-        assert_ne!(canvas.pixel(360 + 300, 140 + 208 + 36), Some(theme.error), "Host border");
+        assert_eq!(
+            canvas.pixel(360 + 100, 140 + 142 + 36),
+            Some(theme.error),
+            "URL border"
+        );
+        assert_ne!(
+            canvas.pixel(360 + 300, 140 + 208 + 36),
+            Some(theme.error),
+            "Host border"
+        );
         let mut busy = ConnectCard::first_start();
         busy.show_segment(Segment::Server);
         busy.begin_opening();
         busy.progress = Some("Connecting to localhost:5432…".to_owned());
         let (canvas, theme) = frame(&busy, ThemeKind::Light, 1.0);
-        assert_eq!(canvas.pixel(360 + 400, 140 + 150), Some(theme.bg1), "disabled URL input");
+        assert_eq!(
+            canvas.pixel(360 + 400, 140 + 150),
+            Some(theme.bg1),
+            "disabled URL input"
+        );
     }
 
     #[test]
@@ -1959,8 +1990,18 @@ mod tests {
         assert_eq!(card.file.caret(), 0);
         card.focus = Focus::Password;
         card.server.password.set("secret");
-        card.place_caret_at(BOXES, left, left + INPUT_TEXT_INSET + server_segment::MASK_ADVANCE * 2.2, 2, false);
-        assert_eq!(card.server.password.selection(), Some((0, 6)), "a double-click in the password selects it all");
+        card.place_caret_at(
+            BOXES,
+            left,
+            left + INPUT_TEXT_INSET + server_segment::MASK_ADVANCE * 2.2,
+            2,
+            false,
+        );
+        assert_eq!(
+            card.server.password.selection(),
+            Some((0, 6)),
+            "a double-click in the password selects it all"
+        );
         assert_eq!(card.copied_text(), None, "the password is never copied");
     }
 
@@ -1968,12 +2009,20 @@ mod tests {
     fn a_paste_into_an_input_is_one_line_and_updates_the_url() {
         let mut card = ConnectCard::first_start();
         assert!(card.paste("/tmp/a.eggdb\n"));
-        assert_eq!(card.file.value(), "/tmp/a.eggdb", "the selected quickstart path is replaced");
+        assert_eq!(
+            card.file.value(),
+            "/tmp/a.eggdb",
+            "the selected quickstart path is replaced"
+        );
         card.show_segment(Segment::Server);
         card.focus = Focus::Host;
         card.server.host.set("");
         assert!(card.paste("db.example.com"));
-        assert!(card.server.url.value().contains("db.example.com"), "{}", card.server.url.value());
+        assert!(
+            card.server.url.value().contains("db.example.com"),
+            "{}",
+            card.server.url.value()
+        );
         card.focus = Focus::Open;
         assert!(!card.paste("ignored"));
     }
@@ -1983,7 +2032,12 @@ mod tests {
         let mut card = ConnectCard::first_start();
         card.can_cancel = true;
         let origin = card_origin(SIZE.0, SIZE.1);
-        let inside = |rect: Rect| ((origin.0 + rect.x + 4.0) as usize, (origin.1 + rect.y + rect.h / 2.0) as usize);
+        let inside = |rect: Rect| {
+            (
+                (origin.0 + rect.x + 4.0) as usize,
+                (origin.1 + rect.y + rect.h / 2.0) as usize,
+            )
+        };
         let (cancel_x, cancel_y) = inside(CANCEL);
         let (open_x, open_y) = inside(OPEN);
         let (canvas, theme) = frame(&card, ThemeKind::Light, 1.0);
@@ -1991,11 +2045,19 @@ mod tests {
         assert_eq!(canvas.pixel(open_x, open_y), Some(theme.accent));
         card.pointer.hovered = Some(NODE_CANCEL);
         let (canvas, _) = frame(&card, ThemeKind::Light, 1.0);
-        assert_eq!(canvas.pixel(cancel_x, cancel_y), Some(theme.bg2), "hover fills bg2");
+        assert_eq!(
+            canvas.pixel(cancel_x, cancel_y),
+            Some(theme.bg2),
+            "hover fills bg2"
+        );
         card.pointer.pressed = Some(NODE_CANCEL);
         let (canvas, _) = frame(&card, ThemeKind::Light, 1.0);
         let edge = (origin.0 + CANCEL.x + CANCEL.w / 2.0) as usize;
-        assert_eq!(canvas.pixel(edge, (origin.1 + CANCEL.y) as usize), Some(theme.border_strong), "pressed edge");
+        assert_eq!(
+            canvas.pixel(edge, (origin.1 + CANCEL.y) as usize),
+            Some(theme.border_strong),
+            "pressed edge"
+        );
         card.pointer = PointerLook {
             hovered: Some(NODE_OPEN),
             ..PointerLook::default()
@@ -2022,7 +2084,9 @@ mod tests {
         card.caret = CaretLook::Inactive;
         let (inactive, _) = frame(&card, ThemeKind::Light, 1.0);
         let origin = card_origin(SIZE.0, SIZE.1);
-        let x = (origin.0 + FILE_INPUT.x + INPUT_TEXT_INSET + BoxFace.advance('a', BODY.0) * 2.0) as usize + 1;
+        let x = (origin.0 + FILE_INPUT.x + INPUT_TEXT_INSET + BoxFace.advance('a', BODY.0) * 2.0)
+            as usize
+            + 1;
         let y = (origin.1 + FILE_INPUT.y + CARET_TOP + 10.0) as usize;
         assert_eq!(on.pixel(x, y), Some(theme.accent));
         assert_ne!(off.pixel(x, y), Some(theme.accent));

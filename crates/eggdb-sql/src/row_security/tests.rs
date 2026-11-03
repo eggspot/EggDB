@@ -325,7 +325,11 @@ fn using_is_the_check_when_a_policy_has_no_with_check() {
         "INSERT 0 1"
     );
     assert_eq!(
-        run(&mut ada, "INSERT INTO docs VALUES (4, 'ada', 'a3') RETURNING id").unwrap(),
+        run(
+            &mut ada,
+            "INSERT INTO docs VALUES (4, 'ada', 'a3') RETURNING id"
+        )
+        .unwrap(),
         "id\n4\nINSERT 0 1"
     );
     assert_eq!(
@@ -375,7 +379,11 @@ fn each_command_checks_its_own_policies_and_restrictive_ones_all_hold() {
         "INSERT 0 1"
     );
     assert_eq!(
-        run(&mut ada, "UPDATE docs SET body = 'long enough' WHERE id = 3").unwrap(),
+        run(
+            &mut ada,
+            "UPDATE docs SET body = 'long enough' WHERE id = 3"
+        )
+        .unwrap(),
         "UPDATE 1"
     );
     for sql in [
@@ -423,9 +431,16 @@ fn returned_new_rows_must_also_be_visible() {
         run(&mut ada, "INSERT INTO docs VALUES (3, 'grace', 'gift')").unwrap(),
         "INSERT 0 1"
     );
-    violates(&mut ada, "INSERT INTO docs VALUES (4, 'grace', 'peek') RETURNING body");
+    violates(
+        &mut ada,
+        "INSERT INTO docs VALUES (4, 'grace', 'peek') RETURNING body",
+    );
     assert_eq!(
-        run(&mut ada, "INSERT INTO docs VALUES (5, 'ada', 'mine') RETURNING body").unwrap(),
+        run(
+            &mut ada,
+            "INSERT INTO docs VALUES (5, 'ada', 'mine') RETURNING body"
+        )
+        .unwrap(),
         "body\nmine\nINSERT 0 1"
     );
 }

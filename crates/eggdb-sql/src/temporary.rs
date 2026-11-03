@@ -441,7 +441,9 @@ mod tests {
         routed
             .put(&table_key(&internal_name("#orders")), b"x")
             .unwrap();
-        routed.put(&rows_prefix(u32::MAX - (1 << 24)), b"row").unwrap();
+        routed
+            .put(&rows_prefix(u32::MAX - (1 << 24)), b"row")
+            .unwrap();
         let names: Vec<String> = objects
             .relations()
             .into_iter()

@@ -408,7 +408,13 @@ fn pointer_button(message: u32) -> Option<(PointerButton, bool)> {
     })
 }
 
-fn pointer_message(window: Handle, state: &WindowState, message: u32, wparam: usize, lparam: isize) {
+fn pointer_message(
+    window: Handle,
+    state: &WindowState,
+    message: u32,
+    wparam: usize,
+    lparam: isize,
+) {
     let (x, y) = win32::point_from_lparam(lparam);
     let (x, y) = (x as f32, y as f32);
     match message {
@@ -1097,7 +1103,9 @@ impl Window for Win32Window {
             file_units: DIALOG_PATH_UNITS as u32,
             file_title: std::ptr::null_mut(),
             file_title_units: 0,
-            initial_directory: initial.as_ref().map_or(std::ptr::null(), |wide| wide.as_ptr()),
+            initial_directory: initial
+                .as_ref()
+                .map_or(std::ptr::null(), |wide| wide.as_ptr()),
             title: std::ptr::null(),
             flags: OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
             file_offset: 0,

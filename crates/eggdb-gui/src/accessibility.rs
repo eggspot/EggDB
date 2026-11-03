@@ -5,8 +5,8 @@
 //! through the paths the keyboard already tests.
 
 use eggdb_platform::window::{
-    AccessAction, AccessActions, AccessCaret, AccessNode, AccessRole, Key, KeyPress, Modifiers,
-    MAX_ACCESS_VALUE_CHARS,
+    AccessAction, AccessActions, AccessCaret, AccessNode, AccessRole, Key, KeyPress,
+    MAX_ACCESS_VALUE_CHARS, Modifiers,
 };
 
 /// The actions a node of `role` offers by default, before its screen's own exceptions: buttons
@@ -166,9 +166,15 @@ pub fn caret_keys(caret: AccessCaret, length: usize) -> Vec<KeyPress> {
     let mut keys = vec![plain(Key::Home)];
     keys.extend(std::iter::repeat_n(plain(Key::Right), anchor));
     if to > anchor {
-        keys.extend(std::iter::repeat_n(chord(Key::Right, shifted()), to - anchor));
+        keys.extend(std::iter::repeat_n(
+            chord(Key::Right, shifted()),
+            to - anchor,
+        ));
     } else {
-        keys.extend(std::iter::repeat_n(chord(Key::Left, shifted()), anchor - to));
+        keys.extend(std::iter::repeat_n(
+            chord(Key::Left, shifted()),
+            anchor - to,
+        ));
     }
     keys
 }
@@ -204,7 +210,9 @@ pub fn action_keys(node: &AccessNode, action: &AccessAction) -> Vec<KeyPress> {
         (AccessAction::SetValue(text), role) => typing(text, role == AccessRole::TextArea),
         (AccessAction::SetCaret(caret), _) => caret_keys(
             *caret,
-            node.value.as_deref().map_or(0, |value| value.chars().count()),
+            node.value
+                .as_deref()
+                .map_or(0, |value| value.chars().count()),
         ),
     }
 }
@@ -293,7 +301,10 @@ fn depth(nodes: &[AccessNode], node: &AccessNode) -> usize {
             break;
         }
         depth += 1;
-        parent = nodes.iter().find(|other| other.id == id).and_then(|other| other.parent);
+        parent = nodes
+            .iter()
+            .find(|other| other.id == id)
+            .and_then(|other| other.parent);
     }
     depth
 }
@@ -334,7 +345,10 @@ pub fn describe(nodes: &[AccessNode]) -> String {
             out.push_str(&format!(" cell={},{}", cell.row, cell.column));
         }
         if let Some(at) = node.tree_position {
-            out.push_str(&format!(" level={} {}/{}", at.level, at.position, at.set_size));
+            out.push_str(&format!(
+                " level={} {}/{}",
+                at.level, at.position, at.set_size
+            ));
         }
         if let Some(shortcut) = &node.shortcut {
             out.push_str(&format!(" shortcut={shortcut}"));
@@ -365,7 +379,10 @@ mod tests {
         assert!(button.invoke && button.focus && !button.toggle && !button.set_value);
         assert!(default_actions(&node(2, AccessRole::CheckBox)).toggle);
         assert!(default_actions(&node(2, AccessRole::Tab)).select);
-        assert_eq!(default_actions(&node(2, AccessRole::Grid)), AccessActions::default());
+        assert_eq!(
+            default_actions(&node(2, AccessRole::Grid)),
+            AccessActions::default()
+        );
         let mut ddl = node(2, AccessRole::TextArea);
         ddl.state.read_only = true;
         assert!(!default_actions(&ddl).set_value && default_actions(&ddl).focus);
@@ -384,40 +401,86 @@ mod tests {
     fn actions_become_the_keys_a_person_would_press() {
         let enter = vec![KeyPress::plain(Key::Enter)];
         let space = vec![KeyPress::plain(Key::Space)];
-        assert_eq!(action_keys(&node(2, AccessRole::Button), &AccessAction::Invoke), enter);
-        assert_eq!(action_keys(&node(2, AccessRole::CheckBox), &AccessAction::Invoke), space);
-        assert_eq!(action_keys(&node(2, AccessRole::CheckBox), &AccessAction::Toggle), space);
+        assert_eq!(
+            action_keys(&node(2, AccessRole::Button), &AccessAction::Invoke),
+            enter
+        );
+        assert_eq!(
+            action_keys(&node(2, AccessRole::CheckBox), &AccessAction::Invoke),
+            space
+        );
+        assert_eq!(
+            action_keys(&node(2, AccessRole::CheckBox), &AccessAction::Toggle),
+            space
+        );
         assert!(action_keys(&node(2, AccessRole::Button), &AccessAction::Focus).is_empty());
         let mut row = node(3, AccessRole::TreeItem);
         row.state.expanded = Some(false);
-        assert_eq!(action_keys(&row, &AccessAction::Expand), vec![KeyPress::plain(Key::Right)]);
-        assert!(action_keys(&row, &AccessAction::Collapse).is_empty(), "already collapsed");
+        assert_eq!(
+            action_keys(&row, &AccessAction::Expand),
+            vec![KeyPress::plain(Key::Right)]
+        );
+        assert!(
+            action_keys(&row, &AccessAction::Collapse).is_empty(),
+            "already collapsed"
+        );
         row.state.expanded = Some(true);
-        assert_eq!(action_keys(&row, &AccessAction::Collapse), vec![KeyPress::plain(Key::Left)]);
+        assert_eq!(
+            action_keys(&row, &AccessAction::Collapse),
+            vec![KeyPress::plain(Key::Left)]
+        );
         assert_eq!(action_keys(&row, &AccessAction::Select), space);
         let mut pill = node(4, AccessRole::ComboBox);
         assert_eq!(action_keys(&pill, &AccessAction::Expand), space);
         pill.state.expanded = Some(true);
-        assert_eq!(action_keys(&pill, &AccessAction::Collapse), vec![KeyPress::plain(Key::Escape)]);
+        assert_eq!(
+            action_keys(&pill, &AccessAction::Collapse),
+            vec![KeyPress::plain(Key::Escape)]
+        );
     }
 
     #[test]
     fn values_are_typed_over_a_select_all() {
         let keys = typing("a\nb\t", false);
-        assert_eq!(keys[0], KeyPress { key: Key::Character('a'), modifiers: primary() });
+        assert_eq!(
+            keys[0],
+            KeyPress {
+                key: Key::Character('a'),
+                modifiers: primary()
+            }
+        );
         assert_eq!(
             keys[1..],
-            [KeyPress::plain(Key::Character('a')), KeyPress::plain(Key::Character('b'))]
+            [
+                KeyPress::plain(Key::Character('a')),
+                KeyPress::plain(Key::Character('b'))
+            ]
         );
         let area = typing("a\nb", true);
         assert_eq!(area[2], KeyPress::plain(Key::Enter));
         assert_eq!(typing("", false)[1], KeyPress::plain(Key::Backspace));
         let mut field = node(5, AccessRole::TextField);
         field.value = Some("shop".to_owned());
-        let keys = action_keys(&field, &AccessAction::SetCaret(AccessCaret { anchor: 1, caret: 9 }));
-        assert_eq!(keys.len(), 1 + 1 + 3, "Home, one Right, then Shift+Right up to the end");
+        let keys = action_keys(
+            &field,
+            &AccessAction::SetCaret(AccessCaret {
+                anchor: 1,
+                caret: 9,
+            }),
+        );
+        assert_eq!(
+            keys.len(),
+            1 + 1 + 3,
+            "Home, one Right, then Shift+Right up to the end"
+        );
         assert_eq!(keys[2].modifiers, shifted());
-        let back = caret_keys(AccessCaret { anchor: 3, caret: 1 }, 4);
+        let back = caret_keys(
+            AccessCaret {
+                anchor: 3,
+                caret: 1,
+            },
+            4,
+        );
         assert_eq!(back.iter().filter(|key| key.key == Key::Left).count(), 2);
     }
 
@@ -429,9 +492,27 @@ mod tests {
         assert_eq!(line_and_column(&lines, 13), (1, 4));
         assert_eq!(line_and_column(&lines, 8), (0, 8));
         assert_eq!(line_and_column(&lines, 500), (1, 6));
-        assert_eq!(field_caret(4, None), AccessCaret { anchor: 4, caret: 4 });
-        assert_eq!(field_caret(0, Some((0, 4))), AccessCaret { anchor: 4, caret: 0 });
-        assert_eq!(field_caret(4, Some((0, 4))), AccessCaret { anchor: 0, caret: 4 });
+        assert_eq!(
+            field_caret(4, None),
+            AccessCaret {
+                anchor: 4,
+                caret: 4
+            }
+        );
+        assert_eq!(
+            field_caret(0, Some((0, 4))),
+            AccessCaret {
+                anchor: 4,
+                caret: 0
+            }
+        );
+        assert_eq!(
+            field_caret(4, Some((0, 4))),
+            AccessCaret {
+                anchor: 0,
+                caret: 4
+            }
+        );
     }
 
     #[test]
@@ -439,14 +520,20 @@ mod tests {
         let mut field = node(2, AccessRole::TextField);
         field.name = "File".to_owned();
         field.value = Some("say \"hi\"".to_owned());
-        field.caret = Some(AccessCaret { anchor: 0, caret: 3 });
+        field.caret = Some(AccessCaret {
+            anchor: 0,
+            caret: 3,
+        });
         field.state = AccessState {
             focused: true,
             invalid: true,
             ..AccessState::default()
         };
         let mut grid = node(3, AccessRole::Grid);
-        grid.table = Some(eggdb_platform::window::AccessTable { rows: 3, columns: 2 });
+        grid.table = Some(eggdb_platform::window::AccessTable {
+            rows: 3,
+            columns: 2,
+        });
         let mut cell = node(4, AccessRole::Cell);
         cell.parent = Some(3);
         cell.cell = Some(eggdb_platform::window::AccessCell { row: 1, column: 0 });

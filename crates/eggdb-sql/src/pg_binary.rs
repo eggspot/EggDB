@@ -685,7 +685,8 @@ mod tests {
     #[test]
     fn numeric_infinities_take_postgresql_14_special_signs() {
         for (value, sign) in [("Infinity", [0xD0, 0x00]), ("-Infinity", [0xF0, 0x00])] {
-            let number = Value::Numeric(crate::numeric::Numeric::parse_with_infinity(value).unwrap());
+            let number =
+                Value::Numeric(crate::numeric::Numeric::parse_with_infinity(value).unwrap());
             let bytes = encode_pg_binary(&number, NUMERIC_OID, TimeZone::UTC)
                 .unwrap()
                 .unwrap();

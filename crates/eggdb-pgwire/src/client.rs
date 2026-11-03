@@ -1024,8 +1024,10 @@ fn parameter_types(body: &[u8]) -> Result<Vec<u32>, ClientError> {
         return Err(malformed());
     }
     Ok(types
-        .chunks_exact(4)
-        .map(|oid| u32::from_be_bytes([oid[0], oid[1], oid[2], oid[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|oid| u32::from_be_bytes(*oid))
         .collect())
 }
 
@@ -1033,10 +1035,7 @@ fn command_tag(body: &[u8]) -> String {
     String::from_utf8_lossy(body.strip_suffix(&[0]).unwrap_or(body)).into_owned()
 }
 
-fn bind_message(
-    statement: &str,
-    parameters: &[Option<&[u8]>],
-) -> Result<Vec<u8>, ClientError> {
+fn bind_message(statement: &str, parameters: &[Option<&[u8]>]) -> Result<Vec<u8>, ClientError> {
     let count = u16::try_from(parameters.len())
         .map_err(|_| ClientError::Protocol("more than 65,535 parameters".to_owned()))?;
     let mut bind = cstring("");
@@ -1084,11 +1083,7 @@ impl PgClient {
     /// statement `name` (Parse, Describe, Sync), with the parameters' types left to the
     /// server, and returns what its Describe step told. The statement lives until
     /// [`PgClient::close_statement`] or the end of the connection.
-    pub fn prepare_named(
-        &mut self,
-        name: &str,
-        sql: &str,
-    ) -> Result<PreparedOutline, ClientError> {
+    pub fn prepare_named(&mut self, name: &str, sql: &str) -> Result<PreparedOutline, ClientError> {
         let mut parse = cstring(name);
         parse.extend_from_slice(&cstring(sql));
         parse.extend_from_slice(&0u16.to_be_bytes());
@@ -1419,7 +1414,10 @@ mod tests {
         let mut longer = description.clone();
         longer.push(0);
         assert!(parameter_types(&longer).is_err());
-        assert_eq!(parameter_types(&0u16.to_be_bytes()).unwrap(), Vec::<u32>::new());
+        assert_eq!(
+            parameter_types(&0u16.to_be_bytes()).unwrap(),
+            Vec::<u32>::new()
+        );
     }
 
     #[test]

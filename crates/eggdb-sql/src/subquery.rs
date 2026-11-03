@@ -2721,11 +2721,9 @@ fn prepare_generated(
         position,
     };
     let temp = match streamed {
-        Some(function) => prepared
-            .temp
-            .add_streamed(env.names, shape, |store| {
-                function.generate_at_most(most_generated_rows, store)
-            })?,
+        Some(function) => prepared.temp.add_streamed(env.names, shape, |store| {
+            function.generate_at_most(most_generated_rows, store)
+        })?,
         None => prepared.temp.add(env.names, shape, rows)?,
     };
     drop(charge);

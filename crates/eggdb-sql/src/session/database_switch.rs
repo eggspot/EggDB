@@ -404,7 +404,9 @@ mod tests {
             "{refused}"
         );
         assert!(
-            refused.hint().is_some_and(|hint| hint.contains("another connection")),
+            refused
+                .hint()
+                .is_some_and(|hint| hint.contains("another connection")),
             "{refused:?}"
         );
         assert_eq!(session.take_database_switch(), None);

@@ -186,12 +186,18 @@ fn a_zero_threshold_logs_every_statement_as_one_line_without_its_values() {
         line.contains(" database=stats user=eggdb protocol=postgresql rows=1 "),
         "{line}"
     );
-    assert!(line.starts_with("20"), "the line starts with its UTC time: {line}");
+    assert!(
+        line.starts_with("20"),
+        "the line starts with its UTC time: {line}"
+    );
     assert!(
         stderr.contains("query=\"INSERT INTO accounts VALUES ($1, $2)\""),
         "{stderr}"
     );
-    assert!(!stderr.contains("hunter2") && !stderr.contains("swordfish"), "{stderr}");
+    assert!(
+        !stderr.contains("hunter2") && !stderr.contains("swordfish"),
+        "{stderr}"
+    );
 }
 
 #[test]

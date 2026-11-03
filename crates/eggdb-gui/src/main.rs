@@ -12,10 +12,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use eggdb_gui::clipboard::SystemClipboard;
 use eggdb_gui::connect_screen::{
     self, DEFAULT_HEIGHT, DEFAULT_WIDTH, MIN_HEIGHT, MIN_WIDTH, TITLE,
 };
-use eggdb_gui::clipboard::SystemClipboard;
 use eggdb_gui::connection::{EngineConnector, home_directory};
 use eggdb_gui::main_window::{self, Faces};
 use eggdb_gui::png::encode_png;
@@ -193,7 +193,13 @@ fn workspace(options: &Options, file_dialog: bool) -> Workspace {
     workspace
 }
 
-fn render(workspace: &Workspace, theme: Theme, faces: Faces<'_>, size: (u32, u32), scale: f32) -> Canvas {
+fn render(
+    workspace: &Workspace,
+    theme: Theme,
+    faces: Faces<'_>,
+    size: (u32, u32),
+    scale: f32,
+) -> Canvas {
     match workspace.screen() {
         Screen::Connect(card) => connect_screen::draw(card, theme, faces, size, scale),
         Screen::Main(window) => main_window::draw(window, theme, faces),
@@ -314,7 +320,12 @@ fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
                 workspace.access(&request, &tree, now)
             }
             Some(WindowEvent::Key(press)) => workspace.key(press, now),
-            Some(WindowEvent::PointerPressed { x, y, button, modifiers }) => {
+            Some(WindowEvent::PointerPressed {
+                x,
+                y,
+                button,
+                modifiers,
+            }) => {
                 let (x, y) = at(x, y);
                 workspace.pointer_pressed(x, y, button, modifiers, faces, logical, now)
             }
@@ -327,7 +338,13 @@ fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
                 dirty |= workspace.pointer_moved(x, y, faces, logical);
                 continue;
             }
-            Some(WindowEvent::Wheel { x, y, lines_down, lines_right, modifiers }) => {
+            Some(WindowEvent::Wheel {
+                x,
+                y,
+                lines_down,
+                lines_right,
+                modifiers,
+            }) => {
                 let (x, y) = at(x, y);
                 dirty |= workspace.wheel(x, y, lines_down, lines_right, modifiers, faces, logical);
                 continue;
@@ -438,9 +455,17 @@ mod tests {
         assert!(window.window && window.png.is_none());
         assert!(!window.box_text && window.frames.is_none());
         assert!(window.create_if_missing && !window.read_only && window.file_dialog);
-        let opening = parse(&["--png", "a.png", "--open", "shop.eggdb", "--no-create", "--read-only", "--no-file-dialog"])
-            .unwrap()
-            .unwrap();
+        let opening = parse(&[
+            "--png",
+            "a.png",
+            "--open",
+            "shop.eggdb",
+            "--no-create",
+            "--read-only",
+            "--no-file-dialog",
+        ])
+        .unwrap()
+        .unwrap();
         assert_eq!(opening.open, Some(OsString::from("shop.eggdb")));
         assert!(!opening.create_if_missing && opening.read_only && !opening.file_dialog);
         let scripted = parse(&["--window", "--frames", "3", "--box-text"])

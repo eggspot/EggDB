@@ -271,7 +271,8 @@ fn mssql_jdbc_database_metadata_runs_as_transact_sql_in_oracle_sessions() {
     assert_eq!(names.len(), 3, "{parameters:?}");
     for (name, expected) in names.iter().zip(["total", "half", "note"]) {
         assert!(
-            name.as_deref().is_some_and(|name| name.trim_start_matches('@') == expected),
+            name.as_deref()
+                .is_some_and(|name| name.trim_start_matches('@') == expected),
             "{parameters:?}"
         );
     }

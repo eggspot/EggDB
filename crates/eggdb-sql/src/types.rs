@@ -792,8 +792,7 @@ fn numeric_input(text: &str) -> SqlResult<Numeric> {
 }
 
 fn exact_of_double(number: f64) -> SqlResult<Numeric> {
-    if number.is_infinite() && crate::constraints::current_dialect() == crate::Dialect::PostgreSql
-    {
+    if number.is_infinite() && crate::constraints::current_dialect() == crate::Dialect::PostgreSql {
         return Ok(Numeric::infinity(number < 0.0));
     }
     Numeric::from_f64(number, 15)

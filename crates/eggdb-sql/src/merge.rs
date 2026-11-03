@@ -1,6 +1,6 @@
 use crate::ast::{
-    BinaryOperator, Expr, ExprKind, Insert, InsertSource, InsertValue, MergeStatement,
-    MergeUpdate, Name, OnDuplicate, SelectItem,
+    BinaryOperator, Expr, ExprKind, Insert, InsertSource, InsertValue, MergeStatement, MergeUpdate,
+    Name, OnDuplicate, SelectItem,
 };
 use crate::constraints::PreparedChecks;
 use crate::encoding::{Column, TableDefinition};
@@ -609,7 +609,8 @@ fn assigned_row(
     for ((_, expr), &index) in update.assignments.iter().zip(columns) {
         let column = &table.columns[index];
         let value = joined.value(expr, row, Some(column.sql_type))?;
-        new_row[index] = rule(value, column).map_err(|error| error.at_if_unplaced(expr.position))?;
+        new_row[index] =
+            rule(value, column).map_err(|error| error.at_if_unplaced(expr.position))?;
     }
     Ok(new_row)
 }
@@ -645,12 +646,8 @@ fn store_updates(
         let (old_key, old_row) = &target_rows[target_index];
         if let Some(firing) = firing.as_mut()
             && firing.has_before()
-            && firing.before_row(
-                writer,
-                tables,
-                Some(old_row.as_slice()),
-                Some(&mut new_row),
-            )? == RowOutcome::Skip
+            && firing.before_row(writer, tables, Some(old_row.as_slice()), Some(&mut new_row))?
+                == RowOutcome::Skip
         {
             continue;
         }

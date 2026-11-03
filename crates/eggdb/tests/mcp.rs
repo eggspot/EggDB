@@ -1171,7 +1171,11 @@ fn an_agent_limited_to_some_columns_sees_and_changes_nothing_else() {
     );
     mcp.initialize();
     assert_eq!(
-        first_value(&mut mcp, "postgresql", "SELECT name FROM users WHERE id = 1"),
+        first_value(
+            &mut mcp,
+            "postgresql",
+            "SELECT name FROM users WHERE id = 1"
+        ),
         "Ada"
     );
     let everything = run_sql(&mut mcp, "postgresql", "SELECT * FROM users ORDER BY id");
@@ -1185,13 +1189,22 @@ fn an_agent_limited_to_some_columns_sees_and_changes_nothing_else() {
         ("sqlite", "SELECT email FROM users"),
         ("postgresql", "SELECT * FROM contact"),
         ("postgresql", "SELECT email_of(1)"),
-        ("postgresql", "WITH u AS (SELECT * FROM users) SELECT email FROM u"),
-        ("postgresql", "SELECT name FROM users WHERE id IN (SELECT id FROM users WHERE email LIKE 'a%')"),
+        (
+            "postgresql",
+            "WITH u AS (SELECT * FROM users) SELECT email FROM u",
+        ),
+        (
+            "postgresql",
+            "SELECT name FROM users WHERE id IN (SELECT id FROM users WHERE email LIKE 'a%')",
+        ),
     ] {
         let answer = run_sql(&mut mcp, dialect, sql);
         let (_, message) = sql_failure(&answer);
         assert!(message.contains("email"), "{dialect} {sql}: {message}");
-        assert!(!message.contains("example.com"), "{dialect} {sql}: {message}");
+        assert!(
+            !message.contains("example.com"),
+            "{dialect} {sql}: {message}"
+        );
     }
     let changed = mcp.call(
         "write_sql",

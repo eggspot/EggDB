@@ -8,17 +8,17 @@ use eggdb_platform::window::{
     PointerButton,
 };
 
+use crate::catalog::Catalog;
 use crate::clipboard::{Clipboard, MemoryClipboard};
 use crate::connect_screen::{self, ConnectAction, ConnectCard, Segment, handle_key};
 use crate::connection::{
     CancelHandle, ConnectFailure, ConnectTarget, Connection, Connector, ResultTable,
     StatementFailure,
 };
-use crate::catalog::Catalog;
 use crate::inspector;
 use crate::main_window::{self, Faces, MainWindow, WindowAction};
-use crate::pointer::{self, ClickCounter, PointerLook};
 use crate::object_browser::TreeItem;
+use crate::pointer::{self, ClickCounter, PointerLook};
 use crate::query_tab::{RunRequest, TabAction};
 
 /// How long an open runs before the card shows its progress state, so a quick open never
@@ -54,7 +54,7 @@ pub enum WorkspaceCommand {
 #[derive(Debug)]
 pub enum Screen {
     /// The connect card, until a database opens.
-    Connect(ConnectCard),
+    Connect(Box<ConnectCard>),
     /// The main window on the open database.
     Main(Box<MainWindow>),
 }
@@ -117,7 +117,7 @@ impl Workspace {
         let mut card = ConnectCard::first_start();
         card.file_dialog = file_dialog;
         Self {
-            screen: Screen::Connect(card),
+            screen: Screen::Connect(Box::new(card)),
             connection: None,
             connector,
             opening: None,
@@ -165,7 +165,11 @@ impl Workspace {
     }
 
     fn refresh_caret(&mut self, now: Instant) -> bool {
-        let look = pointer::caret_look(self.caret_since(now), self.reduced_motion, self.window_active);
+        let look = pointer::caret_look(
+            self.caret_since(now),
+            self.reduced_motion,
+            self.window_active,
+        );
         let slot = match &mut self.screen {
             Screen::Connect(card) => &mut card.caret,
             Screen::Main(window) => &mut window.caret,
@@ -180,7 +184,11 @@ impl Workspace {
         if !self.caret_blinks {
             return None;
         }
-        pointer::until_caret_changes(self.caret_since(now), self.reduced_motion, self.window_active)
+        pointer::until_caret_changes(
+            self.caret_since(now),
+            self.reduced_motion,
+            self.window_active,
+        )
     }
 
     fn input_at(&mut self, now: Instant) {
@@ -288,7 +296,9 @@ impl Workspace {
                 self.access(&request(AccessAction::Focus), &tree, now);
                 if extend
                     && let Some(anchor) = anchor
-                    && let Some(grid) = self.main_window_mut().and_then(|window| window.tab.grid.as_mut())
+                    && let Some(grid) = self
+                        .main_window_mut()
+                        .and_then(|window| window.tab.grid.as_mut())
                 {
                     grid.anchor = anchor;
                 }
@@ -368,17 +378,30 @@ impl Workspace {
     ) -> bool {
         let tree = self.pointer_tree(faces, size);
         match &mut self.screen {
-            Screen::Main(window) => window.wheel(&tree, x, y, lines_down, lines_right, modifiers.shift),
+            Screen::Main(window) => {
+                window.wheel(&tree, x, y, lines_down, lines_right, modifiers.shift)
+            }
             Screen::Connect(_) => false,
         }
     }
 
-    fn drag_to(&mut self, drag: Drag, tree: &[AccessNode], faces: Faces<'_>, x: f32, y: f32) -> bool {
+    fn drag_to(
+        &mut self,
+        drag: Drag,
+        tree: &[AccessNode],
+        faces: Faces<'_>,
+        x: f32,
+        y: f32,
+    ) -> bool {
         match (drag, &mut self.screen) {
             (Drag::CardField { box_left }, Screen::Connect(card)) => {
-                let before = card.focused_field().map(|field| (field.caret(), field.selection()));
+                let before = card
+                    .focused_field()
+                    .map(|field| (field.caret(), field.selection()));
                 card.place_caret_at(faces, box_left, x, 1, true);
-                card.focused_field().map(|field| (field.caret(), field.selection())) != before
+                card.focused_field()
+                    .map(|field| (field.caret(), field.selection()))
+                    != before
             }
             (Drag::Editor, Screen::Main(window)) => {
                 let before = (window.tab.editor.caret(), window.tab.editor.selection());
@@ -389,7 +412,9 @@ impl Workspace {
                 let Some(at) = tree
                     .iter()
                     .rev()
-                    .find(|node| node.role == AccessRole::Cell && pointer::contains(node.bounds, x, y))
+                    .find(|node| {
+                        node.role == AccessRole::Cell && pointer::contains(node.bounds, x, y)
+                    })
                     .and_then(|node| node.cell)
                 else {
                     return false;
@@ -401,7 +426,10 @@ impl Workspace {
                     row: at.row,
                     column: at.column,
                 };
-                if grid.current == cell || at.row >= grid.rows.len() || at.column >= grid.columns.len() {
+                if grid.current == cell
+                    || at.row >= grid.rows.len()
+                    || at.column >= grid.columns.len()
+                {
                     return false;
                 }
                 grid.current = cell;
@@ -468,8 +496,8 @@ impl Workspace {
         let Screen::Connect(card) = &mut self.screen else {
             return WorkspaceCommand::None;
         };
-        let (next, action) = handle_key(card.clone(), press);
-        *card = next;
+        let (next, action) = handle_key(ConnectCard::clone(card), press);
+        **card = next;
         self.act(action, now)
     }
 
@@ -518,13 +546,19 @@ impl Workspace {
     }
 
     fn inspect(&mut self, item: TreeItem) {
-        let (Screen::Main(window), Some(connection)) = (&mut self.screen, self.connection.as_mut()) else {
+        let (Screen::Main(window), Some(connection)) = (&mut self.screen, self.connection.as_mut())
+        else {
             return;
         };
         let Some(name) = inspector::sampled_name(&window.tree, item) else {
             return;
         };
-        if window.inspector.sample.as_ref().is_some_and(|sample| sample.of == name) {
+        if window
+            .inspector
+            .sample
+            .as_ref()
+            .is_some_and(|sample| sample.of == name)
+        {
             return;
         }
         window.inspector.sample = Some(inspector::fetch_sample(connection, &name));
@@ -533,7 +567,8 @@ impl Workspace {
     /// Reads the catalog again and shows it in the tree, keeping its expanded, current and
     /// selected rows; nothing happens while a run holds the connection.
     pub fn refresh_catalog(&mut self) {
-        let (Screen::Main(window), Some(connection)) = (&mut self.screen, self.connection.as_mut()) else {
+        let (Screen::Main(window), Some(connection)) = (&mut self.screen, self.connection.as_mut())
+        else {
             return;
         };
         if let Ok(catalog) = connection.catalog() {
@@ -545,7 +580,10 @@ impl Workspace {
     fn tab_action(&mut self, action: TabAction, now: Instant) {
         match action {
             TabAction::None => {
-                if self.main_window_mut().is_some_and(|window| window.tab.notice.is_some()) {
+                if self
+                    .main_window_mut()
+                    .is_some_and(|window| window.tab.notice.is_some())
+                {
                     self.notice_until.get_or_insert(now + NOTICE_SHOWN_FOR);
                 }
             }
@@ -591,12 +629,20 @@ impl Workspace {
         let worker_cancel = cancel.clone();
         let statements = request.statements.clone();
         let dialect = request.dialect;
-        let rolled_back = request.explain.as_ref().is_some_and(|explain| explain.rolled_back);
+        let rolled_back = request
+            .explain
+            .as_ref()
+            .is_some_and(|explain| explain.rolled_back);
         std::thread::spawn(move || {
             let outcomes = connection.run_script(dialect, &statements, &worker_cancel);
-            let left_open = outcomes.len() < statements.len() && outcomes.first().is_some_and(Result::is_ok);
+            let left_open =
+                outcomes.len() < statements.len() && outcomes.first().is_some_and(Result::is_ok);
             if rolled_back && left_open {
-                let _ = connection.run_script(dialect, &["ROLLBACK".to_owned()], &CancelHandle::default());
+                let _ = connection.run_script(
+                    dialect,
+                    &["ROLLBACK".to_owned()],
+                    &CancelHandle::default(),
+                );
             }
             let _ = send.send((connection, outcomes));
         });
@@ -950,7 +996,12 @@ mod tests {
     }
 
     fn workspace(connector: Arc<dyn Connector>, current: PathBuf) -> Workspace {
-        Workspace::new(connector, Some(PathBuf::from("/home/nobody")), current, true)
+        Workspace::new(
+            connector,
+            Some(PathBuf::from("/home/nobody")),
+            current,
+            true,
+        )
     }
 
     fn type_text(workspace: &mut Workspace, text: &str, now: Instant) {
@@ -975,7 +1026,10 @@ mod tests {
         crate::connect_screen::accessibility_tree(
             card,
             faces,
-            (crate::connect_screen::DEFAULT_WIDTH, crate::connect_screen::DEFAULT_HEIGHT),
+            (
+                crate::connect_screen::DEFAULT_WIDTH,
+                crate::connect_screen::DEFAULT_HEIGHT,
+            ),
         )
     }
 
@@ -1001,30 +1055,66 @@ mod tests {
         assert_eq!(card(&mut workspace).focus, Focus::ReadOnly);
         let tree = card_tree(&workspace);
         workspace.access(&request(NODE_READ_ONLY, AccessAction::Invoke), &tree, now);
-        assert!(!card(&mut workspace).read_only, "invoking a checkbox flips it back");
+        assert!(
+            !card(&mut workspace).read_only,
+            "invoking a checkbox flips it back"
+        );
         let tree = card_tree(&workspace);
         assert_eq!(
             workspace.access(&request(NODE_TITLE, AccessAction::Focus), &tree, now),
             WorkspaceCommand::None
         );
-        assert_eq!(card(&mut workspace).focus, Focus::ReadOnly, "a heading takes no focus");
-        workspace.access(&request(NODE_FILE, AccessAction::SetValue("spoken.eggdb".to_owned())), &tree, now);
+        assert_eq!(
+            card(&mut workspace).focus,
+            Focus::ReadOnly,
+            "a heading takes no focus"
+        );
+        workspace.access(
+            &request(NODE_FILE, AccessAction::SetValue("spoken.eggdb".to_owned())),
+            &tree,
+            now,
+        );
         let typed = card(&mut workspace);
-        assert_eq!((typed.focus, typed.file.value()), (Focus::FileInput, "spoken.eggdb"));
+        assert_eq!(
+            (typed.focus, typed.file.value()),
+            (Focus::FileInput, "spoken.eggdb")
+        );
         let tree = card_tree(&workspace);
-        let caret = eggdb_platform::window::AccessCaret { anchor: 0, caret: 7 };
-        workspace.access(&request(NODE_FILE, AccessAction::SetCaret(caret)), &tree, now);
+        let caret = eggdb_platform::window::AccessCaret {
+            anchor: 0,
+            caret: 7,
+        };
+        workspace.access(
+            &request(NODE_FILE, AccessAction::SetCaret(caret)),
+            &tree,
+            now,
+        );
         assert_eq!(card(&mut workspace).file.selection(), Some((0, 7)));
         let tree = card_tree(&workspace);
-        workspace.access(&request(NODE_CONNECT_TO_A_SERVER, AccessAction::Select), &tree, now);
+        workspace.access(
+            &request(NODE_CONNECT_TO_A_SERVER, AccessAction::Select),
+            &tree,
+            now,
+        );
         assert_eq!(card(&mut workspace).segment, Segment::Server);
-        workspace.access(&request(NODE_OPEN_A_FILE, AccessAction::Select), &card_tree(&workspace), now);
+        workspace.access(
+            &request(NODE_OPEN_A_FILE, AccessAction::Select),
+            &card_tree(&workspace),
+            now,
+        );
         let tree = card_tree(&workspace);
-        workspace.access(&request(NODE_FILE, AccessAction::SetValue("spoken.eggdb".to_owned())), &tree, now);
+        workspace.access(
+            &request(NODE_FILE, AccessAction::SetValue("spoken.eggdb".to_owned())),
+            &tree,
+            now,
+        );
         let tree = card_tree(&workspace);
         workspace.access(&request(NODE_OPEN, AccessAction::Invoke), &tree, now);
         workspace.wait_for_open(Duration::from_secs(10));
-        assert!(matches!(workspace.screen(), Screen::Main(_)), "invoking Open opens the file");
+        assert!(
+            matches!(workspace.screen(), Screen::Main(_)),
+            "invoking Open opens the file"
+        );
     }
 
     #[test]
@@ -1035,7 +1125,10 @@ mod tests {
         let now = Instant::now();
         let mut workspace = workspace(Arc::new(EngineConnector), directory.clone());
         type_text(&mut workspace, "  shop.eggdb ", now);
-        assert_eq!(workspace.key(KeyPress::plain(Key::Enter), now), WorkspaceCommand::None);
+        assert_eq!(
+            workspace.key(KeyPress::plain(Key::Enter), now),
+            WorkspaceCommand::None
+        );
         assert!(card(&mut workspace).busy);
         workspace.wait_for_open(Duration::from_secs(10));
         let Screen::Main(window) = workspace.screen() else {
@@ -1045,7 +1138,10 @@ mod tests {
         assert_eq!(window.location, "shop.eggdb");
         assert!(window.writable && window.tab.editor.text().is_empty());
         let connection = workspace.connection_mut().unwrap();
-        assert_eq!(connection.status_text(), "Connected · shop.eggdb · read-write");
+        assert_eq!(
+            connection.status_text(),
+            "Connected · shop.eggdb · read-write"
+        );
         assert!(path.exists(), "Create was checked at first start");
         drop(workspace);
         let _ = std::fs::remove_file(&path);
@@ -1068,7 +1164,10 @@ mod tests {
         let shown = card(&mut workspace);
         let error = shown.error.clone().expect("the error lines are shown");
         let path_text = path.display().to_string();
-        assert_eq!(error.line, format!("Error: cannot open {path_text}: no such file"));
+        assert_eq!(
+            error.line,
+            format!("Error: cannot open {path_text}: no such file")
+        );
         assert_eq!(
             error.fix,
             Some(format!(
@@ -1079,7 +1178,11 @@ mod tests {
         assert_eq!(shown.file.selection(), Some((0, path_text.chars().count())));
         assert!(!shown.busy && !path.exists());
         workspace.key(KeyPress::plain(Key::Enter), now);
-        assert_eq!(card(&mut workspace).error, None, "a second attempt clears the lines");
+        assert_eq!(
+            card(&mut workspace).error,
+            None,
+            "a second attempt clears the lines"
+        );
     }
 
     #[test]
@@ -1098,7 +1201,10 @@ mod tests {
         assert!(shown.disabled());
         let stopped = now + Duration::from_millis(500);
         workspace.key(KeyPress::plain(Key::Character('x')), stopped);
-        assert_eq!(card(&mut workspace).file.value(), "~/eggdb/quickstart.eggdb");
+        assert_eq!(
+            card(&mut workspace).file.value(),
+            "~/eggdb/quickstart.eggdb"
+        );
         workspace.key(KeyPress::plain(Key::Escape), stopped);
         let shown = card(&mut workspace);
         assert!(!shown.busy && !shown.disabled() && !workspace.is_opening());
@@ -1149,7 +1255,11 @@ mod tests {
         assert!(card(&mut workspace).drag_over);
         workspace.drag_left();
         assert!(!card(&mut workspace).drag_over);
-        let others = [first.clone(), directory.join("b.eggdb"), directory.join("c.eggdb")];
+        let others = [
+            first.clone(),
+            directory.join("b.eggdb"),
+            directory.join("c.eggdb"),
+        ];
         workspace.dropped(&others, now);
         assert_eq!(
             card(&mut workspace).status.as_deref(),
@@ -1245,66 +1355,153 @@ mod tests {
 
     fn centre_of(workspace: &Workspace, id: u32) -> (f32, f32) {
         let bounds = bounds_of(workspace, id);
-        (bounds.x + bounds.width / 2.0, bounds.y + bounds.height / 2.0)
+        (
+            bounds.x + bounds.width / 2.0,
+            bounds.y + bounds.height / 2.0,
+        )
     }
 
     fn click(workspace: &mut Workspace, (x, y): (f32, f32), now: Instant) -> WorkspaceCommand {
-        let _ = workspace.pointer_pressed(x, y, PointerButton::Primary, Modifiers::default(), POINTER_FACES, WINDOW, now);
+        let _ = workspace.pointer_pressed(
+            x,
+            y,
+            PointerButton::Primary,
+            Modifiers::default(),
+            POINTER_FACES,
+            WINDOW,
+            now,
+        );
         workspace.pointer_released(x, y, PointerButton::Primary, POINTER_FACES, WINDOW, now)
     }
 
     #[test]
     fn a_checkbox_toggles_on_release_inside_and_a_release_outside_cancels() {
-        let mut workspace = workspace(Arc::new(SlowConnector(Duration::ZERO)), scratch("pointer-check"));
+        let mut workspace = workspace(
+            Arc::new(SlowConnector(Duration::ZERO)),
+            scratch("pointer-check"),
+        );
         let now = Instant::now();
         let at = centre_of(&workspace, connect_screen::NODE_READ_ONLY);
         assert!(workspace.pointer_moved(at.0, at.1, POINTER_FACES, WINDOW));
-        assert!(card(&mut workspace).pointer.is_hovered(connect_screen::NODE_READ_ONLY));
-        let _ = workspace.pointer_pressed(at.0, at.1, PointerButton::Primary, Modifiers::default(), POINTER_FACES, WINDOW, now);
-        assert!(card(&mut workspace).pointer.is_pressed(connect_screen::NODE_READ_ONLY));
+        assert!(
+            card(&mut workspace)
+                .pointer
+                .is_hovered(connect_screen::NODE_READ_ONLY)
+        );
+        let _ = workspace.pointer_pressed(
+            at.0,
+            at.1,
+            PointerButton::Primary,
+            Modifiers::default(),
+            POINTER_FACES,
+            WINDOW,
+            now,
+        );
+        assert!(
+            card(&mut workspace)
+                .pointer
+                .is_pressed(connect_screen::NODE_READ_ONLY)
+        );
         workspace.pointer_moved(2.0, 2.0, POINTER_FACES, WINDOW);
-        assert!(!card(&mut workspace).pointer.is_pressed(connect_screen::NODE_READ_ONLY));
+        assert!(
+            !card(&mut workspace)
+                .pointer
+                .is_pressed(connect_screen::NODE_READ_ONLY)
+        );
         workspace.pointer_released(2.0, 2.0, PointerButton::Primary, POINTER_FACES, WINDOW, now);
-        assert!(!card(&mut workspace).read_only, "a release outside changes nothing");
+        assert!(
+            !card(&mut workspace).read_only,
+            "a release outside changes nothing"
+        );
         assert_eq!(card(&mut workspace).pointer.pressed, None);
         click(&mut workspace, at, now + Duration::from_secs(1));
         let shown = card(&mut workspace);
         assert!(shown.read_only);
         assert_eq!(shown.focus, Focus::ReadOnly);
-        assert!(shown.pointer.focus_by_pointer && !shown.ring_shown(), "a click draws no ring on a checkbox");
+        assert!(
+            shown.pointer.focus_by_pointer && !shown.ring_shown(),
+            "a click draws no ring on a checkbox"
+        );
         workspace.key(KeyPress::plain(Key::Space), now);
-        assert!(card(&mut workspace).ring_shown(), "a key brings the ring back");
+        assert!(
+            card(&mut workspace).ring_shown(),
+            "a key brings the ring back"
+        );
         assert!(workspace.pointer_left());
         assert_eq!(card(&mut workspace).pointer.hovered, None);
     }
 
     #[test]
     fn a_click_and_a_drag_in_the_file_input_place_the_caret_and_select_and_paste_replaces_it() {
-        let mut workspace = workspace(Arc::new(SlowConnector(Duration::ZERO)), scratch("pointer-field"));
+        let mut workspace = workspace(
+            Arc::new(SlowConnector(Duration::ZERO)),
+            scratch("pointer-field"),
+        );
         let now = Instant::now();
-        workspace.card_mut().expect("the card").file.set("shop.eggdb");
+        workspace
+            .card_mut()
+            .expect("the card")
+            .file
+            .set("shop.eggdb");
         workspace.card_mut().expect("the card").focus = Focus::Open;
         let input = bounds_of(&workspace, connect_screen::NODE_FILE);
-        let (right, left, middle) = (input.x + input.width - 2.0, input.x + 1.0, input.y + input.height / 2.0);
-        let _ = workspace.pointer_pressed(right, middle, PointerButton::Primary, Modifiers::default(), POINTER_FACES, WINDOW, now);
+        let (right, left, middle) = (
+            input.x + input.width - 2.0,
+            input.x + 1.0,
+            input.y + input.height / 2.0,
+        );
+        let _ = workspace.pointer_pressed(
+            right,
+            middle,
+            PointerButton::Primary,
+            Modifiers::default(),
+            POINTER_FACES,
+            WINDOW,
+            now,
+        );
         let shown = card(&mut workspace);
         assert_eq!(shown.focus, Focus::FileInput);
         assert_eq!((shown.file.caret(), shown.file.selection()), (10, None));
         assert!(shown.ring_shown(), "inputs keep the ring after a click");
         assert!(workspace.pointer_moved(left, middle, POINTER_FACES, WINDOW));
-        workspace.pointer_released(left, middle, PointerButton::Primary, POINTER_FACES, WINDOW, now);
+        workspace.pointer_released(
+            left,
+            middle,
+            PointerButton::Primary,
+            POINTER_FACES,
+            WINDOW,
+            now,
+        );
         assert_eq!(card(&mut workspace).file.selection(), Some((0, 10)));
-        workspace.key(KeyPress { key: Key::Character('c'), modifiers: crate::accessibility::primary() }, now);
+        workspace.key(
+            KeyPress {
+                key: Key::Character('c'),
+                modifiers: crate::accessibility::primary(),
+            },
+            now,
+        );
         assert_eq!(workspace.clipboard().text().as_deref(), Some("shop.eggdb"));
         let mut clipboard = MemoryClipboard::default();
         clipboard.put_text("/tmp/other.eggdb\r\n");
         workspace.set_clipboard(Box::new(clipboard));
-        workspace.key(KeyPress { key: Key::Character('v'), modifiers: crate::accessibility::primary() }, now);
+        workspace.key(
+            KeyPress {
+                key: Key::Character('v'),
+                modifiers: crate::accessibility::primary(),
+            },
+            now,
+        );
         assert_eq!(card(&mut workspace).file.value(), "/tmp/other.eggdb");
         let mut large = MemoryClipboard::default();
         large.put_text(&"x".repeat(pointer::MAX_PASTE_BYTES + 1));
         workspace.set_clipboard(Box::new(large));
-        workspace.key(KeyPress { key: Key::Character('v'), modifiers: crate::accessibility::primary() }, now);
+        workspace.key(
+            KeyPress {
+                key: Key::Character('v'),
+                modifiers: crate::accessibility::primary(),
+            },
+            now,
+        );
         let shown = card(&mut workspace);
         assert_eq!(shown.file.value(), "/tmp/other.eggdb");
         assert_eq!(shown.status.as_deref(), Some(pointer::PASTE_TOO_LARGE));
@@ -1316,29 +1513,58 @@ mod tests {
         let directory = scratch("pointer-open");
         let mut workspace = workspace(Arc::new(SlowConnector(Duration::ZERO)), directory.clone());
         let now = Instant::now();
-        workspace.card_mut().expect("the card").file.set(&directory.join("clicked.eggdb").display().to_string());
+        workspace
+            .card_mut()
+            .expect("the card")
+            .file
+            .set(&directory.join("clicked.eggdb").display().to_string());
         let open = centre_of(&workspace, connect_screen::NODE_OPEN);
         click(&mut workspace, open, now);
         workspace.wait_for_open(Duration::from_secs(10));
-        assert!(matches!(workspace.screen(), Screen::Main(_)), "a click on Open opens");
-        workspace.main_window_mut().expect("the main window").tab.editor = crate::editor::Editor::new("SELECT 1;\nSELECT 22;");
+        assert!(
+            matches!(workspace.screen(), Screen::Main(_)),
+            "a click on Open opens"
+        );
+        workspace
+            .main_window_mut()
+            .expect("the main window")
+            .tab
+            .editor = crate::editor::Editor::new("SELECT 1;\nSELECT 22;");
         let editor = bounds_of(&workspace, main_window::NODE_EDITOR);
         let advance = crate::font::BoxFace.advance('x', 13.0);
         let at = (320.0 + advance * 3.0 + 1.0, 88.0 + 20.0 + 5.0);
         assert!(pointer::contains(editor, at.0, at.1));
         click(&mut workspace, at, now + Duration::from_secs(2));
         let window = workspace.main_window_mut().expect("the main window");
-        assert_eq!(window.tab.editor.caret(), crate::editor::Position { line: 1, column: 3 });
+        assert_eq!(
+            window.tab.editor.caret(),
+            crate::editor::Position { line: 1, column: 3 }
+        );
         assert!(window.pointer.focus_by_pointer);
-        let _ = workspace.pointer_pressed(at.0, at.1, PointerButton::Primary, Modifiers::default(), POINTER_FACES, WINDOW, now + Duration::from_millis(2_100));
+        let _ = workspace.pointer_pressed(
+            at.0,
+            at.1,
+            PointerButton::Primary,
+            Modifiers::default(),
+            POINTER_FACES,
+            WINDOW,
+            now + Duration::from_millis(2_100),
+        );
         let window = workspace.main_window_mut().expect("the main window");
-        assert_eq!(window.tab.editor.selected_text().as_deref(), Some("SELECT"), "a double-click selects the word");
+        assert_eq!(
+            window.tab.editor.selected_text().as_deref(),
+            Some("SELECT"),
+            "a double-click selects the word"
+        );
         let _ = std::fs::remove_file(directory.join("clicked.eggdb"));
     }
 
     #[test]
     fn the_caret_blinks_only_once_a_window_starts_it_and_goes_grey_when_inactive() {
-        let mut workspace = workspace(Arc::new(SlowConnector(Duration::ZERO)), scratch("pointer-caret"));
+        let mut workspace = workspace(
+            Arc::new(SlowConnector(Duration::ZERO)),
+            scratch("pointer-caret"),
+        );
         let start = Instant::now();
         assert!(!workspace.tick(start + Duration::from_millis(1_100)));
         assert_eq!(card(&mut workspace).caret, pointer::CaretLook::On);
@@ -1346,9 +1572,15 @@ mod tests {
         workspace.start_caret_blink(start);
         assert!(workspace.tick(start + Duration::from_millis(1_100)));
         assert_eq!(card(&mut workspace).caret, pointer::CaretLook::Off);
-        workspace.key(KeyPress::plain(Key::End), start + Duration::from_millis(1_200));
+        workspace.key(
+            KeyPress::plain(Key::End),
+            start + Duration::from_millis(1_200),
+        );
         assert_eq!(card(&mut workspace).caret, pointer::CaretLook::On);
-        assert_eq!(workspace.until_caret_changes(start + Duration::from_millis(1_600)), Some(Duration::from_millis(630)));
+        assert_eq!(
+            workspace.until_caret_changes(start + Duration::from_millis(1_600)),
+            Some(Duration::from_millis(630))
+        );
         assert!(workspace.set_window_active(false, start + Duration::from_millis(1_700)));
         assert_eq!(card(&mut workspace).caret, pointer::CaretLook::Inactive);
         workspace.set_window_active(true, start + Duration::from_millis(1_800));

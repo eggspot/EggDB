@@ -307,7 +307,10 @@ fn time_zone_rows(columns: &'static [CatalogColumn]) -> Vec<Vec<Value>> {
         .map(|(name, zone)| {
             CatalogRow::new(columns)
                 .set("name", text(name))
-                .set("current_utc_offset", text(&utc_offset_text(zone.offset_at(now))))
+                .set(
+                    "current_utc_offset",
+                    text(&utc_offset_text(zone.offset_at(now))),
+                )
                 .set("is_currently_dst", bit(zone.is_dst_at(now)))
                 .done()
         })

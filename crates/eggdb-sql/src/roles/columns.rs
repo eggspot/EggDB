@@ -53,9 +53,11 @@ fn column_grants_of(reader: &dyn KeyValueRead, table: &str) -> SqlResult<Vec<Sto
             let (Some(grantee), Some(column)) = (rest.get(..split), rest.get(split + 1..)) else {
                 return Ok(true);
             };
-            let (Ok(grantee), Ok(column), [COLUMN_RECORD_VERSION, privileges]) =
-                (std::str::from_utf8(grantee), std::str::from_utf8(column), value)
-            else {
+            let (Ok(grantee), Ok(column), [COLUMN_RECORD_VERSION, privileges]) = (
+                std::str::from_utf8(grantee),
+                std::str::from_utf8(column),
+                value,
+            ) else {
                 damaged = true;
                 return Ok(false);
             };
@@ -152,9 +154,12 @@ pub(crate) fn relation_columns(
                 .map(|column| column.name.clone())
                 .collect(),
         ),
-        Some(Relation::View(view)) => {
-            Some(view.columns.iter().map(|column| column.name.clone()).collect())
-        }
+        Some(Relation::View(view)) => Some(
+            view.columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
+        ),
         None => None,
     })
 }

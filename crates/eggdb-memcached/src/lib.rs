@@ -82,7 +82,11 @@ mod tests {
             "STORED|STORED|VALUE a 0 {}|{value}|END|SERVER_ERROR out of memory|SERVER_ERROR out of memory storing object|VERSION 1.6.0 EggDB|",
             value.len()
         );
-        assert!(answer == expected, "{}", &answer[answer.len().saturating_sub(200)..]);
+        assert!(
+            answer == expected,
+            "{}",
+            &answer[answer.len().saturating_sub(200)..]
+        );
         assert_eq!(budget.used_bytes(), 0);
         assert_eq!(converse(&shared, b"get c\r\n"), "END|");
     }

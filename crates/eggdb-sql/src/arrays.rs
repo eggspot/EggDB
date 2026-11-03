@@ -2,7 +2,9 @@ use crate::ast::{Expr, ExprKind, Literal};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Concatenated, Evaluator, Scope, and, compare_truth, or, truth_value};
 use crate::pg_catalog::CatalogType;
-use crate::types::{Conversion, DefinedType, SqlType, Value, compare_values, convert, equality_key};
+use crate::types::{
+    Conversion, DefinedType, SqlType, Value, compare_values, convert, equality_key,
+};
 use std::cmp::Ordering;
 
 const MAX_ITEMS: usize = 1 << 27;
@@ -596,7 +598,11 @@ fn dimension_number(text: &str, characters: &[char], at: &mut usize) -> SqlResul
             "\"[\" must introduce explicitly-specified array dimensions.",
         ));
     }
-    let number: String = characters.get(start..*at).unwrap_or_default().iter().collect();
+    let number: String = characters
+        .get(start..*at)
+        .unwrap_or_default()
+        .iter()
+        .collect();
     let parsed = number.parse::<i32>().map_err(|_| {
         SqlError::new(
             SqlState::NUMERIC_VALUE_OUT_OF_RANGE,

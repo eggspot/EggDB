@@ -325,7 +325,12 @@ impl ResultBatch {
         (self.results.as_ptr(), self.results.len())
     }
 
-    pub(crate) fn set_local_row(&mut self, row: &[Value], columns: &[OutputColumn], dialect: Dialect) {
+    pub(crate) fn set_local_row(
+        &mut self,
+        row: &[Value],
+        columns: &[OutputColumn],
+        dialect: Dialect,
+    ) {
         self.clear();
         for (index, column) in columns.iter().enumerate() {
             match row.get(index) {
@@ -716,9 +721,7 @@ pub(crate) fn run_on(
             let answered = match parameters {
                 Some(values) => {
                     let bound = text_values(values);
-                    remote
-                        .ready_client()?
-                        .execute_with_parameters(text, &bound)
+                    remote.ready_client()?.execute_with_parameters(text, &bound)
                 }
                 None => remote.ready_client()?.simple_query(text),
             };

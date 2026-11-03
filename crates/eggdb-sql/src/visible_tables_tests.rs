@@ -359,11 +359,17 @@ fn a_table_listed_with_columns_shows_only_those_columns() {
         "id|owner\n1|1\nSELECT 1"
     );
     assert_eq!(
-        last(&mut session, "SELECT s.* FROM secrets s JOIN users u ON u.id = s.owner"),
+        last(
+            &mut session,
+            "SELECT s.* FROM secrets s JOIN users u ON u.id = s.owner"
+        ),
         "id|owner\n1|1\nSELECT 1"
     );
     assert_eq!(
-        last(&mut session, "SELECT count(*) FROM notes JOIN secrets ON secrets.id = notes.secret_id"),
+        last(
+            &mut session,
+            "SELECT count(*) FROM notes JOIN secrets ON secrets.id = notes.secret_id"
+        ),
         "count\n1\nSELECT 1"
     );
     assert_eq!(

@@ -159,7 +159,10 @@ impl ColumnScopes {
                 return Ok(());
             }
             let mut whole_row = false;
-            for item in level.iter().filter(|item| item.label.as_deref() == Some(name)) {
+            for item in level
+                .iter()
+                .filter(|item| item.label.as_deref() == Some(name))
+            {
                 whole_row = true;
                 item.check_whole()?;
             }

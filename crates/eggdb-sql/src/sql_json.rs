@@ -358,7 +358,10 @@ fn path_of(label: &str, value: &Value) -> SqlResult<JsonPath> {
     let Some(text) = value.character_text() else {
         return Err(SqlError::new(
             SqlState::DATATYPE_MISMATCH,
-            format!("{label}() path must be of type jsonpath, not {}", value.type_name()),
+            format!(
+                "{label}() path must be of type jsonpath, not {}",
+                value.type_name()
+            ),
         ));
     };
     json_path::parse(text)
@@ -512,9 +515,7 @@ impl Handling {
                 Behavior::Default => defaults(Clause::OnEmpty)
                     .and_then(|value| cast_default(value, self.returning))
                     .map_err(Failure::Suppressible),
-                behavior => {
-                    behavior_value(behavior, self.returning).map_err(Failure::Suppressible)
-                }
+                behavior => behavior_value(behavior, self.returning).map_err(Failure::Suppressible),
             },
             Err(failure) => Err(failure),
         };
@@ -523,8 +524,9 @@ impl Handling {
             Err(Failure::Fatal(error)) => Err(error),
             Err(Failure::Suppressible(error)) => match self.on_error {
                 Behavior::Error => Err(error),
-                Behavior::Default => defaults(Clause::OnError)
-                    .and_then(|value| cast_default(value, self.returning)),
+                Behavior::Default => {
+                    defaults(Clause::OnError).and_then(|value| cast_default(value, self.returning))
+                }
                 behavior => behavior_value(behavior, self.returning),
             },
         }
@@ -587,7 +589,8 @@ pub(crate) fn query_function(
     let shape = if name == QUERY {
         let wrapper =
             Wrapper::of_code(code_at(name, arguments, 4)?).ok_or_else(|| malformed(name))?;
-        let quotes = Quotes::of_code(code_at(name, arguments, 5)?).ok_or_else(|| malformed(name))?;
+        let quotes =
+            Quotes::of_code(code_at(name, arguments, 5)?).ok_or_else(|| malformed(name))?;
         Some((wrapper, quotes))
     } else {
         None
@@ -753,7 +756,9 @@ impl<'t> PlanReader<'t> {
         if number < 0 {
             return Ok(None);
         }
-        usize::try_from(number).map(Some).map_err(|_| damaged_plan())
+        usize::try_from(number)
+            .map(Some)
+            .map_err(|_| damaged_plan())
     }
 
     fn columns(&mut self, depth: usize) -> SqlResult<Vec<TableColumn>> {
@@ -937,7 +942,10 @@ pub(crate) fn populate_row_type(generated: &GeneratedTable) -> Option<RowType> {
     }
     match &function.arguments.first()?.kind {
         ExprKind::Function { name, arguments } if name == ROW_TYPE => {
-            match arguments.first().map(|argument| (&argument.kind, argument.position)) {
+            match arguments
+                .first()
+                .map(|argument| (&argument.kind, argument.position))
+            {
                 Some((ExprKind::Literal(Literal::String(table)), position)) => {
                     Some(RowType::Table(Name {
                         text: table.clone(),
@@ -982,11 +990,10 @@ pub(crate) fn fill_row_type(
         return Ok(());
     };
     if !function.column_names.is_empty() {
-        return Err(SqlError::not_supported(format!(
-            "a column alias list on {}()",
-            function.name
-        ))
-        .at(function.position));
+        return Err(
+            SqlError::not_supported(format!("a column alias list on {}()", function.name))
+                .at(function.position),
+        );
     }
     if row_type.is_empty() {
         return Err(row_type_required(&function.name).at(function.position));
@@ -1049,7 +1056,10 @@ fn populate_rows(
         other => {
             return Err(SqlError::new(
                 SqlState::UNDEFINED_FUNCTION,
-                format!("function {name}(record, {}) does not exist", other.type_name()),
+                format!(
+                    "function {name}(record, {}) does not exist",
+                    other.type_name()
+                ),
             ));
         }
     };
@@ -1061,12 +1071,12 @@ fn populate_rows(
         };
         declared
             .iter()
-            .map(|(column, sql_type)| {
-                match members.iter().rev().find(|(key, _)| key == column) {
+            .map(
+                |(column, sql_type)| match members.iter().rev().find(|(key, _)| key == column) {
                     None => Ok(Value::Null),
                     Some((_, node)) => crate::json_to_record::field(text, node, *sql_type, binary),
-                }
-            })
+                },
+            )
             .collect()
     };
     if !set {
@@ -1179,7 +1189,11 @@ impl TableRun<'_> {
     }
 
     fn column_type(&self, slot: usize) -> SqlType {
-        self.types.get(slot).copied().flatten().unwrap_or(SqlType::Text)
+        self.types
+            .get(slot)
+            .copied()
+            .flatten()
+            .unwrap_or(SqlType::Text)
     }
 
     fn column_name(&self, slot: usize) -> &str {

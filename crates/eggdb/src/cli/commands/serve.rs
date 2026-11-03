@@ -448,11 +448,11 @@ impl Session<'_> {
             Some(_) => Some(
                 super::serve_mongo::config(&user, &password, max_connections, &memory_budget)
                     .map_err(|error| {
-                    Failure::database(
-                        format!("cannot prepare the MongoDB-compatible listener: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?,
+                        Failure::database(
+                            format!("cannot prepare the MongoDB-compatible listener: {error}"),
+                            Exit::DatabaseError,
+                        )
+                    })?,
             ),
             None => None,
         };

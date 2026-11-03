@@ -5,7 +5,7 @@ pub fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
             out.push(',');
         }
         out.push(digit);
@@ -180,10 +180,19 @@ mod tests {
         assert_eq!(result_summary(3, ms(0.4), 1229), "3 rows · 0.4 ms · 1.2 KB");
         assert_eq!(result_summary(1, ms(9.9), 12), "1 row · 9.9 ms · 12 B");
         assert_eq!(result_summary(0, ms(12.4), 0), "0 rows · 12 ms · 0 B");
-        assert_eq!(result_summary(1234, ms(1234.0), 9 * 1024 * 1024), "1,234 rows · 1.23 s · 9.0 MB");
+        assert_eq!(
+            result_summary(1234, ms(1234.0), 9 * 1024 * 1024),
+            "1,234 rows · 1.23 s · 9.0 MB"
+        );
         assert_eq!(tag_summary("INSERT 0 2", ms(0.3)), "INSERT 0 2 · 0.3 ms");
-        assert_eq!(run_all_summary(5, 3, ms(12.0)), "5 statements · 3 rows · 12 ms");
-        assert_eq!(run_all_summary(1, 1, ms(2.0)), "1 statement · 1 row · 2.0 ms");
+        assert_eq!(
+            run_all_summary(5, 3, ms(12.0)),
+            "5 statements · 3 rows · 12 ms"
+        );
+        assert_eq!(
+            run_all_summary(1, 1, ms(2.0)),
+            "1 statement · 1 row · 2.0 ms"
+        );
         assert_eq!(stopped_summary(12_400), "Stopped · 12,400 rows (partial)");
         assert_eq!(running_summary(ms(1200.0)), "Running · 1.2 s");
         assert_eq!(
@@ -216,7 +225,10 @@ mod tests {
     #[test]
     fn a_summary_is_spoken_with_pauses_and_units_in_words() {
         assert_eq!(spoken("3 rows · 0.4 ms"), "3 rows, 0.4 milliseconds");
-        assert_eq!(spoken("1 row · 1.23 s · 1.2 KB"), "1 row, 1.23 seconds, 1.2 kilobytes");
+        assert_eq!(
+            spoken("1 row · 1.23 s · 1.2 KB"),
+            "1 row, 1.23 seconds, 1.2 kilobytes"
+        );
         assert_eq!(spoken("Error"), "Error");
     }
 }

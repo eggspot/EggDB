@@ -5,7 +5,9 @@ use eggdb_platform::window::{Key, KeyPress};
 
 use crate::canvas::Rect;
 use crate::catalog::Catalog;
-use crate::main_window::{BODY, Button, Painter, SMALL, chevron, focus_ring, icon_database, icon_folder, icon_table};
+use crate::main_window::{
+    BODY, Button, Painter, SMALL, chevron, focus_ring, icon_database, icon_folder, icon_table,
+};
 
 /// How long after a letter the next one still extends the type-ahead prefix.
 pub const TYPE_AHEAD_WINDOW: Duration = Duration::from_secs(1);
@@ -38,7 +40,13 @@ pub enum Group {
 
 impl Group {
     /// Every group, in the tree's order.
-    pub const ALL: [Self; 5] = [Self::Tables, Self::Views, Self::Indexes, Self::Sequences, Self::Keys];
+    pub const ALL: [Self; 5] = [
+        Self::Tables,
+        Self::Views,
+        Self::Indexes,
+        Self::Sequences,
+        Self::Keys,
+    ];
 
     /// The group's label.
     pub fn label(self) -> &'static str {
@@ -168,7 +176,9 @@ impl ObjectTree {
         Self {
             connection: connection.to_owned(),
             catalog,
-            expanded: [TreeItem::Connection, TreeItem::Group(Group::Tables)].into_iter().collect(),
+            expanded: [TreeItem::Connection, TreeItem::Group(Group::Tables)]
+                .into_iter()
+                .collect(),
             current: TreeItem::Connection,
             selected: None,
             filter: String::new(),
@@ -183,7 +193,11 @@ impl ObjectTree {
     pub fn set_catalog(&mut self, catalog: Catalog) {
         let old = std::mem::replace(&mut self.catalog, catalog);
         let resolve = |tree: &Self, item: TreeItem| tree.resolve(&old, item);
-        self.expanded = self.expanded.iter().filter_map(|&item| resolve(self, item)).collect();
+        self.expanded = self
+            .expanded
+            .iter()
+            .filter_map(|&item| resolve(self, item))
+            .collect();
         self.current = resolve(self, self.current).unwrap_or(TreeItem::Connection);
         self.selected = self.selected.and_then(|item| resolve(self, item));
         self.scroll_into_view();
@@ -192,36 +206,69 @@ impl ObjectTree {
     fn resolve(&self, old: &Catalog, item: TreeItem) -> Option<TreeItem> {
         let table = |index: usize| {
             let name = &old.tables.get(index)?.name;
-            self.catalog.tables.iter().position(|table| &table.name == name)
+            self.catalog
+                .tables
+                .iter()
+                .position(|table| &table.name == name)
         };
         let index_named = |index: usize| {
             let name = &old.indexes.get(index)?.name;
-            self.catalog.indexes.iter().position(|found| &found.name == name)
+            self.catalog
+                .indexes
+                .iter()
+                .position(|found| &found.name == name)
         };
         Some(match item {
             TreeItem::Connection | TreeItem::Group(_) => item,
             TreeItem::Table(index) => TreeItem::Table(table(index)?),
             TreeItem::Columns(index) => TreeItem::Columns(table(index)?),
             TreeItem::TableIndexes(index) => TreeItem::TableIndexes(table(index)?),
-            TreeItem::Column { table: owner, column } => {
+            TreeItem::Column {
+                table: owner,
+                column,
+            } => {
                 let name = &old.tables.get(owner)?.columns.get(column)?.name;
                 let owner = table(owner)?;
-                let column = self.catalog.tables.get(owner)?.columns.iter().position(|found| &found.name == name)?;
-                TreeItem::Column { table: owner, column }
+                let column = self
+                    .catalog
+                    .tables
+                    .get(owner)?
+                    .columns
+                    .iter()
+                    .position(|found| &found.name == name)?;
+                TreeItem::Column {
+                    table: owner,
+                    column,
+                }
             }
             TreeItem::TableIndex(index) => TreeItem::TableIndex(index_named(index)?),
             TreeItem::Index(index) => TreeItem::Index(index_named(index)?),
             TreeItem::View(index) => {
                 let name = &old.views.get(index)?.name;
-                TreeItem::View(self.catalog.views.iter().position(|view| &view.name == name)?)
+                TreeItem::View(
+                    self.catalog
+                        .views
+                        .iter()
+                        .position(|view| &view.name == name)?,
+                )
             }
             TreeItem::Sequence(index) => {
                 let name = &old.sequences.get(index)?.name;
-                TreeItem::Sequence(self.catalog.sequences.iter().position(|found| &found.name == name)?)
+                TreeItem::Sequence(
+                    self.catalog
+                        .sequences
+                        .iter()
+                        .position(|found| &found.name == name)?,
+                )
             }
             TreeItem::KeySpace(index) => {
                 let name = old.key_spaces.get(index)?.label();
-                TreeItem::KeySpace(self.catalog.key_spaces.iter().position(|space| space.label() == name)?)
+                TreeItem::KeySpace(
+                    self.catalog
+                        .key_spaces
+                        .iter()
+                        .position(|space| space.label() == name)?,
+                )
             }
         })
     }
@@ -245,7 +292,10 @@ impl ObjectTree {
     }
 
     fn table_name(&self, table: usize) -> &str {
-        self.catalog.tables.get(table).map_or("", |table| table.name.as_str())
+        self.catalog
+            .tables
+            .get(table)
+            .map_or("", |table| table.name.as_str())
     }
 
     fn child_count(&self, item: TreeItem) -> usize {
@@ -253,10 +303,21 @@ impl ObjectTree {
             TreeItem::Connection => self.groups().len(),
             TreeItem::Group(group) => self.group_size(group),
             TreeItem::Table(table) => {
-                1 + usize::from(self.catalog.indexes_of(self.table_name(table)).next().is_some())
+                1 + usize::from(
+                    self.catalog
+                        .indexes_of(self.table_name(table))
+                        .next()
+                        .is_some(),
+                )
             }
-            TreeItem::Columns(table) => self.catalog.tables.get(table).map_or(0, |table| table.columns.len()),
-            TreeItem::TableIndexes(table) => self.catalog.indexes_of(self.table_name(table)).count(),
+            TreeItem::Columns(table) => self
+                .catalog
+                .tables
+                .get(table)
+                .map_or(0, |table| table.columns.len()),
+            TreeItem::TableIndexes(table) => {
+                self.catalog.indexes_of(self.table_name(table)).count()
+            }
             _ => 0,
         }
     }
@@ -265,16 +326,29 @@ impl ObjectTree {
     pub fn children(&self, item: TreeItem) -> Vec<TreeItem> {
         match item {
             TreeItem::Connection => self.groups().into_iter().map(TreeItem::Group).collect(),
-            TreeItem::Group(Group::Tables) => (0..self.catalog.tables.len()).map(TreeItem::Table).collect(),
-            TreeItem::Group(Group::Views) => (0..self.catalog.views.len()).map(TreeItem::View).collect(),
-            TreeItem::Group(Group::Indexes) => (0..self.catalog.indexes.len()).map(TreeItem::Index).collect(),
-            TreeItem::Group(Group::Sequences) => {
-                (0..self.catalog.sequences.len()).map(TreeItem::Sequence).collect()
+            TreeItem::Group(Group::Tables) => (0..self.catalog.tables.len())
+                .map(TreeItem::Table)
+                .collect(),
+            TreeItem::Group(Group::Views) => {
+                (0..self.catalog.views.len()).map(TreeItem::View).collect()
             }
-            TreeItem::Group(Group::Keys) => (0..self.catalog.key_spaces.len()).map(TreeItem::KeySpace).collect(),
+            TreeItem::Group(Group::Indexes) => (0..self.catalog.indexes.len())
+                .map(TreeItem::Index)
+                .collect(),
+            TreeItem::Group(Group::Sequences) => (0..self.catalog.sequences.len())
+                .map(TreeItem::Sequence)
+                .collect(),
+            TreeItem::Group(Group::Keys) => (0..self.catalog.key_spaces.len())
+                .map(TreeItem::KeySpace)
+                .collect(),
             TreeItem::Table(table) => {
                 let mut children = vec![TreeItem::Columns(table)];
-                if self.catalog.indexes_of(self.table_name(table)).next().is_some() {
+                if self
+                    .catalog
+                    .indexes_of(self.table_name(table))
+                    .next()
+                    .is_some()
+                {
                     children.push(TreeItem::TableIndexes(table));
                 }
                 children
@@ -309,13 +383,23 @@ impl ObjectTree {
                 .tables
                 .get(table)
                 .and_then(|table| table.columns.get(column))
-                .map_or_else(String::new, |column| format!("{} {}", column.name, column.type_name)),
-            TreeItem::TableIndex(index) => catalog.indexes.get(index).map_or_else(String::new, |index| index.name.clone()),
+                .map_or_else(String::new, |column| {
+                    format!("{} {}", column.name, column.type_name)
+                }),
+            TreeItem::TableIndex(index) => catalog
+                .indexes
+                .get(index)
+                .map_or_else(String::new, |index| index.name.clone()),
             TreeItem::Index(index) => catalog
                 .indexes
                 .get(index)
-                .map_or_else(String::new, |index| format!("{} on {}", index.name, index.table)),
-            TreeItem::View(view) => catalog.views.get(view).map_or_else(String::new, |view| view.name.clone()),
+                .map_or_else(String::new, |index| {
+                    format!("{} on {}", index.name, index.table)
+                }),
+            TreeItem::View(view) => catalog
+                .views
+                .get(view)
+                .map_or_else(String::new, |view| view.name.clone()),
             TreeItem::Sequence(sequence) => catalog
                 .sequences
                 .get(sequence)
@@ -331,7 +415,9 @@ impl ObjectTree {
         let catalog = &self.catalog;
         match item {
             TreeItem::Group(group) => Some(self.group_size(group).to_string()),
-            TreeItem::Columns(_) | TreeItem::TableIndexes(_) => Some(self.child_count(item).to_string()),
+            TreeItem::Columns(_) | TreeItem::TableIndexes(_) => {
+                Some(self.child_count(item).to_string())
+            }
             TreeItem::Column { table, column } => {
                 let column = catalog.tables.get(table)?.columns.get(column)?;
                 if column.primary_key {
@@ -340,9 +426,11 @@ impl ObjectTree {
                     column.not_null.then(|| "not null".to_owned())
                 }
             }
-            TreeItem::TableIndex(index) | TreeItem::Index(index) => {
-                catalog.indexes.get(index)?.unique.then(|| "unique".to_owned())
-            }
+            TreeItem::TableIndex(index) | TreeItem::Index(index) => catalog
+                .indexes
+                .get(index)?
+                .unique
+                .then(|| "unique".to_owned()),
             TreeItem::Sequence(sequence) => catalog.sequences.get(sequence)?.current.clone(),
             TreeItem::KeySpace(space) => Some(catalog.key_spaces.get(space)?.keys.text()),
             _ => None,
@@ -357,9 +445,13 @@ impl ObjectTree {
         match item {
             TreeItem::Table(table) => Some(catalog.tables.get(table)?.name.clone()),
             TreeItem::View(view) => Some(catalog.views.get(view)?.name.clone()),
-            TreeItem::Index(index) | TreeItem::TableIndex(index) => Some(catalog.indexes.get(index)?.name.clone()),
+            TreeItem::Index(index) | TreeItem::TableIndex(index) => {
+                Some(catalog.indexes.get(index)?.name.clone())
+            }
             TreeItem::Sequence(sequence) => Some(catalog.sequences.get(sequence)?.name.clone()),
-            TreeItem::Column { table, column } => Some(catalog.tables.get(table)?.columns.get(column)?.name.clone()),
+            TreeItem::Column { table, column } => {
+                Some(catalog.tables.get(table)?.columns.get(column)?.name.clone())
+            }
             TreeItem::KeySpace(space) => catalog.key_spaces.get(space)?.collection.clone(),
             _ => None,
         }
@@ -369,7 +461,9 @@ impl ObjectTree {
         match item {
             TreeItem::Connection => RowIcon::Database,
             TreeItem::Group(Group::Keys) => RowIcon::Key,
-            TreeItem::Group(_) | TreeItem::Columns(_) | TreeItem::TableIndexes(_) => RowIcon::Folder,
+            TreeItem::Group(_) | TreeItem::Columns(_) | TreeItem::TableIndexes(_) => {
+                RowIcon::Folder
+            }
             TreeItem::Table(_) | TreeItem::View(_) => RowIcon::Table,
             _ => RowIcon::Blank,
         }
@@ -384,13 +478,21 @@ impl ObjectTree {
         rows
     }
 
-    fn collect(&self, item: TreeItem, level: usize, position: usize, set_size: usize, rows: &mut Vec<TreeRow>) -> bool {
+    fn collect(
+        &self,
+        item: TreeItem,
+        level: usize,
+        position: usize,
+        set_size: usize,
+        rows: &mut Vec<TreeRow>,
+    ) -> bool {
         let filtering = !self.filter.is_empty();
         let count = self.child_count(item);
         let forced = filtering && matches!(item, TreeItem::Connection | TreeItem::Group(_));
         let open = count > 0 && (forced || self.expanded.contains(&item));
         let label = self.label(item);
-        let matched = !filtering || item == TreeItem::Connection || contains_any_case(&label, &self.filter);
+        let matched =
+            !filtering || item == TreeItem::Connection || contains_any_case(&label, &self.filter);
         let at = rows.len();
         rows.push(TreeRow {
             item,
@@ -429,7 +531,10 @@ impl ObjectTree {
         let Some(last) = rows.len().checked_sub(1) else {
             return TreeAction::None;
         };
-        let at = rows.iter().position(|row| row.item == self.current).unwrap_or(0);
+        let at = rows
+            .iter()
+            .position(|row| row.item == self.current)
+            .unwrap_or(0);
         let row = &rows[at];
         let primary = press.modifiers.control || press.modifiers.command;
         let action = match press.key {
@@ -442,18 +547,25 @@ impl ObjectTree {
                     self.expanded.insert(row.item);
                     TreeAction::None
                 }
-                Some(true) if rows.get(at + 1).is_some_and(|next| next.level == row.level + 1) => {
+                Some(true)
+                    if rows
+                        .get(at + 1)
+                        .is_some_and(|next| next.level == row.level + 1) =>
+                {
                     self.move_to(&rows, at + 1)
                 }
                 _ => TreeAction::None,
             },
             Key::Left => {
-                let forced = !self.filter.is_empty() && matches!(row.item, TreeItem::Connection | TreeItem::Group(_));
+                let forced = !self.filter.is_empty()
+                    && matches!(row.item, TreeItem::Connection | TreeItem::Group(_));
                 if row.expanded == Some(true) && !forced {
                     self.expanded.remove(&row.item);
                     TreeAction::None
                 } else {
-                    let parent = rows[..at].iter().rposition(|above| above.level + 1 == row.level);
+                    let parent = rows[..at]
+                        .iter()
+                        .rposition(|above| above.level + 1 == row.level);
                     parent.map_or(TreeAction::None, |parent| self.move_to(&rows, parent))
                 }
             }
@@ -487,7 +599,9 @@ impl ObjectTree {
             Key::Tab => TreeAction::LeaveForward,
             Key::Character('*') if !primary => {
                 let level = row.level;
-                let parent = rows[..at].iter().rposition(|above| above.level + 1 == level);
+                let parent = rows[..at]
+                    .iter()
+                    .rposition(|above| above.level + 1 == level);
                 let from = parent.map_or(0, |parent| parent + 1);
                 for sibling in rows[from..].iter().take_while(|below| below.level >= level) {
                     if sibling.level == level && sibling.expanded == Some(false) {
@@ -559,7 +673,9 @@ impl ObjectTree {
                 TreeAction::None
             }
             Key::Character(letter)
-                if !primary && !letter.is_control() && self.filter.chars().count() < FILTER_LIMIT =>
+                if !primary
+                    && !letter.is_control()
+                    && self.filter.chars().count() < FILTER_LIMIT =>
             {
                 self.filter.push(letter);
                 TreeAction::None
@@ -585,7 +701,10 @@ impl ObjectTree {
     /// Scrolls so the current row is among the [`ROWS_IN_VIEW`] drawn.
     pub fn scroll_into_view(&mut self) {
         let rows = self.rows();
-        let at = rows.iter().position(|row| row.item == self.current).unwrap_or(0);
+        let at = rows
+            .iter()
+            .position(|row| row.item == self.current)
+            .unwrap_or(0);
         if at < self.first_row {
             self.first_row = at;
         } else if at >= self.first_row + ROWS_IN_VIEW {
@@ -609,22 +728,44 @@ pub(crate) enum SidebarFocus {
 
 fn icon_key(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
     let color = paint.theme.text_secondary;
-    paint.canvas.stroke_circle(x + 3.5, y + 6.0, 3.0, 1.5, color);
-    paint.canvas.line((x + 6.5, y + 6.0), (x + 12.0, y + 6.0), 1.5, color);
-    paint.canvas.line((x + 10.0, y + 6.0), (x + 10.0, y + 9.0), 1.5, color);
+    paint
+        .canvas
+        .stroke_circle(x + 3.5, y + 6.0, 3.0, 1.5, color);
+    paint
+        .canvas
+        .line((x + 6.5, y + 6.0), (x + 12.0, y + 6.0), 1.5, color);
+    paint
+        .canvas
+        .line((x + 10.0, y + 6.0), (x + 10.0, y + 9.0), 1.5, color);
 }
 
-pub(crate) fn draw(paint: &mut Painter<'_, '_>, tree: &ObjectTree, access: &str, focus: SidebarFocus) {
+pub(crate) fn draw(
+    paint: &mut Painter<'_, '_>,
+    tree: &ObjectTree,
+    access: &str,
+    focus: SidebarFocus,
+) {
     let theme = paint.theme;
     let faces = paint.faces;
     paint.rect(0.0, 44.0, SIDEBAR_WIDTH, 732.0, theme.bg1);
     paint.rect(SIDEBAR_WIDTH - 1.0, 44.0, 1.0, 732.0, theme.border);
     let filter_box = Rect::new(8.0, 52.0, 244.0, 28.0);
     paint.button(filter_box, Button::Secondary);
-    paint.canvas.stroke_circle(20.0, 64.0, 8.0, 1.5, theme.text_secondary);
-    paint.canvas.line((23.0, 67.0), (26.0, 70.0), 1.5, theme.text_secondary);
+    paint
+        .canvas
+        .stroke_circle(20.0, 64.0, 8.0, 1.5, theme.text_secondary);
+    paint
+        .canvas
+        .line((23.0, 67.0), (26.0, 70.0), 1.5, theme.text_secondary);
     if tree.filter.is_empty() {
-        paint.text(faces.ui, "Filter objects", 32.0, 57.0, BODY, theme.text_secondary);
+        paint.text(
+            faces.ui,
+            "Filter objects",
+            32.0,
+            57.0,
+            BODY,
+            theme.text_secondary,
+        );
     } else {
         let shown = crate::main_window::elided(faces.ui, &tree.filter, 212.0, BODY.0);
         paint.text(faces.ui, &shown, 32.0, 57.0, BODY, theme.text_primary);
@@ -633,19 +774,37 @@ pub(crate) fn draw(paint: &mut Painter<'_, '_>, tree: &ObjectTree, access: &str,
         focus_ring(paint, Rect::new(6.0, 50.0, 248.0, 32.0));
     }
     let rows = tree.rows();
-    for (offset, row) in rows.iter().enumerate().skip(tree.first_row).take(ROWS_IN_VIEW) {
+    for (offset, row) in rows
+        .iter()
+        .enumerate()
+        .skip(tree.first_row)
+        .take(ROWS_IN_VIEW)
+    {
         let y = ROWS_TOP + ROW_HEIGHT * (offset - tree.first_row) as f32;
         draw_row(paint, tree, row, y, access, focus == SidebarFocus::Tree);
     }
 }
 
-fn draw_row(paint: &mut Painter<'_, '_>, tree: &ObjectTree, row: &TreeRow, y: f32, access: &str, focused: bool) {
+fn draw_row(
+    paint: &mut Painter<'_, '_>,
+    tree: &ObjectTree,
+    row: &TreeRow,
+    y: f32,
+    access: &str,
+    focused: bool,
+) {
     let theme = paint.theme;
     let faces = paint.faces;
     let indent = 16.0 * row.level as f32;
     if tree.selected == Some(row.item) {
-        let fill = if focused { theme.selection } else { theme.selection_inactive };
-        paint.canvas.fill_rounded_rect(Rect::new(4.0, y, 252.0, ROW_HEIGHT), 4.0, fill);
+        let fill = if focused {
+            theme.selection
+        } else {
+            theme.selection_inactive
+        };
+        paint
+            .canvas
+            .fill_rounded_rect(Rect::new(4.0, y, 252.0, ROW_HEIGHT), 4.0, fill);
     }
     if let Some(open) = row.expanded {
         chevron(paint, 8.0 + indent, y + 8.0, open);
@@ -663,13 +822,26 @@ fn draw_row(paint: &mut Painter<'_, '_>, tree: &ObjectTree, row: &TreeRow, y: f3
     } else {
         row.detail.clone()
     };
-    let detail_width = detail.as_deref().map_or(0.0, |text| faces.ui.width(text, SMALL.0) + 8.0);
-    let face = if row.level == 0 { faces.ui_bold } else { faces.ui };
+    let detail_width = detail
+        .as_deref()
+        .map_or(0.0, |text| faces.ui.width(text, SMALL.0) + 8.0);
+    let face = if row.level == 0 {
+        faces.ui_bold
+    } else {
+        faces.ui
+    };
     let left = 44.0 + indent;
     let shown = crate::main_window::elided(face, &row.label, 244.0 - detail_width - left, BODY.0);
     paint.text(face, &shown, left, y + 3.0, BODY, theme.text_primary);
     if let Some(detail) = detail {
-        paint.text_right(faces.ui, &detail, 244.0, y + 5.0, SMALL, theme.text_secondary);
+        paint.text_right(
+            faces.ui,
+            &detail,
+            244.0,
+            y + 5.0,
+            SMALL,
+            theme.text_secondary,
+        );
     }
     if focused && tree.current == row.item {
         focus_ring(paint, Rect::new(4.0, y, 252.0, ROW_HEIGHT));
@@ -693,7 +865,9 @@ pub fn row_description(row: &TreeRow, detail: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::{CatalogColumn, CatalogIndex, CatalogSequence, CatalogTable, CatalogView, KeyCount, KeySpace};
+    use crate::catalog::{
+        CatalogColumn, CatalogIndex, CatalogSequence, CatalogTable, CatalogView, KeyCount, KeySpace,
+    };
 
     fn column(name: &str, primary_key: bool) -> CatalogColumn {
         CatalogColumn {
@@ -721,17 +895,47 @@ mod tests {
                 ddl: "CREATE VIEW big_orders AS SELECT id FROM orders;".into(),
             }],
             indexes: vec![
-                CatalogIndex { name: "customers_name_idx".into(), table: "customers".into(), columns: vec!["name".into()], unique: false, ddl: String::new() },
-                CatalogIndex { name: "orders_total_idx".into(), table: "orders".into(), columns: vec!["total".into()], unique: false, ddl: String::new() },
-                CatalogIndex { name: "products_name_key".into(), table: "products".into(), columns: vec!["name".into()], unique: true, ddl: String::new() },
+                CatalogIndex {
+                    name: "customers_name_idx".into(),
+                    table: "customers".into(),
+                    columns: vec!["name".into()],
+                    unique: false,
+                    ddl: String::new(),
+                },
+                CatalogIndex {
+                    name: "orders_total_idx".into(),
+                    table: "orders".into(),
+                    columns: vec!["total".into()],
+                    unique: false,
+                    ddl: String::new(),
+                },
+                CatalogIndex {
+                    name: "products_name_key".into(),
+                    table: "products".into(),
+                    columns: vec!["name".into()],
+                    unique: true,
+                    ddl: String::new(),
+                },
             ],
             sequences: vec![
-                CatalogSequence { name: "invoice_numbers".into(), current: Some("12".into()) },
-                CatalogSequence { name: "ticket_numbers".into(), current: None },
+                CatalogSequence {
+                    name: "invoice_numbers".into(),
+                    current: Some("12".into()),
+                },
+                CatalogSequence {
+                    name: "ticket_numbers".into(),
+                    current: None,
+                },
             ],
             key_spaces: vec![
-                KeySpace { collection: None, keys: KeyCount::Exactly(4) },
-                KeySpace { collection: Some("sessions".into()), keys: KeyCount::Exactly(312) },
+                KeySpace {
+                    collection: None,
+                    keys: KeyCount::Exactly(4),
+                },
+                KeySpace {
+                    collection: Some("sessions".into()),
+                    keys: KeyCount::Exactly(312),
+                },
             ],
         }
     }
@@ -749,13 +953,31 @@ mod tests {
         let tree = ObjectTree::new("shop", shop());
         assert_eq!(
             labels(&tree),
-            ["shop", "Tables", "customers", "orders", "products", "Views", "Indexes", "Sequences", "Keys"]
+            [
+                "shop",
+                "Tables",
+                "customers",
+                "orders",
+                "products",
+                "Views",
+                "Indexes",
+                "Sequences",
+                "Keys"
+            ]
         );
         let rows = tree.rows();
         assert_eq!(rows[1].detail.as_deref(), Some("3"));
         assert_eq!(rows[5].detail.as_deref(), Some("1"));
         assert_eq!(rows[8].detail.as_deref(), Some("2"));
-        assert_eq!((rows[3].level, rows[3].position, rows[3].set_size, rows[3].expanded), (2, 2, 3, Some(false)));
+        assert_eq!(
+            (
+                rows[3].level,
+                rows[3].position,
+                rows[3].set_size,
+                rows[3].expanded
+            ),
+            (2, 2, 3, Some(false))
+        );
         assert_eq!(rows[8].icon, RowIcon::Key);
         let empty = ObjectTree::new("empty", Catalog::default());
         assert_eq!(labels(&empty), ["empty", "Tables"]);
@@ -768,7 +990,10 @@ mod tests {
         let now = Instant::now();
         tree.key(press(Key::Down), now);
         tree.key(press(Key::Left), now);
-        assert_eq!(labels(&tree), ["shop", "Tables", "Views", "Indexes", "Sequences", "Keys"]);
+        assert_eq!(
+            labels(&tree),
+            ["shop", "Tables", "Views", "Indexes", "Sequences", "Keys"]
+        );
         tree.key(press(Key::Right), now);
         tree.key(press(Key::Right), now);
         assert_eq!(tree.current, TreeItem::Table(0));
@@ -787,9 +1012,17 @@ mod tests {
         assert_eq!(rows[5].detail.as_deref(), Some("pk"));
         assert_eq!(rows[5].level, 4);
         tree.key(press(Key::Left), now);
-        assert_eq!(tree.current, TreeItem::Columns(1), "Left on a leaf moves to its parent");
+        assert_eq!(
+            tree.current,
+            TreeItem::Columns(1),
+            "Left on a leaf moves to its parent"
+        );
         tree.key(press(Key::Left), now);
-        assert_eq!(tree.rows()[5].label, "Indexes", "Left on an expanded row collapses it");
+        assert_eq!(
+            tree.rows()[5].label,
+            "Indexes",
+            "Left on an expanded row collapses it"
+        );
         tree.key(press(Key::Left), now);
         assert_eq!(tree.current, TreeItem::Table(1));
     }
@@ -802,10 +1035,24 @@ mod tests {
         assert_eq!(tree.current, TreeItem::Group(Group::Keys));
         tree.key(press(Key::Character('*')), now);
         let rows = tree.rows();
-        assert!(rows.iter().filter(|row| row.level == 1).all(|row| row.expanded == Some(true)));
-        assert!(rows.iter().any(|row| row.label == "products_name_key on products" && row.detail.as_deref() == Some("unique")));
-        assert!(rows.iter().any(|row| row.label == "invoice_numbers" && row.detail.as_deref() == Some("12")));
-        assert!(rows.iter().any(|row| row.label == "sessions" && row.detail.as_deref() == Some("312")));
+        assert!(
+            rows.iter()
+                .filter(|row| row.level == 1)
+                .all(|row| row.expanded == Some(true))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.label == "products_name_key on products"
+                    && row.detail.as_deref() == Some("unique"))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.label == "invoice_numbers" && row.detail.as_deref() == Some("12"))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.label == "sessions" && row.detail.as_deref() == Some("312"))
+        );
         tree.key(press(Key::Home), now);
         assert_eq!(tree.current, TreeItem::Connection);
         tree.key(press(Key::Up), now);
@@ -820,9 +1067,19 @@ mod tests {
         assert_eq!(tree.current, TreeItem::Table(2));
         tree.key(press(Key::Character('r')), now + Duration::from_millis(300));
         assert_eq!(tree.current, TreeItem::Table(2), "`pr` stays on products");
-        tree.key(press(Key::Character('o')), now + Duration::from_millis(2_000));
-        assert_eq!(tree.current, TreeItem::Table(1), "after a second `o` starts again: orders");
-        tree.key(press(Key::Character('V')), now + Duration::from_millis(4_000));
+        tree.key(
+            press(Key::Character('o')),
+            now + Duration::from_millis(2_000),
+        );
+        assert_eq!(
+            tree.current,
+            TreeItem::Table(1),
+            "after a second `o` starts again: orders"
+        );
+        tree.key(
+            press(Key::Character('V')),
+            now + Duration::from_millis(4_000),
+        );
         assert_eq!(tree.current, TreeItem::Group(Group::Views));
     }
 
@@ -833,20 +1090,36 @@ mod tests {
         tree.key(press(Key::Down), now);
         tree.key(press(Key::Down), now);
         tree.key(press(Key::Down), now);
-        assert_eq!(tree.key(press(Key::Enter), now), TreeAction::Open(TreeItem::Table(1)));
+        assert_eq!(
+            tree.key(press(Key::Enter), now),
+            TreeAction::Open(TreeItem::Table(1))
+        );
         assert_eq!(tree.selected, Some(TreeItem::Table(1)));
         let shift_enter = KeyPress {
             key: Key::Enter,
-            modifiers: eggdb_platform::window::Modifiers { shift: true, ..Default::default() },
+            modifiers: eggdb_platform::window::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
         };
-        assert_eq!(tree.key(shift_enter, now), TreeAction::InsertName(TreeItem::Table(1)));
+        assert_eq!(
+            tree.key(shift_enter, now),
+            TreeAction::InsertName(TreeItem::Table(1))
+        );
         assert_eq!(tree.name_of(TreeItem::Table(1)).as_deref(), Some("orders"));
         tree.key(press(Key::End), now);
         assert_eq!(tree.key(press(Key::Enter), now), TreeAction::None);
         assert!(tree.expanded.contains(&TreeItem::Group(Group::Keys)));
         tree.key(press(Key::Down), now);
-        assert_eq!(tree.key(press(Key::Space), now), TreeAction::Inspect(TreeItem::KeySpace(0)));
-        assert_eq!(tree.name_of(TreeItem::KeySpace(0)), None, "the default key space has no name");
+        assert_eq!(
+            tree.key(press(Key::Space), now),
+            TreeAction::Inspect(TreeItem::KeySpace(0))
+        );
+        assert_eq!(
+            tree.name_of(TreeItem::KeySpace(0)),
+            None,
+            "the default key space has no name"
+        );
         assert_eq!(tree.key(press(Key::F5), now), TreeAction::Refresh);
     }
 
@@ -858,7 +1131,18 @@ mod tests {
         }
         let rows = tree.rows();
         let shown: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
-        assert_eq!(shown, ["shop", "Tables", "orders", "Views", "big_orders", "Indexes", "orders_total_idx on orders"]);
+        assert_eq!(
+            shown,
+            [
+                "shop",
+                "Tables",
+                "orders",
+                "Views",
+                "big_orders",
+                "Indexes",
+                "orders_total_idx on orders"
+            ]
+        );
         assert_eq!(rows[1].detail.as_deref(), Some("1 of 3"));
         assert_eq!(tree.current, TreeItem::Connection);
         tree.filter_key(press(Key::Backspace));
@@ -866,7 +1150,10 @@ mod tests {
         tree.filter_key(press(Key::Backspace));
         assert_eq!(tree.filter, "");
         tree.filter_key(press(Key::Character('x')));
-        assert_eq!(tree.filter_key(press(Key::Escape)), TreeAction::LeaveForward);
+        assert_eq!(
+            tree.filter_key(press(Key::Escape)),
+            TreeAction::LeaveForward
+        );
         assert_eq!(tree.filter, "");
     }
 
@@ -886,8 +1173,10 @@ mod tests {
 
     #[test]
     fn the_current_row_stays_in_view() {
-        let mut catalog = Catalog::default();
-        catalog.tables = (0..100).map(|n| table(&format!("t{n:03}"))).collect();
+        let catalog = Catalog {
+            tables: (0..100).map(|n| table(&format!("t{n:03}"))).collect(),
+            ..Catalog::default()
+        };
         let mut tree = ObjectTree::new("big", catalog);
         tree.key(press(Key::End), Instant::now());
         assert_eq!(tree.first_row, 102 - ROWS_IN_VIEW);
@@ -899,7 +1188,13 @@ mod tests {
     fn a_row_reads_its_detail_level_position_and_state() {
         let tree = ObjectTree::new("shop", shop());
         let rows = tree.rows();
-        assert_eq!(row_description(&rows[3], None), "level 3, 2 of 3, collapsed");
-        assert_eq!(row_description(&rows[1], Some("3")), "3, level 2, 1 of 5, expanded");
+        assert_eq!(
+            row_description(&rows[3], None),
+            "level 3, 2 of 3, collapsed"
+        );
+        assert_eq!(
+            row_description(&rows[1], Some("3")),
+            "3, level 2, 1 of 5, expanded"
+        );
     }
 }

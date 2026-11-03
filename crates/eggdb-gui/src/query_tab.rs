@@ -243,13 +243,18 @@ impl QueryTab {
                 .collect()
         } else {
             let caret = self.editor.offset(self.editor.caret());
-            statement_at(&text, caret, self.dialect).into_iter().collect()
+            statement_at(&text, caret, self.dialect)
+                .into_iter()
+                .collect()
         };
         if ranges.is_empty() {
             return None;
         }
         Some(RunRequest {
-            statements: ranges.iter().map(|range| text[range.clone()].to_owned()).collect(),
+            statements: ranges
+                .iter()
+                .map(|range| text[range.clone()].to_owned())
+                .collect(),
             starts: ranges.iter().map(|range| range.start).collect(),
             dialect: self.dialect,
             all,
@@ -314,7 +319,9 @@ impl QueryTab {
         match press.key {
             Key::Enter if primary => return self.run_key(run_all),
             Key::Character('e' | 'E') if primary => return self.explain(press.modifiers.shift),
-            Key::Character('t' | 'T') if press.modifiers.alt && !primary && self.view == ResultView::Plan => {
+            Key::Character('t' | 'T')
+                if press.modifiers.alt && !primary && self.view == ResultView::Plan =>
+            {
                 if let Some(plan) = &mut self.plan {
                     plan.text_shown = !plan.text_shown;
                 }
@@ -324,7 +331,9 @@ impl QueryTab {
             Key::Character('.') if press.modifiers.command && self.running => {
                 return TabAction::Stop;
             }
-            Key::Escape if self.running && self.focus == TabFocus::Editor => return TabAction::Stop,
+            Key::Escape if self.running && self.focus == TabFocus::Editor => {
+                return TabAction::Stop;
+            }
             Key::Character('3') if primary => {
                 if self.view == ResultView::Plan && self.plan.is_some() {
                     self.focus_plan();
@@ -348,7 +357,8 @@ impl QueryTab {
             self.notice = Some(STILL_RUNNING.to_owned());
             return TabAction::None;
         }
-        self.run_request(all).map_or(TabAction::None, TabAction::Run)
+        self.run_request(all)
+            .map_or(TabAction::None, TabAction::Run)
     }
 
     fn focus_grid(&mut self) {
@@ -401,7 +411,10 @@ impl QueryTab {
         match plan.key(press, PLAN_PANEL) {
             PlanAnswer::LeaveForward => self.focus(TabFocus::DialectPill),
             PlanAnswer::LeaveBack => self.focus(TabFocus::Editor),
-            PlanAnswer::Moved | PlanAnswer::Selected | PlanAnswer::Cleared | PlanAnswer::Ignored => {}
+            PlanAnswer::Moved
+            | PlanAnswer::Selected
+            | PlanAnswer::Cleared
+            | PlanAnswer::Ignored => {}
         }
         TabAction::None
     }
@@ -488,7 +501,9 @@ impl QueryTab {
                 let toast = copied_characters_toast(text.chars().count());
                 return TabAction::Copy { text, toast };
             }
-            Key::Character('v' | 'V') if primary && !press.modifiers.shift => return TabAction::Paste,
+            Key::Character('v' | 'V') if primary && !press.modifiers.shift => {
+                return TabAction::Paste;
+            }
             _ => {}
         }
         let Some(key) = editor_key(press) else {
@@ -504,7 +519,11 @@ impl QueryTab {
     }
 
     fn edited(&mut self, line: usize) {
-        if self.error.as_ref().is_some_and(|error| error.line == line + 1) {
+        if self
+            .error
+            .as_ref()
+            .is_some_and(|error| error.line == line + 1)
+        {
             self.error = None;
         }
         if let Some(plan) = self.plan.as_mut() {
@@ -602,7 +621,8 @@ impl QueryTab {
         }
         let shown_rows = self.grid.as_ref().map_or(0, |grid| grid.rows.len());
         if let Some((statement_failure, index)) = failure {
-            self.messages.extend(statement_failure.report.iter().cloned());
+            self.messages
+                .extend(statement_failure.report.iter().cloned());
             if statement_failure.code == CANCELLED && was_stopping {
                 self.summary = status_line::stopped_summary(shown_rows);
                 self.status_tags = "Stopped".to_owned();
@@ -660,7 +680,8 @@ impl QueryTab {
             }
         }
         if let Some((statement_failure, index)) = failure {
-            self.messages.extend(statement_failure.report.iter().cloned());
+            self.messages
+                .extend(statement_failure.report.iter().cloned());
             if statement_failure.code == CANCELLED && was_stopping {
                 self.summary = status_line::stopped_summary(0);
                 self.status_tags = "Stopped".to_owned();
@@ -671,7 +692,9 @@ impl QueryTab {
             self.view = ResultView::Messages;
             if index == explain.plan_at {
                 let mut shifted = statement_failure;
-                shifted.position = shifted.position.and_then(|position| position.checked_sub(explain.prefix_len));
+                shifted.position = shifted
+                    .position
+                    .and_then(|position| position.checked_sub(explain.prefix_len));
                 let original = RunRequest {
                     statements: vec![explain.statement_text.clone()],
                     starts: vec![explain.statement.start],
@@ -683,21 +706,31 @@ impl QueryTab {
             }
             return;
         }
-        let read = plan_table.ok_or(crate::plan_view::PlanError::Empty).and_then(|table| {
-            let tag = table.tag.clone();
-            Plan::from_result(&table).map(|plan| (plan, tag))
-        });
+        let read = plan_table
+            .ok_or(crate::plan_view::PlanError::Empty)
+            .and_then(|table| {
+                let tag = table.tag.clone();
+                Plan::from_result(&table).map(|plan| (plan, tag))
+            });
         match read {
             Ok((plan, tag)) => {
                 let nodes = plan.nodes.len();
-                self.plan = Some(PlanView::new(plan, explain.statement.clone(), explain.statement_text.clone()));
+                self.plan = Some(PlanView::new(
+                    plan,
+                    explain.statement.clone(),
+                    explain.statement_text.clone(),
+                ));
                 if self.focus == TabFocus::Plan {
                     self.focus_plan();
                 }
                 self.view = ResultView::Plan;
                 self.status_tags = status_line::tag_summary(&tag, elapsed);
                 let noun = if nodes == 1 { "node" } else { "nodes" };
-                self.summary = format!("{} {noun} · {}", status_line::thousands(nodes), status_line::elapsed_text(elapsed));
+                self.summary = format!(
+                    "{} {noun} · {}",
+                    status_line::thousands(nodes),
+                    status_line::elapsed_text(elapsed)
+                );
             }
             Err(error) => {
                 self.messages.push(error.to_string());
@@ -725,7 +758,13 @@ impl QueryTab {
             .collect();
         let measure = |text: &str| text.chars().count() as f32 * TEXT_ADVANCE;
         let widths = column_widths(&table.columns, &sample, &measure);
-        let mut grid = ResultGrid::new(table.columns, table.kinds, table.rows, table.row_count, widths);
+        let mut grid = ResultGrid::new(
+            table.columns,
+            table.kinds,
+            table.rows,
+            table.row_count,
+            widths,
+        );
         grid.dialect = self.dialect;
         grid.source_table = statement.and_then(|sql| source_table(sql, self.dialect));
         grid.focused = self.focus == TabFocus::Grid;
@@ -760,7 +799,10 @@ impl QueryTab {
 fn last_tag_has_rows(messages: &[String]) -> bool {
     messages.last().is_some_and(|tag| {
         let verb = tag.split(' ').next().unwrap_or("");
-        matches!(verb, "SELECT" | "FETCH" | "SHOW" | "EXPLAIN" | "VALUES" | "TABLE") || tag.contains("RETURNING")
+        matches!(
+            verb,
+            "SELECT" | "FETCH" | "SHOW" | "EXPLAIN" | "VALUES" | "TABLE"
+        ) || tag.contains("RETURNING")
     })
 }
 
@@ -776,13 +818,17 @@ pub fn token_end(text: &str, from: usize) -> usize {
         let close = if first == '[' { ']' } else { first };
         return rest[first.len_utf8()..]
             .find(close)
-            .map_or(text.len(), |end| from + first.len_utf8() + end + close.len_utf8());
+            .map_or(text.len(), |end| {
+                from + first.len_utf8() + end + close.len_utf8()
+            });
     }
     if !(first.is_alphanumeric() || first == '_') {
         return from + first.len_utf8();
     }
     rest.char_indices()
-        .find(|(_, character)| !(character.is_alphanumeric() || *character == '_' || *character == '.'))
+        .find(|(_, character)| {
+            !(character.is_alphanumeric() || *character == '_' || *character == '.')
+        })
         .map_or(text.len(), |(end, _)| from + end)
 }
 
@@ -826,7 +872,11 @@ mod tests {
     fn table(columns: &[&str], rows: Vec<Vec<Option<&str>>>, tag: &str) -> ResultTable {
         let rows: Vec<Vec<Option<String>>> = rows
             .into_iter()
-            .map(|row| row.into_iter().map(|value| value.map(str::to_owned)).collect())
+            .map(|row| {
+                row.into_iter()
+                    .map(|value| value.map(str::to_owned))
+                    .collect()
+            })
             .collect();
         ResultTable {
             columns: columns.iter().map(|name| (*name).to_owned()).collect(),
@@ -888,19 +938,33 @@ mod tests {
         assert!(tab.show_running(Duration::from_millis(1200)));
         assert_eq!(tab.summary, "Running · 1.2 s");
         let rows = vec![vec![Some("1")], vec![Some("2")], vec![None]];
-        tab.finish(&request, vec![Ok(vec![table(&["id"], rows, "SELECT 3")])], Duration::from_micros(400));
+        tab.finish(
+            &request,
+            vec![Ok(vec![table(&["id"], rows, "SELECT 3")])],
+            Duration::from_micros(400),
+        );
         assert_eq!(tab.summary, "3 rows · 0.4 ms · 35 B");
         assert_eq!(tab.status_tags, "SELECT 3 · 0.4 ms");
         assert_eq!(tab.messages, ["SELECT 3"]);
         let grid = tab.grid.as_ref().unwrap();
         assert_eq!(grid.source_table.as_deref(), Some("customers"));
         assert_eq!(grid.widths, vec![56.0]);
-        tab.finish(&request, vec![Ok(vec![table(&[], vec![], "INSERT 0 2")])], Duration::from_micros(300));
+        tab.finish(
+            &request,
+            vec![Ok(vec![table(&[], vec![], "INSERT 0 2")])],
+            Duration::from_micros(300),
+        );
         assert_eq!(tab.summary, "INSERT 0 2 · 0.3 ms");
-        let all = RunRequest { all: true, ..request.clone() };
+        let all = RunRequest {
+            all: true,
+            ..request.clone()
+        };
         tab.finish(
             &all,
-            vec![Ok(vec![table(&[], vec![], "CREATE TABLE")]), Ok(vec![table(&["a"], vec![vec![Some("1")]], "SELECT 1")])],
+            vec![
+                Ok(vec![table(&[], vec![], "CREATE TABLE")]),
+                Ok(vec![table(&["a"], vec![vec![Some("1")]], "SELECT 1")]),
+            ],
             Duration::from_millis(12),
         );
         assert_eq!(tab.summary, "2 statements · 1 row · 12 ms");
@@ -916,23 +980,44 @@ mod tests {
             message: "relation \"users\" does not exist".into(),
             hint: None,
             position: Some(14),
-            report: vec!["ERROR:  relation \"users\" does not exist".into(), "SQLSTATE:  42P01".into()],
+            report: vec![
+                "ERROR:  relation \"users\" does not exist".into(),
+                "SQLSTATE:  42P01".into(),
+            ],
         };
         tab.started();
         tab.finish(&request, vec![Err(failure)], Duration::from_millis(1));
         let error = tab.error.clone().unwrap();
         assert_eq!(error.range, 24..29);
-        assert_eq!(error.strip_text(), "Error 42P01: relation \"users\" does not exist · Ln 2, Col 15");
+        assert_eq!(
+            error.strip_text(),
+            "Error 42P01: relation \"users\" does not exist · Ln 2, Col 15"
+        );
         assert_eq!(error.fix_label(), None);
-        assert_eq!((tab.summary.as_str(), tab.view), ("Error", ResultView::Messages));
+        assert_eq!(
+            (tab.summary.as_str(), tab.view),
+            ("Error", ResultView::Messages)
+        );
         assert_eq!(tab.messages.len(), 2);
-        assert_eq!(tab.editor.caret(), editor::Position { line: 1, column: 14 });
+        assert_eq!(
+            tab.editor.caret(),
+            editor::Position {
+                line: 1,
+                column: 14
+            }
+        );
         tab.key(press(Key::Escape, false, false));
         assert!(!tab.error.as_ref().unwrap().strip_shown);
         tab.key(press(Key::Character('x'), false, false));
         assert_eq!(tab.error, None, "editing the error's line clears it");
-        let fix = InlineError { fix: Some("Try: CREATE TABLE users (id int) and run it again".into()), ..error };
-        assert_eq!(fix.fix_label().as_deref(), Some("Fix: CREATE TABLE users (id int) and run it a"));
+        let fix = InlineError {
+            fix: Some("Try: CREATE TABLE users (id int) and run it again".into()),
+            ..error
+        };
+        assert_eq!(
+            fix.fix_label().as_deref(),
+            Some("Fix: CREATE TABLE users (id int) and run it a")
+        );
     }
 
     #[test]
@@ -958,14 +1043,26 @@ mod tests {
     fn the_grid_takes_the_keys_after_ctrl_3_and_ctrl_c_copies() {
         let mut tab = QueryTab::with_text("Query 1", "SELECT id FROM t");
         let request = tab.run_request(false).unwrap();
-        tab.finish(&request, vec![Ok(vec![table(&["id"], vec![vec![Some("1")], vec![Some("2")]], "SELECT 2")])], Duration::ZERO);
+        tab.finish(
+            &request,
+            vec![Ok(vec![table(
+                &["id"],
+                vec![vec![Some("1")], vec![Some("2")]],
+                "SELECT 2",
+            )])],
+            Duration::ZERO,
+        );
         tab.key(press(Key::Character('3'), false, true));
         assert_eq!(tab.focus, TabFocus::Grid);
         tab.key(press(Key::Down, true, false));
-        let TabAction::Copy { text, toast } = tab.key(press(Key::Character('c'), false, true)) else {
+        let TabAction::Copy { text, toast } = tab.key(press(Key::Character('c'), false, true))
+        else {
             panic!("Ctrl+C copies");
         };
-        assert_eq!((text.as_str(), toast.as_str()), ("1\n2\n", "Copied 2 cells"));
+        assert_eq!(
+            (text.as_str(), toast.as_str()),
+            ("1\n2\n", "Copied 2 cells")
+        );
         assert_eq!(token_end("users WHERE", 0), 5);
         assert_eq!(token_end("\"Order Lines\" x", 0), 13);
         assert_eq!(token_end("(", 0), 1);
@@ -974,15 +1071,25 @@ mod tests {
 
     #[test]
     fn ctrl_e_explains_the_statement_and_the_plan_takes_the_results() {
-        let mut tab = QueryTab::with_text("Query 1", "SELECT 1;\nSELECT * FROM customers WHERE id = 2;");
+        let mut tab = QueryTab::with_text(
+            "Query 1",
+            "SELECT 1;\nSELECT * FROM customers WHERE id = 2;",
+        );
         let TabAction::Run(request) = tab.key(press(Key::Character('e'), false, true)) else {
             panic!("Ctrl+E runs EXPLAIN");
         };
-        assert_eq!(request.statements, ["EXPLAIN SELECT * FROM customers WHERE id = 2"]);
+        assert_eq!(
+            request.statements,
+            ["EXPLAIN SELECT * FROM customers WHERE id = 2"]
+        );
         let explain = request.explain.clone().expect("an explain run");
         assert_eq!((explain.analyze, explain.statement.start), (false, 10));
         tab.started();
-        let plan = table(&["QUERY PLAN"], vec![vec![Some("Index Scan using customers_pkey on customers")]], "EXPLAIN");
+        let plan = table(
+            &["QUERY PLAN"],
+            vec![vec![Some("Index Scan using customers_pkey on customers")]],
+            "EXPLAIN",
+        );
         tab.finish(&request, vec![Ok(vec![plan])], Duration::from_micros(400));
         assert_eq!(tab.view, ResultView::Plan);
         assert_eq!(tab.summary, "1 node · 0.4 ms");
@@ -995,7 +1102,10 @@ mod tests {
         assert_eq!(highlight, Some(at..at + "customers".len()));
         let _ = tab.key(KeyPress {
             key: Key::Character('t'),
-            modifiers: Modifiers { alt: true, ..Modifiers::default() },
+            modifiers: Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
         });
         assert!(tab.plan.as_ref().is_some_and(|plan| plan.text_shown));
     }
@@ -1006,7 +1116,14 @@ mod tests {
         let TabAction::Run(request) = tab.key(press(Key::Character('E'), true, true)) else {
             panic!("Ctrl+Shift+E runs EXPLAIN ANALYZE");
         };
-        assert_eq!(request.statements, ["BEGIN", "EXPLAIN (ANALYZE, BUFFERS) DELETE FROM t WHERE id = 1", "ROLLBACK"]);
+        assert_eq!(
+            request.statements,
+            [
+                "BEGIN",
+                "EXPLAIN (ANALYZE, BUFFERS) DELETE FROM t WHERE id = 1",
+                "ROLLBACK"
+            ]
+        );
         let failure = StatementFailure {
             code: "42P01".to_owned(),
             message: "relation \"t\" does not exist".to_owned(),
@@ -1015,30 +1132,57 @@ mod tests {
             report: vec!["ERROR:  relation \"t\" does not exist".to_owned()],
         };
         tab.started();
-        tab.finish(&request, vec![Ok(Vec::new()), Err(failure)], Duration::from_millis(1));
+        tab.finish(
+            &request,
+            vec![Ok(Vec::new()), Err(failure)],
+            Duration::from_millis(1),
+        );
         assert_eq!(tab.view, ResultView::Messages);
-        let error = tab.error.as_ref().expect("the squiggle sits under the table's name");
+        let error = tab
+            .error
+            .as_ref()
+            .expect("the squiggle sits under the table's name");
         assert_eq!(error.range, 12..13);
         let mut oracle = QueryTab::with_text("Query 1", "SELECT 1 FROM dual");
         oracle.set_dialect(QueryDialect::Oracle);
-        assert_eq!(oracle.key(press(Key::Character('e'), false, true)), TabAction::None);
+        assert_eq!(
+            oracle.key(press(Key::Character('e'), false, true)),
+            TabAction::None
+        );
         assert_eq!(oracle.view, ResultView::Messages);
-        assert!(oracle.messages[0].starts_with("not_supported: "), "{:?}", oracle.messages);
+        assert!(
+            oracle.messages[0].starts_with("not_supported: "),
+            "{:?}",
+            oracle.messages
+        );
     }
 
     #[test]
     fn the_editor_copies_cuts_and_asks_for_a_paste() {
         let mut tab = QueryTab::with_text("Query 1", "SELECT 1;");
-        assert_eq!(tab.key(press(Key::Character('c'), false, true)), TabAction::None);
+        assert_eq!(
+            tab.key(press(Key::Character('c'), false, true)),
+            TabAction::None
+        );
         tab.key(press(Key::Left, true, false));
         tab.key(press(Key::Left, true, false));
-        let TabAction::Copy { text, toast } = tab.key(press(Key::Character('c'), false, true)) else {
+        let TabAction::Copy { text, toast } = tab.key(press(Key::Character('c'), false, true))
+        else {
             panic!("a selection copies");
         };
-        assert_eq!((text.as_str(), toast.as_str()), ("1;", "Copied 2 characters"));
-        assert!(matches!(tab.key(press(Key::Character('x'), false, true)), TabAction::Copy { .. }));
+        assert_eq!(
+            (text.as_str(), toast.as_str()),
+            ("1;", "Copied 2 characters")
+        );
+        assert!(matches!(
+            tab.key(press(Key::Character('x'), false, true)),
+            TabAction::Copy { .. }
+        ));
         assert_eq!(tab.editor.text(), "SELECT ");
-        assert_eq!(tab.key(press(Key::Character('v'), false, true)), TabAction::Paste);
+        assert_eq!(
+            tab.key(press(Key::Character('v'), false, true)),
+            TabAction::Paste
+        );
         tab.paste("2;\nSELECT 3;");
         assert_eq!(tab.editor.text(), "SELECT 2;\nSELECT 3;");
     }

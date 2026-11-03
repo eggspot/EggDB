@@ -83,8 +83,10 @@ const STAT_STATEMENTS: [CatalogColumn; 12] = [
     column("rows", SqlType::BigInt),
 ];
 
-const STAT_STATEMENTS_INFO: [CatalogColumn; 2] =
-    [column("dealloc", SqlType::BigInt), column("stats_reset", STAMP)];
+const STAT_STATEMENTS_INFO: [CatalogColumn; 2] = [
+    column("dealloc", SqlType::BigInt),
+    column("stats_reset", STAMP),
+];
 
 const TABLES: [CatalogColumn; 8] = [
     column("schemaname", NAME),

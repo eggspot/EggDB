@@ -262,7 +262,10 @@ impl Editor {
     /// Selects `start` to `end` of line `line` (columns, clamped), the caret at the end: a
     /// double-click's word.
     pub fn select_columns(&mut self, line: usize, start: usize, end: usize) {
-        let from = self.clamped(Position { line, column: start });
+        let from = self.clamped(Position {
+            line,
+            column: start,
+        });
         let to = self.clamped(Position { line, column: end });
         self.anchor = Some(from);
         self.caret = to;
@@ -490,9 +493,24 @@ mod tests {
         assert_eq!(editor.position_at(20), Position { line: 1, column: 9 });
         assert_eq!(editor.position_at(18), Position { line: 1, column: 8 });
         assert_eq!(editor.position_at(9), Position { line: 0, column: 9 });
-        assert_eq!(editor.position_at(999), Position { line: 1, column: 14 });
-        editor.place_caret(Position { line: 7, column: 99 });
-        assert_eq!(editor.caret(), Position { line: 1, column: 14 });
+        assert_eq!(
+            editor.position_at(999),
+            Position {
+                line: 1,
+                column: 14
+            }
+        );
+        editor.place_caret(Position {
+            line: 7,
+            column: 99,
+        });
+        assert_eq!(
+            editor.caret(),
+            Position {
+                line: 1,
+                column: 14
+            }
+        );
         editor.apply(Key::Left { select: true });
         assert_eq!(editor.selected_bytes(), Some(24..25));
     }
@@ -567,7 +585,10 @@ mod tests {
         assert_eq!(editor.selected_text().as_deref(), Some("LECT 1;\nSEL"));
         editor.select_to(Position { line: 0, column: 0 });
         assert_eq!(editor.selected_text().as_deref(), Some("SE"));
-        editor.select_to(Position { line: 9, column: 99 });
+        editor.select_to(Position {
+            line: 9,
+            column: 99,
+        });
         assert_eq!(editor.caret(), Position { line: 1, column: 9 });
         editor.select_line(0);
         assert_eq!(editor.selected_text().as_deref(), Some("SELECT 1;\n"));

@@ -743,7 +743,8 @@ impl<'db> WriteTransaction<'db> {
         if self.database().collection_drops() == DROPS_NONE {
             return Ok(());
         }
-        self.remove_dropped_entries(DROPPED_KEYS_PER_COMMIT).map(drop)
+        self.remove_dropped_entries(DROPPED_KEYS_PER_COMMIT)
+            .map(drop)
     }
 
     fn remove_dropped_entries(&mut self, limit: usize) -> Result<DropStep> {

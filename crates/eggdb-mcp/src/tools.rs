@@ -1522,8 +1522,7 @@ fn kv_scan<O: DatabaseOpener>(
     let ranges = match collection {
         Some(_) => vec![(low, high)],
         None => {
-            let reserved_end =
-                after_prefix(RESERVED_KEY_PREFIX).unwrap_or_else(|| far_end.clone());
+            let reserved_end = after_prefix(RESERVED_KEY_PREFIX).unwrap_or_else(|| far_end.clone());
             vec![
                 (low.clone(), high.clone().min(RESERVED_KEY_PREFIX.to_vec())),
                 (low.max(reserved_end), high),

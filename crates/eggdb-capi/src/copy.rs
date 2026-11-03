@@ -19,7 +19,9 @@ struct CopyInData<'a> {
 fn not_a_copy(wanted: &str) -> Failure {
     Failure::sql(&SqlError::new(
         SqlState::FEATURE_NOT_SUPPORTED,
-        format!("the statement ran, but it is not a {wanted}; run it with eggdb_sql_execute instead"),
+        format!(
+            "the statement ran, but it is not a {wanted}; run it with eggdb_sql_execute instead"
+        ),
     ))
 }
 
@@ -157,10 +159,7 @@ impl std::fmt::Debug for EggdbCopy {
 }
 
 fn wrong_stage(stage: &Stage, wanted: &str) -> Failure {
-    Failure::invalid_argument(format!(
-        "this COPY is {}; {wanted}",
-        stage.name()
-    ))
+    Failure::invalid_argument(format!("this COPY is {}; {wanted}", stage.name()))
 }
 
 pub(crate) fn copy_in_remote(
@@ -334,7 +333,11 @@ pub unsafe extern "C" fn eggdb_sql_copy_out_begin(
 /// call on its session meanwhile (but `eggdb_sql_cancel`), and `data` is NULL with a length of
 /// 0 or points to `len` readable bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn eggdb_copy_put(copy: *mut EggdbCopy, data: *const u8, len: usize) -> c_int {
+pub unsafe extern "C" fn eggdb_copy_put(
+    copy: *mut EggdbCopy,
+    data: *const u8,
+    len: usize,
+) -> c_int {
     guarded(|| {
         // SAFETY: eggdb.h asks for a live copy handle used by this call alone.
         let copy = unsafe { copy_handle(copy) }?;
@@ -397,7 +400,9 @@ pub unsafe extern "C" fn eggdb_copy_read(
         let (pointer, length) = match &mut copy.stage {
             Stage::LocalOut { data, read } => {
                 let rest = data.get(*read..).unwrap_or_default();
-                let piece = rest.get(..rest.len().min(COPY_PIECE_BYTES)).unwrap_or_default();
+                let piece = rest
+                    .get(..rest.len().min(COPY_PIECE_BYTES))
+                    .unwrap_or_default();
                 *read = read.saturating_add(piece.len());
                 if piece.is_empty() {
                     (std::ptr::null(), 0)
@@ -491,10 +496,7 @@ fn end_copy(
                 }
             }
         }
-        Stage::Ended => Err(wrong_stage(
-            &Stage::Ended,
-            "free it with eggdb_copy_free",
-        )),
+        Stage::Ended => Err(wrong_stage(&Stage::Ended, "free it with eggdb_copy_free")),
     }
 }
 
@@ -667,7 +669,14 @@ mod tests {
         while channel.read_copy_data(&mut gathered).unwrap_or(false) {
             sizes.push(gathered.len());
         }
-        assert_eq!(sizes, [COPY_PIECE_BYTES, COPY_PIECE_BYTES * 2, COPY_PIECE_BYTES * 2 + 5]);
+        assert_eq!(
+            sizes,
+            [
+                COPY_PIECE_BYTES,
+                COPY_PIECE_BYTES * 2,
+                COPY_PIECE_BYTES * 2 + 5
+            ]
+        );
         assert!(channel.start_copy_out(&start()).is_err());
     }
 

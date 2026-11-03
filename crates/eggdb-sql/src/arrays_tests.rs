@@ -106,10 +106,7 @@ fn dimension_decorations_set_the_lower_bound_and_print_back() {
     );
     assert_eq!(bounded("[1:2]={1,2}"), (1, 2, "{1,2}".to_owned()));
     assert_eq!(bounded("[3]={1,2,3}"), (1, 3, "{1,2,3}".to_owned()));
-    assert_eq!(
-        bounded("[+5:5]={NULL}"),
-        (5, 1, "[5:5]={NULL}".to_owned())
-    );
+    assert_eq!(bounded("[+5:5]={NULL}"), (5, 1, "[5:5]={NULL}".to_owned()));
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
     assert_eq!(
@@ -122,7 +119,11 @@ fn dimension_decorations_set_the_lower_bound_and_print_back() {
 0|2|10|[-1:0]={a,b}
 SELECT 1"
     );
-    run(&mut session, "CREATE TABLE shifted (id integer, a integer[])").unwrap();
+    run(
+        &mut session,
+        "CREATE TABLE shifted (id integer, a integer[])",
+    )
+    .unwrap();
     run(
         &mut session,
         "INSERT INTO shifted VALUES (1, '[0:1]={5,6}'), (2, '{7}')",

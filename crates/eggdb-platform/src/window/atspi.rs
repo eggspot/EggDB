@@ -467,11 +467,11 @@ fn grid_of<'a>(nodes: &'a [AccessNode], node: &AccessNode) -> Option<&'a AccessN
     nearest_ancestor(nodes, node, |ancestor| ancestor.role == AccessRole::Grid)
 }
 
-fn grid_members<'a>(
-    nodes: &'a [AccessNode],
+fn grid_members(
+    nodes: &[AccessNode],
     grid: u32,
     role: AccessRole,
-) -> impl Iterator<Item = &'a AccessNode> {
+) -> impl Iterator<Item = &AccessNode> {
     nodes.iter().filter(move |node| {
         node.role == role
             && node.cell.is_some()

@@ -146,7 +146,10 @@ fn sqlite_schema_edits_the_kept_text_after_add_column_and_rename() {
         "CREATE TABLE pets(id integer primary key, name text, UNIQUE (name))",
     );
     last(&mut session, "create index  by_name on pets(name  desc)");
-    last(&mut session, "ALTER TABLE pets ADD COLUMN age  integer DEFAULT 0");
+    last(
+        &mut session,
+        "ALTER TABLE pets ADD COLUMN age  integer DEFAULT 0",
+    );
     assert_eq!(
         sqlite_text(&mut session, "pets"),
         "sql\nCREATE TABLE pets(id integer primary key, name text, age  integer DEFAULT 0, UNIQUE (name))\nSELECT 1"
@@ -163,7 +166,10 @@ fn sqlite_schema_edits_the_kept_text_after_add_column_and_rename() {
         ),
         "tbl_name|sql\nanimals|CREATE INDEX by_name on \"animals\"(name  desc)\nSELECT 1"
     );
-    last(&mut session, "ALTER TABLE animals RENAME COLUMN age TO years");
+    last(
+        &mut session,
+        "ALTER TABLE animals RENAME COLUMN age TO years",
+    );
     let renamed = sqlite_text(&mut session, "animals");
     assert!(
         renamed.starts_with("sql\nCREATE TABLE animals (") && renamed.contains("years"),
@@ -182,7 +188,10 @@ fn sqlite_schema_keeps_index_view_and_trigger_texts_as_written() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Sqlite);
     last(&mut session, "CREATE TABLE t(a int, b text)");
-    last(&mut session, "create unique index if not exists main.t_ab on t(a,b)");
+    last(
+        &mut session,
+        "create unique index if not exists main.t_ab on t(a,b)",
+    );
     last(
         &mut session,
         "CREATE VIEW IF NOT EXISTS main.big(x) AS select a from t where a > 10",
@@ -206,7 +215,10 @@ fn sqlite_schema_keeps_index_view_and_trigger_texts_as_written() {
     last(&mut session, "DROP VIEW big");
     last(&mut session, "CREATE INDEX t_ab ON t (a, b)");
     let mut postgres = Session::new(&store);
-    last(&mut postgres, "CREATE VIEW big AS select a from t where a > 10");
+    last(
+        &mut postgres,
+        "CREATE VIEW big AS select a from t where a > 10",
+    );
     drop(postgres);
     assert_eq!(
         last(
@@ -253,10 +265,16 @@ fn a_catalog_written_before_the_index_and_view_texts_shows_generated_text_and_al
     last(&mut session, "ALTER TABLE t ADD COLUMN b text");
     last(&mut session, "ALTER TABLE t RENAME TO u");
     assert_eq!(
-        last(&mut session, "SELECT sql FROM sqlite_schema WHERE name = 'u'"),
+        last(
+            &mut session,
+            "SELECT sql FROM sqlite_schema WHERE name = 'u'"
+        ),
         "sql\nCREATE TABLE \"u\"(a int, b text)\nSELECT 1"
     );
-    let index = last(&mut session, "SELECT sql FROM sqlite_schema WHERE name = 't_a'");
+    let index = last(
+        &mut session,
+        "SELECT sql FROM sqlite_schema WHERE name = 't_a'",
+    );
     assert!(index.contains("CREATE INDEX t_a ON u (a)"), "{index}");
     let mut wiped = store.begin_write().unwrap();
     crate::store::delete_prefix(&mut wiped, &prefix).unwrap();

@@ -1342,9 +1342,8 @@ fn binary_citext_array(items: &[&str]) -> Vec<u8> {
 fn binary_arrays_keep_lower_bounds_other_than_one_and_citext_elements_both_ways() {
     let server = TestServer::start(8);
     let (mut client, _) = Client::login(server.address);
-    client.query(
-        "CREATE TABLE shifted (id integer PRIMARY KEY, scores integer[], colors citext[])",
-    );
+    client
+        .query("CREATE TABLE shifted (id integer PRIMARY KEY, scores integer[], colors citext[])");
     let scores = binary_int4_array_from(0, &[Some(5), Some(6)]);
     let colors = binary_citext_array(&["Red", "BLUE"]);
     client.send(
@@ -1398,7 +1397,10 @@ fn binary_arrays_keep_lower_bounds_other_than_one_and_citext_elements_both_ways(
     assert_eq!(tags(&answer), "12TDCZ");
     assert_eq!(
         answer[2].column_types(),
-        [("scores".to_owned(), 1007, 1), ("colors".to_owned(), 9001, 1)]
+        [
+            ("scores".to_owned(), 1007, 1),
+            ("colors".to_owned(), 9001, 1)
+        ]
     );
     assert_eq!(answer[3].raw_row(), [Some(scores), Some(colors)]);
 
@@ -1416,17 +1418,16 @@ fn binary_arrays_keep_lower_bounds_other_than_one_and_citext_elements_both_ways(
 fn user_functions_returning_void_answer_as_postgresql_does_on_the_wire() {
     let server = TestServer::start(8);
     let (mut client, _) = Client::login(server.address);
-    client.query(
-        "CREATE FUNCTION quiet() RETURNS void LANGUAGE plpgsql AS $$ BEGIN END $$",
-    );
-    client.query(
-        "CREATE FUNCTION quiet_sql() RETURNS void LANGUAGE sql AS 'SELECT 1'",
-    );
+    client.query("CREATE FUNCTION quiet() RETURNS void LANGUAGE plpgsql AS $$ BEGIN END $$");
+    client.query("CREATE FUNCTION quiet_sql() RETURNS void LANGUAGE sql AS 'SELECT 1'");
     let answer = client.query("SELECT quiet(), quiet_sql()");
     assert_eq!(tags(&answer), "TDCZ");
     assert_eq!(
         answer[0].column_types(),
-        [("quiet".to_owned(), 2278, 0), ("quiet_sql".to_owned(), 2278, 0)]
+        [
+            ("quiet".to_owned(), 2278, 0),
+            ("quiet_sql".to_owned(), 2278, 0)
+        ]
     );
     assert_eq!(answer[1].raw_row(), [Some(Vec::new()), None]);
 }

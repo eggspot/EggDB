@@ -834,7 +834,12 @@ impl ChangeApplier {
     /// Records that the table was copied from a snapshot taken at `snapshot_lsn`, with these
     /// columns: its changes in transactions that commit before that position are in the copy
     /// and are skipped, and so are the `Relation` messages of those transactions.
-    pub fn copied(&mut self, relation: u32, columns: Option<Vec<RelationColumn>>, snapshot_lsn: Lsn) {
+    pub fn copied(
+        &mut self,
+        relation: u32,
+        columns: Option<Vec<RelationColumn>>,
+        snapshot_lsn: Lsn,
+    ) {
         if let (Some(columns), Some(known)) = (columns, self.relations.get_mut(&relation)) {
             known.columns = columns
                 .into_iter()
@@ -1472,9 +1477,21 @@ mod tests {
             }
         );
         transactions.start(900, true);
-        feed(&mut transactions, 900, &streamed(b'R', 900, &relation_message()[1..]));
-        feed(&mut transactions, 900, &streamed(b'I', 900, &insert_body(&[Some("1"), Some("kept")])));
-        feed(&mut transactions, 900, &streamed(b'I', 901, &insert_body(&[Some("2"), Some("rolled back")])));
+        feed(
+            &mut transactions,
+            900,
+            &streamed(b'R', 900, &relation_message()[1..]),
+        );
+        feed(
+            &mut transactions,
+            900,
+            &streamed(b'I', 900, &insert_body(&[Some("1"), Some("kept")])),
+        );
+        feed(
+            &mut transactions,
+            900,
+            &streamed(b'I', 901, &insert_body(&[Some("2"), Some("rolled back")])),
+        );
         feed(&mut transactions, 900, b"E");
         let abort = parse_logical_message(&stream_abort(900, 901)).unwrap();
         assert_eq!(
@@ -1486,17 +1503,28 @@ mod tests {
         );
         transactions.abort(900, 901).unwrap();
         transactions.start(900, false);
-        feed(&mut transactions, 900, &streamed(b'I', 900, &insert_body(&[Some("3"), None])));
+        feed(
+            &mut transactions,
+            900,
+            &streamed(b'I', 900, &insert_body(&[Some("3"), None])),
+        );
         let commit = parse_logical_message(&stream_commit(900, 0x50, 0x60)).unwrap();
         assert!(matches!(
             commit,
-            LogicalMessage::StreamCommit { xid: 900, commit_lsn: 0x50, end_lsn: 0x60, .. }
+            LogicalMessage::StreamCommit {
+                xid: 900,
+                commit_lsn: 0x50,
+                end_lsn: 0x60,
+                ..
+            }
         ));
         assert_eq!(
             statements_of(&mut applier, &mut transactions, 900, 0x50),
             vec![
-                "INSERT INTO \"public\".\"orders\" (\"id\", \"note\") VALUES ('1', 'kept')".to_owned(),
-                "INSERT INTO \"public\".\"orders\" (\"id\", \"note\") VALUES ('3', NULL)".to_owned(),
+                "INSERT INTO \"public\".\"orders\" (\"id\", \"note\") VALUES ('1', 'kept')"
+                    .to_owned(),
+                "INSERT INTO \"public\".\"orders\" (\"id\", \"note\") VALUES ('3', NULL)"
+                    .to_owned(),
             ]
         );
     }
@@ -1509,7 +1537,11 @@ mod tests {
             1 << 20,
         );
         transactions.start(42, true);
-        feed(&mut transactions, 42, &streamed(b'I', 42, &insert_body(&[Some("1"), None])));
+        feed(
+            &mut transactions,
+            42,
+            &streamed(b'I', 42, &insert_body(&[Some("1"), None])),
+        );
         transactions.abort(42, 42).unwrap();
         assert!(transactions.is_empty());
         assert_eq!(transactions.commit(42).unwrap().count(), 0);
@@ -1532,9 +1564,12 @@ mod tests {
         insert.extend_from_slice(&3u32.to_be_bytes());
         insert.extend_from_slice(b"o'k");
         assert_eq!(
-            applier.apply(parse_logical_message(&insert).unwrap()).unwrap(),
+            applier
+                .apply(parse_logical_message(&insert).unwrap())
+                .unwrap(),
             Change::Statement(
-                "INSERT INTO \"public\".\"orders\" (\"id\", \"note\") VALUES ('77', 'o''k')".to_owned()
+                "INSERT INTO \"public\".\"orders\" (\"id\", \"note\") VALUES ('77', 'o''k')"
+                    .to_owned()
             )
         );
         let mut delete = vec![b'D'];
@@ -1545,7 +1580,11 @@ mod tests {
         delete.extend_from_slice(&2u32.to_be_bytes());
         delete.extend_from_slice(&[0, 1]);
         delete.push(b'n');
-        assert!(applier.apply(parse_logical_message(&delete).unwrap()).is_err());
+        assert!(
+            applier
+                .apply(parse_logical_message(&delete).unwrap())
+                .is_err()
+        );
     }
 
     #[test]
@@ -1560,10 +1599,15 @@ mod tests {
         let mut insert = vec![b'I'];
         insert.extend_from_slice(&insert_body(&[Some("1"), None]));
         applier
-            .apply(LogicalMessage::Begin { final_lsn: 0x80, xid: 1 })
+            .apply(LogicalMessage::Begin {
+                final_lsn: 0x80,
+                xid: 1,
+            })
             .unwrap();
         assert_eq!(
-            applier.apply(parse_logical_message(&insert).unwrap()).unwrap(),
+            applier
+                .apply(parse_logical_message(&insert).unwrap())
+                .unwrap(),
             Change::Nothing
         );
         assert_eq!(
@@ -1573,10 +1617,15 @@ mod tests {
             Change::Nothing
         );
         applier
-            .apply(LogicalMessage::Begin { final_lsn: 0x100, xid: 2 })
+            .apply(LogicalMessage::Begin {
+                final_lsn: 0x100,
+                xid: 2,
+            })
             .unwrap();
         assert!(matches!(
-            applier.apply(parse_logical_message(&insert).unwrap()).unwrap(),
+            applier
+                .apply(parse_logical_message(&insert).unwrap())
+                .unwrap(),
             Change::Statement(_)
         ));
     }
@@ -1610,10 +1659,7 @@ mod tests {
         for message in &messages {
             for cut in 1..message.len() {
                 let _ = parse_streamed_message(&message[..cut]);
-                assert!(
-                    parse_logical_message(&message[..cut]).is_err()
-                        || message[0] == b'I'
-                );
+                assert!(parse_logical_message(&message[..cut]).is_err() || message[0] == b'I');
             }
             assert!(parse_streamed_message(&message[..0]).is_err());
             let mut state = 0x9E37_79B9u64;
@@ -1624,7 +1670,9 @@ mod tests {
                 state ^= state << 17;
                 let position = (state as usize) % mutated.len();
                 mutated[position] = (state >> 24) as u8;
-                if let Ok(StreamedMessage::Change { message, .. }) = parse_streamed_message(&mutated) {
+                if let Ok(StreamedMessage::Change { message, .. }) =
+                    parse_streamed_message(&mutated)
+                {
                     let _ = parse_logical_message(&message);
                 }
             }

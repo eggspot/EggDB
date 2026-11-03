@@ -70,7 +70,10 @@ impl CaretLook {
 
 fn blink_phase(since_input: Duration) -> Duration {
     let period = (CARET_ON + CARET_OFF).as_nanos();
-    let into = since_input.saturating_sub(CARET_SOLID_AFTER_INPUT).as_nanos() % period;
+    let into = since_input
+        .saturating_sub(CARET_SOLID_AFTER_INPUT)
+        .as_nanos()
+        % period;
     Duration::from_nanos(u64::try_from(into).unwrap_or(0))
 }
 
@@ -150,7 +153,11 @@ impl ClickCounter {
                 && (x - last_x).abs() <= MULTI_CLICK_DISTANCE
                 && (y - last_y).abs() <= MULTI_CLICK_DISTANCE
         });
-        self.count = if follows && self.count < 3 { self.count + 1 } else { 1 };
+        self.count = if follows && self.count < 3 {
+            self.count + 1
+        } else {
+            1
+        };
         self.last = Some((now, x, y));
         self.count
     }
@@ -256,9 +263,17 @@ mod tests {
             node(4, AccessRole::TextArea, (260.0, 80.0, 500.0, 300.0), true),
         ];
         assert_eq!(hit_test(&nodes, 240.0, 20.0).map(|node| node.id), Some(3));
-        assert_eq!(hit_test(&nodes, 304.0, 20.0), None, "the right edge is outside");
+        assert_eq!(
+            hit_test(&nodes, 304.0, 20.0),
+            None,
+            "the right edge is outside"
+        );
         assert_eq!(hit_test(&nodes, 600.0, 90.0).map(|node| node.id), Some(4));
-        assert_eq!(hit_test(&nodes, 100.0, 20.0), None, "the toolbar itself does nothing");
+        assert_eq!(
+            hit_test(&nodes, 100.0, 20.0),
+            None,
+            "the toolbar itself does nothing"
+        );
         let mut disabled = nodes.clone();
         disabled[2].state.disabled = true;
         assert_eq!(hit_test(&disabled, 240.0, 20.0), None);
@@ -275,7 +290,10 @@ mod tests {
         assert!(look.is_pressed(3));
         look.hovered = Some(4);
         assert!(!look.is_pressed(3), "dragged off, the press shows no more");
-        assert!(!look.is_hovered(4), "a press on another node keeps the hover off");
+        assert!(
+            !look.is_hovered(4),
+            "a press on another node keeps the hover off"
+        );
     }
 
     #[test]
@@ -290,8 +308,14 @@ mod tests {
         assert_eq!(at(1_560), CaretLook::On);
         assert_eq!(at(1_700), CaretLook::On);
         for ms in [0, 400, 1_100, 1_700] {
-            assert_eq!(caret_look(Duration::from_millis(ms), true, true), CaretLook::On);
-            assert_eq!(caret_look(Duration::from_millis(ms), false, false), CaretLook::Inactive);
+            assert_eq!(
+                caret_look(Duration::from_millis(ms), true, true),
+                CaretLook::On
+            );
+            assert_eq!(
+                caret_look(Duration::from_millis(ms), false, false),
+                CaretLook::Inactive
+            );
         }
         assert!(!CaretLook::Off.shown() && CaretLook::Inactive.shown());
     }
@@ -312,11 +336,26 @@ mod tests {
         let start = Instant::now();
         let mut clicks = ClickCounter::default();
         assert_eq!(clicks.press(start, 600.0, 90.0), 1);
-        assert_eq!(clicks.press(start + Duration::from_millis(200), 602.0, 91.0), 2);
-        assert_eq!(clicks.press(start + Duration::from_millis(400), 601.0, 90.0), 3);
-        assert_eq!(clicks.press(start + Duration::from_millis(500), 601.0, 90.0), 1);
-        assert_eq!(clicks.press(start + Duration::from_millis(1_200), 601.0, 90.0), 1);
-        assert_eq!(clicks.press(start + Duration::from_millis(1_300), 640.0, 90.0), 1);
+        assert_eq!(
+            clicks.press(start + Duration::from_millis(200), 602.0, 91.0),
+            2
+        );
+        assert_eq!(
+            clicks.press(start + Duration::from_millis(400), 601.0, 90.0),
+            3
+        );
+        assert_eq!(
+            clicks.press(start + Duration::from_millis(500), 601.0, 90.0),
+            1
+        );
+        assert_eq!(
+            clicks.press(start + Duration::from_millis(1_200), 601.0, 90.0),
+            1
+        );
+        assert_eq!(
+            clicks.press(start + Duration::from_millis(1_300), 640.0, 90.0),
+            1
+        );
     }
 
     #[test]
@@ -328,9 +367,18 @@ mod tests {
 
     #[test]
     fn pastes_normalise_line_breaks_and_refuse_more_than_a_megabyte() {
-        assert_eq!(paste_text("SELECT 1;\r\nSELECT 2;\rSELECT 3;").as_deref(), Ok("SELECT 1;\nSELECT 2;\nSELECT 3;"));
-        assert_eq!(paste_text(&"x".repeat(MAX_PASTE_BYTES)).map(|text| text.len()), Ok(MAX_PASTE_BYTES));
-        assert_eq!(paste_text(&"x".repeat(MAX_PASTE_BYTES + 1)), Err(PASTE_TOO_LARGE));
+        assert_eq!(
+            paste_text("SELECT 1;\r\nSELECT 2;\rSELECT 3;").as_deref(),
+            Ok("SELECT 1;\nSELECT 2;\nSELECT 3;")
+        );
+        assert_eq!(
+            paste_text(&"x".repeat(MAX_PASTE_BYTES)).map(|text| text.len()),
+            Ok(MAX_PASTE_BYTES)
+        );
+        assert_eq!(
+            paste_text(&"x".repeat(MAX_PASTE_BYTES + 1)),
+            Err(PASTE_TOO_LARGE)
+        );
         assert_eq!(single_line("shop.eggdb\n"), "shop.eggdb");
         assert_eq!(single_line("a\tb\nc\u{7}"), "a b c");
     }

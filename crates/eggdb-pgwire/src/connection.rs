@@ -809,8 +809,11 @@ enum PortalRun {
 
 impl Portal {
     fn total_held_bytes(&self) -> usize {
-        self.held_bytes
-            .saturating_add(self.pending.as_ref().map_or(0, |pending| pending.held_bytes))
+        self.held_bytes.saturating_add(
+            self.pending
+                .as_ref()
+                .map_or(0, |pending| pending.held_bytes),
+        )
     }
 }
 
@@ -1547,10 +1550,7 @@ impl<'a, 's> Connection<'a, 's> {
                 None,
             ));
         }
-        let replaced = self
-            .portals
-            .get(&portal_name)
-            .map(Portal::total_held_bytes);
+        let replaced = self.portals.get(&portal_name).map(Portal::total_held_bytes);
         if replaced.is_none() && self.portals.len() >= MAX_PORTALS {
             return Err((too_many_held("portals", MAX_PORTALS), None));
         }
@@ -1877,7 +1877,13 @@ impl<'a, 's> Connection<'a, 's> {
         let released = released.min(pending.held_bytes);
         pending.held_bytes -= released;
         self.release_held(released);
-        outcome.map(|lost| if lost { RowBatch::ConnectionLost } else { RowBatch::Sent(sent) })
+        outcome.map(|lost| {
+            if lost {
+                RowBatch::ConnectionLost
+            } else {
+                RowBatch::Sent(sent)
+            }
+        })
     }
 
     fn send_rows_counting(

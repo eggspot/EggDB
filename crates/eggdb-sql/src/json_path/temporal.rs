@@ -334,9 +334,10 @@ fn recognized(method: Temporal, text: &str) -> Run<Moment> {
 fn templated(text: &str, template: &str) -> Run<Moment> {
     let read = crate::pg_format::template_moment(text, template).map_err(soft_error)?;
     let offset = match read.offset {
-        Some(offset) => Some(i32::try_from(offset).map_err(|_| {
-            soft(format!("time zone offset in \"{text}\" is out of range"))
-        })?),
+        Some(offset) => Some(
+            i32::try_from(offset)
+                .map_err(|_| soft(format!("time zone offset in \"{text}\" is out of range")))?,
+        ),
         None => None,
     };
     let time = datetime::time_of_timestamp(read.local);
@@ -531,7 +532,11 @@ pub(super) fn compare(left: Moment, right: Moment, with_zone: bool) -> Run<Optio
         )),
         (Moment::Time(_), Moment::TimeTz(..)) | (Moment::TimeTz(..), Moment::Time(_)) => {
             if !with_zone {
-                let naive = if matches!(left, Moment::Time(_)) { left } else { right };
+                let naive = if matches!(left, Moment::Time(_)) {
+                    left
+                } else {
+                    right
+                };
                 return Err(needs_zone(naive, "timetz"));
             }
             let as_zoned = |moment: Moment| match moment {
@@ -567,7 +572,10 @@ mod tests {
 
     #[test]
     fn iso_strings_become_the_first_matching_type() {
-        assert_eq!(method("2017-03-10", Temporal::DateTime).unwrap(), "2017-03-10");
+        assert_eq!(
+            method("2017-03-10", Temporal::DateTime).unwrap(),
+            "2017-03-10"
+        );
         assert_eq!(method("12:34:56", Temporal::DateTime).unwrap(), "12:34:56");
         assert_eq!(
             method("12:34:56+03", Temporal::DateTime).unwrap(),
@@ -585,21 +593,39 @@ mod tests {
 
     #[test]
     fn unrecognized_and_out_of_range_strings_fail_softly() {
-        assert_eq!(method("10/03/2017", Temporal::DateTime).unwrap_err(), "22031");
-        assert_eq!(method("2017-13-10", Temporal::DateTime).unwrap_err(), "22031");
-        assert_eq!(method("12:34:56+99", Temporal::DateTime).unwrap_err(), "22031");
+        assert_eq!(
+            method("10/03/2017", Temporal::DateTime).unwrap_err(),
+            "22031"
+        );
+        assert_eq!(
+            method("2017-13-10", Temporal::DateTime).unwrap_err(),
+            "22031"
+        );
+        assert_eq!(
+            method("12:34:56+99", Temporal::DateTime).unwrap_err(),
+            "22031"
+        );
         assert_eq!(method("", Temporal::Date).unwrap_err(), "22031");
     }
 
     #[test]
     fn conversions_that_need_a_time_zone_fail_without_one() {
-        assert_eq!(method("2017-03-10 12:34:56", Temporal::Date).unwrap(), "2017-03-10");
-        assert_eq!(method("2017-03-10 12:34:56", Temporal::Time).unwrap(), "12:34:56");
+        assert_eq!(
+            method("2017-03-10 12:34:56", Temporal::Date).unwrap(),
+            "2017-03-10"
+        );
+        assert_eq!(
+            method("2017-03-10 12:34:56", Temporal::Time).unwrap(),
+            "12:34:56"
+        );
         assert_eq!(
             method("2017-03-10", Temporal::Timestamp).unwrap(),
             "2017-03-10T00:00:00"
         );
-        assert_eq!(method("2017-03-10", Temporal::TimestampTz).unwrap_err(), "22031");
+        assert_eq!(
+            method("2017-03-10", Temporal::TimestampTz).unwrap_err(),
+            "22031"
+        );
         assert_eq!(method("12:34:56", Temporal::Date).unwrap_err(), "22031");
     }
 
@@ -634,10 +660,18 @@ mod tests {
         let date = Moment::Date(0);
         let midnight = Moment::Timestamp(0);
         let noon = Moment::Timestamp(12 * 3600 * MICROS_PER_SECOND);
-        assert_eq!(compare(date, midnight, false).ok().flatten(), Some(Ordering::Equal));
-        assert_eq!(compare(date, noon, false).ok().flatten(), Some(Ordering::Less));
         assert_eq!(
-            compare(Moment::Time(0), Moment::Date(0), false).ok().flatten(),
+            compare(date, midnight, false).ok().flatten(),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            compare(date, noon, false).ok().flatten(),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare(Moment::Time(0), Moment::Date(0), false)
+                .ok()
+                .flatten(),
             None
         );
         assert!(compare(date, Moment::TimestampTz(0, 0), false).is_err());

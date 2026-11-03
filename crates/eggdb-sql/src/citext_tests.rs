@@ -226,7 +226,10 @@ fn citext_and_hstore_array_columns_store_compare_and_read_back_after_reopening()
     }
     let mut session = Session::new(&store);
     assert_eq!(
-        ok(&mut session, "SELECT id, tags, attrs FROM tagged ORDER BY id"),
+        ok(
+            &mut session,
+            "SELECT id, tags, attrs FROM tagged ORDER BY id"
+        ),
         "id|tags|attrs\n\
          1|{Red,BLUE}|{\"\\\"a\\\"=>\\\"1\\\"\",\"\\\"b\\\"=>NULL\"}\n\
          2|{green}|{\"\\\"x\\\"=>\\\"2\\\"\"}\nSELECT 2"
@@ -274,7 +277,10 @@ fn citext_and_hstore_array_columns_store_compare_and_read_back_after_reopening()
 fn regular_expressions_on_a_citext_subject_ignore_case() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
-    ok(&mut session, "CREATE TABLE account (id integer, email citext)");
+    ok(
+        &mut session,
+        "CREATE TABLE account (id integer, email citext)",
+    );
     ok(
         &mut session,
         "INSERT INTO account VALUES (1, 'Alice@Example.com'), (2, 'bob@example.COM')",

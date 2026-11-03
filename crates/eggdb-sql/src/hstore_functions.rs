@@ -458,7 +458,10 @@ fn record_shape(record_type: Option<SqlType>, record: Value) -> SqlResult<Record
         };
         return Ok(RecordShape {
             type_oid,
-            names: attributes.iter().map(|attribute| attribute.name.clone()).collect(),
+            names: attributes
+                .iter()
+                .map(|attribute| attribute.name.clone())
+                .collect(),
             types: attributes
                 .iter()
                 .map(|attribute| Some(attribute.sql_type))
@@ -504,8 +507,16 @@ fn populated(record_type: Option<SqlType>, record: Value, pairs: &Value) -> SqlR
             (Some(text), None) => Value::Text(text.to_owned()),
         };
     }
-    let names = if shape.anonymous { shape.names } else { Vec::new() };
-    Ok(crate::records::record_value(shape.type_oid, shape.fields, names))
+    let names = if shape.anonymous {
+        shape.names
+    } else {
+        Vec::new()
+    };
+    Ok(crate::records::record_value(
+        shape.type_oid,
+        shape.fields,
+        names,
+    ))
 }
 
 /// `populate_record(record, hstore)` and `record #= hstore`: the record with each field whose

@@ -172,7 +172,8 @@ impl EggdbStmt {
     fn start_stepping(&mut self, state: &mut SessionState) -> Result<(), Failure> {
         match &mut state.backend {
             Backend::Local { session, .. } => {
-                let gathered = gather_local(session, &self.text, Some(self.parameters.as_slice()), None)?;
+                let gathered =
+                    gather_local(session, &self.text, Some(self.parameters.as_slice()), None)?;
                 let dialect = session.dialect();
                 let with_rows = gathered.into_iter().find(|result| result.columns.is_some());
                 let Some(result) = with_rows else {
@@ -968,7 +969,12 @@ mod tests {
 
     #[test]
     fn server_column_types_give_the_kind_their_values_come_back_with() {
-        let names = ["id".to_owned(), "price".to_owned(), "raw".to_owned(), "at".to_owned()];
+        let names = [
+            "id".to_owned(),
+            "price".to_owned(),
+            "raw".to_owned(),
+            "at".to_owned(),
+        ];
         let kinds: Vec<i32> = remote_columns(&names, &[20, 701, 17, 1184])
             .iter()
             .map(|column| column.kind)

@@ -27,7 +27,9 @@ fn line_end_after(text: &str, at: usize) -> usize {
 fn batch_line(dialect: QueryDialect, text: &str, range: &Range<usize>, lexeme: Lexeme) -> bool {
     let word = &text[range.clone()];
     match dialect {
-        QueryDialect::Oracle => lexeme == Lexeme::Other && word == "/" && line_around(text, range.start) == "/",
+        QueryDialect::Oracle => {
+            lexeme == Lexeme::Other && word == "/" && line_around(text, range.start) == "/"
+        }
         QueryDialect::SqlServer => {
             matches!(lexeme, Lexeme::Keyword | Lexeme::Word)
                 && word.eq_ignore_ascii_case("GO")
@@ -63,7 +65,8 @@ fn segments(text: &str, dialect: QueryDialect) -> Vec<Segment> {
             return;
         }
         let ends_batch = batch_line(dialect, text, &range, lexeme);
-        let separates = ends_batch || (lexeme == Lexeme::Semicolon && !opens_block(dialect, &words));
+        let separates =
+            ends_batch || (lexeme == Lexeme::Semicolon && !opens_block(dialect, &words));
         if separates {
             found.push(Segment {
                 range: start..range.start,
@@ -135,7 +138,11 @@ pub fn statement_at(text: &str, offset: usize, dialect: QueryDialect) -> Option<
     let segment = all.get(index)?;
     let before = &text[segment.range.start.min(offset)..offset];
     let rest_of_line = &text[offset..line_end_after(text, offset)];
-    if index > 0 && before.trim().is_empty() && !before.contains('\n') && rest_of_line.trim().is_empty() {
+    if index > 0
+        && before.trim().is_empty()
+        && !before.contains('\n')
+        && rest_of_line.trim().is_empty()
+    {
         index -= 1;
     }
     all[..=index]
@@ -195,7 +202,9 @@ pub fn source_table(sql: &str, dialect: QueryDialect) -> Option<String> {
             _ => break,
         }
     }
-    let mut rest = runs[at..].iter().map(|(range, lexeme)| (&sql[range.clone()], *lexeme));
+    let mut rest = runs[at..]
+        .iter()
+        .map(|(range, lexeme)| (&sql[range.clone()], *lexeme));
     let mut next = rest.next();
     match next {
         Some((word, Lexeme::Keyword)) if word.eq_ignore_ascii_case("AS") => {
@@ -207,7 +216,9 @@ pub fn source_table(sql: &str, dialect: QueryDialect) -> Option<String> {
     }
     match next {
         Some((",", _)) => None,
-        Some((word, Lexeme::Keyword)) if JOINS.contains(&word.to_ascii_uppercase().as_str()) => None,
+        Some((word, Lexeme::Keyword)) if JOINS.contains(&word.to_ascii_uppercase().as_str()) => {
+            None
+        }
         Some((word, Lexeme::Word)) if word.eq_ignore_ascii_case("NATURAL") => None,
         _ => Some(name),
     }
@@ -224,7 +235,7 @@ mod tests {
             .collect()
     }
 
-    fn at<'t>(text: &'t str, caret: usize, dialect: QueryDialect) -> Option<&'t str> {
+    fn at(text: &str, caret: usize, dialect: QueryDialect) -> Option<&str> {
         statement_at(text, caret, dialect).map(|range| &text[range])
     }
 
@@ -232,19 +243,46 @@ mod tests {
     fn statements_split_at_semicolons_outside_strings_comments_and_bodies() {
         let pg = QueryDialect::PostgreSql;
         assert_eq!(texts("SELECT 1;\nSELECT 2;", pg), ["SELECT 1", "SELECT 2"]);
-        assert_eq!(texts("SELECT 'a;b'; SELECT 2", pg), ["SELECT 'a;b'", "SELECT 2"]);
-        assert_eq!(texts("SELECT 1 -- x;y\n; SELECT 2", pg), ["SELECT 1 -- x;y", "SELECT 2"]);
+        assert_eq!(
+            texts("SELECT 'a;b'; SELECT 2", pg),
+            ["SELECT 'a;b'", "SELECT 2"]
+        );
+        assert_eq!(
+            texts("SELECT 1 -- x;y\n; SELECT 2", pg),
+            ["SELECT 1 -- x;y", "SELECT 2"]
+        );
         assert_eq!(texts("SELECT /* ; */ 1;", pg), ["SELECT /* ; */ 1"]);
         assert_eq!(
-            texts("CREATE FUNCTION f() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql; SELECT f()", pg),
-            ["CREATE FUNCTION f() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql", "SELECT f()"]
+            texts(
+                "CREATE FUNCTION f() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql; SELECT f()",
+                pg
+            ),
+            [
+                "CREATE FUNCTION f() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql",
+                "SELECT f()"
+            ]
         );
-        assert_eq!(texts("SELECT \"a;b\" FROM t;", pg), ["SELECT \"a;b\" FROM t"]);
+        assert_eq!(
+            texts("SELECT \"a;b\" FROM t;", pg),
+            ["SELECT \"a;b\" FROM t"]
+        );
         assert_eq!(texts(" ;; -- only a comment\n;", pg), Vec::<&str>::new());
-        assert_eq!(texts("SELECT `a;b`; SELECT 'x\\';y'", QueryDialect::MySql), ["SELECT `a;b`", "SELECT 'x\\';y'"]);
-        assert_eq!(texts("SELECT 'x\\'; SELECT 2", pg), ["SELECT 'x\\'", "SELECT 2"]);
-        assert_eq!(texts("SELECT [a;b] FROM t; SELECT 2", QueryDialect::SqlServer), ["SELECT [a;b] FROM t", "SELECT 2"]);
-        assert_eq!(texts("SELECT 1 # a;b\n;", QueryDialect::MySql), ["SELECT 1 # a;b"]);
+        assert_eq!(
+            texts("SELECT `a;b`; SELECT 'x\\';y'", QueryDialect::MySql),
+            ["SELECT `a;b`", "SELECT 'x\\';y'"]
+        );
+        assert_eq!(
+            texts("SELECT 'x\\'; SELECT 2", pg),
+            ["SELECT 'x\\'", "SELECT 2"]
+        );
+        assert_eq!(
+            texts("SELECT [a;b] FROM t; SELECT 2", QueryDialect::SqlServer),
+            ["SELECT [a;b] FROM t", "SELECT 2"]
+        );
+        assert_eq!(
+            texts("SELECT 1 # a;b\n;", QueryDialect::MySql),
+            ["SELECT 1 # a;b"]
+        );
     }
 
     #[test]
@@ -252,14 +290,23 @@ mod tests {
         let oracle = "BEGIN\n  INSERT INTO t VALUES (1);\n  COMMIT;\nEND;\n/\nSELECT 1 FROM dual;";
         assert_eq!(
             texts(oracle, QueryDialect::Oracle),
-            ["BEGIN\n  INSERT INTO t VALUES (1);\n  COMMIT;\nEND;", "SELECT 1 FROM dual"]
+            [
+                "BEGIN\n  INSERT INTO t VALUES (1);\n  COMMIT;\nEND;",
+                "SELECT 1 FROM dual"
+            ]
         );
         let tsql = "CREATE PROCEDURE p AS BEGIN SELECT 1; SELECT 2; END\nGO\nEXEC p";
         assert_eq!(
             texts(tsql, QueryDialect::SqlServer),
-            ["CREATE PROCEDURE p AS BEGIN SELECT 1; SELECT 2; END", "EXEC p"]
+            [
+                "CREATE PROCEDURE p AS BEGIN SELECT 1; SELECT 2; END",
+                "EXEC p"
+            ]
         );
-        assert_eq!(texts("SELECT 4 / 2; SELECT 1", QueryDialect::Oracle), ["SELECT 4 / 2", "SELECT 1"]);
+        assert_eq!(
+            texts("SELECT 4 / 2; SELECT 1", QueryDialect::Oracle),
+            ["SELECT 4 / 2", "SELECT 1"]
+        );
     }
 
     #[test]
@@ -281,18 +328,36 @@ mod tests {
     #[test]
     fn the_source_table_is_named_only_when_one_table_is_read() {
         let pg = QueryDialect::PostgreSql;
-        assert_eq!(source_table("SELECT id, name FROM customers ORDER BY id", pg).as_deref(), Some("customers"));
-        assert_eq!(source_table("SELECT * FROM shop.orders o WHERE o.id = 1", pg).as_deref(), Some("shop.orders"));
-        assert_eq!(source_table("SELECT * FROM \"Order Lines\" AS l", pg).as_deref(), Some("\"Order Lines\""));
-        assert_eq!(source_table("SELECT * FROM a JOIN b ON a.id = b.id", pg), None);
+        assert_eq!(
+            source_table("SELECT id, name FROM customers ORDER BY id", pg).as_deref(),
+            Some("customers")
+        );
+        assert_eq!(
+            source_table("SELECT * FROM shop.orders o WHERE o.id = 1", pg).as_deref(),
+            Some("shop.orders")
+        );
+        assert_eq!(
+            source_table("SELECT * FROM \"Order Lines\" AS l", pg).as_deref(),
+            Some("\"Order Lines\"")
+        );
+        assert_eq!(
+            source_table("SELECT * FROM a JOIN b ON a.id = b.id", pg),
+            None
+        );
         assert_eq!(source_table("SELECT * FROM a, b", pg), None);
-        assert_eq!(source_table("SELECT * FROM a UNION SELECT * FROM b", pg), None);
+        assert_eq!(
+            source_table("SELECT * FROM a UNION SELECT * FROM b", pg),
+            None
+        );
         assert_eq!(source_table("SELECT 1", pg), None);
         assert_eq!(source_table("SELECT * FROM (SELECT 1) AS s", pg), None);
         assert_eq!(
             source_table("SELECT (SELECT max(id) FROM b) FROM a", pg).as_deref(),
             Some("a")
         );
-        assert_eq!(source_table("SELECT * FROM [order lines]", QueryDialect::SqlServer).as_deref(), Some("[order lines]"));
+        assert_eq!(
+            source_table("SELECT * FROM [order lines]", QueryDialect::SqlServer).as_deref(),
+            Some("[order lines]")
+        );
     }
 }

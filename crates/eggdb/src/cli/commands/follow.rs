@@ -1749,7 +1749,7 @@ impl Session<'_> {
     fn copied_tables(
         &mut self,
         session: &mut eggdb_sql::Session<'_>,
-    ) -> Result<(Vec<(u32, Lsn)>, Vec<PendingForeignKey>), Failure> {
+    ) -> Result<CopiedTables, Failure> {
         let mut rows = Vec::new();
         session
             .execute(COPIED_TABLES_STATEMENT, &mut |result| rows = result.rows)
@@ -1943,26 +1943,33 @@ impl Session<'_> {
                     "SELECT 1 FROM pg_catalog.pg_class WHERE oid = {}",
                     relation.id
                 ))
-                .map_err(|error| source_failed(format!("cannot read the new table {shown}: {error}")))?,
+                .map_err(|error| {
+                    source_failed(format!("cannot read the new table {shown}: {error}"))
+                })?,
         )
         .is_empty();
         let started = Instant::now();
         let (rows, snapshot_lsn) = if still_there {
             let copy = self.copy_new_table(applying, catalog, replication_options, relation)?;
-            applying.applier.copied(relation.id, Some(copy.columns), copy.snapshot_lsn);
+            applying
+                .applier
+                .copied(relation.id, Some(copy.columns), copy.snapshot_lsn);
             applying.copied.push((relation.id, copy.snapshot_lsn));
             applying.foreign_keys.extend(copy.foreign_keys);
             (copy.rows, Some(copy.snapshot_lsn))
         } else {
             let create = new_table_from_relation(relation).map_err(source_failed)?;
             for statement in create {
-                applying.session.execute(&statement, &mut |_| {}).map_err(|error| {
-                    source_failed(format!(
-                        "cannot create the new table {shown} in {}: {} ({statement})",
-                        self.file_display,
-                        error.message()
-                    ))
-                })?;
+                applying
+                    .session
+                    .execute(&statement, &mut |_| {})
+                    .map_err(|error| {
+                        source_failed(format!(
+                            "cannot create the new table {shown} in {}: {} ({statement})",
+                            self.file_display,
+                            error.message()
+                        ))
+                    })?;
             }
             (0, None)
         };
@@ -2000,9 +2007,10 @@ impl Session<'_> {
         relation: &Relation,
     ) -> Result<NewTableCopy, Failure> {
         let shown = format!("{}.{}", relation.namespace, relation.name);
-        let cannot = |reason: String| source_failed(format!("cannot copy the new table {shown}: {reason}"));
-        let mut slot_client = PgClient::connect(replication_options)
-            .map_err(|error| cannot(error.to_string()))?;
+        let cannot =
+            |reason: String| source_failed(format!("cannot copy the new table {shown}: {reason}"));
+        let mut slot_client =
+            PgClient::connect(replication_options).map_err(|error| cannot(error.to_string()))?;
         let slot = slot_client
             .simple_query(&format!(
                 "CREATE_REPLICATION_SLOT {} TEMPORARY LOGICAL pgoutput EXPORT_SNAPSHOT",
@@ -2044,7 +2052,10 @@ impl Session<'_> {
             .simple_query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .map_err(failed)?;
         catalog
-            .simple_query(&format!("SET TRANSACTION SNAPSHOT {}", quote_literal(snapshot)))
+            .simple_query(&format!(
+                "SET TRANSACTION SNAPSHOT {}",
+                quote_literal(snapshot)
+            ))
             .map_err(failed)?;
         let qualified_name = qualified(&relation.namespace, &relation.name);
         let definition =
@@ -2274,6 +2285,8 @@ enum Applied {
     ReadAsText,
 }
 
+type CopiedTables = (Vec<(u32, Lsn)>, Vec<PendingForeignKey>);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingForeignKey {
     item: String,
@@ -2324,7 +2337,10 @@ impl Applying<'_> {
 fn spill_directory(file: &std::path::Path) -> std::path::PathBuf {
     file.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .map_or_else(|| std::path::PathBuf::from("."), std::path::Path::to_path_buf)
+        .map_or_else(
+            || std::path::PathBuf::from("."),
+            std::path::Path::to_path_buf,
+        )
 }
 
 fn spill_prefix(file: &std::path::Path) -> String {
@@ -2359,7 +2375,7 @@ fn delete_state_statement(item: &str) -> String {
     )
 }
 
-fn copied_tables_from(items: &[(String, String)]) -> (Vec<(u32, Lsn)>, Vec<PendingForeignKey>) {
+fn copied_tables_from(items: &[(String, String)]) -> CopiedTables {
     let copied: Vec<(u32, Lsn)> = items
         .iter()
         .filter_map(|(item, value)| {
@@ -2372,7 +2388,9 @@ fn copied_tables_from(items: &[(String, String)]) -> (Vec<(u32, Lsn)>, Vec<Pendi
     let foreign_keys = items
         .iter()
         .filter_map(|(item, value)| {
-            let (relation, _) = item.strip_prefix(FOREIGN_KEY_ITEM_PREFIX)?.split_once(' ')?;
+            let (relation, _) = item
+                .strip_prefix(FOREIGN_KEY_ITEM_PREFIX)?
+                .split_once(' ')?;
             let relation: u32 = relation.parse().ok()?;
             let (_, snapshot_lsn) = copied.iter().find(|(id, _)| *id == relation)?;
             Some(PendingForeignKey {
@@ -2746,7 +2764,9 @@ mod tests {
         assert_eq!(foreign_keys.len(), 1);
         assert_eq!(foreign_keys[0].item, "foreign key 16400 late_customer_fkey");
         assert_eq!(foreign_keys[0].snapshot_lsn, 0x0300_0060);
-        assert!(insert_state_statement("copied 1", "0/1").starts_with("INSERT INTO eggdb_follow.state"));
+        assert!(
+            insert_state_statement("copied 1", "0/1").starts_with("INSERT INTO eggdb_follow.state")
+        );
         assert_eq!(
             delete_state_statement("it's"),
             "DELETE FROM eggdb_follow.state WHERE item = 'it''s'"

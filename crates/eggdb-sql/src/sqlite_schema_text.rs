@@ -258,15 +258,19 @@ impl AlteredTexts {
         if dialect == Dialect::Sqlite
             && let Some(schema) = public_table(&*writer, table)?
         {
-            taken.table =
-                original_text(&*writer, table, &crate::session::sqlite_create_text(&schema))
-                    .ok()
-                    .flatten();
+            taken.table = original_text(
+                &*writer,
+                table,
+                &crate::session::sqlite_create_text(&schema),
+            )
+            .ok()
+            .flatten();
             for index in &schema.indexes {
                 let generated = crate::session::sqlite_index_text(&schema, index);
-                if let Some(original) = original_index_text(&*writer, table, &index.name, &generated)
-                    .ok()
-                    .flatten()
+                if let Some(original) =
+                    original_index_text(&*writer, table, &index.name, &generated)
+                        .ok()
+                        .flatten()
                 {
                     taken.indexes.push((index.name.clone(), original));
                 }
@@ -391,17 +395,15 @@ fn added_column_text(text: &str, column: &str) -> Option<String> {
             }
             TokenKind::RightParen | TokenKind::Comma if depth == 1 => {
                 if let Some(first) = element_first.take()
-                    && !TABLE_CONSTRAINT_WORDS.iter().any(|word| is_word(first, word))
+                    && !TABLE_CONSTRAINT_WORDS
+                        .iter()
+                        .any(|word| is_word(first, word))
                 {
                     last_column_end = Some(previous_end);
                 }
                 if token.kind == TokenKind::RightParen {
                     let at = last_column_end?;
-                    return Some(format!(
-                        "{}, {column}{}",
-                        text.get(..at)?,
-                        text.get(at..)?
-                    ));
+                    return Some(format!("{}, {column}{}", text.get(..at)?, text.get(at..)?));
                 }
                 previous_end = token.end;
                 continue;
@@ -432,12 +434,19 @@ pub(crate) fn stored_trigger_text(text: &str) -> String {
     }
     let mut at = 2;
     if tokens.get(at).is_some_and(|token| is_word(token, "if"))
-        && tokens.get(at + 1).is_some_and(|token| is_word(token, "not"))
-        && tokens.get(at + 2).is_some_and(|token| is_word(token, "exists"))
+        && tokens
+            .get(at + 1)
+            .is_some_and(|token| is_word(token, "not"))
+        && tokens
+            .get(at + 2)
+            .is_some_and(|token| is_word(token, "exists"))
     {
         at += 3;
     }
-    if tokens.get(at + 1).is_some_and(|token| token.kind == TokenKind::Dot) {
+    if tokens
+        .get(at + 1)
+        .is_some_and(|token| token.kind == TokenKind::Dot)
+    {
         at += 2;
     }
     match tokens.get(at).filter(|token| is_name(token)) {
@@ -545,7 +554,9 @@ mod tests {
     #[test]
     fn a_trigger_text_leaves_out_if_not_exists_and_the_schema() {
         assert_eq!(
-            stored_trigger_text("CREATE TRIGGER IF NOT EXISTS main.tr AFTER INSERT ON t BEGIN SELECT 1; END"),
+            stored_trigger_text(
+                "CREATE TRIGGER IF NOT EXISTS main.tr AFTER INSERT ON t BEGIN SELECT 1; END"
+            ),
             "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END"
         );
         assert_eq!(

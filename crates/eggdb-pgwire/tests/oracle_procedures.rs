@@ -42,7 +42,10 @@ fn oracle_client(server: &TestServer) -> Client {
     );
     assert_eq!(client.authenticate(common::PASSWORD).tag, b'R');
     client.read_until_ready();
-    ran(&mut client, "CREATE TABLE log (n NUMBER(5), msg VARCHAR2(200))");
+    ran(
+        &mut client,
+        "CREATE TABLE log (n NUMBER(5), msg VARCHAR2(200))",
+    );
     ran(&mut client, SPLIT_IT);
     ran(&mut client, LOG_IT);
     client

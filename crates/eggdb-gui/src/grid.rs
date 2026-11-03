@@ -129,7 +129,11 @@ fn blob_text(text: &str) -> String {
 
 fn vector_text(text: &str) -> String {
     let inner = text.trim().trim_start_matches('[').trim_end_matches(']');
-    let values: Vec<&str> = inner.split(',').map(str::trim).filter(|value| !value.is_empty()).collect();
+    let values: Vec<&str> = inner
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect();
     if values.len() <= VECTOR_VALUES_SHOWN {
         return format!("[{}]", values.join(", "));
     }
@@ -274,8 +278,8 @@ impl ResultGrid {
     /// The selection: the rows and columns between the anchor and the current cell.
     pub fn selection(&self) -> (Range<usize>, Range<usize>) {
         let rows = self.anchor.row.min(self.current.row)..self.anchor.row.max(self.current.row) + 1;
-        let columns =
-            self.anchor.column.min(self.current.column)..self.anchor.column.max(self.current.column) + 1;
+        let columns = self.anchor.column.min(self.current.column)
+            ..self.anchor.column.max(self.current.column) + 1;
         (rows, columns)
     }
 
@@ -388,25 +392,61 @@ impl ResultGrid {
                 return GridAnswer::Moved;
             }
             Key::Space if shift => {
-                self.anchor = Cell { row: here.row, column: 0 };
-                self.current = Cell { row: here.row, column: self.last_column() };
+                self.anchor = Cell {
+                    row: here.row,
+                    column: 0,
+                };
+                self.current = Cell {
+                    row: here.row,
+                    column: self.last_column(),
+                };
                 return GridAnswer::Moved;
             }
             Key::Space if primary => {
-                self.anchor = Cell { row: 0, column: here.column };
-                self.current = Cell { row: self.last_row(), column: here.column };
+                self.anchor = Cell {
+                    row: 0,
+                    column: here.column,
+                };
+                self.current = Cell {
+                    row: self.last_row(),
+                    column: here.column,
+                };
                 return GridAnswer::Moved;
             }
-            Key::Left => Cell { column: here.column.saturating_sub(1), ..here },
-            Key::Right => Cell { column: here.column + 1, ..here },
-            Key::Up => Cell { row: here.row.saturating_sub(1), ..here },
-            Key::Down => Cell { row: here.row + 1, ..here },
-            Key::PageUp => Cell { row: here.row.saturating_sub(page), ..here },
-            Key::PageDown => Cell { row: here.row.saturating_add(page), ..here },
+            Key::Left => Cell {
+                column: here.column.saturating_sub(1),
+                ..here
+            },
+            Key::Right => Cell {
+                column: here.column + 1,
+                ..here
+            },
+            Key::Up => Cell {
+                row: here.row.saturating_sub(1),
+                ..here
+            },
+            Key::Down => Cell {
+                row: here.row + 1,
+                ..here
+            },
+            Key::PageUp => Cell {
+                row: here.row.saturating_sub(page),
+                ..here
+            },
+            Key::PageDown => Cell {
+                row: here.row.saturating_add(page),
+                ..here
+            },
             Key::Home if primary => Cell { row: 0, ..here },
-            Key::End if primary => Cell { row: self.last_row(), ..here },
+            Key::End if primary => Cell {
+                row: self.last_row(),
+                ..here
+            },
             Key::Home => Cell { column: 0, ..here },
-            Key::End => Cell { column: self.last_column(), ..here },
+            Key::End => Cell {
+                column: self.last_column(),
+                ..here
+            },
             _ => return GridAnswer::Ignored,
         };
         if self.rows.is_empty() || self.columns.is_empty() {
@@ -434,7 +474,11 @@ impl ResultGrid {
         for row in rows.filter(|&row| row < self.rows.len()) {
             let cells: Vec<String> = columns
                 .clone()
-                .map(|column| self.value(Cell { row, column }).map(tsv_field).unwrap_or_default())
+                .map(|column| {
+                    self.value(Cell { row, column })
+                        .map(tsv_field)
+                        .unwrap_or_default()
+                })
                 .collect();
             out.push_str(&cells.join("\t"));
             out.push('\n');
@@ -455,7 +499,10 @@ impl ResultGrid {
     /// selected column (`docs/ux/workspace.md` 3.5).
     pub fn insert_statements(&self) -> String {
         let (rows, columns) = self.selection();
-        let table = self.source_table.clone().unwrap_or_else(|| "result".to_owned());
+        let table = self
+            .source_table
+            .clone()
+            .unwrap_or_else(|| "result".to_owned());
         let names: Vec<String> = columns
             .clone()
             .filter_map(|column| self.columns.get(column))
@@ -466,7 +513,11 @@ impl ResultGrid {
             let values: Vec<String> = columns
                 .clone()
                 .map(|column| {
-                    sql_literal(self.value(Cell { row, column }), self.kind(column), self.dialect)
+                    sql_literal(
+                        self.value(Cell { row, column }),
+                        self.kind(column),
+                        self.dialect,
+                    )
                 })
                 .collect();
             out.push_str(&format!(
@@ -536,8 +587,13 @@ pub fn quote_name(name: &str, dialect: QueryDialect) -> String {
 fn numeric_literal(text: &str) -> bool {
     let body = text.strip_prefix('-').unwrap_or(text);
     !body.is_empty()
-        && body.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-'))
-        && body.chars().next().is_some_and(|c| c.is_ascii_digit() || c == '.')
+        && body
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-'))
+        && body
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit() || c == '.')
         && text.parse::<f64>().is_ok()
 }
 
@@ -552,14 +608,21 @@ pub fn sql_literal(value: Option<&str>, kind: ValueKind, dialect: QueryDialect) 
         ValueKind::Boolean => {
             let truth = matches!(text, "t" | "true" | "TRUE" | "1");
             match (dialect, truth) {
-                (QueryDialect::SqlServer | QueryDialect::Oracle | QueryDialect::Sqlite, true) => "1".to_owned(),
-                (QueryDialect::SqlServer | QueryDialect::Oracle | QueryDialect::Sqlite, false) => "0".to_owned(),
+                (QueryDialect::SqlServer | QueryDialect::Oracle | QueryDialect::Sqlite, true) => {
+                    "1".to_owned()
+                }
+                (QueryDialect::SqlServer | QueryDialect::Oracle | QueryDialect::Sqlite, false) => {
+                    "0".to_owned()
+                }
                 (_, true) => "TRUE".to_owned(),
                 (_, false) => "FALSE".to_owned(),
             }
         }
         ValueKind::Blob => {
-            let hex = text.strip_prefix("\\x").or_else(|| text.strip_prefix("0x")).unwrap_or(text);
+            let hex = text
+                .strip_prefix("\\x")
+                .or_else(|| text.strip_prefix("0x"))
+                .unwrap_or(text);
             if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
                 return string_literal(text, dialect);
             }
@@ -613,7 +676,11 @@ mod tests {
     fn customers() -> ResultGrid {
         let rows = vec![
             vec![Some("1".into()), Some("Ada".into()), None],
-            vec![Some("2".into()), Some("Gr\tace".into()), Some("O'Hara".into())],
+            vec![
+                Some("2".into()),
+                Some("Gr\tace".into()),
+                Some("O'Hara".into()),
+            ],
             vec![Some("3".into()), Some("Alan".into()), Some("x".into())],
         ];
         let mut grid = ResultGrid::new(
@@ -649,12 +716,28 @@ mod tests {
         grid.key(press(Key::Down, true, false), 10);
         assert_eq!(grid.current, Cell { row: 2, column: 2 });
         assert_eq!(grid.selection_size(), (2, 2));
-        assert_eq!(grid.key(press(Key::Right, false, false), 10), GridAnswer::Moved);
-        assert_eq!(grid.current, Cell { row: 2, column: 2 }, "no wrap at the edge");
-        assert_eq!(grid.key(press(Key::Escape, false, false), 10), GridAnswer::Moved);
+        assert_eq!(
+            grid.key(press(Key::Right, false, false), 10),
+            GridAnswer::Moved
+        );
+        assert_eq!(
+            grid.current,
+            Cell { row: 2, column: 2 },
+            "no wrap at the edge"
+        );
+        assert_eq!(
+            grid.key(press(Key::Escape, false, false), 10),
+            GridAnswer::Moved
+        );
         assert_eq!(grid.selection_size(), (1, 1));
-        assert_eq!(grid.key(press(Key::Tab, false, false), 10), GridAnswer::LeaveForward);
-        assert_eq!(grid.key(press(Key::Tab, true, false), 10), GridAnswer::LeaveBack);
+        assert_eq!(
+            grid.key(press(Key::Tab, false, false), 10),
+            GridAnswer::LeaveForward
+        );
+        assert_eq!(
+            grid.key(press(Key::Tab, true, false), 10),
+            GridAnswer::LeaveBack
+        );
         grid.key(press(Key::Home, false, true), 10);
         assert_eq!(grid.current, Cell { row: 0, column: 2 });
         grid.key(press(Key::End, false, true), 10);
@@ -669,8 +752,14 @@ mod tests {
         assert_eq!(grid.selection(), (0..3, 0..1));
         grid.key(press(Key::Character('a'), false, true), 10);
         assert_eq!(grid.selection(), (0..3, 0..3));
-        assert_eq!(grid.key(press(Key::F2, false, false), 10), GridAnswer::OpenValue);
-        assert_eq!(grid.key(press(Key::Character('x'), false, false), 10), GridAnswer::Ignored);
+        assert_eq!(
+            grid.key(press(Key::F2, false, false), 10),
+            GridAnswer::OpenValue
+        );
+        assert_eq!(
+            grid.key(press(Key::Character('x'), false, false), 10),
+            GridAnswer::Ignored
+        );
     }
 
     #[test]
@@ -680,40 +769,82 @@ mod tests {
         grid.current = Cell { row: 1, column: 1 };
         assert_eq!(grid.tsv(false), "1\tAda\n2\tGr\\tace\n");
         assert_eq!(grid.tsv(true), "id\tname\n1\tAda\n2\tGr\\tace\n");
-        let GridAnswer::Copy { text, toast } = grid.key(press(Key::Character('c'), false, true), 10) else {
+        let GridAnswer::Copy { text, toast } =
+            grid.key(press(Key::Character('c'), false, true), 10)
+        else {
             panic!("Ctrl+C copies");
         };
-        assert_eq!((text.as_str(), toast.as_str()), ("1\tAda\n2\tGr\\tace\n", "Copied 4 cells"));
+        assert_eq!(
+            (text.as_str(), toast.as_str()),
+            ("1\tAda\n2\tGr\\tace\n", "Copied 4 cells")
+        );
         grid.current = Cell { row: 1, column: 2 };
         assert_eq!(grid.tsv(false), "1\tAda\t\n2\tGr\\tace\tO'Hara\n");
         assert_eq!(
             grid.insert_statements(),
             "INSERT INTO customers (id, name, note) VALUES (1, 'Ada', NULL);\nINSERT INTO customers (id, name, note) VALUES (2, 'Gr\tace', 'O''Hara');\n"
         );
-        let GridAnswer::Copy { toast, .. } = grid.key(press(Key::Character('I'), true, true), 10) else {
+        let GridAnswer::Copy { toast, .. } = grid.key(press(Key::Character('I'), true, true), 10)
+        else {
             panic!("Ctrl+Shift+I copies INSERTs");
         };
         assert_eq!(toast, "Copied 2 INSERT statements");
         grid.dialect = QueryDialect::MySql;
         grid.source_table = None;
         grid.anchor = Cell { row: 1, column: 2 };
-        assert_eq!(grid.insert_statements(), "INSERT INTO result (note) VALUES ('O''Hara');\n");
+        assert_eq!(
+            grid.insert_statements(),
+            "INSERT INTO result (note) VALUES ('O''Hara');\n"
+        );
         assert_eq!(tsv_field("a\\b\r"), "a\\\\b\\r");
     }
 
     #[test]
     fn literals_and_names_follow_each_dialect() {
-        assert_eq!(sql_literal(Some("it's"), ValueKind::Text, QueryDialect::PostgreSql), "'it''s'");
-        assert_eq!(sql_literal(Some("a\\b"), ValueKind::Text, QueryDialect::MySql), "'a\\\\b'");
-        assert_eq!(sql_literal(Some("é"), ValueKind::Text, QueryDialect::SqlServer), "N'é'");
-        assert_eq!(sql_literal(Some("-1.5e3"), ValueKind::Number, QueryDialect::PostgreSql), "-1.5e3");
-        assert_eq!(sql_literal(Some("NaN"), ValueKind::Number, QueryDialect::PostgreSql), "'NaN'");
-        assert_eq!(sql_literal(Some("t"), ValueKind::Boolean, QueryDialect::PostgreSql), "TRUE");
-        assert_eq!(sql_literal(Some("false"), ValueKind::Boolean, QueryDialect::SqlServer), "0");
-        assert_eq!(sql_literal(Some("\\x0aff"), ValueKind::Blob, QueryDialect::Sqlite), "X'0aff'");
-        assert_eq!(sql_literal(Some("\\x0aff"), ValueKind::Blob, QueryDialect::SqlServer), "0x0aff");
-        assert_eq!(sql_literal(Some("2024-01-02"), ValueKind::Text, QueryDialect::Oracle), "'2024-01-02'");
-        assert_eq!(sql_literal(None, ValueKind::Text, QueryDialect::Oracle), "NULL");
+        assert_eq!(
+            sql_literal(Some("it's"), ValueKind::Text, QueryDialect::PostgreSql),
+            "'it''s'"
+        );
+        assert_eq!(
+            sql_literal(Some("a\\b"), ValueKind::Text, QueryDialect::MySql),
+            "'a\\\\b'"
+        );
+        assert_eq!(
+            sql_literal(Some("é"), ValueKind::Text, QueryDialect::SqlServer),
+            "N'é'"
+        );
+        assert_eq!(
+            sql_literal(Some("-1.5e3"), ValueKind::Number, QueryDialect::PostgreSql),
+            "-1.5e3"
+        );
+        assert_eq!(
+            sql_literal(Some("NaN"), ValueKind::Number, QueryDialect::PostgreSql),
+            "'NaN'"
+        );
+        assert_eq!(
+            sql_literal(Some("t"), ValueKind::Boolean, QueryDialect::PostgreSql),
+            "TRUE"
+        );
+        assert_eq!(
+            sql_literal(Some("false"), ValueKind::Boolean, QueryDialect::SqlServer),
+            "0"
+        );
+        assert_eq!(
+            sql_literal(Some("\\x0aff"), ValueKind::Blob, QueryDialect::Sqlite),
+            "X'0aff'"
+        );
+        assert_eq!(
+            sql_literal(Some("\\x0aff"), ValueKind::Blob, QueryDialect::SqlServer),
+            "0x0aff"
+        );
+        assert_eq!(
+            sql_literal(Some("2024-01-02"), ValueKind::Text, QueryDialect::Oracle),
+            "'2024-01-02'"
+        );
+        assert_eq!(
+            sql_literal(None, ValueKind::Text, QueryDialect::Oracle),
+            "NULL"
+        );
         assert_eq!(quote_name("name", QueryDialect::PostgreSql), "name");
         assert_eq!(quote_name("Name", QueryDialect::PostgreSql), "\"Name\"");
         assert_eq!(quote_name("order", QueryDialect::MySql), "`order`");
@@ -724,14 +855,26 @@ mod tests {
 
     #[test]
     fn cells_draw_each_kind_as_the_spec_says() {
-        assert_eq!(cell_text(None, ValueKind::Number), ("NULL".to_owned(), CellLook::Null));
-        assert_eq!(cell_text(Some("42"), ValueKind::Number), ("42".to_owned(), CellLook::Primary));
+        assert_eq!(
+            cell_text(None, ValueKind::Number),
+            ("NULL".to_owned(), CellLook::Null)
+        );
+        assert_eq!(
+            cell_text(Some("42"), ValueKind::Number),
+            ("42".to_owned(), CellLook::Primary)
+        );
         assert_eq!(cell_text(Some("a\tb"), ValueKind::Text).0, "a\u{2409}b");
         let twenty = format!("\\x{}", "ab".repeat(20));
-        assert_eq!(cell_text(Some(&twenty), ValueKind::Blob), (format!("0x{}…", "ab".repeat(16)), CellLook::Secondary));
+        assert_eq!(
+            cell_text(Some(&twenty), ValueKind::Blob),
+            (format!("0x{}…", "ab".repeat(16)), CellLook::Secondary)
+        );
         assert_eq!(cell_text(Some("\\x0102"), ValueKind::Blob).0, "0x0102");
         let vector = format!("[{}]", vec!["0.5"; 768].join(","));
-        assert_eq!(cell_text(Some(&vector), ValueKind::Vector).0, "[0.5, 0.5, 0.5, … 768]");
+        assert_eq!(
+            cell_text(Some(&vector), ValueKind::Vector).0,
+            "[0.5, 0.5, 0.5, … 768]"
+        );
         assert_eq!(cell_text(Some("[1,2]"), ValueKind::Vector).0, "[1, 2]");
         assert_eq!(cell_text(Some("12"), ValueKind::Ttl).0, "12 s");
         assert_eq!(cell_text(Some("200"), ValueKind::Ttl).0, "3 m 20 s");
@@ -754,7 +897,9 @@ mod tests {
 
     #[test]
     fn the_wheel_scrolls_rows_and_whole_columns_and_keeps_the_current_cell() {
-        let rows = (0..20).map(|row| vec![Some(row.to_string()), None, None]).collect();
+        let rows = (0..20)
+            .map(|row| vec![Some(row.to_string()), None, None])
+            .collect();
         let mut grid = ResultGrid::new(
             vec!["a".into(), "b".into(), "c".into()],
             vec![ValueKind::Number; 3],

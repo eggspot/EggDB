@@ -301,7 +301,10 @@ fn integer_xor_and_not_keep_postgresql_types_and_precedence() {
         ok(&mut session, "SELECT 'abc' ~ 'b' AS a, 'abc' !~ 'b' AS b"),
         "a|b\nt|f\nSELECT 1"
     );
-    ok(&mut session, "CREATE TABLE flags (id integer, bits smallint)");
+    ok(
+        &mut session,
+        "CREATE TABLE flags (id integer, bits smallint)",
+    );
     ok(&mut session, "INSERT INTO flags VALUES (1, 6), (2, 9)");
     assert_eq!(
         ok(

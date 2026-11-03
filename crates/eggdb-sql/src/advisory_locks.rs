@@ -816,7 +816,10 @@ mod tests {
         }
         second.release_transaction_locks();
         let _entered = enter(&first, false);
-        assert_eq!(call("pg_advisory_unlock", &session_key), Value::Boolean(true));
+        assert_eq!(
+            call("pg_advisory_unlock", &session_key),
+            Value::Boolean(true)
+        );
     }
 
     #[test]
@@ -979,15 +982,23 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         assert_eq!(
-            take_application_lock("a", Mode::Shared, Lasts::Session, Some(Duration::from_secs(30)))
-                .unwrap(),
+            take_application_lock(
+                "a",
+                Mode::Shared,
+                Lasts::Session,
+                Some(Duration::from_secs(30))
+            )
+            .unwrap(),
             ApplicationLockGrant::DeadlockVictim
         );
         assert_eq!(ApplicationLockGrant::DeadlockVictim.status(), -3);
         assert!(release_application_lock("b", Lasts::Session).unwrap());
         assert_eq!(
             first.join().unwrap(),
-            (ApplicationLockGrant::AtOnce, ApplicationLockGrant::AfterWaiting)
+            (
+                ApplicationLockGrant::AtOnce,
+                ApplicationLockGrant::AfterWaiting
+            )
         );
         assert!(!application_waits().contains_key(&first_owner));
         drop(entered);

@@ -1261,7 +1261,9 @@ mod tests {
                 declaration: 1
             }]
         );
-        let none = plsql_procedure_call(&split_it(), "hr.split_it", &[]).ok().unwrap();
+        let none = plsql_procedure_call(&split_it(), "hr.split_it", &[])
+            .ok()
+            .unwrap();
         assert_eq!(none.text, "CALL hr.split_it()");
     }
 
@@ -1272,7 +1274,10 @@ mod tests {
                 .err()
                 .map(|error| error.number)
         };
-        assert_eq!(number(&[argument("@other", false, Value::Null)]), Some(8145));
+        assert_eq!(
+            number(&[argument("@other", false, Value::Null)]),
+            Some(8145)
+        );
         assert_eq!(
             number(&[
                 argument("@total", false, Value::Null),

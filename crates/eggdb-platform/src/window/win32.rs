@@ -209,7 +209,10 @@ pub fn clipboard_units(text: &str) -> Vec<u16> {
 
 /// The text of `CF_UNICODETEXT` units, up to the first NUL, with unpaired surrogates replaced.
 pub fn text_from_clipboard_units(units: &[u16]) -> String {
-    let end = units.iter().position(|&unit| unit == 0).unwrap_or(units.len());
+    let end = units
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(units.len());
     String::from_utf16_lossy(units.get(..end).unwrap_or(&[]))
 }
 
@@ -509,7 +512,13 @@ mod tests {
     fn clipboard_text_round_trips_through_unicode_units() {
         let units = clipboard_units("SELECT 1;\nSELECT 'é😀';\r\n");
         assert_eq!(units.last(), Some(&0));
-        assert_eq!(units.iter().filter(|&&unit| unit == u16::from(b'\r')).count(), 2);
+        assert_eq!(
+            units
+                .iter()
+                .filter(|&&unit| unit == u16::from(b'\r'))
+                .count(),
+            2
+        );
         assert_eq!(
             text_from_clipboard_units(&units),
             "SELECT 1;\r\nSELECT 'é😀';\r\n"

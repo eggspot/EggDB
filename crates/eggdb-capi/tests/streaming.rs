@@ -323,10 +323,18 @@ fn load_numbers(sql: *mut EggdbSql, count: usize) {
             } else {
                 format!("'number {id:05} of the streaming test'")
             };
-            format!("({id}, {label}, {}, '\\x{:02x}ff', {id}.5)", id as f64 / 4.0, id % 256)
+            format!(
+                "({id}, {label}, {}, '\\x{:02x}ff', {id}.5)",
+                id as f64 / 4.0,
+                id % 256
+            )
         })
         .collect();
-    ok(execute(sql, &format!("INSERT INTO numbers VALUES {}", rows.join(", "))).0);
+    ok(execute(
+        sql,
+        &format!("INSERT INTO numbers VALUES {}", rows.join(", ")),
+    )
+    .0);
 }
 
 #[test]
@@ -355,12 +363,21 @@ fn a_statement_steps_through_its_rows_one_at_a_time() {
         ok(status);
         assert_eq!(
             kinds,
-            [EGGDB_INTEGER, EGGDB_TEXT, EGGDB_REAL, EGGDB_BLOB, EGGDB_TEXT]
+            [
+                EGGDB_INTEGER,
+                EGGDB_TEXT,
+                EGGDB_REAL,
+                EGGDB_BLOB,
+                EGGDB_TEXT
+            ]
         );
         assert_eq!(value_int64(select, 0), (EGGDB_OK, 11));
         assert_eq!(
             value_text(select, 1),
-            (EGGDB_OK, Some("number 00011 of the streaming test".to_owned()))
+            (
+                EGGDB_OK,
+                Some("number 00011 of the streaming test".to_owned())
+            )
         );
         assert_eq!(value_double(select, 2), (EGGDB_OK, 2.75));
         assert_eq!(value_blob(select, 3), Some(vec![11, 0xff]));
@@ -397,14 +414,22 @@ fn a_statement_steps_through_its_rows_one_at_a_time() {
         assert_eq!(ids, (11..=500).collect::<Vec<i64>>());
         assert_eq!(step(select), (EGGDB_OK, false), "the end stays the end");
         assert_eq!(row_kinds(select).0, EGGDB_ERR_INVALID_ARGUMENT);
-        assert_eq!(first_integer(sql, "SELECT 7"), 7, "the end frees the session");
+        assert_eq!(
+            first_integer(sql, "SELECT 7"),
+            7,
+            "the end frees the session"
+        );
 
         reset(select);
         bind_int64(select, 1, 498);
         assert_eq!(step(select), (EGGDB_OK, true));
         assert_eq!(value_int64(select, 0), (EGGDB_OK, 499));
         reset(select);
-        assert_eq!(first_integer(sql, "SELECT 8"), 8, "a reset frees the session");
+        assert_eq!(
+            first_integer(sql, "SELECT 8"),
+            8,
+            "a reset frees the session"
+        );
 
         assert_eq!(step(select), (EGGDB_OK, true));
         let mut results: *const EggdbResult = ptr::null();
@@ -428,10 +453,7 @@ fn a_statement_steps_through_its_rows_one_at_a_time() {
         assert_eq!(step(update), (EGGDB_OK, false));
         finalize(update);
         assert_eq!(
-            first_integer(
-                sql,
-                "SELECT count(*) FROM numbers WHERE label = 'changed'"
-            ),
+            first_integer(sql, "SELECT count(*) FROM numbers WHERE label = 'changed'"),
             1
         );
 
@@ -447,7 +469,11 @@ fn a_statement_steps_through_its_rows_one_at_a_time() {
         }
         assert_eq!(status, EGGDB_ERR_SQL);
         assert_eq!(last_sqlstate(), "22012");
-        assert_eq!(first_integer(sql, "SELECT 11"), 11, "a failure ends the run");
+        assert_eq!(
+            first_integer(sql, "SELECT 11"),
+            11,
+            "a failure ends the run"
+        );
         finalize(failing);
     });
 }
@@ -525,7 +551,10 @@ fn copy_to_stdout_is_read_in_pieces() {
                 break;
             };
             assert!(!piece.is_empty());
-            assert!(piece.len() < 2 * PIECE_BYTES, "a piece is about 64 KiB at most");
+            assert!(
+                piece.len() < 2 * PIECE_BYTES,
+                "a piece is about 64 KiB at most"
+            );
             data.extend_from_slice(&piece);
             pieces += 1;
         }
@@ -556,13 +585,21 @@ fn copy_to_stdout_is_read_in_pieces() {
         ok(status);
         assert!(piece.is_some_and(|piece| piece.starts_with(b"1,number 00001")));
         free(copy);
-        assert_eq!(first_integer(sql, "SELECT 3"), 3, "a copy freed early frees the session");
+        assert_eq!(
+            first_integer(sql, "SELECT 3"),
+            3,
+            "a copy freed early frees the session"
+        );
 
         let (status, copy) = copy_out_begin(sql, "COPY numbers (id) TO STDOUT");
         ok(status);
         let (status, results) = end(copy);
         ok(status);
-        assert_eq!(tag(&results[0]), "COPY 5000", "ending early reads to the end");
+        assert_eq!(
+            tag(&results[0]),
+            "COPY 5000",
+            "ending early reads to the end"
+        );
         free(copy);
 
         let (status, copy) = copy_out_begin(sql, "SELECT 1");
@@ -704,7 +741,10 @@ fn a_running_statement_is_cancelled_from_another_thread_on_either_session() {
         let (status, count, sqlstate) = runner
             .join()
             .unwrap_or_else(|_| panic!("the statement's thread panicked"));
-        assert_eq!((status, count, sqlstate.as_str()), (EGGDB_ERR_SQL, 0, "57014"));
+        assert_eq!(
+            (status, count, sqlstate.as_str()),
+            (EGGDB_ERR_SQL, 0, "57014")
+        );
         assert!(started.elapsed() < Duration::from_secs(20));
         assert_eq!(first_integer(sql, "SELECT 2"), 2, "the next statement runs");
     });

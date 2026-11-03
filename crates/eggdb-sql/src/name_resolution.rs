@@ -4,6 +4,7 @@ use crate::ast::{
     FromClause, GeneratedTable, Insert, InsertSource, InsertValue, JoinCondition, MergeStatement,
     Name, OnDuplicate, Query, Select, SelectItem, SetExpr, Statement, TableReference, Update,
 };
+use crate::column_privileges::{ColumnScopes, ScopeItem};
 use crate::dialect::Dialect;
 use crate::encoding::ViewDefinition;
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -13,7 +14,6 @@ use crate::lexer::tokenize_in;
 use crate::parser::{Nesting, Parameters, Parser};
 use crate::schemas::{self, DEFAULT_SCHEMA, base_name, display, is_qualified};
 use crate::settings::Settings;
-use crate::column_privileges::{ColumnScopes, ScopeItem};
 use crate::store::KeyValueRead;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -260,7 +260,8 @@ impl<'a> Resolver<'a> {
         let item = match self.readable_item(label.clone(), &table, &relation) {
             Ok(item) => item,
             Err(error) if error.state() == SqlState::INSUFFICIENT_PRIVILEGE => {
-                let columns = crate::roles::relation_columns(self.reader, &table)?.unwrap_or_default();
+                let columns =
+                    crate::roles::relation_columns(self.reader, &table)?.unwrap_or_default();
                 ScopeItem::relation(label, table, columns.clone(), columns)
             }
             Err(error) => return Err(error),
@@ -750,7 +751,11 @@ impl<'a> Resolver<'a> {
                 .iter()
                 .map(|column| column.name.clone())
                 .collect(),
-            Relation::View(view) => view.columns.iter().map(|column| column.name.clone()).collect(),
+            Relation::View(view) => view
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
         };
         let unreadable = match self.settings {
             Some(settings) if self.stack.is_empty() => {

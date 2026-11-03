@@ -439,7 +439,12 @@ impl X11Window {
                 self.keyboard_stale = true;
                 None
             }
-            Packet::ButtonPress { detail, x, y, state } => {
+            Packet::ButtonPress {
+                detail,
+                x,
+                y,
+                state,
+            } => {
                 let (x, y) = (f32::from(x), f32::from(y));
                 let modifiers = x11::modifiers_from_state(state);
                 match x11::button_code(detail) {
@@ -462,7 +467,12 @@ impl X11Window {
                     ButtonCode::Other => None,
                 }
             }
-            Packet::ButtonRelease { detail, x, y, state } => match x11::button_code(detail) {
+            Packet::ButtonRelease {
+                detail,
+                x,
+                y,
+                state,
+            } => match x11::button_code(detail) {
                 ButtonCode::Button(button) => Some(WindowEvent::PointerReleased {
                     x: f32::from(x),
                     y: f32::from(y),
@@ -492,7 +502,11 @@ impl X11Window {
                 target,
                 property,
             } => {
-                let property = if property == x11::ATOM_NONE { target } else { property };
+                let property = if property == x11::ATOM_NONE {
+                    target
+                } else {
+                    property
+                };
                 let answered = if owner == self.window && selection == self.atoms.clipboard {
                     self.serve_clipboard(requestor, target, property)?
                 } else {

@@ -296,7 +296,12 @@ pub fn accessibility_tree(
             Some(NODE_CARD),
             AccessRole::Status,
             text,
-            at(Rect::new(STATUS_LINE.0, STATUS_LINE.1, PANEL_WIDTH, STATUS_HEIGHT)),
+            at(Rect::new(
+                STATUS_LINE.0,
+                STATUS_LINE.1,
+                PANEL_WIDTH,
+                STATUS_HEIGHT,
+            )),
         );
     }
     for ((rect, label), id) in link_rects(faces, origin)
@@ -349,7 +354,10 @@ fn text_field(
     if let Some(node) = tree.nodes.last_mut() {
         node.value = Some(value);
         node.placeholder = (!placeholder.is_empty()).then(|| placeholder.to_owned());
-        node.caret = Some(crate::accessibility::field_caret(text.caret(), text.selection()));
+        node.caret = Some(crate::accessibility::field_caret(
+            text.caret(),
+            text.selection(),
+        ));
     }
 }
 
@@ -392,7 +400,14 @@ fn server_nodes(
 ) {
     let form = &card.server;
     let plain = |field: &TextField| field.value().to_owned();
-    text_field(tree, NODE_URL, "URL", at(down(URL_INPUT, shift)), (plain(&form.url), &form.url), URL_PLACEHOLDER);
+    text_field(
+        tree,
+        NODE_URL,
+        "URL",
+        at(down(URL_INPUT, shift)),
+        (plain(&form.url), &form.url),
+        URL_PLACEHOLDER,
+    );
     tree.add(
         NODE_PROTOCOL,
         Some(NODE_PANEL),
@@ -406,16 +421,41 @@ fn server_nodes(
     for (id, name, rect, field, placeholder) in [
         (NODE_HOST, "Host", HOST_INPUT, &form.host, DEFAULT_HOST),
         (NODE_PORT, "Port", PORT_INPUT, &form.port, ""),
-        (NODE_DATABASE, "Database", DATABASE_INPUT, &form.database, ""),
-        (NODE_USER, "User", USER_INPUT, &form.user, DEFAULT_SERVER_USER),
-        (NODE_PASSWORD, "Password", PASSWORD_INPUT, &form.password, ""),
+        (
+            NODE_DATABASE,
+            "Database",
+            DATABASE_INPUT,
+            &form.database,
+            "",
+        ),
+        (
+            NODE_USER,
+            "User",
+            USER_INPUT,
+            &form.user,
+            DEFAULT_SERVER_USER,
+        ),
+        (
+            NODE_PASSWORD,
+            "Password",
+            PASSWORD_INPUT,
+            &form.password,
+            "",
+        ),
     ] {
         let value = if id == NODE_PASSWORD {
             std::iter::repeat_n(MASK, field.value().chars().count()).collect()
         } else {
             plain(field)
         };
-        text_field(tree, id, name, at(down(rect, shift)), (value, field), placeholder);
+        text_field(
+            tree,
+            id,
+            name,
+            at(down(rect, shift)),
+            (value, field),
+            placeholder,
+        );
     }
     let tls_row = CheckBoxRow {
         id: NODE_USE_TLS,
@@ -427,7 +467,13 @@ fn server_nodes(
     if tls_warning_shown(card) {
         let width = faces.ui.width(TLS_WARNING, BODY.0).min(TLS_WARNING_WIDTH);
         let rect = Rect::new(TLS_WARNING_AT.0, TLS_WARNING_AT.1 + shift, width, BODY.1);
-        tree.add(NODE_TLS_WARNING, Some(NODE_PANEL), AccessRole::Status, TLS_WARNING, at(rect));
+        tree.add(
+            NODE_TLS_WARNING,
+            Some(NODE_PANEL),
+            AccessRole::Status,
+            TLS_WARNING,
+            at(rect),
+        );
     }
 }
 
@@ -661,7 +707,10 @@ window \"EggDB\"
   link \"Where are you coming from?\" actions=invoke,focus
   link \"Load a sample dataset\" actions=invoke,focus
 ";
-        assert_eq!(crate::accessibility::describe(&tree(&ConnectCard::first_start())), expected);
+        assert_eq!(
+            crate::accessibility::describe(&tree(&ConnectCard::first_start())),
+            expected
+        );
     }
 
     #[test]
@@ -677,7 +726,12 @@ window \"EggDB\"
         assert!(url.actions.set_value);
         assert!(url.caret.is_some());
         let password = node(&nodes, NODE_PASSWORD);
-        assert!(password.value.as_deref().is_some_and(|value| value.chars().all(|letter| letter == MASK)));
+        assert!(
+            password
+                .value
+                .as_deref()
+                .is_some_and(|value| value.chars().all(|letter| letter == MASK))
+        );
         card.failed_field = Some(crate::connection::FailureField::Host);
         let failed = tree(&card);
         assert!(node(&failed, NODE_HOST).state.invalid);

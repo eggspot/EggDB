@@ -965,7 +965,8 @@ impl WindowState {
         let runtime = &self.runtime;
         // SAFETY: `event` is the mouse `NSEvent` AppKit passed to the view; `locationInWindow`
         // returns an `NSPoint`.
-        let location = unsafe { (runtime.send_point)(event, runtime.selector(c"locationInWindow")) };
+        let location =
+            unsafe { (runtime.send_point)(event, runtime.selector(c"locationInWindow")) };
         cocoa::pointer_position(location, self.bounds().size.height, self.scale.get())
     }
 
@@ -1111,7 +1112,8 @@ impl WindowState {
         let kind = runtime.string(PASTEBOARD_TYPE_STRING)?;
         // SAFETY: `board` is live; `stringForType:` takes an `NSString` and returns an
         // autoreleased `NSString` or nil.
-        let string = unsafe { (runtime.send_id_id)(board, runtime.selector(c"stringForType:"), kind) };
+        let string =
+            unsafe { (runtime.send_id_id)(board, runtime.selector(c"stringForType:"), kind) };
         self.send_to(kind, c"release");
         if string.is_null() {
             return Ok(None);

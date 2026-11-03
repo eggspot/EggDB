@@ -2467,10 +2467,15 @@ fn parse_table_names(spelled: &str, value: &OsStr) -> Result<Vec<String>, String
                 let inside = rest.strip_suffix(')').ok_or_else(|| {
                     format!("{spelled} takes columns as name(a,b), not '{entry}'")
                 })?;
-                (name.trim(), Some(parse_column_list(spelled, entry, inside)?))
+                (
+                    name.trim(),
+                    Some(parse_column_list(spelled, entry, inside)?),
+                )
             }
             None if entry.contains(')') => {
-                return Err(format!("{spelled} takes columns as name(a,b), not '{entry}'"));
+                return Err(format!(
+                    "{spelled} takes columns as name(a,b), not '{entry}'"
+                ));
             }
             None => (entry, None),
         };
@@ -2493,11 +2498,15 @@ fn split_table_entries<'t>(spelled: &str, text: &'t str) -> Result<Vec<&'t str>,
     for (at, character) in text.char_indices() {
         match character {
             '(' if open => {
-                return Err(format!("{spelled} takes columns as name(a,b), not '{text}'"));
+                return Err(format!(
+                    "{spelled} takes columns as name(a,b), not '{text}'"
+                ));
             }
             '(' => open = true,
             ')' if !open => {
-                return Err(format!("{spelled} takes columns as name(a,b), not '{text}'"));
+                return Err(format!(
+                    "{spelled} takes columns as name(a,b), not '{text}'"
+                ));
             }
             ')' => open = false,
             ',' if !open => {
@@ -2508,7 +2517,9 @@ fn split_table_entries<'t>(spelled: &str, text: &'t str) -> Result<Vec<&'t str>,
         }
     }
     if open {
-        return Err(format!("{spelled} has a column list with no ')' in '{text}'"));
+        return Err(format!(
+            "{spelled} has a column list with no ')' in '{text}'"
+        ));
     }
     entries.push(&text[start..]);
     Ok(entries)
@@ -2626,7 +2637,8 @@ mod tests {
 
     #[test]
     fn mcp_tables_take_column_lists() {
-        let limited = request("mcp app.db --tables orders(id,total),customers --tables orders(id,total)");
+        let limited =
+            request("mcp app.db --tables orders(id,total),customers --tables orders(id,total)");
         assert_eq!(limited.tables, vec!["orders(id,total)", "customers"]);
         let spaced = request("mcp app.db --tables archive.orders(id,id,total)");
         assert_eq!(spaced.tables, vec!["archive.orders(id,total)"]);

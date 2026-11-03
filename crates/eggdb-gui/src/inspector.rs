@@ -137,10 +137,16 @@ impl Description {
     pub fn blocks(&self) -> Vec<(InspectorBlock, String)> {
         let mut blocks = Vec::new();
         if !self.columns.is_empty() {
-            blocks.push((InspectorBlock::Columns, format!("Columns ({})", self.columns.len())));
+            blocks.push((
+                InspectorBlock::Columns,
+                format!("Columns ({})", self.columns.len()),
+            ));
         }
         if !self.indexes.is_empty() {
-            blocks.push((InspectorBlock::Indexes, format!("Indexes ({})", self.indexes.len())));
+            blocks.push((
+                InspectorBlock::Indexes,
+                format!("Indexes ({})", self.indexes.len()),
+            ));
         }
         if self.ddl.is_some() {
             blocks.push((InspectorBlock::Ddl, "DDL".to_owned()));
@@ -176,7 +182,10 @@ pub fn describe(tree: &ObjectTree, item: TreeItem, sample: Option<&Sample>) -> D
             if !catalog.key_spaces.is_empty() {
                 parts.push(counted(catalog.key_spaces.len(), "key space", "key spaces"));
             }
-            Description::titled(tree.connection.clone(), format!("Database · {}", parts.join(" · ")))
+            Description::titled(
+                tree.connection.clone(),
+                format!("Database · {}", parts.join(" · ")),
+            )
         }
         TreeItem::Group(group) => {
             let count = tree.children(item).len();
@@ -216,7 +225,10 @@ pub fn describe(tree: &ObjectTree, item: TreeItem, sample: Option<&Sample>) -> D
             };
             Description {
                 columns: vec![column.clone()],
-                ..Description::titled(column.name.clone(), format!("Column of {} · {}", table.name, column.type_name))
+                ..Description::titled(
+                    column.name.clone(),
+                    format!("Column of {} · {}", table.name, column.type_name),
+                )
             }
         }
         TreeItem::View(view) => {
@@ -249,17 +261,21 @@ pub fn describe(tree: &ObjectTree, item: TreeItem, sample: Option<&Sample>) -> D
             let Some(sequence) = catalog.sequences.get(sequence) else {
                 return Description::titled(String::new(), String::new());
             };
-            let subtitle = sequence
-                .current
-                .as_ref()
-                .map_or_else(|| "Sequence".to_owned(), |value| format!("Sequence · current {value}"));
+            let subtitle = sequence.current.as_ref().map_or_else(
+                || "Sequence".to_owned(),
+                |value| format!("Sequence · current {value}"),
+            );
             Description::titled(sequence.name.clone(), subtitle)
         }
         TreeItem::KeySpace(space) => {
             let Some(space) = catalog.key_spaces.get(space) else {
                 return Description::titled(String::new(), String::new());
             };
-            let kind = if space.collection.is_some() { "Collection" } else { "Key space" };
+            let kind = if space.collection.is_some() {
+                "Collection"
+            } else {
+                "Key space"
+            };
             let keys = match space.keys {
                 crate::catalog::KeyCount::Exactly(1) => "1 key".to_owned(),
                 count => format!("{} keys", count.text()),
@@ -309,7 +325,10 @@ pub fn region(width: f32) -> Rect {
 }
 
 /// Where each block's heading is drawn, top to bottom, for the accessibility tree.
-pub fn heading_tops(description: &Description, inspector: &Inspector) -> Vec<(InspectorBlock, String, f32)> {
+pub fn heading_tops(
+    description: &Description,
+    inspector: &Inspector,
+) -> Vec<(InspectorBlock, String, f32)> {
     let mut placed = Vec::new();
     let mut y = TOP + 64.0;
     for (block, heading) in description.blocks() {
@@ -330,9 +349,15 @@ fn block_height(description: &Description, block: InspectorBlock) -> f32 {
     match block {
         InspectorBlock::Columns => 20.0 * description.columns.len() as f32,
         InspectorBlock::Indexes => 20.0 * description.indexes.len() as f32,
-        InspectorBlock::Ddl => 16.0 * ddl_lines(description.ddl.as_deref().unwrap_or("")).len() as f32 + 16.0,
+        InspectorBlock::Ddl => {
+            16.0 * ddl_lines(description.ddl.as_deref().unwrap_or("")).len() as f32 + 16.0
+        }
         InspectorBlock::SampleRows => {
-            SAMPLE_ROW_HEIGHT * (1 + description.sample.as_ref().map_or(0, |rows| rows.rows.len().min(SAMPLE_ROWS))) as f32
+            SAMPLE_ROW_HEIGHT
+                * (1 + description
+                    .sample
+                    .as_ref()
+                    .map_or(0, |rows| rows.rows.len().min(SAMPLE_ROWS))) as f32
         }
     }
 }
@@ -343,7 +368,14 @@ fn badge(paint: &mut Painter<'_, '_>, text: &str, right: f32, top: f32) -> f32 {
     let rect = Rect::new(right - width, top + 2.0, width, 16.0);
     paint.canvas.fill_rounded_rect(rect, 8.0, theme.bg2);
     let face = paint.faces.ui;
-    paint.text(face, text, rect.x + 6.0, top + 3.0, SMALL, theme.text_secondary);
+    paint.text(
+        face,
+        text,
+        rect.x + 6.0,
+        top + 3.0,
+        SMALL,
+        theme.text_secondary,
+    );
     rect.x
 }
 
@@ -356,7 +388,18 @@ pub(crate) fn draw(paint: &mut Painter<'_, '_>, inspector: &Inspector, descripti
     if inspector.overlay {
         for step in 0..12 {
             let alpha = (41 * (step + 1) / 12) as u8;
-            paint.rect(area.x - 12.0 + step as f32, area.y + 4.0, 1.0, area.h - 4.0, Rgba { r: 0, g: 0, b: 0, a: alpha });
+            paint.rect(
+                area.x - 12.0 + step as f32,
+                area.y + 4.0,
+                1.0,
+                area.h - 4.0,
+                Rgba {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: alpha,
+                },
+            );
         }
     }
     paint.rect(area.x, area.y, area.w, area.h, theme.bg1);
@@ -365,16 +408,37 @@ pub(crate) fn draw(paint: &mut Painter<'_, '_>, inspector: &Inspector, descripti
     let right = area.x + area.w - PADDING;
     let inner = right - left;
     let name = elided(faces.ui_bold, &description.name, inner, TITLE.0);
-    paint.text(faces.ui_bold, &name, left, TOP + 12.0, TITLE, theme.text_primary);
+    paint.text(
+        faces.ui_bold,
+        &name,
+        left,
+        TOP + 12.0,
+        TITLE,
+        theme.text_primary,
+    );
     let subtitle = elided(faces.ui, &description.subtitle, inner, SMALL.0);
-    paint.text(faces.ui, &subtitle, left, TOP + 36.0, SMALL, theme.text_secondary);
+    paint.text(
+        faces.ui,
+        &subtitle,
+        left,
+        TOP + 36.0,
+        SMALL,
+        theme.text_secondary,
+    );
     for (block, heading, top) in heading_tops(description, inspector) {
         if top > BOTTOM - 28.0 {
             break;
         }
         let open = inspector.is_expanded(block);
         chevron(paint, left, top + 8.0, open);
-        paint.text(faces.ui_bold, &heading, left + 16.0, top + 4.0, BODY, theme.text_primary);
+        paint.text(
+            faces.ui_bold,
+            &heading,
+            left + 16.0,
+            top + 4.0,
+            BODY,
+            theme.text_primary,
+        );
         if block == InspectorBlock::Ddl {
             paint.text_right(faces.ui, "Copy", right, top + 4.0, BODY, theme.accent);
         }
@@ -384,7 +448,13 @@ pub(crate) fn draw(paint: &mut Painter<'_, '_>, inspector: &Inspector, descripti
     }
 }
 
-fn draw_block(paint: &mut Painter<'_, '_>, description: &Description, block: InspectorBlock, top: f32, (left, right): (f32, f32)) {
+fn draw_block(
+    paint: &mut Painter<'_, '_>,
+    description: &Description,
+    block: InspectorBlock,
+    top: f32,
+    (left, right): (f32, f32),
+) {
     let theme = paint.theme;
     let faces = paint.faces;
     let fits = |y: f32| y + 20.0 <= BOTTOM - 8.0;
@@ -396,14 +466,26 @@ fn draw_block(paint: &mut Painter<'_, '_>, description: &Description, block: Ins
                     break;
                 }
                 let type_width = faces.mono.width(&column.type_name, SMALL.0);
-                paint.text_right(faces.mono, &column.type_name, right, y + 3.0, SMALL, theme.text_secondary);
+                paint.text_right(
+                    faces.mono,
+                    &column.type_name,
+                    right,
+                    y + 3.0,
+                    SMALL,
+                    theme.text_secondary,
+                );
                 let mut badge_right = right - type_width - 8.0;
                 if column.primary_key {
                     badge_right = badge(paint, "pk", badge_right, y) - 4.0;
                 } else if column.not_null {
                     badge_right = badge(paint, "not null", badge_right, y) - 4.0;
                 }
-                let name = elided(faces.mono, &column.name, (badge_right - left).max(0.0), CODE.0);
+                let name = elided(
+                    faces.mono,
+                    &column.name,
+                    (badge_right - left).max(0.0),
+                    CODE.0,
+                );
                 paint.text(faces.mono, &name, left, y, CODE, theme.text_primary);
             }
         }
@@ -413,7 +495,11 @@ fn draw_block(paint: &mut Painter<'_, '_>, description: &Description, block: Ins
                 if !fits(y) {
                     break;
                 }
-                let badge_right = if found.unique { badge(paint, "unique", right, y) - 4.0 } else { right };
+                let badge_right = if found.unique {
+                    badge(paint, "unique", right, y) - 4.0
+                } else {
+                    right
+                };
                 let text = format!("{} ({})", found.name, found.columns.join(", "));
                 let text = elided(faces.mono, &text, (badge_right - left).max(0.0), CODE.0);
                 paint.text(faces.mono, &text, left, y, CODE, theme.text_primary);
@@ -423,7 +509,12 @@ fn draw_block(paint: &mut Painter<'_, '_>, description: &Description, block: Ins
             let ddl = description.ddl.as_deref().unwrap_or("");
             let lines = ddl_lines(ddl);
             let height = 16.0 * lines.len() as f32 + 8.0;
-            let box_rect = Rect::new(left, top, right - left, height.min(BOTTOM - 8.0 - top).max(0.0));
+            let box_rect = Rect::new(
+                left,
+                top,
+                right - left,
+                height.min(BOTTOM - 8.0 - top).max(0.0),
+            );
             paint.canvas.stroke_rect(box_rect, theme.border);
             for (index, line) in lines.iter().enumerate() {
                 let y = top + 4.0 + 16.0 * index as f32;
@@ -431,7 +522,14 @@ fn draw_block(paint: &mut Painter<'_, '_>, description: &Description, block: Ins
                     break;
                 }
                 let shown = elided(faces.mono, line, right - left - 16.0, SMALL.0);
-                paint.text(faces.mono, &shown, left + 8.0, y, (SMALL.0, 16.0), theme.text_primary);
+                paint.text(
+                    faces.mono,
+                    &shown,
+                    left + 8.0,
+                    y,
+                    (SMALL.0, 16.0),
+                    theme.text_primary,
+                );
             }
         }
         InspectorBlock::SampleRows => {
@@ -445,11 +543,22 @@ fn draw_block(paint: &mut Painter<'_, '_>, description: &Description, block: Ins
                 return;
             }
             let cell_width = (right - left) / cells as f32;
-            let mut header: Vec<String> = sample.columns.iter().take(SAMPLE_COLUMNS).cloned().collect();
+            let mut header: Vec<String> = sample
+                .columns
+                .iter()
+                .take(SAMPLE_COLUMNS)
+                .cloned()
+                .collect();
             if more {
                 header.push("…".to_owned());
             }
-            sample_line(paint, &header, (left, top), cell_width, theme.text_secondary);
+            sample_line(
+                paint,
+                &header,
+                (left, top),
+                cell_width,
+                theme.text_secondary,
+            );
             for (index, row) in sample.rows.iter().take(SAMPLE_ROWS).enumerate() {
                 let y = top + SAMPLE_ROW_HEIGHT * (index + 1) as f32;
                 if !fits(y) {
@@ -469,7 +578,13 @@ fn draw_block(paint: &mut Painter<'_, '_>, description: &Description, block: Ins
     }
 }
 
-fn sample_line(paint: &mut Painter<'_, '_>, values: &[String], (left, top): (f32, f32), cell_width: f32, ink: Rgba) {
+fn sample_line(
+    paint: &mut Painter<'_, '_>,
+    values: &[String],
+    (left, top): (f32, f32),
+    cell_width: f32,
+    ink: Rgba,
+) {
     let mono = paint.faces.mono;
     for (index, value) in values.iter().enumerate() {
         let x = left + cell_width * index as f32;
@@ -510,14 +625,30 @@ mod tests {
                 ..ResultTable::default()
             },
         };
-        let orders = window.tree.catalog.tables.iter().position(|table| table.name == "orders").unwrap();
+        let orders = window
+            .tree
+            .catalog
+            .tables
+            .iter()
+            .position(|table| table.name == "orders")
+            .unwrap();
         let description = describe(&window.tree, TreeItem::Table(orders), Some(&sample));
         assert_eq!(description.name, "orders");
         assert_eq!(description.subtitle, "Table · 3 rows");
-        let headings: Vec<String> = description.blocks().into_iter().map(|(_, heading)| heading).collect();
-        assert_eq!(headings, ["Columns (3)", "Indexes (1)", "DDL", "Sample rows"]);
+        let headings: Vec<String> = description
+            .blocks()
+            .into_iter()
+            .map(|(_, heading)| heading)
+            .collect();
+        assert_eq!(
+            headings,
+            ["Columns (3)", "Indexes (1)", "DDL", "Sample rows"]
+        );
         let other = describe(&window.tree, TreeItem::Table(0), Some(&sample));
-        assert_eq!(other.subtitle, "Table", "another table's sample is not used");
+        assert_eq!(
+            other.subtitle, "Table",
+            "another table's sample is not used"
+        );
         assert_eq!(other.sample, None);
     }
 
@@ -539,11 +670,26 @@ mod tests {
     fn other_rows_describe_themselves() {
         let window = MainWindow::sample();
         let tree = &window.tree;
-        assert_eq!(describe(tree, TreeItem::Connection, None).subtitle, "Database · 3 tables · 1 view · 3 indexes · 1 key space");
-        assert_eq!(describe(tree, TreeItem::Index(1), None).subtitle, "Index on orders");
-        assert_eq!(describe(tree, TreeItem::KeySpace(0), None).subtitle, "Collection · 2 keys");
-        assert_eq!(describe(tree, TreeItem::Group(Group::Tables), None).subtitle, "3 tables");
+        assert_eq!(
+            describe(tree, TreeItem::Connection, None).subtitle,
+            "Database · 3 tables · 1 view · 3 indexes · 1 key space"
+        );
+        assert_eq!(
+            describe(tree, TreeItem::Index(1), None).subtitle,
+            "Index on orders"
+        );
+        assert_eq!(
+            describe(tree, TreeItem::KeySpace(0), None).subtitle,
+            "Collection · 2 keys"
+        );
+        assert_eq!(
+            describe(tree, TreeItem::Group(Group::Tables), None).subtitle,
+            "3 tables"
+        );
         assert_eq!(sampled_name(tree, TreeItem::Index(0)), None);
-        assert_eq!(sampled_name(tree, TreeItem::Table(2)).as_deref(), Some("products"));
+        assert_eq!(
+            sampled_name(tree, TreeItem::Table(2)).as_deref(),
+            Some("products")
+        );
     }
 }

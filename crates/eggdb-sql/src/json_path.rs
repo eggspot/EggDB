@@ -1078,7 +1078,9 @@ fn elements(json: &Json) -> Vec<&Json> {
 
 fn member_values(json: &Json) -> Vec<&Json> {
     match json {
-        Json::Object(members) if Moment::of(json).is_none() => members.iter().map(|(_, item)| &item.value).collect(),
+        Json::Object(members) if Moment::of(json).is_none() => {
+            members.iter().map(|(_, item)| &item.value).collect()
+        }
         _ => Vec::new(),
     }
 }
@@ -1509,9 +1511,7 @@ impl<'a> Evaluator<'a> {
                 Method::Size if self.lax() => Ok(number_json(&Numeric::from_i64(1))),
                 _ => Err(suppressible(
                     SqlState::SQL_JSON_ITEM_CANNOT_BE_CAST_TO_TARGET_TYPE,
-                    format!(
-                        "jsonpath item method .{name}() cannot be applied to a datetime value"
-                    ),
+                    format!("jsonpath item method .{name}() cannot be applied to a datetime value"),
                 )),
             };
         }
@@ -1943,7 +1943,6 @@ pub(crate) fn evaluate(
 ) -> Result<Vec<Json>, Failure> {
     run(document, path, vars, true)
 }
-
 
 impl Call {
     fn items(&self) -> SqlResult<Option<Vec<Json>>> {

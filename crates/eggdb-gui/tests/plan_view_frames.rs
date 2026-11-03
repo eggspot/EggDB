@@ -33,10 +33,8 @@ const STUB_PLAN: &str = "Hash Join  (cost=0.00..100.00 rows=10 width=8)
   ->  Seq Scan on customers c  (cost=0.00..62.00 rows=4 width=4)";
 
 fn scratch(name: &str) -> PathBuf {
-    let directory = std::env::temp_dir().join(format!(
-        "eggdb-gui-plan-view-{}-{name}",
-        std::process::id()
-    ));
+    let directory =
+        std::env::temp_dir().join(format!("eggdb-gui-plan-view-{}-{name}", std::process::id()));
     let _ = std::fs::create_dir_all(&directory);
     directory
 }
@@ -52,7 +50,10 @@ fn with_customers(directory: &Path) -> Workspace {
     );
     workspace.open_typed(&path.display().to_string(), Instant::now());
     workspace.wait_for_open(LIMIT);
-    assert!(matches!(workspace.screen(), Screen::Main(_)), "the file opened");
+    assert!(
+        matches!(workspace.screen(), Screen::Main(_)),
+        "the file opened"
+    );
     workspace.run_text(
         "CREATE TABLE customers (id integer PRIMARY KEY, name text);\nINSERT INTO customers VALUES (1, 'Ada'), (2, 'Grace'), (3, 'Edsger');",
         true,
@@ -89,9 +90,14 @@ fn pixel(canvas: &Canvas, x: f32, y: f32) -> Option<eggdb_gui::Rgba> {
 fn stub_window() -> MainWindow {
     let mut window = MainWindow::sample();
     window.tab.editor = Editor::new(STUB_STATEMENT);
-    let plan = Plan::from_postgresql_text(&STUB_PLAN.lines().map(str::to_owned).collect::<Vec<_>>())
-        .expect("the stub reads");
-    window.tab.plan = Some(PlanView::new(plan, 0..STUB_STATEMENT.len(), STUB_STATEMENT.to_owned()));
+    let plan =
+        Plan::from_postgresql_text(&STUB_PLAN.lines().map(str::to_owned).collect::<Vec<_>>())
+            .expect("the stub reads");
+    window.tab.plan = Some(PlanView::new(
+        plan,
+        0..STUB_STATEMENT.len(),
+        STUB_STATEMENT.to_owned(),
+    ));
     window.tab.view = ResultView::Plan;
     window
 }
@@ -107,20 +113,43 @@ fn ctrl_e_shows_the_index_scan_centred_at_the_top_without_a_cost_row() {
     assert_eq!(tab.view, ResultView::Plan, "{:?}", tab.messages);
     let plan = tab.plan.as_ref().expect("the plan shows");
     assert_eq!(plan.plan.nodes.len(), 1);
-    assert_eq!(plan.plan.nodes[0].operation, "Index Scan using customers_pkey on customers");
+    assert_eq!(
+        plan.plan.nodes[0].operation,
+        "Index Scan using customers_pkey on customers"
+    );
     assert!(!plan.plan.analyze);
-    assert_eq!(plan.plan.facts(0), "", "the engine gives no costs, so no cost row");
+    assert_eq!(
+        plan.plan.facts(0),
+        "",
+        "the engine gives no costs, so no cost row"
+    );
     let rect = plan.node_rect(0, PLAN_AREA).unwrap();
-    assert!((rect.x + rect.w / 2.0 - (260.0 + PLAN_PANEL.0 / 2.0)).abs() <= 1.0, "centred");
+    assert!(
+        (rect.x + rect.w / 2.0 - (260.0 + PLAN_PANEL.0 / 2.0)).abs() <= 1.0,
+        "centred"
+    );
     assert_eq!(rect.y, 434.0, "at the top of the results body");
     let (canvas, theme) = draw(window(&mut workspace));
-    assert_eq!(pixel(&canvas, rect.x + rect.w / 2.0, rect.y), Some(theme.border_control));
-    assert_eq!(pixel(&canvas, rect.x + rect.w - 20.0, rect.y + 35.0), Some(theme.bg2), "an empty bar");
+    assert_eq!(
+        pixel(&canvas, rect.x + rect.w / 2.0, rect.y),
+        Some(theme.border_control)
+    );
+    assert_eq!(
+        pixel(&canvas, rect.x + rect.w - 20.0, rect.y + 35.0),
+        Some(theme.bg2),
+        "an empty bar"
+    );
     let tree = accessibility_tree(window(&mut workspace));
-    let segment = tree.iter().find(|node| node.id == NODE_RESULTS_SEGMENT + 2).expect("the Plan segment");
+    let segment = tree
+        .iter()
+        .find(|node| node.id == NODE_RESULTS_SEGMENT + 2)
+        .expect("the Plan segment");
     assert_eq!(segment.name, "Plan");
     assert!(segment.state.selected);
-    let node = tree.iter().find(|node| node.id == NODE_FIRST_PLAN_NODE).expect("the plan's node");
+    let node = tree
+        .iter()
+        .find(|node| node.id == NODE_FIRST_PLAN_NODE)
+        .expect("the plan's node");
     assert_eq!(node.parent, Some(NODE_PLAN));
     assert_eq!(node.name, "Index Scan using customers_pkey on customers");
 }
@@ -138,16 +167,28 @@ fn ctrl_shift_e_measures_the_statement_and_rolls_a_write_back() {
     assert!(plan.plan.execution_ms.is_some());
     let facts = plan.plan.facts(0);
     assert!(facts.contains(" ms · rows 3"), "{facts}");
-    workspace.explain_text("UPDATE customers SET name = 'changed'", true, Instant::now());
+    workspace.explain_text(
+        "UPDATE customers SET name = 'changed'",
+        true,
+        Instant::now(),
+    );
     workspace.wait_for_run(LIMIT);
     let tab = &window(&mut workspace).tab;
     assert_eq!(tab.view, ResultView::Plan, "{:?}", tab.messages);
     assert_eq!(tab.messages.first().map(String::as_str), Some("BEGIN"));
     assert_eq!(tab.messages.last().map(String::as_str), Some("ROLLBACK"));
-    workspace.run_text("SELECT name FROM customers WHERE id = 1", false, Instant::now());
+    workspace.run_text(
+        "SELECT name FROM customers WHERE id = 1",
+        false,
+        Instant::now(),
+    );
     workspace.wait_for_run(LIMIT);
     let grid = window(&mut workspace).tab.grid.clone().expect("the rows");
-    assert_eq!(grid.rows[0][0].as_deref(), Some("Ada"), "the UPDATE was rolled back");
+    assert_eq!(
+        grid.rows[0][0].as_deref(),
+        Some("Ada"),
+        "the UPDATE was rolled back"
+    );
 }
 
 #[test]
@@ -160,7 +201,11 @@ fn a_dialect_without_a_plan_says_not_supported_in_messages() {
     assert!(!workspace.is_running());
     let tab = &window(&mut workspace).tab;
     assert_eq!(tab.view, ResultView::Messages);
-    assert!(tab.messages[0].contains("Oracle's EXPLAIN PLAN is not in EggDB yet"), "{:?}", tab.messages);
+    assert!(
+        tab.messages[0].contains("Oracle's EXPLAIN PLAN is not in EggDB yet"),
+        "{:?}",
+        tab.messages
+    );
 }
 
 #[test]
@@ -171,17 +216,46 @@ fn the_stub_plan_draws_links_bars_and_heat_borders() {
         (plan.plan.heat(0), plan.plan.heat(1), plan.plan.heat(2)),
         (Heat::Plain, Heat::Warm, Heat::Hot)
     );
-    let rects: Vec<Rect> = (0..3).map(|index| plan.node_rect(index, PLAN_AREA).unwrap()).collect();
+    let rects: Vec<Rect> = (0..3)
+        .map(|index| plan.node_rect(index, PLAN_AREA).unwrap())
+        .collect();
     assert_eq!(rects[1].y - rects[0].y, 56.0);
     assert!(rects[2].x - (rects[1].x + rects[1].w) >= 24.0);
     let (canvas, theme) = draw(&window);
-    let top_middle = |rect: &Rect, below: f32| pixel(&canvas, rect.x + rect.w / 2.0, rect.y + below);
-    assert_eq!(top_middle(&rects[0], 0.0), Some(theme.border_control), "the root is plain");
-    assert_eq!(top_middle(&rects[0], 1.0), Some(theme.bg0), "with a 1 px border");
-    assert_eq!(top_middle(&rects[1], 1.0), Some(theme.warning), "20 % is warm, 2 px");
-    assert_eq!(top_middle(&rects[2], 1.0), Some(theme.error), "62 % is hot, 2 px");
-    let bar = |rect: &Rect, along: f32| pixel(&canvas, rect.x + 12.0 + (rect.w - 24.0) * along, rect.y + 35.0);
-    assert_eq!(bar(&rects[2], 0.5), Some(theme.accent), "62 % of the bar is filled");
+    let top_middle =
+        |rect: &Rect, below: f32| pixel(&canvas, rect.x + rect.w / 2.0, rect.y + below);
+    assert_eq!(
+        top_middle(&rects[0], 0.0),
+        Some(theme.border_control),
+        "the root is plain"
+    );
+    assert_eq!(
+        top_middle(&rects[0], 1.0),
+        Some(theme.bg0),
+        "with a 1 px border"
+    );
+    assert_eq!(
+        top_middle(&rects[1], 1.0),
+        Some(theme.warning),
+        "20 % is warm, 2 px"
+    );
+    assert_eq!(
+        top_middle(&rects[2], 1.0),
+        Some(theme.error),
+        "62 % is hot, 2 px"
+    );
+    let bar = |rect: &Rect, along: f32| {
+        pixel(
+            &canvas,
+            rect.x + 12.0 + (rect.w - 24.0) * along,
+            rect.y + 35.0,
+        )
+    };
+    assert_eq!(
+        bar(&rects[2], 0.5),
+        Some(theme.accent),
+        "62 % of the bar is filled"
+    );
     assert_eq!(bar(&rects[2], 0.8), Some(theme.bg2));
     assert_eq!(bar(&rects[1], 0.1), Some(theme.accent));
     assert_eq!(bar(&rects[1], 0.3), Some(theme.bg2));
@@ -208,7 +282,10 @@ fn down_right_enter_selects_the_hot_child_and_highlights_its_table() {
     let at = STUB_STATEMENT.find("customers").unwrap();
     assert_eq!(plan.highlight, Some(at..at + "customers".len()));
     let tree = accessibility_tree(&window);
-    let node = tree.iter().find(|node| node.id == NODE_FIRST_PLAN_NODE + 2).unwrap();
+    let node = tree
+        .iter()
+        .find(|node| node.id == NODE_FIRST_PLAN_NODE + 2)
+        .unwrap();
     assert_eq!(node.name, "Seq Scan on customers c");
     let description = node.description.clone().unwrap_or_default();
     assert!(description.contains("62 percent, hot"), "{description}");
@@ -217,8 +294,14 @@ fn down_right_enter_selects_the_hot_child_and_highlights_its_table() {
     assert!(node.state.focused && node.state.selected);
     let rect = plan.node_rect(2, PLAN_AREA).unwrap();
     let (canvas, theme) = draw(&window);
-    assert_eq!(pixel(&canvas, rect.x + rect.w / 2.0, rect.y + 3.0), Some(theme.selection));
-    assert_eq!(pixel(&canvas, rect.x + rect.w / 2.0, rect.y - 1.0), Some(theme.focus_ring));
+    assert_eq!(
+        pixel(&canvas, rect.x + rect.w / 2.0, rect.y + 3.0),
+        Some(theme.selection)
+    );
+    assert_eq!(
+        pixel(&canvas, rect.x + rect.w / 2.0, rect.y - 1.0),
+        Some(theme.focus_ring)
+    );
     let highlighted = (320..1000).any(|x| canvas.pixel(x, 89) == Some(theme.selection));
     assert!(highlighted, "the editor highlights the table's name");
     let _ = window.key(chord(Key::Escape, false, false), Instant::now());
@@ -235,5 +318,9 @@ fn down_right_enter_selects_the_hot_child_and_highlights_its_table() {
         Instant::now(),
     );
     assert!(window.tab.plan.as_ref().is_some_and(|plan| plan.text_shown));
-    assert!(!accessibility_tree(&window).iter().any(|node| node.id == NODE_FIRST_PLAN_NODE));
+    assert!(
+        !accessibility_tree(&window)
+            .iter()
+            .any(|node| node.id == NODE_FIRST_PLAN_NODE)
+    );
 }

@@ -567,7 +567,11 @@ impl AccessNode {
 
 /// The request for `action` on node `id` of `nodes`, `None` when there is no such node or it
 /// does not offer that action; bridges call it before they queue a request.
-pub fn access_request(nodes: &[AccessNode], id: u32, action: AccessAction) -> Option<AccessRequest> {
+pub fn access_request(
+    nodes: &[AccessNode],
+    id: u32,
+    action: AccessAction,
+) -> Option<AccessRequest> {
     nodes
         .iter()
         .find(|node| node.id == id)
@@ -761,11 +765,17 @@ mod tests {
         let set = AccessAction::SetValue("shop.eggdb".to_owned());
         assert_eq!(
             access_request(&tree, 3, set.clone()),
-            Some(AccessRequest { node: 3, action: set.clone() })
+            Some(AccessRequest {
+                node: 3,
+                action: set.clone()
+            })
         );
         assert_eq!(access_request(&tree, 3, AccessAction::Invoke), None);
         assert_eq!(access_request(&tree, 9, AccessAction::Focus), None);
-        assert_eq!(access_request(&tree, 3, AccessAction::SetCaret(AccessCaret::default())), None);
+        assert_eq!(
+            access_request(&tree, 3, AccessAction::SetCaret(AccessCaret::default())),
+            None
+        );
         let long = AccessAction::SetValue("x".repeat(MAX_ACCESS_VALUE_CHARS + 1));
         assert_eq!(access_request(&tree, 3, long), None);
         let mut read_only = tree.clone();
@@ -774,7 +784,14 @@ mod tests {
         assert!(read_only[1].allows(&AccessAction::Focus));
         read_only[1].state.disabled = true;
         assert!(!read_only[1].allows(&AccessAction::Focus));
-        assert_eq!(AccessCaret { anchor: 7, caret: 2 }.range(), (2, 7));
+        assert_eq!(
+            AccessCaret {
+                anchor: 7,
+                caret: 2
+            }
+            .range(),
+            (2, 7)
+        );
     }
 
     #[test]

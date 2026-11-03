@@ -850,17 +850,16 @@ pub(crate) fn call(name: &str, values: &[Value], declared: &[Option<SqlType>]) -
     {
         return Err(crate::oracle_datetime::year_out_of_range());
     }
-    let unary_text = |change: fn(&str) -> String,
-                      changed_bytes: fn(&str) -> usize|
-     -> SqlResult<Value> {
-        let Some(text) = text_of(&values[0]) else {
-            return Ok(Value::Null);
+    let unary_text =
+        |change: fn(&str) -> String, changed_bytes: fn(&str) -> usize| -> SqlResult<Value> {
+            let Some(text) = text_of(&values[0]) else {
+                return Ok(Value::Null);
+            };
+            grown_within_limit(text.len().saturating_mul(MAX_CASE_CHANGE_GROWTH), || {
+                changed_bytes(&text)
+            })?;
+            Ok(text_or_null(change(&text)))
         };
-        grown_within_limit(text.len().saturating_mul(MAX_CASE_CHANGE_GROWTH), || {
-            changed_bytes(&text)
-        })?;
-        Ok(text_or_null(change(&text)))
-    };
     match (name, values) {
         (name, [left, right]) if crate::oracle_collections::is_operator(name) => {
             crate::oracle_collections::call(name, left, right)

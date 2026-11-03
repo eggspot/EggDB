@@ -348,8 +348,8 @@ fn time_to_live(
         }
     };
     if !present {
-        let message = (format != Format::Json)
-            .then(|| format!("key not found: {}", render::text(key)));
+        let message =
+            (format != Format::Json).then(|| format!("key not found: {}", render::text(key)));
         return Ok(InBlock::not_found(message));
     }
     Ok(InBlock::printed(match format {
@@ -414,19 +414,19 @@ fn scan(
     let format = request.format.unwrap_or(Format::Text);
     let entries = match &request.collection {
         Some(name) => {
-            let named = transaction.collection(name).map_err(&failure)?;
+            let named = transaction.collection(name).map_err(failure)?;
             let entries = match &arguments.prefix {
                 Some(prefix) => named.scan_prefix(prefix),
                 None => named.scan(arguments.range()),
             };
-            listed(entries, &request.scan, format, out, &failure)?
+            listed(entries, &request.scan, format, out, failure)?
         }
         None => {
             let entries = match &arguments.prefix {
                 Some(prefix) => transaction.scan_prefix(prefix),
                 None => transaction.scan(arguments.range()),
             };
-            listed(entries, &request.scan, format, out, &failure)?
+            listed(entries, &request.scan, format, out, failure)?
         }
     };
     Ok(InBlock::Ran {
