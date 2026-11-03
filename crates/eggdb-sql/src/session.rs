@@ -199,7 +199,7 @@ pub struct PreparedStatement {
     pub is_empty: bool,
 }
 
-fn highest_parameter(tokens: &[Token<'_>]) -> usize {
+pub(crate) fn highest_parameter(tokens: &[Token<'_>]) -> usize {
     let placeholders = tokens
         .iter()
         .filter(|token| token.kind == TokenKind::Placeholder)

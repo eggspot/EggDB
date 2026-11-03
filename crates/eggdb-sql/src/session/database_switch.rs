@@ -434,6 +434,7 @@ mod tests {
         let databases = three_databases();
         let served = served();
         let mut session = Session::with_dialect(&databases.main, Dialect::MySql);
+        session.identify("root", "main");
         session.set_served_databases(&served);
         run(&mut session, "CREATE TEMPORARY TABLE scratch (id INT)").unwrap();
         let refused = run(&mut session, "USE ours").unwrap_err();

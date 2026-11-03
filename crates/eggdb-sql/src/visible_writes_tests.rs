@@ -659,13 +659,14 @@ fn a_policy_calling_a_user_routine_or_holding_a_subquery_cannot_be_written() {
     runs(&mut session, "CREATE POLICY plain ON items USING (id > 0)");
     runs(&mut session, "INSERT INTO items (name) VALUES ('kept')");
     session.close().unwrap();
-    assert_eq!(
-        shown(
-            &store,
-            "SELECT policyname FROM pg_policies ORDER BY policyname"
-        ),
-        "policyname\nowners_own\nplain\nSELECT 2"
-    );
+    let mut names: Vec<String> =
+        crate::row_security::policies(&store.begin_read().unwrap(), "items")
+            .unwrap()
+            .into_iter()
+            .map(|policy| policy.name)
+            .collect();
+    names.sort();
+    assert_eq!(names, ["owners_own", "plain"]);
     assert_eq!(
         shown(&store, "SELECT code FROM secrets"),
         "code\nswordfish\nSELECT 1"

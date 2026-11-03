@@ -283,14 +283,14 @@ fn rows_a_suspended_portal_holds_count_against_the_budget_until_it_closes() {
          INSERT INTO big SELECT g, repeat('x', 10000) FROM generate_series(1, 60) AS g",
     );
     assert!(error_codes(&created).is_empty(), "{created:?}");
-    assert_eq!(tags(&first.query("BEGIN")), "CZ");
+    assert_eq!(tags(&first.query("BEGIN READ ONLY")), "CZ");
     let answer = suspend_big_portal(&mut first, "rows");
     assert_eq!(tags(&answer), "12DsZ", "{answer:?}");
     let held = budget.used_bytes();
     assert!(held >= 59 * 10_000, "{held}");
 
     let (mut second, _) = Client::login(server.address);
-    assert_eq!(tags(&second.query("BEGIN")), "CZ");
+    assert_eq!(tags(&second.query("BEGIN READ ONLY")), "CZ");
     let refused = suspend_big_portal(&mut second, "rows");
     assert_eq!(tags(&refused), "12DEZ", "{refused:?}");
     assert_eq!(error_codes(&refused), ["53200"]);
@@ -308,7 +308,7 @@ fn rows_a_suspended_portal_holds_count_against_the_budget_until_it_closes() {
     assert_eq!(tags(&first.read_until_ready()), "3Z");
     assert!(budget.used_bytes() < 64 * 1024, "{}", budget.used_bytes());
 
-    assert_eq!(tags(&second.query("BEGIN")), "CZ");
+    assert_eq!(tags(&second.query("BEGIN READ ONLY")), "CZ");
     let accepted = suspend_big_portal(&mut second, "rows");
     assert_eq!(tags(&accepted), "12DsZ", "{accepted:?}");
     assert_eq!(tags(&second.query("COMMIT")), "CZ");

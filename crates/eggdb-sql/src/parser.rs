@@ -749,6 +749,17 @@ impl<'t> Parser<'t> {
                     position: name.position,
                 });
             }
+            if name.text.eq_ignore_ascii_case(crate::schemas::CATALOG_SCHEMA)
+                && self.check_database(&name).is_err()
+            {
+                return Ok(Name {
+                    text: crate::schemas::written_qualified(
+                        crate::schemas::CATALOG_SCHEMA,
+                        &table.text.to_ascii_lowercase(),
+                    ),
+                    position: name.position,
+                });
+            }
             self.check_database(&name)?;
             return Ok(table);
         }

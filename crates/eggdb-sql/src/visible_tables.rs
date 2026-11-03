@@ -108,11 +108,10 @@ impl VisibleTables {
             let mut reasons = Vec::new();
             if is_view_record(&stored) {
                 reasons.push("is a view: list it without columns, or list the columns of the tables it reads".to_owned());
+            } else if columns.is_empty() {
+                reasons.push("has an empty column list".to_owned());
             } else {
                 let definition = TableDefinition::decode(name, &stored)?;
-                if columns.is_empty() {
-                    reasons.push("has an empty column list".to_owned());
-                }
                 for column in columns {
                     if !definition
                         .columns

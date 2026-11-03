@@ -1720,9 +1720,11 @@ mod tests {
             "0.00",
             "-1.5",
             "NaN",
+            "Infinity",
+            "-Infinity",
             "123456789012345678901234567890.5",
         ] {
-            let value = n(text);
+            let value = Numeric::parse_with_infinity(text).unwrap();
             let mut bytes = Vec::new();
             value.encode_row(&mut bytes);
             assert_eq!(
@@ -1733,7 +1735,18 @@ mod tests {
                 assert!(Numeric::decode_row(&bytes[..cut]).is_none());
             }
         }
-        assert!(Numeric::decode_row(&[0x04, 0, 0, 0]).is_none());
+        assert_eq!(
+            Numeric::decode_row(&[0x04, 0, 0, 0]),
+            Some((Numeric::infinity(false), 4))
+        );
+        assert_eq!(
+            Numeric::decode_row(&[0x05, 0, 0, 0]),
+            Some((Numeric::infinity(true), 4))
+        );
+        assert!(Numeric::decode_row(&[0x08, 0, 0, 0]).is_none());
+        assert!(Numeric::decode_row(&[0x06, 0, 0, 0]).is_none());
+        assert!(Numeric::decode_row(&[0x04, 1, 0, 0]).is_none());
+        assert!(Numeric::decode_row(&[0x04, 0, 0, 1, 1, 0, 0, 0]).is_none());
         assert!(Numeric::decode_row(&[0, 0xFF, 0xFF, 0]).is_none());
         assert!(Numeric::decode_row(&[0, 0, 0, 1, 0xFF, 0xFF, 0xFF, 0xFF]).is_none());
         assert!(Numeric::decode_row(&[0, 0, 0, 1, 0, 0, 0, 0]).is_none());

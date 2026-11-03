@@ -36,7 +36,7 @@ fn admin_runs(admin: &mut Client, statements: &[&str]) {
 
 fn logged_in(server: &TestServer, user: &str) -> Client {
     let (mut client, ok) = Client::login_as(server.address, user, "pencil", DATABASE);
-    assert_eq!(ok.tag, b'R', "{user}");
+    assert_eq!(ok.tag, b'R', "{user}: {:?}", ok.field(b'M'));
     client.read_until_ready();
     client
 }
@@ -112,23 +112,23 @@ fn a_policy_check_refuses_new_rows_outside_it_over_both_query_protocols() {
         &mut admin,
         &[
             "CREATE TABLE docs (id integer PRIMARY KEY, owner text)",
-            "CREATE USER ada WITH PASSWORD 'pencil'",
+            "CREATE USER mary WITH PASSWORD 'pencil'",
             "CREATE USER grace WITH PASSWORD 'pencil'",
-            "GRANT SELECT, INSERT, UPDATE ON docs TO ada, grace",
+            "GRANT SELECT, INSERT, UPDATE ON docs TO mary, grace",
             "ALTER TABLE docs ENABLE ROW LEVEL SECURITY",
             "CREATE POLICY own ON docs USING (owner = current_user)",
         ],
     );
-    let mut ada = logged_in(&server, "ada");
+    let mut mary = logged_in(&server, "mary");
     assert_eq!(
-        error_code(&ada.query("INSERT INTO docs VALUES (1, 'ada')")),
+        error_code(&mary.query("INSERT INTO docs VALUES (1, 'mary')")),
         None
     );
     for sql in [
         "INSERT INTO docs VALUES (2, 'grace')",
         "UPDATE docs SET owner = 'grace'",
     ] {
-        let replies = ada.query(sql);
+        let replies = mary.query(sql);
         assert_eq!(error_code(&replies).as_deref(), Some("42501"), "{sql}");
         assert_eq!(
             error_text(&replies).as_deref(),
@@ -155,21 +155,21 @@ fn a_policy_check_refuses_new_rows_outside_it_over_both_query_protocols() {
     describe.extend(cstring(""));
     let mut execute = cstring("");
     execute.extend_from_slice(&0i32.to_be_bytes());
-    ada.send(b'P', &parse);
-    ada.send(b'B', &bind("3", "ada"));
-    ada.send(b'D', &describe);
-    ada.send(b'E', &execute);
-    ada.send(b'S', b"");
-    let answer = ada.read_until_ready();
+    mary.send(b'P', &parse);
+    mary.send(b'B', &bind("3", "mary"));
+    mary.send(b'D', &describe);
+    mary.send(b'E', &execute);
+    mary.send(b'S', b"");
+    let answer = mary.read_until_ready();
     assert_eq!(tags(&answer), "12TDCZ");
     assert_eq!(answer[2].column_types().len(), 1);
     assert_eq!(answer[3].row(), text("3"));
     assert_eq!(answer[4].text(), "INSERT 0 1");
-    ada.send(b'P', &parse);
-    ada.send(b'B', &bind("4", "grace"));
-    ada.send(b'E', &execute);
-    ada.send(b'S', b"");
-    let answer = ada.read_until_ready();
+    mary.send(b'P', &parse);
+    mary.send(b'B', &bind("4", "grace"));
+    mary.send(b'E', &execute);
+    mary.send(b'S', b"");
+    let answer = mary.read_until_ready();
     assert_eq!(error_code(&answer).as_deref(), Some("42501"));
     let mut grace = logged_in(&server, "grace");
     assert_eq!(
@@ -179,8 +179,8 @@ fn a_policy_check_refuses_new_rows_outside_it_over_both_query_protocols() {
     assert_eq!(
         rows(&admin.query("SELECT id, owner FROM docs ORDER BY id")),
         [
-            vec![Some("1".to_owned()), Some("ada".to_owned())],
-            vec![Some("3".to_owned()), Some("ada".to_owned())],
+            vec![Some("1".to_owned()), Some("mary".to_owned())],
+            vec![Some("3".to_owned()), Some("mary".to_owned())],
         ]
     );
     server.stop();

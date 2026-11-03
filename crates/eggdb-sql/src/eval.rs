@@ -1362,6 +1362,9 @@ impl Evaluator<'_> {
                 .map(Value::Numeric)
                 .ok_or_else(invalid_extract_field);
         }
+        if infinite_instant(&value).is_some() {
+            return Err(crate::oracle_datetime::year_out_of_range());
+        }
         let Some((kind, local, offset)) = local_instant(&value)? else {
             return if value.is_null() {
                 Ok(Value::Null)
@@ -2375,8 +2378,14 @@ pub(crate) fn arithmetic(
         return result;
     }
     if operator == BinaryOperator::Subtract
-        && matches!(left, Value::Timestamp(_) | Value::TimestampTz(_))
-        && matches!(right, Value::Timestamp(_) | Value::TimestampTz(_))
+        && matches!(
+            left,
+            Value::Timestamp(_) | Value::TimestampTz(_) | Value::Date(_)
+        )
+        && matches!(
+            right,
+            Value::Timestamp(_) | Value::TimestampTz(_) | Value::Date(_)
+        )
         && crate::constraints::current_dialect() == crate::Dialect::Oracle
         && let Some(days) = crate::oracle_conversion::arithmetic(operator, left, right)
     {

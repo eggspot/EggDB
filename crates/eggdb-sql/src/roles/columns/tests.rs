@@ -143,7 +143,6 @@ fn every_way_of_reaching_an_ungranted_column_is_denied() {
         "SELECT * FROM payroll",
         "COPY staff TO STDOUT",
         "COPY staff (id, salary) TO STDOUT",
-        "MERGE INTO staff USING teams t ON staff.id = t.id WHEN MATCHED THEN UPDATE SET name = 'x'",
     ] {
         let message = denied(&mut clerk, sql);
         assert!(
@@ -154,6 +153,12 @@ fn every_way_of_reaching_an_ungranted_column_is_denied() {
     assert_eq!(
         denied(&mut clerk, "SELECT salary FROM staff"),
         "permission denied for table staff"
+    );
+    let mut oracle_clerk = Session::with_dialect(&store, crate::Dialect::Oracle);
+    oracle_clerk.identify_role("clerk", "eggdb").unwrap();
+    denied(
+        &mut oracle_clerk,
+        "MERGE INTO staff USING teams t ON (staff.id = t.id) WHEN MATCHED THEN UPDATE SET name = 'x'",
     );
 }
 

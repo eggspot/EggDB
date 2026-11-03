@@ -437,14 +437,7 @@ fn is_literal(kind: &TokenKind<'_>) -> bool {
 /// after the highest `$n` parameter the statement already has; runs of spaces and comments
 /// between tokens become one space, and a trailing `;` is left out.
 pub(crate) fn normalize(tokens: &[Token<'_>], text: &str) -> Normalized {
-    let mut next = tokens
-        .iter()
-        .filter_map(|token| match token.kind {
-            TokenKind::NumberedParameter(number) => Some(number),
-            _ => None,
-        })
-        .max()
-        .unwrap_or(0);
+    let mut next = crate::session::highest_parameter(tokens);
     let meaningful = tokens
         .iter()
         .rposition(|token| !matches!(token.kind, TokenKind::End | TokenKind::Semicolon))
