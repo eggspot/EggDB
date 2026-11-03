@@ -366,10 +366,7 @@ fn builder_of(select: &mut Select) -> Option<HierarchyBuilder<'_>> {
     let SetExpr::Select(inner) = &mut query.body else {
         return None;
     };
-    Some(HierarchyBuilder {
-        inner,
-        hierarchy,
-    })
+    Some(HierarchyBuilder { inner, hierarchy })
 }
 
 fn source_tail(from: Option<&FromClause>, position: usize) -> SelectItem {

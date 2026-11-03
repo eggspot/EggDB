@@ -375,9 +375,7 @@ impl TransactionSettings {
                 self.at_commit.remove(&name);
             }
             SettingScope::Transaction => {
-                if let Entry::Vacant(entry) =
-                    self.at_commit.entry(name)
-                {
+                if let Entry::Vacant(entry) = self.at_commit.entry(name) {
                     let value = settings.get(entry.key()).ok();
                     entry.insert(value);
                 }

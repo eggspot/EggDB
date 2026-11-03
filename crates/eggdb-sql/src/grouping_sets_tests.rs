@@ -228,7 +228,7 @@ fn grouping_sets_keep_postgresql_errors() {
         )
         .contains("not allowed in WHERE"),
     );
-    let thirteen = vec!["brand"; 13].join(", ");
+    let thirteen = ["brand"; 13].join(", ");
     assert_eq!(
         refused(
             &mut session,

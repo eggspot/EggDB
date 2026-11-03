@@ -296,7 +296,9 @@ pub extern "C" fn eggdb_wasm_card_reset() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eggdb_gui::connect_screen::{NODE_BROWSE, NODE_FILE, NODE_OPEN, NODE_WINDOW};
+    use eggdb_gui::connect_screen::{
+        NODE_BROWSE, NODE_FILE, NODE_OPEN, NODE_READ_ONLY, NODE_WINDOW,
+    };
 
     fn write_input(text: &[u8]) {
         let start = super::super::eggdb_wasm_input(u32::try_from(text.len()).unwrap());
