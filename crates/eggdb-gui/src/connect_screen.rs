@@ -1990,6 +1990,36 @@ mod tests {
     }
 
     #[test]
+    fn a_certificate_check_typed_into_the_url_is_refused_after_tab_and_a_field_edit() {
+        let certificate_refused = |card: &ConnectCard| {
+            let failure = card.server.connect_options().unwrap_err();
+            failure.error_line() == "Error: the client cannot verify server certificates yet"
+                && failure
+                    .try_line()
+                    .is_some_and(|fix| fix.starts_with("Try: sslmode=require"))
+        };
+        let mut card = ConnectCard::first_start();
+        card.show_segment(Segment::Server);
+        card.move_focus(Focus::Url);
+        assert!(card.set_focused_value("postgresql://ada:pw@db/shop?sslmode=verify-full"));
+        let (card, _) = handle_key(card, press(Key::Tab));
+        assert_ne!(card.focus, Focus::Url);
+        assert!(!card.server.url.value().contains("pw"));
+        assert!(certificate_refused(&card));
+        let mut card = ConnectCard {
+            focus: Focus::Host,
+            ..card
+        };
+        let (edited, _) = handle_key(card.clone(), press(Key::Character('2')));
+        assert_eq!(edited.server.host.value(), "db2");
+        assert!(certificate_refused(&edited));
+        card.move_focus(Focus::Url);
+        assert!(card.set_focused_value("postgresql://ada:pw@db/shop"));
+        let (card, _) = handle_key(card, press(Key::Tab));
+        assert!(card.server.connect_options().is_ok());
+    }
+
+    #[test]
     fn a_server_failure_moves_to_its_field_and_borders_only_it() {
         let mut card = ConnectCard::first_start();
         card.show_segment(Segment::Server);

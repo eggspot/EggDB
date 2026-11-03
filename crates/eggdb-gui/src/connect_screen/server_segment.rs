@@ -155,9 +155,10 @@ pub struct ServerUrl {
     pub database: String,
     /// `Use TLS`: off only for `?sslmode=disable`, or `?tls=false` for the other protocols.
     pub use_tls: bool,
-    /// Whether the URL asks for the server's certificate to be checked: `?sslmode=verify-ca`,
-    /// `?sslmode=verify-full` or an `sslrootcert`, which the client cannot do yet.
-    pub verifies_certificate: bool,
+    /// The query parameters, as written, that ask for the server's certificate to be checked:
+    /// `sslmode=verify-ca`, `sslmode=verify-full` and `sslrootcert=…`, which the client cannot
+    /// do yet.
+    pub certificate_parameters: Vec<String>,
     /// Whether every part is whole: a host, a port that is a number from 1 to 65535, whole
     /// %-escapes and a known `sslmode` or `tls` value.
     pub well_formed: bool,
@@ -248,7 +249,7 @@ pub fn parse_server_url(text: &str) -> Option<ServerUrl> {
         well_formed = false;
     }
     let mut use_tls = true;
-    let mut verifies_certificate = false;
+    let mut certificate_parameters = Vec::new();
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
         let value = value.to_ascii_lowercase();
@@ -257,13 +258,13 @@ pub fn parse_server_url(text: &str) -> Option<ServerUrl> {
                 "disable" => Some(false),
                 "allow" | "prefer" | "require" => Some(true),
                 "verify-ca" | "verify-full" => {
-                    verifies_certificate = true;
+                    certificate_parameters.push(pair.to_owned());
                     Some(true)
                 }
                 _ => None,
             },
             (Protocol::PostgreSql, "sslrootcert") => {
-                verifies_certificate = true;
+                certificate_parameters.push(pair.to_owned());
                 continue;
             }
             (Protocol::MySql | Protocol::SqlServer | Protocol::Redis, "tls") => {
@@ -289,9 +290,16 @@ pub fn parse_server_url(text: &str) -> Option<ServerUrl> {
         port,
         database,
         use_tls,
-        verifies_certificate,
+        certificate_parameters,
         well_formed,
     })
+}
+
+impl ServerUrl {
+    /// Whether the URL asks for the server's certificate to be checked.
+    pub fn verifies_certificate(&self) -> bool {
+        !self.certificate_parameters.is_empty()
+    }
 }
 
 /// The server segment's fields, kept in step: editing the `URL` input fills the fields below
@@ -316,6 +324,7 @@ pub struct ServerForm {
     /// `Use TLS`.
     pub use_tls: bool,
     scheme: &'static str,
+    certificate_parameters: Vec<String>,
 }
 
 impl fmt::Debug for ServerForm {
@@ -336,6 +345,7 @@ impl fmt::Debug for ServerForm {
             .field("password", &password)
             .field("use_tls", &self.use_tls)
             .field("scheme", &self.scheme)
+            .field("certificate_parameters", &self.certificate_parameters)
             .finish()
     }
 }
@@ -375,16 +385,20 @@ impl ServerForm {
             password: TextField::default(),
             use_tls: true,
             scheme: Protocol::PostgreSql.scheme(),
+            certificate_parameters: Vec::new(),
         }
     }
 
     /// Takes an edit of the `URL` input: once it starts with a known scheme its parts fill
     /// the fields, a password typed into it included; [`ServerForm::forget_url_password`]
-    /// takes it out of the URL once the input loses the focus.
+    /// takes it out of the URL once the input loses the focus. A certificate check the URL
+    /// asks for is kept until the URL no longer asks for it.
     pub fn url_edited(&mut self) {
         let Some(read) = parse_server_url(self.url.value()) else {
+            self.certificate_parameters.clear();
             return;
         };
+        self.certificate_parameters = read.certificate_parameters;
         self.protocol = read.protocol;
         self.scheme = read.scheme;
         self.host.set(&read.host);
@@ -434,7 +448,8 @@ impl ServerForm {
     }
 
     /// The URL the fields say, without the password: `postgresql://ada@db:5433/shop`, with
-    /// `?sslmode=disable` (`?tls=false`) while `Use TLS` is off.
+    /// the certificate check the typed URL asked for (`?sslmode=verify-full`) and
+    /// `sslmode=disable` (`tls=false`) while `Use TLS` is off.
     pub fn written_url(&self) -> String {
         let mut url = format!("{}://", self.scheme);
         let user = self.user.value().trim();
@@ -458,9 +473,16 @@ impl ServerForm {
             url.push('/');
             url.push_str(&percent_encoded(database));
         }
-        if !self.use_tls {
+        let tls_off = (!self.use_tls).then(|| self.protocol.tls_off_parameter());
+        let parameters: Vec<&str> = self
+            .certificate_parameters
+            .iter()
+            .map(String::as_str)
+            .chain(tls_off)
+            .collect();
+        if !parameters.is_empty() {
             url.push('?');
-            url.push_str(self.protocol.tls_off_parameter());
+            url.push_str(&parameters.join("&"));
         }
         url
     }
@@ -492,7 +514,9 @@ impl ServerForm {
         {
             return Err(url_failure());
         }
-        if read.is_some_and(|url| url.verifies_certificate) {
+        if !self.certificate_parameters.is_empty()
+            || read.is_some_and(|url| url.verifies_certificate())
+        {
             return Err(certificate_verification_failure());
         }
         if self.protocol != Protocol::PostgreSql {
@@ -912,7 +936,7 @@ mod tests {
             "postgresql://ada@db/shop?sslmode=VERIFY-CA",
             "postgresql://ada@db/shop?sslmode=require&sslrootcert=/etc/ca.pem",
         ] {
-            assert!(read(text).verifies_certificate, "{text}");
+            assert!(read(text).verifies_certificate(), "{text}");
             let mut form = ServerForm::new();
             typed(&mut form, text);
             let failure = form.connect_options().unwrap_err();
@@ -929,9 +953,52 @@ mod tests {
             );
             assert_eq!(failure.field, FailureField::Url);
         }
-        assert!(!read("postgresql://db?sslmode=require").verifies_certificate);
+        assert!(!read("postgresql://db?sslmode=require").verifies_certificate());
         let mut form = ServerForm::new();
         typed(&mut form, "postgresql://ada@db/shop?sslmode=require");
+        assert_eq!(form.connect_options().unwrap().ssl_mode, SslMode::Require);
+    }
+
+    #[test]
+    fn a_requested_certificate_check_survives_every_rewrite_of_the_url() {
+        let refused = |form: &ServerForm| {
+            form.connect_options().unwrap_err().error_line()
+                == "Error: the client cannot verify server certificates yet"
+        };
+        let mut form = ServerForm::new();
+        typed(&mut form, "postgresql://ada:pw@db/shop?sslmode=verify-full");
+        form.forget_url_password();
+        assert_eq!(
+            form.url.value(),
+            "postgresql://ada@db:5432/shop?sslmode=verify-full"
+        );
+        assert!(refused(&form));
+        form.host.set("db2");
+        form.field_edited();
+        assert_eq!(
+            form.url.value(),
+            "postgresql://ada@db2:5432/shop?sslmode=verify-full"
+        );
+        assert!(refused(&form));
+        form.toggle_tls();
+        assert_eq!(
+            form.url.value(),
+            "postgresql://ada@db2:5432/shop?sslmode=verify-full&sslmode=disable"
+        );
+        assert!(refused(&form));
+        let mut rooted = ServerForm::new();
+        typed(
+            &mut rooted,
+            "postgresql://ada@db/shop?sslrootcert=/etc/ca.pem",
+        );
+        rooted.user.set("bob");
+        rooted.field_edited();
+        assert!(rooted.url.value().ends_with("?sslrootcert=/etc/ca.pem"));
+        assert!(refused(&rooted));
+        typed(&mut form, "postgresql://ada@db2/shop");
+        form.forget_url_password();
+        form.field_edited();
+        assert_eq!(form.url.value(), "postgresql://ada@db2:5432/shop");
         assert_eq!(form.connect_options().unwrap().ssl_mode, SslMode::Require);
     }
 
