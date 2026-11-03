@@ -46,6 +46,9 @@ pub mod main_window;
 pub mod object_browser;
 /// PNG encoding of rendered frames, for screenshots and tests.
 pub mod png;
+/// The plan view: `EXPLAIN`'s answer read into a tree, laid out top-down with each node's
+/// cost, rows, time and buffers, its hot nodes tinted and its keys (`docs/ux/workspace.md` 5).
+pub mod plan_view;
 /// The inspector: the selected object's columns, indexes, DDL and sample rows
 /// (`docs/ux/workspace.md` 4.3).
 pub mod inspector;

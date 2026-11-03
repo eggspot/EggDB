@@ -20,7 +20,7 @@ use eggdb_gui::workspace::{Screen, Workspace, WorkspaceCommand};
 use eggdb_gui::{BoxFace, Canvas, SystemFaces, Theme, ThemeKind};
 use eggdb_platform::window::{WindowEvent, WindowOptions, has_file_dialog, open_window};
 
-const USAGE: &str = "Usage: eggdb-gui [--window] [--png <file>] [--open <path>] [--no-create] [--read-only] [--no-file-dialog] [--run <sql>] [--theme light|dark|high-contrast] [--scale <n>] [--size <width>x<height>] [--box-text] [--frames <n>]
+const USAGE: &str = "Usage: eggdb-gui [--window] [--png <file>] [--open <path>] [--no-create] [--read-only] [--no-file-dialog] [--run <sql>] [--explain <sql>] [--theme light|dark|high-contrast] [--scale <n>] [--size <width>x<height>] [--box-text] [--frames <n>]
 
 Shows EggDB's connect screen.
   --window          open it in a native window (the default without --png)
@@ -30,6 +30,7 @@ Shows EggDB's connect screen.
   --read-only       check \"Open read-only\"
   --no-file-dialog  lay the card out as on a system without an open-file dialog (with --png)
   --run <sql>       after --open, put <sql> in the editor and run it as Ctrl/Cmd+Enter does (with --png)
+  --explain <sql>   after --open and --run, put <sql> in the editor and explain it as Ctrl/Cmd+E does (with --png)
   --theme <theme>   light (the default), dark or high-contrast
   --scale <n>       device pixels per logical pixel for --png (default 1)
   --size <w>x<h>    the logical size for --png (default 1280x800)
@@ -52,6 +53,7 @@ struct Options {
     frames: Option<u32>,
     open: Option<OsString>,
     run: Option<OsString>,
+    explain: Option<OsString>,
     create_if_missing: bool,
     read_only: bool,
     file_dialog: bool,
@@ -74,6 +76,7 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<Option<Opti
         frames: None,
         open: None,
         run: None,
+        explain: None,
         create_if_missing: true,
         read_only: false,
         file_dialog: true,
@@ -93,6 +96,7 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<Option<Opti
             "--no-file-dialog" => options.file_dialog = false,
             "--open" => options.open = Some(value("a path")?),
             "--run" => options.run = Some(value("a statement")?),
+            "--explain" => options.explain = Some(value("a statement")?),
             "--frames" => {
                 let frames = value("a number")?;
                 options.frames = Some(
@@ -201,6 +205,10 @@ fn write_png(options: &Options, path: &OsString, faces: Faces<'_>) -> Result<(),
     }
     if let Some(sql) = &options.run {
         workspace.run_text(&sql.to_string_lossy(), false, Instant::now());
+        workspace.wait_for_run(SCRIPTED_OPEN_LIMIT);
+    }
+    if let Some(sql) = &options.explain {
+        workspace.explain_text(&sql.to_string_lossy(), false, Instant::now());
         workspace.wait_for_run(SCRIPTED_OPEN_LIMIT);
     }
     let frame = render(

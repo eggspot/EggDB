@@ -10,6 +10,7 @@ use crate::font::{TextStyle, Typeface};
 use crate::grid::{CellLook, ResultGrid, ValueKind, cell_text, quote_name, visible_columns, visible_rows};
 use crate::highlight::{Carry, TokenKind, tokens};
 use crate::inspector::{self, Inspector, InspectorBlock};
+use crate::plan_view::{self, PlanView};
 use crate::object_browser::{self, ObjectTree, ROW_HEIGHT, ROWS_IN_VIEW, ROWS_TOP, SidebarFocus, TreeAction, TreeItem};
 use crate::query_tab::{QueryTab, ResultView, TabAction, TabFocus};
 use crate::status_line;
@@ -728,6 +729,11 @@ fn editor(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
         let _ = tokens(line, tab.dialect, &mut carry);
     }
     let selection = tab.editor.selection();
+    let plan_highlight = tab
+        .plan
+        .as_ref()
+        .and_then(|plan| plan.highlight.clone())
+        .map(|range| (tab.editor.position_at(range.start), tab.editor.position_at(range.end)));
     let squiggle = tab.error.as_ref().map(|error| {
         (
             tab.editor.position_at(error.range.start),
@@ -739,6 +745,13 @@ fn editor(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
         let top = EDITOR_TEXT_TOP + LINE_HEIGHT * (number - first) as f32;
         if number == caret.line {
             paint.rect(308.0, top, centre_width - 48.0, LINE_HEIGHT, theme.bg1);
+        }
+        if let Some((start, end)) = plan_highlight.filter(|(start, end)| (start.line..=end.line).contains(&number)) {
+            let from = if number == start.line { start.column } else { 0 };
+            let to = if number == end.line { end.column } else { line.chars().count() + 1 };
+            let left = column_x(faces.mono, line, from);
+            let right = column_x(faces.mono, line, to).max(left + 4.0);
+            paint.rect(left, top, right - left, LINE_HEIGHT, theme.selection);
         }
         if let Some((start, end)) = selection.filter(|(start, end)| (start.line..=end.line).contains(&number)) {
             let from = if number == start.line { start.column } else { 0 };
@@ -846,25 +859,23 @@ fn results(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
     paint.rect(260.0, 386.0, centre_width, 32.0, theme.bg1);
     paint.rect(260.0, 417.0, centre_width, 1.0, theme.border);
     let messages = tab.view == ResultView::Messages;
-    let (results_face, messages_face) = if messages {
-        (faces.ui, faces.ui_bold)
-    } else {
-        (faces.ui_bold, faces.ui)
-    };
-    let (results_ink, messages_ink) = if messages {
-        (theme.text_secondary, theme.text_primary)
-    } else {
-        (theme.text_primary, theme.text_secondary)
-    };
-    paint.text(results_face, "Results", 272.0, 393.0, BODY, results_ink);
-    if messages {
-        paint.rect(344.0, 414.0, 64.0, 2.0, theme.accent);
-    } else {
-        paint.rect(272.0, 414.0, 48.0, 2.0, theme.accent);
+    for (name, view, x, underline) in result_segments(tab) {
+        let (face, ink) = if tab.view == view {
+            (faces.ui_bold, theme.text_primary)
+        } else {
+            (faces.ui, theme.text_secondary)
+        };
+        paint.text(face, name, x, 393.0, BODY, ink);
+        if tab.view == view {
+            paint.rect(x, 414.0, underline, 2.0, theme.accent);
+        }
     }
-    paint.text(messages_face, "Messages", 344.0, 393.0, BODY, messages_ink);
-    paint.text(faces.ui, &tab.summary, 428.0, 393.0, BODY, theme.text_secondary);
+    paint.text(faces.ui, &tab.summary, summary_x(tab), 393.0, BODY, theme.text_secondary);
     paint.text(faces.ui, "Export…", centre_right - 76.0, 393.0, BODY, theme.text_primary);
+    if let Some(plan) = tab.plan.as_ref().filter(|_| tab.view == ResultView::Plan) {
+        plan_body(paint, plan);
+        return;
+    }
     if messages {
         for (index, line) in tab.messages.iter().enumerate().take(17) {
             let top = 426.0 + LINE_HEIGHT * index as f32;
@@ -895,6 +906,49 @@ fn results(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
         top = 446.0;
     }
     grid_body(paint, grid, top);
+}
+
+const PLAN_SEGMENT_X: f32 = 428.0;
+const PLAN_TOGGLE_WIDTH: f32 = 44.0;
+
+fn result_segments(tab: &QueryTab) -> Vec<(&'static str, ResultView, f32, f32)> {
+    let mut segments = vec![("Results", ResultView::Results, 272.0, 48.0), ("Messages", ResultView::Messages, 344.0, 64.0)];
+    if tab.plan.is_some() {
+        segments.push(("Plan", ResultView::Plan, PLAN_SEGMENT_X, 32.0));
+    }
+    segments
+}
+
+fn summary_x(tab: &QueryTab) -> f32 {
+    if tab.plan.is_some() { PLAN_SEGMENT_X + 56.0 } else { PLAN_SEGMENT_X }
+}
+
+fn plan_toggle_x(centre_right: f32) -> f32 {
+    centre_right - 88.0 - PLAN_TOGGLE_WIDTH
+}
+
+fn plan_body(paint: &mut Painter<'_, '_>, plan: &PlanView) {
+    let theme = paint.theme;
+    let faces = paint.faces;
+    let (centre_width, centre_right) = (paint.centre_width(), paint.centre_right);
+    let toggle = plan_toggle_x(centre_right);
+    if plan.text_shown {
+        paint.canvas.fill_rounded_rect(Rect::new(toggle, 390.0, PLAN_TOGGLE_WIDTH, 24.0), 4.0, theme.bg2);
+    }
+    paint.text(faces.ui, "Text", toggle + 8.0, 393.0, BODY, theme.text_primary);
+    if plan.text_shown {
+        for (index, line) in plan.plan.text.iter().enumerate().take(17) {
+            let top = 426.0 + LINE_HEIGHT * index as f32;
+            let shown = elided(faces.mono, line, centre_width - 20.0, CODE.0);
+            paint.text(faces.mono, &shown, 272.0, top, CODE, theme.text_primary);
+        }
+        return;
+    }
+    plan_view::draw(paint, plan, plan_area(centre_width));
+}
+
+fn plan_area(centre_width: f32) -> Rect {
+    Rect::new(260.0, 418.0, centre_width, BODY_BOTTOM - 418.0)
 }
 
 fn grid_body(paint: &mut Painter<'_, '_>, grid: &ResultGrid, top: f32) {
@@ -1102,8 +1156,12 @@ pub const NODE_BANNER: u32 = 113;
 pub const NODE_GRID: u32 = 114;
 /// The status bar.
 pub const NODE_STATUS_BAR: u32 = 115;
-/// The `Results` segment; `Messages` is the next id.
+/// The `Results` segment; `Messages` is the next id, and `Plan` the one after.
 pub const NODE_RESULTS_SEGMENT: u32 = 116;
+/// The plan's tree, under the `Plan` segment.
+pub const NODE_PLAN: u32 = 119;
+/// The plan's first node; the others follow in the plan's order.
+pub const NODE_FIRST_PLAN_NODE: u32 = 62_000;
 /// The sidebar's filter field.
 pub const NODE_FILTER: u32 = 120;
 /// The object tree.
@@ -1199,12 +1257,15 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
         nodes.push(node(NODE_ERROR_STRIP, NODE_MAIN_WINDOW, AccessRole::Status, &error.strip_text(), (260.0, 352.0, centre_width, 28.0)));
     }
     nodes.push(node(NODE_RESULT_VIEWS, NODE_MAIN_WINDOW, AccessRole::TabList, "Result views", (260.0, 386.0, centre_width, 32.0)));
-    for (offset, (name, view, x)) in [("Results", ResultView::Results, 272.0), ("Messages", ResultView::Messages, 344.0)].into_iter().enumerate() {
+    for (offset, (name, view, x, _)) in result_segments(tab).into_iter().enumerate() {
         let mut segment = node(NODE_RESULTS_SEGMENT + offset as u32, NODE_RESULT_VIEWS, AccessRole::Tab, name, (x, 386.0, 72.0, 32.0));
         segment.state.selected = tab.view == view;
         nodes.push(segment);
     }
-    nodes.push(node(NODE_STATUS_LINE, NODE_MAIN_WINDOW, AccessRole::Status, &status_line::spoken(&tab.summary), (428.0, 386.0, 760.0, 32.0)));
+    nodes.push(node(NODE_STATUS_LINE, NODE_MAIN_WINDOW, AccessRole::Status, &status_line::spoken(&tab.summary), (summary_x(tab), 386.0, 760.0, 32.0)));
+    if let Some(plan) = tab.plan.as_ref().filter(|plan| tab.view == ResultView::Plan && !plan.text_shown) {
+        plan_nodes(&mut nodes, plan, tab_focused && tab.focus == TabFocus::Plan, centre_width);
+    }
     if let Some(grid) = tab.grid.as_ref().filter(|_| tab.view == ResultView::Results) {
         grid_nodes(&mut nodes, grid, centre_width);
     }
@@ -1215,6 +1276,24 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
     bar.value = Some(status_bar_left(tab));
     nodes.push(bar);
     nodes
+}
+
+fn plan_nodes(nodes: &mut Vec<AccessNode>, plan: &PlanView, focused: bool, centre_width: f32) {
+    let area = plan_area(centre_width);
+    let mut tree = node(NODE_PLAN, NODE_MAIN_WINDOW, AccessRole::Group, "Plan", (area.x, area.y, area.w, area.h));
+    let count = plan.plan.nodes.len();
+    tree.value = Some(format!("{} {}", status_line::thousands(count), if count == 1 { "node" } else { "nodes" }));
+    nodes.push(tree);
+    for (index, plan_node) in plan.plan.nodes.iter().enumerate().take(plan_view::MAX_NODES) {
+        let Some(rect) = plan.node_rect(index, area) else {
+            continue;
+        };
+        let mut item = node(NODE_FIRST_PLAN_NODE + index as u32, NODE_PLAN, AccessRole::Button, &plan_node.operation, (rect.x, rect.y, rect.w, rect.h));
+        item.value = Some(plan.plan.spoken(index));
+        item.state.focused = focused && plan.current == index;
+        item.state.selected = plan.selected == Some(index);
+        nodes.push(item);
+    }
 }
 
 fn sidebar_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {

@@ -242,8 +242,13 @@ impl Workspace {
         let worker_cancel = cancel.clone();
         let statements = request.statements.clone();
         let dialect = request.dialect;
+        let rolled_back = request.explain.as_ref().is_some_and(|explain| explain.rolled_back);
         std::thread::spawn(move || {
             let outcomes = connection.run_script(dialect, &statements, &worker_cancel);
+            let left_open = outcomes.len() < statements.len() && outcomes.first().is_some_and(Result::is_ok);
+            if rolled_back && left_open {
+                let _ = connection.run_script(dialect, &["ROLLBACK".to_owned()], &CancelHandle::default());
+            }
             let _ = send.send((connection, outcomes));
         });
         if let Some(window) = self.main_window_mut() {
@@ -323,6 +328,17 @@ impl Workspace {
         if let Some(request) = window.tab.run_request(all) {
             self.start_run(request, now);
         }
+    }
+
+    /// Puts `text` in the editor, the caret at its end, and explains it as `Ctrl/Cmd+E`
+    /// (or, with `analyze`, `Ctrl/Cmd+Shift+E`) would; for scripted runs.
+    pub fn explain_text(&mut self, text: &str, analyze: bool, now: Instant) {
+        let Some(window) = self.main_window_mut() else {
+            return;
+        };
+        window.tab.editor = crate::editor::Editor::new(text);
+        let action = window.tab.explain(analyze);
+        self.tab_action(action, now);
     }
 
     fn act(&mut self, action: ConnectAction, now: Instant) -> WorkspaceCommand {

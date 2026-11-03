@@ -7,6 +7,7 @@ use crate::connection::{ResultTable, StatementFailure};
 use crate::dialect::QueryDialect;
 use crate::editor::{self, Editor};
 use crate::grid::{GridAnswer, ResultGrid, cell_text, column_widths};
+use crate::plan_view::{Plan, PlanAnswer, PlanView, explain_statements};
 use crate::statements::{source_table, statement_at, statements};
 use crate::status_line;
 
@@ -18,6 +19,9 @@ const TEXT_ADVANCE: f32 = 8.0;
 pub const ROWS_IN_VIEW: usize = 13;
 /// What the status bar says when a run key is pressed while a statement runs.
 pub const STILL_RUNNING: &str = "Running… press Esc to stop";
+/// The plan panel's width and height at the golden frame's size, for keeping the current
+/// node in view.
+pub const PLAN_PANEL: (f32, f32) = (1020.0, 358.0);
 
 /// Where the keyboard focus is in the query tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -29,6 +33,8 @@ pub enum TabFocus {
     DialectPill,
     /// The results grid.
     Grid,
+    /// The plan's tree.
+    Plan,
 }
 
 /// The results header's segment that is showing.
@@ -39,6 +45,8 @@ pub enum ResultView {
     Results,
     /// The statements' tag lines and the engine's error text.
     Messages,
+    /// The last `Explain`'s plan.
+    Plan,
 }
 
 /// An error from the engine shown in the editor (`docs/ux/workspace.md` 2.5): the squiggle
@@ -98,6 +106,25 @@ pub struct RunRequest {
     pub dialect: QueryDialect,
     /// Whether this is `Run all`.
     pub all: bool,
+    /// What `Explain` explains, when the run is one.
+    pub explain: Option<ExplainRun>,
+}
+
+/// The statement an `Explain` run explains and how its answer is read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplainRun {
+    /// Whether it runs the statement (`EXPLAIN ANALYZE`).
+    pub analyze: bool,
+    /// The statement's bytes in the editor's text.
+    pub statement: Range<usize>,
+    /// The statement's text.
+    pub statement_text: String,
+    /// Which of the run's statements answers with the plan.
+    pub plan_at: usize,
+    /// How many bytes were put before the statement.
+    pub prefix_len: usize,
+    /// Whether the run is wrapped in a transaction that is rolled back.
+    pub rolled_back: bool,
 }
 
 /// What the window must do after a key in the query tab.
@@ -151,6 +178,8 @@ pub struct QueryTab {
     pub running: bool,
     /// Whether `Stop` was pressed and the engine has not confirmed yet.
     pub stopping: bool,
+    /// The last `Explain`'s plan.
+    pub plan: Option<PlanView>,
 }
 
 impl QueryTab {
@@ -176,6 +205,7 @@ impl QueryTab {
             notice: None,
             running: false,
             stopping: false,
+            plan: None,
         }
     }
 
@@ -212,7 +242,54 @@ impl QueryTab {
             starts: ranges.iter().map(|range| range.start).collect(),
             dialect: self.dialect,
             all,
+            explain: None,
         })
+    }
+
+    /// What `Explain` (or, with `analyze`, `Explain (analyze)`) runs now: the first
+    /// statement of the selection, else the statement under the caret, as `EXPLAIN` in the
+    /// tab's dialect. The error is the `Messages` text for a dialect EggDB cannot explain in.
+    pub fn explain_request(&self, analyze: bool) -> Result<Option<RunRequest>, String> {
+        let Some(base) = self.run_request(false) else {
+            return Ok(None);
+        };
+        let (Some(statement), Some(&start)) = (base.statements.first(), base.starts.first()) else {
+            return Ok(None);
+        };
+        let explained = explain_statements(self.dialect, statement, analyze)?;
+        let count = explained.statements.len();
+        Ok(Some(RunRequest {
+            statements: explained.statements,
+            starts: vec![start; count],
+            dialect: self.dialect,
+            all: false,
+            explain: Some(ExplainRun {
+                analyze,
+                statement: start..start + statement.len(),
+                statement_text: statement.clone(),
+                plan_at: explained.plan_at,
+                prefix_len: explained.prefix_len,
+                rolled_back: explained.rolled_back,
+            }),
+        }))
+    }
+
+    /// `Ctrl/Cmd+E` (with `analyze`, `Ctrl/Cmd+Shift+E`): the run to start, or `Messages`
+    /// showing why the dialect cannot explain yet.
+    pub fn explain(&mut self, analyze: bool) -> TabAction {
+        if self.running {
+            self.notice = Some(STILL_RUNNING.to_owned());
+            return TabAction::None;
+        }
+        match self.explain_request(analyze) {
+            Ok(Some(request)) => TabAction::Run(request),
+            Ok(None) => TabAction::None,
+            Err(message) => {
+                self.messages = vec![message];
+                self.view = ResultView::Messages;
+                TabAction::None
+            }
+        }
     }
 
     /// Answers a key (`docs/ux/workspace.md` 2.2, 2.3, 3.3 to 3.5).
@@ -225,13 +302,22 @@ impl QueryTab {
         let run_all = primary && press.modifiers.shift;
         match press.key {
             Key::Enter if primary => return self.run_key(run_all),
+            Key::Character('e' | 'E') if primary => return self.explain(press.modifiers.shift),
+            Key::Character('t' | 'T') if press.modifiers.alt && !primary && self.view == ResultView::Plan => {
+                if let Some(plan) = &mut self.plan {
+                    plan.text_shown = !plan.text_shown;
+                }
+                return TabAction::None;
+            }
             Key::F5 => return self.run_key(false),
             Key::Character('.') if press.modifiers.command && self.running => {
                 return TabAction::Stop;
             }
             Key::Escape if self.running && self.focus == TabFocus::Editor => return TabAction::Stop,
             Key::Character('3') if primary => {
-                if self.grid.is_some() {
+                if self.view == ResultView::Plan && self.plan.is_some() {
+                    self.focus_plan();
+                } else if self.grid.is_some() {
                     self.focus_grid();
                 }
                 return TabAction::None;
@@ -242,6 +328,7 @@ impl QueryTab {
             TabFocus::Editor => self.editor_key(press),
             TabFocus::DialectPill => self.pill_key(press),
             TabFocus::Grid => self.grid_key(press),
+            TabFocus::Plan => self.plan_key(press),
         }
     }
 
@@ -259,17 +346,51 @@ impl QueryTab {
         if let Some(grid) = &mut self.grid {
             grid.focused = true;
         }
+        if let Some(plan) = &mut self.plan {
+            plan.focused = false;
+        }
     }
 
-    fn focus(&mut self, focus: TabFocus) {
-        if focus == TabFocus::Grid && self.grid.is_some() {
-            self.focus_grid();
-            return;
+    fn focus_plan(&mut self) {
+        self.focus = TabFocus::Plan;
+        if let Some(plan) = &mut self.plan {
+            plan.focused = true;
         }
-        self.focus = if focus == TabFocus::Grid { TabFocus::Editor } else { focus };
         if let Some(grid) = &mut self.grid {
             grid.focused = false;
         }
+    }
+
+    fn focus(&mut self, focus: TabFocus) {
+        let results = matches!(focus, TabFocus::Grid | TabFocus::Plan);
+        if results && self.view == ResultView::Plan && self.plan.is_some() {
+            self.focus_plan();
+            return;
+        }
+        if results && self.grid.is_some() {
+            self.focus_grid();
+            return;
+        }
+        self.focus = if results { TabFocus::Editor } else { focus };
+        if let Some(grid) = &mut self.grid {
+            grid.focused = false;
+        }
+        if let Some(plan) = &mut self.plan {
+            plan.focused = false;
+        }
+    }
+
+    fn plan_key(&mut self, press: KeyPress) -> TabAction {
+        let Some(plan) = &mut self.plan else {
+            self.focus(TabFocus::Editor);
+            return TabAction::None;
+        };
+        match plan.key(press, PLAN_PANEL) {
+            PlanAnswer::LeaveForward => self.focus(TabFocus::DialectPill),
+            PlanAnswer::LeaveBack => self.focus(TabFocus::Editor),
+            PlanAnswer::Moved | PlanAnswer::Selected | PlanAnswer::Cleared | PlanAnswer::Ignored => {}
+        }
+        TabAction::None
     }
 
     fn menu_key(&mut self, press: KeyPress, highlighted: usize) {
@@ -347,10 +468,13 @@ impl QueryTab {
         let before = self.editor.text();
         let line = self.editor.caret().line;
         self.editor.apply(key);
-        if self.editor.text() != before
-            && self.error.as_ref().is_some_and(|error| error.line == line + 1)
-        {
+        let changed = self.editor.text() != before;
+        if changed && self.error.as_ref().is_some_and(|error| error.line == line + 1) {
             self.error = None;
+        }
+        if let Some(plan) = self.plan.as_mut().filter(|_| changed) {
+            plan.highlight = None;
+            plan.selected = None;
         }
         TabAction::None
     }
@@ -395,6 +519,10 @@ impl QueryTab {
         outcomes: Vec<Result<Vec<ResultTable>, StatementFailure>>,
         elapsed: Duration,
     ) {
+        if let Some(explain) = &request.explain {
+            self.finish_explain(explain, outcomes, elapsed);
+            return;
+        }
         let was_stopping = self.stopping;
         self.running = false;
         self.stopping = false;
@@ -461,6 +589,81 @@ impl QueryTab {
             ),
             _ => status_line::tag_summary(&last_tag, elapsed),
         };
+    }
+
+    fn finish_explain(
+        &mut self,
+        explain: &ExplainRun,
+        outcomes: Vec<Result<Vec<ResultTable>, StatementFailure>>,
+        elapsed: Duration,
+    ) {
+        let was_stopping = self.stopping;
+        self.running = false;
+        self.stopping = false;
+        self.error = None;
+        self.messages.clear();
+        let mut plan_table = None;
+        let mut failure = None;
+        for (index, outcome) in outcomes.into_iter().enumerate() {
+            match outcome {
+                Ok(tables) => {
+                    for table in tables {
+                        self.messages.push(table.tag.clone());
+                        if index == explain.plan_at && !table.columns.is_empty() {
+                            plan_table = Some(table);
+                        }
+                    }
+                }
+                Err(statement_failure) => failure = Some((statement_failure, index)),
+            }
+        }
+        if let Some((statement_failure, index)) = failure {
+            self.messages.extend(statement_failure.report.iter().cloned());
+            if statement_failure.code == CANCELLED && was_stopping {
+                self.summary = status_line::stopped_summary(0);
+                self.status_tags = "Stopped".to_owned();
+                return;
+            }
+            self.summary = "Error".to_owned();
+            self.status_tags = "Error".to_owned();
+            self.view = ResultView::Messages;
+            if index == explain.plan_at {
+                let mut shifted = statement_failure;
+                shifted.position = shifted.position.and_then(|position| position.checked_sub(explain.prefix_len));
+                let original = RunRequest {
+                    statements: vec![explain.statement_text.clone()],
+                    starts: vec![explain.statement.start],
+                    dialect: self.dialect,
+                    all: false,
+                    explain: None,
+                };
+                self.show_error(&shifted, &original, 0);
+            }
+            return;
+        }
+        let read = plan_table.ok_or(crate::plan_view::PlanError::Empty).and_then(|table| {
+            let tag = table.tag.clone();
+            Plan::from_result(&table).map(|plan| (plan, tag))
+        });
+        match read {
+            Ok((plan, tag)) => {
+                let nodes = plan.nodes.len();
+                self.plan = Some(PlanView::new(plan, explain.statement.clone(), explain.statement_text.clone()));
+                if self.focus == TabFocus::Plan {
+                    self.focus_plan();
+                }
+                self.view = ResultView::Plan;
+                self.status_tags = status_line::tag_summary(&tag, elapsed);
+                let noun = if nodes == 1 { "node" } else { "nodes" };
+                self.summary = format!("{} {noun} · {}", status_line::thousands(nodes), status_line::elapsed_text(elapsed));
+            }
+            Err(error) => {
+                self.messages.push(error.to_string());
+                self.summary = "Error".to_owned();
+                self.status_tags = "Error".to_owned();
+                self.view = ResultView::Messages;
+            }
+        }
     }
 
     fn show_result(&mut self, table: ResultTable, statement: Option<&str>) {
@@ -569,6 +772,7 @@ pub fn editor_key(press: KeyPress) -> Option<editor::Key> {
 mod tests {
     use super::*;
     use crate::grid::ValueKind;
+    use eggdb_platform::window::Modifiers;
 
     fn press(key: Key, shift: bool, control: bool) -> KeyPress {
         let mut press = KeyPress::plain(key);
@@ -724,5 +928,59 @@ mod tests {
         assert_eq!(token_end("\"Order Lines\" x", 0), 13);
         assert_eq!(token_end("(", 0), 1);
         assert_eq!(token_end("", 0), 0);
+    }
+
+    #[test]
+    fn ctrl_e_explains_the_statement_and_the_plan_takes_the_results() {
+        let mut tab = QueryTab::with_text("Query 1", "SELECT 1;\nSELECT * FROM customers WHERE id = 2;");
+        let TabAction::Run(request) = tab.key(press(Key::Character('e'), false, true)) else {
+            panic!("Ctrl+E runs EXPLAIN");
+        };
+        assert_eq!(request.statements, ["EXPLAIN SELECT * FROM customers WHERE id = 2"]);
+        let explain = request.explain.clone().expect("an explain run");
+        assert_eq!((explain.analyze, explain.statement.start), (false, 10));
+        tab.started();
+        let plan = table(&["QUERY PLAN"], vec![vec![Some("Index Scan using customers_pkey on customers")]], "EXPLAIN");
+        tab.finish(&request, vec![Ok(vec![plan])], Duration::from_micros(400));
+        assert_eq!(tab.view, ResultView::Plan);
+        assert_eq!(tab.summary, "1 node · 0.4 ms");
+        assert!(tab.grid.is_none(), "Results keeps the previous rows");
+        let _ = tab.key(press(Key::Character('3'), false, true));
+        assert_eq!(tab.focus, TabFocus::Plan);
+        let _ = tab.key(press(Key::Enter, false, false));
+        let highlight = tab.plan.as_ref().and_then(|plan| plan.highlight.clone());
+        let at = tab.editor.text().find("customers").unwrap();
+        assert_eq!(highlight, Some(at..at + "customers".len()));
+        let _ = tab.key(KeyPress {
+            key: Key::Character('t'),
+            modifiers: Modifiers { alt: true, ..Modifiers::default() },
+        });
+        assert!(tab.plan.as_ref().is_some_and(|plan| plan.text_shown));
+    }
+
+    #[test]
+    fn ctrl_shift_e_wraps_a_write_in_a_rolled_back_transaction_and_oracle_says_not_supported() {
+        let mut tab = QueryTab::with_text("Query 1", "DELETE FROM t WHERE id = 1");
+        let TabAction::Run(request) = tab.key(press(Key::Character('E'), true, true)) else {
+            panic!("Ctrl+Shift+E runs EXPLAIN ANALYZE");
+        };
+        assert_eq!(request.statements, ["BEGIN", "EXPLAIN (ANALYZE, BUFFERS) DELETE FROM t WHERE id = 1", "ROLLBACK"]);
+        let failure = StatementFailure {
+            code: "42P01".to_owned(),
+            message: "relation \"t\" does not exist".to_owned(),
+            hint: None,
+            position: Some(27 + 12),
+            report: vec!["ERROR:  relation \"t\" does not exist".to_owned()],
+        };
+        tab.started();
+        tab.finish(&request, vec![Ok(Vec::new()), Err(failure)], Duration::from_millis(1));
+        assert_eq!(tab.view, ResultView::Messages);
+        let error = tab.error.as_ref().expect("the squiggle sits under the table's name");
+        assert_eq!(error.range, 12..13);
+        let mut oracle = QueryTab::with_text("Query 1", "SELECT 1 FROM dual");
+        oracle.set_dialect(QueryDialect::Oracle);
+        assert_eq!(oracle.key(press(Key::Character('e'), false, true)), TabAction::None);
+        assert_eq!(oracle.view, ResultView::Messages);
+        assert!(oracle.messages[0].starts_with("not_supported: "), "{:?}", oracle.messages);
     }
 }
