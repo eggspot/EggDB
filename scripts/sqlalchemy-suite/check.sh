@@ -7,9 +7,10 @@ Runs SQLAlchemy's own dialect compliance suite (test/dialect/test_suite.py from 
 2.0.36 source release, MIT) with its PostgreSQL dialect and psycopg 3 against eggdb serve, and
 fails when fewer tests pass than scripts/sqlalchemy-suite/minimum-passes.txt says: the pass
 count may only rise (D45, D163). Raise the number in the same pull request that makes more
-tests pass. eggdb_provision.py replaces SQLAlchemy's step that creates the citext and hstore
-extensions with one that goes on when EggDB answers 0A000 for them; the suite run here uses
-neither. PYTHON names a Python 3 with pip (default python3)."
+tests pass. The whole suite runs: SQLAlchemy's own --maxfail=250 is lifted, so the count does
+not depend on where the 250th failure falls. eggdb_provision.py creates the test_schema and
+test_schema_2 schemas SQLAlchemy's README.unittests.rst asks for, and the citext and hstore
+extensions (D308). PYTHON names a Python 3 with pip (default python3)."
 
 [ $# -eq 2 ] || { echo "$usage" >&2; exit 2; }
 eggdb=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
@@ -46,7 +47,7 @@ port=$(sed -E 's/.*"port":([0-9]+).*/\1/' "$work/serve.out" | head -n 1)
 
 cd "$work/sqlalchemy-2.0.36"
 set +e
-PYTHONPATH="$here" "$work/venv/bin/python" -m pytest test/dialect/test_suite.py -p no:cacheprovider -p eggdb_provision -q -rN \
+PYTHONPATH="$here" "$work/venv/bin/python" -m pytest test/dialect/test_suite.py -p no:cacheprovider -p eggdb_provision -q -rN --maxfail=0 \
   --dburi "postgresql+psycopg://eggdb:suite@127.0.0.1:$port/suite" > "$work/pytest.out" 2>&1
 set -e
 summary=$(tail -n 5 "$work/pytest.out" | grep -E '[0-9]+ (passed|failed)' | tail -n 1 || true)
