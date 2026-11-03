@@ -444,7 +444,11 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
         {
             ("?column?".into(), false)
         }
-        ExprKind::Column { name, .. } | ExprKind::Function { name, .. } => (name.clone(), true),
+        ExprKind::Function { name, .. } => (
+            crate::sql_json::column_name(name).map_or_else(|| name.clone(), str::to_owned),
+            true,
+        ),
+        ExprKind::Column { name, .. } => (name.clone(), true),
         ExprKind::SessionValue { name, .. }
         | ExprKind::SqliteFunction { name, .. }
         | ExprKind::OracleFunction { name, .. } => ((*name).to_owned(), true),
@@ -1225,6 +1229,7 @@ impl Evaluator<'_> {
             ExprKind::Literal(Literal::Decimal(text)) => decimal_literal(text, target, true),
             _ => {
                 let value = self.eval(expr, None)?;
+                refuse_infinite_date_without_infinities(&value)?;
                 if let Value::Text(text) = &value
                     && let Some(converted) = oracle_datetime_of(text, target)
                 {
@@ -1958,6 +1963,19 @@ fn read_by_dialect(sql_type: SqlType) -> Option<crate::Dialect> {
     }
 }
 
+fn refuse_infinite_date_without_infinities(value: &Value) -> SqlResult<()> {
+    if crate::temporal::infinity_sign(value).is_none() {
+        return Ok(());
+    }
+    match crate::constraints::current_dialect() {
+        crate::Dialect::Oracle => Err(crate::oracle_datetime::year_out_of_range()),
+        crate::Dialect::SqlServer => {
+            crate::sqlserver_conversion::refuse_infinite(value, "datetime2")
+        }
+        _ => Ok(()),
+    }
+}
+
 fn oracle_datetime_of(text: &str, target: SqlType) -> Option<SqlResult<Value>> {
     let readable = target.is_datetime() || matches!(target, SqlType::Interval { .. });
     if !readable || crate::constraints::current_dialect() != crate::Dialect::Oracle {
@@ -2371,6 +2389,8 @@ pub(crate) fn arithmetic(
     {
         return result;
     }
+    refuse_infinite_date_without_infinities(left)?;
+    refuse_infinite_date_without_infinities(right)?;
     if crate::constraints::current_dialect() == crate::Dialect::Oracle
         && (matches!(left, Value::Interval(_)) || matches!(right, Value::Interval(_)))
         && let Some(result) = crate::oracle_intervals::arithmetic(operator, left, right)

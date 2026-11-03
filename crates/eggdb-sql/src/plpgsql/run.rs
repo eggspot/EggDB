@@ -1758,6 +1758,7 @@ impl<'r> Run<'r> {
         }
         let offset = usize::try_from(subscript - i64::from(array.lower_bound)).unwrap_or(0);
         if offset >= array.items.len() {
+            crate::arrays::check_upper_bound(array.lower_bound, offset + 1)?;
             array.items.resize(offset + 1, Value::Null);
         }
         array.items[offset] = value;

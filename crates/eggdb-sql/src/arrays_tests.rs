@@ -143,6 +143,27 @@ SELECT 2"
 }
 
 #[test]
+fn concatenation_past_the_largest_upper_bound_is_refused_with_54000() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for sql in [
+        "SELECT '[2147483647:2147483647]={1}'::int[] || 2",
+        "SELECT '[2147483647:2147483647]={1}'::int[] || '{2}'::int[]",
+        "SELECT 0 || '[2147483647:2147483647]={1}'::int[]",
+    ] {
+        assert_eq!(state(&mut session, sql), "54000", "{sql}");
+    }
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT '[2147483646:2147483646]={1}'::int[] || 2 AS a"
+        )
+        .unwrap(),
+        "a\n[2147483646:2147483647]={1,2}\nSELECT 1"
+    );
+}
+
+#[test]
 fn an_array_larger_than_the_value_limit_is_refused_while_it_is_read() {
     let text = format!("{{{}}}", vec!["123456"; 10_000].join(","));
     let _limit = crate::memory::enter_value_limit(4096);

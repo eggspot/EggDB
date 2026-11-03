@@ -26,6 +26,17 @@ pub(crate) const POPULATE: [&str; 4] = [
     "jsonb_populate_recordset",
 ];
 
+/// The column name PostgreSQL gives a select-list item that calls one of the SQL/JSON functions.
+pub(crate) fn column_name(name: &str) -> Option<&'static str> {
+    match name {
+        EXISTS => Some("json_exists"),
+        VALUE => Some("json_value"),
+        QUERY => Some("json_query"),
+        TABLE => Some("json_table"),
+        _ => None,
+    }
+}
+
 const MAX_TABLE_ROWS: u64 = 1_000_000;
 /// The deepest `NESTED PATH` a `JSON_TABLE` may have.
 pub(crate) const MAX_NESTING: usize = 32;
@@ -1162,12 +1173,13 @@ struct TableRun<'a> {
     on_error: Behavior,
     width: usize,
     produced: Cell<u64>,
+    row_limit: u64,
 }
 
-fn too_many_rows() -> SqlError {
+fn too_many_rows(row_limit: u64) -> SqlError {
     SqlError::new(
         SqlState::PROGRAM_LIMIT_EXCEEDED,
-        format!("JSON_TABLE would produce more than {MAX_TABLE_ROWS} rows"),
+        format!("JSON_TABLE would produce more than {row_limit} rows"),
     )
 }
 
@@ -1176,14 +1188,11 @@ fn ordinal(index: usize) -> i64 {
 }
 
 impl TableRun<'_> {
-    fn charge(&self, rows: usize) -> SqlResult<()> {
-        let total = self
-            .produced
-            .get()
-            .saturating_add(u64::try_from(rows).unwrap_or(u64::MAX));
+    fn charge_one_row(&self) -> SqlResult<()> {
+        let total = self.produced.get().saturating_add(1);
         self.produced.set(total);
-        if total > MAX_TABLE_ROWS {
-            return Err(too_many_rows());
+        if total > self.row_limit {
+            return Err(too_many_rows(self.row_limit));
         }
         Ok(())
     }
@@ -1292,14 +1301,13 @@ impl TableRun<'_> {
                 } => own.push((*slot, self.exists(item, *slot, path, *on_error)?)),
                 PreparedColumn::Nested { path, columns } => {
                     for (index, child) in self.items(item, path)?.iter().enumerate() {
-                        let rows = self.rows_for(child, ordinal(index), columns)?;
-                        self.charge(rows.len())?;
-                        children.extend(rows);
+                        children.extend(self.rows_for(child, ordinal(index), columns)?);
                     }
                 }
             }
         }
         if children.is_empty() {
+            self.charge_one_row()?;
             children.push(vec![Value::Null; self.width]);
         }
         for row in &mut children {
@@ -1317,6 +1325,16 @@ fn table_rows(
     values: &[Value],
     names: &[String],
     types: &[Option<SqlType>],
+    sink: &mut RecordSink<'_>,
+) -> SqlResult<()> {
+    table_rows_within(values, names, types, MAX_TABLE_ROWS, sink)
+}
+
+fn table_rows_within(
+    values: &[Value],
+    names: &[String],
+    types: &[Option<SqlType>],
+    row_limit: u64,
     sink: &mut RecordSink<'_>,
 ) -> SqlResult<()> {
     let [document, plan, vars, rest @ ..] = values else {
@@ -1347,11 +1365,10 @@ fn table_rows(
         on_error: plan.on_error,
         width,
         produced: Cell::new(0),
+        row_limit,
     };
     for (index, item) in run.items(&document, &root)?.iter().enumerate() {
-        let rows = run.rows_for(item, ordinal(index), &columns)?;
-        run.charge(rows.len())?;
-        for row in rows {
+        for row in run.rows_for(item, ordinal(index), &columns)? {
             sink(row)?;
         }
     }
@@ -1407,5 +1424,49 @@ mod tests {
         }
         text.push_str("0;");
         assert!(TablePlan::decode(&text).is_err());
+    }
+
+    fn two_level_nested_rows(row_limit: u64) -> SqlResult<Vec<Vec<Value>>> {
+        let plan = TablePlan {
+            path: "$".to_owned(),
+            on_error: Behavior::Error,
+            columns: vec![TableColumn::Nested {
+                path: "$[*]".to_owned(),
+                columns: vec![
+                    TableColumn::Ordinality,
+                    TableColumn::Nested {
+                        path: "$[*]".to_owned(),
+                        columns: vec![TableColumn::Ordinality],
+                    },
+                ],
+            }],
+        };
+        let values = vec![
+            Value::Text("[[1, 2, 3], [4, 5, 6]]".into()),
+            Value::Text(plan.encode()),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+        ];
+        let names = vec!["outer".to_owned(), "inner".to_owned()];
+        let mut types = vec![Some(SqlType::Text); TABLE_FIXED_ARGUMENTS];
+        types.extend([Some(SqlType::BigInt), Some(SqlType::BigInt)]);
+        let mut rows = Vec::new();
+        table_rows_within(&values, &names, &types, row_limit, &mut |row| {
+            rows.push(row);
+            Ok(())
+        })?;
+        Ok(rows)
+    }
+
+    #[test]
+    fn the_row_limit_counts_each_output_row_once_across_nesting_levels() {
+        let rows = two_level_nested_rows(6).map_err(|error| error.message().to_owned());
+        assert_eq!(rows.map(|rows| rows.len()), Ok(6));
+        let refused = two_level_nested_rows(5).map(|rows| rows.len());
+        assert_eq!(
+            refused.map_err(|error| error.state()),
+            Err(SqlState::PROGRAM_LIMIT_EXCEEDED)
+        );
     }
 }

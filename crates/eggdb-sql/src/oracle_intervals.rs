@@ -606,6 +606,9 @@ pub(crate) fn extract(
 
 pub(crate) fn timestamp_difference(left: &Value, right: &Value) -> Option<SqlResult<Value>> {
     let instant = |value: &Value| -> Option<SqlResult<i64>> {
+        if crate::temporal::infinity_sign(value).is_some() {
+            return Some(Err(crate::oracle_datetime::year_out_of_range()));
+        }
         Some(match value {
             Value::Timestamp(micros) => Ok(*micros),
             Value::TimestampTz(micros) => datetime::utc_to_local(*micros),

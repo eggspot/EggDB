@@ -296,6 +296,23 @@ fn too_many_items() -> SqlError {
     )
 }
 
+/// Refuses an array starting at `lower_bound` with `length` elements when its upper bound would
+/// pass `i32::MAX`, with PostgreSQL's `54000`.
+pub(crate) fn check_upper_bound(lower_bound: i32, length: usize) -> SqlResult<()> {
+    let length = i64::try_from(length).unwrap_or(i64::MAX);
+    if i64::from(lower_bound)
+        .saturating_add(length)
+        .saturating_sub(1)
+        > i64::from(i32::MAX)
+    {
+        return Err(SqlError::new(
+            SqlState::PROGRAM_LIMIT_EXCEEDED,
+            "array size exceeds the maximum allowed",
+        ));
+    }
+    Ok(())
+}
+
 fn multidimensional() -> SqlError {
     SqlError::not_supported("multidimensional arrays are not supported yet")
 }
@@ -1196,6 +1213,7 @@ fn concatenate(
         }
     }
     let mut joined = builder.finish();
+    check_upper_bound(lower_bound, joined.items.len())?;
     joined.lower_bound = lower_bound;
     Ok(Value::Array(Box::new(joined)))
 }

@@ -1019,6 +1019,11 @@ mod tests {
             "SELECT CONVERT(date, stamp) FROM hr.moments WHERE id = 1",
             "SELECT CAST(d AS datetime2) FROM hr.moments WHERE id = 1",
             "SELECT stamp AT TIME ZONE 'UTC' FROM hr.moments WHERE id = 1",
+            "SELECT stamp + 1 FROM hr.moments WHERE id = 1",
+            "SELECT d - 1 FROM hr.moments WHERE id = 1",
+            "SELECT stamp - zoned FROM hr.moments WHERE id = 1",
+            "SELECT d - d FROM hr.moments WHERE id = 1",
+            "SELECT CAST(stamp AS varchar(40)) FROM hr.moments WHERE id = 1",
         ] {
             assert_eq!(vendor_code(&mut session, sql), Some(242), "{sql}");
         }
@@ -1047,6 +1052,16 @@ mod tests {
             "SELECT SYS_EXTRACT_UTC(zoned) FROM moments WHERE id = 1",
             "SELECT stamp + 1 FROM moments WHERE id = 1",
             "SELECT d - DATE '2024-01-01' FROM moments WHERE id = 1",
+            "SELECT stamp - 1 FROM moments WHERE id = 1",
+            "SELECT d + 1 FROM moments WHERE id = 1",
+            "SELECT 1 + d FROM moments WHERE id = 1",
+            "SELECT stamp + INTERVAL '1' DAY FROM moments WHERE id = 1",
+            "SELECT stamp - zoned FROM moments WHERE id = 1",
+            "SELECT zoned - zoned FROM moments WHERE id = 1",
+            "SELECT stamp - TIMESTAMP '2024-01-01 00:00:00' FROM moments WHERE id = 1",
+            "SELECT CAST(stamp AS timestamp) FROM moments WHERE id = 1",
+            "SELECT CAST(d AS date) FROM moments WHERE id = 1",
+            "SELECT CAST(stamp AS varchar2(40)) FROM moments WHERE id = 1",
         ] {
             assert_eq!(vendor_code(&mut session, sql), Some(1841), "{sql}");
         }
@@ -1056,6 +1071,13 @@ mod tests {
                 "SELECT TO_CHAR(d, 'YYYY') FROM moments WHERE id = 2"
             ),
             vec![vec![crate::Value::Text("2024".into())]]
+        );
+        assert_eq!(
+            rows(
+                &mut session,
+                "SELECT TO_CHAR(stamp + 1, 'YYYY-MM-DD') FROM moments WHERE id = 2"
+            ),
+            vec![vec![crate::Value::Text("2024-01-02".into())]]
         );
     }
 

@@ -328,6 +328,21 @@ fn json_query_wraps_and_keeps_or_omits_quotes() {
 }
 
 #[test]
+fn sql_json_functions_name_their_columns_as_postgresql_does() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let output = run(
+        &mut session,
+        r#"SELECT json_value('{"a": 1}', '$.a'), json_query('{"a": 1}', '$'), json_exists('{"a": 1}', '$.a')"#,
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        output.lines().next(),
+        Some("json_value|json_query|json_exists")
+    );
+}
+
+#[test]
 fn json_table_builds_rows_from_columns() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
