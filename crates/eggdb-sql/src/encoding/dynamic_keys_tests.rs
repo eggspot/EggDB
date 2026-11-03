@@ -419,3 +419,91 @@ fn a_dynamic_column_of_any_affinity_reads_every_storage_class_in_rows() {
         assert_eq!(decode_row(&encoded, &columns), Ok(values.clone()));
     }
 }
+
+fn blob_table_keyed(primary_key: Vec<usize>, indexes: Vec<IndexDefinition>) -> TableDefinition {
+    TableDefinition {
+        primary_key,
+        indexes,
+        ..blob_only_table()
+    }
+}
+
+fn index_on(columns: Vec<usize>, unique: bool, backs_unique_constraint: bool) -> IndexDefinition {
+    IndexDefinition {
+        id: 1,
+        name: "t_key".into(),
+        unique,
+        columns,
+        backs_unique_constraint,
+        ..IndexDefinition::default()
+    }
+}
+
+#[test]
+fn a_table_keying_a_blob_or_untyped_column_is_version_13_and_older_readers_refuse_it() {
+    let cases = [
+        ("primary key on the blob column", blob_table_keyed(vec![1], Vec::new())),
+        (
+            "primary key including the blob column",
+            blob_table_keyed(vec![0, 1], Vec::new()),
+        ),
+        (
+            "UNIQUE on the blob column",
+            blob_table_keyed(vec![0], vec![index_on(vec![1], true, true)]),
+        ),
+        (
+            "unique index on the blob column",
+            blob_table_keyed(vec![0], vec![index_on(vec![1], true, false)]),
+        ),
+        (
+            "index on the blob column",
+            blob_table_keyed(Vec::new(), vec![index_on(vec![0, 1], false, false)]),
+        ),
+    ];
+    for (case, table) in cases {
+        let mut encoded = table.encode();
+        assert_eq!(encoded[0], AFFINITY_FORMAT_VERSION, "{case}");
+        assert_eq!(encoded[type_after(&encoded, "anything_blob")], 24, "{case}");
+        assert_eq!(TableDefinition::decode("t", &encoded), Ok(table), "{case}");
+        for older in [DEFINED_TYPES_FORMAT_VERSION, BASE_TYPES_FORMAT_VERSION] {
+            let mut older_reader = Reader::new(&encoded, "table definition");
+            let error = older_reader.version_up_to(older).unwrap_err();
+            assert_eq!(error.state().code(), "0A000", "{case}");
+            assert!(error.message().contains("format version 13"), "{case}: {error}");
+        }
+        for claimed in [DEFINED_TYPES_FORMAT_VERSION, BASE_TYPES_FORMAT_VERSION] {
+            encoded[0] = claimed;
+            assert!(damaged(&encoded), "{case} claimed version {claimed}");
+        }
+    }
+}
+
+#[test]
+fn a_blob_table_whose_keys_skip_its_blob_columns_stays_version_10_byte_for_byte() {
+    let cases = [
+        ("no keys", blob_table_keyed(Vec::new(), Vec::new())),
+        ("primary key on id", blob_only_table()),
+        (
+            "index on id",
+            blob_table_keyed(Vec::new(), vec![index_on(vec![0], false, false)]),
+        ),
+        (
+            "UNIQUE on id",
+            blob_table_keyed(Vec::new(), vec![index_on(vec![0], true, true)]),
+        ),
+    ];
+    for (case, table) in cases {
+        let mut encoded = table.encode();
+        assert_eq!(encoded[0], DEFINED_TYPES_FORMAT_VERSION, "{case}");
+        assert_eq!(encoded[type_after(&encoded, "anything_blob")], 24, "{case}");
+        assert_eq!(TableDefinition::decode("t", &encoded), Ok(table), "{case}");
+        let mut older_reader = Reader::new(&encoded, "table definition");
+        assert_eq!(
+            older_reader.version_up_to(DEFINED_TYPES_FORMAT_VERSION),
+            Ok(DEFINED_TYPES_FORMAT_VERSION),
+            "{case}"
+        );
+        encoded[0] = AFFINITY_FORMAT_VERSION;
+        assert!(damaged(&encoded), "{case} claimed version 13");
+    }
+}

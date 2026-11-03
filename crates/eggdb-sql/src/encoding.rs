@@ -849,6 +849,23 @@ impl TableDefinition {
             .any(|column| has_affinity(column.sql_type))
     }
 
+    fn keys_a_dynamic_column(&self) -> bool {
+        let dynamic = |at: &usize| {
+            self.columns
+                .get(*at)
+                .is_some_and(|column| column.sql_type.is_dynamic())
+        };
+        self.primary_key.iter().any(dynamic)
+            || self
+                .indexes
+                .iter()
+                .any(|index| index.columns.iter().any(dynamic))
+    }
+
+    fn needs_affinity_version(&self) -> bool {
+        self.uses_affinities() || self.keys_a_dynamic_column()
+    }
+
     fn encode_defined(&self, out: &mut Vec<u8>) {
         put_varint(out, self.domains.len() as u64);
         for entry in &self.domains {
@@ -1011,7 +1028,7 @@ impl TableDefinition {
     }
 
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let version = if self.uses_affinities() {
+        let version = if self.needs_affinity_version() {
             AFFINITY_FORMAT_VERSION
         } else if self.uses_base_types() {
             BASE_TYPES_FORMAT_VERSION
@@ -1347,7 +1364,7 @@ impl TableDefinition {
         if version == BASE_TYPES_FORMAT_VERSION && !table.uses_base_types() {
             return Err(reader.damaged());
         }
-        if affinities_allowed != table.uses_affinities() {
+        if affinities_allowed != table.needs_affinity_version() {
             return Err(reader.damaged());
         }
         Ok(table)

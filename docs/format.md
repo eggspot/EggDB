@@ -692,9 +692,11 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
   its sorted pairs); a view with such a column starts with version byte 12, and a user-defined
   type with such a member is written with record version 2. Every other table, view and type
   keeps its version and bytes, so older releases refuse only what holds these types.
-  Table-definition version 13 (D305) is written only for a table with a SQLite column of `TEXT`,
-  `NUMERIC` or `REAL` affinity, type tag `25` followed by the affinity's code; a `BLOB` column
-  keeps tag `24` in version 10 (D153), and an older release refuses version 13 by name. Keys and
+  Table-definition version 13 (D305) is written for a table with a SQLite column of `TEXT`,
+  `NUMERIC` or `REAL` affinity (type tag `25` followed by the affinity's code) and for a table
+  whose primary key or any index covers a dynamic column of any affinity; a `BLOB` or untyped
+  column that no key covers keeps tag `24` in version 10 byte for byte (D153), and an older
+  release refuses version 13 by name. Keys and
   index entries of these columns use a class-ordered encoding (numbers by exact value, then
   text, then blobs, NULL last), and rows keep the four storage-class tags. A SQLite
   table's `CREATE TABLE` text as written is one record per table (catalog prefix, `0x15`, the

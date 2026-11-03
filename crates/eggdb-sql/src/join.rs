@@ -602,7 +602,7 @@ fn primary_key_lefts(
     offset: usize,
     pairs: &[(usize, usize)],
 ) -> Option<Vec<usize>> {
-    if table.primary_key.is_empty() {
+    if table.primary_key.is_empty() || !key_lookups_fit(table, &table.primary_key) {
         return None;
     }
     table
@@ -617,6 +617,14 @@ fn primary_key_lefts(
         .collect()
 }
 
+fn key_lookups_fit(table: &TableDefinition, columns: &[usize]) -> bool {
+    columns.iter().all(|&column| {
+        table.columns.get(column).is_some_and(|column| {
+            crate::plan::key_lookup_matches_comparison(column.sql_type)
+        })
+    })
+}
+
 fn index_lefts(
     table: &TableDefinition,
     offset: usize,
@@ -627,6 +635,7 @@ fn index_lefts(
         let lefts: Vec<usize> = index
             .columns
             .iter()
+            .take_while(|&&column| key_lookups_fit(table, &[column]))
             .map_while(|&column| {
                 pairs
                     .iter()

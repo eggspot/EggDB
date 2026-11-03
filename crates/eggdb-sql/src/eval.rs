@@ -1097,7 +1097,10 @@ impl Evaluator<'_> {
             crate::memory::check_value_bytes(left.len().saturating_add(right.len()))?;
         }
         Ok(Concatenated::scalar(
-            match (left.to_text(), right.to_text()) {
+            match (
+                concatenation_text(&left, sqlite),
+                concatenation_text(&right, sqlite),
+            ) {
                 (Some(mut left), Some(right)) => {
                     crate::memory::check_value_bytes(left.len().saturating_add(right.len()))?;
                     left.push_str(&right);
@@ -1896,6 +1899,14 @@ fn as_text_if_character(value: Value) -> Value {
             Value::Text(text)
         }
         other => other,
+    }
+}
+
+fn concatenation_text(value: &Value, sqlite: bool) -> Option<String> {
+    match value {
+        Value::Double(number) if sqlite => crate::sqlite_functions::real_text(*number),
+        Value::Real(number) if sqlite => crate::sqlite_functions::real_text(f64::from(*number)),
+        _ => value.to_text(),
     }
 }
 

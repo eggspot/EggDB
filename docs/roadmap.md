@@ -242,10 +242,12 @@ a string compared with a `NUMERIC` column takes its affinity, and these columns 
 can be primary keys, `UNIQUE` and indexed, ordered as SQLite orders values (numbers by exact
 value, then text, then blobs) by a class-ordered key encoding in table-definition version 13
 (D305). Next for these: dynamic typing for `INTEGER` columns (text in an `INTEGER` column, reals
-kept as reals), an integer compared with a `TEXT` column turned into text first, `CAST(x AS
-NUMERIC)` giving integers, view columns keeping their source column's affinity, `PRAGMA
-table_info` showing the declared type as written, per-value classes for SQLite columns in the C
-API's column kinds, and a benchmark of keyed lookups on `TEXT` keys against SQLite.
+kept as reals), an integer compared with a `TEXT` column turned into text first, a `TEXT` or
+untyped column's values turned into numbers when compared with a `NUMERIC` or `REAL` column,
+`CAST(x AS NUMERIC)` giving integers, view columns keeping their source column's affinity,
+per-value classes for SQLite columns in the C API's column kinds, and a benchmark of keyed
+lookups on `TEXT` keys against SQLite. `PRAGMA table_info` shows the declared type as written
+(D305).
 
 More tracks that run alongside the milestones, each starting where its dependencies land:
 - **The project (D21):** contributing guide, code of conduct, security policy, the stability
@@ -492,9 +494,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `WITHOUT ROWID` tables and UTF-16 databases in SQLite files (D180).
 - `eggdb restore` from an SQLite file into an EggDB file (D13, D180).
 - SQLite's dynamic typing for `INTEGER` columns (text kept as text, reals as reals), an integer
-  compared with a `TEXT` column turned into text first, `CAST(x AS NUMERIC)` giving integers, view
-  columns keeping their source's affinity, `PRAGMA table_info` showing the declared type as
-  written, and per-value classes in the C API's column kinds; the other affinities, untyped
+  compared with a `TEXT` column turned into text first, a `TEXT` or untyped column's values
+  turned into numbers when compared with a `NUMERIC` or `REAL` column, `CAST(x AS NUMERIC)`
+  giving integers, view columns keeping their source's affinity, and per-value classes in the C
+  API's column kinds; the other affinities, untyped
   columns and keys on every dynamic column are built (D305). Check: keyed lookups on `TEXT` keys
   benchmarked against SQLite.
 - SQLite's `VACUUM` in SQL, blob, JSON and math functions, `group_concat`, `total` and

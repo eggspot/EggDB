@@ -348,13 +348,30 @@ impl<'s> Session<'s> {
         Ok(match (pragma.name.as_str(), argument) {
             ("table_info", Some(table)) => {
                 let table = table.to_lowercase();
-                let tables = self.read(|reader, _| read_tables(reader))?;
-                let rows = match tables.iter().find(|schema| schema.name == table) {
-                    Some(schema) => schema
+                let found = self.read(|reader, _| {
+                    let Some(schema) = read_tables(reader)?
+                        .into_iter()
+                        .find(|schema| schema.name == table)
+                    else {
+                        return Ok(None);
+                    };
+                    let text = kept_create_text(reader, &schema)?;
+                    let declared = crate::sqlite_schema_text::declared_column_types(&text);
+                    Ok(Some((schema, declared)))
+                })?;
+                let rows = match found {
+                    Some((schema, declared)) => schema
                         .columns
                         .iter()
                         .enumerate()
                         .map(|(index, column)| {
+                            let type_text = declared
+                                .iter()
+                                .find(|(name, _)| name.eq_ignore_ascii_case(&column.name))
+                                .map_or_else(
+                                    || sqlite_type_name(column.sql_type).to_owned(),
+                                    |(_, text)| text.clone(),
+                                );
                             let key_position = schema
                                 .primary_key
                                 .iter()
@@ -364,7 +381,7 @@ impl<'s> Session<'s> {
                             vec![
                                 Value::BigInt(index as i64),
                                 Value::Text(column.name.clone()),
-                                Value::Text(sqlite_type_name(column.sql_type).to_owned()),
+                                Value::Text(type_text),
                                 Value::BigInt(i64::from(not_null)),
                                 column.default.clone().map_or(Value::Null, Value::Text),
                                 Value::BigInt(key_position),

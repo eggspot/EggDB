@@ -134,6 +134,10 @@ fn same_family(value: &Value, sql_type: SqlType) -> bool {
     }
 }
 
+pub(crate) fn key_lookup_matches_comparison(sql_type: SqlType) -> bool {
+    !sql_type.is_dynamic() || crate::constraints::current_dialect() == crate::Dialect::Sqlite
+}
+
 fn constant(expr: &Expr, column: &Column) -> Option<Value> {
     if check_columns(expr, Scope::empty()).is_err() {
         return None;
@@ -143,12 +147,11 @@ fn constant(expr: &Expr, column: &Column) -> Option<Value> {
         row: &[],
         correlation: None,
     };
+    if !key_lookup_matches_comparison(column.sql_type) {
+        return None;
+    }
     let original = evaluator.eval(expr, Some(column.sql_type)).ok()?;
-    if column.sql_type.is_dynamic() {
-        if crate::constraints::current_dialect() != crate::Dialect::Sqlite {
-            return None;
-        }
-    } else if !same_family(&original, column.sql_type) {
+    if !column.sql_type.is_dynamic() && !same_family(&original, column.sql_type) {
         return None;
     }
     let converted = convert(original.clone(), column.sql_type, Conversion::Assignment).ok()?;

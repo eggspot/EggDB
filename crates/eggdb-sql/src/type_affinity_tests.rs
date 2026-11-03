@@ -224,3 +224,142 @@ fn casts_keep_their_static_types() {
         "typeof(CAST(5 AS TEXT))|typeof(CAST('2' AS REAL))\ntext|real\nSELECT 1"
     );
 }
+
+fn count(session: &mut Session<'_>, sql: &str) -> String {
+    let rendered = last(session, sql);
+    rendered.lines().nth(1).unwrap_or_default().to_owned()
+}
+
+#[test]
+fn keyed_and_scanned_dynamic_columns_find_the_same_rows_in_the_sqlite_and_other_dialects() {
+    let store = MemoryStore::default();
+    {
+        let mut session = sqlite(&store);
+        last(
+            &mut session,
+            "CREATE TABLE by_key (id PRIMARY KEY); \
+             CREATE TABLE by_index (id); \
+             CREATE INDEX by_index_id ON by_index (id); \
+             CREATE TABLE by_scan (id); \
+             INSERT INTO by_key VALUES (9007199254740993), (9007199254740992.5e0); \
+             INSERT INTO by_index SELECT id FROM by_key; \
+             INSERT INTO by_scan SELECT id FROM by_key",
+        );
+    }
+    for dialect in [Dialect::Sqlite, Dialect::PostgreSql, Dialect::MySql] {
+        let mut session = Session::with_dialect(&store, dialect);
+        let scanned = count(
+            &mut session,
+            "SELECT count(*) FROM by_scan WHERE id = 9007199254740993",
+        );
+        for table in ["by_key", "by_index"] {
+            assert_eq!(
+                count(
+                    &mut session,
+                    &format!("SELECT count(*) FROM {table} WHERE id = 9007199254740993")
+                ),
+                scanned,
+                "{dialect:?} {table}"
+            );
+        }
+        let joined = count(
+            &mut session,
+            "SELECT count(*) FROM by_scan AS a JOIN by_scan AS b ON b.id = a.id",
+        );
+        for table in ["by_key", "by_index"] {
+            assert_eq!(
+                count(
+                    &mut session,
+                    &format!("SELECT count(*) FROM by_scan AS a JOIN {table} AS b ON b.id = a.id")
+                ),
+                joined,
+                "{dialect:?} join {table}"
+            );
+        }
+    }
+    let mut session = sqlite(&store);
+    assert_eq!(
+        count(
+            &mut session,
+            "SELECT count(*) FROM by_key WHERE id = 9007199254740993"
+        ),
+        "1"
+    );
+    assert_eq!(
+        state(&mut session, "INSERT INTO by_key VALUES (9007199254740993)"),
+        "23505"
+    );
+}
+
+#[test]
+fn table_info_shows_each_column_type_as_declared() {
+    let store = MemoryStore::default();
+    let mut session = sqlite(&store);
+    last(
+        &mut session,
+        "CREATE TABLE declared (b DATETIME, c BOOLEAN, f DATE, d DECIMAL(10, 2), u, \
+         v varchar(20) NOT NULL, \"quoted name\" Unsigned Big Int PRIMARY KEY, \
+         CHECK (length(v) > 0))",
+    );
+    assert_eq!(
+        last(&mut session, "PRAGMA table_info(declared)"),
+        "cid|name|type|notnull|dflt_value|pk\n\
+         0|b|DATETIME|0|NULL|0\n\
+         1|c|BOOLEAN|0|NULL|0\n\
+         2|f|DATE|0|NULL|0\n\
+         3|d|DECIMAL(10, 2)|0|NULL|0\n\
+         4|u||0|NULL|0\n\
+         5|v|varchar(20)|1|NULL|0\n\
+         6|quoted name|Unsigned Big Int|0|NULL|1\n\
+         SELECT 7"
+    );
+}
+
+#[test]
+fn declared_column_types_read_a_create_table_text_and_nothing_else() {
+    use crate::sqlite_schema_text::declared_column_types;
+    assert_eq!(
+        declared_column_types(
+            "CREATE TABLE IF NOT EXISTS t (a INTEGER PRIMARY KEY, b, c DOUBLE PRECISION DEFAULT (1), \
+             CONSTRAINT k UNIQUE (b), FOREIGN KEY (a) REFERENCES p (id))"
+        ),
+        vec![
+            ("a".to_owned(), "INTEGER".to_owned()),
+            ("b".to_owned(), String::new()),
+            ("c".to_owned(), "DOUBLE PRECISION".to_owned()),
+        ]
+    );
+    for text in [
+        "CREATE TABLE t AS SELECT count(x) FROM u",
+        "CREATE TABLE t (a TEXT",
+        "CREATE TABLE t (a NUMERIC(10",
+        "",
+        "(",
+        ")",
+    ] {
+        assert_eq!(declared_column_types(text), Vec::new(), "{text}");
+    }
+}
+
+#[test]
+fn concatenating_a_real_spells_it_as_sqlite_does() {
+    let store = MemoryStore::default();
+    let mut session = sqlite(&store);
+    last(
+        &mut session,
+        "CREATE TABLE spelled (n NUMERIC, r REAL); \
+         INSERT INTO spelled VALUES ('1e400', 2), ('-1e400', 0.5)",
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT n || '' AS a, r || 'x' AS b FROM spelled ORDER BY r"
+        ),
+        "a|b\n-Inf|0.5x\nInf|2.0x\nSELECT 2"
+    );
+    last(&mut session, "UPDATE spelled SET n = n || ''");
+    assert_eq!(
+        last(&mut session, "SELECT typeof(n), n FROM spelled ORDER BY r"),
+        "typeof(n)|n\ntext|-Inf\ntext|Inf\nSELECT 2"
+    );
+}

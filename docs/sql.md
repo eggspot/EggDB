@@ -3851,12 +3851,16 @@ keys a `citext` is its case-folded text, keyed as text is. An older release refu
 table by name. Table versions skip 8 and 12, which are view versions.
 
 A SQLite column that holds every storage class is type tag `24` when its affinity is `BLOB`
-(D153; written in version 10, as v0.2.0 writes it) and tag `25` followed by its affinity's code
-(`1` `TEXT`, `2` `NUMERIC`, `3` `REAL`) otherwise. Version 13 (D305, `AFFINITY_FORMAT_VERSION`)
-is written only for a table with a tag `25` column: the version 11 layout with tag `25` allowed.
-Every other table keeps its version and bytes; a version 13 table without such a column, tag
-`25` in an older version, a code other than those three, or tag `25` in a view or a
-user-defined type is damage, and an older release refuses a version 13 table by name. A view
+(D153) and tag `25` followed by its affinity's code (`1` `TEXT`, `2` `NUMERIC`, `3` `REAL`)
+otherwise. Version 13 (D305, `AFFINITY_FORMAT_VERSION`), the version 11 layout with tag `25`
+allowed, is written for a table with a tag `25` column and for a table whose primary key or any
+index (a `UNIQUE` constraint's included) covers a tag `24` or tag `25` column, since those keys
+use the encoding below, which v0.2.0 does not know. A `BLOB` or untyped column that no key
+covers stays tag `24` in version 10, byte for byte as v0.2.0 writes it, so `CREATE INDEX` on
+such a column rewrites its table's definition as version 13. Every other table keeps its
+version and bytes; a version 13 table with neither, a version 10 or 11 table keying a tag `24`
+column, tag `25` in an older version, a code other than those three, or tag `25` in a view or
+a user-defined type is damage, and an older release refuses a version 13 table by name. A view
 records no type for such a column. In rows these columns hold the tags of the four classes
 (`3` integer, `5` real, `7` text, `18` blob) whatever their affinity. In keys and index entries
 a value of such a column is `0x02` for NULL (after every value, as in other columns) or `0x01`
@@ -4273,13 +4277,16 @@ And more, not in the suite yet:
   column is not turned into text first (SQLite compares `t = 5` as `t = '5'`), and a column of
   a view has no affinity of its own.
 - Tables made before D305 keep the types they were made with: their `TEXT`, untyped and `DATE`
-  columns stay `text` and their `REAL`, `NUMERIC` and `DECIMAL` columns `double precision`.
-- `PRAGMA table_info` shows `BLOB` for a column without a declared type, where SQLite shows an
-  empty type.
+  columns stay `text`, their `BOOLEAN` columns `bigint`, and their `REAL`, `NUMERIC` and
+  `DECIMAL` columns `double precision`.
+- A `NUMERIC` or `REAL` column compared with a `TEXT` or untyped column does not apply its
+  affinity to the other column's values (SQLite compares `n = t` with `t` turned into a number
+  when it looks like one); only constants take the affinity.
 - Names fold to lower case: result columns and `PRAGMA table_info` show `id` for a column
-  declared `Id`. `PRAGMA table_info` and `sqlite_schema.sql` show the affinity's type name
-  (`INTEGER`, `TEXT`, `REAL`) and a `CREATE TABLE` regenerated from the catalog, not the text
-  as written.
+  declared `Id`. `PRAGMA table_info` shows each column's type as the `CREATE TABLE` text declared it (`DATETIME`,
+  `DECIMAL(10, 2)`, empty for an untyped column), as SQLite does; a table whose kept text no
+  longer matches its catalog (after a change other than `ADD COLUMN`), or that was not made in
+  the SQLite dialect, shows the affinity's type name (`INTEGER`, `TEXT`, `REAL`).
 - An `INTEGER PRIMARY KEY` given `0` takes the next row id where SQLite stores 0, and
   `AUTOINCREMENT` reuses the row id of a deleted last row (SQLite's never does).
   `last_insert_rowid()` is not changed by inserts into tables whose key is not an `INTEGER

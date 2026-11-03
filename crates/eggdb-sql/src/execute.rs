@@ -2674,6 +2674,9 @@ fn point_key(table: &TableDefinition, scope: Scope<'_>, filter: &Expr) -> Option
     let mut key = rows_prefix(table.id);
     for &index in &table.primary_key {
         let column = &table.columns[index];
+        if !crate::plan::key_lookup_matches_comparison(column.sql_type) {
+            return None;
+        }
         let found = key_equality(filter, scope, index)?;
         let original = constants.eval(found, Some(column.sql_type)).ok()?;
         let converted = convert(original.clone(), column.sql_type, Conversion::Assignment).ok()?;
