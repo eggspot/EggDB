@@ -167,6 +167,8 @@ pub enum WindowEvent {
     FileDragLeft,
     /// Files were dropped onto the window, in the order the system listed them.
     FilesDropped(Vec<PathBuf>),
+    /// A screen reader asked a node of the accessibility tree to do something.
+    AccessRequested(AccessRequest),
 }
 
 /// One choice of an open-file dialog's file-type menu: its name and the patterns it shows,
@@ -253,6 +255,24 @@ pub enum AccessRole {
     CheckBox,
     /// A link.
     Link,
+    /// A toolbar holding buttons.
+    Toolbar,
+    /// A button that shows a value and opens a menu of choices (the dialect pill).
+    ComboBox,
+    /// A multi-line editable text area (the query editor).
+    TextArea,
+    /// Text announced at once when it appears (the editor's error strip).
+    Alert,
+    /// A tree of items (the object tree, the plan).
+    Tree,
+    /// One item of a tree, with its level, position and set size.
+    TreeItem,
+    /// A grid of cells with a row and column count (the results grid).
+    Grid,
+    /// A column's header cell in a grid.
+    ColumnHeader,
+    /// One cell of a grid, with its row and column index.
+    Cell,
 }
 
 /// Rectangle of an accessibility node in logical pixels, from the window's top-left corner.
@@ -281,7 +301,112 @@ pub struct AccessState {
     pub selected: bool,
     /// The button `Enter` activates.
     pub default_button: bool,
+    /// For a tree item or a disclosure, whether it is expanded; `None` for a leaf or a node
+    /// that cannot expand.
+    pub expanded: Option<bool>,
+    /// The value is in error (a field the failure is about, the editor's error range).
+    pub invalid: bool,
+    /// The value can be read but not changed (the DDL box).
+    pub read_only: bool,
 }
+
+/// What a screen reader may ask a node to do; each bridge offers only these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AccessActions {
+    /// Activate it, as `Enter` or `Space` on a button does.
+    pub invoke: bool,
+    /// Flip it, as `Space` on a checkbox does.
+    pub toggle: bool,
+    /// Expand or collapse it, as `Right` and `Left` on a tree item do.
+    pub expand_collapse: bool,
+    /// Replace its text.
+    pub set_value: bool,
+    /// Move the keyboard focus to it.
+    pub focus: bool,
+    /// Make it the selected one of its container (a tab, a tree item, a cell).
+    pub select: bool,
+}
+
+/// The caret and selection of a text node's value, in characters from the start: the
+/// selection runs between `anchor` and `caret`, and is empty when they are equal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AccessCaret {
+    /// Where the selection started.
+    pub anchor: usize,
+    /// Where the caret is.
+    pub caret: usize,
+}
+
+impl AccessCaret {
+    /// The selected characters, start before end.
+    pub fn range(self) -> (usize, usize) {
+        (self.anchor.min(self.caret), self.anchor.max(self.caret))
+    }
+}
+
+/// The size of a grid or tree: every row and column it has, not only the visible ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AccessTable {
+    /// The number of rows.
+    pub rows: usize,
+    /// The number of columns.
+    pub columns: usize,
+}
+
+/// Where a cell or column header is in its grid, from zero; a header's row is `0` and its
+/// cells' rows count from `1` in the bridges that put headers in the first row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AccessCell {
+    /// The row, from zero among the data rows.
+    pub row: usize,
+    /// The column, from zero.
+    pub column: usize,
+}
+
+/// Where a tree item is: its level from one, its position among its siblings from one, and
+/// how many siblings (itself included) it has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AccessTreePosition {
+    /// The level, `1` for a top-level item.
+    pub level: usize,
+    /// The position among its siblings, from one.
+    pub position: usize,
+    /// The number of siblings, itself included.
+    pub set_size: usize,
+}
+
+/// What a screen reader asked one node to do ([`WindowEvent::AccessRequested`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccessAction {
+    /// Move the keyboard focus to the node.
+    Focus,
+    /// Activate it.
+    Invoke,
+    /// Flip it.
+    Toggle,
+    /// Expand it.
+    Expand,
+    /// Collapse it.
+    Collapse,
+    /// Make it the selected one of its container.
+    Select,
+    /// Replace its text with this.
+    SetValue(String),
+    /// Put the caret at `caret` with the selection from `anchor`, in characters.
+    SetCaret(AccessCaret),
+}
+
+/// A screen reader's request: the node and what to do with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessRequest {
+    /// The node's id.
+    pub node: u32,
+    /// What to do.
+    pub action: AccessAction,
+}
+
+/// The longest text a [`AccessAction::SetValue`] carries; bridges refuse longer values.
+pub const MAX_ACCESS_VALUE_CHARS: usize = 65_536;
 
 /// One node of a window's accessibility tree: the list is in reading order, and a node's
 /// parent comes before it.
@@ -303,6 +428,75 @@ pub struct AccessNode {
     pub state: AccessState,
     /// Where it is, in logical pixels.
     pub bounds: AccessRect,
+    /// Secondary text read after the name (a tree row's `2.1M rows`, a plan node's costs).
+    pub description: Option<String>,
+    /// The caret and selection in `value`, for a text node.
+    pub caret: Option<AccessCaret>,
+    /// What a screen reader may ask it to do.
+    pub actions: AccessActions,
+    /// For a grid or tree, its size.
+    pub table: Option<AccessTable>,
+    /// For a cell or column header, where it is in its grid.
+    pub cell: Option<AccessCell>,
+    /// For a tree item, its level and position.
+    pub tree_position: Option<AccessTreePosition>,
+    /// The shortcut that does what invoking it does, as the platform writes it (`Ctrl+Enter`).
+    pub shortcut: Option<String>,
+}
+
+impl Default for AccessNode {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            parent: None,
+            role: AccessRole::Group,
+            name: String::new(),
+            value: None,
+            placeholder: None,
+            state: AccessState::default(),
+            bounds: AccessRect::default(),
+            description: None,
+            caret: None,
+            actions: AccessActions::default(),
+            table: None,
+            cell: None,
+            tree_position: None,
+            shortcut: None,
+        }
+    }
+}
+
+impl AccessNode {
+    /// Whether the node can be asked to do `action`.
+    pub fn allows(&self, action: &AccessAction) -> bool {
+        let actions = self.actions;
+        if self.state.disabled {
+            return false;
+        }
+        match action {
+            AccessAction::Focus => actions.focus,
+            AccessAction::Invoke => actions.invoke,
+            AccessAction::Toggle => actions.toggle,
+            AccessAction::Expand | AccessAction::Collapse => actions.expand_collapse,
+            AccessAction::Select => actions.select,
+            AccessAction::SetValue(text) => {
+                actions.set_value
+                    && !self.state.read_only
+                    && text.chars().count() <= MAX_ACCESS_VALUE_CHARS
+            }
+            AccessAction::SetCaret(_) => self.caret.is_some(),
+        }
+    }
+}
+
+/// The request for `action` on node `id` of `nodes`, `None` when there is no such node or it
+/// does not offer that action; bridges call it before they queue a request.
+pub fn access_request(nodes: &[AccessNode], id: u32, action: AccessAction) -> Option<AccessRequest> {
+    nodes
+        .iter()
+        .find(|node| node.id == id)
+        .filter(|node| node.allows(&action))
+        .map(|_| AccessRequest { node: id, action })
 }
 
 /// The id of the node with the keyboard focus, if any.
@@ -458,8 +652,36 @@ mod tests {
                 focused,
                 ..AccessState::default()
             },
-            bounds: AccessRect::default(),
+            ..AccessNode::default()
         }
+    }
+
+    #[test]
+    fn requests_are_made_only_for_actions_a_node_offers() {
+        let mut field = node(3, Some(1), AccessRole::TextField, false);
+        field.actions = AccessActions {
+            set_value: true,
+            focus: true,
+            ..AccessActions::default()
+        };
+        let tree = vec![node(1, None, AccessRole::Window, false), field];
+        let set = AccessAction::SetValue("shop.eggdb".to_owned());
+        assert_eq!(
+            access_request(&tree, 3, set.clone()),
+            Some(AccessRequest { node: 3, action: set.clone() })
+        );
+        assert_eq!(access_request(&tree, 3, AccessAction::Invoke), None);
+        assert_eq!(access_request(&tree, 9, AccessAction::Focus), None);
+        assert_eq!(access_request(&tree, 3, AccessAction::SetCaret(AccessCaret::default())), None);
+        let long = AccessAction::SetValue("x".repeat(MAX_ACCESS_VALUE_CHARS + 1));
+        assert_eq!(access_request(&tree, 3, long), None);
+        let mut read_only = tree.clone();
+        read_only[1].state.read_only = true;
+        assert_eq!(access_request(&read_only, 3, set.clone()), None);
+        assert!(read_only[1].allows(&AccessAction::Focus));
+        read_only[1].state.disabled = true;
+        assert!(!read_only[1].allows(&AccessAction::Focus));
+        assert_eq!(AccessCaret { anchor: 7, caret: 2 }.range(), (2, 7));
     }
 
     #[test]
