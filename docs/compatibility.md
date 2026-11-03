@@ -55,3 +55,21 @@ Each layout places the toolbar, sidebar, tabs, editor, results and status bar at
 sidebar's tree. Product names are trademarks of their owners; EggDB is not affiliated with them,
 and a layout copies an arrangement, shortcuts and workflows only, never their code, artwork,
 icons, colours or text.
+
+## Query tabs and their sessions in EggDB's desktop client
+
+Each query tab in `eggdb-gui` is its own session on the database, kept from the tab's first run
+until it closes, the way a connection in `psql` or a query window in another client is (D310,
+`docs/ux/workspace.md` 9). A `BEGIN` in one run stays open for the next run in that tab, and the
+other tabs do not see its work until it commits. EggDB runs one writer at a time, so a second
+tab's write while another holds the write transaction gets the engine's error. A tab with an open
+transaction shows a `warning` dot and the status bar's `Transaction open` (`Transaction failed:
+ROLLBACK to continue` after an error in the block; `Transaction open in Query 2` from the other
+tabs), and its dialect stays the one the transaction began in until `COMMIT` or `ROLLBACK`.
+
+`Ctrl/Cmd+T` (or the strip's `+`) adds `Query n` after the active tab with its dialect;
+`Ctrl/Cmd+W`, `Ctrl+F4`, a tab's close button or a middle-click closes one; `Ctrl+Tab` and
+`Ctrl+Shift+Tab` move between them. Closing a tab that runs, holds a transaction (which rolls
+back) or holds text asks first. Tabs narrow from 140 to 100 px as they are added, and from ten
+tabs the strip scrolls with the wheel, always keeping the active tab in view. On a server, the
+first tab that runs uses the connection the client opened, and each other tab opens its own.

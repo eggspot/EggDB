@@ -352,6 +352,7 @@ pub struct PgClient {
     tls_version: Option<u16>,
     options: ConnectOptions,
     backend_key: Option<(i32, Vec<u8>)>,
+    ready_status: u8,
 }
 
 impl std::fmt::Debug for PgClient {
@@ -432,6 +433,7 @@ impl PgClient {
                 ..options.clone()
             },
             backend_key: None,
+            ready_status: b'I',
         };
         if let Transport::Tls(stream) = &client.transport {
             client.tls_version = Some(stream.info().version);
@@ -545,7 +547,18 @@ impl PgClient {
         }
         self.fill(1 + length)?;
         let message: Vec<u8> = self.incoming.drain(..1 + length).collect();
+        if message[0] == b'Z'
+            && let Some(&status) = message.get(5)
+        {
+            self.ready_status = status;
+        }
         Ok((message[0], message[5..].to_vec()))
+    }
+
+    /// The transaction status the server gave in its last `ReadyForQuery`: `b'I'` idle,
+    /// `b'T'` inside a transaction block, `b'E'` inside a failed one.
+    pub fn ready_status(&self) -> u8 {
+        self.ready_status
     }
 
     fn start_up(&mut self, options: &ConnectOptions) -> Result<(), ClientError> {

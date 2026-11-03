@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
+use eggdb::sql::TransactionStatus;
 use eggdb_platform::window::{
     AccessAction, AccessNode, AccessRequest, AccessRole, KeyPress, Modifiers, OpenFileDialog,
     PointerButton,
@@ -12,7 +13,7 @@ use crate::catalog::Catalog;
 use crate::clipboard::{Clipboard, MemoryClipboard};
 use crate::connect_screen::{self, ConnectAction, ConnectCard, Segment, handle_key};
 use crate::connection::{
-    CancelHandle, ConnectFailure, ConnectTarget, Connection, Connector, ResultTable,
+    CancelHandle, ConnectFailure, ConnectTarget, Connection, Connector, ResultTable, SessionId,
     StatementFailure,
 };
 use crate::inspector;
@@ -33,7 +34,11 @@ pub const CANCELLED_SHOWN_FOR: Duration = Duration::from_secs(2);
 /// How long a notice such as `Copied 12 cells` stays in the status bar.
 pub const NOTICE_SHOWN_FOR: Duration = Duration::from_secs(2);
 
-type RunAnswer = (Connection, Vec<Result<Vec<ResultTable>, StatementFailure>>);
+type RunAnswer = (
+    Connection,
+    Vec<Result<Vec<ResultTable>, StatementFailure>>,
+    TransactionStatus,
+);
 type OpenAnswer = Result<(Connection, Catalog), ConnectFailure>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +109,7 @@ pub struct Workspace {
     running: Option<Running>,
     reading: Option<Reading>,
     run_waiting_for_connection: Option<mpsc::Sender<Connection>>,
+    sessions_to_close: Vec<SessionId>,
     catalog_wanted: bool,
     sample_wanted: Option<String>,
     status_until: Option<Instant>,
@@ -151,6 +157,7 @@ impl Workspace {
             running: None,
             reading: None,
             run_waiting_for_connection: None,
+            sessions_to_close: Vec::new(),
             catalog_wanted: false,
             sample_wanted: None,
             status_until: None,
@@ -376,6 +383,9 @@ impl Workspace {
         size: (u32, u32),
         now: Instant,
     ) -> WorkspaceCommand {
+        if button == PointerButton::Middle {
+            return self.middle_pressed(x, y, faces, size, now);
+        }
         if button != PointerButton::Primary || self.card_mut().is_some_and(|card| card.busy) {
             return WorkspaceCommand::None;
         }
@@ -446,6 +456,40 @@ impl Workspace {
         }
         self.pointer_look_mut().focus_by_pointer = true;
         command
+    }
+
+    fn middle_pressed(
+        &mut self,
+        x: f32,
+        y: f32,
+        faces: Faces<'_>,
+        size: (u32, u32),
+        now: Instant,
+    ) -> WorkspaceCommand {
+        let tree = self.pointer_tree(faces, size);
+        let Some(node) = pointer::hit_test(&tree, x, y) else {
+            return WorkspaceCommand::None;
+        };
+        let parent_tab = tree
+            .iter()
+            .find(|tab| Some(tab.id) == node.parent && tab.role == AccessRole::Tab);
+        let tab = if node.role == AccessRole::Tab {
+            Some(node)
+        } else {
+            parent_tab
+        };
+        let Some(id) = tab.map(|tab| tab.id) else {
+            return WorkspaceCommand::None;
+        };
+        let Screen::Main(window) = &mut self.screen else {
+            return WorkspaceCommand::None;
+        };
+        let Some(position) = main_window::tab_position_for_node(window, id) else {
+            return WorkspaceCommand::None;
+        };
+        let action = window.close_tab_at(position);
+        self.window_action(action, now);
+        WorkspaceCommand::None
     }
 
     /// A button went up at (`x`, `y`): a press that started on a button, link, checkbox,
@@ -694,6 +738,20 @@ impl Workspace {
             WindowAction::Inspect(item) => self.inspect(item),
             WindowAction::RefreshCatalog => self.refresh_catalog(),
             WindowAction::LayoutChosen(layout) => self.keep_layout(layout, now),
+            WindowAction::CloseSession { session, stop } => self.close_session(session, stop),
+        }
+    }
+
+    fn close_session(&mut self, session: SessionId, stop: bool) {
+        if stop
+            && let Some(running) = &self.running
+            && running.request.session == session
+        {
+            running.cancel.cancel();
+        }
+        match &mut self.connection {
+            Some(connection) => connection.close_session(session),
+            None => self.sessions_to_close.push(session),
         }
     }
 
@@ -779,7 +837,10 @@ impl Workspace {
         self.connection_back(connection);
     }
 
-    fn connection_back(&mut self, connection: Connection) {
+    fn connection_back(&mut self, mut connection: Connection) {
+        for session in self.sessions_to_close.drain(..) {
+            connection.close_session(session);
+        }
         match self.run_waiting_for_connection.take() {
             Some(run) => {
                 if let Err(mpsc::SendError(connection)) = run.send(connection) {
@@ -869,6 +930,18 @@ impl Workspace {
     }
 
     fn start_run(&mut self, request: RunRequest, now: Instant) {
+        if let Some(running) = &self.running {
+            let session = running.request.session;
+            if let Some(window) = self.main_window_mut() {
+                let title = window
+                    .tab_with_session_mut(session)
+                    .map(|tab| tab.title.clone())
+                    .unwrap_or_default();
+                window.tab.notice = Some(main_window::another_tab_running(&title));
+            }
+            self.notice_until = Some(now + NOTICE_SHOWN_FOR);
+            return;
+        }
         let (hand_over, handed) = mpsc::channel::<Connection>();
         match self.connection.take() {
             Some(connection) => {
@@ -884,6 +957,7 @@ impl Workspace {
         let worker_cancel = cancel.clone();
         let statements = request.statements.clone();
         let dialect = request.dialect;
+        let session = request.session;
         let rolled_back = request
             .explain
             .as_ref()
@@ -893,12 +967,16 @@ impl Workspace {
                 return;
             };
             let outcomes = match statements.first() {
-                Some(statement) if rolled_back => {
-                    connection.run_rolled_back(dialect, statement, &worker_cancel)
-                }
-                _ => connection.run_script(dialect, &statements, &worker_cancel),
+                Some(statement) if rolled_back => connection.run_rolled_back_in_session(
+                    session,
+                    dialect,
+                    statement,
+                    &worker_cancel,
+                ),
+                _ => connection.run_in_session(session, dialect, &statements, &worker_cancel),
             };
-            let _ = send.send((connection, outcomes));
+            let transaction = connection.transaction_status(session);
+            let _ = send.send((connection, outcomes, transaction));
         });
         if let Some(window) = self.main_window_mut() {
             window.tab.started();
@@ -912,14 +990,18 @@ impl Workspace {
     }
 
     fn finish_run(&mut self, running: Running, answer: RunAnswer, now: Instant) {
-        let (connection, outcomes) = answer;
+        let (connection, outcomes, transaction) = answer;
         let elapsed = now.saturating_duration_since(running.started);
         let changed_schema = outcomes
             .iter()
             .zip(&running.request.statements)
             .any(|(outcome, statement)| outcome.is_ok() && changes_schema(statement));
-        if let Some(window) = self.main_window_mut() {
-            window.tab.finish(&running.request, outcomes, elapsed);
+        if let Some(tab) = self
+            .main_window_mut()
+            .and_then(|window| window.tab_with_session_mut(running.request.session))
+        {
+            tab.finish(&running.request, outcomes, elapsed);
+            tab.transaction = transaction;
         }
         if changed_schema && matches!(self.screen, Screen::Main(_)) {
             self.catalog_wanted = true;
@@ -939,18 +1021,24 @@ impl Workspace {
                 true
             }
             Err(TryRecvError::Disconnected) => {
+                let session = running.request.session;
                 self.running = None;
-                if let Some(window) = self.main_window_mut() {
-                    window.tab.running = false;
-                    window.tab.stopping = false;
-                    window.tab.summary = "Error".to_owned();
+                if let Some(tab) = self
+                    .main_window_mut()
+                    .and_then(|window| window.tab_with_session_mut(session))
+                {
+                    tab.running = false;
+                    tab.stopping = false;
+                    tab.summary = "Error".to_owned();
                 }
                 true
             }
             Err(TryRecvError::Empty) => {
                 let elapsed = now.saturating_duration_since(running.started);
+                let session = running.request.session;
                 self.main_window_mut()
-                    .is_some_and(|window| window.tab.show_running(elapsed))
+                    .and_then(|window| window.tab_with_session_mut(session))
+                    .is_some_and(|tab| tab.show_running(elapsed))
             }
         }
     }
@@ -1441,6 +1529,98 @@ mod tests {
         assert!(path.exists(), "Create was checked at first start");
         drop(workspace);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn each_tab_keeps_its_own_session_so_a_begin_outlasts_its_run() {
+        let directory = scratch("kept-sessions");
+        let _ = std::fs::remove_file(directory.join("kept.eggdb"));
+        let now = Instant::now();
+        let limit = Duration::from_secs(10);
+        let mut workspace = workspace(Arc::new(EngineConnector), directory.clone());
+        type_text(&mut workspace, "kept.eggdb", now);
+        workspace.key(KeyPress::plain(Key::Enter), now);
+        workspace.wait_for_open(limit);
+        workspace.run_text("CREATE TABLE t (id integer)", false, now);
+        workspace.wait_for_run(limit);
+        workspace.run_text("BEGIN; INSERT INTO t VALUES (1);", true, now);
+        workspace.wait_for_run(limit);
+        let first_cell = |workspace: &mut Workspace| {
+            workspace
+                .main_window_mut()
+                .and_then(|window| window.tab.grid.as_ref())
+                .and_then(|grid| grid.rows.first())
+                .and_then(|row| row.first())
+                .cloned()
+                .flatten()
+        };
+        let window = workspace.main_window_mut().unwrap();
+        assert_eq!(window.tab.transaction, TransactionStatus::InBlock);
+        window.add_tab();
+        assert_eq!(window.tab.title, "Query 2");
+        assert_eq!(window.tab_titles(), ["Query 1", "Query 2"]);
+        workspace.run_text("SELECT count(*) FROM t", false, now);
+        workspace.wait_for_run(limit);
+        assert_eq!(first_cell(&mut workspace).as_deref(), Some("0"));
+        let window = workspace.main_window_mut().unwrap();
+        assert_eq!(window.tab.transaction, TransactionStatus::Idle);
+        assert_eq!(
+            window.other_tab_in_transaction().map(|tab| tab.title.as_str()),
+            Some("Query 1")
+        );
+        window.show_tab(0);
+        workspace.run_text("SELECT count(*) FROM t", false, now);
+        workspace.wait_for_run(limit);
+        assert_eq!(first_cell(&mut workspace).as_deref(), Some("1"));
+        workspace.run_text("COMMIT", false, now);
+        workspace.wait_for_run(limit);
+        let window = workspace.main_window_mut().unwrap();
+        assert_eq!(window.tab.transaction, TransactionStatus::Idle);
+        window.show_tab(1);
+        workspace.run_text("SELECT count(*) FROM t", false, now);
+        workspace.wait_for_run(limit);
+        assert_eq!(first_cell(&mut workspace).as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn closing_a_tab_rolls_back_its_open_transaction() {
+        let directory = scratch("kept-close");
+        let _ = std::fs::remove_file(directory.join("closed.eggdb"));
+        let now = Instant::now();
+        let limit = Duration::from_secs(10);
+        let mut workspace = workspace(Arc::new(EngineConnector), directory.clone());
+        type_text(&mut workspace, "closed.eggdb", now);
+        workspace.key(KeyPress::plain(Key::Enter), now);
+        workspace.wait_for_open(limit);
+        workspace.run_text("CREATE TABLE t (id integer)", false, now);
+        workspace.wait_for_run(limit);
+        workspace
+            .main_window_mut()
+            .expect("the main window")
+            .add_tab();
+        workspace.run_text("BEGIN; INSERT INTO t VALUES (1);", true, now);
+        workspace.wait_for_run(limit);
+        let close = KeyPress {
+            key: Key::Character('w'),
+            modifiers: Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+        };
+        workspace.key(close, now);
+        let window = workspace.main_window_mut().unwrap();
+        let prompt = window.close_prompt.clone().expect("closing asks first");
+        assert_eq!(prompt.title, "Close Query 2 and roll back?");
+        workspace.key(KeyPress::plain(Key::Enter), now);
+        let window = workspace.main_window_mut().unwrap();
+        assert_eq!(window.tab_titles(), ["Query 1"]);
+        assert!(window.close_prompt.is_none());
+        let connection = workspace.connection_mut().expect("the connection is back");
+        let tables = connection.run("SELECT count(*) FROM t").unwrap();
+        assert_eq!(
+            tables.last().and_then(|table| table.rows.first()).cloned(),
+            Some(vec![Some("0".to_owned())])
+        );
     }
 
     #[test]

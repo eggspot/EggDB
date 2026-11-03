@@ -1,9 +1,10 @@
 use std::ops::Range;
 use std::time::Duration;
 
+use eggdb::sql::TransactionStatus;
 use eggdb_platform::window::{Key, KeyPress};
 
-use crate::connection::{ResultTable, StatementFailure};
+use crate::connection::{ResultTable, SessionId, StatementFailure};
 use crate::dialect::QueryDialect;
 use crate::editor::{self, Editor};
 use crate::grid::{GridAnswer, ResultGrid, cell_text, column_widths};
@@ -19,6 +20,11 @@ const TEXT_ADVANCE: f32 = 8.0;
 pub const ROWS_IN_VIEW: usize = 13;
 /// What the status bar says when a run key is pressed while a statement runs.
 pub const STILL_RUNNING: &str = "Running… press Esc to stop";
+/// The status bar's item while the tab's transaction is open.
+pub const TRANSACTION_OPEN: &str = "Transaction open";
+/// The status bar's item while the tab's transaction failed.
+pub const TRANSACTION_FAILED: &str = "Transaction failed: ROLLBACK to continue";
+
 /// The plan panel's width and height at the golden frame's size, for keeping the current
 /// node in view.
 pub const PLAN_PANEL: (f32, f32) = (1020.0, 358.0);
@@ -111,6 +117,8 @@ pub struct RunRequest {
     pub explain: Option<ExplainRun>,
     /// The editor's text when the run was asked for, which `starts` are offsets into.
     pub source_text: String,
+    /// The tab's kept session the statements run on.
+    pub session: SessionId,
 }
 
 /// The statement an `Explain` run explains and how its answer is read.
@@ -195,6 +203,11 @@ pub struct QueryTab {
     pub stopping: bool,
     /// The last `Explain`'s plan.
     pub plan: Option<PlanView>,
+    /// The session this tab's runs keep (`docs/ux/workspace.md` 9.2); the main window gives
+    /// every tab its own.
+    pub session: SessionId,
+    /// Where the tab's kept session stands toward transactions after its last run.
+    pub transaction: TransactionStatus,
 }
 
 impl QueryTab {
@@ -221,6 +234,8 @@ impl QueryTab {
             running: false,
             stopping: false,
             plan: None,
+            session: SessionId::default(),
+            transaction: TransactionStatus::Idle,
         }
     }
 
@@ -264,6 +279,7 @@ impl QueryTab {
             all,
             explain: None,
             source_text: text,
+            session: self.session,
         })
     }
 
@@ -285,6 +301,7 @@ impl QueryTab {
             dialect: self.dialect,
             all: false,
             source_text: base.source_text.clone(),
+            session: self.session,
             explain: Some(ExplainRun {
                 analyze,
                 statement: start..start + statement.len(),
@@ -433,8 +450,11 @@ impl QueryTab {
             Key::Home => self.dialect_menu = Some(0),
             Key::End => self.dialect_menu = Some(last),
             Key::Enter | Key::Space => {
-                self.set_dialect(QueryDialect::at(highlighted));
-                self.dialect_menu = None;
+                let picked = QueryDialect::at(highlighted);
+                if picked == self.dialect || self.dialect_switch_allowed() {
+                    self.set_dialect(picked);
+                    self.dialect_menu = None;
+                }
             }
             Key::Escape | Key::Tab => self.dialect_menu = None,
             Key::Character(letter) => {
@@ -446,10 +466,53 @@ impl QueryTab {
         }
     }
 
+    /// Whether the dialect pill may switch: not while the tab's transaction is open or
+    /// failed (`docs/ux/workspace.md` 9.2), since its session keeps the dialect it began in.
+    pub fn dialect_switch_allowed(&self) -> bool {
+        self.transaction == TransactionStatus::Idle
+    }
+
+    /// The toast the dialect menu shows when it opens while the switch is refused.
+    pub fn dialect_locked_toast(&self) -> String {
+        format!(
+            "Warning: COMMIT or ROLLBACK first; {} has a transaction open",
+            self.title
+        )
+    }
+
+    /// The tab's name for screen readers: `Query 2`, with `, running`, `, transaction open`
+    /// or `, transaction failed` while so.
+    pub fn spoken_title(&self) -> String {
+        let state = match (self.running, self.transaction) {
+            (true, _) => ", running",
+            (false, TransactionStatus::InBlock) => ", transaction open",
+            (false, TransactionStatus::Failed) => ", transaction failed",
+            (false, TransactionStatus::Idle) => "",
+        };
+        format!("{}{state}", self.title)
+    }
+
+    /// The status bar's transaction item for this tab, with whether it reads as failed.
+    pub fn transaction_item(&self) -> Option<(&'static str, bool)> {
+        match self.transaction {
+            TransactionStatus::InBlock => Some((TRANSACTION_OPEN, false)),
+            TransactionStatus::Failed => Some((TRANSACTION_FAILED, true)),
+            TransactionStatus::Idle => None,
+        }
+    }
+
+    /// Opens the dialect menu on the current dialect; while the switch is refused it says why.
+    pub fn open_dialect_menu(&mut self) {
+        self.dialect_menu = Some(self.dialect.index());
+        if !self.dialect_switch_allowed() {
+            self.notice = Some(self.dialect_locked_toast());
+        }
+    }
+
     fn pill_key(&mut self, press: KeyPress) -> TabAction {
         match press.key {
-            Key::Space | Key::Enter => self.dialect_menu = Some(self.dialect.index()),
-            Key::Down if press.modifiers.alt => self.dialect_menu = Some(self.dialect.index()),
+            Key::Space | Key::Enter => self.open_dialect_menu(),
+            Key::Down if press.modifiers.alt => self.open_dialect_menu(),
             Key::Tab if press.modifiers.shift => self.focus(TabFocus::Grid),
             Key::Tab => self.focus(TabFocus::Editor),
             _ => {}
@@ -709,6 +772,7 @@ impl QueryTab {
                     all: false,
                     explain: None,
                     source_text: source_text.to_owned(),
+                    session: self.session,
                 };
                 self.show_error(&shifted, &original, 0);
             }

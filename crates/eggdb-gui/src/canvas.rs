@@ -129,6 +129,30 @@ impl Canvas {
         self.clip = UNCLIPPED;
     }
 
+    /// Keeps what is drawn next inside `rect` (in the coordinates shapes are drawn in, before
+    /// the shift) as well as inside the clip already set, until [`Canvas::restore_clip`] with
+    /// the clip it returns.
+    pub(crate) fn clip_within(&mut self, rect: Rect) -> (i64, i64, i64, i64) {
+        let previous = self.clip;
+        let (dx, dy) = self.shift;
+        self.clip = (
+            previous.0.max((rect.x.floor() as i64).saturating_add(dx)),
+            previous.1.max((rect.y.floor() as i64).saturating_add(dy)),
+            previous
+                .2
+                .min(((rect.x + rect.w).ceil() as i64).saturating_add(dx)),
+            previous
+                .3
+                .min(((rect.y + rect.h).ceil() as i64).saturating_add(dy)),
+        );
+        previous
+    }
+
+    /// Puts back the clip [`Canvas::clip_within`] narrowed.
+    pub(crate) fn restore_clip(&mut self, clip: (i64, i64, i64, i64)) {
+        self.clip = clip;
+    }
+
     /// Mixes `color` into (`x`, `y`) with `coverage`; points outside are ignored.
     pub fn blend(&mut self, x: i64, y: i64, color: Rgba, coverage: f32) {
         let (x, y) = (x.saturating_add(self.shift.0), y.saturating_add(self.shift.1));

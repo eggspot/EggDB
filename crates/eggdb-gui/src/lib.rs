@@ -53,6 +53,9 @@ pub mod object_browser;
 /// The plan view: `EXPLAIN`'s answer read into a tree, laid out top-down with each node's
 /// cost, rows, time and buffers, its hot nodes tinted and its keys (`docs/ux/workspace.md` 5).
 pub mod plan_view;
+/// The query tabs' strip: tab widths, its scroll, new tab titles and the dialog that asks
+/// before a tab closes (`docs/ux/workspace.md` 9.1).
+pub mod tab_strip;
 /// PNG encoding of rendered frames, for screenshots and tests.
 pub mod png;
 /// The pointer and the caret (`docs/ux/workspace.md` 6): hit testing on the accessibility

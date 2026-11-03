@@ -25,8 +25,10 @@ use crate::object_browser::{
 };
 use crate::plan_view::{self, PlanView};
 use crate::pointer::{self, CaretLook, PointerLook};
+use crate::connection::SessionId;
 use crate::query_tab::{QueryTab, ResultView, TabAction, TabFocus};
 use crate::status_line;
+use crate::tab_strip::{self, ClosePrompt, PromptAnswer};
 
 /// The width of the results grid's body, right of the row gutter, at the golden frame's size.
 pub const GRID_BODY_WIDTH: f32 = 972.0;
@@ -83,6 +85,19 @@ pub enum WindowAction {
     RefreshCatalog,
     /// The layout picker applied this layout: the client keeps it in its settings.
     LayoutChosen(Layout),
+    /// A tab closed: end its kept session (rolling back its transaction), after stopping its
+    /// run when `stop`.
+    CloseSession {
+        /// The closed tab's session.
+        session: SessionId,
+        /// Whether its statement was running and must be stopped first.
+        stop: bool,
+    },
+}
+
+/// The status bar's notice when a run is asked for while another tab's statement runs.
+pub fn another_tab_running(title: &str) -> String {
+    format!("{title} is running: wait for it, or stop it with Esc in its tab")
 }
 
 /// The status bar's notice while a run keeps the tree from opening another tab.
@@ -109,8 +124,18 @@ pub struct MainWindow {
     pub width: usize,
     /// The query tab that shows.
     pub tab: QueryTab,
-    /// The other query tabs, in the strip's order before the one that shows.
+    /// The other query tabs, in the strip's order; the one that shows sits at
+    /// [`MainWindow::tab_position`] among them.
     pub background_tabs: Vec<QueryTab>,
+    /// The showing tab's place in the strip.
+    pub tab_position: usize,
+    /// How far the tab strip is scrolled while its tabs overflow it (`docs/ux/workspace.md`
+    /// 9.1).
+    pub tab_scroll: f32,
+    /// The session the next new tab gets.
+    pub next_session: SessionId,
+    /// The dialog asking before the showing tab closes, while it is open.
+    pub close_prompt: Option<ClosePrompt>,
     /// The pointer's hover, press and whether it moved the focus last.
     pub pointer: PointerLook,
     /// How the editor's caret draws at this moment of its blink.
@@ -190,8 +215,15 @@ impl MainWindow {
             inspector: Inspector::for_width(WIDTH),
             focus: WindowFocus::Tab,
             width: WIDTH,
-            tab: QueryTab::new("Query 1"),
+            tab: QueryTab {
+                session: SessionId(1),
+                ..QueryTab::new("Query 1")
+            },
             background_tabs: Vec::new(),
+            tab_position: 0,
+            tab_scroll: 0.0,
+            next_session: SessionId(2),
+            close_prompt: None,
             pointer: PointerLook::default(),
             caret: CaretLook::On,
             wheel_carry: (0.0, 0.0),
@@ -353,6 +385,10 @@ impl MainWindow {
         } else {
             (lines_down, lines_right)
         };
+        if over(NODE_QUERIES) {
+            let notches = if down != 0.0 { down } else { right };
+            return notches.is_finite() && self.scroll_tabs(notches);
+        }
         let (down, right) = wheel_steps(&mut self.wheel_carry, down, right);
         if over(NODE_GRID) {
             if let Some(grid) = self
@@ -383,6 +419,7 @@ impl MainWindow {
     /// The sample of `docs/ux/gui.md`'s golden frame: the `shop` database.
     pub fn sample() -> Self {
         let mut tab = QueryTab::with_text("Query 1", "SELECT id, name FROM customers ORDER BY id;");
+        tab.session = SessionId(1);
         let rows = [
             ("1", "Ada Lovelace"),
             ("2", "Grace Hopper"),
@@ -448,6 +485,13 @@ impl MainWindow {
         if let Some(picker) = &mut self.layout_picker {
             let outcome = picker.key(press);
             return self.picker_outcome(outcome);
+        }
+        if let Some(prompt) = &mut self.close_prompt {
+            let answer = prompt.key(press);
+            return self.prompt_answer(answer);
+        }
+        if let Some(action) = self.tab_key(press) {
+            return action;
         }
         if std::mem::take(&mut self.chord_started)
             && matches!(press.key, Key::Character('l' | 'L'))
@@ -565,15 +609,212 @@ impl MainWindow {
             return WindowAction::Tab(TabAction::None);
         }
         let dialect = self.tab.dialect;
-        let title = format!("Query {}", self.background_tabs.len() + 2);
-        let mut tab = QueryTab::with_text(&title, &open_statement(&name, dialect));
-        tab.set_dialect(dialect);
-        let previous = std::mem::replace(&mut self.tab, tab);
-        self.background_tabs.push(previous);
+        self.new_tab();
+        self.tab.editor = crate::editor::Editor::new(&open_statement(&name, dialect));
         match self.tab.run_request(true) {
             Some(request) => WindowAction::Tab(TabAction::Run(request)),
             None => WindowAction::Tab(TabAction::None),
         }
+    }
+}
+
+impl MainWindow {
+    /// How many tabs the strip has.
+    pub fn tab_count(&self) -> usize {
+        self.background_tabs.len() + 1
+    }
+
+    /// The tabs' titles in the strip's order.
+    pub fn tab_titles(&self) -> Vec<&str> {
+        let mut titles: Vec<&str> = self
+            .background_tabs
+            .iter()
+            .map(|tab| tab.title.as_str())
+            .collect();
+        titles.insert(self.tab_position.min(titles.len()), self.tab.title.as_str());
+        titles
+    }
+
+    /// The tab in the strip at `position`.
+    pub fn tab_at(&self, position: usize) -> Option<&QueryTab> {
+        match position.cmp(&self.tab_position) {
+            std::cmp::Ordering::Less => self.background_tabs.get(position),
+            std::cmp::Ordering::Equal => Some(&self.tab),
+            std::cmp::Ordering::Greater => self.background_tabs.get(position - 1),
+        }
+    }
+
+    /// The tab whose kept session is `session`, showing or not.
+    pub fn tab_with_session_mut(&mut self, session: SessionId) -> Option<&mut QueryTab> {
+        if self.tab.session == session {
+            return Some(&mut self.tab);
+        }
+        self.background_tabs
+            .iter_mut()
+            .find(|tab| tab.session == session)
+    }
+
+    /// The tab, other than the showing one, whose session has a transaction open or failed.
+    pub fn other_tab_in_transaction(&self) -> Option<&QueryTab> {
+        self.background_tabs.iter().find(|tab| {
+            tab.transaction != eggdb::sql::TransactionStatus::Idle
+        })
+    }
+
+    fn strip_width(&self) -> f32 {
+        match self.placed(Area::Tabs) {
+            Some(placed) if self.layout != Layout::EggDb => placed.clip.w,
+            _ => self.centre_right() - 260.0,
+        }
+    }
+
+    fn fresh_tab(&mut self, title: &str) -> QueryTab {
+        let session = self.next_session;
+        self.next_session = SessionId(session.0 + 1);
+        QueryTab {
+            session,
+            ..QueryTab::new(title)
+        }
+    }
+
+    fn take_strip(&mut self) -> Vec<QueryTab> {
+        let shown = std::mem::replace(&mut self.tab, QueryTab::new(""));
+        let mut strip = std::mem::take(&mut self.background_tabs);
+        strip.insert(self.tab_position.min(strip.len()), shown);
+        strip
+    }
+
+    fn show_from(&mut self, mut strip: Vec<QueryTab>, position: usize) {
+        if strip.is_empty() {
+            let first = self.fresh_tab("Query 1");
+            strip.push(first);
+        }
+        let position = position.min(strip.len() - 1);
+        self.tab = strip.remove(position);
+        self.background_tabs = strip;
+        self.tab_position = position;
+        self.tab_scroll = tab_strip::scroll_to_show(
+            self.tab_scroll,
+            position,
+            self.tab_count(),
+            self.strip_width(),
+        );
+    }
+
+    /// `Ctrl/Cmd+T` (`docs/ux/workspace.md` 9.1): `Query n`, the lowest unused number, right
+    /// after the showing tab with its dialect, shown with the focus in its empty editor.
+    pub fn add_tab(&mut self) {
+        self.new_tab();
+        self.focus_tab();
+    }
+
+    fn new_tab(&mut self) {
+        let title = tab_strip::lowest_free_title(self.tab_titles().into_iter());
+        let dialect = self.tab.dialect;
+        let mut tab = self.fresh_tab(&title);
+        tab.set_dialect(dialect);
+        let position = self.tab_position + 1;
+        let mut strip = self.take_strip();
+        strip.insert(position.min(strip.len()), tab);
+        self.show_from(strip, position);
+    }
+
+    /// Shows the tab at `position` in the strip.
+    pub fn show_tab(&mut self, position: usize) {
+        if position == self.tab_position || position >= self.tab_count() {
+            return;
+        }
+        let strip = self.take_strip();
+        self.show_from(strip, position);
+        self.focus_tab();
+    }
+
+    /// `Ctrl+Tab` (or with `back`, `Ctrl+Shift+Tab`): the next (previous) tab, wrapping.
+    pub fn cycle_tab(&mut self, back: bool) {
+        let count = self.tab_count();
+        let position = if back {
+            (self.tab_position + count - 1) % count
+        } else {
+            (self.tab_position + 1) % count
+        };
+        self.show_tab(position);
+    }
+
+    /// `Ctrl/Cmd+W`: closes the showing tab, first asking when it runs, has a transaction
+    /// open or holds text (`docs/ux/workspace.md` 9.1).
+    pub fn close_tab(&mut self) -> WindowAction {
+        match ClosePrompt::for_tab(&self.tab) {
+            Some(prompt) => {
+                self.tab.dialect_menu = None;
+                self.close_prompt = Some(prompt);
+                WindowAction::Tab(TabAction::None)
+            }
+            None => self.close_shown_tab(),
+        }
+    }
+
+    /// Closes the tab at `position`, showing it first so its dialog, if any, is about it.
+    pub fn close_tab_at(&mut self, position: usize) -> WindowAction {
+        self.show_tab(position);
+        self.close_tab()
+    }
+
+    fn close_shown_tab(&mut self) -> WindowAction {
+        let position = self.tab_position;
+        let mut strip = self.take_strip();
+        let closed = strip.remove(position.min(strip.len() - 1));
+        let next = if position < strip.len() {
+            position
+        } else {
+            position.saturating_sub(1)
+        };
+        self.show_from(strip, next);
+        self.focus_tab();
+        WindowAction::CloseSession {
+            session: closed.session,
+            stop: closed.running,
+        }
+    }
+
+    fn prompt_answer(&mut self, answer: PromptAnswer) -> WindowAction {
+        match answer {
+            PromptAnswer::Pending => WindowAction::Tab(TabAction::None),
+            PromptAnswer::Keep => {
+                self.close_prompt = None;
+                WindowAction::Tab(TabAction::None)
+            }
+            PromptAnswer::Close => {
+                self.close_prompt = None;
+                self.close_shown_tab()
+            }
+        }
+    }
+
+    fn tab_key(&mut self, press: KeyPress) -> Option<WindowAction> {
+        let primary = press.modifiers.control || press.modifiers.command;
+        let none = WindowAction::Tab(TabAction::None);
+        match press.key {
+            Key::Character('t' | 'T') if primary && !press.modifiers.shift => {
+                self.add_tab();
+                Some(none)
+            }
+            Key::Character('w' | 'W') if primary && !press.modifiers.shift => Some(self.close_tab()),
+            Key::F4 if press.modifiers.control => Some(self.close_tab()),
+            Key::Tab if press.modifiers.control => {
+                self.cycle_tab(press.modifiers.shift);
+                Some(none)
+            }
+            _ => None,
+        }
+    }
+
+    /// The wheel over the tab strip: 100 px a notch on either axis, while the tabs overflow.
+    pub fn scroll_tabs(&mut self, notches: f32) -> bool {
+        let max = tab_strip::max_scroll(self.tab_count(), self.strip_width());
+        let scrolled = (self.tab_scroll + notches * tab_strip::WHEEL_STEP).clamp(0.0, max);
+        let changed = scrolled != self.tab_scroll;
+        self.tab_scroll = scrolled;
+        changed
     }
 }
 
@@ -831,6 +1072,10 @@ pub fn draw(window: &MainWindow, theme: Theme, faces: Faces<'_>) -> Canvas {
             dialect_menu(&mut paint, &window.tab);
             paint.canvas.draw_anywhere();
         }
+    }
+    if let Some(prompt) = &window.close_prompt {
+        let size = (window.width.max(WIDTH) as f32, HEIGHT as f32);
+        tab_strip::draw_prompt(&mut paint, prompt, size);
     }
     if let Some(picker) = &window.layout_picker {
         let size = (window.width.max(WIDTH) as f32, HEIGHT as f32);
@@ -1167,7 +1412,17 @@ pub(crate) fn elided(face: &dyn Typeface, text: &str, max_width: f32, size: f32)
     text.to_owned()
 }
 
-const TAB_WIDTH: f32 = 140.0;
+fn tab_left(window: &MainWindow, position: usize, width: f32) -> f32 {
+    260.0 + width * position as f32 - window.tab_scroll
+}
+
+fn tab_dot(tab: &QueryTab, theme: Theme) -> Option<Rgba> {
+    match tab.transaction {
+        eggdb::sql::TransactionStatus::InBlock => Some(theme.warning),
+        eggdb::sql::TransactionStatus::Failed => Some(theme.error),
+        eggdb::sql::TransactionStatus::Idle => None,
+    }
+}
 
 fn tabs(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     let theme = paint.theme;
@@ -1175,52 +1430,56 @@ fn tabs(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     let centre_width = paint.centre_width();
     paint.rect(260.0, 44.0, centre_width, 36.0, theme.bg2);
     paint.rect(260.0, 79.0, centre_width, 1.0, theme.border);
-    for (index, other) in window.background_tabs.iter().enumerate() {
-        let left = 260.0 + TAB_WIDTH * index as f32;
-        paint.rect(left + TAB_WIDTH - 1.0, 52.0, 1.0, 20.0, theme.border);
-        let title = elided(faces.ui, &other.title, TAB_WIDTH - 40.0, BODY.0);
-        paint.text(
-            faces.ui,
-            &title,
-            left + 12.0,
-            53.0,
-            BODY,
-            theme.text_secondary,
-        );
+    let count = window.tab_count();
+    let width = tab_strip::tab_width(count, centre_width);
+    let viewport = tab_strip::viewport_width(count, centre_width);
+    let outer_clip = paint
+        .canvas
+        .clip_within(Rect::new(260.0, 44.0, viewport, 36.0));
+    for position in 0..count {
+        let Some(other) = window.tab_at(position) else {
+            continue;
+        };
+        if position == window.tab_position {
+            continue;
+        }
+        let left = tab_left(window, position, width);
+        let hovered = window.pointer.is_hovered(background_tab_node(window, position));
+        if hovered {
+            paint.rect(left, 44.0, width, 35.0, theme.bg1);
+        }
+        let next_is_background = position + 1 != window.tab_position && position + 1 < count;
+        if next_is_background {
+            paint.rect(left + width - 1.0, 52.0, 1.0, 20.0, theme.border);
+        }
+        let label_x = tab_label_x(paint, other, left);
+        let title = elided(faces.ui, &other.title, left + width - 32.0 - label_x, BODY.0);
+        paint.text(faces.ui, &title, label_x, 53.0, BODY, theme.text_secondary);
+        if hovered {
+            close_icon(paint, left + width - 16.0, theme.text_secondary);
+        }
     }
     let tab = &window.tab;
-    let left = 260.0 + TAB_WIDTH * window.background_tabs.len() as f32;
-    paint.rect(left, 44.0, TAB_WIDTH, 36.0, theme.bg0);
-    paint.rect(left, 44.0, TAB_WIDTH, 2.0, theme.accent);
-    paint.text(
-        faces.ui,
-        &tab.title,
-        left + 12.0,
-        53.0,
-        BODY,
-        theme.text_primary,
-    );
-    let close = left + 124.0;
+    let left = tab_left(window, window.tab_position, width);
+    paint.rect(left, 44.0, width, 36.0, theme.bg0);
+    paint.rect(left, 44.0, width, 2.0, theme.accent);
+    let label_x = tab_label_x(paint, tab, left);
+    let title = elided(faces.ui, &tab.title, left + width - 32.0 - label_x, BODY.0);
+    paint.text(faces.ui, &title, label_x, 53.0, BODY, theme.text_primary);
+    let close = left + width - 16.0;
     if tab.running {
         paint
             .canvas
             .stroke_circle(close, 62.0, 12.0, 1.5, theme.accent);
         paint.canvas.fill_circle(close, 57.0, 3.0, theme.accent);
     } else {
-        paint.canvas.line(
-            (close - 4.0, 58.0),
-            (close + 4.0, 66.0),
-            1.5,
-            theme.text_secondary,
-        );
-        paint.canvas.line(
-            (close + 4.0, 58.0),
-            (close - 4.0, 66.0),
-            1.5,
-            theme.text_secondary,
-        );
+        close_icon(paint, close, theme.text_secondary);
     }
-    let plus = left + TAB_WIDTH + 22.0;
+    paint.canvas.restore_clip(outer_clip);
+    if tab_strip::scrolls(count, centre_width) {
+        paint.rect(260.0 + viewport, 44.0, 1.0, 35.0, theme.border);
+    }
+    let plus = tab_strip::plus_x(count, centre_width, 260.0) + 14.0;
     paint.canvas.line(
         (plus - 5.0, 62.0),
         (plus + 5.0, 62.0),
@@ -1230,6 +1489,34 @@ fn tabs(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     paint
         .canvas
         .line((plus, 57.0), (plus, 67.0), 1.5, theme.text_primary);
+}
+
+fn tab_label_x(paint: &mut Painter<'_, '_>, tab: &QueryTab, left: f32) -> f32 {
+    match tab_dot(tab, paint.theme) {
+        Some(color) => {
+            paint.canvas.fill_circle(left + 15.0, 62.0, 6.0, color);
+            left + 24.0
+        }
+        None => left + 12.0,
+    }
+}
+
+fn close_icon(paint: &mut Painter<'_, '_>, centre: f32, color: Rgba) {
+    paint
+        .canvas
+        .line((centre - 4.0, 58.0), (centre + 4.0, 66.0), 1.5, color);
+    paint
+        .canvas
+        .line((centre + 4.0, 58.0), (centre - 4.0, 66.0), 1.5, color);
+}
+
+fn background_tab_node(window: &MainWindow, position: usize) -> u32 {
+    let index = if position > window.tab_position {
+        position - 1
+    } else {
+        position
+    };
+    NODE_FIRST_BACKGROUND_TAB + index as u32 % 1000
 }
 
 fn token_color(theme: Theme, kind: TokenKind) -> Rgba {
@@ -1760,14 +2047,16 @@ fn status_bar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
         SMALL,
         theme.text_secondary,
     );
-    paint.text(
-        faces.ui,
-        &status_bar_left(&window.tab),
-        260.0,
-        781.0,
-        SMALL,
-        theme.text_secondary,
-    );
+    let left = status_bar_left(&window.tab);
+    paint.text(faces.ui, &left, 260.0, 781.0, SMALL, theme.text_secondary);
+    if let Some((text, color)) = transaction_status_item(window, theme) {
+        let x = if left.is_empty() {
+            260.0
+        } else {
+            260.0 + faces.ui.width(&left, SMALL.0) + 16.0
+        };
+        paint.text(faces.ui, &text, x, 781.0, SMALL, color);
+    }
     if let Some(item) = window.layout.status_item() {
         let shown = elided(faces.ui, item, LAYOUT_ITEM_WIDTH, SMALL.0);
         paint.text_right(
@@ -1797,6 +2086,25 @@ fn status_bar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
         );
         right -= width + 16.0;
     }
+}
+
+/// The status bar's transaction item (`docs/ux/workspace.md` 9.2) and its colour: the
+/// showing tab's open or failed transaction, else another tab's open one.
+fn transaction_status_item(window: &MainWindow, theme: Theme) -> Option<(String, Rgba)> {
+    if let Some((text, failed)) = window.tab.transaction_item() {
+        let color = if failed { theme.error } else { theme.warning };
+        return Some((text.to_owned(), color));
+    }
+    let other = window.other_tab_in_transaction()?;
+    Some((
+        transaction_open_in(&other.title),
+        theme.text_secondary,
+    ))
+}
+
+/// The status bar's item while another tab than the showing one holds a transaction.
+pub fn transaction_open_in(title: &str) -> String {
+    format!("Transaction open in {title}")
 }
 
 /// The status bar's left group: a notice while one shows, else the last run's tags, with
@@ -1922,6 +2230,10 @@ pub const NODE_FIRST_TREE_ROW: u32 = 60_000;
 pub const NODE_FIRST_BACKGROUND_TAB: u32 = 61_000;
 /// The status bar's `Works like <product>` item, while a familiar layout is active.
 pub const NODE_LAYOUT_ITEM: u32 = 63_100;
+/// The first tab's close button; the others follow in the strip's order.
+pub const NODE_FIRST_TAB_CLOSE: u32 = 61_500;
+/// The tab strip's `+` button.
+pub const NODE_NEW_TAB: u32 = 61_999;
 
 fn node(
     id: u32,
@@ -1942,6 +2254,16 @@ fn node(
             height: bounds.3,
         },
         ..AccessNode::default()
+    }
+}
+
+fn primary_press(letter: char) -> KeyPress {
+    KeyPress {
+        key: Key::Character(letter),
+        modifiers: eggdb_platform::window::Modifiers {
+            control: true,
+            ..Default::default()
+        },
     }
 }
 
@@ -2003,6 +2325,13 @@ impl MainWindow {
     /// plan node; returns whether that node can take the focus.
     pub fn focus_node(&mut self, node: &AccessNode) -> bool {
         let id = node.id;
+        if (NODE_FIRST_BACKGROUND_TAB..NODE_FIRST_TAB_CLOSE).contains(&id) {
+            let Some(position) = tab_position_of(self, id) else {
+                return false;
+            };
+            self.show_tab(position);
+            return true;
+        }
         match id {
             NODE_EDITOR | NODE_QUERY_TAB => self.focus_tab(),
             NODE_DIALECT => {
@@ -2082,6 +2411,30 @@ impl MainWindow {
             } else {
                 Vec::new()
             };
+        }
+        if self.close_prompt.is_some() {
+            if node.id == tab_strip::NODE_CLOSE_CONFIRM {
+                if let Some(prompt) = &mut self.close_prompt {
+                    prompt.default_focused = true;
+                }
+                return vec![KeyPress::plain(Key::Enter)];
+            }
+            return vec![KeyPress::plain(Key::Escape)];
+        }
+        let invoked = *action == AccessAction::Invoke;
+        if node.id == NODE_NEW_TAB {
+            return if invoked {
+                vec![primary_press('t')]
+            } else {
+                Vec::new()
+            };
+        }
+        if (NODE_FIRST_TAB_CLOSE..NODE_FIRST_TAB_CLOSE + 400).contains(&node.id) {
+            let Some(position) = tab_position_of(self, node.id).filter(|_| invoked) else {
+                return Vec::new();
+            };
+            self.show_tab(position);
+            return vec![primary_press('w')];
         }
         if let Some(chord) = toolbar_chord(node.id, self.layout) {
             if *action != AccessAction::Invoke {
@@ -2201,32 +2554,7 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
         "Queries",
         (260.0, 44.0, centre_width, 36.0),
     ));
-    for (index, other) in window.background_tabs.iter().enumerate() {
-        let left = 260.0 + TAB_WIDTH * index as f32;
-        let background = node(
-            NODE_FIRST_BACKGROUND_TAB + index as u32 % 1000,
-            NODE_QUERIES,
-            AccessRole::Tab,
-            &other.title,
-            (left, 44.0, TAB_WIDTH, 36.0),
-        );
-        nodes.push(background);
-    }
-    let title = if tab.running {
-        format!("{}, running", tab.title)
-    } else {
-        tab.title.clone()
-    };
-    let left = 260.0 + TAB_WIDTH * window.background_tabs.len() as f32;
-    let mut query = node(
-        NODE_QUERY_TAB,
-        NODE_QUERIES,
-        AccessRole::Tab,
-        &title,
-        (left, 44.0, TAB_WIDTH, 36.0),
-    );
-    query.state.selected = true;
-    nodes.push(query);
+    tab_nodes(&mut nodes, window, centre_width);
     let mut text = node(
         NODE_EDITOR,
         NODE_MAIN_WINDOW,
@@ -2331,6 +2659,17 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
     for node in nodes.iter_mut().filter(|node| no_keys_reach_it_yet(node)) {
         node.actions = AccessActions::default();
     }
+    if let Some(prompt) = &window.close_prompt {
+        for node in &mut nodes {
+            node.state.focused = false;
+        }
+        tab_strip::prompt_nodes(
+            &mut nodes,
+            prompt,
+            NODE_MAIN_WINDOW,
+            (width, HEIGHT as f32),
+        );
+    }
     if let Some(picker) = &window.layout_picker {
         for node in &mut nodes {
             node.state.focused = false;
@@ -2347,11 +2686,87 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
 const LAYOUT_ITEM_RIGHT: f32 = 240.0;
 const LAYOUT_ITEM_WIDTH: f32 = 260.0;
 
+fn tab_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow, centre_width: f32) {
+    let count = window.tab_count();
+    let width = tab_strip::tab_width(count, centre_width);
+    let viewport = tab_strip::viewport_width(count, centre_width);
+    for position in 0..count {
+        let Some(tab) = window.tab_at(position) else {
+            continue;
+        };
+        let shown = position == window.tab_position;
+        let id = if shown {
+            NODE_QUERY_TAB
+        } else {
+            background_tab_node(window, position)
+        };
+        let left = tab_left(window, position, width);
+        let visible_left = left.max(260.0);
+        let visible_right = (left + width).min(260.0 + viewport);
+        let mut item = node(
+            id,
+            NODE_QUERIES,
+            AccessRole::Tab,
+            &tab.spoken_title(),
+            (visible_left, 44.0, (visible_right - visible_left).max(0.0), 36.0),
+        );
+        item.state.selected = shown;
+        nodes.push(item);
+        let close_left = left + width - 28.0;
+        if close_left >= 260.0 && close_left + 24.0 <= 260.0 + viewport {
+            let mut close = node(
+                NODE_FIRST_TAB_CLOSE + position as u32 % 400,
+                id,
+                AccessRole::Button,
+                &format!("Close {}", tab.title),
+                (close_left, 50.0, 24.0, 24.0),
+            );
+            close.actions.invoke = true;
+            nodes.push(close);
+        }
+    }
+    let mut plus = node(
+        NODE_NEW_TAB,
+        NODE_QUERIES,
+        AccessRole::Button,
+        "New query tab",
+        (tab_strip::plus_x(count, centre_width, 260.0), 48.0, 28.0, 28.0),
+    );
+    plus.shortcut = Some(format!("{}+T", primary_name()));
+    plus.actions.invoke = true;
+    nodes.push(plus);
+}
+
+/// The strip position of the tab whose node, or whose close button's node, is `id`.
+pub fn tab_position_for_node(window: &MainWindow, id: u32) -> Option<usize> {
+    tab_position_of(window, id)
+}
+
+fn tab_position_of(window: &MainWindow, id: u32) -> Option<usize> {
+    if id == NODE_QUERY_TAB {
+        return Some(window.tab_position);
+    }
+    if (NODE_FIRST_TAB_CLOSE..NODE_FIRST_TAB_CLOSE + 400).contains(&id) {
+        return Some((id - NODE_FIRST_TAB_CLOSE) as usize);
+    }
+    if (NODE_FIRST_BACKGROUND_TAB..NODE_FIRST_TAB_CLOSE).contains(&id) {
+        let index = (id - NODE_FIRST_BACKGROUND_TAB) as usize;
+        if index >= window.background_tabs.len() {
+            return None;
+        }
+        return Some(if index >= window.tab_position {
+            index + 1
+        } else {
+            index
+        });
+    }
+    None
+}
+
 fn no_keys_reach_it_yet(node: &AccessNode) -> bool {
-    let background_tab = (NODE_FIRST_BACKGROUND_TAB..NODE_FIRST_PLAN_NODE).contains(&node.id);
     let result_segment = (NODE_RESULTS_SEGMENT..NODE_PLAN).contains(&node.id);
     let inspector_part = node.parent == Some(NODE_INSPECTOR);
-    background_tab || result_segment || inspector_part
+    result_segment || inspector_part
 }
 
 fn plan_nodes(nodes: &mut Vec<AccessNode>, plan: &PlanView, focused: bool, centre_width: f32) {
@@ -3174,5 +3589,186 @@ mod tests {
             .find(|node| node.id == NODE_RUN_ALL)
             .and_then(|node| node.shortcut);
         assert_eq!(shortcut.as_deref(), Some("F5"));
+    }
+
+    fn primary(letter: char) -> KeyPress {
+        KeyPress {
+            key: Key::Character(letter),
+            modifiers: eggdb_platform::window::Modifiers {
+                control: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    fn control_tab(shift: bool) -> KeyPress {
+        KeyPress {
+            key: Key::Tab,
+            modifiers: eggdb_platform::window::Modifiers {
+                control: true,
+                shift,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn ctrl_t_adds_the_lowest_free_query_after_the_active_tab_and_ctrl_tab_wraps() {
+        let now = Instant::now();
+        let mut window = MainWindow::sample();
+        window.tab.set_dialect(QueryDialect::MySql);
+        let _ = window.key(primary('t'), now);
+        let _ = window.key(primary('t'), now);
+        assert_eq!(window.tab_titles(), ["Query 1", "Query 2", "Query 3"]);
+        assert_eq!(window.tab.title, "Query 3");
+        assert_eq!(window.tab.dialect, QueryDialect::MySql);
+        assert_eq!(window.tab.focus, TabFocus::Editor);
+        assert_ne!(window.tab.session, window.background_tabs[0].session);
+        window.show_tab(0);
+        let _ = window.key(primary('t'), now);
+        assert_eq!(window.tab_titles(), ["Query 1", "Query 4", "Query 2", "Query 3"]);
+        let _ = window.key(control_tab(true), now);
+        assert_eq!(window.tab.title, "Query 1");
+        let _ = window.key(control_tab(true), now);
+        assert_eq!(window.tab.title, "Query 3", "Ctrl+Shift+Tab wraps to the last tab");
+        let _ = window.key(control_tab(false), now);
+        assert_eq!(window.tab.title, "Query 1");
+        assert_eq!(window.tab.grid.as_ref().map(|grid| grid.rows.len()), Some(3));
+    }
+
+    #[test]
+    fn ctrl_w_closes_an_empty_tab_at_once_and_asks_before_closing_one_with_text() {
+        let now = Instant::now();
+        let mut window = MainWindow::sample();
+        let _ = window.key(primary('t'), now);
+        let session = window.tab.session;
+        let closed = window.key(primary('w'), now);
+        assert_eq!(
+            closed,
+            WindowAction::CloseSession {
+                session,
+                stop: false
+            }
+        );
+        assert_eq!(window.tab_titles(), ["Query 1"]);
+        let asked = window.key(primary('w'), now);
+        assert_eq!(asked, WindowAction::Tab(TabAction::None));
+        let prompt = window.close_prompt.clone().expect("Query 1 holds text");
+        assert_eq!(prompt.title, "Close Query 1 without saving?");
+        let tree = accessibility_tree(&window);
+        let confirm = tree
+            .iter()
+            .find(|node| node.id == tab_strip::NODE_CLOSE_CONFIRM)
+            .expect("the dialog's default button");
+        assert_eq!(confirm.name, "Close");
+        assert!(confirm.state.focused);
+        let _ = window.key(KeyPress::plain(Key::Escape), now);
+        assert!(window.close_prompt.is_none());
+        assert_eq!(window.tab.title, "Query 1");
+        let _ = window.key(primary('w'), now);
+        let last = window.key(KeyPress::plain(Key::Enter), now);
+        assert!(matches!(last, WindowAction::CloseSession { stop: false, .. }));
+        assert_eq!(window.tab_titles(), ["Query 1"], "the strip is never empty");
+        assert!(window.tab.editor.text().is_empty() && window.tab.grid.is_none());
+    }
+
+    #[test]
+    fn closing_picks_the_tab_to_the_right_else_the_left() {
+        let now = Instant::now();
+        let mut window = MainWindow::sample();
+        let _ = window.key(primary('t'), now);
+        let _ = window.key(primary('t'), now);
+        window.show_tab(1);
+        let _ = window.key(primary('w'), now);
+        assert_eq!(window.tab.title, "Query 3");
+        let _ = window.key(primary('w'), now);
+        assert_eq!(window.tab.title, "Query 1");
+        assert!(window.close_prompt.is_some(), "Query 1 holds text");
+    }
+
+    #[test]
+    fn a_tab_in_a_transaction_shows_its_dot_name_and_status_item_and_locks_the_dialect() {
+        let theme = Theme::of(crate::color::ThemeKind::Light);
+        let now = Instant::now();
+        let mut window = MainWindow::sample();
+        window.tab.transaction = eggdb::sql::TransactionStatus::InBlock;
+        let tree = accessibility_tree(&window);
+        let tab = tree.iter().find(|node| node.id == NODE_QUERY_TAB).unwrap();
+        assert_eq!(tab.name, "Query 1, transaction open");
+        let canvas = draw(&window, theme, box_faces());
+        assert_eq!(canvas.pixel(275, 62), Some(theme.warning));
+        assert!(!window.tab.dialect_switch_allowed());
+        window.tab.open_dialect_menu();
+        assert_eq!(
+            window.tab.notice.as_deref(),
+            Some("Warning: COMMIT or ROLLBACK first; Query 1 has a transaction open")
+        );
+        let _ = window.key(KeyPress::plain(Key::Down), now);
+        let _ = window.key(KeyPress::plain(Key::Enter), now);
+        assert_eq!(window.tab.dialect, QueryDialect::PostgreSql);
+        window.tab.dialect_menu = None;
+        let _ = window.key(primary('t'), now);
+        assert_eq!(
+            window.other_tab_in_transaction().map(|tab| tab.title.as_str()),
+            Some("Query 1")
+        );
+        assert_eq!(transaction_open_in("Query 1"), "Transaction open in Query 1");
+        let _ = window.key(control_tab(false), now);
+        let _ = window.key(primary('w'), now);
+        assert_eq!(
+            window.close_prompt.as_ref().map(|prompt| prompt.title.as_str()),
+            Some("Close Query 1 and roll back?")
+        );
+    }
+
+    #[test]
+    fn tabs_shrink_then_scroll_and_the_active_one_stays_in_view() {
+        let now = Instant::now();
+        let mut window = MainWindow::sample();
+        for _ in 0..11 {
+            let _ = window.key(primary('t'), now);
+        }
+        assert_eq!(window.tab_count(), 12);
+        assert_eq!(window.tab.title, "Query 12");
+        assert_eq!(window.tab_scroll, 224.0);
+        let tree = accessibility_tree(&window);
+        let plus = tree.iter().find(|node| node.id == NODE_NEW_TAB).unwrap();
+        assert_eq!(plus.bounds.x, 1244.0);
+        let active = tree.iter().find(|node| node.id == NODE_QUERY_TAB).unwrap();
+        assert_eq!((active.bounds.x, active.bounds.width), (1136.0, 100.0));
+        window.show_tab(0);
+        assert_eq!(window.tab_scroll, 0.0);
+        assert!(window.scroll_tabs(1.0));
+        assert_eq!(window.tab_scroll, 100.0);
+        assert!(window.scroll_tabs(9.0));
+        assert_eq!(window.tab_scroll, 224.0);
+        assert!(!window.scroll_tabs(1.0));
+    }
+
+    #[test]
+    fn a_background_tab_and_its_close_button_act_through_the_tree() {
+        let now = Instant::now();
+        let mut window = MainWindow::sample();
+        let _ = window.key(primary('t'), now);
+        let tree = accessibility_tree(&window);
+        let first = tree
+            .iter()
+            .find(|node| node.role == AccessRole::Tab && node.name == "Query 1")
+            .cloned()
+            .unwrap();
+        assert!(first.actions.select, "keys reach background tabs now");
+        assert!(window.access_keys(&first, &AccessAction::Select).is_empty());
+        assert_eq!(window.tab.title, "Query 1");
+        let tree = accessibility_tree(&window);
+        let close = tree
+            .iter()
+            .find(|node| node.name == "Close Query 2")
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            window.access_keys(&close, &AccessAction::Invoke),
+            vec![primary('w')]
+        );
+        assert_eq!(window.tab.title, "Query 2");
     }
 }
