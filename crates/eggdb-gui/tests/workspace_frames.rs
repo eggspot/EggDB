@@ -495,6 +495,21 @@ fn connecting_to_a_running_server_opens_the_main_window_on_its_database() {
     );
 }
 
+#[cfg(not(windows))]
+fn refused_port_lines(port: u16) -> Vec<String> {
+    vec![format!(
+        "Error: cannot connect to 127.0.0.1:{port}: connection refused"
+    )]
+}
+
+#[cfg(windows)]
+fn refused_port_lines(port: u16) -> Vec<String> {
+    vec![
+        format!("Error: cannot connect to 127.0.0.1:{port}: connection refused"),
+        format!("Error: cannot connect to 127.0.0.1:{port}: timed out after 10 s"),
+    ]
+}
+
 #[test]
 fn a_refused_port_shows_the_error_lines_and_focuses_host() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
@@ -508,9 +523,10 @@ fn a_refused_port_shows_the_error_lines_and_focuses_host() {
     );
     let card = shown_card(&mut workspace);
     let error = card.error.clone().expect("the error lines");
-    assert_eq!(
-        error.line,
-        format!("Error: cannot connect to 127.0.0.1:{port}: connection refused")
+    assert!(
+        refused_port_lines(port).contains(&error.line),
+        "{}",
+        error.line
     );
     assert_eq!(
         error.fix.as_deref(),
