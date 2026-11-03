@@ -16,6 +16,7 @@ use crate::connection::{
     CancelHandle, ConnectFailure, ConnectTarget, Connection, Connector, ResultTable, SessionId,
     StatementFailure,
 };
+use crate::dialect::QueryDialect;
 use crate::inspector;
 use crate::layout::Layout;
 use crate::layout_picker::{self, LayoutPicker, PickerOutcome};
@@ -45,12 +46,20 @@ type OpenAnswer = Result<(Connection, Catalog), ConnectFailure>;
 enum CatalogRead {
     Catalog,
     Sample(String),
+    Drop {
+        statement: String,
+        dialect: QueryDialect,
+    },
 }
 
 enum CatalogAnswer {
     Catalog(Result<Catalog, StatementFailure>),
     Sample(inspector::Sample),
+    Dropped(Result<(), StatementFailure>),
 }
+
+/// How long the toast after a drop from the tree shows (`docs/ux/workspace.md` 10.2).
+pub const DROPPED_SHOWN_FOR: Duration = Duration::from_secs(8);
 
 struct Reading {
     read: CatalogRead,
@@ -113,6 +122,7 @@ pub struct Workspace {
     sessions_to_close: Vec<SessionId>,
     catalog_wanted: bool,
     sample_wanted: Option<String>,
+    drop_wanted: Option<(String, QueryDialect)>,
     status_until: Option<Instant>,
     notice_until: Option<Instant>,
     clipboard: Box<dyn Clipboard>,
@@ -161,6 +171,7 @@ impl Workspace {
             sessions_to_close: Vec::new(),
             catalog_wanted: false,
             sample_wanted: None,
+            drop_wanted: None,
             status_until: None,
             notice_until: None,
             clipboard: Box::new(MemoryClipboard::default()),
@@ -513,10 +524,16 @@ impl Workspace {
         }
         self.input_at(now);
         let tree = self.pointer_tree(faces, size);
-        if let Some(window) = self.main_window_mut()
-            && window.close_prompt.is_none()
-        {
-            window.context_press(&tree, x, y);
+        let Some(window) = self.main_window_mut() else {
+            return;
+        };
+        if window.close_prompt.is_some() || window.drop_prompt.is_some() {
+            return;
+        }
+        window.context_press(&tree, x, y);
+        if window.tree_menu.is_some() {
+            let item = window.inspected();
+            self.inspect(item);
         }
     }
 
@@ -803,6 +820,10 @@ impl Workspace {
             WindowAction::Tab(action) => self.tab_action(action, now),
             WindowAction::Inspect(item) => self.inspect(item),
             WindowAction::RefreshCatalog => self.refresh_catalog(),
+            WindowAction::Drop { statement, dialect } => {
+                self.drop_wanted = Some((statement, dialect));
+                self.start_read();
+            }
             WindowAction::LayoutChosen(layout) => self.keep_layout(layout, now),
             WindowAction::CloseSession { session, stop } => self.close_session(session, stop),
         }
@@ -859,7 +880,9 @@ impl Workspace {
         if self.reading.is_some() || self.run_waiting_for_connection.is_some() {
             return;
         }
-        let read = if self.catalog_wanted {
+        let read = if let Some((statement, dialect)) = self.drop_wanted.take() {
+            CatalogRead::Drop { statement, dialect }
+        } else if self.catalog_wanted {
             self.catalog_wanted = false;
             CatalogRead::Catalog
         } else if let Some(name) = self.sample_wanted.take() {
@@ -871,6 +894,9 @@ impl Workspace {
             match read {
                 CatalogRead::Catalog => self.catalog_wanted = true,
                 CatalogRead::Sample(name) => self.sample_wanted = Some(name),
+                CatalogRead::Drop { statement, dialect } => {
+                    self.drop_wanted = Some((statement, dialect));
+                }
             }
             return;
         };
@@ -881,6 +907,14 @@ impl Workspace {
                 CatalogRead::Catalog => CatalogAnswer::Catalog(connection.catalog()),
                 CatalogRead::Sample(name) => {
                     CatalogAnswer::Sample(inspector::fetch_sample(&mut connection, &name))
+                }
+                CatalogRead::Drop { statement, dialect } => {
+                    let outcomes =
+                        connection.run_script(dialect, &[statement], &CancelHandle::default());
+                    CatalogAnswer::Dropped(match outcomes.into_iter().last() {
+                        Some(Err(failure)) => Err(failure),
+                        _ => Ok(()),
+                    })
                 }
             };
             let _ = send.send((connection, answer));
@@ -898,6 +932,14 @@ impl Workspace {
                 }
                 CatalogAnswer::Catalog(Err(_)) => {}
                 CatalogAnswer::Sample(sample) => window.inspector.sample = Some(sample),
+                CatalogAnswer::Dropped(Ok(())) => {
+                    if window.drop_succeeded().is_some() {
+                        self.notice_until = Some(Instant::now() + DROPPED_SHOWN_FOR);
+                    }
+                    window.inspector.sample = None;
+                    self.catalog_wanted = true;
+                }
+                CatalogAnswer::Dropped(Err(failure)) => window.drop_failed(&failure),
             }
         }
         self.connection_back(connection);
@@ -1686,6 +1728,60 @@ mod tests {
         assert_eq!(
             tables.last().and_then(|table| table.rows.first()).cloned(),
             Some(vec![Some("0".to_owned())])
+        );
+    }
+
+    #[test]
+    fn drop_from_the_tree_menu_runs_in_its_own_session_and_refreshes_the_tree() {
+        let directory = scratch("tree-drop");
+        let _ = std::fs::remove_file(directory.join("dropped.eggdb"));
+        let now = Instant::now();
+        let limit = Duration::from_secs(10);
+        let mut workspace = workspace(Arc::new(EngineConnector), directory.clone());
+        type_text(&mut workspace, "dropped.eggdb", now);
+        workspace.key(KeyPress::plain(Key::Enter), now);
+        workspace.wait_for_open(limit);
+        workspace.run_text("CREATE TABLE gone (id integer)", false, now);
+        workspace.wait_for_run(limit);
+        workspace.refresh_catalog();
+        workspace.wait_for_reads(limit);
+        let window = workspace.main_window_mut().expect("the main window");
+        let table = window
+            .tree
+            .catalog
+            .tables
+            .iter()
+            .position(|table| table.name == "gone")
+            .expect("the table is listed");
+        window.focus_tree();
+        window.tree.current = TreeItem::Table(table);
+        let menu_key = KeyPress {
+            key: Key::F10,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        };
+        workspace.key(menu_key, now);
+        let window = workspace.main_window_mut().unwrap();
+        let menu = window.tree_menu.expect("Shift+F10 opens the row menu");
+        assert_eq!(menu.row, TreeItem::Table(table));
+        workspace.key(KeyPress::plain(Key::End), now);
+        workspace.key(KeyPress::plain(Key::Enter), now);
+        let window = workspace.main_window_mut().unwrap();
+        let (prompt, _) = window.drop_prompt.clone().expect("Drop… opens the dialog");
+        assert_eq!(prompt.statement, "DROP TABLE gone;");
+        workspace.key(KeyPress::plain(Key::Tab), now);
+        workspace.key(KeyPress::plain(Key::Tab), now);
+        workspace.key(KeyPress::plain(Key::Enter), now);
+        workspace.wait_for_reads(limit);
+        let window = workspace.main_window_mut().unwrap();
+        assert!(window.drop_prompt.is_none());
+        assert_eq!(window.tab.notice.as_deref(), Some("Dropped table gone"));
+        assert!(!window.tree.catalog.tables.iter().any(|table| table.name == "gone"));
+        assert_eq!(
+            window.tree.selected,
+            Some(TreeItem::Group(crate::object_browser::Group::Tables))
         );
     }
 

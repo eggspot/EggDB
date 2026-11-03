@@ -64,6 +64,12 @@ pub mod grid_menu;
 pub mod scrollbar;
 /// The grid's full-value view on one cell (`docs/ux/workspace.md` 9.3).
 pub mod value_view;
+/// The object tree's row menu: its items, which rows enable them, where it opens and its
+/// keys (`docs/ux/workspace.md` 10.1).
+pub mod tree_menu;
+/// The dialog that confirms dropping an object from the tree, with its statement in the
+/// active tab's dialect (`docs/ux/workspace.md` 10.2).
+pub mod drop_prompt;
 /// PNG encoding of rendered frames, for screenshots and tests.
 pub mod png;
 /// The pointer and the caret (`docs/ux/workspace.md` 6): hit testing on the accessibility

@@ -33,6 +33,8 @@ use crate::status_line;
 use crate::tab_strip::{self, ClosePrompt, PromptAnswer};
 use crate::scrollbar::{self, Axis, Extent};
 use crate::value_view;
+use crate::tree_menu::{self, TreeMenu, TreeMenuAnswer, TreeMenuItem, TreeMenuOrigin};
+use crate::drop_prompt::{self, DropAnswer, DropKind, DropPrompt, DropTarget};
 
 /// The width of the results grid's body, right of the row gutter, at the golden frame's size.
 pub const GRID_BODY_WIDTH: f32 = 972.0;
@@ -87,6 +89,13 @@ pub enum WindowAction {
     Inspect(TreeItem),
     /// Read the catalog again.
     RefreshCatalog,
+    /// Run a drop from the tree in a session of its own (`docs/ux/workspace.md` 10.2).
+    Drop {
+        /// The statement.
+        statement: String,
+        /// The dialect it is written in.
+        dialect: QueryDialect,
+    },
     /// The layout picker applied this layout: the client keeps it in its settings.
     LayoutChosen(Layout),
     /// A tab closed: end its kept session (rolling back its transaction), after stopping its
@@ -161,6 +170,11 @@ pub struct MainWindow {
     pub resizing: bool,
     /// The grid scrollbar the pointer is over or drags, drawn wider (9.6).
     pub scrollbar_hot: Option<Axis>,
+    /// The object tree's open row menu (`docs/ux/workspace.md` 10.1).
+    pub tree_menu: Option<TreeMenu>,
+    /// The dialog confirming a drop, while it is open (10.2), with the row selected after
+    /// the drop succeeds.
+    pub drop_prompt: Option<(DropPrompt, TreeItem)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,6 +258,8 @@ impl MainWindow {
             column_edge: None,
             resizing: false,
             scrollbar_hot: None,
+            tree_menu: None,
+            drop_prompt: None,
         }
     }
 
@@ -512,6 +528,14 @@ impl MainWindow {
             let answer = prompt.key(press);
             return self.prompt_answer(answer);
         }
+        if let Some((prompt, _)) = &mut self.drop_prompt {
+            let answer = prompt.key(press);
+            return self.drop_answer(answer);
+        }
+        if let Some(menu) = &mut self.tree_menu {
+            let answer = menu.key(press);
+            return self.tree_menu_answer(answer, now);
+        }
         if self.tab.value_view.is_some() || self.tab.grid_menu.is_some() {
             return WindowAction::Tab(self.tab.key(press));
         }
@@ -549,6 +573,18 @@ impl MainWindow {
             Key::Escape if self.inspector.overlay && self.focus != WindowFocus::Filter => {
                 self.inspector.overlay = false;
                 return WindowAction::Tab(TabAction::None);
+            }
+            Key::F10 | Key::ContextMenu
+                if self.focus == WindowFocus::Tree
+                    && (press.key == Key::ContextMenu || press.modifiers.shift) =>
+            {
+                self.open_tree_menu(self.tree.current, TreeMenuOrigin::CurrentRow);
+                return WindowAction::Tab(TabAction::None);
+            }
+            Key::Character('c' | 'C')
+                if primary && !press.modifiers.shift && self.focus == WindowFocus::Tree =>
+            {
+                return self.copy_name(self.tree.current);
             }
             _ => {}
         }
@@ -1103,6 +1139,10 @@ pub fn draw(window: &MainWindow, theme: Theme, faces: Faces<'_>) -> Canvas {
     if let Some(prompt) = &window.close_prompt {
         let size = (window.width.max(WIDTH) as f32, HEIGHT as f32);
         tab_strip::draw_prompt(&mut paint, prompt, size);
+    }
+    if let Some((prompt, _)) = &window.drop_prompt {
+        let size = (window.width.max(WIDTH) as f32, HEIGHT as f32);
+        drop_prompt::draw(&mut paint, prompt, size);
     }
     if let Some(picker) = &window.layout_picker {
         let size = (window.width.max(WIDTH) as f32, HEIGHT as f32);
@@ -2285,15 +2325,18 @@ impl MainWindow {
         Some(grid_menu::rect_for(menu.origin, cell, width))
     }
 
-    /// The open popover's rect, the value view's or the grid menu's.
+    /// The open popover's rect, the value view's, the grid menu's or the tree's row menu's.
     pub fn popover_rect(&self) -> Option<Rect> {
-        self.value_view_rect().or_else(|| self.grid_menu_rect())
+        self.value_view_rect()
+            .or_else(|| self.grid_menu_rect())
+            .or_else(|| self.tree_menu_rect())
     }
 
-    /// Closes the value view and the grid's menu.
+    /// Closes the value view, the grid's menu and the tree's row menu.
     pub fn close_popovers(&mut self) {
         self.tab.value_view = None;
         self.tab.grid_menu = None;
+        self.tree_menu = None;
     }
 
     /// Whether node `id` belongs to the open popover.
@@ -2301,6 +2344,8 @@ impl MainWindow {
         (self.tab.value_view.is_some() && is_value_view_node(id))
             || (self.tab.grid_menu.is_some()
                 && (id == grid_menu::NODE_GRID_MENU || grid_menu_item_of(id).is_some()))
+            || (self.tree_menu.is_some()
+                && (id == tree_menu::NODE_TREE_MENU || tree_menu::item_of_node(id).is_some()))
     }
 
     /// A press of the primary button while a popover is open: outside it closes the popover
@@ -2327,6 +2372,9 @@ impl MainWindow {
     /// the pointer. Returns whether it opened.
     pub fn context_press(&mut self, tree: &[AccessNode], x: f32, y: f32) -> bool {
         self.close_popovers();
+        if let Some(opened) = self.tree_context_press(tree, x, y) {
+            return opened;
+        }
         if self.tab.view != ResultView::Results {
             return false;
         }
@@ -2389,6 +2437,17 @@ impl MainWindow {
             let invoked = copy && *action == AccessAction::Invoke;
             return Some(if invoked { vec![KeyPress::plain(Key::Enter)] } else { Vec::new() });
         }
+        if self.tree_menu.is_some() {
+            let Some(index) = tree_menu::item_of_node(node.id) else {
+                self.tree_menu = None;
+                return None;
+            };
+            if let Some(menu) = &mut self.tree_menu {
+                menu.highlighted = Some(index);
+            }
+            let invoked = *action == AccessAction::Invoke;
+            return Some(if invoked { vec![KeyPress::plain(Key::Enter)] } else { Vec::new() });
+        }
         if self.tab.grid_menu.is_some() {
             let Some(index) = grid_menu_item_of(node.id) else {
                 self.tab.grid_menu = None;
@@ -2401,6 +2460,246 @@ impl MainWindow {
             return Some(if invoked { vec![KeyPress::plain(Key::Enter)] } else { Vec::new() });
         }
         None
+    }
+}
+
+impl MainWindow {
+    fn sidebar_shift(&self) -> (f32, f32) {
+        self.placed(Area::Sidebar).map_or((0.0, 0.0), |placed| placed.shift)
+    }
+
+    /// Where the tree's open row menu shows, in window coordinates.
+    pub fn tree_menu_rect(&self) -> Option<Rect> {
+        let menu = self.tree_menu.as_ref()?;
+        let rows = self.tree.rows();
+        let at = rows
+            .iter()
+            .position(|row| row.item == menu.row)
+            .unwrap_or(0);
+        let level = rows.get(at).map_or(0, |row| row.level);
+        let shift = self.sidebar_shift();
+        let label = (
+            44.0 + 16.0 * level as f32 + shift.0,
+            ROWS_TOP + ROW_HEIGHT * at.saturating_sub(self.tree.first_row) as f32 + shift.1,
+        );
+        Some(tree_menu::rect_for(
+            menu.origin,
+            label,
+            self.width.max(WIDTH) as f32,
+        ))
+    }
+
+    /// The tree's menu item under (`x`, `y`), while the menu is open.
+    pub fn tree_menu_item_at(&self, x: f32, y: f32) -> Option<usize> {
+        tree_menu::item_at(self.tree_menu_rect()?, x, y)
+    }
+
+    fn tree_context_press(&mut self, tree: &[AccessNode], x: f32, y: f32) -> Option<bool> {
+        let row = tree
+            .iter()
+            .rev()
+            .find(|node| node.role == AccessRole::TreeItem && pointer::contains(node.bounds, x, y))
+            .cloned();
+        if let Some(row) = row {
+            if !self.focus_node(&row) {
+                return Some(false);
+            }
+            let item = self.tree.current;
+            self.tree.selected = Some(item);
+            self.open_tree_menu(item, TreeMenuOrigin::Pointer { x, y });
+            return Some(true);
+        }
+        let shift = self.sidebar_shift();
+        let in_sidebar = self.placed(Area::Sidebar).is_some()
+            && area_at(x - shift.0, y - shift.1) == Area::Sidebar;
+        if in_sidebar {
+            self.focus_tree();
+            return Some(false);
+        }
+        None
+    }
+
+    /// Opens the row menu on `row` from `origin` (`docs/ux/workspace.md` 10.1), enabling
+    /// the items its kind of row has, `Drop…` only on a writable connection.
+    pub fn open_tree_menu(&mut self, row: TreeItem, origin: TreeMenuOrigin) {
+        self.close_popovers();
+        let expanded = self
+            .tree
+            .rows()
+            .into_iter()
+            .find(|shown| shown.item == row)
+            .and_then(|shown| shown.expanded);
+        let copyable = self.copied_name(row).is_some();
+        let writable = self.writable;
+        let enabled = TreeMenuItem::ALL.map(|item| item.enabled(row, copyable, writable));
+        self.focus_tree();
+        self.tree.current = row;
+        self.tree_menu = Some(TreeMenu::new(row, expanded, enabled, origin));
+    }
+
+    fn tree_menu_answer(&mut self, answer: TreeMenuAnswer, now: Instant) -> WindowAction {
+        let none = WindowAction::Tab(TabAction::None);
+        match answer {
+            TreeMenuAnswer::Moved => none,
+            TreeMenuAnswer::Close => {
+                self.tree_menu = None;
+                self.focus_tree();
+                none
+            }
+            TreeMenuAnswer::Activate(item) => match self.tree_menu.take() {
+                Some(menu) => self.tree_menu_item(item, menu.row, now),
+                None => none,
+            },
+        }
+    }
+
+    fn tree_menu_item(&mut self, item: TreeMenuItem, row: TreeItem, now: Instant) -> WindowAction {
+        self.focus_tree();
+        self.tree.current = row;
+        match item {
+            TreeMenuItem::Open => {
+                let action = self.tree.key(KeyPress::plain(Key::Enter), now);
+                self.tree_action(action, WindowFocus::Tree)
+            }
+            TreeMenuItem::InsertName => {
+                self.tree_action(TreeAction::InsertName(row), WindowFocus::Tree)
+            }
+            TreeMenuItem::CopyName => self.copy_name(row),
+            TreeMenuItem::ShowDdl => self.show_ddl(row),
+            TreeMenuItem::Refresh => WindowAction::RefreshCatalog,
+            TreeMenuItem::Drop => {
+                self.open_drop_prompt(row);
+                WindowAction::Tab(TabAction::None)
+            }
+        }
+    }
+
+    /// What `Copy name` copies for `row`: the connection's path or URL, else the row's name.
+    pub fn copied_name(&self, row: TreeItem) -> Option<String> {
+        match row {
+            TreeItem::Connection => Some(self.location.clone()),
+            other => self.tree.name_of(other),
+        }
+    }
+
+    /// `Ctrl/Cmd+C` in the tree and `Copy name`: puts the name on the clipboard with the
+    /// toast `Copied orders`.
+    pub fn copy_name(&mut self, row: TreeItem) -> WindowAction {
+        match self.copied_name(row) {
+            Some(text) => {
+                let toast = format!("Copied {text}");
+                WindowAction::Tab(TabAction::Copy { text, toast })
+            }
+            None => WindowAction::Tab(TabAction::None),
+        }
+    }
+
+    /// `Show DDL`: selects the row (a column's table), opens the inspector and unfolds its
+    /// `DDL` block.
+    pub fn show_ddl(&mut self, row: TreeItem) -> WindowAction {
+        let item = match row {
+            TreeItem::Column { table, .. } => TreeItem::Table(table),
+            other => other,
+        };
+        self.tree.selected = Some(item);
+        if !self.inspector.is_open() {
+            self.inspector.toggle(self.width);
+        }
+        self.inspector
+            .collapsed
+            .retain(|&block| block != InspectorBlock::Ddl);
+        WindowAction::Inspect(item)
+    }
+
+    fn drop_target(&self, row: TreeItem) -> Option<DropTarget> {
+        let catalog = &self.tree.catalog;
+        let kind = match row {
+            TreeItem::Table(_) => DropKind::Table,
+            TreeItem::View(_) => DropKind::View,
+            TreeItem::Index(index) | TreeItem::TableIndex(index) => DropKind::Index {
+                table: catalog.indexes.get(index)?.table.clone(),
+            },
+            TreeItem::Sequence(_) => DropKind::Sequence,
+            TreeItem::Trigger(trigger) => DropKind::Trigger {
+                table: catalog.triggers.get(trigger)?.table.clone(),
+            },
+            _ => return None,
+        };
+        Some(DropTarget {
+            kind,
+            name: self.tree.name_of(row)?,
+        })
+    }
+
+    fn selected_after_drop(&self, row: TreeItem) -> TreeItem {
+        use crate::object_browser::Group;
+        match row {
+            TreeItem::Table(_) => TreeItem::Group(Group::Tables),
+            TreeItem::View(_) => TreeItem::Group(Group::Views),
+            TreeItem::Index(_) => TreeItem::Group(Group::Indexes),
+            TreeItem::Sequence(_) => TreeItem::Group(Group::Sequences),
+            other => self.tree.table_of(other).unwrap_or(TreeItem::Connection),
+        }
+    }
+
+    /// Why a drop cannot run now: a tab runs, or a tab's session holds a transaction.
+    pub fn drop_blocked(&self) -> Option<String> {
+        let tabs = || std::iter::once(&self.tab).chain(self.background_tabs.iter());
+        if let Some(tab) = tabs().find(|tab| tab.running) {
+            return Some(drop_prompt::blocked_body(&tab.title, true));
+        }
+        tabs()
+            .find(|tab| tab.transaction != eggdb::sql::TransactionStatus::Idle)
+            .map(|tab| drop_prompt::blocked_body(&tab.title, false))
+    }
+
+    /// `Drop…` on `row`: opens the dialog with the statement in the showing tab's dialect;
+    /// nothing on a read-only connection or a row that cannot be dropped.
+    pub fn open_drop_prompt(&mut self, row: TreeItem) {
+        if !self.writable {
+            return;
+        }
+        let Some(target) = self.drop_target(row) else {
+            return;
+        };
+        let prompt = DropPrompt::new(target, self.tab.dialect, self.drop_blocked());
+        self.drop_prompt = Some((prompt, self.selected_after_drop(row)));
+    }
+
+    fn drop_answer(&mut self, answer: DropAnswer) -> WindowAction {
+        match answer {
+            DropAnswer::Pending => WindowAction::Tab(TabAction::None),
+            DropAnswer::Cancel => {
+                self.drop_prompt = None;
+                self.focus_tree();
+                WindowAction::Tab(TabAction::None)
+            }
+            DropAnswer::Drop(statement) => WindowAction::Drop {
+                statement,
+                dialect: self.tab.dialect,
+            },
+        }
+    }
+
+    /// The drop ran: the dialog closes, the dropped row's parent is selected and the toast
+    /// says what went; returns the toast.
+    pub fn drop_succeeded(&mut self) -> Option<String> {
+        let (prompt, then_selected) = self.drop_prompt.take()?;
+        self.tree.selected = Some(then_selected);
+        self.tree.current = then_selected;
+        self.focus_tree();
+        let toast = drop_prompt::dropped_toast(&prompt.target);
+        self.tab.notice = Some(toast.clone());
+        Some(toast)
+    }
+
+    /// The drop failed: the dialog stays with the engine's error line and the full report
+    /// goes to the showing tab's messages.
+    pub fn drop_failed(&mut self, failure: &crate::connection::StatementFailure) {
+        if let Some((prompt, _)) = &mut self.drop_prompt {
+            prompt.failed(drop_prompt::error_line(&failure.code, &failure.message));
+        }
+        self.tab.messages.extend(failure.report.iter().cloned());
     }
 }
 
@@ -2636,10 +2935,16 @@ fn popovers(paint: &mut Painter<'_, '_>, window: &MainWindow) {
         let hovered = window.pointer.hovered.and_then(grid_menu_item_of);
         grid_menu::draw(paint, menu, rect, hovered);
     }
+    if let (Some(menu), Some(rect)) = (&window.tree_menu, window.tree_menu_rect()) {
+        let hovered = window.pointer.hovered.and_then(tree_menu::item_of_node);
+        tree_menu::draw(paint, menu, rect, hovered);
+    }
 }
 
 fn popover_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
-    let open = window.tab.value_view.is_some() || window.tab.grid_menu.is_some();
+    let open = window.tab.value_view.is_some()
+        || window.tab.grid_menu.is_some()
+        || window.tree_menu.is_some();
     if !open {
         return;
     }
@@ -2651,6 +2956,9 @@ fn popover_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
     }
     if let (Some(menu), Some(rect)) = (&window.tab.grid_menu, window.grid_menu_rect()) {
         grid_menu::nodes(nodes, menu, rect, NODE_GRID);
+    }
+    if let (Some(menu), Some(rect)) = (&window.tree_menu, window.tree_menu_rect()) {
+        tree_menu::nodes(nodes, menu, rect, NODE_MAIN_WINDOW);
     }
 }
 
@@ -2895,6 +3203,24 @@ impl MainWindow {
                 layout_item_chord().to_vec()
             } else {
                 Vec::new()
+            };
+        }
+        if let Some((prompt, _)) = &mut self.drop_prompt {
+            return match node.id {
+                drop_prompt::NODE_DROP_STATEMENT => {
+                    prompt.focus = drop_prompt::DropFocus::Statement;
+                    Vec::new()
+                }
+                drop_prompt::NODE_DROP_CONFIRM if prompt.can_drop() => {
+                    prompt.focus = drop_prompt::DropFocus::Drop;
+                    vec![KeyPress::plain(Key::Enter)]
+                }
+                drop_prompt::NODE_DROP_CONFIRM | drop_prompt::NODE_DROP_DIALOG => Vec::new(),
+                drop_prompt::NODE_DROP_CANCEL => {
+                    prompt.focus = drop_prompt::DropFocus::Cancel;
+                    vec![KeyPress::plain(Key::Enter)]
+                }
+                _ => vec![KeyPress::plain(Key::Escape)],
             };
         }
         if self.close_prompt.is_some() {
@@ -3158,6 +3484,12 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
             NODE_MAIN_WINDOW,
             (width, HEIGHT as f32),
         );
+    }
+    if let Some((prompt, _)) = &window.drop_prompt {
+        for node in &mut nodes {
+            node.state.focused = false;
+        }
+        drop_prompt::nodes(&mut nodes, prompt, NODE_MAIN_WINDOW, (width, HEIGHT as f32));
     }
     if let Some(picker) = &window.layout_picker {
         for node in &mut nodes {
@@ -4487,5 +4819,101 @@ mod tests {
         let theme = Theme::of(ThemeKind::Light);
         let canvas = draw(&window, theme, box_faces());
         assert_ne!(canvas.pixel(1275, 700), Some(theme.bg0));
+    }
+
+    #[test]
+    fn the_tree_row_menu_opens_from_the_keyboard_and_the_pointer_and_copies_names() {
+        let mut window = MainWindow::sample();
+        let now = Instant::now();
+        window.focus_tree();
+        window.tree.current = TreeItem::Table(1);
+        assert_eq!(
+            window.key(primary_press('c'), now),
+            WindowAction::Tab(TabAction::Copy {
+                text: "orders".to_owned(),
+                toast: "Copied orders".to_owned(),
+            })
+        );
+        window.key(KeyPress::plain(Key::ContextMenu), now);
+        let menu = window.tree_menu.expect("the menu key opens the row menu");
+        assert_eq!(menu.origin, TreeMenuOrigin::CurrentRow);
+        assert_eq!(menu.highlighted, Some(0));
+        assert_eq!(
+            window.tree_menu_rect(),
+            Some(Rect::new(76.0, 188.0, tree_menu::WIDTH, tree_menu::HEIGHT))
+        );
+        let nodes = accessibility_tree(&window);
+        let drop_item = nodes
+            .iter()
+            .find(|node| node.id == tree_menu::NODE_FIRST_TREE_MENU_ITEM + 5)
+            .expect("the menu's items are in the tree");
+        assert_eq!(drop_item.name, "Drop…");
+        assert!(!drop_item.state.disabled);
+        assert!(window.is_popover_node(drop_item.id));
+        window.key(KeyPress::plain(Key::Escape), now);
+        assert_eq!(window.tree_menu, None);
+        assert_eq!(window.focus, WindowFocus::Tree);
+        let nodes = accessibility_tree(&window);
+        assert!(window.context_press(&nodes, 100.0, 146.0));
+        assert_eq!(window.tree.selected, Some(TreeItem::Table(0)));
+        assert_eq!(
+            window.tree_menu.map(|menu| menu.origin),
+            Some(TreeMenuOrigin::Pointer { x: 100.0, y: 146.0 })
+        );
+        for _ in 0..4 {
+            window.key(KeyPress::plain(Key::Down), now);
+        }
+        assert_eq!(
+            window.key(KeyPress::plain(Key::Enter), now),
+            WindowAction::Inspect(TreeItem::Table(0))
+        );
+        assert!(window.inspector.is_open());
+        assert!(window.inspector.is_expanded(InspectorBlock::Ddl));
+        let nodes = accessibility_tree(&window);
+        assert!(!window.context_press(&nodes, 100.0, 700.0));
+        assert_eq!(window.focus, WindowFocus::Tree);
+        assert_eq!(window.tree_menu, None);
+    }
+
+    #[test]
+    fn drop_asks_with_the_tabs_dialect_and_waits_for_a_tab_in_a_transaction() {
+        let mut window = MainWindow::sample();
+        let now = Instant::now();
+        window.tab.set_dialect(QueryDialect::MySql);
+        window.focus_tree();
+        window.tree.expanded.insert(TreeItem::Group(crate::object_browser::Group::Indexes));
+        let index = window
+            .tree
+            .catalog
+            .indexes
+            .iter()
+            .position(|index| index.name == "orders_customer_id_idx")
+            .unwrap();
+        window.open_drop_prompt(TreeItem::Index(index));
+        let (prompt, then_selected) = window.drop_prompt.clone().expect("the dialog opens");
+        assert_eq!(prompt.statement, "DROP INDEX orders_customer_id_idx ON orders;");
+        assert_eq!(prompt.title(), "Drop index orders_customer_id_idx?");
+        assert_eq!(
+            then_selected,
+            TreeItem::Group(crate::object_browser::Group::Indexes)
+        );
+        window.key(KeyPress::plain(Key::Escape), now);
+        assert!(window.drop_prompt.is_none());
+        window.add_tab();
+        window.tab.transaction = eggdb::sql::TransactionStatus::InBlock;
+        window.show_tab(0);
+        window.open_drop_prompt(TreeItem::Table(1));
+        let (prompt, _) = window.drop_prompt.clone().expect("the dialog opens");
+        assert_eq!(prompt.body(), "COMMIT or ROLLBACK in Query 2 first.");
+        assert!(!prompt.can_drop());
+        window.drop_prompt = None;
+        let mut read_only = MainWindow {
+            writable: false,
+            ..MainWindow::sample()
+        };
+        read_only.open_drop_prompt(TreeItem::Table(1));
+        assert!(read_only.drop_prompt.is_none());
+        read_only.open_tree_menu(TreeItem::Table(1), TreeMenuOrigin::CurrentRow);
+        assert_eq!(read_only.tree_menu.map(|menu| menu.enabled[5]), Some(false));
     }
 }

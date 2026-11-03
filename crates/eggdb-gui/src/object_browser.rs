@@ -495,6 +495,24 @@ impl ObjectTree {
         }
     }
 
+    /// The table a column, an index or a trigger belongs to, as its tree row.
+    pub fn table_of(&self, item: TreeItem) -> Option<TreeItem> {
+        let catalog = &self.catalog;
+        let name = match item {
+            TreeItem::Column { table, .. } => return Some(TreeItem::Table(table)),
+            TreeItem::Index(index) | TreeItem::TableIndex(index) => {
+                &catalog.indexes.get(index)?.table
+            }
+            TreeItem::Trigger(trigger) => &catalog.triggers.get(trigger)?.table,
+            _ => return None,
+        };
+        catalog
+            .tables
+            .iter()
+            .position(|table| &table.name == name)
+            .map(TreeItem::Table)
+    }
+
     fn icon(item: TreeItem) -> RowIcon {
         match item {
             TreeItem::Connection => RowIcon::Database,
@@ -625,6 +643,17 @@ impl ObjectTree {
                     self.toggle(row.item, row.expanded == Some(true));
                     TreeAction::None
                 }
+                TreeItem::Sequence(_) => TreeAction::None,
+                item @ (TreeItem::Column { .. }
+                | TreeItem::Index(_)
+                | TreeItem::TableIndex(_)
+                | TreeItem::Trigger(_)) => match self.table_of(item) {
+                    Some(table) => {
+                        self.selected = Some(item);
+                        TreeAction::Open(table)
+                    }
+                    None => TreeAction::None,
+                },
                 item => {
                     self.selected = Some(item);
                     TreeAction::Inspect(item)
@@ -1216,6 +1245,35 @@ mod tests {
         tree.current = TreeItem::Trigger(0);
         tree.set_catalog(refreshed);
         assert_eq!(tree.current, TreeItem::Trigger(1), "the refresh keeps the trigger by name");
+    }
+
+    #[test]
+    fn enter_on_a_column_index_or_trigger_opens_its_table_and_on_a_sequence_nothing() {
+        let mut tree = ObjectTree::new("shop", shop());
+        let now = Instant::now();
+        for open in [
+            TreeItem::Table(0),
+            TreeItem::TableIndexes(0),
+            TreeItem::Table(1),
+            TreeItem::Columns(1),
+            TreeItem::TableTriggers(1),
+            TreeItem::Group(Group::Indexes),
+        ] {
+            tree.expanded.insert(open);
+        }
+        tree.current = TreeItem::Column { table: 1, column: 1 };
+        assert_eq!(tree.key(press(Key::Enter), now), TreeAction::Open(TreeItem::Table(1)));
+        assert_eq!(tree.selected, Some(TreeItem::Column { table: 1, column: 1 }));
+        tree.current = TreeItem::Index(2);
+        assert_eq!(tree.key(press(Key::Enter), now), TreeAction::Open(TreeItem::Table(2)));
+        tree.current = TreeItem::TableIndex(0);
+        assert_eq!(tree.key(press(Key::Enter), now), TreeAction::Open(TreeItem::Table(0)));
+        tree.current = TreeItem::Trigger(0);
+        assert_eq!(tree.key(press(Key::Enter), now), TreeAction::Open(TreeItem::Table(1)));
+        tree.expanded.insert(TreeItem::Group(Group::Sequences));
+        tree.current = TreeItem::Sequence(0);
+        assert_eq!(tree.key(press(Key::Enter), now), TreeAction::None);
+        assert_eq!(tree.table_of(TreeItem::Sequence(0)), None);
     }
 
     #[test]
