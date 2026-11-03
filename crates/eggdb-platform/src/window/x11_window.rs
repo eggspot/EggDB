@@ -17,6 +17,7 @@ use super::{
 const LARGEST_REPLY: usize = 16 << 20;
 const SELECTION_SERVING_REMEMBERED: usize = 64;
 const RESOURCES_UNITS: u32 = 1 << 16;
+const XSETTINGS_UNITS: u32 = 1 << 14;
 const SHORTEST_WAIT: Duration = Duration::from_millis(1);
 const BACKLOG_RETRY: Duration = Duration::from_millis(10);
 const CLIPBOARD_ANSWER_LIMIT: Duration = Duration::from_secs(2);
@@ -87,6 +88,7 @@ pub(crate) struct X11Window {
     origin_stale: bool,
     atoms: ClipboardAtoms,
     owned_clipboard: Option<String>,
+    screen_number: u32,
 }
 
 impl X11Window {
@@ -151,6 +153,7 @@ impl X11Window {
             origin_stale: false,
             atoms: ClipboardAtoms::default(),
             owned_clipboard: None,
+            screen_number: name.screen,
         };
         this.scale = this.read_scale(screen.root)?;
         this.wm_protocols = this.intern("WM_PROTOCOLS")?;
@@ -379,6 +382,20 @@ impl X11Window {
         let reply = self.reply(sequence)?;
         let resources = x11::parse_property_reply(&reply)?;
         Ok(x11::scale_from_resources(resources).unwrap_or(1.0))
+    }
+
+    fn read_reduced_motion(&mut self) -> Result<bool, WindowError> {
+        let selection = self.intern(&x11::xsettings_selection(self.screen_number))?;
+        let sequence = self.send(&x11::get_selection_owner(selection)?)?;
+        let reply = self.reply(sequence)?;
+        let owner = x11::parse_selection_owner_reply(&reply)?;
+        if owner == 0 {
+            return Ok(false);
+        }
+        let settings = self.intern("_XSETTINGS_SETTINGS")?;
+        let sequence = self.send(&x11::get_property(owner, settings, XSETTINGS_UNITS)?)?;
+        let reply = self.reply(sequence)?;
+        Ok(x11::parse_property_reply(&reply).is_ok_and(x11::xsettings_reduce_motion))
     }
 
     fn refresh_keyboard(&mut self) -> Result<(), WindowError> {
@@ -717,6 +734,10 @@ impl Window for X11Window {
 
     fn set_accessibility_tree(&mut self, nodes: &[AccessNode]) {
         self.update_accessibility(|bridge| bridge.set_tree(nodes));
+    }
+
+    fn reduced_motion(&mut self) -> bool {
+        self.read_reduced_motion().unwrap_or(false)
     }
 
     fn put_clipboard_text(&mut self, text: &str) -> Result<(), WindowError> {

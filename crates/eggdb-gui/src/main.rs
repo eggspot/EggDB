@@ -28,7 +28,7 @@ use eggdb_platform::window::{
     AccessNode, Window, WindowEvent, WindowOptions, has_file_dialog, open_window,
 };
 
-const USAGE: &str = "Usage: eggdb-gui [--window] [--png <file>] [--open <path>] [--no-create] [--read-only] [--no-file-dialog] [--run <sql>] [--explain <sql>] [--theme light|dark|high-contrast] [--layout <layout>] [--scale <n>] [--size <width>x<height>] [--box-text] [--frames <n>]
+const USAGE: &str = "Usage: eggdb-gui [--window] [--png <file>] [--open <path>] [--no-create] [--read-only] [--no-file-dialog] [--run <sql>] [--explain <sql>] [--theme light|dark|high-contrast] [--layout <layout>] [--reduced-motion] [--scale <n>] [--size <width>x<height>] [--box-text] [--frames <n>]
 
 Shows EggDB's connect screen.
   --window          open it in a native window (the default without --png)
@@ -43,6 +43,8 @@ Shows EggDB's connect screen.
   --layout <layout> lay the main window out as eggdb, ssms, pgadmin, dbeaver, datagrip,
                     mysql-workbench, mongodb-compass or redis-insight for this run, without
                     keeping it in the settings
+  --reduced-motion  reduce motion whatever the system's setting says (fills change at once,
+                    the caret holds still)
   --scale <n>       device pixels per logical pixel for --png (default 1)
   --size <w>x<h>    the logical size for --png (default 1280x800)
   --box-text        draw text as boxes, the same pixels on every OS (for pixel tests)
@@ -69,6 +71,7 @@ struct Options {
     read_only: bool,
     file_dialog: bool,
     layout: Option<Layout>,
+    reduced_motion: bool,
 }
 
 fn parse_size(text: &str) -> Option<(u32, u32)> {
@@ -93,6 +96,7 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<Option<Opti
         read_only: false,
         file_dialog: true,
         layout: None,
+        reduced_motion: false,
     };
     while let Some(arg) = args.next() {
         let name = arg
@@ -106,6 +110,7 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<Option<Opti
             "--box-text" => options.box_text = true,
             "--no-create" => options.create_if_missing = false,
             "--read-only" => options.read_only = true,
+            "--reduced-motion" => options.reduced_motion = true,
             "--no-file-dialog" => options.file_dialog = false,
             "--open" => options.open = Some(value("a path")?),
             "--run" => options.run = Some(value("a statement")?),
@@ -212,6 +217,7 @@ fn workspace(options: &Options, file_dialog: bool, keep_settings: bool) -> Works
     if let Some(layout) = options.layout {
         workspace.show_layout(layout);
     }
+    workspace.set_reduced_motion(options.reduced_motion);
     workspace
 }
 
@@ -293,6 +299,8 @@ fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
     let mut workspace = workspace(options, has_file_dialog(), true);
     workspace.set_clipboard(Box::new(SystemClipboard::new(Rc::clone(&window))));
     workspace.start_caret_blink(Instant::now());
+    let system_reduced_motion = window.borrow_mut().reduced_motion();
+    workspace.set_reduced_motion(options.reduced_motion || system_reduced_motion);
     if let Some(open) = &options.open {
         workspace.open_typed(&open.to_string_lossy(), Instant::now());
     }
@@ -408,6 +416,10 @@ fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
             }
             Some(WindowEvent::CloseRequested) => return Ok(()),
             Some(WindowEvent::Focused(active)) => {
+                if active {
+                    let system_reduced_motion = window.borrow_mut().reduced_motion();
+                    workspace.set_reduced_motion(options.reduced_motion || system_reduced_motion);
+                }
                 dirty |= workspace.set_window_active(active, now);
                 continue;
             }
@@ -497,6 +509,9 @@ mod tests {
         assert_eq!(laid_out.layout, Some(Layout::Workbench));
         assert!(parse(&["--layout", "toad"]).is_err());
         assert!(parse(&["--layout"]).is_err());
+        assert!(!laid_out.reduced_motion);
+        let still = parse(&["--png", "a.png", "--reduced-motion"]).unwrap().unwrap();
+        assert!(still.reduced_motion);
         assert!(!opening.create_if_missing && opening.read_only && !opening.file_dialog);
         let scripted = parse(&["--window", "--frames", "3", "--box-text"])
             .unwrap()

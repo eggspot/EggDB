@@ -44,6 +44,7 @@ const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: isize = -4;
 
 const WM_SIZE: u32 = 0x0005;
 const WM_SETFOCUS: u32 = 0x0007;
+const SPI_GETCLIENTAREAANIMATION: u32 = 0x1042;
 const WM_KILLFOCUS: u32 = 0x0008;
 const WM_PAINT: u32 = 0x000F;
 const WM_CLOSE: u32 = 0x0010;
@@ -247,6 +248,7 @@ unsafe extern "system" {
     fn TrackMouseEvent(track: *mut TrackMouseEventParams) -> i32;
     fn ScreenToClient(window: Handle, point: *mut Point) -> i32;
     fn OpenClipboard(owner: Handle) -> i32;
+    fn SystemParametersInfoW(action: u32, parameter: u32, value: *mut i32, update: u32) -> i32;
     fn CloseClipboard() -> i32;
     fn EmptyClipboard() -> i32;
     fn SetClipboardData(format: u32, memory: Handle) -> Handle;
@@ -1034,6 +1036,16 @@ impl Window for Win32Window {
         // SAFETY: `window` is ours; this sends `WM_PAINT` now, which draws the stored frame.
         unsafe { UpdateWindow(self.window) };
         Ok(())
+    }
+
+    fn reduced_motion(&mut self) -> bool {
+        let mut animates: i32 = 1;
+        // SAFETY: `SPI_GETCLIENTAREAANIMATION` writes one `BOOL` to the pointer, which is a
+        // live `i32` of this frame.
+        let read = unsafe {
+            SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &raw mut animates, 0)
+        };
+        read != 0 && animates == 0
     }
 
     fn set_accessibility_tree(&mut self, nodes: &[AccessNode]) {

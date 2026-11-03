@@ -1069,6 +1069,27 @@ impl WindowState {
         Ok(())
     }
 
+    fn reduced_motion(&self) -> bool {
+        let runtime = &self.runtime;
+        let Ok(class) = runtime.class(c"NSWorkspace") else {
+            return false;
+        };
+        // SAFETY: `sharedWorkspace` is a class method returning the shared workspace.
+        let workspace = unsafe { (runtime.send_id)(class, runtime.selector(c"sharedWorkspace")) };
+        if workspace.is_null() {
+            return false;
+        }
+        // SAFETY: `workspace` is the shared `NSWorkspace`, and
+        // `accessibilityDisplayShouldReduceMotion` takes no arguments and returns a `BOOL`.
+        let reduce = unsafe {
+            (runtime.send_bool)(
+                workspace,
+                runtime.selector(c"accessibilityDisplayShouldReduceMotion"),
+            )
+        };
+        reduce != NO
+    }
+
     fn pasteboard(&self) -> Result<Id, WindowError> {
         let runtime = &self.runtime;
         let class = runtime.class(c"NSPasteboard")?;
@@ -1501,6 +1522,11 @@ impl Window for CocoaWindow {
     fn clipboard_text(&mut self) -> Result<Option<String>, WindowError> {
         let state = &self.state;
         state.runtime.with_pool(|| state.clipboard())
+    }
+
+    fn reduced_motion(&mut self) -> bool {
+        let state = &self.state;
+        state.runtime.with_pool(|| state.reduced_motion())
     }
 
     fn next_event(

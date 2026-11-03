@@ -660,6 +660,13 @@ pub trait Window: fmt::Debug {
             "this system has no clipboard in the platform layer yet",
         ))
     }
+
+    /// Whether the user asked the system to reduce motion, read now: macOS's Reduce Motion,
+    /// Windows' "Animation effects" turned off, or an X11 desktop's XSETTINGS
+    /// `Gtk/EnableAnimations` set to 0. Backends that cannot tell answer `false`.
+    fn reduced_motion(&mut self) -> bool {
+        false
+    }
 }
 
 /// Checks that `rgba` holds exactly `width` × `height` pixels of four bytes.

@@ -59,6 +59,7 @@ const OPCODE_CHANGE_PROPERTY: u8 = 18;
 const OPCODE_DELETE_PROPERTY: u8 = 19;
 const OPCODE_GET_PROPERTY: u8 = 20;
 const OPCODE_SET_SELECTION_OWNER: u8 = 22;
+const OPCODE_GET_SELECTION_OWNER: u8 = 23;
 const OPCODE_CONVERT_SELECTION: u8 = 24;
 const OPCODE_SEND_EVENT: u8 = 25;
 const OPCODE_TRANSLATE_COORDINATES: u8 = 40;
@@ -632,6 +633,115 @@ pub fn set_selection_owner(owner: u32, selection: u32, time: u32) -> Result<Vec<
     body.extend_from_slice(&selection.to_le_bytes());
     body.extend_from_slice(&time.to_le_bytes());
     request(OPCODE_SET_SELECTION_OWNER, 0, &body)
+}
+
+/// `GetSelectionOwner`: the window owning `selection`, answered by a reply.
+pub fn get_selection_owner(selection: u32) -> Result<Vec<u8>, WindowError> {
+    request(OPCODE_GET_SELECTION_OWNER, 0, &selection.to_le_bytes())
+}
+
+/// The owner of a `GetSelectionOwner` reply, 0 when the selection has none.
+pub fn parse_selection_owner_reply(reply: &[u8]) -> Result<u32, WindowError> {
+    if u8_at(reply, 0)? != 1 {
+        return Err(protocol("a GetSelectionOwner answer is not a reply"));
+    }
+    u32_at(reply, 8)
+}
+
+/// The selection an XSETTINGS manager owns for `screen`, `_XSETTINGS_S<screen>`.
+pub fn xsettings_selection(screen: u32) -> String {
+    format!("_XSETTINGS_S{screen}")
+}
+
+/// The name of the XSETTINGS setting GTK desktops turn off to reduce motion.
+pub const XSETTINGS_ENABLE_ANIMATIONS: &str = "Gtk/EnableAnimations";
+
+const XSETTING_INTEGER: u8 = 0;
+const XSETTING_STRING: u8 = 1;
+const XSETTING_COLOR: u8 = 2;
+
+struct XsettingsReader<'d> {
+    data: &'d [u8],
+    at: usize,
+    big_endian: bool,
+}
+
+impl<'d> XsettingsReader<'d> {
+    fn take(&mut self, count: usize) -> Option<&'d [u8]> {
+        let end = self.at.checked_add(count)?;
+        let taken = self.data.get(self.at..end)?;
+        self.at = end;
+        Some(taken)
+    }
+
+    fn padded(&mut self, count: usize) -> Option<&'d [u8]> {
+        let taken = self.take(count)?;
+        self.take((4 - count % 4) % 4)?;
+        Some(taken)
+    }
+
+    fn u16(&mut self) -> Option<u16> {
+        let bytes: [u8; 2] = self.take(2)?.try_into().ok()?;
+        Some(if self.big_endian {
+            u16::from_be_bytes(bytes)
+        } else {
+            u16::from_le_bytes(bytes)
+        })
+    }
+
+    fn u32(&mut self) -> Option<u32> {
+        let bytes: [u8; 4] = self.take(4)?.try_into().ok()?;
+        Some(if self.big_endian {
+            u32::from_be_bytes(bytes)
+        } else {
+            u32::from_le_bytes(bytes)
+        })
+    }
+}
+
+/// The integer value of the setting `name` in an XSETTINGS manager's `_XSETTINGS_SETTINGS`
+/// property, `None` when the data lacks it, holds it as another type or is malformed.
+pub fn xsettings_integer(data: &[u8], name: &str) -> Option<i32> {
+    let mut reader = XsettingsReader {
+        data,
+        at: 0,
+        big_endian: *data.first()? == 1,
+    };
+    reader.take(4)?;
+    reader.u32()?;
+    let settings = reader.u32()?;
+    for _ in 0..settings {
+        let kind = *reader.take(2)?.first()?;
+        let length = usize::from(reader.u16()?);
+        let found = reader.padded(length)? == name.as_bytes();
+        reader.u32()?;
+        match kind {
+            XSETTING_INTEGER => {
+                let value = reader.u32()?.cast_signed();
+                if found {
+                    return Some(value);
+                }
+            }
+            XSETTING_STRING => {
+                let length = usize::try_from(reader.u32()?).ok()?;
+                reader.padded(length)?;
+            }
+            XSETTING_COLOR => {
+                reader.take(8)?;
+            }
+            _ => return None,
+        }
+        if found {
+            return None;
+        }
+    }
+    None
+}
+
+/// Whether an XSETTINGS manager's settings ask to reduce motion: `Gtk/EnableAnimations` is
+/// present and 0.
+pub fn xsettings_reduce_motion(data: &[u8]) -> bool {
+    xsettings_integer(data, XSETTINGS_ENABLE_ANIMATIONS) == Some(0)
 }
 
 /// `ConvertSelection`: asks `selection`'s owner to put it, as `target`, in `property` of
@@ -1438,6 +1548,89 @@ mod tests {
             minimum_size_hints(800, 560)[..7],
             [16, 0, 0, 0, 0, 800, 560]
         );
+    }
+
+    fn xsettings(big_endian: bool, settings: &[(u8, &str, &[u8])]) -> Vec<u8> {
+        let word = |value: u32| {
+            if big_endian {
+                value.to_be_bytes()
+            } else {
+                value.to_le_bytes()
+            }
+        };
+        let mut data = vec![u8::from(big_endian), 0, 0, 0];
+        data.extend_from_slice(&word(7));
+        data.extend_from_slice(&word(settings.len() as u32));
+        for (kind, name, value) in settings {
+            data.extend_from_slice(&[*kind, 0]);
+            let length = name.len() as u16;
+            data.extend_from_slice(&if big_endian {
+                length.to_be_bytes()
+            } else {
+                length.to_le_bytes()
+            });
+            data.extend_from_slice(name.as_bytes());
+            data.resize(data.len() + (4 - name.len() % 4) % 4, 0);
+            data.extend_from_slice(&word(3));
+            data.extend_from_slice(value);
+        }
+        data
+    }
+
+    #[test]
+    fn xsettings_find_enable_animations_after_strings_and_colours_in_either_byte_order() {
+        for big_endian in [false, true] {
+            let word = |value: u32| {
+                if big_endian {
+                    value.to_be_bytes()
+                } else {
+                    value.to_le_bytes()
+                }
+            };
+            let mut theme = word(7).to_vec();
+            theme.extend_from_slice(b"Adwaita\0");
+            let off = word(0);
+            let data = xsettings(
+                big_endian,
+                &[
+                    (1, "Net/ThemeName", &theme),
+                    (2, "Gtk/Color", &[0; 8]),
+                    (0, "Gtk/EnableAnimations", &off),
+                ],
+            );
+            assert_eq!(xsettings_integer(&data, XSETTINGS_ENABLE_ANIMATIONS), Some(0));
+            assert!(xsettings_reduce_motion(&data));
+            let on = word(1);
+            let animating = xsettings(big_endian, &[(0, "Gtk/EnableAnimations", &on)]);
+            assert!(!xsettings_reduce_motion(&animating));
+        }
+        let without = xsettings(false, &[(0, "Xft/DPI", &98_304u32.to_le_bytes())]);
+        assert!(!xsettings_reduce_motion(&without));
+        assert_eq!(xsettings_integer(&without, "Xft/DPI"), Some(98_304));
+        assert_eq!(xsettings_selection(1), "_XSETTINGS_S1");
+        let owner = get_selection_owner(0x45).unwrap();
+        assert_eq!(owner, [23, 0, 2, 0, 0x45, 0, 0, 0]);
+        let mut reply = [0u8; 32];
+        reply[0] = 1;
+        reply[8..12].copy_from_slice(&0x0060_0001u32.to_le_bytes());
+        assert_eq!(parse_selection_owner_reply(&reply).unwrap(), 0x0060_0001);
+        assert!(parse_selection_owner_reply(&reply[..9]).is_err());
+    }
+
+    #[test]
+    fn hostile_xsettings_data_answers_none_without_panicking() {
+        let data = xsettings(false, &[(0, "Gtk/EnableAnimations", &0u32.to_le_bytes())]);
+        for end in 0..data.len() {
+            assert_eq!(xsettings_integer(&data[..end], XSETTINGS_ENABLE_ANIMATIONS), None);
+        }
+        let mut huge = data.clone();
+        huge[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(xsettings_integer(&huge, "missing"), None);
+        let mut unknown = data.clone();
+        unknown[12] = 9;
+        assert_eq!(xsettings_integer(&unknown, XSETTINGS_ENABLE_ANIMATIONS), None);
+        let string = xsettings(false, &[(1, "Gtk/EnableAnimations", &[0xFF, 0xFF, 0xFF, 0xFF])]);
+        assert_eq!(xsettings_integer(&string, XSETTINGS_ENABLE_ANIMATIONS), None);
     }
 
     #[test]
