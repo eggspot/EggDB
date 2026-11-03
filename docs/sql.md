@@ -661,15 +661,31 @@ SELECT @@VERSION
   changed once, from one of them, as SQL Server's manual warns. `OUTPUT inserted.` and
   `deleted.` name the target's row and the other tables' columns can be output too; a column
   qualified by another name is Msg 4104.
-- **`MERGE`** (D138): `MERGE [INTO] target [[AS] alias] USING source [[AS] alias [(columns)]] ON
-  condition`, then `WHEN MATCHED [AND condition] THEN UPDATE SET ... | DELETE` and `WHEN NOT
-  MATCHED [BY TARGET] [AND condition] THEN INSERT [(columns)] VALUES (...)`, up to two `WHEN NOT
-  MATCHED BY SOURCE [AND condition] THEN UPDATE SET ... | DELETE` for target rows no source row
-  matches (the first of two needs `AND`, and they are one `UPDATE` and one `DELETE`, else Msg
-  10714; the source's columns are NULL there) (D291), and `OUTPUT` with `inserted.`, `deleted.`
-  and the source's columns (rows of changed rows first, then rows changed by source, then
-  inserted ones); the tag is `MERGE n`. A second `WHEN MATCHED`, `$action`, `TOP`, table hints
-  and `OUTPUT ... INTO` are 40517, and a `MERGE` without `WHEN` is Msg 10713.
+- **`MERGE`** (D138): `MERGE [TOP (n) [PERCENT]] [INTO] target [[AS] alias] USING source [[AS]
+  alias [(columns)]] ON condition`, then up to two `WHEN MATCHED [AND condition] THEN UPDATE SET
+  ... | DELETE` (D303), one `WHEN NOT MATCHED [BY TARGET] [AND condition] THEN INSERT [(columns)]
+  VALUES (...)`, and up to two `WHEN NOT MATCHED BY SOURCE [AND condition] THEN UPDATE SET ... |
+  DELETE` for target rows no source row matches (the source's columns are NULL there) (D291).
+  Of two `WHEN MATCHED` or two `WHEN NOT MATCHED BY SOURCE` clauses the first needs `AND`, and
+  they are one `UPDATE` and one `DELETE`; a matched or unmatched row takes the first clause whose
+  condition holds. Anything else, and a second `WHEN NOT MATCHED`, is Msg 10714. `TOP (n)` changes
+  at most `n` rows, `TOP (n) PERCENT` that share of the rows the clauses would change, rounded up
+  (Msg 1031 past 100): the rows of `WHEN MATCHED` first, then those of `BY SOURCE`, then the
+  inserted ones, as SQL Server leaves the order unspecified. `OUTPUT` takes `inserted.`,
+  `deleted.`, the source's columns and `$action` (`INSERT`, `UPDATE` or `DELETE`, as
+  `nvarchar(10)`), in the same order, and `OUTPUT ... INTO` as below; the tag is `MERGE n`. Table
+  hints are 40517, and a `MERGE` without `WHEN` is Msg 10713.
+- **`OUTPUT ... INTO {@table_variable | table} [(columns)] [OUTPUT ...]`** on `INSERT`, `UPDATE`,
+  `DELETE` and `MERGE` (D303): the rows the `OUTPUT` list makes go into the table variable or the
+  table (a `#temporary` one too) instead of the client, and a second `OUTPUT` list after it still
+  returns rows. The statement and the rows it adds are one change: when the rows break the
+  target's key, `NOT NULL` or types, or the target is missing (Msg 208), nothing the statement did
+  is kept. A column count that does not match the target's is Msg 213.
+- **`SELECT ... INTO new_table [FROM ...]`** (D303): creates `new_table` with the query's columns
+  (their names and types; all of them nullable, without keys, defaults or identity) and fills it
+  with the query's rows; the tag is `SELECT n`. `#name` makes a temporary table. An existing name
+  is Msg 2714, a column without a name Msg 1038, and `INTO` in a later query of a `UNION`,
+  `INTERSECT` or `EXCEPT` Msg 196; in a subquery it is 40517.
 - **`OPENJSON(json [, path]) WITH (column type ['path'] [AS JSON], ...) [AS] alias`** in `FROM`
   (D138): one row per element of a JSON array (an object is one row), each column the value at
   its path (`$`, `$.key`, `$."key"`, `$[n]`, `lax`; without a path the key named as the column
@@ -1206,8 +1222,7 @@ drops it sooner); temporary functions are refused, as SQL Server refuses them.
 Not yet: a global temporary procedure (`##name`) is created like a `#name` one, visible only to
 its own session; a procedure called by its name alone as the first statement of a batch (write
 `EXEC`), `EXEC @result = dbo.scalar_function`, numbered procedures (`name;2`), CLR routines (`AS
-EXTERNAL NAME`), `SELECT INTO` in a body, and `COMMIT` or `ROLLBACK` of the caller's transaction
-inside a function.
+EXTERNAL NAME`), and `COMMIT` or `ROLLBACK` of the caller's transaction inside a function.
 
 ## SQL Server metadata for tools
 
@@ -1535,6 +1550,13 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   grouped query they name output columns (another expression is `0A000`), and beside a window or
   set-returning function in the select list they answer `0A000`. A view with `DISTINCT ON` is
   not automatically updatable.
+- **`SELECT items INTO [TEMPORARY | TEMP | UNLOGGED] [TABLE] new_table [FROM ...]`**
+  (PostgreSQL and SQL Server, D303) creates `new_table` with the query's columns, their names
+  and types (all nullable, without keys or defaults), and fills it with the query's rows; the tag
+  is `SELECT n`. It belongs to the transaction: `ROLLBACK` removes the table. Its other spelling,
+  `CREATE TABLE ... AS`, is not accepted yet. An existing name is `42P07`, `INTO` in a later query of a `UNION`, `INTERSECT`
+  or `EXCEPT` is `42601` and in a subquery `0A000`; `UNLOGGED` makes an ordinary table. Inside
+  PL/pgSQL, `SELECT ... INTO` still assigns variables.
 - **Functions in `FROM`** (D128): `generate_series(start, stop [, step])` over `smallint`,
   `integer` and `bigint` (a step of 0 is `22023`; `numeric` and time stamps answer `0A000`) and
   `unnest(array)`, also written `pg_catalog.generate_series` and `pg_catalog.unnest`, with
@@ -4311,9 +4333,10 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
 - A user function's result without an alias (`SELECT dbo.f(1)`) is named after the function
   (`f`), where SQL Server leaves the column without a name. Functions run as `STABLE` ones: a
   function a statement calls sees the database as that statement started.
-- Not yet: `OUTPUT ... INTO`, `deleted.` in `UPDATE`,
-  `SELECT ... INTO` and global `##temporary` tables (`##name` is the session's own table, like
-  `#name`).
+- Not yet: `deleted.` in `UPDATE`, global `##temporary` tables (`##name` is the session's own
+  table, like `#name`), and `OUTPUT ... INTO` refusing a target with triggers, checks or foreign
+  keys, as SQL Server does (EggDB fires and checks them). A `MERGE`'s deletes do not fire `DELETE`
+  triggers, and `SELECT ... INTO` keeps neither the source columns' `NOT NULL` nor their identity.
 - An identity column that is not the first column of the primary key. The next identity number
   follows the largest one in the table (the smallest for a negative increment), so a deleted
   largest value is used again and an emptied table starts again at its seed, where SQL Server

@@ -204,8 +204,17 @@ ROWS ONLY` as `LIMIT`), Transact-SQL's `TOP n PERCENT` and `TOP n [PERCENT] WITH
 Server's errors 1031 and 1062, and join each partition's values on every row with Transact-SQL's
 `STRING_AGG ... OVER (PARTITION BY ...)` and Oracle's analytic `LISTAGG ... OVER (PARTITION BY
 ...)`, in `WITHIN GROUP` order (D300). Next for these: `TOP ... PERCENT` in `UPDATE`, `DELETE` and
-`INSERT`, `TOP` in `MERGE`, `LISTAGG (DISTINCT ...) OVER`, and PostgreSQL's `2201W` for a NULL
-count with `WITH TIES`.
+`INSERT`, `LISTAGG (DISTINCT ...) OVER`, and PostgreSQL's `2201W` for a NULL count with `WITH
+TIES`.
+Users can now write Transact-SQL `MERGE` with two `WHEN MATCHED` clauses (one `UPDATE`, one
+`DELETE`), `$action` in its `OUTPUT` and `MERGE TOP (n) [PERCENT]`; send the rows of `OUTPUT` on
+`INSERT`, `UPDATE`, `DELETE` and `MERGE` into a table variable or a table with `OUTPUT ... INTO`
+(with a second `OUTPUT` to the client), in one change with the statement; and create a table from
+a query with `SELECT ... INTO new_table` in Transact-SQL (`#temporary` included) and PostgreSQL
+(`INTO [TEMPORARY] [TABLE]`) (D303). Next for these: `deleted.` in a Transact-SQL `UPDATE`'s
+`OUTPUT`, `CREATE TABLE ... AS`, `SELECT ... INTO` keeping the source columns' `NOT NULL` and
+identity, `DELETE` triggers fired by `MERGE`'s deletes, SQL Server's refusal of an `OUTPUT ...
+INTO` target with triggers, checks or foreign keys, PostgreSQL's `MERGE`, and describing a prepared `OUTPUT ... INTO` that still returns rows.
 
 More tracks that run alongside the milestones, each starting where its dependencies land:
 - **The project (D21):** contributing guide, code of conduct, security policy, the stability
