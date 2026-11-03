@@ -230,7 +230,9 @@ pub enum ClientError {
     TimedOut,
     /// TLS failed, or the server refused it where the mode requires it.
     Tls(String),
-    /// Logging in failed.
+    /// Logging in failed on this side: an authentication method the client cannot use or a
+    /// malformed exchange. A login the server refuses arrives as [`ClientError::Server`] with its
+    /// `28` SQLSTATE.
     Authentication(String),
     /// The server reported an error.
     Server {
@@ -568,11 +570,7 @@ impl PgClient {
                 b'Z' => return Ok(()),
                 b'E' => {
                     let (code, message) = error_fields(&body);
-                    return Err(if code.starts_with("28") {
-                        ClientError::Authentication(message)
-                    } else {
-                        ClientError::Server { code, message }
-                    });
+                    return Err(ClientError::Server { code, message });
                 }
                 other => {
                     return Err(ClientError::Protocol(format!(
@@ -719,8 +717,8 @@ impl PgClient {
     fn sasl_message(&mut self, expected_kind: i32) -> Result<String, ClientError> {
         let (tag, body) = self.read_message()?;
         if tag == b'E' {
-            let (_, message) = error_fields(&body);
-            return Err(ClientError::Authentication(message));
+            let (code, message) = error_fields(&body);
+            return Err(ClientError::Server { code, message });
         }
         let kind = body
             .first_chunk::<4>()

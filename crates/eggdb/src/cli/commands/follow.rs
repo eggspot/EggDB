@@ -192,6 +192,9 @@ fn client_failure(target: &str, error: &ClientError) -> Failure {
         ClientError::Authentication(message) => format!(
             "cannot connect to {target}: {message}. Set PGPASSWORD, or pass --password-file"
         ),
+        ClientError::Server { code, message } if code.starts_with("28") => format!(
+            "cannot connect to {target}: {message}. Set PGPASSWORD, or pass --password-file"
+        ),
         other => format!("cannot follow {target}: {other}"),
     })
 }
