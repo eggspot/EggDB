@@ -131,7 +131,8 @@ What it reads, on top of the statements of "What runs today":
   ...] | t1, t2 SET t1.a = ..., t2.b = ... [WHERE ...]` and `DELETE t1[.*], t2 FROM ... | DELETE
   FROM t1, t2 USING ...` (each listed table is changed or deleted once per row that joins, an
   unqualified `SET` column is the one table's that has it or error 1052, an unknown table is
-  1109; D297), `SHOW TABLES`, `SHOW DATABASES`,
+  1109; D297), `GROUP BY ... WITH ROLLUP` and `GROUPING(expr, ...)` (D298), `SHOW TABLES`,
+  `SHOW DATABASES`,
   `DESCRIBE`/`SHOW COLUMNS`, `SHOW CREATE TABLE`, `SHOW VARIABLES [LIKE ...]`, `SHOW WARNINGS`,
   `SHOW COUNT(*) WARNINGS`, `USE`, `SET` of session and user variables (`SET NAMES`, `SET
   autocommit`, `SET @x = ...`), `START TRANSACTION`, `LOCK TABLES`/`UNLOCK TABLES` (accepted),
@@ -330,7 +331,9 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   that sort equal to the last one, D149), `ROWNUM` in
   `WHERE` with Oracle's meaning (`ROWNUM <= n` keeps the first n rows found, before `GROUP BY`
   and `ORDER BY`; `ROWNUM = 1`; `ROWNUM > 1` and `ROWNUM = 2` find nothing), `CASE`, joins,
-  `GROUP BY` and `HAVING`, `LIKE` (case-sensitive), `!=`, `^=` and `~=` for `<>`, `q'[...]'`
+  `GROUP BY` and `HAVING` (with `ROLLUP`, `CUBE`, `GROUPING SETS`, `GROUPING`, `GROUPING_ID`
+  and `GROUP_ID()`, which numbers the repeats of a grouping set from 0, D298), `LIKE`
+  (case-sensitive), `!=`, `^=` and `~=` for `<>`, `q'[...]'`
   and `N'...'` literals, `:name` and `:1` bind variables, and `/` that divides exactly where
   it can (`7/2` is `3.5`).
 - **Types**: `VARCHAR2(n [BYTE|CHAR])`, `NVARCHAR2(n)` and `VARCHAR(n)` as `varchar(n)`
@@ -635,6 +638,8 @@ SELECT @@VERSION
   137, and so is an `@variable` unless the batch declares it or it is a parameter of a
   parameterized batch (`sp_executesql` and the prepared statements of SqlClient and mssql-jdbc,
   item 23b).
+- `GROUP BY ROLLUP (...)`, `CUBE (...)`, `GROUPING SETS (...)` and `()`, the older `GROUP BY a, b
+  WITH ROLLUP` and `WITH CUBE`, `GROUPING(column)` and `GROUPING_ID(column, ...)` (D298).
 - `ORDER BY ... OFFSET n ROWS [FETCH {FIRST | NEXT} m ROWS ONLY]`, `OUTPUT inserted.*` on
   `INSERT` and `UPDATE` and `OUTPUT deleted.*` on `DELETE` (columns, expressions and constants
   such as EF Core's `OUTPUT 1`), `INSERT ... [OUTPUT ...] SELECT ...`, `(VALUES (...), ...) AS
@@ -1506,7 +1511,7 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   query and a `FROM` item (`(VALUES (1, 'a')) AS v(n, s)`): its columns are `column1`,
   `column2`, ... and each takes one type by the `UNION` rules below; rows of different lengths
   are `42601` (D128).
-- `SELECT [ALL | DISTINCT] items [FROM from_item [join ...]] [WHERE expr] [GROUP BY expr, ...] [HAVING expr] [ORDER BY expr [ASC | DESC] [NULLS FIRST | LAST], ...] [LIMIT n | ALL] [OFFSET n [ROW | ROWS]]`.
+- `SELECT [ALL | DISTINCT] items [FROM from_item [join ...]] [WHERE expr] [GROUP BY [ALL | DISTINCT] grouping_item, ...] [HAVING expr] [ORDER BY expr [ASC | DESC] [NULLS FIRST | LAST], ...] [LIMIT n | ALL] [OFFSET n [ROW | ROWS]]`.
   `ORDER BY` takes an output column's number or alias, or any expression over the tables (with
   `DISTINCT`, only expressions in the select list, else `42P10`); a `SELECT` without `FROM`
   returns one row.
@@ -1595,6 +1600,21 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   whose whole primary key is grouped, as PostgreSQL allows. A query with an aggregate or
   `HAVING` and no `GROUP BY` returns one row, even over no rows. Groups come out in no promised
   order; use `ORDER BY`.
+- **Grouping sets** (D298): `GROUP BY ROLLUP (a, b)` groups by `(a, b)`, `(a)` and `()`; `CUBE
+  (a, b)` by every subset of its keys; `GROUPING SETS ((a), (b, c), ())` by each set listed, which
+  may itself be a `ROLLUP`, a `CUBE` or another `GROUPING SETS`; `()` is the grand total, and a
+  parenthesized list such as `ROLLUP ((a, b), c)` counts as one key. Several items multiply
+  their sets (`GROUP BY a, ROLLUP (b)` is `(a, b)` and `(a)`), `GROUP BY DISTINCT` drops repeated
+  sets and `GROUP BY ALL` is the default. In a row of one set, the keys the set leaves out are
+  NULL, and `GROUPING(a, b, ...)` tells such a NULL from a NULL in the data: one bit per argument,
+  the last argument the lowest, 1 when the key is left out of the row's set (`42803` when an
+  argument is not a grouping key). The empty set returns its row even over no rows. Every set
+  is computed in one pass over the rows; a query that only rolls up (each set is the first keys
+  of the one before) returns its rows sorted by the keys, each subtotal after its rows and the
+  total last, as PostgreSQL's sorted plan and MySQL do; other sets come out one set after the
+  other. A primary key determines its table's other columns only when every set groups by it.
+  More than 4096 sets is `54001`, a `CUBE` of more than 12 keys and `GROUPING` with more than
+  31 arguments are `54000`, as in PostgreSQL.
 - **Aggregates**: `count(*)`, `count(expr)`, `sum`, `avg`, `min`, `max`,
   `string_agg(text, delimiter)` (also over `bytea`; a NULL delimiter joins with nothing),
   `json_agg`, `jsonb_agg`, `json_object_agg(key, value)`, `jsonb_object_agg(key, value)`,
@@ -3928,7 +3948,7 @@ two, `COPY` in the binary format and in another encoding, now match). The other 
   `0A000`; `FULL JOIN ... USING` columns cannot be named unqualified from a subquery (`42702`). An `IN` list of constants is compared item by item (a list of
   more than 256 items is not used to choose a key range either), so a very long list against
   many rows is slow; `IN (SELECT ...)` looks values up in a hash set.
-- `NATURAL` joins, `DISTINCT ON`, `GROUPING SETS`, `ROLLUP` and `CUBE`, hypothetical-set
+- `NATURAL` joins, `DISTINCT ON`, hypothetical-set
   aggregates (`rank(x) WITHIN GROUP (...)`), `percentile_cont` and `percentile_disc` over an array
   of fractions, `percentile_cont` between two `interval` values, and the other aggregates
   (`stddev`, `variance`, ...) fail with `0A000`. Window functions (D151) do not take `DISTINCT`
@@ -4294,7 +4314,7 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
 - `JSON_TABLE`'s `PLAN` clause, `IS JSON`, `JSON_SERIALIZE` and `JSON_SCALAR`.
 - Point `SELECT`s as fast as SQLite's everywhere: an AST that borrows the SQL text and a plan
   cache; table statistics for choosing between key lookups and hash joins.
-- `GROUPING SETS`, `ROLLUP` and `CUBE`, `DISTINCT ON`, `NATURAL` joins and the other aggregates
+- `DISTINCT ON`, `NATURAL` joins and the other aggregates
   (`stddev`, `variance`, hypothetical-set aggregates).
 - Then the other dialects (item 23), each with its own correctness suite; for the PostgreSQL protocol,
   TLS, `information_schema` and the catalog queries of GUI tools beyond psql's `\d` family,

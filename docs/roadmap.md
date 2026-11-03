@@ -183,6 +183,13 @@ Users can now change and delete rows through joins in every dialect that has the
 tables (D297). Next for joined `UPDATE` and `DELETE`: subqueries in their `SET` and `RETURNING`
 clauses, a view, a partitioned table or a table with row-level security as their target, and
 `EXPLAIN` of them.
+Users can now summarise at several levels in one query in every dialect that has it:
+`GROUP BY ROLLUP`, `CUBE`, `GROUPING SETS` and `()` in PostgreSQL (with `GROUP BY DISTINCT`),
+SQL Server (also `WITH ROLLUP` and `WITH CUBE`) and Oracle, MySQL's `WITH ROLLUP`, `GROUPING()`
+everywhere but SQLite, `GROUPING_ID()` and Oracle's `GROUP_ID()`, in one pass over the rows
+(D298). Next for grouping sets: SQL Server's and Oracle's one-argument limit for `GROUPING`
+and their own error numbers for grouping-set mistakes, and grouping sets in a query with window
+functions checked against each manual.
 
 More tracks that run alongside the milestones, each starting where its dependencies land:
 - **The project (D21):** contributing guide, code of conduct, security policy, the stability
