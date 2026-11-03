@@ -117,6 +117,8 @@ pub struct Description {
     pub indexes: Vec<CatalogIndex>,
     /// The `DDL` block's statement.
     pub ddl: Option<String>,
+    /// That block's heading: `DDL`, or `Action` for a trigger, whose statement is what it runs.
+    pub ddl_heading: &'static str,
     /// The `Sample rows` block's rows, once fetched.
     pub sample: Option<ResultTable>,
 }
@@ -129,6 +131,7 @@ impl Description {
             columns: Vec::new(),
             indexes: Vec::new(),
             ddl: None,
+            ddl_heading: "DDL",
             sample: None,
         }
     }
@@ -149,7 +152,7 @@ impl Description {
             ));
         }
         if self.ddl.is_some() {
-            blocks.push((InspectorBlock::Ddl, "DDL".to_owned()));
+            blocks.push((InspectorBlock::Ddl, self.ddl_heading.to_owned()));
         }
         if self.sample.is_some() {
             blocks.push((InspectorBlock::SampleRows, "Sample rows".to_owned()));
@@ -198,7 +201,10 @@ pub fn describe(tree: &ObjectTree, item: TreeItem, sample: Option<&Sample>) -> D
             };
             Description::titled(group.label().to_owned(), counted(count, one, many))
         }
-        TreeItem::Table(table) | TreeItem::Columns(table) | TreeItem::TableIndexes(table) => {
+        TreeItem::Table(table)
+        | TreeItem::Columns(table)
+        | TreeItem::TableIndexes(table)
+        | TreeItem::TableTriggers(table) => {
             let Some(table) = catalog.tables.get(table) else {
                 return Description::titled(String::new(), String::new());
             };
@@ -282,15 +288,26 @@ pub fn describe(tree: &ObjectTree, item: TreeItem, sample: Option<&Sample>) -> D
             };
             Description::titled(space.label().to_owned(), format!("{kind} · {keys}"))
         }
+        TreeItem::Trigger(trigger) => {
+            let Some(trigger) = catalog.triggers.get(trigger) else {
+                return Description::titled(String::new(), String::new());
+            };
+            Description {
+                ddl: Some(trigger.action.clone()).filter(|action| !action.is_empty()),
+                ddl_heading: "Action",
+                ..Description::titled(trigger.name.clone(), trigger.summary())
+            }
+        }
     }
 }
 
 /// The name whose sample the inspector fetches for `item`: a table's or a view's.
 pub fn sampled_name(tree: &ObjectTree, item: TreeItem) -> Option<String> {
     match item {
-        TreeItem::Table(table) | TreeItem::Columns(table) | TreeItem::TableIndexes(table) => {
-            Some(tree.catalog.tables.get(table)?.name.clone())
-        }
+        TreeItem::Table(table)
+        | TreeItem::Columns(table)
+        | TreeItem::TableIndexes(table)
+        | TreeItem::TableTriggers(table) => Some(tree.catalog.tables.get(table)?.name.clone()),
         TreeItem::View(view) => Some(tree.catalog.views.get(view)?.name.clone()),
         _ => None,
     }

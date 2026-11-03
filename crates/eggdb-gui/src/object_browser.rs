@@ -90,6 +90,10 @@ pub enum TreeItem {
     Sequence(usize),
     /// A key space.
     KeySpace(usize),
+    /// A table's `Triggers` group, listed when the table has triggers.
+    TableTriggers(usize),
+    /// A trigger in its table's `Triggers` group.
+    Trigger(usize),
 }
 
 /// The 12 × 12 icon a row draws before its label.
@@ -103,6 +107,8 @@ pub enum RowIcon {
     Key,
     /// A grid, for tables and views.
     Table,
+    /// A bolt, for triggers.
+    Bolt,
     /// No icon.
     Blank,
 }
@@ -223,6 +229,13 @@ impl ObjectTree {
             TreeItem::Table(index) => TreeItem::Table(table(index)?),
             TreeItem::Columns(index) => TreeItem::Columns(table(index)?),
             TreeItem::TableIndexes(index) => TreeItem::TableIndexes(table(index)?),
+            TreeItem::TableTriggers(index) => TreeItem::TableTriggers(table(index)?),
+            TreeItem::Trigger(index) => {
+                let old = old.triggers.get(index)?;
+                TreeItem::Trigger(self.catalog.triggers.iter().position(|found| {
+                    found.name == old.name && found.table == old.table
+                })?)
+            }
             TreeItem::Column {
                 table: owner,
                 column,
@@ -303,12 +316,9 @@ impl ObjectTree {
             TreeItem::Connection => self.groups().len(),
             TreeItem::Group(group) => self.group_size(group),
             TreeItem::Table(table) => {
-                1 + usize::from(
-                    self.catalog
-                        .indexes_of(self.table_name(table))
-                        .next()
-                        .is_some(),
-                )
+                let name = self.table_name(table);
+                1 + usize::from(self.catalog.indexes_of(name).next().is_some())
+                    + usize::from(self.catalog.triggers_of(name).next().is_some())
             }
             TreeItem::Columns(table) => self
                 .catalog
@@ -317,6 +327,9 @@ impl ObjectTree {
                 .map_or(0, |table| table.columns.len()),
             TreeItem::TableIndexes(table) => {
                 self.catalog.indexes_of(self.table_name(table)).count()
+            }
+            TreeItem::TableTriggers(table) => {
+                self.catalog.triggers_of(self.table_name(table)).count()
             }
             _ => 0,
         }
@@ -351,6 +364,14 @@ impl ObjectTree {
                 {
                     children.push(TreeItem::TableIndexes(table));
                 }
+                if self
+                    .catalog
+                    .triggers_of(self.table_name(table))
+                    .next()
+                    .is_some()
+                {
+                    children.push(TreeItem::TableTriggers(table));
+                }
                 children
             }
             TreeItem::Columns(table) => (0..self.child_count(item))
@@ -366,6 +387,16 @@ impl ObjectTree {
                     .map(|(at, _)| TreeItem::TableIndex(at))
                     .collect()
             }
+            TreeItem::TableTriggers(table) => {
+                let name = self.table_name(table);
+                self.catalog
+                    .triggers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, trigger)| trigger.table == name)
+                    .map(|(at, _)| TreeItem::Trigger(at))
+                    .collect()
+            }
             _ => Vec::new(),
         }
     }
@@ -379,6 +410,11 @@ impl ObjectTree {
             TreeItem::Table(table) => self.table_name(table).to_owned(),
             TreeItem::Columns(_) => "Columns".to_owned(),
             TreeItem::TableIndexes(_) => "Indexes".to_owned(),
+            TreeItem::TableTriggers(_) => "Triggers".to_owned(),
+            TreeItem::Trigger(trigger) => catalog
+                .triggers
+                .get(trigger)
+                .map_or_else(String::new, |trigger| trigger.name.clone()),
             TreeItem::Column { table, column } => catalog
                 .tables
                 .get(table)
@@ -415,9 +451,10 @@ impl ObjectTree {
         let catalog = &self.catalog;
         match item {
             TreeItem::Group(group) => Some(self.group_size(group).to_string()),
-            TreeItem::Columns(_) | TreeItem::TableIndexes(_) => {
+            TreeItem::Columns(_) | TreeItem::TableIndexes(_) | TreeItem::TableTriggers(_) => {
                 Some(self.child_count(item).to_string())
             }
+            TreeItem::Trigger(trigger) => Some(catalog.triggers.get(trigger)?.events_text()),
             TreeItem::Column { table, column } => {
                 let column = catalog.tables.get(table)?.columns.get(column)?;
                 if column.primary_key {
@@ -449,6 +486,7 @@ impl ObjectTree {
                 Some(catalog.indexes.get(index)?.name.clone())
             }
             TreeItem::Sequence(sequence) => Some(catalog.sequences.get(sequence)?.name.clone()),
+            TreeItem::Trigger(trigger) => Some(catalog.triggers.get(trigger)?.name.clone()),
             TreeItem::Column { table, column } => {
                 Some(catalog.tables.get(table)?.columns.get(column)?.name.clone())
             }
@@ -461,10 +499,12 @@ impl ObjectTree {
         match item {
             TreeItem::Connection => RowIcon::Database,
             TreeItem::Group(Group::Keys) => RowIcon::Key,
-            TreeItem::Group(_) | TreeItem::Columns(_) | TreeItem::TableIndexes(_) => {
-                RowIcon::Folder
-            }
+            TreeItem::Group(_)
+            | TreeItem::Columns(_)
+            | TreeItem::TableIndexes(_)
+            | TreeItem::TableTriggers(_) => RowIcon::Folder,
             TreeItem::Table(_) | TreeItem::View(_) => RowIcon::Table,
+            TreeItem::Trigger(_) => RowIcon::Bolt,
             _ => RowIcon::Blank,
         }
     }
@@ -739,6 +779,13 @@ fn icon_key(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
         .line((x + 10.0, y + 6.0), (x + 10.0, y + 9.0), 1.5, color);
 }
 
+fn icon_bolt(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
+    let color = paint.theme.text_secondary;
+    let points = [(7.0, 0.0), (3.0, 7.0), (6.0, 7.0), (5.0, 12.0), (9.0, 5.0), (6.0, 5.0), (7.0, 0.0)]
+        .map(|(dx, dy)| (x + dx, y + dy));
+    paint.polyline(&points, 1.5, color);
+}
+
 pub(crate) fn draw(
     paint: &mut Painter<'_, '_>,
     tree: &ObjectTree,
@@ -815,6 +862,7 @@ fn draw_row(
         RowIcon::Folder => icon_folder(paint, icon_x, y + 6.0),
         RowIcon::Key => icon_key(paint, icon_x, y + 6.0),
         RowIcon::Table => icon_table(paint, icon_x, y + 6.0),
+        RowIcon::Bolt => icon_bolt(paint, icon_x, y + 6.0),
         RowIcon::Blank => {}
     }
     let detail = if row.item == TreeItem::Connection {
@@ -866,7 +914,8 @@ pub fn row_description(row: &TreeRow, detail: Option<&str>) -> String {
 mod tests {
     use super::*;
     use crate::catalog::{
-        CatalogColumn, CatalogIndex, CatalogSequence, CatalogTable, CatalogView, KeyCount, KeySpace,
+        CatalogColumn, CatalogIndex, CatalogSequence, CatalogTable, CatalogTrigger, CatalogView,
+        KeyCount, KeySpace,
     };
 
     fn column(name: &str, primary_key: bool) -> CatalogColumn {
@@ -937,6 +986,13 @@ mod tests {
                     keys: KeyCount::Exactly(312),
                 },
             ],
+            triggers: vec![CatalogTrigger {
+                name: "orders_stamp".into(),
+                table: "orders".into(),
+                timing: "BEFORE".into(),
+                events: vec!["INSERT".into(), "UPDATE".into()],
+                action: "EXECUTE FUNCTION stamp()".into(),
+            }],
         }
     }
 
@@ -1003,6 +1059,9 @@ mod tests {
         assert_eq!(rows[4].label, "Columns");
         assert_eq!(rows[5].label, "Indexes");
         assert_eq!(rows[5].detail.as_deref(), Some("1"));
+        assert_eq!(rows[6].label, "Triggers");
+        assert_eq!(rows[6].detail.as_deref(), Some("1"));
+        assert_eq!(rows[6].item, TreeItem::TableTriggers(1));
         tree.key(press(Key::Right), now);
         tree.key(press(Key::Right), now);
         assert_eq!(tree.current, TreeItem::Columns(1));
@@ -1121,6 +1180,42 @@ mod tests {
             "the default key space has no name"
         );
         assert_eq!(tree.key(press(Key::F5), now), TreeAction::Refresh);
+    }
+
+    #[test]
+    fn a_tables_triggers_group_lists_each_trigger_with_its_events() {
+        let mut tree = ObjectTree::new("shop", shop());
+        tree.expanded.insert(TreeItem::Table(1));
+        tree.expanded.insert(TreeItem::TableTriggers(1));
+        tree.expanded.insert(TreeItem::Table(0));
+        let rows = tree.rows();
+        let trigger = rows
+            .iter()
+            .find(|row| row.item == TreeItem::Trigger(0))
+            .expect("the trigger row is listed");
+        assert_eq!(trigger.label, "orders_stamp");
+        assert_eq!(trigger.detail.as_deref(), Some("INSERT, UPDATE"));
+        assert_eq!(trigger.level, 4);
+        assert_eq!(trigger.expanded, None);
+        assert_eq!(tree.name_of(TreeItem::Trigger(0)).as_deref(), Some("orders_stamp"));
+        assert!(
+            !rows.iter().any(|row| row.item == TreeItem::TableTriggers(0)),
+            "a table without triggers has no Triggers group"
+        );
+        let mut refreshed = shop();
+        refreshed.triggers.insert(
+            0,
+            CatalogTrigger {
+                name: "audit".into(),
+                table: "customers".into(),
+                timing: "AFTER".into(),
+                events: vec!["DELETE".into()],
+                action: String::new(),
+            },
+        );
+        tree.current = TreeItem::Trigger(0);
+        tree.set_catalog(refreshed);
+        assert_eq!(tree.current, TreeItem::Trigger(1), "the refresh keeps the trigger by name");
     }
 
     #[test]

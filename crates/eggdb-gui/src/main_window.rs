@@ -932,6 +932,7 @@ pub fn sample_catalog() -> Catalog {
             collection: Some("sessions".to_owned()),
             keys: KeyCount::Exactly(2),
         }],
+        triggers: Vec::new(),
     }
 }
 
