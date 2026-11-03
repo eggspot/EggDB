@@ -477,7 +477,7 @@ fn non_composite(kind: &str) -> SqlError {
 
 fn coerce(slot: &Slot, value: Value) -> SqlResult<Value> {
     match slot {
-        Slot::Typed(SqlType::Dynamic) => Ok(value),
+        Slot::Typed(SqlType::Dynamic(_)) => Ok(value),
         Slot::Typed(sql_type) => convert(value, *sql_type, Conversion::Assignment),
         Slot::Untyped => Ok(value),
         Slot::Collection(shape) => collections::coerce_collection(shape, value),
@@ -501,7 +501,7 @@ fn coerce(slot: &Slot, value: Value) -> SqlResult<Value> {
             for (at, (_, sql_type)) in columns.iter().enumerate() {
                 let field = record.fields.get(at).cloned().unwrap_or(Value::Null);
                 fields.push(match sql_type {
-                    SqlType::Dynamic => field,
+                    SqlType::Dynamic(_) => field,
                     sql_type => convert(field, *sql_type, Conversion::Assignment)?,
                 });
             }
@@ -656,7 +656,7 @@ impl<'r> Run<'r> {
                 },
             };
             values.push(match parameter.sql_type {
-                SqlType::Dynamic => value,
+                SqlType::Dynamic(_) => value,
                 sql_type => convert(value, sql_type, Conversion::Assignment)
                     .map_err(|error| self.assignment_error(error))?,
             });
@@ -940,7 +940,7 @@ impl<'r> Run<'r> {
 
     fn element_value(&self, value: Value) -> SqlResult<Value> {
         match self.shape() {
-            Shape::Scalar(Some(SqlType::Dynamic)) if record_of(&value).is_some() => Ok(value),
+            Shape::Scalar(Some(SqlType::Dynamic(_))) if record_of(&value).is_some() => Ok(value),
             Shape::Scalar(Some(sql_type)) => convert(value, sql_type, Conversion::Assignment),
             _ => Ok(value),
         }

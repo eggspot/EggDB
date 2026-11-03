@@ -4,6 +4,7 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::interval::{Interval, IntervalFields};
 use crate::numeric::Numeric;
 use crate::pg_catalog::{CatalogType, RegValue};
+use crate::type_affinity::TypeAffinity;
 use std::cmp::Ordering;
 
 /// A column type of the PostgreSQL dialect that this release stores.
@@ -71,10 +72,11 @@ pub enum SqlType {
     /// A type known by its definition: an enum, a composite type, a range type, a domain, or
     /// one of the base types `citext` and `hstore`.
     Defined(DefinedType),
-    /// A value of any of SQLite's storage classes (an integer, a real, text or a blob), kept as
-    /// it is given: the type of a SQLite column declared `BLOB`, whose rows may hold different
-    /// classes.
-    Dynamic,
+    /// A value of any of SQLite's storage classes (an integer, a real, text or a blob): the type
+    /// of a SQLite column of `TEXT`, `NUMERIC`, `REAL` or `BLOB` affinity, or without a declared
+    /// type, whose rows may hold different classes. The affinity says what a value is turned
+    /// into when it is stored.
+    Dynamic(TypeAffinity),
 }
 
 /// A type known by its definition in the catalog rather than by the engine's storage alone:
@@ -250,7 +252,7 @@ impl SqlType {
             Self::Array(element) => element.type_name(),
             Self::Catalog(kind) => kind.name().to_owned(),
             Self::Defined(defined) => crate::user_types::type_name(defined),
-            Self::Dynamic => "blob".into(),
+            Self::Dynamic(affinity) => affinity.type_name().into(),
         }
     }
 
@@ -285,7 +287,7 @@ impl SqlType {
                 DefinedKind::Domain => "domain",
                 DefinedKind::Base => DefinedType::builtin_base_name(defined.oid).unwrap_or("text"),
             },
-            Self::Dynamic => "blob",
+            Self::Dynamic(_) => "blob",
         }
     }
 
@@ -351,6 +353,12 @@ impl SqlType {
     };
 
     pub(crate) const VOID: Self = Self::Catalog(crate::pg_catalog::CatalogType::Void);
+
+    pub(crate) const DYNAMIC: Self = Self::Dynamic(TypeAffinity::Blob);
+
+    pub(crate) fn is_dynamic(self) -> bool {
+        matches!(self, Self::Dynamic(_))
+    }
 
     fn integer_range(self) -> Option<(i64, i64)> {
         match self {
@@ -742,7 +750,7 @@ pub(crate) fn parse_input(text: &str, sql_type: SqlType) -> SqlResult<Value> {
             .map(|array| Value::Array(Box::new(array))),
         SqlType::Catalog(kind) => crate::pg_catalog::parse_input(text, kind),
         SqlType::Defined(defined) => crate::user_types::parse_input(text, defined),
-        SqlType::Dynamic => Ok(Value::Text(text.to_owned())),
+        SqlType::Dynamic(affinity) => Ok(affinity.stored(Value::Text(text.to_owned()))),
     }
 }
 
@@ -781,6 +789,33 @@ fn different_storage_classes(left: &Value, right: &Value) -> Option<Ordering> {
     let (left_rank, right_rank) = (storage_class_rank(left)?, storage_class_rank(right)?);
     (left_rank != right_rank && crate::constraints::current_dialect() == crate::Dialect::Sqlite)
         .then(|| left_rank.cmp(&right_rank))
+}
+
+fn exact_integer_and_real(left: &Value, right: &Value) -> Option<Ordering> {
+    if crate::constraints::current_dialect() != crate::Dialect::Sqlite {
+        return None;
+    }
+    match (left.as_integer(), right.as_integer()) {
+        (Some(_), Some(_)) | (None, None) => None,
+        (Some(integer), None) => Some(integer_against_real(integer, right.as_float()?)),
+        (None, Some(integer)) => Some(integer_against_real(integer, left.as_float()?).reverse()),
+    }
+}
+
+pub(crate) fn integer_against_real(integer: i64, real: f64) -> Ordering {
+    const TWO_TO_63: f64 = 9_223_372_036_854_775_808.0;
+    if real.is_nan() || real >= TWO_TO_63 {
+        return Ordering::Less;
+    }
+    if real < -TWO_TO_63 {
+        return Ordering::Greater;
+    }
+    let whole = real.trunc();
+    match integer.cmp(&(whole as i64)) {
+        Ordering::Equal if real > whole => Ordering::Less,
+        Ordering::Equal if real < whole => Ordering::Greater,
+        ordering => ordering,
+    }
 }
 
 fn numeric_input(text: &str) -> SqlResult<Numeric> {
@@ -987,8 +1022,8 @@ pub(crate) fn convert(value: Value, target: SqlType, conversion: Conversion) -> 
     if let SqlType::Defined(defined) = target {
         return crate::user_types::convert(value, defined, conversion);
     }
-    if target == SqlType::Dynamic {
-        return Ok(storage_class_value(value));
+    if let SqlType::Dynamic(affinity) = target {
+        return Ok(affinity.stored(storage_class_value(value)));
     }
     if let Some(converted) = crate::hstore::convert_to_json(&value, target) {
         return converted;
@@ -1120,6 +1155,9 @@ pub(crate) fn compare_floats(left: f64, right: f64) -> Ordering {
 pub(crate) fn comparable(left: SqlType, right: SqlType) -> bool {
     if left == SqlType::Json || right == SqlType::Json {
         return false;
+    }
+    if left.is_dynamic() || right.is_dynamic() {
+        return true;
     }
     if let (SqlType::Array(left), SqlType::Array(right)) = (left, right) {
         return left.comparable(right);
@@ -1302,6 +1340,9 @@ pub(crate) fn compare_values(left: &Value, right: &Value) -> Ordering {
         }
         _ => {
             if let Some(ordering) = different_storage_classes(left, right) {
+                return ordering;
+            }
+            if let Some(ordering) = exact_integer_and_real(left, right) {
                 return ordering;
             }
             match (left.as_integer(), right.as_integer()) {

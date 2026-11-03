@@ -2,7 +2,7 @@ use crate::ast::{CreateIndex, DropIndex, IndexSpec, Name};
 use crate::dialect::Dialect;
 use crate::encoding::{
     IndexDefinition, MAX_INDEXES, NAMESPACE, TableDefinition, corrupt, decode_key_values,
-    decode_row, encode_key_value, index_prefix, prefix_end, rows_prefix, skip_key_values,
+    decode_row, encode_column_key, index_prefix, prefix_end, rows_prefix, skip_key_values,
     table_indexes_prefix, table_key,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -35,7 +35,7 @@ pub(crate) fn entry_key(
 ) -> Vec<u8> {
     let mut key = index_prefix(table.id, index.id);
     for &column in &index.columns {
-        encode_key_value(&mut key, &row[column]);
+        encode_column_key(&mut key, &row[column], table.columns[column].sql_type);
     }
     key.extend_from_slice(row_key.get(ROW_KEY_PREFIX_LENGTH..).unwrap_or(&[]));
     key
@@ -71,7 +71,7 @@ pub(crate) fn unique_conflict(
     }
     let mut start = index_prefix(table.id, index.id);
     for &column in &index.columns {
-        encode_key_value(&mut start, &row[column]);
+        encode_column_key(&mut start, &row[column], table.columns[column].sql_type);
     }
     let end = prefix_end(&start);
     let mut found = None;
@@ -355,7 +355,7 @@ fn next_index_id(table: &TableDefinition) -> SqlResult<u32> {
 
 pub(crate) fn check_orderable(sql_type: SqlType, position: usize) -> SqlResult<()> {
     let unordered = match sql_type {
-        SqlType::Array(_) | SqlType::Dynamic => true,
+        SqlType::Array(_) => true,
         SqlType::Defined(defined) => {
             defined.kind != crate::types::DefinedKind::Enum && !crate::citext::is_citext(defined)
         }

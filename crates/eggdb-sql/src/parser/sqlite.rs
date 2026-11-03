@@ -7,6 +7,7 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::children_mut;
 use crate::lexer::TokenKind;
 use crate::settings::Settings;
+use crate::type_affinity::TypeAffinity;
 use crate::types::SqlType;
 
 /// The SQLite release whose documented behaviour EggDB's SQLite dialect follows, as
@@ -284,6 +285,31 @@ enum Affinity {
     Numeric,
 }
 
+fn column_type(declared: &str) -> SqlType {
+    match affinity(declared) {
+        Affinity::Integer => SqlType::BigInt,
+        Affinity::Text => SqlType::Dynamic(TypeAffinity::Text),
+        Affinity::Real => SqlType::Dynamic(TypeAffinity::Real),
+        Affinity::Blob => SqlType::Dynamic(TypeAffinity::Blob),
+        Affinity::Numeric => SqlType::Dynamic(TypeAffinity::Numeric),
+    }
+}
+
+fn cast_type(declared: &str) -> SqlType {
+    match affinity(declared) {
+        Affinity::Integer => SqlType::BigInt,
+        Affinity::Text => SqlType::Text,
+        Affinity::Real => SqlType::Double,
+        Affinity::Blob if declared.is_empty() => SqlType::Text,
+        Affinity::Blob => SqlType::DYNAMIC,
+        Affinity::Numeric if matches!(declared, "boolean" | "bool") => SqlType::BigInt,
+        Affinity::Numeric if ["date", "time"].iter().any(|word| declared.contains(word)) => {
+            SqlType::Text
+        }
+        Affinity::Numeric => SqlType::Double,
+    }
+}
+
 fn affinity(declared: &str) -> Affinity {
     let upper = declared.to_ascii_uppercase();
     if upper.contains("INT") {
@@ -383,6 +409,16 @@ impl<'t> Parser<'t> {
     }
 
     pub(super) fn sqlite_type(&mut self) -> SqlResult<(SqlType, bool)> {
+        let declared = self.sqlite_declared_type()?;
+        Ok((column_type(&declared), declared == "integer"))
+    }
+
+    pub(super) fn sqlite_cast_type(&mut self) -> SqlResult<SqlType> {
+        let declared = self.sqlite_declared_type()?;
+        Ok(cast_type(&declared))
+    }
+
+    fn sqlite_declared_type(&mut self) -> SqlResult<String> {
         let mut words = Vec::new();
         while let TokenKind::Word(word) = self.peek_kind() {
             if matches!(
@@ -418,21 +454,7 @@ impl<'t> Parser<'t> {
             }
             self.expect(&TokenKind::RightParen)?;
         }
-        let declared = words.join(" ");
-        let exact_integer = declared == "integer";
-        let sql_type = match affinity(&declared) {
-            Affinity::Integer => SqlType::BigInt,
-            Affinity::Text => SqlType::Text,
-            Affinity::Real => SqlType::Double,
-            Affinity::Blob if declared.is_empty() => SqlType::Text,
-            Affinity::Blob => SqlType::Dynamic,
-            Affinity::Numeric if matches!(declared.as_str(), "boolean" | "bool") => SqlType::BigInt,
-            Affinity::Numeric if ["date", "time"].iter().any(|word| declared.contains(word)) => {
-                SqlType::Text
-            }
-            Affinity::Numeric => SqlType::Double,
-        };
-        Ok((sql_type, exact_integer))
+        Ok(words.join(" "))
     }
 
     pub(super) fn sqlite_conflict_clause(&mut self) -> SqlResult<()> {

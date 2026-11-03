@@ -3,12 +3,16 @@ use crate::datetime;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::interval::{Interval, IntervalFields};
 use crate::numeric::Numeric;
+use crate::type_affinity::TypeAffinity;
 use crate::types::{DefinedKind, DefinedType, DefinedValue, NumericModifier, SqlType, Value};
 
 #[cfg(test)]
 mod base_types_tests;
 mod catalog;
 mod defined;
+mod dynamic_keys;
+#[cfg(test)]
+mod dynamic_keys_tests;
 mod packages;
 mod partitions;
 mod routines;
@@ -39,7 +43,8 @@ pub(crate) const VIEW_FORMAT_VERSION: u8 = 8;
 const IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION: u8 = 9;
 const DEFINED_TYPES_FORMAT_VERSION: u8 = 10;
 const BASE_TYPES_FORMAT_VERSION: u8 = 11;
-const NEWEST_TABLE_FORMAT_VERSION: u8 = BASE_TYPES_FORMAT_VERSION;
+const AFFINITY_FORMAT_VERSION: u8 = 13;
+const NEWEST_TABLE_FORMAT_VERSION: u8 = AFFINITY_FORMAT_VERSION;
 pub(crate) const BASE_TYPES_VIEW_FORMAT_VERSION: u8 = 12;
 const _: () = assert!(
     NEWEST_TABLE_FORMAT_VERSION != VIEW_FORMAT_VERSION
@@ -298,7 +303,8 @@ fn type_tag(sql_type: SqlType) -> u8 {
         SqlType::Array(_) => 21,
         SqlType::Catalog(_) => 22,
         SqlType::Defined(_) => 23,
-        SqlType::Dynamic => 24,
+        SqlType::Dynamic(TypeAffinity::Blob) => 24,
+        SqlType::Dynamic(_) => 25,
     }
 }
 
@@ -311,14 +317,14 @@ fn is_base_type(sql_type: SqlType) -> bool {
 fn is_version_10_type(sql_type: SqlType) -> bool {
     matches!(
         sql_type,
-        SqlType::Array(_) | SqlType::Defined(_) | SqlType::Dynamic
+        SqlType::Array(_) | SqlType::Defined(_) | SqlType::Dynamic(_)
     )
 }
 
 const STORAGE_CLASS_TAGS: [u8; 4] = [3, 5, 7, 18];
 
 fn column_holds_tag(sql_type: SqlType, tag: u8) -> bool {
-    if sql_type == SqlType::Dynamic {
+    if sql_type.is_dynamic() {
         STORAGE_CLASS_TAGS.contains(&tag)
     } else {
         tag == value_tag(sql_type)
@@ -359,8 +365,13 @@ fn put_type(out: &mut Vec<u8>, sql_type: SqlType) {
             out.push(defined_kind_code(defined.kind));
             out.extend_from_slice(&defined.oid.to_le_bytes());
         }
+        SqlType::Dynamic(affinity) if affinity != TypeAffinity::Blob => out.push(affinity.code()),
         _ => {}
     }
+}
+
+fn has_affinity(sql_type: SqlType) -> bool {
+    matches!(sql_type, SqlType::Dynamic(affinity) if affinity != TypeAffinity::Blob)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -814,6 +825,12 @@ impl TableDefinition {
             .any(|column| is_base_type(column.sql_type))
     }
 
+    fn uses_affinities(&self) -> bool {
+        self.columns
+            .iter()
+            .any(|column| has_affinity(column.sql_type))
+    }
+
     fn encode_defined(&self, out: &mut Vec<u8>) {
         put_varint(out, self.domains.len() as u64);
         for entry in &self.domains {
@@ -976,7 +993,9 @@ impl TableDefinition {
     }
 
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let version = if self.uses_base_types() {
+        let version = if self.uses_affinities() {
+            AFFINITY_FORMAT_VERSION
+        } else if self.uses_base_types() {
             BASE_TYPES_FORMAT_VERSION
         } else if self.needs_defined_version() {
             DEFINED_TYPES_FORMAT_VERSION
@@ -1105,7 +1124,8 @@ impl TableDefinition {
             SCHEMA_FORMAT_VERSION => qualified,
             IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION
             | DEFINED_TYPES_FORMAT_VERSION
-            | BASE_TYPES_FORMAT_VERSION => true,
+            | BASE_TYPES_FORMAT_VERSION
+            | AFFINITY_FORMAT_VERSION => true,
             _ => !qualified,
         };
         if !name_fits_version || !crate::schemas::is_well_formed(name) {
@@ -1115,6 +1135,7 @@ impl TableDefinition {
         let options_allowed = version >= IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION;
         let defined_allowed = version >= DEFINED_TYPES_FORMAT_VERSION;
         let base_types_allowed = version >= BASE_TYPES_FORMAT_VERSION;
+        let affinities_allowed = version == AFFINITY_FORMAT_VERSION;
         let mut identity_seed = None;
         let mut default_dialects = Vec::new();
         let new_types_allowed = version >= TYPES_FORMAT_VERSION;
@@ -1135,6 +1156,7 @@ impl TableDefinition {
                 more_types_allowed,
                 defined_allowed,
                 base_types_allowed,
+                affinities_allowed,
             )?;
             if sql_type
                 .defined()
@@ -1210,7 +1232,8 @@ impl TableDefinition {
             | SCHEMA_FORMAT_VERSION
             | IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION
             | DEFINED_TYPES_FORMAT_VERSION
-            | BASE_TYPES_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), true)?,
+            | BASE_TYPES_FORMAT_VERSION
+            | AFFINITY_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), true)?,
             _ => Vec::new(),
         };
         let constraints = if version >= CONSTRAINTS_FORMAT_VERSION {
@@ -1303,7 +1326,10 @@ impl TableDefinition {
         {
             return Err(reader.damaged());
         }
-        if (version == BASE_TYPES_FORMAT_VERSION) != table.uses_base_types() {
+        if version == BASE_TYPES_FORMAT_VERSION && !table.uses_base_types() {
+            return Err(reader.damaged());
+        }
+        if affinities_allowed != table.uses_affinities() {
             return Err(reader.damaged());
         }
         Ok(table)
@@ -1687,6 +1713,14 @@ pub(crate) fn decode_key_values(
         out.push(reader.key_value(sql_type)?);
     }
     Ok(reader.at)
+}
+
+pub(crate) fn encode_column_key(out: &mut Vec<u8>, value: &Value, sql_type: SqlType) {
+    if sql_type.is_dynamic() {
+        dynamic_keys::encode_dynamic_key(out, value);
+    } else {
+        encode_key_value(out, value);
+    }
 }
 
 pub(crate) fn encode_key_value(out: &mut Vec<u8>, value: &Value) {
@@ -2398,6 +2432,7 @@ impl<'b> Reader<'b> {
         more_types_allowed: bool,
         defined_allowed: bool,
         base_types_allowed: bool,
+        affinities_allowed: bool,
     ) -> SqlResult<SqlType> {
         Ok(match self.byte()? {
             1 => SqlType::SmallInt,
@@ -2450,7 +2485,12 @@ impl<'b> Reader<'b> {
                 }
                 SqlType::Defined(DefinedType { kind, oid })
             }
-            24 if defined_allowed => SqlType::Dynamic,
+            24 if defined_allowed => SqlType::DYNAMIC,
+            25 if affinities_allowed => SqlType::Dynamic(
+                TypeAffinity::of_code(self.byte()?)
+                    .filter(|&affinity| affinity != TypeAffinity::Blob)
+                    .ok_or_else(|| self.damaged())?,
+            ),
             _ => return Err(self.damaged()),
         })
     }
@@ -2586,9 +2626,10 @@ impl<'b> Reader<'b> {
             SqlType::Defined(defined) if crate::citext::is_citext(defined) => {
                 self.escaped_key_text_width()?
             }
-            SqlType::Array(_) | SqlType::Catalog(_) | SqlType::Defined(_) | SqlType::Dynamic => {
+            SqlType::Array(_) | SqlType::Catalog(_) | SqlType::Defined(_) => {
                 return Err(self.damaged());
             }
+            SqlType::Dynamic(_) => self.dynamic_key_width()?,
             SqlType::Numeric(_) => {
                 let rest = self.bytes.get(self.at..).unwrap_or(&[]);
                 Numeric::key_length(rest).ok_or_else(|| self.damaged())?
@@ -2604,6 +2645,9 @@ impl<'b> Reader<'b> {
     }
 
     fn key_value(&mut self, sql_type: SqlType) -> SqlResult<Value> {
+        if sql_type.is_dynamic() {
+            return self.dynamic_key_value();
+        }
         match self.byte()? {
             NULL_IN_KEY => return Ok(Value::Null),
             PRESENT => {}
@@ -2703,7 +2747,7 @@ impl<'b> Reader<'b> {
                 let bytes = self.escaped_key_bytes()?;
                 crate::citext::value(String::from_utf8(bytes).map_err(|_| self.damaged())?)
             }
-            SqlType::Array(_) | SqlType::Catalog(_) | SqlType::Defined(_) | SqlType::Dynamic => {
+            SqlType::Array(_) | SqlType::Catalog(_) | SqlType::Defined(_) | SqlType::Dynamic(_) => {
                 return Err(self.damaged());
             }
             SqlType::Text

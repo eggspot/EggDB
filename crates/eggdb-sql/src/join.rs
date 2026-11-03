@@ -3,7 +3,7 @@ use crate::ast::{
     BinaryOperator, Expr, ExprKind, FromClause, JoinCondition, JoinKind, Select, SelectItem,
 };
 use crate::encoding::{
-    TableDefinition, decode_row_into, encode_key_value, index_prefix, prefix_end, rows_prefix,
+    TableDefinition, decode_row_into, encode_column_key, index_prefix, prefix_end, rows_prefix,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{
@@ -86,7 +86,7 @@ pub(crate) fn type_family(sql_type: SqlType) -> u8 {
             crate::types::DefinedKind::Domain => 20,
             crate::types::DefinedKind::Base => 22,
         },
-        SqlType::Dynamic => 21,
+        SqlType::Dynamic(_) => 21,
     }
 }
 
@@ -1604,10 +1604,11 @@ impl<'a> JoinedRows<'a> {
         let index = &table.indexes[position];
         let mut start = index_prefix(table.id, index.id);
         for (&column, &left) in index.columns.iter().zip(lefts) {
-            let Some(value) = key_value(&row[left], table.columns[column].sql_type) else {
+            let sql_type = table.columns[column].sql_type;
+            let Some(value) = key_value(&row[left], sql_type) else {
                 return Ok(true);
             };
-            encode_key_value(&mut start, &value);
+            encode_column_key(&mut start, &value, sql_type);
         }
         let end = prefix_end(&start);
         let mut going = true;
@@ -1647,7 +1648,7 @@ impl<'a> JoinedRows<'a> {
             if original.sql_type() == Some(sql_type)
                 || (sql_type.is_string() && matches!(original, Value::Text(_)))
             {
-                encode_key_value(&mut key, original);
+                encode_column_key(&mut key, original, sql_type);
                 continue;
             }
             let Ok(converted) = convert(original.clone(), sql_type, Conversion::Assignment) else {
@@ -1656,7 +1657,7 @@ impl<'a> JoinedRows<'a> {
             if compare_values(&converted, original) != Ordering::Equal {
                 return Ok(false);
             }
-            encode_key_value(&mut key, &converted);
+            encode_column_key(&mut key, &converted, sql_type);
         }
         let mut found = false;
         self.reader.get_with(key.as_slice(), &mut |bytes| {

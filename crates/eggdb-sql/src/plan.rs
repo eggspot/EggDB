@@ -1,6 +1,6 @@
 use crate::ast::{BinaryOperator, Expr, ExprKind, Literal};
 use crate::encoding::{
-    Column, NULL_IN_KEY, TableDefinition, decode_row, decode_row_into, encode_key_value,
+    Column, NULL_IN_KEY, TableDefinition, decode_row, decode_row_into, encode_column_key,
     index_prefix, prefix_end, rows_prefix,
 };
 use crate::error::SqlResult;
@@ -144,7 +144,11 @@ fn constant(expr: &Expr, column: &Column) -> Option<Value> {
         correlation: None,
     };
     let original = evaluator.eval(expr, Some(column.sql_type)).ok()?;
-    if !same_family(&original, column.sql_type) {
+    if column.sql_type.is_dynamic() {
+        if crate::constraints::current_dialect() != crate::Dialect::Sqlite {
+            return None;
+        }
+    } else if !same_family(&original, column.sql_type) {
         return None;
     }
     let converted = convert(original.clone(), column.sql_type, Conversion::Assignment).ok()?;
@@ -297,9 +301,9 @@ impl Candidate {
     }
 }
 
-fn encoded(value: &Value) -> Vec<u8> {
+fn encoded(value: &Value, sql_type: SqlType) -> Vec<u8> {
     let mut out = Vec::new();
-    encode_key_value(&mut out, value);
+    encode_column_key(&mut out, value, sql_type);
     out
 }
 
@@ -318,26 +322,31 @@ struct ColumnBounds {
     prefix: Option<Vec<u8>>,
 }
 
-fn bounds_by_column(found: Vec<Predicate>) -> BTreeMap<usize, ColumnBounds> {
+fn bounds_by_column(
+    found: Vec<Predicate>,
+    table: &TableDefinition,
+) -> BTreeMap<usize, ColumnBounds> {
     let mut bounds: BTreeMap<usize, ColumnBounds> = BTreeMap::new();
     for predicate in found {
+        let sql_type = table.columns[predicate.column].sql_type;
+        let key_of = |value: &Value| encoded(value, sql_type);
         let column = bounds.entry(predicate.column).or_default();
         match predicate.bound {
             Bound::Equal(values) if column.equal.is_none() => {
                 let has_null = values.iter().any(Value::is_null);
-                let mut keys: Vec<Vec<u8>> = values.iter().map(encoded).collect();
+                let mut keys: Vec<Vec<u8>> = values.iter().map(key_of).collect();
                 keys.sort();
                 keys.dedup();
                 column.equal = Some((keys, has_null));
             }
             Bound::Lower(value, inclusive) if column.lower.is_none() => {
-                column.lower = Some((encoded(&value), inclusive));
+                column.lower = Some((key_of(&value), inclusive));
             }
             Bound::Upper(value, inclusive) if column.upper.is_none() => {
-                column.upper = Some((encoded(&value), inclusive));
+                column.upper = Some((key_of(&value), inclusive));
             }
             Bound::Prefix(text) if column.prefix.is_none() => {
-                let mut start = encoded(&Value::Text(text));
+                let mut start = key_of(&Value::Text(text));
                 start.truncate(start.len().saturating_sub(2));
                 column.prefix = Some(start);
             }
@@ -512,7 +521,7 @@ pub(crate) fn plan(
     for (position, index) in table.indexes.iter().enumerate() {
         keys.push((KeyChoice::Index(position), &index.columns, index.unique));
     }
-    let bounds = bounds_by_column(found);
+    let bounds = bounds_by_column(found, table);
     let best = keys
         .iter()
         .filter_map(|(key, columns, unique)| candidate(table, *key, columns, *unique, &bounds))

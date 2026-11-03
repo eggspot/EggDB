@@ -160,6 +160,7 @@ mod text_search;
 mod time_zones;
 mod triggers;
 mod tsql;
+mod type_affinity;
 mod types;
 mod typing;
 mod updatable_views;
@@ -252,6 +253,8 @@ mod time_series_tests;
 #[cfg(test)]
 mod transaction_settings_tests;
 #[cfg(test)]
+mod type_affinity_tests;
+#[cfg(test)]
 mod user_type_tests;
 #[cfg(test)]
 mod vector_tests;
@@ -329,6 +332,7 @@ pub use store::{
     StoreFailure,
 };
 pub use time_zones::TimeZone;
+pub use type_affinity::TypeAffinity;
 pub use types::{DefinedKind, DefinedType, DefinedValue, NumericModifier, SqlType, Value};
 pub use visible_tables::{
     OutsideLink, OutsideLinkKind, UnknownTableName, UnservableColumnList, VisibleRead,

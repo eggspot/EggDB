@@ -63,7 +63,7 @@ fn declared_types_show_as_oracle_writes_them() {
     );
     let column = DeclaredType::ColumnType(vec!["job_history".to_owned(), "employee_id".to_owned()]);
     assert_eq!(column.text(), "JOB_HISTORY.EMPLOYEE_ID%TYPE");
-    assert_eq!(column.engine_type(), SqlType::Dynamic);
+    assert_eq!(column.engine_type(), SqlType::DYNAMIC);
     assert!(column.needs_resolution());
     assert_eq!(
         DeclaredType::RowType(vec!["employees".to_owned()]).text(),
@@ -79,7 +79,7 @@ fn declared_types_show_as_oracle_writes_them() {
 #[test]
 fn identity_lists_the_declared_types_of_inputs_only() {
     let parameters = vec![
-        parameter("p_id", ParameterMode::In, SqlType::Dynamic),
+        parameter("p_id", ParameterMode::In, SqlType::DYNAMIC),
         parameter("p_name", ParameterMode::Out, SqlType::Varchar(None)),
         parameter("p_total", ParameterMode::InOut, SqlType::Double),
     ];

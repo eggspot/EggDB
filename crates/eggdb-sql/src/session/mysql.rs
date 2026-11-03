@@ -63,7 +63,7 @@ pub(crate) fn mysql_type_name(sql_type: SqlType) -> String {
         | SqlType::Array(_)
         | SqlType::Catalog(_)
         | SqlType::Defined(_)
-        | SqlType::Dynamic => "text".into(),
+        | SqlType::Dynamic(_) => "text".into(),
     }
 }
 

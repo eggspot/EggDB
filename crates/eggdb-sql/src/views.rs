@@ -378,7 +378,7 @@ fn view_columns(
         };
         columns.push(ViewColumn {
             name,
-            sql_type: column.sql_type,
+            sql_type: column.sql_type.filter(|sql_type| !sql_type.is_dynamic()),
             source,
         });
     }

@@ -530,7 +530,7 @@ impl Run<'_> {
         Ok(match self.slot_of(variable_type)? {
             Slot::Typed(sql_type) => sql_type,
             Slot::Cursor(_) => SqlType::Text,
-            Slot::Untyped | Slot::Record | Slot::Row(_) | Slot::Collection(_) => SqlType::Dynamic,
+            Slot::Untyped | Slot::Record | Slot::Row(_) | Slot::Collection(_) => SqlType::DYNAMIC,
         })
     }
 

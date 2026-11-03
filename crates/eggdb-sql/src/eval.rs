@@ -756,9 +756,9 @@ impl Evaluator<'_> {
 
     fn type_of(&self, value: &Value, expr: &Expr) -> Option<SqlType> {
         if crate::constraints::current_dialect() == crate::Dialect::Sqlite
-            && self.declared_type(expr) == Some(SqlType::Dynamic)
+            && let Some(dynamic @ SqlType::Dynamic(_)) = self.declared_type(expr)
         {
-            return Some(SqlType::Dynamic);
+            return Some(dynamic);
         }
         value.sql_type().or_else(|| self.declared_type(expr))
     }
@@ -2029,6 +2029,11 @@ pub(crate) fn string_constant(text: &str, hint: Option<SqlType>) -> SqlResult<Va
 pub(crate) fn decimal_constant(text: &str, hint: Option<SqlType>) -> SqlResult<Value> {
     match hint {
         Some(sql_type) if sql_type.is_float() => parse_input(text, SqlType::Double),
+        Some(SqlType::Dynamic(_))
+            if crate::constraints::current_dialect() == crate::Dialect::Sqlite =>
+        {
+            parse_input(text, SqlType::Double)
+        }
         _ => Numeric::parse(text).map(Value::Numeric),
     }
 }

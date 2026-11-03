@@ -89,7 +89,7 @@ pub(crate) fn sqlite_type_name(sql_type: SqlType) -> &'static str {
         SqlType::Time(_) | SqlType::TimeTz(_) => "TIME",
         SqlType::Interval { .. } => "INTERVAL",
         SqlType::Uuid => "UUID",
-        SqlType::Dynamic => "BLOB",
+        SqlType::Dynamic(affinity) => affinity.sqlite_name(),
         SqlType::Array(_) | SqlType::Catalog(_) | SqlType::Defined(_) => "TEXT",
     }
 }

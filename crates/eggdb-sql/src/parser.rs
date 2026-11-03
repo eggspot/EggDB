@@ -2299,7 +2299,7 @@ impl<'t> Parser<'t> {
             return self.mysql_type();
         }
         if self.sqlite() {
-            return self.sqlite_type().map(|(sql_type, _)| sql_type);
+            return self.sqlite_cast_type();
         }
         if self.oracle() {
             return self.oracle_type();

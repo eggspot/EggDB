@@ -263,7 +263,7 @@ impl ViewDefinition {
                 reader.byte()?;
                 None
             } else {
-                Some(reader.sql_type(true, true, true, base_types_allowed)?)
+                Some(reader.sql_type(true, true, true, base_types_allowed, false)?)
             };
             let source = reader.plain_name()?;
             if columns.iter().any(|known| known.name == column) {

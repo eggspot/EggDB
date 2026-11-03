@@ -8,7 +8,7 @@ use crate::constraints::{self, PreparedChecks, RowChange};
 use crate::dialect::Dialect;
 use crate::encoding::{
     Column, IdentityGeneration, IdentitySeed, MAX_COLUMNS, TableDefinition, ViewDefinition,
-    decode_meta, decode_row, decode_row_into, encode_key_value, encode_meta, encode_row,
+    decode_meta, decode_row, decode_row_into, encode_column_key, encode_meta, encode_row,
     encode_row_into, is_view_record, meta_key, prefix_end, rows_prefix, table_key,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -731,7 +731,7 @@ pub(crate) fn dependent_table(
 pub(crate) fn row_key(table: &TableDefinition, row: &[Value]) -> Vec<u8> {
     let mut key = rows_prefix(table.id);
     for &index in &table.primary_key {
-        encode_key_value(&mut key, &row[index]);
+        encode_column_key(&mut key, &row[index], table.columns[index].sql_type);
     }
     key
 }
@@ -2105,7 +2105,7 @@ impl<'a> StoredRows<'a> {
             return Ok(None);
         }
         for &index in &table.primary_key {
-            encode_key_value(&mut self.key, &row[index]);
+            encode_column_key(&mut self.key, &row[index], table.columns[index].sql_type);
         }
         let inserted = if table.indexes.is_empty() {
             writer.put_if_absent(&self.key, &self.encoded)?
@@ -2679,7 +2679,7 @@ fn point_key(table: &TableDefinition, scope: Scope<'_>, filter: &Expr) -> Option
         if converted.is_null() || compare_values(&converted, &original) != Ordering::Equal {
             return None;
         }
-        encode_key_value(&mut key, &converted);
+        encode_column_key(&mut key, &converted, column.sql_type);
     }
     Some(key)
 }
