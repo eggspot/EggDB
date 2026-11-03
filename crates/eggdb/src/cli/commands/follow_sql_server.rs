@@ -18,6 +18,8 @@ const DEFAULT_POLL_SECONDS: u64 = 5;
 const ROWS_PER_INSERT: usize = 200;
 const STOP_CHECK: Duration = Duration::from_millis(200);
 const INVALID_OBJECT_NAME: u32 = 208;
+const CAPTURE_START_WAIT: Duration = Duration::from_secs(60);
+const CAPTURE_START_CHECK: Duration = Duration::from_millis(500);
 const TRACKING_VERSION_QUERY: &str =
     "SELECT CAST(CHANGE_TRACKING_CURRENT_VERSION() AS nvarchar(max))";
 const CAPTURE_ENABLED_QUERY: &str =
@@ -822,6 +824,39 @@ fn capture_bounds_query(instance: &str, after: Lsn, committed_before_copy: Optio
          CONVERT(nvarchar(max), sys.fn_cdc_increment_lsn({}), 1), {in_copy}",
         quote_unicode(instance),
         after.literal()
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureStart {
+    Started,
+    NotYetStarted,
+    Unknown,
+}
+
+fn capture_start_query(instance: &str) -> String {
+    format!(
+        "SELECT CAST(CASE WHEN start_lsn IS NULL THEN 0 ELSE 1 END AS nvarchar(max)) \
+         FROM cdc.change_tables WHERE capture_instance = {}",
+        quote_unicode(instance)
+    )
+}
+
+fn capture_start(rows: &TextRows) -> CaptureStart {
+    match first_value(rows, |value| Some(text(value))).as_deref() {
+        Some("1") => CaptureStart::Started,
+        Some("0") => CaptureStart::NotYetStarted,
+        _ => CaptureStart::Unknown,
+    }
+}
+
+fn capture_not_started(target: &str, table: &str, instance: &str) -> Failure {
+    precondition_failed(
+        format!(
+            "cannot follow {target}: CDC's capture job has not started reading capture instance {instance} of {table} after {} s, so its changes could not be read. Make sure SQL Server Agent and the capture job run, then follow again",
+            CAPTURE_START_WAIT.as_secs()
+        ),
+        "EXEC sys.sp_cdc_start_job @job_type = N'capture';".to_owned(),
     )
 }
 
@@ -1978,6 +2013,24 @@ impl Session<'_> {
         } else {
             None
         };
+        if uses_capture {
+            let waited = Instant::now();
+            for table in &tables {
+                let ChangeSource::Capture { instance, .. } = &table.changes else {
+                    continue;
+                };
+                while capture_start(&first_rows(query(
+                    &mut source,
+                    &capture_start_query(instance),
+                )?)) == CaptureStart::NotYetStarted
+                {
+                    if waited.elapsed() >= CAPTURE_START_WAIT {
+                        return Err(capture_not_started(&target, &table.shown(), instance));
+                    }
+                    std::thread::sleep(CAPTURE_START_CHECK);
+                }
+            }
+        }
         let mut copy_started: Option<ServerTime> = None;
         let lsn: Option<Lsn> = if uses_capture {
             let start = first_rows(query(&mut source, COPY_START_QUERY)?);
@@ -2702,6 +2755,41 @@ mod tests {
         assert_eq!(tracking_operation("D"), RowChange::Delete);
         assert_eq!(tracking_operation("I"), RowChange::Insert);
         assert_eq!(tracking_operation("U"), RowChange::Update);
+    }
+
+    #[test]
+    fn a_capture_instance_whose_low_endpoint_is_not_set_yet_is_waited_for() {
+        let answer = |value: Option<&str>| vec![vec![value.map(str::to_owned)]];
+        assert_eq!(
+            capture_start_query("it's"),
+            "SELECT CAST(CASE WHEN start_lsn IS NULL THEN 0 ELSE 1 END AS nvarchar(max)) \
+             FROM cdc.change_tables WHERE capture_instance = N'it''s'"
+        );
+        assert_eq!(capture_start(&answer(Some("1"))), CaptureStart::Started);
+        assert_eq!(
+            capture_start(&answer(Some("0"))),
+            CaptureStart::NotYetStarted
+        );
+        assert_eq!(capture_start(&answer(None)), CaptureStart::Unknown);
+        assert_eq!(capture_start(&Vec::new()), CaptureStart::Unknown);
+        let Failure::Database {
+            message,
+            try_command,
+            code,
+            ..
+        } = capture_not_started("db:1433/app", "shop.items", "shop_items")
+        else {
+            panic!("not a database failure");
+        };
+        assert_eq!(code, "source_failed");
+        assert!(message.contains(
+            "has not started reading capture instance shop_items of shop.items after 60 s"
+        ));
+        assert!(message.contains("SQL Server Agent"));
+        assert_eq!(
+            try_command.as_deref(),
+            Some("EXEC sys.sp_cdc_start_job @job_type = N'capture';")
+        );
     }
 
     #[test]
