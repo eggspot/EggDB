@@ -4178,7 +4178,7 @@ a view that used `SELECT *` keeps the columns it had when it was created (as MyS
 `CREATE DATABASE`, `DROP DATABASE` and `USE` of another database are not supported yet: a
 server serves one database.
 
-The MySQL suite (`crates/eggdb-sql/correctness/mysql.test`, 223 cases from the MySQL 8.0
+The MySQL suite (`crates/eggdb-sql/correctness/mysql.test`, 242 cases from the MySQL 8.0
 Reference Manual's documented behaviour) marks these as differing until they are fixed:
 - `7 / 2` is `3.5` (a `double`) where MySQL gives the `DECIMAL` `3.5000`, and decimal constants
   outside a `DECIMAL` column are doubles (`0.1 + 0.2` is `0.30000000000000004`); stored into a
@@ -4239,7 +4239,7 @@ Views are read-only unless an `INSTEAD OF` trigger makes them writable, as in SQ
 `ALTER TABLE ... RENAME COLUMN` and `DROP COLUMN` (and a table rename's references in views and
 triggers) leave `sqlite_schema` showing generated text instead of SQLite's edited text.
 
-The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 234 cases from sqlite.org's
+The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 261 cases from sqlite.org's
 documentation of SQLite 3.46, never SQLite's source) marks these as differing until they are
 fixed:
 - Indexes: `EXPLAIN` without `QUERY PLAN` (the bytecode listing), partial indexes and indexes
@@ -4283,7 +4283,7 @@ And more, not in the suite yet:
   queries.
 
 ## Known differences from Oracle
-The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 610 cases from Oracle's SQL
+The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 662 cases from Oracle's SQL
 Language Reference and PL/SQL Language Reference, never Oracle's software) marks these as differing until they are fixed:
 - `EXPLAIN PLAN` and `DBMS_XPLAN.DISPLAY` give no costs, cardinalities or predicates and only
   the `Id`, `Operation` and `Name` columns (D312); bitmap, function-based and reverse-key
