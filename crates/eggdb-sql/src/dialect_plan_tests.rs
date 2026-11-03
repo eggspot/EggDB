@@ -314,3 +314,19 @@ fn hostile_showplan_options_return_errors_and_never_panic() {
     all(&mut session, "SET STATISTICS IO ON");
     all(&mut session, "SET STATISTICS TIME OFF");
 }
+
+#[test]
+fn explain_plan_that_creates_plan_table_keeps_the_transaction_and_its_savepoints() {
+    let store = MemoryStore::default();
+    let mut session = oracle_emp(&store);
+    last(&mut session, "SAVEPOINT before_plan");
+    last(&mut session, "EXPLAIN PLAN FOR SELECT * FROM emp");
+    assert!(session.in_block());
+    last(&mut session, "ROLLBACK TO SAVEPOINT before_plan");
+    let error = fails(&mut session, "SELECT COUNT(*) FROM plan_table");
+    assert_eq!(error.vendor_code(), Some(942), "{error}");
+    assert_eq!(
+        last(&mut session, "SELECT COUNT(*) FROM emp"),
+        "COUNT(*)\n1\nSELECT 1"
+    );
+}

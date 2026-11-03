@@ -447,6 +447,7 @@ pub struct Session<'s> {
     statement_start: usize,
     shown_statement: Option<String>,
     explain_plan_displays: bool,
+    creating_plan_table: bool,
     table_variables: crate::table_variables::TableVariables,
     extra_results: Vec<QueryResult>,
     cancel: crate::cancel::CancelSignal,
@@ -528,6 +529,7 @@ impl<'s> Session<'s> {
             statement_start: 0,
             shown_statement: None,
             explain_plan_displays: false,
+            creating_plan_table: false,
             table_variables: crate::table_variables::TableVariables::default(),
             extra_results: Vec::new(),
             cancel: crate::cancel::CancelSignal::default(),
@@ -3388,7 +3390,8 @@ impl<'s> Session<'s> {
     }
 
     fn commits_implicitly(&self, statement: &Statement) -> bool {
-        (self.mysql() || self.oracle())
+        !self.creating_plan_table
+            && (self.mysql() || self.oracle())
             && matches!(
                 statement,
                 Statement::CreateTable(_)

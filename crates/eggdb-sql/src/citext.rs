@@ -88,7 +88,8 @@ const CASE_INSENSITIVE_REGEXP_FUNCTIONS: [&str; 5] = [
     "regexp_split_to_table",
 ];
 
-const CASE_INSENSITIVE_STRING_FUNCTIONS: [&str; 4] = ["replace", "split_part", "strpos", "translate"];
+const CASE_INSENSITIVE_STRING_FUNCTIONS: [&str; 4] =
+    ["replace", "split_part", "strpos", "translate"];
 
 fn as_text(value: &Value) -> Value {
     match text_of(value) {

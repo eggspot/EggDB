@@ -105,7 +105,6 @@ fn plan_table_name(target: &crate::ast::PlanTableTarget) -> String {
     )
 }
 
-
 fn constant_text(expr: &crate::ast::Expr) -> crate::error::SqlResult<Option<String>> {
     use crate::ast::{ExprKind, Literal};
     match &expr.kind {
@@ -151,7 +150,10 @@ impl Session<'_> {
                 let exists =
                     self.read(|reader, tables| Ok(tables.table(reader, &table)?.is_some()))?;
                 if !exists {
-                    self.run_quietly(&crate::explain::create_plan_table(&table))?;
+                    self.creating_plan_table = true;
+                    let created = self.run_quietly(&crate::explain::create_plan_table(&table));
+                    self.creating_plan_table = false;
+                    created?;
                 }
             }
         }
@@ -227,10 +229,7 @@ impl Session<'_> {
         table: Option<&str>,
         statement_id: Option<&str>,
     ) -> crate::error::SqlResult<Vec<String>> {
-        let table = table.map_or_else(
-            || crate::explain::PLAN_TABLE.to_owned(),
-            swap_uniform_case,
-        );
+        let table = table.map_or_else(|| crate::explain::PLAN_TABLE.to_owned(), swap_uniform_case);
         let exists = self.read(|reader, tables| Ok(tables.table(reader, &table)?.is_some()))?;
         if !exists {
             return Ok(crate::explain::missing_plan_lines(statement_id));

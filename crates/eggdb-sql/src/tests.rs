@@ -3750,6 +3750,22 @@ fn oracle_keeps_a_transaction_open_until_commit_and_ddl_commits_it() {
 }
 
 #[test]
+fn an_oracle_savepoint_opens_the_transaction_it_marks() {
+    let store = MemoryStore::default();
+    let mut oracle = Session::with_dialect(&store, crate::Dialect::Oracle);
+    last(&mut oracle, "CREATE TABLE t (id NUMBER(9) PRIMARY KEY)");
+    assert!(!oracle.in_block());
+    last(&mut oracle, "SAVEPOINT first_mark");
+    assert!(oracle.in_block());
+    last(&mut oracle, "INSERT INTO t VALUES (1)");
+    last(&mut oracle, "ROLLBACK TO SAVEPOINT first_mark");
+    assert_eq!(
+        last(&mut oracle, "SELECT COUNT(*) FROM t"),
+        "COUNT(*)\n0\nSELECT 1"
+    );
+}
+
+#[test]
 fn a_large_oracle_decode_stays_linear_and_obeys_the_argument_limit() {
     let store = MemoryStore::default();
     let mut oracle = Session::with_dialect(&store, crate::Dialect::Oracle);

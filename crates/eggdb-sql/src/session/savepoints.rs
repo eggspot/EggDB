@@ -171,6 +171,9 @@ impl Session<'_> {
                     self.begin(false)?;
                     self.savepoints.began_transaction = true;
                 }
+                Dialect::Oracle => {
+                    self.write("SAVEPOINT", |_, _| Ok(QueryResult::command("SAVEPOINT")))?;
+                }
                 _ => return Ok(QueryResult::command("SAVEPOINT")),
             }
         }
