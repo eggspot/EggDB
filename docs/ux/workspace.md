@@ -597,3 +597,195 @@ unless stated) and compares pixels, or dumps the accessibility tree and compares
   unchanged by this slice.
 - Hot-node thresholds are 20 % and 50 % of the root's total, chosen so a plan with four equal
   nodes (25 % each) reads `warm` everywhere and nothing `hot`, and one dominant node is `hot`.
+
+## 9. More tabs, the kept session, the value view, the grid menu, column widths and scrollbars
+
+Designed by Claude Fable for D310. Pins down what sections 2 and 3 leave open. Rects are at the
+1280 × 800 golden frame; tokens, components and roles not restated are gui.md's. The golden frame
+(one tab `Query 1`, 140 wide, `+` at `(408, 48, 28, 28)`, no scrollbars) is unchanged by all of it.
+
+### 9.1 The tab strip with several tabs
+Tabs are `w` wide, side by side from x 260: `w = 140` while `n × 140 + 36 ≤ 1020` (up to 7 tabs),
+then `w = max(100, floor(984 / n))` (8 tabs 123, 9 tabs 109, 10 or more 100); from 10 tabs the
+strip scrolls. While it fits, `+` sits 8 px after the last tab, `(260 + n × w + 8, 48, 28, 28)`.
+While it scrolls, `+` is pinned at `(1244, 48, 28, 28)` behind a 1 px `border` line at x 1236, and
+the tabs draw clipped in the viewport `(260, 44, 976, 36)` with scroll offset `s`: tab `i` (0-based)
+is at `x = 260 + i × w − s`. On adding, closing or activating a tab, `s` moves only as far as needed
+to show the whole active tab (`s = i × w` when it is cut on the left, `s = (i + 1) × w − 976` on
+the right); the wheel moves `s` 100 px per notch (either axis), clamped to `0 … n × w − 976`; `s`
+returns to 0 when the tabs fit again. No scrollbar: the cut tab at each edge is the cue.
+
+| Tab | Fill | Label at `(x + 12, 53)`, cut with `…` at `x + w − 32` | Close icon `(x + w − 20, 58, 8, 8)`, hit `(x + w − 28, 50, 24, 24)` | Between tabs |
+|-----|------|------|------|------|
+| active | `bg0`, stripe `(x, 44, w, 2)` `accent`, no bottom border | `body` `textPrimary` | always | none |
+| inactive | `bg2` (the strip), hover `bg1` | `body` `textSecondary` | only while hovered (the unsaved dot d 6 always) | 1 px `border` at `(x + w − 1, 52, 1, 20)` between two inactive tabs |
+
+Pointer: click activates; a click in the close hit closes; middle-click closes; a double-click on the
+strip's empty part (after `+`, or in the viewport past the last tab) adds a tab. Keys (EggDB layout):
+`Ctrl/Cmd+T` adds `Query n` (the lowest unused number) right after the active tab, with the active
+tab's dialect and connection, activates it and focuses its empty editor; `Ctrl/Cmd+W` and `Ctrl+F4`
+close the active tab; `Ctrl+Tab` / `Ctrl+Shift+Tab` go to the next / previous tab and wrap. After a
+close the tab to its right becomes active, else the one to its left. Closing the last tab leaves one
+empty `Query 1` (no text, no result, blank summary), so the strip is never empty and the window
+returns to the golden frame's state. A running tab (2.3) is never closed silently: every close path
+first asks the `Stop` dialog below; `Keep running` leaves it running.
+
+**Confirm dialogs** (`Close Query 2 without saving?` from 2.1, and the two below) share one shape,
+with the layout picker's conventions: the `scrim` covers the window and takes no input; the dialog
+opens and closes instantly, centred in the whole window.
+
+| Item | Rect (relative to `dx = round((W − 420) / 2)`, `dy = round((H − 160) / 2)`: `(430, 320)` here) | Drawing |
+|------|------|------|
+| dialog | (0, 0, 420, 160) | `bg0`, 1 px `border` inside, `radiusCard`, no shadow |
+| title | text at (24, 20) | `title` `textPrimary` |
+| body | text at (24, 52), wrapped at words to 372 wide, at most two lines of 18 | `body` `textPrimary` |
+| buttons | y 108, h 28, right edge at x 396, 8 px apart, width `max(72, text + 24)`; the default button is rightmost and primary, the other secondary | |
+
+One dialog per close, by priority running > transaction > unsaved, its body naming the rest:
+
+| Case | Title | Body | Buttons (default last) |
+|------|-------|------|------|
+| running | `Stop Query 2 and close it?` | `The running statement is cancelled and the rows fetched so far are discarded.` + ` Its open transaction rolls back.` + ` Its text is unsaved.` as they apply | `Stop and close` / `Keep running` |
+| transaction open or failed | `Close Query 2 and roll back?` | `Query 2 has an open transaction. Closing rolls it back; nothing from it is kept.` + ` Its text is unsaved too.` | `Roll back and close` / `Keep` |
+| unsaved | `Close Query 2 without saving?` | `Its text is not saved anywhere.` | `Close` / `Keep` |
+
+Focus opens on the default button; `Tab` is trapped and cycles the two buttons; `Enter` activates the
+focused button, `Esc`, a click on the scrim and the window's close key are `Keep`. Role `alertdialog`
+(AXSheet / Window modal / dialog), named by the title, described by the body, the default button named.
+
+### 9.2 The kept session
+A tab owns one engine session, opened at its first run and closed when the tab closes (with a
+`ROLLBACK` if a transaction is open), so `BEGIN` in one run holds for the next run in that tab, and
+no other tab sees its uncommitted work. The engine lets one session hold the write transaction at a
+time; a second tab's writer gets the engine's error, shown as any error (2.5), nothing more.
+
+| State | Tab | Status bar (left group, 16 px after the tags) |
+|-------|-----|------|
+| transaction open | dot d 6 `warning` at `(x + 12, 59)`, label moves to `x + 24` | `Transaction open` `small` `warning` |
+| transaction failed (the engine reports the block aborted after an error) | dot `error` | `Transaction failed: ROLLBACK to continue` `small` `error` |
+| another tab holds a transaction | | `Transaction open in Query 2` `small` `textSecondary`; click activates that tab |
+
+The status item is a button: click, `Space` or `Enter` open a two-row popover in the dialect menu's
+style (160 wide, rows 28, `bg0`, 1 px `border`, `radiusPopover`, shadow 0 4 12 at 16 %), above the
+item with a 4 px gap: `COMMIT`, `ROLLBACK` (`COMMIT` disabled while failed). Picking one runs that
+statement in the tab as a normal run, so the summary, `Messages` and the `Committed` toast follow
+2.3 and 2.4. The tab's accessible name adds the state text: `Query 2, transaction open`,
+`Query 2, transaction failed`.
+
+The dialect pill refuses a switch while the tab's transaction is open or failed: its menu opens with
+every other dialect disabled (`textDisabled`), and opening it shows the toast
+`Warning: COMMIT or ROLLBACK first; Query 2 has a transaction open` for 8 s. The session's dialect
+never changes mid-transaction, so the status bar's dialect item and the engine always agree.
+
+### 9.3 The full-value view
+`Enter`, `F2` or a double-click on a cell opens a popover 480 × 240: `bg0`, 1 px `border`,
+`radiusPopover`, shadow 0 4 12 at 16 % black, at `x = clamp(cell.x, 260, 800)`, `y = cell.bottom + 4`,
+or `y = cell.y − 244` when `cell.bottom + 244 > 776`. Rects relative to its top-left:
+
+| Item | Rect | Drawing |
+|------|------|------|
+| header | (0, 0, 480, 32) | `bg1`, 1 px `border` at y 31 |
+| column and type | text at (12, 7), cut with `…` at x 404 | `bodyBold` `textPrimary` for the name, then ` · ` and the type in `body` `textSecondary` (`name · text`, `data · bytea · 184 bytes`) |
+| `Copy` | (412, 2, 56, 28), label at (424, 7) | ghost button; disabled for `NULL` and the empty string |
+| body | (0, 32, 480, 208); text at (12, 40), lines 20, wrapped per character at 456 px (58 glyphs with the pinned font) | `code` `textPrimary`, read-only, no partial selection |
+| scrollbar | track (470, 32, 10, 208) | 9.6 |
+
+Shown: text verbatim with its line breaks; JSON and arrays pretty-printed with 2-space indent and keys
+in stored order; a vector as a JSON array, one value per line; a blob as `0x` + the full hex, no
+spaces; `NULL` as `NULL` and the empty string as `""`, both `textDisabled`. Past 1 MB the body stops
+and its last line is `… and 2.1 MB more` in `textSecondary`. The body scrolls with the wheel (60 px),
+`Up` / `Down` one line, `PgUp` / `PgDn` nine lines, `Home` / `End` to the ends. `Ctrl/Cmd+C` and
+`Copy` copy the body's full text as shown (the whole value, past the 1 MB cut) and toast
+`Copied 1,204 characters` or `Copied 184 bytes as hex` for 2 s. `Esc`, `Enter`, `F2` and a click
+outside close it; focus returns to the cell, which stays current. Role: a non-modal dialog (AXPopover /
+Window IsDialog / dialog / `dialog` `aria-modal=false`) named `<column> value`, its body a read-only
+`textbox` named `Value` (focused on open), the button `Copy value`; `Tab` cycles body → `Copy`.
+
+### 9.4 The grid's right-click menu
+Opens at the pointer (top-left at the pointer, moved left to end at x 1280 and flipped above the
+pointer when it would cross y 776) or, from `Shift+F10` and the menu key, below the current cell with
+a 4 px gap, left-aligned to it, with the same clamping. A right-click outside the selection first makes
+that cell current and collapses the selection; inside it keeps the selection; on the gutter or a header
+it selects that row or column first. Popover 240 wide, `bg0`, 1 px `border`, `radiusPopover`, shadow
+0 4 12 at 16 %, 4 px padding top and bottom, rows 28 (label `body` `textPrimary` at x 12, shortcut
+`body` `textSecondary` right-aligned at x 228), separators 1 px `border` across the width with 4 px
+above and below; height 278. Highlighted row: `selection` rounded r 4 inset 4 px horizontally;
+disabled `textDisabled`.
+
+| Group | Items (shortcut) |
+|-------|------|
+| copy | `Copy` (`Ctrl/Cmd+C`), `Copy with header` (`Ctrl/Cmd+Shift+C`), `Copy as INSERT` (`Ctrl/Cmd+Shift+I`), `Copy as CSV`, `Copy as JSON` |
+| value | `Open value` (`Enter`) |
+| select | `Select row` (`Shift+Space`), `Select column` (`Ctrl/Cmd+Space`), `Select all` (`Ctrl/Cmd+A`) |
+
+From the keyboard the first item is highlighted, from the pointer none. `Up` / `Down` move without
+wrapping, a letter jumps to the next item starting with it (`C` cycles the copy items), `Enter` and a
+click activate, `Esc` and a click outside close; focus returns to the grid. Role `menu` of
+`menuitem`s, each with its shortcut as the accelerator.
+
+`Copy as CSV` is the selection as RFC 4180: a header row of the selected columns' names, fields joined
+by `,`, records by `\r\n` with no trailing one; a field holding `,`, `"`, `\r` or `\n` is quoted with
+`"` doubled; `NULL` is empty; numbers, booleans, dates and uuids are the cell's text; JSON is its
+compact text (quoted as needed); a blob is `0x` + its full hex. `Copy as JSON` is a pretty-printed
+(2-space) array of one object per selected row, keys the column names in column order (a repeated
+name gets `_2`, `_3`); integers, decimals and floats bare; booleans `true` / `false`; `NULL` `null`;
+JSON and arrays embedded as JSON; text, dates, times, uuids, money and intervals as strings; a blob
+as the string `0x…`; a vector as an array of numbers. Toasts: `Copied 12 cells as CSV`,
+`Copied 3 rows as JSON`, 2 s.
+
+### 9.5 Column widths
+A header separator's hit band is 6 px (`x − 3 … x + 2`); hover draws a 2 px `accent` line over the
+separator for the header's height and the column-resize cursor; a drag extends the line through the
+body and resizes live, min 48, max 960. The gutter's edge at x 307 is not a handle. Double-click on
+the band auto-fits: the wider of the header and the first 200 fetched rows, clamped 48–480 (gui.md's
+reset). While dragging, the status bar's left group shows `name · 240 px`. Widths belong to the tab:
+a later run whose columns have the same names in the same order keeps them, any other result resets
+them. Keyboard: `Alt+Left` / `Alt+Right` change the current cell's column by 8 px (`Shift` 32 px) and
+`Alt+Enter` auto-fits it; each announces `name, 240 pixels` politely, and the header exposes
+`width 240 px` as its description.
+
+### 9.6 Scrollbars
+A region whose content fits its viewport draws no scrollbar, so the golden frame has none. Tracks are
+10 px overlays at the region's edge; gutters never scroll horizontally; the grid header scrolls with
+its columns.
+
+| Region | Vertical track | Horizontal track |
+|--------|------|------|
+| grid body | (1270, 446, 10, 330); h 320 while the horizontal one shows | (308, 766, 962, 10) |
+| editor | (1270, 80, 10, 300); h 290 with the horizontal one; both 28 shorter / higher while the error strip shows | (308, 370, 962, 10) |
+| full-value view | (470, 32, 10, 208) relative to the popover | none (the text wraps) |
+| tab strip | none (wheel only, 9.1) | none |
+
+For a track of length `L`, viewport `V`, content `T` and offset `O`: `thumb = max(24, round(L × V / T))`
+and `pos = round((L − thumb) × O / (T − V))`; the thumb is 6 px wide inset 2 px in the track,
+`radiusPill`, `textDisabled` at 60 % alpha; hover and drag `textSecondary`, 8 px wide inset 1 px.
+Shown while the pointer is over the region and for 800 ms after the last scroll or drag, then fading
+200 ms; under reduced motion the thumb is always visible while the content exceeds the viewport,
+never faded. A press on the track pages one viewport toward the pointer at once; dragging the thumb
+sets `O = (pointer − grab − trackStart) / (L − thumb) × (T − V)`, clamped, and the drag continues
+outside the track. Roles: `scrollbar` → AXScrollBar / ScrollBar, RangeValue / scroll bar, Value /
+`scrollbar` with `aria-controls` the region and `aria-orientation`; named `Vertical scrollbar` /
+`Horizontal scrollbar` as children of the region; value `0` to `100` percent; not in the `Tab`
+order, since the region's own keys scroll it.
+
+### Decided by this design (9)
+- Tabs shrink from 140 to 100 before the strip scrolls (from 10 tabs); while scrolling `+` is pinned
+  at the strip's right behind a 1 px line, and the only scroll cue is the cut tab at each edge.
+- Closing the last tab leaves an empty `Query 1`; the strip is never empty.
+- Every close path on a running tab goes through the `Stop Query 2 and close it?` dialog; closes
+  show one dialog, by priority running > transaction > unsaved, whose body names the other reasons.
+- Confirm dialogs are 420 × 160, centred in the window, default button primary and rightmost.
+- An open transaction shows as a `warning` dot in the tab plus a `Transaction open` status item whose
+  popover offers `COMMIT` and `ROLLBACK`; a failed block reads `Transaction failed: ROLLBACK to
+  continue` in `error`; other tabs see `Transaction open in Query 2`.
+- The dialect pill refuses a switch while a transaction is open (other dialects disabled, a
+  `Warning:` toast), rather than letting the next run fail.
+- The value view pretty-prints JSON (2-space), shows the full hex of blobs, cuts the body at 1 MB,
+  and copies what it shows; it has no partial text selection in this slice.
+- `Copy as CSV` (RFC 4180, header row, `\r\n`, no trailing break) and `Copy as JSON` (array of
+  objects, numbers bare, `NULL` as `null`) join the menu; `Select all` joins the select group.
+- Menu items do not wrap at the ends, as in the picker, tree and grid.
+- Column widths belong to the tab and survive runs with the same column names in the same order;
+  the drag's max is 960; `Alt+Left` / `Alt+Right` / `Alt+Enter` are the keyboard path.
+- Under reduced motion scrollbar thumbs stay visible rather than hiding after 800 ms, so people who
+  turn animation off never lose the position cue.
