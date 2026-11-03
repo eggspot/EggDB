@@ -3,8 +3,10 @@ use crate::packstream::{
 };
 use eggdb_graph::{QueryResult, Value};
 use eggdb_keyspace::Keyspace;
+use eggdb_platform::connection_limits::MemoryBudget;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -32,7 +34,7 @@ const IGNORED: u8 = 0x7e;
 const FAILURE: u8 = 0x7f;
 
 /// How the Bolt server runs.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ServerConfig {
     /// The one user drivers log in as, with basic authentication.
     pub user: String,
@@ -40,6 +42,9 @@ pub struct ServerConfig {
     pub password_sha256: [u8; 32],
     /// The most connections served at once.
     pub max_connections: usize,
+    /// The memory every connection's requests and replies hold together, shared with the
+    /// server's other listeners (D284, D307).
+    pub memory_budget: Arc<MemoryBudget>,
 }
 
 impl std::fmt::Debug for ServerConfig {
