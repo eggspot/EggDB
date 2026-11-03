@@ -6,6 +6,8 @@ the models and protocols that most applications use (D5). The build loop may ref
 research, recorded in docs/decisions/ (indexed in docs/decisions.md).
 
 ## Milestones
+What is still to build for each milestone is listed in [What is left, per milestone](#what-is-left-per-milestone).
+
 | # | Milestone | Status |
 |---|-----------|--------|
 | M0 | Repo skeleton: workspace, pinned toolchain, CI, docs | **done** |
@@ -135,18 +137,18 @@ key-value API, the `eggdb` command and its UI exist, and v0.1.0 is released. The
 2026-10-29 to 2026-11-01 gave every milestone a first part: SQL in five dialects with their
 procedural languages, servers for the PostgreSQL, MySQL, TDS, RESP, MongoDB, Elasticsearch, CQL,
 Kafka, AMQP, MQTT, NATS, STOMP, SQS, S3, DynamoDB and Bolt protocols, and first pieces of every
-data model and way of scaling. Most of them are first parts: each milestone row below says what
-is left. Measured sizes and budgets are in D115 and D253, checkpoints in D168.
+data model and way of scaling. Most of them are first parts: [What is left, per milestone](#what-is-left-per-milestone)
+lists what is still to build for each. Measured sizes and budgets are in D115 and D253, checkpoints in D168.
 
 | Area | Status | Missing |
 |------|--------|---------|
 | Platform layer (M1) | files with positional, direct and asynchronous I/O and shared or exclusive file locks (a completion queue on io_uring on Linux, I/O completion ports on Windows on request, and a worker pool elsewhere), aligned buffers, directory sync, clocks, whether a standard stream is a terminal and takes colour, memory (page sizes, explicit and transparent huge pages), CPU sets, thread pinning on Linux and Windows and pinned thread starts, cache padding, CPU topology (cores, packages, NUMA nodes, last-level caches) on Linux, Android and Windows with counts on Apple's systems, the same error for the same wrong path on every OS, deterministic crash, fault, memory, CPU and I/O-ordering simulation; TCP listeners and connections through a completion queue that waits in epoll on Linux and Android, in kqueue on Apple's systems and in `poll(2)` on FreeBSD, NetBSD, illumos and Solaris (a portable poller elsewhere), with a simulated network of hosts (ordered bounded streams, seeded delivery, latency, partitions, resets, injected faults) on a simulated clock; timed reaps and cancel on the network queue; sockets through io_uring on Linux and I/O completion ports on Windows, on request (D165); a memory allocator of our own with per-thread caches and a budget, opt-in (D166); running a child process and reading its own peak memory | IOCP as Windows' automatic choice (after a benchmark), batched io_uring submission, retransmission timeouts and one-way cuts in simulation, timed reaps and cancel on the file I/O queue, non-blocking connects and CI runners on the BSDs and illumos, OpenBSD and DragonFly, UDP, Windows named pipes for the mysql client (local sockets are written on Unix systems, part 4.M1-1, D164, and on Windows 10 version 1803 and later through its own `AF_UNIX` sockets with an owner-only access list, D267), per-device alignment, NUMA memory placement and locked memory, performance and efficiency cores, pinning and topology on the BSDs, file locks on Solaris (D78), and the M1 wrap-up review's follow-ups: a guard against completion packets after an immediate IOCP success, `NotConnected` from a reset stream's address and shutdown in simulation, tests that cancel a pending connect and mix port and worker operations on IOCP, and no readiness call in a reap that is already satisfied |
 | Storage and transactions (M2, M3) | the design (D77), the file format's spec ([format.md](format.md)), CRC-32C with the processor's instructions, the superblock in two header slots, page headers and their checksums, the page file: crash-safe commits, growth, a free list, rollback, one writer or many readers by file lock; the page cache: a fixed budget allocated once, clock eviction, pinned page handles, changes kept until commit, statistics; a benchmark harness with counts gated exactly and times gated as ratios (D80); the write-ahead log: segments inside the file, checksummed records, commits that log whole pages before writing them in place, group commit, the Full, Normal and Off durability modes, redo on open that tells a torn tail from damage (D81); the B+tree: get, put, splits up to the root, fence keys, prefix truncation, every page checked when read from the file, and a whole-tree check (D82), delete with merges and root collapse, and cursors for range, prefix and reverse scans (D83); checkpoints, recovery from the last checkpoint and log segments recycled with never-reused sequence numbers (D84); a crash sweep across the whole stack (D85, [testing.md](testing.md)); transactions: one writer, snapshot readers on any thread through before-images, atomic commit, rollback, hybrid-clock commit stamps (D86); the embedded Rust API, `eggdb::Database` ([embedded.md](embedded.md), D87); values up to 1 GiB on chains of overflow pages, and a check that accounts for every page of the file (D88); a model test against an in-memory map and a fuzzer for hostile files (D89); long commits that no longer grow the file, and batched random overwrites faster than SQLite's (D97) | the rest of the v0.2.0 list above, then MVCC, serializable isolation, partitioning and the LSM bake-off; streaming reads of large values; a checkpoint that restarts the log without header syncs, so `Normal` commits sync as rarely as SQLite's (D97) |
-| Models (D2) | key-value; relational: tables, indexes, joins, aggregates, views, routines and triggers (D98 to D163); documents (D111, D197); full-text search (D195, D196); time series and columnar (D201, D202); vectors and geospatial (D203 to D205); graphs and the Bolt protocol (D206, D207); wide-column, objects and queues (D213 to D219) | each model's own milestone row lists what is left |
+| Models (D2) | key-value; relational: tables, indexes, joins, aggregates, views, routines and triggers (D98 to D163); documents (D111, D197); full-text search (D195, D196); time series and columnar (D201, D202); vectors and geospatial (D203 to D205); graphs and the Bolt protocol (D206, D207); wide-column, objects and queues (D213 to D219) | what is left for each model is listed in [What is left, per milestone](#what-is-left-per-milestone) |
 | SQL dialects (D10, D47) | PostgreSQL, first parts: `CREATE`/`DROP TABLE`, `INSERT`, `SELECT` with `WHERE`, inner, left, right, full and cross joins, subqueries, `WITH` and set operations in all four dialects (D112), `GROUP BY` with aggregates, `HAVING`, `DISTINCT`, `ORDER BY` and `LIMIT`, `UPDATE`, `DELETE`, transaction blocks, integer, float, boolean and text types, through `eggdb sql` (D98, D100); exact `numeric`, `date`, `timestamp`, `timestamptz`, `json`, `jsonb`, `serial` and identity columns in all four dialects and both protocols (D111); `CREATE [UNIQUE] INDEX`, `DROP INDEX` and `UNIQUE` in every dialect, and `EXPLAIN` in PostgreSQL's and MySQL's style and SQLite's `EXPLAIN QUERY PLAN`, Oracle's `EXPLAIN PLAN` not yet (D109); MySQL, first parts on the same tables, with MySQL's errors (D106); SQLite, first parts on the same tables, with SQLite's errors (D107); Oracle, first parts on the same tables, with `ORA-` errors (D108); SQL Server's Transact-SQL, first parts on the same tables (`[brackets]`, `TOP`, `IDENTITY`, `GETDATE()`, batches without semicolons), with SQL Server's error numbers (D122) | the rest of PostgreSQL, MySQL/MariaDB, SQLite and Oracle, T-SQL, then GoogleSQL, Snowflake, Spark, ClickHouse, Trino, Db2, Sybase |
 | Protocols (D5) | PostgreSQL v3 (D103), MySQL's client/server protocol (D106) and SQL Server's TDS 7.4 for go-sqlcmd (D122) and for Microsoft.Data.SqlClient and mssql-jdbc with RPC, prepared statements and transaction manager requests (D132) and bulk loads from `bcp in` and `SqlBulkCopy` (D136), over TLS 1.3 and 1.2 of our own on any address, or on loopback without TLS (D102, D161) | RESP, MongoDB, Elasticsearch, CQL, Kafka, AMQP, MQTT, NATS, STOMP, SQS, S3, DynamoDB and Bolt have first parts (D193 to D219); left: their full command sets, and one shared listener crate for the protocol servers (D122) |
 | Platforms (D8) | Linux (glibc, and musl on x86-64), macOS and Windows built and tested in CI, and release builds for x86-64 and AArch64 on each, run where the runner can (D75); the BSDs, illumos, Solaris, Android, iOS and WASI type-checked in CI | first parts of the browser build and the mobile libraries (D221, D222); left: EggOS, `no_std`, CI runners on the BSDs |
-| Scale (D4, D18) | first parts: replication and failover (D209), change streams (D210), Raft (D211), shard maps and two-phase commit (D212), leaderless quorums (D225) | each scaling milestone row lists what is left |
+| Scale (D4, D18) | first parts: replication and failover (D209), change streams (D210), Raft (D211), shard maps and two-phase commit (D212), leaderless quorums (D225) | what is left for each way of scaling is listed in [What is left, per milestone](#what-is-left-per-milestone) (M14, M15, M18) |
 
 Every protocol milestone also covers that database's tools (D12) and its backups and dumps (D13):
 an application's whole toolchain and its data move over together.
@@ -243,3 +245,752 @@ From the third gap review (D47–D58), each after its foundations:
   (D250).
 - **Hyperscale operations (D58)** follow clusters. Started: resumable batch copies with verified
   differences in `CREATE EXTENSION eggdb_migration` (D251).
+
+## What is left, per milestone
+What each milestone still has to build: the vision (CLAUDE.md, D1 to D58) compared with what is
+built (the tables above, D59 to D296 and PR #86), with every "Left:", "Next:" and "Not yet" line
+of the decisions. Work from the tracks is listed under the milestone it builds on. Left out: D45's
+"not planned" list, Oracle's own wire protocol (D10), anything that needs money, accounts or a
+license change (X12, D50), and publishing to package registries and other release steps. Each
+bullet is one buildable item; "Check:" names what proves it.
+
+### M1 Platform layer
+- I/O completion ports as Windows' automatic choice, and io_uring and IOCP sockets as the default
+  network backends, once the benchmarks show it (D67, D69, D165). Check: the network benchmarks.
+- Batched io_uring submission, and timed reaps and cancel on the file I/O queue (D72, Where we are).
+  Check: simulator tests of a timed reap and a cancel on files.
+- kqueue changes folded into the waiting `kevent` call, so a wait costs no change call (D74).
+  Check: system calls per wait, measured on macOS and FreeBSD.
+- Retransmission timeouts, one-way cuts and per-host latency and bandwidth in the simulated
+  network (D72). Check: a simulator test that fails a connection across a long cut.
+- Non-blocking connects in the `poll(2)` backend on the BSDs and illumos (D73).
+- OpenBSD and DragonFly on the `poll(2)` backend, with CI runners for them (D73).
+- Solaris: file locks, and sends that never raise `SIGPIPE` (D73, D78).
+- UDP sockets in the platform layer, for QUIC and syslog ingest (D34, D39).
+- Windows named pipes, for the mysql client and SQL Server clients on Windows (D267, Where we are).
+- Per-device alignment for direct I/O (Where we are).
+- NUMA memory placement and work placed by NUMA node, so one machine is used fully (D18, 4.M1-4).
+- Performance and efficiency cores on Windows and macOS, and hot work placed on performance cores
+  (4.M1-4).
+- Thread pinning and CPU topology on the BSDs (Where we are).
+- EggDB's own allocator as the default build, once the benchmarks show it (D166, 4.M1-5).
+  Check: the benchmark lines with and without it.
+- The M1 review's IOCP follow-ups: a guard against packets after an immediate success, and tests
+  that cancel a pending connect and mix port and worker operations (Where we are).
+- The M1 review's other follow-ups: `NotConnected` after a reset in simulation, and no readiness
+  call in a reap that is already satisfied (Where we are).
+- GPUs, persistent memory and CXL memory as optional accelerators behind build features, never
+  required (D40, D45).
+
+### M2 Storage engine
+- Users can choose the LSM tree per table with `WITH (storage = lsm)`, kept in the catalog (D170).
+  Check: the B-tree and LSM bake-off in the benchmarks, recorded as a decision.
+- Dirty pages spill to the file before commit, so a write transaction no longer has to fit in
+  the page cache (D86, D167). Check: a 1 GiB `put_reader` peaks near 32 MiB (4.M2-1).
+- A Zstandard-class codec of our own (RFC 8878) for cold data (D171). Check: RFC test vectors and
+  a fuzzer.
+- Compressed leaf pages and log records, with compression chosen per column and page (D40, D171).
+- Compression options in the CLI and `eggdb serve` (D171).
+- Partitioning: rows that move between partitions on `UPDATE`, expressions in partition keys,
+  and indexes created on the parent reaching every partition (D169, 4.M2-3).
+- MySQL's and Oracle's partition `ALTER`s (add, drop, split, exchange) (D169).
+- Online upgrades with a tested downgrade path to the previous minor version (D20, D35). Check:
+  the upgrade, downgrade and mixed-version file tests in CI.
+- Online schema changes and reindexing that block neither reads nor writes (D20). Check: a
+  concurrent workload test across an `ALTER TABLE` and a reindex.
+- Adaptive and learned indexes, where benchmarks justify them (D40).
+
+### M3 Transactions
+- Users can run SQL sessions on concurrent transactions, with each dialect's isolation levels and
+  errors (D172, D173). Check: Flyway's default two-connection lock (D138).
+- Users can choose the isolation level per database, table or request, from strict serializable
+  to read committed with per-statement snapshots (D18, D173).
+- Row versions in the storage engine (MVCC), so changes larger than memory spill (D172).
+- Collections and expiring keys inside concurrent transactions (D172).
+- Waiting on a predicate lock instead of failing at commit (D172).
+- Row locks that hold other writers: `FOR UPDATE`/`FOR SHARE` with `NOWAIT` and `SKIP LOCKED`
+  across concurrent sessions (D32, D173).
+- Deadlock detection between row and advisory locks, failing with `40P01` (D173).
+- Two-phase commit and XA: `PREPARE TRANSACTION`, `COMMIT PREPARED`, MySQL's `XA` and TDS's
+  distributed transactions (D32, D173).
+- Statement-level rollback in MySQL, SQLite, Oracle and SQL Server: a failing statement undoes
+  only itself, not the transaction (sql.md, known differences).
+- `SET LOCAL`, `set_config(..., true)` and `SET` inside routines (D280).
+- `SET TRANSACTION READ ONLY` and exported snapshots (`SET TRANSACTION SNAPSHOT`) (D32).
+- Key-value writes recorded in a savepoint's undo log, so `ROLLBACK TO SAVEPOINT` undoes them in
+  `eggdb shell` (D283).
+
+### M4 Embedded key-value and the single file
+- A benchmark against SQLite's `:memory:` in the compare job (D175).
+- `ATTACH` of in-memory and other EggDB files (D175).
+- An ordered, transactional key-value API in the style of FoundationDB, LevelDB and RocksDB for
+  every driver (D48).
+- SQL tables kept in their own collection (D98's move of SQL into a collection named `sql`).
+- Collections in the C API and the language drivers beyond D139 (D292).
+- Renaming and per-collection counts in `eggdb ui` and `eggdb shell`, with counts kept up to date
+  so `stats --collections` stays instant (D292).
+- SQLite's `speedtest1` and the standard embedded benchmarks on the `embedded` profile (D41).
+  Check: the compare job, gated.
+- On-disk overhead per row and per index entry, measured and gated with the other budgets (D6).
+- The `server` profile split of the binary, with its own size, idle-memory and first-start lines
+  (D230, D253). Check: `benchmarks/footprint.txt`.
+- YCSB workloads against SQLite and Redis (D7).
+- A published branch-coverage target for the core, rising every release toward SQLite's (D41).
+- Pinned benchmark hardware with published descriptions, and a public results page (D44, D252).
+- Joules per query per workload and idle wake-ups, reported and then gated (D44, D252).
+- Public conformance and benchmark dashboards for every dialect, protocol, type and driver
+  (D32, D44).
+
+### M5 SQL engine, SQLite, C API and embedded drivers
+- Column statistics (`pg_stats`, histograms, correlation) gathered by `ANALYZE` (D40, D178).
+- A cost-based optimizer that orders joins by cost (D40, D178). Check: TPC-H's joins, and the
+  Linux join at 1.0 times SQLite's (D100).
+- Adaptive re-planning during execution (D40).
+- Point `SELECT`s as fast as SQLite's everywhere (item 19e, D99). Check: the compare job.
+- Top-N sorts for `ORDER BY ... LIMIT`, and sorts, joins and groups that spill to disk instead of
+  failing at 1 GiB (D100).
+- A resumable executor that streams rows, so portals, the C API and `COPY TO` send rows as they
+  come (D284, D287, D293).
+- Vectorized scans, filters and projections, float and numeric kernels and grouped aggregates,
+  with SIMD chosen at runtime (D40, D179).
+- A query compiler for hot queries, where it pays (D40).
+- `TABLESAMPLE`, t-digest and the other `APPROX_*` functions (D40).
+- TPC-C against PostgreSQL and MySQL (D7).
+- Partial, expression and covering (`INCLUDE`) indexes, `CREATE INDEX CONCURRENTLY` and `NULLS NOT
+  DISTINCT` (D32).
+- GIN, GiST, SP-GiST, BRIN and bitmap index methods (D32).
+- `ROLLUP`, `CUBE`, `GROUPING SETS`, `DISTINCT ON`, `NATURAL` joins, `stddev`, `variance` and
+  hypothetical-set aggregates (sql.md, Next parts).
+- Data-modifying `WITH`, `SEARCH` and `CYCLE`, row constructors and `VALUES` as a query (D32).
+- Multidimensional arrays and array slices (D19, D288).
+- Generated columns (D32).
+- The rest of `ALTER TABLE`: `ALTER COLUMN ... TYPE ... USING`, adding a serial or identity
+  column, renaming what a view uses (D32).
+- The SQL:2023 features, tracked as a published conformance list (D32).
+- The Unicode Collation Algorithm with CLDR tailorings (`COLLATE "de-DE"`), with MySQL's and SQL
+  Server's collation names mapped onto it (D30, D233). Check: the collation conformance test.
+- Collation keys in indexes, and locale-aware `upper` and `lower` (D233).
+- Every legacy encoding the supported databases accept, listed per dialect, on the wire and in
+  `COPY` (D30).
+- WebAssembly functions: floating point and the rest of the 1.0 instruction set (D232). Check: the
+  official spec test suite in CI.
+- `CREATE FUNCTION ... LANGUAGE wasm`, with type mapping and host functions behind permissions
+  (D27, D232).
+- An extension API for types, index methods, functions and protocols, loaded as sandboxed
+  WebAssembly with CPU, memory, time and output limits per role (D27, D45).
+- A native-code compiler for hot WebAssembly functions (D27, D232). Check: benchmarks against
+  other runtimes.
+- Event triggers: PostgreSQL's event triggers, SQL Server's DDL triggers and Oracle's DDL and
+  database event triggers (D27).
+- Users can write SQLite files: the B-tree writer, the rollback journal and the WAL (D180).
+  Check: files EggDB writes pass `PRAGMA integrity_check`.
+- `WITHOUT ROWID` tables and UTF-16 databases in SQLite files (D180).
+- `eggdb restore` from an SQLite file into an EggDB file (D13, D180).
+- SQLite's dynamic typing for every affinity and untyped column, and keys and indexes on `BLOB`
+  columns (D107, sql.md).
+- SQLite's `ATTACH`, `VACUUM` in SQL, blob, JSON and math functions, `group_concat`, `total`,
+  `GLOB` classes and temporary views and triggers (4.M5-10, sql.md). Check: the SQLite suite.
+- SQLite's own text in `sqlite_schema` after `RENAME COLUMN`, `DROP COLUMN` and renamed
+  references in views and triggers (D273, D294).
+- sqllogictest run with its pass rate published and a stated minimum (D10, D45).
+- `libsqlite3`: `sqlite3_create_function`, `sqlite3_backup_*` and the rest of the interface, with
+  rows streamed per step (D181). Check: the sqlite3 shell and Python's `sqlite3` module in CI.
+- The C API: parsed plans kept in prepared statements, binary result formats, typed `Parse` on
+  server sessions and the remaining open options, `check` and `stats` (D142, D268, D293).
+- Asynchronous C API calls, completed by one callback per batch (D17, D293).
+- Every language driver using the new C API calls (prepared handles, stepping, `COPY`) (D293).
+- Each driver benchmarked in embedded mode against SQLite's binding in its language, as D17 lists
+  them (D17, D182). Check: gated in CI.
+- JDBC's `DatabaseMetaData`, and a JNI binding for Java before 22 (D16, 4.M5-6).
+- The Python driver through the CPython C API with buffer-protocol batches (D16, D17).
+- `eggdb sql` runs SQL*Plus commands in Oracle scripts (roadmap item 43).
+
+### M6a Server and the PostgreSQL protocol
+- TLS and authentication on every listener beyond PostgreSQL, MySQL and TDS, so each may listen
+  beyond loopback (D22, D161). Check: the `tls-clients` job with each protocol's own client.
+- Kafka, MQTT, AMQP, NATS, STOMP, Bolt and the HTTP listeners held against the server's memory
+  budget, RESP pub/sub queues counted, and replies measured before they are built (D284).
+- One shared listener crate for the protocol servers (D122).
+- Connections served from an event loop over the completion queue instead of a thread per
+  connection (D103, 4.M1-2). Check: a many-connections benchmark.
+- TLS session resumption, and the processor's AES instructions (D161).
+- HTTP/2, gRPC and QUIC as shared crates of our own (D34).
+- PostgreSQL's function call protocol (D103).
+- PostgreSQL's network address, geometric, bit string, `money`, `xml` and multirange types (D19).
+- `tsvector`, `tsquery`, `jsonpath` and `refcursor` as types of their own (D195, D280, D289).
+- `DateStyle` and `IntervalStyle` beyond ISO and `postgres`, and the special date and time inputs
+  (D19, sql.md).
+- The `citext` versions of the regexp and string functions, `hstore_to_matrix` and `%#` (D288),
+  and the part's security-only second review (D35).
+- `pg_dump --clean`, `pg_dumpall`'s roles and several databases, large objects and dumps in
+  encodings other than UTF-8 (D118).
+- `COPY`'s `REJECT_LIMIT`, and composite and range columns in the binary format (D154).
+- The catalog: `tableoid` and the other system columns, `pg_cast` rows, composite types'
+  `typrelid`, `information_schema.routines` and `parameters`, OIDs kept across renames (D129, D131).
+- pgAdmin, DBeaver and SSMS run in CI, moving from "expected to work" to supported (D12, D163).
+- PostgreSQL's regression suite run from outside the repo, with its pass rate published and a
+  stated minimum, as for every protocol and dialect (D10, D45).
+- Generated REST: JWT sign-in with roles per request, embedded resources, `or=`/`and=` groups,
+  `POST /rpc/<function>`, upserts and an OpenAPI document (D235).
+- A GraphQL API generated from the schema, in Hasura's style (D37).
+- gRPC and OData APIs generated from the schema, OData for Excel, Power BI and SAP (D37).
+- Realtime subscriptions over WebSocket and Server-Sent Events on live queries (D37).
+- End-user sign-in for apps: sign-up, password, magic link, social login and OpenID Connect, with
+  JWT sessions mapped onto row-level security (D37).
+- WebAuthn and passkeys for app sign-in (D54).
+- Files in object storage transformed on request (resize, crop, convert) through WebAssembly
+  extensions and our own image codecs (D37).
+- Rate limits on every generated API (D25, D37).
+
+### M6b The rest of security
+- Kerberos/GSSAPI logins (D22, D185).
+- TLS client certificates, requested and verified by the TLS layer (D22, D161, D185). Check:
+  psql with `sslcert` in the `tls-clients` job.
+- LDAP search-and-bind, StartTLS and LDAPS (D185).
+- PostgreSQL 18's `OAUTHBEARER` mechanism (D185).
+- SAML, API keys and multi-factor sign-in for interactive tools (D22).
+- External authentication rules on the MySQL and TDS listeners, and rules by address or database
+  (D185).
+- MySQL and TDS logins for stored roles (D183).
+- `SET ROLE`, object owners, `WITH GRANT OPTION`, and schema, sequence and routine privileges
+  (D183).
+- `has_table_privilege`, `relacl` and `information_schema`'s privilege views (D183).
+- `FORCE ROW LEVEL SECURITY`, and `pg_policy` and `pg_policies` (D186).
+- SQL Server's column `GRANT` and `DENY`, column privileges on sequences, `MERGE` and `ON CONFLICT
+  DO UPDATE` under row security, and row security through updatable views (D285).
+- Oracle VPD and SQL Server's security predicates (D186).
+- Dynamic data masking: SQL Server's `MASKED WITH` and Oracle's redaction, after its decision
+  (D22, D285).
+- Redis ACLs, MongoDB roles, Elasticsearch roles and Cassandra roles mapped onto the one role
+  model (D22). Check: the same user has the same rights over every protocol.
+- Authenticated page encryption, with a tag per page (D187).
+- Encrypting an existing file and rotating keys online (D23, D187).
+- KMS, HSM and Vault-compatible key sources (D23, D187).
+- Per-column and per-tenant keys (D23, D187, D234).
+- A mode that uses FIPS-approved algorithms only (D23).
+- A path to post-quantum key exchange in TLS (D23).
+- Server events (logins, privilege and schema changes, chosen tables' reads) in the hash-chained
+  audit log, with anchored digests and retention (D26, D231).
+- Crypto-shredding: per-subject keys whose deletion makes data unreadable in the file, history
+  and every backup, with holds that override it (D26, D53, D231, D246).
+- Classification and tagging of personal data (D26).
+- Evidence reports for SOC 2, HIPAA and PCI DSS audits (D26).
+- Ledger tables: `TRUNCATE` and `DROP` refused, digests published outside the database and checked
+  against backups, Merkle proofs, SQL Server's `WITH (LEDGER = ON)` (D38, D236).
+- Retention: holds over some rows, engine-level WORM, records schedules and eDiscovery export in
+  the EDRM style (D53, D246).
+- Sovereignty: customer-held keys kept in-country, limits on operator access and logs of
+  cross-border transfers (D53, D246).
+- Delta Sharing server and client, and zero-copy shares between organizations on branches with
+  entitlements (D52, D245).
+- Marketplace listings of shared data, with no payments (D52).
+- Clean rooms: query-output policies and private set intersection (D52, D245).
+- Differential privacy: privacy budgets, DP aggregates, the snapping mechanism and l-diversity
+  (D52, D245).
+- Blind-index search on encrypted columns (D52).
+- Synthetic data, and masked copies for non-production use (D52).
+- A secrets store with dynamic, short-lived credentials in Vault's style (D54).
+- An LDAP v3 server, SCIM and the published Active Directory protocols (MS-ADTS) (D54).
+- Isolation of tenants by schema or by database, beside isolation by row (D32, D234).
+
+### M6c Operations
+- OTLP export of EggDB's own metrics, logs and traces (D25, D188).
+- Live activity, locks and wait events: `pg_stat_activity` for every session,
+  `sys.dm_exec_requests` and `SHOW PROCESSLIST` across sessions (D25, D188).
+- Statement statistics in the other dialects' views: `performance_schema`'s digest summary and
+  `sys.dm_exec_query_stats` (D25, D286).
+- `EXPLAIN ANALYZE` in the MySQL and SQLite dialects, SQL Server's showplan and Oracle's `EXPLAIN
+  PLAN` and `DBMS_XPLAN` (D25, D277).
+- `EXPLAIN` with costs, conditions and formats other than text; per-node buffers and times,
+  `I/O Timings` and planning time (D286, sql.md).
+- `lock_timeout`, and memory, CPU and I/O limits per user, role, tenant and query (D25, 4.M6c-3).
+- Quotas by bytes and requests per tenant, and admission control (D25, D234).
+- An index and plan advisor, and automatic tuning of indexes and configuration (D25, D31).
+- An admin API, with the same actions as MCP tools (D11, D25).
+- A Kubernetes operator in Rust (D25, D45).
+- A Terraform provider in Rust on Terraform's published plugin protocol (D25, D46).
+- A metering API (usage per tenant, database and query) with hooks for billing, and chargeback
+  and showback reports on it (D44, D58).
+- Column-level lineage captured from queries (D51, D244).
+- The Apache Atlas and OpenMetadata APIs (D51).
+- A schema registry and data contracts (D51).
+- Master data: entity resolution, match and merge, and golden records (D51).
+- Data profiling and data-quality rules at scale (D42, D51).
+
+### M6d The built-in MCP server
+- MCP over HTTP beyond loopback with TLS, and OAuth as the MCP specification describes for
+  remote servers (D189).
+- Writes with confirmation over HTTP (D189, D190).
+- Server-sent event streams (D189).
+- Per-agent time limits and quotas, and the agent's role in each audit record (D190).
+- Table resources beyond the schema document (D190).
+- The 2026-07-28 protocol revision (D190).
+- `--tables` filters for `eggdb serve`'s sessions, writes to tables listed with columns, inserts
+  into a listed table with a foreign key to an unlisted one, and column lists on views (D281).
+- A key-value write tool, with writes to collections (D292).
+- Backup, restore and administration tools (D11).
+- Tools that query documents, search indexes, vectors, graphs and keys in their own query
+  languages (D10, D11).
+- `run_sql` in the SQL Server dialect (D11).
+- Text-to-SQL in every dialect through the MCP server (D31, D205).
+
+### M6e The GUI client and the console
+- The rest of the client track opened by issue #29: every remaining screen of Fable's design
+  (D15, #29).
+- A hand check with VoiceOver, Narrator, Orca and a browser screen reader on every screen (D278).
+- UI Automation's Text and Selection patterns, NSAccessibility rows and live regions, AT-SPI2's
+  text attributes, and selection announcements (D278).
+- IME input, and Wayland windows (D256).
+- The browser build's pointer and clipboard, and the main window in the browser (D278, D279).
+- X11's `INCR` clipboard transfers, XDND drops on X11 and an OLE drop target on Windows (D274,
+  D279).
+- Right-click menus, and the object tree's row menu (`Copy name`, `Show DDL`, `Refresh`, `Drop…`)
+  (D276).
+- Rows streamed into the grid with pages fetched on scroll, and a session kept between runs so a
+  `BEGIN` outlasts its run (D275).
+- More query tabs, the full-value view, column resizing, scroll bars and horizontal scrolling
+  (D275).
+- Resizable regions, the 800 px rail, the splitter tree and the inspector closing under 1024 px
+  (D276, D279).
+- Motion: 80 ms fades, the spinner and the sweeping bar, and the OS's reduced-motion setting
+  (D279).
+- The plan view's hover, click and tooltip, and plans for SQL Server and Oracle (D277).
+- Connecting over the MySQL, TDS and RESP protocols, recent connections, and certificate
+  verification in the GUI (D274).
+- Every data model in the object browser: documents, search, series, graphs, vectors and queues,
+  each opened in its own form (D15, D276).
+- Completion, formatting and error help with `Fix` buttons in the query editor (D15, D275).
+- Editing data in the grid (D15).
+- Import, export, backup and restore screens (D13, D15).
+- Users and permissions screens (D15).
+- Monitoring screens: server status, sessions, locks and slow queries (D15, D25, D237).
+- AI help in the client through the MCP server (D11, D15).
+- The eight familiar layouts of D15 drawn, with their shortcut maps and the picker (D15,
+  4.M6e-3). Check: each layout's spec tests in `docs/ux/`.
+- GPU-accelerated drawing on the desktop (D15).
+- Hinting, kerning, right-to-left and complex scripts, and CFF outlines (D191).
+- The GUI and documentation localized, right-to-left scripts included (D42).
+- The client's speed measured like the engine's: opening a database, running a query and
+  scrolling a large result (D15).
+- Small screens, remembered window size and position, and the OS's theme (D15, D256).
+- The `eggdb gui` command in the command model (D191).
+- The interactive ER view, with diagrams across schemas, views, indexes and checks (D237).
+- An admin web console served by the server (D42).
+- SQL notebooks with charts (D42).
+- A visual query builder and import wizards (D42).
+- A spreadsheet-style grid view with formula columns (D38).
+- Onboarding: a migration guide per source database, sample datasets and tutorials (D42).
+- A documentation site, generated as static pages by our own Rust tool (D32).
+- A research check of whether EggOS's GUI and `eggdb-gui` can share one toolkit, recorded in D15
+  (D15).
+
+### M6f Network drivers, ORMs and connectors
+- The MySQL and TDS protocols as backends of the C API's network session (D192).
+- Connection pooling, prepared statement reuse, binary result formats, cancel and `COPY` in the
+  network drivers (D192).
+- Each driver's own network tests (M6f row).
+- Each driver benchmarked over the network against the best driver in its language, as D17 lists
+  them, and gated (D17).
+- A research decision on the PostgreSQL protocol or an EggDB-native one for the official
+  drivers, and a pure-language server path where benchmarks need one (D17).
+- Every model and dialect, and the MCP tools, exposed through the drivers (D16).
+- The EF Core provider, with Dapper and NHibernate checked (D16, D182). Check: EF Core's
+  provider specification tests.
+- The Hibernate dialect, R2DBC, and jOOQ, Spring Data and Exposed checked (D16, D182).
+- The SQLAlchemy dialect, the Django backend and asyncio support for Python (D16, D182).
+- Prisma, TypeORM, Drizzle, Sequelize and Knex adapters for Node.js (D16, D182).
+- The GORM dialect, with sqlc checked (D16, D182).
+- A PDO driver with Laravel/Eloquent and Doctrine (D16, 4.M6f-2).
+- ActiveRecord and Sequel for Ruby (D16, 4.M6f-2).
+- The Swift and Dart/Flutter drivers with their mobile frameworks (D16).
+- An ODBC driver (D12, D46).
+- Azure Data Studio, DataGrip, MySQL Workbench, Redis Insight, MongoDB Compass, Kibana, Grafana,
+  Metabase, Superset, Liquibase and Alembic checked in CI (D12). Check: `compatibility` job.
+- Power BI, Tableau, Metabase and Airbyte in the `compatibility` job (D239, connectors.md).
+- The compatibility farm's matrix of every driver and ORM version (D44, D252).
+- Our own connectors in each tool's plugin system: Power BI and Tableau connectors, and Excel,
+  Looker, Superset, Metabase and Grafana data source plugins (D46, D239).
+- A dbt adapter, Airbyte and Fivetran sources and destinations, a Debezium connector and Airflow
+  operators (D46, D239).
+- Spark, Flink, Trino and Presto connectors (D46, D239).
+
+### M7 Caching and Redis
+- Per-element storage for large lists, sets, hashes and sorted sets (D193).
+- Lua scripting (`EVAL`) and Redis Functions on our own Lua interpreter (D27, 4.M7-2).
+- Stream consumer groups, and blocking commands (`XREAD BLOCK`, `BLPOP` and the rest) (D193,
+  4.M7-2).
+- Bitmaps, HyperLogLog and geo commands (D19).
+- Keyspace notifications, `CLIENT`, `INFO`, `OBJECT` and `DEBUG` (D12, D193).
+- Cluster mode: slots and the cluster commands (D193).
+- The rest of Redis's commands, tracked per command (D5, D193). Check: Redis client libraries'
+  own test suites.
+- Memory-only collections in the engine, with expiry and eviction (D2, 4.M7-3).
+- Following a live Redis through its replication for a switch with no downtime (D13).
+- Benchmarks with redis-benchmark and memtier against Redis, Valkey and Dragonfly, gated (D7,
+  D177).
+- memcached's binary protocol and SASL (D194).
+- The rest of memcached's meta flags, `stats` details and LRU eviction for its items (D194).
+
+### M8 Full-text search
+- An inverted index in the file, with BM25 in SQL served from it (D195). Check: a benchmark
+  against SQLite FTS5 and Elasticsearch.
+- Weights (`setweight`) and `ts_headline` (D195).
+- Stemmers for every major language, and word segmentation for Chinese, Japanese, Korean and Thai
+  (D30).
+- Synonyms, stop words, and fuzzy and phonetic matching (D30).
+- MySQL's `MATCH ... AGAINST` with `FULLTEXT` keys, SQL Server's `CONTAINS` and `FREETEXT`, and
+  SQLite's FTS5 (D10, 4.M8-1).
+- Elasticsearch mappings applied to field types: `text` and `keyword`, dates, `ip`, geo, `nested`,
+  `flattened`, `dense_vector`, `sparse_vector` and `completion` (D19, D196).
+- `_mget`, `_msearch`, `_update_by_query` and `_delete_by_query` (D196).
+- Scripts, `query_string` syntax and highlighting (D196).
+- Scroll and `search_after` (D196).
+- Nested and bucket aggregations beyond `terms` (D196).
+- Aliases, index templates and the rest of `_cat` (D196).
+- Kibana and OpenSearch Dashboards working against EggDB (D12, D196). Check: `compatibility` job.
+- A benchmark against OpenSearch (D7, D196).
+- Enterprise search that respects each user's permissions (D56).
+- Text extracted from PDF and PST files, and OCR through ONNX models (D56, D249).
+
+### M9 Documents and MongoDB
+- Indexes used by queries, unique indexes and collations (D197).
+- Positional and `arrayFilters` updates, and pipeline-style updates (D197).
+- `$text`, `$expr`, `$jsonSchema`, `$where` and the projection operators (D197).
+- `$facet`, `$bucket`, `$out`, `$merge` and `$lookup` with a pipeline (D197, 4.M9-2).
+- Change streams and multi-document transactions, with the replica-set handshake (D197).
+- `explain`, `renameCollection`, capped and time-series collections, and GridFS (D197).
+- SCRAM-SHA-1, other users and roles (D197).
+- `OP_COMPRESSED` (D197).
+- `mongorestore` inputs: `--gzip`, `--archive`, unique indexes, and a smoke-test sample dump
+  (4.M9-3).
+- Following a live MongoDB through its change streams for a switch with no downtime (D13).
+- A benchmark against MongoDB (D7, D197). Check: YCSB.
+- The Firestore API (D48).
+- Cosmos DB's NoSQL API in gateway mode (D48).
+- Couchbase SQL++, from its documentation only (D48).
+- XML documents with XPath and XQuery (D38). Check: the W3C XQuery suite.
+
+### M10 The other SQL dialects
+- MySQL's types: `BIGINT UNSIGNED` and unsigned ranges, `ENUM`, `SET`, `YEAR`, `BIT`, the spatial
+  types, zero dates and the full `TIME` range (D19, sql.md).
+- MySQL's semantics: `DECIMAL` division, booleans as integers, implicit string-to-number
+  conversion, `sql_mode`, and `1 / 0` as `NULL` with a warning (D10, sql.md).
+- The rest of MySQL's date and time functions, `STR_TO_DATE` and `ON UPDATE CURRENT_TIMESTAMP`
+  (sql.md).
+- Prefix indexes, `FULLTEXT` and `SPATIAL` keys, and `ADD INDEX` in `ALTER TABLE` (sql.md).
+- MySQL stored programs: handlers, cursors, named conditions, `RESIGNAL`, `GET DIAGNOSTICS`,
+  variables set in bodies, and MySQL's error numbers (D199).
+- MySQL events (`CREATE EVENT`) on the job scheduler (D27, D200).
+- `GET_LOCK` named locks, and `information_schema` and `SHOW` completeness (D294, 4.M10-1).
+- `LOAD DATA`, and mysqldump's leftovers: deferred foreign keys, `/*M!` comments, `--tab`, `--xml`,
+  mysqlpump and MySQL Shell dumps (D198). Check: a PyMySQL check of a restored file.
+- MariaDB's sequences (D10, roadmap item 32).
+- MySQL's `JSON_VALUE` and `JSON_TABLE` with MySQL's path language (D289).
+- Following a live MySQL through its binlog for a switch with no downtime (D13).
+- MySQL's own test suite run from outside the repo, with its pass rate published (D1, D10, D45).
+- SQL Server's `rowversion`, `sql_variant`, `xml`, `hierarchyid`, `geography` and `geometry` (D19).
+- `datetimeoffset` keeping its offset, and the declared `varchar` or `nvarchar` kept (D19, D133).
+- `TOP ... PERCENT` and `WITH TIES`, `OUTPUT ... INTO`, `deleted.` in `UPDATE`, `SELECT ... INTO`
+  and global `##temp` tables (sql.md).
+- `MERGE` with a second `WHEN MATCHED`, `$action`, `TOP` and `OUTPUT ... INTO` (D291).
+- Cursor variables, `WHERE CURRENT OF`, `sp_cursor*` server cursors and cursors reset by
+  `sp_reset_connection` (D291).
+- `INSERT ... EXEC` of dynamic SQL, `EXEC AS`, three-part names and other databases in a batch
+  (sql.md).
+- Numbered procedures and temporary functions (roadmap item 33d).
+- SQL Server Agent jobs on the job scheduler (D27, D200).
+- bcp native files with `varchar` columns, and untrusted constraints for bulk loads (D291).
+- EF Core 9 in the `tds-apps` job, and mssql-jdbc's `getSchemas()` (D291).
+- Oracle's `CONNECT BY`, `(+)` outer joins, `INSERT ALL` and `INSERT FIRST`, `RETURNING ... INTO`,
+  synonyms, database links, `ROWID` and views `WITH CHECK OPTION` (sql.md).
+- Oracle's analytic, regular-expression and XML functions, `LISTAGG ... OVER` and `TO_DATE(...
+  DEFAULT ... ON CONVERSION ERROR)` (sql.md).
+- Oracle's types: `TIMESTAMP WITH TIME ZONE` keeping its offset, `BFILE`, `UROWID`, `XMLType`,
+  object types and schema-level collection types (D19).
+- `HEXTORAW`, `RAWTOHEX`, `UTL_RAW`, `DBMS_LOB` and the other Oracle-supplied packages (sql.md).
+- PL/SQL: autonomous transactions, compound triggers, the mutating-table check, `IS A SET`,
+  `MULTISET` and `SET()` (roadmap item 33e).
+- Oracle's bitmap, function-based and reverse-key indexes (sql.md).
+- `DBMS_SCHEDULER` jobs on the job scheduler (D27, D200).
+- NLS: languages beyond the seven, `NLS_TERRITORY` other than `AMERICA`, the NLS decimal character
+  (roadmap item 42b).
+- Named `NOT NULL` constraints kept, and overloaded package procedures described over RPC (D295).
+- GoogleSQL (BigQuery and Spanner), with Spanner's API (D47, D48).
+- Snowflake SQL through Snowflake's documented SQL REST API (D47).
+- Databricks/Spark SQL through the HiveServer2 Thrift protocol and the Statement Execution REST
+  API (D47).
+- ClickHouse SQL through its HTTP and native protocols (D47).
+- Trino/Presto SQL through the Trino client REST protocol (D47).
+- IBM Db2 SQL and SQL PL through DRDA, which also reaches Informix and Db2 for z/OS (D47).
+- Sybase/SAP ASE SQL through the PostgreSQL protocol and TDS 7+ (D47).
+- Redshift, Vertica, Greenplum and Teradata SQL through the PostgreSQL protocol (D47).
+- SAP HANA SQL and its SQL Command Network Protocol, after D34's legal check (D47).
+- `QUALIFY` in the dialects that have it (D240).
+
+### M11 Columnar analytics and time series
+- Columnar table storage: row groups of chunks, deletes as bitmaps, `CREATE TABLE ... USING
+  columnar` (D201).
+- A vectorized executor over chunks, float and string chunks, and compression beyond the
+  encodings (D201).
+- ClickBench-style queries and TPC-H against DuckDB and ClickHouse in the compare job (D7, D201).
+- Analytical replicas: columnar copies kept in step with row tables (HTAP) (D18).
+- Gap filling, `first` and `last`, and hypertables partitioned by time automatically (4.M11-2).
+- Retention, downsampling and continuous aggregates for time series (D39, 4.M11-2). Check: a TSBS
+  benchmark.
+- ASOF and window joins (D50, D243).
+- Bitemporal tables (D50).
+- Order-book and double-entry ledger primitives, with microsecond tail-latency targets in the
+  benchmarks (D50).
+- Parquet: nested columns, GZIP and ZSTD, statistics and dictionaries when writing, several row
+  groups and streaming of large files (D202). Check: a benchmark against DuckDB's reader.
+- `read_parquet` and the other file readers in SQL (D29, D202).
+- Arrow IPC reading, the `.arrow` file format, several batches, dictionaries and nested types
+  (D240).
+- Arrow Flight SQL and ADBC (D29).
+- NDJSON, ORC and Avro (D29).
+- Apache Iceberg, Delta Lake and Hudi tables, read and written, with an Iceberg REST catalog (D29,
+  D46).
+- Excel files read and written as tables (`.xlsx` and `.xls`) (D49).
+- Dataverse's Web API and SharePoint lists as sources and targets (D49).
+- Mainframe loaders: COBOL copybooks, EBCDIC, packed decimal, and VSAM and IMS exports (D49, D242).
+- dBase, ISAM and Btrieve readers where public specifications exist (D49).
+- KQL: `join`, `union`, `let`, `parse`, `mv-expand`, `make-series`, `render`, percentiles and the
+  rest of its functions, and a Kusto-compatible REST endpoint (D49, D242).
+- Splunk's SPL, with HTTP Event Collector ingest (D49).
+- OLAP cubes and semantic models with MDX, DAX and XMLA, after D34's legal check (D38).
+- A semantic layer of metrics and dimensions, defined once and used by BI and OLAP (D46, D238).
+- BI dashboards and charts, designed by Claude Fable (D46, D238).
+- Interactive reports with filters and drill-down, in CSV, HTML and PDF (D46, D238).
+- Reports sent to `https://` targets and by email through the operator's mail server, shared and
+  embedded in other applications (D46, D238).
+- Spreadsheet-style tables with formula columns (D38).
+- Arrays: SQL/MDA, Zarr, HDF5 and NetCDF (D57).
+- Genomics: VCF, BAM and CRAM, and htsget (D57).
+
+### M12 Vectors, geospatial and AI
+- A stored `vector(n)` type with its dimension checked, binary send and receive and a catalog
+  entry (D203).
+- `CREATE INDEX ... USING hnsw` and `ivfflat`, kept in the file and used by `ORDER BY ... LIMIT`
+  (D203).
+- `halfvec`, `sparsevec`, `int8` and bit vectors, and vector arithmetic (D19, D203).
+- An ANN benchmark (recall and queries per second) against pgvector (D203).
+- A stored geometry type (hex EWKB, the binary wire format, a catalog entry) (D204).
+- R-tree spatial indexes (D204).
+- Z and M coordinates, and geography on the WGS 84 spheroid (D204).
+- `ST_Transform` between any projections, overlay operations (union, intersection, buffer) and
+  validity checks (D204, D250). Check: the OGC test suite cases.
+- SQL Server's `geometry::` and `geography::` methods (D204).
+- Vector tiles (`ST_AsMVT`, `ST_AsMVTGeom`), and H3 and S2 indexes (D57, D250).
+- Raster, GeoTIFF and Cloud-Optimized GeoTIFF (D57).
+- Topology and routing at pgRouting's level (D57).
+- The OGC APIs (D57).
+- An ONNX runtime with `embed(model, text)` on local models (D31, D205).
+- Opt-in remote embedding and language-model providers, with keys from the secrets store (D31,
+  D205).
+- Reranking models in hybrid search (D31).
+- A semantic cache (D31).
+- Agent memory as a built-in model (D31).
+- In-database training for common models (D31).
+- A feature store with low-latency online feature serving (D31, D55).
+- An end-to-end retrieval benchmark (D205).
+
+### M13 Graphs
+- SQL/PGQ and GQL, and graph views over tables (D10, D206).
+- Cypher: named paths, `shortestPath()`, `MERGE ... ON CREATE/ON MATCH`, `FOREACH`, `UNION` and
+  list comprehensions (D206).
+- Indexes on labels and properties, and uniqueness constraints (D206).
+- Bolt: open transactions across messages, `LOGON` (5.1 and later), routing tables and bookmarks
+  (D207).
+- Bolt's temporal and spatial PackStream types (D207).
+- Apache TinkerPop Gremlin, and Cosmos DB's Gremlin API (D48).
+- Louvain, Leiden, betweenness and closeness centrality, weighted shortest paths, k-core and graph
+  embeddings (D55, D248).
+- The graph algorithms as procedures in SQL/PGQ (D248).
+- RDF triples and quads with SPARQL 1.1 (D38). Check: the W3C SPARQL suite.
+- The LDBC benchmark against Neo4j (D7, D206).
+
+### M14 Backup, point-in-time recovery and replication
+- Continuous log shipping and replay to any commit (D24, D208). Check: the simulator test of
+  restoring to a stamp.
+- Incremental and parallel backups, encrypted, with retention (D24, D208).
+- Instant snapshots, and copy-on-write clones and branches of a whole database (D24, D28).
+- `eggdb dump` in EggDB's own logical format (D24).
+- `eggdb export --sql` with views, sequences, comments and every constraint (4.M14-2).
+- Immutable (WORM) backups that ransomware can't alter (D53).
+- Backups through `eggdb serve`'s clients, compaction of a file `serve` holds, and progress
+  reports (D141).
+- Tenant-aware backup and restore (D234).
+- Replication wired into the engine: the commit hook and its change log, a transport with TLS and
+  authentication, and `eggdb serve --replica-of` (D209).
+- Initial copy of a replica from a snapshot archive (D208, D209).
+- Automatic failure detection, fencing of an old primary, and planned switchover (D18, D209).
+- Delayed replicas, and standbys in another region fed by log shipping (D18).
+- Replica freshness chosen per request: linearizable, read-your-writes, causal, bounded staleness
+  or eventual (D18).
+- Jepsen-style checks against real processes (D9, D209).
+- Logical replication to other EggDB clusters, across versions, for upgrades without downtime
+  (D18).
+- PostgreSQL's replication protocol served, so other systems can follow EggDB (D18, D103).
+- Change streams to Kafka topics, MQTT and NATS, and webhooks over `https://` (D28, D210).
+- Retries with backoff and a dead-letter table, Debezium's `schema` section and transaction
+  metadata (D210). Check: a consumer test that receives every commit of a workload.
+- Change capture without triggers (D210).
+- System-versioned temporal tables (SQL:2011) with `AS OF` over kept history, and SQL Server's
+  temporal tables (D28).
+- Materialized views kept up to date incrementally at commit, and continuous queries (D28,
+  4.M14-6).
+- `eggdb follow` of `pgoutput`'s parallel streaming and two-phase messages, binary arrays,
+  domains, enums and ranges, and tables moved or recreated during a follow (D296).
+- `eggdb follow` of SQL Server CDC: column type changes, keys other than the primary key, and a
+  lost connection during the first copy (D282).
+
+### M15 Sharding and distributed SQL
+- Raft's term, vote and log persisted in the file's consensus area, snapshots and log compaction
+  (D20, D211).
+- Membership changes by joint consensus, pre-vote, and leader leases for reads (D211).
+- The network transport and `eggdb serve --cluster` (D211, D212).
+- The shard map and decision log replicated on Raft (D212).
+- The data copy of online moves over the replication protocol (D209, D212).
+- A distributed SQL planner that pushes work to shards (D212).
+- Snapshot reads across shards by timestamp, and serializable distributed transactions (D18,
+  D212).
+- Global indexes (D18).
+- Multi-region clusters with latency-aware placement (D4, D212).
+- Rebalancing simulated under load, with partitions, clock skew and node failures (D18, D212).
+- Chaos testing of clusters (D44, D252).
+- The tenant prefix in the key layout, so tenants move online between shards (D20, D234).
+- Databases per tenant moved and rebalanced online (D18, D32).
+- Rolling upgrades with mixed versions in a cluster (D20).
+- MPP distributed analytics with workload queues (D58).
+- Resumable petabyte-scale migrations: Merkle range comparison and parallel ranges across nodes
+  (D58, D251).
+- The etcd v3 gRPC API and the ZooKeeper protocol (D54, D247).
+- Watches and service discovery on change streams (D54, D247).
+- JsonLogic targeting and fractional rollouts for feature flags (D247).
+- Benchmarks at scale: TPC-C and YCSB on a cluster (D7, D18).
+
+### M16 Messaging, wide-column, objects and observability
+- Kafka consumer groups (D33, D213).
+- Kafka transactions and idempotent producers (D33, D213).
+- Kafka's flexible request versions, SASL, and topic creation and deletion APIs (D213).
+- Partitions per topic, retention and compaction (D33, D213).
+- Kafka Connect's REST and worker protocol (D46).
+- A benchmark against Kafka (D33, D213).
+- AMQP 0-9-1: durable exchanges and bindings, headers exchanges, exclusive and auto-delete queues
+  (D33, D214).
+- AMQP 0-9-1 `tx` transactions and publisher confirms (D33, D214).
+- Dead-letter exchanges, message and queue TTL, delayed messages and priorities (D33, D214).
+- Heartbeats sent by the server (D214).
+- Replicated (quorum-style) queues (D33).
+- A benchmark against RabbitMQ (D33, D214).
+- MQTT persistent sessions, and QoS 1 and 2 redelivery to subscribers (D33, D215).
+- MQTT 5's topic aliases, shared subscriptions, message expiry and reason strings (D33, D215).
+- MQTT over WebSockets (D215).
+- A benchmark against Mosquitto and EMQX (D33, D215).
+- SQS FIFO queues, message attributes, batch actions, long polling, dead-letter queues and
+  visibility timeouts (D33, D216).
+- NATS JetStream: durable streams and consumers (D33, D216).
+- NATS no-responders, token and NKey authentication, clusters and leaf nodes (D216).
+- Benchmarks against ElasticMQ and nats-server (D216).
+- AMQP 1.0: annotations and properties end to end, transactions, dynamic nodes, link resumption,
+  `amqp:modified` and an enforced idle timeout (D217).
+- JMS clients and Azure Service Bus-style use over AMQP 1.0 (D33).
+- STOMP heart-beats, `/exchange/` destinations and selectors (D217).
+- A dead-letter queue for rejected messages, and an in-process inbox for embedded consumers
+  (D217).
+- CQL collections, tuples, user-defined types and counters (D19, D218).
+- CQL TTL, `USING TIMESTAMP`, and lightweight transactions beyond `IF NOT EXISTS` (D218).
+- CQL paging, protocol v5 framing and compression (D218).
+- CQL secondary indexes, materialized views, `ALTER TABLE`, schema events and prepared statements
+  shared between connections (D218).
+- A benchmark against ScyllaDB and Cassandra (D7, D218).
+- DynamoDB: secondary indexes, filter and projection expressions, batches, transactions, streams,
+  TTL, all conditions, and PartiQL (D48, D241).
+- The Bigtable and HBase APIs, and Cosmos DB's Table API (D48).
+- S3 versioning, object lock, ACLs and bucket policies, tagging, lifecycle rules and server-side
+  encryption headers (D219).
+- S3 `aws-chunked` uploads, `ListParts`, `ListMultipartUploads`, virtual-hosted buckets and
+  conditional requests (D219).
+- Large objects streamed instead of read whole, and listing without loading a bucket's
+  descriptions (D219). Check: a benchmark against MinIO.
+- InfluxQL and Flux, gzip bodies, and points with the same series and time deduplicated (D220).
+- Remote write 2.0, native histograms and exemplars (D220).
+- The rest of PromQL: `topk`, `quantile`, `histogram_quantile`, `label_replace`, subqueries,
+  vector matching and `bool` (D220).
+- OTLP ingest of metrics, logs and traces (D39).
+- Loki's push API, syslog, and Jaeger and Zipkin traces (D39).
+- LogQL and TraceQL, with the Loki and Tempo query HTTP APIs Grafana uses (D39).
+- Retention and downsampling of observability data (D39, D220).
+- Telegraf and Prometheus in CI, and benchmarks against InfluxDB and Prometheus (D220).
+- Streaming SQL: event time, watermarks, and tumbling, hopping and session windows (D55).
+- Stream-stream joins and late data (D55).
+- `MATCH_RECOGNIZE` for complex event processing (D55).
+- ETL connectors that read from and write to other databases, files, object storage, APIs and
+  the messaging protocols (D46).
+- Transformations in SQL and WebAssembly, with models, tests and lineage in dbt's style (D46).
+- Pipeline orchestration: schedules, dependencies, retries, backfills and monitoring (D46).
+- FIX and EDIFACT dictionaries, HL7 v2 message building and ACKs, and FHIR validation (D50, D243).
+- ISO 20022 and DICOM (D50).
+- IoT models: DTDL and W3C Web of Things (D57).
+- OPC UA, Modbus and Sparkplug ingest (D57).
+- Email stores with IMAP, JMAP and SMTP (D56).
+- CalDAV, CardDAV and WebDAV (D56).
+- Digital asset management: EXIF and XMP metadata, and renditions with our own royalty-free
+  codecs (D56).
+
+### M17 Every platform
+- EggOS as a target, with its own backend in the platform layer (D8).
+- The B-tree, page cache, log and transactions without `std`, on an embedded platform backend
+  with a fixed-frame cache (D223).
+- Wear levelling, the header slots on flash, and power-loss tests on raw flash (D41, D223).
+- A QEMU Cortex-M run in CI (D223).
+- A published memory floor and size budgets per microcontroller profile (D41, D230).
+- A fixed-memory mode that never allocates beyond a set budget (D41).
+- Write-amplification and flash-wear budgets, and battery-aware background work (D41).
+- Correct behavior under iOS background limits and Android Doze (D41).
+- The browser build in a worker with OPFS synchronous access handles, a database shared between
+  tabs and a real `poll_oneoff` sleep (D221).
+- `wasm32-unknown-unknown` without WASI, and size budgets for the module (D6, D221).
+- An IndexedDB-compatible API in the browser build (D48).
+- Android emulator runs, a Gradle module and Android Archive, and the 32-bit ABIs in CI (D222).
+- iOS Simulator runs and a Swift package that pulls the XCFramework (D222).
+- Prepared statements and transactions in the mobile bindings, benchmarked against SQLite's
+  Android and iOS bindings (D17, D222).
+- The rest of the crates tested on i686, armv7 and s390x under QEMU (4.M17-4).
+- Builds and tests on more CPU architectures (D8).
+- ECS, Azure Kubernetes Service and private-networking variants of the cloud templates, and a
+  managed-disk option on Azure (D224).
+- The container image's size and pull time measured and kept from growing (D14, D224).
+
+### M18 The other ways of scaling
+- Leaderless quorums over the network, wired under `eggdb serve` (D225).
+- Merkle trees for anti-entropy (D225).
+- CRDT types (counters, sets) as resolution policies (D18, D225).
+- Multi-primary SQL rows with conflict rules per table: last writer wins, application rules or
+  CRDTs (D18, D225).
+- Tombstones collected once every replica has seen them, and membership changes by epoch (D225).
+- Page-level remote storage: the page cache reads missing pages from object storage, and the log
+  ships segment by segment (D18, D226).
+- `https://` object storage endpoints, multipart copies of large archives, and uploads without a
+  staging file (D226).
+- Stateless compute nodes over shared storage, scaling apart from storage (D18).
+- Serverless: scale to zero and back on demand (D18).
+- Tiered storage: hot, warm and cold pages by age across memory, disk and object storage (D18,
+  D227).
+- An edge server on an edge copy, refreshed as its manifest grows, with cache limits and eviction
+  (D227).
+- Placement rules per table, for tiers, edges and regions (D18, D227).
+- Data pinned to regions, and residency policies per row (D18, D53).
+- Offline-first sync over HTTP, with authentication per user (D228).
+- Sync of SQL tables through change capture (D210, D228).
+- Sync log compaction, partial sync, per-field merges and CRDTs, and end-to-end encryption (D228).
+- A client sync API for apps (D37).
+- CouchDB's replication protocol (D48).
+- Foreign tables with declared columns and filter pushdown (D29, D229).
+- Foreign sources: MySQL, SQL Server, HTTP, S3 and Parquet over object storage (D29, D229).
+- Credentials per source, permission per role, and a timeout and row limit per call (D229).
+- Joins across servers planned as one distributed query, and federated SQL across EggDB clusters
+  in Trino's style (D18, D46, D229).
+- A fleet control plane: inventory, upgrades in canary waves and placement by hardware class
+  (D58).
+- Tenant lifecycle APIs, and databases per user at millions of tenants (D58).
