@@ -94,3 +94,32 @@ column names in the same order. Scrollbars show only while the grid's rows or co
 editor's lines, do not fit; a press on the track pages and the grid's thumb drags. The header
 names the kind of value (`text`, `number`, `json`, `binary`) rather than the column's SQL type
 for now.
+
+## The object tree's row menu, splitters, the rail and motion in EggDB's desktop client
+
+In the sidebar's tree of `eggdb-gui` (D311, `docs/ux/workspace.md` 10), a right-click, `Shift+F10`
+or the menu key opens a row's menu: `Open` (`Expand` / `Collapse` on the connection and groups),
+`Insert name`, `Copy name` (also `Ctrl/Cmd+C`; the connection copies its path or URL), `Show DDL`,
+`Refresh` (`F5`) and `Drop…`, with the items a row cannot use shown disabled in place. `Drop…`
+shows the `DROP` statement in the active tab's dialect (MySQL and SQL Server drop an index `ON` its
+table, PostgreSQL a trigger) and runs it in a session of its own, never a tab's; it waits while a
+tab runs or holds a transaction, and a read-only connection disables it. A table with triggers
+shows a `Triggers` group (one row per trigger, its events as right text) and a `Triggers (n)`
+block in its inspector; a trigger's inspector shows its action. `Enter` on a key space opens a
+`Keys in <space>` tab listing its first 100 keys with their values and sizes in bytes, spelled as
+`eggdb ui` spells them (a file only for now; on a server the tab is empty).
+
+Drag or key the splitters beside the sidebar (180 to 480 px), between the editor and the results,
+and beside a docked inspector (200 to 480 px): arrows move 8 px, `Shift` 32, `Home` / `End` to the
+limits, `Enter` or a double-click resets. The sizes and whether the sidebar and the inspector are
+shown are kept in `gui-settings` per layout (`eggdb.sidebar_width = 268`). `Ctrl/Cmd+B` collapses
+the sidebar to a 36 px rail and back; the rail's items open the tree as a drawer. Windows go down
+to 800 px wide; below 1440 a docked inspector closes and comes back when the window grows again,
+and `Ctrl/Cmd+I` opens it as an overlay at any width. Splitters and the rail are in EggDB's own
+layout only for now.
+
+Hover and pressed fills on the toolbar's buttons, the inactive tabs and the connect screen's
+buttons fade over 80 ms. They change at once, and the caret stops blinking, when the system asks to
+reduce motion (macOS `Reduce motion`, Windows `Animation effects` off, X11 XSETTINGS
+`Gtk/EnableAnimations` off; read at start and whenever the window gains the focus) or when
+`eggdb-gui --reduced-motion` is given.
