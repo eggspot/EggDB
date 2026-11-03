@@ -468,6 +468,9 @@ fn undefined_aggregate(function: AggregateFunction, type_name: &str) -> SqlError
 }
 
 fn check_argument_type(function: AggregateFunction, sql_type: SqlType) -> SqlResult<()> {
+    if sql_type.is_dynamic() {
+        return Ok(());
+    }
     let name = || sql_type.name();
     match function {
         AggregateFunction::Count | AggregateFunction::ApproxCountDistinct => Ok(()),

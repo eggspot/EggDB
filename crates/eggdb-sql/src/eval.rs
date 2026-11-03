@@ -1089,7 +1089,8 @@ impl Evaluator<'_> {
         }
         let either_text = matches!(left, Value::Text(_)) || matches!(right, Value::Text(_));
         let either_null = left.is_null() || right.is_null();
-        if !either_text && !either_null {
+        let sqlite = crate::constraints::current_dialect() == crate::Dialect::Sqlite;
+        if !either_text && !either_null && !sqlite {
             return Err(no_operator("||", &left, &right));
         }
         if let (Value::Text(left), Value::Text(right)) = (&left, &right) {
