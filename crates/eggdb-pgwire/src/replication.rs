@@ -1,8 +1,15 @@
 //! PostgreSQL's logical replication stream as a subscriber reads it: the copy-both messages of
 //! the streaming replication protocol (XLogData, keepalives, standby status updates), the
-//! `pgoutput` plugin's messages (protocol version 1), and the SQL that applies each change to an
-//! EggDB database in the PostgreSQL dialect, including the `ALTER TABLE` that follows a change
-//! to a table's columns on the source.
+//! `pgoutput` plugin's messages (protocol versions 1 and 2, with streamed in-progress
+//! transactions and binary tuples), and the SQL that applies each change to an EggDB database in
+//! the PostgreSQL dialect, including the `ALTER TABLE` that follows a change to a table's
+//! columns on the source and the tables the source creates while it is followed.
+
+mod binary;
+mod spool;
+
+pub use binary::{binary_value_text, decodes_binary};
+pub use spool::{SpooledChanges, StreamedTransactions};
 
 use std::collections::HashMap;
 
@@ -184,6 +191,8 @@ pub enum TupleValue {
     Unchanged,
     /// The value in its text form.
     Text(String),
+    /// The value in its type's binary send format (`binary 'true'`).
+    Binary(Vec<u8>),
 }
 
 /// A `pgoutput` message.
@@ -239,6 +248,48 @@ pub enum LogicalMessage {
     },
     /// A message this subscriber does not need (type, origin, logical message).
     Ignored,
+    /// A streamed in-progress transaction's next block of changes begins (protocol 2).
+    StreamStart {
+        /// The top-level transaction ID.
+        xid: u32,
+        /// Whether this is the transaction's first block.
+        first_segment: bool,
+    },
+    /// The block of streamed changes ends.
+    StreamStop,
+    /// A streamed transaction commits: apply what it streamed.
+    StreamCommit {
+        /// The top-level transaction ID.
+        xid: u32,
+        /// The commit record's position.
+        commit_lsn: Lsn,
+        /// The end of the transaction's WAL.
+        end_lsn: Lsn,
+        /// The commit time, microseconds since the Unix epoch.
+        commit_unix_micros: i64,
+    },
+    /// A streamed transaction, or one of its subtransactions, aborts: drop what it streamed.
+    StreamAbort {
+        /// The top-level transaction ID.
+        xid: u32,
+        /// The aborted subtransaction's ID; `xid` when the whole transaction aborts.
+        subtransaction: u32,
+    },
+}
+
+/// A message inside a block of streamed changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamedMessage {
+    /// A change, to keep until its transaction commits.
+    Change {
+        /// The ID of the (sub)transaction that made it.
+        xid: u32,
+        /// The `pgoutput` message without its transaction ID, as
+        /// [`parse_logical_message`] reads it.
+        message: Vec<u8>,
+    },
+    /// A message about the stream itself, such as its Stream Stop.
+    Control(LogicalMessage),
 }
 
 fn tuple(cursor: &mut Cursor<'_>) -> Result<Vec<TupleValue>, ReplicationError> {
@@ -257,9 +308,8 @@ fn tuple(cursor: &mut Cursor<'_>) -> Result<Vec<TupleValue>, ReplicationError> {
                 )
             }
             b'b' => {
-                return Err(ReplicationError(
-                    "binary tuple values are not requested and not supported".to_owned(),
-                ));
+                let length = cursor.u32("value length")? as usize;
+                TupleValue::Binary(cursor.take(length, "value")?.to_vec())
             }
             other => {
                 return Err(ReplicationError(format!(
@@ -272,10 +322,55 @@ fn tuple(cursor: &mut Cursor<'_>) -> Result<Vec<TupleValue>, ReplicationError> {
     Ok(values)
 }
 
-/// Reads one `pgoutput` message (protocol version 1).
+const STREAMED_CHANGE_KINDS: &[u8] = b"RYIUDTM";
+
+/// Reads one message inside a block of streamed changes, where each change carries the ID of
+/// its (sub)transaction after its kind (protocol version 2).
+pub fn parse_streamed_message(bytes: &[u8]) -> Result<StreamedMessage, ReplicationError> {
+    let mut cursor = Cursor { bytes };
+    let kind = cursor.u8("message kind")?;
+    if !STREAMED_CHANGE_KINDS.contains(&kind) {
+        return parse_logical_message(bytes).map(StreamedMessage::Control);
+    }
+    let xid = cursor.u32("transaction ID")?;
+    let mut message = Vec::with_capacity(1 + cursor.bytes.len());
+    message.push(kind);
+    message.extend_from_slice(cursor.bytes);
+    Ok(StreamedMessage::Change { xid, message })
+}
+
+/// Reads one `pgoutput` message outside a block of streamed changes (protocol versions 1
+/// and 2), or a streamed change once [`parse_streamed_message`] took its transaction ID off.
 pub fn parse_logical_message(bytes: &[u8]) -> Result<LogicalMessage, ReplicationError> {
     let mut cursor = Cursor { bytes };
     match cursor.u8("message kind")? {
+        b'S' => {
+            let xid = cursor.u32("transaction ID")?;
+            let first_segment = cursor.u8("first segment flag")? == 1;
+            Ok(LogicalMessage::StreamStart { xid, first_segment })
+        }
+        b'E' => Ok(LogicalMessage::StreamStop),
+        b'c' => {
+            let xid = cursor.u32("transaction ID")?;
+            cursor.u8("flags")?;
+            let commit_lsn = cursor.u64("commit position")?;
+            let end_lsn = cursor.u64("end position")?;
+            let commit_time = cursor.u64("commit time")? as i64;
+            Ok(LogicalMessage::StreamCommit {
+                xid,
+                commit_lsn,
+                end_lsn,
+                commit_unix_micros: commit_time.saturating_add(POSTGRES_EPOCH_MICROS),
+            })
+        }
+        b'A' => {
+            let xid = cursor.u32("transaction ID")?;
+            let subtransaction = cursor.u32("subtransaction ID")?;
+            Ok(LogicalMessage::StreamAbort {
+                xid,
+                subtransaction,
+            })
+        }
         b'B' => {
             let final_lsn = cursor.u64("final position")?;
             cursor.u64("commit time")?;
@@ -290,7 +385,7 @@ pub fn parse_logical_message(bytes: &[u8]) -> Result<LogicalMessage, Replication
             Ok(LogicalMessage::Commit {
                 commit_lsn,
                 end_lsn,
-                commit_unix_micros: commit_time + POSTGRES_EPOCH_MICROS,
+                commit_unix_micros: commit_time.saturating_add(POSTGRES_EPOCH_MICROS),
             })
         }
         b'R' => {
@@ -382,6 +477,73 @@ pub fn parse_logical_message(bytes: &[u8]) -> Result<LogicalMessage, Replication
     }
 }
 
+/// What the subscriber asks `pgoutput` for when it starts the stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamOptions {
+    /// The protocol version: 1, or 2 for streamed in-progress transactions.
+    pub protocol_version: u32,
+    /// Whether large in-progress transactions are streamed before they commit
+    /// (`streaming 'on'`).
+    pub streaming: bool,
+    /// Whether tuples come in each type's binary send format (`binary 'true'`).
+    pub binary: bool,
+}
+
+/// The first PostgreSQL major version with protocol version 2, streaming and binary tuples.
+pub const STREAMING_MAJOR_VERSION: u32 = 14;
+
+/// The major version in a `server_version` such as `17.2` or `16.4 (Debian 16.4-1)`; 0 when
+/// it has none.
+pub fn server_major_version(server_version: &str) -> u32 {
+    server_version
+        .split(|character: char| !character.is_ascii_digit())
+        .next()
+        .and_then(|major| major.parse().ok())
+        .unwrap_or(0)
+}
+
+impl StreamOptions {
+    /// What a server of this major version offers: protocol 2 with streaming from
+    /// PostgreSQL 14, and binary tuples there too when `binary_decodable` says every followed
+    /// column's type can be read back from its binary form.
+    pub fn for_server(major_version: u32, binary_decodable: bool) -> Self {
+        let modern = major_version >= STREAMING_MAJOR_VERSION;
+        Self {
+            protocol_version: if modern { 2 } else { 1 },
+            streaming: modern,
+            binary: modern && binary_decodable,
+        }
+    }
+
+    /// The same options with text tuples.
+    pub fn without_binary(self) -> Self {
+        Self {
+            binary: false,
+            ..self
+        }
+    }
+
+    /// The `START_REPLICATION` command that streams `slot` from `at` for `publication`.
+    pub fn start_replication_command(&self, slot: &str, at: Lsn, publication: &str) -> String {
+        let mut options = format!(
+            "proto_version '{}', publication_names {}",
+            self.protocol_version,
+            quote_literal(&quote_identifier(publication))
+        );
+        if self.streaming {
+            options.push_str(", streaming 'on'");
+        }
+        if self.binary {
+            options.push_str(", binary 'true'");
+        }
+        format!(
+            "START_REPLICATION SLOT {} LOGICAL {} ({options})",
+            quote_identifier(slot),
+            format_lsn(at)
+        )
+    }
+}
+
 /// `name` quoted as a PostgreSQL identifier.
 pub fn quote_identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
@@ -400,11 +562,21 @@ fn qualified(relation: &Relation) -> String {
     )
 }
 
-fn value_sql(value: &TupleValue) -> String {
+fn value_text(
+    value: &TupleValue,
+    column: &RelationColumn,
+) -> Result<Option<String>, ReplicationError> {
     match value {
-        TupleValue::Null | TupleValue::Unchanged => "NULL".to_owned(),
-        TupleValue::Text(text) => quote_literal(text),
+        TupleValue::Null | TupleValue::Unchanged => Ok(None),
+        TupleValue::Text(text) => Ok(Some(text.clone())),
+        TupleValue::Binary(bytes) => binary_value_text(column.type_oid, bytes)
+            .map(Some)
+            .map_err(|error| ReplicationError(format!("column {}: {error}", column.name))),
     }
+}
+
+fn value_sql(value: &TupleValue, column: &RelationColumn) -> Result<String, ReplicationError> {
+    Ok(value_text(value, column)?.map_or_else(|| "NULL".to_owned(), |text| quote_literal(&text)))
 }
 
 /// The SQL that applies the changes of a logical stream, keeping each table's shape as
@@ -415,6 +587,8 @@ pub struct ChangeApplier {
     target_tables: Option<HashMap<(String, String), Vec<String>>>,
     schemas: Vec<String>,
     skipped: std::collections::HashSet<u32>,
+    copied_at: HashMap<u32, Lsn>,
+    final_lsn: Lsn,
 }
 
 /// One change to a table's shape that a `Relation` message shows was made on the source.
@@ -630,6 +804,9 @@ pub enum Change {
         /// The source's commit time.
         commit_unix_micros: i64,
     },
+    /// The source has a table the target does not, created or published after the copy:
+    /// create it, and copy it with [`ChangeApplier::copied`] when the source still has it.
+    NewTable(Relation),
     /// Nothing to do.
     Nothing,
 }
@@ -649,13 +826,42 @@ impl ChangeApplier {
             .insert((namespace.to_owned(), name.to_owned()), columns);
     }
 
+    /// Treats every table the target does not have as new, even when it has no tables.
+    pub fn track_new_tables(&mut self) {
+        self.target_tables.get_or_insert_with(HashMap::new);
+    }
+
+    /// Records that the table was copied from a snapshot taken at `snapshot_lsn`, with these
+    /// columns: its changes in transactions that commit before that position are in the copy
+    /// and are skipped, and so are the `Relation` messages of those transactions.
+    pub fn copied(&mut self, relation: u32, columns: Option<Vec<RelationColumn>>, snapshot_lsn: Lsn) {
+        if let (Some(columns), Some(known)) = (columns, self.relations.get_mut(&relation)) {
+            known.columns = columns
+                .into_iter()
+                .map(|mut column| {
+                    column.key = known
+                        .columns
+                        .iter()
+                        .any(|old| old.key && old.name == column.name);
+                    column
+                })
+                .collect();
+        }
+        self.copied_at.insert(relation, snapshot_lsn);
+    }
+
+    fn in_copy(&self, relation: u32) -> bool {
+        self.copied_at
+            .get(&relation)
+            .is_some_and(|snapshot_lsn| self.final_lsn < *snapshot_lsn)
+    }
+
     /// Applies only the changes of tables in these schemas; an empty list applies every table.
     pub fn only_schemas(&mut self, schemas: Vec<String>) {
         self.schemas = schemas;
     }
 
     fn reshape(&mut self, relation: &Relation) -> Result<Vec<ReshapeStep>, ReplicationError> {
-        let shown = format!("{}.{}", relation.namespace, relation.name);
         if let Some(previous) = self.relations.get(&relation.id) {
             let mut steps = Vec::new();
             if previous.name != relation.name || previous.namespace != relation.namespace {
@@ -677,9 +883,7 @@ impl ChangeApplier {
         };
         let key = (relation.namespace.clone(), relation.name.clone());
         let Some(names) = tables.remove(&key) else {
-            return Err(ReplicationError(format!(
-                "the source has a new table {shown}, created after the copy; follow cannot create tables while it follows"
-            )));
+            return Ok(Vec::new());
         };
         let previous: Vec<RelationColumn> = names
             .into_iter()
@@ -711,23 +915,23 @@ impl ChangeApplier {
             if !whole_row && !column.key {
                 continue;
             }
-            match value {
-                TupleValue::Null if whole_row => {
+            match (value, value_text(value, column)?) {
+                (_, Some(text)) => {
+                    conditions.push(format!(
+                        "{} = {}",
+                        quote_identifier(&column.name),
+                        quote_literal(&text)
+                    ));
+                }
+                (TupleValue::Null, None) if whole_row => {
                     conditions.push(format!("{} IS NULL", quote_identifier(&column.name)))
                 }
-                TupleValue::Null | TupleValue::Unchanged if !whole_row => {
+                (_, None) if !whole_row => {
                     return Err(ReplicationError(format!(
                         "the key column {} of {} has no value",
                         column.name,
                         qualified(relation)
                     )));
-                }
-                TupleValue::Text(text) => {
-                    conditions.push(format!(
-                        "{} = {}",
-                        quote_identifier(&column.name),
-                        quote_literal(text)
-                    ));
                 }
                 _ => {}
             }
@@ -744,7 +948,10 @@ impl ChangeApplier {
     /// The change one `pgoutput` message makes.
     pub fn apply(&mut self, message: LogicalMessage) -> Result<Change, ReplicationError> {
         Ok(match message {
-            LogicalMessage::Begin { .. } => Change::Begin,
+            LogicalMessage::Begin { final_lsn, .. } => {
+                self.final_lsn = final_lsn;
+                Change::Begin
+            }
             LogicalMessage::Commit {
                 end_lsn,
                 commit_unix_micros,
@@ -757,6 +964,18 @@ impl ChangeApplier {
                 if !self.schemas.is_empty() && !self.schemas.contains(&relation.namespace) {
                     self.skipped.insert(relation.id);
                     return Ok(Change::Nothing);
+                }
+                if self.in_copy(relation.id) {
+                    self.relations.insert(relation.id, relation);
+                    return Ok(Change::Nothing);
+                }
+                let new_table = !self.relations.contains_key(&relation.id)
+                    && self.target_tables.as_ref().is_some_and(|tables| {
+                        !tables.contains_key(&(relation.namespace.clone(), relation.name.clone()))
+                    });
+                if new_table {
+                    self.relations.insert(relation.id, relation.clone());
+                    return Ok(Change::NewTable(relation));
                 }
                 let steps = self.reshape(&relation)?;
                 let change = if steps.is_empty() {
@@ -775,7 +994,7 @@ impl ChangeApplier {
             LogicalMessage::Insert { relation, .. }
             | LogicalMessage::Update { relation, .. }
             | LogicalMessage::Delete { relation, .. }
-                if self.skipped.contains(&relation) =>
+                if self.skipped.contains(&relation) || self.in_copy(relation) =>
             {
                 Change::Nothing
             }
@@ -786,7 +1005,12 @@ impl ChangeApplier {
                     .iter()
                     .map(|column| quote_identifier(&column.name))
                     .collect();
-                let values: Vec<String> = new.iter().map(value_sql).collect();
+                let values = relation
+                    .columns
+                    .iter()
+                    .zip(&new)
+                    .map(|(column, value)| value_sql(value, column))
+                    .collect::<Result<Vec<String>, _>>()?;
                 Change::Statement(format!(
                     "INSERT INTO {} ({}) VALUES ({})",
                     qualified(relation),
@@ -802,9 +1026,13 @@ impl ChangeApplier {
                     .zip(&new)
                     .filter(|(_, value)| **value != TupleValue::Unchanged)
                     .map(|(column, value)| {
-                        format!("{} = {}", quote_identifier(&column.name), value_sql(value))
+                        Ok(format!(
+                            "{} = {}",
+                            quote_identifier(&column.name),
+                            value_sql(value, column)?
+                        ))
                     })
-                    .collect();
+                    .collect::<Result<Vec<String>, ReplicationError>>()?;
                 let whole_row = relation.replica_identity == b'f';
                 let condition = match &old {
                     Some(old) => Self::key_condition(relation, old, whole_row)?,
@@ -834,7 +1062,7 @@ impl ChangeApplier {
             LogicalMessage::Truncate { cascade, relations } => {
                 let relations: Vec<u32> = relations
                     .into_iter()
-                    .filter(|id| !self.skipped.contains(id))
+                    .filter(|id| !self.skipped.contains(id) && !self.in_copy(*id))
                     .collect();
                 if relations.is_empty() {
                     return Ok(Change::Nothing);
@@ -850,6 +1078,15 @@ impl ChangeApplier {
                 ))
             }
             LogicalMessage::Ignored => Change::Nothing,
+            LogicalMessage::StreamStart { .. }
+            | LogicalMessage::StreamStop
+            | LogicalMessage::StreamCommit { .. }
+            | LogicalMessage::StreamAbort { .. } => {
+                return Err(ReplicationError(
+                    "a message about streamed transactions arrived where a change was expected"
+                        .to_owned(),
+                ));
+            }
         })
     }
 }
@@ -1140,14 +1377,267 @@ mod tests {
         unknown.extend_from_slice(&7u32.to_be_bytes());
         unknown.extend_from_slice(b"public\0brand_new\0d");
         unknown.extend_from_slice(&0u16.to_be_bytes());
-        let refused = applier.apply(parse_logical_message(&unknown).unwrap());
+        let added = applier
+            .apply(parse_logical_message(&unknown).unwrap())
+            .unwrap();
         assert!(
-            refused
-                .unwrap_err()
-                .0
-                .contains("new table public.brand_new")
+            matches!(added, Change::NewTable(ref relation) if relation.id == 7 && relation.name == "brand_new")
         );
     }
+
+    fn streamed(kind: u8, xid: u32, body: &[u8]) -> Vec<u8> {
+        let mut message = vec![kind];
+        message.extend_from_slice(&xid.to_be_bytes());
+        message.extend_from_slice(body);
+        message
+    }
+
+    fn insert_body(values: &[Option<&str>]) -> Vec<u8> {
+        let mut body = 16_384u32.to_be_bytes().to_vec();
+        body.push(b'N');
+        body.extend_from_slice(&tuple_bytes(values));
+        body
+    }
+
+    fn stream_start(xid: u32, first: bool) -> Vec<u8> {
+        let mut message = vec![b'S'];
+        message.extend_from_slice(&xid.to_be_bytes());
+        message.push(u8::from(first));
+        message
+    }
+
+    fn stream_commit(xid: u32, commit_lsn: Lsn, end_lsn: Lsn) -> Vec<u8> {
+        let mut message = vec![b'c'];
+        message.extend_from_slice(&xid.to_be_bytes());
+        message.push(0);
+        message.extend_from_slice(&commit_lsn.to_be_bytes());
+        message.extend_from_slice(&end_lsn.to_be_bytes());
+        message.extend_from_slice(&0u64.to_be_bytes());
+        message
+    }
+
+    fn stream_abort(xid: u32, subtransaction: u32) -> Vec<u8> {
+        let mut message = vec![b'A'];
+        message.extend_from_slice(&xid.to_be_bytes());
+        message.extend_from_slice(&subtransaction.to_be_bytes());
+        message
+    }
+
+    fn statements_of(
+        applier: &mut ChangeApplier,
+        transactions: &mut StreamedTransactions,
+        xid: u32,
+        commit_lsn: Lsn,
+    ) -> Vec<String> {
+        let mut statements = Vec::new();
+        applier
+            .apply(LogicalMessage::Begin {
+                final_lsn: commit_lsn,
+                xid,
+            })
+            .unwrap();
+        for message in transactions.commit(xid).unwrap() {
+            let message = parse_logical_message(&message.unwrap()).unwrap();
+            if let Change::Statement(statement) = applier.apply(message).unwrap() {
+                statements.push(statement);
+            }
+        }
+        statements
+    }
+
+    fn feed(transactions: &mut StreamedTransactions, top: u32, bytes: &[u8]) {
+        match parse_streamed_message(bytes).unwrap() {
+            StreamedMessage::Change { xid, message } => {
+                transactions.push(top, xid, message).unwrap()
+            }
+            StreamedMessage::Control(LogicalMessage::StreamStop) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_streamed_transaction_is_applied_at_its_commit_without_its_aborted_subtransaction() {
+        let directory = std::env::temp_dir();
+        let mut transactions = StreamedTransactions::new(
+            directory,
+            format!("eggdb-stream-test-{}-", std::process::id()),
+            1 << 20,
+        );
+        let mut applier = ChangeApplier::new();
+        assert_eq!(
+            parse_logical_message(&stream_start(900, true)).unwrap(),
+            LogicalMessage::StreamStart {
+                xid: 900,
+                first_segment: true
+            }
+        );
+        transactions.start(900, true);
+        feed(&mut transactions, 900, &streamed(b'R', 900, &relation_message()[1..]));
+        feed(&mut transactions, 900, &streamed(b'I', 900, &insert_body(&[Some("1"), Some("kept")])));
+        feed(&mut transactions, 900, &streamed(b'I', 901, &insert_body(&[Some("2"), Some("rolled back")])));
+        feed(&mut transactions, 900, b"E");
+        let abort = parse_logical_message(&stream_abort(900, 901)).unwrap();
+        assert_eq!(
+            abort,
+            LogicalMessage::StreamAbort {
+                xid: 900,
+                subtransaction: 901
+            }
+        );
+        transactions.abort(900, 901).unwrap();
+        transactions.start(900, false);
+        feed(&mut transactions, 900, &streamed(b'I', 900, &insert_body(&[Some("3"), None])));
+        let commit = parse_logical_message(&stream_commit(900, 0x50, 0x60)).unwrap();
+        assert!(matches!(
+            commit,
+            LogicalMessage::StreamCommit { xid: 900, commit_lsn: 0x50, end_lsn: 0x60, .. }
+        ));
+        assert_eq!(
+            statements_of(&mut applier, &mut transactions, 900, 0x50),
+            vec![
+                "INSERT INTO \"public\".\"orders\" (\"id\", \"note\") VALUES ('1', 'kept')".to_owned(),
+                "INSERT INTO \"public\".\"orders\" (\"id\", \"note\") VALUES ('3', NULL)".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_aborted_streamed_transaction_leaves_nothing_to_apply() {
+        let mut transactions = StreamedTransactions::new(
+            std::env::temp_dir(),
+            format!("eggdb-stream-abort-{}-", std::process::id()),
+            1 << 20,
+        );
+        transactions.start(42, true);
+        feed(&mut transactions, 42, &streamed(b'I', 42, &insert_body(&[Some("1"), None])));
+        transactions.abort(42, 42).unwrap();
+        assert!(transactions.is_empty());
+        assert_eq!(transactions.commit(42).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn binary_tuples_become_literals_by_column_type() {
+        let mut applier = ChangeApplier::new();
+        applier
+            .apply(parse_logical_message(&relation_message()).unwrap())
+            .unwrap();
+        let mut insert = vec![b'I'];
+        insert.extend_from_slice(&16_384u32.to_be_bytes());
+        insert.push(b'N');
+        insert.extend_from_slice(&2u16.to_be_bytes());
+        insert.push(b'b');
+        insert.extend_from_slice(&4u32.to_be_bytes());
+        insert.extend_from_slice(&77i32.to_be_bytes());
+        insert.push(b'b');
+        insert.extend_from_slice(&3u32.to_be_bytes());
+        insert.extend_from_slice(b"o'k");
+        assert_eq!(
+            applier.apply(parse_logical_message(&insert).unwrap()).unwrap(),
+            Change::Statement(
+                "INSERT INTO \"public\".\"orders\" (\"id\", \"note\") VALUES ('77', 'o''k')".to_owned()
+            )
+        );
+        let mut delete = vec![b'D'];
+        delete.extend_from_slice(&16_384u32.to_be_bytes());
+        delete.push(b'K');
+        delete.extend_from_slice(&2u16.to_be_bytes());
+        delete.push(b'b');
+        delete.extend_from_slice(&2u32.to_be_bytes());
+        delete.extend_from_slice(&[0, 1]);
+        delete.push(b'n');
+        assert!(applier.apply(parse_logical_message(&delete).unwrap()).is_err());
+    }
+
+    #[test]
+    fn a_copied_table_skips_the_changes_its_copy_already_holds() {
+        let mut applier = ChangeApplier::new();
+        applier.track_new_tables();
+        let added = applier
+            .apply(parse_logical_message(&relation_message()).unwrap())
+            .unwrap();
+        assert!(matches!(added, Change::NewTable(_)));
+        applier.copied(16_384, None, 0x100);
+        let mut insert = vec![b'I'];
+        insert.extend_from_slice(&insert_body(&[Some("1"), None]));
+        applier
+            .apply(LogicalMessage::Begin { final_lsn: 0x80, xid: 1 })
+            .unwrap();
+        assert_eq!(
+            applier.apply(parse_logical_message(&insert).unwrap()).unwrap(),
+            Change::Nothing
+        );
+        assert_eq!(
+            applier
+                .apply(parse_logical_message(&relation_message()).unwrap())
+                .unwrap(),
+            Change::Nothing
+        );
+        applier
+            .apply(LogicalMessage::Begin { final_lsn: 0x100, xid: 2 })
+            .unwrap();
+        assert!(matches!(
+            applier.apply(parse_logical_message(&insert).unwrap()).unwrap(),
+            Change::Statement(_)
+        ));
+    }
+
+    #[test]
+    fn start_replication_asks_for_what_the_server_offers() {
+        assert_eq!(server_major_version("17.2"), 17);
+        assert_eq!(server_major_version("16.4 (Debian 16.4-1.pgdg120+1)"), 16);
+        assert_eq!(server_major_version("13beta1"), 13);
+        assert_eq!(server_major_version(""), 0);
+        assert_eq!(
+            StreamOptions::for_server(13, true).start_replication_command("s", 0x10, "p"),
+            "START_REPLICATION SLOT \"s\" LOGICAL 0/10 (proto_version '1', publication_names '\"p\"')"
+        );
+        assert_eq!(
+            StreamOptions::for_server(17, true).start_replication_command("s", 0x10, "p"),
+            "START_REPLICATION SLOT \"s\" LOGICAL 0/10 (proto_version '2', publication_names '\"p\"', streaming 'on', binary 'true')"
+        );
+        assert!(!StreamOptions::for_server(17, false).binary);
+        assert!(!StreamOptions::for_server(17, true).without_binary().binary);
+    }
+
+    #[test]
+    fn truncated_and_mutated_stream_messages_are_errors_not_panics() {
+        let messages = [
+            stream_start(1, true),
+            stream_commit(1, 2, 3),
+            stream_abort(1, 2),
+            streamed(b'I', 5, &insert_body(&[Some("1"), Some("x")])),
+        ];
+        for message in &messages {
+            for cut in 1..message.len() {
+                let _ = parse_streamed_message(&message[..cut]);
+                assert!(
+                    parse_logical_message(&message[..cut]).is_err()
+                        || message[0] == b'I'
+                );
+            }
+            assert!(parse_streamed_message(&message[..0]).is_err());
+            let mut state = 0x9E37_79B9u64;
+            for _ in 0..500 {
+                let mut mutated = message.clone();
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let position = (state as usize) % mutated.len();
+                mutated[position] = (state >> 24) as u8;
+                if let Ok(StreamedMessage::Change { message, .. }) = parse_streamed_message(&mutated) {
+                    let _ = parse_logical_message(&message);
+                }
+            }
+        }
+        let mut binary = vec![b'I'];
+        binary.extend_from_slice(&1u32.to_be_bytes());
+        binary.push(b'N');
+        binary.extend_from_slice(&1u16.to_be_bytes());
+        binary.push(b'b');
+        binary.extend_from_slice(&u32::MAX.to_be_bytes());
+        assert!(parse_logical_message(&binary).is_err());
+    }
+}
 
     #[test]
     fn changes_outside_the_followed_schemas_are_skipped() {

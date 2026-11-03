@@ -170,7 +170,11 @@ yet; [sql.md](sql.md#the-postgresql-catalog) has the details.
 Instead of a dump, `eggdb follow` copies a running PostgreSQL 10 or newer (with
 `wal_level=logical`) and keeps the copy in step with it. It creates a logical replication slot,
 copies the schema and every table from the slot's snapshot, then applies each transaction
-PostgreSQL commits, until you stop it:
+PostgreSQL commits, until you stop it. From PostgreSQL 14 it reads `pgoutput`'s protocol 2: a
+large transaction is streamed while it runs and kept (in memory up to 64 MiB, then in a
+`<file>.follow-<xid>.spool` file next to the database file) until it commits, and dropped, with
+any rolled-back savepoint, when it aborts; tuples come in binary when every followed column's type
+is one follow reads in binary, and in text otherwise:
 
 ```sh
 PGPASSWORD=... eggdb follow --create app.db 'postgres://ada@db.example.com/app?sslmode=verify-full&sslrootcert=ca.pem'
@@ -194,11 +198,16 @@ table `eggdb_follow.state`), saved in the same transaction as each applied sourc
   `reconnecting` event; replication restarts from the last applied position.
 - Columns added, dropped, renamed or retyped on the source are changed in the file too, from the
   `Relation` messages PostgreSQL sends before the table's next change (a `schema_changed` event
-  each). An added column takes its type and default from the source's catalog. Tables created or
-  moved to another schema during a follow stop it with a clear message.
+  each). An added column takes its type and default from the source's catalog. A table moved to
+  another schema during a follow stops it with a clear message.
+- A table the source creates during the follow (with a `FOR ALL TABLES` publication), or adds to
+  the publication, is created in the file and copied from a snapshot of its own, as PostgreSQL's
+  own subscribers do when they refresh a publication (a `table_added` event): its changes the
+  copy already holds are skipped, and its foreign keys are added once the follow has reached the
+  copy's position.
 
-Details are in [cli.md](cli.md) under `eggdb follow`, and the design is decisions D162 and
-D263.
+Details are in [cli.md](cli.md) under `eggdb follow`, and the design is decisions D162, D263
+and D296.
 
 ## SQL Server
 

@@ -4022,12 +4022,17 @@ A password inside the URL is a usage error, because every user's `ps` would show
 ### Progress and summary
 Each phase prints one fixed line to stderr, in the 16-column label block that restore's report
 uses: `connected`, `publication`, `slot`, `schema`, one `copied` line per table, the `copied`
-total, and then a `following` line with the lag. The summary goes to stdout, with `tables`,
+total, a `stream` line (the `pgoutput` protocol and tuple format), a `table added` line for each
+table the source creates or publishes during the follow (D296), and then a `following` line with
+the lag. The summary goes to stdout, with `tables`,
 `transactions`, `sequences`, `position` and `cleaned up`, then a verdict: `ok: … point
 applications at it now`, or `stopped: the source closed the connection; …` with exit 3.
 
 ### JSON
-One line per event: `connected`, `slot`, `schema`, `table_copied`, `copied`, `stopped`. The last
+One line per event: `connected`, `slot`, `schema`, `table_copied`, `copied`, `stopped`. A
+PostgreSQL follow also writes `stream` (`protocol`, `streaming`, `binary`: what it asked `pgoutput`
+for, again after a switch to text tuples) and `table_added` (`table`, `copied`, `rows`,
+`snapshot_lsn`: a table created or published on the source during the follow) (D296). The last
 carries `ok`, `reason` (`interrupt`, `caught_up` or `source_closed`), the counts, `lsn` or
 `change_version`, `slot_dropped`, `publication_dropped` and `verdict`. A SQL Server follow's
 `table_copied` also carries `changes` (`cdc` or `change_tracking`), `net_changes` and, for a CDC
