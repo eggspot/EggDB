@@ -53,6 +53,10 @@ pub const VK_F2: usize = 0x71;
 pub const VK_F4: usize = 0x73;
 /// `VK_F5`.
 pub const VK_F5: usize = 0x74;
+/// `VK_F10`.
+pub const VK_F10: usize = 0x79;
+/// `VK_APPS` (the menu key).
+pub const VK_APPS: usize = 0x5D;
 
 /// The modifiers from `GetKeyState` results for Shift, Control and Alt: a key is held when
 /// the high bit of its state is set.
@@ -86,6 +90,8 @@ pub fn key_from_virtual_key(virtual_key: usize, modifiers: Modifiers) -> Option<
         VK_F4 => Key::F4,
         VK_F2 => Key::F2,
         VK_F5 => Key::F5,
+        VK_F10 => Key::F10,
+        VK_APPS => Key::ContextMenu,
         VK_PRIOR => Key::PageUp,
         VK_NEXT => Key::PageDown,
         0x30..=0x39 | 0x41..=0x5A if modifiers.control && !modifiers.alt => {
@@ -371,6 +377,8 @@ mod tests {
             (VK_F4, Key::F4),
             (VK_F2, Key::F2),
             (VK_F5, Key::F5),
+            (VK_F10, Key::F10),
+            (VK_APPS, Key::ContextMenu),
             (VK_PRIOR, Key::PageUp),
             (VK_NEXT, Key::PageDown),
         ];

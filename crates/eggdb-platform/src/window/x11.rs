@@ -1155,6 +1155,8 @@ pub fn key_from_keysym(keysym: u32) -> Option<Key> {
         0xFFC1 => Key::F4,
         0xFFBF => Key::F2,
         0xFFC2 => Key::F5,
+        0xFFC7 => Key::F10,
+        0xFF67 => Key::ContextMenu,
         0xFF55 => Key::PageUp,
         0xFF56 => Key::PageDown,
         0x21..=0x7E | 0xA0..=0xFF => Key::Character(char::from_u32(keysym)?),
@@ -1573,6 +1575,8 @@ mod tests {
         assert_eq!(key_from_keysym(0xFE20), Some(Key::Tab));
         assert_eq!(key_from_keysym(0xFF0D), Some(Key::Enter));
         assert_eq!(key_from_keysym(0xFF1B), Some(Key::Escape));
+        assert_eq!(key_from_keysym(0xFFC7), Some(Key::F10));
+        assert_eq!(key_from_keysym(0xFF67), Some(Key::ContextMenu));
         assert_eq!(key_from_keysym(u32::from(b'q')), Some(Key::Character('q')));
         assert_eq!(key_from_keysym(0x0100_00E9), Some(Key::Character('é')));
         assert_eq!(key_from_keysym(0xFFE1), None);

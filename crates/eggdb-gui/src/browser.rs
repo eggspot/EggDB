@@ -31,6 +31,8 @@ pub fn key_from_dom(key: &str) -> Option<Key> {
         "F4" => Key::F4,
         "F2" => Key::F2,
         "F5" => Key::F5,
+        "F10" => Key::F10,
+        "ContextMenu" | "Apps" => Key::ContextMenu,
         "PageUp" => Key::PageUp,
         "PageDown" => Key::PageDown,
         _ => {
@@ -199,6 +201,8 @@ mod tests {
         assert_eq!(key_from_dom("é"), Some(Key::Character('é')));
         assert_eq!(key_from_dom("Shift"), None);
         assert_eq!(key_from_dom("F5"), Some(Key::F5));
+        assert_eq!(key_from_dom("F10"), Some(Key::F10));
+        assert_eq!(key_from_dom("ContextMenu"), Some(Key::ContextMenu));
         assert_eq!(key_from_dom("F6"), None);
         assert_eq!(key_from_dom(""), None);
         assert_eq!(key_from_dom("\u{7}"), None);
