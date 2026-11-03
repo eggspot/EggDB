@@ -44,8 +44,9 @@ pub enum Encrypt {
     Strict,
 }
 
-/// Where and how to connect, read from a `sqlserver://` URL.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Where and how to connect, read from a `sqlserver://` URL. Its `Debug` output shows whether a
+/// password is set, never the password.
+#[derive(Clone, PartialEq, Eq)]
 pub struct TdsConnectOptions {
     /// The host.
     pub host: String,
@@ -63,6 +64,22 @@ pub struct TdsConnectOptions {
     pub trust_server_certificate: bool,
     /// The trusted roots when it is checked.
     pub root_certificate: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for TdsConnectOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TdsConnectOptions")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("database", &self.database)
+            .field("password", &self.password.as_ref().map(|_| "***"))
+            .field("encrypt", &self.encrypt)
+            .field("trust_server_certificate", &self.trust_server_certificate)
+            .field("root_certificate", &self.root_certificate)
+            .finish()
+    }
 }
 
 impl TdsConnectOptions {
@@ -686,6 +703,16 @@ pub fn quote_unicode(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_output_never_shows_the_password() {
+        let mut options = parse_sql_server_url("sqlserver://sa@sql.example.com/Shop").unwrap();
+        options.password = Some("Str0ng!secret".to_owned());
+        let shown = format!("{options:?}");
+        assert!(!shown.contains("Str0ng!secret"), "{shown}");
+        assert!(shown.contains("password: Some(\"***\")"), "{shown}");
+        assert!(shown.contains("sql.example.com"), "{shown}");
+    }
 
     #[test]
     fn urls_read_their_encryption_and_refuse_passwords() {

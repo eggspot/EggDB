@@ -60,13 +60,34 @@ impl Privilege {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 pub(crate) struct RoleOptions {
     pub(crate) login: Option<bool>,
     pub(crate) superuser: Option<bool>,
     pub(crate) create_database: Option<bool>,
     pub(crate) password: Option<Option<String>>,
     pub(crate) member_of: Vec<String>,
+}
+
+const HIDDEN_SECRET: &str = "***";
+
+impl std::fmt::Debug for RoleOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RoleOptions")
+            .field("login", &self.login)
+            .field("superuser", &self.superuser)
+            .field("create_database", &self.create_database)
+            .field(
+                "password",
+                &self
+                    .password
+                    .as_ref()
+                    .map(|password| password.as_ref().map(|_| HIDDEN_SECRET)),
+            )
+            .field("member_of", &self.member_of)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -119,8 +140,9 @@ impl RoleStatement {
     }
 }
 
-/// A role as the catalog keeps it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A role as the catalog keeps it. Its `Debug` output shows whether the role has a password,
+/// never its verifier.
+#[derive(Clone, PartialEq, Eq)]
 pub struct StoredRole {
     /// The role's name.
     pub name: String,
@@ -135,6 +157,23 @@ pub struct StoredRole {
     pub scram_verifier: Option<String>,
     /// The roles this role is a member of.
     pub member_of: Vec<String>,
+}
+
+impl std::fmt::Debug for StoredRole {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StoredRole")
+            .field("name", &self.name)
+            .field("login", &self.login)
+            .field("superuser", &self.superuser)
+            .field("create_database", &self.create_database)
+            .field(
+                "scram_verifier",
+                &self.scram_verifier.as_ref().map(|_| HIDDEN_SECRET),
+            )
+            .field("member_of", &self.member_of)
+            .finish()
+    }
 }
 
 fn role_key(name: &str) -> Vec<u8> {

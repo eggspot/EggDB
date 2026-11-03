@@ -1,4 +1,3 @@
-use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -25,44 +24,12 @@ const DATABASE_MISSING: &str = "3D000";
 
 /// What the connect card asks to open: a database file or a server. Its `Debug` shows a
 /// password as `***`.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectTarget {
     /// A database file on this computer.
     File(FileTarget),
     /// A server speaking the PostgreSQL protocol, such as `eggdb serve`.
     Server(ConnectOptions),
-}
-
-impl fmt::Debug for ConnectTarget {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::File(file) => formatter.debug_tuple("File").field(file).finish(),
-            Self::Server(options) => formatter
-                .debug_tuple("Server")
-                .field(&RedactedConnectOptions(options))
-                .finish(),
-        }
-    }
-}
-
-/// [`ConnectOptions`] for `Debug` output, with the password shown as `***`.
-pub struct RedactedConnectOptions<'a>(pub &'a ConnectOptions);
-
-impl fmt::Debug for RedactedConnectOptions<'_> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let options = self.0;
-        formatter
-            .debug_struct("ConnectOptions")
-            .field("host", &options.host)
-            .field("port", &options.port)
-            .field("user", &options.user)
-            .field("database", &options.database)
-            .field("password", &options.password.as_ref().map(|_| REDACTED))
-            .field("ssl_mode", &options.ssl_mode)
-            .field("ssl_root_cert", &options.ssl_root_cert)
-            .field("replication", &options.replication)
-            .finish_non_exhaustive()
-    }
 }
 
 /// What `Debug` output shows in place of a password.

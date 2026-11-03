@@ -90,6 +90,31 @@ fn roles_are_stored_with_a_scram_verifier_and_never_the_password() {
 }
 
 #[test]
+fn debug_output_shows_neither_a_role_password_nor_its_verifier() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let reader = store.begin_read().unwrap();
+    let clerk = stored_role(&reader, "clerk").unwrap().unwrap();
+    let verifier = clerk.scram_verifier.clone().unwrap();
+    let shown = format!("{clerk:?}");
+    assert!(!shown.contains(&verifier), "{shown}");
+    assert!(!shown.contains("SCRAM-SHA-256$"), "{shown}");
+    assert!(shown.contains("scram_verifier: Some(\"***\")"), "{shown}");
+    let options = RoleOptions {
+        password: Some(Some("pa55word".to_owned())),
+        ..RoleOptions::default()
+    };
+    let shown = format!("{options:?}");
+    assert!(!shown.contains("pa55word"), "{shown}");
+    assert!(shown.contains("password: Some(Some(\"***\"))"), "{shown}");
+    let cleared = RoleOptions {
+        password: Some(None),
+        ..RoleOptions::default()
+    };
+    assert!(format!("{cleared:?}").contains("password: Some(None)"));
+}
+
+#[test]
 fn role_statements_refuse_what_postgresql_refuses() {
     let store = MemoryStore::default();
     setup(&store);

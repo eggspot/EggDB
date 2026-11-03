@@ -136,8 +136,9 @@ impl Protocol {
     }
 }
 
-/// What a server URL says, read part by part so the fields fill while it is typed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What a server URL says, read part by part so the fields fill while it is typed. Its `Debug`
+/// shows the password as `***`.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ServerUrl {
     /// The protocol its scheme names.
     pub protocol: Protocol,
@@ -162,6 +163,24 @@ pub struct ServerUrl {
     /// Whether every part is whole: a host, a port that is a number from 1 to 65535, whole
     /// %-escapes and a known `sslmode` or `tls` value.
     pub well_formed: bool,
+}
+
+impl fmt::Debug for ServerUrl {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ServerUrl")
+            .field("protocol", &self.protocol)
+            .field("scheme", &self.scheme)
+            .field("user", &self.user)
+            .field("password", &self.password.as_ref().map(|_| REDACTED))
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("database", &self.database)
+            .field("use_tls", &self.use_tls)
+            .field("certificate_parameters", &self.certificate_parameters)
+            .field("well_formed", &self.well_formed)
+            .finish()
+    }
 }
 
 fn percent_decoded(text: &str) -> Option<String> {
@@ -1018,6 +1037,11 @@ mod tests {
         let shown = format!("{target:?}");
         assert!(!shown.contains("hunter2"), "{shown}");
         assert!(shown.contains("Some(\"***\")"), "{shown}");
+        let url = read("postgresql://ada:hunter2@db/shop");
+        assert_eq!(url.password.as_deref(), Some("hunter2"));
+        let shown = format!("{url:?}");
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert!(shown.contains("password: Some(\"***\")"), "{shown}");
         assert_eq!(
             url_with_password_redacted("postgresql://ada:s?cr@et@db/shop"),
             "postgresql://ada:***@db/shop"

@@ -136,6 +136,18 @@ fn auth_hello_and_select_guard_the_connection() {
 }
 
 #[test]
+fn the_server_config_debug_output_never_shows_the_password_hash() {
+    let config = ServerConfig {
+        password_sha256: Some([0xab; 32]),
+        max_connections: 8,
+        memory_budget: std::sync::Arc::default(),
+    };
+    let shown = format!("{config:?}");
+    assert!(!shown.contains("171"), "{shown}");
+    assert!(shown.contains("requires_password: true"), "{shown}");
+}
+
+#[test]
 fn a_server_answers_a_pipelined_client_over_tcp() {
     use std::io::{Read, Write};
     let keyspace = MemoryKeyspace::default();

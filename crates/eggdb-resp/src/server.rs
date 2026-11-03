@@ -14,8 +14,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const ACCEPT_POLL: Duration = Duration::from_millis(100);
 const READ_POLL: Duration = Duration::from_millis(200);
 
-/// How the RESP server runs.
-#[derive(Debug, Clone)]
+/// How the RESP server runs. Its `Debug` output never shows the password's hash.
+#[derive(Clone)]
 pub struct ServerConfig {
     /// The SHA-256 of the password clients give with `AUTH` (as `requirepass` asks), or
     /// `None` for none; the password itself is not kept.
@@ -25,6 +25,17 @@ pub struct ServerConfig {
     /// The memory every connection's requests and replies hold together, shared with the
     /// server's other listeners.
     pub memory_budget: Arc<MemoryBudget>,
+}
+
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServerConfig")
+            .field("requires_password", &self.password_sha256.is_some())
+            .field("max_connections", &self.max_connections)
+            .field("memory_budget", &self.memory_budget)
+            .finish()
+    }
 }
 
 const OUT_OF_BUDGET: &str =
