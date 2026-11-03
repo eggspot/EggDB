@@ -755,6 +755,14 @@ impl Evaluator<'_> {
     }
 
     fn type_of(&self, value: &Value, expr: &Expr) -> Option<SqlType> {
+        if let ExprKind::Slot {
+            sql_type: Some(declared),
+            ..
+        } = &expr.kind
+            && !matches!(declared, SqlType::Dynamic(_))
+        {
+            return value.sql_type().or(Some(*declared));
+        }
         if crate::constraints::current_dialect() == crate::Dialect::Sqlite
             && let Some(dynamic @ SqlType::Dynamic(_)) = self.declared_type(expr)
         {

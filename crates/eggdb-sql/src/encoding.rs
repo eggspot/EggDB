@@ -116,11 +116,15 @@ pub(crate) fn table_key(name: &str) -> Vec<u8> {
 
 const TYPICAL_KEY_BYTES: usize = 48;
 
-pub(crate) fn rows_prefix(table_id: u32) -> Vec<u8> {
-    let mut key = Vec::with_capacity(TYPICAL_KEY_BYTES);
+pub(crate) fn push_rows_prefix(key: &mut Vec<u8>, table_id: u32) {
     key.extend_from_slice(NAMESPACE);
     key.push(ROW_SPACE);
     key.extend_from_slice(&table_id.to_be_bytes());
+}
+
+pub(crate) fn rows_prefix(table_id: u32) -> Vec<u8> {
+    let mut key = Vec::with_capacity(TYPICAL_KEY_BYTES);
+    push_rows_prefix(&mut key, table_id);
     key
 }
 
@@ -132,9 +136,16 @@ pub(crate) fn table_indexes_prefix(table_id: u32) -> Vec<u8> {
     key
 }
 
-pub(crate) fn index_prefix(table_id: u32, index_id: u32) -> Vec<u8> {
-    let mut key = table_indexes_prefix(table_id);
+pub(crate) fn push_index_prefix(key: &mut Vec<u8>, table_id: u32, index_id: u32) {
+    key.extend_from_slice(NAMESPACE);
+    key.push(INDEX_SPACE);
+    key.extend_from_slice(&table_id.to_be_bytes());
     key.extend_from_slice(&index_id.to_be_bytes());
+}
+
+pub(crate) fn index_prefix(table_id: u32, index_id: u32) -> Vec<u8> {
+    let mut key = Vec::with_capacity(TYPICAL_KEY_BYTES);
+    push_index_prefix(&mut key, table_id, index_id);
     key
 }
 
@@ -243,15 +254,22 @@ pub(crate) fn key_owner(key: &[u8]) -> KeyOwner<'_> {
     }
 }
 
-pub(crate) fn prefix_end(prefix: &[u8]) -> Vec<u8> {
-    let mut end = prefix.to_vec();
+pub(crate) fn write_prefix_end(end: &mut Vec<u8>, prefix: &[u8]) {
+    end.clear();
+    end.extend_from_slice(prefix);
     while let Some(last) = end.pop() {
         if last != 0xFF {
             end.push(last + 1);
-            return end;
+            return;
         }
     }
-    vec![0xFF; prefix.len() + 1]
+    end.resize(prefix.len() + 1, 0xFF);
+}
+
+pub(crate) fn prefix_end(prefix: &[u8]) -> Vec<u8> {
+    let mut end = Vec::with_capacity(prefix.len() + 1);
+    write_prefix_end(&mut end, prefix);
+    end
 }
 
 pub(crate) fn corrupt(what: &str) -> SqlError {

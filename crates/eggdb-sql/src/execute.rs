@@ -29,6 +29,7 @@ use crate::subquery::Correlation;
 use crate::triggers::{Firing, RowOutcome, TriggerEvent};
 use crate::types::{Conversion, SqlType, Value, compare_values, convert, equality_key};
 use crate::typing;
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -3781,7 +3782,39 @@ impl SourceRows<'_> {
     }
 }
 
+fn late_matches(
+    scope: Scope<'_>,
+    correlation: Option<&Correlation<'_>>,
+    late: Option<&Expr>,
+    row: &[Value],
+) -> SqlResult<bool> {
+    let Some(late) = late else {
+        return Ok(true);
+    };
+    let evaluator = Evaluator {
+        scope,
+        row,
+        correlation,
+    };
+    Ok(evaluator.boolean(late, "WHERE")? == Some(true))
+}
+
 impl SourceRows<'_> {
+    fn yields_borrowed_rows(&self) -> bool {
+        matches!(self.rows, RowSource::Joined(_))
+    }
+
+    fn for_each_row(
+        &mut self,
+        visit: &mut dyn FnMut(Cow<'_, [Value]>) -> SqlResult<bool>,
+    ) -> SqlResult<()> {
+        if self.yields_borrowed_rows() {
+            self.for_each_borrowed(&mut |row| visit(Cow::Borrowed(row)))
+        } else {
+            self.for_each(&mut |row| visit(Cow::Owned(row)))
+        }
+    }
+
     fn for_each_borrowed(
         &mut self,
         visit: &mut dyn FnMut(&[Value]) -> SqlResult<bool>,
@@ -3794,13 +3827,16 @@ impl SourceRows<'_> {
             meter.source_read();
             return read;
         }
-        if self.late.is_some() {
+        if self.late.is_some() && !self.yields_borrowed_rows() {
             return self.for_each(&mut |row| visit(&row));
         }
         let (reader, scope, filter) = (self.reader, self.scope, self.filter);
+        let (late, correlation) = (self.late, self.correlation);
         match &mut self.rows {
             RowSource::Joined(joined) => joined.for_each(&mut |row| {
-                if filter_matches(scope, filter, row)? {
+                if filter_matches(scope, filter, row)?
+                    && late_matches(scope, correlation, late, row)?
+                {
                     visit(row)
                 } else {
                     Ok(true)
@@ -3863,9 +3899,12 @@ fn unsorted_rows(
     let mut skipped = 0;
     let mut seen = window.distinct.then(HashSet::new);
     let mut seen_on = HashSet::new();
-    source.for_each(&mut |row| {
+    source.for_each_row(&mut |row| {
         let projected = if distinct_on.is_empty() {
-            projection.project_owned(row)?
+            match row {
+                Cow::Owned(row) => projection.project_owned(row)?,
+                Cow::Borrowed(row) => projection.project(row)?,
+            }
         } else {
             let projected = projection.project(&row)?;
             let evaluator = Evaluator {
@@ -3935,7 +3974,7 @@ fn sorted_rows(
     let correlation = source.correlation;
     let mut rows = Vec::new();
     let mut seen = window.distinct.then(HashSet::new);
-    source.for_each(&mut |row| {
+    source.for_each_row(&mut |row| {
         let output = projection.project(&row)?;
         if let Some(seen) = &mut seen
             && !first_time_seen(seen, &output, memory)?

@@ -4,16 +4,18 @@ use crate::ast::{
 };
 use crate::encoding::{
     TableDefinition, decode_row_into, encode_column_key, index_prefix, prefix_end, rows_prefix,
+    write_prefix_end,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{
     Evaluator, Scope, Source, Sources, check_columns, children, compare_truth, reject_aggregates,
 };
 use crate::hash_index::HashIndex;
-use crate::indexes::{entry_key, row_key_of_entry};
+use crate::indexes::{write_entry_key, write_row_key_of_entry};
 use crate::memory::WorkMemory;
 use crate::store::{KeyValueRead, ScanDirection};
 use crate::types::{Conversion, SqlType, Value, comparable, compare_values, convert, equality_key};
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -670,6 +672,7 @@ enum Access {
     IndexLookup {
         position: usize,
         lefts: Vec<usize>,
+        probe: RefCell<IndexProbe>,
     },
     Hash {
         probe: Vec<usize>,
@@ -682,6 +685,36 @@ enum Access {
         ids: HashMap<Vec<u8>, Vec<usize>>,
         matched: RefCell<Vec<bool>>,
     },
+}
+
+struct IndexProbe {
+    start: Vec<u8>,
+    prefix_length: usize,
+    end: Vec<u8>,
+    row_key: Vec<u8>,
+    expected_entry: Vec<u8>,
+}
+
+impl IndexProbe {
+    fn new(table_id: u32, index_id: u32) -> Self {
+        let start = index_prefix(table_id, index_id);
+        Self {
+            prefix_length: start.len(),
+            start,
+            end: Vec::new(),
+            row_key: Vec::new(),
+            expected_entry: Vec::new(),
+        }
+    }
+
+    fn restart(&mut self) -> &mut Vec<u8> {
+        self.start.truncate(self.prefix_length);
+        &mut self.start
+    }
+
+    fn close_range(&mut self) {
+        write_prefix_end(&mut self.end, &self.start);
+    }
 }
 
 fn equality_bytes(row: &[Value], offsets: &[usize], key: &mut Vec<u8>) -> bool {
@@ -712,7 +745,12 @@ fn preserved_rows(
         memory.charge(1)?;
         if !build.is_empty() && equality_bytes(&row, &build, &mut key) {
             memory.charge(key.len() + 40)?;
-            ids.entry(key.clone()).or_default().push(rows.len());
+            match ids.get_mut(key.as_slice()) {
+                Some(same_key) => same_key.push(rows.len()),
+                None => {
+                    ids.insert(key.clone(), vec![rows.len()]);
+                }
+            }
         }
         rows.push(row);
         Ok(true)
@@ -741,6 +779,7 @@ struct Step<'a> {
 
 pub(crate) struct JoinedRows<'a> {
     reader: &'a dyn KeyValueRead,
+    watch: crate::cancel::Watch,
     first: &'a TableDefinition,
     first_needed: Vec<bool>,
     first_key: Option<Vec<u8>>,
@@ -1318,7 +1357,14 @@ impl<'a> JoinedRows<'a> {
                         probe: hash_keys.iter().map(|&(outer, _)| outer).collect(),
                         index,
                     },
-                    None => Access::IndexLookup { position, lefts },
+                    None => Access::IndexLookup {
+                        position,
+                        lefts,
+                        probe: RefCell::new(IndexProbe::new(
+                            table.id,
+                            table.indexes[position].id,
+                        )),
+                    },
                 }
             } else if !pairs.is_empty() {
                 let built = build_hash(
@@ -1377,6 +1423,7 @@ impl<'a> JoinedRows<'a> {
         }
         Ok(Self {
             reader,
+            watch: crate::cancel::watch(),
             first: joined.sources.list[0].table,
             first_needed: std::mem::take(&mut needed[0]),
             first_key,
@@ -1442,8 +1489,10 @@ impl<'a> JoinedRows<'a> {
                 .filter(|(_, matched)| !**matched)
                 .map(|(id, _)| id)
                 .collect();
+            let mut row = Vec::with_capacity(self.width);
             for id in unmatched {
-                let mut row = vec![Value::Null; step.offset];
+                row.clear();
+                row.resize(step.offset, Value::Null);
                 row.extend_from_slice(&rows[id]);
                 if !self.extend(level + 1, &mut row, visit)? {
                     return Ok(());
@@ -1454,7 +1503,7 @@ impl<'a> JoinedRows<'a> {
     }
 
     fn passes(&self, level: usize, row: &[Value]) -> SqlResult<bool> {
-        let Some(filters) = self.filters.get(level) else {
+        let Some(filters) = self.filters.get(level).filter(|filters| !filters.is_empty()) else {
             return Ok(true);
         };
         let evaluator = Evaluator {
@@ -1476,7 +1525,7 @@ impl<'a> JoinedRows<'a> {
         row: &mut Vec<Value>,
         visit: &mut dyn FnMut(&[Value]) -> SqlResult<bool>,
     ) -> SqlResult<bool> {
-        crate::cancel::check()?;
+        self.watch.check()?;
         if !self.passes(level, row)? {
             return Ok(true);
         }
@@ -1556,8 +1605,12 @@ impl<'a> JoinedRows<'a> {
                     return Ok(false);
                 }
             }
-            Access::IndexLookup { position, lefts } => {
-                if !self.index_lookup(step, *position, lefts, row, &mut attempt)? {
+            Access::IndexLookup {
+                position,
+                lefts,
+                probe,
+            } => {
+                if !self.index_lookup(step, *position, lefts, probe, row, &mut attempt)? {
                     return Ok(false);
                 }
             }
@@ -1597,35 +1650,45 @@ impl<'a> JoinedRows<'a> {
         step: &Step<'_>,
         position: usize,
         lefts: &[usize],
+        probe: &RefCell<IndexProbe>,
         row: &mut Vec<Value>,
         attempt: &mut dyn FnMut(&mut Vec<Value>) -> SqlResult<bool>,
     ) -> SqlResult<bool> {
         let table = step.table;
         let index = &table.indexes[position];
-        let mut start = index_prefix(table.id, index.id);
+        let mut probe = probe.borrow_mut();
+        let start = probe.restart();
         for (&column, &left) in index.columns.iter().zip(lefts) {
             let sql_type = table.columns[column].sql_type;
             let Some(value) = key_value(&row[left], sql_type) else {
                 return Ok(true);
             };
-            encode_column_key(&mut start, &value, sql_type);
+            encode_column_key(start, &value, sql_type);
         }
-        let end = prefix_end(&start);
+        probe.close_range();
+        let IndexProbe {
+            start,
+            end,
+            row_key,
+            expected_entry,
+            ..
+        } = &mut *probe;
         let mut going = true;
         self.reader
-            .scan(&start, &end, ScanDirection::Forward, &mut |entry, _| {
-                let key = row_key_of_entry(table, index, entry)?;
+            .scan(start, end, ScanDirection::Forward, &mut |entry, _| {
+                write_row_key_of_entry(row_key, table, index, entry)?;
                 let base = row.len();
                 let mut found = false;
-                self.reader.get_with(&key, &mut |bytes| {
+                self.reader.get_with(row_key, &mut |bytes| {
                     decode_row_into(bytes, &table.columns, Some(&step.needed), row)?;
                     found = true;
                     Ok(())
                 })?;
                 let matches = found
-                    && row
-                        .get(base..)
-                        .is_some_and(|inner| entry_key(table, index, inner, &key) == entry);
+                    && row.get(base..).is_some_and(|inner| {
+                        write_entry_key(expected_entry, table, index, inner, row_key);
+                        expected_entry.as_slice() == entry
+                    });
                 if !matches {
                     return Err(crate::encoding::corrupt("index entry"));
                 }
@@ -1640,24 +1703,11 @@ impl<'a> JoinedRows<'a> {
         let mut key = step.key.borrow_mut();
         key.truncate(step.prefix_length);
         for (&index, &left) in table.primary_key.iter().zip(lefts) {
-            let original = &row[left];
-            if original.is_null() {
-                return Ok(false);
-            }
             let sql_type = table.columns[index].sql_type;
-            if original.sql_type() == Some(sql_type)
-                || (sql_type.is_string() && matches!(original, Value::Text(_)))
-            {
-                encode_column_key(&mut key, original, sql_type);
-                continue;
-            }
-            let Ok(converted) = convert(original.clone(), sql_type, Conversion::Assignment) else {
+            let Some(value) = key_value(&row[left], sql_type) else {
                 return Ok(false);
             };
-            if compare_values(&converted, original) != Ordering::Equal {
-                return Ok(false);
-            }
-            encode_column_key(&mut key, &converted, sql_type);
+            encode_column_key(&mut key, &value, sql_type);
         }
         let mut found = false;
         self.reader.get_with(key.as_slice(), &mut |bytes| {
@@ -1669,17 +1719,17 @@ impl<'a> JoinedRows<'a> {
     }
 }
 
-fn key_value(original: &Value, sql_type: SqlType) -> Option<Value> {
+fn key_value(original: &Value, sql_type: SqlType) -> Option<Cow<'_, Value>> {
     if original.is_null() {
         return None;
     }
     if original.sql_type() == Some(sql_type)
         || (sql_type.is_string() && matches!(original, Value::Text(_)))
     {
-        return Some(original.clone());
+        return Some(Cow::Borrowed(original));
     }
     let converted = convert(original.clone(), sql_type, Conversion::Assignment).ok()?;
-    (compare_values(&converted, original) == Ordering::Equal).then_some(converted)
+    (compare_values(&converted, original) == Ordering::Equal).then_some(Cow::Owned(converted))
 }
 
 impl Step<'_> {
@@ -1789,7 +1839,47 @@ impl JoinedFrom<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::with_where_keys;
+    use super::{IndexProbe, key_value, with_where_keys};
+    use crate::encoding::{encode_column_key, index_prefix, prefix_end};
+    use crate::types::{SqlType, Value};
+    use std::borrow::Cow;
+
+    #[test]
+    fn a_reused_index_probe_holds_only_the_latest_value_after_its_prefix() {
+        let mut probe = IndexProbe::new(7, 3);
+        let mut ranges = Vec::new();
+        for value in [Value::BigInt(123_456_789), Value::BigInt(5), Value::BigInt(-1)] {
+            encode_column_key(probe.restart(), &value, SqlType::BigInt);
+            probe.close_range();
+            ranges.push((probe.start.clone(), probe.end.clone()));
+        }
+        for ((start, end), value) in ranges.iter().zip([123_456_789, 5, -1]) {
+            let mut fresh = index_prefix(7, 3);
+            encode_column_key(&mut fresh, &Value::BigInt(value), SqlType::BigInt);
+            assert_eq!(start, &fresh);
+            assert_eq!(end, &prefix_end(&fresh));
+        }
+    }
+
+    #[test]
+    fn a_key_value_of_the_column_type_is_borrowed_and_others_are_converted_or_refused() {
+        let same = Value::BigInt(42);
+        assert!(matches!(
+            key_value(&same, SqlType::BigInt),
+            Some(Cow::Borrowed(Value::BigInt(42)))
+        ));
+        let text = Value::Text("k".into());
+        assert!(matches!(
+            key_value(&text, SqlType::Text),
+            Some(Cow::Borrowed(Value::Text(_)))
+        ));
+        assert!(matches!(
+            key_value(&Value::Integer(42), SqlType::BigInt),
+            Some(Cow::Owned(Value::BigInt(42)))
+        ));
+        assert!(key_value(&Value::Null, SqlType::BigInt).is_none());
+        assert!(key_value(&Value::Double(1.5), SqlType::BigInt).is_none());
+    }
 
     #[test]
     fn a_single_integer_condition_pair_keeps_the_integer_hash_without_where_keys() {
