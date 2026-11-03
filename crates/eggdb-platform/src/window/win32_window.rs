@@ -88,7 +88,7 @@ struct Point {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct TrackMouseEvent {
+struct TrackMouseEventParams {
     size: u32,
     flags: u32,
     window: Handle,
@@ -244,7 +244,7 @@ fn dropped_files(drop: Handle) -> Vec<PathBuf> {
 unsafe extern "system" {
     fn SetCapture(window: Handle) -> Handle;
     fn ReleaseCapture() -> i32;
-    fn TrackMouseEvent(track: *mut TrackMouseEvent) -> i32;
+    fn TrackMouseEvent(track: *mut TrackMouseEventParams) -> i32;
     fn ScreenToClient(window: Handle, point: *mut Point) -> i32;
     fn OpenClipboard(owner: Handle) -> i32;
     fn CloseClipboard() -> i32;
@@ -384,8 +384,8 @@ fn track_leave(window: Handle, state: &WindowState) {
     if state.tracking_leave.get() {
         return;
     }
-    let mut track = TrackMouseEvent {
-        size: std::mem::size_of::<TrackMouseEvent>() as u32,
+    let mut track = TrackMouseEventParams {
+        size: std::mem::size_of::<TrackMouseEventParams>() as u32,
         flags: TME_LEAVE,
         window,
         hover_time: 0,
