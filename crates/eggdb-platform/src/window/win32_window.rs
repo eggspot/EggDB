@@ -1,4 +1,5 @@
 mod automation;
+mod drop_target;
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -13,6 +14,7 @@ use super::{
     Window, WindowError, WindowEvent, WindowOptions, check_clipboard_text, check_frame,
 };
 use automation::Automation;
+use drop_target::DropRegistration;
 
 type Handle = *mut c_void;
 type WindowProcedure = unsafe extern "system" fn(Handle, u32, usize, isize) -> isize;
@@ -215,8 +217,16 @@ unsafe extern "system" {
 }
 
 fn dropped_files(drop: Handle) -> Vec<PathBuf> {
-    // SAFETY: `drop` is the `HDROP` of the `WM_DROPFILES` being handled; asking for the
-    // count with a null buffer writes nothing.
+    let paths = dropped_paths(drop);
+    // SAFETY: `drop` is the `HDROP` of the `WM_DROPFILES` being handled, released once, after
+    // the last query.
+    unsafe { DragFinish(drop) };
+    paths
+}
+
+fn dropped_paths(drop: Handle) -> Vec<PathBuf> {
+    // SAFETY: `drop` is a live `HDROP` (of `WM_DROPFILES`, or the `CF_HDROP` medium of an OLE
+    // drop); asking for the count with a null buffer writes nothing.
     let count = unsafe { DragQueryFileW(drop, DRAG_QUERY_COUNT, std::ptr::null_mut(), 0) };
     let mut paths = Vec::new();
     for index in 0..count.min(MOST_DROPPED_FILES) {
@@ -236,8 +246,6 @@ fn dropped_files(drop: Handle) -> Vec<PathBuf> {
             paths.push(path);
         }
     }
-    // SAFETY: `drop` is released once, after the last query.
-    unsafe { DragFinish(drop) };
     paths
 }
 
@@ -883,6 +891,7 @@ fn register_class(instance: Handle, class_name: &[u16]) -> Result<(), WindowErro
 pub(crate) struct Win32Window {
     window: Handle,
     state: Rc<WindowState>,
+    drop_target: Option<DropRegistration>,
 }
 
 impl Win32Window {
@@ -931,11 +940,18 @@ impl Win32Window {
         if window.is_null() {
             return Err(last_error("CreateWindowExW"));
         }
-        let this = Self { window, state };
+        let drop_target = DropRegistration::register(window, &state);
+        let this = Self {
+            window,
+            state,
+            drop_target,
+        };
         this.state.automation.attach(this.window);
-        // SAFETY: `window` was just created by this backend; the call only lets it receive
-        // `WM_DROPFILES`.
-        unsafe { DragAcceptFiles(this.window, 1) };
+        if this.drop_target.is_none() {
+            // SAFETY: `window` was just created by this backend; the call only lets it
+            // receive `WM_DROPFILES`.
+            unsafe { DragAcceptFiles(this.window, 1) };
+        }
         // SAFETY: `window` was just created by this backend.
         let dpi = unsafe { GetDpiForWindow(this.window) };
         this.state
@@ -995,6 +1011,7 @@ impl Win32Window {
 
 impl Drop for Win32Window {
     fn drop(&mut self) {
+        self.drop_target = None;
         self.state.automation.detach(self.window);
         // SAFETY: `window` is ours; clearing the slot stops the procedure from reaching the
         // state, which is freed after this.

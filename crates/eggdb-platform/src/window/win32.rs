@@ -3,12 +3,13 @@
 //! modifier state, packing the words of a message's parameters, turning a monitor's DPI into a
 //! scale, and converting an RGBA frame into the BGRA rows a 32-bit device-independent bitmap
 //! holds, the filter list and path buffers of the open-file dialog, the pointer's position and
-//! wheel steps in mouse messages, and clipboard text as `CF_UNICODETEXT`. The values come from
-//! Microsoft's public Win32 documentation.
+//! wheel steps in mouse messages, clipboard text as `CF_UNICODETEXT`, and the drop effects and
+//! drag-over state of an OLE `IDropTarget` ([`FileDragTarget`]). The values come from
+//! Microsoft's public Win32 and COM documentation.
 
 use std::path::PathBuf;
 
-use super::{FileFilter, Key, KeyPress, Modifiers};
+use super::{FileFilter, Key, KeyPress, Modifiers, WindowEvent};
 
 /// The DPI Windows treats as a scale of 1.
 pub const BASE_DPI: u32 = 96;
@@ -296,11 +297,107 @@ pub fn path_from_wide_buffer(buffer: &[u16]) -> Option<PathBuf> {
     String::from_utf16(units).ok().map(PathBuf::from)
 }
 
+/// `DROPEFFECT_NONE`: the drop target takes nothing.
+pub const DROPEFFECT_NONE: u32 = 0;
+/// `DROPEFFECT_COPY`: the drop target copies the data (opens the file, leaving it in place).
+pub const DROPEFFECT_COPY: u32 = 1;
+
+/// The drop effect a target answers with for a drag it `accepts`, among the effects the
+/// source `allowed`: a copy when the source allows one, otherwise none.
+pub fn drop_effect(accepts: bool, allowed: u32) -> u32 {
+    if accepts && allowed & DROPEFFECT_COPY != 0 {
+        DROPEFFECT_COPY
+    } else {
+        DROPEFFECT_NONE
+    }
+}
+
+/// The drag-over state of the window's OLE drop target: whether the drag over it carries
+/// files, which the `IDropTarget` methods (`DragEnter`, `DragOver`, `DragLeave`, `Drop`) turn
+/// into the drop effect and the window's drag events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FileDragTarget {
+    accepting: bool,
+}
+
+impl FileDragTarget {
+    /// `DragEnter` with the files the drag carries (none when it carries no `CF_HDROP`) and
+    /// the effects the source allows: the effect, and [`WindowEvent::FileDragEntered`] when
+    /// it carries files.
+    pub fn enter(&mut self, paths: Vec<PathBuf>, allowed: u32) -> (u32, Option<WindowEvent>) {
+        self.accepting = !paths.is_empty();
+        let event = self
+            .accepting
+            .then_some(WindowEvent::FileDragEntered(paths));
+        (drop_effect(self.accepting, allowed), event)
+    }
+
+    /// `DragOver`: the same effect as on entering, among the effects allowed now.
+    pub fn over(&self, allowed: u32) -> u32 {
+        drop_effect(self.accepting, allowed)
+    }
+
+    /// `DragLeave`: [`WindowEvent::FileDragLeft`] when the drag carried files.
+    pub fn leave(&mut self) -> Option<WindowEvent> {
+        std::mem::take(&mut self.accepting).then_some(WindowEvent::FileDragLeft)
+    }
+
+    /// `Drop` with the files dropped: the effect and [`WindowEvent::FilesDropped`], or, when
+    /// nothing usable was dropped, no effect and the end of the drag-over ring.
+    pub fn drop(&mut self, paths: Vec<PathBuf>, allowed: u32) -> (u32, Option<WindowEvent>) {
+        let was_accepting = std::mem::take(&mut self.accepting);
+        if paths.is_empty() {
+            return (
+                DROPEFFECT_NONE,
+                was_accepting.then_some(WindowEvent::FileDragLeft),
+            );
+        }
+        (
+            drop_effect(true, allowed),
+            Some(WindowEvent::FilesDropped(paths)),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const HELD: i16 = i16::MIN;
+
+    #[test]
+    fn a_file_drag_shows_the_ring_copies_and_drops() {
+        let file = || vec![PathBuf::from("C:\\data\\shop.eggdb")];
+        let mut target = FileDragTarget::default();
+        assert_eq!(
+            target.enter(file(), DROPEFFECT_COPY | 2),
+            (DROPEFFECT_COPY, Some(WindowEvent::FileDragEntered(file())))
+        );
+        assert_eq!(target.over(DROPEFFECT_COPY), DROPEFFECT_COPY);
+        assert_eq!(target.over(2), DROPEFFECT_NONE);
+        assert_eq!(
+            target.drop(file(), DROPEFFECT_COPY),
+            (DROPEFFECT_COPY, Some(WindowEvent::FilesDropped(file())))
+        );
+        assert_eq!(target.leave(), None);
+    }
+
+    #[test]
+    fn a_drag_without_files_is_refused_and_a_leave_ends_the_ring() {
+        let mut target = FileDragTarget::default();
+        assert_eq!(target.enter(Vec::new(), DROPEFFECT_COPY), (DROPEFFECT_NONE, None));
+        assert_eq!(target.over(DROPEFFECT_COPY), DROPEFFECT_NONE);
+        assert_eq!(target.leave(), None);
+        let file = vec![PathBuf::from("shop.eggdb")];
+        target.enter(file, DROPEFFECT_COPY);
+        assert_eq!(target.leave(), Some(WindowEvent::FileDragLeft));
+        assert_eq!(target.leave(), None);
+        target.enter(vec![PathBuf::from("shop.eggdb")], DROPEFFECT_COPY);
+        assert_eq!(
+            target.drop(Vec::new(), DROPEFFECT_COPY),
+            (DROPEFFECT_NONE, Some(WindowEvent::FileDragLeft))
+        );
+    }
 
     #[test]
     fn the_dialog_filter_is_name_and_patterns_pairs_ending_in_two_nuls() {

@@ -59,6 +59,8 @@ pub const CURRENT_TIME: u32 = 0;
 pub const ATOM_NONE: u32 = 0;
 /// The code of a `SelectionNotify` event.
 pub const EVENT_CODE_SELECTION_NOTIFY: u8 = 31;
+/// The code of a `ClientMessage` event.
+pub const EVENT_CODE_CLIENT_MESSAGE: u8 = 33;
 
 const OPCODE_CREATE_WINDOW: u8 = 1;
 const OPCODE_CHANGE_WINDOW_ATTRIBUTES: u8 = 2;
@@ -805,6 +807,21 @@ pub fn selection_notify_event(
     event
 }
 
+/// A `ClientMessage` event of format 32 to `window` of type `kind` carrying `data`, as an XDND
+/// target answers its source with.
+pub fn client_message_event(window: u32, kind: u32, data: [u32; 5]) -> [u8; 32] {
+    let mut event = [0u8; 32];
+    event[0] = EVENT_CODE_CLIENT_MESSAGE;
+    event[1] = 32;
+    event[4..8].copy_from_slice(&window.to_le_bytes());
+    event[8..12].copy_from_slice(&kind.to_le_bytes());
+    for (at, value) in data.iter().enumerate() {
+        let start = 12 + at * 4;
+        event[start..start + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    event
+}
+
 /// `SendEvent` with no propagation and an empty event mask: delivers `event` to the client
 /// that created `destination`.
 pub fn send_event(destination: u32, event: &[u8; 32]) -> Result<Vec<u8>, WindowError> {
@@ -1089,14 +1106,15 @@ pub enum Packet {
         /// Its height.
         height: u16,
     },
-    /// A message from another client, such as the window manager's `WM_DELETE_WINDOW`.
+    /// A message from another client, such as the window manager's `WM_DELETE_WINDOW` or a
+    /// drag source's XDND messages.
     ClientMessage {
         /// The window.
         window: u32,
         /// The message's type atom.
         kind: u32,
-        /// Its first 32-bit value.
-        first: u32,
+        /// Its five 32-bit values (as format 32 carries them).
+        data: [u32; 5],
     },
     /// A pointer button went down in the window.
     ButtonPress {
@@ -1266,7 +1284,7 @@ pub fn parse_packet(header: &[u8; 32]) -> Packet {
         33 => Packet::ClientMessage {
             window: word(4),
             kind: word(8),
-            first: word(12),
+            data: [word(12), word(16), word(20), word(24), word(28)],
         },
         34 if header[4] == 1 => Packet::KeyboardMappingChanged,
         code => Packet::Other(code),
@@ -1353,6 +1371,22 @@ mod tests {
             7,
             &serving
         ));
+    }
+
+    #[test]
+    fn client_messages_round_trip_with_all_five_values() {
+        let event = client_message_event(7, 300, [1, 2, 3, 4, 5]);
+        assert_eq!(&event[..2], &[EVENT_CODE_CLIENT_MESSAGE, 32]);
+        assert_eq!(
+            parse_packet(&event),
+            Packet::ClientMessage {
+                window: 7,
+                kind: 300,
+                data: [1, 2, 3, 4, 5]
+            }
+        );
+        let sent = send_event(9, &event).unwrap();
+        assert_eq!(&sent[12..44], &event);
     }
 
     #[test]
@@ -1750,7 +1784,7 @@ mod tests {
             Packet::ClientMessage {
                 window: 7,
                 kind: 300,
-                first: 301
+                data: [301, 0, 0, 0, 0]
             }
         );
         let expose = packet(12, |bytes| bytes[16] = 2);

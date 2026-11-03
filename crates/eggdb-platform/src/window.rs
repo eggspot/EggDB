@@ -23,6 +23,7 @@ pub mod uia;
 pub mod win32;
 pub mod x11;
 pub mod x11_incr;
+pub mod xdnd;
 
 #[cfg(target_os = "macos")]
 mod cocoa_window;
