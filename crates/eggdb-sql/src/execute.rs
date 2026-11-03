@@ -820,7 +820,7 @@ fn with_domain_default(table: &TableDefinition, index: usize, column: &Column) -
     })
 }
 
-fn default_value(table: &TableDefinition, index: usize) -> SqlResult<Value> {
+pub(crate) fn default_value(table: &TableDefinition, index: usize) -> SqlResult<Value> {
     let Some(column) = table.columns.get(index) else {
         return Ok(Value::Null);
     };

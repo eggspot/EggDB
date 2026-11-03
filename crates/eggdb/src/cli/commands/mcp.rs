@@ -203,7 +203,7 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
     };
     let columns_line = if shown_tables.iter().any(|name| name.contains('(')) {
         format!(
-            "  columns      {}: the agent sees only the columns listed, and may not change these tables\n",
+            "  columns      {}: the agent sees only the columns listed, and may not delete their rows or change their definitions\n",
             shown_tables
                 .iter()
                 .filter(|name| name.contains('('))

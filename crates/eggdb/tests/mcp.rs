@@ -1219,13 +1219,18 @@ fn an_agent_limited_to_some_columns_sees_and_changes_nothing_else() {
     );
     let changed = mcp.call(
         "write_sql",
-        r#"{"sql":"UPDATE users SET name = 'Hedy' WHERE id = 2"}"#,
+        r#"{"sql":"UPDATE users SET name = 'Hedy' WHERE id = 3"}"#,
     );
-    let (state, message) = sql_failure(&changed);
+    assert_eq!(text_at(ok(&changed), &["committed"]), "true");
+    let deleted = mcp.call(
+        "write_sql",
+        r#"{"sql":"DELETE FROM users WHERE id = 2","confirm":true}"#,
+    );
+    let (state, message) = sql_failure(&deleted);
     assert_eq!(state, "42501");
-    assert_eq!(
-        message,
-        "cannot change \"users\": this session may read only some of its columns (--tables), so it may not change its rows or its definition"
+    assert!(
+        message.starts_with("cannot delete rows of \"users\""),
+        "{message}"
     );
     let (status, messages) = mcp.finish();
     assert!(status.success(), "{messages}");
@@ -1237,10 +1242,15 @@ fn an_agent_limited_to_some_columns_sees_and_changes_nothing_else() {
         "sql",
         &path,
         "-c",
-        "SELECT 'row=' || name || '/' || coalesce(email, '-') FROM users WHERE id = 2",
+        "SELECT 'row=' || name || '/' || coalesce(email, '-') FROM users WHERE id IN (2, 3) ORDER BY id",
     ]);
     assert!(check.status.success(), "{}", stderr(&check));
     assert!(stdout(&check).contains("row=Grace/-"), "{}", stdout(&check));
+    assert!(
+        stdout(&check).contains("row=Hedy/mh@example.com"),
+        "{}",
+        stdout(&check)
+    );
 }
 
 #[test]

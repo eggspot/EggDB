@@ -258,11 +258,9 @@ fn a_foreign_key_or_a_view_across_the_list_keeps_the_listed_table_from_changing(
     );
     refused(&mut session, "TRUNCATE parents");
     refused(&mut session, "DROP TABLE parents");
-    fails(&mut session, "INSERT INTO orders VALUES (2, 1, 'second')");
-    let referencing = refused(
-        &mut session,
-        "UPDATE orders SET note = 'changed' WHERE id = 1",
-    );
+    runs(&mut session, "INSERT INTO orders VALUES (2, 1, 'second')");
+    runs(&mut session, "UPDATE orders SET note = 'changed' WHERE id = 1");
+    let referencing = refused(&mut session, "ALTER TABLE orders ADD COLUMN extra integer");
     assert!(
         referencing.contains("\"orders\" has a foreign key to table \"customers\""),
         "{referencing}"
@@ -284,8 +282,8 @@ fn a_foreign_key_or_a_view_across_the_list_keeps_the_listed_table_from_changing(
     );
     assert_eq!(shown(&store, "SELECT v FROM peek"), "v\n1\nSELECT 1");
     assert_eq!(
-        shown(&store, "SELECT note FROM orders"),
-        "note\nfirst\nSELECT 1"
+        shown(&store, "SELECT id, note FROM orders ORDER BY id"),
+        "id|note\n1|changed\n2|second\nSELECT 2"
     );
 }
 
@@ -327,10 +325,7 @@ fn the_ties_across_the_list_are_named() {
         .iter()
         .find(|link| link.kind == OutsideLinkKind::References)
         .unwrap();
-    assert_eq!(
-        referencing.blocked_changes(),
-        "change its rows or its definition"
-    );
+    assert_eq!(referencing.blocked_changes(), "change its definition");
     let view = links
         .iter()
         .find(|link| link.kind == OutsideLinkKind::ReadByView)
@@ -560,21 +555,31 @@ fn a_table_another_table_references_takes_inserts_and_other_columns_but_not_dele
 }
 
 #[test]
-fn a_table_listed_with_columns_cannot_be_changed() {
+fn a_table_listed_with_columns_takes_inserts_and_changes_to_its_listed_columns() {
     let store = shop();
     let limited = ConfinedStore {
         store: &store,
         tables: VisibleTables::new(["secrets(id)", "items"]),
     };
     let mut session = Session::new(&limited);
+    runs(&mut session, "INSERT INTO secrets VALUES (2)");
+    runs(&mut session, "INSERT INTO secrets VALUES (1) ON CONFLICT (id) DO NOTHING");
     assert_eq!(
-        refused(&mut session, "INSERT INTO secrets VALUES (2)"),
-        "cannot change \"secrets\": this session may read only some of its columns (--tables), so it may not change its rows or its definition"
+        refused(&mut session, "DELETE FROM secrets WHERE id = 1"),
+        "cannot delete rows of \"secrets\" or change their key: this session may read only some of its columns (--tables), and the row would take the others with it"
     );
     for sql in [
-        "UPDATE secrets SET id = 5",
+        "UPDATE secrets SET id = 5 WHERE id = 1",
         "DELETE FROM secrets",
         "TRUNCATE secrets",
+    ] {
+        let message = refused(&mut session, sql);
+        assert!(
+            message.starts_with("cannot delete rows of \"secrets\""),
+            "{sql}: {message}"
+        );
+    }
+    for sql in [
         "ALTER TABLE secrets ADD COLUMN extra integer",
         "COMMENT ON TABLE secrets IS 'changed'",
         "DROP TABLE secrets",
@@ -590,6 +595,8 @@ fn a_table_listed_with_columns_cannot_be_changed() {
     for sql in [
         "INSERT INTO items (name) SELECT code FROM secrets",
         "UPDATE secrets SET code = 'gone'",
+        "INSERT INTO secrets (id, code) VALUES (3, 'x')",
+        "INSERT INTO secrets VALUES (3) RETURNING code",
     ] {
         let error = fails(&mut session, sql);
         assert_eq!(error.state(), SqlState::UNDEFINED_COLUMN, "{sql}: {error}");
@@ -604,8 +611,8 @@ fn a_table_listed_with_columns_cannot_be_changed() {
     );
     session.close().unwrap();
     assert_eq!(
-        shown(&store, "SELECT id, code FROM secrets"),
-        "id|code\n1|swordfish\nSELECT 1"
+        shown(&store, "SELECT id, coalesce(code, '-') AS code FROM secrets ORDER BY id"),
+        "id|code\n1|swordfish\n2|-\nSELECT 2"
     );
     let limited = ConfinedStore {
         store: &store,
@@ -614,6 +621,414 @@ fn a_table_listed_with_columns_cannot_be_changed() {
     let mut session = Session::new(&limited);
     let message = refused(&mut session, "CREATE TABLE drafts (id integer PRIMARY KEY)");
     assert!(message.starts_with("cannot change \"drafts\""), "{message}");
+}
+
+fn staff() -> MemoryStore {
+    let store = MemoryStore::default();
+    let mut owner = Session::new(&store);
+    runs(
+        &mut owner,
+        "CREATE TABLE staff (
+             id integer PRIMARY KEY,
+             name text NOT NULL,
+             team text,
+             salary integer NOT NULL DEFAULT 1000 CHECK (salary > 0),
+             badge text UNIQUE,
+             note text DEFAULT 'none',
+             bonus integer,
+             CHECK (bonus IS NULL OR bonus < salary)
+         );
+         CREATE INDEX staff_by_team_and_salary ON staff (team, salary);
+         CREATE INDEX staff_by_note ON staff (note);
+         INSERT INTO staff VALUES (1, 'Ada', 'core', 9000, 'b-1', 'secret note', 10)",
+    );
+    owner.close().unwrap();
+    store
+}
+
+fn staff_limited(store: &MemoryStore) -> ConfinedStore<'_> {
+    ConfinedStore {
+        store,
+        tables: VisibleTables::new(["staff(id,name,team,bonus)"]),
+    }
+}
+
+fn index_entries(store: &MemoryStore, index: &str) -> usize {
+    let read = store.begin_read().unwrap();
+    let table = crate::encoding::TableDefinition::decode(
+        "staff",
+        &read
+            .get(&crate::encoding::table_key("staff"))
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let id = table
+        .indexes
+        .iter()
+        .find(|candidate| candidate.name == index)
+        .unwrap()
+        .id;
+    let prefix = crate::encoding::index_prefix(table.id, id);
+    let mut entries = 0;
+    read.scan(
+        &prefix,
+        &crate::encoding::prefix_end(&prefix),
+        crate::store::ScanDirection::Forward,
+        &mut |_, _| {
+            entries += 1;
+            Ok(true)
+        },
+    )
+    .unwrap();
+    entries
+}
+
+#[test]
+fn a_new_row_gives_hidden_columns_their_defaults_and_a_change_keeps_their_values() {
+    let store = staff();
+    let limited = staff_limited(&store);
+    let mut session = Session::new(&limited);
+    runs(&mut session, "INSERT INTO staff (id, name, team) VALUES (2, 'Grace', 'core')");
+    runs(&mut session, "UPDATE staff SET name = 'Ida' WHERE id = 1");
+    runs(
+        &mut session,
+        "INSERT INTO staff (id, name) VALUES (2, 'Grace') ON CONFLICT (id) DO UPDATE SET name = 'Grace Hopper'",
+    );
+    let mut returned = Vec::new();
+    session
+        .execute(
+            "UPDATE staff SET name = 'Ada' WHERE id = 1 RETURNING *",
+            &mut |result| returned.push(render(&result)),
+        )
+        .unwrap();
+    assert_eq!(returned.last().unwrap(), "id|name|team|bonus\n1|Ada|core|10\nUPDATE 1");
+    session.close().unwrap();
+    assert_eq!(
+        shown(
+            &store,
+            "SELECT id, name, team, salary, coalesce(badge, '-') AS badge, note, coalesce(bonus, 0) AS bonus FROM staff ORDER BY id"
+        ),
+        "id|name|team|salary|badge|note|bonus\n1|Ada|core|9000|b-1|secret note|10\n2|Grace Hopper|core|1000|-|none|0\nSELECT 2"
+    );
+    assert_eq!(index_entries(&store, "staff_by_team_and_salary"), 2);
+    assert_eq!(index_entries(&store, "staff_by_note"), 2);
+    assert_eq!(
+        shown(
+            &store,
+            "SELECT id FROM staff WHERE team = 'core' AND salary = 1000"
+        ),
+        "id\n2\nSELECT 1"
+    );
+    assert_eq!(
+        shown(&store, "SELECT id FROM staff WHERE note = 'none'"),
+        "id\n2\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_change_to_a_listed_column_moves_the_hidden_index_entries_with_it() {
+    let store = staff();
+    let limited = staff_limited(&store);
+    let mut session = Session::new(&limited);
+    runs(&mut session, "UPDATE staff SET team = 'ops' WHERE id = 1");
+    session.close().unwrap();
+    assert_eq!(index_entries(&store, "staff_by_team_and_salary"), 1);
+    assert_eq!(
+        shown(&store, "SELECT id FROM staff WHERE team = 'ops' AND salary = 9000"),
+        "id\n1\nSELECT 1"
+    );
+    assert_eq!(
+        shown(&store, "SELECT count(*) FROM staff WHERE team = 'core'"),
+        "count\n0\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_write_whose_outcome_would_test_a_hidden_value_is_refused_whatever_that_value_is() {
+    let store = staff();
+    let limited = staff_limited(&store);
+    let mut session = Session::new(&limited);
+    let tied = "cannot change column \"bonus\" of \"staff\": a check, unique index or foreign key ties it to a column this session cannot see (--tables), so the change would test that column's value";
+    for sql in [
+        "UPDATE staff SET bonus = 5 WHERE id = 1",
+        "UPDATE staff SET bonus = 100000 WHERE id = 1",
+        "UPDATE staff SET bonus = NULL WHERE id = 1",
+    ] {
+        assert_eq!(refused(&mut session, sql), tied, "{sql}");
+    }
+    runs(&mut session, "UPDATE staff SET bonus = 10 WHERE id = 1");
+    let error = fails(
+        &mut session,
+        "INSERT INTO staff (id, name, bonus) VALUES (3, 'Hedy', 5000)",
+    );
+    assert_eq!(error.state(), SqlState::CHECK_VIOLATION, "{error}");
+    assert_eq!(
+        error.message(),
+        "new row for relation \"staff\" violates a check over a column this session cannot see"
+    );
+    assert!(error.detail().is_none(), "{error}");
+    runs(
+        &mut session,
+        "INSERT INTO staff (id, name, bonus) VALUES (3, 'Hedy', 999)",
+    );
+    session.close().unwrap();
+    assert_eq!(
+        shown(&store, "SELECT bonus, salary FROM staff WHERE id = 1"),
+        "bonus|salary\n10|9000\nSELECT 1"
+    );
+    assert_eq!(
+        shown(&store, "SELECT salary, bonus FROM staff WHERE id = 3"),
+        "salary|bonus\n1000|999\nSELECT 1"
+    );
+}
+
+#[test]
+fn hidden_columns_that_need_a_generated_value_or_a_check_against_other_rows_refuse_inserts() {
+    let store = MemoryStore::default();
+    let mut owner = Session::new(&store);
+    runs(
+        &mut owner,
+        "CREATE TABLE counted (id integer PRIMARY KEY, name text, seq serial);
+         CREATE TABLE coded (id integer PRIMARY KEY, name text, code text UNIQUE DEFAULT 'x');
+         CREATE TABLE required (id integer PRIMARY KEY, name text, secret text NOT NULL);
+         CREATE TABLE owners (id integer PRIMARY KEY);
+         CREATE TABLE owned (id integer PRIMARY KEY, name text, owner integer DEFAULT 1 REFERENCES owners (id));
+         CREATE FUNCTION pick() RETURNS text LANGUAGE sql AS $$ SELECT 'p' $$;
+         CREATE TABLE picked (id integer PRIMARY KEY, name text, choice text DEFAULT pick());
+         INSERT INTO owners VALUES (1);
+         INSERT INTO coded VALUES (1, 'a', 'x')",
+    );
+    owner.close().unwrap();
+    let limited = ConfinedStore {
+        store: &store,
+        tables: VisibleTables::new([
+            "counted(id,name)",
+            "coded(id,name)",
+            "required(id,name)",
+            "owned(id,name)",
+            "picked(id,name)",
+        ]),
+    };
+    let mut session = Session::new(&limited);
+    for (sql, reason) in [
+        (
+            "INSERT INTO counted VALUES (1, 'a')",
+            "a column this session cannot see takes generated values (an identity, a serial or a sequence default)",
+        ),
+        (
+            "INSERT INTO coded VALUES (2, 'b')",
+            "a unique index over a column this session cannot see would be checked against other rows",
+        ),
+        (
+            "INSERT INTO owned VALUES (1, 'a')",
+            "a foreign key over a column this session cannot see would be checked against its table",
+        ),
+        (
+            "INSERT INTO picked VALUES (1, 'a')",
+            "the default of a column this session cannot see calls a routine, holds a subquery or cannot be read",
+        ),
+    ] {
+        let message = refused(&mut session, sql);
+        let table = sql.split_whitespace().nth(2).unwrap();
+        assert_eq!(
+            message,
+            format!("cannot insert into \"{table}\": {reason} (--tables)"),
+            "{sql}"
+        );
+    }
+    let error = fails(&mut session, "INSERT INTO required VALUES (1, 'a')");
+    assert_eq!(error.state(), SqlState::NOT_NULL_VIOLATION, "{error}");
+    assert_eq!(
+        error.message(),
+        "null value in a column of relation \"required\" that this session cannot see violates not-null constraint"
+    );
+    runs(&mut session, "UPDATE coded SET name = 'renamed' WHERE id = 1");
+    session.close().unwrap();
+    for table in ["counted", "required", "owned", "picked"] {
+        assert_eq!(
+            shown(&store, &format!("SELECT count(*) FROM {table}")),
+            "count\n0\nSELECT 1",
+            "{table}"
+        );
+    }
+    assert_eq!(
+        shown(&store, "SELECT id, name, code FROM coded"),
+        "id|name|code\n1|renamed|x\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_rolled_back_savepoint_undoes_a_write_to_a_table_listed_with_columns() {
+    let store = staff();
+    let limited = staff_limited(&store);
+    let mut session = Session::new(&limited);
+    runs(&mut session, "BEGIN");
+    runs(&mut session, "SAVEPOINT before");
+    runs(&mut session, "INSERT INTO staff (id, name, team) VALUES (4, 'Kay', 'web')");
+    runs(&mut session, "UPDATE staff SET team = 'ops' WHERE id = 1");
+    runs(&mut session, "ROLLBACK TO SAVEPOINT before");
+    runs(&mut session, "INSERT INTO staff (id, name, team) VALUES (5, 'Lin', 'web')");
+    runs(&mut session, "COMMIT");
+    session.close().unwrap();
+    assert_eq!(
+        shown(&store, "SELECT id, team, salary, note FROM staff ORDER BY id"),
+        "id|team|salary|note\n1|core|9000|secret note\n5|web|1000|none\nSELECT 2"
+    );
+    assert_eq!(index_entries(&store, "staff_by_team_and_salary"), 2);
+    assert_eq!(index_entries(&store, "staff_by_note"), 2);
+    assert_eq!(
+        shown(&store, "SELECT count(*) FROM staff WHERE team = 'ops'"),
+        "count\n0\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_view_listed_with_columns_shows_only_those_and_cannot_be_changed() {
+    let store = staff();
+    let mut owner = Session::new(&store);
+    runs(
+        &mut owner,
+        "CREATE VIEW roster AS SELECT id, name, salary FROM staff",
+    );
+    owner.close().unwrap();
+    let limited = ConfinedStore {
+        store: &store,
+        tables: VisibleTables::new(["staff", "roster(id,name)"]),
+    };
+    let mut session = Session::new(&limited);
+    let mut outputs = Vec::new();
+    session
+        .execute("SELECT * FROM roster", &mut |result| {
+            outputs.push(render(&result))
+        })
+        .unwrap();
+    assert_eq!(outputs.last().unwrap(), "id|name\n1|Ada\nSELECT 1");
+    let error = fails(&mut session, "SELECT salary FROM roster");
+    assert_eq!(error.state(), SqlState::UNDEFINED_COLUMN, "{error}");
+    assert_eq!(
+        refused(
+            &mut session,
+            "CREATE OR REPLACE VIEW roster AS SELECT id, name, salary, badge FROM staff"
+        ),
+        "cannot change view \"roster\": this session may read only some of its columns (--tables)"
+    );
+    refused(&mut session, "DROP VIEW roster");
+    fails(&mut session, "INSERT INTO roster (id, name) VALUES (9, 'Zed')");
+    session.close().unwrap();
+    assert_eq!(
+        shown(&store, "SELECT count(*) FROM staff"),
+        "count\n1\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_row_whose_foreign_key_points_at_an_unlisted_table_is_checked_without_showing_that_table() {
+    let store = MemoryStore::default();
+    let mut owner = Session::new(&store);
+    runs(
+        &mut owner,
+        "CREATE TABLE customers (id integer PRIMARY KEY, card text);
+         CREATE TABLE orders (id integer PRIMARY KEY, customer integer REFERENCES customers (id), note text);
+         INSERT INTO customers VALUES (1, '4111-1111'), (2, '5500-0000');
+         INSERT INTO orders VALUES (1, 1, 'first')",
+    );
+    owner.close().unwrap();
+    let limited = ConfinedStore {
+        store: &store,
+        tables: VisibleTables::new(["orders"]),
+    };
+    let mut session = Session::new(&limited);
+    runs(&mut session, "INSERT INTO orders VALUES (2, 2, 'second')");
+    runs(&mut session, "INSERT INTO orders VALUES (3, NULL, 'none')");
+    runs(&mut session, "UPDATE orders SET customer = 1 WHERE id = 2");
+    runs(&mut session, "DELETE FROM orders WHERE id = 3");
+    for sql in [
+        "INSERT INTO orders VALUES (4, 99, 'missing')",
+        "UPDATE orders SET customer = 99 WHERE id = 1",
+    ] {
+        let error = fails(&mut session, sql);
+        assert_eq!(error.state(), SqlState::FOREIGN_KEY_VIOLATION, "{sql}: {error}");
+        let text = format!("{error} {:?}", error.detail());
+        assert!(!text.contains("4111"), "{sql}: {text}");
+        assert!(!text.contains("card"), "{sql}: {text}");
+    }
+    missing(&mut session, "SELECT * FROM customers");
+    session.close().unwrap();
+    let mut mysql = Session::with_dialect(&limited, crate::Dialect::MySql);
+    let error = fails(&mut mysql, "INSERT INTO orders VALUES (5, 77, 'mysql')");
+    assert!(error.message().contains("REFERENCES `customers`)"), "{error}");
+    assert!(!error.message().contains("`id`)"), "{error}");
+    mysql.close().unwrap();
+    let mut sqlite = Session::with_dialect(&limited, crate::Dialect::Sqlite);
+    runs(&mut sqlite, "PRAGMA foreign_keys = ON");
+    let error = fails(&mut sqlite, "INSERT INTO orders VALUES (6, 77, 'sqlite')");
+    assert_eq!(error.message(), "FOREIGN KEY constraint failed");
+    sqlite.close().unwrap();
+    assert_eq!(
+        shown(&store, "SELECT id, customer, note FROM orders ORDER BY id"),
+        "id|customer|note\n1|1|first\n2|1|second\nSELECT 2"
+    );
+    assert_eq!(
+        shown(&store, "SELECT id, card FROM customers ORDER BY id"),
+        "id|card\n1|4111-1111\n2|5500-0000\nSELECT 2"
+    );
+}
+
+#[test]
+fn joined_updates_and_deletes_and_select_into_cannot_read_an_unlisted_table() {
+    let store = shop();
+    let limited = confined(&store);
+    let mut session = Session::new(&limited);
+    for sql in [
+        "UPDATE items SET name = secrets.code FROM secrets WHERE secrets.id = items.id",
+        "DELETE FROM items USING secrets WHERE secrets.id = items.id",
+        "SELECT code INTO drafts FROM secrets",
+        "MERGE INTO items USING secrets ON items.id = secrets.id WHEN NOT MATCHED THEN INSERT (name) VALUES (secrets.code)",
+    ] {
+        let error = fails(&mut session, sql);
+        assert_eq!(error.state(), SqlState::UNDEFINED_TABLE, "{sql}: {error}");
+        assert!(!error.message().contains("swordfish"), "{sql}: {error}");
+    }
+    let created = refused(&mut session, "SELECT name INTO copied FROM items");
+    assert!(created.starts_with("cannot change \"copied\""), "{created}");
+    runs(&mut session, "SELECT name INTO drafts FROM items");
+    session.close().unwrap();
+    let mut mysql = Session::with_dialect(&limited, crate::Dialect::MySql);
+    for sql in [
+        "UPDATE items, secrets SET items.name = secrets.code WHERE items.id = secrets.id",
+        "DELETE items FROM items JOIN secrets ON secrets.id = items.id",
+    ] {
+        let error = fails(&mut mysql, sql);
+        assert!(
+            matches!(error.state().code(), "42P01" | "42S02"),
+            "{sql}: {error}"
+        );
+        assert!(!error.message().contains("swordfish"), "{sql}: {error}");
+    }
+    mysql.close().unwrap();
+    let mut sqlserver = Session::with_dialect(&limited, crate::Dialect::SqlServer);
+    for sql in [
+        "UPDATE items SET name = 'x' OUTPUT inserted.id INTO secrets WHERE id = 0",
+        "SELECT code INTO log FROM secrets",
+        "UPDATE i SET name = s.code FROM items i JOIN secrets s ON s.id = i.id",
+    ] {
+        let error = fails(&mut sqlserver, sql);
+        assert!(!error.message().contains("swordfish"), "{sql}: {error}");
+    }
+    sqlserver.close().unwrap();
+    assert_eq!(
+        shown(&store, "SELECT id, code FROM secrets"),
+        "id|code\n1|swordfish\nSELECT 1"
+    );
+    assert_eq!(
+        shown(&store, "SELECT count(*) FROM items"),
+        "count\n0\nSELECT 1"
+    );
+    assert_eq!(
+        shown(&store, "SELECT count(*) FROM log"),
+        "count\n0\nSELECT 1"
+    );
 }
 
 #[test]
