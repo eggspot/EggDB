@@ -1,10 +1,11 @@
 //! The behavior every `Network` shares, checked against the operating system's network on the
 //! loopback interface with the portable backend, the system's own and `poll(2)`, and against the
-//! simulation on several seeds, with and without short transfers and latency.
+//! simulation on several seeds, with and without short transfers and latency; UDP sockets too.
 
 use eggdb_platform::{
-    Address, ErrorKind, NetBackend, NetCompletion, NetListener, NetOp, NetQueue, NetQueueOptions,
-    NetStream, Network, OsNetQueue, OsNetwork, Result, SimNetwork,
+    Address, DatagramSocket, ErrorKind, MAX_DATAGRAM_BYTES, NetBackend, NetCompletion,
+    NetListener, NetOp, NetQueue, NetQueueOptions, NetStream, Network, OsNetQueue, OsNetwork,
+    Result, SimNetwork,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -40,6 +41,7 @@ impl Network for OsBackend {
     type Listener = <OsNetwork as Network>::Listener;
     type Stream = <OsNetwork as Network>::Stream;
     type Queue = OsNetQueue;
+    type Datagram = <OsNetwork as Network>::Datagram;
 
     fn listen(&self, address: Address) -> Result<Self::Listener> {
         OsNetwork::new().listen(address)
@@ -47,6 +49,10 @@ impl Network for OsBackend {
 
     fn net_queue(&self, options: NetQueueOptions) -> Result<OsNetQueue> {
         OsNetwork::new().net_queue(options.backend(self.0))
+    }
+
+    fn bind_datagram(&self, address: SocketAddr) -> Result<Self::Datagram> {
+        OsNetwork::new().bind_datagram(address)
     }
 }
 
@@ -367,6 +373,63 @@ contract!(
         assert_eq!(received, b"still here");
     }
 );
+
+contract!(datagrams_cross_whole_in_both_directions, |net| {
+    let a = net.bind_datagram(SocketAddr::new(LOOPBACK, 0)).unwrap();
+    let b = net.bind_datagram(SocketAddr::new(LOOPBACK, 0)).unwrap();
+    let (a_address, b_address) = (a.local_address().unwrap(), b.local_address().unwrap());
+    assert_ne!(a_address, b_address);
+    let mut buffer = vec![0; MAX_DATAGRAM_BYTES];
+    let request: Vec<u8> = (0..1200_u32).map(|at| (at % 251) as u8).collect();
+    assert_eq!(a.send_to(&request, b_address).unwrap(), request.len());
+    let (length, from) = b.receive_from(&mut buffer, Duration::from_secs(5)).unwrap();
+    assert_eq!((&buffer[..length], from), (&request[..], a_address));
+    b.send_to(b"ok", a_address).unwrap();
+    let (length, from) = a.receive_from(&mut buffer, Duration::from_secs(5)).unwrap();
+    assert_eq!((&buffer[..length], from), (&b"ok"[..], b_address));
+});
+
+contract!(a_datagram_receive_with_nothing_sent_times_out, |net| {
+    let socket = net.bind_datagram(SocketAddr::new(LOOPBACK, 0)).unwrap();
+    let error = socket
+        .receive_from(&mut [0; 16], Duration::from_millis(20))
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::TimedOut);
+});
+
+contract!(datagram_sockets_refuse_a_taken_port_and_oversized_or_empty_buffers, |net| {
+    let socket = net.bind_datagram(SocketAddr::new(LOOPBACK, 0)).unwrap();
+    let address = socket.local_address().unwrap();
+    assert_eq!(
+        net.bind_datagram(address).unwrap_err().kind(),
+        ErrorKind::AddrInUse
+    );
+    assert_eq!(
+        socket
+            .send_to(&vec![0; MAX_DATAGRAM_BYTES + 1], address)
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        socket
+            .receive_from(&mut [], Duration::from_millis(1))
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+});
+
+contract!(a_datagram_longer_than_the_buffer_is_cut_or_refused, |net| {
+    let a = net.bind_datagram(SocketAddr::new(LOOPBACK, 0)).unwrap();
+    let b = net.bind_datagram(SocketAddr::new(LOOPBACK, 0)).unwrap();
+    a.send_to(b"0123456789", b.local_address().unwrap()).unwrap();
+    let mut buffer = [0; 4];
+    match b.receive_from(&mut buffer, Duration::from_secs(5)) {
+        Ok((length, _)) => assert_eq!((length, &buffer), (4, b"0123")),
+        Err(error) => assert_eq!(error.kind(), ErrorKind::InvalidInput),
+    }
+});
 
 fn receive_one<N: Network>(
     queue: &mut N::Queue,

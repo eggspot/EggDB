@@ -3,6 +3,7 @@ use crate::net::{
     Address, NetBackend, NetCompletion, NetListener, NetOp, NetOutput, NetQueue, NetQueueOptions,
     NetStream, Network, RejectedNetOp, answered_at_once, net_queue_full,
 };
+use crate::os_datagram::OsDatagramSocket;
 use crate::os_io_uring::NetRing;
 use crate::os_iocp_net::NetPort;
 #[cfg(windows)]
@@ -28,7 +29,8 @@ use std::time::{Duration, Instant};
 /// [`OsNetQueue::backend`] says which one a queue runs.
 /// Connections have Nagle's algorithm turned off, as database protocols send small requests
 /// and answers, and never raise `SIGPIPE`, so a process embedding EggDB is not stopped by a
-/// peer that went away.
+/// peer that went away. Its UDP sockets ([`OsDatagramSocket`]) are the operating system's,
+/// read by a blocking receive with a timeout.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OsNetwork;
 
@@ -43,6 +45,7 @@ impl Network for OsNetwork {
     type Listener = OsListener;
     type Stream = OsStream;
     type Queue = OsNetQueue;
+    type Datagram = OsDatagramSocket;
 
     fn listen(&self, address: Address) -> Result<OsListener> {
         let Address::Tcp(address) = address;
@@ -73,6 +76,10 @@ impl Network for OsNetwork {
             engine,
             canceled: Vec::new(),
         })
+    }
+
+    fn bind_datagram(&self, address: SocketAddr) -> Result<OsDatagramSocket> {
+        OsDatagramSocket::bind(address)
     }
 }
 

@@ -11,6 +11,10 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+mod datagram;
+
+pub use datagram::SimDatagramSocket;
+
 /// A deterministic simulation of a network of hosts, for tests (D9).
 ///
 /// [`SimNetwork::host`] gives each IP address a [`SimHost`], which implements [`Network`].
@@ -37,8 +41,8 @@ use std::time::Duration;
 /// [`ErrorKind::InjectedFault`], by number or at random from a seed, changing nothing. Clones
 /// share the same network.
 ///
-/// Time is a [`SimClock`] that moves only inside `reap`: when no operation can finish and
-/// nothing is due, the queue moves the clock to the next thing that will happen, such as bytes
+/// Time is a [`SimClock`] that moves only inside `reap` and datagram receives: when no
+/// operation can finish and nothing is due, the queue moves the clock to the next thing that will happen, such as bytes
 /// arriving after the latency set with [`SimNetwork::latency`], or to the end of
 /// [`NetQueue::reap_timeout`]'s wait, whichever comes first. [`SimNetwork::host_latency`] and
 /// [`SimNetwork::host_bandwidth`] give a host a link of its own: what crosses it waits for the
@@ -56,6 +60,12 @@ use std::time::Duration;
 /// and an end that sends nothing never learns that its peer gave up, as over TCP. After a reset
 /// or a timeout, the end's [`NetStream::peer_address`] and [`NetStream::shutdown_write`] fail
 /// with [`ErrorKind::NotConnected`], as the operating systems' do.
+///
+/// Datagrams ([`SimDatagramSocket`]) cross the same latency, links and cuts: a datagram sent
+/// across a cut is lost rather than held, datagrams may overtake each other when their latency
+/// differs, and a socket holds at most [`SimNetwork::DATAGRAM_BUFFER_BYTES`] in transit and
+/// unreceived, dropping what arrives beyond it. A datagram receive moves the clock to the
+/// datagram's arrival, or to the end of its wait when none arrives in time.
 #[derive(Debug, Clone, Default)]
 pub struct SimNetwork {
     shared: Arc<Mutex<World>>,
@@ -76,6 +86,8 @@ struct World {
     latency: [Duration; 2],
     cuts: BTreeSet<(IpAddr, IpAddr)>,
     links: BTreeMap<IpAddr, HostLink>,
+    datagram_sockets: BTreeMap<SocketAddr, datagram::Inbox>,
+    next_datagram: u64,
 }
 
 #[derive(Debug)]
@@ -262,6 +274,10 @@ impl SimNetwork {
     /// 200 ms up to 120 s, 924.6 s in all.
     pub const RETRANSMISSION_TIMEOUT: Duration = Duration::from_millis(924_600);
 
+    /// The most bytes of datagrams one [`SimDatagramSocket`] holds in transit and unreceived,
+    /// Linux's default receive buffer; datagrams beyond it are dropped.
+    pub const DATAGRAM_BUFFER_BYTES: usize = 212_992;
+
     /// Creates an empty network, seeded with 0, with its own clock at zero and no latency.
     pub fn new() -> Self {
         Self::default()
@@ -391,6 +407,7 @@ impl Network for SimHost {
     type Listener = SimListener;
     type Stream = SimStream;
     type Queue = SimNetQueue;
+    type Datagram = SimDatagramSocket;
 
     fn listen(&self, address: Address) -> Result<SimListener> {
         let Address::Tcp(address) = address;
@@ -430,6 +447,10 @@ impl Network for SimHost {
             waiting: Vec::new(),
             transferring: BTreeSet::new(),
         })
+    }
+
+    fn bind_datagram(&self, address: SocketAddr) -> Result<SimDatagramSocket> {
+        datagram::bind(self, address)
     }
 }
 

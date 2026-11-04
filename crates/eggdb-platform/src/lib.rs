@@ -10,7 +10,8 @@
 //!   and reaped as [`IoCompletion`]s in any order, each [`IoOp`] owning its [`IoBuffer`] while
 //!   it is in flight;
 //! - [`Network`]: TCP listeners and connections, with a [`NetQueue`] of accepts, connects,
-//!   receives and sends ([`NetOp`]) reaped as [`NetCompletion`]s in any order;
+//!   receives and sends ([`NetOp`]) reaped as [`NetCompletion`]s in any order, and UDP
+//!   sockets ([`DatagramSocket`]);
 //! - [`Clock`]: a monotonic clock for timeouts and a wall clock for hybrid logical clock
 //!   timestamps (D20);
 //! - [`Memory`]: the operating system's page sizes, and zeroed page-aligned [`MemoryRegion`]s
@@ -53,6 +54,7 @@ mod memory;
 mod memory_file;
 mod net;
 mod os_cpus;
+mod os_datagram;
 mod os_fs;
 mod os_io;
 mod os_io_uring;
@@ -146,10 +148,11 @@ pub use io::{IoBackend, IoBuffer, IoCompletion, IoOp, IoQueue, IoQueueOptions, R
 pub use memory::{Memory, MemoryRegion, PageMode};
 pub use memory_file::MemoryFile;
 pub use net::{
-    Address, NetBackend, NetCompletion, NetListener, NetOp, NetOutput, NetQueue, NetQueueOptions,
-    NetStream, Network, RejectedNetOp,
+    Address, DatagramSocket, MAX_DATAGRAM_BYTES, NetBackend, NetCompletion, NetListener, NetOp,
+    NetOutput, NetQueue, NetQueueOptions, NetStream, Network, RejectedNetOp,
 };
 pub use os_cpus::OsCpus;
+pub use os_datagram::OsDatagramSocket;
 pub use os_fs::{OsFile, OsFileSystem};
 pub use os_io::OsIoQueue;
 pub use os_memory::OsMemory;
@@ -158,7 +161,9 @@ pub use sim_cpus::SimCpus;
 pub use sim_fs::{CrashMode, SimFile, SimFileSystem};
 pub use sim_io::SimIoQueue;
 pub use sim_memory::SimMemory;
-pub use sim_net::{SimHost, SimListener, SimNetQueue, SimNetwork, SimStream};
+pub use sim_net::{
+    SimDatagramSocket, SimHost, SimListener, SimNetQueue, SimNetwork, SimStream,
+};
 pub use threads::{SpawnedThread, ThreadOptions};
 pub use topology::{
     CacheId, CoreId, CoreKind, CpuLocation, CpuTopology, NumaNodeId, PackageId, SiblingNumbering,
