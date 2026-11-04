@@ -868,7 +868,10 @@ fn decompose(expr: &Expr, parts: &mut Decomposition) -> SqlResult<Expr> {
     if crate::window::first_call(expr).is_none() {
         if matches!(
             expr.kind,
-            ExprKind::Literal(_) | ExprKind::Constant { .. } | ExprKind::SessionValue { .. }
+            ExprKind::Literal(_)
+                | ExprKind::Constant { .. }
+                | ExprKind::SessionValue { .. }
+                | ExprKind::CurrentSetting { .. }
         ) {
             return Ok(expr.clone());
         }

@@ -40,6 +40,7 @@ pub(crate) use mysql_routines::mysql_program;
 pub use oracle::ORACLE_COMPATIBLE_VERSION;
 pub(crate) use oracle::{is_reserved as is_oracle_reserved, oracle_table_name};
 pub(crate) use plpgsql::plpgsql_program;
+pub(crate) use routines::with_routine_settings_changed;
 pub(crate) use plsql::{plsql_package_program, plsql_program};
 pub use sqlserver::SQLSERVER_COMPATIBLE_VERSION;
 pub(crate) use sqlserver::{
@@ -60,6 +61,7 @@ use crate::ast::{
     JoinKind, JoinedTables, Literal, Name, OnDuplicate, Overriding, Select, SelectItem, Statement,
     TableReference, TruthTest, UnaryOperator, Update,
 };
+use crate::ast::{CharacteristicsTarget, TransactionCharacteristics};
 use crate::dialect::Dialect;
 use crate::encoding::{IndexMethod, SortOptions};
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -326,6 +328,7 @@ pub(crate) struct Parser<'t> {
     function_body: bool,
     select_into: Option<Option<select_into::SelectIntoTable>>,
     later_set_operand: bool,
+    routine_setting_spans: Option<Vec<routines::SettingSpan>>,
 }
 
 #[derive(Clone, Copy)]
@@ -452,6 +455,7 @@ impl<'t> Parser<'t> {
             function_body: false,
             select_into: None,
             later_set_operand: false,
+            routine_setting_spans: None,
         }
     }
 
@@ -1211,10 +1215,24 @@ impl<'t> Parser<'t> {
         if self.is_word("snapshot") {
             return Err(self.not_supported("SET TRANSACTION SNAPSHOT"));
         }
+        let target = if characteristics {
+            CharacteristicsTarget::Session
+        } else {
+            CharacteristicsTarget::CurrentTransaction
+        };
+        self.transaction_characteristics(target)
+            .map(Statement::SetTransaction)
+    }
+
+    pub(super) fn transaction_characteristics(
+        &mut self,
+        target: CharacteristicsTarget,
+    ) -> SqlResult<TransactionCharacteristics> {
         let mut read_only = None;
+        let mut isolation = None;
         loop {
             if self.take_word("isolation") {
-                self.isolation_level()?;
+                isolation = Some(self.isolation_level()?);
             } else if self.take_word("read") {
                 if self.take_word("only") {
                     read_only = Some(true);
@@ -1224,23 +1242,21 @@ impl<'t> Parser<'t> {
                 }
             } else if self.take_word("not") {
                 self.expect_word("deferrable")?;
+            } else if self.oracle() && self.take_word("name") {
+                if !matches!(self.peek_kind(), TokenKind::String(_)) {
+                    return Err(self.unexpected());
+                }
+                self.at += 1;
             } else if !self.take_word("deferrable") {
                 break;
             }
             self.take(&TokenKind::Comma);
         }
-        match (characteristics, read_only) {
-            (true, Some(read_only)) => Ok(Statement::Set {
-                name: "default_transaction_read_only".to_owned(),
-                value: Some(if read_only { "on" } else { "off" }.to_owned()),
-                scope: SettingScope::Session,
-            }),
-            (false, Some(true)) => Err(self.not_supported("SET TRANSACTION READ ONLY")),
-            _ => Ok(Statement::Ignored {
-                tag: "SET",
-                notice: None,
-            }),
-        }
+        Ok(TransactionCharacteristics {
+            target,
+            read_only,
+            isolation,
+        })
     }
 
     fn analyze(&mut self) -> SqlResult<Statement> {
@@ -1319,17 +1335,22 @@ impl<'t> Parser<'t> {
         })
     }
 
-    fn isolation_level(&mut self) -> SqlResult<()> {
+    fn isolation_level(&mut self) -> SqlResult<String> {
         self.expect_word("level")?;
         if self.take_word("serializable") {
-            return Ok(());
+            return Ok("serializable".to_owned());
         }
         if self.take_word("repeatable") {
-            return self.expect_word("read");
+            self.expect_word("read")?;
+            return Ok("repeatable read".to_owned());
         }
-        if self.take_word("read") && (self.take_word("committed") || self.take_word("uncommitted"))
-        {
-            return Ok(());
+        if self.take_word("read") {
+            if self.take_word("committed") {
+                return Ok("read committed".to_owned());
+            }
+            if self.take_word("uncommitted") {
+                return Ok("read uncommitted".to_owned());
+            }
         }
         Err(self.unexpected())
     }
@@ -1538,6 +1559,31 @@ impl<'t> Parser<'t> {
         })
     }
 
+    fn setting_value_now(&self, setting: &str, missing_ok: bool) -> SqlResult<Option<String>> {
+        let wanted = Settings::name_of(setting);
+        if let Some(change) = self
+            .setting_changes
+            .iter()
+            .rev()
+            .find(|change| Settings::name_of(&change.name) == wanted)
+        {
+            return Ok(change.value.clone());
+        }
+        let defaults;
+        let settings = match self.settings {
+            Some(settings) => settings,
+            None => {
+                defaults = Settings::default();
+                &defaults
+            }
+        };
+        match settings.get(setting) {
+            Ok(value) => Ok(Some(value)),
+            Err(_) if missing_ok || setting.contains('.') => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     fn session_function(&mut self, name: &Name) -> SqlResult<Option<Expr>> {
         let known: &'static str = match name.text.as_str() {
             "version" => "version",
@@ -1595,28 +1641,13 @@ impl<'t> Parser<'t> {
                 false
             };
             self.expect(&TokenKind::RightParen)?;
-            let defaults;
-            let settings = match self.settings {
-                Some(settings) => settings,
-                None => {
-                    defaults = Settings::default();
-                    &defaults
-                }
-            };
-            let value = match settings.get(setting) {
-                Ok(value) => value,
-                Err(_) if missing_ok => {
-                    return Ok(Some(Expr {
-                        kind: ExprKind::Literal(Literal::Null),
-                        position: name.position,
-                    }));
-                }
-                Err(error) => return Err(error),
-            };
+            let setting = setting.as_ref().to_owned();
+            let parsed = self.setting_value_now(&setting, missing_ok)?;
             return Ok(Some(Expr {
-                kind: ExprKind::SessionValue {
-                    name: "current_setting",
-                    value,
+                kind: ExprKind::CurrentSetting {
+                    name: setting,
+                    missing_ok,
+                    parsed,
                 },
                 position: name.position,
             }));
@@ -1637,17 +1668,21 @@ impl<'t> Parser<'t> {
         } else {
             self.transaction_noise();
         }
-        let mut read_only = false;
+        let mut read_only = None;
+        let mut isolation = None;
         loop {
             if self.take_word("read") {
                 if self.take_word("only") {
-                    read_only = true;
+                    read_only = Some(true);
                 } else {
                     self.expect_word("write")?;
-                    read_only = false;
+                    read_only = Some(false);
                 }
             } else if self.take_word("isolation") {
-                self.isolation_level()?;
+                isolation = Some(self.isolation_level()?);
+            } else if self.mysql() && self.take_word("with") {
+                self.expect_word("consistent")?;
+                self.expect_word("snapshot")?;
             } else if self.is_word("deferrable") || self.is_word("not") {
                 return Err(self.not_supported("DEFERRABLE"));
             } else {
@@ -1655,7 +1690,10 @@ impl<'t> Parser<'t> {
             }
             self.take(&TokenKind::Comma);
         }
-        Ok(Statement::Begin { read_only })
+        Ok(Statement::Begin {
+            read_only,
+            isolation,
+        })
     }
 
     fn create(&mut self) -> SqlResult<Statement> {

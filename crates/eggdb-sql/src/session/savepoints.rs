@@ -300,16 +300,28 @@ impl Session<'_> {
             let settings = std::sync::Arc::make_mut(&mut self.settings);
             self.transaction_settings.restore(settings, saved);
         }
-        let Block::Writing(writer) = &mut self.block else {
-            self.savepoints.marks.truncate(at + 1);
-            self.savepoints.aborted = false;
-            return Ok(QueryResult::command("ROLLBACK"));
-        };
-        let mut routed = crate::temporary::TemporaryWrite {
-            inner: writer,
-            objects: &mut self.temporary,
-        };
-        undo_back_to(&mut routed, &mut self.savepoints.undo, undo_at)?;
+        match &mut self.block {
+            Block::Writing(writer) => {
+                let mut routed = crate::temporary::TemporaryWrite {
+                    inner: writer,
+                    objects: &mut self.temporary,
+                };
+                undo_back_to(&mut routed, &mut self.savepoints.undo, undo_at)?;
+            }
+            Block::Reading(reader) => {
+                let mut unwritable = crate::plpgsql::ReadOnlyWrite { inner: &**reader };
+                let mut routed = crate::temporary::TemporaryWrite {
+                    inner: &mut unwritable,
+                    objects: &mut self.temporary,
+                };
+                undo_back_to(&mut routed, &mut self.savepoints.undo, undo_at)?;
+            }
+            Block::None | Block::Failed => {
+                self.savepoints.marks.truncate(at + 1);
+                self.savepoints.aborted = false;
+                return Ok(QueryResult::command("ROLLBACK"));
+            }
+        }
         self.savepoints.marks.truncate(at + 1);
         self.savepoints.aborted = false;
         self.tables = crate::execute::TableCache::default();

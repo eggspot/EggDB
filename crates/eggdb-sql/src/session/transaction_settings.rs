@@ -53,13 +53,21 @@ impl Session<'_> {
         })
     }
 
-    pub(super) fn apply_routine_setting_changes(&mut self, changes: Vec<SettingChange>) {
+    pub(super) fn apply_routine_setting_changes(
+        &mut self,
+        changes: Vec<SettingChange>,
+    ) -> SqlResult<()> {
+        let mut applied = Ok(());
         for change in changes {
             if is_dialect_setting(&change.name) {
+                if let Err(error) = self.choose_dialect(change.value.as_deref()) {
+                    applied = Err(error);
+                }
                 continue;
             }
             let _ = self.change_setting(&change.name, change.value.as_deref(), change.scope);
         }
+        applied
     }
 
     pub(super) fn end_transaction_settings(&mut self, committed: bool) {

@@ -333,6 +333,7 @@ pub(crate) fn classify(
         )),
         Statement::CreateTable(_)
         | Statement::Begin { .. }
+        | Statement::SetTransaction(_)
         | Statement::Commit
         | Statement::Rollback
         | Statement::Savepoint(_)
@@ -870,7 +871,10 @@ fn routine_altered(
     alter: &AlterRoutine,
     catalog: &mut CatalogLookup<'_>,
 ) -> Option<DestructiveStatement> {
-    if alter.action == AlterRoutineAction::Accepted {
+    if matches!(
+        alter.action,
+        AlterRoutineAction::Accepted | AlterRoutineAction::Settings(_)
+    ) {
         return None;
     }
     let old = match catalog.existing_routine(&alter.target.name.text) {
@@ -886,7 +890,7 @@ fn routine_altered(
         AlterRoutineAction::SetSchema(schema) => {
             crate::schemas::qualified(&schema.text, crate::schemas::base_name(&old))
         }
-        AlterRoutineAction::Accepted => return None,
+        AlterRoutineAction::Settings(_) | AlterRoutineAction::Accepted => return None,
     };
     routine_changed(shown(&alter.target.name), &[old, new], true, catalog)
 }

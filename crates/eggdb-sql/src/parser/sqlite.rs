@@ -366,7 +366,10 @@ impl<'t> Parser<'t> {
                     || self.take_word("immediate")
                     || self.take_word("exclusive");
                 self.take_word("transaction");
-                Statement::Begin { read_only: false }
+                Statement::Begin {
+                    read_only: None,
+                    isolation: None,
+                }
             }
             "replace" if self.is_word_at(1, "into") => self.insert()?,
             "attach" | "detach" | "vacuum" | "reindex" => {

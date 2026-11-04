@@ -475,7 +475,7 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
         | ExprKind::OuterColumn { sql_type, .. } => *sql_type,
         ExprKind::Subquery(subquery) => crate::subquery::result_type(subquery),
         ExprKind::Cast { sql_type, .. } => Some(crate::user_types::storable_base(*sql_type)),
-        ExprKind::SessionValue { .. } => Some(SqlType::Text),
+        ExprKind::SessionValue { .. } | ExprKind::CurrentSetting { .. } => Some(SqlType::Text),
         ExprKind::Unary(UnaryOperator::Not, _)
         | ExprKind::And(_)
         | ExprKind::Or(_)

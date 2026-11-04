@@ -1019,9 +1019,16 @@ impl<'r> Run<'r> {
         value: Option<&str>,
         scope: SettingScope,
     ) -> SqlResult<()> {
-        if name.eq_ignore_ascii_case(crate::settings::DIALECT_SETTING) {
-            return Err(SqlError::not_supported(
-                "SET eggdb.dialect inside a PL/pgSQL or SQL function",
+        if name.eq_ignore_ascii_case(crate::settings::DIALECT_SETTING)
+            && let Some(value) = value
+            && Dialect::named(value.trim()).is_none()
+        {
+            return Err(SqlError::new(
+                SqlState::INVALID_PARAMETER_VALUE,
+                format!(
+                    "invalid value for parameter \"{}\": \"{value}\"",
+                    crate::settings::DIALECT_SETTING
+                ),
             ));
         }
         self.sync_settings();
@@ -1031,6 +1038,13 @@ impl<'r> Run<'r> {
         Ok(())
     }
 
+    fn reset_all_settings(&mut self) {
+        self.sync_settings();
+        let reset = crate::routine_settings::reset_all(&self.settings);
+        self.settings = RoutineSettings::Changed(Arc::new(reset));
+        self.settings_version = crate::routine_settings::version();
+    }
+
     fn setting_statement(&mut self, statement: &Statement) -> Option<SqlResult<QueryResult>> {
         if self.dialect() != Dialect::PostgreSql {
             return None;
@@ -1038,6 +1052,10 @@ impl<'r> Run<'r> {
         let (name, value, scope, tag) = match statement {
             Statement::Set { name, value, scope } => (name, value.as_deref(), *scope, "SET"),
             Statement::Reset { name: Some(name) } => (name, None, SettingScope::Session, "RESET"),
+            Statement::Reset { name: None } => {
+                self.reset_all_settings();
+                return Some(Ok(QueryResult::command("RESET")));
+            }
             _ => return None,
         };
         Some(

@@ -1,7 +1,8 @@
 use super::{Level, Parser};
 use crate::ast::{
-    AssignedValue, Assignment, BinaryOperator, ColumnDefinition, Expr, ExprKind, IndexSpec,
-    Literal, MySqlStatement, Name, OnDuplicate, Statement, UnaryOperator, VariableTarget,
+    AssignedValue, Assignment, BinaryOperator, CharacteristicsTarget, ColumnDefinition, Expr,
+    ExprKind, IndexSpec, Literal, MySqlStatement, Name, OnDuplicate, Statement, UnaryOperator,
+    VariableTarget,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
@@ -414,18 +415,23 @@ impl<'t> Parser<'t> {
         }
         let mut assignments = Vec::new();
         loop {
+            let session_wide = self.is_word("session") || self.is_word("local");
             let mut global = self.is_word("global") || self.is_word("persist");
             let _ = self.take_word("session")
                 || self.take_word("local")
                 || self.take_word("global")
                 || self.take_word("persist");
             if self.take_word("transaction") {
-                while !matches!(self.peek_kind(), TokenKind::End | TokenKind::Semicolon) {
-                    self.at += 1;
-                }
-                return Ok(Statement::MySql(MySqlStatement::Accepted(
-                    "SET TRANSACTION",
-                )));
+                let target = if global {
+                    CharacteristicsTarget::Global
+                } else if session_wide {
+                    CharacteristicsTarget::Session
+                } else {
+                    CharacteristicsTarget::NextTransaction
+                };
+                return self
+                    .transaction_characteristics(target)
+                    .map(Statement::SetTransaction);
             }
             if self.is_word("password") || self.is_word("role") || self.is_word("default") {
                 return Err(self.not_supported(&format!(

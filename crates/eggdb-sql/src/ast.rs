@@ -17,8 +17,10 @@ pub(crate) enum Statement {
     Update(Update),
     Delete(Delete),
     Begin {
-        read_only: bool,
+        read_only: Option<bool>,
+        isolation: Option<String>,
     },
+    SetTransaction(TransactionCharacteristics),
     Commit,
     Rollback,
     Savepoint(SavepointCommand),
@@ -225,7 +227,15 @@ pub(crate) struct AlterRoutine {
 pub(crate) enum AlterRoutineAction {
     RenameTo(Name),
     SetSchema(Name),
+    Settings(Vec<RoutineSettingChange>),
     Accepted,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RoutineSettingChange {
+    Set { name: String, value: String },
+    Reset(String),
+    ResetAll,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1052,6 +1062,21 @@ pub(crate) enum OnCommit {
     PreserveRows,
     DeleteRows,
     Drop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CharacteristicsTarget {
+    CurrentTransaction,
+    NextTransaction,
+    Session,
+    Global,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TransactionCharacteristics {
+    pub(crate) target: CharacteristicsTarget,
+    pub(crate) read_only: Option<bool>,
+    pub(crate) isolation: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1911,6 +1936,11 @@ pub(crate) enum ExprKind {
     SessionValue {
         name: &'static str,
         value: String,
+    },
+    CurrentSetting {
+        name: String,
+        missing_ok: bool,
+        parsed: Option<String>,
     },
     Subquery(Box<Subquery>),
     OuterColumn {

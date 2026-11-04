@@ -150,6 +150,11 @@ pub(crate) fn translate(error: SqlError, text: &str, user: &str) -> SqlError {
         "42804" | "42846" => Some((932, "inconsistent datatypes".to_owned())),
         "42803" => Some((979, "not a GROUP BY expression".to_owned())),
         "0A000" => Some((3001, format!("unimplemented feature: {message}"))),
+        "25006" if message.ends_with("in a read-only transaction") => Some((
+            1456,
+            "may not perform insert/delete/update operation inside a READ ONLY transaction"
+                .to_owned(),
+        )),
         "25006" => Some((
             16000,
             "database or pluggable database open for read-only access".to_owned(),

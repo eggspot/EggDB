@@ -446,7 +446,7 @@ fn any_part(expr: &Expr, test: &dyn Fn(&Expr) -> bool) -> bool {
 fn changes_between_calls(expr: &Expr) -> bool {
     let changing = |name: &str| CHANGING_FUNCTIONS.contains(&name.to_ascii_lowercase().as_str());
     match &expr.kind {
-        ExprKind::SessionValue { .. } => true,
+        ExprKind::SessionValue { .. } | ExprKind::CurrentSetting { .. } => true,
         ExprKind::Function { name, .. } => changing(name),
         ExprKind::OracleFunction { name, .. } | ExprKind::SqliteFunction { name, .. } => {
             changing(name)

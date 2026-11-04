@@ -145,6 +145,7 @@ pub(crate) fn rebuild(
         | ExprKind::Column { .. }
         | ExprKind::Slot { .. }
         | ExprKind::SessionValue { .. }
+        | ExprKind::CurrentSetting { .. }
         | ExprKind::OuterColumn { .. }
         | ExprKind::Constant { .. } => expr.kind.clone(),
         ExprKind::Subquery(subquery) => {

@@ -942,7 +942,10 @@ impl<'t> Parser<'t> {
                 return Err(not_supported("BEGIN TRANSACTION WITH MARK").at(position));
             }
             self.optional_transaction_name();
-            return Ok(Statement::Begin { read_only: false });
+            return Ok(Statement::Begin {
+                read_only: None,
+                isolation: None,
+            });
         }
         if self.is_word("distributed") {
             return Err(not_supported("BEGIN DISTRIBUTED TRANSACTION").at(position));

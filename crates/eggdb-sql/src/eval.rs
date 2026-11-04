@@ -189,6 +189,7 @@ pub(crate) fn children(expr: &Expr) -> Vec<&Expr> {
         | ExprKind::Column { .. }
         | ExprKind::Slot { .. }
         | ExprKind::SessionValue { .. }
+        | ExprKind::CurrentSetting { .. }
         | ExprKind::OuterColumn { .. }
         | ExprKind::Constant { .. } => Vec::new(),
         ExprKind::Subquery(subquery) => subquery.test.operand().into_iter().collect(),
@@ -239,6 +240,7 @@ pub(crate) fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         | ExprKind::Column { .. }
         | ExprKind::Slot { .. }
         | ExprKind::SessionValue { .. }
+        | ExprKind::CurrentSetting { .. }
         | ExprKind::OuterColumn { .. }
         | ExprKind::Constant { .. } => Vec::new(),
         ExprKind::Subquery(subquery) => subquery.test.operand_mut().into_iter().collect(),
@@ -290,6 +292,7 @@ pub(crate) fn first_aggregate(expr: &Expr) -> Option<&Expr> {
         | ExprKind::Column { .. }
         | ExprKind::Slot { .. }
         | ExprKind::SessionValue { .. }
+        | ExprKind::CurrentSetting { .. }
         | ExprKind::OuterColumn { .. }
         | ExprKind::Constant { .. } => None,
         ExprKind::Unary(_, operand)
@@ -381,6 +384,7 @@ pub(crate) fn check_columns(expr: &Expr, scope: Scope<'_>) -> SqlResult<()> {
             .map_or(Ok(()), |argument| check_columns(argument, scope)),
         ExprKind::Slot { .. }
         | ExprKind::SessionValue { .. }
+        | ExprKind::CurrentSetting { .. }
         | ExprKind::OuterColumn { .. }
         | ExprKind::Constant { .. } => Ok(()),
         ExprKind::Subquery(subquery) => subquery
@@ -458,6 +462,7 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
         ExprKind::SessionValue { name, .. }
         | ExprKind::SqliteFunction { name, .. }
         | ExprKind::OracleFunction { name, .. } => ((*name).to_owned(), true),
+        ExprKind::CurrentSetting { .. } => ("current_setting".to_owned(), true),
         ExprKind::SqlServerFunction {
             function:
                 crate::sqlserver_functions::Function::Convert { .. }
@@ -505,6 +510,21 @@ fn is_unknown_literal(expr: &Expr) -> bool {
     )
 }
 
+fn current_setting(name: &str, missing_ok: bool, parsed: Option<&str>) -> SqlResult<Value> {
+    use crate::routine_settings::JournalValue;
+    match (crate::routine_settings::current_value(name), parsed) {
+        (JournalValue::Set(value), _) => Ok(Value::Text(value)),
+        (JournalValue::Unchanged, Some(value)) => Ok(Value::Text(value.to_owned())),
+        (JournalValue::Unchanged, None) | (JournalValue::Reset, _) => {
+            match crate::settings::Settings::default().get(name) {
+                Ok(value) => Ok(Value::Text(value)),
+                Err(_) if missing_ok => Ok(Value::Null),
+                Err(error) => Err(error),
+            }
+        }
+    }
+}
+
 pub(crate) struct Evaluator<'a> {
     pub(crate) scope: Scope<'a>,
     pub(crate) row: &'a [Value],
@@ -526,6 +546,11 @@ impl Evaluator<'_> {
                 Ok(Value::Null)
             }
             ExprKind::SessionValue { value, .. } => Ok(Value::Text(value.clone())),
+            ExprKind::CurrentSetting {
+                name,
+                missing_ok,
+                parsed,
+            } => current_setting(name, *missing_ok, parsed.as_deref()),
             ExprKind::Column { qualifier, name } => {
                 let index = self
                     .scope
@@ -819,7 +844,7 @@ impl Evaluator<'_> {
                     | crate::sqlserver_functions::Function::TryConvert { target, .. },
                 ..
             } => Some(target.engine_type()),
-            ExprKind::SessionValue { .. } => Some(SqlType::Text),
+            ExprKind::SessionValue { .. } | ExprKind::CurrentSetting { .. } => Some(SqlType::Text),
             ExprKind::Unary(UnaryOperator::Minus | UnaryOperator::Plus, operand) => {
                 self.declared_type(operand)
             }

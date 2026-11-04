@@ -1149,6 +1149,7 @@ pub(crate) fn mentions_subquery(expr: &Expr) -> bool {
         | ExprKind::Column { .. }
         | ExprKind::Slot { .. }
         | ExprKind::SessionValue { .. }
+        | ExprKind::CurrentSetting { .. }
         | ExprKind::OuterColumn { .. }
         | ExprKind::Constant { .. } => false,
         ExprKind::Unary(_, operand)
