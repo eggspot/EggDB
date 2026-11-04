@@ -3712,6 +3712,15 @@ impl<'t> Parser<'t> {
         let Some(fields) = crate::row_values::constructor_fields(expr) else {
             return Ok(false);
         };
+        if let Some(scalar) = list
+            .iter()
+            .find(|item| crate::row_values::constructor_fields(item).is_none())
+        {
+            return match crate::row_values::scalar_against_row(self.dialect, scalar, fields) {
+                Some(error) => Err(error),
+                None => Ok(false),
+            };
+        }
         for item in list {
             let Some(item_fields) = crate::row_values::constructor_fields(item) else {
                 return Ok(false);
@@ -3725,6 +3734,30 @@ impl<'t> Parser<'t> {
             }
         }
         Ok(true)
+    }
+
+    fn row_between(
+        &self,
+        expr: Expr,
+        low: Expr,
+        high: Expr,
+        negated: bool,
+        position: usize,
+    ) -> SqlResult<Expr> {
+        let (above, below) = if negated {
+            (BinaryOperator::Less, BinaryOperator::Greater)
+        } else {
+            (BinaryOperator::GreaterOrEqual, BinaryOperator::LessOrEqual)
+        };
+        let low = self.row_comparison(expr.clone(), above, low)?;
+        let high = self.row_comparison(expr, below, high)?;
+        let operands = vec![low, high];
+        let kind = if negated {
+            ExprKind::Or(operands)
+        } else {
+            ExprKind::And(operands)
+        };
+        Ok(Expr { kind, position })
     }
 
     fn row_list_membership(expr: Expr, list: Vec<Expr>, position: usize) -> Expr {
@@ -4053,20 +4086,12 @@ impl<'t> Parser<'t> {
         } else if self.take_word("distinct") {
             self.expect_word("from")?;
             let right = self.expression_above(Level::Comparison)?;
-            ExprKind::IsDistinctFrom {
-                left: Box::new(expr),
-                right: Box::new(right),
-                negated,
-            }
+            return crate::row_values::distinctness(self.dialect, expr, right, negated, position);
         } else if self.postgresql() && self.take_word("json") {
             return Ok(self.is_json_predicate(expr, negated));
         } else if self.sqlite() {
             let right = self.expression_above(Level::Comparison)?;
-            ExprKind::IsDistinctFrom {
-                left: Box::new(expr),
-                right: Box::new(right),
-                negated: !negated,
-            }
+            return crate::row_values::distinctness(self.dialect, expr, right, !negated, position);
         } else {
             return Err(self.unexpected());
         };
@@ -4124,6 +4149,12 @@ impl<'t> Parser<'t> {
             let low = self.expression_above(Level::Other)?;
             self.expect_word("and")?;
             let high = self.expression_above(Level::Other)?;
+            if [&expr, &low, &high]
+                .iter()
+                .all(|side| crate::row_values::constructor_fields(side).is_some())
+            {
+                return self.row_between(expr, low, high, negated, position);
+            }
             ExprKind::Between {
                 expr: Box::new(expr),
                 low: Box::new(low),

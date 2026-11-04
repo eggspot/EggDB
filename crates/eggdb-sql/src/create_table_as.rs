@@ -428,9 +428,19 @@ fn item_expressions(query: &Statement, width: usize) -> Vec<Option<&Expr>> {
     expressions
 }
 
+fn is_sqlite_real_literal(expr: &Expr) -> bool {
+    matches!(
+        &expr.kind,
+        ExprKind::Cast { expr: inner, sql_type: SqlType::Double }
+            if inner.position == expr.position
+                && matches!(inner.kind, ExprKind::Literal(crate::ast::Literal::Decimal(_)))
+    )
+}
+
 fn sqlite_declared_type(expr: Option<&Expr>, sql_type: Option<SqlType>) -> (&'static str, SqlType) {
     let affinity_of = match expr.map(|expr| &expr.kind) {
         None | Some(ExprKind::Column { .. }) => sql_type,
+        Some(_) if expr.is_some_and(is_sqlite_real_literal) => None,
         Some(ExprKind::Cast { sql_type, .. }) => Some(*sql_type),
         Some(_) => None,
     };

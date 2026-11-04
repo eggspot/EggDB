@@ -80,14 +80,14 @@ pub(crate) fn check_text(
     };
     let deparser = Deparser { table, snapshot };
     let shown = if check.dialect == Dialect::PostgreSql {
-        deparser.check(&check.expression)
+        deparser.check_node(&check.expression)
     } else {
         None
     };
-    match (shown, pretty) {
-        (Some(shown), true) => shown,
-        (Some(shown), false) => format!("({shown})"),
-        (None, _) => check.expression.clone(),
+    match shown {
+        Some(node) if pretty => node.print(),
+        Some(node) => enclosed(&node),
+        None => check.expression.clone(),
     }
 }
 
@@ -107,13 +107,21 @@ pub(crate) fn policy_condition_text(
     };
     let deparser = Deparser { table, snapshot };
     deparser
-        .check(condition)
-        .map_or_else(|| condition.to_owned(), |shown| format!("({shown})"))
+        .check_node(condition)
+        .map_or_else(|| condition.to_owned(), |node| enclosed(&node))
+}
+
+fn enclosed(node: &Node) -> String {
+    match node {
+        Node::Enclosed(text) => text.clone(),
+        other => format!("({})", other.print()),
+    }
 }
 
 #[derive(Debug, Clone)]
 enum Node {
     Atom(String),
+    Enclosed(String),
     Cast {
         operand: Box<Node>,
         type_name: String,
@@ -151,12 +159,12 @@ enum Node {
 
 impl Node {
     fn is_complex(&self) -> bool {
-        !matches!(self, Self::Atom(_))
+        !matches!(self, Self::Atom(_) | Self::Enclosed(_))
     }
 
     fn print(&self) -> String {
         match self {
-            Self::Atom(text) => text.clone(),
+            Self::Atom(text) | Self::Enclosed(text) => text.clone(),
             Self::Cast { operand, type_name } => {
                 if operand.is_complex() && !matches!(**operand, Self::Cast { .. }) {
                     format!("({})::{type_name}", operand.print())
@@ -236,7 +244,10 @@ impl Node {
                 "{}{suffix}",
                 wrapped(
                     operand,
-                    !matches!(**operand, Self::Atom(_) | Self::Cast { .. })
+                    !matches!(
+                        **operand,
+                        Self::Atom(_) | Self::Enclosed(_) | Self::Cast { .. }
+                    )
                 )
             ),
         }
@@ -244,7 +255,7 @@ impl Node {
 
     fn needs_operand_parens(&self) -> bool {
         match self {
-            Self::Atom(_) => false,
+            Self::Atom(_) | Self::Enclosed(_) => false,
             Self::Cast { operand, .. } => operand.needs_operand_parens(),
             _ => true,
         }
@@ -527,8 +538,12 @@ fn negated_piece(piece: Piece) -> Option<Piece> {
 
 impl Deparser<'_> {
     fn check(&self, text: &str) -> Option<String> {
+        Some(self.check_node(text)?.print())
+    }
+
+    fn check_node(&self, text: &str) -> Option<Node> {
         let expr = parse(text)?;
-        Some(self.piece(&expr)?.own().print())
+        Some(self.piece(&expr)?.own())
     }
 
     fn default(&self, text: &str, sql_type: SqlType) -> Option<String> {
@@ -863,6 +878,15 @@ impl Deparser<'_> {
         {
             return self.regclass(argument);
         }
+        if name == crate::records::ROW_FUNCTION {
+            return Some(Piece::Untyped(Node::Atom(self.row_constructor(arguments)?)));
+        }
+        if name == crate::row_values::ROW_ORDERING {
+            return self.row_ordering(arguments);
+        }
+        if name == crate::row_values::ROW_MEMBERSHIP {
+            return self.row_membership(arguments);
+        }
         let text_arguments = TEXT_FUNCTIONS.contains(&name);
         let mut shown = Vec::with_capacity(arguments.len());
         let mut first_type = None;
@@ -895,6 +919,59 @@ impl Deparser<'_> {
             Some(sql_type) => Piece::Typed(node, sql_type),
             None => Piece::Untyped(node),
         })
+    }
+
+    fn row_constructor(&self, fields: &[Expr]) -> Option<String> {
+        let shown = fields
+            .iter()
+            .map(|field| Some(self.piece(field)?.own().print()))
+            .collect::<Option<Vec<_>>>()?;
+        Some(format!("ROW({})", shown.join(", ")))
+    }
+
+    fn row_ordering(&self, arguments: &[Expr]) -> Option<Piece> {
+        let shape = crate::row_values::ordering_shape(arguments)?;
+        let mut left = Vec::with_capacity(shape.left.len());
+        let mut right = Vec::with_capacity(shape.right.len());
+        for (left_field, right_field) in shape.left.iter().zip(shape.right) {
+            let (left_node, right_node) =
+                self.paired(self.piece(left_field)?, self.piece(right_field)?);
+            left.push(left_node.print());
+            right.push(right_node.print());
+        }
+        Some(Piece::Typed(
+            Node::Enclosed(format!(
+                "(ROW({}) {} ROW({}))",
+                left.join(", "),
+                shape.operator.symbol(),
+                right.join(", ")
+            )),
+            SqlType::Boolean,
+        ))
+    }
+
+    fn row_membership(&self, arguments: &[Expr]) -> Option<Piece> {
+        let shape = crate::row_values::membership_shape(arguments)?;
+        let mut alternatives = Vec::with_capacity(shape.items.len());
+        for item in shape.items {
+            let mut equalities = shape
+                .left
+                .iter()
+                .zip(item)
+                .map(|(left, right)| self.comparison_node("=", left, right))
+                .collect::<Option<Vec<_>>>()?;
+            alternatives.push(if equalities.len() == 1 {
+                equalities.pop()?
+            } else {
+                Node::And(equalities)
+            });
+        }
+        let node = if alternatives.len() == 1 {
+            alternatives.pop()?
+        } else {
+            Node::Or(alternatives)
+        };
+        Some(Piece::Typed(node, SqlType::Boolean))
     }
 
     fn sequence_argument(&self, expr: &Expr) -> Option<String> {

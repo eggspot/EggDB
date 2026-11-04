@@ -148,6 +148,70 @@ impl ExpressionText<'_> {
         }
     }
 
+    fn row_text(&self, fields: &[Expr], depth: usize) -> String {
+        match self.spelling {
+            Spelling::PostgreSql => format!("ROW({})", self.joined(fields, ", ", depth)),
+            Spelling::MySql => format!("({})", self.joined(fields, ",", depth)),
+        }
+    }
+
+    fn row_call(&self, name: &str, arguments: &[Expr], depth: usize) -> Option<String> {
+        if name == crate::records::ROW_FUNCTION {
+            return Some(self.row_text(arguments, depth));
+        }
+        if name == crate::row_values::ROW_ORDERING {
+            let shape = crate::row_values::ordering_shape(arguments)?;
+            return Some(format!(
+                "({} {} {})",
+                self.row_text(shape.left, depth),
+                shape.operator.symbol(),
+                self.row_text(shape.right, depth)
+            ));
+        }
+        if name != crate::row_values::ROW_MEMBERSHIP {
+            return None;
+        }
+        let shape = crate::row_values::membership_shape(arguments)?;
+        if self.spelling == Spelling::MySql {
+            let items: Vec<String> = shape
+                .items
+                .iter()
+                .map(|item| self.row_text(item, depth))
+                .collect();
+            return Some(format!(
+                "({} in ({}))",
+                self.row_text(shape.left, depth),
+                items.join(",")
+            ));
+        }
+        let alternatives: Vec<String> = shape
+            .items
+            .iter()
+            .map(|item| {
+                let equalities: Vec<String> = shape
+                    .left
+                    .iter()
+                    .zip(item.iter())
+                    .map(|(left, right)| {
+                        format!(
+                            "({} = {})",
+                            self.at_depth(left, depth),
+                            self.at_depth(right, depth)
+                        )
+                    })
+                    .collect();
+                match equalities.as_slice() {
+                    [only] => only.clone(),
+                    _ => format!("({})", equalities.join(" AND ")),
+                }
+            })
+            .collect();
+        Some(match alternatives.as_slice() {
+            [only] => only.clone(),
+            _ => format!("({})", alternatives.join(" OR ")),
+        })
+    }
+
     fn column(&self, qualifier: Option<&str>, name: &str) -> String {
         if self.bare_columns {
             return name.to_owned();
@@ -304,9 +368,9 @@ impl ExpressionText<'_> {
                 parts.push(self.word("END", "end").to_owned());
                 parts.join(" ")
             }
-            ExprKind::Function { name, arguments } => {
-                format!("{name}({})", self.joined(arguments, ", ", depth))
-            }
+            ExprKind::Function { name, arguments } => self
+                .row_call(name, arguments, depth)
+                .unwrap_or_else(|| format!("{name}({})", self.joined(arguments, ", ", depth))),
             ExprKind::SqliteFunction { name, arguments }
             | ExprKind::OracleFunction { name, arguments } => {
                 format!("{name}({})", self.joined(arguments, ", ", depth))

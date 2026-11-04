@@ -869,14 +869,7 @@ impl<'t> Parser<'t> {
             }
             (TokenKind::Operator("<=>"), _) => {
                 let right = self.expression_above(Level::Pattern)?;
-                Ok(Expr {
-                    kind: ExprKind::IsDistinctFrom {
-                        left: Box::new(left),
-                        right: Box::new(right),
-                        negated: true,
-                    },
-                    position,
-                })
+                crate::row_values::distinctness(self.dialect, left, right, true, position)
             }
             (TokenKind::Operator("/"), _) => {
                 let right = self.expression_above(Level::Power)?;

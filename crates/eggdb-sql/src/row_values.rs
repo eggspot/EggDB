@@ -78,6 +78,90 @@ pub(crate) fn misused(dialect: Dialect, fields: &[Expr]) -> Option<SqlError> {
     }
 }
 
+/// Spells `left IS [NOT] DISTINCT FROM right` (MySQL's `<=>`, SQLite's `IS`) over two row
+/// constructors field by field, so every dialect compares rows the way it compares their fields.
+pub(crate) fn distinctness(
+    dialect: Dialect,
+    left: Expr,
+    right: Expr,
+    negated: bool,
+    position: usize,
+) -> SqlResult<Expr> {
+    let (left, right) = match (
+        into_constructor_fields(left),
+        into_constructor_fields(right),
+    ) {
+        (Ok(left), Ok(right)) => (left, right),
+        (left, right) => {
+            let as_expr = |side: Result<Vec<Expr>, Expr>| match side {
+                Ok(fields) => row(fields, position),
+                Err(expr) => expr,
+            };
+            return Ok(Expr {
+                kind: ExprKind::IsDistinctFrom {
+                    left: Box::new(as_expr(left)),
+                    right: Box::new(as_expr(right)),
+                    negated,
+                },
+                position,
+            });
+        }
+    };
+    if left.len() != right.len() {
+        return Err(unequal_entries(dialect, left.len(), position));
+    }
+    let fields: Vec<Expr> = left
+        .into_iter()
+        .zip(right)
+        .map(|(left, right)| Expr {
+            position: left.position,
+            kind: ExprKind::IsDistinctFrom {
+                left: Box::new(left),
+                right: Box::new(right),
+                negated,
+            },
+        })
+        .collect();
+    let kind = if negated {
+        ExprKind::And(fields)
+    } else {
+        ExprKind::Or(fields)
+    };
+    Ok(Expr { kind, position })
+}
+
+pub(crate) fn scalar_against_row(
+    dialect: Dialect,
+    scalar: &Expr,
+    row_fields: &[Expr],
+) -> Option<SqlError> {
+    let type_name = match &scalar.kind {
+        ExprKind::Literal(crate::ast::Literal::Integer(value)) => {
+            if i32::try_from(*value).is_ok() {
+                "integer"
+            } else {
+                "bigint"
+            }
+        }
+        ExprKind::Literal(crate::ast::Literal::Decimal(_)) => "numeric",
+        ExprKind::Literal(crate::ast::Literal::Boolean(_)) => "boolean",
+        _ => return None,
+    };
+    match dialect {
+        Dialect::MySql | Dialect::Sqlite => misused(dialect, row_fields),
+        _ => Some(
+            SqlError::new(
+                SqlState::UNDEFINED_FUNCTION,
+                format!("operator does not exist: record = {type_name}"),
+            )
+            .with_hint(
+                "No operator matches the given name and argument types. You might need to add explicit type casts.",
+            )
+            .at(scalar.position),
+        ),
+    }
+}
+
 pub(crate) fn oracle_ordering_refused(position: usize) -> SqlError {
     SqlError::new(SqlState::SYNTAX_ERROR, "invalid relational operator")
         .with_oracle_code(920)
@@ -193,6 +277,40 @@ pub(crate) fn membership(left: Vec<Expr>, items: Vec<Vec<Expr>>, position: usize
     arguments.push(row(left, position));
     arguments.extend(items.into_iter().map(|fields| row(fields, position)));
     internal_call(ROW_MEMBERSHIP, arguments, position)
+}
+
+pub(crate) struct OrderingShape<'e> {
+    pub(crate) operator: BinaryOperator,
+    pub(crate) left: &'e [Expr],
+    pub(crate) right: &'e [Expr],
+}
+
+pub(crate) fn ordering_shape(arguments: &[Expr]) -> Option<OrderingShape<'_>> {
+    let [symbol, left, right] = arguments else {
+        return None;
+    };
+    let operator = ordering_operator(symbol).ok()?;
+    let (left, right) = (constructor_fields(left)?, constructor_fields(right)?);
+    (left.len() == right.len()).then_some(OrderingShape {
+        operator,
+        left,
+        right,
+    })
+}
+
+pub(crate) struct MembershipShape<'e> {
+    pub(crate) left: &'e [Expr],
+    pub(crate) items: Vec<&'e [Expr]>,
+}
+
+pub(crate) fn membership_shape(arguments: &[Expr]) -> Option<MembershipShape<'_>> {
+    let (left, items) = arguments.split_first()?;
+    let left = constructor_fields(left)?;
+    let items = items
+        .iter()
+        .map(|item| constructor_fields(item).filter(|fields| fields.len() == left.len()))
+        .collect::<Option<Vec<_>>>()?;
+    Some(MembershipShape { left, items })
 }
 
 pub(crate) fn is_internal_call(name: &str) -> bool {

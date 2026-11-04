@@ -293,6 +293,17 @@ fn sqlite_create_table_as_declares_types_from_expression_affinity() {
         last(&mut session, "SELECT count(*) FROM t2"),
         "count(*)\n2\nSELECT 1"
     );
+    last(
+        &mut session,
+        "CREATE TABLE s AS SELECT 1 AS a, 'x' AS b, 1.5 AS c, NULL AS d, CAST(1.5 AS REAL) AS e",
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 's'"
+        ),
+        "sql\nCREATE TABLE s(a,b,c,d,e REAL)\nSELECT 1"
+    );
 }
 
 #[test]
@@ -510,6 +521,12 @@ fn a_row_in_list_evaluates_its_left_row_once() {
         ),
         "?column?|?column?|?column?|?column?\nf|NULL|t|t\nSELECT 1"
     );
+    for sql in [
+        "SELECT (1, 2) IN ((1, 2), 3)",
+        "SELECT (1, 2) IN ((3, 4), 5)",
+    ] {
+        assert_eq!(fails(&mut session, sql).state().code(), "42883", "{sql}");
+    }
 }
 
 #[test]
@@ -550,8 +567,28 @@ fn row_constructors_follow_each_dialects_rules_outside_postgresql() {
     last(&mut sqlite, "CREATE TABLE pairs (a, b)");
     let error = fails(&mut sqlite, "INSERT INTO pairs VALUES ((1, 2), 3)");
     assert_eq!(error.message(), "row value misused");
+    assert_eq!(
+        last(
+            &mut sqlite,
+            "SELECT (1, 2) IS (1, 2) AS same, (1, 2) IS NOT (1, 3) AS other, \
+             (1, NULL) IS (1, NULL) AS nulls, (1, 2) BETWEEN (0, 0) AND (2, 2) AS inside, \
+             (1, 2) NOT BETWEEN (1, 3) AND (2, 2) AS outside"
+        ),
+        "same|other|nulls|inside|outside\nt|t|t|t|t\nSELECT 1"
+    );
     let mut mysql = Session::with_dialect(&store, Dialect::MySql);
     assert_eq!(fails(&mut mysql, "SELECT (1, 2)").vendor_code(), Some(1241));
+    assert_eq!(
+        last(
+            &mut mysql,
+            "SELECT ROW(1, NULL) <=> ROW(1, NULL) AS same, (1, 2) <=> (1, NULL) AS other"
+        ),
+        "same|other\nt|f\nSELECT 1"
+    );
+    assert_eq!(
+        fails(&mut mysql, "SELECT (1, 2) <=> (1, 2, 3)").vendor_code(),
+        Some(1241)
+    );
     let mut oracle = Session::with_dialect(&store, Dialect::Oracle);
     let error = fails(&mut oracle, "SELECT 1 FROM dual WHERE (1, 2) < (2, 3)");
     assert_eq!(error.vendor_code(), Some(920));

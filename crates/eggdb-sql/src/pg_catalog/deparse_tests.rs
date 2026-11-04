@@ -504,3 +504,117 @@ fn an_expression_the_deparser_cannot_render_is_shown_as_stored() {
     assert!(shown.starts_with("CHECK ("), "{shown}");
     assert!(shown.contains("CASE WHEN a > 0"), "{shown}");
 }
+
+#[test]
+fn row_comparisons_show_as_sql_that_restores_them() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for sql in [
+        "CREATE TABLE pairs (a integer, b integer, \
+         CONSTRAINT pairs_low CHECK ((a, b) < (100, 100)), \
+         CONSTRAINT pairs_listed CHECK ((a, b) IN ((1, 2), (3, 4), (50, 50))))",
+        "ALTER TABLE pairs ENABLE ROW LEVEL SECURITY",
+        "CREATE POLICY pairs_small ON pairs USING ((a, b) <= (9, 9))",
+    ] {
+        run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
+    let definition = |session: &mut Session<'_>, name: &str| {
+        single_text(
+            session,
+            &format!(
+                "SELECT pg_get_constraintdef(oid, true) FROM pg_constraint WHERE conname = '{name}'"
+            ),
+        )
+    };
+    let low = definition(&mut session, "pairs_low");
+    assert_eq!(low, "CHECK ((ROW(a, b) < ROW(100, 100)))");
+    let listed = definition(&mut session, "pairs_listed");
+    assert_eq!(
+        listed,
+        "CHECK (a = 1 AND b = 2 OR a = 3 AND b = 4 OR a = 50 AND b = 50)"
+    );
+    let clause = single_text(
+        &mut session,
+        "SELECT check_clause FROM information_schema.check_constraints \
+         WHERE constraint_name = 'pairs_low'",
+    );
+    assert!(clause.contains("(ROW(a, b) < ROW(100, 100))"), "{clause}");
+    let qual = single_text(
+        &mut session,
+        "SELECT qual FROM pg_policies WHERE policyname = 'pairs_small'",
+    );
+    assert_eq!(qual, "(ROW(a, b) <= ROW(9, 9))");
+    for sql in [
+        format!(
+            "CREATE TABLE restored (a integer, b integer, \
+             CONSTRAINT restored_low {low}, CONSTRAINT restored_listed {listed})"
+        ),
+        "ALTER TABLE restored ENABLE ROW LEVEL SECURITY".to_owned(),
+        format!("CREATE POLICY restored_small ON restored USING {qual}"),
+        "INSERT INTO restored VALUES (3, 4), (50, 50)".to_owned(),
+    ] {
+        run(&mut session, &sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
+    assert_eq!(definition(&mut session, "restored_low"), low);
+    assert_eq!(definition(&mut session, "restored_listed"), listed);
+    assert_eq!(
+        single_text(
+            &mut session,
+            "SELECT qual FROM pg_policies WHERE policyname = 'restored_small'"
+        ),
+        qual
+    );
+    for row in ["(100, 0)", "(5, 5)"] {
+        let error =
+            run(&mut session, &format!("INSERT INTO restored VALUES {row}")).expect_err(row);
+        assert_eq!(
+            error.state(),
+            crate::SqlState::CHECK_VIOLATION,
+            "{row}: {error}"
+        );
+    }
+}
+
+#[test]
+fn explain_shows_row_comparisons_as_each_database_writes_them() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(&mut session, "CREATE TABLE pairs (a integer, b integer)").unwrap();
+    let filter = |session: &mut Session<'_>, sql: &str| {
+        let rows = run(session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        rows.iter()
+            .filter_map(|row| row.first().and_then(Value::to_text))
+            .find(|line| line.contains("Filter: "))
+            .unwrap_or_else(|| panic!("{sql}: {rows:?}"))
+    };
+    let ordering = filter(
+        &mut session,
+        "EXPLAIN SELECT * FROM pairs WHERE (a, b) < (5, 6) AND a = (SELECT 1)",
+    );
+    assert!(
+        ordering.contains("Filter: ((ROW(a, b) < ROW(5, 6)) AND "),
+        "{ordering}"
+    );
+    let membership = filter(
+        &mut session,
+        "EXPLAIN SELECT * FROM pairs WHERE (a, b) IN ((1, 2), (3, 4)) AND a = (SELECT 1)",
+    );
+    assert!(
+        membership.contains("Filter: ((((a = 1) AND (b = 2)) OR ((a = 3) AND (b = 4))) AND "),
+        "{membership}"
+    );
+    let mut mysql = Session::with_dialect(&store, crate::Dialect::MySql);
+    run(&mut mysql, "CREATE TABLE duo (a INT, b INT)").unwrap();
+    let text = run(
+        &mut mysql,
+        "EXPLAIN FORMAT=TREE SELECT * FROM duo WHERE (a, b) < (5, 6) OR (a, b) IN ((1, 2), (3, 4))",
+    )
+    .unwrap()
+    .iter()
+    .filter_map(|row| row.first().and_then(Value::to_text))
+    .collect::<Vec<_>>()
+    .join("\n");
+    assert!(text.contains("< (5,6))"), "{text}");
+    assert!(text.contains(" in ((1,2),(3,4)))"), "{text}");
+    assert!(!text.contains("*row"), "{text}");
+}
