@@ -83,7 +83,7 @@ pub(crate) fn invalid_number() -> SqlError {
     SqlError::new(SqlState::INVALID_TEXT_REPRESENTATION, "invalid number").with_oracle_code(1722)
 }
 
-fn out_of_range(argument: &str) -> SqlError {
+pub(crate) fn out_of_range(argument: &str) -> SqlError {
     SqlError::new(
         SqlState::NUMERIC_VALUE_OUT_OF_RANGE,
         format!("argument '{argument}' is out of range"),
@@ -143,7 +143,7 @@ pub(crate) fn text_of(value: &Value) -> Option<String> {
     text_with_type(value, None)
 }
 
-fn text_or_null(text: String) -> Value {
+pub(crate) fn text_or_null(text: String) -> Value {
     if text.is_empty() {
         Value::Null
     } else {
@@ -269,7 +269,7 @@ pub(crate) fn decimal_of(value: &Value) -> SqlResult<Option<Numeric>> {
     })
 }
 
-fn whole_of(value: &Value) -> SqlResult<Option<i64>> {
+pub(crate) fn whole_of(value: &Value) -> SqlResult<Option<i64>> {
     Ok(number_of(value)?.map(|number| match number {
         Number::Integer(number) => number,
         Number::Decimal(number) => number.to_f64().trunc() as i64,
@@ -945,8 +945,20 @@ pub(crate) fn call(name: &str, values: &[Value], declared: &[Option<SqlType>]) -
         ),
         ("oracle_listagg", [parts, rest @ ..]) => crate::oracle_listagg::joined(parts, rest),
         (
+            "oracle_regexp_like"
+            | "oracle_regexp_count"
+            | "oracle_regexp_substr"
+            | "oracle_regexp_instr"
+            | "oracle_regexp_replace",
+            _,
+        ) => crate::oracle_regexp::call(name, values),
+        ("oracle_keep", [function, last, kept_values, keys @ ..]) => {
+            crate::oracle_keep::kept(function, last, kept_values, keys)
+        }
+        (
             "oracle_fetch_percent"
             | "oracle_fetch_with_ties"
+            | "postgresql_fetch_with_ties"
             | "oracle_fetch_percent_with_ties"
             | "sqlserver_top_percent"
             | "sqlserver_top_percent_with_ties",

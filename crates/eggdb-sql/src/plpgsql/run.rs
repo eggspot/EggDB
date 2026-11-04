@@ -38,7 +38,7 @@ use crate::routines::{
 use crate::schemas::{base_name, display};
 use crate::session::{OutputColumn, QueryResult};
 use crate::settings::{SettingChange, SettingScope, Settings};
-use crate::store::KeyValueWrite;
+use crate::store::{KeyValueRead, KeyValueWrite};
 use crate::types::{Conversion, SqlType, Value, compare_values, convert};
 use std::cell::Cell;
 use std::cmp::Ordering;
@@ -397,17 +397,32 @@ fn parsed(
     frame: &RoutineFrame,
     dialect: Dialect,
 ) -> SqlResult<Statement> {
-    parsed_changing_settings(text, settings, frame, dialect).map(|(statement, _)| statement)
+    let tokens = tokenize_in(text, dialect)?;
+    parsed_tokens(text, &tokens, settings, frame, dialect).map(|(statement, _)| statement)
 }
 
 fn parsed_changing_settings(
+    reader: &dyn KeyValueRead,
     text: &str,
     settings: &Settings,
     frame: &RoutineFrame,
     dialect: Dialect,
 ) -> SqlResult<(Statement, Vec<SettingChange>)> {
     let tokens = tokenize_in(text, dialect)?;
-    let mut parser = Parser::new(text, &tokens)
+    if dialect == Dialect::PostgreSql {
+        crate::pg_catalog::load_for_tokens(reader, &tokens)?;
+    }
+    parsed_tokens(text, &tokens, settings, frame, dialect)
+}
+
+fn parsed_tokens(
+    text: &str,
+    tokens: &[crate::lexer::Token<'_>],
+    settings: &Settings,
+    frame: &RoutineFrame,
+    dialect: Dialect,
+) -> SqlResult<(Statement, Vec<SettingChange>)> {
+    let mut parser = Parser::new(text, tokens)
         .with_context(Parameters::Absent, settings)
         .in_dialect(dialect)
         .with_routine_frame(frame);
@@ -1019,9 +1034,16 @@ impl<'r> Run<'r> {
         value: Option<&str>,
         scope: SettingScope,
     ) -> SqlResult<()> {
-        if name.eq_ignore_ascii_case(crate::settings::DIALECT_SETTING) {
-            return Err(SqlError::not_supported(
-                "SET eggdb.dialect inside a PL/pgSQL or SQL function",
+        if name.eq_ignore_ascii_case(crate::settings::DIALECT_SETTING)
+            && let Some(value) = value
+            && Dialect::named(value.trim()).is_none()
+        {
+            return Err(SqlError::new(
+                SqlState::INVALID_PARAMETER_VALUE,
+                format!(
+                    "invalid value for parameter \"{}\": \"{value}\"",
+                    crate::settings::DIALECT_SETTING
+                ),
             ));
         }
         self.sync_settings();
@@ -1031,6 +1053,13 @@ impl<'r> Run<'r> {
         Ok(())
     }
 
+    fn reset_all_settings(&mut self) {
+        self.sync_settings();
+        let reset = crate::routine_settings::reset_all(&self.settings);
+        self.settings = RoutineSettings::Changed(Arc::new(reset));
+        self.settings_version = crate::routine_settings::version();
+    }
+
     fn setting_statement(&mut self, statement: &Statement) -> Option<SqlResult<QueryResult>> {
         if self.dialect() != Dialect::PostgreSql {
             return None;
@@ -1038,6 +1067,10 @@ impl<'r> Run<'r> {
         let (name, value, scope, tag) = match statement {
             Statement::Set { name, value, scope } => (name, value.as_deref(), *scope, "SET"),
             Statement::Reset { name: Some(name) } => (name, None, SettingScope::Session, "RESET"),
+            Statement::Reset { name: None } => {
+                self.reset_all_settings();
+                return Some(Ok(QueryResult::command("RESET")));
+            }
             _ => return None,
         };
         Some(
@@ -1063,6 +1096,8 @@ impl<'r> Run<'r> {
             return result;
         }
         let dialect = self.dialect();
+        let changes_catalog =
+            dialect == Dialect::PostgreSql && super::statements::may_change_catalog(&statement);
         let mark = self.statement_mark();
         self.share_frame();
         let entered = self.settings.enter();
@@ -1072,6 +1107,9 @@ impl<'r> Run<'r> {
         drop(entered);
         self.adopt_frame();
         self.end_statement(mark, outcome.is_ok())?;
+        if changes_catalog && outcome.is_ok() {
+            crate::pg_catalog::reload_if_loaded(self.writer.read())?;
+        }
         let mut result = outcome?;
         push_statement_notices(std::mem::take(&mut result.notices));
         Ok(result)
@@ -1085,7 +1123,14 @@ impl<'r> Run<'r> {
         }
         let dialect = self.dialect();
         self.refresh_cursor_attributes();
-        let Statement::Call(call) = parsed(text, &self.settings, &self.frame, dialect)? else {
+        let (statement, _) = parsed_changing_settings(
+            self.writer.read(),
+            text,
+            &self.settings,
+            &self.frame,
+            dialect,
+        )?;
+        let Statement::Call(call) = statement else {
             self.query_text(text)?;
             return Ok(Flow::Next);
         };
@@ -1148,8 +1193,13 @@ impl<'r> Run<'r> {
 
     fn query_text(&mut self, text: &str) -> SqlResult<QueryResult> {
         self.refresh_cursor_attributes();
-        let (statement, changes) =
-            parsed_changing_settings(text, &self.settings, &self.frame, self.dialect())?;
+        let (statement, changes) = parsed_changing_settings(
+            self.writer.read(),
+            text,
+            &self.settings,
+            &self.frame,
+            self.dialect(),
+        )?;
         self.execute_changing_settings(statement, changes)
     }
 
@@ -2147,8 +2197,13 @@ impl<'r> Run<'r> {
             ));
             frame.positional.push(at);
         }
-        let (statement, changes) =
-            parsed_changing_settings(&text, &self.settings, &frame, self.dialect())?;
+        let (statement, changes) = parsed_changing_settings(
+            self.writer.read(),
+            &text,
+            &self.settings,
+            &frame,
+            self.dialect(),
+        )?;
         self.execute_changing_settings(statement, changes)
     }
 
@@ -2579,6 +2634,7 @@ impl<'r> Run<'r> {
         let text = definition.body.as_str();
         let tokens =
             tokenize_in(text, Dialect::PostgreSql).map_err(|error| self.sql_located(error, 1))?;
+        crate::pg_catalog::load_for_tokens(self.writer.read(), &tokens)?;
         let mut resume = (0, 0);
         let mut last = None;
         let mut number = 0;

@@ -280,3 +280,80 @@ fn records_past_the_memory_budget_fail_their_pull_and_the_connection_goes_on_aft
     assert!(is_out_of_memory(&messages[2]));
     assert_eq!(budget.used_bytes(), 0);
 }
+
+#[test]
+fn a_named_path_reaches_the_driver_as_a_path_structure() {
+    let keyspace = MemoryKeyspace::default();
+    let mut input = handshake([[0, 0, 0, 5], [0; 4], [0; 4], [0; 4]]);
+    input.extend(hello("secret"));
+    input.extend(encode_request(
+        0x10,
+        &[
+            text(
+                "CREATE (:Person {name: 'Ada'})-[:KNOWS]->(:Person {name: 'Grace'})<-[:KNOWS]-(:Person {name: 'Linus'})",
+            ),
+            map(vec![]),
+            map(vec![]),
+        ],
+    ));
+    input.extend(encode_request(
+        0x3f,
+        &[map(vec![("n", Packed::Integer(-1))])],
+    ));
+    input.extend(encode_request(
+        0x10,
+        &[
+            text(
+                "MATCH (ada {name: 'Ada'}), (linus {name: 'Linus'}) MATCH p = shortestPath((ada)-[*]-(linus)) RETURN p",
+            ),
+            map(vec![]),
+            map(vec![("mode", text("r"))]),
+        ],
+    ));
+    input.extend(encode_request(
+        0x3f,
+        &[map(vec![("n", Packed::Integer(-1))])],
+    ));
+    input.extend(encode_request(0x02, &[]));
+    let (_, messages) = session(input, &keyspace);
+    let record = messages
+        .iter()
+        .find_map(|message| match message {
+            Packed::Struct(0x71, fields) => Some(fields),
+            _ => None,
+        })
+        .expect("a RECORD message");
+    let Packed::List(values) = &record[0] else {
+        panic!("{record:?}");
+    };
+    let Packed::Struct(0x50, fields) = &values[0] else {
+        panic!("{values:?}");
+    };
+    let [
+        Packed::List(nodes),
+        Packed::List(relationships),
+        Packed::List(indices),
+    ] = fields.as_slice()
+    else {
+        panic!("{fields:?}");
+    };
+    assert_eq!(nodes.len(), 3);
+    assert!(
+        nodes
+            .iter()
+            .all(|node| matches!(node, Packed::Struct(0x4e, fields) if fields.len() == 4))
+    );
+    assert_eq!(relationships.len(), 2);
+    assert!(relationships.iter().all(
+        |relationship| matches!(relationship, Packed::Struct(0x72, fields) if fields.len() == 4)
+    ));
+    assert_eq!(
+        indices,
+        &vec![
+            Packed::Integer(1),
+            Packed::Integer(1),
+            Packed::Integer(-2),
+            Packed::Integer(2)
+        ]
+    );
+}

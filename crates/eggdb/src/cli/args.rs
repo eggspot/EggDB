@@ -241,9 +241,11 @@ impl CommandName {
             | OptionName::MqttListen
             | OptionName::SqsListen
             | OptionName::NatsListen
+            | OptionName::SyslogListen
             | OptionName::RespMaxMemory
             | OptionName::RespEviction
             | OptionName::McpTokenFile
+            | OptionName::McpTables
             | OptionName::LogBatches
             | OptionName::User
             | OptionName::Database
@@ -422,9 +424,11 @@ enum OptionName {
     MqttListen,
     SqsListen,
     NatsListen,
+    SyslogListen,
     RespMaxMemory,
     RespEviction,
     McpTokenFile,
+    McpTables,
     LogBatches,
     Dialect,
     User,
@@ -529,9 +533,11 @@ impl OptionName {
             b"mqtt-listen" => Self::MqttListen,
             b"sqs-listen" => Self::SqsListen,
             b"nats-listen" => Self::NatsListen,
+            b"syslog-listen" => Self::SyslogListen,
             b"resp-max-memory" => Self::RespMaxMemory,
             b"resp-eviction" => Self::RespEviction,
             b"mcp-token-file" => Self::McpTokenFile,
+            b"mcp-tables" => Self::McpTables,
             b"log-batches" => Self::LogBatches,
             b"dialect" => Self::Dialect,
             b"user" => Self::User,
@@ -808,6 +814,7 @@ pub(crate) struct ServeOptions {
     pub(crate) metrics_listen: Option<SocketAddr>,
     pub(crate) mcp_listen: Option<SocketAddr>,
     pub(crate) mcp_token_file: Option<PathBuf>,
+    pub(crate) mcp_tables: Vec<String>,
     pub(crate) resp_listen: Option<SocketAddr>,
     pub(crate) memcached_listen: Option<SocketAddr>,
     pub(crate) es_listen: Option<SocketAddr>,
@@ -827,6 +834,7 @@ pub(crate) struct ServeOptions {
     pub(crate) mqtt_listen: Option<SocketAddr>,
     pub(crate) sqs_listen: Option<SocketAddr>,
     pub(crate) nats_listen: Option<SocketAddr>,
+    pub(crate) syslog_listen: Option<SocketAddr>,
     pub(crate) resp_max_memory: Option<u64>,
     pub(crate) resp_eviction: Option<eggdb_resp::EvictionPolicy>,
     pub(crate) log_batches: bool,
@@ -1279,6 +1287,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     Some(parse_listen(&option.spelled, value, 8765).map_err(usage)?);
             }
             OptionName::McpTokenFile => request.serve.mcp_token_file = Some(PathBuf::from(value)),
+            OptionName::McpTables => {
+                add_table_names(&mut request.serve.mcp_tables, &option.spelled, value)
+                    .map_err(usage)?;
+            }
             OptionName::RespMaxMemory => {
                 request.serve.resp_max_memory =
                     Some(parse_size(&option.spelled, value).map_err(usage)? as u64);
@@ -1307,6 +1319,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::NatsListen => {
                 request.serve.nats_listen =
                     Some(parse_listen(&option.spelled, value, 4222).map_err(usage)?);
+            }
+            OptionName::SyslogListen => {
+                request.serve.syslog_listen =
+                    Some(parse_listen(&option.spelled, value, 514).map_err(usage)?);
             }
             OptionName::AmqpListen => {
                 request.serve.amqp_listen =
@@ -1539,24 +1555,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 );
             }
             OptionName::Tables => {
-                for name in parse_table_names(&option.spelled, value).map_err(usage)? {
-                    if request.tables.contains(&name) {
-                        continue;
-                    }
-                    if request
-                        .tables
-                        .iter()
-                        .any(|given| table_part(given) == table_part(&name))
-                    {
-                        return Err(usage(format!(
-                            "{} names '{}' twice with different columns: give it once, with every column it needs, such as {}(a,b)",
-                            option.spelled,
-                            table_part(&name),
-                            table_part(&name)
-                        )));
-                    }
-                    request.tables.push(name);
-                }
+                add_table_names(&mut request.tables, &option.spelled, value).map_err(usage)?;
             }
             OptionName::CallGap => {
                 request.call_gap_ms = Some(
@@ -2445,6 +2444,26 @@ fn parse_page_size(option: &str, value: &OsStr) -> Result<usize, String> {
 fn parse_limit(option: &str, value: &OsStr) -> Result<u64, String> {
     parse_whole_number(value.as_encoded_bytes())
         .ok_or_else(|| format!("{option} needs a whole number, not '{}'", shown(value)))
+}
+
+fn add_table_names(listed: &mut Vec<String>, spelled: &str, value: &OsStr) -> Result<(), String> {
+    for name in parse_table_names(spelled, value)? {
+        if listed.contains(&name) {
+            continue;
+        }
+        if listed
+            .iter()
+            .any(|given| table_part(given) == table_part(&name))
+        {
+            return Err(format!(
+                "{spelled} names '{}' twice with different columns: give it once, with every column it needs, such as {}(a,b)",
+                table_part(&name),
+                table_part(&name)
+            ));
+        }
+        listed.push(name);
+    }
+    Ok(())
 }
 
 fn parse_table_names(spelled: &str, value: &OsStr) -> Result<Vec<String>, String> {

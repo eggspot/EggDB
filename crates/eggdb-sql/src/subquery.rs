@@ -11,6 +11,7 @@ use crate::execute::{self, TableCache};
 use crate::hash_index::SeededIntegerHash;
 use crate::join;
 use crate::memory::WorkMemory;
+use crate::search_cycle::SearchCycle;
 use crate::session::{OutputColumn, QueryResult};
 use crate::set_operations::{self, Branch};
 use crate::store::KeyValueRead;
@@ -148,6 +149,12 @@ impl SubqueryRows {
         let rows = result.rows.len();
         let values: Vec<Value> = if matches!(test, SubqueryTest::Exists) {
             Vec::new()
+        } else if row_operand(test).is_some() {
+            result
+                .rows
+                .into_iter()
+                .map(crate::records::anonymous)
+                .collect()
         } else {
             result
                 .rows
@@ -204,6 +211,27 @@ impl SubqueryRows {
         Ok(result)
     }
 
+    fn row_quantified(
+        &self,
+        fields: &[Value],
+        operator: BinaryOperator,
+        all: bool,
+    ) -> SqlResult<Option<bool>> {
+        let mut result = Some(all);
+        for item in &self.values {
+            let truth = crate::row_values::compare_with_record(fields, item, operator)?;
+            result = if all {
+                and(result, truth)
+            } else {
+                or(result, truth)
+            };
+            if result == Some(!all) {
+                break;
+            }
+        }
+        Ok(result)
+    }
+
     fn quantified(
         &self,
         value: &Value,
@@ -234,6 +262,33 @@ impl SubqueryRows {
 
 fn internal(message: &str) -> SqlError {
     SqlError::new(SqlState::INTERNAL_ERROR, message.to_owned())
+}
+
+fn row_fields(expr: &Expr) -> Option<&[Expr]> {
+    crate::row_values::constructor_fields(expr)
+}
+
+fn row_operand(test: &SubqueryTest) -> Option<&[Expr]> {
+    match test {
+        SubqueryTest::In { expr, .. }
+        | SubqueryTest::Compare { expr, .. }
+        | SubqueryTest::RowCompare { expr, .. } => row_fields(expr),
+        SubqueryTest::Scalar | SubqueryTest::Exists | SubqueryTest::Array => None,
+    }
+}
+
+fn more_than_one_row_in_row(dialect: Dialect) -> SqlError {
+    match dialect {
+        Dialect::MySql => SqlError::new(
+            SqlState::CARDINALITY_VIOLATION,
+            "Subquery returns more than 1 row",
+        )
+        .with_vendor_code(1242),
+        _ => SqlError::new(
+            SqlState::CARDINALITY_VIOLATION,
+            "more than one row returned by a subquery used as an expression",
+        ),
+    }
 }
 
 fn more_than_one_row() -> SqlError {
@@ -287,14 +342,38 @@ pub(crate) fn evaluate(evaluator: &Evaluator<'_>, subquery: &Subquery) -> SqlRes
         SubqueryTest::Exists => Ok(Value::Boolean(rows.rows > 0)),
         SubqueryTest::Array => crate::arrays::from_rows(rows.values.clone(), rows.sql_type),
         SubqueryTest::In { expr, negated } => {
+            if let Some(fields) = row_fields(expr) {
+                let values =
+                    crate::row_values::evaluate_fields(evaluator, fields, rows.values.first())?;
+                let found = rows.row_quantified(&values, BinaryOperator::Equal, false)?;
+                return truth(found.map(|found| found != *negated));
+            }
             let value = evaluator.eval(expr, rows.sql_type)?;
             truth(rows.member(&value)?.map(|found| found != *negated))
+        }
+        SubqueryTest::RowCompare { expr, operator } => {
+            if rows.rows > 1 {
+                return Err(more_than_one_row_in_row(subquery.dialect));
+            }
+            let Some(record) = rows.values.first() else {
+                return Ok(Value::Null);
+            };
+            let fields = row_fields(expr).unwrap_or_default();
+            let values = crate::row_values::evaluate_fields(evaluator, fields, Some(record))?;
+            truth(crate::row_values::compare_with_record(
+                &values, record, *operator,
+            )?)
         }
         SubqueryTest::Compare {
             expr,
             operator,
             all,
         } => {
+            if let Some(fields) = row_fields(expr) {
+                let values =
+                    crate::row_values::evaluate_fields(evaluator, fields, rows.values.first())?;
+                return truth(rows.row_quantified(&values, *operator, *all)?);
+            }
             let value = evaluator.eval(expr, rows.sql_type)?;
             truth(rows.quantified(&value, *operator, *all)?)
         }
@@ -381,6 +460,9 @@ enum LookupShape {
 }
 
 fn lookup_shape(test: &SubqueryTest) -> Option<LookupShape> {
+    if row_operand(test).is_some() {
+        return None;
+    }
     match test {
         SubqueryTest::Exists => Some(LookupShape::Existence),
         SubqueryTest::In { .. }
@@ -395,7 +477,9 @@ fn lookup_shape(test: &SubqueryTest) -> Option<LookupShape> {
             ..
         } => Some(LookupShape::Members),
         SubqueryTest::Scalar => Some(LookupShape::Aggregate),
-        SubqueryTest::Compare { .. } | SubqueryTest::Array => None,
+        SubqueryTest::Compare { .. } | SubqueryTest::Array | SubqueryTest::RowCompare { .. } => {
+            None
+        }
     }
 }
 
@@ -685,7 +769,8 @@ fn lookup_over_every_inner_row(
     };
     let outer = queries.outer;
     let width = outer.len();
-    let result = execute_query(env, tables, &queries.keys, prepared)?;
+    let result =
+        crate::step_times::unmeasured(|| execute_query(env, tables, &queries.keys, prepared))?;
     let mut families: Vec<Option<Family>> = vec![None; width];
     let mut mixed = false;
     let mut keys = HashSet::new();
@@ -739,7 +824,9 @@ fn lookup_over_every_inner_row(
             }
             let missing = match &queries.empty_group {
                 Some(empty_group) => Arc::new(SubqueryRows::from_result(
-                    execute_query(env, tables, empty_group, prepared)?,
+                    crate::step_times::unmeasured(|| {
+                        execute_query(env, tables, empty_group, prepared)
+                    })?,
                     &SubqueryTest::Scalar,
                 )?),
                 None => group_rows(sql_type, Vec::new())?,
@@ -859,6 +946,18 @@ impl<'a> Correlation<'a> {
     }
 
     pub(crate) fn rows(&self, template: usize, row: &[Value]) -> SqlResult<Arc<SubqueryRows>> {
+        let position = self
+            .templates
+            .get(template)
+            .map_or(0, |found| found.query.position);
+        crate::step_times::measure_subplan(
+            position,
+            || self.evaluated_rows(template, row),
+            |rows: &Arc<SubqueryRows>| rows.rows,
+        )
+    }
+
+    fn evaluated_rows(&self, template: usize, row: &[Value]) -> SqlResult<Arc<SubqueryRows>> {
         let found = self
             .templates
             .get(template)
@@ -1149,6 +1248,7 @@ pub(crate) fn mentions_subquery(expr: &Expr) -> bool {
         | ExprKind::Column { .. }
         | ExprKind::Slot { .. }
         | ExprKind::SessionValue { .. }
+        | ExprKind::CurrentSetting { .. }
         | ExprKind::OuterColumn { .. }
         | ExprKind::Constant { .. } => false,
         ExprKind::Unary(_, operand)
@@ -1217,6 +1317,98 @@ pub(crate) fn needs_preparation(select: &Select) -> bool {
             .into_iter()
             .any(mentions_subquery)
         || crate::set_returning::select_needs_expansion(select)
+}
+
+pub(crate) struct PreparedForExplain {
+    pub(crate) select: Select,
+    pub(crate) correlated: Vec<PreparedForExplain>,
+}
+
+fn subplans_not_supported() -> SqlError {
+    SqlError::not_supported(
+        "EXPLAIN of a query with derived tables, table functions, FULL JOIN ... USING, or WITH, set operations or an outer ORDER BY or LIMIT in a subquery",
+    )
+}
+
+pub(crate) fn lone_select(query: &Query) -> Option<&Select> {
+    match &query.body {
+        SetExpr::Select(select)
+            if query.with.is_empty()
+                && query.order_by.is_empty()
+                && query.limit.is_none()
+                && query.offset.is_none() =>
+        {
+            Some(select)
+        }
+        _ => None,
+    }
+}
+
+fn subqueries_explain_as_subplans(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Subquery(subquery) => {
+            subquery
+                .test
+                .operand()
+                .is_none_or(subqueries_explain_as_subplans)
+                && lone_select(&subquery.query).is_some_and(explains_as_subplans)
+        }
+        _ => children(expr)
+            .into_iter()
+            .all(subqueries_explain_as_subplans),
+    }
+}
+
+fn explains_as_subplans(select: &Select) -> bool {
+    let plain_from = select.from.as_ref().is_none_or(|from| {
+        !join::has_full_using(from)
+            && std::iter::once(&from.first)
+                .chain(from.joins.iter().map(|join| &join.table))
+                .all(|table| table.derived.is_none() && table.generated.is_none())
+    });
+    plain_from
+        && !crate::set_returning::select_needs_expansion(select)
+        && select_expressions(select)
+            .into_iter()
+            .all(subqueries_explain_as_subplans)
+}
+
+pub(crate) fn prepare_for_explain(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    select: &Select,
+) -> SqlResult<PreparedForExplain> {
+    if !explains_as_subplans(select) {
+        return Err(subplans_not_supported());
+    }
+    let names = TempTableNames::default();
+    let env = Env {
+        reader,
+        names: &names,
+        columns_only: true,
+    };
+    let mut prepared = Prepared::new();
+    let (query, _) = prepare_query(
+        &env,
+        tables,
+        &Query::of_select(select.clone(), 0),
+        None,
+        None,
+        &mut prepared,
+    )?;
+    prepared_for_explain(&query, prepared)
+}
+
+fn prepared_for_explain(query: &Query, prepared: Prepared) -> SqlResult<PreparedForExplain> {
+    let select = lone_select(query)
+        .ok_or_else(subplans_not_supported)?
+        .clone();
+    let correlated = prepared
+        .templates
+        .into_iter()
+        .map(|template| prepared_for_explain(&template.query, template.prepared))
+        .collect::<SqlResult<_>>()?;
+    Ok(PreparedForExplain { select, correlated })
 }
 
 pub(crate) struct RowSubqueries {
@@ -1445,6 +1637,9 @@ fn prepare_query(
                 Some(Dialect::Sqlite | Dialect::Oracle)
             ))
             && references_table(&table.query, &table.name.text);
+        if !recursive && crate::search_cycle::has_clauses(table) {
+            return Err(crate::search_cycle::not_recursive(table));
+        }
         let result = {
             let overlay = Overlay::new(env.reader, &prepared.temp);
             let env = env.with_reader(&overlay);
@@ -1624,21 +1819,38 @@ fn recursive_table(
         )
         .at(table.name.position));
     }
-    let step_query = Query {
-        body: operation.right.clone(),
-        ..seed_query.clone()
-    };
     let seed = run_query(env, tables, &seed_query, ctes)?;
     let columns = seed.columns.clone().unwrap_or_default();
+    let search_cycle = SearchCycle::new(table, operation, &columns)?;
+    let step_query = Query {
+        body: search_cycle.as_ref().map_or_else(
+            || operation.right.clone(),
+            |found| found.recursive_term().clone(),
+        ),
+        ..seed_query.clone()
+    };
+    let mut working_columns = columns.clone();
+    if let Some(found) = &search_cycle {
+        working_columns.extend(found.added_columns());
+    }
+    let expands = |row: &[Value]| search_cycle.as_ref().is_none_or(|found| found.expands(row));
     let mut memory = WorkMemory::new();
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
     let mut all_rows: Vec<Vec<Value>> = Vec::new();
     let mut working = Vec::new();
+    let mut working_memory = WorkMemory::new();
     for row in seed.rows {
+        let row = match &search_cycle {
+            Some(found) => found.seed_row(row),
+            None => row,
+        };
         if operation.all || first_time(&mut seen, &row, &mut memory)? {
             memory.charge_row(&row)?;
             all_rows.push(row.clone());
-            working.push(row);
+            if expands(&row) {
+                working_memory.charge_row(&row)?;
+                working.push(row);
+            }
         }
     }
     let most = if operation.dialect == Dialect::MySql {
@@ -1658,11 +1870,12 @@ fn recursive_table(
                 "A recursive WITH query may run at most {most} steps; make sure its recursive term stops producing rows."
             )));
         }
+        let held_by_step = std::mem::replace(&mut working_memory, WorkMemory::new());
         let mut step_temp = TempTables::new();
         let temp = step_temp.add(
             env.names,
             Intermediate {
-                columns: &columns,
+                columns: &working_columns,
                 renamed: &table.column_names,
                 label: name,
                 dialect: table.dialect,
@@ -1683,25 +1896,36 @@ fn recursive_table(
             Some(&visible),
         )?;
         let width = columns.len();
-        if step.columns.as_ref().map_or(0, Vec::len) != width {
+        let parent_width = search_cycle.as_ref().map_or(0, SearchCycle::parent_width);
+        if step.columns.as_ref().map_or(0, Vec::len) != width + parent_width {
             return Err(set_operations::column_count_mismatch(
                 operation.operator,
                 operation.dialect,
                 operation.position,
             ));
         }
-        for row in step.rows {
-            let row = set_operations::conform(row, &columns)?;
+        for mut row in step.rows {
+            let row = match &search_cycle {
+                Some(found) => {
+                    let parent = row.split_off(width.min(row.len()));
+                    found.step_row(set_operations::conform(row, &columns)?, parent)
+                }
+                None => set_operations::conform(row, &columns)?,
+            };
             if operation.all || first_time(&mut seen, &row, &mut memory)? {
                 memory.charge_row(&row)?;
                 all_rows.push(row.clone());
-                working.push(row);
+                if expands(&row) {
+                    working_memory.charge_row(&row)?;
+                    working.push(row);
+                }
             }
         }
+        drop(held_by_step);
     }
     Ok(QueryResult::rows(
         format!("SELECT {}", all_rows.len()),
-        columns,
+        working_columns,
         all_rows,
     ))
 }
@@ -2859,8 +3083,12 @@ fn rewrite(
 fn row_cap(subquery: &Subquery) -> Option<i64> {
     match subquery.test {
         SubqueryTest::Exists => Some(1),
-        SubqueryTest::Scalar if subquery.dialect == Dialect::Sqlite => Some(1),
-        SubqueryTest::Scalar => Some(2),
+        SubqueryTest::Scalar | SubqueryTest::RowCompare { .. }
+            if subquery.dialect == Dialect::Sqlite =>
+        {
+            Some(1)
+        }
+        SubqueryTest::Scalar | SubqueryTest::RowCompare { .. } => Some(2),
         _ => None,
     }
 }
@@ -2920,9 +3148,25 @@ fn prepare_subquery(
         names: env.names,
         columns_only: env.columns_only || correlated,
     };
-    let result = execute_query(&inner_env, tables, &query, &inner)?;
+    let mut run = || execute_query(&inner_env, tables, &query, &inner);
+    let result = if inner_env.columns_only {
+        run()?
+    } else {
+        crate::step_times::measure_subplan(subquery.query.position, run, |result: &QueryResult| {
+            result.rows.len()
+        })?
+    };
     let count = result.columns.as_ref().map_or(0, Vec::len);
-    if count != 1 && !matches!(subquery.test, SubqueryTest::Exists) {
+    if let Some(fields) = row_operand(&subquery.test) {
+        if count != fields.len() {
+            return Err(crate::row_values::subquery_width_error(
+                subquery.dialect,
+                count,
+                fields.len(),
+                subquery.query.position,
+            ));
+        }
+    } else if count != 1 && !matches!(subquery.test, SubqueryTest::Exists) {
         return Err(subquery_columns_error(
             subquery.dialect,
             count,

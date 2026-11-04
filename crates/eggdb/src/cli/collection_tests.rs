@@ -43,7 +43,10 @@ fn collections_are_added_listed_used_and_deleted_from_the_command_line() {
     let listed = ok(&["collection", "list", &file]);
     assert_eq!(
         stdout(&listed),
-        format!("{{\"file\":\"{}\",\"collections\":[]}}\n", json(&file))
+        format!(
+            "{{\"file\":\"{}\",\"collections\":[],\"counts\":[]}}\n",
+            json(&file)
+        )
     );
     let added = ok(&["collection", "add", &file, "sessions"]);
     assert_eq!(
@@ -68,7 +71,10 @@ fn collections_are_added_listed_used_and_deleted_from_the_command_line() {
         stdout(&text)
     );
     let names = on_terminal(&["collection", "list", &file]);
-    assert_eq!(stdout(&names), "cache\nsessions\n");
+    assert_eq!(
+        stdout(&names),
+        "cache     no entries\nsessions  no entries\n"
+    );
     assert_eq!(stderr(&names), "2 collections\n");
 
     ok(&["put", &file, "k", "default"]);
@@ -247,4 +253,52 @@ fn a_whole_file_export_carries_its_collections_into_an_import() {
         "{}",
         stdout(&names)
     );
+}
+
+#[test]
+fn list_and_stats_show_counts_kept_through_puts_deletes_and_a_rename() {
+    let directory = TempDirectory::new("collections-cli-counts");
+    let file = directory.file("app.db");
+    ok(&["create", &file]);
+    ok(&["collection", "add", &file, "sessions"]);
+    ok(&["collection", "add", &file, "cache"]);
+    for key in ["s:1", "s:2", "s:3"] {
+        ok(&["put", &file, "-C", "sessions", key, "Ada"]);
+    }
+    ok(&["put", &file, "-C", "cache", "page", "<html>"]);
+    ok(&["put", &file, "-C", "sessions", "s:1", "Grace Hopper"]);
+    ok(&["del", &file, "-C", "sessions", "s:2"]);
+    let listed = on_terminal(&["collection", "list", &file]);
+    assert_eq!(listed.exit, 0, "{}", stderr(&listed));
+    assert_eq!(
+        stdout(&listed),
+        "cache       1 entry\nsessions  2 entries\n"
+    );
+    assert_eq!(stderr(&listed), "2 collections\n");
+    let as_json = ok(&["collection", "list", &file]);
+    assert_eq!(
+        stdout(&as_json),
+        format!(
+            "{{\"file\":\"{}\",\"collections\":[\"cache\",\"sessions\"],\"counts\":[{{\"name\":\"cache\",\"entries\":1,\"key_bytes\":4,\"value_bytes\":6}},{{\"name\":\"sessions\",\"entries\":2,\"key_bytes\":6,\"value_bytes\":15}}]}}\n",
+            json(&file)
+        )
+    );
+
+    let moved = on_terminal(&["collection", "rename", &file, "sessions", "logins"]);
+    assert_eq!(moved.exit, 0, "{}", stderr(&moved));
+    ok(&["put", &file, "-C", "logins", "s:4", "Ada"]);
+    let stats = ok(&["stats", &file, "--collections"]);
+    assert!(
+        stdout(&stats).contains(
+            "\"collections\":[{\"name\":\"cache\",\"entries\":1,\"key_bytes\":4,\"value_bytes\":6},{\"name\":\"logins\",\"entries\":3,\"key_bytes\":9,\"value_bytes\":18}]"
+        ),
+        "{}",
+        stdout(&stats)
+    );
+    let renamed = on_terminal(&["collection", "list", &file]);
+    assert_eq!(stdout(&renamed), "cache     1 entry\nlogins  3 entries\n");
+    ok(&["collection", "delete", &file, "cache"]);
+    let left = on_terminal(&["collection", "list", &file]);
+    assert_eq!(stdout(&left), "logins  3 entries\n");
+    assert_eq!(stderr(&left), "1 collection\n");
 }

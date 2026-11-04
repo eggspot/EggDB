@@ -4,15 +4,15 @@ use crate::results::{self, NOTICE};
 use crate::server::{DatabaseOpener, OpenRefusal};
 use crate::watchdog::Watchdog;
 use eggdb_commands::{
-    ArgumentType, Category, CursorList, CursorRefusal, Grants, TOOLS, ToolDefinition,
-    decode_cursor, encode_cursor,
+    ArgumentType, Category, CursorList, CursorRefusal, Grants, TOOLS, TimeToLiveError,
+    ToolDefinition, decode_cursor, encode_cursor, parse_time_to_live,
 };
 use eggdb_sql::json::{Json, Node};
 use eggdb_sql::{
     DestructiveKind, DestructiveStatement, Dialect, EXACT_ROW_COUNT_UP_TO, KeyValueRead,
-    KeyValueStore, OneStatementError, OneStatementRefusal, QueryResult, RESERVED_KEY_PREFIX,
-    Relation, RelationKind, ScanDirection, Session, SqlError, SqlState, Value, VisibleTables,
-    destructive_statement,
+    KeyValueStore, KeyValueWrite, OneStatementError, OneStatementRefusal, QueryResult,
+    RESERVED_KEY_PREFIX, Relation, RelationKind, ScanDirection, Session, SqlError, SqlState, Value,
+    VisibleTables, destructive_statement,
 };
 use std::time::{Duration, Instant};
 
@@ -44,10 +44,12 @@ pub(crate) enum Tool {
     KvGet,
     KvScan,
     RowList,
+    Put,
+    Del,
 }
 
 impl Tool {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 11] = [
         Self::ListTables,
         Self::DescribeTable,
         Self::RunSql,
@@ -57,6 +59,8 @@ impl Tool {
         Self::KvGet,
         Self::KvScan,
         Self::RowList,
+        Self::Put,
+        Self::Del,
     ];
 
     pub(crate) fn definition(self) -> &'static ToolDefinition {
@@ -664,6 +668,19 @@ pub(crate) fn run<O: DatabaseOpener>(
         Tool::KvGet => kv_get(arguments, call),
         Tool::KvScan => kv_scan(arguments, call),
         Tool::RowList => row_list(arguments, call),
+        Tool::Put | Tool::Del => Err(key_writes_refused(call)),
+    }
+}
+
+pub(crate) fn key_writes_refused<O: DatabaseOpener>(call: &Call<'_, O>) -> ToolError {
+    if !call.allow_write {
+        writes_not_allowed()
+    } else if call.tables.is_some() {
+        limited_to_tables()
+    } else if call.agent_role.is_some() {
+        limited_to_role()
+    } else {
+        ToolError::new("not_supported", "This server does not change keys.")
     }
 }
 
@@ -1648,6 +1665,210 @@ fn kv_scan<O: DatabaseOpener>(
     })
 }
 
+pub(crate) enum KeyChange {
+    Put {
+        value: Vec<u8>,
+        ttl: Option<Duration>,
+    },
+    Delete,
+}
+
+pub(crate) struct KeyWriteRequest<'n> {
+    pub(crate) tool: Tool,
+    pub(crate) collection: Option<&'n str>,
+    pub(crate) key: Vec<u8>,
+    pub(crate) change: KeyChange,
+    pub(crate) confirm: bool,
+}
+
+pub(crate) fn key_write_request<'n>(
+    tool: Tool,
+    arguments: &Arguments<'n>,
+) -> Result<KeyWriteRequest<'n>, ToolError> {
+    arguments.allow_tool(tool)?;
+    let key = arguments
+        .bytes("key", "key_hex")?
+        .ok_or_else(|| ToolError::invalid("give key or key_hex"))?;
+    let collection = arguments.string("collection")?;
+    if collection.is_none() && in_sql_key_space(&key) {
+        return Err(ToolError::invalid(
+            "that key is in SQL's key space; change tables with write_sql",
+        ));
+    }
+    let change = if tool == Tool::Del {
+        KeyChange::Delete
+    } else {
+        let value = arguments
+            .bytes("value", "value_hex")?
+            .ok_or_else(|| ToolError::invalid("give value or value_hex"))?;
+        if value.len() > MAX_VALUE_BYTES {
+            return Err(ToolError::invalid(format!(
+                "value holds {} bytes; a call stores at most {MAX_VALUE_BYTES}",
+                value.len()
+            )));
+        }
+        let ttl = arguments.string("ttl")?.map(time_to_live).transpose()?;
+        KeyChange::Put { value, ttl }
+    };
+    let confirm = tool == Tool::Del && arguments.boolean("confirm")?;
+    Ok(KeyWriteRequest {
+        tool,
+        collection,
+        key,
+        change,
+        confirm,
+    })
+}
+
+fn time_to_live(text: &str) -> Result<Duration, ToolError> {
+    parse_time_to_live(text).map_err(|refusal| match refusal {
+        TimeToLiveError::NotATime => ToolError::invalid(format!(
+            "ttl needs a time such as 30s, 5m, 1h30m, 7d or 1500ms, not {}",
+            shown_name(text)
+        )),
+        TimeToLiveError::Zero => ToolError::invalid(
+            "a ttl of 0 would delete the key as soon as it is stored; leave ttl out, or give a time above 0",
+        ),
+    })
+}
+
+pub(crate) fn declined_key_delete() -> ToolError {
+    ToolError::new(
+        "declined_by_user",
+        "The user declined deleting the key. Nothing was deleted.",
+    )
+    .with_fix("Do not delete it another way; ask the user what they want instead.")
+}
+
+pub(crate) fn key_delete_needs_confirmation() -> ToolError {
+    ToolError::new(
+        "needs_confirmation",
+        "Deleting a key cannot be undone, and this client cannot ask its user, so the call needs confirm: true. Nothing was deleted.",
+    )
+    .with_fix("Ask your user first; send confirm: true only if they agree.")
+}
+
+enum KeyWritten {
+    Stored,
+    Deleted(bool),
+    NoCollection,
+}
+
+fn apply_key_write(
+    writer: &mut impl KeyValueWrite,
+    request: &KeyWriteRequest<'_>,
+) -> Result<KeyWritten, SqlError> {
+    let key = request.key.as_slice();
+    let in_collection = |found: bool| {
+        if found {
+            KeyWritten::Stored
+        } else {
+            KeyWritten::NoCollection
+        }
+    };
+    match (&request.change, request.collection) {
+        (KeyChange::Put { value, ttl: None }, None) => {
+            writer.put(key, value).map(|()| KeyWritten::Stored)
+        }
+        (
+            KeyChange::Put {
+                value,
+                ttl: Some(ttl),
+            },
+            None,
+        ) => writer
+            .put_with_expiry(key, value, *ttl)
+            .map(|()| KeyWritten::Stored),
+        (KeyChange::Put { value, ttl }, Some(name)) => writer
+            .collection_put(name, key, value, *ttl)
+            .map(in_collection),
+        (KeyChange::Delete, None) => writer.delete(key).map(KeyWritten::Deleted),
+        (KeyChange::Delete, Some(name)) => writer
+            .collection_delete(name, key)
+            .map(|deleted| deleted.map_or(KeyWritten::NoCollection, KeyWritten::Deleted)),
+    }
+}
+
+pub(crate) fn write_key<O: DatabaseOpener>(
+    request: &KeyWriteRequest<'_>,
+    call: &Call<'_, O>,
+) -> WriteOutcome {
+    let (result, committed, warning) = call.with_database_for_write(|store, limits| {
+        let mut writer = store
+            .begin_write()
+            .map_err(|error| call.sql_failure(limits, error))?;
+        let written = match apply_key_write(&mut writer, request) {
+            Ok(written) => written,
+            Err(error) => {
+                let _ = writer.rollback();
+                return Err(call.sql_failure(limits, error));
+            }
+        };
+        if matches!(written, KeyWritten::NoCollection) {
+            let _ = writer.rollback();
+            let name = request.collection.unwrap_or_default();
+            let read = store
+                .begin_read()
+                .map_err(|error| call.sql_failure(limits, error))?;
+            return Err(missing_collection(&read, name, call.database_name)
+                .with_fix("Name one of its collections, or leave collection out to change the default key space; eggdb collection add makes a new one."));
+        }
+        writer
+            .commit()
+            .map_err(|error| call.sql_failure(limits, error))?;
+        Ok(written)
+    });
+    let result =
+        result.map(|written| key_written(request, &written, committed, warning.as_deref()));
+    WriteOutcome {
+        result,
+        committed,
+        warning,
+    }
+}
+
+fn key_written(
+    request: &KeyWriteRequest<'_>,
+    written: &KeyWritten,
+    committed: bool,
+    warning: Option<&str>,
+) -> ToolSuccess {
+    let mut out = JsonOut::new();
+    out.begin_object();
+    if let Some(name) = request.collection {
+        out.key("collection").string(name);
+    }
+    if let Ok(text) = std::str::from_utf8(&request.key) {
+        out.key("key");
+        results::text(&mut out, text);
+    }
+    out.key("key_hex").string(&to_hex(&request.key));
+    let rows = match written {
+        KeyWritten::Deleted(deleted) => {
+            out.key("deleted").boolean(*deleted);
+            u64::from(*deleted)
+        }
+        KeyWritten::Stored | KeyWritten::NoCollection => {
+            out.key("stored").boolean(true);
+            if let KeyChange::Put { ttl: Some(ttl), .. } = &request.change {
+                out.key("ttl_ms")
+                    .unsigned(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX));
+            }
+            1
+        }
+    };
+    out.key("committed").boolean(committed);
+    if let Some(warning) = warning {
+        out.key("warning").string(warning);
+    }
+    out.end_object();
+    ToolSuccess {
+        structured: out.finish(),
+        rows: Some(rows),
+        truncated: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1685,7 +1906,7 @@ mod tests {
                 Tool::SampleRows => "sample_rows",
                 Tool::KvGet => "kv_get",
                 Tool::KvScan => "kv_scan",
-                Tool::RowList => not_shipped(),
+                Tool::RowList | Tool::Put | Tool::Del => not_shipped(),
             }
         }
 
@@ -1714,7 +1935,7 @@ mod tests {
                 Tool::SampleRows => "Sample rows",
                 Tool::KvGet => "Get a key",
                 Tool::KvScan => "Scan keys",
-                Tool::RowList => not_shipped(),
+                Tool::RowList | Tool::Put | Tool::Del => not_shipped(),
             }
         }
 
@@ -1751,7 +1972,7 @@ mod tests {
                 Tool::KvScan => {
                     "Lists keys of the database's key-value store in key order with their values, by prefix or by range, a page at a time: pass a cut result's next_start_hex as start_hex to read on. Give a collection to list that named key space instead of the default one. Keys under SQL's tables are left out; read tables with run_sql."
                 }
-                Tool::RowList => not_shipped(),
+                Tool::RowList | Tool::Put | Tool::Del => not_shipped(),
             }
         }
 
@@ -1877,7 +2098,7 @@ mod tests {
                         .end_object();
                     property(out, "collection", "string", COLLECTION_DESCRIPTION);
                 }
-                Tool::RowList => not_shipped(),
+                Tool::RowList | Tool::Put | Tool::Del => not_shipped(),
             }
             out.end_object();
             if !required.is_empty() {
@@ -2045,7 +2266,7 @@ mod tests {
         for allow_write in [false, true] {
             let text = instructions(allow_write, false);
             assert!(text.is_ascii() && !text.contains('\n'), "{text}");
-            assert!(text.len() < 1000, "{} characters", text.len());
+            assert!(text.len() < 1100, "{} characters", text.len());
             for category in Category::ALL {
                 assert!(text.contains(category.name()), "{}", category.name());
             }
@@ -2071,6 +2292,10 @@ mod tests {
             instructions(true, false)
                 .contains("Never send confirm: true without asking your user.")
         );
+        assert!(instructions(true, false).contains(
+            "write_sql writes and commits on its own; put stores a key and del deletes one, after the user's confirmation. Never"
+        ));
+        assert!(!instructions(true, true).contains("put stores a key"));
     }
 
     #[test]
@@ -2130,8 +2355,17 @@ mod tests {
         assert!(!listed.contains("write_sql"));
         let writing = tools_list(served(true));
         assert!(eggdb_sql::json::parse_document(&writing).is_ok());
-        assert_eq!(writing.matches("\"readOnlyHint\":false").count(), 1);
-        assert_eq!(writing.matches("\"destructiveHint\":true").count(), 1);
+        assert_eq!(writing.matches("\"readOnlyHint\":false").count(), 3);
+        assert_eq!(writing.matches("\"destructiveHint\":true").count(), 2);
+        assert!(writing.contains("{\"name\":\"put\",\"title\":\"Store a key\""));
+        assert!(writing.contains("{\"name\":\"del\",\"title\":\"Delete a key\""));
+        let limited_writing = tools_list(Grants {
+            allow_write: true,
+            key_value_store: false,
+        });
+        assert!(limited_writing.contains("\"name\":\"write_sql\""));
+        assert!(!limited_writing.contains("\"name\":\"put\""));
+        assert!(!limited_writing.contains("\"name\":\"del\""));
     }
 
     #[test]

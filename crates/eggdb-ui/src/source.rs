@@ -74,6 +74,17 @@ pub trait Source {
         ))
     }
 
+    /// Gives the collection `name` the name `new_name` in one commit, with every key in it, and
+    /// returns the commit's time, UTC, as `HH:MM:SSZ`. It fails with
+    /// [`ErrorKind::CollectionNotFound`] when there is no collection `name`.
+    fn rename_collection(&mut self, name: &str, new_name: &str) -> Result<String, SourceError> {
+        let _ = (name, new_name);
+        Err(SourceError::new(
+            ErrorKind::Other,
+            "this database has no collections",
+        ))
+    }
+
     /// Runs `text` as a SQL script, statement by statement, as `eggdb sql` does, and rolls
     /// back a transaction block the script leaves open. A source without SQL answers with an
     /// error.

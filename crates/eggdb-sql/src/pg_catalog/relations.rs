@@ -196,8 +196,8 @@ pub(crate) fn build(
         CatalogRelation::Tablespace => tablespace_rows(),
         CatalogRelation::Trigger => trigger_rows(snapshot),
         CatalogRelation::Inherits => inherits_rows(snapshot),
-        CatalogRelation::Policy
-        | CatalogRelation::StatisticExt
+        CatalogRelation::Policy => super::policies::policy_rows(snapshot)?,
+        CatalogRelation::StatisticExt
         | CatalogRelation::Publication
         | CatalogRelation::PublicationRel
         | CatalogRelation::PublicationNamespace
@@ -216,6 +216,9 @@ pub(crate) fn build(
         }
         CatalogRelation::SqlServer(relation) => crate::sqlserver_catalog::rows(snapshot, relation),
         CatalogRelation::Oracle(relation) => crate::oracle_dictionary::rows(snapshot, relation),
+        CatalogRelation::Monitoring(super::monitoring::MonitoringRelation::Policies) => {
+            super::policies::policies_view_rows(snapshot)?
+        }
         CatalogRelation::Monitoring(relation) => super::monitoring::rows(snapshot, relation),
         CatalogRelation::MySql(relation) => crate::mysql_catalog::rows(snapshot, relation),
     })
@@ -289,24 +292,57 @@ fn table_oid(snapshot: &CatalogSnapshot, internal: &str) -> Option<u32> {
         .map(|entry| entry.oid)
 }
 
+fn index_oids(snapshot: &CatalogSnapshot) -> std::collections::HashMap<(&str, u32), u32> {
+    let mut found = std::collections::HashMap::new();
+    for entry in &snapshot.relations {
+        let RelationSource::Index {
+            table,
+            index: IndexSource::Secondary(at),
+        } = &entry.source
+        else {
+            continue;
+        };
+        if let Some(owner) = snapshot
+            .relations
+            .get(*table)
+            .and_then(|owner| owner.table())
+            && let Some(index) = owner.indexes.get(*at)
+        {
+            found.insert((owner.name.as_str(), index.id), entry.oid);
+        }
+    }
+    found
+}
+
+fn inherits_row(child: u32, parent: u32) -> Vec<Value> {
+    Row::new(CatalogRelation::Inherits)
+        .set("inhrelid", oid(child))
+        .set("inhparent", oid(parent))
+        .set("inhseqno", int(1))
+        .set("inhdetachpending", flag(false))
+        .done()
+}
+
 fn inherits_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     let mut rows = Vec::new();
+    let indexes = index_oids(snapshot);
     for (child, record) in snapshot.partitions.every() {
         let Some((parent, _)) = &record.parent else {
             continue;
         };
+        for link in &record.index_links {
+            if let (Some(child_index), Some(parent_index)) = (
+                indexes.get(&(child, link.index)),
+                indexes.get(&(parent.as_str(), link.parent_index)),
+            ) {
+                rows.push(inherits_row(*child_index, *parent_index));
+            }
+        }
         let (Some(child), Some(parent)) = (table_oid(snapshot, child), table_oid(snapshot, parent))
         else {
             continue;
         };
-        rows.push(
-            Row::new(CatalogRelation::Inherits)
-                .set("inhrelid", oid(child))
-                .set("inhparent", oid(parent))
-                .set("inhseqno", int(1))
-                .set("inhdetachpending", flag(false))
-                .done(),
-        );
+        rows.push(inherits_row(child, parent));
     }
     rows
 }
@@ -325,7 +361,7 @@ pub(crate) fn partitioned_table_rows(snapshot: &CatalogSnapshot) -> Vec<(u32, &'
             Some((
                 table_oid(snapshot, table)?,
                 strategy,
-                key.columns.len() as i64,
+                key.parts.len() as i64,
             ))
         })
         .collect()
@@ -348,8 +384,11 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
         let mut file_node = entry.oid;
         let mut partition_bound = None;
         let mut has_subclass = false;
+        let mut row_security = crate::row_security::RowSecuritySwitch::default();
         match &entry.source {
             RelationSource::Table(table) => {
+                row_security = crate::row_security::switch_state(&snapshot.access, &entry.internal)
+                    .unwrap_or_default();
                 if snapshot.partitions.key_of(&table.name).is_some() {
                     kind = "p";
                     file_node = 0;
@@ -384,6 +423,10 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                     .relations
                     .get(*table)
                     .and_then(|owner| owner.table());
+                if owner.is_some_and(|owner| snapshot.partitions.key_of(&owner.name).is_some()) {
+                    kind = "I";
+                    file_node = 0;
+                }
                 natts = owner.map_or(0, |owner| index_columns(owner, *index).len());
                 am = access_method_oid(
                     owner.map_or(IndexMethod::BTree, |owner| index_method(owner, *index)),
@@ -426,8 +469,8 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 .set("relhasrules", flag(has_rules))
                 .set("relhastriggers", flag(has_triggers))
                 .set("relhassubclass", flag(has_subclass))
-                .set("relrowsecurity", flag(false))
-                .set("relforcerowsecurity", flag(false))
+                .set("relrowsecurity", flag(row_security.enabled))
+                .set("relforcerowsecurity", flag(row_security.forced))
                 .set("relispopulated", flag(true))
                 .set("relreplident", text(replident))
                 .set("relispartition", flag(partition_bound.is_some()))
@@ -467,6 +510,7 @@ struct AttributeRow<'a> {
     not_null: bool,
     has_default: bool,
     identity: &'a str,
+    generated: &'a str,
     acl: Value,
 }
 
@@ -489,7 +533,7 @@ fn attribute_row(attribute: AttributeRow<'_>) -> Vec<Value> {
         .set("atthasdef", flag(attribute.has_default))
         .set("atthasmissing", flag(false))
         .set("attidentity", text(attribute.identity))
-        .set("attgenerated", text(""))
+        .set("attgenerated", text(attribute.generated))
         .set("attisdropped", flag(false))
         .set("attislocal", flag(true))
         .set("attinhcount", small(0))
@@ -530,8 +574,14 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                             })
                         }),
                         not_null: column.not_null || table.primary_key.contains(&at),
-                        has_default: column.default.is_some() && table.identity_of(at).is_none(),
+                        has_default: (column.default.is_some() || table.is_generated(at))
+                            && table.identity_of(at).is_none(),
                         identity: identity_code(table.identity_of(at)),
+                        generated: match table.generation_of(at) {
+                            Some(entry) if entry.stored => "s",
+                            Some(_) => "v",
+                            None => "",
+                        },
                         acl: column_acl(snapshot, &entry.internal, &column.name),
                     }));
                 }
@@ -546,6 +596,7 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                         not_null: false,
                         has_default: false,
                         identity: "",
+                        generated: "",
                         acl: column_acl(snapshot, &entry.internal, &column.name),
                     }));
                 }
@@ -567,6 +618,7 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                         not_null: true,
                         has_default: false,
                         identity: "",
+                        generated: "",
                         acl: Value::Null,
                     }));
                 }
@@ -596,6 +648,7 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                         not_null: false,
                         has_default: false,
                         identity: "",
+                        generated: "",
                         acl: Value::Null,
                     }));
                 }
@@ -610,6 +663,7 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                         not_null: false,
                         has_default: false,
                         identity: "",
+                        generated: "",
                         acl: Value::Null,
                     }));
                 }
@@ -1115,6 +1169,19 @@ fn trigger_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     rows
 }
 
+fn index_is_valid(snapshot: &CatalogSnapshot, owner: &TableDefinition, index: IndexSource) -> bool {
+    match index {
+        IndexSource::Secondary(at) if snapshot.partitions.key_of(&owner.name).is_some() => {
+            owner.indexes.get(at).is_none_or(|index| {
+                snapshot
+                    .partitions
+                    .index_reaches_every_partition(&owner.name, index.id)
+            })
+        }
+        _ => true,
+    }
+}
+
 fn index_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     let mut rows = Vec::new();
     for entry in &snapshot.relations {
@@ -1142,7 +1209,7 @@ fn index_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 .set("indisexclusion", flag(false))
                 .set("indimmediate", flag(true))
                 .set("indisclustered", flag(false))
-                .set("indisvalid", flag(true))
+                .set("indisvalid", flag(index_is_valid(snapshot, owner, *index)))
                 .set("indcheckxmin", flag(false))
                 .set("indisready", flag(true))
                 .set("indislive", flag(true))
@@ -1491,7 +1558,7 @@ fn description_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     rows
 }
 
-fn other_database_oid(name: &str) -> u32 {
+pub(super) fn other_database_oid(name: &str) -> u32 {
     let hash = name.bytes().fold(0x811c_9dc5u32, |hash, byte| {
         (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
     });

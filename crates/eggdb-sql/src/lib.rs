@@ -49,6 +49,9 @@ mod eval;
 mod execute;
 mod explain;
 mod foreign;
+mod generated_columns;
+#[cfg(test)]
+mod generated_columns_tests;
 mod geo_functions;
 mod grouping_sets;
 mod hash_index;
@@ -56,6 +59,7 @@ mod hierarchy;
 mod hstore;
 mod hstore_functions;
 mod hyperloglog;
+mod hypothetical_set;
 mod indexes;
 mod information_schema;
 mod interval;
@@ -88,14 +92,17 @@ mod oracle_dictionary;
 mod oracle_errors;
 mod oracle_functions;
 mod oracle_intervals;
+mod oracle_keep;
 mod oracle_listagg;
 mod oracle_nls;
 mod oracle_number_model;
 mod oracle_numerals;
+mod oracle_regexp;
 mod output_into;
 mod parser;
 mod partition_ddl;
 mod partition_dml;
+mod partition_indexes;
 mod partitions;
 mod pg_binary;
 mod pg_catalog;
@@ -122,8 +129,10 @@ mod roles;
 mod routine_settings;
 mod routines;
 mod row_security;
+mod row_values;
 mod schema;
 mod schemas;
+mod search_cycle;
 mod sequences;
 mod served_databases;
 mod session;
@@ -147,6 +156,7 @@ mod sqlserver_types;
 mod stack_depth;
 mod standards;
 pub mod statement_statistics;
+mod statistical_aggregates;
 mod statistics;
 mod step_times;
 mod store;
@@ -188,6 +198,8 @@ mod copy_tests;
 #[cfg(test)]
 mod correctness;
 #[cfg(test)]
+mod create_table_as_tests;
+#[cfg(test)]
 mod destructive_tests;
 #[cfg(test)]
 mod dialect_plan_tests;
@@ -224,17 +236,23 @@ mod multitable_insert_tests;
 #[cfg(test)]
 mod one_statement_tests;
 #[cfg(test)]
+mod oracle_analytic_tests;
+#[cfg(test)]
 mod oracle_tests;
 #[cfg(test)]
 mod output_into_tests;
 #[cfg(test)]
 mod partition_tests;
 #[cfg(test)]
+mod read_only_transaction_tests;
+#[cfg(test)]
 mod regex_tests;
 #[cfg(test)]
 mod savepoint_tests;
 #[cfg(test)]
 mod schema_tests;
+#[cfg(test)]
+mod search_cycle_tests;
 #[cfg(test)]
 mod select_into_tests;
 #[cfg(test)]
@@ -245,6 +263,8 @@ mod sql_json_tests;
 mod sql_speed_tests;
 #[cfg(test)]
 mod sqlserver_tests;
+#[cfg(test)]
+mod statement_rollback_tests;
 #[cfg(test)]
 mod subquery_tests;
 #[cfg(test)]
@@ -257,6 +277,8 @@ mod time_series_tests;
 mod transaction_settings_tests;
 #[cfg(test)]
 mod type_affinity_tests;
+#[cfg(test)]
+mod upsert_tests;
 #[cfg(test)]
 mod user_type_tests;
 #[cfg(test)]
@@ -305,7 +327,7 @@ pub use plsql::ServerOutputReader;
 pub use random::{RandomSource, set_random_source};
 pub use ranges::{RangeBound, RangeBounds, RangeValue};
 pub use records::RecordValue;
-pub use regex::regex_matches_with_flags;
+pub use regex::{regex_captures, regex_matches_with_flags};
 pub use relations::{EXACT_ROW_COUNT_UP_TO, Relation, RelationKind, find_relation};
 pub use restore::{
     Consequence, IgnoredMetaCommand, IgnoredStatements, IncludeBase, IncludeOpener, IncludeRequest,
@@ -315,7 +337,8 @@ pub use restore::{
 };
 pub use roles::{StoredRole, login_verifier, stored_role, stored_roles};
 pub use schema::{
-    ColumnSchema, IndexColumnOrder, IndexSchema, TableSchema, ViewColumnSchema, ViewSchema, quoted,
+    ColumnGeneration, ColumnSchema, IndexColumnOrder, IndexSchema, TableSchema, ViewColumnSchema,
+    ViewSchema, quoted,
 };
 pub use served_databases::{
     DatabaseDirectory, FixedDatabases, ServedDatabaseError, ServedDatabases, is_valid_database_name,

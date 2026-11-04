@@ -1,7 +1,8 @@
 use super::{Level, Parser};
 use crate::ast::{
-    AssignedValue, Assignment, BinaryOperator, ColumnDefinition, Expr, ExprKind, IndexSpec,
-    Literal, MySqlStatement, Name, OnDuplicate, Statement, UnaryOperator, VariableTarget,
+    AssignedValue, Assignment, BinaryOperator, CharacteristicsTarget, ColumnDefinition, Expr,
+    ExprKind, IndexSpec, Literal, MySqlStatement, Name, OnDuplicate, Statement, UnaryOperator,
+    VariableTarget,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
@@ -191,7 +192,10 @@ impl<'t> Parser<'t> {
             "explain"
                 if !self.is_word_at(1, "select")
                     && !self.is_word_at(1, "update")
-                    && !self.is_word_at(1, "delete") =>
+                    && !self.is_word_at(1, "delete")
+                    && !self.is_word_at(1, "analyze")
+                    && !(self.is_word_at(1, "format")
+                        && matches!(self.peek_kind_at(2), TokenKind::Operator("="))) =>
             {
                 self.at += 1;
                 self.describe()?
@@ -414,18 +418,23 @@ impl<'t> Parser<'t> {
         }
         let mut assignments = Vec::new();
         loop {
+            let session_wide = self.is_word("session") || self.is_word("local");
             let mut global = self.is_word("global") || self.is_word("persist");
             let _ = self.take_word("session")
                 || self.take_word("local")
                 || self.take_word("global")
                 || self.take_word("persist");
             if self.take_word("transaction") {
-                while !matches!(self.peek_kind(), TokenKind::End | TokenKind::Semicolon) {
-                    self.at += 1;
-                }
-                return Ok(Statement::MySql(MySqlStatement::Accepted(
-                    "SET TRANSACTION",
-                )));
+                let target = if global {
+                    CharacteristicsTarget::Global
+                } else if session_wide {
+                    CharacteristicsTarget::Session
+                } else {
+                    CharacteristicsTarget::NextTransaction
+                };
+                return self
+                    .transaction_characteristics(target)
+                    .map(Statement::SetTransaction);
             }
             if self.is_word("password") || self.is_word("role") || self.is_word("default") {
                 return Err(self.not_supported(&format!(
@@ -860,14 +869,7 @@ impl<'t> Parser<'t> {
             }
             (TokenKind::Operator("<=>"), _) => {
                 let right = self.expression_above(Level::Pattern)?;
-                Ok(Expr {
-                    kind: ExprKind::IsDistinctFrom {
-                        left: Box::new(left),
-                        right: Box::new(right),
-                        negated: true,
-                    },
-                    position,
-                })
+                crate::row_values::distinctness(self.dialect, left, right, true, position)
             }
             (TokenKind::Operator("/"), _) => {
                 let right = self.expression_above(Level::Power)?;

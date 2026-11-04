@@ -21,7 +21,8 @@ impl fmt::Display for Address {
     }
 }
 
-/// A host's network: listening for connections and a queue for the operations on them.
+/// A host's network: listening for connections, a queue for the operations on them, and UDP
+/// sockets.
 pub trait Network: Send + Sync + fmt::Debug {
     /// The listener type [`Network::listen`] returns.
     type Listener: NetListener;
@@ -29,6 +30,8 @@ pub trait Network: Send + Sync + fmt::Debug {
     type Stream: NetStream;
     /// The queue type for operations on this network.
     type Queue: NetQueue<Listener = Self::Listener, Stream = Self::Stream>;
+    /// The UDP socket type [`Network::bind_datagram`] returns.
+    type Datagram: DatagramSocket;
 
     /// Listens at `address`; port 0 picks a free port, which
     /// [`NetListener::local_address`] then reports. Fails with [`ErrorKind::AddrInUse`] when
@@ -38,6 +41,41 @@ pub trait Network: Send + Sync + fmt::Debug {
 
     /// Creates a queue for accepts, connects, receives and sends.
     fn net_queue(&self, options: NetQueueOptions) -> Result<Self::Queue>;
+
+    /// Opens a UDP socket bound to `address`; port 0 picks a free port, which
+    /// [`DatagramSocket::local_address`] then reports. UDP ports are apart from TCP's, so a
+    /// datagram socket and a listener may share a port number. Fails with
+    /// [`ErrorKind::AddrInUse`] when another datagram socket is bound there, and
+    /// [`ErrorKind::AddrNotAvailable`] when the address is not this host's.
+    fn bind_datagram(&self, address: SocketAddr) -> Result<Self::Datagram>;
+}
+
+/// The largest datagram a [`DatagramSocket`] sends: the most a UDP datagram over IPv4 carries
+/// (65,535 bytes less the IP and UDP headers).
+pub const MAX_DATAGRAM_BYTES: usize = 65_507;
+
+/// A UDP socket: datagrams to and from any address, each one sent whole or not at all, which
+/// may arrive out of order or never, as over UDP.
+///
+/// Its calls block the calling thread, a receive for at most the wait it is given, so a server
+/// reads one with a thread of its own and checks its stop flag between receives.
+pub trait DatagramSocket: Send + Sync + fmt::Debug {
+    /// The address it is bound to.
+    fn local_address(&self) -> Result<SocketAddr>;
+
+    /// Sends `datagram` to `to` and says how many bytes went, always all of them. Fails with
+    /// [`ErrorKind::InvalidInput`] when it is longer than [`MAX_DATAGRAM_BYTES`]. A datagram
+    /// sent where nothing is bound is lost without an error.
+    fn send_to(&self, datagram: &[u8], to: SocketAddr) -> Result<usize>;
+
+    /// Waits up to `wait` for the next datagram, copies it into `buffer` and says how many
+    /// bytes it copied and who sent it; fails with [`ErrorKind::TimedOut`] when none came in
+    /// time, and refuses an empty `buffer` with [`ErrorKind::InvalidInput`]. A datagram longer
+    /// than `buffer` is cut to the buffer's length on Unix systems and in the simulation, and
+    /// fails with [`ErrorKind::InvalidInput`] on Windows, so a caller that refuses datagrams
+    /// longer than some limit receives into a buffer one byte longer and refuses those that
+    /// fill it.
+    fn receive_from(&self, buffer: &mut [u8], wait: Duration) -> Result<(usize, SocketAddr)>;
 }
 
 /// A socket that listens for connections.

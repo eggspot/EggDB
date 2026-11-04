@@ -1,13 +1,18 @@
 use crate::cypher::{
-    Clause, Direction, Expr, NodePattern, Operator, Pattern, Projecting, RelationshipPattern,
-    SetItem,
+    Clause, Direction, Expr, NodePattern, Operator, Pattern, Projecting, Query,
+    RelationshipPattern, SetItem, Shortest,
 };
 use crate::store::{GraphRead, GraphWrite};
-use crate::value::{Node, Relationship, Value, equals, order};
+use crate::value::{Node, Path, Relationship, Value, equals, order};
 use crate::{GraphError, GraphResult, QueryResult};
+use std::cell::Cell;
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 
 const MAX_ROWS: usize = 1 << 22;
+const MAX_SHORTEST_PATH_STEPS: usize = 1 << 20;
+const MAX_SHORTEST_PATH_RELATIONSHIPS_RETURNED: usize = 1 << 20;
 const AGGREGATES: [&str; 6] = ["count", "sum", "avg", "min", "max", "collect"];
 
 type Row = Vec<(String, Value)>;
@@ -20,11 +25,147 @@ fn lookup<'r>(row: &'r Row, name: &str) -> Option<&'r Value> {
         .map(|(_, value)| value)
 }
 
+fn distinct_key<'v>(values: impl Iterator<Item = &'v Value>) -> String {
+    let mut key = String::new();
+    for value in values {
+        push_distinct_key(&mut key, value);
+        key.push('\u{1f}');
+    }
+    key
+}
+
+fn push_distinct_key(key: &mut String, value: &Value) {
+    match value {
+        Value::Float(number) if *number == 0.0 => key.push_str("Float(0.0)"),
+        Value::List(items) => {
+            key.push('[');
+            for item in items {
+                push_distinct_key(key, item);
+                key.push(',');
+            }
+            key.push(']');
+        }
+        Value::Map(entries) => {
+            key.push('{');
+            for (name, item) in entries {
+                let _ = write!(key, "{name:?}:");
+                push_distinct_key(key, item);
+                key.push(',');
+            }
+            key.push('}');
+        }
+        other => {
+            let _ = write!(key, "{other:?}");
+        }
+    }
+}
+
+fn values_held(value: &Value) -> usize {
+    let mut count = 1usize;
+    let mut containers = vec![value];
+    while let Some(container) = containers.pop() {
+        let (items, entries): (&[Value], &[(String, Value)]) = match container {
+            Value::List(items) => (items, &[]),
+            Value::Map(entries) => (&[], entries),
+            _ => continue,
+        };
+        for child in items.iter().chain(entries.iter().map(|(_, item)| item)) {
+            count = count.saturating_add(1);
+            if matches!(child, Value::List(_) | Value::Map(_)) {
+                containers.push(child);
+            }
+        }
+    }
+    count
+}
+
+fn push_comprehension_output(
+    out: &mut Vec<Value>,
+    held: &mut usize,
+    value: Value,
+) -> GraphResult<()> {
+    *held = held.saturating_add(values_held(&value));
+    if *held > MAX_ROWS {
+        return Err(out_of_memory(format!(
+            "a list or pattern comprehension builds more than {MAX_ROWS} values"
+        )));
+    }
+    out.push(value);
+    Ok(())
+}
+
+fn bind_path(row: &mut Row, name: &str, path: Value) -> GraphResult<()> {
+    if lookup(row, name).is_some() {
+        return Err(syntax_error(format!("Variable `{name}` already declared")));
+    }
+    row.push((name.to_owned(), path));
+    Ok(())
+}
+
 fn bind(row: &mut Row, name: &str, value: Value) {
     match row.iter_mut().find(|(known, _)| known == name) {
         Some((_, slot)) => *slot = value,
         None => row.push((name.to_owned(), value)),
     }
+}
+
+#[derive(Clone)]
+struct Walk {
+    origin: u64,
+    used: Vec<u64>,
+    relationships: Vec<Relationship>,
+}
+
+struct Reached {
+    node: u64,
+    distance: u32,
+    before: Vec<(usize, u64)>,
+}
+
+fn out_of_memory(message: impl Into<String>) -> GraphError {
+    GraphError::new(
+        "Neo.TransientError.General.MemoryPoolOutOfMemoryError",
+        message,
+    )
+}
+
+fn syntax_error(message: impl Into<String>) -> GraphError {
+    GraphError::new("Neo.ClientError.Statement.SyntaxError", message)
+}
+
+fn walks_back(
+    reached: &[Reached],
+    end: usize,
+    all: bool,
+    returned: &Cell<usize>,
+) -> GraphResult<Vec<Vec<u64>>> {
+    let mut walks = Vec::new();
+    let mut stack: Vec<(usize, Vec<u64>)> = vec![(end, Vec::new())];
+    while let Some((at, tail)) = stack.pop() {
+        let Some(step) = reached.get(at) else {
+            continue;
+        };
+        if step.before.is_empty() {
+            let mut walk = tail;
+            walk.reverse();
+            let total = returned.get().saturating_add(walk.len().max(1));
+            returned.set(total);
+            if total > MAX_SHORTEST_PATH_RELATIONSHIPS_RETURNED {
+                return Err(out_of_memory(format!(
+                    "the query's shortest paths hold more than {MAX_SHORTEST_PATH_RELATIONSHIPS_RETURNED} relationships together; bound them with fewer hops, fewer start nodes or a more selective pattern"
+                )));
+            }
+            walks.push(walk);
+            continue;
+        }
+        let choices = if all { step.before.len() } else { 1 };
+        for (previous, relationship) in step.before.iter().take(choices) {
+            let mut longer = tail.clone();
+            longer.push(*relationship);
+            stack.push((*previous, longer));
+        }
+    }
+    Ok(walks)
 }
 
 fn type_error(message: impl Into<String>) -> GraphError {
@@ -43,6 +184,9 @@ pub(crate) enum Access<'g> {
 pub(crate) struct Executor<'g, 'p> {
     pub(crate) access: Access<'g>,
     pub(crate) parameters: &'p [(String, Value)],
+    pub(crate) foreach_runs: usize,
+    pub(crate) shortest_path_steps: Cell<usize>,
+    pub(crate) shortest_path_relationships_returned: Cell<usize>,
 }
 
 fn is_aggregate(expr: &Expr) -> bool {
@@ -251,6 +395,58 @@ impl<'g> Executor<'g, '_> {
                     .collect::<GraphResult<_>>()?;
                 self.function(name, values)?
             }
+            Expr::ListComprehension {
+                variable,
+                list,
+                filter,
+                map,
+            } => {
+                let items = match self.evaluate(list, row)? {
+                    Value::List(items) => items,
+                    Value::Null => return Ok(Value::Null),
+                    other => {
+                        return Err(type_error(format!(
+                            "Type mismatch: expected a list but was {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+                let mut scope = row.clone();
+                let mut out = Vec::new();
+                let mut held = 0;
+                for item in items {
+                    bind(&mut scope, variable, item.clone());
+                    if let Some(filter) = filter
+                        && !self.evaluate(filter, &scope)?.is_true()
+                    {
+                        continue;
+                    }
+                    let value = match map {
+                        Some(map) => self.evaluate(map, &scope)?,
+                        None => item,
+                    };
+                    push_comprehension_output(&mut out, &mut held, value)?;
+                }
+                Value::List(out)
+            }
+            Expr::PatternComprehension {
+                pattern,
+                filter,
+                map,
+            } => {
+                let mut out = Vec::new();
+                let mut held = 0;
+                for matched in self.match_pattern(row, pattern)? {
+                    if let Some(filter) = filter
+                        && !self.evaluate(filter, &matched)?.is_true()
+                    {
+                        continue;
+                    }
+                    let value = self.evaluate(map, &matched)?;
+                    push_comprehension_output(&mut out, &mut held, value)?;
+                }
+                Value::List(out)
+            }
         })
     }
 
@@ -420,6 +616,21 @@ impl<'g> Executor<'g, '_> {
                 .node(relationship.end)?
                 .map_or(Value::Null, |node| Value::Node(Box::new(node))),
             ("size" | "length", [Value::List(items)]) => Value::Integer(items.len() as i64),
+            ("length", [Value::Path(path)]) => Value::Integer(path.relationships.len() as i64),
+            ("nodes", [Value::Path(path)]) => Value::List(
+                path.nodes
+                    .iter()
+                    .cloned()
+                    .map(|node| Value::Node(Box::new(node)))
+                    .collect(),
+            ),
+            ("relationships", [Value::Path(path)]) => Value::List(
+                path.relationships
+                    .iter()
+                    .cloned()
+                    .map(|relationship| Value::Relationship(Box::new(relationship)))
+                    .collect(),
+            ),
             ("size", [Value::String(text)]) => Value::Integer(text.chars().count() as i64),
             ("head", [Value::List(items)]) => items.first().cloned().unwrap_or(Value::Null),
             ("last", [Value::List(items)]) => items.last().cloned().unwrap_or(Value::Null),
@@ -595,16 +806,18 @@ impl<'g> Executor<'g, '_> {
         pattern: &Pattern,
         step: usize,
         at: u64,
-        used: Vec<u64>,
+        walk: Walk,
         out: &mut Vec<Row>,
     ) -> GraphResult<()> {
         if out.len() > MAX_ROWS {
-            return Err(GraphError::new(
-                "Neo.TransientError.General.MemoryPoolOutOfMemoryError",
-                "the query matches too many rows",
-            ));
+            return Err(out_of_memory("the query matches too many rows"));
         }
         let Some((relationship_pattern, node_pattern)) = pattern.steps.get(step) else {
+            let mut row = row;
+            if let Some(name) = &pattern.path {
+                let path = self.path_value(walk.origin, &walk.relationships)?;
+                bind_path(&mut row, name, path)?;
+            }
             out.push(row);
             return Ok(());
         };
@@ -622,7 +835,7 @@ impl<'g> Executor<'g, '_> {
         for hop in 1..=max {
             let mut next_frontier = Vec::new();
             for (node, path) in &frontier {
-                let mut taken = used.clone();
+                let mut taken = walk.used.clone();
                 taken.extend(path.iter().map(|relationship| relationship.id));
                 for (relationship, next) in
                     self.steps_from(*node, relationship_pattern, &row, &taken)?
@@ -684,15 +897,20 @@ impl<'g> Executor<'g, '_> {
             if let Some(name) = &node_pattern.variable {
                 bind(&mut next_row, name, node_value);
             }
-            let mut next_used = used.clone();
-            next_used.extend(path.iter().map(|relationship| relationship.id));
-            self.extend(next_row, pattern, step + 1, node.id, next_used, out)?;
+            let mut next_walk = walk.clone();
+            next_walk
+                .used
+                .extend(path.iter().map(|relationship| relationship.id));
+            if pattern.path.is_some() {
+                next_walk.relationships.extend(path);
+            }
+            self.extend(next_row, pattern, step + 1, node.id, next_walk, out)?;
         }
         Ok(())
     }
 
-    fn match_pattern(&self, row: &Row, pattern: &Pattern) -> GraphResult<Vec<Row>> {
-        let starts: Vec<Node> = match self.bound_node(&pattern.start, row)? {
+    fn start_nodes(&self, pattern: &NodePattern, row: &Row) -> GraphResult<Vec<Node>> {
+        Ok(match self.bound_node(pattern, row)? {
             Some(Some(node)) => vec![node],
             Some(None) => Vec::new(),
             None => {
@@ -705,9 +923,51 @@ impl<'g> Executor<'g, '_> {
                 }
                 nodes
             }
-        };
+        })
+    }
+
+    fn existing_node(&self, id: u64) -> GraphResult<Node> {
+        self.read().node(id)?.ok_or_else(|| {
+            GraphError::new(
+                "Neo.DatabaseError.General.UnknownError",
+                format!("node {id} on the path vanished"),
+            )
+        })
+    }
+
+    fn existing_relationship(&self, id: u64) -> GraphResult<Relationship> {
+        self.read().relationship(id)?.ok_or_else(|| {
+            GraphError::new(
+                "Neo.DatabaseError.General.UnknownError",
+                format!("relationship {id} on the path vanished"),
+            )
+        })
+    }
+
+    fn path_value(&self, origin: u64, relationships: &[Relationship]) -> GraphResult<Value> {
+        let mut nodes = Vec::with_capacity(relationships.len() + 1);
+        let mut at = origin;
+        nodes.push(self.existing_node(at)?);
+        for relationship in relationships {
+            at = if relationship.start == at {
+                relationship.end
+            } else {
+                relationship.start
+            };
+            nodes.push(self.existing_node(at)?);
+        }
+        Ok(Value::Path(Box::new(Path {
+            nodes,
+            relationships: relationships.to_vec(),
+        })))
+    }
+
+    fn match_pattern(&self, row: &Row, pattern: &Pattern) -> GraphResult<Vec<Row>> {
+        if let Some(shortest) = pattern.shortest {
+            return self.match_shortest(row, pattern, shortest);
+        }
         let mut out = Vec::new();
-        for node in starts {
+        for node in self.start_nodes(&pattern.start, row)? {
             if !self.node_matches(&node, &pattern.start, row)? {
                 continue;
             }
@@ -715,7 +975,155 @@ impl<'g> Executor<'g, '_> {
             if let Some(name) = &pattern.start.variable {
                 bind(&mut start_row, name, Value::Node(Box::new(node.clone())));
             }
-            self.extend(start_row, pattern, 0, node.id, Vec::new(), &mut out)?;
+            let walk = Walk {
+                origin: node.id,
+                used: Vec::new(),
+                relationships: Vec::new(),
+            };
+            self.extend(start_row, pattern, 0, node.id, walk, &mut out)?;
+        }
+        Ok(out)
+    }
+
+    fn breadth_first(
+        &self,
+        origin: u64,
+        pattern: &RelationshipPattern,
+        row: &Row,
+        max: u32,
+        target: Option<u64>,
+        all: bool,
+    ) -> GraphResult<Vec<Reached>> {
+        let mut reached = vec![Reached {
+            node: origin,
+            distance: 0,
+            before: Vec::new(),
+        }];
+        let mut index: HashMap<u64, usize> = HashMap::from([(origin, 0)]);
+        let mut frontier = vec![0usize];
+        for hop in 1..=max {
+            let mut next_frontier = Vec::new();
+            for &at in &frontier {
+                let Some(from) = reached.get(at).map(|step| step.node) else {
+                    continue;
+                };
+                for (relationship, next) in self.steps_from(from, pattern, row, &[])? {
+                    let steps = self.shortest_path_steps.get() + 1;
+                    self.shortest_path_steps.set(steps);
+                    if steps > MAX_SHORTEST_PATH_STEPS {
+                        return Err(out_of_memory(format!(
+                            "the query's shortest path searches expand more than {MAX_SHORTEST_PATH_STEPS} relationships; bound them with fewer hops, fewer start nodes or a more selective pattern"
+                        )));
+                    }
+                    match index.get(&next) {
+                        None => {
+                            index.insert(next, reached.len());
+                            next_frontier.push(reached.len());
+                            reached.push(Reached {
+                                node: next,
+                                distance: hop,
+                                before: vec![(at, relationship.id)],
+                            });
+                        }
+                        Some(&known) if all => {
+                            if let Some(step) = reached.get_mut(known)
+                                && step.distance == hop
+                            {
+                                step.before.push((at, relationship.id));
+                            }
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+            frontier = next_frontier;
+            let target_reached =
+                target.is_some_and(|target| target != origin && index.contains_key(&target));
+            if frontier.is_empty() || target_reached {
+                break;
+            }
+        }
+        Ok(reached)
+    }
+
+    fn match_shortest(
+        &self,
+        row: &Row,
+        pattern: &Pattern,
+        shortest: Shortest,
+    ) -> GraphResult<Vec<Row>> {
+        let Some((relationship_pattern, end_pattern)) = pattern.steps.first() else {
+            return Ok(Vec::new());
+        };
+        let target = match self.bound_node(end_pattern, row)? {
+            Some(Some(node)) => Some(node.id),
+            Some(None) => return Ok(Vec::new()),
+            None => None,
+        };
+        let (min, max) = relationship_pattern.hops.unwrap_or((1, 1));
+        let all = shortest == Shortest::All;
+        let mut out = Vec::new();
+        for start in self.start_nodes(&pattern.start, row)? {
+            if !self.node_matches(&start, &pattern.start, row)? {
+                continue;
+            }
+            let mut start_row = row.clone();
+            if let Some(name) = &pattern.start.variable {
+                bind(&mut start_row, name, Value::Node(Box::new(start.clone())));
+            }
+            let reached =
+                self.breadth_first(start.id, relationship_pattern, &start_row, max, target, all)?;
+            for (end, step) in reached.iter().enumerate() {
+                if step.distance < min || target.is_some_and(|target| target != step.node) {
+                    continue;
+                }
+                let end_node = self.existing_node(step.node)?;
+                if !self.node_matches(&end_node, end_pattern, &start_row)? {
+                    continue;
+                }
+                for walk in walks_back(
+                    &reached,
+                    end,
+                    all,
+                    &self.shortest_path_relationships_returned,
+                )? {
+                    let relationships = walk
+                        .iter()
+                        .map(|id| self.existing_relationship(*id))
+                        .collect::<GraphResult<Vec<_>>>()?;
+                    let mut next_row = start_row.clone();
+                    if let Some(name) = &relationship_pattern.variable {
+                        let value = if relationship_pattern.hops.is_some() {
+                            Value::List(
+                                relationships
+                                    .iter()
+                                    .cloned()
+                                    .map(|relationship| Value::Relationship(Box::new(relationship)))
+                                    .collect(),
+                            )
+                        } else {
+                            match relationships.first() {
+                                Some(relationship) => {
+                                    Value::Relationship(Box::new(relationship.clone()))
+                                }
+                                None => Value::Null,
+                            }
+                        };
+                        bind(&mut next_row, name, value);
+                    }
+                    if let Some(name) = &end_pattern.variable {
+                        bind(&mut next_row, name, Value::Node(Box::new(end_node.clone())));
+                    }
+                    if let Some(name) = &pattern.path {
+                        let path = self.path_value(start.id, &relationships)?;
+                        bind_path(&mut next_row, name, path)?;
+                    }
+                    out.push(next_row);
+                    if out.len() > MAX_ROWS {
+                        return Err(out_of_memory("the query matches too many rows"));
+                    }
+                }
+            }
         }
         Ok(out)
     }
@@ -723,6 +1131,7 @@ impl<'g> Executor<'g, '_> {
     fn variables_of(patterns: &[Pattern]) -> Vec<String> {
         let mut names = Vec::new();
         for pattern in patterns {
+            names.extend(pattern.path.clone());
             names.extend(pattern.start.variable.clone());
             for (relationship, node) in &pattern.steps {
                 names.extend(relationship.variable.clone());
@@ -769,8 +1178,15 @@ impl<'g> Executor<'g, '_> {
         Ok(id)
     }
 
-    fn create(&mut self, pattern: &Pattern, row: &mut Row) -> GraphResult<()> {
-        let mut at = self.create_node(&pattern.start, row)?;
+    fn create(&mut self, pattern: &Pattern, row: &mut Row, merging: bool) -> GraphResult<()> {
+        if let Some(name) = &pattern.path
+            && lookup(row, name).is_some()
+        {
+            return Err(syntax_error(format!("Variable `{name}` already declared")));
+        }
+        let origin = self.create_node(&pattern.start, row)?;
+        let mut at = origin;
+        let mut walked = Vec::new();
         for (relationship, node) in &pattern.steps {
             let next = self.create_node(node, row)?;
             let [kind] = relationship.kinds.as_slice() else {
@@ -788,6 +1204,7 @@ impl<'g> Executor<'g, '_> {
             let (start, end) = match relationship.direction {
                 Direction::Outgoing => (at, next),
                 Direction::Incoming => (next, at),
+                Direction::Either if merging => (at, next),
                 Direction::Either => {
                     return Err(GraphError::new(
                         "Neo.ClientError.Statement.SyntaxError",
@@ -799,16 +1216,20 @@ impl<'g> Executor<'g, '_> {
             let id = self
                 .writer()?
                 .put_relationship(None, start, end, kind, &properties)?;
-            if let Some(name) = &relationship.variable {
-                let created = self.read().relationship(id)?.ok_or_else(|| {
-                    GraphError::new(
-                        "Neo.DatabaseError.General.UnknownError",
-                        "a created relationship vanished",
-                    )
-                })?;
-                bind(row, name, Value::Relationship(Box::new(created)));
+            if relationship.variable.is_some() || pattern.path.is_some() {
+                let created = self.existing_relationship(id)?;
+                if let Some(name) = &relationship.variable {
+                    bind(row, name, Value::Relationship(Box::new(created.clone())));
+                }
+                if pattern.path.is_some() {
+                    walked.push(created);
+                }
             }
             at = next;
+        }
+        if let Some(name) = &pattern.path {
+            let path = self.path_value(origin, &walked)?;
+            bind_path(row, name, path)?;
         }
         Ok(())
     }
@@ -826,10 +1247,30 @@ impl<'g> Executor<'g, '_> {
                         **relationship = current;
                     }
                 }
+                Value::Path(path) => {
+                    for node in &mut path.nodes {
+                        if let Some(current) = self.read().node(node.id)? {
+                            *node = current;
+                        }
+                    }
+                    for relationship in &mut path.relationships {
+                        if let Some(current) = self.read().relationship(relationship.id)? {
+                            *relationship = current;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
         Ok(())
+    }
+
+    fn apply_set(&mut self, items: &[SetItem], row: &mut Row, removing: bool) -> GraphResult<()> {
+        for item in items {
+            self.refresh(row)?;
+            self.set(item, row, removing)?;
+        }
+        self.refresh(row)
     }
 
     fn set(&mut self, item: &SetItem, row: &Row, removing: bool) -> GraphResult<()> {
@@ -1003,13 +1444,9 @@ impl<'g> Executor<'g, '_> {
             }
         }
         if projecting.distinct {
-            let mut unique: Vec<(Row, Row)> = Vec::new();
-            for (out, source) in projected {
-                if !unique.iter().any(|(known, _)| *known == out) {
-                    unique.push((out, source));
-                }
-            }
-            projected = unique;
+            let mut seen = HashSet::new();
+            projected
+                .retain(|(out, _)| seen.insert(distinct_key(out.iter().map(|(_, value)| value))));
         }
         if !projecting.order.is_empty() {
             let mut keyed = Vec::with_capacity(projected.len());
@@ -1114,10 +1551,162 @@ impl<'g> Executor<'g, '_> {
         })
     }
 
-    pub(crate) fn run(&mut self, clauses: &[Clause]) -> GraphResult<QueryResult> {
+    pub(crate) fn run_query(&mut self, query: &Query) -> GraphResult<QueryResult> {
+        let mut parts = query.parts.iter();
+        let Some(first) = parts.next() else {
+            return Ok(QueryResult::default());
+        };
+        let mut result = self.run(first)?;
+        for part in parts {
+            let next = self.run(part)?;
+            if next.columns != result.columns {
+                return Err(syntax_error(
+                    "All sub queries in an UNION must have the same return column names",
+                ));
+            }
+            result.rows.extend(next.rows);
+            if result.rows.len() > MAX_ROWS {
+                return Err(out_of_memory("the UNION returns too many rows"));
+            }
+        }
+        if query.parts.len() > 1 && !query.union_all {
+            let mut seen = HashSet::new();
+            result
+                .rows
+                .retain(|row| seen.insert(distinct_key(row.iter())));
+        }
+        Ok(result)
+    }
+
+    fn update(&mut self, clause: &Clause, mut rows: Vec<Row>) -> GraphResult<Vec<Row>> {
+        match clause {
+            Clause::Create(patterns) => {
+                for row in &mut rows {
+                    for pattern in patterns {
+                        self.create(pattern, row, false)?;
+                    }
+                }
+            }
+            Clause::Merge {
+                pattern,
+                on_create,
+                on_match,
+            } => {
+                let mut next = Vec::new();
+                for row in rows {
+                    let found = self.match_pattern(&row, pattern)?;
+                    if found.is_empty() {
+                        let mut created = row;
+                        self.create(pattern, &mut created, true)?;
+                        self.apply_set(on_create, &mut created, false)?;
+                        next.push(created);
+                    } else {
+                        for mut matched in found {
+                            self.apply_set(on_match, &mut matched, false)?;
+                            next.push(matched);
+                        }
+                    }
+                    if next.len() > MAX_ROWS {
+                        return Err(out_of_memory("MERGE makes too many rows"));
+                    }
+                }
+                rows = next;
+            }
+            Clause::Set(items) | Clause::Remove(items) => {
+                let removing = matches!(clause, Clause::Remove(_));
+                for row in &mut rows {
+                    self.apply_set(items, row, removing)?;
+                }
+            }
+            Clause::Delete { detach, targets } => {
+                let mut nodes = Vec::new();
+                for row in &rows {
+                    for target in targets {
+                        let value = self.evaluate(target, row)?;
+                        self.delete_relationships_of(value, &mut nodes)?;
+                    }
+                }
+                for node in nodes {
+                    self.writer()?.delete_node(node, *detach)?;
+                }
+            }
+            Clause::Foreach {
+                variable,
+                list,
+                body,
+            } => {
+                for row in &mut rows {
+                    let items = match self.evaluate(list, row)? {
+                        Value::List(items) => items,
+                        Value::Null => Vec::new(),
+                        other => {
+                            return Err(type_error(format!(
+                                "Type mismatch: FOREACH expected a list but was {}",
+                                other.type_name()
+                            )));
+                        }
+                    };
+                    for item in items {
+                        self.foreach_runs += 1;
+                        if self.foreach_runs > MAX_ROWS {
+                            return Err(out_of_memory(format!(
+                                "FOREACH runs its body more than {MAX_ROWS} times in one query"
+                            )));
+                        }
+                        let mut scoped = row.clone();
+                        bind(&mut scoped, variable, item);
+                        let mut inner = vec![scoped];
+                        for clause in body {
+                            inner = self.update(clause, inner)?;
+                        }
+                    }
+                    self.refresh(row)?;
+                }
+            }
+            Clause::Match { .. }
+            | Clause::Unwind(..)
+            | Clause::Call { .. }
+            | Clause::With(_)
+            | Clause::Return(_) => {}
+        }
+        Ok(rows)
+    }
+
+    fn delete_relationships_of(&mut self, value: Value, nodes: &mut Vec<u64>) -> GraphResult<()> {
+        match value {
+            Value::Node(node) => nodes.push(node.id),
+            Value::Relationship(relationship) => {
+                self.writer()?.delete_relationship(relationship.id)?;
+            }
+            Value::Path(path) => {
+                for relationship in &path.relationships {
+                    self.writer()?.delete_relationship(relationship.id)?;
+                }
+                nodes.extend(path.nodes.iter().map(|node| node.id));
+            }
+            Value::List(items) => {
+                for item in items {
+                    if matches!(item, Value::Relationship(_) | Value::Path(_)) {
+                        self.delete_relationships_of(item, nodes)?;
+                    }
+                }
+            }
+            Value::Null => {}
+            other => {
+                return Err(type_error(format!("cannot delete {}", other.type_name())));
+            }
+        }
+        Ok(())
+    }
+
+    fn run(&mut self, clauses: &[Clause]) -> GraphResult<QueryResult> {
         let mut rows: Vec<Row> = vec![Row::new()];
         let mut result = QueryResult::default();
         for clause in clauses {
+            if clause.writes() {
+                rows = self.update(clause, rows)?;
+                continue;
+            }
             match clause {
                 Clause::Match {
                     optional,
@@ -1161,64 +1750,6 @@ impl<'g> Executor<'g, '_> {
                         }
                     }
                     rows = next;
-                }
-                Clause::Create(patterns) => {
-                    for row in &mut rows {
-                        for pattern in patterns {
-                            self.create(pattern, row)?;
-                        }
-                    }
-                }
-                Clause::Merge(pattern) => {
-                    let mut next = Vec::new();
-                    for row in rows {
-                        let found = self.match_pattern(&row, pattern)?;
-                        if found.is_empty() {
-                            let mut created = row;
-                            self.create(pattern, &mut created)?;
-                            next.push(created);
-                        } else {
-                            next.extend(found);
-                        }
-                    }
-                    rows = next;
-                }
-                Clause::Set(items) | Clause::Remove(items) => {
-                    let removing = matches!(clause, Clause::Remove(_));
-                    for row in &mut rows {
-                        for item in items {
-                            self.set(item, row, removing)?;
-                            self.refresh(row)?;
-                        }
-                    }
-                }
-                Clause::Delete { detach, targets } => {
-                    for row in &rows {
-                        for target in targets {
-                            match self.evaluate(target, row)? {
-                                Value::Node(node) => {
-                                    self.writer()?.delete_node(node.id, *detach)?;
-                                }
-                                Value::Relationship(relationship) => {
-                                    self.writer()?.delete_relationship(relationship.id)?;
-                                }
-                                Value::List(items) => {
-                                    for item in items {
-                                        if let Value::Relationship(relationship) = item {
-                                            self.writer()?.delete_relationship(relationship.id)?;
-                                        }
-                                    }
-                                }
-                                Value::Null => {}
-                                other => {
-                                    return Err(type_error(format!(
-                                        "cannot delete {}",
-                                        other.type_name()
-                                    )));
-                                }
-                            }
-                        }
-                    }
                 }
                 Clause::Unwind(list, name) => {
                     let mut next = Vec::new();
@@ -1344,6 +1875,12 @@ impl<'g> Executor<'g, '_> {
                         .collect();
                     return Ok(result);
                 }
+                Clause::Create(_)
+                | Clause::Merge { .. }
+                | Clause::Set(_)
+                | Clause::Remove(_)
+                | Clause::Delete { .. }
+                | Clause::Foreach { .. } => {}
             }
         }
         Ok(result)
@@ -1382,5 +1919,22 @@ pub fn display(value: &Value) -> String {
                 .collect::<String>()
         ),
         Value::Relationship(relationship) => format!("[{}:{}]", relationship.id, relationship.kind),
+        Value::Path(path) => {
+            let mut text = path
+                .nodes
+                .first()
+                .map(|node| display(&Value::Node(Box::new(node.clone()))))
+                .unwrap_or_default();
+            for (relationship, node) in path.relationships.iter().zip(path.nodes.iter().skip(1)) {
+                let link = display(&Value::Relationship(Box::new(relationship.clone())));
+                if relationship.end == node.id {
+                    text.push_str(&format!("-{link}->"));
+                } else {
+                    text.push_str(&format!("<-{link}-"));
+                }
+                text.push_str(&display(&Value::Node(Box::new(node.clone()))));
+            }
+            text
+        }
     }
 }

@@ -407,6 +407,9 @@ impl Parser<'_> {
         let mut rows: Vec<Vec<Expr>> = Vec::new();
         loop {
             let row_position = self.position();
+            if self.mysql() {
+                self.expect_word("row")?;
+            }
             self.expect(&TokenKind::LeftParen)?;
             if self.is_word("default") {
                 return Err(self.not_supported("DEFAULT in a VALUES list outside INSERT"));
@@ -428,6 +431,17 @@ impl Parser<'_> {
             }
         }
         let label = crate::set_returning::VALUES_LABEL;
+        let width = rows.first().map_or(0, Vec::len);
+        let column_names = if self.mysql() {
+            (0..width)
+                .map(|index| Name {
+                    text: format!("column_{index}"),
+                    position,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         Ok(Select {
             distinct: false,
             items: vec![SelectItem::Wildcard {
@@ -444,7 +458,7 @@ impl Parser<'_> {
                     derived: None,
                     generated: Some(Box::new(GeneratedTable::Values(ValuesList {
                         rows,
-                        column_names: Vec::new(),
+                        column_names,
                         position,
                     }))),
                 },
@@ -701,7 +715,7 @@ impl Parser<'_> {
         }
         Ok(Expr {
             kind: ExprKind::OracleFunction {
-                name: "oracle_fetch_with_ties",
+                name: "postgresql_fetch_with_ties",
                 arguments: vec![count],
             },
             position,

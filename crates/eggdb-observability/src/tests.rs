@@ -1,8 +1,9 @@
 use crate::Endpoint;
 use crate::line_protocol::{FieldValue, parse as parse_lines};
-use crate::promql::{Data, evaluate, parse};
+use crate::promql::{Data, Evaluator, Expr, Work, parse};
 use crate::store::Series;
 use eggdb_http::Request;
+use eggdb_platform::connection_limits::MemoryBudget;
 use eggdb_sql::{
     EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection, SqlResult,
 };
@@ -12,13 +13,13 @@ use std::sync::{Arc, Mutex};
 type Map = BTreeMap<Vec<u8>, Vec<u8>>;
 
 #[derive(Default)]
-struct MemoryStore {
+pub(crate) struct MemoryStore {
     committed: Mutex<Arc<Map>>,
 }
 
-struct Snapshot(Arc<Map>);
+pub(crate) struct Snapshot(Arc<Map>);
 
-struct Writer<'s> {
+pub(crate) struct Writer<'s> {
     store: &'s MemoryStore,
     map: Map,
 }
@@ -232,7 +233,18 @@ fn remote_write_requests_decode_into_points() {
     );
 }
 
-fn series(labels: &[(&str, &str)], samples: &[(i64, f64)]) -> Series {
+pub(crate) fn evaluate(
+    expr: &Expr,
+    time_ms: i64,
+    data: &BTreeMap<String, Vec<Series>>,
+) -> Result<Data, String> {
+    let budget = MemoryBudget::new(usize::MAX);
+    Evaluator::new(data, Work::new(&budget, usize::MAX))
+        .evaluate(expr, time_ms)
+        .map_err(|failure| failure.message().to_owned())
+}
+
+pub(crate) fn series(labels: &[(&str, &str)], samples: &[(i64, f64)]) -> Series {
     Series {
         labels: labels
             .iter()
@@ -242,7 +254,7 @@ fn series(labels: &[(&str, &str)], samples: &[(i64, f64)]) -> Series {
     }
 }
 
-fn vector(data: Data) -> Vec<(Vec<(String, String)>, f64)> {
+pub(crate) fn vector(data: Data) -> Vec<(Vec<(String, String)>, f64)> {
     match data {
         Data::Vector(vector) => vector,
         other => panic!("{other:?}"),
@@ -297,7 +309,7 @@ fn promql_selects_rates_aggregates_and_combines() {
         "sum(",
         "requests{code=200}",
         "requests[5x]",
-        "{job=\"api\"}",
+        "{job=~\".*\"}",
     ] {
         assert!(
             parse(broken)
@@ -308,7 +320,7 @@ fn promql_selects_rates_aggregates_and_combines() {
     }
 }
 
-fn post(
+pub(crate) fn post(
     endpoint: &Endpoint<'_, MemoryStore>,
     path: &str,
     query: &str,

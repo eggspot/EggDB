@@ -80,6 +80,15 @@ pub(crate) fn alter_table(
     alter: &AlterTable,
     dialect: Dialect,
 ) -> SqlResult<QueryResult> {
+    if let [AlterAction::AttachIndex(partition_index)] = alter.actions.as_slice() {
+        return crate::partition_indexes::attach_index(
+            writer,
+            tables,
+            &alter.name,
+            partition_index,
+            alter.if_exists,
+        );
+    }
     let mut result = QueryResult::command("ALTER TABLE");
     if tables.table(writer, &alter.name.text)?.is_none() {
         if alter.if_exists {
@@ -154,7 +163,7 @@ fn apply(
             cascade,
         } => drop_column(writer, tables, name, column, *if_exists, *cascade, dialect),
         AlterAction::RenameColumn { from, to } => {
-            rename_column(writer, tables, name, from, to, dialect)?;
+            rename_partitioned_column(writer, tables, name, from, to, dialect)?;
             crate::comments::move_part(writer, name, CommentKind::Column, &from.text, &to.text)?;
             crate::roles::move_column(writer, name, &from.text, &to.text)?;
             Ok(None)
@@ -181,6 +190,14 @@ fn apply(
             let parent = current(writer, tables, name)?;
             crate::partition_ddl::detach(writer, tables, &parent, partition)?;
             Ok(None)
+        }
+        AlterAction::AttachIndex(partition_index) => {
+            let index = Name {
+                text: name.clone(),
+                position: partition_index.position,
+            };
+            crate::partition_indexes::attach_index(writer, tables, &index, partition_index, false)
+                .map(|_| None)
         }
         AlterAction::MoveColumn { column, placement } => {
             move_column(writer, tables, name, column, placement).map(|()| None)
@@ -379,6 +396,7 @@ fn rebuild(
                 writer.delete(&key)?;
                 let mut mapped = map(row)?;
                 if !checks.is_empty() {
+                    checks.generate(&new, &mut mapped)?;
                     checks.check(&new, &mapped)?;
                 }
                 stored.insert(writer, &mut mapped).map_err(|error| {
@@ -472,13 +490,13 @@ fn column_of(definition: &ColumnDefinition) -> Column {
 
 #[cold]
 #[inline(never)]
-fn unreadable_in_transact_sql(constraint: &str, to: &Name) -> SqlError {
+fn unreadable_in_transact_sql(reader: &str, to: &Name) -> SqlError {
     SqlError::not_supported(format!(
-        "renaming a column to \"{}\", which the Transact-SQL check constraint \"{constraint}\" names",
+        "renaming a column to \"{}\", which the Transact-SQL {reader} names",
         to.text
     ))
     .with_hint(
-        "Transact-SQL reads every name in lower case, so the constraint could no longer find the column: choose a name in lower case.",
+        "Transact-SQL reads every name in lower case, so the expression could no longer find the column: choose a name in lower case.",
     )
     .at(to.position)
 }
@@ -542,7 +560,39 @@ fn add_column(
     let added = table.columns.len() - 1;
     table.set_default_dialect(added, definition.default_dialect);
     table.set_domain(added, domain);
-    let fills = column.default.is_some() && has_rows(writer, &table)?;
+    let generator = match &definition.generated {
+        Some(spec) if dialect == Dialect::Sqlite && spec.stored => {
+            return Err(SqlError::new(
+                SqlState::INVALID_TABLE_DEFINITION,
+                "Cannot add a STORED column",
+            )
+            .with_sqlite_code(1)
+            .at(spec.position));
+        }
+        Some(spec) => {
+            let catalog = crate::partitions::catalog(writer, tables)?;
+            if catalog.key_of(&table.name).is_some() || catalog.parent_of(&table.name).is_some() {
+                return Err(
+                    SqlError::not_supported("generated columns in a partitioned table")
+                        .at(spec.position),
+                );
+            }
+            crate::generated_columns::define(&mut table, &[(added, spec)], dialect)?;
+            crate::generated_columns::refuse_routine_calls(
+                &*writer,
+                tables,
+                &table,
+                &[(added, spec)],
+                dialect,
+            )?;
+            if let Some(defined) = table.columns.get(added) {
+                column.sql_type = defined.sql_type;
+            }
+            crate::generated_columns::Generator::of(&table)?
+        }
+        None => None,
+    };
+    let fills = (column.default.is_some() || generator.is_some()) && has_rows(writer, &table)?;
     if column.not_null && !fills && has_rows(writer, &table)? {
         return Err(SqlError::new(
             SqlState::NOT_NULL_VIOLATION,
@@ -562,7 +612,11 @@ fn add_column(
             crate::sequences::load_all(writer)?;
         }
         let mut map = |mut row: Vec<Value>| -> SqlResult<Vec<Value>> {
-            let value = execute::default_of(&table, added)?;
+            row.push(execute::default_of(&table, added)?);
+            if let Some(generator) = &generator {
+                generator.fill(&table, &mut row)?;
+            }
+            let value = row.pop().unwrap_or(Value::Null);
             if value.is_null() && column.not_null {
                 return Err(SqlError::new(
                     SqlState::NOT_NULL_VIOLATION,
@@ -812,6 +866,43 @@ fn drop_column(
     cascade: bool,
     dialect: Dialect,
 ) -> SqlResult<Option<String>> {
+    let catalog = crate::partitions::catalog(&*writer, tables)?;
+    if catalog.is_empty() {
+        return drop_column_here(writer, tables, name, column, if_exists, cascade, dialect);
+    }
+    if let Some((parent, _)) = catalog.parent_of(name)
+        && current(writer, tables, parent)?
+            .column_index(&column.text)
+            .is_some()
+    {
+        return Err(SqlError::new(
+            SqlState::INVALID_TABLE_DEFINITION,
+            format!("cannot drop inherited column \"{}\"", column.text),
+        )
+        .at(column.position));
+    }
+    let partitions = catalog.descendants_of(name);
+    let notice = drop_column_here(writer, tables, name, column, if_exists, cascade, dialect)?;
+    for partition in partitions {
+        if current(writer, tables, &partition)?
+            .column_index(&column.text)
+            .is_some()
+        {
+            drop_column_here(writer, tables, &partition, column, false, cascade, dialect)?;
+        }
+    }
+    Ok(notice)
+}
+
+fn drop_column_here(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    name: &str,
+    column: &Name,
+    if_exists: bool,
+    cascade: bool,
+    dialect: Dialect,
+) -> SqlResult<Option<String>> {
     let table = current(writer, tables, name)?;
     let Some(index) = table.column_index(&column.text) else {
         if if_exists {
@@ -837,6 +928,42 @@ fn drop_column(
             _ => SqlError::not_supported("dropping the only column of a table"),
         });
     }
+    refuse_dropping_a_key_column(writer, tables, &table, &column.text, dialect)?;
+    let mut also_dropped = Vec::new();
+    for dependent in crate::generated_columns::dependents_of(&table, index) {
+        if !cascade || dialect != Dialect::PostgreSql {
+            return Err(crate::generated_columns::dropped_dependency(
+                &table, index, dependent, dialect,
+            ));
+        }
+        if let Some(found) = table.columns.get(dependent) {
+            also_dropped.push(found.name.clone());
+        }
+    }
+    let mut cascade_notices = Vec::new();
+    for dependent in &also_dropped {
+        cascade_notices.push(format!(
+            "NOTICE:  drop cascades to column {dependent} of table {}",
+            crate::schemas::base_name(&table.name)
+        ));
+        let dependent_name = Name {
+            text: dependent.clone(),
+            position: column.position,
+        };
+        drop_column_here(
+            writer,
+            tables,
+            name,
+            &dependent_name,
+            false,
+            cascade,
+            dialect,
+        )?;
+    }
+    let table = current(writer, tables, name)?;
+    let Some(index) = table.column_index(&column.text) else {
+        return Err(missing_column(&table, column, dialect));
+    };
     let in_key = table.primary_key.contains(&index)
         || table.indexes.iter().any(|index_definition| {
             index_definition.unique && index_definition.columns.contains(&index)
@@ -869,6 +996,7 @@ fn drop_column(
     }
     new.identities = table.identities_without_column(index);
     new.default_dialects = table.default_dialects_without_column(index);
+    new.generated = crate::encoding::generated_without_column(&table.generated, index);
     new.domains = table.domains_without_column(index);
     if new.auto_increment_column().is_none() {
         new.identity_seed = None;
@@ -897,6 +1025,13 @@ fn drop_column(
         })
         .collect();
     new.forget_missing_statuses();
+    let dropped_indexes: Vec<u32> = table
+        .indexes
+        .iter()
+        .map(|definition| definition.id)
+        .filter(|id| !new.indexes.iter().any(|kept| kept.id == *id))
+        .collect();
+    crate::partitions::forget_index_links(writer, &table.name, &dropped_indexes)?;
     constraints::unregister_references(writer, tables, &table)?;
     let mut map = |mut row: Vec<Value>| -> SqlResult<Vec<Value>> {
         if index < row.len() {
@@ -907,7 +1042,7 @@ fn drop_column(
     let rebuilt = rebuild(writer, &table, new, &mut map, None)?;
     constraints::register_references(writer, tables, &rebuilt)?;
     crate::sequences::drop_owned_by(writer, tables, &table.name, Some(column.text.as_str()))?;
-    Ok(notices.into_iter().next())
+    Ok(cascade_notices.into_iter().chain(notices).next())
 }
 
 fn unknown_mysql_column(table: &TableDefinition, name: &Name) -> SqlError {
@@ -981,6 +1116,13 @@ fn move_column(
     for entry in &mut new.domains {
         entry.column = at(entry.column);
     }
+    for entry in &mut new.generated {
+        entry.column = at(entry.column);
+    }
+    new.generated.sort_by_key(|entry| entry.column);
+    if crate::constraints::current_dialect() == Dialect::MySql {
+        crate::generated_columns::check_mysql_order(&new)?;
+    }
     constraints::unregister_references(writer, tables, &table)?;
     let mut map = |row: Vec<Value>| -> SqlResult<Vec<Value>> {
         Ok(order
@@ -990,6 +1132,85 @@ fn move_column(
     };
     let rebuilt = rebuild(writer, &table, new, &mut map, None)?;
     constraints::register_references(writer, tables, &rebuilt)?;
+    Ok(())
+}
+
+fn refuse_dropping_a_key_column(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    table: &TableDefinition,
+    column: &str,
+    dialect: Dialect,
+) -> SqlResult<()> {
+    let catalog = crate::partitions::catalog(&*writer, tables)?;
+    if catalog.is_empty() {
+        return Ok(());
+    }
+    let keyed = std::iter::once(table.name.clone()).chain(catalog.descendants_of(&table.name));
+    for name in keyed {
+        let Some(key) = catalog.key_of(&name) else {
+            continue;
+        };
+        let definition = current(writer, tables, &name)?;
+        if crate::partitions::key_reads_column(&definition, key, column)? {
+            return Err(key_column_drop_refused(column, &name, dialect));
+        }
+    }
+    Ok(())
+}
+
+fn key_column_drop_refused(column: &str, name: &str, dialect: Dialect) -> SqlError {
+    if dialect != Dialect::MySql {
+        return SqlError::new(
+            SqlState::INVALID_TABLE_DEFINITION,
+            format!(
+                "cannot drop column \"{column}\" because it is part of the partition key of \
+                 relation \"{}\"",
+                crate::schemas::base_name(name)
+            ),
+        );
+    }
+    SqlError::new(
+        SqlState::MYSQL_COLUMN_NOT_FOUND,
+        format!("Unknown column '{column}' in 'partition function'"),
+    )
+    .with_vendor_code(1054)
+}
+
+fn rename_partitioned_column(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    name: &str,
+    from: &Name,
+    to: &Name,
+    dialect: Dialect,
+) -> SqlResult<()> {
+    let catalog = crate::partitions::catalog(&*writer, tables)?;
+    if catalog.is_empty() {
+        return rename_column(writer, tables, name, from, to, dialect);
+    }
+    if let Some((parent, _)) = catalog.parent_of(name)
+        && current(writer, tables, parent)?
+            .column_index(&from.text)
+            .is_some()
+    {
+        return Err(SqlError::new(
+            SqlState::INVALID_TABLE_DEFINITION,
+            format!("cannot rename inherited column \"{}\"", from.text),
+        )
+        .at(from.position));
+    }
+    rename_column(writer, tables, name, from, to, dialect)?;
+    crate::partitions::rename_key_column(writer, name, &from.text, &to.text)?;
+    for partition in catalog.descendants_of(name) {
+        if current(writer, tables, &partition)?
+            .column_index(&from.text)
+            .is_some()
+        {
+            rename_column(writer, tables, &partition, from, to, dialect)?;
+            crate::partitions::rename_key_column(writer, &partition, &from.text, &to.text)?;
+        }
+    }
     Ok(())
 }
 
@@ -1026,9 +1247,28 @@ fn rename_column(
             && renamed != check.expression
             && to.text.to_lowercase() != to.text
         {
-            return Err(unreadable_in_transact_sql(&check.name, to));
+            return Err(unreadable_in_transact_sql(
+                &format!("check constraint \"{}\"", check.name),
+                to,
+            ));
         }
         check.expression = renamed;
+    }
+    let lower_case = to.text.to_lowercase() == to.text;
+    for entry in &mut table.generated {
+        let renamed =
+            constraints::renamed_in_text(&entry.expression, entry.dialect, &from.text, &to.text);
+        if entry.dialect == Dialect::SqlServer && renamed != entry.expression && !lower_case {
+            let computed = table
+                .columns
+                .get(entry.column)
+                .map_or("", |column| column.name.as_str());
+            return Err(unreadable_in_transact_sql(
+                &format!("computed column \"{computed}\""),
+                to,
+            ));
+        }
+        entry.expression = renamed;
     }
     for key in &mut table.foreign_keys {
         if key.parent == table.name {
@@ -1808,6 +2048,7 @@ fn add_constraint(
                     text: table.name.clone(),
                     position: spec.position,
                 },
+                only: false,
                 if_not_exists: false,
                 sqlite_text: None,
             };

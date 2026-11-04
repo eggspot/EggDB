@@ -653,6 +653,23 @@ const COLLECTION_ARGUMENT: ArgumentDefinition = text_argument(
     ArgumentTarget::Option("collection"),
 );
 
+const WRITE_COLLECTION_ARGUMENT: ArgumentDefinition = text_argument(
+    "collection",
+    "A collection's name: change that named key space instead of the default one. It must exist already.",
+    ArgumentTarget::Option("collection"),
+);
+
+const KEY_TEXT_ARGUMENT: ArgumentDefinition =
+    text_argument("key", "The key as text.", ArgumentTarget::Operand("key"));
+
+const KEY_HEX_ARGUMENT: ArgumentDefinition = text_argument(
+    "key_hex",
+    "The key's bytes in hexadecimal, such as 7573657231.",
+    ArgumentTarget::OperandHex("key"),
+);
+
+const KEY_WRITE_ENVELOPE: &[&str] = &["collection", "key_hex", "committed", "warning"];
+
 const STATEMENT_RESULT: &[FieldDefinition] = &[
     NOTICE,
     field("dialect", FieldType::Text),
@@ -982,5 +999,82 @@ pub const TOOLS: &[ToolDefinition] = &[
             field("next_cursor", FieldType::Text),
         ],
         envelope: &["notice", "columns", "truncated_by"],
+    },
+    ToolDefinition {
+        name: "put",
+        title: "Store a key",
+        description: "Stores a value under one key of the database's key-value store (the keys outside SQL's tables) and commits, replacing any value there and any time to live it had. Give the key as text (key) or hexadecimal bytes (key_hex), the value as text (value) or hexadecimal bytes (value_hex), a ttl such as 30s, 5m, 1h30m or 7d to make the key expire, and a collection to write in that named key space instead of the default one. Keys in SQL's key space are refused: change tables with write_sql.",
+        read_only_server_description: None,
+        command: Some(&["put"]),
+        fixed: &["--format", "json"],
+        arguments: &[
+            KEY_TEXT_ARGUMENT,
+            KEY_HEX_ARGUMENT,
+            text_argument(
+                "value",
+                "The value as text.",
+                ArgumentTarget::Operand("value"),
+            ),
+            text_argument(
+                "value_hex",
+                "The value's bytes in hexadecimal.",
+                ArgumentTarget::OperandHex("value"),
+            ),
+            text_argument(
+                "ttl",
+                "The key expires after this time: 30s, 5m, 1h30m, 7d or 1500ms. Leave it out for a key that never expires.",
+                ArgumentTarget::Option("ttl"),
+            ),
+            WRITE_COLLECTION_ARGUMENT,
+        ],
+        max_effect: Effect::Change,
+        grant: Grant::KeyValueWrite,
+        idempotent: false,
+        open_world: false,
+        confirm: None,
+        result: &[
+            field("collection", FieldType::Text),
+            field("key", FieldType::Bytes),
+            field("key_hex", FieldType::Text),
+            field("stored", FieldType::Boolean),
+            field("ttl_ms", FieldType::Integer),
+            field("committed", FieldType::Boolean),
+            field("warning", FieldType::Text),
+        ],
+        envelope: KEY_WRITE_ENVELOPE,
+    },
+    ToolDefinition {
+        name: "del",
+        title: "Delete a key",
+        description: "Deletes one key of the database's key-value store and commits; deleted says whether it was there. Give the key as text (key) or hexadecimal bytes (key_hex), and a collection to delete from that named key space instead of the default one. Every delete needs the user's confirmation: the server asks the user itself when the client can, and otherwise the call needs confirm: true. Ask your user first and send confirm: true only with their agreement. Keys in SQL's key space are refused: change tables with write_sql.",
+        read_only_server_description: None,
+        command: Some(&["del"]),
+        fixed: &["--format", "json"],
+        arguments: &[
+            KEY_TEXT_ARGUMENT,
+            KEY_HEX_ARGUMENT,
+            WRITE_COLLECTION_ARGUMENT,
+            ArgumentDefinition {
+                name: "confirm",
+                kind: ArgumentType::Boolean { default: false },
+                description: "Deletes the key when the client cannot ask its user. Set it only after your user agreed.",
+                required: false,
+                maps_to: ArgumentTarget::Confirmation,
+            },
+        ],
+        max_effect: Effect::Destroy,
+        grant: Grant::KeyValueWrite,
+        idempotent: true,
+        open_world: false,
+        confirm: Some(ConfirmCheck::KeyDelete),
+        result: &[
+            field("collection", FieldType::Text),
+            field("key", FieldType::Bytes),
+            field("key_hex", FieldType::Text),
+            field("deleted", FieldType::Boolean),
+            field("committed", FieldType::Boolean),
+            field("warning", FieldType::Text),
+        ],
+        envelope: KEY_WRITE_ENVELOPE,
     },
 ];

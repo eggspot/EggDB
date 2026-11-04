@@ -9,6 +9,7 @@ pub(crate) const MAX_SCALE: usize = 1000;
 pub(crate) const MAX_PRECISION: i64 = 1000;
 const MAX_LIMBS: usize = (MAX_INTEGRAL_DIGITS + MAX_SCALE) / LIMB_DIGITS + 2;
 const MIN_SIGNIFICANT_DIGITS: i64 = 16;
+const MAX_SQUARE_ROOT_STEPS: usize = 64;
 const KEY_NEGATIVE: u8 = 0x01;
 const KEY_ZERO: u8 = 0x02;
 const KEY_POSITIVE: u8 = 0x03;
@@ -715,6 +716,47 @@ impl Numeric {
         let (quotient, _) = divide_magnitudes(&dividend, &divisor);
         let rounded = round_off(&quotient, 1);
         Self::finite(self.negative != other.negative, rounded, scale)
+    }
+
+    pub(crate) fn square_root(&self, scale: usize) -> SqlResult<Self> {
+        if self.nan || (self.infinite && !self.negative) {
+            return Ok(self.clone());
+        }
+        if self.negative && !self.is_zero() {
+            return Err(SqlError::new(
+                SqlState::INVALID_ARGUMENT_FOR_POWER,
+                "cannot take square root of a negative number",
+            ));
+        }
+        if self.is_zero() {
+            return Ok(Self::zero(scale));
+        }
+        let working = scale.saturating_add(4).min(MAX_SCALE);
+        let two = Self::from_i64(2);
+        let mut root = self.square_root_estimate()?;
+        for _ in 0..MAX_SQUARE_ROOT_STEPS {
+            if root.is_zero() {
+                return Ok(Self::zero(scale));
+            }
+            let next = root
+                .add(&self.divide_to_scale(&root, working)?)?
+                .divide_to_scale(&two, working)?;
+            let settled = next.compare(&root) == Ordering::Equal;
+            root = next;
+            if settled {
+                break;
+            }
+        }
+        root.rounded(i64::try_from(scale).unwrap_or(MAX_SCALE as i64))
+    }
+
+    fn square_root_estimate(&self) -> SqlResult<Self> {
+        let estimate = self.to_f64().sqrt();
+        if estimate.is_finite() && estimate > 0.0 {
+            return Self::from_f64(estimate, 17);
+        }
+        let exponent = self.decimal_exponent().unwrap_or(0);
+        Self::parse(&format!("1e{}", exponent.div_euclid(2)))
     }
 
     pub(crate) fn remainder(&self, other: &Self) -> SqlResult<Self> {
@@ -1483,6 +1525,31 @@ mod tests {
         assert_eq!(shown(n("-1.1").floor()), "-2");
         assert_eq!(shown(n("1.1").ceiling()), "2");
         assert_eq!(shown(n("2").floor()), "2");
+    }
+
+    #[test]
+    fn square_root_is_rounded_at_the_scale_asked_for() {
+        assert_eq!(
+            shown(n("1.6666666666666667").square_root(16)),
+            "1.2909944487358056"
+        );
+        assert_eq!(shown(n("4").square_root(3)), "2.000");
+        assert_eq!(
+            shown(n("2").square_root(30)),
+            "1.414213562373095048801688724210"
+        );
+        assert_eq!(shown(n("0.0001").square_root(4)), "0.0100");
+        assert_eq!(shown(n("1e-40").square_root(4)), "0.0000");
+        assert_eq!(
+            shown(n("1e600").square_root(0)),
+            format!("1{}", "0".repeat(300))
+        );
+        assert_eq!(shown(n("0").square_root(2)), "0.00");
+        assert_eq!(shown(n("nan").square_root(2)), "NaN");
+        assert_eq!(
+            shown(n("-1").square_root(2)),
+            "error: cannot take square root of a negative number"
+        );
     }
 
     #[test]

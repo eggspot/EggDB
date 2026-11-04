@@ -193,8 +193,12 @@ checked app.db as of commit 2026-10-26 09:14:07.123456 UTC (stamp 17930060471234
 ok: every page passed its checksum, every key is in order, and every page of the file is accounted for.
 ```
 
-Leaked pages (pages the file lost track of) are harmless and still exit 0. Damage exits 4 and
-says what to do:
+Leaked pages (pages the file lost track of) are harmless and still exit 0. `check` also reads
+every collection's kept entry count (D320) and compares it with a scan of the collection's keys,
+expired ones included until the sweep removes them; a count that is damaged or differs exits 4
+with `the collection "<name>" keeps a count of … but holds …`, which names both figures and says
+to restore from a backup or remove the collection with `eggdb collection delete`. Damage exits 4
+and says what to do:
 
 ```
 checked app.db as of commit 2026-10-26 09:14:07.123456 UTC (stamp 1793006047123456.0003)
@@ -631,14 +635,28 @@ eggdb collection list app.db
 eggdb collection delete app.db cache
 ```
 
-- `list` prints the names in byte order, one per line, and the count on stderr (`3 collections`,
-  `no collections`); in a pipe, `{"file":"app.db","collections":["cache","sessions"]}`.
+- `list` prints the names in byte order, one per line, each with its entry count right-aligned
+  after the longest name (`cache     1,204 entries`, `sessions     no entries`), and the number
+  of collections on stderr (`3 collections`, `no collections`). In a pipe it prints
+  `{"file":"app.db","collections":["cache","sessions"],"counts":[{"name":"cache","entries":1204,"key_bytes":19264,"value_bytes":2411724},…]}`:
+  `collections` is unchanged and `counts` has `stats --collections`'s objects (D320).
+- Each collection keeps its count of entries, key bytes and value bytes up to date on every write,
+  so `list` and `stats --collections` read one record per collection. Keys whose time to live has
+  run out count until the expiry sweep removes them. A collection made by a release before D320
+  is counted once from its keys; `list` and `stats` then keep that count (they reopen the file
+  for writing for a moment, and skip it when another program holds the file), and every write
+  keeps it from then on. A file with kept counts opens only read-only in releases before D320,
+  so even a `list` or `stats` run by this release leaves an older file writable only by this
+  release and later ones.
 - `add` prints `added collection sessions to app.db`; `delete` removes the collection and every
   key in it, asks nothing, and prints `deleted collection cache from app.db`. In a pipe they print
   `{"file":…,"collection":…,"added":true}` and `…"deleted":true}`. The first commit of a delete
   takes the name away, so nothing sees the collection again, and its keys go in commits of 512,
   so a collection of millions of keys deletes in the default page cache; keys a crash leaves
-  behind are never read and the next commits remove them (D292).
+  behind are never read and the next commits remove them (D292). On a terminal, a delete that
+  takes more than a second shows its progress on stderr, overwritten every second and cleared
+  before the result: `deleting collection cache: 120,000 of 1,000,000 entries…` (or
+  `120,000 entries…` for a collection without a kept count).
 - `move` (or `rename`) gives a collection a new name with all its keys in one commit, and prints
   `renamed collection sessions to old-sessions in app.db` (in a pipe
   `{"file":…,"collection":…,"new_name":…,"moved":true}`). A missing collection exits 1
@@ -657,13 +675,19 @@ eggdb collection delete app.db cache
   pages), since ten bytes of each say which collection it is in.
 - `eggdb shell` works in one key space at a time: `.collection` lists them, `.collection <name>`
   chooses one and `.collection -` returns to the default key space, and the prompt shows the
-  choice (`app[sessions]=> `). `eggdb ui` shows one key space at a time too: `C` opens the
-  collection picker, which also adds collections, and from 110 columns a sidebar lists them
-  ([ux/ui.md](ux/ui.md) "Collections").
-- `stats --collections` adds each collection's entries, key bytes and value bytes, read from
-  every key (`"collections":[{"name","entries","key_bytes","value_bytes"}]` in JSON); plain
-  `stats` stays instant.
-- SQL does not see collections in this release, and `check` reports the whole file.
+  choice (`app[sessions]=> `). The shell also runs `collection list|add|delete|move|rename` as
+  the command line does, without the file (`collection move sessions logins`); when the
+  collection in use is renamed the shell follows it (`collection: logins (followed the rename)`),
+  and when it is deleted the shell returns to the default key space. Inside a transaction block
+  `collection list` reads the last commit, and `add`, `delete` and `move` are refused (exit 2)
+  until COMMIT or ROLLBACK. `eggdb ui` shows one key space at a time too: `C` opens the
+  collection picker, which adds collections (`a`) and renames the highlighted one (`e`), and
+  from 110 columns a sidebar lists them ([ux/ui.md](ux/ui.md) "Collections").
+- `stats --collections` adds each collection's entries, key bytes and value bytes from its kept
+  count (`"collections":[{"name","entries","key_bytes","value_bytes"}]` in JSON), so it stays as
+  instant as plain `stats`.
+- SQL does not see collections in this release, and `check` reports the whole file, every
+  collection's kept count compared with its keys included.
 
 ## Expiring keys and counters
 
@@ -1001,10 +1025,15 @@ own transaction, so key-value writes and SQL are all-or-nothing together: `COMMI
 and `ttl` its values and times to live, `scan` the keys it put and not the ones it deleted, and
 `cas` compares against the block's value. A time to live set in the block counts from the
 moment the block's transaction began, takes effect at `COMMIT` and is gone after `ROLLBACK`
-(D266, D283). In a failed block they are refused until `ROLLBACK`, in a `BEGIN READ ONLY` block
-the writes are refused while `get`, `scan` and `ttl` read the last commit, and while a
-`SAVEPOINT` is set the writes are refused (a `ROLLBACK TO SAVEPOINT` would not undo them;
-`RELEASE SAVEPOINT` lifts it); `check`, `stats` and `backup` read the last commit.
+(D266, D283). Savepoints cover them too: `ROLLBACK TO SAVEPOINT` undoes the key-value writes
+made after the savepoint together with the SQL ones, values, deletions, times to live and
+collection entries alike, and keeps what came before it; `RELEASE SAVEPOINT` keeps them in the
+block, and savepoints nest (D319). In a failed block they are refused until `ROLLBACK`, and after
+a statement fails while a savepoint is set until `ROLLBACK TO SAVEPOINT` or `ROLLBACK`, in
+PostgreSQL's dialect; in MySQL's, SQLite's, Oracle's and SQL Server's a failed statement undoes
+only itself and they go on (D317); in a
+`BEGIN READ ONLY` block the writes are refused while `get`, `scan` and `ttl` read the last
+commit; `check`, `stats` and `backup` read the last commit.
 
 ```
 app=> begin;
@@ -1072,7 +1101,7 @@ eggdb shell app.db --mode csv -c "select * from items" > items.csv
 ## `eggdb serve`
 
 ```
-eggdb serve <file|directory> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--max-connection-memory <size>] [--idle-timeout <seconds>] [--log-slow-statements <milliseconds>] [--statement-statistics <count>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--auth-rules <file>] [--metrics-listen <address>] [--mcp-listen <address> --mcp-token-file <file>] [--resp-listen <address> [--resp-max-memory <size>] [--resp-eviction <policy>]] [--memcached-listen <address>] [--es-listen <address>] [--mongo-listen <address>] [--bolt-listen <address>] [--cdc-webhook <url>] [--kafka-listen <address>] [--amqp-listen <address>] [--mqtt-listen <address>] [--sqs-listen <address>] [--nats-listen <address>] [--stomp-listen <address>] [--cql-listen <address>] [--s3-listen <address>] [--dynamodb-listen <address>] [--observability-listen <address>] [--rest-listen <address>] [--restore-from s3://bucket/prefix] [--cdc-queue <name>] [--read-only] [--create]
+eggdb serve <file|directory> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--max-connection-memory <size>] [--idle-timeout <seconds>] [--log-slow-statements <milliseconds>] [--statement-statistics <count>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--auth-rules <file>] [--metrics-listen <address>] [--mcp-listen <address> --mcp-token-file <file> [--mcp-tables <names>]] [--resp-listen <address> [--resp-max-memory <size>] [--resp-eviction <policy>]] [--memcached-listen <address>] [--es-listen <address>] [--mongo-listen <address>] [--bolt-listen <address>] [--cdc-webhook <url>] [--kafka-listen <address>] [--amqp-listen <address>] [--mqtt-listen <address>] [--sqs-listen <address>] [--nats-listen <address>] [--syslog-listen <address>] [--stomp-listen <address>] [--cql-listen <address>] [--s3-listen <address>] [--dynamodb-listen <address>] [--observability-listen <address>] [--rest-listen <address>] [--restore-from s3://bucket/prefix] [--cdc-queue <name>] [--read-only] [--create]
 ```
 
 Serves the file over the PostgreSQL wire protocol v3, so psql, pgAdmin-style tools and every
@@ -1126,12 +1155,13 @@ compatibility gap: SQL Server and MySQL keep temporary tables and session locks 
 | `--auth-rules <file>` | how users other than `--user` log in: per user, their stored password (SCRAM-SHA-256, the default), an LDAP simple bind, an OpenID Connect token, or never; LDAP and tokens only over TLS or the local socket ([sql.md](sql.md#roles-and-privileges), D185) |
 | `--metrics-listen <address>` | serves Prometheus metrics at `http://<address>/metrics` (default port 9187) over our own HTTP/1.1: sessions open, statements, errors, commits and rollbacks, and per database the file size, free pages, cache pages, cache hits and misses and the log since the last checkpoint. The metrics hold no data, but put the address where only your monitoring can reach it |
 | `--mcp-listen <address>`, `--mcp-token-file <file>` | serves MCP over Streamable HTTP at `http://<address>/mcp` (default port 8765), read-only, to agents that send the file's token as a Bearer token; loopback addresses only for now ([mcp.md](mcp.md), D189) |
-| `--resp-listen <address>` | serves the RESP protocol (default port 6379) so `redis-cli` and Redis clients work on the file: strings, hashes, lists, sets and sorted sets with expiry, `AUTH` with the server's password, RESP2 and RESP3; each RESP database is the collection `resp<n>`; loopback addresses only for now (D193) |
+| `--mcp-tables <names>` | limits every session of the MCP endpoint to these tables and views, with the names, column lists and filter of `eggdb mcp --tables`, and without the key-value tools; each name must exist when the server starts ([mcp.md](mcp.md), D328) |
+| `--resp-listen <address>` | serves the RESP protocol (default port 6379) so `redis-cli` and Redis clients work on the file: strings, hashes, lists, sets and sorted sets with expiry, bitmaps (`SETBIT`, `GETBIT`, `BITCOUNT`, `BITPOS`, `BITOP`, `BITFIELD`), HyperLogLog (`PFADD`, `PFCOUNT`, `PFMERGE`, in the documented `HYLL` string format) and geo commands (`GEOADD`, `GEODIST`, `GEOHASH`, `GEOPOS`, `GEOSEARCH`, `GEOSEARCHSTORE`, `GEORADIUS` and `GEORADIUSBYMEMBER`), `AUTH` with the server's password, RESP2 and RESP3; each RESP database is the collection `resp<n>`; loopback addresses only for now (D193, D330) |
 | `--resp-max-memory <size>`, `--resp-eviction <policy>` | keeps the RESP keys' stored bytes under the size (as `maxmemory`), evicting by the policy after each write that crosses it: `allkeys-lru`, `allkeys-lfu`, `allkeys-random`, `volatile-lru`, `volatile-lfu`, `volatile-random`, `volatile-ttl`, or `noeviction` (the default), which refuses writes with `OOM` instead (D193) |
 | `--memcached-listen <address>` | serves memcached's text protocol and its basic meta commands (default port 11211) on the collection `memcached0`: `set`, `add`, `replace`, `append`, `prepend`, `cas`, `get`, `gets`, `gat`, `gats`, `delete`, `incr`, `decr`, `touch`, `flush_all`, `mg`, `ms`, `md`, `mn`; loopback only, as the protocol has no authentication (D194) |
-| `--es-listen <address>` | serves a REST API compatible with Elasticsearch and OpenSearch (default port 9200) on the collection `es0`, so their clients and `curl` can index and search: index create, get, delete and exists, document index, create, get, update (`doc`) and delete, `_bulk`, `_search` and `_count` with `match`, `multi_match`, `match_phrase`, `term`, `terms`, `range`, `exists`, `prefix`, `ids` and `bool` queries ranked by BM25, `size`, `from`, `sort`, `q=` and the `terms`, `avg`, `sum`, `min`, `max` and `value_count` aggregations; HTTP basic authentication as `--user` with the server's password; loopback only for now (D196) |
+| `--es-listen <address>` | serves a REST API compatible with Elasticsearch and OpenSearch (default port 9200) on the collection `es0`, so their clients and `curl` can index and search: index create, get, delete and exists, document index, create, get, update (`doc` or `script`) and delete, `_bulk`, `_search` and `_count` with `match`, `multi_match`, `match_phrase`, `term`, `terms`, `range`, `exists`, `prefix`, `ids` and `bool` queries ranked by BM25, `size`, `from`, `sort`, `q=` and the `terms`, `avg`, `sum`, `min`, `max` and `value_count` aggregations, `_mget` (`docs` or `ids`, `_source` filtering), `_msearch` (NDJSON header and body pairs, each answer with its own `status`), and `_update_by_query` and `_delete_by_query` (`query` or `q=`, `max_docs`, `conflicts`, `scroll_size` documents per transaction, version conflicts counted against the snapshot the query read) with update scripts in a small Painless subset: assignments and `+=` style operators on `ctx._source` fields, `++` and `--`, `ctx.op` set to `noop` or `delete`, `remove` and `add`, `params`, and arithmetic and string concatenation (D196, D331); HTTP basic authentication as `--user` with the server's password; loopback only for now (D196) |
 | `--mongo-listen <address>` | serves the MongoDB wire protocol (default port 27017) so `mongosh` and MongoDB drivers work on the file: SCRAM-SHA-256 as `--user` with the server's password, databases and collections (stored in the collection `mongo0`), `insert`, `find` with filters, sort, projection, skip, limit and cursors, `update` and `delete` with the query and update operators, `findAndModify`, `count`, `distinct`, `aggregate` (`$match`, `$project`, `$addFields`, `$unset`, `$sort`, `$skip`, `$limit`, `$count`, `$group`, `$unwind`, `$lookup`, `$replaceRoot`, `$sortByCount`), and recorded indexes; loopback only for now (D197) |
-| `--bolt-listen <address>` | serves the Bolt protocol (versions 5.0 and 4.4, default port 7687) so Neo4j drivers connected with `bolt://` run Cypher on the file's property graph (the collection `graph0`): `MATCH`, `OPTIONAL MATCH`, `CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`, `UNWIND`, `WITH`, `RETURN` with aggregates, and `CALL ... YIELD` of the graph algorithms `eggdb.pageRank(iterations, damping)`, `eggdb.connectedComponents()`, `eggdb.labelPropagation(iterations)`, `eggdb.triangleCount()`, `eggdb.nodeSimilarity()` (Jaccard) and `eggdb.shortestPath(from, to, maxHops, directed)` (D248); basic authentication as `--user` with the server's password; each statement commits on its own, so an explicit transaction that wrote cannot be rolled back yet; loopback only for now (D206, D207) |
+| `--bolt-listen <address>` | serves the Bolt protocol (versions 5.0 and 4.4, default port 7687) so Neo4j drivers connected with `bolt://` run Cypher on the file's property graph (the collection `graph0`): `MATCH`, `OPTIONAL MATCH`, `CREATE`, `MERGE` with `ON CREATE SET` and `ON MATCH SET`, `SET`, `REMOVE`, `DELETE`, `FOREACH`, `UNWIND`, `WITH`, `RETURN` with aggregates, `UNION` and `UNION ALL`, named paths (`p = (a)-[*]->(b)` with `nodes(p)`, `relationships(p)` and `length(p)`, sent to drivers as Bolt paths), `shortestPath()` and `allShortestPaths()`, list comprehensions (`[x IN list WHERE pred \| expr]`) and pattern comprehensions (D333), and `CALL ... YIELD` of the graph algorithms `eggdb.pageRank(iterations, damping)`, `eggdb.connectedComponents()`, `eggdb.labelPropagation(iterations)`, `eggdb.triangleCount()`, `eggdb.nodeSimilarity()` (Jaccard) and `eggdb.shortestPath(from, to, maxHops, directed)` (D248); basic authentication as `--user` with the server's password; each statement commits on its own, so an explicit transaction that wrote cannot be rolled back yet; loopback only for now (D206, D207) |
 | `--cdc-webhook <url>` | posts every change captured by `eggdb_cdc` (below, D210) to the `http://` URL as a Debezium-style JSON event, oldest first, once a second; an event leaves the outbox only when the URL answers 2xx, so each change arrives at least once and in commit order |
 | `--cdc-queue <name>` | delivers every change captured by `eggdb_cdc` into the durable queue `<name>` (created when missing) as a Debezium-style JSON event, oldest first, once a second, at least once; AMQP, STOMP and SQS clients consume it (D217) |
 | `--kafka-listen <address>` | serves the Kafka protocol (default port 9092) so Kafka producers and consumers work on the file's topics (the collection `kafka0`): produce record batches, fetch from an offset, list earliest and latest offsets, and metadata, with topics created on first use with one partition; no consumer groups or transactions yet, so consumers assign partitions themselves; loopback only, as there is no authentication yet (D213) |
@@ -1140,15 +1170,16 @@ compatibility gap: SQL Server and MySQL keep temporary tables and session locks 
 | `--sqs-listen <address>` | serves an SQS-compatible endpoint over HTTP (default port 9324) in the AWS JSON 1.0 protocol that current AWS SDKs use: every request must carry an AWS Signature Version 4 made with the access key `--user` and the secret key the server's password, dated within 15 minutes of the server's clock; create, look up, list, purge and delete queues, send (with a delay), receive (up to 10, with a visibility timeout), delete and return messages, and queue attributes; queue URLs are `http://<address>/000000000000/<name>`; the queues are EggDB's durable queues (the collection `queue0`), the same ones `--amqp-listen` serves; standard queues only, no FIFO queues yet; loopback only for now (D216) |
 | `--s3-listen <address>` | serves an S3-compatible endpoint over HTTP (default port 9000) with path-style URLs (`http://<address>/<bucket>/<key>`): every request signed with AWS Signature Version 4 (access key `--user`, secret key the server's password), in the `Authorization` header or as a presigned URL of up to seven days (Signature Version 2 presigned URLs too, as boto3 makes them by default); create, head, list and delete buckets; put (up to 64 MiB, with `Content-MD5` and `x-amz-content-sha256` checked), get with a byte range, head, copy and delete objects, delete many at once, `ListObjects` and `ListObjectsV2` with prefix, delimiter, `encoding-type=url` and continuation; multipart uploads of up to 10,000 parts; user metadata (`x-amz-meta-*`) and content types are kept; objects live in the file (the collection `objects0`) in 256 KiB pieces; no versioning, ACLs, policies, tagging, lifecycle rules or `aws-chunked` uploads yet; loopback only for now (D219) |
 | `--dynamodb-listen <address>` | serves a DynamoDB-compatible endpoint over HTTP (default port 8000) in the JSON protocol AWS SDKs use, signed with AWS Signature Version 4 (access key `--user`, secret key the server's password): `CreateTable` with a partition key and an optional sort key (S, N or B), `DescribeTable`, `ListTables`, `DeleteTable`, `PutItem` (with `attribute_not_exists` conditions), `GetItem`, `UpdateItem` (`SET`, `REMOVE`), `DeleteItem`, `Query` with `=`, `<`, `<=`, `>`, `>=`, `BETWEEN` and `begins_with` on the sort key (parentheses around the conditions allowed, as boto3 writes them), either direction, and `Scan`, both with `Limit` and `ExclusiveStartKey`; items live in the file (the collection `dynamodb0`); no secondary indexes, filter expressions, batch or transaction calls yet; loopback only for now (D241) |
-| `--observability-listen <address>` | serves a metrics store over HTTP (default port 8086): InfluxDB line protocol at `/write` (v1, with `precision`) and `/api/v2/write` (v2, `Authorization: Token <password>`), Prometheus remote write at `/api/v1/write`, and the Prometheus query API (`/api/v1/query`, `query_range`, `labels`, `label/<name>/values`, `series`, `status/buildinfo`) for Grafana and other Prometheus clients; sign in with `--user` and the server's password (Basic, Token, or `u` and `p`); points land in SQL tables in the `metrics` schema, one per measurement (or metric) with `time`, a text column per tag and a typed column per field, so SQL reads them too; PromQL covers selectors with `=`, `!=`, `=~` and `!~`, `offset`, `rate`, `irate`, `increase`, `delta`, the `*_over_time` functions, `sum`, `avg`, `min`, `max` and `count` with `by` or `without`, arithmetic and comparisons; a metric is a table with a `value` column or `<table>_<field>`; no gzip bodies, LogQL, TraceQL or OTLP yet; loopback only for now (D220) |
+| `--observability-listen <address>` | serves a metrics store over HTTP (default port 8086): InfluxDB line protocol at `/write` (v1, with `precision`) and `/api/v2/write` (v2, `Authorization: Token <password>`), Prometheus remote write at `/api/v1/write`, and the Prometheus query API (`/api/v1/query`, `query_range`, `labels`, `label/<name>/values`, `series`, `status/buildinfo`) for Grafana and other Prometheus clients; sign in with `--user` and the server's password (Basic, Token, or `u` and `p`); points land in SQL tables in the `metrics` schema, one per measurement (or metric) with `time`, a text column per tag and a typed column per field, so SQL reads them too; PromQL covers selectors with `=`, `!=`, `=~` and `!~` (with or without a metric name), `offset`, subqueries (`expr[range:step]`), `rate`, `irate`, `increase`, `delta`, the `*_over_time` functions, `histogram_quantile`, `label_replace`, `label_join`, `vector` and `scalar`, `sum`, `avg`, `min`, `max`, `count`, `group`, `stddev`, `stdvar`, `topk`, `bottomk`, `quantile` and `count_values` with `by` or `without`, arithmetic, comparisons with or without `bool`, `and`, `or` and `unless`, and vector matching with `on`, `ignoring`, `group_left` and `group_right`; each query may hold 50,000,000 samples and is held against `--max-connection-memory` (D334); a metric is a table with a `value` column or `<table>_<field>`; no gzip bodies, LogQL, TraceQL or OTLP yet; loopback only for now (D220) |
 | `--rest-listen <address>` | serves a REST API generated from the tables of the `public` schema (default port 3000), in PostgREST's URL conventions: `GET /<table>?select=...&<column>=<op>.<value>&order=...&limit=...&offset=...` with the operators `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `is`, `in` and `not.`, `Prefer: count=exact` for a `Content-Range` total, `POST` an object or an array to insert, `PATCH` and `DELETE` with filters, `Prefer: return=representation` to get the rows back, and `GET /` listing the tables and columns; sign in with `--user` and the server's password over HTTP Basic; every request is SQL as that user, so roles and row security apply; loopback only for now (D235) |
 | `--restore-from s3://bucket/prefix` | when the database file does not exist, restores the newest copy `eggdb backup` archived into that bucket (checked against its SHA-256) before serving, so a new machine with an empty disk starts from the latest archive; with `eggdb backup <file> s3://...` run on a schedule, the bucket holds the state and any machine can serve it (D226) |
 | `--nats-listen <address>` | serves the NATS client protocol (default port 4222): `CONNECT` with `user` as `--user` and `pass` as the server's password, publish with or without headers, subscribe with `*` and `>` wildcards and queue groups, request and reply, auto-unsubscribe after a number of messages, verbose mode and `echo`; delivery is at most once, as core NATS does, and JetStream is not served yet; loopback only for now (D216) |
+| `--syslog-listen <address>` | takes syslog messages over UDP and TCP on the same port (default port 514, which needs administrator rights on most systems; give another such as `127.0.0.1:5514`): RFC 5424 and the RFC 3164 format older senders write, one message per datagram or framed on TCP by octet counting or line ends (RFC 6587); each message becomes a row of the `syslog` table (`received_at`, `facility`, `severity`, `timestamp`, `hostname`, `app_name`, `procid`, `msgid`, `structured_data`, `message`), created at start, so SQL and every protocol read it; messages longer than 16 KiB are dropped over UDP; over TCP the connection is closed; loopback only, as syslog has no authentication, and port 0 is refused, since senders need to know the port (D315) |
 | `--stomp-listen <address>` | serves STOMP 1.2, 1.1 and 1.0 (default port 61613): `CONNECT` or `STOMP` with `login` as `--user` and `passcode` as the server's password, `SEND`, `SUBSCRIBE` with `ack:auto`, `client` (cumulative) or `client-individual` and an optional `prefetch-count`, `ACK`, `NACK`, transactions (`BEGIN`, `COMMIT`, `ABORT`; a commit's queue messages are stored all or none), receipts and `DISCONNECT`; `/queue/<name>` destinations are the durable queues `--amqp-listen` and `--sqs-listen` serve, `/topic/<name>` destinations go to every current subscriber; no heart-beats yet; loopback only for now (D217) |
 | `--cql-listen <address>` | serves Cassandra's CQL native protocol v4 (default port 9042) for Cassandra drivers: the password authenticator with `--user` and the server's password, `QUERY`, `PREPARE`, `EXECUTE` and `BATCH`, and the `system.local`, `system.peers` and `system_schema` tables drivers read; a keyspace is a SQL schema and a CQL table is a SQL table of the same name, so SQL reads and writes the same rows; `CREATE`/`DROP KEYSPACE`, `CREATE`/`DROP TABLE` (with partition and clustering keys and `CLUSTERING ORDER`), `TRUNCATE`, `INSERT` and `UPDATE` as upserts (counters with `c = c + n`), `INSERT ... IF NOT EXISTS`, `DELETE` of rows or columns, `SELECT` with `WHERE`, `IN`, `ORDER BY`, `LIMIT` and `count(*)`, and batches as one transaction; scalar types only (no collections, user-defined types, TTL, `USING TIMESTAMP` or other lightweight transactions yet), every result in one page; loopback only for now (D218) |
 | `--database <name>` | the name clients connect to; default the file name without its extension (`app.db` is `app`). Any other name gets `3D000` |
 | `--max-connections <count>` | connections served at once, one thread each; default 64. The next one gets `53300 sorry, too many clients already`. At most 16 of them may still be logging in at once, and each has 5 seconds to finish its login. When all 16 are taken, a new connection takes the slot of the oldest that has waited a second or more, and that one is dropped, so idle sockets from another program cannot lock real logins out; only when every one is younger is the new connection refused with `53300` (MySQL 1040, SQL Server 17809). A peer on another machine (over TLS) holds at most 8 of the 16, an IPv6 peer counted by its `/64`. The same limits hold on `--mysql-listen` and `--tds-listen`. A PostgreSQL connection keeps at most 4,096 prepared statements, 4,096 portals and 1 GiB of their text and bound parameters; one more is refused with `54000` and the connection goes on. Messages over 64 KiB, prepared statements, portals and the rows a suspended portal still holds share one memory budget across every listener, `--max-connection-memory` (D254, D284) |
-| `--max-connection-memory <size>` | the memory the connections of every listener may hold together, such as `512m` or `8g`; default `4g` (all of memory on 32-bit machines), at least `1m`. It counts what a connection holds beyond its small buffers: requests and messages over 64 KiB, PostgreSQL prepared statements and portals and the rows a suspended portal (`Execute` with a row limit) has not sent yet, MongoDB cursors' remaining documents, RESP, CQL and memcached replies over 64 KiB, every RESP pub/sub message queued for a subscriber that has not read it yet, HTTP request and response bodies over 64 KiB, and the messages, unfinished message bodies and deliveries of the Kafka, NATS, STOMP, MQTT, AMQP and Bolt listeners. Past it, PostgreSQL answers `53200 out of memory` (MySQL 1041, SQL Server 701), RESP `-OOM`, MongoDB `ExceededMemoryLimit` (146), CQL `Overloaded` (`0x1001`), memcached `SERVER_ERROR out of memory`, Elasticsearch `429 circuit_breaking_exception`, S3 `503 SlowDown`, DynamoDB `ThrottlingException`, the other HTTP listeners `503` with `Retry-After`, NATS `-ERR 'Server Memory Budget Exceeded'`, STOMP an `ERROR` frame, MQTT 5 `DISCONNECT` `0x97`, AMQP 0-9-1 `506 RESOURCE_ERROR`, AMQP 1.0 `amqp:resource-limit-exceeded` and Bolt `Neo.TransientError.General.MemoryPoolOutOfMemoryError`; Kafka closes the connection. A message too large for what is left ends its connection (memcached skips the value and goes on, an HTTP request gets its refusal), a refused reply or result leaves the connection open (a Bolt `PULL` fails until `RESET`), a STOMP or AMQP consumer is sent the queued messages that fit and the rest wait in their queue unleased and not marked redelivered (one that cannot fit even with nothing else held ends its connection), and a pub/sub message is not queued for a subscriber the budget has no room for (D284, D307) |
+| `--max-connection-memory <size>` | the memory the connections of every listener may hold together, such as `512m` or `8g`; default `4g` (all of memory on 32-bit machines), at least `1m`. It counts what a connection holds beyond its small buffers: requests and messages over 64 KiB, PostgreSQL prepared statements and portals and the rows a suspended portal (`Execute` with a row limit) has not sent yet, MongoDB cursors' remaining documents, RESP, CQL and memcached replies over 64 KiB, every RESP pub/sub message queued for a subscriber that has not read it yet, HTTP request and response bodies over 64 KiB (a chunked upload counted as its chunks arrive; a streamed response holds one 16 KiB chunk plus the rows it is sending), and the messages, unfinished message bodies and deliveries of the Kafka, NATS, STOMP, MQTT, AMQP and Bolt listeners. Past it, PostgreSQL answers `53200 out of memory` (MySQL 1041, SQL Server 701), RESP `-OOM`, MongoDB `ExceededMemoryLimit` (146), CQL `Overloaded` (`0x1001`), memcached `SERVER_ERROR out of memory`, Elasticsearch `429 circuit_breaking_exception`, S3 `503 SlowDown`, DynamoDB `ThrottlingException`, the other HTTP listeners `503` with `Retry-After`, NATS `-ERR 'Server Memory Budget Exceeded'`, STOMP an `ERROR` frame, MQTT 5 `DISCONNECT` `0x97`, AMQP 0-9-1 `506 RESOURCE_ERROR`, AMQP 1.0 `amqp:resource-limit-exceeded` and Bolt `Neo.TransientError.General.MemoryPoolOutOfMemoryError`; Kafka closes the connection. A message too large for what is left ends its connection (memcached skips the value and goes on, an HTTP request gets its refusal), a refused reply or result leaves the connection open (a Bolt `PULL` fails until `RESET`), a STOMP or AMQP consumer is sent the queued messages that fit and the rest wait in their queue unleased and not marked redelivered (one that cannot fit even with nothing else held ends its connection), and a pub/sub message is not queued for a subscriber the budget has no room for (D284, D307) |
 | `--idle-timeout <seconds>` | close a logged-in connection that sends nothing for that long; default 3600 (one hour), `0` never closes it. PostgreSQL clients get `FATAL 57P05 terminating connection due to idle-session timeout`, MySQL clients error 4031, and a TDS connection is closed; the log gets a line. The same value holds on every SQL listener (D254) |
 | `--log-slow-statements <milliseconds>` | log every statement that runs at least that long, on any protocol, to stderr as one line after the UTC time: `slow statement duration_ms=12.345 database=app user=eggdb protocol=postgresql rows=1 query="SELECT * FROM t WHERE id = $1"`; the text has each literal replaced by `$1`, `$2`, ..., so values and passwords never reach the log. `0` logs every statement; off by default. The `log_min_duration_statement` setting still logs a PostgreSQL session's own slow simple queries in full (D286) |
 | `--statement-statistics <count>` | how many statement shapes `pg_stat_statements` keeps calls, times and rows for, across every database served; default 5000, as PostgreSQL's `pg_stat_statements.max`, and `0` keeps none. A full table drops its least-called twentieth to take a new statement and counts it in `pg_stat_statements_info.dealloc` (D286) |
@@ -1160,6 +1191,21 @@ compatibility gap: SQL Server and MySQL keep temporary tables and session locks 
 | `--tls-min-version <1.2\|1.3>` | the oldest TLS version accepted; default 1.2 (older JDBC and .NET drivers still need it) |
 | `--read-only` | open the file read-only: writes fail with `25006`, and it works beside other readers |
 | `--create` | create the file if it is missing |
+
+**HTTP connections (D325).** Every HTTP listener (`--rest-listen`, `--es-listen`, `--s3-listen`,
+`--dynamodb-listen`, `--sqs-listen`, `--observability-listen`, `--metrics-listen` and
+`--mcp-listen`) speaks HTTP/1.1 as RFC 9112 describes it: a connection stays open for the next
+request (HTTP/1.0 clients that send `Connection: keep-alive` too) until the client sends
+`Connection: close`, 5 seconds pass without a request, or it has made 100 requests, whose answer
+says `Connection: close`; once twelve of a listener's sixteen connections are open, each answer
+closes its connection, so idle clients cannot keep new ones out. Requests sent one after another
+without waiting (pipelined) are answered in order. Request bodies come with `Content-Length` or
+`Transfer-Encoding: chunked` (chunk extensions are ignored and trailers dropped); a request with
+both, with two lengths, with a coding other than `chunked`, or with any line framed in a way
+another server could read differently is refused with `400` (`501` for a coding EggDB does not
+decode, such as `gzip, chunked`) and its connection closed, so no request can be smuggled behind
+another. A body past the listener's limit, chunked or not, gets `413`. The REST API sends the
+rows of a `GET` with `Transfer-Encoding: chunked` as it writes them out.
 
 **TLS, and loopback without it (D161).** Without TLS, `serve` listens only on `127.0.0.1`, `::1`
 or another loopback address, so only programs on this machine can connect and no password or
@@ -1367,12 +1413,14 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --time-limit 30
   `DELETE` or `UPDATE` whose `WHERE` does not pin every column of a primary or unique key to
   values, `REPLACE` and upserts, a `MERGE` that updates or deletes) run only after the user
   confirms them: through the client's question when it can ask, otherwise through the agent's
-  `confirm: true`. `run_sql` stays read-only.
+  `confirm: true`. `run_sql` stays read-only. Without `--tables` it also adds `put` (store a key,
+  with `ttl` and `collection` as `eggdb put` takes them) and `del` (delete a key, after the same
+  confirmation every time) (D328).
 - **`--tables <names>`** shows the agent only those tables and views (comma-separated, `name` or
   `schema.name`, `public.` and `dbo.` for the default schema, matched exactly as stored; repeat
   it to add more). Every other table, view and sequence is missing for the agent's SQL in every
   dialect and catalog, a listed view that reads an unlisted table fails as missing, and
-  `kv_get` and `kv_scan` are withdrawn (`limited_to_tables` if called). A sequence comes with the
+  the key-value tools are withdrawn (`limited_to_tables` if called). A sequence comes with the
   table that owns it. Every name must exist when the server starts (exit 1, `table_not_found`,
   with the stored name when only the case differs; with `--allow-write` a name not there yet is
   allowed, for the agent to create) (D156). With `--allow-write` the agent changes only those
@@ -1389,7 +1437,8 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --time-limit 30
   opens the file waits that long, so your own writers get the file between an agent's calls.
 - **Tools:** `list_tables`, `describe_table`, `run_sql` (one statement, in `postgresql`, `mysql`,
   `sqlite` or `oracle`), `explain_query`, `sample_rows`, `kv_get`, `kv_scan` (not under
-  `--tables`), and the resource `eggdb://schema`.
+  `--tables`), `row_list`, `write_sql`, `put` and `del` (with `--allow-write`; `put` and `del` not
+  under `--tables`), and the resource `eggdb://schema`.
 - **Every call is recorded** in `<file>.mcp-audit.jsonl` before its result is sent; if that file
   cannot be written, `eggdb mcp` does not start.
 - stdout carries only protocol messages; one line on stderr says what is served (a short

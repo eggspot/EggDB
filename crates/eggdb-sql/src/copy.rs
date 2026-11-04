@@ -155,6 +155,7 @@ pub(crate) struct CopyOptions {
     pub(crate) force_null: CopyColumns,
     pub(crate) encoding: CopyEncoding,
     pub(crate) on_error: CopyOnError,
+    pub(crate) reject_limit: Option<u64>,
     pub(crate) log_verbosity: CopyLogVerbosity,
 }
 
@@ -240,10 +241,32 @@ fn table_source(copy: &CopyStatement) -> SqlResult<(&Name, &[Name])> {
 
 fn targets_of(table: &TableDefinition, columns: &[Name]) -> SqlResult<Vec<usize>> {
     if columns.is_empty() {
-        Ok((0..table.columns.len()).collect())
+        Ok((0..table.columns.len())
+            .filter(|&column| !table.is_generated(column))
+            .collect())
     } else {
         target_columns(table, columns)
     }
+}
+
+fn written_targets_of(table: &TableDefinition, columns: &[Name]) -> SqlResult<Vec<usize>> {
+    let targets = targets_of(table, columns)?;
+    if let Some((&target, name)) = targets
+        .iter()
+        .zip(columns)
+        .find(|(target, _)| table.is_generated(**target))
+    {
+        return Err(SqlError::new(
+            SqlState::INVALID_COLUMN_REFERENCE,
+            format!(
+                "column \"{}\" is a generated column",
+                table.columns[target].name
+            ),
+        )
+        .with_detail("Generated columns cannot be used in COPY.")
+        .at(name.position));
+    }
+    Ok(targets)
 }
 
 const SKIPPED_ROW: &str = "skipping row due to data type incompatibility";
@@ -350,6 +373,7 @@ struct Loader<'t> {
     fields: Fields,
     empty_is_null: bool,
     on_error: CopyOnError,
+    reject_limit: Option<u64>,
     log_verbosity: CopyLogVerbosity,
     skipped: u64,
     notices: Vec<String>,
@@ -419,21 +443,33 @@ impl Loader<'_> {
     ) -> SqlResult<RowRead> {
         let table = self.table;
         let column = &table.columns[index].name;
+        let context = || match &shown {
+            Some(shown) => format!(
+                "COPY {}, line {line}, column {column}: \"{shown}\"",
+                shown_name(table)
+            ),
+            None => format!("COPY {}, line {line}, column {column}", shown_name(table)),
+        };
         if self.on_error == CopyOnError::Stop || !is_data_type_error(&error) {
-            return Err(with_context(error, || match &shown {
-                Some(shown) => format!(
-                    "COPY {}, line {line}, column {column}: \"{shown}\"",
-                    shown_name(table)
-                ),
-                None => format!("COPY {}, line {line}, column {column}", shown_name(table)),
-            }));
+            return Err(with_context(error, context));
         }
         self.skipped += 1;
         if self.log_verbosity == CopyLogVerbosity::Verbose {
             self.notices.push(format!(
                 "NOTICE:  {SKIPPED_ROW} at line {line} for column \"{column}\": \"{}\"",
-                shown.unwrap_or_default()
+                shown.as_deref().unwrap_or_default()
             ));
+        }
+        if let Some(limit) = self.reject_limit
+            && self.skipped > limit
+        {
+            return Err(SqlError::new(
+                SqlState::INVALID_TEXT_REPRESENTATION,
+                format!(
+                    "skipped more than REJECT_LIMIT ({limit}) rows due to data type incompatibility"
+                ),
+            )
+            .with_context(context()));
         }
         Ok(RowRead::Skipped)
     }
@@ -629,7 +665,7 @@ pub(crate) fn copy_from_client(
 ) -> SqlResult<QueryResult> {
     let (name, columns) = table_source(copy)?;
     let table = copied_table(writer, tables, name, false)?;
-    let targets = targets_of(&table, columns)?;
+    let targets = written_targets_of(&table, columns)?;
     let names: Vec<&str> = targets
         .iter()
         .map(|&index| table.columns[index].name.as_str())
@@ -667,6 +703,7 @@ pub(crate) fn copy_from_client(
         targets,
         empty_is_null: crate::constraints::current_dialect() == crate::dialect::Dialect::Oracle,
         on_error: copy.options.on_error,
+        reject_limit: copy.options.reject_limit,
         log_verbosity: copy.options.log_verbosity,
         skipped: 0,
         notices: Vec::new(),
@@ -910,6 +947,7 @@ impl RoutedRows {
             on_duplicate: crate::ast::OnDuplicate::Fail,
             conflict_target: None,
             rollback_on_conflict: false,
+            keeps_changes_on_conflict: false,
             overriding: Some(crate::ast::Overriding::SystemValue),
         };
         crate::execute::insert(writer, tables, &insert).map(|_| ())

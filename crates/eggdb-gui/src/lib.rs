@@ -35,6 +35,9 @@ pub mod dialect;
 pub mod drop_prompt;
 /// The query editor: text, cursor, selection and editing commands.
 pub mod editor;
+/// The editor's right-click menu: its items, when they act, where it opens and its keys
+/// (`docs/ux/workspace.md` 10.9).
+pub mod editor_menu;
 mod font;
 /// The result grid: columns, rows, scrolling and cell selection.
 pub mod grid;
@@ -71,6 +74,13 @@ pub mod pointer;
 /// The query tab: its editor, dialect, runs, results and inline errors
 /// (`docs/ux/workspace.md` 2).
 pub mod query_tab;
+/// A RESP client of our own: the public RESP2/RESP3 wire format over TCP with `HELLO 3`,
+/// `AUTH`, pipelines and bounded reads, for `redis://` connections (`docs/ux/workspace.md`
+/// 10.10).
+pub mod resp_client;
+/// A RESP server's key spaces `resp0` … `resp15` and the keys tab's pages over `SCAN`, with
+/// each key's type and size (`docs/ux/workspace.md` 10.10).
+pub mod resp_keys;
 /// Scrollbar geometry and drawing for the grid, the editor and the value view
 /// (`docs/ux/workspace.md` 9.6).
 pub mod scrollbar;
@@ -79,6 +89,8 @@ pub mod settings;
 /// The splitters between the window's regions and the sizes they set, kept in the client's
 /// settings (`docs/ux/workspace.md` 10.5).
 pub mod splitters;
+/// `Toggle comment` and `Format statement` (`docs/ux/workspace.md` 10.9).
+pub mod sql_format;
 /// Splitting an editor's text into statements by each dialect's rules.
 pub mod statements;
 /// The status line's and status bar's strings (`docs/ux/workspace.md` 2.4).

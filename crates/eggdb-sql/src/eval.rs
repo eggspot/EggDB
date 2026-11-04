@@ -189,6 +189,7 @@ pub(crate) fn children(expr: &Expr) -> Vec<&Expr> {
         | ExprKind::Column { .. }
         | ExprKind::Slot { .. }
         | ExprKind::SessionValue { .. }
+        | ExprKind::CurrentSetting { .. }
         | ExprKind::OuterColumn { .. }
         | ExprKind::Constant { .. } => Vec::new(),
         ExprKind::Subquery(subquery) => subquery.test.operand().into_iter().collect(),
@@ -239,6 +240,7 @@ pub(crate) fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         | ExprKind::Column { .. }
         | ExprKind::Slot { .. }
         | ExprKind::SessionValue { .. }
+        | ExprKind::CurrentSetting { .. }
         | ExprKind::OuterColumn { .. }
         | ExprKind::Constant { .. } => Vec::new(),
         ExprKind::Subquery(subquery) => subquery.test.operand_mut().into_iter().collect(),
@@ -290,6 +292,7 @@ pub(crate) fn first_aggregate(expr: &Expr) -> Option<&Expr> {
         | ExprKind::Column { .. }
         | ExprKind::Slot { .. }
         | ExprKind::SessionValue { .. }
+        | ExprKind::CurrentSetting { .. }
         | ExprKind::OuterColumn { .. }
         | ExprKind::Constant { .. } => None,
         ExprKind::Unary(_, operand)
@@ -381,6 +384,7 @@ pub(crate) fn check_columns(expr: &Expr, scope: Scope<'_>) -> SqlResult<()> {
             .map_or(Ok(()), |argument| check_columns(argument, scope)),
         ExprKind::Slot { .. }
         | ExprKind::SessionValue { .. }
+        | ExprKind::CurrentSetting { .. }
         | ExprKind::OuterColumn { .. }
         | ExprKind::Constant { .. } => Ok(()),
         ExprKind::Subquery(subquery) => subquery
@@ -433,6 +437,9 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
         ExprKind::Function { name, .. } if name == crate::records::ROW_FUNCTION => {
             ("row".into(), true)
         }
+        ExprKind::Function { name, .. } if crate::row_values::is_internal_call(name) => {
+            ("?column?".into(), false)
+        }
         ExprKind::Function { name, arguments } if name == crate::routines::ROUTINE_CALL => {
             (crate::routines::called_name(arguments), true)
         }
@@ -458,6 +465,7 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
         ExprKind::SessionValue { name, .. }
         | ExprKind::SqliteFunction { name, .. }
         | ExprKind::OracleFunction { name, .. } => ((*name).to_owned(), true),
+        ExprKind::CurrentSetting { .. } => ("current_setting".to_owned(), true),
         ExprKind::SqlServerFunction {
             function:
                 crate::sqlserver_functions::Function::Convert { .. }
@@ -498,11 +506,26 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
     }
 }
 
-fn is_unknown_literal(expr: &Expr) -> bool {
+pub(crate) fn is_unknown_literal(expr: &Expr) -> bool {
     matches!(
         expr.kind,
         ExprKind::Literal(Literal::String(_) | Literal::Decimal(_) | Literal::Null)
     )
+}
+
+fn current_setting(name: &str, missing_ok: bool, parsed: Option<&str>) -> SqlResult<Value> {
+    use crate::routine_settings::JournalValue;
+    match (crate::routine_settings::current_value(name), parsed) {
+        (JournalValue::Set(value), _) => Ok(Value::Text(value)),
+        (JournalValue::Unchanged, Some(value)) => Ok(Value::Text(value.to_owned())),
+        (JournalValue::Unchanged, None) | (JournalValue::Reset, _) => {
+            match crate::settings::Settings::default().get(name) {
+                Ok(value) => Ok(Value::Text(value)),
+                Err(_) if missing_ok => Ok(Value::Null),
+                Err(error) => Err(error),
+            }
+        }
+    }
 }
 
 pub(crate) struct Evaluator<'a> {
@@ -526,6 +549,11 @@ impl Evaluator<'_> {
                 Ok(Value::Null)
             }
             ExprKind::SessionValue { value, .. } => Ok(Value::Text(value.clone())),
+            ExprKind::CurrentSetting {
+                name,
+                missing_ok,
+                parsed,
+            } => current_setting(name, *missing_ok, parsed.as_deref()),
             ExprKind::Column { qualifier, name } => {
                 let index = self
                     .scope
@@ -742,7 +770,7 @@ impl Evaluator<'_> {
         }
     }
 
-    fn pair(&self, left: &Expr, right: &Expr) -> SqlResult<(Value, Value)> {
+    pub(crate) fn pair(&self, left: &Expr, right: &Expr) -> SqlResult<(Value, Value)> {
         if is_unknown_literal(left) && !is_unknown_literal(right) {
             let right_value = self.eval(right, None)?;
             let left = self.eval(left, self.type_of(&right_value, right))?;
@@ -754,7 +782,7 @@ impl Evaluator<'_> {
         }
     }
 
-    fn type_of(&self, value: &Value, expr: &Expr) -> Option<SqlType> {
+    pub(crate) fn type_of(&self, value: &Value, expr: &Expr) -> Option<SqlType> {
         if let ExprKind::Slot {
             sql_type: Some(declared),
             ..
@@ -819,7 +847,7 @@ impl Evaluator<'_> {
                     | crate::sqlserver_functions::Function::TryConvert { target, .. },
                 ..
             } => Some(target.engine_type()),
-            ExprKind::SessionValue { .. } => Some(SqlType::Text),
+            ExprKind::SessionValue { .. } | ExprKind::CurrentSetting { .. } => Some(SqlType::Text),
             ExprKind::Unary(UnaryOperator::Minus | UnaryOperator::Plus, operand) => {
                 self.declared_type(operand)
             }
@@ -1441,9 +1469,17 @@ impl Evaluator<'_> {
         }
         match name {
             crate::records::ROW_FUNCTION => {
+                if let Some(error) =
+                    crate::row_values::misused(crate::constraints::current_dialect(), arguments)
+                {
+                    return Err(error);
+                }
                 return crate::records::construct(self.arguments(arguments)?);
             }
             crate::records::FIELD_FUNCTION => return self.field_selection(arguments),
+            name if crate::row_values::is_internal_call(name) => {
+                return crate::row_values::evaluate_internal_call(self, name, arguments);
+            }
             crate::triggers::RAISE_FUNCTION => return crate::triggers::raise(self, arguments),
             crate::routines::ROUTINE_CALL => return crate::routines::evaluate(self, arguments),
             "enum_first" | "enum_last" | "enum_range" => {
@@ -1768,6 +1804,7 @@ fn declared_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
             &[None, Some(SqlType::Integer)]
         }
         "array_ndims" | "cardinality" => &[None],
+        name if crate::pg_catalog::is_privilege_inquiry(name) => &[None, None, None, None],
         "btrim" | "ltrim" | "rtrim" => &[Some(SqlType::Text), Some(SqlType::Text)],
         "quote_ident" => &[Some(SqlType::Text)],
         _ => return function_argument_types(name),

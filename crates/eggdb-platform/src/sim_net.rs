@@ -11,6 +11,10 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+mod datagram;
+
+pub use datagram::SimDatagramSocket;
+
 /// A deterministic simulation of a network of hosts, for tests (D9).
 ///
 /// [`SimNetwork::host`] gives each IP address a [`SimHost`], which implements [`Network`].
@@ -37,14 +41,34 @@ use std::time::Duration;
 /// [`ErrorKind::InjectedFault`], by number or at random from a seed, changing nothing. Clones
 /// share the same network.
 ///
-/// Time is a [`SimClock`] that moves only inside `reap`: when no operation can finish and
-/// nothing is due, the queue moves the clock to the next thing that will happen, such as bytes
+/// Time is a [`SimClock`] that moves only inside `reap` and datagram receives: when no
+/// operation can finish and nothing is due, the queue moves the clock to the next thing that will happen, such as bytes
 /// arriving after the latency set with [`SimNetwork::latency`], or to the end of
-/// [`NetQueue::reap_timeout`]'s wait, whichever comes first. [`SimNetwork::partition`] cuts two
-/// hosts apart: bytes between them stay in transit until [`SimNetwork::heal`], and a connect
-/// across the cut fails with [`ErrorKind::TimedOut`] after [`SimNetwork::CONNECT_TIMEOUT`], as
-/// an unanswered TCP handshake does. A receive across the cut waits until the cut heals or the
-/// operation is canceled.
+/// [`NetQueue::reap_timeout`]'s wait, whichever comes first. [`SimNetwork::host_latency`] and
+/// [`SimNetwork::host_bandwidth`] give a host a link of its own: what crosses it waits for the
+/// link's latency, and bytes queue behind each other at its bandwidth.
+///
+/// [`SimNetwork::partition`] cuts two hosts apart, and [`SimNetwork::partition_one_way`] drops
+/// only what one sends to the other: bytes that cannot cross stay in transit until
+/// [`SimNetwork::heal`], and a connect across either direction of a cut fails with
+/// [`ErrorKind::TimedOut`] after [`SimNetwork::CONNECT_TIMEOUT`], as an unanswered TCP handshake
+/// does. A connection survives a short cut, but an end whose bytes stay unacknowledged for
+/// [`SimNetwork::RETRANSMISSION_TIMEOUT`] (they cannot cross, or the acknowledgements cannot
+/// come back) gives up, as TCP does after its retransmissions: an operation fails with
+/// [`ErrorKind::TimedOut`] once, as Linux reports a socket error once (a receive first returns
+/// what had already arrived, and the end of stream instead when the peer's end of sending
+/// arrived before the timeout), then receives return the end of stream and sends fail with
+/// [`ErrorKind::ConnectionReset`], the kind Linux's `EPIPE` maps to. Its peer, once it can be
+/// reached again, finds the connection reset. A receive with nothing coming waits until the cut heals or the operation is canceled,
+/// and an end that sends nothing never learns that its peer gave up, as over TCP. After a reset
+/// or a timeout, the end's [`NetStream::peer_address`] and [`NetStream::shutdown_write`] fail
+/// with [`ErrorKind::NotConnected`], as the operating systems' do.
+///
+/// Datagrams ([`SimDatagramSocket`]) cross the same latency, links and cuts: a datagram sent
+/// across a cut is lost rather than held, datagrams may overtake each other when their latency
+/// differs, and a socket holds at most [`SimNetwork::DATAGRAM_BUFFER_BYTES`] in transit and
+/// unreceived, dropping what arrives beyond it. A datagram receive moves the clock to the
+/// datagram's arrival, or to the end of its wait when none arrives in time.
 #[derive(Debug, Clone, Default)]
 pub struct SimNetwork {
     shared: Arc<Mutex<World>>,
@@ -63,7 +87,10 @@ struct World {
     next_connection: u64,
     clock: Arc<SimClock>,
     latency: [Duration; 2],
-    partitions: BTreeSet<[IpAddr; 2]>,
+    cuts: BTreeSet<(IpAddr, IpAddr)>,
+    links: BTreeMap<IpAddr, HostLink>,
+    datagram_sockets: BTreeMap<SocketAddr, datagram::Inbox>,
+    next_datagram: u64,
 }
 
 #[derive(Debug)]
@@ -72,12 +99,54 @@ struct RandomFailures {
     per_million: u32,
 }
 
+#[derive(Debug, Default)]
+struct HostLink {
+    latency: [Duration; 2],
+    bytes_per_second: u64,
+    sending_until: Duration,
+    receiving_until: Duration,
+}
+
 #[derive(Debug)]
 struct Connection {
     ends: [SocketAddr; 2],
     flows: [Flow; 2],
     open: [bool; 2],
-    reset: bool,
+    failed: [Option<ErrorKind>; 2],
+    timeout_reported: [bool; 2],
+    peer_ended_before_timeout: [bool; 2],
+}
+
+impl Connection {
+    fn reset(&mut self) {
+        let timed_out = self
+            .failed
+            .map(|failure| failure == Some(ErrorKind::TimedOut));
+        for failure in &mut self.failed {
+            failure.get_or_insert(ErrorKind::ConnectionReset);
+        }
+        for (side, flow) in self.flows.iter_mut().enumerate() {
+            if timed_out[1 - side] {
+                flow.forget_in_transit();
+            } else {
+                flow.clear();
+            }
+        }
+    }
+
+    fn time_out(&mut self, side: usize) {
+        self.failed[side] = Some(ErrorKind::TimedOut);
+        self.peer_ended_before_timeout[side] = self.flows[1 - side].end_arrived;
+        self.flows[side].forget_in_transit();
+    }
+
+    fn report_timeout(&mut self, side: usize) -> bool {
+        !std::mem::replace(&mut self.timeout_reported[side], true)
+    }
+
+    fn hosts(&self, side: usize) -> [IpAddr; 2] {
+        [self.ends[side].ip(), self.ends[1 - side].ip()]
+    }
 }
 
 #[derive(Debug, Default)]
@@ -88,6 +157,8 @@ struct Flow {
     ended: bool,
     end_at: Duration,
     end_arrived: bool,
+    unacknowledged: bool,
+    retransmitting_since: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -126,7 +197,20 @@ impl Flow {
         }
     }
 
+    fn everything_arrived(&self) -> bool {
+        self.in_transit.is_empty() && (!self.ended || self.end_arrived)
+    }
+
+    fn retransmission_deadline(&self) -> Option<Duration> {
+        self.retransmitting_since
+            .map(|since| since.saturating_add(SimNetwork::RETRANSMISSION_TIMEOUT))
+    }
+
     fn send(&mut self, bytes: &[u8], at: Duration) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.unacknowledged = true;
         let at = at.max(self.last_arrival());
         self.in_transit.extend(bytes);
         match self.arrivals.back_mut() {
@@ -141,6 +225,7 @@ impl Flow {
     fn end(&mut self, at: Duration) {
         if !self.ended {
             self.ended = true;
+            self.unacknowledged = true;
             self.end_at = at.max(self.last_arrival());
         }
     }
@@ -161,9 +246,15 @@ impl Flow {
         }
     }
 
-    fn clear(&mut self) {
+    fn forget_in_transit(&mut self) {
         self.in_transit.clear();
         self.arrivals.clear();
+        self.unacknowledged = false;
+        self.retransmitting_since = None;
+    }
+
+    fn clear(&mut self) {
+        self.forget_in_transit();
         self.arrived.clear();
     }
 }
@@ -193,6 +284,16 @@ impl SimNetwork {
     /// second.
     pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(127);
 
+    /// How long an end of a connection keeps retransmitting bytes, or an end of sending, that
+    /// stay unacknowledged across a cut before it gives up with [`ErrorKind::TimedOut`]:
+    /// Linux's default of 15 retransmissions (`tcp_retries2`), the timeout doubling from
+    /// 200 ms up to 120 s, 924.6 s in all.
+    pub const RETRANSMISSION_TIMEOUT: Duration = Duration::from_millis(924_600);
+
+    /// The most bytes of datagrams one [`SimDatagramSocket`] holds in transit and unreceived,
+    /// Linux's default receive buffer; datagrams beyond it are dropped.
+    pub const DATAGRAM_BUFFER_BYTES: usize = 212_992;
+
     /// Creates an empty network, seeded with 0, with its own clock at zero and no latency.
     pub fn new() -> Self {
         Self::default()
@@ -217,22 +318,57 @@ impl SimNetwork {
         lock(&self.shared).latency = [least.min(most), least.max(most)];
     }
 
-    /// Cuts hosts `a` and `b` apart until [`SimNetwork::heal`]. Cutting a host from itself
-    /// does nothing.
+    /// Gives host `ip` a link whose latency, between `least` and `most` and drawn from the seed
+    /// for each send, adds to the network's for everything the host sends or receives, as a
+    /// slow uplink or a far region would. Traffic within one host never crosses its link. Both
+    /// zero, the default, adds nothing. Swapped bounds are put in order.
+    pub fn host_latency(&self, ip: IpAddr, least: Duration, most: Duration) {
+        let mut world = lock(&self.shared);
+        world.links.entry(ip).or_default().latency = [least.min(most), least.max(most)];
+    }
+
+    /// Limits host `ip`'s link to `bytes_per_second` each way: the bytes it sends leave one
+    /// after another at that rate, shared by all its connections, and the bytes it receives
+    /// enter at that rate, so a send of `n` bytes arrives `n / bytes_per_second` later than
+    /// latency alone would make it. Zero, the default, is no limit.
+    pub fn host_bandwidth(&self, ip: IpAddr, bytes_per_second: u64) {
+        lock(&self.shared)
+            .links
+            .entry(ip)
+            .or_default()
+            .bytes_per_second = bytes_per_second;
+    }
+
+    /// Cuts hosts `a` and `b` apart, both ways, until [`SimNetwork::heal`]. Cutting a host from
+    /// itself does nothing.
     pub fn partition(&self, a: IpAddr, b: IpAddr) {
         if a != b {
-            lock(&self.shared).partitions.insert(ordered(a, b));
+            let mut world = lock(&self.shared);
+            world.cuts.insert((a, b));
+            world.cuts.insert((b, a));
         }
     }
 
-    /// Joins hosts `a` and `b` again: bytes held at the cut become due.
+    /// Drops what host `from` sends to host `to` until [`SimNetwork::heal`], while what `to`
+    /// sends to `from` still arrives. A TCP connection needs both ways, so a connect across the
+    /// cut times out, and bytes either end sends stay unacknowledged. Cutting a host from itself
+    /// does nothing.
+    pub fn partition_one_way(&self, from: IpAddr, to: IpAddr) {
+        if from != to {
+            lock(&self.shared).cuts.insert((from, to));
+        }
+    }
+
+    /// Joins hosts `a` and `b` again, both ways: bytes held at the cut become due.
     pub fn heal(&self, a: IpAddr, b: IpAddr) {
-        lock(&self.shared).partitions.remove(&ordered(a, b));
+        let mut world = lock(&self.shared);
+        world.cuts.remove(&(a, b));
+        world.cuts.remove(&(b, a));
     }
 
     /// Joins every pair of hosts cut apart.
     pub fn heal_all(&self) {
-        lock(&self.shared).partitions.clear();
+        lock(&self.shared).cuts.clear();
     }
 
     /// The host with IP address `ip`.
@@ -291,6 +427,7 @@ impl Network for SimHost {
     type Listener = SimListener;
     type Stream = SimStream;
     type Queue = SimNetQueue;
+    type Datagram = SimDatagramSocket;
 
     fn listen(&self, address: Address) -> Result<SimListener> {
         let Address::Tcp(address) = address;
@@ -330,6 +467,10 @@ impl Network for SimHost {
             waiting: Vec::new(),
             transferring: BTreeSet::new(),
         })
+    }
+
+    fn bind_datagram(&self, address: SocketAddr) -> Result<SimDatagramSocket> {
+        datagram::bind(self, address)
     }
 }
 
@@ -382,29 +523,36 @@ impl fmt::Debug for SimStream {
 }
 
 impl SimStream {
-    fn end(&self, side: usize) -> Result<Address> {
-        lock(&self.network.shared)
-            .connections
-            .get(&self.connection)
-            .map(|connection| Address::Tcp(connection.ends[side]))
-            .ok_or_else(|| Error::new(ErrorKind::NotConnected))
+    fn connected(&self, world: &World) -> Result<()> {
+        match world.connections.get(&self.connection) {
+            Some(connection) if connection.failed[self.side].is_none() => Ok(()),
+            _ => Err(Error::new(ErrorKind::NotConnected)),
+        }
     }
 }
 
 impl NetStream for SimStream {
     fn local_address(&self) -> Result<Address> {
-        self.end(self.side)
+        lock(&self.network.shared)
+            .connections
+            .get(&self.connection)
+            .map(|connection| Address::Tcp(connection.ends[self.side]))
+            .ok_or_else(|| Error::new(ErrorKind::NotConnected))
     }
 
     fn peer_address(&self) -> Result<Address> {
-        self.end(1 - self.side)
+        let world = lock(&self.network.shared);
+        self.connected(&world)?;
+        world
+            .connections
+            .get(&self.connection)
+            .map(|connection| Address::Tcp(connection.ends[1 - self.side]))
+            .ok_or_else(|| Error::new(ErrorKind::NotConnected))
     }
 
     fn shutdown_write(&self) -> Result<()> {
         let mut world = lock(&self.network.shared);
-        if !world.connections.contains_key(&self.connection) {
-            return Err(Error::new(ErrorKind::NotConnected));
-        }
+        self.connected(&world)?;
         world.end_flow(self.connection, self.side);
         Ok(())
     }
@@ -413,13 +561,19 @@ impl NetStream for SimStream {
 impl Drop for SimStream {
     fn drop(&mut self) {
         let mut world = lock(&self.network.shared);
-        let owed = world
-            .connections
-            .get(&self.connection)
-            .is_some_and(|connection| connection.flows[1 - self.side].buffered() > 0);
-        if owed {
+        let (failed, owed) =
+            world
+                .connections
+                .get(&self.connection)
+                .map_or((true, false), |connection| {
+                    (
+                        connection.failed[self.side].is_some(),
+                        connection.flows[1 - self.side].buffered() > 0,
+                    )
+                });
+        if owed && !failed {
             world.reset(self.connection);
-        } else {
+        } else if !failed {
             world.end_flow(self.connection, self.side);
         }
         world.close(self.connection, self.side);
@@ -529,7 +683,7 @@ impl SimNetQueue {
             };
             let Address::Tcp(address) = address;
             let gives_up_at = waiting.since.saturating_add(SimNetwork::CONNECT_TIMEOUT);
-            if world.cut(self.ip, address.ip()) {
+            if world.cut_either_way(self.ip, address.ip()) {
                 Some(gives_up_at)
             } else if world.backlog_is_full(address) {
                 let handshake = waiting.handshake_done_at.filter(|&at| at > now);
@@ -557,6 +711,7 @@ impl SimNetQueue {
         let mut world = lock(&network.shared);
         let mut reaped = 0;
         let outcome = loop {
+            world.watch_retransmissions();
             world.deliver_some();
             let done = self.perform(&mut world, completions);
             reaped += done;
@@ -678,8 +833,7 @@ impl World {
         self.clock.advance(at.saturating_sub(self.now()));
     }
 
-    fn delay(&mut self) -> Duration {
-        let [least, most] = self.latency;
+    fn draw(&mut self, [least, most]: [Duration; 2]) -> Duration {
         let spread = u64::try_from((most - least).as_nanos()).unwrap_or(u64::MAX);
         if spread == 0 {
             return least;
@@ -688,36 +842,115 @@ impl World {
         least.saturating_add(Duration::from_nanos(extra))
     }
 
+    fn arrival(&mut self, leaving: Duration, from: IpAddr, to: IpAddr, bytes: usize) -> Duration {
+        let network_latency = self.latency;
+        let mut latency = self.draw(network_latency);
+        if from == to {
+            return leaving.saturating_add(latency);
+        }
+        for host in [from, to] {
+            if let Some(range) = self.links.get(&host).map(|link| link.latency) {
+                latency = latency.saturating_add(self.draw(range));
+            }
+        }
+        let (first_byte_left, sent) = match self.links.get_mut(&from) {
+            Some(link) if link.bytes_per_second > 0 => {
+                let start = leaving.max(link.sending_until);
+                let sent = start.saturating_add(transmission(bytes, link.bytes_per_second));
+                link.sending_until = sent;
+                (start, sent)
+            }
+            _ => (leaving, leaving),
+        };
+        let crossed = sent.saturating_add(latency);
+        match self.links.get_mut(&to) {
+            Some(link) if link.bytes_per_second > 0 => {
+                let start = first_byte_left
+                    .saturating_add(latency)
+                    .max(link.receiving_until);
+                let entered = start
+                    .saturating_add(transmission(bytes, link.bytes_per_second))
+                    .max(crossed);
+                link.receiving_until = entered;
+                entered
+            }
+            _ => crossed,
+        }
+    }
+
     fn backlog_is_full(&self, address: &SocketAddr) -> bool {
         self.listeners
             .get(address)
             .is_some_and(|backlog| backlog.len() >= SimNetwork::MAX_BACKLOG)
     }
 
-    fn cut(&self, a: IpAddr, b: IpAddr) -> bool {
-        a != b && self.partitions.contains(&ordered(a, b))
-    }
-
-    fn connection_cut(&self, connection: &Connection) -> bool {
-        self.cut(connection.ends[CLIENT].ip(), connection.ends[SERVER].ip())
+    fn cut_either_way(&self, a: IpAddr, b: IpAddr) -> bool {
+        is_cut(&self.cuts, a, b) || is_cut(&self.cuts, b, a)
     }
 
     fn end_flow(&mut self, id: u64, side: usize) {
-        if !self.connections.contains_key(&id) {
+        let Some(connection) = self.connections.get(&id) else {
+            return;
+        };
+        if connection.failed[side].is_some() {
             return;
         }
-        let at = self.now().saturating_add(self.delay());
+        let [from, to] = connection.hosts(side);
+        let now = self.now();
+        let at = self.arrival(now, from, to, 0);
         if let Some(connection) = self.connections.get_mut(&id) {
             connection.flows[side].end(at);
         }
     }
 
     fn next_event(&self) -> Option<Duration> {
-        self.connections
-            .values()
-            .filter(|connection| !self.connection_cut(connection))
-            .flat_map(|connection| connection.flows.iter().filter_map(Flow::next_event))
-            .min()
+        let mut next: Option<Duration> = None;
+        for connection in self.connections.values() {
+            for side in [CLIENT, SERVER] {
+                let flow = &connection.flows[side];
+                let arrival = if flow_blocked(&self.cuts, connection, side) {
+                    None
+                } else {
+                    flow.next_event()
+                };
+                for at in arrival.into_iter().chain(flow.retransmission_deadline()) {
+                    next = Some(next.map_or(at, |next| next.min(at)));
+                }
+            }
+        }
+        next
+    }
+
+    fn watch_retransmissions(&mut self) {
+        let now = self.now();
+        let cuts = &self.cuts;
+        for connection in self.connections.values_mut() {
+            for side in [CLIENT, SERVER] {
+                if connection.failed[side].is_some() {
+                    continue;
+                }
+                let [from, to] = connection.hosts(side);
+                let out_cut = is_cut(cuts, from, to);
+                let back_cut = is_cut(cuts, to, from);
+                let peer_gone = connection.failed[1 - side].is_some();
+                let flow = &mut connection.flows[side];
+                if peer_gone && flow.unacknowledged && !out_cut && !back_cut {
+                    connection.reset();
+                    break;
+                }
+                if !peer_gone && !back_cut && flow.everything_arrived() {
+                    flow.unacknowledged = false;
+                }
+                if !(flow.unacknowledged && (out_cut || back_cut || peer_gone)) {
+                    flow.retransmitting_since = None;
+                    continue;
+                }
+                let since = *flow.retransmitting_since.get_or_insert(now);
+                if now.saturating_sub(since) >= SimNetwork::RETRANSMISSION_TIMEOUT {
+                    connection.time_out(side);
+                }
+            }
+        }
     }
 
     fn random_below(&mut self, bound: usize) -> usize {
@@ -745,10 +978,7 @@ impl World {
 
     fn reset(&mut self, connection: u64) {
         if let Some(connection) = self.connections.get_mut(&connection) {
-            connection.reset = true;
-            for flow in &mut connection.flows {
-                flow.clear();
-            }
+            connection.reset();
         }
     }
 
@@ -766,17 +996,18 @@ impl World {
 
     fn deliver_some(&mut self) {
         let now = self.now();
-        let partitions = std::mem::take(&mut self.partitions);
-        let mut rng = std::mem::take(&mut self.rng);
+        let cuts = &self.cuts;
+        let rng = &mut self.rng;
         for connection in self.connections.values_mut() {
-            let [client, server] = connection.ends.map(|end| end.ip());
-            if client != server && partitions.contains(&ordered(client, server)) {
-                continue;
-            }
-            for flow in &mut connection.flows {
-                if !rng.coin() {
+            for side in [CLIENT, SERVER] {
+                let [from, to] = connection.hosts(side);
+                if is_cut(cuts, from, to) || !rng.coin() {
                     continue;
                 }
+                if flow_blocked(cuts, connection, side) {
+                    continue;
+                }
+                let flow = &mut connection.flows[side];
                 let due = flow.due(now);
                 if due > 0 {
                     let arriving = 1 + usize::try_from(rng.next_u64() % due as u64).unwrap_or(0);
@@ -784,26 +1015,24 @@ impl World {
                 } else if flow.end_due(now) {
                     flow.end_arrived = true;
                 }
+                if !is_cut(cuts, to, from) && flow.everything_arrived() {
+                    flow.unacknowledged = false;
+                }
             }
         }
-        self.rng = rng;
-        self.partitions = partitions;
     }
 
     fn deliver_due(&mut self) -> bool {
         let now = self.now();
+        let cuts = &self.cuts;
         let mut delivered = false;
-        let ids: Vec<u64> = self
-            .connections
-            .iter()
-            .filter(|(_, connection)| !self.connection_cut(connection))
-            .map(|(&id, _)| id)
-            .collect();
-        for id in ids {
-            let Some(connection) = self.connections.get_mut(&id) else {
-                continue;
-            };
-            for flow in &mut connection.flows {
+        for connection in self.connections.values_mut() {
+            for side in [CLIENT, SERVER] {
+                if flow_blocked(cuts, connection, side) {
+                    continue;
+                }
+                let [from, to] = connection.hosts(side);
+                let flow = &mut connection.flows[side];
                 let due = flow.due(now);
                 if due > 0 {
                     flow.deliver(due);
@@ -812,6 +1041,9 @@ impl World {
                 if flow.end_due(now) {
                     flow.end_arrived = true;
                     delivered = true;
+                }
+                if !is_cut(cuts, to, from) && flow.everything_arrived() {
+                    flow.unacknowledged = false;
                 }
             }
         }
@@ -875,7 +1107,7 @@ impl World {
         handshake_done_at: &mut Option<Duration>,
     ) -> Option<Result<NetOutput<SimStream>>> {
         let now = self.now();
-        if self.cut(ip, address.ip()) {
+        if self.cut_either_way(ip, address.ip()) {
             if now < since.saturating_add(SimNetwork::CONNECT_TIMEOUT) {
                 return None;
             }
@@ -887,8 +1119,8 @@ impl World {
         let done_at = match *handshake_done_at {
             Some(at) => at,
             None => {
-                let round_trip = self.delay().saturating_add(self.delay());
-                let at = now.saturating_add(round_trip);
+                let syn_arrives = self.arrival(now, ip, address.ip(), 0);
+                let at = self.arrival(syn_arrives, address.ip(), ip, 0);
                 *handshake_done_at = Some(at);
                 at
             }
@@ -929,7 +1161,9 @@ impl World {
                 ends: [local, address],
                 flows: [Flow::default(), Flow::default()],
                 open: [true, true],
-                reset: false,
+                failed: [None, None],
+                timeout_reported: [false, false],
+                peer_ended_before_timeout: [false, false],
             },
         );
         self.listeners.get_mut(&address)?.push_back(id);
@@ -946,17 +1180,28 @@ impl World {
         buffer: &mut [u8],
     ) -> Option<Result<NetOutput<SimStream>>> {
         let connection = self.connections.get(&stream.connection)?;
+        let failure = connection.failed[stream.side];
         let flow = &connection.flows[1 - stream.side];
         let readable = flow.arrived.len().min(buffer.len());
-        if !connection.reset && readable == 0 && !flow.end_arrived {
+        if failure.is_none() && readable == 0 && !flow.end_arrived {
             return None;
         }
-        let reset = connection.reset;
         if let Err(error) = self.next_operation() {
             return Some(Err(error));
         }
-        if reset {
-            return Some(Err(Error::new(ErrorKind::ConnectionReset)));
+        if failure == Some(ErrorKind::TimedOut) && readable == 0 {
+            let connection = self.connections.get_mut(&stream.connection)?;
+            if connection.peer_ended_before_timeout[stream.side]
+                || !connection.report_timeout(stream.side)
+            {
+                return Some(Ok(NetOutput::Transferred(0)));
+            }
+            return Some(Err(Error::new(ErrorKind::TimedOut)));
+        }
+        if let Some(kind) = failure
+            && kind != ErrorKind::TimedOut
+        {
+            return Some(Err(Error::new(kind)));
         }
         let count = self.transfer_size(readable);
         let flow = &mut self.connections.get_mut(&stream.connection)?.flows[1 - stream.side];
@@ -968,18 +1213,35 @@ impl World {
 
     fn send(&mut self, stream: &SimStream, buffer: &[u8]) -> Option<Result<NetOutput<SimStream>>> {
         let connection = self.connections.get(&stream.connection)?;
-        let refused = connection.reset || connection.flows[stream.side].ended;
+        let failure = connection.failed[stream.side];
+        let shut = connection.flows[stream.side].ended;
         let peer_gone = !connection.open[1 - stream.side];
+        let [from, to] = connection.hosts(stream.side);
         let room = SimNetwork::BUFFER_BYTES
             .saturating_sub(connection.flows[stream.side].buffered())
             .min(buffer.len());
-        if !refused && !peer_gone && room == 0 {
+        if failure.is_none() && !shut && !peer_gone && room == 0 {
             return None;
         }
         if let Err(error) = self.next_operation() {
             return Some(Err(error));
         }
-        if refused {
+        if failure == Some(ErrorKind::TimedOut) {
+            let first = self
+                .connections
+                .get_mut(&stream.connection)?
+                .report_timeout(stream.side);
+            let kind = if first {
+                ErrorKind::TimedOut
+            } else {
+                ErrorKind::ConnectionReset
+            };
+            return Some(Err(Error::new(kind)));
+        }
+        if let Some(kind) = failure {
+            return Some(Err(Error::new(kind)));
+        }
+        if shut {
             return Some(Err(Error::new(ErrorKind::ConnectionReset)));
         }
         if peer_gone {
@@ -988,15 +1250,29 @@ impl World {
             return Some(Ok(NetOutput::Transferred(count)));
         }
         let count = self.transfer_size(room);
-        let at = self.now().saturating_add(self.delay());
+        let now = self.now();
+        let at = self.arrival(now, from, to, count);
         let flow = &mut self.connections.get_mut(&stream.connection)?.flows[stream.side];
         flow.send(&buffer[..count], at);
         Some(Ok(NetOutput::Transferred(count)))
     }
 }
 
-fn ordered(a: IpAddr, b: IpAddr) -> [IpAddr; 2] {
-    [a.min(b), a.max(b)]
+fn is_cut(cuts: &BTreeSet<(IpAddr, IpAddr)>, from: IpAddr, to: IpAddr) -> bool {
+    from != to && cuts.contains(&(from, to))
+}
+
+fn flow_blocked(cuts: &BTreeSet<(IpAddr, IpAddr)>, connection: &Connection, side: usize) -> bool {
+    let [from, to] = connection.hosts(side);
+    connection.failed.iter().any(Option::is_some) || is_cut(cuts, from, to)
+}
+
+fn transmission(bytes: usize, bytes_per_second: u64) -> Duration {
+    if bytes_per_second == 0 {
+        return Duration::ZERO;
+    }
+    let nanos = (bytes as u128 * 1_000_000_000).div_ceil(u128::from(bytes_per_second));
+    Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
 }
 
 fn lock(shared: &Mutex<World>) -> MutexGuard<'_, World> {
@@ -1267,14 +1543,308 @@ mod tests {
         pair.send(&client, b"held", 0);
         pair.reap(1);
         pair.receive(&server, 8, 1);
-        let mut completions = Vec::new();
-        let error = pair.queue.reap(&mut completions, 1).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::Stalled);
         assert!(pair.reap_for(1, Duration::from_secs(600)).is_empty());
         assert_eq!(pair.now(), Duration::from_secs(600));
         pair.network.heal_all();
         let completion = pair.reap(1).pop().unwrap();
         assert!(completion.result.unwrap().transferred() > Some(0));
+    }
+
+    #[test]
+    fn a_connection_survives_a_cut_shorter_than_the_retransmission_timeout() {
+        let mut pair = Pair::new(20);
+        let (client, server) = pair.connect();
+        pair.network.partition(CLIENT, SERVER);
+        pair.send(&client, b"kept", 0);
+        pair.reap(1);
+        pair.receive(&server, 4, 1);
+        let short_of_the_timeout = SimNetwork::RETRANSMISSION_TIMEOUT - Duration::from_secs(1);
+        assert!(pair.reap_for(1, short_of_the_timeout).is_empty());
+        pair.network.heal(SERVER, CLIENT);
+        let completion = pair.reap(1).pop().unwrap();
+        let count = completion.result.unwrap().transferred().unwrap();
+        assert_eq!(
+            completion.op.into_buffer().unwrap()[..count],
+            b"kept"[..count]
+        );
+        assert_eq!(pair.now(), short_of_the_timeout);
+        pair.receive(&client, 4, 2);
+        assert!(
+            pair.reap_for(1, 2 * SimNetwork::RETRANSMISSION_TIMEOUT)
+                .is_empty()
+        );
+        pair.queue.cancel(2).unwrap();
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::Canceled);
+        pair.send(&client, b"more", 3);
+        assert!(pair.reap(1).pop().unwrap().result.is_ok());
+        assert!(client.peer_address().is_ok());
+    }
+
+    #[test]
+    fn a_connection_fails_when_its_bytes_stay_unacknowledged_across_a_long_cut() {
+        let mut pair = Pair::new(21);
+        {
+            let (client, server) = pair.connect();
+            pair.network.partition(CLIENT, SERVER);
+            pair.send(&client, b"lost", 0);
+            pair.reap(1);
+            pair.receive(&client, 8, 1);
+            let completion = pair.reap(1).pop().unwrap();
+            assert_eq!(completion.user_data, 1);
+            assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::TimedOut);
+            assert_eq!(pair.now(), SimNetwork::RETRANSMISSION_TIMEOUT);
+            pair.send(&client, b"again", 2);
+            let completion = pair.reap(1).pop().unwrap();
+            assert_eq!(
+                completion.result.unwrap_err().kind(),
+                ErrorKind::ConnectionReset
+            );
+            let not_connected = ErrorKind::NotConnected;
+            assert_eq!(client.peer_address().unwrap_err().kind(), not_connected);
+            assert_eq!(client.shutdown_write().unwrap_err().kind(), not_connected);
+            assert!(client.local_address().is_ok());
+
+            pair.receive(&server, 8, 3);
+            assert!(pair.reap_for(1, Duration::from_secs(3600)).is_empty());
+            assert!(server.peer_address().is_ok());
+            pair.network.heal_all();
+            pair.send(&server, b"still there?", 4);
+            let completion = pair.reap(1).pop().unwrap();
+            assert_eq!(completion.user_data, 4);
+            assert!(completion.result.is_ok());
+            let completion = pair.reap(1).pop().unwrap();
+            assert_eq!(completion.user_data, 3);
+            assert_eq!(
+                completion.result.unwrap_err().kind(),
+                ErrorKind::ConnectionReset
+            );
+            assert_eq!(server.peer_address().unwrap_err().kind(), not_connected);
+        }
+        assert_eq!(pair.network.connection_count(), 0);
+    }
+
+    #[test]
+    fn an_end_that_times_out_still_reads_what_had_arrived_before_it_fails() {
+        let mut pair = Pair::new(23);
+        let (client, server) = pair.connect();
+        pair.send(&server, b"answer", 0);
+        pair.reap(1);
+        pair.receive(&server, 16, 1);
+        assert!(pair.reap_for(1, Duration::from_millis(1)).is_empty());
+        pair.network.partition(CLIENT, SERVER);
+        pair.send(&client, b"request", 2);
+        pair.reap(1);
+        assert!(
+            pair.reap_for(1, 2 * SimNetwork::RETRANSMISSION_TIMEOUT)
+                .is_empty()
+        );
+        pair.receive(&client, 16, 3);
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.user_data, 3);
+        let count = completion.result.unwrap().transferred().unwrap();
+        assert_eq!(&completion.op.into_buffer().unwrap()[..count], b"answer");
+        pair.receive(&client, 16, 4);
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::TimedOut);
+        pair.receive(&client, 16, 5);
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.result.unwrap().transferred(), Some(0));
+        pair.send(&client, b"again", 6);
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(
+            completion.result.unwrap_err().kind(),
+            ErrorKind::ConnectionReset
+        );
+        pair.queue.cancel(1).unwrap();
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::Canceled);
+    }
+
+    #[test]
+    fn an_end_whose_peer_had_ended_reads_the_end_and_its_send_reports_the_timeout_once() {
+        let mut pair = Pair::new(23);
+        let (client, server) = pair.connect();
+        server.shutdown_write().unwrap();
+        pair.receive(&client, 16, 0);
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.result.unwrap().transferred(), Some(0));
+        pair.network.partition(CLIENT, SERVER);
+        pair.send(&client, b"request", 1);
+        pair.reap(1);
+        pair.receive(&server, 16, 2);
+        assert!(
+            pair.reap_for(1, 2 * SimNetwork::RETRANSMISSION_TIMEOUT)
+                .is_empty()
+        );
+        for user_data in [3, 4] {
+            pair.receive(&client, 16, user_data);
+            let completion = pair.reap(1).pop().unwrap();
+            assert_eq!(completion.result.unwrap().transferred(), Some(0));
+        }
+        pair.send(&client, b"again", 5);
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::TimedOut);
+        pair.send(&client, b"again", 6);
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(
+            completion.result.unwrap_err().kind(),
+            ErrorKind::ConnectionReset
+        );
+        pair.queue.cancel(2).unwrap();
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::Canceled);
+    }
+
+    #[test]
+    fn an_end_left_unacknowledged_across_a_long_cut_times_out_while_its_peer_waits() {
+        let mut pair = Pair::new(22);
+        let (client, server) = pair.connect();
+        pair.network.partition(CLIENT, SERVER);
+        pair.send(&client, b"lost", 0);
+        pair.reap(1);
+        pair.receive(&server, 8, 1);
+        assert!(
+            pair.reap_for(1, 2 * SimNetwork::RETRANSMISSION_TIMEOUT)
+                .is_empty()
+        );
+        pair.receive(&client, 8, 2);
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.user_data, 2);
+        assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::TimedOut);
+        pair.queue.cancel(1).unwrap();
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::Canceled);
+    }
+
+    #[test]
+    fn a_one_way_cut_drops_one_direction_while_the_other_flows() {
+        let mut pair = Pair::new(23);
+        let (client, server) = pair.connect();
+        pair.network.partition_one_way(CLIENT, SERVER);
+        pair.send(&server, b"down", 0);
+        pair.receive(&client, 4, 1);
+        let completions = pair.reap(2);
+        let received = completions
+            .into_iter()
+            .find(|completion| completion.user_data == 1)
+            .unwrap();
+        let count = received.result.unwrap().transferred().unwrap();
+        assert!(count > 0);
+        assert_eq!(
+            received.op.into_buffer().unwrap()[..count],
+            b"down"[..count]
+        );
+        assert_eq!(pair.now(), Duration::ZERO);
+
+        pair.send(&client, b"up", 2);
+        pair.reap(1);
+        pair.receive(&server, 4, 3);
+        assert!(pair.reap_for(1, Duration::from_secs(60)).is_empty());
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.user_data, 3);
+        assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::TimedOut);
+        assert_eq!(pair.now(), SimNetwork::RETRANSMISSION_TIMEOUT);
+    }
+
+    #[test]
+    fn a_connect_across_a_one_way_cut_times_out() {
+        for (from, to) in [(CLIENT, SERVER), (SERVER, CLIENT)] {
+            let mut pair = Pair::new(24);
+            pair.network.partition_one_way(from, to);
+            let op = pair.connect_op();
+            pair.submit(op, 0);
+            let completion = pair.reap(1).pop().unwrap();
+            assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::TimedOut);
+            assert_eq!(pair.now(), SimNetwork::CONNECT_TIMEOUT);
+            pair.network.heal(to, from);
+            let (client, server) = pair.connect();
+            pair.send(&client, b"ok", 1);
+            pair.receive(&server, 2, 2);
+            assert_eq!(pair.reap(2).len(), 2);
+        }
+    }
+
+    #[test]
+    fn a_hosts_latency_adds_to_what_it_sends_and_receives() {
+        let mut pair = Pair::new(25);
+        let millis = Duration::from_millis;
+        pair.network.latency(millis(1), millis(1));
+        pair.network.host_latency(SERVER, millis(10), millis(10));
+        let elsewhere = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+        pair.network
+            .host_latency(elsewhere, millis(500), millis(500));
+        let (client, server) = pair.connect();
+        assert_eq!(pair.now(), millis(22));
+        pair.send(&client, b"ping", 0);
+        pair.reap(1);
+        pair.receive(&server, 4, 1);
+        let completion = pair.reap(1).pop().unwrap();
+        assert!(completion.result.unwrap().transferred() > Some(0));
+        assert_eq!(pair.now(), millis(33));
+    }
+
+    #[test]
+    fn a_hosts_bandwidth_spaces_its_bytes_out_on_the_clock() {
+        let mut pair = Pair::new(26);
+        let millis = Duration::from_millis;
+        pair.network.host_bandwidth(CLIENT, 1_000);
+        let (client, server) = pair.connect();
+        assert_eq!(pair.now(), Duration::ZERO);
+        pair.send(&client, &[5; 500], 0);
+        pair.reap(1);
+        pair.send(&client, &[6; 250], 1);
+        pair.reap(1);
+        let mut received = Vec::new();
+        let mut times = Vec::new();
+        while received.len() < 750 {
+            pair.receive(&server, 750 - received.len(), 2);
+            let completion = pair.reap(1).pop().unwrap();
+            let count = completion.result.unwrap().transferred().unwrap();
+            received.extend_from_slice(&completion.op.into_buffer().unwrap()[..count]);
+            times.push((received.len(), pair.now()));
+        }
+        for (total, at) in times {
+            assert_eq!(
+                at,
+                if total <= 500 {
+                    millis(500)
+                } else {
+                    millis(750)
+                }
+            );
+        }
+        assert_eq!(received[..500], [5; 500]);
+        assert_eq!(received[500..], [6; 250]);
+    }
+
+    #[test]
+    fn a_slow_receiver_takes_bytes_in_at_its_own_bandwidth_behind_latency() {
+        let mut pair = Pair::new(27);
+        let millis = Duration::from_millis;
+        pair.network.latency(millis(100), millis(100));
+        pair.network.host_bandwidth(SERVER, 2_000);
+        let (client, server) = pair.connect();
+        let connected = pair.now();
+        assert_eq!(connected, millis(200));
+        pair.send(&client, &[1; 1_000], 0);
+        pair.reap(1);
+        pair.receive(&server, 1_000, 1);
+        pair.reap(1);
+        assert_eq!(pair.now(), connected + millis(600));
+    }
+
+    #[test]
+    fn a_reset_end_has_no_peer_address_and_cannot_shut_down() {
+        let mut pair = Pair::new(28);
+        let (client, server) = pair.connect();
+        pair.send(&client, b"unread", 0);
+        pair.reap(1);
+        drop(server);
+        let not_connected = ErrorKind::NotConnected;
+        assert_eq!(client.peer_address().unwrap_err().kind(), not_connected);
+        assert_eq!(client.shutdown_write().unwrap_err().kind(), not_connected);
+        assert!(client.local_address().is_ok());
     }
 
     #[test]
@@ -1555,7 +2125,7 @@ mod tests {
             }
             let mut streams: Vec<Arc<SimStream>> = Vec::new();
             for step in 0..300 {
-                let choice = rng.next_u64() % 9;
+                let choice = rng.next_u64() % 11;
                 let pick = |rng: &mut crate::rng::SplitMix64, streams: &[Arc<SimStream>]| {
                     (!streams.is_empty())
                         .then(|| Arc::clone(&streams[(rng.next_u64() as usize) % streams.len()]))
@@ -1592,6 +2162,25 @@ mod tests {
                         let _ = pair.queue.cancel(rng.next_u64() % (step + 1));
                         None
                     }
+                    9 => {
+                        match rng.next_u64() % 3 {
+                            0 => pair.network.partition_one_way(CLIENT, SERVER),
+                            1 => pair.network.partition_one_way(SERVER, CLIENT),
+                            _ => pair.network.heal_all(),
+                        }
+                        None
+                    }
+                    10 => {
+                        let host = if rng.coin() { CLIENT } else { SERVER };
+                        if rng.coin() {
+                            let most = Duration::from_millis(rng.next_u64() % 50);
+                            pair.network.host_latency(host, Duration::ZERO, most);
+                        } else {
+                            let bytes_per_second = 1_000 + rng.next_u64() % 1_000_000;
+                            pair.network.host_bandwidth(host, bytes_per_second);
+                        }
+                        None
+                    }
                     _ => {
                         if !streams.is_empty() {
                             let at = (rng.next_u64() as usize) % streams.len();
@@ -1605,7 +2194,11 @@ mod tests {
                 }
                 let mut completions = Vec::new();
                 if choice == 8 {
-                    let timeout = Duration::from_millis(rng.next_u64() % 200);
+                    let timeout = if rng.next_u64().is_multiple_of(8) {
+                        SimNetwork::RETRANSMISSION_TIMEOUT + Duration::from_secs(1)
+                    } else {
+                        Duration::from_millis(rng.next_u64() % 200)
+                    };
                     let wanted = pair.queue.in_flight().min(1);
                     let _ = pair.queue.reap_timeout(&mut completions, wanted, timeout);
                 } else {

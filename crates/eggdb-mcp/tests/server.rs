@@ -350,6 +350,17 @@ fn list_describe_sample_and_the_schema_resource() {
         r#"{"sql":"SELECT name FROM users WHERE id = 1"}"#,
     );
     assert!(!is_error(&explained), "{explained:?}");
+    let with_subplan = call(
+        &mut server,
+        40,
+        "explain_query",
+        r#"{"sql":"SELECT name FROM users WHERE id = (SELECT max(id) FROM users)"}"#,
+    );
+    assert!(!is_error(&with_subplan), "{with_subplan:?}");
+    assert!(
+        format!("{with_subplan:?}").contains("InitPlan 1 (returns $0)"),
+        "{with_subplan:?}"
+    );
     let sqlite = call(
         &mut server,
         11,

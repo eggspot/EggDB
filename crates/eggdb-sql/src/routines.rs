@@ -1,6 +1,6 @@
 use crate::ast::{
-    AlterRoutine, AlterRoutineAction, CreateRoutine, DropRoutine, DropTrigger, Name, RoutineTarget,
-    Statement, TriggerName,
+    AlterRoutine, AlterRoutineAction, CreateRoutine, DropRoutine, DropTrigger, Name,
+    RoutineSettingChange, RoutineTarget, Statement, TriggerName,
 };
 use crate::dialect::Dialect;
 use crate::encoding::{decode_routines, encode_routines, prefix_end, routine_key, routines_prefix};
@@ -623,6 +623,9 @@ pub(crate) fn create_routine(
         _ => {}
     }
     check_returns(&*writer, tables, &definition)?;
+    for (name, _) in &definition.settings {
+        crate::settings::check_parameter_name(name)?;
+    }
     if body_check == BodyCheck::Checked {
         check_body(&definition, create.body_position)?;
     }
@@ -837,6 +840,41 @@ pub(crate) fn drop_routines(
     Ok(result)
 }
 
+fn change_routine_settings(
+    writer: &mut dyn KeyValueWrite,
+    located: &Located,
+    alter: &AlterRoutine,
+    changes: &[RoutineSettingChange],
+) -> SqlResult<()> {
+    for change in changes {
+        match change {
+            RoutineSettingChange::Set { name, .. } | RoutineSettingChange::Reset(name) => {
+                crate::settings::check_parameter_name(name)?;
+            }
+            RoutineSettingChange::ResetAll => {}
+        }
+    }
+    let mut routines = stored(&*writer, &located.name)?;
+    let Some(routine) = routines
+        .iter_mut()
+        .find(|routine| routine.identity == located.identity)
+    else {
+        return Err(missing(
+            alter.kind,
+            &signature_of(&located.name, &located.identity),
+            alter.target.name.position,
+        ));
+    };
+    let text =
+        crate::parser::with_routine_settings_changed(&routine.text, routine.dialect, changes)?;
+    let definition = parse_definition(&text, routine.dialect)?;
+    if definition.kind != routine.kind || definition.identity() != routine.identity {
+        return Err(crate::encoding::corrupt("routine definitions"));
+    }
+    routine.text = text;
+    save(writer, &located.name, &routines)
+}
+
 pub(crate) fn alter_routine(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
@@ -851,6 +889,9 @@ pub(crate) fn alter_routine(
     let located = locate(&*writer, tables, alter.kind, &alter.target)??;
     let new_name = match &alter.action {
         AlterRoutineAction::Accepted => return Ok(result),
+        AlterRoutineAction::Settings(changes) => {
+            return change_routine_settings(writer, &located, alter, changes).map(|()| result);
+        }
         AlterRoutineAction::RenameTo(to) => {
             crate::constraints::check_identifier(to)?;
             qualified(schema_of(&located.name), &to.text)

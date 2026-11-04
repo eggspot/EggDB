@@ -1,7 +1,9 @@
 mod constraints;
 mod copy;
+mod create_table_as;
 mod cursors;
 mod databases;
+mod generated;
 mod grouping_sets;
 mod hierarchy;
 mod indexes;
@@ -41,6 +43,7 @@ pub use oracle::ORACLE_COMPATIBLE_VERSION;
 pub(crate) use oracle::{is_reserved as is_oracle_reserved, oracle_table_name};
 pub(crate) use plpgsql::plpgsql_program;
 pub(crate) use plsql::{plsql_package_program, plsql_program};
+pub(crate) use routines::with_routine_settings_changed;
 pub use sqlserver::SQLSERVER_COMPATIBLE_VERSION;
 pub(crate) use sqlserver::{
     is_reserved as is_sqlserver_reserved, kept_default as sqlserver_kept_default,
@@ -60,6 +63,7 @@ use crate::ast::{
     JoinKind, JoinedTables, Literal, Name, OnDuplicate, Overriding, Select, SelectItem, Statement,
     TableReference, TruthTest, UnaryOperator, Update,
 };
+use crate::ast::{CharacteristicsTarget, TransactionCharacteristics};
 use crate::dialect::Dialect;
 use crate::encoding::{IndexMethod, SortOptions};
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -88,8 +92,6 @@ const AGGREGATES: &[&str] = &[
     "jsonb_agg",
     "json_object_agg",
     "jsonb_object_agg",
-    "stddev",
-    "variance",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -233,6 +235,42 @@ pub(crate) fn like_escape(pattern: Expr, escape: Expr) -> Expr {
     }
 }
 
+fn argument_in_double(expr: Expr) -> Expr {
+    let Expr { kind, position } = expr;
+    let ExprKind::Aggregate {
+        function,
+        argument: Some(argument),
+        distinct,
+    } = kind
+    else {
+        return Expr { kind, position };
+    };
+    let ordered = matches!(
+        &argument.kind,
+        ExprKind::Function { name, .. } if name == crate::aggregate::ORDERED_ARGUMENTS
+    );
+    let argument = if ordered {
+        *argument
+    } else {
+        let at = argument.position;
+        Expr {
+            kind: ExprKind::Cast {
+                expr: argument,
+                sql_type: SqlType::Double,
+            },
+            position: at,
+        }
+    };
+    Expr {
+        kind: ExprKind::Aggregate {
+            function,
+            argument: Some(Box::new(argument)),
+            distinct,
+        },
+        position,
+    }
+}
+
 fn is_postgresql_only(name: &str) -> bool {
     POSTGRESQL_ONLY_FUNCTIONS.contains(&name)
         || POSTGRESQL_ONLY_SET_RETURNING.contains(&name)
@@ -263,7 +301,9 @@ const NAMED_PARAMETERS: [(&str, &[&str]); 5] = [
     ),
 ];
 
-const INTERNAL_FUNCTIONS: [&str; 28] = [
+const INTERNAL_FUNCTIONS: [&str; 31] = [
+    crate::row_values::ROW_ORDERING,
+    crate::row_values::ROW_MEMBERSHIP,
     crate::triggers::RAISE_FUNCTION,
     crate::routines::ROUTINE_CALL,
     "regclass_cast",
@@ -291,6 +331,7 @@ const INTERNAL_FUNCTIONS: [&str; 28] = [
     crate::aggregate::ORDERED_ARGUMENTS,
     crate::aggregate::FILTERED_ARGUMENTS,
     crate::aggregate::ORDERED_SET_ARGUMENTS,
+    crate::hypothetical_set::HYPOTHETICAL_ARGUMENTS,
     crate::window::WINDOW_CALL,
 ];
 
@@ -326,6 +367,8 @@ pub(crate) struct Parser<'t> {
     function_body: bool,
     select_into: Option<Option<select_into::SelectIntoTable>>,
     later_set_operand: bool,
+    routine_setting_spans: Option<Vec<routines::SettingSpan>>,
+    oracle_unaliased_expressions: Vec<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -452,6 +495,8 @@ impl<'t> Parser<'t> {
             function_body: false,
             select_into: None,
             later_set_operand: false,
+            routine_setting_spans: None,
+            oracle_unaliased_expressions: Vec::new(),
         }
     }
 
@@ -905,7 +950,9 @@ impl<'t> Parser<'t> {
                 }
                 Ok(Statement::Rollback)
             }
-            "values" if self.postgresql() => self.query_statement(),
+            "values" if self.postgresql() || self.mysql() || self.sqlite() => {
+                self.query_statement()
+            }
             "values" | "table" => Err(self.not_supported("a VALUES or TABLE statement")),
             "set" => self.set(),
             "show" => self.show(),
@@ -921,6 +968,10 @@ impl<'t> Parser<'t> {
             "alter" if self.is_word_at(1, "table") => {
                 self.at += 1;
                 self.alter_table()
+            }
+            "alter" if self.postgresql() && self.is_word_at(1, "index") => {
+                self.at += 1;
+                self.alter_index()
             }
             "alter" if self.postgresql() && self.is_word_at(1, "sequence") => {
                 self.at += 1;
@@ -1207,10 +1258,24 @@ impl<'t> Parser<'t> {
         if self.is_word("snapshot") {
             return Err(self.not_supported("SET TRANSACTION SNAPSHOT"));
         }
+        let target = if characteristics {
+            CharacteristicsTarget::Session
+        } else {
+            CharacteristicsTarget::CurrentTransaction
+        };
+        self.transaction_characteristics(target)
+            .map(Statement::SetTransaction)
+    }
+
+    pub(super) fn transaction_characteristics(
+        &mut self,
+        target: CharacteristicsTarget,
+    ) -> SqlResult<TransactionCharacteristics> {
         let mut read_only = None;
+        let mut isolation = None;
         loop {
             if self.take_word("isolation") {
-                self.isolation_level()?;
+                isolation = Some(self.isolation_level()?);
             } else if self.take_word("read") {
                 if self.take_word("only") {
                     read_only = Some(true);
@@ -1220,23 +1285,21 @@ impl<'t> Parser<'t> {
                 }
             } else if self.take_word("not") {
                 self.expect_word("deferrable")?;
+            } else if self.oracle() && self.take_word("name") {
+                if !matches!(self.peek_kind(), TokenKind::String(_)) {
+                    return Err(self.unexpected());
+                }
+                self.at += 1;
             } else if !self.take_word("deferrable") {
                 break;
             }
             self.take(&TokenKind::Comma);
         }
-        match (characteristics, read_only) {
-            (true, Some(read_only)) => Ok(Statement::Set {
-                name: "default_transaction_read_only".to_owned(),
-                value: Some(if read_only { "on" } else { "off" }.to_owned()),
-                scope: SettingScope::Session,
-            }),
-            (false, Some(true)) => Err(self.not_supported("SET TRANSACTION READ ONLY")),
-            _ => Ok(Statement::Ignored {
-                tag: "SET",
-                notice: None,
-            }),
-        }
+        Ok(TransactionCharacteristics {
+            target,
+            read_only,
+            isolation,
+        })
     }
 
     fn analyze(&mut self) -> SqlResult<Statement> {
@@ -1315,17 +1378,22 @@ impl<'t> Parser<'t> {
         })
     }
 
-    fn isolation_level(&mut self) -> SqlResult<()> {
+    fn isolation_level(&mut self) -> SqlResult<String> {
         self.expect_word("level")?;
         if self.take_word("serializable") {
-            return Ok(());
+            return Ok("serializable".to_owned());
         }
         if self.take_word("repeatable") {
-            return self.expect_word("read");
+            self.expect_word("read")?;
+            return Ok("repeatable read".to_owned());
         }
-        if self.take_word("read") && (self.take_word("committed") || self.take_word("uncommitted"))
-        {
-            return Ok(());
+        if self.take_word("read") {
+            if self.take_word("committed") {
+                return Ok("read committed".to_owned());
+            }
+            if self.take_word("uncommitted") {
+                return Ok("read uncommitted".to_owned());
+            }
         }
         Err(self.unexpected())
     }
@@ -1534,6 +1602,31 @@ impl<'t> Parser<'t> {
         })
     }
 
+    fn setting_value_now(&self, setting: &str, missing_ok: bool) -> SqlResult<Option<String>> {
+        let wanted = Settings::name_of(setting);
+        if let Some(change) = self
+            .setting_changes
+            .iter()
+            .rev()
+            .find(|change| Settings::name_of(&change.name) == wanted)
+        {
+            return Ok(change.value.clone());
+        }
+        let defaults;
+        let settings = match self.settings {
+            Some(settings) => settings,
+            None => {
+                defaults = Settings::default();
+                &defaults
+            }
+        };
+        match settings.get(setting) {
+            Ok(value) => Ok(Some(value)),
+            Err(_) if missing_ok || setting.contains('.') => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     fn session_function(&mut self, name: &Name) -> SqlResult<Option<Expr>> {
         let known: &'static str = match name.text.as_str() {
             "version" => "version",
@@ -1591,28 +1684,13 @@ impl<'t> Parser<'t> {
                 false
             };
             self.expect(&TokenKind::RightParen)?;
-            let defaults;
-            let settings = match self.settings {
-                Some(settings) => settings,
-                None => {
-                    defaults = Settings::default();
-                    &defaults
-                }
-            };
-            let value = match settings.get(setting) {
-                Ok(value) => value,
-                Err(_) if missing_ok => {
-                    return Ok(Some(Expr {
-                        kind: ExprKind::Literal(Literal::Null),
-                        position: name.position,
-                    }));
-                }
-                Err(error) => return Err(error),
-            };
+            let setting = setting.as_ref().to_owned();
+            let parsed = self.setting_value_now(&setting, missing_ok)?;
             return Ok(Some(Expr {
-                kind: ExprKind::SessionValue {
-                    name: "current_setting",
-                    value,
+                kind: ExprKind::CurrentSetting {
+                    name: setting,
+                    missing_ok,
+                    parsed,
                 },
                 position: name.position,
             }));
@@ -1633,17 +1711,21 @@ impl<'t> Parser<'t> {
         } else {
             self.transaction_noise();
         }
-        let mut read_only = false;
+        let mut read_only = None;
+        let mut isolation = None;
         loop {
             if self.take_word("read") {
                 if self.take_word("only") {
-                    read_only = true;
+                    read_only = Some(true);
                 } else {
                     self.expect_word("write")?;
-                    read_only = false;
+                    read_only = Some(false);
                 }
             } else if self.take_word("isolation") {
-                self.isolation_level()?;
+                isolation = Some(self.isolation_level()?);
+            } else if self.mysql() && self.take_word("with") {
+                self.expect_word("consistent")?;
+                self.expect_word("snapshot")?;
             } else if self.is_word("deferrable") || self.is_word("not") {
                 return Err(self.not_supported("DEFERRABLE"));
             } else {
@@ -1651,7 +1733,10 @@ impl<'t> Parser<'t> {
             }
             self.take(&TokenKind::Comma);
         }
-        Ok(Statement::Begin { read_only })
+        Ok(Statement::Begin {
+            read_only,
+            isolation,
+        })
     }
 
     fn create(&mut self) -> SqlResult<Statement> {
@@ -1779,6 +1864,9 @@ impl<'t> Parser<'t> {
         if self.postgresql() && self.is_word("partition") && self.is_word_at(1, "of") {
             return self.create_partition_of(name, temporary, if_not_exists);
         }
+        if self.at_create_table_as() {
+            return self.create_table_as(name, temporary.is_some(), if_not_exists, None);
+        }
         self.expect(&TokenKind::LeftParen)?;
         let mut columns = Vec::new();
         let mut primary_key = None;
@@ -1860,6 +1948,23 @@ impl<'t> Parser<'t> {
         } else {
             None
         };
+        if self.mysql() && self.at_mysql_table_query() {
+            let declared = CreateTable {
+                name: name.clone(),
+                temporary,
+                if_not_exists,
+                columns,
+                primary_key,
+                primary_key_name,
+                indexes,
+                constraints,
+                comment,
+                partition_by: None,
+                partition_of: None,
+                sqlite_text: None,
+            };
+            return self.create_table_as(name, temporary.is_some(), if_not_exists, Some(declared));
+        }
         if self.sqlite() {
             self.sqlite_table_finish(&name, &mut columns, &primary_key, &integer_columns)?;
         }
@@ -1869,26 +1974,7 @@ impl<'t> Parser<'t> {
         if self.oracle() {
             self.skip_physical_properties()?;
         }
-        if self.postgresql() && self.is_word("on") && self.is_word_at(1, "commit") {
-            let position = self.position();
-            self.at += 2;
-            let action = if self.take_word("preserve") {
-                self.expect_word("rows")?;
-                crate::ast::OnCommit::PreserveRows
-            } else if self.take_word("delete") {
-                self.expect_word("rows")?;
-                crate::ast::OnCommit::DeleteRows
-            } else {
-                self.expect_word("drop")?;
-                crate::ast::OnCommit::Drop
-            };
-            if temporary.is_none() {
-                return Err(SqlError::new(
-                    SqlState::INVALID_TABLE_DEFINITION,
-                    "ON COMMIT can only be used on temporary tables",
-                )
-                .at(position));
-            }
+        if let Some(action) = self.on_commit_clause(temporary.is_some())? {
             temporary = Some(action);
         }
         if self.sqlserver() && crate::temporary::is_sqlserver_temporary(&name.text) {
@@ -1992,12 +2078,12 @@ impl<'t> Parser<'t> {
 
     fn column_definition(&mut self) -> SqlResult<ColumnDefinition> {
         let name = self.name()?;
-        if self.sqlserver() && self.is_word("as") {
-            return Err(sqlserver::not_supported("Computed columns").at(self.position()));
-        }
+        let untyped =
+            (self.sqlserver() && self.is_word("as")) || (self.oracle() && self.starts_generation());
         let serial = self.serial_type();
         let sql_type = match serial {
             Some(sql_type) => sql_type,
+            None if untyped => SqlType::Text,
             None => self.sql_type()?,
         };
         let mut column = ColumnDefinition {
@@ -2013,8 +2099,16 @@ impl<'t> Parser<'t> {
             unique: None,
             constraints: Vec::new(),
             comment: None,
+            generated: None,
         };
+        if untyped && self.sqlserver() {
+            self.sqlserver_computed_column(&mut column)?;
+        }
         loop {
+            if (self.mysql() || self.oracle()) && self.starts_generation() {
+                self.generation_clause(&mut column, !untyped)?;
+                continue;
+            }
             if self.mysql() && self.mysql_column_option(&mut column)? {
                 continue;
             }
@@ -2056,6 +2150,10 @@ impl<'t> Parser<'t> {
             } else if self.oracle() && self.take_word("collate") {
                 self.oracle_collation()?;
             } else if self.is_word("default") {
+                if column.generated.is_some() {
+                    return Err(generated::both_default_and_generation(&column.name.text)
+                        .at(self.position()));
+                }
                 self.at += 1;
                 let start = self.position();
                 let expr = self.binary_operand()?;
@@ -2129,7 +2227,14 @@ impl<'t> Parser<'t> {
         }
         self.expect_word("as")?;
         if self.peek_kind() == &TokenKind::LeftParen {
-            return Err(self.not_supported("generated columns"));
+            if !always {
+                return Err(SqlError::new(
+                    SqlState::SYNTAX_ERROR,
+                    "for a generated column, GENERATED ALWAYS must be specified",
+                )
+                .at(position));
+            }
+            return self.generation_body(column, true, position);
         }
         self.expect_word("identity")?;
         let options_position = self.position();
@@ -2783,6 +2888,7 @@ impl<'t> Parser<'t> {
             OnDuplicate::Fail
         };
         let mut rollback_on_conflict = false;
+        let mut keeps_changes_on_conflict = false;
         if self.mysql() {
             if !replace && self.take_word("ignore") {
                 on_duplicate = OnDuplicate::Ignore;
@@ -2790,7 +2896,11 @@ impl<'t> Parser<'t> {
             self.take_word("into");
         } else if self.sqlite() {
             if !replace && self.take_word("or") {
-                (on_duplicate, rollback_on_conflict) = self.sqlite_conflict_resolution()?;
+                (
+                    on_duplicate,
+                    rollback_on_conflict,
+                    keeps_changes_on_conflict,
+                ) = self.sqlite_conflict_resolution()?;
             }
             self.expect_word("into")?;
         } else if self.sqlserver() {
@@ -2802,6 +2912,10 @@ impl<'t> Parser<'t> {
         let table = match self.table_name() {
             Ok(name) if self.postgresql() && self.is_word("overriding") => {
                 TableReference::named(name, None)
+            }
+            Ok(name) if self.postgresql() && self.take_word("as") => {
+                let alias = self.name()?.text;
+                TableReference::named(name, Some(alias))
             }
             _ => {
                 self.at = start;
@@ -2894,6 +3008,7 @@ impl<'t> Parser<'t> {
             on_duplicate,
             conflict_target,
             rollback_on_conflict,
+            keeps_changes_on_conflict,
             overriding,
         });
         Ok(sqlserver_functions::with_output_into(
@@ -3402,6 +3517,7 @@ impl<'t> Parser<'t> {
         {
             Some(text.clone())
         } else if self.oracle() && !matches!(expr.kind, ExprKind::Column { .. }) {
+            self.oracle_unaliased_expressions.push(expr.position);
             Some(oracle::label(&self.source_text(first_token)))
         } else if self.sqlserver() && !matches!(expr.kind, ExprKind::Column { .. }) {
             Some(String::new())
@@ -3487,6 +3603,170 @@ impl<'t> Parser<'t> {
             left = self.infix(left, level)?;
         }
         Ok(left)
+    }
+
+    fn row_comparison(
+        &self,
+        left: Expr,
+        operator: BinaryOperator,
+        mut right: Expr,
+    ) -> SqlResult<Expr> {
+        let position = left.position;
+        let left_is_row = crate::row_values::constructor_fields(&left).is_some();
+        let right_is_row = crate::row_values::constructor_fields(&right).is_some();
+        if !(left_is_row || right_is_row) || !crate::row_values::is_row_comparison(operator) {
+            return Ok(Self::binary(left, operator, right));
+        }
+        if self.oracle() && crate::row_values::is_ordering(operator) {
+            return Err(crate::row_values::oracle_ordering_refused(position));
+        }
+        let left = match crate::row_values::into_constructor_fields(left) {
+            Ok(left_fields) => match crate::row_values::into_constructor_fields(right) {
+                Ok(right_fields) => {
+                    if left_fields.len() != right_fields.len() {
+                        return Err(crate::row_values::unequal_entries(
+                            self.dialect,
+                            left_fields.len(),
+                            position,
+                        ));
+                    }
+                    return Ok(crate::row_values::compare_constructors(
+                        left_fields,
+                        operator,
+                        right_fields,
+                        position,
+                    ));
+                }
+                Err(other) => {
+                    right = other;
+                    Self::row(left_fields, position)
+                }
+            },
+            Err(other) => other,
+        };
+        if left_is_row
+            && let ExprKind::Subquery(subquery) = &mut right.kind
+            && matches!(subquery.test, crate::ast::SubqueryTest::Scalar)
+        {
+            subquery.test = crate::ast::SubqueryTest::RowCompare {
+                expr: left,
+                operator,
+            };
+            right.position = position;
+            return Ok(right);
+        }
+        let mut left = left;
+        if right_is_row
+            && let ExprKind::Subquery(subquery) = &mut left.kind
+            && matches!(subquery.test, crate::ast::SubqueryTest::Scalar)
+        {
+            subquery.test = crate::ast::SubqueryTest::RowCompare {
+                expr: right,
+                operator: commuted(operator),
+            };
+            return Ok(left);
+        }
+        Ok(Self::binary(left, operator, right))
+    }
+
+    pub(super) fn on_commit_clause(
+        &mut self,
+        temporary: bool,
+    ) -> SqlResult<Option<crate::ast::OnCommit>> {
+        if !(self.postgresql() && self.is_word("on") && self.is_word_at(1, "commit")) {
+            return Ok(None);
+        }
+        let position = self.position();
+        self.at += 2;
+        let action = if self.take_word("preserve") {
+            self.expect_word("rows")?;
+            crate::ast::OnCommit::PreserveRows
+        } else if self.take_word("delete") {
+            self.expect_word("rows")?;
+            crate::ast::OnCommit::DeleteRows
+        } else {
+            self.expect_word("drop")?;
+            crate::ast::OnCommit::Drop
+        };
+        if !temporary {
+            return Err(SqlError::new(
+                SqlState::INVALID_TABLE_DEFINITION,
+                "ON COMMIT can only be used on temporary tables",
+            )
+            .at(position));
+        }
+        Ok(Some(action))
+    }
+
+    fn row(fields: Vec<Expr>, position: usize) -> Expr {
+        Expr {
+            kind: ExprKind::Function {
+                name: crate::records::ROW_FUNCTION.to_owned(),
+                arguments: fields,
+            },
+            position,
+        }
+    }
+
+    fn is_row_list_membership(&self, expr: &Expr, list: &[Expr]) -> SqlResult<bool> {
+        let Some(fields) = crate::row_values::constructor_fields(expr) else {
+            return Ok(false);
+        };
+        if let Some(scalar) = list
+            .iter()
+            .find(|item| crate::row_values::constructor_fields(item).is_none())
+        {
+            return match crate::row_values::scalar_against_row(self.dialect, scalar, fields) {
+                Some(error) => Err(error),
+                None => Ok(false),
+            };
+        }
+        for item in list {
+            let Some(item_fields) = crate::row_values::constructor_fields(item) else {
+                return Ok(false);
+            };
+            if item_fields.len() != fields.len() {
+                return Err(crate::row_values::unequal_entries(
+                    self.dialect,
+                    fields.len(),
+                    item.position,
+                ));
+            }
+        }
+        Ok(true)
+    }
+
+    fn row_between(
+        &self,
+        expr: Expr,
+        low: Expr,
+        high: Expr,
+        negated: bool,
+        position: usize,
+    ) -> SqlResult<Expr> {
+        let (above, below) = if negated {
+            (BinaryOperator::Less, BinaryOperator::Greater)
+        } else {
+            (BinaryOperator::GreaterOrEqual, BinaryOperator::LessOrEqual)
+        };
+        let low = self.row_comparison(expr.clone(), above, low)?;
+        let high = self.row_comparison(expr, below, high)?;
+        let operands = vec![low, high];
+        let kind = if negated {
+            ExprKind::Or(operands)
+        } else {
+            ExprKind::And(operands)
+        };
+        Ok(Expr { kind, position })
+    }
+
+    fn row_list_membership(expr: Expr, list: Vec<Expr>, position: usize) -> Expr {
+        let fields = crate::row_values::into_constructor_fields(expr).unwrap_or_default();
+        let items = list
+            .into_iter()
+            .filter_map(|item| crate::row_values::into_constructor_fields(item).ok())
+            .collect();
+        crate::row_values::membership(fields, items, position)
     }
 
     fn binary(left: Expr, operator: BinaryOperator, right: Expr) -> Expr {
@@ -3673,7 +3953,7 @@ impl<'t> Parser<'t> {
                 if self.infix_level() == Some(Level::Comparison) {
                     return Err(self.unexpected());
                 }
-                Ok(Self::binary(left, operator, right))
+                self.row_comparison(left, operator, right)
             }
             Level::Pattern => self.pattern(left),
             Level::Other => {
@@ -3806,20 +4086,12 @@ impl<'t> Parser<'t> {
         } else if self.take_word("distinct") {
             self.expect_word("from")?;
             let right = self.expression_above(Level::Comparison)?;
-            ExprKind::IsDistinctFrom {
-                left: Box::new(expr),
-                right: Box::new(right),
-                negated,
-            }
+            return crate::row_values::distinctness(self.dialect, expr, right, negated, position);
         } else if self.postgresql() && self.take_word("json") {
             return Ok(self.is_json_predicate(expr, negated));
         } else if self.sqlite() {
             let right = self.expression_above(Level::Comparison)?;
-            ExprKind::IsDistinctFrom {
-                left: Box::new(expr),
-                right: Box::new(right),
-                negated: !negated,
-            }
+            return crate::row_values::distinctness(self.dialect, expr, right, !negated, position);
         } else {
             return Err(self.unexpected());
         };
@@ -3877,6 +4149,12 @@ impl<'t> Parser<'t> {
             let low = self.expression_above(Level::Other)?;
             self.expect_word("and")?;
             let high = self.expression_above(Level::Other)?;
+            if [&expr, &low, &high]
+                .iter()
+                .all(|side| crate::row_values::constructor_fields(side).is_some())
+            {
+                return self.row_between(expr, low, high, negated, position);
+            }
             ExprKind::Between {
                 expr: Box::new(expr),
                 low: Box::new(low),
@@ -3894,6 +4172,10 @@ impl<'t> Parser<'t> {
                 list.push(self.expression()?);
             }
             self.expect(&TokenKind::RightParen)?;
+            if self.is_row_list_membership(&expr, &list)? {
+                let rows = Self::row_list_membership(expr, list, position);
+                return Ok(negated_if(rows, negated, position));
+            }
             ExprKind::InList {
                 expr: Box::new(expr),
                 list,
@@ -4137,12 +4419,12 @@ impl<'t> Parser<'t> {
             }
             TokenKind::LeftParen => {
                 self.at += 1;
-                if self.is_word("values") {
+                if self.is_word("values") && !self.mysql() {
                     return Err(self.not_supported("a VALUES list in an expression"));
                 }
                 let mut expr = self.expression()?;
                 if self.peek_kind() == &TokenKind::Comma {
-                    if !self.postgresql() {
+                    if self.sqlserver() {
                         return Err(self.not_supported("row constructors"));
                     }
                     let mut fields = vec![expr];
@@ -4157,6 +4439,9 @@ impl<'t> Parser<'t> {
                         },
                         position,
                     };
+                    if !self.postgresql() {
+                        return Ok(row);
+                    }
                     return self.field_selections(row);
                 }
                 self.expect(&TokenKind::RightParen)?;
@@ -4197,7 +4482,10 @@ impl<'t> Parser<'t> {
                 {
                     self.array_constructor()
                 }
-                "row" if self.postgresql() && self.peek_kind_at(1) == &TokenKind::LeftParen => {
+                "row"
+                    if (self.postgresql() || self.mysql())
+                        && self.peek_kind_at(1) == &TokenKind::LeftParen =>
+                {
                     self.at += 2;
                     let mut fields = Vec::new();
                     if !self.take(&TokenKind::RightParen) {
@@ -4543,6 +4831,9 @@ impl<'t> Parser<'t> {
     fn function(&mut self, name: Name) -> SqlResult<Expr> {
         let shown = name.text.clone();
         let expr = self.function_call(name)?;
+        if self.keep_follows() {
+            return self.oracle_keep(expr);
+        }
         self.call_clauses(expr, &shown)
     }
 
@@ -4555,6 +4846,32 @@ impl<'t> Parser<'t> {
         }
         if let Some(expr) = self.sql_json_function(&name)? {
             return Ok(expr);
+        }
+        if (self.postgresql() || self.oracle())
+            && let Some(function) = AggregateFunction::hypothetical_named(&name.text)
+            && self.within_group_follows_arguments()
+        {
+            return self.hypothetical_set_aggregate(&name, function);
+        }
+        if (self.postgresql() || self.oracle())
+            && AggregateFunction::hypothetical_named(&name.text).is_some()
+            && let Some(error) = self.hypothetical_set_aggregate_without_within_group(&name)
+        {
+            return Err(error);
+        }
+        if let Some((function, computed_in_double)) = self.statistical_aggregate(&name.text) {
+            if self.is_word_at(1, "distinct")
+                && !self.statistical_aggregate_takes_distinct(&name.text)
+            {
+                self.at += 1;
+                return Err(self.distinct_refused());
+            }
+            let expr = self.aggregate(name, function)?;
+            return Ok(if computed_in_double {
+                argument_in_double(expr)
+            } else {
+                expr
+            });
         }
         if self.mysql()
             && let Some(expr) = self.mysql_function(&name)?
@@ -4822,6 +5139,98 @@ impl<'t> Parser<'t> {
         })
     }
 
+    fn statistical_aggregate(&self, name: &str) -> Option<(AggregateFunction, bool)> {
+        let function = match (self.dialect, name) {
+            (Dialect::PostgreSql, "stddev") => AggregateFunction::Stddev,
+            (Dialect::PostgreSql, "variance") => AggregateFunction::Variance,
+            (Dialect::Oracle, "stddev") => AggregateFunction::OracleStddev,
+            (Dialect::Oracle, "variance") => AggregateFunction::OracleVariance,
+            (Dialect::PostgreSql | Dialect::Oracle | Dialect::MySql, "stddev_samp")
+            | (Dialect::SqlServer, "stdev") => AggregateFunction::StddevSamp,
+            (Dialect::PostgreSql | Dialect::Oracle, "stddev_pop")
+            | (Dialect::MySql, "std" | "stddev" | "stddev_pop")
+            | (Dialect::SqlServer, "stdevp") => AggregateFunction::StddevPop,
+            (Dialect::PostgreSql | Dialect::Oracle | Dialect::MySql, "var_samp")
+            | (Dialect::SqlServer, "var") => AggregateFunction::VarSamp,
+            (Dialect::PostgreSql | Dialect::Oracle, "var_pop")
+            | (Dialect::MySql, "variance" | "var_pop")
+            | (Dialect::SqlServer, "varp") => AggregateFunction::VarPop,
+            _ => return None,
+        };
+        Some((
+            function,
+            matches!(self.dialect, Dialect::MySql | Dialect::SqlServer),
+        ))
+    }
+
+    fn statistical_aggregate_takes_distinct(&self, name: &str) -> bool {
+        match self.dialect {
+            Dialect::MySql => false,
+            Dialect::Oracle => matches!(name, "stddev" | "variance"),
+            _ => true,
+        }
+    }
+
+    fn distinct_refused(&self) -> SqlError {
+        if self.oracle() {
+            return SqlError::new(
+                SqlState::SYNTAX_ERROR,
+                "DISTINCT option not allowed for this function",
+            )
+            .with_oracle_code(30482)
+            .at(self.position());
+        }
+        self.unexpected()
+    }
+
+    fn within_group_follows_arguments(&self) -> bool {
+        self.after_arguments().is_some_and(|after| {
+            self.is_word_at(after, "within") && self.is_word_at(after + 1, "group")
+        })
+    }
+
+    fn after_arguments(&self) -> Option<usize> {
+        if self.peek_kind() != &TokenKind::LeftParen {
+            return None;
+        }
+        let mut depth = 0usize;
+        let mut ahead = 0usize;
+        while self.at + ahead < self.tokens.len() {
+            match self.peek_kind_at(ahead) {
+                TokenKind::LeftParen => depth += 1,
+                TokenKind::RightParen => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(ahead + 1);
+                    }
+                }
+                TokenKind::End => return None,
+                _ => {}
+            }
+            ahead += 1;
+        }
+        None
+    }
+
+    fn hypothetical_set_aggregate_without_within_group(&self, name: &Name) -> Option<SqlError> {
+        let after = self.after_arguments()?;
+        if after <= 2 || self.is_word_at(after, "over") {
+            return None;
+        }
+        Some(if self.oracle() {
+            SqlError::syntax("missing WITHIN keyword", name.position).with_oracle_code(2000)
+        } else {
+            SqlError::new(
+                SqlState::WRONG_OBJECT_TYPE,
+                format!(
+                    "WITHIN GROUP is required for ordered-set aggregate {}",
+                    name.text
+                ),
+            )
+            .at(name.position)
+        })
+    }
+
     fn aggregate_order(&mut self, argument: Expr) -> SqlResult<Expr> {
         if !self.take_word("order") {
             return Ok(argument);
@@ -4970,6 +5379,26 @@ fn is_clause_word(word: &str) -> bool {
             | "similar"
             | "escape"
     )
+}
+
+fn negated_if(expr: Expr, negated: bool, position: usize) -> Expr {
+    if !negated {
+        return expr;
+    }
+    Expr {
+        kind: ExprKind::Unary(UnaryOperator::Not, Box::new(expr)),
+        position,
+    }
+}
+
+fn commuted(operator: BinaryOperator) -> BinaryOperator {
+    match operator {
+        BinaryOperator::Less => BinaryOperator::Greater,
+        BinaryOperator::LessOrEqual => BinaryOperator::GreaterOrEqual,
+        BinaryOperator::Greater => BinaryOperator::Less,
+        BinaryOperator::GreaterOrEqual => BinaryOperator::LessOrEqual,
+        other => other,
+    }
 }
 
 fn truth(expr: Expr, test: TruthTest, negated: bool) -> ExprKind {

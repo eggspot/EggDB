@@ -255,7 +255,7 @@ fn a_constraint_violation_ends_its_statement_but_not_the_batch() {
 }
 
 #[test]
-fn transactions_nest_report_their_changes_and_an_error_that_rolls_one_back_ends_the_batch() {
+fn transactions_nest_report_their_changes_and_a_failed_statement_undoes_only_itself() {
     let server = TestServer::start(8);
     let mut client = Client::login(server.address);
     client.batch("CREATE TABLE t (id INT PRIMARY KEY)");
@@ -295,18 +295,27 @@ fn transactions_nest_report_their_changes_and_an_error_that_rolls_one_back_ends_
             .iter()
             .any(|token| matches!(token, Token::EnvChange { kind: 9, .. }))
     );
-    let rolled_back = client.batch(
+    let undone = client.batch(
         "BEGIN TRAN\nINSERT INTO t VALUES (4)\nINSERT INTO t VALUES (5), (1)\nINSERT INTO t VALUES (6)\nCOMMIT",
     );
-    assert_eq!(errors(&rolled_back)[0].0, 2627);
+    assert_eq!(errors(&undone)[0].0, 2627);
+    assert_eq!(errors(&undone).len(), 1, "{undone:?}");
     assert!(
-        rolled_back
+        undone
+            .iter()
+            .any(|token| matches!(token, Token::EnvChange { kind: 9, .. }))
+    );
+    assert!(
+        !undone
             .iter()
             .any(|token| matches!(token, Token::EnvChange { kind: 10, .. }))
     );
-    assert_eq!(errors(&rolled_back).len(), 1, "{rolled_back:?}");
-    let count = client.batch("SELECT count(*) FROM t");
-    assert_eq!(rows(&count), vec![vec![Some("3".to_owned())]]);
+    let ids = client.batch("SELECT id FROM t ORDER BY id");
+    let kept: Vec<Vec<Option<String>>> = [1, 2, 3, 4, 6]
+        .iter()
+        .map(|id| vec![Some(id.to_string())])
+        .collect();
+    assert_eq!(rows(&ids), kept);
     assert_eq!(
         rows(&client.batch("BEGIN SELECT 1 END")),
         vec![vec![Some("1".to_owned())]]

@@ -1,8 +1,14 @@
+mod by_query;
+mod multi;
+
 use crate::json_out::{Out, escaped, written};
 use crate::query::{Stats, numbers, parse, score, term_buckets};
+use crate::script::{Context, Operation, Script};
 use eggdb_http::{Request, Response};
 use eggdb_keyspace::{KeysRead, KeysWrite, Keyspace};
+use eggdb_platform::connection_limits::MemoryBudget;
 use eggdb_sql::json::{Json, JsonSyntaxError, Node, parse_document};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const INDEX_RECORD: u8 = 1;
@@ -17,6 +23,7 @@ pub struct Api<'k> {
     user: String,
     password_sha256: [u8; 32],
     next_id: AtomicU64,
+    memory_budget: Arc<MemoryBudget>,
 }
 
 impl std::fmt::Debug for Api<'_> {
@@ -62,11 +69,9 @@ pub fn over_memory_budget() -> Response {
     )
 }
 
-fn error(status: u16, kind: &str, reason: &str) -> Response {
+fn error_cause(kind: &str, reason: &str) -> String {
     let mut out = Out::default();
     out.begin_object()
-        .key("error")
-        .begin_object()
         .key("root_cause")
         .begin_array()
         .begin_object()
@@ -80,11 +85,41 @@ fn error(status: u16, kind: &str, reason: &str) -> Response {
         .string(kind)
         .key("reason")
         .string(reason)
-        .end_object()
-        .key("status")
-        .integer(u64::from(status))
         .end_object();
-    json(status, out.finish())
+    out.finish()
+}
+
+fn error(status: u16, kind: &str, reason: &str) -> Response {
+    json(
+        status,
+        format!(
+            "{{\"error\":{},\"status\":{status}}}",
+            error_cause(kind, reason)
+        ),
+    )
+}
+
+fn validation(problems: &[String]) -> Response {
+    let listed: String = problems
+        .iter()
+        .enumerate()
+        .map(|(at, problem)| format!("{}: {problem};", at + 1))
+        .collect();
+    error(
+        400,
+        "action_request_validation_exception",
+        &format!("Validation Failed: {listed}"),
+    )
+}
+
+fn member_of(node: &Node, name: &str) -> Option<Node> {
+    match &node.value {
+        Json::Object(members) => members
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone()),
+        _ => None,
+    }
 }
 
 fn json(status: u16, body: String) -> Response {
@@ -222,7 +257,16 @@ impl<'k> Api<'k> {
             user: user.to_owned(),
             password_sha256,
             next_id: AtomicU64::new(seed),
+            memory_budget: Arc::new(MemoryBudget::default()),
         }
+    }
+
+    /// The same API holding what `_mget`, `_msearch`, `_update_by_query` and
+    /// `_delete_by_query` gather against `budget`, the server's one connection memory budget
+    /// (D307), instead of a budget of its own.
+    pub fn with_memory_budget(mut self, budget: Arc<MemoryBudget>) -> Self {
+        self.memory_budget = budget;
+        self
     }
 
     fn authorized(&self, request: &Request) -> bool {
@@ -295,6 +339,8 @@ impl<'k> Api<'k> {
             ("POST", ["_bulk"]) => self.bulk(None, request),
             ("GET" | "POST", ["_search"]) => self.search(None, request, false),
             ("GET" | "POST", ["_count"]) => self.search(None, request, true),
+            ("GET" | "POST", ["_mget"]) => self.mget(None, request),
+            ("GET" | "POST", ["_msearch"]) => self.msearch(None, request),
             ("POST", ["_refresh"]) => Ok(refreshed()),
             (_, [index, ..]) if !valid_index(index) => {
                 Ok(error(400, "invalid_index_name_exception", &format!("Invalid index name [{index}]")))
@@ -305,8 +351,16 @@ impl<'k> Api<'k> {
             ("GET", [index]) => self.get_index(index),
             ("POST", [_, "_refresh"]) => Ok(refreshed()),
             ("POST", [index, "_bulk"]) => self.bulk(Some(index), request),
-            ("GET" | "POST", [index, "_search"]) => self.search(Some(index), request, false),
-            ("GET" | "POST", [index, "_count"]) => self.search(Some(index), request, true),
+            ("GET" | "POST", [index, "_search"]) => {
+                self.search(Some(std::slice::from_ref(index)), request, false)
+            }
+            ("GET" | "POST", [index, "_count"]) => {
+                self.search(Some(std::slice::from_ref(index)), request, true)
+            }
+            ("GET" | "POST", [index, "_mget"]) => self.mget(Some(index), request),
+            ("GET" | "POST", [index, "_msearch"]) => self.msearch(Some(index), request),
+            ("POST", [index, "_update_by_query"]) => self.update_by_query(index, request),
+            ("POST", [index, "_delete_by_query"]) => self.delete_by_query(index, request),
             ("POST", [index, "_doc"]) => {
                 let id = self.new_id();
                 self.index_document(index, &id, request, false)
@@ -544,6 +598,19 @@ impl<'k> Api<'k> {
     fn update_document(&self, index: &str, id: &str, request: &Request) -> Answer {
         let body = String::from_utf8_lossy(&request.body).into_owned();
         let parsed = parse_document(&body)?;
+        if let Some(script) = member_of(&parsed, "script") {
+            if member_of(&parsed, "doc").is_some() {
+                return Ok(error(
+                    400,
+                    "action_request_validation_exception",
+                    "Validation Failed: 1: can't provide both script and doc;",
+                ));
+            }
+            return match Script::from_node(&script) {
+                Ok(script) => self.update_document_with_script(index, id, &script),
+                Err(reason) => Ok(script_error(&format!("compile error: {reason}"))),
+            };
+        }
         let Some(Json::Object(changes)) = parsed.value.clone().into_object().and_then(|members| {
             members
                 .into_iter()
@@ -581,6 +648,42 @@ impl<'k> Api<'k> {
         })?;
         Ok(match outcome {
             Some(version) => json(200, write_result(index, id, version, "updated")),
+            None => error(
+                404,
+                "document_missing_exception",
+                &format!("[{id}]: document missing"),
+            ),
+        })
+    }
+
+    fn update_document_with_script(&self, index: &str, id: &str, script: &Script) -> Answer {
+        let mut failure = None;
+        let outcome = write(self.keyspace, |keys| {
+            let key = document_key(index, id);
+            let Some((version, source)) = keys.get(&key)?.as_deref().and_then(unstored) else {
+                return Ok(None);
+            };
+            match scripted(script, index, id, version, &source) {
+                Ok((Operation::Index, changed)) => {
+                    keys.put(&key, &stored(version + 1, &changed))?;
+                    Ok(Some((version + 1, "updated")))
+                }
+                Ok((Operation::Noop, _)) => Ok(Some((version, "noop"))),
+                Ok((Operation::Delete, _)) => {
+                    keys.delete(&key)?;
+                    Ok(Some((version + 1, "deleted")))
+                }
+                Err(reason) => {
+                    failure = Some(reason);
+                    Err("the script failed".to_owned())
+                }
+            }
+        });
+        if let Some(reason) = failure {
+            return Ok(script_error(&format!("runtime error: {reason}")));
+        }
+        Ok(match outcome? {
+            Some((version, result)) => json(200, write_result(index, id, version, result)),
             None => error(
                 404,
                 "document_missing_exception",
@@ -674,7 +777,7 @@ impl<'k> Api<'k> {
         ))
     }
 
-    fn search(&self, index: Option<&str>, request: &Request, count_only: bool) -> Answer {
+    fn search(&self, indices: Option<&[&str]>, request: &Request, count_only: bool) -> Answer {
         let body_text = String::from_utf8_lossy(&request.body).into_owned();
         let body = if body_text.trim().is_empty() {
             None
@@ -723,26 +826,34 @@ impl<'k> Api<'k> {
                 "Result window is too large, from + size must be less than or equal to: [10000]",
             ));
         }
+        let ignore_unavailable =
+            query_flag(request, "ignore_unavailable").as_deref() == Some("true");
         let gathered = read(self.keyspace, |keys| {
-            let indices = match index {
-                Some(index) => {
-                    if keys.get(&index_key(index))?.is_none() {
-                        return Ok(None);
+            let searched = match indices {
+                Some(named) => {
+                    let mut searched = Vec::new();
+                    for index in named {
+                        if keys.get(&index_key(index))?.is_some() {
+                            searched.push((*index).to_owned());
+                        } else if !ignore_unavailable {
+                            return Ok(Err((*index).to_owned()));
+                        }
                     }
-                    vec![index.to_owned()]
+                    searched
                 }
                 None => indices_of(keys)?,
             };
             let mut all = Vec::new();
-            for index in indices {
+            for index in searched {
                 for (id, _, source) in documents_of(keys, &index)? {
                     all.push((index.clone(), id, source));
                 }
             }
-            Ok(Some(all))
+            Ok(Ok(all))
         })?;
-        let Some(gathered) = gathered else {
-            return Ok(missing_index(index.unwrap_or_default()));
+        let gathered = match gathered {
+            Ok(gathered) => gathered,
+            Err(missing) => return Ok(missing_index(&missing)),
         };
         let documents: Vec<(String, Node)> = gathered
             .iter()
@@ -972,6 +1083,34 @@ fn aggregate(out: &mut Out, aggregations: &Node, matched: &[&Node]) {
         }
     }
     out.end_object();
+}
+
+fn script_error(reason: &str) -> Response {
+    error(400, "script_exception", reason)
+}
+
+fn scripted(
+    script: &Script,
+    index: &str,
+    id: &str,
+    version: u64,
+    source: &str,
+) -> Result<(Operation, String), String> {
+    let parsed = parse_document(source).map_err(|error| error.message)?;
+    let mut context = Context {
+        source: parsed.value,
+        operation: Operation::Index,
+        index,
+        id,
+        version,
+    };
+    script.run(&mut context)?;
+    let changed = written(&Node {
+        value: context.source,
+        start: 0,
+        end: 0,
+    });
+    Ok((context.operation, changed))
 }
 
 fn refreshed() -> Response {

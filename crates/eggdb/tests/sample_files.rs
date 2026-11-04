@@ -261,7 +261,7 @@ fn a_v0_2_0_file_takes_collections_and_keeps_its_default_key_space() {
         db.collection("added").get("user:1").unwrap(),
         Some(b"in a collection".to_vec())
     );
-    assert_eq!(db.check().unwrap().entries, expected.len() as u64 + 3);
+    assert_eq!(db.check().unwrap().entries, expected.len() as u64 + 4);
     assert_eq!(db.check().unwrap().leaked_pages, 0);
     db.close().unwrap();
 }
@@ -301,8 +301,39 @@ fn a_v0_2_0_file_drops_a_collection_in_steps_across_a_reopen_and_renames_one() {
         db.collection("renamed").get("k").unwrap(),
         Some(b"v".to_vec())
     );
-    assert_eq!(db.check().unwrap().entries, expected.len() as u64 + 3);
+    assert_eq!(db.check().unwrap().entries, expected.len() as u64 + 4);
     assert_eq!(db.check().unwrap().leaked_pages, 0);
+    db.close().unwrap();
+}
+
+#[test]
+fn a_v0_2_0_file_takes_a_kept_collection_count_and_then_carries_its_feature_flag() {
+    let dir = TempDirectory::new("collection-counts");
+    let path = dir.copy_of(CHECKPOINTED_SAMPLE);
+    let features = |path: &Path| {
+        PageFile::open(&OsFileSystem::new(), path, Access::ReadOnly)
+            .unwrap()
+            .superblock()
+            .features
+    };
+    assert_eq!(features(path.as_path()).read_only_compatible, 0);
+    let db = Database::open(&path).unwrap();
+    assert_eq!(db.collection_stats().unwrap(), Vec::new());
+    db.create_collection("counted").unwrap();
+    db.collection("counted").put("k", "value").unwrap();
+    db.close().unwrap();
+    assert_eq!(
+        features(path.as_path()).read_only_compatible,
+        eggdb_storage::Features::COLLECTION_COUNTS
+    );
+    let db = Database::open(&path).unwrap();
+    let stats = db.collection_stats().unwrap();
+    assert_eq!(stats.len(), 1);
+    assert_eq!(
+        (stats[0].entries, stats[0].key_bytes, stats[0].value_bytes),
+        (1, 1, 5)
+    );
+    assert_holds(&db, &v0_2_0_entries());
     db.close().unwrap();
 }
 

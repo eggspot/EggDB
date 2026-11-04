@@ -242,14 +242,40 @@ fn number(value: &Value) -> Option<f64> {
     }
 }
 
+/// Every metric the tables hold, with its table's tag columns: a table with a `value` column
+/// is a metric of its own name, and each other column that is neither text nor `time` is the
+/// metric `<table>_<column>`.
+pub(crate) fn metrics(
+    tables: &BTreeMap<String, Vec<(String, String)>>,
+) -> Vec<(String, Vec<String>)> {
+    let mut found = Vec::new();
+    for (table, columns) in tables {
+        let tags: Vec<String> = columns
+            .iter()
+            .filter(|(column, data_type)| data_type == "text" && column != "time")
+            .map(|(column, _)| column.clone())
+            .collect();
+        for (column, data_type) in columns {
+            if column == "value" {
+                found.push((table.clone(), tags.clone()));
+            } else if column != "time" && data_type != "text" {
+                found.push((format!("{table}_{column}"), tags.clone()));
+            }
+        }
+    }
+    found
+}
+
 /// The samples of metric `name` from `start_ms` (exclusive) to `end_ms` (inclusive), as series
-/// split by their tag values. A metric is a table with a `value` column, or `<table>_<field>`.
+/// split by their tag values, reading at most `most_rows` rows. A metric is a table with a
+/// `value` column, or `<table>_<field>`.
 pub(crate) fn read(
     session: &mut Session<'_>,
     tables: &BTreeMap<String, Vec<(String, String)>>,
     name: &str,
     start_ms: i64,
     end_ms: i64,
+    most_rows: usize,
 ) -> Result<Vec<Series>, String> {
     let located = match tables.get(name) {
         Some(columns) if columns.iter().any(|(column, _)| column == "value") => {
@@ -279,10 +305,11 @@ pub(crate) fn read(
         .chain(std::iter::once(identifier(&field)))
         .chain(tags.iter().map(|tag| identifier(tag)))
         .collect();
+    let most_rows = most_rows.min(usize::try_from(i64::MAX).unwrap_or(usize::MAX));
     let result = rows(
         session,
         &format!(
-            "SELECT {} FROM {} WHERE \"time\" > {} AND \"time\" <= {} AND {} IS NOT NULL ORDER BY \"time\"",
+            "SELECT {} FROM {} WHERE \"time\" > {} AND \"time\" <= {} AND {} IS NOT NULL ORDER BY \"time\" LIMIT {most_rows}",
             selected.join(", "),
             table(&table_name),
             timestamp_literal(start_ms.saturating_mul(1000)),

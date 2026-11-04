@@ -154,7 +154,12 @@ afterwards. Oversized length fields are refused without allocating them. `EGGDB_
 `EGGDB_FUZZ_SEED` run longer campaigns. The message codecs, the SCRAM exchange (RFC 7677's
 example and malformed variants) and the cryptography's published vectors have unit tests of
 their own, and `crates/eggdb-pgwire/tests/protocol.rs` drives every protocol flow with a client
-written in the test.
+written in the test. The HTTP server has one too, in `crates/eggdb-http/src/keep_alive_tests.rs`
+(`hostile_requests_return_errors_and_never_panic`): 20,000 mutations of pipelined, chunked and
+`Content-Length` requests read back to back on one connection, each returning a request or an
+error, never a panic, with the memory budget back at zero; the same file sends request
+smuggling attempts (both lengths, two codings, folded or bare-LF lines, bad chunk sizes) over
+real sockets and requires a `400` or `501` and a closed connection (D325).
 
 The limits that keep another program from locking users out or exhausting memory (D254)
 have tests of their own on each SQL protocol, in `tests/limits.rs` of `eggdb-pgwire`,
@@ -170,7 +175,7 @@ a message or a cursor), CQL (`Overloaded`, `0x1001`, for a frame or a result) an
 (`SERVER_ERROR out of memory`, the connection goes on), and so do the HTTP listeners
 (Elasticsearch, S3, DynamoDB and `eggdb-http`'s plain `503`), Kafka, NATS, STOMP, MQTT, AMQP 0-9-1
 and 1.0, Bolt and RESP pub/sub's queued messages, each checking that the budget returns to zero
-(D307); `crates/eggdb/tests/serve.rs` checks
+(D307), and `eggdb-http`'s chunked uploads are counted as their chunks arrive (`oversized_chunks_are_refused_and_the_budget_returns_to_zero`, D325); `crates/eggdb/tests/serve.rs` checks
 `--max-connection-memory` through the real binary. The login slots and the budget have unit tests
 in `eggdb-platform`'s `connection_limits`. The T-SQL lexer, parser, functions and batches have a seeded mutator in
 `crates/eggdb-sql/src/tests.rs` (`hostile_tsql_input_returns_errors_and_never_panics`, 35,000
@@ -680,6 +685,29 @@ CI's `unix-vms` job runs the platform layer's, the storage engine's and the embe
 natively in FreeBSD, NetBSD and OmniOS (illumos) virtual machines, with the pinned toolchain.
 The `cross` job checks that the rest builds for those targets and for Solaris. OpenBSD and
 DragonFly have no prebuilt Rust standard library (tier 3), so neither job covers them yet.
+
+## The simulated network (D72, D314)
+
+`eggdb-platform`'s `SimNetwork` runs TCP between simulated hosts on a simulated clock, so
+networked code is tested for outages that take minutes or hours of real time in milliseconds,
+and the same seed gives the same schedule. Its tests (`sim_net.rs`) cover a connection that
+survives a cut shorter than `SimNetwork::RETRANSMISSION_TIMEOUT` (924.6 s, Linux's default) and
+one that fails with `TimedOut` across a longer cut, its peer finding it reset once the cut heals
+and it sends; one-way cuts, where one direction's bytes arrive and the other's are held, and
+connects across them time out; per-host latency, and per-host bandwidth that spaces bytes out
+by their size on the clock; and `NotConnected` from a reset end's peer address and shutdown.
+`tests/net_contract.rs` checks the last against the operating systems' sockets on Linux and
+macOS too, and `os_net.rs` checks that a reap already satisfied by operations that finished at
+once makes no readiness call, while operations left waiting are still polled at least every
+17th reap.
+
+UDP sockets (D315) have the same twin: `SimDatagramSocket` carries datagrams across the
+simulated network's latency, links and cuts, loses those sent across a cut, drops what overflows
+a socket's `SimNetwork::DATAGRAM_BUFFER_BYTES`, and moves the clock to a datagram's arrival or to
+the end of a receive's wait (`sim_net/datagram.rs`). `tests/net_contract.rs` runs the datagram
+contract (whole datagrams both ways, a timed-out receive, a taken port, oversized datagrams, and
+a datagram longer than the buffer cut or refused) against the operating system's sockets and the
+simulation alike.
 
 ## Not tested yet
 - `Off` after a power loss: the format promises nothing there, so the sweep only checks that

@@ -8,9 +8,10 @@ use super::{
 };
 use crate::canvas::Rect;
 use crate::connection::{
-    ConnectFailure, FailureField, REDACTED, certificate_verification_failure, ssl_mode,
-    unsupported_protocol_failure, url_failure,
+    ConnectFailure, ConnectTarget, FailureField, REDACTED, certificate_verification_failure,
+    resp_tls_failure, ssl_mode, unsupported_protocol_failure, url_failure,
 };
+use crate::resp_client::RespOptions;
 
 /// The user `eggdb serve` logs in as when the User input is empty.
 pub const DEFAULT_SERVER_USER: &str = "eggdb";
@@ -525,6 +526,63 @@ impl ServerForm {
     /// the port is not a number, with the certificate's when the URL asks for a check the
     /// client cannot make yet, and with the protocol's when the client cannot speak it yet.
     pub fn connect_options(&self) -> Result<ConnectOptions, ConnectFailure> {
+        self.check_typed_url()?;
+        if self.protocol != Protocol::PostgreSql {
+            return Err(unsupported_protocol_failure(self.protocol.label()));
+        }
+        let (host, port) = self.host_and_port()?;
+        let user = match self.user.value().trim() {
+            "" => DEFAULT_SERVER_USER,
+            user => user,
+        };
+        let database = match self.database.value().trim() {
+            "" => user,
+            database => database,
+        };
+        let password = self.password.value();
+        Ok(ConnectOptions {
+            host,
+            port,
+            user: user.to_owned(),
+            database: database.to_owned(),
+            password: (!password.is_empty()).then(|| password.to_owned()),
+            ssl_mode: ssl_mode(self.use_tls),
+            ssl_root_cert: None,
+            replication: false,
+        })
+    }
+
+    /// Where `Connect` goes: the `Redis (RESP)` protocol (a `redis://` URL) as
+    /// [`ServerForm::resp_options`] reads the fields, every other protocol as
+    /// [`ServerForm::connect_options`] does.
+    pub fn connect_target(&self) -> Result<ConnectTarget, ConnectFailure> {
+        if self.protocol == Protocol::Redis {
+            return self.resp_options().map(ConnectTarget::Resp);
+        }
+        self.connect_options().map(ConnectTarget::Server)
+    }
+
+    /// The fields as a RESP connection's options: host `localhost` and port 6379 when left
+    /// empty, the User input as the ACL user only when typed, `AUTH` only with a password.
+    /// Fails as [`ServerForm::connect_options`] does for a typed URL that does not parse or a
+    /// bad port, and with [`resp_tls_failure`]'s lines while `Use TLS` is checked.
+    pub fn resp_options(&self) -> Result<RespOptions, ConnectFailure> {
+        self.check_typed_url()?;
+        if self.use_tls {
+            return Err(resp_tls_failure());
+        }
+        let (host, port) = self.host_and_port()?;
+        let user = self.user.value().trim();
+        let password = self.password.value();
+        Ok(RespOptions {
+            host,
+            port,
+            user: (!user.is_empty()).then(|| user.to_owned()),
+            password: (!password.is_empty()).then(|| password.to_owned()),
+        })
+    }
+
+    fn check_typed_url(&self) -> Result<(), ConnectFailure> {
         let typed = self.url.value().trim();
         let read = parse_server_url(typed);
         if !typed.is_empty()
@@ -538,9 +596,10 @@ impl ServerForm {
         {
             return Err(certificate_verification_failure());
         }
-        if self.protocol != Protocol::PostgreSql {
-            return Err(unsupported_protocol_failure(self.protocol.label()));
-        }
+        Ok(())
+    }
+
+    fn host_and_port(&self) -> Result<(String, u16), ConnectFailure> {
         let host = self.host.value().trim();
         if host.chars().any(char::is_whitespace) {
             return Err(url_failure());
@@ -551,25 +610,8 @@ impl ServerForm {
         } else {
             valid_port(port).ok_or_else(url_failure)?
         };
-        let user = match self.user.value().trim() {
-            "" => DEFAULT_SERVER_USER,
-            user => user,
-        };
-        let database = match self.database.value().trim() {
-            "" => user,
-            database => database,
-        };
-        let password = self.password.value();
-        Ok(ConnectOptions {
-            host: if host.is_empty() { DEFAULT_HOST } else { host }.to_owned(),
-            port,
-            user: user.to_owned(),
-            database: database.to_owned(),
-            password: (!password.is_empty()).then(|| password.to_owned()),
-            ssl_mode: ssl_mode(self.use_tls),
-            ssl_root_cert: None,
-            replication: false,
-        })
+        let host = if host.is_empty() { DEFAULT_HOST } else { host };
+        Ok((host.to_owned(), port))
     }
 
     pub(super) fn field_mut(&mut self, focus: Focus) -> Option<&mut TextField> {
@@ -750,6 +792,41 @@ mod tests {
     fn typed(form: &mut ServerForm, text: &str) {
         form.url.set(text);
         form.url_edited();
+    }
+
+    #[test]
+    fn a_redis_url_connects_over_resp_and_refuses_tls_it_cannot_speak() {
+        let mut form = ServerForm::new();
+        typed(&mut form, "redis://default:s3cret@cache:6380?tls=false");
+        let Ok(ConnectTarget::Resp(options)) = form.connect_target() else {
+            panic!("a redis:// URL is a RESP connection");
+        };
+        assert_eq!((options.host.as_str(), options.port), ("cache", 6380));
+        assert_eq!(options.user.as_deref(), Some("default"));
+        assert_eq!(options.password.as_deref(), Some("s3cret"));
+        let mut plain = ServerForm::new();
+        typed(&mut plain, "redis://localhost?tls=false");
+        let Ok(ConnectTarget::Resp(options)) = plain.connect_target() else {
+            panic!("a redis:// URL without a user is a RESP connection");
+        };
+        assert_eq!(
+            (options.user, options.password, options.port),
+            (None, None, 6379)
+        );
+        let mut encrypted = ServerForm::new();
+        typed(&mut encrypted, "redis://cache");
+        let failure = encrypted.connect_target().unwrap_err();
+        assert_eq!(
+            failure.error_line(),
+            "Error: the client cannot connect over RESP with TLS yet"
+        );
+        assert_eq!(failure.field, FailureField::Host);
+        let mut postgres = ServerForm::new();
+        typed(&mut postgres, "postgresql://ada@db/shop");
+        assert!(matches!(
+            postgres.connect_target(),
+            Ok(ConnectTarget::Server(_))
+        ));
     }
 
     #[test]

@@ -13,6 +13,9 @@ mod defined;
 mod dynamic_keys;
 #[cfg(test)]
 mod dynamic_keys_tests;
+mod generated;
+#[cfg(test)]
+mod generated_tests;
 mod packages;
 mod partitions;
 mod routines;
@@ -20,9 +23,11 @@ mod triggers;
 
 pub(crate) use catalog::*;
 pub(crate) use defined::*;
+pub(crate) use generated::{GeneratedColumn, generated_without_column};
 pub(crate) use packages::{decode_package, encode_package, package_key, packages_prefix};
 pub(crate) use partitions::{
     decode_partitioning, encode_partitioning, partition_key, partitions_prefix,
+    written_before_index_links,
 };
 pub(crate) use routines::{decode_routines, encode_routines, routine_key, routines_prefix};
 pub(crate) use triggers::{decode_triggers, encode_triggers, trigger_key, triggers_prefix};
@@ -44,7 +49,8 @@ const IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION: u8 = 9;
 const DEFINED_TYPES_FORMAT_VERSION: u8 = 10;
 const BASE_TYPES_FORMAT_VERSION: u8 = 11;
 const AFFINITY_FORMAT_VERSION: u8 = 13;
-const NEWEST_TABLE_FORMAT_VERSION: u8 = AFFINITY_FORMAT_VERSION;
+const GENERATED_COLUMNS_FORMAT_VERSION: u8 = 14;
+const NEWEST_TABLE_FORMAT_VERSION: u8 = GENERATED_COLUMNS_FORMAT_VERSION;
 pub(crate) const BASE_TYPES_VIEW_FORMAT_VERSION: u8 = 12;
 const _: () = assert!(
     NEWEST_TABLE_FORMAT_VERSION != VIEW_FORMAT_VERSION
@@ -650,6 +656,7 @@ pub(crate) struct TableDefinition {
     pub(crate) default_dialects: Vec<DefaultDialect>,
     pub(crate) domains: Vec<ColumnDomain>,
     pub(crate) constraint_statuses: Vec<ConstraintStatus>,
+    pub(crate) generated: Vec<GeneratedColumn>,
 }
 
 fn dialect_code(dialect: crate::Dialect) -> u8 {
@@ -1028,7 +1035,9 @@ impl TableDefinition {
     }
 
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let version = if self.needs_affinity_version() {
+        let version = if !self.generated.is_empty() {
+            GENERATED_COLUMNS_FORMAT_VERSION
+        } else if self.needs_affinity_version() {
             AFFINITY_FORMAT_VERSION
         } else if self.uses_base_types() {
             BASE_TYPES_FORMAT_VERSION
@@ -1113,6 +1122,9 @@ impl TableDefinition {
         if version >= DEFINED_TYPES_FORMAT_VERSION {
             self.encode_defined(&mut out);
         }
+        if version >= GENERATED_COLUMNS_FORMAT_VERSION {
+            generated::encode_generated(&self.generated, &mut out);
+        }
         out
     }
 
@@ -1160,7 +1172,8 @@ impl TableDefinition {
             IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION
             | DEFINED_TYPES_FORMAT_VERSION
             | BASE_TYPES_FORMAT_VERSION
-            | AFFINITY_FORMAT_VERSION => true,
+            | AFFINITY_FORMAT_VERSION
+            | GENERATED_COLUMNS_FORMAT_VERSION => true,
             _ => !qualified,
         };
         if !name_fits_version || !crate::schemas::is_well_formed(name) {
@@ -1170,7 +1183,8 @@ impl TableDefinition {
         let options_allowed = version >= IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION;
         let defined_allowed = version >= DEFINED_TYPES_FORMAT_VERSION;
         let base_types_allowed = version >= BASE_TYPES_FORMAT_VERSION;
-        let affinities_allowed = version == AFFINITY_FORMAT_VERSION;
+        let affinities_allowed = version >= AFFINITY_FORMAT_VERSION;
+        let generated_allowed = version >= GENERATED_COLUMNS_FORMAT_VERSION;
         let mut identity_seed = None;
         let mut default_dialects = Vec::new();
         let new_types_allowed = version >= TYPES_FORMAT_VERSION;
@@ -1268,7 +1282,8 @@ impl TableDefinition {
             | IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION
             | DEFINED_TYPES_FORMAT_VERSION
             | BASE_TYPES_FORMAT_VERSION
-            | AFFINITY_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), true)?,
+            | AFFINITY_FORMAT_VERSION
+            | GENERATED_COLUMNS_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), true)?,
             _ => Vec::new(),
         };
         let constraints = if version >= CONSTRAINTS_FORMAT_VERSION {
@@ -1285,6 +1300,11 @@ impl TableDefinition {
             decode_defined(&mut reader)?
         } else {
             (Vec::new(), Vec::new())
+        };
+        let generated = if generated_allowed {
+            generated::decode_generated(&mut reader, &columns)?
+        } else {
+            Vec::new()
         };
         reader.finish()?;
         let newest_type_needed = if more_types_allowed {
@@ -1344,6 +1364,7 @@ impl TableDefinition {
             default_dialects,
             domains,
             constraint_statuses,
+            generated,
         };
         if version == CONSTRAINTS_FORMAT_VERSION && !table.has_constraints() {
             return Err(reader.damaged());
@@ -1357,14 +1378,17 @@ impl TableDefinition {
             return Err(reader.damaged());
         }
         if version >= DEFINED_TYPES_FORMAT_VERSION
-            && (!table.needs_defined_version() || !table.defined_parts_fit())
+            && ((!generated_allowed && !table.needs_defined_version())
+                || !table.defined_parts_fit())
         {
             return Err(reader.damaged());
         }
         if version == BASE_TYPES_FORMAT_VERSION && !table.uses_base_types() {
             return Err(reader.damaged());
         }
-        if affinities_allowed != table.needs_affinity_version() {
+        if (version == AFFINITY_FORMAT_VERSION || !affinities_allowed)
+            && affinities_allowed != table.needs_affinity_version()
+        {
             return Err(reader.damaged());
         }
         Ok(table)

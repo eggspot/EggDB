@@ -1,7 +1,8 @@
 use super::Parser;
 use crate::ast::{
-    CreateTable, Name, NamedPartition, NamedPartitionBound, OnCommit, PartitionBoundSpec,
-    PartitionBoundValue, PartitionBy, PartitionOf, PartitionStrategy, Statement,
+    AlterAction, AlterTable, CreateTable, ExprKind, Name, NamedPartition, NamedPartitionBound,
+    OnCommit, PartitionBoundSpec, PartitionBoundValue, PartitionBy, PartitionKeyPart, PartitionOf,
+    PartitionStrategy, Statement,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
@@ -87,10 +88,10 @@ impl Parser<'_> {
         if !self.postgresql() {
             self.take_word("columns");
         }
-        let columns = self.partition_key_columns()?;
+        let key = self.partition_key()?;
         let mut partition_by = PartitionBy {
             strategy,
-            columns,
+            key,
             partitions: Vec::new(),
             hash_partitions: None,
             position,
@@ -122,11 +123,11 @@ impl Parser<'_> {
         Ok(partition_by)
     }
 
-    fn partition_key_columns(&mut self) -> SqlResult<Vec<Name>> {
+    fn partition_key(&mut self) -> SqlResult<Vec<PartitionKeyPart>> {
         self.expect(&TokenKind::LeftParen)?;
-        let mut columns = Vec::new();
+        let mut parts = Vec::new();
         loop {
-            if columns.len() >= MAX_PARTITION_KEY_COLUMNS {
+            if parts.len() >= MAX_PARTITION_KEY_COLUMNS {
                 return Err(SqlError::new(
                     SqlState::TOO_MANY_COLUMNS,
                     format!(
@@ -135,17 +136,97 @@ impl Parser<'_> {
                 )
                 .at(self.position()));
             }
-            let column = self.name()?;
-            if self.peek_kind() == &TokenKind::LeftParen || !self.at_partition_key_end() {
-                return Err(self.not_supported("expressions in a partition key"));
-            }
-            columns.push(column);
+            parts.push(self.partition_key_part()?);
             if !self.take(&TokenKind::Comma) {
                 break;
             }
         }
         self.expect(&TokenKind::RightParen)?;
-        Ok(columns)
+        Ok(parts)
+    }
+
+    fn partition_key_part(&mut self) -> SqlResult<PartitionKeyPart> {
+        let first_token = self.at;
+        let position = self.position();
+        let takes_expressions = self.postgresql() || self.mysql();
+        if self.peek_kind() == &TokenKind::LeftParen {
+            if !takes_expressions {
+                return Err(self.not_supported("expressions in a partition key"));
+            }
+            self.at += 1;
+            let start = self.position();
+            let expr = self.expression()?;
+            let end = self.previous_end();
+            self.expect(&TokenKind::RightParen)?;
+            let text = self.text_without_column_qualifiers(&expr, start, end);
+            return Ok(key_part(expr, text, position));
+        }
+        let column = self.name()?;
+        if self.peek_kind() != &TokenKind::LeftParen && self.at_partition_key_end() {
+            return Ok(PartitionKeyPart::Column(column));
+        }
+        if !takes_expressions {
+            return Err(self.not_supported("expressions in a partition key"));
+        }
+        self.at = first_token;
+        let expr = if self.postgresql() {
+            let call = self.primary()?;
+            if !self.at_partition_key_end() {
+                return Err(self.unexpected());
+            }
+            call
+        } else {
+            self.expression()?
+        };
+        let end = self.previous_end();
+        let text = self.text_without_column_qualifiers(&expr, position, end);
+        Ok(key_part(expr, text, position))
+    }
+
+    pub(super) fn text_without_column_qualifiers(
+        &self,
+        expr: &crate::ast::Expr,
+        start: usize,
+        end: usize,
+    ) -> String {
+        let mut qualified = Vec::new();
+        qualified_column_starts(expr, &mut qualified);
+        qualified.sort_unstable();
+        qualified.dedup();
+        let mut out = String::with_capacity(end.saturating_sub(start));
+        let mut at = start;
+        for begin in qualified {
+            if begin < at || begin >= end {
+                continue;
+            }
+            let Some(column_start) = self.column_name_start(begin, end) else {
+                continue;
+            };
+            out.push_str(self.text.get(at..begin).unwrap_or(""));
+            at = column_start;
+        }
+        out.push_str(self.text.get(at..end).unwrap_or(""));
+        out
+    }
+
+    fn column_name_start(&self, begin: usize, end: usize) -> Option<usize> {
+        let is_name = |at: usize| {
+            matches!(
+                self.tokens.get(at).map(|token| &token.kind),
+                Some(TokenKind::Word(_) | TokenKind::QuotedIdentifier(_))
+            )
+        };
+        let first = self.tokens.iter().position(|token| token.start == begin)?;
+        let mut last = first;
+        for _ in 0..2 {
+            if self.tokens.get(last + 1).map(|token| &token.kind) == Some(&TokenKind::Dot)
+                && is_name(last + 2)
+            {
+                last += 2;
+            }
+        }
+        let column = self.tokens.get(last)?;
+        (last > first && is_name(first) && column.end <= end).then_some(column.start)
     }
 
     fn at_partition_key_end(&self) -> bool {
@@ -200,6 +281,25 @@ impl Parser<'_> {
                 return Ok(());
             }
         }
+    }
+
+    pub(super) fn alter_index(&mut self) -> SqlResult<Statement> {
+        self.expect_word("index")?;
+        let if_exists = self.is_word("if") && self.is_word_at(1, "exists");
+        if if_exists {
+            self.at += 2;
+        }
+        let name = self.table_name()?;
+        if !(self.is_word("attach") && self.is_word_at(1, "partition")) {
+            return Err(self.not_supported("ALTER INDEX other than ATTACH PARTITION"));
+        }
+        self.at += 2;
+        let partition_index = self.table_name()?;
+        Ok(Statement::AlterTable(AlterTable {
+            name,
+            if_exists,
+            actions: vec![AlterAction::AttachIndex(partition_index)],
+        }))
     }
 
     fn oracle_row_movement(&mut self) -> SqlResult<()> {
@@ -264,6 +364,36 @@ impl Parser<'_> {
         }
         self.at += 1;
         Ok(number)
+    }
+}
+
+fn qualified_column_starts(expr: &crate::ast::Expr, found: &mut Vec<usize>) {
+    if let ExprKind::Column {
+        qualifier: Some(_), ..
+    } = &expr.kind
+    {
+        found.push(expr.position);
+    }
+    for child in crate::eval::children(expr) {
+        qualified_column_starts(child, found);
+    }
+}
+
+fn key_part(expr: crate::ast::Expr, text: String, position: usize) -> PartitionKeyPart {
+    if let ExprKind::Column {
+        qualifier: None,
+        name,
+    } = &expr.kind
+    {
+        return PartitionKeyPart::Column(Name {
+            text: name.clone(),
+            position,
+        });
+    }
+    PartitionKeyPart::Expression {
+        expr,
+        text,
+        position,
     }
 }
 

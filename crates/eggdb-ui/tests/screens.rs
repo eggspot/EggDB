@@ -298,6 +298,23 @@ impl Source for MapSource {
         Ok("09:14:05Z".to_owned())
     }
 
+    fn rename_collection(&mut self, name: &str, new_name: &str) -> Result<String, SourceError> {
+        if self.read_only {
+            return Err(SourceError::new(
+                ErrorKind::ReadOnly,
+                "the database was opened read-only",
+            ));
+        }
+        let Some(keys) = self.collections.remove(name) else {
+            return Err(SourceError::new(
+                ErrorKind::CollectionNotFound,
+                format!("there is no collection named \"{name}\""),
+            ));
+        };
+        self.collections.insert(new_name.to_owned(), keys);
+        Ok("09:14:06Z".to_owned())
+    }
+
     fn start_check(&mut self) -> Result<(), SourceError> {
         self.check_started = true;
         Ok(())
@@ -1798,7 +1815,10 @@ fn scenario_33_the_picker_opens_without_collections_and_changes_nothing() {
         screen.contains("app.db has no collections yet. Press a to"),
         "{screen}"
     );
-    assert!(screen.contains("Enter show   a add   Esc back"), "{screen}");
+    assert!(
+        screen.contains("Enter show   a add   e rename   Esc back"),
+        "{screen}"
+    );
     s.press(&["Enter"]);
     assert_eq!(s.screen(), before);
 }
@@ -1864,6 +1884,79 @@ fn scenario_35_the_picker_adds_a_collection_and_checks_the_name() {
     let mut r = Scenario::with(80, 24, Capabilities::FULL, read_only);
     r.press(&["C", "a"]);
     assert!(!r.screen().contains("Add collection: "), "{}", r.screen());
+}
+
+#[test]
+fn scenario_40_the_picker_renames_a_collection_and_follows_the_shown_one() {
+    let mut s = Scenario::with(80, 24, Capabilities::FULL, with_collections());
+    s.press(&["C", "End", "Enter"]);
+    assert!(s.row(1).starts_with(" Keys in users"), "{}", s.row(1));
+    s.press(&["C", "e"]);
+    assert!(
+        s.screen().contains("Rename users to: users"),
+        "{}",
+        s.screen()
+    );
+    assert!(
+        s.screen().contains("Enter rename   Esc back"),
+        "{}",
+        s.screen()
+    );
+    for _ in 0.."users".len() {
+        s.press(&["Backspace"]);
+    }
+    s.type_str("cache");
+    s.press(&["Enter"]);
+    assert_eq!(s.row(22), " Collection cache already exists");
+    for _ in 0.."cache".len() {
+        s.press(&["Backspace"]);
+    }
+    s.type_str("two words");
+    s.press(&["Enter"]);
+    assert_eq!(
+        s.row(22),
+        " Collection names are 1 to 128 bytes with no spaces or control characters"
+    );
+    for _ in 0.."two words".len() {
+        s.press(&["Backspace"]);
+    }
+    s.type_str("people");
+    s.press(&["Enter"]);
+    assert_eq!(
+        s.row(22),
+        " Renamed collection users to people at 09:14:06Z"
+    );
+    assert!(s.screen().contains("> people"), "{}", s.screen());
+    assert!(!s.screen().contains("Rename users"), "{}", s.screen());
+    s.press(&["Esc"]);
+    assert!(s.row(1).starts_with(" Keys in people"), "{}", s.row(1));
+    assert!(s.row(2).starts_with("> s:1"), "{}", s.row(2));
+    let source = s.ui.source();
+    assert!(source.collections.contains_key("people"));
+    assert!(!source.collections.contains_key("users"));
+}
+
+#[test]
+fn scenario_41_the_default_key_space_and_a_read_only_file_keep_their_names() {
+    let mut s = Scenario::with(80, 24, Capabilities::FULL, with_collections());
+    s.press(&["C", "e"]);
+    assert_eq!(s.row(22), " The default key space cannot be renamed");
+    assert!(!s.screen().contains("Rename "), "{}", s.screen());
+    s.press(&["Down", "e"]);
+    assert!(
+        s.screen().contains("Rename cache to: cache"),
+        "{}",
+        s.screen()
+    );
+    s.press(&["Enter"]);
+    assert!(!s.screen().contains("Rename cache"), "{}", s.screen());
+    assert!(s.ui.source().collections.contains_key("cache"));
+
+    let mut read_only = with_collections();
+    read_only.read_only = true;
+    let mut r = Scenario::with(80, 24, Capabilities::FULL, read_only);
+    r.press(&["C", "End", "e"]);
+    assert!(!r.screen().contains("Rename users to:"), "{}", r.screen());
 }
 
 #[test]

@@ -595,16 +595,17 @@ impl<'a> Session<'a> {
         let stats = db.stats().map_err(|error| {
             operation_failure(&error, &format!("cannot read the stats of {}", self.file))
         })?;
-        let collections = if self.request.collection_stats {
-            Some(db.collection_stats().map_err(|error| {
-                operation_failure(
-                    &error,
-                    &format!("cannot count the collections of {}", self.file),
-                )
-            })?)
+        let counted = if self.request.collection_stats {
+            let context = format!("cannot count the collections of {}", self.file);
+            Some(self.counted_collections(&db, &context)?)
         } else {
             None
         };
+        drop(db);
+        if let Some(counted) = &counted {
+            self.keep_collection_counts(counted);
+        }
+        let collections = counted.map(|counted| counted.stats);
         match self.format {
             Format::Json => self.out.text(&reports::stats_json(
                 &self.file_display,

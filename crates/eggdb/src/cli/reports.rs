@@ -215,7 +215,7 @@ fn collections_text(out: &mut Output<'_>, collections: &[CollectionStats]) {
     }
 }
 
-fn collections_json(collections: &[CollectionStats]) -> String {
+pub(crate) fn collections_json(collections: &[CollectionStats]) -> String {
     let items: Vec<String> = collections
         .iter()
         .map(|collection| {

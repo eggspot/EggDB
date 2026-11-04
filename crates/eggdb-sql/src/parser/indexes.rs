@@ -70,9 +70,7 @@ impl Parser<'_> {
         }
         self.expect_word("on")?;
         let postgresql = !self.mysql() && !self.sqlite() && !self.oracle();
-        if postgresql {
-            self.take_word("only");
-        }
+        let only = postgresql && self.take_word("only");
         let table = self.table_name()?;
         let method = if postgresql {
             self.index_method()?
@@ -109,6 +107,7 @@ impl Parser<'_> {
                 sort_options: columns.sort_options,
             },
             table,
+            only,
             if_not_exists,
             sqlite_text: self.sqlite().then(|| {
                 let kind = if unique { "UNIQUE INDEX" } else { "INDEX" };
@@ -395,6 +394,9 @@ impl Parser<'_> {
             if self.oracle() {
                 return self.oracle_explain_plan();
             }
+            if self.mysql() {
+                return self.mysql_explain();
+            }
             if self.postgresql() && (self.take_word("analyze") || self.take_word("analyse")) {
                 analyze = true;
             } else if self.postgresql() && self.take(&TokenKind::LeftParen) {
@@ -419,6 +421,53 @@ impl Parser<'_> {
             style,
             analyze,
             buffers,
+            statement: Box::new(statement),
+            plan_table: None,
+        }))
+    }
+
+    fn mysql_not_supported(&self, what: &str) -> SqlError {
+        SqlError::not_supported(what).at(self.position())
+    }
+
+    fn mysql_explain(&mut self) -> SqlResult<Statement> {
+        let analyze = self.take_word("analyze");
+        let mut style = if analyze {
+            ExplainStyle::Tree
+        } else {
+            ExplainStyle::Plan
+        };
+        if self.take_word("format") {
+            if !self.take_operator("=") {
+                return Err(self.unexpected());
+            }
+            style = if self.take_word("tree") {
+                ExplainStyle::Tree
+            } else if self.is_word("traditional") && analyze {
+                return Err(self.mysql_not_supported("EXPLAIN ANALYZE with TRADITIONAL format"));
+            } else if self.take_word("traditional") {
+                ExplainStyle::Plan
+            } else {
+                return Err(
+                    self.mysql_not_supported("EXPLAIN formats other than TREE and TRADITIONAL")
+                );
+            };
+        }
+        if style == ExplainStyle::Tree && !self.is_word("select") {
+            return Err(self.mysql_not_supported(
+                "EXPLAIN ANALYZE and EXPLAIN FORMAT=TREE of a statement other than SELECT",
+            ));
+        }
+        if !(self.is_word("select") || self.is_word("update") || self.is_word("delete")) {
+            return Err(self.mysql_not_supported(
+                "EXPLAIN of a statement other than SELECT, UPDATE or DELETE",
+            ));
+        }
+        let statement = self.statement_body()?;
+        Ok(Statement::Explain(Explain {
+            style,
+            analyze,
+            buffers: false,
             statement: Box::new(statement),
             plan_table: None,
         }))

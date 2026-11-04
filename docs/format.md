@@ -126,6 +126,7 @@ other than 0, compression and encryption. The bits defined so far:
 | Set | Bit | Name | Set by |
 |-----|----:|------|--------|
 | read-only compatible | 0 | `EXPIRING_KEYS` | the first commit that gives a key a time to live (D140). A release without expiring keys would show expired keys and could write a key without removing its deadline, so it may only read the file. The bit stays set. |
+| read-only compatible | 1 | `COLLECTION_COUNTS` | the first commit that writes a collection's kept count (D320), which every new collection has. A release without kept counts would write a collection's keys without changing its count, so it may only read the file. The bit stays set. |
 | incompatible | 0 | `COMPRESSED_VALUES` | the first commit that writes a value compressed on overflow pages of layout 2 (D171). A release without them would refuse those pages as damaged, so it refuses the file at open instead. The bit stays set. |
 | incompatible | 1 | `ENCRYPTED_PAGES` | the data pages are encrypted with AES-256-CTR under a key derived from the user's (D187); the file opens only with that key, checked against `page_key_check` |
 
@@ -443,13 +444,24 @@ Recovery is analysis and redo from `checkpoint_lsn`, with no undo pass:
   | prefix, `0x04`, stored key | the deadline of a key with a time to live (D140): a version byte (1) and the deadline in microseconds since the Unix epoch (8 bytes, big-endian) |
   | prefix, `0x05`, deadline (8 bytes, big-endian), stored key | empty: the index of keys by deadline, which commits sweep in order |
   | prefix, `0x06`, number (4 bytes, big-endian) | a collection being dropped in steps (D292): a version byte (1) and its last name (UTF-8), kept until every `0x03` key of that number is gone |
+  | prefix, `0x07`, number (4 bytes, big-endian) | the collection's kept count (D320): a version byte (1), then its `0x03` keys, their bytes without the ten-byte prefix, and their values' bytes (8 bytes each, big-endian) |
 
   Numbers start at 1 and are never reused, so a key of a dropped collection can never be read
   as a key of a later one. A drop removes the name record and writes the `0x06` mark in one
   commit, then removes the collection's keys in commits of up to 512 and the mark with the last
   of them; every commit removes up to 32 keys of a marked number, so a crash between steps only
   delays the rest. A release before D292 ignores the mark and leaves the keys, which no read
-  ever sees. The *stored key* of `0x04` and `0x05` is the key as the tree holds it:
+  ever sees. The `0x07` count is written with the collection and changed by the commit of every
+  write to its `0x03` keys, so it always equals what a scan of the stored keys (expired ones
+  included, until the sweep removes them) would count; a drop removes it in its first commit.
+  A collection made before D320 has none, and is counted once from its keys, then kept.
+  `Database::check` (`eggdb check`) reads every kept count and compares it with a scan of the
+  collection's stored keys in the same snapshot: a count that is damaged or differs is `Corrupt`,
+  naming the collection and both figures. The first
+  commit that writes a count sets the read-only-compatible feature `COLLECTION_COUNTS`, so a
+  release before D320, which would change keys without their count, only reads the file. A count
+  record with a version above 1 is refused as written by a newer release; one of any other
+  length than 25 bytes is damage. The *stored key* of `0x04` and `0x05` is the key as the tree holds it:
   a default key space key as it is, a collection's key with its `0x03` prefix and number. A key
   is expired once the transaction's time, the clock or the last commit's stamp, whichever is
   later, has reached its deadline; the two records and the key are written and removed
@@ -685,7 +697,12 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
   (`1` range, `2` list, `3` hash) and its key's column names, and, when a partition, its parent's
   internal name and bound (`1` range: two value lists; `2` list: one; `3` hash: modulus and
   remainder as varints; `4` default). Each bound value is a byte (`0` the value as text, `1`
-  NULL, `2` MINVALUE, `3` MAXVALUE) and, for `0`, the text. Rows stay in each partition's own
+  NULL, `2` MINVALUE, `3` MAXVALUE) and, for `0`, the text. Record version 2 (D316) is written
+  only when a key has an expression or a partition has indexes attached to its parent's: each
+  key part starts with a kind byte (`0` a column name; `1` an expression, then the dialect byte
+  of the table definitions and the expression's text), and a partition's bound is followed by a
+  count and that many pairs of varints, the partition's index id and the parent index id it is
+  attached to (no id repeated on either side). Rows stay in each partition's own
   table; a partitioned table holds none. Table-definition version 11 (D259) is written only for
   a table with a `citext` or `hstore` column (defined-type kind `5`, a built-in base type, with
   OID 9000 or 9002), whose values in rows are tags `27` (`citext`, its text) and `28` (`hstore`,
@@ -696,7 +713,14 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
   `NUMERIC` or `REAL` affinity (type tag `25` followed by the affinity's code) and for a table
   whose primary key or any index covers a dynamic column of any affinity; a `BLOB` or untyped
   column that no key covers keeps tag `24` in version 10 byte for byte (D153), and an older
-  release refuses version 13 by name. Keys and
+  release refuses version 13 by name. Table-definition version 14 (D322) is written only for a
+  table with generated columns: every section of version 13, then a varint count (at least 1)
+  and, per generated column in increasing position, a varint position, a kind byte (`0`
+  virtual, `1` stored), a dialect byte and the expression's text (varint length, UTF-8). Every
+  other table keeps its version and bytes; an empty list, a position out of range or out of
+  order, a generated column with a default or auto-increment, an unknown kind or dialect, or an
+  empty expression is damage, and an older release refuses version 14 by name. For the version
+  13 columns, keys and
   index entries of these columns use a class-ordered encoding (numbers by exact value, then
   text, then blobs, NULL last), and rows keep the four storage-class tags. A SQLite
   table's `CREATE TABLE` text as written is one record per table (catalog prefix, `0x15`, the

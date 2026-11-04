@@ -1193,3 +1193,226 @@ SELECT 'David_' LIKE 'David|_' ESCAPE '|', 'David!' LIKE 'David|_' ESCAPE '|'
 'David_' LIKE 'David|_' ESCAPE '|'|'David!' LIKE 'David|_' ESCAPE '|'
 1|0
 SELECT 1
+
+chapter "InnoDB Error Handling": a duplicate-key error rolls back the SQL statement
+ok
+CREATE TABLE rb317 (id INT PRIMARY KEY)
+
+ok
+START TRANSACTION
+
+ok
+INSERT INTO rb317 VALUES (1)
+
+error 23000 1062
+INSERT INTO rb317 VALUES (1)
+
+error 23000 1062
+INSERT INTO rb317 VALUES (3), (4), (1)
+
+ok
+INSERT INTO rb317 VALUES (2)
+
+ok
+COMMIT
+
+rows
+SELECT id FROM rb317 ORDER BY id
+----
+id
+1
+2
+SELECT 2
+
+ok
+DROP TABLE rb317
+
+chapter "15.3.1 START TRANSACTION, COMMIT, and ROLLBACK Statements", "15.3.7 SET TRANSACTION Statement": READ ONLY transactions refuse writes with error 1792
+ok
+CREATE TABLE ro318 (id INT PRIMARY KEY)
+
+ok
+START TRANSACTION READ ONLY
+
+error 25006 1792
+INSERT INTO ro318 VALUES (1)
+
+ok
+COMMIT
+
+ok
+SET TRANSACTION READ ONLY
+
+error 25006 1792
+INSERT INTO ro318 VALUES (1)
+
+ok
+INSERT INTO ro318 VALUES (2)
+
+ok
+START TRANSACTION
+
+error 25001 1568
+SET TRANSACTION READ ONLY
+
+ok
+COMMIT
+
+rows
+SELECT id FROM ro318
+----
+id
+2
+SELECT 1
+
+ok
+DROP TABLE ro318
+
+chapter "Aggregate Function Descriptions": STD, STDDEV, STDDEV_POP, STDDEV_SAMP, VARIANCE, VAR_POP and VAR_SAMP return DOUBLE, and STD, STDDEV and VARIANCE are the population forms
+ok
+CREATE TABLE stats321 (g INT, v INT)
+
+ok
+INSERT INTO stats321 VALUES (1, 1), (1, 3), (1, 5), (1, 7), (2, 0), (2, 2), (2, 4), (3, 6)
+
+rows
+SELECT STD(v) AS s, STDDEV(v) AS sd, STDDEV_POP(v) AS sp, VARIANCE(v) AS va, VAR_POP(v) AS vp FROM stats321 WHERE g = 1
+----
+s|sd|sp|va|vp
+2.23606797749979|2.23606797749979|2.23606797749979|5|5
+SELECT 1
+
+rows
+SELECT g, STDDEV_SAMP(v) AS ss, VAR_SAMP(v) AS vs, STD(v) AS s FROM stats321 WHERE g > 1 GROUP BY g ORDER BY g
+----
+g|ss|vs|s
+2|2|4|1.632993161855452
+3|NULL|NULL|0
+SELECT 2
+
+error 42000 1064
+SELECT STD(DISTINCT v) FROM stats321
+
+rows
+SELECT v, VAR_POP(v) OVER (ORDER BY v) AS vp FROM stats321 WHERE g = 1 ORDER BY v
+----
+v|vp
+1|0
+3|1
+5|2.6666666666666665
+7|5
+SELECT 4
+
+chapter "Sorting Rows", "Working with NULL Values": NULL values come first for ORDER BY ... ASC and last for ORDER BY ... DESC, with or without an index
+ok
+CREATE TABLE nulls321 (id INT PRIMARY KEY, v INT)
+
+ok
+INSERT INTO nulls321 VALUES (1, 20), (2, NULL), (3, 10)
+
+rows
+SELECT id FROM nulls321 ORDER BY v
+----
+id
+2
+3
+1
+SELECT 3
+
+rows
+SELECT id FROM nulls321 ORDER BY v DESC
+----
+id
+1
+3
+2
+SELECT 3
+
+ok
+CREATE INDEX nulls321_v ON nulls321 (v)
+
+rows
+SELECT id FROM nulls321 ORDER BY v LIMIT 2
+----
+id
+2
+3
+SELECT 2
+
+rows
+SELECT id FROM nulls321 ORDER BY v DESC LIMIT 2
+----
+id
+1
+3
+SELECT 2
+
+ok
+DROP TABLE nulls321
+
+ok
+DROP TABLE stats321
+
+
+chapter "CREATE TABLE and Generated Columns": a VIRTUAL or STORED generated column is computed from the other columns, DEFAULT is the only value it takes (3105 otherwise), and SHOW COLUMNS names its kind
+ok
+CREATE TABLE gen322 (a INT, b INT, total INT AS (a + b), doubled INT GENERATED ALWAYS AS (a * 2) STORED)
+
+ok
+INSERT INTO gen322 (a, b) VALUES (1, 2), (3, 4)
+
+ok
+INSERT INTO gen322 VALUES (5, 6, DEFAULT, DEFAULT)
+
+rows
+SELECT a, total, doubled FROM gen322 ORDER BY a
+----
+a|total|doubled
+1|3|2
+3|7|6
+5|11|10
+SELECT 3
+
+error HY000 3105
+INSERT INTO gen322 (a, b, total) VALUES (1, 1, 2)
+
+error HY000 3105
+UPDATE gen322 SET doubled = 1
+
+ok
+DROP TABLE gen322
+
+
+chapter "CREATE TABLE ... SELECT" and VALUES: a table made from a query keeps NOT NULL, VALUES ROW is a statement and a derived table
+ok
+CREATE TABLE ctas323 (a INT NOT NULL, b VARCHAR(5))
+
+ok
+INSERT INTO ctas323 VALUES (1, 'x'), (2, NULL)
+
+ok
+CREATE TABLE ctas323_copy SELECT a, b FROM ctas323
+
+error 23000
+INSERT INTO ctas323_copy VALUES (NULL, 'y')
+
+rows
+VALUES ROW(1, 2), ROW(3, 4)
+----
+column_0|column_1
+1|2
+3|4
+SELECT 2
+
+rows
+SELECT a FROM ctas323 WHERE (a, b) = (1, 'x')
+----
+a
+1
+SELECT 1
+
+ok
+DROP TABLE ctas323_copy
+
+ok
+DROP TABLE ctas323

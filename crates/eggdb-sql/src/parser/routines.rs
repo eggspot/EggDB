@@ -1,10 +1,11 @@
 use super::Parser;
 use crate::ast::{
     AlterRoutine, AlterRoutineAction, CallRoutine, CreateRoutine, DoBlock, DropRoutine,
-    RoutineTarget, Statement,
+    RoutineSettingChange, RoutineTarget, Statement,
 };
+use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
-use crate::lexer::TokenKind;
+use crate::lexer::{TokenKind, tokenize_in};
 use crate::routines::{
     MAX_PARAMETERS, ParameterMode, ReturnType, RoutineDefinition, RoutineKind, RoutineLanguage,
     RoutineParameter, RoutineReturns, Volatility,
@@ -18,6 +19,75 @@ const PARAMETER_MODES: [(&str, ParameterMode); 4] = [
     ("inout", ParameterMode::InOut),
     ("variadic", ParameterMode::Variadic),
 ];
+
+pub(super) struct SettingSpan {
+    name: String,
+    start: usize,
+    end: usize,
+}
+
+fn quoted_setting_value(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn kept_settings(changes: &[RoutineSettingChange]) -> Vec<(String, String)> {
+    let mut kept: Vec<(String, String)> = Vec::new();
+    for change in changes {
+        match change {
+            RoutineSettingChange::Set { name, value } => {
+                kept.retain(|(earlier, _)| earlier != name);
+                kept.push((name.clone(), value.clone()));
+            }
+            RoutineSettingChange::Reset(name) => kept.retain(|(earlier, _)| earlier != name),
+            RoutineSettingChange::ResetAll => kept.clear(),
+        }
+    }
+    kept
+}
+
+fn replaces_setting(changes: &[RoutineSettingChange], name: &str) -> bool {
+    changes.iter().any(|change| match change {
+        RoutineSettingChange::Set { name: changed, .. } | RoutineSettingChange::Reset(changed) => {
+            changed == name
+        }
+        RoutineSettingChange::ResetAll => true,
+    })
+}
+
+/// The stored `CREATE FUNCTION` or `CREATE PROCEDURE` text `text` with its `SET` clauses
+/// changed as `ALTER FUNCTION ... SET | RESET` asks: the clauses of every parameter `changes`
+/// names are removed, and one `SET name TO 'value'` per parameter it sets is appended.
+pub(crate) fn with_routine_settings_changed(
+    text: &str,
+    dialect: Dialect,
+    changes: &[RoutineSettingChange],
+) -> SqlResult<String> {
+    let tokens = tokenize_in(text, dialect)?;
+    let mut parser = Parser::new(text, &tokens).in_dialect(dialect);
+    parser.routine_setting_spans = Some(Vec::new());
+    parser.statement()?;
+    let spans = parser.routine_setting_spans.take().unwrap_or_default();
+    let mut written = String::with_capacity(text.len() + 32);
+    let mut copied = 0;
+    for span in spans
+        .iter()
+        .filter(|span| replaces_setting(changes, &span.name))
+    {
+        let Some(before) = text.get(copied..span.start) else {
+            continue;
+        };
+        written.push_str(before.trim_end());
+        copied = span.end;
+    }
+    written.push_str(text.get(copied..).unwrap_or_default());
+    for (name, value) in kept_settings(changes) {
+        written.push_str(" SET ");
+        written.push_str(&name);
+        written.push_str(" TO ");
+        written.push_str(&quoted_setting_value(&value));
+    }
+    Ok(written)
+}
 
 fn too_many_parameters(position: usize) -> SqlError {
     SqlError::new(
@@ -464,8 +534,18 @@ impl<'t> Parser<'t> {
                 }
             } else if self.take_word("support") {
                 self.table_name()?;
-            } else if self.take_word("set") {
+            } else if self.is_word("set") {
+                let start = self.peek().start;
+                self.at += 1;
                 let (setting, current) = self.routine_setting()?;
+                let end = self.previous_end();
+                if let Some(spans) = &mut self.routine_setting_spans {
+                    spans.push(SettingSpan {
+                        name: crate::settings::Settings::name_of(&setting.0),
+                        start,
+                        end,
+                    });
+                }
                 attributes.settings.push(setting);
                 attributes.current_values.extend(current);
             } else if self.take_word("as") {
@@ -515,6 +595,28 @@ impl<'t> Parser<'t> {
         }
         let value = self.setting_value()?.unwrap_or_default();
         Ok(((name, value), None))
+    }
+
+    fn routine_setting_change(&mut self) -> SqlResult<RoutineSettingChange> {
+        let position = self.position();
+        let given = self.parameter_name()?;
+        let name = crate::settings::Settings::name_of(&given);
+        if self.is_word("from") && self.is_word_at(1, "current") {
+            self.at += 2;
+            let value = match self.settings {
+                Some(settings) => settings.get(&given),
+                None => crate::settings::Settings::default().get(&given),
+            }
+            .map_err(|error| error.at(position))?;
+            return Ok(RoutineSettingChange::Set { name, value });
+        }
+        if !(self.take_word("to") || self.take_operator("=")) {
+            return Err(self.unexpected());
+        }
+        Ok(match self.setting_value()? {
+            Some(value) => RoutineSettingChange::Set { name, value },
+            None => RoutineSettingChange::Reset(name),
+        })
     }
 
     fn routine_source(&mut self) -> SqlResult<(String, Option<usize>)> {
@@ -715,10 +817,27 @@ impl<'t> Parser<'t> {
         } else if self.is_word("depends") || (self.is_word("no") && self.is_word_at(1, "depends")) {
             return Err(self.not_supported("ALTER ... DEPENDS ON EXTENSION"));
         } else {
+            let mut settings = Vec::new();
             while !matches!(self.peek_kind(), TokenKind::Semicolon | TokenKind::End) {
-                self.at += 1;
+                if self.postgresql() && self.take_word("set") {
+                    settings.push(self.routine_setting_change()?);
+                } else if self.postgresql() && self.take_word("reset") {
+                    settings.push(if self.take_word("all") {
+                        RoutineSettingChange::ResetAll
+                    } else {
+                        RoutineSettingChange::Reset(crate::settings::Settings::name_of(
+                            &self.parameter_name()?,
+                        ))
+                    });
+                } else {
+                    self.at += 1;
+                }
             }
-            AlterRoutineAction::Accepted
+            if settings.is_empty() {
+                AlterRoutineAction::Accepted
+            } else {
+                AlterRoutineAction::Settings(settings)
+            }
         };
         Ok(Statement::AlterRoutine(AlterRoutine {
             kind,

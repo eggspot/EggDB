@@ -1,6 +1,6 @@
 [package]
 name = "eggdb-esrest"
-description = "EggDB's REST API compatible with Elasticsearch and OpenSearch, from their public API documentation: indices, documents, bulk loads and search with the core query DSL, over EggDB's key-value transactions and full-text search."
+description = "EggDB's REST API compatible with Elasticsearch and OpenSearch, from their public API documentation: indices, documents, bulk loads and search with the core query DSL, multi-get, multi-search, update and delete by query, over EggDB's key-value transactions and full-text search."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,5 +13,6 @@ workspace = true
 eggdb-crypto = { path = "../eggdb-crypto" }
 eggdb-http = { path = "../eggdb-http" }
 eggdb-keyspace = { path = "../eggdb-keyspace" }
+eggdb-platform = { path = "../eggdb-platform" }
 eggdb-search = { path = "../eggdb-search" }
 eggdb-sql = { path = "../eggdb-sql" }

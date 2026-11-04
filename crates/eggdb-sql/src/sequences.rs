@@ -35,6 +35,7 @@ struct StatementSequences {
     all_loaded: bool,
     wanted: bool,
     changed: Vec<String>,
+    first_changed_by: &'static str,
     before: HashMap<String, (i64, bool)>,
     session: SessionSequences,
     memory: WorkMemory,
@@ -53,6 +54,7 @@ pub(crate) fn implicit_sequence_name(table: &str, column: &str) -> String {
 }
 
 const MAX_IDENTIFIER_BYTES: usize = 63;
+const NEXTVAL: &str = "nextval()";
 
 thread_local! {
     static STATEMENT: RefCell<Vec<StatementSequences>> = const { RefCell::new(Vec::new()) };
@@ -66,6 +68,7 @@ pub(crate) fn enter(session: SessionSequences, dialect: Dialect, wanted: bool) {
             all_loaded: false,
             wanted,
             changed: Vec::new(),
+            first_changed_by: NEXTVAL,
             before: HashMap::new(),
             session,
             memory: WorkMemory::new(),
@@ -248,6 +251,23 @@ pub(crate) fn save_changed(writer: &mut dyn KeyValueWrite) -> SqlResult<()> {
         }
     }
     Ok(())
+}
+
+pub(crate) fn first_changing_function() -> &'static str {
+    STATEMENT.with(|state| {
+        state
+            .borrow()
+            .last()
+            .map_or(NEXTVAL, |state| state.first_changed_by)
+    })
+}
+
+pub(crate) fn forget_changes() {
+    STATEMENT.with(|state| {
+        if let Some(state) = state.borrow_mut().last_mut() {
+            state.changed.clear();
+        }
+    });
 }
 
 pub(crate) fn mark_changes_committed() {
@@ -1200,7 +1220,10 @@ fn loaded<'s>(
     }
 }
 
-fn mark_changed(state: &mut StatementSequences, name: &str) {
+fn mark_changed(state: &mut StatementSequences, name: &str, function: &'static str) {
+    if state.changed.is_empty() {
+        state.first_changed_by = function;
+    }
     if !state.changed.iter().any(|known| known == name) {
         state.changed.push(name.to_owned());
     }
@@ -1268,7 +1291,7 @@ fn nextval(name: &str) -> SqlResult<Value> {
         let dialect = state.dialect;
         let sequence = loaded(state, name)?;
         let value = next_value(name, sequence, dialect)?;
-        mark_changed(state, name);
+        mark_changed(state, name, NEXTVAL);
         state.session.currval.insert(name.to_owned(), value);
         state.session.lastval = Some(name.to_owned());
         Ok(Value::BigInt(value))
@@ -1380,7 +1403,7 @@ fn setval(name: &str, value: &Value, is_called: &Value) -> SqlResult<Value> {
         }
         sequence.last_value = number;
         sequence.is_called = called;
-        mark_changed(state, name);
+        mark_changed(state, name, "setval()");
         if called {
             state.session.currval.insert(name.to_owned(), number);
         }

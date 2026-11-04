@@ -151,6 +151,7 @@ dependencies = [
  "eggdb-crypto",
  "eggdb-http",
  "eggdb-keyspace",
+ "eggdb-platform",
  "eggdb-search",
  "eggdb-sql",
 ]
@@ -258,6 +259,7 @@ dependencies = [
  "eggdb-columnar",
  "eggdb-crypto",
  "eggdb-http",
+ "eggdb-platform",
  "eggdb-sql",
 ]
 
@@ -395,6 +397,7 @@ dependencies = [
 name = "eggdb-ui"
 version = "0.3.0"
 dependencies = [
+ "eggdb-commands",
  "eggdb-platform",
 ]
 

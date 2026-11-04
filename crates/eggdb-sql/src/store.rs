@@ -1,4 +1,5 @@
 use crate::error::{SqlError, SqlResult, SqlState};
+use std::time::Duration;
 
 /// Which way a [`KeyValueRead::scan`] walks its range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +44,13 @@ impl SqlError {
         };
         Self::new(state, message)
     }
+}
+
+fn no_key_value_writes() -> SqlError {
+    SqlError::new(
+        SqlState::FEATURE_NOT_SUPPORTED,
+        "this store keeps no times to live or collections",
+    )
 }
 
 /// What a [`KeyValueRead::scan`] calls with each entry, key then value; it returns whether to
@@ -136,6 +144,46 @@ pub trait KeyValueWrite: KeyValueRead {
 
     /// Removes `key`; whether it was there.
     fn delete(&mut self, key: &[u8]) -> SqlResult<bool>;
+
+    /// Stores `value` under `key` with a time to live of `ttl` from now, replacing any value
+    /// and time to live there, for the key-value tools (D328); SQL never calls it. A store
+    /// without times to live, the default, refuses with `0A000`.
+    fn put_with_expiry(&mut self, _key: &[u8], _value: &[u8], _ttl: Duration) -> SqlResult<()> {
+        Err(no_key_value_writes())
+    }
+
+    /// Stores `value` under `key` in the collection named `name` (D139), with a time to live
+    /// of `ttl` when there is one, replacing any value and time to live there; `false`, with
+    /// nothing stored, when there is no such collection. A store without collections, the
+    /// default, refuses with `0A000`.
+    fn collection_put(
+        &mut self,
+        _name: &str,
+        _key: &[u8],
+        _value: &[u8],
+        _ttl: Option<Duration>,
+    ) -> SqlResult<bool> {
+        Err(no_key_value_writes())
+    }
+
+    /// Removes `key` from the collection named `name`: `None` when there is no such
+    /// collection, otherwise whether the key was there. A store without collections, the
+    /// default, refuses with `0A000`.
+    fn collection_delete(&mut self, _name: &str, _key: &[u8]) -> SqlResult<Option<bool>> {
+        Err(no_key_value_writes())
+    }
+
+    /// Puts `key` back as it was before a write made outside SQL in the same transaction:
+    /// holding `previous`, or absent when it is `None`. `key` and `previous` are what the store
+    /// itself keeps, which can include keys [`put`](Self::put) refuses, such as the ones a
+    /// store keeps for times to live; a store with such keys writes them directly. The default
+    /// puts or deletes.
+    fn restore(&mut self, key: &[u8], previous: Option<&[u8]>) -> SqlResult<()> {
+        match previous {
+            Some(value) => self.put(key, value),
+            None => self.delete(key).map(|_| ()),
+        }
+    }
 
     /// Makes every change durable and visible, atomically.
     fn commit(self) -> SqlResult<()>
@@ -311,6 +359,28 @@ impl KeyValueWrite for Box<dyn BoxedWrite + '_> {
         (**self).delete(key)
     }
 
+    fn put_with_expiry(&mut self, key: &[u8], value: &[u8], ttl: Duration) -> SqlResult<()> {
+        (**self).put_with_expiry(key, value, ttl)
+    }
+
+    fn collection_put(
+        &mut self,
+        name: &str,
+        key: &[u8],
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> SqlResult<bool> {
+        (**self).collection_put(name, key, value, ttl)
+    }
+
+    fn collection_delete(&mut self, name: &str, key: &[u8]) -> SqlResult<Option<bool>> {
+        (**self).collection_delete(name, key)
+    }
+
+    fn restore(&mut self, key: &[u8], previous: Option<&[u8]>) -> SqlResult<()> {
+        (**self).restore(key, previous)
+    }
+
     fn commit(self) -> SqlResult<()> {
         self.commit_boxed()
     }
@@ -388,3 +458,7 @@ pub(crate) fn delete_prefix(writer: &mut dyn KeyValueWrite, prefix: &[u8]) -> Sq
         }
     }
 }
+
+#[cfg(test)]
+#[path = "store_tests.rs"]
+mod tests;

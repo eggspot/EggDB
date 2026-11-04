@@ -403,37 +403,263 @@ fn a_failed_block_refuses_key_value_writes_until_rollback() {
     );
 }
 
+fn get_from(file: &str, args: &[&str]) -> Ran {
+    let mut all = vec!["get", file];
+    all.extend_from_slice(args);
+    run_with(&all, b"", Terminal::default())
+}
+
+fn assert_holds(file: &str, key: &str, value: &str) {
+    let ran = get_from(file, &[key]);
+    assert_eq!(ran.exit, 0, "{key}: {}", text(&ran.stderr));
+    assert_eq!(text(&ran.stdout), value, "{key}");
+}
+
+fn assert_absent(file: &str, key: &str) {
+    let ran = get_from(file, &[key]);
+    assert_eq!(ran.exit, 1, "{key}: {}", text(&ran.stdout));
+    assert!(
+        text(&ran.stderr).contains(&format!("key not found: {key}")),
+        "{}",
+        text(&ran.stderr)
+    );
+}
+
 #[test]
-fn key_value_writes_are_refused_while_a_savepoint_is_set() {
-    let directory = TempDirectory::new("shell-mixed-savepoint");
+fn rollback_to_savepoint_undoes_the_key_value_writes_made_after_it() {
+    let directory = TempDirectory::new("shell-savepoint-undo");
+    let file = created(&directory);
+    let script = "begin;\n\
+        put a 1\n\
+        savepoint s;\n\
+        put b 2\n\
+        del a\n\
+        scan -k\n\
+        rollback to savepoint s;\n\
+        scan -k\n\
+        commit;\n";
+    let ran = shell(&file, &[], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    assert_eq!(
+        text(&ran.stdout),
+        "BEGIN\nSAVEPOINT\nb\nROLLBACK\na\nCOMMIT\n"
+    );
+    assert_holds(&file, "a", "1");
+    assert_absent(&file, "b");
+}
+
+#[test]
+fn release_savepoint_keeps_the_key_value_writes_in_the_block() {
+    let directory = TempDirectory::new("shell-savepoint-release");
+    let file = created(&directory);
+    let script = "begin;\n\
+        savepoint s;\n\
+        put kept 1\n\
+        release savepoint s;\n\
+        commit;\n\
+        begin;\n\
+        savepoint t;\n\
+        put dropped 2\n\
+        release savepoint t;\n\
+        rollback;\n\
+        scan -k\n";
+    let ran = shell(&file, &[], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    assert_eq!(
+        text(&ran.stdout),
+        "BEGIN\nSAVEPOINT\nRELEASE\nCOMMIT\nBEGIN\nSAVEPOINT\nRELEASE\nROLLBACK\nkept\n"
+    );
+    assert_holds(&file, "kept", "1");
+    assert_absent(&file, "dropped");
+}
+
+#[test]
+fn nested_savepoints_undo_the_key_value_writes_after_the_one_rolled_back_to() {
+    let directory = TempDirectory::new("shell-savepoint-nested");
+    let file = created(&directory);
+    let script = "put k v0\n\
+        begin;\n\
+        savepoint outer;\n\
+        put k v1\n\
+        savepoint inner;\n\
+        put k v2\n\
+        incr n\n\
+        rollback to savepoint inner;\n\
+        get k\n\
+        scan -k\n\
+        put k v3\n\
+        savepoint third;\n\
+        put m x\n\
+        release savepoint third;\n\
+        rollback to savepoint outer;\n\
+        scan\n\
+        commit;\n\
+        get k\n";
+    let ran = shell(&file, &[], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    assert_eq!(
+        text(&ran.stdout),
+        "BEGIN\nSAVEPOINT\nSAVEPOINT\n1\nROLLBACK\nv1\nk\nSAVEPOINT\nRELEASE\nROLLBACK\n\
+         k\tv0\nCOMMIT\nv0\n"
+    );
+    assert_absent(&file, "n");
+    assert_absent(&file, "m");
+}
+
+#[test]
+fn rollback_to_savepoint_puts_back_times_to_live_and_collection_entries() {
+    let directory = TempDirectory::new("shell-savepoint-expiry-collection");
+    let file = created(&directory);
+    let script = "put --collection sessions --create s:1 Ada\n\
+        put plain p\n\
+        put timed t --ttl 1h\n\
+        begin;\n\
+        savepoint s;\n\
+        put -C sessions s:2 Grace --ttl 1h\n\
+        del -C sessions s:1\n\
+        expire plain 1h\n\
+        persist timed\n\
+        rollback to savepoint s;\n\
+        ttl plain\n\
+        get -C sessions s:1\n\
+        scan -C sessions -k\n\
+        commit;\n\
+        ttl plain\n\
+        ttl timed\n";
+    let ran = shell(&file, &[], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    let out = text(&ran.stdout);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines[..7],
+        [
+            "BEGIN",
+            "SAVEPOINT",
+            "ROLLBACK",
+            "never",
+            "Ada",
+            "s:1",
+            "COMMIT"
+        ],
+        "{out}"
+    );
+    assert_eq!(lines.get(7), Some(&"never"), "{out}");
+    assert!(
+        lines
+            .get(8)
+            .is_some_and(|line| line.starts_with("59m") || *line == "1h"),
+        "{out}"
+    );
+    assert_eq!(lines.len(), 9, "{out}");
+    assert_holds(&file, "plain", "p");
+    let entry = get_from(&file, &["-C", "sessions", "s:2"]);
+    assert_eq!(entry.exit, 1, "{}", text(&entry.stdout));
+}
+
+#[test]
+fn rollback_to_savepoint_undoes_key_value_and_sql_writes_together() {
+    let directory = TempDirectory::new("shell-savepoint-mixed");
+    let file = created(&directory);
+    let script = "create table items (id integer primary key);\n\
+        begin;\n\
+        insert into items values (1);\n\
+        put k 1\n\
+        savepoint s;\n\
+        insert into items values (2);\n\
+        put k 2\n\
+        put j 1\n\
+        rollback to savepoint s;\n\
+        commit;\n\
+        .mode csv\n\
+        select id from items order by id;\n\
+        get k\n\
+        scan --prefix j -k\n";
+    let ran = shell(&file, &[], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    assert_eq!(
+        text(&ran.stdout),
+        "CREATE TABLE\nBEGIN\nINSERT 0 1\nSAVEPOINT\nINSERT 0 1\nROLLBACK\nCOMMIT\n\
+         mode: csv\nid\n1\n1\n"
+    );
+    assert_absent(&file, "j");
+}
+
+#[test]
+fn a_savepoint_that_begins_a_sqlite_transaction_undoes_key_value_writes_too() {
+    let directory = TempDirectory::new("shell-savepoint-sqlite");
+    let file = created(&directory);
+    let script = "savepoint s;\n\
+        put a 1\n\
+        savepoint t;\n\
+        put b 2\n\
+        rollback to t;\n\
+        release s;\n";
+    let ran = shell(&file, &["--dialect", "sqlite"], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    assert_holds(&file, "a", "1");
+    assert_absent(&file, "b");
+}
+
+#[test]
+fn key_value_commands_are_refused_after_a_statement_fails_past_a_savepoint() {
+    let directory = TempDirectory::new("shell-savepoint-failed");
     let file = created(&directory);
     let script = "begin;\n\
         put k before\n\
         savepoint s;\n\
+        select 1/0;\n\
         put k inside\n\
-        del k\n\
-        incr n\n\
+        get k\n\
         rollback to savepoint s;\n\
         get k\n\
-        release savepoint s;\n\
         put k after\n\
         commit;\n\
         get k\n";
     let ran = shell(&file, &["--keep-going"], script);
     let stderr = text(&ran.stderr);
-    for command in ["put", "del", "incr"] {
+    for command in ["put", "get"] {
         assert!(
-            stderr.contains(&format!(
-                "{command} cannot run while a savepoint is set, since ROLLBACK TO SAVEPOINT \
-                 would not undo it; RELEASE SAVEPOINT, COMMIT or ROLLBACK first"
-            )),
+            stderr.contains(&format!("cannot run {command} in ")),
             "{stderr}"
         );
     }
     assert_eq!(
-        text(&ran.stdout),
-        "BEGIN\nSAVEPOINT\nROLLBACK\nbefore\nRELEASE\nCOMMIT\nafter\n"
+        stderr
+            .matches(
+                "a statement failed after the savepoint; ROLLBACK TO SAVEPOINT or ROLLBACK ends it"
+            )
+            .count(),
+        2,
+        "{stderr}"
     );
+    assert_eq!(
+        text(&ran.stdout),
+        "BEGIN\nSAVEPOINT\nROLLBACK\nbefore\nCOMMIT\nafter\n"
+    );
+}
+
+#[test]
+fn a_failed_statement_in_a_mysql_block_undoes_only_itself_and_key_value_commands_go_on() {
+    let directory = TempDirectory::new("shell-statement-rollback");
+    let file = created(&directory);
+    let script = "create table t (id int primary key);\n\
+        begin;\n\
+        insert into t values (1);\n\
+        savepoint s;\n\
+        put k before\n\
+        insert into t values (2), (1);\n\
+        put k after\n\
+        commit;\n";
+    let ran = shell(&file, &["--dialect", "mysql", "--keep-going"], script);
+    let stderr = text(&ran.stderr);
+    assert!(stderr.contains("1062"), "{stderr}");
+    assert!(!stderr.contains("cannot run put"), "{stderr}");
+    assert!(
+        text(&ran.stdout).contains("COMMIT"),
+        "{}",
+        text(&ran.stdout)
+    );
+    assert_holds(&file, "k", "after");
 }
 
 #[test]
@@ -612,30 +838,54 @@ fn cas_in_a_block_compares_against_the_blocks_own_value() {
 }
 
 #[test]
-fn expire_persist_and_cas_are_refused_while_a_savepoint_is_set_and_reads_still_run() {
+fn expire_persist_and_cas_run_while_a_savepoint_is_set_and_rollback_to_it_undoes_them() {
     let directory = TempDirectory::new("shell-block-savepoint-expiry");
     let file = created(&directory);
     let script = "put k v\n\
+        put timed t --ttl 1h\n\
         begin;\n\
         savepoint s;\n\
         expire k 1h\n\
-        persist k\n\
-        cas k v w\n\
         ttl k\n\
+        persist timed\n\
+        ttl timed\n\
+        cas k v w\n\
+        get k\n\
+        rollback to savepoint s;\n\
+        ttl k\n\
+        get k\n\
         scan -k\n\
-        commit;\n";
-    let ran = shell(&file, &["--keep-going"], script);
-    let stderr = text(&ran.stderr);
-    for command in ["expire", "persist", "cas"] {
-        assert!(
-            stderr.contains(&format!(
-                "{command} cannot run while a savepoint is set, since ROLLBACK TO SAVEPOINT \
-                 would not undo it; RELEASE SAVEPOINT, COMMIT or ROLLBACK first"
-            )),
-            "{stderr}"
-        );
-    }
-    assert_eq!(text(&ran.stdout), "BEGIN\nSAVEPOINT\nnever\nk\nCOMMIT\n");
+        commit;\n\
+        ttl k\n";
+    let ran = shell(&file, &[], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    let out = text(&ran.stdout);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "BEGIN",
+            "SAVEPOINT",
+            "1h",
+            "never",
+            "w",
+            "ROLLBACK",
+            "never",
+            "v",
+            "k",
+            "timed",
+            "COMMIT",
+            "never"
+        ],
+        "{out}"
+    );
+    let timed = run_with(&["ttl", &file, "timed"], b"", Terminal::default());
+    assert_eq!(timed.exit, 0, "{}", text(&timed.stderr));
+    assert!(
+        text(&timed.stdout).contains("\"expires_at\":\""),
+        "{}",
+        text(&timed.stdout)
+    );
 }
 
 #[test]
@@ -680,4 +930,84 @@ fn schema_in_sqlite_prints_each_create_statement_as_it_was_written() {
         "{out}"
     );
     assert!(!out.contains("CREATE TABLE other"), "{out}");
+}
+
+#[test]
+fn the_shell_renames_and_deletes_collections_and_follows_the_one_in_use() {
+    let directory = TempDirectory::new("shell-collection-rename");
+    let file = created(&directory);
+    let added = run_with(
+        &["collection", "add", &file, "sessions"],
+        b"",
+        Terminal::default(),
+    );
+    assert_eq!(added.exit, 0, "{}", text(&added.stderr));
+    let script = ".collection sessions\n\
+        put s:1 Ada\n\
+        put s:2 Grace\n\
+        collection list\n\
+        collection rename sessions logins\n\
+        get s:1\n\
+        collection list\n\
+        collection delete logins\n\
+        .collection\n";
+    let ran = shell(&file, &[], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    let stdout = text(&ran.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 10, "{stdout}");
+    assert_eq!(lines[0], "collection: sessions");
+    assert_eq!(lines[1], "sessions  2 entries");
+    assert!(
+        lines[2].starts_with("renamed collection sessions to logins in "),
+        "{stdout}"
+    );
+    assert_eq!(lines[3], "collection: logins (followed the rename)");
+    assert_eq!(lines[4], "Ada");
+    assert_eq!(lines[5], "logins  2 entries");
+    assert!(
+        lines[6].starts_with("deleted collection logins from "),
+        "{stdout}"
+    );
+    assert_eq!(
+        lines[7],
+        "collection: default key space (logins was deleted)"
+    );
+    assert_eq!(&lines[8..], ["* default key space", "no collections"]);
+}
+
+#[test]
+fn the_shell_lists_collections_in_a_block_and_renames_them_only_outside_one() {
+    let directory = TempDirectory::new("shell-collection-block");
+    let file = created(&directory);
+    let added = run_with(
+        &["collection", "add", &file, "sessions"],
+        b"",
+        Terminal::default(),
+    );
+    assert_eq!(added.exit, 0, "{}", text(&added.stderr));
+    let script = "BEGIN;\n\
+        collection list\n\
+        collection move sessions logins\n\
+        ROLLBACK;\n\
+        collection move sessions logins\n\
+        collection list\n";
+    let ran = shell(&file, &["--keep-going"], script);
+    assert_eq!(ran.exit, 2, "{}", text(&ran.stderr));
+    assert!(
+        text(&ran.stderr).contains(
+            "collection add, delete and move run outside a transaction block: COMMIT or ROLLBACK first"
+        ),
+        "{}",
+        text(&ran.stderr)
+    );
+    let stdout = text(&ran.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 5, "{stdout}");
+    assert_eq!(&lines[..3], ["BEGIN", "sessions  no entries", "ROLLBACK"]);
+    assert!(
+        lines[3].starts_with("renamed collection sessions to logins in "),
+        "{stdout}"
+    );
+    assert_eq!(lines[4], "logins  no entries");
 }

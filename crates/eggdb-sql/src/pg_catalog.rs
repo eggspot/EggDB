@@ -2,6 +2,8 @@ mod deparse;
 mod functions;
 mod monitoring;
 mod oids;
+mod policies;
+mod privilege_inquiry;
 mod relations;
 mod routines;
 mod snapshot;
@@ -11,6 +13,8 @@ mod types;
 mod deparse_tests;
 #[cfg(test)]
 mod describe_tests;
+#[cfg(test)]
+mod privilege_tests;
 #[cfg(test)]
 mod routine_tests;
 #[cfg(test)]
@@ -31,13 +35,15 @@ pub(crate) use monitoring::{
 };
 pub(crate) use oids::{OidRequest, Space as OidSpace, assign as assign_oids};
 pub(crate) use oids::{builtin_type, builtin_type_named, format_type, type_modifier};
+pub(crate) use privilege_inquiry::is_inquiry as is_privilege_inquiry;
 pub(crate) use relations::generated_rows;
 pub(crate) use relations::{index_columns, index_is_unique, index_sort_options};
 pub(crate) use snapshot::{
     CatalogSnapshot, ConstraintSource, IndexSource, PackageEntry, RelationEntry, RelationKind,
     RelationSource, RoutineEntry, TriggerEntry, current as current_snapshot, enter_statement,
-    load_for_stored_expressions, load_if_wanted, mentions_catalog, names_non_sequence_relation,
-    routine_oid, session_user, snapshot_for, statement_settings, text_needs_catalog,
+    load_for_stored_expressions, load_for_stored_text, load_for_tokens, load_if_wanted,
+    mentions_catalog, names_non_sequence_relation, reload_if_loaded, routine_oid, session_user,
+    snapshot_for, statement_settings, text_needs_catalog,
 };
 pub use types::{CatalogType, PseudoType, RegKind, RegValue};
 

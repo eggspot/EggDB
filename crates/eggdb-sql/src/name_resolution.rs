@@ -1011,7 +1011,7 @@ impl<'a> Resolver<'a> {
         if depth > MAX_QUERY_NESTING {
             return Err(crate::encoding::corrupt("partition tree"));
         }
-        let Some(partitioned) = crate::partitions::Partitioned::of(catalog, table)? else {
+        let Some(partitioned) = crate::partitions::Partitioned::of(catalog, table, None)? else {
             leaves.push(table.name.clone());
             return Ok(());
         };
@@ -1516,7 +1516,14 @@ impl Binding<'_> {
         if let OnDuplicate::Update(assignments) = &mut insert.on_duplicate {
             reads.extend(assignments.iter_mut().map(|(_, expr)| expr));
         }
-        let conflict_columns = insert.conflict_target.clone().unwrap_or_default();
+        let conflict_columns: Vec<Name> = insert
+            .conflict_target
+            .as_ref()
+            .map(|target| target.columns().to_vec())
+            .unwrap_or_default();
+        if let Some(target) = &mut insert.conflict_target {
+            reads.extend(target.expressions_mut());
+        }
         resolver.walk_in_target_scope(
             &insert.table,
             &mut insert.returning,

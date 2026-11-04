@@ -1,4 +1,4 @@
-use eggdb_graph::Value;
+use eggdb_graph::{Node, Path, Relationship, Value};
 
 const MAX_DEPTH: usize = 64;
 
@@ -263,19 +263,7 @@ pub(crate) fn write_value(out: &mut Vec<u8>, value: &Value, element_ids: bool) {
             }
         }
         Value::Map(entries) => write_properties(out, entries, element_ids),
-        Value::Node(node) => {
-            out.push(if element_ids { 0xb4 } else { 0xb3 });
-            out.push(0x4e);
-            write_integer(out, node.id as i64);
-            write_list_header(out, node.labels.len());
-            for label in &node.labels {
-                write_string(out, label);
-            }
-            write_properties(out, &node.properties, element_ids);
-            if element_ids {
-                write_string(out, &node.id.to_string());
-            }
-        }
+        Value::Node(node) => write_node(out, node, element_ids),
         Value::Relationship(relationship) => {
             out.push(if element_ids { 0xb8 } else { 0xb5 });
             out.push(0x52);
@@ -290,5 +278,76 @@ pub(crate) fn write_value(out: &mut Vec<u8>, value: &Value, element_ids: bool) {
                 write_string(out, &relationship.end.to_string());
             }
         }
+        Value::Path(path) => write_path(out, path, element_ids),
+    }
+}
+
+fn write_node(out: &mut Vec<u8>, node: &Node, element_ids: bool) {
+    out.push(if element_ids { 0xb4 } else { 0xb3 });
+    out.push(0x4e);
+    write_integer(out, node.id as i64);
+    write_list_header(out, node.labels.len());
+    for label in &node.labels {
+        write_string(out, label);
+    }
+    write_properties(out, &node.properties, element_ids);
+    if element_ids {
+        write_string(out, &node.id.to_string());
+    }
+}
+
+fn write_path(out: &mut Vec<u8>, path: &Path, element_ids: bool) {
+    let mut nodes: Vec<&Node> = Vec::new();
+    for node in &path.nodes {
+        if !nodes.iter().any(|known| known.id == node.id) {
+            nodes.push(node);
+        }
+    }
+    let mut relationships: Vec<&Relationship> = Vec::new();
+    let mut indices = Vec::with_capacity(path.relationships.len() * 2);
+    for (step, relationship) in path.relationships.iter().enumerate() {
+        let position = match relationships
+            .iter()
+            .position(|known| known.id == relationship.id)
+        {
+            Some(position) => position,
+            None => {
+                relationships.push(relationship);
+                relationships.len() - 1
+            }
+        };
+        let from = path.nodes.get(step).map(|node| node.id);
+        let to = path.nodes.get(step + 1).map(|node| node.id);
+        let number = position as i64 + 1;
+        indices.push(if from == Some(relationship.start) {
+            number
+        } else {
+            -number
+        });
+        indices.push(
+            to.and_then(|to| nodes.iter().position(|known| known.id == to))
+                .map_or(0, |at| at as i64),
+        );
+    }
+    out.push(0xb3);
+    out.push(0x50);
+    write_list_header(out, nodes.len());
+    for node in &nodes {
+        write_node(out, node, element_ids);
+    }
+    write_list_header(out, relationships.len());
+    for relationship in &relationships {
+        out.push(if element_ids { 0xb4 } else { 0xb3 });
+        out.push(0x72);
+        write_integer(out, relationship.id as i64);
+        write_string(out, &relationship.kind);
+        write_properties(out, &relationship.properties, element_ids);
+        if element_ids {
+            write_string(out, &relationship.id.to_string());
+        }
+    }
+    write_list_header(out, indices.len());
+    for index in indices {
+        write_integer(out, index);
     }
 }

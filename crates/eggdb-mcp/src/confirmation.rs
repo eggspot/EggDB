@@ -4,19 +4,54 @@ use eggdb_sql::DestructiveStatement;
 const MOST_SHOWN_SQL_CHARACTERS: usize = 2000;
 const MOST_LISTED_NAME_BYTES: usize = 16 * 1024;
 
-pub(crate) fn elicitation_params(
-    database: &str,
-    statement: &DestructiveStatement,
-    sql: &str,
-    form_mode: bool,
-) -> String {
+const MOST_SHOWN_KEY_CHARACTERS: usize = 200;
+
+pub(crate) enum Asked<'a> {
+    Statement {
+        statement: &'a DestructiveStatement,
+        sql: &'a str,
+    },
+    KeyDelete {
+        collection: Option<&'a str>,
+        key: &'a [u8],
+    },
+}
+
+impl Asked<'_> {
+    fn message(&self, database: &str) -> String {
+        match self {
+            Self::Statement { statement, sql } => message(database, statement, sql),
+            Self::KeyDelete { collection, key } => key_delete_message(database, *collection, key),
+        }
+    }
+
+    fn title(&self, database: &str) -> String {
+        match self {
+            Self::Statement { .. } => format!("Run it on {database}"),
+            Self::KeyDelete { .. } => format!("Delete it from {database}"),
+        }
+    }
+
+    fn yes_does(&self) -> &'static str {
+        match self {
+            Self::Statement { .. } => {
+                "Yes runs the statement now. No, or closing this, runs nothing, and the agent is told you declined."
+            }
+            Self::KeyDelete { .. } => {
+                "Yes deletes the key now. No, or closing this, deletes nothing, and the agent is told you declined."
+            }
+        }
+    }
+}
+
+pub(crate) fn elicitation_params(database: &str, asked: &Asked<'_>, form_mode: bool) -> String {
     let mut out = JsonOut::new();
     out.begin_object();
     if form_mode {
         out.key("mode").string("form");
     }
     out.key("message")
-        .string(&message(&visible_name(database), statement, sql))
+        .string(&asked.message(&visible_name(database)))
         .key("requestedSchema")
         .begin_object()
         .key("type")
@@ -28,9 +63,9 @@ pub(crate) fn elicitation_params(
         .key("type")
         .string("boolean")
         .key("title")
-        .string(&format!("Run it on {}", visible(database)))
+        .string(&asked.title(&visible(database)))
         .key("description")
-        .string("Yes runs the statement now. No, or closing this, runs nothing, and the agent is told you declined.")
+        .string(asked.yes_does())
         .key("default")
         .boolean(false)
         .end_object()
@@ -76,6 +111,58 @@ pub(crate) fn message(database: &str, statement: &DestructiveStatement, sql: &st
     text.push_str(&format!("\n{fence}sql\n{shown}\n{fence}\n\n"));
     text.push_str(
         "It runs now, in its own transaction, and cannot be undone through the agent; only a backup brings the data back. Names are as the statement gives them: an earlier rename can make a familiar name stand for another table. Run it?",
+    );
+    text
+}
+
+fn shown_key(key: &[u8]) -> String {
+    match std::str::from_utf8(key) {
+        Ok(text) if !text.is_empty() => {
+            let escaped = visible_name(text);
+            let total = escaped.chars().count();
+            let mut shown: String = escaped.chars().take(MOST_SHOWN_KEY_CHARACTERS).collect();
+            if total > MOST_SHOWN_KEY_CHARACTERS {
+                shown.push_str(&format!(
+                    "... ({} more characters)",
+                    thousands(total - MOST_SHOWN_KEY_CHARACTERS)
+                ));
+            }
+            format!("\"{shown}\"")
+        }
+        _ => {
+            let digits: String = key
+                .iter()
+                .take(MOST_SHOWN_KEY_CHARACTERS / 2)
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            let more = key.len().saturating_sub(MOST_SHOWN_KEY_CHARACTERS / 2);
+            if more > 0 {
+                format!("0x{digits}... ({} more bytes)", thousands(more))
+            } else {
+                format!("0x{digits}")
+            }
+        }
+    }
+}
+
+fn key_delete_message(database: &str, collection: Option<&str>, key: &[u8]) -> String {
+    let space = match collection {
+        Some(name) => format!("the collection \"{}\"", visible_name(name)),
+        None => "the default key space".to_owned(),
+    };
+    let mut text = format!(
+        "The AI agent asks to delete the key {} from {space} of {database}.\n",
+        shown_key(key)
+    );
+    if std::str::from_utf8(key).is_ok_and(mixes_alphabets)
+        || collection.is_some_and(mixes_alphabets)
+    {
+        text.push_str(
+            "Some of these names mix alphabets: two names that look the same may be different keys.\n",
+        );
+    }
+    text.push_str(
+        "It is deleted now, with its value, and cannot be undone through the agent; only a backup brings it back. Delete it?",
     );
     text
 }
@@ -249,7 +336,7 @@ fn thousands(number: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{message, mixes_alphabets, thousands, visible};
+    use super::{Asked, elicitation_params, message, mixes_alphabets, thousands, visible};
     use eggdb_sql::{DestructiveKind, DestructivePart, DestructiveStatement};
 
     fn dropped(objects: &[&str], cascade: bool) -> DestructiveStatement {
@@ -325,6 +412,40 @@ mod tests {
         assert!(text.contains("tmp10, users."), "{text}");
         assert!(text.contains("<3,000 blank characters>"), "{text}");
         assert!(text.contains(" users\n"), "{text}");
+    }
+
+    #[test]
+    fn a_key_delete_names_the_key_and_its_collection_and_binary_keys_show_as_hex() {
+        let named = Asked::KeyDelete {
+            collection: Some("sessions"),
+            key: b"s:1\n[x](y)",
+        };
+        let params = elicitation_params("app.db", &named, true);
+        assert!(params.contains("\"mode\":\"form\""), "{params}");
+        assert!(
+            params.contains(r#"from the collection \"sessions\" of app.db."#),
+            "{params}"
+        );
+        assert!(params.contains(r"\\[x\\]"), "{params}");
+        assert!(!params.contains(r"\n[x]"), "{params}");
+        assert!(params.contains("Yes deletes the key now."), "{params}");
+        let binary = Asked::KeyDelete {
+            collection: None,
+            key: &[0xff, 0x00, 0x10],
+        };
+        let params = elicitation_params("app.db", &binary, false);
+        assert!(!params.contains("\"mode\""), "{params}");
+        assert!(
+            params.contains("delete the key 0xff0010 from the default key space of app.db."),
+            "{params}"
+        );
+        let long = vec![b'k'; 300];
+        let long_key = Asked::KeyDelete {
+            collection: None,
+            key: &long,
+        };
+        let params = elicitation_params("app.db", &long_key, false);
+        assert!(params.contains("... (100 more characters)"), "{params}");
     }
 
     #[test]

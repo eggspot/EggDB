@@ -13,6 +13,7 @@ pub(crate) const DIALECT_SETTING: &str = "eggdb.dialect";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Change {
     Free,
+    Boolean,
     Utf8Only,
     OnOnly,
     Fixed,
@@ -113,9 +114,9 @@ const KNOWN: &[Known] = &[
     Known {
         name: "default_transaction_read_only",
         default: fixed_text!("off"),
-        change: Change::Free,
+        change: Change::Boolean,
         reported: true,
-        description: "Sets the default read-only status of new transactions (remembered, not applied yet).",
+        description: "Sets the default read-only status of new transactions.",
     },
     Known {
         name: "escape_string_warning",
@@ -164,7 +165,7 @@ const KNOWN: &[Known] = &[
         default: fixed_text!("on"),
         change: Change::Fixed,
         reported: true,
-        description: "The one user of this release may do everything.",
+        description: "Shows whether the session's user is a superuser.",
     },
     Known {
         name: "lock_timeout",
@@ -326,6 +327,34 @@ fn unrecognized(name: &str) -> SqlError {
         SqlState::UNDEFINED_OBJECT,
         format!("unrecognized configuration parameter \"{name}\""),
     )
+}
+
+pub(crate) fn check_parameter_name(name: &str) -> SqlResult<()> {
+    if known(name).is_some() || is_custom(name) {
+        Ok(())
+    } else {
+        Err(unrecognized(name))
+    }
+}
+
+const BOOLEAN_TRUE: [&str; 6] = ["on", "true", "yes", "1", "t", "y"];
+const BOOLEAN_FALSE: [&str; 7] = ["off", "false", "no", "0", "f", "n", "of"];
+
+pub(crate) fn boolean_setting(value: &str) -> Option<bool> {
+    match value {
+        "on" => return Some(true),
+        "off" => return Some(false),
+        _ => {}
+    }
+    let value = value.trim();
+    let spelled = |words: &[&str]| words.iter().any(|word| value.eq_ignore_ascii_case(word));
+    if spelled(&BOOLEAN_TRUE) {
+        Some(true)
+    } else if spelled(&BOOLEAN_FALSE) {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -519,9 +548,20 @@ impl Settings {
             return Ok(());
         };
         let value = match value {
+            None if known.change == Change::Fixed => return Ok(()),
             None => (known.default)(),
             Some(value) => match known.change {
                 Change::Free => value.to_owned(),
+                Change::Boolean => match boolean_setting(value) {
+                    Some(true) => "on".to_owned(),
+                    Some(false) => "off".to_owned(),
+                    None => {
+                        return Err(SqlError::new(
+                            SqlState::INVALID_PARAMETER_VALUE,
+                            format!("parameter \"{}\" requires a Boolean value", known.name),
+                        ));
+                    }
+                },
                 Change::Utf8Only => {
                     if value.eq_ignore_ascii_case("sql_ascii") {
                         "SQL_ASCII".to_owned()
@@ -596,6 +636,43 @@ impl Settings {
         }
     }
 
+    pub(crate) fn show_transaction_read_only(&mut self, read_only: bool) {
+        let shown = if read_only { "on" } else { "off" };
+        if self
+            .values
+            .get("transaction_read_only")
+            .is_none_or(|value| value != shown)
+        {
+            self.values
+                .insert("transaction_read_only", shown.to_owned());
+        }
+    }
+
+    pub(crate) fn is_on(&self, name: &str) -> bool {
+        match self.known_value(name) {
+            Some(value) => boolean_setting(value).unwrap_or(false),
+            None => self
+                .get(name)
+                .ok()
+                .and_then(|value| boolean_setting(&value))
+                .unwrap_or(false),
+        }
+    }
+
+    pub(crate) fn known_value(&self, name: &str) -> Option<&str> {
+        match self.values.get(name) {
+            Some(value) => Some(value),
+            None => known(name)
+                .and_then(|known| self.values.get(known.name))
+                .map(String::as_str),
+        }
+    }
+
+    pub(crate) fn set_superuser(&mut self, superuser: bool) {
+        let shown = if superuser { "on" } else { "off" };
+        self.values.insert("is_superuser", shown.to_owned());
+    }
+
     pub(crate) fn set_session_user(&mut self, user: &str) {
         self.values.insert("session_authorization", user.to_owned());
     }
@@ -610,6 +687,26 @@ impl Settings {
         self.custom.clear();
         self.time_zone = crate::time_zones::TimeZone::UTC;
         self.set_session_user(&user);
+    }
+
+    pub(crate) fn names_reset_all_changes(&self) -> Vec<String> {
+        let mut names: Vec<String> = KNOWN
+            .iter()
+            .filter(|known| known.change != Change::Fixed)
+            .filter(|known| {
+                self.values
+                    .get(known.name)
+                    .is_some_and(|value| *value != (known.default)())
+            })
+            .map(|known| known.name.to_owned())
+            .collect();
+        names.extend(
+            self.custom
+                .keys()
+                .filter(|name| name.as_str() != DIALECT_SETTING)
+                .cloned(),
+        );
+        names
     }
 
     pub(crate) fn changeable(name: &str) -> bool {

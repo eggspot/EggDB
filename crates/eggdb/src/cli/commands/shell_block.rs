@@ -1,13 +1,13 @@
 use super::expiry::{not_swapped, with_time_to_live};
 use super::{missing_collection, operation_failure, scan_entry};
-use crate::cli::args::{CommandName, Format, Request, ScanOptions};
+use crate::cli::args::{CollectionAction, CommandName, Format, Request, ScanOptions};
 use crate::cli::byte_argument::ByteArgument;
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::output::Output;
 use crate::cli::render::{self, JsonObject, LineBreaks};
 use eggdb::sql::SharedWriteStore;
 use eggdb::{Error, ErrorKind, Scan, WriteTransaction};
-use eggdb_sql::TransactionStatus;
+use eggdb_sql::{Session, TransactionStatus};
 use std::ops::Bound;
 use std::time::Duration;
 
@@ -38,11 +38,6 @@ const WRITES: [CommandName; 7] = [
 ];
 
 const DEFAULT_EXPIRE_TIME: Duration = Duration::from_secs(1);
-
-pub(super) struct BlockState {
-    pub(super) status: TransactionStatus,
-    pub(super) has_savepoints: bool,
-}
 
 pub(super) enum InBlock {
     ReadsTheLastCommit,
@@ -114,7 +109,7 @@ impl Arguments {
 
 pub(super) fn key_value_in_block(
     store: &SharedWriteStore<'_>,
-    block: BlockState,
+    session: &mut Session<'_>,
     request: &Request,
     out: &mut Output<'_>,
     file: &str,
@@ -123,10 +118,29 @@ pub(super) fn key_value_in_block(
     if READS_THE_LAST_COMMIT.contains(&command) {
         return Ok(InBlock::ReadsTheLastCommit);
     }
-    if block.status == TransactionStatus::Failed {
+    if command == CommandName::Collection {
+        if request.collection_action == Some(CollectionAction::List) {
+            return Ok(InBlock::ReadsTheLastCommit);
+        }
+        return Err(Failure::usage(
+            "collection add, delete and move run outside a transaction block: COMMIT or ROLLBACK first",
+            Some(command),
+        ));
+    }
+    if session.transaction_status() == TransactionStatus::Failed {
         return Err(Failure::database(
             format!(
                 "cannot run {} in {file}: the transaction block failed; ROLLBACK ends it",
+                command.name()
+            ),
+            Exit::DatabaseError,
+        ));
+    }
+    if session.failed_after_savepoint() {
+        return Err(Failure::database(
+            format!(
+                "cannot run {} in {file}: a statement failed after the savepoint; ROLLBACK TO \
+                 SAVEPOINT or ROLLBACK ends it",
                 command.name()
             ),
             Exit::DatabaseError,
@@ -141,18 +155,8 @@ pub(super) fn key_value_in_block(
             Some(command),
         ));
     }
-    if block.has_savepoints && WRITES.contains(&command) {
-        return Err(Failure::usage(
-            format!(
-                "{} cannot run while a savepoint is set, since ROLLBACK TO SAVEPOINT would not \
-                 undo it; RELEASE SAVEPOINT, COMMIT or ROLLBACK first",
-                command.name()
-            ),
-            Some(command),
-        ));
-    }
     let arguments = Arguments::resolved(request)?;
-    let ran = store.with_open_transaction(|transaction| {
+    let ran = store.with_open_transaction_undoable(session, |transaction| {
         if command == CommandName::Scan {
             return scan(transaction, request, &arguments, out, file);
         }

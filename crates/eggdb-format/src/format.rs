@@ -182,8 +182,13 @@ impl Features {
     /// a release that does not know it would show expired keys and could write keys without
     /// their deadlines, so it may only read the file.
     pub const EXPIRING_KEYS: u64 = 1 << 0;
-    /// The read-only-compatible features this release knows: [`Features::EXPIRING_KEYS`].
-    pub const KNOWN_READ_ONLY_COMPATIBLE: u64 = Self::EXPIRING_KEYS;
+    /// The read-only-compatible bit of a file that keeps an entry count for its collections
+    /// (D320): a release that does not know it would write keys without updating their
+    /// collection's count, so it may only read the file.
+    pub const COLLECTION_COUNTS: u64 = 1 << 1;
+    /// The read-only-compatible features this release knows: [`Features::EXPIRING_KEYS`] and
+    /// [`Features::COLLECTION_COUNTS`].
+    pub const KNOWN_READ_ONLY_COMPATIBLE: u64 = Self::EXPIRING_KEYS | Self::COLLECTION_COUNTS;
     /// The incompatible bit of a file that holds values compressed on overflow pages of
     /// layout 2 (D171): a release that does not know it would refuse those pages as damaged.
     pub const COMPRESSED_VALUES: u64 = 1 << 0;
@@ -925,14 +930,27 @@ mod tests {
         };
         assert_eq!(expiring.check(Access::ReadWrite), Ok(()));
         let with_unknown = expiring.union(Features {
-            read_only_compatible: 1 << 1,
+            read_only_compatible: 1 << 2,
             ..Features::default()
         });
-        assert_eq!(with_unknown.read_only_compatible, 0b11);
+        assert_eq!(with_unknown.read_only_compatible, 0b101);
         assert_eq!(
             with_unknown.check(Access::ReadWrite),
-            Err(FormatError::ReadOnlyFeatures { bits: 1 << 1 })
+            Err(FormatError::ReadOnlyFeatures { bits: 1 << 2 })
         );
+    }
+
+    #[test]
+    fn collection_counts_are_a_known_read_only_compatible_bit_one() {
+        assert_eq!(Features::COLLECTION_COUNTS, 2);
+        let counted = Features {
+            read_only_compatible: Features::EXPIRING_KEYS | Features::COLLECTION_COUNTS,
+            ..Features::default()
+        };
+        assert_eq!(counted.check(Access::ReadWrite), Ok(()));
+        assert_eq!(counted.check(Access::ReadOnly), Ok(()));
+        let as_an_older_release_sees_it = counted.read_only_compatible & !Features::EXPIRING_KEYS;
+        assert_eq!(as_an_older_release_sees_it, Features::COLLECTION_COUNTS);
     }
 
     #[test]

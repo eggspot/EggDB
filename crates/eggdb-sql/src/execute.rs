@@ -1,8 +1,8 @@
 use crate::aggregate::{self, shape_of};
 use crate::ast::{
-    BinaryOperator, ConstraintKind, CreateTable, Delete, Expr, ExprKind, Insert, InsertSource,
-    InsertValue, Name, OnDuplicate, OrderItem, Overriding, Select, SelectItem, TableReference,
-    Update,
+    BinaryOperator, ConflictTarget, ConstraintKind, CreateTable, Delete, Expr, ExprKind, Insert,
+    InsertSource, InsertValue, Name, OnDuplicate, OrderItem, Overriding, Select, SelectItem,
+    TableReference, Update,
 };
 use crate::constraints::{self, PreparedChecks, RowChange};
 use crate::dialect::Dialect;
@@ -250,6 +250,16 @@ pub(crate) fn create_table(
     dialect: Dialect,
 ) -> SqlResult<QueryResult> {
     if crate::partition_ddl::wants(create) {
+        if let Some(spec) = create
+            .columns
+            .iter()
+            .find_map(|column| column.generated.as_ref())
+        {
+            return Err(
+                SqlError::not_supported("generated columns in a partitioned table")
+                    .at(spec.position),
+            );
+        }
         return crate::partition_ddl::create_table(writer, tables, create, dialect);
     }
     if create.columns.len() > MAX_COLUMNS {
@@ -393,6 +403,22 @@ pub(crate) fn create_table(
         } else if definition.default.is_some() {
             table.set_default_dialect(index, definition.default_dialect);
         }
+    }
+    let generated: Vec<(usize, &crate::ast::GenerationSpec)> = create
+        .columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, definition)| definition.generated.as_ref().map(|spec| (index, spec)))
+        .collect();
+    if !generated.is_empty() {
+        crate::generated_columns::define(&mut table, &generated, dialect)?;
+        crate::generated_columns::refuse_routine_calls(
+            &*writer, tables, &table, &generated, dialect,
+        )?;
+        if dialect == Dialect::Sqlite {
+            crate::generated_columns::sqlite_primary_key_refused(&table)?;
+        }
+        crate::generated_columns::virtual_index_refused(&table, &table.primary_key)?;
     }
     let specs = unique_columns(create).chain(create.indexes.iter().cloned());
     let mut others = None;
@@ -1163,6 +1189,7 @@ fn with_selected_rows(
         on_duplicate: insert.on_duplicate.clone(),
         conflict_target: insert.conflict_target.clone(),
         rollback_on_conflict: insert.rollback_on_conflict,
+        keeps_changes_on_conflict: insert.keeps_changes_on_conflict,
         overriding: insert.overriding,
     })
 }
@@ -1222,9 +1249,13 @@ fn insert_targets(
                 InsertSource::DefaultValues => identity_value_missing(&insert.table.name),
             });
         }
-        None => (0..table.columns.len())
-            .filter(|&index| Some(index) != identity)
-            .collect(),
+        None => {
+            let hides_generated = crate::generated_columns::hidden_from_column_list(dialect);
+            (0..table.columns.len())
+                .filter(|&index| Some(index) != identity)
+                .filter(|&index| !(hides_generated && table.is_generated(index)))
+                .collect()
+        }
     };
     let InsertSource::Values(rows) = &insert.source else {
         return Ok(targets);
@@ -1320,6 +1351,16 @@ fn insert_rows(
         }
     }
     check_generated_always(&table, &targets, rows, insert.overriding)?;
+    let from_query = matches!(insert.source, InsertSource::Query(_));
+    crate::generated_columns::check_insert(&table, &targets, |slot| {
+        if from_query {
+            return Some(true);
+        }
+        rows.iter()
+            .filter_map(|values| values.get(slot))
+            .map(|value| matches!(value, InsertValue::Expr(_)))
+            .reduce(|any, given| any || given)
+    })?;
     let given_ignored: Vec<bool> = (0..table.columns.len())
         .map(|index| {
             insert.overriding == Some(Overriding::UserValue) && table.identity_of(index).is_some()
@@ -1335,7 +1376,11 @@ fn insert_rows(
         _ => None,
     };
     let arbiter = match &insert.conflict_target {
-        Some(names) => Some(ConflictArbiter::of(&table, names)?),
+        Some(target) => Some(ConflictArbiter::of(
+            &table,
+            target,
+            insert.table.alias.as_deref(),
+        )?),
         None => None,
     };
     let mut changed_once = (dialect == Dialect::PostgreSql && updates.is_some())
@@ -1611,7 +1656,14 @@ pub(crate) fn check_updated_to_default(
     assignments: &[(Name, InsertValue)],
 ) -> SqlResult<()> {
     for (&target, (_, value)) in targets.iter().zip(assignments) {
-        if matches!(value, InsertValue::Expr(_)) && table.is_generated_always(target) {
+        let given = matches!(value, InsertValue::Expr(_));
+        if table.is_generated(target)
+            && !constraints::keeps_identity_values()
+            && (given || crate::generated_columns::refuses_default())
+        {
+            return Err(crate::generated_columns::written(table, target, true));
+        }
+        if given && table.is_generated_always(target) {
             let name = &table.columns[target].name;
             return Err(SqlError::new(
                 SqlState::GENERATED_ALWAYS,
@@ -1768,7 +1820,60 @@ enum ConflictArbiter {
 }
 
 impl ConflictArbiter {
-    fn of(table: &TableDefinition, names: &[Name]) -> SqlResult<Self> {
+    fn of(
+        table: &TableDefinition,
+        target: &ConflictTarget,
+        alias: Option<&str>,
+    ) -> SqlResult<Self> {
+        match target {
+            ConflictTarget::Constraint(name) => Self::named(table, name),
+            ConflictTarget::Inferred {
+                columns,
+                expressions,
+                predicate,
+            } => {
+                let label = alias.unwrap_or_else(|| crate::schemas::base_name(&table.name));
+                for expr in expressions.iter().chain(predicate) {
+                    check_inference_columns(table, label, expr)?;
+                }
+                if !expressions.is_empty() {
+                    return Err(no_matching_arbiter());
+                }
+                Self::inferred(table, columns)
+            }
+        }
+    }
+
+    fn named(table: &TableDefinition, name: &Name) -> SqlResult<Self> {
+        if !table.primary_key.is_empty() && table.primary_key_constraint_name() == name.text {
+            return Ok(Self::PrimaryKey);
+        }
+        if let Some(position) = table.indexes.iter().position(|index| {
+            index.unique && index.backs_unique_constraint && index.name == name.text
+        }) {
+            return Ok(Self::UniqueIndex(position));
+        }
+        let without_index = table.checks.iter().any(|check| check.name == name.text)
+            || table.foreign_keys.iter().any(|key| key.name == name.text);
+        if without_index {
+            return Err(SqlError::new(
+                SqlState::WRONG_OBJECT_TYPE,
+                "constraint in ON CONFLICT clause has no associated index",
+            )
+            .at(name.position));
+        }
+        Err(SqlError::new(
+            SqlState::UNDEFINED_OBJECT,
+            format!(
+                "constraint \"{}\" for table \"{}\" does not exist",
+                name.text,
+                crate::schemas::base_name(&table.name)
+            ),
+        )
+        .at(name.position))
+    }
+
+    fn inferred(table: &TableDefinition, names: &[Name]) -> SqlResult<Self> {
         let mut columns = target_columns(table, names)?;
         columns.sort_unstable();
         let mut primary_key = table.primary_key.clone();
@@ -1781,12 +1886,9 @@ impl ConflictArbiter {
             indexed.sort_unstable();
             index.unique && indexed == columns
         });
-        matching.map(Self::UniqueIndex).ok_or_else(|| {
-            SqlError::new(
-                SqlState::INVALID_COLUMN_REFERENCE,
-                "there is no unique or exclusion constraint matching the ON CONFLICT specification",
-            )
-        })
+        matching
+            .map(Self::UniqueIndex)
+            .ok_or_else(no_matching_arbiter)
     }
 
     fn decides(self, conflict: &Conflict) -> bool {
@@ -1795,6 +1897,85 @@ impl ConflictArbiter {
             Self::UniqueIndex(position) => conflict.index == Some(position),
         }
     }
+}
+
+pub(crate) fn routed_conflict_target(
+    table: &TableDefinition,
+    target: &ConflictTarget,
+) -> SqlResult<ConflictTarget> {
+    let ConflictTarget::Constraint(name) = target else {
+        return Ok(target.clone());
+    };
+    let columns = match ConflictArbiter::named(table, name)? {
+        ConflictArbiter::PrimaryKey => table.primary_key.clone(),
+        ConflictArbiter::UniqueIndex(position) => table
+            .indexes
+            .get(position)
+            .map(|index| index.columns.clone())
+            .unwrap_or_default(),
+    };
+    Ok(ConflictTarget::Inferred {
+        columns: columns
+            .iter()
+            .filter_map(|&column| table.columns.get(column))
+            .map(|column| Name {
+                text: column.name.clone(),
+                position: name.position,
+            })
+            .collect(),
+        expressions: Vec::new(),
+        predicate: None,
+    })
+}
+
+fn no_matching_arbiter() -> SqlError {
+    if crate::constraints::current_dialect() == Dialect::Sqlite {
+        return SqlError::new(
+            SqlState::INVALID_COLUMN_REFERENCE,
+            "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint",
+        )
+        .with_sqlite_code(1);
+    }
+    SqlError::new(
+        SqlState::INVALID_COLUMN_REFERENCE,
+        "there is no unique or exclusion constraint matching the ON CONFLICT specification",
+    )
+}
+
+fn check_inference_columns(table: &TableDefinition, label: &str, expr: &Expr) -> SqlResult<()> {
+    match &expr.kind {
+        ExprKind::Subquery(_) => {
+            return Err(SqlError::new(
+                SqlState::FEATURE_NOT_SUPPORTED,
+                "cannot use subquery in index predicate",
+            )
+            .at(expr.position));
+        }
+        ExprKind::Column {
+            qualifier: Some(qualifier),
+            ..
+        } if !qualifier.eq_ignore_ascii_case(label)
+            && !crate::schemas::base_name(qualifier).eq_ignore_ascii_case(label) =>
+        {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_TABLE,
+                format!("missing FROM-clause entry for table \"{qualifier}\""),
+            )
+            .at(expr.position));
+        }
+        ExprKind::Column { name, .. } if table.column_index(name).is_none() => {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_COLUMN,
+                format!("column \"{name}\" does not exist"),
+            )
+            .at(expr.position));
+        }
+        _ => {}
+    }
+    for child in crate::eval::children(expr) {
+        check_inference_columns(table, label, child)?;
+    }
+    Ok(())
 }
 
 fn row_affected_twice() -> SqlError {
@@ -2021,6 +2202,9 @@ impl<'a> StoredRows<'a> {
         let mut combined = existing.clone();
         combined.extend_from_slice(inserted);
         for (index, expr) in updates {
+            if table.is_generated(*index) {
+                return Err(crate::generated_columns::written(table, *index, true));
+            }
             let column = &table.columns[*index];
             let value = Evaluator {
                 scope,
@@ -2042,6 +2226,9 @@ impl<'a> StoredRows<'a> {
             )? == RowOutcome::Skip
         {
             return Ok(UpsertOutcome::Skipped);
+        }
+        if let Some(checks) = self.checks {
+            checks.generate(table, &mut combined)?;
         }
         if combined == existing {
             if let Some((firing, tables)) = firing {
@@ -2120,6 +2307,9 @@ impl<'a> StoredRows<'a> {
         let table = self.table;
         if self.auto_increment.is_some() {
             self.fill_auto_increment(writer, row)?;
+        }
+        if let Some(checks) = self.checks {
+            checks.generate(table, row)?;
         }
         check_not_null(table, row)?;
         if let Some(checks) = self.checks {
@@ -2283,6 +2473,7 @@ fn insert_literals_into_view(
         on_duplicate: OnDuplicate::Fail,
         conflict_target: None,
         rollback_on_conflict: false,
+        keeps_changes_on_conflict: false,
         overriding: None,
     };
     self::insert(writer, tables, &statement)
@@ -2327,6 +2518,7 @@ fn insert_literals_routed(
         on_duplicate: OnDuplicate::Fail,
         conflict_target: None,
         rollback_on_conflict: false,
+        keeps_changes_on_conflict: false,
         overriding: None,
     };
     self::insert(writer, tables, &statement)
@@ -2341,6 +2533,9 @@ pub(crate) fn insert_literals(
         return insert_literals_into_view(writer, tables, insert);
     }
     let table = tables.require_target(writer, &insert.table.name, "insert into")?;
+    if !table.generated.is_empty() {
+        return insert_literals_into_view(writer, tables, insert);
+    }
     if insert.width > table.columns.len() {
         return Err(SqlError::syntax(
             "INSERT has more expressions than target columns",
@@ -3044,6 +3239,20 @@ pub(crate) fn row_limit(expr: Option<&Expr>) -> SqlResult<RowLimit> {
                     ..unlimited
                 });
             }
+            "postgresql_fetch_with_ties" => {
+                let Some(count) = row_count(Some(count), "LIMIT")? else {
+                    return Err(SqlError::new(
+                        SqlState::INVALID_ROW_COUNT_IN_LIMIT_CLAUSE,
+                        "row count cannot be null in FETCH FIRST ... WITH TIES clause",
+                    )
+                    .at(count.position));
+                };
+                return Ok(RowLimit {
+                    count: Some(count),
+                    with_ties: true,
+                    ..unlimited
+                });
+            }
             "oracle_fetch_percent" | "oracle_fetch_percent_with_ties" => {
                 return Ok(RowLimit {
                     count: None,
@@ -3393,6 +3602,37 @@ pub(crate) struct ExplainedQuery {
     pub(crate) limited: bool,
     pub(crate) filtered: bool,
     pub(crate) appended: bool,
+    pub(crate) filter: Option<Expr>,
+    pub(crate) join_conditions: Vec<Option<Expr>>,
+    pub(crate) order_by: Vec<crate::ast::OrderItem>,
+    pub(crate) row_limit: Option<u64>,
+    pub(crate) row_offset: u64,
+    pub(crate) subplans: Vec<crate::explain::Subplan>,
+}
+
+pub(crate) fn explain_select(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    select: &Select,
+) -> SqlResult<ExplainedQuery> {
+    let mut out = ExplainedQuery::default();
+    select_or_explain(reader, tables, select, false, Some(&mut out), None)?;
+    Ok(out)
+}
+
+pub(crate) fn explain_with_subplans(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    statement: &crate::ast::Statement,
+) -> SqlResult<ExplainedQuery> {
+    match statement {
+        crate::ast::Statement::Select(query)
+            if crate::subquery::needs_preparation(query) && union_branches(query).is_none() =>
+        {
+            crate::explain::explain_subplans(reader, tables, query)
+        }
+        _ => explain(reader, tables, statement),
+    }
 }
 
 fn union_branches(query: &Select) -> Option<Vec<&Select>> {
@@ -3473,6 +3713,7 @@ pub(crate) fn explain(
     }
     let access = plan::plan(&table, scope, filter, None);
     out.filtered = filter.is_some();
+    out.filter = filter.cloned();
     out.sources.push(ExplainedSource {
         label: reference
             .alias
@@ -3586,6 +3827,20 @@ fn select_or_explain(
         out.limited = limit.is_limited();
         out.filtered = select.filter.is_some();
         out.sorted = !sort_keys.is_empty();
+        out.filter = select.filter.clone();
+        out.order_by = select.order_by.clone();
+        out.row_limit = limit.count;
+        out.row_offset = offset;
+        if let Some(from) = &select.from
+            && joined.is_some()
+        {
+            out.join_conditions = std::iter::once(None)
+                .chain(from.joins.iter().map(|join| match &join.condition {
+                    crate::ast::JoinCondition::On(condition) => Some(condition.clone()),
+                    _ => None,
+                }))
+                .collect();
+        }
         if let Some(joined) = &joined {
             let methods = joined.methods();
             for (position, source) in joined.sources.list.iter().enumerate() {
@@ -4206,8 +4461,17 @@ pub(crate) fn update(
     tables: &mut TableCache,
     update: &Update,
 ) -> SqlResult<QueryResult> {
+    update_with_row_movement(writer, tables, update, None)
+}
+
+pub(crate) fn update_with_row_movement(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    update: &Update,
+    moved: Option<&mut Vec<crate::partition_dml::MovedRow>>,
+) -> SqlResult<QueryResult> {
     let check_appended = crate::row_security::has_new_row_check(update.returning.as_deref());
-    let result = update_rows(writer, tables, update)?;
+    let result = update_rows(writer, tables, update, moved)?;
     crate::row_security::checked_new_rows(result, &update.table.name.text, check_appended)
 }
 
@@ -4215,6 +4479,7 @@ fn update_rows(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
     update: &Update,
+    moved: Option<&mut Vec<crate::partition_dml::MovedRow>>,
 ) -> SqlResult<QueryResult> {
     if let Some(joined) = &update.from {
         return crate::joined_dml::update(writer, tables, update, joined);
@@ -4235,12 +4500,13 @@ fn update_rows(
     let update = prepared.as_ref().unwrap_or(update);
     let table = tables.require_target(writer, &update.table.name, "update")?;
     if let Some(partitioned) = crate::partitions::partitioned(writer, tables, &table)? {
-        return crate::partition_dml::update(writer, tables, update, &partitioned);
+        return crate::partition_dml::update(writer, tables, update, &partitioned, moved);
     }
     if crate::sequences::mentions_nextval(&table) {
         crate::sequences::load_all(writer)?;
     }
     let checks = PreparedChecks::of(&table)?.with_partitions(writer, tables, &table)?;
+    let may_move = moved.is_some();
     let rule = assignment_rule(constraints::current_dialect());
     let referenced = constraints::is_referenced(&table);
     let keep_old = !table.indexes.is_empty() || referenced || !table.foreign_keys.is_empty();
@@ -4312,8 +4578,9 @@ fn update_rows(
             for ((_, value), &index) in update.assignments.iter().zip(&targets) {
                 new_row[index] = assigned_value(&evaluator, value, &table, index, rule)?;
             }
+            checks.generate(&table, &mut new_row)?;
             check_not_null(&table, &new_row)?;
-            if !checks.is_empty() {
+            if !checks.is_empty() && !(may_move && !checks.fits_partition(&new_row)) {
                 checks.check(&table, &new_row)?;
             }
             if let Some(projection) = &returning {
@@ -4349,8 +4616,9 @@ fn update_rows(
             {
                 continue;
             }
+            checks.generate(&table, &mut new_row)?;
             check_not_null(&table, &new_row)?;
-            if !checks.is_empty() {
+            if !checks.is_empty() && !(may_move && !checks.fits_partition(&new_row)) {
                 checks.check(&table, &new_row)?;
             }
             let new_key = if table.primary_key.is_empty() {
@@ -4366,6 +4634,18 @@ fn update_rows(
         old_rows = kept_old;
         result_rows = kept_results;
     }
+    let moved_count = match moved {
+        Some(moved) => crate::partition_dml::move_out(
+            writer,
+            tables,
+            &table,
+            &checks,
+            &mut changes,
+            &mut old_rows,
+            moved,
+        )?,
+        None => 0,
+    };
     write_updated_rows(writer, tables, &table, &changes, &old_rows, &mut |_| Ok(()))?;
     if let Some(mut firing) = firing {
         for ((_, _, new_row), old_row) in changes.iter().zip(&old_rows) {
@@ -4378,7 +4658,7 @@ fn update_rows(
         }
         firing.finish();
     }
-    let tag = format!("UPDATE {}", changes.len());
+    let tag = format!("UPDATE {}", changes.len() + moved_count);
     Ok(match columns {
         Some(columns) => QueryResult::rows(tag, columns, result_rows),
         None => QueryResult::command(tag),

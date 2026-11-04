@@ -892,6 +892,12 @@ fn dropping_or_disabling_a_trigger_or_row_security_is_destructive() {
             DestructiveKind::DisableRowSecurity,
             "t",
         ),
+        (
+            Dialect::PostgreSql,
+            "ALTER TABLE t NO FORCE ROW LEVEL SECURITY",
+            DestructiveKind::NoForceRowSecurity,
+            "t",
+        ),
     ] {
         let found = statement(dialect, text);
         assert_eq!(found.parts[0].kind, expected, "{text}");
@@ -899,6 +905,7 @@ fn dropping_or_disabling_a_trigger_or_row_security_is_destructive() {
     }
     for text in [
         "ALTER TABLE t ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE ONLY t FORCE ROW LEVEL SECURITY",
         "ALTER TABLE inserted ENABLE TRIGGER inserted_wipes",
         "CREATE POLICY own_rows ON t USING (id > 0)",
     ] {

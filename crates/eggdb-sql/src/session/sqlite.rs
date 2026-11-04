@@ -268,6 +268,20 @@ fn table_info_columns() -> Vec<OutputColumn> {
     ]
 }
 
+fn table_xinfo_columns() -> Vec<OutputColumn> {
+    let mut columns = table_info_columns();
+    columns.push(column("hidden", Some(SqlType::BigInt)));
+    columns
+}
+
+fn hidden_code(column: &crate::schema::ColumnSchema) -> i64 {
+    match &column.generation {
+        Some(generation) if generation.stored => 3,
+        Some(_) => 2,
+        None => 0,
+    }
+}
+
 fn table_list_columns() -> Vec<OutputColumn> {
     vec![
         column("schema", Some(SqlType::Text)),
@@ -334,6 +348,7 @@ impl<'s> Session<'s> {
     pub(super) fn pragma_columns(&self, pragma: &Pragma) -> Option<Vec<OutputColumn>> {
         match pragma.name.as_str() {
             "table_info" if pragma.argument.is_some() => Some(table_info_columns()),
+            "table_xinfo" if pragma.argument.is_some() => Some(table_xinfo_columns()),
             "table_list" => Some(table_list_columns()),
             "index_list" if pragma.argument.is_some() => Some(index_list_columns()),
             "index_info" if pragma.argument.is_some() => Some(index_info_columns()),
@@ -350,7 +365,8 @@ impl<'s> Session<'s> {
         let state = &self.settings.sqlite;
         let pragma_done = || QueryResult::command("PRAGMA");
         Ok(match (pragma.name.as_str(), argument) {
-            ("table_info", Some(table)) => {
+            (pragma_name @ ("table_info" | "table_xinfo"), Some(table)) => {
+                let extended = pragma_name == "table_xinfo";
                 let table = table.to_lowercase();
                 let found = self.read(|reader, _| {
                     let Some(schema) = read_tables(reader)?
@@ -367,6 +383,7 @@ impl<'s> Session<'s> {
                     Some((schema, declared)) => schema
                         .columns
                         .iter()
+                        .filter(|column| extended || column.generation.is_none())
                         .enumerate()
                         .map(|(index, column)| {
                             let type_text = declared
@@ -382,19 +399,28 @@ impl<'s> Session<'s> {
                                 .position(|name| *name == column.name)
                                 .map_or(0, |position| position as i64 + 1);
                             let not_null = column.not_null && key_position == 0;
-                            vec![
+                            let mut row = vec![
                                 Value::BigInt(index as i64),
                                 Value::Text(column.name.clone()),
                                 Value::Text(type_text),
                                 Value::BigInt(i64::from(not_null)),
                                 column.default.clone().map_or(Value::Null, Value::Text),
                                 Value::BigInt(key_position),
-                            ]
+                            ];
+                            if extended {
+                                row.push(Value::BigInt(hidden_code(column)));
+                            }
+                            row
                         })
                         .collect(),
                     None => Vec::new(),
                 };
-                rows_result(table_info_columns(), rows)
+                let columns = if extended {
+                    table_xinfo_columns()
+                } else {
+                    table_info_columns()
+                };
+                rows_result(columns, rows)
             }
             ("index_list", Some(table)) => {
                 let table = table.to_lowercase();
@@ -579,6 +605,7 @@ impl<'s> Session<'s> {
                     unique: None,
                     constraints: Vec::new(),
                     comment: None,
+                    generated: None,
                 })
                 .collect(),
             primary_key: None,
@@ -656,6 +683,7 @@ impl<'s> Session<'s> {
                 on_duplicate: OnDuplicate::Fail,
                 conflict_target: None,
                 rollback_on_conflict: false,
+                keeps_changes_on_conflict: false,
                 overriding: None,
             };
             execute::insert(&mut scratch, &mut cache, &insert)?;

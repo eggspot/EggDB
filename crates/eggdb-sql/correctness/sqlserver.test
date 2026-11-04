@@ -1069,7 +1069,7 @@ CREATE TABLE Versioned40 (id INT NOT NULL PRIMARY KEY) WITH (SYSTEM_VERSIONING =
 error 0A000 40517
 CREATE TABLE Files40 (id INT PRIMARY KEY) ON [PRIMARY] FILESTREAM_ON [FileGroup1]
 
-error 0A000 40517
+ok
 CREATE TABLE Computed40 (id INT PRIMARY KEY, qty INT NOT NULL, doubled AS (qty * 2) PERSISTED)
 
 chapter "ALTER TABLE (Transact-SQL)"
@@ -2449,3 +2449,101 @@ SELECT 3
 
 ok
 DROP TABLE Staff300
+
+chapter "SET XACT_ABORT": with XACT_ABORT OFF a duplicate key ends only its statement, with ON it rolls back the transaction
+ok
+CREATE TABLE rb317 (id INT PRIMARY KEY)
+
+ok
+BEGIN TRAN
+
+ok
+INSERT INTO rb317 VALUES (1)
+
+error 23505 2627
+INSERT INTO rb317 VALUES (1)
+
+error 23505 2627
+INSERT INTO rb317 VALUES (3), (1)
+
+ok
+INSERT INTO rb317 VALUES (2)
+
+rows
+SELECT @@TRANCOUNT AS open_transactions
+----
+open_transactions
+1
+SELECT 1
+
+ok
+COMMIT
+
+rows
+SELECT id FROM rb317 ORDER BY id
+----
+id
+1
+2
+SELECT 2
+
+ok
+SET XACT_ABORT ON
+
+ok
+BEGIN TRAN
+
+ok
+INSERT INTO rb317 VALUES (10)
+
+error 23505 2627
+INSERT INTO rb317 VALUES (11), (1)
+
+rows
+SELECT COUNT(*) AS n, @@TRANCOUNT AS open_transactions FROM rb317
+----
+n|open_transactions
+2|0
+SELECT 1
+
+ok
+SET XACT_ABORT OFF
+
+ok
+DROP TABLE rb317
+
+chapter "STDEV (Transact-SQL)", "STDEVP (Transact-SQL)", "VAR (Transact-SQL)", "VARP (Transact-SQL)": float results, NULL for STDEV and VAR of one value, DISTINCT and OVER
+ok
+CREATE TABLE Stats321 (g INT, v INT)
+
+ok
+INSERT INTO Stats321 VALUES (1, 1), (1, 3), (1, 5), (1, 7), (2, 0), (2, 2), (2, 4), (2, 4), (3, 6)
+
+rows
+SELECT STDEVP(v) AS sp, VARP(v) AS vp FROM Stats321 WHERE g = 1
+----
+sp|vp
+2.23606797749979|5
+SELECT 1
+
+rows
+SELECT g, STDEV(DISTINCT v) AS s, VAR(DISTINCT v) AS va, STDEVP(v) AS sp, VARP(v) AS vp FROM Stats321 WHERE g = 3 OR g = 2 AND v < 4 GROUP BY g ORDER BY g
+----
+g|s|va|sp|vp
+2|1.4142135623730951|2|1|1
+3|NULL|NULL|0|0
+SELECT 2
+
+rows
+SELECT v, VARP(v) OVER (ORDER BY v ROWS UNBOUNDED PRECEDING) AS vp FROM Stats321 WHERE g = 1 ORDER BY v
+----
+v|vp
+1|0
+3|1
+5|2.6666666666666665
+7|5
+SELECT 4
+
+ok
+DROP TABLE Stats321
+

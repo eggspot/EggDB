@@ -5,6 +5,7 @@ mod failure;
 mod help;
 mod jsonl;
 mod output;
+mod progress;
 mod render;
 mod reports;
 mod sqlite_import;

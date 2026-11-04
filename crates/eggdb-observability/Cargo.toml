@@ -1,6 +1,6 @@
 [package]
 name = "eggdb-observability"
-description = "EggDB's metrics store: InfluxDB line protocol and Prometheus remote write into SQL tables, and PromQL through the Prometheus HTTP API."
+description = "EggDB's metrics and logs store: InfluxDB line protocol and Prometheus remote write into SQL tables, PromQL through the Prometheus HTTP API, and syslog over UDP and TCP into the syslog table."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,4 +13,5 @@ workspace = true
 eggdb-columnar = { path = "../eggdb-columnar" }
 eggdb-crypto = { path = "../eggdb-crypto" }
 eggdb-http = { path = "../eggdb-http" }
+eggdb-platform = { path = "../eggdb-platform" }
 eggdb-sql = { path = "../eggdb-sql" }

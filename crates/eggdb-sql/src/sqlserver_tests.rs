@@ -58,7 +58,7 @@ fn constraint_violations_end_their_statement_and_other_errors_end_the_batch() {
 }
 
 #[test]
-fn an_error_that_rolls_back_the_transaction_ends_the_batch_without_committing_later_statements() {
+fn a_duplicate_key_in_a_transaction_ends_only_its_statement_and_the_batch_goes_on() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::SqlServer);
     batch(
@@ -71,12 +71,17 @@ fn an_error_that_rolls_back_the_transaction_ends_the_batch_without_committing_la
         "BEGIN TRAN INSERT INTO t VALUES (2) INSERT INTO t VALUES (3), (1) INSERT INTO t VALUES (4) COMMIT",
     )
     .unwrap();
-    assert_eq!(codes(&steps), vec![None, None, Some(2627)]);
-    assert!(steps[1].in_transaction);
-    assert!(!steps[2].in_transaction);
+    assert_eq!(codes(&steps), vec![None, None, Some(2627), None, None]);
+    assert!(steps[2].in_transaction);
+    assert!(steps[3].in_transaction);
+    assert!(!steps[4].in_transaction);
     assert_eq!(
-        values(&mut session, "SELECT count(*) AS n FROM t"),
-        vec![vec![Value::Integer(1)]]
+        values(&mut session, "SELECT id FROM t ORDER BY id"),
+        vec![
+            vec![Value::Integer(1)],
+            vec![Value::Integer(2)],
+            vec![Value::Integer(4)]
+        ]
     );
 }
 

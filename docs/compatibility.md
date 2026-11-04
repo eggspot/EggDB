@@ -114,7 +114,19 @@ shows a `Triggers` group (one row per trigger, its events as right text) and a `
 block in its inspector; a trigger's inspector shows its action. `Enter` on a key space opens a
 `Keys in <space>` tab listing its first 100 keys with the first 64 bytes of their values and their
 sizes in bytes, spelled as `eggdb ui` spells them, with invisible characters (bidirectional
-overrides, zero-width characters) as `\xNN` (a file only for now; on a server the tab is empty).
+overrides, zero-width characters) as `\xNN` (a SQL server reads no key spaces, so its tab is
+empty). Connect with a `redis://` URL (protocol `Redis (RESP)`, `Use TLS` unchecked) to browse a
+RESP server, EggDB's or another compatible one: the tree shows one `Keys` group with `resp0` and
+every other database of `resp1` … `resp15` that holds keys, and their keys tabs list each key's
+`type` (`string`, `hash`, `list`, `set`, `zset`, `stream`), a string's first 64 bytes and size, an
+aggregate's count (`12 fields`), paged by the server's `SCAN` cursor (`SCAN resp3 PREFIX 'user:'
+CURSOR 1532 LIMIT 100`), with the server's error line and a `Try:` line when it refuses.
+Type a prefix in its `Key prefix` field (`/` or `Ctrl/Cmd+F`; `\xNN` for any byte) to list only
+the keys starting with it, and page with `Next 100` and `Back` (`Alt+PgDn`, `Alt+PgUp`); the editor
+line states what ran, such as `SCAN users PREFIX 'user:' AFTER 'user:0099' LIMIT 100`. Right-click
+the editor or press `Shift+F10` for `Cut`, `Copy`, `Paste`, `Select all`, `Run statement`,
+`Explain`, `Toggle comment` (`Ctrl/Cmd+/`) and `Format statement` (`Ctrl/Cmd+Shift+F`); `Show DDL`
+moves the focus to the inspector's DDL box (D329).
 
 Drag or key the splitters beside the sidebar (180 to 480 px), between the editor and the results,
 and beside a docked inspector (200 to 480 px): arrows move 8 px, `Shift` 32, `Home` / `End` to the

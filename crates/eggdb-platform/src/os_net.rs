@@ -3,6 +3,7 @@ use crate::net::{
     Address, NetBackend, NetCompletion, NetListener, NetOp, NetOutput, NetQueue, NetQueueOptions,
     NetStream, Network, RejectedNetOp, answered_at_once, net_queue_full,
 };
+use crate::os_datagram::OsDatagramSocket;
 use crate::os_io_uring::NetRing;
 use crate::os_iocp_net::NetPort;
 #[cfg(windows)]
@@ -28,7 +29,8 @@ use std::time::{Duration, Instant};
 /// [`OsNetQueue::backend`] says which one a queue runs.
 /// Connections have Nagle's algorithm turned off, as database protocols send small requests
 /// and answers, and never raise `SIGPIPE`, so a process embedding EggDB is not stopped by a
-/// peer that went away.
+/// peer that went away. Its UDP sockets ([`OsDatagramSocket`]) are the operating system's,
+/// read by a blocking receive with a timeout.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OsNetwork;
 
@@ -43,6 +45,7 @@ impl Network for OsNetwork {
     type Listener = OsListener;
     type Stream = OsStream;
     type Queue = OsNetQueue;
+    type Datagram = OsDatagramSocket;
 
     fn listen(&self, address: Address) -> Result<OsListener> {
         let Address::Tcp(address) = address;
@@ -73,6 +76,10 @@ impl Network for OsNetwork {
             engine,
             canceled: Vec::new(),
         })
+    }
+
+    fn bind_datagram(&self, address: SocketAddr) -> Result<OsDatagramSocket> {
+        OsDatagramSocket::bind(address)
     }
 }
 
@@ -125,12 +132,28 @@ impl NetStream for OsStream {
     }
 
     fn peer_address(&self) -> Result<Address> {
-        Ok(Address::Tcp(self.stream.peer_addr()?))
+        let peer = self.stream.peer_addr().map_err(not_connected_once_reset)?;
+        Ok(Address::Tcp(peer))
     }
 
     fn shutdown_write(&self) -> Result<()> {
-        Ok(self.stream.shutdown(Shutdown::Write)?)
+        let shutdown = self.stream.shutdown(Shutdown::Write);
+        Ok(shutdown.map_err(not_connected_once_reset)?)
     }
+}
+
+#[cfg(target_vendor = "apple")]
+fn not_connected_once_reset(error: io::Error) -> io::Error {
+    if error.kind() == io::ErrorKind::InvalidInput {
+        io::Error::from(io::ErrorKind::NotConnected)
+    } else {
+        error
+    }
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn not_connected_once_reset(error: io::Error) -> io::Error {
+    error
 }
 
 type Op = NetOp<OsListener, OsStream>;
@@ -170,6 +193,14 @@ impl OsNetQueue {
             Engine::Readiness(queue) => queue.backend(),
             Engine::Uring(_) => NetBackend::IoUring,
             Engine::Port(_) => NetBackend::Iocp,
+        }
+    }
+
+    #[cfg(test)]
+    fn readiness_waits(&self) -> Option<u64> {
+        match &self.engine {
+            Engine::Readiness(queue) => Some(queue.waits()),
+            _ => None,
         }
     }
 
@@ -590,6 +621,51 @@ mod tests {
             assert_eq!(queue.reap(&mut completions, 0).unwrap(), 0);
             assert!(started.elapsed() < Duration::from_secs(1), "{backend:?}");
             assert_eq!(queue.in_flight(), 4);
+        }
+    }
+
+    #[test]
+    fn a_reap_already_satisfied_waits_for_no_readiness() {
+        for backend in backends() {
+            let network = OsNetwork::new();
+            let listener = Arc::new(network.listen(any_port()).unwrap());
+            let mut queue = network.net_queue(options(backend)).unwrap();
+            if queue.readiness_waits().is_none() {
+                continue;
+            }
+            let (server, client) = connected_pair(&mut queue, &listener);
+            let (server, client) = (Arc::new(server), Arc::new(client));
+            let receive = NetOp::Receive {
+                stream: Arc::clone(&server),
+                buffer: vec![0; 64].into(),
+            };
+            queue.submit(receive, 0).unwrap();
+            let mut completions = Vec::new();
+            queue.reap(&mut completions, 0).unwrap();
+            assert!(completions.is_empty(), "{backend:?}");
+            let waits = queue.readiness_waits();
+            let send_one_byte = |queue: &mut OsNetQueue, completions: &mut Vec<_>| {
+                let send = NetOp::Send {
+                    stream: Arc::clone(&client),
+                    buffer: vec![1; 1].into(),
+                };
+                queue.submit(send, 1).unwrap();
+                queue.reap(completions, 1).unwrap();
+            };
+            send_one_byte(&mut queue, &mut completions);
+            assert_eq!(completions.len(), 1, "{backend:?}");
+            assert_eq!(completions[0].user_data, 1, "{backend:?}");
+            assert_eq!(queue.readiness_waits(), waits, "{backend:?}");
+            let mut sends = 1;
+            while !completions
+                .iter()
+                .any(|completion| completion.user_data == 0)
+            {
+                assert!(sends < 64, "{backend:?}: the receive was never polled");
+                send_one_byte(&mut queue, &mut completions);
+                sends += 1;
+            }
+            assert!(queue.readiness_waits() > waits, "{backend:?}");
         }
     }
 

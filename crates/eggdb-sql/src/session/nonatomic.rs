@@ -172,6 +172,7 @@ impl<'s> Session<'s> {
             && self.autocommit()
             && (!self.implicit_transaction || self.statement_stands_alone)
             && !self.savepoints.is_active()
+            && !self.new_transactions_read_only()
     }
 
     pub(super) fn write_nonatomic(

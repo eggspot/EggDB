@@ -731,3 +731,197 @@ fn refcursor_arrays_hold_cursor_names_and_table_columns_hold_them_as_text_arrays
         "c|t\n{x,y}|text[]\nSELECT 1"
     );
 }
+
+#[test]
+fn reset_all_inside_a_function_resets_every_parameter_for_the_rest_of_the_session() {
+    let store = MemoryStore::default();
+    let mut session = session_with(
+        &store,
+        &[
+            "SET app.mode = 'session'",
+            "SET search_path = hidden, public",
+            "CREATE FUNCTION wipe() RETURNS text LANGUAGE plpgsql AS $$ BEGIN RESET ALL; \
+             RETURN coalesce(current_setting('app.mode', true), 'gone'); END $$",
+        ],
+    );
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT wipe(), current_setting('app.mode', true) AS after"
+        ),
+        "wipe|after\ngone|NULL\nSELECT 1"
+    );
+    assert_eq!(shown(&mut session, "search_path"), "\"$user\", public");
+    assert_eq!(
+        answer(&mut session, "SELECT current_setting('app.mode', true)"),
+        "current_setting\nNULL\nSELECT 1"
+    );
+}
+
+#[test]
+fn set_eggdb_dialect_inside_a_procedure_switches_the_session_after_the_call() {
+    let store = MemoryStore::default();
+    let mut session = session_with(
+        &store,
+        &[
+            "CREATE PROCEDURE to_oracle() LANGUAGE plpgsql AS $$ BEGIN \
+             SET eggdb.dialect = 'oracle'; END $$",
+            "CREATE PROCEDURE to_nowhere() LANGUAGE plpgsql AS $$ BEGIN \
+             SET eggdb.dialect = 'nowhere'; END $$",
+        ],
+    );
+    assert_eq!(
+        refusal(&mut session, "CALL to_nowhere()").state(),
+        SqlState::INVALID_PARAMETER_VALUE
+    );
+    answer(&mut session, "BEGIN");
+    let mut notices = Vec::new();
+    session
+        .execute("CALL to_oracle()", &mut |result| {
+            notices.extend(result.notices)
+        })
+        .expect("call in a block");
+    assert_eq!(
+        notices,
+        vec!["WARNING:  eggdb.dialect cannot change inside a transaction".to_owned()]
+    );
+    assert_eq!(session.dialect(), crate::Dialect::PostgreSql);
+    answer(&mut session, "ROLLBACK");
+    answer(&mut session, "CALL to_oracle()");
+    assert_eq!(session.dialect(), crate::Dialect::Oracle);
+}
+
+#[test]
+fn a_refused_dialect_change_in_a_trigger_of_a_literal_insert_warns() {
+    let store = MemoryStore::default();
+    let mut session = session_with(
+        &store,
+        &[
+            "CREATE TABLE t (a integer)",
+            "CREATE FUNCTION to_oracle() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+             SET eggdb.dialect = 'oracle'; RETURN NEW; END $$",
+            "CREATE TRIGGER switch BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION to_oracle()",
+        ],
+    );
+    answer(&mut session, "BEGIN");
+    let mut notices = Vec::new();
+    session
+        .execute("INSERT INTO t VALUES (1), (2)", &mut |result| {
+            notices.extend(result.notices)
+        })
+        .expect("insert in a block");
+    assert!(
+        notices.contains(&"WARNING:  eggdb.dialect cannot change inside a transaction".to_owned()),
+        "{notices:?}"
+    );
+    assert_eq!(session.dialect(), crate::Dialect::PostgreSql);
+    answer(&mut session, "ROLLBACK");
+}
+
+#[test]
+fn alter_function_set_and_reset_change_the_settings_stored_with_the_routine() {
+    let store = MemoryStore::default();
+    let mut session = session_with(
+        &store,
+        &[
+            "CREATE FUNCTION check_password(uname text) RETURNS text LANGUAGE sql \
+             AS $$ SELECT current_setting('search_path') $$",
+            "CREATE PROCEDURE insert_data(a integer, b integer) LANGUAGE plpgsql \
+             AS $$ BEGIN PERFORM 1; END $$",
+        ],
+    );
+    let default_path = shown(&mut session, "search_path");
+    answer(
+        &mut session,
+        "ALTER FUNCTION check_password(text) SET search_path = admin, pg_temp",
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT check_password('joe')"),
+        "check_password\nadmin, pg_temp\nSELECT 1"
+    );
+    let mut reopened = Session::new(&store);
+    assert_eq!(
+        answer(&mut reopened, "SELECT check_password('joe')"),
+        "check_password\nadmin, pg_temp\nSELECT 1"
+    );
+    answer(
+        &mut session,
+        "ALTER FUNCTION check_password(text) RESET search_path",
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT check_password('joe')"),
+        format!("check_password\n{default_path}\nSELECT 1")
+    );
+    answer(
+        &mut session,
+        "ALTER PROCEDURE insert_data(integer, integer) SET search_path = admin, public",
+    );
+    answer(&mut session, "CALL insert_data(1, 2)");
+    answer(&mut session, "SET app.mode = 'captured'");
+    answer(
+        &mut session,
+        "ALTER FUNCTION check_password SET search_path FROM CURRENT SET app.mode TO 'x' \
+         RESET app.mode",
+    );
+    answer(&mut session, "SET search_path = public");
+    assert_eq!(
+        answer(&mut session, "SELECT check_password('joe')"),
+        format!("check_password\n{default_path}\nSELECT 1")
+    );
+    answer(
+        &mut session,
+        "ALTER FUNCTION check_password(text) RESET ALL",
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT check_password('joe')"),
+        "check_password\npublic\nSELECT 1"
+    );
+    for statement in [
+        "ALTER FUNCTION check_password(text) SET work_mem_of_nothing = '7MB'",
+        "ALTER FUNCTION check_password(text) RESET work_mem_of_nothing",
+        "CREATE FUNCTION tuned() RETURNS int LANGUAGE sql SET work_mem_of_nothing = '7MB' \
+         AS 'SELECT 1'",
+    ] {
+        let error = refusal(&mut session, statement);
+        assert_eq!(error.state().code(), "42704", "{statement}");
+        assert_eq!(
+            error.message(),
+            "unrecognized configuration parameter \"work_mem_of_nothing\"",
+            "{statement}"
+        );
+    }
+    assert_eq!(
+        answer(&mut session, "SELECT check_password('joe')"),
+        "check_password\npublic\nSELECT 1"
+    );
+}
+
+#[test]
+fn current_setting_sees_what_a_routine_set_earlier_in_the_same_statement() {
+    let store = MemoryStore::default();
+    let mut session = session_with(
+        &store,
+        &[
+            "CREATE FUNCTION set_tenant() RETURNS text LANGUAGE plpgsql AS $$ BEGIN \
+             SET app.tenant = 'acme'; RETURN 'set'; END $$",
+        ],
+    );
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT set_tenant(), current_setting('app.tenant') AS tenant"
+        ),
+        "set_tenant|tenant\nset|acme\nSELECT 1"
+    );
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT set_config('app.q', 'v', true), current_setting('app.q', true) AS q"
+        ),
+        "set_config|q\nv|v\nSELECT 1"
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT current_setting('app.unset', true)"),
+        "current_setting\nNULL\nSELECT 1"
+    );
+}

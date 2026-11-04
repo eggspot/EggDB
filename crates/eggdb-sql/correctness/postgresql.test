@@ -1211,7 +1211,7 @@ id
 1
 INSERT 0 1
 
-error 0A000
+ok
 CREATE TABLE stored (a integer, b integer GENERATED ALWAYS AS (a * 2) STORED)
 
 chapter datatype-datetime
@@ -4856,5 +4856,710 @@ SELECT name FROM scores300 ORDER BY score LIMIT 1 FETCH FIRST 1 ROW ONLY
 error 2201W
 SELECT name FROM scores300 ORDER BY score FETCH FIRST -1 ROWS ONLY
 
+error 2201W
+SELECT name FROM scores300 ORDER BY score FETCH FIRST NULL ROWS WITH TIES
+
+rows
+SELECT count(*) FROM (SELECT name FROM scores300 ORDER BY score FETCH FIRST NULL ROWS ONLY) AS everyone
+----
+count
+4
+SELECT 1
+
 ok
 DROP TABLE scores300
+
+chapter ddl-partitioning, "Partitioning": an UPDATE through the parent moves rows, keys may be expressions, and indexes reach every partition
+ok
+CREATE TABLE measurement316 (city_id int NOT NULL, logdate date NOT NULL, peaktemp int) PARTITION BY RANGE (logdate)
+
+ok
+CREATE TABLE measurement316_y2006m02 PARTITION OF measurement316 FOR VALUES FROM ('2006-02-01') TO ('2006-03-01')
+
+ok
+CREATE TABLE measurement316_y2006m03 PARTITION OF measurement316 FOR VALUES FROM ('2006-03-01') TO ('2006-04-01')
+
+ok
+CREATE INDEX ON measurement316 (logdate)
+
+ok
+INSERT INTO measurement316 VALUES (1, '2006-02-10', 5), (2, '2006-03-10', 7)
+
+rows
+UPDATE measurement316 SET logdate = '2006-03-20' WHERE city_id = 1 RETURNING city_id, logdate
+----
+city_id|logdate
+1|2006-03-20
+UPDATE 1
+
+rows
+SELECT count(*) FROM measurement316_y2006m03
+----
+count
+2
+SELECT 1
+
+error 23514
+UPDATE measurement316 SET logdate = '2007-01-01' WHERE city_id = 2
+
+error 23514
+UPDATE measurement316_y2006m03 SET logdate = '2006-02-15' WHERE city_id = 2
+
+rows
+SELECT relname FROM pg_class WHERE relname LIKE 'measurement316%logdate_idx' ORDER BY relname
+----
+relname
+measurement316_logdate_idx
+measurement316_y2006m02_logdate_idx
+measurement316_y2006m03_logdate_idx
+SELECT 3
+
+error 2BP01
+DROP INDEX measurement316_y2006m02_logdate_idx
+
+ok
+DROP TABLE measurement316
+
+ok
+CREATE TABLE names316 (name text NOT NULL) PARTITION BY LIST (lower(name))
+
+ok
+CREATE TABLE names316_a PARTITION OF names316 FOR VALUES IN ('ann')
+
+ok
+CREATE TABLE names316_rest PARTITION OF names316 DEFAULT
+
+ok
+INSERT INTO names316 VALUES ('ANN'), ('Bob')
+
+rows
+SELECT name, pg_get_partkeydef('names316'::regclass) FROM names316_a
+----
+name|pg_get_partkeydef
+ANN|LIST (lower(name))
+SELECT 1
+
+error 42P17
+CREATE TABLE bad316 (x int) PARTITION BY RANGE ((random()))
+
+ok
+DROP TABLE names316
+
+chapter sql-set-transaction, "SET TRANSACTION": READ ONLY refuses every write but temporary tables', and a transaction's characteristics are set before its first query
+ok
+CREATE TABLE ro318 (id integer PRIMARY KEY)
+
+ok
+CREATE TEMP TABLE ro318_scratch (id integer)
+
+ok
+BEGIN
+
+ok
+SET TRANSACTION READ ONLY
+
+rows
+SHOW transaction_read_only
+----
+transaction_read_only
+on
+SHOW
+
+error 25006
+INSERT INTO ro318 VALUES (1)
+
+ok
+ROLLBACK
+
+ok
+START TRANSACTION READ ONLY
+
+ok
+INSERT INTO ro318_scratch VALUES (1)
+
+error 25006
+CREATE TABLE ro318_more (id integer)
+
+ok
+ROLLBACK
+
+ok
+BEGIN
+
+rows
+SELECT count(*) FROM ro318
+----
+count
+0
+SELECT 1
+
+error 25001
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED
+
+ok
+ROLLBACK
+
+ok
+BEGIN READ ONLY
+
+rows
+SELECT count(*) FROM ro318
+----
+count
+0
+SELECT 1
+
+error 25001
+SET TRANSACTION READ WRITE
+
+ok
+ROLLBACK
+
+ok
+SET default_transaction_read_only = on
+
+error 25006
+INSERT INTO ro318 VALUES (2)
+
+ok
+SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE
+
+ok
+INSERT INTO ro318 VALUES (2)
+
+ok
+DROP TABLE ro318
+
+chapter functions-aggregate, "Aggregate Functions for Statistics": stddev, stddev_samp, stddev_pop, variance, var_samp and var_pop, numeric for integer and numeric input, double precision for floating point
+ok
+CREATE TABLE stats321 (g int, i int, n numeric, d double precision)
+
+ok
+INSERT INTO stats321 VALUES (1, 1, 1.10, 1), (1, 2, 2.20, 3), (1, 3, NULL, 5), (1, 4, NULL, 7), (2, 7, 7.00, NULL)
+
+rows
+SELECT variance(i), var_samp(i), var_pop(i), stddev(i), stddev_samp(i), stddev_pop(i) FROM stats321 WHERE g = 1
+----
+variance|var_samp|var_pop|stddev|stddev_samp|stddev_pop
+1.6666666666666667|1.6666666666666667|1.2500000000000000|1.2909944487358056|1.2909944487358056|1.1180339887498948
+SELECT 1
+
+rows
+SELECT g, var_samp(n), var_pop(n), var_samp(d), var_pop(d), stddev(i) FROM stats321 GROUP BY g ORDER BY g
+----
+g|var_samp|var_pop|var_samp|var_pop|stddev
+1|0.60500000000000000000|0.30250000000000000000|6.666666666666667|5|1.2909944487358056
+2|NULL|0|NULL|NULL|NULL
+SELECT 2
+
+rows
+SELECT var_pop(DISTINCT i % 2), stddev_pop(i) FILTER (WHERE i < 3), variance(i) FILTER (WHERE i > 100) FROM stats321
+----
+var_pop|stddev_pop|variance
+0.25000000000000000000|0.50000000000000000000|NULL
+SELECT 1
+
+rows
+SELECT i, var_samp(i) OVER (ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM stats321 WHERE g = 1 ORDER BY i
+----
+i|var_samp
+1|NULL
+2|0.50000000000000000000
+3|1.00000000000000000000
+4|1.6666666666666667
+SELECT 4
+
+error 42883
+SELECT stddev(n::text) FROM stats321
+
+error 42809
+SELECT variance(i) WITHIN GROUP (ORDER BY i) FROM stats321
+
+ok
+DROP TABLE stats321
+
+chapter functions-aggregate, "Hypothetical-Set Aggregate Functions": rank, dense_rank, percent_rank and cume_dist of a hypothetical row, WITHIN GROUP (ORDER BY ...) with several arguments and NULLS FIRST or LAST
+ok
+CREATE TABLE hyp321 (x int, y text)
+
+ok
+INSERT INTO hyp321 VALUES (1, 'a'), (2, 'b'), (2, 'c'), (4, 'd'), (NULL, 'e')
+
+rows
+SELECT rank(2) WITHIN GROUP (ORDER BY x), dense_rank(3) WITHIN GROUP (ORDER BY x), percent_rank(2) WITHIN GROUP (ORDER BY x), cume_dist(2) WITHIN GROUP (ORDER BY x) FROM hyp321
+----
+rank|dense_rank|percent_rank|cume_dist
+2|3|0.2|0.6666666666666666
+SELECT 1
+
+rows
+SELECT rank(2, 'b') WITHIN GROUP (ORDER BY x, y), rank(2) WITHIN GROUP (ORDER BY x NULLS FIRST), rank(2) WITHIN GROUP (ORDER BY x DESC), rank(NULL::int) WITHIN GROUP (ORDER BY x) FROM hyp321
+----
+rank|rank|rank|rank
+2|3|3|5
+SELECT 1
+
+rows
+SELECT x IS NULL AS missing, rank(3) WITHIN GROUP (ORDER BY x) FILTER (WHERE y <> 'a') FROM hyp321 GROUP BY x IS NULL ORDER BY 1
+----
+missing|rank
+f|3
+t|1
+SELECT 2
+
+rows
+SELECT rank(1) WITHIN GROUP (ORDER BY x), dense_rank(1) WITHIN GROUP (ORDER BY x), percent_rank(1) WITHIN GROUP (ORDER BY x), cume_dist(1) WITHIN GROUP (ORDER BY x) FROM hyp321 WHERE false
+----
+rank|dense_rank|percent_rank|cume_dist
+1|1|0|1
+SELECT 1
+
+rows
+SELECT x, rank() OVER (ORDER BY x) FROM hyp321 WHERE x < 3 ORDER BY x, y
+----
+x|rank
+1|1
+2|2
+2|2
+SELECT 3
+
+error 42883
+SELECT rank(1, 2) WITHIN GROUP (ORDER BY x) FROM hyp321
+
+error 42804
+SELECT rank(2) WITHIN GROUP (ORDER BY y) FROM hyp321
+
+error 42809
+SELECT rank(2) FROM hyp321
+
+error 42809
+SELECT cume_dist(2, 'b') FROM hyp321
+
+ok
+DROP TABLE hyp321
+
+chapter ddl-generated-columns, "Generated Columns": a STORED column is computed on INSERT and on UPDATE of the columns it reads, refuses a written value with 428C9 but takes DEFAULT, and its expression must be immutable and may not read another generated column
+ok
+CREATE TABLE gen322 (height_cm int, height_mm int GENERATED ALWAYS AS (height_cm * 10) STORED)
+
+ok
+INSERT INTO gen322 (height_cm) VALUES (180), (NULL)
+
+ok
+INSERT INTO gen322 VALUES (150, DEFAULT)
+
+rows
+SELECT height_cm, height_mm FROM gen322 ORDER BY height_cm NULLS LAST
+----
+height_cm|height_mm
+150|1500
+180|1800
+NULL|NULL
+SELECT 3
+
+ok
+UPDATE gen322 SET height_cm = height_cm + 1 WHERE height_cm = 150
+
+rows
+SELECT height_mm FROM gen322 WHERE height_cm = 151
+----
+height_mm
+1510
+SELECT 1
+
+error 428C9
+INSERT INTO gen322 (height_cm, height_mm) VALUES (1, 2)
+
+error 428C9
+UPDATE gen322 SET height_mm = 0
+
+ok
+UPDATE gen322 SET height_mm = DEFAULT
+
+error 42P17
+CREATE TABLE gen322b (a int, b int GENERATED ALWAYS AS (a + 1) STORED, c int GENERATED ALWAYS AS (b + 1) STORED)
+
+error 42P17
+CREATE TABLE gen322b (a float8, b float8 GENERATED ALWAYS AS (a * random()) STORED)
+
+error 42601
+CREATE TABLE gen322b (a int, b int GENERATED BY DEFAULT AS (a * 2) STORED)
+
+rows
+SELECT is_generated, generation_expression FROM information_schema.columns WHERE table_name = 'gen322' ORDER BY ordinal_position
+----
+is_generated|generation_expression
+NEVER|NULL
+ALWAYS|height_cm * 10
+SELECT 2
+
+ok
+DROP TABLE gen322
+
+chapter functions-info, "Access Privilege Inquiry Functions": answered from the stored grants for any role, true when any listed privilege is held, with PostgreSQL's errors
+ok
+CREATE TABLE priv_accounts (id integer, manager text)
+
+ok
+CREATE USER priv_joe LOGIN
+
+ok
+GRANT INSERT ON priv_accounts TO priv_joe
+
+ok
+GRANT SELECT (manager) ON priv_accounts TO priv_joe
+
+rows
+SELECT has_table_privilege('priv_joe', 'priv_accounts', 'INSERT, SELECT WITH GRANT OPTION') AS any, has_table_privilege('priv_joe', 'priv_accounts', 'select') AS read, has_column_privilege('priv_joe', 'priv_accounts', 'manager', 'SELECT') AS manager, has_column_privilege('priv_joe', 'priv_accounts', 'id', 'SELECT') AS id, has_any_column_privilege('priv_joe', 'priv_accounts', 'SELECT') AS any_column
+----
+any|read|manager|id|any_column
+t|f|t|f|t
+SELECT 1
+
+rows
+SELECT has_schema_privilege('priv_joe', 'public', 'USAGE') AS usage, has_schema_privilege('priv_joe', 'public', 'CREATE') AS create, has_table_privilege('priv_accounts', 'TRUNCATE WITH GRANT OPTION') AS mine
+----
+usage|create|mine
+t|f|t
+SELECT 1
+
+error 22023
+SELECT has_table_privilege('priv_accounts', 'FLY')
+
+error 42704
+SELECT has_table_privilege('priv_nobody', 'priv_accounts', 'SELECT')
+
+error 42P01
+SELECT has_table_privilege('priv_missing', 'SELECT')
+
+error 42703
+SELECT has_column_privilege('priv_accounts', 'nope', 'SELECT')
+
+error 3F000
+SELECT has_schema_privilege('priv_nowhere', 'USAGE')
+
+rows
+SELECT grantee, privilege_type FROM information_schema.table_privileges WHERE table_name = 'priv_accounts'
+----
+grantee|privilege_type
+priv_joe|INSERT
+SELECT 1
+
+rows
+SELECT relacl FROM pg_class WHERE relname = 'priv_accounts'
+----
+relacl
+{eggdb=arwdDxt/eggdb,priv_joe=a/eggdb}
+SELECT 1
+
+chapter sql-altertable, "ALTER TABLE": FORCE ROW LEVEL SECURITY and NO FORCE ROW LEVEL SECURITY, shown in pg_class.relforcerowsecurity beside relrowsecurity
+ok
+ALTER TABLE priv_accounts FORCE ROW LEVEL SECURITY
+
+rows
+SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'priv_accounts'
+----
+relrowsecurity|relforcerowsecurity
+f|t
+SELECT 1
+
+ok
+ALTER TABLE priv_accounts ENABLE ROW LEVEL SECURITY
+
+ok
+ALTER TABLE priv_accounts NO FORCE ROW LEVEL SECURITY
+
+rows
+SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'priv_accounts'
+----
+relrowsecurity|relforcerowsecurity
+t|f
+SELECT 1
+
+chapter view-pg-policies, "pg_policies": one row per policy with its roles, command and conditions as pg_get_expr shows them
+ok
+CREATE POLICY priv_managers ON priv_accounts TO priv_joe USING (id > 1)
+
+rows
+SELECT policyname, permissive, roles, cmd, qual, with_check FROM pg_policies WHERE tablename = 'priv_accounts'
+----
+policyname|permissive|roles|cmd|qual|with_check
+priv_managers|PERMISSIVE|{priv_joe}|ALL|(id > 1)|NULL
+SELECT 1
+
+rows
+SELECT polname, polcmd, polpermissive FROM pg_policy WHERE polrelid = 'priv_accounts'::regclass
+----
+polname|polcmd|polpermissive
+priv_managers|*|t
+SELECT 1
+
+ok
+DROP TABLE priv_accounts
+
+ok
+DROP ROLE priv_joe
+
+
+chapter "CREATE TABLE AS" and row constructors: a table made from a query, WITH NO DATA, and row comparisons with SQL's NULL rules
+ok
+CREATE TABLE ctas323 (a int NOT NULL, b text)
+
+ok
+INSERT INTO ctas323 VALUES (1, 'x'), (2, NULL)
+
+rows
+CREATE TABLE ctas323_copy (n, t) AS SELECT a, b FROM ctas323 ORDER BY a
+----
+SELECT 2
+
+ok
+INSERT INTO ctas323_copy VALUES (NULL, 'kept nullable')
+
+rows
+SELECT count(*) FROM ctas323_copy
+----
+count
+3
+SELECT 1
+
+rows
+CREATE TABLE ctas323_empty AS SELECT * FROM ctas323 WITH NO DATA
+----
+CREATE TABLE AS
+
+rows
+SELECT a FROM ctas323 WHERE (a, b) IN (SELECT 1, 'x')
+----
+a
+1
+SELECT 1
+
+rows
+SELECT count(*) FROM ctas323 WHERE (a, b) NOT IN (SELECT 2, NULL::text)
+----
+count
+1
+SELECT 1
+
+error 42601
+SELECT (1, 2) = (1, 2, 3)
+
+ok
+DROP TABLE ctas323_copy
+
+ok
+DROP TABLE ctas323_empty
+
+ok
+DROP TABLE ctas323
+
+
+chapter sql-insert, "ON CONFLICT Clause": ON CONFLICT ON CONSTRAINT names the arbiter, and an index predicate infers a unique index
+ok
+CREATE TABLE distributors324 (did integer PRIMARY KEY, dname text, is_active boolean DEFAULT true, CONSTRAINT distributors324_dname_key UNIQUE (dname), CONSTRAINT distributors324_did_check CHECK (did > 0))
+
+rows
+INSERT INTO distributors324 (did, dname) VALUES (5, 'Gizmo Transglobal'), (6, 'Associated Computing, Inc') ON CONFLICT (did) DO UPDATE SET dname = EXCLUDED.dname
+----
+INSERT 0 2
+
+rows
+INSERT INTO distributors324 (did, dname) VALUES (7, 'Redline GmbH') ON CONFLICT (did) DO NOTHING
+----
+INSERT 0 1
+
+rows
+INSERT INTO distributors324 (did, dname) VALUES (9, 'Antwerp Design') ON CONFLICT ON CONSTRAINT distributors324_pkey DO NOTHING
+----
+INSERT 0 1
+
+rows
+INSERT INTO distributors324 (did, dname) VALUES (9, 'Antwerp Again') ON CONFLICT ON CONSTRAINT distributors324_pkey DO NOTHING
+----
+INSERT 0 0
+
+rows
+INSERT INTO distributors324 (did, dname) VALUES (10, 'Conrad International') ON CONFLICT (did) WHERE is_active DO NOTHING
+----
+INSERT 0 1
+
+rows
+INSERT INTO distributors324 (did, dname) VALUES (11, 'Redline GmbH') ON CONFLICT ON CONSTRAINT distributors324_dname_key DO UPDATE SET is_active = false
+----
+INSERT 0 1
+
+rows
+SELECT did, dname, is_active FROM distributors324 ORDER BY did
+----
+did|dname|is_active
+5|Gizmo Transglobal|t
+6|Associated Computing, Inc|t
+7|Redline GmbH|f
+9|Antwerp Design|t
+10|Conrad International|t
+SELECT 5
+
+error 23505
+INSERT INTO distributors324 (did, dname) VALUES (5, 'Someone New') ON CONFLICT ON CONSTRAINT distributors324_dname_key DO NOTHING
+
+error 42704
+INSERT INTO distributors324 (did) VALUES (12) ON CONFLICT ON CONSTRAINT no_such_constraint DO NOTHING
+
+error 42809
+INSERT INTO distributors324 (did) VALUES (12) ON CONFLICT ON CONSTRAINT distributors324_did_check DO NOTHING
+
+error 42P10
+INSERT INTO distributors324 (did) VALUES (12) ON CONFLICT (is_active) WHERE is_active DO NOTHING
+
+error 42P10
+INSERT INTO distributors324 (did, dname) VALUES (12, 'x') ON CONFLICT (lower(dname)) DO NOTHING
+
+error 42P10
+INSERT INTO distributors324 (did) VALUES (12) ON CONFLICT (did DESC) DO NOTHING
+
+ok
+DROP TABLE distributors324
+
+chapter sql-copy, "COPY": REJECT_LIMIT ends an ON_ERROR ignore load once more rows than it allows were skipped
+ok
+CREATE TABLE check_ign_err324 (n integer, k integer)
+
+error 22P02
+COPY check_ign_err324 FROM STDIN WITH (on_error ignore, reject_limit 1);
+1	1
+a	2
+3	b
+4	4
+\.
+
+rows
+COPY check_ign_err324 FROM STDIN WITH (on_error ignore, reject_limit 2);
+1	1
+a	2
+3	b
+4	4
+\.
+----
+COPY 2
+
+error 22023
+COPY check_ign_err324 FROM STDIN WITH (reject_limit 1)
+
+error 22023
+COPY check_ign_err324 FROM STDIN WITH (on_error ignore, reject_limit 0)
+
+rows
+SELECT n, k FROM check_ign_err324 ORDER BY n
+----
+n|k
+1|1
+4|4
+SELECT 2
+
+ok
+DROP TABLE check_ign_err324
+
+chapter queries-with, "Search Order" and "Cycle Detection": SEARCH DEPTH FIRST orders by an array of rows, SEARCH BREADTH FIRST by depth, and CYCLE marks the row that repeats
+ok
+CREATE TABLE graph323 (f int, t int, label text)
+
+ok
+INSERT INTO graph323 VALUES (1, 2, 'arc 1 -> 2'), (1, 3, 'arc 1 -> 3'), (2, 3, 'arc 2 -> 3'), (1, 4, 'arc 1 -> 4'), (4, 5, 'arc 4 -> 5')
+
+rows
+WITH RECURSIVE search_graph(f, t, label) AS (
+    SELECT * FROM graph323 g
+  UNION ALL
+    SELECT g.* FROM graph323 g, search_graph sg WHERE g.f = sg.t
+) SEARCH DEPTH FIRST BY f, t SET seq
+SELECT * FROM search_graph ORDER BY seq
+----
+f|t|label|seq
+1|2|arc 1 -> 2|{"(1,2)"}
+2|3|arc 2 -> 3|{"(1,2)","(2,3)"}
+1|3|arc 1 -> 3|{"(1,3)"}
+1|4|arc 1 -> 4|{"(1,4)"}
+4|5|arc 4 -> 5|{"(1,4)","(4,5)"}
+2|3|arc 2 -> 3|{"(2,3)"}
+4|5|arc 4 -> 5|{"(4,5)"}
+SELECT 7
+
+rows
+WITH RECURSIVE search_graph(f, t, label) AS (
+    SELECT * FROM graph323 g
+  UNION ALL
+    SELECT g.* FROM graph323 g, search_graph sg WHERE g.f = sg.t
+) SEARCH BREADTH FIRST BY f, t SET seq
+SELECT * FROM search_graph ORDER BY seq
+----
+f|t|label|seq
+1|2|arc 1 -> 2|(0,1,2)
+1|3|arc 1 -> 3|(0,1,3)
+1|4|arc 1 -> 4|(0,1,4)
+2|3|arc 2 -> 3|(0,2,3)
+4|5|arc 4 -> 5|(0,4,5)
+2|3|arc 2 -> 3|(1,2,3)
+4|5|arc 4 -> 5|(1,4,5)
+SELECT 7
+
+ok
+INSERT INTO graph323 VALUES (5, 1, 'arc 5 -> 1')
+
+rows
+WITH RECURSIVE search_graph(f, t, label) AS (
+    SELECT * FROM graph323 g
+  UNION ALL
+    SELECT g.* FROM graph323 g, search_graph sg WHERE g.f = sg.t
+) CYCLE f, t SET is_cycle USING path
+SELECT f, t, path FROM search_graph WHERE is_cycle ORDER BY path
+----
+f|t|path
+1|4|{"(1,4)","(4,5)","(5,1)","(1,4)"}
+4|5|{"(4,5)","(5,1)","(1,4)","(4,5)"}
+5|1|{"(5,1)","(1,4)","(4,5)","(5,1)"}
+SELECT 3
+
+rows
+WITH RECURSIVE search_graph(f, t, label) AS (
+    SELECT * FROM graph323 g
+  UNION ALL
+    SELECT g.* FROM graph323 g, search_graph sg WHERE g.f = sg.t
+) CYCLE f, t SET is_cycle TO 'Y' DEFAULT 'N' USING path
+SELECT is_cycle, count(*) FROM search_graph GROUP BY is_cycle ORDER BY is_cycle
+----
+is_cycle|count
+N|22
+Y|3
+SELECT 2
+
+rows
+WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n % 3 + 1 FROM t)
+  SEARCH BREADTH FIRST BY n SET ordercol
+  CYCLE n SET is_cycle USING path
+SELECT * FROM t ORDER BY ordercol
+----
+n|ordercol|is_cycle|path
+1|(0,1)|f|{(1)}
+2|(1,2)|f|{(1),(2)}
+3|(2,3)|f|{(1),(2),(3)}
+1|(3,1)|t|{(1),(2),(3),(1)}
+SELECT 4
+
+error 42601
+WITH t(n) AS (SELECT 1) SEARCH DEPTH FIRST BY n SET seq SELECT * FROM t
+
+error 42601
+WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) SEARCH DEPTH FIRST BY m SET seq SELECT * FROM t
+
+error 42701
+WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) CYCLE n, n SET is_cycle USING path SELECT * FROM t
+
+error 42601
+WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) CYCLE n SET n USING path SELECT * FROM t
+
+error 42804
+WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) CYCLE n SET is_cycle TO true DEFAULT 55 USING path SELECT * FROM t
+
+ok
+DROP TABLE graph323

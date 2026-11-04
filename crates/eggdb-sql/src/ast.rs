@@ -17,8 +17,10 @@ pub(crate) enum Statement {
     Update(Update),
     Delete(Delete),
     Begin {
-        read_only: bool,
+        read_only: Option<bool>,
+        isolation: Option<String>,
     },
+    SetTransaction(TransactionCharacteristics),
     Commit,
     Rollback,
     Savepoint(SavepointCommand),
@@ -225,7 +227,15 @@ pub(crate) struct AlterRoutine {
 pub(crate) enum AlterRoutineAction {
     RenameTo(Name),
     SetSchema(Name),
+    Settings(Vec<RoutineSettingChange>),
     Accepted,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RoutineSettingChange {
+    Set { name: String, value: String },
+    Reset(String),
+    ResetAll,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -433,6 +443,43 @@ pub(crate) struct CreateTableAs {
     pub(crate) name: Name,
     pub(crate) temporary: bool,
     pub(crate) query: Statement,
+    pub(crate) spelling: CreateTableAsSpelling,
+    pub(crate) if_not_exists: bool,
+    pub(crate) column_names: Vec<Name>,
+    pub(crate) declared: Option<Box<CreateTable>>,
+    pub(crate) with_data: bool,
+    pub(crate) on_duplicate: OnDuplicate,
+    pub(crate) on_commit: Option<OnCommit>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CreateTableAsSpelling {
+    SelectInto,
+    CreateTableAs,
+}
+
+impl CreateTableAs {
+    pub(crate) fn select_into(name: Name, temporary: bool, query: Statement) -> Self {
+        Self {
+            name,
+            temporary,
+            query,
+            spelling: CreateTableAsSpelling::SelectInto,
+            if_not_exists: false,
+            column_names: Vec::new(),
+            declared: None,
+            with_data: true,
+            on_duplicate: OnDuplicate::Fail,
+            on_commit: None,
+        }
+    }
+
+    pub(crate) fn command(&self) -> &'static str {
+        match self.spelling {
+            CreateTableAsSpelling::SelectInto => "SELECT INTO",
+            CreateTableAsSpelling::CreateTableAs => "CREATE TABLE AS",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -907,6 +954,7 @@ pub(crate) enum AlterAction {
         bound: PartitionBoundSpec,
     },
     DetachPartition(Name),
+    AttachIndex(Name),
     MoveColumn {
         column: Name,
         placement: ColumnPlacement,
@@ -934,6 +982,7 @@ pub(crate) struct IndexSpec {
 pub(crate) struct CreateIndex {
     pub(crate) index: IndexSpec,
     pub(crate) table: Name,
+    pub(crate) only: bool,
     pub(crate) if_not_exists: bool,
     pub(crate) sqlite_text: Option<String>,
 }
@@ -949,6 +998,7 @@ pub(crate) struct DropIndex {
 pub(crate) enum ExplainStyle {
     Plan,
     QueryPlan,
+    Tree,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1052,6 +1102,21 @@ pub(crate) enum OnCommit {
     Drop,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CharacteristicsTarget {
+    CurrentTransaction,
+    NextTransaction,
+    Session,
+    Global,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TransactionCharacteristics {
+    pub(crate) target: CharacteristicsTarget,
+    pub(crate) read_only: Option<bool>,
+    pub(crate) isolation: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SavepointCommand {
     Set(Name),
@@ -1106,10 +1171,20 @@ pub(crate) enum PartitionBoundSpec {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PartitionBy {
     pub(crate) strategy: PartitionStrategy,
-    pub(crate) columns: Vec<Name>,
+    pub(crate) key: Vec<PartitionKeyPart>,
     pub(crate) partitions: Vec<NamedPartition>,
     pub(crate) hash_partitions: Option<u32>,
     pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PartitionKeyPart {
+    Column(Name),
+    Expression {
+        expr: Expr,
+        text: String,
+        position: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1145,6 +1220,16 @@ pub(crate) struct ColumnDefinition {
     pub(crate) unique: Option<Option<Name>>,
     pub(crate) constraints: Vec<ConstraintSpec>,
     pub(crate) comment: Option<String>,
+    pub(crate) generated: Option<GenerationSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct GenerationSpec {
+    pub(crate) expr: Expr,
+    pub(crate) text: String,
+    pub(crate) stored: bool,
+    pub(crate) type_given: bool,
+    pub(crate) position: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1305,6 +1390,37 @@ pub(crate) struct CommonTable {
     pub(crate) column_names: Vec<Name>,
     pub(crate) query: Query,
     pub(crate) dialect: Dialect,
+    pub(crate) search: Option<SearchClause>,
+    pub(crate) cycle: Option<CycleClause>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SearchOrder {
+    DepthFirst,
+    BreadthFirst,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SearchClause {
+    pub(crate) order: SearchOrder,
+    pub(crate) columns: Vec<Name>,
+    pub(crate) sequence_column: Name,
+    pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CycleClause {
+    pub(crate) columns: Vec<Name>,
+    pub(crate) mark_column: Name,
+    pub(crate) mark_values: Option<CycleMarkValues>,
+    pub(crate) path_column: Name,
+    pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CycleMarkValues {
+    pub(crate) cycle: Expr,
+    pub(crate) default: Expr,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1363,20 +1479,28 @@ pub(crate) enum SubqueryTest {
         all: bool,
     },
     Array,
+    RowCompare {
+        expr: Expr,
+        operator: BinaryOperator,
+    },
 }
 
 impl SubqueryTest {
     pub(crate) fn operand(&self) -> Option<&Expr> {
         match self {
             Self::Scalar | Self::Exists | Self::Array => None,
-            Self::In { expr, .. } | Self::Compare { expr, .. } => Some(expr),
+            Self::In { expr, .. } | Self::Compare { expr, .. } | Self::RowCompare { expr, .. } => {
+                Some(expr)
+            }
         }
     }
 
     pub(crate) fn operand_mut(&mut self) -> Option<&mut Expr> {
         match self {
             Self::Scalar | Self::Exists | Self::Array => None,
-            Self::In { expr, .. } | Self::Compare { expr, .. } => Some(expr),
+            Self::In { expr, .. } | Self::Compare { expr, .. } | Self::RowCompare { expr, .. } => {
+                Some(expr)
+            }
         }
     }
 }
@@ -1444,9 +1568,40 @@ pub(crate) struct Insert {
     pub(crate) source: InsertSource,
     pub(crate) returning: Option<Vec<SelectItem>>,
     pub(crate) on_duplicate: OnDuplicate,
-    pub(crate) conflict_target: Option<Vec<Name>>,
+    pub(crate) conflict_target: Option<ConflictTarget>,
     pub(crate) rollback_on_conflict: bool,
+    pub(crate) keeps_changes_on_conflict: bool,
     pub(crate) overriding: Option<Overriding>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ConflictTarget {
+    Inferred {
+        columns: Vec<Name>,
+        expressions: Vec<Expr>,
+        predicate: Option<Expr>,
+    },
+    Constraint(Name),
+}
+
+impl ConflictTarget {
+    pub(crate) fn columns(&self) -> &[Name] {
+        match self {
+            Self::Inferred { columns, .. } => columns,
+            Self::Constraint(_) => &[],
+        }
+    }
+
+    pub(crate) fn expressions_mut(&mut self) -> Vec<&mut Expr> {
+        match self {
+            Self::Inferred {
+                expressions,
+                predicate,
+                ..
+            } => expressions.iter_mut().chain(predicate.iter_mut()).collect(),
+            Self::Constraint(_) => Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1681,10 +1836,22 @@ pub(crate) enum AggregateFunction {
     PercentileDisc,
     Mode,
     ApproxCountDistinct,
+    Stddev,
+    StddevSamp,
+    StddevPop,
+    Variance,
+    VarSamp,
+    VarPop,
+    OracleStddev,
+    OracleVariance,
+    Rank,
+    DenseRank,
+    PercentRank,
+    CumeDist,
 }
 
 impl AggregateFunction {
-    pub(crate) const ALL: [Self; 18] = [
+    pub(crate) const ALL: [Self; 30] = [
         Self::Count,
         Self::Sum,
         Self::Avg,
@@ -1703,7 +1870,50 @@ impl AggregateFunction {
         Self::PercentileDisc,
         Self::Mode,
         Self::ApproxCountDistinct,
+        Self::Stddev,
+        Self::StddevSamp,
+        Self::StddevPop,
+        Self::Variance,
+        Self::VarSamp,
+        Self::VarPop,
+        Self::OracleStddev,
+        Self::OracleVariance,
+        Self::Rank,
+        Self::DenseRank,
+        Self::PercentRank,
+        Self::CumeDist,
     ];
+
+    pub(crate) fn hypothetical_named(name: &str) -> Option<Self> {
+        Some(match name {
+            "rank" => Self::Rank,
+            "dense_rank" => Self::DenseRank,
+            "percent_rank" => Self::PercentRank,
+            "cume_dist" => Self::CumeDist,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn is_hypothetical(self) -> bool {
+        matches!(
+            self,
+            Self::Rank | Self::DenseRank | Self::PercentRank | Self::CumeDist
+        )
+    }
+
+    pub(crate) fn is_statistical(self) -> bool {
+        matches!(
+            self,
+            Self::Stddev
+                | Self::StddevSamp
+                | Self::StddevPop
+                | Self::Variance
+                | Self::VarSamp
+                | Self::VarPop
+                | Self::OracleStddev
+                | Self::OracleVariance
+        )
+    }
 
     pub(crate) fn ordered_set_named(name: &str) -> Option<Self> {
         Some(match name {
@@ -1767,6 +1977,18 @@ impl AggregateFunction {
             Self::PercentileCont => "percentile_cont",
             Self::PercentileDisc => "percentile_disc",
             Self::Mode => "mode",
+            Self::Stddev => "stddev",
+            Self::StddevSamp => "stddev_samp",
+            Self::StddevPop => "stddev_pop",
+            Self::Variance => "variance",
+            Self::VarSamp => "var_samp",
+            Self::VarPop => "var_pop",
+            Self::OracleStddev => "oracle_stddev",
+            Self::OracleVariance => "oracle_variance",
+            Self::Rank => "rank",
+            Self::DenseRank => "dense_rank",
+            Self::PercentRank => "percent_rank",
+            Self::CumeDist => "cume_dist",
         }
     }
 
@@ -1898,6 +2120,11 @@ pub(crate) enum ExprKind {
     SessionValue {
         name: &'static str,
         value: String,
+    },
+    CurrentSetting {
+        name: String,
+        missing_ok: bool,
+        parsed: Option<String>,
     },
     Subquery(Box<Subquery>),
     OuterColumn {

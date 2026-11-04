@@ -1,14 +1,22 @@
 use crate::ast::{
-    Delete, Expr, ExprKind, Insert, InsertSource, InsertValue, Name, TableReference, Update,
+    Delete, Expr, ExprKind, Insert, InsertSource, InsertValue, Name, OnDuplicate, Overriding,
+    TableReference, Update,
 };
+use crate::constraints::{PreparedChecks, RowChange};
 use crate::encoding::TableDefinition;
 use crate::error::{SqlError, SqlResult};
 use crate::eval::{Evaluator, Scope};
-use crate::execute::{self, TableCache};
+use crate::execute::{self, RowUpdate, TableCache};
 use crate::partitions::Partitioned;
 use crate::session::QueryResult;
 use crate::store::KeyValueWrite;
 use crate::types::{Conversion, Value, convert};
+use std::sync::Arc;
+
+pub(crate) struct MovedRow {
+    from: Arc<TableDefinition>,
+    row: Vec<Value>,
+}
 
 fn constant(value: Value) -> Expr {
     Expr {
@@ -128,10 +136,11 @@ pub(crate) fn insert(
     };
     let mut groups: Vec<(String, Vec<usize>, Vec<Vec<InsertValue>>)> = Vec::new();
     let mut key_row = vec![Value::Null; table.columns.len()];
+    let key_columns = partitioned.columns_read();
     for row in rows {
         let mut values: Vec<InsertValue> = row.clone();
         let mut columns = targets.clone();
-        for &key in &partitioned.key {
+        for &key in &key_columns {
             let value = match targets.iter().position(|&target| target == key) {
                 Some(at) => {
                     let value = match row.get(at) {
@@ -150,9 +159,11 @@ pub(crate) fn insert(
                     value
                 }
             };
-            key_row[key] = value;
+            if let Some(slot) = key_row.get_mut(key) {
+                *slot = value;
+            }
         }
-        let Some(child) = partitioned.route(&key_row) else {
+        let Some(child) = partitioned.route(&key_row)? else {
             return Err(partitioned.no_partition(&key_row));
         };
         match groups
@@ -163,6 +174,10 @@ pub(crate) fn insert(
             None => groups.push((child.to_owned(), columns, vec![values])),
         }
     }
+    let conflict_target = match &insert.conflict_target {
+        Some(target) => Some(execute::routed_conflict_target(table, target)?),
+        None => None,
+    };
     let mut merged = Merged::default();
     for (child, columns, rows) in groups {
         let names = columns
@@ -178,8 +193,9 @@ pub(crate) fn insert(
             source: InsertSource::Values(rows),
             returning: insert.returning.clone(),
             on_duplicate: insert.on_duplicate.clone(),
-            conflict_target: insert.conflict_target.clone(),
+            conflict_target: conflict_target.clone(),
             rollback_on_conflict: insert.rollback_on_conflict,
+            keeps_changes_on_conflict: insert.keeps_changes_on_conflict,
             overriding: insert.overriding,
         };
         merged.add(execute::insert(writer, tables, &routed)?);
@@ -192,21 +208,152 @@ pub(crate) fn update(
     tables: &mut TableCache,
     update: &Update,
     partitioned: &Partitioned,
+    moved: Option<&mut Vec<MovedRow>>,
 ) -> SqlResult<QueryResult> {
     let children: Vec<String> = partitioned
         .surviving(update.filter.as_ref(), &qualifiers(&update.table))
         .into_iter()
         .map(str::to_owned)
         .collect();
+    let mut own_moves = Vec::new();
+    let routes_moves = moved.is_none();
+    let moved = moved.unwrap_or(&mut own_moves);
     let mut merged = Merged::default();
     for child in children {
         let routed = Update {
             table: reference_to(&child, &update.table),
             ..update.clone()
         };
-        merged.add(execute::update(writer, tables, &routed)?);
+        merged.add(execute::update_with_row_movement(
+            writer,
+            tables,
+            &routed,
+            Some(&mut *moved),
+        )?);
+    }
+    if routes_moves {
+        insert_moved_rows(writer, tables, &partitioned.table, own_moves)?;
     }
     Ok(merged.finish("UPDATE 0"))
+}
+
+struct LeavingRow {
+    old_key: Vec<u8>,
+    old_row: Option<Vec<Value>>,
+    new_row: Vec<Value>,
+}
+
+pub(crate) fn move_out(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    table: &Arc<TableDefinition>,
+    checks: &PreparedChecks,
+    changes: &mut Vec<RowUpdate>,
+    old_rows: &mut Vec<Vec<Value>>,
+    moved: &mut Vec<MovedRow>,
+) -> SqlResult<usize> {
+    let kept_old_rows = !old_rows.is_empty();
+    let mut old_iter = std::mem::take(old_rows).into_iter();
+    let mut leaving: Vec<LeavingRow> = Vec::new();
+    for (old_key, new_key, new_row) in std::mem::take(changes) {
+        let old_row = if kept_old_rows { old_iter.next() } else { None };
+        if checks.fits_partition(&new_row) {
+            changes.push((old_key, new_key, new_row));
+            old_rows.extend(old_row);
+        } else {
+            leaving.push(LeavingRow {
+                old_key,
+                old_row,
+                new_row,
+            });
+        }
+    }
+    if leaving.is_empty() {
+        return Ok(0);
+    }
+    let count = leaving.len();
+    let mut propagated = Vec::new();
+    for LeavingRow {
+        old_key,
+        old_row,
+        new_row,
+    } in leaving
+    {
+        if let Some(old_row) = &old_row
+            && !table.indexes.is_empty()
+        {
+            crate::indexes::delete_entries(writer, table, old_row, &old_key)?;
+        }
+        writer.delete(&old_key)?;
+        if let Some(old_row) = old_row
+            && crate::constraints::is_referenced(table)
+        {
+            propagated.push(RowChange {
+                table: Arc::clone(table),
+                old: old_row,
+                new: Some(new_row.clone()),
+            });
+        }
+        moved.push(MovedRow {
+            from: Arc::clone(table),
+            row: new_row,
+        });
+    }
+    if !propagated.is_empty() {
+        crate::constraints::propagate(writer, tables, propagated)?;
+    }
+    Ok(count)
+}
+
+fn insert_moved_rows(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    target: &str,
+    moved: Vec<MovedRow>,
+) -> SqlResult<()> {
+    let mut groups: Vec<(Arc<TableDefinition>, Vec<Vec<InsertValue>>)> = Vec::new();
+    for MovedRow { from, row } in moved {
+        let values = row
+            .into_iter()
+            .map(|value| InsertValue::Expr(constant(value)))
+            .collect();
+        match groups
+            .iter_mut()
+            .find(|(table, _)| Arc::ptr_eq(table, &from) || table.name == from.name)
+        {
+            Some((_, rows)) => rows.push(values),
+            None => groups.push((from, vec![values])),
+        }
+    }
+    for (from, rows) in groups {
+        let columns = from
+            .columns
+            .iter()
+            .map(|column| Name {
+                text: column.name.clone(),
+                position: 0,
+            })
+            .collect();
+        let insert = Insert {
+            table: TableReference::named(
+                Name {
+                    text: target.to_owned(),
+                    position: 0,
+                },
+                None,
+            ),
+            columns: Some(columns),
+            source: InsertSource::Values(rows),
+            returning: None,
+            on_duplicate: OnDuplicate::Fail,
+            conflict_target: None,
+            rollback_on_conflict: false,
+            keeps_changes_on_conflict: false,
+            overriding: Some(Overriding::SystemValue),
+        };
+        execute::insert(writer, tables, &insert)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn delete(

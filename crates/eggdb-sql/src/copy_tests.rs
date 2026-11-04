@@ -1684,3 +1684,113 @@ fn encodings_other_than_utf8_are_converted_in_and_out() {
     .unwrap();
     assert_eq!(shown, ["COPY 1", "w\ndéjà\nSELECT 1"]);
 }
+
+#[test]
+fn reject_limit_fails_the_copy_once_more_rows_than_it_allows_were_skipped() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    rows(
+        &mut session,
+        "CREATE TABLE check_ign_err (n integer, k integer)",
+    );
+    let data = b"1\t1\na\t2\n3\t3333333333\n4\tb\n\t5\n6\t6\n";
+    let error = copy_in_bytes(
+        &mut session,
+        "COPY check_ign_err FROM STDIN WITH (on_error ignore, reject_limit 3)",
+        data,
+        5,
+    )
+    .unwrap_err();
+    assert_eq!(error.state(), SqlState::INVALID_TEXT_REPRESENTATION);
+    assert_eq!(
+        error.message(),
+        "skipped more than REJECT_LIMIT (3) rows due to data type incompatibility"
+    );
+    assert_eq!(
+        error.context(),
+        Some("COPY check_ign_err, line 5, column n: \"\"")
+    );
+    assert_eq!(
+        rows(&mut session, "SELECT count(*) FROM check_ign_err"),
+        "count\n0\nSELECT 1"
+    );
+    let loaded = copy_in_bytes(
+        &mut session,
+        "COPY check_ign_err FROM STDIN WITH (on_error ignore, reject_limit 4)",
+        data,
+        5,
+    )
+    .unwrap();
+    assert_eq!(loaded.tag, "COPY 2");
+    assert_eq!(
+        notices_of(&loaded),
+        ["NOTICE:  4 rows were skipped due to data type incompatibility"]
+    );
+    assert_eq!(
+        rows(&mut session, "SELECT n, k FROM check_ign_err ORDER BY n"),
+        "n|k\n1|1\n6|6\nSELECT 2"
+    );
+}
+
+#[test]
+fn reject_limit_needs_on_error_ignore_and_a_positive_count() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    rows(&mut session, "CREATE TABLE x (a integer)");
+    for (sql, code, message) in [
+        (
+            "COPY x FROM STDIN WITH (reject_limit 1)",
+            "22023",
+            "COPY REJECT_LIMIT requires ON_ERROR to be set to IGNORE",
+        ),
+        (
+            "COPY x FROM STDIN WITH (on_error stop, reject_limit 1)",
+            "22023",
+            "COPY REJECT_LIMIT requires ON_ERROR to be set to IGNORE",
+        ),
+        (
+            "COPY x FROM STDIN WITH (on_error ignore, reject_limit 0)",
+            "22023",
+            "REJECT_LIMIT (0) must be greater than zero",
+        ),
+        (
+            "COPY x FROM STDIN WITH (on_error ignore, reject_limit -2)",
+            "22023",
+            "REJECT_LIMIT (-2) must be greater than zero",
+        ),
+        (
+            "COPY x FROM STDIN WITH (on_error ignore, reject_limit many)",
+            "22P02",
+            "invalid input syntax for type bigint: \"many\"",
+        ),
+        (
+            "COPY x FROM STDIN WITH (on_error ignore, reject_limit)",
+            "42601",
+            "reject_limit requires a numeric value",
+        ),
+        (
+            "COPY x FROM STDIN WITH (on_error ignore, reject_limit 1, reject_limit 2)",
+            "42601",
+            "conflicting or redundant options",
+        ),
+    ] {
+        let error = copy_in_bytes(&mut session, sql, b"1\n", 2).unwrap_err();
+        assert_eq!(error.state().code(), code, "{sql}");
+        assert_eq!(error.message(), message, "{sql}");
+    }
+    let verbose = copy_in_bytes(
+        &mut session,
+        "COPY x FROM STDIN WITH (on_error ignore, reject_limit 1, log_verbosity verbose)",
+        b"1\nz\n2\n",
+        3,
+    )
+    .unwrap();
+    assert_eq!(verbose.tag, "COPY 2");
+    assert_eq!(
+        notices_of(&verbose),
+        [
+            "NOTICE:  skipping row due to data type incompatibility at line 2 for column \"a\": \"z\"",
+            "NOTICE:  1 row was skipped due to data type incompatibility",
+        ]
+    );
+}

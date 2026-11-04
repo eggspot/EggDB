@@ -142,15 +142,29 @@ pub(crate) fn column_reach(
     table: &str,
     privilege: Privilege,
 ) -> SqlResult<ColumnReach> {
-    let Some(user) = settings.checked_role.as_deref() else {
-        return Ok(ColumnReach::Every);
+    column_privilege_reach(reader, settings.checked_role.as_deref(), table, privilege)?
+        .ok_or_else(|| permission_denied(table))
+}
+
+/// The columns of `table` that `checked_role` may use with `privilege`, by the rule every
+/// statement is checked with: every column for a superuser session (`None`), on temporary
+/// tables and when the role holds the privilege on the table, the granted columns otherwise,
+/// and `None` when it holds the privilege neither on the table nor on any column.
+pub(crate) fn column_privilege_reach(
+    reader: &dyn KeyValueRead,
+    checked_role: Option<&str>,
+    table: &str,
+    privilege: Privilege,
+) -> SqlResult<Option<ColumnReach>> {
+    let Some(role) = checked_role else {
+        return Ok(Some(ColumnReach::Every));
     };
     if crate::temporary::is_temporary_name(table) {
-        return Ok(ColumnReach::Every);
+        return Ok(Some(ColumnReach::Every));
     }
-    let held = role_closure(reader, user)?;
+    let held = role_closure(reader, role)?;
     if table_level_held(reader, &held, table, privilege)? {
-        return Ok(ColumnReach::Every);
+        return Ok(Some(ColumnReach::Every));
     }
     let granted: BTreeSet<String> = column_grants_of(reader, table)?
         .into_iter()
@@ -158,9 +172,9 @@ pub(crate) fn column_reach(
         .map(|grant| grant.column)
         .collect();
     if granted.is_empty() {
-        return Err(permission_denied(table));
+        return Ok(None);
     }
-    Ok(ColumnReach::Only(granted))
+    Ok(Some(ColumnReach::Only(granted)))
 }
 
 /// Checks that the session may use `privilege` on each of `columns` of `table`. An empty list

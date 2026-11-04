@@ -17,7 +17,15 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-const SNAPSHOT_FUNCTIONS: [&str; 22] = [
+const SNAPSHOT_FUNCTIONS: [&str; 30] = [
+    "has_table_privilege",
+    "has_column_privilege",
+    "has_any_column_privilege",
+    "has_schema_privilege",
+    "has_database_privilege",
+    "has_sequence_privilege",
+    "has_function_privilege",
+    "pg_has_role",
     "pg_get_serial_sequence",
     "pg_get_functiondef",
     "pg_get_function_arguments",
@@ -42,14 +50,44 @@ const SNAPSHOT_FUNCTIONS: [&str; 22] = [
     "regproc",
 ];
 
+const SNAPSHOT_FUNCTION_INITIALS: [bool; 256] = initials(&SNAPSHOT_FUNCTIONS);
+
+const fn initials(names: &[&str]) -> [bool; 256] {
+    let mut table = [false; 256];
+    let mut at = 0;
+    while at < names.len() {
+        let first = names[at].as_bytes()[0];
+        table[first.to_ascii_lowercase() as usize] = true;
+        table[first.to_ascii_uppercase() as usize] = true;
+        at += 1;
+    }
+    table
+}
+
+fn names_snapshot_function(word: &str) -> bool {
+    word.as_bytes()
+        .first()
+        .is_some_and(|first| SNAPSHOT_FUNCTION_INITIALS[usize::from(*first)])
+        && SNAPSHOT_FUNCTIONS
+            .iter()
+            .any(|name| word.eq_ignore_ascii_case(name))
+}
+
 const SEQUENCE_FUNCTIONS: [&str; 3] = ["nextval", "currval", "setval"];
 
-const CATALOG_TEXT_HINTS: [&str; 3] = ["reg", "pg_", "description"];
+const CATALOG_TEXT_HINTS: [&str; 4] = ["reg", "pg_", "description", "privilege"];
 
 pub(crate) fn text_needs_catalog(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    CATALOG_TEXT_HINTS.iter().any(|hint| lower.contains(hint))
+    CATALOG_TEXT_HINTS
+        .iter()
+        .any(|hint| contains_ignoring_ascii_case(text, hint))
         && crate::lexer::tokenize(text).is_ok_and(|tokens| mentions_catalog(&tokens))
+}
+
+fn contains_ignoring_ascii_case(text: &str, lowercase_part: &str) -> bool {
+    text.as_bytes()
+        .windows(lowercase_part.len())
+        .any(|window| window.eq_ignore_ascii_case(lowercase_part.as_bytes()))
 }
 
 pub(crate) fn mentions_catalog(tokens: &[Token<'_>]) -> bool {
@@ -79,14 +117,15 @@ pub(crate) fn mentions_catalog(tokens: &[Token<'_>]) -> bool {
                 return true;
             }
             TokenKind::Word(word) => {
-                let named = |name: &&str| word.eq_ignore_ascii_case(name);
-                if SNAPSHOT_FUNCTIONS.iter().any(named) {
+                if names_snapshot_function(word) {
                     return true;
                 }
                 if word.eq_ignore_ascii_case("regclass") && sequence_call_depths.is_empty() {
                     return true;
                 }
-                previous_sequence_function = SEQUENCE_FUNCTIONS.iter().any(named);
+                previous_sequence_function = SEQUENCE_FUNCTIONS
+                    .iter()
+                    .any(|name| word.eq_ignore_ascii_case(name));
                 continue;
             }
             _ => {}
@@ -173,13 +212,45 @@ pub(crate) fn load_if_wanted(reader: &dyn KeyValueRead) -> SqlResult<()> {
 }
 
 pub(crate) fn load_for_stored_expressions(reader: &dyn KeyValueRead) -> SqlResult<()> {
-    let missing = FRAMES.with(|frames| {
+    if snapshot_missing() {
+        snapshot_for(reader)?;
+    }
+    Ok(())
+}
+
+fn snapshot_missing() -> bool {
+    FRAMES.with(|frames| {
         frames
             .try_borrow()
             .ok()
             .is_some_and(|frames| frames.last().is_some_and(|frame| frame.snapshot.is_none()))
+    })
+}
+
+pub(crate) fn load_for_stored_text(reader: &dyn KeyValueRead, text: &str) -> SqlResult<()> {
+    if snapshot_missing() && text_needs_catalog(text) {
+        snapshot_for(reader)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn load_for_tokens(reader: &dyn KeyValueRead, tokens: &[Token<'_>]) -> SqlResult<()> {
+    if snapshot_missing() && mentions_catalog(tokens) {
+        snapshot_for(reader)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn reload_if_loaded(reader: &dyn KeyValueRead) -> SqlResult<()> {
+    let dropped = FRAMES.with(|frames| {
+        frames.try_borrow_mut().ok().is_some_and(|mut frames| {
+            frames
+                .last_mut()
+                .and_then(|frame| frame.snapshot.take())
+                .is_some()
+        })
     });
-    if missing {
+    if dropped {
         snapshot_for(reader)?;
     }
     Ok(())
@@ -384,6 +455,7 @@ pub(crate) struct CatalogSnapshot {
     pub(crate) stored_roles: Vec<crate::roles::StoredRole>,
     pub(crate) grants: Vec<crate::roles::TableGrant>,
     pub(crate) column_grants: Vec<crate::roles::ColumnGrant>,
+    pub(crate) access: crate::roles::AccessRecords,
 }
 
 fn user_schema_names(reader: &dyn KeyValueRead) -> SqlResult<Vec<String>> {
@@ -667,6 +739,7 @@ impl CatalogSnapshot {
             stored_roles: crate::roles::stored_roles(reader)?,
             grants: crate::roles::every_grant(reader)?,
             column_grants: crate::roles::every_column_grant(reader)?,
+            access: crate::roles::AccessRecords::load(reader)?,
         };
         snapshot.index_relations();
         snapshot.add_constraints_and_defaults();
@@ -838,7 +911,9 @@ impl CatalogSnapshot {
                 );
             }
             for (column_at, column) in table.columns.iter().enumerate() {
-                if column.default.is_some() && table.identity_of(column_at).is_none() {
+                if (column.default.is_some() || table.is_generated(column_at))
+                    && table.identity_of(column_at).is_none()
+                {
                     defaults.push((
                         OidRequest {
                             kind: b'd',

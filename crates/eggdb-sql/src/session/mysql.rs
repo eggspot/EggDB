@@ -400,10 +400,11 @@ impl<'s> Session<'s> {
                             .as_ref()
                             .map_or(Value::Null, |default| Value::Text(unquoted(default))),
                         Value::Text(
-                            if column.auto_increment {
-                                "auto_increment"
-                            } else {
-                                ""
+                            match &column.generation {
+                                Some(generation) if generation.stored => "STORED GENERATED",
+                                Some(_) => "VIRTUAL GENERATED",
+                                None if column.auto_increment => "auto_increment",
+                                None => "",
                             }
                             .into(),
                         ),

@@ -65,6 +65,7 @@
 //!   [`Database::sql_store`].
 
 mod collection;
+mod collection_counts;
 mod concurrent;
 mod database;
 mod error;
@@ -75,7 +76,7 @@ pub mod sql;
 mod transaction;
 mod writer_slot;
 
-pub use collection::{Collection, CollectionStats, ReadCollection, WriteCollection};
+pub use collection::{Collection, CollectionStats, DropProgress, ReadCollection, WriteCollection};
 pub use concurrent::{ConcurrentTransaction, Isolation};
 pub use database::{BackupReport, CheckReport, CompactReport, Database, Stats};
 pub use eggdb_platform::{Clock, SimClock};

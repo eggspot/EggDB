@@ -3,8 +3,8 @@ use crate::ast::{AggregateFunction, Expr, ExprKind, Name, OrderItem};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
 use crate::window::{
-    Frame, FrameBound, FrameClause, FrameExclusion, FrameUnits, WindowCall, WindowDefinition,
-    WindowFunction, WindowReference,
+    Frame, FrameBound, FrameClause, FrameExclusion, FrameUnits, ValueTreatment, WindowCall,
+    WindowDefinition, WindowFunction, WindowReference,
 };
 
 fn wrong_kind(message: String, position: usize) -> SqlError {
@@ -21,6 +21,38 @@ fn no_such_function(name: &str, arguments: usize, position: usize) -> SqlError {
         "No function matches the given name and argument types. You might need to add explicit type casts.",
     )
     .at(position)
+}
+
+pub(super) fn whole_partition_call(
+    function: AggregateFunction,
+    arguments: Vec<Expr>,
+    partition: Vec<Expr>,
+    order: Vec<OrderItem>,
+    position: usize,
+) -> Expr {
+    let frame = FrameClause {
+        frame: Frame {
+            units: FrameUnits::Rows,
+            start: FrameBound::UnboundedPreceding,
+            end: FrameBound::UnboundedFollowing,
+            exclusion: FrameExclusion::NoOthers,
+        },
+        start_offset: None,
+        end_offset: None,
+    };
+    crate::window::call(WindowCall {
+        function: WindowFunction::Aggregate(function),
+        treatment: ValueTreatment::default(),
+        arguments,
+        filter: None,
+        window: WindowReference::Inline(WindowDefinition {
+            base: None,
+            partition,
+            order,
+            frame: Some(frame),
+        }),
+        position,
+    })
 }
 
 impl Parser<'_> {
@@ -126,7 +158,7 @@ impl Parser<'_> {
         else {
             return Err(self.unexpected());
         };
-        if function.is_ordered_set() {
+        if function.is_ordered_set() || function.is_hypothetical() {
             return Err(SqlError::not_supported(format!(
                 "OVER is not supported for ordered-set aggregate {}",
                 function.name()
@@ -202,6 +234,72 @@ impl Parser<'_> {
         order: Vec<OrderItem>,
         position: usize,
     ) -> SqlResult<Expr> {
+        let partition = self.partition_only_window()?;
+        Ok(whole_partition_call(
+            function, arguments, partition, order, position,
+        ))
+    }
+
+    fn windowed(
+        &mut self,
+        function: WindowFunction,
+        arguments: Vec<Expr>,
+        filter: Option<Expr>,
+        position: usize,
+    ) -> SqlResult<Expr> {
+        let window = self.window_reference()?;
+        Ok(crate::window::call(WindowCall {
+            function,
+            treatment: ValueTreatment::default(),
+            arguments,
+            filter,
+            window,
+            position,
+        }))
+    }
+
+    pub(super) fn oracle_window_call(
+        &mut self,
+        function: WindowFunction,
+        arguments: Vec<Expr>,
+        treatment: ValueTreatment,
+        name: &Name,
+    ) -> SqlResult<Expr> {
+        if !function.accepts_arguments(arguments.len()) {
+            return Err(
+                SqlError::syntax("invalid number of arguments", name.position)
+                    .with_oracle_code(909),
+            );
+        }
+        if !self.is_word("over") {
+            return Err(Self::missing_window(name.position));
+        }
+        let window = self.window_reference()?;
+        if function.needs_order()
+            && matches!(
+                &window,
+                WindowReference::Inline(definition)
+                    if definition.order.is_empty() && definition.base.is_none()
+            )
+        {
+            return Err(SqlError::new(
+                SqlState::WINDOWING_ERROR,
+                "missing ORDER BY expression in the window specification",
+            )
+            .with_oracle_code(30485)
+            .at(name.position));
+        }
+        Ok(crate::window::call(WindowCall {
+            function,
+            treatment,
+            arguments,
+            filter: None,
+            window,
+            position: name.position,
+        }))
+    }
+
+    pub(super) fn partition_only_window(&mut self) -> SqlResult<Vec<Expr>> {
         self.expect_word("over")?;
         self.expect(&TokenKind::LeftParen)?;
         let mut partition = Vec::new();
@@ -221,45 +319,7 @@ impl Parser<'_> {
             );
         }
         self.expect(&TokenKind::RightParen)?;
-        let frame = FrameClause {
-            frame: Frame {
-                units: FrameUnits::Rows,
-                start: FrameBound::UnboundedPreceding,
-                end: FrameBound::UnboundedFollowing,
-                exclusion: FrameExclusion::NoOthers,
-            },
-            start_offset: None,
-            end_offset: None,
-        };
-        Ok(crate::window::call(WindowCall {
-            function: WindowFunction::Aggregate(function),
-            arguments,
-            filter: None,
-            window: WindowReference::Inline(WindowDefinition {
-                base: None,
-                partition,
-                order,
-                frame: Some(frame),
-            }),
-            position,
-        }))
-    }
-
-    fn windowed(
-        &mut self,
-        function: WindowFunction,
-        arguments: Vec<Expr>,
-        filter: Option<Expr>,
-        position: usize,
-    ) -> SqlResult<Expr> {
-        let window = self.window_reference()?;
-        Ok(crate::window::call(WindowCall {
-            function,
-            arguments,
-            filter,
-            window,
-            position,
-        }))
+        Ok(partition)
     }
 
     fn window_reference(&mut self) -> SqlResult<WindowReference> {
@@ -398,6 +458,50 @@ impl Parser<'_> {
             }
         }
         crate::window::define_windows(listed)
+    }
+
+    pub(super) fn hypothetical_set_aggregate(
+        &mut self,
+        name: &Name,
+        function: AggregateFunction,
+    ) -> SqlResult<Expr> {
+        self.expect(&TokenKind::LeftParen)?;
+        let mut hypothetical = Vec::new();
+        if !self.take(&TokenKind::RightParen) {
+            loop {
+                hypothetical.push(self.expression()?);
+                if !self.take(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(&TokenKind::RightParen)?;
+        }
+        self.expect_word("within")?;
+        self.expect_word("group")?;
+        self.expect(&TokenKind::LeftParen)?;
+        self.expect_word("order")?;
+        self.expect_word("by")?;
+        let order = self.order_items()?;
+        self.expect(&TokenKind::RightParen)?;
+        if hypothetical.len() != order.len() {
+            return Err(if self.oracle() {
+                SqlError::syntax("invalid number of arguments", name.position).with_oracle_code(909)
+            } else {
+                no_such_function(&name.text, hypothetical.len() + order.len(), name.position)
+            });
+        }
+        Ok(Expr {
+            kind: ExprKind::Aggregate {
+                function,
+                argument: Some(Box::new(crate::hypothetical_set::arguments(
+                    hypothetical,
+                    order,
+                    name.position,
+                ))),
+                distinct: false,
+            },
+            position: name.position,
+        })
     }
 
     pub(super) fn ordered_set_aggregate(

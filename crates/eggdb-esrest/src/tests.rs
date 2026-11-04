@@ -4,11 +4,11 @@ use eggdb_keyspace::MemoryKeyspace;
 
 const PASSWORD: &str = "secret";
 
-fn api(keyspace: &MemoryKeyspace) -> Api<'_> {
+pub(crate) fn api(keyspace: &MemoryKeyspace) -> Api<'_> {
     Api::new(keyspace, "eggdb", eggdb_crypto::sha256(PASSWORD.as_bytes()))
 }
 
-fn request(method: &str, target: &str, body: &str) -> Request {
+pub(crate) fn request(method: &str, target: &str, body: &str) -> Request {
     let (path, query) = match target.split_once('?') {
         Some((path, query)) => (path.to_owned(), Some(query.to_owned())),
         None => (target.to_owned(), None),
@@ -355,4 +355,606 @@ fn a_request_past_the_memory_budget_is_answered_like_a_tripped_circuit_breaker()
         "{text}"
     );
     assert!(text.contains("\"status\":429"), "{text}");
+}
+
+fn seeded_users(keyspace: &MemoryKeyspace) -> Api<'_> {
+    let api = api(keyspace);
+    let bulk = concat!(
+        "{\"index\":{\"_index\":\"my-index-000001\",\"_id\":\"1\"}}\n",
+        "{\"user\":{\"id\":\"kimchy\"},\"count\":1,\"message\":\"trying out Elasticsearch\"}\n",
+        "{\"index\":{\"_index\":\"my-index-000001\",\"_id\":\"2\"}}\n",
+        "{\"user\":{\"id\":\"kimchy\"},\"count\":5,\"message\":\"another test\"}\n",
+        "{\"index\":{\"_index\":\"my-index-000001\",\"_id\":\"3\"}}\n",
+        "{\"user\":{\"id\":\"elkbee\"},\"count\":2,\"message\":\"a third test\"}\n",
+    );
+    let response = api.answer(&request("POST", "/_bulk", bulk));
+    assert!(
+        body(&response).contains("\"errors\":false"),
+        "{}",
+        body(&response)
+    );
+    api
+}
+
+fn count_of(api: &Api<'_>, index: &str) -> String {
+    body(&api.answer(&request("GET", &format!("/{index}/_count"), "")))
+}
+
+#[test]
+fn mget_returns_each_document_in_order_from_the_reference_examples() {
+    let keyspace = MemoryKeyspace::default();
+    let api = seeded(&keyspace);
+    let response = api.answer(&request(
+        "GET",
+        "/_mget",
+        "{\"docs\":[{\"_index\":\"books\",\"_id\":\"1\"},{\"_index\":\"books\",\"_id\":\"9\"},{\"_index\":\"books\",\"_id\":\"2\",\"routing\":\"key2\"}]}",
+    ));
+    assert_eq!(response.status, 200);
+    let text = body(&response);
+    assert!(text.starts_with("{\"docs\":[{\"_index\":\"books\",\"_id\":\"1\",\"_version\":1,\"_seq_no\":0,\"_primary_term\":1,\"found\":true,\"_source\":{\"title\":\"The quick brown fox\""), "{text}");
+    assert!(
+        text.contains("{\"_index\":\"books\",\"_id\":\"9\",\"found\":false}"),
+        "{text}"
+    );
+    assert!(
+        text.find("\"_id\":\"9\"") < text.find("\"_id\":\"2\""),
+        "{text}"
+    );
+
+    let by_index = body(&api.answer(&request(
+        "POST",
+        "/books/_mget",
+        "{\"docs\":[{\"_id\":\"1\"},{\"_id\":\"2\"}]}",
+    )));
+    assert_eq!(by_index.matches("\"found\":true").count(), 2, "{by_index}");
+    let short = body(&api.answer(&request(
+        "GET",
+        "/books/_mget",
+        "{\"ids\":[\"1\",\"3\",\"4\"]}",
+    )));
+    assert_eq!(short.matches("\"found\":true").count(), 2, "{short}");
+    assert_eq!(short.matches("\"found\":false").count(), 1, "{short}");
+}
+
+#[test]
+fn mget_filters_sources_per_document_and_by_url_parameters() {
+    let keyspace = MemoryKeyspace::default();
+    let api = seeded(&keyspace);
+    let text = body(&api.answer(&request(
+        "GET",
+        "/_mget",
+        "{\"docs\":[{\"_index\":\"books\",\"_id\":\"1\",\"_source\":false},{\"_index\":\"books\",\"_id\":\"2\",\"_source\":[\"genre\",\"pages\"]},{\"_index\":\"books\",\"_id\":\"3\",\"_source\":{\"include\":[\"*\"],\"exclude\":[\"title\"]}}]}",
+    )));
+    assert!(
+        text.contains(
+            "\"_id\":\"1\",\"_version\":1,\"_seq_no\":0,\"_primary_term\":1,\"found\":true}"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("\"_source\":{\"genre\":\"nature\",\"pages\":300}"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\"_source\":{\"genre\":\"fable\",\"pages\":80}"),
+        "{text}"
+    );
+    let hidden = body(&api.answer(&request(
+        "GET",
+        "/books/_mget?_source=false",
+        "{\"ids\":[\"1\"]}",
+    )));
+    assert!(!hidden.contains("_source"), "{hidden}");
+    let included = body(&api.answer(&request(
+        "GET",
+        "/books/_mget?_source_includes=title&_source_excludes=pages",
+        "{\"ids\":[\"2\"]}",
+    )));
+    assert!(
+        included.contains("\"_source\":{\"title\":\"Foxes and hounds running quickly\"}"),
+        "{included}"
+    );
+}
+
+#[test]
+fn mget_reports_missing_indices_per_document_and_bad_requests_as_validation_errors() {
+    let keyspace = MemoryKeyspace::default();
+    let api = seeded(&keyspace);
+    let response = api.answer(&request(
+        "GET",
+        "/_mget",
+        "{\"docs\":[{\"_index\":\"nowhere\",\"_id\":\"1\"},{\"_index\":\"books\",\"_id\":\"1\"}]}",
+    ));
+    assert_eq!(response.status, 200);
+    let text = body(&response);
+    assert!(text.contains("{\"_index\":\"nowhere\",\"_id\":\"1\",\"error\":{\"root_cause\":[{\"type\":\"index_not_found_exception\""), "{text}");
+    assert!(text.contains("\"found\":true"), "{text}");
+    for (target, request_body, reason) in [
+        ("/_mget", "{\"ids\":[\"1\"]}", "index is missing for doc 0"),
+        (
+            "/_mget",
+            "{\"docs\":[{\"_id\":\"1\"},{\"_index\":\"books\"}]}",
+            "1: index is missing for doc 0;2: id is missing for doc 1;",
+        ),
+        ("/books/_mget", "{\"docs\":[]}", "no documents to get"),
+        ("/books/_mget", "", "no documents to get"),
+    ] {
+        let refused = api.answer(&request("POST", target, request_body));
+        assert_eq!(refused.status, 400, "{request_body}");
+        let text = body(&refused);
+        assert!(
+            text.contains("action_request_validation_exception"),
+            "{text}"
+        );
+        assert!(text.contains(reason), "{text}");
+    }
+    for hostile in [
+        "{\"docs\":",
+        "{\"docs\":{}}",
+        "{\"docs\":[1]}",
+        "{\"ids\":[{}]}",
+        "{\"docs\":[{\"_id\":\"1\",\"_source\":7}]}",
+    ] {
+        assert_eq!(
+            api.answer(&request("POST", "/books/_mget", hostile)).status,
+            400,
+            "{hostile}"
+        );
+    }
+}
+
+#[test]
+fn msearch_answers_each_search_with_its_own_status_from_the_reference_example() {
+    let keyspace = MemoryKeyspace::default();
+    let api = seeded(&keyspace);
+    let searches = concat!(
+        "{ }\n",
+        "{\"query\":{\"match\":{\"title\":\"fox\"}}}\n",
+        "{\"index\":\"books\"}\n",
+        "{\"query\":{\"term\":{\"genre\":\"fable\"}},\"size\":1}\n",
+        "{\"index\":\"missing\"}\n",
+        "{\"query\":{\"match_all\":{}}}\n",
+        "{\"index\":[\"books\"]}\n",
+        "{\"query\":{\"bogus\":{}}}\n",
+        "{\"index\":\"missing\",\"ignore_unavailable\":true}\n",
+        "{}\n",
+    );
+    let response = api.answer(&request("GET", "/books/_msearch", searches));
+    assert_eq!(response.status, 200);
+    let text = body(&response);
+    assert!(text.starts_with("{\"took\":"), "{text}");
+    assert!(text.contains("\"responses\":[{\"took\":0"), "{text}");
+    assert_eq!(text.matches("\"status\":200}").count(), 3, "{text}");
+    assert!(
+        text.contains("\"total\":{\"value\":1,\"relation\":\"eq\"}"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\"total\":{\"value\":2,\"relation\":\"eq\"}"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\"total\":{\"value\":0,\"relation\":\"eq\"}"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\"type\":\"index_not_found_exception\""),
+        "{text}"
+    );
+    assert!(text.contains("\"status\":404}"), "{text}");
+    assert!(text.contains("\"type\":\"parsing_exception\""), "{text}");
+    assert!(text.contains("\"status\":400}"), "{text}");
+
+    let everywhere = body(&api.answer(&request(
+        "POST",
+        "/_msearch",
+        "{}\r\n{\"query\":{\"match_all\":{}}}\r\n",
+    )));
+    assert!(everywhere.contains("\"value\":3"), "{everywhere}");
+}
+
+#[test]
+fn msearch_refuses_malformed_bodies_as_a_whole() {
+    let keyspace = MemoryKeyspace::default();
+    let api = seeded(&keyspace);
+    for (searches, kind) in [
+        ("", "action_request_validation_exception"),
+        ("\n\n", "action_request_validation_exception"),
+        ("{}\n", "illegal_argument_exception"),
+        ("{}\n{\"query\":\n", "parse_exception"),
+        ("[1]\n{}\n", "illegal_argument_exception"),
+        ("{\"index\n{}\n", "parse_exception"),
+    ] {
+        let response = api.answer(&request("POST", "/_msearch", searches));
+        assert_eq!(response.status, 400, "{searches:?}");
+        assert!(
+            body(&response).contains(kind),
+            "{searches:?}: {}",
+            body(&response)
+        );
+    }
+    let too_many = api.answer(&request("POST", "/_msearch", &"{}\n{}\n".repeat(1001)));
+    assert_eq!(too_many.status, 400);
+    assert!(body(&too_many).contains("at most 1000 searches"));
+    let most = api.answer(&request("POST", "/_msearch", &"{}\n{}\n".repeat(1000)));
+    assert_eq!(most.status, 200);
+    let bad_name = body(&api.answer(&request("POST", "/_msearch", "{\"index\":\"Bad\"}\n{}\n")));
+    assert!(
+        bad_name.contains("invalid_index_name_exception"),
+        "{bad_name}"
+    );
+}
+
+#[test]
+fn update_by_query_runs_a_script_on_matching_documents_from_the_reference_example() {
+    let keyspace = MemoryKeyspace::default();
+    let api = seeded_users(&keyspace);
+    let response = api.answer(&request(
+        "POST",
+        "/my-index-000001/_update_by_query?conflicts=proceed&refresh=true",
+        "{\"script\":{\"source\":\"ctx._source.count++\",\"lang\":\"painless\"},\"query\":{\"term\":{\"user.id\":\"kimchy\"}}}",
+    ));
+    assert_eq!(response.status, 200, "{}", body(&response));
+    let text = body(&response);
+    assert!(text.contains("\"timed_out\":false,\"total\":2,\"updated\":2,\"deleted\":0,\"batches\":1,\"version_conflicts\":0,\"noops\":0,\"retries\":{\"bulk\":0,\"search\":0},\"throttled_millis\":0,\"requests_per_second\":-1.0,\"throttled_until_millis\":0,\"failures\":[]}"), "{text}");
+    let first = body(&api.answer(&request("GET", "/my-index-000001/_doc/1", "")));
+    assert!(first.contains("\"_version\":2"), "{first}");
+    assert!(first.contains("\"count\":2"), "{first}");
+    let second = body(&api.answer(&request("GET", "/my-index-000001/_doc/2", "")));
+    assert!(second.contains("\"count\":6"), "{second}");
+    let untouched = body(&api.answer(&request("GET", "/my-index-000001/_doc/3", "")));
+    assert!(untouched.contains("\"_version\":1"), "{untouched}");
+    assert!(untouched.contains("\"count\":2"), "{untouched}");
+}
+
+#[test]
+fn update_by_query_without_a_script_rewrites_and_scripts_can_skip_or_delete() {
+    let keyspace = MemoryKeyspace::default();
+    let api = seeded_users(&keyspace);
+    let all = body(&api.answer(&request(
+        "POST",
+        "/my-index-000001/_update_by_query?conflicts=proceed",
+        "",
+    )));
+    assert!(all.contains("\"total\":3,\"updated\":3"), "{all}");
+    let rewritten = body(&api.answer(&request("GET", "/my-index-000001/_doc/3", "")));
+    assert!(rewritten.contains("\"_version\":2"), "{rewritten}");
+
+    let mixed = body(&api.answer(&request(
+        "POST",
+        "/my-index-000001/_update_by_query",
+        "{\"script\":{\"source\":\"ctx.op = params.op\",\"params\":{\"op\":\"noop\"}},\"query\":{\"term\":{\"user.id\":\"kimchy\"}}}",
+    )));
+    assert!(
+        mixed.contains("\"total\":2,\"updated\":0,\"deleted\":0"),
+        "{mixed}"
+    );
+    assert!(mixed.contains("\"noops\":2"), "{mixed}");
+    let deleted = body(&api.answer(&request(
+        "POST",
+        "/my-index-000001/_update_by_query?q=third",
+        "{\"script\":\"ctx.op = 'delete'\"}",
+    )));
+    assert!(
+        deleted.contains("\"total\":1,\"updated\":0,\"deleted\":1"),
+        "{deleted}"
+    );
+    assert!(count_of(&api, "my-index-000001").contains("\"count\":2"));
+
+    let limited = body(&api.answer(&request(
+        "POST",
+        "/my-index-000001/_update_by_query?max_docs=1&scroll_size=1",
+        "{\"script\":\"ctx._source.count += 10\"}",
+    )));
+    assert!(limited.contains("\"total\":1,\"updated\":1"), "{limited}");
+    assert!(limited.contains("\"batches\":1"), "{limited}");
+}
+
+#[test]
+fn a_failing_script_changes_nothing_and_reports_the_failure() {
+    let keyspace = MemoryKeyspace::default();
+    let api = seeded_users(&keyspace);
+    let response = api.answer(&request(
+        "POST",
+        "/my-index-000001/_update_by_query",
+        "{\"script\":\"ctx._source.count += 1; ctx._source.missing.inner = 2\"}",
+    ));
+    assert_eq!(response.status, 400, "{}", body(&response));
+    let text = body(&response);
+    assert!(text.contains("\"updated\":0"), "{text}");
+    assert!(text.contains("\"failures\":[{\"index\":\"my-index-000001\",\"id\":\"1\",\"cause\":{\"type\":\"script_exception\""), "{text}");
+    let unchanged = body(&api.answer(&request("GET", "/my-index-000001/_doc/2", "")));
+    assert!(unchanged.contains("\"count\":5"), "{unchanged}");
+    assert!(unchanged.contains("\"_version\":1"), "{unchanged}");
+
+    let compile = api.answer(&request(
+        "POST",
+        "/my-index-000001/_update_by_query",
+        "{\"script\":\"while (true) {}\"}",
+    ));
+    assert_eq!(compile.status, 400);
+    assert!(body(&compile).contains("script_exception"));
+}
+
+#[test]
+fn delete_by_query_deletes_matching_documents_from_the_reference_examples() {
+    let keyspace = MemoryKeyspace::default();
+    let api = seeded_users(&keyspace);
+    let response = api.answer(&request(
+        "POST",
+        "/my-index-000001/_delete_by_query",
+        "{\"query\":{\"match\":{\"user.id\":\"elkbee\"}}}",
+    ));
+    assert_eq!(response.status, 200, "{}", body(&response));
+    let text = body(&response);
+    assert!(text.contains("\"timed_out\":false,\"total\":1,\"deleted\":1,\"batches\":1,\"version_conflicts\":0,\"noops\":0"), "{text}");
+    assert!(!text.contains("\"updated\""), "{text}");
+    assert!(count_of(&api, "my-index-000001").contains("\"count\":2"));
+
+    let limited = body(&api.answer(&request(
+        "POST",
+        "/my-index-000001/_delete_by_query?scroll_size=5000",
+        "{\"query\":{\"term\":{\"user.id\":\"kimchy\"}},\"max_docs\":1}",
+    )));
+    assert!(limited.contains("\"total\":1,\"deleted\":1"), "{limited}");
+    assert!(count_of(&api, "my-index-000001").contains("\"count\":1"));
+
+    let rest = body(&api.answer(&request(
+        "POST",
+        "/my-index-000001/_delete_by_query?conflicts=proceed",
+        "{\"query\":{\"match_all\":{}}}",
+    )));
+    assert!(rest.contains("\"deleted\":1"), "{rest}");
+    assert!(count_of(&api, "my-index-000001").contains("\"count\":0"));
+    let nothing = body(&api.answer(&request("POST", "/my-index-000001/_delete_by_query", "")));
+    assert!(
+        nothing.contains("\"total\":0,\"deleted\":0,\"batches\":0"),
+        "{nothing}"
+    );
+}
+
+#[test]
+fn by_query_requests_refuse_bad_options() {
+    let keyspace = MemoryKeyspace::default();
+    let api = seeded_users(&keyspace);
+    assert_eq!(
+        api.answer(&request("POST", "/nowhere/_delete_by_query", ""))
+            .status,
+        404
+    );
+    for (target, request_body) in [
+        ("/my-index-000001/_delete_by_query?conflicts=maybe", ""),
+        (
+            "/my-index-000001/_delete_by_query",
+            "{\"conflicts\":\"maybe\"}",
+        ),
+        ("/my-index-000001/_delete_by_query", "{\"max_docs\":0}"),
+        ("/my-index-000001/_delete_by_query", "{\"max_docs\":-1}"),
+        ("/my-index-000001/_delete_by_query?max_docs=x", ""),
+        ("/my-index-000001/_delete_by_query?scroll_size=0", ""),
+        (
+            "/my-index-000001/_delete_by_query",
+            "{\"script\":\"ctx.op = 'delete'\"}",
+        ),
+        (
+            "/my-index-000001/_delete_by_query",
+            "{\"query\":{\"bogus\":{}}}",
+        ),
+        ("/my-index-000001/_delete_by_query", "{\"query\":"),
+        ("/my-index-000001/_delete_by_query", "[]"),
+        ("/my-index-000001/_update_by_query", "{\"doc\":{\"a\":1}}"),
+        (
+            "/my-index-000001/_update_by_query",
+            "{\"script\":{\"id\":\"stored\"}}",
+        ),
+    ] {
+        let response = api.answer(&request("POST", target, request_body));
+        assert_eq!(
+            response.status,
+            400,
+            "{target} {request_body}: {}",
+            body(&response)
+        );
+        assert!(
+            body(&response).contains("\"error\":{\"root_cause\""),
+            "{}",
+            body(&response)
+        );
+    }
+    assert!(count_of(&api, "my-index-000001").contains("\"count\":3"));
+}
+
+#[test]
+fn update_and_bulk_update_run_scripts() {
+    let keyspace = MemoryKeyspace::default();
+    let api = api(&keyspace);
+    assert_eq!(
+        api.answer(&request(
+            "PUT",
+            "/test/_doc/1",
+            "{\"counter\":1,\"tags\":[\"red\"]}"
+        ))
+        .status,
+        201
+    );
+    let response = api.answer(&request(
+        "POST",
+        "/test/_update/1",
+        "{\"script\":{\"source\":\"ctx._source.counter += params.count\",\"lang\":\"painless\",\"params\":{\"count\":4}}}",
+    ));
+    assert_eq!(response.status, 200, "{}", body(&response));
+    assert!(body(&response).contains("\"_version\":2,\"result\":\"updated\""));
+    let bulk = concat!(
+        "{\"update\":{\"_id\":\"1\",\"_index\":\"test\"}}\n",
+        "{\"script\":{\"source\":\"ctx._source.tags.add(params['tag'])\",\"lang\":\"painless\",\"params\":{\"tag\":\"blue\"}}}\n",
+    );
+    assert!(body(&api.answer(&request("POST", "/_bulk", bulk))).contains("\"errors\":false"));
+    let document = body(&api.answer(&request("GET", "/test/_doc/1", "")));
+    assert!(
+        document.contains("\"_source\":{\"counter\":5,\"tags\":[\"red\",\"blue\"]}"),
+        "{document}"
+    );
+    let noop = body(&api.answer(&request(
+        "POST",
+        "/test/_update/1",
+        "{\"script\":\"ctx.op = 'noop'\"}",
+    )));
+    assert!(
+        noop.contains("\"_version\":3,\"result\":\"noop\""),
+        "{noop}"
+    );
+    let failed = api.answer(&request(
+        "POST",
+        "/test/_update/1",
+        "{\"script\":\"ctx._source.tags++\"}",
+    ));
+    assert_eq!(failed.status, 400);
+    assert!(body(&failed).contains("script_exception"));
+    let deleted = body(&api.answer(&request(
+        "POST",
+        "/test/_update/1",
+        "{\"script\":\"ctx.op = 'delete'\"}",
+    )));
+    assert!(deleted.contains("\"result\":\"deleted\""), "{deleted}");
+    assert_eq!(api.answer(&request("GET", "/test/_doc/1", "")).status, 404);
+}
+
+fn number_after(text: &str, key: &str) -> u64 {
+    let start = text.find(key).map_or(text.len(), |at| at + key.len());
+    text.get(start..)
+        .unwrap_or_default()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap_or(u64::MAX)
+}
+
+#[test]
+fn manual_slices_split_the_matching_documents_between_them() {
+    let keyspace = MemoryKeyspace::default();
+    let api = api(&keyspace);
+    let mut bulk = String::new();
+    for id in 0..20 {
+        bulk.push_str(&format!(
+            "{{\"index\":{{\"_index\":\"counters\",\"_id\":\"{id}\"}}}}\n{{\"n\":0}}\n"
+        ));
+    }
+    assert!(body(&api.answer(&request("POST", "/_bulk", &bulk))).contains("\"errors\":false"));
+    let mut updated = 0;
+    for slice in 0..2 {
+        let text = body(&api.answer(&request(
+            "POST",
+            "/counters/_update_by_query",
+            &format!("{{\"slice\":{{\"id\":{slice},\"max\":2}},\"script\":\"ctx._source.n++\"}}"),
+        )));
+        let count = number_after(&text, "\"updated\":");
+        assert!(count < 20, "{text}");
+        updated += count;
+    }
+    assert_eq!(updated, 20);
+    for id in 0..20 {
+        let document = body(&api.answer(&request("GET", &format!("/counters/_doc/{id}"), "")));
+        assert!(document.contains("\"_source\":{\"n\":1}"), "{document}");
+    }
+    let mut deleted = 0;
+    for slice in 0..3 {
+        let text = body(&api.answer(&request(
+            "POST",
+            "/counters/_delete_by_query",
+            &format!("{{\"slice\":{{\"id\":{slice},\"max\":3}}}}"),
+        )));
+        deleted += number_after(&text, "\"deleted\":");
+    }
+    assert_eq!(deleted, 20);
+    for refused in [
+        "{\"slice\":{\"id\":0,\"max\":1}}",
+        "{\"slice\":{\"id\":2,\"max\":2}}",
+        "{\"slice\":{\"id\":-1,\"max\":2}}",
+        "{\"slice\":{\"max\":2}}",
+        "{\"slice\":{\"id\":0,\"max\":2,\"other\":1}}",
+        "{\"slice\":2}",
+    ] {
+        let response = api.answer(&request("POST", "/counters/_delete_by_query", refused));
+        assert_eq!(response.status, 400, "{refused}: {}", body(&response));
+    }
+}
+
+#[test]
+fn msearch_headers_expand_wildcard_index_patterns() {
+    let keyspace = MemoryKeyspace::default();
+    let api = api(&keyspace);
+    let bulk = concat!(
+        "{\"index\":{\"_index\":\"logs-a\",\"_id\":\"1\"}}\n{\"m\":1}\n",
+        "{\"index\":{\"_index\":\"logs-b\",\"_id\":\"2\"}}\n{\"m\":2}\n",
+        "{\"index\":{\"_index\":\"metrics\",\"_id\":\"3\"}}\n{\"m\":3}\n",
+    );
+    assert!(body(&api.answer(&request("POST", "/_bulk", bulk))).contains("\"errors\":false"));
+    let searches = concat!(
+        "{\"index\":\"logs-*\"}\n{}\n",
+        "{\"index\":[\"logs-a\",\"met*\"]}\n{}\n",
+        "{\"index\":\"nothing-*\"}\n{}\n",
+        "{\"index\":\"Bad*\"}\n{}\n",
+    );
+    let text = body(&api.answer(&request("POST", "/_msearch", searches)));
+    let totals: Vec<u64> = text
+        .match_indices("\"total\":{\"value\":")
+        .map(|(at, key)| number_after(&text[at..], key))
+        .collect();
+    assert_eq!(totals, vec![2, 2, 0], "{text}");
+    assert!(text.contains("invalid_index_name_exception"), "{text}");
+}
+
+#[test]
+fn update_refuses_both_a_script_and_a_doc() {
+    let keyspace = MemoryKeyspace::default();
+    let api = api(&keyspace);
+    assert_eq!(
+        api.answer(&request("PUT", "/test/_doc/1", "{\"n\":1}"))
+            .status,
+        201
+    );
+    let response = api.answer(&request(
+        "POST",
+        "/test/_update/1",
+        "{\"script\":\"ctx._source.n++\",\"doc\":{\"n\":5}}",
+    ));
+    assert_eq!(response.status, 400);
+    assert!(
+        body(&response).contains("can't provide both script and doc"),
+        "{}",
+        body(&response)
+    );
+    let document = body(&api.answer(&request("GET", "/test/_doc/1", "")));
+    assert!(document.contains("\"_source\":{\"n\":1}"), "{document}");
+}
+
+#[test]
+fn scripts_that_would_corrupt_or_explode_a_document_are_refused() {
+    let keyspace = MemoryKeyspace::default();
+    let api = api(&keyspace);
+    assert_eq!(
+        api.answer(&request("PUT", "/test/_doc/1", "{\"s\":\"x\"}"))
+            .status,
+        201
+    );
+    let doubling = format!(
+        "{{\"script\":\"{}\"}}",
+        "ctx._source.s += ctx._source.s; ".repeat(40)
+    );
+    let response = api.answer(&request("POST", "/test/_update/1", &doubling));
+    assert_eq!(response.status, 400, "{}", body(&response));
+    assert!(body(&response).contains("script_exception"));
+    let literal = api.answer(&request(
+        "POST",
+        "/test/_update/1",
+        "{\"script\":\"ctx._source.a = 1.\"}",
+    ));
+    assert_eq!(literal.status, 200, "{}", body(&literal));
+    let document = body(&api.answer(&request("GET", "/test/_doc/1", "")));
+    assert!(
+        document.contains("\"_source\":{\"s\":\"x\",\"a\":1.0}"),
+        "{document}"
+    );
+    assert!(eggdb_sql::json::parse_document(&document).is_ok());
 }

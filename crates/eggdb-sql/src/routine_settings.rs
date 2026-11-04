@@ -176,6 +176,42 @@ pub(crate) fn change(
     Ok(next)
 }
 
+pub(crate) fn reset_all(current: &Settings) -> Settings {
+    let names = current.names_reset_all_changes();
+    let mut next = current.clone();
+    for name in &names {
+        let _ = next.set(name, None);
+    }
+    for name in &names {
+        record(current, name, None, Lasts::Session);
+    }
+    next
+}
+
+pub(crate) enum JournalValue {
+    Unchanged,
+    Reset,
+    Set(String),
+}
+
+pub(crate) fn current_value(name: &str) -> JournalValue {
+    let name = Settings::name_of(name);
+    JOURNAL.with(|journal| {
+        let Ok(journal) = journal.try_borrow() else {
+            return JournalValue::Unchanged;
+        };
+        journal
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| entry.active && entry.name == name)
+            .map_or(JournalValue::Unchanged, |entry| match &entry.value {
+                Some(value) => JournalValue::Set(value.clone()),
+                None => JournalValue::Reset,
+            })
+    })
+}
+
 pub(crate) struct ClauseScope {
     start: usize,
     count: usize,

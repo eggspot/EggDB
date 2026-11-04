@@ -1,8 +1,9 @@
 use super::{Parser, oracle, sqlite};
 use crate::ast::{
-    BinaryOperator, CommonTable, DerivedTable, Expr, ExprKind, GeneratedTable, Literal, Name,
-    OrderItem, Query, Select, SetExpr, SetOperation, SetOperator, Statement, Subquery,
-    SubqueryState, SubqueryTest, TableReference, WithStatement, WithTable,
+    BinaryOperator, CommonTable, CycleClause, CycleMarkValues, DerivedTable, Expr, ExprKind,
+    GeneratedTable, Literal, Name, OrderItem, Query, SearchClause, SearchOrder, Select, SetExpr,
+    SetOperation, SetOperator, Statement, Subquery, SubqueryState, SubqueryTest, TableReference,
+    WithStatement, WithTable,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
@@ -56,14 +57,16 @@ impl Parser<'_> {
     fn starts_query_at(&self, ahead: usize) -> bool {
         self.is_word_at(ahead, "select")
             || self.is_word_at(ahead, "with")
-            || (self.reads_values_lists() && self.is_word_at(ahead, "values"))
+            || (self.reads_values_lists()
+                && self.is_word_at(ahead, "values")
+                && (!self.mysql() || self.is_word_at(ahead + 1, "row")))
     }
 
     fn reads_values_lists(&self) -> bool {
-        self.postgresql() || self.sqlserver()
+        self.postgresql() || self.sqlserver() || self.mysql() || self.sqlite()
     }
 
-    fn starts_query_in_parentheses(&self) -> bool {
+    pub(super) fn starts_query_in_parentheses(&self) -> bool {
         let mut ahead = 0;
         while self.peek_kind_at(ahead) == &TokenKind::LeftParen {
             ahead += 1;
@@ -320,20 +323,97 @@ impl Parser<'_> {
                 }
                 let query = self.nested_query()?;
                 self.expect(&TokenKind::RightParen)?;
-                if self.is_word("search") || self.is_word("cycle") {
-                    return Err(self.not_supported("SEARCH and CYCLE clauses"));
-                }
+                let (search, cycle) = self.search_and_cycle_clauses()?;
                 tables.push(WithTable::Query(Box::new(CommonTable {
                     name,
                     column_names,
                     query,
                     dialect: self.dialect,
+                    search,
+                    cycle,
                 })));
             }
             if !self.take(&TokenKind::Comma) {
                 return Ok((tables, recursive));
             }
         }
+    }
+
+    fn search_and_cycle_clauses(
+        &mut self,
+    ) -> SqlResult<(Option<SearchClause>, Option<CycleClause>)> {
+        if !self.is_word("search") && !self.is_word("cycle") {
+            return Ok((None, None));
+        }
+        if !self.postgresql() {
+            return Err(self.not_supported("SEARCH and CYCLE clauses"));
+        }
+        let search = if self.is_word("search") {
+            Some(self.search_clause()?)
+        } else {
+            None
+        };
+        let cycle = if self.is_word("cycle") {
+            Some(self.cycle_clause()?)
+        } else {
+            None
+        };
+        Ok((search, cycle))
+    }
+
+    fn search_clause(&mut self) -> SqlResult<SearchClause> {
+        let position = self.position();
+        self.expect_word("search")?;
+        let order = if self.take_word("depth") {
+            SearchOrder::DepthFirst
+        } else {
+            self.expect_word("breadth")?;
+            SearchOrder::BreadthFirst
+        };
+        self.expect_word("first")?;
+        self.expect_word("by")?;
+        let columns = self.bare_name_list()?;
+        self.expect_word("set")?;
+        let sequence_column = self.name()?;
+        Ok(SearchClause {
+            order,
+            columns,
+            sequence_column,
+            position,
+        })
+    }
+
+    fn cycle_clause(&mut self) -> SqlResult<CycleClause> {
+        let position = self.position();
+        self.expect_word("cycle")?;
+        let columns = self.bare_name_list()?;
+        self.expect_word("set")?;
+        let mark_column = self.name()?;
+        let mark_values = if self.take_word("to") {
+            let cycle = self.primary()?;
+            self.expect_word("default")?;
+            let default = self.primary()?;
+            Some(CycleMarkValues { cycle, default })
+        } else {
+            None
+        };
+        self.expect_word("using")?;
+        let path_column = self.name()?;
+        Ok(CycleClause {
+            columns,
+            mark_column,
+            mark_values,
+            path_column,
+            position,
+        })
+    }
+
+    fn bare_name_list(&mut self) -> SqlResult<Vec<Name>> {
+        let mut names = vec![self.name()?];
+        while self.take(&TokenKind::Comma) {
+            names.push(self.name()?);
+        }
+        Ok(names)
     }
 
     fn set_operator(&self) -> Option<(SetOperator, bool)> {
@@ -483,6 +563,8 @@ impl Parser<'_> {
                     self.expect_word("last")?;
                     Some(false)
                 }
+            } else if self.mysql() {
+                Some(!descending)
             } else {
                 None
             };
@@ -655,7 +737,9 @@ impl Parser<'_> {
         if self.reads_values_lists()
             && let Some(mut list) = Self::values_table(&mut query)
         {
-            list.column_names = column_names;
+            if !column_names.is_empty() {
+                list.column_names = column_names;
+            }
             return Ok(TableReference {
                 name,
                 alias,

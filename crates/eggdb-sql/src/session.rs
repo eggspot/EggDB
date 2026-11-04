@@ -5,6 +5,7 @@ mod mysql;
 mod nonatomic;
 mod oracle;
 mod oracle_over_tds;
+mod read_only;
 mod restore;
 mod savepoints;
 mod sqlite;
@@ -40,7 +41,7 @@ use crate::plan_cache::CachedStatement;
 use crate::plpgsql::TransactionEnd;
 use crate::sequences::{self, SequenceAdvance, SessionSequences};
 use crate::settings::{DIALECT_SETTING, SettingScope, Settings};
-use crate::store::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection};
+use crate::store::{KeyValueRead, KeyValueStore, KeyValueWrite};
 use crate::types::{SqlType, Value};
 use std::sync::Arc;
 
@@ -410,6 +411,13 @@ fn double_quoted_key_part(part: &str) -> String {
     format!("\"{}\"", part.replace('"', "\"\""))
 }
 
+fn conflict_resolution_applies(error: &SqlError) -> bool {
+    matches!(
+        error.state(),
+        SqlState::UNIQUE_VIOLATION | SqlState::NOT_NULL_VIOLATION | SqlState::CHECK_VIOLATION
+    )
+}
+
 fn aborted_block() -> SqlError {
     SqlError::new(
         SqlState::IN_FAILED_SQL_TRANSACTION,
@@ -431,9 +439,11 @@ enum Block<'s> {
 /// A block holds the store's one write transaction from `BEGIN` to `COMMIT` or `ROLLBACK`.
 /// In PostgreSQL's dialect a failed statement inside a block rolls the block back at once and
 /// leaves the session in the aborted state: every statement fails with SQLSTATE `25P02` until
-/// `ROLLBACK` (or `COMMIT`, which then reports `ROLLBACK`). In MySQL's, a statement that fails
-/// before writing leaves the block open, one that fails after writing rolls it back and ends
-/// it, and errors carry MySQL's numbers and wording.
+/// `ROLLBACK` (or `COMMIT`, which then reports `ROLLBACK`). In MySQL's, SQLite's, Oracle's and
+/// SQL Server's a failed statement undoes only its own changes and the block goes on, except
+/// SQLite's `INSERT OR FAIL`, which keeps the rows it wrote before the conflict, and SQL
+/// Server's `SET XACT_ABORT ON` and run-time errors that end its batch, which roll the
+/// transaction back. Errors carry each dialect's numbers and wording.
 pub struct Session<'s> {
     store: &'s dyn crate::store::ErasedStore,
     block: Block<'s>,
@@ -484,6 +494,9 @@ pub struct Session<'s> {
     set_error: Option<u32>,
     save_points: Vec<String>,
     savepoints: savepoints::Savepoints,
+    failed_statement_was_undone: bool,
+    keeps_failed_statement_changes: bool,
+    transaction_mode: read_only::TransactionMode,
     advisory_locks: crate::advisory_locks::AdvisoryLocks,
     notifications: crate::notifications::Notifications,
     deallocated: Vec<Option<String>>,
@@ -566,6 +579,9 @@ impl<'s> Session<'s> {
             set_error: None,
             save_points: Vec::new(),
             savepoints: savepoints::Savepoints::default(),
+            failed_statement_was_undone: false,
+            keeps_failed_statement_changes: false,
+            transaction_mode: read_only::TransactionMode::default(),
             advisory_locks: crate::advisory_locks::AdvisoryLocks::new(store.store_id()),
             temporary: crate::temporary::TemporaryObjects::default(),
             portals: crate::portals::Portals::default(),
@@ -959,6 +975,7 @@ impl<'s> Session<'s> {
         self.identify(user, database);
         let settings = Arc::make_mut(&mut self.settings);
         settings.checked_role = (!role.superuser).then(|| role.name.clone());
+        settings.set_superuser(role.superuser);
         settings.login_role = Some(role.name);
         Ok(())
     }
@@ -1084,6 +1101,7 @@ impl<'s> Session<'s> {
         if !std::mem::take(&mut self.block_is_implicit) {
             if ends_settings {
                 self.end_transaction_settings(commit);
+                self.sync_transaction_read_only();
             }
             return Ok(());
         }
@@ -1098,10 +1116,16 @@ impl<'s> Session<'s> {
                 writer.rollback()
             }
             Block::Reading(_) if commit => {
+                self.temporary.commit();
                 self.notifications.commit();
                 Ok(())
             }
-            Block::Reading(_) | Block::Failed | Block::None => {
+            Block::Reading(_) => {
+                self.temporary.rollback();
+                self.notifications.rollback();
+                Ok(())
+            }
+            Block::Failed | Block::None => {
                 self.notifications.rollback();
                 Ok(())
             }
@@ -1109,6 +1133,7 @@ impl<'s> Session<'s> {
         if ends_settings {
             self.end_transaction_settings(commit && ended.is_ok());
         }
+        self.sync_transaction_read_only();
         let settled = self.settle_sequences();
         ended.and(settled)
     }
@@ -1524,7 +1549,8 @@ impl<'s> Session<'s> {
     }
 
     /// Whether a `SAVEPOINT` is set in the open block, so that a `ROLLBACK TO SAVEPOINT` could
-    /// undo part of it. Only writes made through this session's statements are undone.
+    /// undo part of it: the writes of this session's statements, and the ones recorded with
+    /// [`Session::record_savepoint_undo`].
     pub fn has_savepoints(&self) -> bool {
         self.savepoints.is_active()
     }
@@ -1740,6 +1766,7 @@ impl<'s> Session<'s> {
         let statement = if parse_for == ParseFor::Classifying || parser.literal_rows().is_none() {
             match parser.statement()? {
                 Statement::Begin { .. }
+                | Statement::SetTransaction(_)
                 | Statement::Commit
                 | Statement::Rollback
                 | Statement::Savepoint(_)
@@ -1912,7 +1939,8 @@ impl<'s> Session<'s> {
                 let started = crate::statement_statistics::wanted().then(std::time::Instant::now);
                 let result = self.insert_literal_rows(&mut rows);
                 let routine_changes = crate::routine_settings::take_for_session(result.is_ok());
-                self.apply_routine_setting_changes(routine_changes);
+                let routine_applied = self.apply_routine_setting_changes(routine_changes);
+                let result = with_refused_routine_setting(result, routine_applied);
                 let literal_tokens = tokens.get(literal_start..resume.0.min(tokens.len()));
                 self.record_statement(literal_tokens, text, started, &result);
                 let result = self.keep_deferred(result);
@@ -2030,7 +2058,7 @@ impl<'s> Session<'s> {
             self.extra_results.clear();
             crate::deferred_checks::enter(&self.deferred.modes);
             let leftover_changes = crate::routine_settings::take_for_session(true);
-            self.apply_routine_setting_changes(leftover_changes);
+            let leftover_applied = self.apply_routine_setting_changes(leftover_changes);
             crate::portals::install(std::mem::take(&mut self.portals));
             if self.sqlserver()
                 && (self.settings.sqlserver.showplan.is_some()
@@ -2074,9 +2102,11 @@ impl<'s> Session<'s> {
             _path.0.remember(&mut self.search_path_cache);
             self.leave_sequences();
             let settled = self.settle_sequences();
-            self.apply_routine_setting_changes(routine_changes);
+            let routine_applied = self.apply_routine_setting_changes(routine_changes);
             let result =
                 result.and_then(|result| self.apply_setting_changes(result, &setting_changes));
+            let result = with_refused_routine_setting(result, leftover_applied);
+            let result = with_refused_routine_setting(result, routine_applied);
             let result = self.after_statement(result?, diagnostic);
             settled?;
             let mut keep_going = on_result(result);
@@ -2358,6 +2388,13 @@ impl<'s> Session<'s> {
         }
     }
 
+    fn failing_block_on_error<T>(&mut self, result: SqlResult<T>) -> SqlResult<T> {
+        if result.is_err() {
+            self.fail_block_in_postgresql();
+        }
+        result
+    }
+
     /// Ends the session: an open block is rolled back. Whether one was open.
     fn run_quietly(&mut self, text: &str) -> SqlResult<Vec<QueryResult>> {
         let mut results = Vec::new();
@@ -2582,7 +2619,9 @@ impl<'s> Session<'s> {
     }
 
     fn fail_block(&mut self) {
-        if self.savepoints.is_active() && matches!(self.block, Block::Writing(_)) {
+        if self.savepoints.is_active()
+            && matches!(self.block, Block::Writing(_) | Block::Reading(_))
+        {
             self.savepoints.aborted = true;
             return;
         }
@@ -2592,7 +2631,11 @@ impl<'s> Session<'s> {
                 self.temporary.rollback();
                 self.block = Block::Failed;
             }
-            Block::Reading(_) | Block::Failed => self.block = Block::Failed,
+            Block::Reading(_) => {
+                self.temporary.rollback();
+                self.block = Block::Failed;
+            }
+            Block::Failed => self.block = Block::Failed,
             Block::None => {}
         }
     }
@@ -2611,6 +2654,7 @@ impl<'s> Session<'s> {
             copy.source =
                 CopySource::Query(Box::new(crate::pg_catalog::copy_query(relation, columns)?));
         }
+        let refuses_writes = self.transaction_is_read_only();
         match copy.direction {
             CopyDirection::FromClient => self.write("COPY FROM", |writer, tables| {
                 if let CopySource::Table { name, columns } = &mut copy.source {
@@ -2620,6 +2664,7 @@ impl<'s> Session<'s> {
                         return Err(crate::pg_catalog::read_only(relation.name()).at(name.position));
                     }
                     binding.names(writer, tables, std::slice::from_mut(name))?;
+                    read_only::refuse_permanent_name(refuses_writes, "COPY FROM", name)?;
                     check_copied_columns(
                         writer,
                         binding.settings,
@@ -2732,20 +2777,25 @@ impl<'s> Session<'s> {
         let planning = std::time::Instant::now();
         let before_planning = lookups();
         let mut planned = (*explain.statement).clone();
+        let with_subplans = crate::explain::shows_subplans(explain.style, self.dialect);
         let plan = self.read(|reader, tables| {
             binding.statement(reader, tables, &mut planned)?;
-            execute::explain(reader, tables, &planned)
+            if with_subplans {
+                execute::explain_with_subplans(reader, tables, &planned)
+            } else {
+                execute::explain(reader, tables, &planned)
+            }
         })?;
         let planning = planning.elapsed();
         let before_execution = lookups();
         let started = std::time::Instant::now();
         let mut statement = (*explain.statement).clone();
-        let (result, selects) = if crate::explain::PlannedStatement::of(&statement)
+        let (result, selects, subplans) = if crate::explain::PlannedStatement::of(&statement)
             == Some(crate::explain::PlannedStatement::Select)
         {
-            crate::step_times::record(|| self.run(&mut statement, io))
+            crate::step_times::record_with_subplans(|| self.run(&mut statement, io))
         } else {
-            (self.run(&mut statement, io), Vec::new())
+            (self.run(&mut statement, io), Vec::new(), Vec::new())
         };
         let result = result?;
         let execution = started.elapsed();
@@ -2760,16 +2810,19 @@ impl<'s> Session<'s> {
             }
             _ => None,
         };
-        Ok(crate::explain::render_analyzed(
-            &plan,
-            crate::explain::Analyzed {
-                rows,
-                planning,
-                execution,
-                buffers,
-                selects,
-            },
-        ))
+        let analyzed = crate::explain::Analyzed {
+            rows,
+            planning,
+            execution,
+            buffers,
+            selects,
+            subplans,
+        };
+        Ok(if explain.style == crate::ast::ExplainStyle::Tree {
+            crate::explain::render_analyzed_tree(&plan, analyzed)
+        } else {
+            crate::explain::render_analyzed(&plan, analyzed)
+        })
     }
 
     /// The `log_min_duration_statement` threshold: statements that take at least this long are
@@ -2791,7 +2844,25 @@ impl<'s> Session<'s> {
         statement: &mut Statement,
         io: &mut CopyIo<'_, '_>,
     ) -> SqlResult<QueryResult> {
+        if matches!(self.block, Block::None) {
+            self.transaction_mode.forget_transaction();
+        }
+        let result = self.run_statement(statement, io);
+        self.sync_transaction_read_only();
+        result
+    }
+
+    fn run_statement(
+        &mut self,
+        statement: &mut Statement,
+        io: &mut CopyIo<'_, '_>,
+    ) -> SqlResult<QueryResult> {
         self.refuse_after_database_switch()?;
+        self.failed_statement_was_undone = false;
+        self.keeps_failed_statement_changes = matches!(
+            statement,
+            Statement::Insert(insert) if insert.keeps_changes_on_conflict
+        );
         match statement {
             Statement::Set { name, value, .. } if is_dialect_setting(name) => {
                 return self
@@ -2852,7 +2923,18 @@ impl<'s> Session<'s> {
                 if_not_exists,
             } => return self.install_extension(name, *if_not_exists),
             Statement::MaterializedView(command) => return self.materialized_view(command),
-            Statement::Begin { read_only } => return self.begin(*read_only),
+            Statement::Begin {
+                read_only,
+                isolation,
+            } => {
+                let opens = matches!(self.block, Block::None) || self.block_is_implicit;
+                let read_only = read_only.unwrap_or_else(|| self.new_transactions_read_only());
+                let began = self.begin(read_only)?;
+                if opens {
+                    self.transaction_mode.isolation = isolation.clone();
+                }
+                return Ok(began);
+            }
             Statement::Commit => return self.commit(),
             Statement::Rollback => return self.rollback(),
             Statement::Savepoint(command @ crate::ast::SavepointCommand::RollbackTo(_)) => {
@@ -2866,8 +2948,28 @@ impl<'s> Session<'s> {
         if let Statement::Savepoint(command) = statement {
             return self.savepoint_command(command);
         }
+        match statement {
+            Statement::SetTransaction(characteristics) => {
+                let result = self.set_transaction_statement(characteristics);
+                return self.failing_block_on_error(result);
+            }
+            Statement::Set { name, value, .. }
+                if self.dialect == Dialect::PostgreSql
+                    && (name.eq_ignore_ascii_case("transaction_read_only")
+                        || name.eq_ignore_ascii_case("transaction_isolation")) =>
+            {
+                let result = self.set_transaction_parameter(name, value.as_deref());
+                return self.failing_block_on_error(result);
+            }
+            Statement::Set { .. }
+            | Statement::Reset { .. }
+            | Statement::Show { .. }
+            | Statement::Ignored { .. } => {}
+            _ => self.transaction_mode.has_read = true,
+        }
         if self.commits_implicitly(statement)
-            && let Block::Writing(_) = self.block
+            && (matches!(self.block, Block::Writing(_))
+                || (self.oracle() && matches!(self.block, Block::Reading(_))))
         {
             self.commit()?;
         }
@@ -2889,6 +2991,7 @@ impl<'s> Session<'s> {
         };
         let binding = &binding;
         let dialect = self.dialect;
+        let refuses_writes = self.transaction_is_read_only();
         let format_only = self.sqlserver() && self.settings.sqlserver.format_only;
         if format_only
             && !matches!(
@@ -3172,7 +3275,11 @@ impl<'s> Session<'s> {
             Statement::Explain(explain) => self
                 .read(|reader, tables| {
                     binding.statement(reader, tables, &mut explain.statement)?;
-                    execute::explain(reader, tables, &explain.statement)
+                    if crate::explain::shows_subplans(explain.style, dialect) {
+                        execute::explain_with_subplans(reader, tables, &explain.statement)
+                    } else {
+                        execute::explain(reader, tables, &explain.statement)
+                    }
                 })
                 .map(|query| crate::explain::render(&query, explain.style, dialect)),
             Statement::DropTable {
@@ -3185,6 +3292,7 @@ impl<'s> Session<'s> {
             }),
             Statement::Insert(insert) => self.write_firing_triggers("INSERT", |writer, tables| {
                 binding.insert(writer, tables, insert)?;
+                read_only::refuse_permanent_target(refuses_writes, "INSERT", &insert.table)?;
                 if matches!(dialect, Dialect::PostgreSql | Dialect::MySql)
                     || (dialect == Dialect::SqlServer
                         && crate::routines::insert_calls_marked_routine(insert))
@@ -3195,6 +3303,7 @@ impl<'s> Session<'s> {
             }),
             Statement::Update(update) => self.write_firing_triggers("UPDATE", |writer, tables| {
                 binding.update(writer, tables, update)?;
+                read_only::refuse_permanent_target(refuses_writes, "UPDATE", &update.table)?;
                 if matches!(dialect, Dialect::PostgreSql | Dialect::MySql)
                     || (dialect == Dialect::SqlServer
                         && crate::routines::exprs_call_marked_routine(
@@ -3207,6 +3316,7 @@ impl<'s> Session<'s> {
             }),
             Statement::Delete(delete) => self.write_firing_triggers("DELETE", |writer, tables| {
                 binding.delete(writer, tables, delete)?;
+                read_only::refuse_permanent_target(refuses_writes, "DELETE", &delete.table)?;
                 if matches!(dialect, Dialect::PostgreSql | Dialect::MySql)
                     || (dialect == Dialect::SqlServer
                         && crate::routines::exprs_call_marked_routine(
@@ -3218,10 +3328,19 @@ impl<'s> Session<'s> {
                 execute::delete(writer, tables, delete)
             }),
             Statement::With(with) => self.write_firing_triggers("WITH", |writer, tables| {
-                crate::with_statement::run(writer, tables, with, binding)
+                crate::with_statement::run_checking_targets(
+                    writer,
+                    tables,
+                    with,
+                    binding,
+                    &|statement| {
+                        read_only::refuse_permanent_statement_target(refuses_writes, statement)
+                    },
+                )
             }),
             Statement::Merge(merge) => self.write_firing_triggers("MERGE", |writer, tables| {
                 binding.merge(writer, tables, merge)?;
+                read_only::refuse_permanent_target(refuses_writes, "MERGE", &merge.target)?;
                 crate::merge::merge(writer, tables, merge)
             }),
             Statement::CreateTrigger(create) => self.write("CREATE TRIGGER", |writer, tables| {
@@ -3365,9 +3484,12 @@ impl<'s> Session<'s> {
             Statement::SetConstraints { names, deferred } => {
                 self.set_constraints(names.as_deref(), *deferred)
             }
-            Statement::CreateTableAs(create) => self.write("SELECT INTO", |writer, tables| {
-                crate::create_table_as::run(writer, tables, binding, dialect, create)
-            }),
+            Statement::CreateTableAs(create) => {
+                let command = create.command();
+                self.write(command, |writer, tables| {
+                    crate::create_table_as::run(writer, tables, binding, dialect, create)
+                })
+            }
             Statement::MultitableInsert(insert) => self
                 .write_firing_triggers("INSERT", |writer, tables| {
                     crate::multitable_insert::run(writer, tables, binding, insert)
@@ -3376,6 +3498,7 @@ impl<'s> Session<'s> {
                 self.run_output_into(output, binding)
             }
             Statement::Begin { .. }
+            | Statement::SetTransaction(_)
             | Statement::Commit
             | Statement::Rollback
             | Statement::Savepoint(_)
@@ -3480,6 +3603,12 @@ impl<'s> Session<'s> {
         if matches!(self.block, Block::Failed) || self.savepoints.aborted {
             return Err(aborted_block());
         }
+        self.failed_statement_was_undone = false;
+        self.keeps_failed_statement_changes = false;
+        if matches!(self.block, Block::None) {
+            self.transaction_mode.forget_transaction();
+        }
+        self.transaction_mode.has_read = true;
         let settings = Arc::clone(&self.settings);
         let binding = Binding {
             settings: &settings,
@@ -3574,17 +3703,58 @@ impl<'s> Session<'s> {
         body: impl FnOnce(&mut dyn KeyValueWrite, &mut TableCache) -> SqlResult<QueryResult>,
     ) -> SqlResult<QueryResult> {
         self.refuse_writes_when_uncommittable()?;
+        let refuses_writes = self.transaction_is_read_only();
+        if matches!(self.block, Block::None) {
+            self.transaction_mode.next_read_only = None;
+        }
+        if refuses_writes {
+            if read_only::changes_definitions(command) {
+                return Err(read_only::refused_in_read_only_transaction(command));
+            }
+            if matches!(self.block, Block::None) {
+                return self.write_in_statement_snapshot(command, body);
+            }
+        }
         let _types = crate::user_types::enter_if_absent();
         let body = |writer: &mut dyn KeyValueWrite, tables: &mut TableCache| {
+            let mut refusing;
+            let writer: &mut dyn KeyValueWrite = if refuses_writes {
+                refusing = read_only::ReadOnlyTransactionWrite {
+                    inner: writer,
+                    command,
+                };
+                &mut refusing
+            } else {
+                writer
+            };
             sequences::load_for_sequence_calls(writer)?;
             let result =
                 body(writer, tables).map_err(|error| sequences::explain_missing(writer, error))?;
-            sequences::save_changed(writer)?;
+            sequences::save_changed(writer).map_err(|error| {
+                if error.state() == SqlState::READ_ONLY_SQL_TRANSACTION {
+                    let refused = read_only::refused_in_read_only_transaction(
+                        sequences::first_changing_function(),
+                    );
+                    sequences::forget_changes();
+                    refused
+                } else {
+                    error
+                }
+            })?;
             Ok(result)
         };
         let keep_open = !self.autocommit();
         let keeps_ddl_open = self.sqlserver();
         let implicit = self.implicit_transaction;
+        let rolls_back_statements = self.dialect != Dialect::PostgreSql;
+        let keeps_failed_changes = std::mem::take(&mut self.keeps_failed_statement_changes);
+        self.failed_statement_was_undone = false;
+        let undoes = |result: &SqlResult<QueryResult>| {
+            rolls_back_statements
+                && result.as_ref().is_err_and(|error| {
+                    !(keeps_failed_changes && conflict_resolution_applies(error))
+                })
+        };
         let tables = &mut self.tables;
         let objects = &mut self.temporary;
         let undo = self
@@ -3600,32 +3770,38 @@ impl<'s> Session<'s> {
                 let Some(log) = undo else {
                     return Err(SqlError::new(SqlState::INTERNAL_ERROR, "no undo log"));
                 };
-                body(
-                    &mut savepoints::UndoWrite {
-                        inner: &mut routed,
-                        log,
-                    },
+                let statement_start = log.len();
+                let result = body(
+                    &mut savepoints::UndoWrite::new(
+                        &mut routed,
+                        &mut *log,
+                        savepoints::UndoKeptFor::RollbackToSavepoint,
+                    ),
                     tables,
-                )
+                );
+                if undoes(&result) && log.len() > statement_start {
+                    let undone = savepoints::undo_back_to(&mut routed, log, statement_start);
+                    return self.end_undone_statement(result, undone);
+                }
+                result
             }
-            Block::Writing(writer) if self.dialect != Dialect::PostgreSql => {
+            Block::Writing(writer) if rolls_back_statements => {
                 let mut routed = crate::temporary::TemporaryWrite {
                     inner: writer,
                     objects,
                 };
-                let mut tracked = TrackedWrite {
-                    inner: &mut routed,
-                    wrote: false,
-                };
-                let result = body(&mut tracked, tables);
-                let wrote = tracked.wrote;
-                if result.is_err()
-                    && wrote
-                    && let Block::Writing(writer) = std::mem::replace(&mut self.block, Block::None)
-                {
-                    let _ = writer.rollback();
-                    self.temporary.rollback();
-                    self.notifications.rollback();
+                let mut log = savepoints::Undo::new();
+                let result = body(
+                    &mut savepoints::UndoWrite::new(
+                        &mut routed,
+                        &mut log,
+                        savepoints::UndoKeptFor::FailedStatement,
+                    ),
+                    tables,
+                );
+                if undoes(&result) && !log.is_empty() {
+                    let undone = savepoints::undo_back_to(&mut routed, &mut log, 0);
+                    return self.end_undone_statement(result, undone);
                 }
                 result
             }
@@ -3636,10 +3812,30 @@ impl<'s> Session<'s> {
                 },
                 tables,
             ),
-            Block::Reading(_) => Err(SqlError::new(
-                SqlState::READ_ONLY_SQL_TRANSACTION,
-                format!("cannot execute {command} in a read-only transaction"),
-            )),
+            Block::Reading(reader) => {
+                let mut unwritable = crate::plpgsql::ReadOnlyWrite { inner: &**reader };
+                let mut routed = crate::temporary::TemporaryWrite {
+                    inner: &mut unwritable,
+                    objects,
+                };
+                let mut own_log = savepoints::Undo::new();
+                let (log, statement_start, kept_for) = match undo {
+                    Some(log) => {
+                        let start = log.len();
+                        (log, start, savepoints::UndoKeptFor::RollbackToSavepoint)
+                    }
+                    None => (&mut own_log, 0, savepoints::UndoKeptFor::FailedStatement),
+                };
+                let result = body(
+                    &mut savepoints::UndoWrite::new(&mut routed, &mut *log, kept_for),
+                    tables,
+                );
+                if undoes(&result) && log.len() > statement_start {
+                    let undone = savepoints::undo_back_to(&mut routed, log, statement_start);
+                    return self.end_undone_statement(result, undone);
+                }
+                result
+            }
             Block::None | Block::Failed => {
                 let mut writer = self
                     .store
@@ -3652,6 +3848,14 @@ impl<'s> Session<'s> {
                     },
                     tables,
                 );
+                if !keep_open
+                    && !implicit
+                    && outcome.as_ref().is_err_and(|error| {
+                        keeps_failed_changes && conflict_resolution_applies(error)
+                    })
+                {
+                    return self.commit_statement(writer).and(outcome);
+                }
                 self.end_autocommit_statement(
                     writer,
                     outcome,
@@ -3662,6 +3866,24 @@ impl<'s> Session<'s> {
                 )
             }
         }
+    }
+
+    fn end_undone_statement(
+        &mut self,
+        result: SqlResult<QueryResult>,
+        undone: SqlResult<()>,
+    ) -> SqlResult<QueryResult> {
+        self.tables = TableCache::default();
+        match undone {
+            Ok(()) => self.failed_statement_was_undone = true,
+            Err(_) if self.sqlserver() => {
+                let _ = self.abandon_transaction();
+            }
+            Err(_) => {
+                let _ = self.rollback();
+            }
+        }
+        result
     }
 
     fn end_autocommit_statement(
@@ -3716,32 +3938,7 @@ impl<'s> Session<'s> {
                 self.block_is_implicit = true;
                 Ok(result)
             }
-            Ok(result) => {
-                let pending = crate::deferred_checks::take_statement_pending();
-                if !pending.is_empty() {
-                    let checked = crate::constraints::check_pending(
-                        &crate::temporary::TemporaryRead {
-                            inner: &writer,
-                            objects: &self.temporary,
-                        },
-                        &mut self.tables,
-                        &pending,
-                    );
-                    if let Err(error) = checked {
-                        let _ = writer.rollback();
-                        self.temporary.rollback();
-                        return Err(error);
-                    }
-                }
-                if let Err(error) = writer.commit() {
-                    self.temporary.rollback();
-                    return Err(error);
-                }
-                self.temporary.commit();
-                sequences::mark_changes_committed();
-                crate::activity::committed();
-                Ok(result)
-            }
+            Ok(result) => self.commit_statement(writer).map(|()| result),
             Err(error) => {
                 let _ = writer.rollback();
                 self.temporary.rollback();
@@ -3749,6 +3946,36 @@ impl<'s> Session<'s> {
                 Err(error)
             }
         }
+    }
+
+    fn commit_statement(
+        &mut self,
+        writer: Box<dyn crate::store::BoxedWrite + 's>,
+    ) -> SqlResult<()> {
+        let pending = crate::deferred_checks::take_statement_pending();
+        if !pending.is_empty() {
+            let checked = crate::constraints::check_pending(
+                &crate::temporary::TemporaryRead {
+                    inner: &writer,
+                    objects: &self.temporary,
+                },
+                &mut self.tables,
+                &pending,
+            );
+            if let Err(error) = checked {
+                let _ = writer.rollback();
+                self.temporary.rollback();
+                return Err(error);
+            }
+        }
+        if let Err(error) = writer.commit() {
+            self.temporary.rollback();
+            return Err(error);
+        }
+        self.temporary.commit();
+        sequences::mark_changes_committed();
+        crate::activity::committed();
+        Ok(())
     }
 
     fn begin(&mut self, read_only: bool) -> SqlResult<QueryResult> {
@@ -3759,6 +3986,7 @@ impl<'s> Session<'s> {
             match self.block {
                 Block::Writing(_) => {
                     self.block_is_implicit = false;
+                    self.transaction_mode.writing_block_read_only = read_only;
                     return Ok(QueryResult::command("BEGIN"));
                 }
                 Block::Failed => return Err(aborted_block()),
@@ -3773,6 +4001,7 @@ impl<'s> Session<'s> {
             Block::Writing(_) | Block::Reading(_) => Ok(QueryResult::command("BEGIN")
                 .with_notice("WARNING:  there is already a transaction in progress".into())),
             Block::None => {
+                self.transaction_mode.started();
                 self.block = if read_only {
                     Block::Reading(self.store.begin_boxed_read()?)
                 } else {
@@ -3816,6 +4045,7 @@ impl<'s> Session<'s> {
                 })
             }
             Block::Reading(_) => {
+                self.temporary.commit();
                 self.notifications.commit();
                 Ok(QueryResult::command("COMMIT"))
             }
@@ -3850,7 +4080,11 @@ impl<'s> Session<'s> {
                     rolled_back
                 })
             }
-            Block::Reading(_) | Block::Failed => Ok(QueryResult::command("ROLLBACK")),
+            Block::Reading(_) => {
+                self.temporary.rollback();
+                Ok(QueryResult::command("ROLLBACK"))
+            }
+            Block::Failed => Ok(QueryResult::command("ROLLBACK")),
             Block::None if self.mysql() || self.oracle() => Ok(QueryResult::command("ROLLBACK")),
             Block::None => {
                 Ok(QueryResult::command("ROLLBACK").with_notice(NO_TRANSACTION_WARNING.into()))
@@ -3902,66 +4136,6 @@ fn milliseconds_setting(value: &str) -> Option<i64> {
     }
 }
 
-struct TrackedWrite<'w> {
-    inner: &'w mut dyn KeyValueWrite,
-    wrote: bool,
-}
-
-impl KeyValueRead for TrackedWrite<'_> {
-    fn get(&self, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
-        self.inner.get(key)
-    }
-
-    fn get_with(
-        &self,
-        key: &[u8],
-        read: &mut dyn FnMut(&[u8]) -> SqlResult<()>,
-    ) -> SqlResult<bool> {
-        self.inner.get_with(key, read)
-    }
-
-    fn scan(
-        &self,
-        start: &[u8],
-        end: &[u8],
-        direction: ScanDirection,
-        visit: &mut EntryVisitor<'_>,
-    ) -> SqlResult<()> {
-        self.inner.scan(start, end, direction, visit)
-    }
-
-    fn committed_version(&self) -> Option<u64> {
-        self.inner.committed_version()
-    }
-}
-
-impl KeyValueWrite for TrackedWrite<'_> {
-    fn put(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
-        self.wrote = true;
-        self.inner.put(key, value)
-    }
-
-    fn put_if_absent(&mut self, key: &[u8], value: &[u8]) -> SqlResult<bool> {
-        let inserted = self.inner.put_if_absent(key, value)?;
-        self.wrote |= inserted;
-        Ok(inserted)
-    }
-
-    fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {
-        let deleted = self.inner.delete(key)?;
-        self.wrote |= deleted;
-        Ok(deleted)
-    }
-
-    fn commit(self) -> SqlResult<()> {
-        Ok(())
-    }
-
-    fn rollback(self) -> SqlResult<()> {
-        Ok(())
-    }
-}
-
 fn with_raised_notices(result: SqlResult<QueryResult>) -> SqlResult<QueryResult> {
     let raised = crate::plpgsql::take_raised_notices();
     if raised.is_empty() {
@@ -3972,6 +4146,18 @@ fn with_raised_notices(result: SqlResult<QueryResult>) -> SqlResult<QueryResult>
         result.notices.extend(own);
         result
     })
+}
+
+fn with_refused_routine_setting(
+    result: SqlResult<QueryResult>,
+    applied: SqlResult<()>,
+) -> SqlResult<QueryResult> {
+    match applied {
+        Ok(()) => result,
+        Err(refused) => {
+            result.map(|result| result.with_notice(format!("WARNING:  {}", refused.message())))
+        }
+    }
 }
 
 fn read_only_refusal(error: SqlError, command: &str) -> SqlError {

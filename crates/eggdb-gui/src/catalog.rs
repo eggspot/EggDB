@@ -27,6 +27,9 @@ pub struct Catalog {
     pub key_spaces: Vec<KeySpace>,
     /// The triggers of every table.
     pub triggers: Vec<CatalogTrigger>,
+    /// Whether it is a RESP server's (`docs/ux/workspace.md` 10.10): one `Keys` group of
+    /// `resp0` … `resp15`, scanned in the server's order, and no `Tables`.
+    pub over_resp: bool,
 }
 
 /// A trigger on a table.

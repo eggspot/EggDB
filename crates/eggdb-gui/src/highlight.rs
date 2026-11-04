@@ -125,6 +125,10 @@ pub enum Carry {
     Bracketed,
     /// A PostgreSQL dollar-quoted body, closed by this tag (`$$` or `$body$`).
     Dollar(String),
+    /// A PostgreSQL `E'...'` string, where a backslash escapes the next character.
+    Escaped,
+    /// An Oracle `q'[...]'` literal, closed by this character followed by `'`.
+    OracleQuote(char),
 }
 
 /// What one lexed run of SQL is: the highlighter colours them and the statement splitter
@@ -209,14 +213,67 @@ fn next_char_end(text: &str, at: usize) -> usize {
 
 fn word_byte(byte: u8, dialect: QueryDialect) -> bool {
     byte.is_ascii_alphanumeric()
-        || byte == b'_'
-        || (byte == b'$' && dialect != QueryDialect::PostgreSql)
+        || matches!(byte, b'_' | b'$')
+        || !byte.is_ascii()
+        || (byte == b'#' && matches!(dialect, QueryDialect::SqlServer | QueryDialect::Oracle))
+        || (byte == b'@' && dialect == QueryDialect::SqlServer)
 }
 
 fn starts_word(byte: u8, dialect: QueryDialect) -> bool {
     byte.is_ascii_alphabetic()
         || byte == b'_'
+        || !byte.is_ascii()
         || (dialect == QueryDialect::SqlServer && matches!(byte, b'@' | b'#'))
+}
+
+fn oracle_quote_at(text: &str, at: usize) -> Option<(usize, char)> {
+    let prefix = match text.as_bytes().get(at..)? {
+        [b'q' | b'Q', b'\'', ..] => 1,
+        [b'n' | b'N', b'q' | b'Q', b'\'', ..] => 2,
+        _ => return None,
+    };
+    let delimiter_at = at + prefix + 1;
+    let open = text[delimiter_at..]
+        .chars()
+        .next()
+        .filter(|open| !open.is_whitespace())?;
+    let close = match open {
+        '[' => ']',
+        '{' => '}',
+        '<' => '>',
+        '(' => ')',
+        other => other,
+    };
+    Some((delimiter_at + open.len_utf8(), close))
+}
+
+fn escape_string_at(text: &str, at: usize, dialect: QueryDialect) -> bool {
+    dialect == QueryDialect::PostgreSql
+        && matches!(text.as_bytes().get(at..), Some([b'e' | b'E', b'\'', ..]))
+}
+
+fn quote_end(text: &str, at: usize, quote: u8, escapes: bool) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut at = at;
+    while at < bytes.len() {
+        let byte = bytes[at];
+        if byte == b'\\' && escapes {
+            at = (at + 2).min(bytes.len());
+            if at < bytes.len() && !text.is_char_boundary(at) {
+                at = next_char_end(text, at - 1);
+            }
+            continue;
+        }
+        if byte == quote {
+            if bytes.get(at + 1) == Some(&quote) {
+                at += 2;
+                continue;
+            }
+            return Some(at + 1);
+        }
+        at = next_char_end(text, at);
+    }
+    None
 }
 
 fn continue_carry(
@@ -249,27 +306,33 @@ fn continue_carry(
             (at, Lexeme::Comment)
         }
         Carry::Quoted(quote) => {
-            let mut at = at;
-            while at < bytes.len() {
-                let byte = bytes[at];
-                if byte == b'\\' && backslash_escapes(dialect, quote) {
-                    at = (at + 2).min(bytes.len());
-                    if at < bytes.len() && !text.is_char_boundary(at) {
-                        at = next_char_end(text, at - 1);
-                    }
-                    continue;
-                }
-                if byte == quote {
-                    if bytes.get(at + 1) == Some(&quote) {
-                        at += 2;
-                        continue;
-                    }
+            let lexeme = quote_lexeme(dialect, quote);
+            match quote_end(text, at, quote, backslash_escapes(dialect, quote)) {
+                Some(end) => {
                     *carry = Carry::Code;
-                    return (at + 1, quote_lexeme(dialect, quote));
+                    (end, lexeme)
                 }
-                at = next_char_end(text, at);
+                None => (bytes.len(), lexeme),
             }
-            (at, quote_lexeme(dialect, quote))
+        }
+        Carry::Escaped => match quote_end(text, at, b'\'', true) {
+            Some(end) => {
+                *carry = Carry::Code;
+                (end, Lexeme::String)
+            }
+            None => (bytes.len(), Lexeme::String),
+        },
+        Carry::OracleQuote(close) => {
+            let mut ending = String::with_capacity(close.len_utf8() + 1);
+            ending.push(close);
+            ending.push('\'');
+            match text[at..].find(&ending) {
+                Some(found) => {
+                    *carry = Carry::Code;
+                    (at + found + ending.len(), Lexeme::String)
+                }
+                None => (bytes.len(), Lexeme::String),
+            }
         }
         Carry::Bracketed => {
             let mut at = at;
@@ -341,6 +404,19 @@ pub(crate) fn lex(
             at += tag.len();
             *carry = Carry::Dollar(tag);
             let (end, lexeme) = continue_carry(text, at, dialect, carry);
+            at = end;
+            lexeme
+        } else if let Some((body, close)) = (dialect == QueryDialect::Oracle)
+            .then(|| oracle_quote_at(text, at))
+            .flatten()
+        {
+            *carry = Carry::OracleQuote(close);
+            let (end, lexeme) = continue_carry(text, body, dialect, carry);
+            at = end;
+            lexeme
+        } else if escape_string_at(text, at, dialect) {
+            *carry = Carry::Escaped;
+            let (end, lexeme) = continue_carry(text, at + 2, dialect, carry);
             at = end;
             lexeme
         } else if byte.is_ascii_digit() {
@@ -483,9 +559,55 @@ mod tests {
     }
 
     #[test]
+    fn each_dialect_keeps_its_literals_and_names_in_one_run() {
+        let one_run = |line: &str, dialect: QueryDialect, wanted: &str| {
+            let mut carry = Carry::Code;
+            let mut runs = Vec::new();
+            lex(line, dialect, &mut carry, &mut |range, lexeme| {
+                runs.push((line[range].to_owned(), lexeme))
+            });
+            assert!(
+                runs.iter().any(|(text, _)| text == wanted),
+                "{wanted:?} in {line:?} ({dialect:?}): {runs:?}"
+            );
+            assert_eq!(carry, Carry::Code, "{line:?}");
+        };
+        one_run(
+            "select q'[it's]' from dual",
+            QueryDialect::Oracle,
+            "q'[it's]'",
+        );
+        one_run(
+            "select nQ'{a}b}' from dual",
+            QueryDialect::Oracle,
+            "nQ'{a}b}'",
+        );
+        one_run("select Q'!x!' from dual", QueryDialect::Oracle, "Q'!x!'");
+        one_run("select emp# from emp", QueryDialect::Oracle, "emp#");
+        one_run("select E'it\\'s' x", QueryDialect::PostgreSql, "E'it\\'s'");
+        one_run("select a$b from t", QueryDialect::PostgreSql, "a$b");
+        one_run("select café from t", QueryDialect::PostgreSql, "café");
+        one_run("select * from ##g", QueryDialect::SqlServer, "##g");
+        one_run("select @@ROWCOUNT", QueryDialect::SqlServer, "@@ROWCOUNT");
+        let mut carry = Carry::Code;
+        let _ = tokens("select q'<a", QueryDialect::Oracle, &mut carry);
+        assert_eq!(carry, Carry::OracleQuote('>'));
+        let next = tokens("b>' from dual", QueryDialect::Oracle, &mut carry);
+        assert_eq!(next[0], (0..3, TokenKind::String));
+        assert_eq!(carry, Carry::Code);
+        let mut carry = Carry::Code;
+        let _ = tokens("select e'a\\", QueryDialect::PostgreSql, &mut carry);
+        assert_eq!(carry, Carry::Escaped);
+        let mut carry = Carry::Code;
+        let _ = tokens("select q'[x]' from t", QueryDialect::PostgreSql, &mut carry);
+        assert_eq!(carry, Carry::Code);
+    }
+
+    #[test]
     fn hostile_bytes_never_stop_the_lexer() {
         for line in [
-            "'\\", "\"é", "[é", "$a", "$$", "/*/", "--", "é$tag$x", "\\'é", "`",
+            "'\\", "\"é", "[é", "$a", "$$", "/*/", "--", "é$tag$x", "\\'é", "`", "q'", "q'é",
+            "nq'[", "E'\\", "e'\\é", "##", "\u{a0}",
         ] {
             for dialect in QueryDialect::ALL {
                 let mut carry = Carry::Code;

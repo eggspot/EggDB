@@ -719,6 +719,7 @@ fn insert_unmatched(
             on_duplicate: OnDuplicate::Fail,
             conflict_target: None,
             rollback_on_conflict: false,
+            keeps_changes_on_conflict: false,
             overriding: None,
         },
     )?;
@@ -807,6 +808,7 @@ pub(crate) fn store_updates(
         {
             continue;
         }
+        checks.generate(table, &mut new_row)?;
         execute::check_not_null_of(table, &new_row)?;
         if !checks.is_empty() {
             checks.check(table, &new_row)?;

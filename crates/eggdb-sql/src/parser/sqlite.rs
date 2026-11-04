@@ -1,7 +1,7 @@
 use super::{Level, Parser};
 use crate::ast::{
-    BinaryOperator, ColumnDefinition, Expr, ExprKind, Literal, Name, OnDuplicate, Pragma,
-    Statement, TableReference, UnaryOperator,
+    BinaryOperator, ColumnDefinition, ConflictTarget, Expr, ExprKind, Literal, Name, OnDuplicate,
+    Pragma, Statement, TableReference, UnaryOperator,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::children_mut;
@@ -366,7 +366,10 @@ impl<'t> Parser<'t> {
                     || self.take_word("immediate")
                     || self.take_word("exclusive");
                 self.take_word("transaction");
-                Statement::Begin { read_only: false }
+                Statement::Begin {
+                    read_only: None,
+                    isolation: None,
+                }
             }
             "replace" if self.is_word_at(1, "into") => self.insert()?,
             "attach" | "detach" | "vacuum" | "reindex" => {
@@ -503,6 +506,7 @@ impl<'t> Parser<'t> {
             unique: None,
             constraints: Vec::new(),
             comment: None,
+            generated: None,
         };
         let mut autoincrement = None;
         loop {
@@ -559,10 +563,10 @@ impl<'t> Parser<'t> {
                 if !collation.eq_ignore_ascii_case("binary") {
                     return Err(self.not_supported("COLLATE other than BINARY"));
                 }
+            } else if self.starts_generation() {
+                self.generation_clause(&mut column, true)?;
             } else if ["generated", "as"].iter().any(|word| self.is_word(word)) {
-                return Err(self.not_supported(
-                    "a column constraint other than PRIMARY KEY, UNIQUE, NOT NULL, DEFAULT, CHECK and REFERENCES",
-                ));
+                return Err(self.unexpected());
             } else {
                 break;
             }
@@ -640,33 +644,31 @@ impl<'t> Parser<'t> {
         Ok(())
     }
 
-    pub(super) fn sqlite_conflict_resolution(&mut self) -> SqlResult<(OnDuplicate, bool)> {
+    pub(super) fn sqlite_conflict_resolution(&mut self) -> SqlResult<(OnDuplicate, bool, bool)> {
         let resolution = if self.take_word("replace") {
-            (OnDuplicate::Replace, false)
+            (OnDuplicate::Replace, false, false)
         } else if self.take_word("ignore") {
-            (OnDuplicate::Ignore, false)
+            (OnDuplicate::Ignore, false, false)
         } else if self.take_word("rollback") {
-            (OnDuplicate::Fail, true)
-        } else if self.take_word("abort") || self.take_word("fail") {
-            (OnDuplicate::Fail, false)
+            (OnDuplicate::Fail, true, false)
+        } else if self.take_word("fail") {
+            (OnDuplicate::Fail, false, true)
+        } else if self.take_word("abort") {
+            (OnDuplicate::Fail, false, false)
         } else {
             return Err(self.unexpected());
         };
         Ok(resolution)
     }
 
-    pub(super) fn sqlite_upsert(&mut self) -> SqlResult<(OnDuplicate, Option<Vec<Name>>)> {
+    pub(super) fn sqlite_upsert(&mut self) -> SqlResult<(OnDuplicate, Option<ConflictTarget>)> {
         self.expect_word("on")?;
         self.expect_word("conflict")?;
-        if self.postgresql() && self.is_word("on") {
-            return Err(self.not_supported("ON CONFLICT ON CONSTRAINT"));
-        }
-        let target = if self.peek_kind() == &TokenKind::LeftParen {
-            let target = self.name_list()?;
-            if self.is_word("where") {
-                return Err(self.not_supported("ON CONFLICT (...) WHERE"));
-            }
-            Some(target)
+        let target = if self.postgresql() && self.take_word("on") {
+            self.expect_word("constraint")?;
+            Some(ConflictTarget::Constraint(self.name()?))
+        } else if self.peek_kind() == &TokenKind::LeftParen {
+            Some(self.conflict_inference()?)
         } else {
             None
         };
@@ -709,6 +711,78 @@ impl<'t> Parser<'t> {
             return Err(self.not_supported("more than one ON CONFLICT clause"));
         }
         Ok((OnDuplicate::Update(assignments), target))
+    }
+
+    fn conflict_inference(&mut self) -> SqlResult<ConflictTarget> {
+        let opening = self.position();
+        self.expect(&TokenKind::LeftParen)?;
+        let mut columns = Vec::new();
+        let mut expressions = Vec::new();
+        loop {
+            let plain_column = matches!(
+                self.peek_kind(),
+                TokenKind::Word(_) | TokenKind::QuotedIdentifier(_)
+            ) && (matches!(
+                self.peek_kind_at(1),
+                TokenKind::Comma | TokenKind::RightParen
+            ) || ["asc", "desc", "nulls"]
+                .iter()
+                .any(|word| self.is_word_at(1, word)));
+            if plain_column {
+                columns.push(self.name()?);
+            } else {
+                match self.expression()? {
+                    Expr {
+                        kind:
+                            ExprKind::Column {
+                                qualifier: None,
+                                name,
+                            },
+                        position,
+                    } => columns.push(Name {
+                        text: name,
+                        position,
+                    }),
+                    expr => expressions.push(expr),
+                }
+            }
+            self.conflict_element_order(opening)?;
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RightParen)?;
+        let predicate = if self.take_word("where") {
+            Some(self.expression()?)
+        } else {
+            None
+        };
+        Ok(ConflictTarget::Inferred {
+            columns,
+            expressions,
+            predicate,
+        })
+    }
+
+    fn conflict_element_order(&mut self, opening: usize) -> SqlResult<()> {
+        if self.is_word("asc") || self.is_word("desc") {
+            if self.postgresql() {
+                return Err(SqlError::new(
+                    SqlState::INVALID_COLUMN_REFERENCE,
+                    "ASC/DESC is not allowed in ON CONFLICT clause",
+                )
+                .at(opening));
+            }
+            self.at += 1;
+        }
+        if self.postgresql() && self.is_word("nulls") {
+            return Err(SqlError::new(
+                SqlState::INVALID_COLUMN_REFERENCE,
+                "NULLS FIRST/LAST is not allowed in ON CONFLICT clause",
+            )
+            .at(opening));
+        }
+        Ok(())
     }
 
     pub(super) fn sqlite_infix_level(&self) -> Option<Level> {

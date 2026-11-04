@@ -1,6 +1,6 @@
 [package]
 name = "eggdb-resp"
-description = "EggDB's server for the RESP protocol (RESP2 and RESP3, from the public protocol specification) with strings, hashes, lists, sets and sorted sets stored in EggDB, so Redis-compatible clients connect unchanged."
+description = "EggDB's server for the RESP protocol (RESP2 and RESP3, from the public protocol specification) with strings, hashes, lists, sets, sorted sets, bitmaps, HyperLogLog and geo indexes stored in EggDB, so Redis-compatible clients connect unchanged."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

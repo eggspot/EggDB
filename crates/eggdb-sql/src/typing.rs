@@ -191,6 +191,7 @@ fn added_function_type(
         "l2_normalize" => Some(SqlType::Text),
         "strpos" | "position" | "ascii" | "regexp_count" | "regexp_instr" => Some(SqlType::Integer),
         "starts_with" | "regexp_like" | "isfinite" | "is_normalized" => Some(SqlType::Boolean),
+        name if crate::row_values::is_internal_call(name) => Some(SqlType::Boolean),
         "regexp_match" | "regexp_split_to_array" => {
             Some(SqlType::Array(crate::arrays::ArrayElement::Text))
         }
@@ -433,7 +434,11 @@ fn oracle_function_type(name: &str, arguments: &[Expr]) -> Option<SqlType> {
         }
         "oracle_hextoraw" => Some(SqlType::Bytea),
         "oracle_rawtohex" => Some(SqlType::Text),
-        "oracle_tz_offset" | "oracle_listagg" => Some(SqlType::Text),
+        "oracle_tz_offset"
+        | "oracle_listagg"
+        | "oracle_regexp_substr"
+        | "oracle_regexp_replace" => Some(SqlType::Text),
+        "oracle_regexp_like" => Some(SqlType::Boolean),
         "oracle_numtodsinterval" | "oracle_to_dsinterval" => Some(
             crate::oracle_intervals::IntervalKind::DayToSecond
                 .sql_type(crate::oracle_intervals::DEFAULT_FRACTION_DIGITS),
@@ -475,7 +480,7 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
         | ExprKind::OuterColumn { sql_type, .. } => *sql_type,
         ExprKind::Subquery(subquery) => crate::subquery::result_type(subquery),
         ExprKind::Cast { sql_type, .. } => Some(crate::user_types::storable_base(*sql_type)),
-        ExprKind::SessionValue { .. } => Some(SqlType::Text),
+        ExprKind::SessionValue { .. } | ExprKind::CurrentSetting { .. } => Some(SqlType::Text),
         ExprKind::Unary(UnaryOperator::Not, _)
         | ExprKind::And(_)
         | ExprKind::Or(_)

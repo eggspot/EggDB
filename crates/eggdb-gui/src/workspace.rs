@@ -41,6 +41,7 @@ type RunAnswer = (
     Connection,
     Vec<Result<Vec<ResultTable>, StatementFailure>>,
     TransactionStatus,
+    Option<crate::key_scan::PageEnd>,
 );
 type OpenAnswer = Result<(Connection, Catalog), ConnectFailure>;
 type HandedConnection = (Connection, Vec<SessionId>);
@@ -598,10 +599,15 @@ impl Workspace {
         }
         self.input_at(now);
         let tree = self.pointer_tree(faces, size);
+        let clipboard_has_text = self.clipboard.text().is_some();
         let Some(window) = self.main_window_mut() else {
             return;
         };
         if window.close_prompt.is_some() || window.drop_prompt.is_some() {
+            return;
+        }
+        window.clipboard_has_text = clipboard_has_text;
+        if window.editor_context_press(faces, &tree, x, y) {
             return;
         }
         window.context_press(&tree, x, y);
@@ -828,7 +834,15 @@ impl Workspace {
             self.picker_outcome(outcome, now);
             return WorkspaceCommand::None;
         }
+        let menu_key = matches!(
+            press.key,
+            eggdb_platform::window::Key::F10 | eggdb_platform::window::Key::ContextMenu
+        );
+        let clipboard_has_text = menu_key.then(|| self.clipboard.text().is_some());
         if let Screen::Main(window) = &mut self.screen {
+            if let Some(held) = clipboard_has_text {
+                window.clipboard_has_text = held;
+            }
             let action = window.key(press, now);
             self.window_action(action, now);
             return WorkspaceCommand::None;
@@ -1117,7 +1131,7 @@ impl Workspace {
                     self.notice_until.get_or_insert(now + NOTICE_SHOWN_FOR);
                 }
             }
-            TabAction::Run(request) => self.start_run(request, now),
+            TabAction::Run(request) => self.start_run(*request, now),
             TabAction::Stop => {
                 if let Some(running) = &self.running {
                     running.cancel.cancel();
@@ -1194,8 +1208,12 @@ impl Workspace {
             for closed in to_close {
                 connection.close_session(closed);
             }
+            let mut page_end = None;
             let outcomes = match (&scan, &bracketed) {
-                (Some(scan), _) => vec![connection.scan_keys(scan).map(|table| vec![table])],
+                (Some(scan), _) => vec![connection.scan_keys(scan, &worker_cancel).map(|page| {
+                    page_end = Some(page.end);
+                    vec![page.table]
+                })],
                 (None, Some(run)) => {
                     connection.run_bracketed_in_session(session, dialect, run, &worker_cancel)
                 }
@@ -1204,7 +1222,7 @@ impl Workspace {
                 }
             };
             let transaction = connection.transaction_status(session);
-            let _ = send.send((connection, outcomes, transaction));
+            let _ = send.send((connection, outcomes, transaction, page_end));
         });
         if let Some(window) = self.main_window_mut() {
             window.tab.started();
@@ -1218,7 +1236,7 @@ impl Workspace {
     }
 
     fn finish_run(&mut self, running: Running, answer: RunAnswer, now: Instant) {
-        let (connection, outcomes, transaction) = answer;
+        let (connection, outcomes, transaction, page_end) = answer;
         let elapsed = now.saturating_duration_since(running.started);
         let changed_schema = outcomes
             .iter()
@@ -1228,6 +1246,9 @@ impl Workspace {
             .main_window_mut()
             .and_then(|window| window.tab_with_session_mut(running.request.session))
         {
+            if let Some(end) = page_end {
+                tab.key_page_read(&running.request, end);
+            }
             tab.finish(&running.request, outcomes, elapsed);
             tab.transaction = transaction;
         }
@@ -1275,6 +1296,19 @@ impl Workspace {
                     .is_some_and(|tab| tab.show_running(elapsed))
             }
         }
+    }
+
+    fn tick_prefix(&mut self, now: Instant) -> bool {
+        if self.running.is_some() {
+            return false;
+        }
+        let action = match self.main_window_mut() {
+            Some(window) => window.tab.prefix_due(now),
+            None => return false,
+        };
+        let changed = action != TabAction::None;
+        self.tab_action(action, now);
+        changed
     }
 
     /// Waits for the running query to end, up to `limit`, and takes its outcome, then for the
@@ -1431,8 +1465,8 @@ impl Workspace {
             Segment::File => {
                 ConnectTarget::File(card.file_target(self.home.as_deref(), &self.current))
             }
-            Segment::Server => match card.server.connect_options() {
-                Ok(options) => ConnectTarget::Server(options),
+            Segment::Server => match card.server.connect_target() {
+                Ok(target) => target,
                 Err(failure) => {
                     card.begin_opening();
                     card.finish_with_failure(&failure);
@@ -1468,6 +1502,7 @@ impl Workspace {
         changed |= self.tick_plan_tooltip(now);
         changed |= self.tick_read();
         changed |= self.tick_run(now);
+        changed |= self.tick_prefix(now);
         if self.caret_blinks || !self.window_active {
             changed |= self.refresh_caret(now);
         }
@@ -1547,11 +1582,17 @@ impl Workspace {
 }
 
 /// The catalog the main window first shows for `connection`: its full catalog, else its
-/// table names; it reads the database, so it runs off the window's thread.
+/// table names (an empty `Keys` group on a RESP server); it reads the database, so it runs
+/// off the window's thread.
 pub fn opening_catalog(connection: &mut Connection) -> Catalog {
-    connection
-        .catalog()
-        .unwrap_or_else(|_| Catalog::of_tables(connection.table_names().unwrap_or_default()))
+    match connection.catalog() {
+        Ok(catalog) => catalog,
+        Err(_) if connection.is_resp() => Catalog {
+            over_resp: true,
+            ..Catalog::default()
+        },
+        Err(_) => Catalog::of_tables(connection.table_names().unwrap_or_default()),
+    }
 }
 
 /// The main window as it first shows `connection` (`docs/ux/workspace.md` 1.7): its name and
@@ -1597,7 +1638,9 @@ mod tests {
                 ConnectTarget::File(file) => Connection::in_memory(
                     &file.path.file_name().unwrap_or_default().to_string_lossy(),
                 ),
-                ConnectTarget::Server(_) => Err(crate::connection::url_failure()),
+                ConnectTarget::Server(_) | ConnectTarget::Resp(_) => {
+                    Err(crate::connection::url_failure())
+                }
             }
         }
     }

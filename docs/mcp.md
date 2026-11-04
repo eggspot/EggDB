@@ -54,6 +54,8 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --allow-write
 | `kv_get` | the value under one key of the key-value store, by text or hexadecimal key; `collection` reads a named collection instead of the default key space (D292) |
 | `kv_scan` | keys and values in key order, by prefix or range, a page at a time; `collection` lists a named collection instead of the default key space (D292) |
 | `row_list` | the rows of one table in the order they are stored, a page at a time: `limit` rows (100 by default, at most 1,000) and at most 1 MiB, then `next_cursor` to send back as `after`; pages neither repeat nor skip rows while others write (D145) |
+| `put` | only with `--allow-write`: stores a value under one key and commits, replacing any value and time to live there; `ttl` (`30s`, `5m`, `1h30m`, `7d`, `1500ms`) makes the key expire, `collection` writes in a named collection (below, D328) |
+| `del` | only with `--allow-write`: deletes one key and commits, after your confirmation every time; `deleted` says whether it was there (below, D328) |
 
 The tools, their arguments, descriptions and annotations come from EggDB's command registry
 (D143), the same definitions `eggdb help --json` prints, with each tool's CLI twin: `kv_get` is
@@ -137,8 +139,9 @@ or is named itself.
 - **Views read with the agent's eyes.** A view you list works when every table it reads is
   listed too; a view over an unlisted table fails as missing, so listing a view never exposes the
   table behind it.
-- **The keys are off.** `kv_get` and `kv_scan` are not offered, and a call to either answers
-  `limited_to_tables`, with or without a `collection`: collections are keys too (D292).
+- **The keys are off.** `kv_get`, `kv_scan`, `put` and `del` are not offered, and a call to one
+  answers `limited_to_tables`, with or without a `collection`: collections are keys too (D292,
+  D328).
 - **What it still shows.** The names of schemas and of user-defined types, and what a listed
   table's own definition says: a foreign key or a listed view's text names the table it refers
   to, though that table stays unreadable. Internal numbers are not renumbered, so gaps in them
@@ -331,6 +334,20 @@ accept for you. And with `--allow-write` alone the agent can change every table;
 some (above). Give unattended agents a read-only server, give `--allow-write` only to agents you
 would let change all the data they can see, and keep a backup.
 
+### Keys
+
+With `--allow-write` (and without `--tables`) the agent also gets `put` and `del` for the
+key-value store, the keys outside SQL's tables (D328). Both take the key as text (`key`) or
+hexadecimal bytes (`key_hex`) and an optional `collection`, which must exist already
+(`eggdb collection add`); a missing one fails with `collection_not_found` and names the
+collections there. `put` takes the value as `value` or `value_hex` and an optional `ttl`; without
+one the key never expires, as `eggdb put` without `--ttl`. A key in SQL's key space is refused
+with `invalid_arguments`: tables change through `write_sql`. Every `del` asks you first, the same
+way as a destructive statement: the question names the key and its collection, and without a
+client that asks, the call needs `confirm: true`. Each `put` and `del` is recorded in the audit
+log before it runs and again with its outcome, as `write_sql` is. Agents that act as a role get
+neither (D190).
+
 ## Over HTTP, from eggdb serve
 
 `eggdb serve app.db --mcp-listen 127.0.0.1:8765 --mcp-token-file mcp-token.txt` also serves MCP
@@ -342,6 +359,13 @@ requests send back; `DELETE /mcp` with it ends the session. The endpoint is read
 `POST` only (no event streams yet), refuses requests that carry an `Origin` header (web pages),
 keeps up to 64 sessions, and listens only on a loopback address until it has TLS. Every call is
 recorded in the audit log as for `eggdb mcp`.
+
+`--mcp-tables users,orders` limits every session of the endpoint as `--tables` limits `eggdb
+mcp` (above, D328): the same names, column lists and quoting, the same filter under every tool,
+dialect and catalog, and no key-value tools. Each name must exist when the server starts,
+otherwise `eggdb serve` stops with the same message as `eggdb mcp`; `--mcp-tables` without
+`--mcp-listen` is a usage error. The PostgreSQL, MySQL and SQL Server listeners are not affected:
+their clients log in with the server's password and see every table.
 
 Each line of the token file can give an agent a role of its own: `reporter 6f1c...` makes the
 agent that sends that token run every call as the stored role `reporter` (D190), so the role's
@@ -481,6 +505,12 @@ Things to know about the audit file:
   and the names it uses, which are shown in a code fence with hidden and direction-changing
   characters made visible, so the question cannot be made to say something else. What runs is
   exactly the statement you saw.
+- **`put` does not ask, `del` does.** A `put` replaces a key's value and time to live without a
+  confirmation (one named key, like an `UPDATE` of one pinned row, D328), so with `--allow-write`
+  an agent can overwrite, or give a short time to live to, any key it can name in the default
+  key space and the collections. Every `put` is in the audit log with the key; keep
+  `--allow-write` off, or limit the server with `--tables` (`--mcp-tables` for `eggdb serve`),
+  which withdraws the key-value tools, when old values must not be overwritten.
 - **A stopped call never half-writes.** A call still running a second past its time limit ends
   the server, but never once its commit began: the time-limit record always means nothing was
   committed. A change that was committed is never reported as failed.

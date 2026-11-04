@@ -217,6 +217,17 @@ pub(crate) enum Expr {
         arms: Vec<(Expr, Expr)>,
         otherwise: Option<Box<Expr>>,
     },
+    ListComprehension {
+        variable: String,
+        list: Box<Expr>,
+        filter: Option<Box<Expr>>,
+        map: Option<Box<Expr>>,
+    },
+    PatternComprehension {
+        pattern: Box<Pattern>,
+        filter: Option<Box<Expr>>,
+        map: Box<Expr>,
+    },
 }
 
 /// The direction a relationship pattern follows.
@@ -243,8 +254,17 @@ pub(crate) struct RelationshipPattern {
     pub(crate) hops: Option<(u32, u32)>,
 }
 
+/// Which shortest paths a `shortestPath()` or `allShortestPaths()` pattern asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Shortest {
+    One,
+    All,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Pattern {
+    pub(crate) path: Option<String>,
+    pub(crate) shortest: Option<Shortest>,
     pub(crate) start: NodePattern,
     pub(crate) steps: Vec<(RelationshipPattern, NodePattern)>,
 }
@@ -281,7 +301,16 @@ pub(crate) enum Clause {
         filter: Option<Expr>,
     },
     Create(Vec<Pattern>),
-    Merge(Pattern),
+    Merge {
+        pattern: Pattern,
+        on_create: Vec<SetItem>,
+        on_match: Vec<SetItem>,
+    },
+    Foreach {
+        variable: String,
+        list: Expr,
+        body: Vec<Clause>,
+    },
     Set(Vec<SetItem>),
     Remove(Vec<SetItem>),
     Delete {
@@ -298,12 +327,26 @@ pub(crate) enum Clause {
     Return(Projecting),
 }
 
+/// A parsed query: one part, or several joined by `UNION` (`union_all` keeps duplicates).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Query {
+    pub(crate) parts: Vec<Vec<Clause>>,
+    pub(crate) union_all: bool,
+}
+
+impl Query {
+    pub(crate) fn writes(&self) -> bool {
+        self.parts.iter().flatten().any(Clause::writes)
+    }
+}
+
 impl Clause {
     pub(crate) fn writes(&self) -> bool {
         matches!(
             self,
             Clause::Create(_)
-                | Clause::Merge(_)
+                | Clause::Merge { .. }
+                | Clause::Foreach { .. }
                 | Clause::Set(_)
                 | Clause::Remove(_)
                 | Clause::Delete { .. }
@@ -530,17 +573,127 @@ impl Parser<'_> {
     }
 
     fn pattern(&mut self) -> GraphResult<Pattern> {
-        if matches!(self.peek(), Some(Token::Word(_)))
+        let path = if matches!(self.peek(), Some(Token::Word(_) | Token::Quoted(_)))
             && matches!(self.peek_at(1), Some(Token::Symbol("=")))
         {
-            return Err(GraphError::not_supported("named paths"));
+            let name = self.name()?;
+            self.at += 1;
+            Some(name)
+        } else {
+            None
+        };
+        let shortest = match self.peek() {
+            Some(Token::Word(word)) if matches!(self.peek_at(1), Some(Token::Symbol("("))) => {
+                if word.eq_ignore_ascii_case("shortestpath") {
+                    Some(Shortest::One)
+                } else if word.eq_ignore_ascii_case("allshortestpaths") {
+                    Some(Shortest::All)
+                } else {
+                    return Err(self.unexpected());
+                }
+            }
+            _ => None,
+        };
+        if shortest.is_some() {
+            self.at += 2;
         }
         let start = self.node_pattern()?;
         let mut steps = Vec::new();
         while let Some(relationship) = self.relationship_pattern()? {
             steps.push((relationship, self.node_pattern()?));
         }
-        Ok(Pattern { start, steps })
+        if shortest.is_some() {
+            self.expect_symbol(")")?;
+            let [(relationship, _)] = steps.as_slice() else {
+                return Err(syntax(
+                    "shortestPath(...) requires a pattern containing a single relationship",
+                ));
+            };
+            if relationship.hops.is_some_and(|(min, _)| min > 1) {
+                return Err(syntax(
+                    "shortestPath(...) does not support a minimal length different from 0 or 1",
+                ));
+            }
+        }
+        Ok(Pattern {
+            path,
+            shortest,
+            start,
+            steps,
+        })
+    }
+
+    fn list_comprehension(&mut self) -> GraphResult<Expr> {
+        let variable = self.name()?;
+        self.expect_keyword("in")?;
+        let list = Box::new(self.expression()?);
+        let filter = if self.take_keyword("where") {
+            Some(Box::new(self.expression()?))
+        } else {
+            None
+        };
+        let map = if self.take_symbol("|") {
+            Some(Box::new(self.expression()?))
+        } else {
+            None
+        };
+        self.expect_symbol("]")?;
+        Ok(Expr::ListComprehension {
+            variable,
+            list,
+            filter,
+            map,
+        })
+    }
+
+    fn pattern_comprehension(&mut self) -> GraphResult<Option<Expr>> {
+        let starts_like_a_pattern = matches!(self.peek_at(1), Some(Token::Symbol("(")))
+            || (matches!(self.peek_at(1), Some(Token::Word(_) | Token::Quoted(_)))
+                && matches!(self.peek_at(2), Some(Token::Symbol("="))));
+        if !starts_like_a_pattern || !self.bracket_holds_a_comprehension() {
+            return Ok(None);
+        }
+        self.at += 1;
+        let pattern = self.pattern()?;
+        if pattern.steps.is_empty() || pattern.shortest.is_some() {
+            return Err(syntax(
+                "a pattern comprehension needs a relationship pattern and cannot be a shortest path",
+            ));
+        }
+        let filter = if self.take_keyword("where") {
+            Some(Box::new(self.expression()?))
+        } else {
+            None
+        };
+        self.expect_symbol("|")?;
+        let map = Box::new(self.expression()?);
+        self.expect_symbol("]")?;
+        Ok(Some(Expr::PatternComprehension {
+            pattern: Box::new(pattern),
+            filter,
+            map,
+        }))
+    }
+
+    fn bracket_holds_a_comprehension(&self) -> bool {
+        let mut nesting = 0usize;
+        for (token, _) in self.tokens.iter().skip(self.at) {
+            match token {
+                Token::Symbol("[" | "(" | "{") => nesting += 1,
+                Token::Symbol("]" | ")" | "}") => {
+                    nesting = nesting.saturating_sub(1);
+                    if nesting == 0 {
+                        return false;
+                    }
+                }
+                Token::Symbol("|") if nesting == 1 => return true,
+                Token::Word(word) if nesting == 1 && word.eq_ignore_ascii_case("where") => {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     fn patterns(&mut self) -> GraphResult<Vec<Pattern>> {
@@ -753,7 +906,20 @@ impl Parser<'_> {
                 Ok(inner)
             }
             Token::Symbol("[") => {
+                if let Some(comprehension) = self.pattern_comprehension()? {
+                    return Ok(comprehension);
+                }
                 self.at += 1;
+                let names_a_variable = match self.peek() {
+                    Some(Token::Quoted(_)) => true,
+                    Some(Token::Word(word)) => !["true", "false", "null"]
+                        .iter()
+                        .any(|literal| word.eq_ignore_ascii_case(literal)),
+                    _ => false,
+                };
+                if names_a_variable && self.is_keyword_at(1, "in") {
+                    return self.list_comprehension();
+                }
                 let mut items = Vec::new();
                 if !self.take_symbol("]") {
                     loop {
@@ -965,16 +1131,46 @@ impl Parser<'_> {
             return self.match_rest(false);
         }
         if self.take_keyword("create") {
-            return Ok(Clause::Create(self.patterns()?));
+            let patterns = self.patterns()?;
+            if patterns.iter().any(|pattern| pattern.shortest.is_some()) {
+                return Err(syntax("shortestPath(...) cannot be used to CREATE"));
+            }
+            return Ok(Clause::Create(patterns));
         }
         if self.take_keyword("merge") {
             let pattern = self.pattern()?;
-            if self.is_keyword("on") {
-                return Err(GraphError::not_supported(
-                    "MERGE ... ON CREATE and ON MATCH",
-                ));
+            if pattern.shortest.is_some() {
+                return Err(syntax("shortestPath(...) cannot be used to MERGE"));
             }
-            return Ok(Clause::Merge(pattern));
+            let mut on_create = Vec::new();
+            let mut on_match = Vec::new();
+            while self.take_keyword("on") {
+                let creating = self.take_keyword("create");
+                if !creating {
+                    self.expect_keyword("match")?;
+                }
+                self.expect_keyword("set")?;
+                let items = self.set_items(false)?;
+                if creating {
+                    on_create.extend(items);
+                } else {
+                    on_match.extend(items);
+                }
+            }
+            return Ok(Clause::Merge {
+                pattern,
+                on_create,
+                on_match,
+            });
+        }
+        if self.take_keyword("foreach") {
+            self.depth += 1;
+            if self.depth > MAX_DEPTH {
+                return Err(syntax("FOREACH is nested too deeply"));
+            }
+            let parsed = self.foreach_rest();
+            self.depth -= 1;
+            return parsed;
         }
         if self.take_keyword("set") {
             return Ok(Clause::Set(self.set_items(false)?));
@@ -1007,10 +1203,39 @@ impl Parser<'_> {
         if self.take_keyword("call") {
             return self.call_rest();
         }
-        if self.is_keyword("foreach") || self.is_keyword("load") || self.is_keyword("union") {
-            return Err(GraphError::not_supported(&format!("{:?}", self.peek())));
+        if self.is_keyword("load") {
+            return Err(GraphError::not_supported("LOAD CSV"));
         }
         Err(self.unexpected())
+    }
+
+    fn foreach_rest(&mut self) -> GraphResult<Clause> {
+        self.expect_symbol("(")?;
+        let variable = self.name()?;
+        self.expect_keyword("in")?;
+        let list = self.expression()?;
+        self.expect_symbol("|")?;
+        let mut body = Vec::new();
+        while !self.take_symbol(")") {
+            if self.peek().is_none() {
+                return Err(self.unexpected());
+            }
+            let clause = self.clause()?;
+            if !clause.writes() {
+                return Err(syntax(
+                    "Invalid use of a reading clause inside FOREACH: only CREATE, MERGE, SET, REMOVE, DELETE and FOREACH can be used",
+                ));
+            }
+            body.push(clause);
+        }
+        if body.is_empty() {
+            return Err(syntax("FOREACH needs at least one updating clause"));
+        }
+        Ok(Clause::Foreach {
+            variable,
+            list,
+            body,
+        })
     }
 
     fn call_rest(&mut self) -> GraphResult<Clause> {
@@ -1067,8 +1292,8 @@ impl Parser<'_> {
     }
 }
 
-/// Parses a query into its clauses.
-pub(crate) fn parse(text: &str) -> GraphResult<Vec<Clause>> {
+/// Parses a query into its parts and clauses.
+pub(crate) fn parse(text: &str) -> GraphResult<Query> {
     let tokens = tokenize(text)?;
     let mut parser = Parser {
         text,
@@ -1077,14 +1302,47 @@ pub(crate) fn parse(text: &str) -> GraphResult<Vec<Clause>> {
         depth: 0,
         operators: 0,
     };
-    let mut clauses = Vec::new();
-    while parser.peek().is_some() && !parser.is_symbol(";") {
-        clauses.push(parser.clause()?);
+    let mut parts = Vec::new();
+    let mut union_all = None;
+    loop {
+        let mut clauses = Vec::new();
+        while parser.peek().is_some() && !parser.is_symbol(";") && !parser.is_keyword("union") {
+            clauses.push(parser.clause()?);
+        }
+        check_part(&clauses)?;
+        parts.push(clauses);
+        if !parser.take_keyword("union") {
+            break;
+        }
+        let all = parser.take_keyword("all");
+        if union_all.is_some_and(|known| known != all) {
+            return Err(syntax("Invalid combination of UNION and UNION ALL"));
+        }
+        union_all = Some(all);
     }
     parser.take_symbol(";");
     if parser.peek().is_some() {
         return Err(parser.unexpected());
     }
+    if parts.len() > 1
+        && parts.iter().any(|clauses| {
+            !matches!(
+                clauses.last(),
+                Some(Clause::Return(_) | Clause::Call { .. })
+            )
+        })
+    {
+        return Err(syntax(
+            "All sub queries in an UNION must end with a RETURN clause",
+        ));
+    }
+    Ok(Query {
+        parts,
+        union_all: union_all.unwrap_or(false),
+    })
+}
+
+fn check_part(clauses: &[Clause]) -> GraphResult<()> {
     if clauses.is_empty() {
         return Err(syntax("an empty query"));
     }
@@ -1104,5 +1362,5 @@ pub(crate) fn parse(text: &str) -> GraphResult<Vec<Clause>> {
     {
         return Err(syntax("RETURN can only be used at the end of the query"));
     }
-    Ok(clauses)
+    Ok(())
 }

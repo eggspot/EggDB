@@ -282,6 +282,12 @@ jobs:
           test "$(cli LRANGE queue 0 -1 | tr '\n' ' ')" = "a b c "
           cli ZADD board 10 ada 20 grace
           test "$(cli ZRANGE board 0 -1 | tr '\n' ' ')" = "ada grace "
+          test "$(cli SETBIT bits 7 1)" = 0
+          test "$(cli BITCOUNT bits)" = 1
+          test "$(cli PFADD visitors alice bob carol)" = 1
+          test "$(cli PFCOUNT visitors)" = 3
+          test "$(cli GEOADD Sicily 13.361389 38.115556 Palermo 15.087269 37.502669 Catania)" = 2
+          test "$(cli GEODIST Sicily Palermo Catania km)" = 166.2742
           "$RUNNER_TEMP/resp/bin/python" - <<'PY'
           import redis
           r = redis.Redis(port=6380, password="ci-resp-password", protocol=3)
@@ -326,6 +332,16 @@ jobs:
           totals = client.search(index="books", body={"size": 0, "aggs": {"genres": {"terms": {"field": "genre"}}}})
           assert totals["aggregations"]["genres"]["buckets"][0] == {"key": "fable", "doc_count": 2}, totals
           assert client.count(index="books")["count"] == 3
+          docs = client.mget(index="books", body={"ids": ["1", "9"]})["docs"]
+          assert [doc["found"] for doc in docs] == [True, False], docs
+          answers = client.msearch(body=[{"index": "books"}, {"query": {"match": {"title": "fox"}}}, {"index": "nowhere"}, {"query": {"match_all": {}}}])["responses"]
+          assert answers[0]["hits"]["total"]["value"] == 1 and answers[1]["status"] == 404, answers
+          updated = client.update_by_query(index="books", body={"script": {"source": "ctx._source.pages += params.more", "params": {"more": 1}}, "query": {"term": {"genre": "fable"}}}, conflicts="proceed")
+          assert updated["updated"] == 2 and updated["failures"] == [], updated
+          assert client.get(index="books", id="1")["_source"]["pages"] == 121
+          removed = client.delete_by_query(index="books", body={"query": {"term": {"genre": "nature"}}})
+          assert removed["deleted"] == 1, removed
+          assert client.count(index="books")["count"] == 2
           client.delete(index="books", id="3")
           client.indices.delete(index="books")
           assert not client.indices.exists(index="books")

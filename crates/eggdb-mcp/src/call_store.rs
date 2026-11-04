@@ -4,7 +4,7 @@ use eggdb_sql::{
     SqlState, StoreFailure, VisibleRead, VisibleTables, VisibleWrite,
 };
 use std::cell::Cell;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const READS_BETWEEN_CLOCK_CHECKS: u64 = 256;
 
@@ -326,6 +326,31 @@ impl<W: KeyValueWrite> KeyValueWrite for LimitedWrite<'_, W> {
         self.limits.check()?;
         self.limits.count_written(key.len())?;
         self.inner.delete(key)
+    }
+
+    fn put_with_expiry(&mut self, key: &[u8], value: &[u8], ttl: Duration) -> SqlResult<()> {
+        self.limits.check()?;
+        self.limits.count_written(key.len() + value.len())?;
+        self.inner.put_with_expiry(key, value, ttl)
+    }
+
+    fn collection_put(
+        &mut self,
+        name: &str,
+        key: &[u8],
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> SqlResult<bool> {
+        self.limits.check()?;
+        self.limits
+            .count_written(name.len() + key.len() + value.len())?;
+        self.inner.collection_put(name, key, value, ttl)
+    }
+
+    fn collection_delete(&mut self, name: &str, key: &[u8]) -> SqlResult<Option<bool>> {
+        self.limits.check()?;
+        self.limits.count_written(name.len() + key.len())?;
+        self.inner.collection_delete(name, key)
     }
 
     fn commit(self) -> SqlResult<()> {

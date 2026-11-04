@@ -7,8 +7,30 @@ use crate::settings::SavedSettings;
 use crate::store::{EntryVisitor, KeyValueRead, KeyValueWrite, ScanDirection};
 
 const MOST_SAVEPOINTS: usize = 4096;
+const UNDO_ENTRY_OVERHEAD: usize = 64;
 
-type Undo = Vec<(Vec<u8>, Option<Vec<u8>>)>;
+pub(super) type Undo = Vec<UndoEntry>;
+
+#[derive(Debug)]
+pub(super) enum UndoEntry {
+    Statement {
+        key: Vec<u8>,
+        previous: Option<Vec<u8>>,
+    },
+    Host {
+        key: Vec<u8>,
+        previous: Option<Vec<u8>>,
+    },
+}
+
+impl UndoEntry {
+    fn statement(key: &[u8], previous: Option<Vec<u8>>) -> Self {
+        Self::Statement {
+            key: key.to_vec(),
+            previous,
+        }
+    }
+}
 
 #[derive(Debug)]
 struct Mark {
@@ -42,9 +64,84 @@ impl Savepoints {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UndoKeptFor {
+    FailedStatement,
+    RollbackToSavepoint,
+}
+
 pub(super) struct UndoWrite<'w> {
-    pub(super) inner: &'w mut dyn KeyValueWrite,
-    pub(super) log: &'w mut Undo,
+    inner: &'w mut dyn KeyValueWrite,
+    log: &'w mut Undo,
+    memory: crate::memory::WorkMemory,
+    most_bytes: usize,
+    kept_for: UndoKeptFor,
+}
+
+impl<'w> UndoWrite<'w> {
+    pub(super) fn new(
+        inner: &'w mut dyn KeyValueWrite,
+        log: &'w mut Undo,
+        kept_for: UndoKeptFor,
+    ) -> Self {
+        Self {
+            inner,
+            log,
+            memory: crate::memory::WorkMemory::new(),
+            most_bytes: crate::memory::WORK_MEMORY_LIMIT,
+            kept_for,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_most_bytes(
+        inner: &'w mut dyn KeyValueWrite,
+        log: &'w mut Undo,
+        most_bytes: usize,
+    ) -> Self {
+        Self {
+            inner,
+            log,
+            memory: crate::memory::WorkMemory::with_limit(most_bytes),
+            most_bytes,
+            kept_for: UndoKeptFor::FailedStatement,
+        }
+    }
+
+    fn hold(&mut self, key: &[u8], previous: Option<&[u8]>) -> SqlResult<()> {
+        let bytes = key
+            .len()
+            .saturating_add(previous.map_or(0, <[u8]>::len))
+            .saturating_add(UNDO_ENTRY_OVERHEAD);
+        self.memory.charge(bytes).map_err(|error| {
+            if error.state() == SqlState::OUT_OF_MEMORY {
+                undo_log_too_large(self.most_bytes, self.kept_for)
+            } else {
+                error
+            }
+        })
+    }
+}
+
+fn undo_log_too_large(most_bytes: usize, kept_for: UndoKeptFor) -> SqlError {
+    let error = SqlError::new(
+        SqlState::OUT_OF_MEMORY,
+        format!(
+            "a statement inside a transaction can hold at most {most_bytes} bytes of work memory, \
+             including the earlier values it overwrites"
+        ),
+    );
+    match kept_for {
+        UndoKeptFor::FailedStatement => error.with_hint(
+            "The statement keeps every value it overwrites so that a failure undoes only it; split \
+             the change into smaller statements.",
+        ),
+        UndoKeptFor::RollbackToSavepoint => error.with_hint(
+            "After a SAVEPOINT the statement keeps every value it overwrites so that ROLLBACK TO \
+             SAVEPOINT can restore it; split the change into smaller statements or release the \
+             savepoint first.",
+        ),
+    }
 }
 
 impl KeyValueRead for UndoWrite<'_> {
@@ -78,24 +175,27 @@ impl KeyValueRead for UndoWrite<'_> {
 impl KeyValueWrite for UndoWrite<'_> {
     fn put(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
         let previous = self.inner.get(key)?;
+        self.hold(key, previous.as_deref())?;
         self.inner.put(key, value)?;
-        self.log.push((key.to_vec(), previous));
+        self.log.push(UndoEntry::statement(key, previous));
         Ok(())
     }
 
     fn put_if_absent(&mut self, key: &[u8], value: &[u8]) -> SqlResult<bool> {
+        self.hold(key, None)?;
         let inserted = self.inner.put_if_absent(key, value)?;
         if inserted {
-            self.log.push((key.to_vec(), None));
+            self.log.push(UndoEntry::statement(key, None));
         }
         Ok(inserted)
     }
 
     fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {
         let previous = self.inner.get(key)?;
+        self.hold(key, previous.as_deref())?;
         let deleted = self.inner.delete(key)?;
         if deleted {
-            self.log.push((key.to_vec(), previous));
+            self.log.push(UndoEntry::statement(key, previous));
         }
         Ok(deleted)
     }
@@ -107,6 +207,34 @@ impl KeyValueWrite for UndoWrite<'_> {
     fn rollback(self) -> SqlResult<()> {
         Ok(())
     }
+}
+
+pub(super) fn undo_back_to(
+    routed: &mut crate::temporary::TemporaryWrite<'_>,
+    undo: &mut Undo,
+    length: usize,
+) -> SqlResult<()> {
+    while undo.len() > length {
+        let Some(entry) = undo.pop() else {
+            break;
+        };
+        match entry {
+            UndoEntry::Statement {
+                key,
+                previous: Some(value),
+            } => routed.put(&key, &value)?,
+            UndoEntry::Statement {
+                key,
+                previous: None,
+            } => {
+                routed.delete(&key)?;
+            }
+            UndoEntry::Host { key, previous } => {
+                routed.inner.restore(&key, previous.as_deref())?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn missing(name: &Name, dialect: Dialect) -> SqlError {
@@ -146,6 +274,44 @@ fn missing(name: &Name, dialect: Dialect) -> SqlError {
 }
 
 impl Session<'_> {
+    /// Whether [`Session::record_savepoint_undo`] would record writes now: a savepoint is set
+    /// in a block that writes.
+    pub fn records_savepoint_undo(&self) -> bool {
+        self.savepoints.is_active() && matches!(self.block, Block::Writing(_))
+    }
+
+    /// Adds to the open block's savepoint undo log writes made to its write transaction outside
+    /// this session's statements, such as a host's key-value commands: each `(key, previous)`
+    /// is a key of the store and what it held before the write, `None` when it was absent,
+    /// oldest first. A later `ROLLBACK TO SAVEPOINT` puts them back in reverse order through
+    /// [`KeyValueWrite::restore`], interleaved with the statements' own writes, and
+    /// `RELEASE SAVEPOINT` keeps them. Returns `false`, recording nothing, when no savepoint is
+    /// set in a block that writes.
+    pub fn record_savepoint_undo(
+        &mut self,
+        changes: impl IntoIterator<Item = (Vec<u8>, Option<Vec<u8>>)>,
+    ) -> bool {
+        if !self.records_savepoint_undo() {
+            return false;
+        }
+        self.savepoints.undo.extend(
+            changes
+                .into_iter()
+                .map(|(key, previous)| UndoEntry::Host { key, previous }),
+        );
+        true
+    }
+
+    /// Whether a statement failed while a `SAVEPOINT` was set in PostgreSQL's dialect, leaving
+    /// the block refusing statements until `ROLLBACK TO SAVEPOINT` or `ROLLBACK` (in the other
+    /// dialects a failed statement undoes only itself and the block goes on, so this stays
+    /// `false`); [`Session::transaction_status`]
+    /// still answers [`TransactionStatus::InBlock`](crate::TransactionStatus::InBlock) then,
+    /// since the block can go on after the rollback to the savepoint.
+    pub fn failed_after_savepoint(&self) -> bool {
+        self.savepoints.aborted
+    }
+
     pub(super) fn savepoint_command(
         &mut self,
         command: &SavepointCommand,
@@ -219,24 +385,26 @@ impl Session<'_> {
             let settings = std::sync::Arc::make_mut(&mut self.settings);
             self.transaction_settings.restore(settings, saved);
         }
-        let Block::Writing(writer) = &mut self.block else {
-            self.savepoints.marks.truncate(at + 1);
-            self.savepoints.aborted = false;
-            return Ok(QueryResult::command("ROLLBACK"));
-        };
-        let mut routed = crate::temporary::TemporaryWrite {
-            inner: writer,
-            objects: &mut self.temporary,
-        };
-        while self.savepoints.undo.len() > undo_at {
-            let Some((key, previous)) = self.savepoints.undo.pop() else {
-                break;
-            };
-            match previous {
-                Some(value) => routed.put(&key, &value)?,
-                None => {
-                    routed.delete(&key)?;
-                }
+        match &mut self.block {
+            Block::Writing(writer) => {
+                let mut routed = crate::temporary::TemporaryWrite {
+                    inner: writer,
+                    objects: &mut self.temporary,
+                };
+                undo_back_to(&mut routed, &mut self.savepoints.undo, undo_at)?;
+            }
+            Block::Reading(reader) => {
+                let mut unwritable = crate::plpgsql::ReadOnlyWrite { inner: &**reader };
+                let mut routed = crate::temporary::TemporaryWrite {
+                    inner: &mut unwritable,
+                    objects: &mut self.temporary,
+                };
+                undo_back_to(&mut routed, &mut self.savepoints.undo, undo_at)?;
+            }
+            Block::None | Block::Failed => {
+                self.savepoints.marks.truncate(at + 1);
+                self.savepoints.aborted = false;
+                return Ok(QueryResult::command("ROLLBACK"));
             }
         }
         self.savepoints.marks.truncate(at + 1);
@@ -259,3 +427,7 @@ impl Session<'_> {
         Ok(QueryResult::command("RELEASE"))
     }
 }
+
+#[cfg(test)]
+#[path = "savepoints_tests.rs"]
+mod tests;

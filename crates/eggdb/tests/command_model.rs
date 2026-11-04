@@ -398,7 +398,7 @@ fn run_sql_and_write_sql_return_what_sql_prints() {
 fn the_tools_list_carries_the_registry_s_names_and_annotations() {
     let file = key_value_file("parity-tools");
     let _audit = audit_of(file.path());
-    for (options, offered) in [(&[][..], 8), (&["--allow-write"][..], 9)] {
+    for (options, offered) in [(&[][..], 8), (&["--allow-write"][..], 11)] {
         let mut mcp = Mcp::start(file.path(), options);
         let listed = mcp.request("tools/list", "{}");
         let Json::Array(tools) = &at(&listed, &["result", "tools"]).value else {

@@ -4,15 +4,17 @@
 //! `order`, `limit`, `offset` and `Prefer: count=exact`; `POST` to insert one object or an array;
 //! `PATCH` and `DELETE` with filters; `Prefer: return=representation` to get the rows back; and
 //! `GET /` listing the tables and their columns. Every request runs as SQL in a session of the
-//! signed-in user, so roles and row security apply unchanged. PostgREST is a trademark of its
-//! owners; EggDB is compatible with its URL conventions.
+//! signed-in user, so roles and row security apply unchanged. Rows read with `GET` are sent as
+//! they are written out, in HTTP/1.1 chunks, so a large result never sits in memory twice.
+//! PostgREST is a trademark of its owners; EggDB is compatible with its URL conventions.
 
 mod request;
 
-use eggdb_http::{Request, Response};
+use eggdb_http::{Reply, Request, Response, StreamedResponse};
 use eggdb_sql::json::{Json, Node, parse_document};
 use eggdb_sql::{Dialect, KeyValueStore, QueryResult, Session, Value};
 use request::{Query, identifier, literal};
+use std::io::{self, Write};
 
 /// The largest request body the API accepts.
 pub const MAX_REQUEST_BYTES: usize = 8 << 20;
@@ -89,26 +91,44 @@ fn value_json(value: &Value) -> String {
     }
 }
 
-fn rows_json(result: &QueryResult) -> String {
-    let names: Vec<String> = result
+fn column_names(result: &QueryResult) -> Vec<String> {
+    result
         .columns
         .iter()
         .flatten()
         .map(|column| json_string(&column.name))
+        .collect()
+}
+
+fn row_json(names: &[String], row: &[Value]) -> String {
+    let fields: Vec<String> = names
+        .iter()
+        .zip(row)
+        .map(|(name, value)| format!("{name}:{}", value_json(value)))
         .collect();
+    format!("{{{}}}", fields.join(","))
+}
+
+fn rows_json(result: &QueryResult) -> String {
+    let names = column_names(result);
     let rows: Vec<String> = result
         .rows
         .iter()
-        .map(|row| {
-            let fields: Vec<String> = names
-                .iter()
-                .zip(row)
-                .map(|(name, value)| format!("{name}:{}", value_json(value)))
-                .collect();
-            format!("{{{}}}", fields.join(","))
-        })
+        .map(|row| row_json(&names, row))
         .collect();
     format!("[{}]", rows.join(","))
+}
+
+fn write_rows_json(result: &QueryResult, out: &mut dyn Write) -> io::Result<()> {
+    let names = column_names(result);
+    out.write_all(b"[")?;
+    for (index, row) in result.rows.iter().enumerate() {
+        if index > 0 {
+            out.write_all(b",")?;
+        }
+        out.write_all(row_json(&names, row).as_bytes())?;
+    }
+    out.write_all(b"]")
 }
 
 fn json_literal(node: &Node, text: &str) -> Result<String, String> {
@@ -191,8 +211,14 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         Ok(results)
     }
 
-    /// Answers one HTTP request.
+    /// Answers one HTTP request with its whole response in memory.
     pub fn answer(&self, request: &Request) -> Response {
+        self.reply(request).into_response()
+    }
+
+    /// Answers one HTTP request; the rows of a `GET` are a [`StreamedResponse`], written as
+    /// they are sent.
+    pub fn reply(&self, request: &Request) -> Reply<'static> {
         if !self.authorized(request) {
             let mut response = failure(
                 401,
@@ -203,18 +229,18 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                 "WWW-Authenticate".to_owned(),
                 "Basic realm=\"eggdb\"".to_owned(),
             ));
-            return response;
+            return response.into();
         }
         let path = request.path.trim_matches('/');
         if path.is_empty() {
-            return self.describe();
+            return self.describe().into();
         }
         let Some(table) = identifier(path) else {
-            return failure(404, "PGRST205", &format!("no table named {path}"));
+            return failure(404, "PGRST205", &format!("no table named {path}")).into();
         };
         let query = match Query::parse(request.query.as_deref().unwrap_or_default()) {
             Ok(query) => query,
-            Err(message) => return failure(400, "PGRST100", &message),
+            Err(message) => return failure(400, "PGRST100", &message).into(),
         };
         let target = format!(
             "{}.{table}",
@@ -227,10 +253,14 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         let representation = prefer.contains("return=representation");
         match request.method.as_str() {
             "GET" | "HEAD" => self.read(&target, &query, prefer.contains("count=exact")),
-            "POST" => self.insert(&target, &request.body, representation, &query),
-            "PATCH" => self.update(&target, &request.body, &query, representation),
-            "DELETE" => self.delete(&target, &query, representation),
-            _ => failure(405, "PGRST117", "use GET, POST, PATCH or DELETE"),
+            "POST" => self
+                .insert(&target, &request.body, representation, &query)
+                .into(),
+            "PATCH" => self
+                .update(&target, &request.body, &query, representation)
+                .into(),
+            "DELETE" => self.delete(&target, &query, representation).into(),
+            _ => failure(405, "PGRST117", "use GET, POST, PATCH or DELETE").into(),
         }
     }
 
@@ -281,7 +311,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         }
     }
 
-    fn read(&self, target: &str, query: &Query, count: bool) -> Response {
+    fn read(&self, target: &str, query: &Query, count: bool) -> Reply<'static> {
         let sql = format!(
             "SELECT {} FROM {target}{}{}{}",
             query.projection(),
@@ -294,12 +324,11 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                 .into_iter()
                 .rev()
                 .find(|result| result.columns.is_some()),
-            Err(error) => return sql_failure(&error),
+            Err(error) => return sql_failure(&error).into(),
         };
         let Some(rows) = rows else {
-            return json(200, "[]".to_owned());
+            return json(200, "[]".to_owned()).into();
         };
-        let mut response = json(200, rows_json(&rows));
         let first = query.offset.unwrap_or(0);
         let shown = rows.rows.len() as u64;
         let range = if shown == 0 {
@@ -323,15 +352,22 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                             .and_then(Value::to_text)
                     })
                     .unwrap_or_else(|| "*".to_owned()),
-                Err(error) => return sql_failure(&error),
+                Err(error) => return sql_failure(&error).into(),
             }
         } else {
             "*".to_owned()
         };
-        response
-            .headers
-            .push(("Content-Range".to_owned(), format!("{range}/{total}")));
-        response
+        let held_bytes = rows
+            .rows
+            .iter()
+            .map(|row| eggdb_sql::held_row_bytes(row))
+            .fold(0usize, usize::saturating_add);
+        StreamedResponse::new(200, "application/json; charset=utf-8", move |out| {
+            write_rows_json(&rows, out)
+        })
+        .with_header("Content-Range", &format!("{range}/{total}"))
+        .with_held_bytes(held_bytes)
+        .into()
     }
 
     fn insert(&self, target: &str, body: &[u8], representation: bool, query: &Query) -> Response {

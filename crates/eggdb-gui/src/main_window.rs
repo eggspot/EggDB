@@ -14,6 +14,7 @@ use crate::connection::SessionId;
 use crate::dialect::QueryDialect;
 use crate::drop_prompt::{self, DropAnswer, DropKind, DropPrompt, DropTarget};
 use crate::editor::Position;
+use crate::editor_menu::{self, EditorMenuOrigin};
 use crate::font::{TextStyle, Typeface};
 use crate::grid::{
     self, Cell, CellLook, ResultGrid, ValueKind, cell_text, quote_name, visible_columns,
@@ -45,6 +46,7 @@ const GRID_LEFT: f32 = 308.0;
 const BODY_BOTTOM: f32 = 776.0;
 const EDITOR_TEXT_TOP: f32 = 88.0;
 const EDITOR_TEXT_LEFT: f32 = 320.0;
+const EDITOR_GUTTER_RIGHT: f32 = 308.0;
 const LINE_HEIGHT: f32 = 20.0;
 const CARET_MARGIN_LINES: usize = 4;
 const ELIDE_SCAN_LIMIT: usize = 512;
@@ -193,6 +195,9 @@ pub struct MainWindow {
     pub drawer_open: bool,
     /// The rail item the drawer was opened from.
     pub drawer_from: Option<RailItem>,
+    /// Whether the clipboard held text when the last key or right-click came, which
+    /// enables the editor menu's `Paste` on the desktop (`docs/ux/workspace.md` 10.9).
+    pub clipboard_has_text: bool,
 }
 
 /// One of the rail's buttons while the sidebar is collapsed (`docs/ux/workspace.md` 10.6).
@@ -312,6 +317,7 @@ impl MainWindow {
             dragged_splitter: None,
             drawer_open: false,
             drawer_from: None,
+            clipboard_has_text: true,
         }
     }
 
@@ -846,8 +852,14 @@ impl MainWindow {
             let answer = menu.key(press);
             return self.tree_menu_answer(answer, now);
         }
-        if self.tab.value_view.is_some() || self.tab.grid_menu.is_some() {
+        if self.tab.value_view.is_some()
+            || self.tab.grid_menu.is_some()
+            || self.tab.editor_menu.is_some()
+        {
             return WindowAction::Tab(self.tab.key(press));
+        }
+        if self.inspector.ddl_focused {
+            return self.ddl_key(press);
         }
         if let Some(splitter) = self.focused_splitter {
             return self.splitter_key(splitter, press);
@@ -859,6 +871,11 @@ impl MainWindow {
         if self.drawer_open && press.key == Key::Escape {
             self.close_drawer();
             return WindowAction::Tab(TabAction::None);
+        }
+        if self.focus == WindowFocus::Tab
+            && let Some(action) = self.tab.keys_tab_key(press, now)
+        {
+            return WindowAction::Tab(action);
         }
         if let Some(action) = self.tab_key(press) {
             return action;
@@ -910,6 +927,14 @@ impl MainWindow {
                 self.open_tree_menu(self.tree.current, TreeMenuOrigin::CurrentRow);
                 return WindowAction::Tab(TabAction::None);
             }
+            Key::F10 | Key::ContextMenu
+                if self.focus == WindowFocus::Tab
+                    && self.tab.focus == TabFocus::Editor
+                    && (press.key == Key::ContextMenu || press.modifiers.shift) =>
+            {
+                self.open_editor_menu_at_caret();
+                return WindowAction::Tab(TabAction::None);
+            }
             Key::Character('c' | 'C')
                 if primary && !press.modifiers.shift && self.focus == WindowFocus::Tree =>
             {
@@ -940,6 +965,7 @@ impl MainWindow {
 
     /// Moves the focus to the object tree.
     pub fn focus_tree(&mut self) {
+        self.inspector.ddl_focused = false;
         self.focused_splitter = None;
         self.focus = WindowFocus::Tree;
         self.tab.dialect_menu = None;
@@ -950,6 +976,7 @@ impl MainWindow {
     }
 
     fn focus_tab(&mut self) {
+        self.inspector.ddl_focused = false;
         self.focused_splitter = None;
         self.focus = WindowFocus::Tab;
         self.tab.focus = TabFocus::Editor;
@@ -1017,7 +1044,7 @@ impl MainWindow {
         }
         self.tab.editor = crate::editor::Editor::new(&open_statement(&name, dialect));
         match self.tab.run_request(true) {
-            Some(request) => WindowAction::Tab(TabAction::Run(request)),
+            Some(request) => WindowAction::Tab(TabAction::Run(Box::new(request))),
             None => WindowAction::Tab(TabAction::None),
         }
     }
@@ -1034,8 +1061,8 @@ impl MainWindow {
             return none;
         }
         let scan = KeySpaceScan {
-            collection: key_space.collection.clone(),
-            total: key_space.keys,
+            over_resp: self.tree.catalog.over_resp,
+            ..KeySpaceScan::new(key_space.collection.clone(), key_space.keys)
         };
         let open = (0..self.tab_count()).find(|&position| {
             self.tab_at(position)
@@ -1045,7 +1072,9 @@ impl MainWindow {
         match open {
             Some(position) => {
                 self.show_tab(position);
-                self.tab.keys = Some(scan);
+                if let Some(keys) = &mut self.tab.keys {
+                    keys.total = scan.total;
+                }
             }
             None => {
                 let session = self.take_session();
@@ -1058,9 +1087,9 @@ impl MainWindow {
                 }
             }
         }
-        self.tab
-            .run_request(false)
-            .map_or(none, |request| WindowAction::Tab(TabAction::Run(request)))
+        self.tab.run_request(false).map_or(none, |request| {
+            WindowAction::Tab(TabAction::Run(Box::new(request)))
+        })
     }
 
     /// The dialect a new query tab starts in: the showing tab's, or from a keys tab the
@@ -1175,6 +1204,10 @@ impl MainWindow {
     }
 
     fn new_tab(&mut self) -> bool {
+        if self.tree.catalog.over_resp {
+            self.tab.notice = Some(crate::connection::QUERY_TABS_NEED_SQL.to_owned());
+            return false;
+        }
         if self.tab_count() >= tab_strip::MOST_TABS {
             self.tab.notice = Some(tab_strip::TOO_MANY_TABS.to_owned());
             return false;
@@ -1389,6 +1422,7 @@ pub fn sample_catalog() -> Catalog {
             keys: KeyCount::Exactly(2),
         }],
         triggers: Vec::new(),
+        over_resp: false,
     }
 }
 
@@ -2498,22 +2532,35 @@ fn results(paint: &mut Painter<'_, '_>, window: &MainWindow) {
             paint.rect(x, 414.0, underline, 2.0, theme.accent);
         }
     }
-    paint.text(
-        faces.ui,
-        &tab.summary,
-        summary_x(tab, layout),
-        393.0,
-        BODY,
-        theme.text_secondary,
-    );
-    paint.text(
-        faces.ui,
-        "Export…",
-        centre_right - 76.0,
-        393.0,
-        BODY,
-        theme.text_primary,
-    );
+    if tab.is_keys() {
+        let (field, _, _) = keys_header_rects(centre_right);
+        let left = summary_x(tab, layout);
+        let summary = elided(
+            faces.ui,
+            &tab.summary,
+            field.x - KEYS_HEADER_GAP - left,
+            BODY.0,
+        );
+        paint.text(faces.ui, &summary, left, 393.0, BODY, theme.text_secondary);
+        keys_header(paint, tab, centre_right);
+    } else {
+        paint.text(
+            faces.ui,
+            &tab.summary,
+            summary_x(tab, layout),
+            393.0,
+            BODY,
+            theme.text_secondary,
+        );
+        paint.text(
+            faces.ui,
+            "Export…",
+            centre_right - 76.0,
+            393.0,
+            BODY,
+            theme.text_primary,
+        );
+    }
     if let Some(plan) = tab.plan.as_ref().filter(|_| tab.view == ResultView::Plan) {
         plan_body(paint, plan, window.hovered_plan_node());
         return;
@@ -2568,6 +2615,179 @@ fn results(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     }
     grid_body(paint, grid, top);
     grid_handles(paint, grid, top, window);
+    if grid.rows.is_empty()
+        && let Some(empty) = grid.key_scan.as_ref().and_then(KeySpaceScan::empty_text)
+    {
+        paint.text(
+            faces.ui,
+            &empty,
+            272.0,
+            top + grid::HEADER_HEIGHT + 4.0,
+            BODY,
+            theme.text_secondary,
+        );
+    }
+}
+
+const KEYS_HEADER_GAP: f32 = 12.0;
+const KEYS_FIELD_WIDTH: f32 = 200.0;
+const KEYS_BACK_WIDTH: f32 = 72.0;
+const KEYS_NEXT_WIDTH: f32 = 92.0;
+const KEYS_BUTTON_GAP: f32 = 8.0;
+
+/// The keys tab's `Key prefix` field, `Back` and `Next 100` in the results header
+/// (`docs/ux/workspace.md` 10.10), right-aligned to a header ending at `centre_right`.
+pub fn keys_header_rects(centre_right: f32) -> (Rect, Rect, Rect) {
+    let next = Rect::new(
+        centre_right - KEYS_HEADER_GAP - KEYS_NEXT_WIDTH,
+        388.0,
+        KEYS_NEXT_WIDTH,
+        28.0,
+    );
+    let back = Rect::new(
+        next.x - KEYS_BUTTON_GAP - KEYS_BACK_WIDTH,
+        388.0,
+        KEYS_BACK_WIDTH,
+        28.0,
+    );
+    let field = Rect::new(
+        back.x - KEYS_HEADER_GAP - KEYS_FIELD_WIDTH,
+        388.0,
+        KEYS_FIELD_WIDTH,
+        28.0,
+    );
+    (field, back, next)
+}
+
+fn keys_header(paint: &mut Painter<'_, '_>, tab: &QueryTab, centre_right: f32) {
+    let theme = paint.theme;
+    let faces = paint.faces;
+    let pages = &tab.key_pages;
+    let (field, back, next) = keys_header_rects(centre_right);
+    let error = pages.prefix_error();
+    paint.button(field, Button::Secondary);
+    if error.is_some() {
+        paint.canvas.stroke_rect(field, theme.error);
+    } else if pages.prefix_focused {
+        paint.canvas.stroke_rect(field, theme.accent);
+    }
+    let icon = (field.x + 14.0, field.y + 12.0);
+    paint
+        .canvas
+        .stroke_circle(icon.0, icon.1, 8.0, 1.5, theme.text_secondary);
+    paint.canvas.line(
+        (icon.0 + 3.0, icon.1 + 3.0),
+        (icon.0 + 6.0, icon.1 + 6.0),
+        1.5,
+        theme.text_secondary,
+    );
+    let text_left = field.x + 28.0;
+    let room = field.x + field.w - 8.0 - text_left;
+    if pages.prefix_text.is_empty() {
+        paint.text(
+            faces.ui,
+            "Prefix",
+            text_left,
+            393.0,
+            BODY,
+            theme.text_disabled,
+        );
+    } else {
+        let shown = elided(faces.ui, &pages.prefix_text, room, BODY.0);
+        let width = faces.ui.width(&shown, BODY.0);
+        if pages.prefix_focused && pages.prefix_selected {
+            paint.rect(text_left, field.y + 5.0, width, 18.0, theme.selection);
+        }
+        let ink = if tab.running {
+            theme.text_disabled
+        } else {
+            theme.text_primary
+        };
+        paint.text(faces.ui, &shown, text_left, 393.0, BODY, ink);
+    }
+    if pages.prefix_focused && !pages.prefix_selected {
+        let caret = text_left + faces.ui.width(&pages.prefix_text, BODY.0).min(room);
+        paint.rect(caret.round(), field.y + 5.0, 1.0, 18.0, theme.accent);
+    }
+    if let Some(line) = &error {
+        paint.text(
+            faces.ui,
+            line,
+            field.x,
+            field.y + field.h + 2.0,
+            SMALL,
+            theme.error,
+        );
+    }
+    for (rect, label, enabled) in [
+        (back, "Back", pages.can_go_back() && !tab.running),
+        (next, "Next 100", pages.can_go_next() && !tab.running),
+    ] {
+        paint.button(rect, Button::Ghost);
+        let ink = if enabled {
+            theme.text_primary
+        } else {
+            theme.text_disabled
+        };
+        let width = faces.ui.width(label, BODY.0);
+        paint.text(
+            faces.ui,
+            label,
+            rect.x + (rect.w - width) / 2.0,
+            393.0,
+            BODY,
+            ink,
+        );
+    }
+}
+
+fn keys_header_nodes(nodes: &mut Vec<AccessNode>, tab: &QueryTab, centre_right: f32) {
+    let pages = &tab.key_pages;
+    let (field, back, next) = keys_header_rects(centre_right);
+    let mut prefix = node(
+        NODE_KEY_PREFIX,
+        NODE_MAIN_WINDOW,
+        AccessRole::TextField,
+        "Key prefix",
+        (field.x, field.y, field.w, field.h),
+    );
+    prefix.value = Some(pages.prefix_text.clone());
+    prefix.placeholder = Some("Prefix".to_owned());
+    prefix.state.focused = pages.prefix_focused;
+    prefix.state.disabled = tab.running;
+    prefix.description = pages.prefix_error();
+    prefix.state.invalid = prefix.description.is_some();
+    prefix.actions.focus = true;
+    prefix.actions.set_value = true;
+    nodes.push(prefix);
+    for (id, rect, name, shortcut, enabled) in [
+        (
+            NODE_KEYS_BACK,
+            back,
+            "Back",
+            "Alt+PgUp",
+            pages.can_go_back(),
+        ),
+        (
+            NODE_KEYS_NEXT,
+            next,
+            "Next 100",
+            "Alt+PgDn",
+            pages.can_go_next(),
+        ),
+    ] {
+        let mut button = node(
+            id,
+            NODE_MAIN_WINDOW,
+            AccessRole::Button,
+            name,
+            (rect.x, rect.y, rect.w, rect.h),
+        );
+        button.shortcut = Some(shortcut.to_owned());
+        button.state.disabled = !enabled || tab.running;
+        button.actions.invoke = enabled && !tab.running;
+        nodes.push(button);
+    }
 }
 
 const PLAN_SEGMENT_X: f32 = 428.0;
@@ -2985,17 +3205,26 @@ impl MainWindow {
         Some(grid_menu::rect_for(menu.origin, cell, width))
     }
 
-    /// The open popover's rect, the value view's, the grid menu's or the tree's row menu's.
+    /// Where the editor's open menu shows, in window coordinates.
+    pub fn editor_menu_rect(&self) -> Option<Rect> {
+        let menu = self.tab.editor_menu.as_ref()?;
+        Some(editor_menu::rect_for(menu.origin, self.width as f32))
+    }
+
+    /// The open popover's rect: the value view's, the grid menu's, the editor menu's or the
+    /// tree's row menu's.
     pub fn popover_rect(&self) -> Option<Rect> {
         self.value_view_rect()
             .or_else(|| self.grid_menu_rect())
+            .or_else(|| self.editor_menu_rect())
             .or_else(|| self.tree_menu_rect())
     }
 
-    /// Closes the value view, the grid's menu and the tree's row menu.
+    /// Closes the value view, the grid's and the editor's menus and the tree's row menu.
     pub fn close_popovers(&mut self) {
         self.tab.value_view = None;
         self.tab.grid_menu = None;
+        self.tab.editor_menu = None;
         self.tree_menu = None;
     }
 
@@ -3006,6 +3235,8 @@ impl MainWindow {
                 && (id == grid_menu::NODE_GRID_MENU || grid_menu_item_of(id).is_some()))
             || (self.tree_menu.is_some()
                 && (id == tree_menu::NODE_TREE_MENU || tree_menu::item_of_node(id).is_some()))
+            || (self.tab.editor_menu.is_some()
+                && (id == editor_menu::NODE_EDITOR_MENU || editor_menu::item_of_node(id).is_some()))
     }
 
     /// A press of the primary button while a popover is open: outside it closes the popover
@@ -3107,6 +3338,21 @@ impl MainWindow {
                 return None;
             };
             if let Some(menu) = &mut self.tree_menu {
+                menu.highlighted = Some(index);
+            }
+            let invoked = *action == AccessAction::Invoke;
+            return Some(if invoked {
+                vec![KeyPress::plain(Key::Enter)]
+            } else {
+                Vec::new()
+            });
+        }
+        if self.tab.editor_menu.is_some() {
+            let Some(index) = editor_menu::item_of_node(node.id) else {
+                self.tab.editor_menu = None;
+                return None;
+            };
+            if let Some(menu) = &mut self.tab.editor_menu {
                 menu.highlighted = Some(index);
             }
             let invoked = *action == AccessAction::Invoke;
@@ -3277,7 +3523,150 @@ impl MainWindow {
         self.inspector
             .collapsed
             .retain(|&block| block != InspectorBlock::Ddl);
+        self.inspector.ddl_focused = true;
         WindowAction::Inspect(item)
+    }
+
+    fn keys_header_access(&mut self, id: u32, action: &AccessAction) -> Option<Vec<KeyPress>> {
+        if !self.tab.is_keys() {
+            return None;
+        }
+        let alt = |key: Key| KeyPress {
+            key,
+            modifiers: eggdb_platform::window::Modifiers {
+                alt: true,
+                ..Default::default()
+            },
+        };
+        match id {
+            NODE_KEY_PREFIX => {
+                self.focus_tab();
+                self.tab.focus_prefix();
+                if let AccessAction::SetValue(text) = action {
+                    self.tab.key_pages.prefix_text = text.clone();
+                    return Some(vec![KeyPress::plain(Key::Enter)]);
+                }
+                Some(Vec::new())
+            }
+            NODE_KEYS_BACK | NODE_KEYS_NEXT if *action == AccessAction::Invoke => {
+                self.focus_tab();
+                let key = if id == NODE_KEYS_BACK {
+                    Key::PageUp
+                } else {
+                    Key::PageDown
+                };
+                Some(vec![alt(key)])
+            }
+            NODE_KEYS_BACK | NODE_KEYS_NEXT => Some(Vec::new()),
+            _ => None,
+        }
+    }
+
+    fn ddl_key(&mut self, press: KeyPress) -> WindowAction {
+        let primary = press.modifiers.control || press.modifiers.command;
+        match press.key {
+            Key::Character('c' | 'C') if primary => {
+                let description = inspector::describe(
+                    &self.tree,
+                    self.inspected(),
+                    self.inspector.sample.as_ref(),
+                );
+                let Some(text) = description.ddl else {
+                    return WindowAction::Tab(TabAction::None);
+                };
+                let toast = crate::query_tab::copied_characters_toast(text.chars().count());
+                self.tab.notice = Some(toast.clone());
+                WindowAction::Tab(TabAction::Copy { text, toast })
+            }
+            Key::Escape | Key::Tab => {
+                self.inspector.ddl_focused = false;
+                self.focus_tree();
+                WindowAction::Tab(TabAction::None)
+            }
+            _ => WindowAction::Tab(TabAction::None),
+        }
+    }
+
+    /// Opens the editor's right-click menu from `Shift+F10` or the menu key
+    /// (`docs/ux/workspace.md` 10.9): below the caret's line box (the selection's end), or in
+    /// a keys tab below the line's start at x 320.
+    pub fn open_editor_menu_at_caret(&mut self) {
+        let shift = self
+            .placed(Area::Editor)
+            .map_or((0.0, 0.0), |placed| placed.shift);
+        let tab = &self.tab;
+        let lines = tab.editor.lines();
+        let at = if tab.is_keys() {
+            crate::editor::Position::default()
+        } else {
+            tab.editor
+                .selection()
+                .map_or(tab.editor.caret(), |(_, end)| end)
+        };
+        let visible =
+            (((editor_bottom(tab) - EDITOR_TEXT_TOP) / LINE_HEIGHT).floor() as usize).max(1);
+        let first =
+            first_visible_line(tab.editor.caret().line, visible).min(lines.len().saturating_sub(1));
+        let row = at.line.clamp(first, first + visible - 1) - first;
+        let before: String = lines
+            .get(at.line)
+            .map(|line| line.chars().take(at.column).collect())
+            .unwrap_or_default();
+        let origin = EditorMenuOrigin::Caret {
+            x: EDITOR_TEXT_LEFT + crate::grid::measured(&before) + shift.0,
+            line_top: EDITOR_TEXT_TOP + LINE_HEIGHT * row as f32 + shift.1,
+            line_height: LINE_HEIGHT,
+        };
+        let clipboard = self.clipboard_has_text;
+        self.tab.open_editor_menu(origin, clipboard);
+    }
+
+    /// A right-click at (`x`, `y`) over the editor (`docs/ux/workspace.md` 10.9): on the text
+    /// the caret moves to the click (a click inside the selection keeps it), on the gutter
+    /// the line is selected, then the editor's menu opens at the pointer; the error strip and
+    /// the scrollbar open nothing. Returns whether it opened.
+    pub fn editor_context_press(
+        &mut self,
+        faces: Faces<'_>,
+        tree: &[AccessNode],
+        x: f32,
+        y: f32,
+    ) -> bool {
+        let Some(editor) = tree
+            .iter()
+            .find(|node| node.id == NODE_EDITOR && pointer::contains(node.bounds, x, y))
+        else {
+            return false;
+        };
+        let shift = self
+            .placed(Area::Editor)
+            .map_or((0.0, 0.0), |placed| placed.shift);
+        let scrollbar = x >= editor.bounds.x + editor.bounds.width - 12.0;
+        let strip = y - shift.1 >= editor_bottom(&self.tab);
+        if scrollbar || strip {
+            return false;
+        }
+        self.close_popovers();
+        self.focus_tab();
+        if !self.tab.is_keys() {
+            let at = self.editor_position_at(faces, x, y);
+            if x - shift.0 < EDITOR_GUTTER_RIGHT {
+                self.tab.editor.select_line(at.line);
+            } else {
+                let inside = self
+                    .tab
+                    .editor
+                    .selection()
+                    .is_some_and(|(start, end)| start <= at && at <= end);
+                if !inside {
+                    self.tab.editor.place_caret(at);
+                }
+            }
+        }
+        let clipboard = self.clipboard_has_text;
+        self.tab
+            .open_editor_menu(EditorMenuOrigin::Pointer { x, y }, clipboard);
+        true
     }
 
     fn drop_target(&self, row: TreeItem) -> Option<DropTarget> {
@@ -3701,11 +4090,16 @@ fn popovers(paint: &mut Painter<'_, '_>, window: &MainWindow) {
         let hovered = window.pointer.hovered.and_then(tree_menu::item_of_node);
         tree_menu::draw(paint, menu, rect, hovered);
     }
+    if let (Some(menu), Some(rect)) = (&window.tab.editor_menu, window.editor_menu_rect()) {
+        let hovered = window.pointer.hovered.and_then(editor_menu::item_of_node);
+        editor_menu::draw(paint, menu, rect, hovered);
+    }
 }
 
 fn popover_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
     let open = window.tab.value_view.is_some()
         || window.tab.grid_menu.is_some()
+        || window.tab.editor_menu.is_some()
         || window.tree_menu.is_some();
     if !open {
         return;
@@ -3721,6 +4115,9 @@ fn popover_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
     }
     if let (Some(menu), Some(rect)) = (&window.tree_menu, window.tree_menu_rect()) {
         tree_menu::nodes(nodes, menu, rect, NODE_MAIN_WINDOW);
+    }
+    if let (Some(menu), Some(rect)) = (&window.tab.editor_menu, window.editor_menu_rect()) {
+        editor_menu::nodes(nodes, menu, rect, NODE_EDITOR);
     }
 }
 
@@ -3789,6 +4186,12 @@ pub const NODE_LAYOUT_ITEM: u32 = 63_100;
 pub const NODE_FIRST_TAB_CLOSE: u32 = 61_500;
 /// The tab strip's `+` button.
 pub const NODE_NEW_TAB: u32 = 61_999;
+/// A keys tab's `Key prefix` field (`docs/ux/workspace.md` 10.10).
+pub const NODE_KEY_PREFIX: u32 = 63_200;
+/// A keys tab's `Back` button.
+pub const NODE_KEYS_BACK: u32 = 63_201;
+/// A keys tab's `Next 100` button.
+pub const NODE_KEYS_NEXT: u32 = 63_202;
 const TAB_CLOSE_NODES_END: u32 = NODE_FIRST_TAB_CLOSE + tab_strip::MOST_TABS as u32;
 
 fn node(
@@ -4026,6 +4429,9 @@ impl MainWindow {
             self.show_tab(position);
             return vec![primary_press('w')];
         }
+        if let Some(keys) = self.keys_header_access(node.id, action) {
+            return keys;
+        }
         if let Some(chord) = toolbar_chord(node.id, self.layout) {
             if *action != AccessAction::Invoke {
                 return Vec::new();
@@ -4194,6 +4600,9 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
         &status_line::spoken(&tab.summary),
         (summary_x(tab, window.layout), 386.0, 760.0, 32.0),
     ));
+    if tab.is_keys() {
+        keys_header_nodes(&mut nodes, tab, window.centre_right());
+    }
     if let Some(plan) = tab
         .plan
         .as_ref()
@@ -4478,7 +4887,9 @@ fn sidebar_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
         });
         item.state.expanded = row.expanded;
         item.state.selected = tree.selected == Some(row.item);
-        item.state.focused = window.focus == WindowFocus::Tree && tree.current == row.item;
+        item.state.focused = window.focus == WindowFocus::Tree
+            && tree.current == row.item
+            && !window.inspector.ddl_focused;
         nodes.push(item);
     }
 }
@@ -4533,6 +4944,7 @@ fn inspector_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
             );
             ddl.value = description.ddl.clone();
             ddl.state.read_only = true;
+            ddl.state.focused = window.inspector.ddl_focused;
             nodes.push(ddl);
         }
     }
@@ -5955,5 +6367,114 @@ mod tests {
             Theme::of(crate::color::ThemeKind::Light),
             box_faces(),
         );
+    }
+
+    #[test]
+    fn shift_f10_opens_the_editor_menu_below_the_caret_and_show_ddl_focuses_the_ddl_box() {
+        let now = Instant::now();
+        let mut window = MainWindow::sample();
+        window.tab.editor = crate::editor::Editor::new("select 1");
+        window.focus = WindowFocus::Tab;
+        window.tab.focus = TabFocus::Editor;
+        let shift_f10 = KeyPress {
+            key: Key::F10,
+            modifiers: eggdb_platform::window::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        };
+        window.key(shift_f10, now);
+        let menu = window
+            .tab
+            .editor_menu
+            .expect("Shift+F10 opens the editor menu");
+        assert_eq!(menu.highlighted, Some(2), "the first enabled item, Paste");
+        let rect = window.editor_menu_rect().expect("the menu has a rect");
+        assert_eq!(rect.y, EDITOR_TEXT_TOP + LINE_HEIGHT + 4.0);
+        assert_eq!(rect.h, editor_menu::HEIGHT);
+        let tree = accessibility_tree(&window);
+        let cut = tree
+            .iter()
+            .find(|node| node.id == editor_menu::NODE_FIRST_EDITOR_MENU_ITEM)
+            .expect("Cut is exposed");
+        assert_eq!(cut.name, "Cut");
+        assert!(cut.state.disabled, "a disabled item stays in the menu");
+        assert_eq!(cut.parent, Some(editor_menu::NODE_EDITOR_MENU));
+        let run = tree
+            .iter()
+            .find(|node| node.id == editor_menu::NODE_FIRST_EDITOR_MENU_ITEM + 4)
+            .expect("Run is exposed");
+        assert_eq!(run.name, "Run statement");
+        window.key(KeyPress::plain(Key::Character('f')), now);
+        window.key(KeyPress::plain(Key::Enter), now);
+        assert_eq!(window.tab.editor_menu, None);
+        assert_eq!(window.tab.editor.text(), "SELECT\n  1");
+        window.key(KeyPress::plain(Key::ContextMenu), now);
+        window.key(KeyPress::plain(Key::Escape), now);
+        assert_eq!(window.tab.editor_menu, None, "Esc closes the menu");
+        assert_eq!(window.tab.editor.text(), "SELECT\n  1");
+
+        window.show_ddl(TreeItem::Table(1));
+        assert!(window.inspector.ddl_focused);
+        let tree = accessibility_tree(&window);
+        if let Some(ddl) = tree.iter().find(|node| node.id == NODE_DDL) {
+            assert!(ddl.state.focused && ddl.state.read_only);
+            assert_eq!(ddl.role, AccessRole::TextArea);
+            assert!(
+                !tree
+                    .iter()
+                    .any(|node| node.role == AccessRole::TreeItem && node.state.focused),
+                "the focus moved off the tree"
+            );
+        }
+        window.key(KeyPress::plain(Key::Escape), now);
+        assert!(!window.inspector.ddl_focused);
+        assert_eq!(window.focus, WindowFocus::Tree);
+    }
+
+    #[test]
+    fn a_keys_tab_menu_copies_the_scan_line_and_disables_the_editing_items() {
+        let now = Instant::now();
+        let mut window = MainWindow::sample();
+        window.open_keys(0);
+        window.focus = WindowFocus::Tab;
+        window.tab.focus = TabFocus::Editor;
+        window.key(KeyPress::plain(Key::ContextMenu), now);
+        let menu = window
+            .tab
+            .editor_menu
+            .expect("the menu key opens it in a keys tab");
+        assert_eq!(menu.run_label, "Run scan");
+        assert_eq!(
+            menu.enabled,
+            [false, true, false, false, true, false, false, false]
+        );
+        assert_eq!(
+            window.editor_menu_rect().map(|rect| rect.x),
+            Some(EDITOR_TEXT_LEFT)
+        );
+        let WindowAction::Tab(TabAction::Copy { text, .. }) =
+            window.key(KeyPress::plain(Key::Enter), now)
+        else {
+            panic!("Copy copies the scan line");
+        };
+        assert_eq!(text, "SCAN sessions LIMIT 100");
+        let tree = accessibility_tree(&window);
+        let prefix = tree
+            .iter()
+            .find(|node| node.id == NODE_KEY_PREFIX)
+            .expect("the keys tab has its prefix field");
+        assert_eq!(prefix.name, "Key prefix");
+        assert_eq!(prefix.placeholder.as_deref(), Some("Prefix"));
+        let back = tree
+            .iter()
+            .find(|node| node.id == NODE_KEYS_BACK)
+            .expect("Back is exposed");
+        assert!(back.state.disabled, "Back is off on page 1");
+        assert_eq!(back.shortcut.as_deref(), Some("Alt+PgUp"));
+        let (field, back, next) = keys_header_rects(1280.0);
+        assert_eq!(field, Rect::new(884.0, 388.0, 200.0, 28.0));
+        assert_eq!(back, Rect::new(1096.0, 388.0, 72.0, 28.0));
+        assert_eq!(next, Rect::new(1176.0, 388.0, 92.0, 28.0));
     }
 }

@@ -221,6 +221,7 @@ mod tests {
             default_dialect: eggdb_sql::Dialect::PostgreSql,
             auto_increment: false,
             comment: None,
+            generation: None,
         };
         TableSchema {
             name: "orders".to_owned(),

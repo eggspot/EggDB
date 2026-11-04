@@ -148,6 +148,9 @@ pub enum DestructiveKind {
     DropPolicy,
     /// `ALTER TABLE ... DISABLE ROW LEVEL SECURITY`.
     DisableRowSecurity,
+    /// `ALTER TABLE ... NO FORCE ROW LEVEL SECURITY`, which lets the table's owner bypass its
+    /// row security again.
+    NoForceRowSecurity,
 }
 
 impl DestructiveKind {
@@ -183,6 +186,7 @@ impl DestructiveKind {
             Self::DisableTrigger => "DISABLE TRIGGER",
             Self::DropPolicy => "DROP POLICY",
             Self::DisableRowSecurity => "DISABLE ROW LEVEL SECURITY",
+            Self::NoForceRowSecurity => "NO FORCE ROW LEVEL SECURITY",
         }
     }
 }
@@ -331,8 +335,17 @@ pub(crate) fn classify(
             vec![shown(table)],
             false,
         )),
+        Statement::RowSecurity(RowSecurityStatement::Force {
+            table,
+            forced: false,
+        }) => Some(DestructiveStatement::new(
+            DestructiveKind::NoForceRowSecurity,
+            vec![shown(table)],
+            false,
+        )),
         Statement::CreateTable(_)
         | Statement::Begin { .. }
+        | Statement::SetTransaction(_)
         | Statement::Commit
         | Statement::Rollback
         | Statement::Savepoint(_)
@@ -340,7 +353,8 @@ pub(crate) fn classify(
         | Statement::Role(_)
         | Statement::RowSecurity(
             RowSecurityStatement::CreatePolicy { .. }
-            | RowSecurityStatement::Switch { enabled: true, .. },
+            | RowSecurityStatement::Switch { enabled: true, .. }
+            | RowSecurityStatement::Force { forced: true, .. },
         )
         | Statement::Listen(_)
         | Statement::Unlisten(_)
@@ -870,7 +884,10 @@ fn routine_altered(
     alter: &AlterRoutine,
     catalog: &mut CatalogLookup<'_>,
 ) -> Option<DestructiveStatement> {
-    if alter.action == AlterRoutineAction::Accepted {
+    if matches!(
+        alter.action,
+        AlterRoutineAction::Accepted | AlterRoutineAction::Settings(_)
+    ) {
         return None;
     }
     let old = match catalog.existing_routine(&alter.target.name.text) {
@@ -886,7 +903,7 @@ fn routine_altered(
         AlterRoutineAction::SetSchema(schema) => {
             crate::schemas::qualified(&schema.text, crate::schemas::base_name(&old))
         }
-        AlterRoutineAction::Accepted => return None,
+        AlterRoutineAction::Settings(_) | AlterRoutineAction::Accepted => return None,
     };
     routine_changed(shown(&alter.target.name), &[old, new], true, catalog)
 }
@@ -1060,6 +1077,7 @@ fn altered(table: &Name, actions: &[AlterAction]) -> Option<DestructiveStatement
             | AlterAction::DropIdentity { .. }
             | AlterAction::AttachPartition { .. }
             | AlterAction::DetachPartition(_)
+            | AlterAction::AttachIndex(_)
             | AlterAction::MoveColumn { .. }
             | AlterAction::Accepted => continue,
         };

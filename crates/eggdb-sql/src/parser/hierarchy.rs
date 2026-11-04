@@ -251,7 +251,10 @@ impl HierarchyBuilder<'_> {
         if !mentions_hierarchy(expr) {
             if matches!(
                 expr.kind,
-                ExprKind::Literal(_) | ExprKind::Constant { .. } | ExprKind::SessionValue { .. }
+                ExprKind::Literal(_)
+                    | ExprKind::Constant { .. }
+                    | ExprKind::SessionValue { .. }
+                    | ExprKind::CurrentSetting { .. }
             ) {
                 return Ok(expr.clone());
             }

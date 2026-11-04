@@ -1,13 +1,18 @@
 //! EggDB's RESP server (D193): the RESP2 and RESP3 protocol from its public specification, and
 //! the documented semantics of the core commands for strings, hashes, lists, sets and sorted
-//! sets with expiry, over a [`Keyspace`] that keeps each command in one transaction, so clients
-//! built for Redis connect to EggDB unchanged. No code of Redis is used or read.
+//! sets with expiry, bitmaps, HyperLogLog sketches and geospatial indexes (D330), over a
+//! [`Keyspace`] that keeps each command in one transaction, so clients built for Redis connect
+//! to EggDB unchanged. No code of Redis is used or read.
 
 mod aggregates;
 mod aof;
 mod aof_manifest;
+mod bitmaps;
 mod commands;
 mod eviction;
+mod geo;
+mod geohash;
+mod hyperloglog;
 use eggdb_keyspace as keyspace;
 mod protocol;
 mod pubsub;
@@ -28,3 +33,5 @@ pub use value::{Data, Entry, SortedSet};
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_bitmaps_hll_geo;

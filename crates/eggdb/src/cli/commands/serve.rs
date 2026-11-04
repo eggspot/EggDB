@@ -9,7 +9,7 @@ use eggdb_pgwire::{
     DEFAULT_AUTHENTICATION_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_MAX_CONNECTIONS, ListenError,
     MIN_SCRAM_ITERATIONS, MemoryBudget, SCRAM_SALT_BYTES, ScramVerifier, ServerConfig,
 };
-use eggdb_platform::{secure_random, stop_signals};
+use eggdb_platform::{DatagramSocket, Network, OsNetwork, secure_random, stop_signals};
 use std::io::BufRead;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
@@ -46,6 +46,37 @@ fn database_name_of(file: &Path) -> String {
 }
 
 impl Session<'_> {
+    fn check_mcp_tables(
+        &self,
+        db: &eggdb::Database,
+        tables: &eggdb_sql::VisibleTables,
+    ) -> Result<(), Failure> {
+        let file = render::text(self.request.file.display().to_string().as_bytes());
+        let (unknown, unservable, _) = super::mcp::check_tables(&DatabaseStore(db), tables, false)
+            .map_err(|message| {
+                Failure::database(
+                    format!("cannot read {file}: {message}"),
+                    Exit::DatabaseError,
+                )
+            })?;
+        if !unknown.is_empty() {
+            return Err(super::mcp::unknown_tables_failure(
+                &file,
+                &unknown,
+                "--mcp-tables",
+            ));
+        }
+        if !unservable.is_empty() {
+            return Err(super::mcp::unservable_columns_failure(
+                &file,
+                &unservable,
+                "--mcp-tables",
+                "eggdb serve",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn serve(&mut self) -> Result<Exit, Failure> {
         super::foreign::allow_from_environment();
         let usage = |message: String| Failure::usage(message, Some(CommandName::Serve));
@@ -122,6 +153,11 @@ impl Session<'_> {
             None => None,
         };
         let mcp_listener = match (options.mcp_listen, &options.mcp_token_file) {
+            (None, None) if !options.mcp_tables.is_empty() => {
+                return Err(usage(
+                    "--mcp-tables limits the MCP endpoint: give it with --mcp-listen and --mcp-token-file".to_owned(),
+                ));
+            }
             (None, None) => None,
             (Some(_), None) | (None, Some(_)) => {
                 return Err(usage(
@@ -426,6 +462,10 @@ impl Session<'_> {
             }
             None => None,
         };
+        let syslog_sockets = match options.syslog_listen {
+            Some(address) => Some(bind_syslog(address)?),
+            None => None,
+        };
         let nats_config = eggdb_nats::ServerConfig {
             user: user.clone(),
             password_sha256: eggdb_crypto::sha256(password.as_bytes()),
@@ -554,6 +594,11 @@ impl Session<'_> {
             let (name, first) = directory.remove(0);
             (super::Opened::Owned(Box::new(first)), name)
         };
+        let mcp_tables = (!options.mcp_tables.is_empty())
+            .then(|| eggdb_sql::VisibleTables::new(options.mcp_tables.iter().map(String::as_str)));
+        if let Some(tables) = &mcp_tables {
+            self.check_mcp_tables(&db, tables)?;
+        }
         let idle_timeout = match options.idle_timeout_seconds {
             None => Some(DEFAULT_IDLE_TIMEOUT),
             Some(0) => None,
@@ -634,12 +679,27 @@ impl Session<'_> {
                 }),
             );
         }
+        let syslog_collector = eggdb_observability::SyslogCollector::new(
+            &store,
+            &config.user,
+            &config.database,
+            max_connections,
+        );
+        if syslog_sockets.is_some() {
+            syslog_collector.prepare().map_err(|error| {
+                Failure::database(
+                    format!("cannot create the syslog table: {error}"),
+                    Exit::DatabaseError,
+                )
+            })?;
+        }
         let observability_endpoint = eggdb_observability::Endpoint::new(
             &store,
             &config.user,
             server_password_sha256,
             &config.database,
-        );
+        )
+        .with_memory_budget(Arc::clone(&memory_budget));
         let rest_endpoint = eggdb_api::Endpoint::new(
             &store,
             &config.user,
@@ -653,6 +713,7 @@ impl Session<'_> {
                 &mcp_opener,
                 &config.database,
                 tokens.clone(),
+                mcp_tables.clone(),
                 eggdb_mcp::audit::audit_path_for(&self.request.file),
             )
         });
@@ -672,7 +733,8 @@ impl Session<'_> {
             db: &db,
             prefix: super::serve_resp::ES_COLLECTIONS,
         };
-        let es_api = eggdb_esrest::Api::new(&es_database, &config.user, es_password);
+        let es_api = eggdb_esrest::Api::new(&es_database, &config.user, es_password)
+            .with_memory_budget(Arc::clone(&memory_budget));
         let graph_database = super::serve_resp::DatabaseKeyspace {
             db: &db,
             prefix: super::serve_resp::GRAPH_COLLECTIONS,
@@ -787,9 +849,9 @@ impl Session<'_> {
                 None => Ok(()),
             });
             let rest_server = scope.spawn(|| match &rest_listener {
-                Some(listener) => eggdb_http::serve_with_limits(
+                Some(listener) => eggdb_http::serve_replies_with_limits(
                     listener,
-                    &|request| rest_endpoint.answer(request),
+                    &|request| rest_endpoint.reply(request),
                     &stop_signals::requested,
                     &eggdb_http::Limits::new(eggdb_api::MAX_REQUEST_BYTES, &memory_budget),
                 ),
@@ -887,6 +949,14 @@ impl Session<'_> {
                         &stop_signals::requested,
                     );
                 }
+            });
+            let syslog_server = scope.spawn(|| match &syslog_sockets {
+                Some((datagrams, listener)) => syslog_collector.serve(
+                    Some(datagrams),
+                    Some(listener),
+                    &stop_signals::requested,
+                ),
+                None => Ok(()),
             });
             let nats_server = scope.spawn(|| match &nats_listener {
                 Some(listener) => {
@@ -1011,6 +1081,7 @@ impl Session<'_> {
             let _ = amqp_server.join();
             let _ = mqtt_server.join();
             let _ = nats_server.join();
+            let _ = syslog_server.join();
             let _ = stomp_server.join();
             let _ = cql_server.join();
             let _ = observability_server.join();
@@ -1415,6 +1486,42 @@ impl Session<'_> {
             },
         }
     }
+}
+
+fn bind_syslog(
+    address: SocketAddr,
+) -> Result<(eggdb_platform::OsDatagramSocket, std::net::TcpListener), Failure> {
+    if !address.ip().is_loopback() {
+        return Err(Failure::usage(
+            format!(
+                "--syslog-listen {address}: syslog has no authentication or TLS, so it listens only on a loopback address"
+            ),
+            Some(CommandName::Serve),
+        ));
+    }
+    if address.port() == 0 {
+        return Err(Failure::usage(
+            format!(
+                "--syslog-listen {address}: give a port, such as 127.0.0.1:5514, since senders are configured with it"
+            ),
+            Some(CommandName::Serve),
+        ));
+    }
+    let cannot_listen = |error: String| {
+        Failure::database(
+            format!("cannot listen for syslog on {address}: {error}"),
+            Exit::DatabaseError,
+        )
+    };
+    let datagrams = OsNetwork::new()
+        .bind_datagram(address)
+        .map_err(|error| cannot_listen(error.to_string()))?;
+    let bound = datagrams
+        .local_address()
+        .map_err(|error| cannot_listen(error.to_string()))?;
+    let listener =
+        std::net::TcpListener::bind(bound).map_err(|error| cannot_listen(error.to_string()))?;
+    Ok((datagrams, listener))
 }
 
 fn client_host(address: IpAddr, tls: Option<&TlsSetup>) -> String {

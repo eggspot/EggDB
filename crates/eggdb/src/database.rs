@@ -478,6 +478,8 @@ impl Database {
     /// two uses, fails with [`ErrorKind::Corrupt`](crate::ErrorKind::Corrupt), with a message
     /// that says what is damaged; a page with no use is counted in
     /// [`CheckReport::leaked_pages`]. The free list was checked when the database was opened.
+    /// Last, each collection's kept entry count is read and compared with its entries; a
+    /// damaged count, or one that differs, fails with `Corrupt` naming the collection.
     ///
     /// The check reads the whole tree and every value, and holds the database while it does:
     /// other transactions' operations wait until it ends. An open write transaction's changes
@@ -497,6 +499,7 @@ impl Database {
     /// ```
     pub fn check(&self) -> Result<CheckReport> {
         let file = self.store.check().map_err(Error::storage)?;
+        self.begin_read()?.check_collection_counts()?;
         let tree = file.tree.unwrap_or_default();
         Ok(CheckReport {
             stamp: file.stamp,

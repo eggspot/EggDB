@@ -48,6 +48,7 @@ const OID_TYPE: u32 = 26;
 const INT4_TYPE: u32 = 23;
 const ANY_ARRAY_TYPE: u32 = 2277;
 const VOID_TYPE: u32 = 2278;
+const RECORD_ARRAY_TYPE: u32 = 2287;
 const CSTRING_TYPE: u32 = 2275;
 const INTERNAL_TYPE: u32 = 2281;
 
@@ -1375,6 +1376,7 @@ fn array_type_oid(element: ArrayElement) -> u32 {
     match element {
         ArrayElement::Int2Vector => 22,
         ArrayElement::OidVector => 30,
+        ArrayElement::Record => RECORD_ARRAY_TYPE,
         other => builtin_type(type_oid(other.sql_type())).map_or(0, |found| found.array),
     }
 }
@@ -1533,6 +1535,7 @@ pub(crate) enum Space {
     Routine,
     Package,
     SqlServerObject,
+    Policy,
 }
 
 impl Space {
@@ -1546,6 +1549,7 @@ impl Space {
             Self::Routine => b"routine",
             Self::Package => b"package",
             Self::SqlServerObject => b"sqlserver object",
+            Self::Policy => b"policy",
         }
     }
 
