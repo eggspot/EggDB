@@ -12,7 +12,9 @@ use crate::oracle_collections;
 use crate::oracle_intervals::{DEFAULT_LEADING_PRECISION, IntervalField, MAX_PRECISION, Qualifier};
 use crate::settings::Settings;
 use crate::types::{SqlType, Value};
-use crate::window::{ValueTreatment, WindowFunction};
+use crate::window::{
+    ValueTreatment, WindowCall, WindowDefinition, WindowFunction, WindowReference,
+};
 
 /// The Oracle Database release whose documented behaviour EggDB's Oracle dialect follows.
 pub const ORACLE_COMPATIBLE_VERSION: &str = "23ai";
@@ -1041,36 +1043,38 @@ impl<'t> Parser<'t> {
         self.expect_word("by")?;
         let order = self.order_items()?;
         self.expect(&TokenKind::RightParen)?;
+        if self.is_word("over") {
+            let partition = self.partition_only_window()?;
+            return Ok(crate::window::call(WindowCall {
+                function: WindowFunction::Kept { function, last },
+                treatment: ValueTreatment::default(),
+                arguments: argument.map(|argument| vec![*argument]).unwrap_or_default(),
+                filter: None,
+                window: WindowReference::Inline(WindowDefinition {
+                    base: None,
+                    partition,
+                    order,
+                    frame: None,
+                }),
+                position,
+            }));
+        }
         let measure = argument.map_or_else(
             || literal(Literal::Integer(1), position),
             |argument| *argument,
         );
         let mut columns = vec![measure];
         columns.extend(order.iter().map(|item| item.expr.clone()));
-        let partition = if self.is_word("over") {
-            Some(self.partition_only_window()?)
-        } else {
-            None
-        };
-        let arrays = columns.into_iter().map(|column| match &partition {
-            Some(partition) => super::windows::whole_partition_call(
-                AggregateFunction::ArrayAgg,
-                vec![column],
-                partition.clone(),
-                order.clone(),
-                position,
-            ),
-            None => Expr {
-                kind: ExprKind::Aggregate {
-                    function: AggregateFunction::ArrayAgg,
-                    argument: Some(Box::new(crate::aggregate::ordered_arguments(
-                        column,
-                        order.clone(),
-                    ))),
-                    distinct: false,
-                },
-                position,
+        let arrays = columns.into_iter().map(|column| Expr {
+            kind: ExprKind::Aggregate {
+                function: AggregateFunction::ArrayAgg,
+                argument: Some(Box::new(crate::aggregate::ordered_arguments(
+                    column,
+                    order.clone(),
+                ))),
+                distinct: false,
             },
+            position,
         });
         let mut arguments = vec![
             literal(Literal::String(function.name().to_owned()), position),

@@ -11,6 +11,8 @@ use std::ops::Range;
 
 pub(crate) const WINDOW_CALL: &str = "window_call";
 const AGGREGATE_PREFIX: &str = "aggregate ";
+const KEPT_FIRST_PREFIX: &str = "keep first ";
+const KEPT_LAST_PREFIX: &str = "keep last ";
 const IGNORE_NULLS_SUFFIX: &str = " ignore nulls";
 const FROM_LAST_SUFFIX: &str = " from last";
 const HEADER: usize = 9;
@@ -29,6 +31,10 @@ pub(crate) enum WindowFunction {
     LastValue,
     NthValue,
     Aggregate(AggregateFunction),
+    Kept {
+        function: AggregateFunction,
+        last: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -109,18 +115,40 @@ impl WindowFunction {
     }
 
     fn decoded(text: &str) -> Option<Self> {
-        match text.strip_prefix(AGGREGATE_PREFIX) {
-            Some(aggregate) => AggregateFunction::ALL
+        let aggregate_named = |name: &str| {
+            AggregateFunction::ALL
                 .into_iter()
-                .find(|function| function.name() == aggregate)
-                .map(Self::Aggregate),
-            None => Self::named(text),
+                .find(|function| function.name() == name)
+        };
+        if let Some(aggregate) = text.strip_prefix(AGGREGATE_PREFIX) {
+            return aggregate_named(aggregate).map(Self::Aggregate);
         }
+        if let Some(kept) = text.strip_prefix(KEPT_FIRST_PREFIX) {
+            return aggregate_named(kept).map(|function| Self::Kept {
+                function,
+                last: false,
+            });
+        }
+        if let Some(kept) = text.strip_prefix(KEPT_LAST_PREFIX) {
+            return aggregate_named(kept).map(|function| Self::Kept {
+                function,
+                last: true,
+            });
+        }
+        Self::named(text)
     }
 
     fn encoded(self) -> String {
         match self {
             Self::Aggregate(function) => format!("{AGGREGATE_PREFIX}{}", function.name()),
+            Self::Kept {
+                function,
+                last: false,
+            } => format!("{KEPT_FIRST_PREFIX}{}", function.name()),
+            Self::Kept {
+                function,
+                last: true,
+            } => format!("{KEPT_LAST_PREFIX}{}", function.name()),
             other => other.name().to_owned(),
         }
     }
@@ -138,7 +166,7 @@ impl WindowFunction {
             Self::FirstValue => "first_value",
             Self::LastValue => "last_value",
             Self::NthValue => "nth_value",
-            Self::Aggregate(function) => function.name(),
+            Self::Aggregate(function) | Self::Kept { function, .. } => function.name(),
         }
     }
 
@@ -151,6 +179,7 @@ impl WindowFunction {
             Self::Lag | Self::Lead => (1..=3).contains(&count),
             Self::NthValue => count == 2,
             Self::Aggregate(_) => count <= 2,
+            Self::Kept { .. } => count <= 1,
         }
     }
 }
@@ -800,7 +829,7 @@ impl WindowSpec {
             | WindowFunction::FirstValue
             | WindowFunction::LastValue
             | WindowFunction::NthValue => self.argument_type(key_types),
-            WindowFunction::Aggregate(function) => {
+            WindowFunction::Aggregate(function) | WindowFunction::Kept { function, .. } => {
                 crate::aggregate::window_result_type(function, self.argument_type(key_types))
             }
         }
@@ -903,6 +932,31 @@ fn first_where(range: Range<usize>, holds: impl Fn(usize) -> bool) -> usize {
     low
 }
 
+fn non_null_neighbour(
+    valued: &[usize],
+    position: usize,
+    offset: i64,
+    backward: bool,
+) -> Option<usize> {
+    let wanted = usize::try_from(offset).ok()?;
+    if wanted == 0 {
+        return Some(position);
+    }
+    if backward {
+        let before = valued.partition_point(|&candidate| candidate < position);
+        before
+            .checked_sub(wanted)
+            .and_then(|at| valued.get(at))
+            .copied()
+    } else {
+        let through = valued.partition_point(|&candidate| candidate <= position);
+        through
+            .checked_add(wanted - 1)
+            .and_then(|at| valued.get(at))
+            .copied()
+    }
+}
+
 fn is_overflow(error: &SqlError) -> bool {
     error.state() == SqlState::NUMERIC_VALUE_OUT_OF_RANGE
         || error.state() == SqlState::DATETIME_FIELD_OVERFLOW
@@ -917,7 +971,9 @@ pub(crate) fn evaluate(
     let offsets = Offsets::of(spec)?;
     let sql_type = spec.result_type(key_types);
     let argument_type = spec.argument_type(key_types);
-    if let WindowFunction::Aggregate(function) = spec.function {
+    if let WindowFunction::Aggregate(function) | WindowFunction::Kept { function, .. } =
+        spec.function
+    {
         crate::aggregate::check_window_argument(function, argument_type)
             .map_err(|error| error.at_if_unplaced(spec.position))?;
     }
@@ -1116,6 +1172,34 @@ impl<'k> Partition<'k> {
             | WindowFunction::Aggregate(_) => {
                 self.framed(spec, offsets, argument_type, values)?;
             }
+            WindowFunction::Kept { function, last } => {
+                self.kept(spec, function, last, argument_type, values)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn kept(
+        &self,
+        spec: &WindowSpec,
+        function: AggregateFunction,
+        last: bool,
+        argument_type: Option<SqlType>,
+        values: &mut [Value],
+    ) -> SqlResult<()> {
+        let ranked = if last {
+            self.groups.last()
+        } else {
+            self.groups.first()
+        };
+        let (start, end) = ranked.copied().unwrap_or((0, 0));
+        let mut aggregate = WindowAggregate::new(function, argument_type, spec.position);
+        for position in start..end {
+            self.feed(&mut aggregate, spec, position)?;
+        }
+        let value = aggregate.current()?;
+        for position in 0..self.len() {
+            self.store(values, position, value.clone());
         }
         Ok(())
     }
@@ -1162,6 +1246,7 @@ impl<'k> Partition<'k> {
     ) -> SqlResult<()> {
         let backward = spec.function == WindowFunction::Lag;
         let count = self.len();
+        let valued = spec.treatment.ignore_nulls.then(|| self.valued_positions());
         for position in 0..count {
             let offset = if spec.arguments >= 2 {
                 self.value(position, 1)
@@ -1181,8 +1266,8 @@ impl<'k> Partition<'k> {
                     ),
                 ));
             };
-            let found = if spec.treatment.ignore_nulls {
-                self.non_null_neighbour(position, offset, backward)
+            let found = if let Some(valued) = &valued {
+                non_null_neighbour(valued, position, offset, backward)
             } else {
                 let at = position as i64;
                 let target = if backward {
@@ -1212,17 +1297,14 @@ impl<'k> Partition<'k> {
         Ok(())
     }
 
-    fn non_null_neighbour(&self, position: usize, offset: i64, backward: bool) -> Option<usize> {
-        let wanted = usize::try_from(offset).ok()?;
-        if wanted == 0 {
-            return Some(position);
-        }
-        let has_value = |candidate: &usize| !self.value(*candidate, 0).is_null();
-        if backward {
-            (0..position).rev().filter(has_value).nth(wanted - 1)
-        } else {
-            (position + 1..self.len()).filter(has_value).nth(wanted - 1)
-        }
+    fn valued_positions(&self) -> Vec<usize> {
+        (0..self.len())
+            .filter(|&position| {
+                self.row(position)
+                    .first()
+                    .is_some_and(|value| !value.is_null())
+            })
+            .collect()
     }
 
     fn excluded(&self, exclusion: FrameExclusion, position: usize, candidate: usize) -> bool {
@@ -1418,52 +1500,69 @@ impl<'k> Partition<'k> {
             }
             return Ok(());
         }
+        let valued = spec.treatment.ignore_nulls.then(|| self.valued_positions());
         for position in 0..count {
             let (start, end) = self.frame_range(frame, offsets, direction, position)?;
-            let ignore_nulls = spec.treatment.ignore_nulls;
-            let mut rows = (start..end).filter(|&candidate| {
-                !self.excluded(frame.exclusion, position, candidate)
-                    && !(ignore_nulls && self.value(candidate, 0).is_null())
-            });
-            let chosen = match spec.function {
-                WindowFunction::FirstValue => rows.next(),
-                WindowFunction::LastValue => rows.next_back(),
-                _ => {
-                    let wanted = self.value(position, 1);
-                    if wanted.is_null() {
-                        continue;
-                    }
-                    match wanted.as_integer() {
-                        Some(number) if number > 0 => {
-                            let skipped = usize::try_from(number - 1).unwrap_or(usize::MAX);
-                            if spec.treatment.from_last {
-                                rows.rev().nth(skipped)
-                            } else {
-                                rows.nth(skipped)
-                            }
-                        }
-                        Some(_) => {
-                            return Err(SqlError::new(
-                                SqlState::INVALID_ARGUMENT_FOR_NTH_VALUE,
-                                "argument of nth_value must be greater than zero",
-                            ));
-                        }
-                        None => {
-                            return Err(SqlError::new(
-                                SqlState::UNDEFINED_FUNCTION,
-                                format!(
-                                    "function nth_value(unknown, {}) does not exist",
-                                    wanted.type_name()
-                                ),
-                            ));
-                        }
-                    }
+            let kept = |candidate: &usize| !self.excluded(frame.exclusion, position, *candidate);
+            let chosen = match &valued {
+                Some(valued) => {
+                    let low = valued.partition_point(|&candidate| candidate < start);
+                    let high = valued.partition_point(|&candidate| candidate < end);
+                    let rows = valued.get(low..high).unwrap_or(&[]).iter().copied();
+                    self.chosen_row(spec, position, rows.filter(kept))?
                 }
+                None => self.chosen_row(spec, position, (start..end).filter(kept))?,
+            };
+            let Some(chosen) = chosen else {
+                continue;
             };
             let value = chosen.map_or(Value::Null, |candidate| self.value(candidate, 0));
             self.store(values, position, value);
         }
         Ok(())
+    }
+
+    fn chosen_row(
+        &self,
+        spec: &WindowSpec,
+        position: usize,
+        mut rows: impl DoubleEndedIterator<Item = usize>,
+    ) -> SqlResult<Option<Option<usize>>> {
+        Ok(Some(match spec.function {
+            WindowFunction::FirstValue => rows.next(),
+            WindowFunction::LastValue => rows.next_back(),
+            _ => {
+                let wanted = self.value(position, 1);
+                if wanted.is_null() {
+                    return Ok(None);
+                }
+                match wanted.as_integer() {
+                    Some(number) if number > 0 => {
+                        let skipped = usize::try_from(number - 1).unwrap_or(usize::MAX);
+                        if spec.treatment.from_last {
+                            rows.rev().nth(skipped)
+                        } else {
+                            rows.nth(skipped)
+                        }
+                    }
+                    Some(_) => {
+                        return Err(SqlError::new(
+                            SqlState::INVALID_ARGUMENT_FOR_NTH_VALUE,
+                            "argument of nth_value must be greater than zero",
+                        ));
+                    }
+                    None => {
+                        return Err(SqlError::new(
+                            SqlState::UNDEFINED_FUNCTION,
+                            format!(
+                                "function nth_value(unknown, {}) does not exist",
+                                wanted.type_name()
+                            ),
+                        ));
+                    }
+                }
+            }
+        }))
     }
 }
 
@@ -1590,6 +1689,44 @@ mod tests {
             values(&ignoring(WindowFunction::LastValue), &rows),
             integers([None, Some(10), Some(10), Some(30)])
         );
+    }
+
+    #[test]
+    fn ignore_nulls_finds_neighbours_in_a_long_sparse_partition_quickly() {
+        let count = 50_000usize;
+        let rows: Vec<Vec<Value>> = (0..count)
+            .map(|at| {
+                let value = if at == 1 || at == count - 2 {
+                    Value::Integer(i32::try_from(at).unwrap_or(0))
+                } else {
+                    Value::Null
+                };
+                vec![value, Value::Integer(i32::try_from(at).unwrap_or(0))]
+            })
+            .collect();
+        let ignoring = |function, arguments| {
+            let mut ignoring = spec(function, arguments);
+            ignoring.partition = 0;
+            ignoring.treatment.ignore_nulls = true;
+            ignoring
+        };
+        let last = values(&ignoring(WindowFunction::LastValue, 1), &rows);
+        assert_eq!(last[0], Value::Null);
+        assert_eq!(last[2], Value::Integer(1));
+        assert_eq!(last[count - 1], Value::Integer(49_998));
+        let lag = values(&ignoring(WindowFunction::Lag, 1), &rows);
+        assert_eq!(lag[1], Value::Null);
+        assert_eq!(lag[count - 2], Value::Integer(1));
+        assert_eq!(lag[count - 1], Value::Integer(49_998));
+        let mut lead_two = ignoring(WindowFunction::Lead, 2);
+        lead_two.arguments = 2;
+        let rows_with_offset: Vec<Vec<Value>> = rows
+            .iter()
+            .map(|row| vec![row[0].clone(), Value::Integer(2), row[1].clone()])
+            .collect();
+        let lead = values(&lead_two, &rows_with_offset);
+        assert_eq!(lead[0], Value::Integer(49_998));
+        assert_eq!(lead[1], Value::Null);
     }
 
     #[test]

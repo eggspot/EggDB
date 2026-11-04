@@ -231,6 +231,44 @@ fn keep_dense_rank_first_and_last_aggregate_the_rows_that_rank_at_either_end() {
 }
 
 #[test]
+fn keep_over_a_window_ranks_each_partition_once_in_linear_memory() {
+    let store = MemoryStore::default();
+    let mut session = employees(&store);
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT last_name, \
+             COUNT(*) KEEP (DENSE_RANK LAST ORDER BY commission_pct) OVER () \"Untied\", \
+             SUM(salary) KEEP (DENSE_RANK FIRST ORDER BY commission_pct DESC) \
+             OVER (PARTITION BY department_id) \"Top\" \
+             FROM employees WHERE department_id IN (60, 80) ORDER BY employee_id"
+        ),
+        [
+            "Hunold|3|19800",
+            "Ernst|3|19800",
+            "Austin|3|19800",
+            "Russell|3|14000",
+            "Partners|3|14000",
+            "Errazuriz|3|14000"
+        ]
+    );
+    run(&mut session, "CREATE TABLE big (n NUMBER)");
+    run(
+        &mut session,
+        "INSERT INTO big SELECT LEVEL FROM dual CONNECT BY LEVEL <= 20000",
+    );
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT MIN(m), MAX(m), COUNT(*) FROM (SELECT \
+             MAX(n) KEEP (DENSE_RANK FIRST ORDER BY MOD(n, 1000)) OVER (PARTITION BY MOD(n, 2)) m \
+             FROM big)"
+        ),
+        ["19001|20000|20000"]
+    );
+}
+
+#[test]
 fn window_functions_need_oracles_window_specification() {
     let store = MemoryStore::default();
     let mut session = employees(&store);

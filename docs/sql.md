@@ -4610,7 +4610,7 @@ And more, not in the suite yet:
   queries.
 
 ## Known differences from Oracle
-The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 662 cases from Oracle's SQL
+The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 773 cases from Oracle's SQL
 Language Reference and PL/SQL Language Reference, never Oracle's software) marks these as differing until they are fixed:
 - `EXPLAIN PLAN` and `DBMS_XPLAN.DISPLAY` give no costs, cardinalities or predicates and only
   the `Id`, `Operation` and `Name` columns (D312); bitmap, function-based and reverse-key
