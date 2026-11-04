@@ -60,7 +60,7 @@ fn a_table_without_generated_columns_keeps_its_older_version() {
 }
 
 #[test]
-fn an_older_reader_refuses_a_version_14_record_by_its_version() {
+fn a_record_of_the_next_version_is_refused_by_its_version() {
     let mut encoded = generated_table().encode();
     encoded[0] = GENERATED_COLUMNS_FORMAT_VERSION + 1;
     let error = TableDefinition::decode("t", &encoded).unwrap_err();
@@ -136,4 +136,34 @@ fn every_changed_byte_of_a_version_14_record_is_an_error_or_a_clean_decode() {
             );
         }
     }
+}
+
+const PINNED_VERSION_14: &[u8] = &[
+    14, 4, 0, 0, 0, 4, 1, 97, 2, 0, 0, 1, 98, 2, 0, 0, 5, 116, 111, 116, 97, 108, 2, 0, 0, 7, 100,
+    111, 117, 98, 108, 101, 100, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 1, 0, 5, 97, 32, 43, 32,
+    98, 3, 0, 1, 7, 96, 97, 96, 32, 42, 32, 50,
+];
+
+const PINNED_WITHOUT_GENERATED: &[u8] = &[
+    1, 4, 0, 0, 0, 4, 1, 97, 2, 0, 0, 1, 98, 2, 0, 0, 5, 116, 111, 116, 97, 108, 2, 0, 0, 7, 100,
+    111, 117, 98, 108, 101, 100, 2, 0, 0, 0,
+];
+
+#[test]
+fn a_pinned_version_14_record_decodes_and_encodes_byte_for_byte() {
+    let table = generated_table();
+    assert_eq!(table.encode(), PINNED_VERSION_14);
+    assert_eq!(TableDefinition::decode("t", PINNED_VERSION_14), Ok(table));
+}
+
+#[test]
+fn a_table_without_generated_columns_keeps_its_pinned_older_bytes() {
+    let mut table = generated_table();
+    table.generated.clear();
+    assert_eq!(table.encode(), PINNED_WITHOUT_GENERATED);
+    assert!(PINNED_WITHOUT_GENERATED[0] < GENERATED_COLUMNS_FORMAT_VERSION);
+    assert_eq!(
+        TableDefinition::decode("t", PINNED_WITHOUT_GENERATED),
+        Ok(table)
+    );
 }

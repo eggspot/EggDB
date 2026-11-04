@@ -3,9 +3,29 @@ use crate::dialect::Dialect;
 use crate::encoding::{GeneratedColumn, TableDefinition};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope, Source};
-use crate::lexer::tokenize_in;
+use crate::lexer::{TokenKind, tokenize_in};
 use crate::parser::Parser;
 use crate::types::{SqlType, Value};
+
+const SQLSERVER_SESSION_VARIABLES: &[&str] = &[
+    "@@spid",
+    "@@trancount",
+    "@@error",
+    "@@nestlevel",
+    "@@procid",
+    "@@fetch_status",
+    "@@cursor_rows",
+];
+const SQLSERVER_SESSION_FUNCTIONS: &[&str] = &[
+    "error_number",
+    "error_severity",
+    "error_state",
+    "error_line",
+    "error_message",
+    "error_procedure",
+    "xact_state",
+    "cursor_status",
+];
 
 impl TableDefinition {
     pub(crate) fn generation_of(&self, column: usize) -> Option<&GeneratedColumn> {
@@ -197,7 +217,8 @@ fn check_expression(
         return Err(disallowed(table, column, dialect, Disallowed::Aggregate).at(position));
     }
     let changing = crate::partitions::any_part(expr, &crate::partitions::changes_between_calls)
-        || crate::partitions::any_part(expr, &sqlserver_changes_between_calls);
+        || crate::partitions::any_part(expr, &sqlserver_changes_between_calls)
+        || (dialect == Dialect::SqlServer && sqlserver_text_reads_session_state(&spec.text));
     if changing && dialect == Dialect::SqlServer && !spec.stored {
         return Err(computed_on_read_refused(table, column).at(position));
     }
@@ -313,16 +334,39 @@ fn sqlserver_changes_between_calls(expr: &Expr) -> bool {
     )
 }
 
+fn sqlserver_text_reads_session_state(text: &str) -> bool {
+    let Ok(tokens) = tokenize_in(text, Dialect::SqlServer) else {
+        return true;
+    };
+    tokens
+        .iter()
+        .enumerate()
+        .any(|(at, token)| match &token.kind {
+            TokenKind::Variable(name) => {
+                SQLSERVER_SESSION_VARIABLES.contains(&name.to_ascii_lowercase().as_str())
+            }
+            TokenKind::Word(word) => {
+                SQLSERVER_SESSION_FUNCTIONS.contains(&word.to_ascii_lowercase().as_str())
+                    && tokens
+                        .get(at + 1)
+                        .is_some_and(|next| next.kind == TokenKind::LeftParen)
+            }
+            _ => false,
+        })
+}
+
 fn computed_on_read_refused(table: &TableDefinition, column: usize) -> SqlError {
     SqlError::new(
         SqlState::FEATURE_NOT_SUPPORTED,
         format!(
-            "computed column '{}' in table '{}' uses a function whose value changes between reads, and EggDB keeps a computed column's value from when the row was written",
+            "computed column '{}' of table '{}', which is not PERSISTED, over a function whose value changes between reads",
             column_name(table, column),
             table_name(table)
         ),
     )
-    .with_hint("Compute the value in the query or in a view, as in SELECT DATEDIFF(year, dob, GETDATE()) AS age.")
+    .with_hint(
+        "EggDB would keep the column at its value from when the row was written. Compute the value in the query or in a view, as in SELECT DATEDIFF(year, dob, GETDATE()) AS age.",
+    )
 }
 
 enum Disallowed {

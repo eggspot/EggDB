@@ -54,6 +54,131 @@ const CHANGING_FUNCTIONS: &[&str] = &[
     "total_changes",
     crate::routines::ROUTINE_CALL,
 ];
+const IMMUTABLE_POSTGRESQL_FUNCTIONS: &[&str] = &[
+    "abs",
+    "ceil",
+    "ceiling",
+    "floor",
+    "round",
+    "trunc",
+    "sign",
+    "mod",
+    "div",
+    "power",
+    "pow",
+    "sqrt",
+    "cbrt",
+    "exp",
+    "ln",
+    "log",
+    "log10",
+    "degrees",
+    "radians",
+    "pi",
+    "gcd",
+    "lcm",
+    "width_bucket",
+    "factorial",
+    "scale",
+    "min_scale",
+    "trim_scale",
+    "sin",
+    "cos",
+    "tan",
+    "cot",
+    "asin",
+    "acos",
+    "atan",
+    "atan2",
+    "sind",
+    "cosd",
+    "tand",
+    "cotd",
+    "asind",
+    "acosd",
+    "atand",
+    "atan2d",
+    "sinh",
+    "cosh",
+    "tanh",
+    "asinh",
+    "acosh",
+    "atanh",
+    "coalesce",
+    "nullif",
+    "greatest",
+    "least",
+    "lower",
+    "upper",
+    "initcap",
+    "length",
+    "char_length",
+    "character_length",
+    "octet_length",
+    "bit_length",
+    "substr",
+    "substring",
+    "left",
+    "right",
+    "lpad",
+    "rpad",
+    "ltrim",
+    "rtrim",
+    "btrim",
+    "replace",
+    "reverse",
+    "repeat",
+    "split_part",
+    "strpos",
+    "position",
+    "translate",
+    "overlay",
+    "starts_with",
+    "ascii",
+    "chr",
+    "md5",
+    "sha224",
+    "sha256",
+    "sha384",
+    "sha512",
+    "to_hex",
+    "encode",
+    "decode",
+    "quote_ident",
+    "regexp_replace",
+    "regexp_substr",
+    "regexp_count",
+    "regexp_instr",
+    "regexp_like",
+    "make_date",
+    "make_time",
+    "make_timestamp",
+    "make_interval",
+    "justify_days",
+    "justify_hours",
+    "justify_interval",
+    "json_extract_path",
+    "json_extract_path_text",
+    "jsonb_extract_path",
+    "jsonb_extract_path_text",
+    "json_typeof",
+    "jsonb_typeof",
+    "json_array_length",
+    "jsonb_array_length",
+    "json_strip_nulls",
+    "jsonb_strip_nulls",
+    "array_length",
+    "array_lower",
+    "array_upper",
+    "array_ndims",
+    "cardinality",
+    "array_cat",
+    "array_append",
+    "array_prepend",
+    "array_remove",
+    "array_replace",
+    "array_position",
+];
 const MAX_DEPTH: usize = 32;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0100_0000_01b3;
@@ -223,20 +348,85 @@ pub(crate) fn catalog(
     tables: &mut TableCache,
 ) -> SqlResult<Arc<PartitionCatalog>> {
     let version = reader.committed_version();
-    let cache = &mut tables.partitions;
-    if let Some(catalog) = &cache.catalog
+    if let Some(catalog) = &tables.partitions.catalog
         && version.is_some()
-        && cache.version == version
+        && tables.partitions.version == version
     {
         return Ok(Arc::clone(catalog));
     }
-    let loaded = Arc::new(load(reader)?);
-    cache.version = version;
-    cache.catalog = Some(Arc::clone(&loaded));
+    let mut records = linked_records(reader)?;
+    forget_stale_links(&mut records, &mut |table| {
+        Ok(tables
+            .table(reader, table)?
+            .map(|definition| index_ids(&definition)))
+    })?;
+    let loaded = Arc::new(PartitionCatalog { records });
+    tables.partitions.version = version;
+    tables.partitions.catalog = Some(Arc::clone(&loaded));
     Ok(loaded)
 }
 
 pub(crate) fn load(reader: &dyn KeyValueRead) -> SqlResult<PartitionCatalog> {
+    let mut records = linked_records(reader)?;
+    forget_stale_links(&mut records, &mut |table| {
+        Ok(stored_definition(reader, table)?.map(|definition| index_ids(&definition)))
+    })?;
+    Ok(PartitionCatalog { records })
+}
+
+fn index_ids(definition: &TableDefinition) -> Vec<u32> {
+    definition.indexes.iter().map(|index| index.id).collect()
+}
+
+fn linked_records(reader: &dyn KeyValueRead) -> SqlResult<BTreeMap<String, PartitionRecord>> {
+    let (mut records, before_index_links) = decoded_records(reader)?;
+    for table in before_index_links {
+        if let Some(record) = records.get_mut(&table) {
+            link_unique_indexes_of_older_files(reader, &table, record)?;
+        }
+    }
+    Ok(records)
+}
+
+type IndexIds<'a> = dyn FnMut(&str) -> SqlResult<Option<Vec<u32>>> + 'a;
+
+fn forget_stale_links(
+    records: &mut BTreeMap<String, PartitionRecord>,
+    index_ids: &mut IndexIds<'_>,
+) -> SqlResult<()> {
+    let linked: Vec<(String, String)> = records
+        .iter()
+        .filter(|(_, record)| !record.index_links.is_empty())
+        .filter_map(|(table, record)| {
+            let (parent, _) = record.parent.as_ref()?;
+            Some((table.clone(), parent.clone()))
+        })
+        .collect();
+    let mut known: BTreeMap<String, Option<Vec<u32>>> = BTreeMap::new();
+    for (table, parent) in linked {
+        for name in [&table, &parent] {
+            if !known.contains_key(name) {
+                known.insert(name.clone(), index_ids(name)?);
+            }
+        }
+        let has = |name: &str, id: u32| {
+            known
+                .get(name)
+                .and_then(Option::as_ref)
+                .is_none_or(|ids| ids.contains(&id))
+        };
+        if let Some(record) = records.get_mut(&table) {
+            record
+                .index_links
+                .retain(|link| has(&table, link.index) && has(&parent, link.parent_index));
+        }
+    }
+    Ok(())
+}
+
+fn decoded_records(
+    reader: &dyn KeyValueRead,
+) -> SqlResult<(BTreeMap<String, PartitionRecord>, Vec<String>)> {
     let prefix = partitions_prefix();
     let mut records = BTreeMap::new();
     let mut failure = None;
@@ -266,15 +456,60 @@ pub(crate) fn load(reader: &dyn KeyValueRead) -> SqlResult<PartitionCatalog> {
             }
         },
     )?;
-    if let Some(error) = failure {
-        return Err(error);
+    match failure {
+        Some(error) => Err(error),
+        None => Ok((records, before_index_links)),
     }
-    for table in before_index_links {
-        if let Some(record) = records.get_mut(&table) {
-            link_unique_indexes_of_older_files(reader, &table, record)?;
+}
+
+pub(crate) fn linked_index_ids(reader: &dyn KeyValueRead, table: &str) -> SqlResult<Vec<u32>> {
+    let (records, _) = decoded_records(reader)?;
+    let mut ids = Vec::new();
+    for (name, record) in &records {
+        if name == table {
+            ids.extend(record.index_links.iter().map(|link| link.index));
+        }
+        if record
+            .parent
+            .as_ref()
+            .is_some_and(|(parent, _)| parent == table)
+        {
+            ids.extend(record.index_links.iter().map(|link| link.parent_index));
         }
     }
-    Ok(PartitionCatalog { records })
+    Ok(ids)
+}
+
+pub(crate) fn forget_index_links(
+    writer: &mut dyn KeyValueWrite,
+    table: &str,
+    dropped: &[u32],
+) -> SqlResult<()> {
+    if dropped.is_empty() {
+        return Ok(());
+    }
+    let (records, _) = decoded_records(&*writer)?;
+    for (name, mut record) in records {
+        let before = record.index_links.len();
+        if name == table {
+            record
+                .index_links
+                .retain(|link| !dropped.contains(&link.index));
+        }
+        if record
+            .parent
+            .as_ref()
+            .is_some_and(|(parent, _)| parent == table)
+        {
+            record
+                .index_links
+                .retain(|link| !dropped.contains(&link.parent_index));
+        }
+        if record.index_links.len() != before {
+            save(writer, &name, &record)?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn stored(reader: &dyn KeyValueRead, table: &str) -> SqlResult<PartitionRecord> {
@@ -502,34 +737,82 @@ pub(crate) fn changes_between_calls(expr: &Expr) -> bool {
     }
 }
 
-fn depends_on_postgresql_settings(expr: &Expr, table: &TableDefinition) -> bool {
+fn not_known_immutable_in_postgresql(expr: &Expr, table: &TableDefinition) -> bool {
     let type_of = |part: &Expr| crate::typing::static_type(part, table_scope(table));
     let reads_row =
         |part: &Expr| !matches!(part.kind, ExprKind::Literal(_) | ExprKind::Constant { .. });
     match &expr.kind {
+        ExprKind::Literal(_)
+        | ExprKind::Constant { .. }
+        | ExprKind::Column { .. }
+        | ExprKind::Unary(..)
+        | ExprKind::And(_)
+        | ExprKind::Or(_)
+        | ExprKind::IsNull { .. }
+        | ExprKind::IsTruth { .. }
+        | ExprKind::IsDistinctFrom { .. }
+        | ExprKind::Between { .. }
+        | ExprKind::InList { .. }
+        | ExprKind::Like { .. }
+        | ExprKind::Case { .. } => false,
         ExprKind::Cast {
             expr: from,
             sql_type,
         } => {
-            reads_row(from)
-                && type_of(from).is_some_and(|from| cast_reads_settings(from, *sql_type))
+            reads_row(from) && type_of(from).is_none_or(|from| cast_reads_settings(from, *sql_type))
         }
         ExprKind::Function { name, arguments } => {
-            let types: Vec<Option<SqlType>> = arguments.iter().map(type_of).collect();
-            function_reads_settings(&name.to_ascii_lowercase(), &types)
+            let types: Vec<Option<SqlType>> = arguments
+                .iter()
+                .map(|argument| {
+                    if reads_row(argument) {
+                        type_of(argument)
+                    } else {
+                        Some(SqlType::Text)
+                    }
+                })
+                .collect();
+            let name = name.to_ascii_lowercase();
+            let name = name.strip_prefix("pg_catalog.").unwrap_or(&name);
+            !function_is_immutable(name, &types)
         }
         ExprKind::Binary(operator, left, right) => {
-            matches!(
-                operator,
-                BinaryOperator::Add
-                    | BinaryOperator::Subtract
-                    | BinaryOperator::Equal
-                    | BinaryOperator::NotEqual
-                    | BinaryOperator::Less
-                    | BinaryOperator::LessOrEqual
-                    | BinaryOperator::Greater
-                    | BinaryOperator::GreaterOrEqual
-            ) && zone_meets_local_time(type_of(left), type_of(right))
+            binary_reads_settings(*operator, type_of(left), type_of(right))
+        }
+        ExprKind::SqliteFunction { .. }
+        | ExprKind::OracleFunction { .. }
+        | ExprKind::SqlServerFunction { .. }
+        | ExprKind::Aggregate { .. }
+        | ExprKind::Slot { .. }
+        | ExprKind::SessionValue { .. }
+        | ExprKind::CurrentSetting { .. }
+        | ExprKind::Subquery(_)
+        | ExprKind::OuterColumn { .. } => true,
+    }
+}
+
+fn binary_reads_settings(
+    operator: BinaryOperator,
+    left: Option<SqlType>,
+    right: Option<SqlType>,
+) -> bool {
+    match operator {
+        BinaryOperator::Add
+        | BinaryOperator::Subtract
+        | BinaryOperator::Equal
+        | BinaryOperator::NotEqual
+        | BinaryOperator::Less
+        | BinaryOperator::LessOrEqual
+        | BinaryOperator::Greater
+        | BinaryOperator::GreaterOrEqual => zone_meets_local_time(left, right),
+        BinaryOperator::Concat => {
+            let textual = |side: Option<SqlType>| side.is_some_and(is_textual);
+            let other = |side: Option<SqlType>| {
+                side.is_none_or(|sql_type| {
+                    !is_textual(sql_type) && !matches!(sql_type, SqlType::Array(_))
+                })
+            };
+            (textual(left) && other(right)) || (textual(right) && other(left))
         }
         _ => false,
     }
@@ -574,18 +857,21 @@ fn cast_reads_settings(from: SqlType, to: SqlType) -> bool {
     zone_to_local || local_to_zone || datetime_to_text || text_to_datetime || text_to_catalog
 }
 
-fn function_reads_settings(name: &str, arguments: &[Option<SqlType>]) -> bool {
+fn function_is_immutable(name: &str, arguments: &[Option<SqlType>]) -> bool {
     let has_zoned = arguments
         .iter()
-        .flatten()
-        .any(|argument| is_zoned(*argument));
+        .any(|argument| argument.is_none_or(is_zoned));
+    let all_textual = arguments
+        .iter()
+        .all(|argument| argument.is_some_and(is_textual));
     match name {
-        "to_char" | "to_date" => true,
-        "to_timestamp" => arguments.len() == 2,
-        "age" => arguments.len() == 1 || has_zoned,
-        "date_trunc" => has_zoned && arguments.len() < 3,
-        "extract" | "date_part" => has_zoned,
-        _ => false,
+        "date_trunc" => !has_zoned || arguments.len() == 3,
+        "extract" | "date_part" => !has_zoned,
+        "age" => arguments.len() == 2 && !has_zoned,
+        "to_timestamp" => arguments.len() == 1,
+        "timezone" => arguments.len() == 2,
+        "quote_literal" | "quote_nullable" => all_textual,
+        _ => IMMUTABLE_POSTGRESQL_FUNCTIONS.contains(&name),
     }
 }
 
@@ -618,7 +904,7 @@ pub(crate) fn check_key_expression(
     crate::eval::reject_aggregates(expr, "partition key expressions")?;
     if any_part(expr, &changes_between_calls)
         || (dialect == Dialect::PostgreSql
-            && any_part(expr, &|part| depends_on_postgresql_settings(part, table)))
+            && any_part(expr, &|part| not_known_immutable_in_postgresql(part, table)))
     {
         return Err(SqlError::new(
             SqlState::INVALID_OBJECT_DEFINITION,

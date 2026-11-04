@@ -158,7 +158,7 @@ impl Parser<'_> {
             let expr = self.expression()?;
             let end = self.previous_end();
             self.expect(&TokenKind::RightParen)?;
-            let text = self.text.get(start..end).unwrap_or("").to_owned();
+            let text = self.text_without_column_qualifiers(&expr, start, end);
             return Ok(key_part(expr, text, position));
         }
         let column = self.name()?;
@@ -179,8 +179,54 @@ impl Parser<'_> {
             self.expression()?
         };
         let end = self.previous_end();
-        let text = self.text.get(position..end).unwrap_or("").to_owned();
+        let text = self.text_without_column_qualifiers(&expr, position, end);
         Ok(key_part(expr, text, position))
+    }
+
+    pub(super) fn text_without_column_qualifiers(
+        &self,
+        expr: &crate::ast::Expr,
+        start: usize,
+        end: usize,
+    ) -> String {
+        let mut qualified = Vec::new();
+        qualified_column_starts(expr, &mut qualified);
+        qualified.sort_unstable();
+        qualified.dedup();
+        let mut out = String::with_capacity(end.saturating_sub(start));
+        let mut at = start;
+        for begin in qualified {
+            if begin < at || begin >= end {
+                continue;
+            }
+            let Some(column_start) = self.column_name_start(begin, end) else {
+                continue;
+            };
+            out.push_str(self.text.get(at..begin).unwrap_or(""));
+            at = column_start;
+        }
+        out.push_str(self.text.get(at..end).unwrap_or(""));
+        out
+    }
+
+    fn column_name_start(&self, begin: usize, end: usize) -> Option<usize> {
+        let is_name = |at: usize| {
+            matches!(
+                self.tokens.get(at).map(|token| &token.kind),
+                Some(TokenKind::Word(_) | TokenKind::QuotedIdentifier(_))
+            )
+        };
+        let first = self.tokens.iter().position(|token| token.start == begin)?;
+        let mut last = first;
+        for _ in 0..2 {
+            if self.tokens.get(last + 1).map(|token| &token.kind) == Some(&TokenKind::Dot)
+                && is_name(last + 2)
+            {
+                last += 2;
+            }
+        }
+        let column = self.tokens.get(last)?;
+        (last > first && is_name(first) && column.end <= end).then_some(column.start)
     }
 
     fn at_partition_key_end(&self) -> bool {
@@ -318,6 +364,18 @@ impl Parser<'_> {
         }
         self.at += 1;
         Ok(number)
+    }
+}
+
+fn qualified_column_starts(expr: &crate::ast::Expr, found: &mut Vec<usize>) {
+    if let ExprKind::Column {
+        qualifier: Some(_), ..
+    } = &expr.kind
+    {
+        found.push(expr.position);
+    }
+    for child in crate::eval::children(expr) {
+        qualified_column_starts(child, found);
     }
 }
 

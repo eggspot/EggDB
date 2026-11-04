@@ -541,3 +541,69 @@ fn postgresql_refuses_user_functions_in_a_generation_expression_by_their_volatil
     );
     assert_eq!(error.message(), "generation expression is not immutable");
 }
+
+#[test]
+fn a_table_qualified_column_in_a_generation_expression_survives_a_table_rename() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE h (a int, b int GENERATED ALWAYS AS (h.a + 1) STORED)",
+    );
+    last(&mut session, "ALTER TABLE h RENAME TO h2");
+    last(&mut session, "INSERT INTO h2 (a) VALUES (1)");
+    last(&mut session, "UPDATE h2 SET a = 5");
+    assert_eq!(
+        last(&mut session, "SELECT a, b FROM h2"),
+        "a|b\n5|6\nSELECT 1"
+    );
+    let error = fails(
+        &mut session,
+        "CREATE TABLE k (a int, b int GENERATED ALWAYS AS (other.a + 1) STORED)",
+    );
+    assert_eq!(error.state().code(), "42P01", "{error}");
+}
+
+#[test]
+fn sql_server_session_values_in_a_computed_column_that_is_not_persisted_are_refused() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    for create in [
+        "CREATE TABLE a1 (id int, c AS @@TRANCOUNT)",
+        "CREATE TABLE a2 (id int, c AS @@SPID)",
+        "CREATE TABLE a3 (id int, c AS @@ERROR)",
+        "CREATE TABLE a4 (id int, c AS ERROR_NUMBER())",
+    ] {
+        let error = fails(&mut session, create);
+        assert_eq!(error.state().code(), "0A000", "{create}");
+        assert_eq!(
+            error.message(),
+            format!(
+                "computed column 'c' of table '{}', which is not PERSISTED, over a function \
+                 whose value changes between reads is not supported in this version of EggDB.",
+                &create[13..15]
+            )
+        );
+    }
+    last(
+        &mut session,
+        "CREATE TABLE a5 (id int, c AS (id + @@MAX_PRECISION))",
+    );
+}
+
+#[test]
+fn renaming_a_column_a_sql_server_computed_column_reads_to_a_mixed_case_name_is_refused() {
+    let store = MemoryStore::default();
+    let mut sqlserver = Session::with_dialect(&store, Dialect::SqlServer);
+    last(
+        &mut sqlserver,
+        "CREATE TABLE t (a int, b AS (a * 2) PERSISTED)",
+    );
+    let mut session = Session::new(&store);
+    let error = fails(&mut session, "ALTER TABLE t RENAME COLUMN a TO \"Foo\"");
+    assert_eq!(error.state().code(), "0A000", "{error}");
+    assert!(error.message().contains("computed column \"b\""), "{error}");
+    last(&mut session, "ALTER TABLE t RENAME COLUMN a TO foo");
+    last(&mut sqlserver, "INSERT INTO t (foo) VALUES (4)");
+    assert_eq!(last(&mut sqlserver, "SELECT b FROM t"), "b\n8\nSELECT 1");
+}

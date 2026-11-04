@@ -553,6 +553,26 @@ fn other_tables(
         .collect())
 }
 
+fn past_linked_ids(
+    reader: &dyn KeyValueRead,
+    definition: &mut TableDefinition,
+    position: usize,
+) -> SqlResult<()> {
+    let linked = crate::partitions::linked_index_ids(reader, &definition.name)?;
+    let Some(&highest) = linked.iter().max() else {
+        return Ok(());
+    };
+    let unused = highest
+        .checked_add(1)
+        .ok_or_else(|| too_many_indexes(definition))?;
+    if let Some(index) = definition.indexes.get_mut(position)
+        && index.id < unused
+    {
+        index.id = unused;
+    }
+    Ok(())
+}
+
 pub(crate) fn add_index(
     writer: &mut dyn KeyValueWrite,
     table: &TableDefinition,
@@ -563,6 +583,7 @@ pub(crate) fn add_index(
     let mut definition = table.clone();
     let others = other_tables(writer, table)?;
     let position = define_index(&others, &mut definition, spec, dialect, constraint)?;
+    past_linked_ids(&*writer, &mut definition, position)?;
     let leftover = index_prefix(definition.id, definition.indexes[position].id);
     delete_index_entries(writer, &leftover, &prefix_end(&leftover))?;
     let mut memory = WorkMemory::new();
@@ -585,6 +606,7 @@ pub(crate) fn remove_index(
         return Ok(());
     }
     let index = definition.indexes.remove(position);
+    crate::partitions::forget_index_links(writer, &definition.name, &[index.id])?;
     crate::sqlite_schema_text::forget_index(writer, &definition.name, &index.name)?;
     crate::comments::forget_part(
         writer,

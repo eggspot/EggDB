@@ -812,6 +812,14 @@ fn partition_keys_that_depend_on_the_session_settings_are_refused() {
         "RANGE ((ts::timestamptz))",
         "RANGE ((s::date))",
         "LIST ((d::text))",
+        "LIST ((concat(t)))",
+        "LIST ((left(concat(t), 10)))",
+        "LIST ((format('%s', t)))",
+        "LIST ((to_jsonb(t)::text))",
+        "LIST ((json_build_object('a', t)::text))",
+        "RANGE ((make_timestamptz(2020, 1, 1, 0, 0, 0)))",
+        "LIST ((s || t))",
+        "LIST ((current_user || s))",
     ] {
         let error = failure(
             &mut session,
@@ -831,6 +839,9 @@ fn partition_keys_that_depend_on_the_session_settings_are_refused() {
         ("b2", "RANGE ((ts::date))"),
         ("b3", "RANGE ((extract(year FROM d)))"),
         ("b4", "RANGE ((ts + interval '1 day'))"),
+        ("b5", "LIST ((t AT TIME ZONE 'UTC'))"),
+        ("b6", "LIST ((upper(s) || '-' || substr(s, 1, 2)))"),
+        ("b7", "RANGE ((abs(extract(year FROM ts))))"),
     ] {
         answer(
             &mut session,
@@ -1182,4 +1193,213 @@ fn unique_indexes_of_a_file_from_before_index_links_are_linked_after_the_upgrade
         answer(&mut session, "SELECT count(*) FROM u_1"),
         "count\n2\nSELECT 1"
     );
+}
+
+#[test]
+fn a_column_inherited_from_the_parent_cannot_be_dropped_from_a_partition() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    answer(
+        &mut session,
+        "CREATE TABLE e (id int, name text, extra int) PARTITION BY LIST (lower(name));
+         CREATE TABLE e1 PARTITION OF e FOR VALUES IN ('a');
+         CREATE TABLE g (k int, v int) PARTITION BY LIST (k);
+         CREATE TABLE g1 PARTITION OF g FOR VALUES IN (1);
+         INSERT INTO e VALUES (1, 'A', 5);
+         INSERT INTO g VALUES (1, 2)",
+    );
+    for (statement, column) in [
+        ("ALTER TABLE e1 DROP COLUMN name", "name"),
+        ("ALTER TABLE e1 DROP COLUMN extra", "extra"),
+        ("ALTER TABLE g1 DROP COLUMN k", "k"),
+        ("ALTER TABLE g1 DROP COLUMN v", "v"),
+    ] {
+        let error = failure(&mut session, statement);
+        assert_eq!(error.state().code(), "42P16", "{statement}: {error}");
+        assert_eq!(
+            error.message(),
+            format!("cannot drop inherited column \"{column}\""),
+            "{statement}"
+        );
+    }
+    answer(&mut session, "INSERT INTO e VALUES (2, 'a', 6)");
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT id, name, extra FROM e WHERE lower(name) = 'a' ORDER BY id"
+        ),
+        "id|name|extra\n1|A|5\n2|a|6\nSELECT 2"
+    );
+    answer(&mut session, "ALTER TABLE e DROP COLUMN extra");
+    assert_eq!(
+        answer(&mut session, "SELECT * FROM e1 ORDER BY id"),
+        "id|name\n1|A\n2|a\nSELECT 2"
+    );
+    answer(&mut session, "INSERT INTO e VALUES (3, 'A')");
+}
+
+#[test]
+fn mysql_names_the_partition_function_when_a_key_column_is_dropped() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    answer(
+        &mut session,
+        "CREATE TABLE r2 (id int, total int) PARTITION BY RANGE (total * 2) (
+             PARTITION p0 VALUES LESS THAN (100),
+             PARTITION p1 VALUES LESS THAN MAXVALUE)",
+    );
+    let error = failure(&mut session, "ALTER TABLE r2 DROP COLUMN total");
+    assert_eq!(error.state().code(), "42S22", "{error}");
+    assert_eq!(error.vendor_code(), Some(1054));
+    assert_eq!(
+        error.message(),
+        "Unknown column 'total' in 'partition function'"
+    );
+}
+
+#[test]
+fn a_table_qualified_column_in_a_partition_key_survives_partitions_and_renames() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    answer(
+        &mut session,
+        "CREATE TABLE pe (a int, b int) PARTITION BY LIST ((pe.a));
+         CREATE TABLE pe1 PARTITION OF pe DEFAULT;
+         INSERT INTO pe VALUES (1, 2);
+         CREATE TABLE pr (a int, b int) PARTITION BY RANGE ((pr.a + 1));
+         CREATE TABLE pr1 PARTITION OF pr FOR VALUES FROM (0) TO (100);
+         INSERT INTO pr VALUES (5, 6);
+         CREATE TABLE ps (a int) PARTITION BY HASH ((public.ps.a));
+         CREATE TABLE ps0 PARTITION OF ps FOR VALUES WITH (MODULUS 1, REMAINDER 0);
+         INSERT INTO ps VALUES (7)",
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT pg_get_partkeydef('pr'::regclass)"),
+        "pg_get_partkeydef\nRANGE ((a + 1))\nSELECT 1"
+    );
+    answer(
+        &mut session,
+        "ALTER TABLE pe RENAME TO pf; ALTER TABLE pr RENAME TO pq",
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT a, b FROM pf"),
+        "a|b\n1|2\nSELECT 1"
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT a, b FROM pq WHERE a + 1 = 6"),
+        "a|b\n5|6\nSELECT 1"
+    );
+    answer(
+        &mut session,
+        "INSERT INTO pf VALUES (3, 4); INSERT INTO pq VALUES (9, 9)",
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT count(*) FROM ps"),
+        "count\n1\nSELECT 1"
+    );
+    let error = failure(
+        &mut session,
+        "CREATE TABLE px (a int) PARTITION BY LIST ((other.a))",
+    );
+    assert_eq!(error.state().code(), "42P01", "{error}");
+}
+
+fn index_of(store: &MemoryStore, table: &str, index: &str) -> u32 {
+    use crate::store::KeyValueStore;
+    let reader = store.begin_write().unwrap();
+    let bytes = crate::store::KeyValueRead::get(&reader, &crate::encoding::table_key(table))
+        .unwrap()
+        .unwrap();
+    crate::encoding::TableDefinition::decode(table, &bytes)
+        .unwrap()
+        .indexes
+        .iter()
+        .find(|found| found.name == index)
+        .map(|found| found.id)
+        .unwrap()
+}
+
+#[test]
+fn a_dropped_column_leaves_no_index_link_for_a_later_index_to_inherit() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    answer(
+        &mut session,
+        "CREATE TABLE p (a int, b int, c int) PARTITION BY RANGE (a);
+         CREATE TABLE p1 PARTITION OF p FOR VALUES FROM (0) TO (10);
+         CREATE INDEX pb ON p (b);
+         CREATE INDEX pc ON p (c)",
+    );
+    let error = failure(&mut session, "ALTER TABLE p1 DROP COLUMN c");
+    assert_eq!(error.state().code(), "42P16", "{error}");
+    answer(&mut session, "ALTER TABLE p DROP COLUMN c");
+    assert_eq!(answer(&mut session, "SELECT * FROM p1"), "a|b\nSELECT 0");
+    answer(&mut session, "CREATE UNIQUE INDEX pa ON p (a)");
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+              JOIN pg_class parent ON parent.oid = i.inhparent
+             WHERE parent.relname = 'pa'"
+        ),
+        "relname\np1_a_idx\nSELECT 1"
+    );
+    answer(&mut session, "INSERT INTO p VALUES (1, 1)");
+    let error = failure(&mut session, "INSERT INTO p VALUES (1, 2)");
+    assert_eq!(error.state().code(), "23505", "{error}");
+    answer(&mut session, "DROP INDEX pa");
+    assert_eq!(
+        relation_names(&mut session, "p1_%"),
+        relation_names(&mut session, "p1_b%")
+    );
+    answer(&mut session, "CREATE UNIQUE INDEX mine ON p1 (b)");
+    answer(&mut session, "DROP INDEX pb");
+    let error = failure(&mut session, "INSERT INTO p VALUES (2, 1)");
+    assert_eq!(error.state().code(), "23505", "{error}");
+}
+
+#[test]
+fn a_stale_index_link_from_an_older_writer_attaches_no_later_index() {
+    use crate::store::{KeyValueStore, KeyValueWrite};
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    answer(
+        &mut session,
+        "CREATE TABLE s (a int, b int) PARTITION BY RANGE (a);
+         CREATE TABLE s1 PARTITION OF s FOR VALUES FROM (0) TO (10);
+         CREATE INDEX sz ON ONLY s (b);
+         CREATE INDEX s1_b ON s1 (b)",
+    );
+    drop(session);
+    let parent_index = index_of(&store, "s", "sz");
+    let stale = index_of(&store, "s1", "s1_b") + 1;
+    let mut writer = store.begin_write().unwrap();
+    let mut record = crate::partitions::stored(&writer, "s1").unwrap();
+    record.index_links.push(crate::partitions::IndexLink {
+        index: stale,
+        parent_index,
+    });
+    writer
+        .put(
+            &crate::encoding::partition_key("s1"),
+            &crate::encoding::encode_partitioning(&record),
+        )
+        .unwrap();
+    writer.commit().unwrap();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+              WHERE c.relname = 'sz'"
+        ),
+        "indisvalid\nf\nSELECT 1"
+    );
+    answer(&mut session, "CREATE UNIQUE INDEX mine ON s1 (a)");
+    assert!(index_of(&store, "s1", "mine") > stale);
+    answer(&mut session, "ALTER INDEX sz ATTACH PARTITION s1_b");
+    answer(&mut session, "DROP INDEX sz");
+    answer(&mut session, "INSERT INTO s VALUES (1, 1)");
+    let error = failure(&mut session, "INSERT INTO s VALUES (1, 2)");
+    assert_eq!(error.state().code(), "23505", "{error}");
 }

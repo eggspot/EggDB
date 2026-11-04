@@ -37,7 +37,10 @@ impl Parser<'_> {
         let start = self.position();
         let expr = self.expression()?;
         let end = self.tokens[self.at.saturating_sub(1)].end;
-        let text = self.text.get(start..end).unwrap_or("").trim().to_owned();
+        let text = self
+            .text_without_column_qualifiers(&expr, start, end)
+            .trim()
+            .to_owned();
         self.expect(&TokenKind::RightParen)?;
         let stored = match self.dialect {
             Dialect::Oracle => {
@@ -95,7 +98,10 @@ impl Parser<'_> {
             true => (self.tokens[first].end, self.tokens[last].start),
             false => (self.tokens[first].start, self.tokens[last].end),
         };
-        let text = self.text.get(start..end).unwrap_or("").trim().to_owned();
+        let text = self
+            .text_without_column_qualifiers(&expr, start, end)
+            .trim()
+            .to_owned();
         let stored = self.take_word("persisted");
         Self::set_generation(
             column,
