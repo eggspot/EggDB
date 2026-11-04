@@ -1689,7 +1689,9 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   ...)` work there and in Oracle, with NULL making the answer unknown as the standard says. A
   width that differs is `42601` "unequal number of entries in row expressions" (or "subquery has
   too many/few columns"; MySQL's 1241, SQLite's and Oracle's own), and a row subquery with more
-  than one row is `21000`. SQL Server has no row constructors.
+  than one row is `21000` (SQLite uses its first row). Outside PostgreSQL a row constructor is
+  only an operand of a comparison or `IN` (MySQL's 1241, SQLite's `row value misused`), and
+  Oracle compares rows only with `=` and `<>` (ORA-00920). SQL Server has no row constructors.
 - **Functions in `FROM`** (D128): `generate_series(start, stop [, step])` over `smallint`,
   `integer` and `bigint` (a step of 0 is `22023`; `numeric` and time stamps answer `0A000`) and
   `unnest(array)`, also written `pg_catalog.generate_series` and `pg_catalog.unnest`, with
@@ -2880,7 +2882,10 @@ would; the catalogs still name it virtual.
   (`random()`, `now()`, `nextval` and the like): PostgreSQL's `0A000`, `42803` and `42P17`
   (`generation expression is not immutable`), MySQL's 3763, SQLite's `subqueries prohibited in
   generated columns` and `non-deterministic functions prohibited in generated columns`, SQL
-  Server's 1046, 175 and, for a `PERSISTED` column, 4936, Oracle's `ORA-54002`. A generated
+  Server's 1046, 175 and, for a `PERSISTED` column, 4936, Oracle's `ORA-54002`. SQL Server
+  allows such a function in a column that is not `PERSISTED` and computes it on each read;
+  EggDB keeps computed values, so it refuses that column with `0A000` and a hint. A call to a
+  user-defined function is refused too (not immutable, or `0A000` for an `IMMUTABLE` one). A generated
   column may read another one only in MySQL (one defined before it, 3107 otherwise) and SQLite
   (without a loop); PostgreSQL answers `42P17`, SQL Server 1759 and Oracle `ORA-54012`. MySQL
   refuses one that reads an `AUTO_INCREMENT` column (3109), SQLite one in the primary key and
@@ -3687,7 +3692,7 @@ The older forms that `pg_dump` and psql write work too (`WITH CSV HEADER`, `DELI
 | `FORCE_NOT_NULL (cols) \| *`, `FORCE_NULL (cols) \| *` | CSV `FROM` only: an unquoted null string is an empty string, or a quoted one is NULL |
 | `ENCODING 'name'` | the encoding of the data the client sends or receives: `UTF8` (the default), `LATIN1`, `LATIN9`, `WIN1252`, and `UTF16` (`UTF16LE`, `UTF16BE`) beyond PostgreSQL; PostgreSQL's other encodings are `0A000`, an unknown name `22023` |
 | `ON_ERROR stop \| ignore` | `COPY FROM` only: `stop` (the default) fails the copy at the first bad value; `ignore` skips each row with a value its column's type does not accept and reports how many (text and CSV only) |
-| `REJECT_LIMIT n` | with `ON_ERROR ignore` only (`22023` otherwise): the copy fails with `22000` once more than `n` rows were skipped; `n` must be greater than zero (`22023`) |
+| `REJECT_LIMIT n` | with `ON_ERROR ignore` only (`22023` otherwise): the copy fails with `22P02` once more than `n` rows were skipped; `n` must be greater than zero (`22023`) |
 | `LOG_VERBOSITY default \| verbose \| silent` | with `ON_ERROR ignore`: `verbose` adds a notice per skipped row, `silent` drops the count |
 | `FREEZE` | accepted and changes nothing |
 
@@ -3735,7 +3740,7 @@ skipped row also gets `skipping row due to data type incompatibility at line L f
 are not valid in the encoding (`22021`) and constraint violations (`23505`, `23502`, ...) still
 fail the whole copy, as in PostgreSQL. `ON_ERROR ignore` is refused in the binary format.
 `REJECT_LIMIT n` (PostgreSQL 18) bounds the skipping: the row that makes the count exceed `n`
-fails the whole copy with `22000` `skipped more than REJECT_LIMIT (n) rows due to data type
+fails the whole copy with `22P02` `skipped more than REJECT_LIMIT (n) rows due to data type
 incompatibility` and a `CONTEXT` naming its line, column and value, and nothing is loaded
 (D324).
 

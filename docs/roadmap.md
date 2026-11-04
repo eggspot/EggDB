@@ -470,6 +470,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `WITH ROLLUP` are built (D298).
 - SQLite's and SQL Server's NULL ordering: NULLs sort first for `ASC` and last for `DESC` there
   too; MySQL's is built (D321).
+- MySQL's `ORDER BY` on a nullable indexed column read from the index again: read the index's
+  NULL entries first for `ASC` and last for `DESC`, so `ORDER BY created_at DESC LIMIT 10` stops
+  after ten entries instead of sorting every row; benchmark
+  `sql_mysql.order_by_nullable_index_limit` (D321).
 - `DISTINCT ON` an expression outside the select list of a grouped query or beside a window
   function, `NATURAL` joins with a `LATERAL` item, SQLite's error for a wrong `ESCAPE` computed
   at run time and Oracle's for a wrong `ESCAPE`, and Transact-SQL's `[...]` classes in `LIKE` (D299).
@@ -477,7 +481,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   table or a table with row-level security as the target, `EXPLAIN` of them, SQLite's refusal
   of `FROM` tables in `RETURNING`, and `OUTPUT deleted.` of a joined Transact-SQL `UPDATE`
   (D297).
-- PostgreSQL's `CREATE TABLE ... AS EXECUTE` of a prepared statement (D323).
+- PostgreSQL's `CREATE TABLE ... AS EXECUTE` of a prepared statement, and `USING`, `WITH (...)`
+  and `TABLESPACE` in `CREATE TABLE ... AS` (D323).
 - PostgreSQL's `TABLE t` as a query (D323).
 - MySQL's `CREATE TABLE ... LIKE` (D323).
 - SQL Server's `SELECT ... INTO` keeps the source columns' `NOT NULL` (D323).
@@ -488,7 +493,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Generated columns' rest (D322): SQL Server's `sys.computed_columns` rows, the generation clause
   in SQLite's, Oracle's and MySQL's `CREATE TABLE` text and `SHOW CREATE TABLE`, `ALTER COLUMN
   ... SET EXPRESSION`/`DROP EXPRESSION`, MySQL `MODIFY` of a generated column, virtual columns
-  computed on read, generated columns in partitioned tables.
+  computed on read (then SQL Server's non-persisted computed columns over `GETDATE()` or
+  `NEWID()`), generated columns in partitioned tables, user-defined `IMMUTABLE` functions and
+  PostgreSQL's stable casts checked in generation expressions.
 - The rest of `ALTER TABLE`: `ALTER COLUMN ... TYPE ... USING`, adding a serial or identity
   column, renaming what a view uses (D32).
 - A published SQL:2023 conformance list, first Part 2's feature IDs (E011, F031, ...) with each

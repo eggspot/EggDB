@@ -40,6 +40,7 @@ mod log;
 mod lsm;
 mod mcp;
 mod measure;
+mod mysql_order;
 mod net;
 mod page_cache;
 mod tls;
@@ -56,7 +57,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator::new();
 type Counted = fn(&CountingAllocator) -> Result<Vec<Metric>, String>;
 type Uncounted = fn() -> Result<Vec<Metric>, String>;
 
-const COUNTED: [(&str, Counted); 36] = [
+const COUNTED: [(&str, Counted); 37] = [
     (page_cache::HIT, page_cache::hit),
     (page_cache::MISS, page_cache::miss),
     (page_cache::COMMIT, page_cache::commit),
@@ -86,6 +87,10 @@ const COUNTED: [(&str, Counted); 36] = [
     (copy::TO_BINARY, copy::to_stdout_binary),
     (citext::COMPARE, citext::compare),
     (citext::INDEX_LOOKUP, citext::index_lookup),
+    (
+        mysql_order::NULLABLE_INDEX_LIMIT,
+        mysql_order::nullable_index_limit,
+    ),
     (mcp::TOOLS_CALL, mcp::tools_call),
     (mcp::WRITE_CALL, mcp::write_call),
     (tls::RECORD_SEAL, tls::record_seal),
