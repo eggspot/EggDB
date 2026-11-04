@@ -234,6 +234,49 @@ fn explain_analyze_of_a_subplan_that_never_ran_says_never_executed() {
     );
 }
 
+#[test]
+fn explain_analyze_keeps_the_scan_rows_of_a_statement_whose_correlated_subquery_reads_more_rows() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for sql in [
+        "CREATE TABLE outer_rows (a integer, b integer)",
+        "CREATE TABLE inner_rows (c1 integer)",
+        "INSERT INTO outer_rows VALUES (1, 30), (2, 20), (3, 10)",
+        "INSERT INTO inner_rows VALUES (1), (1), (3), (3), (5), (6), (7)",
+    ] {
+        last(&mut session, sql);
+    }
+    for test in [
+        "EXISTS (SELECT 1 FROM inner_rows WHERE inner_rows.c1 = outer_rows.a)",
+        "a IN (SELECT c1 FROM inner_rows WHERE inner_rows.c1 = outer_rows.a)",
+    ] {
+        let lines = plan(
+            &mut session,
+            &format!("EXPLAIN ANALYZE SELECT a FROM outer_rows WHERE {test} ORDER BY b"),
+        );
+        let scan = lines
+            .iter()
+            .find(|line| {
+                line.trim_start()
+                    .trim_start_matches("->  ")
+                    .starts_with("Seq Scan on outer_rows")
+            })
+            .unwrap_or_else(|| panic!("{lines:?}"));
+        assert_eq!(actual(scan).map(|(rows, _)| rows), Some(2), "{lines:?}");
+    }
+    let mut mysql = Session::with_dialect(&store, Dialect::MySql);
+    let text = last(
+        &mut mysql,
+        "EXPLAIN ANALYZE SELECT a FROM outer_rows WHERE EXISTS \
+         (SELECT 1 FROM inner_rows WHERE inner_rows.c1 = outer_rows.a) ORDER BY b",
+    );
+    let filter = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("-> Filter:"))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(filter.ends_with(" rows=2 loops=1)"), "{text}");
+}
+
 fn mysql_tables(store: &MemoryStore) -> Session<'_> {
     let mut session = Session::with_dialect(store, Dialect::MySql);
     for sql in [
@@ -308,10 +351,7 @@ fn mysql_explain_analyze_runs_the_select_and_prints_actual_time_rows_and_loops()
         lines[1].starts_with("-> Filter: (t1.a > (select #2))  (actual time="),
         "{text}"
     );
-    assert!(
-        lines[2].starts_with("    -> Table scan on t1  (actual time="),
-        "{text}"
-    );
+    assert_eq!(lines[2], "    -> Table scan on t1", "{text}");
     assert_eq!(
         lines[3], "    -> Select #2 (subquery in condition; run only once)",
         "{text}"

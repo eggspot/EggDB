@@ -351,10 +351,13 @@ impl Tree<'_> {
                 line_level += 1;
             }
             let text = self.step_text(query, &all, at, step);
+            let filtered_here = at == attach && filter.is_some();
             self.lines.push(TreeLine {
                 level: line_level,
                 text,
-                measured: measured.and_then(|steps| steps.get(at).copied().flatten()),
+                measured: measured
+                    .filter(|_| !filtered_here)
+                    .and_then(|steps| steps.get(at).copied().flatten()),
             });
             if at == all.len().saturating_sub(1) {
                 self.add_subplans(query, SubplanPlace::Condition, level + attach + 1);
@@ -387,9 +390,6 @@ fn actual_text(measured: Measured) -> String {
     }
 }
 
-/// The plan in MySQL's `FORMAT=TREE` form, one `-> ` line per iterator indented four spaces per
-/// level, with `(actual time=a..b rows=n loops=n)` on the iterators EggDB measured when the
-/// statement was analyzed.
 pub(crate) fn tree_text(query: &ExplainedQuery, analyzed: Option<&Analyzed>) -> String {
     let measured = analyzed.map(|analyzed| measured_steps(query, analyzed));
     let mut tree = Tree {

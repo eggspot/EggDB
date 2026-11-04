@@ -1,5 +1,7 @@
-use super::subplans::{Subplan, subplan_reference};
-use crate::ast::{Expr, ExprKind, Literal, Subquery, SubqueryTest, TruthTest, UnaryOperator};
+use super::subplans::{Subplan, SubplanRole, subplan_reference};
+use crate::ast::{
+    BinaryOperator, Expr, ExprKind, Literal, Subquery, SubqueryTest, TruthTest, UnaryOperator,
+};
 use crate::types::Value;
 
 const MOST_DEPTH: usize = 32;
@@ -66,14 +68,22 @@ impl ExpressionText<'_> {
     fn subquery(&self, subquery: &Subquery, depth: usize) -> String {
         let position = subquery.query.position;
         if self.spelling == Spelling::PostgreSql {
-            return self
+            let Some(subplan) = self
                 .subplans
                 .iter()
                 .find(|subplan| subplan.position == position)
-                .map_or_else(
-                    || "(SubPlan)".to_owned(),
-                    |subplan| subplan_reference(subplan, &subquery.test),
-                );
+            else {
+                return "(SubPlan)".to_owned();
+            };
+            if let (
+                SubqueryTest::RowCompare { expr, operator },
+                SubplanRole::Init { parameter, .. },
+            ) = (&subquery.test, subplan.role)
+                && let Some(fields) = crate::row_values::constructor_fields(expr)
+            {
+                return self.row_against_parameters(fields, *operator, parameter, depth);
+            }
+            return subplan_reference(subplan, &subquery.test);
         }
         let select = self
             .select_numbers
@@ -103,6 +113,38 @@ impl ExpressionText<'_> {
                 if *all { "all" } else { "any" }
             ),
             _ => format!("({select})"),
+        }
+    }
+
+    fn row_against_parameters(
+        &self,
+        fields: &[Expr],
+        operator: BinaryOperator,
+        first: usize,
+        depth: usize,
+    ) -> String {
+        let parameter = |at: usize| format!("${}", first.saturating_add(at));
+        let symbol = operator.symbol();
+        let pairs = || {
+            fields.iter().enumerate().map(move |(at, field)| {
+                format!(
+                    "({} {symbol} {})",
+                    self.at_depth(field, depth),
+                    parameter(at)
+                )
+            })
+        };
+        match operator {
+            BinaryOperator::Equal => format!("({})", pairs().collect::<Vec<_>>().join(" AND ")),
+            BinaryOperator::NotEqual => format!("({})", pairs().collect::<Vec<_>>().join(" OR ")),
+            _ => {
+                let parameters: Vec<String> = (0..fields.len()).map(parameter).collect();
+                format!(
+                    "(ROW({}) {symbol} ROW({}))",
+                    self.joined(fields, ", ", depth),
+                    parameters.join(", ")
+                )
+            }
         }
     }
 

@@ -10,7 +10,7 @@ use std::borrow::Cow;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SubplanRole {
-    Init { parameter: usize },
+    Init { parameter: usize, returns: usize },
     Sub { hashed: bool },
 }
 
@@ -33,6 +33,14 @@ pub(crate) struct Subplan {
 struct Numbering {
     plans: usize,
     parameters: usize,
+}
+
+impl Numbering {
+    fn initial(&mut self, returns: usize) -> SubplanRole {
+        let parameter = self.parameters;
+        self.parameters = self.parameters.saturating_add(returns);
+        SubplanRole::Init { parameter, returns }
+    }
 }
 
 pub(crate) fn explain_subplans(
@@ -60,17 +68,17 @@ fn placed_expressions(select: &Select) -> Vec<(&Expr, SubplanPlace)> {
         })
         .collect();
     let condition = |expr| (expr, SubplanPlace::Condition);
-    placed.extend(select.filter.iter().map(condition));
-    placed.extend(select.having.iter().map(condition));
+    placed.extend(select.order_by.iter().map(|item| condition(&item.expr)));
+    placed.extend(select.group_by.iter().map(condition));
+    placed.extend(select.distinct_on.iter().map(condition));
     if let Some(from) = &select.from {
         placed.extend(from.joins.iter().filter_map(|join| match &join.condition {
             JoinCondition::On(expr) => Some(condition(expr)),
             _ => None,
         }));
     }
-    placed.extend(select.group_by.iter().map(condition));
-    placed.extend(select.distinct_on.iter().map(condition));
-    placed.extend(select.order_by.iter().map(|item| condition(&item.expr)));
+    placed.extend(select.filter.iter().map(condition));
+    placed.extend(select.having.iter().map(condition));
     placed.extend(select.limit.iter().map(condition));
     placed.extend(select.offset.iter().map(condition));
     placed
@@ -97,6 +105,14 @@ fn explain_prepared(
     }
     let mut out = execute::explain_select(reader, tables, &select)?;
     out.subplans = subplans;
+    if select
+        .limit
+        .iter()
+        .chain(select.offset.iter())
+        .any(mentions_subplan)
+    {
+        out.limited = true;
+    }
     Ok(out)
 }
 
@@ -172,9 +188,10 @@ fn subplan(
     let role = match (&found.test, correlated) {
         (_, true) => SubplanRole::Sub { hashed: false },
         (SubqueryTest::Scalar | SubqueryTest::Exists | SubqueryTest::Array, false) => {
-            let parameter = numbering.parameters;
-            numbering.parameters += 1;
-            SubplanRole::Init { parameter }
+            numbering.initial(1)
+        }
+        (SubqueryTest::RowCompare { expr, .. }, false) => {
+            numbering.initial(crate::row_values::constructor_fields(expr).map_or(1, <[Expr]>::len))
         }
         (SubqueryTest::In { .. }, false) => SubplanRole::Sub { hashed: true },
         (
@@ -213,7 +230,7 @@ pub(crate) fn subplan_reference(subplan: &Subplan, test: &SubqueryTest) -> Strin
             }
         ) && matches!(subplan.role, SubplanRole::Sub { hashed: true });
     let reference = match subplan.role {
-        SubplanRole::Init { parameter } => return format!("${parameter}"),
+        SubplanRole::Init { parameter, .. } => return format!("${parameter}"),
         SubplanRole::Sub { hashed: true } => format!("(hashed SubPlan {})", subplan.number),
         SubplanRole::Sub { hashed: false } => format!("(SubPlan {})", subplan.number),
     };
@@ -226,8 +243,15 @@ pub(crate) fn subplan_reference(subplan: &Subplan, test: &SubqueryTest) -> Strin
 
 pub(crate) fn subplan_label(subplan: &Subplan) -> String {
     match subplan.role {
-        SubplanRole::Init { parameter } => {
-            format!("InitPlan {} (returns ${parameter})", subplan.number)
+        SubplanRole::Init { parameter, returns } => {
+            let parameters: Vec<String> = (0..returns.max(1))
+                .map(|at| format!("${}", parameter.saturating_add(at)))
+                .collect();
+            format!(
+                "InitPlan {} (returns {})",
+                subplan.number,
+                parameters.join(",")
+            )
         }
         SubplanRole::Sub { .. } => format!("SubPlan {}", subplan.number),
     }
@@ -267,9 +291,17 @@ mod tests {
 
     #[test]
     fn references_follow_postgresqls_spelling_for_each_role() {
-        let init = planned(SubplanRole::Init { parameter: 0 });
+        let init = planned(SubplanRole::Init {
+            parameter: 0,
+            returns: 1,
+        });
         assert_eq!(subplan_reference(&init, &SubqueryTest::Scalar), "$0");
         assert_eq!(subplan_label(&init), "InitPlan 2 (returns $0)");
+        let row = planned(SubplanRole::Init {
+            parameter: 3,
+            returns: 2,
+        });
+        assert_eq!(subplan_label(&row), "InitPlan 2 (returns $3,$4)");
         let hashed = planned(SubplanRole::Sub { hashed: true });
         let not_in = SubqueryTest::In {
             expr: column(),

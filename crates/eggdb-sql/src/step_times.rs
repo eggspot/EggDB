@@ -118,6 +118,19 @@ pub(crate) fn measure_subplan<T, E>(
     result
 }
 
+pub(crate) fn unmeasured<T>(run: impl FnOnce() -> T) -> T {
+    let mut outer_metering = None;
+    with_recording(|recording| {
+        outer_metering = Some(recording.metering);
+        recording.metering = true;
+    });
+    let result = run();
+    if let Some(outer_metering) = outer_metering {
+        with_recording(|recording| recording.metering = outer_metering);
+    }
+    result
+}
+
 pub(crate) struct SelectMeter {
     started: Instant,
     first_row: Cell<Option<Duration>>,

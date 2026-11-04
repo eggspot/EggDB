@@ -426,6 +426,10 @@ impl Parser<'_> {
         }))
     }
 
+    fn mysql_not_supported(&self, what: &str) -> SqlError {
+        SqlError::not_supported(what).at(self.position())
+    }
+
     fn mysql_explain(&mut self) -> SqlResult<Statement> {
         let analyze = self.take_word("analyze");
         let mut style = if analyze {
@@ -439,21 +443,25 @@ impl Parser<'_> {
             }
             style = if self.take_word("tree") {
                 ExplainStyle::Tree
-            } else if !analyze && self.take_word("traditional") {
+            } else if self.is_word("traditional") && analyze {
+                return Err(self.mysql_not_supported("EXPLAIN ANALYZE with TRADITIONAL format"));
+            } else if self.take_word("traditional") {
                 ExplainStyle::Plan
             } else {
-                return Err(self.not_supported("EXPLAIN formats other than TREE and TRADITIONAL"));
+                return Err(
+                    self.mysql_not_supported("EXPLAIN formats other than TREE and TRADITIONAL")
+                );
             };
         }
         if style == ExplainStyle::Tree && !self.is_word("select") {
-            return Err(self.not_supported(
+            return Err(self.mysql_not_supported(
                 "EXPLAIN ANALYZE and EXPLAIN FORMAT=TREE of a statement other than SELECT",
             ));
         }
         if !(self.is_word("select") || self.is_word("update") || self.is_word("delete")) {
-            return Err(
-                self.not_supported("EXPLAIN of a statement other than SELECT, UPDATE or DELETE")
-            );
+            return Err(self.mysql_not_supported(
+                "EXPLAIN of a statement other than SELECT, UPDATE or DELETE",
+            ));
         }
         let statement = self.statement_body()?;
         Ok(Statement::Explain(Explain {

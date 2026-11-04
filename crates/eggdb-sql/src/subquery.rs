@@ -769,7 +769,8 @@ fn lookup_over_every_inner_row(
     };
     let outer = queries.outer;
     let width = outer.len();
-    let result = execute_query(env, tables, &queries.keys, prepared)?;
+    let result =
+        crate::step_times::unmeasured(|| execute_query(env, tables, &queries.keys, prepared))?;
     let mut families: Vec<Option<Family>> = vec![None; width];
     let mut mixed = false;
     let mut keys = HashSet::new();

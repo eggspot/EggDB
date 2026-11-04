@@ -132,12 +132,38 @@ fn subplan_measured(measured: &[MeasuredSubplan], position: usize) -> Measured {
                 times: RowTimes {
                     first_row: per_loop,
                     last_row: per_loop,
-                    rows: subplan.rows / subplan.loops,
+                    rows: rows_per_loop(subplan.rows, subplan.loops),
                 },
                 loops: subplan.loops,
             }
         }
     }
+}
+
+fn rows_per_loop(rows: u64, loops: u64) -> u64 {
+    let Some(whole) = rows.checked_div(loops) else {
+        return rows;
+    };
+    let left = rows % loops;
+    let doubled = u128::from(left) * 2;
+    let rounds_up = doubled > u128::from(loops) || (doubled == u128::from(loops) && whole % 2 == 1);
+    whole.saturating_add(u64::from(rounds_up))
+}
+
+fn top_node_details_end(lines: &[String]) -> usize {
+    let details = lines
+        .iter()
+        .skip(1)
+        .take_while(|line| {
+            line.strip_prefix("  ").is_some_and(|rest| {
+                !rest.starts_with(' ')
+                    && !rest.starts_with("->")
+                    && !rest.starts_with("SubPlan ")
+                    && !rest.starts_with("InitPlan ")
+            })
+        })
+        .count();
+    (1 + details).min(lines.len())
 }
 
 fn milliseconds(duration: Duration) -> f64 {
@@ -265,7 +291,7 @@ pub(crate) fn render_analyzed(query: &ExplainedQuery, analyzed: Analyzed) -> Que
     add_subplans(query, None, &mut lines, Some(&analyzed.subplans));
     if let Some(buffers) = &analyzed.buffers {
         if let Some(line) = buffers_line("  ", buffers.execution) {
-            lines.insert(1.min(lines.len()), line);
+            lines.insert(top_node_details_end(&lines), line);
         }
         if let Some(line) = buffers_line("  ", buffers.planning) {
             lines.push("Planning:".to_owned());
@@ -540,8 +566,6 @@ fn postgresql_lines(query: &ExplainedQuery) -> Vec<String> {
     lines
 }
 
-/// `EXPLAIN ANALYZE` in MySQL's tree form: one row in one `EXPLAIN` column holding the tree,
-/// with `(actual time=a..b rows=n loops=n)` on the iterators EggDB measured.
 pub(crate) fn render_analyzed_tree(query: &ExplainedQuery, analyzed: Analyzed) -> QueryResult {
     QueryResult::rows(
         "SELECT 1".to_owned(),
