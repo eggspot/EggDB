@@ -221,8 +221,6 @@ fn replaced(values: &[Value]) -> SqlResult<Value> {
     Ok(text_or_null(out))
 }
 
-/// Evaluates one of Oracle's `REGEXP_*` functions, under its internal name, over its evaluated
-/// arguments in Oracle's order.
 pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
     match name {
         "oracle_regexp_like" => like(values),

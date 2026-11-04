@@ -119,6 +119,33 @@ fn lag_lead_and_the_value_functions_read_neighbours_and_skip_nulls_when_asked() 
             "147|.3|.3|.4"
         ]
     );
+    let order = "OVER (ORDER BY employee_id)";
+    for (negative, positive) in [
+        (
+            "LAG(commission_pct, -1) IGNORE NULLS",
+            "LEAD(commission_pct) IGNORE NULLS",
+        ),
+        (
+            "LEAD(commission_pct, -1) IGNORE NULLS",
+            "LAG(commission_pct) IGNORE NULLS",
+        ),
+    ] {
+        let read = |session: &mut Session<'_>, call: &str| {
+            rows(
+                session,
+                &format!(
+                    "SELECT employee_id, {call} {order} v FROM employees \
+                     WHERE employee_id >= 100 ORDER BY employee_id"
+                ),
+            )
+        };
+        let flipped = read(&mut session, negative);
+        assert_eq!(flipped, read(&mut session, positive), "{negative}");
+        assert!(
+            flipped.iter().any(|row| !row.ends_with("|NULL")),
+            "{flipped:?}"
+        );
+    }
     let whole =
         "OVER (ORDER BY employee_id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)";
     assert_eq!(

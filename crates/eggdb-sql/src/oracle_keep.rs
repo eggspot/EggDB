@@ -5,7 +5,6 @@ use crate::types::{Value, compare_values};
 use std::cmp::Ordering;
 use std::ops::Range;
 
-/// The aggregate functions that take Oracle's `KEEP (DENSE_RANK FIRST | LAST ORDER BY ...)`.
 pub(crate) const KEPT_AGGREGATES: [AggregateFunction; 11] = [
     AggregateFunction::Min,
     AggregateFunction::Max,
@@ -56,9 +55,6 @@ fn kept_rows(keys: &[&[Value]], count: usize, last: bool) -> Range<usize> {
     0..end
 }
 
-/// Applies the aggregate named by `function` to the values whose sort keys rank first (or last,
-/// when `last` is true) in the arrays `values` and `keys`, which hold the group's values and
-/// each `ORDER BY` key, all sorted in the `KEEP` clause's order.
 pub(crate) fn kept(
     function: &Value,
     last: &Value,

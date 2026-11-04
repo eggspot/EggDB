@@ -938,11 +938,11 @@ fn non_null_neighbour(
     offset: i64,
     backward: bool,
 ) -> Option<usize> {
-    let wanted = usize::try_from(offset).ok()?;
+    let wanted = usize::try_from(offset.unsigned_abs()).ok()?;
     if wanted == 0 {
         return Some(position);
     }
-    if backward {
+    if backward == (offset > 0) {
         let before = valued.partition_point(|&candidate| candidate < position);
         before
             .checked_sub(wanted)
@@ -1504,14 +1504,20 @@ impl<'k> Partition<'k> {
         for position in 0..count {
             let (start, end) = self.frame_range(frame, offsets, direction, position)?;
             let kept = |candidate: &usize| !self.excluded(frame.exclusion, position, *candidate);
+            let excludes = frame.exclusion != FrameExclusion::NoOthers;
             let chosen = match &valued {
                 Some(valued) => {
                     let low = valued.partition_point(|&candidate| candidate < start);
                     let high = valued.partition_point(|&candidate| candidate < end);
                     let rows = valued.get(low..high).unwrap_or(&[]).iter().copied();
-                    self.chosen_row(spec, position, rows.filter(kept))?
+                    if excludes {
+                        self.chosen_row(spec, position, rows.filter(kept))?
+                    } else {
+                        self.chosen_row(spec, position, rows)?
+                    }
                 }
-                None => self.chosen_row(spec, position, (start..end).filter(kept))?,
+                None if excludes => self.chosen_row(spec, position, (start..end).filter(kept))?,
+                None => self.chosen_row(spec, position, start..end)?,
             };
             let Some(chosen) = chosen else {
                 continue;
