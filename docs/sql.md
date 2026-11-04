@@ -140,7 +140,9 @@ What it reads, on top of the statements of "What runs today":
   entries and `UNIQUE` columns make indexes (an unnamed one is named after its first column,
   then `_2`, `_3`), and `CREATE [UNIQUE] INDEX name [USING BTREE] ON t (...)`, `DROP INDEX name
   ON t`, `SHOW INDEX|INDEXES|KEYS FROM t` and `EXPLAIN SELECT` (MySQL's columns: `type` `ALL`,
-  `const`, `ref`, `range` or `index`, the `key`, and `Extra`) work as in MySQL; `SHOW CREATE
+  `const`, `ref`, `range` or `index`, the `key`, and `Extra`; also `FORMAT=TRADITIONAL`) work as
+  in MySQL, and so do `EXPLAIN FORMAT=TREE SELECT` and `EXPLAIN ANALYZE [FORMAT=TREE] SELECT`
+  (see [EXPLAIN ANALYZE and the slow-statement log](#explain-analyze-and-the-slow-statement-log)); `SHOW CREATE
   TABLE` lists the keys and `DESCRIBE` marks `UNI` and `MUL` columns.
 - **Types** as the engine's: `TINYINT(1)` and `BOOLEAN` are booleans (shown as `1` and `0`),
   `TINYINT` and `SMALLINT` are `smallint`, `MEDIUMINT` and `INT` are `integer`, `BIGINT` is
@@ -1566,7 +1568,15 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   [Indexes](#indexes). An unnamed index is `table_columns_idx`.
 - `EXPLAIN statement` for `SELECT`, `UPDATE` and `DELETE`: the plan as PostgreSQL prints it
   without costs (`Seq Scan on t`, `Index Scan using t_b on t`, `Index Scan Backward ...`,
-  `Sort`, `Limit`, `Nested Loop`, `Hash Join`).
+  `Sort`, `Limit`, `Nested Loop`, `Hash Join`). A `SELECT`'s subqueries are drawn under the step
+  that reads them, as PostgreSQL 16 draws them: an uncorrelated scalar, `EXISTS` or `ARRAY`
+  subquery is an `InitPlan n (returns $k)` run once and named `$k`, an uncorrelated `IN`,
+  `= ANY` or `<> ALL` is a `SubPlan n` that the step reads as `(hashed SubPlan n)` (EggDB builds
+  its set once and hashes it), and a correlated subquery, or another quantified comparison, is
+  a `SubPlan n` evaluated per row. The step that uses them carries a `Filter:` line when its
+  `WHERE` names one (other steps still print no conditions), a nested subquery is numbered
+  before the one holding it, and `EXPLAIN ANALYZE` gives each subplan's top node
+  `(actual time=a..b rows=n loops=n)` per run, averaged over its `loops` (D327).
 - `DROP TABLE [IF EXISTS] name [, ...] [CASCADE | RESTRICT]`: removes the definition and every
   row, in one transaction, and the sequences its columns own. A table another table's foreign
   key references, or whose owned sequence another table's default uses, is `2BP01` unless
@@ -2316,7 +2326,20 @@ PostgreSQL does. Each step the executor measures carries PostgreSQL's
 branch of an `Append`, with times in milliseconds from the start of execution to the step's
 first and last row, and `(never executed)` on a step it never read (a scan under `LIMIT 0`).
 The steps inside a join and an `UPDATE` or `DELETE`'s scan carry none yet, and the timing costs
-nothing when the statement is not analyzed (D312); an `UPDATE` or `DELETE` under it changes the data. `EXPLAIN (ANALYZE,
+nothing when the statement is not analyzed (D312); an `UPDATE` or `DELETE` under it changes the
+data. A subquery's `InitPlan` or `SubPlan` carries its runs on its top node: `loops` is how
+many times it ran (once for an `InitPlan`, once per row read for a correlated one, a run answered
+from the per-statement memo included), `rows` and the time are per run, and one that never ran
+says `(never executed)` (D327). In MySQL's dialect, `EXPLAIN FORMAT=TREE SELECT ...` and
+`EXPLAIN ANALYZE [FORMAT=TREE] SELECT ...` answer MySQL 8's tree in one row of one `EXPLAIN`
+column: `-> ` iterators indented four spaces per level (`Table scan on t`, `Single-row index
+lookup on t using PRIMARY (id=2)`, `Index lookup`, `Index range scan`, `Index scan`, `Filter:
+(t.a > 1)`, `Sort: t.b DESC`, `Limit: 2 row(s)`, `Nested loop inner join`, `Inner hash join
+(t1.a = t2.c2)` over `Hash`, `Rows fetched before execution`, and `Select #2 (subquery in
+condition; run only once)` or `dependent` for a subquery), with `(actual time=a..b rows=n
+loops=n)` under `ANALYZE` where EggDB measures, and no `(cost=...)` group since EggDB's planner
+has no estimates. `FORMAT=JSON` and a tree of an `UPDATE` or `DELETE` answer `0A000` (D327).
+`EXPLAIN (ANALYZE,
 BUFFERS)` adds the page cache's lookups in PostgreSQL's form: `Buffers: shared hit=N read=M`
 under the top node for the whole statement (pages found in memory, pages read from the file;
 a count of zero is left out) and the same under `Planning:` for planning, counted on the
@@ -4365,7 +4388,7 @@ two, `COPY` in the binary format and in another encoding, now match). The other 
   inserted row. Subqueries nest at most 32 levels and a statement holds at most 1,024 `SELECT`s
   (`54001`). Every `WITH` query runs, even one nothing names, and `MATERIALIZED` and `NOT
   MATERIALIZED` change nothing; `SEARCH` and `CYCLE`, a data-modifying `WITH` query that resolves conflicts, and `EXPLAIN` of a query with
-  subqueries answer `0A000`. A derived table, a `WITH` query, a `LATERAL` item and the operands of
+  derived tables, or with `WITH` or set operations inside a subquery, answer `0A000`. A derived table, a `WITH` query, a `LATERAL` item and the operands of
   a set operation are held in memory, counted with the statement's other rows against the 1 GiB
   limit, and a correlated subquery keeps up to 32 MiB of results by outer value. A `LATERAL` item
   runs once per distinct set of the values it names, like a correlated subquery, and its join
