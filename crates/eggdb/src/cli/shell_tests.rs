@@ -806,30 +806,44 @@ fn cas_in_a_block_compares_against_the_blocks_own_value() {
 }
 
 #[test]
-fn expire_persist_and_cas_are_refused_while_a_savepoint_is_set_and_reads_still_run() {
+fn expire_persist_and_cas_run_while_a_savepoint_is_set_and_rollback_to_it_undoes_them() {
     let directory = TempDirectory::new("shell-block-savepoint-expiry");
     let file = created(&directory);
     let script = "put k v\n\
+        put timed t --ttl 1h\n\
         begin;\n\
         savepoint s;\n\
         expire k 1h\n\
-        persist k\n\
-        cas k v w\n\
         ttl k\n\
+        persist timed\n\
+        ttl timed\n\
+        cas k v w\n\
+        get k\n\
+        rollback to savepoint s;\n\
+        ttl k\n\
+        get k\n\
         scan -k\n\
-        commit;\n";
-    let ran = shell(&file, &["--keep-going"], script);
-    let stderr = text(&ran.stderr);
-    for command in ["expire", "persist", "cas"] {
-        assert!(
-            stderr.contains(&format!(
-                "{command} cannot run while a savepoint is set, since ROLLBACK TO SAVEPOINT \
-                 would not undo it; RELEASE SAVEPOINT, COMMIT or ROLLBACK first"
-            )),
-            "{stderr}"
-        );
-    }
-    assert_eq!(text(&ran.stdout), "BEGIN\nSAVEPOINT\nnever\nk\nCOMMIT\n");
+        commit;\n\
+        ttl k\n";
+    let ran = shell(&file, &[], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    let out = text(&ran.stdout);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "BEGIN", "SAVEPOINT", "1h", "never", "w", "ROLLBACK", "never", "v", "k", "timed",
+            "COMMIT", "never"
+        ],
+        "{out}"
+    );
+    let timed = run_with(&["ttl", &file, "timed"], b"", Terminal::default());
+    assert_eq!(timed.exit, 0, "{}", text(&timed.stderr));
+    assert!(
+        text(&timed.stdout).contains("\"expires_at\":\""),
+        "{}",
+        text(&timed.stdout)
+    );
 }
 
 #[test]
