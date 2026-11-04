@@ -397,7 +397,17 @@ impl RespClient {
     /// `AUTH` when there is a password); a server that answers it with an error other than
     /// `NOAUTH` or `WRONGPASS` speaks RESP2 and gets `AUTH` on its own.
     pub fn connect(options: &RespOptions) -> Result<Self, RespConnectError> {
+        Self::connect_watched(options, |_| {})
+    }
+
+    /// Connects as [`RespClient::connect`] does, handing `opened` a second handle on the socket
+    /// once it is open and before the hello, so another thread can shut it to stop the hello.
+    pub fn connect_watched(
+        options: &RespOptions,
+        opened: impl FnOnce(TcpStream),
+    ) -> Result<Self, RespConnectError> {
         let stream = open_stream(options).map_err(RespConnectError::Io)?;
+        opened(stream.try_clone().map_err(RespConnectError::Io)?);
         let mut client = Self {
             reader: BufReader::new(stream.try_clone().map_err(RespConnectError::Io)?),
             writer: stream,

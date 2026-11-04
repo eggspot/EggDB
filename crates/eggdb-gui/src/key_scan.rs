@@ -65,7 +65,32 @@ pub enum PageStart {
         cursor: u64,
         /// The keys carried over from the earlier reply.
         carried: Vec<Vec<u8>>,
+        /// The keys the earlier pages showed, which a `SCAN` may return again and this page
+        /// leaves out.
+        shown: Option<std::sync::Arc<ShownKeys>>,
     },
+}
+
+/// The keys one page showed, linked to the pages before it, so every later page's start shares
+/// them instead of copying them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShownKeys {
+    /// The page's keys.
+    pub page: Vec<Vec<u8>>,
+    /// The pages before it.
+    pub earlier: Option<std::sync::Arc<ShownKeys>>,
+}
+
+/// How many earlier pages a server page checks its keys against.
+pub const REMEMBERED_PAGES: usize = 1_000;
+
+impl ShownKeys {
+    /// The keys of this page and up to [`REMEMBERED_PAGES`] - 1 pages before it, newest first.
+    pub fn remembered(&self) -> impl Iterator<Item = &Vec<u8>> {
+        std::iter::successors(Some(self), |shown| shown.earlier.as_deref())
+            .take(REMEMBERED_PAGES)
+            .flat_map(|shown| shown.page.iter())
+    }
 }
 
 /// What reading a page learnt beyond its rows: where the next page starts (`None` on the
@@ -736,6 +761,7 @@ mod tests {
         server.start = PageStart::Cursor {
             cursor: 1532,
             carried: Vec::new(),
+            shown: None,
         };
         assert_eq!(
             server.statement(),

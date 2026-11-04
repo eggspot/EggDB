@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use crate::catalog::{Catalog, KeyCount, KeySpace};
 use crate::connection::{CancelHandle, ResultTable, StatementFailure};
 use crate::grid::ValueKind;
 use crate::key_scan::{
-    KEY_SCAN_LIMIT, KeyPage, KeySpaceScan, PageEnd, PageStart, SHOWN_VALUE_BYTES, spelled,
+    KEY_SCAN_LIMIT, KeyPage, KeySpaceScan, PageEnd, PageStart, SHOWN_VALUE_BYTES, ShownKeys,
+    spelled,
 };
 use crate::resp_client::{RespClient, RespError, RespReply, prefix_pattern};
 use crate::status_line::thousands;
@@ -169,9 +172,9 @@ fn scan_reply(reply: RespReply) -> Result<(u64, Vec<Vec<u8>>), StatementFailure>
 /// Reads a keys tab's page from a RESP server (`docs/ux/workspace.md` 10.10): `SELECT n` and
 /// `DBSIZE`, then `SCAN <cursor> [MATCH <prefix>*] COUNT <needed>` until the page holds one
 /// key more than [`KEY_SCAN_LIMIT`] or the cursor is `0`, the keys an earlier reply carried
-/// first; keys past the page start the next one. Then `TYPE` for every key, and per key
-/// `GETRANGE 0 63` and `STRLEN` for a string or the aggregate's count, in two pipelines.
-/// `cancel` stops it between round trips.
+/// first and keys the earlier pages showed left out; keys past the page start the next one.
+/// Then `TYPE` for every key, and per key `GETRANGE 0 63`, `STRLEN` and `EXISTS` for a string
+/// or the aggregate's count, in two pipelines. `cancel` stops it between round trips.
 pub fn scan_page(
     client: &mut RespClient,
     scan: &KeySpaceScan,
@@ -201,13 +204,26 @@ pub fn scan_page(
         .and_then(|size| size.integer())
         .and_then(|size| u64::try_from(size).ok())
         .map(KeyCount::Exactly);
-    let (mut keys, mut cursor) = match &scan.start {
-        PageStart::Cursor { cursor: 0, carried } => (carried.clone(), None),
-        PageStart::Cursor { cursor, carried } => (carried.clone(), Some(*cursor)),
-        PageStart::First | PageStart::After(_) => (Vec::new(), Some(0)),
+    let (mut keys, mut cursor, earlier) = match &scan.start {
+        PageStart::Cursor {
+            cursor,
+            carried,
+            shown,
+        } => (
+            carried.clone(),
+            (*cursor != 0).then_some(*cursor),
+            shown.clone(),
+        ),
+        PageStart::First | PageStart::After(_) => (Vec::new(), Some(0), None),
     };
     let pattern = (!scan.prefix.is_empty()).then(|| prefix_pattern(&scan.prefix));
-    let mut listed: std::collections::HashSet<Vec<u8>> = keys.iter().cloned().collect();
+    let mut listed: std::collections::HashSet<Vec<u8>> = earlier
+        .as_deref()
+        .into_iter()
+        .flat_map(ShownKeys::remembered)
+        .chain(&keys)
+        .cloned()
+        .collect();
     let mut trips = 0;
     while keys.len() <= KEY_SCAN_LIMIT && trips < MAX_SCAN_ROUND_TRIPS {
         let Some(sent) = cursor else {
@@ -240,6 +256,14 @@ pub fn scan_page(
         (_, cursor) => Some(PageStart::Cursor {
             cursor: cursor.unwrap_or(0),
             carried,
+            shown: if keys.is_empty() {
+                earlier
+            } else {
+                Some(Arc::new(ShownKeys {
+                    page: keys.clone(),
+                    earlier,
+                }))
+            },
         }),
     };
     if cancel.is_cancelled() {
@@ -339,6 +363,7 @@ fn value_rows(
                 shown_end.as_bytes().to_vec(),
             ]);
             sized.push(vec![b"STRLEN".to_vec(), key.clone()]);
+            sized.push(vec![b"EXISTS".to_vec(), key.clone()]);
         } else if let Some(name) = size_command(kind) {
             sized.push(vec![name.to_vec(), key.clone()]);
         }
@@ -354,8 +379,9 @@ fn value_rows(
         let (type_cell, value, bytes) = if kind == "string" {
             let start = replies.next();
             let length = replies.next().and_then(|reply| reply.integer());
+            let exists = replies.next().and_then(|reply| reply.integer());
             match (start.as_ref().and_then(RespReply::bytes), length) {
-                (Some(start), Some(length)) => {
+                (Some(start), Some(length)) if length > 0 || exists == Some(1) => {
                     let mut cell = spelled(start);
                     if usize::try_from(length).is_ok_and(|length| length > start.len()) {
                         cell.push('…');
@@ -403,6 +429,7 @@ pub(crate) mod fake_server {
     pub(crate) enum Stored {
         Text(Vec<u8>),
         Counted(&'static str, i64),
+        DeletedAfterType,
     }
 
     pub(crate) struct FakeServer {
@@ -558,7 +585,7 @@ pub(crate) mod fake_server {
                     array(&[bulk(next.to_string().as_bytes()), array(&found)])
                 }
                 "TYPE" => simple(match database.get(&key) {
-                    Some(Stored::Text(_)) => "string",
+                    Some(Stored::Text(_) | Stored::DeletedAfterType) => "string",
                     Some(Stored::Counted(kind, _)) => kind,
                     None => "none",
                 }),
@@ -573,6 +600,10 @@ pub(crate) mod fake_server {
                     Some(Stored::Text(value)) => integer(value.len() as i64),
                     _ => integer(0),
                 },
+                "EXISTS" => integer(i64::from(matches!(
+                    database.get(&key),
+                    Some(Stored::Text(_) | Stored::Counted(..))
+                ))),
                 "HLEN" | "LLEN" | "SCARD" | "ZCARD" | "XLEN" => match database.get(&key) {
                     Some(Stored::Counted(_, count)) => integer(*count),
                     _ => integer(0),
@@ -701,7 +732,10 @@ mod tests {
         );
         assert_eq!(row(&first, "user:000")[3], "100");
         assert_eq!(row(&first, "user:001"), ["user:001", "string", "v1", "2"]);
-        let Some(PageStart::Cursor { cursor, carried }) = first.end.next.clone() else {
+        let Some(PageStart::Cursor {
+            cursor, carried, ..
+        }) = first.end.next.clone()
+        else {
             panic!("more keys follow page 1 as a cursor");
         };
         assert_eq!((cursor, carried.len()), (120, 20));
@@ -753,6 +787,89 @@ mod tests {
             server.connections.load(std::sync::atomic::Ordering::SeqCst),
             1
         );
+    }
+
+    #[test]
+    fn a_string_deleted_after_its_type_reads_gone_and_an_empty_one_reads_empty() {
+        let mut zero = BTreeMap::new();
+        zero.insert(b"empty".to_vec(), Stored::Text(Vec::new()));
+        zero.insert(b"vanished".to_vec(), Stored::DeletedAfterType);
+        let server = start(keyspace(BTreeMap::from([(0, zero)]), simple("OK"), 30));
+        let page = connect(server.options(None))
+            .scan_keys(&resp0(2), &CancelHandle::default())
+            .expect("the page reads");
+        let rows: Vec<Vec<String>> = page
+            .table
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.clone().unwrap_or_default())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ["empty", "string", "", "0"],
+                ["vanished", "string", GONE, NO_VALUE]
+            ]
+        );
+        assert_eq!(server.sent("EXISTS").len(), 2);
+    }
+
+    #[test]
+    fn a_key_a_later_scan_returns_again_shows_on_its_first_page_only() {
+        let first: Vec<Vec<u8>> = (0..=100)
+            .map(|number| format!("k{number:03}").into_bytes())
+            .collect();
+        let server = start(move |parts: &[Vec<u8>]| {
+            let name = String::from_utf8_lossy(parts.first()?).to_ascii_uppercase();
+            let keys =
+                |keys: &[&[u8]]| array(&keys.iter().map(|key| bulk(key)).collect::<Vec<_>>());
+            Some(match name.as_str() {
+                "SCAN" if parts.get(1).map(Vec::as_slice) == Some(b"0".as_slice()) => {
+                    let found: Vec<&[u8]> = first.iter().map(Vec::as_slice).collect();
+                    array(&[bulk(b"9"), keys(&found)])
+                }
+                "SCAN" => array(&[bulk(b"0"), keys(&[b"k050", b"k100", b"k101", b"k007"])]),
+                "DBSIZE" => b":102\r\n".to_vec(),
+                "TYPE" => simple("string"),
+                "GETRANGE" => bulk(b"v"),
+                "STRLEN" | "EXISTS" => b":1\r\n".to_vec(),
+                _ => simple("OK"),
+            })
+        });
+        let mut connection = connect(server.options(None));
+        let cancel = CancelHandle::default();
+        let page_one = connection
+            .scan_keys(&resp0(102), &cancel)
+            .expect("page 1 reads");
+        assert_eq!(page_one.table.rows.len(), KEY_SCAN_LIMIT);
+        let next = page_one.end.next.clone().expect("a second page follows");
+        let page_two = connection
+            .scan_keys(
+                &KeySpaceScan {
+                    start: next.clone(),
+                    first_position: KEY_SCAN_LIMIT + 1,
+                    ..resp0(102)
+                },
+                &cancel,
+            )
+            .expect("page 2 reads");
+        assert_eq!(column(&page_two, 0), ["k100", "k101"]);
+        assert_eq!(page_two.end.next, None);
+        let again = connection
+            .scan_keys(
+                &KeySpaceScan {
+                    start: next,
+                    first_position: KEY_SCAN_LIMIT + 1,
+                    ..resp0(102)
+                },
+                &cancel,
+            )
+            .expect("Back and Next read page 2 again");
+        assert_eq!(column(&again, 0), ["k100", "k101"]);
     }
 
     #[test]
@@ -914,6 +1031,50 @@ mod tests {
     }
 
     #[test]
+    fn stop_ends_a_reconnect_whose_hello_never_answers() {
+        let hellos = std::sync::atomic::AtomicUsize::new(0);
+        let server = start(move |parts: &[Vec<u8>]| {
+            let name = String::from_utf8_lossy(parts.first()?).to_ascii_uppercase();
+            if name == "HELLO" && hellos.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+                std::thread::sleep(std::time::Duration::from_secs(20));
+            }
+            Some(simple("OK"))
+        });
+        let mut connection = connect(server.options(None));
+        let dropped = CancelHandle::default();
+        dropped.cancel();
+        assert!(connection.scan_keys(&resp0(1), &dropped).is_err());
+        let cancel = CancelHandle::default();
+        let stopper = cancel.clone();
+        let stopping = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            stopper.cancel();
+        });
+        let started = std::time::Instant::now();
+        let failure = connection.scan_keys(&resp0(1), &cancel).unwrap_err();
+        stopping.join().unwrap();
+        assert_eq!(failure.code, "57014");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(
+            server.connections.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        let stopped_first = CancelHandle::default();
+        stopped_first.cancel();
+        assert_eq!(
+            connection
+                .scan_keys(&resp0(1), &stopped_first)
+                .unwrap_err()
+                .code,
+            "57014"
+        );
+        assert_eq!(
+            server.connections.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+    }
+
+    #[test]
     fn a_hostile_scan_reply_is_an_error_not_a_panic() {
         let replies = [
             array(&[bulk(b"not a number"), array(&[])]),
@@ -952,7 +1113,8 @@ mod tests {
             page.end.next,
             Some(PageStart::Cursor {
                 cursor: 7,
-                carried: Vec::new()
+                carried: Vec::new(),
+                shown: None,
             })
         );
         assert_eq!(endless.sent("SCAN").len(), MAX_SCAN_ROUND_TRIPS);

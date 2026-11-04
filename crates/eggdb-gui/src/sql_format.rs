@@ -187,7 +187,7 @@ fn tokens_of(text: &str, dialect: QueryDialect) -> Result<Vec<Token<'_>>, Format
     }
     let mut tokens = Vec::with_capacity(raw.len());
     let mut newline_before = false;
-    for (range, lexeme) in raw {
+    for (range, lexeme) in joined_literals(raw, text) {
         let Some(piece) = text.get(range.clone()) else {
             continue;
         };
@@ -203,6 +203,87 @@ fn tokens_of(text: &str, dialect: QueryDialect) -> Result<Vec<Token<'_>>, Format
         });
     }
     Ok(tokens)
+}
+
+const LITERAL_PREFIXES: [&str; 4] = ["N", "E", "X", "B"];
+
+fn joined_literals(raw: Vec<(Range<usize>, Lexeme)>, text: &str) -> Vec<(Range<usize>, Lexeme)> {
+    let mut out: Vec<(Range<usize>, Lexeme)> = Vec::with_capacity(raw.len());
+    for item in raw {
+        out.push(item);
+        let parts = literal_tail(&out, text);
+        if parts > 1 {
+            let first = out.len() - parts;
+            let Some((last_range, lexeme)) = out.pop() else {
+                continue;
+            };
+            out.truncate(first + 1);
+            if let Some((range, kind)) = out.last_mut() {
+                range.end = last_range.end;
+                *kind = lexeme;
+            }
+        }
+    }
+    out
+}
+
+fn literal_tail(out: &[(Range<usize>, Lexeme)], text: &str) -> usize {
+    let piece = |(range, _): &(Range<usize>, Lexeme)| text.get(range.clone()).unwrap_or("");
+    let touching = |pair: &[(Range<usize>, Lexeme)]| {
+        pair.windows(2)
+            .all(|window| window[0].0.end == window[1].0.start)
+    };
+    let word = |item: &(Range<usize>, Lexeme)| matches!(item.1, Lexeme::Word | Lexeme::Keyword);
+    let quoted = |item: &(Range<usize>, Lexeme)| {
+        (item.1 == Lexeme::String && piece(item).starts_with('\''))
+            || (item.1 == Lexeme::QuotedName && piece(item).starts_with('"'))
+    };
+    match out {
+        [.., mantissa, sign, exponent]
+            if mantissa.1 == Lexeme::Number
+                && is_exponent_lead(piece(mantissa))
+                && matches!(piece(sign), "+" | "-")
+                && exponent.1 == Lexeme::Number
+                && piece(exponent).bytes().all(|byte| byte.is_ascii_digit())
+                && touching(&out[out.len() - 3..]) =>
+        {
+            3
+        }
+        [.., prefix, ampersand, literal]
+            if word(prefix)
+                && piece(prefix).eq_ignore_ascii_case("U")
+                && piece(ampersand) == "&"
+                && quoted(literal)
+                && touching(&out[out.len() - 3..]) =>
+        {
+            3
+        }
+        [.., prefix, literal]
+            if word(prefix)
+                && literal.1 == Lexeme::String
+                && piece(literal).starts_with('\'')
+                && LITERAL_PREFIXES
+                    .iter()
+                    .any(|known| piece(prefix).eq_ignore_ascii_case(known))
+                && touching(&out[out.len() - 2..]) =>
+        {
+            2
+        }
+        _ => 0,
+    }
+}
+
+fn is_exponent_lead(number: &str) -> bool {
+    let Some(mantissa) = number
+        .strip_suffix('e')
+        .or_else(|| number.strip_suffix('E'))
+    else {
+        return false;
+    };
+    mantissa.starts_with(|first: char| first.is_ascii_digit())
+        && mantissa
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
 }
 
 /// Whether `text` holds nothing to run: only whitespace and comments.
@@ -538,6 +619,64 @@ mod tests {
             "UPDATE t\nSET\n  a = 1,\n  b = 2\nWHERE c = 3;\nINSERT INTO t (a, b)\nVALUES\n  (1, 2),\n  (3, 4);\nSELECT\n  *\nFROM a\nLEFT OUTER JOIN b\nON a.id = b.id"
         );
         assert_eq!(formatted.notice(), "Formatted 3 statements");
+    }
+
+    fn formatted(text: &str, dialect: QueryDialect) -> String {
+        format_sql(text, dialect, 0).expect("it lexes").text
+    }
+
+    #[test]
+    fn format_keeps_prefixed_literals_whole_in_each_dialect() {
+        assert_eq!(
+            formatted(
+                "select * from users where name = N'Ada'",
+                QueryDialect::SqlServer
+            ),
+            "SELECT\n  *\nFROM users\nWHERE name = N'Ada'"
+        );
+        assert_eq!(
+            formatted("select n'Ada', x'ff'", QueryDialect::MySql),
+            "SELECT\n  n'Ada',\n  x'ff'"
+        );
+        assert_eq!(
+            formatted("select N'Ada' from dual", QueryDialect::Oracle),
+            "SELECT\n  N'Ada'\nFROM dual"
+        );
+        assert_eq!(
+            formatted(
+                "select E'a\\tb', B'0101', X'ff', U&'d\\0061t', U&\"n\" from t",
+                QueryDialect::PostgreSql
+            ),
+            "SELECT\n  E'a\\tb',\n  B'0101',\n  X'ff',\n  U&'d\\0061t',\n  U&\"n\"\nFROM t"
+        );
+        assert_eq!(
+            formatted("select X'ff'", QueryDialect::Sqlite),
+            "SELECT\n  X'ff'"
+        );
+        assert_eq!(
+            formatted("select n 'a', u & 'b'", QueryDialect::PostgreSql),
+            "SELECT\n  n 'a',\n  u & 'b'"
+        );
+    }
+
+    #[test]
+    fn format_keeps_exponent_numbers_whole_and_spaces_real_operators() {
+        for dialect in [
+            QueryDialect::PostgreSql,
+            QueryDialect::MySql,
+            QueryDialect::SqlServer,
+            QueryDialect::Oracle,
+            QueryDialect::Sqlite,
+        ] {
+            assert_eq!(
+                formatted("select x from t where x < 1e-5 and y > 1.5E+3", dialect),
+                "SELECT\n  x\nFROM t\nWHERE x < 1e-5 AND y > 1.5E+3"
+            );
+            assert_eq!(
+                formatted("select a-1, 2e-b, 0x1e-5", dialect),
+                "SELECT\n  a - 1,\n  2e - b,\n  0x1e - 5"
+            );
+        }
     }
 
     #[test]

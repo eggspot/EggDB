@@ -349,9 +349,24 @@ struct RespLink {
 }
 
 impl RespLink {
-    fn client(&mut self) -> Result<&mut RespClient, StatementFailure> {
+    fn client(
+        &mut self,
+        cancel: Option<&CancelHandle>,
+    ) -> Result<&mut RespClient, StatementFailure> {
         if self.client.is_none() {
-            let client = RespClient::connect(&self.options).map_err(|error| {
+            let stopped = || cancel.is_some_and(CancelHandle::is_cancelled);
+            if stopped() {
+                return Err(StatementFailure::cancelled());
+            }
+            let client = RespClient::connect_watched(&self.options, |socket| {
+                if let Some(cancel) = cancel {
+                    cancel.arm(Stopper::Socket(socket));
+                }
+            })
+            .map_err(|error| {
+                if stopped() {
+                    return StatementFailure::cancelled();
+                }
                 let failure = resp_failure(&self.options, &error);
                 let mut report = vec![failure.error_line()];
                 report.extend(failure.try_line());
@@ -376,11 +391,12 @@ impl RespLink {
         cancel: &CancelHandle,
     ) -> Result<crate::key_scan::KeyPage, StatementFailure> {
         let place = self.options.place();
-        let client = self.client()?;
-        if let Ok(socket) = client.socket() {
-            cancel.arm(Stopper::Socket(socket));
-        }
-        let page = crate::resp_keys::scan_page(client, scan, &place, cancel);
+        let page = self.client(Some(cancel)).and_then(|client| {
+            if let Ok(socket) = client.socket() {
+                cancel.arm(Stopper::Socket(socket));
+            }
+            crate::resp_keys::scan_page(client, scan, &place, cancel)
+        });
         cancel.disarm();
         if page.is_err() {
             self.drop_client();
@@ -390,7 +406,7 @@ impl RespLink {
 
     fn catalog(&mut self) -> Result<crate::catalog::Catalog, StatementFailure> {
         let place = self.options.place();
-        let catalog = crate::resp_keys::read_catalog(self.client()?, &place);
+        let catalog = crate::resp_keys::read_catalog(self.client(None)?, &place);
         if catalog.is_err() {
             self.drop_client();
         }
