@@ -3322,6 +3322,15 @@ impl MainWindow {
             .map(|tab| drop_prompt::blocked_body(&tab.title, false))
     }
 
+    /// Re-reads why the open Drop dialog cannot drop, after a tab's run ended or its
+    /// transaction changed, so `Drop` acts as soon as nothing blocks it.
+    pub fn refresh_drop_blocked(&mut self) {
+        let blocked = self.drop_blocked();
+        if let Some((prompt, _)) = &mut self.drop_prompt {
+            prompt.blocked = blocked;
+        }
+    }
+
     /// `Drop…` on `row`: opens the dialog with the statement in the showing tab's dialect;
     /// nothing on a read-only connection or a row that cannot be dropped.
     pub fn open_drop_prompt(&mut self, row: TreeItem) {
@@ -5768,6 +5777,16 @@ mod tests {
         let (prompt, _) = window.drop_prompt.clone().expect("the dialog opens");
         assert_eq!(prompt.body(), "COMMIT or ROLLBACK in Query 2 first.");
         assert!(!prompt.can_drop());
+        for tab in &mut window.background_tabs {
+            tab.transaction = eggdb::sql::TransactionStatus::Idle;
+        }
+        window.refresh_drop_blocked();
+        let (prompt, _) = window.drop_prompt.clone().expect("the dialog stays open");
+        assert!(prompt.can_drop());
+        assert_eq!(
+            prompt.body(),
+            "Runs at once in its own session; there is no undo."
+        );
         window.drop_prompt = None;
         let mut read_only = MainWindow {
             writable: false,

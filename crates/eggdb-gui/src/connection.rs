@@ -1656,6 +1656,55 @@ mod tests {
         TestServer { port, stop }
     }
 
+    fn a_tab_s_search_path_never_reaches_a_drop(connection: &mut Connection) {
+        connection.run("CREATE SCHEMA app").unwrap();
+        connection.run("CREATE TABLE app.orders (id integer)").unwrap();
+        connection.run("CREATE TABLE orders (id integer)").unwrap();
+        let tab = SessionId(1);
+        let in_tab = |connection: &mut Connection, sql: &str| {
+            connection.run_in_session(
+                tab,
+                QueryDialect::PostgreSql,
+                &[sql.to_owned()],
+                &CancelHandle::default(),
+            )
+        };
+        let set = in_tab(connection, "SET search_path = app, public");
+        assert!(set.iter().all(Result::is_ok), "{set:?}");
+        let dropped = connection.run_script(
+            QueryDialect::PostgreSql,
+            &["DROP TABLE orders;".to_owned()],
+            &CancelHandle::default(),
+        );
+        assert!(dropped.iter().all(Result::is_ok), "{dropped:?}");
+        let kept = in_tab(connection, "SELECT count(*) FROM app.orders");
+        assert!(kept.iter().all(Result::is_ok), "{kept:?}");
+        let gone = in_tab(connection, "SELECT count(*) FROM public.orders");
+        assert!(gone.last().is_some_and(Result::is_err), "{gone:?}");
+        connection.close_session(tab);
+    }
+
+    #[test]
+    fn a_drop_on_a_file_runs_on_a_session_no_tab_uses() {
+        let path = scratch("drop-session").join("shop.eggdb");
+        let _ = std::fs::remove_file(&path);
+        let mut connection = EngineConnector.connect(&file(path, true, false)).unwrap();
+        a_tab_s_search_path_never_reaches_a_drop(&mut connection);
+    }
+
+    #[test]
+    fn a_drop_on_a_server_runs_on_a_session_no_tab_uses() {
+        let running = start_server();
+        let options = ConnectOptions {
+            password: Some(SERVER_PASSWORD.to_owned()),
+            ..server(running.port)
+        };
+        let mut connection = EngineConnector
+            .connect(&ConnectTarget::Server(options))
+            .unwrap();
+        a_tab_s_search_path_never_reaches_a_drop(&mut connection);
+    }
+
     #[test]
     fn on_a_server_a_drop_outside_the_tabs_stays_after_a_tab_s_transaction_rolls_back() {
         let running = start_server();

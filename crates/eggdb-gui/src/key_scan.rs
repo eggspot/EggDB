@@ -12,6 +12,42 @@ use crate::status_line::{elapsed_text, thousands};
 pub const KEY_SCAN_LIMIT: usize = 100;
 /// The keys grid's columns.
 pub const KEY_COLUMNS: [&str; 3] = ["key", "value", "bytes"];
+/// How many bytes of a value its cell spells, before `…`.
+pub const SHOWN_VALUE_BYTES: usize = 64;
+
+/// One scanned key with the start of its value: the rest is dropped as the scan reads it, so
+/// huge values never pile up in memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyEntry {
+    /// The whole key.
+    pub key: Vec<u8>,
+    /// The value's first [`SHOWN_VALUE_BYTES`] bytes.
+    pub value_start: Vec<u8>,
+    /// The whole value's size in bytes.
+    pub value_bytes: usize,
+}
+
+impl KeyEntry {
+    /// Keeps `key` and the start of `value`.
+    pub fn new(key: Vec<u8>, mut value: Vec<u8>) -> Self {
+        let value_bytes = value.len();
+        value.truncate(SHOWN_VALUE_BYTES);
+        value.shrink_to_fit();
+        Self {
+            key,
+            value_start: value,
+            value_bytes,
+        }
+    }
+
+    fn value_cell(&self) -> String {
+        let mut cell = spelled(&self.value_start);
+        if self.value_bytes > self.value_start.len() {
+            cell.push('…');
+        }
+        cell
+    }
+}
 
 /// The key space a keys tab scans (`docs/ux/workspace.md` 10.4) and how many keys the
 /// catalog counted in it.
@@ -92,15 +128,15 @@ impl KeySpaceScan {
     }
 
     /// The scan's answer as the keys grid shows it, from the space's first keys in key order.
-    pub fn table(&self, entries: &[(Vec<u8>, Vec<u8>)]) -> ResultTable {
+    pub fn table(&self, entries: &[KeyEntry]) -> ResultTable {
         let rows: Vec<Vec<Option<String>>> = entries
             .iter()
             .take(KEY_SCAN_LIMIT)
-            .map(|(key, value)| {
+            .map(|entry| {
                 vec![
-                    Some(spelled(key)),
-                    Some(spelled(value)),
-                    Some(thousands(value.len())),
+                    Some(spelled(&entry.key)),
+                    Some(entry.value_cell()),
+                    Some(thousands(entry.value_bytes)),
                 ]
             })
             .collect();
@@ -126,16 +162,20 @@ impl KeySpaceScan {
         Ok(self.table(&entries))
     }
 
-    fn read_entries(&self, database: &Database) -> eggdb::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    fn read_entries(&self, database: &Database) -> eggdb::Result<Vec<KeyEntry>> {
         let transaction = database.begin_read()?;
+        let kept = |entry: eggdb::Result<(Vec<u8>, Vec<u8>)>| {
+            entry.map(|(key, value)| KeyEntry::new(key, value))
+        };
         match &self.collection {
             None => transaction
                 .scan(..[0xFF_u8].as_slice())
                 .take(KEY_SCAN_LIMIT)
+                .map(kept)
                 .collect(),
             Some(name) => {
                 let collection = transaction.collection(name)?;
-                collection.scan(..).take(KEY_SCAN_LIMIT).collect()
+                collection.scan(..).take(KEY_SCAN_LIMIT).map(kept).collect()
             }
         }
     }
@@ -150,7 +190,9 @@ pub fn keys_text(count: usize) -> String {
 }
 
 /// Bytes as `docs/ux/ui.md` spells them: valid printable UTF-8 as it is, `\t` `\n` `\r` and
-/// `\\` escaped, and every control or invalid byte as `\xNN`.
+/// `\\` escaped, and every control, invisible format (bidirectional overrides and isolates,
+/// zero-width characters, the byte order mark, tags) or invalid byte as `\xNN`, so no key can
+/// draw as another.
 pub fn spelled(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len());
     for chunk in bytes.utf8_chunks() {
@@ -160,9 +202,9 @@ pub fn spelled(bytes: &[u8]) -> String {
                 '\n' => out.push_str("\\n"),
                 '\r' => out.push_str("\\r"),
                 '\\' => out.push_str("\\\\"),
-                control if control.is_control() => {
+                hidden if hidden.is_control() || is_invisible_format(hidden) => {
                     let mut buffer = [0_u8; 4];
-                    for byte in control.encode_utf8(&mut buffer).bytes() {
+                    for byte in hidden.encode_utf8(&mut buffer).bytes() {
                         let _ = write!(out, "\\x{byte:02x}");
                     }
                 }
@@ -174,6 +216,23 @@ pub fn spelled(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+fn is_invisible_format(character: char) -> bool {
+    matches!(
+        character,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
 }
 
 #[cfg(test)]
@@ -208,6 +267,16 @@ mod tests {
         assert_eq!(spelled("café".as_bytes()), "café");
         assert_eq!(spelled(b"a\tb\nc\rd\\e"), "a\\tb\\nc\\rd\\\\e");
         assert_eq!(spelled(&[0x00, b'k', 0xFF, 0x7F]), "\\x00k\\xff\\x7f");
+        assert_eq!(
+            spelled("user\u{202E}gpj.exe".as_bytes()),
+            "user\\xe2\\x80\\xaegpj.exe"
+        );
+        assert_eq!(spelled("a\u{200B}b".as_bytes()), "a\\xe2\\x80\\x8bb");
+        assert_eq!(
+            spelled("\u{2066}x\u{2069}".as_bytes()),
+            "\\xe2\\x81\\xa6x\\xe2\\x81\\xa9"
+        );
+        assert_eq!(spelled("\u{FEFF}k".as_bytes()), "\\xef\\xbb\\xbfk");
     }
 
     #[test]
@@ -244,14 +313,16 @@ mod tests {
     #[test]
     fn the_table_has_a_key_value_and_bytes_column_and_a_scan_tag() {
         let entries = vec![
-            (b"a".to_vec(), b"{\"n\":1}".to_vec()),
-            (b"b\x01".to_vec(), Vec::new()),
+            KeyEntry::new(b"a".to_vec(), b"{\"n\":1}".to_vec()),
+            KeyEntry::new(b"b\x01".to_vec(), Vec::new()),
+            KeyEntry::new(b"c".to_vec(), vec![b'z'; 16 * 1024 * 1024]),
         ];
-        let table = users(KeyCount::Exactly(2)).table(&entries);
+        let table = users(KeyCount::Exactly(3)).table(&entries);
         assert_eq!(table.columns, ["key", "value", "bytes"]);
         assert_eq!(table.kinds[2], ValueKind::Number);
-        assert_eq!(table.tag, "SCAN 2");
-        assert_eq!(table.row_count, 2);
+        assert_eq!(entries[2].value_start.len(), SHOWN_VALUE_BYTES);
+        assert_eq!(table.tag, "SCAN 3");
+        assert_eq!(table.row_count, 3);
         assert_eq!(
             table.rows[0],
             [
@@ -266,6 +337,14 @@ mod tests {
                 Some("b\\x01".to_owned()),
                 Some(String::new()),
                 Some("0".to_owned())
+            ]
+        );
+        assert_eq!(
+            table.rows[2],
+            [
+                Some("c".to_owned()),
+                Some(format!("{}…", "z".repeat(SHOWN_VALUE_BYTES))),
+                Some("16,777,216".to_owned())
             ]
         );
     }

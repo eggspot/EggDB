@@ -206,11 +206,21 @@ impl DropPrompt {
         self.error = Some(line);
     }
 
+    /// Closes without dropping, unless the statement already went out: then the dialog
+    /// stays until its answer, so a success always shows its toast.
+    pub fn cancel(&self) -> DropAnswer {
+        if self.dropping {
+            DropAnswer::Pending
+        } else {
+            DropAnswer::Cancel
+        }
+    }
+
     /// Answers a key: `Tab` cycles statement, `Drop`, `Cancel` (`Shift+Tab` back), `Enter`
-    /// and `Space` press the focused button, `Esc` cancels.
+    /// and `Space` press the focused button, `Esc` cancels; neither cancels while dropping.
     pub fn key(&mut self, press: KeyPress) -> DropAnswer {
         match press.key {
-            Key::Escape => DropAnswer::Cancel,
+            Key::Escape => self.cancel(),
             Key::Tab if press.modifiers.shift => {
                 self.focus = match self.focus {
                     DropFocus::Statement => DropFocus::Cancel,
@@ -229,7 +239,7 @@ impl DropPrompt {
             }
             Key::Enter | Key::Space => match self.focus {
                 DropFocus::Drop => self.press_drop(),
-                DropFocus::Cancel => DropAnswer::Cancel,
+                DropFocus::Cancel => self.cancel(),
                 DropFocus::Statement => DropAnswer::Pending,
             },
             _ => DropAnswer::Pending,
@@ -534,6 +544,67 @@ mod tests {
     }
 
     #[test]
+    fn hostile_names_stay_one_quoted_name_in_every_dialect() {
+        let hostile = "x\"; DROP TABLE y; --";
+        let table = target(DropKind::Table, hostile);
+        for dialect in [
+            QueryDialect::PostgreSql,
+            QueryDialect::Oracle,
+            QueryDialect::Sqlite,
+        ] {
+            assert_eq!(
+                drop_statement(&table, dialect),
+                "DROP TABLE \"x\"\"; DROP TABLE y; --\";",
+                "{dialect:?}"
+            );
+        }
+        assert_eq!(
+            drop_statement(
+                &target(DropKind::Table, "x`; DROP TABLE y; --"),
+                QueryDialect::MySql
+            ),
+            "DROP TABLE `x``; DROP TABLE y; --`;"
+        );
+        assert_eq!(
+            drop_statement(
+                &target(DropKind::Table, "x]; DROP TABLE y; --"),
+                QueryDialect::SqlServer
+            ),
+            "DROP TABLE [x]]; DROP TABLE y; --];"
+        );
+        let index = target(
+            DropKind::Index {
+                table: "t]; DROP TABLE y; --".to_owned(),
+            },
+            "i",
+        );
+        assert_eq!(
+            drop_statement(&index, QueryDialect::SqlServer),
+            "DROP INDEX i ON [t]]; DROP TABLE y; --];"
+        );
+        let index = target(
+            DropKind::Index {
+                table: "t`; DROP TABLE y; --".to_owned(),
+            },
+            "i",
+        );
+        assert_eq!(
+            drop_statement(&index, QueryDialect::MySql),
+            "DROP INDEX i ON `t``; DROP TABLE y; --`;"
+        );
+        let trigger = target(
+            DropKind::Trigger {
+                table: "t\"; DROP TABLE y; --".to_owned(),
+            },
+            "g",
+        );
+        assert_eq!(
+            drop_statement(&trigger, QueryDialect::PostgreSql),
+            "DROP TRIGGER g ON \"t\"\"; DROP TABLE y; --\";"
+        );
+    }
+
+    #[test]
     fn the_dialog_opens_on_cancel_and_tab_cycles_statement_drop_cancel() {
         let mut prompt = DropPrompt::new(
             target(DropKind::Table, "orders"),
@@ -555,6 +626,10 @@ mod tests {
             DropAnswer::Drop("DROP TABLE orders;".to_owned())
         );
         assert_eq!(prompt.key(press(Key::Enter, false)), DropAnswer::Pending);
+        assert_eq!(prompt.key(press(Key::Escape, false)), DropAnswer::Pending);
+        prompt.focus = DropFocus::Cancel;
+        assert_eq!(prompt.key(press(Key::Enter, false)), DropAnswer::Pending);
+        prompt.focus = DropFocus::Drop;
         prompt.failed(error_line("2BP01", "cannot drop table orders"));
         assert_eq!(prompt.body(), "Error 2BP01: cannot drop table orders");
         assert!(prompt.can_drop());

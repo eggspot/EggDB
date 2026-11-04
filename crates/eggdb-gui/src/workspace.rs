@@ -1231,6 +1231,9 @@ impl Workspace {
             tab.finish(&running.request, outcomes, elapsed);
             tab.transaction = transaction;
         }
+        if let Some(window) = self.main_window_mut() {
+            window.refresh_drop_blocked();
+        }
         if changed_schema && matches!(self.screen, Screen::Main(_)) {
             self.catalog_wanted = true;
         }
@@ -1258,6 +1261,9 @@ impl Workspace {
                     tab.running = false;
                     tab.stopping = false;
                     tab.summary = "Error".to_owned();
+                }
+                if let Some(window) = self.main_window_mut() {
+                    window.refresh_drop_blocked();
                 }
                 true
             }

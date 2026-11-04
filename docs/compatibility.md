@@ -104,12 +104,17 @@ or the menu key opens a row's menu: `Open` (`Expand` / `Collapse` on the connect
 `Insert name`, `Copy name` (also `Ctrl/Cmd+C`; the connection copies its path or URL), `Show DDL`,
 `Refresh` (`F5`) and `Drop…`, with the items a row cannot use shown disabled in place. `Drop…`
 shows the `DROP` statement in the active tab's dialect (MySQL and SQL Server drop an index `ON` its
-table, PostgreSQL a trigger) and runs it in a session of its own, never a tab's; it waits while a
-tab runs or holds a transaction, and a read-only connection disables it. A table with triggers
+table, PostgreSQL a trigger) and runs it on a session no tab uses: on a file one opened for the drop
+and closed after it, on a server the session the connect opened, which only reads the catalog,
+drops and samples rows. So a tab's temporary tables, `search_path`, role or transaction never
+change what it drops. It waits while a tab runs or holds a transaction (and acts as soon as that
+ends), stays open until the answer comes once `Drop` was pressed, and a read-only connection
+disables it. A table with triggers
 shows a `Triggers` group (one row per trigger, its events as right text) and a `Triggers (n)`
 block in its inspector; a trigger's inspector shows its action. `Enter` on a key space opens a
-`Keys in <space>` tab listing its first 100 keys with their values and sizes in bytes, spelled as
-`eggdb ui` spells them (a file only for now; on a server the tab is empty).
+`Keys in <space>` tab listing its first 100 keys with the first 64 bytes of their values and their
+sizes in bytes, spelled as `eggdb ui` spells them, with invisible characters (bidirectional
+overrides, zero-width characters) as `\xNN` (a file only for now; on a server the tab is empty).
 
 Drag or key the splitters beside the sidebar (180 to 480 px), between the editor and the results,
 and beside a docked inspector (200 to 480 px): arrows move 8 px, `Shift` 32, `Home` / `End` to the
