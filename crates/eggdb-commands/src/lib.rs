@@ -12,6 +12,8 @@
 //!
 //! - A paging cursor ([`encode_cursor`], [`decode_cursor`]) is what a list command prints and
 //!   a list tool returns as `next_cursor`, so the next page starts after the last item (D145).
+//! - A time to live ([`parse_time_to_live`]) is read the same way by `eggdb put --ttl`, the MCP
+//!   tool `put` and `eggdb ui`.
 //!
 //! The shared part of the model is EggOS's `docs/ux/command-model.md`; EggDB's tables are in
 //! `docs/ux/command-model.md` in this repository. The registry is `'static` data with no
@@ -19,11 +21,13 @@
 
 mod cursor;
 mod registry;
+mod time_to_live;
 
 pub use cursor::{
     CursorList, CursorRefusal, LONGEST_CURSOR, check_cursor, decode_cursor, encode_cursor,
     shown_cursor, table_at, table_position,
 };
+pub use time_to_live::{TimeToLiveError, parse_time_to_live};
 pub use registry::{
     COMMANDS, COMMON_OPTIONS, CORE_VERBS, ERROR_CODES, KEPT_NAMES, NOUNS, SHIPPED_TOOL_NAMES, TOOLS,
 };
@@ -452,6 +456,9 @@ pub enum Grant {
     AllowWrite,
     /// The key-value store, which every server grants unless it was started with `--tables`.
     KeyValueStore,
+    /// Changing the key-value store: `--allow-write` on a server that grants the key-value
+    /// store (D328).
+    KeyValueWrite,
 }
 
 impl Grant {
@@ -461,11 +468,13 @@ impl Grant {
             Self::Nothing => None,
             Self::AllowWrite => Some("allow_write"),
             Self::KeyValueStore => Some("key_value_store"),
+            Self::KeyValueWrite => Some("key_value_write"),
         }
     }
 }
 
-/// What one `eggdb mcp` server grants its agent, from the options it was started with.
+/// What one `eggdb mcp` server grants its agent, from the options it was started with: a
+/// server that grants both may change the key-value store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Grants {
     /// Started with `--allow-write`.
@@ -566,6 +575,8 @@ pub enum ConfirmCheck {
     /// key or of a unique key to values, `REPLACE` or an upsert, or a `MERGE` that updates or
     /// deletes.
     DestructiveStatement,
+    /// The call deletes a key of the key-value store, which cannot be brought back (D328).
+    KeyDelete,
 }
 
 impl ConfirmCheck {
@@ -573,6 +584,7 @@ impl ConfirmCheck {
     pub const fn name(self) -> &'static str {
         match self {
             Self::DestructiveStatement => "destructive_statement",
+            Self::KeyDelete => "key_delete",
         }
     }
 
@@ -582,6 +594,9 @@ impl ConfirmCheck {
         match self {
             Self::DestructiveStatement => {
                 "the statement is destructive: DROP, TRUNCATE, a column dropped or retyped, a DELETE or UPDATE whose WHERE does not pin every column of the primary key or of a unique key to values, REPLACE or an upsert, or a MERGE that updates or deletes"
+            }
+            Self::KeyDelete => {
+                "the call deletes a key, whose value cannot be brought back through the agent"
             }
         }
     }
@@ -653,13 +668,15 @@ impl ToolDefinition {
     }
 
     /// Whether a server that grants `grants` offers the tool: a tool that needs `--allow-write`
-    /// is offered only by a server started with it, and one that reads the key-value store only
-    /// by a server started without `--tables`.
+    /// is offered only by a server started with it, one that reads the key-value store only
+    /// by a server started without `--tables`, and one that changes it only by a server that
+    /// grants both.
     pub const fn offered(&self, grants: Grants) -> bool {
         match self.grant {
             Grant::Nothing => true,
             Grant::AllowWrite => grants.allow_write,
             Grant::KeyValueStore => grants.key_value_store,
+            Grant::KeyValueWrite => grants.allow_write && grants.key_value_store,
         }
     }
 

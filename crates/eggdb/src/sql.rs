@@ -37,6 +37,7 @@ pub use eggdb_sql::{
 };
 use eggdb_sql::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection};
 use std::ops::Bound;
+use std::time::Duration;
 
 /// A [`Database`] as the store SQL sessions run on; [`Database::sql_store`] makes one.
 #[derive(Debug, Clone, Copy)]
@@ -63,6 +64,9 @@ const WRITER_BUSY: &str = "another session holds the database's one write transa
 fn store_error(error: Error) -> SqlError {
     if error.kind() == ErrorKind::WriterActive {
         return SqlError::store(StoreFailure::Busy, WRITER_BUSY);
+    }
+    if error.kind() == ErrorKind::ReservedKey {
+        return SqlError::new(SqlState::INVALID_PARAMETER_VALUE, error.to_string());
     }
     let failure = match error.kind() {
         ErrorKind::Locked | ErrorKind::WriterActive => StoreFailure::Busy,
@@ -186,6 +190,24 @@ fn collection_of<'t>(
     }
 }
 
+fn writable_collection<'t, 'db>(
+    transaction: &'t mut WriteTransaction<'db>,
+    name: &str,
+) -> SqlResult<Option<crate::WriteCollection<'t, 'db>>> {
+    match transaction.collection(name) {
+        Ok(collection) => Ok(Some(collection)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::CollectionNotFound | ErrorKind::InvalidCollectionName
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(store_error(error)),
+    }
+}
+
 impl KeyValueRead for SqlWriter<'_> {
     fn get(&self, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
         self.0.get(key).map_err(store_error)
@@ -225,6 +247,35 @@ impl KeyValueWrite for SqlWriter<'_> {
 
     fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {
         self.0.delete(key).map_err(store_error)
+    }
+
+    fn put_with_expiry(&mut self, key: &[u8], value: &[u8], ttl: Duration) -> SqlResult<()> {
+        self.0.put_with_expiry(key, value, ttl).map_err(store_error)
+    }
+
+    fn collection_put(
+        &mut self,
+        name: &str,
+        key: &[u8],
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> SqlResult<bool> {
+        let Some(mut collection) = writable_collection(&mut self.0, name)? else {
+            return Ok(false);
+        };
+        match ttl {
+            Some(ttl) => collection.put_with_expiry(key, value, ttl),
+            None => collection.put(key, value),
+        }
+        .map_err(store_error)?;
+        Ok(true)
+    }
+
+    fn collection_delete(&mut self, name: &str, key: &[u8]) -> SqlResult<Option<bool>> {
+        let Some(mut collection) = writable_collection(&mut self.0, name)? else {
+            return Ok(None);
+        };
+        collection.delete(key).map(Some).map_err(store_error)
     }
 
     fn commit(self) -> SqlResult<()> {

@@ -1,73 +1,11 @@
 use std::time::Duration;
 
-const UNITS: [(&str, u64); 5] = [
-    ("d", 86_400_000),
-    ("h", 3_600_000),
-    ("m", 60_000),
-    ("s", 1_000),
-    ("ms", 1),
-];
+pub use eggdb_commands::{TimeToLiveError, parse_time_to_live};
+
 const SECONDS_PER_DAY: u64 = 86_400;
 const SECONDS_PER_HOUR: u64 = 3_600;
 const SECONDS_PER_MINUTE: u64 = 60;
 const MOST_DAYS_SHOWN: u64 = 9_999;
-
-/// Why a text is not a time to live, from [`parse_time_to_live`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimeToLiveError {
-    /// The text is not a time such as `30s`, `5m`, `1h30m`, `7d` or `1500ms`.
-    NotATime,
-    /// The time is zero, which would remove the key at once.
-    Zero,
-}
-
-/// Reads a time to live as people type it and as [`format_time_left`] prints it: counts with a
-/// unit, `ms`, `s`, `m`, `h` or `d`, joined from the largest unit down, each unit at most once,
-/// with no spaces, decimals or bare numbers: `1500ms`, `30s`, `5m`, `1h30m`, `7d`, `1d12h`.
-pub fn parse_time_to_live(text: &str) -> Result<Duration, TimeToLiveError> {
-    let bytes = text.as_bytes();
-    if bytes.is_empty() {
-        return Err(TimeToLiveError::NotATime);
-    }
-    let mut position = 0;
-    let mut smallest_used = None;
-    let mut millis = 0u64;
-    while position < bytes.len() {
-        let digits_start = position;
-        while bytes.get(position).is_some_and(u8::is_ascii_digit) {
-            position += 1;
-        }
-        let digits = &text[digits_start..position];
-        let rest = &text[position..];
-        let Some(rank) = UNITS
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(rank, (unit, _))| {
-                rest.starts_with(unit)
-                    .then_some(rank)
-                    .filter(|_| !(*unit == "m" && rest.starts_with("ms")))
-            })
-        else {
-            return Err(TimeToLiveError::NotATime);
-        };
-        if digits.is_empty() || smallest_used.is_some_and(|used| rank <= used) {
-            return Err(TimeToLiveError::NotATime);
-        }
-        smallest_used = Some(rank);
-        let (unit, unit_millis) = UNITS[rank];
-        position += unit.len();
-        let count: u64 = digits.parse().map_err(|_| TimeToLiveError::NotATime)?;
-        millis = count
-            .checked_mul(unit_millis)
-            .and_then(|part| millis.checked_add(part))
-            .ok_or(TimeToLiveError::NotATime)?;
-    }
-    if millis == 0 {
-        return Err(TimeToLiveError::Zero);
-    }
-    Ok(Duration::from_millis(millis))
-}
 
 /// A remaining time in full, in the grammar [`parse_time_to_live`] reads: milliseconds under one
 /// second (`412ms`, and `1ms` for less), otherwise whole seconds rounded down, split into days,

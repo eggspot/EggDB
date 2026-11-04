@@ -3,20 +3,20 @@ use crate::audit::{
     call_started_record, now_rfc3339, now_unix_ms, server_started_record,
     time_limit_exceeded_record,
 };
-use crate::confirmation::elicitation_params;
+use crate::confirmation::{Asked, elicitation_params};
 use crate::json_out::{JsonOut, encoded_string};
 use crate::jsonrpc::{
     INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, Incoming, METHOD_NOT_FOUND, Message,
     MessageReader, RESOURCE_NOT_FOUND, error_line, parse_message, request_id, result_line,
 };
 use crate::tools::{
-    self, Arguments, Call, SCHEMA_URI, Tool, ToolError, ToolSuccess, WriteOutcome, resources_list,
-    tools_list,
+    self, Arguments, Call, KeyChange, SCHEMA_URI, Tool, ToolError, ToolSuccess, WriteOutcome,
+    resources_list, tools_list,
 };
 use crate::watchdog::Watchdog;
 use eggdb_commands::{Category, ConfirmCheck, Effect, Grants};
 use eggdb_sql::json::{Json, Node};
-use eggdb_sql::{DestructiveStatement, KeyValueStore, VisibleTables};
+use eggdb_sql::{KeyValueStore, VisibleTables};
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
@@ -131,10 +131,16 @@ impl Connection<'_, '_> {
 
 struct PendingWrite<'a> {
     id: &'a str,
+    tool: Tool,
     call_id: String,
     started: String,
     arguments: &'a str,
     begun: Instant,
+}
+
+struct Refusals {
+    declined: ToolError,
+    needs_confirmation: ToolError,
 }
 
 enum UserAnswer {
@@ -615,6 +621,9 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
         {
             return self.write_call(id, &arguments, &arguments_text, link);
         }
+        if matches!(tool, Tool::Put | Tool::Del) && tool.definition().offered(self.grants()) {
+            return self.key_write_call(id, tool, &arguments, &arguments_text, link);
+        }
         let call_id = self.next_call_id();
         let started = now_rfc3339();
         let (outcome, duration) =
@@ -634,13 +643,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
         arguments_text: &str,
         link: Option<&mut Connection<'_, '_>>,
     ) -> Option<String> {
-        let pending = PendingWrite {
-            id,
-            call_id: self.next_call_id(),
-            started: now_rfc3339(),
-            arguments: arguments_text,
-            begun: Instant::now(),
-        };
+        let pending = self.pending_write(id, Tool::WriteSql, arguments_text);
         let prepared = tools::write_request(arguments).and_then(|request| {
             let call = self.call(Instant::now() + self.config.time_limit);
             let destructive = tools::destructive_part(&request, &call)?;
@@ -654,71 +657,140 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
         };
         let mut confirmation = None;
         if let Some(statement) = &destructive {
-            match link {
-                Some(link) if self.client.can_ask_user => {
-                    match self.ask_user(link, id, statement, request.sql) {
-                        UserAnswer::Run => confirmation = Some("elicitation"),
-                        UserAnswer::Declined => {
-                            return Some(self.finish_write(
-                                &pending,
-                                unwritten(Err(tools::declined_by_user(statement))),
-                                Some("elicitation"),
-                            ));
-                        }
-                        UserAnswer::Failed => {
-                            return Some(self.finish_write(
-                                &pending,
-                                unwritten(Err(tools::confirmation_failed())),
-                                Some("elicitation"),
-                            ));
-                        }
-                        UserAnswer::Cancelled => {
-                            let cancelled = unwritten(Err(ToolError::new(
-                                "cancelled",
-                                "The call was cancelled while the user was asked. Nothing was run.",
-                            )));
-                            let _ = self.finish_write(&pending, cancelled, Some("elicitation"));
-                            return None;
-                        }
-                    }
-                }
-                _ if request.confirm => confirmation = Some("confirm_argument"),
-                _ => {
-                    return Some(self.finish_write(
-                        &pending,
-                        unwritten(Err(tools::needs_confirmation(statement))),
-                        None,
-                    ));
-                }
+            let asked = Asked::Statement {
+                statement,
+                sql: request.sql,
+            };
+            let refusals = Refusals {
+                declined: tools::declined_by_user(statement),
+                needs_confirmation: tools::needs_confirmation(statement),
+            };
+            match self.confirmed(&pending, link, &asked, request.confirm, refusals) {
+                Ok(how) => confirmation = Some(how),
+                Err(answer) => return answer,
             }
         }
-        let request_record = self.request_of(
-            &pending.call_id,
-            &pending.started,
-            Tool::WriteSql.name(),
-            pending.arguments,
-        );
-        if let Err(failure) = self
-            .config
-            .audit
-            .append(&call_started_record(&request_record))
-        {
-            let error = ToolError::new(
-                "audit_unavailable",
-                format!(
-                    "The call could not be recorded in the audit log ({failure}), so nothing was run."
-                ),
-            )
-            .with_fix(format!(
-                "Ask the user to make {} writable.",
-                self.config.audit.path().display()
-            ));
-            return Some(tool_result_line(id, &Err(error)));
+        if let Err(answer) = self.record_write_start(&pending) {
+            return Some(answer);
         }
         let (outcome, _) = self.timed(Tool::WriteSql.name(), |call| {
             tools::write_sql(&request, destructive.as_ref(), call)
         });
         Some(self.finish_write(&pending, outcome, confirmation))
+    }
+
+    fn key_write_call(
+        &mut self,
+        id: &str,
+        tool: Tool,
+        arguments: &Arguments<'_>,
+        arguments_text: &str,
+        link: Option<&mut Connection<'_, '_>>,
+    ) -> Option<String> {
+        let pending = self.pending_write(id, tool, arguments_text);
+        let request = match tools::key_write_request(tool, arguments) {
+            Ok(request) => request,
+            Err(error) => {
+                return Some(self.finish_write(&pending, unwritten(Err(error)), None));
+            }
+        };
+        let mut confirmation = None;
+        if matches!(request.change, KeyChange::Delete) {
+            let asked = Asked::KeyDelete {
+                collection: request.collection,
+                key: &request.key,
+            };
+            let refusals = Refusals {
+                declined: tools::declined_key_delete(),
+                needs_confirmation: tools::key_delete_needs_confirmation(),
+            };
+            match self.confirmed(&pending, link, &asked, request.confirm, refusals) {
+                Ok(how) => confirmation = Some(how),
+                Err(answer) => return answer,
+            }
+        }
+        if let Err(answer) = self.record_write_start(&pending) {
+            return Some(answer);
+        }
+        let (outcome, _) = self.timed(request.tool.name(), |call| {
+            tools::write_key(&request, call)
+        });
+        Some(self.finish_write(&pending, outcome, confirmation))
+    }
+
+    fn pending_write<'a>(&mut self, id: &'a str, tool: Tool, arguments: &'a str) -> PendingWrite<'a> {
+        PendingWrite {
+            id,
+            tool,
+            call_id: self.next_call_id(),
+            started: now_rfc3339(),
+            arguments,
+            begun: Instant::now(),
+        }
+    }
+
+    fn confirmed(
+        &mut self,
+        pending: &PendingWrite<'_>,
+        link: Option<&mut Connection<'_, '_>>,
+        asked: &Asked<'_>,
+        confirm_argument: bool,
+        refusals: Refusals,
+    ) -> Result<&'static str, Option<String>> {
+        match link {
+            Some(link) if self.client.can_ask_user => match self.ask_user(link, pending.id, asked) {
+                UserAnswer::Run => Ok("elicitation"),
+                UserAnswer::Declined => Err(Some(self.finish_write(
+                    pending,
+                    unwritten(Err(refusals.declined)),
+                    Some("elicitation"),
+                ))),
+                UserAnswer::Failed => Err(Some(self.finish_write(
+                    pending,
+                    unwritten(Err(tools::confirmation_failed())),
+                    Some("elicitation"),
+                ))),
+                UserAnswer::Cancelled => {
+                    let cancelled = unwritten(Err(ToolError::new(
+                        "cancelled",
+                        "The call was cancelled while the user was asked. Nothing was run.",
+                    )));
+                    let _ = self.finish_write(pending, cancelled, Some("elicitation"));
+                    Err(None)
+                }
+            },
+            _ if confirm_argument => Ok("confirm_argument"),
+            _ => Err(Some(self.finish_write(
+                pending,
+                unwritten(Err(refusals.needs_confirmation)),
+                None,
+            ))),
+        }
+    }
+
+    fn record_write_start(&self, pending: &PendingWrite<'_>) -> Result<(), String> {
+        let request_record = self.request_of(
+            &pending.call_id,
+            &pending.started,
+            pending.tool.name(),
+            pending.arguments,
+        );
+        self.config
+            .audit
+            .append(&call_started_record(&request_record))
+            .map_err(|failure| {
+                let error = ToolError::new(
+                    "audit_unavailable",
+                    format!(
+                        "The call could not be recorded in the audit log ({failure}), so nothing was run."
+                    ),
+                )
+                .with_fix(format!(
+                    "Ask the user to make {} writable.",
+                    self.config.audit.path().display()
+                ));
+                tool_result_line(pending.id, &Err(error))
+            })
     }
 
     fn finish_write(
@@ -731,7 +803,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
         let request = self.request_of(
             &pending.call_id,
             &pending.started,
-            Tool::WriteSql.name(),
+            pending.tool.name(),
             pending.arguments,
         );
         let facts = WriteFacts {
@@ -760,14 +832,13 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
         &mut self,
         link: &mut Connection<'_, '_>,
         call: &str,
-        statement: &DestructiveStatement,
-        sql: &str,
+        asked: &Asked<'_>,
     ) -> UserAnswer {
         self.confirmations += 1;
         let asked = format!("eggdb-confirm-{}", self.confirmations);
         let asked_id = encoded_string(&asked);
         let form_mode = self.client.protocol.as_deref() == Some(NEWEST_PROTOCOL);
-        let params = elicitation_params(&self.config.database_name, statement, sql, form_mode);
+        let params = elicitation_params(&self.config.database_name, asked, form_mode);
         let mut out = JsonOut::new();
         out.begin_object()
             .key("jsonrpc")
@@ -925,8 +996,13 @@ pub(crate) fn instructions(allow_write: bool, limited_to_tables: bool) -> String
         } else {
             ""
         };
+        let keys = if limited_to_tables {
+            ""
+        } else {
+            "; put stores a key and del deletes one, after the user's confirmation"
+        };
         format!(
-            "This is an EggDB database the user lets you change (--allow-write). Effects: {} {}; {} {}; {} removes data (DROP, TRUNCATE, an upsert, a DELETE or UPDATE not pinned by a key, dropping or retyping a column) and needs the user's confirmation.{limit} Start with list_tables, then describe_table or sample_rows. row_list pages a table's rows: send next_cursor back as after. One SQL statement per call, in the dialect you name (postgresql by default, or mysql, sqlite, oracle): run_sql reads, write_sql writes and commits on its own. Never send confirm: true without asking your user. {errors} {closing}",
+            "This is an EggDB database the user lets you change (--allow-write). Effects: {} {}; {} {}; {} removes data (DROP, TRUNCATE, an upsert, a DELETE or UPDATE not pinned by a key, dropping or retyping a column) and needs the user's confirmation.{limit} Start with list_tables, then describe_table or sample_rows. row_list pages a table's rows: send next_cursor back as after. One SQL statement per call, in the dialect you name (postgresql by default, or mysql, sqlite, oracle): run_sql reads, write_sql writes and commits on its own{keys}. Never send confirm: true without asking your user. {errors} {closing}",
             read.name(),
             read.meaning(),
             change.name(),

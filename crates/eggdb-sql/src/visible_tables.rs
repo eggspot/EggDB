@@ -2536,6 +2536,18 @@ impl<W: KeyValueWrite> KeyValueRead for VisibleWrite<W> {
     }
 }
 
+impl<W: KeyValueWrite> VisibleWrite<W> {
+    fn refuse_key_value_write_when_confined(&self) -> SqlResult<()> {
+        if self.confined.is_none() {
+            return Ok(());
+        }
+        Err(SqlError::new(
+            SqlState::INSUFFICIENT_PRIVILEGE,
+            "only the listed tables may be changed (--tables), not the key-value store",
+        ))
+    }
+}
+
 impl<W: KeyValueWrite> KeyValueWrite for VisibleWrite<W> {
     fn put(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
         if self.confined.is_none() {
@@ -2571,6 +2583,32 @@ impl<W: KeyValueWrite> KeyValueWrite for VisibleWrite<W> {
             confined.note_deleted(key);
         }
         Ok(deleted)
+    }
+
+    fn put_with_expiry(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        ttl: std::time::Duration,
+    ) -> SqlResult<()> {
+        self.refuse_key_value_write_when_confined()?;
+        self.inner.put_with_expiry(key, value, ttl)
+    }
+
+    fn collection_put(
+        &mut self,
+        name: &str,
+        key: &[u8],
+        value: &[u8],
+        ttl: Option<std::time::Duration>,
+    ) -> SqlResult<bool> {
+        self.refuse_key_value_write_when_confined()?;
+        self.inner.collection_put(name, key, value, ttl)
+    }
+
+    fn collection_delete(&mut self, name: &str, key: &[u8]) -> SqlResult<Option<bool>> {
+        self.refuse_key_value_write_when_confined()?;
+        self.inner.collection_delete(name, key)
     }
 
     fn commit(self) -> SqlResult<()> {

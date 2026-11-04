@@ -275,10 +275,20 @@ fn every_tool_s_annotations_follow_from_its_fields() {
             key_value_store: false,
             ..read_only
         };
+        let writing_limited_to_tables = Grants {
+            key_value_store: false,
+            ..every
+        };
         assert!(tool.offered(every), "{}", tool.name);
         assert_eq!(
             tool.offered(read_only),
-            tool.grant != Grant::AllowWrite,
+            !matches!(tool.grant, Grant::AllowWrite | Grant::KeyValueWrite),
+            "{}",
+            tool.name
+        );
+        assert_eq!(
+            tool.offered(writing_limited_to_tables),
+            matches!(tool.grant, Grant::Nothing | Grant::AllowWrite),
             "{}",
             tool.name
         );
@@ -295,11 +305,19 @@ fn every_tool_s_annotations_follow_from_its_fields() {
 fn a_server_limited_to_tables_withdraws_exactly_the_key_value_tools() {
     let withdrawn: Vec<&str> = TOOLS
         .iter()
-        .filter(|tool| tool.grant == Grant::KeyValueStore)
+        .filter(|tool| matches!(tool.grant, Grant::KeyValueStore | Grant::KeyValueWrite))
         .map(|tool| tool.name)
         .collect();
-    assert_eq!(withdrawn, vec!["kv_get", "kv_scan"]);
+    assert_eq!(withdrawn, vec!["kv_get", "kv_scan", "put", "del"]);
     assert_eq!(Grant::KeyValueStore.name(), Some("key_value_store"));
+    assert_eq!(Grant::KeyValueWrite.name(), Some("key_value_write"));
+    let deleting = tool("del").map(|found| (found.max_effect, found.confirm));
+    assert_eq!(
+        deleting,
+        Some((Effect::Destroy, Some(ConfirmCheck::KeyDelete)))
+    );
+    let storing = tool("put").map(|found| (found.max_effect, found.confirm));
+    assert_eq!(storing, Some((Effect::Change, None)));
     let refusal = ERROR_CODES
         .iter()
         .find(|known| known.code == "limited_to_tables")
