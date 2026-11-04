@@ -95,8 +95,9 @@ impl ClientSettings {
     }
 
     /// Writes the settings to `path`, creating its directory; only the user can read it. They
-    /// are written to a file beside it first and then renamed over it, so a crash or a full
-    /// disk mid-write leaves the old file whole.
+    /// are written to a new file beside it first and then renamed over it, so a crash or a full
+    /// disk mid-write leaves the old file whole. When `path` is a symbolic link the file it
+    /// points to is replaced and the link is kept; a link to nothing is refused.
     pub fn save(&self, path: &Path) -> io::Result<()> {
         if let Some(directory) = path
             .parent()
@@ -104,14 +105,32 @@ impl ClientSettings {
         {
             eggdb_platform::user_files::create_private_directory(directory)?;
         }
-        let written = written_beside(path);
-        let saved = write_whole(&written, self.render().as_bytes())
-            .and_then(|()| std::fs::rename(&written, path));
+        let target = replaced_file(path)?;
+        let written = written_beside(&target);
+        let saved = write_new(&written, self.render().as_bytes())
+            .and_then(|()| std::fs::rename(&written, &target));
         if saved.is_err() {
             let _ = std::fs::remove_file(&written);
         }
         saved
     }
+}
+
+fn replaced_file(path: &Path) -> io::Result<PathBuf> {
+    let is_link = std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink());
+    if !is_link {
+        return Ok(path.to_path_buf());
+    }
+    std::fs::canonicalize(path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "the settings file {} is a symbolic link to a file that cannot be reached: {error}",
+                path.display()
+            ),
+        )
+    })
 }
 
 fn names(line: &str, name: &str) -> bool {
@@ -126,8 +145,14 @@ fn written_beside(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{name}.{}.new", std::process::id()))
 }
 
-fn write_whole(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut file = eggdb_platform::user_files::open_private_rewrite(path)?;
+fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = match eggdb_platform::user_files::create_private_new(path) {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(path)?;
+            eggdb_platform::user_files::create_private_new(path)?
+        }
+        opened => opened?,
+    };
     file.write_all(bytes)?;
     file.flush()?;
     file.sync_all()
@@ -242,5 +267,60 @@ mod tests {
         text.push('#');
         std::fs::write(&path, &text).expect("the file is written");
         assert_eq!(ClientSettings::load(&path), ClientSettings::default());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symbolic_link_to_the_settings_is_kept_and_its_file_is_replaced() {
+        let directory =
+            std::env::temp_dir().join(format!("eggdb-gui-settings-link-{}", std::process::id()));
+        let kept = directory.join("dotfiles");
+        std::fs::create_dir_all(&kept).expect("a directory");
+        let real = kept.join(FILE_NAME);
+        std::fs::write(&real, "layout = ssms\n").expect("the file is written");
+        let link = directory.join("linked-settings");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).expect("a link");
+        let settings = ClientSettings {
+            layout: Some(Layout::PgAdmin),
+            ..ClientSettings::default()
+        };
+        settings.save(&link).expect("settings are written through the link");
+        let metadata = std::fs::symlink_metadata(&link).expect("the link is there");
+        assert!(metadata.file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(&real).expect("the file reads"),
+            "layout = pgadmin\n"
+        );
+        let dangling = directory.join("dangling-settings");
+        let _ = std::fs::remove_file(&dangling);
+        std::os::unix::fs::symlink(directory.join("missing"), &dangling).expect("a link");
+        assert!(settings.save(&dangling).is_err());
+        assert!(!directory.join("missing").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_planted_at_the_temporary_name_never_receives_the_settings() {
+        let directory =
+            std::env::temp_dir().join(format!("eggdb-gui-settings-plant-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("a directory");
+        let victim = directory.join("victim");
+        std::fs::write(&victim, "keep me\n").expect("the file is written");
+        let path = directory.join(FILE_NAME);
+        let planted = written_beside(&path);
+        let _ = std::fs::remove_file(&planted);
+        std::os::unix::fs::symlink(&victim, &planted).expect("a link");
+        let settings = ClientSettings {
+            layout: Some(Layout::DataGrip),
+            ..ClientSettings::default()
+        };
+        settings.save(&path).expect("settings are written");
+        assert_eq!(
+            std::fs::read_to_string(&victim).expect("the victim reads"),
+            "keep me\n"
+        );
+        assert_eq!(ClientSettings::load(&path).layout, Some(Layout::DataGrip));
+        assert!(std::fs::symlink_metadata(&planted).is_err());
     }
 }
