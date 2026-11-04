@@ -1419,3 +1419,11 @@ SELECT 3
 
 ok
 DROP TABLE rb317
+
+chapter "Built-In Aggregate Functions": SQLite has no stddev or variance aggregate
+error 42883 1
+SELECT stddev(1)
+
+error 42883 1
+SELECT variance(1)
+

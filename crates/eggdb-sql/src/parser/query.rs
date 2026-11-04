@@ -483,6 +483,8 @@ impl Parser<'_> {
                     self.expect_word("last")?;
                     Some(false)
                 }
+            } else if self.mysql() {
+                Some(!descending)
             } else {
                 None
             };

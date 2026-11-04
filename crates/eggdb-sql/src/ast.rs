@@ -1719,10 +1719,22 @@ pub(crate) enum AggregateFunction {
     PercentileDisc,
     Mode,
     ApproxCountDistinct,
+    Stddev,
+    StddevSamp,
+    StddevPop,
+    Variance,
+    VarSamp,
+    VarPop,
+    OracleStddev,
+    OracleVariance,
+    Rank,
+    DenseRank,
+    PercentRank,
+    CumeDist,
 }
 
 impl AggregateFunction {
-    pub(crate) const ALL: [Self; 18] = [
+    pub(crate) const ALL: [Self; 30] = [
         Self::Count,
         Self::Sum,
         Self::Avg,
@@ -1741,7 +1753,50 @@ impl AggregateFunction {
         Self::PercentileDisc,
         Self::Mode,
         Self::ApproxCountDistinct,
+        Self::Stddev,
+        Self::StddevSamp,
+        Self::StddevPop,
+        Self::Variance,
+        Self::VarSamp,
+        Self::VarPop,
+        Self::OracleStddev,
+        Self::OracleVariance,
+        Self::Rank,
+        Self::DenseRank,
+        Self::PercentRank,
+        Self::CumeDist,
     ];
+
+    pub(crate) fn hypothetical_named(name: &str) -> Option<Self> {
+        Some(match name {
+            "rank" => Self::Rank,
+            "dense_rank" => Self::DenseRank,
+            "percent_rank" => Self::PercentRank,
+            "cume_dist" => Self::CumeDist,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn is_hypothetical(self) -> bool {
+        matches!(
+            self,
+            Self::Rank | Self::DenseRank | Self::PercentRank | Self::CumeDist
+        )
+    }
+
+    pub(crate) fn is_statistical(self) -> bool {
+        matches!(
+            self,
+            Self::Stddev
+                | Self::StddevSamp
+                | Self::StddevPop
+                | Self::Variance
+                | Self::VarSamp
+                | Self::VarPop
+                | Self::OracleStddev
+                | Self::OracleVariance
+        )
+    }
 
     pub(crate) fn ordered_set_named(name: &str) -> Option<Self> {
         Some(match name {
@@ -1805,6 +1860,18 @@ impl AggregateFunction {
             Self::PercentileCont => "percentile_cont",
             Self::PercentileDisc => "percentile_disc",
             Self::Mode => "mode",
+            Self::Stddev => "stddev",
+            Self::StddevSamp => "stddev_samp",
+            Self::StddevPop => "stddev_pop",
+            Self::Variance => "variance",
+            Self::VarSamp => "var_samp",
+            Self::VarPop => "var_pop",
+            Self::OracleStddev => "oracle_stddev",
+            Self::OracleVariance => "oracle_variance",
+            Self::Rank => "rank",
+            Self::DenseRank => "dense_rank",
+            Self::PercentRank => "percent_rank",
+            Self::CumeDist => "cume_dist",
         }
     }
 

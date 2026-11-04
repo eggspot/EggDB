@@ -90,8 +90,6 @@ const AGGREGATES: &[&str] = &[
     "jsonb_agg",
     "json_object_agg",
     "jsonb_object_agg",
-    "stddev",
-    "variance",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -235,6 +233,42 @@ pub(crate) fn like_escape(pattern: Expr, escape: Expr) -> Expr {
     }
 }
 
+fn argument_in_double(expr: Expr) -> Expr {
+    let Expr { kind, position } = expr;
+    let ExprKind::Aggregate {
+        function,
+        argument: Some(argument),
+        distinct,
+    } = kind
+    else {
+        return Expr { kind, position };
+    };
+    let ordered = matches!(
+        &argument.kind,
+        ExprKind::Function { name, .. } if name == crate::aggregate::ORDERED_ARGUMENTS
+    );
+    let argument = if ordered {
+        *argument
+    } else {
+        let at = argument.position;
+        Expr {
+            kind: ExprKind::Cast {
+                expr: argument,
+                sql_type: SqlType::Double,
+            },
+            position: at,
+        }
+    };
+    Expr {
+        kind: ExprKind::Aggregate {
+            function,
+            argument: Some(Box::new(argument)),
+            distinct,
+        },
+        position,
+    }
+}
+
 fn is_postgresql_only(name: &str) -> bool {
     POSTGRESQL_ONLY_FUNCTIONS.contains(&name)
         || POSTGRESQL_ONLY_SET_RETURNING.contains(&name)
@@ -265,7 +299,7 @@ const NAMED_PARAMETERS: [(&str, &[&str]); 5] = [
     ),
 ];
 
-const INTERNAL_FUNCTIONS: [&str; 28] = [
+const INTERNAL_FUNCTIONS: [&str; 29] = [
     crate::triggers::RAISE_FUNCTION,
     crate::routines::ROUTINE_CALL,
     "regclass_cast",
@@ -293,6 +327,7 @@ const INTERNAL_FUNCTIONS: [&str; 28] = [
     crate::aggregate::ORDERED_ARGUMENTS,
     crate::aggregate::FILTERED_ARGUMENTS,
     crate::aggregate::ORDERED_SET_ARGUMENTS,
+    crate::hypothetical_set::HYPOTHETICAL_ARGUMENTS,
     crate::window::WINDOW_CALL,
 ];
 
@@ -4601,6 +4636,20 @@ impl<'t> Parser<'t> {
         if let Some(expr) = self.sql_json_function(&name)? {
             return Ok(expr);
         }
+        if (self.postgresql() || self.oracle())
+            && let Some(function) = AggregateFunction::hypothetical_named(&name.text)
+            && self.within_group_follows_arguments()
+        {
+            return self.hypothetical_set_aggregate(&name, function);
+        }
+        if let Some((function, computed_in_double)) = self.statistical_aggregate(&name.text) {
+            let expr = self.aggregate(name, function)?;
+            return Ok(if computed_in_double {
+                argument_in_double(expr)
+            } else {
+                expr
+            });
+        }
         if self.mysql()
             && let Some(expr) = self.mysql_function(&name)?
         {
@@ -4865,6 +4914,54 @@ impl<'t> Parser<'t> {
             },
             position: name.position,
         })
+    }
+
+    fn statistical_aggregate(&self, name: &str) -> Option<(AggregateFunction, bool)> {
+        let function = match (self.dialect, name) {
+            (Dialect::PostgreSql, "stddev") => AggregateFunction::Stddev,
+            (Dialect::PostgreSql, "variance") => AggregateFunction::Variance,
+            (Dialect::Oracle, "stddev") => AggregateFunction::OracleStddev,
+            (Dialect::Oracle, "variance") => AggregateFunction::OracleVariance,
+            (Dialect::PostgreSql | Dialect::Oracle | Dialect::MySql, "stddev_samp")
+            | (Dialect::SqlServer, "stdev") => AggregateFunction::StddevSamp,
+            (Dialect::PostgreSql | Dialect::Oracle, "stddev_pop")
+            | (Dialect::MySql, "std" | "stddev" | "stddev_pop")
+            | (Dialect::SqlServer, "stdevp") => AggregateFunction::StddevPop,
+            (Dialect::PostgreSql | Dialect::Oracle | Dialect::MySql, "var_samp")
+            | (Dialect::SqlServer, "var") => AggregateFunction::VarSamp,
+            (Dialect::PostgreSql | Dialect::Oracle, "var_pop")
+            | (Dialect::MySql, "variance" | "var_pop")
+            | (Dialect::SqlServer, "varp") => AggregateFunction::VarPop,
+            _ => return None,
+        };
+        Some((
+            function,
+            matches!(self.dialect, Dialect::MySql | Dialect::SqlServer),
+        ))
+    }
+
+    fn within_group_follows_arguments(&self) -> bool {
+        if self.peek_kind() != &TokenKind::LeftParen {
+            return false;
+        }
+        let mut depth = 0usize;
+        let mut ahead = 0usize;
+        while self.at + ahead < self.tokens.len() {
+            match self.peek_kind_at(ahead) {
+                TokenKind::LeftParen => depth += 1,
+                TokenKind::RightParen => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return self.is_word_at(ahead + 1, "within")
+                            && self.is_word_at(ahead + 2, "group");
+                    }
+                }
+                TokenKind::End => return false,
+                _ => {}
+            }
+            ahead += 1;
+        }
+        false
     }
 
     fn aggregate_order(&mut self, argument: Expr) -> SqlResult<Expr> {

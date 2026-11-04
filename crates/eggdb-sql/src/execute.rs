@@ -3047,6 +3047,20 @@ pub(crate) fn row_limit(expr: Option<&Expr>) -> SqlResult<RowLimit> {
                     ..unlimited
                 });
             }
+            "postgresql_fetch_with_ties" => {
+                let Some(count) = row_count(Some(count), "LIMIT")? else {
+                    return Err(SqlError::new(
+                        SqlState::INVALID_ROW_COUNT_IN_LIMIT_CLAUSE,
+                        "row count in FETCH FIRST ... WITH TIES clause must not be null",
+                    )
+                    .at(count.position));
+                };
+                return Ok(RowLimit {
+                    count: Some(count),
+                    with_ties: true,
+                    ..unlimited
+                });
+            }
             "oracle_fetch_percent" | "oracle_fetch_percent_with_ties" => {
                 return Ok(RowLimit {
                     count: None,

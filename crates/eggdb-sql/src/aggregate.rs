@@ -366,7 +366,15 @@ fn sqlserver_aggregate_input(
 fn result_type(function: AggregateFunction, argument: Option<SqlType>) -> Option<SqlType> {
     match function {
         AggregateFunction::Count | AggregateFunction::ApproxCountDistinct => Some(SqlType::BigInt),
-        AggregateFunction::Avg => match argument? {
+        AggregateFunction::Avg
+        | AggregateFunction::Stddev
+        | AggregateFunction::StddevSamp
+        | AggregateFunction::StddevPop
+        | AggregateFunction::Variance
+        | AggregateFunction::VarSamp
+        | AggregateFunction::VarPop
+        | AggregateFunction::OracleStddev
+        | AggregateFunction::OracleVariance => match argument? {
             SqlType::Real | SqlType::Double => Some(SqlType::Double),
             SqlType::SmallInt | SqlType::Integer | SqlType::BigInt | SqlType::Numeric(_) => {
                 Some(SqlType::Numeric(None))
@@ -403,6 +411,8 @@ fn result_type(function: AggregateFunction, argument: Option<SqlType>) -> Option
         AggregateFunction::PercentileDisc | AggregateFunction::Mode => {
             argument.map(SqlType::without_modifier)
         }
+        AggregateFunction::Rank | AggregateFunction::DenseRank => Some(SqlType::BigInt),
+        AggregateFunction::PercentRank | AggregateFunction::CumeDist => Some(SqlType::Double),
     }
 }
 
@@ -484,6 +494,9 @@ fn check_argument_type(function: AggregateFunction, sql_type: SqlType) -> SqlRes
             }
         }
         AggregateFunction::Sum | AggregateFunction::Avg if !sql_type.is_numeric() => {
+            Err(undefined_aggregate(function, &name()))
+        }
+        function if function.is_statistical() && !sql_type.is_numeric() => {
             Err(undefined_aggregate(function, &name()))
         }
         AggregateFunction::StringAgg if !sql_type.is_character() && sql_type != SqlType::Bytea => {
@@ -1027,6 +1040,8 @@ pub(crate) enum Accumulator {
     Truth(Option<bool>),
     Ordered(Vec<OrderedInput>),
     Sketch(crate::hyperloglog::Sketch),
+    Moments(crate::statistical_aggregates::Moments),
+    Standing(crate::hypothetical_set::Standing),
 }
 
 struct Group {
@@ -1044,6 +1059,7 @@ impl Accumulator {
             Self::Extreme(value) | Self::Joined(Some(value)) => crate::memory::held_bytes(value),
             Self::JsonParts(Some(text)) => text.len(),
             Self::Sketch(_) => crate::hyperloglog::Sketch::BYTES,
+            Self::Standing(standing) => standing.held_bytes(),
             Self::Collected { bytes, .. } => *bytes,
             Self::Ordered(inputs) => inputs
                 .iter()
@@ -1110,6 +1126,22 @@ impl Call {
             | AggregateFunction::Mode => Accumulator::Ordered(Vec::new()),
             AggregateFunction::ApproxCountDistinct => {
                 Accumulator::Sketch(crate::hyperloglog::Sketch::new())
+            }
+            AggregateFunction::Stddev
+            | AggregateFunction::StddevSamp
+            | AggregateFunction::StddevPop
+            | AggregateFunction::Variance
+            | AggregateFunction::VarSamp
+            | AggregateFunction::VarPop
+            | AggregateFunction::OracleStddev
+            | AggregateFunction::OracleVariance => {
+                Accumulator::Moments(crate::statistical_aggregates::Moments::Empty)
+            }
+            AggregateFunction::Rank
+            | AggregateFunction::DenseRank
+            | AggregateFunction::PercentRank
+            | AggregateFunction::CumeDist => {
+                Accumulator::Standing(crate::hypothetical_set::Standing::default())
             }
         }
     }
@@ -1329,7 +1361,16 @@ impl Call {
             (self.function, &value),
             (AggregateFunction::Count, _)
                 | (
-                    AggregateFunction::Sum | AggregateFunction::Avg,
+                    AggregateFunction::Sum
+                        | AggregateFunction::Avg
+                        | AggregateFunction::Stddev
+                        | AggregateFunction::StddevSamp
+                        | AggregateFunction::StddevPop
+                        | AggregateFunction::Variance
+                        | AggregateFunction::VarSamp
+                        | AggregateFunction::VarPop
+                        | AggregateFunction::OracleStddev
+                        | AggregateFunction::OracleVariance,
                     Value::SmallInt(_)
                         | Value::Integer(_)
                         | Value::BigInt(_)
@@ -1386,7 +1427,11 @@ impl Call {
                 });
             }
             Accumulator::Sketch(sketch) => sketch.add(&value),
-            Accumulator::Joined(_) | Accumulator::JsonParts(_) | Accumulator::Ordered(_) => {}
+            Accumulator::Moments(moments) => moments.add(&value)?,
+            Accumulator::Joined(_)
+            | Accumulator::JsonParts(_)
+            | Accumulator::Ordered(_)
+            | Accumulator::Standing(_) => {}
         }
         Ok(())
     }
@@ -1503,6 +1548,8 @@ impl Call {
             Accumulator::Truth(state) => state.map_or(Value::Null, Value::Boolean),
             Accumulator::Sketch(sketch) => Value::BigInt(sketch.estimate()),
             Accumulator::Ordered(inputs) => self.finish_ordered(inputs)?,
+            Accumulator::Moments(moments) => moments.finish(self.function)?,
+            Accumulator::Standing(standing) => standing.result(self.function),
         })
     }
 }
@@ -1808,6 +1855,24 @@ impl Grouping {
             if let Some(condition) = condition
                 && evaluator.boolean(condition, "FILTER")? != Some(true)
             {
+                continue;
+            }
+            if call.function.is_hypothetical() {
+                let before = group.accumulators[number].held_bytes();
+                if let (Some(argument), Accumulator::Standing(standing)) =
+                    (argument, &mut group.accumulators[number])
+                {
+                    standing
+                        .add_row(call.function, argument, evaluator)
+                        .map_err(|error| error.at_if_unplaced(call.position))?;
+                }
+                let grown = group.accumulators[number]
+                    .held_bytes()
+                    .saturating_sub(before);
+                if grown > 0 {
+                    group.held.add_bytes(grown)?;
+                    memory.charge(grown)?;
+                }
                 continue;
             }
             let Some(argument) = argument else {

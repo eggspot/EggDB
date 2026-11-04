@@ -701,7 +701,7 @@ impl Parser<'_> {
         }
         Ok(Expr {
             kind: ExprKind::OracleFunction {
-                name: "oracle_fetch_with_ties",
+                name: "postgresql_fetch_with_ties",
                 arguments: vec![count],
             },
             position,

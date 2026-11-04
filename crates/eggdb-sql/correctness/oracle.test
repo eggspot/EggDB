@@ -3507,3 +3507,106 @@ SELECT 1
 
 ok
 DROP TABLE ro318
+
+chapter "STDDEV", "STDDEV_SAMP", "STDDEV_POP", "VARIANCE", "VAR_SAMP", "VAR_POP": STDDEV and VARIANCE are 0 for one row where the _SAMP forms are NULL
+ok
+CREATE TABLE stats321 (g NUMBER, v NUMBER)
+
+ok
+INSERT INTO stats321 VALUES (1, 0)
+
+ok
+INSERT INTO stats321 VALUES (1, 2)
+
+ok
+INSERT INTO stats321 VALUES (1, 4)
+
+ok
+INSERT INTO stats321 VALUES (2, 2)
+
+ok
+INSERT INTO stats321 VALUES (2, 4)
+
+ok
+INSERT INTO stats321 VALUES (2, 4)
+
+ok
+INSERT INTO stats321 VALUES (2, 4)
+
+ok
+INSERT INTO stats321 VALUES (2, 5)
+
+ok
+INSERT INTO stats321 VALUES (2, 5)
+
+ok
+INSERT INTO stats321 VALUES (2, 7)
+
+ok
+INSERT INTO stats321 VALUES (2, 9)
+
+ok
+INSERT INTO stats321 VALUES (3, 6)
+
+rows
+SELECT STDDEV(v) s, VARIANCE(v) va, STDDEV_SAMP(v) ss, VAR_SAMP(v) vs FROM stats321 WHERE g = 1
+----
+S|VA|SS|VS
+2|4|2|4
+SELECT 1
+
+rows
+SELECT STDDEV_POP(v) sp, VAR_POP(v) vp FROM stats321 WHERE g = 2
+----
+SP|VP
+2|4
+SELECT 1
+
+rows
+SELECT STDDEV(v) s, VARIANCE(v) va, STDDEV_SAMP(v) ss, VAR_SAMP(v) vs, VAR_POP(v) vp FROM stats321 WHERE g = 3
+----
+S|VA|SS|VS|VP
+0|0|NULL|NULL|0
+SELECT 1
+
+ok
+DROP TABLE stats321
+
+chapter "RANK", "DENSE_RANK": the aggregate forms, the rank of a hypothetical row in an ordered group
+ok
+CREATE TABLE emp321 (salary NUMBER, commission_pct NUMBER)
+
+ok
+INSERT INTO emp321 VALUES (10000, NULL)
+
+ok
+INSERT INTO emp321 VALUES (15500, .10)
+
+ok
+INSERT INTO emp321 VALUES (15500, NULL)
+
+ok
+INSERT INTO emp321 VALUES (17000, .05)
+
+ok
+INSERT INTO emp321 VALUES (24000, NULL)
+
+rows
+SELECT RANK(15500, .05) WITHIN GROUP (ORDER BY salary, commission_pct) "Rank" FROM emp321
+----
+Rank
+2
+SELECT 1
+
+rows
+SELECT DENSE_RANK(15500, .05) WITHIN GROUP (ORDER BY salary DESC, commission_pct) "Dense Rank" FROM emp321
+----
+Dense Rank
+3
+SELECT 1
+
+error 42883 909
+SELECT RANK(15500) WITHIN GROUP (ORDER BY salary, commission_pct) FROM emp321
+
+ok
+DROP TABLE emp321

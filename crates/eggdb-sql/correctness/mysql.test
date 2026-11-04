@@ -1267,3 +1267,86 @@ SELECT 1
 
 ok
 DROP TABLE ro318
+
+chapter "Aggregate Function Descriptions": STD, STDDEV, STDDEV_POP, STDDEV_SAMP, VARIANCE, VAR_POP and VAR_SAMP return DOUBLE, and STD, STDDEV and VARIANCE are the population forms
+ok
+CREATE TABLE stats321 (g INT, v INT)
+
+ok
+INSERT INTO stats321 VALUES (1, 1), (1, 3), (1, 5), (1, 7), (2, 0), (2, 2), (2, 4), (3, 6)
+
+rows
+SELECT STD(v) AS s, STDDEV(v) AS sd, STDDEV_POP(v) AS sp, VARIANCE(v) AS va, VAR_POP(v) AS vp FROM stats321 WHERE g = 1
+----
+s|sd|sp|va|vp
+2.23606797749979|2.23606797749979|2.23606797749979|5|5
+SELECT 1
+
+rows
+SELECT g, STDDEV_SAMP(v) AS ss, VAR_SAMP(v) AS vs, STD(v) AS s FROM stats321 WHERE g > 1 GROUP BY g ORDER BY g
+----
+g|ss|vs|s
+2|2|4|1.632993161855452
+3|NULL|NULL|0
+SELECT 2
+
+rows
+SELECT v, VAR_POP(v) OVER (ORDER BY v) AS vp FROM stats321 WHERE g = 1 ORDER BY v
+----
+v|vp
+1|0
+3|1
+5|2.6666666666666665
+7|5
+SELECT 4
+
+chapter "Sorting Rows", "Working with NULL Values": NULL values come first for ORDER BY ... ASC and last for ORDER BY ... DESC, with or without an index
+ok
+CREATE TABLE nulls321 (id INT PRIMARY KEY, v INT)
+
+ok
+INSERT INTO nulls321 VALUES (1, 20), (2, NULL), (3, 10)
+
+rows
+SELECT id FROM nulls321 ORDER BY v
+----
+id
+2
+3
+1
+SELECT 3
+
+rows
+SELECT id FROM nulls321 ORDER BY v DESC
+----
+id
+1
+3
+2
+SELECT 3
+
+ok
+CREATE INDEX nulls321_v ON nulls321 (v)
+
+rows
+SELECT id FROM nulls321 ORDER BY v LIMIT 2
+----
+id
+2
+3
+SELECT 2
+
+rows
+SELECT id FROM nulls321 ORDER BY v DESC LIMIT 2
+----
+id
+1
+3
+SELECT 2
+
+ok
+DROP TABLE nulls321
+
+ok
+DROP TABLE stats321
+

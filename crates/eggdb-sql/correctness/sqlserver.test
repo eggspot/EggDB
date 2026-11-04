@@ -2511,3 +2511,39 @@ SET XACT_ABORT OFF
 
 ok
 DROP TABLE rb317
+
+chapter "STDEV (Transact-SQL)", "STDEVP (Transact-SQL)", "VAR (Transact-SQL)", "VARP (Transact-SQL)": float results, NULL for STDEV and VAR of one value, DISTINCT and OVER
+ok
+CREATE TABLE Stats321 (g INT, v INT)
+
+ok
+INSERT INTO Stats321 VALUES (1, 1), (1, 3), (1, 5), (1, 7), (2, 0), (2, 2), (2, 4), (2, 4), (3, 6)
+
+rows
+SELECT STDEVP(v) AS sp, VARP(v) AS vp FROM Stats321 WHERE g = 1
+----
+sp|vp
+2.23606797749979|5
+SELECT 1
+
+rows
+SELECT g, STDEV(DISTINCT v) AS s, VAR(DISTINCT v) AS v, STDEVP(v) AS sp, VARP(v) AS vp FROM Stats321 WHERE g = 3 OR g = 2 AND v < 4 GROUP BY g ORDER BY g
+----
+g|s|v|sp|vp
+2|1.4142135623730951|2|1|1
+3|NULL|NULL|0|0
+SELECT 2
+
+rows
+SELECT v, VARP(v) OVER (ORDER BY v ROWS UNBOUNDED PRECEDING) AS vp FROM Stats321 WHERE g = 1 ORDER BY v
+----
+v|vp
+1|0
+3|1
+5|2.6666666666666665
+7|5
+SELECT 4
+
+ok
+DROP TABLE Stats321
+

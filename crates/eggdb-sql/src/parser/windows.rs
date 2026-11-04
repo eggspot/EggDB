@@ -126,7 +126,7 @@ impl Parser<'_> {
         else {
             return Err(self.unexpected());
         };
-        if function.is_ordered_set() {
+        if function.is_ordered_set() || function.is_hypothetical() {
             return Err(SqlError::not_supported(format!(
                 "OVER is not supported for ordered-set aggregate {}",
                 function.name()
@@ -398,6 +398,55 @@ impl Parser<'_> {
             }
         }
         crate::window::define_windows(listed)
+    }
+
+    pub(super) fn hypothetical_set_aggregate(
+        &mut self,
+        name: &Name,
+        function: AggregateFunction,
+    ) -> SqlResult<Expr> {
+        self.expect(&TokenKind::LeftParen)?;
+        let mut hypothetical = Vec::new();
+        if !self.take(&TokenKind::RightParen) {
+            loop {
+                hypothetical.push(self.expression()?);
+                if !self.take(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(&TokenKind::RightParen)?;
+        }
+        self.expect_word("within")?;
+        self.expect_word("group")?;
+        self.expect(&TokenKind::LeftParen)?;
+        self.expect_word("order")?;
+        self.expect_word("by")?;
+        let order = self.order_items()?;
+        self.expect(&TokenKind::RightParen)?;
+        if hypothetical.len() != order.len() {
+            let error = no_such_function(
+                &name.text,
+                hypothetical.len() + order.len(),
+                name.position,
+            );
+            return Err(if self.oracle() {
+                error.with_oracle_code(909)
+            } else {
+                error
+            });
+        }
+        Ok(Expr {
+            kind: ExprKind::Aggregate {
+                function,
+                argument: Some(Box::new(crate::hypothetical_set::arguments(
+                    hypothetical,
+                    order,
+                    name.position,
+                ))),
+                distinct: false,
+            },
+            position: name.position,
+        })
     }
 
     pub(super) fn ordered_set_aggregate(

@@ -947,6 +947,7 @@ pub(crate) fn call(name: &str, values: &[Value], declared: &[Option<SqlType>]) -
         (
             "oracle_fetch_percent"
             | "oracle_fetch_with_ties"
+            | "postgresql_fetch_with_ties"
             | "oracle_fetch_percent_with_ties"
             | "sqlserver_top_percent"
             | "sqlserver_top_percent_with_ties",
