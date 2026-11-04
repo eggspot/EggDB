@@ -3664,11 +3664,11 @@ impl<'s> Session<'s> {
         body: impl FnOnce(&mut dyn KeyValueWrite, &mut TableCache) -> SqlResult<QueryResult>,
     ) -> SqlResult<QueryResult> {
         self.refuse_writes_when_uncommittable()?;
-        let read_only = self.transaction_is_read_only();
+        let refuses_writes = self.transaction_is_read_only();
         if matches!(self.block, Block::None) {
             self.transaction_mode.next_read_only = None;
         }
-        if read_only {
+        if refuses_writes {
             if read_only::changes_definitions(command) {
                 return Err(read_only::refused_in_read_only_transaction(command));
             }
@@ -3679,7 +3679,7 @@ impl<'s> Session<'s> {
         let _types = crate::user_types::enter_if_absent();
         let body = |writer: &mut dyn KeyValueWrite, tables: &mut TableCache| {
             let mut refusing;
-            let writer: &mut dyn KeyValueWrite = if read_only {
+            let writer: &mut dyn KeyValueWrite = if refuses_writes {
                 refusing = read_only::ReadOnlyTransactionWrite {
                     inner: writer,
                     command,

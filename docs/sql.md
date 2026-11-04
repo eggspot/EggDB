@@ -190,7 +190,11 @@ What it reads, on top of the statements of "What runs today":
   fails part-way leaves none of its rows, and the transaction keeps what came before and goes
   on (D317); `SET autocommit = 0`
   keeps a transaction open from the first write to `COMMIT` or `ROLLBACK`; `CREATE TABLE`,
-  `DROP TABLE` and `START TRANSACTION` commit an open transaction first.
+  `DROP TABLE` and `START TRANSACTION` commit an open transaction first. `START TRANSACTION READ
+  ONLY` (and `WITH CONSISTENT SNAPSHOT`), `SET TRANSACTION READ ONLY | READ WRITE` for the next
+  transaction (error 1568 while one is open) and `SET SESSION TRANSACTION READ ONLY` (the
+  `transaction_read_only` variable) work as MySQL's: writes other than to temporary tables are
+  error 1792 `Cannot execute statement in a READ ONLY transaction.` (D318).
 
 ## The SQLite dialect
 
@@ -522,7 +526,12 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
 - **Transactions as Oracle's**: the first change starts a transaction that stays open until
   `COMMIT` or `ROLLBACK`; `CREATE TABLE`, `DROP TABLE` and `TRUNCATE TABLE` commit what is open
   before and after them. A failing statement rolls back only its own changes, as Oracle's
-  implicit savepoint before each statement does, and the transaction goes on (D317). `eggdb
+  implicit savepoint before each statement does, and the transaction goes on (D317). `SET
+  TRANSACTION READ ONLY [NAME 'name']` starts a read-only transaction that reads one snapshot
+  until `COMMIT` or `ROLLBACK` and refuses changes with `ORA-01456: may not perform
+  insert/delete/update operation inside a READ ONLY transaction`; a `CREATE TABLE` or another
+  statement that commits implicitly ends it first. `SET TRANSACTION` once a transaction is open
+  is `ORA-01453: SET TRANSACTION must be first statement of transaction` (D318). `eggdb
   sql` and `eggdb shell` commit an open transaction when they end, as SQL*Plus does on exit;
   the embedded API rolls it back on `close` unless you commit.
 - **Subqueries, subquery factoring and set operators**: `UNION [ALL]`, `INTERSECT [ALL]`,
@@ -1762,11 +1771,24 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   `0A000`.
 - `BEGIN [WORK | TRANSACTION] [READ ONLY | READ WRITE] [ISOLATION LEVEL ...]`,
   `START TRANSACTION`, `COMMIT`/`END`, `ROLLBACK`/`ABORT`. `SET SESSION CHARACTERISTICS AS
-  TRANSACTION ...` and `SET TRANSACTION ...` take every isolation level, `[NOT] DEFERRABLE` and
-  `READ WRITE` (D131): every transaction runs serializable, so the level changes nothing, as
-  `SHOW transaction_isolation` says; `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` sets
-  `default_transaction_read_only`. `SET TRANSACTION READ ONLY` and `SET TRANSACTION SNAPSHOT`
-  are `0A000`.
+  TRANSACTION ...` and `SET TRANSACTION ...` take every isolation level and `[NOT] DEFERRABLE`
+  (D131): every transaction runs serializable, so the level changes nothing, as `SHOW
+  transaction_isolation` says. Read-only transactions work as PostgreSQL's (D318): `BEGIN READ
+  ONLY`, `START TRANSACTION READ ONLY`, `SET TRANSACTION READ ONLY | READ WRITE`, `SET
+  transaction_read_only = on`, and `default_transaction_read_only` (also set by `SET SESSION
+  CHARACTERISTICS AS TRANSACTION READ ONLY`), which makes every new transaction read-only,
+  single statements outside a block included. A read-only transaction refuses `INSERT`,
+  `UPDATE`, `DELETE`, `MERGE` and `COPY FROM` unless they write a temporary table, every
+  `CREATE`, `ALTER` and `DROP` (temporary ones too), `COMMENT`, `GRANT`, `REVOKE`, `TRUNCATE`
+  and `nextval()`, with `25006 cannot execute INSERT in a read-only transaction`.
+  `SHOW transaction_read_only` and `current_setting('transaction_read_only')` say whether the
+  current transaction is read-only. A transaction that wrote may turn read-only and still commit
+  what it wrote, but `SET TRANSACTION READ WRITE` after the transaction's first query is `25001
+  transaction read-write mode must be set before any query`, and a different isolation level
+  after it is `25001 SET TRANSACTION ISOLATION LEVEL must be called before any query` (the
+  level the block began with, or `serializable`, is the current one); inside a savepoint both
+  are `25001`. Outside a block `SET TRANSACTION` warns `SET TRANSACTION can only be used in
+  transaction blocks` and changes nothing. `SET TRANSACTION SNAPSHOT` is `0A000`.
 - `SET [SESSION | LOCAL] name {TO | =} value | DEFAULT`, `SET [LOCAL] TIME ZONE`, `SET NAMES`,
   `RESET name | ALL`, `SHOW name | ALL`: PostgreSQL's run-time parameters (D104). `client_encoding`
   takes `UTF8` (and `SQL_ASCII`, which passes bytes through) only; settings EggDB does not apply
@@ -1817,7 +1839,8 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   in the session's transactions (a `ROLLBACK` undoes their changes too), and `DISCARD TEMP` or
   `DISCARD ALL` drops them all. They are held in the session's memory, at most 1 GiB per session
   (`53200`), never written to the database file, so they cost no disk writes; changing one still
-  takes the database's write transaction, so a read-only file cannot have them. A temporary table
+  takes the database's write transaction, so a read-only file cannot have them, except inside a
+  read-only transaction, which writes them without the writer (D318). A temporary table
   cannot reference an ordinary one with a foreign key, nor the other way round (`42P16`), nor
   move to another schema (`0A000`). `pg_class` and the other catalogs do not list them yet.
   MySQL's `CREATE TEMPORARY TABLE` and `DROP TEMPORARY TABLE`, SQLite's `CREATE TEMP TABLE` and
@@ -2184,7 +2207,9 @@ waits for it (and gives up with `55P03` after the write timeout). A statement th
 runs on a snapshot and never waits for the writer; `eggdb sql` itself still opens the file for
 writing, even for a script of `SELECT`s, so another program that opens the same file for
 writing is refused (exit code 5) while it runs.
-`BEGIN READ ONLY` reads one snapshot and refuses changes with `25006`. A failed statement inside
+`BEGIN READ ONLY` reads one snapshot and refuses changes with `25006` without taking the
+writer, so it never waits for another writer; it may still write the session's temporary
+tables (D318). A failed statement inside
 a block rolls the block back at once and the session answers `25P02` until `ROLLBACK`; `COMMIT`
 of a failed block reports `ROLLBACK`, as PostgreSQL does. In MySQL's, SQLite's, Oracle's and SQL
 Server's dialects a failed statement rolls back only its own changes and the block goes on, as
@@ -3293,9 +3318,18 @@ In the PostgreSQL dialect (D158), users create and call their own functions and 
   for a parameter the routine's own `SET` clause names, which comes back at its exit. A
   procedure's `COMMIT` ends its `SET LOCAL` values and its `ROLLBACK` also undoes the plain `SET`s
   made since the last `COMMIT`; an exception handler that catches an error undoes the settings
-  its block changed. `RESET ALL` and `SET eggdb.dialect` inside a routine are `0A000`, and
-  `set_config` takes only constants and `$n` parameters as its arguments (a PL/pgSQL variable or
-  another expression, as in `set_config('app.tenant', p_tenant::text, true)`, is `0A000`).
+  its block changed. `RESET ALL` inside a routine resets every parameter the way a `RESET` of
+  each would, and `SET eggdb.dialect` inside one switches the session's dialect once the
+  statement ends (the routine's own statements keep its language; inside a transaction block the
+  switch is refused with a warning, as a top-level `SET eggdb.dialect` is) (D318).
+  `current_setting(name)` reads the value a routine set earlier in the same statement, as in
+  `SELECT set_tenant(), current_setting('app.tenant')`, and a `set_config` earlier in the same
+  select list; an unset custom parameter is an error only when the call runs, and is titled
+  `current_setting`. `ALTER FUNCTION | PROCEDURE | ROUTINE name [(args)] SET name {TO | =} value
+  | SET name FROM CURRENT | RESET name | RESET ALL` changes the settings stored with the routine,
+  several in one statement, as its `CREATE ... SET` clause does (D318). `set_config` takes only
+  constants and `$n` parameters as its arguments (a PL/pgSQL variable or another expression, as
+  in `set_config('app.tenant', p_tenant::text, true)`, is `0A000`).
 - Polymorphic types (D264): parameters and results of `sql` and PL/pgSQL functions and
   procedures may be `anyelement`, `anyarray`, `anynonarray`, `anyenum`, `anycompatible`,
   `anycompatiblearray` and `anycompatiblenonarray`, also in `OUT` parameters, `RETURNS SETOF`,

@@ -3469,3 +3469,41 @@ SELECT 2
 
 ok
 DROP TABLE rb317
+
+chapter "SET TRANSACTION": READ ONLY refuses changes with ORA-01456 and must be the transaction's first statement
+ok
+COMMIT
+
+ok
+CREATE TABLE ro318 (id NUMBER PRIMARY KEY)
+
+ok
+SET TRANSACTION READ ONLY NAME 'report'
+
+error 25006 1456
+INSERT INTO ro318 VALUES (1)
+
+error 25001 1453
+SET TRANSACTION READ WRITE
+
+ok
+COMMIT
+
+ok
+INSERT INTO ro318 VALUES (2)
+
+error 25001 1453
+SET TRANSACTION READ ONLY
+
+ok
+COMMIT
+
+rows
+SELECT id FROM ro318
+----
+ID
+2
+SELECT 1
+
+ok
+DROP TABLE ro318

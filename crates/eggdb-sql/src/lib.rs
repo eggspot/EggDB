@@ -231,6 +231,8 @@ mod output_into_tests;
 #[cfg(test)]
 mod partition_tests;
 #[cfg(test)]
+mod read_only_transaction_tests;
+#[cfg(test)]
 mod regex_tests;
 #[cfg(test)]
 mod savepoint_tests;

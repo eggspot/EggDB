@@ -4934,3 +4934,88 @@ CREATE TABLE bad316 (x int) PARTITION BY RANGE ((random()))
 
 ok
 DROP TABLE names316
+
+chapter sql-set-transaction, "SET TRANSACTION": READ ONLY refuses every write but temporary tables', and a transaction's characteristics are set before its first query
+ok
+CREATE TABLE ro318 (id integer PRIMARY KEY)
+
+ok
+CREATE TEMP TABLE ro318_scratch (id integer)
+
+ok
+BEGIN
+
+ok
+SET TRANSACTION READ ONLY
+
+rows
+SHOW transaction_read_only
+----
+transaction_read_only
+on
+SHOW
+
+error 25006
+INSERT INTO ro318 VALUES (1)
+
+ok
+ROLLBACK
+
+ok
+START TRANSACTION READ ONLY
+
+ok
+INSERT INTO ro318_scratch VALUES (1)
+
+error 25006
+CREATE TABLE ro318_more (id integer)
+
+ok
+ROLLBACK
+
+ok
+BEGIN
+
+rows
+SELECT count(*) FROM ro318
+----
+count
+0
+SELECT 1
+
+error 25001
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED
+
+ok
+ROLLBACK
+
+ok
+BEGIN READ ONLY
+
+rows
+SELECT count(*) FROM ro318
+----
+count
+0
+SELECT 1
+
+error 25001
+SET TRANSACTION READ WRITE
+
+ok
+ROLLBACK
+
+ok
+SET default_transaction_read_only = on
+
+error 25006
+INSERT INTO ro318 VALUES (2)
+
+ok
+SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE
+
+ok
+INSERT INTO ro318 VALUES (2)
+
+ok
+DROP TABLE ro318
