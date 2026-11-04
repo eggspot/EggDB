@@ -207,3 +207,16 @@ Budgets raised under D253, with their reasons:
   11,730,000 to 12,089,896 on macOS; the C API library 9,160,000 to 9,442,464 on Linux and
   7,215,000 to 7,423,408 on macOS. The new budgets are those sizes plus about 1%. The GUI work of
   this batch (D274 to D279) is linked only into `eggdb-gui`.
+- 2026-11-04, the fourth batch (D297 to D313): joined `UPDATE` and `DELETE` in every dialect
+  (D297), grouping sets (D298), `DISTINCT ON`, `NATURAL` joins, `LIKE ... ESCAPE` and `GLOB`
+  classes (D299), `WITH TIES` and windowed `STRING_AGG`/`LISTAGG` (D300), transaction- and
+  routine-scoped settings (D301), the SQL/JSON constructors and predicates, the scale functions
+  and the citext string functions with Unicode case folding (D302), `MERGE`'s second `WHEN
+  MATCHED`, `OUTPUT ... INTO` and `SELECT ... INTO` (D303), Oracle `CONNECT BY` and multitable
+  inserts (D304), SQLite's dynamic typing with its key encoding (D305), the agent filter's
+  column-limited writes (D306), the memory budget in every remaining listener (D307), and Oracle's
+  and SQL Server's plans with per-step `EXPLAIN ANALYZE` times (D312). Measured sizes in CI,
+  before (the previous budgets) and after: the `full` binary 15,897,000 to 16,450,960 bytes on
+  Linux and 12,211,000 to 12,652,424 on macOS; the C API library 9,537,000 to 9,989,904 on Linux
+  and 7,498,000 to 7,837,312 on macOS. The new budgets are those sizes plus about 1%. The GUI
+  and platform-window work of this batch (D309 to D311, D313) is linked only into `eggdb-gui`.
