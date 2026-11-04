@@ -448,3 +448,39 @@ fn dropping_an_end_with_unread_bytes_resets_its_peer_on_the_machine() {
         run(&OsBackend(backend));
     }
 }
+
+#[test]
+fn a_reset_end_has_no_peer_address_and_cannot_shut_down() {
+    fn run<N: Network>(net: &N) {
+        let listener = Arc::new(net.listen(any_port()).unwrap());
+        let mut queue = net.net_queue(NetQueueOptions::new()).unwrap();
+        let (client, server) = connect::<N>(&mut queue, &listener);
+        let send = NetOp::Send {
+            stream: Arc::clone(&client),
+            buffer: b"ab".to_vec().into(),
+        };
+        submit(&mut queue, send, 0);
+        reap::<N>(&mut queue, 1);
+        let first = receive_one::<N>(&mut queue, &server, 1).result.unwrap();
+        assert_eq!(first.transferred(), Some(1));
+        drop(server);
+        let completion = receive_one::<N>(&mut queue, &client, 8);
+        assert_eq!(
+            completion.result.unwrap_err().kind(),
+            ErrorKind::ConnectionReset
+        );
+        let not_connected = ErrorKind::NotConnected;
+        assert_eq!(client.peer_address().unwrap_err().kind(), not_connected);
+        assert_eq!(client.shutdown_write().unwrap_err().kind(), not_connected);
+    }
+    if cfg!(any(target_os = "linux", target_vendor = "apple")) {
+        for backend in os_backends() {
+            run(&OsBackend(backend));
+        }
+    }
+    for seed in 0..8 {
+        let network = SimNetwork::new();
+        network.seed(seed);
+        run(&network.host(LOOPBACK));
+    }
+}

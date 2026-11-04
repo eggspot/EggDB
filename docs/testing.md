@@ -681,6 +681,21 @@ natively in FreeBSD, NetBSD and OmniOS (illumos) virtual machines, with the pinn
 The `cross` job checks that the rest builds for those targets and for Solaris. OpenBSD and
 DragonFly have no prebuilt Rust standard library (tier 3), so neither job covers them yet.
 
+## The simulated network (D72, D314)
+
+`eggdb-platform`'s `SimNetwork` runs TCP between simulated hosts on a simulated clock, so
+networked code is tested for outages that take minutes or hours of real time in milliseconds,
+and the same seed gives the same schedule. Its tests (`sim_net.rs`) cover a connection that
+survives a cut shorter than `SimNetwork::RETRANSMISSION_TIMEOUT` (924.6 s, Linux's default) and
+one that fails with `TimedOut` across a longer cut, its peer finding it reset once the cut heals
+and it sends; one-way cuts, where one direction's bytes arrive and the other's are held, and
+connects across them time out; per-host latency, and per-host bandwidth that spaces bytes out
+by their size on the clock; and `NotConnected` from a reset end's peer address and shutdown.
+`tests/net_contract.rs` checks the last against the operating systems' sockets on Linux and
+macOS too, and `os_net.rs` checks that a reap already satisfied by operations that finished at
+once makes no readiness call, while operations left waiting are still polled at least every
+17th reap.
+
 ## Not tested yet
 - `Off` after a power loss: the format promises nothing there, so the sweep only checks that
   opening and checking don't panic.

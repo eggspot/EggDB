@@ -36,4 +36,9 @@ impl ReadinessQueue {
     pub(crate) fn cancel(&mut self, _: u64, _: &mut Vec<NetCompletion<OsListener, OsStream>>) {
         match *self {}
     }
+
+    #[cfg(test)]
+    pub(crate) fn waits(&self) -> u64 {
+        match *self {}
+    }
 }

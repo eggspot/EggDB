@@ -91,9 +91,14 @@ pub(crate) struct ReadinessQueue {
     woken: Vec<usize>,
     touched: Vec<RawFd>,
     closing: Vec<TcpStream>,
+    reaps_without_a_wait: u32,
+    #[cfg(test)]
+    waits: u64,
 }
 
 impl ReadinessQueue {
+    const MOST_REAPS_WITHOUT_A_WAIT: u32 = 16;
+
     pub(crate) fn new(capacity: usize, backend: NetBackend) -> Result<Self> {
         Ok(Self {
             selector: Selector::new(backend, capacity)?,
@@ -105,6 +110,9 @@ impl ReadinessQueue {
             woken: Vec::new(),
             touched: Vec::new(),
             closing: Vec::new(),
+            reaps_without_a_wait: 0,
+            #[cfg(test)]
+            waits: 0,
         })
     }
 
@@ -147,6 +155,11 @@ impl ReadinessQueue {
         self.fresh = fresh;
         self.fresh.clear();
         self.settle(completions);
+        let satisfied = min > 0 && completions.len() - before >= min;
+        if satisfied && self.reaps_without_a_wait < Self::MOST_REAPS_WITHOUT_A_WAIT {
+            self.reaps_without_a_wait += 1;
+            return Ok(());
+        }
         let mut polled = false;
         loop {
             let short = completions.len() - before < min;
@@ -164,6 +177,11 @@ impl ReadinessQueue {
                     Some(left)
                 }
             };
+            self.reaps_without_a_wait = 0;
+            #[cfg(test)]
+            {
+                self.waits += 1;
+            }
             self.selector.wait(timeout, &mut self.ready)?;
             polled = true;
             let ready = std::mem::take(&mut self.ready);
@@ -174,6 +192,11 @@ impl ReadinessQueue {
             self.ready.clear();
             self.settle(completions);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn waits(&self) -> u64 {
+        self.waits
     }
 
     pub(crate) fn cancel(&mut self, user_data: u64, canceled: &mut Vec<Completion>) {

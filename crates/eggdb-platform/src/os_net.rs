@@ -173,6 +173,14 @@ impl OsNetQueue {
         }
     }
 
+    #[cfg(test)]
+    fn readiness_waits(&self) -> Option<u64> {
+        match &self.engine {
+            Engine::Readiness(queue) => Some(queue.waits()),
+            _ => None,
+        }
+    }
+
     fn poll(waiting: &mut Vec<Waiting>, completions: &mut Vec<Completion>) -> usize {
         let before = completions.len();
         let mut index = 0;
@@ -590,6 +598,48 @@ mod tests {
             assert_eq!(queue.reap(&mut completions, 0).unwrap(), 0);
             assert!(started.elapsed() < Duration::from_secs(1), "{backend:?}");
             assert_eq!(queue.in_flight(), 4);
+        }
+    }
+
+    #[test]
+    fn a_reap_already_satisfied_waits_for_no_readiness() {
+        for backend in backends() {
+            let network = OsNetwork::new();
+            let listener = Arc::new(network.listen(any_port()).unwrap());
+            let mut queue = network.net_queue(options(backend)).unwrap();
+            if queue.readiness_waits().is_none() {
+                continue;
+            }
+            let (server, client) = connected_pair(&mut queue, &listener);
+            let (server, client) = (Arc::new(server), Arc::new(client));
+            let receive = NetOp::Receive {
+                stream: Arc::clone(&server),
+                buffer: vec![0; 64].into(),
+            };
+            queue.submit(receive, 0).unwrap();
+            let mut completions = Vec::new();
+            queue.reap(&mut completions, 0).unwrap();
+            assert!(completions.is_empty(), "{backend:?}");
+            let waits = queue.readiness_waits();
+            let send_one_byte = |queue: &mut OsNetQueue, completions: &mut Vec<_>| {
+                let send = NetOp::Send {
+                    stream: Arc::clone(&client),
+                    buffer: vec![1; 1].into(),
+                };
+                queue.submit(send, 1).unwrap();
+                queue.reap(completions, 1).unwrap();
+            };
+            send_one_byte(&mut queue, &mut completions);
+            assert_eq!(completions.len(), 1, "{backend:?}");
+            assert_eq!(completions[0].user_data, 1, "{backend:?}");
+            assert_eq!(queue.readiness_waits(), waits, "{backend:?}");
+            let mut sends = 1;
+            while !completions.iter().any(|completion| completion.user_data == 0) {
+                assert!(sends < 64, "{backend:?}: the receive was never polled");
+                send_one_byte(&mut queue, &mut completions);
+                sends += 1;
+            }
+            assert!(queue.readiness_waits() > waits, "{backend:?}");
         }
     }
 
