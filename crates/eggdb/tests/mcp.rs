@@ -1342,3 +1342,107 @@ fn an_agent_reads_a_collection_by_name_and_a_missing_one_names_those_there() {
     let (status, messages) = mcp.finish();
     assert!(status.success(), "{messages}");
 }
+
+#[test]
+fn an_agent_stores_and_deletes_keys_only_with_writes_and_a_delete_waits_for_the_user() {
+    let (file, _audit) = sample("mcp-key-writes", 0);
+    let path = file.path().to_str().unwrap();
+    let added = eggdb(&["collection", "add", path, "sessions"]);
+    assert!(added.status.success(), "{}", stderr(&added));
+
+    let mut reader = Mcp::start(file.path(), &[]);
+    reader.initialize();
+    let refused = reader.call("put", r#"{"key":"user:1","value":"Ada"}"#);
+    assert_eq!(error_code(&refused), "read_only");
+    let (status, _) = reader.finish();
+    assert!(status.success());
+    let absent = eggdb(&["get", path, "user:1"]);
+    assert_eq!(absent.status.code(), Some(1), "{}", stderr(&absent));
+
+    let mut mcp = Mcp::start(file.path(), &["--allow-write"]);
+    mcp.initialize();
+    let stored = mcp.call("put", r#"{"key":"user:1","value":"Ada"}"#);
+    let stored = ok(&stored);
+    assert_eq!(text_at(stored, &["stored"]), "true");
+    assert_eq!(text_at(stored, &["committed"]), "true");
+    let read_back = eggdb(&["get", path, "user:1"]);
+    assert!(read_back.status.success(), "{}", stderr(&read_back));
+    assert_eq!(stdout(&read_back).trim_end(), "Ada");
+    let session = mcp.call(
+        "put",
+        r#"{"key":"s:1","value":"open","collection":"sessions","ttl":"1h"}"#,
+    );
+    let session = ok(&session);
+    assert_eq!(text_at(session, &["collection"]), "sessions");
+    assert_eq!(text_at(session, &["ttl_ms"]), "3600000");
+    let left = eggdb(&["ttl", path, "s:1", "-C", "sessions", "--format", "json"]);
+    assert!(left.status.success(), "{}", stderr(&left));
+    let left = parse_document(stdout(&left).trim()).unwrap();
+    let left_ms: u64 = text_at(&left, &["ttl_ms"]).parse().unwrap();
+    assert!((3_000_000..=3_600_000).contains(&left_ms), "{left_ms}");
+    let in_default_space = eggdb(&["get", path, "s:1"]);
+    assert_eq!(in_default_space.status.code(), Some(1));
+    let missing = mcp.call(
+        "put",
+        r#"{"key":"s:2","value":"open","collection":"sesions"}"#,
+    );
+    assert_eq!(error_code(&missing), "collection_not_found");
+    assert!(
+        text_at(result(&missing), &["error", "message"])
+            .contains("its collections are \"sessions\"")
+    );
+    let reserved = mcp.call("put", r#"{"key_hex":"ff53514c0001","value":"x"}"#);
+    assert_eq!(error_code(&reserved), "invalid_arguments");
+    let unconfirmed = mcp.call("del", r#"{"key":"user:1"}"#);
+    assert_eq!(error_code(&unconfirmed), "needs_confirmation");
+    let kept = eggdb(&["get", path, "user:1"]);
+    assert!(kept.status.success(), "{}", stderr(&kept));
+    let deleted = mcp.call(
+        "del",
+        r#"{"key":"s:1","collection":"sessions","confirm":true}"#,
+    );
+    assert_eq!(text_at(ok(&deleted), &["deleted"]), "true");
+    let gone = eggdb(&["get", path, "s:1", "-C", "sessions"]);
+    assert_eq!(gone.status.code(), Some(1));
+    let (status, messages) = mcp.finish();
+    assert!(status.success(), "{messages}");
+    assert!(messages.contains("put stores a key and del deletes one"), "{messages}");
+
+    let mut asking = Mcp::start(file.path(), &["--allow-write"]);
+    asking.initialize_with(r#"{"elicitation":{}}"#);
+    let declining = asking.send_call("del", r#"{"key":"user:1"}"#);
+    let question = asking.server_request();
+    let message = text_at(&question, &["params", "message"]);
+    assert!(
+        message.contains("delete the key \"user:1\" from the default key space of"),
+        "{message}"
+    );
+    asking.send(r#"{"jsonrpc":"2.0","id":"eggdb-confirm-1","result":{"action":"decline"}}"#);
+    let declined = asking.answer();
+    assert_eq!(text_at(&declined, &["id"]), declining.to_string());
+    assert_eq!(error_code(&declined), "declined_by_user");
+    let (status, messages) = asking.finish();
+    assert!(status.success(), "{messages}");
+    let still_there = eggdb(&["get", path, "user:1"]);
+    assert!(still_there.status.success(), "{}", stderr(&still_there));
+
+    let json = eggdb(&["audit", path, "--format", "json"]);
+    assert!(json.status.success(), "{}", stderr(&json));
+    let records: Vec<Node> = stdout(&json)
+        .lines()
+        .map(|line| parse_document(line).unwrap())
+        .collect();
+    let key_writes = |event: &str| {
+        records
+            .iter()
+            .filter(|record| text_at(record, &["event"]) == event)
+            .filter(|record| matches!(text_at(record, &["tool"]).as_str(), "put" | "del"))
+            .count()
+    };
+    assert_eq!(key_writes("call_started"), 4, "{}", stdout(&json));
+    assert_eq!(key_writes("call"), 8, "{}", stdout(&json));
+    let listing = eggdb(&["audit", path, "--format", "text", "--color", "never"]);
+    let text = stdout(&listing);
+    assert!(text.contains("ok, agent confirmed"), "{text}");
+    assert!(text.contains("declined_by_user"), "{text}");
+}

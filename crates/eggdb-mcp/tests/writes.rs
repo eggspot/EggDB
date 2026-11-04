@@ -106,7 +106,8 @@ fn write_sql_is_listed_only_with_allow_write_and_its_annotations_say_it_changes_
     let listed = tools(&mut writing);
     for tool in &listed {
         let name = text_at(tool, &["name"]);
-        let writes = name == "write_sql";
+        let writes = matches!(name.as_str(), "write_sql" | "put" | "del");
+        let destroys = matches!(name.as_str(), "write_sql" | "del");
         assert_eq!(
             text_at(tool, &["annotations", "readOnlyHint"]),
             (!writes).to_string(),
@@ -114,7 +115,7 @@ fn write_sql_is_listed_only_with_allow_write_and_its_annotations_say_it_changes_
         );
         assert_eq!(
             text_at(tool, &["annotations", "destructiveHint"]),
-            writes.to_string(),
+            destroys.to_string(),
             "{name}"
         );
     }

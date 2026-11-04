@@ -2,6 +2,7 @@ use eggdb::Database;
 use eggdb::sql::Store;
 use eggdb_mcp::audit::AuditLog;
 use eggdb_mcp::{DatabaseOpener, OpenRefusal, Server, ServerConfig};
+use eggdb_sql::VisibleTables;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -39,6 +40,7 @@ impl<'d> DatabaseOpener for SharedOpener<'d> {
 pub(super) struct McpEndpoint<'d> {
     opener: &'d SharedOpener<'d>,
     tokens: Vec<AgentToken>,
+    tables: Option<VisibleTables>,
     database_name: String,
     audit: PathBuf,
     sessions: Mutex<HashMap<String, McpSession<'d>>>,
@@ -115,11 +117,13 @@ impl<'d> McpEndpoint<'d> {
         opener: &'d SharedOpener<'d>,
         database_name: &str,
         tokens: Vec<AgentToken>,
+        tables: Option<VisibleTables>,
         audit: PathBuf,
     ) -> Self {
         Self {
             opener,
             tokens,
+            tables,
             database_name: database_name.to_owned(),
             audit,
             sessions: Mutex::new(HashMap::new()),
@@ -148,7 +152,7 @@ impl<'d> McpEndpoint<'d> {
             time_limit: TIME_LIMIT,
             audit: AuditLog::new(self.audit.clone()),
             allow_write: false,
-            tables: None,
+            tables: self.tables.clone(),
             call_gap: Duration::ZERO,
             agent_role: role,
             exit_process: None,

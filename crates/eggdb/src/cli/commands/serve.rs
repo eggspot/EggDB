@@ -46,6 +46,37 @@ fn database_name_of(file: &Path) -> String {
 }
 
 impl Session<'_> {
+    fn check_mcp_tables(
+        &self,
+        db: &eggdb::Database,
+        tables: &eggdb_sql::VisibleTables,
+    ) -> Result<(), Failure> {
+        let file = render::text(self.request.file.display().to_string().as_bytes());
+        let (unknown, unservable, _) =
+            super::mcp::check_tables(&DatabaseStore(db), tables, false).map_err(|message| {
+                Failure::database(
+                    format!("cannot read {file}: {message}"),
+                    Exit::DatabaseError,
+                )
+            })?;
+        if !unknown.is_empty() {
+            return Err(super::mcp::unknown_tables_failure(
+                &file,
+                &unknown,
+                "--mcp-tables",
+            ));
+        }
+        if !unservable.is_empty() {
+            return Err(super::mcp::unservable_columns_failure(
+                &file,
+                &unservable,
+                "--mcp-tables",
+                "eggdb serve",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn serve(&mut self) -> Result<Exit, Failure> {
         super::foreign::allow_from_environment();
         let usage = |message: String| Failure::usage(message, Some(CommandName::Serve));
@@ -122,6 +153,11 @@ impl Session<'_> {
             None => None,
         };
         let mcp_listener = match (options.mcp_listen, &options.mcp_token_file) {
+            (None, None) if !options.mcp_tables.is_empty() => {
+                return Err(usage(
+                    "--mcp-tables limits the MCP endpoint: give it with --mcp-listen and --mcp-token-file".to_owned(),
+                ));
+            }
             (None, None) => None,
             (Some(_), None) | (None, Some(_)) => {
                 return Err(usage(
@@ -558,6 +594,12 @@ impl Session<'_> {
             let (name, first) = directory.remove(0);
             (super::Opened::Owned(Box::new(first)), name)
         };
+        let mcp_tables = (!options.mcp_tables.is_empty()).then(|| {
+            eggdb_sql::VisibleTables::new(options.mcp_tables.iter().map(String::as_str))
+        });
+        if let Some(tables) = &mcp_tables {
+            self.check_mcp_tables(&db, tables)?;
+        }
         let idle_timeout = match options.idle_timeout_seconds {
             None => Some(DEFAULT_IDLE_TIMEOUT),
             Some(0) => None,
@@ -671,6 +713,7 @@ impl Session<'_> {
                 &mcp_opener,
                 &config.database,
                 tokens.clone(),
+                mcp_tables.clone(),
                 eggdb_mcp::audit::audit_path_for(&self.request.file),
             )
         });
