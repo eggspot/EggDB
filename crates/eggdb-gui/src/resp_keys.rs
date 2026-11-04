@@ -1,11 +1,9 @@
-use std::sync::Arc;
-
 use crate::catalog::{Catalog, KeyCount, KeySpace};
 use crate::connection::{CancelHandle, ResultTable, StatementFailure};
 use crate::grid::ValueKind;
 use crate::key_scan::{
-    KEY_SCAN_LIMIT, KeyPage, KeySpaceScan, PageEnd, PageStart, SHOWN_VALUE_BYTES, ShownKeys,
-    spelled,
+    CarriedKeys, KEY_SCAN_LIMIT, KeyPage, KeySpaceScan, PageEnd, PageStart, SHOWN_VALUE_BYTES,
+    ShownKeys, spelled,
 };
 use crate::resp_client::{RespClient, RespError, RespReply, prefix_pattern};
 use crate::status_line::thousands;
@@ -204,7 +202,7 @@ pub fn scan_page(
         .and_then(|size| size.integer())
         .and_then(|size| u64::try_from(size).ok())
         .map(KeyCount::Exactly);
-    let (mut keys, mut cursor, earlier) = match &scan.start {
+    let (carried, mut cursor, earlier) = match &scan.start {
         PageStart::Cursor {
             cursor,
             carried,
@@ -214,8 +212,14 @@ pub fn scan_page(
             (*cursor != 0).then_some(*cursor),
             shown.clone(),
         ),
-        PageStart::First | PageStart::After(_) => (Vec::new(), Some(0), None),
+        PageStart::First | PageStart::After(_) => (CarriedKeys::default(), Some(0), None),
     };
+    let mut keys: Vec<Vec<u8>> = carried
+        .remaining()
+        .iter()
+        .take(KEY_SCAN_LIMIT + 1)
+        .cloned()
+        .collect();
     let pattern = (!scan.prefix.is_empty()).then(|| prefix_pattern(&scan.prefix));
     let mut listed: std::collections::HashSet<Vec<u8>> = earlier
         .as_deref()
@@ -250,7 +254,12 @@ pub fn scan_page(
         }
         cursor = (next != 0).then_some(next);
     }
-    let carried = keys.split_off(keys.len().min(KEY_SCAN_LIMIT));
+    let carried = if carried.len() > KEY_SCAN_LIMIT {
+        keys.truncate(KEY_SCAN_LIMIT);
+        carried.after(KEY_SCAN_LIMIT)
+    } else {
+        CarriedKeys::new(keys.split_off(keys.len().min(KEY_SCAN_LIMIT)))
+    };
     let next = match (carried.is_empty(), cursor) {
         (true, None) => None,
         (_, cursor) => Some(PageStart::Cursor {
@@ -259,10 +268,7 @@ pub fn scan_page(
             shown: if keys.is_empty() {
                 earlier
             } else {
-                Some(Arc::new(ShownKeys {
-                    page: keys.clone(),
-                    earlier,
-                }))
+                Some(ShownKeys::linked(keys.clone(), earlier))
             },
         }),
     };
@@ -1113,7 +1119,7 @@ mod tests {
             page.end.next,
             Some(PageStart::Cursor {
                 cursor: 7,
-                carried: Vec::new(),
+                carried: CarriedKeys::default(),
                 shown: None,
             })
         );

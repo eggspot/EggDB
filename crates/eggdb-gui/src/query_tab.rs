@@ -12,7 +12,9 @@ use crate::editor_menu::{
 };
 use crate::grid::{GridAnswer, GridMenuItem, ResultGrid, cell_text, column_widths};
 use crate::grid_menu::{GridMenu, MenuAnswer};
-use crate::key_scan::{KEY_SCAN_LIMIT, KeyPages, KeySpaceScan, PageEnd, PageStart, unspelled};
+use crate::key_scan::{
+    KEY_SCAN_LIMIT, KeyPages, KeySpaceScan, PageEnd, PageStart, forget_old_shown_keys, unspelled,
+};
 use crate::plan_view::{Plan, PlanAnswer, PlanView, explain_statements};
 use crate::sql_format::{comment_edits, format_sql, is_blank_sql};
 use crate::statements::{source_table, statement_at, statements};
@@ -1024,6 +1026,7 @@ impl QueryTab {
         let shown = self.grid.as_ref().map_or(0, |grid| grid.rows.len());
         let mut earlier = self.key_pages.earlier.clone();
         earlier.push(keys.start.clone());
+        forget_old_shown_keys(&mut earlier);
         let position = keys.first_position.saturating_add(shown);
         self.page_request(next, position, earlier, false)
     }

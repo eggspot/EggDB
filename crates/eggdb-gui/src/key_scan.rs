@@ -1,5 +1,6 @@
 use std::fmt::Write;
 use std::ops::Bound;
+use std::sync::Arc;
 use std::time::Duration;
 
 use eggdb::Database;
@@ -64,11 +65,58 @@ pub enum PageStart {
         /// The cursor the next `SCAN` sends.
         cursor: u64,
         /// The keys carried over from the earlier reply.
-        carried: Vec<Vec<u8>>,
+        carried: CarriedKeys,
         /// The keys the earlier pages showed, which a `SCAN` may return again and this page
         /// leaves out.
-        shown: Option<std::sync::Arc<ShownKeys>>,
+        shown: Option<Arc<ShownKeys>>,
     },
+}
+
+/// The keys a server's reply gave past a page's end, shared by every later page's start, so
+/// a reply's keys are held once however many pages they fill.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CarriedKeys {
+    keys: Arc<[Vec<u8>]>,
+    from: usize,
+}
+
+impl Default for CarriedKeys {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
+impl CarriedKeys {
+    /// Carries `keys`, in the order a reply gave them.
+    pub fn new(keys: Vec<Vec<u8>>) -> Self {
+        Self {
+            keys: keys.into(),
+            from: 0,
+        }
+    }
+
+    /// The keys not yet shown.
+    pub fn remaining(&self) -> &[Vec<u8>] {
+        self.keys.get(self.from..).unwrap_or_default()
+    }
+
+    /// How many keys are not yet shown.
+    pub fn len(&self) -> usize {
+        self.remaining().len()
+    }
+
+    /// Whether every carried key was shown.
+    pub fn is_empty(&self) -> bool {
+        self.remaining().is_empty()
+    }
+
+    /// The same keys, once a page showed `shown` more of them.
+    pub fn after(&self, shown: usize) -> Self {
+        Self {
+            keys: Arc::clone(&self.keys),
+            from: self.from.saturating_add(shown).min(self.keys.len()),
+        }
+    }
 }
 
 /// The keys one page showed, linked to the pages before it, so every later page's start shares
@@ -78,18 +126,101 @@ pub struct ShownKeys {
     /// The page's keys.
     pub page: Vec<Vec<u8>>,
     /// The pages before it.
-    pub earlier: Option<std::sync::Arc<ShownKeys>>,
+    pub earlier: Option<Arc<ShownKeys>>,
+    pages: usize,
+    bytes: usize,
 }
 
 /// How many earlier pages a server page checks its keys against.
 pub const REMEMBERED_PAGES: usize = 1_000;
+/// How many bytes of keys a server page checks its keys against, past the newest page.
+pub const REMEMBERED_BYTES: usize = 32 * 1024 * 1024;
+
+fn page_bytes(page: &[Vec<u8>]) -> usize {
+    page.iter()
+        .fold(0_usize, |total, key| total.saturating_add(key.len()))
+}
 
 impl ShownKeys {
-    /// The keys of this page and up to [`REMEMBERED_PAGES`] - 1 pages before it, newest first.
-    pub fn remembered(&self) -> impl Iterator<Item = &Vec<u8>> {
+    /// `page`, shown after the `earlier` pages. Once the chain holds twice the pages or bytes
+    /// [`ShownKeys::remembered`] reads, it is rebuilt from the ones it still reads, so paging
+    /// on never grows it.
+    pub fn linked(page: Vec<Vec<u8>>, earlier: Option<Arc<ShownKeys>>) -> Arc<Self> {
+        let earlier = match earlier {
+            Some(chain)
+                if chain.pages >= 2 * REMEMBERED_PAGES || chain.bytes > 2 * REMEMBERED_BYTES =>
+            {
+                chain.trimmed()
+            }
+            other => other,
+        };
+        Arc::new(Self::on(page, earlier))
+    }
+
+    fn on(page: Vec<Vec<u8>>, earlier: Option<Arc<ShownKeys>>) -> Self {
+        let (pages, bytes) = earlier
+            .as_deref()
+            .map_or((0, 0), |chain| (chain.pages, chain.bytes));
+        Self {
+            bytes: bytes.saturating_add(page_bytes(&page)),
+            pages: pages.saturating_add(1),
+            page,
+            earlier,
+        }
+    }
+
+    fn chain(&self) -> impl Iterator<Item = &ShownKeys> {
         std::iter::successors(Some(self), |shown| shown.earlier.as_deref())
+    }
+
+    fn trimmed(&self) -> Option<Arc<ShownKeys>> {
+        let mut kept: Vec<&Vec<Vec<u8>>> = Vec::new();
+        let mut bytes = 0_usize;
+        for shown in self.chain() {
+            bytes = bytes.saturating_add(page_bytes(&shown.page));
+            if kept.len() + 1 >= REMEMBERED_PAGES || bytes > REMEMBERED_BYTES {
+                break;
+            }
+            kept.push(&shown.page);
+        }
+        kept.into_iter().rev().fold(None, |earlier, page| {
+            Some(Arc::new(Self::on(page.clone(), earlier)))
+        })
+    }
+
+    /// The keys of this page and of the pages before it, newest first, up to
+    /// [`REMEMBERED_PAGES`] pages and, past this page, [`REMEMBERED_BYTES`] bytes.
+    pub fn remembered(&self) -> impl Iterator<Item = &Vec<u8>> {
+        let mut bytes = 0_usize;
+        self.chain()
             .take(REMEMBERED_PAGES)
-            .flat_map(|shown| shown.page.iter())
+            .enumerate()
+            .take_while(move |(index, shown)| {
+                bytes = bytes.saturating_add(page_bytes(&shown.page));
+                *index == 0 || bytes <= REMEMBERED_BYTES
+            })
+            .flat_map(|(_, shown)| shown.page.iter())
+    }
+}
+
+impl Drop for ShownKeys {
+    fn drop(&mut self) {
+        let mut next = self.earlier.take();
+        while let Some(shown) = next {
+            next = Arc::into_inner(shown).and_then(|mut only| only.earlier.take());
+        }
+    }
+}
+
+/// Leaves out the shown keys of every start in `starts` more than [`REMEMBERED_PAGES`] back,
+/// so a long `Back` history holds only cursors: a page read again from there may repeat a key
+/// a page before it showed.
+pub fn forget_old_shown_keys(starts: &mut [PageStart]) {
+    let Some(old) = starts.len().checked_sub(REMEMBERED_PAGES + 1) else {
+        return;
+    };
+    if let Some(PageStart::Cursor { shown, .. }) = starts.get_mut(old) {
+        *shown = None;
     }
 }
 
@@ -760,7 +891,7 @@ mod tests {
         server.prefix = b"user:".to_vec();
         server.start = PageStart::Cursor {
             cursor: 1532,
-            carried: Vec::new(),
+            carried: CarriedKeys::default(),
             shown: None,
         };
         assert_eq!(
@@ -813,5 +944,82 @@ mod tests {
         assert_eq!(zero.table.rows[0][0].as_deref(), Some("\\x00\\x01"));
         drop(database);
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn chain_depth(shown: &ShownKeys) -> usize {
+        shown.chain().count()
+    }
+
+    #[test]
+    fn the_shown_keys_chain_stays_bounded_however_long_one_pages() {
+        let mut shown: Option<Arc<ShownKeys>> = None;
+        for page in 0..(5 * REMEMBERED_PAGES) {
+            shown = Some(ShownKeys::linked(
+                vec![page.to_string().into_bytes()],
+                shown,
+            ));
+            let depth = shown.as_deref().map_or(0, chain_depth);
+            assert!(depth <= 2 * REMEMBERED_PAGES, "{depth} pages linked");
+        }
+        let newest = shown.expect("pages were shown");
+        let remembered: Vec<&Vec<u8>> = newest.remembered().collect();
+        assert_eq!(remembered.len(), REMEMBERED_PAGES);
+        assert_eq!(
+            remembered[0],
+            &(5 * REMEMBERED_PAGES - 1).to_string().into_bytes()
+        );
+        let half = || vec![vec![b'k'; REMEMBERED_BYTES / 2 + 1]];
+        let big = ShownKeys::linked(half(), Some(ShownKeys::linked(half(), None)));
+        assert_eq!(big.remembered().count(), 1);
+        let after_big = ShownKeys::linked(vec![b"a".to_vec()], Some(big));
+        assert_eq!(after_big.remembered().count(), 2);
+    }
+
+    #[test]
+    fn a_very_long_shown_keys_chain_drops_without_recursing() {
+        let dropped = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                let mut shown: Option<Arc<ShownKeys>> = None;
+                for _ in 0..300_000 {
+                    shown = Some(Arc::new(ShownKeys::on(vec![b"k".to_vec()], shown)));
+                }
+                drop(shown);
+            })
+            .expect("the thread starts")
+            .join();
+        assert!(dropped.is_ok());
+    }
+
+    #[test]
+    fn carried_keys_are_shared_by_every_later_start() {
+        let carried =
+            CarriedKeys::new((0..250_u32).map(|key| key.to_be_bytes().to_vec()).collect());
+        let next = carried.after(KEY_SCAN_LIMIT);
+        assert_eq!(next.len(), 150);
+        assert_eq!(next.remaining()[0], 100_u32.to_be_bytes().to_vec());
+        assert!(Arc::ptr_eq(&carried.keys, &next.keys));
+        assert!(next.after(1_000).is_empty());
+        assert!(CarriedKeys::default().is_empty());
+    }
+
+    #[test]
+    fn starts_further_back_than_the_remembered_pages_forget_their_shown_keys() {
+        let shown = Some(ShownKeys::linked(vec![b"a".to_vec()], None));
+        let start = PageStart::Cursor {
+            cursor: 1,
+            carried: CarriedKeys::default(),
+            shown,
+        };
+        let mut starts = vec![start; REMEMBERED_PAGES + 1];
+        forget_old_shown_keys(&mut starts);
+        assert!(matches!(&starts[0], PageStart::Cursor { shown: None, .. }));
+        assert!(matches!(
+            &starts[1],
+            PageStart::Cursor { shown: Some(_), .. }
+        ));
+        let mut few = starts[1..].to_vec();
+        forget_old_shown_keys(&mut few);
+        assert!(matches!(&few[0], PageStart::Cursor { shown: Some(_), .. }));
     }
 }

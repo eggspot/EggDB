@@ -122,12 +122,24 @@ pub fn prefix_pattern(prefix: &[u8]) -> Vec<u8> {
 /// Reads one reply from `reader` within the client's limits; RESP3 attributes are read and
 /// dropped, and so are pushes that come before the reply.
 pub fn read_reply(reader: &mut impl BufRead) -> Result<RespReply, RespError> {
-    let mut budget = Budget {
-        bytes: MAX_REPLY_BYTES,
-        values: MAX_REPLY_VALUES,
-    };
+    read_reply_within(reader, &mut Budget::default())
+}
+
+fn read_replies(reader: &mut impl BufRead, count: usize) -> Result<Vec<RespReply>, RespError> {
+    let mut budget = Budget::default();
+    let mut replies = Vec::with_capacity(count.min(MAX_REPLY_VALUES));
+    for _ in 0..count {
+        replies.push(read_reply_within(reader, &mut budget)?);
+    }
+    Ok(replies)
+}
+
+fn read_reply_within(
+    reader: &mut impl BufRead,
+    budget: &mut Budget,
+) -> Result<RespReply, RespError> {
     loop {
-        let (reply, pushed) = read_value(reader, &mut budget, 0)?;
+        let (reply, pushed) = read_value(reader, budget, 0)?;
         if !pushed {
             return Ok(reply);
         }
@@ -137,6 +149,15 @@ pub fn read_reply(reader: &mut impl BufRead) -> Result<RespReply, RespError> {
 struct Budget {
     bytes: usize,
     values: usize,
+}
+
+impl Default for Budget {
+    fn default() -> Self {
+        Self {
+            bytes: MAX_REPLY_BYTES,
+            values: MAX_REPLY_VALUES,
+        }
+    }
 }
 
 impl Budget {
@@ -471,7 +492,8 @@ impl RespClient {
         read_reply(&mut self.reader)
     }
 
-    /// Sends every command in one write and reads their replies in order.
+    /// Sends every command in one write and reads their replies in order, all of them within
+    /// one reply's limits.
     pub fn pipeline<P: AsRef<[u8]>>(
         &mut self,
         commands: &[Vec<P>],
@@ -482,11 +504,7 @@ impl RespClient {
         }
         self.writer.write_all(&out)?;
         self.writer.flush()?;
-        let mut replies = Vec::with_capacity(commands.len());
-        for _ in commands {
-            replies.push(read_reply(&mut self.reader)?);
-        }
-        Ok(replies)
+        read_replies(&mut self.reader, commands.len())
     }
 
     /// Closes the connection at once, both ways.
@@ -653,6 +671,23 @@ mod tests {
         }
         many_pushes.extend_from_slice(b"+OK\r\n");
         assert!(read(&many_pushes).is_err());
+    }
+
+    #[test]
+    fn a_pipelines_replies_share_one_replys_limits() {
+        let half = MAX_REPLY_VALUES / 2;
+        let mut one = format!("*{half}\r\n").into_bytes();
+        for _ in 0..half {
+            one.extend_from_slice(b":1\r\n");
+        }
+        assert!(read_replies(&mut &one[..], 1).is_ok());
+        let two = [one.as_slice(), one.as_slice()].concat();
+        assert!(read_replies(&mut &two[..], 2).is_err());
+        let small = b"+OK\r\n:2\r\n".to_vec();
+        assert_eq!(
+            read_replies(&mut &small[..], 2).expect("both replies read"),
+            [RespReply::Simple(b"OK".to_vec()), RespReply::Integer(2)]
+        );
     }
 
     #[test]

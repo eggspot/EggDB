@@ -168,7 +168,7 @@ fn tokens_of(text: &str, dialect: QueryDialect) -> Result<Vec<Token<'_>>, Format
     );
     if carry != Carry::Code {
         let what = match carry {
-            Carry::Quoted(b'\'') => "unclosed string",
+            Carry::Quoted(b'\'') | Carry::Escaped | Carry::OracleQuote(_) => "unclosed string",
             Carry::Quoted(_) | Carry::Bracketed => "unclosed quoted name",
             Carry::Comment { .. } => "unclosed comment",
             Carry::Dollar(_) | Carry::Code => "unclosed $$ body",
@@ -265,6 +265,15 @@ fn literal_tail(out: &[(Range<usize>, Lexeme)], text: &str) -> usize {
                 && LITERAL_PREFIXES
                     .iter()
                     .any(|known| piece(prefix).eq_ignore_ascii_case(known))
+                && touching(&out[out.len() - 2..]) =>
+        {
+            2
+        }
+        [.., mark, number]
+            if mark.1 == Lexeme::Other
+                && piece(mark) == "?"
+                && number.1 == Lexeme::Number
+                && piece(number).bytes().all(|byte| byte.is_ascii_digit())
                 && touching(&out[out.len() - 2..]) =>
         {
             2
@@ -656,6 +665,126 @@ mod tests {
         assert_eq!(
             formatted("select n 'a', u & 'b'", QueryDialect::PostgreSql),
             "SELECT\n  n 'a',\n  u & 'b'"
+        );
+    }
+
+    fn relexed(text: &str, dialect: QueryDialect) -> Vec<(Lexeme, String)> {
+        tokens_of(text, dialect)
+            .expect("it lexes")
+            .iter()
+            .map(|token| (token.lexeme, shown_text(token)))
+            .collect()
+    }
+
+    #[test]
+    fn format_keeps_every_dialects_literals_and_parameters_whole() {
+        let cases: [(QueryDialect, &str, &[&str]); 5] = [
+            (
+                QueryDialect::PostgreSql,
+                "select $1, $12::int, E'a\\tb', e'it\\'s', B'0101', X'ff', U&'d\\0061t', U&\"n\", $$a;b$$, $tag$x $$ y$tag$, 1e-5, 1.5E+3, 2e10, a$b, café from t where c = :name",
+                &[
+                    "$1",
+                    "$12::int",
+                    "E'a\\tb'",
+                    "e'it\\'s'",
+                    "B'0101'",
+                    "X'ff'",
+                    "U&'d\\0061t'",
+                    "U&\"n\"",
+                    "$$a;b$$",
+                    "$tag$x $$ y$tag$",
+                    "1e-5",
+                    "1.5E+3",
+                    "2e10",
+                    "a$b",
+                    "café",
+                    ":name",
+                ],
+            ),
+            (
+                QueryDialect::MySql,
+                "select ?, @v, @@session.sql_mode, @'q v', n'Ada', x'ff', b'01', 0x1F, 1e-5, 'it\\'s', \"d\\\"q\", `order` from t",
+                &[
+                    "?",
+                    "@v",
+                    "@@session.sql_mode",
+                    "@'q v'",
+                    "n'Ada'",
+                    "x'ff'",
+                    "b'01'",
+                    "0x1F",
+                    "1e-5",
+                    "'it\\'s'",
+                    "\"d\\\"q\"",
+                    "`order`",
+                ],
+            ),
+            (
+                QueryDialect::SqlServer,
+                "select @p, @@ROWCOUNT, N'Ada', 0x1F, $1.5, 1.5E+3, [a b], x#y from #t join ##g on #t.a = ##g.a",
+                &[
+                    "@p",
+                    "@@ROWCOUNT",
+                    "N'Ada'",
+                    "0x1F",
+                    "$1.5",
+                    "1.5E+3",
+                    "[a b]",
+                    "x#y",
+                    "FROM #t",
+                    "JOIN ##g",
+                    "#t.a = ##g.a",
+                ],
+            ),
+            (
+                QueryDialect::Oracle,
+                "select :1, :name, q'[it's]', Q'{a}', nq'<y>', NQ'!z!', N'Ada', n'a', 1.5E+3, 1e-5, emp# from dual",
+                &[
+                    ":1",
+                    ":name",
+                    "q'[it's]'",
+                    "Q'{a}'",
+                    "nq'<y>'",
+                    "NQ'!z!'",
+                    "N'Ada'",
+                    "n'a'",
+                    "1.5E+3",
+                    "1e-5",
+                    "emp#",
+                ],
+            ),
+            (
+                QueryDialect::Sqlite,
+                "select ?, ?123, :a, @b, $c, X'ff', [x y], `z`, 1e-5 from t",
+                &["?123", ":a", "@b", "$c", "X'ff'", "[x y]", "`z`", "1e-5"],
+            ),
+        ];
+        for (dialect, statement, forms) in cases {
+            let text = formatted(statement, dialect);
+            for form in forms {
+                assert!(
+                    text.contains(form),
+                    "{form:?} in {dialect:?} became {text:?}"
+                );
+            }
+            assert_eq!(
+                relexed(&text, dialect),
+                relexed(statement, dialect),
+                "{dialect:?}: {text:?}"
+            );
+            assert_eq!(formatted(&text, dialect), text, "{dialect:?}");
+        }
+        assert_eq!(
+            formatted("select ?123, ? from t", QueryDialect::Sqlite),
+            "SELECT\n  ?123,\n  ?\nFROM t"
+        );
+        assert_eq!(
+            formatted("select * from ##g", QueryDialect::SqlServer),
+            "SELECT\n  *\nFROM ##g"
+        );
+        assert_eq!(
+            formatted("select q'[abc]' from dual", QueryDialect::Oracle),
+            "SELECT\n  q'[abc]'\nFROM dual"
         );
     }
 
