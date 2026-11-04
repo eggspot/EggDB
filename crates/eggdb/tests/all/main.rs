@@ -1,11 +1,11 @@
 //! Integration tests of `eggdb`, built as one test program (docs/testing.md, D335).
 
-mod common;
 mod backup;
 mod cli;
 mod cli_busy;
 mod collections;
 mod command_model;
+mod common;
 mod concurrent;
 mod copy;
 mod database;

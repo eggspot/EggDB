@@ -1,7 +1,7 @@
 //! Integration tests of `eggdb-pgwire`, built as one test program (docs/testing.md, D335).
 
-mod common;
 mod column_privileges;
+mod common;
 mod copy;
 mod hostile_messages;
 mod limits;

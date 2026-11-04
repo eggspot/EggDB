@@ -306,7 +306,9 @@ fn a_cancel_rolls_back_the_pipeline_it_stops() {
 fn npgsql_type_loading_queries_answer_in_one_round_trip() {
     let server = TestServer::start(8);
     let (mut client, _) = Client::login(server.address);
-    let answer = client.query(include_str!("../../../eggdb/tests/data/npgsql/load-types.sql"));
+    let answer = client.query(include_str!(
+        "../../../eggdb/tests/data/npgsql/load-types.sql"
+    ));
     let shape: String = tags(&answer).chars().filter(|tag| *tag != 'D').collect();
     assert_eq!(shape, "TCTCTCTCZ", "{answer:?}");
     let int_array = answer

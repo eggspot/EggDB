@@ -15,7 +15,11 @@ fn another_process_cannot_open_a_file_this_process_has_open() {
     let file = TempPath::new("locked-process");
     let _db = Database::open(file.path()).unwrap();
     let output = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "lock_across_processes::lock_probe_from_another_process", "--nocapture"])
+        .args([
+            "--exact",
+            "lock_across_processes::lock_probe_from_another_process",
+            "--nocapture",
+        ])
         .env(LOCK_PROBE, file.path())
         .output()
         .unwrap();

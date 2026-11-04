@@ -1,8 +1,8 @@
 //! Integration tests of `eggdb-tdswire`, built as one test program (docs/testing.md, D335).
 
-mod common;
 mod batch_logic;
 mod bulk_load;
+mod common;
 mod databases;
 mod documented_examples;
 mod hostile_packets;
