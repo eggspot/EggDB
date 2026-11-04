@@ -564,6 +564,36 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   form `LISTAGG(...) [WITHIN GROUP (ORDER BY ...)] OVER ([PARTITION BY ...])` gives each row its
   partition's values joined in `WITHIN GROUP` order; `ORDER BY` inside `OVER` is `ORA-30487` and
   `DISTINCT` there answers `0A000` for now (D300).
+- **Analytic functions** (D332): `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `PERCENT_RANK`, `CUME_DIST`,
+  `NTILE`, `LAG`, `LEAD`, `FIRST_VALUE`, `LAST_VALUE` and `NTH_VALUE`, and every aggregate, with
+  `OVER ([PARTITION BY ...] [ORDER BY ...] [ROWS | RANGE ...])`, computed by the same window code
+  as the other dialects (D151). `LAG`, `LEAD`, `FIRST_VALUE`, `LAST_VALUE` and `NTH_VALUE` take
+  `IGNORE NULLS` or `RESPECT NULLS` inside the parentheses after the first argument or after
+  them (`LAG(x IGNORE NULLS, 2)`, `LAG(x, 2) IGNORE NULLS OVER (...)`), and `NTH_VALUE(x, n)
+  FROM FIRST | FROM LAST`. The ranking functions and `LAG`/`LEAD` without `ORDER BY` in their
+  window are `ORA-30485`, any of them without `OVER` is `ORA-30484`, the wrong number of
+  arguments `ORA-00909`. `RATIO_TO_REPORT(expr) OVER ([PARTITION BY ...])` is each value over its
+  partition's sum (NULL when the value is NULL or the sum is 0; `ORDER BY` in its `OVER` is
+  `ORA-30487`). `MIN`, `MAX`, `SUM`, `AVG`, `COUNT`, `VARIANCE` and `STDDEV` (and their `_SAMP`
+  and `_POP` forms) take `KEEP (DENSE_RANK FIRST | LAST ORDER BY ...)`, aggregating only the rows
+  that rank first or last in that order, ties included, in a group or with `OVER ([PARTITION BY
+  ...])`.
+- **Regular expressions** (D332): `REGEXP_LIKE(source, pattern [, match_parameter])`,
+  `REGEXP_COUNT(source, pattern [, position [, match_parameter]])`, `REGEXP_INSTR(source, pattern
+  [, position [, occurrence [, return_option [, match_parameter [, subexpression]]]]])`,
+  `REGEXP_SUBSTR(source, pattern [, position [, occurrence [, match_parameter [,
+  subexpression]]]])` and `REGEXP_REPLACE(source, pattern [, replace_string [, position [,
+  occurrence [, match_parameter]]]])`, on the regular expression engine of D128 and D130 (POSIX
+  classes such as `[[:digit:]]`, `\d`, `\w`, `\s`, lazy quantifiers, back references `\1` to
+  `\9` in patterns and in `replace_string`). The match is Oracle's: the leftmost one, and there
+  the first the pattern finds in its own order (alternatives left to right, greedy quantifiers
+  longest first, lazy ones shortest first), so `REGEXP_SUBSTR('ab', 'a|ab')` is `a` where
+  PostgreSQL's `regexp_substr` gives `ab`. `match_parameter` takes `i`, `c`, `n` (`.` matches a
+  newline, which it does not by default), `m` (`^` and `$` at each line) and `x` (spaces in the
+  pattern ignored); the last of `i` and `c` wins and another letter is `ORA-01760`. `occurrence`
+  0 in `REGEXP_REPLACE` (the default) replaces every match. A position or occurrence below 1, or a
+  subexpression outside 0 to 9, is `ORA-01428`. An empty source, pattern or result is NULL, as
+  Oracle's empty strings are; `REGEXP_REPLACE` with a NULL pattern gives the source back.
 - **Length limit**: `LPAD`, `RPAD`, `REPLACE`, `||`, `UPPER`, `LOWER`, `INITCAP` and `TO_CHAR` refuse a result longer than
   1,000,000,000 bytes with `ORA-01489` before they build it.
 - **The data dictionary** (D134): `USER_`, `ALL_` and `DBA_` `TABLES`, `TAB_COLUMNS`,
@@ -4635,9 +4665,13 @@ And more, not in the suite yet:
   advances it once per source row; rows go into an `INSERT ALL`'s targets one `INTO` clause at a
   time, so identity values follow that order (D304).
 - Not supported yet: outer joins with `(+)`, `RETURNING ... INTO`, synonyms, database links,
-  `ROWID`, the XML functions, the regular-expression functions (`REGEXP_LIKE`, `REGEXP_SUBSTR`,
-  ...), the ranking and offset window functions (`ROW_NUMBER`, `RANK`, `LAG`, ...: `ORA-00904`),
-  and Oracle-only analytic forms such as `RATIO_TO_REPORT`. Aggregates with `OVER` work.
+  `ROWID` and the XML functions.
+- Regular expressions (D332): without `n`, a bracket expression that excludes characters
+  (`[^a]`) does not match a newline either, where Oracle's does; `x` also treats `#` as the
+  start of a comment; `\Z` is the end of the text only, and `\z` and the equivalence and
+  collation classes (`[=e=]`, `[.ch.]`) are not read. The analytic functions take no `DISTINCT`,
+  `LISTAGG (DISTINCT ...) OVER` included, and `KEEP` is not available on `LISTAGG` or with
+  `DISTINCT`.
   `SAVEPOINT` works as in every dialect (D173), and views `WITH CHECK OPTION` refuse rows they
   would not show ([Schemas, views and comments](#schemas-views-and-comments)).
 - `NUMBER`'s range ends are not Oracle's: `TO_NUMBER('1e126')` gives a 127-digit value where
