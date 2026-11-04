@@ -97,6 +97,8 @@ pub fn run(
             let mut executor = execute::Executor {
                 access: execute::Access::Write(store::GraphWrite { keys }),
                 parameters,
+                foreach_runs: 0,
+                shortest_path_steps: std::cell::Cell::new(0),
             };
             let result = executor.run_query(&parsed);
             let failed = result.is_err();
@@ -112,6 +114,8 @@ pub fn run(
             let mut executor = execute::Executor {
                 access: execute::Access::Read(store::GraphRead { keys }),
                 parameters,
+                foreach_runs: 0,
+                shortest_path_steps: std::cell::Cell::new(0),
             };
             outcome = Some(executor.run_query(&parsed));
             Ok(())

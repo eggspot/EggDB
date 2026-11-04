@@ -650,24 +650,16 @@ impl Parser<'_> {
         let starts_like_a_pattern = matches!(self.peek_at(1), Some(Token::Symbol("(")))
             || (matches!(self.peek_at(1), Some(Token::Word(_) | Token::Quoted(_)))
                 && matches!(self.peek_at(2), Some(Token::Symbol("="))));
-        if !starts_like_a_pattern {
+        if !starts_like_a_pattern || !self.bracket_holds_a_comprehension() {
             return Ok(None);
         }
-        let saved = (self.at, self.depth, self.operators);
         self.at += 1;
-        let pattern = match self.pattern() {
-            Ok(pattern)
-                if !pattern.steps.is_empty()
-                    && pattern.shortest.is_none()
-                    && (self.is_keyword("where") || self.is_symbol("|")) =>
-            {
-                pattern
-            }
-            _ => {
-                (self.at, self.depth, self.operators) = saved;
-                return Ok(None);
-            }
-        };
+        let pattern = self.pattern()?;
+        if pattern.steps.is_empty() || pattern.shortest.is_some() {
+            return Err(syntax(
+                "a pattern comprehension needs a relationship pattern and cannot be a shortest path",
+            ));
+        }
         let filter = if self.take_keyword("where") {
             Some(Box::new(self.expression()?))
         } else {
@@ -681,6 +673,27 @@ impl Parser<'_> {
             filter,
             map,
         }))
+    }
+
+    fn bracket_holds_a_comprehension(&self) -> bool {
+        let mut nesting = 0usize;
+        for (token, _) in self.tokens.iter().skip(self.at) {
+            match token {
+                Token::Symbol("[" | "(" | "{") => nesting += 1,
+                Token::Symbol("]" | ")" | "}") => {
+                    nesting = nesting.saturating_sub(1);
+                    if nesting == 0 {
+                        return false;
+                    }
+                }
+                Token::Symbol("|") if nesting == 1 => return true,
+                Token::Word(word) if nesting == 1 && word.eq_ignore_ascii_case("where") => {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     fn patterns(&mut self) -> GraphResult<Vec<Pattern>> {
@@ -1118,7 +1131,11 @@ impl Parser<'_> {
             return self.match_rest(false);
         }
         if self.take_keyword("create") {
-            return Ok(Clause::Create(self.patterns()?));
+            let patterns = self.patterns()?;
+            if patterns.iter().any(|pattern| pattern.shortest.is_some()) {
+                return Err(syntax("shortestPath(...) cannot be used to CREATE"));
+            }
+            return Ok(Clause::Create(patterns));
         }
         if self.take_keyword("merge") {
             let pattern = self.pattern()?;

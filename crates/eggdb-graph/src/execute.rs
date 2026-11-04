@@ -6,7 +6,7 @@ use crate::store::{GraphRead, GraphWrite};
 use crate::value::{Node, Path, Relationship, Value, equals, order};
 use crate::{GraphError, GraphResult, QueryResult};
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const MAX_ROWS: usize = 1 << 22;
 const MAX_SHORTEST_PATH_STEPS: usize = 1 << 20;
@@ -20,6 +20,23 @@ fn lookup<'r>(row: &'r Row, name: &str) -> Option<&'r Value> {
         .rev()
         .find(|(known, _)| known == name)
         .map(|(_, value)| value)
+}
+
+fn distinct_key<'v>(values: impl Iterator<Item = &'v Value>) -> String {
+    let mut key = String::new();
+    for value in values {
+        key.push_str(&format!("{value:?}"));
+        key.push('\u{1f}');
+    }
+    key
+}
+
+fn bind_path(row: &mut Row, name: &str, path: Value) -> GraphResult<()> {
+    if lookup(row, name).is_some() {
+        return Err(syntax_error(format!("Variable `{name}` already declared")));
+    }
+    row.push((name.to_owned(), path));
+    Ok(())
 }
 
 fn bind(row: &mut Row, name: &str, value: Value) {
@@ -95,6 +112,8 @@ pub(crate) enum Access<'g> {
 pub(crate) struct Executor<'g, 'p> {
     pub(crate) access: Access<'g>,
     pub(crate) parameters: &'p [(String, Value)],
+    pub(crate) foreach_runs: usize,
+    pub(crate) shortest_path_steps: std::cell::Cell<usize>,
 }
 
 fn is_aggregate(expr: &Expr) -> bool {
@@ -720,7 +739,7 @@ impl<'g> Executor<'g, '_> {
             let mut row = row;
             if let Some(name) = &pattern.path {
                 let path = self.path_value(walk.origin, &walk.relationships)?;
-                bind(&mut row, name, path);
+                bind_path(&mut row, name, path)?;
             }
             out.push(row);
             return Ok(());
@@ -905,7 +924,6 @@ impl<'g> Executor<'g, '_> {
         }];
         let mut index: HashMap<u64, usize> = HashMap::from([(origin, 0)]);
         let mut frontier = vec![0usize];
-        let mut steps = 0usize;
         for hop in 1..=max {
             let mut next_frontier = Vec::new();
             for &at in &frontier {
@@ -913,10 +931,11 @@ impl<'g> Executor<'g, '_> {
                     continue;
                 };
                 for (relationship, next) in self.steps_from(from, pattern, row, &[])? {
-                    steps += 1;
+                    let steps = self.shortest_path_steps.get() + 1;
+                    self.shortest_path_steps.set(steps);
                     if steps > MAX_SHORTEST_PATH_STEPS {
                         return Err(out_of_memory(format!(
-                            "the shortest path search expands more than {MAX_SHORTEST_PATH_STEPS} relationships; bound it with fewer hops or a more selective pattern"
+                            "the query's shortest path searches expand more than {MAX_SHORTEST_PATH_STEPS} relationships; bound them with fewer hops, fewer start nodes or a more selective pattern"
                         )));
                     }
                     match index.get(&next) {
@@ -1015,7 +1034,7 @@ impl<'g> Executor<'g, '_> {
                     }
                     if let Some(name) = &pattern.path {
                         let path = self.path_value(start.id, &relationships)?;
-                        bind(&mut next_row, name, path);
+                        bind_path(&mut next_row, name, path)?;
                     }
                     out.push(next_row);
                     if out.len() > MAX_ROWS {
@@ -1078,8 +1097,10 @@ impl<'g> Executor<'g, '_> {
     }
 
     fn create(&mut self, pattern: &Pattern, row: &mut Row, merging: bool) -> GraphResult<()> {
-        if pattern.shortest.is_some() {
-            return Err(syntax_error("shortestPath(...) cannot be used to CREATE"));
+        if let Some(name) = &pattern.path
+            && lookup(row, name).is_some()
+        {
+            return Err(syntax_error(format!("Variable `{name}` already declared")));
         }
         let origin = self.create_node(&pattern.start, row)?;
         let mut at = origin;
@@ -1126,7 +1147,7 @@ impl<'g> Executor<'g, '_> {
         }
         if let Some(name) = &pattern.path {
             let path = self.path_value(origin, &walked)?;
-            bind(row, name, path);
+            bind_path(row, name, path)?;
         }
         Ok(())
     }
@@ -1341,13 +1362,9 @@ impl<'g> Executor<'g, '_> {
             }
         }
         if projecting.distinct {
-            let mut unique: Vec<(Row, Row)> = Vec::new();
-            for (out, source) in projected {
-                if !unique.iter().any(|(known, _)| *known == out) {
-                    unique.push((out, source));
-                }
-            }
-            projected = unique;
+            let mut seen = HashSet::new();
+            projected
+                .retain(|(out, _)| seen.insert(distinct_key(out.iter().map(|(_, value)| value))));
         }
         if !projecting.order.is_empty() {
             let mut keyed = Vec::with_capacity(projected.len());
@@ -1471,13 +1488,10 @@ impl<'g> Executor<'g, '_> {
             }
         }
         if query.parts.len() > 1 && !query.union_all {
-            let mut unique: Vec<Vec<Value>> = Vec::new();
-            for row in result.rows {
-                if !unique.contains(&row) {
-                    unique.push(row);
-                }
-            }
-            result.rows = unique;
+            let mut seen = HashSet::new();
+            result
+                .rows
+                .retain(|row| seen.insert(distinct_key(row.iter())));
         }
         Ok(result)
     }
@@ -1523,11 +1537,15 @@ impl<'g> Executor<'g, '_> {
                 }
             }
             Clause::Delete { detach, targets } => {
+                let mut nodes = Vec::new();
                 for row in &rows {
                     for target in targets {
                         let value = self.evaluate(target, row)?;
-                        self.delete(value, *detach)?;
+                        self.delete_relationships_of(value, &mut nodes)?;
                     }
+                }
+                for node in nodes {
+                    self.writer()?.delete_node(node, *detach)?;
                 }
             }
             Clause::Foreach {
@@ -1547,6 +1565,12 @@ impl<'g> Executor<'g, '_> {
                         }
                     };
                     for item in items {
+                        self.foreach_runs += 1;
+                        if self.foreach_runs > MAX_ROWS {
+                            return Err(out_of_memory(format!(
+                                "FOREACH runs its body more than {MAX_ROWS} times in one query"
+                            )));
+                        }
                         let mut scoped = row.clone();
                         bind(&mut scoped, variable, item);
                         let mut inner = vec![scoped];
@@ -1566,11 +1590,9 @@ impl<'g> Executor<'g, '_> {
         Ok(rows)
     }
 
-    fn delete(&mut self, value: Value, detach: bool) -> GraphResult<()> {
+    fn delete_relationships_of(&mut self, value: Value, nodes: &mut Vec<u64>) -> GraphResult<()> {
         match value {
-            Value::Node(node) => {
-                self.writer()?.delete_node(node.id, detach)?;
-            }
+            Value::Node(node) => nodes.push(node.id),
             Value::Relationship(relationship) => {
                 self.writer()?.delete_relationship(relationship.id)?;
             }
@@ -1578,14 +1600,12 @@ impl<'g> Executor<'g, '_> {
                 for relationship in &path.relationships {
                     self.writer()?.delete_relationship(relationship.id)?;
                 }
-                for node in &path.nodes {
-                    self.writer()?.delete_node(node.id, detach)?;
-                }
+                nodes.extend(path.nodes.iter().map(|node| node.id));
             }
             Value::List(items) => {
                 for item in items {
                     if matches!(item, Value::Relationship(_) | Value::Path(_)) {
-                        self.delete(item, detach)?;
+                        self.delete_relationships_of(item, nodes)?;
                     }
                 }
             }

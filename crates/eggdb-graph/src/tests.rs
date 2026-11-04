@@ -713,3 +713,113 @@ fn list_and_pattern_comprehensions_follow_the_manual() {
         ]]
     );
 }
+
+#[test]
+fn nested_pattern_comprehensions_parse_in_linear_time() {
+    let keyspace = seeded();
+    let levels = 40;
+    let nested = format!(
+        "RETURN {}1{} AS x",
+        "[(a)<-[{k: ".repeat(levels),
+        "}]-(b)]".repeat(levels)
+    );
+    let started = std::time::Instant::now();
+    let outcome = run(&keyspace, &nested, &[], false);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(outcome.is_err());
+    let comprehension = query(
+        &keyspace,
+        "MATCH (a:Person {name: 'Ada'}) RETURN [(a)-[:KNOWS]->(b) | [(b)-[:KNOWS]->(c) | c.name]] AS x",
+    );
+    assert_eq!(
+        comprehension.rows,
+        vec![vec![Value::List(vec![Value::List(vec![text("Linus")])])]]
+    );
+    assert_eq!(
+        query(&keyspace, "WITH 1 AS x RETURN [x = 1, (x) + 1] AS list").rows,
+        vec![vec![Value::List(vec![
+            Value::Boolean(true),
+            Value::Integer(2)
+        ])]]
+    );
+}
+
+#[test]
+fn foreach_body_runs_are_bounded_per_query() {
+    let keyspace = MemoryKeyspace::default();
+    assert_eq!(
+        error_code(
+            &keyspace,
+            "FOREACH (x IN range(1, 3000) | FOREACH (y IN range(1, 3000) | FOREACH (z IN [] | CREATE ())))"
+        ),
+        "Neo.TransientError.General.MemoryPoolOutOfMemoryError"
+    );
+    assert_eq!(
+        query(&keyspace, "MATCH (n) RETURN count(n)").rows,
+        vec![vec![Value::Integer(0)]]
+    );
+}
+
+#[test]
+fn union_and_distinct_remove_duplicates_quickly() {
+    let keyspace = MemoryKeyspace::default();
+    let started = std::time::Instant::now();
+    let union = query(
+        &keyspace,
+        "UNWIND range(1, 50000) AS x RETURN x % 10 AS y UNION UNWIND range(1, 50000) AS x RETURN x % 7 AS y",
+    );
+    assert_eq!(union.rows.len(), 10);
+    assert_eq!(union.rows.first(), Some(&vec![Value::Integer(1)]));
+    let distinct = query(
+        &keyspace,
+        "UNWIND range(1, 50000) AS x RETURN DISTINCT x % 13 AS y",
+    );
+    assert_eq!(distinct.rows.len(), 13);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn a_path_variable_is_declared_once_and_deleting_paths_checks_nodes_after_the_clause() {
+    let keyspace = seeded();
+    assert_eq!(
+        error_code(
+            &keyspace,
+            "MATCH p = (a:Person)-->(b) MATCH p = (c:Project)<--(d) RETURN p"
+        ),
+        "Neo.ClientError.Statement.SyntaxError"
+    );
+    assert_eq!(
+        error_code(
+            &keyspace,
+            "MATCH p = (a:Person {name: 'Ada'})-->(b) CREATE p = (:X)-[:R]->(:Y)"
+        ),
+        "Neo.ClientError.Statement.SyntaxError"
+    );
+    assert_eq!(
+        error_code(
+            &keyspace,
+            "MATCH (n:Nope) CREATE p = shortestPath((a)-[:R]->(b))"
+        ),
+        "Neo.ClientError.Statement.SyntaxError"
+    );
+    let shared = MemoryKeyspace::default();
+    query(&shared, "CREATE (a:P)-[:R]->(:Q), (a)-[:R]->(:Q)");
+    query(&shared, "MATCH p = (:P)-->() DELETE p");
+    assert_eq!(
+        query(&shared, "MATCH (n) RETURN count(n)").rows,
+        vec![vec![Value::Integer(0)]]
+    );
+    query(&shared, "CREATE (a:P)-[:R]->(:Q)");
+    assert_eq!(
+        error_code(&shared, "MATCH (a:P) DELETE a"),
+        "Neo.ClientError.Schema.ConstraintValidationFailed"
+    );
+}
