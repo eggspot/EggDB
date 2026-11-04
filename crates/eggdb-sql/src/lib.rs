@@ -247,6 +247,8 @@ mod sql_speed_tests;
 #[cfg(test)]
 mod sqlserver_tests;
 #[cfg(test)]
+mod statement_rollback_tests;
+#[cfg(test)]
 mod subquery_tests;
 #[cfg(test)]
 mod table_ddl_tests;

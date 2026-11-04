@@ -8,7 +8,7 @@ use crate::store::{EntryVisitor, KeyValueRead, KeyValueWrite, ScanDirection};
 
 const MOST_SAVEPOINTS: usize = 4096;
 
-type Undo = Vec<UndoEntry>;
+pub(super) type Undo = Vec<UndoEntry>;
 
 #[derive(Debug)]
 pub(super) enum UndoEntry {
@@ -130,6 +130,34 @@ impl KeyValueWrite for UndoWrite<'_> {
     }
 }
 
+pub(super) fn undo_back_to(
+    routed: &mut crate::temporary::TemporaryWrite<'_>,
+    undo: &mut Undo,
+    length: usize,
+) -> SqlResult<()> {
+    while undo.len() > length {
+        let Some(entry) = undo.pop() else {
+            break;
+        };
+        match entry {
+            UndoEntry::Statement {
+                key,
+                previous: Some(value),
+            } => routed.put(&key, &value)?,
+            UndoEntry::Statement {
+                key,
+                previous: None,
+            } => {
+                routed.delete(&key)?;
+            }
+            UndoEntry::Host { key, previous } => {
+                routed.inner.restore(&key, previous.as_deref())?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn missing(name: &Name, dialect: Dialect) -> SqlError {
     match dialect {
         Dialect::MySql => SqlError::new(
@@ -189,8 +217,10 @@ impl Session<'_> {
         true
     }
 
-    /// Whether a statement failed while a `SAVEPOINT` was set, leaving the block refusing
-    /// statements until `ROLLBACK TO SAVEPOINT` or `ROLLBACK`; [`Session::transaction_status`]
+    /// Whether a statement failed while a `SAVEPOINT` was set in PostgreSQL's dialect, leaving
+    /// the block refusing statements until `ROLLBACK TO SAVEPOINT` or `ROLLBACK` (in the other
+    /// dialects a failed statement undoes only itself and the block goes on, so this stays
+    /// `false`); [`Session::transaction_status`]
     /// still answers [`TransactionStatus::InBlock`](crate::TransactionStatus::InBlock) then,
     /// since the block can go on after the rollback to the savepoint.
     pub fn failed_after_savepoint(&self) -> bool {
@@ -279,26 +309,7 @@ impl Session<'_> {
             inner: writer,
             objects: &mut self.temporary,
         };
-        while self.savepoints.undo.len() > undo_at {
-            let Some(entry) = self.savepoints.undo.pop() else {
-                break;
-            };
-            match entry {
-                UndoEntry::Statement {
-                    key,
-                    previous: Some(value),
-                } => routed.put(&key, &value)?,
-                UndoEntry::Statement {
-                    key,
-                    previous: None,
-                } => {
-                    routed.delete(&key)?;
-                }
-                UndoEntry::Host { key, previous } => {
-                    routed.inner.restore(&key, previous.as_deref())?;
-                }
-            }
-        }
+        undo_back_to(&mut routed, &mut self.savepoints.undo, undo_at)?;
         self.savepoints.marks.truncate(at + 1);
         self.savepoints.aborted = false;
         self.tables = crate::execute::TableCache::default();

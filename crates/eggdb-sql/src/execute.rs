@@ -1163,6 +1163,7 @@ fn with_selected_rows(
         on_duplicate: insert.on_duplicate.clone(),
         conflict_target: insert.conflict_target.clone(),
         rollback_on_conflict: insert.rollback_on_conflict,
+        keeps_changes_on_conflict: insert.keeps_changes_on_conflict,
         overriding: insert.overriding,
     })
 }
@@ -2283,6 +2284,7 @@ fn insert_literals_into_view(
         on_duplicate: OnDuplicate::Fail,
         conflict_target: None,
         rollback_on_conflict: false,
+        keeps_changes_on_conflict: false,
         overriding: None,
     };
     self::insert(writer, tables, &statement)
@@ -2327,6 +2329,7 @@ fn insert_literals_routed(
         on_duplicate: OnDuplicate::Fail,
         conflict_target: None,
         rollback_on_conflict: false,
+        keeps_changes_on_conflict: false,
         overriding: None,
     };
     self::insert(writer, tables, &statement)

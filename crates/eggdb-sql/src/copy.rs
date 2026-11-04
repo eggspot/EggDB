@@ -910,6 +910,7 @@ impl RoutedRows {
             on_duplicate: crate::ast::OnDuplicate::Fail,
             conflict_target: None,
             rollback_on_conflict: false,
+            keeps_changes_on_conflict: false,
             overriding: Some(crate::ast::Overriding::SystemValue),
         };
         crate::execute::insert(writer, tables, &insert).map(|_| ())

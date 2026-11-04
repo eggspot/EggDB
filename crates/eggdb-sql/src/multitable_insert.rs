@@ -120,6 +120,7 @@ pub(crate) fn run(
             on_duplicate: OnDuplicate::Fail,
             conflict_target: None,
             rollback_on_conflict: false,
+            keeps_changes_on_conflict: false,
             overriding: None,
         };
         writing.insert(&*writer, tables, &mut statement)?;

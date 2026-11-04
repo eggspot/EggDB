@@ -719,6 +719,7 @@ fn insert_unmatched(
             on_duplicate: OnDuplicate::Fail,
             conflict_target: None,
             rollback_on_conflict: false,
+            keeps_changes_on_conflict: false,
             overriding: None,
         },
     )?;

@@ -87,6 +87,13 @@ fn ends_sqlserver_batch(error: &SqlError) -> bool {
     })
 }
 
+pub(super) fn aborts_batch_and_transaction(error: &SqlError) -> bool {
+    error.ends_sqlserver_batch().is_none()
+        && error.state() != SqlState::SYNTAX_ERROR
+        && !resolves_names(error)
+        && ends_sqlserver_batch(error)
+}
+
 fn assigns_only(result: &QueryResult) -> bool {
     result.columns.is_none()
         && result.info_messages.is_empty()
@@ -482,6 +489,7 @@ impl<'s> Session<'s> {
             };
             self.set_last_error(failure.sqlserver_number().unwrap_or(50_000));
             let xact_abort = self.xact_abort_applies(&failure);
+            let rolls_back = self.rolls_back_transaction_after(&failure);
             if self.sqlserver()
                 && (lower_level || !resolves_names(&failure))
                 && let Some(index) = code.program.try_around(at_instruction)
@@ -517,7 +525,7 @@ impl<'s> Session<'s> {
                 }
                 _ => {}
             }
-            if xact_abort && self.in_block() {
+            if rolls_back && self.in_block() {
                 self.abandon_transaction()?;
             }
             if !on_step(self.batch_step(Err(failure), statement_start)) || ends_batch {

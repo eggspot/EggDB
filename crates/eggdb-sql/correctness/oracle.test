@@ -3436,3 +3436,36 @@ DROP TABLE low304
 
 ok
 DROP TABLE high304
+
+chapter "Transactions": statement-level rollback, a failed statement rolls back only its own changes
+ok
+COMMIT
+
+ok
+CREATE TABLE rb317 (id NUMBER PRIMARY KEY)
+
+ok
+INSERT INTO rb317 VALUES (1)
+
+error 23505 1
+INSERT INTO rb317 VALUES (1)
+
+error 23505 1
+INSERT INTO rb317 SELECT 3 FROM dual UNION ALL SELECT 1 FROM dual
+
+ok
+INSERT INTO rb317 VALUES (2)
+
+ok
+COMMIT
+
+rows
+SELECT id FROM rb317 ORDER BY id
+----
+ID
+1
+2
+SELECT 2
+
+ok
+DROP TABLE rb317

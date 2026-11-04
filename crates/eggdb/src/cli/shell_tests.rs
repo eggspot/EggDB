@@ -631,6 +631,26 @@ fn key_value_commands_are_refused_after_a_statement_fails_past_a_savepoint() {
 }
 
 #[test]
+fn a_failed_statement_in_a_mysql_block_undoes_only_itself_and_key_value_commands_go_on() {
+    let directory = TempDirectory::new("shell-statement-rollback");
+    let file = created(&directory);
+    let script = "create table t (id int primary key);\n\
+        begin;\n\
+        insert into t values (1);\n\
+        savepoint s;\n\
+        put k before\n\
+        insert into t values (2), (1);\n\
+        put k after\n\
+        commit;\n";
+    let ran = shell(&file, &["--dialect", "mysql", "--keep-going"], script);
+    let stderr = text(&ran.stderr);
+    assert!(stderr.contains("1062"), "{stderr}");
+    assert!(!stderr.contains("cannot run put"), "{stderr}");
+    assert!(text(&ran.stdout).contains("COMMIT"), "{}", text(&ran.stdout));
+    assert_holds(&file, "k", "after");
+}
+
+#[test]
 fn a_time_to_live_set_in_a_block_applies_at_commit_and_vanishes_at_rollback() {
     let directory = TempDirectory::new("shell-block-expiry");
     let file = created(&directory);

@@ -480,8 +480,15 @@ impl<'s> Session<'s> {
             && error.state() != SqlState::SYNTAX_ERROR
     }
 
+    pub(super) fn rolls_back_transaction_after(&self, error: &SqlError) -> bool {
+        self.xact_abort_applies(error)
+            || (self.sqlserver()
+                && self.failed_statement_was_undone
+                && super::tsql::aborts_batch_and_transaction(error))
+    }
+
     pub(super) fn abort_transaction_after(&mut self, error: &SqlError) -> SqlResult<()> {
-        if self.xact_abort_applies(error) && self.in_block() {
+        if self.rolls_back_transaction_after(error) && self.in_block() {
             self.abandon_transaction()?;
         }
         Ok(())

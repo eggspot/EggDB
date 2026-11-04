@@ -1022,7 +1022,9 @@ moment the block's transaction began, takes effect at `COMMIT` and is gone after
 made after the savepoint together with the SQL ones, values, deletions, times to live and
 collection entries alike, and keeps what came before it; `RELEASE SAVEPOINT` keeps them in the
 block, and savepoints nest (D319). In a failed block they are refused until `ROLLBACK`, and after
-a statement fails while a savepoint is set until `ROLLBACK TO SAVEPOINT` or `ROLLBACK`; in a
+a statement fails while a savepoint is set until `ROLLBACK TO SAVEPOINT` or `ROLLBACK`, in
+PostgreSQL's dialect; in MySQL's, SQLite's, Oracle's and SQL Server's a failed statement undoes
+only itself and they go on (D317); in a
 `BEGIN READ ONLY` block the writes are refused while `get`, `scan` and `ttl` read the last
 commit; `check`, `stats` and `backup` read the last commit.
 

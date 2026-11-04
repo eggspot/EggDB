@@ -656,6 +656,7 @@ impl<'s> Session<'s> {
                 on_duplicate: OnDuplicate::Fail,
                 conflict_target: None,
                 rollback_on_conflict: false,
+                keeps_changes_on_conflict: false,
                 overriding: None,
             };
             execute::insert(&mut scratch, &mut cache, &insert)?;

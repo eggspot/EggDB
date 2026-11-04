@@ -2449,3 +2449,65 @@ SELECT 3
 
 ok
 DROP TABLE Staff300
+
+chapter "SET XACT_ABORT": with XACT_ABORT OFF a duplicate key ends only its statement, with ON it rolls back the transaction
+ok
+CREATE TABLE rb317 (id INT PRIMARY KEY)
+
+ok
+BEGIN TRAN
+
+ok
+INSERT INTO rb317 VALUES (1)
+
+error 23505 2627
+INSERT INTO rb317 VALUES (1)
+
+error 23505 2627
+INSERT INTO rb317 VALUES (3), (1)
+
+ok
+INSERT INTO rb317 VALUES (2)
+
+rows
+SELECT @@TRANCOUNT AS open_transactions
+----
+open_transactions
+1
+SELECT 1
+
+ok
+COMMIT
+
+rows
+SELECT id FROM rb317 ORDER BY id
+----
+id
+1
+2
+SELECT 2
+
+ok
+SET XACT_ABORT ON
+
+ok
+BEGIN TRAN
+
+ok
+INSERT INTO rb317 VALUES (10)
+
+error 23505 2627
+INSERT INTO rb317 VALUES (11), (1)
+
+rows
+SELECT COUNT(*) AS n, @@TRANCOUNT AS open_transactions FROM rb317
+----
+n|open_transactions
+2|0
+SELECT 1
+
+ok
+SET XACT_ABORT OFF
+
+ok
+DROP TABLE rb317

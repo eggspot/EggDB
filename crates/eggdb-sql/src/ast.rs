@@ -1458,6 +1458,7 @@ pub(crate) struct Insert {
     pub(crate) on_duplicate: OnDuplicate,
     pub(crate) conflict_target: Option<Vec<Name>>,
     pub(crate) rollback_on_conflict: bool,
+    pub(crate) keeps_changes_on_conflict: bool,
     pub(crate) overriding: Option<Overriding>,
 }
 

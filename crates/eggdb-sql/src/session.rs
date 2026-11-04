@@ -40,7 +40,7 @@ use crate::plan_cache::CachedStatement;
 use crate::plpgsql::TransactionEnd;
 use crate::sequences::{self, SequenceAdvance, SessionSequences};
 use crate::settings::{DIALECT_SETTING, SettingScope, Settings};
-use crate::store::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection};
+use crate::store::{KeyValueRead, KeyValueStore, KeyValueWrite};
 use crate::types::{SqlType, Value};
 use std::sync::Arc;
 
@@ -410,6 +410,13 @@ fn double_quoted_key_part(part: &str) -> String {
     format!("\"{}\"", part.replace('"', "\"\""))
 }
 
+fn conflict_resolution_applies(error: &SqlError) -> bool {
+    matches!(
+        error.state(),
+        SqlState::UNIQUE_VIOLATION | SqlState::NOT_NULL_VIOLATION | SqlState::CHECK_VIOLATION
+    )
+}
+
 fn aborted_block() -> SqlError {
     SqlError::new(
         SqlState::IN_FAILED_SQL_TRANSACTION,
@@ -431,9 +438,11 @@ enum Block<'s> {
 /// A block holds the store's one write transaction from `BEGIN` to `COMMIT` or `ROLLBACK`.
 /// In PostgreSQL's dialect a failed statement inside a block rolls the block back at once and
 /// leaves the session in the aborted state: every statement fails with SQLSTATE `25P02` until
-/// `ROLLBACK` (or `COMMIT`, which then reports `ROLLBACK`). In MySQL's, a statement that fails
-/// before writing leaves the block open, one that fails after writing rolls it back and ends
-/// it, and errors carry MySQL's numbers and wording.
+/// `ROLLBACK` (or `COMMIT`, which then reports `ROLLBACK`). In MySQL's, SQLite's, Oracle's and
+/// SQL Server's a failed statement undoes only its own changes and the block goes on, except
+/// SQLite's `INSERT OR FAIL`, which keeps the rows it wrote before the conflict, and SQL
+/// Server's `SET XACT_ABORT ON` and run-time errors that end its batch, which roll the
+/// transaction back. Errors carry each dialect's numbers and wording.
 pub struct Session<'s> {
     store: &'s dyn crate::store::ErasedStore,
     block: Block<'s>,
@@ -484,6 +493,8 @@ pub struct Session<'s> {
     set_error: Option<u32>,
     save_points: Vec<String>,
     savepoints: savepoints::Savepoints,
+    failed_statement_was_undone: bool,
+    keeps_failed_statement_changes: bool,
     advisory_locks: crate::advisory_locks::AdvisoryLocks,
     notifications: crate::notifications::Notifications,
     deallocated: Vec<Option<String>>,
@@ -566,6 +577,8 @@ impl<'s> Session<'s> {
             set_error: None,
             save_points: Vec::new(),
             savepoints: savepoints::Savepoints::default(),
+            failed_statement_was_undone: false,
+            keeps_failed_statement_changes: false,
             advisory_locks: crate::advisory_locks::AdvisoryLocks::new(store.store_id()),
             temporary: crate::temporary::TemporaryObjects::default(),
             portals: crate::portals::Portals::default(),
@@ -2793,6 +2806,11 @@ impl<'s> Session<'s> {
         io: &mut CopyIo<'_, '_>,
     ) -> SqlResult<QueryResult> {
         self.refuse_after_database_switch()?;
+        self.failed_statement_was_undone = false;
+        self.keeps_failed_statement_changes = matches!(
+            statement,
+            Statement::Insert(insert) if insert.keeps_changes_on_conflict
+        );
         match statement {
             Statement::Set { name, value, .. } if is_dialect_setting(name) => {
                 return self
@@ -3481,6 +3499,8 @@ impl<'s> Session<'s> {
         if matches!(self.block, Block::Failed) || self.savepoints.aborted {
             return Err(aborted_block());
         }
+        self.failed_statement_was_undone = false;
+        self.keeps_failed_statement_changes = false;
         let settings = Arc::clone(&self.settings);
         let binding = Binding {
             settings: &settings,
@@ -3586,6 +3606,15 @@ impl<'s> Session<'s> {
         let keep_open = !self.autocommit();
         let keeps_ddl_open = self.sqlserver();
         let implicit = self.implicit_transaction;
+        let rolls_back_statements = self.dialect != Dialect::PostgreSql;
+        let keeps_failed_changes = std::mem::take(&mut self.keeps_failed_statement_changes);
+        self.failed_statement_was_undone = false;
+        let undoes = |result: &SqlResult<QueryResult>| {
+            rolls_back_statements
+                && result.as_ref().is_err_and(|error| {
+                    !(keeps_failed_changes && conflict_resolution_applies(error))
+                })
+        };
         let tables = &mut self.tables;
         let objects = &mut self.temporary;
         let undo = self
@@ -3601,32 +3630,36 @@ impl<'s> Session<'s> {
                 let Some(log) = undo else {
                     return Err(SqlError::new(SqlState::INTERNAL_ERROR, "no undo log"));
                 };
-                body(
+                let statement_start = log.len();
+                let result = body(
                     &mut savepoints::UndoWrite {
                         inner: &mut routed,
-                        log,
+                        log: &mut *log,
                     },
                     tables,
-                )
+                );
+                if undoes(&result) && log.len() > statement_start {
+                    let undone = savepoints::undo_back_to(&mut routed, log, statement_start);
+                    return self.end_undone_statement(result, undone);
+                }
+                result
             }
-            Block::Writing(writer) if self.dialect != Dialect::PostgreSql => {
+            Block::Writing(writer) if rolls_back_statements => {
                 let mut routed = crate::temporary::TemporaryWrite {
                     inner: writer,
                     objects,
                 };
-                let mut tracked = TrackedWrite {
-                    inner: &mut routed,
-                    wrote: false,
-                };
-                let result = body(&mut tracked, tables);
-                let wrote = tracked.wrote;
-                if result.is_err()
-                    && wrote
-                    && let Block::Writing(writer) = std::mem::replace(&mut self.block, Block::None)
-                {
-                    let _ = writer.rollback();
-                    self.temporary.rollback();
-                    self.notifications.rollback();
+                let mut log = savepoints::Undo::new();
+                let result = body(
+                    &mut savepoints::UndoWrite {
+                        inner: &mut routed,
+                        log: &mut log,
+                    },
+                    tables,
+                );
+                if undoes(&result) && !log.is_empty() {
+                    let undone = savepoints::undo_back_to(&mut routed, &mut log, 0);
+                    return self.end_undone_statement(result, undone);
                 }
                 result
             }
@@ -3653,6 +3686,14 @@ impl<'s> Session<'s> {
                     },
                     tables,
                 );
+                if !keep_open
+                    && !implicit
+                    && outcome.as_ref().is_err_and(|error| {
+                        keeps_failed_changes && conflict_resolution_applies(error)
+                    })
+                {
+                    return self.commit_statement(writer).and(outcome);
+                }
                 self.end_autocommit_statement(
                     writer,
                     outcome,
@@ -3663,6 +3704,24 @@ impl<'s> Session<'s> {
                 )
             }
         }
+    }
+
+    fn end_undone_statement(
+        &mut self,
+        result: SqlResult<QueryResult>,
+        undone: SqlResult<()>,
+    ) -> SqlResult<QueryResult> {
+        self.tables = TableCache::default();
+        match undone {
+            Ok(()) => self.failed_statement_was_undone = true,
+            Err(_) if self.sqlserver() => {
+                let _ = self.abandon_transaction();
+            }
+            Err(_) => {
+                let _ = self.rollback();
+            }
+        }
+        result
     }
 
     fn end_autocommit_statement(
@@ -3717,32 +3776,7 @@ impl<'s> Session<'s> {
                 self.block_is_implicit = true;
                 Ok(result)
             }
-            Ok(result) => {
-                let pending = crate::deferred_checks::take_statement_pending();
-                if !pending.is_empty() {
-                    let checked = crate::constraints::check_pending(
-                        &crate::temporary::TemporaryRead {
-                            inner: &writer,
-                            objects: &self.temporary,
-                        },
-                        &mut self.tables,
-                        &pending,
-                    );
-                    if let Err(error) = checked {
-                        let _ = writer.rollback();
-                        self.temporary.rollback();
-                        return Err(error);
-                    }
-                }
-                if let Err(error) = writer.commit() {
-                    self.temporary.rollback();
-                    return Err(error);
-                }
-                self.temporary.commit();
-                sequences::mark_changes_committed();
-                crate::activity::committed();
-                Ok(result)
-            }
+            Ok(result) => self.commit_statement(writer).map(|()| result),
             Err(error) => {
                 let _ = writer.rollback();
                 self.temporary.rollback();
@@ -3750,6 +3784,36 @@ impl<'s> Session<'s> {
                 Err(error)
             }
         }
+    }
+
+    fn commit_statement(
+        &mut self,
+        writer: Box<dyn crate::store::BoxedWrite + 's>,
+    ) -> SqlResult<()> {
+        let pending = crate::deferred_checks::take_statement_pending();
+        if !pending.is_empty() {
+            let checked = crate::constraints::check_pending(
+                &crate::temporary::TemporaryRead {
+                    inner: &writer,
+                    objects: &self.temporary,
+                },
+                &mut self.tables,
+                &pending,
+            );
+            if let Err(error) = checked {
+                let _ = writer.rollback();
+                self.temporary.rollback();
+                return Err(error);
+            }
+        }
+        if let Err(error) = writer.commit() {
+            self.temporary.rollback();
+            return Err(error);
+        }
+        self.temporary.commit();
+        sequences::mark_changes_committed();
+        crate::activity::committed();
+        Ok(())
     }
 
     fn begin(&mut self, read_only: bool) -> SqlResult<QueryResult> {
@@ -3900,66 +3964,6 @@ fn milliseconds_setting(value: &str) -> Option<i64> {
         "min" => number.checked_mul(60_000),
         "h" => number.checked_mul(3_600_000),
         _ => None,
-    }
-}
-
-struct TrackedWrite<'w> {
-    inner: &'w mut dyn KeyValueWrite,
-    wrote: bool,
-}
-
-impl KeyValueRead for TrackedWrite<'_> {
-    fn get(&self, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
-        self.inner.get(key)
-    }
-
-    fn get_with(
-        &self,
-        key: &[u8],
-        read: &mut dyn FnMut(&[u8]) -> SqlResult<()>,
-    ) -> SqlResult<bool> {
-        self.inner.get_with(key, read)
-    }
-
-    fn scan(
-        &self,
-        start: &[u8],
-        end: &[u8],
-        direction: ScanDirection,
-        visit: &mut EntryVisitor<'_>,
-    ) -> SqlResult<()> {
-        self.inner.scan(start, end, direction, visit)
-    }
-
-    fn committed_version(&self) -> Option<u64> {
-        self.inner.committed_version()
-    }
-}
-
-impl KeyValueWrite for TrackedWrite<'_> {
-    fn put(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
-        self.wrote = true;
-        self.inner.put(key, value)
-    }
-
-    fn put_if_absent(&mut self, key: &[u8], value: &[u8]) -> SqlResult<bool> {
-        let inserted = self.inner.put_if_absent(key, value)?;
-        self.wrote |= inserted;
-        Ok(inserted)
-    }
-
-    fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {
-        let deleted = self.inner.delete(key)?;
-        self.wrote |= deleted;
-        Ok(deleted)
-    }
-
-    fn commit(self) -> SqlResult<()> {
-        Ok(())
-    }
-
-    fn rollback(self) -> SqlResult<()> {
-        Ok(())
     }
 }
 

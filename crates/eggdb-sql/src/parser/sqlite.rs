@@ -640,15 +640,17 @@ impl<'t> Parser<'t> {
         Ok(())
     }
 
-    pub(super) fn sqlite_conflict_resolution(&mut self) -> SqlResult<(OnDuplicate, bool)> {
+    pub(super) fn sqlite_conflict_resolution(&mut self) -> SqlResult<(OnDuplicate, bool, bool)> {
         let resolution = if self.take_word("replace") {
-            (OnDuplicate::Replace, false)
+            (OnDuplicate::Replace, false, false)
         } else if self.take_word("ignore") {
-            (OnDuplicate::Ignore, false)
+            (OnDuplicate::Ignore, false, false)
         } else if self.take_word("rollback") {
-            (OnDuplicate::Fail, true)
-        } else if self.take_word("abort") || self.take_word("fail") {
-            (OnDuplicate::Fail, false)
+            (OnDuplicate::Fail, true, false)
+        } else if self.take_word("fail") {
+            (OnDuplicate::Fail, false, true)
+        } else if self.take_word("abort") {
+            (OnDuplicate::Fail, false, false)
         } else {
             return Err(self.unexpected());
         };

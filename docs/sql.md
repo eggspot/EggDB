@@ -185,8 +185,10 @@ What it reads, on top of the statements of "What runs today":
   through the server it is `--database`'s), 1064 for syntax errors (`... near '...' at line 1`), 1054,
   1062, 1048, 1050, 1051, 1049, 1193 and the rest. `SHOW WARNINGS` lists the last statement's
   warnings and notes, or its error.
-- **Transactions as MySQL has them**: an error inside `START TRANSACTION` ... `COMMIT` does not
-  end the transaction when the failing statement had not written yet; `SET autocommit = 0`
+- **Transactions as MySQL has them**: an error inside `START TRANSACTION` ... `COMMIT` rolls
+  back only the failing statement, as InnoDB does: a multi-row `INSERT` or an `UPDATE` that
+  fails part-way leaves none of its rows, and the transaction keeps what came before and goes
+  on (D317); `SET autocommit = 0`
   keeps a transaction open from the first write to `COMMIT` or `ROLLBACK`; `CREATE TABLE`,
   `DROP TABLE` and `START TRANSACTION` commit an open transaction first.
 
@@ -242,8 +244,10 @@ What it reads, on top of the statements of "What runs today":
   as in PostgreSQL (D297); `LIMIT n OFFSET m`, `LIMIT m, n`
   and a negative `LIMIT` for no limit; `BEGIN [DEFERRED|IMMEDIATE|EXCLUSIVE] [TRANSACTION]`,
   `COMMIT`, `END`, `ROLLBACK`, with SQLite's errors for a `BEGIN` inside a transaction and a
-  `COMMIT` or `ROLLBACK` outside one; a failing statement inside a transaction leaves it open,
-  and `INSERT OR ROLLBACK` rolls it back.
+  `COMMIT` or `ROLLBACK` outside one; a failing statement inside a transaction backs out its
+  own changes and leaves the transaction open (SQLite's default `ABORT`, also `INSERT OR
+  ABORT`), `INSERT OR FAIL` keeps the rows it wrote before the conflict (in a transaction and
+  on its own), and `INSERT OR ROLLBACK` rolls the transaction back (D317).
 - **Names starting with `sqlite_`** are reserved, as in SQLite: `CREATE TABLE sqlite_x` is
   refused with `object name reserved for internal use`.
 - **Length limit**: a function result longer than 1,000,000,000 bytes (SQLite's default
@@ -517,8 +521,10 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   [WORK]`, `ROLLBACK [WORK]`.
 - **Transactions as Oracle's**: the first change starts a transaction that stays open until
   `COMMIT` or `ROLLBACK`; `CREATE TABLE`, `DROP TABLE` and `TRUNCATE TABLE` commit what is open
-  before and after them. `eggdb sql` and `eggdb shell` commit an open transaction when they
-  end, as SQL*Plus does on exit; the embedded API rolls it back on `close` unless you commit.
+  before and after them. A failing statement rolls back only its own changes, as Oracle's
+  implicit savepoint before each statement does, and the transaction goes on (D317). `eggdb
+  sql` and `eggdb shell` commit an open transaction when they end, as SQL*Plus does on exit;
+  the embedded API rolls it back on `close` unless you commit.
 - **Subqueries, subquery factoring and set operators**: `UNION [ALL]`, `INTERSECT [ALL]`,
   `MINUS [ALL]` and `EXCEPT [ALL]` (23ai), all of one precedence, left to right; `WITH name
   (columns) AS (...)` is recursive when it names itself (no `RECURSIVE` keyword); `RIGHT` and
@@ -751,8 +757,12 @@ SELECT @@VERSION
   mssql-jdbc's `setAutoCommit(false)` sends) the first statement that changes data or the
   schema starts a transaction that lasts until `COMMIT` or `ROLLBACK`.
 - **`SET XACT_ABORT ON`** (D148): a run-time error, a constraint violation included, rolls the
-  open transaction back and ends the batch; `OFF` (the default) ends only the statement for the
-  errors SQL Server ends only the statement for. Syntax errors and `RAISERROR` are not affected,
+  open transaction back and ends the batch (`@@TRANCOUNT` 0); `OFF` (the default) ends only the
+  statement for the errors SQL Server ends only the statement for (a duplicate key, `NOT NULL`,
+  `CHECK` and foreign-key violations, truncation): the statement's own changes are rolled back,
+  a multi-row `INSERT` leaving none of its rows, and the transaction and the batch go on
+  (D317). A run-time error that ends the batch (a conversion or arithmetic error) still rolls
+  the transaction back when its statement had changed rows. Syntax errors and `RAISERROR` are not affected,
   as in SQL Server; `THROW` is. Inside `TRY` the error moves to `CATCH` and leaves the
   transaction open but uncommittable: `XACT_STATE()` is -1, `ROLLBACK` ends it, and `COMMIT` or
   any write is Msg 3930; a batch that ends with it still open rolls it back with Msg 3998.
@@ -2176,7 +2186,9 @@ writing, even for a script of `SELECT`s, so another program that opens the same 
 writing is refused (exit code 5) while it runs.
 `BEGIN READ ONLY` reads one snapshot and refuses changes with `25006`. A failed statement inside
 a block rolls the block back at once and the session answers `25P02` until `ROLLBACK`; `COMMIT`
-of a failed block reports `ROLLBACK`, as PostgreSQL does. DDL is transactional: a rolled-back
+of a failed block reports `ROLLBACK`, as PostgreSQL does. In MySQL's, SQLite's, Oracle's and SQL
+Server's dialects a failed statement rolls back only its own changes and the block goes on, as
+each of them does (D317). DDL is transactional: a rolled-back
 block that created a table leaves no table.
 
 ## Transactions, savepoints and locks
@@ -2185,7 +2197,8 @@ block that created a table leaves no table.
   `ROLLBACK TRANSACTION name` (SQL Server). Rolling back to a savepoint undoes the changes made after
   it and keeps it. In PostgreSQL's dialect a failed statement after a savepoint leaves the block
   aborted until `ROLLBACK TO` brings it back; without savepoints the block is rolled back as
-  before. In SQLite's, a `SAVEPOINT` outside a transaction begins one, and releasing it commits.
+  before. In the other dialects a failed statement undoes only itself, savepoint or not, and
+  a later `ROLLBACK TO` still undoes everything after its savepoint (D317). In SQLite's, a `SAVEPOINT` outside a transaction begins one, and releasing it commits.
   A name that was never set fails with each dialect's error (`3B001`, MySQL 1305, ORA-01086,
   SQL Server 6401). In `eggdb shell` the key-value commands of a block (`put`, `del`, `incr`,
   `expire`, `cas` and the rest) are undone by `ROLLBACK TO SAVEPOINT` with the SQL changes
@@ -4246,8 +4259,6 @@ And more, not in the suite yet:
 - Comparisons and `IS` tests are booleans, shown as `1` and `0`, but arithmetic on them (`TRUE +
   1`) and `IF(1, ...)` with an integer condition are type errors where MySQL treats booleans as
   integers. Strings are not converted to numbers implicitly (`'5' + 1` with a typed string).
-- A statement that fails after it wrote rows inside a transaction rolls the whole transaction
-  back, where MySQL rolls back only the statement (no statement savepoints yet).
 - `AUTO_INCREMENT` continues from the largest value in the table, so the value of a deleted last
   row is given again, which MySQL 8 does not do; `AUTO_INCREMENT=n` table options are ignored.
 - `INSERT IGNORE` skips duplicate keys only; other errors still fail the statement.
@@ -4324,10 +4335,8 @@ And more, not in the suite yet:
   `AUTOINCREMENT` reuses the row id of a deleted last row (SQLite's never does).
   `last_insert_rowid()` is not changed by inserts into tables whose key is not an `INTEGER
   PRIMARY KEY`.
-- A statement that fails after it wrote rows inside a transaction rolls the whole transaction
-  back, where SQLite rolls back the statement (no statement savepoints yet); `INSERT OR FAIL`
-  behaves as `ABORT`, and the `OR` forms cover the primary key only (there are no `UNIQUE`
-  constraints yet).
+- The `OR` forms of `INSERT` cover the primary key only (there are no `UNIQUE` constraints
+  yet), and an `ON CONFLICT FAIL` clause written in a table's constraints acts as `ABORT`.
 - `PRAGMA user_version`, `foreign_keys`, `journal_mode` and `synchronous` are per session, not
   kept in the file; foreign keys are never enforced.
 - Not supported yet: `CREATE INDEX`, `UNIQUE` and `CHECK` constraints, `COLLATE NOCASE`,
@@ -4383,9 +4392,6 @@ And more, not in the suite yet:
   `CHAR`s. A string given to a `RAW` or `BLOB` is read as hexadecimal digits, as `HEXTORAW`
   does (an odd count gets a leading zero, another character is `ORA-01465`). `HEXTORAW` and
   `RAWTOHEX` work; the packages `UTL_RAW` and `DBMS_LOB` are missing.
-- A statement that fails after it wrote rows rolls back the whole transaction, where Oracle
-  rolls back only the statement (no statement savepoints yet); a failing single-row `INSERT`,
-  `UPDATE` or `DELETE` that wrote nothing leaves the transaction as it was, as in Oracle.
 - `GENERATED ALWAYS` refuses a given value with `ORA-32795` and an `UPDATE` of the column with
   `ORA-32796` (D150), but an identity column reuses the number of a deleted last row (Oracle's
   identity is a sequence that never goes back).
@@ -4492,9 +4498,9 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   follows the largest one in the table (the smallest for a negative increment), so a deleted
   largest value is used again and an emptied table starts again at its seed, where SQL Server
   keeps a counter.
-- A statement that fails after it wrote rows rolls back the whole transaction (no statement
-  savepoints yet) and ends the batch; one that wrote nothing leaves the transaction open, as in
-  SQL Server. An unknown column of an existing table is found when the statement runs, after
+- A run-time error that ends the batch (a conversion or arithmetic error) rolls the
+  transaction back only when its statement had changed rows; SQL Server rolls it back either
+  way. An unknown column of an existing table is found when the statement runs, after
   the statements before it in the batch ran (SQL Server finds it when the batch compiles).
 - A `DEFAULT` that names a column or holds a subquery is `0A000` (SQL Server's 128 and 1046
   not yet), and a Transact-SQL default's implicit conversions inside the expression follow the

@@ -2787,6 +2787,7 @@ impl<'t> Parser<'t> {
             OnDuplicate::Fail
         };
         let mut rollback_on_conflict = false;
+        let mut keeps_changes_on_conflict = false;
         if self.mysql() {
             if !replace && self.take_word("ignore") {
                 on_duplicate = OnDuplicate::Ignore;
@@ -2794,7 +2795,8 @@ impl<'t> Parser<'t> {
             self.take_word("into");
         } else if self.sqlite() {
             if !replace && self.take_word("or") {
-                (on_duplicate, rollback_on_conflict) = self.sqlite_conflict_resolution()?;
+                (on_duplicate, rollback_on_conflict, keeps_changes_on_conflict) =
+                    self.sqlite_conflict_resolution()?;
             }
             self.expect_word("into")?;
         } else if self.sqlserver() {
@@ -2898,6 +2900,7 @@ impl<'t> Parser<'t> {
             on_duplicate,
             conflict_target,
             rollback_on_conflict,
+            keeps_changes_on_conflict,
             overriding,
         });
         Ok(sqlserver_functions::with_output_into(

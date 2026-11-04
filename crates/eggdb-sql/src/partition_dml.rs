@@ -191,6 +191,7 @@ pub(crate) fn insert(
             on_duplicate: insert.on_duplicate.clone(),
             conflict_target: insert.conflict_target.clone(),
             rollback_on_conflict: insert.rollback_on_conflict,
+            keeps_changes_on_conflict: insert.keeps_changes_on_conflict,
             overriding: insert.overriding,
         };
         merged.add(execute::insert(writer, tables, &routed)?);
@@ -331,6 +332,7 @@ fn insert_moved_rows(
             on_duplicate: OnDuplicate::Fail,
             conflict_target: None,
             rollback_on_conflict: false,
+            keeps_changes_on_conflict: false,
             overriding: Some(Overriding::SystemValue),
         };
         execute::insert(writer, tables, &insert)?;
