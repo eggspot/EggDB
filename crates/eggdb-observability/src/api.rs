@@ -1,15 +1,20 @@
 use crate::line_protocol::{self, precision_ns};
-use crate::promql::{self, Data, Labels};
-use crate::store::{self, Series};
+use crate::promql::{self, Data, Evaluator, Failure, Fetched, Labels, Work};
+use crate::store;
 use eggdb_http::{Request, Response};
+use eggdb_platform::connection_limits::MemoryBudget;
 use eggdb_sql::{Dialect, KeyValueStore, Session, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The largest request body the endpoint accepts.
 pub const MAX_REQUEST_BYTES: usize = 16 << 20;
 const MAX_POINTS_PER_SERIES: i64 = 11_000;
 const VERSION: &str = "2.53.0";
+/// The most samples one PromQL query may hold at once, as Prometheus's `--query.max-samples`
+/// defaults to.
+pub const DEFAULT_MAX_QUERY_SAMPLES: usize = 50_000_000;
 
 /// The metrics endpoint: InfluxDB writes, Prometheus remote write and the Prometheus query API.
 pub struct Endpoint<'s, S: KeyValueStore> {
@@ -17,6 +22,8 @@ pub struct Endpoint<'s, S: KeyValueStore> {
     user: String,
     password_sha256: [u8; 32],
     database: String,
+    memory_budget: Arc<MemoryBudget>,
+    max_samples: usize,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Endpoint<'_, S> {
@@ -66,14 +73,32 @@ fn success(data: &str) -> Response {
     json(200, format!("{{\"status\":\"success\",\"data\":{data}}}"))
 }
 
-fn bad_data(message: &str) -> Response {
+fn error_json(status: u16, error_type: &str, message: &str) -> Response {
     json(
-        400,
+        status,
         format!(
-            "{{\"status\":\"error\",\"errorType\":\"bad_data\",\"error\":{}}}",
+            "{{\"status\":\"error\",\"errorType\":\"{error_type}\",\"error\":{}}}",
             json_string(message)
         ),
     )
+}
+
+fn bad_data(message: &str) -> Response {
+    error_json(400, "bad_data", message)
+}
+
+fn failed(failure: &Failure) -> Response {
+    match failure {
+        Failure::BadData(message) => bad_data(message),
+        Failure::Execution(message) => error_json(422, "execution", message),
+        Failure::Unavailable(message) => {
+            let mut response = error_json(503, "unavailable", message);
+            response
+                .headers
+                .push(("Retry-After".to_owned(), "1".to_owned()));
+            response
+        }
+    }
 }
 
 fn no_content() -> Response {
@@ -181,6 +206,10 @@ fn time_param(text: Option<&str>, default: i64) -> Result<i64, String> {
     Ok((seconds * 1000.0).round() as i64)
 }
 
+fn required<'t>(value: Option<&'t str>, name: &str) -> Result<&'t str, Failure> {
+    value.ok_or_else(|| Failure::BadData(format!("missing parameter {name}")))
+}
+
 fn label_in_values_path(path: &str) -> Option<&str> {
     path.strip_prefix("/api/v1/label/")
         .and_then(|rest| rest.strip_suffix("/values"))
@@ -209,7 +238,27 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             user: user.to_owned(),
             password_sha256,
             database: database.to_owned(),
+            memory_budget: Arc::new(MemoryBudget::default()),
+            max_samples: DEFAULT_MAX_QUERY_SAMPLES,
         }
+    }
+
+    /// Holds what PromQL queries read and build against `budget`, the server's one connection
+    /// memory budget (D307), instead of a budget of its own.
+    pub fn with_memory_budget(mut self, budget: Arc<MemoryBudget>) -> Self {
+        self.memory_budget = budget;
+        self
+    }
+
+    /// Lets one PromQL query hold at most `samples` samples at once (by default
+    /// [`DEFAULT_MAX_QUERY_SAMPLES`]).
+    pub fn with_max_samples(mut self, samples: usize) -> Self {
+        self.max_samples = samples;
+        self
+    }
+
+    fn work(&self) -> Work<'_> {
+        Work::new(&self.memory_budget, self.max_samples)
     }
 
     fn session(&self) -> Session<'s> {
@@ -375,32 +424,54 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         expr: &promql::Expr,
         start: i64,
         end: i64,
-    ) -> Result<BTreeMap<String, Vec<Series>>, String> {
+        work: &mut Work<'_>,
+    ) -> Result<Fetched, Failure> {
         let mut wanted = Vec::new();
-        promql::selectors(expr, &mut wanted);
+        promql::selectors(expr, 0, &mut wanted);
         let mut data = BTreeMap::new();
         if wanted.is_empty() {
             return Ok(data);
         }
         let mut session = self.session();
         let tables = store::catalog(&mut session)?;
+        let metrics = store::metrics(&tables);
         let mut reach: BTreeMap<String, i64> = BTreeMap::new();
-        for (name, before) in wanted {
-            let entry = reach.entry(name).or_insert(0);
-            *entry = (*entry).max(before);
+        for (selector, before) in wanted {
+            let names: Vec<&String> = match &selector.name {
+                Some(name) => vec![name],
+                None => metrics
+                    .iter()
+                    .filter(|(name, tags)| selector.could_match(name, tags))
+                    .map(|(name, _)| name)
+                    .collect(),
+            };
+            for name in names {
+                let entry = reach.entry(name.clone()).or_insert(0);
+                *entry = (*entry).max(before);
+            }
         }
         for (name, before) in reach {
-            let series = store::read(&mut session, &tables, &name, start - before, end)?;
+            let series = store::read(
+                &mut session,
+                &tables,
+                &name,
+                start.saturating_sub(before),
+                end,
+                work.remaining_samples().saturating_add(1),
+            )?;
+            work.keep(series.iter().map(|series| series.samples.len()).sum())?;
             data.insert(name, series);
         }
         Ok(data)
     }
 
-    fn instant(&self, query: Option<&str>, time: Option<&str>) -> Result<(Data, i64), String> {
-        let expr = promql::parse(query.ok_or("missing parameter query")?)?;
-        let time = time_param(time, now_ms())?;
-        let data = self.fetch(&expr, time, time)?;
-        Ok((promql::evaluate(&expr, time, &data)?, time))
+    fn instant(&self, query: Option<&str>, time: Option<&str>) -> Result<(Data, i64), Failure> {
+        let expr = promql::parse(required(query, "query")?).map_err(Failure::BadData)?;
+        let time = time_param(time, now_ms()).map_err(Failure::BadData)?;
+        let mut work = self.work();
+        let data = self.fetch(&expr, time, time, &mut work)?;
+        let result = Evaluator::new(&data, work).evaluate(&expr, time)?;
+        Ok((result, time))
     }
 
     fn query(&self, query: Option<&str>, time: Option<&str>) -> Response {
@@ -431,7 +502,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                 "{{\"resultType\":\"matrix\",\"result\":{}}}",
                 matrix_json(matrix.iter().map(|(labels, samples)| (labels, samples)))
             )),
-            Err(message) => bad_data(&message),
+            Err(failure) => failed(&failure),
         }
     }
 
@@ -441,32 +512,42 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         start: Option<&str>,
         end: Option<&str>,
         step: Option<&str>,
-    ) -> Result<BTreeMap<Labels, Vec<(i64, f64)>>, String> {
-        let expr = promql::parse(query.ok_or("missing parameter query")?)?;
-        let start = time_param(Some(start.ok_or("missing parameter start")?), 0)?;
-        let end = time_param(Some(end.ok_or("missing parameter end")?), 0)?;
-        let step = step_param(step)?;
+    ) -> Result<BTreeMap<Labels, Vec<(i64, f64)>>, Failure> {
+        let expr = promql::parse(required(query, "query")?).map_err(Failure::BadData)?;
+        let start = time_param(Some(required(start, "start")?), 0).map_err(Failure::BadData)?;
+        let end = time_param(Some(required(end, "end")?), 0).map_err(Failure::BadData)?;
+        let step = step_param(step).map_err(Failure::BadData)?;
         if end < start {
-            return Err("end timestamp must not be before start time".to_owned());
+            return Err(Failure::BadData(
+                "end timestamp must not be before start time".to_owned(),
+            ));
         }
         if end.saturating_sub(start) / step > MAX_POINTS_PER_SERIES {
-            return Err("exceeded maximum resolution of 11,000 points per timeseries. Try decreasing the query resolution (?step=XX)".to_owned());
+            return Err(Failure::BadData("exceeded maximum resolution of 11,000 points per timeseries. Try decreasing the query resolution (?step=XX)".to_owned()));
         }
-        let data = self.fetch(&expr, start, end)?;
+        let mut work = self.work();
+        let data = self.fetch(&expr, start, end, &mut work)?;
+        let mut evaluator = Evaluator::new(&data, work);
         let mut series: BTreeMap<Labels, Vec<(i64, f64)>> = BTreeMap::new();
         let mut time = start;
         while time <= end {
-            match promql::evaluate(&expr, time, &data)? {
-                Data::Scalar(value) => series.entry(Vec::new()).or_default().push((time, value)),
+            let result = evaluator.evaluate(&expr, time)?;
+            evaluator.work.finish_step();
+            match result {
+                Data::Scalar(value) => {
+                    evaluator.work.keep(1)?;
+                    series.entry(Vec::new()).or_default().push((time, value));
+                }
                 Data::Vector(vector) => {
+                    evaluator.work.keep(vector.len())?;
                     for (labels, value) in vector {
                         series.entry(labels).or_default().push((time, value));
                     }
                 }
                 Data::Matrix(_) => {
-                    return Err(
-                        "a range query needs an instant vector or scalar expression".to_owned()
-                    );
+                    return Err(Failure::BadData(
+                        "a range query needs an instant vector or scalar expression".to_owned(),
+                    ));
                 }
             }
             let Some(next) = time.checked_add(step) else {
@@ -489,7 +570,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                 "{{\"resultType\":\"matrix\",\"result\":{}}}",
                 matrix_json(series.iter())
             )),
-            Err(message) => bad_data(&message),
+            Err(failure) => failed(&failure),
         }
     }
 
@@ -514,17 +595,15 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
     fn values_of(&self, name: &str) -> Result<BTreeSet<String>, String> {
         let mut session = self.session();
         let tables = store::catalog(&mut session)?;
+        if name == "__name__" {
+            return Ok(store::metrics(&tables)
+                .into_iter()
+                .map(|(metric, _)| metric)
+                .collect());
+        }
         let mut values = BTreeSet::new();
         for (table, columns) in &tables {
-            if name == "__name__" {
-                for (column, data_type) in columns {
-                    if column == "value" {
-                        values.insert(table.clone());
-                    } else if column != "time" && data_type != "text" {
-                        values.insert(format!("{table}_{column}"));
-                    }
-                }
-            } else if columns
+            if columns
                 .iter()
                 .any(|(column, data_type)| column == name && data_type == "text")
             {
@@ -560,29 +639,28 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         matches: &[&str],
         start: Option<&str>,
         end: Option<&str>,
-    ) -> Result<BTreeSet<Labels>, String> {
+    ) -> Result<BTreeSet<Labels>, Failure> {
         if matches.is_empty() {
-            return Err("no match[] parameter provided".to_owned());
+            return Err(Failure::BadData("no match[] parameter provided".to_owned()));
         }
-        let end = time_param(end, now_ms())?;
-        let start = time_param(start, end - promql::LOOKBACK_MS)?;
+        let end = time_param(end, now_ms()).map_err(Failure::BadData)?;
+        let start =
+            time_param(start, end.saturating_sub(promql::LOOKBACK_MS)).map_err(Failure::BadData)?;
         let mut found = BTreeSet::new();
         for text in matches {
-            let expr = promql::parse(text)?;
+            let expr = promql::parse(text).map_err(Failure::BadData)?;
             let promql::Expr::Selector(selector) = &expr else {
-                return Err("match[] must be a series selector".to_owned());
+                return Err(Failure::BadData(
+                    "match[] must be a series selector".to_owned(),
+                ));
             };
-            let data = self.fetch(&expr, start, end)?;
-            for series in data.get(&selector.name).into_iter().flatten() {
-                let inside = series
+            let mut work = self.work();
+            let data = self.fetch(&expr, start, end, &mut work)?;
+            for series in promql::chosen(selector, &data) {
+                if series
                     .samples
                     .iter()
-                    .any(|(time, _)| *time >= start && *time <= end);
-                if inside
-                    && selector
-                        .matchers
-                        .iter()
-                        .all(|matcher| matcher.matches(&series.labels))
+                    .any(|(time, _)| *time >= start && *time <= end)
                 {
                     found.insert(series.labels.clone());
                 }
@@ -597,7 +675,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                 let items: Vec<String> = found.iter().map(labels_json).collect();
                 success(&format!("[{}]", items.join(",")))
             }
-            Err(message) => bad_data(&message),
+            Err(failure) => failed(&failure),
         }
     }
 }

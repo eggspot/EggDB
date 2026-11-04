@@ -1473,3 +1473,23 @@ pub fn regex_matches_with_flags(text: &str, pattern: &str, flags: &str) -> Resul
         .and_then(|regex| regex.is_match(text, &mut StepBudget::new(MATCH_STEPS)))
         .map_err(|error| error.message().to_owned())
 }
+
+/// The text of each capture group of `pattern`'s first match in `text`, group 0 being the
+/// whole match and a group that took no part in it `None`; `None` when the pattern does not
+/// match. The pattern is read as [`regex_matches_with_flags`] reads it, with no flags except
+/// that `.` matches a newline too.
+pub fn regex_captures(text: &str, pattern: &str) -> Result<Option<Vec<Option<String>>>, String> {
+    let characters: Vec<char> = text.chars().collect();
+    let found = compiled_with(pattern, Options::default())
+        .and_then(|regex| regex.finder(&characters).find(0))
+        .map_err(|error| error.message().to_owned())?;
+    Ok(found.map(|spans| {
+        spans
+            .iter()
+            .map(|span| {
+                span.and_then(|(from, to)| characters.get(from..to))
+                    .map(|piece| piece.iter().collect())
+            })
+            .collect()
+    }))
+}

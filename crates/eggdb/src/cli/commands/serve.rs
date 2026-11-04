@@ -699,7 +699,8 @@ impl Session<'_> {
             &config.user,
             server_password_sha256,
             &config.database,
-        );
+        )
+        .with_memory_budget(Arc::clone(&memory_budget));
         let rest_endpoint = eggdb_api::Endpoint::new(
             &store,
             &config.user,
