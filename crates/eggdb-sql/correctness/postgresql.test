@@ -5450,3 +5450,107 @@ SELECT 2
 
 ok
 DROP TABLE check_ign_err324
+
+chapter queries-with, "Search Order" and "Cycle Detection": SEARCH DEPTH FIRST orders by an array of rows, SEARCH BREADTH FIRST by depth, and CYCLE marks the row that repeats
+ok
+CREATE TABLE graph323 (f int, t int, label text)
+
+ok
+INSERT INTO graph323 VALUES (1, 2, 'arc 1 -> 2'), (1, 3, 'arc 1 -> 3'), (2, 3, 'arc 2 -> 3'), (1, 4, 'arc 1 -> 4'), (4, 5, 'arc 4 -> 5')
+
+rows
+WITH RECURSIVE search_graph(f, t, label) AS (
+    SELECT * FROM graph323 g
+  UNION ALL
+    SELECT g.* FROM graph323 g, search_graph sg WHERE g.f = sg.t
+) SEARCH DEPTH FIRST BY f, t SET seq
+SELECT * FROM search_graph ORDER BY seq
+----
+f|t|label|seq
+1|2|arc 1 -> 2|{"(1,2)"}
+2|3|arc 2 -> 3|{"(1,2)","(2,3)"}
+1|3|arc 1 -> 3|{"(1,3)"}
+1|4|arc 1 -> 4|{"(1,4)"}
+4|5|arc 4 -> 5|{"(1,4)","(4,5)"}
+2|3|arc 2 -> 3|{"(2,3)"}
+4|5|arc 4 -> 5|{"(4,5)"}
+SELECT 7
+
+rows
+WITH RECURSIVE search_graph(f, t, label) AS (
+    SELECT * FROM graph323 g
+  UNION ALL
+    SELECT g.* FROM graph323 g, search_graph sg WHERE g.f = sg.t
+) SEARCH BREADTH FIRST BY f, t SET seq
+SELECT * FROM search_graph ORDER BY seq
+----
+f|t|label|seq
+1|2|arc 1 -> 2|(0,1,2)
+1|3|arc 1 -> 3|(0,1,3)
+1|4|arc 1 -> 4|(0,1,4)
+2|3|arc 2 -> 3|(0,2,3)
+4|5|arc 4 -> 5|(0,4,5)
+2|3|arc 2 -> 3|(1,2,3)
+4|5|arc 4 -> 5|(1,4,5)
+SELECT 7
+
+ok
+INSERT INTO graph323 VALUES (5, 1, 'arc 5 -> 1')
+
+rows
+WITH RECURSIVE search_graph(f, t, label) AS (
+    SELECT * FROM graph323 g
+  UNION ALL
+    SELECT g.* FROM graph323 g, search_graph sg WHERE g.f = sg.t
+) CYCLE f, t SET is_cycle USING path
+SELECT f, t, path FROM search_graph WHERE is_cycle ORDER BY path
+----
+f|t|path
+1|4|{"(1,4)","(4,5)","(5,1)","(1,4)"}
+4|5|{"(4,5)","(5,1)","(1,4)","(4,5)"}
+5|1|{"(5,1)","(1,4)","(4,5)","(5,1)"}
+SELECT 3
+
+rows
+WITH RECURSIVE search_graph(f, t, label) AS (
+    SELECT * FROM graph323 g
+  UNION ALL
+    SELECT g.* FROM graph323 g, search_graph sg WHERE g.f = sg.t
+) CYCLE f, t SET is_cycle TO 'Y' DEFAULT 'N' USING path
+SELECT is_cycle, count(*) FROM search_graph GROUP BY is_cycle ORDER BY is_cycle
+----
+is_cycle|count
+N|22
+Y|3
+SELECT 2
+
+rows
+WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n % 3 + 1 FROM t)
+  SEARCH BREADTH FIRST BY n SET ordercol
+  CYCLE n SET is_cycle USING path
+SELECT * FROM t ORDER BY ordercol
+----
+n|ordercol|is_cycle|path
+1|(0,1)|f|{(1)}
+2|(1,2)|f|{(1),(2)}
+3|(2,3)|f|{(1),(2),(3)}
+1|(3,1)|t|{(1),(2),(3),(1)}
+SELECT 4
+
+error 42601
+WITH t(n) AS (SELECT 1) SEARCH DEPTH FIRST BY n SET seq SELECT * FROM t
+
+error 42601
+WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) SEARCH DEPTH FIRST BY m SET seq SELECT * FROM t
+
+error 42701
+WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) CYCLE n, n SET is_cycle USING path SELECT * FROM t
+
+error 42601
+WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) CYCLE n SET n USING path SELECT * FROM t
+
+error 42804
+WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) CYCLE n SET is_cycle TO true DEFAULT 55 USING path SELECT * FROM t
+
+ok
+DROP TABLE graph323

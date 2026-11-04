@@ -132,6 +132,7 @@ mod row_security;
 mod row_values;
 mod schema;
 mod schemas;
+mod search_cycle;
 mod sequences;
 mod served_databases;
 mod session;
@@ -250,6 +251,8 @@ mod regex_tests;
 mod savepoint_tests;
 #[cfg(test)]
 mod schema_tests;
+#[cfg(test)]
+mod search_cycle_tests;
 #[cfg(test)]
 mod select_into_tests;
 #[cfg(test)]

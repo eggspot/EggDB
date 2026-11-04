@@ -72,9 +72,12 @@ pub enum ArrayElement {
     /// `refcursor[]`: cursor names, held as text; a table column declared `refcursor[]` holds
     /// `text[]`.
     RefCursor,
+    /// `record[]`: rows of any fields, as a recursive query's `SEARCH DEPTH FIRST` and `CYCLE`
+    /// columns hold them; no table column holds one.
+    Record,
 }
 
-const ELEMENT_CODES: [(ArrayElement, u8); 29] = [
+const ELEMENT_CODES: [(ArrayElement, u8); 30] = [
     (ArrayElement::SmallInt, 1),
     (ArrayElement::Integer, 2),
     (ArrayElement::BigInt, 3),
@@ -104,6 +107,7 @@ const ELEMENT_CODES: [(ArrayElement, u8); 29] = [
     (ArrayElement::Citext, 27),
     (ArrayElement::Hstore, 28),
     (ArrayElement::RefCursor, 29),
+    (ArrayElement::Record, 30),
 ];
 
 impl ArrayElement {
@@ -138,6 +142,7 @@ impl ArrayElement {
             Self::Citext => SqlType::Defined(DefinedType::CITEXT),
             Self::Hstore => SqlType::Defined(DefinedType::HSTORE),
             Self::RefCursor => SqlType::Catalog(CatalogType::RefCursor),
+            Self::Record => SqlType::Defined(DefinedType::RECORD),
         }
     }
 
@@ -175,6 +180,7 @@ impl ArrayElement {
                 | Self::Int2Vector
                 | Self::OidVector
                 | Self::RefCursor
+                | Self::Record
         )
     }
 
@@ -737,6 +743,9 @@ pub(crate) fn equality_key_of(out: &mut Vec<u8>, array: &ArrayValue) {
 }
 
 pub(crate) fn encode_stored(array: &ArrayValue) -> Vec<u8> {
+    if array.element == ArrayElement::Record {
+        return encode_stored_records(array);
+    }
     let text = format_items(&array.items);
     let mut out = Vec::with_capacity(4 + text.len());
     out.extend_from_slice(&array.lower_bound.to_le_bytes());
@@ -745,9 +754,44 @@ pub(crate) fn encode_stored(array: &ArrayValue) -> Vec<u8> {
 }
 
 pub(crate) fn decode_stored(bytes: &[u8], element: ArrayElement) -> Option<ArrayValue> {
+    if element == ArrayElement::Record {
+        return decode_stored_records(bytes);
+    }
     let (bound, text) = bytes.split_first_chunk::<4>()?;
     let text = std::str::from_utf8(text).ok()?;
     let mut array = parse_text(text, element).ok()?;
+    array.lower_bound = i32::from_le_bytes(*bound);
+    Some(array)
+}
+
+fn encode_stored_records(array: &ArrayValue) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&array.lower_bound.to_le_bytes());
+    out.extend_from_slice(&(array.items.len() as u64).to_le_bytes());
+    crate::encoding::encode_row_into(&mut out, &array.items);
+    out
+}
+
+fn decode_stored_records(bytes: &[u8]) -> Option<ArrayValue> {
+    let (bound, rest) = bytes.split_first_chunk::<4>()?;
+    let (count, row) = rest.split_first_chunk::<8>()?;
+    let count = usize::try_from(u64::from_le_bytes(*count)).ok()?;
+    if count > row.len() {
+        return None;
+    }
+    let column = crate::encoding::Column {
+        name: String::new(),
+        sql_type: SqlType::Defined(DefinedType::RECORD),
+        not_null: false,
+        default: None,
+        auto_increment: false,
+    };
+    let columns = vec![column; count];
+    let items = crate::encoding::decode_row(row, &columns).ok()?;
+    if items.len() != count {
+        return None;
+    }
+    let mut array = ArrayValue::new(ArrayElement::Record, items);
     array.lower_bound = i32::from_le_bytes(*bound);
     Some(array)
 }

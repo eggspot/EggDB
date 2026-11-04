@@ -11,6 +11,7 @@ use crate::execute::{self, TableCache};
 use crate::hash_index::SeededIntegerHash;
 use crate::join;
 use crate::memory::WorkMemory;
+use crate::search_cycle::SearchCycle;
 use crate::session::{OutputColumn, QueryResult};
 use crate::set_operations::{self, Branch};
 use crate::store::KeyValueRead;
@@ -1627,6 +1628,9 @@ fn prepare_query(
                 Some(Dialect::Sqlite | Dialect::Oracle)
             ))
             && references_table(&table.query, &table.name.text);
+        if !recursive && crate::search_cycle::has_clauses(table) {
+            return Err(crate::search_cycle::not_recursive(table));
+        }
         let result = {
             let overlay = Overlay::new(env.reader, &prepared.temp);
             let env = env.with_reader(&overlay);
@@ -1806,21 +1810,35 @@ fn recursive_table(
         )
         .at(table.name.position));
     }
-    let step_query = Query {
-        body: operation.right.clone(),
-        ..seed_query.clone()
-    };
     let seed = run_query(env, tables, &seed_query, ctes)?;
     let columns = seed.columns.clone().unwrap_or_default();
+    let search_cycle = SearchCycle::new(table, operation, &columns)?;
+    let step_query = Query {
+        body: search_cycle
+            .as_ref()
+            .map_or_else(|| operation.right.clone(), |found| found.recursive_term().clone()),
+        ..seed_query.clone()
+    };
+    let mut working_columns = columns.clone();
+    if let Some(found) = &search_cycle {
+        working_columns.extend(found.added_columns());
+    }
+    let expands = |row: &[Value]| search_cycle.as_ref().is_none_or(|found| found.expands(row));
     let mut memory = WorkMemory::new();
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
     let mut all_rows: Vec<Vec<Value>> = Vec::new();
     let mut working = Vec::new();
     for row in seed.rows {
+        let row = match &search_cycle {
+            Some(found) => found.seed_row(row),
+            None => row,
+        };
         if operation.all || first_time(&mut seen, &row, &mut memory)? {
             memory.charge_row(&row)?;
             all_rows.push(row.clone());
-            working.push(row);
+            if expands(&row) {
+                working.push(row);
+            }
         }
     }
     let most = if operation.dialect == Dialect::MySql {
@@ -1844,7 +1862,7 @@ fn recursive_table(
         let temp = step_temp.add(
             env.names,
             Intermediate {
-                columns: &columns,
+                columns: &working_columns,
                 renamed: &table.column_names,
                 label: name,
                 dialect: table.dialect,
@@ -1865,25 +1883,34 @@ fn recursive_table(
             Some(&visible),
         )?;
         let width = columns.len();
-        if step.columns.as_ref().map_or(0, Vec::len) != width {
+        let parent_width = search_cycle.as_ref().map_or(0, SearchCycle::parent_width);
+        if step.columns.as_ref().map_or(0, Vec::len) != width + parent_width {
             return Err(set_operations::column_count_mismatch(
                 operation.operator,
                 operation.dialect,
                 operation.position,
             ));
         }
-        for row in step.rows {
-            let row = set_operations::conform(row, &columns)?;
+        for mut row in step.rows {
+            let row = match &search_cycle {
+                Some(found) => {
+                    let parent = row.split_off(width.min(row.len()));
+                    found.step_row(set_operations::conform(row, &columns)?, parent)
+                }
+                None => set_operations::conform(row, &columns)?,
+            };
             if operation.all || first_time(&mut seen, &row, &mut memory)? {
                 memory.charge_row(&row)?;
                 all_rows.push(row.clone());
-                working.push(row);
+                if expands(&row) {
+                    working.push(row);
+                }
             }
         }
     }
     Ok(QueryResult::rows(
         format!("SELECT {}", all_rows.len()),
-        columns,
+        working_columns,
         all_rows,
     ))
 }
