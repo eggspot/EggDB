@@ -282,7 +282,7 @@ fn using_pairs(
             .table
             .columns
             .iter()
-            .filter(|column| column.name == name.text)
+            .filter(|column| crate::temp_tables::display_name(&column.name) == name.text)
             .nth(1)
             .is_some()
         {
