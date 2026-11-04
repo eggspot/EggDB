@@ -915,9 +915,10 @@ space has 100 keys or fewer, else `100 keys shown of 1,204 · 0.6 ms` (the count
 tree's right text) with 3.7's banner reading `Showing the first 100 keys of 1,204 in key order.` and
 only its close icon (no `Export…`); an empty space is `0 keys · 0.2 ms` and an empty grid. The status
 bar's tag is `SCAN 100 · 0.6 ms`. `Ctrl/Cmd+T` from a keys tab adds `Query n` with the dialect of the
-nearest SQL tab to its left, else the right, else `PostgreSQL`. A prefix filter and the next page are
-a later slice (ui.md's `/prefix` and `PgDn`); until then the CLI's `scan` and `eggdb ui` read past
-100. Roles: the tab `Keys in users`; the editor a read-only `textbox` named `Scan`; the grid `Keys`.
+nearest SQL tab to its left, else the right, else `PostgreSQL`. The prefix filter, the next page and
+the keys tab on a server connection are 10.10 (ui.md's `/prefix` and `PgDn`); the tab's right-click
+menu is 10.9. Roles: the tab `Keys in users`; the editor a read-only `textbox` named `Scan`; the grid
+`Keys`.
 
 ### 10.5 Splitters
 Three, each gui.md's 6 px band around a 1 px `border` line, hover and drag a 2 px `accent` line with
@@ -1005,6 +1006,171 @@ once; the caret is solid; the running indicator is the static full-width bar wit
 tab's spinner is the static ring; toasts appear and leave instantly; scrollbar thumbs stay visible
 while the content exceeds the viewport (9.6). Nothing else moves anyway.
 
+### 10.9 The editor's right-click menu
+Designed by Claude Fable for batch 5. A right-click in the editor's text area first moves the caret
+to the click point (the nearest character boundary on that line; past the line's end its end; below
+the last line, the last line's end) and collapses the selection, unless the click lands inside the
+selection, which keeps it; a right-click on the gutter puts the caret at that line's start and selects
+the whole line (its text and its line break); a right-click on the error strip or a scrollbar opens
+nothing. The menu opens at the pointer with 9.4's clamping (moved left to end at x `W`, flipped above
+the pointer when it would cross y 776). From `Shift+F10` and the menu key it opens below the caret's
+line box with a 4 px gap, its left edge at the caret's x (the selection's end when there is one),
+same clamping, and scrolls the caret into view first. While the menu is open the editor keeps its
+focused look (`selection` fill, a solid caret), since every item acts on that range. Popover as 9.4:
+240 wide, rows 28, label at x 12, shortcut right-aligned at x 228, two separators, height 250;
+`textDisabled` for a disabled item, which stays in place so the menu's shape never changes.
+
+| Group | Item (shortcut) | Does | Disabled when |
+|-------|------|------|------|
+| clipboard | `Cut` (`Ctrl/Cmd+X`) | copies the selection (6.3) and deletes it, one undo step | no selection; the editor is read-only |
+| | `Copy` (`Ctrl/Cmd+C`) | copies the selection | no selection (in a read-only editor the whole line, never disabled) |
+| | `Paste` (`Ctrl/Cmd+V`) | 6.3's paste at the caret, replacing the selection | the editor is read-only; on desktop also when the clipboard holds no text (in the browser never: the clipboard is read on activation, and a refused read toasts `Paste needs clipboard access; press Ctrl/Cmd+V`) |
+| | `Select all` (`Ctrl/Cmd+A`) | selects the whole text, caret at its end | the text is empty; the editor is read-only |
+| run | `Run selection` / `Run statement` (`Ctrl/Cmd+Enter`) | 2.3's `Run`; the label is `Run selection` while a selection exists, else `Run statement` | the tab is running; the range is blank (only whitespace and comments) |
+| | `Explain` (`Ctrl/Cmd+E`) | 5.1 on the same range | as the toolbar's `Explain`; always in a read-only editor |
+| edit | `Toggle comment` (`Ctrl/Cmd+/`) | below | the text is empty; the editor is read-only |
+| | `Format statement` (`Ctrl/Cmd+Shift+F`) | below | the range is blank; the tab is running; the editor is read-only |
+
+In the keys tab (10.4), whose editor is read-only with no caret, the menu opens with the same shape:
+`Copy` copies the whole `SCAN` line, `Run statement` reads `Run scan` and does what `Run` does there,
+and `Cut`, `Paste`, `Select all`, `Explain`, `Toggle comment` and `Format statement` are disabled.
+From `Shift+F10` in a keys tab the menu opens below the line's start, at x 320 (the text's left edge).
+
+`Toggle comment` works on the selection's lines (a selection ending at column 1 of a line leaves that
+line out) or the caret's line. The marker is `-- ` in every dialect (MySQL needs the space, so it is
+always there). When every non-blank line of the range starts, after its indent, with `--`, that `--`
+and one following space are removed from each; otherwise `-- ` is inserted at the smallest indent of
+the non-blank lines (blank lines are left alone). The selection grows or shrinks with the text, the
+caret stays on its line, and the change is one undo step. `Format statement` rewrites the selection,
+else 2.3's statement under the caret: keywords in the dialect's list (outside strings, quoted
+identifiers, comments and `$$` bodies, which stay byte for byte) go upper-case; each top-level clause
+(`SELECT`, `FROM`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`, `OFFSET`, `UNION` and its
+kin, every `JOIN` form, `ON`, `SET`, `VALUES`, `RETURNING`) starts a line at the statement's indent;
+each select-list item, `SET` assignment and `VALUES` row takes a line indented 2 more; a sub-query in
+parentheses is laid out the same, indented 2 from its opening line; tokens are separated by one
+space, with none before `,`, `)` and `;` or after `(`; a comment keeps its line. The result replaces
+the range as one undo step, the caret goes to the range's start, and the status bar's left group
+shows `Formatted 1 statement` (`Formatted 3 statements` for a selection holding several) for 2 s. A
+range that does not lex is left as it is, with `Cannot format: unclosed string at Ln 3, Col 12` in
+the status bar for 2 s.
+
+Keys as 9.4: the first item highlighted from the keyboard, none from the pointer; `Up` / `Down`
+without wrapping, a letter jumps to the next item starting with it (`C` alternates `Cut` and
+`Copy`), `Enter` and a click activate, `Esc` and a click outside close; focus returns to the editor
+with its caret and selection as they were. Role `menu` of `menuitem`s named by their labels (so the
+`Run` item's name is `Run selection` or `Run statement` as shown), each with its shortcut as the
+accelerator; a disabled item is exposed disabled, never removed.
+
+`Show DDL` (10.1) focuses the inspector's DDL box: the box gets a 2 px `focusRing` 1 px outside its
+1 px `border` (no `accent` border and no caret: it is read-only), its text scrolled to the top, and
+the platform's focus event on the read-only `textbox` named `DDL` is the announcement (`DDL,
+read-only, CREATE TABLE orders …`); no live region speaks, since focus moved.
+
+### 10.10 The keys tab: prefix filter, paging and servers
+Designed by Claude Fable for batch 5; finishes 10.4, which stays as it is for the first page.
+
+**The prefix field.** The keys tab's results header carries, right of the summary, an input `Key
+prefix` at `(884, 388, 200, 28)` in the golden frame (12 px from `Back`; right-aligned to the
+header at other widths), gui.md's input with the search icon (12 px, `textSecondary`) at x 892 and
+the text from x 912, placeholder `Prefix`; the summary is cut with `…` before x 872. `/` from the
+grid or the editor, and `Ctrl/Cmd+F` anywhere in the tab, focus the field with its text selected; a
+click does too. Typing re-runs the scan from the start 150 ms after the last key; `Enter` runs it at
+once and returns focus to the grid; `Esc` restores the prefix that was active when the field took
+focus, runs it when it differs, and returns focus to the grid. `Backspace` in an empty field does
+nothing (the field is always there; the TUI's close is its `Esc`). The prefix is bytes, in ui.md's
+spelling: `\xNN` escapes are accepted, so `\x00` finds keys starting with a zero byte; `\\` is one
+backslash; a lone `\` or a bad escape draws the field invalid (`error` border, `Error: \x needs two
+hex digits` below in `small` `error`) and runs nothing. The editor line reads the filter as a
+`PREFIX` clause: `SCAN users PREFIX 'user:' LIMIT 100`, `PREFIX` in `syntaxKeyword` and the quoted
+bytes in `syntaxString` with `'` doubled, no clause when the field is empty, so the line always
+states what ran. The field's text persists with the tab and is empty on a new keys tab; a second
+`Enter` on the key space (10.4) keeps it.
+
+**Paging.** Two ghost buttons after the field: `Back` at `(1096, 388, 72, 28)` and `Next 100` at
+`(1176, 388, 92, 28)`, ending 12 px from the header's right edge; `Alt+PgDn` and `Alt+PgUp` anywhere
+in the tab are the same, and in the grid `PgDn` with the current cell already on the last row of
+the page, or `PgUp` on its first row, page too (3.3's `PgDn` and `PgUp` keep moving the viewport
+until then). `Next 100` scans from after the last key shown: the editor line becomes
+`SCAN users PREFIX 'user:' AFTER 'user:0100' LIMIT 100` (`AFTER` in `syntaxKeyword`, the key in
+ui.md's spelling; a key longer than 64 bytes is shown whole, the line scrolls). The tab keeps the
+start of every page it has shown (nothing for page 1, then each page's `AFTER` key), so `Back` runs
+the previous page from its recorded start and brings back the keys the user saw, unless the data
+changed in between (a key deleted meanwhile makes that page shorter and the one after it start
+later; `Run` starts over). The current cell lands on the new page's first row after `Next 100` and
+its last row after `Back`, column kept; the grid's scroll goes to that row. The scan reads 101
+entries to learn whether more exist: `Next 100` is disabled on the last page (fewer than 101 came
+back) and `Back` on page 1; `Run` (`Ctrl/Cmd+Enter`, `F5`) returns to page 1 with the prefix kept;
+a change of prefix returns to page 1 too. While a page loads the buttons and the field are
+disabled and 2.3's running indicator runs; `Esc` in the grid and `Stop` cancel it, leaving the
+page that was shown.
+
+The status line (2.4) and the banner (3.7), the count being the catalog's for the whole space and
+unknown under a prefix:
+
+| Case | Status line | Banner |
+|------|------|------|
+| page 1, 100 or fewer keys | `12 keys · 0.3 ms` (10.4) | none |
+| page 1, more exist, no prefix | `100 keys shown of 1,204 · 0.6 ms` (10.4) | `Showing the first 100 keys of 1,204 in key order.` |
+| page 1, more exist, prefix | `100 keys shown · 0.6 ms` | `Showing the first 100 keys starting with 'user:' in key order.` |
+| a later page, no prefix | `Keys 101–200 of 1,204 · 0.5 ms` | `Showing keys 101–200 of 1,204 in key order.` |
+| a later page, prefix | `Keys 101–200 · 0.5 ms` | `Showing keys 101–200 starting with 'user:' in key order.` |
+| the last page | `Keys 1,201–1,204 of 1,204 · 0.2 ms` / `Keys 201–212 · 0.2 ms` | none |
+| no key matches | `0 keys start with 'user:' · 0.2 ms` | none; the grid's first body row reads `No keys start with 'user:'` in `body` `textSecondary` at x 272 (an empty space without a prefix stays 10.4's `0 keys · 0.2 ms` and an empty grid) |
+| an error | `Error` (`Messages` as 2.4) | none |
+
+The banner keeps only its close icon (10.4) and the numbers are positions in the pages as read. The
+status bar's tag is `SCAN 100 · 0.5 ms` on every page.
+
+**On a server.** A connection made with the `redis://` scheme (1.4's `RESP` protocol, which the
+client now speaks: the public RESP2/RESP3 wire format with `HELLO 3`, falling back to RESP2 on an
+`ERR` reply, and `AUTH` from the Password field) is a key-value connection: the tree's level 0 row
+has the right text `RESP` (`RESP · TLS` once the listener offers TLS) and one group, `Keys`, listing
+the databases as `resp0` … `resp15` (D193's collection names, so a file opened locally and the same
+data over the wire read alike; `resp0` always, the others when `DBSIZE` after `SELECT n` is above 0;
+right text the `DBSIZE`), no `Tables`, and `Ctrl/Cmd+T` shows `Query tabs need a SQL connection` in
+the status bar for 2 s. A server reached over the PostgreSQL, MySQL or SQL Server protocol shows no
+`Keys` group (no SQL reads key spaces). `Enter` on `resp3` opens the same keys tab, titled `Keys in
+resp3`, line `SCAN resp3 LIMIT 100`; the scan is `SELECT 3`, then `SCAN <cursor> MATCH <prefix>*
+COUNT <needed>` repeated until the page holds 100 keys or the cursor is `0` (the prefix's `*`, `?`,
+`[`, `]` and `\` each escaped with `\`; the bytes sent as they are); a reply's keys past 100 start
+the next page, before the keys its cursor yields. The editor line shows the cursor instead of a key,
+`SCAN resp3 PREFIX 'user:' CURSOR 1532 LIMIT 100`, and `Back` keeps the cursors as it keeps the
+`AFTER` keys. The grid gains a `type` column between `key` and `value` (`string`, `hash`, `list`,
+`set`, `zset`, `stream`, left-aligned); the page's values come in two pipelines, `TYPE` for every
+key, then per key `GETRANGE 0 63` and `STRLEN` for a string, `HLEN`, `LLEN`, `SCARD`, `ZCARD` or
+`XLEN` for the others, whose `value` cell reads `12 fields`, `3 items`, `8 members`, `8 members`,
+`40 entries` in `textSecondary` with `bytes` `–` in `textDisabled`; a key that expired between the
+two reads `(gone)` in `textDisabled`. The full-value view on a string is `GET`; on the others it is
+the whole aggregate as pretty-printed JSON (`HGETALL` an object, `LRANGE 0 -1` and `SMEMBERS`
+arrays, `ZRANGE 0 -1 WITHSCORES` an array of `[member, score]`, `XRANGE - +` an array of
+`{"id": …, "fields": {…}}`), header `value · hash · 12 fields`. The banner's order words are `in
+the server's order` (an EggDB server scans in key order; another server's cursor order is its own),
+the count is `DBSIZE` read with the page, and 2.3's running indicator covers the round trips, with
+`Running · 1.2 s` in the summary; `Stop` closes the socket, and the next run reconnects. Errors are
+the server's words in `Messages` on the first line, with our `Try:` line under them:
+
+| Reply | Messages |
+|-------|------|
+| `NOAUTH Authentication required.` | `Try: connect again with the password (Ctrl/Cmd+O)` |
+| `WRONGPASS …` | the same |
+| `ERR unknown command 'SCAN'` | `Try: this server has no SCAN; EggDB's key list needs it` |
+| `LOADING …` | `Try: wait for the server to finish loading and press F5` |
+| `ERR DB index is out of range` | `Try: press F5 in the tree; this database is gone` |
+| the connection dropped | `connection to 127.0.0.1:6379 lost` and `Try: press F5 to reconnect and scan again` |
+
+The status line reads `Error`, the page shown before stays in the grid, and the status bar's left
+group shows the first line for 2 s.
+
+**Roles.** The prefix field a `searchbox` named `Key prefix` (value the text; `aria-invalid` with
+the error line as its description when invalid); `Back` and `Next 100` `button`s with `Alt+PgUp`
+and `Alt+PgDn` as their accelerators, disabled while so; the results header's `Tab` order is
+segments → `Key prefix` → `Back` → `Next 100` → grid. The status line is 7's polite live region and
+reads after every page: `Keys 101 to 200 of 1,204, 0.5 milliseconds` (the `–` read as `to`),
+`0 keys start with user:, 0.2 milliseconds`; the banner is announced politely as 3.7's. The `type`
+column is a `columnheader` named `type`; a `value` cell of an aggregate reads its text (`12 fields`),
+a `(gone)` cell reads `gone`. The tree's `resp0` row is a `treeitem` described by its count; the
+connection row's description is `RESP`.
+
 ### Decided by this design (10)
 - The row menu's first item is what `Enter` does, relabelled `Expand` / `Collapse` on the connection
   and groups; `Enter` on a column, index or trigger opens its table, on a sequence nothing.
@@ -1026,7 +1192,8 @@ while the content exceeds the viewport (9.6). Nothing else moves anyway.
   text; the inspector shows its `Action`, and no DDL, since the engine has no text for it.
 - A keys tab is titled `Keys` / `Keys in users`, is reused on a second `Enter`, has a read-only
   one-line `SCAN … LIMIT 100` editor whose `Run` re-scans, columns `key`, `value`, `bytes`, ui.md's
-  byte spelling, the first 100 keys and 3.7's banner beyond them; prefix filter and paging are later.
+  byte spelling, the first 100 keys and 3.7's banner beyond them; 10.10 adds the prefix filter, paging
+  and servers.
 - Splitters are `Tab` stops right after the region on their left or above, skipped by `F6`; they
   reset with `Enter`, reach the limits with `Home` / `End`, and report `Sidebar · 268 px` in the
   status bar.
@@ -1040,3 +1207,24 @@ while the content exceeds the viewport (9.6). Nothing else moves anyway.
 - Only fills fade, by linear sRGB blend over 80 ms, and a reversed fade restarts from the drawn
   colour; reduced motion comes from the OS (read at start and on change), `--reduced-motion` or the
   menu, and can only be forced on.
+- The editor's menu is 9.4's popover at height 250 with `Cut`, `Copy`, `Paste`, `Select all`, a
+  `Run selection` / `Run statement` item that says which it is, `Explain`, `Toggle comment` and
+  `Format statement`; a right-click outside the selection moves the caret and collapses it, inside
+  keeps it, and on the gutter selects the line; the keys tab's read-only editor keeps the shape with
+  `Copy` and `Run scan` enabled.
+- `Toggle comment` uses `-- ` in every dialect and comments a range only when not every non-blank
+  line is already commented; `Format statement` upper-cases keywords, one clause per line, items
+  indented 2, strings and identifiers untouched, one undo step.
+- `Show DDL` is announced by the focus event on the read-only `DDL` box, with a `focusRing` and no
+  caret, never by a live region.
+- The keys tab's prefix is an always-present `Key prefix` field in the results header, reached with
+  `/` and `Ctrl/Cmd+F`, re-scanning 150 ms after the last key, shown in the editor line as
+  `PREFIX '…'`; the count is dropped from the status line while a prefix is active, since nothing
+  counts matches.
+- Paging is `Next 100` / `Back` (`Alt+PgDn` / `Alt+PgUp`, or `PgDn` and `PgUp` at the page's ends),
+  each page starting `AFTER` the last key shown (a cursor on a server), with the page starts kept so
+  `Back` replays what was seen; the status line reads `Keys 101–200 of 1,204 · 0.5 ms`.
+- A `redis://` connection is a key-value connection: one `Keys` group of `resp0` … `resp15`, no
+  `Tables` and no query tabs; its keys tab scans with `SCAN … MATCH prefix* COUNT`, adds a `type`
+  column, reads values in two pipelines, and puts the server's error line and our `Try:` line in
+  `Messages`.
