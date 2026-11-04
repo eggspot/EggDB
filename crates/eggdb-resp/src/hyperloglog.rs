@@ -127,7 +127,7 @@ fn estimate(registers: &[u8]) -> u64 {
     }
     z += m * sigma(count_of(0) / m);
     let alpha_infinity = 1.0 / (2.0 * std::f64::consts::LN_2);
-    (alpha_infinity * m * m / z).round() as u64
+    ((alpha_infinity * m * m / z).round() as u64).min(i64::MAX as u64)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

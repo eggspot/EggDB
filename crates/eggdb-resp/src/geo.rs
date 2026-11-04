@@ -39,7 +39,7 @@ pub(crate) fn execute(
 ) -> Option<Reply> {
     let form = match (name, args.len()) {
         ("geoadd", count) if count >= 4 => return Some(geoadd(context, db, args)),
-        ("geodist", 3 | 4) => return Some(geodist(context, db, args)),
+        ("geodist", count) if count >= 3 => return Some(geodist(context, db, args)),
         ("geohash", count) if count >= 1 => return Some(geohash_command(context, db, args)),
         ("geopos", count) if count >= 1 => return Some(geopos(context, db, args)),
         ("georadius", count) if count >= 5 => SearchForm::Radius { read_only: false },
@@ -50,8 +50,8 @@ pub(crate) fn execute(
         ("georadiusbymember_ro", count) if count >= 4 => {
             SearchForm::RadiusByMember { read_only: true }
         }
-        ("geosearch", count) if count >= 1 => SearchForm::Search,
-        ("geosearchstore", count) if count >= 2 => SearchForm::SearchStore,
+        ("geosearch", count) if count >= 6 => SearchForm::Search,
+        ("geosearchstore", count) if count >= 7 => SearchForm::SearchStore,
         _ => return None,
     };
     Some(search(context, db, form, name, args))
@@ -168,6 +168,9 @@ fn geoadd(context: &Context<'_>, db: u32, args: &[Vec<u8>]) -> Reply {
 }
 
 fn geodist(context: &Context<'_>, db: u32, args: &[Vec<u8>]) -> Reply {
+    if args.len() > 4 {
+        return Reply::Error(SYNTAX.to_owned());
+    }
     let now = context.now_ms;
     let unit = match args.get(3).map(|unit| unit_meters(unit)).transpose() {
         Ok(unit) => unit.unwrap_or(1.0),

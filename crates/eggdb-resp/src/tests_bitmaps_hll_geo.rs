@@ -40,6 +40,23 @@ impl Harness {
         self.encoded(&words)
     }
 
+    fn transacted(&mut self, line: &str) -> String {
+        let arguments: Vec<Vec<u8>> = line
+            .split(' ')
+            .map(|word| word.as_bytes().to_vec())
+            .collect();
+        let context = Context {
+            keyspace: &self.keyspace,
+            password_sha256: None,
+            now_ms: 1_000_000,
+            reply_room_bytes: self.reply_room_bytes,
+        };
+        let mut out = Vec::new();
+        execute_with_transactions(&context, &mut self.client, &arguments)
+            .encode(&mut out, self.client.resp3);
+        String::from_utf8_lossy(&out).replace("\r\n", "|")
+    }
+
     fn value(&mut self, key: &str) -> Vec<u8> {
         match self.run(&[b"GET", key.as_bytes()]) {
             Reply::Bulk(Some(bytes)) => bytes,
@@ -558,11 +575,11 @@ fn geo_commands_refuse_bad_input_with_redis_errors() {
         "-ERR unsupported unit provided. please use M, KM, FT, MI|"
     );
     assert_eq!(
-        redis.text("GEOSEARCH Sicily BYRADIUS 1 km"),
+        redis.text("GEOSEARCH Sicily BYRADIUS 1 km WITHDIST WITHHASH"),
         "-ERR exactly one of FROMMEMBER or FROMLONLAT can be specified for GEOSEARCH|"
     );
     assert_eq!(
-        redis.text("GEOSEARCH Sicily FROMLONLAT 15 37"),
+        redis.text("GEOSEARCH Sicily FROMLONLAT 15 37 WITHDIST WITHHASH"),
         "-ERR exactly one of BYRADIUS and BYBOX can be specified for GEOSEARCH|"
     );
     assert_eq!(
@@ -675,4 +692,110 @@ fn a_redis_cli_session_over_the_wire_gets_resp_replies() {
     assert_eq!(answers[5], ":2\r\n");
     assert_eq!(answers[6], "$8\r\n166.2742\r\n");
     assert_eq!(answers[8], "*1\r\n_\r\n");
+}
+
+#[test]
+fn geo_commands_check_their_arity_as_redis_does() {
+    let mut redis = Harness::new();
+    sicily(&mut redis);
+    assert_eq!(
+        redis.text("GEOSEARCH Sicily BYRADIUS 1 km"),
+        "-ERR wrong number of arguments for 'geosearch' command|"
+    );
+    assert_eq!(
+        redis.text("GEOSEARCH Sicily"),
+        "-ERR wrong number of arguments for 'geosearch' command|"
+    );
+    assert_eq!(
+        redis.text("GEOSEARCHSTORE d Sicily FROMLONLAT 15 37 BYRADIUS"),
+        "-ERR wrong number of arguments for 'geosearchstore' command|"
+    );
+    assert_eq!(
+        redis.text("GEODIST Sicily Palermo"),
+        "-ERR wrong number of arguments for 'geodist' command|"
+    );
+    assert_eq!(
+        redis.text("GEODIST Sicily Palermo Catania km extra"),
+        "-ERR syntax error|"
+    );
+    assert_eq!(
+        redis.text("GEODIST Sicily Palermo Catania km"),
+        "$8|166.2742|"
+    );
+}
+
+fn sketch_bytes(encoding: u8, stale: bool, body: &[u8]) -> Vec<u8> {
+    let mut bytes = b"HYLL".to_vec();
+    bytes.extend([encoding, 0, 0, 0]);
+    bytes.extend([0; 7]);
+    bytes.push(if stale { 0x80 } else { 0 });
+    bytes.extend_from_slice(body);
+    bytes
+}
+
+#[test]
+fn crafted_sketches_are_refused_or_counted_without_overflow() {
+    let mut redis = Harness::new();
+    let corrupted = "-INVALIDOBJ Corrupted HLL object detected|";
+    redis.run(&[b"SET", b"full", &sketch_bytes(1, true, &[0x7F, 0xFF])]);
+    assert_eq!(redis.text("PFCOUNT full"), ":0|");
+    redis.run(&[b"SET", b"past", &sketch_bytes(1, true, &[0x7F, 0xFF, 0x00])]);
+    assert_eq!(redis.text("PFCOUNT past"), corrupted);
+    redis.run(&[b"SET", b"cut", &sketch_bytes(1, true, &[0x40])]);
+    assert_eq!(redis.text("PFCOUNT cut"), corrupted);
+    redis.run(&[b"SET", b"top", &sketch_bytes(0, true, &[0xFF; 12_288])]);
+    let largest = format!(":{}|", i64::MAX);
+    assert_eq!(redis.text("PFCOUNT top"), largest);
+    let counted = redis.value("top");
+    assert_eq!(counted[8..16], i64::MAX.to_le_bytes());
+    assert_eq!(redis.text("PFCOUNT top"), largest);
+    assert_eq!(redis.value("top"), counted);
+    assert_eq!(redis.text("PFCOUNT top full"), largest);
+}
+
+#[test]
+fn writes_keep_or_drop_the_expiry_as_redis_does() {
+    let mut redis = Harness::new();
+    assert_eq!(redis.text("SETBIT bits 0 1"), ":0|");
+    assert_eq!(redis.text("EXPIRE bits 100"), ":1|");
+    assert_eq!(redis.text("SETBIT bits 9 1"), ":0|");
+    assert_eq!(redis.text("TTL bits"), ":100|");
+    assert_eq!(redis.text("PFADD visits a"), ":1|");
+    assert_eq!(redis.text("EXPIRE visits 100"), ":1|");
+    assert_eq!(redis.text("PFADD visits b"), ":1|");
+    assert_eq!(redis.text("TTL visits"), ":100|");
+    assert_eq!(redis.text("GEOADD places 1 1 a"), ":1|");
+    assert_eq!(redis.text("EXPIRE places 100"), ":1|");
+    assert_eq!(redis.text("GEOADD places 1.5 1.5 b"), ":1|");
+    assert_eq!(redis.text("TTL places"), ":100|");
+    assert_eq!(redis.text("SET combined x EX 100"), "+OK|");
+    assert_eq!(redis.text("BITOP OR combined bits"), ":2|");
+    assert_eq!(redis.text("TTL combined"), ":-1|");
+    assert_eq!(redis.text("SET near x EX 100"), "+OK|");
+    assert_eq!(
+        redis.text("GEOSEARCHSTORE near places FROMLONLAT 1 1 BYRADIUS 500 km"),
+        ":2|"
+    );
+    assert_eq!(redis.text("TTL near"), ":-1|");
+}
+
+#[test]
+fn setbit_and_pfadd_queue_in_multi_and_touch_watched_keys() {
+    let mut redis = Harness::new();
+    assert_eq!(redis.transacted("MULTI"), "+OK|");
+    assert_eq!(redis.transacted("SETBIT bits 3 1"), "+QUEUED|");
+    assert_eq!(redis.transacted("PFADD visits a"), "+QUEUED|");
+    assert_eq!(redis.transacted("EXEC"), "*2|:0|:1|");
+    assert_eq!(redis.text("GETBIT bits 3"), ":1|");
+    assert_eq!(redis.text("PFCOUNT visits"), ":1|");
+    assert_eq!(redis.transacted("WATCH bits visits"), "+OK|");
+    assert_eq!(redis.transacted("SETBIT bits 4 1"), ":0|");
+    assert_eq!(redis.transacted("MULTI"), "+OK|");
+    assert_eq!(redis.transacted("GETBIT bits 4"), "+QUEUED|");
+    assert_eq!(redis.transacted("EXEC"), "*-1|");
+    assert_eq!(redis.transacted("WATCH visits"), "+OK|");
+    assert_eq!(redis.transacted("PFADD visits b"), ":1|");
+    assert_eq!(redis.transacted("MULTI"), "+OK|");
+    assert_eq!(redis.transacted("PFCOUNT visits"), "+QUEUED|");
+    assert_eq!(redis.transacted("EXEC"), "*-1|");
 }
