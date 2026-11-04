@@ -1843,7 +1843,8 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   that end the identity before its type's range answer `0A000`. `ALTER COLUMN c SET GENERATED
   {ALWAYS | BY DEFAULT}`, `SET INCREMENT BY`, `SET START WITH`, `RESTART [WITH n]` (on an identity
   backed by a sequence) and `DROP IDENTITY [IF EXISTS]` change it later (`55000` on a column that
-  is not an identity). Generated columns (`GENERATED ALWAYS AS (expr) STORED`) answer `0A000`. `ALTER TABLE t
+  is not an identity). Generated columns (`GENERATED ALWAYS AS (expr) [STORED | VIRTUAL]`) are
+  described in [Generated columns](#generated-columns). `ALTER TABLE t
   ALTER COLUMN c ADD GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY [(SEQUENCE NAME s START WITH
   ...)]`, as `pg_dump` writes identity columns, makes a sequence owned by the column (`s`, or
   `t_c_seq`) and the default `nextval('s'::regclass)`, so `setval('s', ...)` works and the column
@@ -2705,6 +2706,62 @@ name` and `DROP PRIMARY KEY`.
 `DROP COLUMN`, `TYPE` and adding or dropping a primary key rebuild the table's rows and indexes a
 thousand rows at a time within the statement's transaction; `ADD COLUMN` with a default rewrites
 the rows in place; the other actions change only the definition (D114).
+
+## Generated columns
+
+A generated column computes its value from the other columns of its row (D322), in every
+dialect's spelling:
+
+| Dialect | Definition | Kind |
+|---|---|---|
+| PostgreSQL | `c type GENERATED ALWAYS AS (expr) [STORED \| VIRTUAL]` | `VIRTUAL` when neither is written, as in PostgreSQL 18 |
+| MySQL | `c type [GENERATED ALWAYS] AS (expr) [VIRTUAL \| STORED]` | `VIRTUAL` by default |
+| SQLite | `c [type] [GENERATED ALWAYS] AS (expr) [VIRTUAL \| STORED]` | `VIRTUAL` by default |
+| SQL Server | `c AS expr [PERSISTED] [NOT NULL]` (a computed column) | `PERSISTED` is stored |
+| Oracle | `c [type] [GENERATED ALWAYS] AS (expr) [VIRTUAL]` (a virtual column) | virtual |
+
+A computed column without a type (SQL Server, Oracle) takes the type of its expression; one EggDB
+cannot work out answers `0A000` and asks for a `CAST`. The value is computed on every `INSERT`,
+on every `UPDATE` (so a change to a column it reads changes it), by `MERGE`, upserts, `COPY`,
+cascaded foreign-key updates and after `BEFORE` triggers, as PostgreSQL does. A `VIRTUAL` column
+is kept like a `STORED` one, so reading it costs nothing and gives the same value its expression
+would; the catalogs still name it virtual.
+
+- **Writes.** A value written into one fails with the dialect's error: PostgreSQL's `428C9`
+  (`cannot insert a non-DEFAULT value into column "c"`, `column "c" can only be updated to
+  DEFAULT`, detail `Column "c" is a generated column.`), MySQL's 3105 (`The value specified for
+  generated column 'c' in table 't' is not allowed.`), SQLite's `cannot INSERT into generated
+  column "c"` and `cannot UPDATE generated column "c"`, SQL Server's 271 and Oracle's
+  `ORA-54013` and `ORA-54017`. `DEFAULT` is accepted where the dialect accepts it (PostgreSQL,
+  MySQL, Oracle; SQL Server refuses it too). An `INSERT` without a column list leaves generated
+  columns out in SQLite and SQL Server, and gives them `DEFAULT` elsewhere; `INSERT ... SELECT`
+  into one fails. `COPY` without a column list leaves them out, and `COPY ... FROM` naming one
+  answers `42P10` (`Generated columns cannot be used in COPY.`).
+- **Expressions.** No subqueries, aggregates or functions whose result changes between calls
+  (`random()`, `now()`, `nextval` and the like): PostgreSQL's `0A000`, `42803` and `42P17`
+  (`generation expression is not immutable`), MySQL's 3763, SQLite's `subqueries prohibited in
+  generated columns` and `non-deterministic functions prohibited in generated columns`, SQL
+  Server's 1046, 175 and, for a `PERSISTED` column, 4936, Oracle's `ORA-54002`. A generated
+  column may read another one only in MySQL (one defined before it, 3107 otherwise) and SQLite
+  (without a loop); PostgreSQL answers `42P17`, SQL Server 1759 and Oracle `ORA-54012`. MySQL
+  refuses one that reads an `AUTO_INCREMENT` column (3109), SQLite one in the primary key and
+  PostgreSQL a `DEFAULT` with a generation expression.
+- **Indexes** work on generated columns as on any other, except PostgreSQL's virtual ones
+  (`0A000`, as in PostgreSQL 18).
+- **ALTER TABLE.** `ADD COLUMN ... GENERATED ALWAYS AS (...)` computes the value of every
+  existing row (SQLite refuses a `STORED` one, `Cannot add a STORED column`). Renaming a column
+  rewrites the expressions that read it. Dropping a column a generated column reads fails:
+  PostgreSQL's `2BP01` (`cannot drop column a of table t because other objects depend on it`),
+  with `CASCADE` dropping the generated column too; MySQL's 3108, SQL Server's 5074, Oracle's
+  `ORA-54031`, SQLite's `error in table t after drop column`.
+- **Catalogs.** `pg_attribute.attgenerated` is `s` or `v` and `atthasdef` true, `pg_attrdef`
+  holds the expression for `pg_get_expr`, `information_schema.columns` has `is_generated`
+  `ALWAYS` and `generation_expression`; MySQL's `information_schema.columns.EXTRA` and `SHOW
+  COLUMNS` say `STORED GENERATED` or `VIRTUAL GENERATED`; SQLite's `PRAGMA table_xinfo` has
+  `hidden` 2 (virtual) or 3 (stored) and `PRAGMA table_info` leaves them out; SQL Server's
+  `sys.columns.is_computed` is 1; Oracle's `USER_TAB_COLS.VIRTUAL_COLUMN` is `YES` with the
+  expression in `DATA_DEFAULT`. `CREATE TABLE` text written in PostgreSQL's dialect (`eggdb
+  dump`) keeps the generation clause.
 
 ## Triggers
 
@@ -4397,7 +4454,7 @@ And more, not in the suite yet:
 - `PRAGMA user_version`, `foreign_keys`, `journal_mode` and `synchronous` are per session, not
   kept in the file; foreign keys are never enforced.
 - Not supported yet: `CREATE INDEX`, `UNIQUE` and `CHECK` constraints, `COLLATE NOCASE`,
-  generated columns, views, `ATTACH`, `VACUUM`, `UPDATE OR ...`, `VALUES` as a query,
+  views, `ATTACH`, `VACUUM`, `UPDATE OR ...`, `VALUES` as a query,
   `group_concat` and `total`, the JSON and math functions and bare columns in aggregate
   queries.
 
