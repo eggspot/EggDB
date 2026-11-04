@@ -111,7 +111,7 @@ fn member_type(
     own_oid: u32,
     base_types_allowed: bool,
 ) -> SqlResult<SqlType> {
-    let sql_type = reader.sql_type(true, true, true, base_types_allowed)?;
+    let sql_type = reader.sql_type(true, true, true, base_types_allowed, false)?;
     if sql_type
         .defined()
         .is_some_and(|defined| defined.oid == own_oid)

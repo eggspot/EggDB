@@ -89,6 +89,12 @@ fn run_statement(
             binding.merge(&*writer, tables, &mut merge)?;
             crate::merge::merge(writer, tables, &merge)
         }
+        Statement::CreateTableAs(mut create) => {
+            crate::create_table_as::run(writer, tables, &binding, dialect, &mut create)
+        }
+        Statement::MultitableInsert(mut insert) => {
+            crate::multitable_insert::run(writer, tables, &binding, &mut insert)
+        }
         Statement::With(with) => crate::with_statement::run(writer, tables, &with, &binding),
         Statement::Truncate(mut table) => {
             binding.target(&*writer, tables, &mut table)?;

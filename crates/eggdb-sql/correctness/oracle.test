@@ -3238,3 +3238,201 @@ DROP TABLE log316
 
 ok
 DROP TABLE emp316
+
+chapter "Joins", "Pattern-matching Conditions": NATURAL joins and LIKE ... ESCAPE
+ok
+CREATE TABLE letters299 (num NUMBER, name VARCHAR2(10))
+
+ok
+INSERT INTO letters299 VALUES (1, 'a')
+
+ok
+INSERT INTO letters299 VALUES (2, 'b')
+
+ok
+CREATE TABLE values299 (num NUMBER, value VARCHAR2(10))
+
+ok
+INSERT INTO values299 VALUES (1, 'xxx')
+
+rows
+SELECT num, name, value FROM letters299 NATURAL LEFT OUTER JOIN values299 ORDER BY num
+----
+NUM|NAME|VALUE
+1|a|xxx
+2|b|NULL
+SELECT 2
+
+ok
+CREATE TABLE codes299 (code VARCHAR2(10))
+
+ok
+INSERT INTO codes299 VALUES ('A_B')
+
+ok
+INSERT INTO codes299 VALUES ('AxB')
+
+rows
+SELECT code FROM codes299 WHERE code LIKE 'A\_B' ESCAPE '\'
+----
+CODE
+A_B
+SELECT 1
+
+chapter "LISTAGG": the analytic form, LISTAGG ... WITHIN GROUP (ORDER BY ...) OVER (query_partition_clause)
+ok
+CREATE TABLE staff300 (id NUMBER PRIMARY KEY, deptno NUMBER, ename VARCHAR2(10))
+
+ok
+INSERT INTO staff300 VALUES (1, 10, 'CLARK')
+
+ok
+INSERT INTO staff300 VALUES (2, 10, 'KING')
+
+ok
+INSERT INTO staff300 VALUES (3, 20, 'SMITH')
+
+ok
+INSERT INTO staff300 VALUES (4, 10, 'MILLER')
+
+rows
+SELECT id, LISTAGG(ename, '; ') WITHIN GROUP (ORDER BY ename) OVER (PARTITION BY deptno) AS team FROM staff300 ORDER BY id
+----
+ID|TEAM
+1|CLARK; KING; MILLER
+2|CLARK; KING; MILLER
+3|SMITH
+4|CLARK; KING; MILLER
+SELECT 4
+
+rows
+SELECT id, LISTAGG(ename, ',') WITHIN GROUP (ORDER BY id DESC) OVER () AS everyone FROM staff300 WHERE deptno = 10 ORDER BY id
+----
+ID|EVERYONE
+1|MILLER,KING,CLARK
+2|MILLER,KING,CLARK
+4|MILLER,KING,CLARK
+SELECT 3
+
+error 42601 30487
+SELECT LISTAGG(ename, ',') WITHIN GROUP (ORDER BY ename) OVER (PARTITION BY deptno ORDER BY id) FROM staff300
+
+error 0A000
+SELECT LISTAGG(DISTINCT ename, ',') WITHIN GROUP (ORDER BY ename) OVER (PARTITION BY deptno) FROM staff300
+
+ok
+DROP TABLE staff300
+
+chapter "Hierarchical Queries": START WITH ... CONNECT BY PRIOR, LEVEL, SYS_CONNECT_BY_PATH, CONNECT_BY_ROOT, CONNECT_BY_ISLEAF and ORDER SIBLINGS BY
+ok
+CREATE TABLE emp304 (employee_id NUMBER PRIMARY KEY, last_name VARCHAR2(20), manager_id NUMBER)
+
+ok
+INSERT INTO emp304 VALUES (100, 'King', NULL)
+
+ok
+INSERT INTO emp304 VALUES (101, 'Kochhar', 100)
+
+ok
+INSERT INTO emp304 VALUES (102, 'De Haan', 100)
+
+ok
+INSERT INTO emp304 VALUES (103, 'Hunold', 102)
+
+ok
+INSERT INTO emp304 VALUES (108, 'Greenberg', 101)
+
+rows
+SELECT last_name, LEVEL, SYS_CONNECT_BY_PATH(last_name, '/') AS path, CONNECT_BY_ISLEAF AS leaf FROM emp304 START WITH manager_id IS NULL CONNECT BY PRIOR employee_id = manager_id ORDER SIBLINGS BY last_name
+----
+LAST_NAME|LEVEL|PATH|LEAF
+King|1|/King|0
+De Haan|2|/King/De Haan|0
+Hunold|3|/King/De Haan/Hunold|1
+Kochhar|2|/King/Kochhar|0
+Greenberg|3|/King/Kochhar/Greenberg|1
+SELECT 5
+
+rows
+SELECT last_name, CONNECT_BY_ROOT last_name AS root, PRIOR last_name AS manager FROM emp304 WHERE LEVEL > 1 START WITH employee_id = 101 CONNECT BY PRIOR employee_id = manager_id
+----
+LAST_NAME|ROOT|MANAGER
+Greenberg|Kochhar|Kochhar
+SELECT 1
+
+rows
+SELECT LEVEL AS n FROM dual CONNECT BY LEVEL <= 3
+----
+N
+1
+2
+3
+SELECT 3
+
+error 42601 1788
+SELECT LEVEL FROM emp304
+
+error 42601 30929
+SELECT last_name FROM emp304 ORDER SIBLINGS BY last_name
+
+ok
+DROP TABLE emp304
+
+chapter "INSERT": multi_table_insert, INSERT ALL and INSERT FIRST with WHEN ... THEN INTO and ELSE INTO
+ok
+CREATE TABLE src304 (id NUMBER, amount NUMBER)
+
+ok
+INSERT INTO src304 VALUES (1, 50)
+
+ok
+INSERT INTO src304 VALUES (2, 500)
+
+ok
+CREATE TABLE low304 (id NUMBER, amount NUMBER)
+
+ok
+CREATE TABLE high304 (id NUMBER, amount NUMBER)
+
+ok
+INSERT ALL INTO low304 VALUES (id, amount) INTO high304 (id, amount) VALUES (id, amount * 10) SELECT id, amount FROM src304
+
+rows
+SELECT id, amount FROM high304 ORDER BY id
+----
+ID|AMOUNT
+1|500
+2|5000
+SELECT 2
+
+ok
+DELETE FROM low304
+
+ok
+DELETE FROM high304
+
+ok
+INSERT FIRST WHEN amount > 100 THEN INTO high304 ELSE INTO low304 SELECT id, amount FROM src304
+
+rows
+SELECT id FROM high304
+----
+ID
+2
+SELECT 1
+
+rows
+SELECT id FROM low304
+----
+ID
+1
+SELECT 1
+
+ok
+DROP TABLE src304
+
+ok
+DROP TABLE low304
+
+ok
+DROP TABLE high304

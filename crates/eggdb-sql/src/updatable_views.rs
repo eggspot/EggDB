@@ -119,7 +119,7 @@ fn view_level(
             "Views containing UNION, INTERSECT, or EXCEPT are not automatically updatable.",
         ));
     };
-    if select.distinct {
+    if select.removes_duplicates() {
         return Err(refused(
             "Views containing DISTINCT are not automatically updatable.",
         ));
@@ -315,6 +315,7 @@ fn map_in_body(body: &mut SetExpr, level: &Level) -> SqlResult<()> {
                 .iter_mut()
                 .chain(select.group_by.iter_mut())
                 .chain(select.having.iter_mut())
+                .chain(select.distinct_on.iter_mut())
                 .chain(select.order_by.iter_mut().map(|item| &mut item.expr));
             for expr in rest {
                 map_qualified(expr, level)?;

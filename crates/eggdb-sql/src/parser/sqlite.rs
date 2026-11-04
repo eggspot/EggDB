@@ -7,6 +7,7 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::children_mut;
 use crate::lexer::TokenKind;
 use crate::settings::Settings;
+use crate::type_affinity::TypeAffinity;
 use crate::types::SqlType;
 
 /// The SQLite release whose documented behaviour EggDB's SQLite dialect follows, as
@@ -191,37 +192,41 @@ fn is_boolean_valued(expr: &Expr) -> bool {
         | ExprKind::InList { .. }
         | ExprKind::Like { .. }
         | ExprKind::Literal(Literal::Null | Literal::Boolean(_)) => true,
-        ExprKind::SqliteFunction { name, .. } => *name == "sqlite_truth",
+        ExprKind::SqliteFunction { name, .. } => matches!(*name, "sqlite_truth" | "sqlite_glob"),
         _ => false,
     }
 }
 
+pub(super) fn checked_escape(escape: Expr) -> SqlResult<Expr> {
+    if let ExprKind::Literal(Literal::String(text)) = &escape.kind
+        && text.chars().count() != 1
+    {
+        return Err(SqlError::new(
+            SqlState::INVALID_ESCAPE_SEQUENCE,
+            "ESCAPE expression must be a single character",
+        )
+        .at(escape.position));
+    }
+    Ok(escape)
+}
+
 pub(super) fn glob(expr: Expr, pattern: Expr, negated: bool) -> SqlResult<Expr> {
     let position = expr.position;
-    let ExprKind::Literal(Literal::String(text)) = &pattern.kind else {
-        return Err(
-            SqlError::not_supported("GLOB with a pattern other than a constant string")
-                .at(pattern.position),
-        );
+    let converted = match &pattern.kind {
+        ExprKind::Literal(Literal::String(text)) => glob_as_like(text),
+        _ => None,
     };
-    let mut converted = String::with_capacity(text.len());
-    for character in text.chars() {
-        match character {
-            '*' => converted.push('%'),
-            '?' => converted.push('_'),
-            '%' | '_' | '\\' => {
-                converted.push('\\');
-                converted.push(character);
+    let Some(converted) = converted else {
+        let matched = sqlite_function("sqlite_glob", vec![pattern, expr], position);
+        return Ok(if negated {
+            Expr {
+                kind: ExprKind::Unary(UnaryOperator::Not, Box::new(matched)),
+                position,
             }
-            '[' => {
-                return Err(
-                    SqlError::not_supported("character classes ([...]) in GLOB patterns")
-                        .at(pattern.position),
-                );
-            }
-            other => converted.push(other),
-        }
-    }
+        } else {
+            matched
+        });
+    };
     Ok(Expr {
         kind: ExprKind::Like {
             expr: Box::new(expr),
@@ -231,6 +236,23 @@ pub(super) fn glob(expr: Expr, pattern: Expr, negated: bool) -> SqlResult<Expr> 
         },
         position,
     })
+}
+
+fn glob_as_like(text: &str) -> Option<String> {
+    let mut converted = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '*' => converted.push('%'),
+            '?' => converted.push('_'),
+            '%' | '_' | '\\' => {
+                converted.push('\\');
+                converted.push(character);
+            }
+            '[' => return None,
+            other => converted.push(other),
+        }
+    }
+    Some(converted)
 }
 
 fn point_excluded_values(expr: &mut Expr) {
@@ -274,6 +296,31 @@ enum Affinity {
     Blob,
     Real,
     Numeric,
+}
+
+fn column_type(declared: &str) -> SqlType {
+    match affinity(declared) {
+        Affinity::Integer => SqlType::BigInt,
+        Affinity::Text => SqlType::Dynamic(TypeAffinity::Text),
+        Affinity::Real => SqlType::Dynamic(TypeAffinity::Real),
+        Affinity::Blob => SqlType::Dynamic(TypeAffinity::Blob),
+        Affinity::Numeric => SqlType::Dynamic(TypeAffinity::Numeric),
+    }
+}
+
+fn cast_type(declared: &str) -> SqlType {
+    match affinity(declared) {
+        Affinity::Integer => SqlType::BigInt,
+        Affinity::Text => SqlType::Text,
+        Affinity::Real => SqlType::Double,
+        Affinity::Blob if declared.is_empty() => SqlType::Text,
+        Affinity::Blob => SqlType::DYNAMIC,
+        Affinity::Numeric if matches!(declared, "boolean" | "bool") => SqlType::BigInt,
+        Affinity::Numeric if ["date", "time"].iter().any(|word| declared.contains(word)) => {
+            SqlType::Text
+        }
+        Affinity::Numeric => SqlType::Double,
+    }
 }
 
 fn affinity(declared: &str) -> Affinity {
@@ -375,6 +422,16 @@ impl<'t> Parser<'t> {
     }
 
     pub(super) fn sqlite_type(&mut self) -> SqlResult<(SqlType, bool)> {
+        let declared = self.sqlite_declared_type()?;
+        Ok((column_type(&declared), declared == "integer"))
+    }
+
+    pub(super) fn sqlite_cast_type(&mut self) -> SqlResult<SqlType> {
+        let declared = self.sqlite_declared_type()?;
+        Ok(cast_type(&declared))
+    }
+
+    fn sqlite_declared_type(&mut self) -> SqlResult<String> {
         let mut words = Vec::new();
         while let TokenKind::Word(word) = self.peek_kind() {
             if matches!(
@@ -410,21 +467,7 @@ impl<'t> Parser<'t> {
             }
             self.expect(&TokenKind::RightParen)?;
         }
-        let declared = words.join(" ");
-        let exact_integer = declared == "integer";
-        let sql_type = match affinity(&declared) {
-            Affinity::Integer => SqlType::BigInt,
-            Affinity::Text => SqlType::Text,
-            Affinity::Real => SqlType::Double,
-            Affinity::Blob if declared.is_empty() => SqlType::Text,
-            Affinity::Blob => SqlType::Dynamic,
-            Affinity::Numeric if matches!(declared.as_str(), "boolean" | "bool") => SqlType::BigInt,
-            Affinity::Numeric if ["date", "time"].iter().any(|word| declared.contains(word)) => {
-                SqlType::Text
-            }
-            Affinity::Numeric => SqlType::Double,
-        };
-        Ok((sql_type, exact_integer))
+        Ok(words.join(" "))
     }
 
     pub(super) fn sqlite_conflict_clause(&mut self) -> SqlResult<()> {
@@ -755,7 +798,7 @@ impl<'t> Parser<'t> {
             "hex" => ("sqlite_hex", &[1]),
             "quote" => ("sqlite_quote", &[1]),
             "printf" | "format" => ("sqlite_printf", &[]),
-            "like" => ("like", &[2]),
+            "like" => ("like", &[2, 3]),
             "glob" => ("glob", &[2]),
             "date" => ("sqlite_date", &[]),
             "time" => ("sqlite_time", &[]),
@@ -819,9 +862,16 @@ impl<'t> Parser<'t> {
                 let (Some(pattern), Some(subject)) = (arguments.next(), arguments.next()) else {
                     return Err(wrong_argument_count(name));
                 };
+                let escape = arguments.next();
                 if internal == "glob" {
                     glob(subject, pattern, false)?
                 } else {
+                    let pattern = match escape {
+                        Some(escape) => {
+                            crate::parser::like_escape(pattern, checked_escape(escape)?)
+                        }
+                        None => pattern,
+                    };
                     Expr {
                         kind: ExprKind::Like {
                             expr: Box::new(subject),

@@ -86,7 +86,10 @@ pub(super) fn coerce_collection(shape: &CollectionShape, value: Value) -> SqlRes
     {
         return Err(subscript_outside_limit());
     }
-    if !matches!(shape.element, Slot::Untyped | Slot::Typed(SqlType::Dynamic)) {
+    if !matches!(
+        shape.element,
+        Slot::Untyped | Slot::Typed(SqlType::Dynamic(_))
+    ) {
         let fields = std::mem::take(&mut record.fields);
         let mut coerced = Vec::with_capacity(fields.len());
         for field in fields {
@@ -136,7 +139,7 @@ fn set_field(slot: &Slot, element: Value, field: &str, value: Value) -> SqlResul
         _ => None,
     };
     record.fields[at] = match declared {
-        Some(SqlType::Dynamic) | None => value,
+        Some(SqlType::Dynamic(_)) | None => value,
         Some(sql_type) => convert(value, sql_type, Conversion::Assignment)?,
     };
     Ok(element)

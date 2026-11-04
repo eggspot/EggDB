@@ -93,7 +93,7 @@ impl Run<'_> {
     fn get_output_line(&mut self, text: &str) -> SqlResult<()> {
         let Statement::Call(call) = parsed(
             text,
-            self.settings,
+            &self.settings,
             &RoutineFrame::default(),
             self.dialect(),
         )?

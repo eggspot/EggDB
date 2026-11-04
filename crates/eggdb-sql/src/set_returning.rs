@@ -425,9 +425,11 @@ fn json_path_query_tz_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>)
 }
 
 fn text_arguments(name: &str, types: &[Option<SqlType>]) -> SqlResult<()> {
-    let texts = types
-        .iter()
-        .all(|sql_type| sql_type.is_none_or(SqlType::is_character));
+    let texts = types.iter().all(|sql_type| {
+        sql_type.is_none_or(|sql_type| {
+            sql_type.is_character() || crate::citext::is_citext_type(sql_type)
+        })
+    });
     if (2..=3).contains(&types.len()) && texts {
         Ok(())
     } else {
@@ -445,11 +447,17 @@ fn regexp_split_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
 }
 
 fn regexp_matches_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
-    crate::regexp_functions::matches_rows(values, sink)
+    crate::regexp_functions::matches_rows(
+        &crate::citext::regexp_arguments("regexp_matches", values),
+        sink,
+    )
 }
 
 fn regexp_split_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
-    crate::regexp_functions::split_rows(values, sink)
+    crate::regexp_functions::split_rows(
+        &crate::citext::regexp_arguments("regexp_split_to_table", values),
+        sink,
+    )
 }
 
 pub(crate) const VALUES_LABEL: &str = "*VALUES*";
@@ -1100,6 +1108,12 @@ pub(crate) fn expand_select_list(select: &mut Select) -> SqlResult<()> {
     let Some(position) = position else {
         return Ok(());
     };
+    if let Some(on) = select.distinct_on.first() {
+        return Err(SqlError::not_supported(
+            "DISTINCT ON with a window or set-returning function in the select list is not supported yet",
+        )
+        .at(on.position));
+    }
     let mut builder = ExpansionBuilder::default();
     for item in std::mem::take(&mut select.items) {
         builder.add(item)?;
@@ -1129,6 +1143,8 @@ pub(crate) fn expand_select_list(select: &mut Select) -> SqlResult<()> {
         limit: None,
         offset: None,
         source_row_limit: select.source_row_limit.take(),
+        grouping_sets: select.grouping_sets.take(),
+        distinct_on: Vec::new(),
     };
     select.items = vec![SelectItem::Wildcard {
         qualifier: None,

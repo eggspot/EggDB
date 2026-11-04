@@ -8,7 +8,7 @@ use crate::constraints::{self, PreparedChecks, RowChange};
 use crate::dialect::Dialect;
 use crate::encoding::{
     Column, IdentityGeneration, IdentitySeed, MAX_COLUMNS, TableDefinition, ViewDefinition,
-    decode_meta, decode_row, decode_row_into, encode_key_value, encode_meta, encode_row,
+    decode_meta, decode_row, decode_row_into, encode_column_key, encode_meta, encode_row,
     encode_row_into, is_view_record, meta_key, prefix_end, rows_prefix, table_key,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -29,6 +29,7 @@ use crate::subquery::Correlation;
 use crate::triggers::{Firing, RowOutcome, TriggerEvent};
 use crate::types::{Conversion, SqlType, Value, compare_values, convert, equality_key};
 use crate::typing;
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -83,6 +84,9 @@ pub(crate) fn column_storage(
                 "column cannot be of type record",
             )
             .at(position))
+        }
+        SqlType::Array(crate::arrays::ArrayElement::RefCursor) => {
+            Ok((SqlType::Array(crate::arrays::ArrayElement::Text), None))
         }
         SqlType::Array(element) if !element.is_storable() => {
             Err(crate::arrays::unsupported_element(element.sql_type()).at(position))
@@ -728,7 +732,7 @@ pub(crate) fn dependent_table(
 pub(crate) fn row_key(table: &TableDefinition, row: &[Value]) -> Vec<u8> {
     let mut key = rows_prefix(table.id);
     for &index in &table.primary_key {
-        encode_key_value(&mut key, &row[index]);
+        encode_column_key(&mut key, &row[index], table.columns[index].sql_type);
     }
     key
 }
@@ -817,7 +821,7 @@ fn with_domain_default(table: &TableDefinition, index: usize, column: &Column) -
     })
 }
 
-fn default_value(table: &TableDefinition, index: usize) -> SqlResult<Value> {
+pub(crate) fn default_value(table: &TableDefinition, index: usize) -> SqlResult<Value> {
     let Some(column) = table.columns.get(index) else {
         return Ok(Value::Null);
     };
@@ -900,7 +904,7 @@ pub(crate) fn assignment_rule(dialect: Dialect) -> Assignment {
     }
 }
 
-fn assigned_value(
+pub(crate) fn assigned_value(
     evaluator: &Evaluator<'_>,
     value: &InsertValue,
     table: &TableDefinition,
@@ -1045,13 +1049,26 @@ pub(crate) fn update_exprs(update: &mut Update) -> Vec<&mut Expr> {
     }
     exprs.extend(update.filter.iter_mut());
     exprs.extend(returning_exprs(&mut update.returning));
+    exprs.extend(update.from.iter_mut().flat_map(join_conditions));
     exprs
 }
 
 pub(crate) fn delete_exprs(delete: &mut Delete) -> Vec<&mut Expr> {
     let mut exprs: Vec<&mut Expr> = delete.filter.iter_mut().collect();
     exprs.extend(returning_exprs(&mut delete.returning));
+    exprs.extend(delete.using.iter_mut().flat_map(join_conditions));
     exprs
+}
+
+fn join_conditions(joined: &mut crate::ast::JoinedTables) -> impl Iterator<Item = &mut Expr> {
+    joined
+        .tables
+        .joins
+        .iter_mut()
+        .filter_map(|join| match &mut join.condition {
+            crate::ast::JoinCondition::On(on) => Some(on),
+            _ => None,
+        })
 }
 
 fn with_subqueries_run<T: Clone>(
@@ -1160,6 +1177,92 @@ pub(crate) fn insert(
     crate::row_security::checked_new_rows(result, &insert.table.name.text, check_appended)
 }
 
+/// Checks an `INSERT` against its table without writing a row: the table exists, every listed
+/// column does, and each `VALUES` list fits the target columns.
+pub(crate) fn check_insert(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    insert: &Insert,
+) -> SqlResult<()> {
+    if crate::updatable_views::is_view(writer, tables, &insert.table)? {
+        return Ok(());
+    }
+    let table = tables.require_target(writer, &insert.table.name, "insert into")?;
+    insert_targets(&table, insert, crate::constraints::current_dialect()).map(drop)
+}
+
+fn insert_targets(
+    table: &TableDefinition,
+    insert: &Insert,
+    dialect: Dialect,
+) -> SqlResult<Vec<usize>> {
+    let sqlserver = dialect == Dialect::SqlServer;
+    let identity = sqlserver.then(|| table.auto_increment_column()).flatten();
+    let identity_insert =
+        identity.is_some() && constraints::identity_insert_is_on(&insert.table.name.text);
+    let targets = match &insert.columns {
+        Some(names) => {
+            let targets = target_columns(table, names)?;
+            if let Some(identity) = identity
+                && targets.contains(&identity) != identity_insert
+            {
+                return Err(if identity_insert {
+                    identity_value_missing(&insert.table.name)
+                } else {
+                    identity_insert_off(&insert.table.name)
+                });
+            }
+            targets
+        }
+        None if identity_insert => {
+            return Err(match insert.source {
+                InsertSource::Values(_) | InsertSource::Query(_) => {
+                    identity_needs_column_list(&insert.table.name)
+                }
+                InsertSource::DefaultValues => identity_value_missing(&insert.table.name),
+            });
+        }
+        None => (0..table.columns.len())
+            .filter(|&index| Some(index) != identity)
+            .collect(),
+    };
+    let InsertSource::Values(rows) = &insert.source else {
+        return Ok(targets);
+    };
+    let Some(first) = rows.first() else {
+        return Ok(targets);
+    };
+    let position = insert.table.name.position;
+    if rows.iter().any(|row| row.len() != first.len()) {
+        return Err(SqlError::syntax(
+            "VALUES lists must all be the same length",
+            position,
+        ));
+    }
+    let oracle = dialect == Dialect::Oracle;
+    if first.len() > targets.len() {
+        return Err(if oracle {
+            oracle_value_count("too many values", 913, position)
+        } else {
+            SqlError::syntax("INSERT has more expressions than target columns", position)
+        });
+    }
+    if (insert.columns.is_some() || sqlserver || oracle) && first.len() < targets.len() {
+        return Err(if oracle {
+            oracle_value_count("not enough values", 947, position)
+        } else {
+            SqlError::syntax("INSERT has more target columns than expressions", position)
+        });
+    }
+    Ok(targets)
+}
+
+fn oracle_value_count(message: &str, code: u16, position: usize) -> SqlError {
+    SqlError::new(SqlState::SYNTAX_ERROR, message)
+        .with_oracle_code(code)
+        .at(position)
+}
+
 fn insert_rows(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
@@ -1196,64 +1299,19 @@ fn insert_rows(
     let checks = PreparedChecks::of(&table)?.with_partitions(writer, tables, &table)?;
     let scope = scope_of(&table, &insert.table);
     let dialect = crate::constraints::current_dialect();
-    let sqlserver = dialect == Dialect::SqlServer;
-    let identity = sqlserver.then(|| table.auto_increment_column()).flatten();
+    let identity = (dialect == Dialect::SqlServer)
+        .then(|| table.auto_increment_column())
+        .flatten();
     let identity_insert =
         identity.is_some() && constraints::identity_insert_is_on(&insert.table.name.text);
     let rule = assignment_rule(dialect);
-    let targets = match &insert.columns {
-        Some(names) => {
-            let targets = target_columns(&table, names)?;
-            if let Some(identity) = identity
-                && targets.contains(&identity) != identity_insert
-            {
-                return Err(if identity_insert {
-                    identity_value_missing(&insert.table.name)
-                } else {
-                    identity_insert_off(&insert.table.name)
-                });
-            }
-            targets
-        }
-        None if identity_insert => {
-            return Err(match insert.source {
-                InsertSource::Values(_) | InsertSource::Query(_) => {
-                    identity_needs_column_list(&insert.table.name)
-                }
-                InsertSource::DefaultValues => identity_value_missing(&insert.table.name),
-            });
-        }
-        None => (0..table.columns.len())
-            .filter(|&index| Some(index) != identity)
-            .collect(),
-    };
+    let targets = insert_targets(&table, insert, dialect)?;
     let returning = returning(&insert.returning, scope)?;
     let empty_row: Vec<Vec<InsertValue>> = vec![Vec::new()];
     let rows = match &insert.source {
         InsertSource::Values(rows) => rows,
         InsertSource::Query(_) | InsertSource::DefaultValues => &empty_row,
     };
-    if let Some(first) = rows.first() {
-        if rows.iter().any(|row| row.len() != first.len()) {
-            return Err(SqlError::syntax(
-                "VALUES lists must all be the same length",
-                insert.table.name.position,
-            ));
-        }
-        if first.len() > targets.len() {
-            return Err(SqlError::syntax(
-                "INSERT has more expressions than target columns",
-                insert.table.name.position,
-            ));
-        }
-        let listed_values = matches!(insert.source, InsertSource::Values(_));
-        if (insert.columns.is_some() || sqlserver && listed_values) && first.len() < targets.len() {
-            return Err(SqlError::syntax(
-                "INSERT has more target columns than expressions",
-                insert.table.name.position,
-            ));
-        }
-    }
     if let InsertSource::Values(rows) = &insert.source {
         for value in rows.iter().flatten() {
             if let InsertValue::Expr(expr) = value {
@@ -1547,7 +1605,7 @@ fn generated_always_detail(name: &str) -> String {
     format!("Column \"{name}\" is an identity column defined as GENERATED ALWAYS.")
 }
 
-fn check_updated_to_default(
+pub(crate) fn check_updated_to_default(
     table: &TableDefinition,
     targets: &[usize],
     assignments: &[(Name, InsertValue)],
@@ -2089,7 +2147,7 @@ impl<'a> StoredRows<'a> {
             return Ok(None);
         }
         for &index in &table.primary_key {
-            encode_key_value(&mut self.key, &row[index]);
+            encode_column_key(&mut self.key, &row[index], table.columns[index].sql_type);
         }
         let inserted = if table.indexes.is_empty() {
             writer.put_if_absent(&self.key, &self.encoded)?
@@ -2379,6 +2437,28 @@ pub(crate) fn project_rows(
     Ok((projection.columns, projected))
 }
 
+pub(crate) fn returned_rows(
+    items: &Option<Vec<SelectItem>>,
+    scope: Scope<'_>,
+    rows: &[Vec<Value>],
+) -> SqlResult<Option<ReturnedRows>> {
+    let Some(projection) = returning(items, scope)? else {
+        return Ok(None);
+    };
+    let mut projected = Vec::with_capacity(rows.len());
+    for row in rows {
+        projected.push(projection.project(row)?);
+    }
+    Ok(Some((projection.columns, projected)))
+}
+
+pub(crate) fn returned_columns(
+    items: &Option<Vec<SelectItem>>,
+    scope: Scope<'_>,
+) -> SqlResult<Option<Vec<OutputColumn>>> {
+    Ok(returning(items, scope)?.map(|projection| projection.columns))
+}
+
 fn returning<'a>(
     items: &'a Option<Vec<SelectItem>>,
     scope: Scope<'a>,
@@ -2635,13 +2715,16 @@ fn point_key(table: &TableDefinition, scope: Scope<'_>, filter: &Expr) -> Option
     let mut key = rows_prefix(table.id);
     for &index in &table.primary_key {
         let column = &table.columns[index];
+        if !crate::plan::key_lookup_matches_comparison(column.sql_type) {
+            return None;
+        }
         let found = key_equality(filter, scope, index)?;
         let original = constants.eval(found, Some(column.sql_type)).ok()?;
         let converted = convert(original.clone(), column.sql_type, Conversion::Assignment).ok()?;
         if converted.is_null() || compare_values(&converted, &original) != Ordering::Equal {
             return None;
         }
-        encode_key_value(&mut key, &converted);
+        encode_column_key(&mut key, &converted, column.sql_type);
     }
     Some(key)
 }
@@ -2906,7 +2989,7 @@ fn percent_of(total: usize, percent: f64) -> usize {
     }
 }
 
-fn fetch_percent(expr: &Expr) -> SqlResult<f64> {
+fn percent_value(expr: &Expr) -> SqlResult<Option<f64>> {
     let constants = Evaluator {
         scope: Scope::empty(),
         row: &[],
@@ -2914,7 +2997,31 @@ fn fetch_percent(expr: &Expr) -> SqlResult<f64> {
     };
     reject_aggregates(expr, "FETCH")?;
     let value = constants.eval(expr, None)?;
-    Ok(crate::oracle_functions::decimal_of(&value)?.map_or(0.0, |percent| percent.to_f64()))
+    Ok(crate::oracle_functions::decimal_of(&value)?.map(|percent| percent.to_f64()))
+}
+
+fn fetch_percent(expr: &Expr) -> SqlResult<f64> {
+    Ok(percent_value(expr)?.unwrap_or(0.0))
+}
+
+fn top_percent(expr: &Expr) -> SqlResult<f64> {
+    let Some(percent) = percent_value(expr)? else {
+        return Err(SqlError::new(
+            SqlState::INVALID_ROW_COUNT_IN_LIMIT_CLAUSE,
+            "TOP clause contains an invalid value.",
+        )
+        .with_sqlserver_code(1006)
+        .at(expr.position));
+    };
+    if (0.0..=100.0).contains(&percent) {
+        return Ok(percent);
+    }
+    Err(SqlError::new(
+        SqlState::INVALID_ROW_COUNT_IN_LIMIT_CLAUSE,
+        "Percent values must be between 0 and 100.",
+    )
+    .with_sqlserver_code(1031)
+    .at(expr.position))
 }
 
 pub(crate) fn row_limit(expr: Option<&Expr>) -> SqlResult<RowLimit> {
@@ -2942,6 +3049,13 @@ pub(crate) fn row_limit(expr: Option<&Expr>) -> SqlResult<RowLimit> {
                     count: None,
                     percent: Some(fetch_percent(count)?),
                     with_ties: *name == "oracle_fetch_percent_with_ties",
+                });
+            }
+            "sqlserver_top_percent" | "sqlserver_top_percent_with_ties" => {
+                return Ok(RowLimit {
+                    count: None,
+                    percent: Some(top_percent(count)?),
+                    with_ties: *name == "sqlserver_top_percent_with_ties",
                 });
             }
             _ => {}
@@ -3034,6 +3148,141 @@ fn sort_keys<'e>(
         keys.push(key);
     }
     Ok(keys)
+}
+
+fn distinct_on_keys<'e>(
+    select: &'e Select,
+    sort_keys: &[SortKey<'_>],
+    projection: &Projection<'_>,
+    scope: Scope<'_>,
+    grouped: Option<&[Option<Expr>]>,
+) -> SqlResult<Vec<SortKey<'e>>> {
+    let keys = select
+        .distinct_on
+        .iter()
+        .enumerate()
+        .map(|(index, expr)| {
+            let rewritten = grouped.map(|rewritten| rewritten.get(index).and_then(Option::as_ref));
+            distinct_on_key(expr, projection, scope, rewritten)
+        })
+        .collect::<SqlResult<Vec<_>>>()?;
+    let leading = sort_keys.len().min(keys.len());
+    let matches_order = sort_keys[..leading].iter().all(|ordered| {
+        keys.iter()
+            .any(|key| same_sort_key(key, ordered, projection, scope))
+    });
+    if !matches_order {
+        return Err(SqlError::new(
+            SqlState::INVALID_COLUMN_REFERENCE,
+            "SELECT DISTINCT ON expressions must match initial ORDER BY expressions",
+        )
+        .at(select.distinct_on.first().map_or(0, |expr| expr.position)));
+    }
+    Ok(keys)
+}
+
+fn distinct_on_key<'e>(
+    expr: &'e Expr,
+    projection: &Projection<'_>,
+    scope: Scope<'_>,
+    grouped: Option<Option<&Expr>>,
+) -> SqlResult<SortKey<'e>> {
+    match &expr.kind {
+        ExprKind::Literal(crate::ast::Literal::Integer(position))
+            if i32::try_from(*position).is_err() =>
+        {
+            Err(non_integer_distinct_on_constant(expr.position))
+        }
+        ExprKind::Literal(
+            crate::ast::Literal::String(_)
+            | crate::ast::Literal::Decimal(_)
+            | crate::ast::Literal::Boolean(_),
+        ) => Err(non_integer_distinct_on_constant(expr.position)),
+        ExprKind::Literal(crate::ast::Literal::Integer(position)) => usize::try_from(*position)
+            .ok()
+            .filter(|&index| index >= 1 && index <= projection.columns.len())
+            .map(|index| SortKey::Output(index - 1))
+            .ok_or_else(|| {
+                SqlError::new(
+                    SqlState::INVALID_COLUMN_REFERENCE,
+                    format!("DISTINCT ON position {position} is not in select list"),
+                )
+                .at(expr.position)
+            }),
+        ExprKind::Column {
+            qualifier: None,
+            name,
+        } if projection.columns.iter().any(|column| &column.name == name) => Ok(SortKey::Output(
+            projection.output_named(name, expr.position)?,
+        )),
+        _ => match grouped {
+            Some(rewritten) => projection
+                .output_of(rewritten.unwrap_or(expr))
+                .map(SortKey::Output)
+                .ok_or_else(|| {
+                    SqlError::not_supported(
+                        "DISTINCT ON an expression outside the select list of a grouped query",
+                    )
+                    .with_hint(
+                        "Add the expression to the select list, or name its output column or \
+                         position in DISTINCT ON.",
+                    )
+                    .at(expr.position)
+                }),
+            None => {
+                check_columns(expr, scope)?;
+                Ok(SortKey::Expr(expr))
+            }
+        },
+    }
+}
+
+fn non_integer_distinct_on_constant(position: usize) -> SqlError {
+    SqlError::syntax("non-integer constant in DISTINCT ON", position)
+}
+
+fn source_column(expr: &Expr, scope: Scope<'_>) -> Option<usize> {
+    match &expr.kind {
+        ExprKind::Column { qualifier, name } => {
+            scope.column(qualifier.as_deref(), name, expr.position).ok()
+        }
+        _ => None,
+    }
+}
+
+fn same_sort_key(
+    left: &SortKey<'_>,
+    right: &SortKey<'_>,
+    projection: &Projection<'_>,
+    scope: Scope<'_>,
+) -> bool {
+    let output = |key: &SortKey<'_>| match key {
+        SortKey::Output(index) => Some(*index),
+        SortKey::Expr(expr) => projection.output_of(expr),
+    };
+    match (output(left), output(right), left, right) {
+        (Some(left), Some(right), _, _) => left == right,
+        (None, None, SortKey::Expr(left), SortKey::Expr(right)) => {
+            match (source_column(left, scope), source_column(right, scope)) {
+                (Some(left), Some(right)) => left == right,
+                _ => shape_of(left) == shape_of(right),
+            }
+        }
+        _ => false,
+    }
+}
+
+fn distinct_on_values(
+    keys: &[SortKey<'_>],
+    evaluator: &Evaluator<'_>,
+    output: &[Value],
+) -> SqlResult<Vec<Value>> {
+    keys.iter()
+        .map(|key| match key {
+            SortKey::Output(index) => Ok(output.get(*index).cloned().unwrap_or(Value::Null)),
+            SortKey::Expr(expr) => evaluator.eval(expr, None),
+        })
+        .collect()
 }
 
 pub(crate) fn returning_columns(
@@ -3200,6 +3449,14 @@ pub(crate) fn explain(
             select_or_explain(reader, tables, query, false, Some(&mut out), None)?;
             return Ok(out);
         }
+        crate::ast::Statement::Update(update) if update.from.is_some() => {
+            return Err(SqlError::not_supported("EXPLAIN of UPDATE ... FROM"));
+        }
+        crate::ast::Statement::Delete(delete) if delete.using.is_some() => {
+            return Err(SqlError::not_supported(
+                "EXPLAIN of DELETE that joins other tables",
+            ));
+        }
         crate::ast::Statement::Update(update) => (&update.table, update.filter.as_ref()),
         crate::ast::Statement::Delete(delete) => (&delete.table, delete.filter.as_ref()),
         _ => {
@@ -3307,6 +3564,15 @@ fn select_or_explain(
         post_scope,
         select.distinct,
     )?;
+    let distinct_on = distinct_on_keys(
+        select,
+        &sort_keys,
+        &projection,
+        post_scope,
+        grouping
+            .as_ref()
+            .map(|grouping| grouping.distinct_on.as_slice()),
+    )?;
     if columns_only {
         return Ok(QueryResult::rows(
             "SELECT 0".to_owned(),
@@ -3366,6 +3632,7 @@ fn select_or_explain(
         limit,
         distinct: select.distinct,
     };
+    let meter = crate::step_times::claim();
     let mut memory = WorkMemory::new();
     let bound_filter = match (&joined, &select.filter) {
         (Some(_), Some(filter)) => Some(aggregate::bind(filter, scope)?),
@@ -3413,6 +3680,7 @@ fn select_or_explain(
         },
         late,
         correlation,
+        meter: meter.as_ref(),
     };
     if let Some(count) = select.source_row_limit {
         let wanted = usize::try_from(count).unwrap_or(usize::MAX);
@@ -3424,6 +3692,7 @@ fn select_or_explain(
             filter: None,
             late: None,
             correlation,
+            meter: None,
         };
     }
     if let Some(grouping) = &grouping {
@@ -3440,20 +3709,27 @@ fn select_or_explain(
             filter: None,
             late: None,
             correlation,
+            meter: None,
         };
     }
     let output = if sort_keys.is_empty() || (ordered && !limit.with_ties) {
-        unsorted_rows(&mut source, &projection, window, &mut memory)?
+        unsorted_rows(&mut source, &projection, window, &distinct_on, &mut memory)?
     } else {
         sorted_rows(
             &mut source,
             &select.order_by,
             &projection,
-            &sort_keys,
+            SortedKeys {
+                sort: &sort_keys,
+                distinct_on: &distinct_on,
+            },
             window,
             &mut memory,
         )?
     };
+    if let Some(meter) = &meter {
+        meter.finish(output.len(), window.skip);
+    }
     let tag = format!("SELECT {}", output.len());
     Ok(QueryResult::rows(tag, projection.columns, output))
 }
@@ -3538,6 +3814,7 @@ struct SourceRows<'a> {
     filter: Option<&'a Expr>,
     late: Option<&'a Expr>,
     correlation: Option<&'a Correlation<'a>>,
+    meter: Option<&'a crate::step_times::SelectMeter>,
 }
 
 impl SourceRows<'_> {
@@ -3546,6 +3823,14 @@ impl SourceRows<'_> {
     }
 
     fn for_each(&mut self, visit: &mut dyn FnMut(Vec<Value>) -> SqlResult<bool>) -> SqlResult<()> {
+        if let Some(meter) = self.meter.take() {
+            let read = self.for_each(&mut |row| {
+                meter.source_row();
+                visit(row)
+            });
+            meter.source_read();
+            return read;
+        }
         let Some(late) = self.late else {
             return self.for_each_early(visit);
         };
@@ -3600,18 +3885,61 @@ impl SourceRows<'_> {
     }
 }
 
+fn late_matches(
+    scope: Scope<'_>,
+    correlation: Option<&Correlation<'_>>,
+    late: Option<&Expr>,
+    row: &[Value],
+) -> SqlResult<bool> {
+    let Some(late) = late else {
+        return Ok(true);
+    };
+    let evaluator = Evaluator {
+        scope,
+        row,
+        correlation,
+    };
+    Ok(evaluator.boolean(late, "WHERE")? == Some(true))
+}
+
 impl SourceRows<'_> {
+    fn yields_borrowed_rows(&self) -> bool {
+        matches!(self.rows, RowSource::Joined(_))
+    }
+
+    fn for_each_row(
+        &mut self,
+        visit: &mut dyn FnMut(Cow<'_, [Value]>) -> SqlResult<bool>,
+    ) -> SqlResult<()> {
+        if self.yields_borrowed_rows() {
+            self.for_each_borrowed(&mut |row| visit(Cow::Borrowed(row)))
+        } else {
+            self.for_each(&mut |row| visit(Cow::Owned(row)))
+        }
+    }
+
     fn for_each_borrowed(
         &mut self,
         visit: &mut dyn FnMut(&[Value]) -> SqlResult<bool>,
     ) -> SqlResult<()> {
-        if self.late.is_some() {
+        if let Some(meter) = self.meter.take() {
+            let read = self.for_each_borrowed(&mut |row: &[Value]| {
+                meter.source_row();
+                visit(row)
+            });
+            meter.source_read();
+            return read;
+        }
+        if self.late.is_some() && !self.yields_borrowed_rows() {
             return self.for_each(&mut |row| visit(&row));
         }
         let (reader, scope, filter) = (self.reader, self.scope, self.filter);
+        let (late, correlation) = (self.late, self.correlation);
         match &mut self.rows {
             RowSource::Joined(joined) => joined.for_each(&mut |row| {
-                if filter_matches(scope, filter, row)? {
+                if filter_matches(scope, filter, row)?
+                    && late_matches(scope, correlation, late, row)?
+                {
                     visit(row)
                 } else {
                     Ok(true)
@@ -3661,6 +3989,7 @@ fn unsorted_rows(
     source: &mut SourceRows<'_>,
     projection: &Projection<'_>,
     window: Window,
+    distinct_on: &[SortKey<'_>],
     memory: &mut WorkMemory,
 ) -> SqlResult<Vec<Vec<Value>>> {
     let mut output = Vec::new();
@@ -3668,10 +3997,30 @@ fn unsorted_rows(
     if take == 0 && source.has_rows_to_read() {
         return Ok(output);
     }
+    let scope = source.scope;
+    let correlation = source.correlation;
     let mut skipped = 0;
     let mut seen = window.distinct.then(HashSet::new);
-    source.for_each(&mut |row| {
-        let projected = projection.project_owned(row)?;
+    let mut seen_on = HashSet::new();
+    source.for_each_row(&mut |row| {
+        let projected = if distinct_on.is_empty() {
+            match row {
+                Cow::Owned(row) => projection.project_owned(row)?,
+                Cow::Borrowed(row) => projection.project(row)?,
+            }
+        } else {
+            let projected = projection.project(&row)?;
+            let evaluator = Evaluator {
+                scope,
+                row: &row,
+                correlation,
+            };
+            let key = distinct_on_values(distinct_on, &evaluator, &projected)?;
+            if !first_time_seen(&mut seen_on, &key, memory)? {
+                return Ok(true);
+            }
+            projected
+        };
         if let Some(seen) = &mut seen
             && !first_time_seen(seen, &projected, memory)?
         {
@@ -3693,19 +4042,42 @@ fn unsorted_rows(
     Ok(output)
 }
 
+#[derive(Clone, Copy)]
+struct SortedKeys<'k, 'e> {
+    sort: &'k [SortKey<'e>],
+    distinct_on: &'k [SortKey<'e>],
+}
+
+fn first_of_each_distinct_on(
+    rows: Vec<(Vec<Value>, Vec<Value>)>,
+    sort_key_count: usize,
+    memory: &mut WorkMemory,
+) -> SqlResult<Vec<(Vec<Value>, Vec<Value>)>> {
+    let mut seen = HashSet::new();
+    let mut kept = Vec::new();
+    for (mut keys, output) in rows {
+        let distinct_on = keys.split_off(sort_key_count.min(keys.len()));
+        if first_time_seen(&mut seen, &distinct_on, memory)? {
+            kept.push((keys, output));
+        }
+    }
+    Ok(kept)
+}
+
 fn sorted_rows(
     source: &mut SourceRows<'_>,
     order_by: &[OrderItem],
     projection: &Projection<'_>,
-    sort_keys: &[SortKey<'_>],
+    keys_of: SortedKeys<'_, '_>,
     window: Window,
     memory: &mut WorkMemory,
 ) -> SqlResult<Vec<Vec<Value>>> {
+    let sort_keys = keys_of.sort;
     let scope = source.scope;
     let correlation = source.correlation;
     let mut rows = Vec::new();
     let mut seen = window.distinct.then(HashSet::new);
-    source.for_each(&mut |row| {
+    source.for_each_row(&mut |row| {
         let output = projection.project(&row)?;
         if let Some(seen) = &mut seen
             && !first_time_seen(seen, &output, memory)?
@@ -3730,6 +4102,10 @@ fn sorted_rows(
             bytes.add(&value)?;
             keys.push(value);
         }
+        for value in distinct_on_values(keys_of.distinct_on, &evaluator, &output)? {
+            bytes.add(&value)?;
+            keys.push(value);
+        }
         memory.charge_row(&output)?;
         memory.charge_row(&keys)?;
         rows.push((keys, output));
@@ -3737,6 +4113,9 @@ fn sorted_rows(
     })?;
     check_sortable(order_by, &rows)?;
     rows.sort_by(|(left, _), (right, _)| compare_sort_keys(order_by, left, right));
+    if !keys_of.distinct_on.is_empty() {
+        rows = first_of_each_distinct_on(rows, sort_keys.len(), memory)?;
+    }
     let take = window.limit.rows_to_take(rows.len());
     let tied = |left: &Vec<Value>, right: &Vec<Value>| {
         compare_sort_keys(order_by, left, right) == Ordering::Equal
@@ -3837,6 +4216,9 @@ fn update_rows(
     tables: &mut TableCache,
     update: &Update,
 ) -> SqlResult<QueryResult> {
+    if let Some(joined) = &update.from {
+        return crate::joined_dml::update(writer, tables, update, joined);
+    }
     if crate::updatable_views::is_view(writer, tables, &update.table)? {
         if let Some(result) = crate::triggers::update_instead_of_view(writer, tables, update)? {
             return Ok(result);
@@ -4004,6 +4386,7 @@ fn update_rows(
 }
 
 pub(crate) type RowUpdate = (Vec<u8>, Vec<u8>, Vec<Value>);
+pub(crate) type ReturnedRows = (Vec<OutputColumn>, Vec<Vec<Value>>);
 
 struct Upsert<'u> {
     updates: &'u [(usize, Expr)],
@@ -4150,6 +4533,7 @@ pub(crate) fn truncate(
         table: table.clone(),
         filter: None,
         returning: None,
+        using: None,
     };
     delete_matching(writer, tables, &every_row, false)?;
     if let Some(firing) = firing {
@@ -4163,6 +4547,9 @@ pub(crate) fn delete(
     tables: &mut TableCache,
     delete: &Delete,
 ) -> SqlResult<QueryResult> {
+    if let Some(joined) = &delete.using {
+        return crate::joined_dml::delete(writer, tables, delete, joined);
+    }
     delete_matching(writer, tables, delete, true)
 }
 

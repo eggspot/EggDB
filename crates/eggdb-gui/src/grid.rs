@@ -7,6 +7,9 @@ use crate::highlight::is_keyword;
 
 const MIN_COLUMN: f32 = 48.0;
 const MAX_COLUMN: f32 = 480.0;
+const MAX_DRAGGED_COLUMN: f32 = 960.0;
+const RESIZE_STEP: f32 = 8.0;
+const RESIZE_BIG_STEP: f32 = 32.0;
 const SAMPLED_ROWS: usize = 200;
 const CELL_PADDING: f32 = 12.0;
 const BLOB_BYTES_SHOWN: usize = 16;
@@ -18,6 +21,13 @@ pub const HEADER_HEIGHT: f32 = 28.0;
 pub const ROW_HEIGHT: f32 = 24.0;
 /// The width of the row-number gutter.
 pub const GUTTER_WIDTH: f32 = 48.0;
+/// The advance of one character of the grid's monospace text, which sizes columns.
+pub const CHARACTER_ADVANCE: f32 = 8.0;
+
+/// The width `text` takes at [`CHARACTER_ADVANCE`] a character.
+pub fn measured(text: &str) -> f32 {
+    text.chars().count() as f32 * CHARACTER_ADVANCE
+}
 
 /// Each column's width (`docs/ux/gui.md`, "Grid"): the wider of its header and its first 200
 /// cells, measured by `width`, plus padding on both sides, between 48 and 480 pixels.
@@ -87,12 +97,29 @@ pub enum ValueKind {
     Vector,
     /// A key's time to live, right-aligned.
     Ttl,
+    /// A key-value key or value spelled as text (`docs/ux/ui.md`), drawn as it is and an
+    /// empty one as `(empty)`.
+    SpelledBytes,
 }
 
 impl ValueKind {
     /// Whether its cells align right.
     pub fn right_aligned(self) -> bool {
         matches!(self, Self::Number | Self::Ttl)
+    }
+
+    /// The kind's name as the full-value view's header gives it: `text`, `number`, `binary`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Number => "number",
+            Self::Text => "text",
+            Self::Boolean => "boolean",
+            Self::Json => "json",
+            Self::Blob => "binary",
+            Self::Vector => "vector",
+            Self::Ttl => "ttl",
+            Self::SpelledBytes => "bytes",
+        }
     }
 }
 
@@ -170,6 +197,8 @@ pub fn cell_text(value: Option<&str>, kind: ValueKind) -> (String, CellLook) {
         ValueKind::Blob => (blob_text(text), CellLook::Secondary),
         ValueKind::Vector => (vector_text(text), CellLook::Secondary),
         ValueKind::Ttl => (ttl_text(text), CellLook::Primary),
+        ValueKind::SpelledBytes if text.is_empty() => ("(empty)".to_owned(), CellLook::Null),
+        ValueKind::SpelledBytes => (printable(text), CellLook::Primary),
         ValueKind::Number | ValueKind::Text | ValueKind::Boolean | ValueKind::Json => {
             (printable(text), CellLook::Primary)
         }
@@ -198,6 +227,10 @@ pub enum GridAnswer {
     LeaveBack,
     /// `Enter` or `F2`: open the current cell's full value.
     OpenValue,
+    /// `Shift+F10` or the menu key: open the grid's menu below the current cell.
+    OpenMenu,
+    /// `Alt+Left`, `Alt+Right` or `Alt+Enter`: the current cell's column changed width.
+    Resized,
     /// A copy: the text for the clipboard and the toast that says what was copied.
     Copy {
         /// The copied text.
@@ -235,6 +268,9 @@ pub struct ResultGrid {
     pub source_table: Option<String>,
     /// The tab's dialect, for `Copy as INSERT`'s quoting.
     pub dialect: QueryDialect,
+    /// The key space a keys tab scanned, when the grid shows one (`docs/ux/workspace.md`
+    /// 10.4).
+    pub key_scan: Option<crate::key_scan::KeySpaceScan>,
 }
 
 fn primary(press: &KeyPress) -> bool {
@@ -263,6 +299,14 @@ impl ResultGrid {
     /// Whether the result has more rows than were fetched into the grid.
     pub fn truncated(&self) -> bool {
         self.row_count > self.rows.len()
+    }
+
+    /// The banner's text over a cut result (`docs/ux/workspace.md` 3.7, 10.4).
+    pub fn banner_text(&self) -> String {
+        match &self.key_scan {
+            Some(scan) => scan.banner(self.rows.len()),
+            None => crate::status_line::truncated_banner(self.rows.len(), self.row_count),
+        }
     }
 
     /// The kind of column `column`.
@@ -376,7 +420,20 @@ impl ResultGrid {
         let to = match press.key {
             Key::Tab if shift => return GridAnswer::LeaveBack,
             Key::Tab => return GridAnswer::LeaveForward,
+            Key::Enter if press.modifiers.alt => {
+                self.auto_fit(here.column);
+                return GridAnswer::Resized;
+            }
+            Key::Left | Key::Right if press.modifiers.alt => {
+                let step = if shift { RESIZE_BIG_STEP } else { RESIZE_STEP };
+                let step = if press.key == Key::Left { -step } else { step };
+                let width = self.widths.get(here.column).copied().unwrap_or(MIN_COLUMN);
+                self.set_width(here.column, width + step);
+                return GridAnswer::Resized;
+            }
             Key::Enter | Key::F2 => return GridAnswer::OpenValue,
+            Key::F10 if shift => return GridAnswer::OpenMenu,
+            Key::ContextMenu => return GridAnswer::OpenMenu,
             Key::Escape => {
                 self.anchor = self.current;
                 return GridAnswer::Moved;
@@ -486,6 +543,178 @@ impl ResultGrid {
         out
     }
 
+    /// Sets column `column`'s width, between 48 and 960 pixels (`docs/ux/workspace.md` 9.5);
+    /// returns whether it changed.
+    pub fn set_width(&mut self, column: usize, width: f32) -> bool {
+        let Some(current) = self.widths.get_mut(column) else {
+            return false;
+        };
+        let width = width.round().clamp(MIN_COLUMN, MAX_DRAGGED_COLUMN);
+        let changed = *current != width;
+        *current = width;
+        changed
+    }
+
+    /// The width that fits column `column`: the wider of its header and its first 200
+    /// fetched cells, between 48 and 480 pixels.
+    pub fn fit_width(&self, column: usize) -> f32 {
+        let Some(name) = self.columns.get(column) else {
+            return MIN_COLUMN;
+        };
+        let kind = self.kind(column);
+        let cells: Vec<Vec<String>> = self
+            .rows
+            .iter()
+            .take(SAMPLED_ROWS)
+            .map(|row| vec![cell_text(row.get(column).and_then(|value| value.as_deref()), kind).0])
+            .collect();
+        column_widths(std::slice::from_ref(name), &cells, &measured)
+            .first()
+            .copied()
+            .unwrap_or(MIN_COLUMN)
+    }
+
+    /// Sets column `column` to the width that fits it; returns whether it changed.
+    pub fn auto_fit(&mut self, column: usize) -> bool {
+        let width = self.fit_width(column);
+        self.set_width(column, width)
+    }
+
+    /// Keeps `earlier`'s widths when it had the same column names in the same order, as a
+    /// tab's widths survive a run with the same columns (`docs/ux/workspace.md` 9.5).
+    pub fn keep_widths_of(&mut self, earlier: &ResultGrid) {
+        if earlier.columns == self.columns && earlier.widths.len() == self.widths.len() {
+            self.widths.clone_from(&earlier.widths);
+        }
+    }
+
+    /// Column `column`'s name and width as the status bar shows it while it is resized:
+    /// `name · 240 px`.
+    pub fn width_text(&self, column: usize) -> String {
+        let name = self.columns.get(column).map_or("", String::as_str);
+        let width = self.widths.get(column).copied().unwrap_or(0.0);
+        format!("{name} · {width:.0} px")
+    }
+
+    /// The columns' total width.
+    pub fn content_width(&self) -> f32 {
+        self.widths.iter().sum()
+    }
+
+    fn fetched_selection(&self) -> (Range<usize>, Range<usize>) {
+        let (rows, columns) = self.selection();
+        let rows = rows.start.min(self.rows.len())..rows.end.min(self.rows.len());
+        let columns = columns.start.min(self.columns.len())..columns.end.min(self.columns.len());
+        (rows, columns)
+    }
+
+    /// The selection as RFC 4180 CSV (`docs/ux/workspace.md` 9.4): a header row of the
+    /// selected columns' names, fields joined by `,` and records by `\r\n` with no trailing
+    /// one, a field holding `,`, `"`, `\r` or `\n` quoted with `"` doubled, NULL empty and a
+    /// blob as `0x` and its full hex.
+    pub fn csv(&self) -> String {
+        let (rows, columns) = self.fetched_selection();
+        let mut records = Vec::with_capacity(rows.len() + 1);
+        let header: Vec<String> = columns
+            .clone()
+            .map(|column| csv_field(&self.columns[column]))
+            .collect();
+        records.push(header.join(","));
+        for row in rows {
+            let fields: Vec<String> = columns
+                .clone()
+                .map(|column| match self.value(Cell { row, column }) {
+                    None => String::new(),
+                    Some(text) if self.kind(column) == ValueKind::Blob => {
+                        csv_field(&full_hex(text))
+                    }
+                    Some(text) if self.kind(column) == ValueKind::Json && is_json(text) => {
+                        csv_field(&compact_json(text))
+                    }
+                    Some(text) => csv_field(text),
+                })
+                .collect();
+            records.push(fields.join(","));
+        }
+        records.join("\r\n")
+    }
+
+    /// The selection as a pretty-printed JSON array of one object per selected row
+    /// (`docs/ux/workspace.md` 9.4): keys the column names in column order, a repeated name
+    /// suffixed `_2`, `_3`; numbers and booleans bare, NULL `null`, JSON and vectors embedded,
+    /// everything else a string.
+    pub fn json(&self) -> String {
+        let (rows, columns) = self.fetched_selection();
+        let keys = json_keys(&self.columns[columns.clone()]);
+        let mut objects = Vec::with_capacity(rows.len());
+        for row in rows {
+            let members: Vec<String> = columns
+                .clone()
+                .zip(&keys)
+                .map(|(column, key)| {
+                    let value = json_value(self.value(Cell { row, column }), self.kind(column));
+                    format!("{}:{value}", json_string(key))
+                })
+                .collect();
+            objects.push(format!("{{{}}}", members.join(",")));
+        }
+        pretty_json(&format!("[{}]", objects.join(",")))
+    }
+
+    fn copy_csv(&self) -> GridAnswer {
+        let (rows, columns) = self.fetched_selection();
+        GridAnswer::Copy {
+            text: self.csv(),
+            toast: crate::status_line::copied_csv_text(rows.len() * columns.len()),
+        }
+    }
+
+    fn copy_json(&self) -> GridAnswer {
+        let (rows, _) = self.fetched_selection();
+        GridAnswer::Copy {
+            text: self.json(),
+            toast: crate::status_line::copied_json_text(rows.len()),
+        }
+    }
+
+    /// Does what the grid's menu item `item` says (`docs/ux/workspace.md` 9.4).
+    pub fn menu_item(&mut self, item: GridMenuItem) -> GridAnswer {
+        let primary = |letter: char, shift: bool| KeyPress {
+            key: Key::Character(letter),
+            modifiers: eggdb_platform::window::Modifiers {
+                control: true,
+                shift,
+                ..Default::default()
+            },
+        };
+        let shift_space = KeyPress {
+            key: Key::Space,
+            modifiers: eggdb_platform::window::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        };
+        let control_space = KeyPress {
+            key: Key::Space,
+            modifiers: eggdb_platform::window::Modifiers {
+                control: true,
+                ..Default::default()
+            },
+        };
+        let press = match item {
+            GridMenuItem::CopyAsCsv => return self.copy_csv(),
+            GridMenuItem::CopyAsJson => return self.copy_json(),
+            GridMenuItem::OpenValue => return GridAnswer::OpenValue,
+            GridMenuItem::Copy => primary('c', false),
+            GridMenuItem::CopyWithHeader => primary('c', true),
+            GridMenuItem::CopyAsInsert => primary('i', true),
+            GridMenuItem::SelectRow => shift_space,
+            GridMenuItem::SelectColumn => control_space,
+            GridMenuItem::SelectAll => primary('a', false),
+        };
+        self.key(press, 1)
+    }
+
     fn copy_tsv(&self, header: bool) -> GridAnswer {
         let (rows, columns) = self.selection_size();
         let rows = rows.min(self.rows.len().saturating_sub(self.selection().0.start));
@@ -541,6 +770,376 @@ impl ResultGrid {
             toast: crate::status_line::copied_inserts_text(statements),
         }
     }
+}
+
+/// One item of the grid's right-click menu (`docs/ux/workspace.md` 9.4), in its order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridMenuItem {
+    /// `Copy`: the selection as TSV.
+    Copy,
+    /// `Copy with header`: TSV with the column names first.
+    CopyWithHeader,
+    /// `Copy as INSERT`.
+    CopyAsInsert,
+    /// `Copy as CSV`.
+    CopyAsCsv,
+    /// `Copy as JSON`.
+    CopyAsJson,
+    /// `Open value`: the current cell's full-value view.
+    OpenValue,
+    /// `Select row`.
+    SelectRow,
+    /// `Select column`.
+    SelectColumn,
+    /// `Select all`.
+    SelectAll,
+}
+
+impl GridMenuItem {
+    /// Every item, top to bottom.
+    pub const ALL: [Self; 9] = [
+        Self::Copy,
+        Self::CopyWithHeader,
+        Self::CopyAsInsert,
+        Self::CopyAsCsv,
+        Self::CopyAsJson,
+        Self::OpenValue,
+        Self::SelectRow,
+        Self::SelectColumn,
+        Self::SelectAll,
+    ];
+
+    /// The item's label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Copy => "Copy",
+            Self::CopyWithHeader => "Copy with header",
+            Self::CopyAsInsert => "Copy as INSERT",
+            Self::CopyAsCsv => "Copy as CSV",
+            Self::CopyAsJson => "Copy as JSON",
+            Self::OpenValue => "Open value",
+            Self::SelectRow => "Select row",
+            Self::SelectColumn => "Select column",
+            Self::SelectAll => "Select all",
+        }
+    }
+
+    /// The item's shortcut as the menu shows it, with `primary` naming `Ctrl` or `Cmd`.
+    pub fn shortcut(self, primary: &str) -> Option<String> {
+        match self {
+            Self::Copy => Some(format!("{primary}+C")),
+            Self::CopyWithHeader => Some(format!("{primary}+Shift+C")),
+            Self::CopyAsInsert => Some(format!("{primary}+Shift+I")),
+            Self::OpenValue => Some("Enter".to_owned()),
+            Self::SelectRow => Some("Shift+Space".to_owned()),
+            Self::SelectColumn => Some(format!("{primary}+Space")),
+            Self::SelectAll => Some(format!("{primary}+A")),
+            Self::CopyAsCsv | Self::CopyAsJson => None,
+        }
+    }
+
+    /// Whether a separator follows the item, ending its group.
+    pub fn ends_group(self) -> bool {
+        matches!(self, Self::CopyAsJson | Self::OpenValue)
+    }
+}
+
+/// A blob's text as `0x` and its full hex, from PostgreSQL's `\x` form or an `0x` one.
+pub fn full_hex(text: &str) -> String {
+    let hex = text
+        .strip_prefix("\\x")
+        .or_else(|| text.strip_prefix("0x"))
+        .unwrap_or(text);
+    format!("0x{hex}")
+}
+
+fn csv_field(text: &str) -> String {
+    if text.contains([',', '"', '\r', '\n']) {
+        format!("\"{}\"", text.replace('"', "\"\""))
+    } else {
+        text.to_owned()
+    }
+}
+
+fn json_keys(names: &[String]) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::with_capacity(names.len());
+    for name in names {
+        let mut key = name.clone();
+        let mut suffix = 2;
+        while keys.contains(&key) {
+            key = format!("{name}_{suffix}");
+            suffix += 1;
+        }
+        keys.push(key);
+    }
+    keys
+}
+
+/// `text` as a JSON string, quoted and escaped.
+pub fn json_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{0}'..='\u{1f}' => out.push_str(&format!("\\u{:04x}", character as u32)),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn json_value(value: Option<&str>, kind: ValueKind) -> String {
+    let Some(text) = value else {
+        return "null".to_owned();
+    };
+    match kind {
+        ValueKind::Number | ValueKind::Ttl if numeric_literal(text) && is_json(text) => {
+            text.to_owned()
+        }
+        ValueKind::Boolean => {
+            let truth = matches!(text, "t" | "true" | "TRUE" | "1");
+            String::from(if truth { "true" } else { "false" })
+        }
+        ValueKind::Json | ValueKind::Vector if is_json(text) => text.trim().to_owned(),
+        ValueKind::Blob => json_string(&full_hex(text)),
+        _ => json_string(text),
+    }
+}
+
+const JSON_DEPTH_LIMIT: usize = 256;
+
+/// Whether `text` is one JSON value (RFC 8259) with nothing after it, nested at most 256
+/// deep.
+pub fn is_json(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut at = 0;
+    json_element(bytes, &mut at, 0) && {
+        skip_json_space(bytes, &mut at);
+        at == bytes.len()
+    }
+}
+
+fn skip_json_space(bytes: &[u8], at: &mut usize) {
+    while bytes
+        .get(*at)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
+    {
+        *at += 1;
+    }
+}
+
+fn json_element(bytes: &[u8], at: &mut usize, depth: usize) -> bool {
+    if depth > JSON_DEPTH_LIMIT {
+        return false;
+    }
+    skip_json_space(bytes, at);
+    match bytes.get(*at) {
+        Some(b'{') => json_members(bytes, at, depth, b'}', true),
+        Some(b'[') => json_members(bytes, at, depth, b']', false),
+        Some(b'"') => json_string_token(bytes, at),
+        Some(b't') => json_word(bytes, at, b"true"),
+        Some(b'f') => json_word(bytes, at, b"false"),
+        Some(b'n') => json_word(bytes, at, b"null"),
+        Some(b'-' | b'0'..=b'9') => json_number(bytes, at),
+        _ => false,
+    }
+}
+
+fn json_members(bytes: &[u8], at: &mut usize, depth: usize, close: u8, object: bool) -> bool {
+    *at += 1;
+    skip_json_space(bytes, at);
+    if bytes.get(*at) == Some(&close) {
+        *at += 1;
+        return true;
+    }
+    loop {
+        if object {
+            skip_json_space(bytes, at);
+            if !json_string_token(bytes, at) {
+                return false;
+            }
+            skip_json_space(bytes, at);
+            if bytes.get(*at) != Some(&b':') {
+                return false;
+            }
+            *at += 1;
+        }
+        if !json_element(bytes, at, depth + 1) {
+            return false;
+        }
+        skip_json_space(bytes, at);
+        match bytes.get(*at) {
+            Some(b',') => *at += 1,
+            Some(&byte) if byte == close => {
+                *at += 1;
+                return true;
+            }
+            _ => return false,
+        }
+    }
+}
+
+fn json_string_token(bytes: &[u8], at: &mut usize) -> bool {
+    if bytes.get(*at) != Some(&b'"') {
+        return false;
+    }
+    *at += 1;
+    while let Some(&byte) = bytes.get(*at) {
+        *at += 1;
+        match byte {
+            b'"' => return true,
+            b'\\' => match bytes.get(*at) {
+                Some(b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't') => *at += 1,
+                Some(b'u') => {
+                    let digits = bytes.get(*at + 1..*at + 5);
+                    if !digits.is_some_and(|digits| digits.iter().all(u8::is_ascii_hexdigit)) {
+                        return false;
+                    }
+                    *at += 5;
+                }
+                _ => return false,
+            },
+            0..=0x1f => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn json_word(bytes: &[u8], at: &mut usize, word: &[u8]) -> bool {
+    if bytes.get(*at..*at + word.len()) == Some(word) {
+        *at += word.len();
+        true
+    } else {
+        false
+    }
+}
+
+fn json_digits(bytes: &[u8], at: &mut usize) -> usize {
+    let start = *at;
+    while bytes.get(*at).is_some_and(u8::is_ascii_digit) {
+        *at += 1;
+    }
+    *at - start
+}
+
+fn json_number(bytes: &[u8], at: &mut usize) -> bool {
+    if bytes.get(*at) == Some(&b'-') {
+        *at += 1;
+    }
+    match bytes.get(*at) {
+        Some(b'0') => *at += 1,
+        Some(b'1'..=b'9') => {
+            json_digits(bytes, at);
+        }
+        _ => return false,
+    }
+    if bytes.get(*at) == Some(&b'.') {
+        *at += 1;
+        if json_digits(bytes, at) == 0 {
+            return false;
+        }
+    }
+    if matches!(bytes.get(*at), Some(b'e' | b'E')) {
+        *at += 1;
+        if matches!(bytes.get(*at), Some(b'+' | b'-')) {
+            *at += 1;
+        }
+        if json_digits(bytes, at) == 0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// `text`, which [`is_json`] accepts, without the white space between its tokens.
+pub fn compact_json(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for character in text.chars() {
+        if in_string {
+            out.push(character);
+            match character {
+                '\\' if !escaped => escaped = true,
+                '"' if !escaped => in_string = false,
+                _ => escaped = false,
+            }
+            continue;
+        }
+        match character {
+            ' ' | '\t' | '\n' | '\r' => {}
+            '"' => {
+                in_string = true;
+                out.push('"');
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// `text` pretty-printed with a 2-space indent (`docs/ux/workspace.md` 9.3): a line per
+/// member and element, `": "` after keys, empty objects and arrays kept as `{}` and `[]`,
+/// strings untouched and keys in their stored order. Text that is not JSON (a PostgreSQL
+/// array such as `{1,2}`) is laid out by the same brackets and commas.
+pub fn pretty_json(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() * 2);
+    let mut depth: usize = 0;
+    let mut characters = text.chars().peekable();
+    let newline = |out: &mut String, depth: usize| {
+        out.push('\n');
+        for _ in 0..depth {
+            out.push_str("  ");
+        }
+    };
+    while let Some(character) = characters.next() {
+        match character {
+            '"' => {
+                out.push('"');
+                let mut escaped = false;
+                for inner in characters.by_ref() {
+                    out.push(inner);
+                    match inner {
+                        '\\' if !escaped => escaped = true,
+                        '"' if !escaped => break,
+                        _ => escaped = false,
+                    }
+                }
+            }
+            '{' | '[' => {
+                while characters.next_if(|next| next.is_whitespace()).is_some() {}
+                let close = if character == '{' { '}' } else { ']' };
+                if characters.next_if_eq(&close).is_some() {
+                    out.push(character);
+                    out.push(close);
+                } else {
+                    out.push(character);
+                    depth += 1;
+                    newline(&mut out, depth);
+                }
+            }
+            '}' | ']' => {
+                depth = depth.saturating_sub(1);
+                newline(&mut out, depth);
+                out.push(character);
+            }
+            ',' => {
+                out.push(',');
+                newline(&mut out, depth);
+            }
+            ':' => out.push_str(": "),
+            ' ' | '\t' | '\n' | '\r' => {}
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 fn tsv_field(text: &str) -> String {
@@ -934,5 +1533,170 @@ mod tests {
         grid.scroll_by(0, -1, 13);
         assert_eq!(grid.scroll_x, 80.0);
         assert_eq!(grid.current, Cell { row: 2, column: 1 });
+    }
+
+    #[test]
+    fn copy_as_csv_quotes_what_needs_it_and_leaves_null_empty() {
+        let mut grid = customers();
+        grid.rows[1][1] = Some("Grace, \"Amazing\"".into());
+        grid.anchor = Cell { row: 0, column: 0 };
+        grid.current = Cell { row: 1, column: 2 };
+        assert_eq!(
+            grid.csv(),
+            "id,name,note\r\n1,Ada,\r\n2,\"Grace, \"\"Amazing\"\"\",O'Hara"
+        );
+        let GridAnswer::Copy { toast, .. } = grid.menu_item(GridMenuItem::CopyAsCsv) else {
+            panic!("Copy as CSV copies");
+        };
+        assert_eq!(toast, "Copied 6 cells as CSV");
+    }
+
+    #[test]
+    fn copy_as_csv_gives_json_cells_their_compact_text() {
+        let grid = ResultGrid {
+            anchor: Cell { row: 0, column: 0 },
+            current: Cell { row: 1, column: 0 },
+            ..ResultGrid::new(
+                vec!["doc".into()],
+                vec![ValueKind::Json],
+                vec![
+                    vec![Some(
+                        "{\n  \"k\": [1, 2],\n  \"s\": \"a b\\\" c\"\n}".into(),
+                    )],
+                    vec![Some("{1,2}".into())],
+                ],
+                2,
+                vec![60.0],
+            )
+        };
+        assert_eq!(
+            grid.csv(),
+            "doc\r\n\"{\"\"k\"\":[1,2],\"\"s\"\":\"\"a b\\\"\" c\"\"}\"\r\n\"{1,2}\""
+        );
+    }
+
+    #[test]
+    fn copy_as_json_quotes_number_text_that_json_does_not_allow() {
+        let rows = [".5", "-.5", "5.", "007", "-0.5", "1e3", "12"]
+            .into_iter()
+            .map(|text| vec![Some(text.to_owned())])
+            .collect();
+        let grid = ResultGrid {
+            anchor: Cell { row: 0, column: 0 },
+            current: Cell { row: 6, column: 0 },
+            ..ResultGrid::new(
+                vec!["n".into()],
+                vec![ValueKind::Number],
+                rows,
+                7,
+                vec![60.0],
+            )
+        };
+        let json = grid.json();
+        assert!(is_json(&json), "{json}");
+        for quoted in ["\".5\"", "\"-.5\"", "\"5.\"", "\"007\""] {
+            assert!(json.contains(&format!("\"n\": {quoted}")), "{json}");
+        }
+        for bare in ["-0.5", "1e3", "12"] {
+            assert!(json.contains(&format!("\"n\": {bare}\n")), "{json}");
+        }
+    }
+
+    #[test]
+    fn copy_as_json_embeds_numbers_json_and_null_and_suffixes_repeated_names() {
+        let grid = ResultGrid {
+            anchor: Cell { row: 0, column: 0 },
+            current: Cell { row: 1, column: 4 },
+            ..ResultGrid::new(
+                vec![
+                    "id".into(),
+                    "id".into(),
+                    "ok".into(),
+                    "doc".into(),
+                    "data".into(),
+                ],
+                vec![
+                    ValueKind::Number,
+                    ValueKind::Text,
+                    ValueKind::Boolean,
+                    ValueKind::Json,
+                    ValueKind::Blob,
+                ],
+                vec![
+                    vec![
+                        Some("1".into()),
+                        Some("a\"b".into()),
+                        Some("t".into()),
+                        Some("{\"k\": [1, 2]}".into()),
+                        Some("\\x0aff".into()),
+                    ],
+                    vec![
+                        Some("NaN".into()),
+                        None,
+                        Some("f".into()),
+                        Some("{1,2}".into()),
+                        None,
+                    ],
+                ],
+                2,
+                vec![60.0; 5],
+            )
+        };
+        assert_eq!(
+            grid.json(),
+            "[\n  {\n    \"id\": 1,\n    \"id_2\": \"a\\\"b\",\n    \"ok\": true,\n    \"doc\": {\n      \"k\": [\n        1,\n        2\n      ]\n    },\n    \"data\": \"0x0aff\"\n  },\n  {\n    \"id\": \"NaN\",\n    \"id_2\": null,\n    \"ok\": false,\n    \"doc\": \"{1,2}\",\n    \"data\": null\n  }\n]"
+        );
+        assert!(is_json("{\"a\": [1, -2.5e3, true, null, \"\\u00e9\"]}"));
+        assert!(!is_json("{1,2}"));
+        assert!(!is_json("[1,]"));
+        assert!(!is_json(&"[".repeat(10_000)));
+    }
+
+    #[test]
+    fn shift_f10_and_the_menu_key_open_the_menu() {
+        let mut grid = customers();
+        let shift_f10 = press(Key::F10, true, false);
+        assert_eq!(grid.key(shift_f10, 10), GridAnswer::OpenMenu);
+        assert_eq!(
+            grid.key(press(Key::ContextMenu, false, false), 10),
+            GridAnswer::OpenMenu
+        );
+        assert_eq!(
+            grid.key(press(Key::F10, false, false), 10),
+            GridAnswer::Ignored
+        );
+        assert_eq!(
+            grid.menu_item(GridMenuItem::OpenValue),
+            GridAnswer::OpenValue
+        );
+        grid.menu_item(GridMenuItem::SelectAll);
+        assert_eq!(grid.selection(), (0..3, 0..3));
+    }
+
+    #[test]
+    fn widths_stay_within_their_limits_and_survive_a_result_with_the_same_columns() {
+        let mut grid = customers();
+        assert!(grid.set_width(1, 2_000.0));
+        assert_eq!(grid.widths[1], 960.0);
+        grid.set_width(1, 10.0);
+        assert_eq!(grid.widths[1], 48.0);
+        assert!(!grid.set_width(7, 100.0));
+        grid.rows[0][1] = Some("x".repeat(100));
+        assert_eq!(grid.fit_width(1), 480.0);
+        assert_eq!(grid.fit_width(0), 48.0);
+        grid.set_width(2, 300.0);
+        let mut again = customers();
+        again.keep_widths_of(&grid);
+        assert_eq!(again.widths, grid.widths);
+        let mut other = ResultGrid::new(
+            vec!["id".into(), "note".into(), "name".into()],
+            vec![ValueKind::Number; 3],
+            Vec::new(),
+            0,
+            vec![60.0; 3],
+        );
+        other.keep_widths_of(&grid);
+        assert_eq!(other.widths, vec![60.0; 3]);
+        assert_eq!(grid.width_text(2), "note · 300 px");
     }
 }

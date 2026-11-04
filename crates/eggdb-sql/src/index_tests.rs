@@ -534,9 +534,12 @@ fn oracle_indexes_follow_oracle() {
     assert_eq!(used.vendor_code(), Some(955));
     last(&mut session, "DROP INDEX emp_dept_ix");
     assert_eq!(
-        fails(&mut session, "EXPLAIN PLAN FOR SELECT * FROM emp")
-            .state()
-            .code(),
+        fails(
+            &mut session,
+            "EXPLAIN PLAN FOR INSERT INTO emp VALUES (9, NULL, NULL)"
+        )
+        .state()
+        .code(),
         "0A000"
     );
 }

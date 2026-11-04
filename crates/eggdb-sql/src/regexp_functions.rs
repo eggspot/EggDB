@@ -7,7 +7,8 @@ use crate::types::{SqlType, Value};
 
 type Matched = (Vec<char>, Option<Vec<Option<Span>>>);
 
-pub(crate) const FUNCTIONS: [&str; 9] = [
+pub(crate) const FUNCTIONS: [&str; 10] = [
+    "like_escape",
     "regexp_like",
     "regexp_match",
     "regexp_replace",
@@ -198,7 +199,12 @@ pub(crate) fn matches_rows(
     })
 }
 
-fn split_pieces(text: &str, pattern: &str, flags: &str, function: &str) -> SqlResult<Vec<Value>> {
+pub(crate) fn split_pieces(
+    text: &str,
+    pattern: &str,
+    flags: &str,
+    function: &str,
+) -> SqlResult<Vec<Value>> {
     let options = single_match_flags(function, flags, None)?;
     let regex = compiled_with(pattern, options)?;
     let chars = chars_of(text);
@@ -659,6 +665,40 @@ fn similar_to_escape(values: &[Value]) -> Option<SqlResult<Value>> {
     )
 }
 
+pub(crate) fn like_escape_text(pattern: &str, escape: Option<char>) -> SqlResult<String> {
+    if escape == Some('\\') {
+        return Ok(pattern.to_owned());
+    }
+    let mut out = String::with_capacity(pattern.len() + 4);
+    let mut characters = pattern.chars();
+    while let Some(character) = characters.next() {
+        if Some(character) == escape {
+            let Some(escaped) = characters.next() else {
+                return Err(SqlError::new(
+                    SqlState::INVALID_ESCAPE_SEQUENCE,
+                    "LIKE pattern must not end with escape character",
+                ));
+            };
+            out.push('\\');
+            out.push(escaped);
+        } else if character == '\\' {
+            out.push_str("\\\\");
+        } else {
+            out.push(character);
+        }
+    }
+    Ok(out)
+}
+
+fn like_escape(values: &[Value]) -> Option<SqlResult<Value>> {
+    let pattern = values.first()?.character_text()?;
+    Some(
+        escape_character(values.get(1))
+            .and_then(|escape| like_escape_text(pattern, escape))
+            .map(Value::Text),
+    )
+}
+
 fn similar_substring_pattern(values: &[Value]) -> Option<SqlResult<Value>> {
     let pattern = values.first()?.character_text()?;
     Some(
@@ -697,6 +737,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         "regexp_count" => regexp_count(values),
         "regexp_instr" => regexp_instr(values),
         "regexp_substr" => regexp_substr(values),
+        "like_escape" => like_escape(values),
         "similar_to_escape" => similar_to_escape(values),
         "similar_substring_pattern" => similar_substring_pattern(values),
         _ => None,
@@ -862,6 +903,23 @@ mod tests {
                 .code(),
             "22025"
         );
+    }
+
+    #[test]
+    fn like_escape_rewrites_another_escape_character_as_a_backslash() {
+        assert_eq!(like_escape_text("a#_b#%", Some('#')).unwrap(), "a\\_b\\%");
+        assert_eq!(like_escape_text("a\\b##", Some('#')).unwrap(), "a\\\\b\\#");
+        assert_eq!(like_escape_text("a\\_", Some('\\')).unwrap(), "a\\_");
+        assert_eq!(like_escape_text("a\\%", None).unwrap(), "a\\\\%");
+        assert_eq!(
+            like_escape_text("a#", Some('#'))
+                .unwrap_err()
+                .state()
+                .code(),
+            "22025"
+        );
+        assert!(crate::eval::like("a_c", &like_escape_text("a!_c", Some('!')).unwrap()).unwrap());
+        assert!(!crate::eval::like("abc", &like_escape_text("a!_c", Some('!')).unwrap()).unwrap());
     }
 
     #[test]

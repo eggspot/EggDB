@@ -392,10 +392,18 @@ fn a_table_listed_with_columns_shows_only_those_columns() {
         let error = fails(&mut session, sql);
         assert_eq!(error.state().code(), "42703", "{sql}: {error}");
     }
-    for sql in ["SELECT * FROM secret_view", "SELECT * FROM owners"] {
-        let error = fails(&mut session, sql);
-        assert_eq!(error.state().code(), "42P01", "{sql}: {error}");
-    }
+    let through_listed_view = fails(&mut session, "SELECT * FROM secret_view");
+    assert_eq!(
+        through_listed_view.state().code(),
+        "42703",
+        "{through_listed_view}"
+    );
+    assert!(
+        !through_listed_view.message().contains("swordfish"),
+        "{through_listed_view}"
+    );
+    let error = fails(&mut session, "SELECT * FROM owners");
+    assert_eq!(error.state().code(), "42P01", "{error}");
 }
 
 #[test]
@@ -442,7 +450,7 @@ fn column_lists_that_cannot_be_served_are_reported_and_hide_their_table() {
     let tables = VisibleTables::new([
         "secrets(owner,secret)",
         "users(id,nme)",
-        "user_names(name)",
+        "user_names(nme)",
         "notes()",
         "drafts(id)",
     ]);
@@ -451,7 +459,7 @@ fn column_lists_that_cannot_be_served_are_reported_and_hide_their_table() {
         vec![
             "secrets(owner,secret)",
             "users(id,nme)",
-            "user_names(name)",
+            "user_names(nme)",
             "notes()",
             "drafts(id)",
         ]
@@ -472,11 +480,7 @@ fn column_lists_that_cannot_be_served_are_reported_and_hide_their_table() {
                 "leaves out its primary key column \"id\": list it too".to_owned()
             ),
             ("users".to_owned(), "has no column \"nme\"".to_owned()),
-            (
-                "user_names".to_owned(),
-                "is a view: list it without columns, or list the columns of the tables it reads"
-                    .to_owned()
-            ),
+            ("user_names".to_owned(), "has no column \"nme\"".to_owned()),
             ("notes".to_owned(), "has an empty column list".to_owned()),
             (
                 "drafts".to_owned(),

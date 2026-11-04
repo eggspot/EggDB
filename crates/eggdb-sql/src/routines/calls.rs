@@ -1135,8 +1135,7 @@ fn matched(
 }
 
 fn literal_argument(value: &Value, target: SqlType) -> Value {
-    let text =
-        matches!(value, Value::Text(_)) && target != SqlType::Dynamic && !is_polymorphic(target);
+    let text = matches!(value, Value::Text(_)) && !target.is_dynamic() && !is_polymorphic(target);
     if text && convert(value.clone(), target, Conversion::Assignment).is_err() {
         return convert(value.clone(), target, Conversion::Explicit)
             .unwrap_or_else(|_| value.clone());
@@ -1145,7 +1144,7 @@ fn literal_argument(value: &Value, target: SqlType) -> Value {
 }
 
 fn fit(value: &Value, target: SqlType) -> Option<usize> {
-    if target == SqlType::Dynamic || is_polymorphic(target) {
+    if target.is_dynamic() || is_polymorphic(target) {
         return Some(1);
     }
     match value.sql_type() {

@@ -156,6 +156,8 @@ fn single_value_select(expr: Expr) -> Select {
         limit: None,
         offset: None,
         source_row_limit: None,
+        grouping_sets: None,
+        distinct_on: Vec::new(),
     }
 }
 

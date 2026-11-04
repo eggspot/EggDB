@@ -223,6 +223,38 @@ impl ColumnScopes {
         }
         Ok(())
     }
+
+    /// Checks the columns a `NATURAL` join compares, where `right_at` is the joined entry's
+    /// place in the innermost list: every column name both sides have, counting an entry whose
+    /// columns are unknown as having every name.
+    pub(crate) fn check_natural(&self, right_at: usize) -> SqlResult<()> {
+        let Some((right, left)) = self
+            .levels
+            .last()
+            .and_then(|level| level.get(..=right_at))
+            .and_then(<[ScopeItem]>::split_last)
+        else {
+            return Ok(());
+        };
+        let may_have = |item: &ScopeItem, column: &str| item.is_opaque() || item.has_column(column);
+        for item in left {
+            if item
+                .unreadable
+                .iter()
+                .any(|column| may_have(right, column.as_str()))
+            {
+                return Err(permission_denied(&item.relation));
+            }
+        }
+        if right
+            .unreadable
+            .iter()
+            .any(|column| left.iter().any(|item| may_have(item, column.as_str())))
+        {
+            return Err(permission_denied(&right.relation));
+        }
+        Ok(())
+    }
 }
 
 /// The columns of `columns` that `readable` does not allow, in table order.

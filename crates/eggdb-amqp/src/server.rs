@@ -3,12 +3,13 @@ use crate::codec::{
     frame, take_frame,
 };
 use eggdb_keyspace::Keyspace;
+use eggdb_platform::connection_limits::{MemoryBudget, Reservation};
 use eggdb_queues::Queues;
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const PROTOCOL_HEADER: &[u8; 8] = b"AMQP\x00\x00\x09\x01";
@@ -22,13 +23,17 @@ const MOST_BUFFERED_BYTES: usize = 64 << 20;
 const NOT_FOUND: u16 = 404;
 const ACCESS_REFUSED: u16 = 403;
 const PRECONDITION_FAILED: u16 = 406;
+const RESOURCE_ERROR: u16 = 506;
+const OUT_OF_MEMORY_BUDGET: &str =
+    "RESOURCE_ERROR - the server's connections already hold their memory budget";
+const DELIVERY_FRAME_BYTES: usize = 64;
 const FRAME_ERROR: u16 = 501;
 const COMMAND_INVALID: u16 = 503;
 const CHANNEL_ERROR: u16 = 504;
 const NOT_IMPLEMENTED: u16 = 540;
 
 /// How the AMQP server runs.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ServerConfig {
     /// The one user clients log in as with PLAIN.
     pub user: String,
@@ -36,6 +41,9 @@ pub struct ServerConfig {
     pub password_sha256: [u8; 32],
     /// The most connections served at once.
     pub max_connections: usize,
+    /// The memory every connection's unread frames, unfinished message bodies and deliveries
+    /// hold together, shared with the server's other listeners (D284, D307).
+    pub memory_budget: Arc<MemoryBudget>,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -160,7 +168,12 @@ fn now_ms() -> u64 {
         })
 }
 
-fn encode_message(exchange: &str, routing_key: &str, properties: &[u8], body: &[u8]) -> Vec<u8> {
+pub(crate) fn encode_message(
+    exchange: &str,
+    routing_key: &str,
+    properties: &[u8],
+    body: &[u8],
+) -> Vec<u8> {
     let mut out = Out::default();
     out.shortstr(exchange)
         .shortstr(routing_key)
@@ -169,12 +182,35 @@ fn encode_message(exchange: &str, routing_key: &str, properties: &[u8], body: &[
     out.bytes
 }
 
-fn decode_message(stored: &[u8]) -> Parsed<(String, String, Vec<u8>, Vec<u8>)> {
-    let mut args = Args::new(stored);
-    let exchange = args.shortstr()?;
-    let routing_key = args.shortstr()?;
-    let properties = args.longstr()?.to_vec();
-    Ok((exchange, routing_key, properties, args.rest().to_vec()))
+struct StoredMessage<'m> {
+    exchange: String,
+    routing_key: String,
+    properties: &'m [u8],
+    body: &'m [u8],
+}
+
+impl<'m> StoredMessage<'m> {
+    fn framed(stored: &'m [u8]) -> Parsed<Self> {
+        let mut args = Args::new(stored);
+        let exchange = args.shortstr()?;
+        let routing_key = args.shortstr()?;
+        let properties = args.longstr()?;
+        Ok(Self {
+            exchange,
+            routing_key,
+            properties,
+            body: args.rest(),
+        })
+    }
+
+    fn read(queue: &str, stored: &'m [u8]) -> Self {
+        Self::framed(stored).unwrap_or_else(|_| Self {
+            exchange: String::new(),
+            routing_key: queue.to_owned(),
+            properties: &[],
+            body: stored,
+        })
+    }
 }
 
 struct Consumer {
@@ -207,6 +243,8 @@ struct Connection<'s, 'b> {
     stage: Stage,
     channels: BTreeMap<u16, Channel>,
     outgoing: VecDeque<Vec<u8>>,
+    bodies_held: Reservation<'b>,
+    next_consumer: usize,
 }
 
 fn method(out: &Out, channel: u16) -> Vec<u8> {
@@ -214,6 +252,21 @@ fn method(out: &Out, channel: u16) -> Vec<u8> {
 }
 
 impl Connection<'_, '_> {
+    fn declared_body_bytes(&self) -> usize {
+        self.channels
+            .values()
+            .filter_map(|state| state.header.as_ref())
+            .map(|(size, _)| usize::try_from(*size).unwrap_or(usize::MAX))
+            .fold(0, usize::saturating_add)
+    }
+
+    fn release_finished_bodies(&mut self) {
+        let declared = self.declared_body_bytes();
+        if declared < self.bodies_held.bytes() {
+            self.bodies_held.hold_if_large(declared);
+        }
+    }
+
     fn send(&mut self, channel: u16, out: Out) {
         self.outgoing.push_back(method(&out, channel));
     }
@@ -240,82 +293,132 @@ impl Connection<'_, '_> {
         }
     }
 
-    fn deliver_message(&mut self, channel: u16, out: Out, stored: &[u8]) -> Parsed<()> {
-        let (_, _, properties, body) = decode_message(stored)?;
+    fn deliver_message(&mut self, channel: u16, out: Out, message: &StoredMessage<'_>) {
         self.send(channel, out);
         let mut header = Out::default();
-        header.short(60).short(0).longlong(body.len() as u64);
-        header.bytes.extend_from_slice(if properties.is_empty() {
-            &[0, 0]
-        } else {
-            &properties
-        });
+        header
+            .short(60)
+            .short(0)
+            .longlong(message.body.len() as u64);
+        header
+            .bytes
+            .extend_from_slice(if message.properties.is_empty() {
+                &[0, 0]
+            } else {
+                message.properties
+            });
         self.outgoing
             .push_back(frame(FRAME_HEADER, channel, &header.bytes));
-        for chunk in body.chunks((FRAME_MAX - 8) as usize) {
+        for chunk in message.body.chunks((FRAME_MAX - 8) as usize) {
             self.outgoing.push_back(frame(FRAME_BODY, channel, chunk));
         }
-        Ok(())
     }
 
-    fn pump(&mut self) -> Parsed<()> {
-        let channels: Vec<u16> = self.channels.keys().copied().collect();
-        for channel in channels {
-            let consumers: Vec<(String, String, bool)> = match self.channels.get(&channel) {
-                Some(state) => state
-                    .consumers
-                    .iter()
-                    .map(|consumer| {
-                        (
-                            consumer.tag.clone(),
-                            consumer.queue.clone(),
-                            consumer.no_ack,
-                        )
-                    })
-                    .collect(),
-                None => continue,
+    fn pump(&mut self, held: &mut Reservation<'_>) -> bool {
+        let mut consumers: Vec<(u16, String, String, bool)> = self
+            .channels
+            .iter()
+            .flat_map(|(&channel, state)| {
+                state.consumers.iter().map(move |consumer| {
+                    (
+                        channel,
+                        consumer.tag.clone(),
+                        consumer.queue.clone(),
+                        consumer.no_ack,
+                    )
+                })
+            })
+            .collect();
+        if consumers.is_empty() {
+            return true;
+        }
+        let start = self.next_consumer % consumers.len();
+        consumers.rotate_left(start);
+        let mut pumped_bytes = 0usize;
+        for (position, (channel, tag, queue, no_ack)) in consumers.into_iter().enumerate() {
+            let room = match self.channels.get(&channel) {
+                Some(state) if state.prefetch > 0 => {
+                    usize::from(state.prefetch).saturating_sub(state.unacked.len())
+                }
+                Some(_) => 64,
+                None => 0,
             };
-            for (tag, queue, no_ack) in consumers {
-                let room = match self.channels.get(&channel) {
-                    Some(state) if state.prefetch > 0 => {
-                        usize::from(state.prefetch).saturating_sub(state.unacked.len())
-                    }
-                    Some(_) => 64,
-                    None => 0,
-                };
-                if room == 0 {
-                    continue;
-                }
-                let messages = self
-                    .broker
-                    .queues
-                    .receive(&queue, room, LEASE_MS, now_ms())
-                    .map_err(|error| error.to_string())?;
-                for message in messages {
-                    let Some(state) = self.channels.get_mut(&channel) else {
-                        break;
-                    };
-                    state.next_tag += 1;
-                    let delivery_tag = state.next_tag;
-                    if no_ack {
-                        let _ = self.broker.queues.ack(&queue, message.id);
+            if room == 0 {
+                continue;
+            }
+            let mut refused = false;
+            let leased = self.broker.queues.receive_fitting(
+                &queue,
+                room,
+                LEASE_MS,
+                now_ms(),
+                &mut |body_bytes: usize| {
+                    let grown = pumped_bytes
+                        .saturating_add(body_bytes)
+                        .saturating_add(DELIVERY_FRAME_BYTES);
+                    if held.hold_if_large(grown) {
+                        pumped_bytes = grown;
+                        true
                     } else {
-                        state
-                            .unacked
-                            .insert(delivery_tag, (queue.clone(), message.id));
+                        refused = true;
+                        false
                     }
-                    let (exchange, routing_key, _, _) = decode_message(&message.body)?;
-                    let mut out = Out::method(60, 60);
-                    out.shortstr(&tag)
-                        .longlong(delivery_tag)
-                        .octet(u8::from(message.receive_count > 1))
-                        .shortstr(&exchange)
-                        .shortstr(&routing_key);
-                    self.deliver_message(channel, out, &message.body)?;
-                }
+                },
+            );
+            let Ok(messages) = leased else {
+                continue;
+            };
+            if refused && messages.is_empty() && pumped_bytes == 0 {
+                self.close_connection(RESOURCE_ERROR, OUT_OF_MEMORY_BUDGET, 0, 0);
+                return false;
+            }
+            let delivered_any = !messages.is_empty();
+            self.deliver_batch(channel, &tag, &queue, no_ack, messages);
+            if refused {
+                self.next_consumer = start
+                    .saturating_add(position)
+                    .saturating_add(usize::from(delivered_any));
+                return true;
             }
         }
-        Ok(())
+        true
+    }
+
+    fn deliver_batch(
+        &mut self,
+        channel: u16,
+        tag: &str,
+        queue: &str,
+        no_ack: bool,
+        messages: Vec<eggdb_queues::Message>,
+    ) {
+        let mut messages = messages.into_iter();
+        while let Some(message) = messages.next() {
+            let Some(state) = self.channels.get_mut(&channel) else {
+                let now = now_ms();
+                for unsent in std::iter::once(message).chain(messages) {
+                    let _ = self.broker.queues.unlease(queue, unsent.id, now);
+                }
+                return;
+            };
+            state.next_tag += 1;
+            let delivery_tag = state.next_tag;
+            if no_ack {
+                let _ = self.broker.queues.ack(queue, message.id);
+            } else {
+                state
+                    .unacked
+                    .insert(delivery_tag, (queue.to_owned(), message.id));
+            }
+            let stored = StoredMessage::read(queue, &message.body);
+            let mut out = Out::method(60, 60);
+            out.shortstr(tag)
+                .longlong(delivery_tag)
+                .octet(u8::from(message.receive_count > 1))
+                .shortstr(&stored.exchange)
+                .shortstr(&stored.routing_key);
+            self.deliver_message(channel, out, &stored);
+        }
     }
 
     fn acknowledge(&mut self, channel: u16, tag: u64, multiple: bool, outcome: Option<bool>) {
@@ -409,6 +512,13 @@ impl Connection<'_, '_> {
                     return Ok(false);
                 }
                 let properties = args.rest().to_vec();
+                let declared = self
+                    .declared_body_bytes()
+                    .saturating_add(usize::try_from(size).unwrap_or(usize::MAX));
+                if !self.bodies_held.hold_if_large(declared) {
+                    self.close_connection(RESOURCE_ERROR, OUT_OF_MEMORY_BUDGET, 60, 40);
+                    return Ok(false);
+                }
                 if let Some(state) = self.channels.get_mut(&incoming.channel) {
                     state.header = Some((size, properties));
                     if size == 0 {
@@ -807,14 +917,14 @@ impl Connection<'_, '_> {
                                 .unacked
                                 .insert(delivery_tag, (queue.clone(), message.id));
                         }
-                        let (exchange, routing_key, _, _) = decode_message(&message.body)?;
+                        let stored = StoredMessage::read(&queue, &message.body);
                         let mut out = Out::method(60, 71);
                         out.longlong(delivery_tag)
                             .octet(u8::from(message.receive_count > 1))
-                            .shortstr(&exchange)
-                            .shortstr(&routing_key)
+                            .shortstr(&stored.exchange)
+                            .shortstr(&stored.routing_key)
                             .long(remaining as u32);
-                        self.deliver_message(channel, out, &message.body)?;
+                        self.deliver_message(channel, out, &stored);
                     }
                 }
             }
@@ -931,7 +1041,11 @@ pub(crate) fn serve_stream(
         stage: Stage::StartSent,
         channels: BTreeMap::new(),
         outgoing: VecDeque::new(),
+        bodies_held: config.memory_budget.empty_reservation(),
+        next_consumer: 0,
     };
+    let mut read_held = config.memory_budget.empty_reservation();
+    let mut outgoing_held = config.memory_budget.empty_reservation();
     let mut buffer = Vec::new();
     let mut chunk = vec![0u8; 64 * 1024];
     let outcome = loop {
@@ -940,7 +1054,16 @@ pub(crate) fn serve_stream(
         }
         match reader.read(&mut chunk) {
             Ok(0) => break Ok(()),
-            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+            Ok(read) => {
+                if !read_held.hold_if_large(buffer.len().saturating_add(read)) {
+                    connection.close_connection(RESOURCE_ERROR, OUT_OF_MEMORY_BUDGET, 0, 0);
+                    while let Some(bytes) = connection.outgoing.pop_front() {
+                        writer.write_all(&bytes)?;
+                    }
+                    break Ok(());
+                }
+                buffer.extend_from_slice(&chunk[..read]);
+            }
             Err(error)
                 if matches!(
                     error.kind(),
@@ -952,7 +1075,7 @@ pub(crate) fn serve_stream(
         loop {
             match take_frame(&mut buffer) {
                 Ok(Some(incoming)) => match connection.handle(incoming) {
-                    Ok(true) => {}
+                    Ok(true) => connection.release_finished_bodies(),
                     Ok(false) => {
                         keep_going = false;
                         break;
@@ -981,12 +1104,14 @@ pub(crate) fn serve_stream(
                 }
             }
         }
+        read_held.hold_if_large(buffer.len());
         if keep_going && matches!(connection.stage, Stage::Open) {
-            let _ = connection.pump();
+            keep_going = connection.pump(&mut outgoing_held);
         }
         while let Some(bytes) = connection.outgoing.pop_front() {
             writer.write_all(&bytes)?;
         }
+        outgoing_held.resize(0);
         if !keep_going {
             break Ok(());
         }

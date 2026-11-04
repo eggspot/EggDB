@@ -9,6 +9,7 @@ mod restore;
 mod savepoints;
 mod sqlite;
 pub(crate) mod sqlserver;
+mod transaction_settings;
 mod triggers;
 mod tsql;
 
@@ -16,6 +17,7 @@ pub use oracle_over_tds::{PlsqlParameter, PlsqlProcedure};
 pub use sqlserver::{BatchStep, NamedParameter, ParameterDeclaration, StoredProcedure};
 
 pub(crate) use oracle::create_text as oracle_create_text;
+pub(crate) use oracle::identifier as oracle_identifier;
 
 pub(crate) use sqlite::create_text as sqlite_create_text;
 pub(crate) use sqlite::{index_text as sqlite_index_text, view_text as sqlite_view_text};
@@ -37,7 +39,7 @@ use crate::parser::{LiteralRows, Parameters, Parser, parameter_number};
 use crate::plan_cache::CachedStatement;
 use crate::plpgsql::TransactionEnd;
 use crate::sequences::{self, SequenceAdvance, SessionSequences};
-use crate::settings::{DIALECT_SETTING, Settings};
+use crate::settings::{DIALECT_SETTING, SettingScope, Settings};
 use crate::store::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection};
 use crate::types::{SqlType, Value};
 use std::sync::Arc;
@@ -390,6 +392,24 @@ fn is_one_statement_naming_the_postgresql_catalog(text: &str) -> bool {
     qualifies
 }
 
+fn materialized_view_key(name: &str) -> String {
+    let name = crate::schemas::normalized(name);
+    let key = match name.split_once(crate::schemas::QUALIFIER) {
+        Some((schema, relation)) => format!(
+            "{}.{}",
+            double_quoted_key_part(schema),
+            double_quoted_key_part(relation)
+        ),
+        None if name.starts_with('"') => double_quoted_key_part(name),
+        None => name.to_owned(),
+    };
+    crate::dump::sql_string(&key)
+}
+
+fn double_quoted_key_part(part: &str) -> String {
+    format!("\"{}\"", part.replace('"', "\"\""))
+}
+
 fn aborted_block() -> SqlError {
     SqlError::new(
         SqlState::IN_FAILED_SQL_TRANSACTION,
@@ -427,7 +447,7 @@ pub struct Session<'s> {
     statement_uses_sequences: bool,
     statement_walks_expressions: bool,
     search_path_cache: crate::schemas::PathCache,
-    search_path_at_begin: Option<String>,
+    transaction_settings: crate::settings::TransactionSettings,
     max_value_bytes: usize,
     max_row_bytes: usize,
     deadline: Option<std::time::Instant>,
@@ -439,6 +459,9 @@ pub struct Session<'s> {
     identity_insert_table: Option<String>,
     keeps_identity_values: bool,
     statement_start: usize,
+    shown_statement: Option<String>,
+    explain_plan_displays: bool,
+    creating_plan_table: bool,
     table_variables: crate::table_variables::TableVariables,
     extra_results: Vec<QueryResult>,
     cancel: crate::cancel::CancelSignal,
@@ -506,7 +529,7 @@ impl<'s> Session<'s> {
             statement_uses_sequences: false,
             statement_walks_expressions: true,
             search_path_cache: crate::schemas::PathCache::default(),
-            search_path_at_begin: None,
+            transaction_settings: crate::settings::TransactionSettings::default(),
             max_value_bytes: crate::memory::MAX_VALUE_BYTES,
             max_row_bytes: crate::memory::MAX_ROW_BYTES,
             deadline: None,
@@ -518,6 +541,9 @@ impl<'s> Session<'s> {
             identity_insert_table: None,
             keeps_identity_values: false,
             statement_start: 0,
+            shown_statement: None,
+            explain_plan_displays: false,
+            creating_plan_table: false,
             table_variables: crate::table_variables::TableVariables::default(),
             extra_results: Vec::new(),
             cancel: crate::cancel::CancelSignal::default(),
@@ -591,6 +617,17 @@ impl<'s> Session<'s> {
     /// sets `n + 1`, so it can tell the client the result was cut.
     pub fn set_max_result_rows(&mut self, rows: Option<u64>) {
         self.max_result_rows = rows;
+    }
+
+    /// With `true`, Oracle's `EXPLAIN PLAN` writes no plan table and answers with the
+    /// `PLAN_TABLE_OUTPUT` lines `SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)` would show right
+    /// after it, so a caller that opens the database read-only (the CLI's `eggdb explain`,
+    /// MCP's `explain_query`) can explain in Oracle's dialect. It also makes a statement EggDB
+    /// cannot plan under SQL Server's `SET SHOWPLAN_TEXT` or `SHOWPLAN_ALL` fail with
+    /// `not_supported`, as Oracle's `EXPLAIN PLAN` does, instead of answering with only the
+    /// statement's text. `false` is the default.
+    pub fn set_explain_plan_displays(&mut self, displays: bool) {
+        self.explain_plan_displays = displays;
     }
 
     /// The dialect this session reads: the one it was opened in, or the one a client chose
@@ -1040,10 +1077,14 @@ impl<'s> Session<'s> {
 
     fn end_implicit_transaction(&mut self, commit: bool) -> SqlResult<()> {
         self.implicit_transaction = false;
-        if !self.in_block() {
+        let ends_settings = !self.in_block();
+        if ends_settings {
             self.advisory_locks.release_transaction_locks();
         }
         if !std::mem::take(&mut self.block_is_implicit) {
+            if ends_settings {
+                self.end_transaction_settings(commit);
+            }
             return Ok(());
         }
         let pending = std::mem::take(&mut self.deferred.pending);
@@ -1065,6 +1106,9 @@ impl<'s> Session<'s> {
                 Ok(())
             }
         };
+        if ends_settings {
+            self.end_transaction_settings(commit && ended.is_ok());
+        }
         let settled = self.settle_sequences();
         ended.and(settled)
     }
@@ -1113,6 +1157,9 @@ impl<'s> Session<'s> {
     }
 
     fn reset_all_settings(&mut self) {
+        if self.settings_follow_transaction() {
+            self.transaction_settings.before_reset_all(&self.settings);
+        }
         match &self.connection_settings {
             Some(remembered) => {
                 let mut restored = Settings::clone(remembered);
@@ -1125,12 +1172,15 @@ impl<'s> Session<'s> {
         }
     }
 
-    fn reset_setting(&mut self, name: &str) -> SqlResult<()> {
-        let remembered = self
-            .connection_settings
+    fn connection_value(&self, name: &str) -> Option<String> {
+        self.connection_settings
             .as_ref()
-            .and_then(|settings| settings.get(name).ok());
-        Arc::make_mut(&mut self.settings).set(name, remembered.as_deref())
+            .and_then(|settings| settings.get(name).ok())
+    }
+
+    fn reset_setting(&mut self, name: &str) -> SqlResult<()> {
+        self.change_setting(name, None, SettingScope::Session)
+            .map(drop)
     }
 
     fn discard(&mut self, target: DiscardTarget) -> SqlResult<QueryResult> {
@@ -1363,11 +1413,11 @@ impl<'s> Session<'s> {
             }),
             Statement::Update(update) => self.read(|reader, tables| {
                 binding.update(reader, tables, update)?;
-                execute::returning_columns(reader, tables, &update.table, &update.returning)
+                crate::joined_dml::update_columns(reader, tables, update)
             }),
             Statement::Delete(delete) => self.read(|reader, tables| {
                 binding.delete(reader, tables, delete)?;
-                execute::returning_columns(reader, tables, &delete.table, &delete.returning)
+                crate::joined_dml::delete_columns(reader, tables, delete)
             }),
             Statement::With(with) => self.read(|reader, tables| {
                 crate::with_statement::describe(reader, tables, with, binding)
@@ -1375,6 +1425,7 @@ impl<'s> Session<'s> {
             Statement::Show { name } => Ok(Some(self.show_columns(name.as_deref()))),
             Statement::MySql(statement) => self.describe_mysql(statement),
             Statement::Pragma(pragma) => Ok(self.pragma_columns(pragma)),
+            Statement::Explain(explain) if explain.plan_table.is_some() => Ok(None),
             Statement::Explain(explain) => {
                 Ok(Some(crate::explain::columns(explain.style, self.dialect)))
             }
@@ -1860,6 +1911,8 @@ impl<'s> Session<'s> {
                 crate::deferred_checks::enter(&self.deferred.modes);
                 let started = crate::statement_statistics::wanted().then(std::time::Instant::now);
                 let result = self.insert_literal_rows(&mut rows);
+                let routine_changes = crate::routine_settings::take_for_session(result.is_ok());
+                self.apply_routine_setting_changes(routine_changes);
                 let literal_tokens = tokens.get(literal_start..resume.0.min(tokens.len()));
                 self.record_statement(literal_tokens, text, started, &result);
                 let result = self.keep_deferred(result);
@@ -1976,9 +2029,21 @@ impl<'s> Session<'s> {
             self.enter_sequences(uses_sequences);
             self.extra_results.clear();
             crate::deferred_checks::enter(&self.deferred.modes);
+            let leftover_changes = crate::routine_settings::take_for_session(true);
+            self.apply_routine_setting_changes(leftover_changes);
             crate::portals::install(std::mem::take(&mut self.portals));
+            if self.sqlserver()
+                && (self.settings.sqlserver.showplan.is_some()
+                    || self.settings.sqlserver.statistics_profile)
+            {
+                let end = tokens.get(resume.0).map_or(text.len(), |token| token.start);
+                self.shown_statement = text
+                    .get(self.statement_start..end)
+                    .map(|shown| shown.trim().trim_end_matches(';').trim_end().to_owned());
+            }
             let started = crate::statement_statistics::wanted().then(std::time::Instant::now);
             let result = with_raised_notices(self.run(&mut statement, &mut io));
+            let routine_changes = crate::routine_settings::take_for_session(result.is_ok());
             self.record_statement(statement_tokens, text, started, &result);
             self.portals = crate::portals::take();
             if matches!(self.block, Block::None) {
@@ -2009,6 +2074,7 @@ impl<'s> Session<'s> {
             _path.0.remember(&mut self.search_path_cache);
             self.leave_sequences();
             let settled = self.settle_sequences();
+            self.apply_routine_setting_changes(routine_changes);
             let result =
                 result.and_then(|result| self.apply_setting_changes(result, &setting_changes));
             let result = self.after_statement(result?, diagnostic);
@@ -2173,14 +2239,14 @@ impl<'s> Session<'s> {
     fn apply_setting_changes(
         &mut self,
         result: QueryResult,
-        changes: &[(String, String)],
+        changes: &[crate::settings::SettingChange],
     ) -> SqlResult<QueryResult> {
-        for (name, value) in changes {
+        for crate::settings::SettingChange { name, value, scope } in changes {
             if is_dialect_setting(name) {
-                self.choose_dialect(Some(value))?;
+                self.choose_dialect(value.as_deref())?;
                 continue;
             }
-            Arc::make_mut(&mut self.settings).set(name, Some(value))?;
+            self.change_setting(name, value.as_deref(), *scope)?;
         }
         Ok(result)
     }
@@ -2300,7 +2366,7 @@ impl<'s> Session<'s> {
     }
 
     fn atomically(&mut self, body: impl FnOnce(&mut Self) -> SqlResult<()>) -> SqlResult<()> {
-        if !self.autocommit() {
+        if !self.autocommit() || !matches!(self.block, Block::None) {
             return body(self);
         }
         self.run_quietly("BEGIN")?;
@@ -2313,25 +2379,27 @@ impl<'s> Session<'s> {
         }
     }
 
+    fn materialized_views_registered(&mut self) -> SqlResult<bool> {
+        let internal = crate::schemas::qualified("eggdb_internal", "materialized_views");
+        self.read(|reader, _| {
+            Ok(reader
+                .get(&crate::encoding::table_key(&internal))?
+                .is_some())
+        })
+    }
+
     fn materialized_view_query(&mut self, name: &str) -> SqlResult<Option<String>> {
-        let rows = match self.run_quietly(&format!(
-            "SELECT query FROM eggdb_internal.materialized_views WHERE name = {}",
-            crate::dump::sql_string(name)
-        )) {
-            Ok(results) => results
-                .into_iter()
-                .flat_map(|result| result.rows)
-                .collect::<Vec<_>>(),
-            Err(error)
-                if matches!(
-                    error.state(),
-                    SqlState::UNDEFINED_TABLE | SqlState::INVALID_SCHEMA_NAME
-                ) =>
-            {
-                Vec::new()
-            }
-            Err(error) => return Err(error),
-        };
+        if !self.materialized_views_registered()? {
+            return Ok(None);
+        }
+        let rows = self
+            .run_quietly(&format!(
+                "SELECT query FROM eggdb_internal.materialized_views WHERE name = {}",
+                materialized_view_key(name)
+            ))?
+            .into_iter()
+            .flat_map(|result| result.rows)
+            .collect::<Vec<_>>();
         Ok(rows
             .into_iter()
             .next()
@@ -2347,7 +2415,7 @@ impl<'s> Session<'s> {
     ) -> SqlResult<QueryResult> {
         use crate::ast::MaterializedViewCommand;
         let written = |name: &str| {
-            name.split('.')
+            name.split(crate::schemas::QUALIFIER)
                 .map(crate::schema::quoted)
                 .collect::<Vec<_>>()
                 .join(".")
@@ -2403,7 +2471,7 @@ impl<'s> Session<'s> {
                     session.run_quietly(&format!("CREATE TABLE {table} ({})", columns.join(", ")))?;
                     session.run_quietly(&format!(
                         "INSERT INTO eggdb_internal.materialized_views VALUES ({}, {})",
-                        crate::dump::sql_string(&name_text),
+                        materialized_view_key(&name_text),
                         crate::dump::sql_string(&query)
                     ))?;
                     if with_data {
@@ -2450,7 +2518,7 @@ impl<'s> Session<'s> {
                         session.run_quietly(&format!("DROP TABLE {}", written(name)))?;
                         session.run_quietly(&format!(
                             "DELETE FROM eggdb_internal.materialized_views WHERE name = {}",
-                            crate::dump::sql_string(name)
+                            materialized_view_key(name)
                         ))?;
                     }
                     Ok(())
@@ -2518,12 +2586,14 @@ impl<'s> Session<'s> {
             self.savepoints.aborted = true;
             return;
         }
-        if let Block::Writing(writer) = std::mem::replace(&mut self.block, Block::None) {
-            let _ = writer.rollback();
-            self.temporary.rollback();
-            self.block = Block::Failed;
-        } else if let Block::Reading(_) = self.block {
-            self.block = Block::Failed;
+        match std::mem::replace(&mut self.block, Block::None) {
+            Block::Writing(writer) => {
+                let _ = writer.rollback();
+                self.temporary.rollback();
+                self.block = Block::Failed;
+            }
+            Block::Reading(_) | Block::Failed => self.block = Block::Failed,
+            Block::None => {}
         }
     }
 
@@ -2670,7 +2740,14 @@ impl<'s> Session<'s> {
         let before_execution = lookups();
         let started = std::time::Instant::now();
         let mut statement = (*explain.statement).clone();
-        let result = self.run(&mut statement, io)?;
+        let (result, selects) = if crate::explain::PlannedStatement::of(&statement)
+            == Some(crate::explain::PlannedStatement::Select)
+        {
+            crate::step_times::record(|| self.run(&mut statement, io))
+        } else {
+            (self.run(&mut statement, io), Vec::new())
+        };
+        let result = result?;
         let execution = started.elapsed();
         let after_execution = lookups();
         let rows = crate::statement_statistics::rows_of(&result);
@@ -2690,6 +2767,7 @@ impl<'s> Session<'s> {
                 planning,
                 execution,
                 buffers,
+                selects,
             },
         ))
     }
@@ -2715,7 +2793,7 @@ impl<'s> Session<'s> {
     ) -> SqlResult<QueryResult> {
         self.refuse_after_database_switch()?;
         match statement {
-            Statement::Set { name, value } if is_dialect_setting(name) => {
+            Statement::Set { name, value, .. } if is_dialect_setting(name) => {
                 return self
                     .choose_dialect(value.as_deref())
                     .map(|()| QueryResult::command("SET"));
@@ -2726,6 +2804,11 @@ impl<'s> Session<'s> {
                     .map(|()| QueryResult::command("RESET"));
             }
             _ => {}
+        }
+        if self.sqlserver()
+            && let Some(planned) = self.plan_instead_under_showplan(statement)?
+        {
+            return Ok(planned);
         }
         if self.sqlite() {
             match statement {
@@ -2758,6 +2841,7 @@ impl<'s> Session<'s> {
                 Statement::SqlServer(SqlServerStatement::InsertBulk(bulk)) => {
                     return self.run_insert_bulk(bulk, io);
                 }
+                Statement::SqlServer(SqlServerStatement::OutputInto(_)) => {}
                 Statement::SqlServer(statement) => return self.run_sqlserver(statement),
                 _ => {}
             }
@@ -2816,6 +2900,14 @@ impl<'s> Session<'s> {
             )
         {
             return Ok(QueryResult::command("FMTONLY"));
+        }
+        let profiled = if self.sqlserver() && self.settings.sqlserver.statistics_profile {
+            self.statement_plan(statement, binding).ok().flatten()
+        } else {
+            None
+        };
+        if self.oracle() {
+            self.show_plan_displays(statement)?;
         }
         let result = match statement {
             Statement::Select(select) if format_only => self.read(|reader, tables| {
@@ -3042,9 +3134,9 @@ impl<'s> Session<'s> {
                     None => result,
                 })
             }
-            Statement::Set { name, value } => Arc::make_mut(&mut self.settings)
-                .set(name, value.as_deref())
-                .map(|()| QueryResult::command("SET")),
+            Statement::Set { name, value, scope } => {
+                self.set_statement(name, value.as_deref(), *scope)
+            }
             Statement::Reset { name: Some(name) } => self
                 .reset_setting(name)
                 .map(|()| QueryResult::command("RESET")),
@@ -3069,6 +3161,10 @@ impl<'s> Session<'s> {
                 }
                 crate::indexes::drop_index(writer, tables, drop, dialect)
             }),
+            Statement::Explain(explain) if explain.plan_table.is_some() => {
+                let explain = explain.clone();
+                self.explain_into_plan_table(&explain)
+            }
             Statement::Explain(explain) if explain.analyze => {
                 let explain = explain.clone();
                 self.explain_analyze(&explain, io)
@@ -3269,6 +3365,16 @@ impl<'s> Session<'s> {
             Statement::SetConstraints { names, deferred } => {
                 self.set_constraints(names.as_deref(), *deferred)
             }
+            Statement::CreateTableAs(create) => self.write("SELECT INTO", |writer, tables| {
+                crate::create_table_as::run(writer, tables, binding, dialect, create)
+            }),
+            Statement::MultitableInsert(insert) => self
+                .write_firing_triggers("INSERT", |writer, tables| {
+                    crate::multitable_insert::run(writer, tables, binding, insert)
+                }),
+            Statement::SqlServer(SqlServerStatement::OutputInto(output)) => {
+                self.run_output_into(output, binding)
+            }
             Statement::Begin { .. }
             | Statement::Commit
             | Statement::Rollback
@@ -3282,6 +3388,15 @@ impl<'s> Session<'s> {
                 ));
             }
         };
+        if let (Some(plan), Ok(answer)) = (&profiled, &result) {
+            let text = self.shown_statement.take().unwrap_or_default();
+            let rows = crate::statement_statistics::rows_of(answer);
+            self.extra_results.push(crate::explain::showplan_all(
+                Some((&plan.0, plan.1)),
+                &text,
+                Some(rows),
+            ));
+        }
         if result.is_err() {
             self.fail_block_in_postgresql();
             if let Statement::Insert(insert) = statement
@@ -3301,7 +3416,8 @@ impl<'s> Session<'s> {
     }
 
     fn commits_implicitly(&self, statement: &Statement) -> bool {
-        (self.mysql() || self.oracle())
+        !self.creating_plan_table
+            && (self.mysql() || self.oracle())
             && matches!(
                 statement,
                 Statement::CreateTable(_)
@@ -3643,9 +3759,6 @@ impl<'s> Session<'s> {
             match self.block {
                 Block::Writing(_) => {
                     self.block_is_implicit = false;
-                    if self.dialect == Dialect::PostgreSql {
-                        self.search_path_at_begin = self.settings.get("search_path").ok();
-                    }
                     return Ok(QueryResult::command("BEGIN"));
                 }
                 Block::Failed => return Err(aborted_block()),
@@ -3665,19 +3778,8 @@ impl<'s> Session<'s> {
                 } else {
                     Block::Writing(self.store.begin_boxed_write()?)
                 };
-                if self.dialect == Dialect::PostgreSql {
-                    self.search_path_at_begin = self.settings.get("search_path").ok();
-                }
                 Ok(QueryResult::command("BEGIN"))
             }
-        }
-    }
-
-    fn restore_search_path(&mut self) {
-        if let Some(path) = self.search_path_at_begin.take()
-            && self.settings.get("search_path").ok().as_deref() != Some(path.as_str())
-        {
-            let _ = Arc::make_mut(&mut self.settings).set("search_path", Some(&path));
         }
     }
 
@@ -3690,15 +3792,22 @@ impl<'s> Session<'s> {
         self.savepoints.clear();
         self.advisory_locks.release_transaction_locks();
         let implicit = std::mem::take(&mut self.block_is_implicit);
-        if matches!(self.block, Block::Failed) {
-            self.restore_search_path();
-        }
-        self.search_path_at_begin = None;
+        let failed = matches!(self.block, Block::Failed);
         let pending = std::mem::take(&mut self.deferred.pending);
         self.deferred.clear();
+        let ended = self.end_block_for_commit(implicit, &pending);
+        self.end_transaction_settings(!failed && ended.is_ok());
+        ended
+    }
+
+    fn end_block_for_commit(
+        &mut self,
+        implicit: bool,
+        pending: &[crate::deferred_checks::PendingCheck],
+    ) -> SqlResult<QueryResult> {
         match std::mem::replace(&mut self.block, Block::None) {
             Block::Writing(writer) => {
-                self.commit_writes(writer, &pending)?;
+                self.commit_writes(writer, pending)?;
                 let committed = QueryResult::command("COMMIT");
                 Ok(if implicit && self.dialect == Dialect::PostgreSql {
                     committed.with_notice(NO_TRANSACTION_WARNING.into())
@@ -3729,7 +3838,7 @@ impl<'s> Session<'s> {
         self.savepoints.clear();
         self.advisory_locks.release_transaction_locks();
         let implicit = std::mem::take(&mut self.block_is_implicit);
-        self.restore_search_path();
+        self.end_transaction_settings(false);
         match std::mem::replace(&mut self.block, Block::None) {
             Block::Writing(writer) => {
                 self.temporary.rollback();

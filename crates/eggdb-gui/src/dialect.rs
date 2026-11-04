@@ -49,6 +49,15 @@ impl QueryDialect {
         }
     }
 
+    /// The pill's dialect that runs as the engine's `dialect`; PostgreSQL's for one the pill
+    /// does not list.
+    pub fn of_engine(dialect: Dialect) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|listed| listed.engine() == dialect)
+            .unwrap_or_default()
+    }
+
     /// Its place in [`QueryDialect::ALL`].
     pub fn index(self) -> usize {
         Self::ALL
@@ -96,5 +105,8 @@ mod tests {
         assert_eq!(QueryDialect::at(9), QueryDialect::PostgreSql);
         assert_eq!(QueryDialect::Oracle.index(), 3);
         assert_eq!(QueryDialect::SqlServer.engine(), Dialect::SqlServer);
+        for dialect in QueryDialect::ALL {
+            assert_eq!(QueryDialect::of_engine(dialect.engine()), dialect);
+        }
     }
 }

@@ -452,12 +452,16 @@ fn views_rows(snapshot: &CatalogSnapshot, objects: &SqlServerObjects) -> Vec<Vec
                 .get(object.relation)
                 .map(|entry| &entry.source)
             {
-                Some(RelationSource::View(view)) => Value::Text(format!(
-                    "CREATE VIEW [{}].[{}] AS {}",
-                    objects.schema_name(object.schema_id),
-                    object.name,
-                    view.query
-                )),
+                Some(RelationSource::View(view)) => {
+                    view.shown_query().map_or(Value::Null, |query| {
+                        Value::Text(format!(
+                            "CREATE VIEW [{}].[{}] AS {}",
+                            objects.schema_name(object.schema_id),
+                            object.name,
+                            query
+                        ))
+                    })
+                }
                 _ => Value::Null,
             };
             located(

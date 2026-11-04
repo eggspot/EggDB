@@ -285,11 +285,12 @@ pub(super) const EXPLAIN: CommandDefinition = CommandDefinition {
     usage: "eggdb explain <file> -c <sql> [--dialect postgresql|mysql|sqlite|oracle|sqlserver]",
     help: "\
 Shows the plan EggDB would use for one SELECT, UPDATE or DELETE, without running it. EggDB puts
-EXPLAIN in front of the statement (EXPLAIN QUERY PLAN with --dialect sqlite) and prints the
-result as eggdb sql prints a SELECT, in the dialect's own EXPLAIN form: postgresql's QUERY PLAN
-lines, mysql's EXPLAIN columns, sqlite's query plan rows. Oracle's EXPLAIN PLAN and SQL Server's
-showplan are not in EggDB yet; every dialect sees the same tables, so explain with postgresql.
-The file is opened read-only, so it works beside other readers. One statement per call.
+EXPLAIN in front of the statement (EXPLAIN QUERY PLAN with --dialect sqlite, EXPLAIN PLAN FOR
+with oracle, SET SHOWPLAN_TEXT ON before it with sqlserver) and prints the result as eggdb sql
+prints a SELECT, in the dialect's own form: postgresql's QUERY PLAN lines, mysql's EXPLAIN
+columns, sqlite's query plan rows, oracle's DBMS_XPLAN.DISPLAY lines (no PLAN_TABLE is written),
+sqlserver's StmtText plan rows. The file is opened read-only, so it works beside other readers.
+One statement per call.
 
   -c, --command <sql>   the statement to explain, without EXPLAIN
       --dialect <name>  postgresql (default), mysql, sqlite, oracle or sqlserver

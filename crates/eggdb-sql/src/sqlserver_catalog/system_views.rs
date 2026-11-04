@@ -1413,12 +1413,18 @@ fn sql_module_rows(snapshot: &CatalogSnapshot, objects: &SqlServerObjects) -> Ve
         .objects
         .iter()
         .filter_map(|object| {
-            let definition = module_definition(snapshot, objects, object)?;
+            let definition = module_definition(snapshot, objects, object);
+            if definition.is_none() && object.kind != ObjectKind::View {
+                return None;
+            }
             let null_on_null_input =
                 routine_definition(snapshot, object).is_some_and(|routine| routine.strict);
             let row = CatalogRow::new(SQL_MODULE_COLUMNS)
                 .set("object_id", Value::Integer(object.object_id))
-                .set("definition", text(&definition))
+                .set(
+                    "definition",
+                    definition.map_or(Value::Null, |definition| text(&definition)),
+                )
                 .set("uses_ansi_nulls", bit(true))
                 .set("uses_quoted_identifier", bit(true))
                 .set("null_on_null_input", bit(null_on_null_input));

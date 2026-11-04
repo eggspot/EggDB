@@ -1,8 +1,10 @@
 use crate::log::{self, error};
 use crate::wire::{Parsed, Reader, Writer};
 use eggdb_keyspace::Keyspace;
+use eggdb_platform::connection_limits::MemoryBudget;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -29,12 +31,15 @@ const SUPPORTED: [(i16, i16, i16); 5] = [
 ];
 
 /// How the Kafka-compatible server runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ServerConfig {
     /// The host and port clients reach this broker at, as Metadata reports it.
     pub advertised: SocketAddr,
     /// The most connections served at once.
     pub max_connections: usize,
+    /// The memory every connection's requests and responses hold together, shared with the
+    /// server's other listeners (D284, D307).
+    pub memory_budget: Arc<MemoryBudget>,
 }
 
 struct StopAware<'s> {
@@ -309,12 +314,13 @@ pub(crate) fn answer(
     Some(framed)
 }
 
-fn serve_stream(
+pub(crate) fn serve_stream(
     keyspace: &dyn Keyspace,
     config: &ServerConfig,
     mut reader: impl Read,
     writer: &mut impl Write,
 ) -> io::Result<()> {
+    let mut held = config.memory_budget.empty_reservation();
     loop {
         let mut size = [0u8; 4];
         match reader.read_exact(&mut size) {
@@ -328,12 +334,22 @@ fn serve_stream(
         else {
             return Ok(());
         };
+        if !held.hold_if_large(length) {
+            return Ok(());
+        }
         let mut frame = vec![0u8; length];
         reader.read_exact(&mut frame)?;
-        match answer(keyspace, config, &frame) {
-            Some(response) => writer.write_all(&response)?,
-            None => return Ok(()),
+        let answered = answer(keyspace, config, &frame);
+        drop(frame);
+        let Some(response) = answered else {
+            return Ok(());
+        };
+        if !held.hold_if_large(response.len()) {
+            return Ok(());
         }
+        writer.write_all(&response)?;
+        drop(response);
+        held.resize(0);
     }
 }
 

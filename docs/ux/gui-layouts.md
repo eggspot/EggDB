@@ -218,3 +218,80 @@ Key Type`, `Raw mode`, `Group results`, `Clear Results`, `CLI`, `Command Helper`
 - While a familiar layout is active, the status bar's right group gains a `Works like <product>`
   item; clicking it opens the picker and its tooltip carries the trademark note. On first start the
   connect screen's sidebar shows one row, `Coming from another client? Pick a layout`, until used or dismissed.
+
+## The layout picker
+One modal dialog, the same over the connect screen (the link `Where are you coming from?`, the
+sidebar row `Coming from another client? Pick a layout`) and over the main window (`View > Layout`,
+the palette, `Ctrl+K L` / `Cmd+K L`, the status bar's `Works like <product>` item). gui.md's tokens
+and rules apply; one token is added, `scrim` (light `#1B1F24` at 40 % alpha, dark `#000000` at 56 %,
+high contrast `#000000` at 70 %; gui.md adopts it). Values are logical pixels; `dx, dy` is the
+dialog's top-left, `dx = round((W − 560) / 2)`, `dy = round((H − 504) / 2)`, centred in the whole
+window (never the main area): at 1280 × 800 the dialog is `(360, 148, 560, 504)`. It opens and
+closes instantly (no motion), the scrim covers the window, and nothing under it takes input.
+
+| Item | Rect / position (relative to `dx, dy`) | Drawing |
+|------|------|---------|
+| scrim | the window | filled rect `scrim` over the frame, drawn before the dialog |
+| dialog | (0, 0, 560, 504) | fill `bg0`, 1 px `border` inside the rect, `radiusCard` 8, no shadow |
+| title | text at (24, 20) | `title` `textPrimary`: `Pick a layout` |
+| list | (24, 52, 512, 352) | eight rows of 44, no outline, no scrolling; row `n` at y `52 + 44 × (n − 1)` |
+| row label | text at (60, row + 6) | `body` `textPrimary`; the active layout's label is `bodyBold` |
+| row description | text at (60, row + 24) | `small` `textSecondary`, one line, cut with `…` at x 524 |
+| check icon | 12 × 12 at (36, row + 9), active layout only | two 1.5 px `textPrimary` lines (2, 6)–(5, 9) and (5, 9)–(10, 3) in the box |
+| highlighted row | rounded rect (24, row, 512, 44) r 4 | `selection` while the list has focus, `selectionInactive` otherwise; with keyboard focus a 2 px `focusRing` inset 1 px; hover on another row `bg2` |
+| trademark note | text at (24, 416), two lines of 14 | `small` `textSecondary`, wrapped at words to 512 wide: `Product names are trademarks of their owners; EggDB is not affiliated with them. A layout copies an arrangement, shortcuts and workflows only.` (the full note is this file's header and the status bar item's tooltip) |
+| `Cancel` | (364, 456, 84, 28) | secondary |
+| `Apply` | (456, 456, 80, 28) | primary, the default button |
+
+The rows, in this order, with their labels (exactly the headings above) and descriptions:
+
+| # | Label | Description |
+|---|-------|-------------|
+| 1 | `EggDB` | `Objects on the left, the editor above the results grid, EggDB's own keys.` |
+| 2 | `Works like SQL Server Management Studio` | `Object Explorer left, editor above Results and Messages, F5 executes.` |
+| 3 | `Works like pgAdmin 4` | `Object Explorer left, a Query Tool tab with Data Output below, F5 executes.` |
+| 4 | `Works like DBeaver` | `Navigator over Projects, run toolbar beside the script, Grid or Text results.` |
+| 5 | `Works like DataGrip` | `Database Explorer left, a console per data source, results in Services.` |
+| 6 | `Works like MySQL Workbench` | `Navigator with SCHEMAS left, Result Grid with side tabs, Output log below.` |
+| 7 | `Works like MongoDB Compass` | `Collections in a full-height sidebar, Filter bar above documents, shell below.` |
+| 8 | `Works like Redis Insight` | `Icon rail, a Workbench editor, one result card per command, CLI at the bottom.` |
+
+**Keys and pointer.** The dialog opens with focus on the list and the active layout highlighted.
+`Tab` order, trapped and wrapping: list → `Cancel` → `Apply`. `Up` / `Down` move the highlight one
+row and do not wrap (the ends stop, as in the tree and grid); `Home` / `End` go to the first / last
+row; `PgUp` / `PgDn` do the same; typing a letter jumps to the next row whose label starts with it
+(`W` cycles the seven `Works like` rows). `Enter` anywhere but on `Cancel` applies the highlighted
+layout (on `Cancel` it cancels); `Space` on a button activates it and on the list does nothing.
+`Esc`, `Cancel`, a click on the scrim and the window's close key all keep the current layout.
+`Ctrl+K L` / `Cmd+K L` do nothing while the picker is open. Pointer: a click on a row highlights it
+and focuses the list; a double-click (the OS's interval) applies it; hover is `bg2` only on rows
+other than the highlighted one. `Apply` with the active layout highlighted closes without a change.
+
+**What applying does.** The choice is written to the client's settings at once (key `layout`,
+values `eggdb`, `ssms`, `pgadmin`, `dbeaver`, `datagrip`, `mysql-workbench`, `mongodb-compass`,
+`redis-insight`), beside the theme and recent connections. In the main window the switch is
+instant and keeps every tab, caret, result and connection ("How switching works"); focus returns to
+where it was before the picker (the status bar item, the editor, the link). On the connect screen the
+link's text stays `Where are you coming from?` (the link opens the picker again), and while a
+familiar layout is stored the card draws `Layout: Works like <product>` in `small` `textSecondary`,
+right-aligned at `cx + 536` on the title row (line box y `cy + 30`); `EggDB` draws no line. The main
+window opens in the stored layout, with that layout's shortcut table and labels, in every window.
+
+**What the screen reader hears.** Opening announces the dialog's name, then the highlighted row;
+closing returns focus and announces nothing. The scrim is not in the tree.
+
+| Element | Role (generic → macOS / UIA / AT-SPI / ARIA) | Name | Value / states |
+|---------|---------------------------------------------|------|----------------|
+| dialog | dialog → AXWindow (`AXDialog`) / Window (IsDialog, IsModal) / dialog / `dialog`, `aria-modal=true` | `Pick a layout` (labelled by the title) | modal, described by the trademark note |
+| title | heading → AXStaticText (`AXHeading`) / Text / heading / `heading` level 1 | `Pick a layout` | |
+| list | list box → AXList / List (Selection, single, required) / list box / `listbox` | `Layouts` | focused; the highlighted row is the active descendant |
+| each row | option → AXRow / ListItem (SelectionItem) / list item / `option` | the label; the description as its description | `n of 8`; selected (highlighted); checked (the active layout, `aria-checked`) |
+| trademark note | text → AXStaticText / Text / label / `note` | the whole text | |
+| `Cancel`, `Apply` | button | `Cancel`, `Apply` | `Apply` is the default button |
+
+A highlight move raises the platform's selection event; `Apply` raises a value change on the status
+bar's `Works like <product>` item (polite) and on the connect card's `Layout:` text, and the focus
+event when focus returns. Tests: golden frames (light, dark, high contrast) of the picker over the
+connect screen with row 3 highlighted and row 1 checked; a key test (`Down` × 9 stops at row 8,
+`Home`, `W` × 7 cycles, `Esc` keeps, `Enter` applies and the setting reads `pgadmin`); the
+accessibility-tree test with exactly the nodes above.

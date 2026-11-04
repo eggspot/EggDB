@@ -1,5 +1,5 @@
 use crate::canvas::Rect;
-use crate::catalog::{CatalogColumn, CatalogIndex};
+use crate::catalog::{CatalogColumn, CatalogIndex, CatalogTrigger};
 use crate::color::Rgba;
 use crate::connection::{Connection, ResultTable};
 use crate::dialect::QueryDialect;
@@ -31,6 +31,8 @@ pub enum InspectorBlock {
     Columns,
     /// `Indexes (3)`.
     Indexes,
+    /// `Triggers (2)`, on a table that has triggers.
+    Triggers,
     /// `DDL`.
     Ddl,
     /// `Sample rows`.
@@ -115,8 +117,12 @@ pub struct Description {
     pub columns: Vec<CatalogColumn>,
     /// The `Indexes` block's rows.
     pub indexes: Vec<CatalogIndex>,
+    /// The `Triggers` block's rows, on a table.
+    pub triggers: Vec<CatalogTrigger>,
     /// The `DDL` block's statement.
     pub ddl: Option<String>,
+    /// That block's heading: `DDL`, or `Action` for a trigger, whose statement is what it runs.
+    pub ddl_heading: &'static str,
     /// The `Sample rows` block's rows, once fetched.
     pub sample: Option<ResultTable>,
 }
@@ -128,7 +134,9 @@ impl Description {
             subtitle,
             columns: Vec::new(),
             indexes: Vec::new(),
+            triggers: Vec::new(),
             ddl: None,
+            ddl_heading: "DDL",
             sample: None,
         }
     }
@@ -148,8 +156,14 @@ impl Description {
                 format!("Indexes ({})", self.indexes.len()),
             ));
         }
+        if !self.triggers.is_empty() {
+            blocks.push((
+                InspectorBlock::Triggers,
+                format!("Triggers ({})", self.triggers.len()),
+            ));
+        }
         if self.ddl.is_some() {
-            blocks.push((InspectorBlock::Ddl, "DDL".to_owned()));
+            blocks.push((InspectorBlock::Ddl, self.ddl_heading.to_owned()));
         }
         if self.sample.is_some() {
             blocks.push((InspectorBlock::SampleRows, "Sample rows".to_owned()));
@@ -198,7 +212,10 @@ pub fn describe(tree: &ObjectTree, item: TreeItem, sample: Option<&Sample>) -> D
             };
             Description::titled(group.label().to_owned(), counted(count, one, many))
         }
-        TreeItem::Table(table) | TreeItem::Columns(table) | TreeItem::TableIndexes(table) => {
+        TreeItem::Table(table)
+        | TreeItem::Columns(table)
+        | TreeItem::TableIndexes(table)
+        | TreeItem::TableTriggers(table) => {
             let Some(table) = catalog.tables.get(table) else {
                 return Description::titled(String::new(), String::new());
             };
@@ -210,6 +227,7 @@ pub fn describe(tree: &ObjectTree, item: TreeItem, sample: Option<&Sample>) -> D
             Description {
                 columns: table.columns.clone(),
                 indexes: catalog.indexes_of(&table.name).cloned().collect(),
+                triggers: catalog.triggers_of(&table.name).cloned().collect(),
                 ddl: Some(table.ddl.clone()).filter(|ddl| !ddl.is_empty()),
                 sample: sample.map(|sample| sample.rows.clone()),
                 ..Description::titled(table.name.clone(), subtitle)
@@ -282,15 +300,26 @@ pub fn describe(tree: &ObjectTree, item: TreeItem, sample: Option<&Sample>) -> D
             };
             Description::titled(space.label().to_owned(), format!("{kind} · {keys}"))
         }
+        TreeItem::Trigger(trigger) => {
+            let Some(trigger) = catalog.triggers.get(trigger) else {
+                return Description::titled(String::new(), String::new());
+            };
+            Description {
+                ddl: Some(trigger.action.clone()).filter(|action| !action.is_empty()),
+                ddl_heading: "Action",
+                ..Description::titled(trigger.name.clone(), trigger.summary())
+            }
+        }
     }
 }
 
 /// The name whose sample the inspector fetches for `item`: a table's or a view's.
 pub fn sampled_name(tree: &ObjectTree, item: TreeItem) -> Option<String> {
     match item {
-        TreeItem::Table(table) | TreeItem::Columns(table) | TreeItem::TableIndexes(table) => {
-            Some(tree.catalog.tables.get(table)?.name.clone())
-        }
+        TreeItem::Table(table)
+        | TreeItem::Columns(table)
+        | TreeItem::TableIndexes(table)
+        | TreeItem::TableTriggers(table) => Some(tree.catalog.tables.get(table)?.name.clone()),
         TreeItem::View(view) => Some(tree.catalog.views.get(view)?.name.clone()),
         _ => None,
     }
@@ -319,9 +348,9 @@ pub fn fetch_sample(connection: &mut Connection, name: &str) -> Sample {
     }
 }
 
-/// The inspector's rect in a window `width` wide.
-pub fn region(width: f32) -> Rect {
-    Rect::new(width - INSPECTOR_WIDTH, TOP, INSPECTOR_WIDTH, BOTTOM - TOP)
+/// The inspector's rect, `inspector_width` wide, in a window `width` wide.
+pub fn region(width: f32, inspector_width: f32) -> Rect {
+    Rect::new(width - inspector_width, TOP, inspector_width, BOTTOM - TOP)
 }
 
 /// Where each block's heading is drawn, top to bottom, for the accessibility tree.
@@ -349,6 +378,7 @@ fn block_height(description: &Description, block: InspectorBlock) -> f32 {
     match block {
         InspectorBlock::Columns => 20.0 * description.columns.len() as f32,
         InspectorBlock::Indexes => 20.0 * description.indexes.len() as f32,
+        InspectorBlock::Triggers => 36.0 * description.triggers.len() as f32,
         InspectorBlock::Ddl => {
             16.0 * ddl_lines(description.ddl.as_deref().unwrap_or("")).len() as f32 + 16.0
         }
@@ -379,12 +409,17 @@ fn badge(paint: &mut Painter<'_, '_>, text: &str, right: f32, top: f32) -> f32 {
     rect.x
 }
 
-/// Draws the inspector for `description` at the window's right edge; as an overlay it casts
-/// a shadow on the main area.
-pub(crate) fn draw(paint: &mut Painter<'_, '_>, inspector: &Inspector, description: &Description) {
+/// Draws the inspector for `description`, `width` wide, at the window's right edge; as an
+/// overlay it casts a shadow on the main area.
+pub(crate) fn draw(
+    paint: &mut Painter<'_, '_>,
+    inspector: &Inspector,
+    description: &Description,
+    width: f32,
+) {
     let theme = paint.theme;
     let faces = paint.faces;
-    let area = region(paint.width);
+    let area = region(paint.width, width);
     if inspector.overlay {
         for step in 0..12 {
             let alpha = (41 * (step + 1) / 12) as u8;
@@ -503,6 +538,19 @@ fn draw_block(
                 let text = format!("{} ({})", found.name, found.columns.join(", "));
                 let text = elided(faces.mono, &text, (badge_right - left).max(0.0), CODE.0);
                 paint.text(faces.mono, &text, left, y, CODE, theme.text_primary);
+            }
+        }
+        InspectorBlock::Triggers => {
+            for (index, trigger) in description.triggers.iter().enumerate() {
+                let y = top + 36.0 * index as f32;
+                if !fits(y + 16.0) {
+                    break;
+                }
+                let name = elided(faces.mono, &trigger.name, right - left, CODE.0);
+                paint.text(faces.mono, &name, left, y, CODE, theme.text_primary);
+                let when = format!("{} {}", trigger.timing, trigger.events_text());
+                let when = elided(faces.ui, &when, right - left, SMALL.0);
+                paint.text(faces.ui, &when, left, y + 20.0, SMALL, theme.text_secondary);
             }
         }
         InspectorBlock::Ddl => {
@@ -650,6 +698,43 @@ mod tests {
             "another table's sample is not used"
         );
         assert_eq!(other.sample, None);
+    }
+
+    #[test]
+    fn a_table_with_triggers_lists_them_between_indexes_and_ddl() {
+        let mut window = MainWindow::sample();
+        let trigger = |name: &str, events: &[&str]| CatalogTrigger {
+            name: name.to_owned(),
+            table: "orders".to_owned(),
+            timing: "AFTER".to_owned(),
+            events: events.iter().map(|event| (*event).to_owned()).collect(),
+            action: "EXECUTE FUNCTION audit()".to_owned(),
+        };
+        window.tree.catalog.triggers = vec![
+            trigger("orders_audit", &["INSERT", "UPDATE"]),
+            trigger("orders_touch", &["UPDATE"]),
+        ];
+        let orders = window
+            .tree
+            .catalog
+            .tables
+            .iter()
+            .position(|table| table.name == "orders")
+            .unwrap();
+        let description = describe(&window.tree, TreeItem::Table(orders), None);
+        let headings: Vec<String> = description
+            .blocks()
+            .into_iter()
+            .map(|(_, heading)| heading)
+            .collect();
+        assert_eq!(
+            headings,
+            ["Columns (3)", "Indexes (1)", "Triggers (2)", "DDL"]
+        );
+        let tops = heading_tops(&description, &Inspector::for_width(1440));
+        assert_eq!(tops[3].2 - tops[2].2, 28.0 + 72.0 + 8.0);
+        let customers = describe(&window.tree, TreeItem::Table(0), None);
+        assert!(customers.triggers.is_empty());
     }
 
     #[test]

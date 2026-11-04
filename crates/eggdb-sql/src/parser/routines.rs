@@ -38,8 +38,38 @@ struct RoutineAttributes {
     strict: bool,
     security_definer: bool,
     settings: Vec<(String, String)>,
+    current_values: Vec<CurrentValue>,
     body: Option<String>,
     body_position: Option<usize>,
+}
+
+struct CurrentValue {
+    start: usize,
+    end: usize,
+    value: String,
+}
+
+fn with_current_values(text: &str, start: usize, current_values: &[CurrentValue]) -> String {
+    let mut written = String::with_capacity(text.len());
+    let mut copied = 0;
+    for current in current_values {
+        let (Some(from), Some(to)) = (
+            current.start.checked_sub(start),
+            current.end.checked_sub(start),
+        ) else {
+            continue;
+        };
+        let Some(before) = text.get(copied..from).filter(|_| from <= to) else {
+            continue;
+        };
+        written.push_str(before);
+        written.push_str("TO '");
+        written.push_str(&current.value.replace('\'', "''"));
+        written.push('\'');
+        copied = to;
+    }
+    written.push_str(text.get(copied..).unwrap_or_default());
+    written
 }
 
 impl<'t> Parser<'t> {
@@ -237,7 +267,11 @@ impl<'t> Parser<'t> {
             security_definer: attributes.security_definer,
             settings: attributes.settings,
             body,
-            text: self.slice(start, self.previous_end()),
+            text: with_current_values(
+                &self.slice(start, self.previous_end()),
+                start,
+                &attributes.current_values,
+            ),
             tsql: None,
             plsql: None,
         };
@@ -375,6 +409,7 @@ impl<'t> Parser<'t> {
             strict: false,
             security_definer: false,
             settings: Vec::new(),
+            current_values: Vec::new(),
             body: None,
             body_position: None,
         };
@@ -430,7 +465,9 @@ impl<'t> Parser<'t> {
             } else if self.take_word("support") {
                 self.table_name()?;
             } else if self.take_word("set") {
-                attributes.settings.push(self.routine_setting()?);
+                let (setting, current) = self.routine_setting()?;
+                attributes.settings.push(setting);
+                attributes.current_values.extend(current);
             } else if self.take_word("as") {
                 let (body, body_position) = self.routine_source()?;
                 attributes.body = Some(body);
@@ -454,20 +491,30 @@ impl<'t> Parser<'t> {
         }
     }
 
-    fn routine_setting(&mut self) -> SqlResult<(String, String)> {
+    fn routine_setting(&mut self) -> SqlResult<((String, String), Option<CurrentValue>)> {
         let position = self.position();
         let name = self.parameter_name()?;
-        if self.take_word("from") {
-            return Err(SqlError::not_supported(
-                "SET ... FROM CURRENT on a routine is not supported yet",
-            )
-            .at(position));
+        if self.is_word("from") && self.is_word_at(1, "current") {
+            let start = self.peek().start;
+            self.at += 2;
+            let end = self.previous_end();
+            let value = match self.settings {
+                Some(settings) => settings.get(&name),
+                None => crate::settings::Settings::default().get(&name),
+            }
+            .map_err(|error| error.at(position))?;
+            let current = CurrentValue {
+                start,
+                end,
+                value: value.clone(),
+            };
+            return Ok(((name, value), Some(current)));
         }
         if !(self.take_word("to") || self.take_operator("=")) {
             return Err(self.unexpected());
         }
         let value = self.setting_value()?.unwrap_or_default();
-        Ok((name, value))
+        Ok(((name, value), None))
     }
 
     fn routine_source(&mut self) -> SqlResult<(String, Option<usize>)> {

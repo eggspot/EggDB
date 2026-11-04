@@ -158,7 +158,6 @@ fn the_ssms_fixture_restores_and_matches_the_hand_written_results() {
         "\"comments\":2",
         "\"tables_skipped\":0",
         "\"rows_skipped\":0",
-        "\"kind\":\"procedure\",\"name\":\"dbo.TopCustomers\"",
         "\"kind\":\"synonym\",\"name\":\"dbo.Orders\"",
         "\"kind\":\"user or role\",\"name\":\"shopapp\"",
         "\"kind\":\"role membership\"",
@@ -197,13 +196,18 @@ fn the_ssms_fixture_restores_and_matches_the_hand_written_results() {
         "trorders|f\n"
     );
     assert!(!report.contains("\"name\":\"dbo.OrderItems\""), "{report}");
+    assert!(
+        !report.contains("\"name\":\"dbo.TopCustomers\""),
+        "{report}"
+    );
     assert_eq!(
         tsql(
             &db,
-            "SELECT dbo.OrderItems(1), dbo.OrderItems(3), dbo.OrderItems(42), OBJECT_ID('dbo.TopCustomers')"
+            "SELECT dbo.OrderItems(1), dbo.OrderItems(3), dbo.OrderItems(42), CASE WHEN OBJECT_ID('dbo.TopCustomers') IS NULL THEN 0 ELSE 1 END"
         ),
-        "3|2|NULL|NULL\n"
+        "3|2|NULL|1\n"
     );
+    assert_eq!(tsql(&db, "EXEC dbo.TopCustomers"), "1|2\n2|1\n");
     assert_eq!(
         tsql(
             &db,

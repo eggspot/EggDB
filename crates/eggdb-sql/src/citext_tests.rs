@@ -312,6 +312,106 @@ fn regular_expressions_on_a_citext_subject_ignore_case() {
 }
 
 #[test]
+fn citext_string_and_regexp_functions_ignore_case_as_the_extension_defines_them() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let cases = [
+        (
+            "SELECT regexp_match('Hello World'::citext, 'WORLD') AS a, \
+             regexp_match('Hello World'::citext, 'WORLD', 'c') AS b, \
+             regexp_match('Hello World'::text, 'WORLD') AS c",
+            "a|b|c\n{World}|NULL|NULL\nSELECT 1",
+        ),
+        (
+            "SELECT regexp_replace('Banana'::citext, 'A', '-', 'g') AS a, \
+             regexp_replace('Banana'::citext, 'A', '-') AS b, \
+             regexp_replace('Banana'::citext, 'N', '-', 'gc') AS c",
+            "a|b|c\nB-n-n-|B-nana|Banana\nSELECT 1",
+        ),
+        (
+            "SELECT regexp_split_to_array('aXbxc'::citext, 'x') AS a",
+            "a\n{a,b,c}\nSELECT 1",
+        ),
+        (
+            "SELECT regexp_matches('aXbx'::citext, '(x)', 'g') AS m",
+            "m\n{X}\n{x}\nSELECT 2",
+        ),
+        (
+            "SELECT regexp_split_to_table('1X2x3'::citext, 'x') AS p",
+            "p\n1\n2\n3\nSELECT 3",
+        ),
+        (
+            "SELECT replace('Hello hello'::citext, 'HELLO', 'bye') AS a, \
+             replace('a.b.A'::citext, '.', '+') AS b, \
+             replace('Hello'::text, 'L'::citext, 'x') AS c, \
+             replace(NULL::citext, 'a', 'b') AS d",
+            "a|b|c|d\nbye bye|a+b+A|Hello|NULL\nSELECT 1",
+        ),
+        (
+            "SELECT split_part('oneXtwoxthree'::citext, 'x', 2) AS a, \
+             split_part('oneXtwo'::citext, 'x', 5) AS b, \
+             split_part('a.B.c'::citext, '.', 3) AS c",
+            "a|b|c\ntwo|NULL|c\nSELECT 1",
+        ),
+        (
+            "SELECT strpos('Hello'::citext, 'LL') AS a, strpos('Hello'::text, 'LL') AS b, \
+             strpos('Hello'::text, 'LL'::citext) AS c",
+            "a|b|c\n3|0|0\nSELECT 1",
+        ),
+        (
+            "SELECT translate('Hello'::citext, 'L', '1') AS a, \
+             translate('Hello'::text, 'L', '1') AS b",
+            "a|b\nHe11o|Hello\nSELECT 1",
+        ),
+    ];
+    for (sql, expected) in cases {
+        assert_eq!(ok(&mut session, sql), expected, "{sql}");
+    }
+    ok(
+        &mut session,
+        "CREATE TABLE account (id integer, email citext)",
+    );
+    ok(
+        &mut session,
+        "INSERT INTO account VALUES (1, 'Alice@Example.com'), (2, 'bob@other.org')",
+    );
+    assert_eq!(
+        ok(
+            &mut session,
+            "SELECT id, split_part(email, '@EXAMPLE', 1) AS name FROM account \
+             WHERE strpos(email, 'EXAMPLE') > 0 ORDER BY id"
+        ),
+        "id|name\n1|Alice\nSELECT 1"
+    );
+}
+
+#[test]
+fn citext_string_functions_fold_case_beyond_ascii_and_regexps_fold_ascii_letters() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        ok(
+            &mut session,
+            "SELECT replace('CAFÉ'::citext, 'é', 'e') AS a, \
+             split_part('aÉb'::citext, 'é', 2) AS b, \
+             strpos('Café'::citext, 'É') AS c, \
+             translate('ÉTÉ'::citext, 'é', 'e') AS d, \
+             replace('Straße'::citext, 'SS', 's') AS e, \
+             'CAFÉ'::citext = 'café' AS f"
+        ),
+        "a|b|c|d|e|f\nCAFe|b|4|eTe|Strase|t\nSELECT 1"
+    );
+    assert_eq!(
+        ok(
+            &mut session,
+            "SELECT regexp_replace('CAFÉ'::citext, 'é', 'e') AS a, \
+             regexp_replace('CAFÉ'::citext, 'f', 'p') AS b"
+        ),
+        "a|b\nCAFÉ|CApÉ\nSELECT 1"
+    );
+}
+
+#[test]
 fn a_view_over_a_citext_column_reads_back_after_reopening() {
     let store = MemoryStore::default();
     {

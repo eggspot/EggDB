@@ -545,7 +545,7 @@ fn returned_type(returns: &RoutineReturns) -> SqlType {
     match returns {
         RoutineReturns::One(ReturnType::Type(sql_type))
         | RoutineReturns::Set(ReturnType::Type(sql_type)) => *sql_type,
-        _ => SqlType::Dynamic,
+        _ => SqlType::DYNAMIC,
     }
 }
 

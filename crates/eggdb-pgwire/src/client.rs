@@ -64,8 +64,9 @@ impl SslMode {
     }
 }
 
-/// Where and how to connect, read from a `postgres://` URL.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Where and how to connect, read from a `postgres://` URL. Its `Debug` output shows whether a
+/// password is set, never the password.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ConnectOptions {
     /// The host name or address.
     pub host: String,
@@ -84,6 +85,24 @@ pub struct ConnectOptions {
     /// Whether to open a logical replication connection (`replication=database`).
     pub replication: bool,
 }
+
+impl std::fmt::Debug for ConnectOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConnectOptions")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("database", &self.database)
+            .field("password", &self.password.as_ref().map(|_| HIDDEN_SECRET))
+            .field("ssl_mode", &self.ssl_mode)
+            .field("ssl_root_cert", &self.ssl_root_cert)
+            .field("replication", &self.replication)
+            .finish()
+    }
+}
+
+const HIDDEN_SECRET: &str = "***";
 
 impl ConnectOptions {
     /// The URL without a password, for messages.
@@ -333,6 +352,7 @@ pub struct PgClient {
     tls_version: Option<u16>,
     options: ConnectOptions,
     backend_key: Option<(i32, Vec<u8>)>,
+    ready_status: u8,
 }
 
 impl std::fmt::Debug for PgClient {
@@ -413,6 +433,7 @@ impl PgClient {
                 ..options.clone()
             },
             backend_key: None,
+            ready_status: b'I',
         };
         if let Transport::Tls(stream) = &client.transport {
             client.tls_version = Some(stream.info().version);
@@ -526,7 +547,18 @@ impl PgClient {
         }
         self.fill(1 + length)?;
         let message: Vec<u8> = self.incoming.drain(..1 + length).collect();
+        if message[0] == b'Z'
+            && let Some(&status) = message.get(5)
+        {
+            self.ready_status = status;
+        }
         Ok((message[0], message[5..].to_vec()))
+    }
+
+    /// The transaction status the server gave in its last `ReadyForQuery`: `b'I'` idle,
+    /// `b'T'` inside a transaction block, `b'E'` inside a failed one.
+    pub fn ready_status(&self) -> u8 {
+        self.ready_status
     }
 
     fn start_up(&mut self, options: &ConnectOptions) -> Result<(), ClientError> {
@@ -977,12 +1009,23 @@ pub struct PreparedOutline {
 
 /// What a cancel request for one connection needs: where its server is, and the process ID and
 /// secret key the server gave the connection in its `BackendKeyData`. It may be sent from any
-/// thread while the connection runs a statement.
-#[derive(Debug, Clone)]
+/// thread while the connection runs a statement. Its `Debug` output never shows the secret key.
+#[derive(Clone)]
 pub struct CancelRequest {
     options: ConnectOptions,
     process_id: i32,
     secret_key: Vec<u8>,
+}
+
+impl std::fmt::Debug for CancelRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CancelRequest")
+            .field("options", &self.options)
+            .field("process_id", &self.process_id)
+            .field("secret_key", &HIDDEN_SECRET)
+            .finish()
+    }
 }
 
 impl CancelRequest {
@@ -1309,6 +1352,25 @@ fn data_row(body: &[u8]) -> Result<Vec<Option<String>>, ClientError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_output_shows_neither_the_password_nor_the_cancel_key() {
+        let mut options = parse_postgres_url("postgres://ada@db.example.com/app").unwrap();
+        options.password = Some("hunter2-secret".to_owned());
+        let shown = format!("{options:?}");
+        assert!(!shown.contains("hunter2-secret"), "{shown}");
+        assert!(shown.contains("password: Some(\"***\")"), "{shown}");
+        assert!(shown.contains("db.example.com"), "{shown}");
+        let cancel = CancelRequest {
+            options,
+            process_id: 7,
+            secret_key: b"cancel-key-bytes".to_vec(),
+        };
+        let shown = format!("{cancel:?}");
+        assert!(!shown.contains("hunter2-secret"), "{shown}");
+        assert!(!shown.contains("99, 97, 110"), "{shown}");
+        assert!(shown.contains("process_id: 7"), "{shown}");
+    }
 
     #[test]
     fn urls_read_like_libpq_and_refuse_passwords() {

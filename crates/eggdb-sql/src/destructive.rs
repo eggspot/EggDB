@@ -1,10 +1,10 @@
 use crate::ast::{
     AlterAction, AlterRoutine, AlterRoutineAction, AlterTriggerAction, AssignedValue,
     BinaryOperator, CopySource, CreateRoutine, CursorCommand, Delete, DropRoutine, Expr, ExprKind,
-    GeneratedTable, Insert, InsertSource, InsertValue, Literal, MaterializedViewCommand,
-    MergeStatement, MySqlStatement, Name, OnDuplicate, Query, ReferentialAction, RoutineTarget,
-    Select, SelectItem, SetExpr, SqlServerStatement, Statement, TableReference, UnaryOperator,
-    Update, VariableSource,
+    FromClause, GeneratedTable, Insert, InsertSource, InsertValue, JoinCondition, Literal,
+    MaterializedViewCommand, MergeStatement, MultitableInsert, MySqlStatement, Name, OnDuplicate,
+    OutputInto, OutputTarget, Query, ReferentialAction, RoutineTarget, Select, SelectItem, SetExpr,
+    SqlServerStatement, Statement, TableReference, UnaryOperator, Update, VariableSource,
 };
 use crate::dialect::Dialect;
 use crate::encoding::TableDefinition;
@@ -390,6 +390,8 @@ pub(crate) fn classify(
         )),
         Statement::With(with) => crate::with_statement::classify(with, keys),
         Statement::Merge(merge) => merged(merge, keys),
+        Statement::CreateTableAs(create) => classify(&create.query, keys),
+        Statement::MultitableInsert(insert) => multitable_inserted(insert, keys),
     }
 }
 
@@ -418,6 +420,7 @@ fn sqlserver(
         }
         | SqlServerStatement::SelectAssign { query, .. } => classify(query, keys),
         SqlServerStatement::DeclareCursor(cursor) => classify(&cursor.query, keys),
+        SqlServerStatement::OutputInto(output) => output_into(output, keys),
         SqlServerStatement::InsertBulk(bulk) => insert_runs_code(&bulk.table, keys),
         SqlServerStatement::Use(_)
         | SqlServerStatement::NoCount(_)
@@ -431,6 +434,7 @@ fn sqlserver(
         | SqlServerStatement::UpdateVariable { .. }
         | SqlServerStatement::DeleteVariable { .. }
         | SqlServerStatement::FormatOnly(_)
+        | SqlServerStatement::Showplan { .. }
         | SqlServerStatement::XactAbort(_)
         | SqlServerStatement::Declare(_)
         | SqlServerStatement::SetVariable { .. }
@@ -533,14 +537,23 @@ fn shown_text(name: &str) -> String {
 fn deleted(delete: &Delete, keys: &mut CatalogLookup<'_>) -> Option<DestructiveStatement> {
     let kind = match row_reach(delete.filter.as_ref(), &delete.table, keys) {
         RowReach::WholeTable => Some(DestructiveKind::DeleteWithoutFilter),
-        RowReach::Pinned(table) if !table.delete_reaches_further => None,
+        RowReach::Pinned(table) if !table.delete_reaches_further && delete.using.is_none() => None,
         RowReach::Pinned(_) | RowReach::Many => Some(DestructiveKind::DeleteOfManyRows),
     };
     let mut functions = CalledFunctions::default();
     optional_user_functions(delete.filter.as_ref(), keys, &mut functions);
     returning_user_functions(delete.returning.as_deref(), keys, &mut functions);
+    let mut names = vec![shown(&delete.table.name)];
+    if let Some(joined) = &delete.using {
+        from_user_functions(&joined.tables, keys, &mut functions);
+        for &at in &joined.more_targets_at {
+            if let Some(reference) = joined.references().nth(at) {
+                names.push(shown(&reference.name));
+            }
+        }
+    }
     DestructiveStatement::combined(
-        kind.map(|kind| DestructiveStatement::new(kind, vec![shown(&delete.table.name)], false)),
+        kind.map(|kind| DestructiveStatement::new(kind, names, false)),
         running(functions.user),
     )
 }
@@ -548,7 +561,11 @@ fn deleted(delete: &Delete, keys: &mut CatalogLookup<'_>) -> Option<DestructiveS
 fn updated(update: &Update, keys: &mut CatalogLookup<'_>) -> Option<DestructiveStatement> {
     let kind = match row_reach(update.filter.as_ref(), &update.table, keys) {
         RowReach::WholeTable => Some(DestructiveKind::UpdateWithoutFilter),
-        RowReach::Pinned(table) if !table.update_reaches_further_with(update) => None,
+        RowReach::Pinned(table)
+            if !table.update_reaches_further_with(update) && update.from.is_none() =>
+        {
+            None
+        }
         RowReach::Pinned(_) | RowReach::Many => Some(DestructiveKind::UpdateOfManyRows),
     };
     let mut functions = CalledFunctions::default();
@@ -559,10 +576,33 @@ fn updated(update: &Update, keys: &mut CatalogLookup<'_>) -> Option<DestructiveS
     }
     optional_user_functions(update.filter.as_ref(), keys, &mut functions);
     returning_user_functions(update.returning.as_deref(), keys, &mut functions);
+    if let Some(joined) = &update.from {
+        from_user_functions(&joined.tables, keys, &mut functions);
+    }
     DestructiveStatement::combined(
-        kind.map(|kind| DestructiveStatement::new(kind, vec![shown(&update.table.name)], false)),
+        kind.map(|kind| DestructiveStatement::new(kind, updated_tables(update), false)),
         running(functions.user),
     )
+}
+
+fn updated_tables(update: &Update) -> Vec<String> {
+    let mut names = vec![shown(&update.table.name)];
+    let Some(joined) = update
+        .from
+        .as_ref()
+        .filter(|joined| joined.writes_any_table)
+    else {
+        return names;
+    };
+    let unqualified = (0..update.assignments.len())
+        .any(|at| joined.assigned_at.get(at).copied().flatten().is_none());
+    for (at, reference) in joined.references().enumerate() {
+        let written = unqualified || joined.assigned_at.contains(&Some(at));
+        if written && reference.derived.is_none() && reference.generated.is_none() {
+            push_new(&mut names, shown(&reference.name));
+        }
+    }
+    names
 }
 
 fn inserted(insert: &Insert, keys: &mut CatalogLookup<'_>) -> Option<DestructiveStatement> {
@@ -592,6 +632,29 @@ fn inserted(insert: &Insert, keys: &mut CatalogLookup<'_>) -> Option<Destructive
         }
     }
     returning_user_functions(insert.returning.as_deref(), keys, &mut functions);
+    DestructiveStatement::combined(found, running(functions.user))
+}
+
+fn output_into(output: &OutputInto, keys: &mut CatalogLookup<'_>) -> Option<DestructiveStatement> {
+    let found = classify(&output.statement, keys);
+    match &output.destination.target {
+        OutputTarget::Table(table) => {
+            DestructiveStatement::combined(found, insert_runs_code(&table.name, keys))
+        }
+        OutputTarget::Variable(_) => found,
+    }
+}
+
+fn multitable_inserted(
+    insert: &MultitableInsert,
+    keys: &mut CatalogLookup<'_>,
+) -> Option<DestructiveStatement> {
+    let mut found = None;
+    for target in insert.targets() {
+        found = DestructiveStatement::combined(found, insert_runs_code(&target.table.name, keys));
+    }
+    let mut functions = CalledFunctions::default();
+    query_user_functions(&insert.source, keys, &mut functions);
     DestructiveStatement::combined(found, running(functions.user))
 }
 
@@ -664,9 +727,36 @@ fn select_user_functions(
     for expr in crate::subquery::select_expressions(select) {
         user_functions(expr, catalog, functions);
     }
-    let Some(from) = &select.from else {
-        return;
-    };
+    if let Some(from) = &select.from {
+        listed_user_functions(from, catalog, functions);
+    }
+}
+
+fn from_user_functions(
+    from: &FromClause,
+    catalog: &mut CatalogLookup<'_>,
+    functions: &mut CalledFunctions,
+) {
+    for table in std::iter::once(&from.first).chain(from.joins.iter().map(|join| &join.table)) {
+        if let Some(generated) = &table.generated {
+            for expr in crate::set_returning::expressions(generated) {
+                user_functions(expr, catalog, functions);
+            }
+        }
+    }
+    for join in &from.joins {
+        if let JoinCondition::On(expr) = &join.condition {
+            user_functions(expr, catalog, functions);
+        }
+    }
+    listed_user_functions(from, catalog, functions);
+}
+
+fn listed_user_functions(
+    from: &FromClause,
+    catalog: &mut CatalogLookup<'_>,
+    functions: &mut CalledFunctions,
+) {
     for table in std::iter::once(&from.first).chain(from.joins.iter().map(|join| &join.table)) {
         if let Some(derived) = &table.derived {
             query_user_functions(&derived.query, catalog, functions);
@@ -865,11 +955,11 @@ fn changed_routines(names: Vec<String>) -> Option<DestructiveStatement> {
 
 fn merged(merge: &MergeStatement, keys: &mut CatalogLookup<'_>) -> Option<DestructiveStatement> {
     let deletes = merge
-        .update
+        .matched
         .iter()
         .chain(&merge.by_source)
         .any(|clause| clause.delete_condition.is_some());
-    let found = match merge.update.as_ref().or(merge.by_source.first()) {
+    let found = match merge.matched.first().or(merge.by_source.first()) {
         Some(_) => {
             let kind = if deletes {
                 DestructiveKind::DeleteOfManyRows
@@ -888,7 +978,7 @@ fn merged(merge: &MergeStatement, keys: &mut CatalogLookup<'_>) -> Option<Destru
     let mut functions = CalledFunctions::default();
     select_user_functions(&merge.source, keys, &mut functions);
     user_functions(&merge.on, keys, &mut functions);
-    if let Some(update) = &merge.update {
+    for update in &merge.matched {
         for (_, expr) in &update.assignments {
             user_functions(expr, keys, &mut functions);
         }

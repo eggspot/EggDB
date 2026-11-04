@@ -1,9 +1,11 @@
-use crate::frame::{Frame, next_frame};
+use crate::frame::{Frame, next_frame, pending_frame_bytes};
 use crate::{ServerConfig, serve};
 use eggdb_keyspace::MemoryKeyspace;
+use eggdb_platform::connection_limits::MemoryBudget;
 use eggdb_queues::{Depth, Queues};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -22,6 +24,7 @@ fn config() -> ServerConfig {
         user: "eggdb".to_owned(),
         password_sha256: eggdb_crypto::sha256(b"secret"),
         max_connections: 8,
+        memory_budget: Arc::default(),
     }
 }
 
@@ -94,13 +97,17 @@ impl Drop for StopOnDrop<'_> {
 }
 
 fn with_server(test: impl FnOnce(SocketAddr, &Queues<'_>)) {
+    with_server_config(&config(), test);
+}
+
+fn with_server_config(config: &ServerConfig, test: impl FnOnce(SocketAddr, &Queues<'_>)) {
     let keyspace = MemoryKeyspace::default();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let stop = AtomicBool::new(false);
     std::thread::scope(|scope| {
         let server = scope.spawn(|| {
-            serve(&keyspace, &listener, &config(), &|| {
+            serve(&keyspace, &listener, config, &|| {
                 stop.load(Ordering::Relaxed)
             })
         });
@@ -289,4 +296,122 @@ fn wrong_passcodes_and_bad_frames_are_refused() {
             ("ERROR", Some("r"))
         );
     });
+}
+
+#[test]
+fn a_frame_declares_the_bytes_it_will_take() {
+    assert_eq!(pending_frame_bytes(b""), 0);
+    let head = b"\nSEND\ndestination:/queue/a\ncontent-length:500000\n\n";
+    assert_eq!(pending_frame_bytes(head), head.len() + 500_000 + 1);
+    let crlf = b"SEND\r\ncontent-length:10\r\n\r\nabc";
+    assert_eq!(pending_frame_bytes(crlf), 27 + 10 + 1);
+    assert_eq!(pending_frame_bytes(b"SEND\ncontent-length:500000\n"), 27);
+    assert_eq!(pending_frame_bytes(b"SEND\n\nbody"), 10);
+}
+
+#[test]
+fn frames_and_transactions_past_the_memory_budget_are_refused_and_others_go_on() {
+    let budget = Arc::new(MemoryBudget::new(400_000));
+    let config = ServerConfig {
+        memory_budget: Arc::clone(&budget),
+        ..config()
+    };
+    with_server_config(&config, |address, queues| {
+        let mut greedy = Client::connected(address);
+        greedy
+            .stream
+            .write_all(b"SEND\ndestination:/queue/big\ncontent-length:500000\n\n")
+            .unwrap();
+        let refusal = greedy.next();
+        assert_eq!(refusal.command, "ERROR", "{refusal:?}");
+        assert!(
+            String::from_utf8_lossy(&refusal.body).contains("memory budget"),
+            "{refusal:?}"
+        );
+        let mut stager = Client::connected(address);
+        stager.send(&Frame::new("BEGIN").with("transaction", "t"));
+        let body = vec![b'x'; 120_000];
+        let staged = || {
+            Frame::new("SEND")
+                .with("destination", "/queue/staged")
+                .with("transaction", "t")
+                .with_body(&body)
+        };
+        stager.receipt(staged(), "first");
+        stager.receipt(staged(), "second");
+        stager.send(&staged().with("receipt", "third"));
+        let refusal = stager.next();
+        assert_eq!(refusal.command, "ERROR", "{refusal:?}");
+        assert!(
+            String::from_utf8_lossy(&refusal.body).contains("memory budget"),
+            "{refusal:?}"
+        );
+        let mut other = Client::connected(address);
+        other.receipt(
+            Frame::new("SEND")
+                .with("destination", "/queue/small")
+                .with_body(b"fits"),
+            "sent",
+        );
+        assert_eq!(queues.depth("small", u64::MAX).unwrap().ready, 1);
+        assert!(!queues.exists("staged").unwrap());
+    });
+    assert_eq!(budget.used_bytes(), 0);
+}
+
+#[test]
+fn a_small_budget_delivers_every_queued_message_to_every_subscription_without_redelivering() {
+    let budget = Arc::new(MemoryBudget::new(400_000));
+    let config = ServerConfig {
+        memory_budget: Arc::clone(&budget),
+        ..config()
+    };
+    with_server_config(&config, |address, queues| {
+        let body = vec![b'x'; 100_000];
+        for queue in ["first", "second"] {
+            queues.declare(queue).unwrap();
+            for _ in 0..12 {
+                queues.send(queue, &body, 0, now_ms()).unwrap();
+            }
+        }
+        let mut consumer = Client::connected(address);
+        for (queue, id) in [("first", "a"), ("second", "b")] {
+            consumer.send(
+                &Frame::new("SUBSCRIBE")
+                    .with("destination", &format!("/queue/{queue}"))
+                    .with("id", id),
+            );
+        }
+        let mut received = std::collections::BTreeMap::<String, usize>::new();
+        for _ in 0..24 {
+            let message = consumer.next();
+            assert_eq!(message.command, "MESSAGE", "{message:?}");
+            assert_eq!(message.header("redelivered"), None, "{message:?}");
+            assert_eq!(message.body.len(), body.len());
+            *received
+                .entry(message.header("subscription").unwrap().to_owned())
+                .or_default() += 1;
+        }
+        assert_eq!(received.get("a"), Some(&12));
+        assert_eq!(received.get("b"), Some(&12));
+        queues.declare("huge").unwrap();
+        queues
+            .send("huge", &vec![b'y'; 500_000], 0, now_ms())
+            .unwrap();
+        let mut greedy = Client::connected(address);
+        greedy.send(
+            &Frame::new("SUBSCRIBE")
+                .with("destination", "/queue/huge")
+                .with("id", "h"),
+        );
+        let refusal = greedy.next();
+        assert_eq!(refusal.command, "ERROR", "{refusal:?}");
+        assert!(
+            String::from_utf8_lossy(&refusal.body).contains("memory budget"),
+            "{refusal:?}"
+        );
+        let untouched = queues.receive("huge", 1, 1, u64::MAX - 1).unwrap();
+        assert_eq!(untouched[0].receive_count, 1);
+    });
+    assert_eq!(budget.used_bytes(), 0);
 }

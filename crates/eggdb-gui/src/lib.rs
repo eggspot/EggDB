@@ -30,18 +30,30 @@ pub mod connect_screen;
 pub mod connection;
 /// The SQL dialects a query tab runs in.
 pub mod dialect;
+/// The dialog that confirms dropping an object from the tree, with its statement in the
+/// active tab's dialect (`docs/ux/workspace.md` 10.2).
+pub mod drop_prompt;
 /// The query editor: text, cursor, selection and editing commands.
 pub mod editor;
 mod font;
 /// The result grid: columns, rows, scrolling and cell selection.
 pub mod grid;
+/// The grid's right-click menu: its items, where it opens and its keys
+/// (`docs/ux/workspace.md` 9.4).
+pub mod grid_menu;
 /// SQL syntax highlighting for the editor.
 pub mod highlight;
 /// The inspector: the selected object's columns, indexes, DDL and sample rows
 /// (`docs/ux/workspace.md` 4.3).
 pub mod inspector;
-/// The window layout: panes, splitters and their sizes.
+/// A keys tab's scan of a key space's first keys, spelled for the keys grid
+/// (`docs/ux/workspace.md` 10.4).
+pub mod key_scan;
+/// The main window's layouts (`docs/ux/gui-layouts.md`): EggDB's own and those that work like
+/// clients people already know, each with its regions, labels and shortcut table.
 pub mod layout;
+/// The layout picker: the dialog that lists the layouts and applies one.
+pub mod layout_picker;
 /// The main window: what it draws and how it answers input.
 pub mod main_window;
 /// The object browser: the sidebar's tree of the catalog, its filter and keys
@@ -59,11 +71,27 @@ pub mod pointer;
 /// The query tab: its editor, dialect, runs, results and inline errors
 /// (`docs/ux/workspace.md` 2).
 pub mod query_tab;
+/// Scrollbar geometry and drawing for the grid, the editor and the value view
+/// (`docs/ux/workspace.md` 9.6).
+pub mod scrollbar;
+/// What the client keeps per user between starts, such as the layout.
+pub mod settings;
+/// The splitters between the window's regions and the sizes they set, kept in the client's
+/// settings (`docs/ux/workspace.md` 10.5).
+pub mod splitters;
 /// Splitting an editor's text into statements by each dialect's rules.
 pub mod statements;
 /// The status line's and status bar's strings (`docs/ux/workspace.md` 2.4).
 pub mod status_line;
 mod system_faces;
+/// The query tabs' strip: tab widths, its scroll, new tab titles and the dialog that asks
+/// before a tab closes (`docs/ux/workspace.md` 9.1).
+pub mod tab_strip;
+/// The object tree's row menu: its items, which rows enable them, where it opens and its
+/// keys (`docs/ux/workspace.md` 10.1).
+pub mod tree_menu;
+/// The grid's full-value view on one cell (`docs/ux/workspace.md` 9.3).
+pub mod value_view;
 /// The client's screens in order: the connect card until a database opens, then the main
 /// window on it (`docs/ux/workspace.md` 1.5 to 1.7).
 pub mod workspace;

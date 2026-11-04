@@ -75,6 +75,8 @@ pub(crate) fn scalar_select(items: Vec<Expr>, from: Option<TableReference>) -> S
         limit: None,
         offset: None,
         source_row_limit: None,
+        grouping_sets: None,
+        distinct_on: Vec::new(),
     }
 }
 

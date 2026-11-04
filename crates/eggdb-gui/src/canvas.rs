@@ -26,7 +26,11 @@ pub struct Canvas {
     width: usize,
     height: usize,
     pixels: Vec<Rgba>,
+    shift: (i64, i64),
+    clip: (i64, i64, i64, i64),
 }
+
+const UNCLIPPED: (i64, i64, i64, i64) = (0, 0, i64::MAX, i64::MAX);
 
 fn fitted_size(width: usize, height: usize) -> (usize, usize) {
     if width
@@ -56,6 +60,8 @@ impl Canvas {
             width,
             height,
             pixels: vec![background; width * height],
+            shift: (0, 0),
+            clip: UNCLIPPED,
         }
     }
 
@@ -69,6 +75,8 @@ impl Canvas {
             width,
             height,
             pixels: vec![background; count],
+            shift: (0, 0),
+            clip: UNCLIPPED,
         })
     }
 
@@ -101,9 +109,59 @@ impl Canvas {
             .collect()
     }
 
+    /// Moves everything drawn next by `shift` whole pixels and keeps it inside `clip` (in
+    /// the canvas's own pixels), until [`Canvas::draw_anywhere`]: how a region drawn for one
+    /// place of the window is put in another.
+    pub(crate) fn draw_placed(&mut self, shift: (i64, i64), clip: Rect) {
+        self.shift = shift;
+        self.clip = (
+            clip.x.floor() as i64,
+            clip.y.floor() as i64,
+            (clip.x + clip.w).ceil() as i64,
+            (clip.y + clip.h).ceil() as i64,
+        );
+    }
+
+    /// Ends [`Canvas::draw_placed`]: shapes go where they are drawn again, anywhere on the
+    /// canvas.
+    pub(crate) fn draw_anywhere(&mut self) {
+        self.shift = (0, 0);
+        self.clip = UNCLIPPED;
+    }
+
+    /// Keeps what is drawn next inside `rect` (in the coordinates shapes are drawn in, before
+    /// the shift) as well as inside the clip already set, until [`Canvas::restore_clip`] with
+    /// the clip it returns.
+    pub(crate) fn clip_within(&mut self, rect: Rect) -> (i64, i64, i64, i64) {
+        let previous = self.clip;
+        let (dx, dy) = self.shift;
+        self.clip = (
+            previous.0.max((rect.x.floor() as i64).saturating_add(dx)),
+            previous.1.max((rect.y.floor() as i64).saturating_add(dy)),
+            previous
+                .2
+                .min(((rect.x + rect.w).ceil() as i64).saturating_add(dx)),
+            previous
+                .3
+                .min(((rect.y + rect.h).ceil() as i64).saturating_add(dy)),
+        );
+        previous
+    }
+
+    /// Puts back the clip [`Canvas::clip_within`] narrowed.
+    pub(crate) fn restore_clip(&mut self, clip: (i64, i64, i64, i64)) {
+        self.clip = clip;
+    }
+
     /// Mixes `color` into (`x`, `y`) with `coverage`; points outside are ignored.
     pub fn blend(&mut self, x: i64, y: i64, color: Rgba, coverage: f32) {
-        if coverage <= 0.0 || x < 0 || y < 0 {
+        let (x, y) = (
+            x.saturating_add(self.shift.0),
+            y.saturating_add(self.shift.1),
+        );
+        let (left, top, right, bottom) = self.clip;
+        let inside = (left.max(0)..right).contains(&x) && (top.max(0)..bottom).contains(&y);
+        if coverage <= 0.0 || !inside {
             return;
         }
         let (x, y) = (x as usize, y as usize);
@@ -286,6 +344,21 @@ mod tests {
         }
         assert_eq!(fitted_size(131_072, 131_072), (8192, 8192));
         assert!(Canvas::new(usize::MAX, 0, WHITE).pixels().is_empty());
+    }
+
+    #[test]
+    fn placed_drawing_moves_by_the_shift_and_stays_inside_the_clip() {
+        let mut canvas = Canvas::new(8, 8, WHITE);
+        canvas.draw_placed((2, 3), Rect::new(2.0, 3.0, 3.0, 2.0));
+        canvas.fill_rect(Rect::new(0.0, 0.0, 8.0, 8.0), BLACK);
+        canvas.draw_anywhere();
+        let dark: Vec<(usize, usize)> = (0..8)
+            .flat_map(|y| (0..8).map(move |x| (x, y)))
+            .filter(|&(x, y)| canvas.pixel(x, y) == Some(BLACK))
+            .collect();
+        assert_eq!(dark, [(2, 3), (3, 3), (4, 3), (2, 4), (3, 4), (4, 4)]);
+        canvas.fill_rect(Rect::new(0.0, 0.0, 1.0, 1.0), BLACK);
+        assert_eq!(canvas.pixel(0, 0), Some(BLACK));
     }
 
     #[test]

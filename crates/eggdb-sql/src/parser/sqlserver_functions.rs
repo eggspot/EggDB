@@ -2,7 +2,8 @@ use super::Parser;
 use super::sqlserver::not_supported;
 use crate::ast::{
     AggregateFunction, DerivedTable, Expr, ExprKind, FromClause, GeneratedTable, Literal, Name,
-    Query, Select, SelectItem, TableFunction, TableReference,
+    OutputDestination, OutputInto, OutputTarget, Query, Select, SelectItem, SqlServerStatement,
+    Statement, TableFunction, TableReference,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
@@ -13,6 +14,26 @@ use crate::sqlserver_types::{Length, SqlServerType};
 use crate::types::{SqlType, Value};
 
 const MOST_CONCAT_ARGUMENTS: usize = 254;
+
+pub(super) struct OutputClause {
+    pub(super) items: Vec<SelectItem>,
+    pub(super) into: Option<OutputDestination>,
+}
+
+pub(super) fn with_output_into(
+    statement: Statement,
+    destination: Option<OutputDestination>,
+) -> Statement {
+    match destination {
+        Some(destination) => {
+            Statement::SqlServer(SqlServerStatement::OutputInto(Box::new(OutputInto {
+                statement,
+                destination,
+            })))
+        }
+        None => statement,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OutputStatement {
@@ -117,11 +138,19 @@ pub(super) fn now_with_offset(position: usize) -> Expr {
     }
 }
 
-fn unqualified(expr: &mut Expr, statement: OutputStatement) -> SqlResult<()> {
+fn bound_output_column(
+    expr: &mut Expr,
+    statement: OutputStatement,
+    target: Option<&str>,
+) -> SqlResult<()> {
     if let ExprKind::Column { qualifier, name } = &mut expr.kind {
         match qualifier.as_deref() {
-            Some("inserted") if statement != OutputStatement::Delete => *qualifier = None,
-            Some("deleted") if statement == OutputStatement::Delete => *qualifier = None,
+            Some("inserted") if statement != OutputStatement::Delete => {
+                *qualifier = target.map(str::to_owned);
+            }
+            Some("deleted") if statement == OutputStatement::Delete => {
+                *qualifier = target.map(str::to_owned);
+            }
             Some("deleted") => {
                 return Err(not_supported("OUTPUT deleted. in UPDATE").at(expr.position));
             }
@@ -131,9 +160,38 @@ fn unqualified(expr: &mut Expr, statement: OutputStatement) -> SqlResult<()> {
         return Ok(());
     }
     for child in crate::eval::children_mut(expr) {
-        unqualified(child, statement)?;
+        bound_output_column(child, statement, target)?;
     }
     Ok(())
+}
+
+pub(super) fn bound_output(
+    mut items: Vec<SelectItem>,
+    statement: OutputStatement,
+    target: Option<&str>,
+) -> SqlResult<Vec<SelectItem>> {
+    for item in &mut items {
+        match item {
+            SelectItem::Wildcard {
+                qualifier,
+                position,
+            } => match qualifier.as_deref() {
+                Some("inserted") if statement != OutputStatement::Delete => {
+                    *qualifier = target.map(str::to_owned);
+                }
+                Some("deleted") if statement == OutputStatement::Delete => {
+                    *qualifier = target.map(str::to_owned);
+                }
+                Some("deleted") => {
+                    return Err(not_supported("OUTPUT deleted. in UPDATE").at(*position));
+                }
+                Some(other) => return Err(not_bound(other, "*", *position)),
+                None => {}
+            },
+            SelectItem::Expr { expr, .. } => bound_output_column(expr, statement, target)?,
+        }
+    }
+    Ok(items)
 }
 
 impl Parser<'_> {
@@ -417,9 +475,6 @@ impl Parser<'_> {
         } else {
             Vec::new()
         };
-        if self.is_word("over") {
-            return Err(not_supported("STRING_AGG with OVER").at(self.position()));
-        }
         let value_position = value.position;
         let text_value = call(
             Function::Convert {
@@ -429,6 +484,14 @@ impl Parser<'_> {
             vec![value],
             value_position,
         );
+        if self.is_word("over") {
+            return self.whole_partition_aggregate(
+                AggregateFunction::StringAgg,
+                vec![text_value, separator],
+                order,
+                name.position,
+            );
+        }
         let joined = Expr {
             kind: ExprKind::Function {
                 name: "string_agg_arguments".to_owned(),
@@ -709,32 +772,60 @@ impl Parser<'_> {
     pub(super) fn sqlserver_output(
         &mut self,
         statement: OutputStatement,
-    ) -> SqlResult<Option<Vec<SelectItem>>> {
+    ) -> SqlResult<Option<OutputClause>> {
+        let Some(clause) = self.sqlserver_output_items()? else {
+            return Ok(None);
+        };
+        Ok(Some(OutputClause {
+            items: bound_output(clause.items, statement, None)?,
+            into: clause.into,
+        }))
+    }
+
+    pub(super) fn sqlserver_output_items(&mut self) -> SqlResult<Option<OutputClause>> {
         if !self.take_word("output") {
             return Ok(None);
         }
         let mut items = self.select_items()?;
-        if self.is_word("into") {
-            return Err(not_supported("OUTPUT ... INTO").at(self.position()));
+        let position = self.position();
+        if !self.take_word("into") {
+            return Ok(Some(OutputClause { items, into: None }));
         }
-        for item in &mut items {
-            match item {
-                SelectItem::Wildcard {
-                    qualifier,
-                    position,
-                } => match qualifier.as_deref() {
-                    Some("inserted") if statement != OutputStatement::Delete => *qualifier = None,
-                    Some("deleted") if statement == OutputStatement::Delete => *qualifier = None,
-                    Some("deleted") => {
-                        return Err(not_supported("OUTPUT deleted. in UPDATE").at(*position));
-                    }
-                    Some(other) => return Err(not_bound(other, "*", *position)),
-                    None => {}
-                },
-                SelectItem::Expr { expr, .. } => unqualified(expr, statement)?,
+        let destination = self.output_destination()?;
+        items.push(SelectItem::Expr {
+            expr: Expr {
+                kind: ExprKind::Literal(Literal::Null),
+                position,
+            },
+            alias: Some(crate::output_into::END_OF_OUTPUT_INTO.to_owned()),
+        });
+        if self.take_word("output") {
+            items.extend(self.select_items()?);
+            if self.is_word("into") {
+                return Err(self.unexpected());
             }
         }
-        Ok(Some(items))
+        Ok(Some(OutputClause {
+            items,
+            into: Some(destination),
+        }))
+    }
+
+    fn output_destination(&mut self) -> SqlResult<OutputDestination> {
+        let target = if matches!(self.peek_kind(), TokenKind::Variable(_)) {
+            OutputTarget::Variable(self.variable_name()?)
+        } else {
+            OutputTarget::Table(TableReference::named(self.table_name()?, None))
+        };
+        let columns = if self.peek_kind() == &TokenKind::LeftParen
+            && !self.is_word_at(1, "select")
+            && !self.is_word_at(1, "with")
+        {
+            Some(self.name_list()?)
+        } else {
+            None
+        };
+        Ok(OutputDestination { target, columns })
     }
 
     pub(super) fn sqlserver_offset_fetch(
@@ -1052,6 +1143,8 @@ fn derived_rows(
         limit: None,
         offset: None,
         source_row_limit: None,
+        grouping_sets: None,
+        distinct_on: Vec::new(),
     };
     TableReference {
         name: Name {
@@ -1064,6 +1157,7 @@ fn derived_rows(
             column_names: Vec::new(),
             dialect,
             lateral: false,
+            hierarchy: None,
         })),
         generated: None,
     }

@@ -49,7 +49,7 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --allow-write
 | `describe_table` | one table's or view's columns (types, `NOT NULL`, defaults, comments), primary key, indexes, comment, and its row count (exact up to 10,000) |
 | `write_sql` | only with `--allow-write`: runs **one** statement that may change the database, in its own transaction (below) |
 | `run_sql` | runs **one** SQL statement that reads, in a dialect: `postgresql` (the default), `mysql`, `sqlite`, `sqlserver` or `oracle`, all on the same tables; returns at most `max_rows` rows (100 by default, at most 10,000) and 1 MiB |
-| `explain_query` | the plan for one `SELECT`, `UPDATE` or `DELETE`, without running it; give the statement without `EXPLAIN` (Oracle's `EXPLAIN PLAN` and SQL Server's showplan are not in EggDB yet, so those two dialects are refused) |
+| `explain_query` | the plan for one `SELECT`, `UPDATE` or `DELETE`, without running it; give the statement without `EXPLAIN`; `oracle` answers with `DBMS_XPLAN.DISPLAY`'s lines (no `PLAN_TABLE` is written) and `sqlserver` with `SHOWPLAN_TEXT`'s `StmtText` rows (D312) |
 | `sample_rows` | the first rows of a table or view as stored: a table's in primary-key order, a view's in its query's order; not a random sample (10 by default, at most 1,000) |
 | `kv_get` | the value under one key of the key-value store, by text or hexadecimal key; `collection` reads a named collection instead of the default key space (D292) |
 | `kv_scan` | keys and values in key order, by prefix or range, a page at a time; `collection` lists a named collection instead of the default key space (D292) |
@@ -154,20 +154,40 @@ or is named itself.
 claude mcp add mydb -- eggdb mcp /path/to/app.db --tables 'people(id,name),orders'
 ```
 
-A name followed by a column list in parentheses shows that table with only those columns
-(D281). The other columns do not exist for the agent: `SELECT *`, `describe_table`,
+A name followed by a column list in parentheses shows that table or view with only those
+columns (D281, D306). The other columns do not exist for the agent: `SELECT *`, `describe_table`,
 `sample_rows`, `information_schema` and every other catalog leave them out, and a query that
 names one fails as an unknown column (`42703`), whether directly, through a listed view, a
 function's body, a CTE or a subquery. Their values, comments, statistics and the indexes over
 them are hidden below the SQL engine, as hidden tables are.
 
-- **The list must hold the primary key**, and the table must exist when the server starts; a
-  view takes no list (list the columns of the tables it reads). A column the table does not
-  have, a primary-key column left out, an empty list or a list on a view stops the server, exit
-  1, with `column_not_found`.
-- **A table listed with columns cannot be changed**, even with `--allow-write`: rows written
-  without the hidden columns would lose them, so an `INSERT`, `UPDATE`, `DELETE`, `ALTER`,
-  comment, policy or `ANALYZE` on it is refused (`42501`).
+- **The list must hold the primary key**, and the table must exist when the server starts. A
+  column the table or view does not have, a primary-key column left out, an empty list, or a
+  list on a SQL Server view whose query starts with `WITH` stops the server, exit 1, with
+  `column_not_found`.
+- **A view listed with columns** reads its query as before and shows only the listed columns;
+  it cannot be replaced, dropped or written through (`42501`). No catalog shows its query text,
+  which would name and compute the hidden columns: `pg_views.definition`,
+  `pg_get_viewdef` and `information_schema.views` give NULL, as PostgreSQL does for a view you
+  do not own; MySQL's `information_schema.VIEWS` gives an empty definition and `SHOW CREATE
+  VIEW` is refused (1142), as without the `SHOW VIEW` privilege; `sqlite_schema.sql`, SQL
+  Server's `sys.sql_modules`, `OBJECT_DEFINITION` and `INFORMATION_SCHEMA.VIEWS`, and Oracle's
+  `ALL_VIEWS.TEXT` give NULL.
+- **Writes with `--allow-write` keep the hidden columns** (D306). An `INSERT` gives them their
+  defaults, and an `UPDATE` or upsert of the listed columns keeps their values; the indexes over
+  them are kept up to date, and their checks and `NOT NULL` run on the new row, with errors that
+  name neither the column nor its value. `RETURNING`, triggers and every error show only the
+  listed columns.
+- **What stays refused** (`42501`): deleting rows or changing their key (the row would take the
+  hidden values with it), `TRUNCATE`, `ALTER`, comments, policies and `ANALYZE`; an insert when
+  a hidden column takes a generated value (identity, `serial`, a sequence default), has a domain,
+  or has a default that calls a routine or holds a subquery, or when a unique index or foreign key
+  over a hidden column would have to be checked against other rows; and a change to a listed
+  column that a check, unique index or foreign key ties to a hidden one, whatever the values, so
+  that no answer depends on a value the agent cannot see. A partitioned table or a partition
+  takes no writes, and a table another listed table references through a hidden column takes
+  no changes to its rows. That other table takes no new or changed foreign-key values either,
+  other than NULL, since checking one would test the hidden column.
 - **What it still shows.** Hidden column names can appear in definitions the agent may read: a
   listed table's column default, a generated column, a row-security policy, or another table's
   foreign key that points at them. A row-security policy that names a hidden column makes the
@@ -189,7 +209,9 @@ can reach another table is covered, not a list of statement kinds:
 
 - **Other tables are missing.** `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `COPY` or a
   `SELECT` that names an unlisted table fails as missing (`42P01`), as it does on a read-only
-  server. So does a trigger on a listed table whose function writes an unlisted one, a
+  server; that includes `UPDATE ... FROM`, `DELETE ... USING`, MySQL's multi-table `UPDATE` and
+  `DELETE`, `MERGE`, SQL Server's `OUTPUT ... INTO` and `SELECT ... INTO`, which creates its
+  table only under a listed name. So does a trigger on a listed table whose function writes an unlisted one, a
   procedure or function whose body reads or writes one, and `nextval` on a sequence that is
   neither listed nor owned by a listed table. The statement fails and nothing is changed.
 - **New objects only under listed names.** `CREATE TABLE` or `CREATE VIEW` works for a name in
@@ -201,8 +223,14 @@ can reach another table is covered, not a list of statement kinds:
   sessions, unfiltered, and dropping it switches off what it guards; dropping the table takes
   its triggers with it.
 - **Ties to unlisted tables limit what they tie.** When a listed table has a foreign key to an
-  unlisted one, its rows and definition cannot change, since the check would read the other
-  table. When an unlisted table has a foreign key to a listed one, the listed table still takes
+  unlisted one, its new rows and changed keys are checked against the other table below the SQL
+  engine (D306): a missing parent fails with the usual foreign-key error (`23503`), which names
+  the other table and the agent's own key values but none of its rows or columns, and its
+  definition cannot change. It does tell the agent whether a value exists in the other table:
+  trying an email as the key shows whether that email is in the column the foreign key points
+  at. When that matters, list the table without the foreign key's columns; the banner names
+  each such tie on a `reveals` line. Such a foreign key is checked at once even when it is deferrable,
+  and a writing session does not show it in the catalogs. When an unlisted table has a foreign key to a listed one, the listed table still takes
   inserts and changes to the columns that foreign key does not point at (D281), but deleting a
   row, changing a column it points at and changing the definition are refused, whatever the
   foreign key's action: `CASCADE`, `SET NULL` and `SET DEFAULT` would write the other table, and
@@ -352,7 +380,7 @@ agent can act on it whatever the code; every code's category is in
 | `time_limit` | the call ran past the time limit | narrow the statement, or raise `--time-limit` |
 | `damaged` | the file is damaged | `eggdb check` |
 | `invalid_arguments` | an argument is missing, unknown or of the wrong type | |
-| `not_supported` | Oracle's `EXPLAIN PLAN` or SQL Server's showplan | explain it in `postgresql` |
+| `not_supported` | a statement the dialect cannot do yet, such as Oracle's `EXPLAIN PLAN` of an `INSERT` | send it in `postgresql` |
 | `audit_unavailable` | the call could not be recorded, so its result is withheld | make the audit file writable |
 | `database_unavailable` | the file cannot be opened for another reason (not an EggDB file, written by a newer EggDB, an I/O error) | ask the user |
 

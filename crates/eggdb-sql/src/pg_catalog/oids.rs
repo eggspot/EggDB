@@ -110,7 +110,9 @@ pub(crate) struct BuiltinType {
 
 pub(crate) const REFCURSOR_TYPE: u32 = 1790;
 
-pub(crate) const BUILTIN_TYPES: [BuiltinType; 78] = [
+const REFCURSOR_ARRAY_TYPE: u32 = 2201;
+
+pub(crate) const BUILTIN_TYPES: [BuiltinType; 79] = [
     BuiltinType {
         oid: 16,
         typname: "bool",
@@ -916,6 +918,21 @@ pub(crate) const BUILTIN_TYPES: [BuiltinType; 78] = [
         category: 'U',
         preferred: false,
         element: 0,
+        array: REFCURSOR_ARRAY_TYPE,
+        align: 'i',
+        storage: 'x',
+        collation: 0,
+    },
+    BuiltinType {
+        oid: REFCURSOR_ARRAY_TYPE,
+        typname: "_refcursor",
+        shown: "refcursor[]",
+        length: -1,
+        by_value: false,
+        kind: 'b',
+        category: 'A',
+        preferred: false,
+        element: REFCURSOR_TYPE,
         array: 0,
         align: 'i',
         storage: 'x',
@@ -1330,7 +1347,7 @@ pub(crate) fn type_oid(sql_type: SqlType) -> u32 {
         SqlType::Catalog(kind) => catalog_type_oid(kind),
         SqlType::Array(element) => array_type_oid(element),
         SqlType::Defined(defined) => defined.oid,
-        SqlType::Dynamic => 25,
+        SqlType::Dynamic(_) => 25,
     }
 }
 

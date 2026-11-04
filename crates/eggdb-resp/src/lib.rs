@@ -20,7 +20,7 @@ pub use aof::{AofReplay, AofReport, replay_aof};
 pub use aof_manifest::{AofFileKind, AofManifest, AofManifestFile, parse_aof_manifest};
 pub use commands::{Client, Context, execute};
 pub use eviction::{EvictingKeyspace, EvictionPolicy};
-pub use keyspace::{KeysRead, KeysWrite, Keyspace, MemoryKeyspace};
+pub use keyspace::{EntryVisitor, KeysRead, KeysWrite, Keyspace, MemoryKeyspace};
 pub use protocol::{ProtocolError, Reply, RequestReader, format_double};
 pub use server::{ServerConfig, serve};
 pub use transactions::execute_with_transactions;

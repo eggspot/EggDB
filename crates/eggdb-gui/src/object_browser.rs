@@ -90,6 +90,10 @@ pub enum TreeItem {
     Sequence(usize),
     /// A key space.
     KeySpace(usize),
+    /// A table's `Triggers` group, listed when the table has triggers.
+    TableTriggers(usize),
+    /// A trigger in its table's `Triggers` group.
+    Trigger(usize),
 }
 
 /// The 12 × 12 icon a row draws before its label.
@@ -103,6 +107,8 @@ pub enum RowIcon {
     Key,
     /// A grid, for tables and views.
     Table,
+    /// A bolt, for triggers.
+    Bolt,
     /// No icon.
     Blank,
 }
@@ -223,6 +229,16 @@ impl ObjectTree {
             TreeItem::Table(index) => TreeItem::Table(table(index)?),
             TreeItem::Columns(index) => TreeItem::Columns(table(index)?),
             TreeItem::TableIndexes(index) => TreeItem::TableIndexes(table(index)?),
+            TreeItem::TableTriggers(index) => TreeItem::TableTriggers(table(index)?),
+            TreeItem::Trigger(index) => {
+                let old = old.triggers.get(index)?;
+                TreeItem::Trigger(
+                    self.catalog
+                        .triggers
+                        .iter()
+                        .position(|found| found.name == old.name && found.table == old.table)?,
+                )
+            }
             TreeItem::Column {
                 table: owner,
                 column,
@@ -303,12 +319,9 @@ impl ObjectTree {
             TreeItem::Connection => self.groups().len(),
             TreeItem::Group(group) => self.group_size(group),
             TreeItem::Table(table) => {
-                1 + usize::from(
-                    self.catalog
-                        .indexes_of(self.table_name(table))
-                        .next()
-                        .is_some(),
-                )
+                let name = self.table_name(table);
+                1 + usize::from(self.catalog.indexes_of(name).next().is_some())
+                    + usize::from(self.catalog.triggers_of(name).next().is_some())
             }
             TreeItem::Columns(table) => self
                 .catalog
@@ -317,6 +330,9 @@ impl ObjectTree {
                 .map_or(0, |table| table.columns.len()),
             TreeItem::TableIndexes(table) => {
                 self.catalog.indexes_of(self.table_name(table)).count()
+            }
+            TreeItem::TableTriggers(table) => {
+                self.catalog.triggers_of(self.table_name(table)).count()
             }
             _ => 0,
         }
@@ -351,6 +367,14 @@ impl ObjectTree {
                 {
                     children.push(TreeItem::TableIndexes(table));
                 }
+                if self
+                    .catalog
+                    .triggers_of(self.table_name(table))
+                    .next()
+                    .is_some()
+                {
+                    children.push(TreeItem::TableTriggers(table));
+                }
                 children
             }
             TreeItem::Columns(table) => (0..self.child_count(item))
@@ -366,6 +390,16 @@ impl ObjectTree {
                     .map(|(at, _)| TreeItem::TableIndex(at))
                     .collect()
             }
+            TreeItem::TableTriggers(table) => {
+                let name = self.table_name(table);
+                self.catalog
+                    .triggers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, trigger)| trigger.table == name)
+                    .map(|(at, _)| TreeItem::Trigger(at))
+                    .collect()
+            }
             _ => Vec::new(),
         }
     }
@@ -379,6 +413,11 @@ impl ObjectTree {
             TreeItem::Table(table) => self.table_name(table).to_owned(),
             TreeItem::Columns(_) => "Columns".to_owned(),
             TreeItem::TableIndexes(_) => "Indexes".to_owned(),
+            TreeItem::TableTriggers(_) => "Triggers".to_owned(),
+            TreeItem::Trigger(trigger) => catalog
+                .triggers
+                .get(trigger)
+                .map_or_else(String::new, |trigger| trigger.name.clone()),
             TreeItem::Column { table, column } => catalog
                 .tables
                 .get(table)
@@ -415,9 +454,10 @@ impl ObjectTree {
         let catalog = &self.catalog;
         match item {
             TreeItem::Group(group) => Some(self.group_size(group).to_string()),
-            TreeItem::Columns(_) | TreeItem::TableIndexes(_) => {
+            TreeItem::Columns(_) | TreeItem::TableIndexes(_) | TreeItem::TableTriggers(_) => {
                 Some(self.child_count(item).to_string())
             }
+            TreeItem::Trigger(trigger) => Some(catalog.triggers.get(trigger)?.events_text()),
             TreeItem::Column { table, column } => {
                 let column = catalog.tables.get(table)?.columns.get(column)?;
                 if column.primary_key {
@@ -449,6 +489,7 @@ impl ObjectTree {
                 Some(catalog.indexes.get(index)?.name.clone())
             }
             TreeItem::Sequence(sequence) => Some(catalog.sequences.get(sequence)?.name.clone()),
+            TreeItem::Trigger(trigger) => Some(catalog.triggers.get(trigger)?.name.clone()),
             TreeItem::Column { table, column } => {
                 Some(catalog.tables.get(table)?.columns.get(column)?.name.clone())
             }
@@ -457,14 +498,34 @@ impl ObjectTree {
         }
     }
 
+    /// The table a column, an index or a trigger belongs to, as its tree row.
+    pub fn table_of(&self, item: TreeItem) -> Option<TreeItem> {
+        let catalog = &self.catalog;
+        let name = match item {
+            TreeItem::Column { table, .. } => return Some(TreeItem::Table(table)),
+            TreeItem::Index(index) | TreeItem::TableIndex(index) => {
+                &catalog.indexes.get(index)?.table
+            }
+            TreeItem::Trigger(trigger) => &catalog.triggers.get(trigger)?.table,
+            _ => return None,
+        };
+        catalog
+            .tables
+            .iter()
+            .position(|table| &table.name == name)
+            .map(TreeItem::Table)
+    }
+
     fn icon(item: TreeItem) -> RowIcon {
         match item {
             TreeItem::Connection => RowIcon::Database,
             TreeItem::Group(Group::Keys) => RowIcon::Key,
-            TreeItem::Group(_) | TreeItem::Columns(_) | TreeItem::TableIndexes(_) => {
-                RowIcon::Folder
-            }
+            TreeItem::Group(_)
+            | TreeItem::Columns(_)
+            | TreeItem::TableIndexes(_)
+            | TreeItem::TableTriggers(_) => RowIcon::Folder,
             TreeItem::Table(_) | TreeItem::View(_) => RowIcon::Table,
+            TreeItem::Trigger(_) => RowIcon::Bolt,
             _ => RowIcon::Blank,
         }
     }
@@ -577,7 +638,7 @@ impl ObjectTree {
                 }
             }
             Key::Enter => match row.item {
-                TreeItem::Table(_) | TreeItem::View(_) => {
+                TreeItem::Table(_) | TreeItem::View(_) | TreeItem::KeySpace(_) => {
                     self.selected = Some(row.item);
                     TreeAction::Open(row.item)
                 }
@@ -585,6 +646,17 @@ impl ObjectTree {
                     self.toggle(row.item, row.expanded == Some(true));
                     TreeAction::None
                 }
+                TreeItem::Sequence(_) => TreeAction::None,
+                item @ (TreeItem::Column { .. }
+                | TreeItem::Index(_)
+                | TreeItem::TableIndex(_)
+                | TreeItem::Trigger(_)) => match self.table_of(item) {
+                    Some(table) => {
+                        self.selected = Some(item);
+                        TreeAction::Open(table)
+                    }
+                    None => TreeAction::None,
+                },
                 item => {
                     self.selected = Some(item);
                     TreeAction::Inspect(item)
@@ -739,17 +811,33 @@ fn icon_key(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
         .line((x + 10.0, y + 6.0), (x + 10.0, y + 9.0), 1.5, color);
 }
 
+fn icon_bolt(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
+    let color = paint.theme.text_secondary;
+    let points = [
+        (7.0, 0.0),
+        (3.0, 7.0),
+        (6.0, 7.0),
+        (5.0, 12.0),
+        (9.0, 5.0),
+        (6.0, 5.0),
+        (7.0, 0.0),
+    ]
+    .map(|(dx, dy)| (x + dx, y + dy));
+    paint.polyline(&points, 1.5, color);
+}
+
 pub(crate) fn draw(
     paint: &mut Painter<'_, '_>,
     tree: &ObjectTree,
     access: &str,
     focus: SidebarFocus,
+    width: f32,
 ) {
     let theme = paint.theme;
     let faces = paint.faces;
-    paint.rect(0.0, 44.0, SIDEBAR_WIDTH, 732.0, theme.bg1);
-    paint.rect(SIDEBAR_WIDTH - 1.0, 44.0, 1.0, 732.0, theme.border);
-    let filter_box = Rect::new(8.0, 52.0, 244.0, 28.0);
+    paint.rect(0.0, 44.0, width, 732.0, theme.bg1);
+    paint.rect(width - 1.0, 44.0, 1.0, 732.0, theme.border);
+    let filter_box = Rect::new(8.0, 52.0, width - 16.0, 28.0);
     paint.button(filter_box, Button::Secondary);
     paint
         .canvas
@@ -767,11 +855,11 @@ pub(crate) fn draw(
             theme.text_secondary,
         );
     } else {
-        let shown = crate::main_window::elided(faces.ui, &tree.filter, 212.0, BODY.0);
+        let shown = crate::main_window::elided(faces.ui, &tree.filter, width - 48.0, BODY.0);
         paint.text(faces.ui, &shown, 32.0, 57.0, BODY, theme.text_primary);
     }
     if focus == SidebarFocus::Filter {
-        focus_ring(paint, Rect::new(6.0, 50.0, 248.0, 32.0));
+        focus_ring(paint, Rect::new(6.0, 50.0, width - 12.0, 32.0));
     }
     let rows = tree.rows();
     for (offset, row) in rows
@@ -781,7 +869,25 @@ pub(crate) fn draw(
         .take(ROWS_IN_VIEW)
     {
         let y = ROWS_TOP + ROW_HEIGHT * (offset - tree.first_row) as f32;
-        draw_row(paint, tree, row, y, access, focus == SidebarFocus::Tree);
+        draw_row(
+            paint,
+            tree,
+            row,
+            (y, width),
+            access,
+            focus == SidebarFocus::Tree,
+        );
+    }
+}
+
+pub(crate) fn draw_icon(paint: &mut Painter<'_, '_>, icon: RowIcon, x: f32, y: f32) {
+    match icon {
+        RowIcon::Database => icon_database(paint, x, y),
+        RowIcon::Folder => icon_folder(paint, x, y),
+        RowIcon::Key => icon_key(paint, x, y),
+        RowIcon::Table => icon_table(paint, x, y),
+        RowIcon::Bolt => icon_bolt(paint, x, y),
+        RowIcon::Blank => {}
     }
 }
 
@@ -789,7 +895,7 @@ fn draw_row(
     paint: &mut Painter<'_, '_>,
     tree: &ObjectTree,
     row: &TreeRow,
-    y: f32,
+    (y, width): (f32, f32),
     access: &str,
     focused: bool,
 ) {
@@ -804,19 +910,12 @@ fn draw_row(
         };
         paint
             .canvas
-            .fill_rounded_rect(Rect::new(4.0, y, 252.0, ROW_HEIGHT), 4.0, fill);
+            .fill_rounded_rect(Rect::new(4.0, y, width - 8.0, ROW_HEIGHT), 4.0, fill);
     }
     if let Some(open) = row.expanded {
         chevron(paint, 8.0 + indent, y + 8.0, open);
     }
-    let icon_x = 24.0 + indent;
-    match row.icon {
-        RowIcon::Database => icon_database(paint, icon_x, y + 6.0),
-        RowIcon::Folder => icon_folder(paint, icon_x, y + 6.0),
-        RowIcon::Key => icon_key(paint, icon_x, y + 6.0),
-        RowIcon::Table => icon_table(paint, icon_x, y + 6.0),
-        RowIcon::Blank => {}
-    }
+    draw_icon(paint, row.icon, 24.0 + indent, y + 6.0);
     let detail = if row.item == TreeItem::Connection {
         Some(access.to_owned())
     } else {
@@ -831,20 +930,21 @@ fn draw_row(
         faces.ui
     };
     let left = 44.0 + indent;
-    let shown = crate::main_window::elided(face, &row.label, 244.0 - detail_width - left, BODY.0);
+    let shown =
+        crate::main_window::elided(face, &row.label, width - 16.0 - detail_width - left, BODY.0);
     paint.text(face, &shown, left, y + 3.0, BODY, theme.text_primary);
     if let Some(detail) = detail {
         paint.text_right(
             faces.ui,
             &detail,
-            244.0,
+            width - 16.0,
             y + 5.0,
             SMALL,
             theme.text_secondary,
         );
     }
     if focused && tree.current == row.item {
-        focus_ring(paint, Rect::new(4.0, y, 252.0, ROW_HEIGHT));
+        focus_ring(paint, Rect::new(4.0, y, width - 8.0, ROW_HEIGHT));
     }
 }
 
@@ -866,7 +966,8 @@ pub fn row_description(row: &TreeRow, detail: Option<&str>) -> String {
 mod tests {
     use super::*;
     use crate::catalog::{
-        CatalogColumn, CatalogIndex, CatalogSequence, CatalogTable, CatalogView, KeyCount, KeySpace,
+        CatalogColumn, CatalogIndex, CatalogSequence, CatalogTable, CatalogTrigger, CatalogView,
+        KeyCount, KeySpace,
     };
 
     fn column(name: &str, primary_key: bool) -> CatalogColumn {
@@ -937,6 +1038,13 @@ mod tests {
                     keys: KeyCount::Exactly(312),
                 },
             ],
+            triggers: vec![CatalogTrigger {
+                name: "orders_stamp".into(),
+                table: "orders".into(),
+                timing: "BEFORE".into(),
+                events: vec!["INSERT".into(), "UPDATE".into()],
+                action: "EXECUTE FUNCTION stamp()".into(),
+            }],
         }
     }
 
@@ -1003,6 +1111,9 @@ mod tests {
         assert_eq!(rows[4].label, "Columns");
         assert_eq!(rows[5].label, "Indexes");
         assert_eq!(rows[5].detail.as_deref(), Some("1"));
+        assert_eq!(rows[6].label, "Triggers");
+        assert_eq!(rows[6].detail.as_deref(), Some("1"));
+        assert_eq!(rows[6].item, TreeItem::TableTriggers(1));
         tree.key(press(Key::Right), now);
         tree.key(press(Key::Right), now);
         assert_eq!(tree.current, TreeItem::Columns(1));
@@ -1116,11 +1227,111 @@ mod tests {
             TreeAction::Inspect(TreeItem::KeySpace(0))
         );
         assert_eq!(
+            tree.key(press(Key::Enter), now),
+            TreeAction::Open(TreeItem::KeySpace(0)),
+            "Enter on a key space opens its keys tab"
+        );
+        assert_eq!(
             tree.name_of(TreeItem::KeySpace(0)),
             None,
             "the default key space has no name"
         );
         assert_eq!(tree.key(press(Key::F5), now), TreeAction::Refresh);
+    }
+
+    #[test]
+    fn a_tables_triggers_group_lists_each_trigger_with_its_events() {
+        let mut tree = ObjectTree::new("shop", shop());
+        tree.expanded.insert(TreeItem::Table(1));
+        tree.expanded.insert(TreeItem::TableTriggers(1));
+        tree.expanded.insert(TreeItem::Table(0));
+        let rows = tree.rows();
+        let trigger = rows
+            .iter()
+            .find(|row| row.item == TreeItem::Trigger(0))
+            .expect("the trigger row is listed");
+        assert_eq!(trigger.label, "orders_stamp");
+        assert_eq!(trigger.detail.as_deref(), Some("INSERT, UPDATE"));
+        assert_eq!(trigger.level, 4);
+        assert_eq!(trigger.expanded, None);
+        assert_eq!(
+            tree.name_of(TreeItem::Trigger(0)).as_deref(),
+            Some("orders_stamp")
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.item == TreeItem::TableTriggers(0)),
+            "a table without triggers has no Triggers group"
+        );
+        let mut refreshed = shop();
+        refreshed.triggers.insert(
+            0,
+            CatalogTrigger {
+                name: "audit".into(),
+                table: "customers".into(),
+                timing: "AFTER".into(),
+                events: vec!["DELETE".into()],
+                action: String::new(),
+            },
+        );
+        tree.current = TreeItem::Trigger(0);
+        tree.set_catalog(refreshed);
+        assert_eq!(
+            tree.current,
+            TreeItem::Trigger(1),
+            "the refresh keeps the trigger by name"
+        );
+    }
+
+    #[test]
+    fn enter_on_a_column_index_or_trigger_opens_its_table_and_on_a_sequence_nothing() {
+        let mut tree = ObjectTree::new("shop", shop());
+        let now = Instant::now();
+        for open in [
+            TreeItem::Table(0),
+            TreeItem::TableIndexes(0),
+            TreeItem::Table(1),
+            TreeItem::Columns(1),
+            TreeItem::TableTriggers(1),
+            TreeItem::Group(Group::Indexes),
+        ] {
+            tree.expanded.insert(open);
+        }
+        tree.current = TreeItem::Column {
+            table: 1,
+            column: 1,
+        };
+        assert_eq!(
+            tree.key(press(Key::Enter), now),
+            TreeAction::Open(TreeItem::Table(1))
+        );
+        assert_eq!(
+            tree.selected,
+            Some(TreeItem::Column {
+                table: 1,
+                column: 1
+            })
+        );
+        tree.current = TreeItem::Index(2);
+        assert_eq!(
+            tree.key(press(Key::Enter), now),
+            TreeAction::Open(TreeItem::Table(2))
+        );
+        tree.current = TreeItem::TableIndex(0);
+        assert_eq!(
+            tree.key(press(Key::Enter), now),
+            TreeAction::Open(TreeItem::Table(0))
+        );
+        tree.current = TreeItem::Trigger(0);
+        assert_eq!(
+            tree.key(press(Key::Enter), now),
+            TreeAction::Open(TreeItem::Table(1))
+        );
+        tree.expanded.insert(TreeItem::Group(Group::Sequences));
+        tree.current = TreeItem::Sequence(0);
+        assert_eq!(tree.key(press(Key::Enter), now), TreeAction::None);
+        assert_eq!(tree.table_of(TreeItem::Sequence(0)), None);
     }
 
     #[test]

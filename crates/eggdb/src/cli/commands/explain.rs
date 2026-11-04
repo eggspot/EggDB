@@ -6,6 +6,7 @@ use eggdb::sql::Store as DatabaseStore;
 use eggdb_sql::{Dialect, OneStatementError, OneStatementRefusal, QueryResult};
 
 const EXPLAIN_WORD: &str = "explain";
+const SHOWPLAN_ON: &str = "SET SHOWPLAN_TEXT ON";
 
 impl Session<'_> {
     pub(super) fn explain(&mut self) -> Result<Exit, Failure> {
@@ -19,16 +20,18 @@ impl Session<'_> {
             }
         };
         let dialect = self.request.dialect;
-        refuse_unexplainable(dialect, &statement)?;
+        refuse_unexplainable(&statement)?;
         let prefix = explain_prefix(dialect);
         let explained = format!("{prefix}{statement}");
         let db = self.open(Access::ReadOnly, None)?;
         let store = DatabaseStore(&db);
         let mut session = eggdb_sql::Session::with_dialect(&store, dialect);
         let mut result: Option<QueryResult> = None;
-        let ran = session.run_one_statement(&explained, &mut |returned| {
-            result = Some(returned);
-            true
+        let ran = explain_only(&mut session, dialect).and_then(|()| {
+            session.run_one_statement(&explained, &mut |returned| {
+                result = Some(returned);
+                true
+            })
         });
         let _ = session.close();
         drop(db);
@@ -54,28 +57,32 @@ impl Session<'_> {
 }
 
 fn explain_prefix(dialect: Dialect) -> &'static str {
-    if dialect == Dialect::Sqlite {
-        "EXPLAIN QUERY PLAN "
-    } else {
-        "EXPLAIN "
+    match dialect {
+        Dialect::Sqlite => "EXPLAIN QUERY PLAN ",
+        Dialect::Oracle => "EXPLAIN PLAN FOR ",
+        Dialect::SqlServer => "",
+        _ => "EXPLAIN ",
     }
 }
 
-fn refuse_unexplainable(dialect: Dialect, statement: &str) -> Result<(), Failure> {
-    let not_yet = match dialect {
-        Dialect::Oracle => Some(("Oracle's", "Oracle's EXPLAIN PLAN")),
-        Dialect::SqlServer => Some(("SQL Server's", "SQL Server's showplan")),
-        _ => None,
-    };
-    if let Some((dialect_name, feature)) = not_yet {
-        return Err(Failure::coded(
-            "not_supported",
-            format!(
-                "cannot explain in {dialect_name} dialect: {feature} is not in EggDB yet. Explain the query with --dialect postgresql; every dialect sees the same tables."
-            ),
-            Exit::DatabaseError,
-        ));
+fn explain_only(
+    session: &mut eggdb_sql::Session<'_>,
+    dialect: Dialect,
+) -> Result<(), OneStatementError> {
+    match dialect {
+        Dialect::Oracle => {
+            session.set_explain_plan_displays(true);
+            Ok(())
+        }
+        Dialect::SqlServer => {
+            session.set_explain_plan_displays(true);
+            session.run_one_statement(SHOWPLAN_ON, &mut |_| true)
+        }
+        _ => Ok(()),
     }
+}
+
+fn refuse_unexplainable(statement: &str) -> Result<(), Failure> {
     let starts_with_explain = statement
         .trim_start()
         .get(..EXPLAIN_WORD.len())
@@ -116,25 +123,18 @@ mod tests {
     use eggdb_sql::{Dialect, OneStatementRefusal};
 
     #[test]
-    fn oracle_and_sql_server_are_refused_and_explain_is_added_once() {
-        let oracle = refuse_unexplainable(Dialect::Oracle, "SELECT 1");
-        assert!(matches!(
-            oracle,
-            Err(Failure::Database {
-                code: "not_supported",
-                exit: Exit::DatabaseError,
-                ..
-            })
-        ));
-        assert!(refuse_unexplainable(Dialect::SqlServer, "SELECT 1").is_err());
-        let doubled = refuse_unexplainable(Dialect::PostgreSql, "  explain SELECT 1");
+    fn each_dialect_gets_its_own_explain_and_explain_is_added_once() {
+        let doubled = refuse_unexplainable("  explain SELECT 1");
         assert_eq!(
             doubled.map_err(|failure| failure.code()),
             Err("invalid_arguments")
         );
-        assert!(refuse_unexplainable(Dialect::MySql, "SELECT 1").is_ok());
+        assert!(refuse_unexplainable("SELECT 1").is_ok());
         assert_eq!(explain_prefix(Dialect::Sqlite), "EXPLAIN QUERY PLAN ");
         assert_eq!(explain_prefix(Dialect::PostgreSql), "EXPLAIN ");
+        assert_eq!(explain_prefix(Dialect::MySql), "EXPLAIN ");
+        assert_eq!(explain_prefix(Dialect::Oracle), "EXPLAIN PLAN FOR ");
+        assert_eq!(explain_prefix(Dialect::SqlServer), "");
     }
 
     #[test]

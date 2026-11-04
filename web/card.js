@@ -137,6 +137,13 @@ export class ConnectCard {
     this.mirror.addEventListener("input", () => this.update());
     this.mirror.addEventListener("copy", (event) => this.onCopy(event));
     this.mirror.addEventListener("paste", (event) => this.onPaste(event));
+    this.mirror.addEventListener("pointerdown", (event) => this.onPointerDown(event));
+    this.mirror.addEventListener("pointermove", (event) => this.onPointerMove(event));
+    this.mirror.addEventListener("pointerup", (event) => this.onPointerUp(event));
+    this.mirror.addEventListener("pointercancel", (event) => this.onPointerUp(event));
+    this.mirror.addEventListener("pointerleave", () => this.onPointerLeave());
+    this.mirror.addEventListener("dblclick", (event) => this.onDoubleClick(event));
+    this.clipboardPending = null;
     if (typeof ResizeObserver === "function") new ResizeObserver(() => this.update()).observe(container);
   }
 
@@ -250,20 +257,106 @@ export class ConnectCard {
     const primary = event.ctrlKey || event.metaKey;
     if (primary && !SHORTCUT_LETTERS.has(event.key.toLowerCase())) return;
     const code = this.key(event.key, modifierBits(event));
-    if (code !== KEY_IGNORED && !CLIPBOARD_ACTIONS.has(code)) event.preventDefault();
+    if (CLIPBOARD_ACTIONS.has(code)) this.awaitClipboardEvent(ACTIONS[code]);
+    else if (code !== KEY_IGNORED) event.preventDefault();
+  }
+
+  awaitClipboardEvent(action) {
+    this.clipboardPending = action;
+    setTimeout(() => {
+      if (this.clipboardPending !== action) return;
+      this.clipboardPending = null;
+      if (action === "paste") this.paste();
+      else this.copy();
+    }, 0);
+  }
+
+  pastedText(text) {
+    this.send(text);
+    const answer = this.exports.eggdb_wasm_card_paste();
+    if (answer !== 0) this.update();
+    return answer === 1;
+  }
+
+  async copy() {
+    if (this.exports.eggdb_wasm_card_copied_text() !== 1 || !navigator.clipboard?.writeText) return false;
+    try {
+      await navigator.clipboard.writeText(new TextDecoder().decode(this.output()));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async paste() {
+    if (!navigator.clipboard?.readText) return false;
+    try {
+      return this.pastedText(await navigator.clipboard.readText());
+    } catch {
+      return false;
+    }
   }
 
   onCopy(event) {
+    this.clipboardPending = null;
     event.preventDefault();
     if (this.exports.eggdb_wasm_card_copied_text() !== 1) return;
     event.clipboardData?.setData("text/plain", new TextDecoder().decode(this.output()));
   }
 
   onPaste(event) {
+    this.clipboardPending = null;
     event.preventDefault();
-    const text = event.clipboardData?.getData("text/plain") ?? "";
-    this.send(text);
-    if (this.exports.eggdb_wasm_card_paste() !== 0) this.update();
+    this.pastedText(event.clipboardData?.getData("text/plain") ?? "");
+  }
+
+  canvasPoint(event) {
+    const box = this.canvas.getBoundingClientRect();
+    return [event.clientX - box.left, event.clientY - box.top];
+  }
+
+  onPointerDown(event) {
+    const [x, y] = this.canvasPoint(event);
+    const code = this.exports.eggdb_wasm_card_pointer_down(x, y, event.button, modifierBits(event));
+    if (code === KEY_IGNORED) return;
+    event.preventDefault();
+    this.capture(event.pointerId);
+    this.update();
+    this.syncFocus(true);
+    this.act(code);
+  }
+
+  capture(pointerId) {
+    try {
+      this.mirror.setPointerCapture(pointerId);
+    } catch {
+      return;
+    }
+  }
+
+  onPointerMove(event) {
+    const [x, y] = this.canvasPoint(event);
+    if (this.exports.eggdb_wasm_card_pointer_move(x, y) === 1) this.update();
+  }
+
+  onPointerUp(event) {
+    const [x, y] = event.type === "pointercancel" ? [NaN, NaN] : this.canvasPoint(event);
+    const code = this.exports.eggdb_wasm_card_pointer_up(x, y, event.button < 0 ? 0 : event.button);
+    if (code === KEY_IGNORED) return;
+    event.preventDefault();
+    this.update();
+    this.syncFocus(true);
+    this.act(code);
+  }
+
+  onPointerLeave() {
+    if (this.exports.eggdb_wasm_card_pointer_leave() === 1) this.update();
+  }
+
+  onDoubleClick(event) {
+    const [x, y] = this.canvasPoint(event);
+    event.preventDefault();
+    if (this.exports.eggdb_wasm_card_double_click(x, y) === 1) this.update();
   }
 
   onFocus(event) {
@@ -275,6 +368,10 @@ export class ConnectCard {
   }
 
   onClick(event) {
+    if (event.detail > 0) {
+      event.preventDefault();
+      return;
+    }
     const id = Number(event.target?.dataset?.node);
     const node = this.nodes.find((candidate) => candidate.id === id);
     if (!node) return;

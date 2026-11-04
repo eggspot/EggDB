@@ -161,15 +161,18 @@ fn mysql_definition(child: &TableDefinition, key: &ForeignKey) -> String {
         .map(|name| quote(name))
         .collect();
     let parents: Vec<String> = key.parent_columns.iter().map(|name| quote(name)).collect();
+    let referenced = if parents.is_empty() {
+        quote(&key.parent)
+    } else {
+        format!("{} ({})", quote(&key.parent), parents.join(", "))
+    };
     let context = context();
     format!(
-        "(`{}`.`{}`, CONSTRAINT `{}` FOREIGN KEY ({}) REFERENCES `{}` ({}))",
+        "(`{}`.`{}`, CONSTRAINT `{}` FOREIGN KEY ({}) REFERENCES {referenced})",
         context.database,
         child.name,
         key.name,
         columns.join(", "),
-        key.parent,
-        parents.join(", ")
     )
 }
 
@@ -651,7 +654,51 @@ pub(crate) fn check_parents(
     Ok(())
 }
 
-fn same_value(left: Option<&Value>, right: Option<&Value>) -> bool {
+pub(crate) fn check_parent_outside_the_session(
+    reader: &dyn KeyValueRead,
+    child: &TableDefinition,
+    key: &ForeignKey,
+    parent: &TableDefinition,
+    row: &[Value],
+    only_changed_from: Option<&[Value]>,
+) -> SqlResult<()> {
+    if !foreign_keys_enforced() {
+        return Ok(());
+    }
+    if let Some(old) = only_changed_from
+        && key
+            .columns
+            .iter()
+            .all(|&index| same_value(old.get(index), row.get(index)))
+    {
+        return Ok(());
+    }
+    let Some(values) = key_values(row, &key.columns) else {
+        return Ok(());
+    };
+    let parent_columns = if key.parent_columns.is_empty() {
+        Some(parent.primary_key.clone())
+    } else {
+        key.parent_columns
+            .iter()
+            .map(|name| parent.column_index(name))
+            .collect::<Option<Vec<usize>>>()
+    };
+    let Some(parent_columns) = parent_columns.filter(|columns| columns.len() == values.len())
+    else {
+        return Err(crate::encoding::corrupt("foreign key"));
+    };
+    if parent_has_key(reader, parent, &parent_columns, &values)? {
+        return Ok(());
+    }
+    let without_parent_columns = ForeignKey {
+        parent_columns: Vec::new(),
+        ..key.clone()
+    };
+    Err(missing_parent(child, &without_parent_columns, row))
+}
+
+pub(crate) fn same_value(left: Option<&Value>, right: Option<&Value>) -> bool {
     match (left, right) {
         (Some(Value::Null), Some(Value::Null)) => true,
         (Some(Value::Null), _) | (_, Some(Value::Null)) => false,

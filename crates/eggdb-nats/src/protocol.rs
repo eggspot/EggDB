@@ -41,6 +41,21 @@ fn line_end(buffer: &[u8]) -> Option<(usize, usize)> {
     Some((end, newline + 1))
 }
 
+/// The bytes the frame at the start of `buffer` takes once whole: what a `PUB` or `HPUB`
+/// control line declares, or what `buffer` already holds.
+pub(crate) fn pending_frame_bytes(buffer: &[u8]) -> usize {
+    let declared = line_end(buffer).and_then(|(end, after)| {
+        let line = std::str::from_utf8(buffer.get(..end)?).ok()?;
+        let mut words = line.split_ascii_whitespace();
+        let operation = words.next()?;
+        let publishes =
+            operation.eq_ignore_ascii_case("PUB") || operation.eq_ignore_ascii_case("HPUB");
+        let total = words.last()?.parse::<usize>().ok()?;
+        publishes.then_some(after.saturating_add(total).saturating_add(2))
+    });
+    declared.unwrap_or(0).max(buffer.len())
+}
+
 /// The next whole frame at the start of `buffer` and how many bytes it used, `None` when more
 /// bytes are needed, or the `-ERR` text when the input breaks the protocol.
 pub(crate) fn next_frame(buffer: &[u8]) -> Result<Option<(Frame, usize)>, &'static str> {

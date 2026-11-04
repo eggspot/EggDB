@@ -1,5 +1,5 @@
 use eggdb::{Database, ErrorKind, ReadCollection, WriteCollection};
-use eggdb_resp::{KeysRead, KeysWrite, Keyspace};
+use eggdb_resp::{EntryVisitor, KeysRead, KeysWrite, Keyspace};
 
 pub(super) struct DatabaseKeyspace<'d> {
     pub(super) db: &'d Database,
@@ -28,6 +28,19 @@ fn visit_scanned(
     for entry in scan {
         let (key, _) = entry.map_err(|error| failed(&error))?;
         if !visit(key)? {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn visit_entries(
+    scan: impl Iterator<Item = Result<(Vec<u8>, Vec<u8>), eggdb::Error>>,
+    visit: &mut EntryVisitor<'_>,
+) -> Result<(), String> {
+    for entry in scan {
+        let (key, value) = entry.map_err(|error| failed(&error))?;
+        if !visit(&key, &value)? {
             break;
         }
     }
@@ -75,6 +88,13 @@ impl KeysRead for ReadKeys<'_> {
             .map(|entry| entry.map_err(|error| failed(&error)))
             .collect()
     }
+
+    fn visit_prefix(&self, prefix: &[u8], visit: &mut EntryVisitor<'_>) -> Result<(), String> {
+        let Some(collection) = &self.collection else {
+            return Ok(());
+        };
+        visit_entries(collection.scan_prefix(prefix), visit)
+    }
 }
 
 struct WriteKeys<'t, 'db> {
@@ -105,6 +125,10 @@ impl KeysRead for WriteKeys<'_, '_> {
             .scan_prefix(prefix)
             .map(|entry| entry.map_err(|error| failed(&error)))
             .collect()
+    }
+
+    fn visit_prefix(&self, prefix: &[u8], visit: &mut EntryVisitor<'_>) -> Result<(), String> {
+        visit_entries(self.collection.scan_prefix(prefix), visit)
     }
 }
 

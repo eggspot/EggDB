@@ -11,7 +11,7 @@
 mod api;
 mod keys;
 
-pub use api::Endpoint;
+pub use api::{Endpoint, over_memory_budget};
 
 #[cfg(test)]
 mod tests;

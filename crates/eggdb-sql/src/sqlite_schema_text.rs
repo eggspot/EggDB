@@ -15,6 +15,19 @@ const LENGTH_BYTES: usize = 4;
 const PART_SEPARATOR: u8 = 0xFF;
 const INDEX_PART: u8 = b'i';
 const TABLE_CONSTRAINT_WORDS: [&str; 5] = ["constraint", "primary", "unique", "check", "foreign"];
+const WORDS_AFTER_A_TYPE: [&str; 11] = [
+    "constraint",
+    "primary",
+    "not",
+    "null",
+    "unique",
+    "check",
+    "default",
+    "collate",
+    "references",
+    "generated",
+    "as",
+];
 
 fn text_key(relation: &str) -> Vec<u8> {
     let mut key = NAMESPACE.to_vec();
@@ -418,6 +431,78 @@ fn added_column_text(text: &str, column: &str) -> Option<String> {
         previous_end = token.end;
     }
     None
+}
+
+pub(crate) fn declared_column_types(text: &str) -> Vec<(String, String)> {
+    column_declarations(text).unwrap_or_default()
+}
+
+fn column_declarations(text: &str) -> Option<Vec<(String, String)>> {
+    let tokens = tokenize_in(text, Dialect::Sqlite).ok()?;
+    let open = tokens
+        .iter()
+        .position(|token| token.kind == TokenKind::LeftParen)?;
+    if tokens.get(..open)?.iter().any(|token| is_word(token, "as")) {
+        return None;
+    }
+    let mut declared = Vec::new();
+    let mut depth = 0usize;
+    let mut element: Vec<&Token<'_>> = Vec::new();
+    for token in tokens.get(open + 1..)? {
+        match token.kind {
+            TokenKind::RightParen | TokenKind::Comma if depth == 0 => {
+                declared.extend(declared_column(text, &element));
+                element.clear();
+                if token.kind == TokenKind::RightParen {
+                    return Some(declared);
+                }
+                continue;
+            }
+            TokenKind::LeftParen => depth += 1,
+            TokenKind::RightParen => depth = depth.checked_sub(1)?,
+            TokenKind::End => return None,
+            _ => {}
+        }
+        element.push(token);
+    }
+    None
+}
+
+fn is_type_word(token: &Token<'_>) -> bool {
+    matches!(&token.kind, TokenKind::Word(word)
+        if !WORDS_AFTER_A_TYPE.iter().any(|stop| word.eq_ignore_ascii_case(stop)))
+}
+
+fn declared_column(text: &str, element: &[&Token<'_>]) -> Option<(String, String)> {
+    let (name, rest) = element.split_first()?;
+    if TABLE_CONSTRAINT_WORDS
+        .iter()
+        .any(|word| is_word(name, word))
+    {
+        return None;
+    }
+    let name = match &name.kind {
+        TokenKind::Word(word) | TokenKind::String(word) => word.to_string(),
+        TokenKind::QuotedIdentifier(quoted) => quoted.clone(),
+        _ => return None,
+    };
+    let words = rest.iter().take_while(|token| is_type_word(token)).count();
+    let Some(last_word) = words.checked_sub(1).and_then(|at| rest.get(at)) else {
+        return Some((name, String::new()));
+    };
+    let mut end = last_word.end;
+    if rest
+        .get(words)
+        .is_some_and(|token| token.kind == TokenKind::LeftParen)
+    {
+        let after = rest.get(words..)?;
+        let close = after
+            .iter()
+            .position(|token| token.kind == TokenKind::RightParen)?;
+        end = after.get(close)?.end;
+    }
+    let start = rest.first()?.start;
+    Some((name, text.get(start..end)?.to_owned()))
 }
 
 /// A SQLite trigger's text the way `sqlite_schema` stores it: `IF NOT EXISTS` and a schema

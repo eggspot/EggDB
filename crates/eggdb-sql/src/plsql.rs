@@ -93,7 +93,7 @@ impl DeclaredType {
     pub(crate) fn engine_type(&self) -> SqlType {
         match self {
             Self::Sql { sql_type, .. } => *sql_type,
-            Self::ColumnType(_) | Self::RowType(_) | Self::Named(_) => SqlType::Dynamic,
+            Self::ColumnType(_) | Self::RowType(_) | Self::Named(_) => SqlType::DYNAMIC,
         }
     }
 

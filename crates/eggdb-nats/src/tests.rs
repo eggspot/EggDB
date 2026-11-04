@@ -1,7 +1,9 @@
-use crate::protocol::{Frame, next_frame, subject_matches, valid_subject};
+use crate::protocol::{Frame, next_frame, pending_frame_bytes, subject_matches, valid_subject};
 use crate::{ServerConfig, serve};
+use eggdb_platform::connection_limits::MemoryBudget;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -10,6 +12,7 @@ fn config() -> ServerConfig {
         user: "eggdb".to_owned(),
         password_sha256: eggdb_crypto::sha256(b"secret"),
         max_connections: 8,
+        memory_budget: Arc::default(),
     }
 }
 
@@ -72,11 +75,15 @@ impl Drop for StopOnDrop<'_> {
 }
 
 fn with_server(test: impl FnOnce(SocketAddr)) {
+    with_server_config(&config(), test);
+}
+
+fn with_server_config(config: &ServerConfig, test: impl FnOnce(SocketAddr)) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let stop = AtomicBool::new(false);
     std::thread::scope(|scope| {
-        let server = scope.spawn(|| serve(&listener, &config(), &|| stop.load(Ordering::Relaxed)));
+        let server = scope.spawn(|| serve(&listener, config, &|| stop.load(Ordering::Relaxed)));
         let stopping = StopOnDrop(&stop);
         test(address);
         drop(stopping);
@@ -226,4 +233,42 @@ fn wrong_passwords_and_bad_input_are_refused() {
         verbose.send("NONSENSE\r\n");
         assert_eq!(verbose.line(), "-ERR 'Unknown Protocol Operation'");
     });
+}
+
+#[test]
+fn a_frame_declares_the_bytes_it_will_take() {
+    assert_eq!(pending_frame_bytes(b""), 0);
+    assert_eq!(pending_frame_bytes(b"PUB a 300000\r\n"), 14 + 300_000 + 2);
+    assert_eq!(
+        pending_frame_bytes(b"hpub a r 2 300000\r\nxy"),
+        19 + 300_000 + 2
+    );
+    assert_eq!(pending_frame_bytes(b"PUB a 3000"), 10);
+    assert_eq!(pending_frame_bytes(b"PING\r\n"), 6);
+    assert_eq!(pending_frame_bytes(b"PUB a lots\r\n"), 12);
+}
+
+#[test]
+fn a_message_past_the_memory_budget_ends_its_connection_and_others_go_on() {
+    let budget = Arc::new(MemoryBudget::new(300_000));
+    let config = ServerConfig {
+        memory_budget: Arc::clone(&budget),
+        ..config()
+    };
+    with_server_config(&config, |address| {
+        let mut greedy = Client::connected(address, LOGIN);
+        greedy.send("PUB big 400000\r\n");
+        assert_eq!(greedy.line(), "-ERR 'Server Memory Budget Exceeded'");
+        assert_eq!(greedy.line(), "");
+        let mut listener = Client::connected(address, LOGIN);
+        listener.send("SUB fits 1\r\n");
+        listener.sync();
+        let mut publisher = Client::connected(address, LOGIN);
+        let payload = "x".repeat(100_000);
+        publisher.send(&format!("PUB fits 100000\r\n{payload}\r\n"));
+        publisher.sync();
+        assert_eq!(listener.line(), "MSG fits 1 100000");
+        assert_eq!(listener.payload(100_000), payload);
+    });
+    assert_eq!(budget.used_bytes(), 0);
 }

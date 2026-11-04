@@ -167,7 +167,10 @@ session's portal past the budget fails with `53200` while the first goes on (D28
 protocol servers test the same budget in their own crates (D284): RESP (`-OOM`, a request too
 large ends its connection, a reply too large is replaced), MongoDB (`ExceededMemoryLimit`, 146, for
 a message or a cursor), CQL (`Overloaded`, `0x1001`, for a frame or a result) and memcached
-(`SERVER_ERROR out of memory`, the connection goes on); `crates/eggdb/tests/serve.rs` checks
+(`SERVER_ERROR out of memory`, the connection goes on), and so do the HTTP listeners
+(Elasticsearch, S3, DynamoDB and `eggdb-http`'s plain `503`), Kafka, NATS, STOMP, MQTT, AMQP 0-9-1
+and 1.0, Bolt and RESP pub/sub's queued messages, each checking that the budget returns to zero
+(D307); `crates/eggdb/tests/serve.rs` checks
 `--max-connection-memory` through the real binary. The login slots and the budget have unit tests
 in `eggdb-platform`'s `connection_limits`. The T-SQL lexer, parser, functions and batches have a seeded mutator in
 `crates/eggdb-sql/src/tests.rs` (`hostile_tsql_input_returns_errors_and_never_panics`, 35,000
@@ -291,11 +294,11 @@ through the `eggdb` command; the smoke test reads the samples with each release 
   ignored test `write_the_v0_2_0_log_sample` wrote it, and refuses to run while the file exists.
 
 ## SQL against the manual (D105)
-`crates/eggdb-sql/correctness/postgresql.test` holds 308 cases, each a header (`ok`, `rows` with
+`crates/eggdb-sql/correctness/postgresql.test` holds 886 cases, each a header (`ok`, `rows` with
 the expected output after `----`, or `error <SQLSTATE>`), its SQL, and the PostgreSQL manual's
 chapter it comes from on a `chapter` line. They run in order in one session over the in-memory
 store, so later cases see the tables earlier ones made. The runner (`src/correctness.rs`) takes
-the dialect's name; each later dialect adds its own file (`sqlserver.test` names SQL Server's error number after the SQLSTATE, D122). `mysql.test` (174 cases from the MySQL
+the dialect's name; each later dialect adds its own file (`sqlserver.test` names SQL Server's error number after the SQLSTATE, D122). `mysql.test` (242 cases from the MySQL
 8.0 Reference Manual, D106) may name MySQL's error number after the SQLSTATE (`error 42S02
 1146`), and the runner then checks both. A case marked `... differs` is a known
 difference, listed in sql.md: the runner checks that it still differs, so fixing the engine
@@ -350,6 +353,18 @@ runs 20,000 statements built from fragments of the new syntax in each of the fou
 and `numeric_and_time_keys_return_the_same_rows_with_and_without_indexes` compares every query
 over `numeric`, `date`, `timestamp` and `timestamptz` keys with and without indexes, through
 updates, deletes and inserts.
+
+## SQLite's dynamic typing and class-ordered keys (D305)
+`encoding/dynamic_keys_tests.rs` pins the key of every storage class and the integer edges
+(`i64::MIN`, `i64::MAX`, 2^53 + 1) to test vectors, checks 50,000 random pairs of mixed
+classes against an independent statement of SQLite's order (and that each key decodes and
+re-encodes to the same bytes, and every cut is an error), and feeds 200,000 hostile byte
+strings to the key decoder: each is an error or a canonical key, never a panic, and skipping
+agrees with decoding. Table definitions of version 13 are checked for their type tags, every
+truncation, flipped bytes, refusal by older readers and versions that do not match their
+columns; `BLOB`-only tables stay version 10. `type_affinity_tests.rs` runs each affinity,
+keys, unique and range lookups and a reopened store in the SQLite dialect, and the SQLite
+correctness suite covers the same cases against SQLite's documentation.
 
 ## Times, intervals, bytes, UUIDs and padded text (D113)
 Interval arithmetic is checked against a plain reference on 5,000 random pairs: sums,

@@ -1,7 +1,7 @@
 use crate::commands::{Client, Context};
 use crate::keyspace::Keyspace;
 use crate::protocol::{ProtocolError, Reply, RequestReader};
-use crate::pubsub::{Hub, Kind};
+use crate::pubsub::{Hub, Kind, Queued};
 use crate::transactions::execute_with_transactions;
 use eggdb_platform::connection_limits::{MemoryBudget, UNCOUNTED_BUFFER_BYTES};
 use std::io::{self, Write};
@@ -14,8 +14,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const ACCEPT_POLL: Duration = Duration::from_millis(100);
 const READ_POLL: Duration = Duration::from_millis(200);
 
-/// How the RESP server runs.
-#[derive(Debug, Clone)]
+/// How the RESP server runs. Its `Debug` output never shows the password's hash.
+#[derive(Clone)]
 pub struct ServerConfig {
     /// The SHA-256 of the password clients give with `AUTH` (as `requirepass` asks), or
     /// `None` for none; the password itself is not kept.
@@ -25,6 +25,17 @@ pub struct ServerConfig {
     /// The memory every connection's requests and replies hold together, shared with the
     /// server's other listeners.
     pub memory_budget: Arc<MemoryBudget>,
+}
+
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServerConfig")
+            .field("requires_password", &self.password_sha256.is_some())
+            .field("max_connections", &self.max_connections)
+            .field("memory_budget", &self.memory_budget)
+            .finish()
+    }
 }
 
 const OUT_OF_BUDGET: &str =
@@ -74,7 +85,7 @@ struct Connection<'s> {
     id: u64,
     hub: &'s Hub,
     writer: Arc<Mutex<TcpStream>>,
-    outbox: Option<(Sender<Vec<u8>>, Arc<AtomicUsize>)>,
+    outbox: Option<(Sender<Queued>, Arc<AtomicUsize>)>,
 }
 
 impl Connection<'_> {
@@ -90,19 +101,21 @@ impl Connection<'_> {
         if self.outbox.is_some() {
             return;
         }
-        let (sender, receiver) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (sender, receiver) = std::sync::mpsc::channel::<Queued>();
         let pending = Arc::new(AtomicUsize::new(0));
         let writer = Arc::clone(&self.writer);
         let forwarded = Arc::clone(&pending);
         let started = std::thread::Builder::new()
             .name("eggdb-resp-push".to_owned())
             .spawn(move || {
-                for frame in receiver {
+                for Queued { frame, held } in receiver {
                     forwarded.fetch_sub(1, Ordering::AcqRel);
                     let mut stream = writer
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if stream.write_all(&frame).is_err() {
+                    let written = stream.write_all(&frame);
+                    drop(held);
+                    if written.is_err() {
                         return;
                     }
                 }
@@ -251,7 +264,7 @@ pub fn serve(
 ) -> io::Result<usize> {
     listener.set_nonblocking(true)?;
     let active = AtomicUsize::new(0);
-    let hub = Hub::default();
+    let hub = Hub::new(Arc::clone(&config.memory_budget));
     let next_id = AtomicU64::new(1);
     std::thread::scope(|scope| {
         while !stop() {

@@ -395,7 +395,7 @@ fn output_returns_the_rows_a_statement_changed() {
         ("DELETE FROM o OUTPUT inserted.qty", 4104),
         (
             "INSERT INTO o (qty) OUTPUT inserted.id INTO x VALUES (1)",
-            40517,
+            208,
         ),
     ] {
         let error = session.execute(text, &mut |_| {}).expect_err(text);
@@ -1676,6 +1676,110 @@ fn merge_refuses_by_source_clauses_sql_server_refuses() {
         "MERGE m USING (SELECT 1 AS id) s ON m.id = s.id WHEN NOT MATCHED BY SOURCE THEN DELETE WHEN NOT MATCHED BY SOURCE THEN UPDATE SET v = 1",
         "MERGE m USING (SELECT 1 AS id) s ON m.id = s.id WHEN NOT MATCHED BY SOURCE AND v = 1 THEN DELETE WHEN NOT MATCHED BY SOURCE THEN DELETE",
         "MERGE m USING (SELECT 1 AS id) s ON m.id = s.id WHEN NOT MATCHED BY SOURCE AND v = 1 THEN DELETE WHEN NOT MATCHED BY SOURCE AND v = 2 THEN UPDATE SET v = 3 WHEN NOT MATCHED BY SOURCE THEN DELETE",
+    ] {
+        let error = session
+            .execute(text, &mut |_| {})
+            .expect_err("a refused MERGE");
+        assert_eq!(error.vendor_code(), Some(10714), "{text}");
+    }
+}
+
+#[test]
+fn merge_runs_two_when_matched_clauses_and_names_each_action() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(
+        &mut session,
+        "CREATE TABLE stock (id INT PRIMARY KEY, qty INT)",
+    );
+    values(
+        &mut session,
+        "INSERT INTO stock VALUES (1, 10), (2, 20), (3, 30)",
+    );
+    let changed = values(
+        &mut session,
+        "MERGE stock AS t USING (VALUES (1, 0), (2, 25), (4, 40)) AS s (id, qty) ON t.id = s.id \
+         WHEN MATCHED AND s.qty = 0 THEN DELETE \
+         WHEN MATCHED THEN UPDATE SET qty = s.qty \
+         WHEN NOT MATCHED THEN INSERT (id, qty) VALUES (s.id, s.qty) \
+         OUTPUT $action, inserted.id, deleted.id",
+    );
+    let action = |name: &str| Value::Text(name.to_owned());
+    assert_eq!(changed.len(), 3);
+    assert!(changed.contains(&vec![action("DELETE"), Value::Null, Value::Integer(1)]));
+    assert!(changed.contains(&vec![
+        action("UPDATE"),
+        Value::Integer(2),
+        Value::Integer(2)
+    ]));
+    assert!(changed.contains(&vec![action("INSERT"), Value::Integer(4), Value::Null]));
+    assert_eq!(
+        values(&mut session, "SELECT id, qty FROM stock ORDER BY id"),
+        vec![
+            vec![Value::Integer(2), Value::Integer(25)],
+            vec![Value::Integer(3), Value::Integer(30)],
+            vec![Value::Integer(4), Value::Integer(40)],
+        ]
+    );
+    let by_source = values(
+        &mut session,
+        "MERGE stock USING (SELECT 2 AS id) AS s ON stock.id = s.id \
+         WHEN NOT MATCHED BY SOURCE THEN DELETE OUTPUT $action, deleted.id",
+    );
+    assert_eq!(by_source.len(), 2);
+    assert!(by_source.contains(&vec![action("DELETE"), Value::Integer(3)]));
+    assert!(by_source.contains(&vec![action("DELETE"), Value::Integer(4)]));
+}
+
+#[test]
+fn merge_top_limits_the_rows_it_changes() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(
+        &mut session,
+        "CREATE TABLE stock (id INT PRIMARY KEY, qty INT)",
+    );
+    let inserted = values(
+        &mut session,
+        "MERGE TOP (2) INTO stock USING (VALUES (1, 10), (2, 20), (3, 30)) AS s (id, qty) \
+         ON stock.id = s.id WHEN NOT MATCHED THEN INSERT (id, qty) VALUES (s.id, s.qty) \
+         OUTPUT inserted.id",
+    );
+    assert_eq!(inserted.len(), 2);
+    assert_eq!(values(&mut session, "SELECT id FROM stock").len(), 2);
+    values(&mut session, "INSERT INTO stock VALUES (7, 70), (8, 80)");
+    values(
+        &mut session,
+        "MERGE TOP (50) PERCENT stock USING (SELECT id FROM stock) AS s ON stock.id = s.id \
+         WHEN MATCHED THEN DELETE",
+    );
+    assert_eq!(values(&mut session, "SELECT id FROM stock").len(), 2);
+    let error = error_of(
+        &mut session,
+        "MERGE TOP (101) PERCENT stock USING (SELECT 1 AS id) AS s ON stock.id = s.id \
+         WHEN MATCHED THEN DELETE",
+    );
+    assert_eq!(error.vendor_code(), Some(1031));
+    for text in [
+        "SELECT TOP (NULL) PERCENT id FROM stock",
+        "SELECT TOP (NULL) PERCENT WITH TIES id FROM stock ORDER BY id",
+    ] {
+        let error = error_of(&mut session, text);
+        assert_eq!(error.vendor_code(), Some(1006), "{text}");
+        assert_eq!(error.message(), "TOP clause contains an invalid value.");
+    }
+}
+
+#[test]
+fn merge_refuses_matched_and_not_matched_clauses_sql_server_refuses() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(&mut session, "CREATE TABLE m (id INT PRIMARY KEY, v INT)");
+    for text in [
+        "MERGE m USING (SELECT 1 AS id) s ON m.id = s.id WHEN MATCHED THEN DELETE WHEN MATCHED THEN UPDATE SET v = 1",
+        "MERGE m USING (SELECT 1 AS id) s ON m.id = s.id WHEN MATCHED AND v = 1 THEN UPDATE SET v = 2 WHEN MATCHED THEN UPDATE SET v = 3",
+        "MERGE m USING (SELECT 1 AS id) s ON m.id = s.id WHEN MATCHED AND v = 1 THEN DELETE WHEN MATCHED AND v = 2 THEN UPDATE SET v = 3 WHEN MATCHED THEN DELETE",
+        "MERGE m USING (SELECT 1 AS id) s ON m.id = s.id WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id) WHEN NOT MATCHED BY TARGET THEN INSERT (id) VALUES (2)",
     ] {
         let error = session
             .execute(text, &mut |_| {})

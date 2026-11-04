@@ -1013,7 +1013,9 @@ fn views_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
         .filter(|entry| is_view(entry) == Some(true))
         .map(|entry| {
             let definition = match &entry.source {
-                RelationSource::View(view) => character_data(&view.query),
+                RelationSource::View(view) => {
+                    view.shown_query().map_or(Value::Null, character_data)
+                }
                 _ => Value::Null,
             };
             let mut row = InformationRow::new(InformationRelation::Views)

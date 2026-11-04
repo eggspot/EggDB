@@ -54,6 +54,8 @@ fn select_over(target: &TableReference, items: Vec<SelectItem>, filter: Option<E
         limit: None,
         offset: None,
         source_row_limit: None,
+        grouping_sets: None,
+        distinct_on: Vec::new(),
     }
 }
 
@@ -72,6 +74,8 @@ fn constant_select(items: Vec<Expr>) -> Select {
         limit: None,
         offset: None,
         source_row_limit: None,
+        grouping_sets: None,
+        distinct_on: Vec::new(),
     }
 }
 

@@ -8,7 +8,8 @@ use eggdb::{Database, ErrorKind, Options};
 use eggdb_mcp::audit::{AuditLog, audit_path_for};
 use eggdb_mcp::{DatabaseOpener, OpenRefusal, Server, ServerConfig, StartFailure};
 use eggdb_sql::{
-    KeyValueStore, OutsideLink, UnknownTableName, UnservableColumnList, VisibleTables,
+    KeyValueStore, OutsideLink, OutsideLinkKind, UnknownTableName, UnservableColumnList,
+    VisibleTables,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -203,7 +204,7 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
     };
     let columns_line = if shown_tables.iter().any(|name| name.contains('(')) {
         format!(
-            "  columns      {}: the agent sees only the columns listed, and may not change these tables\n",
+            "  columns      {}: the agent sees only the columns listed, and may not delete their rows or change their definitions\n",
             shown_tables
                 .iter()
                 .filter(|name| name.contains('('))
@@ -244,6 +245,14 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
                     render::text(link.listed.as_bytes()),
                     render::text(link.outside.as_bytes())
                 ));
+                if link.kind == OutsideLinkKind::References {
+                    line.push_str(&format!(
+                        "  reveals      the agent can learn whether a value exists in {}, in the columns that foreign key points at, by trying it as a key of {}; list {} without that foreign key's columns to prevent it\n",
+                        render::text(link.outside.as_bytes()),
+                        render::text(link.listed.as_bytes()),
+                        render::text(link.listed.as_bytes())
+                    ));
+                }
             }
             line
         }

@@ -3,15 +3,23 @@ use crate::ast::{Name, SavepointCommand};
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::session::QueryResult;
+use crate::settings::SavedSettings;
 use crate::store::{EntryVisitor, KeyValueRead, KeyValueWrite, ScanDirection};
 
 const MOST_SAVEPOINTS: usize = 4096;
 
 type Undo = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 
+#[derive(Debug)]
+struct Mark {
+    name: String,
+    undo_at: usize,
+    settings: Option<SavedSettings>,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct Savepoints {
-    marks: Vec<(String, usize)>,
+    marks: Vec<Mark>,
     pub(super) undo: Undo,
     pub(super) aborted: bool,
     began_transaction: bool,
@@ -30,7 +38,7 @@ impl Savepoints {
     }
 
     fn latest(&self, name: &str) -> Option<usize> {
-        self.marks.iter().rposition(|(mark, _)| mark == name)
+        self.marks.iter().rposition(|mark| mark.name == name)
     }
 }
 
@@ -163,6 +171,9 @@ impl Session<'_> {
                     self.begin(false)?;
                     self.savepoints.began_transaction = true;
                 }
+                Dialect::Oracle => {
+                    self.write("SAVEPOINT", |_, _| Ok(QueryResult::command("SAVEPOINT")))?;
+                }
                 _ => return Ok(QueryResult::command("SAVEPOINT")),
             }
         }
@@ -179,7 +190,13 @@ impl Session<'_> {
             self.savepoints.marks.remove(at);
         }
         let undo_at = self.savepoints.undo.len();
-        self.savepoints.marks.push((name.text.clone(), undo_at));
+        let settings = (self.dialect == Dialect::PostgreSql)
+            .then(|| self.transaction_settings.save(&self.settings));
+        self.savepoints.marks.push(Mark {
+            name: name.text.clone(),
+            undo_at,
+            settings,
+        });
         Ok(QueryResult::command("SAVEPOINT"))
     }
 
@@ -194,7 +211,14 @@ impl Session<'_> {
             }
             return Err(missing(name, self.dialect));
         };
-        let undo_at = self.savepoints.marks[at].1;
+        let Some(mark) = self.savepoints.marks.get(at) else {
+            return Err(missing(name, self.dialect));
+        };
+        let undo_at = mark.undo_at;
+        if let Some(saved) = mark.settings.clone() {
+            let settings = std::sync::Arc::make_mut(&mut self.settings);
+            self.transaction_settings.restore(settings, saved);
+        }
         let Block::Writing(writer) = &mut self.block else {
             self.savepoints.marks.truncate(at + 1);
             self.savepoints.aborted = false;

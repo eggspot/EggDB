@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
+use eggdb::sql::TransactionStatus;
 use eggdb_platform::window::{
     AccessAction, AccessNode, AccessRequest, AccessRole, KeyPress, Modifiers, OpenFileDialog,
     PointerButton,
@@ -12,14 +13,20 @@ use crate::catalog::Catalog;
 use crate::clipboard::{Clipboard, MemoryClipboard};
 use crate::connect_screen::{self, ConnectAction, ConnectCard, Segment, handle_key};
 use crate::connection::{
-    CancelHandle, ConnectFailure, ConnectTarget, Connection, Connector, ResultTable,
-    StatementFailure,
+    BracketedRun, CancelHandle, ConnectFailure, ConnectTarget, Connection, Connector, ResultTable,
+    SessionId, StatementFailure,
 };
+use crate::dialect::QueryDialect;
 use crate::inspector;
+use crate::layout::Layout;
+use crate::layout_picker::{self, LayoutPicker, PickerOutcome};
 use crate::main_window::{self, Faces, MainWindow, WindowAction};
 use crate::object_browser::TreeItem;
+use crate::plan_view;
 use crate::pointer::{self, ClickCounter, PointerLook};
 use crate::query_tab::{RunRequest, TabAction};
+use crate::settings::ClientSettings;
+use crate::splitters::RegionSizes;
 
 /// How long an open runs before the card shows its progress state, so a quick open never
 /// flickers.
@@ -30,19 +37,34 @@ pub const CANCELLED_SHOWN_FOR: Duration = Duration::from_secs(2);
 /// How long a notice such as `Copied 12 cells` stays in the status bar.
 pub const NOTICE_SHOWN_FOR: Duration = Duration::from_secs(2);
 
-type RunAnswer = (Connection, Vec<Result<Vec<ResultTable>, StatementFailure>>);
+type RunAnswer = (
+    Connection,
+    Vec<Result<Vec<ResultTable>, StatementFailure>>,
+    TransactionStatus,
+);
 type OpenAnswer = Result<(Connection, Catalog), ConnectFailure>;
+type HandedConnection = (Connection, Vec<SessionId>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CatalogRead {
     Catalog,
     Sample(String),
+    Drop {
+        statement: String,
+        dialect: QueryDialect,
+    },
+    CloseSessions(Vec<SessionId>),
 }
 
 enum CatalogAnswer {
     Catalog(Result<Catalog, StatementFailure>),
     Sample(inspector::Sample),
+    Dropped(Result<(), StatementFailure>),
+    SessionsClosed,
 }
+
+/// How long the toast after a drop from the tree shows (`docs/ux/workspace.md` 10.2).
+pub const DROPPED_SHOWN_FOR: Duration = Duration::from_secs(8);
 
 struct Reading {
     read: CatalogRead,
@@ -54,6 +76,7 @@ enum Drag {
     CardField { box_left: f32 },
     Editor,
     Grid,
+    Handle(main_window::GridHandle),
 }
 
 /// What the window around the workspace must do after an input.
@@ -100,9 +123,11 @@ pub struct Workspace {
     opening: Option<Opening>,
     running: Option<Running>,
     reading: Option<Reading>,
-    run_waiting_for_connection: Option<mpsc::Sender<Connection>>,
+    run_waiting_for_connection: Option<mpsc::Sender<HandedConnection>>,
+    sessions_to_close: Vec<SessionId>,
     catalog_wanted: bool,
     sample_wanted: Option<String>,
+    drop_wanted: Option<(String, QueryDialect)>,
     status_until: Option<Instant>,
     notice_until: Option<Instant>,
     clipboard: Box<dyn Clipboard>,
@@ -114,6 +139,10 @@ pub struct Workspace {
     caret_blinks: bool,
     window_active: bool,
     reduced_motion: bool,
+    fill_targets: (Option<u32>, Option<u32>),
+    plan_hover: Option<(usize, Instant)>,
+    layout: Layout,
+    settings_path: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for Workspace {
@@ -146,8 +175,10 @@ impl Workspace {
             running: None,
             reading: None,
             run_waiting_for_connection: None,
+            sessions_to_close: Vec::new(),
             catalog_wanted: false,
             sample_wanted: None,
+            drop_wanted: None,
             status_until: None,
             notice_until: None,
             clipboard: Box::new(MemoryClipboard::default()),
@@ -159,6 +190,100 @@ impl Workspace {
             caret_blinks: false,
             window_active: true,
             reduced_motion: false,
+            fill_targets: (None, None),
+            plan_hover: None,
+            layout: Layout::EggDb,
+            settings_path: None,
+        }
+    }
+
+    /// Keeps the client's settings in the file at `path` (`None`: nowhere) and shows the
+    /// layout they name.
+    pub fn use_settings(&mut self, path: Option<PathBuf>) {
+        if let Some(layout) = path
+            .as_deref()
+            .and_then(|path| ClientSettings::load(path).layout)
+        {
+            self.show_layout(layout);
+        }
+        self.settings_path = path;
+    }
+
+    /// The layout the main window shows, or opens in.
+    pub fn layout(&self) -> Layout {
+        self.layout
+    }
+
+    /// Shows `layout` on the card and in the main window, without keeping it in the settings;
+    /// for scripted runs.
+    pub fn show_layout(&mut self, layout: Layout) {
+        self.layout = layout;
+        match &mut self.screen {
+            Screen::Connect(card) => card.layout = layout,
+            Screen::Main(window) => window.layout = layout,
+        }
+    }
+
+    fn keep_layout(&mut self, layout: Layout, now: Instant) {
+        self.show_layout(layout);
+        let sizes = self.saved_sizes(layout);
+        if let Some(window) = self.main_window_mut() {
+            window.use_sizes(sizes);
+        }
+        let Some(path) = self.settings_path.clone() else {
+            return;
+        };
+        let mut settings = ClientSettings::load(&path);
+        settings.layout = Some(layout);
+        if let Err(error) = settings.save(&path) {
+            let notice = format!("{} applies to this window only: {error}", layout.label());
+            match &mut self.screen {
+                Screen::Connect(card) => {
+                    card.status = Some(notice);
+                    self.status_until = Some(now + NOTICE_SHOWN_FOR);
+                }
+                Screen::Main(window) => {
+                    window.tab.notice = Some(notice);
+                    self.notice_until = Some(now + NOTICE_SHOWN_FOR);
+                }
+            }
+        }
+    }
+
+    fn picker_outcome(&mut self, outcome: PickerOutcome, now: Instant) {
+        let chosen = match &mut self.screen {
+            Screen::Connect(card) => match outcome {
+                PickerOutcome::Open => None,
+                PickerOutcome::Keep => {
+                    card.layout_picker = None;
+                    None
+                }
+                PickerOutcome::Apply(layout) => {
+                    card.layout_picker = None;
+                    Some(layout)
+                }
+            },
+            Screen::Main(window) => match window.picker_outcome(outcome) {
+                WindowAction::LayoutChosen(layout) => Some(layout),
+                _ => None,
+            },
+        };
+        if let Some(layout) = chosen {
+            self.keep_layout(layout, now);
+        }
+    }
+
+    fn picker_mut(&mut self) -> Option<&mut LayoutPicker> {
+        match &mut self.screen {
+            Screen::Connect(card) => card.layout_picker.as_mut(),
+            Screen::Main(window) => window.layout_picker.as_mut(),
+        }
+    }
+
+    fn picker_size(&self, size: (u32, u32)) -> (f32, f32) {
+        match &self.screen {
+            Screen::Connect(_) => (size.0 as f32, size.1 as f32),
+            Screen::Main(window) => (window.width as f32, main_window::HEIGHT as f32),
         }
     }
 
@@ -173,6 +298,70 @@ impl Workspace {
     /// asks.
     pub fn set_reduced_motion(&mut self, reduced: bool) {
         self.reduced_motion = reduced;
+        if reduced {
+            self.pointer_look_mut().stop_fades();
+        }
+    }
+
+    fn tick_fades(&mut self, now: Instant) -> bool {
+        let before = self.fill_targets;
+        let reduced = self.reduced_motion;
+        let look = self.pointer_look_mut();
+        let targets = (look.hovered, look.pressed);
+        if reduced {
+            look.stop_fades();
+        } else if targets != before {
+            look.follow(before, now);
+        }
+        let changed = look.advance(now);
+        self.fill_targets = targets;
+        changed
+    }
+
+    fn tick_plan_tooltip(&mut self, now: Instant) -> bool {
+        let hovered = match &self.screen {
+            Screen::Main(window) => window.hovered_plan_node(),
+            Screen::Connect(_) => None,
+        };
+        match (self.plan_hover, hovered) {
+            (Some((node, _)), Some(current)) if node == current => {}
+            (_, current) => self.plan_hover = current.map(|node| (node, now)),
+        }
+        let due = self
+            .plan_hover
+            .filter(|&(_, since)| now.saturating_duration_since(since) >= plan_view::TOOLTIP_DELAY)
+            .map(|(node, _)| node);
+        self.main_window_mut()
+            .and_then(|window| window.tab.plan.as_mut())
+            .is_some_and(|plan| plan.show_pointer_tooltip(due))
+    }
+
+    /// How long until the pointer has rested on a plan node long enough for its tooltip,
+    /// `None` when it rests on none or the tooltip already shows (`docs/ux/workspace.md` 5.4).
+    pub fn until_plan_tooltip(&self, now: Instant) -> Option<Duration> {
+        let (node, since) = self.plan_hover?;
+        let Screen::Main(window) = &self.screen else {
+            return None;
+        };
+        let shown = window
+            .tab
+            .plan
+            .as_ref()
+            .is_some_and(|plan| plan.tooltip.is_some_and(|(shown, _)| shown == node));
+        if shown {
+            return None;
+        }
+        Some(plan_view::TOOLTIP_DELAY.saturating_sub(now.saturating_duration_since(since)))
+    }
+
+    /// How long until a fading fill needs a new frame, `None` when nothing fades
+    /// (`docs/ux/workspace.md` 10.8).
+    pub fn until_fade_changes(&self) -> Option<Duration> {
+        let look = match &self.screen {
+            Screen::Connect(card) => &card.pointer,
+            Screen::Main(window) => &window.pointer,
+        };
+        look.is_fading().then_some(pointer::FADE_FRAME_INTERVAL)
     }
 
     /// The window became active (`true`) or inactive: an inactive window's caret is solid
@@ -243,7 +432,9 @@ impl Workspace {
         let tree = self.pointer_tree(faces, size);
         let mut changed = match self.drag {
             Some(drag) => self.drag_to(drag, &tree, faces, x, y),
-            None => false,
+            None => self
+                .main_window_mut()
+                .is_some_and(|window| window.hover_grid_handles(x, y)),
         };
         let hovered = pointer::hit_test(&tree, x, y).map(|node| node.id);
         let look = self.pointer_look_mut();
@@ -257,8 +448,11 @@ impl Workspace {
     /// The pointer left the window: nothing is hovered. Returns whether the frame changed.
     pub fn pointer_left(&mut self) -> bool {
         let look = self.pointer_look_mut();
-        let changed = look.hovered.is_some();
+        let mut changed = look.hovered.is_some();
         look.hovered = None;
+        if let Some(window) = self.main_window_mut().filter(|window| !window.resizing) {
+            changed |= window.column_edge.take().is_some() | window.scrollbar_hot.take().is_some();
+        }
         changed
     }
 
@@ -278,13 +472,46 @@ impl Workspace {
         size: (u32, u32),
         now: Instant,
     ) -> WorkspaceCommand {
+        if button == PointerButton::Middle {
+            return self.middle_pressed(x, y, faces, size, now);
+        }
+        if button == PointerButton::Secondary {
+            self.secondary_pressed(x, y, faces, size, now);
+            return WorkspaceCommand::None;
+        }
         if button != PointerButton::Primary || self.card_mut().is_some_and(|card| card.busy) {
             return WorkspaceCommand::None;
         }
         self.input_at(now);
         let clicks = self.clicks.press(now, x, y);
+        let logical = self.picker_size(size);
+        if let Some(picker) = self.picker_mut() {
+            let outcome = layout_picker::press_at(picker, logical, x, y, clicks);
+            self.picker_outcome(outcome, now);
+            return WorkspaceCommand::None;
+        }
+        if self
+            .main_window_mut()
+            .is_some_and(|window| window.press_outside_popover(x, y))
+        {
+            return WorkspaceCommand::None;
+        }
+        if let Some(handle) = self.main_window_mut().and_then(|window| {
+            window
+                .press_layout_handle(x, y, clicks)
+                .or_else(|| window.press_grid_handle(x, y, clicks))
+        }) {
+            self.keep_sizes(now);
+            if handle != main_window::GridHandle::Done {
+                self.drag = Some(Drag::Handle(handle));
+            }
+            return WorkspaceCommand::None;
+        }
         let tree = self.pointer_tree(faces, size);
-        let Some(node) = pointer::hit_test(&tree, x, y).cloned() else {
+        let Some(node) = pointer::hit_test(&tree, x, y)
+            .filter(|node| self.popover_allows(node.id))
+            .cloned()
+        else {
             return WorkspaceCommand::None;
         };
         {
@@ -328,7 +555,14 @@ impl Workspace {
                 {
                     grid.anchor = anchor;
                 }
-                self.drag = Some(Drag::Grid);
+                if clicks == 2
+                    && !extend
+                    && let Some(window) = self.main_window_mut()
+                {
+                    window.tab.open_value();
+                } else {
+                    self.drag = Some(Drag::Grid);
+                }
             }
             AccessRole::TreeItem => {
                 let action = if clicks == 2 {
@@ -342,6 +576,73 @@ impl Workspace {
         }
         self.pointer_look_mut().focus_by_pointer = true;
         command
+    }
+
+    fn popover_allows(&self, id: u32) -> bool {
+        match &self.screen {
+            Screen::Main(window) => window.popover_rect().is_none() || window.is_popover_node(id),
+            Screen::Connect(_) => true,
+        }
+    }
+
+    fn secondary_pressed(
+        &mut self,
+        x: f32,
+        y: f32,
+        faces: Faces<'_>,
+        size: (u32, u32),
+        now: Instant,
+    ) {
+        if self.picker_mut().is_some() || !matches!(self.screen, Screen::Main(_)) {
+            return;
+        }
+        self.input_at(now);
+        let tree = self.pointer_tree(faces, size);
+        let Some(window) = self.main_window_mut() else {
+            return;
+        };
+        if window.close_prompt.is_some() || window.drop_prompt.is_some() {
+            return;
+        }
+        window.context_press(&tree, x, y);
+        if window.tree_menu.is_some() {
+            let item = window.inspected();
+            self.inspect(item);
+        }
+    }
+
+    fn middle_pressed(
+        &mut self,
+        x: f32,
+        y: f32,
+        faces: Faces<'_>,
+        size: (u32, u32),
+        now: Instant,
+    ) -> WorkspaceCommand {
+        let tree = self.pointer_tree(faces, size);
+        let Some(node) = pointer::hit_test(&tree, x, y) else {
+            return WorkspaceCommand::None;
+        };
+        let parent_tab = tree
+            .iter()
+            .find(|tab| Some(tab.id) == node.parent && tab.role == AccessRole::Tab);
+        let tab = if node.role == AccessRole::Tab {
+            Some(node)
+        } else {
+            parent_tab
+        };
+        let Some(id) = tab.map(|tab| tab.id) else {
+            return WorkspaceCommand::None;
+        };
+        let Screen::Main(window) = &mut self.screen else {
+            return WorkspaceCommand::None;
+        };
+        let Some(position) = main_window::tab_position_for_node(window, id) else {
+            return WorkspaceCommand::None;
+        };
+        let action = window.close_tab_at(position);
+        self.window_action(action, now);
+        WorkspaceCommand::None
     }
 
     /// A button went up at (`x`, `y`): a press that started on a button, link, checkbox,
@@ -360,6 +661,10 @@ impl Workspace {
             return WorkspaceCommand::None;
         }
         self.drag = None;
+        if let Some(window) = self.main_window_mut() {
+            window.release_grid_handle();
+        }
+        self.keep_sizes(now);
         let Some(pressed) = self.pointer_look_mut().pressed.take() else {
             return WorkspaceCommand::None;
         };
@@ -434,6 +739,7 @@ impl Workspace {
                 window.drag_editor(faces, x, y);
                 (window.tab.editor.caret(), window.tab.editor.selection()) != before
             }
+            (Drag::Handle(handle), Screen::Main(window)) => window.drag_grid_handle(handle, x, y),
             (Drag::Grid, Screen::Main(window)) => {
                 let Some(at) = tree
                     .iter()
@@ -514,6 +820,14 @@ impl Workspace {
     /// Answers a key press.
     pub fn key(&mut self, press: KeyPress, now: Instant) -> WorkspaceCommand {
         self.input_at(now);
+        let card_picked = match &mut self.screen {
+            Screen::Connect(card) => card.layout_picker.as_mut().map(|picker| picker.key(press)),
+            Screen::Main(_) => None,
+        };
+        if let Some(outcome) = card_picked {
+            self.picker_outcome(outcome, now);
+            return WorkspaceCommand::None;
+        }
         if let Screen::Main(window) = &mut self.screen {
             let action = window.key(press, now);
             self.window_action(action, now);
@@ -545,6 +859,11 @@ impl Workspace {
             return WorkspaceCommand::None;
         };
         let keys = match &mut self.screen {
+            Screen::Connect(card) if card.layout_picker.is_some() => card
+                .layout_picker
+                .as_mut()
+                .map(|picker| layout_picker::access_keys(picker, node, &request.action))
+                .unwrap_or_default(),
             Screen::Connect(card) => {
                 if !card.focus_node(node.id) {
                     return WorkspaceCommand::None;
@@ -576,7 +895,55 @@ impl Workspace {
             WindowAction::Tab(action) => self.tab_action(action, now),
             WindowAction::Inspect(item) => self.inspect(item),
             WindowAction::RefreshCatalog => self.refresh_catalog(),
+            WindowAction::Drop { statement, dialect } => {
+                self.drop_wanted = Some((statement, dialect));
+                self.start_read();
+            }
+            WindowAction::LayoutChosen(layout) => self.keep_layout(layout, now),
+            WindowAction::CloseSession { session, stop } => self.close_session(session, stop),
         }
+        self.keep_sizes(now);
+    }
+
+    fn keep_sizes(&mut self, now: Instant) {
+        let path = self.settings_path.clone();
+        let Some(window) = self.main_window_mut() else {
+            return;
+        };
+        if !std::mem::take(&mut window.sizes_changed) {
+            return;
+        }
+        let (sizes, layout) = (window.sizes, window.layout);
+        self.notice_until = Some(now + NOTICE_SHOWN_FOR);
+        let Some(path) = path else {
+            return;
+        };
+        let mut settings = ClientSettings::load(&path);
+        sizes.write_to(&mut settings, layout);
+        if let Err(error) = settings.save(&path)
+            && let Some(window) = self.main_window_mut()
+        {
+            window.tab.notice = Some(format!("The new sizes apply to this window only: {error}"));
+        }
+    }
+
+    fn saved_sizes(&self, layout: Layout) -> RegionSizes {
+        self.settings_path
+            .as_deref()
+            .map_or_else(RegionSizes::default, |path| {
+                RegionSizes::from_settings(&ClientSettings::load(path), layout)
+            })
+    }
+
+    fn close_session(&mut self, session: SessionId, stop: bool) {
+        if stop
+            && let Some(running) = &self.running
+            && running.request.session == session
+        {
+            running.cancel.cancel();
+        }
+        self.sessions_to_close.push(session);
+        self.start_read();
     }
 
     fn inspect(&mut self, item: TreeItem) {
@@ -617,7 +984,11 @@ impl Workspace {
         if self.reading.is_some() || self.run_waiting_for_connection.is_some() {
             return;
         }
-        let read = if self.catalog_wanted {
+        let read = if !self.sessions_to_close.is_empty() {
+            CatalogRead::CloseSessions(std::mem::take(&mut self.sessions_to_close))
+        } else if let Some((statement, dialect)) = self.drop_wanted.take() {
+            CatalogRead::Drop { statement, dialect }
+        } else if self.catalog_wanted {
             self.catalog_wanted = false;
             CatalogRead::Catalog
         } else if let Some(name) = self.sample_wanted.take() {
@@ -629,6 +1000,10 @@ impl Workspace {
             match read {
                 CatalogRead::Catalog => self.catalog_wanted = true,
                 CatalogRead::Sample(name) => self.sample_wanted = Some(name),
+                CatalogRead::Drop { statement, dialect } => {
+                    self.drop_wanted = Some((statement, dialect));
+                }
+                CatalogRead::CloseSessions(sessions) => self.sessions_to_close = sessions,
             }
             return;
         };
@@ -639,6 +1014,20 @@ impl Workspace {
                 CatalogRead::Catalog => CatalogAnswer::Catalog(connection.catalog()),
                 CatalogRead::Sample(name) => {
                     CatalogAnswer::Sample(inspector::fetch_sample(&mut connection, &name))
+                }
+                CatalogRead::Drop { statement, dialect } => {
+                    let outcomes =
+                        connection.run_script(dialect, &[statement], &CancelHandle::default());
+                    CatalogAnswer::Dropped(match outcomes.into_iter().last() {
+                        Some(Err(failure)) => Err(failure),
+                        _ => Ok(()),
+                    })
+                }
+                CatalogRead::CloseSessions(sessions) => {
+                    for session in sessions {
+                        connection.close_session(session);
+                    }
+                    CatalogAnswer::SessionsClosed
                 }
             };
             let _ = send.send((connection, answer));
@@ -656,6 +1045,15 @@ impl Workspace {
                 }
                 CatalogAnswer::Catalog(Err(_)) => {}
                 CatalogAnswer::Sample(sample) => window.inspector.sample = Some(sample),
+                CatalogAnswer::Dropped(Ok(())) => {
+                    if window.drop_succeeded().is_some() {
+                        self.notice_until = Some(Instant::now() + DROPPED_SHOWN_FOR);
+                    }
+                    window.inspector.sample = None;
+                    self.catalog_wanted = true;
+                }
+                CatalogAnswer::Dropped(Err(failure)) => window.drop_failed(&failure),
+                CatalogAnswer::SessionsClosed => {}
             }
         }
         self.connection_back(connection);
@@ -664,7 +1062,9 @@ impl Workspace {
     fn connection_back(&mut self, connection: Connection) {
         match self.run_waiting_for_connection.take() {
             Some(run) => {
-                if let Err(mpsc::SendError(connection)) = run.send(connection) {
+                let handed = run.send((connection, std::mem::take(&mut self.sessions_to_close)));
+                if let Err(mpsc::SendError((connection, to_close))) = handed {
+                    self.sessions_to_close = to_close;
                     self.connection = Some(connection);
                     self.start_read();
                 }
@@ -751,10 +1151,23 @@ impl Workspace {
     }
 
     fn start_run(&mut self, request: RunRequest, now: Instant) {
-        let (hand_over, handed) = mpsc::channel::<Connection>();
+        if let Some(running) = &self.running {
+            let session = running.request.session;
+            if let Some(window) = self.main_window_mut() {
+                let title = window
+                    .tab_with_session_mut(session)
+                    .map(|tab| tab.title.clone())
+                    .unwrap_or_default();
+                window.tab.notice = Some(main_window::another_tab_running(&title));
+            }
+            self.notice_until = Some(now + NOTICE_SHOWN_FOR);
+            return;
+        }
+        let (hand_over, handed) = mpsc::channel::<HandedConnection>();
         match self.connection.take() {
             Some(connection) => {
-                let _ = hand_over.send(connection);
+                let to_close = std::mem::take(&mut self.sessions_to_close);
+                let _ = hand_over.send((connection, to_close));
             }
             None if self.reading.is_some() && self.run_waiting_for_connection.is_none() => {
                 self.run_waiting_for_connection = Some(hand_over);
@@ -766,21 +1179,32 @@ impl Workspace {
         let worker_cancel = cancel.clone();
         let statements = request.statements.clone();
         let dialect = request.dialect;
-        let rolled_back = request
-            .explain
-            .as_ref()
-            .is_some_and(|explain| explain.rolled_back);
+        let session = request.session;
+        let scan = request.scan.clone();
+        let bracketed = request.explain.as_ref().map(|explain| BracketedRun {
+            before: explain.before.clone(),
+            statements: statements.clone(),
+            after: explain.after.clone(),
+            rolled_back: explain.rolled_back,
+        });
         std::thread::spawn(move || {
-            let Ok(mut connection) = handed.recv() else {
+            let Ok((mut connection, to_close)) = handed.recv() else {
                 return;
             };
-            let outcomes = match statements.first() {
-                Some(statement) if rolled_back => {
-                    connection.run_rolled_back(dialect, statement, &worker_cancel)
+            for closed in to_close {
+                connection.close_session(closed);
+            }
+            let outcomes = match (&scan, &bracketed) {
+                (Some(scan), _) => vec![connection.scan_keys(scan).map(|table| vec![table])],
+                (None, Some(run)) => {
+                    connection.run_bracketed_in_session(session, dialect, run, &worker_cancel)
                 }
-                _ => connection.run_script(dialect, &statements, &worker_cancel),
+                (None, None) => {
+                    connection.run_in_session(session, dialect, &statements, &worker_cancel)
+                }
             };
-            let _ = send.send((connection, outcomes));
+            let transaction = connection.transaction_status(session);
+            let _ = send.send((connection, outcomes, transaction));
         });
         if let Some(window) = self.main_window_mut() {
             window.tab.started();
@@ -794,14 +1218,21 @@ impl Workspace {
     }
 
     fn finish_run(&mut self, running: Running, answer: RunAnswer, now: Instant) {
-        let (connection, outcomes) = answer;
+        let (connection, outcomes, transaction) = answer;
         let elapsed = now.saturating_duration_since(running.started);
         let changed_schema = outcomes
             .iter()
             .zip(&running.request.statements)
             .any(|(outcome, statement)| outcome.is_ok() && changes_schema(statement));
+        if let Some(tab) = self
+            .main_window_mut()
+            .and_then(|window| window.tab_with_session_mut(running.request.session))
+        {
+            tab.finish(&running.request, outcomes, elapsed);
+            tab.transaction = transaction;
+        }
         if let Some(window) = self.main_window_mut() {
-            window.tab.finish(&running.request, outcomes, elapsed);
+            window.refresh_drop_blocked();
         }
         if changed_schema && matches!(self.screen, Screen::Main(_)) {
             self.catalog_wanted = true;
@@ -821,18 +1252,27 @@ impl Workspace {
                 true
             }
             Err(TryRecvError::Disconnected) => {
+                let session = running.request.session;
                 self.running = None;
+                if let Some(tab) = self
+                    .main_window_mut()
+                    .and_then(|window| window.tab_with_session_mut(session))
+                {
+                    tab.running = false;
+                    tab.stopping = false;
+                    tab.summary = "Error".to_owned();
+                }
                 if let Some(window) = self.main_window_mut() {
-                    window.tab.running = false;
-                    window.tab.stopping = false;
-                    window.tab.summary = "Error".to_owned();
+                    window.refresh_drop_blocked();
                 }
                 true
             }
             Err(TryRecvError::Empty) => {
                 let elapsed = now.saturating_duration_since(running.started);
+                let session = running.request.session;
                 self.main_window_mut()
-                    .is_some_and(|window| window.tab.show_running(elapsed))
+                    .and_then(|window| window.tab_with_session_mut(session))
+                    .is_some_and(|tab| tab.show_running(elapsed))
             }
         }
     }
@@ -927,10 +1367,16 @@ impl Workspace {
                 }
                 WorkspaceCommand::None
             }
-            ConnectAction::None
-            | ConnectAction::Cancel
-            | ConnectAction::ShowLayoutPicker
-            | ConnectAction::LoadSampleDataset => WorkspaceCommand::None,
+            ConnectAction::ShowLayoutPicker => {
+                let layout = self.layout;
+                if let Some(card) = self.card_mut() {
+                    card.layout_picker = Some(LayoutPicker::opened(layout));
+                }
+                WorkspaceCommand::None
+            }
+            ConnectAction::None | ConnectAction::Cancel | ConnectAction::LoadSampleDataset => {
+                WorkspaceCommand::None
+            }
         }
     }
 
@@ -1012,11 +1458,15 @@ impl Workspace {
         });
     }
 
-    /// Moves time on to `now`: takes a finished open's answer, shows the progress state
-    /// after [`PROGRESS_DELAY`] and clears `Cancelled` after [`CANCELLED_SHOWN_FOR`].
-    /// Returns whether the screen changed.
+    /// Moves time on to `now`: starts and moves on the 80 ms hover and pressed fades (none
+    /// under reduced motion), shows a plan node's tooltip once the pointer has rested on it
+    /// for 600 ms, takes a finished open's answer, shows the progress state after
+    /// [`PROGRESS_DELAY`] and clears `Cancelled` after [`CANCELLED_SHOWN_FOR`]. Returns
+    /// whether the screen changed.
     pub fn tick(&mut self, now: Instant) -> bool {
-        let mut changed = self.tick_read();
+        let mut changed = self.tick_fades(now);
+        changed |= self.tick_plan_tooltip(now);
+        changed |= self.tick_read();
         changed |= self.tick_run(now);
         if self.caret_blinks || !self.window_active {
             changed |= self.refresh_caret(now);
@@ -1081,7 +1531,10 @@ impl Workspace {
         self.opening = None;
         match answer {
             Ok((connection, catalog)) => {
-                self.screen = Screen::Main(Box::new(main_window_for(&connection, catalog)));
+                let mut window = main_window_for(&connection, catalog);
+                window.layout = self.layout;
+                window.use_sizes(self.saved_sizes(self.layout));
+                self.screen = Screen::Main(Box::new(window));
                 self.connection = Some(connection);
             }
             Err(failure) => {
@@ -1315,6 +1768,162 @@ mod tests {
         assert!(path.exists(), "Create was checked at first start");
         drop(workspace);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn each_tab_keeps_its_own_session_so_a_begin_outlasts_its_run() {
+        let directory = scratch("kept-sessions");
+        let _ = std::fs::remove_file(directory.join("kept.eggdb"));
+        let now = Instant::now();
+        let limit = Duration::from_secs(10);
+        let mut workspace = workspace(Arc::new(EngineConnector), directory.clone());
+        type_text(&mut workspace, "kept.eggdb", now);
+        workspace.key(KeyPress::plain(Key::Enter), now);
+        workspace.wait_for_open(limit);
+        workspace.run_text("CREATE TABLE t (id integer)", false, now);
+        workspace.wait_for_run(limit);
+        workspace.run_text("BEGIN; INSERT INTO t VALUES (1);", true, now);
+        workspace.wait_for_run(limit);
+        let first_cell = |workspace: &mut Workspace| {
+            workspace
+                .main_window_mut()
+                .and_then(|window| window.tab.grid.as_ref())
+                .and_then(|grid| grid.rows.first())
+                .and_then(|row| row.first())
+                .cloned()
+                .flatten()
+        };
+        let window = workspace.main_window_mut().unwrap();
+        assert_eq!(window.tab.transaction, TransactionStatus::InBlock);
+        window.add_tab();
+        assert_eq!(window.tab.title, "Query 2");
+        assert_eq!(window.tab_titles(), ["Query 1", "Query 2"]);
+        workspace.run_text("SELECT count(*) FROM t", false, now);
+        workspace.wait_for_run(limit);
+        assert_eq!(first_cell(&mut workspace).as_deref(), Some("0"));
+        let window = workspace.main_window_mut().unwrap();
+        assert_eq!(window.tab.transaction, TransactionStatus::Idle);
+        assert_eq!(
+            window
+                .other_tab_in_transaction()
+                .map(|tab| tab.title.as_str()),
+            Some("Query 1")
+        );
+        window.show_tab(0);
+        workspace.run_text("SELECT count(*) FROM t", false, now);
+        workspace.wait_for_run(limit);
+        assert_eq!(first_cell(&mut workspace).as_deref(), Some("1"));
+        workspace.run_text("COMMIT", false, now);
+        workspace.wait_for_run(limit);
+        let window = workspace.main_window_mut().unwrap();
+        assert_eq!(window.tab.transaction, TransactionStatus::Idle);
+        window.show_tab(1);
+        workspace.run_text("SELECT count(*) FROM t", false, now);
+        workspace.wait_for_run(limit);
+        assert_eq!(first_cell(&mut workspace).as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn closing_a_tab_rolls_back_its_open_transaction() {
+        let directory = scratch("kept-close");
+        let _ = std::fs::remove_file(directory.join("closed.eggdb"));
+        let now = Instant::now();
+        let limit = Duration::from_secs(10);
+        let mut workspace = workspace(Arc::new(EngineConnector), directory.clone());
+        type_text(&mut workspace, "closed.eggdb", now);
+        workspace.key(KeyPress::plain(Key::Enter), now);
+        workspace.wait_for_open(limit);
+        workspace.run_text("CREATE TABLE t (id integer)", false, now);
+        workspace.wait_for_run(limit);
+        workspace
+            .main_window_mut()
+            .expect("the main window")
+            .add_tab();
+        workspace.run_text("BEGIN; INSERT INTO t VALUES (1);", true, now);
+        workspace.wait_for_run(limit);
+        let close = KeyPress {
+            key: Key::Character('w'),
+            modifiers: Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+        };
+        workspace.key(close, now);
+        let window = workspace.main_window_mut().unwrap();
+        let prompt = window.close_prompt.clone().expect("closing asks first");
+        assert_eq!(prompt.title, "Close Query 2 and roll back?");
+        workspace.key(KeyPress::plain(Key::Enter), now);
+        let window = workspace.main_window_mut().unwrap();
+        assert_eq!(window.tab_titles(), ["Query 1"]);
+        assert!(window.close_prompt.is_none());
+        workspace.wait_for_reads(limit);
+        let connection = workspace.connection_mut().expect("the connection is back");
+        let tables = connection.run("SELECT count(*) FROM t").unwrap();
+        assert_eq!(
+            tables.last().and_then(|table| table.rows.first()).cloned(),
+            Some(vec![Some("0".to_owned())])
+        );
+    }
+
+    #[test]
+    fn drop_from_the_tree_menu_runs_in_its_own_session_and_refreshes_the_tree() {
+        let directory = scratch("tree-drop");
+        let _ = std::fs::remove_file(directory.join("dropped.eggdb"));
+        let now = Instant::now();
+        let limit = Duration::from_secs(10);
+        let mut workspace = workspace(Arc::new(EngineConnector), directory.clone());
+        type_text(&mut workspace, "dropped.eggdb", now);
+        workspace.key(KeyPress::plain(Key::Enter), now);
+        workspace.wait_for_open(limit);
+        workspace.run_text("CREATE TABLE gone (id integer)", false, now);
+        workspace.wait_for_run(limit);
+        workspace.refresh_catalog();
+        workspace.wait_for_reads(limit);
+        let window = workspace.main_window_mut().expect("the main window");
+        let table = window
+            .tree
+            .catalog
+            .tables
+            .iter()
+            .position(|table| table.name == "gone")
+            .expect("the table is listed");
+        window.focus_tree();
+        window.tree.current = TreeItem::Table(table);
+        let menu_key = KeyPress {
+            key: Key::F10,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        };
+        workspace.key(menu_key, now);
+        let window = workspace.main_window_mut().unwrap();
+        let menu = window.tree_menu.expect("Shift+F10 opens the row menu");
+        assert_eq!(menu.row, TreeItem::Table(table));
+        workspace.key(KeyPress::plain(Key::End), now);
+        workspace.key(KeyPress::plain(Key::Enter), now);
+        let window = workspace.main_window_mut().unwrap();
+        let (prompt, _) = window.drop_prompt.clone().expect("Drop… opens the dialog");
+        assert_eq!(prompt.statement, "DROP TABLE gone;");
+        workspace.key(KeyPress::plain(Key::Tab), now);
+        workspace.key(KeyPress::plain(Key::Tab), now);
+        workspace.key(KeyPress::plain(Key::Enter), now);
+        workspace.wait_for_reads(limit);
+        let window = workspace.main_window_mut().unwrap();
+        assert!(window.drop_prompt.is_none());
+        assert_eq!(window.tab.notice.as_deref(), Some("Dropped table gone"));
+        assert!(
+            !window
+                .tree
+                .catalog
+                .tables
+                .iter()
+                .any(|table| table.name == "gone")
+        );
+        assert_eq!(
+            window.tree.selected,
+            Some(TreeItem::Group(crate::object_browser::Group::Tables))
+        );
     }
 
     #[test]
@@ -1920,5 +2529,153 @@ mod tests {
         assert_eq!(workspace.sample_wanted, names[1]);
         workspace.inspect(TreeItem::Table(0));
         assert_eq!(workspace.sample_wanted, None);
+    }
+
+    #[test]
+    fn a_closed_tab_s_session_closes_on_a_worker_and_its_transaction_rolls_back() {
+        let mut workspace = workspace(Arc::new(EngineConnector), scratch("close-session"));
+        workspace.open_typed("closing.eggdb", Instant::now());
+        workspace.wait_for_open(Duration::from_secs(30));
+        workspace.wait_for_reads(Duration::from_secs(10));
+        let now = Instant::now();
+        workspace.run_text("BEGIN", false, now);
+        workspace.wait_for_run(Duration::from_secs(10));
+        let session = workspace
+            .main_window_mut()
+            .expect("the main window")
+            .tab
+            .session;
+        assert_eq!(
+            workspace
+                .connection
+                .as_ref()
+                .map(|connection| connection.transaction_status(session)),
+            Some(TransactionStatus::InBlock)
+        );
+        workspace.window_action(
+            WindowAction::CloseSession {
+                session,
+                stop: false,
+            },
+            now,
+        );
+        assert!(
+            workspace.connection.is_none(),
+            "the window's thread hands the connection to a worker"
+        );
+        assert!(
+            workspace
+                .reading
+                .as_ref()
+                .is_some_and(|reading| reading.read == CatalogRead::CloseSessions(vec![session]))
+        );
+        workspace.wait_for_reads(Duration::from_secs(10));
+        assert!(workspace.sessions_to_close.is_empty());
+        assert_eq!(
+            workspace
+                .connection
+                .as_ref()
+                .map(|connection| connection.transaction_status(session)),
+            Some(TransactionStatus::Idle)
+        );
+    }
+
+    #[test]
+    fn the_card_s_layout_picker_keeps_the_choice_and_the_main_window_opens_in_it() {
+        let directory = scratch("layout-picker");
+        let settings = directory.join("gui-settings");
+        std::fs::write(&settings, "theme = dark\n").expect("settings are written");
+        let mut workspace = workspace(Arc::new(EngineConnector), directory.clone());
+        workspace.use_settings(Some(settings.clone()));
+        assert_eq!(workspace.layout(), Layout::EggDb);
+        let now = Instant::now();
+        workspace.act(ConnectAction::ShowLayoutPicker, now);
+        assert!(card(&mut workspace).layout_picker.is_some());
+        assert!(
+            card_tree(&workspace)
+                .iter()
+                .any(|node| node.id == layout_picker::NODE_DIALOG)
+        );
+        workspace.key(KeyPress::plain(Key::Down), now);
+        workspace.key(KeyPress::plain(Key::Escape), now);
+        assert!(card(&mut workspace).layout_picker.is_none());
+        assert_eq!(workspace.layout(), Layout::EggDb);
+        workspace.act(ConnectAction::ShowLayoutPicker, now);
+        workspace.key(KeyPress::plain(Key::Down), now);
+        workspace.key(KeyPress::plain(Key::Down), now);
+        workspace.key(KeyPress::plain(Key::Enter), now);
+        assert_eq!(workspace.layout(), Layout::PgAdmin);
+        assert_eq!(card(&mut workspace).layout, Layout::PgAdmin);
+        assert_eq!(
+            std::fs::read_to_string(&settings).expect("settings are kept"),
+            "layout = pgadmin\ntheme = dark\n"
+        );
+        let mut again = workspace_with_settings(&directory, &settings);
+        assert_eq!(again.layout(), Layout::PgAdmin);
+        again.open_typed("layouts.eggdb", now);
+        again.wait_for_open(Duration::from_secs(30));
+        let window = again.main_window_mut().expect("the main window shows");
+        assert_eq!(window.layout, Layout::PgAdmin);
+        let primary = crate::accessibility::primary();
+        again.key(
+            KeyPress {
+                key: Key::Character('k'),
+                modifiers: primary,
+            },
+            now,
+        );
+        again.key(KeyPress::plain(Key::Character('l')), now);
+        again.key(KeyPress::plain(Key::Up), now);
+        again.key(KeyPress::plain(Key::Enter), now);
+        assert_eq!(again.layout(), Layout::Ssms);
+        assert_eq!(ClientSettings::load(&settings).layout, Some(Layout::Ssms));
+    }
+
+    fn workspace_with_settings(directory: &Path, settings: &Path) -> Workspace {
+        let mut workspace = workspace(Arc::new(EngineConnector), directory.to_path_buf());
+        workspace.use_settings(Some(settings.to_path_buf()));
+        workspace
+    }
+
+    #[test]
+    fn a_press_on_the_picker_s_scrim_keeps_the_layout_and_a_double_click_applies_a_row() {
+        let directory = scratch("layout-pointer");
+        let mut workspace = workspace(Arc::new(EngineConnector), directory);
+        let faces = crate::main_window::Faces {
+            ui: &crate::font::BoxFace,
+            ui_bold: &crate::font::BoxFace,
+            mono: &crate::font::BoxFace,
+        };
+        let size = (
+            crate::connect_screen::DEFAULT_WIDTH,
+            crate::connect_screen::DEFAULT_HEIGHT,
+        );
+        let now = Instant::now();
+        let press = |workspace: &mut Workspace, x: f32, y: f32, at: Instant| {
+            workspace.pointer_pressed(
+                x,
+                y,
+                PointerButton::Primary,
+                Modifiers::default(),
+                faces,
+                size,
+                at,
+            )
+        };
+        workspace.act(ConnectAction::ShowLayoutPicker, now);
+        press(&mut workspace, 10.0, 10.0, now);
+        assert!(card(&mut workspace).layout_picker.is_none());
+        workspace.act(ConnectAction::ShowLayoutPicker, now);
+        let row = layout_picker::row_rect((1280.0, 800.0), 7);
+        let later = now + Duration::from_secs(5);
+        press(&mut workspace, row.x + 10.0, row.y + 10.0, later);
+        press(
+            &mut workspace,
+            row.x + 10.0,
+            row.y + 10.0,
+            later + Duration::from_millis(50),
+        );
+        assert_eq!(workspace.layout(), Layout::RedisInsight);
+        assert!(card(&mut workspace).layout_picker.is_none());
     }
 }

@@ -63,7 +63,7 @@ pub(crate) fn module_definition(
                 "CREATE VIEW [{}].[{}] AS {}",
                 objects.schema_name(object.schema_id),
                 object.name,
-                view.query
+                view.shown_query()?
             ))
         }
         ObjectSource::Relation | ObjectSource::Constraint(_) | ObjectSource::Default(_) => None,

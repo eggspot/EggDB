@@ -1,9 +1,10 @@
 use crate::packet::{
     CONNACK, CONNECT, DISCONNECT, Fields, PINGREQ, PINGRESP, PUBACK, PUBCOMP, PUBLISH, PUBREC,
-    PUBREL, Parsed, SUBACK, SUBSCRIBE, UNSUBACK, UNSUBSCRIBE, encode, filter_matches, put_string,
-    take_packet, valid_filter,
+    PUBREL, Parsed, SUBACK, SUBSCRIBE, UNSUBACK, UNSUBSCRIBE, encode, filter_matches,
+    pending_packet_bytes, put_string, take_packet, valid_filter,
 };
 use eggdb_keyspace::Keyspace;
+use eggdb_platform::connection_limits::{MemoryBudget, Reservation};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -15,9 +16,13 @@ const ACCEPT_POLL: Duration = Duration::from_millis(100);
 const READ_POLL: Duration = Duration::from_millis(200);
 const CONNECT_WAIT: Duration = Duration::from_secs(10);
 const MAX_SUBSCRIPTIONS: usize = 1_000;
+const PUBLISH_HEADER_BYTES: usize = 16;
+const QUOTA_EXCEEDED: u8 = 0x97;
+pub(crate) const OUT_OF_MEMORY_BUDGET: &str =
+    "the server's connections already hold their memory budget";
 
 /// How the MQTT broker runs.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ServerConfig {
     /// The user clients connect as.
     pub user: String,
@@ -25,6 +30,9 @@ pub struct ServerConfig {
     pub password_sha256: [u8; 32],
     /// The most connections served at once.
     pub max_connections: usize,
+    /// The memory every connection's unread packets, retained replays and deliveries
+    /// hold together, shared with the server's other listeners (D284, D307).
+    pub memory_budget: Arc<MemoryBudget>,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -36,6 +44,7 @@ impl std::fmt::Debug for ServerConfig {
 }
 
 type SharedWriter = Arc<Mutex<dyn Write + Send>>;
+type RetainedMessage = (String, u8, Vec<u8>);
 
 const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -80,8 +89,8 @@ impl<'k> Broker<'k> {
         }
     }
 
-    fn deliver(&self, topic: &str, payload: &[u8], qos: u8) {
-        let mut deliveries: Vec<(SharedWriter, Vec<u8>)> = Vec::new();
+    fn deliver(&self, topic: &str, payload: &[u8], qos: u8, budget: &MemoryBudget) {
+        let mut deliveries: Vec<(SharedWriter, u8, u8, u16)> = Vec::new();
         let mut subscribers = self
             .subscribers
             .lock()
@@ -100,18 +109,24 @@ impl<'k> Broker<'k> {
             if qos > 0 {
                 subscriber.next_id = subscriber.next_id.wrapping_add(1).max(1);
             }
-            let packet = publish_packet(
+            deliveries.push((
+                Arc::clone(&subscriber.writer),
                 subscriber.version,
-                topic,
-                payload,
                 qos,
-                false,
                 subscriber.next_id,
-            );
-            deliveries.push((Arc::clone(&subscriber.writer), packet));
+            ));
         }
         drop(subscribers);
-        for (writer, packet) in deliveries {
+        let packet_bytes = payload
+            .len()
+            .saturating_add(topic.len())
+            .saturating_add(PUBLISH_HEADER_BYTES);
+        let mut held = budget.empty_reservation();
+        for (writer, version, qos, id) in deliveries {
+            if !held.hold_if_large(packet_bytes) {
+                continue;
+            }
+            let packet = publish_packet(version, topic, payload, qos, false, id);
             let mut writer = writer
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -132,8 +147,14 @@ impl<'k> Broker<'k> {
         })
     }
 
-    fn retained(&self, filter: &str) -> Result<Vec<(String, u8, Vec<u8>)>, String> {
+    fn retained<'b>(
+        &self,
+        filter: &str,
+        budget: &'b MemoryBudget,
+    ) -> Result<(Vec<RetainedMessage>, Reservation<'b>), String> {
         let mut found = Vec::new();
+        let mut held = budget.empty_reservation();
+        let mut found_bytes = 0usize;
         self.keyspace.read(0, &mut |keys| {
             for (key, value) in keys.scan(b"")? {
                 let Ok(topic) = String::from_utf8(key) else {
@@ -142,19 +163,33 @@ impl<'k> Broker<'k> {
                 if filter_matches(filter, &topic)
                     && let Some((&qos, payload)) = value.split_first()
                 {
+                    found_bytes = found_bytes
+                        .saturating_add(payload.len())
+                        .saturating_add(topic.len())
+                        .saturating_add(PUBLISH_HEADER_BYTES);
+                    if !held.hold_if_large(found_bytes) {
+                        return Err(OUT_OF_MEMORY_BUDGET.to_owned());
+                    }
                     found.push((topic, qos, payload.to_vec()));
                 }
             }
             Ok(())
         })?;
-        Ok(found)
+        Ok((found, held))
     }
 
-    fn publish(&self, topic: &str, payload: &[u8], qos: u8, retain: bool) -> Result<(), String> {
+    fn publish(
+        &self,
+        topic: &str,
+        payload: &[u8],
+        qos: u8,
+        retain: bool,
+        budget: &MemoryBudget,
+    ) -> Result<(), String> {
         if retain {
             self.retain(topic, payload, qos)?;
         }
-        self.deliver(topic, payload, qos);
+        self.deliver(topic, payload, qos, budget);
         Ok(())
     }
 }
@@ -168,6 +203,7 @@ struct Will {
 
 struct Session<'b, 'k> {
     broker: &'b Broker<'k>,
+    budget: &'b MemoryBudget,
     id: u64,
     version: u8,
     writer: SharedWriter,
@@ -202,7 +238,8 @@ impl Session<'_, '_> {
                 let payload = fields.rest().to_vec();
                 let duplicate = qos == 2 && !self.incoming_qos2.insert(packet_id);
                 if !duplicate {
-                    self.broker.publish(&topic, &payload, qos, flags & 1 == 1)?;
+                    self.broker
+                        .publish(&topic, &payload, qos, flags & 1 == 1, self.budget)?;
                 }
                 match qos {
                     1 => self
@@ -279,7 +316,8 @@ impl Session<'_, '_> {
                 self.send(&encode(SUBACK, 0, &ack))
                     .map_err(|error| error.to_string())?;
                 for (filter, granted) in accepted {
-                    for (topic, qos, payload) in self.broker.retained(&filter)? {
+                    let (retained, _held) = self.broker.retained(&filter, self.budget)?;
+                    for (topic, qos, payload) in retained {
                         let qos = qos.min(granted);
                         self.send(&publish_packet(
                             self.version,
@@ -386,6 +424,15 @@ fn connect(config: &ServerConfig, body: &[u8]) -> Parsed<(u8, u16, Option<Will>,
     Ok((version, keep_alive, will, allowed))
 }
 
+fn refuse_over_budget(writer: &SharedWriter, session: Option<&Session<'_, '_>>) {
+    if session.is_some_and(|active| active.version >= 5) {
+        let _ = writer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .write_all(&encode(DISCONNECT, 0, &[QUOTA_EXCEEDED]));
+    }
+}
+
 /// Serves one client connection until it disconnects or breaks the protocol.
 pub(crate) fn serve_stream(
     broker: &Broker<'_>,
@@ -395,6 +442,8 @@ pub(crate) fn serve_stream(
     writer: SharedWriter,
     stop: &(dyn Fn() -> bool + Sync),
 ) -> io::Result<()> {
+    let budget: &MemoryBudget = &config.memory_budget;
+    let mut held = budget.empty_reservation();
     let mut buffer = Vec::new();
     let mut chunk = vec![0u8; 16 * 1024];
     let started = Instant::now();
@@ -407,7 +456,14 @@ pub(crate) fn serve_stream(
         }
         match reader.read(&mut chunk) {
             Ok(0) => break false,
-            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+            Ok(read) => {
+                let grown = buffer.len().saturating_add(read);
+                if !held.hold_if_large(grown.max(pending_packet_bytes(&buffer))) {
+                    refuse_over_budget(&writer, session.as_ref());
+                    break false;
+                }
+                buffer.extend_from_slice(&chunk[..read]);
+            }
             Err(error)
                 if matches!(
                     error.kind(),
@@ -453,6 +509,7 @@ pub(crate) fn serve_stream(
                             keep_alive = Duration::from_secs(u64::from(seconds));
                             session = Some(Session {
                                 broker,
+                                budget,
                                 id,
                                 version,
                                 writer: Arc::clone(&writer),
@@ -467,7 +524,10 @@ pub(crate) fn serve_stream(
                                     finished = Some(true);
                                     break;
                                 }
-                                Err(_) => {
+                                Err(problem) => {
+                                    if problem == OUT_OF_MEMORY_BUDGET {
+                                        refuse_over_budget(&writer, Some(&*active));
+                                    }
                                     finished = Some(false);
                                     break;
                                 }
@@ -485,6 +545,10 @@ pub(crate) fn serve_stream(
         if let Some(clean) = finished {
             break clean;
         }
+        if !held.hold_if_large(pending_packet_bytes(&buffer)) {
+            refuse_over_budget(&writer, session.as_ref());
+            break false;
+        }
         if session.is_none() && started.elapsed() > CONNECT_WAIT {
             break false;
         }
@@ -499,7 +563,7 @@ pub(crate) fn serve_stream(
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&id);
         if !clean_end && let Some(will) = active.will {
-            let _ = broker.publish(&will.topic, &will.payload, will.qos, will.retain);
+            let _ = broker.publish(&will.topic, &will.payload, will.qos, will.retain, budget);
         }
     }
     Ok(())

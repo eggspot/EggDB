@@ -89,7 +89,7 @@ pub(crate) fn sqlite_type_name(sql_type: SqlType) -> &'static str {
         SqlType::Time(_) | SqlType::TimeTz(_) => "TIME",
         SqlType::Interval { .. } => "INTERVAL",
         SqlType::Uuid => "UUID",
-        SqlType::Dynamic => "BLOB",
+        SqlType::Dynamic(affinity) => affinity.sqlite_name(),
         SqlType::Array(_) | SqlType::Catalog(_) | SqlType::Defined(_) => "TEXT",
     }
 }
@@ -186,7 +186,7 @@ fn kept_index_text(
 
 struct ListedView {
     name: String,
-    text: String,
+    text: Option<String>,
 }
 
 fn listed_views(reader: &dyn KeyValueRead) -> SqlResult<Vec<ListedView>> {
@@ -195,12 +195,16 @@ fn listed_views(reader: &dyn KeyValueRead) -> SqlResult<Vec<ListedView>> {
         if crate::temporary::is_temporary_name(&view.name) {
             continue;
         }
-        let generated = view_text(&view);
-        let text = if crate::schemas::schema_of(&view.name) == crate::schemas::DEFAULT_SCHEMA {
-            crate::sqlite_schema_text::original_text(reader, &view.name, &generated)?
-                .unwrap_or(generated)
+        let text = if view.shown_query().is_none() {
+            None
+        } else if crate::schemas::schema_of(&view.name) == crate::schemas::DEFAULT_SCHEMA {
+            let generated = view_text(&view);
+            Some(
+                crate::sqlite_schema_text::original_text(reader, &view.name, &generated)?
+                    .unwrap_or(generated),
+            )
         } else {
-            generated
+            Some(view_text(&view))
         };
         listed.push(ListedView {
             name: crate::schemas::base_name(&view.name).to_owned(),
@@ -348,13 +352,30 @@ impl<'s> Session<'s> {
         Ok(match (pragma.name.as_str(), argument) {
             ("table_info", Some(table)) => {
                 let table = table.to_lowercase();
-                let tables = self.read(|reader, _| read_tables(reader))?;
-                let rows = match tables.iter().find(|schema| schema.name == table) {
-                    Some(schema) => schema
+                let found = self.read(|reader, _| {
+                    let Some(schema) = read_tables(reader)?
+                        .into_iter()
+                        .find(|schema| schema.name == table)
+                    else {
+                        return Ok(None);
+                    };
+                    let text = kept_create_text(reader, &schema)?;
+                    let declared = crate::sqlite_schema_text::declared_column_types(&text);
+                    Ok(Some((schema, declared)))
+                })?;
+                let rows = match found {
+                    Some((schema, declared)) => schema
                         .columns
                         .iter()
                         .enumerate()
                         .map(|(index, column)| {
+                            let type_text = declared
+                                .iter()
+                                .find(|(name, _)| name.eq_ignore_ascii_case(&column.name))
+                                .map_or_else(
+                                    || sqlite_type_name(column.sql_type).to_owned(),
+                                    |(_, text)| text.clone(),
+                                );
                             let key_position = schema
                                 .primary_key
                                 .iter()
@@ -364,7 +385,7 @@ impl<'s> Session<'s> {
                             vec![
                                 Value::BigInt(index as i64),
                                 Value::Text(column.name.clone()),
-                                Value::Text(sqlite_type_name(column.sql_type).to_owned()),
+                                Value::Text(type_text),
                                 Value::BigInt(i64::from(not_null)),
                                 column.default.clone().map_or(Value::Null, Value::Text),
                                 Value::BigInt(key_position),
@@ -602,7 +623,7 @@ impl<'s> Session<'s> {
                     text_literal(view.name.clone()),
                     text_literal(view.name),
                     integer_literal(0),
-                    text_literal(view.text),
+                    view.text.map_or_else(null_literal, text_literal),
                 ]);
             }
             for listed in &triggers {

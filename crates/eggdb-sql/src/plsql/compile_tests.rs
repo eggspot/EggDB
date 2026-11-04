@@ -370,7 +370,7 @@ fn a_stored_procedure_keeps_its_declared_types_and_source() {
         modes,
         [ParameterMode::In, ParameterMode::In, ParameterMode::Out]
     );
-    assert_eq!(definition.parameters[0].sql_type, SqlType::Dynamic);
+    assert_eq!(definition.parameters[0].sql_type, SqlType::DYNAMIC);
     let Some(plsql) = &definition.plsql else {
         panic!("{definition:?}");
     };
@@ -410,7 +410,7 @@ fn a_function_heading_records_its_return_type_and_options() {
     );
     assert!(matches!(
         pipelined.definition.returns,
-        RoutineReturns::Set(ReturnType::Type(SqlType::Dynamic))
+        RoutineReturns::Set(ReturnType::Type(SqlType::Dynamic(_)))
     ));
     assert!(matches!(
         pipelined.program.block.steps[0].kind,

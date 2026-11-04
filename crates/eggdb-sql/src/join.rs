@@ -3,17 +3,19 @@ use crate::ast::{
     BinaryOperator, Expr, ExprKind, FromClause, JoinCondition, JoinKind, Select, SelectItem,
 };
 use crate::encoding::{
-    TableDefinition, decode_row_into, encode_key_value, index_prefix, prefix_end, rows_prefix,
+    TableDefinition, decode_row_into, encode_column_key, index_prefix, prefix_end, rows_prefix,
+    write_prefix_end,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{
     Evaluator, Scope, Source, Sources, check_columns, children, compare_truth, reject_aggregates,
 };
 use crate::hash_index::HashIndex;
-use crate::indexes::{entry_key, row_key_of_entry};
+use crate::indexes::{write_entry_key, write_row_key_of_entry};
 use crate::memory::WorkMemory;
 use crate::store::{KeyValueRead, ScanDirection};
 use crate::types::{Conversion, SqlType, Value, comparable, compare_values, convert, equality_key};
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -86,7 +88,7 @@ pub(crate) fn type_family(sql_type: SqlType) -> u8 {
             crate::types::DefinedKind::Domain => 20,
             crate::types::DefinedKind::Base => 22,
         },
-        SqlType::Dynamic => 21,
+        SqlType::Dynamic(_) => 21,
     }
 }
 
@@ -176,59 +178,12 @@ pub(crate) fn resolve<'a>(
             }
             JoinCondition::Using(names) => {
                 let left = sources_between(&list, group_start..right_index, &merged);
-                for (at, name) in names.iter().enumerate() {
-                    if names[..at].iter().any(|earlier| earlier.text == name.text) {
-                        return Err(SqlError::new(
-                            SqlState::DUPLICATE_COLUMN,
-                            format!(
-                                "column name \"{}\" appears more than once in USING clause",
-                                name.text
-                            ),
-                        )
-                        .at(name.position));
-                    }
-                    let left_offset = Scope::Many(&left)
-                        .column(None, &name.text, name.position)
-                        .map_err(|error| {
-                            if error.state() == SqlState::AMBIGUOUS_COLUMN {
-                                SqlError::new(
-                                    SqlState::AMBIGUOUS_COLUMN,
-                                    format!(
-                                        "common column name \"{}\" appears more than once in left table",
-                                        name.text
-                                    ),
-                                )
-                                .at(name.position)
-                            } else {
-                                SqlError::new(
-                                    SqlState::UNDEFINED_COLUMN,
-                                    format!(
-                                        "column \"{}\" specified in USING clause does not exist in left table",
-                                        name.text
-                                    ),
-                                )
-                                .at(name.position)
-                            }
-                        })?;
-                    let right_column = right.table.column_index(&name.text).ok_or_else(|| {
-                        SqlError::new(
-                            SqlState::UNDEFINED_COLUMN,
-                            format!(
-                                "column \"{}\" specified in USING clause does not exist in right table",
-                                name.text
-                            ),
-                        )
-                        .at(name.position)
-                    })?;
-                    let left_type = Scope::Many(&left).column_type(left_offset);
-                    let right_type = right.table.columns[right_column].sql_type;
-                    if let Some(left_type) = left_type
-                        && !comparable(left_type, right_type)
-                    {
-                        return Err(no_equality(left_type, right_type, name.position));
-                    }
-                    using.push((left_offset, right.offset + right_column));
-                }
+                using = using_pairs(&left, right, names)?;
+            }
+            JoinCondition::Natural => {
+                let left = sources_between(&list, group_start..right_index, &merged);
+                let names = natural_columns(&list, &group_star, right, join.table.name.position);
+                using = using_pairs(&left, right, &names)?;
             }
             JoinCondition::Always => {}
         }
@@ -273,9 +228,129 @@ pub(crate) fn resolve<'a>(
     Ok(joined)
 }
 
+fn using_pairs(
+    left: &Sources<'_>,
+    right: Source<'_>,
+    names: &[crate::ast::Name],
+) -> SqlResult<Vec<(usize, usize)>> {
+    let mut using = Vec::with_capacity(names.len());
+    for (at, name) in names.iter().enumerate() {
+        if names[..at].iter().any(|earlier| earlier.text == name.text) {
+            return Err(SqlError::new(
+                SqlState::DUPLICATE_COLUMN,
+                format!(
+                    "column name \"{}\" appears more than once in USING clause",
+                    name.text
+                ),
+            )
+            .at(name.position));
+        }
+        let left_offset = Scope::Many(left)
+            .column(None, &name.text, name.position)
+            .map_err(|error| {
+                if error.state() == SqlState::AMBIGUOUS_COLUMN {
+                    SqlError::new(
+                        SqlState::AMBIGUOUS_COLUMN,
+                        format!(
+                            "common column name \"{}\" appears more than once in left table",
+                            name.text
+                        ),
+                    )
+                    .at(name.position)
+                } else {
+                    SqlError::new(
+                        SqlState::UNDEFINED_COLUMN,
+                        format!(
+                            "column \"{}\" specified in USING clause does not exist in left table",
+                            name.text
+                        ),
+                    )
+                    .at(name.position)
+                }
+            })?;
+        let right_column = right.table.column_index(&name.text).ok_or_else(|| {
+            SqlError::new(
+                SqlState::UNDEFINED_COLUMN,
+                format!(
+                    "column \"{}\" specified in USING clause does not exist in right table",
+                    name.text
+                ),
+            )
+            .at(name.position)
+        })?;
+        if right
+            .table
+            .columns
+            .iter()
+            .filter(|column| crate::temp_tables::display_name(&column.name) == name.text)
+            .nth(1)
+            .is_some()
+        {
+            return Err(SqlError::new(
+                SqlState::AMBIGUOUS_COLUMN,
+                format!(
+                    "common column name \"{}\" appears more than once in right table",
+                    name.text
+                ),
+            )
+            .at(name.position));
+        }
+        let left_type = Scope::Many(left).column_type(left_offset);
+        let right_type = right.table.columns[right_column].sql_type;
+        if let Some(left_type) = left_type
+            && !comparable(left_type, right_type)
+        {
+            return Err(no_equality(left_type, right_type, name.position));
+        }
+        using.push((left_offset, right.offset + right_column));
+    }
+    Ok(using)
+}
+
+fn column_name_at<'t>(list: &[Source<'t>], offset: usize) -> Option<&'t str> {
+    list.iter().find_map(|source| {
+        offset
+            .checked_sub(source.offset)
+            .and_then(|at| source.table.columns.get(at))
+            .map(|column| column.name.as_str())
+    })
+}
+
+fn natural_columns(
+    list: &[Source<'_>],
+    left_star: &[usize],
+    right: Source<'_>,
+    position: usize,
+) -> Vec<crate::ast::Name> {
+    let mut names: Vec<crate::ast::Name> = Vec::new();
+    for &offset in left_star {
+        let Some(name) = column_name_at(list, offset) else {
+            continue;
+        };
+        let shared = shown_columns_of(&right).any(|at| {
+            right
+                .table
+                .columns
+                .get(at - right.offset)
+                .is_some_and(|column| column.name == name)
+        });
+        if shared && !names.iter().any(|known| known.text == name) {
+            names.push(crate::ast::Name {
+                text: name.to_owned(),
+                position,
+            });
+        }
+    }
+    names
+}
+
 pub(crate) fn has_full_using(from: &FromClause) -> bool {
     from.joins.iter().any(|join| {
-        join.kind == JoinKind::Full && matches!(join.condition, JoinCondition::Using(_))
+        join.kind == JoinKind::Full
+            && matches!(
+                join.condition,
+                JoinCondition::Using(_) | JoinCondition::Natural
+            )
     })
 }
 
@@ -439,6 +514,9 @@ pub(crate) fn merge_full_using(
     if let Some(having) = &select.having {
         select.having = Some(with_merged_columns(having, &merged)?);
     }
+    for key in &mut select.distinct_on {
+        *key = with_merged_columns(key, &merged)?;
+    }
     for item in &mut select.order_by {
         item.expr = with_merged_columns(&item.expr, &merged)?;
     }
@@ -541,7 +619,7 @@ fn primary_key_lefts(
     offset: usize,
     pairs: &[(usize, usize)],
 ) -> Option<Vec<usize>> {
-    if table.primary_key.is_empty() {
+    if table.primary_key.is_empty() || !key_lookups_fit(table, &table.primary_key) {
         return None;
     }
     table
@@ -556,6 +634,15 @@ fn primary_key_lefts(
         .collect()
 }
 
+fn key_lookups_fit(table: &TableDefinition, columns: &[usize]) -> bool {
+    columns.iter().all(|&column| {
+        table
+            .columns
+            .get(column)
+            .is_some_and(|column| crate::plan::key_lookup_matches_comparison(column.sql_type))
+    })
+}
+
 fn index_lefts(
     table: &TableDefinition,
     offset: usize,
@@ -566,6 +653,7 @@ fn index_lefts(
         let lefts: Vec<usize> = index
             .columns
             .iter()
+            .take_while(|&&column| key_lookups_fit(table, &[column]))
             .map_while(|&column| {
                 pairs
                     .iter()
@@ -611,6 +699,7 @@ enum Access {
     IndexLookup {
         position: usize,
         lefts: Vec<usize>,
+        probe: RefCell<IndexProbe>,
     },
     Hash {
         probe: Vec<usize>,
@@ -623,6 +712,36 @@ enum Access {
         ids: HashMap<Vec<u8>, Vec<usize>>,
         matched: RefCell<Vec<bool>>,
     },
+}
+
+struct IndexProbe {
+    start: Vec<u8>,
+    prefix_length: usize,
+    end: Vec<u8>,
+    row_key: Vec<u8>,
+    expected_entry: Vec<u8>,
+}
+
+impl IndexProbe {
+    fn new(table_id: u32, index_id: u32) -> Self {
+        let start = index_prefix(table_id, index_id);
+        Self {
+            prefix_length: start.len(),
+            start,
+            end: Vec::new(),
+            row_key: Vec::new(),
+            expected_entry: Vec::new(),
+        }
+    }
+
+    fn restart(&mut self) -> &mut Vec<u8> {
+        self.start.truncate(self.prefix_length);
+        &mut self.start
+    }
+
+    fn close_range(&mut self) {
+        write_prefix_end(&mut self.end, &self.start);
+    }
 }
 
 fn equality_bytes(row: &[Value], offsets: &[usize], key: &mut Vec<u8>) -> bool {
@@ -653,7 +772,12 @@ fn preserved_rows(
         memory.charge(1)?;
         if !build.is_empty() && equality_bytes(&row, &build, &mut key) {
             memory.charge(key.len() + 40)?;
-            ids.entry(key.clone()).or_default().push(rows.len());
+            match ids.get_mut(key.as_slice()) {
+                Some(same_key) => same_key.push(rows.len()),
+                None => {
+                    ids.insert(key.clone(), vec![rows.len()]);
+                }
+            }
         }
         rows.push(row);
         Ok(true)
@@ -682,6 +806,7 @@ struct Step<'a> {
 
 pub(crate) struct JoinedRows<'a> {
     reader: &'a dyn KeyValueRead,
+    watch: crate::cancel::Watch,
     first: &'a TableDefinition,
     first_needed: Vec<bool>,
     first_key: Option<Vec<u8>>,
@@ -1259,7 +1384,11 @@ impl<'a> JoinedRows<'a> {
                         probe: hash_keys.iter().map(|&(outer, _)| outer).collect(),
                         index,
                     },
-                    None => Access::IndexLookup { position, lefts },
+                    None => Access::IndexLookup {
+                        position,
+                        lefts,
+                        probe: RefCell::new(IndexProbe::new(table.id, table.indexes[position].id)),
+                    },
                 }
             } else if !pairs.is_empty() {
                 let built = build_hash(
@@ -1318,6 +1447,7 @@ impl<'a> JoinedRows<'a> {
         }
         Ok(Self {
             reader,
+            watch: crate::cancel::watch(),
             first: joined.sources.list[0].table,
             first_needed: std::mem::take(&mut needed[0]),
             first_key,
@@ -1383,8 +1513,10 @@ impl<'a> JoinedRows<'a> {
                 .filter(|(_, matched)| !**matched)
                 .map(|(id, _)| id)
                 .collect();
+            let mut row = Vec::with_capacity(self.width);
             for id in unmatched {
-                let mut row = vec![Value::Null; step.offset];
+                row.clear();
+                row.resize(step.offset, Value::Null);
                 row.extend_from_slice(&rows[id]);
                 if !self.extend(level + 1, &mut row, visit)? {
                     return Ok(());
@@ -1395,7 +1527,11 @@ impl<'a> JoinedRows<'a> {
     }
 
     fn passes(&self, level: usize, row: &[Value]) -> SqlResult<bool> {
-        let Some(filters) = self.filters.get(level) else {
+        let Some(filters) = self
+            .filters
+            .get(level)
+            .filter(|filters| !filters.is_empty())
+        else {
             return Ok(true);
         };
         let evaluator = Evaluator {
@@ -1417,7 +1553,7 @@ impl<'a> JoinedRows<'a> {
         row: &mut Vec<Value>,
         visit: &mut dyn FnMut(&[Value]) -> SqlResult<bool>,
     ) -> SqlResult<bool> {
-        crate::cancel::check()?;
+        self.watch.check()?;
         if !self.passes(level, row)? {
             return Ok(true);
         }
@@ -1497,8 +1633,12 @@ impl<'a> JoinedRows<'a> {
                     return Ok(false);
                 }
             }
-            Access::IndexLookup { position, lefts } => {
-                if !self.index_lookup(step, *position, lefts, row, &mut attempt)? {
+            Access::IndexLookup {
+                position,
+                lefts,
+                probe,
+            } => {
+                if !self.index_lookup(step, *position, lefts, probe, row, &mut attempt)? {
                     return Ok(false);
                 }
             }
@@ -1538,34 +1678,45 @@ impl<'a> JoinedRows<'a> {
         step: &Step<'_>,
         position: usize,
         lefts: &[usize],
+        probe: &RefCell<IndexProbe>,
         row: &mut Vec<Value>,
         attempt: &mut dyn FnMut(&mut Vec<Value>) -> SqlResult<bool>,
     ) -> SqlResult<bool> {
         let table = step.table;
         let index = &table.indexes[position];
-        let mut start = index_prefix(table.id, index.id);
+        let mut probe = probe.borrow_mut();
+        let start = probe.restart();
         for (&column, &left) in index.columns.iter().zip(lefts) {
-            let Some(value) = key_value(&row[left], table.columns[column].sql_type) else {
+            let sql_type = table.columns[column].sql_type;
+            let Some(value) = key_value(&row[left], sql_type) else {
                 return Ok(true);
             };
-            encode_key_value(&mut start, &value);
+            encode_column_key(start, &value, sql_type);
         }
-        let end = prefix_end(&start);
+        probe.close_range();
+        let IndexProbe {
+            start,
+            end,
+            row_key,
+            expected_entry,
+            ..
+        } = &mut *probe;
         let mut going = true;
         self.reader
-            .scan(&start, &end, ScanDirection::Forward, &mut |entry, _| {
-                let key = row_key_of_entry(table, index, entry)?;
+            .scan(start, end, ScanDirection::Forward, &mut |entry, _| {
+                write_row_key_of_entry(row_key, table, index, entry)?;
                 let base = row.len();
                 let mut found = false;
-                self.reader.get_with(&key, &mut |bytes| {
+                self.reader.get_with(row_key, &mut |bytes| {
                     decode_row_into(bytes, &table.columns, Some(&step.needed), row)?;
                     found = true;
                     Ok(())
                 })?;
                 let matches = found
-                    && row
-                        .get(base..)
-                        .is_some_and(|inner| entry_key(table, index, inner, &key) == entry);
+                    && row.get(base..).is_some_and(|inner| {
+                        write_entry_key(expected_entry, table, index, inner, row_key);
+                        expected_entry.as_slice() == entry
+                    });
                 if !matches {
                     return Err(crate::encoding::corrupt("index entry"));
                 }
@@ -1580,24 +1731,11 @@ impl<'a> JoinedRows<'a> {
         let mut key = step.key.borrow_mut();
         key.truncate(step.prefix_length);
         for (&index, &left) in table.primary_key.iter().zip(lefts) {
-            let original = &row[left];
-            if original.is_null() {
-                return Ok(false);
-            }
             let sql_type = table.columns[index].sql_type;
-            if original.sql_type() == Some(sql_type)
-                || (sql_type.is_string() && matches!(original, Value::Text(_)))
-            {
-                encode_key_value(&mut key, original);
-                continue;
-            }
-            let Ok(converted) = convert(original.clone(), sql_type, Conversion::Assignment) else {
+            let Some(value) = key_value(&row[left], sql_type) else {
                 return Ok(false);
             };
-            if compare_values(&converted, original) != Ordering::Equal {
-                return Ok(false);
-            }
-            encode_key_value(&mut key, &converted);
+            encode_column_key(&mut key, &value, sql_type);
         }
         let mut found = false;
         self.reader.get_with(key.as_slice(), &mut |bytes| {
@@ -1609,17 +1747,17 @@ impl<'a> JoinedRows<'a> {
     }
 }
 
-fn key_value(original: &Value, sql_type: SqlType) -> Option<Value> {
+fn key_value(original: &Value, sql_type: SqlType) -> Option<Cow<'_, Value>> {
     if original.is_null() {
         return None;
     }
     if original.sql_type() == Some(sql_type)
         || (sql_type.is_string() && matches!(original, Value::Text(_)))
     {
-        return Some(original.clone());
+        return Some(Cow::Borrowed(original));
     }
     let converted = convert(original.clone(), sql_type, Conversion::Assignment).ok()?;
-    (compare_values(&converted, original) == Ordering::Equal).then_some(converted)
+    (compare_values(&converted, original) == Ordering::Equal).then_some(Cow::Owned(converted))
 }
 
 impl Step<'_> {
@@ -1666,18 +1804,26 @@ impl JoinedFrom<'_> {
         }
         output_exprs.extend(select.group_by.iter());
         output_exprs.extend(select.having.iter());
+        output_exprs.extend(select.distinct_on.iter());
         output_exprs.extend(select.order_by.iter().map(|item| &item.expr));
         output_exprs.extend(late);
         mark_exprs(list, &mut needed, &output_exprs);
         let output = needed.clone();
         let mut condition_exprs: Vec<&Expr> = select.filter.iter().collect();
         if let Some(from) = &select.from {
-            for join in &from.joins {
+            for (join, shape) in from.joins.iter().zip(&self.shapes) {
                 match &join.condition {
                     JoinCondition::On(expr) => condition_exprs.push(expr),
                     JoinCondition::Using(names) => {
                         for name in names {
                             mark_column(list, &mut needed, None, &name.text);
+                        }
+                    }
+                    JoinCondition::Natural => {
+                        for &(_, right) in &shape.using {
+                            if let Some(name) = column_name_at(list, right) {
+                                mark_column(list, &mut needed, None, name);
+                            }
                         }
                     }
                     JoinCondition::Always => {}
@@ -1721,7 +1867,51 @@ impl JoinedFrom<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::with_where_keys;
+    use super::{IndexProbe, key_value, with_where_keys};
+    use crate::encoding::{encode_column_key, index_prefix, prefix_end};
+    use crate::types::{SqlType, Value};
+    use std::borrow::Cow;
+
+    #[test]
+    fn a_reused_index_probe_holds_only_the_latest_value_after_its_prefix() {
+        let mut probe = IndexProbe::new(7, 3);
+        let mut ranges = Vec::new();
+        for value in [
+            Value::BigInt(123_456_789),
+            Value::BigInt(5),
+            Value::BigInt(-1),
+        ] {
+            encode_column_key(probe.restart(), &value, SqlType::BigInt);
+            probe.close_range();
+            ranges.push((probe.start.clone(), probe.end.clone()));
+        }
+        for ((start, end), value) in ranges.iter().zip([123_456_789, 5, -1]) {
+            let mut fresh = index_prefix(7, 3);
+            encode_column_key(&mut fresh, &Value::BigInt(value), SqlType::BigInt);
+            assert_eq!(start, &fresh);
+            assert_eq!(end, &prefix_end(&fresh));
+        }
+    }
+
+    #[test]
+    fn a_key_value_of_the_column_type_is_borrowed_and_others_are_converted_or_refused() {
+        let same = Value::BigInt(42);
+        assert!(matches!(
+            key_value(&same, SqlType::BigInt),
+            Some(Cow::Borrowed(Value::BigInt(42)))
+        ));
+        let text = Value::Text("k".into());
+        assert!(matches!(
+            key_value(&text, SqlType::Text),
+            Some(Cow::Borrowed(Value::Text(_)))
+        ));
+        assert!(matches!(
+            key_value(&Value::Integer(42), SqlType::BigInt),
+            Some(Cow::Owned(Value::BigInt(42)))
+        ));
+        assert!(key_value(&Value::Null, SqlType::BigInt).is_none());
+        assert!(key_value(&Value::Double(1.5), SqlType::BigInt).is_none());
+    }
 
     #[test]
     fn a_single_integer_condition_pair_keeps_the_integer_hash_without_where_keys() {

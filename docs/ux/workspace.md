@@ -347,8 +347,11 @@ the tab's dialect, read-only, never the statement itself (cli.md 24); `Ctrl/Cmd+
 `EXPLAIN ANALYZE` (it does run the statement, inside a transaction that is rolled back for a
 statement that writes, and the toolbar's `Explain` menu says `Explain (analyze) runs the
 statement`). The results header gains a `Plan` segment after `Messages`, active when a plan came
-back; `Results` keeps the previous rows. A dialect without a plan (`Oracle` for now) shows the
-CLI's `not_supported` message in `Messages`.
+back; `Results` keeps the previous rows. A dialect without a plan shows the CLI's `not_supported`
+message in `Messages`. Oracle's dialect explains with `EXPLAIN PLAN FOR` and
+`DBMS_XPLAN.DISPLAY` (rolled back) and SQL Server's with `SET SHOWPLAN_ALL` (analyze: `SET
+STATISTICS PROFILE`, rolled back); their nodes read as the engine names them (`TABLE ACCESS FULL
+EMP`, `Clustered Index Seek [t].[t_pkey]`), SQL Server's statement row is the root (D312).
 
 ### 5.2 Layout
 The plan is a tree drawn top-down in the `results` body: the root node at the top centre, children
@@ -597,3 +600,443 @@ unless stated) and compares pixels, or dumps the accessibility tree and compares
   unchanged by this slice.
 - Hot-node thresholds are 20 % and 50 % of the root's total, chosen so a plan with four equal
   nodes (25 % each) reads `warm` everywhere and nothing `hot`, and one dominant node is `hot`.
+
+## 9. More tabs, the kept session, the value view, the grid menu, column widths and scrollbars
+
+Designed by Claude Fable for D310. Pins down what sections 2 and 3 leave open. Rects are at the
+1280 × 800 golden frame; tokens, components and roles not restated are gui.md's. The golden frame
+(one tab `Query 1`, 140 wide, `+` at `(408, 48, 28, 28)`, no scrollbars) is unchanged by all of it.
+
+### 9.1 The tab strip with several tabs
+Tabs are `w` wide, side by side from x 260: `w = 140` while `n × 140 + 36 ≤ 1020` (up to 7 tabs),
+then `w = max(100, floor(984 / n))` (8 tabs 123, 9 tabs 109, 10 or more 100); from 10 tabs the
+strip scrolls. While it fits, `+` sits 8 px after the last tab, `(260 + n × w + 8, 48, 28, 28)`.
+While it scrolls, `+` is pinned at `(1244, 48, 28, 28)` behind a 1 px `border` line at x 1236, and
+the tabs draw clipped in the viewport `(260, 44, 976, 36)` with scroll offset `s`: tab `i` (0-based)
+is at `x = 260 + i × w − s`. On adding, closing or activating a tab, `s` moves only as far as needed
+to show the whole active tab (`s = i × w` when it is cut on the left, `s = (i + 1) × w − 976` on
+the right); the wheel moves `s` 100 px per notch (either axis), clamped to `0 … n × w − 976`; `s`
+returns to 0 when the tabs fit again. No scrollbar: the cut tab at each edge is the cue.
+
+| Tab | Fill | Label at `(x + 12, 53)`, cut with `…` at `x + w − 32` | Close icon `(x + w − 20, 58, 8, 8)`, hit `(x + w − 28, 50, 24, 24)` | Between tabs |
+|-----|------|------|------|------|
+| active | `bg0`, stripe `(x, 44, w, 2)` `accent`, no bottom border | `body` `textPrimary` | always | none |
+| inactive | `bg2` (the strip), hover `bg1` | `body` `textSecondary` | only while hovered (the unsaved dot d 6 always) | 1 px `border` at `(x + w − 1, 52, 1, 20)` between two inactive tabs |
+
+Pointer: click activates; a click in the close hit closes; middle-click closes; a double-click on the
+strip's empty part (after `+`, or in the viewport past the last tab) adds a tab. Keys (EggDB layout):
+`Ctrl/Cmd+T` adds `Query n` (the lowest unused number) right after the active tab, with the active
+tab's dialect and connection, activates it and focuses its empty editor; `Ctrl/Cmd+W` and `Ctrl+F4`
+close the active tab; `Ctrl+Tab` / `Ctrl+Shift+Tab` go to the next / previous tab and wrap. After a
+close the tab to its right becomes active, else the one to its left. Closing the last tab leaves one
+empty `Query 1` (no text, no result, blank summary), so the strip is never empty and the window
+returns to the golden frame's state. A running tab (2.3) is never closed silently: every close path
+first asks the `Stop` dialog below; `Keep running` leaves it running.
+
+**Confirm dialogs** (`Close Query 2 without saving?` from 2.1, and the two below) share one shape,
+with the layout picker's conventions: the `scrim` covers the window and takes no input; the dialog
+opens and closes instantly, centred in the whole window.
+
+| Item | Rect (relative to `dx = round((W − 420) / 2)`, `dy = round((H − 160) / 2)`: `(430, 320)` here) | Drawing |
+|------|------|------|
+| dialog | (0, 0, 420, 160) | `bg0`, 1 px `border` inside, `radiusCard`, no shadow |
+| title | text at (24, 20) | `title` `textPrimary` |
+| body | text at (24, 52), wrapped at words to 372 wide, at most two lines of 18 | `body` `textPrimary` |
+| buttons | y 108, h 28, right edge at x 396, 8 px apart, width `max(72, text + 24)`; the default button is rightmost and primary, the other secondary | |
+
+One dialog per close, by priority running > transaction > unsaved, its body naming the rest:
+
+| Case | Title | Body | Buttons (default last) |
+|------|-------|------|------|
+| running | `Stop Query 2 and close it?` | `The running statement is cancelled and the rows fetched so far are discarded.` + ` Its open transaction rolls back.` + ` Its text is unsaved.` as they apply | `Stop and close` / `Keep running` |
+| transaction open or failed | `Close Query 2 and roll back?` | `Query 2 has an open transaction. Closing rolls it back; nothing from it is kept.` + ` Its text is unsaved too.` | `Roll back and close` / `Keep` |
+| unsaved | `Close Query 2 without saving?` | `Its text is not saved anywhere.` | `Close` / `Keep` |
+
+Focus opens on the default button; `Tab` is trapped and cycles the two buttons; `Enter` activates the
+focused button, `Esc`, a click on the scrim and the window's close key are `Keep`. Role `alertdialog`
+(AXSheet / Window modal / dialog), named by the title, described by the body, the default button named.
+
+### 9.2 The kept session
+A tab owns one engine session, opened at its first run and closed when the tab closes (with a
+`ROLLBACK` if a transaction is open), so `BEGIN` in one run holds for the next run in that tab, and
+no other tab sees its uncommitted work. The engine lets one session hold the write transaction at a
+time; a second tab's writer gets the engine's error, shown as any error (2.5), nothing more.
+
+| State | Tab | Status bar (left group, 16 px after the tags) |
+|-------|-----|------|
+| transaction open | dot d 6 `warning` at `(x + 12, 59)`, label moves to `x + 24` | `Transaction open` `small` `warning` |
+| transaction failed (the engine reports the block aborted after an error) | dot `error` | `Transaction failed: ROLLBACK to continue` `small` `error` |
+| another tab holds a transaction | | `Transaction open in Query 2` `small` `textSecondary`; click activates that tab |
+
+The status item is a button: click, `Space` or `Enter` open a two-row popover in the dialect menu's
+style (160 wide, rows 28, `bg0`, 1 px `border`, `radiusPopover`, shadow 0 4 12 at 16 %), above the
+item with a 4 px gap: `COMMIT`, `ROLLBACK` (`COMMIT` disabled while failed). Picking one runs that
+statement in the tab as a normal run, so the summary, `Messages` and the `Committed` toast follow
+2.3 and 2.4. The tab's accessible name adds the state text: `Query 2, transaction open`,
+`Query 2, transaction failed`.
+
+The dialect pill refuses a switch while the tab's transaction is open or failed: its menu opens with
+every other dialect disabled (`textDisabled`), and opening it shows the toast
+`Warning: COMMIT or ROLLBACK first; Query 2 has a transaction open` for 8 s. The session's dialect
+never changes mid-transaction, so the status bar's dialect item and the engine always agree.
+
+### 9.3 The full-value view
+`Enter`, `F2` or a double-click on a cell opens a popover 480 × 240: `bg0`, 1 px `border`,
+`radiusPopover`, shadow 0 4 12 at 16 % black, at `x = clamp(cell.x, 260, 800)`, `y = cell.bottom + 4`,
+or `y = cell.y − 244` when `cell.bottom + 244 > 776`. Rects relative to its top-left:
+
+| Item | Rect | Drawing |
+|------|------|------|
+| header | (0, 0, 480, 32) | `bg1`, 1 px `border` at y 31 |
+| column and type | text at (12, 7), cut with `…` at x 404 | `bodyBold` `textPrimary` for the name, then ` · ` and the type in `body` `textSecondary` (`name · text`, `data · bytea · 184 bytes`) |
+| `Copy` | (412, 2, 56, 28), label at (424, 7) | ghost button; disabled for `NULL` and the empty string |
+| body | (0, 32, 480, 208); text at (12, 40), lines 20, wrapped per character at 456 px (58 glyphs with the pinned font) | `code` `textPrimary`, read-only, no partial selection |
+| scrollbar | track (470, 32, 10, 208) | 9.6 |
+
+Shown: text verbatim with its line breaks; JSON and arrays pretty-printed with 2-space indent and keys
+in stored order; a vector as a JSON array, one value per line; a blob as `0x` + the full hex, no
+spaces; `NULL` as `NULL` and the empty string as `""`, both `textDisabled`. Past 1 MB the body stops
+and its last line is `… and 2.1 MB more` in `textSecondary`. The body scrolls with the wheel (60 px),
+`Up` / `Down` one line, `PgUp` / `PgDn` nine lines, `Home` / `End` to the ends. `Ctrl/Cmd+C` and
+`Copy` copy the body's full text as shown (the whole value, past the 1 MB cut) and toast
+`Copied 1,204 characters` or `Copied 184 bytes as hex` for 2 s. `Esc`, `Enter`, `F2` and a click
+outside close it; focus returns to the cell, which stays current. Role: a non-modal dialog (AXPopover /
+Window IsDialog / dialog / `dialog` `aria-modal=false`) named `<column> value`, its body a read-only
+`textbox` named `Value` (focused on open), the button `Copy value`; `Tab` cycles body → `Copy`.
+
+### 9.4 The grid's right-click menu
+Opens at the pointer (top-left at the pointer, moved left to end at x 1280 and flipped above the
+pointer when it would cross y 776) or, from `Shift+F10` and the menu key, below the current cell with
+a 4 px gap, left-aligned to it, with the same clamping. A right-click outside the selection first makes
+that cell current and collapses the selection; inside it keeps the selection; on the gutter or a header
+it selects that row or column first. Popover 240 wide, `bg0`, 1 px `border`, `radiusPopover`, shadow
+0 4 12 at 16 %, 4 px padding top and bottom, rows 28 (label `body` `textPrimary` at x 12, shortcut
+`body` `textSecondary` right-aligned at x 228), separators 1 px `border` across the width with 4 px
+above and below; height 278. Highlighted row: `selection` rounded r 4 inset 4 px horizontally;
+disabled `textDisabled`.
+
+| Group | Items (shortcut) |
+|-------|------|
+| copy | `Copy` (`Ctrl/Cmd+C`), `Copy with header` (`Ctrl/Cmd+Shift+C`), `Copy as INSERT` (`Ctrl/Cmd+Shift+I`), `Copy as CSV`, `Copy as JSON` |
+| value | `Open value` (`Enter`) |
+| select | `Select row` (`Shift+Space`), `Select column` (`Ctrl/Cmd+Space`), `Select all` (`Ctrl/Cmd+A`) |
+
+From the keyboard the first item is highlighted, from the pointer none. `Up` / `Down` move without
+wrapping, a letter jumps to the next item starting with it (`C` cycles the copy items), `Enter` and a
+click activate, `Esc` and a click outside close; focus returns to the grid. Role `menu` of
+`menuitem`s, each with its shortcut as the accelerator.
+
+`Copy as CSV` is the selection as RFC 4180: a header row of the selected columns' names, fields joined
+by `,`, records by `\r\n` with no trailing one; a field holding `,`, `"`, `\r` or `\n` is quoted with
+`"` doubled; `NULL` is empty; numbers, booleans, dates and uuids are the cell's text; JSON is its
+compact text (quoted as needed); a blob is `0x` + its full hex. `Copy as JSON` is a pretty-printed
+(2-space) array of one object per selected row, keys the column names in column order (a repeated
+name gets `_2`, `_3`); integers, decimals and floats bare; booleans `true` / `false`; `NULL` `null`;
+JSON and arrays embedded as JSON; text, dates, times, uuids, money and intervals as strings; a blob
+as the string `0x…`; a vector as an array of numbers. Toasts: `Copied 12 cells as CSV`,
+`Copied 3 rows as JSON`, 2 s.
+
+### 9.5 Column widths
+A header separator's hit band is 6 px (`x − 3 … x + 2`); hover draws a 2 px `accent` line over the
+separator for the header's height and the column-resize cursor; a drag extends the line through the
+body and resizes live, min 48, max 960. The gutter's edge at x 307 is not a handle. Double-click on
+the band auto-fits: the wider of the header and the first 200 fetched rows, clamped 48–480 (gui.md's
+reset). While dragging, the status bar's left group shows `name · 240 px`. Widths belong to the tab:
+a later run whose columns have the same names in the same order keeps them, any other result resets
+them. Keyboard: `Alt+Left` / `Alt+Right` change the current cell's column by 8 px (`Shift` 32 px) and
+`Alt+Enter` auto-fits it; each announces `name, 240 pixels` politely, and the header exposes
+`width 240 px` as its description.
+
+### 9.6 Scrollbars
+A region whose content fits its viewport draws no scrollbar, so the golden frame has none. Tracks are
+10 px overlays at the region's edge; gutters never scroll horizontally; the grid header scrolls with
+its columns.
+
+| Region | Vertical track | Horizontal track |
+|--------|------|------|
+| grid body | (1270, 446, 10, 330); h 320 while the horizontal one shows | (308, 766, 962, 10) |
+| editor | (1270, 80, 10, 300); h 290 with the horizontal one; both 28 shorter / higher while the error strip shows | (308, 370, 962, 10) |
+| full-value view | (470, 32, 10, 208) relative to the popover | none (the text wraps) |
+| tab strip | none (wheel only, 9.1) | none |
+
+For a track of length `L`, viewport `V`, content `T` and offset `O`: `thumb = max(24, round(L × V / T))`
+and `pos = round((L − thumb) × O / (T − V))`; the thumb is 6 px wide inset 2 px in the track,
+`radiusPill`, `textDisabled` at 60 % alpha; hover and drag `textSecondary`, 8 px wide inset 1 px.
+Shown while the pointer is over the region and for 800 ms after the last scroll or drag, then fading
+200 ms; under reduced motion the thumb is always visible while the content exceeds the viewport,
+never faded. A press on the track pages one viewport toward the pointer at once; dragging the thumb
+sets `O = (pointer − grab − trackStart) / (L − thumb) × (T − V)`, clamped, and the drag continues
+outside the track. Roles: `scrollbar` → AXScrollBar / ScrollBar, RangeValue / scroll bar, Value /
+`scrollbar` with `aria-controls` the region and `aria-orientation`; named `Vertical scrollbar` /
+`Horizontal scrollbar` as children of the region; value `0` to `100` percent; not in the `Tab`
+order, since the region's own keys scroll it.
+
+### Decided by this design (9)
+- Tabs shrink from 140 to 100 before the strip scrolls (from 10 tabs); while scrolling `+` is pinned
+  at the strip's right behind a 1 px line, and the only scroll cue is the cut tab at each edge.
+- Closing the last tab leaves an empty `Query 1`; the strip is never empty.
+- Every close path on a running tab goes through the `Stop Query 2 and close it?` dialog; closes
+  show one dialog, by priority running > transaction > unsaved, whose body names the other reasons.
+- Confirm dialogs are 420 × 160, centred in the window, default button primary and rightmost.
+- An open transaction shows as a `warning` dot in the tab plus a `Transaction open` status item whose
+  popover offers `COMMIT` and `ROLLBACK`; a failed block reads `Transaction failed: ROLLBACK to
+  continue` in `error`; other tabs see `Transaction open in Query 2`.
+- The dialect pill refuses a switch while a transaction is open (other dialects disabled, a
+  `Warning:` toast), rather than letting the next run fail.
+- The value view pretty-prints JSON (2-space), shows the full hex of blobs, cuts the body at 1 MB,
+  and copies what it shows; it has no partial text selection in this slice.
+- `Copy as CSV` (RFC 4180, header row, `\r\n`, no trailing break) and `Copy as JSON` (array of
+  objects, numbers bare, `NULL` as `null`) join the menu; `Select all` joins the select group.
+- Menu items do not wrap at the ends, as in the picker, tree and grid.
+- Column widths belong to the tab and survive runs with the same column names in the same order;
+  the drag's max is 960; `Alt+Left` / `Alt+Right` / `Alt+Enter` are the keyboard path.
+- Under reduced motion scrollbar thumbs stay visible rather than hiding after 800 ms, so people who
+  turn animation off never lose the position cue.
+
+## 10. The tree's row menu, the Drop dialog, the keys grid, triggers, splitters, the rail and motion
+
+Designed by Claude Fable for D311. Pins down what sections 4, 6 and 7 leave open. Rects are at the
+1280 × 800 golden frame; tokens, components, roles, the confirm-dialog shape of 9.1 and the popover
+of 9.4 are reused, not restated. The golden frame (sidebar shown, inspector closed, no menu, no
+dialog) is unchanged by all of it.
+
+### 10.1 The row menu
+A right-click on a row first selects it (and shows it in the inspector, as a single click does);
+the menu opens at the pointer with 9.4's clamping (moved left to end at x `W`, flipped above the
+pointer when it would cross y 776). From `Shift+F10` and the menu key it opens below the current
+row with a 4 px gap, left-aligned to the row's label (`x = 8 + 16 × level + 36`), same clamping. A
+right-click on the tree's empty space focuses the tree and opens nothing. Popover as 9.4: 240 wide,
+rows 28, label at x 12, shortcut right-aligned at x 228, two separators, height 194; `textDisabled`
+for a disabled item, which stays in place so the menu's shape never changes.
+
+| Group | Item (shortcut) | Does |
+|-------|------|------|
+| open | `Open` (`Enter`) | what `Enter` does on the row (4.2); on the connection and a group the label is `Expand` or `Collapse` by its state |
+| | `Insert name` (`Shift+Enter`) | inserts the name at the active tab's caret (quoted when the dialect needs it); focus stays in the tree |
+| | `Copy name` (`Ctrl/Cmd+C`) | copies the name; toast `Copied orders` for 2 s; the connection copies its path or URL (`Copied /data/shop.eggdb`) |
+| inspect | `Show DDL` | selects the row, opens the inspector (docked, or the overlay) with its `DDL` block expanded and scrolled to the top, and focuses the DDL box; `Esc` there returns focus to the tree (and closes the overlay) |
+| | `Refresh` (`F5`) | reloads the whole catalog, keeping expansion, selection and the filter |
+| drop | `Drop…` | 10.2 |
+
+Which rows get what; a cell is `yes`, `–` (disabled), or the special case:
+
+| Row | `Open` | `Insert name` | `Copy name` | `Show DDL` | `Refresh` | `Drop…` |
+|-----|------|------|------|------|------|------|
+| connection | `Expand` / `Collapse` | – | the path or URL | – | yes | – |
+| group (`Tables`, `Views`, …, a table's `Columns`, `Indexes`, `Triggers`) | `Expand` / `Collapse` | – | – | – | yes | – |
+| table, view | yes | yes | yes | yes | yes | yes |
+| column | opens its table (`Enter` too) | yes | yes | its table's DDL | yes | – |
+| index (either place) | opens its table | the index name | the index name | yes | yes | yes |
+| sequence | – | yes | yes | yes | yes | yes |
+| trigger | opens its table | yes | yes | – (no text from the engine) | yes | yes |
+| key space | yes | – (no SQL reads it) | yes | – | yes | – |
+
+`Drop…` is also disabled on a read-only connection. `Enter` on a column, index or trigger opens its
+table's `LIMIT 100` tab, and on a sequence does nothing, so the menu's first item always says what
+`Enter` does. Keys as 9.4: the first item highlighted from the keyboard, none from the pointer;
+`Up` / `Down` without wrapping, letters jump, `Enter` and a click activate, `Esc` and a click outside
+close, focus returns to the row. Role `menu` of `menuitem`s with their accelerators; a disabled item
+is exposed disabled, never removed. `Delete` in the tree stays nothing (4.2): the only way to a drop
+is the item that shows its statement.
+
+### 10.2 The Drop dialog
+9.1's dialog, 420 × 192 at `dx = round((W − 420) / 2)`, `dy = round((H − 192) / 2)` (`(430, 304)`).
+
+| Item | Rect (relative) | Drawing |
+|------|------|------|
+| title | text at (24, 20) | `title`: `Drop table orders?` (`view`, `index`, `sequence`, `trigger`; the bare name) |
+| body | text at (24, 52), one line | `body`: `Runs at once in its own session; there is no undo.` |
+| statement | box (24, 78, 372, 48): `bg1`, 1 px `border`, `radiusControl`; text at (32, 82), 2 lines of 20 | `code` `textPrimary`, read-only, wrapped per character at 356 px, cut with `…` at the end of the second line |
+| buttons | y 144, h 28, right edge x 396 | `Drop` secondary with `error` text, then `Cancel` primary and default, rightmost |
+
+The statement is in the active tab's dialect, names quoted as the tab's `Insert name` quotes them
+(bare when plain; `"…"` in PostgreSQL, Oracle and SQLite, `` `…` `` in MySQL, `[…]` in SQL Server):
+
+| Kind | PostgreSQL | MySQL | SQL Server | Oracle | SQLite |
+|------|------|------|------|------|------|
+| table | `DROP TABLE orders;` | same | same | same | same |
+| view | `DROP VIEW v;` | same | same | same | same |
+| index | `DROP INDEX i;` | `DROP INDEX i ON t;` | `DROP INDEX i ON t;` | `DROP INDEX i;` | `DROP INDEX i;` |
+| sequence | `DROP SEQUENCE s;` | same | same | same | same |
+| trigger | `DROP TRIGGER g ON t;` | `DROP TRIGGER g;` | `DROP TRIGGER g;` | `DROP TRIGGER g;` | `DROP TRIGGER g;` |
+
+Columns are not dropped from the tree (`ALTER TABLE … DROP COLUMN` belongs to the table designer, a
+later slice) and key spaces are not dropped from it (no SQL reads them; `eggdb collection delete`
+does it until a later slice offers `Delete collection…` through the engine's API). `Drop` is
+disabled, with the body replaced by `Wait for Query 2 to finish first.` or `COMMIT or ROLLBACK in
+Query 2 first.`, while any tab is running or holds a transaction (open or failed), so the engine's
+single writer never turns the drop into a surprise error. `Drop` runs the statement in a session of
+its own, opened and closed for it, never a tab's kept session (9.2), so no tab's transaction can hold
+or undo it; the dialog closes at once. Success: toast `Dropped table orders` in `success` for 8 s, the
+catalog refreshes, the parent group becomes the selected row and the inspector shows it; results
+already in grids stay (a result is a snapshot). Failure: the dialog stays, the body line becomes
+`Error 2BP01: cannot drop table orders because other objects depend on it` in `small` `error`
+(the engine's message, cut with `…`; the full text goes to the active tab's `Messages`), and `Drop`
+stays enabled for a second try. Focus opens on `Cancel`; `Tab` cycles statement box → `Drop` →
+`Cancel`; `Enter` activates the focused button; `Esc`, a click on the scrim and the window's close
+key are `Cancel`. Role `alertdialog` named by the title, described by the body; the box a read-only
+`textbox` named `Statement`.
+
+### 10.3 Triggers
+A table's `Triggers` group (level 3, folder icon, after `Indexes`, drawn only when the table has
+triggers, right text the count) holds one row per trigger name (level 4; `information_schema`'s one
+row per event is merged): icon a bolt of 1.5 px lines (7, 0)–(3, 7)–(6, 7)–(5, 12)–(9, 5)–(6, 5)–(7, 0);
+label the name; right text the events in catalog order joined by `, ` (`INSERT`, `INSERT, UPDATE`)
+in `small` `textSecondary`, the label cut with `…` 8 px before it. The inspector for a trigger: header
+`<name>` and `Trigger · AFTER INSERT, UPDATE on orders` (`BEFORE`, `INSTEAD OF`), then one block
+`Action` with `action_statement` in the DDL box's style (read-only `code`, 1 px `border`, ghost `Copy`),
+and no `DDL` or `Open in tab` (the engine has no `CREATE TRIGGER` text). A table's inspector gains
+`Triggers (2)` between `Indexes` and `DDL`: the name, then `AFTER INSERT, UPDATE` as `small`
+`textSecondary`. The tree row's accessible description is the right text; the trigger's `Open`,
+`Drop…` and the rest are 10.1's.
+
+### 10.4 The keys grid
+`Enter` on a key space opens a **keys tab**, titled `Keys` for the default key space and `Keys in
+users` for a collection (ui.md's words); a second `Enter` on the same space activates its tab and
+runs the scan again instead of opening another. The tab is not a query tab: its editor is read-only
+and holds one line, `SCAN LIMIT 100` or `SCAN users LIMIT 100` (`SCAN` and `LIMIT` in
+`syntaxKeyword`), no caret, keys do nothing in it, `Ln, Col` is absent from the status bar, and the
+dialect pill is disabled reading `Keys`. `Run` (`Ctrl/Cmd+Enter`, `F5`) runs the scan again from the
+start; `Run all`, `Explain` and `Plan` are disabled and `Messages` is empty. The scan is the engine's
+ordered key-value scan of the first 100 keys of the space (no SQL runs), read in one short read
+transaction through the connection, so the tab keeps no session and closes without asking. The grid:
+
+| Column | Cell | Aligned |
+|--------|------|------|
+| `key` | the bytes in ui.md's spelling: valid printable UTF-8 as it is, every other byte `\xNN`, `\t` `\n` `\r` `\\` escaped; cut with `…` | left |
+| `value` | the same spelling of the first 64 bytes, then `…`; an empty value `(empty)` in `textDisabled` | left |
+| `bytes` | the value's size, `1,204` | right |
+
+The full-value view (9.3) on a `key` or `value` cell shows the whole bytes by ui.md's auto rule: text
+(with `\xNN` for invalid bytes), JSON pretty-printed when the whole value parses, otherwise `0x` + hex
+as a blob; its header reads `value · 1,204 bytes`. Copy follows 3.5 and 9.4 on the text as drawn
+(`Copy as INSERT` disabled: there is no table). The status line (2.4): `12 keys · 0.3 ms` when the
+space has 100 keys or fewer, else `100 keys shown of 1,204 · 0.6 ms` (the count is the catalog's, the
+tree's right text) with 3.7's banner reading `Showing the first 100 keys of 1,204 in key order.` and
+only its close icon (no `Export…`); an empty space is `0 keys · 0.2 ms` and an empty grid. The status
+bar's tag is `SCAN 100 · 0.6 ms`. `Ctrl/Cmd+T` from a keys tab adds `Query n` with the dialect of the
+nearest SQL tab to its left, else the right, else `PostgreSQL`. A prefix filter and the next page are
+a later slice (ui.md's `/prefix` and `PgDn`); until then the CLI's `scan` and `eggdb ui` read past
+100. Roles: the tab `Keys in users`; the editor a read-only `textbox` named `Scan`; the grid `Keys`.
+
+### 10.5 Splitters
+Three, each gui.md's 6 px band around a 1 px `border` line, hover and drag a 2 px `accent` line with
+the resize cursor, no animation:
+
+| Splitter | Band at 1280 × 800 | Line | Keys | Range (default) |
+|----------|------|------|------|------|
+| sidebar | (256, 44, 6, 732) | x 259 | `Left` / `Right` | 180–480 (260) |
+| editor/results | (260, 380, 1020, 6) | y 382 | `Up` / `Down` | editor ≥ 80, results ≥ 120 (results 40 % of the body) |
+| inspector (docked only, so from 1440) | (1157, 44, 6, 732) at 1440 | x 1160 | `Left` / `Right` | 200–480 (280) |
+
+A splitter is a `Tab` stop right after the region on its left or above it: toolbar → filter → tree →
+sidebar splitter → tabs → editor → editor/results splitter → results → inspector splitter →
+inspector → status bar; `F6` cycles regions and skips them, and the rail (10.6) has none. Focused: a
+2 px `focusRing` around the band clipped to its length, `(254, 44, 10, 732)`, `(260, 378, 1020, 10)`,
+`(1155, 44, 10, 732)`, plus the `accent` line. Arrows move 8 px, `Shift` + arrows 32, `Home` / `End`
+to the minimum / maximum, `Enter` and a double-click reset the default; `Esc` returns focus to the
+region before it. While dragging or after a key, the status bar's left group shows `Sidebar · 268 px`,
+`Results · 312 px` or `Inspector · 280 px` (for 2 s after a key), and the change is announced as
+`Sidebar width, 268 pixels`. Resizing redraws live, never animates (6.4). Sizes persist in the client's
+settings file (`gui-settings`, moved by `EGGDB_GUI_SETTINGS`), one `name = value` line each, keyed by
+the layout's key: `eggdb.sidebar_width = 268`, `eggdb.results_ratio = 0.40`,
+`eggdb.inspector_width = 280`, `eggdb.sidebar_shown = true`, `eggdb.inspector_shown = true`
+(`ssms.…` for that layout), written when a drag ends or a key changes a size, read at start and
+clamped to the ranges.
+
+### 10.6 The rail
+`Ctrl/Cmd+B` at any width collapses the sidebar to the 36 px rail and back (never hides it
+entirely), so the shortcut means one thing at every width and the objects stay one click away; the
+centre takes the 224 px. Under 800 px (the browser's viewport; windows never get there) the rail is
+forced and `Ctrl/Cmd+B` opens and closes the drawer instead. Rail rect `(0, 44, 36, 732)`, `bg1`, 1 px
+`border` at x 35, no splitter; the tabs, editor and results start at x 36. Items are buttons
+`(0, y, 36, 32)`, their 12 × 12 icon at `(12, y + 10)` in `textSecondary` (`textPrimary` hovered or
+selected), from y 52 with no gap:
+
+| Item | Icon | Click |
+|------|------|------|
+| `Objects` | database | opens the drawer with the tree focused on its current row |
+| `Filter objects` | search | opens the drawer with the filter field focused |
+| separator `(8, y, 20, 1)` `border` with 4 px above and below | | |
+| `Tables`, `Keys`, `Documents` (each only when the connection has the group) | table, key, document | opens the drawer with that group selected, expanded and scrolled into view |
+
+`Views`, `Indexes` and `Sequences` share the folder icon, so they get no item (two identical icons
+would be a guess); `Objects` reaches them. Hover `bg2` rounded rect inset 4 px horizontally
+(`(4, y, 28, 32)`, `radiusControl`); the item the drawer was opened from is selected: `selection`
+fill plus a 2 px `accent` stripe at `(0, y, 2, 32)`; focused: 2 px `focusRing` inset 1 px. A tooltip
+(popover `bg0`, 1 px `border`, `radiusPopover`, `small`, padding 4 8, right of the item with a 4 px
+gap) shows the name after 600 ms, `Objects` with `Ctrl/Cmd+B`. The drawer is the sidebar drawn over
+the rail and the centre, `(0, 44, 260, 732)`, `bg1`, 1 px `border` at x 259 and the inspector overlay's
+shadow (0 4 12 at 16 % black), opened instantly, with the filter field and the tree exactly as
+docked. It closes on `Esc`, a click outside it, `Ctrl/Cmd+B`, and when a row opens a tab (`Enter`,
+double-click); `Space` (show in the inspector) keeps it open. Focus returns to where it was before
+the drawer opened. `Ctrl/Cmd+1` with the rail shown opens the drawer and focuses the tree. Roles: the
+rail a `toolbar` named `Objects rail`, `aria-orientation=vertical`, one `Tab` stop with `Up` /
+`Down` moving between its buttons (named as the table, `pressed` the selected one); the drawer a
+`dialog` `aria-modal=false` named `Objects`, its children the sidebar's.
+
+### 10.7 The inspector by width
+From 1440 the inspector is docked and open by default (`Ctrl/Cmd+I` closes and reopens it docked);
+from 1024 to 1439 it is closed by default and `Ctrl/Cmd+I` opens 4.3's overlay; under 1024 the
+same overlay still opens (280 of 800 px, over the right edge, `Esc` closes), so no width loses the
+DDL and sample rows. Shrinking below 1440 closes a docked inspector (its `inspector_shown` setting is
+kept); growing back to 1440 reopens it when it was open. An open overlay survives a resize,
+re-anchored to the right edge. The docked inspector's splitter (10.5) exists only while docked.
+
+### 10.8 Motion and reduced motion
+What fades over 80 ms linear: fills only, on hover and pressed changes, of buttons (primary,
+secondary, ghost, dropdown, dialog buttons), tree rows, rail items, inactive tabs (`bg2` ↔ `bg1`),
+grid rows, status bar item pills and the highlighted row of every menu and popover. Lines, borders,
+text and icon colours, focus rings, selection fills, splitter lines, tab switches and tree expansion
+change at once. A fade draws `lerp(from, to, elapsed / 80)` per sRGB channel (alpha included), clamped
+at 1; a change of target while a fade runs starts a new 80 ms fade from the colour currently drawn, so
+a quick in-and-out never jumps. The window redraws at the display's rate only while a fade or a blink
+is running.
+
+Reduced motion is on when the OS says so, when the client was started with `--reduced-motion`, or
+when `View > Reduce motion` is checked (the flag and the menu force it on; nothing forces it off).
+The OS value is read at start and again when the OS reports a change: macOS
+`accessibilityDisplayShouldReduceMotion` and its `DidChange` notification; Windows
+`SPI_GETCLIENTAREAANIMATION` and `WM_SETTINGCHANGE`; Linux the XSETTINGS `Gtk/EnableAnimations`
+property on X11 and `org.gnome.desktop.interface enable-animations` through the settings portal on
+Wayland, each with its change event; the browser `prefers-reduced-motion` and its `change` event; all
+through the platform layer with our own declarations (D1, D8). Under reduced motion: fills change at
+once; the caret is solid; the running indicator is the static full-width bar with `Running…`; the
+tab's spinner is the static ring; toasts appear and leave instantly; scrollbar thumbs stay visible
+while the content exceeds the viewport (9.6). Nothing else moves anyway.
+
+### Decided by this design (10)
+- The row menu's first item is what `Enter` does, relabelled `Expand` / `Collapse` on the connection
+  and groups; `Enter` on a column, index or trigger opens its table, on a sequence nothing.
+- Disabled items stay in the menu in place (height always 194), so the menu's shape never changes.
+- `Show DDL` opens the inspector at the `DDL` block and focuses the box, rather than a new tab; the
+  inspector's `Open in tab` remains the tab path.
+- `Copy name` is `Ctrl/Cmd+C` in the tree, toasting `Copied orders`; on the connection it copies the
+  path or URL.
+- The Drop dialog is 420 × 192 with the statement in a two-line read-only code box; `Cancel` is
+  primary, default and rightmost, `Drop` secondary in `error` text.
+- Drop statements are in the active tab's dialect with the tab's quoting; MySQL and SQL Server drop
+  an index `ON` its table, PostgreSQL drops a trigger `ON` its table.
+- Columns and key spaces have no `Drop…` (the table designer and `Delete collection…` are later
+  slices); a read-only connection disables it everywhere.
+- A drop runs in its own session, never a tab's kept session, and `Drop` is disabled while any tab
+  runs or holds a transaction; failure keeps the dialog open with the engine's error line.
+- After a drop the parent group is selected and grids keep their rows (a result is a snapshot).
+- A trigger row merges `information_schema`'s per-event rows into one, with the events as right
+  text; the inspector shows its `Action`, and no DDL, since the engine has no text for it.
+- A keys tab is titled `Keys` / `Keys in users`, is reused on a second `Enter`, has a read-only
+  one-line `SCAN … LIMIT 100` editor whose `Run` re-scans, columns `key`, `value`, `bytes`, ui.md's
+  byte spelling, the first 100 keys and 3.7's banner beyond them; prefix filter and paging are later.
+- Splitters are `Tab` stops right after the region on their left or above, skipped by `F6`; they
+  reset with `Enter`, reach the limits with `Home` / `End`, and report `Sidebar · 268 px` in the
+  status bar.
+- Sizes and the shown states persist in `gui-settings` as `<layout>.sidebar_width`, `results_ratio`,
+  `inspector_width`, `sidebar_shown`, `inspector_shown`.
+- `Ctrl/Cmd+B` collapses to the rail at every width rather than hiding the sidebar; the rail has
+  `Objects`, `Filter objects` and one item per group with its own icon (`Tables`, `Keys`,
+  `Documents`), and opens the tree as a 260 px drawer with the overlay shadow.
+- The inspector overlay opens at every width, including under 1024; shrinking below 1440 closes a
+  docked inspector and growing back reopens it.
+- Only fills fade, by linear sRGB blend over 80 ms, and a reversed fade restarts from the drawn
+  colour; reduced motion comes from the OS (read at start and on change), `--reduced-motion` or the
+  menu, and can only be forced on.

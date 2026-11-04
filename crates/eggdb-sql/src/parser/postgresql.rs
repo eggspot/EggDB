@@ -457,6 +457,8 @@ impl Parser<'_> {
             limit: None,
             offset: None,
             source_row_limit: None,
+            grouping_sets: None,
+            distinct_on: Vec::new(),
         })
     }
 
@@ -667,13 +669,51 @@ impl Parser<'_> {
             position: name.position,
         })
     }
+
+    pub(super) fn postgresql_fetch(&mut self, ordered: bool) -> SqlResult<Expr> {
+        let position = self.position();
+        self.at += 1;
+        if !self.take_word("first") {
+            self.expect_word("next")?;
+        }
+        let count = if self.is_word("row") || self.is_word("rows") {
+            Expr {
+                kind: ExprKind::Literal(Literal::Integer(1)),
+                position,
+            }
+        } else {
+            self.expression()?
+        };
+        if !self.take_word("rows") {
+            self.expect_word("row")?;
+        }
+        if self.take_word("only") {
+            return Ok(count);
+        }
+        let ties_at = self.position();
+        self.expect_word("with")?;
+        self.expect_word("ties")?;
+        if !ordered {
+            return Err(SqlError::syntax(
+                "WITH TIES cannot be specified without ORDER BY clause",
+                ties_at,
+            ));
+        }
+        Ok(Expr {
+            kind: ExprKind::OracleFunction {
+                name: "oracle_fetch_with_ties",
+                arguments: vec![count],
+            },
+            position,
+        })
+    }
 }
 
 fn is_values_select(select: &Select) -> bool {
     let Some(from) = &select.from else {
         return false;
     };
-    !select.distinct
+    !select.removes_duplicates()
         && matches!(
             select.items.as_slice(),
             [SelectItem::Wildcard {
@@ -689,6 +729,7 @@ fn is_values_select(select: &Select) -> bool {
         )
         && select.filter.is_none()
         && select.group_by.is_empty()
+        && select.grouping_sets.is_none()
         && select.having.is_none()
         && select.order_by.is_empty()
         && select.limit.is_none()

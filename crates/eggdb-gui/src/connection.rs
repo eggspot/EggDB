@@ -1,9 +1,12 @@
-use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::thread::JoinHandle;
 
-use eggdb::sql::{CancelSignal, Dialect, QueryResult, SqlError, Value, error_lines};
+use eggdb::sql::{
+    CancelSignal, Dialect, QueryResult, Session, SqlError, Store, TransactionStatus, Value,
+    error_lines,
+};
 use eggdb::{Database, Error, ErrorKind, Options};
 use eggdb_pgwire::client::{
     CancelRequest, ClientError, ConnectOptions, PgClient, QueryRows, SslMode,
@@ -25,44 +28,12 @@ const DATABASE_MISSING: &str = "3D000";
 
 /// What the connect card asks to open: a database file or a server. Its `Debug` shows a
 /// password as `***`.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectTarget {
     /// A database file on this computer.
     File(FileTarget),
     /// A server speaking the PostgreSQL protocol, such as `eggdb serve`.
     Server(ConnectOptions),
-}
-
-impl fmt::Debug for ConnectTarget {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::File(file) => formatter.debug_tuple("File").field(file).finish(),
-            Self::Server(options) => formatter
-                .debug_tuple("Server")
-                .field(&RedactedConnectOptions(options))
-                .finish(),
-        }
-    }
-}
-
-/// [`ConnectOptions`] for `Debug` output, with the password shown as `***`.
-pub struct RedactedConnectOptions<'a>(pub &'a ConnectOptions);
-
-impl fmt::Debug for RedactedConnectOptions<'_> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let options = self.0;
-        formatter
-            .debug_struct("ConnectOptions")
-            .field("host", &options.host)
-            .field("port", &options.port)
-            .field("user", &options.user)
-            .field("database", &options.database)
-            .field("password", &options.password.as_ref().map(|_| REDACTED))
-            .field("ssl_mode", &options.ssl_mode)
-            .field("ssl_root_cert", &options.ssl_root_cert)
-            .field("replication", &options.replication)
-            .finish_non_exhaustive()
-    }
 }
 
 /// What `Debug` output shows in place of a password.
@@ -192,6 +163,42 @@ impl StatementFailure {
         }
     }
 
+    pub(crate) fn session_lost() -> Self {
+        let message = "the tab's session ended; run again to start a new one".to_owned();
+        Self {
+            code: String::new(),
+            report: vec![format!("ERROR:  {message}")],
+            message,
+            hint: None,
+            position: None,
+        }
+    }
+
+    pub(crate) fn from_engine(error: &eggdb::Error) -> Self {
+        let message = error.to_string();
+        Self {
+            code: String::new(),
+            report: vec![format!("ERROR:  {message}")],
+            message,
+            hint: None,
+            position: None,
+        }
+    }
+
+    pub(crate) fn dialect_in_transaction(open: QueryDialect, wanted: QueryDialect) -> Self {
+        let message = transaction_dialect_message(open, wanted);
+        Self {
+            code: ACTIVE_TRANSACTION.to_owned(),
+            report: vec![
+                format!("ERROR:  {message}"),
+                format!("SQLSTATE:  {ACTIVE_TRANSACTION}"),
+            ],
+            message,
+            hint: None,
+            position: None,
+        }
+    }
+
     pub(crate) fn from_client(error: &ClientError) -> Self {
         let (code, message) = match error {
             ClientError::Server { code, message } => (code.clone(), message.clone()),
@@ -209,6 +216,15 @@ impl StatementFailure {
             report,
         }
     }
+}
+
+/// What a run in `wanted` answers while the tab's transaction, begun in `open`, is still open.
+pub fn transaction_dialect_message(open: QueryDialect, wanted: QueryDialect) -> String {
+    format!(
+        "this tab's transaction was begun in {}; COMMIT or ROLLBACK it before running {}",
+        open.label(),
+        wanted.label()
+    )
 }
 
 enum Stopper {
@@ -289,9 +305,248 @@ impl CancelHandle {
     }
 }
 
+/// The query tab a kept session belongs to: each tab runs on its own session, kept from its
+/// first run until [`Connection::close_session`], so a `BEGIN` in one run holds for the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct SessionId(pub u64);
+
+/// Each statement's answer, in order, the last one the failure when one failed.
+pub type Outcomes = Vec<Result<Vec<ResultTable>, StatementFailure>>;
+
+/// SQLSTATE `25001` active_sql_transaction.
+pub const ACTIVE_TRANSACTION: &str = "25001";
+
 enum Link {
-    File(Box<Database>),
-    Server(Box<PgClient>),
+    File(FileLink),
+    Server(ServerLink),
+}
+
+struct FileLink {
+    kept: Option<KeptSessions>,
+    database: Arc<Database>,
+}
+
+struct ServerLink {
+    client: Box<PgClient>,
+    options: Box<ConnectOptions>,
+    tab_clients: Vec<(SessionId, PgClient)>,
+}
+
+impl Drop for ServerLink {
+    fn drop(&mut self) {
+        for (_, client) in self.tab_clients.drain(..) {
+            client.terminate();
+        }
+    }
+}
+
+enum SessionWork {
+    Run(SessionRun),
+    Close(SessionId, mpsc::Sender<()>),
+    Status(SessionId, mpsc::Sender<TransactionStatus>),
+}
+
+struct SessionRun {
+    session: SessionId,
+    dialect: QueryDialect,
+    statements: Vec<String>,
+    cancel: CancelHandle,
+    answer: mpsc::Sender<Outcomes>,
+}
+
+struct KeptSessions {
+    work: Option<mpsc::Sender<SessionWork>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl KeptSessions {
+    fn start(database: &Arc<Database>) -> io::Result<Self> {
+        let (work, jobs) = mpsc::channel();
+        let database = Arc::clone(database);
+        let thread = std::thread::Builder::new()
+            .name("eggdb-gui-sessions".to_owned())
+            .spawn(move || keep_sessions(&database, &jobs))?;
+        Ok(Self {
+            work: Some(work),
+            thread: Some(thread),
+        })
+    }
+
+    fn run(
+        &self,
+        session: SessionId,
+        dialect: QueryDialect,
+        statements: &[String],
+        cancel: &CancelHandle,
+    ) -> Outcomes {
+        let (answer, answered) = mpsc::channel();
+        let run = SessionRun {
+            session,
+            dialect,
+            statements: statements.to_vec(),
+            cancel: cancel.clone(),
+            answer,
+        };
+        let sent = self
+            .work
+            .as_ref()
+            .is_some_and(|work| work.send(SessionWork::Run(run)).is_ok());
+        if !sent {
+            return vec![Err(StatementFailure::session_lost())];
+        }
+        answered
+            .recv()
+            .unwrap_or_else(|_| vec![Err(StatementFailure::session_lost())])
+    }
+
+    fn close(&self, session: SessionId) {
+        let (closed, answered) = mpsc::channel();
+        let sent = self
+            .work
+            .as_ref()
+            .is_some_and(|work| work.send(SessionWork::Close(session, closed)).is_ok());
+        if sent {
+            let _ = answered.recv();
+        }
+    }
+}
+
+impl KeptSessions {
+    fn status(&self, session: SessionId) -> TransactionStatus {
+        let (answer, answered) = mpsc::channel();
+        let sent = self
+            .work
+            .as_ref()
+            .is_some_and(|work| work.send(SessionWork::Status(session, answer)).is_ok());
+        if !sent {
+            return TransactionStatus::Idle;
+        }
+        answered.recv().unwrap_or(TransactionStatus::Idle)
+    }
+}
+
+impl Drop for KeptSessions {
+    fn drop(&mut self) {
+        drop(self.work.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn keep_sessions(database: &Database, jobs: &mpsc::Receiver<SessionWork>) {
+    let store = database.sql_store();
+    let mut sessions: Vec<(SessionId, Session<'_>)> = Vec::new();
+    while let Ok(job) = jobs.recv() {
+        match job {
+            SessionWork::Run(run) => {
+                let outcomes = run_kept(&store, &mut sessions, &run);
+                let _ = run.answer.send(outcomes);
+            }
+            SessionWork::Close(id, closed) => {
+                if let Some(at) = sessions.iter().position(|(kept, _)| *kept == id) {
+                    let (_, session) = sessions.swap_remove(at);
+                    let _ = session.close();
+                }
+                let _ = closed.send(());
+            }
+            SessionWork::Status(id, answer) => {
+                let status = sessions
+                    .iter()
+                    .find(|(kept, _)| *kept == id)
+                    .map_or(TransactionStatus::Idle, |(_, session)| {
+                        session.transaction_status()
+                    });
+                let _ = answer.send(status);
+            }
+        }
+    }
+    for (_, session) in sessions {
+        let _ = session.close();
+    }
+}
+
+fn run_kept<'s>(
+    store: &'s Store<'_>,
+    sessions: &mut Vec<(SessionId, Session<'s>)>,
+    run: &SessionRun,
+) -> Outcomes {
+    let wanted = run.dialect.engine();
+    let at = match sessions.iter().position(|(id, _)| *id == run.session) {
+        Some(at) => at,
+        None => {
+            sessions.push((run.session, store.session(wanted)));
+            sessions.len() - 1
+        }
+    };
+    let Some((_, session)) = sessions.get_mut(at) else {
+        return Vec::new();
+    };
+    if session.dialect() != wanted {
+        if session.transaction_status() != TransactionStatus::Idle {
+            return vec![Err(StatementFailure::dialect_in_transaction(
+                QueryDialect::of_engine(session.dialect()),
+                run.dialect,
+            ))];
+        }
+        let old = std::mem::replace(session, store.session(wanted));
+        let _ = old.close();
+    }
+    run_on_session(session, &run.statements, &run.cancel)
+}
+
+fn run_on_session(
+    session: &mut Session<'_>,
+    statements: &[String],
+    cancel: &CancelHandle,
+) -> Outcomes {
+    let mut outcomes = Vec::with_capacity(statements.len());
+    let signal = session.cancel_signal();
+    signal.clear();
+    cancel.arm(Stopper::File(signal));
+    for statement in statements {
+        if cancel.is_cancelled() {
+            outcomes.push(Err(StatementFailure::cancelled()));
+            break;
+        }
+        let mut tables = Vec::new();
+        let ran = session.execute(statement, &mut |result| tables.push(file_result(result)));
+        let failed = ran.is_err();
+        outcomes.push(
+            ran.map(|()| tables)
+                .map_err(|error| StatementFailure::from_sql(&error, statement)),
+        );
+        if failed {
+            break;
+        }
+    }
+    cancel.disarm();
+    session.cancel_signal().clear();
+    outcomes
+}
+
+fn run_on_client(client: &mut PgClient, statements: &[String], cancel: &CancelHandle) -> Outcomes {
+    let mut outcomes = Vec::with_capacity(statements.len());
+    if let Some(request) = client.cancel_request() {
+        cancel.arm(Stopper::Server(request));
+    }
+    for statement in statements {
+        if cancel.is_cancelled() {
+            outcomes.push(Err(StatementFailure::cancelled()));
+            break;
+        }
+        let ran = client
+            .simple_query(statement)
+            .map(|results| results.into_iter().map(server_result).collect())
+            .map_err(|error| StatementFailure::from_client(&error));
+        let failed = ran.is_err();
+        outcomes.push(ran);
+        if failed {
+            break;
+        }
+    }
+    cancel.disarm();
+    outcomes
 }
 
 /// The GUI's link to one database: an open `.eggdb` file or a session on a server. The main
@@ -331,7 +586,10 @@ impl Connection {
             location: name.to_owned(),
             read_only: false,
             tls: false,
-            link: Link::File(Box::new(database)),
+            link: Link::File(FileLink {
+                kept: None,
+                database: Arc::new(database),
+            }),
         })
     }
 
@@ -384,8 +642,8 @@ impl Connection {
     /// The user's tables, in name order.
     pub fn table_names(&mut self) -> Result<Vec<String>, StatementFailure> {
         match &mut self.link {
-            Link::File(database) => {
-                let store = database.sql_store();
+            Link::File(file) => {
+                let store = file.database.sql_store();
                 let mut session = store.session(Dialect::PostgreSql);
                 let tables = session
                     .tables()
@@ -395,8 +653,9 @@ impl Connection {
                 names.sort();
                 Ok(names)
             }
-            Link::Server(client) => {
-                let results = client
+            Link::Server(server) => {
+                let results = server
+                    .client
                     .simple_query(USER_TABLES)
                     .map_err(|error| StatementFailure::from_client(&error))?;
                 Ok(results
@@ -413,8 +672,21 @@ impl Connection {
     /// the engine's schema, a server through its `pg_catalog` and `information_schema`.
     pub fn catalog(&mut self) -> Result<crate::catalog::Catalog, StatementFailure> {
         match &mut self.link {
-            Link::File(database) => crate::catalog::read_file(database),
-            Link::Server(client) => crate::catalog::read_server(client),
+            Link::File(file) => crate::catalog::read_file(&file.database),
+            Link::Server(server) => crate::catalog::read_server(&mut server.client),
+        }
+    }
+
+    /// A keys tab's scan of `scan`'s key space (`docs/ux/workspace.md` 10.4): its first
+    /// [`crate::key_scan::KEY_SCAN_LIMIT`] keys in key order, in one read transaction and no
+    /// session. A server lists no key spaces yet, so its answer is an empty scan.
+    pub fn scan_keys(
+        &self,
+        scan: &crate::key_scan::KeySpaceScan,
+    ) -> Result<ResultTable, StatementFailure> {
+        match &self.link {
+            Link::File(file) => scan.scan_file(&file.database),
+            Link::Server(_) => Ok(scan.table(&[])),
         }
     }
 
@@ -432,92 +704,189 @@ impl Connection {
     /// Runs `statements` one after another in `dialect` on one session, so a `BEGIN` in one
     /// holds for the next, and stops at the first that fails: the answer has one entry per
     /// statement that ran, the last one the failure when there was one. `cancel` can stop the
-    /// running statement from another thread.
+    /// running statement from another thread. A file runs them on a session of their own,
+    /// closed after; a server on the client the connect opened, which no tab's kept session
+    /// uses, so the catalog, the tree's drops and the inspector's samples never run inside a
+    /// tab's transaction.
     pub fn run_script(
         &mut self,
         dialect: QueryDialect,
         statements: &[String],
         cancel: &CancelHandle,
-    ) -> Vec<Result<Vec<ResultTable>, StatementFailure>> {
-        let mut outcomes = Vec::with_capacity(statements.len());
+    ) -> Outcomes {
         match &mut self.link {
-            Link::File(database) => {
-                let store = database.sql_store();
+            Link::File(file) => {
+                let store = file.database.sql_store();
                 let mut session = store.session(dialect.engine());
-                cancel.arm(Stopper::File(session.cancel_signal()));
-                for statement in statements {
-                    if cancel.is_cancelled() {
-                        outcomes.push(Err(StatementFailure::cancelled()));
-                        break;
-                    }
-                    let mut tables = Vec::new();
-                    let ran =
-                        session.execute(statement, &mut |result| tables.push(file_result(result)));
-                    let failed = ran.is_err();
-                    outcomes.push(
-                        ran.map(|()| tables)
-                            .map_err(|error| StatementFailure::from_sql(&error, statement)),
-                    );
-                    if failed {
-                        break;
-                    }
-                }
-                cancel.disarm();
+                let outcomes = run_on_session(&mut session, statements, cancel);
                 let _ = session.close();
+                outcomes
             }
-            Link::Server(client) => {
-                if let Some(request) = client.cancel_request() {
-                    cancel.arm(Stopper::Server(request));
-                }
-                for statement in statements {
-                    if cancel.is_cancelled() {
-                        outcomes.push(Err(StatementFailure::cancelled()));
-                        break;
-                    }
-                    let ran = client
-                        .simple_query(statement)
-                        .map(|results| results.into_iter().map(server_result).collect())
-                        .map_err(|error| StatementFailure::from_client(&error));
-                    let failed = ran.is_err();
-                    outcomes.push(ran);
-                    if failed {
-                        break;
-                    }
-                }
-                cancel.disarm();
-            }
+            Link::Server(server) => run_on_client(&mut server.client, statements, cancel),
         }
-        outcomes
+    }
+
+    /// Runs `statements` as [`Connection::run_script`] does, on the session `session` keeps
+    /// from its first run until [`Connection::close_session`]: a transaction begun in one run
+    /// stays open for the next, and other sessions do not see its work until it commits. On a
+    /// server each kept session is a client of its own, opened with the connect's options. A
+    /// session idle outside a transaction follows `dialect`; one inside a transaction keeps
+    /// its dialect and answers a run in another with SQLSTATE `25001`.
+    pub fn run_in_session(
+        &mut self,
+        session: SessionId,
+        dialect: QueryDialect,
+        statements: &[String],
+        cancel: &CancelHandle,
+    ) -> Outcomes {
+        match &mut self.link {
+            Link::File(file) => {
+                if file.kept.is_none() {
+                    match KeptSessions::start(&file.database) {
+                        Ok(kept) => file.kept = Some(kept),
+                        Err(_) => return vec![Err(StatementFailure::session_lost())],
+                    }
+                }
+                match &file.kept {
+                    Some(kept) => kept.run(session, dialect, statements, cancel),
+                    None => vec![Err(StatementFailure::session_lost())],
+                }
+            }
+            Link::Server(server) => match server.client_for(session) {
+                Ok(client) => run_on_client(client, statements, cancel),
+                Err(failure) => vec![Err(failure)],
+            },
+        }
+    }
+
+    /// Ends `session`: an open transaction in it rolls back, and its next run starts a new
+    /// session.
+    pub fn close_session(&mut self, session: SessionId) {
+        match &mut self.link {
+            Link::File(file) => {
+                if let Some(kept) = &file.kept {
+                    kept.close(session);
+                }
+            }
+            Link::Server(server) => server.close(session),
+        }
+    }
+
+    /// Where `session` stands toward transactions: idle, inside a block, or inside a failed
+    /// block that only `ROLLBACK` ends. A session that never ran is idle.
+    pub fn transaction_status(&self, session: SessionId) -> TransactionStatus {
+        match &self.link {
+            Link::File(file) => file
+                .kept
+                .as_ref()
+                .map_or(TransactionStatus::Idle, |kept| kept.status(session)),
+            Link::Server(server) => server.status(session),
+        }
     }
 
     /// Runs `statement` in `dialect` so that nothing it writes stays, whatever it is: on a
-    /// server session that already has a transaction open, between `SAVEPOINT` and
-    /// `ROLLBACK TO SAVEPOINT`, so the session's own work stays; else inside `BEGIN` and
-    /// `ROLLBACK`. The outcomes start with the opening statement's, then the statement's,
+    /// session that already has a transaction open, between `SAVEPOINT` and
+    /// `ROLLBACK TO SAVEPOINT` (SQL Server's `SAVE TRANSACTION` and `ROLLBACK TRANSACTION`),
+    /// so the session's own work stays; an idle Oracle session, whose `SAVEPOINT` opens the
+    /// transaction, between `SAVEPOINT` and `ROLLBACK`; else inside `BEGIN`
+    /// (`BEGIN TRANSACTION`) and `ROLLBACK`. The outcomes start with the opening statement's, then the statement's,
     /// then the closing statements'; a session whose transaction already failed gets that
-    /// failure and runs nothing.
+    /// failure and runs nothing. With `session` it runs on that kept session, else as
+    /// [`Connection::run_script`] does.
     pub fn run_rolled_back(
         &mut self,
         dialect: QueryDialect,
         statement: &str,
         cancel: &CancelHandle,
-    ) -> Vec<Result<Vec<ResultTable>, StatementFailure>> {
+    ) -> Outcomes {
+        self.run_rolled_back_on(None, dialect, &[statement.to_owned()], cancel)
+    }
+
+    /// [`Connection::run_rolled_back`] on the kept session `session`.
+    pub fn run_rolled_back_in_session(
+        &mut self,
+        session: SessionId,
+        dialect: QueryDialect,
+        statement: &str,
+        cancel: &CancelHandle,
+    ) -> Outcomes {
+        self.run_rolled_back_on(Some(session), dialect, &[statement.to_owned()], cancel)
+    }
+
+    /// Runs `run` on the kept session `session`: its `before` statements, then, when they
+    /// all succeeded, its statements (rolled back as [`Connection::run_rolled_back`] does
+    /// when `run.rolled_back`), then its `after` statements whatever happened, which `cancel`
+    /// does not stop. The outcomes are those of every statement that ran, in order.
+    pub fn run_bracketed_in_session(
+        &mut self,
+        session: SessionId,
+        dialect: QueryDialect,
+        run: &BracketedRun,
+        cancel: &CancelHandle,
+    ) -> Outcomes {
+        let mut outcomes = if run.before.is_empty() {
+            Vec::new()
+        } else {
+            self.run_in_session(session, dialect, &run.before, cancel)
+        };
+        let ready = outcomes.len() == run.before.len() && outcomes.iter().all(Result::is_ok);
+        if ready {
+            let ran = if run.rolled_back {
+                self.run_rolled_back_on(Some(session), dialect, &run.statements, cancel)
+            } else {
+                self.run_in_session(session, dialect, &run.statements, cancel)
+            };
+            outcomes.extend(ran);
+        }
+        if !run.after.is_empty() {
+            outcomes.extend(self.run_in_session(
+                session,
+                dialect,
+                &run.after,
+                &CancelHandle::default(),
+            ));
+        }
+        outcomes
+    }
+
+    fn run_on(
+        &mut self,
+        session: Option<SessionId>,
+        dialect: QueryDialect,
+        statements: &[String],
+        cancel: &CancelHandle,
+    ) -> Outcomes {
+        match session {
+            Some(session) => self.run_in_session(session, dialect, statements, cancel),
+            None => self.run_script(dialect, statements, cancel),
+        }
+    }
+
+    fn run_rolled_back_on(
+        &mut self,
+        session: Option<SessionId>,
+        dialect: QueryDialect,
+        statements: &[String],
+        cancel: &CancelHandle,
+    ) -> Outcomes {
         let undo = CancelHandle::default();
-        if matches!(self.link, Link::Server(_)) {
-            let savepoint = format!("SAVEPOINT {ROLLED_BACK_SAVEPOINT}");
-            let mut opened = self.run_script(dialect, &[savepoint], &undo);
+        let words = UndoWords::of(dialect);
+        let keeps_transactions = session.is_some() || matches!(self.link, Link::Server(_));
+        let idle = session
+            .is_some_and(|session| self.transaction_status(session) == TransactionStatus::Idle);
+        let savepoint_opens_transaction = dialect == QueryDialect::Oracle;
+        if keeps_transactions && (!idle || savepoint_opens_transaction) {
+            let mut opened = self.run_on(session, dialect, &[words.savepoint()], &undo);
             match opened.pop() {
                 Some(Ok(tables)) => {
+                    let closing = if idle {
+                        vec![words.rollback.to_owned()]
+                    } else {
+                        words.back_to_savepoint()
+                    };
                     let mut outcomes = vec![Ok(tables)];
-                    outcomes.extend(self.run_script(dialect, &[statement.to_owned()], cancel));
-                    outcomes.extend(self.run_script(
-                        dialect,
-                        &[
-                            format!("ROLLBACK TO SAVEPOINT {ROLLED_BACK_SAVEPOINT}"),
-                            format!("RELEASE SAVEPOINT {ROLLED_BACK_SAVEPOINT}"),
-                        ],
-                        &undo,
-                    ));
+                    outcomes.extend(self.run_on(session, dialect, statements, cancel));
+                    outcomes.extend(self.run_on(session, dialect, &closing, &undo));
                     return outcomes;
                 }
                 Some(Err(failure)) if failure.code != NO_ACTIVE_TRANSACTION => {
@@ -526,17 +895,121 @@ impl Connection {
                 _ => {}
             }
         }
-        let script = [
-            "BEGIN".to_owned(),
-            statement.to_owned(),
-            "ROLLBACK".to_owned(),
-        ];
-        let mut outcomes = self.run_script(dialect, &script, cancel);
+        let mut script = Vec::with_capacity(statements.len() + 2);
+        script.push(words.begin.to_owned());
+        script.extend(statements.iter().cloned());
+        script.push(words.rollback.to_owned());
+        let mut outcomes = self.run_on(session, dialect, &script, cancel);
         let began = outcomes.first().is_some_and(Result::is_ok);
-        if began && outcomes.len() < script.len() && matches!(self.link, Link::Server(_)) {
-            outcomes.extend(self.run_script(dialect, &["ROLLBACK".to_owned()], &undo));
+        if began && outcomes.len() < script.len() && keeps_transactions {
+            outcomes.extend(self.run_on(session, dialect, &[words.rollback.to_owned()], &undo));
         }
         outcomes
+    }
+}
+
+/// Statements run with set-up before and clean-up after them, as `Explain` runs in SQL
+/// Server's dialect: `SET SHOWPLAN_ALL ON`, the statement, then `SET SHOWPLAN_ALL OFF` even
+/// when the statement failed.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BracketedRun {
+    /// Run first; the statements run only when all of these succeed.
+    pub before: Vec<String>,
+    /// The statements.
+    pub statements: Vec<String>,
+    /// Run last, whatever happened before.
+    pub after: Vec<String>,
+    /// Whether the statements run so that nothing they write stays.
+    pub rolled_back: bool,
+}
+
+struct UndoWords {
+    begin: &'static str,
+    rollback: &'static str,
+    sqlserver: bool,
+}
+
+impl UndoWords {
+    fn of(dialect: QueryDialect) -> Self {
+        if dialect == QueryDialect::SqlServer {
+            Self {
+                begin: "BEGIN TRANSACTION",
+                rollback: "ROLLBACK",
+                sqlserver: true,
+            }
+        } else {
+            Self {
+                begin: "BEGIN",
+                rollback: "ROLLBACK",
+                sqlserver: false,
+            }
+        }
+    }
+
+    fn savepoint(&self) -> String {
+        if self.sqlserver {
+            format!("SAVE TRANSACTION {ROLLED_BACK_SAVEPOINT}")
+        } else {
+            format!("SAVEPOINT {ROLLED_BACK_SAVEPOINT}")
+        }
+    }
+
+    fn back_to_savepoint(&self) -> Vec<String> {
+        if self.sqlserver {
+            vec![format!("ROLLBACK TRANSACTION {ROLLED_BACK_SAVEPOINT}")]
+        } else {
+            vec![
+                format!("ROLLBACK TO SAVEPOINT {ROLLED_BACK_SAVEPOINT}"),
+                format!("RELEASE SAVEPOINT {ROLLED_BACK_SAVEPOINT}"),
+            ]
+        }
+    }
+}
+
+impl ServerLink {
+    fn new(client: PgClient, options: &ConnectOptions) -> Self {
+        let first_used_tls = client.tls_version().is_some();
+        Self {
+            client: Box::new(client),
+            options: Box::new(tab_client_options(options, first_used_tls)),
+            tab_clients: Vec::new(),
+        }
+    }
+
+    fn client_for(&mut self, session: SessionId) -> Result<&mut PgClient, StatementFailure> {
+        let at = match self.tab_clients.iter().position(|(id, _)| *id == session) {
+            Some(at) => at,
+            None => {
+                let client = PgClient::connect(&self.options)
+                    .map_err(|error| StatementFailure::from_client(&error))?;
+                self.tab_clients.push((session, client));
+                self.tab_clients.len() - 1
+            }
+        };
+        match self.tab_clients.get_mut(at) {
+            Some((_, client)) => Ok(client),
+            None => Err(StatementFailure::session_lost()),
+        }
+    }
+
+    fn status(&self, session: SessionId) -> TransactionStatus {
+        let client = self
+            .tab_clients
+            .iter()
+            .find(|(id, _)| *id == session)
+            .map(|(_, client)| client);
+        match client.map(PgClient::ready_status) {
+            Some(b'T') => TransactionStatus::InBlock,
+            Some(b'E') => TransactionStatus::Failed,
+            _ => TransactionStatus::Idle,
+        }
+    }
+
+    fn close(&mut self, session: SessionId) {
+        if let Some(at) = self.tab_clients.iter().position(|(id, _)| *id == session) {
+            let (_, client) = self.tab_clients.swap_remove(at);
+            client.terminate();
+        }
     }
 }
 
@@ -677,7 +1150,10 @@ fn open_file(target: &FileTarget) -> Result<Connection, ConnectFailure> {
         location: file_name(path),
         read_only: target.read_only,
         tls: false,
-        link: Link::File(Box::new(database)),
+        link: Link::File(FileLink {
+            kept: None,
+            database: Arc::new(database),
+        }),
     })
 }
 
@@ -715,6 +1191,14 @@ fn file_failure(shown: &str, error: &Error, creates: bool) -> ConnectFailure {
     ConnectFailure::new(message, fix, FailureField::File)
 }
 
+fn tab_client_options(options: &ConnectOptions, first_used_tls: bool) -> ConnectOptions {
+    let mut tab_options = options.clone();
+    if first_used_tls {
+        tab_options.ssl_mode = tab_options.ssl_mode.max(SslMode::Require);
+    }
+    tab_options
+}
+
 fn connect_server(options: &ConnectOptions) -> Result<Connection, ConnectFailure> {
     let client = PgClient::connect(options).map_err(|error| server_failure(options, &error))?;
     let tls = client.tls_version().is_some();
@@ -723,7 +1207,7 @@ fn connect_server(options: &ConnectOptions) -> Result<Connection, ConnectFailure
         location: format!("{}:{}", options.host, options.port),
         read_only: false,
         tls,
-        link: Link::Server(Box::new(client)),
+        link: Link::Server(ServerLink::new(client, options)),
     })
 }
 
@@ -944,6 +1428,351 @@ mod tests {
     }
 
     #[test]
+    fn bracketed_runs_explain_in_sql_server_and_oracle_and_leave_nothing_behind() {
+        let path = scratch("bracketed").join("shop.eggdb");
+        let _ = std::fs::remove_file(&path);
+        let mut connection = EngineConnector.connect(&file(path, true, false)).unwrap();
+        connection
+            .run("CREATE TABLE t (id integer PRIMARY KEY, b integer)")
+            .unwrap();
+        connection
+            .run("INSERT INTO t VALUES (1, 10), (2, 20)")
+            .unwrap();
+        let cancel = CancelHandle::default();
+        let tab = SessionId(3);
+        let showplan = BracketedRun {
+            before: vec!["SET SHOWPLAN_ALL ON".to_owned()],
+            statements: vec!["SELECT * FROM t WHERE id = 1".to_owned()],
+            after: vec!["SET SHOWPLAN_ALL OFF".to_owned()],
+            rolled_back: false,
+        };
+        let outcomes =
+            connection.run_bracketed_in_session(tab, QueryDialect::SqlServer, &showplan, &cancel);
+        assert_eq!(outcomes.len(), 3, "{outcomes:?}");
+        let plan = outcomes[1]
+            .as_ref()
+            .ok()
+            .and_then(|tables| tables.last())
+            .cloned();
+        assert!(
+            plan.is_some_and(|table| table.columns.iter().any(|column| column == "NodeId")),
+            "{outcomes:?}"
+        );
+        let failing = BracketedRun {
+            statements: vec!["SELECT * FROM missing".to_owned()],
+            ..showplan.clone()
+        };
+        let outcomes =
+            connection.run_bracketed_in_session(tab, QueryDialect::SqlServer, &failing, &cancel);
+        assert!(outcomes.last().is_some_and(Result::is_ok), "{outcomes:?}");
+        let ran = connection.run_in_session(
+            tab,
+            QueryDialect::SqlServer,
+            &["SELECT b FROM t WHERE id = 2".to_owned()],
+            &cancel,
+        );
+        let rows = ran
+            .last()
+            .and_then(|outcome| outcome.as_ref().ok())
+            .and_then(|tables| tables.last())
+            .map(|table| table.rows.clone());
+        assert_eq!(
+            rows,
+            Some(vec![vec![Some("20".to_owned())]]),
+            "showplan is off again"
+        );
+        let profile = BracketedRun {
+            before: vec!["SET STATISTICS PROFILE ON".to_owned()],
+            statements: vec!["DELETE FROM t WHERE id = 1".to_owned()],
+            after: vec!["SET STATISTICS PROFILE OFF".to_owned()],
+            rolled_back: true,
+        };
+        let outcomes =
+            connection.run_bracketed_in_session(tab, QueryDialect::SqlServer, &profile, &cancel);
+        assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
+        assert_eq!(count_of(&mut connection, "t").as_deref(), Some("2"));
+        let oracle = BracketedRun {
+            statements: vec![
+                "EXPLAIN PLAN FOR SELECT * FROM t".to_owned(),
+                "SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)".to_owned(),
+            ],
+            rolled_back: true,
+            ..BracketedRun::default()
+        };
+        let outcomes = connection.run_bracketed_in_session(
+            SessionId(4),
+            QueryDialect::Oracle,
+            &oracle,
+            &cancel,
+        );
+        assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
+        let display = outcomes[2]
+            .as_ref()
+            .ok()
+            .and_then(|tables| tables.last())
+            .cloned();
+        assert!(
+            display.is_some_and(|table| table.columns == ["PLAN_TABLE_OUTPUT"]),
+            "{outcomes:?}"
+        );
+        assert_eq!(
+            connection.transaction_status(SessionId(4)),
+            TransactionStatus::Idle
+        );
+    }
+
+    #[test]
+    fn a_kept_session_holds_its_transaction_between_runs_until_it_closes() {
+        let path = scratch("kept").join("shop.eggdb");
+        let _ = std::fs::remove_file(&path);
+        let mut connection = EngineConnector.connect(&file(path, true, false)).unwrap();
+        connection.run("CREATE TABLE t (id integer)").unwrap();
+        let cancel = CancelHandle::default();
+        let tab = SessionId(1);
+        let run = |connection: &mut Connection, session: SessionId, sql: &str| {
+            connection.run_in_session(
+                session,
+                QueryDialect::PostgreSql,
+                &[sql.to_owned()],
+                &cancel,
+            )
+        };
+        assert!(run(&mut connection, tab, "BEGIN").iter().all(Result::is_ok));
+        assert!(
+            run(&mut connection, tab, "INSERT INTO t VALUES (1)")
+                .iter()
+                .all(Result::is_ok)
+        );
+        assert_eq!(count_of(&mut connection, "t").as_deref(), Some("0"));
+        let mysql = connection.run_in_session(
+            tab,
+            QueryDialect::MySql,
+            &["SELECT 1".to_owned()],
+            &CancelHandle::default(),
+        );
+        let refused = mysql.last().and_then(|outcome| outcome.as_ref().err());
+        assert_eq!(
+            refused.map(|failure| failure.code.as_str()),
+            Some(ACTIVE_TRANSACTION)
+        );
+        assert_eq!(
+            refused.map(|failure| failure.message.as_str()),
+            Some(
+                "this tab's transaction was begun in PostgreSQL; COMMIT or ROLLBACK it before running MySQL"
+            )
+        );
+        let seen = run(&mut connection, tab, "SELECT count(*) FROM t");
+        let rows = seen
+            .last()
+            .and_then(|outcome| outcome.as_ref().ok())
+            .and_then(|tables| tables.last())
+            .map(|table| table.rows.clone());
+        assert_eq!(rows, Some(vec![vec![Some("1".to_owned())]]));
+        assert!(
+            run(&mut connection, tab, "COMMIT")
+                .iter()
+                .all(Result::is_ok)
+        );
+        assert_eq!(count_of(&mut connection, "t").as_deref(), Some("1"));
+        assert!(run(&mut connection, tab, "BEGIN").iter().all(Result::is_ok));
+        assert!(
+            run(&mut connection, tab, "INSERT INTO t VALUES (2)")
+                .iter()
+                .all(Result::is_ok)
+        );
+        assert_eq!(
+            connection.transaction_status(tab),
+            TransactionStatus::InBlock
+        );
+        connection.close_session(tab);
+        assert_eq!(connection.transaction_status(tab), TransactionStatus::Idle);
+        assert_eq!(count_of(&mut connection, "t").as_deref(), Some("1"));
+        let other = run(&mut connection, SessionId(2), "INSERT INTO t VALUES (3)");
+        assert!(other.iter().all(Result::is_ok), "{other:?}");
+        assert_eq!(count_of(&mut connection, "t").as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn a_cancelled_run_leaves_the_kept_session_ready_for_the_next_one() {
+        let path = scratch("kept-cancel").join("shop.eggdb");
+        let _ = std::fs::remove_file(&path);
+        let mut connection = EngineConnector.connect(&file(path, true, false)).unwrap();
+        let cancelled = CancelHandle::default();
+        cancelled.cancel();
+        let tab = SessionId(7);
+        let stopped = connection.run_in_session(
+            tab,
+            QueryDialect::PostgreSql,
+            &["SELECT 1".to_owned()],
+            &cancelled,
+        );
+        assert_eq!(
+            stopped
+                .last()
+                .and_then(|outcome| outcome.as_ref().err())
+                .map(|failure| failure.code.as_str()),
+            Some(QUERY_CANCELED)
+        );
+        let next = connection.run_in_session(
+            tab,
+            QueryDialect::PostgreSql,
+            &["SELECT 1".to_owned()],
+            &CancelHandle::default(),
+        );
+        assert!(next.iter().all(Result::is_ok), "{next:?}");
+    }
+
+    struct TestServer {
+        port: u16,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    const SERVER_PASSWORD: &str = "correct horse";
+
+    fn start_server() -> TestServer {
+        let address = "127.0.0.1:0".parse().unwrap();
+        let listener = eggdb_pgwire::listen_on_loopback(address).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let config = eggdb_pgwire::ServerConfig {
+            user: "ada".to_owned(),
+            verifier: eggdb_pgwire::ScramVerifier::derive(
+                SERVER_PASSWORD.as_bytes(),
+                b"0123456789abcdef",
+                4096,
+            ),
+            database: "shop".to_owned(),
+            max_connections: 8,
+            authentication_timeout: std::time::Duration::from_secs(5),
+            idle_timeout: None,
+            memory_budget: Arc::default(),
+            auth_rules: None,
+            tls: None,
+        };
+        let thread_stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let database = Database::in_memory_with(Options::new()).unwrap();
+            let store = database.sql_store();
+            let stopped = move || thread_stop.load(std::sync::atomic::Ordering::Acquire);
+            let _ = eggdb_pgwire::serve(&store, &listener, &config, &stopped, &|_: &str| {});
+        });
+        TestServer { port, stop }
+    }
+
+    fn a_tab_s_search_path_never_reaches_a_drop(connection: &mut Connection) {
+        connection.run("CREATE SCHEMA app").unwrap();
+        connection
+            .run("CREATE TABLE app.orders (id integer)")
+            .unwrap();
+        connection.run("CREATE TABLE orders (id integer)").unwrap();
+        let tab = SessionId(1);
+        let in_tab = |connection: &mut Connection, sql: &str| {
+            connection.run_in_session(
+                tab,
+                QueryDialect::PostgreSql,
+                &[sql.to_owned()],
+                &CancelHandle::default(),
+            )
+        };
+        let set = in_tab(connection, "SET search_path = app, public");
+        assert!(set.iter().all(Result::is_ok), "{set:?}");
+        let dropped = connection.run_script(
+            QueryDialect::PostgreSql,
+            &["DROP TABLE orders;".to_owned()],
+            &CancelHandle::default(),
+        );
+        assert!(dropped.iter().all(Result::is_ok), "{dropped:?}");
+        let kept = in_tab(connection, "SELECT count(*) FROM app.orders");
+        assert!(kept.iter().all(Result::is_ok), "{kept:?}");
+        let gone = in_tab(connection, "SELECT count(*) FROM public.orders");
+        assert!(gone.last().is_some_and(Result::is_err), "{gone:?}");
+        connection.close_session(tab);
+    }
+
+    #[test]
+    fn a_drop_on_a_file_runs_on_a_session_no_tab_uses() {
+        let path = scratch("drop-session").join("shop.eggdb");
+        let _ = std::fs::remove_file(&path);
+        let mut connection = EngineConnector.connect(&file(path, true, false)).unwrap();
+        a_tab_s_search_path_never_reaches_a_drop(&mut connection);
+    }
+
+    #[test]
+    fn a_drop_on_a_server_runs_on_a_session_no_tab_uses() {
+        let running = start_server();
+        let options = ConnectOptions {
+            password: Some(SERVER_PASSWORD.to_owned()),
+            ..server(running.port)
+        };
+        let mut connection = EngineConnector
+            .connect(&ConnectTarget::Server(options))
+            .unwrap();
+        a_tab_s_search_path_never_reaches_a_drop(&mut connection);
+    }
+
+    #[test]
+    fn on_a_server_a_drop_outside_the_tabs_stays_after_a_tab_s_transaction_rolls_back() {
+        let running = start_server();
+        let options = ConnectOptions {
+            password: Some(SERVER_PASSWORD.to_owned()),
+            ..server(running.port)
+        };
+        let mut connection = EngineConnector
+            .connect(&ConnectTarget::Server(options))
+            .unwrap();
+        connection.run("CREATE TABLE x (id integer)").unwrap();
+        connection.run("CREATE TABLE y (id integer)").unwrap();
+        let tab = SessionId(1);
+        let other_tab = SessionId(2);
+        let run = |connection: &mut Connection, session: SessionId, sql: &str| {
+            connection.run_in_session(
+                session,
+                QueryDialect::PostgreSql,
+                &[sql.to_owned()],
+                &CancelHandle::default(),
+            )
+        };
+        assert!(
+            run(&mut connection, tab, "BEGIN READ ONLY")
+                .iter()
+                .all(Result::is_ok)
+        );
+        assert!(
+            run(&mut connection, other_tab, "SELECT 1")
+                .iter()
+                .all(Result::is_ok)
+        );
+        assert!(
+            run(&mut connection, tab, "SELECT * FROM missing")
+                .last()
+                .is_some_and(Result::is_err)
+        );
+        assert_eq!(
+            connection.transaction_status(tab),
+            TransactionStatus::Failed
+        );
+        assert_eq!(
+            connection.transaction_status(other_tab),
+            TransactionStatus::Idle
+        );
+        connection.run("DROP TABLE x").unwrap();
+        assert!(connection.catalog().is_ok());
+        assert_eq!(connection.table_names().unwrap(), vec!["y".to_owned()]);
+        connection.close_session(tab);
+        connection.close_session(other_tab);
+        assert_eq!(connection.transaction_status(tab), TransactionStatus::Idle);
+        assert_eq!(connection.table_names().unwrap(), vec!["y".to_owned()]);
+        let again = run(&mut connection, tab, "SELECT count(*) FROM y");
+        assert!(again.iter().all(Result::is_ok), "{again:?}");
+    }
+
+    #[test]
     fn a_created_file_opens_read_write_and_reopens_read_only() {
         let path = scratch("create").join("shop.eggdb");
         let _ = std::fs::remove_file(&path);
@@ -1056,6 +1885,39 @@ mod tests {
             ssl_mode: SslMode::Disable,
             ssl_root_cert: None,
             replication: false,
+        }
+    }
+
+    #[test]
+    fn tab_clients_after_a_tls_connect_require_tls_and_keep_its_certificate_checks() {
+        let preferred = ConnectOptions {
+            ssl_mode: SslMode::Prefer,
+            ..server(5432)
+        };
+        assert_eq!(
+            tab_client_options(&preferred, true).ssl_mode,
+            SslMode::Require
+        );
+        assert_eq!(
+            tab_client_options(&preferred, false).ssl_mode,
+            SslMode::Prefer
+        );
+        let disabled = server(5432);
+        assert_eq!(
+            tab_client_options(&disabled, false).ssl_mode,
+            SslMode::Disable
+        );
+        for verified in [SslMode::VerifyCa, SslMode::VerifyFull] {
+            let options = ConnectOptions {
+                ssl_mode: verified,
+                ssl_root_cert: Some("/etc/eggdb/root.pem".into()),
+                ..server(5432)
+            };
+            let tab = tab_client_options(&options, true);
+            assert_eq!(tab.ssl_mode, verified);
+            assert_eq!(tab.ssl_root_cert, options.ssl_root_cert);
+            assert_eq!(tab.host, options.host);
+            assert_eq!(tab.user, options.user);
         }
     }
 

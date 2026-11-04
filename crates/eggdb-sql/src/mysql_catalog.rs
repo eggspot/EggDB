@@ -878,7 +878,10 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MySqlRelation) -> Vec<V
                             mysql_schema(snapshot, text_of(row, "table_schema")),
                         ),
                         ("table_name", optional(text_of(row, "table_name"))),
-                        ("view_definition", optional(text_of(row, "view_definition"))),
+                        (
+                            "view_definition",
+                            text(&text_of(row, "view_definition").unwrap_or_default()),
+                        ),
                         ("check_option", text("NONE")),
                         ("is_updatable", optional(text_of(row, "is_updatable"))),
                         ("definer", text("eggdb@%")),

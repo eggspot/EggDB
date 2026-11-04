@@ -96,7 +96,7 @@ fn too_long() -> SqlError {
     )
 }
 
-fn checked_length(bytes: usize) -> SqlResult<()> {
+pub(crate) fn checked_length(bytes: usize) -> SqlResult<()> {
     if bytes > MAX_TEXT_BYTES {
         return Err(too_long());
     }

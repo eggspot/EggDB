@@ -5,6 +5,8 @@ use super::{
 use crate::dialect::Dialect;
 use crate::error::SqlResult;
 use crate::types::SqlType;
+use std::hash::BuildHasher;
+use std::sync::OnceLock;
 
 const SCHEMA_SPACE: u8 = 0x07;
 pub(super) const DEPENDENCY_SPACE: u8 = 0x08;
@@ -17,6 +19,7 @@ const LOCAL_CHECK_FLAG: u8 = 4;
 const CASCADED_CHECK_FLAG: u8 = 8;
 const KNOWN_VIEW_FLAGS: u8 =
     WILDCARD_FLAG | COLUMN_LIST_FLAG | LOCAL_CHECK_FLAG | CASCADED_CHECK_FLAG;
+const NARROWED_SEAL_LENGTH: usize = 16;
 pub(crate) const MAX_SEARCH_PATH: usize = 64;
 pub(crate) const MAX_VIEW_REFERENCES: usize = 4096;
 pub(crate) const MAX_VIEW_TEXT: usize = 1 << 20;
@@ -182,6 +185,7 @@ pub(crate) struct ViewDefinition {
     pub(crate) expands_wildcard: bool,
     pub(crate) has_column_list: bool,
     pub(crate) check_option: Option<CheckOption>,
+    pub(crate) columns_narrowed: bool,
 }
 
 impl ViewDefinition {
@@ -232,7 +236,29 @@ impl ViewDefinition {
         out
     }
 
+    /// The definition as the store filter serves it to a session that lists the view with
+    /// columns (D306): the record [`ViewDefinition::encode`] stores, followed by this
+    /// process's random seal, which [`ViewDefinition::decode`] alone turns into
+    /// `columns_narrowed`. It is never stored: a file cannot carry the mark, and in another
+    /// process these bytes are damage.
+    pub(crate) fn encode_columns_narrowed(&self) -> Vec<u8> {
+        let mut out = self.encode();
+        out.extend_from_slice(narrowed_seal());
+        out
+    }
+
     pub(crate) fn decode(name: &str, bytes: &[u8]) -> SqlResult<Self> {
+        match bytes.strip_suffix(narrowed_seal().as_slice()) {
+            Some(record) => {
+                let mut view = Self::decode_stored(name, record)?;
+                view.columns_narrowed = true;
+                Ok(view)
+            }
+            None => Self::decode_stored(name, bytes),
+        }
+    }
+
+    fn decode_stored(name: &str, bytes: &[u8]) -> SqlResult<Self> {
         let mut reader = Reader::new(bytes, "view definition");
         let version = reader.byte()?;
         let base_types_allowed = version == BASE_TYPES_VIEW_FORMAT_VERSION;
@@ -263,7 +289,7 @@ impl ViewDefinition {
                 reader.byte()?;
                 None
             } else {
-                Some(reader.sql_type(true, true, true, base_types_allowed)?)
+                Some(reader.sql_type(true, true, true, base_types_allowed, false)?)
             };
             let source = reader.plain_name()?;
             if columns.iter().any(|known| known.name == column) {
@@ -309,6 +335,7 @@ impl ViewDefinition {
             references,
             expands_wildcard: flags & WILDCARD_FLAG != 0,
             has_column_list: flags & COLUMN_LIST_FLAG != 0,
+            columns_narrowed: false,
             check_option: if flags & LOCAL_CHECK_FLAG != 0 {
                 Some(CheckOption::Local)
             } else if flags & CASCADED_CHECK_FLAG != 0 {
@@ -322,6 +349,20 @@ impl ViewDefinition {
         }
         Ok(view)
     }
+}
+
+fn narrowed_seal() -> &'static [u8; NARROWED_SEAL_LENGTH] {
+    static SEAL: OnceLock<[u8; NARROWED_SEAL_LENGTH]> = OnceLock::new();
+    SEAL.get_or_init(|| {
+        let mut seal = [0; NARROWED_SEAL_LENGTH];
+        if crate::random::fill(&mut seal).is_err() {
+            let state = std::collections::hash_map::RandomState::new();
+            let (first, second) = seal.split_at_mut(NARROWED_SEAL_LENGTH / 2);
+            first.copy_from_slice(&state.hash_one(1u8).to_le_bytes());
+            second.copy_from_slice(&state.hash_one(2u8).to_le_bytes());
+        }
+        seal
+    })
 }
 
 pub(crate) fn is_view_record(bytes: &[u8]) -> bool {
@@ -362,6 +403,7 @@ mod tests {
             expands_wildcard: true,
             has_column_list: true,
             check_option: None,
+            columns_narrowed: false,
         }
     }
 
@@ -429,11 +471,39 @@ mod tests {
             assert_eq!(ViewDefinition::decode("app\0v", &bytes).unwrap(), flagged);
         }
         let mut bytes = view().encode();
-        for unknown in [12u8, 13, 15, 16, 0x80, 0xFF] {
+        for unknown in [12u8, 13, 15, 16, 19, 32, 0x80, 0xFF] {
             bytes[2] = unknown;
             let error = ViewDefinition::decode("app\0v", &bytes).unwrap_err();
             assert_eq!(error.state().code(), "XX001");
         }
+    }
+
+    #[test]
+    fn the_narrowed_mark_is_never_stored_and_a_stored_flag_for_it_is_damage() {
+        let mut narrowed = view();
+        narrowed.has_column_list = false;
+        narrowed.expands_wildcard = false;
+        narrowed.columns_narrowed = true;
+        let stored = narrowed.encode();
+        assert_eq!(stored[2], 0);
+        let decoded = ViewDefinition::decode("app\0v", &stored).unwrap();
+        assert!(!decoded.columns_narrowed);
+        assert_eq!(decoded.shown_query(), Some("SELECT a, b FROM app.t"));
+        let mut forged = stored.clone();
+        forged[2] = 16;
+        let error = ViewDefinition::decode("app\0v", &forged).unwrap_err();
+        assert_eq!(error.state().code(), "XX001");
+        let served = narrowed.encode_columns_narrowed();
+        assert_eq!(served[..stored.len()], stored[..]);
+        assert_eq!(ViewDefinition::decode("app\0v", &served).unwrap(), narrowed);
+        let mut forged_served = served.clone();
+        forged_served[2] = 16;
+        assert!(ViewDefinition::decode("app\0v", &forged_served).is_err());
+        let mut wrong_seal = served.clone();
+        if let Some(last) = wrong_seal.last_mut() {
+            *last ^= 1;
+        }
+        assert!(ViewDefinition::decode("app\0v", &wrong_seal).is_err());
     }
 
     #[test]
@@ -623,6 +693,7 @@ mod tests {
             expands_wildcard: false,
             has_column_list: false,
             check_option: None,
+            columns_narrowed: false,
         }
     }
 

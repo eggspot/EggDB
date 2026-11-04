@@ -1,7 +1,9 @@
 use std::cell::{Cell, RefCell};
+use std::time::Instant;
 
 use eggdb_gui::browser::{
-    accessibility_json, action_code, key_from_dom, modifiers_from_bits, theme_from_code,
+    CardPointer, PointerAnswer, accessibility_json, action_code, key_from_dom, modifiers_from_bits,
+    pointer_button_from_dom, theme_from_code,
 };
 use eggdb_gui::connect_screen::{self, ConnectCard, DEFAULT_HEIGHT, DEFAULT_WIDTH, frame_size};
 use eggdb_gui::main_window::Faces;
@@ -29,6 +31,7 @@ thread_local! {
     static CARD: RefCell<ConnectCard> = RefCell::new(ConnectCard::first_start());
     static FONTS: RefCell<CardFonts> = RefCell::new(CardFonts::default());
     static SIZE: Cell<(u32, u32)> = const { Cell::new((DEFAULT_WIDTH, DEFAULT_HEIGHT)) };
+    static POINTER: RefCell<CardPointer> = RefCell::new(CardPointer::default());
 }
 
 fn with_faces<T>(run: impl FnOnce(Faces<'_>) -> T) -> T {
@@ -209,16 +212,93 @@ pub extern "C" fn eggdb_wasm_card_paste() -> u32 {
     })
 }
 
+fn with_pointer<T>(run: impl FnOnce(&mut CardPointer, &mut ConnectCard, (u32, u32)) -> T) -> T {
+    let size = SIZE.with(Cell::get);
+    POINTER.with(|pointer| {
+        CARD.with(|card| run(&mut pointer.borrow_mut(), &mut card.borrow_mut(), size))
+    })
+}
+
+fn pointer_code(answer: PointerAnswer) -> u32 {
+    if answer.used() {
+        action_code(answer.action)
+    } else {
+        KEY_IGNORED
+    }
+}
+
+/// Answers a DOM `pointerdown` at (`x`, `y`) CSS pixels from the canvas's top-left corner with
+/// DOM button number `button` (0 main, 1 auxiliary, 2 secondary) and `modifiers` as for
+/// [`eggdb_wasm_card_key`]. Returns the action code as [`eggdb_wasm_card_key`] does, 0 when only
+/// the frame changed, or [`KEY_IGNORED`] when the card does not use the press (so the browser
+/// keeps its own behaviour, such as its context menu).
+#[unsafe(no_mangle)]
+pub extern "C" fn eggdb_wasm_card_pointer_down(x: f32, y: f32, button: u32, modifiers: u32) -> u32 {
+    let Some(button) = pointer_button_from_dom(button) else {
+        return KEY_IGNORED;
+    };
+    let modifiers = modifiers_from_bits(modifiers);
+    let answer = with_pointer(|pointer, card, size| {
+        with_faces(|faces| {
+            pointer.pressed(card, faces, size, (x, y), button, modifiers, Instant::now())
+        })
+    });
+    pointer_code(answer)
+}
+
+/// Answers a DOM `pointermove` at (`x`, `y`): the hover, and a drag's selection in an input.
+/// Returns 1 when the frame changed, 0 otherwise.
+#[unsafe(no_mangle)]
+pub extern "C" fn eggdb_wasm_card_pointer_move(x: f32, y: f32) -> u32 {
+    let changed = with_pointer(|pointer, card, size| {
+        with_faces(|faces| pointer.moved(card, faces, size, (x, y)))
+    });
+    u32::from(changed)
+}
+
+/// Answers a DOM `pointerup` at (`x`, `y`) with DOM button number `button`: a press that
+/// started on a button, link, checkbox or tab and ends on it acts. Returns what
+/// [`eggdb_wasm_card_pointer_down`] returns.
+#[unsafe(no_mangle)]
+pub extern "C" fn eggdb_wasm_card_pointer_up(x: f32, y: f32, button: u32) -> u32 {
+    let Some(button) = pointer_button_from_dom(button) else {
+        return KEY_IGNORED;
+    };
+    let answer = with_pointer(|pointer, card, size| {
+        with_faces(|faces| pointer.released(card, faces, size, (x, y), button))
+    });
+    pointer_code(answer)
+}
+
+/// Answers the browser's own `dblclick` at (`x`, `y`): the word under it in an input when the
+/// card's own click count missed it. Returns 1 when the frame changed, 0 otherwise.
+#[unsafe(no_mangle)]
+pub extern "C" fn eggdb_wasm_card_double_click(x: f32, y: f32) -> u32 {
+    let changed = with_pointer(|pointer, card, size| {
+        with_faces(|faces| pointer.double_clicked(card, faces, size, (x, y)))
+    });
+    u32::from(changed)
+}
+
+/// Answers a DOM `pointerleave`: nothing is hovered. Returns 1 when the frame changed.
+#[unsafe(no_mangle)]
+pub extern "C" fn eggdb_wasm_card_pointer_leave() -> u32 {
+    u32::from(with_pointer(|pointer, card, _| pointer.left(card)))
+}
+
 /// Puts the card back in its first-start state.
 #[unsafe(no_mangle)]
 pub extern "C" fn eggdb_wasm_card_reset() {
     CARD.with(|card| *card.borrow_mut() = ConnectCard::first_start());
+    POINTER.with(|pointer| *pointer.borrow_mut() = CardPointer::default());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eggdb_gui::connect_screen::{NODE_BROWSE, NODE_FILE, NODE_OPEN, NODE_WINDOW};
+    use eggdb_gui::connect_screen::{
+        NODE_BROWSE, NODE_FILE, NODE_OPEN, NODE_READ_ONLY, NODE_WINDOW,
+    };
 
     fn write_input(text: &[u8]) {
         let start = super::super::eggdb_wasm_input(u32::try_from(text.len()).unwrap());
@@ -299,6 +379,51 @@ mod tests {
         assert_eq!(eggdb_wasm_card_focus(NODE_BROWSE), 1);
         eggdb_wasm_card_reset();
         assert!(tree().contains("\"value\":\"~/eggdb/quickstart.eggdb\""));
+    }
+
+    fn bounds(id: u32) -> [f32; 4] {
+        let tree = tree();
+        let at = tree.find(&format!("{{\"id\":{id},")).unwrap();
+        let number = |name: &str| -> f32 {
+            let key = format!("\"{name}\":");
+            let start = at + tree[at..].find(&key).unwrap() + key.len();
+            let end = start + tree[start..].find(',').unwrap();
+            tree[start..end].parse().unwrap()
+        };
+        [number("x"), number("y"), number("width"), number("height")]
+    }
+
+    fn centre(id: u32) -> (f32, f32) {
+        let [x, y, width, height] = bounds(id);
+        (x + width / 2.0, y + height / 2.0)
+    }
+
+    #[test]
+    fn the_host_sends_pointer_presses_moves_and_releases() {
+        eggdb_wasm_card_reset();
+        eggdb_wasm_card_render(1280, 800, 1.0, 0);
+        let (x, y) = centre(NODE_READ_ONLY);
+        assert_eq!(eggdb_wasm_card_pointer_move(x, y), 1);
+        assert_eq!(eggdb_wasm_card_pointer_move(x, y), 0);
+        assert_eq!(eggdb_wasm_card_pointer_down(x, y, 2, 0), KEY_IGNORED);
+        assert_eq!(eggdb_wasm_card_pointer_down(x, y, 4, 0), KEY_IGNORED);
+        assert_eq!(eggdb_wasm_card_pointer_down(x, y, 0, 0), 0);
+        assert_eq!(eggdb_wasm_card_pointer_up(x, y, 0), 0);
+        assert!(tree().contains("\"name\":\"Open read-only\",\"value\":null,\"placeholder\":null,\"focused\":true,\"checked\":true"));
+        assert_eq!(eggdb_wasm_card_pointer_up(x, y, 0), KEY_IGNORED);
+        assert_eq!(eggdb_wasm_card_pointer_leave(), 1);
+        assert_eq!(eggdb_wasm_card_pointer_leave(), 0);
+        let (x, y) = centre(NODE_BROWSE);
+        assert_eq!(eggdb_wasm_card_pointer_down(x, y, 0, 0), 0);
+        assert_eq!(eggdb_wasm_card_pointer_up(x, y, 0), 2);
+        let [left, top, _, height] = bounds(NODE_FILE);
+        let (x, y) = (left + 12.0, top + height / 2.0);
+        assert_eq!(eggdb_wasm_card_pointer_down(x, y, 0, 0), 0);
+        assert_eq!(eggdb_wasm_card_pointer_up(x, y, 0), 0);
+        assert_eq!(eggdb_wasm_card_double_click(x, y), 1);
+        assert_eq!(eggdb_wasm_card_copied_text(), 1);
+        assert_eq!(eggdb_wasm_card_double_click(x, y), 0);
+        eggdb_wasm_card_reset();
     }
 
     #[test]

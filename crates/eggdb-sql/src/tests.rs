@@ -583,9 +583,6 @@ fn not_supported_yet_answers_0a000_with_a_hint() {
     let store = MemoryStore::default();
     let mut session = with_people(&store);
     for sql in [
-        "SELECT * FROM people a NATURAL JOIN people b",
-        "SELECT age FROM people GROUP BY ROLLUP (age)",
-        "SELECT DISTINCT ON (age) age FROM people",
         "SELECT '{{1}}'::int[]",
         "CREATE TABLE ts (t money)",
         "CREATE TABLE js (j inet)",
@@ -1500,7 +1497,6 @@ fn join_errors_follow_postgresql() {
             "SELECT * FROM a JOIN b ON b.k = c.k JOIN people c ON true",
             "42P01",
         ),
-        ("SELECT * FROM a NATURAL JOIN b", "0A000"),
         ("SELECT * FROM a JOIN (a JOIN b ON true) ON true", "0A000"),
         ("SELECT * FROM nope JOIN a ON true", "42P01"),
         ("SELECT * FROM a JOIN nope ON true", "42P01"),
@@ -1677,9 +1673,7 @@ fn grouping_errors_follow_postgresql() {
             "SELECT DISTINCT person_id FROM orders ORDER BY amount",
             "42P10",
         ),
-        ("SELECT DISTINCT ON (person_id) amount FROM orders", "0A000"),
-        ("SELECT age FROM people GROUP BY ROLLUP (age)", "0A000"),
-        ("SELECT age FROM people GROUP BY ()", "0A000"),
+        ("SELECT age FROM people GROUP BY ()", "42803"),
         ("UPDATE people SET age = count(*)", "42803"),
         ("UPDATE people SET age = 1 WHERE count(*) > 1", "42803"),
         ("DELETE FROM people WHERE count(*) > 1", "42803"),
@@ -2277,9 +2271,10 @@ fn set_show_and_reset_remember_run_time_parameters() {
     assert_eq!(state(&mut session, "SET server_version = '1'"), "55P02");
     assert_eq!(state(&mut session, "SET no_such_thing = 1"), "42704");
     assert_eq!(state(&mut session, "SHOW no_such_thing"), "42704");
+    assert_eq!(last(&mut session, "SET LOCAL statement_timeout = 5"), "SET");
     assert_eq!(
-        state(&mut session, "SET LOCAL statement_timeout = 0"),
-        "0A000"
+        last(&mut session, "SHOW statement_timeout"),
+        "statement_timeout\n0\nSHOW"
     );
     assert_eq!(last(&mut session, "SET myapp.tenant = 'blue'"), "SET");
     assert_eq!(
@@ -2915,7 +2910,11 @@ fn explain_analyze_runs_the_statement_and_reports_rows_and_times() {
     run(&mut session, "INSERT INTO t VALUES (1, 1), (2, 2), (3, 3)").unwrap();
     let plan = last(&mut session, "EXPLAIN ANALYZE SELECT * FROM t WHERE n > 1");
     let lines: Vec<&str> = plan.lines().collect();
-    assert!(lines[1].ends_with("(actual rows=2 loops=1)"), "{plan}");
+    assert_eq!(
+        actual_group(lines[1]).map(|(_, _, rows)| rows),
+        Some(2),
+        "{plan}"
+    );
     assert!(
         lines[lines.len() - 3].starts_with("Planning Time: "),
         "{plan}"
@@ -2929,11 +2928,12 @@ fn explain_analyze_runs_the_statement_and_reports_rows_and_times() {
         &mut session,
         "EXPLAIN (ANALYZE, COSTS OFF) DELETE FROM t WHERE id = 3",
     );
-    assert!(
+    assert_eq!(
         plan.lines()
             .nth(1)
-            .unwrap()
-            .ends_with("(actual rows=1 loops=1)"),
+            .and_then(actual_group)
+            .map(|(_, _, rows)| rows),
+        Some(1),
         "{plan}"
     );
     assert_eq!(
@@ -2943,6 +2943,92 @@ fn explain_analyze_runs_the_statement_and_reports_rows_and_times() {
     assert_eq!(
         fails(&mut session, "EXPLAIN (FORMAT JSON) SELECT 1").state(),
         crate::SqlState::FEATURE_NOT_SUPPORTED
+    );
+}
+
+fn actual_group(line: &str) -> Option<(f64, f64, u64)> {
+    let group = line
+        .split_once(" (actual time=")?
+        .1
+        .strip_suffix(" loops=1)")?;
+    let (times, rows) = group.split_once(" rows=")?;
+    let (first, last) = times.split_once("..")?;
+    let three_decimals = |time: &str| {
+        time.split_once('.')
+            .is_some_and(|(_, decimals)| decimals.len() == 3)
+    };
+    if !three_decimals(first) || !three_decimals(last) {
+        return None;
+    }
+    let (first, last) = (first.parse::<f64>().ok()?, last.parse::<f64>().ok()?);
+    (first <= last).then_some((first, last, rows.parse().ok()?))
+}
+
+#[test]
+fn explain_analyze_times_the_scan_sort_and_limit_it_measures() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(
+        &mut session,
+        "CREATE TABLE t (id integer PRIMARY KEY, n integer)",
+    )
+    .unwrap();
+    run(&mut session, "INSERT INTO t VALUES (1, 1), (2, 2), (3, 3)").unwrap();
+    let plan = last(
+        &mut session,
+        "EXPLAIN ANALYZE SELECT * FROM t ORDER BY n DESC LIMIT 1",
+    );
+    let lines: Vec<&str> = plan.lines().collect();
+    assert!(lines[1].starts_with("Limit (actual time="), "{plan}");
+    assert!(lines[2].starts_with("  ->  Sort (actual time="), "{plan}");
+    assert!(
+        lines[3].starts_with("        ->  Seq Scan on t (actual time="),
+        "{plan}"
+    );
+    let measured: Vec<(f64, f64, u64)> = lines[1..4]
+        .iter()
+        .map(|line| actual_group(line).unwrap_or_else(|| panic!("{line} in {plan}")))
+        .collect();
+    let rows: Vec<u64> = measured.iter().map(|(_, _, rows)| *rows).collect();
+    assert_eq!(rows, [1, 1, 3], "{plan}");
+    assert!(
+        measured.windows(2).all(|pair| pair[0].1 >= pair[1].1),
+        "a step ends no earlier than the steps under it: {plan}"
+    );
+    let execution: f64 = lines[lines.len() - 2]
+        .strip_prefix("Execution Time: ")
+        .and_then(|time| time.strip_suffix(" ms"))
+        .and_then(|time| time.parse().ok())
+        .unwrap_or_else(|| panic!("{plan}"));
+    assert!(measured[0].1 <= execution, "{plan}");
+    let plan = last(&mut session, "EXPLAIN ANALYZE SELECT * FROM t LIMIT 0");
+    let lines: Vec<&str> = plan.lines().collect();
+    assert_eq!(
+        actual_group(lines[1]).map(|(_, _, rows)| rows),
+        Some(0),
+        "{plan}"
+    );
+    assert_eq!(lines[2], "  ->  Seq Scan on t (never executed)", "{plan}");
+    run(
+        &mut session,
+        "CREATE TABLE u (id integer PRIMARY KEY, t_id integer)",
+    )
+    .unwrap();
+    run(
+        &mut session,
+        "INSERT INTO u VALUES (10, 1), (11, 3), (12, 9)",
+    )
+    .unwrap();
+    let plan = last(
+        &mut session,
+        "EXPLAIN ANALYZE SELECT * FROM u JOIN t ON t.id = u.t_id",
+    );
+    let lines: Vec<&str> = plan.lines().collect();
+    assert!(lines[1].contains(" (actual time="), "{plan}");
+    assert_eq!(
+        actual_group(lines[1]).map(|(_, _, rows)| rows),
+        Some(2),
+        "{plan}"
     );
 }
 
@@ -3661,6 +3747,22 @@ fn oracle_keeps_a_transaction_open_until_commit_and_ddl_commits_it() {
         .map(|column| column.name)
         .collect();
     assert_eq!(names, ["Id", "ID"]);
+}
+
+#[test]
+fn an_oracle_savepoint_opens_the_transaction_it_marks() {
+    let store = MemoryStore::default();
+    let mut oracle = Session::with_dialect(&store, crate::Dialect::Oracle);
+    last(&mut oracle, "CREATE TABLE t (id NUMBER(9) PRIMARY KEY)");
+    assert!(!oracle.in_block());
+    last(&mut oracle, "SAVEPOINT first_mark");
+    assert!(oracle.in_block());
+    last(&mut oracle, "INSERT INTO t VALUES (1)");
+    last(&mut oracle, "ROLLBACK TO SAVEPOINT first_mark");
+    assert_eq!(
+        last(&mut oracle, "SELECT COUNT(*) FROM t"),
+        "COUNT(*)\n0\nSELECT 1"
+    );
 }
 
 #[test]
@@ -4719,5 +4821,41 @@ fn infinite_time_stamps_and_dates_follow_postgresql() {
             "SELECT count(*) AS n FROM moments WHERE at > '2100-01-01'"
         ),
         "1"
+    );
+}
+
+#[test]
+fn scale_min_scale_and_trim_scale_follow_postgresql() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for (sql, shown) in [
+        ("SELECT scale(8.4100)", "4"),
+        ("SELECT min_scale(8.4100)", "2"),
+        ("SELECT trim_scale(8.4100)", "8.41"),
+        ("SELECT scale(42)", "0"),
+        ("SELECT min_scale(1000::bigint)", "0"),
+        ("SELECT trim_scale(0.000)", "0"),
+        ("SELECT trim_scale('-1.2300')", "-1.23"),
+        ("SELECT scale('NaN'::numeric)", "NULL"),
+        ("SELECT min_scale('Infinity'::numeric)", "NULL"),
+        ("SELECT trim_scale('-Infinity'::numeric)", "-Infinity"),
+        ("SELECT trim_scale('NaN'::numeric)", "NaN"),
+        ("SELECT scale(NULL::numeric)", "NULL"),
+        ("SELECT pg_typeof(scale(1.5))::text", "integer"),
+        ("SELECT pg_typeof(trim_scale(1.50))::text", "numeric"),
+    ] {
+        assert_eq!(one_value(&mut session, sql), shown, "{sql}");
+    }
+    last(
+        &mut session,
+        "CREATE TABLE prices (amount numeric(10, 4)); INSERT INTO prices VALUES (2.5), (3.1250)",
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT scale(amount) AS s, min_scale(amount) AS m, trim_scale(amount) AS t \
+             FROM prices ORDER BY amount"
+        ),
+        "s|m|t\n4|1|2.5\n4|3|3.125\nSELECT 2"
     );
 }

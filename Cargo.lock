@@ -58,6 +58,7 @@ version = "0.2.0"
 dependencies = [
  "eggdb-crypto",
  "eggdb-keyspace",
+ "eggdb-platform",
  "eggdb-queues",
 ]
 
@@ -102,6 +103,7 @@ dependencies = [
  "eggdb-crypto",
  "eggdb-graph",
  "eggdb-keyspace",
+ "eggdb-platform",
 ]
 
 [[package]]
@@ -208,12 +210,16 @@ dependencies = [
 [[package]]
 name = "eggdb-http"
 version = "0.2.0"
+dependencies = [
+ "eggdb-platform",
+]
 
 [[package]]
 name = "eggdb-kafka"
 version = "0.2.0"
 dependencies = [
  "eggdb-keyspace",
+ "eggdb-platform",
 ]
 
 [[package]]
@@ -260,6 +266,7 @@ version = "0.2.0"
 dependencies = [
  "eggdb-crypto",
  "eggdb-keyspace",
+ "eggdb-platform",
 ]
 
 [[package]]
@@ -277,6 +284,7 @@ name = "eggdb-nats"
 version = "0.2.0"
 dependencies = [
  "eggdb-crypto",
+ "eggdb-platform",
  "eggdb-sql",
 ]
 
@@ -389,6 +397,7 @@ version = "0.2.0"
 dependencies = [
  "eggdb-crypto",
  "eggdb-keyspace",
+ "eggdb-platform",
  "eggdb-queues",
 ]
 

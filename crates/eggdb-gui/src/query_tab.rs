@@ -1,24 +1,32 @@
 use std::ops::Range;
 use std::time::Duration;
 
+use eggdb::sql::TransactionStatus;
 use eggdb_platform::window::{Key, KeyPress};
 
-use crate::connection::{ResultTable, StatementFailure};
+use crate::connection::{ResultTable, SessionId, StatementFailure};
 use crate::dialect::QueryDialect;
 use crate::editor::{self, Editor};
-use crate::grid::{GridAnswer, ResultGrid, cell_text, column_widths};
+use crate::grid::{GridAnswer, GridMenuItem, ResultGrid, cell_text, column_widths};
+use crate::grid_menu::{GridMenu, MenuAnswer};
+use crate::key_scan::KeySpaceScan;
 use crate::plan_view::{Plan, PlanAnswer, PlanView, explain_statements};
 use crate::statements::{source_table, statement_at, statements};
 use crate::status_line;
+use crate::value_view::{ValueAnswer, ValueView};
 
 const FIX_LABEL_CHARACTERS: usize = 40;
 const CANCELLED: &str = "57014";
-const TEXT_ADVANCE: f32 = 8.0;
 
 /// The rows the results body shows at the golden frame's size, for paging keys.
 pub const ROWS_IN_VIEW: usize = 13;
 /// What the status bar says when a run key is pressed while a statement runs.
 pub const STILL_RUNNING: &str = "Running… press Esc to stop";
+/// The status bar's item while the tab's transaction is open.
+pub const TRANSACTION_OPEN: &str = "Transaction open";
+/// The status bar's item while the tab's transaction failed.
+pub const TRANSACTION_FAILED: &str = "Transaction failed: ROLLBACK to continue";
+
 /// The plan panel's width and height at the golden frame's size, for keeping the current
 /// node in view.
 pub const PLAN_PANEL: (f32, f32) = (1020.0, 358.0);
@@ -111,6 +119,11 @@ pub struct RunRequest {
     pub explain: Option<ExplainRun>,
     /// The editor's text when the run was asked for, which `starts` are offsets into.
     pub source_text: String,
+    /// The tab's kept session the statements run on.
+    pub session: SessionId,
+    /// For a keys tab, the key space to scan instead of running the statements
+    /// (`docs/ux/workspace.md` 10.4).
+    pub scan: Option<KeySpaceScan>,
 }
 
 /// The statement an `Explain` run explains and how its answer is read.
@@ -122,8 +135,14 @@ pub struct ExplainRun {
     pub statement: Range<usize>,
     /// The statement's text.
     pub statement_text: String,
+    /// What runs before the statements, such as `SET SHOWPLAN_ALL ON`.
+    pub before: Vec<String>,
+    /// What runs after them whatever happened, such as `SET SHOWPLAN_ALL OFF`.
+    pub after: Vec<String>,
     /// Which of the run's outcomes answers with the plan.
     pub plan_at: usize,
+    /// Which of the run's outcomes is the explained statement's own.
+    pub statement_at: usize,
     /// How many bytes were put before the statement.
     pub prefix_len: usize,
     /// Whether the run goes through [`crate::connection::Connection::run_rolled_back`], so
@@ -195,6 +214,17 @@ pub struct QueryTab {
     pub stopping: bool,
     /// The last `Explain`'s plan.
     pub plan: Option<PlanView>,
+    /// The session this tab's runs keep (`docs/ux/workspace.md` 9.2); the main window gives
+    /// every tab its own.
+    pub session: SessionId,
+    /// Where the tab's kept session stands toward transactions after its last run.
+    pub transaction: TransactionStatus,
+    /// The grid's open full-value view (`docs/ux/workspace.md` 9.3).
+    pub value_view: Option<ValueView>,
+    /// The grid's open right-click menu (`docs/ux/workspace.md` 9.4).
+    pub grid_menu: Option<GridMenu>,
+    /// The key space a keys tab scans; `None` for a query tab (`docs/ux/workspace.md` 10.4).
+    pub keys: Option<KeySpaceScan>,
 }
 
 impl QueryTab {
@@ -221,6 +251,34 @@ impl QueryTab {
             running: false,
             stopping: false,
             plan: None,
+            session: SessionId::default(),
+            transaction: TransactionStatus::Idle,
+            value_view: None,
+            grid_menu: None,
+            keys: None,
+        }
+    }
+
+    /// A keys tab on `scan`'s key space: titled `Keys in users`, its read-only editor holding
+    /// the scan's one line.
+    pub fn keys(scan: KeySpaceScan) -> Self {
+        Self {
+            keys: Some(scan.clone()),
+            ..Self::with_text(&scan.title(), &scan.statement())
+        }
+    }
+
+    /// Whether this is a keys tab, whose editor is read-only and whose dialect is fixed.
+    pub fn is_keys(&self) -> bool {
+        self.keys.is_some()
+    }
+
+    /// What the dialect pill and the status bar name: the dialect, or `Keys` in a keys tab.
+    pub fn pill_label(&self) -> &'static str {
+        if self.is_keys() {
+            "Keys"
+        } else {
+            self.dialect.label()
         }
     }
 
@@ -238,6 +296,18 @@ impl QueryTab {
     /// nothing to run.
     pub fn run_request(&self, all: bool) -> Option<RunRequest> {
         let text = self.editor.text();
+        if let Some(scan) = &self.keys {
+            return (!all).then(|| RunRequest {
+                statements: vec![text.clone()],
+                starts: vec![0],
+                dialect: self.dialect,
+                all: false,
+                explain: None,
+                source_text: text.clone(),
+                session: self.session,
+                scan: Some(scan.clone()),
+            });
+        }
         let ranges: Vec<Range<usize>> = if all {
             statements(&text, self.dialect)
         } else if let Some(selected) = self.editor.selected_bytes() {
@@ -264,13 +334,19 @@ impl QueryTab {
             all,
             explain: None,
             source_text: text,
+            session: self.session,
+            scan: None,
         })
     }
 
     /// What `Explain` (or, with `analyze`, `Explain (analyze)`) runs now: the first
-    /// statement of the selection, else the statement under the caret, as `EXPLAIN` in the
-    /// tab's dialect. The error is the `Messages` text for a dialect EggDB cannot explain in.
+    /// statement of the selection, else the statement under the caret, explained in the
+    /// tab's dialect's own form ([`explain_statements`]). The error is the `Messages` text
+    /// for what EggDB cannot explain in the dialect yet.
     pub fn explain_request(&self, analyze: bool) -> Result<Option<RunRequest>, String> {
+        if self.is_keys() {
+            return Ok(None);
+        }
         let Some(base) = self.run_request(false) else {
             return Ok(None);
         };
@@ -285,11 +361,16 @@ impl QueryTab {
             dialect: self.dialect,
             all: false,
             source_text: base.source_text.clone(),
+            session: self.session,
+            scan: None,
             explain: Some(ExplainRun {
                 analyze,
                 statement: start..start + statement.len(),
                 statement_text: statement.clone(),
+                before: explained.before,
+                after: explained.after,
                 plan_at: explained.plan_at,
+                statement_at: explained.statement_at,
                 prefix_len: explained.prefix_len,
                 rolled_back: explained.rolled_back,
             }),
@@ -321,6 +402,29 @@ impl QueryTab {
             self.menu_key(press, highlighted);
             return TabAction::None;
         }
+        if let Some(view) = &mut self.value_view {
+            return match view.key(press) {
+                ValueAnswer::Moved => TabAction::None,
+                ValueAnswer::Close => {
+                    self.value_view = None;
+                    TabAction::None
+                }
+                ValueAnswer::Copy { text, toast } => {
+                    self.notice = Some(toast.clone());
+                    TabAction::Copy { text, toast }
+                }
+            };
+        }
+        if let Some(menu) = &mut self.grid_menu {
+            return match menu.key(press) {
+                MenuAnswer::Moved => TabAction::None,
+                MenuAnswer::Close => {
+                    self.grid_menu = None;
+                    TabAction::None
+                }
+                MenuAnswer::Activate(item) => self.menu_item(item),
+            };
+        }
         let run_all = primary && press.modifiers.shift;
         match press.key {
             Key::Enter if primary => return self.run_key(run_all),
@@ -351,6 +455,7 @@ impl QueryTab {
             _ => {}
         }
         match self.focus {
+            TabFocus::Editor | TabFocus::DialectPill if self.is_keys() => TabAction::None,
             TabFocus::Editor => self.editor_key(press),
             TabFocus::DialectPill => self.pill_key(press),
             TabFocus::Grid => self.grid_key(press),
@@ -420,6 +525,7 @@ impl QueryTab {
             PlanAnswer::Moved
             | PlanAnswer::Selected
             | PlanAnswer::Cleared
+            | PlanAnswer::Tooltip
             | PlanAnswer::Ignored => {}
         }
         TabAction::None
@@ -433,8 +539,11 @@ impl QueryTab {
             Key::Home => self.dialect_menu = Some(0),
             Key::End => self.dialect_menu = Some(last),
             Key::Enter | Key::Space => {
-                self.set_dialect(QueryDialect::at(highlighted));
-                self.dialect_menu = None;
+                let picked = QueryDialect::at(highlighted);
+                if picked == self.dialect || self.dialect_switch_allowed() {
+                    self.set_dialect(picked);
+                    self.dialect_menu = None;
+                }
             }
             Key::Escape | Key::Tab => self.dialect_menu = None,
             Key::Character(letter) => {
@@ -446,10 +555,56 @@ impl QueryTab {
         }
     }
 
+    /// Whether the dialect pill may switch: not while the tab's transaction is open or
+    /// failed (`docs/ux/workspace.md` 9.2), since its session keeps the dialect it began in.
+    pub fn dialect_switch_allowed(&self) -> bool {
+        self.transaction == TransactionStatus::Idle
+    }
+
+    /// The toast the dialect menu shows when it opens while the switch is refused.
+    pub fn dialect_locked_toast(&self) -> String {
+        format!(
+            "Warning: COMMIT or ROLLBACK first; {} has a transaction open",
+            self.title
+        )
+    }
+
+    /// The tab's name for screen readers: `Query 2`, with `, running`, `, transaction open`
+    /// or `, transaction failed` while so.
+    pub fn spoken_title(&self) -> String {
+        let state = match (self.running, self.transaction) {
+            (true, _) => ", running",
+            (false, TransactionStatus::InBlock) => ", transaction open",
+            (false, TransactionStatus::Failed) => ", transaction failed",
+            (false, TransactionStatus::Idle) => "",
+        };
+        format!("{}{state}", self.title)
+    }
+
+    /// The status bar's transaction item for this tab, with whether it reads as failed.
+    pub fn transaction_item(&self) -> Option<(&'static str, bool)> {
+        match self.transaction {
+            TransactionStatus::InBlock => Some((TRANSACTION_OPEN, false)),
+            TransactionStatus::Failed => Some((TRANSACTION_FAILED, true)),
+            TransactionStatus::Idle => None,
+        }
+    }
+
+    /// Opens the dialect menu on the current dialect; while the switch is refused it says why.
+    pub fn open_dialect_menu(&mut self) {
+        if self.is_keys() {
+            return;
+        }
+        self.dialect_menu = Some(self.dialect.index());
+        if !self.dialect_switch_allowed() {
+            self.notice = Some(self.dialect_locked_toast());
+        }
+    }
+
     fn pill_key(&mut self, press: KeyPress) -> TabAction {
         match press.key {
-            Key::Space | Key::Enter => self.dialect_menu = Some(self.dialect.index()),
-            Key::Down if press.modifiers.alt => self.dialect_menu = Some(self.dialect.index()),
+            Key::Space | Key::Enter => self.open_dialect_menu(),
+            Key::Down if press.modifiers.alt => self.open_dialect_menu(),
             Key::Tab if press.modifiers.shift => self.focus(TabFocus::Grid),
             Key::Tab => self.focus(TabFocus::Editor),
             _ => {}
@@ -457,12 +612,45 @@ impl QueryTab {
         TabAction::None
     }
 
+    /// Opens the full-value view on the grid's current cell (`docs/ux/workspace.md` 9.3).
+    pub fn open_value(&mut self) {
+        self.grid_menu = None;
+        self.value_view = self
+            .grid
+            .as_ref()
+            .filter(|grid| grid.current.row < grid.rows.len())
+            .map(|grid| ValueView::open(grid, grid.current));
+    }
+
+    /// Opens the grid's right-click menu `menu`, closing the value view.
+    pub fn open_grid_menu(&mut self, menu: GridMenu) {
+        if self.grid.is_some() {
+            self.value_view = None;
+            self.grid_menu = Some(menu);
+        }
+    }
+
+    /// Closes the grid's menu and does what its `item` says.
+    pub fn menu_item(&mut self, item: GridMenuItem) -> TabAction {
+        self.grid_menu = None;
+        let Some(grid) = &mut self.grid else {
+            return TabAction::None;
+        };
+        let answer = grid.menu_item(item);
+        self.grid_answer(answer)
+    }
+
     fn grid_key(&mut self, press: KeyPress) -> TabAction {
         let Some(grid) = &mut self.grid else {
             self.focus(TabFocus::Editor);
             return TabAction::None;
         };
-        match grid.key(press, ROWS_IN_VIEW) {
+        let answer = grid.key(press, ROWS_IN_VIEW);
+        self.grid_answer(answer)
+    }
+
+    fn grid_answer(&mut self, answer: GridAnswer) -> TabAction {
+        match answer {
             GridAnswer::Copy { text, toast } => {
                 self.notice = Some(toast.clone());
                 TabAction::Copy { text, toast }
@@ -476,10 +664,26 @@ impl QueryTab {
                 TabAction::None
             }
             GridAnswer::Moved => {
-                grid.scroll_into_view(ROWS_IN_VIEW, crate::main_window::GRID_BODY_WIDTH);
+                if let Some(grid) = &mut self.grid {
+                    grid.scroll_into_view(ROWS_IN_VIEW, crate::main_window::GRID_BODY_WIDTH);
+                }
                 TabAction::None
             }
-            GridAnswer::OpenValue | GridAnswer::Ignored => TabAction::None,
+            GridAnswer::OpenValue => {
+                self.open_value();
+                TabAction::None
+            }
+            GridAnswer::OpenMenu => {
+                self.open_grid_menu(GridMenu::at_current_cell());
+                TabAction::None
+            }
+            GridAnswer::Resized => {
+                if let Some(grid) = &self.grid {
+                    self.notice = Some(grid.width_text(grid.current.column));
+                }
+                TabAction::None
+            }
+            GridAnswer::Ignored => TabAction::None,
         }
     }
 
@@ -541,6 +745,9 @@ impl QueryTab {
     /// Inserts `text` at the editor's caret, replacing the selection (`docs/ux/workspace.md`
     /// 6.3): `text` is already cleaned by [`crate::pointer::paste_text`].
     pub fn paste(&mut self, text: &str) {
+        if self.is_keys() {
+            return;
+        }
         let line = self.editor.caret().line;
         self.editor.paste(text);
         self.edited(line);
@@ -610,7 +817,10 @@ impl QueryTab {
                         }
                     }
                 }
-                Err(statement_failure) => failure = Some((statement_failure, index)),
+                Err(statement_failure) if failure.is_none() => {
+                    failure = Some((statement_failure, index));
+                }
+                Err(_) => {}
             }
         }
         match last_rows {
@@ -657,6 +867,12 @@ impl QueryTab {
             ),
             _ => status_line::tag_summary(&last_tag, elapsed),
         };
+        if let Some(scan) = &request.scan {
+            self.summary = scan.summary(shown_rows, elapsed);
+            if let Some(grid) = &mut self.grid {
+                grid.key_scan = Some(scan.clone());
+            }
+        }
     }
 
     fn finish_explain(
@@ -697,7 +913,7 @@ impl QueryTab {
             self.summary = "Error".to_owned();
             self.status_tags = "Error".to_owned();
             self.view = ResultView::Messages;
-            if index == explain.plan_at {
+            if index == explain.statement_at {
                 let mut shifted = statement_failure;
                 shifted.position = shifted
                     .position
@@ -709,6 +925,8 @@ impl QueryTab {
                     all: false,
                     explain: None,
                     source_text: source_text.to_owned(),
+                    session: self.session,
+                    scan: None,
                 };
                 self.show_error(&shifted, &original, 0);
             }
@@ -764,8 +982,7 @@ impl QueryTab {
                     .collect()
             })
             .collect();
-        let measure = |text: &str| text.chars().count() as f32 * TEXT_ADVANCE;
-        let widths = column_widths(&table.columns, &sample, &measure);
+        let widths = column_widths(&table.columns, &sample, &crate::grid::measured);
         let mut grid = ResultGrid::new(
             table.columns,
             table.kinds,
@@ -776,6 +993,11 @@ impl QueryTab {
         grid.dialect = self.dialect;
         grid.source_table = statement.and_then(|sql| source_table(sql, self.dialect));
         grid.focused = self.focus == TabFocus::Grid;
+        self.value_view = None;
+        self.grid_menu = None;
+        if let Some(earlier) = &self.grid {
+            grid.keep_widths_of(earlier);
+        }
         self.grid = Some(grid);
     }
 
@@ -1205,14 +1427,42 @@ mod tests {
         let mut oracle = QueryTab::with_text("Query 1", "SELECT 1 FROM dual");
         oracle.set_dialect(QueryDialect::Oracle);
         assert_eq!(
-            oracle.key(press(Key::Character('e'), false, true)),
+            oracle.key(press(Key::Character('E'), true, true)),
             TabAction::None
         );
         assert_eq!(oracle.view, ResultView::Messages);
         assert!(
-            oracle.messages[0].starts_with("not_supported: "),
+            oracle.messages[0].starts_with("not_supported: cannot explain (analyze) in Oracle's"),
             "{:?}",
             oracle.messages
+        );
+        let TabAction::Run(request) = oracle.key(press(Key::Character('e'), false, true)) else {
+            panic!("Ctrl+E explains in Oracle's dialect");
+        };
+        assert_eq!(
+            request.statements,
+            [
+                "EXPLAIN PLAN FOR SELECT 1 FROM dual",
+                "SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)"
+            ]
+        );
+        let explain = request.explain.clone().expect("an explain run");
+        assert!(explain.rolled_back);
+        assert_eq!((explain.statement_at, explain.plan_at), (1, 2));
+        let mut sqlserver = QueryTab::with_text("Query 1", "SELECT 1");
+        sqlserver.set_dialect(QueryDialect::SqlServer);
+        let TabAction::Run(request) = sqlserver.key(press(Key::Character('e'), false, true)) else {
+            panic!("Ctrl+E explains in SQL Server's dialect");
+        };
+        let explain = request.explain.clone().expect("an explain run");
+        assert_eq!(request.statements, ["SELECT 1"]);
+        assert_eq!(
+            (explain.before, explain.after, explain.rolled_back),
+            (
+                vec!["SET SHOWPLAN_ALL ON".to_owned()],
+                vec!["SET SHOWPLAN_ALL OFF".to_owned()],
+                false
+            )
         );
     }
 

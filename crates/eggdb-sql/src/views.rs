@@ -275,6 +275,7 @@ pub(crate) fn create_view(
         expands_wildcard: selects_wildcard(&create.query),
         has_column_list: !create.columns.is_empty(),
         check_option: create.check_option,
+        columns_narrowed: false,
     };
     let bytes = view.encode();
     if ViewDefinition::decode(&internal, &bytes).is_err() {
@@ -378,7 +379,7 @@ fn view_columns(
         };
         columns.push(ViewColumn {
             name,
-            sql_type: column.sql_type,
+            sql_type: column.sql_type.filter(|sql_type| !sql_type.is_dynamic()),
             source,
         });
     }

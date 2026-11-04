@@ -14,13 +14,17 @@ pub(super) const MAX_QUERIES: usize = 1024;
 #[derive(Default)]
 pub(super) struct QueryTail {
     pub(super) order_by: Vec<OrderItem>,
+    pub(super) siblings: Vec<OrderItem>,
     pub(super) limit: Option<Expr>,
     pub(super) offset: Option<Expr>,
 }
 
 impl QueryTail {
     fn is_empty(&self) -> bool {
-        self.order_by.is_empty() && self.limit.is_none() && self.offset.is_none()
+        self.order_by.is_empty()
+            && self.siblings.is_empty()
+            && self.limit.is_none()
+            && self.offset.is_none()
     }
 }
 
@@ -202,6 +206,9 @@ impl Parser<'_> {
                 .with_sqlserver_code(10741)
                 .at(top.position));
             }
+            if tail.order_by.is_empty() && super::sqlserver::top_has_ties(&top) {
+                return Err(super::sqlserver::ties_without_order_by(top.position));
+            }
             tail.limit = Some(top);
         }
         let (body, tail) = match body {
@@ -224,11 +231,19 @@ impl Parser<'_> {
                         crate::window::resolve_references(&mut item.expr, windows)?;
                     }
                 }
+                if self.oracle() {
+                    super::hierarchy::apply_ordering(&mut select, tail.siblings)?;
+                }
                 select.limit = tail.limit;
                 select.offset = tail.offset;
                 (SetExpr::Select(select), QueryTail::default())
             }
-            body => (body, tail),
+            body => {
+                if let Some(item) = tail.siblings.first() {
+                    return Err(super::hierarchy::siblings_not_allowed(item.expr.position));
+                }
+                (body, tail)
+            }
         };
         Ok(Query {
             with,
@@ -342,7 +357,7 @@ impl Parser<'_> {
             let position = self.position();
             self.at += 1;
             let all = self.set_quantifier(operator)?;
-            let right = self.set_term()?;
+            let right = self.later_operand(Self::set_term)?;
             left = self.set_operation(operator, all, left, right, position)?;
         }
         Ok(left)
@@ -354,10 +369,20 @@ impl Parser<'_> {
             let position = self.position();
             self.at += 1;
             let all = self.set_quantifier(operator)?;
-            let right = self.set_operand()?;
+            let right = self.later_operand(Self::set_operand)?;
             left = self.set_operation(operator, all, left, right, position)?;
         }
         Ok(left)
+    }
+
+    fn later_operand(
+        &mut self,
+        parse: impl FnOnce(&mut Self) -> SqlResult<SetExpr>,
+    ) -> SqlResult<SetExpr> {
+        let outer = std::mem::replace(&mut self.later_set_operand, true);
+        let parsed = parse(self);
+        self.later_set_operand = outer;
+        parsed
     }
 
     fn set_quantifier(&mut self, operator: SetOperator) -> SqlResult<bool> {
@@ -475,9 +500,15 @@ impl Parser<'_> {
 
     pub(super) fn query_tail(&mut self) -> SqlResult<QueryTail> {
         let mut order_by = Vec::new();
+        let mut siblings = Vec::new();
         if self.take_word("order") {
+            let in_siblings = self.oracle() && self.take_word("siblings");
             self.expect_word("by")?;
-            order_by = self.order_items()?;
+            if in_siblings {
+                siblings = self.order_items()?;
+            } else {
+                order_by = self.order_items()?;
+            }
         }
         let mut limit = None;
         let mut offset = None;
@@ -544,6 +575,14 @@ impl Parser<'_> {
                     }
                 }
                 let _ = self.take_word("rows") || self.take_word("row");
+            } else if self.postgresql() && self.is_word("fetch") {
+                if limit.is_some() {
+                    return Err(SqlError::syntax(
+                        "multiple LIMIT clauses not allowed",
+                        self.position(),
+                    ));
+                }
+                limit = Some(self.postgresql_fetch(!order_by.is_empty())?);
             } else if self.is_word("fetch") {
                 return Err(self.not_supported("FETCH FIRST"));
             } else if self.is_word("for")
@@ -570,6 +609,7 @@ impl Parser<'_> {
         }
         let tail = QueryTail {
             order_by,
+            siblings,
             limit,
             offset,
         };
@@ -631,6 +671,7 @@ impl Parser<'_> {
                 column_names,
                 dialect: self.dialect,
                 lateral: false,
+                hierarchy: None,
             })),
             generated: None,
         })

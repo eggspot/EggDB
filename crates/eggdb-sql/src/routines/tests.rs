@@ -308,3 +308,21 @@ fn hostile_routine_statements_return_errors() {
         ],
     );
 }
+
+#[test]
+fn set_from_current_is_written_into_the_definition_as_the_value_at_create() {
+    let text = "CREATE FUNCTION f() RETURNS integer LANGUAGE sql \
+                SET search_path FROM CURRENT AS 'SELECT 1'";
+    let definition = parse_definition(text, Dialect::PostgreSql).unwrap();
+    assert_eq!(
+        definition.settings,
+        vec![("search_path".to_owned(), "\"$user\", public".to_owned())]
+    );
+    assert_eq!(
+        definition.text,
+        "CREATE FUNCTION f() RETURNS integer LANGUAGE sql \
+         SET search_path TO '\"$user\", public' AS 'SELECT 1'"
+    );
+    let reparsed = parse_definition(&definition.text, Dialect::PostgreSql).unwrap();
+    assert_eq!(reparsed.settings, definition.settings);
+}

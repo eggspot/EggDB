@@ -101,23 +101,62 @@ pub(crate) fn enter(signal: &CancelSignal) -> EnteredSignal {
     EnteredSignal { previous }
 }
 
+fn cancelled_by_user() -> SqlError {
+    SqlError::new(
+        SqlState::QUERY_CANCELED,
+        "canceling statement due to user request",
+    )
+}
+
 pub(crate) fn check() -> SqlResult<()> {
-    let cancelled = ACTIVE.with(|active| {
+    let cancelled_now = ACTIVE.with(|active| {
         active
             .borrow()
             .as_ref()
             .is_some_and(|raised| raised.load(Ordering::Relaxed))
     });
-    if cancelled {
-        return Err(SqlError::new(
-            SqlState::QUERY_CANCELED,
-            "canceling statement due to user request",
-        ));
+    if cancelled_now {
+        return Err(cancelled_by_user());
     }
     if past_deadline(false) {
         return Err(timed_out());
     }
     Ok(())
+}
+
+pub(crate) struct Watch {
+    signal: Option<Arc<AtomicBool>>,
+    deadline: Option<Instant>,
+    checks: Cell<u32>,
+}
+
+pub(crate) fn watch() -> Watch {
+    Watch {
+        signal: ACTIVE.with(|active| active.borrow().clone()),
+        deadline: DEADLINE.with(Cell::get),
+        checks: Cell::new(0),
+    }
+}
+
+impl Watch {
+    pub(crate) fn check(&self) -> SqlResult<()> {
+        if self
+            .signal
+            .as_ref()
+            .is_some_and(|raised| raised.load(Ordering::Relaxed))
+        {
+            return Err(cancelled_by_user());
+        }
+        let Some(deadline) = self.deadline else {
+            return Ok(());
+        };
+        let count = self.checks.get().wrapping_add(1);
+        self.checks.set(count);
+        if count.is_multiple_of(CLOCK_EVERY) && Instant::now() >= deadline {
+            return Err(timed_out());
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn sleep(seconds: f64) -> SqlResult<()> {
@@ -146,7 +185,7 @@ pub(crate) fn sleep(seconds: f64) -> SqlResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CancelSignal, check, enter, enter_deadline, sleep};
+    use super::{CLOCK_EVERY, CancelSignal, check, enter, enter_deadline, sleep, watch};
     use crate::error::SqlState;
     use std::time::{Duration, Instant};
 
@@ -164,6 +203,43 @@ mod tests {
         signal.clear();
         let _entered = enter(&signal);
         assert!(check().is_ok());
+    }
+
+    #[test]
+    fn a_watch_taken_inside_a_statement_stops_at_its_signal_and_its_deadline() {
+        let signal = CancelSignal::default();
+        let unwatched = watch();
+        let entered = enter(&signal);
+        let watched = watch();
+        assert!(watched.check().is_ok());
+        signal.cancel();
+        assert_eq!(
+            watched.check().unwrap_err().state(),
+            SqlState::QUERY_CANCELED
+        );
+        assert!(unwatched.check().is_ok());
+        drop(entered);
+        assert_eq!(
+            watched.check().unwrap_err().state(),
+            SqlState::QUERY_CANCELED
+        );
+        signal.clear();
+        assert!(watched.check().is_ok());
+        let _deadline = enter_deadline(Some(Duration::ZERO), None);
+        let timed = watch();
+        let mut stopped_at = None;
+        for row in 1..=CLOCK_EVERY {
+            if timed.check().is_err() {
+                stopped_at = Some(row);
+                break;
+            }
+        }
+        assert_eq!(stopped_at, Some(CLOCK_EVERY));
+        let _none = enter_deadline(None, None);
+        let free = watch();
+        for _ in 0..=CLOCK_EVERY {
+            assert!(free.check().is_ok());
+        }
     }
 
     #[test]

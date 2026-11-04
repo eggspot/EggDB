@@ -13,7 +13,7 @@ use eggdb_gui::grid::Cell;
 use eggdb_gui::main_window::{
     self, Faces, MainWindow, NODE_EDITOR, NODE_GRID, NODE_RUN_ALL, accessibility_tree,
 };
-use eggdb_gui::pointer::CaretLook;
+use eggdb_gui::pointer::{CaretLook, FADE_FRAME_INTERVAL, FILL_FADE, Fill, FillMix};
 use eggdb_gui::workspace::{Screen, Workspace};
 use eggdb_gui::{BoxFace, Canvas, Theme, ThemeKind, Typeface};
 use eggdb_platform::window::{AccessRect, AccessRole, Key, KeyPress, Modifiers, PointerButton};
@@ -145,6 +145,54 @@ fn hovering_and_pressing_run_all_fill_it_and_a_release_outside_runs_nothing() {
         Some(theme.bg0),
         "the fill goes with the pointer"
     );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn a_hover_fill_fades_in_over_80_ms_and_changes_at_once_under_reduced_motion() {
+    let directory = scratch("fade");
+    let mut workspace = opened(&directory);
+    let run_all = bounds_of(&mut workspace, NODE_RUN_ALL);
+    let centre = (
+        run_all.x + run_all.width / 2.0,
+        run_all.y + run_all.height / 2.0,
+    );
+    let padding = (run_all.x + 4.0, centre.1);
+    let start = Instant::now();
+    workspace.tick(start);
+    assert!(workspace.pointer_moved(centre.0, centre.1, BOX_FACES, WINDOW));
+    workspace.tick(start);
+    let (canvas, theme) = frame(&mut workspace);
+    assert_eq!(
+        pixel(&canvas, padding.0, padding.1),
+        Some(theme.bg0),
+        "the first frame still draws the rest fill"
+    );
+    assert_eq!(workspace.until_fade_changes(), Some(FADE_FRAME_INTERVAL));
+    assert!(workspace.tick(start + FILL_FADE / 2));
+    let (canvas, _) = frame(&mut workspace);
+    let halfway = FillMix::of(Fill::Rest)
+        .toward(Fill::Hovered, 500)
+        .blend(theme.bg0, theme.bg2, theme.bg2);
+    assert_eq!(pixel(&canvas, padding.0, padding.1), Some(halfway));
+    assert!(workspace.tick(start + FILL_FADE));
+    let (canvas, _) = frame(&mut workspace);
+    assert_eq!(pixel(&canvas, padding.0, padding.1), Some(theme.bg2));
+    assert_eq!(
+        workspace.until_fade_changes(),
+        None,
+        "no frames once it ends"
+    );
+    workspace.set_reduced_motion(true);
+    workspace.pointer_moved(700.0, 600.0, BOX_FACES, WINDOW);
+    workspace.tick(start + FILL_FADE * 2);
+    let (canvas, _) = frame(&mut workspace);
+    assert_eq!(
+        pixel(&canvas, padding.0, padding.1),
+        Some(theme.bg0),
+        "reduced motion changes the fill at once"
+    );
+    assert_eq!(workspace.until_fade_changes(), None);
     let _ = std::fs::remove_dir_all(&directory);
 }
 

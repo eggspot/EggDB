@@ -127,7 +127,12 @@ What it reads, on top of the statements of "What runs today":
   `lower_case_table_names` is 1), `"..."` strings, backslash escapes in strings, `#` and `-- `
   comments, `/*! ... */` run as SQL, `?` placeholders, `X'0102'` hex literals.
 - **Statements**: `LIMIT offset, count`, `AUTO_INCREMENT`, `INSERT IGNORE`, `REPLACE`,
-  `INSERT ... ON DUPLICATE KEY UPDATE` with `VALUES(col)`, `SHOW TABLES`, `SHOW DATABASES`,
+  `INSERT ... ON DUPLICATE KEY UPDATE` with `VALUES(col)`, multiple-table `UPDATE t1 [JOIN t2
+  ...] | t1, t2 SET t1.a = ..., t2.b = ... [WHERE ...]` and `DELETE t1[.*], t2 FROM ... | DELETE
+  FROM t1, t2 USING ...` (each listed table is changed or deleted once per row that joins, an
+  unqualified `SET` column is the one table's that has it or error 1052, an unknown table is
+  1109; D297), `GROUP BY ... WITH ROLLUP` and `GROUPING(expr, ...)` (D298), `SHOW TABLES`,
+  `SHOW DATABASES`,
   `DESCRIBE`/`SHOW COLUMNS`, `SHOW CREATE TABLE`, `SHOW VARIABLES [LIKE ...]`, `SHOW WARNINGS`,
   `SHOW COUNT(*) WARNINGS`, `USE`, `SET` of session and user variables (`SET NAMES`, `SET
   autocommit`, `SET @x = ...`), `START TRANSACTION`, `LOCK TABLES`/`UNLOCK TABLES` (accepted),
@@ -206,17 +211,25 @@ What it reads, on top of the statements of "What runs today":
   `:name`, `@name` and `$name` numbered as SQLite numbers them; a parameter without a value is
   NULL.
 - **Type affinity** from the declared type name, by datatype3.html's rules in order: a name
-  containing `INT` is an integer (`bigint`, 64 bits), `CHAR`, `CLOB` or `TEXT` text (lengths
-  such as `VARCHAR(10)` are not enforced, as in SQLite), `REAL`, `FLOA` or `DOUB` a real
-  (`double precision`), no type at all text; the rest (`NUMERIC` affinity) is a real, except
-  `BOOLEAN` (an integer) and names containing `DATE` or `TIME` (text, as SQLite's date
-  functions keep them: `DATE`, `DATETIME` and `TIMESTAMP` columns hold ISO 8601 text, as an
-  SQLite application writes it). `DECIMAL(p,s)` is a real, by the same rule. A column declared
-  `BLOB` holds every storage class as it is given, row by row (an integer, a real, text or a
-  blob, D153): `typeof()` tells which, `quote()` writes a blob as `X'0A0B'`, `length()` counts a
-  blob's bytes, and values of different classes compare and sort as SQLite orders them (numbers,
-  then text, then blobs). Blob literals are `x'0A0B'` (an even number of hexadecimal digits;
-  anything else is `unrecognized token`).
+  containing `INT` is an integer (`bigint`, 64 bits); `CHAR`, `CLOB` or `TEXT` gives `TEXT`
+  affinity (lengths such as `VARCHAR(10)` are not enforced, as in SQLite); `BLOB` or no type at
+  all gives `BLOB` affinity; `REAL`, `FLOA` or `DOUB` gives `REAL` affinity; the rest (`NUMERIC`,
+  `DECIMAL(p,s)`, `BOOLEAN`, `DATE`, `DATETIME`) gives `NUMERIC` affinity. A column of any
+  affinity but `INTEGER` holds every storage class, row by row, as SQLite's datatype page
+  says (D153, D305): `TEXT` stores a number as its text (`5` becomes `'5'`, `2.0` `'2.0'`);
+  `NUMERIC` stores text that is a well-formed integer or real as a number, preferring an integer
+  (`'3.0e+5'` becomes `300000`; `'0x10'`, `'abc'` and `'2024-02-29'` stay text) and a real that
+  is a whole number as an integer; `REAL` does the same and then makes every number a real (`7`
+  becomes `7.0`); `BLOB` keeps every value as given. `typeof()` tells which class a value has,
+  `quote()` writes a blob as `X'0A0B'`, `length()` counts a blob's bytes, and values of different
+  classes compare and sort as SQLite orders them (numbers, then text, then blobs; an integer and
+  a real compare by their exact values). A string compared with a column of `NUMERIC` or `REAL`
+  affinity takes that affinity first, so `amount = '12'` finds the integer `12`. These columns
+  can be keys, `UNIQUE` and indexed (D305): `3` and `3.0` are the same key, and a range such as
+  `k > 2.5` takes the larger numbers, then all text, then all blobs, as SQLite's comparison
+  does. `CAST` keeps its static types (`CAST(x AS TEXT)` is text, `AS REAL` a real). Blob
+  literals are `x'0A0B'` (an even number of hexadecimal digits; anything else is `unrecognized
+  token`).
 - **Row ids**: a column declared exactly `INTEGER PRIMARY KEY` (on the column or as the table's
   one-column key) is the row id: a NULL or missing value takes one more than the largest in
   the table; `AUTOINCREMENT` is accepted on it (and refused elsewhere, as in SQLite);
@@ -225,7 +238,8 @@ What it reads, on top of the statements of "What runs today":
   `REFERENCES` and `FOREIGN KEY` accepted and not enforced (SQLite's default, `PRAGMA
   foreign_keys` off), `ON CONFLICT ABORT|FAIL` in constraints; `INSERT OR
   REPLACE|IGNORE|ABORT|FAIL|ROLLBACK`, `REPLACE INTO`, upserts (`ON CONFLICT [(cols)] DO
-  NOTHING` and `DO UPDATE SET ... excluded.col`), `RETURNING`; `LIMIT n OFFSET m`, `LIMIT m, n`
+  NOTHING` and `DO UPDATE SET ... excluded.col`), `RETURNING`, `UPDATE ... SET ... FROM ...`
+  as in PostgreSQL (D297); `LIMIT n OFFSET m`, `LIMIT m, n`
   and a negative `LIMIT` for no limit; `BEGIN [DEFERRED|IMMEDIATE|EXCLUSIVE] [TRANSACTION]`,
   `COMMIT`, `END`, `ROLLBACK`, with SQLite's errors for a `BEGIN` inside a transaction and a
   `COMMIT` or `ROLLBACK` outside one; a failing statement inside a transaction leaves it open,
@@ -256,7 +270,10 @@ What it reads, on top of the statements of "What runs today":
   INTEGER PRIMARY KEY (rowid=?)`, `USE TEMP B-TREE FOR ORDER BY`). A duplicate is `UNIQUE
   constraint failed: t.a` with `SQLITE_CONSTRAINT_UNIQUE` (2067).
 - **Expressions**: `||`, `==`, `IS`/`IS NOT` between any two values, `LIKE` ignoring ASCII
-  case, `GLOB` with `*` and `?`, integers as conditions (`WHERE active`, `NOT 0`), `TRUE` and
+  case, `LIKE ... ESCAPE 'c'` and `like(pattern, text, escape)`, `GLOB` with `*`, `?` and
+  character classes (`[abc]`, `[a-z]`, `[^0-9]`, `]` first and `-` first or last as themselves,
+  an unclosed `[` matching nothing) and with a pattern from a column or a subquery, `NATURAL
+  [LEFT | RIGHT | FULL] JOIN`, integers as conditions (`WHERE active`, `NOT 0`), `TRUE` and
   `FALSE` as 1 and 0, comparisons giving 1 and 0, division and remainder by zero giving NULL,
   and result columns named by their text (`SELECT count(*)` gives a column `count(*)`).
 - **Compound selects and subqueries**: `UNION [ALL]`, `INTERSECT` and `EXCEPT`, all of one
@@ -325,7 +342,9 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   that sort equal to the last one, D149), `ROWNUM` in
   `WHERE` with Oracle's meaning (`ROWNUM <= n` keeps the first n rows found, before `GROUP BY`
   and `ORDER BY`; `ROWNUM = 1`; `ROWNUM > 1` and `ROWNUM = 2` find nothing), `CASE`, joins,
-  `GROUP BY` and `HAVING`, `LIKE` (case-sensitive), `!=`, `^=` and `~=` for `<>`, `q'[...]'`
+  `GROUP BY` and `HAVING` (with `ROLLUP`, `CUBE`, `GROUPING SETS`, `GROUPING`, `GROUPING_ID`
+  and `GROUP_ID()`, which numbers the repeats of a grouping set from 0, D298), `LIKE`
+  (case-sensitive), `!=`, `^=` and `~=` for `<>`, `q'[...]'`
   and `N'...'` literals, `:name` and `:1` bind variables, and `/` that divides exactly where
   it can (`7/2` is `3.5`).
 - **Types**: `VARCHAR2(n [BYTE|CHAR])`, `NVARCHAR2(n)` and `VARCHAR(n)` as `varchar(n)`
@@ -454,6 +473,26 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   THEN INSERT [(columns)] VALUES (...) [WHERE ...]`, in either order; `ORA-30926` when a target
   row matches more than one source row, `ORA-38104` for an updated `ON` column, `ORA-00918`
   for an ambiguous name; the result is `MERGE n`.
+- **Hierarchical queries** (D304): `[START WITH condition] CONNECT BY [NOCYCLE] condition` (in
+  either order, after `WHERE`) walks the rows of the `FROM` table, view, subquery or `DUAL` depth
+  first from the rows `START WITH` finds (every row without it), as Oracle returns them. `PRIOR
+  expr` reads the parent row in `CONNECT BY` and the select list (NULL for a root); `LEVEL` (also
+  in `CONNECT BY`: `SELECT LEVEL FROM dual CONNECT BY LEVEL <= 10`), `CONNECT_BY_ROOT expr`,
+  `CONNECT_BY_ISLEAF`, `CONNECT_BY_ISCYCLE` (`ORA-30930` without `NOCYCLE`) and
+  `SYS_CONNECT_BY_PATH(expr, 'separator')` (a constant separator, `ORA-30003`; a value holding it
+  is `ORA-30004`; a path longer than 4,000 bytes is `ORA-01489`) can be selected, filtered, grouped and sorted. `WHERE` filters after the walk,
+  so a filtered-out row's descendants stay. `ORDER SIBLINGS BY` sorts the rows under each parent
+  (and the roots) and keeps the hierarchy; elsewhere it is `ORA-30929`. A loop (a child with the
+  `PRIOR` values of one of its ancestors) is `ORA-01436`; with `NOCYCLE` the walk stops there and
+  marks the row with `CONNECT_BY_ISCYCLE = 1`. The pseudo-columns without `CONNECT BY` are
+  `ORA-01788`. `CONNECT BY` over a join, `PRIOR` beside a subquery and `ORDER SIBLINGS BY` a
+  pseudo-column answer `0A000` for now.
+- **Multitable inserts** (D304): `INSERT ALL INTO t [(columns)] [VALUES (...)] [INTO ...]
+  subquery`, `INSERT ALL WHEN condition THEN INTO ... [WHEN ...] [ELSE INTO ...] subquery` (every
+  `WHEN` that holds) and `INSERT FIRST WHEN ... THEN INTO ... [ELSE INTO ...] subquery` (the first
+  that holds). The subquery runs once; `WHEN` and `VALUES` read its columns, `VALUES` takes
+  `DEFAULT`, and an `INTO` without `VALUES` takes the subquery's columns in order. It is one
+  statement: a failing target undoes them all, and the result counts every row inserted.
 - **Indexes**: `CREATE [UNIQUE] INDEX name ON t (...)` with `TABLESPACE`, `ONLINE`, `LOGGING`
   and `COMPUTE STATISTICS` accepted, `DROP INDEX name`, `UNIQUE` columns and `CONSTRAINT name
   UNIQUE (...)` (an unnamed one is `SYS_C` and seven digits), `USER_INDEXES`/`ALL_INDEXES`
@@ -500,7 +539,10 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   other dialects. `LISTAGG([ALL | DISTINCT] expr [, delimiter] [ON OVERFLOW ERROR | TRUNCATE
   ['indicator'] [WITH | WITHOUT COUNT]]) [WITHIN GROUP (ORDER BY ...)]` joins a group's values
   (NULLs left out, NULL for none); past 32,767 bytes it is `ORA-01489`, or truncated at the last
-  whole value with the indicator (`...`) and the count of values left out (D149).
+  whole value with the indicator (`...`) and the count of values left out (D149). The analytic
+  form `LISTAGG(...) [WITHIN GROUP (ORDER BY ...)] OVER ([PARTITION BY ...])` gives each row its
+  partition's values joined in `WITHIN GROUP` order; `ORDER BY` inside `OVER` is `ORA-30487` and
+  `DISTINCT` there answers `0A000` for now (D300).
 - **Length limit**: `LPAD`, `RPAD`, `REPLACE`, `||`, `UPPER`, `LOWER`, `INITCAP` and `TO_CHAR` refuse a result longer than
   1,000,000,000 bytes with `ORA-01489` before they build it.
 - **The data dictionary** (D134): `USER_`, `ALL_` and `DBA_` `TABLES`, `TAB_COLUMNS`,
@@ -561,7 +603,9 @@ SELECT @@VERSION
   before sending; the server reads `GO` as SQL Server does, as an ordinary word (`SELECT 1 GO`
   names its column `go`; `GO` alone is a syntax error). Scripts with `GO` for `eggdb restore`
   come with item 40.
-- `SELECT TOP n` and `TOP (expression)`; `N'...'` strings; `--` and nested `/* */` comments;
+- `SELECT TOP n` and `TOP (expression)`, with `PERCENT` (a percent of the rows the query finds,
+  rounded up; outside 0 to 100 is error 1031) and `WITH TIES` (the rows after the last one that
+  sort equal to it; without `ORDER BY` it is error 1062) (D300); `N'...'` strings; `--` and nested `/* */` comments;
   the operators `+ - * / % = <> != < > <= >= !< !>`.
 - **Types** (item 39, D123), written bare or bracketed in any case (`[decimal](18, 2)`, `AS
   DateTime2`), each kept as one of the engine's types, so PostgreSQL SQL reads the same columns:
@@ -622,7 +666,9 @@ SELECT @@VERSION
   `COUNT` returning `int` and `COUNT_BIG` `bigint`, `SUM` and `AVG` with SQL Server's result
   types (`int` for `tinyint`, `smallint` and `int`, `bigint`, `decimal(38, s)` and for `AVG`
   `decimal(38, max(s, 6))`, `float`; error 8115 past the type), `STRING_AGG` with `WITHIN GROUP
-  (ORDER BY ...)`. `STRING_SPLIT(text, separator [, enable_ordinal])` is a table with a `value`
+  (ORDER BY ...)`, also as a window function with `OVER ([PARTITION BY ...])` (the form Azure
+  Synapse documents; each row gets its partition's values joined in `WITHIN GROUP` order, D300).
+  `STRING_SPLIT(text, separator [, enable_ordinal])` is a table with a `value`
   column (and `ordinal`), and a one-character separator (error 214 otherwise). Dividing
   decimals gives SQL Server's precision and scale (`2 / 3.0` is `0.666666`, `10.0 / 4` is
   `2.500000000000`). `@@VERSION`, `@@SPID`, `@@SERVERNAME`, `@@TRANCOUNT`, `@@LANGUAGE`,
@@ -630,19 +676,46 @@ SELECT @@VERSION
   137, and so is an `@variable` unless the batch declares it or it is a parameter of a
   parameterized batch (`sp_executesql` and the prepared statements of SqlClient and mssql-jdbc,
   item 23b).
+- `GROUP BY ROLLUP (...)`, `CUBE (...)`, `GROUPING SETS (...)` and `()`, the older `GROUP BY a, b
+  WITH ROLLUP` and `WITH CUBE`, `GROUPING(column)` and `GROUPING_ID(column, ...)` (D298).
 - `ORDER BY ... OFFSET n ROWS [FETCH {FIRST | NEXT} m ROWS ONLY]`, `OUTPUT inserted.*` on
   `INSERT` and `UPDATE` and `OUTPUT deleted.*` on `DELETE` (columns, expressions and constants
   such as EF Core's `OUTPUT 1`), `INSERT ... [OUTPUT ...] SELECT ...`, `(VALUES (...), ...) AS
   alias (columns)` as a table, and `SELECT total = qty * price`.
-- **`MERGE`** (D138): `MERGE [INTO] target [[AS] alias] USING source [[AS] alias [(columns)]] ON
-  condition`, then `WHEN MATCHED [AND condition] THEN UPDATE SET ... | DELETE` and `WHEN NOT
-  MATCHED [BY TARGET] [AND condition] THEN INSERT [(columns)] VALUES (...)`, up to two `WHEN NOT
-  MATCHED BY SOURCE [AND condition] THEN UPDATE SET ... | DELETE` for target rows no source row
-  matches (the first of two needs `AND`, and they are one `UPDATE` and one `DELETE`, else Msg
-  10714; the source's columns are NULL there) (D291), and `OUTPUT` with `inserted.`, `deleted.`
-  and the source's columns (rows of changed rows first, then rows changed by source, then
-  inserted ones); the tag is `MERGE n`. A second `WHEN MATCHED`, `$action`, `TOP`, table hints
-  and `OUTPUT ... INTO` are 40517, and a `MERGE` without `WHEN` is Msg 10713.
+- `UPDATE target SET [alias.]column = expr, ... [OUTPUT ...] FROM table_source [WHERE ...]` and
+  `DELETE [FROM] target [OUTPUT ...] FROM table_source [WHERE ...]` (D297): the target is the
+  table in `FROM` whose alias it names, or the one reference to it there; otherwise it joins the
+  `FROM` list as one more table, as in PostgreSQL. A target row that joins several rows is
+  changed once, from one of them, as SQL Server's manual warns. `OUTPUT inserted.` (and, in a
+  `DELETE`, `deleted.`) names the target's row and the other tables' columns can be output too;
+  `deleted.` in a joined `UPDATE` is Msg 40517 for now, as in a single-table one. A column
+  qualified by another name is Msg 4104, and a target named by its table name when the `FROM`
+  lists that table more than once, each under an alias, is Msg 8154.
+- **`MERGE`** (D138): `MERGE [TOP (n) [PERCENT]] [INTO] target [[AS] alias] USING source [[AS]
+  alias [(columns)]] ON condition`, then up to two `WHEN MATCHED [AND condition] THEN UPDATE SET
+  ... | DELETE` (D303), one `WHEN NOT MATCHED [BY TARGET] [AND condition] THEN INSERT [(columns)]
+  VALUES (...)`, and up to two `WHEN NOT MATCHED BY SOURCE [AND condition] THEN UPDATE SET ... |
+  DELETE` for target rows no source row matches (the source's columns are NULL there) (D291).
+  Of two `WHEN MATCHED` or two `WHEN NOT MATCHED BY SOURCE` clauses the first needs `AND`, and
+  they are one `UPDATE` and one `DELETE`; a matched or unmatched row takes the first clause whose
+  condition holds. Anything else, and a second `WHEN NOT MATCHED`, is Msg 10714. `TOP (n)` changes
+  at most `n` rows, `TOP (n) PERCENT` that share of the rows the clauses would change, rounded up
+  (Msg 1031 past 100): the rows of `WHEN MATCHED` first, then those of `BY SOURCE`, then the
+  inserted ones, as SQL Server leaves the order unspecified. `OUTPUT` takes `inserted.`,
+  `deleted.`, the source's columns and `$action` (`INSERT`, `UPDATE` or `DELETE`, as
+  `nvarchar(10)`), in the same order, and `OUTPUT ... INTO` as below; the tag is `MERGE n`. Table
+  hints are 40517, and a `MERGE` without `WHEN` is Msg 10713.
+- **`OUTPUT ... INTO {@table_variable | table} [(columns)] [OUTPUT ...]`** on `INSERT`, `UPDATE`,
+  `DELETE` and `MERGE` (D303): the rows the `OUTPUT` list makes go into the table variable or the
+  table (a `#temporary` one too) instead of the client, and a second `OUTPUT` list after it still
+  returns rows. The statement and the rows it adds are one change: when the rows break the
+  target's key, `NOT NULL` or types, or the target is missing (Msg 208), nothing the statement did
+  is kept. A column count that does not match the target's is Msg 213.
+- **`SELECT ... INTO new_table [FROM ...]`** (D303): creates `new_table` with the query's columns
+  (their names and types; all of them nullable, without keys, defaults or identity) and fills it
+  with the query's rows; the tag is `SELECT n`. `#name` makes a temporary table. An existing name
+  is Msg 2714, a column without a name Msg 1038, and `INTO` in a later query of a `UNION`,
+  `INTERSECT` or `EXCEPT` Msg 196; in a subquery it is 40517.
 - **`OPENJSON(json [, path]) WITH (column type ['path'] [AS JSON], ...) [AS] alias`** in `FROM`
   (D138): one row per element of a JSON array (an object is one row), each column the value at
   its path (`$`, `$.key`, `$."key"`, `$[n]`, `lax`; without a path the key named as the column
@@ -1179,8 +1252,7 @@ drops it sooner); temporary functions are refused, as SQL Server refuses them.
 Not yet: a global temporary procedure (`##name`) is created like a `#name` one, visible only to
 its own session; a procedure called by its name alone as the first statement of a batch (write
 `EXEC`), `EXEC @result = dbo.scalar_function`, numbered procedures (`name;2`), CLR routines (`AS
-EXTERNAL NAME`), `SELECT INTO` in a body, and `COMMIT` or `ROLLBACK` of the caller's transaction
-inside a function.
+EXTERNAL NAME`), and `COMMIT` or `ROLLBACK` of the caller's transaction inside a function.
 
 ## SQL Server metadata for tools
 
@@ -1494,10 +1566,29 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   query and a `FROM` item (`(VALUES (1, 'a')) AS v(n, s)`): its columns are `column1`,
   `column2`, ... and each takes one type by the `UNION` rules below; rows of different lengths
   are `42601` (D128).
-- `SELECT [ALL | DISTINCT] items [FROM from_item [join ...]] [WHERE expr] [GROUP BY expr, ...] [HAVING expr] [ORDER BY expr [ASC | DESC] [NULLS FIRST | LAST], ...] [LIMIT n | ALL] [OFFSET n [ROW | ROWS]]`.
+- `SELECT [ALL | DISTINCT | DISTINCT ON (expr, ...)] items [FROM from_item [join ...]] [WHERE expr] [GROUP BY [ALL | DISTINCT] grouping_item, ...] [HAVING expr] [ORDER BY expr [ASC | DESC] [NULLS FIRST | LAST], ...] [LIMIT n | ALL] [OFFSET n [ROW | ROWS]] [FETCH {FIRST | NEXT} [n] {ROW | ROWS} {ONLY | WITH TIES}]`.
+  `FETCH FIRST n ROWS ONLY` is `LIMIT n` (no count is 1); `WITH TIES` (D300) also returns the
+  rows after the last one that sort equal to it, and needs `ORDER BY` (else `42601`); `LIMIT`
+  and `FETCH` together are `42601`.
   `ORDER BY` takes an output column's number or alias, or any expression over the tables (with
   `DISTINCT`, only expressions in the select list, else `42P10`); a `SELECT` without `FROM`
-  returns one row.
+  returns one row. `DISTINCT ON (expr, ...)` (PostgreSQL, D299) keeps the first row of each set
+  of rows equal in those expressions (NULLs equal), in `ORDER BY` order, before `LIMIT` and
+  `OFFSET`; its expressions follow `ORDER BY`'s rules (an output column's number or alias, or
+  any expression over the tables), and they must be the leftmost `ORDER BY` items in any order,
+  else `42P10` "SELECT DISTINCT ON expressions must match initial ORDER BY expressions" (a
+  column matches with or without its table's name). A constant that is not an integer is
+  `42601` "non-integer constant in DISTINCT ON". In a
+  grouped query they name output columns (another expression is `0A000`), and beside a window or
+  set-returning function in the select list they answer `0A000`. A view with `DISTINCT ON` is
+  not automatically updatable.
+- **`SELECT items INTO [TEMPORARY | TEMP | UNLOGGED] [TABLE] new_table [FROM ...]`**
+  (PostgreSQL and SQL Server, D303) creates `new_table` with the query's columns, their names
+  and types (all nullable, without keys or defaults), and fills it with the query's rows; the tag
+  is `SELECT n`. It belongs to the transaction: `ROLLBACK` removes the table. Its other spelling,
+  `CREATE TABLE ... AS`, is not accepted yet. An existing name is `42P07`, `INTO` in a later query of a `UNION`, `INTERSECT`
+  or `EXCEPT` is `42601` and in a subquery `0A000`; `UNLOGGED` makes an ordinary table. Inside
+  PL/pgSQL, `SELECT ... INTO` still assigns variables.
 - **Functions in `FROM`** (D128): `generate_series(start, stop [, step])` over `smallint`,
   `integer` and `bigint` (a step of 0 is `22023`; `numeric` and time stamps answer `0A000`) and
   `unnest(array)`, also written `pg_catalog.generate_series` and `pg_catalog.unnest`, with
@@ -1522,7 +1613,10 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   PostgreSQL. Transact-SQL's `CROSS APPLY` and `OUTER APPLY` are lateral joins too.
 - **Joins**: `a [INNER] JOIN b ON cond`, `a LEFT [OUTER] JOIN b ON cond`, `a RIGHT [OUTER] JOIN
   b ON cond`, `a FULL [OUTER] JOIN b ON cond`, `JOIN ... USING (columns)`,
-  `a CROSS JOIN b` and `FROM a, b`, chained left to right, each table with an optional alias.
+  `a NATURAL [INNER | LEFT | RIGHT | FULL] JOIN b` (D299; not in Transact-SQL, no `FULL` in
+  MySQL), `a CROSS JOIN b` and `FROM a, b`, chained left to right, each table with an optional
+  alias. A `NATURAL` join is `USING` every column name both sides show, in the left side's
+  order; with none it is a cross join, and a name the left side has twice is `42702`.
   A right join keeps every row of its right table, a full join every row of both; the rows of
   the right table that matched nothing come after the others, extended with NULLs. With
   `RIGHT JOIN ... USING`, the `USING` column is the right table's; with `FULL JOIN ... USING`
@@ -1583,6 +1677,22 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   whose whole primary key is grouped, as PostgreSQL allows. A query with an aggregate or
   `HAVING` and no `GROUP BY` returns one row, even over no rows. Groups come out in no promised
   order; use `ORDER BY`.
+- **Grouping sets** (D298): `GROUP BY ROLLUP (a, b)` groups by `(a, b)`, `(a)` and `()`; `CUBE
+  (a, b)` by every subset of its keys; `GROUPING SETS ((a), (b, c), ())` by each set listed, which
+  may itself be a `ROLLUP`, a `CUBE` or another `GROUPING SETS`; `()` is the grand total, and a
+  parenthesized list such as `ROLLUP ((a, b), c)` counts as one key. Several items multiply
+  their sets (`GROUP BY a, ROLLUP (b)` is `(a, b)` and `(a)`), `GROUP BY DISTINCT` drops repeated
+  sets and `GROUP BY ALL` is the default. In a row of one set, the keys the set leaves out are
+  NULL, and `GROUPING(a, b, ...)` tells such a NULL from a NULL in the data: one bit per argument,
+  the last argument the lowest, 1 when the key is left out of the row's set (`42803` when an
+  argument is not a grouping key). The empty set returns its row even over no rows. Every set
+  is computed in one pass over the rows; a query that only rolls up (each set is the first keys
+  of the one before) returns its rows sorted by the keys, each subtotal after its rows and the
+  total last, as PostgreSQL's sorted plan and MySQL do; other sets come out one set after the
+  other. A primary key determines its table's other columns only when every set groups by it.
+  More than 4096 sets is `54001`, a `CUBE` of more than 12 keys `54000` and `GROUPING` with
+  more than 31 arguments `54023`, as in PostgreSQL; the sets times the `GROUP BY` keys may be at
+  most 1,048,576 (`54001`, EggDB's own bound on the work per row).
 - **Aggregates**: `count(*)`, `count(expr)`, `sum`, `avg`, `min`, `max`,
   `string_agg(text, delimiter)` (also over `bytea`; a NULL delimiter joins with nothing),
   `json_agg`, `jsonb_agg`, `json_object_agg(key, value)`, `jsonb_object_agg(key, value)`,
@@ -1626,11 +1736,20 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   `WHERE`, `GROUP BY`, `HAVING`, `JOIN ... ON` or `LIMIT` they are `42P20`, nested ones are
   `42P20`, and one inside an aggregate is `42803`, as PostgreSQL reports them. MySQL, SQLite,
   Oracle and Transact-SQL take the same syntax.
-- `UPDATE name [[AS] alias] SET column = expr | DEFAULT, ... [WHERE expr] [RETURNING items]`.
-  Changing a primary key moves the row; the uniqueness check runs after every row moved, so
-  `UPDATE t SET id = id + 1` succeeds (PostgreSQL may refuse it, depending on the order it
-  visits rows).
-- `DELETE FROM name [[AS] alias] [WHERE expr] [RETURNING items]`.
+- `UPDATE name [[AS] alias] SET column = expr | DEFAULT, ... [FROM from_list] [WHERE expr]
+  [RETURNING items]`. Changing a primary key moves the row; the uniqueness check runs after every
+  row moved, so `UPDATE t SET id = id + 1` succeeds (PostgreSQL may refuse it, depending on the
+  order it visits rows).
+- `DELETE FROM name [[AS] alias] [USING from_list] [WHERE expr] [RETURNING items]`.
+- **Joined `UPDATE` and `DELETE`** (D297): `FROM` and `USING` take any `FROM` list (joins,
+  subqueries, `VALUES`, functions); `WHERE` joins it to the target, and a target row is changed
+  or deleted when at least one combination of rows matches. A target row that matches several
+  rows is changed once, from one of them, as PostgreSQL's manual says (which one is not defined).
+  `SET`, `WHERE` and `RETURNING` read the other tables' columns, `RETURNING *` returns the
+  target's columns and then theirs, and naming the target again in the list without an alias is
+  `42712`, as in PostgreSQL. Subqueries in `SET` and `RETURNING` of a joined statement, a view,
+  partitioned table or table with row-level security as its target, and `EXPLAIN` of it are
+  `0A000`.
 - `BEGIN [WORK | TRANSACTION] [READ ONLY | READ WRITE] [ISOLATION LEVEL ...]`,
   `START TRANSACTION`, `COMMIT`/`END`, `ROLLBACK`/`ABORT`. `SET SESSION CHARACTERISTICS AS
   TRANSACTION ...` and `SET TRANSACTION ...` take every isolation level, `[NOT] DEFERRABLE` and
@@ -1638,11 +1757,21 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   `SHOW transaction_isolation` says; `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` sets
   `default_transaction_read_only`. `SET TRANSACTION READ ONLY` and `SET TRANSACTION SNAPSHOT`
   are `0A000`.
-- `SET [SESSION] name {TO | =} value | DEFAULT`, `SET TIME ZONE`, `SET NAMES`, `RESET name | ALL`,
-  `SHOW name | ALL`: PostgreSQL's run-time parameters (D104). `client_encoding` takes `UTF8`
-  (and `SQL_ASCII`, which passes bytes through) only; settings EggDB does not apply yet, such as `statement_timeout` and `search_path`, are
-  remembered and shown; `SET LOCAL` is not supported yet. `max_identifier_length`,
-  `max_index_keys` and `max_function_args` are fixed, as PostgreSQL's server limits.
+- `SET [SESSION | LOCAL] name {TO | =} value | DEFAULT`, `SET [LOCAL] TIME ZONE`, `SET NAMES`,
+  `RESET name | ALL`, `SHOW name | ALL`: PostgreSQL's run-time parameters (D104). `client_encoding`
+  takes `UTF8` (and `SQL_ASCII`, which passes bytes through) only; settings EggDB does not apply
+  yet, such as `lock_timeout`, are remembered and shown. `max_identifier_length`,
+  `max_index_keys` and `max_function_args` are fixed, as PostgreSQL's server limits. Settings
+  follow transactions as in PostgreSQL (D301): a `SET` inside a transaction is undone by its
+  `ROLLBACK` (and by `ROLLBACK TO SAVEPOINT` to a savepoint set before it) and kept by its
+  `COMMIT`, unless the `COMMIT` itself fails (a deferred constraint), which undoes them with the
+  data; `SET LOCAL` and `set_config(name, value, true)` last to the end of the transaction
+  whether it commits or not (a later `SET` of the same parameter in the transaction is what
+  stays after its `COMMIT`). `SET [LOCAL] name TO DEFAULT` is `RESET name`: the value the client
+  sent when it connected, else the built-in default. Outside a transaction block `SET LOCAL` warns `SET LOCAL can only be
+  used in transaction blocks` and changes nothing, and `set_config(..., true)` lasts for its own
+  statement; in an implicit transaction (a multi-statement `Query` message, a pipeline up to its
+  `Sync`) both last until it ends.
 - `$1`, `$2`, …: parameters, given through the PostgreSQL protocol's extended query messages
   (D104); outside it, `$1` is `42P02` (there is no parameter `$1`).
 - `version()`, `current_user`, `session_user`, `user`, `current_database()`, `current_schema`
@@ -1877,7 +2006,9 @@ arguments and a `_tz` form, and the operators `jsonb @? path` and `jsonb @@ path
 `.**{1 to 2}`) accessors, filters `? (...)` with comparisons, `&&`, `||`, `!`, `is unknown`,
 `exists`, `like_regex` (with `flag`) and `starts with`, arithmetic (`+ - * / %`, unary signs),
 the methods `type()`, `size()`, `double()`, `number()`, `integer()`, `string()`, `abs()`,
-`floor()`, `ceiling()`, `bigint()`, `boolean()` and `keyvalue()`, the datetime methods
+`floor()`, `ceiling()`, `bigint()`, `boolean()`, `keyvalue()` and PostgreSQL 17's
+`decimal([precision [, scale]])` (a number or numeric string rounded to that precision and scale,
+`2203G` when it does not fit, `22023` for a precision outside 1 to 1000; D302), the datetime methods
 `datetime()`, `datetime(template)`, `date()`, `time([p])`, `time_tz([p])`, `timestamp([p])` and
 `timestamp_tz([p])` (ISO strings or a `to_timestamp` template; comparisons that need the session's
 time zone only in the `_tz` functions, else `22031`), and `$name` variables (D289). Errors carry PostgreSQL's
@@ -1894,8 +2025,10 @@ composite column (`r myrowtype`) member by member, as in PostgreSQL's documented
 nested array fails with `0A000` (arrays have one dimension), an array mixing nested arrays and
 scalars with `22P02`. `json_populate_record`, `jsonb_populate_record`, `json_populate_recordset`
 and `jsonb_populate_recordset` in `FROM` take their columns from the first argument's row type,
-`NULL::t` or `CAST(NULL AS t)` for a table, view or composite type `t` (a base row that is not
-NULL fails with `0A000`).
+`NULL::t` or `CAST(NULL AS t)` for a table, view or composite type `t`. A base row of a
+composite type that is not NULL (`ROW(1, 2)::pt`) gives each column the JSON member's value when
+the object has that key and the base row's value otherwise, and is returned whole for a NULL
+document (D302).
 
 The SQL/JSON query functions (D289) work as in PostgreSQL 17 and Oracle: `JSON_EXISTS(doc, path
 [PASSING v AS name, ...] [{TRUE | FALSE | UNKNOWN | ERROR} ON ERROR])`, `JSON_VALUE(... [RETURNING
@@ -1909,6 +2042,18 @@ quotes and behavior clauses, `name type EXISTS [PATH 'path']` and `NESTED [PATH]
 (...)` (children joined to their parent, siblings in a union), may follow another `FROM` item it
 reads, and produces at most 1,000,000 rows (`54000`) with at most 32 nested levels. Oracle's
 dialect accepts the same forms, columns without a type and `NULL ON ERROR`.
+
+PostgreSQL 17's SQL/JSON constructors and predicate (D302): `expr IS [NOT] JSON [VALUE | SCALAR |
+ARRAY | OBJECT] [{WITH | WITHOUT} UNIQUE [KEYS]]` tests a `text`, `bytea`, `json` or `jsonb`
+value (false for text that is not JSON, NULL for NULL, `42804` for other types; a `jsonb` value
+never has duplicate keys), and works in `CHECK` constraints. `JSON(expr [FORMAT JSON] [{WITH |
+WITHOUT} UNIQUE [KEYS]])` reads text or `bytea` as `json`, keeping the text as written (`22P02`
+for text that is not JSON, `22030` for a duplicate key under `WITH UNIQUE KEYS`, `42804` for a
+non-string argument). `JSON_SCALAR(expr)` gives the `json` value `to_json` gives (a number or
+boolean as itself, anything else as a string, a date or time stamp in ISO form).
+`JSON_SERIALIZE(expr [FORMAT JSON] [RETURNING type [FORMAT JSON]])` gives a JSON value's text as
+`text` (the default), another character type or `bytea` (other types are `42804`). Their columns
+are named `?column?`, `json`, `json_scalar` and `json_serialize`, as in PostgreSQL.
 
 **Arrays** (D128) are values of expressions, of `WITH` queries, derived tables and `VALUES` lists,
 and of results, with one dimension and elements of `smallint`, `integer`, `bigint`, `real`,
@@ -1979,7 +2124,11 @@ hold at most 2^27 elements (`54000`) and counts against the session's value limi
   other collation is `42704`, a non-text operand `42804`); and type names written
   `pg_catalog.int4` (another schema is `42704`).
 - Comparisons `= <> != < <= > >=`, `BETWEEN`, `IN (list)`, `LIKE` and `ILIKE` with `%`, `_`
-  and `\` escapes, `IS [NOT] NULL`, `ISNULL`, `NOTNULL`, `IS [NOT] TRUE | FALSE | UNKNOWN`,
+  and `\` escapes, `[NOT] LIKE | ILIKE pattern ESCAPE 'c'` in every dialect (D299; `ESCAPE ''`
+  means no escape character, a longer one and a pattern ending in its escape character are
+  `22025`, `ESCAPE NULL` gives NULL; SQLite's dialect refuses a constant escape that is not one
+  character, `ESCAPE ''` included, with "ESCAPE expression must be a single character"; PostgreSQL's `like_escape(pattern, escape)` is the same
+  rewrite), `IS [NOT] NULL`, `ISNULL`, `NOTNULL`, `IS [NOT] TRUE | FALSE | UNKNOWN`,
   `IS [NOT] DISTINCT FROM`, each with its `NOT` form.
 - `AND`, `OR`, `NOT` with SQL's three-valued logic: `NULL AND false` is false, `NULL OR true`
   is true, anything else with NULL is NULL, and `WHERE` keeps only rows where the condition is
@@ -2068,7 +2217,12 @@ full-text index yet, so `@@` reads every row.
 
 `EXPLAIN ANALYZE` (or `EXPLAIN (ANALYZE[, COSTS OFF, ...])`) runs the statement and prints its
 plan with the rows it returned or changed, and the planning and execution times, as
-PostgreSQL does; an `UPDATE` or `DELETE` under it changes the data. `EXPLAIN (ANALYZE,
+PostgreSQL does. Each step the executor measures carries PostgreSQL's
+`(actual time=a..b rows=n loops=1)`: the top node, a scan, the top of a join, a `Sort` and each
+branch of an `Append`, with times in milliseconds from the start of execution to the step's
+first and last row, and `(never executed)` on a step it never read (a scan under `LIMIT 0`).
+The steps inside a join and an `UPDATE` or `DELETE`'s scan carry none yet, and the timing costs
+nothing when the statement is not analyzed (D312); an `UPDATE` or `DELETE` under it changes the data. `EXPLAIN (ANALYZE,
 BUFFERS)` adds the page cache's lookups in PostgreSQL's form: `Buffers: shared hit=N read=M`
 under the top node for the whole statement (pages found in memory, pages read from the file;
 a count of zero is left out) and the same under `Planning:` for planning, counted on the
@@ -2096,6 +2250,44 @@ kept (5000 by default); a full table drops its least-called twentieth. `--log-sl
 protocol, as one line: `slow statement duration_ms=... database=... user=... protocol=...
 rows=... query="..."` after the UTC time, with the same normalized text. `lock_timeout` and
 limits per role are not there yet.
+
+## Plans in Oracle's and SQL Server's dialects
+
+In Oracle's dialect, `EXPLAIN PLAN [SET STATEMENT_ID = 'id'] [INTO table] FOR <SELECT, UPDATE
+or DELETE>` plans the statement without running it and writes one row per operation to
+`PLAN_TABLE` (created on first use with the columns of Oracle's reference) or to the table
+`INTO` names, which must exist. The rows are written all or none: a failure part-way (a too
+narrow `INTO` column, a constraint) leaves no row, and each plan gets a `PLAN_ID` no other
+session of the same server takes. `SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)` (with optional
+`table`, `statement_id` and `format` arguments) returns the last plan as `PLAN_TABLE_OUTPUT`
+lines:
+
+```
+Plan hash value: <the same number for the same plan>
+
+----------------------------------
+| Id  | Operation         | Name |
+----------------------------------
+|   0 | SELECT STATEMENT  |      |
+|   1 |  TABLE ACCESS FULL| EMP  |
+----------------------------------
+```
+
+In SQL Server's dialect, `SET SHOWPLAN_TEXT ON` and `SET SHOWPLAN_ALL ON` make every later
+statement return its plan instead of running (the statement's text, then the `|--` tree; or
+SQL Server's 18 `SHOWPLAN_ALL` columns). Only `SET` options run, so `SET SHOWPLAN_TEXT OFF` can
+end it; `BEGIN`, `COMMIT`, `ROLLBACK` and `SAVE TRANSACTION`, `USE`, `CREATE` and `DROP
+DATABASE`, `INSERT BULK`, `THROW`, `RAISERROR`, `PRINT`, `WAITFOR` and variable assignments are
+shown and not run. `DECLARE` declares its variables without their initial values, so later
+statements can name them. `IF` and `WHILE` conditions are not evaluated: each statement of the
+batch is shown once in order, both branches of an `IF` and a loop's body once. `EXEC` of a
+procedure and `EXEC(...)` show the plans of the statements inside. `SET SHOWPLAN_TEXT` and
+`SET SHOWPLAN_ALL` inside `EXEC(...)`, `sp_executesql` or a procedure fail with SQL Server's
+error 1067 and end the batch, as SQL Server refuses them there, and `SET eggdb.dialect` is
+refused in nested code (`0A000`), so nested code cannot turn plans off and run what follows. `SET STATISTICS PROFILE ON` runs each statement
+and adds that result with `Rows` and `Executes`. EggDB has no estimates, so costs and row
+estimates are NULL, and it measures whole statements, so only the top operator's rows are
+filled in (D312).
 
 ## LISTEN and NOTIFY
 
@@ -2561,8 +2753,23 @@ parameters, D288) and its text and binary forms on the wire.
 - `citext` keeps the text as written and compares, orders, groups, hashes and indexes by one
   full case fold, so a unique `citext` index refuses `'Ann'` next to `'ANN'`, and `LIKE` and
   `ILIKE` on a `citext` value ignore case, and so do the regular expression operators `~`, `~*`,
-  `!~` and `!~*` when the value they test is `citext` (D288). Full case folding differs from PostgreSQL's
-  `lower()`-based `citext`: `'ß'::citext = 'SS'` is true in EggDB and false in PostgreSQL (D259).
+  `!~` and `!~*` when the value they test is `citext` (D288). As in the citext extension,
+  `regexp_match`, `regexp_matches`, `regexp_replace`, `regexp_split_to_array`,
+  `regexp_split_to_table`, `replace`, `split_part`, `strpos` and `translate` ignore case when their
+  first argument is `citext`. `replace`, `split_part`, `strpos` and `translate` fold case the
+  way `citext`'s `=` does, by the same full case fold over all of Unicode: they match the search
+  text literally on the folded forms and return slices of the original text, so
+  `replace('CAFÉ'::citext, 'é', 'e')` gives `CAFe` and `strpos('Straße'::citext, 'SS')` gives 5;
+  a match that would start or end inside one character's fold (the `s` of `ß`) does not count.
+  `split_part` gives NULL for a field that does not exist, as the extension's array subscript
+  does. The regular expression ones add the `i` flag unless the flags hold `c`, and that flag
+  ignores the case of ASCII letters only, so `regexp_replace('CAFÉ'::citext, 'é', 'e')` gives
+  `CAFÉ` (D302). A `citext` argument
+  anywhere else is read as `text`. Full case folding differs from PostgreSQL's
+  `lower()`-based `citext`: `'ß'::citext = 'SS'` is true in EggDB and false in PostgreSQL (D259),
+  and the four functions follow `=`, so PostgreSQL gives `strpos('Straße'::citext, 'SS')` 0,
+  `replace('Straße'::citext, 'SS', 'x')` `Straße` and `split_part('aßbSSc'::citext, 'ss', 2)`
+  `c` where EggDB gives 5, `Straxe` and `b` (D302).
 - `hstore` keeps its pairs sorted as PostgreSQL does and prints `"a"=>"1", "b"=>NULL`. Its
   operators `->` (a key or an array of keys), `?`, `?|`, `?&`, `@>`, `<@`, `||` and `-` (a key,
   an array of keys or an `hstore`) and its functions `akeys`, `avals`, `skeys`, `svals`, `each`,
@@ -2575,8 +2782,7 @@ parameters, D288) and its text and binary forms on the wire.
   argument is not a row) (D288).
 
 Not yet: `hstore_to_matrix` and `%#` of a non-empty `hstore` (they need multidimensional arrays,
-`0A000`; an empty one gives `{}`), and the `citext` versions of `regexp_match`, `regexp_replace`,
-`replace`, `split_part`, `strpos` and `translate` (D288).
+`0A000`; an empty one gives `{}`) (D288).
 
 ## Vectors (pgvector)
 
@@ -2639,9 +2845,13 @@ rows in a table of that name, `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WI
 replaces them with the query's current rows in one transaction, and `DROP MATERIALIZED VIEW [IF
 EXISTS] name[, ...]` removes it. The defining queries are kept in
 `eggdb_internal.materialized_views`. Reads of a materialized view are reads of its table, so
-they are as fast as any table and see the rows of the last refresh. Not yet: keeping the rows up
-to date on every commit (incremental maintenance), column name lists, and indexes on the view
-being kept across a refresh.
+they are as fast as any table and see the rows of the last refresh. A materialized view may be
+named in any schema (`CREATE MATERIALIZED VIEW reports.daily AS ...`), takes indexes like a
+table, and is created, refreshed and dropped inside a transaction block like any other statement:
+the first one in a database leaves the block usable (D308). Not yet: keeping the rows up to date
+on every commit (incremental maintenance), column name lists, indexes on the view being kept
+across a refresh, and `pg_class` showing it as a materialized view (`relkind` `m`) rather than a
+table.
 
 ## Change streams (eggdb_cdc)
 
@@ -3040,7 +3250,23 @@ In the PostgreSQL dialect (D158), users create and call their own functions and 
   cursor's rows are read when it is opened. `refcursor` is a type of its own holding the
   cursor's name (D280): `pg_typeof` names it, results send it with type OID 1790, it converts
   to and from `text`, and a parameter declared with OID 1790 reads as text. A table column
-  declared `refcursor` is stored and shown as `text`.
+  declared `refcursor` is stored and shown as `text`. `refcursor[]` (OID 2201) is an array of
+  cursor names (D301): `ARRAY[c1, c2]` of `refcursor` variables, `'{a,b}'::refcursor[]`,
+  variables, parameters and results of that type; a table column declared `refcursor[]` is
+  stored and shown as `text[]`.
+- Settings in routines (D301): a function's or procedure's `SET name {TO | =} value` and `SET
+  name FROM CURRENT` (the value the parameter has at `CREATE`, written into the definition as
+  `SET name TO 'value'`) apply while it runs, `search_path` and `TimeZone` included, and the old
+  value comes back when it returns, also on an error. `SET`, `SET LOCAL`, `RESET name` and
+  `set_config(...)` inside a PL/pgSQL or `sql` routine apply to the statements after them and to
+  the routines they call: a plain `SET` lasts for the session after the routine (also over a
+  `SET` clause of the same parameter), `SET LOCAL` lasts to the end of the transaction, except
+  for a parameter the routine's own `SET` clause names, which comes back at its exit. A
+  procedure's `COMMIT` ends its `SET LOCAL` values and its `ROLLBACK` also undoes the plain `SET`s
+  made since the last `COMMIT`; an exception handler that catches an error undoes the settings
+  its block changed. `RESET ALL` and `SET eggdb.dialect` inside a routine are `0A000`, and
+  `set_config` takes only constants and `$n` parameters as its arguments (a PL/pgSQL variable or
+  another expression, as in `set_config('app.tenant', p_tenant::text, true)`, is `0A000`).
 - Polymorphic types (D264): parameters and results of `sql` and PL/pgSQL functions and
   procedures may be `anyelement`, `anyarray`, `anynonarray`, `anyenum`, `anycompatible`,
   `anycompatiblearray` and `anycompatiblenonarray`, also in `OUT` parameters, `RETURNS SETOF`,
@@ -3084,7 +3310,8 @@ qualified names as `app.t`.
 
 Unqualified names follow `search_path`, a session setting (default `"$user", public`): `SET
 search_path [TO | =] app, public`, `RESET search_path`, `SHOW search_path`, `SELECT
-pg_catalog.set_config('search_path', '', false)` (constants or parameters, not `true` for local), `current_schema()`
+pg_catalog.set_config('search_path', '', false)` (constants or parameters; `true` for a
+transaction's setting, D301), `current_schema()`
 and `current_schemas(bool)` (shown as `{pg_catalog,app,public}`). A name is looked up in each
 schema of the path that exists, in order; `pg_catalog` is searched first for functions
 (`pg_catalog.nextval`, `pg_catalog.set_config` and the other functions that exist). New objects
@@ -3093,7 +3320,10 @@ create in` when there is none). The other dialects have one schema: SQLite's `ma
 is the session's temporary schema), Oracle's `USER.t` for the session's user's own tables and
 `hr.t` for schema `hr` (D127), MySQL's `db.t` for the connected database.
 
-**Views**, in every dialect: `CREATE [OR REPLACE] VIEW name [(columns)] AS query`, `DROP VIEW
+**Views**, in every dialect: `CREATE [OR REPLACE] VIEW name [(columns)] AS query`, in PostgreSQL
+`CREATE [OR REPLACE] [TEMP] RECURSIVE VIEW name (columns) AS query` (D299; the column list is
+required, and the view is stored as `WITH RECURSIVE name (columns) AS (query) SELECT columns FROM
+name`, as the manual defines it), `DROP VIEW
 [IF EXISTS] name [, ...] [CASCADE | RESTRICT]`, and in PostgreSQL `ALTER VIEW [IF EXISTS] name
 RENAME TO new | SET SCHEMA s | OWNER TO role`. A view may use joins, groups, subqueries, `WITH`,
 set operations and other views. Its query is checked when it is created and expanded where it is
@@ -3637,6 +3867,34 @@ PostgreSQL sorts them (by key length, then bytes), and unsorted or duplicate key
 keys a `citext` is its case-folded text, keyed as text is. An older release refuses a version 11
 table by name. Table versions skip 8 and 12, which are view versions.
 
+A SQLite column that holds every storage class is type tag `24` when its affinity is `BLOB`
+(D153) and tag `25` followed by its affinity's code (`1` `TEXT`, `2` `NUMERIC`, `3` `REAL`)
+otherwise. Version 13 (D305, `AFFINITY_FORMAT_VERSION`), the version 11 layout with tag `25`
+allowed, is written for a table with a tag `25` column and for a table whose primary key or any
+index (a `UNIQUE` constraint's included) covers a tag `24` or tag `25` column, since those keys
+use the encoding below, which v0.2.0 does not know. A `BLOB` or untyped column that no key
+covers stays tag `24` in version 10, byte for byte as v0.2.0 writes it, so `CREATE INDEX` on
+such a column rewrites its table's definition as version 13. Every other table keeps its
+version and bytes; a version 13 table with neither, a version 10 or 11 table keying a tag `24`
+column, tag `25` in an older version, a code other than those three, or tag `25` in a view or
+a user-defined type is damage, and an older release refuses a version 13 table by name. A view
+records no type for such a column. In rows these columns hold the tags of the four classes
+(`3` integer, `5` real, `7` text, `18` blob) whatever their affinity. In keys and index entries
+a value of such a column is `0x02` for NULL (after every value, as in other columns) or `0x01`
+followed by its class and its body, so the classes sort as SQLite orders them:
+- `0x01`, a number: the nearest 64-bit float in the order-preserving form other `double
+  precision` keys use (`-0.0` and every NaN written as `0.0` and the one canonical NaN), then a
+  16-bit big-endian offset with its sign bit flipped, the integer's distance from that float
+  (at most 1024, nonzero only for integers beyond 2^53; `0` for a real). Integers and reals
+  therefore order by exact value, and an integer and a real that are equal (`3`, `3.0`) have the
+  same key;
+- `0x02`, text: its UTF-8 bytes escaped and ended as `text` keys are (`0x00` written `0x00
+  0xFF`, then `0x00 0x01`);
+- `0x03`, a blob: its bytes, escaped and ended the same way.
+
+A key is read back only in its canonical form: an offset that does not round to its float, a
+non-canonical zero or NaN, an unknown class or text that is not UTF-8 is damage.
+
 A user-defined type is a record under the catalog prefix, `0x0A` and the type's schema-qualified
 name: record version `1`, its kind (as above), its 32-bit OID (16384 to 2^31-1, picked from a hash
 of its name and never reused while it exists), then an enum's labels (count; each its 64-bit sort
@@ -3744,8 +4002,7 @@ table's primary key and indexes, but a view with grouping, aggregates, `DISTINCT
 window or a computed column used by the condition, or one on the NULL side of an outer join, is
 still computed in full before the condition filters it; a view that is not automatically
 updatable has no rules to make it so (its `INSTEAD OF` triggers make it writable),
-there are no materialized or
-recursive views, renaming a table
+there are no materialized views, renaming a table
 or view that a view uses is `0A000` (PostgreSQL follows the rename), a view resolves its names
 with the search path it was created with when it is used, where PostgreSQL binds them once, a
 column `DEFAULT nextval('s')` finds an unqualified `s` through the search path when it runs, and
@@ -3820,7 +4077,10 @@ two, `COPY` in the binary format and in another encoding, now match). The other 
   `numeric` values, as in PostgreSQL 14: they sort between the finite values and `NaN`, follow
   PostgreSQL's arithmetic (`Infinity - Infinity` is `NaN`, `x / Infinity` is 0), cast to and from
   `double precision`, fail with `0A000` when cast to an integer and with `22003` in a
-  `numeric(p,s)` column (D290). `^` with a non-integer exponent, or an integer one whose exact result
+  `numeric(p,s)` column (D290). `scale(x)` is the number of digits a value shows after the point,
+  `min_scale(x)` the fewest that still give it exactly, and `trim_scale(x)` the value with its
+  trailing fractional zeros dropped (`8.4100` gives 4, 2 and `8.41`); of `NaN` or an infinity the
+  first two are NULL and `trim_scale` returns it unchanged (D302). `^` with a non-integer exponent, or an integer one whose exact result
   would need more than 2,000 digits, is computed in double precision (15 significant digits).
 - `date` and time stamps take ISO 8601 and PostgreSQL's ISO style only: `infinity`, `epoch`,
   `now`, `today`, month names (`Feb 29 2024`) and `MDY`/`DMY` forms (`02/29/2024`) answer
@@ -3841,9 +4101,10 @@ two, `COPY` in the binary format and in another encoding, now match). The other 
   back references explores every way it can match, bounded by the step budget, so a hostile one
   ends with `54000`.
 - `to_json`, `to_jsonb` and `json_build_*` take a whole row only as a `FROM` item's name;
-  `json_object(text[])`, `json_populate_record` in a select list or with a base row that is not
-  NULL, `JSON_TABLE`'s `PLAN` clause, `JSON_SERIALIZE`, `JSON_SCALAR`, `JSON()` and `IS JSON`
-  are missing.
+  `json_object(text[])`, `json_populate_record` in a select list and `JSON_TABLE`'s `PLAN`
+  clause are missing, and Oracle's `IS JSON` (lax syntax, `STRICT`), `JSON_SERIALIZE` options and
+  `JSON_SCALAR` are not parsed in Oracle's dialect yet. `IS JSON` on a document nested deeper
+  than the JSON parser's 256 levels is false (PostgreSQL says true).
 - `interval` (D113): only the `postgres` `IntervalStyle` is printed. PostgreSQL 17's `infinity`
   and `-infinity` intervals read, print, compare, add, multiply, divide, `justify`, and give
   `isfinite` false and `date_part` an infinite double as PostgreSQL's do (D153), but a time stamp
@@ -3907,7 +4168,7 @@ two, `COPY` in the binary format and in another encoding, now match). The other 
   `0A000`; `FULL JOIN ... USING` columns cannot be named unqualified from a subquery (`42702`). An `IN` list of constants is compared item by item (a list of
   more than 256 items is not used to choose a key range either), so a very long list against
   many rows is slow; `IN (SELECT ...)` looks values up in a hash set.
-- `NATURAL` joins, `DISTINCT ON`, `GROUPING SETS`, `ROLLUP` and `CUBE`, hypothetical-set
+- Hypothetical-set
   aggregates (`rank(x) WITHIN GROUP (...)`), `percentile_cont` and `percentile_disc` over an array
   of fractions, `percentile_cont` between two `interval` values, and the other aggregates
   (`stddev`, `variance`, ...) fail with `0A000`. Window functions (D151) do not take `DISTINCT`
@@ -3951,7 +4212,7 @@ a view that used `SELECT *` keeps the columns it had when it was created (as MyS
 `CREATE DATABASE`, `DROP DATABASE` and `USE` of another database are not supported yet: a
 server serves one database.
 
-The MySQL suite (`crates/eggdb-sql/correctness/mysql.test`, 223 cases from the MySQL 8.0
+The MySQL suite (`crates/eggdb-sql/correctness/mysql.test`, 242 cases from the MySQL 8.0
 Reference Manual's documented behaviour) marks these as differing until they are fixed:
 - `7 / 2` is `3.5` (a `double`) where MySQL gives the `DECIMAL` `3.5000`, and decimal constants
   outside a `DECIMAL` column are doubles (`0.1 + 0.2` is `0.30000000000000004`); stored into a
@@ -4012,31 +4273,37 @@ Views are read-only unless an `INSTEAD OF` trigger makes them writable, as in SQ
 `ALTER TABLE ... RENAME COLUMN` and `DROP COLUMN` (and a table rename's references in views and
 triggers) leave `sqlite_schema` showing generated text instead of SQLite's edited text.
 
-The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 234 cases from sqlite.org's
+The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 263 cases from sqlite.org's
 documentation of SQLite 3.46, never SQLite's source) marks these as differing until they are
 fixed:
 - Indexes: `EXPLAIN` without `QUERY PLAN` (the bytecode listing), partial indexes and indexes
   on expressions answer an error; an `ON CONFLICT (columns)` that names no unique key answers
   `42P10` with PostgreSQL's message; `sqlite_schema.sql` of an index is regenerated from the
   catalog.
-- A column of `INTEGER`, `TEXT`, `REAL` or `NUMERIC` affinity has one type: the affinity's.
-  SQLite's columns may hold any storage class, so a `NUMERIC` column given `7` keeps the integer
-  `7` where EggDB keeps the real `7.0`, and an `INTEGER` column given `'abc'` keeps the text
-  where EggDB answers `datatype mismatch`. Only `BLOB` columns hold every class (D153), and
-  they cannot be in a key or an index yet (`0A000`).
+- A column of `INTEGER` affinity has one type, `bigint`: an `INTEGER` column given `'abc'`
+  keeps the text in SQLite, where EggDB answers `datatype mismatch`. Columns of the other
+  affinities hold every storage class (D153, D305).
 - Dates and times: `date()`, `time()`, `datetime()`, `julianday()`, `strftime()`,
   `unixepoch()` and `CURRENT_TIMESTAMP` are not supported yet; `DATE` and `DATETIME` columns
   keep their text, as SQLite's do.
 
 And more, not in the suite yet:
-- Columns without a declared type are text, so `typeof()` says `text` for numbers stored
-  there, where SQLite gives them `BLOB` affinity as a `BLOB` column has. A real given to an
-  `INTEGER` column is rounded where SQLite keeps it as a real, and `CAST('abc' AS INTEGER)` is
-  an error where SQLite gives 0.
+- A real given to an `INTEGER` column is rounded where SQLite keeps it as a real, and
+  `CAST('abc' AS INTEGER)` is an error where SQLite gives 0. `CAST(x AS NUMERIC)` gives a
+  real where SQLite gives an integer for a whole number. An integer compared with a `TEXT`
+  column is not turned into text first (SQLite compares `t = 5` as `t = '5'`), and a column of
+  a view has no affinity of its own.
+- Tables made before D305 keep the types they were made with: their `TEXT`, untyped and `DATE`
+  columns stay `text`, their `BOOLEAN` columns `bigint`, and their `REAL`, `NUMERIC` and
+  `DECIMAL` columns `double precision`.
+- A `NUMERIC` or `REAL` column compared with a `TEXT` or untyped column does not apply its
+  affinity to the other column's values (SQLite compares `n = t` with `t` turned into a number
+  when it looks like one); only constants take the affinity.
 - Names fold to lower case: result columns and `PRAGMA table_info` show `id` for a column
-  declared `Id`. `PRAGMA table_info` and `sqlite_schema.sql` show the affinity's type name
-  (`INTEGER`, `TEXT`, `REAL`) and a `CREATE TABLE` regenerated from the catalog, not the text
-  as written.
+  declared `Id`. `PRAGMA table_info` shows each column's type as the `CREATE TABLE` text declared it (`DATETIME`,
+  `DECIMAL(10, 2)`, empty for an untyped column), as SQLite does; a table whose kept text no
+  longer matches its catalog (after a change other than `ADD COLUMN`), or that was not made in
+  the SQLite dialect, shows the affinity's type name (`INTEGER`, `TEXT`, `REAL`).
 - An `INTEGER PRIMARY KEY` given `0` takes the next row id where SQLite stores 0, and
   `AUTOINCREMENT` reuses the row id of a deleted last row (SQLite's never does).
   `last_insert_rowid()` is not changed by inserts into tables whose key is not an `INTEGER
@@ -4049,14 +4316,15 @@ And more, not in the suite yet:
   kept in the file; foreign keys are never enforced.
 - Not supported yet: `CREATE INDEX`, `UNIQUE` and `CHECK` constraints, `COLLATE NOCASE`,
   generated columns, views, `ATTACH`, `VACUUM`, `UPDATE OR ...`, `VALUES` as a query,
-  `group_concat` and `total`, the JSON and math functions, `GLOB` character
-  classes and bare columns in aggregate queries.
+  `group_concat` and `total`, the JSON and math functions and bare columns in aggregate
+  queries.
 
 ## Known differences from Oracle
-The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 610 cases from Oracle's SQL
+The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 662 cases from Oracle's SQL
 Language Reference and PL/SQL Language Reference, never Oracle's software) marks these as differing until they are fixed:
-- `EXPLAIN PLAN FOR` and `DBMS_XPLAN`, bitmap, function-based and reverse-key indexes, and the
-  primary key's index in `USER_INDEXES` (EggDB keeps the primary key as the table's own order).
+- `EXPLAIN PLAN` and `DBMS_XPLAN.DISPLAY` give no costs, cardinalities or predicates and only
+  the `Id`, `Operation` and `Name` columns (D312); bitmap, function-based and reverse-key
+  indexes, and the primary key's index in `USER_INDEXES` (EggDB keeps the primary key as the table's own order).
 - `ROWNUM` in the select list, `ORDER BY` or anywhere but `WHERE` conditions joined by `AND`.
 - Division that does not end keeps `numeric`'s scale (about 20 digits; Oracle has 38), so `2 /
   3 * 3` is not exactly 2, `date - date` of 8 hours shows fewer 3s and `MONTHS_BETWEEN` fewer
@@ -4087,7 +4355,7 @@ And more, not in the suite yet:
   `HH:MI:SS AM` and `DL` follows the documented `fmDay, Month dd, yyyy` (`December 1`), choices
   recorded in D149; `L` and `U` pad the leading symbol to twelve characters as the conversion
   table shows. Languages other than the seven above, `E`/`EE` (other calendars),
-  `TO_DATE(... DEFAULT ... ON CONVERSION ERROR)`, `LISTAGG ... OVER` and `AT TIME ZONE` are not
+  `TO_DATE(... DEFAULT ... ON CONVERSION ERROR)`, `LISTAGG (DISTINCT ...) OVER` and `AT TIME ZONE` are not
   supported yet. Other string functions given a date (`SUBSTR(d, ...)`) write it by
   `NLS_DATE_FORMAT` whatever its type; a time stamp assigned to a character column takes the
   timestamp format only when it has a fractional second. `NEXTVAL` in a `MERGE`'s `VALUES` draws
@@ -4141,11 +4409,13 @@ And more, not in the suite yet:
   fire themselves again and the mutating-table check (`ORA-04091`) is not made.
 - `SYS_CONTEXT` takes only text constants as its arguments, and a third argument (the length)
   is accepted and ignored.
-- Not supported yet: `CONNECT BY`, outer joins with `(+)`, `INSERT ALL`, `RETURNING ... INTO`,
-  synonyms, database links, `ROWID`, the XML functions, the regular-expression functions
-  (`REGEXP_LIKE`, `REGEXP_SUBSTR`, ...), the ranking and offset window functions
-  (`ROW_NUMBER`, `RANK`, `LAG`, ...: `ORA-00904`), and Oracle-only analytic forms such as
-  `RATIO_TO_REPORT`. Aggregates with `OVER` work.
+- `SEQUENCE.NEXTVAL` in a multitable insert's `VALUES` advances once per use, where Oracle
+  advances it once per source row; rows go into an `INSERT ALL`'s targets one `INTO` clause at a
+  time, so identity values follow that order (D304).
+- Not supported yet: outer joins with `(+)`, `RETURNING ... INTO`, synonyms, database links,
+  `ROWID`, the XML functions, the regular-expression functions (`REGEXP_LIKE`, `REGEXP_SUBSTR`,
+  ...), the ranking and offset window functions (`ROW_NUMBER`, `RANK`, `LAG`, ...: `ORA-00904`),
+  and Oracle-only analytic forms such as `RATIO_TO_REPORT`. Aggregates with `OVER` work.
   `SAVEPOINT` works as in every dialect (D173), and views `WITH CHECK OPTION` refuse rows they
   would not show ([Schemas, views and comments](#schemas-views-and-comments)).
 - `NUMBER`'s range ends are not Oracle's: `TO_NUMBER('1e126')` gives a 127-digit value where
@@ -4198,9 +4468,10 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
 - A user function's result without an alias (`SELECT dbo.f(1)`) is named after the function
   (`f`), where SQL Server leaves the column without a name. Functions run as `STABLE` ones: a
   function a statement calls sees the database as that statement started.
-- Not yet: `TOP ... PERCENT` and `WITH TIES`, `OUTPUT ... INTO`, `deleted.` in `UPDATE`,
-  `SELECT ... INTO` and global `##temporary` tables (`##name` is the session's own table, like
-  `#name`).
+- Not yet: `deleted.` in `UPDATE`, global `##temporary` tables (`##name` is the session's own
+  table, like `#name`), and `OUTPUT ... INTO` refusing a target with triggers, checks or foreign
+  keys, as SQL Server does (EggDB fires and checks them). A `MERGE`'s deletes do not fire `DELETE`
+  triggers, and `SELECT ... INTO` keeps neither the source columns' `NOT NULL` nor their identity.
 - An identity column that is not the first column of the primary key. The next identity number
   follows the largest one in the table (the smallest for a negative increment), so a deleted
   largest value is used again and an emptied table starts again at its seed, where SQL Server
@@ -4274,11 +4545,11 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   temporal tables are Msg 40517.
 
 ## Next parts (roadmap)
-- `JSON_TABLE`'s `PLAN` clause, `IS JSON`, `JSON_SERIALIZE` and `JSON_SCALAR`.
+- `JSON_TABLE`'s `PLAN` clause, and Oracle's `IS JSON`, `JSON_SERIALIZE` and `JSON_SCALAR`.
 - Point `SELECT`s as fast as SQLite's everywhere: an AST that borrows the SQL text and a plan
   cache; table statistics for choosing between key lookups and hash joins.
-- `GROUPING SETS`, `ROLLUP` and `CUBE`, `DISTINCT ON`, `NATURAL` joins and the other aggregates
-  (`stddev`, `variance`, hypothetical-set aggregates).
+- The other aggregates (`stddev`, `variance`, hypothetical-set aggregates); `DISTINCT ON` over
+  any expression in a grouped query and beside window functions; `LATERAL ... NATURAL JOIN`.
 - Then the other dialects (item 23), each with its own correctness suite; for the PostgreSQL protocol,
   TLS, `information_schema` and the catalog queries of GUI tools beyond psql's `\d` family,
   and `LISTEN`/`NOTIFY` (M6a).

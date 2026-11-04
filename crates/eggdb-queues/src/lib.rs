@@ -88,7 +88,21 @@ struct Stored {
     body: Vec<u8>,
 }
 
+const STORED_HEADER_BYTES: usize = 20;
+
 impl Stored {
+    fn visible_ms_and_body_length(bytes: &[u8]) -> Result<(u64, usize)> {
+        let visible = bytes
+            .get(..8)
+            .and_then(|visible| <[u8; 8]>::try_from(visible).ok())
+            .ok_or_else(|| QueueError::Storage("a stored message is damaged".to_owned()))?;
+        let body_length = bytes
+            .len()
+            .checked_sub(STORED_HEADER_BYTES)
+            .ok_or_else(|| QueueError::Storage("a stored message is damaged".to_owned()))?;
+        Ok((u64::from_be_bytes(visible), body_length))
+    }
+
     fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(20 + self.body.len());
         out.extend_from_slice(&self.visible_ms.to_be_bytes());
@@ -313,18 +327,57 @@ impl<'k> Queues<'k> {
         lease_ms: u64,
         now_ms: u64,
     ) -> Result<Vec<Message>> {
-        let any_visible = self.read(|keys| {
+        self.receive_fitting(name, max, lease_ms, now_ms, &mut |_: usize| true)
+    }
+
+    /// Leases, oldest first, up to `max` of the messages visible at `now_ms` for `lease_ms`,
+    /// while `fits` accepts each one's body length. The first message `fits` refuses ends the
+    /// batch: it and every later message stay as they were, and nothing is written when no
+    /// message is accepted.
+    pub fn receive_fitting(
+        &self,
+        name: &str,
+        max: usize,
+        lease_ms: u64,
+        now_ms: u64,
+        fits: &mut dyn FnMut(usize) -> bool,
+    ) -> Result<Vec<Message>> {
+        if max == 0 {
+            return Ok(Vec::new());
+        }
+        let chosen = self.read(|keys| {
             if keys.get(&queue_key(name)).map_err(storage)?.is_none() {
                 return Err(QueueError::NoQueue(name.to_owned()));
             }
-            for (_, value) in keys.scan(&messages_prefix(name)).map_err(storage)? {
-                if Stored::decode(&value)?.visible_ms <= now_ms {
+            let mut chosen = Vec::new();
+            let mut damaged = None;
+            keys.visit_prefix(&messages_prefix(name), &mut |key, value| {
+                if chosen.len() >= max {
+                    return Ok(false);
+                }
+                let (visible_ms, body_length) = match Stored::visible_ms_and_body_length(value) {
+                    Ok(header) => header,
+                    Err(error) => {
+                        damaged = Some(error);
+                        return Ok(false);
+                    }
+                };
+                if visible_ms > now_ms {
                     return Ok(true);
                 }
+                if !fits(body_length) {
+                    return Ok(false);
+                }
+                chosen.push(key.to_vec());
+                Ok(true)
+            })
+            .map_err(storage)?;
+            match damaged {
+                Some(error) => Err(error),
+                None => Ok(chosen),
             }
-            Ok(false)
         })?;
-        if !any_visible || max == 0 {
+        if chosen.is_empty() {
             return Ok(Vec::new());
         }
         self.write(|keys| {
@@ -332,10 +385,10 @@ impl<'k> Queues<'k> {
                 return Err(QueueError::NoQueue(name.to_owned()));
             }
             let mut out = Vec::new();
-            for (key, value) in keys.scan(&messages_prefix(name)).map_err(storage)? {
-                if out.len() >= max {
-                    break;
-                }
+            for key in chosen {
+                let Some(value) = keys.get(&key).map_err(storage)? else {
+                    continue;
+                };
                 let mut stored = Stored::decode(&value)?;
                 if stored.visible_ms > now_ms {
                     continue;
@@ -375,6 +428,23 @@ impl<'k> Queues<'k> {
         })
     }
 
+    /// Gives back a leased message that was never sent: it is visible again at `now_ms` and
+    /// its receive count is what it was before the lease, so its next delivery is not marked
+    /// redelivered. Returns whether it was there.
+    pub fn unlease(&self, name: &str, id: u64, now_ms: u64) -> Result<bool> {
+        self.write(|keys| {
+            let key = message_key(name, id);
+            let Some(value) = keys.get(&key).map_err(storage)? else {
+                return Ok(false);
+            };
+            let mut stored = Stored::decode(&value)?;
+            stored.visible_ms = now_ms;
+            stored.receive_count = stored.receive_count.saturating_sub(1);
+            keys.put(&key, &stored.encode()).map_err(storage)?;
+            Ok(true)
+        })
+    }
+
     /// How many messages are ready and waiting at `now_ms`.
     pub fn depth(&self, name: &str, now_ms: u64) -> Result<Depth> {
         self.read(|keys| {
@@ -382,14 +452,23 @@ impl<'k> Queues<'k> {
                 return Err(QueueError::NoQueue(name.to_owned()));
             }
             let mut depth = Depth::default();
-            for (_, value) in keys.scan(&messages_prefix(name)).map_err(storage)? {
-                if Stored::decode(&value)?.visible_ms <= now_ms {
-                    depth.ready += 1;
-                } else {
-                    depth.waiting += 1;
+            let mut damaged = None;
+            keys.visit_prefix(&messages_prefix(name), &mut |_, value| {
+                match Stored::visible_ms_and_body_length(value) {
+                    Ok((visible_ms, _)) if visible_ms <= now_ms => depth.ready += 1,
+                    Ok(_) => depth.waiting += 1,
+                    Err(error) => {
+                        damaged = Some(error);
+                        return Ok(false);
+                    }
                 }
+                Ok(true)
+            })
+            .map_err(storage)?;
+            match damaged {
+                Some(error) => Err(error),
+                None => Ok(depth),
             }
-            Ok(depth)
         })
     }
 }
@@ -470,5 +549,43 @@ mod tests {
                 waiting: 0
             }
         );
+    }
+
+    #[test]
+    fn receive_fitting_leases_only_what_fits_and_unlease_keeps_the_receive_count() {
+        let keyspace = MemoryKeyspace::default();
+        let queues = Queues::new(&keyspace);
+        queues.declare("jobs").unwrap();
+        for body in [&b"aaaa"[..], b"bbbb", b"cccc"] {
+            queues.send("jobs", body, 0, 0).unwrap();
+        }
+        let mut room = 9usize;
+        let leased = queues
+            .receive_fitting("jobs", 10, 30_000, 0, &mut |length: usize| match room
+                .checked_sub(length)
+            {
+                Some(left) => {
+                    room = left;
+                    true
+                }
+                None => false,
+            })
+            .unwrap();
+        assert_eq!(leased.len(), 2);
+        assert!(
+            queues
+                .receive_fitting("jobs", 10, 30_000, 0, &mut |_: usize| false)
+                .unwrap()
+                .is_empty()
+        );
+        let rest = queues.receive("jobs", 10, 30_000, 0).unwrap();
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].body, b"cccc");
+        assert_eq!(rest[0].receive_count, 1);
+        assert!(queues.unlease("jobs", leased[1].id, 0).unwrap());
+        let again = queues.receive("jobs", 10, 30_000, 0).unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].id, leased[1].id);
+        assert_eq!(again[0].receive_count, 1);
     }
 }

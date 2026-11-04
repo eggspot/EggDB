@@ -188,21 +188,26 @@ pub fn is_normalized(text: &str, form: Form) -> bool {
 pub fn case_fold(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for character in text.chars() {
-        let code = u32::from(character);
-        match CASE_FOLDING.binary_search_by_key(&code, |(entry, ..)| *entry) {
-            Ok(at) => {
-                let (_, offset, length) = CASE_FOLDING[at];
-                out.extend(
-                    CASE_FOLDING_DATA
-                        [usize::from(offset)..usize::from(offset) + usize::from(length)]
-                        .iter()
-                        .filter_map(|code| char::from_u32(*code)),
-                );
-            }
-            Err(_) => out.push(character),
-        }
+        case_fold_into(character, &mut out);
     }
     out
+}
+
+/// Appends the full case fold of one character to `out`: [`case_fold`] of a text is the
+/// folds of its characters, one after another.
+pub fn case_fold_into(character: char, out: &mut String) {
+    let code = u32::from(character);
+    match CASE_FOLDING.binary_search_by_key(&code, |(entry, ..)| *entry) {
+        Ok(at) => {
+            let (_, offset, length) = CASE_FOLDING[at];
+            out.extend(
+                CASE_FOLDING_DATA[usize::from(offset)..usize::from(offset) + usize::from(length)]
+                    .iter()
+                    .filter_map(|code| char::from_u32(*code)),
+            );
+        }
+        Err(_) => out.push(character),
+    }
 }
 
 /// The key two strings share when they differ only by case, accents and compatibility forms:

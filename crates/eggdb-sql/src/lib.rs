@@ -36,6 +36,7 @@ mod console;
 mod constraints;
 mod coordination;
 mod copy;
+mod create_table_as;
 mod datetime;
 mod deferred_checks;
 mod destructive;
@@ -49,7 +50,9 @@ mod execute;
 mod explain;
 mod foreign;
 mod geo_functions;
+mod grouping_sets;
 mod hash_index;
+mod hierarchy;
 mod hstore;
 mod hstore_functions;
 mod hyperloglog;
@@ -58,6 +61,7 @@ mod information_schema;
 mod interval;
 pub mod jobs;
 mod join;
+mod joined_dml;
 pub mod json;
 mod json_functions;
 mod json_path;
@@ -68,6 +72,7 @@ mod md5;
 mod memory;
 mod merge;
 mod migration;
+mod multitable_insert;
 mod mysql_catalog;
 mod mysql_errors;
 mod mysql_variables;
@@ -87,6 +92,7 @@ mod oracle_listagg;
 mod oracle_nls;
 mod oracle_number_model;
 mod oracle_numerals;
+mod output_into;
 mod parser;
 mod partition_ddl;
 mod partition_dml;
@@ -113,6 +119,7 @@ mod restore;
 mod result_row_cap;
 mod retention;
 mod roles;
+mod routine_settings;
 mod routines;
 mod row_security;
 mod schema;
@@ -124,6 +131,7 @@ mod set_operations;
 mod set_returning;
 mod settings;
 mod sql_json;
+mod sql_json_constructors;
 mod sqlite_datetime;
 mod sqlite_errors;
 mod sqlite_functions;
@@ -140,6 +148,7 @@ mod stack_depth;
 mod standards;
 pub mod statement_statistics;
 mod statistics;
+mod step_times;
 mod store;
 mod string_functions;
 mod subquery;
@@ -152,6 +161,7 @@ mod text_search;
 mod time_zones;
 mod triggers;
 mod tsql;
+mod type_affinity;
 mod types;
 mod typing;
 mod updatable_views;
@@ -180,15 +190,25 @@ mod correctness;
 #[cfg(test)]
 mod destructive_tests;
 #[cfg(test)]
+mod dialect_plan_tests;
+#[cfg(test)]
+mod distinct_on_and_natural_join_tests;
+#[cfg(test)]
 mod engine_limits_tests;
 #[cfg(test)]
 mod geo_tests;
+#[cfg(test)]
+mod grouping_sets_tests;
+#[cfg(test)]
+mod hierarchy_tests;
 #[cfg(test)]
 mod implicit_transaction_tests;
 #[cfg(test)]
 mod index_tests;
 #[cfg(test)]
 mod insert_select_tests;
+#[cfg(test)]
+mod joined_dml_tests;
 #[cfg(test)]
 mod json_path_tests;
 #[cfg(test)]
@@ -200,9 +220,13 @@ mod memory_store;
 #[cfg(test)]
 mod migration_tool_tests;
 #[cfg(test)]
+mod multitable_insert_tests;
+#[cfg(test)]
 mod one_statement_tests;
 #[cfg(test)]
 mod oracle_tests;
+#[cfg(test)]
+mod output_into_tests;
 #[cfg(test)]
 mod partition_tests;
 #[cfg(test)]
@@ -211,6 +235,8 @@ mod regex_tests;
 mod savepoint_tests;
 #[cfg(test)]
 mod schema_tests;
+#[cfg(test)]
+mod select_into_tests;
 #[cfg(test)]
 mod set_returning_tests;
 #[cfg(test)]
@@ -227,6 +253,10 @@ mod table_ddl_tests;
 mod tests;
 #[cfg(test)]
 mod time_series_tests;
+#[cfg(test)]
+mod transaction_settings_tests;
+#[cfg(test)]
+mod type_affinity_tests;
 #[cfg(test)]
 mod user_type_tests;
 #[cfg(test)]
@@ -305,6 +335,7 @@ pub use store::{
     StoreFailure,
 };
 pub use time_zones::TimeZone;
+pub use type_affinity::TypeAffinity;
 pub use types::{DefinedKind, DefinedType, DefinedValue, NumericModifier, SqlType, Value};
 pub use visible_tables::{
     OutsideLink, OutsideLinkKind, UnknownTableName, UnservableColumnList, VisibleRead,

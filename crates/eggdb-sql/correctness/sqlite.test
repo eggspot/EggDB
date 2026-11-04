@@ -171,7 +171,6 @@ SELECT n, typeof(n) FROM affinity WHERE n = 7
 n|typeof(n)
 7|integer
 SELECT 1
-... differs
 
 rows
 INSERT INTO affinity (i) VALUES ('abc')
@@ -1125,8 +1124,17 @@ SELECT 1
 error 42601 1
 SELECT x'0A0'
 
-error 0A000
+ok
 CREATE INDEX b31_x ON b31 (x)
+
+rows
+SELECT id FROM b31 WHERE x > 2 ORDER BY x
+----
+id
+2
+3
+4
+SELECT 3
 
 chapter "SQLite Foreign Key Support", "CREATE TABLE: CHECK constraints", "ALTER TABLE"
 ok
@@ -1254,3 +1262,123 @@ DROP VIEW w33
 
 ok
 DROP TABLE t33
+
+chapter "SELECT", "The LIKE, GLOB, REGEXP, MATCH, and extract operators": NATURAL joins, LIKE ... ESCAPE and GLOB character classes
+ok
+CREATE TABLE letters299 (num INTEGER, name TEXT)
+
+ok
+INSERT INTO letters299 VALUES (1, 'a'), (2, 'b'), (3, 'c')
+
+ok
+CREATE TABLE values299 (num INTEGER, value TEXT)
+
+ok
+INSERT INTO values299 VALUES (1, 'xxx'), (3, 'yyy'), (5, 'zzz')
+
+rows
+SELECT * FROM letters299 NATURAL JOIN values299 ORDER BY num
+----
+num|name|value
+1|a|xxx
+3|c|yyy
+SELECT 2
+
+rows
+SELECT * FROM letters299 NATURAL LEFT JOIN values299 ORDER BY num
+----
+num|name|value
+1|a|xxx
+2|b|NULL
+3|c|yyy
+SELECT 3
+
+rows
+SELECT 'A_C' LIKE 'a#_c' ESCAPE '#', 'abc' LIKE 'a#_c' ESCAPE '#', like('a#%', 'A%', '#'), like('a#%', 'ab', '#')
+----
+'A_C' LIKE 'a#_c' ESCAPE '#'|'abc' LIKE 'a#_c' ESCAPE '#'|like('a#%', 'A%', '#')|like('a#%', 'ab', '#')
+1|0|1|0
+SELECT 1
+
+error 22025 1
+SELECT 'ab' LIKE 'a%' ESCAPE ''
+
+error 22025 1
+SELECT like('a%', 'ab', '##')
+
+rows
+SELECT 'cat' GLOB '[a-c]*', 'dog' GLOB '[a-c]*', 'dog' GLOB '[^a-c]*', 'x' NOT GLOB '[abc]', glob('*[0-9][0-9]', 'room 42')
+----
+'cat' GLOB '[a-c]*'|'dog' GLOB '[a-c]*'|'dog' GLOB '[^a-c]*'|'x' NOT GLOB '[abc]'|glob('*[0-9][0-9]', 'room 42')
+1|0|1|1|1
+SELECT 1
+
+rows
+SELECT name FROM letters299 WHERE name GLOB (SELECT '[ab]') ORDER BY name
+----
+name
+a
+b
+SELECT 2
+
+chapter "Datatypes In SQLite": "Type Affinity", "Comparison Expressions" and keys on columns of every affinity
+ok
+CREATE TABLE dyn305 (id INTEGER PRIMARY KEY, t TEXT, n NUMERIC, r REAL, u)
+
+rows
+INSERT INTO dyn305 (t, n, r, u) VALUES (5, '3.0e+5', '7', '8'), (2.5, 'abc', 'seven', 8), ('x', '12', 1, 1.0)
+----
+INSERT 0 3
+
+rows
+SELECT typeof(t), t, typeof(n), n, typeof(r), r, typeof(u), u FROM dyn305 ORDER BY id
+----
+typeof(t)|t|typeof(n)|n|typeof(r)|r|typeof(u)|u
+text|5|integer|300000|real|7.0|text|8
+text|2.5|text|abc|text|seven|integer|8
+text|x|integer|12|real|1.0|real|1.0
+SELECT 3
+
+rows
+SELECT id FROM dyn305 WHERE n = '12'
+----
+id
+3
+SELECT 1
+
+ok
+CREATE TABLE keys305 (k PRIMARY KEY, v)
+
+rows
+INSERT INTO keys305 VALUES (3, 'integer'), ('3', 'text'), (x'03', 'blob'), (2.5, 'real'), (-1, 'negative')
+----
+INSERT 0 5
+
+error 23505 1555
+INSERT INTO keys305 VALUES (3.0, 'same number')
+
+rows
+SELECT v FROM keys305 ORDER BY k
+----
+v
+negative
+real
+integer
+text
+blob
+SELECT 5
+
+rows
+SELECT v FROM keys305 WHERE k > 2.5 ORDER BY k
+----
+v
+integer
+text
+blob
+SELECT 3
+
+ok
+CREATE UNIQUE INDEX dyn305_n ON dyn305 (n)
+
+error 23505 2067
+INSERT INTO dyn305 (n) VALUES ('12.0')

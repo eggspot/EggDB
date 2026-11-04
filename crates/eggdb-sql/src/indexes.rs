@@ -2,8 +2,8 @@ use crate::ast::{CreateIndex, DropIndex, IndexSpec, Name};
 use crate::dialect::Dialect;
 use crate::encoding::{
     IndexDefinition, MAX_INDEXES, NAMESPACE, TableDefinition, corrupt, decode_key_values,
-    decode_row, encode_key_value, index_prefix, prefix_end, rows_prefix, skip_key_values,
-    table_indexes_prefix, table_key,
+    decode_row, encode_column_key, index_prefix, prefix_end, push_index_prefix, push_rows_prefix,
+    rows_prefix, skip_key_values, table_indexes_prefix, table_key,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::TableCache;
@@ -33,12 +33,24 @@ pub(crate) fn entry_key(
     row: &[Value],
     row_key: &[u8],
 ) -> Vec<u8> {
-    let mut key = index_prefix(table.id, index.id);
+    let mut key = Vec::with_capacity(ENTRY_KEY_PREFIX_LENGTH + row_key.len() + 16);
+    write_entry_key(&mut key, table, index, row, row_key);
+    key
+}
+
+pub(crate) fn write_entry_key(
+    key: &mut Vec<u8>,
+    table: &TableDefinition,
+    index: &IndexDefinition,
+    row: &[Value],
+    row_key: &[u8],
+) {
+    key.clear();
+    push_index_prefix(key, table.id, index.id);
     for &column in &index.columns {
-        encode_key_value(&mut key, &row[column]);
+        encode_column_key(key, &row[column], table.columns[column].sql_type);
     }
     key.extend_from_slice(row_key.get(ROW_KEY_PREFIX_LENGTH..).unwrap_or(&[]));
-    key
 }
 
 pub(crate) fn row_key_of_entry(
@@ -46,6 +58,17 @@ pub(crate) fn row_key_of_entry(
     index: &IndexDefinition,
     entry: &[u8],
 ) -> SqlResult<Vec<u8>> {
+    let mut key = Vec::with_capacity(entry.len());
+    write_row_key_of_entry(&mut key, table, index, entry)?;
+    Ok(key)
+}
+
+pub(crate) fn write_row_key_of_entry(
+    key: &mut Vec<u8>,
+    table: &TableDefinition,
+    index: &IndexDefinition,
+    entry: &[u8],
+) -> SqlResult<()> {
     let body = entry
         .get(ENTRY_KEY_PREFIX_LENGTH..)
         .ok_or_else(|| corrupt("index entry"))?;
@@ -54,9 +77,10 @@ pub(crate) fn row_key_of_entry(
     if suffix.is_empty() {
         return Err(corrupt("index entry"));
     }
-    let mut key = rows_prefix(table.id);
+    key.clear();
+    push_rows_prefix(key, table.id);
     key.extend_from_slice(suffix);
-    Ok(key)
+    Ok(())
 }
 
 pub(crate) fn unique_conflict(
@@ -71,7 +95,7 @@ pub(crate) fn unique_conflict(
     }
     let mut start = index_prefix(table.id, index.id);
     for &column in &index.columns {
-        encode_key_value(&mut start, &row[column]);
+        encode_column_key(&mut start, &row[column], table.columns[column].sql_type);
     }
     let end = prefix_end(&start);
     let mut found = None;
@@ -355,7 +379,7 @@ fn next_index_id(table: &TableDefinition) -> SqlResult<u32> {
 
 pub(crate) fn check_orderable(sql_type: SqlType, position: usize) -> SqlResult<()> {
     let unordered = match sql_type {
-        SqlType::Array(_) | SqlType::Dynamic => true,
+        SqlType::Array(_) => true,
         SqlType::Defined(defined) => {
             defined.kind != crate::types::DefinedKind::Enum && !crate::citext::is_citext(defined)
         }

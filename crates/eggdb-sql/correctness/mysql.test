@@ -1156,3 +1156,40 @@ SET time_zone = 'Mars/Olympus'
 
 ok
 SET time_zone = 'SYSTEM'
+
+chapter "15.2.13.2 JOIN Clause", "14.8.1 String Comparison Functions and Operators": NATURAL joins and LIKE ... ESCAPE
+ok
+CREATE TABLE letters299 (num INT, name VARCHAR(10))
+
+ok
+INSERT INTO letters299 VALUES (1, 'a'), (2, 'b'), (3, 'c')
+
+ok
+CREATE TABLE values299 (num INT, value VARCHAR(10))
+
+ok
+INSERT INTO values299 VALUES (1, 'xxx'), (3, 'yyy'), (5, 'zzz')
+
+rows
+SELECT * FROM letters299 NATURAL JOIN values299 ORDER BY num
+----
+num|name|value
+1|a|xxx
+3|c|yyy
+SELECT 2
+
+rows
+SELECT * FROM letters299 NATURAL LEFT JOIN values299 ORDER BY num
+----
+num|name|value
+1|a|xxx
+2|b|NULL
+3|c|yyy
+SELECT 3
+
+rows
+SELECT 'David_' LIKE 'David|_' ESCAPE '|', 'David!' LIKE 'David|_' ESCAPE '|'
+----
+'David_' LIKE 'David|_' ESCAPE '|'|'David!' LIKE 'David|_' ESCAPE '|'
+1|0
+SELECT 1

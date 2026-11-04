@@ -25,6 +25,40 @@ pub struct Catalog {
     pub sequences: Vec<CatalogSequence>,
     /// The key spaces: the default one when it holds keys, then each collection.
     pub key_spaces: Vec<KeySpace>,
+    /// The triggers of every table.
+    pub triggers: Vec<CatalogTrigger>,
+}
+
+/// A trigger on a table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogTrigger {
+    /// The trigger's name.
+    pub name: String,
+    /// The table it is on.
+    pub table: String,
+    /// When it fires: `BEFORE`, `AFTER` or `INSTEAD OF`.
+    pub timing: String,
+    /// The events it fires on, in the catalog's order: `INSERT`, `UPDATE`, `DELETE`.
+    pub events: Vec<String>,
+    /// What it runs, as `information_schema.triggers.action_statement` gives it.
+    pub action: String,
+}
+
+impl CatalogTrigger {
+    /// The tree row's right text: the events joined, `INSERT, UPDATE`.
+    pub fn events_text(&self) -> String {
+        self.events.join(", ")
+    }
+
+    /// The inspector's line under the name: `Trigger · AFTER INSERT, UPDATE on orders`.
+    pub fn summary(&self) -> String {
+        format!(
+            "Trigger · {} {} on {}",
+            self.timing,
+            self.events_text(),
+            self.table
+        )
+    }
 }
 
 /// One column of a table or a view.
@@ -137,6 +171,16 @@ impl Catalog {
         }
     }
 
+    /// The triggers on `table`, in name order.
+    pub fn triggers_of<'c>(
+        &'c self,
+        table: &'c str,
+    ) -> impl Iterator<Item = &'c CatalogTrigger> + 'c {
+        self.triggers
+            .iter()
+            .filter(move |trigger| trigger.table == table)
+    }
+
     /// The secondary indexes of `table`, in name order.
     pub fn indexes_of<'c>(&'c self, table: &'c str) -> impl Iterator<Item = &'c CatalogIndex> + 'c {
         self.indexes
@@ -183,6 +227,7 @@ fn read_file_schema(session: &mut Session<'_>) -> Result<Catalog, StatementFailu
         .map_err(|error| StatementFailure::from_sql(&error, ""))?;
     let definitions = file_rows(session, &view_definitions_query()).unwrap_or_default();
     let sequences = file_rows(session, &sequences_query()).unwrap_or_default();
+    let triggers = file_rows(session, TRIGGERS_QUERY).unwrap_or_default();
     let mut catalog = Catalog::default();
     for schema in &schemas {
         catalog.tables.push(file_table(schema));
@@ -217,6 +262,7 @@ fn read_file_schema(session: &mut Session<'_>) -> Result<Catalog, StatementFailu
         });
     }
     catalog.sequences = sequence_rows(&sequences);
+    catalog.triggers = trigger_rows(&triggers);
     sort_catalog(&mut catalog);
     Ok(catalog)
 }
@@ -314,6 +360,7 @@ pub fn read_server(client: &mut PgClient) -> Result<Catalog, StatementFailure> {
     ))
     .unwrap_or_default();
     let sequences = server_rows(client, &sequences_query()).unwrap_or_default();
+    let triggers = server_rows(client, TRIGGERS_QUERY).unwrap_or_default();
     let columns_of = |relation: &str| -> Vec<CatalogColumn> {
         columns
             .iter()
@@ -360,6 +407,7 @@ pub fn read_server(client: &mut PgClient) -> Result<Catalog, StatementFailure> {
         });
     }
     catalog.sequences = sequence_rows(&sequences);
+    catalog.triggers = trigger_rows(&triggers);
     sort_catalog(&mut catalog);
     Ok(catalog)
 }
@@ -395,6 +443,35 @@ fn sequence_rows(rows: &[Vec<Option<String>>]) -> Vec<CatalogSequence> {
         .collect()
 }
 
+const TRIGGERS_QUERY: &str = "SELECT trigger_name, event_object_table, action_timing, event_manipulation, action_statement FROM information_schema.triggers WHERE trigger_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY trigger_name, event_object_table";
+
+/// The triggers in rows of `information_schema.triggers` (name, table, timing, event, action), one
+/// trigger for the rows that share a name and a table, its events in the order listed.
+pub fn trigger_rows(rows: &[Vec<Option<String>>]) -> Vec<CatalogTrigger> {
+    let mut triggers: Vec<CatalogTrigger> = Vec::new();
+    for row in rows {
+        let (name, table, event) = (text_at(row, 0), text_at(row, 1), text_at(row, 3));
+        match triggers
+            .iter_mut()
+            .find(|trigger| trigger.name == name && trigger.table == table)
+        {
+            Some(trigger) => {
+                if !trigger.events.contains(&event) {
+                    trigger.events.push(event);
+                }
+            }
+            None => triggers.push(CatalogTrigger {
+                name,
+                table,
+                timing: text_at(row, 2),
+                events: vec![event],
+                action: text_at(row, 4),
+            }),
+        }
+    }
+    triggers
+}
+
 fn text_at(row: &[Option<String>], column: usize) -> String {
     row.get(column).cloned().flatten().unwrap_or_default()
 }
@@ -404,6 +481,7 @@ fn sort_catalog(catalog: &mut Catalog) {
     catalog.views.sort_by(|a, b| a.name.cmp(&b.name));
     catalog.indexes.sort_by(|a, b| a.name.cmp(&b.name));
     catalog.sequences.sort_by(|a, b| a.name.cmp(&b.name));
+    catalog.triggers.sort_by(|a, b| a.name.cmp(&b.name));
 }
 
 /// The `CREATE TABLE` statement a server's columns describe, when the server gives no DDL.
@@ -576,6 +654,87 @@ mod tests {
         assert_eq!(catalog.key_spaces[1].keys, KeyCount::Exactly(2));
         drop(database);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_file_lists_its_triggers_with_their_timing_and_events() {
+        let path = scratch("triggers");
+        let database = shop(&path);
+        {
+            let store = database.sql_store();
+            let mut session = store.session(Dialect::Sqlite);
+            for statement in [
+                "CREATE TABLE audit (note text)",
+                "CREATE TRIGGER orders_audit AFTER UPDATE ON orders BEGIN INSERT INTO audit VALUES ('u'); END",
+                "CREATE TRIGGER orders_check BEFORE INSERT ON orders BEGIN SELECT 1; END",
+            ] {
+                session
+                    .execute(statement, &mut |_| {})
+                    .expect("the triggers are made");
+            }
+            let _ = session.close();
+        }
+        let catalog = read_file(&database).expect("the catalog reads");
+        let triggers: Vec<(String, String, String)> = catalog
+            .triggers
+            .iter()
+            .map(|trigger| {
+                (
+                    trigger.name.clone(),
+                    trigger.table.clone(),
+                    trigger.summary(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            triggers,
+            vec![
+                (
+                    "orders_audit".to_owned(),
+                    "orders".to_owned(),
+                    "Trigger · AFTER UPDATE on orders".to_owned()
+                ),
+                (
+                    "orders_check".to_owned(),
+                    "orders".to_owned(),
+                    "Trigger · BEFORE INSERT on orders".to_owned()
+                ),
+            ]
+        );
+        assert_eq!(catalog.triggers_of("orders").count(), 2);
+        assert!(
+            catalog.triggers[0].action.contains("INSERT INTO audit"),
+            "{}",
+            catalog.triggers[0].action
+        );
+        assert_eq!(catalog.triggers_of("customers").count(), 0);
+        drop(database);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn trigger_rows_join_one_triggers_events() {
+        let row = |name: &str, event: &str| {
+            vec![
+                Some(name.to_owned()),
+                Some("orders".to_owned()),
+                Some("BEFORE".to_owned()),
+                Some(event.to_owned()),
+            ]
+        };
+        let triggers = trigger_rows(&[
+            row("stamp", "INSERT"),
+            row("stamp", "UPDATE"),
+            row("stamp", "UPDATE"),
+            vec![None],
+        ]);
+        assert_eq!(triggers.len(), 2);
+        assert_eq!(triggers[0].events_text(), "INSERT, UPDATE");
+        assert_eq!(
+            triggers[0].summary(),
+            "Trigger · BEFORE INSERT, UPDATE on orders"
+        );
+        assert_eq!(triggers[1].name, "");
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use super::value::{Value, decode_all, decode_first, encode};
 use crate::server::{Broker, ServerConfig};
+use eggdb_platform::connection_limits::{Reservation, UNCOUNTED_BUFFER_BYTES};
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -19,6 +20,9 @@ const LINK_CREDIT: u32 = 500;
 const MAX_PER_PUMP: u32 = 100;
 const MAX_RANGE: u32 = 10_000;
 const LEASE_MS: u64 = 30 * 60 * 1000;
+const DELIVERY_FRAME_BYTES: usize = 64;
+const RESOURCE_LIMIT_EXCEEDED: &str = "amqp:resource-limit-exceeded";
+const OUT_OF_MEMORY_BUDGET: &str = "the server's connections already hold their memory budget";
 
 const SASL_MECHANISMS: u64 = 0x40;
 const SASL_INIT: u64 = 0x41;
@@ -129,6 +133,20 @@ struct Connection<'b, 's> {
     remote_idle: Option<Duration>,
     sessions: BTreeMap<u16, Session>,
     outgoing: Vec<u8>,
+    unfinished_held: Reservation<'b>,
+    outgoing_held: Reservation<'b>,
+    next_link: usize,
+}
+
+fn delivery_bytes(body_bytes: usize, max_frame: u32) -> usize {
+    let frame_room = usize::try_from(max_frame).unwrap_or(usize::MAX).max(1);
+    let payload = body_bytes.saturating_add(DELIVERY_FRAME_BYTES);
+    payload.saturating_add(
+        payload
+            .div_ceil(frame_room)
+            .saturating_add(1)
+            .saturating_mul(DELIVERY_FRAME_BYTES),
+    )
 }
 
 fn message_body(payload: &[u8]) -> Result<Vec<u8>, String> {
@@ -182,6 +200,28 @@ fn outgoing_payload(queue: &str, message: &eggdb_queues::Message) -> Vec<u8> {
 }
 
 impl Connection<'_, '_> {
+    fn unfinished_delivery_bytes(&self) -> usize {
+        self.sessions
+            .values()
+            .flat_map(|session| session.links.values())
+            .filter_map(|link| link.incoming.as_ref())
+            .map(|incoming| incoming.bytes.len())
+            .fold(0, usize::saturating_add)
+    }
+
+    fn release_finished_deliveries(&mut self) {
+        let unfinished = self.unfinished_delivery_bytes();
+        if unfinished < self.unfinished_held.bytes() {
+            self.unfinished_held.hold_if_large(unfinished);
+        }
+    }
+
+    fn written(&mut self) {
+        self.outgoing.clear();
+        self.outgoing.shrink_to(UNCOUNTED_BUFFER_BYTES);
+        self.outgoing_held.resize(0);
+    }
+
     fn send(&mut self, kind: u8, channel: u16, body: &[u8]) {
         self.outgoing.extend_from_slice(&frame(kind, channel, body));
     }
@@ -513,6 +553,13 @@ impl Connection<'_, '_> {
 
     fn transfer(&mut self, channel: u16, body: &Value, payload: &[u8]) -> Result<(), String> {
         let handle = self.handle_of(body)?;
+        let unfinished = self
+            .unfinished_delivery_bytes()
+            .saturating_add(payload.len());
+        if !self.unfinished_held.hold_if_large(unfinished) {
+            self.close_with(RESOURCE_LIMIT_EXCEEDED, OUT_OF_MEMORY_BUDGET);
+            return Ok(());
+        }
         let session = self.session(channel)?;
         session.next_incoming_id = session.next_incoming_id.wrapping_add(1);
         let link = session
@@ -735,18 +782,53 @@ impl Connection<'_, '_> {
                 }
             }
         }
-        for (channel, handle, queue, room, presettled, drain) in wanted {
+        if wanted.is_empty() {
+            return;
+        }
+        let start = self.next_link % wanted.len();
+        wanted.rotate_left(start);
+        let mut delivered_this_round = false;
+        for (position, (channel, handle, queue, room, presettled, drain)) in
+            wanted.into_iter().enumerate()
+        {
+            let mut refused = false;
             let messages = if room > 0 {
-                self.broker
+                let broker = self.broker;
+                let max_frame = self.remote_max_frame;
+                let mut held_bytes = self.outgoing.len();
+                let held = &mut self.outgoing_held;
+                broker
                     .queues
-                    .receive(&queue, room as usize, LEASE_MS, now_ms())
+                    .receive_fitting(
+                        &queue,
+                        room as usize,
+                        LEASE_MS,
+                        now_ms(),
+                        &mut |body_bytes: usize| {
+                            let grown =
+                                held_bytes.saturating_add(delivery_bytes(body_bytes, max_frame));
+                            if held.hold_if_large(grown) {
+                                held_bytes = grown;
+                                true
+                            } else {
+                                refused = true;
+                                false
+                            }
+                        },
+                    )
                     .unwrap_or_default()
             } else {
                 Vec::new()
             };
+            if refused && messages.is_empty() && !delivered_this_round {
+                self.close_with(RESOURCE_LIMIT_EXCEEDED, OUT_OF_MEMORY_BUDGET);
+                return;
+            }
             let mut sent = Vec::new();
-            for message in &messages {
+            let mut unsent = messages.iter();
+            for message in unsent.by_ref() {
                 let Some(session) = self.sessions.get_mut(&channel) else {
+                    let _ = self.broker.queues.unlease(&queue, message.id, now_ms());
                     break;
                 };
                 let delivery_id = session.next_outgoing_id;
@@ -776,10 +858,22 @@ impl Connection<'_, '_> {
                 );
                 sent.push(message.id);
             }
+            let now = now_ms();
+            for message in unsent {
+                let _ = self.broker.queues.unlease(&queue, message.id, now);
+            }
+            let delivered_any = !sent.is_empty();
+            delivered_this_round |= delivered_any;
             if presettled {
                 for id in sent {
                     let _ = self.broker.queues.ack(&queue, id);
                 }
+            }
+            if refused {
+                self.next_link = start
+                    .saturating_add(position)
+                    .saturating_add(usize::from(delivered_any));
+                return;
             }
             if drain && messages.len() < room as usize {
                 let Some(session) = self.sessions.get_mut(&channel) else {
@@ -846,6 +940,9 @@ pub(crate) fn serve_stream(
         remote_idle: None,
         sessions: BTreeMap::new(),
         outgoing: Vec::new(),
+        unfinished_held: config.memory_budget.empty_reservation(),
+        outgoing_held: config.memory_budget.empty_reservation(),
+        next_link: 0,
     };
     let mut buffer = Vec::new();
     let mut chunk = vec![0u8; 64 * 1024];
@@ -908,6 +1005,7 @@ pub(crate) fn serve_stream(
                     {
                         connection.close_with("amqp:connection:framing-error", &description);
                     }
+                    connection.release_finished_deliveries();
                 }
                 _ => connection.close_with(
                     "amqp:connection:framing-error",
@@ -926,7 +1024,7 @@ pub(crate) fn serve_stream(
         }
         if !connection.outgoing.is_empty() {
             writer.write_all(&connection.outgoing)?;
-            connection.outgoing.clear();
+            connection.written();
             last_sent = Instant::now();
         }
         if connection.stage == Stage::Closed {

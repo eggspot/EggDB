@@ -137,6 +137,17 @@ impl<'s> Session<'s> {
         }))
     }
 
+    pub(in crate::session) fn runs_its_body_under_showplan(
+        &mut self,
+        call: &ProcedureCall,
+    ) -> SqlResult<bool> {
+        let name = call.procedure.text.as_str();
+        Ok(ApplicationLockProcedure::named(name).is_none()
+            && !crate::session::sqlserver::is_system_procedure(name)
+            && self.batch_resume.is_some()
+            && self.tsql_routine(&call.routine)?.is_some())
+    }
+
     pub(in crate::session) fn run_execute(
         &mut self,
         call: &ProcedureCall,

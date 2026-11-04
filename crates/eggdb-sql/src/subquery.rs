@@ -472,7 +472,7 @@ fn single_item(select: &Select, shape: LookupShape) -> Option<&Expr> {
     let fits = match shape {
         LookupShape::Existence => false,
         LookupShape::Members => true,
-        LookupShape::Aggregate => !select.distinct && columns_only_in_aggregates(expr),
+        LookupShape::Aggregate => !select.removes_duplicates() && columns_only_in_aggregates(expr),
     };
     (plain && fits).then_some(expr)
 }
@@ -619,6 +619,8 @@ fn key_query(query: &Query, shape: LookupShape) -> Option<KeyQueries> {
                 limit: None,
                 offset: None,
                 source_row_limit: None,
+                grouping_sets: None,
+                distinct_on: Vec::new(),
             },
             query.position,
         )),
@@ -641,6 +643,8 @@ fn key_query(query: &Query, shape: LookupShape) -> Option<KeyQueries> {
         limit: None,
         offset: None,
         source_row_limit: None,
+        grouping_sets: None,
+        distinct_on: Vec::new(),
     };
     Some(KeyQueries {
         keys: Query::of_select(keys, query.position),
@@ -1087,6 +1091,7 @@ pub(crate) fn select_expressions_mut(select: &mut Select) -> Vec<&mut Expr> {
     exprs.extend(select.filter.iter_mut());
     exprs.extend(select.group_by.iter_mut());
     exprs.extend(select.having.iter_mut());
+    exprs.extend(select.distinct_on.iter_mut());
     exprs.extend(select.order_by.iter_mut().map(|item| &mut item.expr));
     exprs.extend(select.limit.iter_mut());
     exprs.extend(select.offset.iter_mut());
@@ -1116,6 +1121,7 @@ pub(crate) fn select_expressions(select: &Select) -> Vec<&Expr> {
     exprs.extend(select.filter.iter());
     exprs.extend(select.group_by.iter());
     exprs.extend(select.having.iter());
+    exprs.extend(select.distinct_on.iter());
     exprs.extend(select.order_by.iter().map(|item| &item.expr));
     exprs.extend(select.limit.iter());
     exprs.extend(select.offset.iter());
@@ -1833,6 +1839,7 @@ fn prepare_select(
             )?;
         }
         let mut others: Vec<&mut Expr> = select.group_by.iter_mut().collect();
+        others.extend(select.distinct_on.iter_mut());
         others.extend(select.order_by.iter_mut().map(|item| &mut item.expr));
         others.extend(select.limit.iter_mut());
         others.extend(select.offset.iter_mut());
@@ -1869,6 +1876,10 @@ fn prepare_reference(
         let result = {
             let overlay = Overlay::new(env.reader, &prepared.temp);
             run_query(&env.with_reader(&overlay), tables, &derived.query, ctes)?
+        };
+        let result = match &derived.hierarchy {
+            Some(hierarchy) => crate::hierarchy::expanded(hierarchy, result)?,
+            None => result,
         };
         let columns = result.columns.unwrap_or_default();
         let label = reference.alias.as_deref().unwrap_or("unnamed_subquery");
@@ -1910,7 +1921,7 @@ fn rows_a_lone_function_needs(select: &Select) -> Option<u64> {
             .generated
             .as_deref()
             .is_some_and(|generated| matches!(generated, GeneratedTable::Function(_)));
-    let keeps_rows_as_they_come = !select.distinct
+    let keeps_rows_as_they_come = !select.removes_duplicates()
         && select.filter.is_none()
         && select.order_by.is_empty()
         && select.source_row_limit.is_none()
@@ -2192,6 +2203,8 @@ fn lateral_source(reference: &TableReference) -> Option<LateralSource> {
         limit: None,
         offset: None,
         source_row_limit: None,
+        grouping_sets: None,
+        distinct_on: Vec::new(),
     };
     Some(LateralSource {
         query: Query::of_select(select, position),
@@ -2351,6 +2364,8 @@ fn lateral_rows(
             limit: None,
             offset: None,
             source_row_limit: None,
+            grouping_sets: None,
+            distinct_on: Vec::new(),
         };
         run_query(
             &outer_env,
@@ -2424,7 +2439,13 @@ fn prepare_lateral(
         return Ok(());
     };
     let (kind, uses_names) = match from.joins.get(join_at) {
-        Some(join) => (join.kind, matches!(join.condition, JoinCondition::Using(_))),
+        Some(join) => (
+            join.kind,
+            matches!(
+                join.condition,
+                JoinCondition::Using(_) | JoinCondition::Natural
+            ),
+        ),
         None => return Err(internal("a LATERAL item lost its join")),
     };
     let source = std::iter::once(&from.first)

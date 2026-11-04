@@ -127,6 +127,9 @@ fn added_function_type(
     if let Some(sql_type) = crate::sql_json::query_result_type(name, arguments, scope) {
         return Some(Some(sql_type));
     }
+    if let Some(sql_type) = crate::sql_json_constructors::result_type(name, arguments, scope) {
+        return Some(Some(sql_type));
+    }
     if matches!(name, "pg_sleep" | "pg_notify") {
         return Some(Some(SqlType::VOID));
     }
@@ -156,6 +159,7 @@ fn added_function_type(
         | "quote_nullable"
         | "regexp_replace"
         | "regexp_substr"
+        | "like_escape"
         | "similar_to_escape"
         | "similar_substring_pattern"
         | "to_char"
@@ -351,6 +355,8 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
             _ => None,
         },
         ("json_array_length" | "jsonb_array_length", [_]) => Some(SqlType::Integer),
+        ("scale" | "min_scale", [_]) => Some(SqlType::Integer),
+        ("trim_scale", [_]) => Some(SqlType::Numeric(None)),
         ("round" | "trunc" | "ceil" | "ceiling" | "floor", [argument, ..]) => {
             match static_type(argument, scope)? {
                 SqlType::Numeric(_) => Some(SqlType::Numeric(None)),
@@ -463,7 +469,7 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
             .column(qualifier.as_deref(), name, expr.position)
             .ok()
             .and_then(|offset| scope.column_type(offset))
-            .filter(|sql_type| *sql_type != SqlType::Dynamic),
+            .filter(|sql_type| !sql_type.is_dynamic()),
         ExprKind::Slot { sql_type, .. }
         | ExprKind::Constant { sql_type, .. }
         | ExprKind::OuterColumn { sql_type, .. } => *sql_type,

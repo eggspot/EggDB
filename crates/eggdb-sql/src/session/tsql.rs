@@ -1,8 +1,8 @@
 use super::sqlserver::BatchStep;
 use super::{Client, InfoMessage, NamedParameter, QueryResult, Session, reborrowed_rows};
 use crate::ast::{
-    AssignmentTarget, DynamicSql, Expr, Name, RaiseError, Select, Statement, ThrowArguments,
-    VariableDeclaration, VariableSource,
+    AssignmentTarget, DynamicSql, Expr, Name, OutputInto, OutputTarget, RaiseError, Select,
+    Statement, ThrowArguments, VariableDeclaration, VariableSource,
 };
 use crate::bulk_load::BulkRows;
 use crate::copy::NoCopyChannel;
@@ -328,6 +328,12 @@ impl<'s> Session<'s> {
         let mut at_instruction = 0usize;
         while let Some(&instruction) = code.program.instructions.get(at_instruction) {
             let (at, test) = match instruction {
+                Instruction::Jump { .. } | Instruction::Return
+                    if self.settings.sqlserver.showplan.is_some() =>
+                {
+                    at_instruction += 1;
+                    continue;
+                }
                 Instruction::Jump { to } => {
                     if to <= at_instruction && self.cancel.is_cancelled() {
                         let error = self.in_dialect(
@@ -407,6 +413,17 @@ impl<'s> Session<'s> {
             }
             let (failure, lower_level) = match flow {
                 Ok(_) => {
+                    if test.is_some() && self.settings.sqlserver.showplan.is_some() {
+                        self.set_last_error(0);
+                        self.condition_holds = None;
+                        for result in results {
+                            if !on_step(self.batch_step(Ok(result), statement_start)) {
+                                return Ok(ProgramEnd::Stopped);
+                            }
+                        }
+                        at_instruction += 1;
+                        continue;
+                    }
                     if let Some((otherwise, _)) = test {
                         self.set_last_error(0);
                         at_instruction = if self.condition_holds.take() == Some(true) {
@@ -1133,6 +1150,35 @@ impl<'s> Session<'s> {
 
     fn variable_column(&self, variable: &Name, column: &Name) -> SqlResult<(usize, SqlType)> {
         crate::tsql::variable_column(&self.table_variables, variable, column)
+    }
+
+    pub(super) fn run_output_into(
+        &mut self,
+        output: &mut OutputInto,
+        binding: &Binding<'_>,
+    ) -> SqlResult<QueryResult> {
+        let mut staged = match &output.destination.target {
+            OutputTarget::Variable(variable) => Some(
+                self.table_variables
+                    .get(&variable.text)
+                    .cloned()
+                    .ok_or_else(|| {
+                        crate::table_variables::undeclared(&variable.text).at(variable.position)
+                    })?,
+            ),
+            OutputTarget::Table(_) => None,
+        };
+        let command = crate::output_into::command(&output.statement);
+        let result = self.write_firing_triggers(command, |writer, tables| {
+            crate::output_into::run(writer, tables, binding, output, staged.as_mut())
+        })?;
+        if let (Some(staged), OutputTarget::Variable(variable)) =
+            (staged, &output.destination.target)
+        {
+            self.writable_table_variables()
+                .insert(variable.text.clone(), staged);
+        }
+        Ok(result)
     }
 
     pub(super) fn insert_into_variable(

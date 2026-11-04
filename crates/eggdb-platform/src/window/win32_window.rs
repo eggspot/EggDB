@@ -1,4 +1,5 @@
 mod automation;
+mod drop_target;
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -13,6 +14,7 @@ use super::{
     Window, WindowError, WindowEvent, WindowOptions, check_clipboard_text, check_frame,
 };
 use automation::Automation;
+use drop_target::DropRegistration;
 
 type Handle = *mut c_void;
 type WindowProcedure = unsafe extern "system" fn(Handle, u32, usize, isize) -> isize;
@@ -44,6 +46,7 @@ const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: isize = -4;
 
 const WM_SIZE: u32 = 0x0005;
 const WM_SETFOCUS: u32 = 0x0007;
+const SPI_GETCLIENTAREAANIMATION: u32 = 0x1042;
 const WM_KILLFOCUS: u32 = 0x0008;
 const WM_PAINT: u32 = 0x000F;
 const WM_CLOSE: u32 = 0x0010;
@@ -54,6 +57,7 @@ const WM_NCCREATE: u32 = 0x0081;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_CHAR: u32 = 0x0102;
 const WM_SYSKEYDOWN: u32 = 0x0104;
+const WM_SYSKEYUP: u32 = 0x0105;
 const WM_DPICHANGED: u32 = 0x02E0;
 const WM_DROPFILES: u32 = 0x0233;
 const WM_MOUSEMOVE: u32 = 0x0200;
@@ -213,9 +217,30 @@ unsafe extern "system" {
     fn DragFinish(drop: Handle);
 }
 
-fn dropped_files(drop: Handle) -> Vec<PathBuf> {
-    // SAFETY: `drop` is the `HDROP` of the `WM_DROPFILES` being handled; asking for the
-    // count with a null buffer writes nothing.
+/// The paths of a `WM_DROPFILES` drop, after which the drop is released.
+///
+/// # Safety
+///
+/// `drop` must be the live `HDROP` of the `WM_DROPFILES` message being handled, not used again
+/// after this call.
+unsafe fn dropped_files(drop: Handle) -> Vec<PathBuf> {
+    // SAFETY: the caller passes a live `HDROP`, as this function's contract requires.
+    let paths = unsafe { dropped_paths(drop) };
+    // SAFETY: `drop` is the `HDROP` of the `WM_DROPFILES` being handled, released once, after
+    // the last query.
+    unsafe { DragFinish(drop) };
+    paths
+}
+
+/// The paths a drop handle holds, at most `MOST_DROPPED_FILES` of them.
+///
+/// # Safety
+///
+/// `drop` must be a live `HDROP` (of `WM_DROPFILES`, or the `CF_HDROP` medium of an OLE drop)
+/// for the whole call.
+unsafe fn dropped_paths(drop: Handle) -> Vec<PathBuf> {
+    // SAFETY: the caller passes a live `HDROP`; asking for the count with a null buffer writes
+    // nothing.
     let count = unsafe { DragQueryFileW(drop, DRAG_QUERY_COUNT, std::ptr::null_mut(), 0) };
     let mut paths = Vec::new();
     for index in 0..count.min(MOST_DROPPED_FILES) {
@@ -235,8 +260,6 @@ fn dropped_files(drop: Handle) -> Vec<PathBuf> {
             paths.push(path);
         }
     }
-    // SAFETY: `drop` is released once, after the last query.
-    unsafe { DragFinish(drop) };
     paths
 }
 
@@ -247,6 +270,7 @@ unsafe extern "system" {
     fn TrackMouseEvent(track: *mut TrackMouseEventParams) -> i32;
     fn ScreenToClient(window: Handle, point: *mut Point) -> i32;
     fn OpenClipboard(owner: Handle) -> i32;
+    fn SystemParametersInfoW(action: u32, parameter: u32, value: *mut i32, update: u32) -> i32;
     fn CloseClipboard() -> i32;
     fn EmptyClipboard() -> i32;
     fn SetClipboardData(format: u32, memory: Handle) -> Handle;
@@ -728,7 +752,9 @@ fn handle_message(
         WM_GETOBJECT => return state.automation.answer_get_object(window, wparam, lparam),
         WM_CLOSE => state.push(WindowEvent::CloseRequested),
         WM_DROPFILES => {
-            let paths = dropped_files(std::ptr::without_provenance_mut(wparam));
+            // SAFETY: a `WM_DROPFILES` message's `wparam` is the drop's live `HDROP`, which this
+            // handler releases once.
+            let paths = unsafe { dropped_files(std::ptr::without_provenance_mut(wparam)) };
             if !paths.is_empty() {
                 state.push(WindowEvent::FilesDropped(paths));
             }
@@ -754,10 +780,11 @@ fn handle_message(
             if let Some(key) = win32::key_from_virtual_key(wparam, modifiers) {
                 state.push(WindowEvent::Key(KeyPress { key, modifiers }));
             }
-            if message == WM_SYSKEYDOWN {
+            if message == WM_SYSKEYDOWN && !win32::system_key_is_answered(wparam, modifiers) {
                 return None;
             }
         }
+        WM_SYSKEYUP if win32::system_key_is_answered(wparam, held_modifiers()) => {}
         WM_CHAR => {
             let mut characters = state.characters.get();
             let character = characters.push(win32::low_word(wparam));
@@ -881,6 +908,7 @@ fn register_class(instance: Handle, class_name: &[u16]) -> Result<(), WindowErro
 pub(crate) struct Win32Window {
     window: Handle,
     state: Rc<WindowState>,
+    drop_target: Option<DropRegistration>,
 }
 
 impl Win32Window {
@@ -929,11 +957,18 @@ impl Win32Window {
         if window.is_null() {
             return Err(last_error("CreateWindowExW"));
         }
-        let this = Self { window, state };
+        let drop_target = DropRegistration::register(window, &state);
+        let this = Self {
+            window,
+            state,
+            drop_target,
+        };
         this.state.automation.attach(this.window);
-        // SAFETY: `window` was just created by this backend; the call only lets it receive
-        // `WM_DROPFILES`.
-        unsafe { DragAcceptFiles(this.window, 1) };
+        if this.drop_target.is_none() {
+            // SAFETY: `window` was just created by this backend; the call only lets it
+            // receive `WM_DROPFILES`.
+            unsafe { DragAcceptFiles(this.window, 1) };
+        }
         // SAFETY: `window` was just created by this backend.
         let dpi = unsafe { GetDpiForWindow(this.window) };
         this.state
@@ -993,6 +1028,7 @@ impl Win32Window {
 
 impl Drop for Win32Window {
     fn drop(&mut self) {
+        self.drop_target = None;
         self.state.automation.detach(self.window);
         // SAFETY: `window` is ours; clearing the slot stops the procedure from reaching the
         // state, which is freed after this.
@@ -1034,6 +1070,15 @@ impl Window for Win32Window {
         // SAFETY: `window` is ours; this sends `WM_PAINT` now, which draws the stored frame.
         unsafe { UpdateWindow(self.window) };
         Ok(())
+    }
+
+    fn reduced_motion(&mut self) -> bool {
+        let mut animates: i32 = 1;
+        // SAFETY: `SPI_GETCLIENTAREAANIMATION` writes one `BOOL` to the pointer, which is a
+        // live `i32` of this frame.
+        let read =
+            unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &raw mut animates, 0) };
+        read != 0 && animates == 0
     }
 
     fn set_accessibility_tree(&mut self, nodes: &[AccessNode]) {

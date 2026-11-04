@@ -97,6 +97,17 @@ fn empty(status: u16) -> Response {
     }
 }
 
+/// The answer to a request the server's memory budget cannot take: `503 SlowDown`, which S3
+/// clients retry with backoff.
+pub fn over_memory_budget() -> Response {
+    failure(
+        503,
+        "SlowDown",
+        "the server's connections already hold their memory budget; reduce your request rate",
+        "",
+    )
+}
+
 fn failure(status: u16, code: &str, message: &str, resource: &str) -> Response {
     xml(
         status,

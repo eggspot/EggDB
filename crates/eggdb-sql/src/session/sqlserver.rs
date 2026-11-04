@@ -324,6 +324,8 @@ impl<'s> Session<'s> {
         settings.sqlserver.no_count = false;
         settings.sqlserver.implicit_transactions = false;
         settings.sqlserver.format_only = false;
+        settings.sqlserver.showplan = None;
+        settings.sqlserver.statistics_profile = false;
         settings.sqlserver.cursors.clear();
         self.tsql_cursors.clear();
         self.temporary.discard_prefix(&crate::encoding::routine_key(
@@ -525,6 +527,21 @@ impl<'s> Session<'s> {
                 Arc::make_mut(&mut self.settings).sqlserver.format_only = *on;
                 Ok(QueryResult::command("SET"))
             }
+            SqlServerStatement::Showplan { kind, on } => {
+                if *kind != crate::ast::ShowplanKind::StatisticsProfile && self.dynamic_depth > 0 {
+                    return Err(showplan_inside_nested_code());
+                }
+                let sqlserver = &mut Arc::make_mut(&mut self.settings).sqlserver;
+                match kind {
+                    crate::ast::ShowplanKind::StatisticsProfile => {
+                        sqlserver.statistics_profile = *on;
+                    }
+                    kind if *on => sqlserver.showplan = Some(*kind),
+                    kind if sqlserver.showplan == Some(*kind) => sqlserver.showplan = None,
+                    _ => {}
+                }
+                Ok(QueryResult::command("SET"))
+            }
             SqlServerStatement::XactAbort(on) => {
                 Arc::make_mut(&mut self.settings).sqlserver.xact_abort = *on;
                 Ok(QueryResult::command("SET"))
@@ -582,6 +599,10 @@ impl<'s> Session<'s> {
             SqlServerStatement::CloseCursor(cursor) => self.run_close_cursor(cursor),
             SqlServerStatement::DeallocateCursor(cursor) => self.run_deallocate_cursor(cursor),
             SqlServerStatement::WaitFor { until_time, time } => self.run_waitfor(*until_time, time),
+            SqlServerStatement::OutputInto(_) => Err(SqlError::new(
+                SqlState::INTERNAL_ERROR,
+                "an OUTPUT ... INTO statement reached the SQL Server statement runner",
+            )),
         }
     }
 
@@ -789,5 +810,129 @@ impl<'s> Session<'s> {
             self.identity_insert_table = None;
         }
         Ok(QueryResult::command("SET"))
+    }
+}
+
+pub(super) fn showplan_inside_nested_code() -> SqlError {
+    SqlError::new(
+        SqlState::SYNTAX_ERROR,
+        "The SET SHOWPLAN statements must be the only statements in the batch.",
+    )
+    .with_sqlserver_code(1067)
+}
+
+fn runs_under_showplan(statement: &crate::ast::Statement) -> bool {
+    use crate::ast::Statement;
+    matches!(
+        statement,
+        Statement::Set { .. }
+            | Statement::Ignored { .. }
+            | Statement::SqlServer(
+                SqlServerStatement::Showplan { .. }
+                    | SqlServerStatement::NoCount(_)
+                    | SqlServerStatement::ImplicitTransactions(_)
+                    | SqlServerStatement::FormatOnly(_)
+                    | SqlServerStatement::XactAbort(_)
+            )
+    )
+}
+
+impl Session<'_> {
+    pub(super) fn plan_instead_under_showplan(
+        &mut self,
+        statement: &crate::ast::Statement,
+    ) -> SqlResult<Option<QueryResult>> {
+        use crate::ast::Statement;
+        let Some(kind) = self.settings.sqlserver.showplan else {
+            return Ok(None);
+        };
+        if runs_under_showplan(statement) {
+            return Ok(None);
+        }
+        match statement {
+            Statement::SqlServer(SqlServerStatement::ExecuteDynamic(_)) => return Ok(None),
+            Statement::SqlServer(SqlServerStatement::Execute(call))
+                if self.runs_its_body_under_showplan(call)? =>
+            {
+                return Ok(None);
+            }
+            Statement::SqlServer(SqlServerStatement::Declare(declarations)) => {
+                let unassigned: Vec<crate::ast::VariableDeclaration> = declarations
+                    .iter()
+                    .map(|declaration| crate::ast::VariableDeclaration {
+                        initial: None,
+                        ..declaration.clone()
+                    })
+                    .collect();
+                self.run_declare(&unassigned)?;
+            }
+            Statement::SqlServer(SqlServerStatement::DeclareTable {
+                name,
+                columns,
+                rules,
+            }) => {
+                self.declare_table_variable(name, columns, rules)?;
+            }
+            _ => {}
+        }
+        self.refresh_database_names();
+        let settings = Arc::clone(&self.settings);
+        crate::roles::check_statement(&settings, statement)?;
+        let binding = Binding {
+            settings: &settings,
+            walk_expressions: self.statement_walks_expressions,
+            target_privilege: Some(crate::roles::target_privilege(statement)),
+        };
+        self.showplan(statement, &binding, kind).map(Some)
+    }
+
+    pub(super) fn statement_plan(
+        &mut self,
+        statement: &crate::ast::Statement,
+        binding: &Binding<'_>,
+    ) -> SqlResult<
+        Option<(
+            crate::execute::ExplainedQuery,
+            crate::explain::PlannedStatement,
+        )>,
+    > {
+        let Some(planned) = crate::explain::PlannedStatement::of(statement) else {
+            return Ok(None);
+        };
+        let mut bound = statement.clone();
+        let query = self.read(|reader, tables| {
+            binding.statement(reader, tables, &mut bound)?;
+            crate::execute::explain(reader, tables, &bound)
+        })?;
+        Ok(Some((query, planned)))
+    }
+
+    pub(super) fn showplan(
+        &mut self,
+        statement: &crate::ast::Statement,
+        binding: &Binding<'_>,
+        kind: crate::ast::ShowplanKind,
+    ) -> SqlResult<QueryResult> {
+        let text = self.shown_statement.take().unwrap_or_default();
+        let plan = self.statement_plan(statement, binding)?;
+        if plan.is_none() && self.explain_plan_displays {
+            return Err(SqlError::not_supported(
+                "SHOWPLAN of a statement other than SELECT, UPDATE or DELETE",
+            ));
+        }
+        let plan = plan.as_ref().map(|(query, planned)| (query, *planned));
+        match kind {
+            crate::ast::ShowplanKind::Text => {
+                let mut results = crate::explain::showplan_text(plan, &text).into_iter();
+                let first = results
+                    .next()
+                    .unwrap_or_else(|| QueryResult::command("SHOWPLAN"));
+                self.extra_results.extend(results);
+                Ok(first)
+            }
+            crate::ast::ShowplanKind::All | crate::ast::ShowplanKind::StatisticsProfile => {
+                Ok(crate::explain::showplan_all(plan, &text, None))
+            }
+        }
     }
 }

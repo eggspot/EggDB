@@ -3,7 +3,7 @@ mod cursors;
 use super::{Parameters, Parser};
 use crate::ast::{
     AlterSequence, ColumnDefinition, Comment, CommentTarget, CreateSequence, Expr, ExprKind,
-    Literal, Name, ProcedureCall, Query, RelationKind, SequenceOptions, SetExpr,
+    Literal, Name, ProcedureCall, Query, RelationKind, SequenceOptions, SetExpr, ShowplanKind,
     SqlServerStatement, Statement, TableReference,
 };
 use crate::dialect::Dialect;
@@ -384,6 +384,39 @@ pub(crate) fn ends_a_block(word: &str) -> bool {
 
 pub(super) fn outside_a_batch(what: &str) -> SqlError {
     not_supported(&format!("{what} outside a Transact-SQL batch"))
+}
+
+pub(super) fn top_limit(count: Expr, percent: bool, with_ties: bool, position: usize) -> Expr {
+    let name = match (percent, with_ties) {
+        (false, false) => return count,
+        (false, true) => "oracle_fetch_with_ties",
+        (true, false) => "sqlserver_top_percent",
+        (true, true) => "sqlserver_top_percent_with_ties",
+    };
+    Expr {
+        kind: ExprKind::OracleFunction {
+            name,
+            arguments: vec![count],
+        },
+        position,
+    }
+}
+
+pub(super) fn top_has_ties(top: &Expr) -> bool {
+    matches!(
+        &top.kind,
+        ExprKind::OracleFunction { name, .. }
+            if *name == "oracle_fetch_with_ties" || *name == "sqlserver_top_percent_with_ties"
+    )
+}
+
+pub(super) fn ties_without_order_by(position: usize) -> SqlError {
+    SqlError::new(
+        SqlState::SYNTAX_ERROR,
+        "The TOP N WITH TIES clause is not allowed without a corresponding ORDER BY clause.",
+    )
+    .with_sqlserver_code(1062)
+    .at(position)
 }
 
 pub(crate) fn not_supported(what: &str) -> SqlError {
@@ -962,6 +995,7 @@ impl<'t> Parser<'t> {
             return Ok(Statement::Set {
                 name: crate::settings::DIALECT_SETTING.to_owned(),
                 value: Some(value),
+                scope: crate::settings::SettingScope::Session,
             });
         }
         let option = match self.peek_kind() {
@@ -988,6 +1022,36 @@ impl<'t> Parser<'t> {
             "xact_abort" => {
                 let on = self.on_or_off()?;
                 Ok(Statement::SqlServer(SqlServerStatement::XactAbort(on)))
+            }
+            "showplan_text" | "showplan_all" => {
+                let kind = if option == "showplan_text" {
+                    ShowplanKind::Text
+                } else {
+                    ShowplanKind::All
+                };
+                let on = self.on_or_off()?;
+                Ok(Statement::SqlServer(SqlServerStatement::Showplan {
+                    kind,
+                    on,
+                }))
+            }
+            "showplan_xml" => Err(not_supported("SET SHOWPLAN_XML").at(position)),
+            "statistics" => {
+                if self.take_word("profile") {
+                    let on = self.on_or_off()?;
+                    return Ok(Statement::SqlServer(SqlServerStatement::Showplan {
+                        kind: ShowplanKind::StatisticsProfile,
+                        on,
+                    }));
+                }
+                if self.take_word("io") || self.take_word("time") {
+                    self.on_or_off()?;
+                    return Ok(accepted_set());
+                }
+                if self.is_word("xml") {
+                    return Err(not_supported("SET STATISTICS XML").at(position));
+                }
+                Err(self.unexpected())
             }
             "numeric_roundabort" => {
                 if self.on_or_off()? {
@@ -1523,23 +1587,20 @@ impl<'t> Parser<'t> {
                 }
             }
         };
-        let whole_view = self.is_word("percent");
-        if whole_view {
-            if !(self.at_view_top_level()
-                && matches!(count.kind, ExprKind::Literal(Literal::Integer(100))))
-            {
-                return Err(not_supported("TOP ... PERCENT").at(self.position()));
-            }
-            self.at += 1;
+        let percent = self.take_word("percent");
+        let with_ties = self.is_word("with") && self.is_word_at(1, "ties");
+        if with_ties {
+            self.at += 2;
         }
-        if self.is_word("with") && self.is_word_at(1, "ties") {
-            return Err(not_supported("TOP ... WITH TIES").at(self.position()));
-        }
-        if whole_view {
+        if percent
+            && !with_ties
+            && self.at_view_top_level()
+            && matches!(count.kind, ExprKind::Literal(Literal::Integer(100)))
+        {
             self.ignored_view_top = true;
             return Ok(None);
         }
-        Ok(Some(count))
+        Ok(Some(top_limit(count, percent, with_ties, position)))
     }
 
     pub(super) fn at_view_top_level(&self) -> bool {

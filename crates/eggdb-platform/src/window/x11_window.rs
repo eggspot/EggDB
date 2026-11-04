@@ -9,6 +9,10 @@ use super::atspi_bridge::{self, AtspiBridge};
 use super::x11::{
     self, ButtonCode, ImageTarget, KeyboardMapping, Packet, PixelLayout, PropertyData,
 };
+use super::x11_incr::{
+    self, IncomingIncr, IncrProgress, IncrStep, MAX_OUTGOING_TRANSFERS, OutgoingIncr,
+};
+use super::xdnd::{self, XdndAtoms, XdndInput, XdndReaction, XdndTarget};
 use super::{
     AccessNode, KeyPress, MAX_CLIPBOARD_TEXT_BYTES, Window, WindowError, WindowEvent,
     WindowOptions, check_clipboard_text, check_frame,
@@ -17,11 +21,15 @@ use super::{
 const LARGEST_REPLY: usize = 16 << 20;
 const SELECTION_SERVING_REMEMBERED: usize = 64;
 const RESOURCES_UNITS: u32 = 1 << 16;
+const XSETTINGS_UNITS: u32 = 1 << 14;
 const SHORTEST_WAIT: Duration = Duration::from_millis(1);
 const BACKLOG_RETRY: Duration = Duration::from_millis(10);
 const CLIPBOARD_ANSWER_LIMIT: Duration = Duration::from_secs(2);
 const CLIPBOARD_REPLY_UNITS: u32 = (MAX_CLIPBOARD_TEXT_BYTES / 4 + 1) as u32;
 const SELECTION_REQUEST_HEADER_BYTES: usize = 24;
+const XDND_TYPE_LIST_UNITS: u32 = 1024;
+const MOST_QUEUED_DRAG_INPUTS: usize = 256;
+const MOST_DRAG_INPUTS_PER_EVENT: usize = 16;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct ClipboardAtoms {
@@ -87,6 +95,13 @@ pub(crate) struct X11Window {
     origin_stale: bool,
     atoms: ClipboardAtoms,
     owned_clipboard: Option<String>,
+    outgoing: Vec<OutgoingIncr>,
+    changed_property: Option<u32>,
+    xdnd: XdndAtoms,
+    xdnd_landing: u32,
+    drag: XdndTarget,
+    drag_inputs: VecDeque<XdndInput>,
+    screen_number: u32,
 }
 
 impl X11Window {
@@ -151,6 +166,13 @@ impl X11Window {
             origin_stale: false,
             atoms: ClipboardAtoms::default(),
             owned_clipboard: None,
+            outgoing: Vec::new(),
+            changed_property: None,
+            xdnd: XdndAtoms::default(),
+            xdnd_landing: 0,
+            drag: XdndTarget::default(),
+            drag_inputs: VecDeque::new(),
+            screen_number: name.screen,
         };
         this.scale = this.read_scale(screen.root)?;
         this.wm_protocols = this.intern("WM_PROTOCOLS")?;
@@ -165,6 +187,20 @@ impl X11Window {
             incr: this.intern("INCR")?,
             landing: this.intern("EGGDB_CLIPBOARD")?,
         };
+        this.xdnd = XdndAtoms {
+            aware: this.intern("XdndAware")?,
+            enter: this.intern("XdndEnter")?,
+            position: this.intern("XdndPosition")?,
+            status: this.intern("XdndStatus")?,
+            leave: this.intern("XdndLeave")?,
+            drop: this.intern("XdndDrop")?,
+            finished: this.intern("XdndFinished")?,
+            selection: this.intern("XdndSelection")?,
+            type_list: this.intern("XdndTypeList")?,
+            action_copy: this.intern("XdndActionCopy")?,
+            uri_list: this.intern("text/uri-list")?,
+        };
+        this.xdnd_landing = this.intern("EGGDB_XDND")?;
         this.refresh_keyboard()?;
         let scale = this.scale;
         let device = |logical: u32| {
@@ -181,7 +217,8 @@ impl X11Window {
             | x11::EVENT_BUTTON_PRESS
             | x11::EVENT_BUTTON_RELEASE
             | x11::EVENT_POINTER_MOTION
-            | x11::EVENT_LEAVE_WINDOW;
+            | x11::EVENT_LEAVE_WINDOW
+            | x11::EVENT_PROPERTY_CHANGE;
         this.send(&x11::create_window(
             window,
             screen.root,
@@ -217,6 +254,12 @@ impl X11Window {
                 u32::from(min_width),
                 u32::from(min_height),
             )),
+        )?)?;
+        this.send(&x11::change_property(
+            window,
+            this.xdnd.aware,
+            x11::ATOM_ATOM,
+            PropertyData::Words(&[xdnd::XDND_VERSION]),
         )?)?;
         this.send(&x11::create_gc(gc, window)?)?;
         this.send(&x11::map_window(window)?)?;
@@ -381,6 +424,20 @@ impl X11Window {
         Ok(x11::scale_from_resources(resources).unwrap_or(1.0))
     }
 
+    fn read_reduced_motion(&mut self) -> Result<bool, WindowError> {
+        let selection = self.intern(&x11::xsettings_selection(self.screen_number))?;
+        let sequence = self.send(&x11::get_selection_owner(selection)?)?;
+        let reply = self.reply(sequence)?;
+        let owner = x11::parse_selection_owner_reply(&reply)?;
+        if owner == 0 {
+            return Ok(false);
+        }
+        let settings = self.intern("_XSETTINGS_SETTINGS")?;
+        let sequence = self.send(&x11::get_property(owner, settings, XSETTINGS_UNITS)?)?;
+        let reply = self.reply(sequence)?;
+        Ok(x11::parse_property_reply(&reply).is_ok_and(x11::xsettings_reduce_motion))
+    }
+
     fn refresh_keyboard(&mut self) -> Result<(), WindowError> {
         let count = self
             .max_keycode
@@ -442,15 +499,25 @@ impl X11Window {
                     }
                 })
             }
-            Packet::ClientMessage {
-                window,
-                kind,
-                first,
-            } if window == self.window
-                && kind == self.wm_protocols
-                && first == self.wm_delete_window =>
-            {
-                Some(WindowEvent::CloseRequested)
+            Packet::ClientMessage { window, kind, data } if window == self.window => {
+                if kind == self.wm_protocols && data[0] == self.wm_delete_window {
+                    Some(WindowEvent::CloseRequested)
+                } else if let Some(message) = xdnd::parse_message(&self.xdnd, kind, data) {
+                    self.queue_drag_input(XdndInput::Message(message));
+                    None
+                } else {
+                    None
+                }
+            }
+            Packet::SelectionNotify {
+                time,
+                requestor,
+                selection,
+                property,
+                ..
+            } if requestor == self.window && selection == self.xdnd.selection => {
+                self.queue_drag_input(XdndInput::Answer { time, property });
+                None
             }
             Packet::FocusIn => {
                 self.update_accessibility(|bridge| bridge.set_window_active(true));
@@ -512,6 +579,18 @@ impl X11Window {
             }),
             Packet::LeaveNotify { window, mode } if window == self.window && mode == 0 => {
                 Some(WindowEvent::PointerLeft)
+            }
+            Packet::PropertyNotify {
+                window,
+                atom,
+                state,
+            } => {
+                if window == self.window && state == x11::PROPERTY_NEW_VALUE {
+                    self.changed_property = Some(atom);
+                } else if state == x11::PROPERTY_DELETED {
+                    self.continue_transfer(window, atom)?;
+                }
+                None
             }
             Packet::SelectionClear { owner, selection }
                 if owner == self.window && selection == self.atoms.clipboard =>
@@ -581,14 +660,14 @@ impl X11Window {
         let largest = usize::from(self.maximum_request_length)
             .saturating_mul(4)
             .saturating_sub(SELECTION_REQUEST_HEADER_BYTES);
-        if text.len() > largest {
-            return Ok(false);
-        }
         let bytes = if target == x11::ATOM_STRING {
             latin1(&text)
         } else {
             text.into_bytes()
         };
+        if bytes.len() > largest {
+            return self.start_transfer(requestor, property, target, bytes);
+        }
         self.send_serving_selection(&x11::change_property(
             requestor,
             property,
@@ -596,6 +675,91 @@ impl X11Window {
             PropertyData::Bytes(&bytes),
         )?)?;
         Ok(true)
+    }
+
+    fn start_transfer(
+        &mut self,
+        requestor: u32,
+        property: u32,
+        target: u32,
+        bytes: Vec<u8>,
+    ) -> Result<bool, WindowError> {
+        self.drop_stalled_transfers()?;
+        let busy = self
+            .outgoing
+            .iter()
+            .any(|transfer| transfer.is_for(requestor, property));
+        if busy || self.outgoing.len() >= MAX_OUTGOING_TRANSFERS {
+            return Ok(false);
+        }
+        let chunk =
+            x11_incr::incr_chunk_size(self.maximum_request_length, SELECTION_REQUEST_HEADER_BYTES);
+        let transfer = OutgoingIncr::new(requestor, property, target, bytes, chunk, Instant::now());
+        self.send_serving_selection(&x11::select_events(requestor, x11::EVENT_PROPERTY_CHANGE)?)?;
+        self.send_serving_selection(&x11::change_property(
+            requestor,
+            property,
+            self.atoms.incr,
+            PropertyData::Words(&[transfer.announced_size()]),
+        )?)?;
+        self.outgoing.push(transfer);
+        Ok(true)
+    }
+
+    fn continue_transfer(&mut self, window: u32, property: u32) -> Result<(), WindowError> {
+        let Some(at) = self
+            .outgoing
+            .iter()
+            .position(|transfer| transfer.is_for(window, property))
+        else {
+            return Ok(());
+        };
+        let transfer = &mut self.outgoing[at];
+        let target = transfer.target;
+        let request = match transfer.next(Instant::now()) {
+            IncrStep::Chunk(range) => Some(x11::change_property(
+                window,
+                property,
+                target,
+                PropertyData::Bytes(transfer.bytes(range)),
+            )?),
+            IncrStep::End => Some(x11::change_property(
+                window,
+                property,
+                target,
+                PropertyData::Bytes(&[]),
+            )?),
+            IncrStep::Done => None,
+        };
+        match request {
+            Some(request) => self.send_serving_selection(&request)?,
+            None => self.end_transfer(at)?,
+        }
+        self.stream.flush().map_err(|error| io_error(&error))
+    }
+
+    fn end_transfer(&mut self, at: usize) -> Result<(), WindowError> {
+        let transfer = self.outgoing.swap_remove(at);
+        let still_used = self
+            .outgoing
+            .iter()
+            .any(|other| other.requestor == transfer.requestor);
+        if still_used {
+            return Ok(());
+        }
+        self.send_serving_selection(&x11::select_events(transfer.requestor, 0)?)
+    }
+
+    fn drop_stalled_transfers(&mut self) -> Result<(), WindowError> {
+        let now = Instant::now();
+        while let Some(at) = self
+            .outgoing
+            .iter()
+            .position(|transfer| transfer.is_stalled(now))
+        {
+            self.end_transfer(at)?;
+        }
+        Ok(())
     }
 
     fn wait_for_selection(&mut self, deadline: Instant) -> Result<Option<u32>, WindowError> {
@@ -626,6 +790,175 @@ impl X11Window {
                         self.pending.push_back(event);
                     }
                 }
+            }
+        }
+    }
+
+    fn reply_or_error(&mut self, sequence: u16) -> Result<Option<Vec<u8>>, WindowError> {
+        loop {
+            let Some(packet) = self.read_packet(None)? else {
+                continue;
+            };
+            let mut header = [0u8; 32];
+            header.copy_from_slice(packet.get(..32).unwrap_or(&[0; 32]));
+            match x11::parse_packet(&header) {
+                Packet::Reply { sequence: got } if got == sequence => return Ok(Some(packet)),
+                Packet::Error { sequence: got, .. } if got == sequence => return Ok(None),
+                Packet::Reply { .. } => {}
+                packet => {
+                    if let Some(event) = self.translate(packet)? {
+                        self.pending.push_back(event);
+                    }
+                }
+            }
+        }
+    }
+
+    fn queue_drag_input(&mut self, input: XdndInput) {
+        xdnd::queue_bounded(&mut self.drag_inputs, input, MOST_QUEUED_DRAG_INPUTS);
+    }
+
+    fn handle_drag_input(&mut self, input: XdndInput) -> Result<(), WindowError> {
+        let reactions = match input {
+            XdndInput::Message(message) => self.drag.receive(message, self.xdnd.uri_list),
+            XdndInput::Answer { time, property } => {
+                if !self.drag.awaits(time) {
+                    return Ok(());
+                }
+                let paths = self.read_dragged(property)?;
+                self.drag.data(time, paths.as_deref())
+            }
+        };
+        self.perform_drag(reactions)
+    }
+
+    fn forget_new_value(&mut self, property: u32) {
+        if self.changed_property == Some(property) {
+            self.changed_property = None;
+        }
+    }
+
+    fn perform_drag(&mut self, reactions: Vec<XdndReaction>) -> Result<(), WindowError> {
+        let atoms = self.xdnd;
+        for reaction in reactions {
+            match reaction {
+                XdndReaction::ReadTypeList { source } => {
+                    let types = self.source_types(source)?;
+                    self.drag.types_read(source, &types, atoms.uri_list);
+                }
+                XdndReaction::Status { source, accept } => {
+                    let data = xdnd::status_data(&atoms, self.window, accept);
+                    let event = x11::client_message_event(source, atoms.status, data);
+                    self.send_serving_selection(&x11::send_event(source, &event)?)?;
+                }
+                XdndReaction::RequestPaths { time } => {
+                    self.send(&x11::convert_selection(
+                        self.window,
+                        atoms.selection,
+                        atoms.uri_list,
+                        self.xdnd_landing,
+                        time,
+                    )?)?;
+                }
+                XdndReaction::Finished { source, accepted } => {
+                    let data = xdnd::finished_data(&atoms, self.window, accepted);
+                    let event = x11::client_message_event(source, atoms.finished, data);
+                    self.send_serving_selection(&x11::send_event(source, &event)?)?;
+                }
+                XdndReaction::Event(event) => self.pending.push_back(event),
+            }
+        }
+        self.stream.flush().map_err(|error| io_error(&error))
+    }
+
+    fn source_types(&mut self, source: u32) -> Result<Vec<u32>, WindowError> {
+        let sequence = self.send(&x11::get_property(
+            source,
+            self.xdnd.type_list,
+            XDND_TYPE_LIST_UNITS,
+        )?)?;
+        self.stream.flush().map_err(|error| io_error(&error))?;
+        let Some(reply) = self.reply_or_error(sequence)? else {
+            return Ok(Vec::new());
+        };
+        Ok(x11::parse_property_reply(&reply)?
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_le_bytes(*word))
+            .collect())
+    }
+
+    fn read_dragged(&mut self, property: u32) -> Result<Option<Vec<u8>>, WindowError> {
+        if property == x11::ATOM_NONE {
+            return Ok(None);
+        }
+        let sequence = self.send(&x11::get_property_deleting(
+            self.window,
+            property,
+            CLIPBOARD_REPLY_UNITS,
+        )?)?;
+        let reply = self.reply(sequence)?;
+        if x11::parse_property_type(&reply)? != self.atoms.incr {
+            return Ok(Some(x11::parse_property_reply(&reply)?.to_vec()));
+        }
+        let announced = x11_incr::incr_lower_bound(x11::parse_property_reply(&reply)?);
+        self.forget_new_value(property);
+        Ok(self
+            .read_in_increments(property, announced)
+            .ok()
+            .map(String::into_bytes))
+    }
+
+    fn wait_for_new_value(&mut self, property: u32, deadline: Instant) -> Result<(), WindowError> {
+        loop {
+            if self.changed_property == Some(property) {
+                self.changed_property = None;
+                return Ok(());
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(WindowError::Io(
+                    "the clipboard's owner stopped sending its text".to_owned(),
+                ));
+            }
+            let Some(packet) = self.read_packet(Some(left))? else {
+                continue;
+            };
+            let mut header = [0u8; 32];
+            header.copy_from_slice(packet.get(..32).unwrap_or(&[0; 32]));
+            match x11::parse_packet(&header) {
+                Packet::Reply { .. } => {}
+                packet => {
+                    if let Some(event) = self.translate(packet)? {
+                        self.pending.push_back(event);
+                    }
+                }
+            }
+        }
+    }
+
+    fn read_in_increments(
+        &mut self,
+        property: u32,
+        announced: Option<u32>,
+    ) -> Result<String, WindowError> {
+        let mut incoming = IncomingIncr::new(announced, MAX_CLIPBOARD_TEXT_BYTES, Instant::now())?;
+        loop {
+            let deadline = incoming.chunk_deadline(Instant::now(), CLIPBOARD_ANSWER_LIMIT)?;
+            self.wait_for_new_value(property, deadline)?;
+            let sequence = self.send(&x11::get_property_deleting(
+                self.window,
+                property,
+                CLIPBOARD_REPLY_UNITS,
+            )?)?;
+            let reply = self.reply(sequence)?;
+            if x11::parse_property_type(&reply)? == x11::ATOM_NONE {
+                incoming.property_gone()?;
+                continue;
+            }
+            if incoming.take(x11::parse_property_reply(&reply)?)? == IncrProgress::Done {
+                return Ok(incoming.into_text());
             }
         }
     }
@@ -686,6 +1019,7 @@ impl Window for X11Window {
         timeout: Option<Duration>,
     ) -> Result<Option<WindowEvent>, WindowError> {
         let deadline = timeout.and_then(|wait| Instant::now().checked_add(wait));
+        let mut handled_drag_inputs = 0;
         loop {
             if self.keyboard_stale {
                 self.refresh_keyboard()?;
@@ -693,16 +1027,38 @@ impl Window for X11Window {
             if self.origin_stale {
                 self.refresh_origin()?;
             }
+            self.drop_stalled_transfers()?;
+            let drag_turn = xdnd::handles_drag_input(
+                handled_drag_inputs,
+                MOST_DRAG_INPUTS_PER_EVENT,
+                !self.pending.is_empty(),
+            );
+            if drag_turn && let Some(input) = self.drag_inputs.pop_front() {
+                self.handle_drag_input(input)?;
+                handled_drag_inputs += 1;
+                continue;
+            }
             if let Some(event) = self.pending.pop_front() {
                 return Ok(Some(event));
             }
+            let stall = self.outgoing.iter().map(OutgoingIncr::stalls_at).min();
+            let wake = match (deadline, stall) {
+                (Some(deadline), Some(stall)) => Some(deadline.min(stall)),
+                (deadline, stall) => deadline.or(stall),
+            };
             let packet = if self.accessibility.is_some() {
-                self.read_packet_serving_accessibility(deadline)?
+                self.read_packet_serving_accessibility(wake)?
             } else {
-                self.read_packet(timeout)?
+                let wait = wake.map(|wake| wake.saturating_duration_since(Instant::now()));
+                self.read_packet(wait)?
             };
             let Some(packet) = packet else {
-                return Ok(None);
+                let caller_due =
+                    deadline.map_or(stall.is_none(), |deadline| Instant::now() >= deadline);
+                if caller_due {
+                    return Ok(None);
+                }
+                continue;
             };
             if packet.is_empty() {
                 continue;
@@ -717,6 +1073,10 @@ impl Window for X11Window {
 
     fn set_accessibility_tree(&mut self, nodes: &[AccessNode]) {
         self.update_accessibility(|bridge| bridge.set_tree(nodes));
+    }
+
+    fn reduced_motion(&mut self) -> bool {
+        self.read_reduced_motion().unwrap_or(false)
     }
 
     fn put_clipboard_text(&mut self, text: &str) -> Result<(), WindowError> {
@@ -757,9 +1117,9 @@ impl Window for X11Window {
         let reply = self.reply(sequence)?;
         let kind = x11::parse_property_type(&reply)?;
         if kind == atoms.incr {
-            return Err(WindowError::Unsupported(
-                "the clipboard's owner sends its text in increments, which is not read yet",
-            ));
+            let announced = x11_incr::incr_lower_bound(x11::parse_property_reply(&reply)?);
+            self.forget_new_value(property);
+            return self.read_in_increments(property, announced).map(Some);
         }
         let bytes = x11::parse_property_reply(&reply)?;
         if bytes.len() > MAX_CLIPBOARD_TEXT_BYTES {

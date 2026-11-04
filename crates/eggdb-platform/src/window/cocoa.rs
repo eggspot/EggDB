@@ -42,6 +42,10 @@ pub const KEY_F4: u16 = 0x76;
 pub const KEY_F5: u16 = 0x60;
 /// `kVK_F2`.
 pub const KEY_F2: u16 = 0x78;
+/// `kVK_F10`.
+pub const KEY_F10: u16 = 0x6D;
+/// `kVK_ContextualMenu`, the menu key some keyboards have.
+pub const KEY_CONTEXTUAL_MENU: u16 = 0x6E;
 /// `kVK_PageUp`.
 pub const KEY_PAGE_UP: u16 = 0x74;
 /// `kVK_PageDown`.
@@ -142,6 +146,8 @@ pub fn key_from_key_code(code: u16) -> Option<Key> {
         KEY_F4 => Key::F4,
         KEY_F2 => Key::F2,
         KEY_F5 => Key::F5,
+        KEY_F10 => Key::F10,
+        KEY_CONTEXTUAL_MENU => Key::ContextMenu,
         KEY_PAGE_UP => Key::PageUp,
         KEY_PAGE_DOWN => Key::PageDown,
         _ => return None,
@@ -1006,6 +1012,8 @@ mod tests {
             (KEY_F4, Key::F4),
             (KEY_F2, Key::F2),
             (KEY_F5, Key::F5),
+            (KEY_F10, Key::F10),
+            (KEY_CONTEXTUAL_MENU, Key::ContextMenu),
             (KEY_PAGE_UP, Key::PageUp),
             (KEY_PAGE_DOWN, Key::PageDown),
         ];

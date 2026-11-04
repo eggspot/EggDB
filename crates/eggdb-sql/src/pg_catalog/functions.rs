@@ -287,7 +287,7 @@ fn with_snapshot(name: &str, values: &[Value], first: Option<u32>) -> SqlResult<
         )),
         ("pg_get_viewdef", _) => text(snapshot.relation(object).and_then(
             |entry| match &entry.source {
-                RelationSource::View(view) => Some(view.query.clone()),
+                RelationSource::View(view) => view.shown_query().map(str::to_owned),
                 _ => None,
             },
         )),

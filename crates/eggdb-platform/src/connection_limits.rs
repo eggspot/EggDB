@@ -244,6 +244,15 @@ impl MemoryBudget {
         reservation.resize(bytes).then_some(reservation)
     }
 
+    /// A reservation of `bytes` that keeps the budget alive itself, so it can move to another
+    /// thread with what it holds; `None` when the budget has less left.
+    pub fn reserve_owned(budget: &Arc<Self>, bytes: usize) -> Option<OwnedReservation> {
+        budget.take(bytes).then(|| OwnedReservation {
+            budget: Arc::clone(budget),
+            bytes,
+        })
+    }
+
     fn take(&self, bytes: usize) -> bool {
         self.used_bytes
             .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
@@ -307,10 +316,31 @@ impl Drop for Reservation<'_> {
     }
 }
 
+/// Bytes held against a shared [`MemoryBudget`], given back when dropped.
+#[derive(Debug)]
+pub struct OwnedReservation {
+    budget: Arc<MemoryBudget>,
+    bytes: usize,
+}
+
+impl OwnedReservation {
+    /// The bytes reserved.
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
+impl Drop for OwnedReservation {
+    fn drop(&mut self) {
+        self.budget.give_back(self.bytes);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{LoginSlots, MemoryBudget, UNCOUNTED_BUFFER_BYTES};
     use std::net::IpAddr;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     fn address(text: &str) -> Option<IpAddr> {
@@ -443,6 +473,19 @@ mod tests {
         assert_eq!(budget.used_bytes(), 0);
         assert!(other.hold_if_large(2 * UNCOUNTED_BUFFER_BYTES));
         drop(other);
+        assert_eq!(budget.used_bytes(), 0);
+    }
+
+    #[test]
+    fn an_owned_reservation_gives_its_bytes_back_on_the_thread_that_drops_it() {
+        let budget = Arc::new(MemoryBudget::new(100));
+        let held = MemoryBudget::reserve_owned(&budget, 70).unwrap();
+        assert_eq!(held.bytes(), 70);
+        assert!(MemoryBudget::reserve_owned(&budget, 31).is_none());
+        assert!(budget.reserve(31).is_none());
+        std::thread::spawn(move || drop(held)).join().unwrap();
+        assert_eq!(budget.used_bytes(), 0);
+        assert!(MemoryBudget::reserve_owned(&budget, usize::MAX).is_none());
         assert_eq!(budget.used_bytes(), 0);
     }
 }

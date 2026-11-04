@@ -1,6 +1,9 @@
 use crate::broker::{Broker, ServerConfig, serve_stream};
-use crate::packet::{encode, filter_matches, put_string, take_packet, valid_filter};
+use crate::packet::{
+    encode, filter_matches, pending_packet_bytes, put_string, take_packet, valid_filter,
+};
 use eggdb_keyspace::MemoryKeyspace;
+use eggdb_platform::connection_limits::MemoryBudget;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
@@ -9,6 +12,7 @@ fn config() -> ServerConfig {
         user: "eggdb".to_owned(),
         password_sha256: eggdb_crypto::sha256(b"secret"),
         max_connections: 4,
+        memory_budget: Arc::default(),
     }
 }
 
@@ -66,9 +70,18 @@ fn packets(output: &[u8]) -> Vec<(u8, Vec<u8>)> {
 type Packets = Vec<(u8, Vec<u8>)>;
 
 fn session(broker: &Broker<'_>, id: u64, input: Vec<u8>) -> (Arc<Mutex<Vec<u8>>>, Packets) {
+    session_with(broker, &config(), id, input)
+}
+
+fn session_with(
+    broker: &Broker<'_>,
+    config: &ServerConfig,
+    id: u64,
+    input: Vec<u8>,
+) -> (Arc<Mutex<Vec<u8>>>, Packets) {
     let output = Arc::new(Mutex::new(Vec::new()));
     let shared: Arc<Mutex<dyn Write + Send>> = output.clone();
-    serve_stream(broker, &config(), id, input.as_slice(), shared, &|| false).unwrap();
+    serve_stream(broker, config, id, input.as_slice(), shared, &|| false).unwrap();
     let bytes = output.lock().unwrap().clone();
     (output, packets(&bytes))
 }
@@ -162,4 +175,56 @@ fn hostile_bytes_end_the_session_without_panicking() {
         session(&broker, 9, damaged);
     }
     session(&broker, 9, vec![0x10, 0xff, 0xff, 0xff, 0xff, 0x01]);
+}
+
+#[test]
+fn a_packet_declares_the_bytes_it_will_take() {
+    assert_eq!(pending_packet_bytes(&[]), 0);
+    assert_eq!(pending_packet_bytes(&[0x30]), 1);
+    assert_eq!(pending_packet_bytes(&[0x30, 0xe0, 0xa7]), 3);
+    assert_eq!(pending_packet_bytes(&[0x30, 0xe0, 0xa7, 0x12]), 4 + 300_000);
+    assert_eq!(pending_packet_bytes(&[0x30, 2, b'a', b'b']), 4);
+}
+
+#[test]
+fn packets_and_retained_replays_past_the_memory_budget_are_refused() {
+    let keyspace = MemoryKeyspace::default();
+    let broker = Broker::new(&keyspace);
+    let budget = Arc::new(MemoryBudget::new(200_000));
+    let config = ServerConfig {
+        memory_budget: Arc::clone(&budget),
+        ..config()
+    };
+    let mut greedy = connect(5, "secret", None);
+    greedy.extend_from_slice(&[0x30, 0xe0, 0xa7, 0x12]);
+    let (_, answers) = session_with(&broker, &config, 1, greedy);
+    assert_eq!(answers, [(2, vec![0, 0, 0]), (14, vec![0x97])]);
+    assert_eq!(budget.used_bytes(), 0);
+    let retained = "r".repeat(120_000);
+    for topic in ["kept/a", "kept/b"] {
+        let mut input = connect(4, "secret", None);
+        input.extend(publish(topic, &retained, 0, true));
+        input.extend(encode(14, 0, &[]));
+        let (_, answers) = session_with(&broker, &config, 3, input);
+        assert_eq!(answers, [(2, vec![0, 0])]);
+    }
+    let mut replay = connect(4, "secret", None);
+    replay.extend(subscribe(4, "kept/#", 0));
+    let (_, answers) = session_with(&broker, &config, 4, replay);
+    assert!(answers.iter().all(|(kind, _)| *kind != 3), "{answers:?}");
+    let mut replay_v5 = connect(5, "secret", None);
+    replay_v5.extend(subscribe(5, "kept/#", 0));
+    let (_, answers) = session_with(&broker, &config, 6, replay_v5);
+    assert!(answers.iter().all(|(kind, _)| *kind != 3), "{answers:?}");
+    assert_eq!(answers.last(), Some(&(14, vec![0x97])), "{answers:?}");
+    assert_eq!(budget.used_bytes(), 0);
+    let mut one = connect(4, "secret", None);
+    one.extend(subscribe(4, "kept/a", 0));
+    let (_, answers) = session_with(&broker, &config, 5, one);
+    assert!(
+        answers
+            .iter()
+            .any(|(kind, body)| *kind == 3 && body.len() > 120_000)
+    );
+    assert_eq!(budget.used_bytes(), 0);
 }

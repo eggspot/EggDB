@@ -63,7 +63,7 @@ pub(crate) fn mysql_type_name(sql_type: SqlType) -> String {
         | SqlType::Array(_)
         | SqlType::Catalog(_)
         | SqlType::Defined(_)
-        | SqlType::Dynamic => "text".into(),
+        | SqlType::Dynamic(_) => "text".into(),
     }
 }
 
@@ -287,10 +287,21 @@ impl<'s> Session<'s> {
                     .with_vendor_code(1146)
                     .at(view.position));
                 };
+                let Some(query) = definition.shown_query() else {
+                    return Err(SqlError::new(
+                        SqlState::MYSQL_SYNTAX_OR_ACCESS,
+                        format!(
+                            "SHOW VIEW command denied to user for table '{}': this session sees only some of its columns",
+                            view.text
+                        ),
+                    )
+                    .with_vendor_code(1142)
+                    .at(view.position));
+                };
                 let text = format!(
                     "CREATE ALGORITHM=UNDEFINED DEFINER=CURRENT_USER SQL SECURITY DEFINER VIEW {} AS {}",
                     backticked(&view.text),
-                    definition.query
+                    query
                 );
                 Ok(rows_result(
                     create_view_columns(),

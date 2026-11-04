@@ -22,6 +22,8 @@ pub mod cocoa;
 pub mod uia;
 pub mod win32;
 pub mod x11;
+pub mod x11_incr;
+pub mod xdnd;
 
 #[cfg(target_os = "macos")]
 mod cocoa_window;
@@ -99,6 +101,10 @@ pub enum Key {
     F4,
     /// The F5 function key.
     F5,
+    /// The F10 function key (`Shift+F10` opens a context menu).
+    F10,
+    /// The menu key (the application or context-menu key), which opens a context menu.
+    ContextMenu,
     /// A key that types a character, as typed with the modifiers' effect on case already
     /// applied (`q` or `Q`).
     Character(char),
@@ -655,6 +661,13 @@ pub trait Window: fmt::Debug {
         Err(WindowError::Unsupported(
             "this system has no clipboard in the platform layer yet",
         ))
+    }
+
+    /// Whether the user asked the system to reduce motion, read now: macOS's Reduce Motion,
+    /// Windows' "Animation effects" turned off, or an X11 desktop's XSETTINGS
+    /// `Gtk/EnableAnimations` set to 0. Backends that cannot tell answer `false`.
+    fn reduced_motion(&mut self) -> bool {
+        false
     }
 }
 

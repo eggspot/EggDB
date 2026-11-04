@@ -303,6 +303,7 @@ pub(crate) fn first_aggregate(expr: &Expr) -> Option<&Expr> {
             pattern: right,
             ..
         } => first_aggregate(left).or_else(|| first_aggregate(right)),
+        ExprKind::Function { name, .. } if crate::grouping_sets::is_operation(name) => Some(expr),
         _ => children(expr).into_iter().find_map(first_aggregate),
     }
 }
@@ -444,8 +445,13 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
         {
             ("?column?".into(), false)
         }
+        ExprKind::Function { name, .. } if name == crate::sql_json_constructors::IS_JSON => {
+            ("?column?".into(), false)
+        }
         ExprKind::Function { name, .. } => (
-            crate::sql_json::column_name(name).map_or_else(|| name.clone(), str::to_owned),
+            crate::sql_json::column_name(name)
+                .or_else(|| crate::sql_json_constructors::column_name(name))
+                .map_or_else(|| name.clone(), str::to_owned),
             true,
         ),
         ExprKind::Column { name, .. } => (name.clone(), true),
@@ -749,10 +755,18 @@ impl Evaluator<'_> {
     }
 
     fn type_of(&self, value: &Value, expr: &Expr) -> Option<SqlType> {
-        if crate::constraints::current_dialect() == crate::Dialect::Sqlite
-            && self.declared_type(expr) == Some(SqlType::Dynamic)
+        if let ExprKind::Slot {
+            sql_type: Some(declared),
+            ..
+        } = &expr.kind
+            && !matches!(declared, SqlType::Dynamic(_))
         {
-            return Some(SqlType::Dynamic);
+            return value.sql_type().or(Some(*declared));
+        }
+        if crate::constraints::current_dialect() == crate::Dialect::Sqlite
+            && let Some(dynamic @ SqlType::Dynamic(_)) = self.declared_type(expr)
+        {
+            return Some(dynamic);
         }
         value.sql_type().or_else(|| self.declared_type(expr))
     }
@@ -1075,14 +1089,18 @@ impl Evaluator<'_> {
         }
         let either_text = matches!(left, Value::Text(_)) || matches!(right, Value::Text(_));
         let either_null = left.is_null() || right.is_null();
-        if !either_text && !either_null {
+        let sqlite = crate::constraints::current_dialect() == crate::Dialect::Sqlite;
+        if !either_text && !either_null && !sqlite {
             return Err(no_operator("||", &left, &right));
         }
         if let (Value::Text(left), Value::Text(right)) = (&left, &right) {
             crate::memory::check_value_bytes(left.len().saturating_add(right.len()))?;
         }
         Ok(Concatenated::scalar(
-            match (left.to_text(), right.to_text()) {
+            match (
+                concatenation_text(&left, sqlite),
+                concatenation_text(&right, sqlite),
+            ) {
                 (Some(mut left), Some(right)) => {
                     crate::memory::check_value_bytes(left.len().saturating_add(right.len()))?;
                     left.push_str(&right);
@@ -1466,6 +1484,9 @@ impl Evaluator<'_> {
             name if crate::sql_json::is_query_function(name) => {
                 return crate::sql_json::query_function(self, name, arguments);
             }
+            name if crate::sql_json_constructors::is_constructor(name) => {
+                return crate::sql_json_constructors::function(self, name, arguments);
+            }
             crate::json_functions::ROW_OBJECT => {
                 return crate::json_functions::row_object(self, arguments);
             }
@@ -1551,6 +1572,9 @@ impl Evaluator<'_> {
             return result;
         }
         if let Some(result) = crate::json_path::function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::citext::function(name, &values) {
             return result;
         }
         if let Some(result) = crate::regexp_functions::function(name, &values) {
@@ -1760,6 +1784,7 @@ fn function_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
     const INTERVAL: Option<SqlType> = Some(SqlType::INTERVAL);
     Some(match name {
         "split_part" => &[TEXT, TEXT, INTEGER],
+        "scale" | "min_scale" | "trim_scale" => &[Some(SqlType::Numeric(None))],
         "replace" | "translate" => &[TEXT, TEXT, TEXT],
         "strpos" | "position" | "starts_with" => &[TEXT, TEXT],
         "left" | "right" | "repeat" => &[TEXT, INTEGER],
@@ -1779,6 +1804,7 @@ fn function_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         "regexp_like"
         | "regexp_match"
         | "regexp_split_to_array"
+        | "like_escape"
         | "similar_to_escape"
         | "similar_substring_pattern" => &[TEXT, TEXT, TEXT],
         "regexp_replace" => &[TEXT, TEXT, TEXT],
@@ -1873,6 +1899,14 @@ fn as_text_if_character(value: Value) -> Value {
             Value::Text(text)
         }
         other => other,
+    }
+}
+
+fn concatenation_text(value: &Value, sqlite: bool) -> Option<String> {
+    match value {
+        Value::Double(number) if sqlite => crate::sqlite_functions::real_text(*number),
+        Value::Real(number) if sqlite => crate::sqlite_functions::real_text(f64::from(*number)),
+        _ => value.to_text(),
     }
 }
 
@@ -2015,6 +2049,11 @@ pub(crate) fn string_constant(text: &str, hint: Option<SqlType>) -> SqlResult<Va
 pub(crate) fn decimal_constant(text: &str, hint: Option<SqlType>) -> SqlResult<Value> {
     match hint {
         Some(sql_type) if sql_type.is_float() => parse_input(text, SqlType::Double),
+        Some(SqlType::Dynamic(_))
+            if crate::constraints::current_dialect() == crate::Dialect::Sqlite =>
+        {
+            parse_input(text, SqlType::Double)
+        }
         _ => Numeric::parse(text).map(Value::Numeric),
     }
 }
@@ -2104,6 +2143,17 @@ fn numeric_function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
         {
             let number = Value::Numeric(Numeric::from_i64(whole.as_integer().unwrap_or(0)));
             return numeric_function(name, &[number, count.clone()]);
+        }
+        ("scale" | "min_scale" | "trim_scale", [Value::Null]) => Ok(Value::Null),
+        ("scale" | "min_scale", [Value::Numeric(number)]) if number.is_special() => Ok(Value::Null),
+        ("scale", [Value::Numeric(number)]) => Ok(Value::Integer(i32::from(number.scale()))),
+        ("min_scale", [Value::Numeric(number)]) => Ok(number
+            .minimum_scale()
+            .map_or(Value::Null, |scale| Value::Integer(i32::from(scale)))),
+        ("trim_scale", [Value::Numeric(number)]) => number.trimmed_scale().map(Value::Numeric),
+        ("scale" | "min_scale" | "trim_scale", [whole]) if whole.as_integer().is_some() => {
+            let number = Value::Numeric(Numeric::from_i64(whole.as_integer().unwrap_or(0)));
+            return numeric_function(name, &[number]);
         }
         ("ceil" | "ceiling", [Value::Numeric(number)]) => number.ceiling().map(Value::Numeric),
         ("floor", [Value::Numeric(number)]) => number.floor().map(Value::Numeric),

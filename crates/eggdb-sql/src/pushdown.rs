@@ -26,7 +26,7 @@ fn filters_rows_only(query: &Query) -> Option<&Select> {
         && query.order_by.is_empty()
         && query.limit.is_none()
         && query.offset.is_none()
-        && !select.distinct
+        && !select.removes_duplicates()
         && select.group_by.is_empty()
         && select.having.is_none()
         && select.limit.is_none()
@@ -88,6 +88,9 @@ fn plain_column(name: String, position: usize) -> Expr {
 }
 
 fn outputs_of(derived: &DerivedTable, stored_columns: &mut StoredColumns<'_>) -> Option<Outputs> {
+    if derived.hierarchy.is_some() {
+        return None;
+    }
     let select = filters_rows_only(&derived.query)?;
     let renamed = |index: usize| {
         derived

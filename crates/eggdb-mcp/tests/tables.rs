@@ -1,8 +1,9 @@
 //! A server started with `--tables` over an in-memory database: only the listed tables and
 //! views exist for the agent, in every tool, dialect and catalog, the key-value tools are
 //! withdrawn, the instructions and the audit say so, and the gap between calls holds. A table
-//! listed with columns shows only those and cannot be changed, a table an unlisted one
-//! references takes inserts but not deletes, and a new policy cannot call a user routine.
+//! listed with columns shows only those and takes inserts and changes to them, a table an
+//! unlisted one references takes inserts but not deletes, and a new policy cannot call a user
+//! routine.
 
 mod common;
 
@@ -470,25 +471,42 @@ fn a_table_listed_with_columns_shows_only_those_to_every_tool() {
         sampled.contains("Ada") && !sampled.contains("123-45-6789"),
         "{sampled}"
     );
-    let (state, message) = write_refused(&mut server, 12, "UPDATE people SET name = 'Grace'");
-    assert_eq!(state, "42501");
-    assert_eq!(
-        message,
-        "cannot change \"people\": this session may read only some of its columns (--tables), so it may not change its rows or its definition"
+    let renamed = write(
+        &mut server,
+        12,
+        "UPDATE people SET name = 'Ida' WHERE id = 1",
     );
-    assert_eq!(
-        write_refused(&mut server, 13, "INSERT INTO people VALUES (2, 'Grace')").0,
-        "42501"
+    assert_eq!(text_at(structured(&renamed), &["committed"]), "true");
+    let inserted = write(
+        &mut server,
+        13,
+        "INSERT INTO people VALUES (2, 'Grace') RETURNING *",
     );
+    assert_eq!(text_at(structured(&inserted), &["committed"]), "true");
+    assert!(!format!("{inserted:?}").contains("ssn"), "{inserted:?}");
     assert_eq!(
         write_refused(&mut server, 14, "UPDATE people SET ssn = 'x'").0,
         "42703"
+    );
+    let (state, message) = write_refused(&mut server, 16, "DELETE FROM people WHERE id = 1");
+    assert_eq!(state, "42501");
+    assert!(
+        message.starts_with("cannot delete rows of \"people\""),
+        "{message}"
     );
     assert_eq!(
         count(
             &opener.store,
             Dialect::PostgreSql,
-            "SELECT count(*) FROM people WHERE name = 'Ada' AND ssn = '123-45-6789'"
+            "SELECT count(*) FROM people WHERE id = 1 AND name = 'Ida' AND ssn = '123-45-6789'"
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &opener.store,
+            Dialect::PostgreSql,
+            "SELECT count(*) FROM people WHERE id = 2 AND name = 'Grace' AND ssn IS NULL"
         ),
         1
     );

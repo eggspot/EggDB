@@ -3,9 +3,11 @@
 //! the display name, `MIT-MAGIC-COOKIE-1` from an Xauthority file, connection setup, the
 //! requests `CreateWindow`, `ChangeProperty`, `MapWindow`, `InternAtom`, `GetProperty`,
 //! `CreateGC`, `PutImage`, `GetKeyboardMapping`, and for the `CLIPBOARD` selection
-//! `SetSelectionOwner`, `ConvertSelection` and `SendEvent`, their replies, and the events a
-//! window reads (keys, buttons, motion, selections). Every message is little-endian (the client chooses the byte order at setup). Parsing
-//! never panics: a short or inconsistent message is a [`WindowError::Protocol`].
+//! `SetSelectionOwner`, `ConvertSelection`, `SendEvent` and `ChangeWindowAttributes` (for the
+//! `INCR` transfers in [`super::x11_incr`]), their replies, and the events a window reads (keys,
+//! buttons, motion, properties, selections). Every message is little-endian (the client
+//! chooses the byte order at setup). Parsing never panics: a short or inconsistent message is a
+//! [`WindowError::Protocol`].
 
 use super::{Key, Modifiers, PointerButton, WindowError};
 
@@ -45,20 +47,30 @@ pub const EVENT_BUTTON_RELEASE: u32 = 0x0000_0008;
 pub const EVENT_LEAVE_WINDOW: u32 = 0x0000_0020;
 /// The event mask bit for `MotionNotify` with or without a button held.
 pub const EVENT_POINTER_MOTION: u32 = 0x0000_0040;
+/// The `PropertyChange` event mask bit: `PropertyNotify` when a property of the window changes.
+pub const EVENT_PROPERTY_CHANGE: u32 = 0x0040_0000;
+/// A `PropertyNotify` state: the property was given a new value.
+pub const PROPERTY_NEW_VALUE: u8 = 0;
+/// A `PropertyNotify` state: the property was deleted.
+pub const PROPERTY_DELETED: u8 = 1;
 /// The `Time` value `CurrentTime`.
 pub const CURRENT_TIME: u32 = 0;
 /// The atom value `None`, as in a refused `SelectionNotify`.
 pub const ATOM_NONE: u32 = 0;
 /// The code of a `SelectionNotify` event.
 pub const EVENT_CODE_SELECTION_NOTIFY: u8 = 31;
+/// The code of a `ClientMessage` event.
+pub const EVENT_CODE_CLIENT_MESSAGE: u8 = 33;
 
 const OPCODE_CREATE_WINDOW: u8 = 1;
+const OPCODE_CHANGE_WINDOW_ATTRIBUTES: u8 = 2;
 const OPCODE_MAP_WINDOW: u8 = 8;
 const OPCODE_INTERN_ATOM: u8 = 16;
 const OPCODE_CHANGE_PROPERTY: u8 = 18;
 const OPCODE_DELETE_PROPERTY: u8 = 19;
 const OPCODE_GET_PROPERTY: u8 = 20;
 const OPCODE_SET_SELECTION_OWNER: u8 = 22;
+const OPCODE_GET_SELECTION_OWNER: u8 = 23;
 const OPCODE_CONVERT_SELECTION: u8 = 24;
 const OPCODE_SEND_EVENT: u8 = 25;
 const OPCODE_TRANSLATE_COORDINATES: u8 = 40;
@@ -547,12 +559,25 @@ pub enum PropertyData<'d> {
 }
 
 /// Whether an error the server sent about request `sequence` with `major_opcode` came from
-/// answering another client's selection request: a `ChangeProperty` on its window or the
+/// answering another client's selection request: a `ChangeProperty` on its window, the
+/// `ChangeWindowAttributes` that follows an `INCR` transfer's deletions on it, or the
 /// `SendEvent` that notifies it, among the requests in `serving`. That window may be gone
 /// already, so the error is the other client's and must not end this one's event loop.
 pub fn is_selection_serving_error(major_opcode: u8, sequence: u16, serving: &[u16]) -> bool {
-    matches!(major_opcode, OPCODE_CHANGE_PROPERTY | OPCODE_SEND_EVENT)
-        && serving.contains(&sequence)
+    matches!(
+        major_opcode,
+        OPCODE_CHANGE_PROPERTY | OPCODE_CHANGE_WINDOW_ATTRIBUTES | OPCODE_SEND_EVENT
+    ) && serving.contains(&sequence)
+}
+
+/// `ChangeWindowAttributes` with only the event mask: this client hears `event_mask`'s events
+/// on `window`, another client's window too (each client has its own mask on a window).
+pub fn select_events(window: u32, event_mask: u32) -> Result<Vec<u8>, WindowError> {
+    let mut body = Vec::with_capacity(12);
+    body.extend_from_slice(&window.to_le_bytes());
+    body.extend_from_slice(&CW_EVENT_MASK.to_le_bytes());
+    body.extend_from_slice(&event_mask.to_le_bytes());
+    request(OPCODE_CHANGE_WINDOW_ATTRIBUTES, 0, &body)
 }
 
 /// `ChangeProperty` in mode `Replace`: sets `property` of `window` to `data` of type `kind`.
@@ -634,6 +659,115 @@ pub fn set_selection_owner(owner: u32, selection: u32, time: u32) -> Result<Vec<
     request(OPCODE_SET_SELECTION_OWNER, 0, &body)
 }
 
+/// `GetSelectionOwner`: the window owning `selection`, answered by a reply.
+pub fn get_selection_owner(selection: u32) -> Result<Vec<u8>, WindowError> {
+    request(OPCODE_GET_SELECTION_OWNER, 0, &selection.to_le_bytes())
+}
+
+/// The owner of a `GetSelectionOwner` reply, 0 when the selection has none.
+pub fn parse_selection_owner_reply(reply: &[u8]) -> Result<u32, WindowError> {
+    if u8_at(reply, 0)? != 1 {
+        return Err(protocol("a GetSelectionOwner answer is not a reply"));
+    }
+    u32_at(reply, 8)
+}
+
+/// The selection an XSETTINGS manager owns for `screen`, `_XSETTINGS_S<screen>`.
+pub fn xsettings_selection(screen: u32) -> String {
+    format!("_XSETTINGS_S{screen}")
+}
+
+/// The name of the XSETTINGS setting GTK desktops turn off to reduce motion.
+pub const XSETTINGS_ENABLE_ANIMATIONS: &str = "Gtk/EnableAnimations";
+
+const XSETTING_INTEGER: u8 = 0;
+const XSETTING_STRING: u8 = 1;
+const XSETTING_COLOR: u8 = 2;
+
+struct XsettingsReader<'d> {
+    data: &'d [u8],
+    at: usize,
+    big_endian: bool,
+}
+
+impl<'d> XsettingsReader<'d> {
+    fn take(&mut self, count: usize) -> Option<&'d [u8]> {
+        let end = self.at.checked_add(count)?;
+        let taken = self.data.get(self.at..end)?;
+        self.at = end;
+        Some(taken)
+    }
+
+    fn padded(&mut self, count: usize) -> Option<&'d [u8]> {
+        let taken = self.take(count)?;
+        self.take((4 - count % 4) % 4)?;
+        Some(taken)
+    }
+
+    fn u16(&mut self) -> Option<u16> {
+        let bytes: [u8; 2] = self.take(2)?.try_into().ok()?;
+        Some(if self.big_endian {
+            u16::from_be_bytes(bytes)
+        } else {
+            u16::from_le_bytes(bytes)
+        })
+    }
+
+    fn u32(&mut self) -> Option<u32> {
+        let bytes: [u8; 4] = self.take(4)?.try_into().ok()?;
+        Some(if self.big_endian {
+            u32::from_be_bytes(bytes)
+        } else {
+            u32::from_le_bytes(bytes)
+        })
+    }
+}
+
+/// The integer value of the setting `name` in an XSETTINGS manager's `_XSETTINGS_SETTINGS`
+/// property, `None` when the data lacks it, holds it as another type or is malformed.
+pub fn xsettings_integer(data: &[u8], name: &str) -> Option<i32> {
+    let mut reader = XsettingsReader {
+        data,
+        at: 0,
+        big_endian: *data.first()? == 1,
+    };
+    reader.take(4)?;
+    reader.u32()?;
+    let settings = reader.u32()?;
+    for _ in 0..settings {
+        let kind = *reader.take(2)?.first()?;
+        let length = usize::from(reader.u16()?);
+        let found = reader.padded(length)? == name.as_bytes();
+        reader.u32()?;
+        match kind {
+            XSETTING_INTEGER => {
+                let value = reader.u32()?.cast_signed();
+                if found {
+                    return Some(value);
+                }
+            }
+            XSETTING_STRING => {
+                let length = usize::try_from(reader.u32()?).ok()?;
+                reader.padded(length)?;
+            }
+            XSETTING_COLOR => {
+                reader.take(8)?;
+            }
+            _ => return None,
+        }
+        if found {
+            return None;
+        }
+    }
+    None
+}
+
+/// Whether an XSETTINGS manager's settings ask to reduce motion: `Gtk/EnableAnimations` is
+/// present and 0.
+pub fn xsettings_reduce_motion(data: &[u8]) -> bool {
+    xsettings_integer(data, XSETTINGS_ENABLE_ANIMATIONS) == Some(0)
+}
+
 /// `ConvertSelection`: asks `selection`'s owner to put it, as `target`, in `property` of
 /// `requestor` and answer with a `SelectionNotify`.
 pub fn convert_selection(
@@ -669,6 +803,21 @@ pub fn selection_notify_event(
         (20, property),
     ] {
         event[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    event
+}
+
+/// A `ClientMessage` event of format 32 to `window` of type `kind` carrying `data`, as an XDND
+/// target answers its source with.
+pub fn client_message_event(window: u32, kind: u32, data: [u32; 5]) -> [u8; 32] {
+    let mut event = [0u8; 32];
+    event[0] = EVENT_CODE_CLIENT_MESSAGE;
+    event[1] = 32;
+    event[4..8].copy_from_slice(&window.to_le_bytes());
+    event[8..12].copy_from_slice(&kind.to_le_bytes());
+    for (at, value) in data.iter().enumerate() {
+        let start = 12 + at * 4;
+        event[start..start + 4].copy_from_slice(&value.to_le_bytes());
     }
     event
 }
@@ -957,14 +1106,15 @@ pub enum Packet {
         /// Its height.
         height: u16,
     },
-    /// A message from another client, such as the window manager's `WM_DELETE_WINDOW`.
+    /// A message from another client, such as the window manager's `WM_DELETE_WINDOW` or a
+    /// drag source's XDND messages.
     ClientMessage {
         /// The window.
         window: u32,
         /// The message's type atom.
         kind: u32,
-        /// Its first 32-bit value.
-        first: u32,
+        /// Its five 32-bit values (as format 32 carries them).
+        data: [u32; 5],
     },
     /// A pointer button went down in the window.
     ButtonPress {
@@ -1002,6 +1152,15 @@ pub enum Packet {
         /// 0 for a normal leave, 1 and 2 for leaves caused by grabs.
         mode: u8,
     },
+    /// A property of a window changed: given a new value or deleted.
+    PropertyNotify {
+        /// The window.
+        window: u32,
+        /// The property's atom.
+        atom: u32,
+        /// [`PROPERTY_NEW_VALUE`] or [`PROPERTY_DELETED`].
+        state: u8,
+    },
     /// Another client took a selection this one owned.
     SelectionClear {
         /// The window that owned it.
@@ -1026,6 +1185,8 @@ pub enum Packet {
     },
     /// The answer to this client's `ConvertSelection`.
     SelectionNotify {
+        /// The time of the request it answers, or `CurrentTime`.
+        time: u32,
         /// The window that asked.
         requestor: u32,
         /// The selection's atom.
@@ -1088,6 +1249,11 @@ pub fn parse_packet(header: &[u8; 32]) -> Packet {
             window: word(12),
             mode: header[30],
         },
+        28 => Packet::PropertyNotify {
+            window: word(4),
+            atom: word(8),
+            state: header[16],
+        },
         29 => Packet::SelectionClear {
             owner: word(8),
             selection: word(12),
@@ -1101,6 +1267,7 @@ pub fn parse_packet(header: &[u8; 32]) -> Packet {
             property: word(24),
         },
         31 => Packet::SelectionNotify {
+            time: word(4),
             requestor: word(8),
             selection: word(12),
             target: word(16),
@@ -1120,7 +1287,7 @@ pub fn parse_packet(header: &[u8; 32]) -> Packet {
         33 => Packet::ClientMessage {
             window: word(4),
             kind: word(8),
-            first: word(12),
+            data: [word(12), word(16), word(20), word(24), word(28)],
         },
         34 if header[4] == 1 => Packet::KeyboardMappingChanged,
         code => Packet::Other(code),
@@ -1155,6 +1322,8 @@ pub fn key_from_keysym(keysym: u32) -> Option<Key> {
         0xFFC1 => Key::F4,
         0xFFBF => Key::F2,
         0xFFC2 => Key::F5,
+        0xFFC7 => Key::F10,
+        0xFF67 => Key::ContextMenu,
         0xFF55 => Key::PageUp,
         0xFF56 => Key::PageDown,
         0x21..=0x7E | 0xA0..=0xFF => Key::Character(char::from_u32(keysym)?),
@@ -1200,6 +1369,48 @@ mod tests {
             &serving
         ));
         assert!(!is_selection_serving_error(OPCODE_SEND_EVENT, 9, &[]));
+        assert!(is_selection_serving_error(
+            OPCODE_CHANGE_WINDOW_ATTRIBUTES,
+            7,
+            &serving
+        ));
+    }
+
+    #[test]
+    fn client_messages_round_trip_with_all_five_values() {
+        let event = client_message_event(7, 300, [1, 2, 3, 4, 5]);
+        assert_eq!(&event[..2], &[EVENT_CODE_CLIENT_MESSAGE, 32]);
+        assert_eq!(
+            parse_packet(&event),
+            Packet::ClientMessage {
+                window: 7,
+                kind: 300,
+                data: [1, 2, 3, 4, 5]
+            }
+        );
+        let sent = send_event(9, &event).unwrap();
+        assert_eq!(&sent[12..44], &event);
+    }
+
+    #[test]
+    fn property_notifications_and_event_selection_are_encoded_as_the_spec_lays_them_out() {
+        assert_eq!(
+            select_events(0x0040_0001, EVENT_PROPERTY_CHANGE).unwrap(),
+            vec![2, 0, 4, 0, 1, 0, 0x40, 0, 0, 0x08, 0, 0, 0, 0, 0x40, 0]
+        );
+        let deleted = packet(28, |bytes| {
+            bytes[4..8].copy_from_slice(&9u32.to_le_bytes());
+            bytes[8..12].copy_from_slice(&300u32.to_le_bytes());
+            bytes[16] = PROPERTY_DELETED;
+        });
+        assert_eq!(
+            parse_packet(&deleted),
+            Packet::PropertyNotify {
+                window: 9,
+                atom: 300,
+                state: PROPERTY_DELETED
+            }
+        );
     }
 
     #[test]
@@ -1438,6 +1649,104 @@ mod tests {
         );
     }
 
+    fn xsettings(big_endian: bool, settings: &[(u8, &str, &[u8])]) -> Vec<u8> {
+        let word = |value: u32| {
+            if big_endian {
+                value.to_be_bytes()
+            } else {
+                value.to_le_bytes()
+            }
+        };
+        let mut data = vec![u8::from(big_endian), 0, 0, 0];
+        data.extend_from_slice(&word(7));
+        data.extend_from_slice(&word(settings.len() as u32));
+        for (kind, name, value) in settings {
+            data.extend_from_slice(&[*kind, 0]);
+            let length = name.len() as u16;
+            data.extend_from_slice(&if big_endian {
+                length.to_be_bytes()
+            } else {
+                length.to_le_bytes()
+            });
+            data.extend_from_slice(name.as_bytes());
+            data.resize(data.len() + (4 - name.len() % 4) % 4, 0);
+            data.extend_from_slice(&word(3));
+            data.extend_from_slice(value);
+        }
+        data
+    }
+
+    #[test]
+    fn xsettings_find_enable_animations_after_strings_and_colours_in_either_byte_order() {
+        for big_endian in [false, true] {
+            let word = |value: u32| {
+                if big_endian {
+                    value.to_be_bytes()
+                } else {
+                    value.to_le_bytes()
+                }
+            };
+            let mut theme = word(7).to_vec();
+            theme.extend_from_slice(b"Adwaita\0");
+            let off = word(0);
+            let data = xsettings(
+                big_endian,
+                &[
+                    (1, "Net/ThemeName", &theme),
+                    (2, "Gtk/Color", &[0; 8]),
+                    (0, "Gtk/EnableAnimations", &off),
+                ],
+            );
+            assert_eq!(
+                xsettings_integer(&data, XSETTINGS_ENABLE_ANIMATIONS),
+                Some(0)
+            );
+            assert!(xsettings_reduce_motion(&data));
+            let on = word(1);
+            let animating = xsettings(big_endian, &[(0, "Gtk/EnableAnimations", &on)]);
+            assert!(!xsettings_reduce_motion(&animating));
+        }
+        let without = xsettings(false, &[(0, "Xft/DPI", &98_304u32.to_le_bytes())]);
+        assert!(!xsettings_reduce_motion(&without));
+        assert_eq!(xsettings_integer(&without, "Xft/DPI"), Some(98_304));
+        assert_eq!(xsettings_selection(1), "_XSETTINGS_S1");
+        let owner = get_selection_owner(0x45).unwrap();
+        assert_eq!(owner, [23, 0, 2, 0, 0x45, 0, 0, 0]);
+        let mut reply = [0u8; 32];
+        reply[0] = 1;
+        reply[8..12].copy_from_slice(&0x0060_0001u32.to_le_bytes());
+        assert_eq!(parse_selection_owner_reply(&reply).unwrap(), 0x0060_0001);
+        assert!(parse_selection_owner_reply(&reply[..9]).is_err());
+    }
+
+    #[test]
+    fn hostile_xsettings_data_answers_none_without_panicking() {
+        let data = xsettings(false, &[(0, "Gtk/EnableAnimations", &0u32.to_le_bytes())]);
+        for end in 0..data.len() {
+            assert_eq!(
+                xsettings_integer(&data[..end], XSETTINGS_ENABLE_ANIMATIONS),
+                None
+            );
+        }
+        let mut huge = data.clone();
+        huge[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(xsettings_integer(&huge, "missing"), None);
+        let mut unknown = data.clone();
+        unknown[12] = 9;
+        assert_eq!(
+            xsettings_integer(&unknown, XSETTINGS_ENABLE_ANIMATIONS),
+            None
+        );
+        let string = xsettings(
+            false,
+            &[(1, "Gtk/EnableAnimations", &[0xFF, 0xFF, 0xFF, 0xFF])],
+        );
+        assert_eq!(
+            xsettings_integer(&string, XSETTINGS_ENABLE_ANIMATIONS),
+            None
+        );
+    }
+
     #[test]
     fn put_image_is_chunked_under_the_maximum_request_length() {
         assert_eq!(rows_per_put_image(1280, 0xFFFF), Some(51));
@@ -1493,7 +1802,7 @@ mod tests {
             Packet::ClientMessage {
                 window: 7,
                 kind: 300,
-                first: 301
+                data: [301, 0, 0, 0, 0]
             }
         );
         let expose = packet(12, |bytes| bytes[16] = 2);
@@ -1573,6 +1882,8 @@ mod tests {
         assert_eq!(key_from_keysym(0xFE20), Some(Key::Tab));
         assert_eq!(key_from_keysym(0xFF0D), Some(Key::Enter));
         assert_eq!(key_from_keysym(0xFF1B), Some(Key::Escape));
+        assert_eq!(key_from_keysym(0xFFC7), Some(Key::F10));
+        assert_eq!(key_from_keysym(0xFF67), Some(Key::ContextMenu));
         assert_eq!(key_from_keysym(u32::from(b'q')), Some(Key::Character('q')));
         assert_eq!(key_from_keysym(0x0100_00E9), Some(Key::Character('é')));
         assert_eq!(key_from_keysym(0xFFE1), None);
@@ -1664,10 +1975,11 @@ mod tests {
                 property: 6,
             }
         );
-        let notify = selection_notify_event(0, 9, 10, 11, 12);
+        let notify = selection_notify_event(8, 9, 10, 11, 12);
         assert_eq!(
             parse_packet(&notify),
             Packet::SelectionNotify {
+                time: 8,
                 requestor: 9,
                 selection: 10,
                 target: 11,

@@ -35,6 +35,7 @@ pub(crate) enum Statement {
     Set {
         name: String,
         value: Option<String>,
+        scope: crate::settings::SettingScope,
     },
     Show {
         name: Option<String>,
@@ -89,6 +90,8 @@ pub(crate) enum Statement {
     MaterializedView(MaterializedViewCommand),
     SqlServer(SqlServerStatement),
     Merge(Box<MergeStatement>),
+    CreateTableAs(Box<CreateTableAs>),
+    MultitableInsert(Box<MultitableInsert>),
     AlterSession(Vec<(String, String)>),
     Discard(DiscardTarget),
     Cursor(CursorCommand),
@@ -412,10 +415,85 @@ pub(crate) struct MergeStatement {
     pub(crate) source: Select,
     pub(crate) source_label: Option<String>,
     pub(crate) on: Expr,
-    pub(crate) update: Option<MergeUpdate>,
+    pub(crate) matched: Vec<MergeUpdate>,
     pub(crate) insert: Option<MergeInsert>,
     pub(crate) by_source: Vec<MergeUpdate>,
     pub(crate) output: Option<Vec<SelectItem>>,
+    pub(crate) top: Option<Expr>,
+}
+
+impl MergeUpdate {
+    pub(crate) fn only_deletes(&self) -> bool {
+        self.assignments.is_empty() && self.delete_condition.is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreateTableAs {
+    pub(crate) name: Name,
+    pub(crate) temporary: bool,
+    pub(crate) query: Statement,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MultitableInsertKind {
+    All,
+    First,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MultitableInsert {
+    pub(crate) kind: MultitableInsertKind,
+    pub(crate) source: Query,
+    pub(crate) computed: usize,
+    pub(crate) branches: Vec<InsertBranch>,
+    pub(crate) otherwise: Vec<InsertTarget>,
+}
+
+impl MultitableInsert {
+    pub(crate) fn targets(&self) -> impl Iterator<Item = &InsertTarget> {
+        self.branches
+            .iter()
+            .flat_map(|branch| &branch.targets)
+            .chain(&self.otherwise)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct InsertBranch {
+    pub(crate) condition: Option<usize>,
+    pub(crate) targets: Vec<InsertTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct InsertTarget {
+    pub(crate) table: TableReference,
+    pub(crate) columns: Option<Vec<Name>>,
+    pub(crate) values: Option<Vec<TargetValue>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TargetValue {
+    Computed(usize),
+    Default,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OutputInto {
+    pub(crate) statement: Statement,
+    pub(crate) destination: OutputDestination,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OutputDestination {
+    pub(crate) target: OutputTarget,
+    pub(crate) columns: Option<Vec<Name>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum OutputTarget {
+    Variable(Name),
+    Table(TableReference),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -462,6 +540,10 @@ pub(crate) enum SqlServerStatement {
         filter: Option<Expr>,
     },
     FormatOnly(bool),
+    Showplan {
+        kind: ShowplanKind,
+        on: bool,
+    },
     XactAbort(bool),
     InsertBulk(crate::bulk_load::InsertBulk),
     Declare(Vec<VariableDeclaration>),
@@ -495,6 +577,7 @@ pub(crate) enum SqlServerStatement {
         until_time: bool,
         time: Expr,
     },
+    OutputInto(Box<OutputInto>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -874,6 +957,20 @@ pub(crate) struct Explain {
     pub(crate) analyze: bool,
     pub(crate) buffers: bool,
     pub(crate) statement: Box<Statement>,
+    pub(crate) plan_table: Option<PlanTableTarget>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct PlanTableTarget {
+    pub(crate) statement_id: Option<String>,
+    pub(crate) table: Option<Name>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShowplanKind {
+    Text,
+    All,
+    StatisticsProfile,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1141,6 +1238,26 @@ pub(crate) struct DerivedTable {
     pub(crate) column_names: Vec<Name>,
     pub(crate) dialect: Dialect,
     pub(crate) lateral: bool,
+    pub(crate) hierarchy: Option<Box<Hierarchy>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Hierarchy {
+    pub(crate) inputs: usize,
+    pub(crate) start: Option<usize>,
+    pub(crate) connect: Expr,
+    pub(crate) prior_inputs: Vec<usize>,
+    pub(crate) no_cycle: bool,
+    pub(crate) siblings: Vec<(usize, crate::types::SortDirection)>,
+    pub(crate) outputs: Vec<HierarchyOutput>,
+    pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum HierarchyOutput {
+    Path { input: usize, separator: String },
+    Root(usize),
+    Prior(usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1352,6 +1469,7 @@ pub(crate) struct Update {
     pub(crate) assignments: Vec<(Name, InsertValue)>,
     pub(crate) filter: Option<Expr>,
     pub(crate) returning: Option<Vec<SelectItem>>,
+    pub(crate) from: Option<JoinedTables>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1359,6 +1477,32 @@ pub(crate) struct Delete {
     pub(crate) table: TableReference,
     pub(crate) filter: Option<Expr>,
     pub(crate) returning: Option<Vec<SelectItem>>,
+    pub(crate) using: Option<JoinedTables>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct JoinedTables {
+    pub(crate) tables: FromClause,
+    pub(crate) target_at: Option<usize>,
+    pub(crate) more_targets_at: Vec<usize>,
+    pub(crate) assigned_at: Vec<Option<usize>>,
+    pub(crate) writes_any_table: bool,
+}
+
+impl JoinedTables {
+    pub(crate) fn beside_target(tables: FromClause) -> Self {
+        Self {
+            tables,
+            target_at: None,
+            more_targets_at: Vec::new(),
+            assigned_at: Vec::new(),
+            writes_any_table: false,
+        }
+    }
+
+    pub(crate) fn references(&self) -> impl Iterator<Item = &TableReference> {
+        std::iter::once(&self.tables.first).chain(self.tables.joins.iter().map(|join| &join.table))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1395,6 +1539,7 @@ pub(crate) enum JoinCondition {
     Always,
     On(Expr),
     Using(Vec<Name>),
+    Natural,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1417,11 +1562,26 @@ pub(crate) struct Select {
     pub(crate) from: Option<FromClause>,
     pub(crate) filter: Option<Expr>,
     pub(crate) group_by: Vec<Expr>,
+    pub(crate) grouping_sets: Option<GroupingSets>,
+    pub(crate) distinct_on: Vec<Expr>,
     pub(crate) having: Option<Expr>,
     pub(crate) order_by: Vec<OrderItem>,
     pub(crate) limit: Option<Expr>,
     pub(crate) offset: Option<Expr>,
     pub(crate) source_row_limit: Option<u64>,
+}
+
+impl Select {
+    /// Whether the query keeps one row of each set of duplicates, by `DISTINCT` or `DISTINCT ON`.
+    pub(crate) fn removes_duplicates(&self) -> bool {
+        self.distinct || !self.distinct_on.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GroupingSets {
+    pub(crate) sets: Vec<Vec<usize>>,
+    pub(crate) distinct: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

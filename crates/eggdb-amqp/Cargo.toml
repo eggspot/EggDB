@@ -12,4 +12,5 @@ workspace = true
 [dependencies]
 eggdb-crypto = { path = "../eggdb-crypto" }
 eggdb-keyspace = { path = "../eggdb-keyspace" }
+eggdb-platform = { path = "../eggdb-platform" }
 eggdb-queues = { path = "../eggdb-queues" }

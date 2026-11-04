@@ -1,12 +1,24 @@
-use crate::ast::ExplainStyle;
+mod oracle_plan;
+mod showplan;
+
+pub(crate) use oracle_plan::{
+    DisplayedRow, MOST_DISPLAYED_ROWS, PLAN_DISPLAY_FUNCTION, PLAN_TABLE, PlanRow,
+    create_plan_table, display_lines, display_result, insert_plan_row, missing_plan_lines,
+    plan_rows, written_plan_table,
+};
+pub(crate) use showplan::{showplan_all, showplan_text};
+
+use crate::ast::{ExplainStyle, Statement};
 use crate::dialect::Dialect;
 use crate::encoding::TableDefinition;
 use crate::execute::{ExplainedQuery, ExplainedSource};
 use crate::join::JoinMethod;
 use crate::plan::{KeyChoice, Use};
 use crate::session::{OutputColumn, QueryResult};
+use crate::step_times::{MeasuredSelect, RowTimes};
 use crate::store::PageLookups;
 use crate::types::{SqlType, Value};
+use std::time::Duration;
 
 const MYSQL_COLUMNS: [&str; 12] = [
     "id",
@@ -76,9 +88,103 @@ pub(crate) struct Buffers {
 
 pub(crate) struct Analyzed {
     pub(crate) rows: u64,
-    pub(crate) planning: std::time::Duration,
-    pub(crate) execution: std::time::Duration,
+    pub(crate) planning: Duration,
+    pub(crate) execution: Duration,
     pub(crate) buffers: Option<Buffers>,
+    pub(crate) selects: Vec<MeasuredSelect>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Measured {
+    Ran(RowTimes),
+    NeverExecuted,
+}
+
+fn milliseconds(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+fn actual_group(measured: Measured) -> String {
+    match measured {
+        Measured::NeverExecuted => " (never executed)".to_owned(),
+        Measured::Ran(times) => format!(
+            " (actual time={:.3}..{:.3} rows={} loops=1)",
+            milliseconds(times.first_row.min(times.last_row)),
+            milliseconds(times.last_row),
+            times.rows
+        ),
+    }
+}
+
+fn source_measured(select: &MeasuredSelect) -> Measured {
+    select.source.map_or(Measured::NeverExecuted, Measured::Ran)
+}
+
+fn sort_measured(select: &MeasuredSelect) -> Measured {
+    let Some(source) = select.source else {
+        return Measured::NeverExecuted;
+    };
+    Measured::Ran(RowTimes {
+        first_row: source.last_row.min(select.output.last_row),
+        last_row: select.output.last_row,
+        rows: select
+            .output
+            .rows
+            .saturating_add(select.skipped)
+            .min(source.rows),
+    })
+}
+
+fn top_measured(measured: &[Option<Measured>], analyzed: &Analyzed) -> Measured {
+    let own = measured.first().copied().flatten();
+    let first_ran = measured.iter().take(2).find_map(|step| match step {
+        Some(Measured::Ran(times)) => Some(times.first_row),
+        _ => None,
+    });
+    let last_row = match own {
+        Some(Measured::Ran(times)) => times.last_row,
+        _ => analyzed.execution,
+    };
+    Measured::Ran(RowTimes {
+        first_row: first_ran.unwrap_or(last_row).min(last_row),
+        last_row,
+        rows: analyzed.rows,
+    })
+}
+
+fn measured_steps(query: &ExplainedQuery, analyzed: &Analyzed) -> Vec<Option<Measured>> {
+    let mut measured = vec![None; steps(query).len()];
+    let wrappers = usize::from(query.limited) + usize::from(query.sorted);
+    if query.appended {
+        let branches = analyzed.selects.iter().take(query.sources.len());
+        for (position, select) in branches.enumerate() {
+            if let Some(step) = measured.get_mut(wrappers + 1 + position) {
+                *step = Some(source_measured(select));
+            }
+        }
+    } else if let Some(select) = analyzed.selects.first() {
+        if let Some(step) = measured.get_mut(wrappers) {
+            *step = Some(source_measured(select));
+        }
+        if query.sorted
+            && let Some(step) = measured.get_mut(usize::from(query.limited))
+        {
+            *step = Some(sort_measured(select));
+        }
+    }
+    let mut top = top_measured(&measured, analyzed);
+    if wrappers == 0
+        && !query.appended
+        && let Some(select) = analyzed.selects.first()
+        && let Some(source) = select.source
+        && let Measured::Ran(times) = &mut top
+    {
+        times.rows = times.rows.saturating_add(select.skipped).min(source.rows);
+    }
+    if let Some(step) = measured.first_mut() {
+        *step = Some(top);
+    }
+    measured
 }
 
 fn buffers_line(indent: &str, lookups: PageLookups) -> Option<String> {
@@ -92,14 +198,24 @@ fn buffers_line(indent: &str, lookups: PageLookups) -> Option<String> {
     (!parts.is_empty()).then(|| format!("{indent}Buffers: shared {}", parts.join(" ")))
 }
 
-/// `EXPLAIN ANALYZE` in PostgreSQL's text form: the plan, the rows the statement returned or
-/// changed on its top line, under `BUFFERS` the page lookups of the whole statement under the
-/// top node and those of planning under `Planning:`, and the planning and execution times.
+/// `EXPLAIN ANALYZE` in PostgreSQL's text form: the plan with `(actual time=a..b rows=n
+/// loops=1)` on the top node and on each scan, join, sort and append branch the executor
+/// measured (milliseconds from the start of execution to the step's first and last row;
+/// `(never executed)` for a step it never read), the rows the statement returned or changed on
+/// the top line, under `BUFFERS` the page lookups of the whole statement under the top node and
+/// those of planning under `Planning:`, and the planning and execution times.
 pub(crate) fn render_analyzed(query: &ExplainedQuery, analyzed: Analyzed) -> QueryResult {
-    let mut lines = postgresql_lines(query);
-    if let Some(top) = lines.first_mut() {
-        top.push_str(&format!(" (actual rows={} loops=1)", analyzed.rows));
-    }
+    let measured = measured_steps(query, &analyzed);
+    let mut lines: Vec<String> = postgresql_lines(query)
+        .into_iter()
+        .zip(measured)
+        .map(|(mut line, measured)| {
+            if let Some(measured) = measured {
+                line.push_str(&actual_group(measured));
+            }
+            line
+        })
+        .collect();
     if let Some(buffers) = &analyzed.buffers {
         if let Some(line) = buffers_line("  ", buffers.execution) {
             lines.insert(1.min(lines.len()), line);
@@ -111,11 +227,11 @@ pub(crate) fn render_analyzed(query: &ExplainedQuery, analyzed: Analyzed) -> Que
     }
     lines.push(format!(
         "Planning Time: {:.3} ms",
-        analyzed.planning.as_secs_f64() * 1000.0
+        milliseconds(analyzed.planning)
     ));
     lines.push(format!(
         "Execution Time: {:.3} ms",
-        analyzed.execution.as_secs_f64() * 1000.0
+        milliseconds(analyzed.execution)
     ));
     QueryResult::rows(
         "EXPLAIN".to_owned(),
@@ -159,84 +275,148 @@ fn postgresql_scan(source: &ExplainedSource) -> String {
     }
 }
 
-fn postgresql_inner(source: &ExplainedSource, method: JoinMethod) -> Vec<(usize, String)> {
-    let relation = named_relation(source);
+enum Step<'q> {
+    Result,
+    Append,
+    Sort,
+    Limit,
+    NestedLoop,
+    HashJoin,
+    Hash,
+    Scan(&'q ExplainedSource),
+    FullScan(&'q ExplainedSource),
+    KeyLookup(&'q ExplainedSource, KeyChoice),
+}
+
+fn inner_steps(source: &ExplainedSource, method: JoinMethod) -> Vec<(usize, Step<'_>)> {
     match method {
-        JoinMethod::PrimaryKey => vec![(
-            0,
-            format!(
-                "Index Scan using {} on {relation}",
-                key_name(&source.table, KeyChoice::Primary, Dialect::PostgreSql)
-            ),
-        )],
-        JoinMethod::Index(position) => vec![(
-            0,
-            format!(
-                "Index Scan using {} on {relation}",
-                source.table.indexes[position].name
-            ),
-        )],
-        JoinMethod::Hash => vec![
-            (0, "Hash".to_owned()),
-            (1, format!("Seq Scan on {relation}")),
-        ],
-        JoinMethod::Loop => vec![(0, format!("Seq Scan on {relation}"))],
+        JoinMethod::PrimaryKey => vec![(0, Step::KeyLookup(source, KeyChoice::Primary))],
+        JoinMethod::Index(position) => {
+            vec![(0, Step::KeyLookup(source, KeyChoice::Index(position)))]
+        }
+        JoinMethod::Hash => vec![(0, Step::Hash), (1, Step::FullScan(source))],
+        JoinMethod::Loop => vec![(0, Step::FullScan(source))],
     }
 }
 
-fn postgresql_tree(query: &ExplainedQuery, upto: usize) -> Vec<(usize, String)> {
+fn join_steps(query: &ExplainedQuery, upto: usize) -> Vec<(usize, Step<'_>)> {
     let Some(source) = query.sources.get(upto) else {
         return Vec::new();
     };
     let Some(method) = source.join else {
-        return vec![(0, postgresql_scan(source))];
+        return vec![(0, Step::Scan(source))];
     };
-    let mut lines = vec![(
+    let mut steps = vec![(
         0,
         match method {
-            JoinMethod::Hash => "Hash Join".to_owned(),
-            _ => "Nested Loop".to_owned(),
+            JoinMethod::Hash => Step::HashJoin,
+            _ => Step::NestedLoop,
         },
     )];
-    let outer = postgresql_tree(query, upto.saturating_sub(1));
-    lines.extend(outer.into_iter().map(|(level, text)| (level + 1, text)));
-    lines.extend(
-        postgresql_inner(source, method)
+    let outer = join_steps(query, upto.saturating_sub(1));
+    steps.extend(outer.into_iter().map(|(level, step)| (level + 1, step)));
+    steps.extend(
+        inner_steps(source, method)
             .into_iter()
-            .map(|(level, text)| (level + 1, text)),
+            .map(|(level, step)| (level + 1, step)),
     );
-    lines
+    steps
+}
+
+fn under<'q>(top: Step<'q>, steps: Vec<(usize, Step<'q>)>) -> Vec<(usize, Step<'q>)> {
+    std::iter::once((0, top))
+        .chain(steps.into_iter().map(|(level, step)| (level + 1, step)))
+        .collect()
+}
+
+fn steps(query: &ExplainedQuery) -> Vec<(usize, Step<'_>)> {
+    let mut steps = if query.sources.is_empty() {
+        vec![(0, Step::Result)]
+    } else if query.appended {
+        under(
+            Step::Append,
+            query
+                .sources
+                .iter()
+                .map(|source| (0, Step::Scan(source)))
+                .collect(),
+        )
+    } else {
+        join_steps(query, query.sources.len() - 1)
+    };
+    if query.sorted {
+        steps = under(Step::Sort, steps);
+    }
+    if query.limited {
+        steps = under(Step::Limit, steps);
+    }
+    steps
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlannedStatement {
+    Select,
+    Update,
+    Delete,
+}
+
+impl PlannedStatement {
+    pub(crate) fn of(statement: &Statement) -> Option<Self> {
+        match statement {
+            Statement::Select(_) | Statement::Query(_) => Some(Self::Select),
+            Statement::Update(_) => Some(Self::Update),
+            Statement::Delete(_) => Some(Self::Delete),
+            _ => None,
+        }
+    }
+}
+
+fn steps_without_hashes(query: &ExplainedQuery) -> Vec<(usize, Step<'_>)> {
+    let mut ancestors: Vec<(usize, bool)> = Vec::new();
+    let mut kept = Vec::new();
+    for (level, step) in steps(query) {
+        while ancestors.last().is_some_and(|(at, _)| *at >= level) {
+            ancestors.pop();
+        }
+        let hashes = ancestors.iter().filter(|(_, hash)| *hash).count();
+        let hash = matches!(step, Step::Hash);
+        ancestors.push((level, hash));
+        if !hash {
+            kept.push((level.saturating_sub(hashes), step));
+        }
+    }
+    kept
+}
+
+fn postgresql_step(step: &Step<'_>) -> String {
+    match step {
+        Step::Result => "Result".to_owned(),
+        Step::Append => "Append".to_owned(),
+        Step::Sort => "Sort".to_owned(),
+        Step::Limit => "Limit".to_owned(),
+        Step::NestedLoop => "Nested Loop".to_owned(),
+        Step::HashJoin => "Hash Join".to_owned(),
+        Step::Hash => "Hash".to_owned(),
+        Step::Scan(source) => postgresql_scan(source),
+        Step::FullScan(source) => format!("Seq Scan on {}", named_relation(source)),
+        Step::KeyLookup(source, key) => format!(
+            "Index Scan using {} on {}",
+            key_name(&source.table, *key, Dialect::PostgreSql),
+            named_relation(source)
+        ),
+    }
 }
 
 fn postgresql_lines(query: &ExplainedQuery) -> Vec<String> {
-    let mut tree = if query.sources.is_empty() {
-        vec![(0, "Result".to_owned())]
-    } else if query.appended {
-        std::iter::once((0, "Append".to_owned()))
-            .chain(
-                query
-                    .sources
-                    .iter()
-                    .map(|source| (1, postgresql_scan(source))),
-            )
-            .collect()
-    } else {
-        postgresql_tree(query, query.sources.len() - 1)
-    };
-    if query.sorted {
-        tree = std::iter::once((0, "Sort".to_owned()))
-            .chain(tree.into_iter().map(|(level, text)| (level + 1, text)))
-            .collect();
-    }
-    if query.limited {
-        tree = std::iter::once((0, "Limit".to_owned()))
-            .chain(tree.into_iter().map(|(level, text)| (level + 1, text)))
-            .collect();
-    }
-    tree.into_iter()
-        .map(|(level, text)| match level {
-            0 => text,
-            _ => format!("{}->  {text}", " ".repeat(6 * level - 4)),
+    steps(query)
+        .into_iter()
+        .map(|(level, step)| match level {
+            0 => postgresql_step(&step),
+            _ => format!(
+                "{}->  {}",
+                " ".repeat(6 * level - 4),
+                postgresql_step(&step)
+            ),
         })
         .collect()
 }
@@ -419,5 +599,112 @@ mod tests {
             Some("  Buffers: shared hit=5")
         );
         assert_eq!(buffers_line("  ", lookups(0, 0)), None);
+    }
+
+    fn micros(first_row: u64, last_row: u64, rows: u64) -> RowTimes {
+        RowTimes {
+            first_row: Duration::from_micros(first_row),
+            last_row: Duration::from_micros(last_row),
+            rows,
+        }
+    }
+
+    fn analyzed(rows: u64, selects: Vec<MeasuredSelect>) -> Analyzed {
+        Analyzed {
+            rows,
+            planning: Duration::from_micros(7),
+            execution: Duration::from_micros(100),
+            buffers: None,
+            selects,
+        }
+    }
+
+    fn plan_lines(query: &ExplainedQuery, analyzed: Analyzed) -> Vec<String> {
+        render_analyzed(query, analyzed)
+            .rows
+            .into_iter()
+            .filter_map(|row| match row.into_iter().next() {
+                Some(Value::Text(line)) => Some(line),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_measured_step_prints_postgresqls_actual_time_rows_and_loops() {
+        let measured = MeasuredSelect {
+            source: Some(micros(10, 25, 1)),
+            output: micros(10, 30, 1),
+            skipped: 0,
+        };
+        let lines = plan_lines(&ExplainedQuery::default(), analyzed(1, vec![measured]));
+        assert_eq!(lines[0], "Result (actual time=0.010..0.025 rows=1 loops=1)");
+        assert_eq!(lines[1], "Planning Time: 0.007 ms");
+        assert_eq!(lines[2], "Execution Time: 0.100 ms");
+    }
+
+    #[test]
+    fn a_scan_on_top_of_an_offset_only_select_counts_the_rows_it_handed_up() {
+        let measured = MeasuredSelect {
+            source: Some(micros(10, 25, 1)),
+            output: micros(10, 30, 0),
+            skipped: 1,
+        };
+        let lines = plan_lines(&ExplainedQuery::default(), analyzed(0, vec![measured]));
+        assert_eq!(lines[0], "Result (actual time=0.010..0.025 rows=1 loops=1)");
+    }
+
+    #[test]
+    fn a_sort_under_a_limit_starts_when_its_input_ends_and_counts_what_it_handed_up() {
+        let query = ExplainedQuery {
+            sorted: true,
+            limited: true,
+            ..ExplainedQuery::default()
+        };
+        let measured = MeasuredSelect {
+            source: Some(micros(5, 40, 3)),
+            output: micros(5, 60, 1),
+            skipped: 1,
+        };
+        let lines = plan_lines(&query, analyzed(1, vec![measured]));
+        assert_eq!(
+            lines[..3],
+            [
+                "Limit (actual time=0.040..0.100 rows=1 loops=1)",
+                "  ->  Sort (actual time=0.040..0.060 rows=2 loops=1)",
+                "        ->  Result (actual time=0.005..0.040 rows=3 loops=1)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_step_the_executor_never_read_says_never_executed() {
+        let query = ExplainedQuery {
+            sorted: true,
+            limited: true,
+            ..ExplainedQuery::default()
+        };
+        let measured = MeasuredSelect {
+            source: None,
+            output: micros(50, 50, 0),
+            skipped: 0,
+        };
+        let lines = plan_lines(&query, analyzed(0, vec![measured]));
+        assert_eq!(
+            lines[..3],
+            [
+                "Limit (actual time=0.100..0.100 rows=0 loops=1)",
+                "  ->  Sort (never executed)",
+                "        ->  Result (never executed)",
+            ]
+        );
+    }
+
+    #[test]
+    fn without_measured_steps_the_top_node_carries_the_statements_rows_and_time() {
+        assert_eq!(
+            plan_lines(&ExplainedQuery::default(), analyzed(4, Vec::new()))[0],
+            "Result (actual time=0.100..0.100 rows=4 loops=1)"
+        );
     }
 }

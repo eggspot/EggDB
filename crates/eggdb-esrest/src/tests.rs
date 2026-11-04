@@ -344,3 +344,15 @@ fn ids_in_urls_are_percent_decoded_and_bulk_checks_index_names() {
     assert!(body(&counted).contains("\"count\":1"), "{}", body(&counted));
     assert_eq!(api.answer(&request("PUT", "/_private", "")).status, 400);
 }
+
+#[test]
+fn a_request_past_the_memory_budget_is_answered_like_a_tripped_circuit_breaker() {
+    let response = crate::over_memory_budget();
+    assert_eq!(response.status, 429);
+    let text = body(&response);
+    assert!(
+        text.contains("\"type\":\"circuit_breaking_exception\""),
+        "{text}"
+    );
+    assert!(text.contains("\"status\":429"), "{text}");
+}

@@ -14,11 +14,11 @@ use eggdb_gui::main_window::{
     self, Faces, MainWindow, NODE_FIRST_PLAN_NODE, NODE_PLAN, NODE_RESULTS_SEGMENT,
     accessibility_tree,
 };
-use eggdb_gui::plan_view::{Heat, NODE_HEIGHT, Plan, PlanView};
+use eggdb_gui::plan_view::{Heat, NODE_HEIGHT, Plan, PlanView, TooltipCause};
 use eggdb_gui::query_tab::{PLAN_PANEL, ResultView, TabFocus};
 use eggdb_gui::workspace::{Screen, Workspace};
 use eggdb_gui::{BoxFace, Canvas, Rect, Theme, ThemeKind};
-use eggdb_platform::window::{Key, KeyPress, Modifiers};
+use eggdb_platform::window::{Key, KeyPress, Modifiers, PointerButton};
 
 const BOX_FACES: Faces<'static> = Faces {
     ui: &BoxFace,
@@ -26,6 +26,7 @@ const BOX_FACES: Faces<'static> = Faces {
     mono: &BoxFace,
 };
 const LIMIT: Duration = Duration::from_secs(60);
+const WINDOW: (u32, u32) = (1280, 800);
 const PLAN_AREA: Rect = Rect::new(260.0, 418.0, PLAN_PANEL.0, PLAN_PANEL.1);
 const STUB_STATEMENT: &str = "SELECT * FROM orders o JOIN customers c ON c.id = o.customer_id";
 const STUB_PLAN: &str = "Hash Join  (cost=0.00..100.00 rows=10 width=8)
@@ -192,20 +193,193 @@ fn ctrl_shift_e_measures_the_statement_and_rolls_a_write_back() {
 }
 
 #[test]
-fn a_dialect_without_a_plan_says_not_supported_in_messages() {
+fn oracle_explains_through_dbms_xplan_and_keeps_no_plan_table_row() {
     let directory = scratch("oracle");
     let mut workspace = with_customers(&directory);
-    let tab = &mut window(&mut workspace).tab;
-    tab.set_dialect(QueryDialect::Oracle);
+    window(&mut workspace).tab.set_dialect(QueryDialect::Oracle);
     workspace.explain_text("SELECT * FROM customers", false, Instant::now());
+    workspace.wait_for_run(LIMIT);
+    let tab = &window(&mut workspace).tab;
+    assert_eq!(tab.view, ResultView::Plan, "{:?}", tab.messages);
+    let plan = tab.plan.as_ref().expect("the plan shows");
+    assert_eq!(plan.plan.nodes[0].operation, "SELECT STATEMENT");
+    assert_eq!(plan.plan.nodes[1].operation, "TABLE ACCESS FULL CUSTOMERS");
+    assert_eq!(plan.plan.nodes[1].relation.as_deref(), Some("CUSTOMERS"));
+    assert!(plan.plan.text[0].starts_with("Plan hash value: "));
+    workspace.run_text("SELECT count(*) FROM plan_table", false, Instant::now());
+    workspace.wait_for_run(LIMIT);
+    let tab = &window(&mut workspace).tab;
+    let kept = tab
+        .grid
+        .as_ref()
+        .and_then(|grid| grid.rows.first())
+        .and_then(|row| row.first().cloned().flatten());
+    assert!(
+        tab.error.is_some() || kept.as_deref() == Some("0"),
+        "the plan's rows were rolled back: {kept:?}"
+    );
+    window(&mut workspace).tab.set_dialect(QueryDialect::Oracle);
+    workspace.explain_text("SELECT * FROM customers", true, Instant::now());
     assert!(!workspace.is_running());
     let tab = &window(&mut workspace).tab;
     assert_eq!(tab.view, ResultView::Messages);
     assert!(
-        tab.messages[0].contains("Oracle's EXPLAIN PLAN is not in EggDB yet"),
+        tab.messages[0].contains("DBMS_XPLAN.DISPLAY_CURSOR"),
         "{:?}",
         tab.messages
     );
+}
+
+#[test]
+fn sql_server_explains_with_showplan_all_and_measures_with_statistics_profile() {
+    let directory = scratch("sqlserver");
+    let mut workspace = with_customers(&directory);
+    window(&mut workspace)
+        .tab
+        .set_dialect(QueryDialect::SqlServer);
+    workspace.explain_text(
+        "SELECT * FROM customers WHERE id = 2",
+        false,
+        Instant::now(),
+    );
+    workspace.wait_for_run(LIMIT);
+    let tab = &window(&mut workspace).tab;
+    assert_eq!(tab.view, ResultView::Plan, "{:?}", tab.messages);
+    let plan = tab.plan.as_ref().expect("the plan shows");
+    assert!(!plan.plan.analyze);
+    assert_eq!(plan.plan.nodes[0].operation, "SELECT");
+    assert!(
+        plan.plan.nodes[1]
+            .operation
+            .starts_with("Clustered Index Seek [customers]"),
+        "{:?}",
+        plan.plan.nodes
+    );
+    assert_eq!(plan.plan.nodes[1].relation.as_deref(), Some("customers"));
+    workspace.explain_text(
+        "UPDATE customers SET name = 'changed' WHERE id = 1",
+        true,
+        Instant::now(),
+    );
+    workspace.wait_for_run(LIMIT);
+    let tab = &window(&mut workspace).tab;
+    assert_eq!(tab.view, ResultView::Plan, "{:?}", tab.messages);
+    let plan = tab.plan.as_ref().expect("the profile shows");
+    assert!(plan.plan.analyze);
+    assert_eq!(plan.plan.actual_rows_total(0), Some(1.0));
+    workspace.run_text(
+        "SELECT name FROM customers WHERE id = 1",
+        false,
+        Instant::now(),
+    );
+    workspace.wait_for_run(LIMIT);
+    let grid = window(&mut workspace).tab.grid.clone().expect("the rows");
+    assert_eq!(
+        grid.rows[0][0].as_deref(),
+        Some("Ada"),
+        "the UPDATE was rolled back and showplan is off again"
+    );
+}
+
+#[test]
+fn hovering_a_node_fills_it_shows_its_tooltip_after_600_ms_and_a_click_selects_it() {
+    let directory = scratch("hover");
+    let mut workspace = with_customers(&directory);
+    let stub = stub_window().tab.plan.clone().expect("the stub plan");
+    {
+        let window = window(&mut workspace);
+        window.tab.editor = Editor::new(STUB_STATEMENT);
+        window.tab.plan = Some(stub);
+        window.tab.view = ResultView::Plan;
+    }
+    let bounds = accessibility_tree(window(&mut workspace))
+        .into_iter()
+        .find(|node| node.id == NODE_FIRST_PLAN_NODE + 2)
+        .map(|node| node.bounds)
+        .expect("the node is in the tree");
+    let centre = (
+        bounds.x + bounds.width / 2.0,
+        bounds.y + bounds.height / 2.0,
+    );
+    let start = Instant::now();
+    assert!(workspace.pointer_moved(centre.0, centre.1, BOX_FACES, WINDOW));
+    assert_eq!(window(&mut workspace).hovered_plan_node(), Some(2));
+    let (canvas, theme) = draw(window(&mut workspace));
+    assert_eq!(
+        pixel(&canvas, centre.0, bounds.y + 3.0),
+        Some(theme.bg2),
+        "the hovered node fills bg2"
+    );
+    let _ = workspace.tick(start);
+    assert_eq!(
+        window(&mut workspace).tab.plan.as_ref().unwrap().tooltip,
+        None
+    );
+    let wait = workspace
+        .until_plan_tooltip(start)
+        .expect("a tooltip is due");
+    assert!(wait <= Duration::from_millis(600), "{wait:?}");
+    assert!(workspace.tick(start + Duration::from_millis(600)));
+    let plan = window(&mut workspace).tab.plan.clone().unwrap();
+    assert_eq!(plan.tooltip, Some((2, TooltipCause::Pointer)));
+    assert_eq!(plan.tooltip_lines(2)[0], "Seq Scan on customers c");
+    assert_eq!(
+        workspace.until_plan_tooltip(start + Duration::from_millis(600)),
+        None
+    );
+    let (canvas, theme) = draw(window(&mut workspace));
+    let tip_top = bounds.y + NODE_HEIGHT + 4.0;
+    assert_eq!(
+        pixel(&canvas, bounds.x + 10.0, tip_top),
+        Some(theme.border),
+        "the tooltip's border sits 4 px under the node"
+    );
+    assert_eq!(
+        pixel(&canvas, bounds.x + 3.0, tip_top + 20.0),
+        Some(theme.bg0),
+        "the tooltip draws as a popover"
+    );
+    let _ = workspace.pointer_pressed(
+        centre.0,
+        centre.1,
+        PointerButton::Primary,
+        Modifiers::default(),
+        BOX_FACES,
+        WINDOW,
+        start + Duration::from_millis(700),
+    );
+    let plan = window(&mut workspace).tab.plan.clone().unwrap();
+    assert_eq!((plan.current, plan.selected), (2, Some(2)));
+    let at = STUB_STATEMENT.find("customers").unwrap();
+    assert_eq!(plan.highlight, Some(at..at + "customers".len()));
+    assert!(workspace.pointer_moved(1.0, 1.0, BOX_FACES, WINDOW));
+    assert!(workspace.tick(start + Duration::from_millis(800)));
+    assert_eq!(
+        window(&mut workspace).tab.plan.as_ref().unwrap().tooltip,
+        None
+    );
+}
+
+#[test]
+fn ctrl_shift_space_shows_the_current_nodes_tooltip_at_once_and_esc_hides_it() {
+    let mut window = stub_window();
+    let _ = window.key(chord(Key::Character('3'), false, true), Instant::now());
+    let _ = window.key(chord(Key::Down, false, false), Instant::now());
+    let _ = window.key(chord(Key::Space, true, true), Instant::now());
+    let plan = window.tab.plan.as_ref().unwrap();
+    assert_eq!(plan.tooltip, Some((1, TooltipCause::Keyboard)));
+    let lines = plan.tooltip_lines(1);
+    assert_eq!(lines[0], "Seq Scan on orders o");
+    assert!(
+        lines[1].starts_with("cost 0.00..20.00 · rows 10"),
+        "{lines:?}"
+    );
+    let _ = window.key(chord(Key::Escape, false, false), Instant::now());
+    let plan = window.tab.plan.as_ref().unwrap();
+    assert_eq!((plan.tooltip, plan.current), (None, 1));
+    let _ = window.key(chord(Key::Space, true, true), Instant::now());
+    let _ = window.key(chord(Key::Right, false, false), Instant::now());
+    assert_eq!(window.tab.plan.as_ref().unwrap().tooltip, None);
 }
 
 #[test]

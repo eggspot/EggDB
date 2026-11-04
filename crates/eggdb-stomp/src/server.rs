@@ -1,5 +1,6 @@
-use crate::frame::{Frame, next_frame};
+use crate::frame::{Frame, next_frame, pending_frame_bytes};
 use eggdb_keyspace::Keyspace;
+use eggdb_platform::connection_limits::{MemoryBudget, Reservation};
 use eggdb_queues::{QueueError, Queues};
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
@@ -19,9 +20,12 @@ const MAX_TRANSACTIONS: usize = 100;
 const MAX_STAGED: usize = 10_000;
 const MOST_STAGED_BYTES: usize = 64 << 20;
 const VERSIONS: [&str; 3] = ["1.2", "1.1", "1.0"];
+const MESSAGE_HEADER_BYTES: usize = 256;
+pub(crate) const OUT_OF_MEMORY_BUDGET: &str =
+    "the server's connections already hold their memory budget";
 
 /// How the STOMP server runs.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ServerConfig {
     /// The user clients log in as.
     pub user: String,
@@ -29,6 +33,9 @@ pub struct ServerConfig {
     pub password_sha256: [u8; 32],
     /// The most connections served at once.
     pub max_connections: usize,
+    /// The memory every connection's unread frames, staged transactions and deliveries hold
+    /// together, shared with the server's other listeners (D284, D307).
+    pub memory_budget: Arc<MemoryBudget>,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -99,26 +106,46 @@ impl<'k> Broker<'k> {
         self.topics.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn publish_topic(&self, topic: &str, content_type: Option<&str>, body: &[u8]) {
+    fn publish_topic(
+        &self,
+        topic: &str,
+        content_type: Option<&str>,
+        body: &[u8],
+        budget: &MemoryBudget,
+    ) {
         let topics = self.topics();
         let Some(subscribers) = topics.get(topic) else {
             return;
         };
         let id = self.next_topic_message.fetch_add(1, Ordering::Relaxed);
-        let mut deliveries: Vec<(SharedWriter, Vec<u8>)> = Vec::with_capacity(subscribers.len());
-        for subscriber in subscribers {
+        let deliveries: Vec<(SharedWriter, String)> = subscribers
+            .iter()
+            .map(|subscriber| {
+                (
+                    Arc::clone(&subscriber.writer),
+                    subscriber.subscription.clone(),
+                )
+            })
+            .collect();
+        drop(topics);
+        let frame_bytes = body
+            .len()
+            .saturating_add(topic.len())
+            .saturating_add(content_type.map_or(0, str::len))
+            .saturating_add(MESSAGE_HEADER_BYTES);
+        let mut held = budget.empty_reservation();
+        for (writer, subscription) in deliveries {
+            if !held.hold_if_large(frame_bytes.saturating_add(subscription.len())) {
+                continue;
+            }
             let mut frame = Frame::new("MESSAGE")
                 .with("destination", topic)
                 .with("message-id", &format!("topic-{id}"))
-                .with("subscription", &subscriber.subscription);
+                .with("subscription", &subscription);
             if let Some(content_type) = content_type {
                 frame = frame.with("content-type", content_type);
             }
             let bytes = frame.with_body(body).encode();
-            deliveries.push((Arc::clone(&subscriber.writer), bytes));
-        }
-        drop(topics);
-        for (writer, bytes) in deliveries {
             let _ = writer
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -166,6 +193,15 @@ enum Staged {
     Nack(String),
 }
 
+impl Staged {
+    fn body_bytes(&self) -> usize {
+        match self {
+            Self::Send { body, .. } => body.len(),
+            Self::Ack(_) | Self::Nack(_) => 0,
+        }
+    }
+}
+
 enum Next {
     Continue,
     Close,
@@ -174,6 +210,7 @@ enum Next {
 struct Session<'b, 'k> {
     broker: &'b Broker<'k>,
     config: &'b ServerConfig,
+    staged_held: Reservation<'b>,
     id: u64,
     writer: SharedWriter,
     connected: bool,
@@ -256,9 +293,12 @@ impl Session<'_, '_> {
                     .send(name, body, 0, now_ms())
                     .map_err(|error| queue_failure(&error))?;
             }
-            Destination::Topic => self
-                .broker
-                .publish_topic(destination_text, content_type, body),
+            Destination::Topic => self.broker.publish_topic(
+                destination_text,
+                content_type,
+                body,
+                &self.config.memory_budget,
+            ),
         }
         Ok(())
     }
@@ -396,19 +436,25 @@ impl Session<'_, '_> {
         frame.header("id").or_else(|| frame.header("message-id"))
     }
 
-    fn stage(&mut self, transaction: &str, staged: Staged) -> Result<(), String> {
-        let held: usize = self.transactions.values().map(Vec::len).sum();
-        let held_bytes: usize = self
-            .transactions
+    fn staged_bytes(&self) -> usize {
+        self.transactions
             .values()
             .flatten()
-            .map(|step| match step {
-                Staged::Send { body, .. } => body.len(),
-                Staged::Ack(_) | Staged::Nack(_) => 0,
-            })
-            .sum();
+            .map(Staged::body_bytes)
+            .sum()
+    }
+
+    fn stage(&mut self, transaction: &str, staged: Staged) -> Result<(), String> {
+        let held: usize = self.transactions.values().map(Vec::len).sum();
+        let held_bytes = self.staged_bytes();
         if held >= MAX_STAGED || held_bytes >= MOST_STAGED_BYTES {
             return Err("the session's transactions hold too many frames".to_owned());
+        }
+        if !self
+            .staged_held
+            .hold_if_large(held_bytes.saturating_add(staged.body_bytes()))
+        {
+            return Err(OUT_OF_MEMORY_BUDGET.to_owned());
         }
         let steps = self
             .transactions
@@ -454,8 +500,12 @@ impl Session<'_, '_> {
                     body,
                 } => {
                     if matches!(destination(&text)?, Destination::Topic) {
-                        self.broker
-                            .publish_topic(&text, content_type.as_deref(), &body);
+                        self.broker.publish_topic(
+                            &text,
+                            content_type.as_deref(),
+                            &body,
+                            &self.config.memory_budget,
+                        );
                     }
                 }
                 Staged::Ack(token) => self.settle(&token, true)?,
@@ -541,7 +591,12 @@ impl Session<'_, '_> {
         if !self.connected {
             return self.refuse("the first frame must be CONNECT or STOMP", Some(frame));
         }
-        match self.apply(frame) {
+        let applied = self.apply(frame);
+        let staged_bytes = self.staged_bytes();
+        if staged_bytes < self.staged_held.bytes() {
+            self.staged_held.hold_if_large(staged_bytes);
+        }
+        match applied {
             Ok(next) => {
                 if let Some(receipt) = frame.header("receipt") {
                     self.send(&Frame::new("RECEIPT").with("receipt-id", receipt))?;
@@ -552,7 +607,7 @@ impl Session<'_, '_> {
         }
     }
 
-    fn pump(&mut self) -> io::Result<()> {
+    fn pump(&mut self) -> io::Result<Next> {
         let waiting: Vec<(String, String, AckMode, usize)> = self
             .subscriptions
             .iter()
@@ -571,42 +626,88 @@ impl Session<'_, '_> {
                 (room > 0).then(|| (id.clone(), queue, subscription.ack, room))
             })
             .collect();
+        let config = self.config;
+        let mut held = config.memory_budget.empty_reservation();
         for (id, queue, ack, room) in waiting {
-            let Ok(messages) = self.broker.queues.receive(&queue, room, LEASE_MS, now_ms()) else {
+            let mut batch_bytes = 0usize;
+            let mut refused = false;
+            let leased = self.broker.queues.receive_fitting(
+                &queue,
+                room,
+                LEASE_MS,
+                now_ms(),
+                &mut |body_bytes: usize| {
+                    let grown = batch_bytes
+                        .saturating_add(body_bytes)
+                        .saturating_add(MESSAGE_HEADER_BYTES);
+                    if held.hold_if_large(grown) {
+                        batch_bytes = grown;
+                        true
+                    } else {
+                        refused = true;
+                        false
+                    }
+                },
+            );
+            let Ok(messages) = leased else {
+                held.resize(0);
                 continue;
             };
-            for message in messages {
-                let message_id = format!("{queue}-{}", message.id);
-                let mut frame = Frame::new("MESSAGE")
-                    .with("destination", &format!("/queue/{queue}"))
-                    .with("message-id", &message_id)
-                    .with("subscription", &id);
-                if message.receive_count > 1 {
-                    frame = frame.with("redelivered", "true");
-                }
-                if ack != AckMode::Auto {
-                    frame = frame.with("ack", &message_id);
-                }
-                let sent = self.send(&frame.with_body(&message.body));
-                if ack == AckMode::Auto {
-                    if sent.is_ok() {
-                        let _ = self.broker.queues.ack(&queue, message.id);
-                    } else {
-                        let _ = self.broker.queues.release(&queue, message.id, now_ms());
-                    }
+            if refused && messages.is_empty() {
+                return self.refuse(OUT_OF_MEMORY_BUDGET, None);
+            }
+            let delivered = self.deliver(&id, &queue, ack, messages);
+            held.resize(0);
+            delivered?;
+        }
+        Ok(Next::Continue)
+    }
+
+    fn deliver(
+        &mut self,
+        id: &str,
+        queue: &str,
+        ack: AckMode,
+        messages: Vec<eggdb_queues::Message>,
+    ) -> io::Result<()> {
+        let mut messages = messages.into_iter();
+        while let Some(message) = messages.next() {
+            let message_id = format!("{queue}-{}", message.id);
+            let mut frame = Frame::new("MESSAGE")
+                .with("destination", &format!("/queue/{queue}"))
+                .with("message-id", &message_id)
+                .with("subscription", id);
+            if message.receive_count > 1 {
+                frame = frame.with("redelivered", "true");
+            }
+            if ack != AckMode::Auto {
+                frame = frame.with("ack", &message_id);
+            }
+            let sent = self.send(&frame.with_body(&message.body));
+            if ack == AckMode::Auto {
+                if sent.is_ok() {
+                    let _ = self.broker.queues.ack(queue, message.id);
                 } else {
-                    self.next_sequence += 1;
-                    self.pending.insert(
-                        message_id,
-                        Pending {
-                            subscription: id.clone(),
-                            queue: queue.clone(),
-                            id: message.id,
-                            sequence: self.next_sequence,
-                        },
-                    );
+                    let _ = self.broker.queues.release(queue, message.id, now_ms());
                 }
-                sent?;
+            } else {
+                self.next_sequence += 1;
+                self.pending.insert(
+                    message_id,
+                    Pending {
+                        subscription: id.to_owned(),
+                        queue: queue.to_owned(),
+                        id: message.id,
+                        sequence: self.next_sequence,
+                    },
+                );
+            }
+            if let Err(error) = sent {
+                let now = now_ms();
+                for unsent in messages {
+                    let _ = self.broker.queues.unlease(queue, unsent.id, now);
+                }
+                return Err(error);
             }
         }
         Ok(())
@@ -614,6 +715,8 @@ impl Session<'_, '_> {
 
     fn run(&mut self, mut reader: impl Read, stop: &(dyn Fn() -> bool + Sync)) -> io::Result<()> {
         let started = Instant::now();
+        let config = self.config;
+        let mut held = config.memory_budget.empty_reservation();
         let mut buffer = Vec::new();
         let mut chunk = vec![0; 64 * 1024];
         loop {
@@ -635,12 +738,23 @@ impl Session<'_, '_> {
             if stop() || (!self.connected && started.elapsed() > CONNECT_WAIT) {
                 return Ok(());
             }
-            if self.connected {
-                self.pump()?;
+            if self.connected && matches!(self.pump()?, Next::Close) {
+                return Ok(());
+            }
+            if !held.hold_if_large(pending_frame_bytes(&buffer)) {
+                self.refuse(OUT_OF_MEMORY_BUDGET, None)?;
+                return Ok(());
             }
             match reader.read(&mut chunk) {
                 Ok(0) => return Ok(()),
-                Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                Ok(read) => {
+                    let grown = buffer.len().saturating_add(read);
+                    if !held.hold_if_large(grown.max(pending_frame_bytes(&buffer))) {
+                        self.refuse(OUT_OF_MEMORY_BUDGET, None)?;
+                        return Ok(());
+                    }
+                    buffer.extend_from_slice(&chunk[..read]);
+                }
                 Err(error)
                     if matches!(
                         error.kind(),
@@ -665,6 +779,7 @@ pub(crate) fn serve_stream(
     let mut session = Session {
         broker,
         config,
+        staged_held: config.memory_budget.empty_reservation(),
         id,
         writer,
         connected: false,
