@@ -13,6 +13,7 @@ pub const MAX_ROW_BYTES: usize = 1 << 31;
 
 const ROW_OVERHEAD: usize = 24;
 const VALUE_SIZE: usize = std::mem::size_of::<Value>();
+const RECORD_OVERHEAD: usize = 64;
 
 #[derive(Clone, Copy)]
 struct Shared {
@@ -36,10 +37,20 @@ pub(crate) fn held_bytes(value: &Value) -> usize {
         Value::Defined(defined) => match defined.as_ref() {
             crate::types::DefinedValue::Enum(label) => label.label.len(),
             crate::types::DefinedValue::Record(record) => {
-                record.fields.iter().map(held_bytes).fold(
-                    record.names.iter().map(String::len).sum(),
-                    usize::saturating_add,
-                )
+                let frame = RECORD_OVERHEAD
+                    .saturating_add(record.fields.len().saturating_mul(VALUE_SIZE))
+                    .saturating_add(
+                        record
+                            .names
+                            .len()
+                            .saturating_mul(std::mem::size_of::<String>()),
+                    );
+                record
+                    .fields
+                    .iter()
+                    .map(held_bytes)
+                    .chain(record.names.iter().map(String::len))
+                    .fold(frame, usize::saturating_add)
             }
             crate::types::DefinedValue::Range(range) => range.bounds.as_ref().map_or(0, |bounds| {
                 [&bounds.lower, &bounds.upper]
@@ -338,6 +349,17 @@ mod tests {
         let long = super::held_row_bytes(&[Value::Text("x".repeat(1000))]);
         assert_eq!(long - short, 999);
         assert!(super::held_row_bytes(&[]) > 0);
+    }
+
+    #[test]
+    fn a_record_counts_its_fields_names_and_box() {
+        let record = crate::records::construct(vec![Value::Integer(1), Value::Integer(2)])
+            .expect("a record of two integers");
+        let held = super::held_bytes(&record);
+        assert!(
+            held >= super::RECORD_OVERHEAD + 2 * super::VALUE_SIZE,
+            "{held}"
+        );
     }
 
     #[test]

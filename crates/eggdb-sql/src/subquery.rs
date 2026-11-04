@@ -1838,6 +1838,7 @@ fn recursive_table(
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
     let mut all_rows: Vec<Vec<Value>> = Vec::new();
     let mut working = Vec::new();
+    let mut working_memory = WorkMemory::new();
     for row in seed.rows {
         let row = match &search_cycle {
             Some(found) => found.seed_row(row),
@@ -1847,6 +1848,7 @@ fn recursive_table(
             memory.charge_row(&row)?;
             all_rows.push(row.clone());
             if expands(&row) {
+                working_memory.charge_row(&row)?;
                 working.push(row);
             }
         }
@@ -1868,6 +1870,7 @@ fn recursive_table(
                 "A recursive WITH query may run at most {most} steps; make sure its recursive term stops producing rows."
             )));
         }
+        let held_by_step = std::mem::replace(&mut working_memory, WorkMemory::new());
         let mut step_temp = TempTables::new();
         let temp = step_temp.add(
             env.names,
@@ -1913,10 +1916,12 @@ fn recursive_table(
                 memory.charge_row(&row)?;
                 all_rows.push(row.clone());
                 if expands(&row) {
+                    working_memory.charge_row(&row)?;
                     working.push(row);
                 }
             }
         }
+        drop(held_by_step);
     }
     Ok(QueryResult::rows(
         format!("SELECT {}", all_rows.len()),
