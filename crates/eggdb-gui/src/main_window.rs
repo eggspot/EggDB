@@ -14,12 +14,12 @@ use crate::connection::SessionId;
 use crate::dialect::QueryDialect;
 use crate::drop_prompt::{self, DropAnswer, DropKind, DropPrompt, DropTarget};
 use crate::editor::Position;
+use crate::editor_menu::{self, EditorMenuOrigin};
 use crate::font::{TextStyle, Typeface};
 use crate::grid::{
     self, Cell, CellLook, ResultGrid, ValueKind, cell_text, quote_name, visible_columns,
     visible_rows,
 };
-use crate::editor_menu::{self, EditorMenuOrigin};
 use crate::grid_menu::{self, GridMenu};
 use crate::highlight::{Carry, TokenKind, tokens};
 use crate::inspector::{self, Inspector, InspectorBlock};
@@ -1060,7 +1060,10 @@ impl MainWindow {
             self.tab.notice = Some(OPEN_WHILE_RUNNING.to_owned());
             return none;
         }
-        let scan = KeySpaceScan::new(key_space.collection.clone(), key_space.keys);
+        let scan = KeySpaceScan {
+            over_resp: self.tree.catalog.over_resp,
+            ..KeySpaceScan::new(key_space.collection.clone(), key_space.keys)
+        };
         let open = (0..self.tab_count()).find(|&position| {
             self.tab_at(position)
                 .and_then(|tab| tab.keys.as_ref())
@@ -1201,6 +1204,10 @@ impl MainWindow {
     }
 
     fn new_tab(&mut self) -> bool {
+        if self.tree.catalog.over_resp {
+            self.tab.notice = Some(crate::connection::QUERY_TABS_NEED_SQL.to_owned());
+            return false;
+        }
         if self.tab_count() >= tab_strip::MOST_TABS {
             self.tab.notice = Some(tab_strip::TOO_MANY_TABS.to_owned());
             return false;
@@ -1415,6 +1422,7 @@ pub fn sample_catalog() -> Catalog {
             keys: KeyCount::Exactly(2),
         }],
         triggers: Vec::new(),
+        over_resp: false,
     }
 }
 
@@ -2676,7 +2684,14 @@ fn keys_header(paint: &mut Painter<'_, '_>, tab: &QueryTab, centre_right: f32) {
     let text_left = field.x + 28.0;
     let room = field.x + field.w - 8.0 - text_left;
     if pages.prefix_text.is_empty() {
-        paint.text(faces.ui, "Prefix", text_left, 393.0, BODY, theme.text_disabled);
+        paint.text(
+            faces.ui,
+            "Prefix",
+            text_left,
+            393.0,
+            BODY,
+            theme.text_disabled,
+        );
     } else {
         let shown = elided(faces.ui, &pages.prefix_text, room, BODY.0);
         let width = faces.ui.width(&shown, BODY.0);
@@ -3221,8 +3236,7 @@ impl MainWindow {
             || (self.tree_menu.is_some()
                 && (id == tree_menu::NODE_TREE_MENU || tree_menu::item_of_node(id).is_some()))
             || (self.tab.editor_menu.is_some()
-                && (id == editor_menu::NODE_EDITOR_MENU
-                    || editor_menu::item_of_node(id).is_some()))
+                && (id == editor_menu::NODE_EDITOR_MENU || editor_menu::item_of_node(id).is_some()))
     }
 
     /// A press of the primary button while a popover is open: outside it closes the popover
@@ -6370,7 +6384,10 @@ mod tests {
             },
         };
         window.key(shift_f10, now);
-        let menu = window.tab.editor_menu.expect("Shift+F10 opens the editor menu");
+        let menu = window
+            .tab
+            .editor_menu
+            .expect("Shift+F10 opens the editor menu");
         assert_eq!(menu.highlighted, Some(2), "the first enabled item, Paste");
         let rect = window.editor_menu_rect().expect("the menu has a rect");
         assert_eq!(rect.y, EDITOR_TEXT_TOP + LINE_HEIGHT + 4.0);
@@ -6423,7 +6440,10 @@ mod tests {
         window.focus = WindowFocus::Tab;
         window.tab.focus = TabFocus::Editor;
         window.key(KeyPress::plain(Key::ContextMenu), now);
-        let menu = window.tab.editor_menu.expect("the menu key opens it in a keys tab");
+        let menu = window
+            .tab
+            .editor_menu
+            .expect("the menu key opens it in a keys tab");
         assert_eq!(menu.run_label, "Run scan");
         assert_eq!(
             menu.enabled,

@@ -604,6 +604,7 @@ impl ConnectCard {
             ConnectTarget::Server(options) => {
                 format!("Connecting to {}:{}…", options.host, options.port)
             }
+            ConnectTarget::Resp(options) => format!("Connecting to {}…", options.place()),
         };
         self.progress = Some(text);
     }

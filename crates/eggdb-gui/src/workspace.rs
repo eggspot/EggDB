@@ -1210,7 +1210,7 @@ impl Workspace {
             }
             let mut page_end = None;
             let outcomes = match (&scan, &bracketed) {
-                (Some(scan), _) => vec![connection.scan_keys(scan).map(|page| {
+                (Some(scan), _) => vec![connection.scan_keys(scan, &worker_cancel).map(|page| {
                     page_end = Some(page.end);
                     vec![page.table]
                 })],
@@ -1465,8 +1465,8 @@ impl Workspace {
             Segment::File => {
                 ConnectTarget::File(card.file_target(self.home.as_deref(), &self.current))
             }
-            Segment::Server => match card.server.connect_options() {
-                Ok(options) => ConnectTarget::Server(options),
+            Segment::Server => match card.server.connect_target() {
+                Ok(target) => target,
                 Err(failure) => {
                     card.begin_opening();
                     card.finish_with_failure(&failure);
@@ -1582,11 +1582,17 @@ impl Workspace {
 }
 
 /// The catalog the main window first shows for `connection`: its full catalog, else its
-/// table names; it reads the database, so it runs off the window's thread.
+/// table names (an empty `Keys` group on a RESP server); it reads the database, so it runs
+/// off the window's thread.
 pub fn opening_catalog(connection: &mut Connection) -> Catalog {
-    connection
-        .catalog()
-        .unwrap_or_else(|_| Catalog::of_tables(connection.table_names().unwrap_or_default()))
+    match connection.catalog() {
+        Ok(catalog) => catalog,
+        Err(_) if connection.is_resp() => Catalog {
+            over_resp: true,
+            ..Catalog::default()
+        },
+        Err(_) => Catalog::of_tables(connection.table_names().unwrap_or_default()),
+    }
 }
 
 /// The main window as it first shows `connection` (`docs/ux/workspace.md` 1.7): its name and
@@ -1632,7 +1638,9 @@ mod tests {
                 ConnectTarget::File(file) => Connection::in_memory(
                     &file.path.file_name().unwrap_or_default().to_string_lossy(),
                 ),
-                ConnectTarget::Server(_) => Err(crate::connection::url_failure()),
+                ConnectTarget::Server(_) | ConnectTarget::Resp(_) => {
+                    Err(crate::connection::url_failure())
+                }
             }
         }
     }

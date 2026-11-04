@@ -179,10 +179,15 @@ pub struct ObjectTree {
 impl ObjectTree {
     /// The tree of `catalog` as it first shows: the connection and `Tables` expanded.
     pub fn new(connection: &str, catalog: Catalog) -> Self {
+        let first_group = if catalog.over_resp {
+            Group::Keys
+        } else {
+            Group::Tables
+        };
         Self {
             connection: connection.to_owned(),
             catalog,
-            expanded: [TreeItem::Connection, TreeItem::Group(Group::Tables)]
+            expanded: [TreeItem::Connection, TreeItem::Group(first_group)]
                 .into_iter()
                 .collect(),
             current: TreeItem::Connection,
@@ -289,11 +294,17 @@ impl ObjectTree {
         })
     }
 
-    /// The groups the connection has, in the tree's order; `Tables` always.
+    /// The groups the connection has, in the tree's order; `Tables` always, except on a RESP
+    /// server, which has `Keys` always and nothing else.
     pub fn groups(&self) -> Vec<Group> {
+        let always = if self.catalog.over_resp {
+            Group::Keys
+        } else {
+            Group::Tables
+        };
         Group::ALL
             .into_iter()
-            .filter(|&group| group == Group::Tables || self.group_size(group) > 0)
+            .filter(|&group| group == always || self.group_size(group) > 0)
             .collect()
     }
 
@@ -453,6 +464,7 @@ impl ObjectTree {
     fn detail(&self, item: TreeItem) -> Option<String> {
         let catalog = &self.catalog;
         match item {
+            TreeItem::Connection => catalog.over_resp.then(|| "RESP".to_owned()),
             TreeItem::Group(group) => Some(self.group_size(group).to_string()),
             TreeItem::Columns(_) | TreeItem::TableIndexes(_) | TreeItem::TableTriggers(_) => {
                 Some(self.child_count(item).to_string())
@@ -1045,6 +1057,7 @@ mod tests {
                 events: vec!["INSERT".into(), "UPDATE".into()],
                 action: "EXECUTE FUNCTION stamp()".into(),
             }],
+            over_resp: false,
         }
     }
 

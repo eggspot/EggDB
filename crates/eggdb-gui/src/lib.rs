@@ -74,6 +74,13 @@ pub mod pointer;
 /// The query tab: its editor, dialect, runs, results and inline errors
 /// (`docs/ux/workspace.md` 2).
 pub mod query_tab;
+/// A RESP client of our own: the public RESP2/RESP3 wire format over TCP with `HELLO 3`,
+/// `AUTH`, pipelines and bounded reads, for `redis://` connections (`docs/ux/workspace.md`
+/// 10.10).
+pub mod resp_client;
+/// A RESP server's key spaces `resp0` … `resp15` and the keys tab's pages over `SCAN`, with
+/// each key's type and size (`docs/ux/workspace.md` 10.10).
+pub mod resp_keys;
 /// Scrollbar geometry and drawing for the grid, the editor and the value view
 /// (`docs/ux/workspace.md` 9.6).
 pub mod scrollbar;

@@ -7,7 +7,9 @@ use eggdb_platform::window::{Key, KeyPress};
 use crate::connection::{ResultTable, SessionId, StatementFailure};
 use crate::dialect::QueryDialect;
 use crate::editor::{self, Editor, Position};
-use crate::editor_menu::{EditorMenu, EditorMenuAnswer, EditorMenuItem, EditorMenuOrigin, EditorState};
+use crate::editor_menu::{
+    EditorMenu, EditorMenuAnswer, EditorMenuItem, EditorMenuOrigin, EditorState,
+};
 use crate::grid::{GridAnswer, GridMenuItem, ResultGrid, cell_text, column_widths};
 use crate::grid_menu::{GridMenu, MenuAnswer};
 use crate::key_scan::{KEY_SCAN_LIMIT, KeyPages, KeySpaceScan, PageEnd, PageStart, unspelled};
@@ -794,9 +796,9 @@ impl QueryTab {
             empty: text.is_empty(),
             clipboard_text,
             running: self.running,
-            blank_range: self.run_range().is_none_or(|range| {
-                is_blank_sql(text.get(range).unwrap_or(""), self.dialect)
-            }),
+            blank_range: self
+                .run_range()
+                .is_none_or(|range| is_blank_sql(text.get(range).unwrap_or(""), self.dialect)),
         }
     }
 
@@ -1974,7 +1976,110 @@ mod tests {
         let page = scan.scan_file(database).expect("the page reads");
         tab.started();
         tab.key_page_read(&request, page.end);
-        tab.finish(&request, vec![Ok(vec![page.table])], Duration::from_micros(500));
+        tab.finish(
+            &request,
+            vec![Ok(vec![page.table])],
+            Duration::from_micros(500),
+        );
+    }
+
+    fn read_resp_page(
+        tab: &mut QueryTab,
+        action: TabAction,
+        connection: &mut crate::connection::Connection,
+    ) {
+        let TabAction::Run(request) = action else {
+            panic!("the keys tab asks for a page");
+        };
+        let scan = request.scan.clone().expect("a keys page scans");
+        let page = connection
+            .scan_keys(&scan, &crate::connection::CancelHandle::default())
+            .expect("the page reads over RESP");
+        tab.started();
+        tab.key_page_read(&request, page.end);
+        tab.finish(
+            &request,
+            vec![Ok(vec![page.table])],
+            Duration::from_micros(500),
+        );
+    }
+
+    #[test]
+    fn a_keys_tab_on_a_resp_server_pages_by_cursor_with_a_type_column() {
+        use crate::connection::{ConnectTarget, Connector, EngineConnector};
+        use crate::resp_keys::fake_server::{Stored, keyspace, simple, start};
+        let mut keys = std::collections::BTreeMap::new();
+        for number in 0..230_u32 {
+            keys.insert(
+                format!("user:{number:04}").into_bytes(),
+                Stored::Text(b"u".to_vec()),
+            );
+        }
+        for number in 0..12_u32 {
+            keys.insert(
+                format!("cart:{number:02}").into_bytes(),
+                Stored::Counted("hash", 3),
+            );
+        }
+        let server = start(keyspace(
+            std::collections::BTreeMap::from([(0, keys)]),
+            simple("OK"),
+            40,
+        ));
+        let mut connection = EngineConnector
+            .connect(&ConnectTarget::Resp(server.options(None)))
+            .expect("the RESP server answers");
+        let scan = KeySpaceScan {
+            over_resp: true,
+            ..KeySpaceScan::new(
+                Some("resp0".to_owned()),
+                crate::catalog::KeyCount::Exactly(200),
+            )
+        };
+        let mut tab = QueryTab::keys(scan);
+        assert_eq!(tab.editor.text(), "SCAN resp0 LIMIT 100");
+        let first = TabAction::Run(tab.run_request(false).expect("Run scans page 1"));
+        read_resp_page(&mut tab, first, &mut connection);
+        assert_eq!(tab.summary, "100 keys shown of 242 · 0.5 ms");
+        assert_eq!(
+            tab.grid.as_ref().map(ResultGrid::banner_text).as_deref(),
+            Some("Showing the first 100 keys of 242 in the server's order.")
+        );
+        assert_eq!(
+            tab.grid.as_ref().map(|grid| grid.columns.clone()),
+            Some(
+                crate::resp_keys::RESP_KEY_COLUMNS
+                    .map(str::to_owned)
+                    .to_vec()
+            )
+        );
+        assert_eq!(
+            tab.grid
+                .as_ref()
+                .and_then(|grid| grid.rows.first().cloned()),
+            Some(vec![
+                Some("cart:00".to_owned()),
+                Some("hash".to_owned()),
+                Some("3 fields".to_owned()),
+                Some("–".to_owned()),
+            ])
+        );
+        let next = tab.next_page();
+        read_resp_page(&mut tab, next, &mut connection);
+        assert_eq!(tab.editor.text(), "SCAN resp0 CURSOR 120 LIMIT 100");
+        assert_eq!(tab.summary, "Keys 101–200 of 242 · 0.5 ms");
+        assert_eq!(
+            tab.grid.as_ref().and_then(|grid| grid.value(grid.current)),
+            Some("user:0088")
+        );
+        let last = tab.next_page();
+        read_resp_page(&mut tab, last, &mut connection);
+        assert_eq!(tab.summary, "Keys 201–242 of 242 · 0.5 ms");
+        assert!(!tab.key_pages.can_go_next());
+        let back = tab.previous_page();
+        read_resp_page(&mut tab, back, &mut connection);
+        assert_eq!(tab.editor.text(), "SCAN resp0 CURSOR 120 LIMIT 100");
+        assert_eq!(tab.summary, "Keys 101–200 of 242 · 0.5 ms");
     }
 
     #[test]
@@ -2017,7 +2122,11 @@ mod tests {
             tab.keys_tab_key(KeyPress::plain(Key::Character(letter)), now);
         }
         assert_eq!(tab.key_pages.prefix_text, "user:");
-        assert_eq!(tab.prefix_due(now), TabAction::None, "the field waits 150 ms");
+        assert_eq!(
+            tab.prefix_due(now),
+            TabAction::None,
+            "the field waits 150 ms"
+        );
         let typed = tab.prefix_due(now + PREFIX_DEBOUNCE);
         read_page(&mut tab, typed, &database);
         assert_eq!(tab.editor.text(), "SCAN users PREFIX 'user:' LIMIT 100");
@@ -2046,7 +2155,10 @@ mod tests {
         let last = tab.next_page();
         read_page(&mut tab, last, &database);
         assert_eq!(tab.summary, "Keys 201–212 · 0.5 ms");
-        assert!(!tab.key_pages.can_go_next(), "Next 100 is off on the last page");
+        assert!(
+            !tab.key_pages.can_go_next(),
+            "Next 100 is off on the last page"
+        );
         assert!(tab.grid.as_ref().is_some_and(|grid| !grid.truncated()));
         let back = tab.previous_page();
         read_page(&mut tab, back, &database);
@@ -2061,7 +2173,10 @@ mod tests {
         let none = tab.keys_tab_key(KeyPress::plain(Key::Enter), now);
         read_page(&mut tab, none.expect("Enter runs at once"), &database);
         assert_eq!(tab.summary, "0 keys start with 'x' · 0.5 ms");
-        assert!(!tab.key_pages.can_go_back(), "a new prefix starts on page 1");
+        assert!(
+            !tab.key_pages.can_go_back(),
+            "a new prefix starts on page 1"
+        );
         tab.focus_prefix();
         for letter in "\\x4".chars() {
             tab.keys_tab_key(KeyPress::plain(Key::Character(letter)), now);
@@ -2082,7 +2197,10 @@ mod tests {
         tab.open_editor_menu(origin, true);
         let menu = tab.editor_menu.expect("the menu opens");
         assert_eq!(menu.run_label, crate::editor_menu::RUN_STATEMENT);
-        assert_eq!(menu.enabled, [false, false, true, true, true, true, true, true]);
+        assert_eq!(
+            menu.enabled,
+            [false, false, true, true, true, true, true, true]
+        );
         tab.editor_menu_item(EditorMenuItem::FormatStatement);
         assert_eq!(tab.editor.text(), "SELECT\n  a,\n  b\nFROM t");
         assert_eq!(tab.notice.as_deref(), Some("Formatted 1 statement"));
@@ -2117,9 +2235,15 @@ mod tests {
         keys.open_editor_menu(origin, true);
         let menu = keys.editor_menu.expect("a keys tab has the menu too");
         assert_eq!(menu.run_label, crate::editor_menu::RUN_SCAN);
-        assert_eq!(menu.enabled, [false, true, false, false, true, false, false, false]);
+        assert_eq!(
+            menu.enabled,
+            [false, true, false, false, true, false, false, false]
+        );
         let copied = keys.editor_menu_item(EditorMenuItem::Copy);
         assert!(matches!(copied, TabAction::Copy { ref text, .. } if text == "SCAN LIMIT 100"));
-        assert!(matches!(keys.editor_menu_item(EditorMenuItem::Run), TabAction::Run(_)));
+        assert!(matches!(
+            keys.editor_menu_item(EditorMenuItem::Run),
+            TabAction::Run(_)
+        ));
     }
 }

@@ -14,6 +14,7 @@ use eggdb_pgwire::client::{
 
 use crate::dialect::QueryDialect;
 use crate::grid::ValueKind;
+use crate::resp_client::{RespClient, RespConnectError, RespOptions};
 
 /// The most rows one result keeps for the grid; the rest are counted, not held
 /// (`docs/ux/workspace.md` 3.7).
@@ -34,6 +35,8 @@ pub enum ConnectTarget {
     File(FileTarget),
     /// A server speaking the PostgreSQL protocol, such as `eggdb serve`.
     Server(ConnectOptions),
+    /// A server speaking RESP, reached with a `redis://` URL: a key-value connection.
+    Resp(RespOptions),
 }
 
 /// What `Debug` output shows in place of a password.
@@ -163,6 +166,16 @@ impl StatementFailure {
         }
     }
 
+    pub(crate) fn needs_sql() -> Self {
+        Self {
+            code: String::new(),
+            report: vec![QUERY_TABS_NEED_SQL.to_owned()],
+            message: QUERY_TABS_NEED_SQL.to_owned(),
+            hint: None,
+            position: None,
+        }
+    }
+
     pub(crate) fn session_lost() -> Self {
         let message = "the tab's session ended; run again to start a new one".to_owned();
         Self {
@@ -230,12 +243,16 @@ pub fn transaction_dialect_message(open: QueryDialect, wanted: QueryDialect) -> 
 enum Stopper {
     File(CancelSignal),
     Server(CancelRequest),
+    Socket(std::net::TcpStream),
 }
 
 impl Stopper {
     fn stop(self) {
         match self {
             Self::File(signal) => signal.cancel(),
+            Self::Socket(socket) => {
+                let _ = socket.shutdown(std::net::Shutdown::Both);
+            }
             Self::Server(request) => {
                 std::thread::spawn(move || {
                     let _ = request.send();
@@ -313,12 +330,78 @@ pub struct SessionId(pub u64);
 /// Each statement's answer, in order, the last one the failure when one failed.
 pub type Outcomes = Vec<Result<Vec<ResultTable>, StatementFailure>>;
 
+/// What a SQL run, or `Ctrl/Cmd+T`, answers on a RESP connection (`docs/ux/workspace.md`
+/// 10.10).
+pub const QUERY_TABS_NEED_SQL: &str = "Query tabs need a SQL connection";
+
 /// SQLSTATE `25001` active_sql_transaction.
 pub const ACTIVE_TRANSACTION: &str = "25001";
 
 enum Link {
     File(FileLink),
     Server(ServerLink),
+    Resp(RespLink),
+}
+
+struct RespLink {
+    options: RespOptions,
+    client: Option<RespClient>,
+}
+
+impl RespLink {
+    fn client(&mut self) -> Result<&mut RespClient, StatementFailure> {
+        if self.client.is_none() {
+            let client = RespClient::connect(&self.options).map_err(|error| {
+                let failure = resp_failure(&self.options, &error);
+                let mut report = vec![failure.error_line()];
+                report.extend(failure.try_line());
+                StatementFailure {
+                    code: String::new(),
+                    message: failure.message,
+                    hint: None,
+                    position: None,
+                    report,
+                }
+            })?;
+            self.client = Some(client);
+        }
+        self.client
+            .as_mut()
+            .ok_or_else(StatementFailure::session_lost)
+    }
+
+    fn scan(
+        &mut self,
+        scan: &crate::key_scan::KeySpaceScan,
+        cancel: &CancelHandle,
+    ) -> Result<crate::key_scan::KeyPage, StatementFailure> {
+        let place = self.options.place();
+        let client = self.client()?;
+        if let Ok(socket) = client.socket() {
+            cancel.arm(Stopper::Socket(socket));
+        }
+        let page = crate::resp_keys::scan_page(client, scan, &place, cancel);
+        cancel.disarm();
+        if page.is_err() {
+            self.drop_client();
+        }
+        page
+    }
+
+    fn catalog(&mut self) -> Result<crate::catalog::Catalog, StatementFailure> {
+        let place = self.options.place();
+        let catalog = crate::resp_keys::read_catalog(self.client()?, &place);
+        if catalog.is_err() {
+            self.drop_client();
+        }
+        catalog
+    }
+
+    fn drop_client(&mut self) {
+        if let Some(client) = self.client.take() {
+            client.close();
+        }
+    }
 }
 
 struct FileLink {
@@ -610,7 +693,12 @@ impl Connection {
 
     /// Whether this is a server session.
     pub fn is_server(&self) -> bool {
-        matches!(self.link, Link::Server(_))
+        matches!(self.link, Link::Server(_) | Link::Resp(_))
+    }
+
+    /// Whether this is a RESP server: a key-value connection with no SQL.
+    pub fn is_resp(&self) -> bool {
+        matches!(self.link, Link::Resp(_))
     }
 
     /// The status bar's connection text: `Connected · shop.eggdb · read-write`, or
@@ -619,6 +707,7 @@ impl Connection {
         let detail = match (&self.link, self.read_only, self.tls) {
             (Link::Server(_), _, true) => "TLS",
             (Link::Server(_), _, false) => "no TLS",
+            (Link::Resp(_), _, _) => "RESP",
             (Link::File(_), true, _) => "read-only",
             (Link::File(_), false, _) => "read-write",
         };
@@ -629,7 +718,7 @@ impl Connection {
     pub fn toast(&self) -> String {
         match &self.link {
             Link::File(_) => format!("Opened {}", self.location),
-            Link::Server(_) => {
+            Link::Server(_) | Link::Resp(_) => {
                 let host = self
                     .location
                     .rsplit_once(':')
@@ -664,6 +753,7 @@ impl Connection {
                     .filter_map(|row| row.into_iter().next().flatten())
                     .collect())
             }
+            Link::Resp(_) => Ok(Vec::new()),
         }
     }
 
@@ -674,20 +764,25 @@ impl Connection {
         match &mut self.link {
             Link::File(file) => crate::catalog::read_file(&file.database),
             Link::Server(server) => crate::catalog::read_server(&mut server.client),
+            Link::Resp(resp) => resp.catalog(),
         }
     }
 
     /// A keys tab's page of `scan`'s key space (`docs/ux/workspace.md` 10.4, 10.10): up to
-    /// [`crate::key_scan::KEY_SCAN_LIMIT`] keys starting with its prefix after its start, in
-    /// key order, in one read transaction and no session. A SQL server reads no key spaces,
-    /// so its answer is an empty page.
+    /// [`crate::key_scan::KEY_SCAN_LIMIT`] keys starting with its prefix after its start. A
+    /// file reads them in key order, in one read transaction and no session; a RESP server
+    /// with `SCAN` in its own order, reconnecting first when an earlier exchange dropped, and
+    /// `cancel` closes its socket. A SQL server reads no key spaces, so its answer is an empty
+    /// page.
     pub fn scan_keys(
-        &self,
+        &mut self,
         scan: &crate::key_scan::KeySpaceScan,
+        cancel: &CancelHandle,
     ) -> Result<crate::key_scan::KeyPage, StatementFailure> {
-        match &self.link {
+        match &mut self.link {
             Link::File(file) => scan.scan_file(&file.database),
             Link::Server(_) => Ok(scan.page(&[])),
+            Link::Resp(resp) => resp.scan(scan, cancel),
         }
     }
 
@@ -724,6 +819,7 @@ impl Connection {
                 outcomes
             }
             Link::Server(server) => run_on_client(&mut server.client, statements, cancel),
+            Link::Resp(_) => vec![Err(StatementFailure::needs_sql())],
         }
     }
 
@@ -757,6 +853,7 @@ impl Connection {
                 Ok(client) => run_on_client(client, statements, cancel),
                 Err(failure) => vec![Err(failure)],
             },
+            Link::Resp(_) => vec![Err(StatementFailure::needs_sql())],
         }
     }
 
@@ -770,6 +867,7 @@ impl Connection {
                 }
             }
             Link::Server(server) => server.close(session),
+            Link::Resp(_) => {}
         }
     }
 
@@ -782,6 +880,7 @@ impl Connection {
                 .as_ref()
                 .map_or(TransactionStatus::Idle, |kept| kept.status(session)),
             Link::Server(server) => server.status(session),
+            Link::Resp(_) => TransactionStatus::Idle,
         }
     }
 
@@ -1110,6 +1209,7 @@ impl Connector for EngineConnector {
         match target {
             ConnectTarget::File(file) => open_file(file),
             ConnectTarget::Server(options) => connect_server(options),
+            ConnectTarget::Resp(options) => connect_resp(options),
         }
     }
 }
@@ -1210,6 +1310,73 @@ fn connect_server(options: &ConnectOptions) -> Result<Connection, ConnectFailure
         tls,
         link: Link::Server(ServerLink::new(client, options)),
     })
+}
+
+fn connect_resp(options: &RespOptions) -> Result<Connection, ConnectFailure> {
+    let client = RespClient::connect(options).map_err(|error| resp_failure(options, &error))?;
+    Ok(Connection {
+        name: options.host.clone(),
+        location: options.place(),
+        read_only: false,
+        tls: false,
+        link: Link::Resp(RespLink {
+            options: options.clone(),
+            client: Some(client),
+        }),
+    })
+}
+
+/// The card's failure lines for a RESP connection that `error` stopped: the network's lines
+/// as for any server, and the server's own line when it refused the password.
+pub fn resp_failure(options: &RespOptions, error: &RespConnectError) -> ConnectFailure {
+    let place = options.place();
+    let network = || Some("check the host name and your network".to_owned());
+    match error {
+        RespConnectError::Io(io_error) if io_error.kind() == io::ErrorKind::ConnectionRefused => {
+            ConnectFailure::new(
+                format!("cannot connect to {place}: connection refused"),
+                Some("check that the server is running and the port is open".to_owned()),
+                FailureField::Host,
+            )
+        }
+        RespConnectError::Io(io_error)
+            if matches!(
+                io_error.kind(),
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+            ) =>
+        {
+            ConnectFailure::new(
+                format!("cannot connect to {place}: timed out after 10 s"),
+                network(),
+                FailureField::Host,
+            )
+        }
+        RespConnectError::Io(io_error) => ConnectFailure::new(
+            format!("cannot connect to {place}: {io_error}"),
+            network(),
+            FailureField::Host,
+        ),
+        RespConnectError::Protocol(message) => ConnectFailure::new(
+            format!("cannot connect to {place}: {message}"),
+            Some("check that the port is a RESP server's".to_owned()),
+            FailureField::Host,
+        ),
+        RespConnectError::Refused(line) => ConnectFailure::new(
+            line.clone(),
+            Some("check the user name and password".to_owned()),
+            FailureField::Password,
+        ),
+    }
+}
+
+/// The failure shown when a `redis://` connection asks for TLS, which the client does not
+/// speak over RESP yet: it never connects with less protection than was asked for.
+pub fn resp_tls_failure() -> ConnectFailure {
+    ConnectFailure::new(
+        "the client cannot connect over RESP with TLS yet".to_owned(),
+        Some("uncheck \"Use TLS\" only on a network you trust".to_owned()),
+        FailureField::Host,
+    )
 }
 
 /// The card's failure lines for a connection that `error` stopped (`docs/ux/workspace.md`
