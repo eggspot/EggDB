@@ -174,6 +174,10 @@ pub(crate) fn insert(
             None => groups.push((child.to_owned(), columns, vec![values])),
         }
     }
+    let conflict_target = match &insert.conflict_target {
+        Some(target) => Some(execute::routed_conflict_target(table, target)?),
+        None => None,
+    };
     let mut merged = Merged::default();
     for (child, columns, rows) in groups {
         let names = columns
@@ -189,7 +193,7 @@ pub(crate) fn insert(
             source: InsertSource::Values(rows),
             returning: insert.returning.clone(),
             on_duplicate: insert.on_duplicate.clone(),
-            conflict_target: insert.conflict_target.clone(),
+            conflict_target: conflict_target.clone(),
             rollback_on_conflict: insert.rollback_on_conflict,
             keeps_changes_on_conflict: insert.keeps_changes_on_conflict,
             overriding: insert.overriding,

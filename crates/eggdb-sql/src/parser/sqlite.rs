@@ -1,7 +1,7 @@
 use super::{Level, Parser};
 use crate::ast::{
-    BinaryOperator, ColumnDefinition, Expr, ExprKind, Literal, Name, OnDuplicate, Pragma,
-    Statement, TableReference, UnaryOperator,
+    BinaryOperator, ColumnDefinition, ConflictTarget, Expr, ExprKind, Literal, Name, OnDuplicate,
+    Pragma, Statement, TableReference, UnaryOperator,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::children_mut;
@@ -661,18 +661,14 @@ impl<'t> Parser<'t> {
         Ok(resolution)
     }
 
-    pub(super) fn sqlite_upsert(&mut self) -> SqlResult<(OnDuplicate, Option<Vec<Name>>)> {
+    pub(super) fn sqlite_upsert(&mut self) -> SqlResult<(OnDuplicate, Option<ConflictTarget>)> {
         self.expect_word("on")?;
         self.expect_word("conflict")?;
-        if self.postgresql() && self.is_word("on") {
-            return Err(self.not_supported("ON CONFLICT ON CONSTRAINT"));
-        }
-        let target = if self.peek_kind() == &TokenKind::LeftParen {
-            let target = self.name_list()?;
-            if self.is_word("where") {
-                return Err(self.not_supported("ON CONFLICT (...) WHERE"));
-            }
-            Some(target)
+        let target = if self.postgresql() && self.take_word("on") {
+            self.expect_word("constraint")?;
+            Some(ConflictTarget::Constraint(self.name()?))
+        } else if self.peek_kind() == &TokenKind::LeftParen {
+            Some(self.conflict_inference()?)
         } else {
             None
         };
@@ -715,6 +711,63 @@ impl<'t> Parser<'t> {
             return Err(self.not_supported("more than one ON CONFLICT clause"));
         }
         Ok((OnDuplicate::Update(assignments), target))
+    }
+
+    fn conflict_inference(&mut self) -> SqlResult<ConflictTarget> {
+        self.expect(&TokenKind::LeftParen)?;
+        let mut columns = Vec::new();
+        let mut expressions = Vec::new();
+        loop {
+            let plain_column = matches!(
+                self.peek_kind(),
+                TokenKind::Word(_) | TokenKind::QuotedIdentifier(_)
+            ) && (matches!(
+                self.peek_kind_at(1),
+                TokenKind::Comma | TokenKind::RightParen
+            ) || ["asc", "desc", "nulls"]
+                .iter()
+                .any(|word| self.is_word_at(1, word)));
+            if plain_column {
+                columns.push(self.name()?);
+            } else {
+                expressions.push(self.expression()?);
+            }
+            self.conflict_element_order()?;
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RightParen)?;
+        let predicate = if self.take_word("where") {
+            Some(self.expression()?)
+        } else {
+            None
+        };
+        Ok(ConflictTarget::Inferred {
+            columns,
+            expressions,
+            predicate,
+        })
+    }
+
+    fn conflict_element_order(&mut self) -> SqlResult<()> {
+        let position = self.position();
+        if self.is_word("asc") || self.is_word("desc") {
+            if self.postgresql() {
+                return Err(SqlError::syntax(
+                    "ASC/DESC is not allowed in ON CONFLICT clause",
+                    position,
+                ));
+            }
+            self.at += 1;
+        }
+        if self.postgresql() && self.is_word("nulls") {
+            return Err(SqlError::syntax(
+                "NULLS FIRST/LAST is not allowed in ON CONFLICT clause",
+                position,
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn sqlite_infix_level(&self) -> Option<Level> {

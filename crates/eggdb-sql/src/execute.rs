@@ -1,8 +1,8 @@
 use crate::aggregate::{self, shape_of};
 use crate::ast::{
-    BinaryOperator, ConstraintKind, CreateTable, Delete, Expr, ExprKind, Insert, InsertSource,
-    InsertValue, Name, OnDuplicate, OrderItem, Overriding, Select, SelectItem, TableReference,
-    Update,
+    BinaryOperator, ConflictTarget, ConstraintKind, CreateTable, Delete, Expr, ExprKind, Insert,
+    InsertSource, InsertValue, Name, OnDuplicate, OrderItem, Overriding, Select, SelectItem,
+    TableReference, Update,
 };
 use crate::constraints::{self, PreparedChecks, RowChange};
 use crate::dialect::Dialect;
@@ -1373,7 +1373,7 @@ fn insert_rows(
         _ => None,
     };
     let arbiter = match &insert.conflict_target {
-        Some(names) => Some(ConflictArbiter::of(&table, names)?),
+        Some(target) => Some(ConflictArbiter::of(&table, target)?),
         None => None,
     };
     let mut changed_once = (dialect == Dialect::PostgreSql && updates.is_some())
@@ -1813,7 +1813,55 @@ enum ConflictArbiter {
 }
 
 impl ConflictArbiter {
-    fn of(table: &TableDefinition, names: &[Name]) -> SqlResult<Self> {
+    fn of(table: &TableDefinition, target: &ConflictTarget) -> SqlResult<Self> {
+        match target {
+            ConflictTarget::Constraint(name) => Self::named(table, name),
+            ConflictTarget::Inferred {
+                columns,
+                expressions,
+                predicate,
+            } => {
+                for expr in expressions.iter().chain(predicate) {
+                    check_inference_columns(table, expr)?;
+                }
+                if !expressions.is_empty() {
+                    return Err(no_matching_arbiter());
+                }
+                Self::inferred(table, columns)
+            }
+        }
+    }
+
+    fn named(table: &TableDefinition, name: &Name) -> SqlResult<Self> {
+        if !table.primary_key.is_empty() && table.primary_key_constraint_name() == name.text {
+            return Ok(Self::PrimaryKey);
+        }
+        if let Some(position) = table.indexes.iter().position(|index| {
+            index.unique && index.backs_unique_constraint && index.name == name.text
+        }) {
+            return Ok(Self::UniqueIndex(position));
+        }
+        let without_index = table.checks.iter().any(|check| check.name == name.text)
+            || table.foreign_keys.iter().any(|key| key.name == name.text);
+        if without_index {
+            return Err(SqlError::new(
+                SqlState::WRONG_OBJECT_TYPE,
+                "constraint in ON CONFLICT clause has no associated index",
+            )
+            .at(name.position));
+        }
+        Err(SqlError::new(
+            SqlState::UNDEFINED_OBJECT,
+            format!(
+                "constraint \"{}\" for table \"{}\" does not exist",
+                name.text,
+                crate::schemas::base_name(&table.name)
+            ),
+        )
+        .at(name.position))
+    }
+
+    fn inferred(table: &TableDefinition, names: &[Name]) -> SqlResult<Self> {
         let mut columns = target_columns(table, names)?;
         columns.sort_unstable();
         let mut primary_key = table.primary_key.clone();
@@ -1826,12 +1874,7 @@ impl ConflictArbiter {
             indexed.sort_unstable();
             index.unique && indexed == columns
         });
-        matching.map(Self::UniqueIndex).ok_or_else(|| {
-            SqlError::new(
-                SqlState::INVALID_COLUMN_REFERENCE,
-                "there is no unique or exclusion constraint matching the ON CONFLICT specification",
-            )
-        })
+        matching.map(Self::UniqueIndex).ok_or_else(no_matching_arbiter)
     }
 
     fn decides(self, conflict: &Conflict) -> bool {
@@ -1840,6 +1883,58 @@ impl ConflictArbiter {
             Self::UniqueIndex(position) => conflict.index == Some(position),
         }
     }
+}
+
+pub(crate) fn routed_conflict_target(
+    table: &TableDefinition,
+    target: &ConflictTarget,
+) -> SqlResult<ConflictTarget> {
+    let ConflictTarget::Constraint(name) = target else {
+        return Ok(target.clone());
+    };
+    let columns = match ConflictArbiter::named(table, name)? {
+        ConflictArbiter::PrimaryKey => table.primary_key.clone(),
+        ConflictArbiter::UniqueIndex(position) => table
+            .indexes
+            .get(position)
+            .map(|index| index.columns.clone())
+            .unwrap_or_default(),
+    };
+    Ok(ConflictTarget::Inferred {
+        columns: columns
+            .iter()
+            .filter_map(|&column| table.columns.get(column))
+            .map(|column| Name {
+                text: column.name.clone(),
+                position: name.position,
+            })
+            .collect(),
+        expressions: Vec::new(),
+        predicate: None,
+    })
+}
+
+fn no_matching_arbiter() -> SqlError {
+    SqlError::new(
+        SqlState::INVALID_COLUMN_REFERENCE,
+        "there is no unique or exclusion constraint matching the ON CONFLICT specification",
+    )
+}
+
+fn check_inference_columns(table: &TableDefinition, expr: &Expr) -> SqlResult<()> {
+    if let ExprKind::Column { name, .. } = &expr.kind
+        && table.column_index(name).is_none()
+    {
+        return Err(SqlError::new(
+            SqlState::UNDEFINED_COLUMN,
+            format!("column \"{name}\" does not exist"),
+        )
+        .at(expr.position));
+    }
+    for child in crate::eval::children(expr) {
+        check_inference_columns(table, child)?;
+    }
+    Ok(())
 }
 
 fn row_affected_twice() -> SqlError {

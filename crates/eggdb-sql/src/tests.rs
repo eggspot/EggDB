@@ -2441,13 +2441,12 @@ fn postgresql_upserts_act_only_on_their_conflict_target_and_once_per_row() {
         "INSERT INTO users VALUES (8, 'a@x', 'Ed'), (9, 'a@x', 'Flo') ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name",
     );
     assert_eq!(twice.state(), crate::SqlState::CARDINALITY_VIOLATION);
-    let by_constraint = fails(
-        &mut session,
-        "INSERT INTO users VALUES (5, 'old@x', 'Gus') ON CONFLICT ON CONSTRAINT users_pkey DO NOTHING",
-    );
     assert_eq!(
-        by_constraint.state(),
-        crate::SqlState::FEATURE_NOT_SUPPORTED
+        last(
+            &mut session,
+            "INSERT INTO users VALUES (5, 'old@x', 'Gus') ON CONFLICT ON CONSTRAINT users_pkey DO NOTHING"
+        ),
+        "INSERT 0 0"
     );
     assert_eq!(
         last(

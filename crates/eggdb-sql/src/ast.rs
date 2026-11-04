@@ -1388,6 +1388,37 @@ pub(crate) struct CommonTable {
     pub(crate) column_names: Vec<Name>,
     pub(crate) query: Query,
     pub(crate) dialect: Dialect,
+    pub(crate) search: Option<SearchClause>,
+    pub(crate) cycle: Option<CycleClause>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SearchOrder {
+    DepthFirst,
+    BreadthFirst,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SearchClause {
+    pub(crate) order: SearchOrder,
+    pub(crate) columns: Vec<Name>,
+    pub(crate) sequence_column: Name,
+    pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CycleClause {
+    pub(crate) columns: Vec<Name>,
+    pub(crate) mark_column: Name,
+    pub(crate) mark_values: Option<CycleMarkValues>,
+    pub(crate) path_column: Name,
+    pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CycleMarkValues {
+    pub(crate) cycle: Expr,
+    pub(crate) default: Expr,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1535,10 +1566,40 @@ pub(crate) struct Insert {
     pub(crate) source: InsertSource,
     pub(crate) returning: Option<Vec<SelectItem>>,
     pub(crate) on_duplicate: OnDuplicate,
-    pub(crate) conflict_target: Option<Vec<Name>>,
+    pub(crate) conflict_target: Option<ConflictTarget>,
     pub(crate) rollback_on_conflict: bool,
     pub(crate) keeps_changes_on_conflict: bool,
     pub(crate) overriding: Option<Overriding>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ConflictTarget {
+    Inferred {
+        columns: Vec<Name>,
+        expressions: Vec<Expr>,
+        predicate: Option<Expr>,
+    },
+    Constraint(Name),
+}
+
+impl ConflictTarget {
+    pub(crate) fn columns(&self) -> &[Name] {
+        match self {
+            Self::Inferred { columns, .. } => columns,
+            Self::Constraint(_) => &[],
+        }
+    }
+
+    pub(crate) fn expressions_mut(&mut self) -> Vec<&mut Expr> {
+        match self {
+            Self::Inferred {
+                expressions,
+                predicate,
+                ..
+            } => expressions.iter_mut().chain(predicate.iter_mut()).collect(),
+            Self::Constraint(_) => Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

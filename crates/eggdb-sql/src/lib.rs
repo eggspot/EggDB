@@ -275,6 +275,8 @@ mod transaction_settings_tests;
 #[cfg(test)]
 mod type_affinity_tests;
 #[cfg(test)]
+mod upsert_tests;
+#[cfg(test)]
 mod user_type_tests;
 #[cfg(test)]
 mod vector_tests;

@@ -1486,3 +1486,33 @@ DROP TABLE ctas323_copy
 
 ok
 DROP TABLE ctas323
+
+
+chapter "UPSERT": a conflict target may order its columns and name a partial index with WHERE
+ok
+CREATE TABLE vocabulary324 (word TEXT PRIMARY KEY, count INT DEFAULT 1)
+
+rows
+INSERT INTO vocabulary324 (word) VALUES ('jovial') ON CONFLICT (word) DO UPDATE SET count = count + 1
+----
+INSERT 0 1
+
+rows
+INSERT INTO vocabulary324 (word) VALUES ('jovial') ON CONFLICT (word ASC) DO UPDATE SET count = count + 1
+----
+INSERT 0 1
+
+rows
+INSERT INTO vocabulary324 (word) VALUES ('jovial') ON CONFLICT (word) WHERE count > 0 DO UPDATE SET count = count + 1
+----
+INSERT 0 1
+
+rows
+SELECT word, count FROM vocabulary324
+----
+word|count
+jovial|3
+SELECT 1
+
+ok
+DROP TABLE vocabulary324
