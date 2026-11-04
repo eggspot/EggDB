@@ -51,17 +51,14 @@ fn murmur_hash_64a(data: &[u8], seed: u64) -> u64 {
     const MULTIPLIER: u64 = 0xc6a4_a793_5bd1_e995;
     const SHIFT: u32 = 47;
     let mut hash = seed ^ (data.len() as u64).wrapping_mul(MULTIPLIER);
-    let mut blocks = data.chunks_exact(8);
-    for block in &mut blocks {
-        let mut word = [0u8; 8];
-        word.copy_from_slice(block);
-        let mut k = u64::from_le_bytes(word).wrapping_mul(MULTIPLIER);
+    let (blocks, tail) = data.as_chunks::<8>();
+    for block in blocks {
+        let mut k = u64::from_le_bytes(*block).wrapping_mul(MULTIPLIER);
         k ^= k >> SHIFT;
         k = k.wrapping_mul(MULTIPLIER);
         hash ^= k;
         hash = hash.wrapping_mul(MULTIPLIER);
     }
-    let tail = blocks.remainder();
     if !tail.is_empty() {
         for (index, byte) in tail.iter().enumerate() {
             hash ^= u64::from(*byte) << (8 * index);

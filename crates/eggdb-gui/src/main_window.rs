@@ -1044,7 +1044,7 @@ impl MainWindow {
         }
         self.tab.editor = crate::editor::Editor::new(&open_statement(&name, dialect));
         match self.tab.run_request(true) {
-            Some(request) => WindowAction::Tab(TabAction::Run(request)),
+            Some(request) => WindowAction::Tab(TabAction::Run(Box::new(request))),
             None => WindowAction::Tab(TabAction::None),
         }
     }
@@ -1087,9 +1087,9 @@ impl MainWindow {
                 }
             }
         }
-        self.tab
-            .run_request(false)
-            .map_or(none, |request| WindowAction::Tab(TabAction::Run(request)))
+        self.tab.run_request(false).map_or(none, |request| {
+            WindowAction::Tab(TabAction::Run(Box::new(request)))
+        })
     }
 
     /// The dialect a new query tab starts in: the showing tab's, or from a keys tab the

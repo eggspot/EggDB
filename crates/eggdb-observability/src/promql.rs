@@ -516,7 +516,7 @@ impl Parser {
         }
         match self.next() {
             Some(Token::Duration(ms)) => Ok(ms),
-            Some(Token::Number(number)) if number == 0.0 => Ok(0),
+            Some(Token::Number(0.0)) => Ok(0),
             _ => Err("expected a duration after offset".to_owned()),
         }
     }

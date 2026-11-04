@@ -840,8 +840,8 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
         asked: &Asked<'_>,
     ) -> UserAnswer {
         self.confirmations += 1;
-        let asked = format!("eggdb-confirm-{}", self.confirmations);
-        let asked_id = encoded_string(&asked);
+        let request_id = format!("eggdb-confirm-{}", self.confirmations);
+        let asked_id = encoded_string(&request_id);
         let form_mode = self.client.protocol.as_deref() == Some(NEWEST_PROTOCOL);
         let params = elicitation_params(&self.config.database_name, asked, form_mode);
         let mut out = JsonOut::new();
@@ -849,7 +849,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
             .key("jsonrpc")
             .string("2.0")
             .key("id")
-            .string(&asked)
+            .string(&request_id)
             .key("method")
             .string("elicitation/create")
             .key("params")

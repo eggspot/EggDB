@@ -237,6 +237,12 @@ pub(crate) fn update(
     Ok(merged.finish("UPDATE 0"))
 }
 
+struct LeavingRow {
+    old_key: Vec<u8>,
+    old_row: Option<Vec<Value>>,
+    new_row: Vec<Value>,
+}
+
 pub(crate) fn move_out(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
@@ -254,19 +260,28 @@ pub(crate) fn move_out(
     }
     let kept_old_rows = !old_rows.is_empty();
     let mut old_iter = std::mem::take(old_rows).into_iter();
-    let mut leaving: Vec<(Vec<u8>, Option<Vec<Value>>, Vec<Value>)> = Vec::new();
+    let mut leaving: Vec<LeavingRow> = Vec::new();
     for (old_key, new_key, new_row) in std::mem::take(changes) {
         let old_row = if kept_old_rows { old_iter.next() } else { None };
         if checks.fits_partition(&new_row) {
             changes.push((old_key, new_key, new_row));
             old_rows.extend(old_row);
         } else {
-            leaving.push((old_key, old_row, new_row));
+            leaving.push(LeavingRow {
+                old_key,
+                old_row,
+                new_row,
+            });
         }
     }
     let count = leaving.len();
     let mut propagated = Vec::new();
-    for (old_key, old_row, new_row) in leaving {
+    for LeavingRow {
+        old_key,
+        old_row,
+        new_row,
+    } in leaving
+    {
         if let Some(old_row) = &old_row
             && !table.indexes.is_empty()
         {

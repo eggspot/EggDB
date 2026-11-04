@@ -684,7 +684,7 @@ fn kept_counts_follow_every_kind_of_write_and_ignore_a_rollback() {
     })
     .unwrap();
     let after_commit = ("c".to_owned(), 3, 3, 5 + 2 + 2);
-    assert_eq!(kept_counts(&db), [after_commit.clone()]);
+    assert_eq!(kept_counts(&db), std::slice::from_ref(&after_commit));
 
     let mut tx = db.begin_write().unwrap();
     let mut c = tx.collection("c").unwrap();
@@ -692,7 +692,7 @@ fn kept_counts_follow_every_kind_of_write_and_ignore_a_rollback() {
     assert!(c.delete("a").unwrap());
     drop(c);
     tx.rollback().unwrap();
-    assert_eq!(kept_counts(&db), [after_commit.clone()]);
+    assert_eq!(kept_counts(&db), std::slice::from_ref(&after_commit));
 
     db.collection("c").put("t", "t").unwrap();
     assert!(db.collection("c").delete("n").unwrap());

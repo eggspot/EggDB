@@ -535,7 +535,3 @@ pub(crate) fn sqlite_primary_key_refused(table: &TableDefinition) -> SqlResult<(
     }
     Ok(())
 }
-
-pub(crate) fn kind_word(entry: &GeneratedColumn) -> &'static str {
-    if entry.stored { "STORED" } else { "VIRTUAL" }
-}

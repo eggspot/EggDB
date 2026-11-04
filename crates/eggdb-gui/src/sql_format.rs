@@ -71,7 +71,7 @@ fn indent_of(line: &str) -> usize {
 /// otherwise `-- ` goes in at the smallest indent of the non-blank lines. Blank lines are
 /// left alone (`None`).
 pub fn comment_edits(lines: &[&str]) -> Vec<Option<LineEdit>> {
-    let filled = |line: &&str| !line.trim().is_empty();
+    let filled = |line: &&&str| !line.trim().is_empty();
     let commented = lines.iter().filter(filled).all(|line| {
         let indent = byte_at(line, indent_of(line));
         line[indent..].starts_with("--")

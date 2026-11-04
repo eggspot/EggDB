@@ -1131,7 +1131,7 @@ impl Workspace {
                     self.notice_until.get_or_insert(now + NOTICE_SHOWN_FOR);
                 }
             }
-            TabAction::Run(request) => self.start_run(request, now),
+            TabAction::Run(request) => self.start_run(*request, now),
             TabAction::Stop => {
                 if let Some(running) = &self.running {
                     running.cancel.cancel();

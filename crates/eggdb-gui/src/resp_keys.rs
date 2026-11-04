@@ -559,7 +559,7 @@ pub(crate) mod fake_server {
                 }
                 "TYPE" => simple(match database.get(&key) {
                     Some(Stored::Text(_)) => "string",
-                    Some(Stored::Counted(kind, _)) => *kind,
+                    Some(Stored::Counted(kind, _)) => kind,
                     None => "none",
                 }),
                 "GETRANGE" => match database.get(&key) {

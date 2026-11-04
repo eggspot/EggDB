@@ -163,7 +163,7 @@ pub enum TabAction {
     /// Nothing beyond drawing the new frame.
     None,
     /// Run these statements off the window's thread.
-    Run(RunRequest),
+    Run(Box<RunRequest>),
     /// Stop the running statement.
     Stop,
     /// Put `text` on the clipboard and show `toast`.
@@ -399,7 +399,7 @@ impl QueryTab {
             return TabAction::None;
         }
         match self.explain_request(analyze) {
-            Ok(Some(request)) => TabAction::Run(request),
+            Ok(Some(request)) => TabAction::Run(Box::new(request)),
             Ok(None) => TabAction::None,
             Err(message) => {
                 self.messages = vec![message];
@@ -493,7 +493,7 @@ impl QueryTab {
             return TabAction::None;
         }
         self.run_request(all)
-            .map_or(TabAction::None, TabAction::Run)
+            .map_or(TabAction::None, |request| TabAction::Run(Box::new(request)))
     }
 
     fn focus_grid(&mut self) {
@@ -1012,7 +1012,7 @@ impl QueryTab {
         self.key_pages.pending_earlier = Some(earlier);
         self.key_pages.land_on_last = land_on_last;
         self.key_pages.due = None;
-        TabAction::Run(self.scan_request(scan))
+        TabAction::Run(Box::new(self.scan_request(scan)))
     }
 
     /// `Next 100` (`Alt+PgDn`, `docs/ux/workspace.md` 10.10): scans from after the last key
@@ -2038,7 +2038,7 @@ mod tests {
         };
         let mut tab = QueryTab::keys(scan);
         assert_eq!(tab.editor.text(), "SCAN resp0 LIMIT 100");
-        let first = TabAction::Run(tab.run_request(false).expect("Run scans page 1"));
+        let first = TabAction::Run(Box::new(tab.run_request(false).expect("Run scans page 1")));
         read_resp_page(&mut tab, first, &mut connection);
         assert_eq!(tab.summary, "100 keys shown of 242 · 0.5 ms");
         assert_eq!(
@@ -2109,7 +2109,7 @@ mod tests {
         );
         let mut tab = QueryTab::keys(scan);
         let now = Instant::now();
-        let first = TabAction::Run(tab.run_request(false).expect("Run scans page 1"));
+        let first = TabAction::Run(Box::new(tab.run_request(false).expect("Run scans page 1")));
         read_page(&mut tab, first, &database);
         assert_eq!(tab.summary, "100 keys shown of 242 · 0.5 ms");
         assert!(!tab.key_pages.can_go_back() && tab.key_pages.can_go_next());

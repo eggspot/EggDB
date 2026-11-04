@@ -211,7 +211,7 @@ fn hostile_input(seed: &mut u64) -> Vec<u8> {
 
 #[test]
 fn hostile_messages_and_streams_never_panic() {
-    let mut seed = 0x5EED_0F_5915_1061_u64;
+    let mut seed = 0x005E_ED0F_5915_1061_u64;
     for _ in 0..20_000 {
         let input = hostile_input(&mut seed);
         let message = parse(&input, RECEIVED_2026_11_04);

@@ -724,7 +724,7 @@ fn wrong_arguments(name: &str, values: &[Value]) -> SqlError {
 pub(crate) fn function(name: &str, values: &[Value]) -> SqlResult<Value> {
     let snapshot = snapshot::require()?;
     let inquiry = Inquiry {
-        snapshot: &*snapshot,
+        snapshot: &snapshot,
     };
     let session = inquiry.session();
     match (name, values) {
