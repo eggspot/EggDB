@@ -86,7 +86,7 @@ const VERSION: &CStr =
         Err(_) => c"unknown",
     };
 
-/// The version of this EggDB library, such as `"0.3.0"`. The text is static.
+/// The version of this EggDB library, such as `"0.4.0"`. The text is static.
 #[unsafe(no_mangle)]
 pub extern "C" fn eggdb_version() -> *const c_char {
     VERSION.as_ptr()
