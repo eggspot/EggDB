@@ -1479,8 +1479,10 @@ eggdb: cannot rename the collection cache to users in app.db: users is already a
 ```
 
 ### Per-collection counts in `eggdb stats --collections` (D292)
-`stats` stays instant and reads no page; `--collections` adds one line per collection, counted by
-reading every key of every collection (keys whose time to live has run out are left out):
+`stats` stays instant and reads no page, and so does `--collections` since D320: each line comes
+from the counts the collection keeps, updated by every write. The counts include keys whose time
+to live has run out until the expiry sweep removes them, so a collection can show entries a `scan`
+no longer returns. The text and JSON are unchanged byte for byte:
 ```
 $ eggdb stats app.db --collections
 ...
@@ -1658,9 +1660,71 @@ and, under Shell commands, before `.mode`,
 7. `collection list` prints names on stdout and the count on stderr, as `scan` does; JSON is one
    object with an array.
 
-Not in this release: `eggdb ui -C <name>` to open on a collection, a per-collection key count in
-`list`, `-C` on `check`, and collections in SQL. `collection move` (alias `rename`) and
-`stats --collections` came with D292.
+Not in this release: `eggdb ui -C <name>` to open on a collection, `-C` on `check`, and
+collections in SQL. `collection move` (alias `rename`) and `stats --collections` came with D292;
+counts in `list`, the delete progress line and collection commands in the shell with D320 (below).
+
+### Counts, progress and the shell's collection commands (D320, designed by Claude Fable)
+**`eggdb collection list` with counts.** Each collection keeps its entry count and its key and
+value byte totals, updated by every write, so counts are instant. `list` still opens the file
+read-only and prints the names in byte order, one per line, now followed by the count,
+right-aligned after the longest name (a name has no whitespace, so the first word of a line is
+still the name, and `awk '{print $1}'` keeps working):
+```
+$ eggdb collection list app.db
+cache     1,204 entries
+sessions     no entries
+users       312 entries
+3 collections
+```
+The count uses the words `stats` uses (`no entries`, `1 entry`, `1,204 entries`). The stderr
+trailer and the exit codes are unchanged. In JSON the `collections` array of strings stays as it
+is, and one field is added after it, `counts`, an array of the objects `stats --collections`
+gives, in the same order (`[]` for both when there are none):
+```
+{"file":"app.db","collections":["cache","sessions"],"counts":[{"name":"cache","entries":1204,"key_bytes":19264,"value_bytes":2411724},{"name":"sessions","entries":0,"key_bytes":0,"value_bytes":0}]}
+```
+
+**Progress while `eggdb collection delete` runs.** The keys go in commits of 512, so a large
+collection takes a while. When stderr is a terminal, a progress line is written there every
+second, overwritten with `\r` and cleared before the result line, as `export` and `import` do
+(nothing is printed for a deletion under a second):
+```
+deleting collection cache: 120,000 of 1,000,000 entries…
+```
+The total is the collection's kept count, read in the first commit. Without a kept count (a
+collection made before D320 that was never counted): `deleting collection cache: 120,000
+entries…`. The result lines, JSON and exit codes are unchanged.
+
+**Collection commands in `eggdb shell`.** `collection list|add|delete|move|rename` run in the
+shell as every key-value command does, without `eggdb <command> <file>`:
+`collection move sessions old-sessions`. Output, errors and exit codes are the command line's.
+`collection list` reads the last commit, so it runs anywhere; `add`, `delete` and `move` need a
+commit of their own and are refused inside a transaction block:
+`collection add, delete and move run outside a transaction block: COMMIT or ROLLBACK first`
+(exit 2). Tab completes the verbs, and a collection name after `delete` and `move`. When the
+collection in use is renamed the shell follows it and says so after the command's own line; when
+it is deleted the shell returns to the default key space:
+```
+app[sessions]=> collection move sessions old-sessions
+renamed collection sessions to old-sessions in app.db
+collection: old-sessions (followed the rename)
+app[old-sessions]=> collection delete old-sessions
+deleted collection old-sessions from app.db
+collection: default key space (old-sessions was deleted)
+```
+Help text, after the `-C <name> on a key command` line:
+```
+  collection list              the collections and their entry counts
+  collection add <name>        make a collection; collection delete <name> removes it and its keys
+  collection move <a> <b>      rename a collection (also: rename); the one in use follows its new name
+```
+
+Decided by this design: `list` gains a right-aligned count and the name stays the first word;
+JSON adds `counts` in `stats --collections`'s shape so one reader serves both; counts include
+expired keys the sweep has not removed, and the docs say so where counts are shown; the delete
+progress line follows `export`'s; the shell follows a rename of the collection in use and leaves
+a deleted one; `add`, `delete` and `move` are refused inside a block rather than half-joining it.
 
 ### As built (D139)
 - The shell's "collection dropped by another program" warning is left out: the shell holds the

@@ -631,14 +631,26 @@ eggdb collection list app.db
 eggdb collection delete app.db cache
 ```
 
-- `list` prints the names in byte order, one per line, and the count on stderr (`3 collections`,
-  `no collections`); in a pipe, `{"file":"app.db","collections":["cache","sessions"]}`.
+- `list` prints the names in byte order, one per line, each with its entry count right-aligned
+  after the longest name (`cache     1,204 entries`, `sessions     no entries`), and the number
+  of collections on stderr (`3 collections`, `no collections`). In a pipe it prints
+  `{"file":"app.db","collections":["cache","sessions"],"counts":[{"name":"cache","entries":1204,"key_bytes":19264,"value_bytes":2411724},…]}`:
+  `collections` is unchanged and `counts` has `stats --collections`'s objects (D320).
+- Each collection keeps its count of entries, key bytes and value bytes up to date on every write,
+  so `list` and `stats --collections` read one record per collection. Keys whose time to live has
+  run out count until the expiry sweep removes them. A collection made by a release before D320
+  is counted once from its keys; `list` and `stats` then keep that count (they reopen the file
+  for writing for a moment, and skip it when another program holds the file), and every write
+  keeps it from then on. A file with kept counts opens only read-only in releases before D320.
 - `add` prints `added collection sessions to app.db`; `delete` removes the collection and every
   key in it, asks nothing, and prints `deleted collection cache from app.db`. In a pipe they print
   `{"file":…,"collection":…,"added":true}` and `…"deleted":true}`. The first commit of a delete
   takes the name away, so nothing sees the collection again, and its keys go in commits of 512,
   so a collection of millions of keys deletes in the default page cache; keys a crash leaves
-  behind are never read and the next commits remove them (D292).
+  behind are never read and the next commits remove them (D292). On a terminal, a delete that
+  takes more than a second shows its progress on stderr, overwritten every second and cleared
+  before the result: `deleting collection cache: 120,000 of 1,000,000 entries…` (or
+  `120,000 entries…` for a collection without a kept count).
 - `move` (or `rename`) gives a collection a new name with all its keys in one commit, and prints
   `renamed collection sessions to old-sessions in app.db` (in a pipe
   `{"file":…,"collection":…,"new_name":…,"moved":true}`). A missing collection exits 1
@@ -657,12 +669,17 @@ eggdb collection delete app.db cache
   pages), since ten bytes of each say which collection it is in.
 - `eggdb shell` works in one key space at a time: `.collection` lists them, `.collection <name>`
   chooses one and `.collection -` returns to the default key space, and the prompt shows the
-  choice (`app[sessions]=> `). `eggdb ui` shows one key space at a time too: `C` opens the
-  collection picker, which also adds collections, and from 110 columns a sidebar lists them
-  ([ux/ui.md](ux/ui.md) "Collections").
-- `stats --collections` adds each collection's entries, key bytes and value bytes, read from
-  every key (`"collections":[{"name","entries","key_bytes","value_bytes"}]` in JSON); plain
-  `stats` stays instant.
+  choice (`app[sessions]=> `). The shell also runs `collection list|add|delete|move|rename` as
+  the command line does, without the file (`collection move sessions logins`); when the
+  collection in use is renamed the shell follows it (`collection: logins (followed the rename)`),
+  and when it is deleted the shell returns to the default key space. Inside a transaction block
+  `collection list` reads the last commit, and `add`, `delete` and `move` are refused (exit 2)
+  until COMMIT or ROLLBACK. `eggdb ui` shows one key space at a time too: `C` opens the
+  collection picker, which adds collections (`a`) and renames the highlighted one (`e`), and
+  from 110 columns a sidebar lists them ([ux/ui.md](ux/ui.md) "Collections").
+- `stats --collections` adds each collection's entries, key bytes and value bytes from its kept
+  count (`"collections":[{"name","entries","key_bytes","value_bytes"}]` in JSON), so it stays as
+  instant as plain `stats`.
 - SQL does not see collections in this release, and `check` reports the whole file.
 
 ## Expiring keys and counters
@@ -1075,7 +1092,7 @@ eggdb shell app.db --mode csv -c "select * from items" > items.csv
 ## `eggdb serve`
 
 ```
-eggdb serve <file|directory> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--max-connection-memory <size>] [--idle-timeout <seconds>] [--log-slow-statements <milliseconds>] [--statement-statistics <count>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--auth-rules <file>] [--metrics-listen <address>] [--mcp-listen <address> --mcp-token-file <file>] [--resp-listen <address> [--resp-max-memory <size>] [--resp-eviction <policy>]] [--memcached-listen <address>] [--es-listen <address>] [--mongo-listen <address>] [--bolt-listen <address>] [--cdc-webhook <url>] [--kafka-listen <address>] [--amqp-listen <address>] [--mqtt-listen <address>] [--sqs-listen <address>] [--nats-listen <address>] [--stomp-listen <address>] [--cql-listen <address>] [--s3-listen <address>] [--dynamodb-listen <address>] [--observability-listen <address>] [--rest-listen <address>] [--restore-from s3://bucket/prefix] [--cdc-queue <name>] [--read-only] [--create]
+eggdb serve <file|directory> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--max-connection-memory <size>] [--idle-timeout <seconds>] [--log-slow-statements <milliseconds>] [--statement-statistics <count>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--auth-rules <file>] [--metrics-listen <address>] [--mcp-listen <address> --mcp-token-file <file>] [--resp-listen <address> [--resp-max-memory <size>] [--resp-eviction <policy>]] [--memcached-listen <address>] [--es-listen <address>] [--mongo-listen <address>] [--bolt-listen <address>] [--cdc-webhook <url>] [--kafka-listen <address>] [--amqp-listen <address>] [--mqtt-listen <address>] [--sqs-listen <address>] [--nats-listen <address>] [--syslog-listen <address>] [--stomp-listen <address>] [--cql-listen <address>] [--s3-listen <address>] [--dynamodb-listen <address>] [--observability-listen <address>] [--rest-listen <address>] [--restore-from s3://bucket/prefix] [--cdc-queue <name>] [--read-only] [--create]
 ```
 
 Serves the file over the PostgreSQL wire protocol v3, so psql, pgAdmin-style tools and every
@@ -1147,6 +1164,7 @@ compatibility gap: SQL Server and MySQL keep temporary tables and session locks 
 | `--rest-listen <address>` | serves a REST API generated from the tables of the `public` schema (default port 3000), in PostgREST's URL conventions: `GET /<table>?select=...&<column>=<op>.<value>&order=...&limit=...&offset=...` with the operators `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `is`, `in` and `not.`, `Prefer: count=exact` for a `Content-Range` total, `POST` an object or an array to insert, `PATCH` and `DELETE` with filters, `Prefer: return=representation` to get the rows back, and `GET /` listing the tables and columns; sign in with `--user` and the server's password over HTTP Basic; every request is SQL as that user, so roles and row security apply; loopback only for now (D235) |
 | `--restore-from s3://bucket/prefix` | when the database file does not exist, restores the newest copy `eggdb backup` archived into that bucket (checked against its SHA-256) before serving, so a new machine with an empty disk starts from the latest archive; with `eggdb backup <file> s3://...` run on a schedule, the bucket holds the state and any machine can serve it (D226) |
 | `--nats-listen <address>` | serves the NATS client protocol (default port 4222): `CONNECT` with `user` as `--user` and `pass` as the server's password, publish with or without headers, subscribe with `*` and `>` wildcards and queue groups, request and reply, auto-unsubscribe after a number of messages, verbose mode and `echo`; delivery is at most once, as core NATS does, and JetStream is not served yet; loopback only for now (D216) |
+| `--syslog-listen <address>` | takes syslog messages over UDP and TCP on the same port (default port 514, which needs administrator rights on most systems; give another such as `127.0.0.1:5514`): RFC 5424 and the RFC 3164 format older senders write, one message per datagram or framed on TCP by octet counting or line ends (RFC 6587); each message becomes a row of the `syslog` table (`received_at`, `facility`, `severity`, `timestamp`, `hostname`, `app_name`, `procid`, `msgid`, `structured_data`, `message`), created at start, so SQL and every protocol read it; messages longer than 16 KiB are dropped; loopback only, as syslog has no authentication (D315) |
 | `--stomp-listen <address>` | serves STOMP 1.2, 1.1 and 1.0 (default port 61613): `CONNECT` or `STOMP` with `login` as `--user` and `passcode` as the server's password, `SEND`, `SUBSCRIBE` with `ack:auto`, `client` (cumulative) or `client-individual` and an optional `prefetch-count`, `ACK`, `NACK`, transactions (`BEGIN`, `COMMIT`, `ABORT`; a commit's queue messages are stored all or none), receipts and `DISCONNECT`; `/queue/<name>` destinations are the durable queues `--amqp-listen` and `--sqs-listen` serve, `/topic/<name>` destinations go to every current subscriber; no heart-beats yet; loopback only for now (D217) |
 | `--cql-listen <address>` | serves Cassandra's CQL native protocol v4 (default port 9042) for Cassandra drivers: the password authenticator with `--user` and the server's password, `QUERY`, `PREPARE`, `EXECUTE` and `BATCH`, and the `system.local`, `system.peers` and `system_schema` tables drivers read; a keyspace is a SQL schema and a CQL table is a SQL table of the same name, so SQL reads and writes the same rows; `CREATE`/`DROP KEYSPACE`, `CREATE`/`DROP TABLE` (with partition and clustering keys and `CLUSTERING ORDER`), `TRUNCATE`, `INSERT` and `UPDATE` as upserts (counters with `c = c + n`), `INSERT ... IF NOT EXISTS`, `DELETE` of rows or columns, `SELECT` with `WHERE`, `IN`, `ORDER BY`, `LIMIT` and `count(*)`, and batches as one transaction; scalar types only (no collections, user-defined types, TTL, `USING TIMESTAMP` or other lightweight transactions yet), every result in one page; loopback only for now (D218) |
 | `--database <name>` | the name clients connect to; default the file name without its extension (`app.db` is `app`). Any other name gets `3D000` |

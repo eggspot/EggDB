@@ -671,6 +671,31 @@ The sidebar's hints: ` ↑↓ switch  a add  Enter keys  C collection  ? help  q
 columns, and in narrow mode, there is no sidebar and `C` is the way; the title ` Keys in users`
 says which space is shown at every width.
 
+### Renaming a collection (`e` in the picker, D320, designed by Claude Fable)
+`e` renames the highlighted collection: `e` is "edit what is highlighted" everywhere (the key
+list's `e` edits the selected value), `m` is the last-message key on every screen and `r` is
+refresh, so neither fits; the CLI's verb stays `move`. The picker's title becomes
+` Rename users to: users█`, the single-line editor prefilled with the current name, cursor at the
+end (most renames keep most of the name; `Ctrl-U` clears it); the hint line reads
+`Enter rename   Esc back`, and the picker's own hint line is `Enter show   a add   e rename   Esc back`
+(`e rename` drops first when the picker is narrower). `Enter` checks before any transaction: a
+bad name shows the `Collection names are 1 to 128 bytes…` toast and keeps the editor; a name
+already in the list shows `Collection cache already exists` and keeps it; the name unchanged
+closes the editor with nothing done. A good name runs the rename in one commit (the
+commit-failure table applies), re-reads the names, keeps the picker open with the highlight on
+the renamed row, and toasts `Renamed collection users to old-sessions at 09:14:05Z`. If the
+renamed collection is the shown one, the UI follows it: the title becomes ` Keys in old-sessions`,
+and the filter, selection and count stay (the keys are the same). `e` on the default key space
+row toasts `The default key space cannot be renamed`. Read-only: `e` shows the read-only toast.
+Deleting stays with the CLI, and the footer keeps saying so.
+
+In the sidebar, `e` renames the shown collection through the same editor, as `a` adds through
+it. Sidebar hints: ` ↑↓ switch  a add  e rename  Enter keys  C collection  ? help  q quit`.
+
+Scenarios: 40. `e` renames `users` to `people` while it is shown: the title follows, the toast
+matches; a taken name and a bad name keep the editor with their toasts. 41. `e` on the default key
+space toasts; the same name closes the editor; `--read-only` opens no editor.
+
 ### When the collection disappears
 Another program may drop the shown collection between two key presses. A redraw whose scan
 fails with `CollectionNotFound` switches to the default key space, redraws, and shows the
@@ -685,7 +710,7 @@ and redraw, so a collection added elsewhere appears on the next `r` or redraw.
 A line pair after `Find`:
 ```
  Collections C  pick the collection shown (default key space first); a adds one
-             Tab reaches the sidebar from 110 columns; the CLI deletes one
+             e renames, the CLI deletes; Tab reaches the sidebar at 110 columns
 ```
 
 ### Scenarios for the tests
