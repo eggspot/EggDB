@@ -841,6 +841,12 @@ mod tests {
         assert_eq!(sessions.get("s:2")?, None);
         assert_eq!(sessions.time_to_live("s:2")?, None);
         drop(sessions);
+        let counted: Vec<(String, u64, u64, u64)> = db
+            .collection_stats()?
+            .into_iter()
+            .map(|one| (one.name, one.entries, one.key_bytes, one.value_bytes))
+            .collect();
+        assert_eq!(counted, [("sessions".to_owned(), 1, 3, 3)]);
         drop(db);
         std::fs::remove_file(&path)?;
         Ok(())

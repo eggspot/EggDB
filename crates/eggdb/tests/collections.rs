@@ -265,11 +265,11 @@ fn a_rolled_back_create_leaves_no_collection_and_a_drop_removes_every_key() {
         Ok(())
     })
     .unwrap();
-    assert_eq!(db.check().unwrap().entries, 1 + 2000 + 1 + 1 + 2);
+    assert_eq!(db.check().unwrap().entries, 1 + 2000 + 1 + 1 + 2 + 2);
     assert!(db.drop_collection("big").unwrap());
     assert!(!db.drop_collection("big").unwrap());
     assert_eq!(db.collection_names().unwrap(), ["other"]);
-    assert_eq!(db.check().unwrap().entries, 1 + 1 + 1 + 1);
+    assert_eq!(db.check().unwrap().entries, 1 + 1 + 1 + 1 + 1);
     assert_eq!(
         db.collection("big").put("k", "v").unwrap_err().kind(),
         ErrorKind::CollectionNotFound
@@ -452,6 +452,11 @@ fn random_changes_to_three_key_spaces_agree_with_three_maps() {
                 .unwrap();
             assert_eq!(scanned, in_range, "round {round}, {space:?}");
         }
+        assert_eq!(
+            kept_counts(&db),
+            [model_counts("a", &models[1]), model_counts("b", &models[2])],
+            "round {round}"
+        );
         if round % 10 == 9 {
             db.checkpoint().unwrap();
         }
@@ -462,6 +467,23 @@ fn random_changes_to_three_key_spaces_agree_with_three_maps() {
         assert_eq!(&scan_all(&db, *space), model, "after reopening, {space:?}");
     }
     assert_eq!(db.check().unwrap().leaked_pages, 0);
+}
+
+fn kept_counts(db: &Database) -> Vec<(String, u64, u64, u64)> {
+    db.collection_stats()
+        .unwrap()
+        .into_iter()
+        .map(|one| (one.name, one.entries, one.key_bytes, one.value_bytes))
+        .collect()
+}
+
+fn model_counts(name: &str, model: &Entries) -> (String, u64, u64, u64) {
+    (
+        name.to_owned(),
+        model.len() as u64,
+        model.keys().map(|key| key.len() as u64).sum(),
+        model.values().map(|value| value.len() as u64).sum(),
+    )
 }
 
 fn stored_entries(db: &Database) -> u64 {
@@ -552,7 +574,7 @@ fn a_collection_larger_than_the_page_cache_drops_in_steps_and_is_gone_from_the_f
         })
         .unwrap();
     }
-    assert_eq!(stored_entries(&db), 1 + 1 + 1 + 20_000);
+    assert_eq!(stored_entries(&db), 1 + 1 + 1 + 1 + 20_000);
     assert!(db.drop_collection("big").unwrap());
     assert_eq!(db.collection_names().unwrap(), Vec::<String>::new());
     assert_eq!(stored_entries(&db), 1 + 1);
@@ -602,10 +624,10 @@ fn a_drop_left_unfinished_is_invisible_and_later_commits_and_a_reopen_finish_it(
     let removed = db.finish_collection_drops().unwrap();
     assert!(removed > 0 && removed < 1010, "{removed}");
     assert_eq!(db.finish_collection_drops().unwrap(), 0);
-    assert_eq!(stored_entries(&db), 1 + 1 + 1);
+    assert_eq!(stored_entries(&db), 1 + 1 + 1 + 1);
     assert_eq!(db.check().unwrap().leaked_pages, 0);
     db.put("z", "z").unwrap();
-    assert_eq!(stored_entries(&db), 1 + 1 + 1 + 1);
+    assert_eq!(stored_entries(&db), 1 + 1 + 1 + 1 + 1);
 }
 
 #[test]
@@ -638,4 +660,84 @@ fn collection_stats_count_each_collection_s_entries_and_bytes() {
     assert_eq!(shown, [("a", 2, 6, 5), ("b", 0, 0, 0)]);
     let unchanged = db.stats().unwrap();
     assert_eq!(db.stats().unwrap().page_count, unchanged.page_count);
+}
+
+#[test]
+fn kept_counts_follow_every_kind_of_write_and_ignore_a_rollback() {
+    let file = TempPath::new("collections-kept-counts");
+    let db = Database::open(file.path()).unwrap();
+    db.create_collection("c").unwrap();
+    assert_eq!(kept_counts(&db), [("c".to_owned(), 0, 0, 0)]);
+    db.write(|tx| {
+        let mut c = tx.collection("c")?;
+        c.put("a", "1")?;
+        c.put("a", "12345")?;
+        assert!(c.put_if_absent("b", "22")?);
+        assert!(!c.put_if_absent("b", "333")?);
+        assert_eq!(c.increment("n", 10)?, 10);
+        assert!(c.compare_and_set("b", Some(b"22"), None)?);
+        assert!(!c.delete("missing")?);
+        c.put_with_expiry("t", "tt", Duration::from_secs(3600))?;
+        assert!(c.clear_expiry("t")?);
+        assert!(c.set_expiry("t", Duration::from_secs(3600))?);
+        Ok(())
+    })
+    .unwrap();
+    let after_commit = ("c".to_owned(), 3, 3, 5 + 2 + 2);
+    assert_eq!(kept_counts(&db), [after_commit.clone()]);
+
+    let mut tx = db.begin_write().unwrap();
+    let mut c = tx.collection("c").unwrap();
+    c.put("x", "rolled back").unwrap();
+    assert!(c.delete("a").unwrap());
+    drop(c);
+    tx.rollback().unwrap();
+    assert_eq!(kept_counts(&db), [after_commit.clone()]);
+
+    db.collection("c").put("t", "t").unwrap();
+    assert!(db.collection("c").delete("n").unwrap());
+    drop(db);
+    let db = Database::open(file.path()).unwrap();
+    assert_eq!(kept_counts(&db), [("c".to_owned(), 2, 2, 5 + 1)]);
+}
+
+#[test]
+fn a_rename_keeps_the_count_and_a_name_dropped_and_made_again_starts_at_zero() {
+    let file = TempPath::new("collections-kept-rename");
+    let db = Database::open(file.path()).unwrap();
+    db.create_collection("sessions").unwrap();
+    db.collection("sessions").put("s:1", "Ada").unwrap();
+    db.rename_collection("sessions", "logins").unwrap();
+    assert_eq!(kept_counts(&db), [("logins".to_owned(), 1, 3, 3)]);
+    db.collection("logins").put("s:2", "Grace").unwrap();
+    assert_eq!(kept_counts(&db), [("logins".to_owned(), 2, 6, 8)]);
+    assert!(db.drop_collection("logins").unwrap());
+    db.create_collection("logins").unwrap();
+    assert_eq!(kept_counts(&db), [("logins".to_owned(), 0, 0, 0)]);
+}
+
+#[test]
+fn a_long_drop_reports_its_progress_up_to_the_kept_count() {
+    let file = TempPath::new("collections-drop-progress");
+    let db = Database::open(file.path()).unwrap();
+    db.create_collection("big").unwrap();
+    db.write(|tx| {
+        let mut big = tx.collection("big")?;
+        for n in 0..1500u32 {
+            big.put(n.to_be_bytes(), "v")?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let mut seen = Vec::new();
+    assert!(
+        db.drop_collection_with_progress("big", |progress| seen.push((progress.removed, progress.entries)))
+            .unwrap()
+    );
+    assert_eq!(seen.first(), Some(&(512, Some(1500))));
+    assert_eq!(seen.last(), Some(&(1500, Some(1500))));
+    assert!(seen.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    let mut called = false;
+    assert!(!db.drop_collection_with_progress("big", |_| called = true).unwrap());
+    assert!(!called);
 }

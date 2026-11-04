@@ -1,3 +1,4 @@
+use crate::collection_counts::EntryCount;
 use crate::database::Database;
 use crate::error::{Error, ErrorKind, Result};
 use crate::expiry::{self, Moment};
@@ -12,6 +13,7 @@ const CATALOG_TAG: u8 = 0x01;
 const NAME_TAG: u8 = 0x02;
 const ENTRY_TAG: u8 = 0x03;
 const DROPPING_TAG: u8 = 0x06;
+const COUNT_TAG: u8 = 0x07;
 const RECORD_VERSION: u8 = 1;
 const RECORD_BYTES: usize = 5;
 const FIRST_NUMBER: u32 = 1;
@@ -84,6 +86,26 @@ fn name_key(name: &str) -> Vec<u8> {
 
 fn entries_prefix(number: u32) -> Vec<u8> {
     tagged(ENTRY_TAG, &number.to_be_bytes())
+}
+
+pub(crate) fn count_key(number: u32) -> Vec<u8> {
+    tagged(COUNT_TAG, &number.to_be_bytes())
+}
+
+pub(crate) fn entry_number(key: &[u8]) -> Option<(u32, u64)> {
+    let rest = key
+        .strip_prefix(COLLECTIONS_PREFIX)?
+        .strip_prefix(&[ENTRY_TAG])?;
+    let (number, own_key) = rest.split_first_chunk::<4>()?;
+    Some((u32::from_be_bytes(*number), own_key.len() as u64))
+}
+
+pub(crate) fn counted_number(key: &[u8]) -> Option<u32> {
+    let rest = key
+        .strip_prefix(COLLECTIONS_PREFIX)?
+        .strip_prefix(&[COUNT_TAG])?;
+    let number: [u8; 4] = rest.try_into().ok()?;
+    Some(u32::from_be_bytes(number))
 }
 
 fn droppings_prefix() -> Vec<u8> {
@@ -546,8 +568,8 @@ impl std::fmt::Debug for WriteCollection<'_, '_> {
 }
 
 /// What [`Database::collection_stats`] counts in one collection: its entries and their bytes,
-/// as a scan of the whole collection reads them, so keys whose time to live has run out are
-/// left out.
+/// as the collection keeps them up to date on every write. Keys whose time to live has run out
+/// count until the expiry sweep removes them, as a key's own deletion would.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct CollectionStats {
@@ -562,33 +584,93 @@ pub struct CollectionStats {
     pub value_bytes: u64,
 }
 
-fn count_entries(name: String, mut scan: Scan<'_>) -> Result<CollectionStats> {
-    let mut stats = CollectionStats {
-        name,
-        entries: 0,
-        key_bytes: 0,
-        value_bytes: 0,
-    };
-    while let Some((key, value_bytes)) = scan.next_key_and_value_len()? {
-        stats.entries += 1;
-        stats.key_bytes += key.len() as u64;
-        stats.value_bytes += value_bytes;
+/// How far [`Database::drop_collection_with_progress`] has come, after each of its commits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct DropProgress {
+    /// The keys removed so far, those of earlier unfinished drops included.
+    pub removed: u64,
+    /// The keys the collection held when the drop began, as its kept count says, or `None`
+    /// for a collection without one (written by a release before counts were kept).
+    pub entries: Option<u64>,
+}
+
+struct KeptRecord {
+    name: String,
+    number: u32,
+    count: Option<EntryCount>,
+}
+
+impl KeptRecord {
+    fn stats(&self, reader: Reader<'_>, tree: Option<BTree>) -> Result<CollectionStats> {
+        let count = match self.count {
+            Some(count) => count,
+            None => counted_by_scan(reader, tree, self.number)?,
+        };
+        Ok(CollectionStats {
+            name: self.name.clone(),
+            entries: count.entries,
+            key_bytes: count.key_bytes,
+            value_bytes: count.value_bytes,
+        })
     }
-    Ok(stats)
+}
+
+fn counted_by_scan(reader: Reader<'_>, tree: Option<BTree>, number: u32) -> Result<EntryCount> {
+    let mut scan = Scan::within_prefix(reader, tree, &entries_prefix(number), b"");
+    let mut count = EntryCount::default();
+    while let Some((key, value_bytes)) = scan.next_key_and_value_len()? {
+        count.add(key.len() as u64, value_bytes);
+    }
+    Ok(count)
+}
+
+fn kept_records(reader: Reader<'_>, tree: Option<BTree>) -> Result<Vec<KeptRecord>> {
+    let names = names_in(Scan::within_prefix(reader, tree, &names_prefix(), b""))?;
+    let Some(found) = tree else {
+        return Ok(Vec::new());
+    };
+    names
+        .into_iter()
+        .map(|name| {
+            let number = collection_number(reader.get(&found, &name_key(&name))?, &name)?;
+            let count = reader
+                .get(&found, &count_key(number))?
+                .map(|record| EntryCount::read(&record))
+                .transpose()?;
+            Ok(KeptRecord {
+                name,
+                number,
+                count,
+            })
+        })
+        .collect()
+}
+
+fn stats_of(
+    records: &[KeptRecord],
+    reader: Reader<'_>,
+    tree: Option<BTree>,
+) -> Result<Vec<CollectionStats>> {
+    records
+        .iter()
+        .map(|record| record.stats(reader, tree))
+        .collect()
 }
 
 impl ReadTransaction<'_> {
     /// Each collection's entries and their bytes, as this transaction sees them, in the byte
-    /// order of the names (see [`CollectionStats`]). It reads every key of every collection.
+    /// order of the names (see [`CollectionStats`]). Each collection keeps its count, so this
+    /// reads one record per collection; a collection written by a release before counts were
+    /// kept is counted by reading its keys.
     pub fn collection_stats(&self) -> Result<Vec<CollectionStats>> {
-        self.collection_names()?
-            .into_iter()
-            .map(|name| {
-                let collection = self.collection(&name)?;
-                let scan = collection.scan_prefix(b"");
-                count_entries(name, scan)
-            })
-            .collect()
+        let records = kept_records(self.reader(), self.tree())?;
+        stats_of(&records, self.reader(), self.tree())
+    }
+
+    pub(crate) fn has_uncounted_collections(&self) -> Result<bool> {
+        let records = kept_records(self.reader(), self.tree())?;
+        Ok(records.iter().any(|record| record.count.is_none()))
     }
 
     /// The collection named `name`, as this transaction sees it (see [`ReadCollection`]). It
@@ -687,6 +769,7 @@ impl<'db> WriteTransaction<'db> {
         })?;
         self.put_raw(&catalog, &record(next))?;
         self.put_raw(&key, &record(number))?;
+        self.put_raw(&count_key(number), &EntryCount::default().record())?;
         Ok(true)
     }
 
@@ -726,17 +809,53 @@ impl<'db> WriteTransaction<'db> {
     /// all. A crash between steps leaves the mark, so those commits carry on where the steps
     /// stopped; keys of a dropped collection are never read again in the meantime.
     pub fn drop_collection(&mut self, name: &str) -> Result<bool> {
+        Ok(self.drop_collection_step(name)?.is_some())
+    }
+
+    fn drop_collection_step(&mut self, name: &str) -> Result<Option<FirstDropStep>> {
         check_collection_name(name)?;
         let key = name_key(name);
         let Some(existing) = self.get_raw(&key)? else {
-            return Ok(false);
+            return Ok(None);
         };
         let number = read_record(&existing, &format!("the collection \"{name}\""))?;
+        let entries = self.kept_count(number)?.map(|count| count.entries);
         self.delete_raw(&key)?;
+        self.delete_raw(&count_key(number))?;
         self.put_raw(&dropping_key(number), &dropping_record(name))?;
         self.database().note_collection_drops(DROPS_PENDING);
-        self.remove_dropped_entries(DROP_STEP_KEYS)?;
-        Ok(true)
+        let step = self.remove_dropped_entries(DROP_STEP_KEYS)?;
+        Ok(Some(FirstDropStep {
+            removed: step.entries as u64,
+            entries,
+        }))
+    }
+
+    pub(crate) fn keep_collection_counts(&mut self) -> Result<Vec<CollectionStats>> {
+        let records = kept_records(self.reader(), self.tree())?;
+        let mut stats = Vec::with_capacity(records.len());
+        for record in &records {
+            let one = match self.kept_count(record.number)? {
+                Some(count) => CollectionStats {
+                    name: record.name.clone(),
+                    entries: count.entries,
+                    key_bytes: count.key_bytes,
+                    value_bytes: count.value_bytes,
+                },
+                None => {
+                    let counted = record.stats(self.reader(), self.tree())?;
+                    let count = EntryCount {
+                        entries: counted.entries,
+                        key_bytes: counted.key_bytes,
+                        value_bytes: counted.value_bytes,
+                    };
+                    self.put_raw(&count_key(record.number), &count.record())?;
+                    counted
+                }
+            };
+            stats.push(one);
+        }
+        Ok(stats)
     }
 
     pub(crate) fn finish_drops_before_commit(&mut self) -> Result<()> {
@@ -797,6 +916,11 @@ struct DropStep {
     finished: usize,
 }
 
+struct FirstDropStep {
+    removed: u64,
+    entries: Option<u64>,
+}
+
 impl Database {
     /// The collection named `name`, for transactions of one step (see [`Collection`]). Nothing
     /// is read until it is used.
@@ -829,13 +953,34 @@ impl Database {
     /// after one in a later step the collection stays dropped, and the next commits, or
     /// [`Database::finish_collection_drops`], remove its remaining keys.
     pub fn drop_collection(&self, name: &str) -> Result<bool> {
+        self.drop_collection_with_progress(name, |_| {})
+    }
+
+    /// Drops the collection named `name` as [`Database::drop_collection`] does, and calls
+    /// `progress` after each of its commits with the keys removed so far and, when the
+    /// collection kept a count, how many it held: a caller can show how far a long drop has
+    /// come. `progress` is not called when there is no such collection.
+    pub fn drop_collection_with_progress(
+        &self,
+        name: &str,
+        mut progress: impl FnMut(DropProgress),
+    ) -> Result<bool> {
         let mut transaction = self.begin_write()?;
-        if !transaction.drop_collection(name)? {
+        transaction.skip_sweep_on_commit();
+        let Some(first) = transaction.drop_collection_step(name)? else {
             transaction.rollback()?;
             return Ok(false);
-        }
+        };
         transaction.commit()?;
-        self.finish_collection_drops()?;
+        let mut shown = DropProgress {
+            removed: first.removed,
+            entries: first.entries,
+        };
+        progress(shown);
+        self.finish_drops_reporting(|removed| {
+            shown.removed = first.removed.saturating_add(removed);
+            progress(shown);
+        })?;
         Ok(true)
     }
 
@@ -844,6 +989,10 @@ impl Database {
     /// keys, and every commit removes up to 32 of them by itself; this frees their space at
     /// once, for example after a crash in the middle of [`Database::drop_collection`].
     pub fn finish_collection_drops(&self) -> Result<u64> {
+        self.finish_drops_reporting(|_| {})
+    }
+
+    fn finish_drops_reporting(&self, mut removed_so_far: impl FnMut(u64)) -> Result<u64> {
         let mut removed = 0u64;
         loop {
             let mut transaction = self.begin_write()?;
@@ -855,6 +1004,9 @@ impl Database {
             }
             transaction.commit()?;
             removed += step.entries as u64;
+            if step.entries > 0 {
+                removed_so_far(removed);
+            }
         }
     }
 
@@ -869,10 +1021,33 @@ impl Database {
     }
 
     /// Each collection's entries and their bytes as of the last commit, in the byte order of
-    /// the names (see [`CollectionStats`]). Unlike [`Database::stats`] it reads every key of
-    /// every collection, so it takes time in proportion to their size.
+    /// the names (see [`CollectionStats`]). Each collection keeps its count up to date on
+    /// every write, so this reads one record per collection. A collection written by a release
+    /// before counts were kept is counted once by reading its keys, and on a database open for
+    /// writing whose writer is free that count is committed and kept from then on.
     pub fn collection_stats(&self) -> Result<Vec<CollectionStats>> {
-        self.begin_read()?.collection_stats()
+        let read = self.begin_read()?;
+        let records = kept_records(read.reader(), read.tree())?;
+        let all_kept = records.iter().all(|record| record.count.is_some());
+        if all_kept || self.is_read_only() {
+            return stats_of(&records, read.reader(), read.tree());
+        }
+        drop(read);
+        match self.try_begin_write() {
+            Ok(mut transaction) => {
+                let stats = transaction.keep_collection_counts()?;
+                transaction.commit()?;
+                Ok(stats)
+            }
+            Err(error) if error.kind() == ErrorKind::WriterActive => {
+                self.begin_read()?.collection_stats()
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn has_uncounted_collections(&self) -> Result<bool> {
+        self.begin_read()?.has_uncounted_collections()
     }
 
     /// The names of the database's collections as of the last commit, in byte order.

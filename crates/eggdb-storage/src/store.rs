@@ -674,6 +674,22 @@ impl<'s, F: File> WriteTransaction<'s, F> {
         cursor.next_key_and_value_len_in(&state.cache)
     }
 
+    /// The length in bytes of the value stored under `key` in `tree`, this transaction's
+    /// changes included, or `None` when the key is absent: the length
+    /// [`WriteTransaction::next_key_and_value_len`] reports, read without the value's overflow
+    /// pages beyond the first.
+    pub fn value_len(&self, tree: &BTree, key: &[u8]) -> Result<Option<u64>, StorageError> {
+        self.check_open()?;
+        let state = self.store.lock()?;
+        match tree.stored_value_in(&state.cache, key)? {
+            None => Ok(None),
+            Some(StoredValue::Inline(bytes)) => Ok(Some(bytes.len() as u64)),
+            Some(StoredValue::Overflow(reference)) => {
+                crate::overflow::value_length(&state.cache, &reference).map(|len| Some(len as u64))
+            }
+        }
+    }
+
     /// Checks that [`WriteTransaction::put_from_reader`] would accept `key` and a value of
     /// `value_bytes` bytes, as [`BTree::check_fits_len`] does, without changing anything.
     pub fn check_fits_len(&self, key: &[u8], value_bytes: usize) -> Result<(), StorageError> {

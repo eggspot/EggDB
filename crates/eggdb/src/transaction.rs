@@ -1,4 +1,5 @@
 use crate::collection;
+use crate::collection_counts::{EntryCount, KeptCounts};
 use crate::database::Database;
 use crate::error::{Error, Result};
 use crate::expiry::{self, Moment};
@@ -230,8 +231,10 @@ pub struct WriteTransaction<'db> {
     created_tree: bool,
     now: Moment,
     adds_expiring_keys: bool,
+    adds_collection_counts: bool,
     sweeps_on_commit: bool,
     journal: Option<Vec<StoredChange>>,
+    counts: KeptCounts,
     turn: WriterTurn<'db>,
 }
 
@@ -249,8 +252,10 @@ impl<'db> WriteTransaction<'db> {
             created_tree: false,
             now,
             adds_expiring_keys: false,
+            adds_collection_counts: false,
             sweeps_on_commit: true,
             journal: None,
+            counts: KeptCounts::default(),
             turn,
         })
     }
@@ -328,6 +333,8 @@ impl<'db> WriteTransaction<'db> {
         source: &mut dyn std::io::Read,
     ) -> Result<()> {
         let previous = self.previous_for_journal(key)?;
+        let kept = self.kept_entry(key)?;
+        let before = self.value_len_if(kept, key)?;
         let tree = match self.tree {
             Some(tree) => tree,
             None => {
@@ -342,6 +349,9 @@ impl<'db> WriteTransaction<'db> {
             .put_from_reader(&tree, key, len, source)
             .map_err(Error::storage)?;
         self.note_change(key, previous);
+        if let Some((number, key_bytes)) = kept {
+            self.counts.change(number, key_bytes, before, Some(len));
+        }
         Ok(())
     }
 
@@ -425,6 +435,8 @@ impl<'db> WriteTransaction<'db> {
 
     pub(crate) fn put_raw(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         let previous = self.previous_for_journal(key)?;
+        let kept = self.kept_entry(key)?;
+        let before = self.value_len_if(kept, key)?;
         let tree = match self.tree {
             Some(tree) => tree,
             None => {
@@ -434,14 +446,64 @@ impl<'db> WriteTransaction<'db> {
         };
         self.inner.put(&tree, key, value).map_err(Error::storage)?;
         self.note_change(key, previous);
-        Ok(())
+        if let Some((number, key_bytes)) = kept {
+            self.counts
+                .change(number, key_bytes, before, Some(value.len() as u64));
+        }
+        self.note_count_record(key, Some(value))
     }
 
     fn previous_for_journal(&self, key: &[u8]) -> Result<Option<Option<Vec<u8>>>> {
-        match self.journal {
-            Some(_) => self.get_raw(key).map(Some),
-            None => Ok(None),
+        if self.journal.is_none() {
+            return Ok(None);
         }
+        let kept = collection::counted_number(key).and_then(|number| self.counts.kept(number));
+        match kept {
+            Some(count) => Ok(Some(Some(count.record().to_vec()))),
+            None => self.get_raw(key).map(Some),
+        }
+    }
+
+    fn kept_entry(&mut self, key: &[u8]) -> Result<Option<(u32, u64)>> {
+        let Some((number, key_bytes)) = collection::entry_number(key) else {
+            return Ok(None);
+        };
+        Ok(self
+            .kept_count(number)?
+            .map(|_| (number, key_bytes)))
+    }
+
+    pub(crate) fn kept_count(&mut self, number: u32) -> Result<Option<EntryCount>> {
+        if !self.counts.knows(number) {
+            let record = self.get_raw(&collection::count_key(number))?;
+            self.counts.learn(number, record.as_deref())?;
+        }
+        Ok(self.counts.kept(number))
+    }
+
+    fn value_len_if(&self, kept: Option<(u32, u64)>, key: &[u8]) -> Result<Option<u64>> {
+        let (Some(_), Some(tree)) = (kept, &self.tree) else {
+            return Ok(None);
+        };
+        self.inner.value_len(tree, key).map_err(Error::storage)
+    }
+
+    fn note_count_record(&mut self, key: &[u8], record: Option<&[u8]>) -> Result<()> {
+        let Some(number) = collection::counted_number(key) else {
+            return Ok(());
+        };
+        self.counts.learn(number, record)?;
+        if record.is_some() {
+            self.adds_collection_counts = true;
+        }
+        Ok(())
+    }
+
+    fn keep_changed_counts(&mut self) -> Result<()> {
+        for (number, count) in self.counts.take_changed() {
+            self.put_raw(&collection::count_key(number), &count.record())?;
+        }
+        Ok(())
     }
 
     fn note_change(&mut self, key: &[u8], previous: Option<Option<Vec<u8>>>) {
@@ -503,12 +565,18 @@ impl<'db> WriteTransaction<'db> {
                 self.create_tree()?
             }
         };
+        let kept = self.kept_entry(key)?;
         let inserted = self
             .inner
             .put_if_absent(&tree, key, value)
             .map_err(Error::storage)?;
         if inserted {
             self.note_change(key, Some(None));
+            if let Some((number, key_bytes)) = kept {
+                self.counts
+                    .change(number, key_bytes, None, Some(value.len() as u64));
+            }
+            self.note_count_record(key, Some(value))?;
         }
         Ok(inserted)
     }
@@ -528,10 +596,16 @@ impl<'db> WriteTransaction<'db> {
             return Ok(false);
         };
         let previous = self.previous_for_journal(key)?;
+        let kept = self.kept_entry(key)?;
+        let before = self.value_len_if(kept, key)?;
         let deleted = self.inner.delete(&tree, key).map_err(Error::storage)?;
         if deleted {
             self.note_change(key, previous);
+            if let Some((number, key_bytes)) = kept {
+                self.counts.change(number, key_bytes, before, None);
+            }
         }
+        self.note_count_record(key, None)?;
         Ok(deleted)
     }
 
@@ -552,9 +626,16 @@ impl<'db> WriteTransaction<'db> {
         if self.sweeps_on_commit {
             self.finish_drops_before_commit()?;
         }
+        self.keep_changed_counts()?;
         if self.adds_expiring_keys {
             self.inner.add_features(Features {
                 read_only_compatible: Features::EXPIRING_KEYS,
+                ..Features::default()
+            });
+        }
+        if self.adds_collection_counts {
+            self.inner.add_features(Features {
+                read_only_compatible: Features::COLLECTION_COUNTS,
                 ..Features::default()
             });
         }
