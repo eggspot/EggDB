@@ -11,7 +11,8 @@ Each package has unit tests in its `src/` and at most one integration-test progr
 `tests/all/main.rs`, which declares one module per area (`tests/all/<area>.rs`) and the shared
 helpers in `tests/all/common/`. The package's `Cargo.toml` sets `autotests = false` and names that
 one `[[test]]`, so a new top-level `tests/*.rs` file would never be compiled:
-`scripts/check-test-layout.sh`, the first step of CI's `lint-and-test`, fails on it, on a module
+`scripts/check-test-layout.sh`, the first check of
+ CI's `lint-and-test`, fails on it, on a module
 file `main.rs` doesn't declare and on a package without the setting. A test keeps its name and only
 gains its file's module (`cargo test serve` still finds `serve::...`); a test that runs its own
 program again as a child names itself with that module (`--exact process::...`). Debug and test
