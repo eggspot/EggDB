@@ -283,10 +283,7 @@ fn change_switch(writer: &mut dyn KeyValueWrite, table: &str, flag: u8, on: bool
 }
 
 pub(crate) fn is_enabled(reader: &dyn KeyValueRead, table: &str) -> SqlResult<bool> {
-    Ok(matches!(
-        reader.get(&switch_key(table))?.as_deref(),
-        Some([RECORD_VERSION, flags]) if flags & ENABLED != 0
-    ))
+    Ok(switch_flags(reader, table)? & ENABLED != 0)
 }
 
 fn missing_table(table: &Name) -> SqlError {

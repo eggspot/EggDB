@@ -224,6 +224,91 @@ fn routine_bodies_and_row_security_policies_ask_the_inquiry_functions() {
 }
 
 #[test]
+fn do_blocks_and_dynamic_sql_ask_the_inquiry_functions() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    for sql in [
+        "CREATE FUNCTION dynamic_check() RETURNS boolean LANGUAGE plpgsql AS $$ \
+         DECLARE v boolean; BEGIN \
+         EXECUTE 'SELECT has_table_privilege(''hidden'', ''SELECT'')' INTO v; RETURN v; END $$",
+        "CREATE FUNCTION formatted_check() RETURNS boolean LANGUAGE plpgsql AS $$ \
+         DECLARE v boolean; BEGIN \
+         EXECUTE format('SELECT %s(%L, %L)', 'has_table_privilege', 'hidden', 'SELECT') INTO v; \
+         RETURN v; END $$",
+        "CREATE FUNCTION staff_member() RETURNS boolean LANGUAGE sql \
+         AS 'SELECT pg_has_role(current_user, ''staff'', ''MEMBER'')'",
+    ] {
+        shown(&mut admin, sql);
+    }
+    let mut joe = as_role(&store, "joe");
+    for sql in [
+        "DO $$ BEGIN IF NOT pg_has_role('joe', 'MEMBER') THEN RAISE EXCEPTION 'no'; END IF; END $$",
+        "DO $$ BEGIN PERFORM has_table_privilege('hidden', 'SELECT'); END $$",
+        "DO $$ BEGIN IF has_table_privilege('hidden', 'UPDATE') OR NOT has_table_privilege('hidden', 'DELETE') \
+         THEN RAISE EXCEPTION 'wrong answer'; END IF; END $$",
+        "DO $$ BEGIN IF to_regclass('hidden') IS NULL THEN RAISE EXCEPTION 'no'; END IF; END $$",
+        "DO $$ DECLARE v boolean; BEGIN \
+         EXECUTE 'SELECT pg_has_role(''staff'', ''MEMBER'')' INTO v; \
+         IF v THEN RAISE EXCEPTION 'joe is not staff'; END IF; END $$",
+        "DO $$ BEGIN IF staff_member() THEN RAISE EXCEPTION 'joe is not staff'; END IF; END $$",
+    ] {
+        assert_eq!(shown(&mut joe, sql), "DO", "{sql}");
+    }
+    assert_eq!(
+        shown(
+            &mut joe,
+            "SELECT dynamic_check() AS dynamic, formatted_check() AS formatted"
+        ),
+        "dynamic|formatted\nt|t\nSELECT 1"
+    );
+    let mut carol = as_role(&store, "carol");
+    assert_eq!(
+        shown(
+            &mut carol,
+            "SELECT dynamic_check() AS dynamic, formatted_check() AS formatted"
+        ),
+        "dynamic|formatted\nf|f\nSELECT 1"
+    );
+    let message = fails_with(
+        &mut carol,
+        "DO $$ BEGIN IF NOT has_table_privilege('hidden', 'SELECT') THEN \
+         RAISE EXCEPTION 'carol may not read hidden'; END IF; END $$",
+        SqlState::RAISE_EXCEPTION,
+    );
+    assert_eq!(message, "carol may not read hidden");
+}
+
+#[test]
+fn a_routine_sees_the_tables_and_grants_it_made_itself() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    for sql in [
+        "CREATE FUNCTION make_and_check(name text) RETURNS boolean LANGUAGE plpgsql AS $$ \
+         BEGIN EXECUTE format('CREATE TABLE %I (x integer)', name); \
+         RETURN has_table_privilege(name, 'SELECT') AND NOT has_table_privilege('joe', name, 'SELECT'); \
+         END $$",
+        "CREATE FUNCTION fresh_check() RETURNS boolean LANGUAGE plpgsql AS $$ \
+         BEGIN CREATE TABLE fresh (x integer); RETURN has_table_privilege('fresh', 'SELECT'); END $$",
+    ] {
+        shown(&mut admin, sql);
+    }
+    assert_eq!(
+        shown(&mut admin, "SELECT fresh_check() AS fresh"),
+        "fresh\nt\nSELECT 1"
+    );
+    assert_eq!(
+        shown(
+            &mut admin,
+            "SELECT has_table_privilege('accounts', 'SELECT') AS before, \
+             make_and_check('later') AS after"
+        ),
+        "before|after\nt|t\nSELECT 1"
+    );
+}
+
+#[test]
 fn the_inquiry_functions_fail_as_postgresql_does() {
     let store = MemoryStore::default();
     setup(&store);

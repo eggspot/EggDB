@@ -20,6 +20,21 @@ pub(crate) fn processed_rows(result: &QueryResult) -> u64 {
         .unwrap_or(0)
 }
 
+pub(crate) fn may_change_catalog(statement: &Statement) -> bool {
+    !matches!(
+        statement,
+        Statement::Select(_)
+            | Statement::Query(_)
+            | Statement::Insert(_)
+            | Statement::Update(_)
+            | Statement::Delete(_)
+            | Statement::Merge(_)
+            | Statement::Call(_)
+            | Statement::Do(_)
+            | Statement::With(_)
+    )
+}
+
 fn not_in_routine(what: &str) -> SqlError {
     SqlError::not_supported(format!("{what} inside a PL/pgSQL or SQL function"))
 }

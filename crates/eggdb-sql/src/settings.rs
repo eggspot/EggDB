@@ -165,7 +165,7 @@ const KNOWN: &[Known] = &[
         default: fixed_text!("on"),
         change: Change::Fixed,
         reported: true,
-        description: "The one user of this release may do everything.",
+        description: "Shows whether the session's user is a superuser.",
     },
     Known {
         name: "lock_timeout",
@@ -537,6 +537,7 @@ impl Settings {
             return Ok(());
         };
         let value = match value {
+            None if known.change == Change::Fixed => return Ok(()),
             None => (known.default)(),
             Some(value) => match known.change {
                 Change::Free => value.to_owned(),
@@ -641,6 +642,11 @@ impl Settings {
             .ok()
             .and_then(|value| boolean_setting(&value))
             .unwrap_or(false)
+    }
+
+    pub(crate) fn set_superuser(&mut self, superuser: bool) {
+        let shown = if superuser { "on" } else { "off" };
+        self.values.insert("is_superuser", shown.to_owned());
     }
 
     pub(crate) fn set_session_user(&mut self, user: &str) {

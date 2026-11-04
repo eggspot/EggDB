@@ -601,5 +601,59 @@ fn a_damaged_switch_record_refuses_to_change_and_reads_as_an_error() {
             run(&mut admin, "ALTER TABLE notes FORCE ROW LEVEL SECURITY").is_err(),
             "{value:?}"
         );
+        let mut ada = as_role(&store, "ada");
+        assert!(run(&mut ada, "SELECT id FROM notes").is_err(), "{value:?}");
     }
+}
+
+#[test]
+fn resetting_the_session_authorization_keeps_the_checked_role_and_its_policies() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    run(
+        &mut admin,
+        "INSERT INTO notes VALUES (4, 'eggdb', 'admin secret')",
+    )
+    .unwrap();
+    let mut grace = as_role(&store, "grace");
+    for sql in [
+        "RESET session_authorization",
+        "SET session_authorization TO DEFAULT",
+        "SET session_authorization = DEFAULT",
+        "SET LOCAL session_authorization TO DEFAULT",
+        "RESET SESSION AUTHORIZATION",
+        "SET SESSION AUTHORIZATION DEFAULT",
+        "RESET ALL",
+        "RESET is_superuser",
+    ] {
+        run(&mut grace, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        assert_eq!(
+            run(
+                &mut grace,
+                "SELECT current_user AS who, session_user AS session, \
+                 current_setting('is_superuser') AS superuser"
+            )
+            .unwrap(),
+            "who|session|superuser\ngrace|grace|off\nSELECT 1",
+            "{sql}"
+        );
+        assert_eq!(
+            run(&mut grace, "SELECT id, body FROM notes ORDER BY id").unwrap(),
+            "id|body\n2|g1\nSELECT 1",
+            "{sql}"
+        );
+    }
+    let error = run(&mut grace, "SET session_authorization = 'eggdb'").unwrap_err();
+    assert_eq!(
+        error.state(),
+        SqlState::CANT_CHANGE_RUNTIME_PARAM,
+        "{error}"
+    );
+    let mut boss = Session::new(&store);
+    run(&mut boss, "RESET session_authorization").unwrap();
+    assert_eq!(
+        run(&mut boss, "SHOW is_superuser").unwrap(),
+        "is_superuser\non\nSHOW"
+    );
 }

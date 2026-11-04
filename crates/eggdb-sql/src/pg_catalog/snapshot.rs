@@ -210,6 +210,28 @@ pub(crate) fn load_for_stored_text(reader: &dyn KeyValueRead, text: &str) -> Sql
     Ok(())
 }
 
+pub(crate) fn load_for_tokens(reader: &dyn KeyValueRead, tokens: &[Token<'_>]) -> SqlResult<()> {
+    if snapshot_missing() && mentions_catalog(tokens) {
+        snapshot_for(reader)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn reload_if_loaded(reader: &dyn KeyValueRead) -> SqlResult<()> {
+    let dropped = FRAMES.with(|frames| {
+        frames.try_borrow_mut().ok().is_some_and(|mut frames| {
+            frames
+                .last_mut()
+                .and_then(|frame| frame.snapshot.take())
+                .is_some()
+        })
+    });
+    if dropped {
+        snapshot_for(reader)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn snapshot_for(reader: &dyn KeyValueRead) -> SqlResult<Rc<CatalogSnapshot>> {
     if let Some(found) = current() {
         return Ok(found);

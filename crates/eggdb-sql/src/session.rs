@@ -975,6 +975,7 @@ impl<'s> Session<'s> {
         self.identify(user, database);
         let settings = Arc::make_mut(&mut self.settings);
         settings.checked_role = (!role.superuser).then(|| role.name.clone());
+        settings.set_superuser(role.superuser);
         settings.login_role = Some(role.name);
         Ok(())
     }
