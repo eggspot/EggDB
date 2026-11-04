@@ -45,8 +45,7 @@ fn squeeze(interleaved: u64) -> u32 {
 
 fn interleaved_in(point: Point, latitude_min: f64, latitude_max: f64) -> u64 {
     let cells = (1_u64 << STEPS) as f64;
-    let latitude_offset =
-        (point.latitude - latitude_min) / (latitude_max - latitude_min) * cells;
+    let latitude_offset = (point.latitude - latitude_min) / (latitude_max - latitude_min) * cells;
     let longitude_offset =
         (point.longitude - LONGITUDE_MIN) / (LONGITUDE_MAX - LONGITUDE_MIN) * cells;
     spread(latitude_offset as u32) | (spread(longitude_offset as u32) << 1)
@@ -70,7 +69,11 @@ pub(crate) fn decode(bits: u64) -> Point {
     let latitude_low = edge(latitude_cell, LATITUDE_MIN, latitude_scale);
     let latitude_high = edge(latitude_cell.wrapping_add(1), LATITUDE_MIN, latitude_scale);
     let longitude_low = edge(longitude_cell, LONGITUDE_MIN, longitude_scale);
-    let longitude_high = edge(longitude_cell.wrapping_add(1), LONGITUDE_MIN, longitude_scale);
+    let longitude_high = edge(
+        longitude_cell.wrapping_add(1),
+        LONGITUDE_MIN,
+        longitude_scale,
+    );
     Point {
         longitude: ((longitude_low + longitude_high) / 2.0).clamp(LONGITUDE_MIN, LONGITUDE_MAX),
         latitude: ((latitude_low + latitude_high) / 2.0).clamp(LATITUDE_MIN, LATITUDE_MAX),
@@ -100,7 +103,11 @@ pub(crate) fn distance_meters(from: Point, to: Point) -> f64 {
     2.0 * EARTH_RADIUS_METERS * a.sqrt().asin()
 }
 
-pub(crate) fn distance_within_radius(center: Point, point: Point, radius_meters: f64) -> Option<f64> {
+pub(crate) fn distance_within_radius(
+    center: Point,
+    point: Point,
+    radius_meters: f64,
+) -> Option<f64> {
     let distance = distance_meters(center, point);
     (distance <= radius_meters).then_some(distance)
 }

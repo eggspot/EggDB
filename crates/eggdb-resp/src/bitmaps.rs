@@ -1,4 +1,6 @@
-use crate::commands::{Context, NOT_INTEGER, SYNTAX, WRONG_TYPE, integer, load, reading, save, writing};
+use crate::commands::{
+    Context, NOT_INTEGER, SYNTAX, WRONG_TYPE, integer, load, reading, save, writing,
+};
 use crate::protocol::Reply;
 use crate::value::{Data, Entry};
 
@@ -524,7 +526,10 @@ fn parse_overflow(word: &[u8]) -> Result<Overflow, String> {
     }
 }
 
-fn parse_field_operations(args: &[Vec<u8>], read_only: bool) -> Result<Vec<FieldOperation>, String> {
+fn parse_field_operations(
+    args: &[Vec<u8>],
+    read_only: bool,
+) -> Result<Vec<FieldOperation>, String> {
     let mut overflow = Overflow::Wrap;
     let mut operations = Vec::new();
     let mut at = 0;

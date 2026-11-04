@@ -267,7 +267,10 @@ fn sparse_registers(body: &[u8]) -> Option<Vec<u8>> {
         } else if opcode & SPARSE_LONG_ZERO != 0 {
             let low = *body.get(at + 1)?;
             at += 2;
-            (0, ((usize::from(opcode & 0x3F) << 8) | usize::from(low)) + 1)
+            (
+                0,
+                ((usize::from(opcode & 0x3F) << 8) | usize::from(low)) + 1,
+            )
         } else {
             at += 1;
             (0, usize::from(opcode & 0x3F) + 1)

@@ -75,7 +75,10 @@ fn bit_commands_refuse_bad_offsets_values_and_types_as_redis_does() {
         redis.text("SETBIT k 0 2"),
         "-ERR bit is not an integer or out of range|"
     );
-    assert_eq!(redis.text("BITPOS k 2"), "-ERR The bit argument must be 1 or 0.|");
+    assert_eq!(
+        redis.text("BITPOS k 2"),
+        "-ERR The bit argument must be 1 or 0.|"
+    );
     assert_eq!(redis.text("BITCOUNT k 0"), "-ERR syntax error|");
     assert_eq!(redis.text("BITCOUNT k 0 1 WORD"), "-ERR syntax error|");
     assert_eq!(
@@ -99,7 +102,11 @@ fn setbit_far_past_the_end_stops_at_the_servers_memory_budget() {
         "-OOM command not allowed: the value would pass the server's memory budget|"
     );
     assert_eq!(redis.text("EXISTS huge"), ":0|");
-    assert!(redis.text("BITFIELD huge SET u8 4294967000 1").starts_with("-OOM "));
+    assert!(
+        redis
+            .text("BITFIELD huge SET u8 4294967000 1")
+            .starts_with("-OOM ")
+    );
     assert_eq!(redis.text("SETBIT small 8000000 1"), ":0|");
     assert_eq!(redis.text("STRLEN small"), ":1000001|");
 }
@@ -212,7 +219,10 @@ fn bitfield_reads_writes_and_overflows_like_the_command_page() {
         redis.text("BITFIELD s OVERFLOW SAT INCRBY i8 0 -1000 INCRBY u8 8 1000"),
         "*2|:-128|:255|"
     );
-    assert_eq!(redis.text("BITFIELD nokey GET u8 0 GET i4 100"), "*2|:0|:0|");
+    assert_eq!(
+        redis.text("BITFIELD nokey GET u8 0 GET i4 100"),
+        "*2|:0|:0|"
+    );
     assert_eq!(redis.text("EXISTS nokey"), ":0|");
     assert_eq!(redis.text("SET hello Hello_World"), "+OK|");
     assert_eq!(redis.text("BITFIELD_RO hello GET i8 16"), "*1|:108|");
@@ -316,14 +326,25 @@ fn hyperloglog_commands_refuse_other_values() {
         redis.text("PFCOUNT list"),
         "-WRONGTYPE Operation against a key holding the wrong kind of value|"
     );
-    redis.run(&[b"SET", b"short", b"HYLL\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"]);
+    redis.run(&[
+        b"SET",
+        b"short",
+        b"HYLL\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+    ]);
     assert_eq!(
         redis.text("PFCOUNT short"),
         "-INVALIDOBJ Corrupted HLL object detected|"
     );
-    redis.run(&[b"SET", b"dense", b"HYLL\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"]);
+    redis.run(&[
+        b"SET",
+        b"dense",
+        b"HYLL\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+    ]);
     assert_eq!(redis.text("PFADD dense a"), not_a_sketch);
-    assert_eq!(redis.text("PFCOUNT"), "-ERR wrong number of arguments for 'pfcount' command|");
+    assert_eq!(
+        redis.text("PFCOUNT"),
+        "-ERR wrong number of arguments for 'pfcount' command|"
+    );
 }
 
 fn sicily(redis: &mut Harness) {
@@ -340,9 +361,18 @@ const CATANIA: &str = "*2|$20|15.08726745843887329|$20|37.50266842333162032|";
 fn geoadd_geodist_geopos_and_geohash_follow_the_command_pages_examples() {
     let mut redis = Harness::new();
     sicily(&mut redis);
-    assert_eq!(redis.text("GEODIST Sicily Palermo Catania"), "$11|166274.1516|");
-    assert_eq!(redis.text("GEODIST Sicily Palermo Catania km"), "$8|166.2742|");
-    assert_eq!(redis.text("GEODIST Sicily Palermo Catania mi"), "$8|103.3182|");
+    assert_eq!(
+        redis.text("GEODIST Sicily Palermo Catania"),
+        "$11|166274.1516|"
+    );
+    assert_eq!(
+        redis.text("GEODIST Sicily Palermo Catania km"),
+        "$8|166.2742|"
+    );
+    assert_eq!(
+        redis.text("GEODIST Sicily Palermo Catania mi"),
+        "$8|103.3182|"
+    );
     assert_eq!(redis.text("GEODIST Sicily Foo Bar"), "$-1|");
     assert_eq!(
         redis.text("GEOPOS Sicily Palermo Catania NonExisting"),
@@ -383,7 +413,10 @@ fn georadius_and_georadiusbymember_follow_the_command_pages_examples() {
         redis.text("GEORADIUS Sicily 15 37 200 km WITHDIST WITHCOORD"),
         format!("*2|*3|$7|Palermo|$8|190.4424|{PALERMO}*3|$7|Catania|$7|56.4413|{CATANIA}")
     );
-    assert_eq!(redis.text("GEORADIUS Sicily 15 37 100 km"), "*1|$7|Catania|");
+    assert_eq!(
+        redis.text("GEORADIUS Sicily 15 37 100 km"),
+        "*1|$7|Catania|"
+    );
     assert_eq!(
         redis.text("GEORADIUS_RO Sicily 15 37 200 km ASC"),
         "*2|$7|Catania|$7|Palermo|"
@@ -392,7 +425,10 @@ fn georadius_and_georadiusbymember_follow_the_command_pages_examples() {
         redis.text("GEORADIUS Sicily 15 37 200 km COUNT 1"),
         "*1|$7|Catania|"
     );
-    assert_eq!(redis.text("GEORADIUS Sicily 15 37 200 km STORE near"), ":2|");
+    assert_eq!(
+        redis.text("GEORADIUS Sicily 15 37 200 km STORE near"),
+        ":2|"
+    );
     assert_eq!(redis.text("ZCARD near"), ":2|");
     assert_eq!(redis.text("GEORADIUS Sicily 15 37 1 km STORE near"), ":0|");
     assert_eq!(redis.text("EXISTS near"), ":0|");
@@ -406,7 +442,10 @@ fn georadius_and_georadiusbymember_follow_the_command_pages_examples() {
     );
 
     let mut redis = Harness::new();
-    assert_eq!(redis.text("GEOADD Sicily 13.583333 37.316667 Agrigento"), ":1|");
+    assert_eq!(
+        redis.text("GEOADD Sicily 13.583333 37.316667 Agrigento"),
+        ":1|"
+    );
     sicily(&mut redis);
     assert_eq!(
         redis.text("GEORADIUSBYMEMBER Sicily Agrigento 100 km"),
@@ -447,7 +486,9 @@ fn geosearch_and_geosearchstore_follow_the_command_pages_examples() {
         ":3|"
     );
     assert_eq!(
-        redis.text("GEOSEARCH key1 FROMLONLAT 15 37 BYBOX 400 400 km ASC WITHCOORD WITHDIST WITHHASH"),
+        redis.text(
+            "GEOSEARCH key1 FROMLONLAT 15 37 BYBOX 400 400 km ASC WITHCOORD WITHDIST WITHHASH"
+        ),
         format!(
             "*3|*4|$7|Catania|$7|56.4413|:3479447370796909|{CATANIA}\
              *4|$7|Palermo|$8|190.4424|:3479099956230698|{PALERMO}\
@@ -455,7 +496,9 @@ fn geosearch_and_geosearchstore_follow_the_command_pages_examples() {
         )
     );
     assert_eq!(
-        redis.text("GEOSEARCHSTORE key2 Sicily FROMLONLAT 15 37 BYBOX 400 400 km ASC COUNT 3 STOREDIST"),
+        redis.text(
+            "GEOSEARCHSTORE key2 Sicily FROMLONLAT 15 37 BYBOX 400 400 km ASC COUNT 3 STOREDIST"
+        ),
         ":3|"
     );
     assert_eq!(
@@ -478,7 +521,10 @@ fn geosearch_and_geosearchstore_follow_the_command_pages_examples() {
         redis.text("GEOSEARCH Sicily FROMLONLAT 15 37 BYRADIUS 200 km DESC"),
         "*2|$7|Palermo|$7|Catania|"
     );
-    assert_eq!(redis.text("GEOSEARCH nokey FROMMEMBER a BYRADIUS 1 km"), "*0|");
+    assert_eq!(
+        redis.text("GEOSEARCH nokey FROMMEMBER a BYRADIUS 1 km"),
+        "*0|"
+    );
     assert_eq!(
         redis.text("GEOSEARCHSTORE key1 nokey FROMLONLAT 15 37 BYRADIUS 1 km"),
         ":0|"
@@ -498,8 +544,14 @@ fn geo_commands_refuse_bad_input_with_redis_errors() {
         redis.text("GEOADD Sicily 0 85.06 nowhere"),
         "-ERR invalid longitude,latitude pair 0.000000,85.060000|"
     );
-    assert_eq!(redis.text("GEOADD Sicily x 0 nowhere"), "-ERR value is not a valid float|");
-    assert_eq!(redis.text("GEOADD Sicily NX XX 1 1 a"), "-ERR syntax error|");
+    assert_eq!(
+        redis.text("GEOADD Sicily x 0 nowhere"),
+        "-ERR value is not a valid float|"
+    );
+    assert_eq!(
+        redis.text("GEOADD Sicily NX XX 1 1 a"),
+        "-ERR syntax error|"
+    );
     assert_eq!(redis.text("GEOADD Sicily 1 1 a 2"), "-ERR syntax error|");
     assert_eq!(
         redis.text("GEODIST Sicily Palermo Catania yards"),

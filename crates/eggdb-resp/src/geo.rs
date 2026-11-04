@@ -1,5 +1,7 @@
 use crate::aggregates::{expiry, sorted_of};
-use crate::commands::{Context, NOT_INTEGER, SYNTAX, WRONG_TYPE, float, integer, load, reading, save, writing};
+use crate::commands::{
+    Context, NOT_INTEGER, SYNTAX, WRONG_TYPE, float, integer, load, reading, save, writing,
+};
 use crate::geohash::{self, Point};
 use crate::keyspace::KeysRead;
 use crate::protocol::Reply;
@@ -42,7 +44,9 @@ pub(crate) fn execute(
         ("geopos", count) if count >= 1 => return Some(geopos(context, db, args)),
         ("georadius", count) if count >= 5 => SearchForm::Radius { read_only: false },
         ("georadius_ro", count) if count >= 5 => SearchForm::Radius { read_only: true },
-        ("georadiusbymember", count) if count >= 4 => SearchForm::RadiusByMember { read_only: false },
+        ("georadiusbymember", count) if count >= 4 => {
+            SearchForm::RadiusByMember { read_only: false }
+        }
         ("georadiusbymember_ro", count) if count >= 4 => {
             SearchForm::RadiusByMember { read_only: true }
         }
@@ -243,8 +247,13 @@ enum Center {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Area {
-    Radius { meters: f64 },
-    Box { width_meters: f64, height_meters: f64 },
+    Radius {
+        meters: f64,
+    },
+    Box {
+        width_meters: f64,
+        height_meters: f64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,7 +374,12 @@ impl Search {
         Ok(search)
     }
 
-    fn parse_options(&mut self, form: SearchForm, command: &str, options: &[Vec<u8>]) -> Result<(), String> {
+    fn parse_options(
+        &mut self,
+        form: SearchForm,
+        command: &str,
+        options: &[Vec<u8>],
+    ) -> Result<(), String> {
         let mut at = 0;
         while let Some(word) = options.get(at) {
             let rest = &options[at + 1..];
