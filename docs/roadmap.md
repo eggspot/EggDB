@@ -193,8 +193,7 @@ everywhere but SQLite, `GROUPING_ID()` and Oracle's `GROUP_ID()`, in one pass ov
 (D298). Next for grouping sets: SQL Server's and Oracle's one-argument limit for `GROUPING`
 and their own error numbers for grouping-set mistakes, grouping sets in a query with window
 functions checked against each manual, `GROUPING` of an outer query's keys inside a subquery
-(`42803` today), and MySQL's NULL ordering (NULL first for `ASC`), so MySQL's `WITH ROLLUP ...
-ORDER BY year DESC` example puts the super-aggregate row last as MySQL's manual shows.
+(`42803` today); MySQL's NULL ordering is built (D321).
 Users can now keep one row per key with PostgreSQL's `DISTINCT ON (...)` in `ORDER BY` order,
 join by every shared column name with `NATURAL [INNER | LEFT | RIGHT | FULL] JOIN` (PostgreSQL,
 MySQL, SQLite, Oracle), name their own escape character with `LIKE ... ESCAPE` in every dialect
@@ -213,8 +212,7 @@ ROWS ONLY` as `LIMIT`), Transact-SQL's `TOP n PERCENT` and `TOP n [PERCENT] WITH
 Server's errors 1031 and 1062, and join each partition's values on every row with Transact-SQL's
 `STRING_AGG ... OVER (PARTITION BY ...)` and Oracle's analytic `LISTAGG ... OVER (PARTITION BY
 ...)`, in `WITHIN GROUP` order (D300). Next for these: `TOP ... PERCENT` in `UPDATE`, `DELETE` and
-`INSERT`, `LISTAGG (DISTINCT ...) OVER`, PostgreSQL's `2201W` for a NULL count with `WITH
-TIES`, and Msg 1006 for a plain Transact-SQL `TOP (NULL)` (`TOP (NULL) PERCENT` is built).
+`INSERT`, `LISTAGG (DISTINCT ...) OVER` and Msg 1006 for a plain Transact-SQL `TOP (NULL)` (`TOP (NULL) PERCENT` is built).
 Users can now write Transact-SQL `MERGE` with two `WHEN MATCHED` clauses (one `UPDATE`, one
 `DELETE`), `$action` in its `OUTPUT` and `MERGE TOP (n) [PERCENT]`; send the rows of `OUTPUT` on
 `INSERT`, `UPDATE`, `DELETE` and `MERGE` into a table variable or a table with `OUTPUT ... INTO`
