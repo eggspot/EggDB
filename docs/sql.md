@@ -1759,6 +1759,20 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   `WITH RECURSIVE name (columns) AS (non-recursive-term UNION [ALL] recursive-term)` repeats the
   recursive term over the rows the last step added until a step adds none (`UNION` drops rows
   seen before); a recursion still adding rows after 1,000,000 steps fails with `54001`.
+  PostgreSQL 14's clauses after the parentheses add columns to it (D323): `SEARCH DEPTH FIRST BY
+  columns SET ordercol` adds a `record[]` of the listed columns' values along the path from the
+  first row (`{"(1,2)","(2,3)"}`), so `ORDER BY ordercol` gives depth-first order; `SEARCH
+  BREADTH FIRST BY columns SET ordercol` adds a `record` of the step's depth and the columns
+  (`(1,2,3)`), for breadth-first order; `CYCLE columns SET is_cycle [TO value DEFAULT value]
+  USING path` adds the mark (`true`/`false` by default, else the two constants' common type) and
+  the path as a `record[]`, and a row whose columns are already on its path is returned marked
+  and not followed further (fields compare with NULLs equal). With both, the columns are added
+  in the order `ordercol`, `is_cycle`, `path`. Misuse is answered as PostgreSQL does: a query that
+  is not recursive, a column not in the list or a new column name already in it, and a left or
+  right side of the `UNION` that is not a `SELECT` or a recursive reference not at the top of
+  the right-hand `SELECT` are `42601`, a column listed twice `42701`, and mark values of no
+  common type `42804`; other dialects answer `0A000`. A `SELECT *` over a `USING` or `NATURAL`
+  join in the recursive term of such a query is `0A000`.
 - **Set operations**: `query UNION | INTERSECT | EXCEPT [ALL | DISTINCT] query`, with operands in
   parentheses (which may have their own `ORDER BY` and `LIMIT`), `INTERSECT` binding tighter
   than `UNION` and `EXCEPT`, and `ORDER BY`, `LIMIT` and `OFFSET` after the last operand applying
