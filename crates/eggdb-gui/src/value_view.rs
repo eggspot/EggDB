@@ -124,7 +124,8 @@ pub fn wrapped_lines(text: &str, width: usize, limit: usize) -> (Vec<String>, us
 }
 
 /// The view's rect for a cell at `cell` in a window `window_width` wide: left-aligned to the
-/// cell within the window, 4 below it, or above it when it would cross the body's bottom.
+/// cell within the window, 4 below it, or above it when it would cross the body's bottom, and
+/// never above the window's top.
 pub fn popover_rect(cell: Rect, window_width: f32) -> Rect {
     let x = cell.x.clamp(MIN_LEFT, (window_width - WIDTH).max(MIN_LEFT));
     let below = cell.y + cell.h + GAP;
@@ -133,7 +134,7 @@ pub fn popover_rect(cell: Rect, window_width: f32) -> Rect {
     } else {
         below
     };
-    Rect::new(x, y, WIDTH, HEIGHT)
+    Rect::new(x, y.max(0.0), WIDTH, HEIGHT)
 }
 
 /// The `Copy` button's rect in a view at `view`.
@@ -523,6 +524,10 @@ mod tests {
         assert_eq!(
             popover_rect(Rect::new(200.0, 446.0, 100.0, 24.0), 1280.0).x,
             260.0
+        );
+        assert_eq!(
+            popover_rect(Rect::new(308.0, 120.0, 100.0, 600.0), 1280.0),
+            Rect::new(308.0, 0.0, 480.0, 240.0)
         );
     }
 }

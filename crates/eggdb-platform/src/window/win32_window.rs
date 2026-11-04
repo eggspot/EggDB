@@ -57,6 +57,7 @@ const WM_NCCREATE: u32 = 0x0081;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_CHAR: u32 = 0x0102;
 const WM_SYSKEYDOWN: u32 = 0x0104;
+const WM_SYSKEYUP: u32 = 0x0105;
 const WM_DPICHANGED: u32 = 0x02E0;
 const WM_DROPFILES: u32 = 0x0233;
 const WM_MOUSEMOVE: u32 = 0x0200;
@@ -764,10 +765,11 @@ fn handle_message(
             if let Some(key) = win32::key_from_virtual_key(wparam, modifiers) {
                 state.push(WindowEvent::Key(KeyPress { key, modifiers }));
             }
-            if message == WM_SYSKEYDOWN {
+            if message == WM_SYSKEYDOWN && !win32::system_key_is_answered(wparam, modifiers) {
                 return None;
             }
         }
+        WM_SYSKEYUP if win32::system_key_is_answered(wparam, held_modifiers()) => {}
         WM_CHAR => {
             let mut characters = state.characters.get();
             let character = characters.push(win32::low_word(wparam));

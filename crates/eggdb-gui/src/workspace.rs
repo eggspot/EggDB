@@ -43,6 +43,7 @@ type RunAnswer = (
     TransactionStatus,
 );
 type OpenAnswer = Result<(Connection, Catalog), ConnectFailure>;
+type HandedConnection = (Connection, Vec<SessionId>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CatalogRead {
@@ -52,12 +53,14 @@ enum CatalogRead {
         statement: String,
         dialect: QueryDialect,
     },
+    CloseSessions(Vec<SessionId>),
 }
 
 enum CatalogAnswer {
     Catalog(Result<Catalog, StatementFailure>),
     Sample(inspector::Sample),
     Dropped(Result<(), StatementFailure>),
+    SessionsClosed,
 }
 
 /// How long the toast after a drop from the tree shows (`docs/ux/workspace.md` 10.2).
@@ -120,7 +123,7 @@ pub struct Workspace {
     opening: Option<Opening>,
     running: Option<Running>,
     reading: Option<Reading>,
-    run_waiting_for_connection: Option<mpsc::Sender<Connection>>,
+    run_waiting_for_connection: Option<mpsc::Sender<HandedConnection>>,
     sessions_to_close: Vec<SessionId>,
     catalog_wanted: bool,
     sample_wanted: Option<String>,
@@ -939,10 +942,8 @@ impl Workspace {
         {
             running.cancel.cancel();
         }
-        match &mut self.connection {
-            Some(connection) => connection.close_session(session),
-            None => self.sessions_to_close.push(session),
-        }
+        self.sessions_to_close.push(session);
+        self.start_read();
     }
 
     fn inspect(&mut self, item: TreeItem) {
@@ -983,7 +984,9 @@ impl Workspace {
         if self.reading.is_some() || self.run_waiting_for_connection.is_some() {
             return;
         }
-        let read = if let Some((statement, dialect)) = self.drop_wanted.take() {
+        let read = if !self.sessions_to_close.is_empty() {
+            CatalogRead::CloseSessions(std::mem::take(&mut self.sessions_to_close))
+        } else if let Some((statement, dialect)) = self.drop_wanted.take() {
             CatalogRead::Drop { statement, dialect }
         } else if self.catalog_wanted {
             self.catalog_wanted = false;
@@ -1000,6 +1003,7 @@ impl Workspace {
                 CatalogRead::Drop { statement, dialect } => {
                     self.drop_wanted = Some((statement, dialect));
                 }
+                CatalogRead::CloseSessions(sessions) => self.sessions_to_close = sessions,
             }
             return;
         };
@@ -1018,6 +1022,12 @@ impl Workspace {
                         Some(Err(failure)) => Err(failure),
                         _ => Ok(()),
                     })
+                }
+                CatalogRead::CloseSessions(sessions) => {
+                    for session in sessions {
+                        connection.close_session(session);
+                    }
+                    CatalogAnswer::SessionsClosed
                 }
             };
             let _ = send.send((connection, answer));
@@ -1043,18 +1053,18 @@ impl Workspace {
                     self.catalog_wanted = true;
                 }
                 CatalogAnswer::Dropped(Err(failure)) => window.drop_failed(&failure),
+                CatalogAnswer::SessionsClosed => {}
             }
         }
         self.connection_back(connection);
     }
 
-    fn connection_back(&mut self, mut connection: Connection) {
-        for session in self.sessions_to_close.drain(..) {
-            connection.close_session(session);
-        }
+    fn connection_back(&mut self, connection: Connection) {
         match self.run_waiting_for_connection.take() {
             Some(run) => {
-                if let Err(mpsc::SendError(connection)) = run.send(connection) {
+                let handed = run.send((connection, std::mem::take(&mut self.sessions_to_close)));
+                if let Err(mpsc::SendError((connection, to_close))) = handed {
+                    self.sessions_to_close = to_close;
                     self.connection = Some(connection);
                     self.start_read();
                 }
@@ -1153,10 +1163,11 @@ impl Workspace {
             self.notice_until = Some(now + NOTICE_SHOWN_FOR);
             return;
         }
-        let (hand_over, handed) = mpsc::channel::<Connection>();
+        let (hand_over, handed) = mpsc::channel::<HandedConnection>();
         match self.connection.take() {
             Some(connection) => {
-                let _ = hand_over.send(connection);
+                let to_close = std::mem::take(&mut self.sessions_to_close);
+                let _ = hand_over.send((connection, to_close));
             }
             None if self.reading.is_some() && self.run_waiting_for_connection.is_none() => {
                 self.run_waiting_for_connection = Some(hand_over);
@@ -1177,9 +1188,12 @@ impl Workspace {
             rolled_back: explain.rolled_back,
         });
         std::thread::spawn(move || {
-            let Ok(mut connection) = handed.recv() else {
+            let Ok((mut connection, to_close)) = handed.recv() else {
                 return;
             };
+            for closed in to_close {
+                connection.close_session(closed);
+            }
             let outcomes = match (&scan, &bracketed) {
                 (Some(scan), _) => vec![connection.scan_keys(scan).map(|table| vec![table])],
                 (None, Some(run)) => {
@@ -2508,6 +2522,55 @@ mod tests {
         assert_eq!(workspace.sample_wanted, names[1]);
         workspace.inspect(TreeItem::Table(0));
         assert_eq!(workspace.sample_wanted, None);
+    }
+
+    #[test]
+    fn a_closed_tab_s_session_closes_on_a_worker_and_its_transaction_rolls_back() {
+        let mut workspace = workspace(Arc::new(EngineConnector), scratch("close-session"));
+        workspace.open_typed("closing.eggdb", Instant::now());
+        workspace.wait_for_open(Duration::from_secs(30));
+        workspace.wait_for_reads(Duration::from_secs(10));
+        let now = Instant::now();
+        workspace.run_text("BEGIN", false, now);
+        workspace.wait_for_run(Duration::from_secs(10));
+        let session = workspace
+            .main_window_mut()
+            .expect("the main window")
+            .tab
+            .session;
+        assert_eq!(
+            workspace
+                .connection
+                .as_ref()
+                .map(|connection| connection.transaction_status(session)),
+            Some(TransactionStatus::InBlock)
+        );
+        workspace.window_action(
+            WindowAction::CloseSession {
+                session,
+                stop: false,
+            },
+            now,
+        );
+        assert!(
+            workspace.connection.is_none(),
+            "the window's thread hands the connection to a worker"
+        );
+        assert!(
+            workspace
+                .reading
+                .as_ref()
+                .is_some_and(|reading| reading.read == CatalogRead::CloseSessions(vec![session]))
+        );
+        workspace.wait_for_reads(Duration::from_secs(10));
+        assert!(workspace.sessions_to_close.is_empty());
+        assert_eq!(
+            workspace
+                .connection
+                .as_ref()
+                .map(|connection| connection.transaction_status(session)),
+            Some(TransactionStatus::Idle)
+        );
     }
 
     #[test]

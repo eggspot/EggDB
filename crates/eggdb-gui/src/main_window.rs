@@ -1012,7 +1012,9 @@ impl MainWindow {
             return WindowAction::Tab(TabAction::None);
         }
         let dialect = self.nearest_query_dialect();
-        self.new_tab();
+        if !self.new_tab() {
+            return WindowAction::Tab(TabAction::None);
+        }
         self.tab.editor = crate::editor::Editor::new(&open_statement(&name, dialect));
         match self.tab.run_request(true) {
             Some(request) => WindowAction::Tab(TabAction::Run(request)),
@@ -1047,10 +1049,13 @@ impl MainWindow {
             }
             None => {
                 let session = self.take_session();
-                self.insert_tab(QueryTab {
+                let tab = QueryTab {
                     session,
                     ..QueryTab::keys(scan)
-                });
+                };
+                if !self.insert_tab(tab) {
+                    return none;
+                }
             }
         }
         self.tab
@@ -1164,23 +1169,33 @@ impl MainWindow {
     /// `Ctrl/Cmd+T` (`docs/ux/workspace.md` 9.1): `Query n`, the lowest unused number, right
     /// after the showing tab with its dialect, shown with the focus in its empty editor.
     pub fn add_tab(&mut self) {
-        self.new_tab();
-        self.focus_tab();
+        if self.new_tab() {
+            self.focus_tab();
+        }
     }
 
-    fn new_tab(&mut self) {
+    fn new_tab(&mut self) -> bool {
+        if self.tab_count() >= tab_strip::MOST_TABS {
+            self.tab.notice = Some(tab_strip::TOO_MANY_TABS.to_owned());
+            return false;
+        }
         let title = tab_strip::lowest_free_title(self.tab_titles().into_iter());
         let dialect = self.nearest_query_dialect();
         let mut tab = self.fresh_tab(&title);
         tab.set_dialect(dialect);
-        self.insert_tab(tab);
+        self.insert_tab(tab)
     }
 
-    fn insert_tab(&mut self, tab: QueryTab) {
+    fn insert_tab(&mut self, tab: QueryTab) -> bool {
+        if self.tab_count() >= tab_strip::MOST_TABS {
+            self.tab.notice = Some(tab_strip::TOO_MANY_TABS.to_owned());
+            return false;
+        }
         let position = self.tab_position + 1;
         let mut strip = self.take_strip();
         strip.insert(position.min(strip.len()), tab);
         self.show_from(strip, position);
+        true
     }
 
     /// Shows the tab at `position` in the strip.
@@ -2208,13 +2223,17 @@ fn close_icon(paint: &mut Painter<'_, '_>, centre: f32, color: Rgba) {
         .line((centre + 4.0, 58.0), (centre - 4.0, 66.0), 1.5, color);
 }
 
+fn close_node(position: usize) -> u32 {
+    NODE_FIRST_TAB_CLOSE + (position % tab_strip::MOST_TABS) as u32
+}
+
 fn background_tab_node(window: &MainWindow, position: usize) -> u32 {
     let index = if position > window.tab_position {
         position - 1
     } else {
         position
     };
-    NODE_FIRST_BACKGROUND_TAB + index as u32 % 1000
+    NODE_FIRST_BACKGROUND_TAB + (index % tab_strip::MOST_TABS) as u32
 }
 
 fn token_color(theme: Theme, kind: TokenKind) -> Rgba {
@@ -3761,6 +3780,7 @@ pub const NODE_LAYOUT_ITEM: u32 = 63_100;
 pub const NODE_FIRST_TAB_CLOSE: u32 = 61_500;
 /// The tab strip's `+` button.
 pub const NODE_NEW_TAB: u32 = 61_999;
+const TAB_CLOSE_NODES_END: u32 = NODE_FIRST_TAB_CLOSE + tab_strip::MOST_TABS as u32;
 
 fn node(
     id: u32,
@@ -3990,7 +4010,7 @@ impl MainWindow {
                 Vec::new()
             };
         }
-        if (NODE_FIRST_TAB_CLOSE..NODE_FIRST_TAB_CLOSE + 400).contains(&node.id) {
+        if (NODE_FIRST_TAB_CLOSE..TAB_CLOSE_NODES_END).contains(&node.id) {
             let Some(position) = tab_position_of(self, node.id).filter(|_| invoked) else {
                 return Vec::new();
             };
@@ -4210,7 +4230,7 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
                 24.0,
             ),
         );
-        button.description = Some(crate::layout::TRADEMARK_NOTE.to_owned());
+        button.description = Some(crate::layout::FULL_TRADEMARK_NOTE.to_owned());
         button.shortcut = Some(format!("{}+K L", primary_name()));
         button.actions.invoke = true;
         nodes.push(button);
@@ -4283,7 +4303,7 @@ fn tab_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow, centre_width: f32
         let close_left = left + width - 28.0;
         if close_left >= 260.0 && close_left + 24.0 <= 260.0 + viewport {
             let mut close = node(
-                NODE_FIRST_TAB_CLOSE + position as u32 % 400,
+                close_node(position),
                 id,
                 AccessRole::Button,
                 &format!("Close {}", tab.title),
@@ -4319,8 +4339,9 @@ fn tab_position_of(window: &MainWindow, id: u32) -> Option<usize> {
     if id == NODE_QUERY_TAB {
         return Some(window.tab_position);
     }
-    if (NODE_FIRST_TAB_CLOSE..NODE_FIRST_TAB_CLOSE + 400).contains(&id) {
-        return Some((id - NODE_FIRST_TAB_CLOSE) as usize);
+    if (NODE_FIRST_TAB_CLOSE..TAB_CLOSE_NODES_END).contains(&id) {
+        let position = (id - NODE_FIRST_TAB_CLOSE) as usize;
+        return (position < window.tab_count()).then_some(position);
     }
     if (NODE_FIRST_BACKGROUND_TAB..NODE_FIRST_TAB_CLOSE).contains(&id) {
         let index = (id - NODE_FIRST_BACKGROUND_TAB) as usize;
@@ -5061,7 +5082,7 @@ mod tests {
         assert_eq!(item.name, "Works like SQL Server Management Studio");
         assert_eq!(
             item.description.as_deref(),
-            Some(crate::layout::TRADEMARK_NOTE)
+            Some(crate::layout::FULL_TRADEMARK_NOTE)
         );
         let names: Vec<&str> = tree
             .iter()
@@ -5360,6 +5381,42 @@ mod tests {
         assert!(window.scroll_tabs(9.0));
         assert_eq!(window.tab_scroll, 224.0);
         assert!(!window.scroll_tabs(1.0));
+    }
+
+    #[test]
+    fn a_window_holds_at_most_400_tabs_each_with_node_ids_of_its_own() {
+        let mut window = MainWindow::sample();
+        for _ in 1..tab_strip::MOST_TABS {
+            window.add_tab();
+        }
+        assert_eq!(window.tab_count(), tab_strip::MOST_TABS);
+        let last = window.tab.title.clone();
+        window.add_tab();
+        assert_eq!(window.tab_count(), tab_strip::MOST_TABS);
+        assert_eq!(window.tab.title, last);
+        assert_eq!(
+            window.tab.notice.as_deref(),
+            Some(tab_strip::TOO_MANY_TABS)
+        );
+        let mut ids: Vec<u32> = (0..window.tab_count())
+            .filter(|&position| position != window.tab_position)
+            .map(|position| background_tab_node(&window, position))
+            .collect();
+        ids.extend((0..window.tab_count()).map(close_node));
+        let count = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), count);
+        assert!(!ids.contains(&NODE_NEW_TAB));
+        for position in 0..window.tab_count() {
+            assert_eq!(
+                tab_position_of(&window, close_node(position)),
+                Some(position)
+            );
+        }
+        window.show_tab(0);
+        let first_background = background_tab_node(&window, 1);
+        assert_eq!(tab_position_of(&window, first_background), Some(1));
     }
 
     #[test]

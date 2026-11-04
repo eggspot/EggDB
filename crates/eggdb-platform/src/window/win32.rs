@@ -108,6 +108,15 @@ pub fn key_from_virtual_key(virtual_key: usize, modifiers: Modifiers) -> Option<
     })
 }
 
+/// Whether the window answers a `WM_SYSKEYDOWN` or `WM_SYSKEYUP` for `virtual_key` itself
+/// rather than passing it to `DefWindowProcW`: `F10` and `Shift+F10`, which the default turns
+/// into `SC_KEYMENU` and the window menu's keyboard mode, so the next `Down` or `Enter` would
+/// reach the system menu instead of the GUI. Keys held with Alt, such as `Alt+F4`, keep the
+/// default.
+pub fn system_key_is_answered(virtual_key: usize, modifiers: Modifiers) -> bool {
+    virtual_key == VK_F10 && !modifiers.alt
+}
+
 /// The key press a `WM_CHAR` character makes, or `None` when the key was already answered by
 /// [`key_from_virtual_key`]: control codes, the space bar, and anything typed with Control
 /// but not Alt. Control and Alt together are AltGr, whose character the keyboard layout has
@@ -492,6 +501,17 @@ mod tests {
         assert_eq!(key_from_virtual_key(0x41, plain), None);
         assert_eq!(key_from_virtual_key(0x70, plain), None);
         assert_eq!(key_from_virtual_key(usize::MAX, plain), None);
+    }
+
+    #[test]
+    fn f10_is_answered_by_the_window_and_alt_combinations_keep_the_default() {
+        assert!(system_key_is_answered(VK_F10, Modifiers::default()));
+        assert!(system_key_is_answered(VK_F10, with(true, false, false)));
+        assert!(system_key_is_answered(VK_F10, with(false, true, false)));
+        assert!(!system_key_is_answered(VK_F10, with(false, false, true)));
+        assert!(!system_key_is_answered(VK_F4, with(false, false, true)));
+        assert!(!system_key_is_answered(VK_APPS, Modifiers::default()));
+        assert!(!system_key_is_answered(usize::MAX, Modifiers::default()));
     }
 
     #[test]

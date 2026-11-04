@@ -628,6 +628,9 @@ impl ResultGrid {
                     Some(text) if self.kind(column) == ValueKind::Blob => {
                         csv_field(&full_hex(text))
                     }
+                    Some(text) if self.kind(column) == ValueKind::Json && is_json(text) => {
+                        csv_field(&compact_json(text))
+                    }
                     Some(text) => csv_field(text),
                 })
                 .collect();
@@ -896,7 +899,9 @@ fn json_value(value: Option<&str>, kind: ValueKind) -> String {
         return "null".to_owned();
     };
     match kind {
-        ValueKind::Number | ValueKind::Ttl if numeric_literal(text) => text.to_owned(),
+        ValueKind::Number | ValueKind::Ttl if numeric_literal(text) && is_json(text) => {
+            text.to_owned()
+        }
         ValueKind::Boolean => {
             let truth = matches!(text, "t" | "true" | "TRUE" | "1");
             String::from(if truth { "true" } else { "false" })
@@ -1051,6 +1056,33 @@ fn json_number(bytes: &[u8], at: &mut usize) -> bool {
         }
     }
     true
+}
+
+/// `text`, which [`is_json`] accepts, without the white space between its tokens.
+pub fn compact_json(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for character in text.chars() {
+        if in_string {
+            out.push(character);
+            match character {
+                '\\' if !escaped => escaped = true,
+                '"' if !escaped => in_string = false,
+                _ => escaped = false,
+            }
+            continue;
+        }
+        match character {
+            ' ' | '\t' | '\n' | '\r' => {}
+            '"' => {
+                in_string = true;
+                out.push('"');
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// `text` pretty-printed with a 2-space indent (`docs/ux/workspace.md` 9.3): a line per
@@ -1517,6 +1549,55 @@ mod tests {
             panic!("Copy as CSV copies");
         };
         assert_eq!(toast, "Copied 6 cells as CSV");
+    }
+
+    #[test]
+    fn copy_as_csv_gives_json_cells_their_compact_text() {
+        let grid = ResultGrid {
+            anchor: Cell { row: 0, column: 0 },
+            current: Cell { row: 1, column: 0 },
+            ..ResultGrid::new(
+                vec!["doc".into()],
+                vec![ValueKind::Json],
+                vec![
+                    vec![Some("{\n  \"k\": [1, 2],\n  \"s\": \"a b\\\" c\"\n}".into())],
+                    vec![Some("{1,2}".into())],
+                ],
+                2,
+                vec![60.0],
+            )
+        };
+        assert_eq!(
+            grid.csv(),
+            "doc\r\n\"{\"\"k\"\":[1,2],\"\"s\"\":\"\"a b\\\"\" c\"\"}\"\r\n\"{1,2}\""
+        );
+    }
+
+    #[test]
+    fn copy_as_json_quotes_number_text_that_json_does_not_allow() {
+        let rows = [".5", "-.5", "5.", "007", "-0.5", "1e3", "12"]
+            .into_iter()
+            .map(|text| vec![Some(text.to_owned())])
+            .collect();
+        let grid = ResultGrid {
+            anchor: Cell { row: 0, column: 0 },
+            current: Cell { row: 6, column: 0 },
+            ..ResultGrid::new(
+                vec!["n".into()],
+                vec![ValueKind::Number],
+                rows,
+                7,
+                vec![60.0],
+            )
+        };
+        let json = grid.json();
+        assert!(is_json(&json), "{json}");
+        for quoted in ["\".5\"", "\"-.5\"", "\"5.\"", "\"007\""] {
+            assert!(json.contains(&format!("\"n\": {quoted}")), "{json}");
+        }
+        for bare in ["-0.5", "1e3", "12"] {
+            assert!(json.contains(&format!("\"n\": {bare}\n")), "{json}");
+        }
     }
 
     #[test]

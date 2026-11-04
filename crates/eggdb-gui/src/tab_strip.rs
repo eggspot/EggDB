@@ -12,6 +12,11 @@ pub const WIDEST_TAB: f32 = 140.0;
 pub const NARROWEST_TAB: f32 = 100.0;
 /// How far one wheel notch scrolls the strip.
 pub const WHEEL_STEP: f32 = 100.0;
+/// The most tabs one window holds; adding one more is refused with [`TOO_MANY_TABS`], so every
+/// tab and close button keeps an accessibility node id of its own.
+pub const MOST_TABS: usize = 400;
+/// The status line when [`MOST_TABS`] are open and another is asked for.
+pub const TOO_MANY_TABS: &str = "This window holds at most 400 tabs: close one to open another";
 const PLUS_ROOM: f32 = 36.0;
 const PINNED_PLUS_ROOM: f32 = 44.0;
 const DIALOG_WIDTH: f32 = 420.0;

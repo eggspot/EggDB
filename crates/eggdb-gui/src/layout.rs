@@ -52,9 +52,12 @@ const fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
 /// reach its right edge.
 pub const DESIGN_WIDTH: f32 = 1280.0;
 
-/// The short form of the trademark note, as the layout picker and the status bar item's
-/// tooltip show it.
+/// The short form of the trademark note, as the layout picker shows it.
 pub const TRADEMARK_NOTE: &str = "Product names are trademarks of their owners; EggDB is not affiliated with them. A layout copies an arrangement, shortcuts and workflows only.";
+
+/// The full trademark note, naming each product's owner (`docs/ux/gui-layouts.md`'s header),
+/// as the status bar's `Works like` item's tooltip carries it.
+pub const FULL_TRADEMARK_NOTE: &str = "SQL Server Management Studio is a trademark of Microsoft Corporation; pgAdmin of the pgAdmin Development Team; DBeaver of DBeaver Corp; DataGrip of JetBrains s.r.o.; MySQL Workbench of Oracle Corporation; MongoDB Compass of MongoDB, Inc.; Redis Insight of Redis Ltd. EggDB uses these names only to describe which client a layout is compatible with (\"works like\") and is not affiliated with, endorsed by or sponsored by any of them. A layout reproduces an arrangement, keyboard shortcuts and workflows only: none of their code, artwork, icons, colours, fonts or screenshots is used or imitated.";
 
 /// An action a layout gives keys of its own to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

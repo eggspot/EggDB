@@ -71,8 +71,10 @@ tabs), and its dialect stays the one the transaction began in until `COMMIT` or 
 `Ctrl/Cmd+W`, `Ctrl+F4`, a tab's close button or a middle-click closes one; `Ctrl+Tab` and
 `Ctrl+Shift+Tab` move between them. Closing a tab that runs, holds a transaction (which rolls
 back) or holds text asks first. Tabs narrow from 140 to 100 px as they are added, and from ten
-tabs the strip scrolls with the wheel, always keeping the active tab in view. On a server, the
-first tab that runs uses the connection the client opened, and each other tab opens its own.
+tabs the strip scrolls with the wheel, always keeping the active tab in view; a window holds at
+most 400 tabs. On a server, each tab opens a connection of its own at its first run; the
+connection the client opened serves only the object tree, its drops and the inspector's samples,
+so they never run inside a tab's transaction.
 
 ## The result grid's value view, menu, column widths and scrollbars
 

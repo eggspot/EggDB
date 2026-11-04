@@ -329,7 +329,6 @@ struct FileLink {
 struct ServerLink {
     client: Box<PgClient>,
     options: Box<ConnectOptions>,
-    client_owner: Option<SessionId>,
     tab_clients: Vec<(SessionId, PgClient)>,
 }
 
@@ -706,7 +705,9 @@ impl Connection {
     /// holds for the next, and stops at the first that fails: the answer has one entry per
     /// statement that ran, the last one the failure when there was one. `cancel` can stop the
     /// running statement from another thread. A file runs them on a session of their own,
-    /// closed after; a server on the connection's first session.
+    /// closed after; a server on the client the connect opened, which no tab's kept session
+    /// uses, so the catalog, the tree's drops and the inspector's samples never run inside a
+    /// tab's transaction.
     pub fn run_script(
         &mut self,
         dialect: QueryDialect,
@@ -727,7 +728,8 @@ impl Connection {
 
     /// Runs `statements` as [`Connection::run_script`] does, on the session `session` keeps
     /// from its first run until [`Connection::close_session`]: a transaction begun in one run
-    /// stays open for the next, and other sessions do not see its work until it commits. A
+    /// stays open for the next, and other sessions do not see its work until it commits. On a
+    /// server each kept session is a client of its own, opened with the connect's options. A
     /// session idle outside a transaction follows `dialect`; one inside a transaction keeps
     /// its dialect and answers a run in another with SQLSTATE `25001`.
     pub fn run_in_session(
@@ -969,16 +971,11 @@ impl ServerLink {
         Self {
             client: Box::new(client),
             options: Box::new(options.clone()),
-            client_owner: None,
             tab_clients: Vec::new(),
         }
     }
 
     fn client_for(&mut self, session: SessionId) -> Result<&mut PgClient, StatementFailure> {
-        if self.client_owner.is_none_or(|owner| owner == session) {
-            self.client_owner = Some(session);
-            return Ok(&mut *self.client);
-        }
         let at = match self.tab_clients.iter().position(|(id, _)| *id == session) {
             Some(at) => at,
             None => {
@@ -995,14 +992,11 @@ impl ServerLink {
     }
 
     fn status(&self, session: SessionId) -> TransactionStatus {
-        let client = if self.client_owner == Some(session) {
-            Some(&*self.client)
-        } else {
-            self.tab_clients
-                .iter()
-                .find(|(id, _)| *id == session)
-                .map(|(_, client)| client)
-        };
+        let client = self
+            .tab_clients
+            .iter()
+            .find(|(id, _)| *id == session)
+            .map(|(_, client)| client);
         match client.map(PgClient::ready_status) {
             Some(b'T') => TransactionStatus::InBlock,
             Some(b'E') => TransactionStatus::Failed,
@@ -1011,11 +1005,6 @@ impl ServerLink {
     }
 
     fn close(&mut self, session: SessionId) {
-        if self.client_owner == Some(session) {
-            self.client_owner = None;
-            let _ = self.client.simple_query("ROLLBACK");
-            return;
-        }
         if let Some(at) = self.tab_clients.iter().position(|(id, _)| *id == session) {
             let (_, client) = self.tab_clients.swap_remove(at);
             client.terminate();
@@ -1622,6 +1611,105 @@ mod tests {
             &CancelHandle::default(),
         );
         assert!(next.iter().all(Result::is_ok), "{next:?}");
+    }
+
+    struct TestServer {
+        port: u16,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    const SERVER_PASSWORD: &str = "correct horse";
+
+    fn start_server() -> TestServer {
+        let address = "127.0.0.1:0".parse().unwrap();
+        let listener = eggdb_pgwire::listen_on_loopback(address).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let config = eggdb_pgwire::ServerConfig {
+            user: "ada".to_owned(),
+            verifier: eggdb_pgwire::ScramVerifier::derive(
+                SERVER_PASSWORD.as_bytes(),
+                b"0123456789abcdef",
+                4096,
+            ),
+            database: "shop".to_owned(),
+            max_connections: 8,
+            authentication_timeout: std::time::Duration::from_secs(5),
+            idle_timeout: None,
+            memory_budget: Arc::default(),
+            auth_rules: None,
+            tls: None,
+        };
+        let thread_stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let database = Database::in_memory_with(Options::new()).unwrap();
+            let store = database.sql_store();
+            let stopped = move || thread_stop.load(std::sync::atomic::Ordering::Acquire);
+            let _ = eggdb_pgwire::serve(&store, &listener, &config, &stopped, &|_: &str| {});
+        });
+        TestServer { port, stop }
+    }
+
+    #[test]
+    fn on_a_server_a_drop_outside_the_tabs_stays_after_a_tab_s_transaction_rolls_back() {
+        let running = start_server();
+        let options = ConnectOptions {
+            password: Some(SERVER_PASSWORD.to_owned()),
+            ..server(running.port)
+        };
+        let mut connection = EngineConnector
+            .connect(&ConnectTarget::Server(options))
+            .unwrap();
+        connection.run("CREATE TABLE x (id integer)").unwrap();
+        connection.run("CREATE TABLE y (id integer)").unwrap();
+        let tab = SessionId(1);
+        let other_tab = SessionId(2);
+        let run = |connection: &mut Connection, session: SessionId, sql: &str| {
+            connection.run_in_session(
+                session,
+                QueryDialect::PostgreSql,
+                &[sql.to_owned()],
+                &CancelHandle::default(),
+            )
+        };
+        assert!(
+            run(&mut connection, tab, "BEGIN READ ONLY")
+                .iter()
+                .all(Result::is_ok)
+        );
+        assert!(
+            run(&mut connection, other_tab, "SELECT 1")
+                .iter()
+                .all(Result::is_ok)
+        );
+        assert!(
+            run(&mut connection, tab, "SELECT * FROM missing")
+                .last()
+                .is_some_and(Result::is_err)
+        );
+        assert_eq!(
+            connection.transaction_status(tab),
+            TransactionStatus::Failed
+        );
+        assert_eq!(
+            connection.transaction_status(other_tab),
+            TransactionStatus::Idle
+        );
+        connection.run("DROP TABLE x").unwrap();
+        assert!(connection.catalog().is_ok());
+        assert_eq!(connection.table_names().unwrap(), vec!["y".to_owned()]);
+        connection.close_session(tab);
+        connection.close_session(other_tab);
+        assert_eq!(connection.transaction_status(tab), TransactionStatus::Idle);
+        assert_eq!(connection.table_names().unwrap(), vec!["y".to_owned()]);
+        let again = run(&mut connection, tab, "SELECT count(*) FROM y");
+        assert!(again.iter().all(Result::is_ok), "{again:?}");
     }
 
     #[test]
