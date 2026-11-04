@@ -91,6 +91,26 @@ pub(crate) fn check_text(
     }
 }
 
+/// A row security policy's condition as `pg_get_expr` shows it: in PostgreSQL's deparsed form
+/// within parentheses, or as written when the deparser does not know one of its constructs.
+pub(crate) fn policy_condition_text(
+    snapshot: &CatalogSnapshot,
+    table_at: usize,
+    condition: &str,
+) -> String {
+    let Some(table) = snapshot
+        .relations
+        .get(table_at)
+        .and_then(|entry| entry.table())
+    else {
+        return condition.to_owned();
+    };
+    let deparser = Deparser { table, snapshot };
+    deparser
+        .check(condition)
+        .map_or_else(|| condition.to_owned(), |shown| format!("({shown})"))
+}
+
 #[derive(Debug, Clone)]
 enum Node {
     Atom(String),

@@ -8,7 +8,7 @@ use eggdb_auth::scram::parse_scram_verifier;
 use eggdb_crypto::{base64_encode, hmac_sha256, pbkdf2_hmac_sha256, sha256};
 use std::collections::BTreeSet;
 
-const ROLE_SPACE: u8 = 0x11;
+pub(crate) const ROLE_SPACE: u8 = 0x11;
 pub(crate) const GRANT_SPACE: u8 = 0x12;
 const RECORD_VERSION: u8 = 1;
 const LOGIN: u8 = 1;
@@ -749,17 +749,35 @@ pub(crate) fn check_table(
     table: &str,
     privilege: Privilege,
 ) -> SqlResult<()> {
-    let Some(user) = settings.checked_role.as_deref() else {
-        return Ok(());
-    };
-    if crate::temporary::is_temporary_name(table) {
-        return Ok(());
-    }
-    if table_level_held(reader, &role_closure(reader, user)?, table, privilege)? {
+    if holds_table_privilege(reader, settings.checked_role.as_deref(), table, privilege)? {
         Ok(())
     } else {
         Err(permission_denied(table))
     }
+}
+
+/// Whether `checked_role` holds `privilege` on the whole of `table`, by the rule every statement
+/// is checked with: always when it is `None` (a superuser session), on temporary tables, and
+/// otherwise when the role, a role it belongs to or `PUBLIC` holds it.
+pub(crate) fn holds_table_privilege(
+    reader: &dyn KeyValueRead,
+    checked_role: Option<&str>,
+    table: &str,
+    privilege: Privilege,
+) -> SqlResult<bool> {
+    let Some(role) = checked_role else {
+        return Ok(true);
+    };
+    if crate::temporary::is_temporary_name(table) {
+        return Ok(true);
+    }
+    table_level_held(reader, &role_closure(reader, role)?, table, privilege)
+}
+
+/// Whether `checked_role` may create, change or drop objects (schemas, tables, temporary
+/// tables, routines): only a superuser session may until object ownership lands.
+pub(crate) fn may_define_objects(checked_role: Option<&str>) -> bool {
+    checked_role.is_none()
 }
 
 fn table_level_held(
@@ -805,7 +823,7 @@ pub(crate) fn target_privilege(statement: &Statement) -> Privilege {
 /// Refuses statements that change the schema for a session whose privileges are checked: only
 /// superusers define objects until object ownership lands.
 pub(crate) fn check_statement(settings: &Settings, statement: &Statement) -> SqlResult<()> {
-    if settings.checked_role.is_none() {
+    if may_define_objects(settings.checked_role.as_deref()) {
         return Ok(());
     }
     let defines = matches!(
@@ -869,12 +887,14 @@ pub fn login_verifier(reader: &dyn KeyValueRead, user: &str) -> SqlResult<Option
         .and_then(|role| role.scram_verifier))
 }
 
+mod access_records;
 mod columns;
 
+pub(crate) use access_records::AccessRecords;
 pub(crate) use columns::{
     COLUMN_GRANT_SPACE, COLUMN_PRIVILEGES, ColumnGrant, ColumnReach, check_columns,
-    column_grant_target, column_reach, every_column_grant, forget_column, move_column, move_table,
-    relation_columns,
+    column_grant_target, column_privilege_reach, column_reach, every_column_grant, forget_column,
+    move_column, move_table, relation_columns,
 };
 
 #[cfg(test)]

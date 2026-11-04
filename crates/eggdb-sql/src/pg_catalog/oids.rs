@@ -1533,6 +1533,7 @@ pub(crate) enum Space {
     Routine,
     Package,
     SqlServerObject,
+    Policy,
 }
 
 impl Space {
@@ -1546,6 +1547,7 @@ impl Space {
             Self::Routine => b"routine",
             Self::Package => b"package",
             Self::SqlServerObject => b"sqlserver object",
+            Self::Policy => b"policy",
         }
     }
 

@@ -1793,6 +1793,7 @@ fn declared_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
             &[None, Some(SqlType::Integer)]
         }
         "array_ndims" | "cardinality" => &[None],
+        name if crate::pg_catalog::is_privilege_inquiry(name) => &[None, None, None, None],
         "btrim" | "ltrim" | "rtrim" => &[Some(SqlType::Text), Some(SqlType::Text)],
         "quote_ident" => &[Some(SqlType::Text)],
         _ => return function_argument_types(name),

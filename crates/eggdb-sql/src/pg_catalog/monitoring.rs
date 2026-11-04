@@ -66,7 +66,19 @@ pub(crate) enum MonitoringRelation {
     Sequences,
     StatStatements,
     StatStatementsInfo,
+    Policies,
 }
+
+const POLICIES: [CatalogColumn; 8] = [
+    column("schemaname", NAME),
+    column("tablename", NAME),
+    column("policyname", NAME),
+    column("permissive", SqlType::Text),
+    column("roles", SqlType::Array(ArrayElement::Name)),
+    column("cmd", SqlType::Text),
+    column("qual", SqlType::Text),
+    column("with_check", SqlType::Text),
+];
 
 const STAT_STATEMENTS: [CatalogColumn; 12] = [
     column("userid", OID),
@@ -433,7 +445,7 @@ const OPFAMILY: [CatalogColumn; 5] = [
 ];
 
 impl MonitoringRelation {
-    pub(crate) const ALL: [Self; 33] = [
+    pub(crate) const ALL: [Self; 34] = [
         Self::StatActivity,
         Self::StatDatabase,
         Self::Locks,
@@ -467,6 +479,7 @@ impl MonitoringRelation {
         Self::Sequences,
         Self::StatStatements,
         Self::StatStatementsInfo,
+        Self::Policies,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -504,6 +517,7 @@ impl MonitoringRelation {
             Self::Sequences => "pg_sequences",
             Self::StatStatements => "pg_stat_statements",
             Self::StatStatementsInfo => "pg_stat_statements_info",
+            Self::Policies => "pg_policies",
         }
     }
 
@@ -556,6 +570,7 @@ impl MonitoringRelation {
             Self::Sequences => &SEQUENCES,
             Self::StatStatements => &STAT_STATEMENTS,
             Self::StatStatementsInfo => &STAT_STATEMENTS_INFO,
+            Self::Policies => &POLICIES,
         }
     }
 
@@ -577,6 +592,7 @@ impl MonitoringRelation {
                 | Self::StatUserIndexes
                 | Self::StatStatements
                 | Self::StatStatementsInfo
+                | Self::Policies
         )
     }
 }
@@ -817,7 +833,13 @@ fn table_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                     .set("hasindexes", Value::Boolean(has_indexes))
                     .set("hasrules", Value::Boolean(false))
                     .set("hastriggers", Value::Boolean(has_triggers))
-                    .set("rowsecurity", Value::Boolean(false))
+                    .set(
+                        "rowsecurity",
+                        Value::Boolean(
+                            crate::row_security::switch_state(&snapshot.access, &entry.internal)
+                                .is_ok_and(|switch| switch.enabled),
+                        ),
+                    )
                     .done(),
             )
         })
@@ -946,6 +968,9 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     if values.iter().any(Value::is_null) && name != "pg_size_pretty" {
         return Some(Ok(Value::Null));
     }
+    if super::privilege_inquiry::is_inquiry(name) {
+        return Some(super::privilege_inquiry::function(name, values));
+    }
     Some(match name {
         "pg_is_in_recovery" | "pg_is_wal_replay_paused" => Ok(Value::Boolean(false)),
         "pg_backend_pid" => Ok(Value::Integer(
@@ -1038,13 +1063,13 @@ mod tests {
     }
 
     #[test]
-    fn privileges_are_all_granted_and_unknowns_are_none() {
+    fn tablespace_privileges_are_granted_and_unknowns_are_none() {
         assert_eq!(
             function(
-                "has_table_privilege",
+                "has_tablespace_privilege",
                 &[
-                    Value::Text("t".to_owned()),
-                    Value::Text("SELECT".to_owned())
+                    Value::Text("pg_default".to_owned()),
+                    Value::Text("CREATE".to_owned())
                 ]
             )
             .map(Result::ok),

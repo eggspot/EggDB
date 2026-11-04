@@ -17,7 +17,15 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-const SNAPSHOT_FUNCTIONS: [&str; 22] = [
+const SNAPSHOT_FUNCTIONS: [&str; 30] = [
+    "has_table_privilege",
+    "has_column_privilege",
+    "has_any_column_privilege",
+    "has_schema_privilege",
+    "has_database_privilege",
+    "has_sequence_privilege",
+    "has_function_privilege",
+    "pg_has_role",
     "pg_get_serial_sequence",
     "pg_get_functiondef",
     "pg_get_function_arguments",
@@ -44,7 +52,7 @@ const SNAPSHOT_FUNCTIONS: [&str; 22] = [
 
 const SEQUENCE_FUNCTIONS: [&str; 3] = ["nextval", "currval", "setval"];
 
-const CATALOG_TEXT_HINTS: [&str; 3] = ["reg", "pg_", "description"];
+const CATALOG_TEXT_HINTS: [&str; 4] = ["reg", "pg_", "description", "privilege"];
 
 pub(crate) fn text_needs_catalog(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
@@ -384,6 +392,7 @@ pub(crate) struct CatalogSnapshot {
     pub(crate) stored_roles: Vec<crate::roles::StoredRole>,
     pub(crate) grants: Vec<crate::roles::TableGrant>,
     pub(crate) column_grants: Vec<crate::roles::ColumnGrant>,
+    pub(crate) access: crate::roles::AccessRecords,
 }
 
 fn user_schema_names(reader: &dyn KeyValueRead) -> SqlResult<Vec<String>> {
@@ -667,6 +676,7 @@ impl CatalogSnapshot {
             stored_roles: crate::roles::stored_roles(reader)?,
             grants: crate::roles::every_grant(reader)?,
             column_grants: crate::roles::every_column_grant(reader)?,
+            access: crate::roles::AccessRecords::load(reader)?,
         };
         snapshot.index_relations();
         snapshot.add_constraints_and_defaults();

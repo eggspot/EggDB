@@ -196,8 +196,8 @@ pub(crate) fn build(
         CatalogRelation::Tablespace => tablespace_rows(),
         CatalogRelation::Trigger => trigger_rows(snapshot),
         CatalogRelation::Inherits => inherits_rows(snapshot),
-        CatalogRelation::Policy
-        | CatalogRelation::StatisticExt
+        CatalogRelation::Policy => super::policies::policy_rows(snapshot)?,
+        CatalogRelation::StatisticExt
         | CatalogRelation::Publication
         | CatalogRelation::PublicationRel
         | CatalogRelation::PublicationNamespace
@@ -216,6 +216,9 @@ pub(crate) fn build(
         }
         CatalogRelation::SqlServer(relation) => crate::sqlserver_catalog::rows(snapshot, relation),
         CatalogRelation::Oracle(relation) => crate::oracle_dictionary::rows(snapshot, relation),
+        CatalogRelation::Monitoring(super::monitoring::MonitoringRelation::Policies) => {
+            super::policies::policies_view_rows(snapshot)?
+        }
         CatalogRelation::Monitoring(relation) => super::monitoring::rows(snapshot, relation),
         CatalogRelation::MySql(relation) => crate::mysql_catalog::rows(snapshot, relation),
     })
@@ -381,8 +384,11 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
         let mut file_node = entry.oid;
         let mut partition_bound = None;
         let mut has_subclass = false;
+        let mut row_security = crate::row_security::RowSecuritySwitch::default();
         match &entry.source {
             RelationSource::Table(table) => {
+                row_security = crate::row_security::switch_state(&snapshot.access, &entry.internal)
+                    .unwrap_or_default();
                 if snapshot.partitions.key_of(&table.name).is_some() {
                     kind = "p";
                     file_node = 0;
@@ -463,8 +469,8 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 .set("relhasrules", flag(has_rules))
                 .set("relhastriggers", flag(has_triggers))
                 .set("relhassubclass", flag(has_subclass))
-                .set("relrowsecurity", flag(false))
-                .set("relforcerowsecurity", flag(false))
+                .set("relrowsecurity", flag(row_security.enabled))
+                .set("relforcerowsecurity", flag(row_security.forced))
                 .set("relispopulated", flag(true))
                 .set("relreplident", text(replident))
                 .set("relispartition", flag(partition_bound.is_some()))
@@ -1552,7 +1558,7 @@ fn description_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     rows
 }
 
-fn other_database_oid(name: &str) -> u32 {
+pub(super) fn other_database_oid(name: &str) -> u32 {
     let hash = name.bytes().fold(0x811c_9dc5u32, |hash, byte| {
         (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
     });

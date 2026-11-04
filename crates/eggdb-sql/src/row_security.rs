@@ -10,6 +10,7 @@ pub(crate) const POLICY_SPACE: u8 = 0x13;
 pub(crate) const ROW_SECURITY_SPACE: u8 = 0x14;
 const RECORD_VERSION: u8 = 1;
 const ENABLED: u8 = 1;
+const FORCED: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PolicyCommand {
@@ -67,6 +68,19 @@ pub(crate) enum RowSecurityStatement {
         table: Name,
         enabled: bool,
     },
+    Force {
+        table: Name,
+        forced: bool,
+    },
+}
+
+/// Whether a table applies row security (`ENABLE ROW LEVEL SECURITY`) and whether it applies
+/// it to the table's owner too (`FORCE ROW LEVEL SECURITY`), as `pg_class.relrowsecurity` and
+/// `relforcerowsecurity` show them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RowSecuritySwitch {
+    pub(crate) enabled: bool,
+    pub(crate) forced: bool,
 }
 
 impl RowSecurityStatement {
@@ -74,7 +88,7 @@ impl RowSecurityStatement {
         match self {
             Self::CreatePolicy { .. } => "CREATE POLICY",
             Self::DropPolicy { .. } => "DROP POLICY",
-            Self::Switch { .. } => "ALTER TABLE",
+            Self::Switch { .. } | Self::Force { .. } => "ALTER TABLE",
         }
     }
 
@@ -82,7 +96,8 @@ impl RowSecurityStatement {
         match self {
             Self::CreatePolicy { table, .. }
             | Self::DropPolicy { table, .. }
-            | Self::Switch { table, .. } => table,
+            | Self::Switch { table, .. }
+            | Self::Force { table, .. } => table,
         }
     }
 }
@@ -239,6 +254,39 @@ pub(crate) fn policies(reader: &dyn KeyValueRead, table: &str) -> SqlResult<Vec<
         .collect()
 }
 
+fn switch_flags(reader: &dyn KeyValueRead, table: &str) -> SqlResult<u8> {
+    match reader.get(&switch_key(table))?.as_deref() {
+        None => Ok(0),
+        Some([RECORD_VERSION, flags]) => Ok(*flags),
+        Some(_) => Err(corrupt()),
+    }
+}
+
+/// The row security switches of `table`. The `FORCE` flag is a second bit in the switch record
+/// of D186, so a release that knows only `ENABLE` still reads and applies the first bit.
+pub(crate) fn switch_state(reader: &dyn KeyValueRead, table: &str) -> SqlResult<RowSecuritySwitch> {
+    let flags = switch_flags(reader, table)?;
+    Ok(RowSecuritySwitch {
+        enabled: flags & ENABLED != 0,
+        forced: flags & FORCED != 0,
+    })
+}
+
+fn change_switch(
+    writer: &mut dyn KeyValueWrite,
+    table: &str,
+    flag: u8,
+    on: bool,
+) -> SqlResult<()> {
+    let current = switch_flags(writer, table)?;
+    let changed = if on { current | flag } else { current & !flag };
+    if changed == 0 {
+        writer.delete(&switch_key(table)).map(|_| ())
+    } else {
+        writer.put(&switch_key(table), &[RECORD_VERSION, changed])
+    }
+}
+
 pub(crate) fn is_enabled(reader: &dyn KeyValueRead, table: &str) -> SqlResult<bool> {
     Ok(matches!(
         reader.get(&switch_key(table))?.as_deref(),
@@ -268,7 +316,8 @@ pub(crate) fn run(
     let table = match statement {
         RowSecurityStatement::CreatePolicy { table, .. }
         | RowSecurityStatement::DropPolicy { table, .. }
-        | RowSecurityStatement::Switch { table, .. } => table,
+        | RowSecurityStatement::Switch { table, .. }
+        | RowSecurityStatement::Force { table, .. } => table,
     };
     if writer
         .get(&crate::encoding::table_key(&table.text))?
@@ -328,11 +377,10 @@ pub(crate) fn run(
             writer.delete(&key)?;
         }
         RowSecurityStatement::Switch { table, enabled } => {
-            if *enabled {
-                writer.put(&switch_key(&table.text), &[RECORD_VERSION, ENABLED])?;
-            } else {
-                writer.delete(&switch_key(&table.text))?;
-            }
+            change_switch(writer, &table.text, ENABLED, *enabled)?;
+        }
+        RowSecurityStatement::Force { table, forced } => {
+            change_switch(writer, &table.text, FORCED, *forced)?;
         }
     }
     Ok(QueryResult::command(statement.tag()))

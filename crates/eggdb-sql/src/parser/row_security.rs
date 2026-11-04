@@ -17,25 +17,36 @@ impl Parser<'_> {
 
     pub(super) fn alter_row_security(&mut self) -> SqlResult<Statement> {
         self.at += 2;
+        self.take_word("only");
         let table = self.table_name()?;
-        let enabled = if self.take_word("enable") {
-            true
+        let statement = if self.take_word("enable") {
+            RowSecurityStatement::Switch {
+                table,
+                enabled: true,
+            }
         } else if self.take_word("disable") {
-            false
-        } else if self.take_word("force") || (self.take_word("no") && self.take_word("force")) {
-            return Err(
-                self.not_supported("FORCE ROW LEVEL SECURITY (EggDB has no table owners yet)")
-            );
+            RowSecurityStatement::Switch {
+                table,
+                enabled: false,
+            }
+        } else if self.take_word("force") {
+            RowSecurityStatement::Force {
+                table,
+                forced: true,
+            }
+        } else if self.take_word("no") {
+            self.expect_word("force")?;
+            RowSecurityStatement::Force {
+                table,
+                forced: false,
+            }
         } else {
             return Err(self.unexpected());
         };
         self.expect_word("row")?;
         self.expect_word("level")?;
         self.expect_word("security")?;
-        Ok(Statement::RowSecurity(RowSecurityStatement::Switch {
-            table,
-            enabled,
-        }))
+        Ok(Statement::RowSecurity(statement))
     }
 
     fn condition_text(&mut self) -> SqlResult<String> {

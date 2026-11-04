@@ -148,6 +148,9 @@ pub enum DestructiveKind {
     DropPolicy,
     /// `ALTER TABLE ... DISABLE ROW LEVEL SECURITY`.
     DisableRowSecurity,
+    /// `ALTER TABLE ... NO FORCE ROW LEVEL SECURITY`, which lets the table's owner bypass its
+    /// row security again.
+    NoForceRowSecurity,
 }
 
 impl DestructiveKind {
@@ -183,6 +186,7 @@ impl DestructiveKind {
             Self::DisableTrigger => "DISABLE TRIGGER",
             Self::DropPolicy => "DROP POLICY",
             Self::DisableRowSecurity => "DISABLE ROW LEVEL SECURITY",
+            Self::NoForceRowSecurity => "NO FORCE ROW LEVEL SECURITY",
         }
     }
 }
@@ -331,6 +335,14 @@ pub(crate) fn classify(
             vec![shown(table)],
             false,
         )),
+        Statement::RowSecurity(RowSecurityStatement::Force {
+            table,
+            forced: false,
+        }) => Some(DestructiveStatement::new(
+            DestructiveKind::NoForceRowSecurity,
+            vec![shown(table)],
+            false,
+        )),
         Statement::CreateTable(_)
         | Statement::Begin { .. }
         | Statement::SetTransaction(_)
@@ -341,7 +353,8 @@ pub(crate) fn classify(
         | Statement::Role(_)
         | Statement::RowSecurity(
             RowSecurityStatement::CreatePolicy { .. }
-            | RowSecurityStatement::Switch { enabled: true, .. },
+            | RowSecurityStatement::Switch { enabled: true, .. }
+            | RowSecurityStatement::Force { forced: true, .. },
         )
         | Statement::Listen(_)
         | Statement::Unlisten(_)
