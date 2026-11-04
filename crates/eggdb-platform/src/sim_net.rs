@@ -114,18 +114,24 @@ struct Connection {
 
 impl Connection {
     fn reset(&mut self) {
+        let timed_out = self
+            .failed
+            .map(|failure| failure == Some(ErrorKind::TimedOut));
         for failure in &mut self.failed {
             failure.get_or_insert(ErrorKind::ConnectionReset);
         }
-        for flow in &mut self.flows {
-            flow.clear();
+        for (side, flow) in self.flows.iter_mut().enumerate() {
+            if timed_out[1 - side] {
+                flow.forget_in_transit();
+            } else {
+                flow.clear();
+            }
         }
     }
 
     fn time_out(&mut self, side: usize) {
         self.failed[side] = Some(ErrorKind::TimedOut);
         self.flows[side].forget_in_transit();
-        self.flows[1 - side].arrived.clear();
     }
 
     fn hosts(&self, side: usize) -> [IpAddr; 2] {
@@ -1171,7 +1177,9 @@ impl World {
         if let Err(error) = self.next_operation() {
             return Some(Err(error));
         }
-        if let Some(kind) = failure {
+        if let Some(kind) = failure
+            && (kind != ErrorKind::TimedOut || readable == 0)
+        {
             return Some(Err(Error::new(kind)));
         }
         let count = self.transfer_size(readable);
@@ -1578,6 +1586,34 @@ mod tests {
             assert_eq!(server.peer_address().unwrap_err().kind(), not_connected);
         }
         assert_eq!(pair.network.connection_count(), 0);
+    }
+
+    #[test]
+    fn an_end_that_times_out_still_reads_what_had_arrived_before_it_fails() {
+        let mut pair = Pair::new(23);
+        let (client, server) = pair.connect();
+        pair.send(&server, b"answer", 0);
+        pair.reap(1);
+        pair.receive(&server, 16, 1);
+        assert!(pair.reap_for(1, Duration::from_millis(1)).is_empty());
+        pair.network.partition(CLIENT, SERVER);
+        pair.send(&client, b"request", 2);
+        pair.reap(1);
+        assert!(
+            pair.reap_for(1, 2 * SimNetwork::RETRANSMISSION_TIMEOUT)
+                .is_empty()
+        );
+        pair.receive(&client, 16, 3);
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.user_data, 3);
+        let count = completion.result.unwrap().transferred().unwrap();
+        assert_eq!(&completion.op.into_buffer().unwrap()[..count], b"answer");
+        pair.receive(&client, 16, 4);
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::TimedOut);
+        pair.queue.cancel(1).unwrap();
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::Canceled);
     }
 
     #[test]
@@ -2009,7 +2045,7 @@ mod tests {
             }
             let mut streams: Vec<Arc<SimStream>> = Vec::new();
             for step in 0..300 {
-                let choice = rng.next_u64() % 9;
+                let choice = rng.next_u64() % 11;
                 let pick = |rng: &mut crate::rng::SplitMix64, streams: &[Arc<SimStream>]| {
                     (!streams.is_empty())
                         .then(|| Arc::clone(&streams[(rng.next_u64() as usize) % streams.len()]))
@@ -2046,6 +2082,25 @@ mod tests {
                         let _ = pair.queue.cancel(rng.next_u64() % (step + 1));
                         None
                     }
+                    9 => {
+                        match rng.next_u64() % 3 {
+                            0 => pair.network.partition_one_way(CLIENT, SERVER),
+                            1 => pair.network.partition_one_way(SERVER, CLIENT),
+                            _ => pair.network.heal_all(),
+                        }
+                        None
+                    }
+                    10 => {
+                        let host = if rng.coin() { CLIENT } else { SERVER };
+                        if rng.coin() {
+                            let most = Duration::from_millis(rng.next_u64() % 50);
+                            pair.network.host_latency(host, Duration::ZERO, most);
+                        } else {
+                            let bytes_per_second = 1_000 + rng.next_u64() % 1_000_000;
+                            pair.network.host_bandwidth(host, bytes_per_second);
+                        }
+                        None
+                    }
                     _ => {
                         if !streams.is_empty() {
                             let at = (rng.next_u64() as usize) % streams.len();
@@ -2059,7 +2114,11 @@ mod tests {
                 }
                 let mut completions = Vec::new();
                 if choice == 8 {
-                    let timeout = Duration::from_millis(rng.next_u64() % 200);
+                    let timeout = if rng.next_u64().is_multiple_of(8) {
+                        SimNetwork::RETRANSMISSION_TIMEOUT + Duration::from_secs(1)
+                    } else {
+                        Duration::from_millis(rng.next_u64() % 200)
+                    };
                     let wanted = pair.queue.in_flight().min(1);
                     let _ = pair.queue.reap_timeout(&mut completions, wanted, timeout);
                 } else {
