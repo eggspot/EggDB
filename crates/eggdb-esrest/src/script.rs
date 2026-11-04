@@ -2,6 +2,7 @@ use crate::json_out::written;
 use eggdb_sql::json::{Json, Node};
 
 const MAX_NESTING: usize = 64;
+const MAX_OPERATIONS: usize = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Arithmetic {
@@ -146,6 +147,7 @@ impl Script {
         let statements = Parser {
             tokens: &tokens,
             at: 0,
+            operations: 0,
         }
         .statements()?;
         Ok(Self { statements, params })
@@ -235,7 +237,7 @@ impl Script {
         context: &Context<'_>,
         depth: usize,
     ) -> Result<Json, String> {
-        if depth > MAX_NESTING {
+        if depth > MAX_OPERATIONS {
             return Err("the script nests too deeply".to_owned());
         }
         Ok(match expression {
@@ -537,9 +539,19 @@ enum Path {
 struct Parser<'t> {
     tokens: &'t [Token],
     at: usize,
+    operations: usize,
 }
 
 impl Parser<'_> {
+    fn count_operation(&mut self) -> Result<(), String> {
+        self.operations += 1;
+        if self.operations > MAX_OPERATIONS {
+            Err(format!("the script has more than {MAX_OPERATIONS} operations"))
+        } else {
+            Ok(())
+        }
+    }
+
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.at)
     }
@@ -699,6 +711,7 @@ impl Parser<'_> {
             self.peek().cloned()
         {
             self.at += 1;
+            self.count_operation()?;
             let right = self.term(depth)?;
             left = Expression::Binary(Box::new(left), operator, Box::new(right));
         }
@@ -712,6 +725,7 @@ impl Parser<'_> {
         )) = self.peek().cloned()
         {
             self.at += 1;
+            self.count_operation()?;
             let right = self.unary(depth)?;
             left = Expression::Binary(Box::new(left), operator, Box::new(right));
         }
@@ -725,6 +739,7 @@ impl Parser<'_> {
         match self.peek().cloned() {
             Some(Token::Operator(Arithmetic::Subtract)) => {
                 self.at += 1;
+                self.count_operation()?;
                 Ok(Expression::Negate(Box::new(self.unary(depth + 1)?)))
             }
             Some(Token::OpenParen) => {
@@ -894,6 +909,10 @@ mod tests {
         assert!(run(&deep, "{}").is_err());
         let open = format!("\"ctx._source.a = {}1\"", "(".repeat(4000));
         assert!(run(&open, "{}").is_err());
+        let long = format!("\"ctx._source.a = {}1\"", "1 + ".repeat(5000));
+        assert!(run(&long, "{}").is_err());
+        let fits = format!("\"ctx._source.a = {}1\"", "1 + ".repeat(500));
+        assert_eq!(run(&fits, "{}"), Ok(("{\"a\":501}".to_owned(), super::Operation::Index)));
     }
 
     #[test]
