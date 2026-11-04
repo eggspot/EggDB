@@ -12,13 +12,13 @@ use std::sync::{Arc, Mutex};
 type Map = BTreeMap<Vec<u8>, Vec<u8>>;
 
 #[derive(Default)]
-struct MemoryStore {
+pub(crate) struct MemoryStore {
     committed: Mutex<Arc<Map>>,
 }
 
-struct Snapshot(Arc<Map>);
+pub(crate) struct Snapshot(Arc<Map>);
 
-struct Writer<'s> {
+pub(crate) struct Writer<'s> {
     store: &'s MemoryStore,
     map: Map,
 }

@@ -117,6 +117,37 @@ fn serve_refuses_every_address_but_loopback() {
 }
 
 #[test]
+fn serve_takes_syslog_only_on_a_loopback_address() {
+    let file = TempPath::new("serve-syslog-loopback");
+    let path = file.path().to_str().unwrap();
+    let refused = eggdb(
+        &[
+            "serve",
+            path,
+            "--create",
+            "--listen",
+            "127.0.0.1:0",
+            "--syslog-listen",
+            "0.0.0.0:5514",
+        ],
+        Some("secret"),
+    );
+    assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
+    assert!(
+        stderr(&refused)
+            .contains("--syslog-listen 0.0.0.0:5514: syslog has no authentication or TLS"),
+        "{}",
+        stderr(&refused)
+    );
+    let bad = eggdb(&["serve", path, "--syslog-listen", "x"], Some("secret"));
+    assert!(
+        stderr(&bad).contains("--syslog-listen needs an address and port such as 127.0.0.1:514"),
+        "{}",
+        stderr(&bad)
+    );
+}
+
+#[test]
 fn serve_prints_its_port_answers_clients_holds_the_file_and_stops_on_sigterm() {
     let file = TempPath::new("serve-run");
     let path = file.path().to_str().unwrap().to_owned();

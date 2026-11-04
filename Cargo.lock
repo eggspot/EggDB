@@ -295,6 +295,7 @@ dependencies = [
  "eggdb-columnar",
  "eggdb-crypto",
  "eggdb-http",
+ "eggdb-platform",
  "eggdb-sql",
 ]
 

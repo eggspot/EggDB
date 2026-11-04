@@ -9,7 +9,7 @@ use eggdb_pgwire::{
     DEFAULT_AUTHENTICATION_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_MAX_CONNECTIONS, ListenError,
     MIN_SCRAM_ITERATIONS, MemoryBudget, SCRAM_SALT_BYTES, ScramVerifier, ServerConfig,
 };
-use eggdb_platform::{secure_random, stop_signals};
+use eggdb_platform::{DatagramSocket, Network, OsNetwork, secure_random, stop_signals};
 use std::io::BufRead;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
@@ -426,6 +426,10 @@ impl Session<'_> {
             }
             None => None,
         };
+        let syslog_sockets = match options.syslog_listen {
+            Some(address) => Some(bind_syslog(address)?),
+            None => None,
+        };
         let nats_config = eggdb_nats::ServerConfig {
             user: user.clone(),
             password_sha256: eggdb_crypto::sha256(password.as_bytes()),
@@ -633,6 +637,20 @@ impl Session<'_> {
                     let _ = slow_events.send(stamped(&statement.to_string()));
                 }),
             );
+        }
+        let syslog_collector = eggdb_observability::SyslogCollector::new(
+            &store,
+            &config.user,
+            &config.database,
+            max_connections,
+        );
+        if syslog_sockets.is_some() {
+            syslog_collector.prepare().map_err(|error| {
+                Failure::database(
+                    format!("cannot create the syslog table: {error}"),
+                    Exit::DatabaseError,
+                )
+            })?;
         }
         let observability_endpoint = eggdb_observability::Endpoint::new(
             &store,
@@ -888,6 +906,14 @@ impl Session<'_> {
                     );
                 }
             });
+            let syslog_server = scope.spawn(|| match &syslog_sockets {
+                Some((datagrams, listener)) => syslog_collector.serve(
+                    Some(datagrams),
+                    Some(listener),
+                    &stop_signals::requested,
+                ),
+                None => Ok(()),
+            });
             let nats_server = scope.spawn(|| match &nats_listener {
                 Some(listener) => {
                     eggdb_nats::serve(listener, &nats_config, &stop_signals::requested)
@@ -1011,6 +1037,7 @@ impl Session<'_> {
             let _ = amqp_server.join();
             let _ = mqtt_server.join();
             let _ = nats_server.join();
+            let _ = syslog_server.join();
             let _ = stomp_server.join();
             let _ = cql_server.join();
             let _ = observability_server.join();
@@ -1415,6 +1442,34 @@ impl Session<'_> {
             },
         }
     }
+}
+
+fn bind_syslog(
+    address: SocketAddr,
+) -> Result<(eggdb_platform::OsDatagramSocket, std::net::TcpListener), Failure> {
+    if !address.ip().is_loopback() {
+        return Err(Failure::usage(
+            format!(
+                "--syslog-listen {address}: syslog has no authentication or TLS, so it listens only on a loopback address"
+            ),
+            Some(CommandName::Serve),
+        ));
+    }
+    let cannot_listen = |error: String| {
+        Failure::database(
+            format!("cannot listen for syslog on {address}: {error}"),
+            Exit::DatabaseError,
+        )
+    };
+    let datagrams = OsNetwork::new()
+        .bind_datagram(address)
+        .map_err(|error| cannot_listen(error.to_string()))?;
+    let bound = datagrams
+        .local_address()
+        .map_err(|error| cannot_listen(error.to_string()))?;
+    let listener = std::net::TcpListener::bind(bound)
+        .map_err(|error| cannot_listen(error.to_string()))?;
+    Ok((datagrams, listener))
 }
 
 fn client_host(address: IpAddr, tls: Option<&TlsSetup>) -> String {
