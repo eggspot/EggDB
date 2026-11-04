@@ -5,11 +5,14 @@ use crate::cypher::{
 use crate::store::{GraphRead, GraphWrite};
 use crate::value::{Node, Path, Relationship, Value, equals, order};
 use crate::{GraphError, GraphResult, QueryResult};
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 
 const MAX_ROWS: usize = 1 << 22;
 const MAX_SHORTEST_PATH_STEPS: usize = 1 << 20;
+const MAX_SHORTEST_PATH_RELATIONSHIPS_RETURNED: usize = 1 << 20;
 const AGGREGATES: [&str; 6] = ["count", "sum", "avg", "min", "max", "collect"];
 
 type Row = Vec<(String, Value)>;
@@ -25,10 +28,70 @@ fn lookup<'r>(row: &'r Row, name: &str) -> Option<&'r Value> {
 fn distinct_key<'v>(values: impl Iterator<Item = &'v Value>) -> String {
     let mut key = String::new();
     for value in values {
-        key.push_str(&format!("{value:?}"));
+        push_distinct_key(&mut key, value);
         key.push('\u{1f}');
     }
     key
+}
+
+fn push_distinct_key(key: &mut String, value: &Value) {
+    match value {
+        Value::Float(number) if *number == 0.0 => key.push_str("Float(0.0)"),
+        Value::List(items) => {
+            key.push('[');
+            for item in items {
+                push_distinct_key(key, item);
+                key.push(',');
+            }
+            key.push(']');
+        }
+        Value::Map(entries) => {
+            key.push('{');
+            for (name, item) in entries {
+                let _ = write!(key, "{name:?}:");
+                push_distinct_key(key, item);
+                key.push(',');
+            }
+            key.push('}');
+        }
+        other => {
+            let _ = write!(key, "{other:?}");
+        }
+    }
+}
+
+fn values_held(value: &Value) -> usize {
+    let mut count = 1usize;
+    let mut containers = vec![value];
+    while let Some(container) = containers.pop() {
+        let (items, entries): (&[Value], &[(String, Value)]) = match container {
+            Value::List(items) => (items, &[]),
+            Value::Map(entries) => (&[], entries),
+            _ => continue,
+        };
+        for child in items.iter().chain(entries.iter().map(|(_, item)| item)) {
+            count = count.saturating_add(1);
+            if matches!(child, Value::List(_) | Value::Map(_)) {
+                containers.push(child);
+            }
+        }
+    }
+    count
+}
+
+fn push_comprehension_output(
+    out: &mut Vec<Value>,
+    held: &mut usize,
+    value: Value,
+) -> GraphResult<()> {
+    *held = held.saturating_add(values_held(&value));
+    if *held > MAX_ROWS {
+        return Err(out_of_memory(format!(
+            "a list or pattern comprehension builds more than {MAX_ROWS} values"
+        )));
+    }
+    out.push(value);
+    Ok(())
 }
 
 fn bind_path(row: &mut Row, name: &str, path: Value) -> GraphResult<()> {
@@ -70,7 +133,12 @@ fn syntax_error(message: impl Into<String>) -> GraphError {
     GraphError::new("Neo.ClientError.Statement.SyntaxError", message)
 }
 
-fn walks_back(reached: &[Reached], end: usize, all: bool) -> GraphResult<Vec<Vec<u64>>> {
+fn walks_back(
+    reached: &[Reached],
+    end: usize,
+    all: bool,
+    returned: &Cell<usize>,
+) -> GraphResult<Vec<Vec<u64>>> {
     let mut walks = Vec::new();
     let mut stack: Vec<(usize, Vec<u64>)> = vec![(end, Vec::new())];
     while let Some((at, tail)) = stack.pop() {
@@ -80,10 +148,14 @@ fn walks_back(reached: &[Reached], end: usize, all: bool) -> GraphResult<Vec<Vec
         if step.before.is_empty() {
             let mut walk = tail;
             walk.reverse();
-            walks.push(walk);
-            if walks.len() > MAX_ROWS {
-                return Err(out_of_memory("allShortestPaths finds too many paths"));
+            let total = returned.get().saturating_add(walk.len().max(1));
+            returned.set(total);
+            if total > MAX_SHORTEST_PATH_RELATIONSHIPS_RETURNED {
+                return Err(out_of_memory(format!(
+                    "the query's shortest paths hold more than {MAX_SHORTEST_PATH_RELATIONSHIPS_RETURNED} relationships together; bound them with fewer hops, fewer start nodes or a more selective pattern"
+                )));
             }
+            walks.push(walk);
             continue;
         }
         let choices = if all { step.before.len() } else { 1 };
@@ -113,7 +185,8 @@ pub(crate) struct Executor<'g, 'p> {
     pub(crate) access: Access<'g>,
     pub(crate) parameters: &'p [(String, Value)],
     pub(crate) foreach_runs: usize,
-    pub(crate) shortest_path_steps: std::cell::Cell<usize>,
+    pub(crate) shortest_path_steps: Cell<usize>,
+    pub(crate) shortest_path_relationships_returned: Cell<usize>,
 }
 
 fn is_aggregate(expr: &Expr) -> bool {
@@ -340,6 +413,7 @@ impl<'g> Executor<'g, '_> {
                 };
                 let mut scope = row.clone();
                 let mut out = Vec::new();
+                let mut held = 0;
                 for item in items {
                     bind(&mut scope, variable, item.clone());
                     if let Some(filter) = filter
@@ -347,10 +421,11 @@ impl<'g> Executor<'g, '_> {
                     {
                         continue;
                     }
-                    out.push(match map {
+                    let value = match map {
                         Some(map) => self.evaluate(map, &scope)?,
                         None => item,
-                    });
+                    };
+                    push_comprehension_output(&mut out, &mut held, value)?;
                 }
                 Value::List(out)
             }
@@ -360,13 +435,15 @@ impl<'g> Executor<'g, '_> {
                 map,
             } => {
                 let mut out = Vec::new();
+                let mut held = 0;
                 for matched in self.match_pattern(row, pattern)? {
                     if let Some(filter) = filter
                         && !self.evaluate(filter, &matched)?.is_true()
                     {
                         continue;
                     }
-                    out.push(self.evaluate(map, &matched)?);
+                    let value = self.evaluate(map, &matched)?;
+                    push_comprehension_output(&mut out, &mut held, value)?;
                 }
                 Value::List(out)
             }
@@ -1004,7 +1081,12 @@ impl<'g> Executor<'g, '_> {
                 if !self.node_matches(&end_node, end_pattern, &start_row)? {
                     continue;
                 }
-                for walk in walks_back(&reached, end, all)? {
+                for walk in walks_back(
+                    &reached,
+                    end,
+                    all,
+                    &self.shortest_path_relationships_returned,
+                )? {
                     let relationships = walk
                         .iter()
                         .map(|id| self.existing_relationship(*id))

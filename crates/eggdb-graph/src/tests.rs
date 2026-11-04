@@ -784,6 +784,92 @@ fn union_and_distinct_remove_duplicates_quickly() {
         "{:?}",
         started.elapsed()
     );
+    for (text, rows) in [
+        ("UNWIND [0.0, -0.0] AS x RETURN DISTINCT x", 1),
+        ("UNWIND [[0.0], [-0.0]] AS x RETURN DISTINCT x", 1),
+        ("UNWIND [{a: 0.0}, {a: -0.0}] AS x RETURN DISTINCT x", 1),
+        ("RETURN 0.0 AS x UNION RETURN -0.0 AS x", 1),
+        ("UNWIND [0.0, 0.5, '0.0', [0.0]] AS x RETURN DISTINCT x", 4),
+    ] {
+        assert_eq!(query(&keyspace, text).rows.len(), rows, "{text}");
+    }
+}
+
+#[test]
+fn comprehension_output_is_bounded_per_comprehension() {
+    let keyspace = MemoryKeyspace::default();
+    assert_eq!(
+        error_code(
+            &keyspace,
+            "RETURN [x IN range(1, 2100) | range(1, 2100)] AS x"
+        ),
+        "Neo.TransientError.General.MemoryPoolOutOfMemoryError"
+    );
+    assert_eq!(
+        query(
+            &keyspace,
+            "RETURN size([x IN range(1, 1000) | [x, {a: x}]]) AS x"
+        )
+        .rows,
+        vec![vec![Value::Integer(1000)]]
+    );
+    query(&keyspace, "CREATE (a:A), (a)-[:R]->(:B), (a)-[:R]->(:B)");
+    assert_eq!(
+        error_code(
+            &keyspace,
+            "MATCH (a:A) RETURN [(a)-->(b) | range(1, 2200000)] AS x"
+        ),
+        "Neo.TransientError.General.MemoryPoolOutOfMemoryError"
+    );
+    assert_eq!(
+        query(
+            &keyspace,
+            "MATCH (a:A) RETURN [(a)-->(b) | range(1, 3)] AS x"
+        )
+        .rows
+        .len(),
+        1
+    );
+}
+
+#[test]
+fn all_shortest_paths_hold_a_bounded_number_of_relationships_per_query() {
+    let keyspace = MemoryKeyspace::default();
+    query(
+        &keyspace,
+        "CREATE (:S), (:T) WITH 1 AS one UNWIND range(1, 70) AS i CREATE (:L1), (:L2), (:L3)",
+    );
+    for text in [
+        "MATCH (s:S), (a:L1) CREATE (s)-[:R]->(a)",
+        "MATCH (a:L1), (b:L2) CREATE (a)-[:R]->(b)",
+        "MATCH (b:L2), (c:L3) CREATE (b)-[:R]->(c)",
+        "MATCH (c:L3), (t:T) CREATE (c)-[:R]->(t)",
+    ] {
+        query(&keyspace, text);
+    }
+    assert_eq!(
+        error_code(
+            &keyspace,
+            "MATCH p = allShortestPaths((s:S)-[*]->(t:T)) RETURN count(p) AS n"
+        ),
+        "Neo.TransientError.General.MemoryPoolOutOfMemoryError"
+    );
+    assert_eq!(
+        query(
+            &keyspace,
+            "MATCH p = shortestPath((s:S)-[*]->(t:T)) RETURN length(p) AS n"
+        )
+        .rows,
+        vec![vec![Value::Integer(4)]]
+    );
+    assert_eq!(
+        query(
+            &keyspace,
+            "MATCH (b:L2) WITH b LIMIT 1 MATCH p = allShortestPaths((s:S)-[*]->(b)) RETURN count(p) AS n"
+        )
+        .rows,
+        vec![vec![Value::Integer(70)]]
+    );
 }
 
 #[test]

@@ -99,6 +99,7 @@ pub fn run(
                 parameters,
                 foreach_runs: 0,
                 shortest_path_steps: std::cell::Cell::new(0),
+                shortest_path_relationships_returned: std::cell::Cell::new(0),
             };
             let result = executor.run_query(&parsed);
             let failed = result.is_err();
@@ -116,6 +117,7 @@ pub fn run(
                 parameters,
                 foreach_runs: 0,
                 shortest_path_steps: std::cell::Cell::new(0),
+                shortest_path_relationships_returned: std::cell::Cell::new(0),
             };
             outcome = Some(executor.run_query(&parsed));
             Ok(())
