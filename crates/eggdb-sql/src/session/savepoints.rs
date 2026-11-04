@@ -64,18 +64,36 @@ impl Savepoints {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UndoKeptFor {
+    FailedStatement,
+    RollbackToSavepoint,
+}
+
 pub(super) struct UndoWrite<'w> {
     inner: &'w mut dyn KeyValueWrite,
     log: &'w mut Undo,
-    held_bytes: usize,
+    memory: crate::memory::WorkMemory,
     most_bytes: usize,
+    kept_for: UndoKeptFor,
 }
 
 impl<'w> UndoWrite<'w> {
-    pub(super) fn new(inner: &'w mut dyn KeyValueWrite, log: &'w mut Undo) -> Self {
-        Self::with_most_bytes(inner, log, crate::memory::WORK_MEMORY_LIMIT)
+    pub(super) fn new(
+        inner: &'w mut dyn KeyValueWrite,
+        log: &'w mut Undo,
+        kept_for: UndoKeptFor,
+    ) -> Self {
+        Self {
+            inner,
+            log,
+            memory: crate::memory::WorkMemory::new(),
+            most_bytes: crate::memory::WORK_MEMORY_LIMIT,
+            kept_for,
+        }
     }
 
+    #[cfg(test)]
     fn with_most_bytes(
         inner: &'w mut dyn KeyValueWrite,
         log: &'w mut Undo,
@@ -84,8 +102,9 @@ impl<'w> UndoWrite<'w> {
         Self {
             inner,
             log,
-            held_bytes: 0,
+            memory: crate::memory::WorkMemory::with_limit(most_bytes),
             most_bytes,
+            kept_for: UndoKeptFor::FailedStatement,
         }
     }
 
@@ -94,26 +113,35 @@ impl<'w> UndoWrite<'w> {
             .len()
             .saturating_add(previous.map_or(0, <[u8]>::len))
             .saturating_add(UNDO_ENTRY_OVERHEAD);
-        let held = self.held_bytes.saturating_add(bytes);
-        if held > self.most_bytes {
-            return Err(undo_log_too_large(self.most_bytes));
-        }
-        self.held_bytes = held;
-        Ok(())
+        self.memory.charge(bytes).map_err(|error| {
+            if error.state() == SqlState::OUT_OF_MEMORY {
+                undo_log_too_large(self.most_bytes, self.kept_for)
+            } else {
+                error
+            }
+        })
     }
 }
 
-fn undo_log_too_large(most_bytes: usize) -> SqlError {
-    SqlError::new(
+fn undo_log_too_large(most_bytes: usize, kept_for: UndoKeptFor) -> SqlError {
+    let error = SqlError::new(
         SqlState::OUT_OF_MEMORY,
         format!(
-            "a statement inside a transaction can change at most {most_bytes} bytes of earlier values"
+            "a statement inside a transaction can hold at most {most_bytes} bytes of work memory, \
+             including the earlier values it overwrites"
         ),
-    )
-    .with_hint(
-        "The statement keeps every value it overwrites so that a failure undoes only it; split \
-         the change into smaller statements.",
-    )
+    );
+    match kept_for {
+        UndoKeptFor::FailedStatement => error.with_hint(
+            "The statement keeps every value it overwrites so that a failure undoes only it; split \
+             the change into smaller statements.",
+        ),
+        UndoKeptFor::RollbackToSavepoint => error.with_hint(
+            "After a SAVEPOINT the statement keeps every value it overwrites so that ROLLBACK TO \
+             SAVEPOINT can restore it; split the change into smaller statements or release the \
+             savepoint first.",
+        ),
+    }
 }
 
 impl KeyValueRead for UndoWrite<'_> {

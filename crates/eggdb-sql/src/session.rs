@@ -3328,7 +3328,15 @@ impl<'s> Session<'s> {
                 execute::delete(writer, tables, delete)
             }),
             Statement::With(with) => self.write_firing_triggers("WITH", |writer, tables| {
-                crate::with_statement::run(writer, tables, with, binding)
+                crate::with_statement::run_checking_targets(
+                    writer,
+                    tables,
+                    with,
+                    binding,
+                    &|statement| {
+                        read_only::refuse_permanent_statement_target(refuses_writes, statement)
+                    },
+                )
             }),
             Statement::Merge(merge) => self.write_firing_triggers("MERGE", |writer, tables| {
                 binding.merge(writer, tables, merge)?;
@@ -3764,7 +3772,11 @@ impl<'s> Session<'s> {
                 };
                 let statement_start = log.len();
                 let result = body(
-                    &mut savepoints::UndoWrite::new(&mut routed, &mut *log),
+                    &mut savepoints::UndoWrite::new(
+                        &mut routed,
+                        &mut *log,
+                        savepoints::UndoKeptFor::RollbackToSavepoint,
+                    ),
                     tables,
                 );
                 if undoes(&result) && log.len() > statement_start {
@@ -3780,7 +3792,11 @@ impl<'s> Session<'s> {
                 };
                 let mut log = savepoints::Undo::new();
                 let result = body(
-                    &mut savepoints::UndoWrite::new(&mut routed, &mut log),
+                    &mut savepoints::UndoWrite::new(
+                        &mut routed,
+                        &mut log,
+                        savepoints::UndoKeptFor::FailedStatement,
+                    ),
                     tables,
                 );
                 if undoes(&result) && !log.is_empty() {
@@ -3803,15 +3819,15 @@ impl<'s> Session<'s> {
                     objects,
                 };
                 let mut own_log = savepoints::Undo::new();
-                let (log, statement_start) = match undo {
+                let (log, statement_start, kept_for) = match undo {
                     Some(log) => {
                         let start = log.len();
-                        (log, start)
+                        (log, start, savepoints::UndoKeptFor::RollbackToSavepoint)
                     }
-                    None => (&mut own_log, 0),
+                    None => (&mut own_log, 0, savepoints::UndoKeptFor::FailedStatement),
                 };
                 let result = body(
-                    &mut savepoints::UndoWrite::new(&mut routed, &mut *log),
+                    &mut savepoints::UndoWrite::new(&mut routed, &mut *log, kept_for),
                     tables,
                 );
                 if undoes(&result) && log.len() > statement_start {

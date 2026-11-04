@@ -394,6 +394,16 @@ pub(crate) fn run(
     with: &WithStatement,
     binding: &Binding<'_>,
 ) -> SqlResult<QueryResult> {
+    run_checking_targets(writer, tables, with, binding, &|_| Ok(()))
+}
+
+pub(crate) fn run_checking_targets(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    with: &WithStatement,
+    binding: &Binding<'_>,
+    check_target: &dyn Fn(&Statement) -> SqlResult<()>,
+) -> SqlResult<QueryResult> {
     let mut frame: Frame = (*crate::table_variables::current()).clone();
     let mut materialized: Vec<Materialized> = Vec::with_capacity(with.tables.len());
     for (number, table) in with.tables.iter().enumerate() {
@@ -425,6 +435,7 @@ pub(crate) fn run(
                 let result = {
                     let _entered = entered(&frame);
                     bind(binding, writer, tables, &mut statement)?;
+                    check_target(&statement)?;
                     run_statement(writer, tables, &statement)?
                 };
                 record(
@@ -442,6 +453,7 @@ pub(crate) fn run(
     replace_in_statement(&mut body, &materialized)?;
     let _entered = entered(&frame);
     bind(binding, writer, tables, &mut body)?;
+    check_target(&body)?;
     run_statement(writer, tables, &body)
 }
 

@@ -447,3 +447,67 @@ fn a_read_only_transaction_refuses_a_write_that_matches_no_rows() {
     answer(&mut session, "INSERT INTO scratch VALUES (1)");
     answer(&mut session, "DELETE FROM scratch WHERE false");
 }
+
+#[test]
+fn a_write_inside_with_that_matches_no_rows_is_refused_in_a_read_only_transaction() {
+    let store = MemoryStore::default();
+    let mut session = postgresql_session(&store);
+    answer(&mut session, "CREATE TEMPORARY TABLE scratch (id integer)");
+    answer(&mut session, "BEGIN READ ONLY");
+    let error = refusal(
+        &mut session,
+        "WITH gone AS (DELETE FROM films WHERE false RETURNING *) SELECT * FROM gone",
+    );
+    assert_eq!(error.state().code(), "25006");
+    assert_eq!(
+        error.message(),
+        "cannot execute DELETE in a read-only transaction"
+    );
+    answer(&mut session, "ROLLBACK");
+    answer(&mut session, "BEGIN READ ONLY");
+    let error = refusal(
+        &mut session,
+        "WITH none AS (SELECT 1 WHERE false) UPDATE films SET title = 'x' WHERE false",
+    );
+    assert_eq!(error.state().code(), "25006");
+    answer(&mut session, "ROLLBACK");
+    answer(&mut session, "BEGIN READ ONLY");
+    answer(
+        &mut session,
+        "WITH gone AS (DELETE FROM scratch WHERE false RETURNING *) SELECT * FROM gone",
+    );
+    answer(&mut session, "ROLLBACK");
+}
+
+#[test]
+fn call_and_do_outside_a_block_are_refused_when_new_transactions_are_read_only() {
+    let store = MemoryStore::default();
+    let mut session = postgresql_session(&store);
+    answer(
+        &mut session,
+        "CREATE PROCEDURE add_film(n integer) LANGUAGE plpgsql AS $$ BEGIN INSERT INTO films VALUES (n, 'Added'); END $$",
+    );
+    answer(
+        &mut session,
+        "CREATE PROCEDURE add_and_commit(n integer) LANGUAGE plpgsql AS $$ BEGIN INSERT INTO films VALUES (n, 'Added'); COMMIT; END $$",
+    );
+    for setting in [
+        "SET default_transaction_read_only = on",
+        "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY",
+    ] {
+        answer(&mut session, setting);
+        for statement in [
+            "CALL add_film(2)",
+            "CALL add_and_commit(3)",
+            "DO $$ BEGIN INSERT INTO films VALUES (4, 'Done'); END $$",
+        ] {
+            let error = refusal(&mut session, statement);
+            assert_eq!(error.state().code(), "25006", "{setting}: {statement}");
+        }
+        answer(&mut session, "SET default_transaction_read_only = off");
+    }
+    assert_eq!(
+        answer(&mut session, "SELECT count(*) FROM films"),
+        "count\n1\nSELECT 1"
+    );
+}

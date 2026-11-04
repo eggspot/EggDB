@@ -71,6 +71,26 @@ pub(super) fn refuse_permanent_target(
     refuse_permanent_name(refuses_writes, command, &target.name)
 }
 
+pub(super) fn refuse_permanent_statement_target(
+    refuses_writes: bool,
+    statement: &crate::ast::Statement,
+) -> SqlResult<()> {
+    use crate::ast::Statement;
+    match statement {
+        Statement::Insert(insert) => {
+            refuse_permanent_target(refuses_writes, "INSERT", &insert.table)
+        }
+        Statement::Update(update) => {
+            refuse_permanent_target(refuses_writes, "UPDATE", &update.table)
+        }
+        Statement::Delete(delete) => {
+            refuse_permanent_target(refuses_writes, "DELETE", &delete.table)
+        }
+        Statement::Merge(merge) => refuse_permanent_target(refuses_writes, "MERGE", &merge.target),
+        _ => Ok(()),
+    }
+}
+
 pub(super) fn refuse_permanent_name(
     refuses_writes: bool,
     command: &str,
