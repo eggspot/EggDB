@@ -3908,7 +3908,10 @@ impl<'t> Parser<'t> {
             self.at += 1;
             let mut pattern = self.expression_above(Level::Other)?;
             if self.take_word("escape") {
-                let escape = self.expression_above(Level::Other)?;
+                let mut escape = self.expression_above(Level::Other)?;
+                if self.sqlite() {
+                    escape = sqlite::checked_escape(escape)?;
+                }
                 pattern = like_escape(pattern, escape);
             }
             ExprKind::Like {

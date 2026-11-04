@@ -201,7 +201,8 @@ MySQL, SQLite, Oracle), name their own escape character with `LIKE ... ESCAPE` i
 (and SQLite's `like(pattern, text, escape)`), match SQLite `GLOB` character classes and patterns
 from columns, and create PostgreSQL `RECURSIVE` views (D299). Next for these: `DISTINCT ON` an
 expression outside the select list of a grouped query or beside a window function, `NATURAL`
-joins with a `LATERAL` item, SQLite's own error for an `ESCAPE` that is not one character,
+joins with a `LATERAL` item, SQLite's own error for an `ESCAPE` computed at run time that is
+not one character (a constant one is refused as SQLite refuses it),
 Oracle's `ORA-01424` for an escape character before anything but `%`, `_` or itself,
 Transact-SQL's `[...]` classes in `LIKE`, SQLite's "no match" (not `22025`) for a `LIKE` pattern
 ending in its escape character, `\` as an ordinary character in SQLite and Transact-SQL `LIKE`
@@ -455,8 +456,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - MySQL's NULL ordering: NULL sorts first for `ASC` and last for `DESC` in MySQL, the opposite
   of the MySQL dialect today.
 - `DISTINCT ON` an expression outside the select list of a grouped query or beside a window
-  function, `NATURAL` joins with a `LATERAL` item, SQLite's and Oracle's own errors for a wrong
-  `ESCAPE`, and Transact-SQL's `[...]` classes in `LIKE` (D299).
+  function, `NATURAL` joins with a `LATERAL` item, SQLite's error for a wrong `ESCAPE` computed
+  at run time and Oracle's for a wrong `ESCAPE`, and Transact-SQL's `[...]` classes in `LIKE` (D299).
 - Joined `UPDATE` and `DELETE` with subqueries in `SET` and `RETURNING`, a view, a partitioned
   table or a table with row-level security as the target, `EXPLAIN` of them, SQLite's refusal
   of `FROM` tables in `RETURNING`, and `OUTPUT deleted.` of a joined Transact-SQL `UPDATE`

@@ -197,6 +197,19 @@ fn is_boolean_valued(expr: &Expr) -> bool {
     }
 }
 
+pub(super) fn checked_escape(escape: Expr) -> SqlResult<Expr> {
+    if let ExprKind::Literal(Literal::String(text)) = &escape.kind
+        && text.chars().count() != 1
+    {
+        return Err(SqlError::new(
+            SqlState::INVALID_ESCAPE_SEQUENCE,
+            "ESCAPE expression must be a single character",
+        )
+        .at(escape.position));
+    }
+    Ok(escape)
+}
+
 pub(super) fn glob(expr: Expr, pattern: Expr, negated: bool) -> SqlResult<Expr> {
     let position = expr.position;
     let converted = match &pattern.kind {
@@ -854,7 +867,9 @@ impl<'t> Parser<'t> {
                     glob(subject, pattern, false)?
                 } else {
                     let pattern = match escape {
-                        Some(escape) => crate::parser::like_escape(pattern, escape),
+                        Some(escape) => {
+                            crate::parser::like_escape(pattern, checked_escape(escape)?)
+                        }
                         None => pattern,
                     };
                     Expr {

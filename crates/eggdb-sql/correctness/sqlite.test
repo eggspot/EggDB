@@ -1300,6 +1300,12 @@ SELECT 'A_C' LIKE 'a#_c' ESCAPE '#', 'abc' LIKE 'a#_c' ESCAPE '#', like('a#%', '
 1|0|1|0
 SELECT 1
 
+error 22025 1
+SELECT 'ab' LIKE 'a%' ESCAPE ''
+
+error 22025 1
+SELECT like('a%', 'ab', '##')
+
 rows
 SELECT 'cat' GLOB '[a-c]*', 'dog' GLOB '[a-c]*', 'dog' GLOB '[^a-c]*', 'x' NOT GLOB '[abc]', glob('*[0-9][0-9]', 'room 42')
 ----

@@ -2126,7 +2126,8 @@ hold at most 2^27 elements (`54000`) and counts against the session's value limi
 - Comparisons `= <> != < <= > >=`, `BETWEEN`, `IN (list)`, `LIKE` and `ILIKE` with `%`, `_`
   and `\` escapes, `[NOT] LIKE | ILIKE pattern ESCAPE 'c'` in every dialect (D299; `ESCAPE ''`
   means no escape character, a longer one and a pattern ending in its escape character are
-  `22025`, `ESCAPE NULL` gives NULL; PostgreSQL's `like_escape(pattern, escape)` is the same
+  `22025`, `ESCAPE NULL` gives NULL; SQLite's dialect refuses a constant escape that is not one
+  character, `ESCAPE ''` included, with "ESCAPE expression must be a single character"; PostgreSQL's `like_escape(pattern, escape)` is the same
   rewrite), `IS [NOT] NULL`, `ISNULL`, `NOTNULL`, `IS [NOT] TRUE | FALSE | UNKNOWN`,
   `IS [NOT] DISTINCT FROM`, each with its `NOT` form.
 - `AND`, `OR`, `NOT` with SQL's three-valued logic: `NULL AND false` is false, `NULL OR true`
@@ -3264,7 +3265,9 @@ In the PostgreSQL dialect (D158), users create and call their own functions and 
   for a parameter the routine's own `SET` clause names, which comes back at its exit. A
   procedure's `COMMIT` ends its `SET LOCAL` values and its `ROLLBACK` also undoes the plain `SET`s
   made since the last `COMMIT`; an exception handler that catches an error undoes the settings
-  its block changed. `RESET ALL` and `SET eggdb.dialect` inside a routine are `0A000`.
+  its block changed. `RESET ALL` and `SET eggdb.dialect` inside a routine are `0A000`, and
+  `set_config` takes only constants and `$n` parameters as its arguments (a PL/pgSQL variable or
+  another expression, as in `set_config('app.tenant', p_tenant::text, true)`, is `0A000`).
 - Polymorphic types (D264): parameters and results of `sql` and PL/pgSQL functions and
   procedures may be `anyelement`, `anyarray`, `anynonarray`, `anyenum`, `anycompatible`,
   `anycompatiblearray` and `anycompatiblenonarray`, also in `OUT` parameters, `RETURNS SETOF`,
@@ -4271,7 +4274,7 @@ Views are read-only unless an `INSTEAD OF` trigger makes them writable, as in SQ
 `ALTER TABLE ... RENAME COLUMN` and `DROP COLUMN` (and a table rename's references in views and
 triggers) leave `sqlite_schema` showing generated text instead of SQLite's edited text.
 
-The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 261 cases from sqlite.org's
+The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 263 cases from sqlite.org's
 documentation of SQLite 3.46, never SQLite's source) marks these as differing until they are
 fixed:
 - Indexes: `EXPLAIN` without `QUERY PLAN` (the bytecode listing), partial indexes and indexes
