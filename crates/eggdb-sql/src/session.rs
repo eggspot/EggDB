@@ -1938,7 +1938,8 @@ impl<'s> Session<'s> {
                 let started = crate::statement_statistics::wanted().then(std::time::Instant::now);
                 let result = self.insert_literal_rows(&mut rows);
                 let routine_changes = crate::routine_settings::take_for_session(result.is_ok());
-                let _ = self.apply_routine_setting_changes(routine_changes);
+                let routine_applied = self.apply_routine_setting_changes(routine_changes);
+                let result = with_refused_routine_setting(result, routine_applied);
                 let literal_tokens = tokens.get(literal_start..resume.0.min(tokens.len()));
                 self.record_statement(literal_tokens, text, started, &result);
                 let result = self.keep_deferred(result);
@@ -2056,7 +2057,7 @@ impl<'s> Session<'s> {
             self.extra_results.clear();
             crate::deferred_checks::enter(&self.deferred.modes);
             let leftover_changes = crate::routine_settings::take_for_session(true);
-            let _ = self.apply_routine_setting_changes(leftover_changes);
+            let leftover_applied = self.apply_routine_setting_changes(leftover_changes);
             crate::portals::install(std::mem::take(&mut self.portals));
             if self.sqlserver()
                 && (self.settings.sqlserver.showplan.is_some()
@@ -2103,11 +2104,8 @@ impl<'s> Session<'s> {
             let routine_applied = self.apply_routine_setting_changes(routine_changes);
             let result =
                 result.and_then(|result| self.apply_setting_changes(result, &setting_changes));
-            let result = match routine_applied {
-                Ok(()) => result,
-                Err(refused) => result
-                    .map(|result| result.with_notice(format!("WARNING:  {}", refused.message()))),
-            };
+            let result = with_refused_routine_setting(result, leftover_applied);
+            let result = with_refused_routine_setting(result, routine_applied);
             let result = self.after_statement(result?, diagnostic);
             settled?;
             let mut keep_going = on_result(result);
@@ -3765,10 +3763,7 @@ impl<'s> Session<'s> {
                 };
                 let statement_start = log.len();
                 let result = body(
-                    &mut savepoints::UndoWrite {
-                        inner: &mut routed,
-                        log: &mut *log,
-                    },
+                    &mut savepoints::UndoWrite::new(&mut routed, &mut *log),
                     tables,
                 );
                 if undoes(&result) && log.len() > statement_start {
@@ -3784,10 +3779,7 @@ impl<'s> Session<'s> {
                 };
                 let mut log = savepoints::Undo::new();
                 let result = body(
-                    &mut savepoints::UndoWrite {
-                        inner: &mut routed,
-                        log: &mut log,
-                    },
+                    &mut savepoints::UndoWrite::new(&mut routed, &mut log),
                     tables,
                 );
                 if undoes(&result) && !log.is_empty() {
@@ -3818,10 +3810,7 @@ impl<'s> Session<'s> {
                     None => (&mut own_log, 0),
                 };
                 let result = body(
-                    &mut savepoints::UndoWrite {
-                        inner: &mut routed,
-                        log: &mut *log,
-                    },
+                    &mut savepoints::UndoWrite::new(&mut routed, &mut *log),
                     tables,
                 );
                 if undoes(&result) && log.len() > statement_start {
@@ -4140,6 +4129,18 @@ fn with_raised_notices(result: SqlResult<QueryResult>) -> SqlResult<QueryResult>
         result.notices.extend(own);
         result
     })
+}
+
+fn with_refused_routine_setting(
+    result: SqlResult<QueryResult>,
+    applied: SqlResult<()>,
+) -> SqlResult<QueryResult> {
+    match applied {
+        Ok(()) => result,
+        Err(refused) => {
+            result.map(|result| result.with_notice(format!("WARNING:  {}", refused.message())))
+        }
+    }
 }
 
 fn read_only_refusal(error: SqlError, command: &str) -> SqlError {

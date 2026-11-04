@@ -7,6 +7,7 @@ use crate::settings::SavedSettings;
 use crate::store::{EntryVisitor, KeyValueRead, KeyValueWrite, ScanDirection};
 
 const MOST_SAVEPOINTS: usize = 4096;
+const UNDO_ENTRY_OVERHEAD: usize = 64;
 
 pub(super) type Undo = Vec<UndoEntry>;
 
@@ -64,8 +65,55 @@ impl Savepoints {
 }
 
 pub(super) struct UndoWrite<'w> {
-    pub(super) inner: &'w mut dyn KeyValueWrite,
-    pub(super) log: &'w mut Undo,
+    inner: &'w mut dyn KeyValueWrite,
+    log: &'w mut Undo,
+    held_bytes: usize,
+    most_bytes: usize,
+}
+
+impl<'w> UndoWrite<'w> {
+    pub(super) fn new(inner: &'w mut dyn KeyValueWrite, log: &'w mut Undo) -> Self {
+        Self::with_most_bytes(inner, log, crate::memory::WORK_MEMORY_LIMIT)
+    }
+
+    fn with_most_bytes(
+        inner: &'w mut dyn KeyValueWrite,
+        log: &'w mut Undo,
+        most_bytes: usize,
+    ) -> Self {
+        Self {
+            inner,
+            log,
+            held_bytes: 0,
+            most_bytes,
+        }
+    }
+
+    fn hold(&mut self, key: &[u8], previous: Option<&[u8]>) -> SqlResult<()> {
+        let bytes = key
+            .len()
+            .saturating_add(previous.map_or(0, <[u8]>::len))
+            .saturating_add(UNDO_ENTRY_OVERHEAD);
+        let held = self.held_bytes.saturating_add(bytes);
+        if held > self.most_bytes {
+            return Err(undo_log_too_large(self.most_bytes));
+        }
+        self.held_bytes = held;
+        Ok(())
+    }
+}
+
+fn undo_log_too_large(most_bytes: usize) -> SqlError {
+    SqlError::new(
+        SqlState::OUT_OF_MEMORY,
+        format!(
+            "a statement inside a transaction can change at most {most_bytes} bytes of earlier values"
+        ),
+    )
+    .with_hint(
+        "The statement keeps every value it overwrites so that a failure undoes only it; split \
+         the change into smaller statements.",
+    )
 }
 
 impl KeyValueRead for UndoWrite<'_> {
@@ -99,12 +147,14 @@ impl KeyValueRead for UndoWrite<'_> {
 impl KeyValueWrite for UndoWrite<'_> {
     fn put(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
         let previous = self.inner.get(key)?;
+        self.hold(key, previous.as_deref())?;
         self.inner.put(key, value)?;
         self.log.push(UndoEntry::statement(key, previous));
         Ok(())
     }
 
     fn put_if_absent(&mut self, key: &[u8], value: &[u8]) -> SqlResult<bool> {
+        self.hold(key, None)?;
         let inserted = self.inner.put_if_absent(key, value)?;
         if inserted {
             self.log.push(UndoEntry::statement(key, None));
@@ -114,6 +164,7 @@ impl KeyValueWrite for UndoWrite<'_> {
 
     fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {
         let previous = self.inner.get(key)?;
+        self.hold(key, previous.as_deref())?;
         let deleted = self.inner.delete(key)?;
         if deleted {
             self.log.push(UndoEntry::statement(key, previous));
@@ -195,6 +246,12 @@ fn missing(name: &Name, dialect: Dialect) -> SqlError {
 }
 
 impl Session<'_> {
+    /// Whether [`Session::record_savepoint_undo`] would record writes now: a savepoint is set
+    /// in a block that writes.
+    pub fn records_savepoint_undo(&self) -> bool {
+        self.savepoints.is_active() && matches!(self.block, Block::Writing(_))
+    }
+
     /// Adds to the open block's savepoint undo log writes made to its write transaction outside
     /// this session's statements, such as a host's key-value commands: each `(key, previous)`
     /// is a key of the store and what it held before the write, `None` when it was absent,
@@ -206,7 +263,7 @@ impl Session<'_> {
         &mut self,
         changes: impl IntoIterator<Item = (Vec<u8>, Option<Vec<u8>>)>,
     ) -> bool {
-        if !self.savepoints.is_active() || !matches!(self.block, Block::Writing(_)) {
+        if !self.records_savepoint_undo() {
             return false;
         }
         self.savepoints.undo.extend(
@@ -342,3 +399,7 @@ impl Session<'_> {
         Ok(QueryResult::command("RELEASE"))
     }
 }
+
+#[cfg(test)]
+#[path = "savepoints_tests.rs"]
+mod tests;

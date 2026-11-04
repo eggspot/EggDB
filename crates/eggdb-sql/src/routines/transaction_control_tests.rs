@@ -792,6 +792,33 @@ fn set_eggdb_dialect_inside_a_procedure_switches_the_session_after_the_call() {
 }
 
 #[test]
+fn a_refused_dialect_change_in_a_trigger_of_a_literal_insert_warns() {
+    let store = MemoryStore::default();
+    let mut session = session_with(
+        &store,
+        &[
+            "CREATE TABLE t (a integer)",
+            "CREATE FUNCTION to_oracle() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+             SET eggdb.dialect = 'oracle'; RETURN NEW; END $$",
+            "CREATE TRIGGER switch BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION to_oracle()",
+        ],
+    );
+    answer(&mut session, "BEGIN");
+    let mut notices = Vec::new();
+    session
+        .execute("INSERT INTO t VALUES (1), (2)", &mut |result| {
+            notices.extend(result.notices)
+        })
+        .expect("insert in a block");
+    assert!(
+        notices.contains(&"WARNING:  eggdb.dialect cannot change inside a transaction".to_owned()),
+        "{notices:?}"
+    );
+    assert_eq!(session.dialect(), crate::Dialect::PostgreSql);
+    answer(&mut session, "ROLLBACK");
+}
+
+#[test]
 fn alter_function_set_and_reset_change_the_settings_stored_with_the_routine() {
     let store = MemoryStore::default();
     let mut session = session_with(

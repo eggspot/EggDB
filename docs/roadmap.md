@@ -403,9 +403,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - SQL Server rolls back the whole transaction for a batch-aborting error that fails before
   writing, and dooms the transaction for such an error inside `TRY` (D317).
 - SQLite's `UPDATE OR ...` and the conflict clauses of table constraints (D317).
-- The before-images that statement-level rollback keeps in MySQL's, SQLite's, Oracle's and SQL
-  Server's dialects are counted against the statement's memory limit, with a benchmark of a bulk
-  write inside a transaction in those dialects (D317).
+- A benchmark of a bulk write inside a transaction in MySQL's, SQLite's, Oracle's and SQL
+  Server's dialects, measuring statement-level rollback's extra read per key (D317).
 - PostgreSQL's exported snapshots: `pg_export_snapshot()` and `SET TRANSACTION SNAPSHOT` (D318).
 - `SELECT ... FOR UPDATE | SHARE` and `LOCK TABLE` refused with `25006` in a read-only
   transaction (D318).
@@ -1192,6 +1191,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Loki's push API, and Jaeger and Zipkin traces (D39).
 - Syslog over TLS (RFC 5425) and beyond loopback, the sender's address as a column, and rsyslog
   and syslog-ng in CI (D315).
+- A TCP syslog connection that stays silent is closed after an idle limit, so silent connections
+  cannot take every `--max-connections` slot (D315).
+- The syslog collector reports a batch it fails to store (a changed `syslog` table, a revoked
+  privilege) and still stores the batch's other chunks (D315).
 - LogQL and TraceQL, with the Loki and Tempo query HTTP APIs Grafana uses (D39).
 - Telegraf and Prometheus in CI, and benchmarks against InfluxDB and Prometheus (D220).
 - Streaming SQL: event time, watermarks, and tumbling, hopping and session windows (D55).
