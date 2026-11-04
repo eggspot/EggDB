@@ -282,6 +282,12 @@ jobs:
           test "$(cli LRANGE queue 0 -1 | tr '\n' ' ')" = "a b c "
           cli ZADD board 10 ada 20 grace
           test "$(cli ZRANGE board 0 -1 | tr '\n' ' ')" = "ada grace "
+          test "$(cli SETBIT bits 7 1)" = 0
+          test "$(cli BITCOUNT bits)" = 1
+          test "$(cli PFADD visitors alice bob carol)" = 1
+          test "$(cli PFCOUNT visitors)" = 3
+          test "$(cli GEOADD Sicily 13.361389 38.115556 Palermo 15.087269 37.502669 Catania)" = 2
+          test "$(cli GEODIST Sicily Palermo Catania km)" = 166.2742
           "$RUNNER_TEMP/resp/bin/python" - <<'PY'
           import redis
           r = redis.Redis(port=6380, password="ci-resp-password", protocol=3)
