@@ -9,6 +9,9 @@ use std::sync::Mutex;
 /// Keys and their stored bytes, in key order.
 pub type Entries = Vec<(Vec<u8>, Vec<u8>)>;
 
+/// Receives one key and its stored bytes from [`KeysRead::visit_prefix`]; returns whether to go on.
+pub type EntryVisitor<'a> = dyn FnMut(&[u8], &[u8]) -> Result<bool, String> + 'a;
+
 type Database = BTreeMap<Vec<u8>, Vec<u8>>;
 
 /// Reads one database's keys within a transaction.
@@ -48,7 +51,7 @@ pub trait KeysRead {
     fn visit_prefix(
         &self,
         prefix: &[u8],
-        visit: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool, String>,
+        visit: &mut EntryVisitor<'_>,
     ) -> Result<(), String> {
         self.visit_keys(&mut |key| {
             if !key.starts_with(prefix) {
@@ -132,7 +135,7 @@ impl KeysRead for MemoryKeys<'_> {
     fn visit_prefix(
         &self,
         prefix: &[u8],
-        visit: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool, String>,
+        visit: &mut EntryVisitor<'_>,
     ) -> Result<(), String> {
         for (key, value) in self
             .map
