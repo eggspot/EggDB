@@ -294,7 +294,7 @@ through the `eggdb` command; the smoke test reads the samples with each release 
   ignored test `write_the_v0_2_0_log_sample` wrote it, and refuses to run while the file exists.
 
 ## SQL against the manual (D105)
-`crates/eggdb-sql/correctness/postgresql.test` holds 879 cases, each a header (`ok`, `rows` with
+`crates/eggdb-sql/correctness/postgresql.test` holds 886 cases, each a header (`ok`, `rows` with
 the expected output after `----`, or `error <SQLSTATE>`), its SQL, and the PostgreSQL manual's
 chapter it comes from on a `chapter` line. They run in order in one session over the in-memory
 store, so later cases see the tables earlier ones made. The runner (`src/correctness.rs`) takes
