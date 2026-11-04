@@ -1290,6 +1290,9 @@ g|ss|vs|s
 3|NULL|NULL|0
 SELECT 2
 
+error 42000 1064
+SELECT STD(DISTINCT v) FROM stats321
+
 rows
 SELECT v, VAR_POP(v) OVER (ORDER BY v) AS vp FROM stats321 WHERE g = 1 ORDER BY v
 ----

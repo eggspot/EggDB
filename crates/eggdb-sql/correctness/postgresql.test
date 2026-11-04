@@ -5126,6 +5126,15 @@ SELECT 3
 error 42883
 SELECT rank(1, 2) WITHIN GROUP (ORDER BY x) FROM hyp321
 
+error 42804
+SELECT rank(2) WITHIN GROUP (ORDER BY y) FROM hyp321
+
+error 42809
+SELECT rank(2) FROM hyp321
+
+error 42809
+SELECT cume_dist(2, 'b') FROM hyp321
+
 ok
 DROP TABLE hyp321
 
@@ -5406,7 +5415,7 @@ INSERT INTO distributors324 (did) VALUES (12) ON CONFLICT (is_active) WHERE is_a
 error 42P10
 INSERT INTO distributors324 (did, dname) VALUES (12, 'x') ON CONFLICT (lower(dname)) DO NOTHING
 
-error 42601
+error 42P10
 INSERT INTO distributors324 (did) VALUES (12) ON CONFLICT (did DESC) DO NOTHING
 
 ok
@@ -5416,7 +5425,7 @@ chapter sql-copy, "COPY": REJECT_LIMIT ends an ON_ERROR ignore load once more ro
 ok
 CREATE TABLE check_ign_err324 (n integer, k integer)
 
-error 22000
+error 22P02
 COPY check_ign_err324 FROM STDIN WITH (on_error ignore, reject_limit 1);
 1	1
 a	2

@@ -714,6 +714,7 @@ impl<'t> Parser<'t> {
     }
 
     fn conflict_inference(&mut self) -> SqlResult<ConflictTarget> {
+        let opening = self.position();
         self.expect(&TokenKind::LeftParen)?;
         let mut columns = Vec::new();
         let mut expressions = Vec::new();
@@ -730,9 +731,22 @@ impl<'t> Parser<'t> {
             if plain_column {
                 columns.push(self.name()?);
             } else {
-                expressions.push(self.expression()?);
+                match self.expression()? {
+                    Expr {
+                        kind:
+                            ExprKind::Column {
+                                qualifier: None,
+                                name,
+                            },
+                        position,
+                    } => columns.push(Name {
+                        text: name,
+                        position,
+                    }),
+                    expr => expressions.push(expr),
+                }
             }
-            self.conflict_element_order()?;
+            self.conflict_element_order(opening)?;
             if !self.take(&TokenKind::Comma) {
                 break;
             }
@@ -750,22 +764,23 @@ impl<'t> Parser<'t> {
         })
     }
 
-    fn conflict_element_order(&mut self) -> SqlResult<()> {
-        let position = self.position();
+    fn conflict_element_order(&mut self, opening: usize) -> SqlResult<()> {
         if self.is_word("asc") || self.is_word("desc") {
             if self.postgresql() {
-                return Err(SqlError::syntax(
+                return Err(SqlError::new(
+                    SqlState::INVALID_COLUMN_REFERENCE,
                     "ASC/DESC is not allowed in ON CONFLICT clause",
-                    position,
-                ));
+                )
+                .at(opening));
             }
             self.at += 1;
         }
         if self.postgresql() && self.is_word("nulls") {
-            return Err(SqlError::syntax(
+            return Err(SqlError::new(
+                SqlState::INVALID_COLUMN_REFERENCE,
                 "NULLS FIRST/LAST is not allowed in ON CONFLICT clause",
-                position,
-            ));
+            )
+            .at(opening));
         }
         Ok(())
     }

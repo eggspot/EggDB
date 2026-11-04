@@ -183,6 +183,30 @@ fn an_index_predicate_infers_a_full_unique_index_as_the_manual_shows() {
          ON CONFLICT (zipcode) WHERE is_active DO NOTHING",
     );
     assert_eq!(no_index.state(), crate::SqlState::INVALID_COLUMN_REFERENCE);
+    for (predicate, state) in [
+        ("zz.is_active", crate::SqlState::UNDEFINED_TABLE),
+        ("excluded.is_active", crate::SqlState::UNDEFINED_TABLE),
+        (
+            "(SELECT nope FROM distributors) > 0",
+            crate::SqlState::FEATURE_NOT_SUPPORTED,
+        ),
+    ] {
+        let refused = fails(
+            &mut session,
+            &format!(
+                "INSERT INTO distributors (did) VALUES (5) ON CONFLICT (did) WHERE {predicate} DO NOTHING"
+            ),
+        );
+        assert_eq!(refused.state(), state, "{predicate}");
+    }
+    assert_eq!(
+        last(
+            &mut session,
+            "INSERT INTO distributors (did) VALUES (5) \
+             ON CONFLICT (did) WHERE distributors.is_active DO NOTHING"
+        ),
+        "INSERT 0 0"
+    );
 }
 
 #[test]
@@ -206,11 +230,16 @@ fn an_expression_target_needs_an_expression_index_and_order_is_refused() {
         &mut session,
         "INSERT INTO distributors (did) VALUES (13) ON CONFLICT (did DESC) DO NOTHING",
     );
-    assert_eq!(ordered.state(), crate::SqlState::SYNTAX_ERROR);
+    assert_eq!(ordered.state(), crate::SqlState::INVALID_COLUMN_REFERENCE);
     assert_eq!(
         ordered.message(),
         "ASC/DESC is not allowed in ON CONFLICT clause"
     );
+    run(
+        &mut session,
+        "INSERT INTO distributors (did) VALUES (13) ON CONFLICT ((did)) DO NOTHING",
+    )
+    .unwrap();
 }
 
 #[test]
@@ -266,5 +295,13 @@ fn sqlite_upsert_targets_take_a_where_clause_and_ordering() {
     assert_eq!(
         last(&mut session, "SELECT word, count FROM vocabulary"),
         "word|count\njovial|3\nSELECT 1"
+    );
+    let unmatched = fails(
+        &mut session,
+        "INSERT INTO vocabulary (word) VALUES ('jovial') ON CONFLICT (lower(word)) DO NOTHING",
+    );
+    assert_eq!(
+        unmatched.message(),
+        "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint"
     );
 }

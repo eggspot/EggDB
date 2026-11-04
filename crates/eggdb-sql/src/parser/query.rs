@@ -57,7 +57,9 @@ impl Parser<'_> {
     fn starts_query_at(&self, ahead: usize) -> bool {
         self.is_word_at(ahead, "select")
             || self.is_word_at(ahead, "with")
-            || (self.reads_values_lists() && self.is_word_at(ahead, "values"))
+            || (self.reads_values_lists()
+                && self.is_word_at(ahead, "values")
+                && (!self.mysql() || self.is_word_at(ahead + 1, "row")))
     }
 
     fn reads_values_lists(&self) -> bool {

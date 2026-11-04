@@ -191,6 +191,7 @@ fn added_function_type(
         "l2_normalize" => Some(SqlType::Text),
         "strpos" | "position" | "ascii" | "regexp_count" | "regexp_instr" => Some(SqlType::Integer),
         "starts_with" | "regexp_like" | "isfinite" | "is_normalized" => Some(SqlType::Boolean),
+        name if crate::row_values::is_internal_call(name) => Some(SqlType::Boolean),
         "regexp_match" | "regexp_split_to_array" => {
             Some(SqlType::Array(crate::arrays::ArrayElement::Text))
         }

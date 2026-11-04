@@ -4,6 +4,9 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, and, compare_truth, or};
 use crate::types::{DefinedValue, Value};
 
+pub(crate) const ROW_ORDERING: &str = "*row ordering*";
+pub(crate) const ROW_MEMBERSHIP: &str = "*row membership*";
+
 pub(crate) fn constructor_fields(expr: &Expr) -> Option<&[Expr]> {
     match &expr.kind {
         ExprKind::Function { name, arguments } if name == crate::records::ROW_FUNCTION => {
@@ -55,6 +58,32 @@ pub(crate) fn unequal_entries(dialect: Dialect, left: usize, position: usize) ->
     .at(position)
 }
 
+pub(crate) fn misused(dialect: Dialect, fields: &[Expr]) -> Option<SqlError> {
+    let position = fields.first().map_or(0, |field| field.position);
+    match dialect {
+        Dialect::MySql => Some(
+            SqlError::new(
+                SqlState::CARDINALITY_VIOLATION,
+                "Operand should contain 1 column(s)",
+            )
+            .with_vendor_code(1241)
+            .at(position),
+        ),
+        Dialect::Sqlite => Some(
+            SqlError::new(SqlState::SYNTAX_ERROR, "row value misused")
+                .with_sqlite_code(1)
+                .at(position),
+        ),
+        _ => None,
+    }
+}
+
+pub(crate) fn oracle_ordering_refused(position: usize) -> SqlError {
+    SqlError::new(SqlState::SYNTAX_ERROR, "invalid relational operator")
+        .with_oracle_code(920)
+        .at(position)
+}
+
 pub(crate) fn subquery_width_error(
     dialect: Dialect,
     found: usize,
@@ -99,62 +128,180 @@ fn strict(operator: BinaryOperator) -> BinaryOperator {
     }
 }
 
-/// Spells a comparison of two row constructors of the same width as comparisons of their
-/// fields, with SQL's rules for NULL: `=` holds when every pair is equal, `<>` when any pair
-/// differs, and an ordering is decided by the first pair that is not equal, NULL when that
-/// pair holds a NULL.
+fn row(fields: Vec<Expr>, position: usize) -> Expr {
+    Expr {
+        kind: ExprKind::Function {
+            name: crate::records::ROW_FUNCTION.to_owned(),
+            arguments: fields,
+        },
+        position,
+    }
+}
+
+fn internal_call(name: &str, arguments: Vec<Expr>, position: usize) -> Expr {
+    Expr {
+        kind: ExprKind::Function {
+            name: name.to_owned(),
+            arguments,
+        },
+        position,
+    }
+}
+
+/// Spells a comparison of two row constructors of the same width with SQL's rules for NULL:
+/// `=` becomes the `AND` of the fields' equalities and `<>` the `OR` of their differences, so an
+/// index on the fields still serves them; an ordering becomes one flat call decided by the first
+/// pair that is not equal, NULL when that pair holds a NULL, however wide the rows are.
 pub(crate) fn compare_constructors(
     left: Vec<Expr>,
     operator: BinaryOperator,
     right: Vec<Expr>,
     position: usize,
 ) -> Expr {
-    let pairs: Vec<(Expr, Expr)> = left.into_iter().zip(right).collect();
     let kind = match operator {
         BinaryOperator::Equal => ExprKind::And(
-            pairs
-                .into_iter()
+            left.into_iter()
+                .zip(right)
                 .map(|(left, right)| binary(BinaryOperator::Equal, left, right))
                 .collect(),
         ),
         BinaryOperator::NotEqual => ExprKind::Or(
-            pairs
-                .into_iter()
+            left.into_iter()
+                .zip(right)
                 .map(|(left, right)| binary(BinaryOperator::NotEqual, left, right))
                 .collect(),
         ),
-        _ => return ordered(pairs, operator, position),
+        _ => {
+            let symbol = Expr {
+                kind: ExprKind::Literal(crate::ast::Literal::String(operator.symbol().to_owned())),
+                position,
+            };
+            return internal_call(
+                ROW_ORDERING,
+                vec![symbol, row(left, position), row(right, position)],
+                position,
+            );
+        }
     };
     Expr { kind, position }
 }
 
-fn ordered(mut pairs: Vec<(Expr, Expr)>, operator: BinaryOperator, position: usize) -> Expr {
-    let Some((last_left, last_right)) = pairs.pop() else {
-        return Expr {
-            kind: ExprKind::Literal(crate::ast::Literal::Boolean(matches!(
-                operator,
-                BinaryOperator::LessOrEqual | BinaryOperator::GreaterOrEqual
-            ))),
-            position,
-        };
-    };
-    let mut result = binary(operator, last_left, last_right);
-    while let Some((left, right)) = pairs.pop() {
-        let equal = binary(BinaryOperator::Equal, left.clone(), right.clone());
-        let decided = binary(strict(operator), left, right);
-        result = Expr {
-            kind: ExprKind::Or(vec![
-                decided,
-                Expr {
-                    kind: ExprKind::And(vec![equal, result]),
-                    position,
-                },
-            ]),
-            position,
-        };
+/// Spells `(a, b) IN ((1, 2), (3, 4))` as one call that evaluates the left row once and
+/// compares it with each listed row in turn.
+pub(crate) fn membership(left: Vec<Expr>, items: Vec<Vec<Expr>>, position: usize) -> Expr {
+    let mut arguments = Vec::with_capacity(items.len() + 1);
+    arguments.push(row(left, position));
+    arguments.extend(items.into_iter().map(|fields| row(fields, position)));
+    internal_call(ROW_MEMBERSHIP, arguments, position)
+}
+
+pub(crate) fn is_internal_call(name: &str) -> bool {
+    name == ROW_ORDERING || name == ROW_MEMBERSHIP
+}
+
+fn lost_shape() -> SqlError {
+    SqlError::new(SqlState::INTERNAL_ERROR, "a row comparison lost its rows")
+}
+
+fn ordering_operator(symbol: &Expr) -> SqlResult<BinaryOperator> {
+    match &symbol.kind {
+        ExprKind::Literal(crate::ast::Literal::String(symbol)) => match symbol.as_str() {
+            "<" => Ok(BinaryOperator::Less),
+            "<=" => Ok(BinaryOperator::LessOrEqual),
+            ">" => Ok(BinaryOperator::Greater),
+            ">=" => Ok(BinaryOperator::GreaterOrEqual),
+            _ => Err(lost_shape()),
+        },
+        _ => Err(lost_shape()),
     }
-    result.position = position;
-    result
+}
+
+pub(crate) fn evaluate_internal_call(
+    evaluator: &Evaluator<'_>,
+    name: &str,
+    arguments: &[Expr],
+) -> SqlResult<Value> {
+    let truth = if name == ROW_ORDERING {
+        ordering(evaluator, arguments)?
+    } else {
+        member(evaluator, arguments)?
+    };
+    Ok(crate::eval::truth_value(truth))
+}
+
+fn ordering(evaluator: &Evaluator<'_>, arguments: &[Expr]) -> SqlResult<Option<bool>> {
+    let [symbol, left, right] = arguments else {
+        return Err(lost_shape());
+    };
+    let operator = ordering_operator(symbol)?;
+    let (Some(left), Some(right)) = (constructor_fields(left), constructor_fields(right)) else {
+        return Err(lost_shape());
+    };
+    if left.len() != right.len() {
+        return Err(lost_shape());
+    }
+    for (left, right) in left.iter().zip(right) {
+        let (left, right) = evaluator.pair(left, right)?;
+        match compare_truth(&left, &right, "=")? {
+            Some(true) => {}
+            None => return Ok(None),
+            Some(false) => return compare_truth(&left, &right, strict(operator).symbol()),
+        }
+    }
+    Ok(Some(matches!(
+        operator,
+        BinaryOperator::LessOrEqual | BinaryOperator::GreaterOrEqual
+    )))
+}
+
+fn member(evaluator: &Evaluator<'_>, arguments: &[Expr]) -> SqlResult<Option<bool>> {
+    let Some((left, items)) = arguments.split_first() else {
+        return Err(lost_shape());
+    };
+    let Some(left) = constructor_fields(left) else {
+        return Err(lost_shape());
+    };
+    let left_values = left
+        .iter()
+        .map(|field| {
+            if crate::eval::is_unknown_literal(field) {
+                Ok(None)
+            } else {
+                evaluator.eval(field, None).map(Some)
+            }
+        })
+        .collect::<SqlResult<Vec<_>>>()?;
+    let mut result = Some(false);
+    for item in items {
+        let Some(fields) = constructor_fields(item) else {
+            return Err(lost_shape());
+        };
+        if fields.len() != left.len() {
+            return Err(lost_shape());
+        }
+        let mut matched = Some(true);
+        for ((left, known), field) in left.iter().zip(&left_values).zip(fields) {
+            let equal = match known {
+                Some(value) => {
+                    let other = evaluator.eval(field, evaluator.type_of(value, left))?;
+                    compare_truth(value, &other, "=")?
+                }
+                None => {
+                    let (value, other) = evaluator.pair(left, field)?;
+                    compare_truth(&value, &other, "=")?
+                }
+            };
+            matched = and(matched, equal);
+            if matched == Some(false) {
+                break;
+            }
+        }
+        result = or(result, matched);
+        if result == Some(true) {
+            break;
+        }
+    }
+    Ok(result)
 }
 
 pub(crate) fn evaluate_fields(

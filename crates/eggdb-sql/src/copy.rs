@@ -464,7 +464,7 @@ impl Loader<'_> {
             && self.skipped > limit
         {
             return Err(SqlError::new(
-                SqlState::DATA_EXCEPTION,
+                SqlState::INVALID_TEXT_REPRESENTATION,
                 format!(
                     "skipped more than REJECT_LIMIT ({limit}) rows due to data type incompatibility"
                 ),

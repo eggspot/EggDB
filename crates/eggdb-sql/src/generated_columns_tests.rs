@@ -392,6 +392,31 @@ fn sql_server_computed_columns_are_left_out_of_inserts_and_refuse_writes_with_27
 }
 
 #[test]
+fn sql_server_refuses_a_computed_column_whose_value_changes_between_reads() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    for create in [
+        "CREATE TABLE people (dob date, age AS DATEDIFF(year, dob, GETDATE()))",
+        "CREATE TABLE tokens (id int, token AS NEWID())",
+    ] {
+        let error = fails(&mut session, create);
+        assert_eq!(error.state().code(), "0A000", "{create}");
+        assert!(
+            error.message().contains("changes between reads"),
+            "{create}"
+        );
+    }
+    let error = fails(
+        &mut session,
+        "CREATE TABLE stamped (id int, stamp AS GETDATE() PERSISTED)",
+    );
+    assert_eq!(error.vendor_code(), Some(4936));
+    last(&mut session, "CREATE TABLE plain (id int)");
+    let error = fails(&mut session, "ALTER TABLE plain ADD stamp AS SYSDATETIME()");
+    assert_eq!(error.state().code(), "0A000");
+}
+
+#[test]
 fn oracle_virtual_columns_refuse_writes_with_ora_54013_and_show_in_user_tab_cols() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Oracle);
@@ -428,4 +453,91 @@ fn oracle_virtual_columns_refuse_writes_with_ora_54013_and_show_in_user_tab_cols
     );
     let error = fails(&mut session, "ALTER TABLE emp DROP COLUMN bonus");
     assert_eq!(error.vendor_code(), Some(54031));
+}
+
+#[test]
+fn sql_server_reads_the_whole_expression_after_as() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    last(
+        &mut session,
+        "CREATE TABLE sums (a int, b int, c AS (a + b) * 2, d AS (a * 3))",
+    );
+    last(&mut session, "INSERT INTO sums VALUES (1, 2)");
+    assert_eq!(
+        last(&mut session, "SELECT c, d FROM sums"),
+        "c|d\n6|3\nSELECT 1"
+    );
+}
+
+#[test]
+fn mysql_checks_a_placed_generated_column_at_its_final_position() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    last(&mut session, "CREATE TABLE y1 (a int, b int AS (a + 1))");
+    let error = fails(
+        &mut session,
+        "ALTER TABLE y1 ADD COLUMN e int AS (b * 2) FIRST",
+    );
+    assert_eq!(error.vendor_code(), Some(3107));
+    last(
+        &mut session,
+        "ALTER TABLE y1 ADD COLUMN f int AS (b * 2) AFTER b",
+    );
+}
+
+#[test]
+fn generated_columns_stay_out_of_partitioned_tables_through_alter_table() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "CREATE TABLE p (a int) PARTITION BY LIST (a)");
+    last(
+        &mut session,
+        "CREATE TABLE p1 PARTITION OF p FOR VALUES IN (1, 2)",
+    );
+    let error = fails(
+        &mut session,
+        "ALTER TABLE p ADD COLUMN g int GENERATED ALWAYS AS (a * 2) STORED",
+    );
+    assert_eq!(error.state().code(), "0A000");
+    last(
+        &mut session,
+        "CREATE TABLE q (a int, g int GENERATED ALWAYS AS (a * 2) STORED)",
+    );
+    let error = fails(
+        &mut session,
+        "ALTER TABLE p ATTACH PARTITION q FOR VALUES IN (3)",
+    );
+    assert_eq!(error.state().code(), "0A000");
+    last(&mut session, "INSERT INTO p VALUES (2)");
+}
+
+#[test]
+fn postgresql_refuses_user_functions_in_a_generation_expression_by_their_volatility() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE FUNCTION vf(x int) RETURNS float8 AS 'SELECT x * random()' LANGUAGE sql",
+    );
+    last(
+        &mut session,
+        "CREATE FUNCTION twice(x int) RETURNS int AS 'SELECT x * 2' LANGUAGE sql IMMUTABLE",
+    );
+    let error = fails(
+        &mut session,
+        "CREATE TABLE g1 (a int, b float8 GENERATED ALWAYS AS (vf(a)) STORED)",
+    );
+    assert_eq!(error.message(), "generation expression is not immutable");
+    let error = fails(
+        &mut session,
+        "CREATE TABLE g2 (a int, b int GENERATED ALWAYS AS (twice(a)) STORED)",
+    );
+    assert_eq!(error.state().code(), "0A000");
+    last(&mut session, "CREATE TABLE g2 (a int)");
+    let error = fails(
+        &mut session,
+        "ALTER TABLE g2 ADD COLUMN c float8 GENERATED ALWAYS AS (vf(a)) STORED",
+    );
+    assert_eq!(error.message(), "generation expression is not immutable");
 }

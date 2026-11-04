@@ -111,3 +111,29 @@ fn dropping_a_column_shifts_the_generated_positions() {
     assert_eq!(without.len(), 1);
     assert_eq!(without[0].column, 2);
 }
+
+#[test]
+fn every_changed_byte_of_a_version_14_record_is_an_error_or_a_clean_decode() {
+    let encoded = generated_table().encode();
+    let mut plain = generated_table();
+    plain.generated.clear();
+    let section_start = plain.encode().len().saturating_sub(1);
+    for at in (0..encoded.len()).filter(|&at| at == 0 || at >= section_start) {
+        for value in [0u8, 1, 2, 3, 4, 7, 8, 13, 14, 15, 0x7F, 0x80, 0xFE, 0xFF] {
+            let mut changed = encoded.clone();
+            changed[at] = value;
+            let Ok(decoded) = TableDefinition::decode("t", &changed) else {
+                continue;
+            };
+            for entry in &decoded.generated {
+                assert!(entry.column < decoded.columns.len(), "{at}: {value}");
+                assert!(!entry.expression.is_empty(), "{at}: {value}");
+            }
+            assert_eq!(
+                TableDefinition::decode("t", &decoded.encode()).as_ref(),
+                Ok(&decoded),
+                "{at}: {value}"
+            );
+        }
+    }
+}

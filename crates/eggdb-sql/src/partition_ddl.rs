@@ -404,6 +404,11 @@ pub(crate) fn attach(
         },
         "attach",
     )?;
+    if !child.generated.is_empty() || !parent.generated.is_empty() {
+        return Err(
+            SqlError::not_supported("generated columns in a partitioned table").at(position),
+        );
+    }
     if child.name == parent.name || catalog.descendants_of(&child.name).contains(&parent.name) {
         return Err(SqlError::new(
             SqlState::DUPLICATE_TABLE,

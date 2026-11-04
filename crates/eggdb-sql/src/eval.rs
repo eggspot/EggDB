@@ -437,6 +437,9 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
         ExprKind::Function { name, .. } if name == crate::records::ROW_FUNCTION => {
             ("row".into(), true)
         }
+        ExprKind::Function { name, .. } if crate::row_values::is_internal_call(name) => {
+            ("?column?".into(), false)
+        }
         ExprKind::Function { name, arguments } if name == crate::routines::ROUTINE_CALL => {
             (crate::routines::called_name(arguments), true)
         }
@@ -503,7 +506,7 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
     }
 }
 
-fn is_unknown_literal(expr: &Expr) -> bool {
+pub(crate) fn is_unknown_literal(expr: &Expr) -> bool {
     matches!(
         expr.kind,
         ExprKind::Literal(Literal::String(_) | Literal::Decimal(_) | Literal::Null)
@@ -767,7 +770,7 @@ impl Evaluator<'_> {
         }
     }
 
-    fn pair(&self, left: &Expr, right: &Expr) -> SqlResult<(Value, Value)> {
+    pub(crate) fn pair(&self, left: &Expr, right: &Expr) -> SqlResult<(Value, Value)> {
         if is_unknown_literal(left) && !is_unknown_literal(right) {
             let right_value = self.eval(right, None)?;
             let left = self.eval(left, self.type_of(&right_value, right))?;
@@ -779,7 +782,7 @@ impl Evaluator<'_> {
         }
     }
 
-    fn type_of(&self, value: &Value, expr: &Expr) -> Option<SqlType> {
+    pub(crate) fn type_of(&self, value: &Value, expr: &Expr) -> Option<SqlType> {
         if let ExprKind::Slot {
             sql_type: Some(declared),
             ..
@@ -1466,9 +1469,17 @@ impl Evaluator<'_> {
         }
         match name {
             crate::records::ROW_FUNCTION => {
+                if let Some(error) =
+                    crate::row_values::misused(crate::constraints::current_dialect(), arguments)
+                {
+                    return Err(error);
+                }
                 return crate::records::construct(self.arguments(arguments)?);
             }
             crate::records::FIELD_FUNCTION => return self.field_selection(arguments),
+            name if crate::row_values::is_internal_call(name) => {
+                return crate::row_values::evaluate_internal_call(self, name, arguments);
+            }
             crate::triggers::RAISE_FUNCTION => return crate::triggers::raise(self, arguments),
             crate::routines::ROUTINE_CALL => return crate::routines::evaluate(self, arguments),
             "enum_first" | "enum_last" | "enum_range" => {

@@ -3076,7 +3076,11 @@ fn rewrite(
 fn row_cap(subquery: &Subquery) -> Option<i64> {
     match subquery.test {
         SubqueryTest::Exists => Some(1),
-        SubqueryTest::Scalar if subquery.dialect == Dialect::Sqlite => Some(1),
+        SubqueryTest::Scalar | SubqueryTest::RowCompare { .. }
+            if subquery.dialect == Dialect::Sqlite =>
+        {
+            Some(1)
+        }
         SubqueryTest::Scalar | SubqueryTest::RowCompare { .. } => Some(2),
         _ => None,
     }

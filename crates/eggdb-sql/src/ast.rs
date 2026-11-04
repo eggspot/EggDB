@@ -449,6 +449,7 @@ pub(crate) struct CreateTableAs {
     pub(crate) declared: Option<Box<CreateTable>>,
     pub(crate) with_data: bool,
     pub(crate) on_duplicate: OnDuplicate,
+    pub(crate) on_commit: Option<OnCommit>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -469,6 +470,7 @@ impl CreateTableAs {
             declared: None,
             with_data: true,
             on_duplicate: OnDuplicate::Fail,
+            on_commit: None,
         }
     }
 

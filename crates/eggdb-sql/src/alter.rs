@@ -570,7 +570,21 @@ fn add_column(
             .at(spec.position));
         }
         Some(spec) => {
+            let catalog = crate::partitions::catalog(writer, tables)?;
+            if catalog.key_of(&table.name).is_some() || catalog.parent_of(&table.name).is_some() {
+                return Err(
+                    SqlError::not_supported("generated columns in a partitioned table")
+                        .at(spec.position),
+                );
+            }
             crate::generated_columns::define(&mut table, &[(added, spec)], dialect)?;
+            crate::generated_columns::refuse_routine_calls(
+                &*writer,
+                tables,
+                &table,
+                &[(added, spec)],
+                dialect,
+            )?;
             if let Some(defined) = table.columns.get(added) {
                 column.sql_type = defined.sql_type;
             }
@@ -1062,6 +1076,9 @@ fn move_column(
         entry.column = at(entry.column);
     }
     new.generated.sort_by_key(|entry| entry.column);
+    if crate::constraints::current_dialect() == Dialect::MySql {
+        crate::generated_columns::check_mysql_order(&new)?;
+    }
     constraints::unregister_references(writer, tables, &table)?;
     let mut map = |row: Vec<Value>| -> SqlResult<Vec<Value>> {
         Ok(order

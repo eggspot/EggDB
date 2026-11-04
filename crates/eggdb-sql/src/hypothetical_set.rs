@@ -1,5 +1,5 @@
 use crate::ast::{AggregateFunction, Expr, ExprKind, Literal, OrderItem};
-use crate::error::SqlResult;
+use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::Evaluator;
 use crate::types::{
     SortDirection, Value, compare_in_directions, decode_directions, encode_directions, equality_key,
@@ -82,7 +82,9 @@ impl Standing {
         let mut hypothetical = Vec::with_capacity(parts.hypothetical.len());
         for (key, value) in parts.keys.iter().zip(parts.hypothetical) {
             let key = evaluator.eval(key, None)?;
-            hypothetical.push(evaluator.eval(value, key.sql_type())?);
+            let given = evaluator.eval(value, key.sql_type())?;
+            unmatched_types(&key, &given, value.position)?;
+            hypothetical.push(given);
             keys.push(key);
         }
         self.rows = self.rows.saturating_add(1);
@@ -120,6 +122,27 @@ impl Standing {
             _ => Value::Null,
         }
     }
+}
+
+fn unmatched_types(key: &Value, given: &Value, position: usize) -> SqlResult<()> {
+    if crate::constraints::current_dialect() != crate::Dialect::PostgreSql {
+        return Ok(());
+    }
+    let (Some(key_type), Some(given_type)) = (key.sql_type(), given.sql_type()) else {
+        return Ok(());
+    };
+    if crate::set_operations::common_type(key_type, given_type).is_some() {
+        return Ok(());
+    }
+    Err(SqlError::new(
+        SqlState::DATATYPE_MISMATCH,
+        format!(
+            "WITHIN GROUP types {} and {} cannot be matched",
+            key_type.name(),
+            given_type.name()
+        ),
+    )
+    .at(position))
 }
 
 fn distinct_key(keys: &[Value]) -> Vec<u8> {

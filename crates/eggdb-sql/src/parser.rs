@@ -301,7 +301,9 @@ const NAMED_PARAMETERS: [(&str, &[&str]); 5] = [
     ),
 ];
 
-const INTERNAL_FUNCTIONS: [&str; 29] = [
+const INTERNAL_FUNCTIONS: [&str; 31] = [
+    crate::row_values::ROW_ORDERING,
+    crate::row_values::ROW_MEMBERSHIP,
     crate::triggers::RAISE_FUNCTION,
     crate::routines::ROUTINE_CALL,
     "regclass_cast",
@@ -1972,26 +1974,7 @@ impl<'t> Parser<'t> {
         if self.oracle() {
             self.skip_physical_properties()?;
         }
-        if self.postgresql() && self.is_word("on") && self.is_word_at(1, "commit") {
-            let position = self.position();
-            self.at += 2;
-            let action = if self.take_word("preserve") {
-                self.expect_word("rows")?;
-                crate::ast::OnCommit::PreserveRows
-            } else if self.take_word("delete") {
-                self.expect_word("rows")?;
-                crate::ast::OnCommit::DeleteRows
-            } else {
-                self.expect_word("drop")?;
-                crate::ast::OnCommit::Drop
-            };
-            if temporary.is_none() {
-                return Err(SqlError::new(
-                    SqlState::INVALID_TABLE_DEFINITION,
-                    "ON COMMIT can only be used on temporary tables",
-                )
-                .at(position));
-            }
+        if let Some(action) = self.on_commit_clause(temporary.is_some())? {
             temporary = Some(action);
         }
         if self.sqlserver() && crate::temporary::is_sqlserver_temporary(&name.text) {
@@ -3634,6 +3617,9 @@ impl<'t> Parser<'t> {
         if !(left_is_row || right_is_row) || !crate::row_values::is_row_comparison(operator) {
             return Ok(Self::binary(left, operator, right));
         }
+        if self.oracle() && crate::row_values::is_ordering(operator) {
+            return Err(crate::row_values::oracle_ordering_refused(position));
+        }
         let left = match crate::row_values::into_constructor_fields(left) {
             Ok(left_fields) => match crate::row_values::into_constructor_fields(right) {
                 Ok(right_fields) => {
@@ -3683,6 +3669,35 @@ impl<'t> Parser<'t> {
         Ok(Self::binary(left, operator, right))
     }
 
+    pub(super) fn on_commit_clause(
+        &mut self,
+        temporary: bool,
+    ) -> SqlResult<Option<crate::ast::OnCommit>> {
+        if !(self.postgresql() && self.is_word("on") && self.is_word_at(1, "commit")) {
+            return Ok(None);
+        }
+        let position = self.position();
+        self.at += 2;
+        let action = if self.take_word("preserve") {
+            self.expect_word("rows")?;
+            crate::ast::OnCommit::PreserveRows
+        } else if self.take_word("delete") {
+            self.expect_word("rows")?;
+            crate::ast::OnCommit::DeleteRows
+        } else {
+            self.expect_word("drop")?;
+            crate::ast::OnCommit::Drop
+        };
+        if !temporary {
+            return Err(SqlError::new(
+                SqlState::INVALID_TABLE_DEFINITION,
+                "ON COMMIT can only be used on temporary tables",
+            )
+            .at(position));
+        }
+        Ok(Some(action))
+    }
+
     fn row(fields: Vec<Expr>, position: usize) -> Expr {
         Expr {
             kind: ExprKind::Function {
@@ -3693,19 +3708,13 @@ impl<'t> Parser<'t> {
         }
     }
 
-    fn row_list_membership(
-        &self,
-        expr: &Expr,
-        list: &[Expr],
-        position: usize,
-    ) -> SqlResult<Option<Expr>> {
+    fn is_row_list_membership(&self, expr: &Expr, list: &[Expr]) -> SqlResult<bool> {
         let Some(fields) = crate::row_values::constructor_fields(expr) else {
-            return Ok(None);
+            return Ok(false);
         };
-        let mut alternatives = Vec::with_capacity(list.len());
         for item in list {
             let Some(item_fields) = crate::row_values::constructor_fields(item) else {
-                return Ok(None);
+                return Ok(false);
             };
             if item_fields.len() != fields.len() {
                 return Err(crate::row_values::unequal_entries(
@@ -3714,17 +3723,17 @@ impl<'t> Parser<'t> {
                     item.position,
                 ));
             }
-            alternatives.push(crate::row_values::compare_constructors(
-                fields.to_vec(),
-                BinaryOperator::Equal,
-                item_fields.to_vec(),
-                item.position,
-            ));
         }
-        Ok(Some(Expr {
-            kind: ExprKind::Or(alternatives),
-            position,
-        }))
+        Ok(true)
+    }
+
+    fn row_list_membership(expr: Expr, list: Vec<Expr>, position: usize) -> Expr {
+        let fields = crate::row_values::into_constructor_fields(expr).unwrap_or_default();
+        let items = list
+            .into_iter()
+            .filter_map(|item| crate::row_values::into_constructor_fields(item).ok())
+            .collect();
+        crate::row_values::membership(fields, items, position)
     }
 
     fn binary(left: Expr, operator: BinaryOperator, right: Expr) -> Expr {
@@ -4132,7 +4141,8 @@ impl<'t> Parser<'t> {
                 list.push(self.expression()?);
             }
             self.expect(&TokenKind::RightParen)?;
-            if let Some(rows) = self.row_list_membership(&expr, &list, position)? {
+            if self.is_row_list_membership(&expr, &list)? {
+                let rows = Self::row_list_membership(expr, list, position);
                 return Ok(negated_if(rows, negated, position));
             }
             ExprKind::InList {
@@ -4378,7 +4388,7 @@ impl<'t> Parser<'t> {
             }
             TokenKind::LeftParen => {
                 self.at += 1;
-                if self.is_word("values") {
+                if self.is_word("values") && !self.mysql() {
                     return Err(self.not_supported("a VALUES list in an expression"));
                 }
                 let mut expr = self.expression()?;
@@ -4812,7 +4822,19 @@ impl<'t> Parser<'t> {
         {
             return self.hypothetical_set_aggregate(&name, function);
         }
+        if (self.postgresql() || self.oracle())
+            && AggregateFunction::hypothetical_named(&name.text).is_some()
+            && let Some(error) = self.hypothetical_set_aggregate_without_within_group(&name)
+        {
+            return Err(error);
+        }
         if let Some((function, computed_in_double)) = self.statistical_aggregate(&name.text) {
+            if self.is_word_at(1, "distinct")
+                && !self.statistical_aggregate_takes_distinct(&name.text)
+            {
+                self.at += 1;
+                return Err(self.distinct_refused());
+            }
             let expr = self.aggregate(name, function)?;
             return Ok(if computed_in_double {
                 argument_in_double(expr)
@@ -5110,9 +5132,35 @@ impl<'t> Parser<'t> {
         ))
     }
 
+    fn statistical_aggregate_takes_distinct(&self, name: &str) -> bool {
+        match self.dialect {
+            Dialect::MySql => false,
+            Dialect::Oracle => matches!(name, "stddev" | "variance"),
+            _ => true,
+        }
+    }
+
+    fn distinct_refused(&self) -> SqlError {
+        if self.oracle() {
+            return SqlError::new(
+                SqlState::SYNTAX_ERROR,
+                "DISTINCT option not allowed for this function",
+            )
+            .with_oracle_code(30482)
+            .at(self.position());
+        }
+        self.unexpected()
+    }
+
     fn within_group_follows_arguments(&self) -> bool {
+        self.after_arguments().is_some_and(|after| {
+            self.is_word_at(after, "within") && self.is_word_at(after + 1, "group")
+        })
+    }
+
+    fn after_arguments(&self) -> Option<usize> {
         if self.peek_kind() != &TokenKind::LeftParen {
-            return false;
+            return None;
         }
         let mut depth = 0usize;
         let mut ahead = 0usize;
@@ -5122,16 +5170,34 @@ impl<'t> Parser<'t> {
                 TokenKind::RightParen => {
                     depth = depth.saturating_sub(1);
                     if depth == 0 {
-                        return self.is_word_at(ahead + 1, "within")
-                            && self.is_word_at(ahead + 2, "group");
+                        return Some(ahead + 1);
                     }
                 }
-                TokenKind::End => return false,
+                TokenKind::End => return None,
                 _ => {}
             }
             ahead += 1;
         }
-        false
+        None
+    }
+
+    fn hypothetical_set_aggregate_without_within_group(&self, name: &Name) -> Option<SqlError> {
+        let after = self.after_arguments()?;
+        if after <= 2 || self.is_word_at(after, "over") {
+            return None;
+        }
+        Some(if self.oracle() {
+            SqlError::syntax("missing WITHIN keyword", name.position).with_oracle_code(2000)
+        } else {
+            SqlError::new(
+                SqlState::WRONG_OBJECT_TYPE,
+                format!(
+                    "WITHIN GROUP is required for ordered-set aggregate {}",
+                    name.text
+                ),
+            )
+            .at(name.position)
+        })
     }
 
     fn aggregate_order(&mut self, argument: Expr) -> SqlResult<Expr> {

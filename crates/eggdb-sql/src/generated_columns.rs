@@ -196,8 +196,12 @@ fn check_expression(
     if crate::eval::reject_aggregates(expr, "column generation expressions").is_err() {
         return Err(disallowed(table, column, dialect, Disallowed::Aggregate).at(position));
     }
-    let changing = crate::partitions::any_part(expr, &crate::partitions::changes_between_calls);
-    if changing && (dialect != Dialect::SqlServer || spec.stored) {
+    let changing = crate::partitions::any_part(expr, &crate::partitions::changes_between_calls)
+        || crate::partitions::any_part(expr, &sqlserver_changes_between_calls);
+    if changing && dialect == Dialect::SqlServer && !spec.stored {
+        return Err(computed_on_read_refused(table, column).at(position));
+    }
+    if changing {
         return Err(disallowed(table, column, dialect, Disallowed::Volatile).at(position));
     }
     crate::eval::check_columns(expr, table_scope(table))?;
@@ -233,6 +237,92 @@ fn check_expression(
         }
     }
     Ok(())
+}
+
+pub(crate) fn refuse_routine_calls(
+    reader: &dyn crate::store::KeyValueRead,
+    tables: &mut crate::execute::TableCache,
+    table: &TableDefinition,
+    specs: &[(usize, &GenerationSpec)],
+    dialect: Dialect,
+) -> SqlResult<()> {
+    for &(column, spec) in specs {
+        let mut names = Vec::new();
+        called_names(&spec.expr, &mut names);
+        for name in names {
+            let Some(found) = crate::routines::resolve(reader, tables, name)? else {
+                continue;
+            };
+            let changing = found.routines.iter().any(|routine| {
+                routine.kind == crate::routines::RoutineKind::Function
+                    && routine.volatility != crate::routines::Volatility::Immutable
+            });
+            let error = if !changing {
+                SqlError::not_supported("a user-defined function in a generation expression")
+                    .with_hint(
+                        "Write the function's expression in the column's definition instead.",
+                    )
+            } else if dialect == Dialect::SqlServer && !spec.stored {
+                computed_on_read_refused(table, column)
+            } else {
+                disallowed(table, column, dialect, Disallowed::Volatile)
+            };
+            return Err(error.at(spec.position));
+        }
+    }
+    Ok(())
+}
+
+fn called_names<'e>(expr: &'e Expr, names: &mut Vec<&'e str>) {
+    if let ExprKind::Function { name, .. } = &expr.kind
+        && !name.starts_with('*')
+        && !names.contains(&name.as_str())
+    {
+        names.push(name);
+    }
+    for child in crate::eval::children(expr) {
+        called_names(child, names);
+    }
+}
+
+pub(crate) fn check_mysql_order(table: &TableDefinition) -> SqlResult<()> {
+    for entry in &table.generated {
+        let refers_later = columns_of(table, entry)
+            .into_iter()
+            .any(|other| table.is_generated(other) && other >= entry.column);
+        if refers_later {
+            return Err(generated_reference(
+                table,
+                entry.column,
+                entry.column,
+                Dialect::MySql,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn sqlserver_changes_between_calls(expr: &Expr) -> bool {
+    use crate::sqlserver_functions::Function;
+    matches!(
+        &expr.kind,
+        ExprKind::SqlServerFunction {
+            function: Function::NewId | Function::RowCount | Function::ScopeIdentity,
+            ..
+        }
+    )
+}
+
+fn computed_on_read_refused(table: &TableDefinition, column: usize) -> SqlError {
+    SqlError::new(
+        SqlState::FEATURE_NOT_SUPPORTED,
+        format!(
+            "computed column '{}' in table '{}' uses a function whose value changes between reads, and EggDB keeps a computed column's value from when the row was written",
+            column_name(table, column),
+            table_name(table)
+        ),
+    )
+    .with_hint("Compute the value in the query or in a view, as in SELECT DATEDIFF(year, dob, GETDATE()) AS age.")
 }
 
 enum Disallowed {

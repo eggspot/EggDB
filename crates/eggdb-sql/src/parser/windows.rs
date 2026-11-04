@@ -484,12 +484,10 @@ impl Parser<'_> {
         let order = self.order_items()?;
         self.expect(&TokenKind::RightParen)?;
         if hypothetical.len() != order.len() {
-            let error =
-                no_such_function(&name.text, hypothetical.len() + order.len(), name.position);
             return Err(if self.oracle() {
-                error.with_oracle_code(909)
+                SqlError::syntax("invalid number of arguments", name.position).with_oracle_code(909)
             } else {
-                error
+                no_such_function(&name.text, hypothetical.len() + order.len(), name.position)
             });
         }
         Ok(Expr {

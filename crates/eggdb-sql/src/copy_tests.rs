@@ -1701,7 +1701,7 @@ fn reject_limit_fails_the_copy_once_more_rows_than_it_allows_were_skipped() {
         5,
     )
     .unwrap_err();
-    assert_eq!(error.state(), SqlState::DATA_EXCEPTION);
+    assert_eq!(error.state(), SqlState::INVALID_TEXT_REPRESENTATION);
     assert_eq!(
         error.message(),
         "skipped more than REJECT_LIMIT (3) rows due to data type incompatibility"

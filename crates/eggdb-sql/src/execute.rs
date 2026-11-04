@@ -412,6 +412,9 @@ pub(crate) fn create_table(
         .collect();
     if !generated.is_empty() {
         crate::generated_columns::define(&mut table, &generated, dialect)?;
+        crate::generated_columns::refuse_routine_calls(
+            &*writer, tables, &table, &generated, dialect,
+        )?;
         if dialect == Dialect::Sqlite {
             crate::generated_columns::sqlite_primary_key_refused(&table)?;
         }
@@ -1373,7 +1376,11 @@ fn insert_rows(
         _ => None,
     };
     let arbiter = match &insert.conflict_target {
-        Some(target) => Some(ConflictArbiter::of(&table, target)?),
+        Some(target) => Some(ConflictArbiter::of(
+            &table,
+            target,
+            insert.table.alias.as_deref(),
+        )?),
         None => None,
     };
     let mut changed_once = (dialect == Dialect::PostgreSql && updates.is_some())
@@ -1813,7 +1820,11 @@ enum ConflictArbiter {
 }
 
 impl ConflictArbiter {
-    fn of(table: &TableDefinition, target: &ConflictTarget) -> SqlResult<Self> {
+    fn of(
+        table: &TableDefinition,
+        target: &ConflictTarget,
+        alias: Option<&str>,
+    ) -> SqlResult<Self> {
         match target {
             ConflictTarget::Constraint(name) => Self::named(table, name),
             ConflictTarget::Inferred {
@@ -1821,8 +1832,9 @@ impl ConflictArbiter {
                 expressions,
                 predicate,
             } => {
+                let label = alias.unwrap_or_else(|| crate::schemas::base_name(&table.name));
                 for expr in expressions.iter().chain(predicate) {
-                    check_inference_columns(table, expr)?;
+                    check_inference_columns(table, label, expr)?;
                 }
                 if !expressions.is_empty() {
                     return Err(no_matching_arbiter());
@@ -1917,24 +1929,51 @@ pub(crate) fn routed_conflict_target(
 }
 
 fn no_matching_arbiter() -> SqlError {
+    if crate::constraints::current_dialect() == Dialect::Sqlite {
+        return SqlError::new(
+            SqlState::INVALID_COLUMN_REFERENCE,
+            "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint",
+        )
+        .with_sqlite_code(1);
+    }
     SqlError::new(
         SqlState::INVALID_COLUMN_REFERENCE,
         "there is no unique or exclusion constraint matching the ON CONFLICT specification",
     )
 }
 
-fn check_inference_columns(table: &TableDefinition, expr: &Expr) -> SqlResult<()> {
-    if let ExprKind::Column { name, .. } = &expr.kind
-        && table.column_index(name).is_none()
-    {
-        return Err(SqlError::new(
-            SqlState::UNDEFINED_COLUMN,
-            format!("column \"{name}\" does not exist"),
-        )
-        .at(expr.position));
+fn check_inference_columns(table: &TableDefinition, label: &str, expr: &Expr) -> SqlResult<()> {
+    match &expr.kind {
+        ExprKind::Subquery(_) => {
+            return Err(SqlError::new(
+                SqlState::FEATURE_NOT_SUPPORTED,
+                "cannot use subquery in index predicate",
+            )
+            .at(expr.position));
+        }
+        ExprKind::Column {
+            qualifier: Some(qualifier),
+            ..
+        } if !qualifier.eq_ignore_ascii_case(label)
+            && !crate::schemas::base_name(qualifier).eq_ignore_ascii_case(label) =>
+        {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_TABLE,
+                format!("missing FROM-clause entry for table \"{qualifier}\""),
+            )
+            .at(expr.position));
+        }
+        ExprKind::Column { name, .. } if table.column_index(name).is_none() => {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_COLUMN,
+                format!("column \"{name}\" does not exist"),
+            )
+            .at(expr.position));
+        }
+        _ => {}
     }
     for child in crate::eval::children(expr) {
-        check_inference_columns(table, child)?;
+        check_inference_columns(table, label, child)?;
     }
     Ok(())
 }
@@ -3204,7 +3243,7 @@ pub(crate) fn row_limit(expr: Option<&Expr>) -> SqlResult<RowLimit> {
                 let Some(count) = row_count(Some(count), "LIMIT")? else {
                     return Err(SqlError::new(
                         SqlState::INVALID_ROW_COUNT_IN_LIMIT_CLAUSE,
-                        "row count in FETCH FIRST ... WITH TIES clause must not be null",
+                        "row count cannot be null in FETCH FIRST ... WITH TIES clause",
                     )
                     .at(count.position));
                 };

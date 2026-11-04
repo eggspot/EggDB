@@ -450,3 +450,150 @@ fn sqlserver_values_derived_table_names_its_columns() {
     );
     assert!(shown.starts_with("id|name\n1|a\n2|b\n"), "{shown}");
 }
+
+#[test]
+fn a_wide_row_ordering_is_decided_without_nesting_one_level_per_field() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let ones = vec!["1"; 2000].join(", ");
+    let mut raised = vec!["1"; 1999];
+    raised.push("2");
+    let raised = raised.join(", ");
+    assert_eq!(
+        last(&mut session, &format!("SELECT ({ones}) < ({raised})")),
+        "?column?\nt\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, &format!("SELECT ({ones}) >= ({ones})")),
+        "?column?\nt\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT (1, NULL::int, 3) < (1, 2, 0), (1, 2, NULL::int) < (1, 3, 0), ('a', 2) > ('a', 1)"
+        ),
+        "?column?|?column?|?column?\nNULL|t|t\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_row_in_list_evaluates_its_left_row_once() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "CREATE SEQUENCE drawn");
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT (nextval('drawn'), 1) IN ((5, 1), (6, 1), (7, 1), (1, 1))"
+        ),
+        "?column?\nt\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT currval('drawn')"),
+        "currval\n1\nSELECT 1"
+    );
+    let wide_left = vec!["coalesce(1, 2)"; 200].join(", ");
+    let item = format!("({})", vec!["2"; 200].join(", "));
+    let items = vec![item; 3000].join(", ");
+    assert_eq!(
+        last(
+            &mut session,
+            &format!("SELECT ({wide_left}) NOT IN ({items})")
+        ),
+        "?column?\nt\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT (1, NULL::int) IN ((2, 2), (3, 3)), (1, NULL::int) IN ((2, 2), (1, NULL)), \
+             (1, NULL::int) NOT IN ((2, 2)), ('x', 1) IN (('x', 1))"
+        ),
+        "?column?|?column?|?column?|?column?\nf|NULL|t|t\nSELECT 1"
+    );
+}
+
+#[test]
+fn mysql_values_function_parses_inside_parentheses_in_on_duplicate_key_update() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    last(&mut session, "CREATE TABLE u (a int PRIMARY KEY, b int)");
+    last(&mut session, "INSERT INTO u VALUES (1, 5)");
+    last(
+        &mut session,
+        "INSERT INTO u VALUES (1, 5) ON DUPLICATE KEY UPDATE b = (VALUES(b) + 1)",
+    );
+    last(
+        &mut session,
+        "INSERT INTO u VALUES (1, 8) ON DUPLICATE KEY UPDATE b = ((VALUES(b)) * 2)",
+    );
+    assert_eq!(
+        last(&mut session, "SELECT a, b FROM u"),
+        "a|b\n1|16\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT * FROM (VALUES ROW(1, 2)) AS v"),
+        "column_0|column_1\n1|2\nSELECT 1"
+    );
+}
+
+#[test]
+fn row_constructors_follow_each_dialects_rules_outside_postgresql() {
+    let store = MemoryStore::default();
+    let mut sqlite = Session::with_dialect(&store, Dialect::Sqlite);
+    assert_eq!(
+        last(
+            &mut sqlite,
+            "SELECT CASE WHEN (1, 2) = (SELECT 1, 2 UNION ALL SELECT 3, 4) THEN 'first' END AS r"
+        ),
+        "r\nfirst\nSELECT 1"
+    );
+    last(&mut sqlite, "CREATE TABLE pairs (a, b)");
+    let error = fails(&mut sqlite, "INSERT INTO pairs VALUES ((1, 2), 3)");
+    assert_eq!(error.message(), "row value misused");
+    let mut mysql = Session::with_dialect(&store, Dialect::MySql);
+    assert_eq!(fails(&mut mysql, "SELECT (1, 2)").vendor_code(), Some(1241));
+    let mut oracle = Session::with_dialect(&store, Dialect::Oracle);
+    let error = fails(&mut oracle, "SELECT 1 FROM dual WHERE (1, 2) < (2, 3)");
+    assert_eq!(error.vendor_code(), Some(920));
+    assert_eq!(
+        last(&mut oracle, "SELECT 1 one FROM dual WHERE (1, 2) = (1, 2)"),
+        "ONE\n1\nSELECT 1"
+    );
+}
+
+#[test]
+fn postgresql_create_table_as_takes_on_commit_and_refuses_storage_options() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "BEGIN");
+    last(
+        &mut session,
+        "CREATE TEMP TABLE v2 ON COMMIT DROP AS SELECT 1 AS a",
+    );
+    assert_eq!(last(&mut session, "SELECT a FROM v2"), "a\n1\nSELECT 1");
+    last(&mut session, "COMMIT");
+    assert_eq!(
+        fails(&mut session, "SELECT a FROM v2").state().code(),
+        "42P01"
+    );
+    for create in [
+        "CREATE TABLE v3 USING heap AS SELECT 1 AS a",
+        "CREATE TABLE v3 WITH (fillfactor = 70) AS SELECT 1 AS a",
+        "CREATE TABLE v3 (a) TABLESPACE pg_default AS SELECT 1",
+    ] {
+        assert_eq!(
+            fails(&mut session, create).state().code(),
+            "0A000",
+            "{create}"
+        );
+    }
+    assert_eq!(
+        fails(
+            &mut session,
+            "CREATE TABLE v4 ON COMMIT DROP AS SELECT 1 AS a"
+        )
+        .state()
+        .code(),
+        "42P16"
+    );
+}

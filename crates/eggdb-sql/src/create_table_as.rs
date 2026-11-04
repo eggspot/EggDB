@@ -266,7 +266,9 @@ struct TableShape<'a> {
 fn empty_table(create: &CreateTableAs) -> CreateTable {
     CreateTable {
         name: create.name.clone(),
-        temporary: create.temporary.then_some(OnCommit::PreserveRows),
+        temporary: create
+            .temporary
+            .then_some(create.on_commit.unwrap_or(OnCommit::PreserveRows)),
         if_not_exists: false,
         columns: Vec::new(),
         primary_key: None,
