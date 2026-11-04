@@ -35,6 +35,9 @@ pub mod dialect;
 pub mod drop_prompt;
 /// The query editor: text, cursor, selection and editing commands.
 pub mod editor;
+/// The editor's right-click menu: its items, when they act, where it opens and its keys
+/// (`docs/ux/workspace.md` 10.9).
+pub mod editor_menu;
 mod font;
 /// The result grid: columns, rows, scrolling and cell selection.
 pub mod grid;
@@ -49,6 +52,9 @@ pub mod inspector;
 /// A keys tab's scan of a key space's first keys, spelled for the keys grid
 /// (`docs/ux/workspace.md` 10.4).
 pub mod key_scan;
+/// A keys tab's scan over the RESP protocol of a server reached with `redis://`
+/// (`docs/ux/workspace.md` 10.10).
+pub mod resp_keys;
 /// The main window's layouts (`docs/ux/gui-layouts.md`): EggDB's own and those that work like
 /// clients people already know, each with its regions, labels and shortcut table.
 pub mod layout;
@@ -79,6 +85,8 @@ pub mod settings;
 /// The splitters between the window's regions and the sizes they set, kept in the client's
 /// settings (`docs/ux/workspace.md` 10.5).
 pub mod splitters;
+/// `Toggle comment` and `Format statement` (`docs/ux/workspace.md` 10.9).
+pub mod sql_format;
 /// Splitting an editor's text into statements by each dialect's rules.
 pub mod statements;
 /// The status line's and status bar's strings (`docs/ux/workspace.md` 2.4).

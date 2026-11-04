@@ -320,6 +320,24 @@ impl Editor {
         self.lines[last].push_str(&tail);
     }
 
+    /// Replaces bytes `range` of [`Editor::text`] (clamped to character boundaries) with
+    /// `text` as one undo step; the caret ends after the new text.
+    pub fn replace_bytes(&mut self, range: std::ops::Range<usize>, text: &str) {
+        let start = self.position_at(range.start);
+        let end = self.position_at(range.end.max(range.start));
+        self.anchor = Some(start);
+        self.caret = end;
+        self.paste(text);
+    }
+
+    /// Selects from `anchor` to `caret` (both clamped to the text), the caret at `caret`; no
+    /// selection when they are the same place.
+    pub fn set_selection(&mut self, anchor: Position, caret: Position) {
+        let anchor = self.clamped(anchor);
+        self.caret = self.clamped(caret);
+        self.anchor = (anchor != self.caret).then_some(anchor);
+    }
+
     /// Puts the caret at `at` (clamped to the text) and clears the selection.
     pub fn place_caret(&mut self, at: Position) {
         let line = at.line.min(self.lines.len() - 1);

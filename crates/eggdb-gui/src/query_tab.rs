@@ -6,11 +6,13 @@ use eggdb_platform::window::{Key, KeyPress};
 
 use crate::connection::{ResultTable, SessionId, StatementFailure};
 use crate::dialect::QueryDialect;
-use crate::editor::{self, Editor};
+use crate::editor::{self, Editor, Position};
+use crate::editor_menu::{EditorMenu, EditorMenuAnswer, EditorMenuItem, EditorMenuOrigin, EditorState};
 use crate::grid::{GridAnswer, GridMenuItem, ResultGrid, cell_text, column_widths};
 use crate::grid_menu::{GridMenu, MenuAnswer};
 use crate::key_scan::KeySpaceScan;
 use crate::plan_view::{Plan, PlanAnswer, PlanView, explain_statements};
+use crate::sql_format::{comment_edits, format_sql, is_blank_sql};
 use crate::statements::{source_table, statement_at, statements};
 use crate::status_line;
 use crate::value_view::{ValueAnswer, ValueView};
@@ -225,6 +227,10 @@ pub struct QueryTab {
     pub grid_menu: Option<GridMenu>,
     /// The key space a keys tab scans; `None` for a query tab (`docs/ux/workspace.md` 10.4).
     pub keys: Option<KeySpaceScan>,
+    /// The editor's open right-click menu (`docs/ux/workspace.md` 10.9).
+    pub editor_menu: Option<EditorMenu>,
+    /// A keys tab's prefix field and pages (`docs/ux/workspace.md` 10.10).
+    pub key_pages: KeyPages,
 }
 
 impl QueryTab {
@@ -256,6 +262,8 @@ impl QueryTab {
             value_view: None,
             grid_menu: None,
             keys: None,
+            editor_menu: None,
+            key_pages: KeyPages::default(),
         }
     }
 
@@ -413,6 +421,16 @@ impl QueryTab {
                     self.notice = Some(toast.clone());
                     TabAction::Copy { text, toast }
                 }
+            };
+        }
+        if let Some(menu) = &mut self.editor_menu {
+            return match menu.key(press) {
+                EditorMenuAnswer::Moved => TabAction::None,
+                EditorMenuAnswer::Close => {
+                    self.editor_menu = None;
+                    TabAction::None
+                }
+                EditorMenuAnswer::Activate(item) => self.editor_menu_item(item),
             };
         }
         if let Some(menu) = &mut self.grid_menu {
@@ -714,6 +732,14 @@ impl QueryTab {
             Key::Character('v' | 'V') if primary && !press.modifiers.shift => {
                 return TabAction::Paste;
             }
+            Key::Character('/') if primary => {
+                self.toggle_comment();
+                return TabAction::None;
+            }
+            Key::Character('f' | 'F') if primary && press.modifiers.shift => {
+                self.format_statement();
+                return TabAction::None;
+            }
             _ => {}
         }
         let Some(key) = editor_key(press) else {
@@ -751,6 +777,186 @@ impl QueryTab {
         let line = self.editor.caret().line;
         self.editor.paste(text);
         self.edited(line);
+    }
+
+    /// What the editor holds, for its right-click menu's rules (`docs/ux/workspace.md`
+    /// 10.9); `clipboard_text` says whether the clipboard holds text.
+    pub fn editor_state(&self, clipboard_text: bool) -> EditorState {
+        let text = self.editor.text();
+        let keys = self.is_keys();
+        EditorState {
+            selection: !keys && self.editor.selection().is_some(),
+            read_only: keys,
+            empty: text.is_empty(),
+            clipboard_text,
+            running: self.running,
+            blank_range: self.run_range().is_none_or(|range| {
+                is_blank_sql(text.get(range).unwrap_or(""), self.dialect)
+            }),
+        }
+    }
+
+    fn run_range(&self) -> Option<Range<usize>> {
+        if let Some(selected) = self.editor.selected_bytes() {
+            return Some(selected);
+        }
+        let text = self.editor.text();
+        statement_at(&text, self.editor.offset(self.editor.caret()), self.dialect)
+    }
+
+    /// Opens the editor's right-click menu at `origin`, closing the other popovers.
+    pub fn open_editor_menu(&mut self, origin: EditorMenuOrigin, clipboard_text: bool) {
+        self.grid_menu = None;
+        self.value_view = None;
+        self.dialect_menu = None;
+        self.editor_menu = Some(EditorMenu::new(self.editor_state(clipboard_text), origin));
+    }
+
+    /// Closes the editor's menu and does what its `item` says (`docs/ux/workspace.md` 10.9).
+    pub fn editor_menu_item(&mut self, item: EditorMenuItem) -> TabAction {
+        self.editor_menu = None;
+        let keys = self.is_keys();
+        match item {
+            EditorMenuItem::Cut | EditorMenuItem::Copy => {
+                let text = if keys {
+                    Some(self.editor.text())
+                } else {
+                    self.editor.selected_text()
+                };
+                let Some(text) = text else {
+                    return TabAction::None;
+                };
+                if item == EditorMenuItem::Cut {
+                    if keys {
+                        return TabAction::None;
+                    }
+                    self.editor.apply(editor::Key::Backspace);
+                    self.edited(self.editor.caret().line);
+                }
+                let toast = copied_characters_toast(text.chars().count());
+                self.notice = Some(toast.clone());
+                TabAction::Copy { text, toast }
+            }
+            EditorMenuItem::Paste if !keys => TabAction::Paste,
+            EditorMenuItem::SelectAll if !keys => {
+                self.editor.apply(editor::Key::SelectAll);
+                TabAction::None
+            }
+            EditorMenuItem::Run => self.run_key(false),
+            EditorMenuItem::Explain if !keys => self.explain(false),
+            EditorMenuItem::ToggleComment => {
+                self.toggle_comment();
+                TabAction::None
+            }
+            EditorMenuItem::FormatStatement => {
+                self.format_statement();
+                TabAction::None
+            }
+            EditorMenuItem::Paste | EditorMenuItem::SelectAll | EditorMenuItem::Explain => {
+                TabAction::None
+            }
+        }
+    }
+
+    /// `Toggle comment` (`Ctrl/Cmd+/`, `docs/ux/workspace.md` 10.9) on the selection's lines,
+    /// a selection ending at a line's start leaving that line out, or the caret's line; one
+    /// undo step, the selection growing or shrinking with the text.
+    pub fn toggle_comment(&mut self) {
+        if self.is_keys() || self.editor.text().is_empty() {
+            return;
+        }
+        let caret = self.editor.caret();
+        let selection = self.editor.selection();
+        let (first, last) = match selection {
+            Some((start, end)) if end.line > start.line && end.column == 0 => {
+                (start.line, end.line - 1)
+            }
+            Some((start, end)) => (start.line, end.line),
+            None => (caret.line, caret.line),
+        };
+        let lines: Vec<&str> = self
+            .editor
+            .lines()
+            .iter()
+            .skip(first)
+            .take(last + 1 - first)
+            .map(String::as_str)
+            .collect();
+        let edits = comment_edits(&lines);
+        if edits.iter().all(Option::is_none) {
+            return;
+        }
+        let replaced: Vec<String> = lines
+            .iter()
+            .zip(&edits)
+            .map(|(line, edit)| edit.map_or_else(|| (*line).to_owned(), |edit| edit.applied(line)))
+            .collect();
+        let moved = |at: Position| Position {
+            line: at.line,
+            column: at
+                .line
+                .checked_sub(first)
+                .and_then(|index| edits.get(index).copied().flatten())
+                .map_or(at.column, |edit| edit.moved(at.column)),
+        };
+        let anchor = selection.map(|(start, end)| if caret == end { start } else { end });
+        let start = self.editor.offset(Position {
+            line: first,
+            column: 0,
+        });
+        let end = self.editor.offset(Position {
+            line: last,
+            column: usize::MAX,
+        });
+        self.editor.replace_bytes(start..end, &replaced.join("\n"));
+        match anchor {
+            Some(anchor) => self.editor.set_selection(moved(anchor), moved(caret)),
+            None => self.editor.place_caret(moved(caret)),
+        }
+        self.edited(first);
+    }
+
+    /// `Format statement` (`Ctrl/Cmd+Shift+F`, `docs/ux/workspace.md` 10.9): lays out the
+    /// selection, else the statement under the caret, as one undo step with the caret at its
+    /// start and `Formatted 1 statement` in the status bar; a range that does not lex stays
+    /// and the status bar says why.
+    pub fn format_statement(&mut self) {
+        if self.is_keys() || self.running {
+            return;
+        }
+        let Some(range) = self.run_range() else {
+            return;
+        };
+        let text = self.editor.text();
+        let Some(source) = text.get(range.clone()) else {
+            return;
+        };
+        if is_blank_sql(source, self.dialect) {
+            return;
+        }
+        let start = self.editor.position_at(range.start);
+        let indent = self
+            .editor
+            .lines()
+            .get(start.line)
+            .map_or(0, |line| line.chars().take_while(|c| *c == ' ').count());
+        match format_sql(source, self.dialect, indent) {
+            Ok(formatted) => {
+                self.editor.replace_bytes(range, &formatted.text);
+                self.editor.place_caret(start);
+                self.notice = Some(formatted.notice());
+                self.edited(start.line);
+            }
+            Err(error) => {
+                let at = self.editor.position_at(range.start + error.at);
+                self.notice = Some(format!(
+                    "Cannot format: {} at Ln {}, Col {}",
+                    error.what,
+                    at.line + 1,
+                    at.column + 1
+                ));
+            }
+        }
     }
 
     /// A run of `request` started: `Run` and `Run all` disable, `Stop` enables, the
