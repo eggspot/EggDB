@@ -25,6 +25,14 @@ fn into_not_allowed(position: usize) -> SqlError {
     SqlError::syntax("SELECT ... INTO is not allowed here", position)
 }
 
+fn into_inside_a_subquery(sqlserver: bool, position: usize) -> SqlError {
+    if sqlserver {
+        return SqlError::syntax("Incorrect syntax near the keyword 'INTO'.", position)
+            .with_sqlserver_code(156);
+    }
+    into_not_allowed(position)
+}
+
 impl Parser<'_> {
     pub(super) fn query_or_select_into(&mut self) -> SqlResult<Statement> {
         let outer = self.select_into.replace(None);
@@ -47,12 +55,13 @@ impl Parser<'_> {
     pub(super) fn select_into_table(&mut self) -> SqlResult<()> {
         let position = self.position();
         let dialect_allows = self.sqlserver() || self.postgresql();
-        if !dialect_allows
-            || self.query_depth > 0
-            || self.function_body
-            || self.routine_frame.is_some()
-            || self.select_into.is_none()
-        {
+        if !dialect_allows || self.function_body || self.routine_frame.is_some() {
+            return Err(self.not_supported("SELECT INTO"));
+        }
+        if self.query_depth > 0 {
+            return Err(into_inside_a_subquery(self.sqlserver(), position));
+        }
+        if self.select_into.is_none() {
             return Err(self.not_supported("SELECT INTO"));
         }
         if self.later_set_operand || matches!(self.select_into, Some(Some(_))) {

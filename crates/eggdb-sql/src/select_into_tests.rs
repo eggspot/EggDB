@@ -237,3 +237,28 @@ fn postgresql_select_into_in_a_later_query_of_a_union_is_42601() {
         );
     }
 }
+
+#[test]
+fn into_inside_a_subquery_is_a_syntax_error_in_each_dialect() {
+    let store = MemoryStore::default();
+    let mut postgresql = Session::new(&store);
+    let refused = error(&mut postgresql, "SELECT * FROM (SELECT 1 AS z INTO s4) q");
+    assert_eq!(refused.state().code(), "42601");
+    assert_eq!(refused.message(), "SELECT ... INTO is not allowed here");
+    let sqlserver_store = MemoryStore::default();
+    let mut sqlserver = sqlserver_products(&sqlserver_store);
+    let refused = error(
+        &mut sqlserver,
+        "SELECT id FROM (SELECT id INTO inner_copy FROM products) AS d",
+    );
+    assert_eq!(refused.vendor_code(), Some(156));
+    assert_eq!(
+        refused.message(),
+        "Incorrect syntax near the keyword 'INTO'."
+    );
+    assert!(
+        sqlserver
+            .execute("SELECT id FROM inner_copy", &mut |_| {})
+            .is_err()
+    );
+}
