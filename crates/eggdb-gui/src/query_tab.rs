@@ -895,13 +895,19 @@ impl QueryTab {
             .zip(&edits)
             .map(|(line, edit)| edit.map_or_else(|| (*line).to_owned(), |edit| edit.applied(line)))
             .collect();
-        let moved = |at: Position| Position {
+        let moved = |at: Position, starts_selection: bool| Position {
             line: at.line,
             column: at
                 .line
                 .checked_sub(first)
                 .and_then(|index| edits.get(index).copied().flatten())
-                .map_or(at.column, |edit| edit.moved(at.column)),
+                .map_or(at.column, |edit| {
+                    if starts_selection && edit.inserted > 0 && at.column == edit.at {
+                        at.column
+                    } else {
+                        edit.moved(at.column)
+                    }
+                }),
         };
         let anchor = selection.map(|(start, end)| if caret == end { start } else { end });
         let start = self.editor.offset(Position {
@@ -914,8 +920,10 @@ impl QueryTab {
         });
         self.editor.replace_bytes(start..end, &replaced.join("\n"));
         match anchor {
-            Some(anchor) => self.editor.set_selection(moved(anchor), moved(caret)),
-            None => self.editor.place_caret(moved(caret)),
+            Some(anchor) => self
+                .editor
+                .set_selection(moved(anchor, anchor < caret), moved(caret, caret < anchor)),
+            None => self.editor.place_caret(moved(caret, false)),
         }
         self.edited(first);
     }
@@ -1956,5 +1964,162 @@ mod tests {
         );
         tab.paste("2;\nSELECT 3;");
         assert_eq!(tab.editor.text(), "SELECT 2;\nSELECT 3;");
+    }
+
+    fn read_page(tab: &mut QueryTab, action: TabAction, database: &eggdb::Database) {
+        let TabAction::Run(request) = action else {
+            panic!("the keys tab asks for a page");
+        };
+        let scan = request.scan.clone().expect("a keys page scans");
+        let page = scan.scan_file(database).expect("the page reads");
+        tab.started();
+        tab.key_page_read(&request, page.end);
+        tab.finish(&request, vec![Ok(vec![page.table])], Duration::from_micros(500));
+    }
+
+    #[test]
+    fn a_keys_tab_filters_by_prefix_and_pages_forward_and_back() {
+        let path = std::env::temp_dir().join(format!(
+            "eggdb-gui-keys-tab-pages-{}.eggdb",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let database = eggdb::Database::open(&path).expect("the file opens");
+        database
+            .write(|transaction| {
+                transaction.create_collection("users")?;
+                let mut users = transaction.collection("users")?;
+                for number in 0..212_u32 {
+                    users.put(format!("user:{number:04}"), "u")?;
+                }
+                for number in 0..30_u32 {
+                    users.put(format!("guest:{number:02}"), "g")?;
+                }
+                Ok(())
+            })
+            .expect("the keys are written");
+        let scan = KeySpaceScan::new(
+            Some("users".to_owned()),
+            crate::catalog::KeyCount::Exactly(242),
+        );
+        let mut tab = QueryTab::keys(scan);
+        let now = Instant::now();
+        let first = TabAction::Run(tab.run_request(false).expect("Run scans page 1"));
+        read_page(&mut tab, first, &database);
+        assert_eq!(tab.summary, "100 keys shown of 242 · 0.5 ms");
+        assert!(!tab.key_pages.can_go_back() && tab.key_pages.can_go_next());
+        assert_eq!(
+            tab.keys_tab_key(press(Key::Character('f'), false, true), now),
+            Some(TabAction::None)
+        );
+        assert!(tab.key_pages.prefix_focused);
+        for letter in "user:".chars() {
+            tab.keys_tab_key(KeyPress::plain(Key::Character(letter)), now);
+        }
+        assert_eq!(tab.key_pages.prefix_text, "user:");
+        assert_eq!(tab.prefix_due(now), TabAction::None, "the field waits 150 ms");
+        let typed = tab.prefix_due(now + PREFIX_DEBOUNCE);
+        read_page(&mut tab, typed, &database);
+        assert_eq!(tab.editor.text(), "SCAN users PREFIX 'user:' LIMIT 100");
+        assert_eq!(tab.summary, "100 keys shown · 0.5 ms");
+        assert_eq!(
+            tab.grid.as_ref().map(ResultGrid::banner_text).as_deref(),
+            Some("Showing the first 100 keys starting with 'user:' in key order.")
+        );
+        tab.key_pages.prefix_focused = false;
+        tab.focus(TabFocus::Grid);
+        let mut alt_page_down = KeyPress::plain(Key::PageDown);
+        alt_page_down.modifiers.alt = true;
+        let next = tab
+            .keys_tab_key(alt_page_down, now)
+            .expect("Alt+PgDn pages");
+        read_page(&mut tab, next, &database);
+        assert_eq!(
+            tab.editor.text(),
+            "SCAN users PREFIX 'user:' AFTER 'user:0099' LIMIT 100"
+        );
+        assert_eq!(tab.summary, "Keys 101–200 · 0.5 ms");
+        assert_eq!(
+            tab.grid.as_ref().and_then(|grid| grid.value(grid.current)),
+            Some("user:0100")
+        );
+        let last = tab.next_page();
+        read_page(&mut tab, last, &database);
+        assert_eq!(tab.summary, "Keys 201–212 · 0.5 ms");
+        assert!(!tab.key_pages.can_go_next(), "Next 100 is off on the last page");
+        assert!(tab.grid.as_ref().is_some_and(|grid| !grid.truncated()));
+        let back = tab.previous_page();
+        read_page(&mut tab, back, &database);
+        assert_eq!(tab.summary, "Keys 101–200 · 0.5 ms");
+        assert_eq!(
+            tab.grid.as_ref().map(|grid| grid.current.row),
+            Some(99),
+            "Back lands on the page's last row"
+        );
+        tab.focus_prefix();
+        tab.keys_tab_key(KeyPress::plain(Key::Character('x')), now);
+        let none = tab.keys_tab_key(KeyPress::plain(Key::Enter), now);
+        read_page(&mut tab, none.expect("Enter runs at once"), &database);
+        assert_eq!(tab.summary, "0 keys start with 'x' · 0.5 ms");
+        assert!(!tab.key_pages.can_go_back(), "a new prefix starts on page 1");
+        tab.focus_prefix();
+        for letter in "\\x4".chars() {
+            tab.keys_tab_key(KeyPress::plain(Key::Character(letter)), now);
+        }
+        assert_eq!(
+            tab.key_pages.prefix_error().as_deref(),
+            Some("Error: \\x needs two hex digits")
+        );
+        assert_eq!(tab.prefix_due(now + PREFIX_DEBOUNCE), TabAction::None);
+        drop(database);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_editor_menu_formats_comments_and_copies_with_one_undo_step_each() {
+        let mut tab = QueryTab::with_text("Query 1", "select a, b from t");
+        let origin = EditorMenuOrigin::Pointer { x: 400.0, y: 120.0 };
+        tab.open_editor_menu(origin, true);
+        let menu = tab.editor_menu.expect("the menu opens");
+        assert_eq!(menu.run_label, crate::editor_menu::RUN_STATEMENT);
+        assert_eq!(menu.enabled, [false, false, true, true, true, true, true, true]);
+        tab.editor_menu_item(EditorMenuItem::FormatStatement);
+        assert_eq!(tab.editor.text(), "SELECT\n  a,\n  b\nFROM t");
+        assert_eq!(tab.notice.as_deref(), Some("Formatted 1 statement"));
+        tab.editor.apply(editor::Key::Undo);
+        assert_eq!(tab.editor.text(), "select a, b from t");
+        tab.editor.apply(editor::Key::SelectAll);
+        tab.editor_menu_item(EditorMenuItem::ToggleComment);
+        assert_eq!(tab.editor.text(), "-- select a, b from t");
+        assert_eq!(
+            tab.editor.selected_text().as_deref(),
+            Some("-- select a, b from t")
+        );
+        tab.editor_menu_item(EditorMenuItem::ToggleComment);
+        assert_eq!(tab.editor.text(), "select a, b from t");
+        let cut = tab.editor_menu_item(EditorMenuItem::Cut);
+        assert!(matches!(cut, TabAction::Copy { ref text, .. } if text == "select a, b from t"));
+        assert_eq!(tab.editor.text(), "");
+        tab.open_editor_menu(origin, false);
+        assert_eq!(
+            tab.editor_menu.map(|menu| menu.enabled),
+            Some([false, false, false, false, false, false, false, false])
+        );
+        let mut broken = QueryTab::with_text("Query 2", "select 'abc");
+        broken.format_statement();
+        assert_eq!(broken.editor.text(), "select 'abc");
+        assert_eq!(
+            broken.notice.as_deref(),
+            Some("Cannot format: unclosed string at Ln 1, Col 8")
+        );
+        let scan = KeySpaceScan::new(None, crate::catalog::KeyCount::Exactly(3));
+        let mut keys = QueryTab::keys(scan);
+        keys.open_editor_menu(origin, true);
+        let menu = keys.editor_menu.expect("a keys tab has the menu too");
+        assert_eq!(menu.run_label, crate::editor_menu::RUN_SCAN);
+        assert_eq!(menu.enabled, [false, true, false, false, true, false, false, false]);
+        let copied = keys.editor_menu_item(EditorMenuItem::Copy);
+        assert!(matches!(copied, TabAction::Copy { ref text, .. } if text == "SCAN LIMIT 100"));
+        assert!(matches!(keys.editor_menu_item(EditorMenuItem::Run), TabAction::Run(_)));
     }
 }

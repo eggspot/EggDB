@@ -52,9 +52,6 @@ pub mod inspector;
 /// A keys tab's scan of a key space's first keys, spelled for the keys grid
 /// (`docs/ux/workspace.md` 10.4).
 pub mod key_scan;
-/// A keys tab's scan over the RESP protocol of a server reached with `redis://`
-/// (`docs/ux/workspace.md` 10.10).
-pub mod resp_keys;
 /// The main window's layouts (`docs/ux/gui-layouts.md`): EggDB's own and those that work like
 /// clients people already know, each with its regions, labels and shortcut table.
 pub mod layout;

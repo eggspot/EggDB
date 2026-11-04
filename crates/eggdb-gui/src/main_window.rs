@@ -2524,22 +2524,35 @@ fn results(paint: &mut Painter<'_, '_>, window: &MainWindow) {
             paint.rect(x, 414.0, underline, 2.0, theme.accent);
         }
     }
-    paint.text(
-        faces.ui,
-        &tab.summary,
-        summary_x(tab, layout),
-        393.0,
-        BODY,
-        theme.text_secondary,
-    );
-    paint.text(
-        faces.ui,
-        "Export…",
-        centre_right - 76.0,
-        393.0,
-        BODY,
-        theme.text_primary,
-    );
+    if tab.is_keys() {
+        let (field, _, _) = keys_header_rects(centre_right);
+        let left = summary_x(tab, layout);
+        let summary = elided(
+            faces.ui,
+            &tab.summary,
+            field.x - KEYS_HEADER_GAP - left,
+            BODY.0,
+        );
+        paint.text(faces.ui, &summary, left, 393.0, BODY, theme.text_secondary);
+        keys_header(paint, tab, centre_right);
+    } else {
+        paint.text(
+            faces.ui,
+            &tab.summary,
+            summary_x(tab, layout),
+            393.0,
+            BODY,
+            theme.text_secondary,
+        );
+        paint.text(
+            faces.ui,
+            "Export…",
+            centre_right - 76.0,
+            393.0,
+            BODY,
+            theme.text_primary,
+        );
+    }
     if let Some(plan) = tab.plan.as_ref().filter(|_| tab.view == ResultView::Plan) {
         plan_body(paint, plan, window.hovered_plan_node());
         return;
@@ -2594,6 +2607,172 @@ fn results(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     }
     grid_body(paint, grid, top);
     grid_handles(paint, grid, top, window);
+    if grid.rows.is_empty()
+        && let Some(empty) = grid.key_scan.as_ref().and_then(KeySpaceScan::empty_text)
+    {
+        paint.text(
+            faces.ui,
+            &empty,
+            272.0,
+            top + grid::HEADER_HEIGHT + 4.0,
+            BODY,
+            theme.text_secondary,
+        );
+    }
+}
+
+const KEYS_HEADER_GAP: f32 = 12.0;
+const KEYS_FIELD_WIDTH: f32 = 200.0;
+const KEYS_BACK_WIDTH: f32 = 72.0;
+const KEYS_NEXT_WIDTH: f32 = 92.0;
+const KEYS_BUTTON_GAP: f32 = 8.0;
+
+/// The keys tab's `Key prefix` field, `Back` and `Next 100` in the results header
+/// (`docs/ux/workspace.md` 10.10), right-aligned to a header ending at `centre_right`.
+pub fn keys_header_rects(centre_right: f32) -> (Rect, Rect, Rect) {
+    let next = Rect::new(
+        centre_right - KEYS_HEADER_GAP - KEYS_NEXT_WIDTH,
+        388.0,
+        KEYS_NEXT_WIDTH,
+        28.0,
+    );
+    let back = Rect::new(
+        next.x - KEYS_BUTTON_GAP - KEYS_BACK_WIDTH,
+        388.0,
+        KEYS_BACK_WIDTH,
+        28.0,
+    );
+    let field = Rect::new(
+        back.x - KEYS_HEADER_GAP - KEYS_FIELD_WIDTH,
+        388.0,
+        KEYS_FIELD_WIDTH,
+        28.0,
+    );
+    (field, back, next)
+}
+
+fn keys_header(paint: &mut Painter<'_, '_>, tab: &QueryTab, centre_right: f32) {
+    let theme = paint.theme;
+    let faces = paint.faces;
+    let pages = &tab.key_pages;
+    let (field, back, next) = keys_header_rects(centre_right);
+    let error = pages.prefix_error();
+    paint.button(field, Button::Secondary);
+    if error.is_some() {
+        paint.canvas.stroke_rect(field, theme.error);
+    } else if pages.prefix_focused {
+        paint.canvas.stroke_rect(field, theme.accent);
+    }
+    let icon = (field.x + 14.0, field.y + 12.0);
+    paint
+        .canvas
+        .stroke_circle(icon.0, icon.1, 8.0, 1.5, theme.text_secondary);
+    paint.canvas.line(
+        (icon.0 + 3.0, icon.1 + 3.0),
+        (icon.0 + 6.0, icon.1 + 6.0),
+        1.5,
+        theme.text_secondary,
+    );
+    let text_left = field.x + 28.0;
+    let room = field.x + field.w - 8.0 - text_left;
+    if pages.prefix_text.is_empty() {
+        paint.text(faces.ui, "Prefix", text_left, 393.0, BODY, theme.text_disabled);
+    } else {
+        let shown = elided(faces.ui, &pages.prefix_text, room, BODY.0);
+        let width = faces.ui.width(&shown, BODY.0);
+        if pages.prefix_focused && pages.prefix_selected {
+            paint.rect(text_left, field.y + 5.0, width, 18.0, theme.selection);
+        }
+        let ink = if tab.running {
+            theme.text_disabled
+        } else {
+            theme.text_primary
+        };
+        paint.text(faces.ui, &shown, text_left, 393.0, BODY, ink);
+    }
+    if pages.prefix_focused && !pages.prefix_selected {
+        let caret = text_left + faces.ui.width(&pages.prefix_text, BODY.0).min(room);
+        paint.rect(caret.round(), field.y + 5.0, 1.0, 18.0, theme.accent);
+    }
+    if let Some(line) = &error {
+        paint.text(
+            faces.ui,
+            line,
+            field.x,
+            field.y + field.h + 2.0,
+            SMALL,
+            theme.error,
+        );
+    }
+    for (rect, label, enabled) in [
+        (back, "Back", pages.can_go_back() && !tab.running),
+        (next, "Next 100", pages.can_go_next() && !tab.running),
+    ] {
+        paint.button(rect, Button::Ghost);
+        let ink = if enabled {
+            theme.text_primary
+        } else {
+            theme.text_disabled
+        };
+        let width = faces.ui.width(label, BODY.0);
+        paint.text(
+            faces.ui,
+            label,
+            rect.x + (rect.w - width) / 2.0,
+            393.0,
+            BODY,
+            ink,
+        );
+    }
+}
+
+fn keys_header_nodes(nodes: &mut Vec<AccessNode>, tab: &QueryTab, centre_right: f32) {
+    let pages = &tab.key_pages;
+    let (field, back, next) = keys_header_rects(centre_right);
+    let mut prefix = node(
+        NODE_KEY_PREFIX,
+        NODE_MAIN_WINDOW,
+        AccessRole::TextField,
+        "Key prefix",
+        (field.x, field.y, field.w, field.h),
+    );
+    prefix.value = Some(pages.prefix_text.clone());
+    prefix.placeholder = Some("Prefix".to_owned());
+    prefix.state.focused = pages.prefix_focused;
+    prefix.state.disabled = tab.running;
+    prefix.description = pages.prefix_error();
+    prefix.state.invalid = prefix.description.is_some();
+    prefix.actions.focus = true;
+    prefix.actions.set_value = true;
+    nodes.push(prefix);
+    for (id, rect, name, shortcut, enabled) in [
+        (
+            NODE_KEYS_BACK,
+            back,
+            "Back",
+            "Alt+PgUp",
+            pages.can_go_back(),
+        ),
+        (
+            NODE_KEYS_NEXT,
+            next,
+            "Next 100",
+            "Alt+PgDn",
+            pages.can_go_next(),
+        ),
+    ] {
+        let mut button = node(
+            id,
+            NODE_MAIN_WINDOW,
+            AccessRole::Button,
+            name,
+            (rect.x, rect.y, rect.w, rect.h),
+        );
+        button.shortcut = Some(shortcut.to_owned());
+        button.state.disabled = !enabled || tab.running;
+        button.actions.invoke = enabled && !tab.running;
+        nodes.push(button);
+    }
 }
 
 const PLAN_SEGMENT_X: f32 = 428.0;
@@ -3334,6 +3513,41 @@ impl MainWindow {
         WindowAction::Inspect(item)
     }
 
+    fn keys_header_access(&mut self, id: u32, action: &AccessAction) -> Option<Vec<KeyPress>> {
+        if !self.tab.is_keys() {
+            return None;
+        }
+        let alt = |key: Key| KeyPress {
+            key,
+            modifiers: eggdb_platform::window::Modifiers {
+                alt: true,
+                ..Default::default()
+            },
+        };
+        match id {
+            NODE_KEY_PREFIX => {
+                self.focus_tab();
+                self.tab.focus_prefix();
+                if let AccessAction::SetValue(text) = action {
+                    self.tab.key_pages.prefix_text = text.clone();
+                    return Some(vec![KeyPress::plain(Key::Enter)]);
+                }
+                Some(Vec::new())
+            }
+            NODE_KEYS_BACK | NODE_KEYS_NEXT if *action == AccessAction::Invoke => {
+                self.focus_tab();
+                let key = if id == NODE_KEYS_BACK {
+                    Key::PageUp
+                } else {
+                    Key::PageDown
+                };
+                Some(vec![alt(key)])
+            }
+            NODE_KEYS_BACK | NODE_KEYS_NEXT => Some(Vec::new()),
+            _ => None,
+        }
+    }
+
     fn ddl_key(&mut self, press: KeyPress) -> WindowAction {
         let primary = press.modifiers.control || press.modifiers.command;
         match press.key {
@@ -3958,6 +4172,12 @@ pub const NODE_LAYOUT_ITEM: u32 = 63_100;
 pub const NODE_FIRST_TAB_CLOSE: u32 = 61_500;
 /// The tab strip's `+` button.
 pub const NODE_NEW_TAB: u32 = 61_999;
+/// A keys tab's `Key prefix` field (`docs/ux/workspace.md` 10.10).
+pub const NODE_KEY_PREFIX: u32 = 63_200;
+/// A keys tab's `Back` button.
+pub const NODE_KEYS_BACK: u32 = 63_201;
+/// A keys tab's `Next 100` button.
+pub const NODE_KEYS_NEXT: u32 = 63_202;
 const TAB_CLOSE_NODES_END: u32 = NODE_FIRST_TAB_CLOSE + tab_strip::MOST_TABS as u32;
 
 fn node(
@@ -4195,6 +4415,9 @@ impl MainWindow {
             self.show_tab(position);
             return vec![primary_press('w')];
         }
+        if let Some(keys) = self.keys_header_access(node.id, action) {
+            return keys;
+        }
         if let Some(chord) = toolbar_chord(node.id, self.layout) {
             if *action != AccessAction::Invoke {
                 return Vec::new();
@@ -4363,6 +4586,9 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
         &status_line::spoken(&tab.summary),
         (summary_x(tab, window.layout), 386.0, 760.0, 32.0),
     ));
+    if tab.is_keys() {
+        keys_header_nodes(&mut nodes, tab, window.centre_right());
+    }
     if let Some(plan) = tab
         .plan
         .as_ref()
