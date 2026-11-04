@@ -1,5 +1,6 @@
 [package]
 name = "eggdb-ui"
+autotests = false
 description = "EggDB's terminal user interface: browse a database file full screen in any terminal."
 version.workspace = true
 edition.workspace = true
@@ -12,3 +13,7 @@ workspace = true
 [dependencies]
 eggdb-commands = { path = "../eggdb-commands" }
 eggdb-platform = { path = "../eggdb-platform" }
+
+[[test]]
+name = "all"
+path = "tests/all/main.rs"

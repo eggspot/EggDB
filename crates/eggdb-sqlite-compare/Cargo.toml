@@ -1,5 +1,6 @@
 [package]
 name = "eggdb-sqlite-compare"
+autotests = false
 description = "EggDB's embedded key-value store measured against SQLite on the same machine, gated against the committed baseline (D7, D94). Never published and never shipped."
 version = "0.1.0"
 edition = "2024"
@@ -29,3 +30,7 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[[test]]
+name = "all"
+path = "tests/all/main.rs"

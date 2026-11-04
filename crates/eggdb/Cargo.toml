@@ -1,5 +1,6 @@
 [package]
 name = "eggdb"
+autotests = false
 description = "EggDB: one database for every kind of data, written from scratch in Rust."
 version.workspace = true
 edition.workspace = true
@@ -54,3 +55,7 @@ eggdb-storage = { path = "../eggdb-storage" }
 eggdb-tdswire = { path = "../eggdb-tdswire" }
 eggdb-tls = { path = "../eggdb-tls" }
 eggdb-ui = { path = "../eggdb-ui" }
+
+[[test]]
+name = "all"
+path = "tests/all/main.rs"

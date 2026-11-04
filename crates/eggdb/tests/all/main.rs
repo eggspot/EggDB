@@ -1,0 +1,32 @@
+//! Integration tests of `eggdb`, built as one test program (docs/testing.md, D335).
+
+mod common;
+mod backup;
+mod cli;
+mod cli_busy;
+mod collections;
+mod command_model;
+mod concurrent;
+mod copy;
+mod database;
+mod dry_run;
+mod expiry;
+mod follow;
+mod large_values;
+mod lock_across_processes;
+mod mcp;
+mod model;
+mod paging;
+mod pg_catalog;
+mod restore;
+mod restore_aof;
+mod restore_oracle;
+mod restore_sqlserver;
+mod sample_files;
+mod scans;
+mod serve;
+mod serve_databases;
+mod shell_blocks;
+mod sql;
+mod statement_statistics;
+mod transactions;

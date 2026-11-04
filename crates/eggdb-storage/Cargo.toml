@@ -1,5 +1,6 @@
 [package]
 name = "eggdb-storage"
+autotests = false
 description = "EggDB's storage engine: the file format, its checksums and the structures that keep data on disk."
 version.workspace = true
 edition.workspace = true
@@ -13,3 +14,7 @@ eggdb-platform = { path = "../eggdb-platform" }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "all"
+path = "tests/all/main.rs"

@@ -1,0 +1,1451 @@
+//! `eggdb mcp` run as a real child process, driven by a scripted MCP client over its stdin and
+//! stdout, every stdout line checked to be a JSON-RPC message; and `eggdb audit` listing the
+//! calls. The databases are built by the tests, never the frozen sample files (D96).
+
+use crate::common;
+
+use common::TempPath;
+use eggdb_sql::json::{Json, Node, parse_document};
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Output, Stdio};
+use std::sync::mpsc::{Receiver, channel};
+use std::time::Duration;
+
+const ANSWER_WAIT: Duration = Duration::from_secs(60);
+
+fn eggdb(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_eggdb"))
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn audit_path(database: &Path) -> PathBuf {
+    let mut path = database.as_os_str().to_owned();
+    path.push(".mcp-audit.jsonl");
+    PathBuf::from(path)
+}
+
+struct Audit(PathBuf);
+
+impl Drop for Audit {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn sample(name: &str, rows: usize) -> (TempPath, Audit) {
+    let file = TempPath::new(name);
+    let path = file.path().to_str().unwrap().to_owned();
+    let mut sql = String::from(
+        "CREATE TABLE users (id integer PRIMARY KEY, name text NOT NULL, email text); \
+         INSERT INTO users VALUES (1, 'Ada', 'ada@example.com'), (2, 'Grace', NULL), (3, 'Margaret', 'mh@example.com');",
+    );
+    if rows > 0 {
+        sql.push_str(" CREATE TABLE numbers (n integer PRIMARY KEY, v integer);");
+        for chunk in (1..=rows).collect::<Vec<_>>().chunks(1000) {
+            let values: Vec<String> = chunk.iter().map(|n| format!("({n}, {})", n % 97)).collect();
+            sql.push_str(&format!(
+                " INSERT INTO numbers VALUES {};",
+                values.join(", ")
+            ));
+        }
+    }
+    let mut creating = Command::new(env!("CARGO_BIN_EXE_eggdb"))
+        .args(["sql", &path, "--create"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Some(mut input) = creating.stdin.take() {
+        input.write_all(sql.as_bytes()).unwrap();
+    }
+    let created = creating.wait_with_output().unwrap();
+    assert!(created.status.success(), "{}", stderr(&created));
+    let put = eggdb(&["put", &path, "greeting", "hello"]);
+    assert!(put.status.success(), "{}", stderr(&put));
+    let audit = Audit(audit_path(file.path()));
+    let _ = std::fs::remove_file(&audit.0);
+    (file, audit)
+}
+
+fn is_json_rpc(node: &Node) -> bool {
+    let Json::Object(members) = &node.value else {
+        return false;
+    };
+    let has = |name: &str| members.iter().any(|(member, _)| member == name);
+    has("jsonrpc") && has("id") && (has("result") ^ has("error"))
+}
+
+struct Mcp {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    lines: Receiver<String>,
+    next_id: u64,
+}
+
+impl Mcp {
+    fn start(database: &Path, options: &[&str]) -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_eggdb"))
+            .arg("mcp")
+            .arg(database)
+            .args(options)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (sender, lines) = channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { return };
+                if sender.send(line).is_err() {
+                    return;
+                }
+            }
+        });
+        let stdin = child.stdin.take();
+        Self {
+            child,
+            stdin,
+            lines,
+            next_id: 0,
+        }
+    }
+
+    fn send(&mut self, message: &str) {
+        let stdin = self.stdin.as_mut().unwrap();
+        stdin.write_all(message.as_bytes()).unwrap();
+        stdin.write_all(b"\n").unwrap();
+        stdin.flush().unwrap();
+    }
+
+    fn answer(&mut self) -> Node {
+        let line = self.lines.recv_timeout(ANSWER_WAIT).expect("an answer");
+        assert!(line.is_ascii(), "{line}");
+        let node = parse_document(&line).unwrap_or_else(|error| panic!("{line}: {error:?}"));
+        assert!(is_json_rpc(&node), "not a JSON-RPC answer: {line}");
+        node
+    }
+
+    fn request(&mut self, method: &str, params: &str) -> Node {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.send(&format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"{method}","params":{params}}}"#
+        ));
+        let answer = self.answer();
+        assert_eq!(text_at(&answer, &["id"]), id.to_string());
+        answer
+    }
+
+    fn call(&mut self, tool: &str, arguments: &str) -> Node {
+        self.request(
+            "tools/call",
+            &format!(r#"{{"name":"{tool}","arguments":{arguments}}}"#),
+        )
+    }
+
+    fn initialize(&mut self) {
+        let answer = self.request(
+            "initialize",
+            r#"{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"acceptance-test","version":"1.0"}}"#,
+        );
+        assert_eq!(
+            text_at(&answer, &["result", "protocolVersion"]),
+            "2025-11-25"
+        );
+        self.send(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
+    }
+
+    fn finish(mut self) -> (ExitStatus, String) {
+        self.stdin = None;
+        let status = self.child.wait().unwrap();
+        while let Ok(line) = self.lines.recv_timeout(Duration::from_secs(5)) {
+            let node = parse_document(&line).unwrap_or_else(|error| panic!("{line}: {error:?}"));
+            assert!(is_json_rpc(&node), "{line}");
+        }
+        let mut stderr = String::new();
+        if let Some(mut pipe) = self.child.stderr.take() {
+            let _ = std::io::Read::read_to_string(&mut pipe, &mut stderr);
+        }
+        (status, stderr)
+    }
+}
+
+fn get<'n>(node: &'n Node, path: &[&str]) -> &'n Node {
+    let mut node = node;
+    for step in path {
+        node = match &node.value {
+            Json::Object(members) => members
+                .iter()
+                .find(|(name, _)| name == step)
+                .map(|(_, value)| value)
+                .unwrap_or_else(|| panic!("no {step} in {node:?}")),
+            Json::Array(items) => &items[step.parse::<usize>().unwrap()],
+            _ => panic!("cannot step into {step}"),
+        };
+    }
+    node
+}
+
+fn text_at(node: &Node, path: &[&str]) -> String {
+    match &get(node, path).value {
+        Json::String(text) | Json::Number(text) => text.clone(),
+        Json::Boolean(value) => value.to_string(),
+        Json::Null => "null".to_owned(),
+        other => panic!("not a scalar: {other:?}"),
+    }
+}
+
+fn canonical(node: &Node) -> String {
+    match &node.value {
+        Json::Null => "null".to_owned(),
+        Json::Boolean(value) => value.to_string(),
+        Json::Number(text) => text.clone(),
+        Json::String(text) => format!("{text:?}"),
+        Json::Array(items) => format!(
+            "[{}]",
+            items.iter().map(canonical).collect::<Vec<_>>().join(",")
+        ),
+        Json::Object(members) => format!(
+            "{{{}}}",
+            members
+                .iter()
+                .map(|(name, value)| format!("{name:?}:{}", canonical(value)))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    }
+}
+
+fn result(answer: &Node) -> &Node {
+    get(answer, &["result", "structuredContent"])
+}
+
+fn error_code(answer: &Node) -> String {
+    assert_eq!(
+        text_at(answer, &["result", "isError"]),
+        "true",
+        "{answer:?}"
+    );
+    text_at(result(answer), &["error", "code"])
+}
+
+fn ok(answer: &Node) -> &Node {
+    assert_eq!(
+        text_at(answer, &["result", "isError"]),
+        "false",
+        "{answer:?}"
+    );
+    result(answer)
+}
+
+#[test]
+fn an_agent_reads_but_never_writes_and_every_call_is_audited() {
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    let (file, audit) = sample("mcp-acceptance", 0);
+    let path = file.path().to_str().unwrap();
+    let none_yet = eggdb(&["audit", path]);
+    assert!(none_yet.status.success());
+    assert!(
+        stderr(&none_yet).contains("no MCP calls yet"),
+        "{}",
+        stderr(&none_yet)
+    );
+    let mut mcp = Mcp::start(file.path(), &[]);
+    mcp.send(r#"{"jsonrpc":"2.0","id":"probe","method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#);
+    let discover = mcp.answer();
+    assert_eq!(text_at(&discover, &["error", "code"]), "-32601");
+    mcp.initialize();
+    let listed = mcp.request("tools/list", "{}");
+    let Json::Array(tools) = &get(&listed, &["result", "tools"]).value else {
+        panic!("{listed:?}");
+    };
+    assert_eq!(tools.len(), 8);
+    let described = mcp.call("describe_table", r#"{"table":"users"}"#);
+    let described = ok(&described);
+    assert_eq!(text_at(described, &["columns", "2", "name"]), "email");
+    assert_eq!(text_at(described, &["rows", "count"]), "3");
+    let postgresql = mcp.call(
+        "run_sql",
+        r#"{"sql":"SELECT id, name FROM users WHERE email IS NOT NULL ORDER BY id"}"#,
+    );
+    let oracle = mcp.call(
+        "run_sql",
+        r#"{"sql":"SELECT id, name FROM users WHERE email IS NOT NULL ORDER BY id","dialect":"oracle"}"#,
+    );
+    assert_eq!(
+        canonical(get(ok(&postgresql), &["rows"])),
+        canonical(get(ok(&oracle), &["rows"]))
+    );
+    assert_eq!(text_at(ok(&oracle), &["rows", "1", "1"]), "Margaret");
+    let write = mcp.call(
+        "run_sql",
+        r#"{"sql":"INSERT INTO users VALUES (4, 'Eve', NULL)"}"#,
+    );
+    assert_eq!(error_code(&write), "read_only");
+    let sneaky = mcp.call("run_sql", r#"{"sql":"COMMIT; DROP TABLE users"}"#);
+    assert_eq!(error_code(&sneaky), "transaction_control_refused");
+    let still_there = mcp.call("run_sql", r#"{"sql":"SELECT count(*) FROM users"}"#);
+    assert_eq!(text_at(ok(&still_there), &["rows", "0", "0"]), "3");
+    let writer = eggdb(&[
+        "sql",
+        path,
+        "-c",
+        "INSERT INTO users VALUES (4, 'Katherine', NULL)",
+    ]);
+    assert!(writer.status.success(), "{}", stderr(&writer));
+    let seen = mcp.call(
+        "run_sql",
+        r#"{"sql":"SELECT name FROM users WHERE id = 4"}"#,
+    );
+    assert_eq!(text_at(ok(&seen), &["rows", "0", "0"]), "Katherine");
+    {
+        let held = eggdb::Database::open(file.path()).unwrap();
+        let busy = mcp.call("list_tables", "{}");
+        assert_eq!(error_code(&busy), "database_busy");
+        held.close().unwrap();
+    }
+    {
+        let reader =
+            eggdb::Database::open_with(file.path(), eggdb::Options::new().read_only(true)).unwrap();
+        let beside = mcp.call("kv_get", r#"{"key":"greeting"}"#);
+        assert_eq!(text_at(ok(&beside), &["entry", "value"]), "hello");
+        reader.close().unwrap();
+    }
+    let many = mcp.call("run_sql", r#"{"sql":"SELECT id FROM users","max_rows":2}"#);
+    assert_eq!(text_at(ok(&many), &["truncated_by"]), "max_rows");
+    let (status, messages) = mcp.finish();
+    assert!(status.success(), "{messages}");
+    assert!(messages.contains("serving"), "{messages}");
+    let listing = eggdb(&["audit", path, "--format", "text", "--color", "never"]);
+    assert!(listing.status.success(), "{}", stderr(&listing));
+    let text = stdout(&listing);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 11, "{text}");
+    assert!(lines[0].contains("server started: eggdb"), "{text}");
+    assert!(lines[1].contains("describe_table") && lines[1].contains("{\"table\":\"users\"}"));
+    assert!(lines[4].contains("read_only") && lines[4].contains("INSERT INTO users"));
+    assert!(lines[5].contains("transaction_control_refused"));
+    assert!(lines[8].contains("database_busy"));
+    assert!(lines[10].contains("2+"), "{}", lines[10]);
+    let summary = stderr(&listing);
+    assert!(
+        summary.contains("10 calls, 3 errors, by acceptance-test 1.0 (the name the client gave)"),
+        "{summary}"
+    );
+    let none_shown = eggdb(&[
+        "audit", path, "-n", "0", "--format", "text", "--color", "never",
+    ]);
+    assert!(stdout(&none_shown).is_empty());
+    assert!(
+        stderr(&none_shown).starts_with("last 0 of 10 calls, 3 errors"),
+        "{}",
+        stderr(&none_shown)
+    );
+    let json = eggdb(&["audit", path, "--format", "json", "-n", "3"]);
+    let records: Vec<Node> = stdout(&json)
+        .lines()
+        .map(|line| parse_document(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 3);
+    assert_eq!(text_at(&records[2], &["tool"]), "run_sql");
+    assert_eq!(text_at(&records[2], &["client", "name"]), "acceptance-test");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&audit.0).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+}
+
+#[test]
+fn a_call_past_its_time_limit_is_stopped_and_a_stuck_one_is_stopped_or_ends_the_server() {
+    let (file, audit) = sample("mcp-time-limit", 5000);
+    let mut mcp = Mcp::start(file.path(), &["--time-limit", "1"]);
+    mcp.initialize();
+    mcp.send(r#"{"jsonrpc":"2.0","id":50,"method":"tools/call","params":{"name":"run_sql","arguments":{"sql":"SELECT count(*) FROM numbers a WHERE (SELECT count(*) FROM numbers b WHERE b.n <= a.n) > 0"}}}"#);
+    std::thread::sleep(Duration::from_millis(300));
+    let refused_writer = eggdb(&[
+        "put",
+        file.path().to_str().unwrap(),
+        "during",
+        "call",
+        "--busy-timeout",
+        "0",
+    ]);
+    assert_eq!(
+        refused_writer.status.code(),
+        Some(5),
+        "{}",
+        stderr(&refused_writer)
+    );
+    assert!(
+        stderr(&refused_writer).contains("eggdb mcp"),
+        "{}",
+        stderr(&refused_writer)
+    );
+    let reads = mcp.answer();
+    assert_eq!(error_code(&reads), "time_limit");
+    mcp.send(r#"{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"run_sql","arguments":{"sql":"WITH k AS (SELECT n FROM numbers) SELECT count(*) FROM k x CROSS JOIN k y CROSS JOIN k z WHERE x.n + y.n + z.n < 0"}}}"#);
+    match mcp.lines.recv_timeout(Duration::from_secs(10)) {
+        Ok(line) => {
+            let stopped = parse_document(&line).unwrap();
+            assert_eq!(error_code(&stopped), "time_limit");
+            let (status, _) = mcp.finish();
+            assert!(status.success());
+        }
+        Err(_) => {
+            let (status, _) = mcp.finish();
+            assert_eq!(status.code(), Some(3));
+            let records = std::fs::read_to_string(&audit.0).unwrap();
+            assert!(
+                records.contains("\"event\":\"time_limit_exceeded\""),
+                "{records}"
+            );
+        }
+    }
+    let writer = eggdb(&["put", file.path().to_str().unwrap(), "after", "exit"]);
+    assert!(writer.status.success(), "{}", stderr(&writer));
+}
+
+#[test]
+fn a_log_left_by_an_unclean_writer_is_read_without_changing_the_file() {
+    let (file, _audit) = sample("mcp-unclean", 0);
+    {
+        let db = eggdb::Database::open(file.path()).unwrap();
+        db.put("late", "commit").unwrap();
+        drop(db);
+    }
+    let before = std::fs::read(file.path()).unwrap();
+    let mut mcp = Mcp::start(file.path(), &[]);
+    mcp.initialize();
+    let late = mcp.call("kv_get", r#"{"key":"late"}"#);
+    assert_eq!(text_at(ok(&late), &["entry", "value"]), "commit");
+    let (status, _) = mcp.finish();
+    assert!(status.success());
+    assert_eq!(std::fs::read(file.path()).unwrap(), before);
+}
+
+#[test]
+fn a_damaged_file_is_reported_as_damaged() {
+    let (file, _audit) = sample("mcp-damaged", 3000);
+    let mut mcp = Mcp::start(file.path(), &[]);
+    mcp.initialize();
+    let mut bytes = std::fs::read(file.path()).unwrap();
+    let page = 4096;
+    for byte in &mut bytes[page * 2..] {
+        *byte ^= 0x5a;
+    }
+    std::fs::write(file.path(), &bytes).unwrap();
+    let answer = mcp.call("run_sql", r#"{"sql":"SELECT count(*) FROM numbers"}"#);
+    assert_eq!(error_code(&answer), "damaged");
+    let (status, _) = mcp.finish();
+    assert!(status.success());
+}
+
+#[test]
+fn startup_refuses_a_missing_file_an_unwritable_audit_file_and_a_bad_time_limit() {
+    let missing = TempPath::new("mcp-missing");
+    let path = missing.path().to_str().unwrap();
+    let refused = eggdb(&["mcp", path]);
+    assert_eq!(refused.status.code(), Some(3));
+    assert!(
+        stderr(&refused).contains("eggdb mcp never creates a database"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(!missing.path().exists());
+    let (file, audit) = sample("mcp-audit-blocked", 0);
+    std::fs::create_dir(&audit.0).unwrap();
+    let blocked = eggdb(&["mcp", file.path().to_str().unwrap()]);
+    assert_eq!(blocked.status.code(), Some(3));
+    assert!(
+        stderr(&blocked).contains("does not start without it"),
+        "{}",
+        stderr(&blocked)
+    );
+    std::fs::remove_dir(&audit.0).unwrap();
+    #[cfg(unix)]
+    {
+        let elsewhere = TempPath::new("mcp-audit-elsewhere");
+        std::fs::write(elsewhere.path(), b"kept\n").unwrap();
+        std::fs::hard_link(elsewhere.path(), &audit.0).unwrap();
+        let linked = eggdb(&["mcp", file.path().to_str().unwrap()]);
+        assert_eq!(linked.status.code(), Some(3));
+        assert!(
+            stderr(&linked).contains("it has another name (a hard link)"),
+            "{}",
+            stderr(&linked)
+        );
+        assert!(
+            stderr(&linked).contains("Move it away"),
+            "{}",
+            stderr(&linked)
+        );
+        assert_eq!(std::fs::read(elsewhere.path()).unwrap(), b"kept\n");
+        std::fs::remove_file(&audit.0).unwrap();
+    }
+    for value in ["0", "301", "five"] {
+        let bad = eggdb(&["mcp", file.path().to_str().unwrap(), "--time-limit", value]);
+        assert_eq!(bad.status.code(), Some(2));
+        assert!(
+            stderr(&bad).contains("--time-limit must be a whole number of seconds from 1 to 300")
+        );
+    }
+    let hex = eggdb(&["audit", file.path().to_str().unwrap(), "--format", "hex"]);
+    assert_eq!(hex.status.code(), Some(2));
+    let nowhere = eggdb(&["audit", path]);
+    assert_eq!(nowhere.status.code(), Some(3));
+}
+
+#[test]
+fn eggdb_audit_never_prints_raw_control_characters_from_the_file() {
+    let (file, audit) = sample("mcp-hostile-audit", 0);
+    let hostile = "\\u001b[2J\\u001b]0;pwned\\u0007\\u009b31m\\u202e\\u200b\\u2066\\udb40\\udc41";
+    let lines = [
+        format!(r#"{{"event":"server_started","time":"{hostile}XXXXXXXXXXXXXXX","version":"{hostile}","pid":1,"read_only":true,"time_limit_ms":5000}}"#),
+        format!(r#"{{"event":"call","time":"2026-10-28T09:14:07.123456Z{hostile}","client":{{"name":"{hostile}","version":"{hostile}"}},"protocol":"{hostile}","tool":"{hostile}","arguments":{{"sql":"{hostile}"}},"outcome":"error","error_code":"{hostile}","sqlstate":"{hostile}","result_bytes":1,"truncated":false,"duration_ms":1}}"#),
+        format!(r#"{{"event":"time_limit_exceeded","time":"{hostile}","tool":"{hostile}","time_limit_ms":1,"pid":1}}"#),
+        "{\"event\":\"call\",\"time\":\"2026-10-28T09:14:07.123456Z\",\"tool\":\"run_sql\",\"arguments\":{\"sql\":\"raw \u{9b}\u{202e}\u{1b}x\"},\"outcome\":\"ok\",\"result_bytes\":1,\"truncated\":false,\"duration_ms\":1}".to_owned(),
+    ];
+    std::fs::write(&audit.0, lines.join("\n") + "\n").unwrap();
+    let path = file.path().to_str().unwrap();
+    for format in ["text", "json"] {
+        let listed = eggdb(&["audit", path, "--format", format, "--color", "never"]);
+        assert!(listed.status.success(), "{}", stderr(&listed));
+        let text = stdout(&listed) + &stderr(&listed);
+        assert!(text.contains("pwned"), "{format}: {text}");
+        for raw in [
+            '\u{1b}',
+            '\u{7}',
+            '\u{9b}',
+            '\u{202e}',
+            '\u{200b}',
+            '\u{2066}',
+            '\u{e0041}',
+        ] {
+            assert!(!text.contains(raw), "{format} printed {raw:?}: {text:?}");
+        }
+    }
+}
+
+#[test]
+fn values_too_large_for_a_call_fail_fast_instead_of_taking_gigabytes() {
+    let (file, _audit) = sample("mcp-big-values", 0);
+    let mut mcp = Mcp::start(file.path(), &["--time-limit", "60"]);
+    mcp.initialize();
+    let wide = format!(
+        "WITH RECURSIVE r(n, s) AS (SELECT 1, 'x' UNION ALL SELECT n + 1, s || s FROM r WHERE n < 25) SELECT count(*) FROM (SELECT {} FROM r WHERE n = 25) AS q",
+        vec!["s"; 200].join(", ")
+    );
+    for sql in [
+        "WITH RECURSIVE r(n, s) AS (SELECT 1, 'x' UNION ALL SELECT n + 1, s || s FROM r WHERE n < 32) SELECT n, length(s) FROM r ORDER BY n DESC LIMIT 1",
+        "WITH RECURSIVE r(n, s) AS (SELECT 1, 'x' UNION ALL SELECT n + 1, s || s FROM r WHERE n < 28) SELECT length(s||s||s||s||s||s||s||s||s||s||s||s||s||s||s||s) FROM r WHERE n = 28",
+        &wide,
+    ] {
+        let start = std::time::Instant::now();
+        let answer = mcp.call("run_sql", &format!(r#"{{"sql":"{sql}"}}"#));
+        assert_eq!(error_code(&answer), "sql_error", "{answer:?}");
+        assert_eq!(text_at(result(&answer), &["error", "sqlstate"]), "54000");
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+    let (status, _) = mcp.finish();
+    assert!(status.success());
+}
+
+#[test]
+fn every_way_of_holding_many_large_values_at_once_stops_at_the_row_limit() {
+    let (file, _audit) = sample("mcp-wide-families", 0);
+    let mut mcp = Mcp::start(file.path(), &["--time-limit", "60"]);
+    mcp.initialize();
+    let doubled = "WITH RECURSIVE r(n, s) AS (SELECT 1, 'x' UNION ALL SELECT n + 1, s || s FROM r WHERE n < 24)";
+    let copies = |prefix: &str| {
+        (0..20)
+            .map(|copy| format!("{prefix}s || '{copy}')"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let plain = |separator: &str| {
+        (0..20)
+            .map(|copy| format!("s || '{copy}'"))
+            .collect::<Vec<_>>()
+            .join(separator)
+    };
+    for (family, sql) in [
+        (
+            "GROUP BY keys",
+            format!(
+                "{doubled} SELECT count(*) FROM (SELECT n FROM r WHERE n = 24 GROUP BY n, {}) AS q",
+                plain(", ")
+            ),
+        ),
+        (
+            "aggregate states",
+            format!(
+                "{doubled} SELECT count(*) FROM (SELECT {} FROM r WHERE n = 24) AS q",
+                copies("max(")
+            ),
+        ),
+        (
+            "function arguments",
+            format!(
+                "{doubled} SELECT length(greatest({})) FROM r WHERE n = 24",
+                plain(", ")
+            ),
+        ),
+        (
+            "ORDER BY keys",
+            format!(
+                "{doubled} SELECT n FROM r WHERE n = 24 ORDER BY {}",
+                plain(", ")
+            ),
+        ),
+        (
+            "DISTINCT rows",
+            format!(
+                "{doubled} SELECT count(*) FROM (SELECT DISTINCT {} FROM r WHERE n = 24) AS q",
+                plain(", ")
+            ),
+        ),
+        (
+            "set operations",
+            format!(
+                "{doubled} SELECT count(*) FROM (SELECT {0} FROM r WHERE n = 24 UNION SELECT {0} FROM r WHERE n = 23) AS q",
+                plain(", ")
+            ),
+        ),
+    ] {
+        let start = std::time::Instant::now();
+        let answer = mcp.call("run_sql", &format!(r#"{{"sql":"{sql}"}}"#));
+        assert_eq!(error_code(&answer), "sql_error", "{family}: {answer:?}");
+        let state = text_at(result(&answer), &["error", "sqlstate"]);
+        assert!(state == "54000" || state == "53200", "{family}: {state}");
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "{family}: {:?}",
+            start.elapsed()
+        );
+    }
+    let (status, _) = mcp.finish();
+    assert!(status.success());
+}
+
+impl Mcp {
+    fn initialize_with(&mut self, capabilities: &str) {
+        let answer = self.request(
+            "initialize",
+            &format!(
+                r#"{{"protocolVersion":"2025-11-25","capabilities":{capabilities},"clientInfo":{{"name":"acceptance-test","version":"1.0"}}}}"#
+            ),
+        );
+        assert_eq!(
+            text_at(&answer, &["result", "protocolVersion"]),
+            "2025-11-25"
+        );
+        self.send(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
+    }
+
+    fn send_call(&mut self, tool: &str, arguments: &str) -> u64 {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.send(&format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{tool}","arguments":{arguments}}}}}"#
+        ));
+        id
+    }
+
+    fn server_request(&mut self) -> Node {
+        let line = self.lines.recv_timeout(ANSWER_WAIT).expect("a request");
+        assert!(line.is_ascii(), "{line}");
+        let node = parse_document(&line).unwrap_or_else(|error| panic!("{line}: {error:?}"));
+        assert_eq!(text_at(&node, &["jsonrpc"]), "2.0", "{line}");
+        assert_eq!(text_at(&node, &["method"]), "elicitation/create", "{line}");
+        node
+    }
+}
+
+fn user_count(path: &str) -> u64 {
+    let counted = eggdb(&["sql", path, "-c", "SELECT count(*) FROM users"]);
+    assert!(counted.status.success(), "{}", stderr(&counted));
+    let text = stdout(&counted);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines.first().map(|line| line.trim()),
+        Some("count"),
+        "{text}"
+    );
+    lines[2].trim().parse().unwrap_or_else(|_| panic!("{text}"))
+}
+
+#[test]
+fn an_agent_writes_with_allow_write_and_destructive_statements_wait_for_the_user() {
+    let (file, _audit) = sample("mcp-writes", 0);
+    let path = file.path().to_str().unwrap();
+    let mut reader = Mcp::start(file.path(), &[]);
+    reader.initialize();
+    let refused = reader.call(
+        "write_sql",
+        r#"{"sql":"INSERT INTO users VALUES (9, 'Eve', NULL)"}"#,
+    );
+    assert_eq!(error_code(&refused), "read_only");
+    assert!(text_at(result(&refused), &["error", "fix"]).contains("--allow-write"));
+    let (status, _) = reader.finish();
+    assert!(status.success());
+
+    let mut mcp = Mcp::start(file.path(), &["--allow-write"]);
+    mcp.initialize();
+    let listed = mcp.request("tools/list", "{}");
+    let Json::Array(tools) = &get(&listed, &["result", "tools"]).value else {
+        panic!("{listed:?}");
+    };
+    let write = tools
+        .iter()
+        .find(|tool| text_at(tool, &["name"]) == "write_sql")
+        .expect("write_sql is listed");
+    assert_eq!(text_at(write, &["annotations", "readOnlyHint"]), "false");
+    assert_eq!(text_at(write, &["annotations", "destructiveHint"]), "true");
+    let through_run_sql = mcp.call(
+        "run_sql",
+        r#"{"sql":"INSERT INTO users VALUES (4, 'Eve', NULL)"}"#,
+    );
+    assert_eq!(error_code(&through_run_sql), "read_only");
+    let granted = mcp.call(
+        "write_sql",
+        r#"{"sql":"INSERT INTO users VALUES (4, 'Eve', NULL)"}"#,
+    );
+    assert_eq!(text_at(ok(&granted), &["committed"]), "true");
+    let oracle = mcp.call(
+        "write_sql",
+        r#"{"sql":"INSERT INTO users VALUES (5, 'Hedy', NULL)","dialect":"oracle"}"#,
+    );
+    assert_eq!(text_at(ok(&oracle), &["committed"]), "true");
+    assert_eq!(user_count(path), 5);
+    let writer = eggdb(&[
+        "sql",
+        path,
+        "-c",
+        "INSERT INTO users VALUES (6, 'Katherine', NULL)",
+    ]);
+    assert!(writer.status.success(), "{}", stderr(&writer));
+    let created = mcp.call(
+        "write_sql",
+        r#"{"sql":"CREATE TABLE scratch (id integer PRIMARY KEY)"}"#,
+    );
+    ok(&created);
+    let unconfirmed = mcp.call("write_sql", r#"{"sql":"DELETE FROM users"}"#);
+    assert_eq!(error_code(&unconfirmed), "needs_confirmation");
+    assert_eq!(user_count(path), 6);
+    let filtered = mcp.call("write_sql", r#"{"sql":"DELETE FROM users WHERE id = 6"}"#);
+    assert_eq!(text_at(ok(&filtered), &["rows_changed"]), "1");
+    let confirmed = mcp.call(
+        "write_sql",
+        r#"{"sql":"UPDATE users SET email = NULL","confirm":true}"#,
+    );
+    assert_eq!(text_at(ok(&confirmed), &["rows_changed"]), "5");
+    let (status, messages) = mcp.finish();
+    assert!(status.success(), "{messages}");
+    assert!(messages.contains("read-write"), "{messages}");
+
+    let mut asking = Mcp::start(file.path(), &["--allow-write"]);
+    asking.initialize_with(r#"{"elicitation":{}}"#);
+    let dropping = asking.send_call("write_sql", r#"{"sql":"DROP TABLE scratch"}"#);
+    let question = asking.server_request();
+    assert_eq!(text_at(&question, &["id"]), "eggdb-confirm-1");
+    assert!(text_at(&question, &["params", "message"]).contains("DROP TABLE: scratch."));
+    let between = eggdb(&["put", path, "asked", "while waiting"]);
+    assert!(between.status.success(), "{}", stderr(&between));
+    asking.send(r#"{"jsonrpc":"2.0","id":"eggdb-confirm-1","result":{"action":"accept","content":{"run":true}}}"#);
+    let dropped = asking.answer();
+    assert_eq!(text_at(&dropped, &["id"]), dropping.to_string());
+    assert_eq!(text_at(ok(&dropped), &["committed"]), "true");
+    let declining = asking.send_call(
+        "write_sql",
+        r#"{"sql":"TRUNCATE TABLE users","dialect":"oracle"}"#,
+    );
+    let question = asking.server_request();
+    assert_eq!(text_at(&question, &["id"]), "eggdb-confirm-2");
+    asking.send(r#"{"jsonrpc":"2.0","id":"eggdb-confirm-2","result":{"action":"decline"}}"#);
+    let declined = asking.answer();
+    assert_eq!(text_at(&declined, &["id"]), declining.to_string());
+    assert_eq!(error_code(&declined), "declined_by_user");
+    assert_eq!(user_count(path), 5);
+    let (status, messages) = asking.finish();
+    assert!(status.success(), "{messages}");
+
+    let listing = eggdb(&["audit", path, "--format", "text", "--color", "never"]);
+    assert!(listing.status.success(), "{}", stderr(&listing));
+    let text = stdout(&listing);
+    let calls: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.contains("server started"))
+        .collect();
+    assert_eq!(calls.len(), 10, "{text}");
+    assert!(text.contains("writes allowed"), "{text}");
+    assert!(text.contains("ok, agent confirmed"), "{text}");
+    assert!(text.contains("ok, user confirmed"), "{text}");
+    assert!(text.contains("needs_confirmation"), "{text}");
+    assert!(text.contains("declined_by_user"), "{text}");
+    assert!(!text.contains("unknown"), "{text}");
+    let json = eggdb(&["audit", path, "--format", "json"]);
+    let records: Vec<Node> = stdout(&json)
+        .lines()
+        .map(|line| parse_document(line).unwrap())
+        .collect();
+    let started = records
+        .iter()
+        .filter(|record| text_at(record, &["event"]) == "call_started")
+        .count();
+    assert_eq!(started, 6, "{}", stdout(&json));
+}
+
+fn run_sql(mcp: &mut Mcp, dialect: &str, sql: &str) -> Node {
+    mcp.call(
+        "run_sql",
+        &format!(r#"{{"sql":{sql:?},"dialect":"{dialect}"}}"#),
+    )
+}
+
+fn first_value(mcp: &mut Mcp, dialect: &str, sql: &str) -> String {
+    let answer = run_sql(mcp, dialect, sql);
+    text_at(ok(&answer), &["rows", "0", "0"])
+}
+
+#[test]
+fn an_agent_limited_to_tables_sees_only_them_in_every_dialect_and_catalog() {
+    let (file, _audit) = sample("mcp-tables", 0);
+    let path = file.path().to_str().unwrap().to_owned();
+    let setup = eggdb(&[
+        "sql",
+        &path,
+        "-c",
+        "CREATE TABLE secrets (id integer PRIMARY KEY, code text); \
+         INSERT INTO secrets VALUES (1, 'swordfish'); \
+         CREATE VIEW users_and_secrets AS SELECT u.name, s.code FROM users u JOIN secrets s ON s.id = u.id; \
+         CREATE VIEW user_names AS SELECT name FROM users",
+    ]);
+    assert!(setup.status.success(), "{}", stderr(&setup));
+    let mut mcp = Mcp::start(
+        file.path(),
+        &[
+            "--tables",
+            "users,user_names",
+            "--tables",
+            "public.users_and_secrets",
+            "--call-gap",
+            "0",
+        ],
+    );
+    mcp.initialize();
+    let listed = mcp.request("tools/list", "{}");
+    let tools = canonical(get(&listed, &["result", "tools"]));
+    assert!(
+        !tools.contains("kv_get") && !tools.contains("kv_scan"),
+        "{tools}"
+    );
+    let tables = mcp.call("list_tables", "{}");
+    let shown = canonical(ok(&tables));
+    assert!(
+        shown.contains("\"users\"") && shown.contains("\"user_names\""),
+        "{shown}"
+    );
+    assert!(!shown.contains("\"secrets\""), "{shown}");
+    for (dialect, sql) in [
+        ("postgresql", "SELECT code FROM secrets"),
+        ("postgresql", "SELECT code FROM public.secrets"),
+        ("postgresql", "SELECT * FROM users_and_secrets"),
+        (
+            "postgresql",
+            "SELECT * FROM users WHERE id IN (SELECT id FROM secrets)",
+        ),
+        ("mysql", "SELECT code FROM secrets"),
+        ("sqlite", "SELECT code FROM secrets"),
+        ("sqlserver", "SELECT code FROM dbo.secrets"),
+        ("oracle", "SELECT code FROM secrets"),
+    ] {
+        let answer = run_sql(&mut mcp, dialect, sql);
+        assert_eq!(error_code(&answer), "sql_error", "{dialect}: {sql}");
+        assert!(
+            !canonical(&answer).contains("swordfish"),
+            "{dialect}: {sql}"
+        );
+    }
+    let hidden = mcp.call("describe_table", r#"{"table":"secrets"}"#);
+    let missing = mcp.call("describe_table", r#"{"table":"no_such_table"}"#);
+    assert_eq!(error_code(&hidden), error_code(&missing));
+    assert_eq!(
+        first_value(&mut mcp, "postgresql", "SELECT count(*) FROM users"),
+        "3"
+    );
+    for (dialect, hidden_sql, shown_sql) in [
+        (
+            "postgresql",
+            "SELECT count(*) FROM pg_catalog.pg_class WHERE relname = 'secrets'",
+            "SELECT count(*) FROM pg_catalog.pg_class WHERE relname = 'users'",
+        ),
+        (
+            "postgresql",
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = 'secrets'",
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = 'users'",
+        ),
+        (
+            "postgresql",
+            "SELECT count(*) FROM information_schema.columns WHERE column_name = 'code' AND table_name = 'secrets'",
+            "SELECT count(*) FROM information_schema.columns WHERE column_name = 'email'",
+        ),
+        (
+            "sqlserver",
+            "SELECT count(*) FROM sys.tables WHERE name = 'secrets'",
+            "SELECT count(*) FROM sys.tables WHERE name = 'users'",
+        ),
+        (
+            "sqlserver",
+            "SELECT count(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'secrets'",
+            "SELECT count(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'users'",
+        ),
+        (
+            "oracle",
+            "SELECT count(*) FROM all_tables WHERE table_name = 'SECRETS'",
+            "SELECT count(*) FROM all_tables WHERE table_name = 'USERS'",
+        ),
+    ] {
+        assert_eq!(
+            first_value(&mut mcp, dialect, hidden_sql),
+            "0",
+            "{hidden_sql}"
+        );
+        assert_eq!(
+            first_value(&mut mcp, dialect, shown_sql),
+            "1",
+            "{shown_sql}"
+        );
+    }
+    let refused = mcp.call("kv_get", r#"{"key":"greeting"}"#);
+    assert_eq!(error_code(&refused), "limited_to_tables");
+    assert!(!canonical(&refused).contains("hello"));
+    let (status, messages) = mcp.finish();
+    assert!(status.success(), "{messages}");
+    assert!(
+        messages.contains("read-only, tables users, user_names, users_and_secrets; audit"),
+        "{messages}"
+    );
+    assert!(messages.contains("; call gap off"), "{messages}");
+    let listing = eggdb(&["audit", &path, "--format", "text", "--color", "never"]);
+    assert!(listing.status.success(), "{}", stderr(&listing));
+    let text = stdout(&listing);
+    assert!(
+        text.contains("server started: eggdb ")
+            && text.contains(", read-only, 3 tables (users, user_names, users_and")
+            && text.contains("..."),
+        "the listing cuts the line to its width: {text}"
+    );
+    let records = eggdb(&["audit", &path, "--format", "json"]);
+    assert!(records.status.success(), "{}", stderr(&records));
+    let started = stdout(&records);
+    assert!(
+        started.contains(r#""tables":["users","user_names","users_and_secrets"]"#)
+            && started.contains(r#""call_gap_ms":0"#),
+        "{started}"
+    );
+    assert!(text.contains("limited_to_tables"), "{text}");
+}
+
+#[test]
+fn startup_refuses_unknown_tables_and_a_bad_call_gap() {
+    let (file, _audit) = sample("mcp-tables-refused", 0);
+    let path = file.path().to_str().unwrap().to_owned();
+    let unknown = eggdb(&["mcp", &path, "--tables", "users,ordres,USERS"]);
+    assert_eq!(unknown.status.code(), Some(1), "{}", stderr(&unknown));
+    let message = stderr(&unknown);
+    assert!(
+        message.contains(
+            "--tables names 'ordres' and 'USERS' (stored as 'users'): no table, view or sequence in"
+        ),
+        "{message}"
+    );
+    assert!(
+        message.contains(
+            "has these names. Names match as stored; fix them, or create the tables first."
+        ),
+        "{message}"
+    );
+    assert!(message.contains("eggdb table list"), "{message}");
+    let one = eggdb(&["mcp", &path, "--tables", "ordres"]);
+    assert_eq!(one.status.code(), Some(1));
+    assert!(
+        stderr(&one)
+            .contains("has that name. Names match as stored; fix it, or create the table first."),
+        "{}",
+        stderr(&one)
+    );
+    let writing = eggdb(&["mcp", &path, "--allow-write", "--tables", "USERS"]);
+    assert_eq!(writing.status.code(), Some(1));
+    assert!(
+        stderr(&writing).contains("--tables names 'USERS' (stored as 'users')"),
+        "{}",
+        stderr(&writing)
+    );
+    let gap = eggdb(&["mcp", &path, "--call-gap", "20s"]);
+    assert_eq!(gap.status.code(), Some(2));
+    assert!(
+        stderr(&gap).contains(
+            "--call-gap must be a whole number of milliseconds from 0 to 10000, not '20s'"
+        ),
+        "{}",
+        stderr(&gap)
+    );
+    assert!(!audit_path(file.path()).exists());
+}
+
+fn sql_failure(answer: &Node) -> (String, String) {
+    assert_eq!(error_code(answer), "sql_error", "{}", canonical(answer));
+    (
+        text_at(result(answer), &["error", "sqlstate"]),
+        text_at(result(answer), &["error", "message"]),
+    )
+}
+
+#[test]
+fn an_agent_writing_with_tables_changes_only_those_tables() {
+    let (file, _audit) = sample("mcp-tables-write", 0);
+    let path = file.path().to_str().unwrap().to_owned();
+    let setup = eggdb(&[
+        "sql",
+        &path,
+        "-c",
+        "CREATE TABLE secrets (id integer PRIMARY KEY, code text); \
+         INSERT INTO secrets VALUES (1, 'swordfish'); \
+         CREATE TABLE notes (id serial PRIMARY KEY, body text); \
+         CREATE TABLE parents (id integer PRIMARY KEY); \
+         CREATE TABLE children (id integer PRIMARY KEY, parent integer REFERENCES parents (id) ON DELETE CASCADE); \
+         INSERT INTO parents VALUES (1); \
+         INSERT INTO children VALUES (1, 1)",
+    ]);
+    assert!(setup.status.success(), "{}", stderr(&setup));
+    let mut mcp = Mcp::start(
+        file.path(),
+        &[
+            "--allow-write",
+            "--tables",
+            "users,notes,parents,drafts",
+            "--call-gap",
+            "0",
+        ],
+    );
+    mcp.initialize();
+    let inserted = mcp.call(
+        "write_sql",
+        r#"{"sql":"INSERT INTO notes (body) VALUES ('hello')"}"#,
+    );
+    assert_eq!(text_at(ok(&inserted), &["committed"]), "true");
+    let updated = mcp.call(
+        "write_sql",
+        r#"{"sql":"UPDATE users SET email = 'grace@example.com' WHERE id = 2"}"#,
+    );
+    assert_eq!(text_at(ok(&updated), &["committed"]), "true");
+    let created = mcp.call(
+        "write_sql",
+        r#"{"sql":"CREATE TABLE drafts (id integer PRIMARY KEY, body text)"}"#,
+    );
+    assert_eq!(text_at(ok(&created), &["committed"]), "true");
+    let into_created = mcp.call(
+        "write_sql",
+        r#"{"sql":"INSERT INTO drafts VALUES (1, 'first')"}"#,
+    );
+    assert_eq!(text_at(ok(&into_created), &["committed"]), "true");
+    let hidden = mcp.call(
+        "write_sql",
+        r#"{"sql":"INSERT INTO secrets VALUES (2, 'x')"}"#,
+    );
+    assert_eq!(sql_failure(&hidden).0, "42P01");
+    let other_name = mcp.call(
+        "write_sql",
+        r#"{"sql":"CREATE TABLE elsewhere (id integer)"}"#,
+    );
+    let (state, message) = sql_failure(&other_name);
+    assert_eq!(state, "42501");
+    assert!(message.contains("\"elsewhere\""), "{message}");
+    let routine = mcp.call(
+        "write_sql",
+        r#"{"sql":"CREATE FUNCTION leak() RETURNS integer AS 'SELECT 1' LANGUAGE sql"}"#,
+    );
+    assert_eq!(sql_failure(&routine).0, "42501");
+    let referenced = mcp.call("write_sql", r#"{"sql":"INSERT INTO parents VALUES (2)"}"#);
+    assert_eq!(text_at(ok(&referenced), &["committed"]), "true");
+    let cascading = mcp.call(
+        "write_sql",
+        r#"{"sql":"DELETE FROM parents WHERE id = 1","confirm":true}"#,
+    );
+    let (state, message) = sql_failure(&cascading);
+    assert_eq!(state, "42501");
+    assert_eq!(
+        message,
+        "cannot delete a row of \"parents\" or change a column a foreign key points at: table \"children\" has a foreign key to \"parents\", and this session may neither change nor check \"children\" (--tables)"
+    );
+    let key_change = mcp.call(
+        "write_sql",
+        r#"{"sql":"UPDATE parents SET id = 5 WHERE id = 1","confirm":true}"#,
+    );
+    assert_eq!(sql_failure(&key_change).0, "42501");
+    let (status, messages) = mcp.finish();
+    assert!(status.success(), "{messages}");
+    assert!(
+        messages.contains("read-write, tables users, notes, parents, drafts"),
+        "{messages}"
+    );
+    let check = eggdb(&[
+        "sql",
+        &path,
+        "-c",
+        "SELECT 'secrets=' || CAST(count(*) AS text) FROM secrets; \
+         SELECT 'parents=' || CAST(count(*) AS text) FROM parents; \
+         SELECT 'note=' || body FROM notes; \
+         SELECT 'draft=' || body FROM drafts",
+    ]);
+    assert!(check.status.success(), "{}", stderr(&check));
+    let rows = stdout(&check);
+    for expected in ["secrets=1", "parents=2", "note=hello", "draft=first"] {
+        assert!(rows.contains(expected), "{expected}: {rows}");
+    }
+}
+
+#[test]
+fn calls_wait_for_the_gap_and_the_user_s_writer_works_between_them() {
+    let (file, _audit) = sample("mcp-gap", 0);
+    let path = file.path().to_str().unwrap().to_owned();
+    let mut mcp = Mcp::start(file.path(), &["--call-gap", "300"]);
+    mcp.initialize();
+    let started = std::time::Instant::now();
+    for _ in 0..3 {
+        ok(&mcp.call("list_tables", "{}"));
+    }
+    assert!(
+        started.elapsed() >= Duration::from_millis(600),
+        "{:?}",
+        started.elapsed()
+    );
+    let put = eggdb(&["put", &path, "between", "calls"]);
+    assert!(put.status.success(), "{}", stderr(&put));
+    let (status, messages) = mcp.finish();
+    assert!(status.success(), "{messages}");
+    assert!(messages.contains("; call gap 300 ms"), "{messages}");
+}
+
+#[test]
+fn an_agent_limited_to_some_columns_sees_and_changes_nothing_else() {
+    let (file, _audit) = sample("mcp-tables-columns", 0);
+    let path = file.path().to_str().unwrap().to_owned();
+    let setup = eggdb(&[
+        "sql",
+        &path,
+        "-c",
+        "CREATE VIEW contact AS SELECT name, email FROM users; \
+         CREATE FUNCTION email_of(person integer) RETURNS text LANGUAGE sql STABLE AS $$ SELECT email FROM users WHERE id = person $$; \
+         CREATE FUNCTION email_now(person integer) RETURNS text LANGUAGE sql AS $$ SELECT email FROM users WHERE id = person $$",
+    ]);
+    assert!(setup.status.success(), "{}", stderr(&setup));
+    let mut mcp = Mcp::start(
+        file.path(),
+        &[
+            "--allow-write",
+            "--tables",
+            "users(id,name),contact",
+            "--call-gap",
+            "0",
+        ],
+    );
+    mcp.initialize();
+    assert_eq!(
+        first_value(
+            &mut mcp,
+            "postgresql",
+            "SELECT name FROM users WHERE id = 1"
+        ),
+        "Ada"
+    );
+    let everything = run_sql(&mut mcp, "postgresql", "SELECT * FROM users ORDER BY id");
+    let shown = canonical(&everything);
+    assert!(shown.contains("Margaret"), "{shown}");
+    assert!(!shown.contains("ada@example.com"), "{shown}");
+    assert!(!shown.contains("email"), "{shown}");
+    for (dialect, sql) in [
+        ("postgresql", "SELECT email FROM users"),
+        ("mysql", "SELECT email FROM users"),
+        ("sqlite", "SELECT email FROM users"),
+        ("postgresql", "SELECT * FROM contact"),
+        ("postgresql", "SELECT email_of(1)"),
+        (
+            "postgresql",
+            "WITH u AS (SELECT * FROM users) SELECT email FROM u",
+        ),
+        (
+            "postgresql",
+            "SELECT name FROM users WHERE id IN (SELECT id FROM users WHERE email LIKE 'a%')",
+        ),
+    ] {
+        let answer = run_sql(&mut mcp, dialect, sql);
+        let (_, message) = sql_failure(&answer);
+        assert!(message.contains("email"), "{dialect} {sql}: {message}");
+        assert!(
+            !message.contains("example.com"),
+            "{dialect} {sql}: {message}"
+        );
+    }
+    let volatile = mcp.call(
+        "write_sql",
+        r#"{"sql":"SELECT email_now(1)","confirm":true}"#,
+    );
+    let (state, message) = sql_failure(&volatile);
+    assert_eq!(state, "42703");
+    assert!(
+        message.contains("email") && !message.contains("example.com"),
+        "{message}"
+    );
+    let changed = mcp.call(
+        "write_sql",
+        r#"{"sql":"UPDATE users SET name = 'Hedy' WHERE id = 3"}"#,
+    );
+    assert_eq!(text_at(ok(&changed), &["committed"]), "true");
+    let deleted = mcp.call(
+        "write_sql",
+        r#"{"sql":"DELETE FROM users WHERE id = 2","confirm":true}"#,
+    );
+    let (state, message) = sql_failure(&deleted);
+    assert_eq!(state, "42501");
+    assert!(
+        message.starts_with("cannot delete rows of \"users\""),
+        "{message}"
+    );
+    let (status, messages) = mcp.finish();
+    assert!(status.success(), "{messages}");
+    assert!(
+        messages.contains("read-write, tables users(id,name), contact"),
+        "{messages}"
+    );
+    let check = eggdb(&[
+        "sql",
+        &path,
+        "-c",
+        "SELECT 'row=' || name || '/' || coalesce(email, '-') FROM users WHERE id IN (2, 3) ORDER BY id",
+    ]);
+    assert!(check.status.success(), "{}", stderr(&check));
+    assert!(stdout(&check).contains("row=Grace/-"), "{}", stdout(&check));
+    assert!(
+        stdout(&check).contains("row=Hedy/mh@example.com"),
+        "{}",
+        stdout(&check)
+    );
+}
+
+#[test]
+fn startup_refuses_column_lists_it_cannot_serve() {
+    let (file, _audit) = sample("mcp-tables-columns-refused", 0);
+    let path = file.path().to_str().unwrap().to_owned();
+    let unknown = eggdb(&["mcp", &path, "--tables", "users(id,emial)"]);
+    assert_eq!(unknown.status.code(), Some(1), "{}", stderr(&unknown));
+    let message = stderr(&unknown);
+    assert!(
+        message.contains("--tables lists columns eggdb mcp cannot serve from ")
+            && message.contains(": 'users' has no column \"emial\". Fix the column list."),
+        "{message}"
+    );
+    let keyless = eggdb(&["mcp", &path, "--tables", "users(name)"]);
+    assert_eq!(keyless.status.code(), Some(1));
+    assert!(
+        stderr(&keyless).contains("'users' leaves out its primary key column \"id\": list it too"),
+        "{}",
+        stderr(&keyless)
+    );
+    let not_yet = eggdb(&["mcp", &path, "--allow-write", "--tables", "drafts(id)"]);
+    assert_eq!(not_yet.status.code(), Some(1));
+    assert!(
+        stderr(&not_yet).contains("'drafts' does not exist yet"),
+        "{}",
+        stderr(&not_yet)
+    );
+    let twice = eggdb(&["mcp", &path, "--tables", "users(id)", "--tables", "users"]);
+    assert_eq!(twice.status.code(), Some(2));
+    assert!(
+        stderr(&twice).contains("--tables names 'users' twice with different columns"),
+        "{}",
+        stderr(&twice)
+    );
+    let unclosed = eggdb(&["mcp", &path, "--tables", "users(id"]);
+    assert_eq!(unclosed.status.code(), Some(2));
+    assert!(
+        stderr(&unclosed).contains("--tables has a column list with no ')' in 'users(id'"),
+        "{}",
+        stderr(&unclosed)
+    );
+    assert!(!audit_path(file.path()).exists());
+}
+
+#[test]
+fn an_agent_reads_a_collection_by_name_and_a_missing_one_names_those_there() {
+    let (file, _audit) = sample("mcp-collections", 0);
+    let path = file.path().to_str().unwrap();
+    for (key, value) in [("s:1", "alice"), ("s:2", "bob"), ("t:1", "other")] {
+        let put = eggdb(&["put", path, "-C", "sessions", key, value, "--create"]);
+        assert!(put.status.success(), "{}", stderr(&put));
+    }
+    let mut mcp = Mcp::start(file.path(), &[]);
+    mcp.initialize();
+    let found = mcp.call("kv_get", r#"{"key":"s:2","collection":"sessions"}"#);
+    let found = ok(&found);
+    assert_eq!(text_at(found, &["collection"]), "sessions");
+    assert_eq!(text_at(found, &["entry", "value"]), "bob");
+    let outside = mcp.call("kv_get", r#"{"key":"greeting","collection":"sessions"}"#);
+    assert_eq!(text_at(ok(&outside), &["found"]), "false");
+    let default_space = mcp.call("kv_get", r#"{"key":"s:2"}"#);
+    assert_eq!(text_at(ok(&default_space), &["found"]), "false");
+    let scanned = mcp.call(
+        "kv_scan",
+        r#"{"collection":"sessions","prefix":"s:","max_entries":1}"#,
+    );
+    let scanned = ok(&scanned);
+    assert_eq!(text_at(scanned, &["returned_entries"]), "1");
+    assert_eq!(text_at(scanned, &["entries", "0", "key"]), "s:1");
+    assert_eq!(text_at(scanned, &["truncated"]), "true");
+    let next = text_at(scanned, &["next_start_hex"]);
+    let rest = mcp.call(
+        "kv_scan",
+        &format!(r#"{{"collection":"sessions","prefix":"s:","start_hex":"{next}"}}"#),
+    );
+    let rest = ok(&rest);
+    assert_eq!(text_at(rest, &["returned_entries"]), "1");
+    assert_eq!(text_at(rest, &["entries", "0", "value"]), "bob");
+    let everything = mcp.call("kv_scan", r#"{"keys_only":true}"#);
+    assert_eq!(text_at(ok(&everything), &["returned_entries"]), "1");
+    let missing = mcp.call("kv_scan", r#"{"collection":"sesions"}"#);
+    assert_eq!(error_code(&missing), "collection_not_found");
+    let message = text_at(result(&missing), &["error", "message"]);
+    assert!(
+        message.contains("its collections are \"sessions\""),
+        "{message}"
+    );
+    let (status, messages) = mcp.finish();
+    assert!(status.success(), "{messages}");
+}
+
+#[test]
+fn an_agent_stores_and_deletes_keys_only_with_writes_and_a_delete_waits_for_the_user() {
+    let (file, _audit) = sample("mcp-key-writes", 0);
+    let path = file.path().to_str().unwrap();
+    let added = eggdb(&["collection", "add", path, "sessions"]);
+    assert!(added.status.success(), "{}", stderr(&added));
+
+    let mut reader = Mcp::start(file.path(), &[]);
+    reader.initialize();
+    let refused = reader.call("put", r#"{"key":"user:1","value":"Ada"}"#);
+    assert_eq!(error_code(&refused), "read_only");
+    let (status, _) = reader.finish();
+    assert!(status.success());
+    let absent = eggdb(&["get", path, "user:1"]);
+    assert_eq!(absent.status.code(), Some(1), "{}", stderr(&absent));
+
+    let mut mcp = Mcp::start(file.path(), &["--allow-write"]);
+    mcp.initialize();
+    let stored = mcp.call("put", r#"{"key":"user:1","value":"Ada"}"#);
+    let stored = ok(&stored);
+    assert_eq!(text_at(stored, &["stored"]), "true");
+    assert_eq!(text_at(stored, &["committed"]), "true");
+    let read_back = eggdb(&["get", path, "user:1"]);
+    assert!(read_back.status.success(), "{}", stderr(&read_back));
+    assert_eq!(stdout(&read_back).trim_end(), "Ada");
+    let session = mcp.call(
+        "put",
+        r#"{"key":"s:1","value":"open","collection":"sessions","ttl":"1h"}"#,
+    );
+    let session = ok(&session);
+    assert_eq!(text_at(session, &["collection"]), "sessions");
+    assert_eq!(text_at(session, &["ttl_ms"]), "3600000");
+    let left = eggdb(&["ttl", path, "s:1", "-C", "sessions", "--format", "json"]);
+    assert!(left.status.success(), "{}", stderr(&left));
+    let left = parse_document(stdout(&left).trim()).unwrap();
+    let left_ms: u64 = text_at(&left, &["ttl_ms"]).parse().unwrap();
+    assert!((3_000_000..=3_600_000).contains(&left_ms), "{left_ms}");
+    let in_default_space = eggdb(&["get", path, "s:1"]);
+    assert_eq!(in_default_space.status.code(), Some(1));
+    let missing = mcp.call(
+        "put",
+        r#"{"key":"s:2","value":"open","collection":"sesions"}"#,
+    );
+    assert_eq!(error_code(&missing), "collection_not_found");
+    assert!(
+        text_at(result(&missing), &["error", "message"])
+            .contains("its collections are \"sessions\"")
+    );
+    let reserved = mcp.call("put", r#"{"key_hex":"ff53514c0001","value":"x"}"#);
+    assert_eq!(error_code(&reserved), "invalid_arguments");
+    let unconfirmed = mcp.call("del", r#"{"key":"user:1"}"#);
+    assert_eq!(error_code(&unconfirmed), "needs_confirmation");
+    let kept = eggdb(&["get", path, "user:1"]);
+    assert!(kept.status.success(), "{}", stderr(&kept));
+    let deleted = mcp.call(
+        "del",
+        r#"{"key":"s:1","collection":"sessions","confirm":true}"#,
+    );
+    assert_eq!(text_at(ok(&deleted), &["deleted"]), "true");
+    let gone = eggdb(&["get", path, "s:1", "-C", "sessions"]);
+    assert_eq!(gone.status.code(), Some(1));
+    let (status, messages) = mcp.finish();
+    assert!(status.success(), "{messages}");
+    assert!(
+        messages.contains("read-write (destructive statements need the user's confirmation)"),
+        "{messages}"
+    );
+
+    let mut asking = Mcp::start(file.path(), &["--allow-write"]);
+    asking.initialize_with(r#"{"elicitation":{}}"#);
+    let declining = asking.send_call("del", r#"{"key":"user:1"}"#);
+    let question = asking.server_request();
+    let message = text_at(&question, &["params", "message"]);
+    assert!(
+        message.contains("delete the key \"user:1\" from the default key space of"),
+        "{message}"
+    );
+    asking.send(r#"{"jsonrpc":"2.0","id":"eggdb-confirm-1","result":{"action":"decline"}}"#);
+    let declined = asking.answer();
+    assert_eq!(text_at(&declined, &["id"]), declining.to_string());
+    assert_eq!(error_code(&declined), "declined_by_user");
+    let (status, messages) = asking.finish();
+    assert!(status.success(), "{messages}");
+    let still_there = eggdb(&["get", path, "user:1"]);
+    assert!(still_there.status.success(), "{}", stderr(&still_there));
+
+    let json = eggdb(&["audit", path, "--format", "json"]);
+    assert!(json.status.success(), "{}", stderr(&json));
+    let records: Vec<Node> = stdout(&json)
+        .lines()
+        .map(|line| parse_document(line).unwrap())
+        .collect();
+    let key_writes = |event: &str| {
+        records
+            .iter()
+            .filter(|record| text_at(record, &["event"]) == event)
+            .filter(|record| matches!(text_at(record, &["tool"]).as_str(), "put" | "del"))
+            .count()
+    };
+    assert_eq!(key_writes("call_started"), 4, "{}", stdout(&json));
+    assert_eq!(key_writes("call"), 8, "{}", stdout(&json));
+    let listing = eggdb(&["audit", path, "--format", "text", "--color", "never"]);
+    let text = stdout(&listing);
+    assert!(text.contains("ok, agent confirmed"), "{text}");
+    assert!(text.contains("declined_by_user"), "{text}");
+}

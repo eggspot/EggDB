@@ -1,5 +1,6 @@
 [package]
 name = "eggdb-platform"
+autotests = false
 description = "EggDB's platform layer: files and asynchronous I/O, networking, clocks, memory, CPUs and threads, and the deterministic simulation used to test them."
 version.workspace = true
 edition.workspace = true
@@ -8,3 +9,7 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "all"
+path = "tests/all/main.rs"
