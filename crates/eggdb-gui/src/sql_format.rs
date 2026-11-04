@@ -267,7 +267,7 @@ const JOIN_LEADS: [&str; 6] = ["LEFT", "RIGHT", "FULL", "INNER", "CROSS", "NATUR
 const LIST_CLAUSES: [&str; 3] = ["SELECT", "SET", "VALUES"];
 const CLAUSE_MODIFIERS: [&str; 2] = ["DISTINCT", "ALL"];
 
-fn next_words(tokens: &[Token<'_>], from: usize) -> impl Iterator<Item = String> + '_ {
+fn next_words<'a>(tokens: &'a [Token<'_>], from: usize) -> impl Iterator<Item = String> + 'a {
     tokens
         .iter()
         .skip(from)
