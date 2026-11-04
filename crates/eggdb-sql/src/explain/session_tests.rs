@@ -249,11 +249,32 @@ fn explain_analyze_keeps_the_scan_rows_of_a_statement_whose_correlated_subquery_
     for test in [
         "EXISTS (SELECT 1 FROM inner_rows WHERE inner_rows.c1 = outer_rows.a)",
         "a IN (SELECT c1 FROM inner_rows WHERE inner_rows.c1 = outer_rows.a)",
-    ] {
-        let lines = plan(
-            &mut session,
-            &format!("EXPLAIN ANALYZE SELECT a FROM outer_rows WHERE {test} ORDER BY b"),
-        );
+        "(SELECT max(c1) FROM inner_rows WHERE inner_rows.c1 = outer_rows.a) IS NOT NULL",
+        "(SELECT count(*) FROM inner_rows WHERE inner_rows.c1 = outer_rows.a) > 0",
+    ]
+    .into_iter()
+    .map(|test| {
+        (
+            format!("SELECT a FROM outer_rows WHERE {test} ORDER BY b"),
+            2,
+        )
+    })
+    .chain([
+        (
+            "SELECT a, (SELECT max(c1) FROM inner_rows WHERE inner_rows.c1 = outer_rows.a) \
+             FROM outer_rows"
+                .to_owned(),
+            3,
+        ),
+        (
+            "SELECT a, (SELECT count(*) FROM inner_rows WHERE inner_rows.c1 = outer_rows.a) \
+             FROM outer_rows"
+                .to_owned(),
+            3,
+        ),
+    ]) {
+        let (query, rows) = test;
+        let lines = plan(&mut session, &format!("EXPLAIN ANALYZE {query}"));
         let scan = lines
             .iter()
             .find(|line| {
@@ -262,7 +283,7 @@ fn explain_analyze_keeps_the_scan_rows_of_a_statement_whose_correlated_subquery_
                     .starts_with("Seq Scan on outer_rows")
             })
             .unwrap_or_else(|| panic!("{lines:?}"));
-        assert_eq!(actual(scan).map(|(rows, _)| rows), Some(2), "{lines:?}");
+        assert_eq!(actual(scan).map(|(rows, _)| rows), Some(rows), "{lines:?}");
     }
     let mut mysql = Session::with_dialect(&store, Dialect::MySql);
     let text = last(
@@ -275,6 +296,16 @@ fn explain_analyze_keeps_the_scan_rows_of_a_statement_whose_correlated_subquery_
         .find(|line| line.trim_start().starts_with("-> Filter:"))
         .unwrap_or_else(|| panic!("{text}"));
     assert!(filter.ends_with(" rows=2 loops=1)"), "{text}");
+    let text = last(
+        &mut mysql,
+        "EXPLAIN ANALYZE SELECT a, (SELECT max(c1) FROM inner_rows \
+         WHERE inner_rows.c1 = outer_rows.a) FROM outer_rows",
+    );
+    let scan = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("-> Table scan on outer_rows"))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(scan.ends_with(" rows=3 loops=1)"), "{text}");
 }
 
 fn mysql_tables(store: &MemoryStore) -> Session<'_> {

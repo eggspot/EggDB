@@ -824,7 +824,9 @@ fn lookup_over_every_inner_row(
             }
             let missing = match &queries.empty_group {
                 Some(empty_group) => Arc::new(SubqueryRows::from_result(
-                    execute_query(env, tables, empty_group, prepared)?,
+                    crate::step_times::unmeasured(|| {
+                        execute_query(env, tables, empty_group, prepared)
+                    })?,
                     &SubqueryTest::Scalar,
                 )?),
                 None => group_rows(sql_type, Vec::new())?,
