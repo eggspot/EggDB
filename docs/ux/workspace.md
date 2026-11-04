@@ -1137,7 +1137,7 @@ the next page, before the keys its cursor yields. The editor line shows the curs
 `SCAN resp3 PREFIX 'user:' CURSOR 1532 LIMIT 100`, and `Back` keeps the cursors as it keeps the
 `AFTER` keys. The grid gains a `type` column between `key` and `value` (`string`, `hash`, `list`,
 `set`, `zset`, `stream`, left-aligned); the page's values come in two pipelines, `TYPE` for every
-key, then per key `GETRANGE 0 63` and `STRLEN` for a string, `HLEN`, `LLEN`, `SCARD`, `ZCARD` or
+key, then per key `GETRANGE 0 63`, `STRLEN` and `EXISTS` for a string (a key gone between reads shows `(gone)`), `HLEN`, `LLEN`, `SCARD`, `ZCARD` or
 `XLEN` for the others, whose `value` cell reads `12 fields`, `3 items`, `8 members`, `8 members`,
 `40 entries` in `textSecondary` with `bytes` `–` in `textDisabled`; a key that expired between the
 two reads `(gone)` in `textDisabled`. The full-value view on a string is `GET`; on the others it is
