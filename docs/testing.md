@@ -154,7 +154,12 @@ afterwards. Oversized length fields are refused without allocating them. `EGGDB_
 `EGGDB_FUZZ_SEED` run longer campaigns. The message codecs, the SCRAM exchange (RFC 7677's
 example and malformed variants) and the cryptography's published vectors have unit tests of
 their own, and `crates/eggdb-pgwire/tests/protocol.rs` drives every protocol flow with a client
-written in the test.
+written in the test. The HTTP server has one too, in `crates/eggdb-http/src/keep_alive_tests.rs`
+(`hostile_requests_return_errors_and_never_panic`): 20,000 mutations of pipelined, chunked and
+`Content-Length` requests read back to back on one connection, each returning a request or an
+error, never a panic, with the memory budget back at zero; the same file sends request
+smuggling attempts (both lengths, two codings, folded or bare-LF lines, bad chunk sizes) over
+real sockets and requires a `400` or `501` and a closed connection (D325).
 
 The limits that keep another program from locking users out or exhausting memory (D254)
 have tests of their own on each SQL protocol, in `tests/limits.rs` of `eggdb-pgwire`,
@@ -170,7 +175,7 @@ a message or a cursor), CQL (`Overloaded`, `0x1001`, for a frame or a result) an
 (`SERVER_ERROR out of memory`, the connection goes on), and so do the HTTP listeners
 (Elasticsearch, S3, DynamoDB and `eggdb-http`'s plain `503`), Kafka, NATS, STOMP, MQTT, AMQP 0-9-1
 and 1.0, Bolt and RESP pub/sub's queued messages, each checking that the budget returns to zero
-(D307); `crates/eggdb/tests/serve.rs` checks
+(D307), and `eggdb-http`'s chunked uploads are counted as their chunks arrive (`oversized_chunks_are_refused_and_the_budget_returns_to_zero`, D325); `crates/eggdb/tests/serve.rs` checks
 `--max-connection-memory` through the real binary. The login slots and the budget have unit tests
 in `eggdb-platform`'s `connection_limits`. The T-SQL lexer, parser, functions and batches have a seeded mutator in
 `crates/eggdb-sql/src/tests.rs` (`hostile_tsql_input_returns_errors_and_never_panics`, 35,000

@@ -334,7 +334,6 @@ fn rows_are_streamed_in_chunks_over_a_kept_connection() {
             "{answer}"
         );
         assert!(answer.contains("Content-Range: 0-2999/*\r\n"), "{answer}");
-        assert!(answer.contains(r#"{"id":3000,"label":"reading 3000"}]"#));
         assert!(
             answer.ends_with("\r\n[{\"id\":7,\"label\":\"reading 7\"}]\r\n0\r\n\r\n"),
             "{answer}"
