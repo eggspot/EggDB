@@ -938,6 +938,18 @@ impl<'a> Correlation<'a> {
     }
 
     pub(crate) fn rows(&self, template: usize, row: &[Value]) -> SqlResult<Arc<SubqueryRows>> {
+        let position = self
+            .templates
+            .get(template)
+            .map_or(0, |found| found.query.position);
+        crate::step_times::measure_subplan(
+            position,
+            || self.evaluated_rows(template, row),
+            |rows: &Arc<SubqueryRows>| rows.rows,
+        )
+    }
+
+    fn evaluated_rows(&self, template: usize, row: &[Value]) -> SqlResult<Arc<SubqueryRows>> {
         let found = self
             .templates
             .get(template)
@@ -1297,6 +1309,96 @@ pub(crate) fn needs_preparation(select: &Select) -> bool {
             .into_iter()
             .any(mentions_subquery)
         || crate::set_returning::select_needs_expansion(select)
+}
+
+pub(crate) struct PreparedForExplain {
+    pub(crate) select: Select,
+    pub(crate) correlated: Vec<PreparedForExplain>,
+}
+
+fn subplans_not_supported() -> SqlError {
+    SqlError::not_supported(
+        "EXPLAIN of a query with derived tables, table functions, FULL JOIN ... USING, or WITH, set operations or an outer ORDER BY or LIMIT in a subquery",
+    )
+}
+
+pub(crate) fn lone_select(query: &Query) -> Option<&Select> {
+    match &query.body {
+        SetExpr::Select(select)
+            if query.with.is_empty()
+                && query.order_by.is_empty()
+                && query.limit.is_none()
+                && query.offset.is_none() =>
+        {
+            Some(select)
+        }
+        _ => None,
+    }
+}
+
+fn subqueries_explain_as_subplans(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Subquery(subquery) => {
+            subquery
+                .test
+                .operand()
+                .is_none_or(subqueries_explain_as_subplans)
+                && lone_select(&subquery.query).is_some_and(explains_as_subplans)
+        }
+        _ => children(expr)
+            .into_iter()
+            .all(subqueries_explain_as_subplans),
+    }
+}
+
+fn explains_as_subplans(select: &Select) -> bool {
+    let plain_from = select.from.as_ref().is_none_or(|from| {
+        !join::has_full_using(from)
+            && std::iter::once(&from.first)
+                .chain(from.joins.iter().map(|join| &join.table))
+                .all(|table| table.derived.is_none() && table.generated.is_none())
+    });
+    plain_from
+        && !crate::set_returning::select_needs_expansion(select)
+        && select_expressions(select)
+            .into_iter()
+            .all(subqueries_explain_as_subplans)
+}
+
+pub(crate) fn prepare_for_explain(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    select: &Select,
+) -> SqlResult<PreparedForExplain> {
+    if !explains_as_subplans(select) {
+        return Err(subplans_not_supported());
+    }
+    let names = TempTableNames::default();
+    let env = Env {
+        reader,
+        names: &names,
+        columns_only: true,
+    };
+    let mut prepared = Prepared::new();
+    let (query, _) = prepare_query(
+        &env,
+        tables,
+        &Query::of_select(select.clone(), 0),
+        None,
+        None,
+        &mut prepared,
+    )?;
+    prepared_for_explain(&query, prepared)
+}
+
+fn prepared_for_explain(query: &Query, prepared: Prepared) -> SqlResult<PreparedForExplain> {
+    let select = lone_select(query).ok_or_else(subplans_not_supported)?.clone();
+    let correlated = prepared
+        .templates
+        .into_iter()
+        .map(|template| prepared_for_explain(&template.query, template.prepared))
+        .collect::<SqlResult<_>>()?;
+    Ok(PreparedForExplain { select, correlated })
 }
 
 pub(crate) struct RowSubqueries {
@@ -3000,7 +3102,14 @@ fn prepare_subquery(
         names: env.names,
         columns_only: env.columns_only || correlated,
     };
-    let result = execute_query(&inner_env, tables, &query, &inner)?;
+    let mut run = || execute_query(&inner_env, tables, &query, &inner);
+    let result = if inner_env.columns_only {
+        run()?
+    } else {
+        crate::step_times::measure_subplan(subquery.query.position, run, |result: &QueryResult| {
+            result.rows.len()
+        })?
+    };
     let count = result.columns.as_ref().map_or(0, Vec::len);
     if let Some(fields) = row_operand(&subquery.test) {
         if count != fields.len() {

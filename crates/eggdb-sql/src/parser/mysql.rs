@@ -192,7 +192,9 @@ impl<'t> Parser<'t> {
             "explain"
                 if !self.is_word_at(1, "select")
                     && !self.is_word_at(1, "update")
-                    && !self.is_word_at(1, "delete") =>
+                    && !self.is_word_at(1, "delete")
+                    && !self.is_word_at(1, "analyze")
+                    && !self.is_word_at(1, "format") =>
             {
                 self.at += 1;
                 self.describe()?

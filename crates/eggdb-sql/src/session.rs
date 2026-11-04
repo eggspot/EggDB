@@ -2768,20 +2768,25 @@ impl<'s> Session<'s> {
         let planning = std::time::Instant::now();
         let before_planning = lookups();
         let mut planned = (*explain.statement).clone();
+        let with_subplans = crate::explain::shows_subplans(explain.style, self.dialect);
         let plan = self.read(|reader, tables| {
             binding.statement(reader, tables, &mut planned)?;
-            execute::explain(reader, tables, &planned)
+            if with_subplans {
+                execute::explain_with_subplans(reader, tables, &planned)
+            } else {
+                execute::explain(reader, tables, &planned)
+            }
         })?;
         let planning = planning.elapsed();
         let before_execution = lookups();
         let started = std::time::Instant::now();
         let mut statement = (*explain.statement).clone();
-        let (result, selects) = if crate::explain::PlannedStatement::of(&statement)
+        let (result, selects, subplans) = if crate::explain::PlannedStatement::of(&statement)
             == Some(crate::explain::PlannedStatement::Select)
         {
-            crate::step_times::record(|| self.run(&mut statement, io))
+            crate::step_times::record_with_subplans(|| self.run(&mut statement, io))
         } else {
-            (self.run(&mut statement, io), Vec::new())
+            (self.run(&mut statement, io), Vec::new(), Vec::new())
         };
         let result = result?;
         let execution = started.elapsed();
@@ -2796,16 +2801,19 @@ impl<'s> Session<'s> {
             }
             _ => None,
         };
-        Ok(crate::explain::render_analyzed(
-            &plan,
-            crate::explain::Analyzed {
-                rows,
-                planning,
-                execution,
-                buffers,
-                selects,
-            },
-        ))
+        let analyzed = crate::explain::Analyzed {
+            rows,
+            planning,
+            execution,
+            buffers,
+            selects,
+            subplans,
+        };
+        Ok(if explain.style == crate::ast::ExplainStyle::Tree {
+            crate::explain::render_analyzed_tree(&plan, analyzed)
+        } else {
+            crate::explain::render_analyzed(&plan, analyzed)
+        })
     }
 
     /// The `log_min_duration_statement` threshold: statements that take at least this long are
@@ -3255,7 +3263,11 @@ impl<'s> Session<'s> {
             Statement::Explain(explain) => self
                 .read(|reader, tables| {
                     binding.statement(reader, tables, &mut explain.statement)?;
-                    execute::explain(reader, tables, &explain.statement)
+                    if crate::explain::shows_subplans(explain.style, dialect) {
+                        execute::explain_with_subplans(reader, tables, &explain.statement)
+                    } else {
+                        execute::explain(reader, tables, &explain.statement)
+                    }
                 })
                 .map(|query| crate::explain::render(&query, explain.style, dialect)),
             Statement::DropTable {

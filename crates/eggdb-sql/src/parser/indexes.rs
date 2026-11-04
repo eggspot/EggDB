@@ -394,6 +394,9 @@ impl Parser<'_> {
             if self.oracle() {
                 return self.oracle_explain_plan();
             }
+            if self.mysql() {
+                return self.mysql_explain();
+            }
             if self.postgresql() && (self.take_word("analyze") || self.take_word("analyse")) {
                 analyze = true;
             } else if self.postgresql() && self.take(&TokenKind::LeftParen) {
@@ -418,6 +421,45 @@ impl Parser<'_> {
             style,
             analyze,
             buffers,
+            statement: Box::new(statement),
+            plan_table: None,
+        }))
+    }
+
+    fn mysql_explain(&mut self) -> SqlResult<Statement> {
+        let analyze = self.take_word("analyze");
+        let mut style = if analyze {
+            ExplainStyle::Tree
+        } else {
+            ExplainStyle::Plan
+        };
+        if self.take_word("format") {
+            if !self.take_operator("=") {
+                return Err(self.unexpected());
+            }
+            style = if self.take_word("tree") {
+                ExplainStyle::Tree
+            } else if !analyze && self.take_word("traditional") {
+                ExplainStyle::Plan
+            } else {
+                return Err(self.not_supported("EXPLAIN formats other than TREE and TRADITIONAL"));
+            };
+        }
+        if style == ExplainStyle::Tree && !self.is_word("select") {
+            return Err(self.not_supported(
+                "EXPLAIN ANALYZE and EXPLAIN FORMAT=TREE of a statement other than SELECT",
+            ));
+        }
+        if !(self.is_word("select") || self.is_word("update") || self.is_word("delete")) {
+            return Err(
+                self.not_supported("EXPLAIN of a statement other than SELECT, UPDATE or DELETE")
+            );
+        }
+        let statement = self.statement_body()?;
+        Ok(Statement::Explain(Explain {
+            style,
+            analyze,
+            buffers: false,
             statement: Box::new(statement),
             plan_table: None,
         }))

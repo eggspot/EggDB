@@ -996,6 +996,7 @@ pub(crate) struct DropIndex {
 pub(crate) enum ExplainStyle {
     Plan,
     QueryPlan,
+    Tree,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1445,11 +1446,11 @@ pub(crate) enum SubqueryTest {
         all: bool,
     },
     Array,
-}
     RowCompare {
         expr: Expr,
         operator: BinaryOperator,
     },
+}
 
 impl SubqueryTest {
     pub(crate) fn operand(&self) -> Option<&Expr> {

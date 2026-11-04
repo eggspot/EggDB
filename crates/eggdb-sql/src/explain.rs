@@ -1,5 +1,10 @@
+mod expression_text;
+mod mysql_tree;
 mod oracle_plan;
+#[cfg(test)]
+mod session_tests;
 mod showplan;
+mod subplans;
 
 pub(crate) use oracle_plan::{
     DisplayedRow, MOST_DISPLAYED_ROWS, PLAN_DISPLAY_FUNCTION, PLAN_TABLE, PlanRow,
@@ -7,6 +12,7 @@ pub(crate) use oracle_plan::{
     plan_rows, written_plan_table,
 };
 pub(crate) use showplan::{showplan_all, showplan_text};
+pub(crate) use subplans::{Subplan, explain_subplans};
 
 use crate::ast::{ExplainStyle, Statement};
 use crate::dialect::Dialect;
@@ -15,9 +21,10 @@ use crate::execute::{ExplainedQuery, ExplainedSource};
 use crate::join::JoinMethod;
 use crate::plan::{KeyChoice, Use};
 use crate::session::{OutputColumn, QueryResult};
-use crate::step_times::{MeasuredSelect, RowTimes};
+use crate::step_times::{MeasuredSelect, MeasuredSubplan, RowTimes};
 use crate::store::PageLookups;
 use crate::types::{SqlType, Value};
+use expression_text::{ExpressionText, Spelling};
 use std::time::Duration;
 
 const MYSQL_COLUMNS: [&str; 12] = [
@@ -45,6 +52,7 @@ pub(crate) fn columns(style: ExplainStyle, dialect: Dialect) -> Vec<OutputColumn
         sql_type: Some(SqlType::BigInt),
     };
     match (style, dialect) {
+        (ExplainStyle::Tree, _) => vec![text("EXPLAIN")],
         (ExplainStyle::QueryPlan, _) | (_, Dialect::Sqlite) => vec![
             number("id"),
             number("parent"),
@@ -65,8 +73,17 @@ pub(crate) fn columns(style: ExplainStyle, dialect: Dialect) -> Vec<OutputColumn
     }
 }
 
+pub(crate) fn shows_subplans(style: ExplainStyle, dialect: Dialect) -> bool {
+    match style {
+        ExplainStyle::Tree => true,
+        ExplainStyle::Plan => dialect == Dialect::PostgreSql,
+        ExplainStyle::QueryPlan => false,
+    }
+}
+
 pub(crate) fn render(query: &ExplainedQuery, style: ExplainStyle, dialect: Dialect) -> QueryResult {
     let rows = match (style, dialect) {
+        (ExplainStyle::Tree, _) => vec![vec![Value::Text(mysql_tree::tree_text(query, None))]],
         (ExplainStyle::QueryPlan, _) | (_, Dialect::Sqlite) => sqlite_rows(query),
         (ExplainStyle::Plan, Dialect::MySql) => mysql_rows(query),
         (ExplainStyle::Plan, _) => postgresql_lines(query)
@@ -92,12 +109,35 @@ pub(crate) struct Analyzed {
     pub(crate) execution: Duration,
     pub(crate) buffers: Option<Buffers>,
     pub(crate) selects: Vec<MeasuredSelect>,
+    pub(crate) subplans: Vec<MeasuredSubplan>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Measured {
     Ran(RowTimes),
+    Looped { times: RowTimes, loops: u64 },
     NeverExecuted,
+}
+
+fn subplan_measured(measured: &[MeasuredSubplan], position: usize) -> Measured {
+    match measured
+        .iter()
+        .find(|subplan| subplan.position == position && subplan.loops > 0)
+    {
+        None => Measured::NeverExecuted,
+        Some(subplan) => {
+            let loops = u32::try_from(subplan.loops).unwrap_or(u32::MAX).max(1);
+            let per_loop = subplan.total / loops;
+            Measured::Looped {
+                times: RowTimes {
+                    first_row: per_loop,
+                    last_row: per_loop,
+                    rows: subplan.rows / subplan.loops,
+                },
+                loops: subplan.loops,
+            }
+        }
+    }
 }
 
 fn milliseconds(duration: Duration) -> f64 {
@@ -109,6 +149,12 @@ fn actual_group(measured: Measured) -> String {
         Measured::NeverExecuted => " (never executed)".to_owned(),
         Measured::Ran(times) => format!(
             " (actual time={:.3}..{:.3} rows={} loops=1)",
+            milliseconds(times.first_row.min(times.last_row)),
+            milliseconds(times.last_row),
+            times.rows
+        ),
+        Measured::Looped { times, loops } => format!(
+            " (actual time={:.3}..{:.3} rows={} loops={loops})",
             milliseconds(times.first_row.min(times.last_row)),
             milliseconds(times.last_row),
             times.rows
@@ -206,7 +252,7 @@ fn buffers_line(indent: &str, lookups: PageLookups) -> Option<String> {
 /// those of planning under `Planning:`, and the planning and execution times.
 pub(crate) fn render_analyzed(query: &ExplainedQuery, analyzed: Analyzed) -> QueryResult {
     let measured = measured_steps(query, &analyzed);
-    let mut lines: Vec<String> = postgresql_lines(query)
+    let mut lines: Vec<String> = postgresql_step_lines(query, None)
         .into_iter()
         .zip(measured)
         .map(|(mut line, measured)| {
@@ -216,6 +262,7 @@ pub(crate) fn render_analyzed(query: &ExplainedQuery, analyzed: Analyzed) -> Que
             line
         })
         .collect();
+    add_subplans(query, None, &mut lines, Some(&analyzed.subplans));
     if let Some(buffers) = &analyzed.buffers {
         if let Some(line) = buffers_line("  ", buffers.execution) {
             lines.insert(1.min(lines.len()), line);
@@ -407,18 +454,99 @@ fn postgresql_step(step: &Step<'_>) -> String {
     }
 }
 
-fn postgresql_lines(query: &ExplainedQuery) -> Vec<String> {
+fn arrow_column(base: Option<usize>, level: usize) -> Option<usize> {
+    match (base, level) {
+        (None, 0) => None,
+        (None, level) => Some(6 * level - 4),
+        (Some(column), level) => Some(column + 6 * level),
+    }
+}
+
+fn property_column(base: Option<usize>, level: usize) -> usize {
+    arrow_column(base, level).map_or(2, |column| column + 6)
+}
+
+fn postgresql_step_lines(query: &ExplainedQuery, base: Option<usize>) -> Vec<String> {
     steps(query)
         .into_iter()
-        .map(|(level, step)| match level {
-            0 => postgresql_step(&step),
-            _ => format!(
-                "{}->  {}",
-                " ".repeat(6 * level - 4),
-                postgresql_step(&step)
-            ),
+        .map(|(level, step)| match arrow_column(base, level) {
+            None => postgresql_step(&step),
+            Some(column) => format!("{}->  {}", " ".repeat(column), postgresql_step(&step)),
         })
         .collect()
+}
+
+fn subplan_lines(
+    subplan: &Subplan,
+    column: usize,
+    measured: Option<&[MeasuredSubplan]>,
+) -> Vec<String> {
+    let base = Some(column);
+    let mut lines = postgresql_step_lines(&subplan.plan, base);
+    if let Some(measured) = measured
+        && let Some(first) = lines.first_mut()
+    {
+        first.push_str(&actual_group(subplan_measured(measured, subplan.position)));
+    }
+    add_subplans(&subplan.plan, base, &mut lines, measured);
+    lines
+}
+
+fn add_subplans(
+    query: &ExplainedQuery,
+    base: Option<usize>,
+    lines: &mut Vec<String>,
+    measured: Option<&[MeasuredSubplan]>,
+) {
+    if query.subplans.is_empty() {
+        return;
+    }
+    let attach = usize::from(query.limited) + usize::from(query.sorted);
+    let column = property_column(base, attach);
+    let indent = " ".repeat(column);
+    let mut under_attach = Vec::new();
+    if let Some(filter) = query
+        .filter
+        .as_ref()
+        .filter(|filter| subplans::mentions_subplan(filter))
+    {
+        let text = ExpressionText {
+            spelling: Spelling::PostgreSql,
+            qualifier: None,
+            bare_columns: query.sources.len() <= 1,
+            subplans: &query.subplans,
+            select_numbers: &[],
+        }
+        .text(filter);
+        under_attach.push(format!("{indent}Filter: {text}"));
+    }
+    let initial = |subplan: &&Subplan| matches!(subplan.role, subplans::SubplanRole::Init { .. });
+    for subplan in query.subplans.iter().filter(initial) {
+        under_attach.push(format!("{indent}{}", subplans::subplan_label(subplan)));
+        under_attach.extend(subplan_lines(subplan, column + 2, measured));
+    }
+    let at = (attach + 1).min(lines.len());
+    lines.splice(at..at, under_attach);
+    for subplan in query.subplans.iter().filter(|subplan| !initial(subplan)) {
+        lines.push(format!("{indent}{}", subplans::subplan_label(subplan)));
+        lines.extend(subplan_lines(subplan, column + 2, measured));
+    }
+}
+
+fn postgresql_lines(query: &ExplainedQuery) -> Vec<String> {
+    let mut lines = postgresql_step_lines(query, None);
+    add_subplans(query, None, &mut lines, None);
+    lines
+}
+
+/// `EXPLAIN ANALYZE` in MySQL's tree form: one row in one `EXPLAIN` column holding the tree,
+/// with `(actual time=a..b rows=n loops=n)` on the iterators EggDB measured.
+pub(crate) fn render_analyzed_tree(query: &ExplainedQuery, analyzed: Analyzed) -> QueryResult {
+    QueryResult::rows(
+        "SELECT 1".to_owned(),
+        columns(ExplainStyle::Tree, Dialect::MySql),
+        vec![vec![Value::Text(mysql_tree::tree_text(query, Some(&analyzed)))]],
+    )
 }
 
 fn mysql_rows(query: &ExplainedQuery) -> Vec<Vec<Value>> {
@@ -616,6 +744,7 @@ mod tests {
             execution: Duration::from_micros(100),
             buffers: None,
             selects,
+            subplans: Vec::new(),
         }
     }
 

@@ -3466,6 +3466,37 @@ pub(crate) struct ExplainedQuery {
     pub(crate) limited: bool,
     pub(crate) filtered: bool,
     pub(crate) appended: bool,
+    pub(crate) filter: Option<Expr>,
+    pub(crate) join_conditions: Vec<Option<Expr>>,
+    pub(crate) order_by: Vec<crate::ast::OrderItem>,
+    pub(crate) row_limit: Option<u64>,
+    pub(crate) row_offset: u64,
+    pub(crate) subplans: Vec<crate::explain::Subplan>,
+}
+
+pub(crate) fn explain_select(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    select: &Select,
+) -> SqlResult<ExplainedQuery> {
+    let mut out = ExplainedQuery::default();
+    select_or_explain(reader, tables, select, false, Some(&mut out), None)?;
+    Ok(out)
+}
+
+pub(crate) fn explain_with_subplans(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    statement: &crate::ast::Statement,
+) -> SqlResult<ExplainedQuery> {
+    match statement {
+        crate::ast::Statement::Select(query)
+            if crate::subquery::needs_preparation(query) && union_branches(query).is_none() =>
+        {
+            crate::explain::explain_subplans(reader, tables, query)
+        }
+        _ => explain(reader, tables, statement),
+    }
 }
 
 fn union_branches(query: &Select) -> Option<Vec<&Select>> {
@@ -3546,6 +3577,7 @@ pub(crate) fn explain(
     }
     let access = plan::plan(&table, scope, filter, None);
     out.filtered = filter.is_some();
+    out.filter = filter.cloned();
     out.sources.push(ExplainedSource {
         label: reference
             .alias
@@ -3659,6 +3691,20 @@ fn select_or_explain(
         out.limited = limit.is_limited();
         out.filtered = select.filter.is_some();
         out.sorted = !sort_keys.is_empty();
+        out.filter = select.filter.clone();
+        out.order_by = select.order_by.clone();
+        out.row_limit = limit.count;
+        out.row_offset = offset;
+        if let Some(from) = &select.from
+            && joined.is_some()
+        {
+            out.join_conditions = std::iter::once(None)
+                .chain(from.joins.iter().map(|join| match &join.condition {
+                    crate::ast::JoinCondition::On(condition) => Some(condition.clone()),
+                    _ => None,
+                }))
+                .collect();
+        }
         if let Some(joined) = &joined {
             let methods = joined.methods();
             for (position, source) in joined.sources.list.iter().enumerate() {
