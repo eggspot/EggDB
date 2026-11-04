@@ -4858,3 +4858,79 @@ SELECT name FROM scores300 ORDER BY score FETCH FIRST -1 ROWS ONLY
 
 ok
 DROP TABLE scores300
+
+chapter ddl-partitioning, "Partitioning": an UPDATE through the parent moves rows, keys may be expressions, and indexes reach every partition
+ok
+CREATE TABLE measurement316 (city_id int NOT NULL, logdate date NOT NULL, peaktemp int) PARTITION BY RANGE (logdate)
+
+ok
+CREATE TABLE measurement316_y2006m02 PARTITION OF measurement316 FOR VALUES FROM ('2006-02-01') TO ('2006-03-01')
+
+ok
+CREATE TABLE measurement316_y2006m03 PARTITION OF measurement316 FOR VALUES FROM ('2006-03-01') TO ('2006-04-01')
+
+ok
+CREATE INDEX ON measurement316 (logdate)
+
+ok
+INSERT INTO measurement316 VALUES (1, '2006-02-10', 5), (2, '2006-03-10', 7)
+
+rows
+UPDATE measurement316 SET logdate = '2006-03-20' WHERE city_id = 1 RETURNING city_id, logdate
+----
+city_id|logdate
+1|2006-03-20
+UPDATE 1
+
+rows
+SELECT count(*) FROM measurement316_y2006m03
+----
+count
+2
+SELECT 1
+
+error 23514
+UPDATE measurement316 SET logdate = '2007-01-01' WHERE city_id = 2
+
+error 23514
+UPDATE measurement316_y2006m03 SET logdate = '2006-02-15' WHERE city_id = 2
+
+rows
+SELECT relname FROM pg_class WHERE relname LIKE 'measurement316%logdate_idx' ORDER BY relname
+----
+relname
+measurement316_logdate_idx
+measurement316_y2006m02_logdate_idx
+measurement316_y2006m03_logdate_idx
+SELECT 3
+
+error 2BP01
+DROP INDEX measurement316_y2006m02_logdate_idx
+
+ok
+DROP TABLE measurement316
+
+ok
+CREATE TABLE names316 (name text NOT NULL) PARTITION BY LIST (lower(name))
+
+ok
+CREATE TABLE names316_a PARTITION OF names316 FOR VALUES IN ('ann')
+
+ok
+CREATE TABLE names316_rest PARTITION OF names316 DEFAULT
+
+ok
+INSERT INTO names316 VALUES ('ANN'), ('Bob')
+
+rows
+SELECT name, pg_get_partkeydef('names316'::regclass) FROM names316_a
+----
+name|pg_get_partkeydef
+ANN|LIST (lower(name))
+SELECT 1
+
+error 42P17
+CREATE TABLE bad316 (x int) PARTITION BY RANGE ((random()))
+
+ok
+DROP TABLE names316

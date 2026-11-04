@@ -2404,20 +2404,33 @@ ALTER TABLE measurements DETACH PARTITION old_rows;
 - **Strategies.** `RANGE` over one or more columns (`FROM` inclusive, `TO` exclusive, `MINVALUE`
   and `MAXVALUE`), `LIST` over one column (`NULL` may be listed), `HASH` over one or more columns
   (`MODULUS` and `REMAINDER`), and a `DEFAULT` partition for rows no other partition takes. A
-  partition may itself be partitioned. Partition keys are columns; expressions in a key are
-  refused for now.
+  partition may itself be partitioned. A key part is a column or an expression:
+  `PARTITION BY RANGE ((id / 100))`, `LIST (lower(name))`, `HASH ((a + b))`, and MySQL's
+  `RANGE (YEAR(d))`. Subqueries, aggregates, functions whose value changes between calls
+  (`random()`, `now()`, `nextval`, user-defined routines) and expressions without a column are
+  refused with PostgreSQL's errors, and so are primary keys and unique constraints when the key
+  has an expression (D316).
 - **Rows go where they belong.** `INSERT`, `COPY` and `INSERT ... SELECT` into the partitioned
   table route each row to its partition. A row no partition takes fails with `23514`, `no
   partition of relation ... found for row`, and a row written straight into a partition must
   fit its bound (`violates partition constraint`). `UPDATE`, `DELETE` and `TRUNCATE` on the
-  partitioned table reach every partition. An `UPDATE` that would move a row to another
-  partition is refused for now.
+  partitioned table reach every partition. An `UPDATE` through the partitioned table that
+  changes a row's key moves the row to the partition that takes it (its count and `RETURNING`
+  include it), or fails with `23514 no partition ... found for row` when none does; an `UPDATE`
+  that names a partition moves rows only within it (D316).
 - **Pruning.** A query reads only the partitions its `WHERE` can match: comparisons, `BETWEEN`,
-  `IN` and `IS NULL` on the key against constants. `EXPLAIN` lists the partitions read; when one
+  `IN` and `IS NULL` on the key (a key expression written as in the key, such as
+  `lower(name) = 'ann'`) against constants. `EXPLAIN` lists the partitions read; when one
   is left, the query reads it directly and uses its indexes.
-- **Constraints.** A primary key or unique constraint of a partitioned table must include every
-  key column, and each partition gets its own. `PARTITION OF` copies the parent's columns,
-  defaults, primary key, unique constraints and checks. `AUTO_INCREMENT` and identity columns are
+- **Constraints and indexes.** A primary key or unique constraint of a partitioned table must
+  include every key column, and each partition gets its own. `PARTITION OF` copies the parent's
+  columns, defaults, primary key and checks. `CREATE INDEX` on a partitioned table gives every
+  partition, at every level, a matching index (one it already has with the same definition, or
+  a new `<partition>_<columns>_idx`), and so do partitions created or attached later. `CREATE
+  INDEX ... ON ONLY t` makes the parent's index alone, which `pg_index.indisvalid` shows as false
+  until `ALTER INDEX t_idx ATTACH PARTITION p_idx` has attached an index of every partition.
+  `DROP INDEX` of the parent's index drops the partitions' indexes; an attached partition index
+  can't be dropped alone (`2BP01`). `AUTO_INCREMENT` and identity columns are
   refused in partitioned tables for now; `serial` columns share their sequence.
 - **Catalogs and restores.** `pg_class` shows `relkind` `p` and `relispartition`, `pg_inherits`
   links partitions to their parent, `pg_partitioned_table`, `pg_get_partkeydef` and

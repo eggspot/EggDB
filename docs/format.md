@@ -685,7 +685,12 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
   (`1` range, `2` list, `3` hash) and its key's column names, and, when a partition, its parent's
   internal name and bound (`1` range: two value lists; `2` list: one; `3` hash: modulus and
   remainder as varints; `4` default). Each bound value is a byte (`0` the value as text, `1`
-  NULL, `2` MINVALUE, `3` MAXVALUE) and, for `0`, the text. Rows stay in each partition's own
+  NULL, `2` MINVALUE, `3` MAXVALUE) and, for `0`, the text. Record version 2 (D316) is written
+  only when a key has an expression or a partition has indexes attached to its parent's: each
+  key part starts with a kind byte (`0` a column name; `1` an expression, then the dialect byte
+  of the table definitions and the expression's text), and a partition's bound is followed by a
+  count and that many pairs of varints, the partition's index id and the parent index id it is
+  attached to (no id repeated on either side). Rows stay in each partition's own
   table; a partitioned table holds none. Table-definition version 11 (D259) is written only for
   a table with a `citext` or `hstore` column (defined-type kind `5`, a built-in base type, with
   OID 9000 or 9002), whose values in rows are tags `27` (`citext`, its text) and `28` (`hstore`,
