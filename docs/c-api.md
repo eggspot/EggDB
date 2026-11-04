@@ -490,23 +490,23 @@ without warning. EggDB needs nothing special for that: a committed transaction i
 is rolled back when the file opens next. Keep the database in the app's own files directory.
 
 ## How it is tested
-- `crates/eggdb-capi/tests/api.rs` calls every function as a C program would: commits and
+- `crates/eggdb-capi/tests/all/api.rs` calls every function as a C program would: commits and
   rollbacks, scans in batches in every direction and across transactions, collections, times
   to live, counters and compare-and-set, SQL in two dialects with parameters and blocks,
   backup and compaction, refusing to close while in use, threads sharing a handle, and every
   misuse (NULL pointers, bad UTF-8, unknown flags and dialects) answered with a status.
-- `crates/eggdb-capi/tests/statements.rs` prepares statements once and runs them many times
+- `crates/eggdb-capi/tests/all/statements.rs` prepares statements once and runs them many times
   with every typed binding, reads their column outlines, cancels a running `pg_sleep` from
   another thread, bulk-loads rows with `COPY` (text, CSV, a failing row, more data than one
   piece), and checks every misuse of a statement.
-- `crates/eggdb-capi/tests/streaming.rs` runs each scenario on a session in the process and on
+- `crates/eggdb-capi/tests/all/streaming.rs` runs each scenario on a session in the process and on
   one from `eggdb_sql_connect` to a server in the same process: stepping through 490 rows with
   every getter, NULLs, a failing division and a statement with no rows, the session refusing
   other calls while a run or a copy is open, `COPY ... TO STDOUT` of 5,000 rows read in pieces,
   ended early and freed early, a `COPY ... FROM STDIN` fed in 7-byte pieces that cut rows and
   characters, a failing row, an abandoned copy, a cancelled `pg_sleep`, and 4,200 statements
   prepared and finalized on a server (more than it keeps at once).
-- `crates/eggdb-capi/tests/header.rs` reads `eggdb.h` and checks it against the Rust code:
+- `crates/eggdb-capi/tests/all/header.rs` reads `eggdb.h` and checks it against the Rust code:
   every constant and its value, every exported function and its number of parameters, every
   struct's fields and types in order.
 - `scripts/c-api/check.sh` compiles `crates/eggdb-capi/tests/c/api_check.c` with the system C

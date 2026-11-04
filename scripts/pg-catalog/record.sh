@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage="usage: scripts/pg-catalog/record.sh <data directory> <label>
 
-Records the data of EggDB's always-on catalog test (crates/eggdb/tests/pg_catalog.rs): fills
+Records the data of EggDB's always-on catalog test (crates/eggdb/tests/all/pg_catalog.rs): fills
 DATABASE (default eggdb_catalog) of a running PostgreSQL server with
 scripts/pg-catalog/fixture.sql, writes its pg_dump to <data directory>/fixture.sql, runs every
 command of scripts/pg-catalog/commands.txt with the psql named by PSQL and -E, and writes each

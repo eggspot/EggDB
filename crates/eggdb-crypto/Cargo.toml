@@ -1,5 +1,6 @@
 [package]
 name = "eggdb-crypto"
+autotests = false
 description = "EggDB's cryptography, written from the public standards and checked against their published vectors: the SHA-2 hashes, HMAC, HKDF, PBKDF2, the ciphers, key exchanges and signatures of TLS, Base64 and constant-time comparison (D23, D35)."
 version.workspace = true
 edition.workspace = true
@@ -8,3 +9,7 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "all"
+path = "tests/all/main.rs"

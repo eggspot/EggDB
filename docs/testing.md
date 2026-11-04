@@ -6,6 +6,19 @@ simulated file system of `eggdb-platform` (D9), which numbers every file operati
 one of them, and can simulate a power loss that drops every unsynced write or tears unsynced
 writes into 512-byte pieces that survive or not, chosen by a seed.
 
+## How the tests are built (D335)
+Each package has unit tests in its `src/` and at most one integration-test program,
+`tests/all/main.rs`, which declares one module per area (`tests/all/<area>.rs`) and the shared
+helpers in `tests/all/common/`. The package's `Cargo.toml` sets `autotests = false` and names that
+one `[[test]]`, so a new top-level `tests/*.rs` file would never be compiled:
+`scripts/check-test-layout.sh`, the first check of
+ CI's `lint-and-test`, fails on it, on a module
+file `main.rs` doesn't declare and on a package without the setting. A test keeps its name and only
+gains its file's module (`cargo test serve` still finds `serve::...`); a test that runs its own
+program again as a child names itself with that module (`--exact process::...`). Debug and test
+builds keep line tables only (`debug = "line-tables-only"`), enough for a panic's file and line
+and a backtrace's; packages from outside the workspace (none today, D1) get no debug information.
+
 ## The whole stack: the crash sweep (D85)
 `crates/eggdb-storage/src/crash_sweep_tests.rs` runs a seeded B+tree workload through the page
 cache, the log and the page file: puts, overwrites, values at the leaf's limit, values on
@@ -97,13 +110,13 @@ After a reopen the store must hold exactly one commit at or after the last one t
 transactions run out of frames. CI runs 12 seeds of 250 steps (about 2 s of a debug build);
 `EGGDB_MODEL_TEST=1` runs 256 seeds of 3,000 steps.
 
-`crates/eggdb/tests/model.rs` does the same through the embedded API on real files: closure and
+`crates/eggdb/tests/all/model.rs` does the same through the embedded API on real files: closure and
 one-step transactions, rollbacks by an error from the closure, every range form, prefixes,
 scans that take entries from both ends at random, `check` and `stats`, closes, drops and
 read-only reopens.
 
 ## Hostile files (D89)
-`crates/eggdb-storage/tests/hostile_files.rs` is a seeded fuzzer with no outside tools. It builds
+`crates/eggdb-storage/tests/all/hostile_files.rs` is a seeded fuzzer with no outside tools. It builds
 five valid files (checkpointed; with a log to replay; with a log that wrapped through its
 recycled segments and gave segments to the free list; cut off by a torn power loss; with 16 KiB
 pages) and damages each case with one to three of 22 mutations:
@@ -144,7 +157,7 @@ nothing was imported.
 
 ## Hostile protocol messages (D103)
 `eggdb serve` reads bytes from any program on the machine, so the PostgreSQL protocol has a
-seeded fuzzer of its own in `crates/eggdb-pgwire/tests/hostile_messages.rs`: it mutates valid
+seeded fuzzer of its own in `crates/eggdb-pgwire/tests/all/hostile_messages.rs`: it mutates valid
 startup packets, `Query`, `Parse`, `Bind`, `Describe`, `Execute`, `Close`, `Sync` and SASL
 messages (bit flips, cuts, noise, rewritten length and count fields, random message types) and
 feeds them to every parser and to the SCRAM exchange, which must return an error or a value and
@@ -153,7 +166,7 @@ after authentication (80 cases) and requires a well-behaved client to connect an
 afterwards. Oversized length fields are refused without allocating them. `EGGDB_FUZZ_CASES` and
 `EGGDB_FUZZ_SEED` run longer campaigns. The message codecs, the SCRAM exchange (RFC 7677's
 example and malformed variants) and the cryptography's published vectors have unit tests of
-their own, and `crates/eggdb-pgwire/tests/protocol.rs` drives every protocol flow with a client
+their own, and `crates/eggdb-pgwire/tests/all/protocol.rs` drives every protocol flow with a client
 written in the test. The HTTP server has one too, in `crates/eggdb-http/src/keep_alive_tests.rs`
 (`hostile_requests_return_errors_and_never_panic`): 20,000 mutations of pipelined, chunked and
 `Content-Length` requests read back to back on one connection, each returning a request or an
@@ -162,7 +175,7 @@ smuggling attempts (both lengths, two codings, folded or bare-LF lines, bad chun
 real sockets and requires a `400` or `501` and a closed connection (D325).
 
 The limits that keep another program from locking users out or exhausting memory (D254)
-have tests of their own on each SQL protocol, in `tests/limits.rs` of `eggdb-pgwire`,
+have tests of their own on each SQL protocol, in `tests/all/limits.rs` of `eggdb-pgwire`,
 `eggdb-mysqlwire` and `eggdb-tdswire`: 20 idle sockets do not keep a real login out, 10,000
 `Parse` messages end in `54000` after 4,096 prepared statements, portals stop at 4,096, a message
 or prepared statements past the server's memory budget fail with `53200` (MySQL 1041, SQL Server
@@ -175,7 +188,7 @@ a message or a cursor), CQL (`Overloaded`, `0x1001`, for a frame or a result) an
 (`SERVER_ERROR out of memory`, the connection goes on), and so do the HTTP listeners
 (Elasticsearch, S3, DynamoDB and `eggdb-http`'s plain `503`), Kafka, NATS, STOMP, MQTT, AMQP 0-9-1
 and 1.0, Bolt and RESP pub/sub's queued messages, each checking that the budget returns to zero
-(D307), and `eggdb-http`'s chunked uploads are counted as their chunks arrive (`oversized_chunks_are_refused_and_the_budget_returns_to_zero`, D325); `crates/eggdb/tests/serve.rs` checks
+(D307), and `eggdb-http`'s chunked uploads are counted as their chunks arrive (`oversized_chunks_are_refused_and_the_budget_returns_to_zero`, D325); `crates/eggdb/tests/all/serve.rs` checks
 `--max-connection-memory` through the real binary. The login slots and the budget have unit tests
 in `eggdb-platform`'s `connection_limits`. The T-SQL lexer, parser, functions and batches have a seeded mutator in
 `crates/eggdb-sql/src/tests.rs` (`hostile_tsql_input_returns_errors_and_never_panics`, 35,000
@@ -184,7 +197,7 @@ dialect list.
 
 ## Hostile MCP messages (D119)
 `eggdb mcp` reads whatever an agent's client sends, so its JSON-RPC reader and dispatch have a
-seeded fuzzer in `crates/eggdb-mcp/tests/hostile_messages.rs`: it mutates valid MCP messages
+seeded fuzzer in `crates/eggdb-mcp/tests/all/hostile_messages.rs`: it mutates valid MCP messages
 (byte flips, cuts, inserted JSON fragments such as `\u0000`, lone surrogates and huge numbers,
 nesting past the 256-level limit, a parameter of every wrong type, a key given twice, batches and
 random bytes) and requires every line that is a request to get exactly one answer that is one
@@ -194,17 +207,17 @@ answers in order. Messages over 4 MiB are refused without being buffered, and so
 `EGGDB_FUZZ_SEED` run longer campaigns. A third run (D121) starts a server with `--allow-write`
 and a client that can be asked, sends 400 destructive `write_sql` calls and answers each
 question with mutated, cut, stray or garbled answers, cancels and pings: every line out must be
-JSON and the statement must never run. `crates/eggdb-mcp/tests/server.rs` drives every tool and
-rule over an in-memory store, `crates/eggdb-mcp/tests/writes.rs` the writes, both confirmation
+JSON and the statement must never run. `crates/eggdb-mcp/tests/all/server.rs` drives every tool and
+rule over an in-memory store, `crates/eggdb-mcp/tests/all/writes.rs` the writes, both confirmation
 paths, the wait for an answer and the commits that must never be reported failed,
-`crates/eggdb-mcp/tests/tables.rs` a server limited with `--tables` (D156: hidden tables missing
+`crates/eggdb-mcp/tests/all/tables.rs` a server limited with `--tables` (D156: hidden tables missing
 in every tool, dialect and catalog, the key-value tools refused, the gap between calls), and
-`crates/eggdb/tests/mcp.rs` drives the built binary as a child process, checking that every line
+`crates/eggdb/tests/all/mcp.rs` drives the built binary as a child process, checking that every line
 on its stdout is a JSON-RPC message, `--tables` included. `crates/eggdb-sql/src/visible_tables_tests.rs`
 checks the filter itself: every SQL key read through it, no hidden name, row or comment found.
 
 ## Expiring keys and counters (D140)
-`crates/eggdb/tests/expiry.rs` runs the API on a `SimClock` (`Options::clock`): a key expires
+`crates/eggdb/tests/all/expiry.rs` runs the API on a `SimClock` (`Options::clock`): a key expires
 exactly at its deadline, one microsecond after it is still readable, across a crash (a drop
 without `close`) and a reopen, in the default key space and in a collection, in `get`, `get_with`
 and scans both ways; a wall clock set back after a commit never brings an expired key back; a
@@ -217,7 +230,7 @@ holds, deadline records included, so the tests also see what the commit sweep an
 deadline record readers (`expiry.rs`); the key layout is pinned by test vectors, and
 `sample_files.rs` checks that a v0.2.0 file takes expiring keys and then carries the
 `EXPIRING_KEYS` bit. The CLI, the shell and the UI scenarios 40 to 45 are in
-`cli/expiry_tests.rs` and `eggdb-ui/tests/screens.rs`, and the smoke test runs every new command.
+`cli/expiry_tests.rs` and `eggdb-ui/tests/all/screens.rs`, and the smoke test runs every new command.
 
 The command model (D143) has four checks. The registry test (`crates/eggdb-commands`) checks
 every command's and tool's fields, that every command is a kept name or a noun with core verbs,
@@ -225,7 +238,7 @@ that new tool names join their command's words with `_` and shipped ones come fr
 every tool's MCP annotations follow from its effect, idempotence and reach, and that every
 argument maps onto an option or operand of its CLI twin. `eggdb-mcp` keeps the shipped
 `tools/list` generator as an oracle and checks the registry's output against it byte for byte,
-with and without `--allow-write`. The parity test (`tests/command_model.rs`) runs `eggdb mcp`
+with and without `--allow-write`. The parity test (`tests/all/command_model.rs`) runs `eggdb mcp`
 and the `eggdb` commands as real processes on the same files: `kv_get`/`get --json`,
 `kv_scan`/`scan --json`, `run_sql` and `write_sql`/`sql --json` return the same values once the
 tool's envelope is removed, and the same failure (a missing file, a failed statement) has the same
@@ -236,12 +249,12 @@ asked for), `explain_query`/`explain` in three dialects and with its refusals, a
 from a tool and `table_not_found` from its twin, compared by category. From slice 3 (D145) it
 pages `row_list` and `row list --json` side by side, comparing each page's items with the
 records and the tool's `next_cursor` with the twin's trailer line, and compares their refusals
-(a view, a cursor of another table, a malformed cursor, a missing table). `tests/paging.rs`
+(a view, a cursor of another table, a malformed cursor, a missing table). `tests/all/paging.rs`
 pages a 10,000-row table 1,000 rows at a time while a writer inserts rows before and after the
 cursor and deletes rows ahead of it between pages, and requires no row repeated or skipped,
 rows added ahead read and rows added behind or removed never read; it does the same for
 `table list` while tables are created, follows the text form's next-page command, and pages a
-table without a primary key. `tests/dry_run.rs` runs `restore --dry-run` and a real restore of
+table without a primary key. `tests/all/dry_run.rs` runs `restore --dry-run` and a real restore of
 the same dump on two copies of a file and requires the same report, the file unchanged byte for
 byte and its sequence unmoved, and checks `--create` dry runs, failures and a leftover scratch
 file; it does the same for `import --csv --dry-run`. `eggdb-mcp`'s server tests page `row_list`
@@ -330,7 +343,7 @@ statements built from subquery, `WITH`, set-operation and join fragments in each
 `DISABLE TRIGGER`), the catalogs that list them, the trigger record cut at every length and with
 every byte flipped (an error, never a panic), and 20,000 statements built from trigger fragments
 in each dialect. `a_killed_process_keeps_a_triggers_changes_with_its_statement` in
-`crates/eggdb/tests/sql.rs` kills `eggdb sql` while it inserts into a table whose trigger writes a
+`crates/eggdb/tests/all/sql.rs` kills `eggdb sql` while it inserts into a table whose trigger writes a
 log and checks that the table and the log always hold the same rows.
 
 ## PL/SQL (D160)
@@ -456,7 +469,7 @@ an enum type and an identity column), with `expected.txt`, each table's sorted
 `scripts/pg-restore/check.sh target/debug/eggdb <work> --rows 300 --fixtures
 crates/eggdb/tests/data/pg_dump pg16` against PostgreSQL 16.13 and with `pg18` against 18 (`PG_BIN`
 naming each one's tools); `pg18.sql` carries `\restrict`, and `pg18-custom.sql` is a custom
-archive turned into SQL by `pg_restore -f`. `crates/eggdb/tests/restore.rs` restores each and
+archive turned into SQL by `pg_restore -f`. `crates/eggdb/tests/all/restore.rs` restores each and
 compares every table byte for byte. CI's `pg-restore` job runs the same script against the
 official `postgres:16` and `postgres:17` containers with about 50,000 rows, restoring every form
 with `eggdb restore` and the `--inserts` one with `psql -f` against `eggdb serve`.
@@ -477,7 +490,7 @@ defaults, `WITH CHECK` and `WITH NOCHECK` constraints over an orphan row, `NOCHE
 properties (kept as comments); and
 `shop-sqlpackage.sql`, a sqlpackage script with its `:setvar` header. `shop-expected.txt` holds
 queries and their results written by hand from the scripts' data and Microsoft's documented
-semantics. `crates/eggdb/tests/restore_sqlserver.rs` restores both with the built binary and
+semantics. `crates/eggdb/tests/all/restore_sqlserver.rs` restores both with the built binary and
 checks the report and every query, then UTF-8, UTF-8 with a mark, LF-only, UTF-16 big-endian
 and stdin variants, a generated script of 5,000 rows and one 20 MiB value, errors with and
 without `--create` and `--keep-going`, the content routes and sqlcmd's commands (`:r` and `!!`
@@ -491,12 +504,12 @@ identities, identities refused at run time) and `sqlserver_batches` have unit te
 alias types, wide identities, blocks) read one to seven bytes at a time. `XACT_ABORT` and
 uncommittable transactions are tested in `batch_logic_tests.rs`, Transact-SQL sequences and
 `MS_Description` (with hostile statements) in `sqlserver_tests.rs`, and `GO` in `eggdb sql` in
-`crates/eggdb/tests/sql.rs`. `crates/eggdb/tests/data/ssms-sample.sql` is the smoke test's
+`crates/eggdb/tests/all/sql.rs`. `crates/eggdb/tests/data/ssms-sample.sql` is the smoke test's
 sample, restored with `eggdb restore` and with go-sqlcmd's `-i` against `eggdb serve`.
 
 **Restoring Oracle scripts (item 43, D127).** `crates/eggdb/tests/data/oracle/hr/` holds Oracle's
 own HR sample-schema scripts, unchanged (MIT, from `oracle-samples/db-sample-schemas`; the
-folder's README names the commit). `crates/eggdb/tests/restore_oracle.rs` restores
+folder's README names the commit). `crates/eggdb/tests/all/restore_oracle.rs` restores
 `hr_install.sql` with the built binary from another working directory, so its `@@` includes are
 found beside it, and checks the documented counts (regions 5, countries 25, locations 23,
 departments 27, jobs 19, employees 107, job_history 10) through Oracle and PostgreSQL SQL, the
@@ -520,7 +533,7 @@ taken over, the foreign key enabled (`ORA-02291`) and the still-disabled `CHECK`
 tests in `tests_oracle.rs` cover the column-level rewrites, `ALTER TABLE ... ADD (...)`, the
 refused-identity retry, a restore with all three and `SqlPlusScript`'s steps; `oracle_tests.rs`
 covers identity options, `ORA-32795`/`ORA-32796` and `USING INDEX` in a session; the hostile
-Oracle fragments gained the identity and `USING INDEX` forms. `crates/eggdb/tests/sql.rs` runs a
+Oracle fragments gained the identity and `USING INDEX` forms. `crates/eggdb/tests/all/sql.rs` runs a
 SQL*Plus script through `eggdb sql --dialect oracle` (an `@@` include, `--define`, `PROMPT`,
 `SPOOL`, `HOST`, `/` after `;`, `EXIT`, `--json`, the stopping errors and `-c` left plain), and
 the smoke test pipes a short script with `DEFINE`, `PROMPT` and a counted `SET`.
@@ -555,7 +568,7 @@ command fails and checks that nothing of it stayed, and cancels `SELECT pg_sleep
 `NpgsqlCommand.Cancel()` after one second. `scripts/pg-apps/check.sh` builds it with the .NET
 SDK (Npgsql restored from NuGet, a test tool never shipped) and runs it against PostgreSQL 17 and
 EggDB next to the Java and Python programs, requiring the same bytes. Below the driver,
-`crates/eggdb-pgwire/tests/transactions_and_cancel.rs` speaks the protocol directly: pipelines
+`crates/eggdb-pgwire/tests/all/transactions_and_cancel.rs` speaks the protocol directly: pipelines
 that commit at `Sync` or leave nothing, one `Query` message's statements as one transaction, a
 `BEGIN` inside a pipeline, portals closed at the end of their transaction, `DISCARD ALL`,
 `CancelRequest` with right and wrong keys and one that rolls back a pipeline, and Npgsql's
@@ -585,7 +598,7 @@ it a new database and compares its output with `scripts/tds-apps/expected-efcore
 Below the tools, `crates/eggdb-sql/src/insert_select_tests.rs`, `migration_tool_tests.rs` and
 `advisory_locks.rs` test `INSERT ... SELECT`, Flyway's statements and the lock table, the SQL
 Server suite has cases for `MERGE`, `OPENJSON`, `SAVE TRANSACTION` and `INSERT ... SELECT`, and
-`crates/eggdb-tdswire/tests/rpc.rs` sends a save point and a rollback to it over the socket.
+`crates/eggdb-tdswire/tests/all/rpc.rs` sends a save point and a rollback to it over the socket.
 
 SQL Server's drivers have their own check (item 23b, D132).
 `crates/eggdb/tests/clients/java/TdsAppCheck.java` (mssql-jdbc) and
@@ -600,7 +613,7 @@ CI oracle under its license. CI's `tds-apps` job runs it with mssql-jdbc 12.8.1 
 5.2.2, downloaded as test tools and never shipped, and keeps both outputs, the server log and the
 difference. The RPC, transaction manager and reset paths have unit tests in
 `crates/eggdb-tdswire/src/rpc.rs`, `messages.rs`, `procedures.rs` and `tokens.rs`, socket tests in
-`crates/eggdb-tdswire/tests/rpc.rs`, mutated requests in `hostile_packets.rs`, and the dialect's
+`crates/eggdb-tdswire/tests/all/rpc.rs`, mutated requests in `hostile_packets.rs`, and the dialect's
 parameters, implicit transactions, `IF` and resets have tests in
 `crates/eggdb-sql/src/sqlserver_tests.rs`.
 
@@ -618,13 +631,13 @@ it with pgjdbc 42.7.4 and the `postgres:17` image's psql, test tools never shipp
 `SYS_CONTEXT`, the dialect switch on PostgreSQL and Transact-SQL sessions, `$n` parameters and
 the user's own schema have unit tests in `crates/eggdb-sql/src/oracle_dictionary/tests.rs`; the
 startup option, a refused dialect and the extended protocol in Oracle's dialect have socket tests
-in `crates/eggdb-pgwire/tests/protocol.rs`, and a TDS batch that switches, with transaction
-manager requests after it, in `crates/eggdb-tdswire/tests/protocol.rs`; the hostile Oracle
+in `crates/eggdb-pgwire/tests/all/protocol.rs`, and a TDS batch that switches, with transaction
+manager requests after it, in `crates/eggdb-tdswire/tests/all/protocol.rs`; the hostile Oracle
 statement fuzzer in `crates/eggdb-sql/src/tests.rs` covers the new views, `SYS_CONTEXT` and the
 `SET`.
 
 ## The C API (D142)
-`crates/eggdb-capi/tests/api.rs` calls every function of `eggdb.h` the way a C program does,
+`crates/eggdb-capi/tests/all/api.rs` calls every function of `eggdb.h` the way a C program does,
 through raw pointers: commits and rollbacks across a reopen, a read transaction refusing a
 change, scans of 1,000 keys in batches forward, backward, by range and by prefix, a scan
 continued in a later transaction that sees the writes ahead of it, collections kept apart from
@@ -633,7 +646,7 @@ SQLite's dialects with typed values, a failing statement's SQLSTATE, parameters 
 quote and a semicolon, a transaction block rolled back and one left open at close, backup and
 compaction, `eggdb_close` refusing while a transaction or session is open, four threads reading
 through one handle, and misuse (NULL handles and buffers, text that is not UTF-8, unknown flags
-and dialects) answered with `EGGDB_ERR_INVALID_ARGUMENT`. `tests/header.rs` parses `eggdb.h` and
+and dialects) answered with `EGGDB_ERR_INVALID_ARGUMENT`. `tests/all/header.rs` parses `eggdb.h` and
 fails when a constant, a function's parameter count or a struct's fields differ from the Rust
 code. `scripts/c-api/check.sh <library directory> <work>` compiles
 `crates/eggdb-capi/tests/c/api_check.c` with `-Wall -Wextra -Wpedantic -Werror`, compiles the
@@ -648,11 +661,11 @@ workflow on the release libraries of the Linux and macOS targets its runners can
   RFC 6979) and against Project Wycheproof's cases for AES-GCM, ChaCha20-Poly1305, X25519, P-256
   ECDH and ECDSA, and RSA PKCS#1 v1.5 and PSS. The cases are kept in
   `crates/eggdb-crypto/tests/data`.
-- **TLS 1.3 against RFC 8448.** `crates/eggdb-tls/tests/rfc8448.rs` checks every published value
+- **TLS 1.3 against RFC 8448.** `crates/eggdb-tls/tests/all/rfc8448.rs` checks every published value
   of RFC 8448's "Simple 1-RTT Handshake": hellos decoded and re-encoded byte for byte, every
   secret, key and IV, both Finished messages, the CertificateVerify signature, and every
   protected record sealed and opened exactly.
-- **Handshakes over sockets.** `tests/handshake.rs` runs real TLS 1.3 and TLS 1.2 handshakes over
+- **Handshakes over sockets.** `tests/all/handshake.rs` runs real TLS 1.3 and TLS 1.2 handshakes over
   loopback TCP and covers:
   - data in both directions;
   - channel binding and exported keys agreeing on both sides;
@@ -661,14 +674,14 @@ workflow on the release libraries of the Linux and macOS targets its runners can
   - key updates;
   - the version limits;
   - garbage instead of a ClientHello.
-- **Hostile input.** `tests/hostile.rs` mutates every handshake decoder's input, the record layer's
+- **Hostile input.** `tests/all/hostile.rs` mutates every handshake decoder's input, the record layer's
   and the handshake buffer's, and feeds a server mutated ClientHellos. None may panic.
-- **Protocols.** `crates/eggdb-pgwire/tests/tls.rs` covers SSLRequest, direct TLS with and without
+- **Protocols.** `crates/eggdb-pgwire/tests/all/tls.rs` covers SSLRequest, direct TLS with and without
   ALPN, SCRAM-SHA-256-PLUS with a right and a wrong channel binding, and the downgrade check.
-  `crates/eggdb-mysqlwire/tests/tls.rs` covers the SSL request and a query over TLS.
-  `crates/eggdb-tdswire/tests/tls.rs` covers full encryption, login-only encryption, plaintext
+  `crates/eggdb-mysqlwire/tests/all/tls.rs` covers the SSL request and a query over TLS.
+  `crates/eggdb-tdswire/tests/all/tls.rs` covers full encryption, login-only encryption, plaintext
   from loopback, and TDS 8 strict.
-- **`eggdb serve`.** `crates/eggdb/tests/serve.rs` checks the option rules, and a self-signed
+- **`eggdb serve`.** `crates/eggdb/tests/all/serve.rs` checks the option rules, and a self-signed
   server on `0.0.0.0` whose printed fingerprint matches the certificate it serves.
 - **Real clients.** CI's `tls-clients` job runs `scripts/tls-clients/check.sh`, which connects
   real clients to `eggdb serve` with a certificate from a test authority made by openssl:
@@ -696,7 +709,7 @@ one that fails with `TimedOut` across a longer cut, its peer finding it reset on
 and it sends; one-way cuts, where one direction's bytes arrive and the other's are held, and
 connects across them time out; per-host latency, and per-host bandwidth that spaces bytes out
 by their size on the clock; and `NotConnected` from a reset end's peer address and shutdown.
-`tests/net_contract.rs` checks the last against the operating systems' sockets on Linux and
+`tests/all/net_contract.rs` checks the last against the operating systems' sockets on Linux and
 macOS too, and `os_net.rs` checks that a reap already satisfied by operations that finished at
 once makes no readiness call, while operations left waiting are still polled at least every
 17th reap.
@@ -704,7 +717,7 @@ once makes no readiness call, while operations left waiting are still polled at 
 UDP sockets (D315) have the same twin: `SimDatagramSocket` carries datagrams across the
 simulated network's latency, links and cuts, loses those sent across a cut, drops what overflows
 a socket's `SimNetwork::DATAGRAM_BUFFER_BYTES`, and moves the clock to a datagram's arrival or to
-the end of a receive's wait (`sim_net/datagram.rs`). `tests/net_contract.rs` runs the datagram
+the end of a receive's wait (`sim_net/datagram.rs`). `tests/all/net_contract.rs` runs the datagram
 contract (whole datagrams both ways, a timed-out receive, a taken port, oversized datagrams, and
 a datagram longer than the buffer cut or refused) against the operating system's sockets and the
 simulation alike.

@@ -1,5 +1,6 @@
 [package]
 name = "eggdb-mysqlwire"
+autotests = false
 description = "EggDB's server for the MySQL client/server protocol: the handshake, caching_sha2_password and mysql_native_password authentication, text queries and prepared statements, on loopback listeners only for now (D102, D106)."
 version.workspace = true
 edition.workspace = true
@@ -14,3 +15,7 @@ eggdb-crypto = { path = "../eggdb-crypto" }
 eggdb-platform = { path = "../eggdb-platform" }
 eggdb-sql = { path = "../eggdb-sql" }
 eggdb-tls = { path = "../eggdb-tls" }
+
+[[test]]
+name = "all"
+path = "tests/all/main.rs"

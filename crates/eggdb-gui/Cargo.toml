@@ -1,5 +1,6 @@
 [package]
 name = "eggdb-gui"
+autotests = false
 description = "EggDB's own GUI toolkit and desktop client: a software rasterizer, TrueType text from the system's fonts, and the client's screens as designed in docs/ux/gui.md."
 version.workspace = true
 edition.workspace = true
@@ -13,3 +14,7 @@ workspace = true
 eggdb = { path = "../eggdb" }
 eggdb-pgwire = { path = "../eggdb-pgwire" }
 eggdb-platform = { path = "../eggdb-platform" }
+
+[[test]]
+name = "all"
+path = "tests/all/main.rs"
