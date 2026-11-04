@@ -204,9 +204,18 @@ Check each task against these before starting and again before opening the PR.
   Each decision is a file of its own, `docs/decisions/D<number>.md` (zero-padded to three digits),
   so read only the ones a task needs. `docs/roadmap.md`: milestones and status.
 
+## Testing
+- Integration tests go in the package's single `tests/all` program; never add a new top-level
+  `tests/*.rs` file. `tests/all/main.rs` declares one module per area (`tests/all/<area>.rs`),
+  shared helpers are its `common` module, and the package's `Cargo.toml` has `autotests = false`
+  and one `[[test]]` named `all`. Every extra test program links the whole engine again, so the
+  build folder would grow with each test file (D335). `scripts/check-test-layout.sh` checks this in
+  CI's `lint-and-test`. Test data stays in `tests/data` and the like, beside `tests/all`.
+
 ## Commands
 - `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`,
-  `cargo doc --workspace --no-deps`. CI runs exactly these (job `lint-and-test`). CI's last job,
+  `cargo doc --workspace --no-deps`. CI runs exactly these (job `lint-and-test`), after
+  `scripts/check-test-layout.sh` (see Testing). CI's last job,
   `check`, waits for every other job and fails if one failed or was cancelled: it is the one
   required status check, and a new job is added to its `needs:` list (D101).
 - `scripts/smoke-test.sh target/debug/eggdb` runs a built binary through every command, the

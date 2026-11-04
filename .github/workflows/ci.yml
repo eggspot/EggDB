@@ -16,8 +16,6 @@ permissions:
 
 env:
   CARGO_INCREMENTAL: 0
-  CARGO_PROFILE_DEV_DEBUG: line-tables-only
-  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
   changes:
@@ -80,6 +78,8 @@ jobs:
             echo "::error::third-party crates in what ships (D1): $foreign"
             exit 1
           fi
+      - name: One integration-test program per package
+        run: scripts/check-test-layout.sh
       - name: Format
         run: cargo fmt --all --check
       - name: Lint
