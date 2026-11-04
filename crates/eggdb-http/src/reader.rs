@@ -214,7 +214,7 @@ impl<S: RequestSource> RequestReader<S> {
             if !held.hold_if_large(total) {
                 return Err(HttpError::OverMemoryBudget);
             }
-            body.reserve(size);
+            body.reserve_exact(size);
             self.take_into(&mut body, size)?;
             self.take_crlf()?;
         }

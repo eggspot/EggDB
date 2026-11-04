@@ -357,10 +357,16 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         } else {
             "*".to_owned()
         };
+        let held_bytes = rows
+            .rows
+            .iter()
+            .map(|row| eggdb_sql::held_row_bytes(row))
+            .fold(0usize, usize::saturating_add);
         StreamedResponse::new(200, "application/json; charset=utf-8", move |out| {
             write_rows_json(&rows, out)
         })
         .with_header("Content-Range", &format!("{range}/{total}"))
+        .with_held_bytes(held_bytes)
         .into()
     }
 

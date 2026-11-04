@@ -10,6 +10,7 @@ const READ_POLL: Duration = Duration::from_millis(200);
 const FIRST_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 const BODY_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const SLOWEST_BODY_BYTES_PER_SECOND: u64 = 64 * 1024;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const LINGER_TIMEOUT: Duration = Duration::from_secs(1);
 const LINGER_BYTES: usize = 1 << 20;
@@ -34,12 +35,29 @@ struct ConnectionStream<'s> {
     stop: &'s (dyn Fn() -> bool + Sync),
     deadline: Instant,
     phase: Phase,
+    body_started: Instant,
+    body_bytes: u64,
 }
 
 impl ConnectionStream<'_> {
     fn wait_for_request(&mut self, timeout: Duration) {
         self.phase = Phase::Waiting;
         self.deadline = deadline_after(timeout);
+    }
+
+    fn body_read(&mut self, count: usize) {
+        self.body_bytes = self.body_bytes.saturating_add(count as u64);
+        let allowed_millis = self
+            .body_bytes
+            .saturating_mul(1000)
+            .checked_div(SLOWEST_BODY_BYTES_PER_SECOND)
+            .unwrap_or(u64::MAX);
+        let whole_body = BODY_READ_TIMEOUT.saturating_add(Duration::from_millis(allowed_millis));
+        let whole_body_deadline = self
+            .body_started
+            .checked_add(whole_body)
+            .unwrap_or_else(|| deadline_after(whole_body));
+        self.deadline = deadline_after(BODY_READ_TIMEOUT).min(whole_body_deadline);
     }
 }
 
@@ -52,7 +70,7 @@ impl Read for ConnectionStream<'_> {
             match self.stream.read(buffer) {
                 Ok(count) => {
                     if self.phase == Phase::Body {
-                        self.deadline = deadline_after(BODY_READ_TIMEOUT);
+                        self.body_read(count);
                     }
                     return Ok(count);
                 }
@@ -82,6 +100,8 @@ impl RequestSource for ConnectionStream<'_> {
 
     fn head_ended(&mut self) {
         self.phase = Phase::Body;
+        self.body_started = Instant::now();
+        self.body_bytes = 0;
         self.deadline = deadline_after(BODY_READ_TIMEOUT);
     }
 }
@@ -264,6 +284,8 @@ pub(crate) fn serve_connection<'h>(
         stop,
         deadline: deadline_after(FIRST_REQUEST_TIMEOUT),
         phase: Phase::Waiting,
+        body_started: Instant::now(),
+        body_bytes: 0,
     });
     let mut held = limits.memory_budget.empty_reservation();
     let max_requests = limits.max_requests_per_connection.max(1);
@@ -312,8 +334,17 @@ pub(crate) fn serve_connection<'h>(
                     && connection.keeps()
             }
             Reply::Streamed(streamed) => {
-                held.resize(0);
-                write_streamed(&mut writer, streamed, head_only, version, keep)
+                if held.hold_if_large(streamed.held_bytes) {
+                    write_streamed(&mut writer, streamed, head_only, version, keep)
+                } else {
+                    drop(streamed);
+                    held.resize(0);
+                    let response = (limits.over_memory_budget)();
+                    let keep = keep && whole_response_frames_itself(&response, head_only);
+                    let connection = ConnectionHeader::of(version, keep);
+                    write_whole(&mut writer, &response, head_only, connection).is_ok()
+                        && connection.keeps()
+                }
             }
         };
         held.resize(0);

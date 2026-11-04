@@ -334,6 +334,14 @@ fn rows_are_streamed_in_chunks_over_a_kept_connection() {
             "{answer}"
         );
         assert!(answer.contains("Content-Range: 0-2999/*\r\n"), "{answer}");
+        let sizes = first_chunk_sizes(&answer);
+        assert!(sizes.len() > 1, "{sizes:?}");
+        assert!(
+            sizes
+                .iter()
+                .all(|&size| size > 0 && size <= eggdb_http::STREAM_CHUNK_BYTES),
+            "{sizes:?}"
+        );
         assert!(
             answer.ends_with("\r\n[{\"id\":7,\"label\":\"reading 7\"}]\r\n0\r\n\r\n"),
             "{answer}"
@@ -341,4 +349,22 @@ fn rows_are_streamed_in_chunks_over_a_kept_connection() {
         stopped.store(true, std::sync::atomic::Ordering::Release);
     });
     assert_eq!(budget.used_bytes(), 0);
+}
+
+fn first_chunk_sizes(answer: &str) -> Vec<usize> {
+    let Some((_, mut rest)) = answer.split_once("\r\n\r\n") else {
+        return Vec::new();
+    };
+    let mut sizes = Vec::new();
+    while let Some((line, after)) = rest.split_once("\r\n") {
+        let Ok(size) = usize::from_str_radix(line, 16) else {
+            break;
+        };
+        if size == 0 {
+            break;
+        }
+        sizes.push(size);
+        rest = after.get(size + 2..).unwrap_or_default();
+    }
+    sizes
 }

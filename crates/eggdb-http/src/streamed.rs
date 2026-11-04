@@ -94,6 +94,10 @@ pub struct StreamedResponse<'a> {
     pub headers: Vec<(String, String)>,
     /// Writes the body; not called for a `HEAD` request.
     pub body: BodyProducer<'a>,
+    /// The bytes the body's source keeps in memory until the body is sent, such as a query's
+    /// rows; the server holds them against its memory budget while it sends the body, and
+    /// answers its over-budget response instead when they do not fit.
+    pub held_bytes: usize,
 }
 
 impl fmt::Debug for StreamedResponse<'_> {
@@ -102,6 +106,7 @@ impl fmt::Debug for StreamedResponse<'_> {
             .field("status", &self.status)
             .field("content_type", &self.content_type)
             .field("headers", &self.headers)
+            .field("held_bytes", &self.held_bytes)
             .finish_non_exhaustive()
     }
 }
@@ -118,7 +123,14 @@ impl<'a> StreamedResponse<'a> {
             content_type: content_type.to_owned(),
             headers: Vec::new(),
             body: Box::new(body),
+            held_bytes: 0,
         }
+    }
+
+    /// The same response, holding `bytes` against the server's memory budget while it is sent.
+    pub fn with_held_bytes(mut self, bytes: usize) -> Self {
+        self.held_bytes = bytes;
+        self
     }
 
     /// The same response with header `name: value` added; values with line breaks are dropped.

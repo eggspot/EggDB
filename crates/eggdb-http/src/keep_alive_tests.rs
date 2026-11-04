@@ -103,6 +103,9 @@ fn streamed_rows(rows: usize) -> Reply<'static> {
 fn handler(request: &Request) -> Reply<'static> {
     match request.path.as_str() {
         "/rows" => streamed_rows(5_000),
+        "/held" => StreamedResponse::new(200, "text/plain", |out| out.write_all(b"held"))
+            .with_held_bytes(1_000_000)
+            .into(),
         "/large" => Response::ok("text/plain", vec![b'x'; 200_000]).into(),
         _ => Response::ok(
             "text/plain",
@@ -412,6 +415,70 @@ fn an_idle_connection_is_closed_and_the_last_allowed_request_says_close() {
         let waited = Instant::now();
         assert!(closed(&mut silent_reader));
         assert!(waited.elapsed() < Duration::from_secs(8));
+    });
+}
+
+#[test]
+fn a_streamed_body_whose_source_outgrows_the_budget_gets_the_over_budget_answer() {
+    let budget = MemoryBudget::new(150_000);
+    let limits = Limits::new(1 << 20, &budget)
+        .answering_over_budget_with(|| Response::text(429, "slow down"));
+    with_server(&limits, |address| {
+        let (mut client, mut reader) = connect(address);
+        client
+            .write_all(b"GET /held HTTP/1.1\r\n\r\nGET /rows HTTP/1.1\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let refused = read_answer(&mut reader, false);
+        assert_eq!(
+            (refused.status(), refused.text()),
+            (429, "slow down\n".to_owned())
+        );
+        let rows = read_answer(&mut reader, false);
+        assert_eq!(rows.status(), 200);
+        assert!(rows.text().starts_with("{\"row\":0}"));
+    });
+    assert_eq!(budget.used_bytes(), 0);
+    let roomy = MemoryBudget::new(2_000_000);
+    with_server(&default_limits(&roomy), |address| {
+        let (mut client, mut reader) = connect(address);
+        client
+            .write_all(b"GET /held HTTP/1.1\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let held = read_answer(&mut reader, false);
+        assert_eq!((held.status(), held.text()), (200, "held".to_owned()));
+    });
+    assert_eq!(roomy.used_bytes(), 0);
+}
+
+#[test]
+fn a_body_trickled_slower_than_the_slowest_rate_is_cut_off() {
+    let budget = MemoryBudget::default();
+    with_server(&default_limits(&budget), |address| {
+        let (mut client, mut reader) = connect(address);
+        client
+            .write_all(b"POST /slow HTTP/1.1\r\nContent-Length: 1000\r\n\r\n")
+            .unwrap();
+        let started = Instant::now();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                while started.elapsed() < Duration::from_secs(12) {
+                    if client.write_all(b"x").is_err() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(400));
+                }
+            });
+            let mut rest = Vec::new();
+            let ended = reader.read_to_end(&mut rest);
+            let still_open = ended.as_ref().is_err_and(|error| {
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                )
+            });
+            assert!(!still_open, "{ended:?}");
+            assert!(started.elapsed() < Duration::from_secs(9));
+        });
     });
 }
 
