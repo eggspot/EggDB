@@ -1,6 +1,6 @@
 use super::collection::collections_count;
 use super::compact::shell_holds_the_file;
-use super::shell_block::{BlockState, InBlock, key_value_in_block};
+use super::shell_block::{InBlock, key_value_in_block};
 use super::shell_copy::{
     CopyEnd, CopyLines, ShellCopy, backslash_copy_arguments, parse_backslash_copy,
 };
@@ -1094,12 +1094,8 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
             Ok(Invocation::Run(request)) => request,
             _ => return None,
         };
-        let block = BlockState {
-            status: self.sql.transaction_status(),
-            has_savepoints: self.sql.has_savepoints(),
-        };
         let mut out = Output::new(&mut *console.stdout, false);
-        let ran = key_value_in_block(self.store, block, &request, &mut out, &self.file);
+        let ran = key_value_in_block(self.store, &mut self.sql, &request, &mut out, &self.file);
         let written = match &ran {
             Ok(InBlock::Ran { printed, .. }) => out.write_through(printed),
             _ => Ok(()),

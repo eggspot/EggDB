@@ -1001,10 +1001,13 @@ own transaction, so key-value writes and SQL are all-or-nothing together: `COMMI
 and `ttl` its values and times to live, `scan` the keys it put and not the ones it deleted, and
 `cas` compares against the block's value. A time to live set in the block counts from the
 moment the block's transaction began, takes effect at `COMMIT` and is gone after `ROLLBACK`
-(D266, D283). In a failed block they are refused until `ROLLBACK`, in a `BEGIN READ ONLY` block
-the writes are refused while `get`, `scan` and `ttl` read the last commit, and while a
-`SAVEPOINT` is set the writes are refused (a `ROLLBACK TO SAVEPOINT` would not undo them;
-`RELEASE SAVEPOINT` lifts it); `check`, `stats` and `backup` read the last commit.
+(D266, D283). Savepoints cover them too: `ROLLBACK TO SAVEPOINT` undoes the key-value writes
+made after the savepoint together with the SQL ones, values, deletions, times to live and
+collection entries alike, and keeps what came before it; `RELEASE SAVEPOINT` keeps them in the
+block, and savepoints nest (D319). In a failed block they are refused until `ROLLBACK`, and after
+a statement fails while a savepoint is set until `ROLLBACK TO SAVEPOINT` or `ROLLBACK`; in a
+`BEGIN READ ONLY` block the writes are refused while `get`, `scan` and `ttl` read the last
+commit; `check`, `stats` and `backup` read the last commit.
 
 ```
 app=> begin;

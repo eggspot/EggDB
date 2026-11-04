@@ -231,8 +231,11 @@ pub struct WriteTransaction<'db> {
     now: Moment,
     adds_expiring_keys: bool,
     sweeps_on_commit: bool,
+    journal: Option<Vec<StoredChange>>,
     turn: WriterTurn<'db>,
 }
+
+pub(crate) type StoredChange = (Vec<u8>, Option<Vec<u8>>);
 
 impl<'db> WriteTransaction<'db> {
     pub(crate) fn begin(database: &'db Database, turn: WriterTurn<'db>) -> Result<Self> {
@@ -247,6 +250,7 @@ impl<'db> WriteTransaction<'db> {
             now,
             adds_expiring_keys: false,
             sweeps_on_commit: true,
+            journal: None,
             turn,
         })
     }
@@ -323,6 +327,7 @@ impl<'db> WriteTransaction<'db> {
         len: u64,
         source: &mut dyn std::io::Read,
     ) -> Result<()> {
+        let previous = self.previous_for_journal(key)?;
         let tree = match self.tree {
             Some(tree) => tree,
             None => {
@@ -335,7 +340,9 @@ impl<'db> WriteTransaction<'db> {
         };
         self.inner
             .put_from_reader(&tree, key, len, source)
-            .map_err(Error::storage)
+            .map_err(Error::storage)?;
+        self.note_change(key, previous);
+        Ok(())
     }
 
     pub(crate) fn tree(&self) -> Option<BTree> {
@@ -417,6 +424,7 @@ impl<'db> WriteTransaction<'db> {
     }
 
     pub(crate) fn put_raw(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        let previous = self.previous_for_journal(key)?;
         let tree = match self.tree {
             Some(tree) => tree,
             None => {
@@ -424,7 +432,39 @@ impl<'db> WriteTransaction<'db> {
                 self.create_tree()?
             }
         };
-        self.inner.put(&tree, key, value).map_err(Error::storage)
+        self.inner.put(&tree, key, value).map_err(Error::storage)?;
+        self.note_change(key, previous);
+        Ok(())
+    }
+
+    fn previous_for_journal(&self, key: &[u8]) -> Result<Option<Option<Vec<u8>>>> {
+        match self.journal {
+            Some(_) => self.get_raw(key).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn note_change(&mut self, key: &[u8], previous: Option<Option<Vec<u8>>>) {
+        if let (Some(journal), Some(previous)) = (self.journal.as_mut(), previous) {
+            journal.push((key.to_vec(), previous));
+        }
+    }
+
+    pub(crate) fn journaled<T>(
+        &mut self,
+        work: impl FnOnce(&mut Self) -> T,
+    ) -> (T, Vec<StoredChange>) {
+        self.journal = Some(Vec::new());
+        let result = work(self);
+        let changes = self.journal.take().unwrap_or_default();
+        (result, changes)
+    }
+
+    pub(crate) fn restore_stored(&mut self, key: &[u8], previous: Option<&[u8]>) -> Result<()> {
+        match previous {
+            Some(value) => self.put_raw(key, value),
+            None => self.delete_raw(key).map(|_| ()),
+        }
     }
 
     /// Stores `value` under `key` only when `key` is absent or has expired, and returns whether
@@ -463,9 +503,14 @@ impl<'db> WriteTransaction<'db> {
                 self.create_tree()?
             }
         };
-        self.inner
+        let inserted = self
+            .inner
             .put_if_absent(&tree, key, value)
-            .map_err(Error::storage)
+            .map_err(Error::storage)?;
+        if inserted {
+            self.note_change(key, Some(None));
+        }
+        Ok(inserted)
     }
 
     /// Removes `key` and its value from the default key space, and returns whether the key was
@@ -482,7 +527,12 @@ impl<'db> WriteTransaction<'db> {
         let Some(tree) = self.tree else {
             return Ok(false);
         };
-        self.inner.delete(&tree, key).map_err(Error::storage)
+        let previous = self.previous_for_journal(key)?;
+        let deleted = self.inner.delete(&tree, key).map_err(Error::storage)?;
+        if deleted {
+            self.note_change(key, previous);
+        }
+        Ok(deleted)
     }
 
     /// Commits every change atomically and returns the commit's stamp, which is above every

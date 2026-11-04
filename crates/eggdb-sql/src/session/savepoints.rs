@@ -8,7 +8,28 @@ use crate::store::{EntryVisitor, KeyValueRead, KeyValueWrite, ScanDirection};
 
 const MOST_SAVEPOINTS: usize = 4096;
 
-type Undo = Vec<(Vec<u8>, Option<Vec<u8>>)>;
+type Undo = Vec<UndoEntry>;
+
+#[derive(Debug)]
+pub(super) enum UndoEntry {
+    Statement {
+        key: Vec<u8>,
+        previous: Option<Vec<u8>>,
+    },
+    Host {
+        key: Vec<u8>,
+        previous: Option<Vec<u8>>,
+    },
+}
+
+impl UndoEntry {
+    fn statement(key: &[u8], previous: Option<Vec<u8>>) -> Self {
+        Self::Statement {
+            key: key.to_vec(),
+            previous,
+        }
+    }
+}
 
 #[derive(Debug)]
 struct Mark {
@@ -79,14 +100,14 @@ impl KeyValueWrite for UndoWrite<'_> {
     fn put(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
         let previous = self.inner.get(key)?;
         self.inner.put(key, value)?;
-        self.log.push((key.to_vec(), previous));
+        self.log.push(UndoEntry::statement(key, previous));
         Ok(())
     }
 
     fn put_if_absent(&mut self, key: &[u8], value: &[u8]) -> SqlResult<bool> {
         let inserted = self.inner.put_if_absent(key, value)?;
         if inserted {
-            self.log.push((key.to_vec(), None));
+            self.log.push(UndoEntry::statement(key, None));
         }
         Ok(inserted)
     }
@@ -95,7 +116,7 @@ impl KeyValueWrite for UndoWrite<'_> {
         let previous = self.inner.get(key)?;
         let deleted = self.inner.delete(key)?;
         if deleted {
-            self.log.push((key.to_vec(), previous));
+            self.log.push(UndoEntry::statement(key, previous));
         }
         Ok(deleted)
     }
@@ -146,6 +167,36 @@ fn missing(name: &Name, dialect: Dialect) -> SqlError {
 }
 
 impl Session<'_> {
+    /// Adds to the open block's savepoint undo log writes made to its write transaction outside
+    /// this session's statements, such as a host's key-value commands: each `(key, previous)`
+    /// is a key of the store and what it held before the write, `None` when it was absent,
+    /// oldest first. A later `ROLLBACK TO SAVEPOINT` puts them back in reverse order through
+    /// [`KeyValueWrite::restore`], interleaved with the statements' own writes, and
+    /// `RELEASE SAVEPOINT` keeps them. Returns `false`, recording nothing, when no savepoint is
+    /// set in a block that writes.
+    pub fn record_savepoint_undo(
+        &mut self,
+        changes: impl IntoIterator<Item = (Vec<u8>, Option<Vec<u8>>)>,
+    ) -> bool {
+        if !self.savepoints.is_active() || !matches!(self.block, Block::Writing(_)) {
+            return false;
+        }
+        self.savepoints.undo.extend(
+            changes
+                .into_iter()
+                .map(|(key, previous)| UndoEntry::Host { key, previous }),
+        );
+        true
+    }
+
+    /// Whether a statement failed while a `SAVEPOINT` was set, leaving the block refusing
+    /// statements until `ROLLBACK TO SAVEPOINT` or `ROLLBACK`; [`Session::transaction_status`]
+    /// still answers [`TransactionStatus::InBlock`](crate::TransactionStatus::InBlock) then,
+    /// since the block can go on after the rollback to the savepoint.
+    pub fn failed_after_savepoint(&self) -> bool {
+        self.savepoints.aborted
+    }
+
     pub(super) fn savepoint_command(
         &mut self,
         command: &SavepointCommand,
@@ -229,13 +280,22 @@ impl Session<'_> {
             objects: &mut self.temporary,
         };
         while self.savepoints.undo.len() > undo_at {
-            let Some((key, previous)) = self.savepoints.undo.pop() else {
+            let Some(entry) = self.savepoints.undo.pop() else {
                 break;
             };
-            match previous {
-                Some(value) => routed.put(&key, &value)?,
-                None => {
+            match entry {
+                UndoEntry::Statement {
+                    key,
+                    previous: Some(value),
+                } => routed.put(&key, &value)?,
+                UndoEntry::Statement {
+                    key,
+                    previous: None,
+                } => {
                     routed.delete(&key)?;
+                }
+                UndoEntry::Host { key, previous } => {
+                    routed.inner.restore(&key, previous.as_deref())?;
                 }
             }
         }

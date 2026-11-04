@@ -501,6 +501,49 @@ impl<'db> SharedWriteStore<'db> {
         let mut open = self.open.try_borrow_mut().ok()?;
         open.as_mut().map(work)
     }
+
+    /// Runs `work` as [`with_open_transaction`](Self::with_open_transaction) does, for
+    /// `session`, the session on this store whose block holds the transaction. While that block
+    /// has a `SAVEPOINT` set, every change `work` makes, its times to live and collection
+    /// entries included, goes into the session's savepoint undo log: `ROLLBACK TO SAVEPOINT`
+    /// undoes it together with the statements' writes since the savepoint, and
+    /// `RELEASE SAVEPOINT` keeps it in the block.
+    ///
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let path = std::env::temp_dir().join(format!("eggdb-doc-undoable-{}.db", std::process::id()));
+    /// use eggdb::sql::{Dialect, SharedWriteStore};
+    /// let db = eggdb::Database::open(&path)?;
+    /// let store = SharedWriteStore::new(&db);
+    /// let mut sql = store.session(Dialect::PostgreSql);
+    /// sql.execute("BEGIN", &mut |_| {})?;
+    /// store.with_open_transaction_undoable(&mut sql, |tx| tx.put("a", "1")).transpose()?;
+    /// sql.execute("SAVEPOINT s", &mut |_| {})?;
+    /// store.with_open_transaction_undoable(&mut sql, |tx| tx.put("b", "2")).transpose()?;
+    /// store.with_open_transaction_undoable(&mut sql, |tx| tx.delete("a")).transpose()?;
+    /// sql.execute("ROLLBACK TO SAVEPOINT s", &mut |_| {})?;
+    /// sql.execute("COMMIT", &mut |_| {})?;
+    /// assert_eq!(db.get("a")?, Some(b"1".to_vec()));
+    /// assert_eq!(db.get("b")?, None);
+    /// sql.close()?;
+    /// # drop(store);
+    /// # drop(db);
+    /// # std::fs::remove_file(&path)?;
+    /// # Ok(()) }
+    /// ```
+    pub fn with_open_transaction_undoable<T>(
+        &self,
+        session: &mut Session<'_>,
+        work: impl FnOnce(&mut WriteTransaction<'db>) -> T,
+    ) -> Option<T> {
+        if !session.has_savepoints() {
+            return self.with_open_transaction(work);
+        }
+        let (result, changes) =
+            self.with_open_transaction(|transaction| transaction.journaled(work))?;
+        session.record_savepoint_undo(changes);
+        Some(result)
+    }
 }
 
 /// The write transaction SQL writes through, as [`SharedWriteStore`] gives it: the transaction
@@ -595,6 +638,14 @@ impl KeyValueWrite for SharedWriter<'_, '_> {
 
     fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {
         self.writing(|transaction| transaction.delete(key).map_err(store_error))
+    }
+
+    fn restore(&mut self, key: &[u8], previous: Option<&[u8]>) -> SqlResult<()> {
+        self.writing(|transaction| {
+            transaction
+                .restore_stored(key, previous)
+                .map_err(store_error)
+        })
     }
 
     fn commit(self) -> SqlResult<()> {
@@ -739,5 +790,59 @@ mod tests {
         assert_eq!(line_of(text, 24), (2, "SELECT * FROM nope;", 14));
         assert_eq!(line_of(text, 0), (1, "SELECT 1;", 0));
         assert_eq!(line_of("é x", 3), (1, "é x", 2));
+    }
+
+    fn undone_after_a_savepoint(
+        db: &Database,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let store = SharedWriteStore::new(db);
+        let mut sql = store.session(Dialect::PostgreSql);
+        sql.execute("BEGIN; SAVEPOINT s", &mut |_| {})?;
+        store
+            .with_open_transaction_undoable(&mut sql, |tx| -> crate::Result<()> {
+                tx.clear_expiry("timed")?;
+                tx.put_with_expiry("fresh", "f", std::time::Duration::from_secs(60))?;
+                tx.put("plain", "changed")?;
+                let mut sessions = tx.collection("sessions")?;
+                sessions.delete("s:1")?;
+                sessions.put_with_expiry("s:2", "Grace", std::time::Duration::from_secs(60))?;
+                Ok(())
+            })
+            .transpose()?;
+        sql.execute("ROLLBACK TO SAVEPOINT s", &mut |_| {})?;
+        store
+            .with_open_transaction_undoable(&mut sql, |tx| tx.put("after", "kept"))
+            .transpose()?;
+        sql.execute("RELEASE SAVEPOINT s; COMMIT", &mut |_| {})?;
+        sql.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_savepoint_rollback_puts_back_times_to_live_and_collection_entries()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let path = std::env::temp_dir().join(format!(
+            "eggdb-sql-savepoint-undo-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let db = Database::open(&path)?;
+        db.create_collection("sessions")?;
+        db.collection("sessions").put("s:1", "Ada")?;
+        db.put_with_expiry("timed", "t", std::time::Duration::from_secs(3600))?;
+        db.put("plain", "p")?;
+        undone_after_a_savepoint(&db)?;
+        assert!(db.time_to_live("timed")?.is_some());
+        assert_eq!(db.get("fresh")?, None);
+        assert_eq!(db.get("plain")?, Some(b"p".to_vec()));
+        assert_eq!(db.get("after")?, Some(b"kept".to_vec()));
+        let sessions = db.collection("sessions");
+        assert_eq!(sessions.get("s:1")?, Some(b"Ada".to_vec()));
+        assert_eq!(sessions.get("s:2")?, None);
+        assert_eq!(sessions.time_to_live("s:2")?, None);
+        drop(sessions);
+        drop(db);
+        std::fs::remove_file(&path)?;
+        Ok(())
     }
 }

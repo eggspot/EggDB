@@ -2187,7 +2187,10 @@ block that created a table leaves no table.
   aborted until `ROLLBACK TO` brings it back; without savepoints the block is rolled back as
   before. In SQLite's, a `SAVEPOINT` outside a transaction begins one, and releasing it commits.
   A name that was never set fails with each dialect's error (`3B001`, MySQL 1305, ORA-01086,
-  SQL Server 6401).
+  SQL Server 6401). In `eggdb shell` the key-value commands of a block (`put`, `del`, `incr`,
+  `expire`, `cas` and the rest) are undone by `ROLLBACK TO SAVEPOINT` with the SQL changes
+  made after the savepoint, and embedded code gets the same through
+  `SharedWriteStore::with_open_transaction_undoable` (D319).
 - **Row locks.** `SELECT ... FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY SHARE` with
   `OF`, `NOWAIT`, `SKIP LOCKED` (and Oracle's `WAIT n`, MySQL's `LOCK IN SHARE MODE`) and
   `LOCK TABLE ... IN ... MODE [NOWAIT]` are accepted. A transaction block holds the database's

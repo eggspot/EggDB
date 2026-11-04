@@ -137,6 +137,18 @@ pub trait KeyValueWrite: KeyValueRead {
     /// Removes `key`; whether it was there.
     fn delete(&mut self, key: &[u8]) -> SqlResult<bool>;
 
+    /// Puts `key` back as it was before a write made outside SQL in the same transaction:
+    /// holding `previous`, or absent when it is `None`. `key` and `previous` are what the store
+    /// itself keeps, which can include keys [`put`](Self::put) refuses, such as the ones a
+    /// store keeps for times to live; a store with such keys writes them directly. The default
+    /// puts or deletes.
+    fn restore(&mut self, key: &[u8], previous: Option<&[u8]>) -> SqlResult<()> {
+        match previous {
+            Some(value) => self.put(key, value),
+            None => self.delete(key).map(|_| ()),
+        }
+    }
+
     /// Makes every change durable and visible, atomically.
     fn commit(self) -> SqlResult<()>
     where
@@ -309,6 +321,10 @@ impl KeyValueWrite for Box<dyn BoxedWrite + '_> {
 
     fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {
         (**self).delete(key)
+    }
+
+    fn restore(&mut self, key: &[u8], previous: Option<&[u8]>) -> SqlResult<()> {
+        (**self).restore(key, previous)
     }
 
     fn commit(self) -> SqlResult<()> {

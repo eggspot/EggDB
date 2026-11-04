@@ -1524,7 +1524,8 @@ impl<'s> Session<'s> {
     }
 
     /// Whether a `SAVEPOINT` is set in the open block, so that a `ROLLBACK TO SAVEPOINT` could
-    /// undo part of it. Only writes made through this session's statements are undone.
+    /// undo part of it: the writes of this session's statements, and the ones recorded with
+    /// [`Session::record_savepoint_undo`].
     pub fn has_savepoints(&self) -> bool {
         self.savepoints.is_active()
     }
