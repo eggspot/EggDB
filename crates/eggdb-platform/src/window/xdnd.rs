@@ -6,6 +6,7 @@
 //! 2483). [`XdndTarget`] is the state machine without I/O: it turns each message into the
 //! [`XdndReaction`]s the window performs, so the protocol is tested without a server.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use super::WindowEvent;
@@ -387,6 +388,64 @@ fn file_path(uri: &[u8]) -> Option<PathBuf> {
     String::from_utf8(decoded).ok().map(PathBuf::from)
 }
 
+/// What a window queues for its drag target: a protocol message, or the selection answer that
+/// carries a drop's data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XdndInput {
+    /// A client message from the drag source.
+    Message(XdndMessage),
+    /// The `SelectionNotify` for a data request made at `time`, with the property holding it.
+    Answer {
+        /// The time the data was asked for with.
+        time: u32,
+        /// The property the data was written to.
+        property: u32,
+    },
+}
+
+impl XdndInput {
+    fn keep_rank(&self) -> u8 {
+        match self {
+            Self::Message(XdndMessage::Position { .. }) => 0,
+            Self::Message(XdndMessage::Enter { .. }) => 1,
+            Self::Message(XdndMessage::Leave { .. } | XdndMessage::Drop { .. })
+            | Self::Answer { .. } => 2,
+        }
+    }
+}
+
+/// Adds `input` to `queue`, which holds at most `most` inputs. A full queue makes room by
+/// dropping its oldest `Position`, else its oldest `Enter`; a `Leave`, a `Drop` or a data
+/// answer is never dropped for a `Position` or an `Enter`, so a flood of positions cannot lose
+/// the end of a drag. An input ranked below everything queued is the one dropped.
+pub fn queue_bounded(queue: &mut VecDeque<XdndInput>, input: XdndInput, most: usize) {
+    if most == 0 {
+        return;
+    }
+    if queue.len() < most {
+        queue.push_back(input);
+        return;
+    }
+    let evicted = queue
+        .iter()
+        .enumerate()
+        .min_by_key(|(at, queued)| (queued.keep_rank(), *at))
+        .map(|(at, queued)| (at, queued.keep_rank()));
+    if let Some((at, rank)) = evicted
+        && rank <= input.keep_rank()
+    {
+        queue.remove(at);
+        queue.push_back(input);
+    }
+}
+
+/// Whether the window handles another queued drag input before giving back a waiting event:
+/// at most `most_per_event` inputs are handled while `events_waiting`, so a flood of drag
+/// messages never keeps key and pointer events from the caller.
+pub fn handles_drag_input(handled: usize, most_per_event: usize, events_waiting: bool) -> bool {
+    !events_waiting || handled < most_per_event
+}
+
 /// The local files of a `text/uri-list` (RFC 2483): one URI a line, lines ending in CRLF (or
 /// LF), `#` lines comments; `file:` URIs on this host (an empty host or `localhost`),
 /// percent-decoded. Other URIs, other hosts, and paths that are not UTF-8 or hold a NUL are
@@ -403,6 +462,62 @@ pub fn parse_uri_list(text: &[u8]) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn position(time: u32) -> XdndInput {
+        XdndInput::Message(XdndMessage::Position { source: 7, time })
+    }
+
+    fn enter() -> XdndInput {
+        XdndInput::Message(XdndMessage::Enter {
+            source: 7,
+            version: 5,
+            more_types: false,
+            types: [0; 3],
+        })
+    }
+
+    #[test]
+    fn a_full_queue_drops_the_oldest_position_and_keeps_leave_drop_and_answers() {
+        let mut queue = VecDeque::new();
+        queue_bounded(&mut queue, enter(), 4);
+        for time in 1..=3 {
+            queue_bounded(&mut queue, position(time), 4);
+        }
+        queue_bounded(&mut queue, position(4), 4);
+        assert_eq!(
+            Vec::from(queue.clone()),
+            vec![enter(), position(2), position(3), position(4)]
+        );
+        let dropped = XdndInput::Message(XdndMessage::Drop { source: 7, time: 9 });
+        queue_bounded(&mut queue, dropped, 4);
+        let answer = XdndInput::Answer {
+            time: 9,
+            property: 3,
+        };
+        queue_bounded(&mut queue, answer, 4);
+        let left = XdndInput::Message(XdndMessage::Leave { source: 7 });
+        queue_bounded(&mut queue, left, 4);
+        assert_eq!(Vec::from(queue.clone()), vec![enter(), dropped, answer, left]);
+        queue_bounded(&mut queue, left, 4);
+        assert_eq!(Vec::from(queue.clone()), vec![dropped, answer, left, left]);
+        queue_bounded(&mut queue, position(10), 4);
+        queue_bounded(&mut queue, enter(), 4);
+        assert_eq!(Vec::from(queue.clone()), vec![dropped, answer, left, left]);
+        queue_bounded(&mut queue, left, 4);
+        assert_eq!(Vec::from(queue.clone()), vec![answer, left, left, left]);
+        let mut none = VecDeque::new();
+        queue_bounded(&mut none, left, 0);
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn queued_drag_inputs_give_way_to_waiting_events_after_the_turn_limit() {
+        assert!(handles_drag_input(0, 16, true));
+        assert!(handles_drag_input(15, 16, true));
+        assert!(!handles_drag_input(16, 16, true));
+        assert!(handles_drag_input(16, 16, false));
+        assert!(handles_drag_input(10_000, 16, false));
+    }
 
     const URI_LIST: u32 = 50;
 

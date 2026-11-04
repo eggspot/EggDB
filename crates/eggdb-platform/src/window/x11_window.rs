@@ -12,7 +12,7 @@ use super::x11::{
 use super::x11_incr::{
     self, IncomingIncr, IncrProgress, IncrStep, MAX_OUTGOING_TRANSFERS, OutgoingIncr,
 };
-use super::xdnd::{self, XdndAtoms, XdndMessage, XdndReaction, XdndTarget};
+use super::xdnd::{self, XdndAtoms, XdndInput, XdndReaction, XdndTarget};
 use super::{
     AccessNode, KeyPress, MAX_CLIPBOARD_TEXT_BYTES, Window, WindowError, WindowEvent,
     WindowOptions, check_clipboard_text, check_frame,
@@ -29,12 +29,7 @@ const CLIPBOARD_REPLY_UNITS: u32 = (MAX_CLIPBOARD_TEXT_BYTES / 4 + 1) as u32;
 const SELECTION_REQUEST_HEADER_BYTES: usize = 24;
 const XDND_TYPE_LIST_UNITS: u32 = 1024;
 const MOST_QUEUED_DRAG_INPUTS: usize = 256;
-
-#[derive(Debug, Clone, Copy)]
-enum DragInput {
-    Message(XdndMessage),
-    Answer { time: u32, property: u32 },
-}
+const MOST_DRAG_INPUTS_PER_EVENT: usize = 16;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct ClipboardAtoms {
@@ -105,7 +100,7 @@ pub(crate) struct X11Window {
     xdnd: XdndAtoms,
     xdnd_landing: u32,
     drag: XdndTarget,
-    drag_inputs: VecDeque<DragInput>,
+    drag_inputs: VecDeque<XdndInput>,
     screen_number: u32,
 }
 
@@ -508,7 +503,7 @@ impl X11Window {
                 if kind == self.wm_protocols && data[0] == self.wm_delete_window {
                     Some(WindowEvent::CloseRequested)
                 } else if let Some(message) = xdnd::parse_message(&self.xdnd, kind, data) {
-                    self.queue_drag_input(DragInput::Message(message));
+                    self.queue_drag_input(XdndInput::Message(message));
                     None
                 } else {
                     None
@@ -521,7 +516,7 @@ impl X11Window {
                 property,
                 ..
             } if requestor == self.window && selection == self.xdnd.selection => {
-                self.queue_drag_input(DragInput::Answer { time, property });
+                self.queue_drag_input(XdndInput::Answer { time, property });
                 None
             }
             Packet::FocusIn => {
@@ -819,16 +814,14 @@ impl X11Window {
         }
     }
 
-    fn queue_drag_input(&mut self, input: DragInput) {
-        if self.drag_inputs.len() < MOST_QUEUED_DRAG_INPUTS {
-            self.drag_inputs.push_back(input);
-        }
+    fn queue_drag_input(&mut self, input: XdndInput) {
+        xdnd::queue_bounded(&mut self.drag_inputs, input, MOST_QUEUED_DRAG_INPUTS);
     }
 
-    fn handle_drag_input(&mut self, input: DragInput) -> Result<(), WindowError> {
+    fn handle_drag_input(&mut self, input: XdndInput) -> Result<(), WindowError> {
         let reactions = match input {
-            DragInput::Message(message) => self.drag.receive(message, self.xdnd.uri_list),
-            DragInput::Answer { time, property } => {
+            XdndInput::Message(message) => self.drag.receive(message, self.xdnd.uri_list),
+            XdndInput::Answer { time, property } => {
                 if !self.drag.awaits(time) {
                     return Ok(());
                 }
@@ -1026,6 +1019,7 @@ impl Window for X11Window {
         timeout: Option<Duration>,
     ) -> Result<Option<WindowEvent>, WindowError> {
         let deadline = timeout.and_then(|wait| Instant::now().checked_add(wait));
+        let mut handled_drag_inputs = 0;
         loop {
             if self.keyboard_stale {
                 self.refresh_keyboard()?;
@@ -1034,8 +1028,14 @@ impl Window for X11Window {
                 self.refresh_origin()?;
             }
             self.drop_stalled_transfers()?;
-            if let Some(input) = self.drag_inputs.pop_front() {
+            let drag_turn = xdnd::handles_drag_input(
+                handled_drag_inputs,
+                MOST_DRAG_INPUTS_PER_EVENT,
+                !self.pending.is_empty(),
+            );
+            if drag_turn && let Some(input) = self.drag_inputs.pop_front() {
                 self.handle_drag_input(input)?;
+                handled_drag_inputs += 1;
                 continue;
             }
             if let Some(event) = self.pending.pop_front() {
