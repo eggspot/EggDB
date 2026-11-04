@@ -88,10 +88,11 @@ fn bad_data(message: &str) -> Response {
 }
 
 fn failed(failure: &Failure) -> Response {
+    let message = failure.message();
     match failure {
-        Failure::BadData(message) => bad_data(message),
-        Failure::Execution(message) => error_json(422, "execution", message),
-        Failure::Unavailable(message) => {
+        Failure::BadData(_) => bad_data(message),
+        Failure::Execution(_) => error_json(422, "execution", message),
+        Failure::Unavailable(_) => {
             let mut response = error_json(503, "unavailable", message);
             response
                 .headers
