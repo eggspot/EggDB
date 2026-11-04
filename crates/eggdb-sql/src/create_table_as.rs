@@ -31,16 +31,6 @@ pub(crate) fn run(
     if create.if_not_exists && exists_already(writer, tables, binding, create)? {
         return Ok(skipped(create, dialect));
     }
-    if dialect == Dialect::Oracle
-        && let Some(position) = unnamed_oracle_expression(&create.query, create.column_names.len())
-    {
-        return Err(SqlError::new(
-            SqlState::SYNTAX_ERROR,
-            "must name this expression with a column alias",
-        )
-        .with_oracle_code(998)
-        .at(position));
-    }
     if !create.with_data {
         without_rows(&mut create.query);
     }
@@ -62,7 +52,7 @@ pub(crate) fn run(
         .as_ref()
         .map(|_| definition_names(create, &columns));
     binding.create_table(&*writer, tables, &mut definition)?;
-    execute::create_table(writer, tables, &definition, dialect)?;
+    crate::sqlite_schema_text::create_table(writer, tables, &definition, dialect)?;
     let count = selected.rows.len();
     if count > 0 {
         let mut insert = Insert {
@@ -146,15 +136,20 @@ fn first_select(query: &Statement) -> Option<&Select> {
     }
 }
 
-fn unnamed_oracle_expression(query: &Statement, names_given: usize) -> Option<usize> {
+pub(crate) fn unnamed_oracle_expression(
+    query: &Statement,
+    names_given: usize,
+    unaliased: &[usize],
+) -> Option<usize> {
     let select = first_select(query)?;
     select
         .items
         .iter()
         .skip(names_given)
         .find_map(|item| match item {
-            SelectItem::Expr { expr, alias: None }
-                if !matches!(expr.kind, ExprKind::Column { .. }) =>
+            SelectItem::Expr { expr, .. }
+                if !matches!(expr.kind, ExprKind::Column { .. })
+                    && unaliased.contains(&expr.position) =>
             {
                 Some(expr.position)
             }

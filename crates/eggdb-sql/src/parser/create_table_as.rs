@@ -1,6 +1,6 @@
 use super::Parser;
 use crate::ast::{CreateTable, CreateTableAs, CreateTableAsSpelling, Name, OnDuplicate, Statement};
-use crate::error::SqlResult;
+use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
 
 impl Parser<'_> {
@@ -85,7 +85,22 @@ impl Parser<'_> {
             return Err(self.unexpected());
         }
         let position = self.position();
+        self.oracle_unaliased_expressions.clear();
         let query = self.query_statement()?;
+        if self.oracle()
+            && let Some(unnamed) = crate::create_table_as::unnamed_oracle_expression(
+                &query,
+                column_names.len(),
+                &self.oracle_unaliased_expressions,
+            )
+        {
+            return Err(SqlError::new(
+                SqlState::SYNTAX_ERROR,
+                "must name this expression with a column alias",
+            )
+            .with_oracle_code(998)
+            .at(unnamed));
+        }
         if !matches!(query, Statement::Select(_) | Statement::Query(_)) {
             return Err(self
                 .not_supported("a data-modifying statement in CREATE TABLE AS")

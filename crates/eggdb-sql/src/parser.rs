@@ -366,6 +366,7 @@ pub(crate) struct Parser<'t> {
     select_into: Option<Option<select_into::SelectIntoTable>>,
     later_set_operand: bool,
     routine_setting_spans: Option<Vec<routines::SettingSpan>>,
+    oracle_unaliased_expressions: Vec<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -493,6 +494,7 @@ impl<'t> Parser<'t> {
             select_into: None,
             later_set_operand: false,
             routine_setting_spans: None,
+            oracle_unaliased_expressions: Vec::new(),
         }
     }
 
@@ -2928,6 +2930,10 @@ impl<'t> Parser<'t> {
             Ok(name) if self.postgresql() && self.is_word("overriding") => {
                 TableReference::named(name, None)
             }
+            Ok(name) if self.postgresql() && self.take_word("as") => {
+                let alias = self.name()?.text;
+                TableReference::named(name, Some(alias))
+            }
             _ => {
                 self.at = start;
                 self.table_reference()?
@@ -3528,6 +3534,7 @@ impl<'t> Parser<'t> {
         {
             Some(text.clone())
         } else if self.oracle() && !matches!(expr.kind, ExprKind::Column { .. }) {
+            self.oracle_unaliased_expressions.push(expr.position);
             Some(oracle::label(&self.source_text(first_token)))
         } else if self.sqlserver() && !matches!(expr.kind, ExprKind::Column { .. }) {
             Some(String::new())

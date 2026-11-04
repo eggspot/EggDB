@@ -253,7 +253,11 @@ impl Tree<'_> {
                 });
                 match condition {
                     Some(condition) => {
-                        format!("Inner hash join ({})", self.text(query, condition))
+                        let parts: Vec<String> = conjuncts(condition)
+                            .into_iter()
+                            .map(|part| parenthesized(self.text(query, part)))
+                            .collect();
+                        format!("Inner hash join {}", parts.join(", "))
                     }
                     None => "Inner hash join".to_owned(),
                 }
@@ -405,4 +409,12 @@ pub(crate) fn tree_text(query: &ExplainedQuery, analyzed: Option<&Analyzed>) -> 
         text.push('\n');
     }
     text
+}
+
+fn parenthesized(text: String) -> String {
+    if text.starts_with('(') && text.ends_with(')') {
+        text
+    } else {
+        format!("({text})")
+    }
 }

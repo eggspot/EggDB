@@ -3707,7 +3707,11 @@ impl<'s> Session<'s> {
             sequences::load_for_sequence_calls(writer)?;
             let result =
                 body(writer, tables).map_err(|error| sequences::explain_missing(writer, error))?;
-            sequences::save_changed(writer)?;
+            sequences::save_changed(writer).inspect_err(|error| {
+                if error.state() == SqlState::READ_ONLY_SQL_TRANSACTION {
+                    sequences::forget_changes();
+                }
+            })?;
             Ok(result)
         };
         let keep_open = !self.autocommit();

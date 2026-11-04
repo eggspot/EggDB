@@ -250,6 +250,14 @@ pub(crate) fn save_changed(writer: &mut dyn KeyValueWrite) -> SqlResult<()> {
     Ok(())
 }
 
+pub(crate) fn forget_changes() {
+    STATEMENT.with(|state| {
+        if let Some(state) = state.borrow_mut().last_mut() {
+            state.changed.clear();
+        }
+    });
+}
+
 pub(crate) fn mark_changes_committed() {
     STATEMENT.with(|state| {
         if let Some(state) = state.borrow_mut().last_mut() {

@@ -48,6 +48,10 @@ const CHANGING_FUNCTIONS: &[&str] = &[
     "utc_timestamp",
     "curdate",
     "curtime",
+    "sqlite_random",
+    "last_insert_rowid",
+    "changes",
+    "total_changes",
     crate::routines::ROUTINE_CALL,
 ];
 const MAX_DEPTH: usize = 32;
