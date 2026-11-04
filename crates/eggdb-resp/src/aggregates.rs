@@ -30,7 +30,7 @@ fn set_of(entry: Option<&Entry>) -> Result<BTreeSet<Vec<u8>>, String> {
     }
 }
 
-fn sorted_of(entry: Option<&Entry>) -> Result<SortedSet, String> {
+pub(crate) fn sorted_of(entry: Option<&Entry>) -> Result<SortedSet, String> {
     match entry.map(|entry| &entry.data) {
         None => Ok(SortedSet::default()),
         Some(Data::SortedSet(set)) => Ok(set.clone()),
@@ -38,7 +38,7 @@ fn sorted_of(entry: Option<&Entry>) -> Result<SortedSet, String> {
     }
 }
 
-fn expiry(entry: Option<&Entry>) -> Option<u64> {
+pub(crate) fn expiry(entry: Option<&Entry>) -> Option<u64> {
     entry.and_then(|entry| entry.expires_at_ms)
 }
 

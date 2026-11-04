@@ -44,12 +44,22 @@ pub struct Context<'k> {
 
 const REPLY_OVER_BUDGET: &str =
     "OOM command not allowed: the reply would pass the server's memory budget";
+const VALUE_OVER_BUDGET: &str =
+    "OOM command not allowed: the value would pass the server's memory budget";
 const BULK_FRAMING_BYTES: usize = 32;
 
 impl Context<'_> {
     pub(crate) fn check_reply_room(&self, reply_bytes: usize) -> Result<(), String> {
         if reply_bytes > self.reply_room_bytes {
             Err(REPLY_OVER_BUDGET.to_owned())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn check_value_room(&self, value_bytes: usize) -> Result<(), String> {
+        if value_bytes > self.reply_room_bytes {
+            Err(VALUE_OVER_BUDGET.to_owned())
         } else {
             Ok(())
         }
@@ -702,9 +712,15 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
         }
         _ => crate::aggregates::execute(context, db, name, args)
             .or_else(|| crate::streams::execute(context, db, name, args))
+            .or_else(|| crate::bitmaps::execute(context, db, name, args))
+            .or_else(|| crate::hyperloglog::execute(context, db, name, args))
+            .or_else(|| crate::geo::execute(context, db, name, args))
             .unwrap_or_else(|| {
                 if crate::aggregates::is_known(name)
                     || crate::streams::is_known(name)
+                    || crate::bitmaps::is_known(name)
+                    || crate::hyperloglog::is_known(name)
+                    || crate::geo::is_known(name)
                     || is_known(name)
                 {
                     wrong_arguments(name)

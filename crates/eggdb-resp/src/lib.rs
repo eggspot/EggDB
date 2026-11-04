@@ -6,8 +6,12 @@
 mod aggregates;
 mod aof;
 mod aof_manifest;
+mod bitmaps;
 mod commands;
 mod eviction;
+mod geo;
+mod geohash;
+mod hyperloglog;
 use eggdb_keyspace as keyspace;
 mod protocol;
 mod pubsub;
@@ -28,3 +32,5 @@ pub use value::{Data, Entry, SortedSet};
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_bitmaps_hll_geo;
