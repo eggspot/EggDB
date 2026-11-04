@@ -399,6 +399,18 @@ impl Source for DatabaseSource {
         }
     }
 
+    fn rename_collection(&mut self, name: &str, new_name: &str) -> Result<String, SourceError> {
+        let stamp = self
+            .db()?
+            .try_begin_write()
+            .and_then(|mut tx| {
+                tx.rename_collection(name, new_name)?;
+                tx.commit()
+            })
+            .map_err(|error| source_error(&error))?;
+        Ok(clock_time(stamp).unwrap_or_default())
+    }
+
     fn start_check(&mut self) -> Result<(), SourceError> {
         let db = Arc::clone(self.db.as_ref().ok_or_else(|| {
             SourceError::new(ErrorKind::NeedsReopen, format!("{} is closed", self.name))
@@ -739,6 +751,50 @@ mod tests {
             db.get("s:2").unwrap_or_else(|error| panic!("get: {error}")),
             None
         );
+    }
+
+    #[test]
+    fn the_ui_renames_a_collection_of_a_real_database_with_its_keys_and_count() {
+        let (file, db) = database("rename-collection");
+        db.create_collection("sessions")
+            .unwrap_or_else(|error| panic!("create: {error}"));
+        db.collection("sessions")
+            .put("s:1", "alice")
+            .unwrap_or_else(|error| panic!("put: {error}"));
+        db.close().unwrap_or_else(|error| panic!("close: {error}"));
+        let mut screen = Screen::new(source_at(&file.0, Options::new()));
+        screen.keys(&["C", "End", "Enter", "C", "e"]);
+        for _ in 0.."sessions".len() {
+            screen.keys(&["Backspace"]);
+        }
+        screen.typed("logins");
+        let renamed = screen.keys(&["Enter"]);
+        assert!(
+            renamed.contains("Renamed collection sessions to logins at "),
+            "{renamed}"
+        );
+        let shown = screen.keys(&["Esc"]);
+        assert!(shown.contains(" Keys in logins"), "{shown}");
+        assert!(shown.contains("> s:1"), "{shown}");
+        screen.close();
+
+        let db = Database::open(&file.0).unwrap_or_else(|error| panic!("open: {error}"));
+        assert_eq!(
+            db.collection_names()
+                .unwrap_or_else(|error| panic!("names: {error}")),
+            ["logins"]
+        );
+        assert_eq!(
+            db.collection("logins")
+                .get("s:1")
+                .unwrap_or_else(|error| panic!("get: {error}")),
+            Some(b"alice".to_vec())
+        );
+        let counted = db
+            .collection_stats()
+            .unwrap_or_else(|error| panic!("stats: {error}"));
+        assert_eq!(counted.len(), 1);
+        assert_eq!((counted[0].name.as_str(), counted[0].entries), ("logins", 1));
     }
 
     #[test]

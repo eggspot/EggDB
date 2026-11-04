@@ -12,14 +12,45 @@ const PICKER_COLS: usize = 46;
 const SIDEBAR_FROM_COLS: u16 = 110;
 const SIDEBAR_SMALLEST: u16 = 20;
 const SIDEBAR_LARGEST: u16 = 24;
-const PICKER_KEYS: &str = "Enter show   a add   Esc back";
+const PICKER_KEYS: &str = "Enter show   a add   e rename   Esc back";
+const NARROW_PICKER_KEYS: &str = "Enter show   a add   Esc back";
 const ADDING_KEYS: &str = "Enter add   Esc back";
+const RENAMING_KEYS: &str = "Enter rename   Esc back";
 const BAD_NAME: &str = "Collection names are 1 to 128 bytes with no spaces or control characters";
+const DEFAULT_KEY_SPACE_KEEPS_ITS_NAME: &str = "The default key space cannot be renamed";
+
+#[derive(Debug, Clone)]
+enum NameEdit {
+    Adding(String),
+    Renaming { from: String, text: String },
+}
+
+impl NameEdit {
+    fn text_mut(&mut self) -> &mut String {
+        match self {
+            Self::Adding(text) | Self::Renaming { text, .. } => text,
+        }
+    }
+
+    fn title(&self) -> String {
+        match self {
+            Self::Adding(text) => format!("Add collection: {text}"),
+            Self::Renaming { from, text } => format!("Rename {from} to: {text}"),
+        }
+    }
+
+    fn keys(&self) -> &'static str {
+        match self {
+            Self::Adding(_) => ADDING_KEYS,
+            Self::Renaming { .. } => RENAMING_KEYS,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(super) struct Picker {
     highlighted: usize,
-    adding: Option<String>,
+    editing: Option<NameEdit>,
 }
 
 fn is_collection_name(name: &str) -> bool {
@@ -78,11 +109,38 @@ impl<S: Source> Ui<S> {
 
     pub(super) fn open_picker(&mut self, adding: bool) {
         self.refresh_collections();
-        let adding = (adding && !self.read_only()).then(String::new);
+        let editing = (adding && !self.read_only()).then(|| NameEdit::Adding(String::new()));
         self.picker = Some(Picker {
             highlighted: self.shown_row(),
-            adding,
+            editing,
         });
+    }
+
+    fn open_picker_renaming(&mut self) {
+        self.refresh_collections();
+        let highlighted = self.shown_row();
+        let editing = self.renaming_at(highlighted);
+        self.picker = Some(Picker {
+            highlighted,
+            editing,
+        });
+    }
+
+    fn renaming_at(&mut self, row: usize) -> Option<NameEdit> {
+        if self.read_only() {
+            self.info(READ_ONLY_TOAST);
+            return None;
+        }
+        match self.space_at(row) {
+            Some(Some(name)) => Some(NameEdit::Renaming {
+                text: name.clone(),
+                from: name,
+            }),
+            _ => {
+                self.info(DEFAULT_KEY_SPACE_KEEPS_ITS_NAME);
+                None
+            }
+        }
     }
 
     pub(super) fn show_space(&mut self, space: Option<String>) {
@@ -107,24 +165,44 @@ impl<S: Source> Ui<S> {
         let Some(mut picker) = self.picker.take() else {
             return;
         };
-        if let Some(mut text) = picker.adding.take() {
+        if let Some(mut editing) = picker.editing.take() {
             match key.code {
                 KeyCode::Esc => {}
                 KeyCode::Enter => {
-                    if self.add_and_show_collection(&text) {
-                        return;
+                    let finished = match editing.clone() {
+                        NameEdit::Adding(text) => {
+                            if self.add_and_show_collection(&text) {
+                                return;
+                            }
+                            false
+                        }
+                        NameEdit::Renaming { from, text } => {
+                            match self.rename_collection(&from, &text) {
+                                Some(row) => {
+                                    picker.highlighted = row;
+                                    true
+                                }
+                                None => false,
+                            }
+                        }
+                    };
+                    if !finished {
+                        picker.editing = Some(editing);
                     }
-                    picker.adding = Some(text);
                 }
                 KeyCode::Backspace => {
-                    text.pop();
-                    picker.adding = Some(text);
+                    editing.text_mut().pop();
+                    picker.editing = Some(editing);
+                }
+                KeyCode::Char('u') if key.modifiers.ctrl => {
+                    editing.text_mut().clear();
+                    picker.editing = Some(editing);
                 }
                 KeyCode::Char(c) if !key.modifiers.ctrl && !key.modifiers.alt => {
-                    text.push(c);
-                    picker.adding = Some(text);
+                    editing.text_mut().push(c);
+                    picker.editing = Some(editing);
                 }
-                _ => picker.adding = Some(text),
+                _ => picker.editing = Some(editing),
             }
             self.picker = Some(picker);
             return;
@@ -146,7 +224,8 @@ impl<S: Source> Ui<S> {
                 return;
             }
             KeyCode::Char('a') if self.read_only() => self.info(READ_ONLY_TOAST),
-            KeyCode::Char('a') => picker.adding = Some(String::new()),
+            KeyCode::Char('a') => picker.editing = Some(NameEdit::Adding(String::new())),
+            KeyCode::Char('e') => picker.editing = self.renaming_at(picker.highlighted),
             KeyCode::Down | KeyCode::Char('j') => {
                 picker.highlighted = (picker.highlighted + 1).min(last);
             }
@@ -189,6 +268,48 @@ impl<S: Source> Ui<S> {
                 false
             }
         }
+    }
+
+    fn rename_collection(&mut self, from: &str, to: &str) -> Option<usize> {
+        if to == from {
+            return Some(self.row_of(from));
+        }
+        if !is_collection_name(to) {
+            self.toast(ToastKind::Error, BAD_NAME.to_owned());
+            return None;
+        }
+        if self.collection_names.iter().any(|known| known == to) {
+            self.toast(ToastKind::Error, format!("Collection {to} already exists"));
+            return None;
+        }
+        match self.source.rename_collection(from, to) {
+            Ok(time) => {
+                self.refresh_collections();
+                if self.collection.as_deref() == Some(from) {
+                    if let Err(error) = self.source.show_collection(Some(to)) {
+                        self.error(error);
+                        return None;
+                    }
+                    self.collection = Some(to.to_owned());
+                }
+                self.toast(
+                    ToastKind::Success,
+                    format!("Renamed collection {from} to {to} at {time}"),
+                );
+                Some(self.row_of(to))
+            }
+            Err(error) => {
+                self.error(error);
+                None
+            }
+        }
+    }
+
+    fn row_of(&self, name: &str) -> usize {
+        self.collection_names
+            .iter()
+            .position(|known| known == name)
+            .map_or(0, |index| index + 1)
     }
 
     pub(super) fn sidebar_cols(&self) -> u16 {
@@ -237,6 +358,10 @@ impl<S: Source> Ui<S> {
                 self.open_picker(true);
                 return true;
             }
+            KeyCode::Char('e') => {
+                self.open_picker_renaming();
+                return true;
+            }
             _ => return false,
         };
         if chosen != shown
@@ -251,6 +376,7 @@ impl<S: Source> Ui<S> {
         vec![
             Hint::new(self.theme.symbol(Symbol::UpDown), "switch"),
             Hint::new("a", "add").available(!self.read_only()),
+            Hint::new("e", "rename").available(!self.read_only()),
             Hint::new("Enter", "keys"),
             Hint::new("C", "collection"),
             Hint::new("?", "help"),
@@ -354,8 +480,8 @@ impl<S: Source> Ui<S> {
         let plain = self.theme.style(Role::Plain);
         let horizontal = self.theme.symbol(Symbol::HorizontalLine);
         let vertical = self.theme.symbol(Symbol::VerticalLine);
-        let title = match &picker.adding {
-            Some(text) => format!("Add collection: {text}"),
+        let title = match &picker.editing {
+            Some(editing) => editing.title(),
             None => "Collections".to_owned(),
         };
         let title_shown = cut_to_cells(&title, width.saturating_sub(4), self.theme.ellipsis());
@@ -367,7 +493,7 @@ impl<S: Source> Ui<S> {
         );
         frame.fill(col, top, width_cells, plain);
         self.put(frame, col, top, &top_line, Role::Plain, width_cells);
-        if picker.adding.is_some() {
+        if picker.editing.is_some() {
             let at = col + 2 + u16::try_from(text_width(&title_shown)).unwrap_or(0);
             frame.cursor = Some((at.min(col + width_cells - 2), top));
         }
@@ -406,10 +532,10 @@ impl<S: Source> Ui<S> {
             body(frame, line, Role::Plain, false);
         }
         body(frame, "", Role::Plain, false);
-        let keys = if picker.adding.is_some() {
-            ADDING_KEYS
-        } else {
-            PICKER_KEYS
+        let keys = match &picker.editing {
+            Some(editing) => editing.keys(),
+            None if text_width(PICKER_KEYS) <= inner => PICKER_KEYS,
+            None => NARROW_PICKER_KEYS,
         };
         body(frame, keys, Role::Plain, true);
         let bottom_row = row + 1;
