@@ -240,10 +240,29 @@ fn table_source(copy: &CopyStatement) -> SqlResult<(&Name, &[Name])> {
 
 fn targets_of(table: &TableDefinition, columns: &[Name]) -> SqlResult<Vec<usize>> {
     if columns.is_empty() {
-        Ok((0..table.columns.len()).collect())
+        Ok((0..table.columns.len())
+            .filter(|&column| !table.is_generated(column))
+            .collect())
     } else {
         target_columns(table, columns)
     }
+}
+
+fn written_targets_of(table: &TableDefinition, columns: &[Name]) -> SqlResult<Vec<usize>> {
+    let targets = targets_of(table, columns)?;
+    if let Some((&target, name)) = targets
+        .iter()
+        .zip(columns)
+        .find(|(target, _)| table.is_generated(**target))
+    {
+        return Err(SqlError::new(
+            SqlState::INVALID_COLUMN_REFERENCE,
+            format!("column \"{}\" is a generated column", table.columns[target].name),
+        )
+        .with_detail("Generated columns cannot be used in COPY.")
+        .at(name.position));
+    }
+    Ok(targets)
 }
 
 const SKIPPED_ROW: &str = "skipping row due to data type incompatibility";
@@ -629,7 +648,7 @@ pub(crate) fn copy_from_client(
 ) -> SqlResult<QueryResult> {
     let (name, columns) = table_source(copy)?;
     let table = copied_table(writer, tables, name, false)?;
-    let targets = targets_of(&table, columns)?;
+    let targets = written_targets_of(&table, columns)?;
     let names: Vec<&str> = targets
         .iter()
         .map(|&index| table.columns[index].name.as_str())

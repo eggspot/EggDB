@@ -396,6 +396,7 @@ fn rebuild(
                 writer.delete(&key)?;
                 let mut mapped = map(row)?;
                 if !checks.is_empty() {
+                    checks.generate(&new, &mut mapped)?;
                     checks.check(&new, &mapped)?;
                 }
                 stored.insert(writer, &mut mapped).map_err(|error| {
@@ -559,7 +560,25 @@ fn add_column(
     let added = table.columns.len() - 1;
     table.set_default_dialect(added, definition.default_dialect);
     table.set_domain(added, domain);
-    let fills = column.default.is_some() && has_rows(writer, &table)?;
+    let generator = match &definition.generated {
+        Some(spec) if dialect == Dialect::Sqlite && spec.stored => {
+            return Err(SqlError::new(
+                SqlState::INVALID_TABLE_DEFINITION,
+                "Cannot add a STORED column",
+            )
+            .with_sqlite_code(1)
+            .at(spec.position));
+        }
+        Some(spec) => {
+            crate::generated_columns::define(&mut table, &[(added, spec)], dialect)?;
+            if let Some(defined) = table.columns.get(added) {
+                column.sql_type = defined.sql_type;
+            }
+            crate::generated_columns::Generator::of(&table)?
+        }
+        None => None,
+    };
+    let fills = (column.default.is_some() || generator.is_some()) && has_rows(writer, &table)?;
     if column.not_null && !fills && has_rows(writer, &table)? {
         return Err(SqlError::new(
             SqlState::NOT_NULL_VIOLATION,
@@ -579,7 +598,11 @@ fn add_column(
             crate::sequences::load_all(writer)?;
         }
         let mut map = |mut row: Vec<Value>| -> SqlResult<Vec<Value>> {
-            let value = execute::default_of(&table, added)?;
+            row.push(execute::default_of(&table, added)?);
+            if let Some(generator) = &generator {
+                generator.fill(&table, &mut row)?;
+            }
+            let value = row.pop().unwrap_or(Value::Null);
             if value.is_null() && column.not_null {
                 return Err(SqlError::new(
                     SqlState::NOT_NULL_VIOLATION,
@@ -854,6 +877,41 @@ fn drop_column(
             _ => SqlError::not_supported("dropping the only column of a table"),
         });
     }
+    let mut also_dropped = Vec::new();
+    for dependent in crate::generated_columns::dependents_of(&table, index) {
+        if !cascade || dialect != Dialect::PostgreSql {
+            return Err(crate::generated_columns::dropped_dependency(
+                &table, index, dependent, dialect,
+            ));
+        }
+        if let Some(found) = table.columns.get(dependent) {
+            also_dropped.push(found.name.clone());
+        }
+    }
+    let mut cascade_notices = Vec::new();
+    for dependent in &also_dropped {
+        cascade_notices.push(format!(
+            "NOTICE:  drop cascades to column {dependent} of table {}",
+            crate::schemas::base_name(&table.name)
+        ));
+        let dependent_name = Name {
+            text: dependent.clone(),
+            position: column.position,
+        };
+        drop_column(
+            writer,
+            tables,
+            name,
+            &dependent_name,
+            false,
+            cascade,
+            dialect,
+        )?;
+    }
+    let table = current(writer, tables, name)?;
+    let Some(index) = table.column_index(&column.text) else {
+        return Err(missing_column(&table, column, dialect));
+    };
     let in_key = table.primary_key.contains(&index)
         || table.indexes.iter().any(|index_definition| {
             index_definition.unique && index_definition.columns.contains(&index)
@@ -886,6 +944,7 @@ fn drop_column(
     }
     new.identities = table.identities_without_column(index);
     new.default_dialects = table.default_dialects_without_column(index);
+    new.generated = crate::encoding::generated_without_column(&table.generated, index);
     new.domains = table.domains_without_column(index);
     if new.auto_increment_column().is_none() {
         new.identity_seed = None;
@@ -924,7 +983,7 @@ fn drop_column(
     let rebuilt = rebuild(writer, &table, new, &mut map, None)?;
     constraints::register_references(writer, tables, &rebuilt)?;
     crate::sequences::drop_owned_by(writer, tables, &table.name, Some(column.text.as_str()))?;
-    Ok(notices.into_iter().next())
+    Ok(cascade_notices.into_iter().chain(notices).next())
 }
 
 fn unknown_mysql_column(table: &TableDefinition, name: &Name) -> SqlError {
@@ -998,6 +1057,10 @@ fn move_column(
     for entry in &mut new.domains {
         entry.column = at(entry.column);
     }
+    for entry in &mut new.generated {
+        entry.column = at(entry.column);
+    }
+    new.generated.sort_by_key(|entry| entry.column);
     constraints::unregister_references(writer, tables, &table)?;
     let mut map = |row: Vec<Value>| -> SqlResult<Vec<Value>> {
         Ok(order
@@ -1046,6 +1109,10 @@ fn rename_column(
             return Err(unreadable_in_transact_sql(&check.name, to));
         }
         check.expression = renamed;
+    }
+    for entry in &mut table.generated {
+        entry.expression =
+            constraints::renamed_in_text(&entry.expression, entry.dialect, &from.text, &to.text);
     }
     for key in &mut table.foreign_keys {
         if key.parent == table.name {

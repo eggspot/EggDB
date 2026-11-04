@@ -127,6 +127,7 @@ fn table_definition(
             unique: None,
             constraints: Vec::new(),
             comment: None,
+            generated: None,
         });
     }
     Ok(CreateTable {

@@ -506,6 +506,7 @@ impl<'t> Parser<'t> {
             unique: None,
             constraints: Vec::new(),
             comment: None,
+            generated: None,
         };
         let mut autoincrement = None;
         loop {
@@ -562,10 +563,10 @@ impl<'t> Parser<'t> {
                 if !collation.eq_ignore_ascii_case("binary") {
                     return Err(self.not_supported("COLLATE other than BINARY"));
                 }
+            } else if self.starts_generation() {
+                self.generation_clause(&mut column, true)?;
             } else if ["generated", "as"].iter().any(|word| self.is_word(word)) {
-                return Err(self.not_supported(
-                    "a column constraint other than PRIMARY KEY, UNIQUE, NOT NULL, DEFAULT, CHECK and REFERENCES",
-                ));
+                return Err(self.unexpected());
             } else {
                 break;
             }

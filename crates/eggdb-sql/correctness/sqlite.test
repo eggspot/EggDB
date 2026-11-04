@@ -1427,3 +1427,23 @@ SELECT stddev(1)
 error 42883 1
 SELECT variance(1)
 
+
+chapter gencol, "Generated Columns": VIRTUAL and STORED columns are computed from their row, an INSERT without a column list leaves them out, and naming one in an INSERT fails
+ok
+CREATE TABLE gen322 (a INTEGER PRIMARY KEY, b INT, c TEXT, d INT GENERATED ALWAYS AS (a*abs(b)) VIRTUAL, e TEXT GENERATED ALWAYS AS (substr(c,b,b+1)) STORED)
+
+ok
+INSERT INTO gen322 VALUES (1, 2, 'hello')
+
+rows
+SELECT d, e FROM gen322
+----
+d|e
+2|ell
+SELECT 1
+
+error 42P17 1
+CREATE TABLE gen322b (a INT, b INT AS (random()))
+
+ok
+DROP TABLE gen322

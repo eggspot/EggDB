@@ -436,14 +436,14 @@ fn expression_type(expr: &Expr, table: &TableDefinition, dialect: Dialect) -> Op
     }
 }
 
-fn any_part(expr: &Expr, test: &dyn Fn(&Expr) -> bool) -> bool {
+pub(crate) fn any_part(expr: &Expr, test: &dyn Fn(&Expr) -> bool) -> bool {
     test(expr)
         || crate::eval::children(expr)
             .into_iter()
             .any(|child| any_part(child, test))
 }
 
-fn changes_between_calls(expr: &Expr) -> bool {
+pub(crate) fn changes_between_calls(expr: &Expr) -> bool {
     let changing = |name: &str| CHANGING_FUNCTIONS.contains(&name.to_ascii_lowercase().as_str());
     match &expr.kind {
         ExprKind::SessionValue { .. } | ExprKind::CurrentSetting { .. } => true,
@@ -849,8 +849,7 @@ fn restrictions_of(
     for conjunct in conjuncts(filter) {
         match &conjunct.kind {
             ExprKind::Binary(operator, left, right) => {
-                let (column, value, operator) = match names_key_part(left, qualifiers, matchers)
-                {
+                let (column, value, operator) = match names_key_part(left, qualifiers, matchers) {
                     Some(column) => (column, right, Some(*operator)),
                     None => match names_key_part(right, qualifiers, matchers) {
                         Some(column) => (column, left, flipped(*operator)),

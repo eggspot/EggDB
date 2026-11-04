@@ -466,6 +466,25 @@ struct Keys {
     constraint_types: HashMap<String, String>,
 }
 
+fn generation_extra(
+    snapshot: &CatalogSnapshot,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Option<&'static str> {
+    let definition = snapshot
+        .relations
+        .iter()
+        .find(|entry| entry.schema == schema && entry.name == table)?
+        .table()?;
+    let entry = definition.generation_of(definition.column_index(column)?)?;
+    Some(if entry.stored {
+        "STORED GENERATED"
+    } else {
+        "VIRTUAL GENERATED"
+    })
+}
+
 fn keys(snapshot: &CatalogSnapshot) -> Keys {
     let constraint_types: HashMap<String, String> =
         standard_rows(snapshot, InformationRelation::TableConstraints)
@@ -603,6 +622,13 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MySqlRelation) -> Vec<V
                             .as_deref()
                             .is_some_and(|value| value.starts_with("nextval("));
                     let textual = matches!(data_type, "varchar" | "char" | "longtext");
+                    let generation = generation_extra(snapshot, &schema, &table, &name);
+                    let extra = match generation {
+                        Some(kind) => kind,
+                        None if generated => "auto_increment",
+                        None => "",
+                    };
+                    let expression = text_of(row, "generation_expression").unwrap_or_default();
                     build(
                         columns,
                         vec![
@@ -653,10 +679,10 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MySqlRelation) -> Vec<V
                                 Value::Text(mysql_column_type(data_type, row)),
                             ),
                             ("column_key", text(key)),
-                            ("extra", text(if generated { "auto_increment" } else { "" })),
+                            ("extra", text(extra)),
                             ("privileges", text("select,insert,update,references")),
                             ("column_comment", text("")),
-                            ("generation_expression", text("")),
+                            ("generation_expression", Value::Text(expression)),
                         ],
                     )
                 })

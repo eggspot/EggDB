@@ -2,6 +2,7 @@ mod constraints;
 mod copy;
 mod cursors;
 mod databases;
+mod generated;
 mod grouping_sets;
 mod hierarchy;
 mod indexes;
@@ -2069,12 +2070,12 @@ impl<'t> Parser<'t> {
 
     fn column_definition(&mut self) -> SqlResult<ColumnDefinition> {
         let name = self.name()?;
-        if self.sqlserver() && self.is_word("as") {
-            return Err(sqlserver::not_supported("Computed columns").at(self.position()));
-        }
+        let untyped = (self.sqlserver() && self.is_word("as"))
+            || (self.oracle() && self.starts_generation());
         let serial = self.serial_type();
         let sql_type = match serial {
             Some(sql_type) => sql_type,
+            None if untyped => SqlType::Text,
             None => self.sql_type()?,
         };
         let mut column = ColumnDefinition {
@@ -2090,8 +2091,16 @@ impl<'t> Parser<'t> {
             unique: None,
             constraints: Vec::new(),
             comment: None,
+            generated: None,
         };
+        if untyped && self.sqlserver() {
+            self.sqlserver_computed_column(&mut column)?;
+        }
         loop {
+            if (self.mysql() || self.oracle()) && self.starts_generation() {
+                self.generation_clause(&mut column, !untyped)?;
+                continue;
+            }
             if self.mysql() && self.mysql_column_option(&mut column)? {
                 continue;
             }
@@ -2133,6 +2142,10 @@ impl<'t> Parser<'t> {
             } else if self.oracle() && self.take_word("collate") {
                 self.oracle_collation()?;
             } else if self.is_word("default") {
+                if column.generated.is_some() {
+                    return Err(generated::both_default_and_generation(&column.name.text)
+                        .at(self.position()));
+                }
                 self.at += 1;
                 let start = self.position();
                 let expr = self.binary_operand()?;
@@ -2206,7 +2219,14 @@ impl<'t> Parser<'t> {
         }
         self.expect_word("as")?;
         if self.peek_kind() == &TokenKind::LeftParen {
-            return Err(self.not_supported("generated columns"));
+            if !always {
+                return Err(SqlError::new(
+                    SqlState::SYNTAX_ERROR,
+                    "for a generated column, GENERATED ALWAYS must be specified",
+                )
+                .at(position));
+            }
+            return self.generation_body(column, true, position);
         }
         self.expect_word("identity")?;
         let options_position = self.position();

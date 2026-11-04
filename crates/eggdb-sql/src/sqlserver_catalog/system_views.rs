@@ -888,6 +888,10 @@ fn column_rows(
                 ],
                 false,
             );
+            let computed = entry
+                .table()
+                .is_some_and(|table| table.is_generated(position));
+            row = row.set("is_computed", bit(computed));
             if identity_only {
                 row = row
                     .set("seed_value", Value::BigInt(facts.identity_seed.seed))

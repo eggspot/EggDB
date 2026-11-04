@@ -62,6 +62,7 @@ fn copied_column(
         unique: None,
         constraints: Vec::new(),
         comment: None,
+        generated: None,
     })
 }
 

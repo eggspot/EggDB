@@ -158,6 +158,20 @@ pub struct ColumnSchema {
     pub auto_increment: bool,
     /// The column's comment, from `COMMENT ON COLUMN` or MySQL's `COMMENT` column option.
     pub comment: Option<String>,
+    /// How the column computes its value when it is a generated (computed) column.
+    pub generation: Option<ColumnGeneration>,
+}
+
+/// The expression a generated column (PostgreSQL's `GENERATED ALWAYS AS`, MySQL's and SQLite's
+/// generated columns, SQL Server's computed columns, Oracle's virtual columns) computes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnGeneration {
+    /// The expression's text, written in [`dialect`](Self::dialect).
+    pub expression: String,
+    /// The dialect the expression is written in.
+    pub dialect: crate::Dialect,
+    /// Whether the column is `STORED` (`PERSISTED` in SQL Server) rather than `VIRTUAL`.
+    pub stored: bool,
 }
 
 impl TableSchema {
@@ -246,6 +260,19 @@ impl TableSchema {
                     && column.default_dialect == crate::Dialect::PostgreSql
                 {
                     part.push_str(&format!(" DEFAULT {default}"));
+                }
+                if let Some(generation) = &column.generation
+                    && generation.dialect == crate::Dialect::PostgreSql
+                {
+                    part.push_str(&format!(
+                        " GENERATED ALWAYS AS ({}) {}",
+                        generation.expression,
+                        if generation.stored {
+                            "STORED"
+                        } else {
+                            "VIRTUAL"
+                        }
+                    ));
                 }
                 if column.not_null && !self.primary_key.contains(&column.name) {
                     part.push_str(" NOT NULL");
@@ -353,6 +380,13 @@ fn schema_of(definition: &TableDefinition) -> TableSchema {
                 default_dialect: definition.default_dialect(position),
                 auto_increment: column.auto_increment,
                 comment: None,
+                generation: definition
+                    .generation_of(position)
+                    .map(|entry| ColumnGeneration {
+                        expression: entry.expression.clone(),
+                        dialect: entry.dialect,
+                        stored: entry.stored,
+                    }),
             })
             .collect(),
         primary_key: definition

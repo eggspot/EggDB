@@ -1182,6 +1182,16 @@ pub(crate) struct ColumnDefinition {
     pub(crate) unique: Option<Option<Name>>,
     pub(crate) constraints: Vec<ConstraintSpec>,
     pub(crate) comment: Option<String>,
+    pub(crate) generated: Option<GenerationSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct GenerationSpec {
+    pub(crate) expr: Expr,
+    pub(crate) text: String,
+    pub(crate) stored: bool,
+    pub(crate) type_given: bool,
+    pub(crate) position: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]

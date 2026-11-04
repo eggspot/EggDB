@@ -343,6 +343,7 @@ pub(crate) struct PreparedChecks {
     domains: Option<crate::user_types::DomainChecks>,
     partition: Option<std::sync::Arc<crate::partitions::PartitionConstraint>>,
     partitioned: Option<crate::partitions::Partitioned>,
+    generator: Option<crate::generated_columns::Generator>,
 }
 
 impl PreparedChecks {
@@ -370,6 +371,7 @@ impl PreparedChecks {
             domains: crate::user_types::DomainChecks::of(table)?,
             partition: None,
             partitioned: None,
+            generator: crate::generated_columns::Generator::of(table)?,
         })
     }
 
@@ -386,6 +388,7 @@ impl PreparedChecks {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.checks.is_empty()
+            && self.generator.is_none()
             && self.domains.is_none()
             && self.partition.is_none()
             && self.partitioned.is_none()
@@ -395,6 +398,13 @@ impl PreparedChecks {
         self.partition
             .as_ref()
             .is_none_or(|partition| partition.holds(row))
+    }
+
+    pub(crate) fn generate(&self, table: &TableDefinition, row: &mut [Value]) -> SqlResult<()> {
+        match &self.generator {
+            Some(generator) => generator.fill(table, row),
+            None => Ok(()),
+        }
     }
 
     pub(crate) fn check(&self, table: &TableDefinition, row: &[Value]) -> SqlResult<()> {
@@ -981,6 +991,9 @@ fn apply_action(
                         }
                         unchanged_by_before_triggers(&*writer, child, &row_key, &row, "updated")?;
                         changed_by_before_triggers = true;
+                    }
+                    if let Some(checks) = &checks {
+                        checks.generate(child, &mut updated)?;
                     }
                     execute::check_not_null_of(child, &updated)?;
                     if let Some(checks) = &checks {

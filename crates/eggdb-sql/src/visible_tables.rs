@@ -1044,7 +1044,10 @@ fn narrowed_insert(
         }));
     }
     crate::constraints::PreparedChecks::of(full)
-        .and_then(|checks| checks.check(full, &new))
+        .and_then(|checks| {
+            checks.generate(full, &mut new)?;
+            checks.check(full, &new)
+        })
         .map_err(|error| hidden_check_failed(&table, &error))?;
     Ok(Ok(NarrowedRow { old: None, new }))
 }
@@ -1135,6 +1138,7 @@ fn without_column(table: &TableDefinition, removed: usize) -> TableDefinition {
     }
     shown.identities = table.identities_without_column(removed);
     shown.default_dialects = table.default_dialects_without_column(removed);
+    shown.generated = crate::encoding::generated_without_column(&table.generated, removed);
     shown.domains = table.domains_without_column(removed);
     if shown.auto_increment_column().is_none() {
         shown.identity_seed = None;

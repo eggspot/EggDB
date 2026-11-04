@@ -428,6 +428,8 @@ pub(crate) fn define_index(
         check_orderable(table.columns[column].sql_type, name.position)?;
         columns.push(column);
     }
+    crate::generated_columns::virtual_index_refused(table, &columns)
+        .map_err(|error| error.at(spec.position))?;
     let given = match (&spec.name, dialect) {
         (Some(_), Dialect::Sqlite) if constraint => None,
         (Some(name), _) => Some(name.text.clone()),
@@ -727,7 +729,13 @@ pub(crate) fn drop_index(
             return Err(index_missing(name, dialect));
         };
         let index_id = definition.indexes[position].id;
-        crate::partition_indexes::before_drop(writer, tables, &definition, index_id, name.position)?;
+        crate::partition_indexes::before_drop(
+            writer,
+            tables,
+            &definition,
+            index_id,
+            name.position,
+        )?;
         remove_index(writer, &mut definition, position)?;
     }
     Ok(result)

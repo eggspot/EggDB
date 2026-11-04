@@ -299,7 +299,10 @@ fn index_oids(snapshot: &CatalogSnapshot) -> std::collections::HashMap<(&str, u3
         else {
             continue;
         };
-        if let Some(owner) = snapshot.relations.get(*table).and_then(|owner| owner.table())
+        if let Some(owner) = snapshot
+            .relations
+            .get(*table)
+            .and_then(|owner| owner.table())
             && let Some(index) = owner.indexes.get(*at)
         {
             found.insert((owner.name.as_str(), index.id), entry.oid);
@@ -501,6 +504,7 @@ struct AttributeRow<'a> {
     not_null: bool,
     has_default: bool,
     identity: &'a str,
+    generated: &'a str,
     acl: Value,
 }
 
@@ -523,7 +527,7 @@ fn attribute_row(attribute: AttributeRow<'_>) -> Vec<Value> {
         .set("atthasdef", flag(attribute.has_default))
         .set("atthasmissing", flag(false))
         .set("attidentity", text(attribute.identity))
-        .set("attgenerated", text(""))
+        .set("attgenerated", text(attribute.generated))
         .set("attisdropped", flag(false))
         .set("attislocal", flag(true))
         .set("attinhcount", small(0))
@@ -564,8 +568,14 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                             })
                         }),
                         not_null: column.not_null || table.primary_key.contains(&at),
-                        has_default: column.default.is_some() && table.identity_of(at).is_none(),
+                        has_default: (column.default.is_some() || table.is_generated(at))
+                            && table.identity_of(at).is_none(),
                         identity: identity_code(table.identity_of(at)),
+                        generated: match table.generation_of(at) {
+                            Some(entry) if entry.stored => "s",
+                            Some(_) => "v",
+                            None => "",
+                        },
                         acl: column_acl(snapshot, &entry.internal, &column.name),
                     }));
                 }
@@ -580,6 +590,7 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                         not_null: false,
                         has_default: false,
                         identity: "",
+                        generated: "",
                         acl: column_acl(snapshot, &entry.internal, &column.name),
                     }));
                 }
@@ -601,6 +612,7 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                         not_null: true,
                         has_default: false,
                         identity: "",
+                        generated: "",
                         acl: Value::Null,
                     }));
                 }
@@ -630,6 +642,7 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                         not_null: false,
                         has_default: false,
                         identity: "",
+                        generated: "",
                         acl: Value::Null,
                     }));
                 }
@@ -644,6 +657,7 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                         not_null: false,
                         has_default: false,
                         identity: "",
+                        generated: "",
                         acl: Value::Null,
                     }));
                 }
@@ -1151,14 +1165,13 @@ fn trigger_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
 
 fn index_is_valid(snapshot: &CatalogSnapshot, owner: &TableDefinition, index: IndexSource) -> bool {
     match index {
-        IndexSource::Secondary(at) if snapshot.partitions.key_of(&owner.name).is_some() => owner
-            .indexes
-            .get(at)
-            .is_none_or(|index| {
+        IndexSource::Secondary(at) if snapshot.partitions.key_of(&owner.name).is_some() => {
+            owner.indexes.get(at).is_none_or(|index| {
                 snapshot
                     .partitions
                     .index_reaches_every_partition(&owner.name, index.id)
-            }),
+            })
+        }
         _ => true,
     }
 }

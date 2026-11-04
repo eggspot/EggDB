@@ -38,6 +38,14 @@ pub(crate) fn default_text(snapshot: &CatalogSnapshot, table_at: usize, column: 
     else {
         return String::new();
     };
+    if let Some(entry) = table.generation_of(column) {
+        let deparser = Deparser { table, snapshot };
+        return match entry.dialect {
+            Dialect::PostgreSql => deparser.check(&entry.expression),
+            _ => None,
+        }
+        .unwrap_or_else(|| entry.expression.clone());
+    }
     let written_in = table.default_dialect(column);
     let Some(column) = table.columns.get(column) else {
         return String::new();

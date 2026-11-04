@@ -638,6 +638,7 @@ struct ColumnFacts<'a> {
     default: Option<String>,
     identity: Option<IdentityFacts>,
     domain: Option<u32>,
+    generation: Option<&'a str>,
 }
 
 struct IdentityFacts {
@@ -719,6 +720,9 @@ fn relation_columns<'a>(
                     .map(|_| default_text(snapshot, at, position)),
                 identity: identity_facts(snapshot, table, position),
                 domain: table.domain_of(position),
+                generation: table
+                    .generation_of(position)
+                    .map(|entry| entry.expression.as_str()),
             })
             .collect(),
         RelationSource::View(view) => view
@@ -731,6 +735,7 @@ fn relation_columns<'a>(
                 default: None,
                 identity: None,
                 domain: None,
+                generation: None,
             })
             .collect(),
         RelationSource::Catalog(relation) => relation
@@ -743,6 +748,7 @@ fn relation_columns<'a>(
                 default: None,
                 identity: None,
                 domain: None,
+                generation: None,
             })
             .collect(),
         RelationSource::Sequence(_) | RelationSource::Index { .. } => Vec::new(),
@@ -944,7 +950,18 @@ fn column_row(
                     .is_some_and(|identity| identity.cycle),
             ),
         )
-        .set("is_generated", character_data("NEVER"))
+        .set(
+            "is_generated",
+            character_data(if column.generation.is_some() {
+                "ALWAYS"
+            } else {
+                "NEVER"
+            }),
+        )
+        .set(
+            "generation_expression",
+            column.generation.map_or(Value::Null, character_data),
+        )
         .set("is_updatable", yes_or_no(!view));
     if let Some(udt_name) = described.udt_name {
         row = row

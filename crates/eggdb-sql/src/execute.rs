@@ -394,6 +394,19 @@ pub(crate) fn create_table(
             table.set_default_dialect(index, definition.default_dialect);
         }
     }
+    let generated: Vec<(usize, &crate::ast::GenerationSpec)> = create
+        .columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, definition)| definition.generated.as_ref().map(|spec| (index, spec)))
+        .collect();
+    if !generated.is_empty() {
+        crate::generated_columns::define(&mut table, &generated, dialect)?;
+        if dialect == Dialect::Sqlite {
+            crate::generated_columns::sqlite_primary_key_refused(&table)?;
+        }
+        crate::generated_columns::virtual_index_refused(&table, &table.primary_key)?;
+    }
     let specs = unique_columns(create).chain(create.indexes.iter().cloned());
     let mut others = None;
     for spec in specs {
@@ -1223,9 +1236,13 @@ fn insert_targets(
                 InsertSource::DefaultValues => identity_value_missing(&insert.table.name),
             });
         }
-        None => (0..table.columns.len())
-            .filter(|&index| Some(index) != identity)
-            .collect(),
+        None => {
+            let hides_generated = crate::generated_columns::hidden_from_column_list(dialect);
+            (0..table.columns.len())
+                .filter(|&index| Some(index) != identity)
+                .filter(|&index| !(hides_generated && table.is_generated(index)))
+                .collect()
+        }
     };
     let InsertSource::Values(rows) = &insert.source else {
         return Ok(targets);
@@ -1321,6 +1338,16 @@ fn insert_rows(
         }
     }
     check_generated_always(&table, &targets, rows, insert.overriding)?;
+    let from_query = matches!(insert.source, InsertSource::Query(_));
+    crate::generated_columns::check_insert(&table, &targets, |slot| {
+        if from_query {
+            return Some(true);
+        }
+        rows.iter()
+            .filter_map(|values| values.get(slot))
+            .map(|value| matches!(value, InsertValue::Expr(_)))
+            .reduce(|any, given| any || given)
+    })?;
     let given_ignored: Vec<bool> = (0..table.columns.len())
         .map(|index| {
             insert.overriding == Some(Overriding::UserValue) && table.identity_of(index).is_some()
@@ -1612,7 +1639,14 @@ pub(crate) fn check_updated_to_default(
     assignments: &[(Name, InsertValue)],
 ) -> SqlResult<()> {
     for (&target, (_, value)) in targets.iter().zip(assignments) {
-        if matches!(value, InsertValue::Expr(_)) && table.is_generated_always(target) {
+        let given = matches!(value, InsertValue::Expr(_));
+        if table.is_generated(target)
+            && !constraints::keeps_identity_values()
+            && (given || crate::generated_columns::refuses_default())
+        {
+            return Err(crate::generated_columns::written(table, target, true));
+        }
+        if given && table.is_generated_always(target) {
             let name = &table.columns[target].name;
             return Err(SqlError::new(
                 SqlState::GENERATED_ALWAYS,
@@ -2022,6 +2056,9 @@ impl<'a> StoredRows<'a> {
         let mut combined = existing.clone();
         combined.extend_from_slice(inserted);
         for (index, expr) in updates {
+            if table.is_generated(*index) {
+                return Err(crate::generated_columns::written(table, *index, true));
+            }
             let column = &table.columns[*index];
             let value = Evaluator {
                 scope,
@@ -2043,6 +2080,9 @@ impl<'a> StoredRows<'a> {
             )? == RowOutcome::Skip
         {
             return Ok(UpsertOutcome::Skipped);
+        }
+        if let Some(checks) = self.checks {
+            checks.generate(table, &mut combined)?;
         }
         if combined == existing {
             if let Some((firing, tables)) = firing {
@@ -2121,6 +2161,9 @@ impl<'a> StoredRows<'a> {
         let table = self.table;
         if self.auto_increment.is_some() {
             self.fill_auto_increment(writer, row)?;
+        }
+        if let Some(checks) = self.checks {
+            checks.generate(table, row)?;
         }
         check_not_null(table, row)?;
         if let Some(checks) = self.checks {
@@ -2344,6 +2387,9 @@ pub(crate) fn insert_literals(
         return insert_literals_into_view(writer, tables, insert);
     }
     let table = tables.require_target(writer, &insert.table.name, "insert into")?;
+    if !table.generated.is_empty() {
+        return insert_literals_into_view(writer, tables, insert);
+    }
     if insert.width > table.columns.len() {
         return Err(SqlError::syntax(
             "INSERT has more expressions than target columns",
@@ -4340,6 +4386,7 @@ fn update_rows(
             for ((_, value), &index) in update.assignments.iter().zip(&targets) {
                 new_row[index] = assigned_value(&evaluator, value, &table, index, rule)?;
             }
+            checks.generate(&table, &mut new_row)?;
             check_not_null(&table, &new_row)?;
             if !checks.is_empty() && !(may_move && !checks.fits_partition(&new_row)) {
                 checks.check(&table, &new_row)?;
@@ -4377,6 +4424,7 @@ fn update_rows(
             {
                 continue;
             }
+            checks.generate(&table, &mut new_row)?;
             check_not_null(&table, &new_row)?;
             if !checks.is_empty() && !(may_move && !checks.fits_partition(&new_row)) {
                 checks.check(&table, &new_row)?;

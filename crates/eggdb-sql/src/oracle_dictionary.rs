@@ -974,6 +974,11 @@ fn column_rows(dictionary: &Dictionary<'_>) -> Vec<Vec<Value>> {
             let column_id = position as i64 + 1;
             let (precision, scale) = precision_and_scale(facts.sql_type);
             let characters = character_length(facts.sql_type);
+            let generation = entry
+                .table()
+                .and_then(|table| table.generation_of(position))
+                .map(|found| found.expression.as_str());
+            let default = generation.or(facts.default);
             rows.push(
                 dictionary
                     .row()
@@ -988,16 +993,19 @@ fn column_rows(dictionary: &Dictionary<'_>) -> Vec<Vec<Value>> {
                     .set("column_id", number(column_id))
                     .set(
                         "default_length",
-                        optional_number(facts.default.map(|default| default.len() as i64)),
+                        optional_number(default.map(|default| default.len() as i64)),
                     )
-                    .set("data_default", optional_text(facts.default))
+                    .set("data_default", optional_text(default))
                     .set("char_col_decl_length", optional_number(characters))
                     .set("char_length", number(characters.unwrap_or(0)))
                     .set("char_used", optional_text(characters.map(|_| "C")))
                     .set("default_on_null", text("NO"))
                     .set("identity_column", flag(facts.identity, "YES", "NO"))
                     .set("hidden_column", text("NO"))
-                    .set("virtual_column", text("NO"))
+                    .set(
+                        "virtual_column",
+                        text(if generation.is_some() { "YES" } else { "NO" }),
+                    )
                     .set("segment_column_id", number(column_id))
                     .set("internal_column_id", number(column_id))
                     .set("user_generated", text("YES"))

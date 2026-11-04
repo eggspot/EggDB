@@ -838,7 +838,9 @@ impl CatalogSnapshot {
                 );
             }
             for (column_at, column) in table.columns.iter().enumerate() {
-                if column.default.is_some() && table.identity_of(column_at).is_none() {
+                if (column.default.is_some() || table.is_generated(column_at))
+                    && table.identity_of(column_at).is_none()
+                {
                     defaults.push((
                         OidRequest {
                             kind: b'd',

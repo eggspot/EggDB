@@ -49,6 +49,9 @@ mod eval;
 mod execute;
 mod explain;
 mod foreign;
+mod generated_columns;
+#[cfg(test)]
+mod generated_columns_tests;
 mod geo_functions;
 mod grouping_sets;
 mod hash_index;
@@ -312,7 +315,7 @@ pub use plsql::ServerOutputReader;
 pub use random::{RandomSource, set_random_source};
 pub use ranges::{RangeBound, RangeBounds, RangeValue};
 pub use records::RecordValue;
-pub use regex::regex_matches_with_flags;
+pub use regex::{regex_captures, regex_matches_with_flags};
 pub use relations::{EXACT_ROW_COUNT_UP_TO, Relation, RelationKind, find_relation};
 pub use restore::{
     Consequence, IgnoredMetaCommand, IgnoredStatements, IncludeBase, IncludeOpener, IncludeRequest,
@@ -322,7 +325,8 @@ pub use restore::{
 };
 pub use roles::{StoredRole, login_verifier, stored_role, stored_roles};
 pub use schema::{
-    ColumnSchema, IndexColumnOrder, IndexSchema, TableSchema, ViewColumnSchema, ViewSchema, quoted,
+    ColumnGeneration, ColumnSchema, IndexColumnOrder, IndexSchema, TableSchema, ViewColumnSchema,
+    ViewSchema, quoted,
 };
 pub use served_databases::{
     DatabaseDirectory, FixedDatabases, ServedDatabaseError, ServedDatabases, is_valid_database_name,
