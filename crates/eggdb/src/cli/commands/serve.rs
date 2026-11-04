@@ -805,9 +805,9 @@ impl Session<'_> {
                 None => Ok(()),
             });
             let rest_server = scope.spawn(|| match &rest_listener {
-                Some(listener) => eggdb_http::serve_with_limits(
+                Some(listener) => eggdb_http::serve_replies_with_limits(
                     listener,
-                    &|request| rest_endpoint.answer(request),
+                    &|request| rest_endpoint.reply(request),
                     &stop_signals::requested,
                     &eggdb_http::Limits::new(eggdb_api::MAX_REQUEST_BYTES, &memory_budget),
                 ),

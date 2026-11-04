@@ -1,27 +1,42 @@
-//! A small HTTP/1.1 server written from RFC 9110 and RFC 9112: one request per connection,
-//! bodies only with `Content-Length` and at most 1 MiB unless a listener sets its own limit
-//! (with `100 Continue` for clients that wait for it), with every length and wait bounded so a
-//! hostile client cannot hold a thread or memory for long. A listener given [`Limits`] holds
-//! every body over 64 KiB, the request's and then the response's, against the server's one
-//! memory budget (D284, D307), and answers with its own refusal when the budget is spent. A
-//! minimal client posts to plain `http://` URLs, for webhooks.
+//! A small HTTP/1.1 server written from RFC 9110 and RFC 9112. Connections persist (HTTP/1.1
+//! by default, HTTP/1.0 with `Connection: keep-alive`) until `Connection: close`, an idle
+//! timeout or a number of requests, and pipelined requests are answered in order. Request
+//! bodies come with `Content-Length` or `Transfer-Encoding: chunked`, at most 1 MiB unless a
+//! listener sets its own limit (with `100 Continue` for clients that wait for it); framing that
+//! could be read two ways is refused, as RFC 9112 asks, so requests cannot be smuggled. A
+//! handler answers a whole [`Response`] or a [`StreamedResponse`] sent in chunks as it is
+//! produced. Every length and wait is bounded so a hostile client cannot hold a thread or
+//! memory for long. A listener given [`Limits`] holds every body over 64 KiB, the request's
+//! (a chunked one as it arrives) and then the response's, against the server's one memory
+//! budget (D284, D307), and answers with its own refusal when the budget is spent. A minimal
+//! client posts to plain `http://` URLs, for webhooks.
 
 mod client;
+mod connection;
+mod reader;
+mod streamed;
 
 pub use client::{ClientResponse, HttpTarget, host_header, parse_http_url, post, request};
+pub use streamed::{BodyProducer, BodyWriter, Reply, STREAM_CHUNK_BYTES, StreamedResponse};
 
+use connection::ConnectionHeader;
 use eggdb_platform::connection_limits::{MemoryBudget, Reservation};
+use reader::{PlainSource, RequestReader};
 use std::fmt;
 use std::io::{self, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 const MAX_HEAD_BYTES: usize = 16 * 1024;
 const MAX_HEADERS: usize = 100;
-const READ_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCEPT_POLL: Duration = Duration::from_millis(100);
 const MAX_CONNECTIONS: usize = 16;
+const KEEP_ALIVE_BELOW_CONNECTIONS: usize = MAX_CONNECTIONS - MAX_CONNECTIONS / 4;
+/// How long a persistent connection waits for its next request before the server closes it.
+pub const KEEP_ALIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+/// The most requests one connection is served before the server closes it.
+pub const MAX_REQUESTS_PER_CONNECTION: usize = 100;
 /// The longest request body [`serve`] reads: 1 MiB.
 pub const MAX_BODY_BYTES: usize = 1 << 20;
 
@@ -106,6 +121,8 @@ pub enum HttpError {
     Malformed,
     /// The body is longer than the server's memory budget has left.
     OverMemoryBudget,
+    /// The body is sent with a transfer coding other than `chunked`.
+    UnsupportedTransferCoding,
 }
 
 impl fmt::Display for HttpError {
@@ -116,6 +133,7 @@ impl fmt::Display for HttpError {
             Self::BodyTooLarge => "the request body is too large",
             Self::Malformed => "the request is not HTTP/1.1",
             Self::OverMemoryBudget => "the server's connections already hold their memory budget",
+            Self::UnsupportedTransferCoding => "the request's transfer coding is not supported",
         })
     }
 }
@@ -124,26 +142,29 @@ impl std::error::Error for HttpError {}
 
 fn reason(status: u16) -> &'static str {
     match status {
+        100 => "Continue",
         200 => "OK",
+        201 => "Created",
         202 => "Accepted",
+        204 => "No Content",
+        206 => "Partial Content",
+        304 => "Not Modified",
+        400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
-        413 => "Content Too Large",
-        429 => "Too Many Requests",
-        400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        409 => "Conflict",
+        411 => "Length Required",
+        412 => "Precondition Failed",
+        413 => "Content Too Large",
+        416 => "Range Not Satisfiable",
+        429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
+        501 => "Not Implemented",
         503 => "Service Unavailable",
         _ => "Internal Server Error",
     }
-}
-
-fn head_end(bytes: &[u8]) -> Option<usize> {
-    bytes
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .map(|at| at + 4)
 }
 
 /// Decodes `%XX` escapes in one URL path segment or query value; `None` when an escape is not
@@ -173,7 +194,7 @@ fn hex_digit(byte: u8) -> Option<u8> {
 }
 
 /// Reads a request from `stream`: its head, at most 16 KiB, and a body of at most 1 MiB given
-/// by `Content-Length` (chunked bodies are refused).
+/// by `Content-Length` or sent with `Transfer-Encoding: chunked`.
 pub fn read_request(stream: &mut impl Read) -> Result<Request, HttpError> {
     read_request_limited(stream, MAX_BODY_BYTES, &mut || {})
 }
@@ -192,99 +213,17 @@ pub fn read_request_limited(
 
 /// Reads a request as [`read_request_limited`] does, holding a body over 64 KiB in `held`
 /// before it is read (and before `100 Continue` is sent), so a declared length the budget
-/// cannot take costs nothing: that request fails with [`HttpError::OverMemoryBudget`].
+/// cannot take costs nothing: that request fails with [`HttpError::OverMemoryBudget`]. A
+/// chunked body is held as its chunks arrive, each chunk's size before its bytes are read.
 pub fn read_request_holding(
     stream: &mut impl Read,
     max_body_bytes: usize,
     held: &mut Reservation<'_>,
     on_continue: &mut dyn FnMut(),
 ) -> Result<Request, HttpError> {
-    let mut head = Vec::new();
-    let mut chunk = [0u8; 8192];
-    let end = loop {
-        if let Some(end) = head_end(&head) {
-            break end;
-        }
-        if head.len() >= MAX_HEAD_BYTES {
-            return Err(HttpError::TooLarge);
-        }
-        let count = stream.read(&mut chunk).map_err(|_| HttpError::Closed)?;
-        if count == 0 {
-            return Err(HttpError::Closed);
-        }
-        head.extend_from_slice(&chunk[..count]);
-    };
-    let text = std::str::from_utf8(&head[..end]).map_err(|_| HttpError::Malformed)?;
-    let mut lines = text.split("\r\n");
-    let mut parts = lines.next().unwrap_or_default().split(' ');
-    let (Some(method), Some(target), Some(version), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return Err(HttpError::Malformed);
-    };
-    if !version.starts_with("HTTP/1.")
-        || method.is_empty()
-        || !method.bytes().all(|byte| byte.is_ascii_uppercase())
-        || !target.starts_with('/')
-    {
-        return Err(HttpError::Malformed);
-    }
-    let mut headers = Vec::new();
-    for line in lines.filter(|line| !line.is_empty()) {
-        if headers.len() >= MAX_HEADERS {
-            return Err(HttpError::TooLarge);
-        }
-        let (name, value) = line.split_once(':').ok_or(HttpError::Malformed)?;
-        if name.is_empty() || name.contains([' ', '\t']) {
-            return Err(HttpError::Malformed);
-        }
-        headers.push((name.to_ascii_lowercase(), value.trim().to_owned()));
-    }
-    let (path, query) = match target.split_once('?') {
-        Some((path, query)) => (path, Some(query.to_owned())),
-        None => (target, None),
-    };
-    let mut request = Request {
-        method: method.to_owned(),
-        path: path.to_owned(),
-        query,
-        headers,
-        body: Vec::new(),
-    };
-    if request.header("transfer-encoding").is_some() {
-        return Err(HttpError::Malformed);
-    }
-    let length = match request.header("content-length") {
-        None => 0,
-        Some(text) => text.parse::<usize>().map_err(|_| HttpError::Malformed)?,
-    };
-    if length > max_body_bytes {
-        return Err(HttpError::BodyTooLarge);
-    }
-    if !held.hold_if_large(length) {
-        return Err(HttpError::OverMemoryBudget);
-    }
-    if length > 0
-        && head.len() == end
-        && request
-            .header("expect")
-            .is_some_and(|expect| expect.eq_ignore_ascii_case("100-continue"))
-    {
-        on_continue();
-    }
-    let mut body = head[end..].to_vec();
-    if body.len() > length {
-        body.truncate(length);
-    }
-    while body.len() < length {
-        let count = stream.read(&mut chunk).map_err(|_| HttpError::Closed)?;
-        if count == 0 {
-            return Err(HttpError::Closed);
-        }
-        body.extend_from_slice(&chunk[..count.min(length - body.len())]);
-    }
-    request.body = body;
-    Ok(request)
+    RequestReader::new(PlainSource(stream))
+        .next_request(max_body_bytes, held, on_continue)
+        .map(|(request, _)| request)
 }
 
 /// Writes `response` to `stream`, without its body for a `HEAD` request, and asks the client to
@@ -295,28 +234,7 @@ pub fn write_response(
     response: &Response,
     head_only: bool,
 ) -> io::Result<()> {
-    let mut head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nConnection: close\r\nCache-Control: no-store\r\n",
-        response.status,
-        reason(response.status),
-        response.content_type,
-    );
-    if !response
-        .headers
-        .iter()
-        .any(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-    {
-        head.push_str(&format!("Content-Length: {}\r\n", response.body.len()));
-    }
-    for (name, value) in &response.headers {
-        head.push_str(&format!("{name}: {value}\r\n"));
-    }
-    head.push_str("\r\n");
-    stream.write_all(head.as_bytes())?;
-    if !head_only {
-        stream.write_all(&response.body)?;
-    }
-    stream.flush()
+    connection::write_whole(stream, response, head_only, ConnectionHeader::Close)
 }
 
 /// What a listener bounds: the longest body it reads, the memory budget its connections share
@@ -330,6 +248,10 @@ pub struct Limits<'b> {
     /// What a request whose body, or whose response's body, the budget cannot take is
     /// answered with, in the words of the protocol the listener speaks.
     pub over_memory_budget: fn() -> Response,
+    /// How long a persistent connection waits for its next request.
+    pub keep_alive_idle_timeout: Duration,
+    /// The most requests one connection is served; the last answer says `Connection: close`.
+    pub max_requests_per_connection: usize,
 }
 
 impl<'b> Limits<'b> {
@@ -340,6 +262,18 @@ impl<'b> Limits<'b> {
             max_body_bytes,
             memory_budget,
             over_memory_budget: over_memory_budget_response,
+            keep_alive_idle_timeout: KEEP_ALIVE_IDLE_TIMEOUT,
+            max_requests_per_connection: MAX_REQUESTS_PER_CONNECTION,
+        }
+    }
+
+    /// These limits, closing a persistent connection after `idle_timeout` without a request or
+    /// after `max_requests` requests.
+    pub fn with_keep_alive(self, idle_timeout: Duration, max_requests: usize) -> Self {
+        Self {
+            keep_alive_idle_timeout: idle_timeout,
+            max_requests_per_connection: max_requests,
+            ..self
         }
     }
 
@@ -362,55 +296,11 @@ pub fn over_memory_budget_response() -> Response {
     .with_header("Retry-After", "1")
 }
 
-fn serve_one(
-    mut stream: TcpStream,
-    handler: &(dyn Fn(&Request) -> Response + Sync),
-    limits: &Limits<'_>,
-) {
-    if stream.set_read_timeout(Some(READ_TIMEOUT)).is_err()
-        || stream.set_write_timeout(Some(READ_TIMEOUT)).is_err()
-    {
-        return;
-    }
-    let Ok(mut interim) = stream.try_clone() else {
-        return;
-    };
-    let mut send_continue = || {
-        let _ = interim.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
-    };
-    let mut held = limits.memory_budget.empty_reservation();
-    let read = read_request_holding(
-        &mut stream,
-        limits.max_body_bytes,
-        &mut held,
-        &mut send_continue,
-    );
-    let response = match read {
-        Ok(request) => {
-            let response = handler(&request);
-            let head_only = request.method == "HEAD";
-            drop(request);
-            let response = if held.hold_if_large(response.body.len()) {
-                response
-            } else {
-                drop(response);
-                held.resize(0);
-                (limits.over_memory_budget)()
-            };
-            let _ = write_response(&mut stream, &response, head_only);
-            return;
-        }
-        Err(HttpError::TooLarge) => Response::text(431, "the request head is too large"),
-        Err(HttpError::BodyTooLarge) => Response::text(413, "the request body is too large"),
-        Err(HttpError::Malformed) => Response::text(400, "not an HTTP/1.1 request"),
-        Err(HttpError::OverMemoryBudget) => (limits.over_memory_budget)(),
-        Err(HttpError::Closed) => return,
-    };
-    let _ = write_response(&mut stream, &response, false);
-}
-
 /// Serves requests arriving on `listener` with `handler`, a thread per connection and at most
-/// sixteen at once, until `stop` turns true.
+/// sixteen at once, until `stop` turns true. Connections persist and take pipelined requests
+/// until the client closes, asks to, waits [`KEEP_ALIVE_IDLE_TIMEOUT`] or sends
+/// [`MAX_REQUESTS_PER_CONNECTION`]; once twelve connections are open, each answer closes its
+/// connection, so idle clients cannot keep new ones out.
 pub fn serve(
     listener: &TcpListener,
     handler: &(dyn Fn(&Request) -> Response + Sync),
@@ -445,6 +335,18 @@ pub fn serve_with_limits(
     stop: &(dyn Fn() -> bool + Sync),
     limits: &Limits<'_>,
 ) -> io::Result<()> {
+    let whole = |request: &Request| -> Reply<'static> { Reply::Whole(handler(request)) };
+    serve_replies_with_limits(listener, &whole, stop, limits)
+}
+
+/// Serves requests as [`serve_with_limits`] does with a handler that answers a [`Reply`]: a
+/// [`StreamedResponse`] is sent in chunks as it is produced, holding one chunk at a time.
+pub fn serve_replies_with_limits<'h>(
+    listener: &TcpListener,
+    handler: &(dyn Fn(&Request) -> Reply<'h> + Sync),
+    stop: &(dyn Fn() -> bool + Sync),
+    limits: &Limits<'_>,
+) -> io::Result<()> {
     listener.set_nonblocking(true)?;
     let active = AtomicUsize::new(0);
     std::thread::scope(|scope| {
@@ -473,7 +375,7 @@ pub fn serve_with_limits(
             let spawned = std::thread::Builder::new()
                 .name("eggdb-http".to_owned())
                 .spawn_scoped(scope, move || {
-                    serve_one(stream, handler, limits);
+                    connection::serve_connection(stream, handler, limits, stop, active);
                     active.fetch_sub(1, Ordering::AcqRel);
                 });
             if spawned.is_err() {
@@ -485,8 +387,12 @@ pub fn serve_with_limits(
 }
 
 #[cfg(test)]
+mod keep_alive_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpStream;
 
     #[test]
     fn a_body_limit_is_kept_and_a_waiting_client_is_told_to_continue() {
@@ -561,7 +467,7 @@ mod tests {
         assert_eq!(posted.body, b"abc");
         for hostile in [
             &b"POST / HTTP/1.1\r\nContent-Length: x\r\n\r\n"[..],
-            b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n",
+            b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 3\r\n\r\n",
         ] {
             assert_eq!(read_request(&mut &hostile[..]), Err(HttpError::Malformed));
         }
@@ -618,7 +524,10 @@ mod tests {
 
     fn exchange(address: std::net::SocketAddr, request: &[u8]) -> String {
         let mut client = TcpStream::connect(address).unwrap();
-        client.write_all(request).unwrap();
+        let line_end = request.windows(2).position(|pair| pair == b"\r\n").unwrap() + 2;
+        client.write_all(&request[..line_end]).unwrap();
+        client.write_all(b"Connection: close\r\n").unwrap();
+        client.write_all(&request[line_end..]).unwrap();
         let mut answer = Vec::new();
         let _ = client.read_to_end(&mut answer);
         String::from_utf8_lossy(&answer).into_owned()
@@ -700,14 +609,14 @@ mod tests {
             });
             let mut client = TcpStream::connect(address).unwrap();
             client
-                .write_all(b"GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
+                .write_all(b"GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
                 .unwrap();
             let mut answer = String::new();
             client.read_to_string(&mut answer).unwrap();
             assert!(answer.ends_with("/hello"), "{answer}");
             let mut posting = TcpStream::connect(address).unwrap();
             posting
-                .write_all(b"POST /echo HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello")
+                .write_all(b"POST /echo HTTP/1.0\r\nContent-Length: 5\r\n\r\nhello")
                 .unwrap();
             let mut echoed = String::new();
             posting.read_to_string(&mut echoed).unwrap();

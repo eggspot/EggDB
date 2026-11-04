@@ -129,12 +129,14 @@ fn dechunk(raw: &[u8], max_body: usize) -> io::Result<Vec<u8>> {
     let mut body = Vec::new();
     let mut at = 0;
     loop {
-        let line_end = raw[at..]
+        let line_end = raw
+            .get(at..)
+            .unwrap_or_default()
             .windows(2)
             .position(|pair| pair == b"\r\n")
             .ok_or_else(|| invalid("a chunk size line is cut short"))?
             + at;
-        let size_text = std::str::from_utf8(&raw[at..line_end])
+        let size_text = std::str::from_utf8(raw.get(at..line_end).unwrap_or_default())
             .map_err(|_| invalid("a chunk size is not text"))?;
         let size =
             usize::from_str_radix(size_text.split(';').next().unwrap_or_default().trim(), 16)
@@ -143,7 +145,7 @@ fn dechunk(raw: &[u8], max_body: usize) -> io::Result<Vec<u8>> {
         if size == 0 {
             return Ok(body);
         }
-        if body.len() + size > max_body {
+        if body.len().saturating_add(size) > max_body {
             return Err(invalid("the response body is larger than allowed"));
         }
         body.extend_from_slice(
