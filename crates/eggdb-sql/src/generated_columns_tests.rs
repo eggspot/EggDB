@@ -267,10 +267,10 @@ fn mysql_stored_columns_show_in_information_schema_and_guard_their_order() {
     assert_eq!(
         last(
             &mut session,
-            "SELECT column_name, extra FROM information_schema.columns \
+            "SELECT column_name AS name, extra AS kind FROM information_schema.columns \
              WHERE table_name = 't' ORDER BY ordinal_position"
         ),
-        "column_name|extra\na|\nb|STORED GENERATED\nc|VIRTUAL GENERATED\nSELECT 3"
+        "name|kind\na|\nb|STORED GENERATED\nc|VIRTUAL GENERATED\nSELECT 3"
     );
     last(&mut session, "INSERT INTO t (a) VALUES (4)");
     assert_eq!(
