@@ -3,6 +3,8 @@ use eggdb_sql::json::{Json, Node};
 
 const MAX_NESTING: usize = 64;
 const MAX_OPERATIONS: usize = 1000;
+const MAX_VALUE_BYTES: usize = eggdb_http::MAX_BODY_BYTES;
+const MAX_SOURCE_DEPTH: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Arithmetic {
@@ -159,6 +161,7 @@ impl Script {
     pub(crate) fn run(&self, context: &mut Context<'_>) -> Result<(), String> {
         for statement in &self.statements {
             self.execute(statement, context)?;
+            within_limits(&context.source)?;
         }
         Ok(())
     }
@@ -321,11 +324,57 @@ fn float_text(value: f64) -> Result<String, String> {
     }
 }
 
+fn within_limits(source: &Json) -> Result<(), String> {
+    let mut remaining = MAX_VALUE_BYTES;
+    if fits(source, 0, &mut remaining) {
+        Ok(())
+    } else {
+        Err(format!(
+            "the document would grow past {MAX_VALUE_BYTES} bytes or {MAX_SOURCE_DEPTH} levels of nesting"
+        ))
+    }
+}
+
+fn fits(value: &Json, depth: usize, remaining: &mut usize) -> bool {
+    if depth > MAX_SOURCE_DEPTH {
+        return false;
+    }
+    let own = match value {
+        Json::Null | Json::Boolean(_) => 5,
+        Json::Number(text) | Json::String(text) => text.len() + 2,
+        Json::Array(items) => items.len() + 2,
+        Json::Object(members) => members.iter().map(|(key, _)| key.len() + 4).sum(),
+    };
+    let Some(left) = remaining.checked_sub(own) else {
+        return false;
+    };
+    *remaining = left;
+    match value {
+        Json::Array(items) => items
+            .iter()
+            .all(|item| fits(&item.value, depth + 1, remaining)),
+        Json::Object(members) => members
+            .iter()
+            .all(|(_, member)| fits(&member.value, depth + 1, remaining)),
+        _ => true,
+    }
+}
+
+fn concatenated(left: &Json, right: &Json) -> Result<Json, String> {
+    let (left, right) = (display(left), display(right));
+    if left.len().saturating_add(right.len()) > MAX_VALUE_BYTES {
+        return Err(format!(
+            "the string would grow past {MAX_VALUE_BYTES} bytes"
+        ));
+    }
+    Ok(Json::String(left + &right))
+}
+
 fn arithmetic(left: &Json, operator: Arithmetic, right: &Json) -> Result<Json, String> {
     if operator == Arithmetic::Add
         && (matches!(left, Json::String(_)) || matches!(right, Json::String(_)))
     {
-        return Ok(Json::String(display(left) + &display(right)));
+        return concatenated(left, right);
     }
     let (Json::Number(left_text), Json::Number(right_text)) = (left, right) else {
         return Err(format!(
@@ -506,13 +555,7 @@ fn tokens(source: &str) -> Result<Vec<Token>, String> {
                         break;
                     }
                 }
-                if text.starts_with('.') {
-                    text.insert(0, '0');
-                }
-                if text.parse::<f64>().is_err() {
-                    return Err(format!("invalid number [{text}]"));
-                }
-                Token::Number(text)
+                Token::Number(number_literal(&text)?)
             }
             letter if letter.is_alphabetic() || letter == '_' => {
                 let mut name = String::from(letter);
@@ -531,6 +574,19 @@ fn tokens(source: &str) -> Result<Vec<Token>, String> {
         out.push(token);
     }
     Ok(out)
+}
+
+fn number_literal(text: &str) -> Result<String, String> {
+    let invalid = || format!("invalid number [{text}]");
+    if text.contains(['.', 'e', 'E']) {
+        let value = text.parse::<f64>().map_err(|_| invalid())?;
+        return float_text(value).map_err(|_| invalid());
+    }
+    let value = match text.strip_prefix('0') {
+        Some(octal) if !octal.is_empty() => i64::from_str_radix(octal, 8),
+        _ => text.parse::<i64>(),
+    };
+    value.map(|value| value.to_string()).map_err(|_| invalid())
 }
 
 enum Path {
@@ -584,6 +640,7 @@ impl Parser<'_> {
                 self.at += 1;
                 continue;
             }
+            self.count_operation()?;
             statements.push(self.statement()?);
             match self.next() {
                 None | Some(Token::Semicolon) => {}
@@ -948,8 +1005,11 @@ mod tests {
         ] {
             assert!(run(script, source).is_err(), "{script} on {source}");
         }
-        let deep = format!("\"ctx._source.a = {}1\"", "-".repeat(4000));
-        assert!(run(&deep, "{}").is_err());
+        let deep = format!("\"ctx._source.a = {}1\"", "- ".repeat(4000));
+        assert_eq!(
+            run(&deep, "{}"),
+            Err("the script nests too deeply".to_owned())
+        );
         let open = format!("\"ctx._source.a = {}1\"", "(".repeat(4000));
         assert!(run(&open, "{}").is_err());
         let long = format!("\"ctx._source.a = {}1\"", "1 + ".repeat(5000));
@@ -968,5 +1028,52 @@ mod tests {
             run(script, "{\"y\":2}"),
             Ok(("{\"x\":1}".to_owned(), Operation::Index))
         );
+    }
+
+    #[test]
+    fn number_literals_are_stored_as_valid_json() {
+        for (literal, stored) in [
+            ("1.", "1.0"),
+            (".5", "0.5"),
+            ("1e3", "1000.0"),
+            ("2.50", "2.5"),
+            ("0", "0"),
+            ("42", "42"),
+            ("007", "7"),
+            ("010", "8"),
+        ] {
+            assert_eq!(
+                run(&format!("\"ctx._source.a = {literal}\""), "{}"),
+                Ok((format!("{{\"a\":{stored}}}"), Operation::Index)),
+                "{literal}"
+            );
+            let (written, _) =
+                run(&format!("\"ctx._source.a = {literal}\""), "{}").expect("the literal is valid");
+            assert!(parse_document(&written).is_ok(), "{written}");
+        }
+        for literal in ["08", "1..2", "99999999999999999999", "1e400"] {
+            assert!(
+                run(&format!("\"ctx._source.a = {literal}\""), "{}").is_err(),
+                "{literal}"
+            );
+        }
+    }
+
+    #[test]
+    fn scripts_cannot_grow_a_document_without_bound() {
+        let doubling = format!("\"{}\"", "ctx._source.s += ctx._source.s; ".repeat(40));
+        let error = run(&doubling, "{\"s\":\"x\"}").expect_err("the string stops growing");
+        assert!(error.contains("bytes"), "{error}");
+        let lists = format!("\"{}\"", "ctx._source.a.add(ctx._source.a); ".repeat(40));
+        let error = run(&lists, "{\"a\":[1]}").expect_err("the list stops growing");
+        assert!(error.contains("bytes"), "{error}");
+        let nesting = format!("\"{}\"", "ctx._source.b = ctx._source; ".repeat(300));
+        let error = run(&nesting, "{}").expect_err("the nesting stops growing");
+        assert!(error.contains("levels"), "{error}");
+        let many = format!("\"{}\"", "ctx._source.n++; ".repeat(1001));
+        assert!(run(&many, "{\"n\":0}").is_err());
+        let fits = format!("\"{}\"", "ctx._source.s += ctx._source.s; ".repeat(10));
+        let (written, _) = run(&fits, "{\"s\":\"x\"}").expect("1 KiB fits");
+        assert_eq!(written.len(), "{\"s\":\"\"}".len() + 1024);
     }
 }

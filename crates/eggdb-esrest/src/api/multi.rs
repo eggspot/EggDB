@@ -1,9 +1,9 @@
 use super::{
-    Answer, Api, Failure, document_key, error, error_cause, index_key, json, member_of,
+    Answer, Api, Failure, document_key, error, error_cause, index_key, indices_of, json, member_of,
     over_memory_budget, query_flag, read, unstored, valid_index, validation,
 };
 use crate::json_out::escaped;
-use crate::source_filter::SourceFilter;
+use crate::source_filter::{SourceFilter, matches};
 use eggdb_http::{Request, Response};
 use eggdb_sql::json::{Json, Node, parse_document};
 
@@ -315,7 +315,7 @@ impl Api<'_> {
     fn one_search(&self, indices: &[String], ignore_unavailable: bool, body: &str) -> Response {
         if let Some(invalid) = indices
             .iter()
-            .find(|index| *index != "_all" && *index != "*" && !valid_index(index))
+            .find(|index| *index != "_all" && !valid_index(&index.replace('*', "x")))
         {
             return error(
                 400,
@@ -325,7 +325,15 @@ impl Api<'_> {
         }
         let everything =
             indices.is_empty() || indices.iter().any(|index| index == "_all" || index == "*");
-        let names: Vec<&str> = indices.iter().map(String::as_str).collect();
+        let names = if everything {
+            Vec::new()
+        } else {
+            match self.expanded(indices) {
+                Ok(names) => names,
+                Err(reason) => return error(500, "eggdb_exception", &reason),
+            }
+        };
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
         let search = Request {
             method: "POST".to_owned(),
             path: String::new(),
@@ -339,5 +347,25 @@ impl Api<'_> {
             Err(Failure::BadRequest(reason)) => error(400, "parse_exception", &reason),
             Err(Failure::Storage(reason)) => error(500, "eggdb_exception", &reason),
         }
+    }
+
+    fn expanded(&self, indices: &[String]) -> Result<Vec<String>, String> {
+        if !indices.iter().any(|index| index.contains('*')) {
+            return Ok(indices.to_vec());
+        }
+        let existing = read(self.keyspace, |keys| indices_of(keys))?;
+        let mut names: Vec<String> = Vec::new();
+        for index in indices {
+            if index.contains('*') {
+                for name in existing.iter().filter(|name| matches(index, name)) {
+                    if !names.contains(name) {
+                        names.push(name.clone());
+                    }
+                }
+            } else if !names.contains(index) {
+                names.push(index.clone());
+            }
+        }
+        Ok(names)
     }
 }

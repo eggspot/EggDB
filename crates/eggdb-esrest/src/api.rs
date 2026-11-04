@@ -599,6 +599,13 @@ impl<'k> Api<'k> {
         let body = String::from_utf8_lossy(&request.body).into_owned();
         let parsed = parse_document(&body)?;
         if let Some(script) = member_of(&parsed, "script") {
+            if member_of(&parsed, "doc").is_some() {
+                return Ok(error(
+                    400,
+                    "action_request_validation_exception",
+                    "Validation Failed: 1: can't provide both script and doc;",
+                ));
+            }
             return match Script::from_node(&script) {
                 Ok(script) => self.update_document_with_script(index, id, &script),
                 Err(reason) => Ok(script_error(&format!("compile error: {reason}"))),

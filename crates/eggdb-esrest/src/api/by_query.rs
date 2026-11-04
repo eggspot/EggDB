@@ -73,6 +73,61 @@ impl Tally {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Slice {
+    id: u64,
+    max: u64,
+}
+
+impl Slice {
+    fn of(node: &Node) -> Result<Self, Response> {
+        let refused = |reason: &str| error(400, "parse_exception", reason);
+        let Json::Object(members) = &node.value else {
+            return Err(refused("[slice] must be an object"));
+        };
+        let (mut id, mut max) = (None, None);
+        for (key, value) in members {
+            let Json::Number(text) = &value.value else {
+                return Err(refused(&format!("[slice] [{key}] must be a whole number")));
+            };
+            let number = text
+                .parse::<i64>()
+                .map_err(|_| refused(&format!("[slice] [{key}] must be a whole number")))?;
+            match key.as_str() {
+                "id" => id = Some(number),
+                "max" => max = Some(number),
+                other => return Err(refused(&format!("[slice] does not support [{other}]"))),
+            }
+        }
+        let illegal = |reason: &str| error(400, "illegal_argument_exception", reason);
+        let (Some(id), Some(max)) = (id, max) else {
+            return Err(illegal("[slice] needs both [id] and [max]"));
+        };
+        if max <= 1 {
+            return Err(illegal("max must be greater than 1"));
+        }
+        if id < 0 {
+            return Err(illegal("id must be greater than or equal to 0"));
+        }
+        if id >= max {
+            return Err(illegal("max must be greater than id"));
+        }
+        Ok(Self {
+            id: id.unsigned_abs(),
+            max: max.unsigned_abs(),
+        })
+    }
+
+    fn holds(self, document_id: &str) -> bool {
+        let hash = document_id
+            .bytes()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+            });
+        hash % self.max == self.id
+    }
+}
+
 #[derive(Debug)]
 struct ByQuery {
     query: Query,
@@ -80,6 +135,7 @@ struct ByQuery {
     conflicts: Conflicts,
     max_docs: Option<u64>,
     scroll_size: usize,
+    slice: Option<Slice>,
 }
 
 fn count_of(node: &Node) -> Option<u64> {
@@ -110,6 +166,7 @@ impl ByQuery {
         let mut script = None;
         let mut conflicts = query_flag(request, "conflicts");
         let mut max_docs = None;
+        let mut slice = None;
         if let Some(body) = &body {
             let Json::Object(members) = &body.value else {
                 return Err(error(
@@ -146,7 +203,7 @@ impl ByQuery {
                             ));
                         }
                     },
-                    "slice" => {}
+                    "slice" => slice = Some(Slice::of(value)?),
                     other => {
                         return Err(error(
                             400,
@@ -214,6 +271,7 @@ impl ByQuery {
             conflicts,
             max_docs,
             scroll_size,
+            slice,
         })
     }
 }
@@ -302,7 +360,7 @@ impl Api<'_> {
             Change::Delete
         };
         let mut reservation = self.memory_budget.empty_reservation();
-        let matched = match self.matched_documents(index, &options.query, &mut reservation)? {
+        let matched = match self.matched_documents(index, &options, &mut reservation)? {
             Snapshot::Matched(matched) => matched,
             Snapshot::MissingIndex => return Ok(missing_index(index)),
             Snapshot::OverBudget => return Ok(over_memory_budget()),
@@ -320,7 +378,7 @@ impl Api<'_> {
     fn matched_documents(
         &self,
         index: &str,
-        query: &Query,
+        options: &ByQuery,
         reservation: &mut Reservation<'_>,
     ) -> Result<Snapshot, String> {
         read(self.keyspace, |keys| {
@@ -338,10 +396,13 @@ impl Api<'_> {
                     return Ok(true);
                 };
                 let id = String::from_utf8_lossy(id).into_owned();
+                if options.slice.is_some_and(|slice| !slice.holds(&id)) {
+                    return Ok(true);
+                }
                 let Ok(document) = parse_document(&source) else {
                     return Ok(true);
                 };
-                if matches(query, &id, &document) {
+                if matches(&options.query, &id, &document) {
                     held = held.saturating_add(id.len() + MATCHED_ENTRY_BYTES);
                     if !reservation.hold_if_large(held) {
                         over_budget = true;
@@ -484,7 +545,7 @@ mod tests {
             .expect("valid options");
         let mut reservation = api.memory_budget.empty_reservation();
         let Ok(Snapshot::Matched(matched)) =
-            api.matched_documents("logs", &options.query, &mut reservation)
+            api.matched_documents("logs", &options, &mut reservation)
         else {
             panic!("the snapshot reads the index");
         };
@@ -513,7 +574,7 @@ mod tests {
             assert_eq!(response.status, 201);
         }
         let Ok(Snapshot::Matched(matched)) =
-            api.matched_documents("logs", &options.query, &mut reservation)
+            api.matched_documents("logs", &options, &mut reservation)
         else {
             panic!("the snapshot reads the index");
         };

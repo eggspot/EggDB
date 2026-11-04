@@ -813,3 +813,143 @@ fn update_and_bulk_update_run_scripts() {
     assert!(deleted.contains("\"result\":\"deleted\""), "{deleted}");
     assert_eq!(api.answer(&request("GET", "/test/_doc/1", "")).status, 404);
 }
+
+fn number_after(text: &str, key: &str) -> u64 {
+    let start = text.find(key).map_or(text.len(), |at| at + key.len());
+    text.get(start..)
+        .unwrap_or_default()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap_or(u64::MAX)
+}
+
+#[test]
+fn manual_slices_split_the_matching_documents_between_them() {
+    let keyspace = MemoryKeyspace::default();
+    let api = api(&keyspace);
+    let mut bulk = String::new();
+    for id in 0..20 {
+        bulk.push_str(&format!(
+            "{{\"index\":{{\"_index\":\"counters\",\"_id\":\"{id}\"}}}}\n{{\"n\":0}}\n"
+        ));
+    }
+    assert!(body(&api.answer(&request("POST", "/_bulk", &bulk))).contains("\"errors\":false"));
+    let mut updated = 0;
+    for slice in 0..2 {
+        let text = body(&api.answer(&request(
+            "POST",
+            "/counters/_update_by_query",
+            &format!("{{\"slice\":{{\"id\":{slice},\"max\":2}},\"script\":\"ctx._source.n++\"}}"),
+        )));
+        let count = number_after(&text, "\"updated\":");
+        assert!(count < 20, "{text}");
+        updated += count;
+    }
+    assert_eq!(updated, 20);
+    for id in 0..20 {
+        let document = body(&api.answer(&request("GET", &format!("/counters/_doc/{id}"), "")));
+        assert!(document.contains("\"_source\":{\"n\":1}"), "{document}");
+    }
+    let mut deleted = 0;
+    for slice in 0..3 {
+        let text = body(&api.answer(&request(
+            "POST",
+            "/counters/_delete_by_query",
+            &format!("{{\"slice\":{{\"id\":{slice},\"max\":3}}}}"),
+        )));
+        deleted += number_after(&text, "\"deleted\":");
+    }
+    assert_eq!(deleted, 20);
+    for refused in [
+        "{\"slice\":{\"id\":0,\"max\":1}}",
+        "{\"slice\":{\"id\":2,\"max\":2}}",
+        "{\"slice\":{\"id\":-1,\"max\":2}}",
+        "{\"slice\":{\"max\":2}}",
+        "{\"slice\":{\"id\":0,\"max\":2,\"other\":1}}",
+        "{\"slice\":2}",
+    ] {
+        let response = api.answer(&request("POST", "/counters/_delete_by_query", refused));
+        assert_eq!(response.status, 400, "{refused}: {}", body(&response));
+    }
+}
+
+#[test]
+fn msearch_headers_expand_wildcard_index_patterns() {
+    let keyspace = MemoryKeyspace::default();
+    let api = api(&keyspace);
+    let bulk = concat!(
+        "{\"index\":{\"_index\":\"logs-a\",\"_id\":\"1\"}}\n{\"m\":1}\n",
+        "{\"index\":{\"_index\":\"logs-b\",\"_id\":\"2\"}}\n{\"m\":2}\n",
+        "{\"index\":{\"_index\":\"metrics\",\"_id\":\"3\"}}\n{\"m\":3}\n",
+    );
+    assert!(body(&api.answer(&request("POST", "/_bulk", bulk))).contains("\"errors\":false"));
+    let searches = concat!(
+        "{\"index\":\"logs-*\"}\n{}\n",
+        "{\"index\":[\"logs-a\",\"met*\"]}\n{}\n",
+        "{\"index\":\"nothing-*\"}\n{}\n",
+        "{\"index\":\"Bad*\"}\n{}\n",
+    );
+    let text = body(&api.answer(&request("POST", "/_msearch", searches)));
+    let totals: Vec<u64> = text
+        .match_indices("\"total\":{\"value\":")
+        .map(|(at, key)| number_after(&text[at..], key))
+        .collect();
+    assert_eq!(totals, vec![2, 2, 0], "{text}");
+    assert!(text.contains("invalid_index_name_exception"), "{text}");
+}
+
+#[test]
+fn update_refuses_both_a_script_and_a_doc() {
+    let keyspace = MemoryKeyspace::default();
+    let api = api(&keyspace);
+    assert_eq!(
+        api.answer(&request("PUT", "/test/_doc/1", "{\"n\":1}"))
+            .status,
+        201
+    );
+    let response = api.answer(&request(
+        "POST",
+        "/test/_update/1",
+        "{\"script\":\"ctx._source.n++\",\"doc\":{\"n\":5}}",
+    ));
+    assert_eq!(response.status, 400);
+    assert!(
+        body(&response).contains("can't provide both script and doc"),
+        "{}",
+        body(&response)
+    );
+    let document = body(&api.answer(&request("GET", "/test/_doc/1", "")));
+    assert!(document.contains("\"_source\":{\"n\":1}"), "{document}");
+}
+
+#[test]
+fn scripts_that_would_corrupt_or_explode_a_document_are_refused() {
+    let keyspace = MemoryKeyspace::default();
+    let api = api(&keyspace);
+    assert_eq!(
+        api.answer(&request("PUT", "/test/_doc/1", "{\"s\":\"x\"}"))
+            .status,
+        201
+    );
+    let doubling = format!(
+        "{{\"script\":\"{}\"}}",
+        "ctx._source.s += ctx._source.s; ".repeat(40)
+    );
+    let response = api.answer(&request("POST", "/test/_update/1", &doubling));
+    assert_eq!(response.status, 400, "{}", body(&response));
+    assert!(body(&response).contains("script_exception"));
+    let literal = api.answer(&request(
+        "POST",
+        "/test/_update/1",
+        "{\"script\":\"ctx._source.a = 1.\"}",
+    ));
+    assert_eq!(literal.status, 200, "{}", body(&literal));
+    let document = body(&api.answer(&request("GET", "/test/_doc/1", "")));
+    assert!(
+        document.contains("\"_source\":{\"s\":\"x\",\"a\":1.0}"),
+        "{document}"
+    );
+    assert!(eggdb_sql::json::parse_document(&document).is_ok());
+}
