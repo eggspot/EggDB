@@ -1177,6 +1177,92 @@ pub(crate) fn insert(
     crate::row_security::checked_new_rows(result, &insert.table.name.text, check_appended)
 }
 
+/// Checks an `INSERT` against its table without writing a row: the table exists, every listed
+/// column does, and each `VALUES` list fits the target columns.
+pub(crate) fn check_insert(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    insert: &Insert,
+) -> SqlResult<()> {
+    if crate::updatable_views::is_view(writer, tables, &insert.table)? {
+        return Ok(());
+    }
+    let table = tables.require_target(writer, &insert.table.name, "insert into")?;
+    insert_targets(&table, insert, crate::constraints::current_dialect()).map(drop)
+}
+
+fn insert_targets(
+    table: &TableDefinition,
+    insert: &Insert,
+    dialect: Dialect,
+) -> SqlResult<Vec<usize>> {
+    let sqlserver = dialect == Dialect::SqlServer;
+    let identity = sqlserver.then(|| table.auto_increment_column()).flatten();
+    let identity_insert =
+        identity.is_some() && constraints::identity_insert_is_on(&insert.table.name.text);
+    let targets = match &insert.columns {
+        Some(names) => {
+            let targets = target_columns(table, names)?;
+            if let Some(identity) = identity
+                && targets.contains(&identity) != identity_insert
+            {
+                return Err(if identity_insert {
+                    identity_value_missing(&insert.table.name)
+                } else {
+                    identity_insert_off(&insert.table.name)
+                });
+            }
+            targets
+        }
+        None if identity_insert => {
+            return Err(match insert.source {
+                InsertSource::Values(_) | InsertSource::Query(_) => {
+                    identity_needs_column_list(&insert.table.name)
+                }
+                InsertSource::DefaultValues => identity_value_missing(&insert.table.name),
+            });
+        }
+        None => (0..table.columns.len())
+            .filter(|&index| Some(index) != identity)
+            .collect(),
+    };
+    let InsertSource::Values(rows) = &insert.source else {
+        return Ok(targets);
+    };
+    let Some(first) = rows.first() else {
+        return Ok(targets);
+    };
+    let position = insert.table.name.position;
+    if rows.iter().any(|row| row.len() != first.len()) {
+        return Err(SqlError::syntax(
+            "VALUES lists must all be the same length",
+            position,
+        ));
+    }
+    let oracle = dialect == Dialect::Oracle;
+    if first.len() > targets.len() {
+        return Err(if oracle {
+            oracle_value_count("too many values", 913, position)
+        } else {
+            SqlError::syntax("INSERT has more expressions than target columns", position)
+        });
+    }
+    if (insert.columns.is_some() || sqlserver || oracle) && first.len() < targets.len() {
+        return Err(if oracle {
+            oracle_value_count("not enough values", 947, position)
+        } else {
+            SqlError::syntax("INSERT has more target columns than expressions", position)
+        });
+    }
+    Ok(targets)
+}
+
+fn oracle_value_count(message: &str, code: u16, position: usize) -> SqlError {
+    SqlError::new(SqlState::SYNTAX_ERROR, message)
+        .with_oracle_code(code)
+        .at(position)
+}
+
 fn insert_rows(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
@@ -1213,64 +1299,19 @@ fn insert_rows(
     let checks = PreparedChecks::of(&table)?.with_partitions(writer, tables, &table)?;
     let scope = scope_of(&table, &insert.table);
     let dialect = crate::constraints::current_dialect();
-    let sqlserver = dialect == Dialect::SqlServer;
-    let identity = sqlserver.then(|| table.auto_increment_column()).flatten();
+    let identity = (dialect == Dialect::SqlServer)
+        .then(|| table.auto_increment_column())
+        .flatten();
     let identity_insert =
         identity.is_some() && constraints::identity_insert_is_on(&insert.table.name.text);
     let rule = assignment_rule(dialect);
-    let targets = match &insert.columns {
-        Some(names) => {
-            let targets = target_columns(&table, names)?;
-            if let Some(identity) = identity
-                && targets.contains(&identity) != identity_insert
-            {
-                return Err(if identity_insert {
-                    identity_value_missing(&insert.table.name)
-                } else {
-                    identity_insert_off(&insert.table.name)
-                });
-            }
-            targets
-        }
-        None if identity_insert => {
-            return Err(match insert.source {
-                InsertSource::Values(_) | InsertSource::Query(_) => {
-                    identity_needs_column_list(&insert.table.name)
-                }
-                InsertSource::DefaultValues => identity_value_missing(&insert.table.name),
-            });
-        }
-        None => (0..table.columns.len())
-            .filter(|&index| Some(index) != identity)
-            .collect(),
-    };
+    let targets = insert_targets(&table, insert, dialect)?;
     let returning = returning(&insert.returning, scope)?;
     let empty_row: Vec<Vec<InsertValue>> = vec![Vec::new()];
     let rows = match &insert.source {
         InsertSource::Values(rows) => rows,
         InsertSource::Query(_) | InsertSource::DefaultValues => &empty_row,
     };
-    if let Some(first) = rows.first() {
-        if rows.iter().any(|row| row.len() != first.len()) {
-            return Err(SqlError::syntax(
-                "VALUES lists must all be the same length",
-                insert.table.name.position,
-            ));
-        }
-        if first.len() > targets.len() {
-            return Err(SqlError::syntax(
-                "INSERT has more expressions than target columns",
-                insert.table.name.position,
-            ));
-        }
-        let listed_values = matches!(insert.source, InsertSource::Values(_));
-        if (insert.columns.is_some() || sqlserver && listed_values) && first.len() < targets.len() {
-            return Err(SqlError::syntax(
-                "INSERT has more target columns than expressions",
-                insert.table.name.position,
-            ));
-        }
-    }
     if let InsertSource::Values(rows) = &insert.source {
         for value in rows.iter().flatten() {
             if let InsertValue::Expr(expr) = value {

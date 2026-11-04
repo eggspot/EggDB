@@ -424,3 +424,16 @@ fn array_parameters_bind_as_arrays_of_their_declared_element_type() {
     );
     assert_eq!(refused.unwrap_err().state().code(), "22P02");
 }
+
+#[test]
+fn a_failed_statement_inside_a_read_only_block_leaves_the_block_failed() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "BEGIN READ ONLY");
+    assert_eq!(session.transaction_status(), TransactionStatus::InBlock);
+    assert_eq!(state(&mut session, "SELECT * FROM missing"), "42P01");
+    assert_eq!(session.transaction_status(), TransactionStatus::Failed);
+    assert_eq!(state(&mut session, "SELECT 1"), "25P02");
+    last(&mut session, "ROLLBACK");
+    assert_eq!(session.transaction_status(), TransactionStatus::Idle);
+}

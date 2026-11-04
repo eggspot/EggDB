@@ -395,7 +395,9 @@ fn a_small_budget_delivers_every_queued_message_to_every_subscription_without_re
         assert_eq!(received.get("a"), Some(&12));
         assert_eq!(received.get("b"), Some(&12));
         queues.declare("huge").unwrap();
-        queues.send("huge", &vec![b'y'; 500_000], 0, now_ms()).unwrap();
+        queues
+            .send("huge", &vec![b'y'; 500_000], 0, now_ms())
+            .unwrap();
         let mut greedy = Client::connected(address);
         greedy.send(
             &Frame::new("SUBSCRIBE")

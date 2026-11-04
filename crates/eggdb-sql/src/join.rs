@@ -619,9 +619,10 @@ fn primary_key_lefts(
 
 fn key_lookups_fit(table: &TableDefinition, columns: &[usize]) -> bool {
     columns.iter().all(|&column| {
-        table.columns.get(column).is_some_and(|column| {
-            crate::plan::key_lookup_matches_comparison(column.sql_type)
-        })
+        table
+            .columns
+            .get(column)
+            .is_some_and(|column| crate::plan::key_lookup_matches_comparison(column.sql_type))
     })
 }
 

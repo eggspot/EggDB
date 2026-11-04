@@ -467,7 +467,10 @@ fn a_hostile_group_by_is_refused_before_its_sets_are_built() {
         &format!("SELECT count(*) FROM items_sold GROUP BY {many}, CUBE ({twelve})"),
     );
     assert_eq!(state, "54001");
-    assert!(message.starts_with("too many grouping set keys present"), "{message}");
+    assert!(
+        message.starts_with("too many grouping set keys present"),
+        "{message}"
+    );
     let two_thousand = ["brand"; 2000].join(", ");
     let (state, _) = refused_state(
         &mut session,
@@ -485,7 +488,9 @@ fn a_hostile_group_by_is_refused_before_its_sets_are_built() {
     assert_eq!(
         last(
             &mut session,
-            &format!("SELECT count(*) AS n FROM (SELECT count(*) FROM items_sold GROUP BY {many}) AS g")
+            &format!(
+                "SELECT count(*) AS n FROM (SELECT count(*) FROM items_sold GROUP BY {many}) AS g"
+            )
         ),
         "n\n2\nSELECT 1"
     );

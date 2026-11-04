@@ -442,11 +442,7 @@ fn column_declarations(text: &str) -> Option<Vec<(String, String)>> {
     let open = tokens
         .iter()
         .position(|token| token.kind == TokenKind::LeftParen)?;
-    if tokens
-        .get(..open)?
-        .iter()
-        .any(|token| is_word(token, "as"))
-    {
+    if tokens.get(..open)?.iter().any(|token| is_word(token, "as")) {
         return None;
     }
     let mut declared = Vec::new();

@@ -1560,7 +1560,9 @@ mod tests {
                 vec!["doc".into()],
                 vec![ValueKind::Json],
                 vec![
-                    vec![Some("{\n  \"k\": [1, 2],\n  \"s\": \"a b\\\" c\"\n}".into())],
+                    vec![Some(
+                        "{\n  \"k\": [1, 2],\n  \"s\": \"a b\\\" c\"\n}".into(),
+                    )],
                     vec![Some("{1,2}".into())],
                 ],
                 2,

@@ -524,7 +524,10 @@ mod tests {
             vec![XdndReaction::RequestPaths { time: 7 }]
         );
         assert_eq!(
-            target.data(7, Some(b"# a comment\nfile://localhost/home/ana/shop.eggdb\n")),
+            target.data(
+                7,
+                Some(b"# a comment\nfile://localhost/home/ana/shop.eggdb\n")
+            ),
             vec![
                 XdndReaction::Event(WindowEvent::FilesDropped(shop())),
                 XdndReaction::Finished {

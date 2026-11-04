@@ -185,7 +185,9 @@ fn split_part(values: &[Value]) -> Option<SqlResult<Value>> {
     };
     let end = found.get(at).map_or(text.len(), |range| range.start);
     let piece = start.and_then(|start| text.get(start..end));
-    Some(Ok(piece.map_or(Value::Null, |piece| Value::Text(piece.to_owned()))))
+    Some(Ok(
+        piece.map_or(Value::Null, |piece| Value::Text(piece.to_owned()))
+    ))
 }
 
 fn position(values: &[Value]) -> Option<SqlResult<Value>> {
@@ -198,13 +200,11 @@ fn position(values: &[Value]) -> Option<SqlResult<Value>> {
             .first()
             .map(|range| range.start)
     };
-    let position = start
-        .and_then(|start| text.get(..start))
-        .map_or(0, |head| {
-            i64::try_from(head.chars().count())
-                .unwrap_or(i64::MAX)
-                .saturating_add(1)
-        });
+    let position = start.and_then(|start| text.get(..start)).map_or(0, |head| {
+        i64::try_from(head.chars().count())
+            .unwrap_or(i64::MAX)
+            .saturating_add(1)
+    });
     Some(crate::types::integer_value(position, SqlType::Integer))
 }
 
@@ -388,7 +388,10 @@ mod tests {
 
     #[test]
     fn string_functions_on_citext_fold_case_beyond_ascii_like_equality() {
-        assert_eq!(called("replace", &texts("CAFÉ café", &["é", "e"])), "CAFe cafe");
+        assert_eq!(
+            called("replace", &texts("CAFÉ café", &["é", "e"])),
+            "CAFe cafe"
+        );
         assert_eq!(called("replace", &texts("Straße", &["SS", "s"])), "Strase");
         assert_eq!(called("replace", &texts("ß", &["s", "x"])), "ß");
         assert_eq!(called("replace", &texts("abc", &["", "x"])), "abc");
@@ -406,7 +409,10 @@ mod tests {
         assert_eq!(called("strpos", &texts("Straße", &["s"])), "1");
         assert_eq!(called("strpos", &texts("ß", &["s"])), "0");
         assert_eq!(called("strpos", &texts("abc", &[""])), "1");
-        assert_eq!(called("translate", &texts("ÉCOLE école", &["é", "e"])), "eCOLE ecole");
+        assert_eq!(
+            called("translate", &texts("ÉCOLE école", &["é", "e"])),
+            "eCOLE ecole"
+        );
         assert_eq!(called("translate", &texts("İa", &["İA", "XY"])), "XY");
         assert_eq!(called("translate", &texts("abc", &["B", ""])), "ac");
     }

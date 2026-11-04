@@ -1179,7 +1179,8 @@ impl<'s> Session<'s> {
     }
 
     fn reset_setting(&mut self, name: &str) -> SqlResult<()> {
-        self.change_setting(name, None, SettingScope::Session).map(drop)
+        self.change_setting(name, None, SettingScope::Session)
+            .map(drop)
     }
 
     fn discard(&mut self, target: DiscardTarget) -> SqlResult<QueryResult> {
@@ -2585,12 +2586,14 @@ impl<'s> Session<'s> {
             self.savepoints.aborted = true;
             return;
         }
-        if let Block::Writing(writer) = std::mem::replace(&mut self.block, Block::None) {
-            let _ = writer.rollback();
-            self.temporary.rollback();
-            self.block = Block::Failed;
-        } else if let Block::Reading(_) = self.block {
-            self.block = Block::Failed;
+        match std::mem::replace(&mut self.block, Block::None) {
+            Block::Writing(writer) => {
+                let _ = writer.rollback();
+                self.temporary.rollback();
+                self.block = Block::Failed;
+            }
+            Block::Reading(_) | Block::Failed => self.block = Block::Failed,
+            Block::None => {}
         }
     }
 

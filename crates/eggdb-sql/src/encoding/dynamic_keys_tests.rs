@@ -442,7 +442,10 @@ fn index_on(columns: Vec<usize>, unique: bool, backs_unique_constraint: bool) ->
 #[test]
 fn a_table_keying_a_blob_or_untyped_column_is_version_13_and_older_readers_refuse_it() {
     let cases = [
-        ("primary key on the blob column", blob_table_keyed(vec![1], Vec::new())),
+        (
+            "primary key on the blob column",
+            blob_table_keyed(vec![1], Vec::new()),
+        ),
         (
             "primary key including the blob column",
             blob_table_keyed(vec![0, 1], Vec::new()),
@@ -469,7 +472,10 @@ fn a_table_keying_a_blob_or_untyped_column_is_version_13_and_older_readers_refus
             let mut older_reader = Reader::new(&encoded, "table definition");
             let error = older_reader.version_up_to(older).unwrap_err();
             assert_eq!(error.state().code(), "0A000", "{case}");
-            assert!(error.message().contains("format version 13"), "{case}: {error}");
+            assert!(
+                error.message().contains("format version 13"),
+                "{case}: {error}"
+            );
         }
         for claimed in [DEFINED_TYPES_FORMAT_VERSION, BASE_TYPES_FORMAT_VERSION] {
             encoded[0] = claimed;

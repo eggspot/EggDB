@@ -293,7 +293,11 @@ fn under_showplan_transaction_control_and_batch_commands_are_shown_and_never_run
     }
     all(&mut session, "SET SHOWPLAN_TEXT OFF");
     assert!(
-        last(&mut session, "SELECT @@TRANCOUNT AS tc, COUNT(*) AS n FROM t").contains("\n1|3\n"),
+        last(
+            &mut session,
+            "SELECT @@TRANCOUNT AS tc, COUNT(*) AS n FROM t"
+        )
+        .contains("\n1|3\n"),
         "a transaction statement ran under SHOWPLAN_TEXT"
     );
     all(&mut session, "ROLLBACK");

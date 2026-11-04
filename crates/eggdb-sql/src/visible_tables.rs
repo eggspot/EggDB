@@ -257,8 +257,7 @@ impl VisibleTables {
         for (&id, narrowed) in &shown.narrowed {
             narrowed_writes.insert(id, NarrowedWrites::of(&inner, &shown, narrowed)?);
         }
-        let keys_to_hidden_columns =
-            foreign_keys_to_hidden_columns(&inner, &shown, &rows_blocked)?;
+        let keys_to_hidden_columns = foreign_keys_to_hidden_columns(&inner, &shown, &rows_blocked)?;
         let mut left_to_the_writer: Vec<u32> = parents_outside.keys().copied().collect();
         left_to_the_writer.extend(keys_to_hidden_columns.keys().copied());
         left_to_the_writer.sort_unstable();
@@ -266,7 +265,13 @@ impl VisibleTables {
         for id in left_to_the_writer {
             let refused_keys: Vec<String> = keys_to_hidden_columns
                 .get(&id)
-                .map(|refused| refused.keys.iter().map(|(key, _)| key.name.clone()).collect())
+                .map(|refused| {
+                    refused
+                        .keys
+                        .iter()
+                        .map(|(key, _)| key.name.clone())
+                        .collect()
+                })
                 .unwrap_or_default();
             shown.leave_outside_foreign_keys_to_the_writer(&inner, id, &refused_keys)?;
         }
@@ -607,11 +612,13 @@ fn foreign_keys_to_hidden_columns(
             .foreign_keys
             .iter()
             .filter(|key| {
-                shown.narrowed_named(key.parent.as_bytes()).is_some_and(|parent| {
-                    key.parent_columns
-                        .iter()
-                        .any(|column| !parent.kept_names.contains(column))
-                })
+                shown
+                    .narrowed_named(key.parent.as_bytes())
+                    .is_some_and(|parent| {
+                        key.parent_columns
+                            .iter()
+                            .any(|column| !parent.kept_names.contains(column))
+                    })
             })
             .map(|key| (key.clone(), Confined::shown(key.parent.as_bytes())))
             .collect();
@@ -1226,11 +1233,9 @@ impl Shown {
         };
         let mut definition = TableDefinition::decode(&text, &shown)?;
         let hidden = &self.hidden;
-        definition
-            .foreign_keys
-            .retain(|key| {
-                !hidden.contains(key.parent.as_bytes()) && !refused_keys.contains(&key.name)
-            });
+        definition.foreign_keys.retain(|key| {
+            !hidden.contains(key.parent.as_bytes()) && !refused_keys.contains(&key.name)
+        });
         definition.forget_missing_statuses();
         let encoded = definition.encode();
         match self.narrowed.get_mut(&id) {

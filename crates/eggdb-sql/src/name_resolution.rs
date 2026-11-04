@@ -2017,9 +2017,7 @@ impl Binding<'_> {
                 .assignments
                 .iter()
                 .enumerate()
-                .filter(|(at, _)| {
-                    joined.assigned_at.get(*at).copied().flatten().or(main) == target
-                })
+                .filter(|(at, _)| joined.assigned_at.get(*at).copied().flatten().or(main) == target)
                 .map(|(_, (name, _))| name.text.clone())
                 .collect()
         };

@@ -297,11 +297,7 @@ fn deliveries_past_the_memory_budget_wait_until_the_ones_before_them_are_written
         .filter(|&count| count > 0)
         .collect();
     assert_eq!(transfers_per_write, [1, 1], "{writes:?}");
-    for (_, _, payload) in writes
-        .iter()
-        .flatten()
-        .filter(|(code, _, _)| *code == 0x14)
-    {
+    for (_, _, payload) in writes.iter().flatten().filter(|(code, _, _)| *code == 0x14) {
         let (header, _) = decode_first(payload).unwrap();
         assert_eq!(
             (header.field(3), header.field(4)),
@@ -362,7 +358,10 @@ fn a_queued_message_past_the_memory_budget_closes_its_receiver_without_leasing_i
     .into_iter()
     .flatten()
     .collect();
-    assert!(replies.iter().all(|(code, _, _)| *code != 0x14), "{replies:?}");
+    assert!(
+        replies.iter().all(|(code, _, _)| *code != 0x14),
+        "{replies:?}"
+    );
     let (code, close, _) = replies.last().unwrap();
     assert_eq!(*code, 0x18, "{replies:?}");
     assert_eq!(

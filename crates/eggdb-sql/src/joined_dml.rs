@@ -304,7 +304,8 @@ impl JoinedSource {
         let Some(from) = without_null_extension(&self.from, at) else {
             return Ok(None);
         };
-        self.rows_over(reader, tables, &from, filter, position, memory).map(Some)
+        self.rows_over(reader, tables, &from, filter, position, memory)
+            .map(Some)
     }
 
     fn rows_over(
@@ -553,7 +554,12 @@ pub(crate) fn update(
             &mut memory,
         )?;
         let rows = present.as_deref().unwrap_or(joined_rows.as_slice());
-        matches.push(matched_rows(&*writer, &source.items[at], rows, &mut memory)?);
+        matches.push(matched_rows(
+            &*writer,
+            &source.items[at],
+            rows,
+            &mut memory,
+        )?);
         present_rows.push(present);
     }
     let rule = execute::assignment_rule(crate::constraints::current_dialect());
@@ -702,7 +708,12 @@ pub(crate) fn delete(
             &mut memory,
         )?;
         let rows = present.as_deref().unwrap_or(joined_rows.as_slice());
-        matches.push(matched_rows(&*writer, &source.items[at], rows, &mut memory)?);
+        matches.push(matched_rows(
+            &*writer,
+            &source.items[at],
+            rows,
+            &mut memory,
+        )?);
         present_rows.push(present);
     }
     let mut affected = 0usize;

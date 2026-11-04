@@ -187,7 +187,9 @@ fn sqlserver_select_into_in_a_later_query_of_a_union_is_msg_196() {
         let refused = error(&mut session, statement);
         assert_eq!(refused.vendor_code(), Some(196), "{statement}");
         assert!(
-            refused.message().starts_with("SELECT INTO must be the first query"),
+            refused
+                .message()
+                .starts_with("SELECT INTO must be the first query"),
             "{statement}: {}",
             refused.message()
         );

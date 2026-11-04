@@ -526,14 +526,14 @@ mod tests {
         }
         let mut room = 9usize;
         let leased = queues
-            .receive_fitting("jobs", 10, 30_000, 0, &mut |length: usize| {
-                match room.checked_sub(length) {
-                    Some(left) => {
-                        room = left;
-                        true
-                    }
-                    None => false,
+            .receive_fitting("jobs", 10, 30_000, 0, &mut |length: usize| match room
+                .checked_sub(length)
+            {
+                Some(left) => {
+                    room = left;
+                    true
                 }
+                None => false,
             })
             .unwrap();
         assert_eq!(leased.len(), 2);

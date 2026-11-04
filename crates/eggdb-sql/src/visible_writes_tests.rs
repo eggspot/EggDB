@@ -1037,11 +1037,18 @@ fn a_view_listed_with_columns_shows_no_query_text_in_any_dialects_catalog() {
         ]),
     };
     assert_eq!(
-        rendered_in(&limited, crate::Dialect::PostgreSql, "SELECT * FROM roster_ms"),
+        rendered_in(
+            &limited,
+            crate::Dialect::PostgreSql,
+            "SELECT * FROM roster_ms"
+        ),
         "id|name\n1|Ada\nSELECT 1"
     );
     let listings = [
-        (crate::Dialect::PostgreSql, "SELECT viewname, definition FROM pg_views"),
+        (
+            crate::Dialect::PostgreSql,
+            "SELECT viewname, definition FROM pg_views",
+        ),
         (
             crate::Dialect::PostgreSql,
             "SELECT table_name, view_definition FROM information_schema.views",
@@ -1054,7 +1061,10 @@ fn a_view_listed_with_columns_shows_no_query_text_in_any_dialects_catalog() {
             crate::Dialect::MySql,
             "SELECT TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS",
         ),
-        (crate::Dialect::Sqlite, "SELECT name, sql FROM sqlite_schema"),
+        (
+            crate::Dialect::Sqlite,
+            "SELECT name, sql FROM sqlite_schema",
+        ),
         (
             crate::Dialect::SqlServer,
             "SELECT object_id, definition FROM sys.sql_modules",
@@ -1085,7 +1095,7 @@ fn a_view_listed_with_columns_shows_no_query_text_in_any_dialects_catalog() {
         ),
         (
             crate::Dialect::PostgreSql,
-            "SELECT count(*) FROM information_schema.views WHERE view_definition IS NULL",
+            "SELECT count(*) FROM information_schema.views WHERE view_definition IS NULL AND table_schema = 'public'",
         ),
         (
             crate::Dialect::MySql,
@@ -1205,7 +1215,10 @@ fn a_foreign_key_to_a_hidden_column_of_a_listed_table_is_refused_rather_than_rep
     };
     let mut session = Session::new(&limited);
     runs(&mut session, "INSERT INTO invites VALUES (2, NULL, 'none')");
-    runs(&mut session, "UPDATE invites SET note = 'kept' WHERE id = 1");
+    runs(
+        &mut session,
+        "UPDATE invites SET note = 'kept' WHERE id = 1",
+    );
     for sql in [
         "INSERT INTO invites VALUES (3, 'ada@example.com', 'known')",
         "INSERT INTO invites VALUES (4, 'bob@example.com', 'unknown')",

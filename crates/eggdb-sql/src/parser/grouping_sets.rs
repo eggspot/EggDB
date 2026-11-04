@@ -222,7 +222,11 @@ impl Parser<'_> {
                 Some(element) => element,
                 None => vec![self.grouping_unit(keys)?],
             };
-            check_expansion(sets.len().saturating_add(element.len()), keys.len(), position)?;
+            check_expansion(
+                sets.len().saturating_add(element.len()),
+                keys.len(),
+                position,
+            )?;
             sets.extend(element);
             if !self.take(&TokenKind::Comma) {
                 return Ok(sets);

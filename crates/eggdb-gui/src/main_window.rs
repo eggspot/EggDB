@@ -5403,10 +5403,7 @@ mod tests {
         window.add_tab();
         assert_eq!(window.tab_count(), tab_strip::MOST_TABS);
         assert_eq!(window.tab.title, last);
-        assert_eq!(
-            window.tab.notice.as_deref(),
-            Some(tab_strip::TOO_MANY_TABS)
-        );
+        assert_eq!(window.tab.notice.as_deref(), Some(tab_strip::TOO_MANY_TABS));
         let mut ids: Vec<u32> = (0..window.tab_count())
             .filter(|&position| position != window.tab_position)
             .map(|position| background_tab_node(&window, position))

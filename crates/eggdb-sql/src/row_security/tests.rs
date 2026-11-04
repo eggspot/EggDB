@@ -480,7 +480,10 @@ fn a_joined_table_with_row_security_joins_only_the_visible_rows() {
     )
     .expect_err("a joined DELETE of a table with row-level security");
     assert_eq!(refused.state(), SqlState::FEATURE_NOT_SUPPORTED);
-    assert!(refused.message().contains("row-level security"), "{refused}");
+    assert!(
+        refused.message().contains("row-level security"),
+        "{refused}"
+    );
     assert_eq!(
         run(&mut admin, "SELECT id, note FROM marks ORDER BY id").unwrap(),
         "id|note\n1|a1\n2|m2\n3|a2\nSELECT 3"

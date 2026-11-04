@@ -367,7 +367,12 @@ fn a_small_budget_delivers_every_queued_message_to_every_consumer_without_redeli
     assert_eq!(budget.used_bytes(), 0);
     queues.declare("huge").unwrap();
     queues
-        .send("huge", &encode_message("", "huge", &[], &vec![b'h'; 500_000]), 0, 0)
+        .send(
+            "huge",
+            &encode_message("", "huge", &[], &vec![b'h'; 500_000]),
+            0,
+            0,
+        )
         .unwrap();
     let mut greedy = login("secret");
     greedy.extend(method(1, 60, 20, |out| {

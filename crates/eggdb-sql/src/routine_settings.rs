@@ -61,7 +61,12 @@ impl Journal {
         let continued = self
             .entries
             .get_mut(floor..)
-            .and_then(|level| level.iter_mut().rev().find(|earlier| earlier.name == entry.name))
+            .and_then(|level| {
+                level
+                    .iter_mut()
+                    .rev()
+                    .find(|earlier| earlier.name == entry.name)
+            })
             .filter(|last| last.takes_value_of(&entry));
         match continued {
             Some(last) => last.value = entry.value,
@@ -323,7 +328,10 @@ pub(crate) fn effective_if_changed(synced: &mut u64) -> Option<Settings> {
 pub(crate) fn take_for_session(succeeded: bool) -> Vec<SettingChange> {
     let (had_root, taken) = with_journal(|journal| {
         journal.floor = 0;
-        (journal.root.take().is_some(), std::mem::take(&mut journal.entries))
+        (
+            journal.root.take().is_some(),
+            std::mem::take(&mut journal.entries),
+        )
     });
     if !had_root && taken.is_empty() {
         return Vec::new();

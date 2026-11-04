@@ -1856,6 +1856,7 @@ mod tests {
         let window = workspace.main_window_mut().unwrap();
         assert_eq!(window.tab_titles(), ["Query 1"]);
         assert!(window.close_prompt.is_none());
+        workspace.wait_for_reads(limit);
         let connection = workspace.connection_mut().expect("the connection is back");
         let tables = connection.run("SELECT count(*) FROM t").unwrap();
         assert_eq!(

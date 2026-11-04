@@ -1658,7 +1658,9 @@ mod tests {
 
     fn a_tab_s_search_path_never_reaches_a_drop(connection: &mut Connection) {
         connection.run("CREATE SCHEMA app").unwrap();
-        connection.run("CREATE TABLE app.orders (id integer)").unwrap();
+        connection
+            .run("CREATE TABLE app.orders (id integer)")
+            .unwrap();
         connection.run("CREATE TABLE orders (id integer)").unwrap();
         let tab = SessionId(1);
         let in_tab = |connection: &mut Connection, sql: &str| {

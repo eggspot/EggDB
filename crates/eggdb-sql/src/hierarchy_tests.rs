@@ -279,9 +279,7 @@ fn chain(store: &MemoryStore, depth: u32) -> Session<'_> {
     );
     results(
         &mut session,
-        &format!(
-            "INSERT INTO chain SELECT LEVEL, LEVEL - 1 FROM dual CONNECT BY LEVEL <= {depth}"
-        ),
+        &format!("INSERT INTO chain SELECT LEVEL, LEVEL - 1 FROM dual CONNECT BY LEVEL <= {depth}"),
     );
     results(&mut session, "COMMIT");
     session
@@ -299,7 +297,10 @@ fn a_deep_chain_is_walked_in_time_linear_in_its_rows() {
         ),
         vec!["20000|20000"]
     );
-    results(&mut session, "UPDATE chain SET parent_id = 20000 WHERE id = 1");
+    results(
+        &mut session,
+        "UPDATE chain SET parent_id = 20000 WHERE id = 1",
+    );
     results(&mut session, "COMMIT");
     assert_eq!(
         error(

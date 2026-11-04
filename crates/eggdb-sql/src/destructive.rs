@@ -587,7 +587,11 @@ fn updated(update: &Update, keys: &mut CatalogLookup<'_>) -> Option<DestructiveS
 
 fn updated_tables(update: &Update) -> Vec<String> {
     let mut names = vec![shown(&update.table.name)];
-    let Some(joined) = update.from.as_ref().filter(|joined| joined.writes_any_table) else {
+    let Some(joined) = update
+        .from
+        .as_ref()
+        .filter(|joined| joined.writes_any_table)
+    else {
         return names;
     };
     let unqualified = (0..update.assignments.len())

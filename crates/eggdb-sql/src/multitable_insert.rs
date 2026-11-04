@@ -124,6 +124,7 @@ pub(crate) fn run(
         };
         writing.insert(&*writer, tables, &mut statement)?;
         if unused {
+            execute::check_insert(writer, tables, &statement)?;
             continue;
         }
         inserted += count;

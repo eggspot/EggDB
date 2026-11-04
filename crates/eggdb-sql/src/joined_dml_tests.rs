@@ -476,7 +476,10 @@ fn mysql_outer_joined_keyless_target_never_touches_its_all_null_row() {
         "DELETE 0"
     );
     assert_eq!(
-        last(&mut session, "UPDATE u LEFT JOIN t ON t.a = u.a SET t.b = 99"),
+        last(
+            &mut session,
+            "UPDATE u LEFT JOIN t ON t.a = u.a SET t.b = 99"
+        ),
         "UPDATE 0"
     );
     last(&mut session, "INSERT INTO u VALUES (1)");
@@ -521,7 +524,10 @@ fn sqlserver_outer_joined_keyless_target_never_touches_its_all_null_row() {
         "UPDATE 0"
     );
     assert_eq!(
-        last(&mut session, "DELETE FROM t FROM u LEFT JOIN t ON t.a = u.a"),
+        last(
+            &mut session,
+            "DELETE FROM t FROM u LEFT JOIN t ON t.a = u.a"
+        ),
         "DELETE 0"
     );
     last(&mut session, "INSERT INTO u VALUES (1)");

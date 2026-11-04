@@ -156,7 +156,11 @@ mod tests {
         let text = "ß".repeat(200_000);
         let needle = format!("s{}", "ß".repeat(100_000));
         let started = std::time::Instant::now();
-        assert!(FoldedText::new(&text).matches(&needle, usize::MAX).is_empty());
+        assert!(
+            FoldedText::new(&text)
+                .matches(&needle, usize::MAX)
+                .is_empty()
+        );
         assert!(started.elapsed() < std::time::Duration::from_secs(30));
     }
 }
