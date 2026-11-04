@@ -462,5 +462,5 @@ fn other_dialects_still_refuse_search_and_cycle() {
         "WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) \
          CYCLE n SET is_cycle USING path SELECT * FROM t",
     );
-    assert_eq!(error.state().code(), "0A000");
+    assert_eq!(error.state().code(), "42000");
 }

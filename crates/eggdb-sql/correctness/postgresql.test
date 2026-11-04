@@ -1211,7 +1211,7 @@ id
 1
 INSERT 0 1
 
-error 0A000
+ok
 CREATE TABLE stored (a integer, b integer GENERATED ALWAYS AS (a * 2) STORED)
 
 chapter datatype-datetime

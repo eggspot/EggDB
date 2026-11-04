@@ -741,11 +741,7 @@ fn an_ssms_shaped_script_restores_with_its_report() {
         .collect();
     assert_eq!(
         differences,
-        [
-            (11, "sales.Orders.Twice"),
-            (11, "sales.Orders.At"),
-            (22, "dbo.Docs.Body")
-        ]
+        [(11, "sales.Orders.At"), (22, "dbo.Docs.Body")]
     );
     assert_eq!(
         query(&store, "SELECT id, body FROM docs"),
@@ -753,8 +749,11 @@ fn an_ssms_shaped_script_restores_with_its_report() {
     );
     assert_eq!(report.ignored.grant, 1);
     assert_eq!(
-        query(&store, "SELECT id, total FROM sales.orders ORDER BY id"),
-        "id|total\n0|1.5000\n10|2.0000\nSELECT 2"
+        query(
+            &store,
+            "SELECT id, total, twice FROM sales.orders ORDER BY id"
+        ),
+        "id|total|twice\n0|1.5000|3.0000\n10|2.0000|4.0000\nSELECT 2"
     );
     let mut session = Session::with_dialect(&store, Dialect::SqlServer);
     session

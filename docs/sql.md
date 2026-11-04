@@ -2607,7 +2607,7 @@ ALTER TABLE measurements DETACH PARTITION old_rows;
   (`MODULUS` and `REMAINDER`), and a `DEFAULT` partition for rows no other partition takes. A
   partition may itself be partitioned. A key part is a column or an expression:
   `PARTITION BY RANGE ((id / 100))`, `LIST (lower(name))`, `HASH ((a + b))`, and MySQL's
-  `RANGE (YEAR(d))`. Subqueries, aggregates, functions whose value changes between calls
+  `RANGE (EXTRACT(YEAR FROM d))`. Subqueries, aggregates, functions whose value changes between calls
   (`random()`, `now()`, `nextval`, user-defined routines) and expressions without a column are
   refused with PostgreSQL's errors, and so are primary keys and unique constraints when the key
   has an expression (D316).

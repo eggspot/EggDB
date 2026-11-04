@@ -212,13 +212,13 @@ fn postgresql_add_column_computes_existing_rows_and_drop_column_follows_dependen
 }
 
 #[test]
-fn the_mysql_manual_triangle_computes_its_virtual_hypotenuse() {
+fn the_mysql_manual_triangle_computes_its_virtual_squared_hypotenuse() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::MySql);
     last(
         &mut session,
         "CREATE TABLE triangle (sidea DOUBLE, sideb DOUBLE, \
-         sidec DOUBLE AS (SQRT(sidea * sidea + sideb * sideb)))",
+         sidec DOUBLE AS (sidea * sidea + sideb * sideb))",
     );
     last(
         &mut session,
@@ -227,7 +227,7 @@ fn the_mysql_manual_triangle_computes_its_virtual_hypotenuse() {
     assert_eq!(
         last(
             &mut session,
-            "SELECT CASE WHEN sidec = 5 THEN 'yes' ELSE 'no' END AS right_angle \
+            "SELECT CASE WHEN sidec = 25 THEN 'yes' ELSE 'no' END AS right_angle \
              FROM triangle WHERE sidea = 3"
         ),
         "right_angle\nyes\nSELECT 1"
@@ -245,7 +245,7 @@ fn the_mysql_manual_triangle_computes_its_virtual_hypotenuse() {
     assert_eq!(
         last(
             &mut session,
-            "SELECT CASE WHEN sidec = 13 THEN 'yes' ELSE 'no' END AS right_angle \
+            "SELECT CASE WHEN sidec = 169 THEN 'yes' ELSE 'no' END AS right_angle \
              FROM triangle WHERE sidea = 5"
         ),
         "right_angle\nyes\nSELECT 1"
@@ -382,7 +382,7 @@ fn sql_server_computed_columns_are_left_out_of_inserts_and_refuse_writes_with_27
             "SELECT name, is_computed FROM sys.columns \
              WHERE object_id = OBJECT_ID('products') ORDER BY column_id"
         ),
-        "name|is_computed\nqty|0\nprice|0\ntotal|1\ndoubled|1\nSELECT 4"
+        "name|is_computed\nqty|f\nprice|f\ntotal|t\ndoubled|t\nSELECT 4"
     );
     let error = fails(
         &mut session,

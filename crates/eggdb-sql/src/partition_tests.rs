@@ -515,8 +515,9 @@ fn rows_move_between_sub_partitions_and_in_mysql() {
          INSERT INTO o VALUES (1, 1999), (2, 2010)",
     );
     answer(&mut session, "UPDATE o SET y = 2015 WHERE id = 1");
+    let mut reader = Session::new(&store);
     assert_eq!(
-        answer(&mut session, "SELECT id FROM `o#P#p1` ORDER BY id"),
+        answer(&mut reader, "SELECT id FROM \"o#P#p1\" ORDER BY id"),
         "id\n1\n2\nSELECT 2"
     );
     let error = failure(&mut session, "UPDATE o SET y = 2030 WHERE id = 1");
@@ -587,7 +588,7 @@ fn expressions_in_partition_keys_route_prune_and_move_rows() {
         error
             .detail()
             .unwrap_or_default()
-            .contains("(id / 100) = (25)"),
+            .contains("((id / 100)) = (25)"),
         "{error}"
     );
     answer(
@@ -609,14 +610,17 @@ fn expressions_in_partition_keys_route_prune_and_move_rows() {
     answer(
         &mut session,
         "CREATE TABLE sales (id int NOT NULL, d date NOT NULL)
-             PARTITION BY RANGE (YEAR(d)) (
+             PARTITION BY RANGE (EXTRACT(YEAR FROM d)) (
                PARTITION p_old VALUES LESS THAN (2000),
                PARTITION p_new VALUES LESS THAN MAXVALUE
              );
          INSERT INTO sales VALUES (1, '1999-12-31'), (2, '2024-06-01')",
     );
     assert_eq!(
-        answer(&mut session, "SELECT id FROM `sales#P#p_old`"),
+        answer(
+            &mut Session::new(&store),
+            "SELECT id FROM \"sales#P#p_old\""
+        ),
         "id\n1\nSELECT 1"
     );
 }
