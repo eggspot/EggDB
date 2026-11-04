@@ -1,5 +1,6 @@
 mod constraints;
 mod copy;
+mod create_table_as;
 mod cursors;
 mod databases;
 mod generated;
@@ -945,7 +946,9 @@ impl<'t> Parser<'t> {
                 }
                 Ok(Statement::Rollback)
             }
-            "values" if self.postgresql() => self.query_statement(),
+            "values" if self.postgresql() || self.mysql() || self.sqlite() => {
+                self.query_statement()
+            }
             "values" | "table" => Err(self.not_supported("a VALUES or TABLE statement")),
             "set" => self.set(),
             "show" => self.show(),
@@ -1857,6 +1860,9 @@ impl<'t> Parser<'t> {
         if self.postgresql() && self.is_word("partition") && self.is_word_at(1, "of") {
             return self.create_partition_of(name, temporary, if_not_exists);
         }
+        if self.at_create_table_as() {
+            return self.create_table_as(name, temporary.is_some(), if_not_exists, None);
+        }
         self.expect(&TokenKind::LeftParen)?;
         let mut columns = Vec::new();
         let mut primary_key = None;
@@ -1938,6 +1944,23 @@ impl<'t> Parser<'t> {
         } else {
             None
         };
+        if self.mysql() && self.at_mysql_table_query() {
+            let declared = CreateTable {
+                name: name.clone(),
+                temporary,
+                if_not_exists,
+                columns,
+                primary_key,
+                primary_key_name,
+                indexes,
+                constraints,
+                comment,
+                partition_by: None,
+                partition_of: None,
+                sqlite_text: None,
+            };
+            return self.create_table_as(name, temporary.is_some(), if_not_exists, Some(declared));
+        }
         if self.sqlite() {
             self.sqlite_table_finish(&name, &mut columns, &primary_key, &integer_columns)?;
         }
@@ -3589,6 +3612,111 @@ impl<'t> Parser<'t> {
         Ok(left)
     }
 
+    fn row_comparison(
+        &self,
+        left: Expr,
+        operator: BinaryOperator,
+        mut right: Expr,
+    ) -> SqlResult<Expr> {
+        let position = left.position;
+        let left_is_row = crate::row_values::constructor_fields(&left).is_some();
+        let right_is_row = crate::row_values::constructor_fields(&right).is_some();
+        if !(left_is_row || right_is_row) || !crate::row_values::is_row_comparison(operator) {
+            return Ok(Self::binary(left, operator, right));
+        }
+        let left = match crate::row_values::into_constructor_fields(left) {
+            Ok(left_fields) => match crate::row_values::into_constructor_fields(right) {
+                Ok(right_fields) => {
+                    if left_fields.len() != right_fields.len() {
+                        return Err(crate::row_values::unequal_entries(
+                            self.dialect,
+                            left_fields.len(),
+                            position,
+                        ));
+                    }
+                    return Ok(crate::row_values::compare_constructors(
+                        left_fields,
+                        operator,
+                        right_fields,
+                        position,
+                    ));
+                }
+                Err(other) => {
+                    right = other;
+                    Self::row(left_fields, position)
+                }
+            },
+            Err(other) => other,
+        };
+        if left_is_row
+            && let ExprKind::Subquery(subquery) = &mut right.kind
+            && matches!(subquery.test, crate::ast::SubqueryTest::Scalar)
+        {
+            subquery.test = crate::ast::SubqueryTest::RowCompare {
+                expr: left,
+                operator,
+            };
+            right.position = position;
+            return Ok(right);
+        }
+        let mut left = left;
+        if right_is_row
+            && let ExprKind::Subquery(subquery) = &mut left.kind
+            && matches!(subquery.test, crate::ast::SubqueryTest::Scalar)
+        {
+            subquery.test = crate::ast::SubqueryTest::RowCompare {
+                expr: right,
+                operator: commuted(operator),
+            };
+            return Ok(left);
+        }
+        Ok(Self::binary(left, operator, right))
+    }
+
+    fn row(fields: Vec<Expr>, position: usize) -> Expr {
+        Expr {
+            kind: ExprKind::Function {
+                name: crate::records::ROW_FUNCTION.to_owned(),
+                arguments: fields,
+            },
+            position,
+        }
+    }
+
+    fn row_list_membership(
+        &self,
+        expr: &Expr,
+        list: &[Expr],
+        position: usize,
+    ) -> SqlResult<Option<Expr>> {
+        let Some(fields) = crate::row_values::constructor_fields(expr) else {
+            return Ok(None);
+        };
+        let mut alternatives = Vec::with_capacity(list.len());
+        for item in list {
+            let Some(item_fields) = crate::row_values::constructor_fields(item) else {
+                return Ok(None);
+            };
+            if item_fields.len() != fields.len() {
+                return Err(crate::row_values::unequal_entries(
+                    self.dialect,
+                    fields.len(),
+                    item.position,
+                ));
+            }
+            alternatives.push(crate::row_values::compare_constructors(
+                fields.to_vec(),
+                BinaryOperator::Equal,
+                item_fields.to_vec(),
+                item.position,
+            ));
+        }
+        Ok(Some(Expr {
+            kind: ExprKind::Or(alternatives),
+            position,
+        }))
+    }
+
     fn binary(left: Expr, operator: BinaryOperator, right: Expr) -> Expr {
         let position = left.position;
         Expr {
@@ -3773,7 +3901,7 @@ impl<'t> Parser<'t> {
                 if self.infix_level() == Some(Level::Comparison) {
                     return Err(self.unexpected());
                 }
-                Ok(Self::binary(left, operator, right))
+                self.row_comparison(left, operator, right)
             }
             Level::Pattern => self.pattern(left),
             Level::Other => {
@@ -3994,6 +4122,9 @@ impl<'t> Parser<'t> {
                 list.push(self.expression()?);
             }
             self.expect(&TokenKind::RightParen)?;
+            if let Some(rows) = self.row_list_membership(&expr, &list, position)? {
+                return Ok(negated_if(rows, negated, position));
+            }
             ExprKind::InList {
                 expr: Box::new(expr),
                 list,
@@ -4242,7 +4373,7 @@ impl<'t> Parser<'t> {
                 }
                 let mut expr = self.expression()?;
                 if self.peek_kind() == &TokenKind::Comma {
-                    if !self.postgresql() {
+                    if self.sqlserver() {
                         return Err(self.not_supported("row constructors"));
                     }
                     let mut fields = vec![expr];
@@ -4257,6 +4388,9 @@ impl<'t> Parser<'t> {
                         },
                         position,
                     };
+                    if !self.postgresql() {
+                        return Ok(row);
+                    }
                     return self.field_selections(row);
                 }
                 self.expect(&TokenKind::RightParen)?;
@@ -4297,7 +4431,10 @@ impl<'t> Parser<'t> {
                 {
                     self.array_constructor()
                 }
-                "row" if self.postgresql() && self.peek_kind_at(1) == &TokenKind::LeftParen => {
+                "row"
+                    if (self.postgresql() || self.mysql())
+                        && self.peek_kind_at(1) == &TokenKind::LeftParen =>
+                {
                     self.at += 2;
                     let mut fields = Vec::new();
                     if !self.take(&TokenKind::RightParen) {
@@ -5132,6 +5269,26 @@ fn is_clause_word(word: &str) -> bool {
             | "similar"
             | "escape"
     )
+}
+
+fn negated_if(expr: Expr, negated: bool, position: usize) -> Expr {
+    if !negated {
+        return expr;
+    }
+    Expr {
+        kind: ExprKind::Unary(UnaryOperator::Not, Box::new(expr)),
+        position,
+    }
+}
+
+fn commuted(operator: BinaryOperator) -> BinaryOperator {
+    match operator {
+        BinaryOperator::Less => BinaryOperator::Greater,
+        BinaryOperator::LessOrEqual => BinaryOperator::GreaterOrEqual,
+        BinaryOperator::Greater => BinaryOperator::Less,
+        BinaryOperator::GreaterOrEqual => BinaryOperator::LessOrEqual,
+        other => other,
+    }
 }
 
 fn truth(expr: Expr, test: TruthTest, negated: bool) -> ExprKind {

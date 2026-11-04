@@ -1447,3 +1447,42 @@ CREATE TABLE gen322b (a INT, b INT AS (random()))
 
 ok
 DROP TABLE gen322
+
+
+chapter "CREATE TABLE ... AS SELECT", VALUES and row values: declared types from expression affinity
+ok
+CREATE TABLE ctas323 (a INTEGER, b TEXT)
+
+ok
+INSERT INTO ctas323 VALUES (1, 'x'), (2, 'y')
+
+ok
+CREATE TABLE ctas323_copy AS SELECT a, b, a * 2 AS c FROM ctas323
+
+rows
+SELECT sql FROM sqlite_schema WHERE name = 'ctas323_copy'
+----
+sql
+CREATE TABLE ctas323_copy(a INT,b TEXT,c)
+SELECT 1
+
+rows
+VALUES (1, 'one'), (2, 'two')
+----
+column1|column2
+1|one
+2|two
+SELECT 2
+
+rows
+SELECT a FROM ctas323 WHERE (a, b) IN (VALUES (2, 'y'))
+----
+a
+2
+SELECT 1
+
+ok
+DROP TABLE ctas323_copy
+
+ok
+DROP TABLE ctas323

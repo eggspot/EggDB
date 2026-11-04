@@ -3610,3 +3610,37 @@ SELECT RANK(15500) WITHIN GROUP (ORDER BY salary, commission_pct) FROM emp321
 
 ok
 DROP TABLE emp321
+
+
+chapter "CREATE TABLE AS SELECT": the WHERE 1 = 0 idiom copies the shape and NOT NULL, and multi-column IN
+ok
+CREATE TABLE ctas323 (id NUMBER NOT NULL, name VARCHAR2(10))
+
+ok
+INSERT INTO ctas323 VALUES (1, 'one')
+
+ok
+CREATE TABLE ctas323_shape AS SELECT * FROM ctas323 WHERE 1 = 0
+
+rows
+SELECT COUNT(*) FROM ctas323_shape
+----
+COUNT(*)
+0
+SELECT 1
+
+error 23502
+INSERT INTO ctas323_shape VALUES (NULL, 'x')
+
+rows
+SELECT name FROM ctas323 WHERE (id, name) IN (SELECT 1, 'one' FROM dual)
+----
+NAME
+one
+SELECT 1
+
+ok
+DROP TABLE ctas323_shape
+
+ok
+DROP TABLE ctas323

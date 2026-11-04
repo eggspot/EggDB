@@ -60,10 +60,10 @@ impl Parser<'_> {
     }
 
     fn reads_values_lists(&self) -> bool {
-        self.postgresql() || self.sqlserver()
+        self.postgresql() || self.sqlserver() || self.mysql() || self.sqlite()
     }
 
-    fn starts_query_in_parentheses(&self) -> bool {
+    pub(super) fn starts_query_in_parentheses(&self) -> bool {
         let mut ahead = 0;
         while self.peek_kind_at(ahead) == &TokenKind::LeftParen {
             ahead += 1;
@@ -657,7 +657,9 @@ impl Parser<'_> {
         if self.reads_values_lists()
             && let Some(mut list) = Self::values_table(&mut query)
         {
-            list.column_names = column_names;
+            if !column_names.is_empty() {
+                list.column_names = column_names;
+            }
             return Ok(TableReference {
                 name,
                 alias,

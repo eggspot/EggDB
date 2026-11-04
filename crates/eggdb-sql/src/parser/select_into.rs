@@ -45,11 +45,11 @@ impl Parser<'_> {
         if !matches!(query, Statement::Select(_) | Statement::Query(_)) {
             return Err(into_not_allowed(table.name.position));
         }
-        Ok(Statement::CreateTableAs(Box::new(CreateTableAs {
-            name: table.name,
-            temporary: table.temporary,
+        Ok(Statement::CreateTableAs(Box::new(CreateTableAs::select_into(
+            table.name,
+            table.temporary,
             query,
-        })))
+        ))))
     }
 
     pub(super) fn select_into_table(&mut self) -> SqlResult<()> {

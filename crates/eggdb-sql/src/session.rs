@@ -3448,9 +3448,12 @@ impl<'s> Session<'s> {
             Statement::SetConstraints { names, deferred } => {
                 self.set_constraints(names.as_deref(), *deferred)
             }
-            Statement::CreateTableAs(create) => self.write("SELECT INTO", |writer, tables| {
-                crate::create_table_as::run(writer, tables, binding, dialect, create)
-            }),
+            Statement::CreateTableAs(create) => {
+                let command = create.command();
+                self.write(command, |writer, tables| {
+                    crate::create_table_as::run(writer, tables, binding, dialect, create)
+                })
+            }
             Statement::MultitableInsert(insert) => self
                 .write_firing_triggers("INSERT", |writer, tables| {
                     crate::multitable_insert::run(writer, tables, binding, insert)

@@ -127,6 +127,7 @@ mod roles;
 mod routine_settings;
 mod routines;
 mod row_security;
+mod row_values;
 mod schema;
 mod schemas;
 mod sequences;
@@ -183,6 +184,8 @@ mod with_statement;
 mod arrays_tests;
 #[cfg(test)]
 mod batch_logic_tests;
+#[cfg(test)]
+mod create_table_as_tests;
 #[cfg(test)]
 mod bulk_load_tests;
 #[cfg(test)]

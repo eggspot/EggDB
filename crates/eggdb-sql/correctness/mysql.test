@@ -1378,3 +1378,38 @@ UPDATE gen322 SET doubled = 1
 
 ok
 DROP TABLE gen322
+
+
+chapter "CREATE TABLE ... SELECT" and VALUES: a table made from a query keeps NOT NULL, VALUES ROW is a statement and a derived table
+ok
+CREATE TABLE ctas323 (a INT NOT NULL, b VARCHAR(5))
+
+ok
+INSERT INTO ctas323 VALUES (1, 'x'), (2, NULL)
+
+ok
+CREATE TABLE ctas323_copy SELECT a, b FROM ctas323
+
+error 23000
+INSERT INTO ctas323_copy VALUES (NULL, 'y')
+
+rows
+VALUES ROW(1, 2), ROW(3, 4)
+----
+column_0|column_1
+1|2
+3|4
+SELECT 2
+
+rows
+SELECT a FROM ctas323 WHERE (a, b) = (1, 'x')
+----
+a
+1
+SELECT 1
+
+ok
+DROP TABLE ctas323_copy
+
+ok
+DROP TABLE ctas323

@@ -148,6 +148,12 @@ impl SubqueryRows {
         let rows = result.rows.len();
         let values: Vec<Value> = if matches!(test, SubqueryTest::Exists) {
             Vec::new()
+        } else if row_operand(test).is_some() {
+            result
+                .rows
+                .into_iter()
+                .map(crate::records::anonymous)
+                .collect()
         } else {
             result
                 .rows
@@ -204,6 +210,27 @@ impl SubqueryRows {
         Ok(result)
     }
 
+    fn row_quantified(
+        &self,
+        fields: &[Value],
+        operator: BinaryOperator,
+        all: bool,
+    ) -> SqlResult<Option<bool>> {
+        let mut result = Some(all);
+        for item in &self.values {
+            let truth = crate::row_values::compare_with_record(fields, item, operator)?;
+            result = if all {
+                and(result, truth)
+            } else {
+                or(result, truth)
+            };
+            if result == Some(!all) {
+                break;
+            }
+        }
+        Ok(result)
+    }
+
     fn quantified(
         &self,
         value: &Value,
@@ -234,6 +261,33 @@ impl SubqueryRows {
 
 fn internal(message: &str) -> SqlError {
     SqlError::new(SqlState::INTERNAL_ERROR, message.to_owned())
+}
+
+fn row_fields(expr: &Expr) -> Option<&[Expr]> {
+    crate::row_values::constructor_fields(expr)
+}
+
+fn row_operand(test: &SubqueryTest) -> Option<&[Expr]> {
+    match test {
+        SubqueryTest::In { expr, .. }
+        | SubqueryTest::Compare { expr, .. }
+        | SubqueryTest::RowCompare { expr, .. } => row_fields(expr),
+        SubqueryTest::Scalar | SubqueryTest::Exists | SubqueryTest::Array => None,
+    }
+}
+
+fn more_than_one_row_in_row(dialect: Dialect) -> SqlError {
+    match dialect {
+        Dialect::MySql => SqlError::new(
+            SqlState::CARDINALITY_VIOLATION,
+            "Subquery returns more than 1 row",
+        )
+        .with_vendor_code(1242),
+        _ => SqlError::new(
+            SqlState::CARDINALITY_VIOLATION,
+            "more than one row returned by a subquery used as an expression",
+        ),
+    }
 }
 
 fn more_than_one_row() -> SqlError {
@@ -287,14 +341,34 @@ pub(crate) fn evaluate(evaluator: &Evaluator<'_>, subquery: &Subquery) -> SqlRes
         SubqueryTest::Exists => Ok(Value::Boolean(rows.rows > 0)),
         SubqueryTest::Array => crate::arrays::from_rows(rows.values.clone(), rows.sql_type),
         SubqueryTest::In { expr, negated } => {
+            if let Some(fields) = row_fields(expr) {
+                let values = crate::row_values::evaluate_fields(evaluator, fields, rows.values.first())?;
+                let found = rows.row_quantified(&values, BinaryOperator::Equal, false)?;
+                return truth(found.map(|found| found != *negated));
+            }
             let value = evaluator.eval(expr, rows.sql_type)?;
             truth(rows.member(&value)?.map(|found| found != *negated))
+        }
+        SubqueryTest::RowCompare { expr, operator } => {
+            if rows.rows > 1 {
+                return Err(more_than_one_row_in_row(subquery.dialect));
+            }
+            let Some(record) = rows.values.first() else {
+                return Ok(Value::Null);
+            };
+            let fields = row_fields(expr).unwrap_or_default();
+            let values = crate::row_values::evaluate_fields(evaluator, fields, Some(record))?;
+            truth(crate::row_values::compare_with_record(&values, record, *operator)?)
         }
         SubqueryTest::Compare {
             expr,
             operator,
             all,
         } => {
+            if let Some(fields) = row_fields(expr) {
+                let values = crate::row_values::evaluate_fields(evaluator, fields, rows.values.first())?;
+                return truth(rows.row_quantified(&values, *operator, *all)?);
+            }
             let value = evaluator.eval(expr, rows.sql_type)?;
             truth(rows.quantified(&value, *operator, *all)?)
         }
@@ -381,6 +455,9 @@ enum LookupShape {
 }
 
 fn lookup_shape(test: &SubqueryTest) -> Option<LookupShape> {
+    if row_operand(test).is_some() {
+        return None;
+    }
     match test {
         SubqueryTest::Exists => Some(LookupShape::Existence),
         SubqueryTest::In { .. }
@@ -395,7 +472,9 @@ fn lookup_shape(test: &SubqueryTest) -> Option<LookupShape> {
             ..
         } => Some(LookupShape::Members),
         SubqueryTest::Scalar => Some(LookupShape::Aggregate),
-        SubqueryTest::Compare { .. } | SubqueryTest::Array => None,
+        SubqueryTest::Compare { .. } | SubqueryTest::Array | SubqueryTest::RowCompare { .. } => {
+            None
+        }
     }
 }
 
@@ -2861,7 +2940,7 @@ fn row_cap(subquery: &Subquery) -> Option<i64> {
     match subquery.test {
         SubqueryTest::Exists => Some(1),
         SubqueryTest::Scalar if subquery.dialect == Dialect::Sqlite => Some(1),
-        SubqueryTest::Scalar => Some(2),
+        SubqueryTest::Scalar | SubqueryTest::RowCompare { .. } => Some(2),
         _ => None,
     }
 }
@@ -2923,7 +3002,16 @@ fn prepare_subquery(
     };
     let result = execute_query(&inner_env, tables, &query, &inner)?;
     let count = result.columns.as_ref().map_or(0, Vec::len);
-    if count != 1 && !matches!(subquery.test, SubqueryTest::Exists) {
+    if let Some(fields) = row_operand(&subquery.test) {
+        if count != fields.len() {
+            return Err(crate::row_values::subquery_width_error(
+                subquery.dialect,
+                count,
+                fields.len(),
+                subquery.query.position,
+            ));
+        }
+    } else if count != 1 && !matches!(subquery.test, SubqueryTest::Exists) {
         return Err(subquery_columns_error(
             subquery.dialect,
             count,

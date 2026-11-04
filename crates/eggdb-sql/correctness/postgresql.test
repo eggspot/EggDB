@@ -5290,3 +5290,57 @@ DROP TABLE priv_accounts
 
 ok
 DROP ROLE priv_joe
+
+
+chapter "CREATE TABLE AS" and row constructors: a table made from a query, WITH NO DATA, and row comparisons with SQL's NULL rules
+ok
+CREATE TABLE ctas323 (a int NOT NULL, b text)
+
+ok
+INSERT INTO ctas323 VALUES (1, 'x'), (2, NULL)
+
+rows
+CREATE TABLE ctas323_copy (n, t) AS SELECT a, b FROM ctas323 ORDER BY a
+----
+SELECT 2
+
+ok
+INSERT INTO ctas323_copy VALUES (NULL, 'kept nullable')
+
+rows
+SELECT count(*) FROM ctas323_copy
+----
+count
+3
+SELECT 1
+
+rows
+CREATE TABLE ctas323_empty AS SELECT * FROM ctas323 WITH NO DATA
+----
+CREATE TABLE AS
+
+rows
+SELECT a FROM ctas323 WHERE (a, b) IN (SELECT 1, 'x')
+----
+a
+1
+SELECT 1
+
+rows
+SELECT count(*) FROM ctas323 WHERE (a, b) NOT IN (SELECT 2, NULL::text)
+----
+count
+1
+SELECT 1
+
+error 42601
+SELECT (1, 2) = (1, 2, 3)
+
+ok
+DROP TABLE ctas323_copy
+
+ok
+DROP TABLE ctas323_empty
+
+ok
+DROP TABLE ctas323

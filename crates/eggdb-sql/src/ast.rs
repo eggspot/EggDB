@@ -443,6 +443,41 @@ pub(crate) struct CreateTableAs {
     pub(crate) name: Name,
     pub(crate) temporary: bool,
     pub(crate) query: Statement,
+    pub(crate) spelling: CreateTableAsSpelling,
+    pub(crate) if_not_exists: bool,
+    pub(crate) column_names: Vec<Name>,
+    pub(crate) declared: Option<Box<CreateTable>>,
+    pub(crate) with_data: bool,
+    pub(crate) on_duplicate: OnDuplicate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CreateTableAsSpelling {
+    SelectInto,
+    CreateTableAs,
+}
+
+impl CreateTableAs {
+    pub(crate) fn select_into(name: Name, temporary: bool, query: Statement) -> Self {
+        Self {
+            name,
+            temporary,
+            query,
+            spelling: CreateTableAsSpelling::SelectInto,
+            if_not_exists: false,
+            column_names: Vec::new(),
+            declared: None,
+            with_data: true,
+            on_duplicate: OnDuplicate::Fail,
+        }
+    }
+
+    pub(crate) fn command(&self) -> &'static str {
+        match self.spelling {
+            CreateTableAsSpelling::SelectInto => "SELECT INTO",
+            CreateTableAsSpelling::CreateTableAs => "CREATE TABLE AS",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1411,19 +1446,27 @@ pub(crate) enum SubqueryTest {
     },
     Array,
 }
+    RowCompare {
+        expr: Expr,
+        operator: BinaryOperator,
+    },
 
 impl SubqueryTest {
     pub(crate) fn operand(&self) -> Option<&Expr> {
         match self {
             Self::Scalar | Self::Exists | Self::Array => None,
-            Self::In { expr, .. } | Self::Compare { expr, .. } => Some(expr),
+            Self::In { expr, .. } | Self::Compare { expr, .. } | Self::RowCompare { expr, .. } => {
+                Some(expr)
+            }
         }
     }
 
     pub(crate) fn operand_mut(&mut self) -> Option<&mut Expr> {
         match self {
             Self::Scalar | Self::Exists | Self::Array => None,
-            Self::In { expr, .. } | Self::Compare { expr, .. } => Some(expr),
+            Self::In { expr, .. } | Self::Compare { expr, .. } | Self::RowCompare { expr, .. } => {
+                Some(expr)
+            }
         }
     }
 }
