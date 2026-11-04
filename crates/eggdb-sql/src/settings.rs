@@ -337,12 +337,23 @@ pub(crate) fn check_parameter_name(name: &str) -> SqlResult<()> {
     }
 }
 
+const BOOLEAN_TRUE: [&str; 6] = ["on", "true", "yes", "1", "t", "y"];
+const BOOLEAN_FALSE: [&str; 7] = ["off", "false", "no", "0", "f", "n", "of"];
+
 pub(crate) fn boolean_setting(value: &str) -> Option<bool> {
-    let value = value.trim().to_ascii_lowercase();
-    match value.as_str() {
-        "on" | "true" | "yes" | "1" | "t" | "y" => Some(true),
-        "off" | "false" | "no" | "0" | "f" | "n" | "of" => Some(false),
-        _ => None,
+    match value {
+        "on" => return Some(true),
+        "off" => return Some(false),
+        _ => {}
+    }
+    let value = value.trim();
+    let spelled = |words: &[&str]| words.iter().any(|word| value.eq_ignore_ascii_case(word));
+    if spelled(&BOOLEAN_TRUE) {
+        Some(true)
+    } else if spelled(&BOOLEAN_FALSE) {
+        Some(false)
+    } else {
+        None
     }
 }
 
@@ -638,10 +649,23 @@ impl Settings {
     }
 
     pub(crate) fn is_on(&self, name: &str) -> bool {
-        self.get(name)
-            .ok()
-            .and_then(|value| boolean_setting(&value))
-            .unwrap_or(false)
+        match self.known_value(name) {
+            Some(value) => boolean_setting(value).unwrap_or(false),
+            None => self
+                .get(name)
+                .ok()
+                .and_then(|value| boolean_setting(&value))
+                .unwrap_or(false),
+        }
+    }
+
+    pub(crate) fn known_value(&self, name: &str) -> Option<&str> {
+        match self.values.get(name) {
+            Some(value) => Some(value),
+            None => known(name)
+                .and_then(|known| self.values.get(known.name))
+                .map(String::as_str),
+        }
     }
 
     pub(crate) fn set_superuser(&mut self, superuser: bool) {

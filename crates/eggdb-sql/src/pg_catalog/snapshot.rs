@@ -50,6 +50,29 @@ const SNAPSHOT_FUNCTIONS: [&str; 30] = [
     "regproc",
 ];
 
+const SNAPSHOT_FUNCTION_INITIALS: [bool; 256] = initials(&SNAPSHOT_FUNCTIONS);
+
+const fn initials(names: &[&str]) -> [bool; 256] {
+    let mut table = [false; 256];
+    let mut at = 0;
+    while at < names.len() {
+        let first = names[at].as_bytes()[0];
+        table[first.to_ascii_lowercase() as usize] = true;
+        table[first.to_ascii_uppercase() as usize] = true;
+        at += 1;
+    }
+    table
+}
+
+fn names_snapshot_function(word: &str) -> bool {
+    word.as_bytes()
+        .first()
+        .is_some_and(|first| SNAPSHOT_FUNCTION_INITIALS[usize::from(*first)])
+        && SNAPSHOT_FUNCTIONS
+            .iter()
+            .any(|name| word.eq_ignore_ascii_case(name))
+}
+
 const SEQUENCE_FUNCTIONS: [&str; 3] = ["nextval", "currval", "setval"];
 
 const CATALOG_TEXT_HINTS: [&str; 4] = ["reg", "pg_", "description", "privilege"];
@@ -94,14 +117,15 @@ pub(crate) fn mentions_catalog(tokens: &[Token<'_>]) -> bool {
                 return true;
             }
             TokenKind::Word(word) => {
-                let named = |name: &&str| word.eq_ignore_ascii_case(name);
-                if SNAPSHOT_FUNCTIONS.iter().any(named) {
+                if names_snapshot_function(word) {
                     return true;
                 }
                 if word.eq_ignore_ascii_case("regclass") && sequence_call_depths.is_empty() {
                     return true;
                 }
-                previous_sequence_function = SEQUENCE_FUNCTIONS.iter().any(named);
+                previous_sequence_function = SEQUENCE_FUNCTIONS
+                    .iter()
+                    .any(|name| word.eq_ignore_ascii_case(name));
                 continue;
             }
             _ => {}

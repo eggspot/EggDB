@@ -1323,3 +1323,29 @@ fn pg_sequences_lists_every_sequence_with_postgresql_columns() {
         .contains('1')
     );
 }
+
+#[test]
+fn catalog_functions_are_recognised_in_any_case_and_ordinary_words_are_not() {
+    let mentions = |sql: &str| {
+        let tokens = crate::lexer::tokenize(sql).unwrap();
+        super::mentions_catalog(&tokens)
+    };
+    for function in [
+        "has_table_privilege",
+        "PG_HAS_ROLE",
+        "To_RegClass",
+        "regtype",
+        "Obj_Description",
+        "COL_DESCRIPTION",
+        "pg_get_viewdef",
+    ] {
+        assert!(mentions(&format!("SELECT {function}('x')")), "{function}");
+    }
+    for ordinary in [
+        "SELECT name, score FROM people WHERE id = 7",
+        "SELECT has_privileges, pg, total FROM orders",
+        "SELECT nextval('s')",
+    ] {
+        assert!(!mentions(ordinary), "{ordinary}");
+    }
+}

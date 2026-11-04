@@ -218,11 +218,7 @@ impl<'s> Session<'s> {
         }
         let read_only = self.transaction_is_read_only();
         let shown = if read_only { "on" } else { "off" };
-        if self
-            .settings
-            .get("transaction_read_only")
-            .is_ok_and(|value| value == shown)
-        {
+        if self.settings.known_value("transaction_read_only") == Some(shown) {
             return;
         }
         Arc::make_mut(&mut self.settings).show_transaction_read_only(read_only);
