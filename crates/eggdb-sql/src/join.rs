@@ -278,6 +278,23 @@ fn using_pairs(
             )
             .at(name.position)
         })?;
+        if right
+            .table
+            .columns
+            .iter()
+            .filter(|column| column.name == name.text)
+            .nth(1)
+            .is_some()
+        {
+            return Err(SqlError::new(
+                SqlState::AMBIGUOUS_COLUMN,
+                format!(
+                    "common column name \"{}\" appears more than once in right table",
+                    name.text
+                ),
+            )
+            .at(name.position));
+        }
         let left_type = Scope::Many(left).column_type(left_offset);
         let right_type = right.table.columns[right_column].sql_type;
         if let Some(left_type) = left_type
