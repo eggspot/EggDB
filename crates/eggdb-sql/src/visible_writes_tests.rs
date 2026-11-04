@@ -1484,7 +1484,10 @@ const FOREIGN_KEY_LISTINGS: [(crate::Dialect, &str); 9] = [
         crate::Dialect::MySql,
         "SELECT TABLE_NAME, COLUMN_NAME, REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE",
     ),
-    (crate::Dialect::Sqlite, "SELECT name, sql FROM sqlite_schema"),
+    (
+        crate::Dialect::Sqlite,
+        "SELECT name, sql FROM sqlite_schema",
+    ),
     (
         crate::Dialect::SqlServer,
         "SELECT * FROM sys.foreign_key_columns",
@@ -1518,7 +1521,11 @@ fn a_foreign_key_to_a_hidden_column_is_shown_by_no_dialects_catalog() {
     );
     assert!(counted.contains("\n0\n"), "{counted}");
     assert_eq!(
-        rendered_in(&limited, crate::Dialect::PostgreSql, "SELECT id, pref FROM c"),
+        rendered_in(
+            &limited,
+            crate::Dialect::PostgreSql,
+            "SELECT id, pref FROM c"
+        ),
         "id|pref\n1|C1\nSELECT 1"
     );
     let whole = ConfinedStore {

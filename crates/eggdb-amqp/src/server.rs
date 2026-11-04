@@ -300,11 +300,13 @@ impl Connection<'_, '_> {
             .short(60)
             .short(0)
             .longlong(message.body.len() as u64);
-        header.bytes.extend_from_slice(if message.properties.is_empty() {
-            &[0, 0]
-        } else {
-            message.properties
-        });
+        header
+            .bytes
+            .extend_from_slice(if message.properties.is_empty() {
+                &[0, 0]
+            } else {
+                message.properties
+            });
         self.outgoing
             .push_back(frame(FRAME_HEADER, channel, &header.bytes));
         for chunk in message.body.chunks((FRAME_MAX - 8) as usize) {

@@ -476,12 +476,18 @@ fn dynamic_sql_and_procedures_cannot_turn_showplan_off_to_run_what_follows() {
             "SET SHOWPLAN_ALL ON",
             "EXEC('SET SHOWPLAN_ALL OFF; DELETE FROM t'); SET SHOWPLAN_ALL OFF; SELECT COUNT(*) AS n FROM t",
         ),
-        ("SET SHOWPLAN_ALL ON", "EXEC('SET SHOWPLAN_ALL OFF'); DELETE FROM t"),
+        (
+            "SET SHOWPLAN_ALL ON",
+            "EXEC('SET SHOWPLAN_ALL OFF'); DELETE FROM t",
+        ),
         (
             "SET SHOWPLAN_ALL ON",
             "EXEC sp_executesql N'SET SHOWPLAN_ALL OFF; DELETE FROM t'",
         ),
-        ("SET SHOWPLAN_TEXT ON", "EXEC('SET SHOWPLAN_TEXT OFF; DELETE FROM t')"),
+        (
+            "SET SHOWPLAN_TEXT ON",
+            "EXEC('SET SHOWPLAN_TEXT OFF; DELETE FROM t')",
+        ),
         ("SET SHOWPLAN_TEXT ON", "EXEC plan_off"),
         (
             "SET SHOWPLAN_TEXT ON",
@@ -491,8 +497,9 @@ fn dynamic_sql_and_procedures_cannot_turn_showplan_off_to_run_what_follows() {
         all(&mut session, on);
         let _ = run(&mut session, escape);
         assert!(
-            run(&mut session, "SELECT 1 AS planned")
-                .is_ok_and(|outputs| outputs.first().is_some_and(|first| first.starts_with("StmtText"))),
+            run(&mut session, "SELECT 1 AS planned").is_ok_and(|outputs| outputs
+                .first()
+                .is_some_and(|first| first.starts_with("StmtText"))),
             "SHOWPLAN went off: {escape}"
         );
         all(&mut session, &on.replace(" ON", " OFF"));

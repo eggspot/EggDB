@@ -89,11 +89,7 @@ impl KeysRead for ReadKeys<'_> {
             .collect()
     }
 
-    fn visit_prefix(
-        &self,
-        prefix: &[u8],
-        visit: &mut EntryVisitor<'_>,
-    ) -> Result<(), String> {
+    fn visit_prefix(&self, prefix: &[u8], visit: &mut EntryVisitor<'_>) -> Result<(), String> {
         let Some(collection) = &self.collection else {
             return Ok(());
         };
@@ -131,11 +127,7 @@ impl KeysRead for WriteKeys<'_, '_> {
             .collect()
     }
 
-    fn visit_prefix(
-        &self,
-        prefix: &[u8],
-        visit: &mut EntryVisitor<'_>,
-    ) -> Result<(), String> {
+    fn visit_prefix(&self, prefix: &[u8], visit: &mut EntryVisitor<'_>) -> Result<(), String> {
         visit_entries(self.collection.scan_prefix(prefix), visit)
     }
 }

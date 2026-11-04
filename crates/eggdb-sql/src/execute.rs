@@ -3162,8 +3162,7 @@ fn distinct_on_keys<'e>(
         .iter()
         .enumerate()
         .map(|(index, expr)| {
-            let rewritten =
-                grouped.map(|rewritten| rewritten.get(index).and_then(Option::as_ref));
+            let rewritten = grouped.map(|rewritten| rewritten.get(index).and_then(Option::as_ref));
             distinct_on_key(expr, projection, scope, rewritten)
         })
         .collect::<SqlResult<Vec<_>>>()?;

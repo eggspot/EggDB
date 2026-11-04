@@ -1214,7 +1214,10 @@ impl Shown {
             return Ok(());
         };
         let text = String::from_utf8_lossy(&name).into_owned();
-        let shown = match (self.narrowed.get(&id), self.unchecked_definitions.get(&name)) {
+        let shown = match (
+            self.narrowed.get(&id),
+            self.unchecked_definitions.get(&name),
+        ) {
             (Some(narrowed), _) => narrowed.definition.clone(),
             (None, Some(unchecked)) => unchecked.clone(),
             (None, None) => match reader.get(&table_key(&text))? {

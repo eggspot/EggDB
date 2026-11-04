@@ -388,8 +388,14 @@ fn list_describe_sample_and_the_schema_resource() {
     );
     for (id, escape) in [
         (16, "EXEC('SET SHOWPLAN_TEXT OFF; SELECT name FROM users')"),
-        (17, "EXEC sp_executesql N'SET SHOWPLAN_TEXT OFF; SELECT name FROM users'"),
-        (18, "EXEC('SET eggdb.dialect = postgresql; SELECT name FROM users')"),
+        (
+            17,
+            "EXEC sp_executesql N'SET SHOWPLAN_TEXT OFF; SELECT name FROM users'",
+        ),
+        (
+            18,
+            "EXEC('SET eggdb.dialect = postgresql; SELECT name FROM users')",
+        ),
     ] {
         let arguments = format!(r#"{{"sql":"{escape}","dialect":"sqlserver"}}"#);
         let escaped = call(&mut server, id, "explain_query", &arguments);

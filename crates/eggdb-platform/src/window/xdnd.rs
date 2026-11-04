@@ -497,7 +497,10 @@ mod tests {
         queue_bounded(&mut queue, answer, 4);
         let left = XdndInput::Message(XdndMessage::Leave { source: 7 });
         queue_bounded(&mut queue, left, 4);
-        assert_eq!(Vec::from(queue.clone()), vec![enter(), dropped, answer, left]);
+        assert_eq!(
+            Vec::from(queue.clone()),
+            vec![enter(), dropped, answer, left]
+        );
         queue_bounded(&mut queue, left, 4);
         assert_eq!(Vec::from(queue.clone()), vec![dropped, answer, left, left]);
         queue_bounded(&mut queue, position(10), 4);

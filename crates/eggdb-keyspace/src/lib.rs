@@ -48,11 +48,7 @@ pub trait KeysRead {
     /// Calls `visit` with each key starting with `prefix` and its stored bytes, in key order,
     /// one entry at a time, until it returns `false` or an error, so a caller that needs only
     /// the first entries never holds the others.
-    fn visit_prefix(
-        &self,
-        prefix: &[u8],
-        visit: &mut EntryVisitor<'_>,
-    ) -> Result<(), String> {
+    fn visit_prefix(&self, prefix: &[u8], visit: &mut EntryVisitor<'_>) -> Result<(), String> {
         self.visit_keys(&mut |key| {
             if !key.starts_with(prefix) {
                 return Ok(key.as_slice() < prefix);
@@ -132,11 +128,7 @@ impl KeysRead for MemoryKeys<'_> {
             .collect())
     }
 
-    fn visit_prefix(
-        &self,
-        prefix: &[u8],
-        visit: &mut EntryVisitor<'_>,
-    ) -> Result<(), String> {
+    fn visit_prefix(&self, prefix: &[u8], visit: &mut EntryVisitor<'_>) -> Result<(), String> {
         for (key, value) in self
             .map
             .range(prefix.to_vec()..)
@@ -237,7 +229,10 @@ mod tests {
     #[test]
     fn visit_prefix_sees_only_the_prefix_and_stops_when_told() {
         let expected = vec![b"b".to_vec(), b"b\x01".to_vec()];
-        assert_eq!(first_two_under_b(&KeysOnly(entries())), (expected.clone(), 2));
+        assert_eq!(
+            first_two_under_b(&KeysOnly(entries())),
+            (expected.clone(), 2)
+        );
         let keyspace = MemoryKeyspace::default();
         keyspace
             .write(0, &mut |keys| {

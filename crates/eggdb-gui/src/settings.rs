@@ -117,8 +117,8 @@ impl ClientSettings {
 }
 
 fn replaced_file(path: &Path) -> io::Result<PathBuf> {
-    let is_link = std::fs::symlink_metadata(path)
-        .is_ok_and(|metadata| metadata.file_type().is_symlink());
+    let is_link =
+        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink());
     if !is_link {
         return Ok(path.to_path_buf());
     }
@@ -285,7 +285,9 @@ mod tests {
             layout: Some(Layout::PgAdmin),
             ..ClientSettings::default()
         };
-        settings.save(&link).expect("settings are written through the link");
+        settings
+            .save(&link)
+            .expect("settings are written through the link");
         let metadata = std::fs::symlink_metadata(&link).expect("the link is there");
         assert!(metadata.file_type().is_symlink());
         assert_eq!(
