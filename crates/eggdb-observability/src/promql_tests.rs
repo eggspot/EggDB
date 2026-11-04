@@ -845,3 +845,72 @@ fn the_query_api_answers_new_promql_and_its_errors_in_prometheus_shapes() {
     assert_eq!(status, 422, "{answer}");
     assert!(answer.contains("too many samples"), "{answer}");
 }
+
+#[test]
+fn subquery_steps_give_back_their_samples_after_each_step() {
+    let data = counter();
+    let expr = parse("max_over_time(rate(x[10m])[30m:1m])").unwrap();
+    let roomy = MemoryBudget::new(usize::MAX);
+    let answered = Evaluator::new(&data, Work::new(&roomy, 100)).evaluate(&expr, 1_800_000);
+    assert!(
+        matches!(&answered, Ok(Data::Vector(vector)) if vector.len() == 1),
+        "{answered:?}"
+    );
+    let one_step_too_many = Evaluator::new(&data, Work::new(&roomy, 30)).evaluate(
+        &parse("max_over_time(rate(x[10m])[30m:1m])").unwrap(),
+        1_800_000,
+    );
+    assert_eq!(
+        one_step_too_many,
+        Err(Failure::Execution(
+            "query processing would load too many samples into memory in query execution"
+                .to_owned()
+        ))
+    );
+}
+
+#[test]
+fn results_with_the_same_labels_once_the_name_is_dropped_are_refused() {
+    let data = fetched(vec![
+        series(
+            &[("__name__", "http_requests_total"), ("job", "api")],
+            &[(30_000, 1.0), (60_000, 3.0)],
+        ),
+        series(
+            &[("__name__", "http_errors_total"), ("job", "api")],
+            &[(30_000, 1.0), (60_000, 2.0)],
+        ),
+        series(
+            &[("__name__", "info"), ("job", "api"), ("owner", "web")],
+            &[(30_000, 1.0), (60_000, 1.0)],
+        ),
+    ]);
+    for query in [
+        "rate({__name__=~\"http_requests_total|http_errors_total\", job=\"api\"}[5m])",
+        "{__name__=~\"http_.*\", job=\"api\"} * 2",
+        "2 * {__name__=~\"http_.*\"}",
+        "abs({__name__=~\"http_.*\"})",
+    ] {
+        let message = failure(query, 60_000, &data);
+        assert!(
+            message.contains("vector cannot contain metrics with the same labelset"),
+            "{query}: {message}"
+        );
+    }
+    assert_eq!(
+        values(&sorted("{__name__=~\"http_.*\"} > 1", 60_000, &data)),
+        [2.0, 3.0]
+    );
+    assert_eq!(
+        failure(
+            "{__name__=~\"http_.*\"} * on(job) group_left(owner) info",
+            60_000,
+            &data
+        ),
+        "multiple matches for labels: grouping labels must ensure unique matches"
+    );
+    assert_eq!(
+        failure("topk(1e19, info)", 60_000, &data),
+        "Scalar value 10000000000000000000 overflows int64"
+    );
+}

@@ -1182,8 +1182,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - PromQL's remaining functions and modifiers: the `@` modifier and negative offsets, `limitk`
   and `limit_ratio`, `clamp*`, `predict_linear`, `deriv`, `resets`, `changes`, `absent*`,
   `sort*`, date, trigonometric and the other `*_over_time` functions, string results, named
-  capture groups in `label_replace`, a query timeout, and label matchers pushed down into the
-  SQL read (D334).
+  capture groups in `label_replace`, a query timeout (a subquery over many series at a fine
+  resolution, such as `max_over_time(rate({__name__=~".+"}[1m])[127d:1s])`, stays under the step
+  cap but can hold a thread for hours), and label matchers pushed down into the SQL read (D334).
 - OTLP ingest of metrics, logs and traces (D39).
 - Loki's push API, and Jaeger and Zipkin traces (D39).
 - Syslog over TLS (RFC 5425) and beyond loopback, the sender's address as a column, and rsyslog

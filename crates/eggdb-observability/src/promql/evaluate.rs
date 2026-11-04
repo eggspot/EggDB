@@ -1,6 +1,6 @@
 use super::functions::{
-    aggregate_values, histogram_quantile, label_join, label_replace, range_function,
-    scalar_function, set_label,
+    aggregate_values, ensure_unique_label_sets, histogram_quantile, label_join, label_replace,
+    range_function, scalar_function, set_label,
 };
 use super::{
     Aggregation, Binary, Cardinality, Expr, Failure, Fetched, Grouping, LOOKBACK_MS, Labels,
@@ -71,6 +71,15 @@ impl<'b> Work<'b> {
     fn take(&mut self, samples: usize) -> Result<(), Failure> {
         self.step_samples = self.step_samples.saturating_add(samples);
         self.hold()
+    }
+
+    fn give_back_to(&mut self, step_samples: usize) {
+        self.step_samples = self.step_samples.min(step_samples);
+        let _ = self.reservation.hold_if_large(
+            self.kept_samples
+                .saturating_add(self.step_samples)
+                .saturating_mul(SAMPLE_BYTES),
+        );
     }
 
     /// Gives back what the last evaluation step held.
@@ -371,7 +380,7 @@ fn group_key(grouping: Option<&Grouping>, labels: &Labels) -> Labels {
 fn whole_number(value: f64) -> Result<i64, Failure> {
     if value.is_nan() || value >= i64::MAX as f64 || value < i64::MIN as f64 {
         return Err(Failure::BadData(format!(
-            "scalar value {value} overflows int64"
+            "Scalar value {value} overflows int64"
         )));
     }
     Ok(value as i64)
@@ -391,6 +400,14 @@ impl<'d, 'b> Evaluator<'d, 'b> {
 
     /// Evaluates `expr` at `time_ms`.
     pub(crate) fn evaluate(&mut self, expr: &Expr, time_ms: i64) -> Result<Data, Failure> {
+        let data = self.evaluate_unchecked(expr, time_ms)?;
+        if let Data::Vector(vector) = &data {
+            ensure_unique_label_sets(vector)?;
+        }
+        Ok(data)
+    }
+
+    fn evaluate_unchecked(&mut self, expr: &Expr, time_ms: i64) -> Result<Data, Failure> {
         match expr {
             Expr::Number(number) => Ok(Data::Scalar(*number)),
             Expr::Text(_) => Err(Failure::BadData(
@@ -683,9 +700,15 @@ impl<'d, 'b> Evaluator<'d, 'b> {
         };
         self.work.run_subquery_steps(steps)?;
         let mut series: BTreeMap<Labels, Vec<(i64, f64)>> = BTreeMap::new();
+        let held_before = self.work.step_samples;
+        let mut collected = 0usize;
         while at <= end {
-            match self.evaluate(&subquery.inner, at)? {
+            let inner = self.evaluate(&subquery.inner, at)?;
+            self.work
+                .give_back_to(held_before.saturating_add(collected));
+            match inner {
                 Data::Vector(vector) => {
+                    collected = collected.saturating_add(vector.len());
                     self.work.take(vector.len())?;
                     for (labels, value) in vector {
                         series.entry(labels).or_default().push((at, value));

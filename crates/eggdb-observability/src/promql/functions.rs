@@ -304,13 +304,20 @@ pub(crate) fn histogram_quantile(quantile: f64, buckets: Vec<(Labels, f64)>) -> 
         .collect()
 }
 
-fn unique_label_sets(vector: Vec<(Labels, f64)>) -> Result<Vec<(Labels, f64)>, Failure> {
+/// Refuses a vector in which two elements have the same labels, as Prometheus refuses the
+/// result of every function, aggregation and operator.
+pub(crate) fn ensure_unique_label_sets(vector: &[(Labels, f64)]) -> Result<(), Failure> {
     let mut seen: BTreeSet<&Labels> = BTreeSet::new();
     if vector.iter().any(|(labels, _)| !seen.insert(labels)) {
         return Err(Failure::Execution(
             "vector cannot contain metrics with the same labelset".to_owned(),
         ));
     }
+    Ok(())
+}
+
+fn unique_label_sets(vector: Vec<(Labels, f64)>) -> Result<Vec<(Labels, f64)>, Failure> {
+    ensure_unique_label_sets(&vector)?;
     Ok(vector)
 }
 
