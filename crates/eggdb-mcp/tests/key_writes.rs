@@ -23,6 +23,13 @@ fn listed_tools(server: &mut Server<'_, MapOpener>) -> String {
         .unwrap()
 }
 
+fn initialize(server: &mut Server<'_, MapOpener>) {
+    let answer = server
+        .handle(br#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test-client","version":"1.0"}}}"#)
+        .unwrap();
+    assert!(answer.contains("\"protocolVersion\""), "{answer}");
+}
+
 fn stored(opener: &MapOpener, key: &[u8]) -> Option<Vec<u8>> {
     opener.store.snapshot().get(key).cloned()
 }
@@ -74,6 +81,7 @@ fn a_server_limited_to_tables_or_acting_as_a_role_refuses_them_even_with_writes(
             }
         };
         let mut server = Server::new(&opener, config).unwrap();
+        initialize(&mut server);
         let tools = listed_tools(&mut server);
         assert!(!tools.contains("\"name\":\"put\""), "{name}: {tools}");
         let put = call(&mut server, 2, "put", r#"{"key":"k","value":"v"}"#);

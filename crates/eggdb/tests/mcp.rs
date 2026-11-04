@@ -1407,7 +1407,7 @@ fn an_agent_stores_and_deletes_keys_only_with_writes_and_a_delete_waits_for_the_
     let (status, messages) = mcp.finish();
     assert!(status.success(), "{messages}");
     assert!(
-        messages.contains("put stores a key and del deletes one"),
+        messages.contains("read-write (destructive statements need the user's confirmation)"),
         "{messages}"
     );
 

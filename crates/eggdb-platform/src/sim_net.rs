@@ -1543,40 +1543,40 @@ mod tests {
     #[test]
     fn a_connection_fails_when_its_bytes_stay_unacknowledged_across_a_long_cut() {
         let mut pair = Pair::new(21);
-        let (client, server) = pair.connect();
-        pair.network.partition(CLIENT, SERVER);
-        pair.send(&client, b"lost", 0);
-        pair.reap(1);
-        pair.receive(&client, 8, 1);
-        let completion = pair.reap(1).pop().unwrap();
-        assert_eq!(completion.user_data, 1);
-        assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::TimedOut);
-        assert_eq!(pair.now(), SimNetwork::RETRANSMISSION_TIMEOUT);
-        pair.send(&client, b"again", 2);
-        let completion = pair.reap(1).pop().unwrap();
-        assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::TimedOut);
-        let not_connected = ErrorKind::NotConnected;
-        assert_eq!(client.peer_address().unwrap_err().kind(), not_connected);
-        assert_eq!(client.shutdown_write().unwrap_err().kind(), not_connected);
-        assert!(client.local_address().is_ok());
+        {
+            let (client, server) = pair.connect();
+            pair.network.partition(CLIENT, SERVER);
+            pair.send(&client, b"lost", 0);
+            pair.reap(1);
+            pair.receive(&client, 8, 1);
+            let completion = pair.reap(1).pop().unwrap();
+            assert_eq!(completion.user_data, 1);
+            assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::TimedOut);
+            assert_eq!(pair.now(), SimNetwork::RETRANSMISSION_TIMEOUT);
+            pair.send(&client, b"again", 2);
+            let completion = pair.reap(1).pop().unwrap();
+            assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::TimedOut);
+            let not_connected = ErrorKind::NotConnected;
+            assert_eq!(client.peer_address().unwrap_err().kind(), not_connected);
+            assert_eq!(client.shutdown_write().unwrap_err().kind(), not_connected);
+            assert!(client.local_address().is_ok());
 
-        pair.receive(&server, 8, 3);
-        assert!(pair.reap_for(1, Duration::from_secs(3600)).is_empty());
-        assert!(server.peer_address().is_ok());
-        pair.network.heal_all();
-        pair.send(&server, b"still there?", 4);
-        let completion = pair.reap(1).pop().unwrap();
-        assert_eq!(completion.user_data, 4);
-        assert!(completion.result.is_ok());
-        let completion = pair.reap(1).pop().unwrap();
-        assert_eq!(completion.user_data, 3);
-        assert_eq!(
-            completion.result.unwrap_err().kind(),
-            ErrorKind::ConnectionReset
-        );
-        assert_eq!(server.peer_address().unwrap_err().kind(), not_connected);
-        drop(client);
-        drop(server);
+            pair.receive(&server, 8, 3);
+            assert!(pair.reap_for(1, Duration::from_secs(3600)).is_empty());
+            assert!(server.peer_address().is_ok());
+            pair.network.heal_all();
+            pair.send(&server, b"still there?", 4);
+            let completion = pair.reap(1).pop().unwrap();
+            assert_eq!(completion.user_data, 4);
+            assert!(completion.result.is_ok());
+            let completion = pair.reap(1).pop().unwrap();
+            assert_eq!(completion.user_data, 3);
+            assert_eq!(
+                completion.result.unwrap_err().kind(),
+                ErrorKind::ConnectionReset
+            );
+            assert_eq!(server.peer_address().unwrap_err().kind(), not_connected);
+        }
         assert_eq!(pair.network.connection_count(), 0);
     }
 

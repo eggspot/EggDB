@@ -132,12 +132,28 @@ impl NetStream for OsStream {
     }
 
     fn peer_address(&self) -> Result<Address> {
-        Ok(Address::Tcp(self.stream.peer_addr()?))
+        let peer = self.stream.peer_addr().map_err(not_connected_once_reset)?;
+        Ok(Address::Tcp(peer))
     }
 
     fn shutdown_write(&self) -> Result<()> {
-        Ok(self.stream.shutdown(Shutdown::Write)?)
+        let shutdown = self.stream.shutdown(Shutdown::Write);
+        Ok(shutdown.map_err(not_connected_once_reset)?)
     }
+}
+
+#[cfg(target_vendor = "apple")]
+fn not_connected_once_reset(error: io::Error) -> io::Error {
+    if error.kind() == io::ErrorKind::InvalidInput {
+        io::Error::from(io::ErrorKind::NotConnected)
+    } else {
+        error
+    }
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn not_connected_once_reset(error: io::Error) -> io::Error {
+    error
 }
 
 type Op = NetOp<OsListener, OsStream>;

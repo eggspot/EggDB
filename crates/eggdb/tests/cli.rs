@@ -899,7 +899,7 @@ fn collections_are_renamed_counted_by_stats_and_deleted_in_steps_by_the_binary()
     let listed = dir.eggdb(&["collection", "list", "app.db"]);
     assert_eq!(
         stdout(&listed),
-        "{\"file\":\"app.db\",\"collections\":[\"cache\",\"users\"]}\n"
+        "{\"file\":\"app.db\",\"collections\":[\"cache\",\"users\"],\"counts\":[{\"name\":\"cache\",\"entries\":1,\"key_bytes\":3,\"value_bytes\":3},{\"name\":\"users\",\"entries\":0,\"key_bytes\":0,\"value_bytes\":0}]}\n"
     );
 
     let plain = dir.eggdb(&["stats", "app.db"]);
@@ -957,6 +957,6 @@ fn collections_are_renamed_counted_by_stats_and_deleted_in_steps_by_the_binary()
     let db = Database::open(&path).unwrap();
     assert_eq!(db.collection_names().unwrap(), ["users"]);
     assert_eq!(db.finish_collection_drops().unwrap(), 0);
-    assert_eq!(db.check().unwrap().entries, 1 + 1);
+    assert_eq!(db.check().unwrap().entries, 1 + 1 + 1);
     db.close().unwrap();
 }
