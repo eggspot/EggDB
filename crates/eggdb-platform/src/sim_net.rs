@@ -54,9 +54,12 @@ pub use datagram::SimDatagramSocket;
 /// [`ErrorKind::TimedOut`] after [`SimNetwork::CONNECT_TIMEOUT`], as an unanswered TCP handshake
 /// does. A connection survives a short cut, but an end whose bytes stay unacknowledged for
 /// [`SimNetwork::RETRANSMISSION_TIMEOUT`] (they cannot cross, or the acknowledgements cannot
-/// come back) gives up, as TCP does after its retransmissions: its operations fail with
-/// [`ErrorKind::TimedOut`] and its peer, once it can be reached again, finds the connection
-/// reset. A receive with nothing coming waits until the cut heals or the operation is canceled,
+/// come back) gives up, as TCP does after its retransmissions: an operation fails with
+/// [`ErrorKind::TimedOut`] once, as Linux reports a socket error once (a receive first returns
+/// what had already arrived, and the end of stream instead when the peer's end of sending
+/// arrived before the timeout), then receives return the end of stream and sends fail with
+/// [`ErrorKind::ConnectionReset`], the kind Linux's `EPIPE` maps to. Its peer, once it can be
+/// reached again, finds the connection reset. A receive with nothing coming waits until the cut heals or the operation is canceled,
 /// and an end that sends nothing never learns that its peer gave up, as over TCP. After a reset
 /// or a timeout, the end's [`NetStream::peer_address`] and [`NetStream::shutdown_write`] fail
 /// with [`ErrorKind::NotConnected`], as the operating systems' do.
@@ -110,6 +113,8 @@ struct Connection {
     flows: [Flow; 2],
     open: [bool; 2],
     failed: [Option<ErrorKind>; 2],
+    timeout_reported: [bool; 2],
+    peer_ended_before_timeout: [bool; 2],
 }
 
 impl Connection {
@@ -131,7 +136,12 @@ impl Connection {
 
     fn time_out(&mut self, side: usize) {
         self.failed[side] = Some(ErrorKind::TimedOut);
+        self.peer_ended_before_timeout[side] = self.flows[1 - side].end_arrived;
         self.flows[side].forget_in_transit();
+    }
+
+    fn report_timeout(&mut self, side: usize) -> bool {
+        !std::mem::replace(&mut self.timeout_reported[side], true)
     }
 
     fn hosts(&self, side: usize) -> [IpAddr; 2] {
@@ -1152,6 +1162,8 @@ impl World {
                 flows: [Flow::default(), Flow::default()],
                 open: [true, true],
                 failed: [None, None],
+                timeout_reported: [false, false],
+                peer_ended_before_timeout: [false, false],
             },
         );
         self.listeners.get_mut(&address)?.push_back(id);
@@ -1177,8 +1189,17 @@ impl World {
         if let Err(error) = self.next_operation() {
             return Some(Err(error));
         }
+        if failure == Some(ErrorKind::TimedOut) && readable == 0 {
+            let connection = self.connections.get_mut(&stream.connection)?;
+            if connection.peer_ended_before_timeout[stream.side]
+                || !connection.report_timeout(stream.side)
+            {
+                return Some(Ok(NetOutput::Transferred(0)));
+            }
+            return Some(Err(Error::new(ErrorKind::TimedOut)));
+        }
         if let Some(kind) = failure
-            && (kind != ErrorKind::TimedOut || readable == 0)
+            && kind != ErrorKind::TimedOut
         {
             return Some(Err(Error::new(kind)));
         }
@@ -1204,6 +1225,18 @@ impl World {
         }
         if let Err(error) = self.next_operation() {
             return Some(Err(error));
+        }
+        if failure == Some(ErrorKind::TimedOut) {
+            let first = self
+                .connections
+                .get_mut(&stream.connection)?
+                .report_timeout(stream.side);
+            let kind = if first {
+                ErrorKind::TimedOut
+            } else {
+                ErrorKind::ConnectionReset
+            };
+            return Some(Err(Error::new(kind)));
         }
         if let Some(kind) = failure {
             return Some(Err(Error::new(kind)));
@@ -1563,7 +1596,10 @@ mod tests {
             assert_eq!(pair.now(), SimNetwork::RETRANSMISSION_TIMEOUT);
             pair.send(&client, b"again", 2);
             let completion = pair.reap(1).pop().unwrap();
-            assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::TimedOut);
+            assert_eq!(
+                completion.result.unwrap_err().kind(),
+                ErrorKind::ConnectionReset
+            );
             let not_connected = ErrorKind::NotConnected;
             assert_eq!(client.peer_address().unwrap_err().kind(), not_connected);
             assert_eq!(client.shutdown_write().unwrap_err().kind(), not_connected);
@@ -1611,7 +1647,51 @@ mod tests {
         pair.receive(&client, 16, 4);
         let completion = pair.reap(1).pop().unwrap();
         assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::TimedOut);
+        pair.receive(&client, 16, 5);
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.result.unwrap().transferred(), Some(0));
+        pair.send(&client, b"again", 6);
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(
+            completion.result.unwrap_err().kind(),
+            ErrorKind::ConnectionReset
+        );
         pair.queue.cancel(1).unwrap();
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::Canceled);
+    }
+
+    #[test]
+    fn an_end_whose_peer_had_ended_reads_the_end_and_its_send_reports_the_timeout_once() {
+        let mut pair = Pair::new(23);
+        let (client, server) = pair.connect();
+        server.shutdown_write().unwrap();
+        pair.receive(&client, 16, 0);
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.result.unwrap().transferred(), Some(0));
+        pair.network.partition(CLIENT, SERVER);
+        pair.send(&client, b"request", 1);
+        pair.reap(1);
+        pair.receive(&server, 16, 2);
+        assert!(
+            pair.reap_for(1, 2 * SimNetwork::RETRANSMISSION_TIMEOUT)
+                .is_empty()
+        );
+        for user_data in [3, 4] {
+            pair.receive(&client, 16, user_data);
+            let completion = pair.reap(1).pop().unwrap();
+            assert_eq!(completion.result.unwrap().transferred(), Some(0));
+        }
+        pair.send(&client, b"again", 5);
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::TimedOut);
+        pair.send(&client, b"again", 6);
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(
+            completion.result.unwrap_err().kind(),
+            ErrorKind::ConnectionReset
+        );
+        pair.queue.cancel(2).unwrap();
         let completion = pair.reap(1).pop().unwrap();
         assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::Canceled);
     }
