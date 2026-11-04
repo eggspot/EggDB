@@ -12,6 +12,7 @@ use crate::oracle_collections;
 use crate::oracle_intervals::{DEFAULT_LEADING_PRECISION, IntervalField, MAX_PRECISION, Qualifier};
 use crate::settings::Settings;
 use crate::types::{SqlType, Value};
+use crate::window::{ValueTreatment, WindowFunction};
 
 /// The Oracle Database release whose documented behaviour EggDB's Oracle dialect follows.
 pub const ORACLE_COMPATIBLE_VERSION: &str = "23ai";
@@ -186,14 +187,6 @@ pub(super) fn ansi_literal(date: bool, text: Expr, position: usize) -> Expr {
 pub(super) fn not_below_zero(count: Expr) -> Expr {
     let position = count.position;
     oracle_function("oracle_row_count", vec![count], position)
-}
-
-fn invalid_identifier(name: &str, position: usize) -> SqlError {
-    SqlError::new(
-        SqlState::UNDEFINED_FUNCTION,
-        format!("function {name}() does not exist"),
-    )
-    .at(position)
 }
 
 fn wrong_argument_count(name: &Name, too_few: bool) -> SqlError {
@@ -927,6 +920,166 @@ impl<'t> Parser<'t> {
         ))
     }
 
+    fn null_treatment(&mut self, treatment: &mut ValueTreatment) {
+        if self.is_word_at(1, "nulls") {
+            if self.is_word("ignore") {
+                self.at += 2;
+                treatment.ignore_nulls = true;
+            } else if self.is_word("respect") {
+                self.at += 2;
+                treatment.ignore_nulls = false;
+            }
+        }
+    }
+
+    fn oracle_analytic_function(
+        &mut self,
+        name: &Name,
+        function: WindowFunction,
+    ) -> SqlResult<Expr> {
+        let treated = function.takes_value_treatment();
+        let mut treatment = ValueTreatment::default();
+        self.expect(&TokenKind::LeftParen)?;
+        let mut arguments = Vec::new();
+        if !self.take(&TokenKind::RightParen) {
+            loop {
+                arguments.push(self.expression()?);
+                if treated && arguments.len() == 1 {
+                    self.null_treatment(&mut treatment);
+                }
+                if !self.take(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(&TokenKind::RightParen)?;
+        }
+        if function == WindowFunction::NthValue
+            && self.is_word("from")
+            && (self.is_word_at(1, "first") || self.is_word_at(1, "last"))
+        {
+            self.at += 1;
+            treatment.from_last = self.take_word("last");
+            if !treatment.from_last {
+                self.expect_word("first")?;
+            }
+        }
+        if treated {
+            self.null_treatment(&mut treatment);
+        }
+        self.oracle_window_call(function, arguments, treatment, name)
+    }
+
+    pub(super) fn missing_window(position: usize) -> SqlError {
+        SqlError::new(
+            SqlState::WRONG_OBJECT_TYPE,
+            "missing window specification for this function",
+        )
+        .with_oracle_code(30484)
+        .at(position)
+    }
+
+    fn ratio_to_report(&mut self, name: &Name) -> SqlResult<Expr> {
+        let position = name.position;
+        let mut arguments = self.oracle_arguments()?;
+        if arguments.len() != 1 {
+            return Err(wrong_argument_count(name, arguments.is_empty()));
+        }
+        let Some(value) = arguments.pop() else {
+            return Err(wrong_argument_count(name, true));
+        };
+        if !self.is_word("over") {
+            return Err(Self::missing_window(position));
+        }
+        let partition = self.partition_only_window()?;
+        let total = super::windows::whole_partition_call(
+            AggregateFunction::Sum,
+            vec![value.clone()],
+            partition,
+            Vec::new(),
+            position,
+        );
+        let total = function(
+            "nullif",
+            vec![total, literal(Literal::Integer(0), position)],
+            position,
+        );
+        Ok(oracle_function(
+            "oracle_divide",
+            vec![value, total],
+            position,
+        ))
+    }
+
+    pub(super) fn keep_follows(&self) -> bool {
+        self.oracle() && self.is_word("keep") && self.peek_kind_at(1) == &TokenKind::LeftParen
+    }
+
+    pub(super) fn oracle_keep(&mut self, aggregate: Expr) -> SqlResult<Expr> {
+        let position = aggregate.position;
+        let ExprKind::Aggregate {
+            function,
+            argument,
+            distinct,
+        } = aggregate.kind
+        else {
+            return Err(self.unexpected());
+        };
+        if !crate::oracle_keep::KEPT_AGGREGATES.contains(&function) {
+            return Err(self.unexpected());
+        }
+        if distinct {
+            return Err(self.not_supported("DISTINCT with KEEP (DENSE_RANK ...)"));
+        }
+        self.expect_word("keep")?;
+        self.expect(&TokenKind::LeftParen)?;
+        self.expect_word("dense_rank")?;
+        let last = self.take_word("last");
+        if !last {
+            self.expect_word("first")?;
+        }
+        self.expect_word("order")?;
+        self.expect_word("by")?;
+        let order = self.order_items()?;
+        self.expect(&TokenKind::RightParen)?;
+        let measure = argument.map_or_else(
+            || literal(Literal::Integer(1), position),
+            |argument| *argument,
+        );
+        let mut columns = vec![measure];
+        columns.extend(order.iter().map(|item| item.expr.clone()));
+        let partition = if self.is_word("over") {
+            Some(self.partition_only_window()?)
+        } else {
+            None
+        };
+        let arrays = columns.into_iter().map(|column| match &partition {
+            Some(partition) => super::windows::whole_partition_call(
+                AggregateFunction::ArrayAgg,
+                vec![column],
+                partition.clone(),
+                order.clone(),
+                position,
+            ),
+            None => Expr {
+                kind: ExprKind::Aggregate {
+                    function: AggregateFunction::ArrayAgg,
+                    argument: Some(Box::new(crate::aggregate::ordered_arguments(
+                        column,
+                        order.clone(),
+                    ))),
+                    distinct: false,
+                },
+                position,
+            },
+        });
+        let mut arguments = vec![
+            literal(Literal::String(function.name().to_owned()), position),
+            literal(Literal::Boolean(last), position),
+        ];
+        arguments.extend(arrays);
+        Ok(oracle_function("oracle_keep", arguments, position))
+    }
+
     fn oracle_number(&mut self) -> SqlResult<SqlType> {
         if !self.take(&TokenKind::LeftParen) {
             return Ok(SqlType::Numeric(None));
@@ -1177,6 +1330,12 @@ impl<'t> Parser<'t> {
         if name.text == "listagg" {
             return self.oracle_listagg(name).map(Some);
         }
+        if name.text == "ratio_to_report" {
+            return self.ratio_to_report(name).map(Some);
+        }
+        if let Some(function) = crate::window::WindowFunction::named(&name.text) {
+            return self.oracle_analytic_function(name, function).map(Some);
+        }
         if name.text == "sys_connect_by_path" {
             let arguments = self.oracle_arguments()?;
             return Ok(Some(function("sys_connect_by_path", arguments, position)));
@@ -1234,9 +1393,11 @@ impl<'t> Parser<'t> {
             "numtoyminterval" => ("oracle_numtoyminterval", 2, 2),
             "to_dsinterval" => ("oracle_to_dsinterval", 1, 1),
             "to_yminterval" => ("oracle_to_yminterval", 1, 1),
-            _ if crate::window::WindowFunction::named(&name.text).is_some() => {
-                return Err(invalid_identifier(&name.text, position));
-            }
+            "regexp_like" => ("oracle_regexp_like", 2, 3),
+            "regexp_count" => ("oracle_regexp_count", 2, 4),
+            "regexp_substr" => ("oracle_regexp_substr", 2, 6),
+            "regexp_instr" => ("oracle_regexp_instr", 2, 7),
+            "regexp_replace" => ("oracle_regexp_replace", 2, 6),
             _ => return self.oracle_routine_call(name).map(Some),
         };
         let arguments = self.oracle_arguments()?;

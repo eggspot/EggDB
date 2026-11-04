@@ -433,7 +433,11 @@ fn oracle_function_type(name: &str, arguments: &[Expr]) -> Option<SqlType> {
         }
         "oracle_hextoraw" => Some(SqlType::Bytea),
         "oracle_rawtohex" => Some(SqlType::Text),
-        "oracle_tz_offset" | "oracle_listagg" => Some(SqlType::Text),
+        "oracle_tz_offset"
+        | "oracle_listagg"
+        | "oracle_regexp_substr"
+        | "oracle_regexp_replace" => Some(SqlType::Text),
+        "oracle_regexp_like" => Some(SqlType::Boolean),
         "oracle_numtodsinterval" | "oracle_to_dsinterval" => Some(
             crate::oracle_intervals::IntervalKind::DayToSecond
                 .sql_type(crate::oracle_intervals::DEFAULT_FRACTION_DIGITS),

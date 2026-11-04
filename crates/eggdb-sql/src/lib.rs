@@ -92,10 +92,12 @@ mod oracle_dictionary;
 mod oracle_errors;
 mod oracle_functions;
 mod oracle_intervals;
+mod oracle_keep;
 mod oracle_listagg;
 mod oracle_nls;
 mod oracle_number_model;
 mod oracle_numerals;
+mod oracle_regexp;
 mod output_into;
 mod parser;
 mod partition_ddl;
@@ -232,6 +234,8 @@ mod migration_tool_tests;
 mod multitable_insert_tests;
 #[cfg(test)]
 mod one_statement_tests;
+#[cfg(test)]
+mod oracle_analytic_tests;
 #[cfg(test)]
 mod oracle_tests;
 #[cfg(test)]

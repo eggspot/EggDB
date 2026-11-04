@@ -77,7 +77,7 @@ fn whole(spans: &[Option<Span>]) -> Option<Span> {
     spans.first().copied().flatten()
 }
 
-fn each_match(
+pub(crate) fn each_match(
     regex: &Regex,
     chars: &[char],
     from: usize,
@@ -252,7 +252,7 @@ fn split_to_array(values: &[Value]) -> Option<SqlResult<Value>> {
     Some(split_pieces(text, pattern, flags, "regexp_split_to_array").and_then(text_array))
 }
 
-fn replacement(
+pub(crate) fn replacement(
     out: &mut String,
     template: &[char],
     chars: &[char],

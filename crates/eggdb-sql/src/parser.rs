@@ -4780,6 +4780,9 @@ impl<'t> Parser<'t> {
     fn function(&mut self, name: Name) -> SqlResult<Expr> {
         let shown = name.text.clone();
         let expr = self.function_call(name)?;
+        if self.keep_follows() {
+            return self.oracle_keep(expr);
+        }
         self.call_clauses(expr, &shown)
     }
 

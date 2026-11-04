@@ -31,6 +31,7 @@ pub(crate) struct Options {
     pub(crate) line_anchors: bool,
     pub(crate) expanded: bool,
     pub(crate) literal: bool,
+    pub(crate) leftmost_first: bool,
 }
 
 pub(crate) enum OptionLetter {

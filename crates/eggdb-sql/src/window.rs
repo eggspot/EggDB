@@ -11,6 +11,8 @@ use std::ops::Range;
 
 pub(crate) const WINDOW_CALL: &str = "window_call";
 const AGGREGATE_PREFIX: &str = "aggregate ";
+const IGNORE_NULLS_SUFFIX: &str = " ignore nulls";
+const FROM_LAST_SUFFIX: &str = " from last";
 const HEADER: usize = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,7 +31,66 @@ pub(crate) enum WindowFunction {
     Aggregate(AggregateFunction),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ValueTreatment {
+    pub(crate) ignore_nulls: bool,
+    pub(crate) from_last: bool,
+}
+
+impl ValueTreatment {
+    fn encoded(self, function: WindowFunction) -> String {
+        let mut text = function.encoded();
+        if self.from_last {
+            text.push_str(FROM_LAST_SUFFIX);
+        }
+        if self.ignore_nulls {
+            text.push_str(IGNORE_NULLS_SUFFIX);
+        }
+        text
+    }
+
+    fn decoded(text: &str) -> Option<(WindowFunction, Self)> {
+        let (text, ignore_nulls) = match text.strip_suffix(IGNORE_NULLS_SUFFIX) {
+            Some(rest) => (rest, true),
+            None => (text, false),
+        };
+        let (text, from_last) = match text.strip_suffix(FROM_LAST_SUFFIX) {
+            Some(rest) => (rest, true),
+            None => (text, false),
+        };
+        let function = WindowFunction::decoded(text)?;
+        Some((
+            function,
+            Self {
+                ignore_nulls,
+                from_last,
+            },
+        ))
+    }
+}
+
 impl WindowFunction {
+    pub(crate) fn needs_order(self) -> bool {
+        matches!(
+            self,
+            Self::RowNumber
+                | Self::Rank
+                | Self::DenseRank
+                | Self::PercentRank
+                | Self::CumeDist
+                | Self::Ntile
+                | Self::Lag
+                | Self::Lead
+        )
+    }
+
+    pub(crate) fn takes_value_treatment(self) -> bool {
+        matches!(
+            self,
+            Self::Lag | Self::Lead | Self::FirstValue | Self::LastValue | Self::NthValue
+        )
+    }
+
     pub(crate) fn named(name: &str) -> Option<Self> {
         Some(match name {
             "row_number" => Self::RowNumber,
@@ -261,6 +322,7 @@ pub(crate) enum WindowReference {
 
 pub(crate) struct WindowCall {
     pub(crate) function: WindowFunction,
+    pub(crate) treatment: ValueTreatment,
     pub(crate) arguments: Vec<Expr>,
     pub(crate) filter: Option<Expr>,
     pub(crate) window: WindowReference,
@@ -270,6 +332,7 @@ pub(crate) struct WindowCall {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct WindowSpec {
     pub(crate) function: WindowFunction,
+    pub(crate) treatment: ValueTreatment,
     pub(crate) arguments: usize,
     pub(crate) filtered: bool,
     pub(crate) partition: usize,
@@ -282,6 +345,7 @@ pub(crate) struct WindowSpec {
 
 struct Parts {
     function: WindowFunction,
+    treatment: ValueTreatment,
     arguments: Vec<Expr>,
     filter: Option<Expr>,
     partition: Vec<Expr>,
@@ -314,6 +378,7 @@ fn lost_definition(position: usize) -> SqlError {
 pub(crate) fn call(call: WindowCall) -> Expr {
     let WindowCall {
         function,
+        treatment,
         arguments,
         filter,
         window,
@@ -331,6 +396,7 @@ pub(crate) fn call(call: WindowCall) -> Expr {
     };
     encode(Parts {
         function,
+        treatment,
         arguments,
         filter,
         partition: definition.partition,
@@ -357,7 +423,7 @@ fn encode(parts: Parts) -> Expr {
         None => (String::new(), None, None),
     };
     let mut arguments = vec![
-        literal(Literal::String(parts.function.encoded())),
+        literal(Literal::String(parts.treatment.encoded(parts.function))),
         literal(Literal::String(encode_directions(&directions))),
         literal(Literal::Integer(parts.partition.len() as i64)),
         literal(Literal::Integer(parts.arguments.len() as i64)),
@@ -408,7 +474,7 @@ fn parts(expr: Expr) -> Option<Parts> {
     }
     let mut arguments = arguments.into_iter();
     let mut header: Vec<Expr> = arguments.by_ref().take(HEADER).collect();
-    let function = WindowFunction::decoded(&literal_text(header.first()?)?)?;
+    let (function, treatment) = ValueTreatment::decoded(&literal_text(header.first()?)?)?;
     let directions = decode_directions(&literal_text(header.get(1)?)?);
     let partition_count = literal_count(header.get(2)?)?;
     let argument_count = literal_count(header.get(3)?)?;
@@ -455,6 +521,7 @@ fn parts(expr: Expr) -> Option<Parts> {
         .collect();
     Some(Parts {
         function,
+        treatment,
         arguments: call_arguments,
         filter,
         partition,
@@ -480,10 +547,10 @@ pub(crate) fn function_name(arguments: &[Expr]) -> String {
     arguments
         .first()
         .and_then(literal_text)
-        .and_then(|text| WindowFunction::decoded(&text))
+        .and_then(|text| ValueTreatment::decoded(&text))
         .map_or_else(
             || "?column?".to_owned(),
-            |function| function.name().to_owned(),
+            |(function, _)| function.name().to_owned(),
         )
 }
 
@@ -498,6 +565,7 @@ pub(crate) fn split(expr: Expr) -> Option<(WindowSpec, Vec<Expr>)> {
     };
     let spec = WindowSpec {
         function: parts.function,
+        treatment: parts.treatment,
         arguments: parts.arguments.len(),
         filtered: parts.filter.is_some(),
         partition: parts.partition.len(),
@@ -1113,15 +1181,19 @@ impl<'k> Partition<'k> {
                     ),
                 ));
             };
-            let at = position as i64;
-            let target = if backward {
-                at.checked_sub(offset)
+            let found = if spec.treatment.ignore_nulls {
+                self.non_null_neighbour(position, offset, backward)
             } else {
-                at.checked_add(offset)
+                let at = position as i64;
+                let target = if backward {
+                    at.checked_sub(offset)
+                } else {
+                    at.checked_add(offset)
+                };
+                target
+                    .and_then(|target| usize::try_from(target).ok())
+                    .filter(|&target| target < count)
             };
-            let found = target
-                .and_then(|target| usize::try_from(target).ok())
-                .filter(|&target| target < count);
             let value = match found {
                 Some(target) => self.value(target, 0),
                 None if spec.arguments >= 3 => {
@@ -1138,6 +1210,19 @@ impl<'k> Partition<'k> {
             self.store(values, position, value);
         }
         Ok(())
+    }
+
+    fn non_null_neighbour(&self, position: usize, offset: i64, backward: bool) -> Option<usize> {
+        let wanted = usize::try_from(offset).ok()?;
+        if wanted == 0 {
+            return Some(position);
+        }
+        let has_value = |candidate: &usize| !self.value(*candidate, 0).is_null();
+        if backward {
+            (0..position).rev().filter(has_value).nth(wanted - 1)
+        } else {
+            (position + 1..self.len()).filter(has_value).nth(wanted - 1)
+        }
     }
 
     fn excluded(&self, exclusion: FrameExclusion, position: usize, candidate: usize) -> bool {
@@ -1335,8 +1420,11 @@ impl<'k> Partition<'k> {
         }
         for position in 0..count {
             let (start, end) = self.frame_range(frame, offsets, direction, position)?;
-            let mut rows = (start..end)
-                .filter(|&candidate| !self.excluded(frame.exclusion, position, candidate));
+            let ignore_nulls = spec.treatment.ignore_nulls;
+            let mut rows = (start..end).filter(|&candidate| {
+                !self.excluded(frame.exclusion, position, candidate)
+                    && !(ignore_nulls && self.value(candidate, 0).is_null())
+            });
             let chosen = match spec.function {
                 WindowFunction::FirstValue => rows.next(),
                 WindowFunction::LastValue => rows.next_back(),
@@ -1347,7 +1435,12 @@ impl<'k> Partition<'k> {
                     }
                     match wanted.as_integer() {
                         Some(number) if number > 0 => {
-                            rows.nth(usize::try_from(number - 1).unwrap_or(usize::MAX))
+                            let skipped = usize::try_from(number - 1).unwrap_or(usize::MAX);
+                            if spec.treatment.from_last {
+                                rows.rev().nth(skipped)
+                            } else {
+                                rows.nth(skipped)
+                            }
                         }
                         Some(_) => {
                             return Err(SqlError::new(
@@ -1390,6 +1483,7 @@ mod tests {
     fn spec(function: WindowFunction, arguments: usize) -> WindowSpec {
         WindowSpec {
             function,
+            treatment: super::ValueTreatment::default(),
             arguments,
             filtered: false,
             partition: 1,
@@ -1457,6 +1551,44 @@ mod tests {
         assert_eq!(
             values(&spec(WindowFunction::CumeDist, 0), &keys())[5],
             Value::Double(1.0)
+        );
+    }
+
+    #[test]
+    fn ignore_nulls_skips_rows_without_a_value() {
+        let rows: Vec<Vec<Value>> = [None, Some(10), None, Some(30)]
+            .into_iter()
+            .zip(1..)
+            .map(|(value, order)| {
+                vec![
+                    value.map_or(Value::Null, Value::Integer),
+                    Value::Integer(order),
+                ]
+            })
+            .collect();
+        let ignoring = |function| {
+            let mut ignoring = spec(function, 1);
+            ignoring.partition = 0;
+            ignoring.treatment.ignore_nulls = true;
+            ignoring
+        };
+        let integers = |numbers: [Option<i32>; 4]| -> Vec<Value> {
+            numbers
+                .into_iter()
+                .map(|number| number.map_or(Value::Null, Value::Integer))
+                .collect()
+        };
+        assert_eq!(
+            values(&ignoring(WindowFunction::Lag), &rows),
+            integers([None, None, Some(10), Some(10)])
+        );
+        assert_eq!(
+            values(&ignoring(WindowFunction::Lead), &rows),
+            integers([Some(10), Some(30), Some(30), None])
+        );
+        assert_eq!(
+            values(&ignoring(WindowFunction::LastValue), &rows),
+            integers([None, Some(10), Some(10), Some(30)])
         );
     }
 

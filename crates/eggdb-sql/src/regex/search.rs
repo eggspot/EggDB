@@ -280,6 +280,7 @@ pub(crate) struct Finder<'r, 't> {
     classes: &'r [CharClass],
     case: CaseSensitivity,
     newline_excluded: bool,
+    leftmost_first: bool,
     text: &'t [char],
     visited: Option<Visited>,
     looks: HashMap<(u32, usize), bool>,
@@ -321,6 +322,7 @@ impl<'r, 't> Finder<'r, 't> {
             classes: &regex.classes,
             case: regex.options.case,
             newline_excluded: regex.options.newline_excluded,
+            leftmost_first: regex.options.leftmost_first,
             text,
             visited,
             looks: HashMap::new(),
@@ -346,7 +348,9 @@ impl<'r, 't> Finder<'r, 't> {
         from: usize,
         budget: &mut StepBudget,
     ) -> SqlResult<Option<Vec<Option<Span>>>> {
-        let goal = if self.program.longest {
+        let goal = if self.leftmost_first {
+            Goal::First
+        } else if self.program.longest {
             Goal::Longest
         } else {
             Goal::Shortest
