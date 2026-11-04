@@ -19,6 +19,33 @@ fn eggdb(args: &[&str], password: Option<&str>) -> Output {
     command.output().unwrap()
 }
 
+fn exit_within(child: &mut std::process::Child, limit: Duration) -> std::process::ExitStatus {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("eggdb did not exit within {limit:?}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn eggdb_within(args: &[&str], password: &str, limit: Duration) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_eggdb"))
+        .args(args)
+        .env("EGGDB_PASSWORD", password)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    exit_within(&mut child, limit);
+    child.wait_with_output().unwrap()
+}
+
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
@@ -139,12 +166,107 @@ fn serve_takes_syslog_only_on_a_loopback_address() {
         "{}",
         stderr(&refused)
     );
+    let any_port = eggdb(
+        &[
+            "serve",
+            path,
+            "--create",
+            "--listen",
+            "127.0.0.1:0",
+            "--syslog-listen",
+            "127.0.0.1:0",
+        ],
+        Some("secret"),
+    );
+    assert_eq!(any_port.status.code(), Some(2), "{}", stderr(&any_port));
+    assert!(
+        stderr(&any_port).contains("--syslog-listen 127.0.0.1:0: give a port"),
+        "{}",
+        stderr(&any_port)
+    );
     let bad = eggdb(&["serve", path, "--syslog-listen", "x"], Some("secret"));
     assert!(
         stderr(&bad).contains("--syslog-listen needs an address and port such as 127.0.0.1:514"),
         "{}",
         stderr(&bad)
     );
+}
+
+fn free_syslog_port() -> u16 {
+    for _ in 0..20 {
+        let Ok(datagrams) = std::net::UdpSocket::bind("127.0.0.1:0") else {
+            continue;
+        };
+        let Ok(address) = datagrams.local_addr() else {
+            continue;
+        };
+        if std::net::TcpListener::bind(address).is_ok() {
+            return address.port();
+        }
+    }
+    panic!("no port free for both UDP and TCP on loopback");
+}
+
+#[test]
+fn serve_stores_syslog_sent_over_udp_and_tcp_and_stops_on_sigterm() {
+    let file = TempPath::new("serve-syslog-run");
+    let path = file.path().to_str().unwrap().to_owned();
+    let password_file = TempPath::new("serve-syslog-run-password");
+    std::fs::write(password_file.path(), "s3cret\n").unwrap();
+    let port = free_syslog_port();
+    let syslog_address = format!("127.0.0.1:{port}");
+    let mut server = Command::new(env!("CARGO_BIN_EXE_eggdb"))
+        .args([
+            "serve",
+            &path,
+            "--create",
+            "--listen",
+            "0",
+            "--password-file",
+            password_file.path().to_str().unwrap(),
+            "--syslog-listen",
+            &syslog_address,
+        ])
+        .env_remove("EGGDB_PASSWORD")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(server.stdout.take().unwrap());
+    let mut first = String::new();
+    stdout.read_line(&mut first).unwrap();
+    assert!(first.starts_with("{\"listening\":\"127.0.0.1:"), "{first}");
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    sender
+        .send_to(
+            b"<13>1 2026-11-04T10:00:00Z host app - - - over udp",
+            &syslog_address,
+        )
+        .unwrap();
+    let message = "<13>1 2026-11-04T10:00:01Z host app - - - over tcp";
+    let mut stream = TcpStream::connect(&syslog_address).unwrap();
+    stream
+        .write_all(format!("{} {message}", message.len()).as_bytes())
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    drop(stream);
+    stop(&mut server);
+    let status = exit_within(&mut server, Duration::from_secs(30));
+    if cfg!(unix) {
+        assert_eq!(status.code(), Some(0));
+        let stored = eggdb(
+            &[
+                "sql",
+                &path,
+                "-c",
+                "SELECT string_agg(message, '+' ORDER BY message) FROM syslog",
+            ],
+            None,
+        );
+        assert_eq!(stored.status.code(), Some(0), "{}", stderr(&stored));
+        let shown = String::from_utf8_lossy(&stored.stdout);
+        assert!(shown.contains("over tcp+over udp"), "{shown}");
+    }
 }
 
 #[test]
@@ -666,7 +788,7 @@ fn mcp_tables_needs_the_mcp_endpoint_and_names_that_exist() {
     );
     let token_file = TempPath::new("serve-mcp-tables-refused-token");
     std::fs::write(token_file.path(), "0123456789abcdef0123456789abcdef\n").unwrap();
-    let unknown = eggdb(
+    let unknown = eggdb_within(
         &[
             "serve",
             &path,
@@ -679,7 +801,8 @@ fn mcp_tables_needs_the_mcp_endpoint_and_names_that_exist() {
             "--mcp-tables",
             "orders,nowhere",
         ],
-        Some("secret"),
+        "secret",
+        Duration::from_secs(30),
     );
     assert_ne!(unknown.status.code(), Some(0), "{}", stderr(&unknown));
     assert!(

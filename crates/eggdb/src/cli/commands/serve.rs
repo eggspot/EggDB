@@ -1499,6 +1499,14 @@ fn bind_syslog(
             Some(CommandName::Serve),
         ));
     }
+    if address.port() == 0 {
+        return Err(Failure::usage(
+            format!(
+                "--syslog-listen {address}: give a port, such as 127.0.0.1:5514, since senders are configured with it"
+            ),
+            Some(CommandName::Serve),
+        ));
+    }
     let cannot_listen = |error: String| {
         Failure::database(
             format!("cannot listen for syslog on {address}: {error}"),
