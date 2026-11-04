@@ -359,6 +359,24 @@ impl KeyValueWrite for Box<dyn BoxedWrite + '_> {
         (**self).delete(key)
     }
 
+    fn put_with_expiry(&mut self, key: &[u8], value: &[u8], ttl: Duration) -> SqlResult<()> {
+        (**self).put_with_expiry(key, value, ttl)
+    }
+
+    fn collection_put(
+        &mut self,
+        name: &str,
+        key: &[u8],
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> SqlResult<bool> {
+        (**self).collection_put(name, key, value, ttl)
+    }
+
+    fn collection_delete(&mut self, name: &str, key: &[u8]) -> SqlResult<Option<bool>> {
+        (**self).collection_delete(name, key)
+    }
+
     fn restore(&mut self, key: &[u8], previous: Option<&[u8]>) -> SqlResult<()> {
         (**self).restore(key, previous)
     }
@@ -440,3 +458,7 @@ pub(crate) fn delete_prefix(writer: &mut dyn KeyValueWrite, prefix: &[u8]) -> Sq
         }
     }
 }
+
+#[cfg(test)]
+#[path = "store_tests.rs"]
+mod tests;

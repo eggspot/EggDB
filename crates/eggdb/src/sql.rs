@@ -190,6 +190,35 @@ fn collection_of<'t>(
     }
 }
 
+fn put_in_collection(
+    transaction: &mut WriteTransaction<'_>,
+    name: &str,
+    key: &[u8],
+    value: &[u8],
+    ttl: Option<Duration>,
+) -> SqlResult<bool> {
+    let Some(mut collection) = writable_collection(transaction, name)? else {
+        return Ok(false);
+    };
+    match ttl {
+        Some(ttl) => collection.put_with_expiry(key, value, ttl),
+        None => collection.put(key, value),
+    }
+    .map_err(store_error)?;
+    Ok(true)
+}
+
+fn delete_from_collection(
+    transaction: &mut WriteTransaction<'_>,
+    name: &str,
+    key: &[u8],
+) -> SqlResult<Option<bool>> {
+    let Some(mut collection) = writable_collection(transaction, name)? else {
+        return Ok(None);
+    };
+    collection.delete(key).map(Some).map_err(store_error)
+}
+
 fn writable_collection<'t, 'db>(
     transaction: &'t mut WriteTransaction<'db>,
     name: &str,
@@ -260,22 +289,11 @@ impl KeyValueWrite for SqlWriter<'_> {
         value: &[u8],
         ttl: Option<Duration>,
     ) -> SqlResult<bool> {
-        let Some(mut collection) = writable_collection(&mut self.0, name)? else {
-            return Ok(false);
-        };
-        match ttl {
-            Some(ttl) => collection.put_with_expiry(key, value, ttl),
-            None => collection.put(key, value),
-        }
-        .map_err(store_error)?;
-        Ok(true)
+        put_in_collection(&mut self.0, name, key, value, ttl)
     }
 
     fn collection_delete(&mut self, name: &str, key: &[u8]) -> SqlResult<Option<bool>> {
-        let Some(mut collection) = writable_collection(&mut self.0, name)? else {
-            return Ok(None);
-        };
-        collection.delete(key).map(Some).map_err(store_error)
+        delete_from_collection(&mut self.0, name, key)
     }
 
     fn commit(self) -> SqlResult<()> {
@@ -587,12 +605,16 @@ impl<'db> SharedWriteStore<'db> {
         session: &mut Session<'_>,
         work: impl FnOnce(&mut WriteTransaction<'db>) -> T,
     ) -> Option<T> {
-        if !session.has_savepoints() {
+        if !session.records_savepoint_undo() {
             return self.with_open_transaction(work);
         }
         let (result, changes) =
             self.with_open_transaction(|transaction| transaction.journaled(work))?;
-        session.record_savepoint_undo(changes);
+        let recorded = session.record_savepoint_undo(changes);
+        debug_assert!(
+            recorded,
+            "the session stopped taking savepoint undo during the work"
+        );
         Some(result)
     }
 }
@@ -689,6 +711,28 @@ impl KeyValueWrite for SharedWriter<'_, '_> {
 
     fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {
         self.writing(|transaction| transaction.delete(key).map_err(store_error))
+    }
+
+    fn put_with_expiry(&mut self, key: &[u8], value: &[u8], ttl: Duration) -> SqlResult<()> {
+        self.writing(|transaction| {
+            transaction
+                .put_with_expiry(key, value, ttl)
+                .map_err(store_error)
+        })
+    }
+
+    fn collection_put(
+        &mut self,
+        name: &str,
+        key: &[u8],
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> SqlResult<bool> {
+        self.writing(|transaction| put_in_collection(transaction, name, key, value, ttl))
+    }
+
+    fn collection_delete(&mut self, name: &str, key: &[u8]) -> SqlResult<Option<bool>> {
+        self.writing(|transaction| delete_from_collection(transaction, name, key))
     }
 
     fn restore(&mut self, key: &[u8], previous: Option<&[u8]>) -> SqlResult<()> {
@@ -841,6 +885,29 @@ mod tests {
         assert_eq!(line_of(text, 24), (2, "SELECT * FROM nope;", 14));
         assert_eq!(line_of(text, 0), (1, "SELECT 1;", 0));
         assert_eq!(line_of("é x", 3), (1, "é x", 2));
+    }
+
+    #[test]
+    fn the_shared_writer_writes_times_to_live_and_collection_entries()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let db = Database::in_memory()?;
+        db.create_collection("sessions")?;
+        db.collection("sessions").put("s:1", "Ada")?;
+        let store = SharedWriteStore::new(&db);
+        let mut writer = store.begin_write()?;
+        writer.put_with_expiry(b"timed", b"t", Duration::from_secs(3600))?;
+        assert!(writer.collection_put("sessions", b"s:2", b"Grace", None)?);
+        assert!(!writer.collection_put("nowhere", b"k", b"v", None)?);
+        assert_eq!(writer.collection_delete("sessions", b"s:1")?, Some(true));
+        assert_eq!(writer.collection_delete("nowhere", b"k")?, None);
+        writer.commit()?;
+        assert!(db.time_to_live("timed")?.is_some());
+        assert_eq!(
+            db.collection("sessions").get("s:2")?,
+            Some(b"Grace".to_vec())
+        );
+        assert_eq!(db.collection("sessions").get("s:1")?, None);
+        Ok(())
     }
 
     fn undone_after_a_savepoint(

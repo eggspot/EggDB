@@ -1,7 +1,7 @@
 use crate::collection;
 use crate::collection_counts::{EntryCount, KeptCounts};
 use crate::database::Database;
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result};
 use crate::expiry::{self, Moment};
 use crate::scan::{KeyRange, Reader, Scan};
 use crate::writer_slot::WriterTurn;
@@ -332,6 +332,12 @@ impl<'db> WriteTransaction<'db> {
         len: u64,
         source: &mut dyn std::io::Read,
     ) -> Result<()> {
+        if collection::counted_number(key).is_some() {
+            return Err(Error::new(
+                ErrorKind::ReservedKey,
+                "a collection's entry count is written whole by EggDB, never streamed",
+            ));
+        }
         let previous = self.previous_for_journal(key)?;
         let kept = self.kept_entry(key)?;
         let before = self.value_len_if(kept, key)?;
@@ -469,6 +475,15 @@ impl<'db> WriteTransaction<'db> {
             return Ok(None);
         };
         Ok(self.kept_count(number)?.map(|_| (number, key_bytes)))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn put_unchecked(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        let tree = match self.tree {
+            Some(tree) => tree,
+            None => self.create_tree()?,
+        };
+        self.inner.put(&tree, key, value).map_err(Error::storage)
     }
 
     pub(crate) fn kept_count(&mut self, number: u32) -> Result<Option<EntryCount>> {

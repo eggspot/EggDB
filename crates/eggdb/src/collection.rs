@@ -668,6 +668,43 @@ impl ReadTransaction<'_> {
         stats_of(&records, self.reader(), self.tree())
     }
 
+    pub(crate) fn check_collection_counts(&self) -> Result<()> {
+        let names = names_in(Scan::within_prefix(
+            self.reader(),
+            self.tree(),
+            &names_prefix(),
+            b"",
+        ))?;
+        let Some(found) = self.tree() else {
+            return Ok(());
+        };
+        for name in names {
+            let number = collection_number(self.reader().get(&found, &name_key(&name))?, &name)?;
+            let Some(record) = self.reader().get(&found, &count_key(number))? else {
+                continue;
+            };
+            let kept = EntryCount::read(&record).map_err(|error| {
+                Error::new(error.kind(), format!("the collection \"{name}\": {error}"))
+            })?;
+            let held = counted_by_scan(self.reader(), self.tree(), number)?;
+            if kept != held {
+                return Err(Error::new(
+                    ErrorKind::Corrupt,
+                    format!(
+                        "the collection \"{name}\" keeps a count of {} entries ({} key bytes, {} value bytes) but holds {} ({} key bytes, {} value bytes); restore from a backup, or delete the collection with `eggdb collection delete`",
+                        kept.entries,
+                        kept.key_bytes,
+                        kept.value_bytes,
+                        held.entries,
+                        held.key_bytes,
+                        held.value_bytes
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn has_uncounted_collections(&self) -> Result<bool> {
         let records = kept_records(self.reader(), self.tree())?;
         Ok(records.iter().any(|record| record.count.is_none()))
@@ -819,7 +856,11 @@ impl<'db> WriteTransaction<'db> {
             return Ok(None);
         };
         let number = read_record(&existing, &format!("the collection \"{name}\""))?;
-        let entries = self.kept_count(number)?.map(|count| count.entries);
+        let entries = match self.kept_count(number) {
+            Ok(count) => count.map(|count| count.entries),
+            Err(error) if error.kind() == ErrorKind::Corrupt => None,
+            Err(error) => return Err(error),
+        };
         self.delete_raw(&key)?;
         self.delete_raw(&count_key(number))?;
         self.put_raw(&dropping_key(number), &dropping_record(name))?;

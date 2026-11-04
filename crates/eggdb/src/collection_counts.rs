@@ -246,6 +246,57 @@ mod tests {
     }
 
     #[test]
+    fn a_damaged_count_fails_writes_and_check_but_its_collection_still_drops() {
+        let db = Database::in_memory().unwrap();
+        db.create_collection("c").unwrap();
+        db.write(|tx| tx.collection("c")?.put("k", "v")).unwrap();
+        assert!(db.check().is_ok());
+        let mut tx = db.begin_write().unwrap();
+        tx.put_unchecked(&count_key(1), &count(5, 1, 1).record())
+            .unwrap();
+        tx.commit().unwrap();
+        let differs = db.check().unwrap_err();
+        assert_eq!(differs.kind(), ErrorKind::Corrupt);
+        assert!(
+            differs
+                .to_string()
+                .contains("the collection \"c\" keeps a count of 5 entries"),
+            "{differs}"
+        );
+        let mut tx = db.begin_write().unwrap();
+        tx.put_unchecked(&count_key(1), &[1, 2, 3]).unwrap();
+        tx.commit().unwrap();
+        let put = db.write(|tx| tx.collection("c")?.put("k2", "v"));
+        assert_eq!(put.unwrap_err().kind(), ErrorKind::Corrupt);
+        let deleted = db.write(|tx| tx.collection("c")?.delete("k"));
+        assert_eq!(deleted.unwrap_err().kind(), ErrorKind::Corrupt);
+        assert_eq!(
+            db.collection_stats().unwrap_err().kind(),
+            ErrorKind::Corrupt
+        );
+        let damaged = db.check().unwrap_err();
+        assert_eq!(damaged.kind(), ErrorKind::Corrupt);
+        assert!(
+            damaged.to_string().contains("the collection \"c\""),
+            "{damaged}"
+        );
+        assert!(db.drop_collection("c").unwrap());
+        assert!(db.check().is_ok());
+        assert!(shown(&db).is_empty());
+    }
+
+    #[test]
+    fn a_count_record_is_never_streamed() {
+        let db = Database::in_memory().unwrap();
+        let mut tx = db.begin_write().unwrap();
+        let record = count(0, 0, 0).record();
+        let refused = tx
+            .put_raw_from_reader(&count_key(1), record.len() as u64, &mut record.as_slice())
+            .unwrap_err();
+        assert_eq!(refused.kind(), ErrorKind::ReservedKey);
+    }
+
+    #[test]
     fn a_damaged_or_newer_count_record_is_an_error_not_a_count() {
         let record = count(3, 4, 5).record();
         let damaged: [&[u8]; 4] = [&[], &[1], &record[..24], &[0; 25]];

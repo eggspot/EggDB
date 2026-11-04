@@ -246,6 +246,13 @@ fn a_client_that_can_ask_is_asked_before_a_key_is_deleted() {
             message.contains("delete the key \"session:1\" from the default key space of app.db."),
             "{message}"
         );
+        assert_eq!(
+            text_at(
+                asked,
+                &["params", "requestedSchema", "properties", "run", "title"]
+            ),
+            "Delete it from app.db"
+        );
         let result = &answers[2];
         if deletes {
             assert!(!is_error(result), "{result:?}");

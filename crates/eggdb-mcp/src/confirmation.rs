@@ -25,6 +25,13 @@ impl Asked<'_> {
         }
     }
 
+    fn title(&self, database: &str) -> String {
+        match self {
+            Self::Statement { .. } => format!("Run it on {database}"),
+            Self::KeyDelete { .. } => format!("Delete it from {database}"),
+        }
+    }
+
     fn yes_does(&self) -> &'static str {
         match self {
             Self::Statement { .. } => {
@@ -56,7 +63,7 @@ pub(crate) fn elicitation_params(database: &str, asked: &Asked<'_>, form_mode: b
         .key("type")
         .string("boolean")
         .key("title")
-        .string(&format!("Run it on {}", visible(database)))
+        .string(&asked.title(&visible(database)))
         .key("description")
         .string(asked.yes_does())
         .key("default")

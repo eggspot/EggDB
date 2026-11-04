@@ -505,6 +505,12 @@ Things to know about the audit file:
   and the names it uses, which are shown in a code fence with hidden and direction-changing
   characters made visible, so the question cannot be made to say something else. What runs is
   exactly the statement you saw.
+- **`put` does not ask, `del` does.** A `put` replaces a key's value and time to live without a
+  confirmation (one named key, like an `UPDATE` of one pinned row, D328), so with `--allow-write`
+  an agent can overwrite, or give a short time to live to, any key it can name in the default
+  key space and the collections. Every `put` is in the audit log with the key; keep
+  `--allow-write` off, or limit the server with `--tables` (`--mcp-tables` for `eggdb serve`),
+  which withdraws the key-value tools, when old values must not be overwritten.
 - **A stopped call never half-writes.** A call still running a second past its time limit ends
   the server, but never once its commit began: the time-limit record always means nothing was
   committed. A change that was committed is never reported as failed.
