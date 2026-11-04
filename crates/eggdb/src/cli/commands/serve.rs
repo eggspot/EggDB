@@ -733,7 +733,8 @@ impl Session<'_> {
             db: &db,
             prefix: super::serve_resp::ES_COLLECTIONS,
         };
-        let es_api = eggdb_esrest::Api::new(&es_database, &config.user, es_password);
+        let es_api = eggdb_esrest::Api::new(&es_database, &config.user, es_password)
+            .with_memory_budget(Arc::clone(&memory_budget));
         let graph_database = super::serve_resp::DatabaseKeyspace {
             db: &db,
             prefix: super::serve_resp::GRAPH_COLLECTIONS,

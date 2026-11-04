@@ -332,6 +332,16 @@ jobs:
           totals = client.search(index="books", body={"size": 0, "aggs": {"genres": {"terms": {"field": "genre"}}}})
           assert totals["aggregations"]["genres"]["buckets"][0] == {"key": "fable", "doc_count": 2}, totals
           assert client.count(index="books")["count"] == 3
+          docs = client.mget(index="books", body={"ids": ["1", "9"]})["docs"]
+          assert [doc["found"] for doc in docs] == [True, False], docs
+          answers = client.msearch(body=[{"index": "books"}, {"query": {"match": {"title": "fox"}}}, {"index": "nowhere"}, {"query": {"match_all": {}}}])["responses"]
+          assert answers[0]["hits"]["total"]["value"] == 1 and answers[1]["status"] == 404, answers
+          updated = client.update_by_query(index="books", body={"script": {"source": "ctx._source.pages += params.more", "params": {"more": 1}}, "query": {"term": {"genre": "fable"}}}, conflicts="proceed")
+          assert updated["updated"] == 2 and updated["failures"] == [], updated
+          assert client.get(index="books", id="1")["_source"]["pages"] == 121
+          removed = client.delete_by_query(index="books", body={"query": {"term": {"genre": "nature"}}})
+          assert removed["deleted"] == 1, removed
+          assert client.count(index="books")["count"] == 2
           client.delete(index="books", id="3")
           client.indices.delete(index="books")
           assert not client.indices.exists(index="books")
