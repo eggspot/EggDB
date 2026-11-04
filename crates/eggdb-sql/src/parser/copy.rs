@@ -51,6 +51,7 @@ fn option_key(name: &str) -> Option<&'static str> {
         "force_null" => "force_null",
         "encoding" => "encoding",
         "on_error" => "on_error",
+        "reject_limit" => "reject_limit",
         "log_verbosity" => "log_verbosity",
         _ => return None,
     })
@@ -88,6 +89,28 @@ fn one_byte(key: &str, argument: Argument, what: &str) -> SqlResult<u8> {
             "COPY {what} must be a single one-byte character"
         ))),
     }
+}
+
+fn reject_limit(key: &str, argument: Argument, position: usize) -> SqlResult<u64> {
+    let Argument::Text(given) = argument else {
+        return Err(SqlError::syntax(
+            format!("{key} requires a numeric value"),
+            position,
+        ));
+    };
+    let limit: i64 = given.parse().map_err(|_| {
+        SqlError::new(
+            SqlState::INVALID_TEXT_REPRESENTATION,
+            format!("invalid input syntax for type bigint: \"{given}\""),
+        )
+        .at(position)
+    })?;
+    u64::try_from(limit)
+        .ok()
+        .filter(|&limit| limit > 0)
+        .ok_or_else(|| {
+            invalid_value(format!("REJECT_LIMIT ({limit}) must be greater than zero")).at(position)
+        })
 }
 
 fn columns(key: &str, argument: Argument) -> SqlResult<CopyColumns> {
@@ -174,6 +197,7 @@ impl OptionsBuilder {
                     }
                 };
             }
+            "reject_limit" => options.reject_limit = Some(reject_limit(key, argument, position)?),
             "log_verbosity" => {
                 let verbosity = text(key, argument)?;
                 options.log_verbosity = match verbosity.to_ascii_lowercase().as_str() {
@@ -232,6 +256,11 @@ impl OptionsBuilder {
     fn check_modes(&self, direction: CopyDirection) -> SqlResult<()> {
         self.check_binary()?;
         let options = &self.options;
+        if options.reject_limit.is_some() && options.on_error != CopyOnError::Ignore {
+            return Err(invalid_value(
+                "COPY REJECT_LIMIT requires ON_ERROR to be set to IGNORE",
+            ));
+        }
         if options.format != CopyFormat::Csv {
             let csv_only = [
                 (options.quote.is_some(), "quote"),

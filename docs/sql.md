@@ -249,8 +249,8 @@ What it reads, on top of the statements of "What runs today":
 - **Statements**: `CREATE TABLE [IF NOT EXISTS]` with `WITHOUT ROWID` and `STRICT` accepted,
   `REFERENCES` and `FOREIGN KEY` accepted and not enforced (SQLite's default, `PRAGMA
   foreign_keys` off), `ON CONFLICT ABORT|FAIL` in constraints; `INSERT OR
-  REPLACE|IGNORE|ABORT|FAIL|ROLLBACK`, `REPLACE INTO`, upserts (`ON CONFLICT [(cols)] DO
-  NOTHING` and `DO UPDATE SET ... excluded.col`), `RETURNING`, `UPDATE ... SET ... FROM ...`
+  REPLACE|IGNORE|ABORT|FAIL|ROLLBACK`, `REPLACE INTO`, upserts (`ON CONFLICT [(cols [ASC|DESC])
+  [WHERE expr]] DO NOTHING` and `DO UPDATE SET ... excluded.col`; D324), `RETURNING`, `UPDATE ... SET ... FROM ...`
   as in PostgreSQL (D297); `LIMIT n OFFSET m`, `LIMIT m, n`
   and a negative `LIMIT` for no limit; `BEGIN [DEFERRED|IMMEDIATE|EXCLUSIVE] [TRANSACTION]`,
   `COMMIT`, `END`, `ROLLBACK`, with SQLite's errors for a `BEGIN` inside a transaction and a
@@ -1617,13 +1617,22 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   as it was before the statement, then inserts the rows in the query's order through the path of
   `INSERT ... VALUES` (conversions, defaults, identity, constraints, `RETURNING`), in every
   dialect (D138).
-- `INSERT ... ON CONFLICT [(columns)] DO NOTHING | DO UPDATE SET column = expr, ...` (`EXCLUDED`
-  names the row that was proposed; `DO UPDATE` needs the columns, as in PostgreSQL). `RETURNING`
-  gives the inserted and the updated rows, not the skipped ones, and each counts once in the
-  tag. The columns must be those of the primary key or a unique index (`42P10` otherwise); a
-  conflict on another unique key fails with `23505`, as in PostgreSQL, and `DO UPDATE` reaching
-  one row twice in a statement is `21000`. Not yet: `ON CONSTRAINT name` (`0A000`) and `WHERE` on
-  the target or the update.
+- `INSERT ... ON CONFLICT [(columns) [WHERE predicate] | ON CONSTRAINT name] DO NOTHING | DO
+  UPDATE SET column = expr, ...` (`EXCLUDED` names the row that was proposed; `DO UPDATE` needs
+  the columns or a constraint name, as in PostgreSQL). `RETURNING` gives the inserted and the
+  updated rows, not the skipped ones, and each counts once in the tag. The columns must be those
+  of the primary key or a unique index (`42P10` otherwise); a conflict on another unique key
+  fails with `23505`, as in PostgreSQL, and `DO UPDATE` reaching one row twice in a statement is
+  `21000`. `ON CONSTRAINT name` names the primary key or a unique constraint as the arbiter, on a
+  partitioned table too: a name that is no constraint of the table, or a unique index created
+  without a constraint, is `42704` (`constraint "x" for table "t" does not exist`), and a
+  `CHECK` or foreign key is `42809`. The `WHERE` after the columns is the index predicate
+  PostgreSQL uses to infer a partial unique index; EggDB has no partial indexes yet, so, as
+  PostgreSQL does when a full unique index matches, the predicate's columns are checked (`42703`)
+  and the full unique index on the columns is the arbiter. An expression in the columns
+  (`ON CONFLICT (lower(email))`) is `42P10`, as no index is on an expression yet, and `ASC`,
+  `DESC` and `NULLS` are `42601` (D324). Not yet: `WHERE` on `DO UPDATE`, and `COLLATE` or an
+  operator class on a target column.
 - `VALUES (expr, ...), (expr, ...) [ORDER BY ...] [LIMIT ...] [OFFSET ...]` as a statement, an
   operand of `UNION`, `INTERSECT` and `EXCEPT`, a subquery (`x IN (VALUES (1), (2))`), a `WITH`
   query and a `FROM` item (`(VALUES (1, 'a')) AS v(n, s)`): its columns are `column1`,
@@ -3664,6 +3673,7 @@ The older forms that `pg_dump` and psql write work too (`WITH CSV HEADER`, `DELI
 | `FORCE_NOT_NULL (cols) \| *`, `FORCE_NULL (cols) \| *` | CSV `FROM` only: an unquoted null string is an empty string, or a quoted one is NULL |
 | `ENCODING 'name'` | the encoding of the data the client sends or receives: `UTF8` (the default), `LATIN1`, `LATIN9`, `WIN1252`, and `UTF16` (`UTF16LE`, `UTF16BE`) beyond PostgreSQL; PostgreSQL's other encodings are `0A000`, an unknown name `22023` |
 | `ON_ERROR stop \| ignore` | `COPY FROM` only: `stop` (the default) fails the copy at the first bad value; `ignore` skips each row with a value its column's type does not accept and reports how many (text and CSV only) |
+| `REJECT_LIMIT n` | with `ON_ERROR ignore` only (`22023` otherwise): the copy fails with `22000` once more than `n` rows were skipped; `n` must be greater than zero (`22023`) |
 | `LOG_VERBOSITY default \| verbose \| silent` | with `ON_ERROR ignore`: `verbose` adds a notice per skipped row, `silent` drops the count |
 | `FREEZE` | accepted and changes nothing |
 
@@ -3710,6 +3720,10 @@ skipped row also gets `skipping row due to data type incompatibility at line L f
 "value"`, and `silent` leaves out the count. Rows that break the format (`22P04`), bytes that
 are not valid in the encoding (`22021`) and constraint violations (`23505`, `23502`, ...) still
 fail the whole copy, as in PostgreSQL. `ON_ERROR ignore` is refused in the binary format.
+`REJECT_LIMIT n` (PostgreSQL 18) bounds the skipping: the row that makes the count exceed `n`
+fails the whole copy with `22000` `skipped more than REJECT_LIMIT (n) rows due to data type
+incompatibility` and a `CONTEXT` naming its line, column and value, and nothing is loaded
+(D324).
 
 **Encodings.** `ENCODING` names the encoding of the data on the client's side; EggDB stores
 UTF-8, so `COPY FROM` converts the data to UTF-8 before reading it and `COPY TO` converts each
@@ -4281,7 +4295,8 @@ bounds.
 forms, and PostgreSQL's other encodings are `0A000`; `UTF16` is EggDB's own (PostgreSQL has no
 such encoding); a script's inline data ignores `ENCODING`; `ON_ERROR ignore` skips rows with
 values their type refuses, but a domain's `CHECK` is tested with the row's constraints and fails
-the copy (PostgreSQL skips the row), and `REJECT_LIMIT` is not recognized yet; the binary format
+the copy (PostgreSQL skips the row), and the per-row notices of `LOG_VERBOSITY verbose` are not
+sent when `REJECT_LIMIT` fails the copy (PostgreSQL sends them before the error); the binary format
 refuses composite and range columns and multidimensional arrays, and an incomplete row count at
 the end of the data is an error where PostgreSQL ends quietly; `FREEZE` is accepted and changes
 nothing (PostgreSQL refuses it unless the table was created or truncated in the same

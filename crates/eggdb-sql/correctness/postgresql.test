@@ -5344,3 +5344,109 @@ DROP TABLE ctas323_empty
 
 ok
 DROP TABLE ctas323
+
+
+chapter sql-insert, "ON CONFLICT Clause": ON CONFLICT ON CONSTRAINT names the arbiter, and an index predicate infers a unique index
+ok
+CREATE TABLE distributors324 (did integer PRIMARY KEY, dname text, is_active boolean DEFAULT true, CONSTRAINT distributors324_dname_key UNIQUE (dname), CONSTRAINT distributors324_did_check CHECK (did > 0))
+
+rows
+INSERT INTO distributors324 (did, dname) VALUES (5, 'Gizmo Transglobal'), (6, 'Associated Computing, Inc') ON CONFLICT (did) DO UPDATE SET dname = EXCLUDED.dname
+----
+INSERT 0 2
+
+rows
+INSERT INTO distributors324 (did, dname) VALUES (7, 'Redline GmbH') ON CONFLICT (did) DO NOTHING
+----
+INSERT 0 1
+
+rows
+INSERT INTO distributors324 (did, dname) VALUES (9, 'Antwerp Design') ON CONFLICT ON CONSTRAINT distributors324_pkey DO NOTHING
+----
+INSERT 0 1
+
+rows
+INSERT INTO distributors324 (did, dname) VALUES (9, 'Antwerp Again') ON CONFLICT ON CONSTRAINT distributors324_pkey DO NOTHING
+----
+INSERT 0 0
+
+rows
+INSERT INTO distributors324 (did, dname) VALUES (10, 'Conrad International') ON CONFLICT (did) WHERE is_active DO NOTHING
+----
+INSERT 0 1
+
+rows
+INSERT INTO distributors324 (did, dname) VALUES (11, 'Redline GmbH') ON CONFLICT ON CONSTRAINT distributors324_dname_key DO UPDATE SET is_active = false
+----
+INSERT 0 1
+
+rows
+SELECT did, dname, is_active FROM distributors324 ORDER BY did
+----
+did|dname|is_active
+5|Gizmo Transglobal|t
+6|Associated Computing, Inc|t
+7|Redline GmbH|f
+9|Antwerp Design|t
+10|Conrad International|t
+SELECT 5
+
+error 23505
+INSERT INTO distributors324 (did, dname) VALUES (5, 'Someone New') ON CONFLICT ON CONSTRAINT distributors324_dname_key DO NOTHING
+
+error 42704
+INSERT INTO distributors324 (did) VALUES (12) ON CONFLICT ON CONSTRAINT no_such_constraint DO NOTHING
+
+error 42809
+INSERT INTO distributors324 (did) VALUES (12) ON CONFLICT ON CONSTRAINT distributors324_did_check DO NOTHING
+
+error 42P10
+INSERT INTO distributors324 (did) VALUES (12) ON CONFLICT (is_active) WHERE is_active DO NOTHING
+
+error 42P10
+INSERT INTO distributors324 (did, dname) VALUES (12, 'x') ON CONFLICT (lower(dname)) DO NOTHING
+
+error 42601
+INSERT INTO distributors324 (did) VALUES (12) ON CONFLICT (did DESC) DO NOTHING
+
+ok
+DROP TABLE distributors324
+
+chapter sql-copy, "COPY": REJECT_LIMIT ends an ON_ERROR ignore load once more rows than it allows were skipped
+ok
+CREATE TABLE check_ign_err324 (n integer, k integer)
+
+error 22000
+COPY check_ign_err324 FROM STDIN WITH (on_error ignore, reject_limit 1);
+1	1
+a	2
+3	b
+4	4
+\.
+
+rows
+COPY check_ign_err324 FROM STDIN WITH (on_error ignore, reject_limit 2);
+1	1
+a	2
+3	b
+4	4
+\.
+----
+COPY 2
+
+error 22023
+COPY check_ign_err324 FROM STDIN WITH (reject_limit 1)
+
+error 22023
+COPY check_ign_err324 FROM STDIN WITH (on_error ignore, reject_limit 0)
+
+rows
+SELECT n, k FROM check_ign_err324 ORDER BY n
+----
+n|k
+1|1
+4|4
+SELECT 2
+
+ok
+DROP TABLE check_ign_err324
