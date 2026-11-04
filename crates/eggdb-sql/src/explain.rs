@@ -525,8 +525,9 @@ fn add_subplans(
         under_attach.push(format!("{indent}{}", subplans::subplan_label(subplan)));
         under_attach.extend(subplan_lines(subplan, column + 2, measured));
     }
-    let at = (attach + 1).min(lines.len());
-    lines.splice(at..at, under_attach);
+    let below = lines.split_off((attach + 1).min(lines.len()));
+    lines.extend(under_attach);
+    lines.extend(below);
     for subplan in query.subplans.iter().filter(|subplan| !initial(subplan)) {
         lines.push(format!("{indent}{}", subplans::subplan_label(subplan)));
         lines.extend(subplan_lines(subplan, column + 2, measured));
