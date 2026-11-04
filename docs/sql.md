@@ -179,7 +179,11 @@ What it reads, on top of the statements of "What runs today":
   `VERSION()`, `USER()`, `CURRENT_USER()`, `CONNECTION_ID()`, `LAST_INSERT_ID()`, `@@var`
   (`@@version`, `@@sql_mode`, `@@max_allowed_packet`, ...), `@var`, `DIV`, `MOD`, `/` in
   floating point, `<=>`, `||` and `&&` as `OR` and `AND`, `!`. A result column without an alias
-  is named by its text (`SELECT 1+1` gives a column `1+1`).
+  is named by its text (`SELECT 1+1` gives a column `1+1`). `STD`, `STDDEV`, `STDDEV_POP`,
+  `STDDEV_SAMP`, `VARIANCE`, `VAR_POP` and `VAR_SAMP` return `DOUBLE` (D321).
+- **NULL ordering**: NULL sorts first for `ORDER BY ... ASC` and last for `DESC`, as in MySQL,
+  in queries and window definitions; an index on a column that may hold NULLs is then not read
+  in place of the sort (D321).
 - **Errors** with MySQL's numbers, SQLSTATEs and wording: `ERROR 1146 (42S02): Table
   'eggdb.missing' doesn't exist` (`eggdb` is the database name in `eggdb sql` and `eggdb shell`;
   through the server it is `--database`'s), 1064 for syntax errors (`... near '...' at line 1`), 1054,
@@ -1587,8 +1591,8 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   are `42601` (D128).
 - `SELECT [ALL | DISTINCT | DISTINCT ON (expr, ...)] items [FROM from_item [join ...]] [WHERE expr] [GROUP BY [ALL | DISTINCT] grouping_item, ...] [HAVING expr] [ORDER BY expr [ASC | DESC] [NULLS FIRST | LAST], ...] [LIMIT n | ALL] [OFFSET n [ROW | ROWS]] [FETCH {FIRST | NEXT} [n] {ROW | ROWS} {ONLY | WITH TIES}]`.
   `FETCH FIRST n ROWS ONLY` is `LIMIT n` (no count is 1); `WITH TIES` (D300) also returns the
-  rows after the last one that sort equal to it, and needs `ORDER BY` (else `42601`); `LIMIT`
-  and `FETCH` together are `42601`.
+  rows after the last one that sort equal to it, and needs `ORDER BY` (else `42601`) and a count
+  that is not NULL (`2201W`, D321); `LIMIT` and `FETCH` together are `42601`.
   `ORDER BY` takes an output column's number or alias, or any expression over the tables (with
   `DISTINCT`, only expressions in the select list, else `42P10`); a `SELECT` without `FROM`
   returns one row. `DISTINCT ON (expr, ...)` (PostgreSQL, D299) keeps the first row of each set
@@ -1730,6 +1734,25 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   and `avg` of text, and `min` and `max` of booleans and `json`, fail with `42883`, as there.
   Every aggregate takes `FILTER (WHERE condition)`, which feeds it only the rows where the
   condition is true (`count(*) FILTER (WHERE x > 1)`, D151).
+- **Statistical aggregates** (D321): `stddev_samp`, `stddev_pop`, `var_samp` and `var_pop`, and
+  each dialect's own names: PostgreSQL's `stddev` and `variance` (the sample forms), Oracle's
+  `STDDEV` and `VARIANCE` (the sample forms, but 0 for one row), MySQL's `STD`, `STDDEV` and
+  `VARIANCE` (the population forms, as MySQL defines them) and Transact-SQL's `STDEV`,
+  `STDEVP`, `VAR` and `VARP`; SQLite has none (`no such function`). They skip NULLs, are NULL
+  over no rows, the sample forms are NULL for one row, and they take `DISTINCT`, `FILTER` and
+  `OVER`. In PostgreSQL and Oracle an integer or `numeric` argument gives an exact `numeric`,
+  computed from exact sums and divided at PostgreSQL's scale (`variance` of 1, 2, 3 and 4 is
+  `1.6666666666666667`, `stddev` its square root at the same scale), and a float gives `double
+  precision` from a running mean (Welford's method), so large offsets cost no precision; MySQL
+  and Transact-SQL return `DOUBLE` and `float` for every argument. A non-numeric argument is
+  `42883`.
+- **Hypothetical-set aggregates** (D321), in PostgreSQL and Oracle: `rank(args) WITHIN GROUP
+  (ORDER BY exprs)`, `dense_rank`, `percent_rank` and `cume_dist` give the rank the row of
+  `args` would have among the group's rows in that order, with as many arguments as `ORDER BY`
+  expressions (else `42883`, ORA-00909), each column's `ASC`, `DESC` and `NULLS FIRST` or
+  `LAST`; `rank` and `dense_rank` are `bigint`, `percent_rank` (`(rank - 1) / rows`) and
+  `cume_dist` (`(rows before or equal to it + 1) / (rows + 1)`) `double precision`. Over no rows
+  they are 1, 1, 0 and 1. They take `FILTER`, not `OVER` (`0A000`).
 - **Ordered-set aggregates** (D151): `percentile_cont(fraction) WITHIN GROUP (ORDER BY expr)`
   (`double precision`, interpolated between the two nearest values), `percentile_disc(fraction)
   WITHIN GROUP (ORDER BY expr)` (the first value whose position reaches the fraction, in the
@@ -4231,10 +4254,10 @@ two, `COPY` in the binary format and in another encoding, now match). The other 
   `0A000`; `FULL JOIN ... USING` columns cannot be named unqualified from a subquery (`42702`). An `IN` list of constants is compared item by item (a list of
   more than 256 items is not used to choose a key range either), so a very long list against
   many rows is slow; `IN (SELECT ...)` looks values up in a hash set.
-- Hypothetical-set
-  aggregates (`rank(x) WITHIN GROUP (...)`), `percentile_cont` and `percentile_disc` over an array
-  of fractions, `percentile_cont` between two `interval` values, and the other aggregates
-  (`stddev`, `variance`, ...) fail with `0A000`. Window functions (D151) do not take `DISTINCT`
+- `percentile_cont` and `percentile_disc` over an array of fractions, `percentile_cont` between
+  two `interval` values, and `regr_*`, `covar_*` and `corr` fail with `0A000` or `42883`; the
+  direct arguments of a hypothetical-set aggregate are not checked to name only grouped columns
+  (D321). Window functions (D151) do not take `DISTINCT`
   or `ORDER BY` inside an aggregate's parentheses (`0A000`, as in PostgreSQL); a window whose
   frame does not start at `UNBOUNDED PRECEDING`, or that excludes rows, recomputes its aggregate
   for each row, so a long sliding frame costs its length per row; a correlated subquery cannot
@@ -4604,8 +4627,7 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
 - `JSON_TABLE`'s `PLAN` clause, and Oracle's `IS JSON`, `JSON_SERIALIZE` and `JSON_SCALAR`.
 - Point `SELECT`s as fast as SQLite's everywhere: an AST that borrows the SQL text and a plan
   cache; table statistics for choosing between key lookups and hash joins.
-- The other aggregates (`stddev`, `variance`, hypothetical-set aggregates); `DISTINCT ON` over
-  any expression in a grouped query and beside window functions; `LATERAL ... NATURAL JOIN`.
+- `regr_*`, `covar_*` and `corr`; `DISTINCT ON` over any expression in a grouped query and beside window functions; `LATERAL ... NATURAL JOIN`.
 - Then the other dialects (item 23), each with its own correctness suite; for the PostgreSQL protocol,
   TLS, `information_schema` and the catalog queries of GUI tools beyond psql's `\d` family,
   and `LISTEN`/`NOTIFY` (M6a).
