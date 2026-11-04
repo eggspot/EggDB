@@ -220,3 +220,13 @@ Budgets raised under D253, with their reasons:
   Linux and 12,211,000 to 12,652,424 on macOS; the C API library 9,537,000 to 9,989,904 on Linux
   and 7,498,000 to 7,837,312 on macOS. The new budgets are those sizes plus about 1%. The GUI
   and platform-window work of this batch (D309 to D311, D313) is linked only into `eggdb-gui`.
+- 2026-11-05, the fifth batch (D314 to D334): partitions with expression keys and index links,
+  generated columns, statement-level rollback, read-only transactions, the privilege views,
+  `EXPLAIN` subplans and MySQL's tree plans, Oracle's window and regular-expression functions,
+  Redis-compatible bitmaps, HyperLogLog and geo commands, the Elasticsearch-compatible multi APIs
+  and Painless subset, Cypher paths, PromQL, syslog and HTTP keep-alive. Measured sizes in CI,
+  before (the previous budgets) and after: the `full` binary 16,616,000 to 17,628,456 bytes on
+  Linux (6.1%) and 12,779,000 to 13,545,848 on macOS (6.0%); the C API library 10,090,000 to
+  10,625,048 on Linux (5.3%) and 7,916,000 to 8,333,552 on macOS (5.3%). The new budgets are
+  those sizes plus about 1%. The client's work of this batch (D329) is linked only into
+  `eggdb-gui`.
