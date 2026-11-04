@@ -6354,4 +6354,107 @@ mod tests {
             box_faces(),
         );
     }
+
+    #[test]
+    fn shift_f10_opens_the_editor_menu_below_the_caret_and_show_ddl_focuses_the_ddl_box() {
+        let now = Instant::now();
+        let mut window = MainWindow::sample();
+        window.tab.editor = crate::editor::Editor::new("select 1");
+        window.focus = WindowFocus::Tab;
+        window.tab.focus = TabFocus::Editor;
+        let shift_f10 = KeyPress {
+            key: Key::F10,
+            modifiers: eggdb_platform::window::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        };
+        window.key(shift_f10, now);
+        let menu = window.tab.editor_menu.expect("Shift+F10 opens the editor menu");
+        assert_eq!(menu.highlighted, Some(2), "the first enabled item, Paste");
+        let rect = window.editor_menu_rect().expect("the menu has a rect");
+        assert_eq!(rect.y, EDITOR_TEXT_TOP + LINE_HEIGHT + 4.0);
+        assert_eq!(rect.h, editor_menu::HEIGHT);
+        let tree = accessibility_tree(&window);
+        let cut = tree
+            .iter()
+            .find(|node| node.id == editor_menu::NODE_FIRST_EDITOR_MENU_ITEM)
+            .expect("Cut is exposed");
+        assert_eq!(cut.name, "Cut");
+        assert!(cut.state.disabled, "a disabled item stays in the menu");
+        assert_eq!(cut.parent, Some(editor_menu::NODE_EDITOR_MENU));
+        let run = tree
+            .iter()
+            .find(|node| node.id == editor_menu::NODE_FIRST_EDITOR_MENU_ITEM + 4)
+            .expect("Run is exposed");
+        assert_eq!(run.name, "Run statement");
+        window.key(KeyPress::plain(Key::Character('f')), now);
+        window.key(KeyPress::plain(Key::Enter), now);
+        assert_eq!(window.tab.editor_menu, None);
+        assert_eq!(window.tab.editor.text(), "SELECT\n  1");
+        window.key(KeyPress::plain(Key::ContextMenu), now);
+        window.key(KeyPress::plain(Key::Escape), now);
+        assert_eq!(window.tab.editor_menu, None, "Esc closes the menu");
+        assert_eq!(window.tab.editor.text(), "SELECT\n  1");
+
+        window.show_ddl(TreeItem::Table(1));
+        assert!(window.inspector.ddl_focused);
+        let tree = accessibility_tree(&window);
+        if let Some(ddl) = tree.iter().find(|node| node.id == NODE_DDL) {
+            assert!(ddl.state.focused && ddl.state.read_only);
+            assert_eq!(ddl.role, AccessRole::TextArea);
+            assert!(
+                !tree
+                    .iter()
+                    .any(|node| node.role == AccessRole::TreeItem && node.state.focused),
+                "the focus moved off the tree"
+            );
+        }
+        window.key(KeyPress::plain(Key::Escape), now);
+        assert!(!window.inspector.ddl_focused);
+        assert_eq!(window.focus, WindowFocus::Tree);
+    }
+
+    #[test]
+    fn a_keys_tab_menu_copies_the_scan_line_and_disables_the_editing_items() {
+        let now = Instant::now();
+        let mut window = MainWindow::sample();
+        window.open_keys(0);
+        window.focus = WindowFocus::Tab;
+        window.tab.focus = TabFocus::Editor;
+        window.key(KeyPress::plain(Key::ContextMenu), now);
+        let menu = window.tab.editor_menu.expect("the menu key opens it in a keys tab");
+        assert_eq!(menu.run_label, "Run scan");
+        assert_eq!(
+            menu.enabled,
+            [false, true, false, false, true, false, false, false]
+        );
+        assert_eq!(
+            window.editor_menu_rect().map(|rect| rect.x),
+            Some(EDITOR_TEXT_LEFT)
+        );
+        let WindowAction::Tab(TabAction::Copy { text, .. }) =
+            window.key(KeyPress::plain(Key::Enter), now)
+        else {
+            panic!("Copy copies the scan line");
+        };
+        assert_eq!(text, "SCAN sessions LIMIT 100");
+        let tree = accessibility_tree(&window);
+        let prefix = tree
+            .iter()
+            .find(|node| node.id == NODE_KEY_PREFIX)
+            .expect("the keys tab has its prefix field");
+        assert_eq!(prefix.name, "Key prefix");
+        assert_eq!(prefix.placeholder.as_deref(), Some("Prefix"));
+        let back = tree
+            .iter()
+            .find(|node| node.id == NODE_KEYS_BACK)
+            .expect("Back is exposed");
+        assert!(back.state.disabled, "Back is off on page 1");
+        assert_eq!(back.shortcut.as_deref(), Some("Alt+PgUp"));
+        let (field, back, next) = keys_header_rects(1280.0);
+        assert_eq!(field, Rect::new(884.0, 388.0, 200.0, 28.0));
+        assert_eq!(back, Rect::new(1096.0, 388.0, 72.0, 28.0));
+        assert_eq!(next, Rect::new(1176.0, 388.0, 92.0, 28.0));
+    }
 }
