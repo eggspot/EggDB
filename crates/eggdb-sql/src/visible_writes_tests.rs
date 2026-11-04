@@ -1540,12 +1540,13 @@ fn a_writer_sees_the_same_definition_without_the_foreign_key_and_still_checks_it
         store: &store,
         tables: VisibleTables::new(["p(id,name)", "c"]),
     };
-    let mut session = Session::with_dialect(&limited, crate::Dialect::MySql);
+    let mut session = Session::new(&limited);
     let mut outputs = Vec::new();
     session
-        .execute("BEGIN; SHOW CREATE TABLE c", &mut |result| {
-            outputs.push(render(&result))
-        })
+        .execute(
+            "BEGIN; INSERT INTO c VALUES (3, NULL); SELECT pg_get_constraintdef(oid) FROM pg_constraint",
+            &mut |result| outputs.push(render(&result)),
+        )
         .unwrap();
     let text = outputs.join("\n");
     assert!(!text.contains("secret_code"), "{text}");
