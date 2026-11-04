@@ -647,10 +647,9 @@ impl NarrowedView {
             query,
             columns: kept,
             expands_wildcard: false,
-            columns_narrowed: true,
             ..view
         }
-        .encode();
+        .encode_columns_narrowed();
         Some(Self {
             kept_names,
             definition,
@@ -1740,6 +1739,7 @@ enum Refusal {
     HiddenUpdate { table: String, reason: &'static str },
     TiedColumn { table: String, column: String },
     KeyToHiddenColumn { table: String, parent: String },
+    KeyToHiddenColumnDefinition(String),
     Shared,
     Trigger,
     Code { routine: String, place: StoredCode },
@@ -1859,6 +1859,13 @@ impl Refusal {
                 ),
             )
             .with_hint("Leave the foreign key's columns NULL, or ask the user to list the columns of the other table it points at (--tables)."),
+            Self::KeyToHiddenColumnDefinition(table) => SqlError::new(
+                SqlState::INSUFFICIENT_PRIVILEGE,
+                format!(
+                    "cannot change the definition of \"{table}\": it has a foreign key to columns this session cannot see (--tables), and this session's copy of the definition leaves that foreign key out, so writing it back would drop it"
+                ),
+            )
+            .with_hint("Inserting rows and changing other columns works. To change the table itself, ask the user to list the columns that foreign key points at (--tables)."),
             Self::Shared => SqlError::new(
                 SqlState::INSUFFICIENT_PRIVILEGE,
                 "cannot change a schema, type, routine, package, role or other object outside a table: this session may change only the tables it is limited to (--tables)",
@@ -2119,13 +2126,16 @@ impl Confined {
             return Err(Refusal::NarrowedView(Self::shown(name)));
         }
         if self.may_use(name) {
-            return match self.links.iter().find(|link| link.listed == name) {
-                Some(link) => Err(Refusal::Linked {
+            if let Some(link) = self.links.iter().find(|link| link.listed == name) {
+                return Err(Refusal::Linked {
                     link: link.shown(),
                     rows: false,
-                }),
-                None => Ok(()),
-            };
+                });
+            }
+            if self.shown.unchecked_definitions.contains_key(name) {
+                return Err(Refusal::KeyToHiddenColumnDefinition(Self::shown(name)));
+            }
+            return Ok(());
         }
         if !self.shown.hidden.contains(name)
             && let Some(value) = value

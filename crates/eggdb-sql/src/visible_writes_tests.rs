@@ -1599,3 +1599,139 @@ fn a_view_whose_own_text_starts_like_a_narrowed_one_keeps_its_text_for_its_owner
     assert!(outputs.join("\n").contains("eggdb_shown_columns"));
     mysql.close().unwrap();
 }
+
+fn constraint_definitions(store: &MemoryStore) -> String {
+    shown(
+        store,
+        "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE contype = 'f' ORDER BY conname",
+    )
+}
+
+#[test]
+fn a_definition_change_to_a_child_whose_foreign_key_points_at_a_hidden_column_is_refused() {
+    let store = MemoryStore::default();
+    let mut owner = Session::new(&store);
+    runs(
+        &mut owner,
+        "CREATE TABLE p (id integer PRIMARY KEY, name text, code text UNIQUE, ssn text);
+         CREATE TABLE c (id integer PRIMARY KEY, pcode text REFERENCES p (code), pid integer REFERENCES p (id), note text);
+         INSERT INTO p VALUES (1, 'Ada', 'C1', '123');
+         INSERT INTO c VALUES (1, 'C1', 1, 'first')",
+    );
+    owner.close().unwrap();
+    let before = constraint_definitions(&store);
+    assert!(before.contains("c_pcode_fkey"), "{before}");
+    let limited = ConfinedStore {
+        store: &store,
+        tables: VisibleTables::new(["p(id,name)", "c"]),
+    };
+    let mut session = Session::new(&limited);
+    for sql in [
+        "ALTER TABLE c ADD COLUMN x integer",
+        "ALTER TABLE c ALTER COLUMN note SET DEFAULT 'n'",
+        "ALTER TABLE c RENAME COLUMN note TO memo",
+        "ALTER TABLE c ADD CONSTRAINT c_note_check CHECK (note <> '')",
+        "CREATE INDEX c_note ON c (note)",
+        "COMMENT ON TABLE c IS 'children'",
+        "COMMENT ON COLUMN c.note IS 'a note'",
+    ] {
+        let message = refused(&mut session, sql);
+        assert!(
+            message.starts_with("cannot change the definition of \"c\""),
+            "{sql}: {message}"
+        );
+    }
+    for sql in [
+        "ALTER TABLE c DROP COLUMN note",
+        "ALTER TABLE c DROP CONSTRAINT c_pid_fkey",
+        "ALTER TABLE c RENAME TO d",
+        "DROP TABLE c",
+    ] {
+        refused(&mut session, sql);
+    }
+    runs(&mut session, "UPDATE c SET note = 'kept' WHERE id = 1");
+    session.close().unwrap();
+    let mut mysql = Session::with_dialect(&limited, crate::Dialect::MySql);
+    let error = fails(&mut mysql, "ALTER TABLE c ADD COLUMN y int");
+    assert!(
+        error
+            .message()
+            .starts_with("cannot change the definition of \"c\""),
+        "{error}"
+    );
+    mysql.close().unwrap();
+    assert_eq!(constraint_definitions(&store), before);
+    assert_eq!(
+        shown(&store, "SELECT id, pcode, pid, note FROM c"),
+        "id|pcode|pid|note\n1|C1|1|kept\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_stored_view_record_claiming_the_narrowed_mark_is_damage_not_a_hidden_text() {
+    let store = MemoryStore::default();
+    let mut owner = Session::new(&store);
+    runs(
+        &mut owner,
+        "CREATE TABLE e (k integer PRIMARY KEY, v text);
+         CREATE VIEW vv AS SELECT k, v FROM e",
+    );
+    owner.close().unwrap();
+    let prefix = crate::encoding::table_key("");
+    let mut views = Vec::new();
+    let read = store.begin_read().unwrap();
+    read.scan(
+        &prefix,
+        &crate::encoding::prefix_end(&prefix),
+        crate::store::ScanDirection::Forward,
+        &mut |key, value| {
+            if crate::encoding::is_view_record(value) {
+                views.push((key.to_vec(), value.to_vec()));
+            }
+            Ok(true)
+        },
+    )
+    .unwrap();
+    drop(read);
+    assert_eq!(views.len(), 1);
+    let (key, mut value) = views.remove(0);
+    value[2] |= 16;
+    let mut write = store.begin_write().unwrap();
+    write.put(&key, &value).unwrap();
+    write.commit().unwrap();
+    let mut session = Session::new(&store);
+    let error = fails(
+        &mut session,
+        "SELECT definition FROM pg_views WHERE viewname = 'vv'",
+    );
+    assert_eq!(error.state().code(), "XX001", "{error}");
+    session.close().unwrap();
+}
+
+#[test]
+fn a_view_listed_with_columns_keeps_its_stored_record_free_of_the_narrowed_mark() {
+    let store = MemoryStore::default();
+    let mut owner = Session::new(&store);
+    runs(
+        &mut owner,
+        "CREATE TABLE e (k integer PRIMARY KEY, v text, secret text);
+         CREATE VIEW vv AS SELECT k, v, secret FROM e",
+    );
+    owner.close().unwrap();
+    let limited = ConfinedStore {
+        store: &store,
+        tables: VisibleTables::new(["vv(k,v)", "e"]),
+    };
+    let text = rendered_in(
+        &limited,
+        crate::Dialect::PostgreSql,
+        "SELECT definition FROM pg_views WHERE viewname = 'vv'",
+    );
+    assert!(!text.contains("secret"), "{text}");
+    let text = shown(
+        &store,
+        "SELECT definition FROM pg_views WHERE viewname = 'vv'",
+    );
+    assert!(text.contains("secret"), "{text}");
+    assert!(!text.contains("eggdb_shown_columns"), "{text}");
+}

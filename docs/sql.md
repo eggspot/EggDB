@@ -2283,9 +2283,8 @@ statements can name them. `IF` and `WHILE` conditions are not evaluated: each st
 batch is shown once in order, both branches of an `IF` and a loop's body once. `EXEC` of a
 procedure and `EXEC(...)` show the plans of the statements inside. `SET SHOWPLAN_TEXT` and
 `SET SHOWPLAN_ALL` inside `EXEC(...)`, `sp_executesql` or a procedure fail with SQL Server's
-error 1067 and end the batch, as SQL Server refuses them there, and so does changing
-`eggdb.dialect` there while a plan is shown, so nested code cannot turn plans off and run what
-follows. `SET STATISTICS PROFILE ON` runs each statement
+error 1067 and end the batch, as SQL Server refuses them there, and `SET eggdb.dialect` is
+refused in nested code (`0A000`), so nested code cannot turn plans off and run what follows. `SET STATISTICS PROFILE ON` runs each statement
 and adds that result with `Rows` and `Executes`. EggDB has no estimates, so costs and row
 estimates are NULL, and it measures whole statements, so only the top operator's rows are
 filled in (D312).
