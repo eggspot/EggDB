@@ -66,9 +66,15 @@ fn mysql_undoes_only_the_failing_statement_and_the_transaction_commits_the_rest(
         Some(1062)
     );
     assert!(session.in_block());
-    assert_eq!(shown(&mut session, "SELECT id FROM t ORDER BY id"), ["1", "2"]);
+    assert_eq!(
+        shown(&mut session, "SELECT id FROM t ORDER BY id"),
+        ["1", "2"]
+    );
     run(&mut session, "COMMIT");
-    assert_eq!(shown(&mut session, "SELECT id FROM t ORDER BY id"), ["1", "2"]);
+    assert_eq!(
+        shown(&mut session, "SELECT id FROM t ORDER BY id"),
+        ["1", "2"]
+    );
 }
 
 #[test]
@@ -82,12 +88,18 @@ fn mysql_undoes_a_failing_statement_after_a_savepoint_and_rollback_to_still_work
     run(&mut session, "INSERT INTO t VALUES (2)");
     fails(&mut session, "INSERT INTO t VALUES (3), (1)");
     assert!(!session.failed_after_savepoint());
-    assert_eq!(shown(&mut session, "SELECT id FROM t ORDER BY id"), ["1", "2"]);
+    assert_eq!(
+        shown(&mut session, "SELECT id FROM t ORDER BY id"),
+        ["1", "2"]
+    );
     run(&mut session, "INSERT INTO t VALUES (4)");
     run(&mut session, "ROLLBACK TO SAVEPOINT a");
     run(&mut session, "INSERT INTO t VALUES (5)");
     run(&mut session, "COMMIT");
-    assert_eq!(shown(&mut session, "SELECT id FROM t ORDER BY id"), ["1", "5"]);
+    assert_eq!(
+        shown(&mut session, "SELECT id FROM t ORDER BY id"),
+        ["1", "5"]
+    );
 }
 
 #[test]
@@ -135,12 +147,14 @@ fn sqlite_aborts_the_statement_and_keeps_the_transaction() {
     fails(&mut session, "INSERT OR ABORT INTO t VALUES (4), (1)");
     assert!(session.in_block());
     run(&mut session, "COMMIT");
-    assert_eq!(shown(&mut session, "SELECT id FROM t ORDER BY id"), ["1", "2"]);
+    assert_eq!(
+        shown(&mut session, "SELECT id FROM t ORDER BY id"),
+        ["1", "2"]
+    );
 }
 
 #[test]
-fn sqlite_insert_or_fail_keeps_the_rows_before_the_conflict_and_or_rollback_ends_the_transaction()
-{
+fn sqlite_insert_or_fail_keeps_the_rows_before_the_conflict_and_or_rollback_ends_the_transaction() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Sqlite);
     run(&mut session, "CREATE TABLE t (id INTEGER PRIMARY KEY)");
@@ -225,7 +239,10 @@ fn sql_server_rolls_back_the_whole_transaction_with_xact_abort_on() {
     assert_eq!(errors(&steps), [Some(2627)]);
     assert!(!session.in_block());
     assert_eq!(
-        shown(&mut session, "SELECT COUNT(*) AS n, @@TRANCOUNT AS open FROM t"),
+        shown(
+            &mut session,
+            "SELECT COUNT(*) AS n, @@TRANCOUNT AS open FROM t"
+        ),
         ["0|0"]
     );
 }

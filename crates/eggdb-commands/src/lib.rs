@@ -27,10 +27,10 @@ pub use cursor::{
     CursorList, CursorRefusal, LONGEST_CURSOR, check_cursor, decode_cursor, encode_cursor,
     shown_cursor, table_at, table_position,
 };
-pub use time_to_live::{TimeToLiveError, parse_time_to_live};
 pub use registry::{
     COMMANDS, COMMON_OPTIONS, CORE_VERBS, ERROR_CODES, KEPT_NAMES, NOUNS, SHIPPED_TOOL_NAMES, TOOLS,
 };
+pub use time_to_live::{TimeToLiveError, parse_time_to_live};
 
 /// The most a use of a command or a call of a tool can do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

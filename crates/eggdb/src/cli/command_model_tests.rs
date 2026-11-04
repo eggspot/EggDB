@@ -338,7 +338,10 @@ fn help_json_lists_exactly_the_registry() {
                 );
             } else if name == "del" {
                 assert_eq!(string_at(tool, &["confirm"]).as_deref(), Some("key_delete"));
-                assert_eq!(string_at(tool, &["grant"]).as_deref(), Some("key_value_write"));
+                assert_eq!(
+                    string_at(tool, &["grant"]).as_deref(),
+                    Some("key_value_write")
+                );
                 assert!(
                     matches!(when, Some(Json::String(text)) if text.starts_with("the call deletes a key")),
                     "{when:?}"

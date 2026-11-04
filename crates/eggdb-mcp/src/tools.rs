@@ -10,9 +10,9 @@ use eggdb_commands::{
 use eggdb_sql::json::{Json, Node};
 use eggdb_sql::{
     DestructiveKind, DestructiveStatement, Dialect, EXACT_ROW_COUNT_UP_TO, KeyValueRead,
-    KeyValueStore, KeyValueWrite, OneStatementError, OneStatementRefusal, QueryResult, RESERVED_KEY_PREFIX,
-    Relation, RelationKind, ScanDirection, Session, SqlError, SqlState, Value, VisibleTables,
-    destructive_statement,
+    KeyValueStore, KeyValueWrite, OneStatementError, OneStatementRefusal, QueryResult,
+    RESERVED_KEY_PREFIX, Relation, RelationKind, ScanDirection, Session, SqlError, SqlState, Value,
+    VisibleTables, destructive_statement,
 };
 use std::time::{Duration, Instant};
 
@@ -1818,7 +1818,8 @@ pub(crate) fn write_key<O: DatabaseOpener>(
             .map_err(|error| call.sql_failure(limits, error))?;
         Ok(written)
     });
-    let result = result.map(|written| key_written(request, &written, committed, warning.as_deref()));
+    let result =
+        result.map(|written| key_written(request, &written, committed, warning.as_deref()));
     WriteOutcome {
         result,
         committed,

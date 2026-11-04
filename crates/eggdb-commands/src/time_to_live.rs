@@ -73,11 +73,30 @@ mod tests {
 
     #[test]
     fn times_join_units_from_the_largest_down_and_nothing_else_is_a_time() {
-        assert_eq!(parse_time_to_live("1500ms"), Ok(Duration::from_millis(1500)));
+        assert_eq!(
+            parse_time_to_live("1500ms"),
+            Ok(Duration::from_millis(1500))
+        );
         assert_eq!(parse_time_to_live("1h30m"), Ok(Duration::from_secs(5400)));
-        assert_eq!(parse_time_to_live("7d"), Ok(Duration::from_secs(7 * 86_400)));
-        for text in ["", "30", "1.5s", "1 s", "30m5h", "1w", "-1s", "99999999999999999999d"] {
-            assert_eq!(parse_time_to_live(text), Err(TimeToLiveError::NotATime), "{text}");
+        assert_eq!(
+            parse_time_to_live("7d"),
+            Ok(Duration::from_secs(7 * 86_400))
+        );
+        for text in [
+            "",
+            "30",
+            "1.5s",
+            "1 s",
+            "30m5h",
+            "1w",
+            "-1s",
+            "99999999999999999999d",
+        ] {
+            assert_eq!(
+                parse_time_to_live(text),
+                Err(TimeToLiveError::NotATime),
+                "{text}"
+            );
         }
         assert_eq!(parse_time_to_live("0s"), Err(TimeToLiveError::Zero));
     }

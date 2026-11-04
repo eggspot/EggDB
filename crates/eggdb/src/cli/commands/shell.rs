@@ -1125,7 +1125,8 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
 
     fn change_to_the_collection_in_use(&self, request: &Request) -> Option<CollectionChange> {
         let in_use = self.collection.as_deref()?;
-        if request.command != CommandName::Collection || request.collection.as_deref() != Some(in_use)
+        if request.command != CommandName::Collection
+            || request.collection.as_deref() != Some(in_use)
         {
             return None;
         }

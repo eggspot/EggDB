@@ -712,13 +712,16 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
         if let Err(answer) = self.record_write_start(&pending) {
             return Some(answer);
         }
-        let (outcome, _) = self.timed(request.tool.name(), |call| {
-            tools::write_key(&request, call)
-        });
+        let (outcome, _) = self.timed(request.tool.name(), |call| tools::write_key(&request, call));
         Some(self.finish_write(&pending, outcome, confirmation))
     }
 
-    fn pending_write<'a>(&mut self, id: &'a str, tool: Tool, arguments: &'a str) -> PendingWrite<'a> {
+    fn pending_write<'a>(
+        &mut self,
+        id: &'a str,
+        tool: Tool,
+        arguments: &'a str,
+    ) -> PendingWrite<'a> {
         PendingWrite {
             id,
             tool,
@@ -738,27 +741,29 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
         refusals: Refusals,
     ) -> Result<&'static str, Option<String>> {
         match link {
-            Some(link) if self.client.can_ask_user => match self.ask_user(link, pending.id, asked) {
-                UserAnswer::Run => Ok("elicitation"),
-                UserAnswer::Declined => Err(Some(self.finish_write(
-                    pending,
-                    unwritten(Err(refusals.declined)),
-                    Some("elicitation"),
-                ))),
-                UserAnswer::Failed => Err(Some(self.finish_write(
-                    pending,
-                    unwritten(Err(tools::confirmation_failed())),
-                    Some("elicitation"),
-                ))),
-                UserAnswer::Cancelled => {
-                    let cancelled = unwritten(Err(ToolError::new(
-                        "cancelled",
-                        "The call was cancelled while the user was asked. Nothing was run.",
-                    )));
-                    let _ = self.finish_write(pending, cancelled, Some("elicitation"));
-                    Err(None)
+            Some(link) if self.client.can_ask_user => {
+                match self.ask_user(link, pending.id, asked) {
+                    UserAnswer::Run => Ok("elicitation"),
+                    UserAnswer::Declined => Err(Some(self.finish_write(
+                        pending,
+                        unwritten(Err(refusals.declined)),
+                        Some("elicitation"),
+                    ))),
+                    UserAnswer::Failed => Err(Some(self.finish_write(
+                        pending,
+                        unwritten(Err(tools::confirmation_failed())),
+                        Some("elicitation"),
+                    ))),
+                    UserAnswer::Cancelled => {
+                        let cancelled = unwritten(Err(ToolError::new(
+                            "cancelled",
+                            "The call was cancelled while the user was asked. Nothing was run.",
+                        )));
+                        let _ = self.finish_write(pending, cancelled, Some("elicitation"));
+                        Err(None)
+                    }
                 }
-            },
+            }
             _ if confirm_argument => Ok("confirm_argument"),
             _ => Err(Some(self.finish_write(
                 pending,

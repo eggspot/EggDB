@@ -2,8 +2,7 @@ use crate::ast::{AggregateFunction, Expr, ExprKind, Literal, OrderItem};
 use crate::error::SqlResult;
 use crate::eval::Evaluator;
 use crate::types::{
-    SortDirection, Value, compare_in_directions, decode_directions, encode_directions,
-    equality_key,
+    SortDirection, Value, compare_in_directions, decode_directions, encode_directions, equality_key,
 };
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -113,9 +112,7 @@ impl Standing {
                     .saturating_add(1),
             ),
             AggregateFunction::PercentRank if self.rows == 0 => Value::Double(0.0),
-            AggregateFunction::PercentRank => {
-                Value::Double(self.before as f64 / self.rows as f64)
-            }
+            AggregateFunction::PercentRank => Value::Double(self.before as f64 / self.rows as f64),
             AggregateFunction::CumeDist => Value::Double(
                 self.before.saturating_add(self.peers).saturating_add(1) as f64
                     / self.rows.saturating_add(1) as f64,

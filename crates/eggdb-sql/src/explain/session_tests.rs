@@ -187,16 +187,30 @@ fn explain_analyze_counts_a_correlated_subplans_loops_and_an_initplans_single_ru
         &mut session,
         "EXPLAIN ANALYZE SELECT unique1 FROM tenk1 t WHERE t.ten < ALL (SELECT o.ten FROM onek o WHERE o.four = t.four)",
     );
-    assert!(lines[0].starts_with("Seq Scan on tenk1 t (actual time="), "{lines:?}");
+    assert!(
+        lines[0].starts_with("Seq Scan on tenk1 t (actual time="),
+        "{lines:?}"
+    );
     assert_eq!(lines[1], "  Filter: (SubPlan 1)", "{lines:?}");
     assert_eq!(lines[2], "  SubPlan 1", "{lines:?}");
-    assert!(lines[3].starts_with("    ->  Seq Scan on onek o (actual time="), "{lines:?}");
-    assert_eq!(actual(&lines[3]).map(|(_, loops)| loops), Some(3), "{lines:?}");
+    assert!(
+        lines[3].starts_with("    ->  Seq Scan on onek o (actual time="),
+        "{lines:?}"
+    );
+    assert_eq!(
+        actual(&lines[3]).map(|(_, loops)| loops),
+        Some(3),
+        "{lines:?}"
+    );
     let lines = plan(
         &mut session,
         "EXPLAIN ANALYZE SELECT unique1 FROM tenk1 t WHERE t.ten < (SELECT max(o.ten) FROM onek o)",
     );
-    assert_eq!(actual(&lines[0]).map(|(rows, _)| rows), Some(3), "{lines:?}");
+    assert_eq!(
+        actual(&lines[0]).map(|(rows, _)| rows),
+        Some(3),
+        "{lines:?}"
+    );
     assert_eq!(lines[2], "  InitPlan 1 (returns $0)", "{lines:?}");
     assert_eq!(actual(&lines[3]), Some((1, 1)), "{lines:?}");
 }
@@ -277,7 +291,10 @@ fn mysql_explain_analyze_runs_the_select_and_prints_actual_time_rows_and_loops()
     );
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines[0], "EXPLAIN", "{text}");
-    assert!(lines[1].starts_with("-> Inner hash join (t1.a = t2.c2)  (actual time="), "{text}");
+    assert!(
+        lines[1].starts_with("-> Inner hash join (t1.a = t2.c2)  (actual time="),
+        "{text}"
+    );
     assert!(lines[1].ends_with(" rows=2 loops=1)"), "{text}");
     assert_eq!(lines[2], "    -> Table scan on t1", "{text}");
     assert_eq!(lines[3], "    -> Hash", "{text}");
@@ -287,10 +304,22 @@ fn mysql_explain_analyze_runs_the_select_and_prints_actual_time_rows_and_loops()
         "EXPLAIN ANALYZE SELECT a FROM t1 WHERE a > (SELECT min(c1) FROM t2)",
     );
     let lines: Vec<&str> = text.lines().collect();
-    assert!(lines[1].starts_with("-> Filter: (t1.a > (select #2))  (actual time="), "{text}");
-    assert!(lines[2].starts_with("    -> Table scan on t1  (actual time="), "{text}");
-    assert_eq!(lines[3], "    -> Select #2 (subquery in condition; run only once)", "{text}");
-    assert!(lines[4].starts_with("        -> Table scan on t2  (actual time="), "{text}");
+    assert!(
+        lines[1].starts_with("-> Filter: (t1.a > (select #2))  (actual time="),
+        "{text}"
+    );
+    assert!(
+        lines[2].starts_with("    -> Table scan on t1  (actual time="),
+        "{text}"
+    );
+    assert_eq!(
+        lines[3], "    -> Select #2 (subquery in condition; run only once)",
+        "{text}"
+    );
+    assert!(
+        lines[4].starts_with("        -> Table scan on t2  (actual time="),
+        "{text}"
+    );
     assert!(lines[4].ends_with(" rows=1 loops=1)"), "{text}");
 }
 
@@ -306,7 +335,10 @@ fn mysql_refuses_tree_explains_of_writes_and_json_format() {
     }
     assert!(last(&mut session, "SELECT count(*) FROM t1").ends_with("\n3\nSELECT 1"));
     assert!(
-        last(&mut session, "EXPLAIN FORMAT=TRADITIONAL SELECT * FROM t1 WHERE id = 2")
-            .contains("|const|PRIMARY|PRIMARY|")
+        last(
+            &mut session,
+            "EXPLAIN FORMAT=TRADITIONAL SELECT * FROM t1 WHERE id = 2"
+        )
+        .contains("|const|PRIMARY|PRIMARY|")
     );
 }

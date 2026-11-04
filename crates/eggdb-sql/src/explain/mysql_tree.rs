@@ -54,18 +54,20 @@ fn names_column(expr: &Expr, label: &str, column: &str) -> bool {
 }
 
 fn sql_value_of<'e>(conditions: &[&'e Expr], label: &str, column: &str) -> Option<&'e Expr> {
-    conditions.iter().find_map(|&condition| match &condition.kind {
-        ExprKind::Binary(BinaryOperator::Equal, left, right) => {
-            if names_column(left, label, column) {
-                Some(&**right)
-            } else if names_column(right, label, column) {
-                Some(&**left)
-            } else {
-                None
+    conditions
+        .iter()
+        .find_map(|&condition| match &condition.kind {
+            ExprKind::Binary(BinaryOperator::Equal, left, right) => {
+                if names_column(left, label, column) {
+                    Some(&**right)
+                } else if names_column(right, label, column) {
+                    Some(&**left)
+                } else {
+                    None
+                }
             }
-        }
-        _ => None,
-    })
+            _ => None,
+        })
 }
 
 impl Tree<'_> {
@@ -84,7 +86,12 @@ impl Tree<'_> {
         .text(expr)
     }
 
-    fn lookup(&self, query: &ExplainedQuery, source: &ExplainedSource, columns: &[usize]) -> String {
+    fn lookup(
+        &self,
+        query: &ExplainedQuery,
+        source: &ExplainedSource,
+        columns: &[usize],
+    ) -> String {
         let mut conditions: Vec<&Expr> = query.filter.iter().flat_map(conjuncts).collect();
         for condition in query.join_conditions.iter().flatten() {
             conditions.extend(conjuncts(condition));
@@ -169,10 +176,7 @@ impl Tree<'_> {
         }
     }
 
-    fn join_source<'q>(
-        all: &'q [(usize, Step<'q>)],
-        at: usize,
-    ) -> Option<&'q ExplainedSource> {
+    fn join_source<'q>(all: &'q [(usize, Step<'q>)], at: usize) -> Option<&'q ExplainedSource> {
         let level = all.get(at)?.0;
         let mut inner = None;
         for (offset, (child_level, step)) in all.iter().enumerate().skip(at + 1) {
@@ -300,7 +304,11 @@ impl Tree<'_> {
     }
 
     fn add_subplans(&mut self, query: &ExplainedQuery, place: SubplanPlace, level: usize) {
-        for subplan in query.subplans.iter().filter(|subplan| subplan.place == place) {
+        for subplan in query
+            .subplans
+            .iter()
+            .filter(|subplan| subplan.place == place)
+        {
             let label = self.subplan_label(subplan);
             self.lines.push(TreeLine {
                 level,

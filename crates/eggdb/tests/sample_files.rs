@@ -329,7 +329,10 @@ fn a_v0_2_0_file_takes_a_kept_collection_count_and_then_carries_its_feature_flag
     let db = Database::open(&path).unwrap();
     let stats = db.collection_stats().unwrap();
     assert_eq!(stats.len(), 1);
-    assert_eq!((stats[0].entries, stats[0].key_bytes, stats[0].value_bytes), (1, 1, 5));
+    assert_eq!(
+        (stats[0].entries, stats[0].key_bytes, stats[0].value_bytes),
+        (1, 1, 5)
+    );
     assert_holds(&db, &v0_2_0_entries());
     db.close().unwrap();
 }

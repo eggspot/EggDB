@@ -819,7 +819,8 @@ impl<'k> Api<'k> {
                 "Result window is too large, from + size must be less than or equal to: [10000]",
             ));
         }
-        let ignore_unavailable = query_flag(request, "ignore_unavailable").as_deref() == Some("true");
+        let ignore_unavailable =
+            query_flag(request, "ignore_unavailable").as_deref() == Some("true");
         let gathered = read(self.keyspace, |keys| {
             let searched = match indices {
                 Some(named) => {

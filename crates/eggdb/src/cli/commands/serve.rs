@@ -52,8 +52,8 @@ impl Session<'_> {
         tables: &eggdb_sql::VisibleTables,
     ) -> Result<(), Failure> {
         let file = render::text(self.request.file.display().to_string().as_bytes());
-        let (unknown, unservable, _) =
-            super::mcp::check_tables(&DatabaseStore(db), tables, false).map_err(|message| {
+        let (unknown, unservable, _) = super::mcp::check_tables(&DatabaseStore(db), tables, false)
+            .map_err(|message| {
                 Failure::database(
                     format!("cannot read {file}: {message}"),
                     Exit::DatabaseError,
@@ -594,9 +594,8 @@ impl Session<'_> {
             let (name, first) = directory.remove(0);
             (super::Opened::Owned(Box::new(first)), name)
         };
-        let mcp_tables = (!options.mcp_tables.is_empty()).then(|| {
-            eggdb_sql::VisibleTables::new(options.mcp_tables.iter().map(String::as_str))
-        });
+        let mcp_tables = (!options.mcp_tables.is_empty())
+            .then(|| eggdb_sql::VisibleTables::new(options.mcp_tables.iter().map(String::as_str)));
         if let Some(tables) = &mcp_tables {
             self.check_mcp_tables(&db, tables)?;
         }
@@ -1512,8 +1511,8 @@ fn bind_syslog(
     let bound = datagrams
         .local_address()
         .map_err(|error| cannot_listen(error.to_string()))?;
-    let listener = std::net::TcpListener::bind(bound)
-        .map_err(|error| cannot_listen(error.to_string()))?;
+    let listener =
+        std::net::TcpListener::bind(bound).map_err(|error| cannot_listen(error.to_string()))?;
     Ok((datagrams, listener))
 }
 

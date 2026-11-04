@@ -58,14 +58,12 @@ impl Parser<'_> {
         if_not_exists: bool,
         declared: Option<CreateTable>,
     ) -> SqlResult<Statement> {
-        let column_names = if declared.is_none()
-            && !self.mysql()
-            && self.peek_kind() == &TokenKind::LeftParen
-        {
-            self.name_list()?
-        } else {
-            Vec::new()
-        };
+        let column_names =
+            if declared.is_none() && !self.mysql() && self.peek_kind() == &TokenKind::LeftParen {
+                self.name_list()?
+            } else {
+                Vec::new()
+            };
         if self.oracle() {
             self.skip_physical_properties()?;
         }

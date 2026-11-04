@@ -148,19 +148,24 @@ struct Token<'a> {
 fn tokens_of(text: &str, dialect: QueryDialect) -> Result<Vec<Token<'_>>, FormatError> {
     let mut raw: Vec<(Range<usize>, Lexeme)> = Vec::new();
     let mut carry = Carry::Code;
-    lex(text, dialect, &mut carry, &mut |range, lexeme| {
-        match raw.last_mut() {
+    lex(
+        text,
+        dialect,
+        &mut carry,
+        &mut |range, lexeme| match raw.last_mut() {
             Some((last, previous))
                 if *previous == lexeme
                     && last.end == range.start
                     && matches!(lexeme, Lexeme::String | Lexeme::QuotedName)
-                    && text.get(last.clone()).is_some_and(|piece| !piece.is_empty()) =>
+                    && text
+                        .get(last.clone())
+                        .is_some_and(|piece| !piece.is_empty()) =>
             {
                 last.end = range.end;
             }
             _ => raw.push((range, lexeme)),
-        }
-    });
+        },
+    );
     if carry != Carry::Code {
         let what = match carry {
             Carry::Quoted(b'\'') => "unclosed string",
@@ -310,9 +315,7 @@ fn spaced(previous: Option<&Token<'_>>, token: &Token<'_>) -> bool {
         (_, "," | ")" | ";") | ("(", _) | (".", _) | (_, ".") => false,
         (_, "(") if matches!(previous.lexeme, Lexeme::Word | Lexeme::QuotedName) => !adjacent,
         (":" | "@" | "$", _) | (_, ":") if adjacent => false,
-        _ if adjacent && previous.lexeme == Lexeme::Other && token.lexeme == Lexeme::Other => {
-            false
-        }
+        _ if adjacent && previous.lexeme == Lexeme::Other && token.lexeme == Lexeme::Other => false,
         _ => true,
     }
 }
@@ -483,10 +486,7 @@ mod tests {
             toggled(&["-- SELECT 1", "  --FROM t", ""]),
             ["SELECT 1", "  FROM t", ""]
         );
-        assert_eq!(
-            toggled(&["-- a", "b"]),
-            ["-- -- a", "-- b"]
-        );
+        assert_eq!(toggled(&["-- a", "b"]), ["-- -- a", "-- b"]);
         let edit = comment_edits(&["  x"])[0].expect("a filled line is edited");
         assert_eq!(edit.at, 2);
         assert_eq!(edit.moved(1), 1);

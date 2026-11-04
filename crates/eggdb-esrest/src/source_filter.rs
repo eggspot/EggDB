@@ -47,7 +47,9 @@ impl SourceFilter {
     /// The filter a request's `_source` member asks for: `true`, `false`, a pattern, an array
     /// of patterns, or an object with `includes` and `excludes` (or `include` and `exclude`).
     pub(crate) fn from_node(node: &Node) -> Result<Self, String> {
-        let invalid = || "[_source] must be a boolean, a string, an array of strings or an object with includes and excludes".to_owned();
+        let invalid = || {
+            "[_source] must be a boolean, a string, an array of strings or an object with includes and excludes".to_owned()
+        };
         match &node.value {
             Json::Boolean(false) => Ok(Self::Hidden),
             Json::Boolean(true) => Ok(Self::default()),
@@ -122,7 +124,12 @@ struct Walk<'p> {
 }
 
 impl Walk<'_> {
-    fn members(&self, members: &[(String, Node)], prefix: &str, included: bool) -> Vec<(String, Node)> {
+    fn members(
+        &self,
+        members: &[(String, Node)],
+        prefix: &str,
+        included: bool,
+    ) -> Vec<(String, Node)> {
         let mut kept = Vec::new();
         for (key, node) in members {
             let path = if prefix.is_empty() {
@@ -164,7 +171,9 @@ impl Walk<'_> {
                     .iter()
                     .filter_map(|item| {
                         let value = match &item.value {
-                            Json::Object(_) | Json::Array(_) => self.value(&item.value, path, whole)?,
+                            Json::Object(_) | Json::Array(_) => {
+                                self.value(&item.value, path, whole)?
+                            }
                             other if whole => other.clone(),
                             _ => return None,
                         };
@@ -219,7 +228,9 @@ pub(crate) fn matches(pattern: &str, text: &str) -> bool {
             },
         }
     }
-    pattern.get(p..).is_some_and(|rest| rest.iter().all(|&character| character == '*'))
+    pattern
+        .get(p..)
+        .is_some_and(|rest| rest.iter().all(|&character| character == '*'))
 }
 
 #[cfg(test)]
@@ -268,20 +279,30 @@ mod tests {
             Some("{\"tags\":[{\"k\":1}]}")
         );
         assert_eq!(
-            SourceFilter::from_flags(Some("message,n"), None, None).apply(SOURCE).as_deref(),
+            SourceFilter::from_flags(Some("message,n"), None, None)
+                .apply(SOURCE)
+                .as_deref(),
             Some("{\"message\":\"hi\",\"n\":3}")
         );
         assert_eq!(
-            SourceFilter::from_flags(None, None, Some("user,tags")).apply(SOURCE).as_deref(),
+            SourceFilter::from_flags(None, None, Some("user,tags"))
+                .apply(SOURCE)
+                .as_deref(),
             Some("{\"message\":\"hi\",\"n\":3}")
         );
-        assert_eq!(SourceFilter::from_flags(Some("false"), None, None).apply(SOURCE), None);
+        assert_eq!(
+            SourceFilter::from_flags(Some("false"), None, None).apply(SOURCE),
+            None
+        );
     }
 
     #[test]
     fn a_bad_source_member_is_an_error() {
         for spec in ["1", "[1]", "{\"includes\":2}", "{\"other\":[]}", "null"] {
-            assert!(SourceFilter::from_node(&parse_document(spec).expect("JSON")).is_err(), "{spec}");
+            assert!(
+                SourceFilter::from_node(&parse_document(spec).expect("JSON")).is_err(),
+                "{spec}"
+            );
         }
     }
 }

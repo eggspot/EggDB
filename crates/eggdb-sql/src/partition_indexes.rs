@@ -128,7 +128,16 @@ pub(crate) fn create_on_partitioned(
     };
     if !create.only {
         for child in children(writer, tables, &table.name)? {
-            reach(writer, tables, &definition, &index, &child, position, dialect, 0)?;
+            reach(
+                writer,
+                tables,
+                &definition,
+                &index,
+                &child,
+                position,
+                dialect,
+                0,
+            )?;
         }
     }
     Ok(QueryResult::command("CREATE INDEX"))
@@ -164,7 +173,10 @@ fn reach(
         return Err(crate::encoding::corrupt("partition tree"));
     }
     let catalog = crate::partitions::catalog(writer, tables)?;
-    if catalog.child_index_of(child_name, parent_index.id).is_some() {
+    if catalog
+        .child_index_of(child_name, parent_index.id)
+        .is_some()
+    {
         return Ok(());
     }
     let child = table_named(writer, tables, child_name, position)?;
@@ -188,7 +200,8 @@ fn reach(
             if parent_index.unique
                 && let Some(key) = &child_key
             {
-                let columns: Vec<&str> = spec.columns.iter().map(|name| name.text.as_str()).collect();
+                let columns: Vec<&str> =
+                    spec.columns.iter().map(|name| name.text.as_str()).collect();
                 check_unique_covers_key(key, &columns, position)?;
             }
             let (definition, at) = crate::indexes::add_index(
@@ -341,9 +354,9 @@ fn found_in<'t>(every: &'t [TableDefinition], schemas: &[String], name: &str) ->
         }) {
             return Some(found);
         }
-        if let Some(table) = in_schema
-            .find(|table| !table.primary_key.is_empty() && table.primary_key_constraint_name() == base)
-        {
+        if let Some(table) = in_schema.find(|table| {
+            !table.primary_key.is_empty() && table.primary_key_constraint_name() == base
+        }) {
             return Some(Found::PrimaryKey(table));
         }
     }
@@ -384,7 +397,11 @@ pub(crate) fn attach_index(
 ) -> SqlResult<QueryResult> {
     let result = QueryResult::command("ALTER INDEX");
     let every = crate::indexes::every_table(writer)?;
-    let parent_found = found_in(&every, &schemas_to_search(writer, &index.text)?, &index.text);
+    let parent_found = found_in(
+        &every,
+        &schemas_to_search(writer, &index.text)?,
+        &index.text,
+    );
     let Some(parent_found) = parent_found else {
         if if_exists {
             return Ok(result.with_notice(format!(

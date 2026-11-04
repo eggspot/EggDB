@@ -3,9 +3,9 @@
 //! simulation on several seeds, with and without short transfers and latency; UDP sockets too.
 
 use eggdb_platform::{
-    Address, DatagramSocket, ErrorKind, MAX_DATAGRAM_BYTES, NetBackend, NetCompletion,
-    NetListener, NetOp, NetQueue, NetQueueOptions, NetStream, Network, OsNetQueue, OsNetwork,
-    Result, SimNetwork,
+    Address, DatagramSocket, ErrorKind, MAX_DATAGRAM_BYTES, NetBackend, NetCompletion, NetListener,
+    NetOp, NetQueue, NetQueueOptions, NetStream, Network, OsNetQueue, OsNetwork, Result,
+    SimNetwork,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -397,33 +397,37 @@ contract!(a_datagram_receive_with_nothing_sent_times_out, |net| {
     assert_eq!(error.kind(), ErrorKind::TimedOut);
 });
 
-contract!(datagram_sockets_refuse_a_taken_port_and_oversized_or_empty_buffers, |net| {
-    let socket = net.bind_datagram(SocketAddr::new(LOOPBACK, 0)).unwrap();
-    let address = socket.local_address().unwrap();
-    assert_eq!(
-        net.bind_datagram(address).unwrap_err().kind(),
-        ErrorKind::AddrInUse
-    );
-    assert_eq!(
-        socket
-            .send_to(&vec![0; MAX_DATAGRAM_BYTES + 1], address)
-            .unwrap_err()
-            .kind(),
-        ErrorKind::InvalidInput
-    );
-    assert_eq!(
-        socket
-            .receive_from(&mut [], Duration::from_millis(1))
-            .unwrap_err()
-            .kind(),
-        ErrorKind::InvalidInput
-    );
-});
+contract!(
+    datagram_sockets_refuse_a_taken_port_and_oversized_or_empty_buffers,
+    |net| {
+        let socket = net.bind_datagram(SocketAddr::new(LOOPBACK, 0)).unwrap();
+        let address = socket.local_address().unwrap();
+        assert_eq!(
+            net.bind_datagram(address).unwrap_err().kind(),
+            ErrorKind::AddrInUse
+        );
+        assert_eq!(
+            socket
+                .send_to(&vec![0; MAX_DATAGRAM_BYTES + 1], address)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            socket
+                .receive_from(&mut [], Duration::from_millis(1))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidInput
+        );
+    }
+);
 
 contract!(a_datagram_longer_than_the_buffer_is_cut_or_refused, |net| {
     let a = net.bind_datagram(SocketAddr::new(LOOPBACK, 0)).unwrap();
     let b = net.bind_datagram(SocketAddr::new(LOOPBACK, 0)).unwrap();
-    a.send_to(b"0123456789", b.local_address().unwrap()).unwrap();
+    a.send_to(b"0123456789", b.local_address().unwrap())
+        .unwrap();
     let mut buffer = [0; 4];
     match b.receive_from(&mut buffer, Duration::from_secs(5)) {
         Ok((length, _)) => assert_eq!((length, &buffer), (4, b"0123")),

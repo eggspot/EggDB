@@ -1,8 +1,8 @@
 use super::privilege_inquiry::privilege_list_parses;
+use crate::Session;
 use crate::error::{SqlResult, SqlState};
 use crate::memory_store::MemoryStore;
 use crate::tests::render;
-use crate::Session;
 
 fn run(session: &mut Session<'_>, sql: &str) -> SqlResult<String> {
     let mut last = String::new();
@@ -143,11 +143,23 @@ fn a_checked_role_is_told_exactly_what_its_statements_may_do() {
         ),
         "usage|create|connect|temp|staff\nt|f|t|f|f\nSELECT 1"
     );
-    fails_with(&mut joe, "SELECT * FROM accounts", SqlState::INSUFFICIENT_PRIVILEGE);
+    fails_with(
+        &mut joe,
+        "SELECT * FROM accounts",
+        SqlState::INSUFFICIENT_PRIVILEGE,
+    );
     shown(&mut joe, "SELECT * FROM hidden");
     shown(&mut joe, "INSERT INTO accounts VALUES (3, 'joe', 0)");
-    fails_with(&mut joe, "CREATE TABLE mine (id integer)", SqlState::INSUFFICIENT_PRIVILEGE);
-    fails_with(&mut joe, "CREATE TEMPORARY TABLE scratch (id integer)", SqlState::INSUFFICIENT_PRIVILEGE);
+    fails_with(
+        &mut joe,
+        "CREATE TABLE mine (id integer)",
+        SqlState::INSUFFICIENT_PRIVILEGE,
+    );
+    fails_with(
+        &mut joe,
+        "CREATE TEMPORARY TABLE scratch (id integer)",
+        SqlState::INSUFFICIENT_PRIVILEGE,
+    );
     let mut carol = as_role(&store, "carol");
     assert_eq!(
         shown(
@@ -325,7 +337,10 @@ fn usage_privileges_list_what_every_role_may_use() {
     let store = MemoryStore::default();
     setup(&store);
     let mut admin = Session::new(&store);
-    shown(&mut admin, "CREATE DOMAIN positive AS integer CHECK (VALUE > 0)");
+    shown(
+        &mut admin,
+        "CREATE DOMAIN positive AS integer CHECK (VALUE > 0)",
+    );
     assert_eq!(
         shown(
             &mut admin,
@@ -413,7 +428,11 @@ fn privilege_lists_parse_as_postgresql_reads_them() {
         ("  INSERT ,\tselect with grant option ", 2),
         ("SELECT WITH GRANT OPTION, RULE, MAINTAIN", 3),
     ] {
-        assert_eq!(privilege_list_parses(text, false).ok(), Some(count), "{text}");
+        assert_eq!(
+            privilege_list_parses(text, false).ok(),
+            Some(count),
+            "{text}"
+        );
     }
     for text in [
         "",
@@ -429,7 +448,11 @@ fn privilege_lists_parse_as_postgresql_reads_them() {
         assert!(privilege_list_parses(text, false).is_err(), "{text}");
     }
     assert_eq!(
-        privilege_list_parses("member with admin option, USAGE WITH GRANT OPTION, set", true).ok(),
+        privilege_list_parses(
+            "member with admin option, USAGE WITH GRANT OPTION, set",
+            true
+        )
+        .ok(),
         Some(3)
     );
     assert!(privilege_list_parses("SELECT", true).is_err());
@@ -438,8 +461,22 @@ fn privilege_lists_parse_as_postgresql_reads_them() {
 #[test]
 fn random_privilege_lists_never_panic() {
     const PIECES: [&str; 16] = [
-        "SELECT", "insert", " ", ",", "WITH", " GRANT", " OPTION", " ADMIN", "\t", "é", "\u{0}",
-        "MEMBER", "with grant option", "ß", "\u{10ffff}", "UsAgE",
+        "SELECT",
+        "insert",
+        " ",
+        ",",
+        "WITH",
+        " GRANT",
+        " OPTION",
+        " ADMIN",
+        "\t",
+        "é",
+        "\u{0}",
+        "MEMBER",
+        "with grant option",
+        "ß",
+        "\u{10ffff}",
+        "UsAgE",
     ];
     let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
     let mut next = move || {

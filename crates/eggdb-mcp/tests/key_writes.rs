@@ -6,8 +6,8 @@
 mod common;
 
 use common::{
-    MapOpener, TempAudit, call, error_code, initialized, is_error, parsed, sample_store,
-    served, structured, tables_config, text_at, writing_config, writing_server,
+    MapOpener, TempAudit, call, error_code, initialized, is_error, parsed, sample_store, served,
+    structured, tables_config, text_at, writing_config, writing_server,
 };
 use eggdb_mcp::{Server, ServerConfig};
 use eggdb_sql::RESERVED_KEY_PREFIX;
@@ -37,7 +37,12 @@ fn a_read_only_server_neither_lists_nor_runs_the_key_writes() {
     assert!(!tools.contains("\"name\":\"del\""), "{tools}");
     let put = call(&mut server, 2, "put", r#"{"key":"k","value":"v"}"#);
     assert_eq!(error_code(&put), "read_only");
-    let del = call(&mut server, 3, "del", r#"{"key":"greeting","confirm":true}"#);
+    let del = call(
+        &mut server,
+        3,
+        "del",
+        r#"{"key":"greeting","confirm":true}"#,
+    );
     assert_eq!(error_code(&del), "read_only");
     assert_eq!(stored(&opener, b"k"), None);
     assert_eq!(opener.write_opens.get(), 0);
@@ -83,7 +88,10 @@ fn with_writes_put_stores_and_replaces_a_key_and_each_write_is_audited_twice() {
     let opener = MapOpener::new(sample_store());
     let mut server = writing_server(&opener, &audit, "{}");
     let tools = listed_tools(&mut server);
-    assert!(tools.contains("{\"name\":\"put\",\"title\":\"Store a key\""), "{tools}");
+    assert!(
+        tools.contains("{\"name\":\"put\",\"title\":\"Store a key\""),
+        "{tools}"
+    );
     let put = call(&mut server, 2, "put", r#"{"key":"user:1","value":"Ada"}"#);
     assert!(!is_error(&put), "{put:?}");
     let result = structured(&put);
@@ -92,7 +100,12 @@ fn with_writes_put_stores_and_replaces_a_key_and_each_write_is_audited_twice() {
     assert_eq!(text_at(result, &["stored"]), "true");
     assert_eq!(text_at(result, &["committed"]), "true");
     assert_eq!(stored(&opener, b"user:1"), Some(b"Ada".to_vec()));
-    let replaced = call(&mut server, 3, "put", r#"{"key_hex":"757365723a31","value_hex":"00ff"}"#);
+    let replaced = call(
+        &mut server,
+        3,
+        "put",
+        r#"{"key_hex":"757365723a31","value_hex":"00ff"}"#,
+    );
     assert!(!is_error(&replaced), "{replaced:?}");
     assert_eq!(stored(&opener, b"user:1"), Some(vec![0x00, 0xff]));
     let records = audit_records(&audit);
@@ -102,7 +115,13 @@ fn with_writes_put_stores_and_replaces_a_key_and_each_write_is_audited_twice() {
         .collect();
     assert_eq!(
         events,
-        ["server_started", "call_started", "call", "call_started", "call"],
+        [
+            "server_started",
+            "call_started",
+            "call",
+            "call_started",
+            "call"
+        ],
         "{records:?}"
     );
     assert_eq!(text_at(&records[2], &["tool"]), "put");
@@ -120,11 +139,27 @@ fn put_refuses_sql_s_key_space_a_bad_time_to_live_and_a_missing_value() {
         .collect();
     let before = opener.store.snapshot();
     for (id, arguments, expected) in [
-        (2, format!(r#"{{"key_hex":"{hex}00","value":"x"}}"#), "SQL's key space"),
-        (3, r#"{"key":"k","value":"v","ttl":"5"}"#.to_owned(), "ttl needs a time"),
-        (4, r#"{"key":"k","value":"v","ttl":"0s"}"#.to_owned(), "a ttl of 0"),
+        (
+            2,
+            format!(r#"{{"key_hex":"{hex}00","value":"x"}}"#),
+            "SQL's key space",
+        ),
+        (
+            3,
+            r#"{"key":"k","value":"v","ttl":"5"}"#.to_owned(),
+            "ttl needs a time",
+        ),
+        (
+            4,
+            r#"{"key":"k","value":"v","ttl":"0s"}"#.to_owned(),
+            "a ttl of 0",
+        ),
         (5, r#"{"key":"k"}"#.to_owned(), "give value or value_hex"),
-        (6, r#"{"key":"k","value":"v","confirm":true}"#.to_owned(), "unknown argument"),
+        (
+            6,
+            r#"{"key":"k","value":"v","confirm":true}"#.to_owned(),
+            "unknown argument",
+        ),
     ] {
         let answer = call(&mut server, id, "put", &arguments);
         assert_eq!(error_code(&answer), "invalid_arguments", "{arguments}");
@@ -150,11 +185,21 @@ fn a_delete_needs_confirm_true_when_the_client_cannot_ask() {
     let unconfirmed = call(&mut server, 2, "del", r#"{"key":"session:1"}"#);
     assert_eq!(error_code(&unconfirmed), "needs_confirmation");
     assert_eq!(stored(&opener, b"session:1"), Some(b"open".to_vec()));
-    let confirmed = call(&mut server, 3, "del", r#"{"key":"session:1","confirm":true}"#);
+    let confirmed = call(
+        &mut server,
+        3,
+        "del",
+        r#"{"key":"session:1","confirm":true}"#,
+    );
     assert!(!is_error(&confirmed), "{confirmed:?}");
     assert_eq!(text_at(structured(&confirmed), &["deleted"]), "true");
     assert_eq!(stored(&opener, b"session:1"), None);
-    let again = call(&mut server, 4, "del", r#"{"key":"session:1","confirm":true}"#);
+    let again = call(
+        &mut server,
+        4,
+        "del",
+        r#"{"key":"session:1","confirm":true}"#,
+    );
     assert_eq!(text_at(structured(&again), &["deleted"]), "false");
     let records = audit_records(&audit);
     let calls: Vec<&Node> = records

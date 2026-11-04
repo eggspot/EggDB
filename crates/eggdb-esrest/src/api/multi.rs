@@ -279,7 +279,9 @@ impl Api<'_> {
         let mut responses = Vec::with_capacity(searches.len());
         for (header, search_line) in searches {
             let indices = if header.indices.is_empty() {
-                default_index.map(|index| vec![index.to_owned()]).unwrap_or_default()
+                default_index
+                    .map(|index| vec![index.to_owned()])
+                    .unwrap_or_default()
             } else {
                 header.indices
             };
@@ -321,7 +323,8 @@ impl Api<'_> {
                 &format!("Invalid index name [{invalid}]"),
             );
         }
-        let everything = indices.is_empty() || indices.iter().any(|index| index == "_all" || index == "*");
+        let everything =
+            indices.is_empty() || indices.iter().any(|index| index == "_all" || index == "*");
         let names: Vec<&str> = indices.iter().map(String::as_str).collect();
         let search = Request {
             method: "POST".to_owned(),

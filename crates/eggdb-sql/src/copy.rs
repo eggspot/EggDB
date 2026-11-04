@@ -258,7 +258,10 @@ fn written_targets_of(table: &TableDefinition, columns: &[Name]) -> SqlResult<Ve
     {
         return Err(SqlError::new(
             SqlState::INVALID_COLUMN_REFERENCE,
-            format!("column \"{}\" is a generated column", table.columns[target].name),
+            format!(
+                "column \"{}\" is a generated column",
+                table.columns[target].name
+            ),
         )
         .with_detail("Generated columns cannot be used in COPY.")
         .at(name.position));

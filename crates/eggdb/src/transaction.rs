@@ -468,9 +468,7 @@ impl<'db> WriteTransaction<'db> {
         let Some((number, key_bytes)) = collection::entry_number(key) else {
             return Ok(None);
         };
-        Ok(self
-            .kept_count(number)?
-            .map(|_| (number, key_bytes)))
+        Ok(self.kept_count(number)?.map(|_| (number, key_bytes)))
     }
 
     pub(crate) fn kept_count(&mut self, number: u32) -> Result<Option<EntryCount>> {

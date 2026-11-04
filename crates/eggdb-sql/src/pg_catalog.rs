@@ -34,8 +34,8 @@ pub(crate) use monitoring::{
     function as monitoring_function, result_type as monitoring_result_type,
 };
 pub(crate) use oids::{OidRequest, Space as OidSpace, assign as assign_oids};
-pub(crate) use privilege_inquiry::is_inquiry as is_privilege_inquiry;
 pub(crate) use oids::{builtin_type, builtin_type_named, format_type, type_modifier};
+pub(crate) use privilege_inquiry::is_inquiry as is_privilege_inquiry;
 pub(crate) use relations::generated_rows;
 pub(crate) use relations::{index_columns, index_is_unique, index_sort_options};
 pub(crate) use snapshot::{

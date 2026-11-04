@@ -190,7 +190,7 @@ impl ByQuery {
         };
         if max_docs == Some(0) {
             return Err(validation(&[
-                "maxDocs should be greater than 0, but was [0]".to_owned()
+                "maxDocs should be greater than 0, but was [0]".to_owned(),
             ]));
         }
         let scroll_size = match query_flag(request, "scroll_size") {
@@ -201,7 +201,9 @@ impl ByQuery {
                     return Err(error(
                         400,
                         "illegal_argument_exception",
-                        &format!("[scroll_size] must be from 1 to {MAX_SCROLL_SIZE} but was [{text}]"),
+                        &format!(
+                            "[scroll_size] must be from 1 to {MAX_SCROLL_SIZE} but was [{text}]"
+                        ),
                     ));
                 }
             },
@@ -330,7 +332,8 @@ impl Api<'_> {
             let mut held = 0usize;
             let mut over_budget = false;
             keys.visit_prefix(&prefix, &mut |key, value| {
-                let (Some(id), Some((version, source))) = (key.get(prefix.len()..), unstored(value))
+                let (Some(id), Some((version, source))) =
+                    (key.get(prefix.len()..), unstored(value))
                 else {
                     return Ok(true);
                 };
@@ -493,7 +496,10 @@ mod tests {
         let tally = api
             .change_matched("logs", &matched, Change::Delete, &options)
             .expect("the deletes run");
-        assert_eq!((tally.deleted, tally.version_conflicts, tally.batches), (2, 1, 3));
+        assert_eq!(
+            (tally.deleted, tally.version_conflicts, tally.batches),
+            (2, 1, 3)
+        );
         assert!(tally.failures.is_empty());
         let kept = api.answer(&request("GET", "/logs/_doc/2", ""));
         assert_eq!(kept.status, 200);
@@ -517,7 +523,10 @@ mod tests {
         let tally = api
             .change_matched("logs", &matched, Change::Update(None), &options)
             .expect("the updates run");
-        assert_eq!((tally.updated, tally.version_conflicts, tally.batches), (0, 1, 1));
+        assert_eq!(
+            (tally.updated, tally.version_conflicts, tally.batches),
+            (0, 1, 1)
+        );
         assert_eq!(tally.status, 409);
         assert!(tally.failures[0].contains("version_conflict_engine_exception"));
     }

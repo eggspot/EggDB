@@ -42,8 +42,8 @@ pub(crate) use mysql_routines::mysql_program;
 pub use oracle::ORACLE_COMPATIBLE_VERSION;
 pub(crate) use oracle::{is_reserved as is_oracle_reserved, oracle_table_name};
 pub(crate) use plpgsql::plpgsql_program;
-pub(crate) use routines::with_routine_settings_changed;
 pub(crate) use plsql::{plsql_package_program, plsql_program};
+pub(crate) use routines::with_routine_settings_changed;
 pub use sqlserver::SQLSERVER_COMPATIBLE_VERSION;
 pub(crate) use sqlserver::{
     is_reserved as is_sqlserver_reserved, kept_default as sqlserver_kept_default,
@@ -2093,8 +2093,8 @@ impl<'t> Parser<'t> {
 
     fn column_definition(&mut self) -> SqlResult<ColumnDefinition> {
         let name = self.name()?;
-        let untyped = (self.sqlserver() && self.is_word("as"))
-            || (self.oracle() && self.starts_generation());
+        let untyped =
+            (self.sqlserver() && self.is_word("as")) || (self.oracle() && self.starts_generation());
         let serial = self.serial_type();
         let sql_type = match serial {
             Some(sql_type) => sql_type,
@@ -2911,8 +2911,11 @@ impl<'t> Parser<'t> {
             self.take_word("into");
         } else if self.sqlite() {
             if !replace && self.take_word("or") {
-                (on_duplicate, rollback_on_conflict, keeps_changes_on_conflict) =
-                    self.sqlite_conflict_resolution()?;
+                (
+                    on_duplicate,
+                    rollback_on_conflict,
+                    keeps_changes_on_conflict,
+                ) = self.sqlite_conflict_resolution()?;
             }
             self.expect_word("into")?;
         } else if self.sqlserver() {

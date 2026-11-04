@@ -69,8 +69,9 @@ fn trimmed(raw: &[u8]) -> &[u8] {
 pub(crate) fn parse(raw: &[u8], received_unix_micros: i64) -> Message {
     let raw = trimmed(raw);
     match priority(raw) {
-        Some((priority, rest)) => rfc5424(priority, rest)
-            .unwrap_or_else(|| rfc3164(priority, rest, received_unix_micros)),
+        Some((priority, rest)) => {
+            rfc5424(priority, rest).unwrap_or_else(|| rfc3164(priority, rest, received_unix_micros))
+        }
         None => Message::of_priority(USER_NOTICE, text(raw)),
     }
 }
@@ -256,7 +257,11 @@ fn year_of_days(days: i64) -> i64 {
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_from_march = (5 * day_of_year + 2) / 153;
     let year = year_of_era + era * 400;
-    if month_from_march >= 10 { year + 1 } else { year }
+    if month_from_march >= 10 {
+        year + 1
+    } else {
+        year
+    }
 }
 
 fn civil_seconds(
@@ -304,9 +309,8 @@ fn bsd_timestamp(content: &[u8], received_unix_micros: i64) -> Option<(i64, &[u8
     } else {
         rest.strip_prefix(b" ")?
     };
-    let received_year = year_of_days(
-        received_unix_micros.div_euclid(MICROS_PER_SECOND * SECONDS_PER_DAY),
-    );
+    let received_year =
+        year_of_days(received_unix_micros.div_euclid(MICROS_PER_SECOND * SECONDS_PER_DAY));
     let at_year = |year| {
         civil_seconds(year, month, day, hour, minute, second)
             .map(|seconds| seconds * MICROS_PER_SECOND)
@@ -345,7 +349,10 @@ fn bsd_hostname(rest: &[u8]) -> Option<(String, &[u8])> {
     let space = rest.iter().position(|&byte| byte == b' ')?;
     let token = rest.get(..space)?;
     let looks_like_a_tag = token.ends_with(b":") || token.contains(&b'[');
-    if token.is_empty() || token.len() > MOST_HOSTNAME_BYTES || !printable(token) || looks_like_a_tag
+    if token.is_empty()
+        || token.len() > MOST_HOSTNAME_BYTES
+        || !printable(token)
+        || looks_like_a_tag
     {
         return None;
     }

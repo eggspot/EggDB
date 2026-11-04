@@ -546,7 +546,10 @@ pub(crate) fn render_analyzed_tree(query: &ExplainedQuery, analyzed: Analyzed) -
     QueryResult::rows(
         "SELECT 1".to_owned(),
         columns(ExplainStyle::Tree, Dialect::MySql),
-        vec![vec![Value::Text(mysql_tree::tree_text(query, Some(&analyzed)))]],
+        vec![vec![Value::Text(mysql_tree::tree_text(
+            query,
+            Some(&analyzed),
+        ))]],
     )
 }
 

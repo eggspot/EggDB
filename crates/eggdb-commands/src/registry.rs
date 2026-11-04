@@ -1010,7 +1010,11 @@ pub const TOOLS: &[ToolDefinition] = &[
         arguments: &[
             KEY_TEXT_ARGUMENT,
             KEY_HEX_ARGUMENT,
-            text_argument("value", "The value as text.", ArgumentTarget::Operand("value")),
+            text_argument(
+                "value",
+                "The value as text.",
+                ArgumentTarget::Operand("value"),
+            ),
             text_argument(
                 "value_hex",
                 "The value's bytes in hexadecimal.",

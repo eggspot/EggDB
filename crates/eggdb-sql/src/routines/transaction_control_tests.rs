@@ -841,7 +841,10 @@ fn alter_function_set_and_reset_change_the_settings_stored_with_the_routine() {
         answer(&mut session, "SELECT check_password('joe')"),
         format!("check_password\n{default_path}\nSELECT 1")
     );
-    answer(&mut session, "ALTER FUNCTION check_password(text) RESET ALL");
+    answer(
+        &mut session,
+        "ALTER FUNCTION check_password(text) RESET ALL",
+    );
     assert_eq!(
         answer(&mut session, "SELECT check_password('joe')"),
         "check_password\npublic\nSELECT 1"

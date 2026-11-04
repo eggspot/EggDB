@@ -1853,7 +1853,8 @@ fn help_lines<S: Source>(ui: &Ui<S>) -> Vec<String> {
         lines.extend([
             "Collections C  pick the collection shown (default key space first); a adds one"
                 .to_owned(),
-            "            e renames, the CLI deletes; Tab reaches the sidebar at 110 columns".to_owned(),
+            "            e renames, the CLI deletes; Tab reaches the sidebar at 110 columns"
+                .to_owned(),
         ]);
     }
     lines.extend([

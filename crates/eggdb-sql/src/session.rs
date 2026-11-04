@@ -2613,7 +2613,8 @@ impl<'s> Session<'s> {
     }
 
     fn fail_block(&mut self) {
-        if self.savepoints.is_active() && matches!(self.block, Block::Writing(_) | Block::Reading(_))
+        if self.savepoints.is_active()
+            && matches!(self.block, Block::Writing(_) | Block::Reading(_))
         {
             self.savepoints.aborted = true;
             return;

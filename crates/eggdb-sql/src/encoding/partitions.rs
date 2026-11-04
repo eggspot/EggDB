@@ -84,7 +84,10 @@ fn values(reader: &mut Reader<'_>) -> SqlResult<Vec<BoundText>> {
 }
 
 fn needs_version_2(record: &PartitionRecord) -> bool {
-    record.key.as_ref().is_some_and(PartitionKey::has_expressions)
+    record
+        .key
+        .as_ref()
+        .is_some_and(PartitionKey::has_expressions)
         || (record.parent.is_some() && !record.index_links.is_empty())
 }
 

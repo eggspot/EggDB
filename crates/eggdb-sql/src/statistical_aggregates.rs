@@ -172,7 +172,8 @@ impl Moments {
         let delta = number - mean;
         let next_mean = mean + delta / next_count as f64;
         let next_deviations = squared_deviations + delta * (number - next_mean);
-        let finite_before = number.is_finite() && mean.is_finite() && squared_deviations.is_finite();
+        let finite_before =
+            number.is_finite() && mean.is_finite() && squared_deviations.is_finite();
         if finite_before && (next_mean.is_infinite() || next_deviations.is_infinite()) {
             return Err(float_overflow());
         }
@@ -221,7 +222,9 @@ fn float_moments(count: i64, sum: &Numeric, squares: &Numeric) -> SqlResult<(i64
     }
     let count_value = Numeric::from_i64(count);
     let mean = sum.divide(&count_value)?.to_f64();
-    let numerator = squares.multiply(&count_value)?.subtract(&sum.multiply(sum)?)?;
+    let numerator = squares
+        .multiply(&count_value)?
+        .subtract(&sum.multiply(sum)?)?;
     let deviations = numerator.divide(&count_value)?.to_f64().max(0.0);
     Ok((count, mean, deviations))
 }
@@ -240,7 +243,9 @@ fn exact_result(
         return Ok(Value::Numeric(Numeric::nan()));
     }
     let count_value = Numeric::from_i64(count);
-    let numerator = squares.multiply(&count_value)?.subtract(&sum.multiply(sum)?)?;
+    let numerator = squares
+        .multiply(&count_value)?
+        .subtract(&sum.multiply(sum)?)?;
     if count == 1 || numerator.compare(&Numeric::from_i64(0)) != Ordering::Greater {
         return Ok(Value::Numeric(Numeric::from_i64(0)));
     }
@@ -262,9 +267,7 @@ fn float_result(count: i64, squared_deviations: f64, measure: Measure, divisor: 
         (Divisor::Sample, 1) => return Value::Null,
         (Divisor::SampleOrZero, 1) => 0.0,
         (Divisor::Population, _) => squared_deviations / count as f64,
-        (Divisor::Sample | Divisor::SampleOrZero, _) => {
-            squared_deviations / (count - 1) as f64
-        }
+        (Divisor::Sample | Divisor::SampleOrZero, _) => squared_deviations / (count - 1) as f64,
     };
     let variance = if variance < 0.0 { 0.0 } else { variance };
     Value::Double(match measure {
@@ -304,10 +307,22 @@ mod tests {
     #[test]
     fn integer_input_gives_exact_numeric_results() {
         let values = integers(&[1, 2, 3, 4]);
-        assert_eq!(finished(&values, AggregateFunction::Variance), "1.6666666666666667");
-        assert_eq!(finished(&values, AggregateFunction::Stddev), "1.2909944487358056");
-        assert_eq!(finished(&values, AggregateFunction::VarPop), "1.2500000000000000");
-        assert_eq!(finished(&values, AggregateFunction::StddevPop), "1.1180339887498948");
+        assert_eq!(
+            finished(&values, AggregateFunction::Variance),
+            "1.6666666666666667"
+        );
+        assert_eq!(
+            finished(&values, AggregateFunction::Stddev),
+            "1.2909944487358056"
+        );
+        assert_eq!(
+            finished(&values, AggregateFunction::VarPop),
+            "1.2500000000000000"
+        );
+        assert_eq!(
+            finished(&values, AggregateFunction::StddevPop),
+            "1.1180339887498948"
+        );
     }
 
     #[test]
@@ -332,11 +347,20 @@ mod tests {
     fn float_input_uses_a_stable_running_method() {
         let values = doubles(&[1.0, 3.0, 5.0, 7.0]);
         assert_eq!(finished(&values, AggregateFunction::VarPop), "5");
-        assert_eq!(finished(&values, AggregateFunction::VarSamp), "6.666666666666667");
-        assert_eq!(finished(&doubles(&[3.0, 5.0]), AggregateFunction::StddevSamp), "1.4142135623730951");
+        assert_eq!(
+            finished(&values, AggregateFunction::VarSamp),
+            "6.666666666666667"
+        );
+        assert_eq!(
+            finished(&doubles(&[3.0, 5.0]), AggregateFunction::StddevSamp),
+            "1.4142135623730951"
+        );
         let shifted = doubles(&[1.0e9 + 4.0, 1.0e9 + 7.0, 1.0e9 + 13.0, 1.0e9 + 16.0]);
         assert_eq!(finished(&shifted, AggregateFunction::VarSamp), "30");
-        assert_eq!(finished(&doubles(&[f64::INFINITY]), AggregateFunction::VarPop), "NaN");
+        assert_eq!(
+            finished(&doubles(&[f64::INFINITY]), AggregateFunction::VarPop),
+            "NaN"
+        );
         assert_eq!(
             finished(&doubles(&[1.0e308, -1.0e308]), AggregateFunction::VarPop),
             "error: value out of range: overflow"
@@ -349,8 +373,15 @@ mod tests {
             Value::Numeric(Numeric::parse("1.10").unwrap()),
             Value::Numeric(Numeric::parse("2.20").unwrap()),
         ];
-        assert_eq!(finished(&values, AggregateFunction::VarSamp), "0.60500000000000000000");
-        let wide = vec![Value::BigInt(i64::MAX), Value::BigInt(i64::MAX), Value::BigInt(i64::MAX - 2)];
+        assert_eq!(
+            finished(&values, AggregateFunction::VarSamp),
+            "0.60500000000000000000"
+        );
+        let wide = vec![
+            Value::BigInt(i64::MAX),
+            Value::BigInt(i64::MAX),
+            Value::BigInt(i64::MAX - 2),
+        ];
         assert_eq!(
             finished(&wide, AggregateFunction::VarSamp),
             "1.3333333333333333"

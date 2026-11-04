@@ -188,8 +188,6 @@ mod arrays_tests;
 #[cfg(test)]
 mod batch_logic_tests;
 #[cfg(test)]
-mod create_table_as_tests;
-#[cfg(test)]
 mod bulk_load_tests;
 #[cfg(test)]
 mod citext_tests;
@@ -199,6 +197,8 @@ mod constraint_tests;
 mod copy_tests;
 #[cfg(test)]
 mod correctness;
+#[cfg(test)]
+mod create_table_as_tests;
 #[cfg(test)]
 mod destructive_tests;
 #[cfg(test)]

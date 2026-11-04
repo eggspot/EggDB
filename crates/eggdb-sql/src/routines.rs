@@ -854,7 +854,8 @@ fn change_routine_settings(
             alter.target.name.position,
         ));
     };
-    let text = crate::parser::with_routine_settings_changed(&routine.text, routine.dialect, changes)?;
+    let text =
+        crate::parser::with_routine_settings_changed(&routine.text, routine.dialect, changes)?;
     let definition = parse_definition(&text, routine.dialect)?;
     if definition.kind != routine.kind || definition.identity() != routine.identity {
         return Err(crate::encoding::corrupt("routine definitions"));

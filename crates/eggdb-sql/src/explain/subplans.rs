@@ -85,7 +85,15 @@ fn explain_prepared(
 ) -> SqlResult<ExplainedQuery> {
     let mut subplans = Vec::new();
     for (expr, place) in placed_expressions(&select) {
-        collect(reader, tables, prepared, expr, place, numbering, &mut subplans)?;
+        collect(
+            reader,
+            tables,
+            prepared,
+            expr,
+            place,
+            numbering,
+            &mut subplans,
+        )?;
     }
     let mut out = execute::explain_select(reader, tables, &select)?;
     out.subplans = subplans;

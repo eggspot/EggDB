@@ -90,7 +90,10 @@ fn on_conflict_on_a_unique_constraint_arbitrates_only_that_constraint() {
         "INSERT 0 1"
     );
     assert_eq!(
-        last(&mut session, "SELECT did, zipcode FROM distributors WHERE dname = 'Gizmo'"),
+        last(
+            &mut session,
+            "SELECT did, zipcode FROM distributors WHERE dname = 'Gizmo'"
+        ),
         "did|zipcode\n5|99999\nSELECT 1"
     );
     let other_key = fails(
@@ -246,7 +249,10 @@ fn sqlite_upsert_targets_take_a_where_clause_and_ordering() {
         &mut session,
         "CREATE TABLE vocabulary (word TEXT PRIMARY KEY, count INT DEFAULT 1)",
     );
-    last(&mut session, "INSERT INTO vocabulary (word) VALUES ('jovial')");
+    last(
+        &mut session,
+        "INSERT INTO vocabulary (word) VALUES ('jovial')",
+    );
     last(
         &mut session,
         "INSERT INTO vocabulary (word) VALUES ('jovial') \

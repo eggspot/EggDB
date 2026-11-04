@@ -255,11 +255,7 @@ impl KeySpaceScan {
 
     fn page_range(&self, shown: usize) -> String {
         let last = self.first_position.saturating_add(shown).saturating_sub(1);
-        format!(
-            "{}–{}",
-            thousands(self.first_position),
-            thousands(last)
-        )
+        format!("{}–{}", thousands(self.first_position), thousands(last))
     }
 
     fn order_words(&self) -> &'static str {
@@ -313,7 +309,10 @@ impl KeySpaceScan {
         if self.first_position > 1 {
             format!("Showing keys {} {filter} {order}.", self.page_range(shown))
         } else {
-            format!("Showing the first {} keys {filter} {order}.", thousands(shown))
+            format!(
+                "Showing the first {} keys {filter} {order}.",
+                thousands(shown)
+            )
         }
     }
 
@@ -452,7 +451,9 @@ pub struct KeyPages {
 impl KeyPages {
     /// The field's error line, when its text does not spell bytes.
     pub fn prefix_error(&self) -> Option<String> {
-        unspelled(&self.prefix_text).err().map(|error| error.message)
+        unspelled(&self.prefix_text)
+            .err()
+            .map(|error| error.message)
     }
 
     /// Whether `Back` acts: a page before this one exists.
@@ -654,10 +655,7 @@ mod tests {
         let page = users(KeyCount::Exactly(150))
             .scan_file(&database)
             .expect("the scan reads");
-        assert_eq!(
-            page.end.next,
-            Some(PageStart::After(b"user:099".to_vec()))
-        );
+        assert_eq!(page.end.next, Some(PageStart::After(b"user:099".to_vec())));
         let table = page.table;
         assert_eq!(table.rows.len(), KEY_SCAN_LIMIT);
         assert_eq!(table.row_count, 150);
@@ -728,7 +726,10 @@ mod tests {
             none.summary(0, Duration::from_micros(200)),
             "0 keys start with 'user:' · 0.2 ms"
         );
-        assert_eq!(none.empty_text().as_deref(), Some("No keys start with 'user:'"));
+        assert_eq!(
+            none.empty_text().as_deref(),
+            Some("No keys start with 'user:'")
+        );
         let mut server = KeySpaceScan::new(Some("resp3".to_owned()), KeyCount::Exactly(1204));
         server.over_resp = true;
         server.prefix = b"user:".to_vec();
@@ -745,10 +746,8 @@ mod tests {
 
     #[test]
     fn a_prefix_and_pages_read_a_file_with_more_than_a_hundred_keys() {
-        let path = std::env::temp_dir().join(format!(
-            "eggdb-gui-key-pages-{}.eggdb",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("eggdb-gui-key-pages-{}.eggdb", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let database = Database::open(&path).expect("the file opens");
         database

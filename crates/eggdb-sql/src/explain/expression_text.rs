@@ -79,7 +79,10 @@ impl ExpressionText<'_> {
             .select_numbers
             .iter()
             .find(|(at, _)| *at == position)
-            .map_or_else(|| "select".to_owned(), |(_, number)| format!("select #{number}"));
+            .map_or_else(
+                || "select".to_owned(),
+                |(_, number)| format!("select #{number}"),
+            );
         match &subquery.test {
             SubqueryTest::Scalar => format!("({select})"),
             SubqueryTest::Exists => format!("exists({select})"),
@@ -130,10 +133,16 @@ impl ExpressionText<'_> {
                 Spelling::MySql => format!("(not({}))", text(operand)),
             },
             ExprKind::And(operands) => {
-                format!("({})", self.joined(operands, self.word(" AND ", " and "), depth))
+                format!(
+                    "({})",
+                    self.joined(operands, self.word(" AND ", " and "), depth)
+                )
             }
             ExprKind::Or(operands) => {
-                format!("({})", self.joined(operands, self.word(" OR ", " or "), depth))
+                format!(
+                    "({})",
+                    self.joined(operands, self.word(" OR ", " or "), depth)
+                )
             }
             ExprKind::Binary(operator, left, right) => {
                 format!("({} {} {})", text(left), operator.symbol(), text(right))
@@ -178,7 +187,11 @@ impl ExpressionText<'_> {
                 high,
                 negated,
             } => {
-                let not = if *negated { self.word("NOT ", "not ") } else { "" };
+                let not = if *negated {
+                    self.word("NOT ", "not ")
+                } else {
+                    ""
+                };
                 format!(
                     "({} {not}{} {} {} {})",
                     text(expr),
@@ -193,7 +206,11 @@ impl ExpressionText<'_> {
                 list,
                 negated,
             } => {
-                let not = if *negated { self.word("NOT ", "not ") } else { "" };
+                let not = if *negated {
+                    self.word("NOT ", "not ")
+                } else {
+                    ""
+                };
                 format!(
                     "({} {not}{} ({}))",
                     text(expr),
@@ -311,10 +328,7 @@ mod tests {
             subplans: &[],
             select_numbers: &[],
         };
-        assert_eq!(
-            postgresql.text(&condition),
-            "((a > 1) AND (b IS NOT NULL))"
-        );
+        assert_eq!(postgresql.text(&condition), "((a > 1) AND (b IS NOT NULL))");
         let mysql = ExpressionText {
             spelling: Spelling::MySql,
             qualifier: Some("t"),

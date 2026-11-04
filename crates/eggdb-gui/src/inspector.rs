@@ -482,7 +482,14 @@ pub(crate) fn draw(
         }
         if open {
             let focused = inspector.ddl_focused && block == InspectorBlock::Ddl;
-            draw_block(paint, description, block, top + 28.0, (left, right), focused);
+            draw_block(
+                paint,
+                description,
+                block,
+                top + 28.0,
+                (left, right),
+                focused,
+            );
         }
     }
 }

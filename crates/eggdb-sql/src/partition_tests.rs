@@ -1,6 +1,6 @@
+use crate::error::SqlState;
 use crate::memory_store::MemoryStore;
 use crate::tests::render;
-use crate::error::SqlState;
 use crate::{Dialect, Session, SqlError};
 
 fn run(session: &mut Session<'_>, sql: &str) -> Result<String, SqlError> {
@@ -433,10 +433,7 @@ fn an_update_through_the_parent_moves_rows_to_the_partition_that_takes_them() {
     let mut session = with_measurements(&store);
     answer(&mut session, "CREATE INDEX m_v_idx ON m (v)");
     assert_eq!(
-        answer(
-            &mut session,
-            "UPDATE m SET at = '2025-06-01' WHERE id = 1"
-        ),
+        answer(&mut session, "UPDATE m SET at = '2025-06-01' WHERE id = 1"),
         "UPDATE 1"
     );
     assert_eq!(
@@ -458,14 +455,8 @@ fn an_update_through_the_parent_moves_rows_to_the_partition_that_takes_them() {
         ),
         "id|at|v\n2|2024-05-05|21\nUPDATE 1"
     );
-    assert_eq!(
-        answer(&mut session, "UPDATE m SET v = v + 100"),
-        "UPDATE 3"
-    );
-    let error = failure(
-        &mut session,
-        "UPDATE m SET at = '2030-01-01' WHERE id = 3",
-    );
+    assert_eq!(answer(&mut session, "UPDATE m SET v = v + 100"), "UPDATE 3");
+    let error = failure(&mut session, "UPDATE m SET at = '2030-01-01' WHERE id = 3");
     assert_eq!(error.state(), SqlState::CHECK_VIOLATION, "{error}");
     assert!(
         error
@@ -501,10 +492,7 @@ fn rows_move_between_sub_partitions_and_in_mysql() {
         answer(&mut session, "UPDATE t SET s = 'b' WHERE k = 1"),
         "UPDATE 1"
     );
-    assert_eq!(
-        answer(&mut session, "SELECT k FROM t1b"),
-        "k\n1\nSELECT 1"
-    );
+    assert_eq!(answer(&mut session, "SELECT k FROM t1b"), "k\n1\nSELECT 1");
     let error = failure(&mut session, "UPDATE t1 SET k = 2");
     assert!(error.message().contains("partition constraint"), "{error}");
     assert_eq!(
@@ -595,7 +583,13 @@ fn expressions_in_partition_keys_route_prune_and_move_rows() {
     );
     let error = failure(&mut session, "INSERT INTO ev VALUES (2500, 'd')");
     assert_eq!(error.state(), SqlState::CHECK_VIOLATION, "{error}");
-    assert!(error.detail().unwrap_or_default().contains("(id / 100) = (25)"), "{error}");
+    assert!(
+        error
+            .detail()
+            .unwrap_or_default()
+            .contains("(id / 100) = (25)"),
+        "{error}"
+    );
     answer(
         &mut session,
         "CREATE TABLE h (id int NOT NULL) PARTITION BY HASH ((id + 1));
@@ -663,11 +657,18 @@ fn an_index_on_the_parent_reaches_every_partition_now_and_later() {
         "count\n4\nSELECT 1"
     );
     assert_eq!(
-        answer(&mut session, "SELECT relkind FROM pg_class WHERE relname = 'm_v_idx'"),
+        answer(
+            &mut session,
+            "SELECT relkind FROM pg_class WHERE relname = 'm_v_idx'"
+        ),
         "relkind\nI\nSELECT 1"
     );
     let error = failure(&mut session, "DROP INDEX m_2024_v_idx");
-    assert_eq!(error.state(), SqlState::DEPENDENT_OBJECTS_STILL_EXIST, "{error}");
+    assert_eq!(
+        error.state(),
+        SqlState::DEPENDENT_OBJECTS_STILL_EXIST,
+        "{error}"
+    );
     assert!(
         error
             .message()
@@ -675,10 +676,7 @@ fn an_index_on_the_parent_reaches_every_partition_now_and_later() {
         "{error}"
     );
     answer(&mut session, "DROP INDEX m_v_idx");
-    assert_eq!(
-        relation_names(&mut session, "m%v%"),
-        "relname\nSELECT 0"
-    );
+    assert_eq!(relation_names(&mut session, "m%v%"), "relname\nSELECT 0");
     let error = failure(&mut session, "CREATE UNIQUE INDEX m_v_key ON m (v)");
     assert!(
         error
@@ -714,7 +712,11 @@ fn an_index_made_on_only_the_parent_is_valid_once_every_partition_is_attached() 
     );
     assert_eq!(answer(&mut session, validity), "indisvalid\nf\nSELECT 1");
     let error = failure(&mut session, "ALTER INDEX m_w ATTACH PARTITION m_2025_id");
-    assert_eq!(error.state(), SqlState::INVALID_OBJECT_DEFINITION, "{error}");
+    assert_eq!(
+        error.state(),
+        SqlState::INVALID_OBJECT_DEFINITION,
+        "{error}"
+    );
     assert_eq!(
         error.detail().unwrap_or_default(),
         "The index definitions do not match."
@@ -725,11 +727,21 @@ fn an_index_made_on_only_the_parent_is_valid_once_every_partition_is_attached() 
          ALTER INDEX m_w ATTACH PARTITION m_2025_w",
     );
     assert_eq!(answer(&mut session, validity), "indisvalid\nt\nSELECT 1");
-    let error = failure(&mut session, "ALTER INDEX m_2024_w ATTACH PARTITION m_2025_w");
+    let error = failure(
+        &mut session,
+        "ALTER INDEX m_2024_w ATTACH PARTITION m_2025_w",
+    );
     assert_eq!(error.state(), SqlState::WRONG_OBJECT_TYPE, "{error}");
-    answer(&mut session, "ALTER INDEX IF EXISTS nowhere ATTACH PARTITION m_2025_w");
+    answer(
+        &mut session,
+        "ALTER INDEX IF EXISTS nowhere ATTACH PARTITION m_2025_w",
+    );
     let error = failure(&mut session, "DROP INDEX m_2025_w");
-    assert_eq!(error.state(), SqlState::DEPENDENT_OBJECTS_STILL_EXIST, "{error}");
+    assert_eq!(
+        error.state(),
+        SqlState::DEPENDENT_OBJECTS_STILL_EXIST,
+        "{error}"
+    );
 }
 
 #[test]

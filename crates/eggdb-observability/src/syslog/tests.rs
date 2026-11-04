@@ -47,9 +47,7 @@ fn rfc5424_examples_read_every_header_field() {
     let event = parse(RFC5424_EVENT, RECEIVED_2026_11_04);
     assert_eq!(
         event.structured_data,
-        owned(
-            "[exampleSDID@32473 iut=\"3\" eventSource=\"Application\" eventID=\"1011\"]"
-        )
+        owned("[exampleSDID@32473 iut=\"3\" eventSource=\"Application\" eventID=\"1011\"]")
     );
     assert_eq!(event.message, "An application event log entry...");
     let two = parse(RFC5424_TWO_ELEMENTS, RECEIVED_2026_11_04);
@@ -68,7 +66,10 @@ fn rfc5424_values_keep_escaped_brackets_and_quotes_and_fractions_scale() {
         b"<14>1 1985-04-12T23:20:50.52Z host app - - [id@1 a=\"x\\]y\\\"z\" b=\"\"] after\n",
         RECEIVED_2026_11_04,
     );
-    assert_eq!(escaped.structured_data, owned("[id@1 a=\"x\\]y\\\"z\" b=\"\"]"));
+    assert_eq!(
+        escaped.structured_data,
+        owned("[id@1 a=\"x\\]y\\\"z\" b=\"\"]")
+    );
     assert_eq!(escaped.message, "after");
     assert_eq!(escaped.timestamp_micros, Some(482_196_050_520_000));
     let leap_day = parse(
@@ -92,7 +93,11 @@ fn a_broken_rfc5424_header_is_kept_as_an_rfc3164_message() {
         let message = parse(broken.as_bytes(), RECEIVED_2026_11_04);
         assert_eq!((message.facility, message.severity), (1, 6), "{broken}");
         assert_eq!(message.timestamp_micros, None, "{broken}");
-        assert_eq!(message.message, broken.get(4..).unwrap_or_default(), "{broken}");
+        assert_eq!(
+            message.message,
+            broken.get(4..).unwrap_or_default(),
+            "{broken}"
+        );
     }
 }
 
@@ -113,7 +118,10 @@ fn rfc3164_examples_read_the_timestamp_host_tag_and_process() {
             message: "'su root' failed for lonvick on /dev/pts/8".to_owned(),
         }
     );
-    let bfg = parse(b"<13>Feb  5 17:32:18 10.0.0.99 Use the BFG!", RECEIVED_2026_11_04);
+    let bfg = parse(
+        b"<13>Feb  5 17:32:18 10.0.0.99 Use the BFG!",
+        RECEIVED_2026_11_04,
+    );
     assert_eq!(bfg.timestamp_micros, Some(1_770_312_738_000_000));
     assert_eq!(bfg.hostname, owned("10.0.0.99"));
     assert_eq!(bfg.app_name, None);
@@ -147,7 +155,11 @@ fn rfc3164_without_a_priority_is_user_notice_and_a_bad_timestamp_stays_in_the_te
     );
     for bad_priority in ["<192>x", "<01>x", "<>x", "<1234>x", "<12"] {
         let message = parse(bad_priority.as_bytes(), RECEIVED_2026_11_04);
-        assert_eq!((message.facility, message.severity), (1, 5), "{bad_priority}");
+        assert_eq!(
+            (message.facility, message.severity),
+            (1, 5),
+            "{bad_priority}"
+        );
         assert_eq!(message.message, bad_priority);
     }
 }
@@ -374,9 +386,7 @@ fn syslog_sent_over_udp_and_tcp_is_read_back_through_sql() {
                 text("evntslog"),
                 None,
                 text("ID47"),
-                text(
-                    "[exampleSDID@32473 iut=\"3\" eventSource=\"Application\" eventID=\"1011\"]"
-                ),
+                text("[exampleSDID@32473 iut=\"3\" eventSource=\"Application\" eventID=\"1011\"]"),
                 text("An application event log entry..."),
                 text("t"),
                 text("t"),

@@ -532,7 +532,15 @@ fn rollback_to_savepoint_puts_back_times_to_live_and_collection_entries() {
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines[..7],
-        ["BEGIN", "SAVEPOINT", "ROLLBACK", "never", "Ada", "s:1", "COMMIT"],
+        [
+            "BEGIN",
+            "SAVEPOINT",
+            "ROLLBACK",
+            "never",
+            "Ada",
+            "s:1",
+            "COMMIT"
+        ],
         "{out}"
     );
     assert_eq!(lines.get(7), Some(&"never"), "{out}");
@@ -646,7 +654,11 @@ fn a_failed_statement_in_a_mysql_block_undoes_only_itself_and_key_value_commands
     let stderr = text(&ran.stderr);
     assert!(stderr.contains("1062"), "{stderr}");
     assert!(!stderr.contains("cannot run put"), "{stderr}");
-    assert!(text(&ran.stdout).contains("COMMIT"), "{}", text(&ran.stdout));
+    assert!(
+        text(&ran.stdout).contains("COMMIT"),
+        "{}",
+        text(&ran.stdout)
+    );
     assert_holds(&file, "k", "after");
 }
 
@@ -852,8 +864,18 @@ fn expire_persist_and_cas_run_while_a_savepoint_is_set_and_rollback_to_it_undoes
     assert_eq!(
         lines,
         [
-            "BEGIN", "SAVEPOINT", "1h", "never", "w", "ROLLBACK", "never", "v", "k", "timed",
-            "COMMIT", "never"
+            "BEGIN",
+            "SAVEPOINT",
+            "1h",
+            "never",
+            "w",
+            "ROLLBACK",
+            "never",
+            "v",
+            "k",
+            "timed",
+            "COMMIT",
+            "never"
         ],
         "{out}"
     );
@@ -947,7 +969,10 @@ fn the_shell_renames_and_deletes_collections_and_follows_the_one_in_use() {
         lines[6].starts_with("deleted collection logins from "),
         "{stdout}"
     );
-    assert_eq!(lines[7], "collection: default key space (logins was deleted)");
+    assert_eq!(
+        lines[7],
+        "collection: default key space (logins was deleted)"
+    );
     assert_eq!(&lines[8..], ["* default key space", "no collections"]);
 }
 

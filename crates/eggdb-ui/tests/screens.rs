@@ -1892,8 +1892,16 @@ fn scenario_40_the_picker_renames_a_collection_and_follows_the_shown_one() {
     s.press(&["C", "End", "Enter"]);
     assert!(s.row(1).starts_with(" Keys in users"), "{}", s.row(1));
     s.press(&["C", "e"]);
-    assert!(s.screen().contains("Rename users to: users"), "{}", s.screen());
-    assert!(s.screen().contains("Enter rename   Esc back"), "{}", s.screen());
+    assert!(
+        s.screen().contains("Rename users to: users"),
+        "{}",
+        s.screen()
+    );
+    assert!(
+        s.screen().contains("Enter rename   Esc back"),
+        "{}",
+        s.screen()
+    );
     for _ in 0.."users".len() {
         s.press(&["Backspace"]);
     }
@@ -1914,7 +1922,10 @@ fn scenario_40_the_picker_renames_a_collection_and_follows_the_shown_one() {
     }
     s.type_str("people");
     s.press(&["Enter"]);
-    assert_eq!(s.row(22), " Renamed collection users to people at 09:14:06Z");
+    assert_eq!(
+        s.row(22),
+        " Renamed collection users to people at 09:14:06Z"
+    );
     assert!(s.screen().contains("> people"), "{}", s.screen());
     assert!(!s.screen().contains("Rename users"), "{}", s.screen());
     s.press(&["Esc"]);
@@ -1932,7 +1943,11 @@ fn scenario_41_the_default_key_space_and_a_read_only_file_keep_their_names() {
     assert_eq!(s.row(22), " The default key space cannot be renamed");
     assert!(!s.screen().contains("Rename "), "{}", s.screen());
     s.press(&["Down", "e"]);
-    assert!(s.screen().contains("Rename cache to: cache"), "{}", s.screen());
+    assert!(
+        s.screen().contains("Rename cache to: cache"),
+        "{}",
+        s.screen()
+    );
     s.press(&["Enter"]);
     assert!(!s.screen().contains("Rename cache"), "{}", s.screen());
     assert!(s.ui.source().collections.contains_key("cache"));

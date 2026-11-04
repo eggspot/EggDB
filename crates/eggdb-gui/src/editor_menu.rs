@@ -561,8 +561,17 @@ mod tests {
             keys.key(KeyPress::plain(Key::Enter)),
             EditorMenuAnswer::Activate(EditorMenuItem::Run)
         );
-        let mut pointer = EditorMenu::new(writable(false), EditorMenuOrigin::Pointer { x: 1.0, y: 1.0 });
-        assert_eq!(pointer.key(KeyPress::plain(Key::Enter)), EditorMenuAnswer::Moved);
-        assert_eq!(pointer.key(KeyPress::plain(Key::Escape)), EditorMenuAnswer::Close);
+        let mut pointer = EditorMenu::new(
+            writable(false),
+            EditorMenuOrigin::Pointer { x: 1.0, y: 1.0 },
+        );
+        assert_eq!(
+            pointer.key(KeyPress::plain(Key::Enter)),
+            EditorMenuAnswer::Moved
+        );
+        assert_eq!(
+            pointer.key(KeyPress::plain(Key::Escape)),
+            EditorMenuAnswer::Close
+        );
     }
 }

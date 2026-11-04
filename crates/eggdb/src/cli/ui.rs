@@ -794,7 +794,10 @@ mod tests {
             .collection_stats()
             .unwrap_or_else(|error| panic!("stats: {error}"));
         assert_eq!(counted.len(), 1);
-        assert_eq!((counted[0].name.as_str(), counted[0].entries), ("logins", 1));
+        assert_eq!(
+            (counted[0].name.as_str(), counted[0].entries),
+            ("logins", 1)
+        );
     }
 
     #[test]

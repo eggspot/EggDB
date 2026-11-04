@@ -138,7 +138,8 @@ impl Script {
                         (other, _) => return Err(format!("unknown script field [{other}]")),
                     }
                 }
-                let source = source.ok_or_else(|| "must specify <source> for an inline script".to_owned())?;
+                let source = source
+                    .ok_or_else(|| "must specify <source> for an inline script".to_owned())?;
                 (source, params)
             }
             _ => return Err("a script is a string or an object".to_owned()),
@@ -203,7 +204,8 @@ impl Script {
                         ));
                     }
                 };
-                let stepped = arithmetic(&current, Arithmetic::Add, &Json::Number(delta.to_string()))?;
+                let stepped =
+                    arithmetic(&current, Arithmetic::Add, &Json::Number(delta.to_string()))?;
                 assign(&mut context.source, path, stepped)
             }
             Statement::Remove { path, key } => {
@@ -491,9 +493,13 @@ fn tokens(source: &str) -> Result<Vec<Token>, String> {
             digit if digit.is_ascii_digit() || digit == '.' => {
                 let mut text = String::from(digit);
                 while let Some(&more) = characters.get(at) {
-                    let exponent_sign = matches!(more, '+' | '-')
-                        && text.ends_with(['e', 'E']);
-                    if more.is_ascii_digit() || more == '.' || more == 'e' || more == 'E' || exponent_sign {
+                    let exponent_sign = matches!(more, '+' | '-') && text.ends_with(['e', 'E']);
+                    if more.is_ascii_digit()
+                        || more == '.'
+                        || more == 'e'
+                        || more == 'E'
+                        || exponent_sign
+                    {
                         text.push(more);
                         at += 1;
                     } else {
@@ -546,7 +552,9 @@ impl Parser<'_> {
     fn count_operation(&mut self) -> Result<(), String> {
         self.operations += 1;
         if self.operations > MAX_OPERATIONS {
-            Err(format!("the script has more than {MAX_OPERATIONS} operations"))
+            Err(format!(
+                "the script has more than {MAX_OPERATIONS} operations"
+            ))
         } else {
             Ok(())
         }
@@ -590,7 +598,11 @@ impl Parser<'_> {
 
     fn statement(&mut self) -> Result<Statement, String> {
         if let Some(Token::Increment | Token::Decrement) = self.peek() {
-            let delta = if self.next() == Some(Token::Increment) { 1 } else { -1 };
+            let delta = if self.next() == Some(Token::Increment) {
+                1
+            } else {
+                -1
+            };
             return match self.path()? {
                 Path::Reference(Reference::Source(path)) if !path.is_empty() => {
                     Ok(Statement::Step { path, delta })
@@ -617,7 +629,9 @@ impl Parser<'_> {
                         path,
                         value: argument,
                     }),
-                    other => Err(format!("method [{other}] is not supported in update scripts")),
+                    other => Err(format!(
+                        "method [{other}] is not supported in update scripts"
+                    )),
                 }
             }
             Path::Call { method, .. } => Err(format!(
@@ -644,8 +658,10 @@ impl Parser<'_> {
                 (Reference::Param(_) | Reference::Meta(_), Some(Token::Assign(_))) => {
                     Err("only ctx._source and ctx.op can be changed".to_owned())
                 }
-                _ => Err("a statement assigns to ctx._source or ctx.op, or calls add or remove"
-                    .to_owned()),
+                _ => Err(
+                    "a statement assigns to ctx._source or ctx.op, or calls add or remove"
+                        .to_owned(),
+                ),
             },
         }
     }
@@ -829,7 +845,10 @@ mod tests {
     #[test]
     fn the_reference_examples_run() {
         assert_eq!(
-            run("{\"source\":\"ctx._source.count++\",\"lang\":\"painless\"}", "{\"count\":1}"),
+            run(
+                "{\"source\":\"ctx._source.count++\",\"lang\":\"painless\"}",
+                "{\"count\":1}"
+            ),
             Ok(("{\"count\":2}".to_owned(), Operation::Index))
         );
         assert_eq!(
@@ -854,12 +873,21 @@ mod tests {
             ))
         );
         assert_eq!(
-            run("\"ctx._source.remove('new_field')\"", "{\"a\":1,\"new_field\":2}"),
+            run(
+                "\"ctx._source.remove('new_field')\"",
+                "{\"a\":1,\"new_field\":2}"
+            ),
             Ok(("{\"a\":1}".to_owned(), Operation::Index))
         );
         assert_eq!(
-            run("\"ctx._source['my-object'].counter -= 2; ctx.op = 'noop'\"", "{\"my-object\":{\"counter\":1}}"),
-            Ok(("{\"my-object\":{\"counter\":-1}}".to_owned(), Operation::Noop))
+            run(
+                "\"ctx._source['my-object'].counter -= 2; ctx.op = 'noop'\"",
+                "{\"my-object\":{\"counter\":1}}"
+            ),
+            Ok((
+                "{\"my-object\":{\"counter\":-1}}".to_owned(),
+                Operation::Noop
+            ))
         );
         assert_eq!(
             run("\"ctx.op = 'delete'\"", "{}"),
@@ -870,12 +898,24 @@ mod tests {
     #[test]
     fn arithmetic_follows_java() {
         assert_eq!(
-            run("\"ctx._source.a = (ctx._source.a + 1) * 2 / 4; ctx._source.b = ctx._source.b * 1.5; ctx._source.c = 'n' + ctx._source.c + 1; ctx._source.d = -ctx._source.d % 3\"", "{\"a\":3,\"b\":3,\"c\":2,\"d\":7}"),
-            Ok(("{\"a\":2,\"b\":4.5,\"c\":\"n21\",\"d\":-1}".to_owned(), Operation::Index))
+            run(
+                "\"ctx._source.a = (ctx._source.a + 1) * 2 / 4; ctx._source.b = ctx._source.b * 1.5; ctx._source.c = 'n' + ctx._source.c + 1; ctx._source.d = -ctx._source.d % 3\"",
+                "{\"a\":3,\"b\":3,\"c\":2,\"d\":7}"
+            ),
+            Ok((
+                "{\"a\":2,\"b\":4.5,\"c\":\"n21\",\"d\":-1}".to_owned(),
+                Operation::Index
+            ))
         );
         assert_eq!(
-            run("\"ctx._source.version = ctx._version; ctx._source.id = ctx._id + '@' + ctx._index\"", "{}"),
-            Ok(("{\"version\":3,\"id\":\"1@my-index-000001\"}".to_owned(), Operation::Index))
+            run(
+                "\"ctx._source.version = ctx._version; ctx._source.id = ctx._id + '@' + ctx._index\"",
+                "{}"
+            ),
+            Ok((
+                "{\"version\":3,\"id\":\"1@my-index-000001\"}".to_owned(),
+                Operation::Index
+            ))
         );
     }
 
@@ -900,7 +940,10 @@ mod tests {
             ("\"ctx._source.a.size()\"", "{}"),
             ("\"System.exit(0)\"", "{}"),
             ("{\"id\":\"stored\"}", "{}"),
-            ("{\"source\":\"ctx.op = 'noop'\",\"lang\":\"expression\"}", "{}"),
+            (
+                "{\"source\":\"ctx.op = 'noop'\",\"lang\":\"expression\"}",
+                "{}",
+            ),
             ("42", "{}"),
         ] {
             assert!(run(script, source).is_err(), "{script} on {source}");
@@ -912,7 +955,10 @@ mod tests {
         let long = format!("\"ctx._source.a = {}1\"", "1 + ".repeat(5000));
         assert!(run(&long, "{}").is_err());
         let fits = format!("\"ctx._source.a = {}1\"", "1 + ".repeat(500));
-        assert_eq!(run(&fits, "{}"), Ok(("{\"a\":501}".to_owned(), super::Operation::Index)));
+        assert_eq!(
+            run(&fits, "{}"),
+            Ok(("{\"a\":501}".to_owned(), super::Operation::Index))
+        );
     }
 
     #[test]

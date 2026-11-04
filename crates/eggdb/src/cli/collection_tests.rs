@@ -71,7 +71,10 @@ fn collections_are_added_listed_used_and_deleted_from_the_command_line() {
         stdout(&text)
     );
     let names = on_terminal(&["collection", "list", &file]);
-    assert_eq!(stdout(&names), "cache     no entries\nsessions  no entries\n");
+    assert_eq!(
+        stdout(&names),
+        "cache     no entries\nsessions  no entries\n"
+    );
     assert_eq!(stderr(&names), "2 collections\n");
 
     ok(&["put", &file, "k", "default"]);
@@ -267,7 +270,10 @@ fn list_and_stats_show_counts_kept_through_puts_deletes_and_a_rename() {
     ok(&["del", &file, "-C", "sessions", "s:2"]);
     let listed = on_terminal(&["collection", "list", &file]);
     assert_eq!(listed.exit, 0, "{}", stderr(&listed));
-    assert_eq!(stdout(&listed), "cache       1 entry\nsessions  2 entries\n");
+    assert_eq!(
+        stdout(&listed),
+        "cache       1 entry\nsessions  2 entries\n"
+    );
     assert_eq!(stderr(&listed), "2 collections\n");
     let as_json = ok(&["collection", "list", &file]);
     assert_eq!(

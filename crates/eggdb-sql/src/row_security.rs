@@ -272,12 +272,7 @@ pub(crate) fn switch_state(reader: &dyn KeyValueRead, table: &str) -> SqlResult<
     })
 }
 
-fn change_switch(
-    writer: &mut dyn KeyValueWrite,
-    table: &str,
-    flag: u8,
-    on: bool,
-) -> SqlResult<()> {
+fn change_switch(writer: &mut dyn KeyValueWrite, table: &str, flag: u8, on: bool) -> SqlResult<()> {
     let current = switch_flags(writer, table)?;
     let changed = if on { current | flag } else { current & !flag };
     if changed == 0 {

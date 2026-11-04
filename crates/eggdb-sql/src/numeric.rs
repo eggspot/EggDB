@@ -1529,12 +1529,21 @@ mod tests {
 
     #[test]
     fn square_root_is_rounded_at_the_scale_asked_for() {
-        assert_eq!(shown(n("1.6666666666666667").square_root(16)), "1.2909944487358056");
+        assert_eq!(
+            shown(n("1.6666666666666667").square_root(16)),
+            "1.2909944487358056"
+        );
         assert_eq!(shown(n("4").square_root(3)), "2.000");
-        assert_eq!(shown(n("2").square_root(30)), "1.414213562373095048801688724210");
+        assert_eq!(
+            shown(n("2").square_root(30)),
+            "1.414213562373095048801688724210"
+        );
         assert_eq!(shown(n("0.0001").square_root(4)), "0.0100");
         assert_eq!(shown(n("1e-40").square_root(4)), "0.0000");
-        assert_eq!(shown(n("1e600").square_root(0)), format!("1{}", "0".repeat(300)));
+        assert_eq!(
+            shown(n("1e600").square_root(0)),
+            format!("1{}", "0".repeat(300))
+        );
         assert_eq!(shown(n("0").square_root(2)), "0.00");
         assert_eq!(shown(n("nan").square_root(2)), "NaN");
         assert_eq!(

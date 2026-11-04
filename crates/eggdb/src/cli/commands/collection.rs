@@ -202,7 +202,10 @@ impl Session<'_> {
 }
 
 pub(crate) fn listed_with_counts(stats: &[CollectionStats]) -> String {
-    let counts: Vec<String> = stats.iter().map(|one| render::entries(one.entries)).collect();
+    let counts: Vec<String> = stats
+        .iter()
+        .map(|one| render::entries(one.entries))
+        .collect();
     let name_width = stats
         .iter()
         .map(|one| one.name.chars().count())
@@ -276,9 +279,14 @@ mod tests {
         db.create_collection("cache").unwrap();
         db.collection("cache").put("k", "v").unwrap();
         let mut seen: Vec<DropProgress> = Vec::new();
-        assert!(db.drop_collection_with_progress("cache", |step| seen.push(step)).unwrap());
+        assert!(
+            db.drop_collection_with_progress("cache", |step| seen.push(step))
+                .unwrap()
+        );
         assert_eq!(
-            seen.iter().map(|step| drop_progress_line("cache", *step)).collect::<Vec<_>>(),
+            seen.iter()
+                .map(|step| drop_progress_line("cache", *step))
+                .collect::<Vec<_>>(),
             ["deleting collection cache: 1 of 1 entry…"]
         );
     }

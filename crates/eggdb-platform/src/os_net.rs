@@ -641,7 +641,10 @@ mod tests {
             assert_eq!(completions[0].user_data, 1, "{backend:?}");
             assert_eq!(queue.readiness_waits(), waits, "{backend:?}");
             let mut sends = 1;
-            while !completions.iter().any(|completion| completion.user_data == 0) {
+            while !completions
+                .iter()
+                .any(|completion| completion.user_data == 0)
+            {
                 assert!(sends < 64, "{backend:?}: the receive was never polled");
                 send_one_byte(&mut queue, &mut completions);
                 sends += 1;

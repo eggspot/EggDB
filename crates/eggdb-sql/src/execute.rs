@@ -1874,7 +1874,9 @@ impl ConflictArbiter {
             indexed.sort_unstable();
             index.unique && indexed == columns
         });
-        matching.map(Self::UniqueIndex).ok_or_else(no_matching_arbiter)
+        matching
+            .map(Self::UniqueIndex)
+            .ok_or_else(no_matching_arbiter)
     }
 
     fn decides(self, conflict: &Conflict) -> bool {

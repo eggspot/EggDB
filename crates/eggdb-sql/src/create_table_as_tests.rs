@@ -53,7 +53,10 @@ fn postgresql_create_table_as_copies_rows_and_reports_select_n() {
     );
     last(&mut session, "INSERT INTO films_recent (code) VALUES ('X')");
     assert_eq!(
-        last(&mut session, "SELECT count(*) FROM films_recent WHERE title IS NULL"),
+        last(
+            &mut session,
+            "SELECT count(*) FROM films_recent WHERE title IS NULL"
+        ),
         "count\n1\nSELECT 1"
     );
 }
@@ -174,9 +177,15 @@ fn mysql_create_table_select_merges_declared_columns_and_keeps_not_null() {
     last(&mut session, "INSERT INTO plain (b, c) VALUES (30, NULL)");
     last(&mut session, "CREATE TABLE foo (n INT)");
     last(&mut session, "INSERT INTO foo VALUES (1), (2)");
-    last(&mut session, "CREATE TABLE bar (UNIQUE (n)) SELECT n FROM foo");
+    last(
+        &mut session,
+        "CREATE TABLE bar (UNIQUE (n)) SELECT n FROM foo",
+    );
     fails(&mut session, "INSERT INTO bar VALUES (1)");
-    last(&mut session, "CREATE TABLE tagged (m INT) SELECT n FROM foo");
+    last(
+        &mut session,
+        "CREATE TABLE tagged (m INT) SELECT n FROM foo",
+    );
     assert_eq!(
         last(&mut session, "SELECT * FROM tagged ORDER BY n"),
         "m|n\nNULL|1\nNULL|2\nSELECT 2"
@@ -311,10 +320,7 @@ fn sqlite_values_and_row_values() {
         "a|b\n1|5\n2|1\nSELECT 2"
     );
     assert_eq!(
-        last(
-            &mut session,
-            "SELECT a, b FROM t WHERE (a, b) = (1, 2)"
-        ),
+        last(&mut session, "SELECT a, b FROM t WHERE (a, b) = (1, 2)"),
         "a|b\n1|2\nSELECT 1"
     );
 }
@@ -356,10 +362,7 @@ fn postgresql_row_comparisons_follow_sql_null_rules() {
         "count\n1\nSELECT 1"
     );
     assert_eq!(
-        last(
-            &mut session,
-            "SELECT a FROM t WHERE (a, b) = (SELECT 2, 5)"
-        ),
+        last(&mut session, "SELECT a FROM t WHERE (a, b) = (SELECT 2, 5)"),
         "a\n2\nSELECT 1"
     );
     assert_eq!(
@@ -370,7 +373,10 @@ fn postgresql_row_comparisons_follow_sql_null_rules() {
         "count\n0\nSELECT 1"
     );
     let error = fails(&mut session, "SELECT (1, 2) = (1, 2, 3)");
-    assert_eq!(error.message(), "unequal number of entries in row expressions");
+    assert_eq!(
+        error.message(),
+        "unequal number of entries in row expressions"
+    );
     let error = fails(
         &mut session,
         "SELECT count(*) FROM t WHERE (a, b) IN (SELECT x FROM s)",
@@ -421,7 +427,10 @@ fn oracle_create_table_as_keeps_not_null_and_needs_aliases() {
         &mut session,
         "CREATE TABLE unnamed AS SELECT salary * 2 FROM employees",
     );
-    assert_eq!(error.message(), "must name this expression with a column alias");
+    assert_eq!(
+        error.message(),
+        "must name this expression with a column alias"
+    );
     assert_eq!(
         last(
             &mut session,

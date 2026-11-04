@@ -57,9 +57,10 @@ pub(crate) fn run(
         query: &create.query,
     };
     let mut definition = table_definition(create, &shape, dialect)?;
-    let inserted_columns = create.declared.as_ref().map(|_| {
-        definition_names(create, &columns)
-    });
+    let inserted_columns = create
+        .declared
+        .as_ref()
+        .map(|_| definition_names(create, &columns));
     binding.create_table(&*writer, tables, &mut definition)?;
     execute::create_table(writer, tables, &definition, dialect)?;
     let count = selected.rows.len();
@@ -316,7 +317,10 @@ fn checked_column_names(create: &CreateTableAs, width: usize, dialect: Dialect) 
         .at(position));
     }
     if given > width {
-        return Err(SqlError::syntax("too many column names were specified", position));
+        return Err(SqlError::syntax(
+            "too many column names were specified",
+            position,
+        ));
     }
     Ok(())
 }
@@ -340,10 +344,8 @@ fn table_definition(
             return Err(missing_column_name(position));
         }
         let sql_type = if dialect == Dialect::Sqlite {
-            let (declared, sql_type) = sqlite_declared_type(
-                expressions.get(index).copied().flatten(),
-                column.sql_type,
-            );
+            let (declared, sql_type) =
+                sqlite_declared_type(expressions.get(index).copied().flatten(), column.sql_type);
             sqlite_columns.push((name.text.clone(), declared));
             sql_type
         } else {
@@ -389,7 +391,10 @@ fn table_definition(
     Ok(definition)
 }
 
-fn merged_columns(declared: &CreateTable, selected: Vec<ColumnDefinition>) -> Vec<ColumnDefinition> {
+fn merged_columns(
+    declared: &CreateTable,
+    selected: Vec<ColumnDefinition>,
+) -> Vec<ColumnDefinition> {
     let same = |left: &ColumnDefinition, right: &ColumnDefinition| {
         left.name.text.eq_ignore_ascii_case(&right.name.text)
     };
@@ -400,7 +405,11 @@ fn merged_columns(declared: &CreateTable, selected: Vec<ColumnDefinition>) -> Ve
         .cloned()
         .collect();
     for column in selected {
-        match declared.columns.iter().find(|written| same(written, &column)) {
+        match declared
+            .columns
+            .iter()
+            .find(|written| same(written, &column))
+        {
             Some(written) => merged.push(written.clone()),
             None => merged.push(column),
         }

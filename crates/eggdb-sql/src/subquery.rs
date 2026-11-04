@@ -343,7 +343,8 @@ pub(crate) fn evaluate(evaluator: &Evaluator<'_>, subquery: &Subquery) -> SqlRes
         SubqueryTest::Array => crate::arrays::from_rows(rows.values.clone(), rows.sql_type),
         SubqueryTest::In { expr, negated } => {
             if let Some(fields) = row_fields(expr) {
-                let values = crate::row_values::evaluate_fields(evaluator, fields, rows.values.first())?;
+                let values =
+                    crate::row_values::evaluate_fields(evaluator, fields, rows.values.first())?;
                 let found = rows.row_quantified(&values, BinaryOperator::Equal, false)?;
                 return truth(found.map(|found| found != *negated));
             }
@@ -359,7 +360,9 @@ pub(crate) fn evaluate(evaluator: &Evaluator<'_>, subquery: &Subquery) -> SqlRes
             };
             let fields = row_fields(expr).unwrap_or_default();
             let values = crate::row_values::evaluate_fields(evaluator, fields, Some(record))?;
-            truth(crate::row_values::compare_with_record(&values, record, *operator)?)
+            truth(crate::row_values::compare_with_record(
+                &values, record, *operator,
+            )?)
         }
         SubqueryTest::Compare {
             expr,
@@ -367,7 +370,8 @@ pub(crate) fn evaluate(evaluator: &Evaluator<'_>, subquery: &Subquery) -> SqlRes
             all,
         } => {
             if let Some(fields) = row_fields(expr) {
-                let values = crate::row_values::evaluate_fields(evaluator, fields, rows.values.first())?;
+                let values =
+                    crate::row_values::evaluate_fields(evaluator, fields, rows.values.first())?;
                 return truth(rows.row_quantified(&values, *operator, *all)?);
             }
             let value = evaluator.eval(expr, rows.sql_type)?;
@@ -1393,7 +1397,9 @@ pub(crate) fn prepare_for_explain(
 }
 
 fn prepared_for_explain(query: &Query, prepared: Prepared) -> SqlResult<PreparedForExplain> {
-    let select = lone_select(query).ok_or_else(subplans_not_supported)?.clone();
+    let select = lone_select(query)
+        .ok_or_else(subplans_not_supported)?
+        .clone();
     let correlated = prepared
         .templates
         .into_iter()
@@ -1814,9 +1820,10 @@ fn recursive_table(
     let columns = seed.columns.clone().unwrap_or_default();
     let search_cycle = SearchCycle::new(table, operation, &columns)?;
     let step_query = Query {
-        body: search_cycle
-            .as_ref()
-            .map_or_else(|| operation.right.clone(), |found| found.recursive_term().clone()),
+        body: search_cycle.as_ref().map_or_else(
+            || operation.right.clone(),
+            |found| found.recursive_term().clone(),
+        ),
         ..seed_query.clone()
     };
     let mut working_columns = columns.clone();

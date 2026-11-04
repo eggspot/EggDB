@@ -324,8 +324,9 @@ impl Inquiry<'_> {
             return Ok(None);
         }
         match &entry.source {
-            RelationSource::Catalog(_) => Ok((privilege == Privilege::Select)
-                .then_some(crate::roles::ColumnReach::Every)),
+            RelationSource::Catalog(_) => {
+                Ok((privilege == Privilege::Select).then_some(crate::roles::ColumnReach::Every))
+            }
             RelationSource::Index { .. } => Ok(None),
             RelationSource::Table(_) | RelationSource::View(_) | RelationSource::Sequence(_) => {
                 crate::roles::column_privilege_reach(
@@ -352,10 +353,17 @@ impl Inquiry<'_> {
         Ok(false)
     }
 
-    fn has_table_privilege(&self, holder: &Holder, object: &Value, list: &Value) -> SqlResult<Value> {
+    fn has_table_privilege(
+        &self,
+        holder: &Holder,
+        object: &Value,
+        list: &Value,
+    ) -> SqlResult<Value> {
         let entry = self.relation(object)?;
         let wanted = parse_privileges(&written_name(list), &TABLE_PRIVILEGES, &[GRANT_OPTION])?;
-        answer(entry, |entry| self.any_table_privilege(holder, entry, &wanted))
+        answer(entry, |entry| {
+            self.any_table_privilege(holder, entry, &wanted)
+        })
     }
 
     fn has_column_privilege(
@@ -383,7 +391,11 @@ impl Inquiry<'_> {
                 .as_integer()
                 .and_then(|number| usize::try_from(number).ok())
                 .and_then(|number| number.checked_sub(1))
-                .and_then(|at| relation_columns(entry).get(at).map(|name| (*name).to_owned())),
+                .and_then(|at| {
+                    relation_columns(entry)
+                        .get(at)
+                        .map(|name| (*name).to_owned())
+                }),
             (None, _) => None,
         };
         let wanted = parse_privileges(&written_name(list), &COLUMN_PRIVILEGES, &[GRANT_OPTION])?;
@@ -453,13 +465,19 @@ impl Inquiry<'_> {
     ) -> SqlResult<bool> {
         match (holder, wanted) {
             (Holder::Superuser, _) => Ok(true),
-            (_, Wanted {
-                with_option: true, ..
-            }) => Ok(false),
-            (_, Wanted {
-                asked: Asked::Table(Privilege::Select),
-                ..
-            }) => self.table_privilege(holder, entry, wanted),
+            (
+                _,
+                Wanted {
+                    with_option: true, ..
+                },
+            ) => Ok(false),
+            (
+                _,
+                Wanted {
+                    asked: Asked::Table(Privilege::Select),
+                    ..
+                },
+            ) => self.table_privilege(holder, entry, wanted),
             (_, _) => Ok(EVERY_ROLE_USES_EVERY_SEQUENCE),
         }
     }
@@ -525,8 +543,7 @@ impl Inquiry<'_> {
                 format!("database \"{name}\" does not exist"),
             ));
         }
-        let wanted =
-            parse_privileges(&written_name(list), &DATABASE_PRIVILEGES, &[GRANT_OPTION])?;
+        let wanted = parse_privileges(&written_name(list), &DATABASE_PRIVILEGES, &[GRANT_OPTION])?;
         let current = database.as_deref() == Some(self.snapshot.database.as_str());
         answer(database.as_ref(), |_| {
             Ok(wanted
@@ -606,8 +623,7 @@ impl Inquiry<'_> {
             }
             None => self.function_exists(&written_name(object))?,
         };
-        let wanted =
-            parse_privileges(&written_name(list), &FUNCTION_PRIVILEGES, &[GRANT_OPTION])?;
+        let wanted = parse_privileges(&written_name(list), &FUNCTION_PRIVILEGES, &[GRANT_OPTION])?;
         answer(exists.then_some(()), |()| {
             Ok(wanted
                 .iter()
@@ -663,10 +679,7 @@ fn holds_object_privilege(holder: &Holder, wanted: Wanted, connected_here: bool)
     }
 }
 
-fn answer<T>(
-    object: Option<T>,
-    decide: impl FnOnce(T) -> SqlResult<bool>,
-) -> SqlResult<Value> {
+fn answer<T>(object: Option<T>, decide: impl FnOnce(T) -> SqlResult<bool>) -> SqlResult<Value> {
     match object {
         Some(object) => decide(object).map(Value::Boolean),
         None => Ok(Value::Null),
@@ -687,9 +700,11 @@ fn relation_columns(entry: &RelationEntry) -> Vec<&str> {
             .map(|column| column.name.as_str())
             .collect(),
         RelationSource::Sequence(_) => SEQUENCE_COLUMNS.to_vec(),
-        RelationSource::Catalog(relation) => {
-            relation.columns().iter().map(|column| column.name).collect()
-        }
+        RelationSource::Catalog(relation) => relation
+            .columns()
+            .iter()
+            .map(|column| column.name)
+            .collect(),
         RelationSource::Index { .. } => Vec::new(),
     }
 }

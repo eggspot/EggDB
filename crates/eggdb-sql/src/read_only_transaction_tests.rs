@@ -42,7 +42,10 @@ fn shown(session: &mut Session<'_>, name: &str) -> String {
 
 fn postgresql_session(store: &MemoryStore) -> Session<'_> {
     let mut session = Session::new(store);
-    answer(&mut session, "CREATE TABLE films (code integer PRIMARY KEY, title text)");
+    answer(
+        &mut session,
+        "CREATE TABLE films (code integer PRIMARY KEY, title text)",
+    );
     answer(&mut session, "INSERT INTO films VALUES (1, 'Bananas')");
     session
 }
@@ -196,9 +199,15 @@ fn set_transaction_after_the_first_query_is_refused_as_postgresql_refuses_it() {
     );
     answer(&mut session, "ROLLBACK");
     answer(&mut session, "BEGIN");
-    answer(&mut session, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+    answer(
+        &mut session,
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+    );
     answer(&mut session, "SELECT 1");
-    answer(&mut session, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+    answer(
+        &mut session,
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+    );
     answer(&mut session, "COMMIT");
     answer(&mut session, "BEGIN READ ONLY");
     answer(&mut session, "SELECT 1");
@@ -320,7 +329,10 @@ fn mysql_read_only_transactions_refuse_writes_with_error_1792() {
         Some(1792)
     );
     answer(&mut session, "SET SESSION TRANSACTION READ WRITE");
-    answer(&mut session, "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ WRITE");
+    answer(
+        &mut session,
+        "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ WRITE",
+    );
     answer(&mut session, "INSERT INTO t VALUES (3)");
     answer(&mut session, "COMMIT");
     assert_eq!(

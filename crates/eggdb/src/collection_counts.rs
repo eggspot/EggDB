@@ -239,7 +239,10 @@ mod tests {
         expected.extend_from_slice(&[0, 0, 0, 0, 0, 0, 2, 3]);
         expected.extend_from_slice(&[0xff; 8]);
         assert_eq!(record.as_slice(), expected.as_slice());
-        assert_eq!(EntryCount::read(&record).ok(), Some(count(1, 0x0203, u64::MAX)));
+        assert_eq!(
+            EntryCount::read(&record).ok(),
+            Some(count(1, 0x0203, u64::MAX))
+        );
     }
 
     #[test]

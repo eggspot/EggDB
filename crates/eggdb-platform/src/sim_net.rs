@@ -316,7 +316,11 @@ impl SimNetwork {
     /// enter at that rate, so a send of `n` bytes arrives `n / bytes_per_second` later than
     /// latency alone would make it. Zero, the default, is no limit.
     pub fn host_bandwidth(&self, ip: IpAddr, bytes_per_second: u64) {
-        lock(&self.shared).links.entry(ip).or_default().bytes_per_second = bytes_per_second;
+        lock(&self.shared)
+            .links
+            .entry(ip)
+            .or_default()
+            .bytes_per_second = bytes_per_second;
     }
 
     /// Cuts hosts `a` and `b` apart, both ways, until [`SimNetwork::heal`]. Cutting a host from
@@ -541,15 +545,16 @@ impl NetStream for SimStream {
 impl Drop for SimStream {
     fn drop(&mut self) {
         let mut world = lock(&self.network.shared);
-        let (failed, owed) = world
-            .connections
-            .get(&self.connection)
-            .map_or((true, false), |connection| {
-                (
-                    connection.failed[self.side].is_some(),
-                    connection.flows[1 - self.side].buffered() > 0,
-                )
-            });
+        let (failed, owed) =
+            world
+                .connections
+                .get(&self.connection)
+                .map_or((true, false), |connection| {
+                    (
+                        connection.failed[self.side].is_some(),
+                        connection.flows[1 - self.side].buffered() > 0,
+                    )
+                });
         if owed && !failed {
             world.reset(self.connection);
         } else if !failed {
@@ -1610,7 +1615,10 @@ mod tests {
             .unwrap();
         let count = received.result.unwrap().transferred().unwrap();
         assert!(count > 0);
-        assert_eq!(received.op.into_buffer().unwrap()[..count], b"down"[..count]);
+        assert_eq!(
+            received.op.into_buffer().unwrap()[..count],
+            b"down"[..count]
+        );
         assert_eq!(pair.now(), Duration::ZERO);
 
         pair.send(&client, b"up", 2);
@@ -1648,7 +1656,8 @@ mod tests {
         pair.network.latency(millis(1), millis(1));
         pair.network.host_latency(SERVER, millis(10), millis(10));
         let elsewhere = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
-        pair.network.host_latency(elsewhere, millis(500), millis(500));
+        pair.network
+            .host_latency(elsewhere, millis(500), millis(500));
         let (client, server) = pair.connect();
         assert_eq!(pair.now(), millis(22));
         pair.send(&client, b"ping", 0);
@@ -1680,7 +1689,14 @@ mod tests {
             times.push((received.len(), pair.now()));
         }
         for (total, at) in times {
-            assert_eq!(at, if total <= 500 { millis(500) } else { millis(750) });
+            assert_eq!(
+                at,
+                if total <= 500 {
+                    millis(500)
+                } else {
+                    millis(750)
+                }
+            );
         }
         assert_eq!(received[..500], [5; 500]);
         assert_eq!(received[500..], [6; 250]);

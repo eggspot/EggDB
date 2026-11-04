@@ -356,8 +356,8 @@ impl<'s> Session<'s> {
                 let variables = &mut Arc::make_mut(&mut self.settings).mysql;
                 if let Some(read_only) = characteristics.read_only {
                     for name in ["transaction_read_only", "tx_read_only"] {
-                        let _ = variables
-                            .set_system(name, Some(Value::BigInt(i64::from(read_only))));
+                        let _ =
+                            variables.set_system(name, Some(Value::BigInt(i64::from(read_only))));
                     }
                 }
                 if let Some(level) = &characteristics.isolation {

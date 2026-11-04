@@ -949,8 +949,7 @@ mod tests {
         };
         assert_eq!(counted.check(Access::ReadWrite), Ok(()));
         assert_eq!(counted.check(Access::ReadOnly), Ok(()));
-        let as_an_older_release_sees_it =
-            counted.read_only_compatible & !Features::EXPIRING_KEYS;
+        let as_an_older_release_sees_it = counted.read_only_compatible & !Features::EXPIRING_KEYS;
         assert_eq!(as_an_older_release_sees_it, Features::COLLECTION_COUNTS);
     }
 

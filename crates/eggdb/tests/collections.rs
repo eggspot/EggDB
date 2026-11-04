@@ -731,13 +731,17 @@ fn a_long_drop_reports_its_progress_up_to_the_kept_count() {
     .unwrap();
     let mut seen = Vec::new();
     assert!(
-        db.drop_collection_with_progress("big", |progress| seen.push((progress.removed, progress.entries)))
+        db.drop_collection_with_progress("big", |progress| seen
+            .push((progress.removed, progress.entries)))
             .unwrap()
     );
     assert_eq!(seen.first(), Some(&(512, Some(1500))));
     assert_eq!(seen.last(), Some(&(1500, Some(1500))));
     assert!(seen.windows(2).all(|pair| pair[0].0 < pair[1].0));
     let mut called = false;
-    assert!(!db.drop_collection_with_progress("big", |_| called = true).unwrap());
+    assert!(
+        !db.drop_collection_with_progress("big", |_| called = true)
+            .unwrap()
+    );
     assert!(!called);
 }
