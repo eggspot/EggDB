@@ -115,6 +115,12 @@ block in its inspector; a trigger's inspector shows its action. `Enter` on a key
 `Keys in <space>` tab listing its first 100 keys with the first 64 bytes of their values and their
 sizes in bytes, spelled as `eggdb ui` spells them, with invisible characters (bidirectional
 overrides, zero-width characters) as `\xNN` (a file only for now; on a server the tab is empty).
+Type a prefix in its `Key prefix` field (`/` or `Ctrl/Cmd+F`; `\xNN` for any byte) to list only
+the keys starting with it, and page with `Next 100` and `Back` (`Alt+PgDn`, `Alt+PgUp`); the editor
+line states what ran, such as `SCAN users PREFIX 'user:' AFTER 'user:0099' LIMIT 100`. Right-click
+the editor or press `Shift+F10` for `Cut`, `Copy`, `Paste`, `Select all`, `Run statement`,
+`Explain`, `Toggle comment` (`Ctrl/Cmd+/`) and `Format statement` (`Ctrl/Cmd+Shift+F`); `Show DDL`
+moves the focus to the inspector's DDL box (D329).
 
 Drag or key the splitters beside the sidebar (180 to 480 px), between the editor and the results,
 and beside a docked inspector (200 to 480 px): arrows move 8 px, `Shift` 32, `Home` / `End` to the
