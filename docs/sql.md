@@ -1608,10 +1608,39 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
 - **`SELECT items INTO [TEMPORARY | TEMP | UNLOGGED] [TABLE] new_table [FROM ...]`**
   (PostgreSQL and SQL Server, D303) creates `new_table` with the query's columns, their names
   and types (all nullable, without keys or defaults), and fills it with the query's rows; the tag
-  is `SELECT n`. It belongs to the transaction: `ROLLBACK` removes the table. Its other spelling,
-  `CREATE TABLE ... AS`, is not accepted yet. An existing name is `42P07`, `INTO` in a later query of a `UNION`, `INTERSECT`
+  is `SELECT n`. It belongs to the transaction: `ROLLBACK` removes the table. Its other spelling is
+  `CREATE TABLE ... AS` (below). An existing name is `42P07`, `INTO` in a later query of a `UNION`, `INTERSECT`
   or `EXCEPT` is `42601` and in a subquery `0A000`; `UNLOGGED` makes an ordinary table. Inside
   PL/pgSQL, `SELECT ... INTO` still assigns variables.
+- **`CREATE [TEMP] TABLE [IF NOT EXISTS] name [(column, ...)] AS query [WITH [NO] DATA]`**
+  (D323) makes a table from a query in PostgreSQL, MySQL, SQLite and Oracle: the columns take the
+  query's names (or the listed ones; more names than columns is `42601` "too many column names
+  were specified", and in Oracle any other count is `ORA-01730`) and types, without keys or
+  defaults, and the rows are copied in the same transaction; the tag is `SELECT n`, and
+  `CREATE TABLE AS` for `WITH NO DATA`, which copies only the shape. `IF NOT EXISTS` on an
+  existing table runs nothing and answers a notice. PostgreSQL and SQLite make every column
+  nullable; MySQL and Oracle keep `NOT NULL` of a column copied directly from the one table of
+  the query. MySQL's `CREATE TABLE t [(definitions)] [IGNORE | REPLACE] [AS] SELECT ...` puts the
+  defined columns the query doesn't name first, uses a definition's type for a query column of
+  the same name, keeps the keys and indexes defined, and reports the rows as affected. SQLite
+  declares each column by its expression's affinity (`INT`, `TEXT`, `REAL`, `NUM`, or no type
+  for an expression) and keeps the text `CREATE TABLE t(a INT,c)` in `sqlite_schema`. Oracle
+  needs an alias for an expression (`ORA-00998`), and `WHERE 1 = 0` copies the shape. `CREATE
+  TABLE AS EXECUTE`, PostgreSQL's `TABLE t` as the query and MySQL's `CREATE TABLE ... LIKE`
+  answer `0A000` or a syntax error.
+- **`VALUES` as a query** (D323): in MySQL `VALUES ROW(1, 2), ROW(3, 4)` is a statement and a
+  derived table with columns `column_0`, `column_1`, ...; in SQLite `VALUES (1, 2), (3, 4)` names
+  them `column1`, `column2`, ...; a derived table's alias list (`(VALUES ...) AS t(a, b)`, also in
+  SQL Server) renames them.
+- **Row constructors** (D323): `(a, b)` (and `ROW(a, b)` in PostgreSQL and MySQL) compare with
+  `=`, `<>`, `<`, `<=`, `>`, `>=` against another row constructor or a subquery of as many columns
+  in PostgreSQL, MySQL and SQLite, by SQL's rules: `=` holds when every pair is equal, and an
+  ordering is decided by the first pair that is not equal, NULL when that pair holds a NULL.
+  `(a, b) [NOT] IN (SELECT x, y ...)`, `(a, b) IN ((1, 2), (3, 4))` and `(a, b) = ANY (SELECT
+  ...)` work there and in Oracle, with NULL making the answer unknown as the standard says. A
+  width that differs is `42601` "unequal number of entries in row expressions" (or "subquery has
+  too many/few columns"; MySQL's 1241, SQLite's and Oracle's own), and a row subquery with more
+  than one row is `21000`. SQL Server has no row constructors.
 - **Functions in `FROM`** (D128): `generate_series(start, stop [, step])` over `smallint`,
   `integer` and `bigint` (a step of 0 is `22023`; `numeric` and time stamps answer `0A000`) and
   `unnest(array)`, also written `pg_catalog.generate_series` and `pg_catalog.unnest`, with
@@ -4335,8 +4364,7 @@ two, `COPY` in the binary format and in another encoding, now match). The other 
   correlated subquery is `0A000`, and `INSERT ... VALUES` cannot have a subquery that names the
   inserted row. Subqueries nest at most 32 levels and a statement holds at most 1,024 `SELECT`s
   (`54001`). Every `WITH` query runs, even one nothing names, and `MATERIALIZED` and `NOT
-  MATERIALIZED` change nothing; `SEARCH` and `CYCLE`, row constructors (`(a, b) IN (SELECT
-  ...)`), a data-modifying `WITH` query that resolves conflicts, and `EXPLAIN` of a query with
+  MATERIALIZED` change nothing; `SEARCH` and `CYCLE`, a data-modifying `WITH` query that resolves conflicts, and `EXPLAIN` of a query with
   subqueries answer `0A000`. A derived table, a `WITH` query, a `LATERAL` item and the operands of
   a set operation are held in memory, counted with the statement's other rows against the 1 GiB
   limit, and a correlated subquery keeps up to 32 MiB of results by outer value. A `LATERAL` item
