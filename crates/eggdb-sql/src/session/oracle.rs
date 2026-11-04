@@ -117,6 +117,22 @@ fn constant_text(expr: &crate::ast::Expr) -> crate::error::SqlResult<Option<Stri
     }
 }
 
+const EXPLAIN_PLAN_SAVEPOINT: &str = "eggdb_explain_plan";
+
+static LAST_PLAN_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_plan_id(after_largest: u64) -> u64 {
+    use std::sync::atomic::Ordering;
+    let mut last = LAST_PLAN_ID.load(Ordering::Acquire);
+    loop {
+        let next = after_largest.max(last.saturating_add(1));
+        match LAST_PLAN_ID.compare_exchange_weak(last, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return next,
+            Err(seen) => last = seen,
+        }
+    }
+}
+
 impl Session<'_> {
     pub(super) fn explain_into_plan_table(
         &mut self,
@@ -142,36 +158,69 @@ impl Session<'_> {
             return Ok(crate::explain::display_result(&rows));
         }
         let table = plan_table_name(target);
+        let autocommitting = self.autocommit() && !self.in_block();
+        if autocommitting {
+            self.begin(false)?;
+            let written = self.write_plan_rows(target, &table, &rows);
+            return match written {
+                Ok(()) => self.commit().map(|_| QueryResult::command("EXPLAIN PLAN")),
+                Err(error) => {
+                    let _ = self.rollback();
+                    Err(error)
+                }
+            };
+        }
+        let mark = crate::ast::Name {
+            text: EXPLAIN_PLAN_SAVEPOINT.to_owned(),
+            position: 0,
+        };
+        self.set_savepoint(&mark)?;
+        let written = self.write_plan_rows(target, &table, &rows);
+        if written.is_err() {
+            let _ = self.rollback_to_savepoint(&mark);
+        }
+        let released = self.release_savepoint(&mark);
+        written?;
+        released.map(|_| QueryResult::command("EXPLAIN PLAN"))
+    }
+
+    fn write_plan_rows(
+        &mut self,
+        target: &crate::ast::PlanTableTarget,
+        table: &str,
+        rows: &[crate::explain::PlanRow],
+    ) -> crate::error::SqlResult<()> {
         match &target.table {
             Some(name) => {
                 self.read(|reader, tables| tables.require(reader, name).map(drop))?;
             }
             None => {
                 let exists =
-                    self.read(|reader, tables| Ok(tables.table(reader, &table)?.is_some()))?;
+                    self.read(|reader, tables| Ok(tables.table(reader, table)?.is_some()))?;
                 if !exists {
                     self.creating_plan_table = true;
-                    let created = self.run_quietly(&crate::explain::create_plan_table(&table));
+                    let created = self.run_quietly(&crate::explain::create_plan_table(table));
                     self.creating_plan_table = false;
                     created?;
                 }
             }
         }
-        let plan_id = first_text(self.run_quietly(&format!(
+        let after_largest = first_text(self.run_quietly(&format!(
             "SELECT TO_CHAR(NVL(MAX(plan_id), 0) + 1) FROM {}",
-            crate::explain::written_plan_table(&table)
+            crate::explain::written_plan_table(table)
         ))?)
         .and_then(|text| text.trim().parse::<u64>().ok())
         .unwrap_or(1);
-        for row in &rows {
+        let plan_id = next_plan_id(after_largest);
+        for row in rows {
             self.run_quietly(&crate::explain::insert_plan_row(
-                &table,
+                table,
                 row,
                 plan_id,
                 target.statement_id.as_deref(),
             ))?;
         }
-        Ok(QueryResult::command("EXPLAIN PLAN"))
+        Ok(())
     }
 
     pub(super) fn show_plan_displays(
@@ -245,8 +294,9 @@ impl Session<'_> {
             return Ok(crate::explain::missing_plan_lines(statement_id));
         };
         let results = self.run_quietly(&format!(
-            "SELECT TO_CHAR(id), TO_CHAR(depth), operation, options, object_name FROM {} WHERE plan_id = {plan_id} ORDER BY id",
-            crate::explain::written_plan_table(&table)
+            "SELECT TO_CHAR(id), TO_CHAR(depth), operation, options, object_name FROM {} WHERE plan_id = {plan_id} ORDER BY id FETCH FIRST {} ROWS ONLY",
+            crate::explain::written_plan_table(&table),
+            crate::explain::MOST_DISPLAYED_ROWS
         ))?;
         let text = |value: Option<&crate::types::Value>| match value {
             Some(crate::types::Value::Text(text)) => Some(text.clone()),

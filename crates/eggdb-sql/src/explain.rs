@@ -2,8 +2,8 @@ mod oracle_plan;
 mod showplan;
 
 pub(crate) use oracle_plan::{
-    DisplayedRow, MOST_DISPLAYED_ROWS, PLAN_DISPLAY_FUNCTION, PLAN_TABLE, create_plan_table,
-    display_lines, display_result, insert_plan_row, missing_plan_lines, plan_rows,
+    DisplayedRow, MOST_DISPLAYED_ROWS, PLAN_DISPLAY_FUNCTION, PLAN_TABLE, PlanRow,
+    create_plan_table, display_lines, display_result, insert_plan_row, missing_plan_lines, plan_rows,
     written_plan_table,
 };
 pub(crate) use showplan::{showplan_all, showplan_text};
@@ -172,7 +172,15 @@ fn measured_steps(query: &ExplainedQuery, analyzed: &Analyzed) -> Vec<Option<Mea
             *step = Some(sort_measured(select));
         }
     }
-    let top = top_measured(&measured, analyzed);
+    let mut top = top_measured(&measured, analyzed);
+    if wrappers == 0
+        && !query.appended
+        && let Some(select) = analyzed.selects.first()
+        && let Some(source) = select.source
+        && let Measured::Ran(times) = &mut top
+    {
+        times.rows = times.rows.saturating_add(select.skipped).min(source.rows);
+    }
     if let Some(step) = measured.first_mut() {
         *step = Some(top);
     }
@@ -633,6 +641,17 @@ mod tests {
         assert_eq!(lines[0], "Result (actual time=0.010..0.025 rows=1 loops=1)");
         assert_eq!(lines[1], "Planning Time: 0.007 ms");
         assert_eq!(lines[2], "Execution Time: 0.100 ms");
+    }
+
+    #[test]
+    fn a_scan_on_top_of_an_offset_only_select_counts_the_rows_it_handed_up() {
+        let measured = MeasuredSelect {
+            source: Some(micros(10, 25, 1)),
+            output: micros(10, 30, 0),
+            skipped: 1,
+        };
+        let lines = plan_lines(&ExplainedQuery::default(), analyzed(0, vec![measured]));
+        assert_eq!(lines[0], "Result (actual time=0.010..0.025 rows=1 loops=1)");
     }
 
     #[test]

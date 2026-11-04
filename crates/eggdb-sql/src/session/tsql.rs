@@ -328,6 +328,12 @@ impl<'s> Session<'s> {
         let mut at_instruction = 0usize;
         while let Some(&instruction) = code.program.instructions.get(at_instruction) {
             let (at, test) = match instruction {
+                Instruction::Jump { .. } | Instruction::Return
+                    if self.settings.sqlserver.showplan.is_some() =>
+                {
+                    at_instruction += 1;
+                    continue;
+                }
                 Instruction::Jump { to } => {
                     if to <= at_instruction && self.cancel.is_cancelled() {
                         let error = self.in_dialect(
@@ -407,6 +413,17 @@ impl<'s> Session<'s> {
             }
             let (failure, lower_level) = match flow {
                 Ok(_) => {
+                    if test.is_some() && self.settings.sqlserver.showplan.is_some() {
+                        self.set_last_error(0);
+                        self.condition_holds = None;
+                        for result in results {
+                            if !on_step(self.batch_step(Ok(result), statement_start)) {
+                                return Ok(ProgramEnd::Stopped);
+                            }
+                        }
+                        at_instruction += 1;
+                        continue;
+                    }
                     if let Some((otherwise, _)) = test {
                         self.set_last_error(0);
                         at_instruction = if self.condition_holds.take() == Some(true) {

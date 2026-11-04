@@ -48,7 +48,7 @@ const PLAN_TABLE_COLUMNS: [(&str, &str); 36] = [
     ("access_predicates", "VARCHAR2(4000)"),
     ("filter_predicates", "VARCHAR2(4000)"),
     ("projection", "VARCHAR2(4000)"),
-    ("time", "NUMBER(38)"),
+    ("time", "NUMBER(20,2)"),
     ("qblock_name", "VARCHAR2(128)"),
 ];
 

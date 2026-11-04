@@ -2255,7 +2255,9 @@ limits per role are not there yet.
 In Oracle's dialect, `EXPLAIN PLAN [SET STATEMENT_ID = 'id'] [INTO table] FOR <SELECT, UPDATE
 or DELETE>` plans the statement without running it and writes one row per operation to
 `PLAN_TABLE` (created on first use with the columns of Oracle's reference) or to the table
-`INTO` names, which must exist. `SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)` (with optional
+`INTO` names, which must exist. The rows are written all or none: a failure part-way (a too
+narrow `INTO` column, a constraint) leaves no row, and each plan gets a `PLAN_ID` no other
+session of the same server takes. `SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)` (with optional
 `table`, `statement_id` and `format` arguments) returns the last plan as `PLAN_TABLE_OUTPUT`
 lines:
 
@@ -2272,7 +2274,13 @@ Plan hash value: <the same number for the same plan>
 
 In SQL Server's dialect, `SET SHOWPLAN_TEXT ON` and `SET SHOWPLAN_ALL ON` make every later
 statement return its plan instead of running (the statement's text, then the `|--` tree; or
-SQL Server's 18 `SHOWPLAN_ALL` columns), and `SET STATISTICS PROFILE ON` runs each statement
+SQL Server's 18 `SHOWPLAN_ALL` columns). Only `SET` options run, so `SET SHOWPLAN_TEXT OFF` can
+end it; `BEGIN`, `COMMIT`, `ROLLBACK` and `SAVE TRANSACTION`, `USE`, `CREATE` and `DROP
+DATABASE`, `INSERT BULK`, `THROW`, `RAISERROR`, `PRINT`, `WAITFOR` and variable assignments are
+shown and not run. `DECLARE` declares its variables without their initial values, so later
+statements can name them. `IF` and `WHILE` conditions are not evaluated: each statement of the
+batch is shown once in order, both branches of an `IF` and a loop's body once. `EXEC` of a
+procedure and `EXEC(...)` show the plans of the statements inside. `SET STATISTICS PROFILE ON` runs each statement
 and adds that result with `Rows` and `Executes`. EggDB has no estimates, so costs and row
 estimates are NULL, and it measures whole statements, so only the top operator's rows are
 filled in (D312).

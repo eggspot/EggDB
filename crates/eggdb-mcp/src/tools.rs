@@ -690,7 +690,10 @@ fn explain_only(session: &mut Session<'_>, dialect: Dialect) -> Result<(), OneSt
             session.set_explain_plan_displays(true);
             Ok(())
         }
-        Dialect::SqlServer => session.run_one_statement("SET SHOWPLAN_TEXT ON", &mut |_| true),
+        Dialect::SqlServer => {
+            session.set_explain_plan_displays(true);
+            session.run_one_statement("SET SHOWPLAN_TEXT ON", &mut |_| true)
+        }
         _ => Ok(()),
     }
 }

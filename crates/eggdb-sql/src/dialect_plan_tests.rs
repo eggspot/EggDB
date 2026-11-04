@@ -161,6 +161,36 @@ fn a_session_that_displays_plans_answers_explain_plan_with_the_display_and_write
     );
 }
 
+const NARROW_PLAN_TABLE: &str = "CREATE TABLE my_plan (statement_id VARCHAR2(30), plan_id NUMBER, timestamp DATE, operation VARCHAR2(30), options VARCHAR2(255), object_owner VARCHAR2(128), object_name VARCHAR2(3), object_alias VARCHAR2(261), object_type VARCHAR2(30), optimizer VARCHAR2(255), id NUMBER, parent_id NUMBER, depth NUMBER, position NUMBER)";
+
+const PLAN_WITH_A_LONG_INDEX_NAME: &str =
+    "EXPLAIN PLAN INTO my_plan FOR SELECT name FROM emp WHERE dept = 10";
+
+#[test]
+fn explain_plan_whose_third_row_fails_leaves_no_row_in_a_transaction_or_under_autocommit() {
+    let store = MemoryStore::default();
+    let mut session = oracle_emp(&store);
+    last(&mut session, NARROW_PLAN_TABLE);
+    last(&mut session, "COMMIT");
+    assert_eq!(
+        fails(&mut session, PLAN_WITH_A_LONG_INDEX_NAME).vendor_code(),
+        Some(12899)
+    );
+    assert_eq!(
+        last(&mut session, "SELECT COUNT(*) AS n FROM my_plan"),
+        "N\n0\nSELECT 1"
+    );
+    last(&mut session, "COMMIT");
+    let mut autocommitting = Session::new(&store);
+    last(&mut autocommitting, "SET eggdb.dialect = oracle");
+    assert!(run(&mut autocommitting, PLAN_WITH_A_LONG_INDEX_NAME).is_err());
+    assert!(!autocommitting.in_block());
+    assert_eq!(
+        last(&mut autocommitting, "SELECT COUNT(*) AS n FROM my_plan"),
+        "N\n0\nSELECT 1"
+    );
+}
+
 #[test]
 fn explain_plan_refuses_what_it_cannot_plan_and_a_missing_into_table() {
     let store = MemoryStore::default();
@@ -232,6 +262,104 @@ fn showplan_text_returns_the_statement_and_its_plan_tree_without_running_it() {
         last(&mut session, "SELECT COUNT(*) AS n FROM t").contains("\n2\n"),
         "the DELETE ran under SHOWPLAN_TEXT"
     );
+}
+
+#[test]
+fn under_showplan_transaction_control_and_batch_commands_are_shown_and_never_run() {
+    let store = MemoryStore::default();
+    let mut session = sqlserver_t(&store);
+    all(&mut session, "BEGIN TRANSACTION");
+    all(&mut session, "INSERT INTO t VALUES (50, 50)");
+    all(&mut session, "SET SHOWPLAN_TEXT ON");
+    for shown in [
+        "ROLLBACK",
+        "COMMIT TRANSACTION",
+        "SAVE TRANSACTION keep",
+        "ROLLBACK TRANSACTION keep",
+        "BEGIN TRANSACTION",
+        "USE nowhere",
+        "DROP DATABASE nowhere",
+        "THROW 50000, 'not raised', 1",
+        "RAISERROR('not raised', 16, 1)",
+        "WAITFOR DELAY '00:00:03'",
+    ] {
+        let outputs = all(&mut session, shown);
+        assert!(
+            outputs
+                .first()
+                .is_some_and(|output| output.starts_with(&format!("StmtText\n{shown}\n"))),
+            "{shown}: {outputs:?}"
+        );
+    }
+    all(&mut session, "SET SHOWPLAN_TEXT OFF");
+    assert!(
+        last(&mut session, "SELECT @@TRANCOUNT AS tc, COUNT(*) AS n FROM t").contains("\n1|3\n"),
+        "a transaction statement ran under SHOWPLAN_TEXT"
+    );
+    all(&mut session, "ROLLBACK");
+    assert!(last(&mut session, "SELECT COUNT(*) AS n FROM t").contains("\n2\n"));
+}
+
+#[test]
+fn under_showplan_a_while_loop_and_both_if_branches_are_shown_once_and_never_run() {
+    let store = MemoryStore::default();
+    let mut session = sqlserver_t(&store);
+    all(&mut session, "SET SHOWPLAN_TEXT ON");
+    let mut outputs = Vec::new();
+    session
+        .execute_batch(
+            "DECLARE @n INT = (SELECT COUNT(*) FROM t)\nWHILE (SELECT COUNT(*) FROM t) < 5\nBEGIN\n  INSERT INTO t VALUES (99, 1)\nEND\nIF @n = 2\n  DELETE FROM t\nELSE\n  SELECT b FROM t WHERE b = @n",
+            &mut |step| {
+                outputs.push(match step.outcome {
+                    Ok(result) => render(&result),
+                    Err(error) => format!("error: {error}"),
+                });
+                true
+            },
+        )
+        .unwrap();
+    assert!(
+        !outputs.iter().any(|output| output.starts_with("error: ")),
+        "{outputs:?}"
+    );
+    for statement in [
+        "INSERT INTO t VALUES (99, 1)",
+        "DELETE FROM t",
+        "SELECT b FROM t WHERE b = @n",
+    ] {
+        assert_eq!(
+            outputs
+                .iter()
+                .filter(|output| output.starts_with(&format!("StmtText\n{statement}\n")))
+                .count(),
+            1,
+            "{statement}: {outputs:?}"
+        );
+    }
+    assert!(
+        outputs
+            .iter()
+            .any(|output| output.contains("Clustered Index Delete")),
+        "{outputs:?}"
+    );
+    all(&mut session, "SET SHOWPLAN_TEXT OFF");
+    assert!(
+        last(&mut session, "SELECT COUNT(*) AS n FROM t").contains("\n2\n"),
+        "a statement in the loop or the IF ran under SHOWPLAN_TEXT"
+    );
+}
+
+#[test]
+fn a_read_only_explainer_s_showplan_refuses_what_it_cannot_plan() {
+    let store = MemoryStore::default();
+    let mut session = sqlserver_t(&store);
+    session.set_explain_plan_displays(true);
+    all(&mut session, "SET SHOWPLAN_TEXT ON");
+    assert_eq!(all(&mut session, "SELECT b FROM t").len(), 2);
+    let refused = fails(&mut session, "DROP TABLE t");
+    assert_eq!(refused.state().code(), "0A000", "{refused}");
+    all(&mut session, "SET SHOWPLAN_TEXT OFF");
+    assert!(last(&mut session, "SELECT COUNT(*) AS n FROM t").contains("\n2\n"));
 }
 
 #[test]

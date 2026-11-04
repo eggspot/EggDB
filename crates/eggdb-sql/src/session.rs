@@ -622,7 +622,10 @@ impl<'s> Session<'s> {
     /// With `true`, Oracle's `EXPLAIN PLAN` writes no plan table and answers with the
     /// `PLAN_TABLE_OUTPUT` lines `SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)` would show right
     /// after it, so a caller that opens the database read-only (the CLI's `eggdb explain`,
-    /// MCP's `explain_query`) can explain in Oracle's dialect. `false` is the default.
+    /// MCP's `explain_query`) can explain in Oracle's dialect. It also makes a statement EggDB
+    /// cannot plan under SQL Server's `SET SHOWPLAN_TEXT` or `SHOWPLAN_ALL` fail with
+    /// `not_supported`, as Oracle's `EXPLAIN PLAN` does, instead of answering with only the
+    /// statement's text. `false` is the default.
     pub fn set_explain_plan_displays(&mut self, displays: bool) {
         self.explain_plan_displays = displays;
     }
@@ -2799,6 +2802,11 @@ impl<'s> Session<'s> {
             }
             _ => {}
         }
+        if self.sqlserver()
+            && let Some(planned) = self.plan_instead_under_showplan(statement)?
+        {
+            return Ok(planned);
+        }
         if self.sqlite() {
             match statement {
                 Statement::Begin { .. } if self.in_block() => {
@@ -2889,12 +2897,6 @@ impl<'s> Session<'s> {
             )
         {
             return Ok(QueryResult::command("FMTONLY"));
-        }
-        if self.sqlserver()
-            && let Some(kind) = self.settings.sqlserver.showplan
-            && !sqlserver::runs_under_showplan(statement)
-        {
-            return self.showplan(statement, binding, kind);
         }
         let profiled = if self.sqlserver() && self.settings.sqlserver.statistics_profile {
             self.statement_plan(statement, binding).ok().flatten()

@@ -74,7 +74,10 @@ fn explain_only(
             session.set_explain_plan_displays(true);
             Ok(())
         }
-        Dialect::SqlServer => session.run_one_statement(SHOWPLAN_ON, &mut |_| true),
+        Dialect::SqlServer => {
+            session.set_explain_plan_displays(true);
+            session.run_one_statement(SHOWPLAN_ON, &mut |_| true)
+        }
         _ => Ok(()),
     }
 }

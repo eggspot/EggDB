@@ -368,6 +368,24 @@ fn list_describe_sample_and_the_schema_resource() {
         text_at(structured(&oracle), &["columns", "0", "name"]),
         "PLAN_TABLE_OUTPUT"
     );
+    let showplan = call(
+        &mut server,
+        14,
+        "explain_query",
+        r#"{"sql":"SELECT name FROM users WHERE id = 1","dialect":"sqlserver"}"#,
+    );
+    assert!(!is_error(&showplan), "{showplan:?}");
+    let unplannable = call(
+        &mut server,
+        15,
+        "explain_query",
+        r#"{"sql":"PRINT 'hello'","dialect":"sqlserver"}"#,
+    );
+    assert_eq!(error_code(&unplannable), "sql_error");
+    assert!(
+        format!("{unplannable:?}").contains("SHOWPLAN of a statement other than SELECT"),
+        "{unplannable:?}"
+    );
     let sneaky = call(
         &mut server,
         13,

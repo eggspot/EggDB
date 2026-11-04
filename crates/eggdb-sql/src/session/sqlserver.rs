@@ -810,7 +810,7 @@ impl<'s> Session<'s> {
     }
 }
 
-pub(super) fn runs_under_showplan(statement: &crate::ast::Statement) -> bool {
+fn runs_under_showplan(statement: &crate::ast::Statement) -> bool {
     use crate::ast::Statement;
     matches!(
         statement,
@@ -827,6 +827,54 @@ pub(super) fn runs_under_showplan(statement: &crate::ast::Statement) -> bool {
 }
 
 impl Session<'_> {
+    pub(super) fn plan_instead_under_showplan(
+        &mut self,
+        statement: &crate::ast::Statement,
+    ) -> SqlResult<Option<QueryResult>> {
+        use crate::ast::Statement;
+        let Some(kind) = self.settings.sqlserver.showplan else {
+            return Ok(None);
+        };
+        if runs_under_showplan(statement) {
+            return Ok(None);
+        }
+        match statement {
+            Statement::SqlServer(SqlServerStatement::ExecuteDynamic(_)) => return Ok(None),
+            Statement::SqlServer(SqlServerStatement::Execute(call))
+                if self.runs_its_body_under_showplan(call)? =>
+            {
+                return Ok(None);
+            }
+            Statement::SqlServer(SqlServerStatement::Declare(declarations)) => {
+                let unassigned: Vec<crate::ast::VariableDeclaration> = declarations
+                    .iter()
+                    .map(|declaration| crate::ast::VariableDeclaration {
+                        initial: None,
+                        ..declaration.clone()
+                    })
+                    .collect();
+                self.run_declare(&unassigned)?;
+            }
+            Statement::SqlServer(SqlServerStatement::DeclareTable {
+                name,
+                columns,
+                rules,
+            }) => {
+                self.declare_table_variable(name, columns, rules)?;
+            }
+            _ => {}
+        }
+        self.refresh_database_names();
+        let settings = Arc::clone(&self.settings);
+        crate::roles::check_statement(&settings, statement)?;
+        let binding = Binding {
+            settings: &settings,
+            walk_expressions: self.statement_walks_expressions,
+            target_privilege: Some(crate::roles::target_privilege(statement)),
+        };
+        self.showplan(statement, &binding, kind).map(Some)
+    }
+
     pub(super) fn statement_plan(
         &mut self,
         statement: &crate::ast::Statement,
@@ -856,6 +904,11 @@ impl Session<'_> {
     ) -> SqlResult<QueryResult> {
         let text = self.shown_statement.take().unwrap_or_default();
         let plan = self.statement_plan(statement, binding)?;
+        if plan.is_none() && self.explain_plan_displays {
+            return Err(SqlError::not_supported(
+                "SHOWPLAN of a statement other than SELECT, UPDATE or DELETE",
+            ));
+        }
         let plan = plan.as_ref().map(|(query, planned)| (query, *planned));
         match kind {
             crate::ast::ShowplanKind::Text => {
