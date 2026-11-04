@@ -2,5 +2,5 @@ apiVersion: v2
 name: eggdb
 description: EggDB, one database for every kind of data, served over PostgreSQL's protocol with Prometheus metrics.
 type: application
-version: 0.2.0
-appVersion: "0.2.0"
+version: 0.3.0
+appVersion: "0.3.0"
