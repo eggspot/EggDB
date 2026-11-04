@@ -5186,3 +5186,107 @@ SELECT 2
 
 ok
 DROP TABLE gen322
+
+chapter functions-info, "Access Privilege Inquiry Functions": answered from the stored grants for any role, true when any listed privilege is held, with PostgreSQL's errors
+ok
+CREATE TABLE priv_accounts (id integer, manager text)
+
+ok
+CREATE USER priv_joe LOGIN
+
+ok
+GRANT INSERT ON priv_accounts TO priv_joe
+
+ok
+GRANT SELECT (manager) ON priv_accounts TO priv_joe
+
+rows
+SELECT has_table_privilege('priv_joe', 'priv_accounts', 'INSERT, SELECT WITH GRANT OPTION') AS any, has_table_privilege('priv_joe', 'priv_accounts', 'select') AS read, has_column_privilege('priv_joe', 'priv_accounts', 'manager', 'SELECT') AS manager, has_column_privilege('priv_joe', 'priv_accounts', 'id', 'SELECT') AS id, has_any_column_privilege('priv_joe', 'priv_accounts', 'SELECT') AS any_column
+----
+any|read|manager|id|any_column
+t|f|t|f|t
+SELECT 1
+
+rows
+SELECT has_schema_privilege('priv_joe', 'public', 'USAGE') AS usage, has_schema_privilege('priv_joe', 'public', 'CREATE') AS create, has_table_privilege('priv_accounts', 'TRUNCATE WITH GRANT OPTION') AS mine
+----
+usage|create|mine
+t|f|t
+SELECT 1
+
+error 22023
+SELECT has_table_privilege('priv_accounts', 'FLY')
+
+error 42704
+SELECT has_table_privilege('priv_nobody', 'priv_accounts', 'SELECT')
+
+error 42P01
+SELECT has_table_privilege('priv_missing', 'SELECT')
+
+error 42703
+SELECT has_column_privilege('priv_accounts', 'nope', 'SELECT')
+
+error 3F000
+SELECT has_schema_privilege('priv_nowhere', 'USAGE')
+
+rows
+SELECT grantee, privilege_type FROM information_schema.table_privileges WHERE table_name = 'priv_accounts'
+----
+grantee|privilege_type
+priv_joe|INSERT
+SELECT 1
+
+rows
+SELECT relacl FROM pg_class WHERE relname = 'priv_accounts'
+----
+relacl
+{eggdb=arwdDxt/eggdb,priv_joe=a/eggdb}
+SELECT 1
+
+chapter sql-altertable, "ALTER TABLE": FORCE ROW LEVEL SECURITY and NO FORCE ROW LEVEL SECURITY, shown in pg_class.relforcerowsecurity beside relrowsecurity
+ok
+ALTER TABLE priv_accounts FORCE ROW LEVEL SECURITY
+
+rows
+SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'priv_accounts'
+----
+relrowsecurity|relforcerowsecurity
+f|t
+SELECT 1
+
+ok
+ALTER TABLE priv_accounts ENABLE ROW LEVEL SECURITY
+
+ok
+ALTER TABLE priv_accounts NO FORCE ROW LEVEL SECURITY
+
+rows
+SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'priv_accounts'
+----
+relrowsecurity|relforcerowsecurity
+t|f
+SELECT 1
+
+chapter view-pg-policies, "pg_policies": one row per policy with its roles, command and conditions as pg_get_expr shows them
+ok
+CREATE POLICY priv_managers ON priv_accounts TO priv_joe USING (id > 1)
+
+rows
+SELECT policyname, permissive, roles, cmd, qual, with_check FROM pg_policies WHERE tablename = 'priv_accounts'
+----
+policyname|permissive|roles|cmd|qual|with_check
+priv_managers|PERMISSIVE|{priv_joe}|ALL|(id > 1)|NULL
+SELECT 1
+
+rows
+SELECT polname, polcmd, polpermissive FROM pg_policy WHERE polrelid = 'priv_accounts'::regclass
+----
+polname|polcmd|polpermissive
+priv_managers|*|t
+SELECT 1
+
+ok
+DROP TABLE priv_accounts
+
+ok
+DROP ROLE priv_joe

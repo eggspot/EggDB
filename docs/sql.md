@@ -2388,6 +2388,32 @@ it did not. An upsert (`ON CONFLICT DO UPDATE`) also needs `UPDATE`, and `REPLAC
 yet: logins of stored roles over MySQL's and SQL Server's protocols, schema privileges, object
 owners and `SET ROLE`.
 
+PostgreSQL's privilege inquiry functions answer from the same grants the statements are checked
+against (D326), for the current user or any role named (a name, an OID or `public`):
+
+```sql
+SELECT has_table_privilege('myschema.mytable', 'select');
+SELECT has_table_privilege('joe', 'mytable', 'INSERT, SELECT WITH GRANT OPTION');
+SELECT has_column_privilege('clerk', 'staff', 'name', 'UPDATE');
+```
+
+`has_table_privilege`, `has_column_privilege`, `has_any_column_privilege`,
+`has_sequence_privilege`, `has_schema_privilege`, `has_database_privilege`,
+`has_function_privilege` and `pg_has_role` take the object by name or OID and a comma-separated
+list of privileges in any case, each optionally `WITH GRANT OPTION` (and `WITH ADMIN OPTION` for
+roles), and are true when any of them is held. A superuser holds everything; a checked role never
+holds a grant option, since only superusers grant. Schemas give every role `USAGE` and only
+superusers `CREATE`, databases `CONNECT` to the current one and `CREATE` and `TEMPORARY` to
+superusers, sequences `USAGE` and `UPDATE` to every role (`nextval` and `setval` are not checked
+yet) and `SELECT` by the table grants, and functions `EXECUTE` to every role, which is what the
+engine enforces. An unknown role is `42704`, table `42P01`, column `42703`, schema `3F000`,
+database `3D000`, function `42883`, a relation that is not a sequence `42809` and an unknown
+privilege `22023 unrecognized privilege type`, as on PostgreSQL; an object named by an OID that
+does not exist gives NULL. `information_schema.table_privileges`, `role_table_grants`,
+`column_privileges`, `role_column_grants` and `usage_privileges` list grants whose grantee is
+the current user, a role it belongs to or (except in the `role_*` views) `PUBLIC`, as the SQL
+standard defines them; a superuser sees every grant.
+
 Privileges can also be granted on single columns, as PostgreSQL (and MySQL) write them (D285):
 
 ```sql
@@ -2423,6 +2449,14 @@ security, `COPY ... FROM` is refused as in PostgreSQL ("use INSERT statements in
 are `INSERT ... ON CONFLICT DO UPDATE`, `REPLACE` and `MERGE`, which would reach rows the
 policies hide. `COPY ... FROM` into a table with enabled `INSERT` triggers is refused too, since
 COPY does not fire them yet.
+
+`ALTER TABLE [ONLY] t FORCE ROW LEVEL SECURITY` and `NO FORCE ROW LEVEL SECURITY` (D326) make the
+table's owner subject to its policies too, as on PostgreSQL. Every table's owner is a superuser
+until object owners land, and superusers bypass row security even when it is forced, as they do
+on PostgreSQL, so the switch is kept for `pg_dump` and tools and takes effect with owners.
+`pg_class.relrowsecurity`, `relforcerowsecurity` and `pg_tables.rowsecurity` show the switches,
+and `pg_policy` and `pg_policies` list the policies with their roles, command and conditions in
+`pg_get_expr`'s form, so psql's `\d` and `\dp` show them.
 
 Roles can also log in through a directory or an identity provider (D185). Give `eggdb serve
 --auth-rules auth.conf` a file such as:
@@ -3667,7 +3701,8 @@ relation X (`pg_catalog` is searched first unless `search_path` lists it after a
 `pg_attrdef`, `pg_description`, `pg_database`, `pg_roles`, `pg_am`, `pg_collation`,
 `pg_sequence`, `pg_depend`, `pg_tablespace`, `pg_settings` (the session's settings, one row
 each), `pg_timezone_names` (every region of the time zone database, D153) and `pg_trigger`
-(every trigger, of any dialect, with `tgtype`, `tgenabled`, `tgattr` and `tgargs`), and the empty `pg_inherits`, `pg_policy`, `pg_statistic_ext`, `pg_publication`,
+(every trigger, of any dialect, with `tgtype`, `tgenabled`, `tgattr` and `tgargs`), `pg_policy`
+and the view `pg_policies` (every row security policy, D326), and the empty `pg_inherits`, `pg_statistic_ext`, `pg_publication`,
 `pg_publication_rel`, `pg_publication_namespace`, `pg_rewrite`,
 `pg_auth_members`, `pg_opclass`, `pg_enum` and `pg_range`, `pg_proc` with the array
 functions `array_in`, `array_out`, `array_recv` and `array_send` (D135) and every user function
@@ -3721,7 +3756,7 @@ folded into 16385 to 4294967295, a collision taking the next free number in a fi
 it is the same in every statement and after a restart, and changes when the object is renamed.
 
 **Types and functions.** `oid`, `xid`, `name`, `pg_node_tree`, `aclitem` (PostgreSQL's `grantee=privileges/grantor` text, as `pg_class.relacl`
-and `\dp` show a table's grants; NULL where EggDB keeps no grants, such as `attacl`),
+and `\dp` show a table's grants, and `pg_attribute.attacl` a column's; NULL where an object has no grants),
 `int2vector` and `oidvector` (subscripts from 0, written separated by spaces), and `regclass`,
 `regtype`, `regnamespace`, `regrole` and `regproc` work in expressions and casts but are not
 column types of tables; `"char"` is the type of the catalog's kind columns only, and `"char"`

@@ -773,10 +773,10 @@ pub(crate) fn function(name: &str, values: &[Value]) -> SqlResult<Value> {
 
 #[cfg(test)]
 pub(super) fn privilege_list_parses(text: &str, of_role: bool) -> SqlResult<usize> {
-    if of_role {
+    let parsed = if of_role {
         parse_privileges(text, &ROLE_PRIVILEGES, &[GRANT_OPTION, ADMIN_OPTION])
     } else {
         parse_privileges(text, &TABLE_PRIVILEGES, &[GRANT_OPTION])
-    }
-    .map(|wanted| wanted.len())
+    };
+    parsed.map(|wanted| wanted.len())
 }
