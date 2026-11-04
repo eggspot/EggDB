@@ -250,6 +250,16 @@ pub(crate) fn create_table(
     dialect: Dialect,
 ) -> SqlResult<QueryResult> {
     if crate::partition_ddl::wants(create) {
+        if let Some(spec) = create
+            .columns
+            .iter()
+            .find_map(|column| column.generated.as_ref())
+        {
+            return Err(
+                SqlError::not_supported("generated columns in a partitioned table")
+                    .at(spec.position),
+            );
+        }
         return crate::partition_ddl::create_table(writer, tables, create, dialect);
     }
     if create.columns.len() > MAX_COLUMNS {
