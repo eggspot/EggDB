@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 
 use super::WindowEvent;
+use super::x11::CURRENT_TIME;
 
 /// The XDND version this target speaks.
 pub const XDND_VERSION: u32 = 5;
@@ -136,8 +137,8 @@ pub enum XdndReaction {
         /// Whether the drop would be taken.
         accept: bool,
     },
-    /// Ask for `XdndSelection` as `text/uri-list` at `time` and call [`XdndTarget::data`]
-    /// with what arrives.
+    /// Ask for `XdndSelection` as `text/uri-list` at `time` and, when the answer comes,
+    /// read it only if [`XdndTarget::awaits`] its time, then call [`XdndTarget::data`].
     RequestPaths {
         /// The time from the source's message.
         time: u32,
@@ -158,6 +159,7 @@ struct Drag {
     source: u32,
     offers_paths: bool,
     requested: bool,
+    awaiting: Option<u32>,
     paths: Option<Vec<PathBuf>>,
     dropped: bool,
     entered: bool,
@@ -206,6 +208,7 @@ impl XdndTarget {
             source,
             offers_paths: !more_types && types.contains(&uri_list),
             requested: false,
+            awaiting: None,
             paths: None,
             dropped: false,
             entered: false,
@@ -234,6 +237,7 @@ impl XdndTarget {
         let mut reactions = vec![XdndReaction::Status { source, accept }];
         if drag.offers_paths && !drag.requested {
             drag.requested = true;
+            drag.awaiting = Some(time);
             reactions.push(XdndReaction::RequestPaths { time });
         }
         reactions
@@ -275,15 +279,31 @@ impl XdndTarget {
             return Vec::new();
         }
         drag.requested = true;
+        drag.awaiting = Some(time);
         vec![XdndReaction::RequestPaths { time }]
     }
 
-    /// The `text/uri-list` the source gave, or `None` when it refused: before a drop the
-    /// drag-over ring shows for its files, after one they are dropped.
-    pub fn data(&mut self, uri_list: Option<&[u8]>) -> Vec<XdndReaction> {
+    /// Whether an answer from `XdndSelection` stamped `time` is the one the current drag asked
+    /// for: it asked and has had no answer yet, at that time (or the owner answered with
+    /// `CurrentTime`). An answer left over from an earlier drag is not.
+    pub fn awaits(&self, time: u32) -> bool {
+        self.drag
+            .as_ref()
+            .and_then(|drag| drag.awaiting)
+            .is_some_and(|asked| time == asked || time == CURRENT_TIME)
+    }
+
+    /// The `text/uri-list` the source gave at `time`, or `None` when it refused: before a drop
+    /// the drag-over ring shows for its files, after one they are dropped. An answer the drag
+    /// does not [`await`](Self::awaits) is ignored.
+    pub fn data(&mut self, time: u32, uri_list: Option<&[u8]>) -> Vec<XdndReaction> {
+        if !self.awaits(time) {
+            return Vec::new();
+        }
         let Some(drag) = self.drag.as_mut() else {
             return Vec::new();
         };
+        drag.awaiting = None;
         let paths = uri_list.map(parse_uri_list).unwrap_or_default();
         if drag.dropped {
             drag.paths = Some(paths);
@@ -463,7 +483,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            target.data(Some(b"file:///home/ana/shop.eggdb\r\n")),
+            target.data(5, Some(b"file:///home/ana/shop.eggdb\r\n")),
             vec![XdndReaction::Event(WindowEvent::FileDragEntered(shop()))]
         );
         assert_eq!(
@@ -504,7 +524,7 @@ mod tests {
             vec![XdndReaction::RequestPaths { time: 7 }]
         );
         assert_eq!(
-            target.data(Some(b"# a comment\nfile://localhost/home/ana/shop.eggdb\n")),
+            target.data(7, Some(b"# a comment\nfile://localhost/home/ana/shop.eggdb\n")),
             vec![
                 XdndReaction::Event(WindowEvent::FilesDropped(shop())),
                 XdndReaction::Finished {
@@ -547,7 +567,7 @@ mod tests {
         };
         target.receive(files, URI_LIST);
         target.receive(XdndMessage::Position { source: 9, time: 3 }, URI_LIST);
-        target.data(Some(b"file:///home/ana/shop.eggdb"));
+        target.data(3, Some(b"file:///home/ana/shop.eggdb"));
         assert_eq!(
             target.receive(XdndMessage::Leave { source: 8 }, URI_LIST),
             vec![]
@@ -584,7 +604,7 @@ mod tests {
         };
         target.receive(files, URI_LIST);
         target.receive(XdndMessage::Position { source: 9, time: 3 }, URI_LIST);
-        assert_eq!(target.data(None), vec![]);
+        assert_eq!(target.data(3, None), vec![]);
         assert_eq!(
             target.receive(XdndMessage::Position { source: 9, time: 4 }, URI_LIST),
             vec![XdndReaction::Status {
@@ -598,6 +618,78 @@ mod tests {
                 source: 9,
                 accepted: false
             }]
+        );
+    }
+
+    #[test]
+    fn an_answer_left_over_from_an_earlier_drag_is_ignored() {
+        let mut target = XdndTarget::default();
+        let files = |source| XdndMessage::Enter {
+            source,
+            version: 5,
+            more_types: false,
+            types: [URI_LIST, 0, 0],
+        };
+        target.receive(files(8), URI_LIST);
+        target.receive(XdndMessage::Position { source: 8, time: 3 }, URI_LIST);
+        target.receive(XdndMessage::Leave { source: 8 }, URI_LIST);
+        target.receive(files(9), URI_LIST);
+        assert!(!target.awaits(3));
+        assert_eq!(
+            target.data(3, Some(b"file:///home/ana/other.eggdb")),
+            vec![]
+        );
+        target.receive(XdndMessage::Position { source: 9, time: 6 }, URI_LIST);
+        assert!(!target.awaits(3));
+        assert!(target.awaits(6));
+        assert_eq!(
+            target.data(3, Some(b"file:///home/ana/other.eggdb")),
+            vec![]
+        );
+        assert_eq!(
+            target.data(6, Some(b"file:///home/ana/shop.eggdb")),
+            vec![XdndReaction::Event(WindowEvent::FileDragEntered(shop()))]
+        );
+        assert!(!target.awaits(6));
+        assert_eq!(
+            target.data(6, Some(b"file:///home/ana/other.eggdb")),
+            vec![]
+        );
+        assert_eq!(
+            target.receive(XdndMessage::Drop { source: 9, time: 7 }, URI_LIST),
+            vec![
+                XdndReaction::Event(WindowEvent::FilesDropped(shop())),
+                XdndReaction::Finished {
+                    source: 9,
+                    accepted: true
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn an_owner_answering_with_current_time_is_taken() {
+        let mut target = XdndTarget::default();
+        target.receive(
+            XdndMessage::Enter {
+                source: 9,
+                version: 5,
+                more_types: false,
+                types: [URI_LIST, 0, 0],
+            },
+            URI_LIST,
+        );
+        target.receive(XdndMessage::Drop { source: 9, time: 7 }, URI_LIST);
+        assert!(target.awaits(CURRENT_TIME));
+        assert_eq!(
+            target.data(CURRENT_TIME, Some(b"file:///home/ana/shop.eggdb")),
+            vec![
+                XdndReaction::Event(WindowEvent::FilesDropped(shop())),
+                XdndReaction::Finished {
+                    source: 9,
+                    accepted: true
+                }
+            ]
         );
     }
 

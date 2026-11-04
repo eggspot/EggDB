@@ -111,9 +111,9 @@ struct DropTarget {
 }
 
 impl DropTarget {
-    fn at<'a>(this: *mut c_void) -> &'a DropTarget {
-        // SAFETY: OLE calls the methods with the pointer `RegisterDragDrop` was given, which
-        // points to a live `DropTarget` while OLE holds the reference it took.
+    unsafe fn at<'a>(this: *mut c_void) -> &'a DropTarget {
+        // SAFETY: the caller passes the pointer `RegisterDragDrop` was given, which points to a
+        // live `DropTarget` while a reference to it is held.
         unsafe { &*this.cast::<DropTarget>() }
     }
 
@@ -130,31 +130,34 @@ impl DropTarget {
         left
     }
 
-    fn answer(
+    unsafe fn answer(
         &self,
         effect: *mut u32,
         update: impl FnOnce(&mut FileDragTarget, u32) -> u32,
     ) -> HResult {
-        let Some(allowed) = read_effect(effect) else {
+        // SAFETY: the caller passes OLE's `pdwEffect`, null or valid for the call.
+        let Some(allowed) = (unsafe { read_effect(effect) }) else {
             return E_POINTER;
         };
         let Ok(mut drag) = self.drag.try_borrow_mut() else {
             return E_UNEXPECTED;
         };
         let chosen = update(&mut drag, allowed);
-        write_effect(effect, chosen)
+        // SAFETY: as for `read_effect` above.
+        unsafe { write_effect(effect, chosen) }
     }
 }
 
-fn read_effect(effect: *mut u32) -> Option<u32> {
+unsafe fn read_effect(effect: *mut u32) -> Option<u32> {
     if effect.is_null() {
         return None;
     }
-    // SAFETY: OLE passes `pdwEffect` as a valid in/out `DWORD` for the call.
+    // SAFETY: the caller passes OLE's `pdwEffect`, which is a valid in/out `DWORD` for the
+    // call when it is not null.
     Some(unsafe { effect.read() })
 }
 
-fn write_effect(effect: *mut u32, value: u32) -> HResult {
+unsafe fn write_effect(effect: *mut u32, value: u32) -> HResult {
     if effect.is_null() {
         return E_POINTER;
     }
@@ -163,7 +166,7 @@ fn write_effect(effect: *mut u32, value: u32) -> HResult {
     S_OK
 }
 
-fn data_paths(data: *mut c_void) -> Vec<PathBuf> {
+unsafe fn data_paths(data: *mut c_void) -> Vec<PathBuf> {
     if data.is_null() {
         return Vec::new();
     }
@@ -179,7 +182,7 @@ fn data_paths(data: *mut c_void) -> Vec<PathBuf> {
         handle: std::ptr::null_mut(),
         release_owner: std::ptr::null_mut(),
     };
-    // SAFETY: `data` is the `IDataObject` OLE passes for this call, alive for it; a COM
+    // SAFETY: the caller passes the `IDataObject` OLE gave the call, alive for it; a COM
     // object's first field is its vtable pointer.
     let vtable = unsafe { (*data.cast::<DataObject>()).vtable };
     if vtable.is_null() {
@@ -212,10 +215,16 @@ unsafe extern "system" fn query_interface(
         return E_POINTER;
     }
     // SAFETY: COM passes a valid IID pointer or null; null is refused.
-    let known =
-        unsafe { iid.as_ref() }.is_some_and(|&iid| iid == IID_IUNKNOWN || iid == IID_IDROPTARGET);
+    let Some(&iid) = (unsafe { iid.as_ref() }) else {
+        // SAFETY: `out` is COM's non-null out parameter for one interface pointer.
+        unsafe { out.write(std::ptr::null_mut()) };
+        return E_POINTER;
+    };
+    let known = iid == IID_IUNKNOWN || iid == IID_IDROPTARGET;
     let interface = if known {
-        let target = DropTarget::at(this);
+        // SAFETY: COM calls the method with the target's own pointer, which a reference held
+        // by the caller keeps alive.
+        let target = unsafe { DropTarget::at(this) };
         target
             .references
             .set(target.references.get().saturating_add(1));
@@ -229,7 +238,8 @@ unsafe extern "system" fn query_interface(
 }
 
 unsafe extern "system" fn add_ref(this: *mut c_void) -> u32 {
-    let target = DropTarget::at(this);
+    // SAFETY: as in `query_interface`.
+    let target = unsafe { DropTarget::at(this) };
     let count = target.references.get().saturating_add(1);
     target.references.set(count);
     count
@@ -247,14 +257,19 @@ unsafe extern "system" fn drag_enter(
     _point: Point,
     effect: *mut u32,
 ) -> HResult {
-    let target = DropTarget::at(this);
-    let paths = data_paths(data);
+    // SAFETY: as in `query_interface`.
+    let target = unsafe { DropTarget::at(this) };
+    // SAFETY: `data` is the `IDataObject` OLE passes for this call, or null.
+    let paths = unsafe { data_paths(data) };
     let mut event = None;
-    let answer = target.answer(effect, |drag, allowed| {
-        let (chosen, entered) = drag.enter(paths, allowed);
-        event = entered;
-        chosen
-    });
+    // SAFETY: `effect` is OLE's `pdwEffect` for this call.
+    let answer = unsafe {
+        target.answer(effect, |drag, allowed| {
+            let (chosen, entered) = drag.enter(paths, allowed);
+            event = entered;
+            chosen
+        })
+    };
     if let Some(event) = event {
         target.state.push(event);
     }
@@ -267,11 +282,15 @@ unsafe extern "system" fn drag_over(
     _point: Point,
     effect: *mut u32,
 ) -> HResult {
-    DropTarget::at(this).answer(effect, |drag, allowed| drag.over(allowed))
+    // SAFETY: as in `query_interface`.
+    let target = unsafe { DropTarget::at(this) };
+    // SAFETY: `effect` is OLE's `pdwEffect` for this call.
+    unsafe { target.answer(effect, |drag, allowed| drag.over(allowed)) }
 }
 
 unsafe extern "system" fn drag_leave(this: *mut c_void) -> HResult {
-    let target = DropTarget::at(this);
+    // SAFETY: as in `query_interface`.
+    let target = unsafe { DropTarget::at(this) };
     let left = target
         .drag
         .try_borrow_mut()
@@ -290,19 +309,25 @@ unsafe extern "system" fn drop_files(
     _point: Point,
     effect: *mut u32,
 ) -> HResult {
-    let target = DropTarget::at(this);
-    let paths = data_paths(data);
+    // SAFETY: as in `query_interface`.
+    let target = unsafe { DropTarget::at(this) };
+    // SAFETY: `data` is the `IDataObject` OLE passes for this call, or null.
+    let paths = unsafe { data_paths(data) };
     let mut event = None;
-    let answer = target.answer(effect, |drag, allowed| {
-        let (chosen, dropped) = drag.drop(paths, allowed);
-        event = dropped;
-        chosen
-    });
+    // SAFETY: `effect` is OLE's `pdwEffect` for this call.
+    let answer = unsafe {
+        target.answer(effect, |drag, allowed| {
+            let (chosen, dropped) = drag.drop(paths, allowed);
+            event = dropped;
+            chosen
+        })
+    };
     if let Some(event) = event {
         target.state.push(event);
     }
     if answer != S_OK {
-        let _ = write_effect(effect, DROPEFFECT_NONE);
+        // SAFETY: `effect` is OLE's `pdwEffect` for this call.
+        let _ = unsafe { write_effect(effect, DROPEFFECT_NONE) };
     }
     answer
 }

@@ -1185,6 +1185,8 @@ pub enum Packet {
     },
     /// The answer to this client's `ConvertSelection`.
     SelectionNotify {
+        /// The time of the request it answers, or `CurrentTime`.
+        time: u32,
         /// The window that asked.
         requestor: u32,
         /// The selection's atom.
@@ -1265,6 +1267,7 @@ pub fn parse_packet(header: &[u8; 32]) -> Packet {
             property: word(24),
         },
         31 => Packet::SelectionNotify {
+            time: word(4),
             requestor: word(8),
             selection: word(12),
             target: word(16),
@@ -1972,10 +1975,11 @@ mod tests {
                 property: 6,
             }
         );
-        let notify = selection_notify_event(0, 9, 10, 11, 12);
+        let notify = selection_notify_event(8, 9, 10, 11, 12);
         assert_eq!(
             parse_packet(&notify),
             Packet::SelectionNotify {
+                time: 8,
                 requestor: 9,
                 selection: 10,
                 target: 11,

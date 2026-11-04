@@ -18,6 +18,12 @@ pub const MAX_INCR_CHUNK: usize = 256 << 10;
 /// The most transfers one window serves at the same time; another requestor is refused until
 /// one ends.
 pub const MAX_OUTGOING_TRANSFERS: usize = 8;
+/// The longest a requestor reads one selection in increments, from the `INCR` answer to the
+/// empty chunk, however often chunks arrive.
+pub const INCR_READ_LIMIT: Duration = Duration::from_secs(30);
+/// The most times a requestor told of a new value finds the property gone before it gives the
+/// transfer up.
+pub const MOST_GONE_CHUNKS: u32 = 8;
 
 /// The bytes a chunk of a selection may carry for a server whose largest request is
 /// `maximum_request_length` 4-byte units, after `header` bytes of `ChangeProperty`: at most
@@ -122,6 +128,13 @@ impl OutgoingIncr {
     pub fn is_stalled(&self, now: Instant) -> bool {
         now.saturating_duration_since(self.touched) >= INCR_STALL_LIMIT
     }
+
+    /// When the transfer stalls unless the requestor deletes the property before.
+    pub fn stalls_at(&self) -> Instant {
+        self.touched
+            .checked_add(INCR_STALL_LIMIT)
+            .unwrap_or(self.touched)
+    }
 }
 
 /// Where a requestor's transfer is after a chunk.
@@ -133,17 +146,20 @@ pub enum IncrProgress {
     Done,
 }
 
-/// A selection a requestor reads in increments, at most `limit` bytes.
+/// A selection a requestor reads in increments, at most `limit` bytes and for at most
+/// [`INCR_READ_LIMIT`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncomingIncr {
     bytes: Vec<u8>,
     limit: usize,
+    gives_up_at: Instant,
+    gone: u32,
 }
 
 impl IncomingIncr {
-    /// A transfer whose `INCR` property announced `announced` bytes at least; refused when that
-    /// is already more than `limit`.
-    pub fn new(announced: Option<u32>, limit: usize) -> Result<Self, WindowError> {
+    /// A transfer started at `now` whose `INCR` property announced `announced` bytes at least;
+    /// refused when that is already more than `limit`.
+    pub fn new(announced: Option<u32>, limit: usize, now: Instant) -> Result<Self, WindowError> {
         let announced = announced.map_or(0, |size| usize::try_from(size).unwrap_or(usize::MAX));
         if announced > limit {
             return Err(too_large(limit));
@@ -151,7 +167,39 @@ impl IncomingIncr {
         Ok(Self {
             bytes: Vec::with_capacity(announced.min(MAX_INCR_CHUNK)),
             limit,
+            gives_up_at: now.checked_add(INCR_READ_LIMIT).unwrap_or(now),
+            gone: 0,
         })
+    }
+
+    /// Until when to wait for the next chunk at `now`: `chunk_wait` from now, but never past
+    /// the transfer's own [`INCR_READ_LIMIT`], which refuses it once it has passed.
+    pub fn chunk_deadline(
+        &self,
+        now: Instant,
+        chunk_wait: Duration,
+    ) -> Result<Instant, WindowError> {
+        if now >= self.gives_up_at {
+            return Err(WindowError::Io(format!(
+                "the clipboard's owner took more than {} s to send its text",
+                INCR_READ_LIMIT.as_secs()
+            )));
+        }
+        Ok(now
+            .checked_add(chunk_wait)
+            .map_or(self.gives_up_at, |at| at.min(self.gives_up_at)))
+    }
+
+    /// The property was gone when read after a new value was announced; refused after
+    /// [`MOST_GONE_CHUNKS`] such reads.
+    pub fn property_gone(&mut self) -> Result<(), WindowError> {
+        self.gone = self.gone.saturating_add(1);
+        if self.gone > MOST_GONE_CHUNKS {
+            return Err(WindowError::Protocol(
+                "the clipboard's owner kept removing its text before it was read".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     /// Adds the next chunk: an empty one ends the transfer, and one that takes the selection
@@ -239,17 +287,59 @@ mod tests {
 
     #[test]
     fn a_requestor_joins_chunks_until_the_empty_one_and_keeps_to_its_limit() {
-        let mut incoming = IncomingIncr::new(Some(6), 10).unwrap();
+        let now = Instant::now();
+        let mut incoming = IncomingIncr::new(Some(6), 10, now).unwrap();
         assert_eq!(incoming.take(b"caf"), Ok(IncrProgress::More));
         assert_eq!(incoming.take("\u{e9}!".as_bytes()), Ok(IncrProgress::More));
         assert_eq!(incoming.take(b""), Ok(IncrProgress::Done));
         assert_eq!(incoming.into_text(), "caf\u{e9}!");
-        assert!(IncomingIncr::new(Some(11), 10).is_err());
-        let mut small = IncomingIncr::new(None, 4).unwrap();
+        assert!(IncomingIncr::new(Some(11), 10, now).is_err());
+        let mut small = IncomingIncr::new(None, 4, now).unwrap();
         assert_eq!(small.take(b"abcd"), Ok(IncrProgress::More));
         assert!(small.take(b"e").is_err());
-        let mut lossy = IncomingIncr::new(None, 4).unwrap();
+        let mut lossy = IncomingIncr::new(None, 4, now).unwrap();
         assert_eq!(lossy.take(&[0xff, b'a']), Ok(IncrProgress::More));
         assert_eq!(lossy.into_text(), "\u{fffd}a");
+    }
+
+    #[test]
+    fn a_stalled_transfer_says_when_it_stalls() {
+        let now = Instant::now();
+        let mut transfer = OutgoingIncr::new(1, 2, 3, vec![0; 10], 4, now);
+        assert_eq!(transfer.stalls_at(), now + INCR_STALL_LIMIT);
+        transfer.next(now + Duration::from_secs(3));
+        assert_eq!(
+            transfer.stalls_at(),
+            now + Duration::from_secs(3) + INCR_STALL_LIMIT
+        );
+    }
+
+    #[test]
+    fn a_requestor_gives_up_a_dripping_transfer_at_its_overall_limit() {
+        let now = Instant::now();
+        let mut incoming = IncomingIncr::new(None, 1 << 20, now).unwrap();
+        let wait = Duration::from_secs(2);
+        assert_eq!(incoming.chunk_deadline(now, wait), Ok(now + wait));
+        let mut at = now;
+        while at < now + INCR_READ_LIMIT {
+            assert_eq!(incoming.take(b"a"), Ok(IncrProgress::More));
+            let deadline = incoming.chunk_deadline(at, wait).unwrap();
+            assert!(deadline <= now + INCR_READ_LIMIT);
+            at += Duration::from_millis(1900);
+        }
+        assert!(incoming.chunk_deadline(at, wait).is_err());
+        assert_eq!(
+            incoming.chunk_deadline(now + INCR_READ_LIMIT - Duration::from_secs(1), wait),
+            Ok(now + INCR_READ_LIMIT)
+        );
+    }
+
+    #[test]
+    fn a_requestor_gives_up_an_owner_that_keeps_removing_the_property() {
+        let mut incoming = IncomingIncr::new(None, 10, Instant::now()).unwrap();
+        for _ in 0..MOST_GONE_CHUNKS {
+            assert_eq!(incoming.property_gone(), Ok(()));
+        }
+        assert!(incoming.property_gone().is_err());
     }
 }
