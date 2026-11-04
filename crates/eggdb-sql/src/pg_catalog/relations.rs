@@ -289,24 +289,54 @@ fn table_oid(snapshot: &CatalogSnapshot, internal: &str) -> Option<u32> {
         .map(|entry| entry.oid)
 }
 
+fn index_oids(snapshot: &CatalogSnapshot) -> std::collections::HashMap<(&str, u32), u32> {
+    let mut found = std::collections::HashMap::new();
+    for entry in &snapshot.relations {
+        let RelationSource::Index {
+            table,
+            index: IndexSource::Secondary(at),
+        } = &entry.source
+        else {
+            continue;
+        };
+        if let Some(owner) = snapshot.relations.get(*table).and_then(|owner| owner.table())
+            && let Some(index) = owner.indexes.get(*at)
+        {
+            found.insert((owner.name.as_str(), index.id), entry.oid);
+        }
+    }
+    found
+}
+
+fn inherits_row(child: u32, parent: u32) -> Vec<Value> {
+    Row::new(CatalogRelation::Inherits)
+        .set("inhrelid", oid(child))
+        .set("inhparent", oid(parent))
+        .set("inhseqno", int(1))
+        .set("inhdetachpending", flag(false))
+        .done()
+}
+
 fn inherits_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     let mut rows = Vec::new();
+    let indexes = index_oids(snapshot);
     for (child, record) in snapshot.partitions.every() {
         let Some((parent, _)) = &record.parent else {
             continue;
         };
+        for link in &record.index_links {
+            if let (Some(child_index), Some(parent_index)) = (
+                indexes.get(&(child, link.index)),
+                indexes.get(&(parent.as_str(), link.parent_index)),
+            ) {
+                rows.push(inherits_row(*child_index, *parent_index));
+            }
+        }
         let (Some(child), Some(parent)) = (table_oid(snapshot, child), table_oid(snapshot, parent))
         else {
             continue;
         };
-        rows.push(
-            Row::new(CatalogRelation::Inherits)
-                .set("inhrelid", oid(child))
-                .set("inhparent", oid(parent))
-                .set("inhseqno", int(1))
-                .set("inhdetachpending", flag(false))
-                .done(),
-        );
+        rows.push(inherits_row(child, parent));
     }
     rows
 }
@@ -325,7 +355,7 @@ pub(crate) fn partitioned_table_rows(snapshot: &CatalogSnapshot) -> Vec<(u32, &'
             Some((
                 table_oid(snapshot, table)?,
                 strategy,
-                key.columns.len() as i64,
+                key.parts.len() as i64,
             ))
         })
         .collect()
@@ -384,6 +414,10 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                     .relations
                     .get(*table)
                     .and_then(|owner| owner.table());
+                if owner.is_some_and(|owner| snapshot.partitions.key_of(&owner.name).is_some()) {
+                    kind = "I";
+                    file_node = 0;
+                }
                 natts = owner.map_or(0, |owner| index_columns(owner, *index).len());
                 am = access_method_oid(
                     owner.map_or(IndexMethod::BTree, |owner| index_method(owner, *index)),
@@ -1115,6 +1149,20 @@ fn trigger_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     rows
 }
 
+fn index_is_valid(snapshot: &CatalogSnapshot, owner: &TableDefinition, index: IndexSource) -> bool {
+    match index {
+        IndexSource::Secondary(at) if snapshot.partitions.key_of(&owner.name).is_some() => owner
+            .indexes
+            .get(at)
+            .is_none_or(|index| {
+                snapshot
+                    .partitions
+                    .index_reaches_every_partition(&owner.name, index.id)
+            }),
+        _ => true,
+    }
+}
+
 fn index_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     let mut rows = Vec::new();
     for entry in &snapshot.relations {
@@ -1142,7 +1190,7 @@ fn index_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 .set("indisexclusion", flag(false))
                 .set("indimmediate", flag(true))
                 .set("indisclustered", flag(false))
-                .set("indisvalid", flag(true))
+                .set("indisvalid", flag(index_is_valid(snapshot, owner, *index)))
                 .set("indcheckxmin", flag(false))
                 .set("indisready", flag(true))
                 .set("indislive", flag(true))

@@ -1,12 +1,15 @@
-use super::{NAMESPACE, Reader, put_bytes, put_varint};
+use super::{NAMESPACE, Reader, dialect_code, dialect_of, put_bytes, put_varint};
 use crate::error::SqlResult;
 use crate::partitions::{
-    BoundText, MAX_BOUND_VALUES, MAX_KEY_COLUMNS, PartitionBound, PartitionKey, PartitionRecord,
-    PartitionStrategy,
+    BoundText, IndexLink, KeyPart, MAX_BOUND_VALUES, MAX_INDEX_LINKS, MAX_KEY_COLUMNS,
+    PartitionBound, PartitionKey, PartitionRecord, PartitionStrategy,
 };
 
 pub(super) const PARTITION_SPACE: u8 = 0x0E;
 const RECORD_VERSION: u8 = 1;
+const EXPRESSIONS_AND_INDEXES_VERSION: u8 = 2;
+const COLUMN_PART: u8 = 0;
+const EXPRESSION_PART: u8 = 1;
 const KEY_FLAG: u8 = 1;
 const PARENT_FLAG: u8 = 2;
 const KNOWN_FLAGS: u8 = KEY_FLAG | PARENT_FLAG;
@@ -80,8 +83,18 @@ fn values(reader: &mut Reader<'_>) -> SqlResult<Vec<BoundText>> {
     Ok(values)
 }
 
+fn needs_version_2(record: &PartitionRecord) -> bool {
+    record.key.as_ref().is_some_and(PartitionKey::has_expressions)
+        || (record.parent.is_some() && !record.index_links.is_empty())
+}
+
 pub(crate) fn encode_partitioning(record: &PartitionRecord) -> Vec<u8> {
-    let mut out = vec![RECORD_VERSION];
+    let version_2 = needs_version_2(record);
+    let mut out = vec![if version_2 {
+        EXPRESSIONS_AND_INDEXES_VERSION
+    } else {
+        RECORD_VERSION
+    }];
     let mut flags = 0;
     if record.key.is_some() {
         flags |= KEY_FLAG;
@@ -92,9 +105,21 @@ pub(crate) fn encode_partitioning(record: &PartitionRecord) -> Vec<u8> {
     out.push(flags);
     if let Some(key) = &record.key {
         out.push(strategy_code(key.strategy));
-        put_varint(&mut out, key.columns.len() as u64);
-        for column in &key.columns {
-            put_bytes(&mut out, column.as_bytes());
+        put_varint(&mut out, key.parts.len() as u64);
+        for part in &key.parts {
+            match part {
+                KeyPart::Column(column) => {
+                    if version_2 {
+                        out.push(COLUMN_PART);
+                    }
+                    put_bytes(&mut out, column.as_bytes());
+                }
+                KeyPart::Expression { text, dialect } => {
+                    out.push(EXPRESSION_PART);
+                    out.push(dialect_code(*dialect));
+                    put_bytes(&mut out, text.as_bytes());
+                }
+            }
         }
     }
     if let Some((parent, bound)) = &record.parent {
@@ -116,13 +141,61 @@ pub(crate) fn encode_partitioning(record: &PartitionRecord) -> Vec<u8> {
             }
             PartitionBound::Default => out.push(DEFAULT),
         }
+        if version_2 {
+            put_varint(&mut out, record.index_links.len() as u64);
+            for link in &record.index_links {
+                put_varint(&mut out, u64::from(link.index));
+                put_varint(&mut out, u64::from(link.parent_index));
+            }
+        }
     }
     out
 }
 
+fn key_part(reader: &mut Reader<'_>, version: u8) -> SqlResult<KeyPart> {
+    if version < EXPRESSIONS_AND_INDEXES_VERSION {
+        return Ok(KeyPart::Column(reader.name()?));
+    }
+    match reader.byte()? {
+        COLUMN_PART => Ok(KeyPart::Column(reader.name()?)),
+        EXPRESSION_PART => {
+            let dialect = dialect_of(reader.byte()?).ok_or_else(|| reader.damaged())?;
+            let text = reader.text()?;
+            if text.is_empty() {
+                return Err(reader.damaged());
+            }
+            Ok(KeyPart::Expression { text, dialect })
+        }
+        _ => Err(reader.damaged()),
+    }
+}
+
+fn index_links(reader: &mut Reader<'_>) -> SqlResult<Vec<IndexLink>> {
+    let count = reader.count()?;
+    if count > MAX_INDEX_LINKS {
+        return Err(reader.damaged());
+    }
+    let mut links: Vec<IndexLink> = Vec::with_capacity(count);
+    for _ in 0..count {
+        let index = u32::try_from(reader.varint()?).map_err(|_| reader.damaged())?;
+        let parent_index = u32::try_from(reader.varint()?).map_err(|_| reader.damaged())?;
+        if links
+            .iter()
+            .any(|link| link.index == index || link.parent_index == parent_index)
+        {
+            return Err(reader.damaged());
+        }
+        links.push(IndexLink {
+            index,
+            parent_index,
+        });
+    }
+    Ok(links)
+}
+
 pub(crate) fn decode_partitioning(table: &str, bytes: &[u8]) -> SqlResult<PartitionRecord> {
     let mut reader = Reader::new(bytes, "partitioning");
-    reader.version()?;
+    let version = reader.version_up_to(EXPRESSIONS_AND_INDEXES_VERSION)?;
     if table.is_empty() || !crate::schemas::is_well_formed(table) {
         return Err(reader.damaged());
     }
@@ -136,14 +209,14 @@ pub(crate) fn decode_partitioning(table: &str, bytes: &[u8]) -> SqlResult<Partit
         if count == 0 || count > MAX_KEY_COLUMNS {
             return Err(reader.damaged());
         }
-        let mut columns = Vec::with_capacity(count);
+        let mut parts = Vec::with_capacity(count);
         for _ in 0..count {
-            columns.push(reader.name()?);
+            parts.push(key_part(&mut reader, version)?);
         }
         if strategy == PartitionStrategy::List && count != 1 {
             return Err(reader.damaged());
         }
-        Some(PartitionKey { strategy, columns })
+        Some(PartitionKey { strategy, parts })
     } else {
         None
     };
@@ -177,6 +250,15 @@ pub(crate) fn decode_partitioning(table: &str, bytes: &[u8]) -> SqlResult<Partit
     } else {
         None
     };
+    let index_links = if version >= EXPRESSIONS_AND_INDEXES_VERSION && parent.is_some() {
+        index_links(&mut reader)?
+    } else {
+        Vec::new()
+    };
     reader.finish()?;
-    Ok(PartitionRecord { key, parent })
+    Ok(PartitionRecord {
+        key,
+        parent,
+        index_links,
+    })
 }

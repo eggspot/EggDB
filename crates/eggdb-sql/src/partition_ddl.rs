@@ -1,15 +1,14 @@
 use crate::ast::{
-    ColumnDefinition, ConstraintKind, ConstraintSpec, CreateTable, IndexSpec, Name,
-    NamedPartitionBound, PartitionBoundSpec, PartitionBoundValue, PartitionBy,
+    ColumnDefinition, ConstraintKind, ConstraintSpec, CreateTable, Name, NamedPartitionBound,
+    PartitionBoundSpec, PartitionBoundValue, PartitionBy, PartitionKeyPart,
 };
 use crate::dialect::Dialect;
 use crate::encoding::TableDefinition;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::{self, TableCache};
-use crate::partitions::{PartitionBound, PartitionKey, PartitionStrategy};
+use crate::partitions::{KeyPart, PartitionBound, PartitionKey, PartitionStrategy};
 use crate::session::QueryResult;
 use crate::store::KeyValueWrite;
-use crate::types::SqlType;
 use std::sync::Arc;
 
 const MYSQL_PARTITION_MARKER: &str = "#P#";
@@ -83,19 +82,6 @@ fn copy_of(parent: &TableDefinition, name: Name) -> SqlResult<CreateTable> {
         .collect::<SqlResult<Vec<_>>>()?;
     let primary_key = (!parent.primary_key.is_empty())
         .then(|| (names_of(parent, &parent.primary_key, position), position));
-    let indexes = parent
-        .indexes
-        .iter()
-        .filter(|index| index.unique)
-        .map(|index| IndexSpec {
-            name: None,
-            unique: true,
-            columns: names_of(parent, &index.columns, position),
-            position,
-            method: index.method,
-            sort_options: index.sort_options,
-        })
-        .collect();
     let mut constraints = Vec::with_capacity(parent.checks.len());
     for check in &parent.checks {
         let expr = crate::constraints::parse_check(check)?;
@@ -121,7 +107,7 @@ fn copy_of(parent: &TableDefinition, name: Name) -> SqlResult<CreateTable> {
         columns,
         primary_key,
         primary_key_name: None,
-        indexes,
+        indexes: Vec::new(),
         constraints,
         comment: None,
         partition_by: None,
@@ -130,43 +116,51 @@ fn copy_of(parent: &TableDefinition, name: Name) -> SqlResult<CreateTable> {
     })
 }
 
-fn key_types(table: &TableDefinition, key: &PartitionKey) -> SqlResult<Vec<SqlType>> {
-    key.columns
-        .iter()
-        .map(|column| {
-            table
-                .column_index(column)
-                .map(|index| table.columns[index].sql_type)
-                .ok_or_else(|| crate::encoding::corrupt("partition key"))
-        })
-        .collect()
-}
-
-fn validated_key(table: &TableDefinition, by: &PartitionBy) -> SqlResult<PartitionKey> {
-    let mut columns: Vec<String> = Vec::with_capacity(by.columns.len());
-    let mut positions = Vec::with_capacity(by.columns.len());
-    for column in &by.columns {
-        let Some(index) = table.column_index(&column.text) else {
-            return Err(SqlError::new(
-                SqlState::UNDEFINED_COLUMN,
-                format!(
-                    "column \"{}\" named in partition key does not exist",
-                    column.text
-                ),
-            )
-            .at(column.position));
-        };
-        if columns.contains(&column.text) {
-            return Err(SqlError::new(
-                SqlState::DUPLICATE_COLUMN,
-                format!("column \"{}\" appears twice in partition key", column.text),
-            )
-            .at(column.position));
+fn validated_key(
+    table: &TableDefinition,
+    by: &PartitionBy,
+    dialect: Dialect,
+) -> SqlResult<PartitionKey> {
+    let mut parts: Vec<KeyPart> = Vec::with_capacity(by.key.len());
+    let mut positions = Vec::with_capacity(by.key.len());
+    for part in &by.key {
+        match part {
+            PartitionKeyPart::Column(column) => {
+                let Some(index) = table.column_index(&column.text) else {
+                    return Err(SqlError::new(
+                        SqlState::UNDEFINED_COLUMN,
+                        format!(
+                            "column \"{}\" named in partition key does not exist",
+                            column.text
+                        ),
+                    )
+                    .at(column.position));
+                };
+                let named = KeyPart::Column(column.text.clone());
+                if parts.contains(&named) {
+                    return Err(SqlError::new(
+                        SqlState::DUPLICATE_COLUMN,
+                        format!("column \"{}\" appears twice in partition key", column.text),
+                    )
+                    .at(column.position));
+                }
+                parts.push(named);
+                positions.push(index);
+            }
+            PartitionKeyPart::Expression {
+                expr,
+                text,
+                position,
+            } => {
+                crate::partitions::check_key_expression(table, expr, dialect, *position)?;
+                parts.push(KeyPart::Expression {
+                    text: text.clone(),
+                    dialect,
+                });
+            }
         }
-        columns.push(column.text.clone());
-        positions.push(index);
     }
-    if by.strategy == PartitionStrategy::List && columns.len() != 1 {
+    if by.strategy == PartitionStrategy::List && parts.len() != 1 {
         return Err(SqlError::new(
             SqlState::INVALID_OBJECT_DEFINITION,
             "cannot use \"list\" partition strategy with more than one column",
@@ -179,6 +173,26 @@ fn validated_key(table: &TableDefinition, by: &PartitionBy) -> SqlResult<Partiti
             by.position,
         ));
     }
+    let key = PartitionKey {
+        strategy: by.strategy,
+        parts,
+    };
+    let has_unique_index = table.indexes.iter().any(|index| index.unique);
+    if key.has_expressions() && (!table.primary_key.is_empty() || has_unique_index) {
+        let kind = if table.primary_key.is_empty() {
+            "UNIQUE"
+        } else {
+            "PRIMARY KEY"
+        };
+        return Err(SqlError::new(
+            SqlState::FEATURE_NOT_SUPPORTED,
+            format!("unsupported {kind} constraint with partition key definition"),
+        )
+        .with_detail(format!(
+            "{kind} constraints cannot be used when partition keys include expressions."
+        ))
+        .at(by.position));
+    }
     let covers = |unique: &[usize]| positions.iter().all(|key| unique.contains(key));
     let primary_covers = table.primary_key.is_empty() || covers(&table.primary_key);
     if !primary_covers
@@ -187,16 +201,17 @@ fn validated_key(table: &TableDefinition, by: &PartitionBy) -> SqlResult<Partiti
             .iter()
             .any(|index| index.unique && !covers(&index.columns))
     {
-        return Err(SqlError::new(
-            SqlState::FEATURE_NOT_SUPPORTED,
-            "unique constraint on partitioned table must include all partitioning columns",
-        )
-        .at(by.position));
+        return Err(unique_lacks_key(by.position));
     }
-    Ok(PartitionKey {
-        strategy: by.strategy,
-        columns,
-    })
+    Ok(key)
+}
+
+pub(crate) fn unique_lacks_key(position: usize) -> SqlError {
+    SqlError::new(
+        SqlState::FEATURE_NOT_SUPPORTED,
+        "unique constraint on partitioned table must include all partitioning columns",
+    )
+    .at(position)
 }
 
 pub(crate) fn create_table(
@@ -244,7 +259,7 @@ pub(crate) fn create_table(
     };
     let result = execute::create_table(writer, tables, &plain, dialect)?;
     let table = tables.require_target(writer, &create.name, "partition")?;
-    let key = validated_key(&table, by)?;
+    let key = validated_key(&table, by, dialect)?;
     let mut record = crate::partitions::stored(writer, &table.name)?;
     record.key = Some(key.clone());
     crate::partitions::save(writer, &table.name, &record)?;
@@ -268,7 +283,7 @@ fn create_named_partitions(
     dialect: Dialect,
 ) -> SqlResult<()> {
     let position = by.position;
-    let width = key.columns.len();
+    let width = key.parts.len();
     let mut previous: Vec<PartitionBoundValue> = vec![PartitionBoundValue::MinValue; width];
     let mut planned: Vec<(Name, PartitionBoundSpec)> = Vec::new();
     for (number, partition) in by.partitions.iter().enumerate() {
@@ -410,7 +425,7 @@ pub(crate) fn attach(
         .at(position));
     }
     same_columns(parent, &child, position)?;
-    let types = key_types(parent, &key)?;
+    let types = crate::partitions::key_types(parent, &key)?;
     let bound = crate::partitions::bound_of(bound, &key, &types, position)?;
     crate::partitions::check_no_overlap(
         &catalog,
@@ -437,7 +452,7 @@ pub(crate) fn attach(
             check_existing_rows(writer, tables, &sibling, position)?;
         }
     }
-    Ok(())
+    crate::partition_indexes::reach_partition(writer, tables, &parent.name, &child.name, position)
 }
 
 fn check_existing_rows(
@@ -488,5 +503,6 @@ pub(crate) fn detach(
     }
     let mut record = crate::partitions::stored(writer, &child_name)?;
     record.parent = None;
+    record.index_links.clear();
     crate::partitions::save(writer, &child_name, &record)
 }

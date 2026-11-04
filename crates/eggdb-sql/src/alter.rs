@@ -80,6 +80,15 @@ pub(crate) fn alter_table(
     alter: &AlterTable,
     dialect: Dialect,
 ) -> SqlResult<QueryResult> {
+    if let [AlterAction::AttachIndex(partition_index)] = alter.actions.as_slice() {
+        return crate::partition_indexes::attach_index(
+            writer,
+            tables,
+            &alter.name,
+            partition_index,
+            alter.if_exists,
+        );
+    }
     let mut result = QueryResult::command("ALTER TABLE");
     if tables.table(writer, &alter.name.text)?.is_none() {
         if alter.if_exists {
@@ -181,6 +190,14 @@ fn apply(
             let parent = current(writer, tables, name)?;
             crate::partition_ddl::detach(writer, tables, &parent, partition)?;
             Ok(None)
+        }
+        AlterAction::AttachIndex(partition_index) => {
+            let index = Name {
+                text: name.clone(),
+                position: partition_index.position,
+            };
+            crate::partition_indexes::attach_index(writer, tables, &index, partition_index, false)
+                .map(|_| None)
         }
         AlterAction::MoveColumn { column, placement } => {
             move_column(writer, tables, name, column, placement).map(|()| None)
@@ -1808,6 +1825,7 @@ fn add_constraint(
                     text: table.name.clone(),
                     position: spec.position,
                 },
+                only: false,
                 if_not_exists: false,
                 sqlite_text: None,
             };

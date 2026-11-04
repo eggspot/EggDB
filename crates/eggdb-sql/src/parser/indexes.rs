@@ -70,9 +70,7 @@ impl Parser<'_> {
         }
         self.expect_word("on")?;
         let postgresql = !self.mysql() && !self.sqlite() && !self.oracle();
-        if postgresql {
-            self.take_word("only");
-        }
+        let only = postgresql && self.take_word("only");
         let table = self.table_name()?;
         let method = if postgresql {
             self.index_method()?
@@ -109,6 +107,7 @@ impl Parser<'_> {
                 sort_options: columns.sort_options,
             },
             table,
+            only,
             if_not_exists,
             sqlite_text: self.sqlite().then(|| {
                 let kind = if unique { "UNIQUE INDEX" } else { "INDEX" };

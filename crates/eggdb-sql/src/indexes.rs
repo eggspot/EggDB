@@ -514,14 +514,9 @@ pub(crate) fn create_index_as(
     constraint: bool,
 ) -> SqlResult<QueryResult> {
     let table = tables.require(writer, &create.table)?;
-    let mut definition = (*table).clone();
-    let others: Vec<TableDefinition> = every_table(writer)?
-        .into_iter()
-        .filter(|other| other.name != table.name)
-        .collect();
     if create.if_not_exists
         && let Some(name) = &create.index.name
-        && name_taken(&others, &definition, &name.text, dialect)
+        && name_taken(&other_tables(writer, &table)?, &table, &name.text, dialect)
     {
         let notice = match dialect {
             Dialect::PostgreSql => vec![format!(
@@ -534,7 +529,38 @@ pub(crate) fn create_index_as(
         result.notices = notice;
         return Ok(result);
     }
-    let position = define_index(&others, &mut definition, &create.index, dialect, constraint)?;
+    if crate::partitions::catalog(writer, tables)?
+        .key_of(&table.name)
+        .is_some()
+    {
+        return crate::partition_indexes::create_on_partitioned(
+            writer, tables, &table, create, dialect, constraint,
+        );
+    }
+    add_index(writer, &table, &create.index, dialect, constraint)?;
+    Ok(QueryResult::command("CREATE INDEX"))
+}
+
+fn other_tables(
+    reader: &dyn KeyValueRead,
+    table: &TableDefinition,
+) -> SqlResult<Vec<TableDefinition>> {
+    Ok(every_table(reader)?
+        .into_iter()
+        .filter(|other| other.name != table.name)
+        .collect())
+}
+
+pub(crate) fn add_index(
+    writer: &mut dyn KeyValueWrite,
+    table: &TableDefinition,
+    spec: &IndexSpec,
+    dialect: Dialect,
+    constraint: bool,
+) -> SqlResult<(TableDefinition, usize)> {
+    let mut definition = table.clone();
+    let others = other_tables(writer, table)?;
+    let position = define_index(&others, &mut definition, spec, dialect, constraint)?;
     let leftover = index_prefix(definition.id, definition.indexes[position].id);
     delete_index_entries(writer, &leftover, &prefix_end(&leftover))?;
     let mut memory = WorkMemory::new();
@@ -545,7 +571,28 @@ pub(crate) fn create_index_as(
         &mut memory,
     )?;
     writer.put(&table_key(&definition.name), &definition.encode())?;
-    Ok(QueryResult::command("CREATE INDEX"))
+    Ok((definition, position))
+}
+
+pub(crate) fn remove_index(
+    writer: &mut dyn KeyValueWrite,
+    definition: &mut TableDefinition,
+    position: usize,
+) -> SqlResult<()> {
+    if position >= definition.indexes.len() {
+        return Ok(());
+    }
+    let index = definition.indexes.remove(position);
+    crate::sqlite_schema_text::forget_index(writer, &definition.name, &index.name)?;
+    crate::comments::forget_part(
+        writer,
+        &definition.name,
+        crate::encoding::CommentKind::Index,
+        &index.name,
+    )?;
+    let prefix = index_prefix(definition.id, index.id);
+    delete_index_entries(writer, &prefix, &prefix_end(&prefix))?;
+    writer.put(&table_key(&definition.name), &definition.encode())
 }
 
 fn index_missing(name: &Name, dialect: Dialect) -> SqlError {
@@ -679,17 +726,9 @@ pub(crate) fn drop_index(
         else {
             return Err(index_missing(name, dialect));
         };
-        let index = definition.indexes.remove(position);
-        crate::sqlite_schema_text::forget_index(writer, &definition.name, &index.name)?;
-        crate::comments::forget_part(
-            writer,
-            &definition.name,
-            crate::encoding::CommentKind::Index,
-            &index.name,
-        )?;
-        let prefix = index_prefix(definition.id, index.id);
-        delete_index_entries(writer, &prefix, &prefix_end(&prefix))?;
-        writer.put(&table_key(&definition.name), &definition.encode())?;
+        let index_id = definition.indexes[position].id;
+        crate::partition_indexes::before_drop(writer, tables, &definition, index_id, name.position)?;
+        remove_index(writer, &mut definition, position)?;
     }
     Ok(result)
 }

@@ -96,6 +96,7 @@ mod output_into;
 mod parser;
 mod partition_ddl;
 mod partition_dml;
+mod partition_indexes;
 mod partitions;
 mod pg_binary;
 mod pg_catalog;

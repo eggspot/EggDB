@@ -907,6 +907,7 @@ pub(crate) enum AlterAction {
         bound: PartitionBoundSpec,
     },
     DetachPartition(Name),
+    AttachIndex(Name),
     MoveColumn {
         column: Name,
         placement: ColumnPlacement,
@@ -934,6 +935,7 @@ pub(crate) struct IndexSpec {
 pub(crate) struct CreateIndex {
     pub(crate) index: IndexSpec,
     pub(crate) table: Name,
+    pub(crate) only: bool,
     pub(crate) if_not_exists: bool,
     pub(crate) sqlite_text: Option<String>,
 }
@@ -1106,10 +1108,20 @@ pub(crate) enum PartitionBoundSpec {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PartitionBy {
     pub(crate) strategy: PartitionStrategy,
-    pub(crate) columns: Vec<Name>,
+    pub(crate) key: Vec<PartitionKeyPart>,
     pub(crate) partitions: Vec<NamedPartition>,
     pub(crate) hash_partitions: Option<u32>,
     pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PartitionKeyPart {
+    Column(Name),
+    Expression {
+        expr: Expr,
+        text: String,
+        position: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -922,6 +922,10 @@ impl<'t> Parser<'t> {
                 self.at += 1;
                 self.alter_table()
             }
+            "alter" if self.postgresql() && self.is_word_at(1, "index") => {
+                self.at += 1;
+                self.alter_index()
+            }
             "alter" if self.postgresql() && self.is_word_at(1, "sequence") => {
                 self.at += 1;
                 self.alter_sequence()

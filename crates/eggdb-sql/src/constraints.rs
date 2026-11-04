@@ -391,14 +391,18 @@ impl PreparedChecks {
             && self.partitioned.is_none()
     }
 
+    pub(crate) fn fits_partition(&self, row: &[Value]) -> bool {
+        self.partition
+            .as_ref()
+            .is_none_or(|partition| partition.holds(row))
+    }
+
     pub(crate) fn check(&self, table: &TableDefinition, row: &[Value]) -> SqlResult<()> {
         if let Some(partitioned) = &self.partitioned {
             return Err(partitioned.no_partition(row));
         }
-        if let Some(partition) = &self.partition
-            && !partition.holds(row)
-        {
-            return Err(partition.violation(&table.name, row));
+        if let Some(partition) = &self.partition {
+            partition.check(&table.name, row)?;
         }
         if let Some(domains) = &self.domains {
             domains.check(row)?;

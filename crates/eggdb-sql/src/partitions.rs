@@ -6,7 +6,7 @@ use crate::encoding::{
     partitions_prefix, prefix_end,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
-use crate::eval::{Evaluator, Scope};
+use crate::eval::{Evaluator, Scope, Source};
 use crate::execute::TableCache;
 use crate::store::{KeyValueRead, KeyValueWrite, ScanDirection};
 use crate::types::{Conversion, SqlType, Value, compare_values, convert};
@@ -16,6 +16,40 @@ use std::sync::Arc;
 
 pub(crate) const MAX_KEY_COLUMNS: usize = 32;
 pub(crate) const MAX_BOUND_VALUES: usize = 65_536;
+pub(crate) const MAX_INDEX_LINKS: usize = 65_536;
+const CHANGING_FUNCTIONS: &[&str] = &[
+    "random",
+    "rand",
+    "now",
+    "current_timestamp",
+    "current_date",
+    "current_time",
+    "localtime",
+    "localtimestamp",
+    "clock_timestamp",
+    "statement_timestamp",
+    "transaction_timestamp",
+    "timeofday",
+    "nextval",
+    "currval",
+    "lastval",
+    "setval",
+    "gen_random_uuid",
+    "uuid",
+    "uuid_generate_v4",
+    "uuid_short",
+    "sysdate",
+    "systimestamp",
+    "sysdatetime",
+    "getdate",
+    "getutcdate",
+    "newid",
+    "unix_timestamp",
+    "utc_timestamp",
+    "curdate",
+    "curtime",
+    crate::routines::ROUTINE_CALL,
+];
 const MAX_DEPTH: usize = 32;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0100_0000_01b3;
@@ -30,9 +64,29 @@ pub(crate) enum BoundText {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum KeyPart {
+    Column(String),
+    Expression { text: String, dialect: Dialect },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PartitionKey {
     pub(crate) strategy: PartitionStrategy,
-    pub(crate) columns: Vec<String>,
+    pub(crate) parts: Vec<KeyPart>,
+}
+
+impl PartitionKey {
+    pub(crate) fn has_expressions(&self) -> bool {
+        self.parts
+            .iter()
+            .any(|part| matches!(part, KeyPart::Expression { .. }))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IndexLink {
+    pub(crate) index: u32,
+    pub(crate) parent_index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +107,7 @@ pub(crate) enum PartitionBound {
 pub(crate) struct PartitionRecord {
     pub(crate) key: Option<PartitionKey>,
     pub(crate) parent: Option<(String, PartitionBound)>,
+    pub(crate) index_links: Vec<IndexLink>,
 }
 
 impl PartitionRecord {
@@ -113,6 +168,43 @@ impl PartitionCatalog {
         self.records
             .iter()
             .map(|(name, record)| (name.as_str(), record))
+    }
+
+    pub(crate) fn index_links_of(&self, table: &str) -> &[IndexLink] {
+        self.records
+            .get(table)
+            .map_or(&[], |record| record.index_links.as_slice())
+    }
+
+    pub(crate) fn parent_index_of(&self, table: &str, index: u32) -> Option<(&str, u32)> {
+        let (parent, _) = self.parent_of(table)?;
+        self.index_links_of(table)
+            .iter()
+            .find(|link| link.index == index)
+            .map(|link| (parent, link.parent_index))
+    }
+
+    pub(crate) fn child_index_of(&self, child: &str, parent_index: u32) -> Option<u32> {
+        self.index_links_of(child)
+            .iter()
+            .find(|link| link.parent_index == parent_index)
+            .map(|link| link.index)
+    }
+
+    pub(crate) fn index_reaches_every_partition(&self, table: &str, index: u32) -> bool {
+        let mut pending = vec![(table.to_owned(), index, 0usize)];
+        while let Some((parent, parent_index, depth)) = pending.pop() {
+            if depth > MAX_DEPTH {
+                return false;
+            }
+            for (child, _) in self.children_of(&parent) {
+                let Some(child_index) = self.child_index_of(child, parent_index) else {
+                    return false;
+                };
+                pending.push((child.to_owned(), child_index, depth + 1));
+            }
+        }
+        true
     }
 }
 
@@ -317,22 +409,238 @@ impl TypedBound {
     }
 }
 
-fn key_values(row: &[Value], positions: &[usize]) -> Vec<Value> {
-    positions
-        .iter()
-        .map(|&position| row.get(position).cloned().unwrap_or(Value::Null))
-        .collect()
+fn table_scope(table: &TableDefinition) -> Scope<'_> {
+    Scope::One(Source {
+        table,
+        label: &table.name,
+        offset: 0,
+    })
 }
 
-fn key_positions(table: &TableDefinition, columns: &[String]) -> SqlResult<Vec<usize>> {
-    columns
-        .iter()
-        .map(|column| {
-            table
-                .column_index(column)
-                .ok_or_else(|| crate::encoding::corrupt("partition key"))
+pub(crate) fn parse_key_expression(text: &str, dialect: Dialect) -> SqlResult<Expr> {
+    let damaged = || crate::encoding::corrupt("partition key");
+    let tokens = crate::lexer::tokenize_in(text, dialect).map_err(|_| damaged())?;
+    let mut parser = crate::parser::Parser::new(text, &tokens).in_dialect(dialect);
+    let expr = parser.expression().map_err(|_| damaged())?;
+    if !parser.at_end() {
+        return Err(damaged());
+    }
+    Ok(expr)
+}
+
+fn expression_type(expr: &Expr, table: &TableDefinition, dialect: Dialect) -> Option<SqlType> {
+    match crate::typing::static_type(expr, table_scope(table)) {
+        Some(sql_type) => Some(sql_type),
+        None if dialect == Dialect::MySql => Some(SqlType::BigInt),
+        None => None,
+    }
+}
+
+fn any_part(expr: &Expr, test: &dyn Fn(&Expr) -> bool) -> bool {
+    test(expr)
+        || crate::eval::children(expr)
+            .into_iter()
+            .any(|child| any_part(child, test))
+}
+
+fn changes_between_calls(expr: &Expr) -> bool {
+    let changing = |name: &str| CHANGING_FUNCTIONS.contains(&name.to_ascii_lowercase().as_str());
+    match &expr.kind {
+        ExprKind::SessionValue { .. } => true,
+        ExprKind::Function { name, .. } => changing(name),
+        ExprKind::OracleFunction { name, .. } | ExprKind::SqliteFunction { name, .. } => {
+            changing(name)
+        }
+        _ => false,
+    }
+}
+
+fn expression_columns(expr: &Expr, table: &TableDefinition, found: &mut Vec<usize>) {
+    if let ExprKind::Column { name, .. } = &expr.kind
+        && let Some(position) = table.column_index(name)
+        && !found.contains(&position)
+    {
+        found.push(position);
+    }
+    for child in crate::eval::children(expr) {
+        expression_columns(child, table, found);
+    }
+}
+
+pub(crate) fn check_key_expression(
+    table: &TableDefinition,
+    expr: &Expr,
+    dialect: Dialect,
+    position: usize,
+) -> SqlResult<()> {
+    crate::eval::check_columns(expr, table_scope(table))?;
+    if any_part(expr, &|part| matches!(part.kind, ExprKind::Subquery(_))) {
+        return Err(SqlError::new(
+            SqlState::FEATURE_NOT_SUPPORTED,
+            "cannot use subquery in partition key expression",
+        )
+        .at(position));
+    }
+    crate::eval::reject_aggregates(expr, "partition key expressions")?;
+    if any_part(expr, &changes_between_calls) {
+        return Err(SqlError::new(
+            SqlState::INVALID_OBJECT_DEFINITION,
+            "functions in partition key expression must be marked IMMUTABLE",
+        )
+        .at(position));
+    }
+    let mut columns = Vec::new();
+    expression_columns(expr, table, &mut columns);
+    if columns.is_empty() {
+        return Err(SqlError::new(
+            SqlState::INVALID_OBJECT_DEFINITION,
+            "cannot use constant expression as partition key",
+        )
+        .at(position));
+    }
+    if expression_type(expr, table, dialect).is_none() {
+        return Err(SqlError::not_supported(
+            "a partition key expression whose type EggDB cannot work out",
+        )
+        .with_hint("Cast the expression to the type it gives, as in ((expr)::integer).")
+        .at(position));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+enum KeySource {
+    Column(usize),
+    Expression(Expr),
+}
+
+#[derive(Debug, Clone)]
+struct KeyReader {
+    sources: Vec<KeySource>,
+    types: Vec<SqlType>,
+    table: Option<Arc<TableDefinition>>,
+}
+
+impl KeyReader {
+    fn of(table: &TableDefinition, key: &PartitionKey) -> SqlResult<Self> {
+        let damaged = || crate::encoding::corrupt("partition key");
+        let mut sources = Vec::with_capacity(key.parts.len());
+        let mut types = Vec::with_capacity(key.parts.len());
+        let mut owner = None;
+        for part in &key.parts {
+            match part {
+                KeyPart::Column(name) => {
+                    let position = table.column_index(name).ok_or_else(damaged)?;
+                    types.push(table.columns[position].sql_type);
+                    sources.push(KeySource::Column(position));
+                }
+                KeyPart::Expression { text, dialect } => {
+                    let expr = parse_key_expression(text, *dialect)?;
+                    crate::eval::check_columns(&expr, table_scope(table)).map_err(|_| damaged())?;
+                    types.push(expression_type(&expr, table, *dialect).ok_or_else(damaged)?);
+                    sources.push(KeySource::Expression(expr));
+                    if owner.is_none() {
+                        owner = Some(Arc::new(table.clone()));
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            sources,
+            types,
+            table: owner,
         })
-        .collect()
+    }
+
+    fn read(&self, row: &[Value]) -> SqlResult<Vec<Value>> {
+        self.sources
+            .iter()
+            .zip(&self.types)
+            .map(|(source, sql_type)| match source {
+                KeySource::Column(position) => {
+                    Ok(row.get(*position).cloned().unwrap_or(Value::Null))
+                }
+                KeySource::Expression(expr) => {
+                    let table = self
+                        .table
+                        .as_deref()
+                        .ok_or_else(|| crate::encoding::corrupt("partition key"))?;
+                    let evaluator = Evaluator {
+                        scope: table_scope(table),
+                        row,
+                        correlation: None,
+                    };
+                    let value = evaluator.eval(expr, Some(*sql_type))?;
+                    convert(value, *sql_type, Conversion::Explicit)
+                }
+            })
+            .collect()
+    }
+
+    fn columns_read(&self) -> Vec<usize> {
+        let mut found = Vec::new();
+        for source in &self.sources {
+            match source {
+                KeySource::Column(position) => {
+                    if !found.contains(position) {
+                        found.push(*position);
+                    }
+                }
+                KeySource::Expression(expr) => {
+                    if let Some(table) = self.table.as_deref() {
+                        expression_columns(expr, table, &mut found);
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    fn matchers(&self, table: &TableDefinition) -> Vec<KeyMatcher> {
+        self.sources
+            .iter()
+            .map(|source| match source {
+                KeySource::Column(position) => KeyMatcher::Column(
+                    table
+                        .columns
+                        .get(*position)
+                        .map(|column| column.name.clone())
+                        .unwrap_or_default(),
+                ),
+                KeySource::Expression(expr) => KeyMatcher::Expression(normalized(expr, &[])),
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone)]
+enum KeyMatcher {
+    Column(String),
+    Expression(Expr),
+}
+
+fn normalize(expr: &mut Expr, qualifiers: &[&str]) {
+    expr.position = 0;
+    if let ExprKind::Column { qualifier, .. } = &mut expr.kind
+        && qualifier
+            .as_deref()
+            .is_some_and(|written| qualifiers.contains(&written))
+    {
+        *qualifier = None;
+    }
+    for child in crate::eval::children_mut(expr) {
+        normalize(child, qualifiers);
+    }
+}
+
+fn normalized(expr: &Expr, qualifiers: &[&str]) -> Expr {
+    let mut copy = expr.clone();
+    normalize(&mut copy, qualifiers);
+    copy
+}
+
+pub(crate) fn key_types(table: &TableDefinition, key: &PartitionKey) -> SqlResult<Vec<SqlType>> {
+    Ok(KeyReader::of(table, key)?.types)
 }
 
 #[derive(Debug, Clone)]
@@ -345,9 +653,9 @@ struct TypedChild {
 pub(crate) struct Partitioned {
     pub(crate) table: String,
     pub(crate) strategy: PartitionStrategy,
-    pub(crate) key: Vec<usize>,
+    key: KeyReader,
     key_names: Vec<String>,
-    key_types: Vec<SqlType>,
+    matchers: Vec<KeyMatcher>,
     children: Vec<TypedChild>,
 }
 
@@ -359,26 +667,26 @@ impl Partitioned {
         let Some(key) = catalog.key_of(&table.name) else {
             return Ok(None);
         };
-        let positions = key_positions(table, &key.columns)?;
-        let key_types: Vec<SqlType> = positions
-            .iter()
-            .map(|&position| table.columns[position].sql_type)
-            .collect();
+        let reader = KeyReader::of(table, key)?;
         let mut children = Vec::new();
         for (name, bound) in catalog.children_of(&table.name) {
             children.push(TypedChild {
                 name: name.to_owned(),
-                bound: typed(bound, &key_types)?,
+                bound: typed(bound, &reader.types)?,
             });
         }
         Ok(Some(Self {
             table: table.name.clone(),
             strategy: key.strategy,
-            key: positions,
-            key_names: key.columns.clone(),
-            key_types,
+            matchers: reader.matchers(table),
+            key: reader,
+            key_names: key.parts.iter().map(part_definition).collect(),
             children,
         }))
+    }
+
+    pub(crate) fn columns_read(&self) -> Vec<usize> {
+        self.key.columns_read()
     }
 
     pub(crate) fn children(&self) -> impl Iterator<Item = &str> {
@@ -397,19 +705,21 @@ impl Partitioned {
         default
     }
 
-    pub(crate) fn route(&self, row: &[Value]) -> Option<&str> {
-        self.chosen(&key_values(row, &self.key))
+    pub(crate) fn route(&self, row: &[Value]) -> SqlResult<Option<&str>> {
+        Ok(self.chosen(&self.key.read(row)?))
     }
 
     pub(crate) fn no_partition(&self, row: &[Value]) -> SqlError {
-        let key = key_values(row, &self.key);
-        no_partition_error(&self.table, &self.key_names, &key)
+        match self.key.read(row) {
+            Ok(key) => no_partition_error(&self.table, &self.key_names, &key),
+            Err(error) => error,
+        }
     }
 
     pub(crate) fn surviving(&self, filter: Option<&Expr>, qualifiers: &[&str]) -> Vec<&str> {
         let restrictions = match filter {
-            Some(filter) => restrictions_of(filter, qualifiers, &self.key_names, &self.key_types),
-            None => vec![Vec::new(); self.key_names.len()],
+            Some(filter) => restrictions_of(filter, qualifiers, &self.matchers, &self.key.types),
+            None => vec![Vec::new(); self.matchers.len()],
         };
         let mut kept = Vec::new();
         for child in &self.children {
@@ -439,7 +749,7 @@ impl Partitioned {
         let Some(pinned) = pinned else {
             return true;
         };
-        if self.key.len() > 1 {
+        if self.key.types.len() > 1 {
             return true;
         }
         !pinned.iter().all(|value| {
@@ -483,16 +793,27 @@ fn constant_value(expr: &Expr, sql_type: SqlType) -> Option<Value> {
     (!matches!(value, Value::Null)).then_some(value)
 }
 
-fn names_key_column(expr: &Expr, qualifiers: &[&str], key_names: &[String]) -> Option<usize> {
-    let ExprKind::Column { qualifier, name } = &expr.kind else {
-        return None;
-    };
-    if let Some(qualifier) = qualifier
-        && !qualifiers.iter().any(|allowed| allowed == qualifier)
+fn names_key_part(expr: &Expr, qualifiers: &[&str], matchers: &[KeyMatcher]) -> Option<usize> {
+    if let ExprKind::Column { qualifier, name } = &expr.kind {
+        if let Some(qualifier) = qualifier
+            && !qualifiers.contains(&qualifier.as_str())
+        {
+            return None;
+        }
+        return matchers
+            .iter()
+            .position(|matcher| matches!(matcher, KeyMatcher::Column(key) if key == name));
+    }
+    if !matchers
+        .iter()
+        .any(|matcher| matches!(matcher, KeyMatcher::Expression(_)))
     {
         return None;
     }
-    key_names.iter().position(|key| key == name)
+    let candidate = normalized(expr, qualifiers);
+    matchers
+        .iter()
+        .position(|matcher| matches!(matcher, KeyMatcher::Expression(key) if *key == candidate))
 }
 
 fn flipped(operator: BinaryOperator) -> Option<BinaryOperator> {
@@ -521,17 +842,17 @@ fn conjuncts(expr: &Expr) -> Vec<&Expr> {
 fn restrictions_of(
     filter: &Expr,
     qualifiers: &[&str],
-    key_names: &[String],
+    matchers: &[KeyMatcher],
     key_types: &[SqlType],
 ) -> Vec<Vec<Restriction>> {
-    let mut restrictions = vec![Vec::new(); key_names.len()];
+    let mut restrictions = vec![Vec::new(); matchers.len()];
     for conjunct in conjuncts(filter) {
         match &conjunct.kind {
             ExprKind::Binary(operator, left, right) => {
-                let (column, value, operator) = match names_key_column(left, qualifiers, key_names)
+                let (column, value, operator) = match names_key_part(left, qualifiers, matchers)
                 {
                     Some(column) => (column, right, Some(*operator)),
-                    None => match names_key_column(right, qualifiers, key_names) {
+                    None => match names_key_part(right, qualifiers, matchers) {
                         Some(column) => (column, left, flipped(*operator)),
                         None => continue,
                     },
@@ -558,7 +879,7 @@ fn restrictions_of(
                 high,
                 negated: false,
             } => {
-                let Some(column) = names_key_column(expr, qualifiers, key_names) else {
+                let Some(column) = names_key_part(expr, qualifiers, matchers) else {
                     continue;
                 };
                 if let Some(low) = constant_value(low, key_types[column]) {
@@ -573,7 +894,7 @@ fn restrictions_of(
                 list,
                 negated: false,
             } => {
-                let Some(column) = names_key_column(expr, qualifiers, key_names) else {
+                let Some(column) = names_key_part(expr, qualifiers, matchers) else {
                     continue;
                 };
                 let values: Option<Vec<Value>> = list
@@ -588,7 +909,7 @@ fn restrictions_of(
                 expr,
                 negated: false,
             } => {
-                if let Some(column) = names_key_column(expr, qualifiers, key_names) {
+                if let Some(column) = names_key_part(expr, qualifiers, matchers) {
                     restrictions[column].push(Restriction::IsNull);
                 }
             }
@@ -692,7 +1013,7 @@ fn bound_survives(
 #[derive(Debug)]
 struct ConstraintLevel {
     parent: String,
-    key: Vec<usize>,
+    key: KeyReader,
     bound: TypedBound,
     siblings: Vec<TypedBound>,
 }
@@ -703,14 +1024,30 @@ pub(crate) struct PartitionConstraint {
 }
 
 impl PartitionConstraint {
-    pub(crate) fn holds(&self, row: &[Value]) -> bool {
-        self.levels.iter().all(|level| {
-            let key = key_values(row, &level.key);
-            match level.bound {
+    fn fits(&self, row: &[Value]) -> SqlResult<bool> {
+        for level in &self.levels {
+            let key = level.key.read(row)?;
+            let fits = match level.bound {
                 TypedBound::Default => !level.siblings.iter().any(|sibling| sibling.holds(&key)),
                 ref bound => bound.holds(&key),
+            };
+            if !fits {
+                return Ok(false);
             }
-        })
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn holds(&self, row: &[Value]) -> bool {
+        self.fits(row).unwrap_or(false)
+    }
+
+    pub(crate) fn check(&self, table: &str, row: &[Value]) -> SqlResult<()> {
+        if self.fits(row)? {
+            Ok(())
+        } else {
+            Err(self.violation(table, row))
+        }
     }
 
     pub(crate) fn violation(&self, table: &str, row: &[Value]) -> SqlError {
@@ -795,11 +1132,8 @@ pub(crate) fn constraint_of(
         let Some(key) = catalog.key_of(parent) else {
             return Err(crate::encoding::corrupt("partition tree"));
         };
-        let positions = key_positions(table, &key.columns)?;
-        let types: Vec<SqlType> = positions
-            .iter()
-            .map(|&position| table.columns[position].sql_type)
-            .collect();
+        let reader = KeyReader::of(table, key)?;
+        let types = reader.types.clone();
         let siblings = if matches!(bound, PartitionBound::Default) {
             catalog
                 .children_of(parent)
@@ -814,7 +1148,7 @@ pub(crate) fn constraint_of(
         };
         levels.push(ConstraintLevel {
             parent: parent.to_owned(),
-            key: positions,
+            key: reader,
             bound: typed(bound, &types)?,
             siblings,
         });
@@ -1078,13 +1412,31 @@ pub(crate) fn strategy_name(strategy: PartitionStrategy) -> &'static str {
     }
 }
 
+fn looks_like_function(text: &str, dialect: Dialect) -> bool {
+    parse_key_expression(text, dialect).is_ok_and(|expr| {
+        matches!(
+            expr.kind,
+            ExprKind::Function { .. }
+                | ExprKind::OracleFunction { .. }
+                | ExprKind::SqlServerFunction { .. }
+                | ExprKind::SqliteFunction { .. }
+        )
+    })
+}
+
+fn part_definition(part: &KeyPart) -> String {
+    match part {
+        KeyPart::Column(column) => crate::pg_keywords::quote_ident(column),
+        KeyPart::Expression { text, dialect } if looks_like_function(text, *dialect) => {
+            text.clone()
+        }
+        KeyPart::Expression { text, .. } => format!("({text})"),
+    }
+}
+
 pub(crate) fn key_definition(key: &PartitionKey) -> String {
-    let columns: Vec<String> = key
-        .columns
-        .iter()
-        .map(|column| crate::pg_keywords::quote_ident(column))
-        .collect();
-    format!("{} ({})", strategy_name(key.strategy), columns.join(", "))
+    let parts: Vec<String> = key.parts.iter().map(part_definition).collect();
+    format!("{} ({})", strategy_name(key.strategy), parts.join(", "))
 }
 
 fn bound_literal(text: &BoundText, numeric: bool) -> String {
@@ -1126,14 +1478,10 @@ pub(crate) fn bound_definition(bound: &PartitionBound, numeric: &[bool]) -> Stri
 }
 
 pub(crate) fn numeric_key_columns(table: &TableDefinition, key: &PartitionKey) -> Vec<bool> {
-    key.columns
-        .iter()
-        .map(|column| {
-            table
-                .column_index(column)
-                .is_some_and(|index| table.columns[index].sql_type.is_numeric())
-        })
-        .collect()
+    match key_types(table, key) {
+        Ok(types) => types.iter().map(|sql_type| sql_type.is_numeric()).collect(),
+        Err(_) => vec![false; key.parts.len()],
+    }
 }
 
 pub(crate) fn forget(writer: &mut dyn KeyValueWrite, table: &str) -> SqlResult<()> {

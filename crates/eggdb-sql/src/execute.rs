@@ -4206,8 +4206,17 @@ pub(crate) fn update(
     tables: &mut TableCache,
     update: &Update,
 ) -> SqlResult<QueryResult> {
+    update_with_row_movement(writer, tables, update, None)
+}
+
+pub(crate) fn update_with_row_movement(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    update: &Update,
+    moved: Option<&mut Vec<crate::partition_dml::MovedRow>>,
+) -> SqlResult<QueryResult> {
     let check_appended = crate::row_security::has_new_row_check(update.returning.as_deref());
-    let result = update_rows(writer, tables, update)?;
+    let result = update_rows(writer, tables, update, moved)?;
     crate::row_security::checked_new_rows(result, &update.table.name.text, check_appended)
 }
 
@@ -4215,6 +4224,7 @@ fn update_rows(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
     update: &Update,
+    moved: Option<&mut Vec<crate::partition_dml::MovedRow>>,
 ) -> SqlResult<QueryResult> {
     if let Some(joined) = &update.from {
         return crate::joined_dml::update(writer, tables, update, joined);
@@ -4235,12 +4245,13 @@ fn update_rows(
     let update = prepared.as_ref().unwrap_or(update);
     let table = tables.require_target(writer, &update.table.name, "update")?;
     if let Some(partitioned) = crate::partitions::partitioned(writer, tables, &table)? {
-        return crate::partition_dml::update(writer, tables, update, &partitioned);
+        return crate::partition_dml::update(writer, tables, update, &partitioned, moved);
     }
     if crate::sequences::mentions_nextval(&table) {
         crate::sequences::load_all(writer)?;
     }
     let checks = PreparedChecks::of(&table)?.with_partitions(writer, tables, &table)?;
+    let may_move = moved.is_some();
     let rule = assignment_rule(constraints::current_dialect());
     let referenced = constraints::is_referenced(&table);
     let keep_old = !table.indexes.is_empty() || referenced || !table.foreign_keys.is_empty();
@@ -4313,7 +4324,7 @@ fn update_rows(
                 new_row[index] = assigned_value(&evaluator, value, &table, index, rule)?;
             }
             check_not_null(&table, &new_row)?;
-            if !checks.is_empty() {
+            if !checks.is_empty() && !(may_move && !checks.fits_partition(&new_row)) {
                 checks.check(&table, &new_row)?;
             }
             if let Some(projection) = &returning {
@@ -4350,7 +4361,7 @@ fn update_rows(
                 continue;
             }
             check_not_null(&table, &new_row)?;
-            if !checks.is_empty() {
+            if !checks.is_empty() && !(may_move && !checks.fits_partition(&new_row)) {
                 checks.check(&table, &new_row)?;
             }
             let new_key = if table.primary_key.is_empty() {
@@ -4366,6 +4377,18 @@ fn update_rows(
         old_rows = kept_old;
         result_rows = kept_results;
     }
+    let moved_count = match moved {
+        Some(moved) => crate::partition_dml::move_out(
+            writer,
+            tables,
+            &table,
+            &checks,
+            &mut changes,
+            &mut old_rows,
+            moved,
+        )?,
+        None => 0,
+    };
     write_updated_rows(writer, tables, &table, &changes, &old_rows, &mut |_| Ok(()))?;
     if let Some(mut firing) = firing {
         for ((_, _, new_row), old_row) in changes.iter().zip(&old_rows) {
@@ -4378,7 +4401,7 @@ fn update_rows(
         }
         firing.finish();
     }
-    let tag = format!("UPDATE {}", changes.len());
+    let tag = format!("UPDATE {}", changes.len() + moved_count);
     Ok(match columns {
         Some(columns) => QueryResult::rows(tag, columns, result_rows),
         None => QueryResult::command(tag),
