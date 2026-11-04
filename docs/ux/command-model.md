@@ -133,10 +133,12 @@ command of the parser that is not. `eggdb help --json` prints these definitions;
 | `kv_get` | `get --json` | read | | yes | | `notice`, `collection` when one was named, `found`; in `entry`, `key_hex` when `key` is there, and `value_bytes` |
 | `kv_scan` | `scan --json` | read | | yes | | `notice`, `collection` when one was named, `returned_entries`, `truncated`, `next_start_hex`; in each entry, as `kv_get` |
 | `row_list` | `row list --json` | read | | yes | | `notice`, `columns`, `truncated_by`; `truncated` and `next_cursor` are the twin's page trailer |
+| `put` | `put --json` | change | `key_value_write`: `--allow-write` without `--tables` or a role | no | | `collection` when one was named, `key_hex`, `committed`, `warning`; no `expires_at` (D328) |
+| `del` | `del --json` | destroy | `key_value_write` | yes | `key_delete`: the call deletes a key, whose value cannot be brought back through the agent (D328) | `collection` when one was named, `key_hex`, `committed`, `warning` |
 
 No tool reaches outside the database (`openWorldHint` is false for all). Their names are the
-shipped ones (D119, D121), and `row_list` (D145) joins its command's words with `_`, as every
-new tool's name does. `help --json` shows each tool's `confirm` check by name and, in
+shipped ones (D119, D121), and `row_list` (D145), `put` and `del` (D328) join their command's
+words with `_`, as every new tool's name does. `help --json` shows each tool's `confirm` check by name and, in
 `confirm_when`, the sentence saying when it asks. Arguments map
 to the twin: `sql` to `-c`, `dialect` to `--dialect`, `key` and `key_hex` to the key operand
 (hex as `0x…`), `prefix`, `start` and `end` (and their `_hex` forms) to `--prefix`, `--from` and
@@ -168,8 +170,8 @@ that declares the code; `-` marks a code only MCP gives.
 | `already_exists` | `exists` | 3 | `collection move` to a name a collection already has, `export`, `create` or `backup` to a file that is there, or a staging file left by `backup` or `compact`, or the scratch copy (`<file>.restoring`, `<file>.importing`) a dry run of `restore` or `import --csv` would write |
 | `database_busy` | `busy` | 5 | another program holds the file |
 | `read_only` | `read_only` | 3 | MCP: a write without `--allow-write`, or sent to `run_sql`. CLI: a statement refused with SQLSTATE 25006, as `sql --read-only` refuses writes |
-| `limited_to_tables` | `needs_grant` | - | MCP: `kv_get` or `kv_scan` on a server started with `--tables`, which leaves out the key-value store |
-| `limited_to_role` | `needs_grant` | - | MCP: `kv_get` or `kv_scan` from an agent that acts as a database role, which leaves out the key-value store |
+| `limited_to_tables` | `needs_grant` | - | MCP: `kv_get`, `kv_scan`, `put` or `del` on a server started with `--tables`, which leaves out the key-value store |
+| `limited_to_role` | `needs_grant` | - | MCP: `kv_get`, `kv_scan`, `put` or `del` from an agent that acts as a database role, which leaves out the key-value store |
 | `needs_confirmation` | `needs_confirmation` | - | a destructive `write_sql` without `confirm: true` on a client that cannot ask |
 | `declined_by_user` | `declined` | - | the user said no |
 | `cancelled` | `declined` | - | the client cancelled the call while the user was asked |

@@ -1094,7 +1094,7 @@ eggdb shell app.db --mode csv -c "select * from items" > items.csv
 ## `eggdb serve`
 
 ```
-eggdb serve <file|directory> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--max-connection-memory <size>] [--idle-timeout <seconds>] [--log-slow-statements <milliseconds>] [--statement-statistics <count>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--auth-rules <file>] [--metrics-listen <address>] [--mcp-listen <address> --mcp-token-file <file>] [--resp-listen <address> [--resp-max-memory <size>] [--resp-eviction <policy>]] [--memcached-listen <address>] [--es-listen <address>] [--mongo-listen <address>] [--bolt-listen <address>] [--cdc-webhook <url>] [--kafka-listen <address>] [--amqp-listen <address>] [--mqtt-listen <address>] [--sqs-listen <address>] [--nats-listen <address>] [--syslog-listen <address>] [--stomp-listen <address>] [--cql-listen <address>] [--s3-listen <address>] [--dynamodb-listen <address>] [--observability-listen <address>] [--rest-listen <address>] [--restore-from s3://bucket/prefix] [--cdc-queue <name>] [--read-only] [--create]
+eggdb serve <file|directory> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--max-connection-memory <size>] [--idle-timeout <seconds>] [--log-slow-statements <milliseconds>] [--statement-statistics <count>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--auth-rules <file>] [--metrics-listen <address>] [--mcp-listen <address> --mcp-token-file <file> [--mcp-tables <names>]] [--resp-listen <address> [--resp-max-memory <size>] [--resp-eviction <policy>]] [--memcached-listen <address>] [--es-listen <address>] [--mongo-listen <address>] [--bolt-listen <address>] [--cdc-webhook <url>] [--kafka-listen <address>] [--amqp-listen <address>] [--mqtt-listen <address>] [--sqs-listen <address>] [--nats-listen <address>] [--syslog-listen <address>] [--stomp-listen <address>] [--cql-listen <address>] [--s3-listen <address>] [--dynamodb-listen <address>] [--observability-listen <address>] [--rest-listen <address>] [--restore-from s3://bucket/prefix] [--cdc-queue <name>] [--read-only] [--create]
 ```
 
 Serves the file over the PostgreSQL wire protocol v3, so psql, pgAdmin-style tools and every
@@ -1148,6 +1148,7 @@ compatibility gap: SQL Server and MySQL keep temporary tables and session locks 
 | `--auth-rules <file>` | how users other than `--user` log in: per user, their stored password (SCRAM-SHA-256, the default), an LDAP simple bind, an OpenID Connect token, or never; LDAP and tokens only over TLS or the local socket ([sql.md](sql.md#roles-and-privileges), D185) |
 | `--metrics-listen <address>` | serves Prometheus metrics at `http://<address>/metrics` (default port 9187) over our own HTTP/1.1: sessions open, statements, errors, commits and rollbacks, and per database the file size, free pages, cache pages, cache hits and misses and the log since the last checkpoint. The metrics hold no data, but put the address where only your monitoring can reach it |
 | `--mcp-listen <address>`, `--mcp-token-file <file>` | serves MCP over Streamable HTTP at `http://<address>/mcp` (default port 8765), read-only, to agents that send the file's token as a Bearer token; loopback addresses only for now ([mcp.md](mcp.md), D189) |
+| `--mcp-tables <names>` | limits every session of the MCP endpoint to these tables and views, with the names, column lists and filter of `eggdb mcp --tables`, and without the key-value tools; each name must exist when the server starts ([mcp.md](mcp.md), D328) |
 | `--resp-listen <address>` | serves the RESP protocol (default port 6379) so `redis-cli` and Redis clients work on the file: strings, hashes, lists, sets and sorted sets with expiry, `AUTH` with the server's password, RESP2 and RESP3; each RESP database is the collection `resp<n>`; loopback addresses only for now (D193) |
 | `--resp-max-memory <size>`, `--resp-eviction <policy>` | keeps the RESP keys' stored bytes under the size (as `maxmemory`), evicting by the policy after each write that crosses it: `allkeys-lru`, `allkeys-lfu`, `allkeys-random`, `volatile-lru`, `volatile-lfu`, `volatile-random`, `volatile-ttl`, or `noeviction` (the default), which refuses writes with `OOM` instead (D193) |
 | `--memcached-listen <address>` | serves memcached's text protocol and its basic meta commands (default port 11211) on the collection `memcached0`: `set`, `add`, `replace`, `append`, `prepend`, `cas`, `get`, `gets`, `gat`, `gats`, `delete`, `incr`, `decr`, `touch`, `flush_all`, `mg`, `ms`, `md`, `mn`; loopback only, as the protocol has no authentication (D194) |
@@ -1405,12 +1406,14 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --time-limit 30
   `DELETE` or `UPDATE` whose `WHERE` does not pin every column of a primary or unique key to
   values, `REPLACE` and upserts, a `MERGE` that updates or deletes) run only after the user
   confirms them: through the client's question when it can ask, otherwise through the agent's
-  `confirm: true`. `run_sql` stays read-only.
+  `confirm: true`. `run_sql` stays read-only. Without `--tables` it also adds `put` (store a key,
+  with `ttl` and `collection` as `eggdb put` takes them) and `del` (delete a key, after the same
+  confirmation every time) (D328).
 - **`--tables <names>`** shows the agent only those tables and views (comma-separated, `name` or
   `schema.name`, `public.` and `dbo.` for the default schema, matched exactly as stored; repeat
   it to add more). Every other table, view and sequence is missing for the agent's SQL in every
   dialect and catalog, a listed view that reads an unlisted table fails as missing, and
-  `kv_get` and `kv_scan` are withdrawn (`limited_to_tables` if called). A sequence comes with the
+  the key-value tools are withdrawn (`limited_to_tables` if called). A sequence comes with the
   table that owns it. Every name must exist when the server starts (exit 1, `table_not_found`,
   with the stored name when only the case differs; with `--allow-write` a name not there yet is
   allowed, for the agent to create) (D156). With `--allow-write` the agent changes only those
@@ -1427,7 +1430,8 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --time-limit 30
   opens the file waits that long, so your own writers get the file between an agent's calls.
 - **Tools:** `list_tables`, `describe_table`, `run_sql` (one statement, in `postgresql`, `mysql`,
   `sqlite` or `oracle`), `explain_query`, `sample_rows`, `kv_get`, `kv_scan` (not under
-  `--tables`), and the resource `eggdb://schema`.
+  `--tables`), `row_list`, `write_sql`, `put` and `del` (with `--allow-write`; `put` and `del` not
+  under `--tables`), and the resource `eggdb://schema`.
 - **Every call is recorded** in `<file>.mcp-audit.jsonl` before its result is sent; if that file
   cannot be written, `eggdb mcp` does not start.
 - stdout carries only protocol messages; one line on stderr says what is served (a short

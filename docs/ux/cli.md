@@ -1177,6 +1177,7 @@ before `audit`:
 ```
 eggdb mcp app.db: a read-write MCP server on stdin and stdout, for an AI agent's client to start; nothing to type here.
   writes       allowed (--allow-write): write_sql runs one statement per call, in its own transaction
+  keys         put stores a key and del deletes one, a del only after you say yes
   confirm      DROP, TRUNCATE, a DELETE or UPDATE not pinned by a key, an upsert, dropping or retyping a column: only after you say yes
   audit        app.db.mcp-audit.jsonl (eggdb audit app.db shows it)
   time limit   5 s per call
