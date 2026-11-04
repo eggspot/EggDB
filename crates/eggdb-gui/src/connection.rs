@@ -243,16 +243,14 @@ pub fn transaction_dialect_message(open: QueryDialect, wanted: QueryDialect) -> 
 enum Stopper {
     File(CancelSignal),
     Server(CancelRequest),
-    Socket(std::net::TcpStream),
+    Resp(crate::resp_client::RespStopper),
 }
 
 impl Stopper {
     fn stop(self) {
         match self {
             Self::File(signal) => signal.cancel(),
-            Self::Socket(socket) => {
-                let _ = socket.shutdown(std::net::Shutdown::Both);
-            }
+            Self::Resp(stopper) => stopper.stop(),
             Self::Server(request) => {
                 std::thread::spawn(move || {
                     let _ = request.send();
@@ -358,9 +356,9 @@ impl RespLink {
             if stopped() {
                 return Err(StatementFailure::cancelled());
             }
-            let client = RespClient::connect_watched(&self.options, |socket| {
+            let client = RespClient::connect_watched(&self.options, |stopper| {
                 if let Some(cancel) = cancel {
-                    cancel.arm(Stopper::Socket(socket));
+                    cancel.arm(Stopper::Resp(stopper));
                 }
             })
             .map_err(|error| {
@@ -392,8 +390,8 @@ impl RespLink {
     ) -> Result<crate::key_scan::KeyPage, StatementFailure> {
         let place = self.options.place();
         let page = self.client(Some(cancel)).and_then(|client| {
-            if let Ok(socket) = client.socket() {
-                cancel.arm(Stopper::Socket(socket));
+            if let Ok(stopper) = client.stopper() {
+                cancel.arm(Stopper::Resp(stopper));
             }
             crate::resp_keys::scan_page(client, scan, &place, cancel)
         });

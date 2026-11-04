@@ -1,11 +1,15 @@
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 /// How long connecting to a RESP server may take before it fails.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long one read or write on an open connection may wait.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(30);
+/// How often a waiting read checks whether a [`RespStopper`] stopped its exchange.
+pub const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// The longest status, error or length line a reply may send.
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
 /// The most bytes one reply may carry in its strings, all nested values together.
@@ -408,9 +412,54 @@ impl From<RespError> for RespConnectError {
 /// and a fall back to RESP2, and `AUTH` from the password.
 #[derive(Debug)]
 pub struct RespClient {
-    reader: BufReader<TcpStream>,
+    reader: BufReader<StoppableReader>,
     writer: TcpStream,
+    stopped: Arc<AtomicBool>,
     resp3: bool,
+}
+
+/// Stops a [`RespClient`]'s running exchange from another thread: the waiting read fails
+/// within [`STOP_POLL_INTERVAL`] on every OS, and the socket is shut both ways.
+#[derive(Debug)]
+pub struct RespStopper {
+    socket: TcpStream,
+    stopped: Arc<AtomicBool>,
+}
+
+impl RespStopper {
+    /// Stops the exchange; every later read on the client fails too.
+    pub fn stop(self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        let _ = self.socket.shutdown(Shutdown::Both);
+    }
+}
+
+#[derive(Debug)]
+struct StoppableReader {
+    stream: TcpStream,
+    stopped: Arc<AtomicBool>,
+}
+
+impl Read for StoppableReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let started = Instant::now();
+        loop {
+            if self.stopped.load(Ordering::SeqCst) {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "the exchange was stopped",
+                ));
+            }
+            match self.stream.read(buf) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) && started.elapsed() < IO_TIMEOUT => {}
+                other => return other,
+            }
+        }
+    }
 }
 
 impl RespClient {
@@ -421,19 +470,24 @@ impl RespClient {
         Self::connect_watched(options, |_| {})
     }
 
-    /// Connects as [`RespClient::connect`] does, handing `opened` a second handle on the socket
-    /// once it is open and before the hello, so another thread can shut it to stop the hello.
+    /// Connects as [`RespClient::connect`] does, handing `opened` a [`RespStopper`] once the
+    /// socket is open and before the hello, so another thread can stop the hello.
     pub fn connect_watched(
         options: &RespOptions,
-        opened: impl FnOnce(TcpStream),
+        opened: impl FnOnce(RespStopper),
     ) -> Result<Self, RespConnectError> {
         let stream = open_stream(options).map_err(RespConnectError::Io)?;
-        opened(stream.try_clone().map_err(RespConnectError::Io)?);
+        let stopped = Arc::new(AtomicBool::new(false));
         let mut client = Self {
-            reader: BufReader::new(stream.try_clone().map_err(RespConnectError::Io)?),
+            reader: BufReader::new(StoppableReader {
+                stream: stream.try_clone().map_err(RespConnectError::Io)?,
+                stopped: Arc::clone(&stopped),
+            }),
             writer: stream,
+            stopped,
             resp3: false,
         };
+        opened(client.stopper().map_err(RespConnectError::Io)?);
         client.hello(options)?;
         Ok(client)
     }
@@ -479,10 +533,12 @@ impl RespClient {
         self.resp3
     }
 
-    /// A second handle on the socket, whose shutdown from another thread stops a running
-    /// exchange.
-    pub fn socket(&self) -> io::Result<TcpStream> {
-        self.writer.try_clone()
+    /// A [`RespStopper`] that stops a running exchange from another thread.
+    pub fn stopper(&self) -> io::Result<RespStopper> {
+        Ok(RespStopper {
+            socket: self.writer.try_clone()?,
+            stopped: Arc::clone(&self.stopped),
+        })
     }
 
     /// Sends one command and reads its reply; an error reply is a reply, not an `Err`.
@@ -522,7 +578,7 @@ fn open_stream(options: &RespOptions) -> io::Result<TcpStream> {
     for socket in (options.host.as_str(), options.port).to_socket_addrs()? {
         match TcpStream::connect_timeout(&socket, CONNECT_TIMEOUT) {
             Ok(stream) => {
-                stream.set_read_timeout(Some(IO_TIMEOUT))?;
+                stream.set_read_timeout(Some(STOP_POLL_INTERVAL))?;
                 stream.set_write_timeout(Some(IO_TIMEOUT))?;
                 let _ = stream.set_nodelay(true);
                 return Ok(stream);
