@@ -1,6 +1,6 @@
 use super::expiry::{not_swapped, with_time_to_live};
 use super::{missing_collection, operation_failure, scan_entry};
-use crate::cli::args::{CommandName, Format, Request, ScanOptions};
+use crate::cli::args::{CollectionAction, CommandName, Format, Request, ScanOptions};
 use crate::cli::byte_argument::ByteArgument;
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::output::Output;
@@ -117,6 +117,15 @@ pub(super) fn key_value_in_block(
     let command = request.command;
     if READS_THE_LAST_COMMIT.contains(&command) {
         return Ok(InBlock::ReadsTheLastCommit);
+    }
+    if command == CommandName::Collection {
+        if request.collection_action == Some(CollectionAction::List) {
+            return Ok(InBlock::ReadsTheLastCommit);
+        }
+        return Err(Failure::usage(
+            "collection add, delete and move run outside a transaction block: COMMIT or ROLLBACK first",
+            Some(command),
+        ));
     }
     if session.transaction_status() == TransactionStatus::Failed {
         return Err(Failure::database(

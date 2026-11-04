@@ -6,7 +6,7 @@ use super::shell_copy::{
 };
 use super::sql::{exit_for, result_text};
 use super::{Access, execute_on, session_for, uses_color};
-use crate::cli::args::{self, CommandName, Invocation, Request, ResultMode};
+use crate::cli::args::{self, CollectionAction, CommandName, Invocation, Request, ResultMode};
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::output::{Output, Style};
 use crate::cli::{Console, Terminal, help, report};
@@ -29,9 +29,21 @@ use std::time::{Duration, Instant};
 const SERVEROUTPUT_SHORTEST: usize = "serverout".len();
 const NOTHING_TO_RUN: &str =
     "eggdb: nothing to run: / ends a PL/SQL unit here; Up then Enter repeats the last statement\n";
-const KEY_VALUE_COMMANDS: [&str; 13] = [
-    "put", "get", "del", "scan", "check", "stats", "backup", "ttl", "expire", "persist", "incr",
-    "decr", "cas",
+const KEY_VALUE_COMMANDS: [&str; 14] = [
+    "put",
+    "get",
+    "del",
+    "scan",
+    "check",
+    "stats",
+    "backup",
+    "ttl",
+    "expire",
+    "persist",
+    "incr",
+    "decr",
+    "cas",
+    "collection",
 ];
 const META_COMMANDS: [&str; 8] = [
     ".help",
@@ -49,7 +61,13 @@ const KEY_SPACE_COMMANDS: [&str; 10] = [
 const ONE_KEY_COMMANDS: [&str; 8] = [
     "get", "del", "ttl", "expire", "persist", "incr", "decr", "cas",
 ];
+const COLLECTION_VERBS: [&str; 5] = ["list", "add", "delete", "move", "rename"];
 const DEFAULT_KEY_SPACE: &str = "default key space";
+
+enum CollectionChange {
+    Renamed(String),
+    Deleted,
+}
 const LONGEST_PROMPT_COLLECTION: usize = 16;
 const STATEMENT_KEYWORDS: [&str; 15] = [
     "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "BEGIN", "COMMIT", "ROLLBACK", "SET",
@@ -978,6 +996,9 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
   stats                        size, pages, last commit and log
   backup <copy>                write a consistent copy of {file} to a new file, while open here
   -C <name> on a key command   work in that collection for this line
+  collection list              the collections and their entry counts
+  collection add <name>        make a collection; collection delete <name> removes it and its keys
+  collection move <a> <b>      rename a collection (also: rename); the one in use follows its new name
 SQL: the PostgreSQL dialect, or MySQL's, SQLite's or Oracle's with --dialect, statements ended by ;
   (docs/sql.md; in Oracle's a PL/SQL block or CREATE PROCEDURE ends at a line holding /); BEGIN spans prompts:
   {stem}=*> is inside a transaction block, {stem}=!> a failed one (ROLLBACK ends it).
@@ -1036,13 +1057,19 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
             );
         }
         let mut arguments: Vec<OsString> = vec![OsString::from(&words[0])];
-        arguments.push(self.request.file.clone().into_os_string());
-        let in_key_space = KEY_SPACE_COMMANDS.contains(&words[0].as_str());
-        if let Some(name) = self.collection.as_ref().filter(|_| in_key_space) {
-            arguments.push(OsString::from("--collection"));
-            arguments.push(OsString::from(name));
+        if words[0] == "collection" {
+            arguments.extend(words.get(1).map(OsString::from));
+            arguments.push(self.request.file.clone().into_os_string());
+            arguments.extend(words.iter().skip(2).map(OsString::from));
+        } else {
+            arguments.push(self.request.file.clone().into_os_string());
+            let in_key_space = KEY_SPACE_COMMANDS.contains(&words[0].as_str());
+            if let Some(name) = self.collection.as_ref().filter(|_| in_key_space) {
+                arguments.push(OsString::from("--collection"));
+                arguments.push(OsString::from(name));
+            }
+            arguments.extend(words[1..].iter().map(OsString::from));
         }
-        arguments.extend(words[1..].iter().map(OsString::from));
         if self.sql.transaction_status() != TransactionStatus::Idle
             && let Some(step) = self.key_value_in_block(console, &arguments)
         {
@@ -1063,11 +1090,18 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
             stderr: &mut *console.stderr,
             terminal,
         };
+        let mut followed = None;
         let exit = match args::parse(&arguments) {
             Ok(Invocation::Run(request)) => {
                 let color = request.color;
+                let change = self.change_to_the_collection_in_use(&request);
                 match execute_on(*request, &mut inner, Some(self.db)) {
-                    Ok(exit) => exit,
+                    Ok(exit) => {
+                        if exit == Exit::Done {
+                            followed = change;
+                        }
+                        exit
+                    }
                     Err(Failure::OutputClosed) => return Step::Quit,
                     Err(failure) => report(&failure, &mut inner, color),
                 }
@@ -1081,8 +1115,42 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
             Ok(_) => Exit::Done,
             Err(failure) => report(&failure, &mut inner, self.request.color),
         };
+        if let Some(change) = followed {
+            let note = self.follow(change);
+            self.print(console, &note);
+        }
         self.time(console, started.elapsed());
         Step::Continue(exit)
+    }
+
+    fn change_to_the_collection_in_use(&self, request: &Request) -> Option<CollectionChange> {
+        let in_use = self.collection.as_deref()?;
+        if request.command != CommandName::Collection || request.collection.as_deref() != Some(in_use)
+        {
+            return None;
+        }
+        match request.collection_action {
+            Some(CollectionAction::Move) => request
+                .new_collection_name
+                .clone()
+                .map(CollectionChange::Renamed),
+            Some(CollectionAction::Delete) => Some(CollectionChange::Deleted),
+            _ => None,
+        }
+    }
+
+    fn follow(&mut self, change: CollectionChange) -> String {
+        let old = self.collection.take().unwrap_or_default();
+        match change {
+            CollectionChange::Renamed(new_name) => {
+                let note = format!("collection: {new_name} (followed the rename)\n");
+                self.collection = Some(new_name);
+                note
+            }
+            CollectionChange::Deleted => {
+                format!("collection: {DEFAULT_KEY_SPACE} ({old} was deleted)\n")
+            }
+        }
     }
 
     fn key_value_in_block(
@@ -1156,6 +1224,20 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
             return completion;
         }
         if !continuing && let Some(first) = first {
+            if first == "collection" {
+                completion.candidates = match previous.as_slice() {
+                    [_] => COLLECTION_VERBS
+                        .iter()
+                        .filter(|verb| verb.starts_with(word))
+                        .map(|verb| (*verb).to_owned())
+                        .collect(),
+                    [_, "delete" | "del" | "move" | "rename"] => {
+                        self.collections_starting_with(word, false)
+                    }
+                    _ => Vec::new(),
+                };
+                return completion;
+            }
             if KEY_VALUE_COMMANDS.contains(&first) {
                 let last = previous.last().copied().unwrap_or_default();
                 if matches!(last, "-C" | "--collection") {

@@ -889,3 +889,80 @@ fn schema_in_sqlite_prints_each_create_statement_as_it_was_written() {
     );
     assert!(!out.contains("CREATE TABLE other"), "{out}");
 }
+
+#[test]
+fn the_shell_renames_and_deletes_collections_and_follows_the_one_in_use() {
+    let directory = TempDirectory::new("shell-collection-rename");
+    let file = created(&directory);
+    let added = run_with(
+        &["collection", "add", &file, "sessions"],
+        b"",
+        Terminal::default(),
+    );
+    assert_eq!(added.exit, 0, "{}", text(&added.stderr));
+    let script = ".collection sessions\n\
+        put s:1 Ada\n\
+        put s:2 Grace\n\
+        collection list\n\
+        collection rename sessions logins\n\
+        get s:1\n\
+        collection list\n\
+        collection delete logins\n\
+        .collection\n";
+    let ran = shell(&file, &[], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    let stdout = text(&ran.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 10, "{stdout}");
+    assert_eq!(lines[0], "collection: sessions");
+    assert_eq!(lines[1], "sessions  2 entries");
+    assert!(
+        lines[2].starts_with("renamed collection sessions to logins in "),
+        "{stdout}"
+    );
+    assert_eq!(lines[3], "collection: logins (followed the rename)");
+    assert_eq!(lines[4], "Ada");
+    assert_eq!(lines[5], "logins  2 entries");
+    assert!(
+        lines[6].starts_with("deleted collection logins from "),
+        "{stdout}"
+    );
+    assert_eq!(lines[7], "collection: default key space (logins was deleted)");
+    assert_eq!(&lines[8..], ["* default key space", "no collections"]);
+}
+
+#[test]
+fn the_shell_lists_collections_in_a_block_and_renames_them_only_outside_one() {
+    let directory = TempDirectory::new("shell-collection-block");
+    let file = created(&directory);
+    let added = run_with(
+        &["collection", "add", &file, "sessions"],
+        b"",
+        Terminal::default(),
+    );
+    assert_eq!(added.exit, 0, "{}", text(&added.stderr));
+    let script = "BEGIN;\n\
+        collection list\n\
+        collection move sessions logins\n\
+        ROLLBACK;\n\
+        collection move sessions logins\n\
+        collection list\n";
+    let ran = shell(&file, &["--keep-going"], script);
+    assert_eq!(ran.exit, 2, "{}", text(&ran.stderr));
+    assert!(
+        text(&ran.stderr).contains(
+            "collection add, delete and move run outside a transaction block: COMMIT or ROLLBACK first"
+        ),
+        "{}",
+        text(&ran.stderr)
+    );
+    let stdout = text(&ran.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 5, "{stdout}");
+    assert_eq!(&lines[..3], ["BEGIN", "sessions  no entries", "ROLLBACK"]);
+    assert!(
+        lines[3].starts_with("renamed collection sessions to logins in "),
+        "{stdout}"
+    );
+    assert_eq!(lines[4], "logins  no entries");
+}
