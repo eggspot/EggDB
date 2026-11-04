@@ -611,15 +611,7 @@ fn foreign_keys_to_hidden_columns(
         let keys: Vec<(ForeignKey, String)> = child
             .foreign_keys
             .iter()
-            .filter(|key| {
-                shown
-                    .narrowed_named(key.parent.as_bytes())
-                    .is_some_and(|parent| {
-                        key.parent_columns
-                            .iter()
-                            .any(|column| !parent.kept_names.contains(column))
-                    })
-            })
+            .filter(|key| shown.points_at_hidden_columns(key))
             .map(|key| (key.clone(), Confined::shown(key.parent.as_bytes())))
             .collect();
         if !keys.is_empty() {
@@ -655,6 +647,7 @@ impl NarrowedView {
             query,
             columns: kept,
             expands_wildcard: false,
+            columns_narrowed: true,
             ..view
         }
         .encode();
@@ -709,15 +702,12 @@ fn shown_columns_query(view: &ViewDefinition, kept: &[ViewColumn]) -> Option<Str
     ))
 }
 
-fn shown_columns_prefix(dialect: Dialect) -> String {
-    format!("WITH {} (", quoted_in(dialect, SHOWN_COLUMNS_LABEL))
-}
-
 impl ViewDefinition {
-    /// The query text a catalog shows for this view: `None` for a view a session lists with
-    /// columns (D306), whose query would name and compute the columns it hides.
+    /// The query text a catalog shows for this view: `None` for the definition a session that
+    /// lists the view with columns reads (D306), whose query would name and compute the columns
+    /// it hides.
     pub(crate) fn shown_query(&self) -> Option<&str> {
-        if self.query.starts_with(&shown_columns_prefix(self.dialect)) {
+        if self.columns_narrowed {
             None
         } else {
             Some(&self.query)
@@ -1224,9 +1214,10 @@ impl Shown {
             return Ok(());
         };
         let text = String::from_utf8_lossy(&name).into_owned();
-        let shown = match self.narrowed.get(&id) {
-            Some(narrowed) => narrowed.definition.clone(),
-            None => match reader.get(&table_key(&text))? {
+        let shown = match (self.narrowed.get(&id), self.unchecked_definitions.get(&name)) {
+            (Some(narrowed), _) => narrowed.definition.clone(),
+            (None, Some(unchecked)) => unchecked.clone(),
+            (None, None) => match reader.get(&table_key(&text))? {
                 Some(stored) => stored,
                 None => return Ok(()),
             },
@@ -1279,6 +1270,7 @@ impl Shown {
         };
         let tables_prefix = table_key("");
         let mut failure = None;
+        let mut children = Vec::new();
         reader.scan(
             &tables_prefix,
             &prefix_end(&tables_prefix),
@@ -1341,12 +1333,16 @@ impl Shown {
                 }
                 shown.relations.insert(name.to_vec());
                 shown.tables.insert(table.id);
+                if !table.foreign_keys.is_empty() {
+                    children.push((name.to_vec(), table));
+                }
                 Ok(true)
             },
         )?;
         if let Some(error) = failure {
             return Err(error);
         }
+        shown.hide_foreign_keys_to_hidden_columns(children)?;
         let sequences = sequences_prefix();
         reader.scan(
             &sequences,
@@ -1379,6 +1375,49 @@ impl Shown {
             },
         )?;
         Ok(shown)
+    }
+
+    fn points_at_hidden_columns(&self, key: &ForeignKey) -> bool {
+        self.narrowed_named(key.parent.as_bytes())
+            .is_some_and(|parent| {
+                key.parent_columns
+                    .iter()
+                    .any(|column| !parent.kept_names.contains(column))
+            })
+    }
+
+    fn hide_foreign_keys_to_hidden_columns(
+        &mut self,
+        children: Vec<(Vec<u8>, TableDefinition)>,
+    ) -> SqlResult<()> {
+        for (name, child) in children {
+            if !child
+                .foreign_keys
+                .iter()
+                .any(|key| self.points_at_hidden_columns(key))
+            {
+                continue;
+            }
+            let id = child.id;
+            let mut definition = match self.narrowed.get(&id) {
+                Some(narrowed) => {
+                    TableDefinition::decode(&String::from_utf8_lossy(&name), &narrowed.definition)?
+                }
+                None => child,
+            };
+            definition
+                .foreign_keys
+                .retain(|key| !self.points_at_hidden_columns(key));
+            definition.forget_missing_statuses();
+            let encoded = definition.encode();
+            match self.narrowed.get_mut(&id) {
+                Some(narrowed) => narrowed.definition = encoded,
+                None => {
+                    self.unchecked_definitions.insert(name, encoded);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn narrowed_named(&self, name: &[u8]) -> Option<&Narrowed> {

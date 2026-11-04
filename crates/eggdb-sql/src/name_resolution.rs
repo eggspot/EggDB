@@ -463,6 +463,7 @@ impl<'a> Resolver<'a> {
             expands_wildcard: false,
             has_column_list: false,
             check_option: None,
+            columns_narrowed: false,
         };
         self.expand(reference, Arc::new(view))?;
         Ok(true)

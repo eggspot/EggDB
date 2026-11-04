@@ -1451,3 +1451,143 @@ fn a_policy_calling_a_user_routine_or_holding_a_subquery_cannot_be_written() {
         "code\nswordfish\nSELECT 1"
     );
 }
+
+fn referenced_through_a_hidden_column() -> MemoryStore {
+    let store = MemoryStore::default();
+    let mut owner = Session::new(&store);
+    runs(
+        &mut owner,
+        "CREATE TABLE p (id integer PRIMARY KEY, name text, secret_code text UNIQUE, ssn text);
+         CREATE TABLE c (id integer PRIMARY KEY, pref text REFERENCES p (secret_code));
+         INSERT INTO p VALUES (1, 'Ada', 'C1', '123');
+         INSERT INTO c VALUES (1, 'C1')",
+    );
+    owner.close().unwrap();
+    store
+}
+
+const FOREIGN_KEY_LISTINGS: [(crate::Dialect, &str); 9] = [
+    (
+        crate::Dialect::PostgreSql,
+        "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint",
+    ),
+    (
+        crate::Dialect::PostgreSql,
+        "SELECT * FROM information_schema.referential_constraints",
+    ),
+    (
+        crate::Dialect::PostgreSql,
+        "SELECT table_name, column_name, constraint_name FROM information_schema.key_column_usage",
+    ),
+    (crate::Dialect::MySql, "SHOW CREATE TABLE c"),
+    (
+        crate::Dialect::MySql,
+        "SELECT TABLE_NAME, COLUMN_NAME, REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE",
+    ),
+    (crate::Dialect::Sqlite, "SELECT name, sql FROM sqlite_schema"),
+    (
+        crate::Dialect::SqlServer,
+        "SELECT * FROM sys.foreign_key_columns",
+    ),
+    (
+        crate::Dialect::Oracle,
+        "SELECT constraint_name, constraint_type FROM all_constraints",
+    ),
+    (
+        crate::Dialect::Oracle,
+        "SELECT constraint_name, column_name FROM all_cons_columns",
+    ),
+];
+
+#[test]
+fn a_foreign_key_to_a_hidden_column_is_shown_by_no_dialects_catalog() {
+    let store = referenced_through_a_hidden_column();
+    let limited = ConfinedStore {
+        store: &store,
+        tables: VisibleTables::new(["p(id,name)", "c"]),
+    };
+    for (dialect, sql) in FOREIGN_KEY_LISTINGS {
+        let text = rendered_in(&limited, dialect, sql);
+        assert!(!text.contains("secret_code"), "{dialect:?} {sql}: {text}");
+        assert!(!text.contains("c_pref_fkey"), "{dialect:?} {sql}: {text}");
+    }
+    let counted = rendered_in(
+        &limited,
+        crate::Dialect::PostgreSql,
+        "SELECT count(*) FROM pg_constraint WHERE contype = 'f'",
+    );
+    assert!(counted.contains("\n0\n"), "{counted}");
+    assert_eq!(
+        rendered_in(&limited, crate::Dialect::PostgreSql, "SELECT id, pref FROM c"),
+        "id|pref\n1|C1\nSELECT 1"
+    );
+    let whole = ConfinedStore {
+        store: &store,
+        tables: VisibleTables::new(["p", "c"]),
+    };
+    let text = rendered_in(
+        &whole,
+        crate::Dialect::PostgreSql,
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE contype = 'f'",
+    );
+    assert!(text.contains("secret_code"), "{text}");
+}
+
+#[test]
+fn a_writer_sees_the_same_definition_without_the_foreign_key_and_still_checks_it() {
+    let store = referenced_through_a_hidden_column();
+    let limited = ConfinedStore {
+        store: &store,
+        tables: VisibleTables::new(["p(id,name)", "c"]),
+    };
+    let mut session = Session::with_dialect(&limited, crate::Dialect::MySql);
+    let mut outputs = Vec::new();
+    session
+        .execute("BEGIN; SHOW CREATE TABLE c", &mut |result| {
+            outputs.push(render(&result))
+        })
+        .unwrap();
+    let text = outputs.join("\n");
+    assert!(!text.contains("secret_code"), "{text}");
+    let message = refused(&mut session, "INSERT INTO c VALUES (2, 'C1')");
+    assert!(
+        message.starts_with("cannot add or change a foreign key value of \"c\""),
+        "{message}"
+    );
+    session.close().unwrap();
+}
+
+#[test]
+fn a_view_whose_own_text_starts_like_a_narrowed_one_keeps_its_text_for_its_owner() {
+    let store = MemoryStore::default();
+    let mut owner = Session::new(&store);
+    runs(
+        &mut owner,
+        "CREATE VIEW sneaky AS WITH \"eggdb_shown_columns\" (x) AS (SELECT 1) SELECT x FROM \"eggdb_shown_columns\"",
+    );
+    owner.close().unwrap();
+    let text = shown(
+        &store,
+        "SELECT definition FROM pg_views WHERE viewname = 'sneaky'",
+    );
+    assert!(text.contains("eggdb_shown_columns"), "{text}");
+    let listed = ConfinedStore {
+        store: &store,
+        tables: VisibleTables::new(["sneaky"]),
+    };
+    let text = rendered_in(
+        &listed,
+        crate::Dialect::Sqlite,
+        "SELECT sql FROM sqlite_schema WHERE name = 'sneaky'",
+    );
+    assert!(text.contains("eggdb_shown_columns"), "{text}");
+    let mut mysql = Session::with_dialect(&store, crate::Dialect::MySql);
+    let mut outputs = Vec::new();
+    mysql
+        .execute("SHOW CREATE VIEW sneaky", &mut |result| {
+            outputs.push(render(&result))
+        })
+        .unwrap();
+    assert!(outputs.join("\n").contains("eggdb_shown_columns"));
+    mysql.close().unwrap();
+}

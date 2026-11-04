@@ -15,8 +15,12 @@ const WILDCARD_FLAG: u8 = 1;
 const COLUMN_LIST_FLAG: u8 = 2;
 const LOCAL_CHECK_FLAG: u8 = 4;
 const CASCADED_CHECK_FLAG: u8 = 8;
-const KNOWN_VIEW_FLAGS: u8 =
-    WILDCARD_FLAG | COLUMN_LIST_FLAG | LOCAL_CHECK_FLAG | CASCADED_CHECK_FLAG;
+const COLUMNS_NARROWED_FLAG: u8 = 16;
+const KNOWN_VIEW_FLAGS: u8 = WILDCARD_FLAG
+    | COLUMN_LIST_FLAG
+    | LOCAL_CHECK_FLAG
+    | CASCADED_CHECK_FLAG
+    | COLUMNS_NARROWED_FLAG;
 pub(crate) const MAX_SEARCH_PATH: usize = 64;
 pub(crate) const MAX_VIEW_REFERENCES: usize = 4096;
 pub(crate) const MAX_VIEW_TEXT: usize = 1 << 20;
@@ -182,6 +186,7 @@ pub(crate) struct ViewDefinition {
     pub(crate) expands_wildcard: bool,
     pub(crate) has_column_list: bool,
     pub(crate) check_option: Option<CheckOption>,
+    pub(crate) columns_narrowed: bool,
 }
 
 impl ViewDefinition {
@@ -204,6 +209,9 @@ impl ViewDefinition {
         }
         if self.has_column_list {
             flags |= COLUMN_LIST_FLAG;
+        }
+        if self.columns_narrowed {
+            flags |= COLUMNS_NARROWED_FLAG;
         }
         flags |= match self.check_option {
             Some(CheckOption::Local) => LOCAL_CHECK_FLAG,
@@ -309,6 +317,7 @@ impl ViewDefinition {
             references,
             expands_wildcard: flags & WILDCARD_FLAG != 0,
             has_column_list: flags & COLUMN_LIST_FLAG != 0,
+            columns_narrowed: flags & COLUMNS_NARROWED_FLAG != 0,
             check_option: if flags & LOCAL_CHECK_FLAG != 0 {
                 Some(CheckOption::Local)
             } else if flags & CASCADED_CHECK_FLAG != 0 {
@@ -362,6 +371,7 @@ mod tests {
             expands_wildcard: true,
             has_column_list: true,
             check_option: None,
+            columns_narrowed: false,
         }
     }
 
@@ -428,8 +438,15 @@ mod tests {
             assert_eq!(bytes[2], flags);
             assert_eq!(ViewDefinition::decode("app\0v", &bytes).unwrap(), flagged);
         }
+        let mut narrowed = view();
+        narrowed.has_column_list = false;
+        narrowed.expands_wildcard = false;
+        narrowed.columns_narrowed = true;
+        let bytes = narrowed.encode();
+        assert_eq!(bytes[2], 16);
+        assert_eq!(ViewDefinition::decode("app\0v", &bytes).unwrap(), narrowed);
         let mut bytes = view().encode();
-        for unknown in [12u8, 13, 15, 16, 0x80, 0xFF] {
+        for unknown in [12u8, 13, 15, 32, 0x80, 0xFF] {
             bytes[2] = unknown;
             let error = ViewDefinition::decode("app\0v", &bytes).unwrap_err();
             assert_eq!(error.state().code(), "XX001");
@@ -623,6 +640,7 @@ mod tests {
             expands_wildcard: false,
             has_column_list: false,
             check_option: None,
+            columns_narrowed: false,
         }
     }
 
