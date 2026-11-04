@@ -493,3 +493,113 @@ fn a_joined_table_with_row_security_joins_only_the_visible_rows() {
         "count\n3\nSELECT 1"
     );
 }
+
+fn switches(session: &mut Session<'_>) -> String {
+    run(
+        session,
+        "SELECT c.relrowsecurity, c.relforcerowsecurity, t.rowsecurity FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_tables t ON t.tablename = c.relname WHERE c.relname = 'notes'",
+    )
+    .unwrap()
+}
+
+#[test]
+fn force_row_level_security_is_stored_beside_enable_as_postgresql_shows_it() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    let header = "relrowsecurity|relforcerowsecurity|rowsecurity";
+    assert_eq!(switches(&mut admin), format!("{header}\nt|f|t\nSELECT 1"));
+    for (sql, expected) in [
+        ("ALTER TABLE notes FORCE ROW LEVEL SECURITY", "t|t|t"),
+        ("ALTER TABLE notes NO FORCE ROW LEVEL SECURITY", "t|f|t"),
+        ("ALTER TABLE notes DISABLE ROW LEVEL SECURITY", "f|f|f"),
+        ("ALTER TABLE ONLY notes FORCE ROW LEVEL SECURITY", "f|t|f"),
+        ("ALTER TABLE notes ENABLE ROW LEVEL SECURITY", "t|t|t"),
+        ("ALTER TABLE notes DISABLE ROW LEVEL SECURITY", "f|t|f"),
+        ("ALTER TABLE notes NO FORCE ROW LEVEL SECURITY", "f|f|f"),
+    ] {
+        assert_eq!(run(&mut admin, sql).unwrap(), "ALTER TABLE", "{sql}");
+        assert_eq!(
+            switches(&mut admin),
+            format!("{header}\n{expected}\nSELECT 1"),
+            "{sql}"
+        );
+    }
+    let reader = crate::KeyValueStore::begin_read(&store).unwrap();
+    assert_eq!(reader.get(&switch_key("notes")).unwrap(), None);
+}
+
+#[test]
+fn forcing_row_security_never_lets_a_checked_role_past_its_policies() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    run(&mut admin, "ALTER TABLE notes FORCE ROW LEVEL SECURITY").unwrap();
+    let mut ada = as_role(&store, "ada");
+    assert_eq!(
+        run(&mut ada, "SELECT id FROM notes ORDER BY id").unwrap(),
+        "id\n1\n3\nSELECT 2"
+    );
+    for sql in [
+        "ALTER TABLE notes NO FORCE ROW LEVEL SECURITY",
+        "ALTER TABLE notes FORCE ROW LEVEL SECURITY",
+    ] {
+        let error = run(&mut ada, sql).expect_err(sql);
+        assert_eq!(error.state(), SqlState::INSUFFICIENT_PRIVILEGE, "{sql}");
+    }
+    assert_eq!(
+        run(&mut admin, "SELECT count(*) FROM notes").unwrap(),
+        "count\n3\nSELECT 1"
+    );
+    let error = run(&mut admin, "ALTER TABLE missing FORCE ROW LEVEL SECURITY").unwrap_err();
+    assert_eq!(error.state(), SqlState::UNDEFINED_TABLE);
+}
+
+#[test]
+fn the_force_flag_keeps_enable_readable_by_releases_that_know_only_enable() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    run(&mut admin, "ALTER TABLE notes FORCE ROW LEVEL SECURITY").unwrap();
+    let reader = crate::KeyValueStore::begin_read(&store).unwrap();
+    assert_eq!(
+        reader.get(&switch_key("notes")).unwrap(),
+        Some(vec![RECORD_VERSION, ENABLED | FORCED])
+    );
+    assert!(is_enabled(&reader, "notes").unwrap());
+    drop(reader);
+    run(&mut admin, "ALTER TABLE notes DISABLE ROW LEVEL SECURITY").unwrap();
+    let reader = crate::KeyValueStore::begin_read(&store).unwrap();
+    assert_eq!(
+        reader.get(&switch_key("notes")).unwrap(),
+        Some(vec![RECORD_VERSION, FORCED])
+    );
+    assert!(!is_enabled(&reader, "notes").unwrap());
+    assert_eq!(
+        switch_state(&reader, "notes").unwrap(),
+        RowSecuritySwitch {
+            enabled: false,
+            forced: true
+        }
+    );
+}
+
+#[test]
+fn a_damaged_switch_record_refuses_to_change_and_reads_as_an_error() {
+    for value in [&[][..], &[9, ENABLED][..], &[RECORD_VERSION][..]] {
+        let store = MemoryStore::default();
+        setup(&store);
+        let mut writer = crate::KeyValueStore::begin_write(&store).unwrap();
+        writer.put(&switch_key("notes"), value).unwrap();
+        writer.commit().unwrap();
+        let reader = crate::KeyValueStore::begin_read(&store).unwrap();
+        assert!(switch_state(&reader, "notes").is_err(), "{value:?}");
+        drop(reader);
+        let mut admin = Session::new(&store);
+        assert!(
+            run(&mut admin, "ALTER TABLE notes FORCE ROW LEVEL SECURITY").is_err(),
+            "{value:?}"
+        );
+    }
+}

@@ -13,6 +13,7 @@ use crate::triggers::{
 use crate::types::{SqlType, Value};
 use std::collections::HashMap;
 
+mod privileges;
 #[cfg(test)]
 mod tests;
 
@@ -45,10 +46,14 @@ pub(crate) enum InformationRelation {
     Parameters,
     Triggers,
     ColumnPrivileges,
+    TablePrivileges,
+    RoleTableGrants,
+    RoleColumnGrants,
+    UsagePrivileges,
 }
 
 impl InformationRelation {
-    pub(crate) const ALL: [Self; 14] = [
+    pub(crate) const ALL: [Self; 18] = [
         Self::Schemata,
         Self::Tables,
         Self::Columns,
@@ -63,6 +68,10 @@ impl InformationRelation {
         Self::Parameters,
         Self::Triggers,
         Self::ColumnPrivileges,
+        Self::TablePrivileges,
+        Self::RoleTableGrants,
+        Self::RoleColumnGrants,
+        Self::UsagePrivileges,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -81,6 +90,10 @@ impl InformationRelation {
             Self::Parameters => "parameters",
             Self::Triggers => "triggers",
             Self::ColumnPrivileges => "column_privileges",
+            Self::TablePrivileges => "table_privileges",
+            Self::RoleTableGrants => "role_table_grants",
+            Self::RoleColumnGrants => "role_column_grants",
+            Self::UsagePrivileges => "usage_privileges",
         }
     }
 
@@ -113,7 +126,9 @@ impl InformationRelation {
             Self::Routines => ROUTINES_COLUMNS,
             Self::Parameters => PARAMETERS_COLUMNS,
             Self::Triggers => TRIGGERS_COLUMNS,
-            Self::ColumnPrivileges => COLUMN_PRIVILEGES_COLUMNS,
+            Self::ColumnPrivileges | Self::RoleColumnGrants => COLUMN_PRIVILEGES_COLUMNS,
+            Self::TablePrivileges | Self::RoleTableGrants => TABLE_PRIVILEGES_COLUMNS,
+            Self::UsagePrivileges => USAGE_PRIVILEGES_COLUMNS,
         }
     }
 }
@@ -210,6 +225,28 @@ const COLUMN_PRIVILEGES_COLUMNS: &[CatalogColumn] = &[
     column("table_schema", SQL_IDENTIFIER),
     column("table_name", SQL_IDENTIFIER),
     column("column_name", SQL_IDENTIFIER),
+    column("privilege_type", CHARACTER_DATA),
+    column("is_grantable", YES_OR_NO),
+];
+
+const TABLE_PRIVILEGES_COLUMNS: &[CatalogColumn] = &[
+    column("grantor", SQL_IDENTIFIER),
+    column("grantee", SQL_IDENTIFIER),
+    column("table_catalog", SQL_IDENTIFIER),
+    column("table_schema", SQL_IDENTIFIER),
+    column("table_name", SQL_IDENTIFIER),
+    column("privilege_type", CHARACTER_DATA),
+    column("is_grantable", YES_OR_NO),
+    column("with_hierarchy", YES_OR_NO),
+];
+
+const USAGE_PRIVILEGES_COLUMNS: &[CatalogColumn] = &[
+    column("grantor", SQL_IDENTIFIER),
+    column("grantee", SQL_IDENTIFIER),
+    column("object_catalog", SQL_IDENTIFIER),
+    column("object_schema", SQL_IDENTIFIER),
+    column("object_name", SQL_IDENTIFIER),
+    column("object_type", CHARACTER_DATA),
     column("privilege_type", CHARACTER_DATA),
     column("is_grantable", YES_OR_NO),
 ];
@@ -490,96 +527,20 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: InformationRelation) ->
         InformationRelation::Routines => routines_rows(snapshot),
         InformationRelation::Parameters => parameters_rows(snapshot),
         InformationRelation::Triggers => triggers_rows(snapshot),
-        InformationRelation::ColumnPrivileges => column_privileges_rows(snapshot),
-    }
-}
-
-fn column_privilege_row(
-    snapshot: &CatalogSnapshot,
-    entry: &RelationEntry,
-    grantee: &str,
-    column: &str,
-    privilege: crate::roles::Privilege,
-) -> Vec<Value> {
-    let grantee = if grantee == crate::roles::PUBLIC {
-        "PUBLIC"
-    } else {
-        grantee
-    };
-    InformationRow::new(InformationRelation::ColumnPrivileges)
-        .set("grantor", identifier(&snapshot.user))
-        .set("grantee", identifier(grantee))
-        .set("table_catalog", identifier(&snapshot.database))
-        .set("table_schema", identifier(&entry.schema))
-        .set("table_name", identifier(&entry.name))
-        .set("column_name", identifier(column))
-        .set(
-            "privilege_type",
-            character_data(&privilege.keyword().to_ascii_uppercase()),
-        )
-        .set("is_grantable", yes_or_no(false))
-        .done()
-}
-
-fn relation_column_names(entry: &RelationEntry) -> Vec<&str> {
-    match &entry.source {
-        RelationSource::Table(table) => table
-            .columns
-            .iter()
-            .map(|column| column.name.as_str())
-            .filter(|name| !crate::temp_tables::is_hidden_column(name))
-            .collect(),
-        RelationSource::View(view) => view
-            .columns
-            .iter()
-            .map(|column| column.name.as_str())
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn column_privileges_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
-    let entries: HashMap<&str, &RelationEntry> = snapshot
-        .relations
-        .iter()
-        .map(|entry| (entry.internal.as_str(), entry))
-        .collect();
-    let mut rows = Vec::new();
-    for grant in &snapshot.grants {
-        let Some(entry) = entries.get(grant.table.as_str()) else {
-            continue;
-        };
-        for column in relation_column_names(entry) {
-            for privilege in crate::roles::COLUMN_PRIVILEGES {
-                if grant.privileges & privilege.bit() != 0 {
-                    rows.push(column_privilege_row(
-                        snapshot,
-                        entry,
-                        &grant.grantee,
-                        column,
-                        privilege,
-                    ));
-                }
-            }
+        InformationRelation::ColumnPrivileges => {
+            privileges::column_privileges_rows(snapshot, privileges::Shown::WithPublic)
         }
-    }
-    for grant in &snapshot.column_grants {
-        let Some(entry) = entries.get(grant.table.as_str()) else {
-            continue;
-        };
-        for privilege in crate::roles::COLUMN_PRIVILEGES {
-            if grant.holds(privilege) {
-                rows.push(column_privilege_row(
-                    snapshot,
-                    entry,
-                    &grant.grantee,
-                    &grant.column,
-                    privilege,
-                ));
-            }
+        InformationRelation::RoleColumnGrants => {
+            privileges::column_privileges_rows(snapshot, privileges::Shown::RolesOnly)
         }
+        InformationRelation::TablePrivileges => {
+            privileges::table_privileges_rows(snapshot, privileges::Shown::WithPublic)
+        }
+        InformationRelation::RoleTableGrants => {
+            privileges::table_privileges_rows(snapshot, privileges::Shown::RolesOnly)
+        }
+        InformationRelation::UsagePrivileges => privileges::usage_privileges_rows(snapshot),
     }
-    rows
 }
 
 fn schemata_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
