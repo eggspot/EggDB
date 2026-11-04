@@ -698,6 +698,13 @@ fn explain_only(session: &mut Session<'_>, dialect: Dialect) -> Result<(), OneSt
     }
 }
 
+fn is_plan(dialect: Dialect, result: &QueryResult) -> bool {
+    dialect != Dialect::SqlServer
+        || result.columns.as_ref().is_none_or(|columns| {
+            matches!(columns.as_slice(), [column] if column.name == "StmtText")
+        })
+}
+
 fn statement_in<S: KeyValueStore, O: DatabaseOpener>(
     store: &S,
     limits: &CallLimits,
@@ -718,13 +725,25 @@ fn statement_in<S: KeyValueStore, O: DatabaseOpener>(
         Explaining::Yes => explain_only(&mut session, dialect),
         Explaining::No => Ok(()),
     };
+    let mut not_a_plan = false;
     let ran = prepared.and_then(|()| {
         session.run_one_statement(sql, &mut |returned| {
+            if explaining == Explaining::Yes && !is_plan(dialect, &returned) {
+                not_a_plan = true;
+                return false;
+            }
             result = Some(returned);
             true
         })
     });
     let _ = session.close();
+    if not_a_plan {
+        return Err(ToolError::new(
+            "not_a_plan",
+            "The statement returned rows that are not a plan, so nothing was returned.",
+        )
+        .with_fix("Give explain_query one SELECT, UPDATE or DELETE to plan; use run_sql to read rows."));
+    }
     match ran {
         Ok(()) => Ok(result),
         Err(OneStatementError::Refused(refusal)) => Err(refused(refusal)),

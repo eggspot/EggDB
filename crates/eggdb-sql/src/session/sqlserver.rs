@@ -528,6 +528,9 @@ impl<'s> Session<'s> {
                 Ok(QueryResult::command("SET"))
             }
             SqlServerStatement::Showplan { kind, on } => {
+                if *kind != crate::ast::ShowplanKind::StatisticsProfile && self.dynamic_depth > 0 {
+                    return Err(showplan_inside_nested_code());
+                }
                 let sqlserver = &mut Arc::make_mut(&mut self.settings).sqlserver;
                 match kind {
                     crate::ast::ShowplanKind::StatisticsProfile => {
@@ -808,6 +811,14 @@ impl<'s> Session<'s> {
         }
         Ok(QueryResult::command("SET"))
     }
+}
+
+pub(super) fn showplan_inside_nested_code() -> SqlError {
+    SqlError::new(
+        SqlState::SYNTAX_ERROR,
+        "The SET SHOWPLAN statements must be the only statements in the batch.",
+    )
+    .with_sqlserver_code(1067)
 }
 
 fn runs_under_showplan(statement: &crate::ast::Statement) -> bool {

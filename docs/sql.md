@@ -2280,7 +2280,11 @@ DATABASE`, `INSERT BULK`, `THROW`, `RAISERROR`, `PRINT`, `WAITFOR` and variable 
 shown and not run. `DECLARE` declares its variables without their initial values, so later
 statements can name them. `IF` and `WHILE` conditions are not evaluated: each statement of the
 batch is shown once in order, both branches of an `IF` and a loop's body once. `EXEC` of a
-procedure and `EXEC(...)` show the plans of the statements inside. `SET STATISTICS PROFILE ON` runs each statement
+procedure and `EXEC(...)` show the plans of the statements inside. `SET SHOWPLAN_TEXT` and
+`SET SHOWPLAN_ALL` inside `EXEC(...)`, `sp_executesql` or a procedure fail with SQL Server's
+error 1067 and end the batch, as SQL Server refuses them there, and so does changing
+`eggdb.dialect` there while a plan is shown, so nested code cannot turn plans off and run what
+follows. `SET STATISTICS PROFILE ON` runs each statement
 and adds that result with `Rows` and `Executes`. EggDB has no estimates, so costs and row
 estimates are NULL, and it measures whole statements, so only the top operator's rows are
 filled in (D312).
@@ -2762,7 +2766,10 @@ parameters, D288) and its text and binary forms on the wire.
   ignores the case of ASCII letters only, so `regexp_replace('CAFÉ'::citext, 'é', 'e')` gives
   `CAFÉ` (D302). A `citext` argument
   anywhere else is read as `text`. Full case folding differs from PostgreSQL's
-  `lower()`-based `citext`: `'ß'::citext = 'SS'` is true in EggDB and false in PostgreSQL (D259).
+  `lower()`-based `citext`: `'ß'::citext = 'SS'` is true in EggDB and false in PostgreSQL (D259),
+  and the four functions follow `=`, so PostgreSQL gives `strpos('Straße'::citext, 'SS')` 0,
+  `replace('Straße'::citext, 'SS', 'x')` `Straße` and `split_part('aßbSSc'::citext, 'ss', 2)`
+  `c` where EggDB gives 5, `Straxe` and `b` (D302).
 - `hstore` keeps its pairs sorted as PostgreSQL does and prints `"a"=>"1", "b"=>NULL`. Its
   operators `->` (a key or an array of keys), `?`, `?|`, `?&`, `@>`, `<@`, `||` and `-` (a key,
   an array of keys or an `hstore`) and its functions `akeys`, `avals`, `skeys`, `svals`, `each`,

@@ -462,3 +462,50 @@ fn explain_plan_that_creates_plan_table_keeps_the_transaction_and_its_savepoints
         "COUNT(*)\n1\nSELECT 1"
     );
 }
+
+#[test]
+fn dynamic_sql_and_procedures_cannot_turn_showplan_off_to_run_what_follows() {
+    let store = MemoryStore::default();
+    let mut session = sqlserver_t(&store);
+    last(
+        &mut session,
+        "CREATE PROCEDURE plan_off AS BEGIN SET SHOWPLAN_ALL OFF; DELETE FROM t; END",
+    );
+    for (on, escape) in [
+        (
+            "SET SHOWPLAN_ALL ON",
+            "EXEC('SET SHOWPLAN_ALL OFF; DELETE FROM t'); SET SHOWPLAN_ALL OFF; SELECT COUNT(*) AS n FROM t",
+        ),
+        ("SET SHOWPLAN_ALL ON", "EXEC('SET SHOWPLAN_ALL OFF'); DELETE FROM t"),
+        (
+            "SET SHOWPLAN_ALL ON",
+            "EXEC sp_executesql N'SET SHOWPLAN_ALL OFF; DELETE FROM t'",
+        ),
+        ("SET SHOWPLAN_TEXT ON", "EXEC('SET SHOWPLAN_TEXT OFF; DELETE FROM t')"),
+        ("SET SHOWPLAN_TEXT ON", "EXEC plan_off"),
+        (
+            "SET SHOWPLAN_TEXT ON",
+            "EXEC('SET eggdb.dialect = postgresql'); DELETE FROM t",
+        ),
+    ] {
+        all(&mut session, on);
+        let _ = run(&mut session, escape);
+        assert!(
+            run(&mut session, "SELECT 1 AS planned")
+                .is_ok_and(|outputs| outputs.first().is_some_and(|first| first.starts_with("StmtText"))),
+            "SHOWPLAN went off: {escape}"
+        );
+        all(&mut session, &on.replace(" ON", " OFF"));
+        assert!(
+            last(&mut session, "SELECT COUNT(*) AS n FROM t").contains("\n2\n"),
+            "the DELETE ran: {escape}"
+        );
+    }
+    all(&mut session, "SET SHOWPLAN_ALL ON");
+    let refused = fails(&mut session, "EXEC('SET SHOWPLAN_ALL OFF')");
+    assert_eq!(refused.vendor_code(), Some(1067), "{refused}");
+    all(&mut session, "SET SHOWPLAN_ALL OFF");
+    let refused = fails(&mut session, "EXEC('SET SHOWPLAN_TEXT ON; DELETE FROM t')");
+    assert_eq!(refused.vendor_code(), Some(1067), "{refused}");
+    assert!(last(&mut session, "SELECT COUNT(*) AS n FROM t").contains("\n2\n"));
+}

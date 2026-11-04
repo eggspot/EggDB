@@ -2786,6 +2786,17 @@ impl<'s> Session<'s> {
         (millis > 0).then(|| std::time::Duration::from_millis(millis.unsigned_abs()))
     }
 
+    fn refuse_leaving_showplan_inside_nested_code(&self) -> SqlResult<()> {
+        if self.dynamic_depth > 0 && self.settings.sqlserver.showplan.is_some() {
+            return Err(SqlError::new(
+                SqlState::FEATURE_NOT_SUPPORTED,
+                "eggdb.dialect cannot change inside EXEC or a procedure while SHOWPLAN is on: the statements after it would run instead of being planned",
+            )
+            .with_sqlserver_code(1067));
+        }
+        Ok(())
+    }
+
     fn run(
         &mut self,
         statement: &mut Statement,
@@ -2794,11 +2805,13 @@ impl<'s> Session<'s> {
         self.refuse_after_database_switch()?;
         match statement {
             Statement::Set { name, value, .. } if is_dialect_setting(name) => {
+                self.refuse_leaving_showplan_inside_nested_code()?;
                 return self
                     .choose_dialect(value.as_deref())
                     .map(|()| QueryResult::command("SET"));
             }
             Statement::Reset { name: Some(name) } if is_dialect_setting(name) => {
+                self.refuse_leaving_showplan_inside_nested_code()?;
                 return self
                     .choose_dialect(None)
                     .map(|()| QueryResult::command("RESET"));
