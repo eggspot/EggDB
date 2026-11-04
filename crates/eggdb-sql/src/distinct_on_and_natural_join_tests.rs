@@ -155,3 +155,57 @@ fn natural_joins_compare_shared_names_and_report_ambiguous_ones() {
     );
     assert!(state(&mut sqlserver, "SELECT * FROM a NATURAL JOIN b").starts_with("42"));
 }
+
+#[test]
+fn a_right_side_with_two_columns_of_a_joined_name_is_ambiguous() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE e (k INT, v TEXT); INSERT INTO e VALUES (100, 'x')",
+    );
+    for sql in [
+        "SELECT * FROM e NATURAL JOIN (SELECT 100 AS k, 2 AS k) s",
+        "SELECT * FROM e JOIN (SELECT 100 AS k, 2 AS k) s USING (k)",
+    ] {
+        let error = run(&mut session, sql).expect_err(sql);
+        assert_eq!(error.state().code(), "42702", "{sql}");
+        assert_eq!(
+            error.message(),
+            "common column name \"k\" appears more than once in right table",
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn distinct_on_in_a_grouped_query_takes_an_expression_of_the_select_list() {
+    let store = MemoryStore::default();
+    let mut session = with_orders(&store);
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT DISTINCT ON (count(*)) count(*), customer FROM orders \
+             WHERE customer IS NOT NULL GROUP BY customer ORDER BY count(*), customer"
+        ),
+        "count|customer\n1|cy\n2|ann\nSELECT 2"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT DISTINCT ON (amount / 10) amount / 10, count(*) FROM orders \
+             WHERE amount IS NOT NULL GROUP BY amount / 10 ORDER BY amount / 10"
+        ),
+        "?column?|count\n0|2\n1|1\n3|1\n4|1\n5|1\nSELECT 5"
+    );
+    let error = run(
+        &mut session,
+        "SELECT DISTINCT ON (max(amount)) customer FROM orders GROUP BY customer ORDER BY max(amount)",
+    )
+    .expect_err("an aggregate outside the select list");
+    assert_eq!(error.state().code(), "0A000");
+    assert_eq!(
+        error.message(),
+        "DISTINCT ON an expression outside the select list of a grouped query"
+    );
+}

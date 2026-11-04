@@ -124,6 +124,7 @@ pub(crate) struct Grouping {
     pub(crate) items: Vec<SelectItem>,
     pub(crate) having: Option<Expr>,
     pub(crate) order: Vec<Option<Expr>>,
+    pub(crate) distinct_on: Vec<Option<Expr>>,
 }
 
 pub(crate) struct OutputItem {
@@ -969,6 +970,17 @@ pub(crate) fn analyze(select: &Select, scope: Scope<'_>) -> SqlResult<Grouping> 
             Some(analyzer.rewrite(&item.expr)?)
         });
     }
+    let mut distinct_on = Vec::with_capacity(select.distinct_on.len());
+    for expr in &select.distinct_on {
+        let refers_to_output = matches!(&expr.kind, ExprKind::Literal(_))
+            || matches!(&expr.kind, ExprKind::Column { qualifier: None, name }
+                if outputs.iter().any(|output| &output.name == name));
+        distinct_on.push(if refers_to_output {
+            None
+        } else {
+            Some(analyzer.rewrite(expr)?)
+        });
+    }
     for call in &analyzer.calls {
         if let Some(argument) = &call.argument
             && let Some(sql_type) = argument_type(call.function, argument, scope)
@@ -989,6 +1001,7 @@ pub(crate) fn analyze(select: &Select, scope: Scope<'_>) -> SqlResult<Grouping> 
         items,
         having,
         order,
+        distinct_on,
     })
 }
 

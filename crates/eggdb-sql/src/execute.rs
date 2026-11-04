@@ -3155,12 +3155,17 @@ fn distinct_on_keys<'e>(
     sort_keys: &[SortKey<'_>],
     projection: &Projection<'_>,
     scope: Scope<'_>,
-    grouped: bool,
+    grouped: Option<&[Option<Expr>]>,
 ) -> SqlResult<Vec<SortKey<'e>>> {
     let keys = select
         .distinct_on
         .iter()
-        .map(|expr| distinct_on_key(expr, projection, scope, grouped))
+        .enumerate()
+        .map(|(index, expr)| {
+            let rewritten =
+                grouped.map(|rewritten| rewritten.get(index).and_then(Option::as_ref));
+            distinct_on_key(expr, projection, scope, rewritten)
+        })
         .collect::<SqlResult<Vec<_>>>()?;
     let leading = sort_keys.len().min(keys.len());
     let matches_order = sort_keys[..leading].iter().all(|ordered| {
@@ -3181,7 +3186,7 @@ fn distinct_on_key<'e>(
     expr: &'e Expr,
     projection: &Projection<'_>,
     scope: Scope<'_>,
-    grouped: bool,
+    grouped: Option<Option<&Expr>>,
 ) -> SqlResult<SortKey<'e>> {
     match &expr.kind {
         ExprKind::Literal(crate::ast::Literal::Integer(position))
@@ -3211,20 +3216,25 @@ fn distinct_on_key<'e>(
         } if projection.columns.iter().any(|column| &column.name == name) => Ok(SortKey::Output(
             projection.output_named(name, expr.position)?,
         )),
-        _ if grouped => projection
-            .output_of(expr)
-            .map(SortKey::Output)
-            .ok_or_else(|| {
-                SqlError::not_supported(
-                    "DISTINCT ON an expression outside the select list of a grouped query",
-                )
-                .with_hint("Name the output column, or its position, in DISTINCT ON.")
-                .at(expr.position)
-            }),
-        _ => {
-            check_columns(expr, scope)?;
-            Ok(SortKey::Expr(expr))
-        }
+        _ => match grouped {
+            Some(rewritten) => projection
+                .output_of(rewritten.unwrap_or(expr))
+                .map(SortKey::Output)
+                .ok_or_else(|| {
+                    SqlError::not_supported(
+                        "DISTINCT ON an expression outside the select list of a grouped query",
+                    )
+                    .with_hint(
+                        "Add the expression to the select list, or name its output column or \
+                         position in DISTINCT ON.",
+                    )
+                    .at(expr.position)
+                }),
+            None => {
+                check_columns(expr, scope)?;
+                Ok(SortKey::Expr(expr))
+            }
+        },
     }
 }
 
@@ -3560,7 +3570,9 @@ fn select_or_explain(
         &sort_keys,
         &projection,
         post_scope,
-        grouping.is_some(),
+        grouping
+            .as_ref()
+            .map(|grouping| grouping.distinct_on.as_slice()),
     )?;
     if columns_only {
         return Ok(QueryResult::rows(
