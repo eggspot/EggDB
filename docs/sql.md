@@ -4512,7 +4512,7 @@ two, `COPY` in the binary format and in another encoding, now match). The other 
   the point-select gap is roadmap item 19e (D99). A `GROUP BY` with four aggregates over 10,000
   rows takes about 0.94 times SQLite's time on the Mac and 0.86 on Linux, and a 10,000-row join
   by primary key about 0.99 times on the Mac and 1.4 on Linux, gated the same way; the Linux join
-  must reach 1.0 before v0.4.0 (item 19e, D100).
+  must reach 1.0 before v0.5.0 (item 19e, D100).
 
 ## Known differences from MySQL
 A view is read-only, `SHOW CREATE VIEW` shows the query as it was written (MySQL rewrites it),
