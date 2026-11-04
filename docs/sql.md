@@ -4166,7 +4166,13 @@ such a column rewrites its table's definition as version 13. Every other table k
 version and bytes; a version 13 table with neither, a version 10 or 11 table keying a tag `24`
 column, tag `25` in an older version, a code other than those three, or tag `25` in a view or
 a user-defined type is damage, and an older release refuses a version 13 table by name. A view
-records no type for such a column. In rows these columns hold the tags of the four classes
+records no type for such a column. Version 14 (D322, `GENERATED_COLUMNS_FORMAT_VERSION`) is written only for a
+table with generated columns: every section of version 13, then a varint count (at least 1) and,
+per generated column in increasing position, a varint position, a kind byte (`0` virtual, `1`
+stored), a dialect byte and the expression's text (varint length, UTF-8). A table without
+generated columns keeps its version and bytes; an empty list, a position out of range or out of
+order, a generated column with a default or auto-increment, an unknown kind or dialect, or an
+empty expression is damage, and an older release refuses a version 14 table by name. In rows these columns hold the tags of the four classes
 (`3` integer, `5` real, `7` text, `18` blob) whatever their affinity. In keys and index entries
 a value of such a column is `0x02` for NULL (after every value, as in other columns) or `0x01`
 followed by its class and its body, so the classes sort as SQLite orders them:
@@ -4446,7 +4452,7 @@ two, `COPY` in the binary format and in another encoding, now match). The other 
   correlated subquery is `0A000`, and `INSERT ... VALUES` cannot have a subquery that names the
   inserted row. Subqueries nest at most 32 levels and a statement holds at most 1,024 `SELECT`s
   (`54001`). Every `WITH` query runs, even one nothing names, and `MATERIALIZED` and `NOT
-  MATERIALIZED` change nothing; `SEARCH` and `CYCLE`, a data-modifying `WITH` query that resolves conflicts, and `EXPLAIN` of a query with
+  MATERIALIZED` change nothing; a data-modifying `WITH` query that resolves conflicts, and `EXPLAIN` of a query with
   derived tables, or with `WITH` or set operations inside a subquery, answer `0A000`. A derived table, a `WITH` query, a `LATERAL` item and the operands of
   a set operation are held in memory, counted with the statement's other rows against the 1 GiB
   limit, and a correlated subquery keeps up to 32 MiB of results by outer value. A `LATERAL` item
@@ -4599,7 +4605,7 @@ And more, not in the suite yet:
 - `PRAGMA user_version`, `foreign_keys`, `journal_mode` and `synchronous` are per session, not
   kept in the file; foreign keys are never enforced.
 - Not supported yet: `CREATE INDEX`, `UNIQUE` and `CHECK` constraints, `COLLATE NOCASE`,
-  views, `ATTACH`, `VACUUM`, `UPDATE OR ...`, `VALUES` as a query,
+  views, `ATTACH`, `VACUUM`, `UPDATE OR ...`,
   `group_concat` and `total`, the JSON and math functions and bare columns in aggregate
   queries.
 

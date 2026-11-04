@@ -394,26 +394,34 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Server's application locks already detect cycles among themselves (D291), the start to build on.
 - Two-phase commit and XA: `PREPARE TRANSACTION`, `COMMIT PREPARED`, MySQL's `XA` and TDS's
   distributed transactions (D32, D173).
-- Next for statement-level rollback (D317): a failing Oracle statement trigger or SQL Server
-  `AFTER` trigger undoing only its statement where the database does, a MySQL `CALL` keeping the
-  procedure's statements before the failing one, SQL Server's transaction rollback for
-  batch-aborting errors that fail before writing and its doomed transaction for them inside
-  `TRY`, and SQLite's `UPDATE OR ...` and conflict clauses in table constraints.
-- Next for read-only transactions (D318): exported snapshots (`pg_export_snapshot`, `SET
-  TRANSACTION SNAPSHOT`), `SELECT ... FOR UPDATE | SHARE` and `LOCK TABLE` refused in a read-only
-  transaction, `SET TRANSACTION` in an implicit transaction before it writes, `25006` (not
-  `0A000`) for a writing volatile function called from a `SELECT` in `BEGIN READ ONLY`, and
-  `default_transaction_read_only` for a procedure `CALL` that commits inside it.
-- Next: savepoint undo for key-value writes from other front ends once they join SQL blocks
-  (`eggdb serve`'s RESP and wire sessions do not share a block with key-value commands yet) (D319).
+- A failing Oracle statement trigger or SQL Server `AFTER` trigger undoes only its own
+  statement, as those databases do (D317).
+- A failing statement inside a MySQL `CALL` keeps the procedure's statements before it (D317).
+- SQL Server rolls back the whole transaction for a batch-aborting error that fails before
+  writing, and dooms the transaction for such an error inside `TRY` (D317).
+- SQLite's `UPDATE OR ...` and the conflict clauses of table constraints (D317).
+- The before-images that statement-level rollback keeps in MySQL's, SQLite's, Oracle's and SQL
+  Server's dialects are counted against the statement's memory limit, with a benchmark of a bulk
+  write inside a transaction in those dialects (D317).
+- PostgreSQL's exported snapshots: `pg_export_snapshot()` and `SET TRANSACTION SNAPSHOT` (D318).
+- `SELECT ... FOR UPDATE | SHARE` and `LOCK TABLE` refused with `25006` in a read-only
+  transaction (D318).
+- `SET TRANSACTION READ ONLY` in an implicit transaction, before it writes (D318).
+- A writing volatile function called from a `SELECT` in `BEGIN READ ONLY` answers `25006`, not
+  `0A000` (D318).
+- `default_transaction_read_only` applies to a procedure `CALL` that commits inside it (D318).
+- `ROLLBACK TO SAVEPOINT` undoes key-value writes made through `eggdb serve`'s RESP and wire
+  sessions once those share a block with SQL (D319).
 
 ### M4 Embedded key-value and the single file
 - A benchmark against SQLite's `:memory:` in the compare job (D175).
 - `ATTACH` of in-memory, EggDB and SQLite files, in every dialect that has it (D175, sql.md).
 - SQL tables kept in their own collection, named `sql` (D139: "SQL in collections is later work").
 - Collections in the C API and the language drivers beyond D139 (D292).
-- Next: a dim entry count on each row of `eggdb ui`'s collection picker (designed in ux/ui.md,
-  D320), and export, import and restore moved onto the shared progress line (D320).
+- A dim entry count on each row of `eggdb ui`'s collection picker, as designed in ux/ui.md
+  (D320).
+- `eggdb export`, `import` and `restore` show their progress on the shared progress line
+  (`cli/progress.rs`) (D320).
 - SQLite's `speedtest1` and the standard embedded benchmarks on the `embedded` profile (D41).
   Check: the compare job, gated.
 - On-disk overhead per row and per index entry, measured and gated with the other budgets (D6).
@@ -467,9 +475,11 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   table or a table with row-level security as the target, `EXPLAIN` of them, SQLite's refusal
   of `FROM` tables in `RETURNING`, and `OUTPUT deleted.` of a joined Transact-SQL `UPDATE`
   (D297).
-- Next: `CREATE TABLE AS EXECUTE`, PostgreSQL's `TABLE t`, MySQL's `CREATE TABLE ... LIKE`, SQL
-  Server's `SELECT ... INTO` keeping `NOT NULL`, and a keyed lookup for correlated `(a, b) IN
-  (SELECT ...)` (D323).
+- PostgreSQL's `CREATE TABLE ... AS EXECUTE` of a prepared statement (D323).
+- PostgreSQL's `TABLE t` as a query (D323).
+- MySQL's `CREATE TABLE ... LIKE` (D323).
+- SQL Server's `SELECT ... INTO` keeps the source columns' `NOT NULL` (D323).
+- A correlated `(a, b) IN (SELECT ...)` looked up by key instead of scanned (D323).
 - A data-modifying `WITH` query that resolves conflicts (sql.md); `CREATE RECURSIVE VIEW` is
   built (D299).
 - Multidimensional arrays and array slices (D19, D288).
@@ -538,10 +548,12 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   connection (D103, D165). Check: a many-connections benchmark.
 - TLS session resumption, and the processor's AES instructions (D161).
 - HTTP/2, gRPC and QUIC as shared crates of our own (D34).
-- Next: Elasticsearch search and scroll hits, S3 `GetObject` of large objects and Prometheus
-  query results sent as `StreamedResponse` like the REST API's rows; large request bodies handed
-  to handlers as they arrive; `gzip`/`deflate` request bodies; `400` for an HTTP/1.1 request
-  without `Host` (D325, D188).
+- Elasticsearch search and scroll hits sent as a stream, like the REST API's rows (D325).
+- S3 `GetObject` of a large object sent as a stream (D325, D188).
+- Prometheus query results sent as a stream (D325).
+- Large HTTP request bodies handed to the handler as they arrive (D325).
+- `gzip` and `deflate` HTTP request bodies (D325).
+- `400` for an HTTP/1.1 request without a `Host` header (D325).
 - PostgreSQL's function call protocol (D103).
 - PostgreSQL's network address, geometric, bit string, `money`, `xml` and multirange types (D19).
 - `tsvector`, `tsquery` and `jsonpath` as types of their own (D195, D289).
@@ -601,11 +613,14 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - MySQL and TDS logins for stored roles (D183).
 - `SET ROLE`, object owners, `WITH GRANT OPTION`, and schema, sequence and routine privileges
   (D183).
-- Next: `aclexplode`, `acldefault` and `makeaclitem`; `has_type_privilege`,
-  `has_tablespace_privilege`, `has_server_privilege` and `has_parameter_privilege` answered from
-  grants; `information_schema.routine_privileges`, `udt_privileges`, `enabled_roles` and
-  `applicable_roles`; `pg_namespace.nspacl` with schema grants; `FORCE ROW LEVEL SECURITY` taking
-  effect once object owners land, and `BYPASSRLS` (D326).
+- PostgreSQL's `aclexplode`, `acldefault` and `makeaclitem` (D326).
+- `has_type_privilege`, `has_tablespace_privilege`, `has_server_privilege` and
+  `has_parameter_privilege` answered from grants (D326).
+- `information_schema.routine_privileges`, `udt_privileges`, `enabled_roles` and
+  `applicable_roles` (D326).
+- `pg_namespace.nspacl` showing schema grants (D326).
+- `FORCE ROW LEVEL SECURITY` taking effect once object owners land, and roles with `BYPASSRLS`
+  (D326).
 - SQL Server's column `GRANT` and `DENY`, column privileges on sequences, `MERGE` and `ON CONFLICT
   DO UPDATE` under row security, and row security through updatable views (D285).
 - Column grants that follow a column renamed by MySQL's `CHANGE COLUMN` (D285).
@@ -655,13 +670,17 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `sys.dm_exec_requests` and `SHOW PROCESSLIST` across sessions (D25, D188).
 - Statement statistics in the other dialects' views: `performance_schema`'s digest summary and
   `sys.dm_exec_query_stats` (D25, D286).
-- Next: SQLite's `.scanstats on|off` in `eggdb sql`'s shell (a `Session` switch recording each
-  SQLite `SELECT`'s steps and returning `QUERY PLAN` / `` `--SCAN t (loops=1 rows=3) `` lines the
-  shell prints after the result); MySQL's `(cost=... rows=...)`, `Aggregate`/`Group`/`Stream
-  results` iterators, `FORMAT=JSON` and `EXPLAIN ANALYZE` of `UPDATE`/`DELETE`/`TABLE`;
-  subqueries in `EXPLAIN` of `UPDATE`/`DELETE`, derived tables, `WITH` and set operations and in
-  Oracle's, SQL Server's, SQLite's and MySQL's tabular plans; a key choice for comparisons with an
-  `InitPlan`'s `$k`; times on each iterator inside a subplan (D327).
+- SQLite's `.scanstats on|off` in `eggdb sql`'s shell: after each `SELECT` the shell prints its
+  `QUERY PLAN` with `--SCAN t (loops=1 rows=3)` lines (D327).
+- MySQL's `EXPLAIN FORMAT=TREE` shows `(cost=... rows=...)` and the `Aggregate`, `Group` and
+  `Stream results` iterators (D327).
+- MySQL's `EXPLAIN FORMAT=JSON` (D327).
+- MySQL's `EXPLAIN ANALYZE` of `UPDATE`, `DELETE` and `TABLE` (D327).
+- Subqueries in `EXPLAIN` of `UPDATE` and `DELETE`, and of derived tables, `WITH` and set
+  operations (D327).
+- Subqueries in Oracle's, SQL Server's, SQLite's and MySQL's tabular plans (D327).
+- An index used for a comparison with an `InitPlan`'s `$k` (D327).
+- Times on each iterator inside a subplan in `EXPLAIN ANALYZE` (D327).
 - Times on the steps inside a join (a counter per level in `JoinedRows::extend`, inner `loops` =
   outer rows), on an `UPDATE` or `DELETE`'s scan and on aggregates; per-operator rows in `SET
   STATISTICS PROFILE`; `DISPLAY_CURSOR`, predicates in `PLAN_TABLE`, and `SHOWPLAN_*` alone in
@@ -695,9 +714,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   an oracle, and checking a listed child's keys against a hidden column of a listed parent
   (refused with 42501 for now); writes to tables listed with columns, foreign keys to unlisted
   tables and column lists on views (whose query text no catalog shows) are built (D306).
-- Next: key writes for agents with a role (key-level grants), a per-session key allow-list so the
-  key-value tools work under `--tables`, and counters, compare-and-set and `expire` as tools
-  (D328).
+- MCP key writes for agents acting as a role, through key-level grants (D328).
+- A per-session key allow-list, so the MCP key-value tools work under `--mcp-tables` (D328).
+- Counters, compare-and-set and `expire` as MCP tools (D328).
 - Backup, restore and administration tools (D11).
 - Tools that query documents, search indexes, vectors, graphs and keys in their own query
   languages (D10, D11).
@@ -715,12 +734,15 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   XDND's `XdndProxy` and actions other than copy; dragging out of the client (`DoDragDrop`, an
   XDND source); Wayland's data device; X11's `INCR`, XDND drops and Windows' OLE drop target are
   built (D274, D279, D313).
-- Next: the full-value view on a RESP aggregate (`HGETALL`, `LRANGE`, `SMEMBERS`, `ZRANGE …
-  WITHSCORES`, `XRANGE` as JSON) and the dimmed looks of its count, `–` and `(gone)` cells; RESP
-  over TLS (`rediss://`, `RESP · TLS`); a RESP connection opening without `Query 1`; the keys
-  tab's prefix field caret movement and its `Tab` stops on `Back`/`Next 100`; the editor's focused
-  look while its menu is open; the browser's clipboard read for `Paste`; `menu`/`menuitem`/
-  `searchbox` roles in the platform layer (D329).
+- The full-value view of a RESP aggregate (`HGETALL`, `LRANGE`, `SMEMBERS`, `ZRANGE …
+  WITHSCORES`, `XRANGE` shown as JSON) (D329).
+- The dimmed looks of the RESP keys tab's count, `–` and `(gone)` cells (D329).
+- RESP over TLS in the client (`rediss://`, shown as `RESP · TLS`) (D329).
+- A RESP connection opens without an empty `Query 1` tab (D329).
+- Caret movement in the keys tab's prefix field, and `Tab` stops on `Back` and `Next 100` (D329).
+- The editor keeps its focused look while its menu is open (D329).
+- `Paste` in the browser reads the clipboard (D329).
+- `menu`, `menuitem` and `searchbox` roles in the platform layer's accessibility (D329).
 - Rows streamed into the grid with pages fetched on scroll (D275).
 - The value view's text selection and SQL type names; menu, dialog and scroll bar accessibility
   roles; scrollbars that hide and fade; the editor's draggable and horizontal scrollbars; the
@@ -828,9 +850,12 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   SQLite's FTS5 (D10, D195).
 - Elasticsearch mappings applied to field types: `text` and `keyword`, dates, `ip`, geo, `nested`,
   `flattened`, `dense_vector`, `sparse_vector` and `completion` (D19, D196).
-- Next: `wait_for_completion=false` tasks, `_rethrottle` and parallel `slices` for by-query APIs,
-  by-query over several indices or patterns, `_msearch/template`, `upsert` and `detect_noop` on
-  `_update`, and `_source` filtering on `_search` and `GET _doc` (D331).
+- `wait_for_completion=false` tasks for the by-query APIs (D331).
+- `_rethrottle` and parallel `slices` for the by-query APIs (D331).
+- `_update_by_query` and `_delete_by_query` over several indices or patterns (D331).
+- `_msearch/template` (D331).
+- `upsert` and `detect_noop` on `_update` (D331).
+- `_source` filtering on `_search` and `GET _doc` (D331).
 - Painless beyond D331's update subset (conditions, loops, comparisons, more methods, stored
   scripts), `query_string` syntax and highlighting (D196, D331).
 - Scroll and `search_after` (D196).
@@ -867,6 +892,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   conversion, `sql_mode`, and `1 / 0` as `NULL` with a warning (D10, sql.md).
 - The rest of MySQL's date and time functions, `STR_TO_DATE` and `ON UPDATE CURRENT_TIMESTAMP`
   (sql.md).
+- MySQL's `YEAR()` and `SQRT()`, missing from MySQL's dialect today (D316's and D322's tests use
+  `EXTRACT(YEAR FROM d)` and avoid square roots until then) (sql.md).
 - Prefix indexes and `ADD INDEX` in `ALTER TABLE` (sql.md).
 - MySQL stored programs: handlers, cursors, named conditions, `RESIGNAL`, `GET DIAGNOSTICS`,
   variables set in bodies, and MySQL's error numbers (D199).
@@ -1023,9 +1050,12 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 
 ### M13 Graphs
 - SQL/PGQ and GQL, and graph views over tables (D10, D206).
-- Next: Cypher path predicates pushed into the shortest-path search, `shortestPath()` as an
-  expression, GQL quantified paths and `SHORTEST k`, `CALL {}` subqueries, label predicates in
-  expressions (`WHERE n:Label`) and MERGE's null-property error (D333).
+- Cypher path predicates pushed into the shortest-path search (D333).
+- Cypher's `shortestPath()` as an expression (D333).
+- GQL quantified paths and `SHORTEST k` (D333).
+- Cypher's `CALL {}` subqueries (D333).
+- Label predicates in Cypher expressions (`WHERE n:Label`) (D333).
+- Cypher's `MERGE` answering its error for a null property (D333).
 - Indexes on labels and properties, and uniqueness constraints (D206).
 - Bolt: open transactions across messages, `LOGON` (5.1 and later), routing tables and bookmarks
   (D207).

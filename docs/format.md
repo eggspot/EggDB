@@ -710,7 +710,14 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
   `NUMERIC` or `REAL` affinity (type tag `25` followed by the affinity's code) and for a table
   whose primary key or any index covers a dynamic column of any affinity; a `BLOB` or untyped
   column that no key covers keeps tag `24` in version 10 byte for byte (D153), and an older
-  release refuses version 13 by name. Keys and
+  release refuses version 13 by name. Table-definition version 14 (D322) is written only for a
+  table with generated columns: every section of version 13, then a varint count (at least 1)
+  and, per generated column in increasing position, a varint position, a kind byte (`0`
+  virtual, `1` stored), a dialect byte and the expression's text (varint length, UTF-8). Every
+  other table keeps its version and bytes; an empty list, a position out of range or out of
+  order, a generated column with a default or auto-increment, an unknown kind or dialect, or an
+  empty expression is damage, and an older release refuses version 14 by name. For the version
+  13 columns, keys and
   index entries of these columns use a class-ordered encoding (numbers by exact value, then
   text, then blobs, NULL last), and rows keep the four storage-class tags. A SQLite
   table's `CREATE TABLE` text as written is one record per table (catalog prefix, `0x15`, the
