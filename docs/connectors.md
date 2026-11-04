@@ -16,6 +16,7 @@ days (D44, D252).
 | Spark, Trino | JDBC with pgjdbc (Spark), the PostgreSQL connector (Trino) | pgjdbc itself in CI |
 | Kafka Connect | JDBC source and sink connectors with pgjdbc; or EggDB's own Kafka protocol (D213) | Kafka clients in CI |
 | Any tool with S3 support | EggDB's S3-compatible endpoint (D219) | boto3 in CI |
+| rsyslog, syslog-ng, Fluent Bit, network devices | syslog over UDP or TCP to `--syslog-listen`, rows in the `syslog` table (D315) | RFC 5424 and RFC 3164 examples over UDP and TCP in unit tests; the senders themselves not yet |
 
 EggDB's own pipelines need no extra tool: `eggdb_foreign` reads other servers and Parquet files
 (D229), `pg_cron` schedules SQL (D200), and change capture streams changes out (D210).

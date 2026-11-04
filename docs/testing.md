@@ -696,6 +696,14 @@ macOS too, and `os_net.rs` checks that a reap already satisfied by operations th
 once makes no readiness call, while operations left waiting are still polled at least every
 17th reap.
 
+UDP sockets (D315) have the same twin: `SimDatagramSocket` carries datagrams across the
+simulated network's latency, links and cuts, loses those sent across a cut, drops what overflows
+a socket's `SimNetwork::DATAGRAM_BUFFER_BYTES`, and moves the clock to a datagram's arrival or to
+the end of a receive's wait (`sim_net/datagram.rs`). `tests/net_contract.rs` runs the datagram
+contract (whole datagrams both ways, a timed-out receive, a taken port, oversized datagrams, and
+a datagram longer than the buffer cut or refused) against the operating system's sockets and the
+simulation alike.
+
 ## Not tested yet
 - `Off` after a power loss: the format promises nothing there, so the sweep only checks that
   opening and checking don't panic.
