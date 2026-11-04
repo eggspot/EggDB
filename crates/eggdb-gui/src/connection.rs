@@ -968,9 +968,10 @@ impl UndoWords {
 
 impl ServerLink {
     fn new(client: PgClient, options: &ConnectOptions) -> Self {
+        let first_used_tls = client.tls_version().is_some();
         Self {
             client: Box::new(client),
-            options: Box::new(options.clone()),
+            options: Box::new(tab_client_options(options, first_used_tls)),
             tab_clients: Vec::new(),
         }
     }
@@ -1188,6 +1189,14 @@ fn file_failure(shown: &str, error: &Error, creates: bool) -> ConnectFailure {
         _ => (format!("cannot open {shown}: {error}"), None),
     };
     ConnectFailure::new(message, fix, FailureField::File)
+}
+
+fn tab_client_options(options: &ConnectOptions, first_used_tls: bool) -> ConnectOptions {
+    let mut tab_options = options.clone();
+    if first_used_tls {
+        tab_options.ssl_mode = tab_options.ssl_mode.max(SslMode::Require);
+    }
+    tab_options
 }
 
 fn connect_server(options: &ConnectOptions) -> Result<Connection, ConnectFailure> {
@@ -1876,6 +1885,39 @@ mod tests {
             ssl_mode: SslMode::Disable,
             ssl_root_cert: None,
             replication: false,
+        }
+    }
+
+    #[test]
+    fn tab_clients_after_a_tls_connect_require_tls_and_keep_its_certificate_checks() {
+        let preferred = ConnectOptions {
+            ssl_mode: SslMode::Prefer,
+            ..server(5432)
+        };
+        assert_eq!(
+            tab_client_options(&preferred, true).ssl_mode,
+            SslMode::Require
+        );
+        assert_eq!(
+            tab_client_options(&preferred, false).ssl_mode,
+            SslMode::Prefer
+        );
+        let disabled = server(5432);
+        assert_eq!(
+            tab_client_options(&disabled, false).ssl_mode,
+            SslMode::Disable
+        );
+        for verified in [SslMode::VerifyCa, SslMode::VerifyFull] {
+            let options = ConnectOptions {
+                ssl_mode: verified,
+                ssl_root_cert: Some("/etc/eggdb/root.pem".into()),
+                ..server(5432)
+            };
+            let tab = tab_client_options(&options, true);
+            assert_eq!(tab.ssl_mode, verified);
+            assert_eq!(tab.ssl_root_cert, options.ssl_root_cert);
+            assert_eq!(tab.host, options.host);
+            assert_eq!(tab.user, options.user);
         }
     }
 
