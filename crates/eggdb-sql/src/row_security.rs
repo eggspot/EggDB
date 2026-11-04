@@ -401,13 +401,18 @@ fn applicable(
         return Ok(None);
     }
     let held = crate::roles::role_closure(reader, user)?;
-    Ok(Some(
-        policies(reader, table)?
-            .into_iter()
-            .filter(|policy| policy.command.covers(command))
-            .filter(|policy| policy.roles.iter().any(|role| held.contains(role)))
-            .collect(),
-    ))
+    let applying: Vec<Policy> = policies(reader, table)?
+        .into_iter()
+        .filter(|policy| policy.command.covers(command))
+        .filter(|policy| policy.roles.iter().any(|role| held.contains(role)))
+        .collect();
+    for condition in applying
+        .iter()
+        .flat_map(|policy| policy.using.iter().chain(policy.check.iter()))
+    {
+        crate::pg_catalog::load_for_stored_text(reader, condition)?;
+    }
+    Ok(Some(applying))
 }
 
 fn combined(policies: &[Policy], clause: impl Fn(&Policy) -> Option<String>) -> String {

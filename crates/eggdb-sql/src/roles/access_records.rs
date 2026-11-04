@@ -1,4 +1,4 @@
-use super::{COLUMN_GRANT_SPACE, GRANT_SPACE, ROLE_SPACE};
+use super::{COLUMN_GRANT_SPACE, GRANT_SPACE, ROLE_SPACE, decode_role, encode_role};
 use crate::encoding::{NAMESPACE, prefix_end};
 use crate::error::SqlResult;
 use crate::row_security::{POLICY_SPACE, ROW_SECURITY_SPACE};
@@ -13,8 +13,8 @@ const ACCESS_SPACES: [u8; 5] = [
     COLUMN_GRANT_SPACE,
 ];
 
-/// A copy of the records that decide who may do what (roles, table and column grants, row
-/// security policies and switches) as one statement's catalog snapshot saw them. It reads like
+/// A copy of the records that decide who may do what (roles without their password verifiers,
+/// table and column grants, row security policies and switches) as one statement's catalog snapshot saw them. It reads like
 /// the store, so the catalog answers privilege questions with the very functions that check
 /// statements, never with a second copy of their rules.
 #[derive(Debug, Default)]
@@ -31,13 +31,28 @@ impl AccessRecords {
                 &prefix_end(&prefix),
                 ScanDirection::Forward,
                 &mut |key, value| {
-                    records.insert(key.to_vec(), value.to_vec());
+                    let kept = if space == ROLE_SPACE {
+                        without_verifier(key, value)?
+                    } else {
+                        value.to_vec()
+                    };
+                    records.insert(key.to_vec(), kept);
                     Ok(true)
                 },
             )?;
         }
         Ok(Self(records))
     }
+}
+
+fn without_verifier(key: &[u8], value: &[u8]) -> SqlResult<Vec<u8>> {
+    let name = key
+        .get(NAMESPACE.len() + 1..)
+        .and_then(|name| std::str::from_utf8(name).ok())
+        .ok_or_else(|| crate::encoding::corrupt("role"))?;
+    let mut role = decode_role(name, value)?;
+    role.scram_verifier = None;
+    Ok(encode_role(&role))
 }
 
 impl KeyValueRead for AccessRecords {

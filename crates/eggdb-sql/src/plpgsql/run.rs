@@ -200,6 +200,9 @@ fn invoke_in(
             );
         }
     };
+    if definition.dialect == Dialect::PostgreSql {
+        crate::pg_catalog::load_for_stored_text(writer.read(), &definition.body)?;
+    }
     let clause = if definition.dialect == Dialect::PostgreSql {
         crate::routine_settings::enter_clause(settings, &definition.settings)?
     } else {

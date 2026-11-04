@@ -391,11 +391,7 @@ impl Inquiry<'_> {
                 .as_integer()
                 .and_then(|number| usize::try_from(number).ok())
                 .and_then(|number| number.checked_sub(1))
-                .and_then(|at| {
-                    relation_columns(entry)
-                        .get(at)
-                        .map(|name| (*name).to_owned())
-                }),
+                .and_then(|at| attribute_numbered(entry, at)),
             (None, _) => None,
         };
         let wanted = parse_privileges(&written_name(list), &COLUMN_PRIVILEGES, &[GRANT_OPTION])?;
@@ -706,6 +702,20 @@ fn relation_columns(entry: &RelationEntry) -> Vec<&str> {
             .map(|column| column.name)
             .collect(),
         RelationSource::Index { .. } => Vec::new(),
+    }
+}
+
+fn attribute_numbered(entry: &RelationEntry, at: usize) -> Option<String> {
+    match &entry.source {
+        RelationSource::Table(table) => table
+            .columns
+            .get(at)
+            .map(|column| column.name.as_str())
+            .filter(|name| !crate::temp_tables::is_hidden_column(name))
+            .map(str::to_owned),
+        _ => relation_columns(entry)
+            .get(at)
+            .map(|name| (*name).to_owned()),
     }
 }
 

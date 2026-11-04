@@ -174,6 +174,56 @@ fn a_checked_role_is_told_exactly_what_its_statements_may_do() {
 }
 
 #[test]
+fn routine_bodies_and_row_security_policies_ask_the_inquiry_functions() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    for sql in [
+        "CREATE FUNCTION may_read_hidden() RETURNS boolean LANGUAGE sql \
+         AS 'SELECT has_table_privilege(''hidden'', ''SELECT'')'",
+        "CREATE FUNCTION in_staff() RETURNS boolean LANGUAGE plpgsql \
+         AS 'BEGIN RETURN pg_has_role(current_user, ''staff'', ''MEMBER''); END'",
+        "CREATE TABLE ledger (id integer, owner text)",
+        "INSERT INTO ledger VALUES (1, 'carol'), (2, 'joe'), (3, 'admin')",
+        "GRANT SELECT ON ledger TO PUBLIC",
+        "ALTER TABLE ledger ENABLE ROW LEVEL SECURITY",
+        "CREATE POLICY ledger_read ON ledger USING (pg_has_role(current_user, 'staff', 'MEMBER') \
+         OR (owner = current_user AND has_table_privilege('hidden', 'DELETE')))",
+    ] {
+        shown(&mut admin, sql);
+    }
+    let mut joe = as_role(&store, "joe");
+    assert_eq!(
+        shown(
+            &mut joe,
+            "SELECT may_read_hidden() AS hidden, in_staff() AS staff"
+        ),
+        "hidden|staff\nt|f\nSELECT 1"
+    );
+    assert_eq!(
+        shown(&mut joe, "SELECT id FROM ledger ORDER BY id"),
+        "id\n2\nSELECT 1"
+    );
+    let mut carol = as_role(&store, "carol");
+    assert_eq!(
+        shown(
+            &mut carol,
+            "SELECT may_read_hidden() AS hidden, in_staff() AS staff"
+        ),
+        "hidden|staff\nf|t\nSELECT 1"
+    );
+    assert_eq!(
+        shown(&mut carol, "SELECT id FROM ledger ORDER BY id"),
+        "id\n1\n2\n3\nSELECT 3"
+    );
+    let mut outsider = as_role(&store, "admin");
+    assert_eq!(
+        shown(&mut outsider, "SELECT count(*) AS seen FROM ledger"),
+        "seen\n0\nSELECT 1"
+    );
+}
+
+#[test]
 fn the_inquiry_functions_fail_as_postgresql_does() {
     let store = MemoryStore::default();
     setup(&store);

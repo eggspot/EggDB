@@ -55,9 +55,16 @@ const SEQUENCE_FUNCTIONS: [&str; 3] = ["nextval", "currval", "setval"];
 const CATALOG_TEXT_HINTS: [&str; 4] = ["reg", "pg_", "description", "privilege"];
 
 pub(crate) fn text_needs_catalog(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    CATALOG_TEXT_HINTS.iter().any(|hint| lower.contains(hint))
+    CATALOG_TEXT_HINTS
+        .iter()
+        .any(|hint| contains_ignoring_ascii_case(text, hint))
         && crate::lexer::tokenize(text).is_ok_and(|tokens| mentions_catalog(&tokens))
+}
+
+fn contains_ignoring_ascii_case(text: &str, lowercase_part: &str) -> bool {
+    text.as_bytes()
+        .windows(lowercase_part.len())
+        .any(|window| window.eq_ignore_ascii_case(lowercase_part.as_bytes()))
 }
 
 pub(crate) fn mentions_catalog(tokens: &[Token<'_>]) -> bool {
@@ -181,13 +188,23 @@ pub(crate) fn load_if_wanted(reader: &dyn KeyValueRead) -> SqlResult<()> {
 }
 
 pub(crate) fn load_for_stored_expressions(reader: &dyn KeyValueRead) -> SqlResult<()> {
-    let missing = FRAMES.with(|frames| {
+    if snapshot_missing() {
+        snapshot_for(reader)?;
+    }
+    Ok(())
+}
+
+fn snapshot_missing() -> bool {
+    FRAMES.with(|frames| {
         frames
             .try_borrow()
             .ok()
             .is_some_and(|frames| frames.last().is_some_and(|frame| frame.snapshot.is_none()))
-    });
-    if missing {
+    })
+}
+
+pub(crate) fn load_for_stored_text(reader: &dyn KeyValueRead, text: &str) -> SqlResult<()> {
+    if snapshot_missing() && text_needs_catalog(text) {
         snapshot_for(reader)?;
     }
     Ok(())
