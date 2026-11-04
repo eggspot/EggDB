@@ -100,6 +100,8 @@ pub enum HttpError {
     Closed,
     /// The head is longer than the server reads, or has too many headers.
     TooLarge,
+    /// The body is longer than the listener reads.
+    BodyTooLarge,
     /// The head is not HTTP/1.x.
     Malformed,
     /// The body is longer than the server's memory budget has left.
@@ -111,6 +113,7 @@ impl fmt::Display for HttpError {
         f.write_str(match self {
             Self::Closed => "the connection closed before the request ended",
             Self::TooLarge => "the request head is too large",
+            Self::BodyTooLarge => "the request body is too large",
             Self::Malformed => "the request is not HTTP/1.1",
             Self::OverMemoryBudget => "the server's connections already hold their memory budget",
         })
@@ -256,7 +259,7 @@ pub fn read_request_holding(
         Some(text) => text.parse::<usize>().map_err(|_| HttpError::Malformed)?,
     };
     if length > max_body_bytes {
-        return Err(HttpError::TooLarge);
+        return Err(HttpError::BodyTooLarge);
     }
     if !held.hold_if_large(length) {
         return Err(HttpError::OverMemoryBudget);
@@ -320,7 +323,7 @@ pub fn write_response(
 /// with the server's other listeners, and the answer it gives when that budget is spent.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits<'b> {
-    /// The longest request body read; a longer one is answered `431`.
+    /// The longest request body read; a longer one is answered `413`.
     pub max_body_bytes: usize,
     /// The bytes every connection of the server holds together.
     pub memory_budget: &'b MemoryBudget,
@@ -397,7 +400,8 @@ fn serve_one(
             let _ = write_response(&mut stream, &response, head_only);
             return;
         }
-        Err(HttpError::TooLarge) => Response::text(431, "the request is too large"),
+        Err(HttpError::TooLarge) => Response::text(431, "the request head is too large"),
+        Err(HttpError::BodyTooLarge) => Response::text(413, "the request body is too large"),
         Err(HttpError::Malformed) => Response::text(400, "not an HTTP/1.1 request"),
         Err(HttpError::OverMemoryBudget) => (limits.over_memory_budget)(),
         Err(HttpError::Closed) => return,
@@ -492,7 +496,7 @@ mod tests {
             1,
             &mut || continued += 1,
         );
-        assert_eq!((request, continued), (Err(HttpError::TooLarge), 0));
+        assert_eq!((request, continued), (Err(HttpError::BodyTooLarge), 0));
         let body = vec![7u8; 2_000_000];
         let mut bytes =
             b"PUT /b/k HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 2000000\r\n\r\n"
@@ -563,7 +567,7 @@ mod tests {
         }
         assert_eq!(
             read_request(&mut &b"POST / HTTP/1.1\r\nContent-Length: 99999999\r\n\r\n"[..]),
-            Err(HttpError::TooLarge)
+            Err(HttpError::BodyTooLarge)
         );
         let endless = vec![b'a'; MAX_HEAD_BYTES + 10];
         assert_eq!(read_request(&mut &endless[..]), Err(HttpError::TooLarge));

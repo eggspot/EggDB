@@ -106,7 +106,7 @@ impl<'b> Fields<'b> {
 }
 
 /// The first packet of a connection.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum StartupRequest {
     /// `SSLRequest`: the client asks for TLS.
     Ssl,
@@ -128,6 +128,30 @@ pub enum StartupRequest {
         /// The parameter names and values, `user`, `database` and the others.
         parameters: Vec<(String, String)>,
     },
+}
+
+impl std::fmt::Debug for StartupRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ssl => formatter.write_str("Ssl"),
+            Self::GssEncryption => formatter.write_str("GssEncryption"),
+            Self::Cancel { process_id, .. } => formatter
+                .debug_struct("Cancel")
+                .field("process_id", process_id)
+                .field("secret_key", &"***")
+                .finish(),
+            Self::Startup {
+                major,
+                minor,
+                parameters,
+            } => formatter
+                .debug_struct("Startup")
+                .field("major", major)
+                .field("minor", minor)
+                .field("parameters", parameters)
+                .finish(),
+        }
+    }
 }
 
 /// Parses a startup packet's body, after its length word.
@@ -215,7 +239,7 @@ pub enum Target {
 }
 
 /// A message from the client after startup.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum FrontendMessage {
     /// `Q`: run the statements of a query string.
     Query(String),
@@ -270,6 +294,64 @@ pub enum FrontendMessage {
     CopyFail(String),
     /// A message type this server does not handle, such as a function call.
     Other(u8),
+}
+
+impl std::fmt::Debug for FrontendMessage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Query(text) => formatter.debug_tuple("Query").field(text).finish(),
+            Self::Parse {
+                name,
+                query,
+                parameter_types,
+            } => formatter
+                .debug_struct("Parse")
+                .field("name", name)
+                .field("query", query)
+                .field("parameter_types", parameter_types)
+                .finish(),
+            Self::Bind {
+                portal,
+                statement,
+                parameter_formats,
+                parameters,
+                result_formats,
+            } => formatter
+                .debug_struct("Bind")
+                .field("portal", portal)
+                .field("statement", statement)
+                .field("parameter_formats", parameter_formats)
+                .field("parameters", parameters)
+                .field("result_formats", result_formats)
+                .finish(),
+            Self::Describe(target, name) => formatter
+                .debug_tuple("Describe")
+                .field(target)
+                .field(name)
+                .finish(),
+            Self::Execute { portal, max_rows } => formatter
+                .debug_struct("Execute")
+                .field("portal", portal)
+                .field("max_rows", max_rows)
+                .finish(),
+            Self::Close(target, name) => formatter
+                .debug_tuple("Close")
+                .field(target)
+                .field(name)
+                .finish(),
+            Self::Sync => formatter.write_str("Sync"),
+            Self::Flush => formatter.write_str("Flush"),
+            Self::Terminate => formatter.write_str("Terminate"),
+            Self::AuthenticationResponse(_) => formatter
+                .debug_tuple("AuthenticationResponse")
+                .field(&"***")
+                .finish(),
+            Self::CopyData => formatter.write_str("CopyData"),
+            Self::CopyDone => formatter.write_str("CopyDone"),
+            Self::CopyFail(reason) => formatter.debug_tuple("CopyFail").field(reason).finish(),
+            Self::Other(tag) => formatter.debug_tuple("Other").field(tag).finish(),
+        }
+    }
 }
 
 fn formats(fields: &mut Fields<'_>) -> Result<Vec<Format>, MalformedMessage> {
@@ -992,5 +1074,22 @@ mod tests {
         outbox.clear();
         outbox.copy_in_response(2, Format::Binary).unwrap();
         assert_eq!(outbox.bytes(), b"G\0\0\0\x0b\x01\0\x02\0\x01\0\x01");
+    }
+
+    #[test]
+    fn passwords_and_cancel_keys_stay_out_of_debug_output() {
+        let response = FrontendMessage::AuthenticationResponse(b"hunter2-password".to_vec());
+        let shown = format!("{response:?}");
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert!(!shown.contains("104"), "{shown}");
+        assert!(shown.contains("***"), "{shown}");
+        let cancel = StartupRequest::Cancel {
+            process_id: 7,
+            secret_key: vec![201, 202, 203, 204],
+        };
+        let shown = format!("{cancel:?}");
+        assert!(!shown.contains("201"), "{shown}");
+        assert!(shown.contains("process_id: 7"), "{shown}");
+        assert!(shown.contains("***"), "{shown}");
     }
 }

@@ -212,6 +212,12 @@ fn packets_and_retained_replays_past_the_memory_budget_are_refused() {
     replay.extend(subscribe(4, "kept/#", 0));
     let (_, answers) = session_with(&broker, &config, 4, replay);
     assert!(answers.iter().all(|(kind, _)| *kind != 3), "{answers:?}");
+    let mut replay_v5 = connect(5, "secret", None);
+    replay_v5.extend(subscribe(5, "kept/#", 0));
+    let (_, answers) = session_with(&broker, &config, 6, replay_v5);
+    assert!(answers.iter().all(|(kind, _)| *kind != 3), "{answers:?}");
+    assert_eq!(answers.last(), Some(&(14, vec![0x97])), "{answers:?}");
+    assert_eq!(budget.used_bytes(), 0);
     let mut one = connect(4, "secret", None);
     one.extend(subscribe(4, "kept/a", 0));
     let (_, answers) = session_with(&broker, &config, 5, one);

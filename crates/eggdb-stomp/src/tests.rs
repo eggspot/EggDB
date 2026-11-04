@@ -358,3 +358,58 @@ fn frames_and_transactions_past_the_memory_budget_are_refused_and_others_go_on()
     });
     assert_eq!(budget.used_bytes(), 0);
 }
+
+#[test]
+fn a_small_budget_delivers_every_queued_message_to_every_subscription_without_redelivering() {
+    let budget = Arc::new(MemoryBudget::new(400_000));
+    let config = ServerConfig {
+        memory_budget: Arc::clone(&budget),
+        ..config()
+    };
+    with_server_config(&config, |address, queues| {
+        let body = vec![b'x'; 100_000];
+        for queue in ["first", "second"] {
+            queues.declare(queue).unwrap();
+            for _ in 0..12 {
+                queues.send(queue, &body, 0, now_ms()).unwrap();
+            }
+        }
+        let mut consumer = Client::connected(address);
+        for (queue, id) in [("first", "a"), ("second", "b")] {
+            consumer.send(
+                &Frame::new("SUBSCRIBE")
+                    .with("destination", &format!("/queue/{queue}"))
+                    .with("id", id),
+            );
+        }
+        let mut received = std::collections::BTreeMap::<String, usize>::new();
+        for _ in 0..24 {
+            let message = consumer.next();
+            assert_eq!(message.command, "MESSAGE", "{message:?}");
+            assert_eq!(message.header("redelivered"), None, "{message:?}");
+            assert_eq!(message.body.len(), body.len());
+            *received
+                .entry(message.header("subscription").unwrap().to_owned())
+                .or_default() += 1;
+        }
+        assert_eq!(received.get("a"), Some(&12));
+        assert_eq!(received.get("b"), Some(&12));
+        queues.declare("huge").unwrap();
+        queues.send("huge", &vec![b'y'; 500_000], 0, now_ms()).unwrap();
+        let mut greedy = Client::connected(address);
+        greedy.send(
+            &Frame::new("SUBSCRIBE")
+                .with("destination", "/queue/huge")
+                .with("id", "h"),
+        );
+        let refusal = greedy.next();
+        assert_eq!(refusal.command, "ERROR", "{refusal:?}");
+        assert!(
+            String::from_utf8_lossy(&refusal.body).contains("memory budget"),
+            "{refusal:?}"
+        );
+        let untouched = queues.receive("huge", 1, 1, u64::MAX - 1).unwrap();
+        assert_eq!(untouched[0].receive_count, 1);
+    });
+    assert_eq!(budget.used_bytes(), 0);
+}

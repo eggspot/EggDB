@@ -607,7 +607,7 @@ impl Session<'_, '_> {
         }
     }
 
-    fn pump(&mut self) -> io::Result<()> {
+    fn pump(&mut self) -> io::Result<Next> {
         let waiting: Vec<(String, String, AckMode, usize)> = self
             .subscriptions
             .iter()
@@ -629,51 +629,85 @@ impl Session<'_, '_> {
         let config = self.config;
         let mut held = config.memory_budget.empty_reservation();
         for (id, queue, ack, room) in waiting {
-            let Ok(messages) = self.broker.queues.receive(&queue, room, LEASE_MS, now_ms()) else {
+            let mut batch_bytes = 0usize;
+            let mut refused = false;
+            let leased = self.broker.queues.receive_fitting(
+                &queue,
+                room,
+                LEASE_MS,
+                now_ms(),
+                &mut |body_bytes: usize| {
+                    let grown = batch_bytes
+                        .saturating_add(body_bytes)
+                        .saturating_add(MESSAGE_HEADER_BYTES);
+                    if held.hold_if_large(grown) {
+                        batch_bytes = grown;
+                        true
+                    } else {
+                        refused = true;
+                        false
+                    }
+                },
+            );
+            let Ok(messages) = leased else {
+                held.resize(0);
                 continue;
             };
-            let batch_bytes = messages
-                .iter()
-                .map(|message| message.body.len().saturating_add(MESSAGE_HEADER_BYTES))
-                .fold(0, usize::saturating_add);
-            if !held.hold_if_large(batch_bytes) {
-                for message in &messages {
-                    let _ = self.broker.queues.release(&queue, message.id, now_ms());
-                }
-                return Ok(());
+            if refused && messages.is_empty() {
+                return self.refuse(OUT_OF_MEMORY_BUDGET, None);
             }
-            for message in messages {
-                let message_id = format!("{queue}-{}", message.id);
-                let mut frame = Frame::new("MESSAGE")
-                    .with("destination", &format!("/queue/{queue}"))
-                    .with("message-id", &message_id)
-                    .with("subscription", &id);
-                if message.receive_count > 1 {
-                    frame = frame.with("redelivered", "true");
-                }
-                if ack != AckMode::Auto {
-                    frame = frame.with("ack", &message_id);
-                }
-                let sent = self.send(&frame.with_body(&message.body));
-                if ack == AckMode::Auto {
-                    if sent.is_ok() {
-                        let _ = self.broker.queues.ack(&queue, message.id);
-                    } else {
-                        let _ = self.broker.queues.release(&queue, message.id, now_ms());
-                    }
+            let delivered = self.deliver(&id, &queue, ack, messages);
+            held.resize(0);
+            delivered?;
+        }
+        Ok(Next::Continue)
+    }
+
+    fn deliver(
+        &mut self,
+        id: &str,
+        queue: &str,
+        ack: AckMode,
+        messages: Vec<eggdb_queues::Message>,
+    ) -> io::Result<()> {
+        let mut messages = messages.into_iter();
+        while let Some(message) = messages.next() {
+            let message_id = format!("{queue}-{}", message.id);
+            let mut frame = Frame::new("MESSAGE")
+                .with("destination", &format!("/queue/{queue}"))
+                .with("message-id", &message_id)
+                .with("subscription", id);
+            if message.receive_count > 1 {
+                frame = frame.with("redelivered", "true");
+            }
+            if ack != AckMode::Auto {
+                frame = frame.with("ack", &message_id);
+            }
+            let sent = self.send(&frame.with_body(&message.body));
+            if ack == AckMode::Auto {
+                if sent.is_ok() {
+                    let _ = self.broker.queues.ack(queue, message.id);
                 } else {
-                    self.next_sequence += 1;
-                    self.pending.insert(
-                        message_id,
-                        Pending {
-                            subscription: id.clone(),
-                            queue: queue.clone(),
-                            id: message.id,
-                            sequence: self.next_sequence,
-                        },
-                    );
+                    let _ = self.broker.queues.release(queue, message.id, now_ms());
                 }
-                sent?;
+            } else {
+                self.next_sequence += 1;
+                self.pending.insert(
+                    message_id,
+                    Pending {
+                        subscription: id.to_owned(),
+                        queue: queue.to_owned(),
+                        id: message.id,
+                        sequence: self.next_sequence,
+                    },
+                );
+            }
+            if let Err(error) = sent {
+                let now = now_ms();
+                for unsent in messages {
+                    let _ = self.broker.queues.unlease(queue, unsent.id, now);
+                }
+                return Err(error);
             }
         }
         Ok(())
@@ -704,8 +738,8 @@ impl Session<'_, '_> {
             if stop() || (!self.connected && started.elapsed() > CONNECT_WAIT) {
                 return Ok(());
             }
-            if self.connected {
-                self.pump()?;
+            if self.connected && matches!(self.pump()?, Next::Close) {
+                return Ok(());
             }
             if !held.hold_if_large(pending_frame_bytes(&buffer)) {
                 self.refuse(OUT_OF_MEMORY_BUDGET, None)?;

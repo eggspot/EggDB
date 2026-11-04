@@ -135,11 +135,12 @@ struct Connection<'b, 's> {
     outgoing: Vec<u8>,
     unfinished_held: Reservation<'b>,
     outgoing_held: Reservation<'b>,
+    next_link: usize,
 }
 
-fn delivery_bytes(message: &eggdb_queues::Message, max_frame: u32) -> usize {
+fn delivery_bytes(body_bytes: usize, max_frame: u32) -> usize {
     let frame_room = usize::try_from(max_frame).unwrap_or(usize::MAX).max(1);
-    let payload = message.body.len().saturating_add(DELIVERY_FRAME_BYTES);
+    let payload = body_bytes.saturating_add(DELIVERY_FRAME_BYTES);
     payload.saturating_add(
         payload
             .div_ceil(frame_room)
@@ -781,31 +782,53 @@ impl Connection<'_, '_> {
                 }
             }
         }
-        for (channel, handle, queue, room, presettled, drain) in wanted {
+        if wanted.is_empty() {
+            return;
+        }
+        let start = self.next_link % wanted.len();
+        wanted.rotate_left(start);
+        let mut delivered_this_round = false;
+        for (position, (channel, handle, queue, room, presettled, drain)) in
+            wanted.into_iter().enumerate()
+        {
+            let mut refused = false;
             let messages = if room > 0 {
-                self.broker
+                let broker = self.broker;
+                let max_frame = self.remote_max_frame;
+                let mut held_bytes = self.outgoing.len();
+                let held = &mut self.outgoing_held;
+                broker
                     .queues
-                    .receive(&queue, room as usize, LEASE_MS, now_ms())
+                    .receive_fitting(
+                        &queue,
+                        room as usize,
+                        LEASE_MS,
+                        now_ms(),
+                        &mut |body_bytes: usize| {
+                            let grown =
+                                held_bytes.saturating_add(delivery_bytes(body_bytes, max_frame));
+                            if held.hold_if_large(grown) {
+                                held_bytes = grown;
+                                true
+                            } else {
+                                refused = true;
+                                false
+                            }
+                        },
+                    )
                     .unwrap_or_default()
             } else {
                 Vec::new()
             };
+            if refused && messages.is_empty() && !delivered_this_round {
+                self.close_with(RESOURCE_LIMIT_EXCEEDED, OUT_OF_MEMORY_BUDGET);
+                return;
+            }
             let mut sent = Vec::new();
-            let mut out_of_budget = false;
-            for (index, message) in messages.iter().enumerate() {
-                let held = self
-                    .outgoing
-                    .len()
-                    .saturating_add(delivery_bytes(message, self.remote_max_frame));
-                if !self.outgoing_held.hold_if_large(held) {
-                    let now = now_ms();
-                    for unsent in &messages[index..] {
-                        let _ = self.broker.queues.release(&queue, unsent.id, now);
-                    }
-                    out_of_budget = true;
-                    break;
-                }
+            let mut unsent = messages.iter();
+            for message in unsent.by_ref() {
                 let Some(session) = self.sessions.get_mut(&channel) else {
+                    let _ = self.broker.queues.unlease(&queue, message.id, now_ms());
                     break;
                 };
                 let delivery_id = session.next_outgoing_id;
@@ -835,12 +858,21 @@ impl Connection<'_, '_> {
                 );
                 sent.push(message.id);
             }
+            let now = now_ms();
+            for message in unsent {
+                let _ = self.broker.queues.unlease(&queue, message.id, now);
+            }
+            let delivered_any = !sent.is_empty();
+            delivered_this_round |= delivered_any;
             if presettled {
                 for id in sent {
                     let _ = self.broker.queues.ack(&queue, id);
                 }
             }
-            if out_of_budget {
+            if refused {
+                self.next_link = start
+                    .saturating_add(position)
+                    .saturating_add(usize::from(delivered_any));
                 return;
             }
             if drain && messages.len() < room as usize {
@@ -910,6 +942,7 @@ pub(crate) fn serve_stream(
         outgoing: Vec::new(),
         unfinished_held: config.memory_budget.empty_reservation(),
         outgoing_held: config.memory_budget.empty_reservation(),
+        next_link: 0,
     };
     let mut buffer = Vec::new();
     let mut chunk = vec![0u8; 64 * 1024];

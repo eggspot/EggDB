@@ -313,18 +313,45 @@ impl<'k> Queues<'k> {
         lease_ms: u64,
         now_ms: u64,
     ) -> Result<Vec<Message>> {
-        let any_visible = self.read(|keys| {
+        self.receive_fitting(name, max, lease_ms, now_ms, &mut |_: usize| true)
+    }
+
+    /// Leases, oldest first, up to `max` of the messages visible at `now_ms` for `lease_ms`,
+    /// while `fits` accepts each one's body length. The first message `fits` refuses ends the
+    /// batch: it and every later message stay as they were, and nothing is written when no
+    /// message is accepted.
+    pub fn receive_fitting(
+        &self,
+        name: &str,
+        max: usize,
+        lease_ms: u64,
+        now_ms: u64,
+        fits: &mut dyn FnMut(usize) -> bool,
+    ) -> Result<Vec<Message>> {
+        if max == 0 {
+            return Ok(Vec::new());
+        }
+        let chosen = self.read(|keys| {
             if keys.get(&queue_key(name)).map_err(storage)?.is_none() {
                 return Err(QueueError::NoQueue(name.to_owned()));
             }
-            for (_, value) in keys.scan(&messages_prefix(name)).map_err(storage)? {
-                if Stored::decode(&value)?.visible_ms <= now_ms {
-                    return Ok(true);
+            let mut chosen = Vec::new();
+            for (key, value) in keys.scan(&messages_prefix(name)).map_err(storage)? {
+                if chosen.len() >= max {
+                    break;
                 }
+                let stored = Stored::decode(&value)?;
+                if stored.visible_ms > now_ms {
+                    continue;
+                }
+                if !fits(stored.body.len()) {
+                    break;
+                }
+                chosen.push(key);
             }
-            Ok(false)
+            Ok(chosen)
         })?;
-        if !any_visible || max == 0 {
+        if chosen.is_empty() {
             return Ok(Vec::new());
         }
         self.write(|keys| {
@@ -332,10 +359,10 @@ impl<'k> Queues<'k> {
                 return Err(QueueError::NoQueue(name.to_owned()));
             }
             let mut out = Vec::new();
-            for (key, value) in keys.scan(&messages_prefix(name)).map_err(storage)? {
-                if out.len() >= max {
-                    break;
-                }
+            for key in chosen {
+                let Some(value) = keys.get(&key).map_err(storage)? else {
+                    continue;
+                };
                 let mut stored = Stored::decode(&value)?;
                 if stored.visible_ms > now_ms {
                     continue;
@@ -370,6 +397,23 @@ impl<'k> Queues<'k> {
             };
             let mut stored = Stored::decode(&value)?;
             stored.visible_ms = now_ms;
+            keys.put(&key, &stored.encode()).map_err(storage)?;
+            Ok(true)
+        })
+    }
+
+    /// Gives back a leased message that was never sent: it is visible again at `now_ms` and
+    /// its receive count is what it was before the lease, so its next delivery is not marked
+    /// redelivered. Returns whether it was there.
+    pub fn unlease(&self, name: &str, id: u64, now_ms: u64) -> Result<bool> {
+        self.write(|keys| {
+            let key = message_key(name, id);
+            let Some(value) = keys.get(&key).map_err(storage)? else {
+                return Ok(false);
+            };
+            let mut stored = Stored::decode(&value)?;
+            stored.visible_ms = now_ms;
+            stored.receive_count = stored.receive_count.saturating_sub(1);
             keys.put(&key, &stored.encode()).map_err(storage)?;
             Ok(true)
         })
@@ -470,5 +514,43 @@ mod tests {
                 waiting: 0
             }
         );
+    }
+
+    #[test]
+    fn receive_fitting_leases_only_what_fits_and_unlease_keeps_the_receive_count() {
+        let keyspace = MemoryKeyspace::default();
+        let queues = Queues::new(&keyspace);
+        queues.declare("jobs").unwrap();
+        for body in [&b"aaaa"[..], b"bbbb", b"cccc"] {
+            queues.send("jobs", body, 0, 0).unwrap();
+        }
+        let mut room = 9usize;
+        let leased = queues
+            .receive_fitting("jobs", 10, 30_000, 0, &mut |length: usize| {
+                match room.checked_sub(length) {
+                    Some(left) => {
+                        room = left;
+                        true
+                    }
+                    None => false,
+                }
+            })
+            .unwrap();
+        assert_eq!(leased.len(), 2);
+        assert!(
+            queues
+                .receive_fitting("jobs", 10, 30_000, 0, &mut |_: usize| false)
+                .unwrap()
+                .is_empty()
+        );
+        let rest = queues.receive("jobs", 10, 30_000, 0).unwrap();
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].body, b"cccc");
+        assert_eq!(rest[0].receive_count, 1);
+        assert!(queues.unlease("jobs", leased[1].id, 0).unwrap());
+        let again = queues.receive("jobs", 10, 30_000, 0).unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].id, leased[1].id);
+        assert_eq!(again[0].receive_count, 1);
     }
 }

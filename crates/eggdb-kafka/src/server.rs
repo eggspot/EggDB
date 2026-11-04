@@ -348,6 +348,8 @@ pub(crate) fn serve_stream(
             return Ok(());
         }
         writer.write_all(&response)?;
+        drop(response);
+        held.resize(0);
     }
 }
 

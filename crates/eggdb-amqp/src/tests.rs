@@ -1,5 +1,5 @@
 use crate::codec::{FRAME_BODY, FRAME_HEADER, FRAME_METHOD, Out, frame, take_frame};
-use crate::server::{Broker, ServerConfig, serve_stream, topic_matches};
+use crate::server::{Broker, ServerConfig, encode_message, serve_stream, topic_matches};
 use eggdb_keyspace::MemoryKeyspace;
 
 fn config() -> ServerConfig {
@@ -285,5 +285,110 @@ fn a_message_body_past_the_memory_budget_closes_its_connection_and_others_go_on(
             .ready,
         1
     );
+    assert_eq!(budget.used_bytes(), 0);
+}
+
+struct PolledInput<'a> {
+    input: &'a [u8],
+    idle_polls: usize,
+}
+
+impl std::io::Read for PolledInput<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if !self.input.is_empty() {
+            return self.input.read(buffer);
+        }
+        if self.idle_polls == 0 {
+            return Ok(0);
+        }
+        self.idle_polls -= 1;
+        Err(std::io::ErrorKind::WouldBlock.into())
+    }
+}
+
+#[test]
+fn a_small_budget_delivers_every_queued_message_to_every_consumer_without_redelivering() {
+    let keyspace = MemoryKeyspace::default();
+    let broker = Broker::new(&keyspace);
+    let budget = std::sync::Arc::new(eggdb_platform::connection_limits::MemoryBudget::new(
+        400_000,
+    ));
+    let config = ServerConfig {
+        memory_budget: std::sync::Arc::clone(&budget),
+        ..config()
+    };
+    let queues = eggdb_queues::Queues::new(&keyspace);
+    let body = vec![b'm'; 100_000];
+    for queue in ["first", "second"] {
+        queues.declare(queue).unwrap();
+        let stored = encode_message("", queue, &[], &body);
+        for _ in 0..12 {
+            queues.send(queue, &stored, 0, 0).unwrap();
+        }
+    }
+    let mut input = login("secret");
+    for (queue, tag) in [("first", "c1"), ("second", "c2")] {
+        input.extend(method(1, 60, 20, |out| {
+            out.short(0)
+                .shortstr(queue)
+                .shortstr(tag)
+                .octet(2)
+                .empty_table();
+        }));
+    }
+    let reader = PolledInput {
+        input: &input,
+        idle_polls: 40,
+    };
+    let mut output = Vec::new();
+    serve_stream(&broker, &config, reader, &mut output, &|| false).unwrap();
+    let answers = methods(&output);
+    let deliveries: Vec<&Vec<u8>> = answers
+        .iter()
+        .filter(|(kind, class, id, _)| *kind == FRAME_METHOD && (*class, *id) == (60, 60))
+        .map(|(_, _, _, payload)| payload)
+        .collect();
+    for tag in [&b"c1"[..], b"c2"] {
+        assert_eq!(
+            deliveries
+                .iter()
+                .filter(|payload| &payload[5..7] == tag)
+                .count(),
+            12
+        );
+    }
+    assert!(deliveries.iter().all(|payload| payload[15] == 0));
+    assert!(
+        answers
+            .iter()
+            .all(|(_, class, id, _)| (*class, *id) != (10, 50))
+    );
+    assert_eq!(queues.depth("first", u64::MAX).unwrap().ready, 0);
+    assert_eq!(budget.used_bytes(), 0);
+    queues.declare("huge").unwrap();
+    queues
+        .send("huge", &encode_message("", "huge", &[], &vec![b'h'; 500_000]), 0, 0)
+        .unwrap();
+    let mut greedy = login("secret");
+    greedy.extend(method(1, 60, 20, |out| {
+        out.short(0)
+            .shortstr("huge")
+            .shortstr("h")
+            .octet(2)
+            .empty_table();
+    }));
+    let reader = PolledInput {
+        input: &greedy,
+        idle_polls: 3,
+    };
+    let mut output = Vec::new();
+    serve_stream(&broker, &config, reader, &mut output, &|| false).unwrap();
+    let answers = methods(&output);
+    let close = answers
+        .iter()
+        .find(|(kind, class, id, _)| *kind == FRAME_METHOD && (*class, *id) == (10, 50))
+        .expect("a Connection.Close");
+    assert_eq!(u16::from_be_bytes([close.3[4], close.3[5]]), 506);
+    assert_eq!(queues.receive("huge", 1, 1, 1).unwrap()[0].receive_count, 1);
     assert_eq!(budget.used_bytes(), 0);
 }

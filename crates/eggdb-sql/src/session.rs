@@ -393,7 +393,21 @@ fn is_one_statement_naming_the_postgresql_catalog(text: &str) -> bool {
 }
 
 fn materialized_view_key(name: &str) -> String {
-    crate::dump::sql_string(&crate::schemas::display(name))
+    let name = crate::schemas::normalized(name);
+    let key = match name.split_once(crate::schemas::QUALIFIER) {
+        Some((schema, relation)) => format!(
+            "{}.{}",
+            double_quoted_key_part(schema),
+            double_quoted_key_part(relation)
+        ),
+        None if name.starts_with('"') => double_quoted_key_part(name),
+        None => name.to_owned(),
+    };
+    crate::dump::sql_string(&key)
+}
+
+fn double_quoted_key_part(part: &str) -> String {
+    format!("\"{}\"", part.replace('"', "\"\""))
 }
 
 fn aborted_block() -> SqlError {

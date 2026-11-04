@@ -179,3 +179,44 @@ fn materialized_views_live_in_the_schema_they_are_named_in() {
         run(&mut session, "SELECT 0::bigint AS count")
     );
 }
+
+#[test]
+fn a_schema_qualified_view_and_a_public_view_named_with_a_dot_are_kept_apart() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(
+        &mut session,
+        "CREATE SCHEMA reports; \
+         CREATE TABLE sales (amount int); \
+         INSERT INTO sales VALUES (1), (2)",
+    );
+    run(
+        &mut session,
+        "CREATE MATERIALIZED VIEW reports.daily AS SELECT count(*) AS total FROM sales WHERE amount >= 4; \
+         CREATE MATERIALIZED VIEW \"reports.daily\" AS SELECT count(*) AS total FROM sales",
+    );
+    run(
+        &mut session,
+        "INSERT INTO sales VALUES (4); \
+         REFRESH MATERIALIZED VIEW reports.daily",
+    );
+    assert_eq!(
+        run(&mut session, "SELECT total FROM reports.daily"),
+        run(&mut session, "SELECT 1::bigint AS total")
+    );
+    assert_eq!(
+        run(&mut session, "SELECT total FROM \"reports.daily\""),
+        run(&mut session, "SELECT 2::bigint AS total")
+    );
+    run(&mut session, "REFRESH MATERIALIZED VIEW \"reports.daily\"");
+    assert_eq!(
+        run(&mut session, "SELECT total FROM \"reports.daily\""),
+        run(&mut session, "SELECT 3::bigint AS total")
+    );
+    run(&mut session, "DROP MATERIALIZED VIEW reports.daily");
+    assert_eq!(
+        run(&mut session, "SELECT total FROM \"reports.daily\""),
+        run(&mut session, "SELECT 3::bigint AS total")
+    );
+    run(&mut session, "REFRESH MATERIALIZED VIEW \"reports.daily\"");
+}

@@ -524,7 +524,10 @@ pub(crate) fn serve_stream(
                                     finished = Some(true);
                                     break;
                                 }
-                                Err(_) => {
+                                Err(problem) => {
+                                    if problem == OUT_OF_MEMORY_BUDGET {
+                                        refuse_over_budget(&writer, Some(&*active));
+                                    }
                                     finished = Some(false);
                                     break;
                                 }

@@ -297,11 +297,80 @@ fn deliveries_past_the_memory_budget_wait_until_the_ones_before_them_are_written
         .filter(|&count| count > 0)
         .collect();
     assert_eq!(transfers_per_write, [1, 1], "{writes:?}");
+    for (_, _, payload) in writes
+        .iter()
+        .flatten()
+        .filter(|(code, _, _)| *code == 0x14)
+    {
+        let (header, _) = decode_first(payload).unwrap();
+        assert_eq!(
+            (header.field(3), header.field(4)),
+            (&Value::Bool(true), &Value::Uint(0))
+        );
+    }
     assert_eq!(budget.used_bytes(), 0);
     assert_eq!(
         queues.depth("jobs", u64::MAX).unwrap(),
         eggdb_queues::Depth::default()
     );
+}
+
+#[test]
+fn a_queued_message_past_the_memory_budget_closes_its_receiver_without_leasing_it() {
+    let keyspace = MemoryKeyspace::default();
+    let queues = eggdb_queues::Queues::new(&keyspace);
+    queues.declare("huge").unwrap();
+    queues.send("huge", &vec![b'h'; 150_000], 0, 0).unwrap();
+    let (budget, config) = budgeted(100_000);
+    let mut connect = opened_session();
+    connect.extend(frame(
+        0,
+        0,
+        0x12,
+        vec![
+            Value::String("in".to_owned()),
+            Value::Uint(0),
+            Value::Bool(true),
+            Value::Ubyte(1),
+            Value::Ubyte(0),
+            terminus(0x28, "huge"),
+            Value::Null,
+        ],
+        &[],
+    ));
+    connect.extend(frame(
+        0,
+        0,
+        0x13,
+        vec![
+            Value::Uint(0),
+            Value::Uint(100),
+            Value::Uint(0),
+            Value::Uint(100),
+            Value::Uint(0),
+            Value::Uint(0),
+            Value::Uint(5),
+        ],
+        &[],
+    ));
+    let heartbeat = vec![0, 0, 0, 8, 2, 0, 0, 0];
+    let replies: Vec<(u64, Value, Vec<u8>)> = run_writes(
+        &keyspace,
+        &config,
+        vec![sasl("secret"), connect, heartbeat.clone(), heartbeat],
+    )
+    .into_iter()
+    .flatten()
+    .collect();
+    assert!(replies.iter().all(|(code, _, _)| *code != 0x14), "{replies:?}");
+    let (code, close, _) = replies.last().unwrap();
+    assert_eq!(*code, 0x18, "{replies:?}");
+    assert_eq!(
+        close.field(0).field(0),
+        &Value::Symbol("amqp:resource-limit-exceeded".to_owned())
+    );
+    assert_eq!(budget.used_bytes(), 0);
+    assert_eq!(queues.receive("huge", 1, 1, 1).unwrap()[0].receive_count, 1);
 }
 
 #[test]
