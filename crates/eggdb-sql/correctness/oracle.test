@@ -3323,6 +3323,292 @@ SELECT LISTAGG(DISTINCT ename, ',') WITHIN GROUP (ORDER BY ename) OVER (PARTITIO
 ok
 DROP TABLE staff300
 
+chapter "Analytic Functions": ROW_NUMBER, RANK, DENSE_RANK, PERCENT_RANK, CUME_DIST, NTILE, LAG, LEAD, FIRST_VALUE, LAST_VALUE, NTH_VALUE with IGNORE NULLS and FROM LAST, aggregates OVER, RATIO_TO_REPORT and KEEP (DENSE_RANK FIRST|LAST)
+ok
+CREATE TABLE emp332 (employee_id NUMBER PRIMARY KEY, last_name VARCHAR2(20), department_id NUMBER, salary NUMBER, commission_pct NUMBER)
+
+ok
+INSERT INTO emp332 VALUES (100, 'King', 90, 24000, NULL)
+
+ok
+INSERT INTO emp332 VALUES (101, 'Kochhar', 90, 17000, NULL)
+
+ok
+INSERT INTO emp332 VALUES (102, 'De Haan', 90, 17000, NULL)
+
+ok
+INSERT INTO emp332 VALUES (103, 'Hunold', 60, 9000, NULL)
+
+ok
+INSERT INTO emp332 VALUES (104, 'Ernst', 60, 6000, NULL)
+
+ok
+INSERT INTO emp332 VALUES (105, 'Austin', 60, 4800, NULL)
+
+ok
+INSERT INTO emp332 VALUES (145, 'Russell', 80, 14000, .4)
+
+ok
+INSERT INTO emp332 VALUES (146, 'Partners', 80, 13500, .3)
+
+ok
+INSERT INTO emp332 VALUES (147, 'Errazuriz', 80, 12000, .3)
+
+rows
+SELECT last_name, RANK() OVER (PARTITION BY department_id ORDER BY salary DESC) rnk, DENSE_RANK() OVER (PARTITION BY department_id ORDER BY salary DESC) drnk, ROW_NUMBER() OVER (PARTITION BY department_id ORDER BY salary DESC, employee_id) rn FROM emp332 WHERE department_id = 90 ORDER BY employee_id
+----
+LAST_NAME|RNK|DRNK|RN
+King|1|1|1
+Kochhar|2|2|2
+De Haan|2|2|3
+SELECT 3
+
+rows
+SELECT last_name, NTILE(2) OVER (ORDER BY salary DESC) bucket, PERCENT_RANK() OVER (ORDER BY salary) pr FROM emp332 WHERE department_id = 60 ORDER BY salary DESC
+----
+LAST_NAME|BUCKET|PR
+Hunold|1|1
+Ernst|1|.5
+Austin|2|0
+SELECT 3
+
+rows
+SELECT last_name, CUME_DIST() OVER (ORDER BY salary) cd FROM emp332 WHERE department_id = 90 OR employee_id = 103 ORDER BY salary, employee_id
+----
+LAST_NAME|CD
+Hunold|.25
+Kochhar|.75
+De Haan|.75
+King|1
+SELECT 4
+
+rows
+SELECT last_name, LAG(salary, 1, 0) OVER (ORDER BY employee_id) prev, LEAD(salary) OVER (ORDER BY employee_id) nxt FROM emp332 WHERE department_id = 60 ORDER BY employee_id
+----
+LAST_NAME|PREV|NXT
+Hunold|0|6000
+Ernst|9000|4800
+Austin|6000|NULL
+SELECT 3
+
+rows
+SELECT employee_id, LAG(commission_pct IGNORE NULLS) OVER (ORDER BY employee_id) inside, LAG(commission_pct) IGNORE NULLS OVER (ORDER BY employee_id) outside, LAG(commission_pct, 2) RESPECT NULLS OVER (ORDER BY employee_id) respected FROM emp332 WHERE employee_id >= 105 ORDER BY employee_id
+----
+EMPLOYEE_ID|INSIDE|OUTSIDE|RESPECTED
+105|NULL|NULL|NULL
+145|NULL|NULL|NULL
+146|.4|.4|NULL
+147|.3|.3|.4
+SELECT 4
+
+rows
+SELECT employee_id, FIRST_VALUE(commission_pct) OVER (ORDER BY employee_id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) fv, FIRST_VALUE(commission_pct IGNORE NULLS) OVER (ORDER BY employee_id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) fv_known, LAST_VALUE(commission_pct) IGNORE NULLS OVER (ORDER BY employee_id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) lv_known FROM emp332 WHERE employee_id IN (105, 145, 147) ORDER BY employee_id
+----
+EMPLOYEE_ID|FV|FV_KNOWN|LV_KNOWN
+105|NULL|.4|.3
+145|NULL|.4|.3
+147|NULL|.4|.3
+SELECT 3
+
+rows
+SELECT last_name, NTH_VALUE(salary, 2) FROM FIRST OVER (PARTITION BY department_id ORDER BY salary ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) second_lowest, NTH_VALUE(salary, 1) FROM LAST OVER (PARTITION BY department_id ORDER BY salary ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) highest FROM emp332 WHERE department_id = 80 ORDER BY employee_id
+----
+LAST_NAME|SECOND_LOWEST|HIGHEST
+Russell|13500|14000
+Partners|13500|14000
+Errazuriz|13500|14000
+SELECT 3
+
+rows
+SELECT last_name, SUM(salary) OVER (PARTITION BY department_id) total, AVG(salary) OVER (PARTITION BY department_id) average, SUM(salary) OVER (ORDER BY employee_id ROWS UNBOUNDED PRECEDING) running, COUNT(*) OVER () everyone FROM emp332 WHERE department_id = 60 ORDER BY employee_id
+----
+LAST_NAME|TOTAL|AVERAGE|RUNNING|EVERYONE
+Hunold|19800|6600|9000|3
+Ernst|19800|6600|15000|3
+Austin|19800|6600|19800|3
+SELECT 3
+
+rows
+SELECT department_id, MIN(salary) KEEP (DENSE_RANK FIRST ORDER BY commission_pct) "Worst", MAX(salary) KEEP (DENSE_RANK LAST ORDER BY commission_pct) "Best" FROM emp332 GROUP BY department_id ORDER BY department_id
+----
+DEPARTMENT_ID|Worst|Best
+60|4800|9000
+80|12000|14000
+90|17000|24000
+SELECT 3
+
+rows
+SELECT last_name, salary, MIN(salary) KEEP (DENSE_RANK FIRST ORDER BY commission_pct) OVER (PARTITION BY department_id) "Worst", MAX(salary) KEEP (DENSE_RANK LAST ORDER BY commission_pct) OVER (PARTITION BY department_id) "Best" FROM emp332 WHERE department_id = 80 ORDER BY employee_id
+----
+LAST_NAME|SALARY|Worst|Best
+Russell|14000|12000|14000
+Partners|13500|12000|14000
+Errazuriz|12000|12000|14000
+SELECT 3
+
+error 42P20 30485
+SELECT ROW_NUMBER() OVER (PARTITION BY department_id) FROM emp332
+
+error 42809 30484
+SELECT RANK() FROM emp332
+
+error 42601 909
+SELECT NTILE() OVER (ORDER BY salary) FROM emp332
+
+ok
+CREATE TABLE sales332 (id NUMBER, region VARCHAR2(1), amount NUMBER)
+
+ok
+INSERT INTO sales332 VALUES (1, 'E', 1000)
+
+ok
+INSERT INTO sales332 VALUES (2, 'E', 3000)
+
+ok
+INSERT INTO sales332 VALUES (3, 'W', 500)
+
+ok
+INSERT INTO sales332 VALUES (4, 'W', 500)
+
+ok
+INSERT INTO sales332 VALUES (5, 'W', NULL)
+
+rows
+SELECT id, RATIO_TO_REPORT(amount) OVER (PARTITION BY region) ratio FROM sales332 ORDER BY id
+----
+ID|RATIO
+1|.25
+2|.75
+3|.5
+4|.5
+5|NULL
+SELECT 5
+
+rows
+SELECT id, RATIO_TO_REPORT(amount) OVER () ratio FROM sales332 WHERE region = 'E' ORDER BY id
+----
+ID|RATIO
+1|.25
+2|.75
+SELECT 2
+
+error 42601 30487
+SELECT RATIO_TO_REPORT(amount) OVER (ORDER BY id) FROM sales332
+
+ok
+DROP TABLE sales332
+
+ok
+DROP TABLE emp332
+
+chapter "REGEXP_LIKE", "REGEXP_COUNT", "REGEXP_INSTR", "REGEXP_SUBSTR", "REGEXP_REPLACE": position, occurrence, return_option, match_parameter and subexpression, NULL for an empty result
+ok
+CREATE TABLE emp332r (employee_id NUMBER PRIMARY KEY, last_name VARCHAR2(20), phone_number VARCHAR2(20))
+
+ok
+INSERT INTO emp332r VALUES (100, 'King', '515.123.4567')
+
+ok
+INSERT INTO emp332r VALUES (101, 'Kochhar', '515.123.4568')
+
+ok
+INSERT INTO emp332r VALUES (103, 'Hunold', '590.423.4567')
+
+rows
+SELECT last_name FROM emp332r WHERE REGEXP_LIKE(last_name, '^k', 'i') ORDER BY employee_id
+----
+LAST_NAME
+King
+Kochhar
+SELECT 2
+
+rows
+SELECT last_name FROM emp332r WHERE REGEXP_LIKE(last_name, '^k') ORDER BY employee_id
+----
+LAST_NAME
+SELECT 0
+
+rows
+SELECT REGEXP_REPLACE(phone_number, '([[:digit:]]{3})\.([[:digit:]]{3})\.([[:digit:]]{4})', '(\1) \2-\3') formatted FROM emp332r ORDER BY employee_id
+----
+FORMATTED
+(515) 123-4567
+(515) 123-4568
+(590) 423-4567
+SELECT 3
+
+rows
+SELECT '<' || REGEXP_REPLACE('Peru', '(.)', '\1 ') || '>' spaced FROM dual
+----
+SPACED
+<P e r u >
+SELECT 1
+
+rows
+SELECT REGEXP_REPLACE('500   Oracle     Parkway,    Redwood  Shores, CA', '( ){2,}', ' ') squeezed FROM dual
+----
+SQUEEZED
+500 Oracle Parkway, Redwood Shores, CA
+SELECT 1
+
+rows
+SELECT REGEXP_SUBSTR('500 Oracle Parkway, Redwood Shores, CA', ',[^,]+,') part FROM dual
+----
+PART
+, Redwood Shores,
+SELECT 1
+
+rows
+SELECT REGEXP_SUBSTR('http://www.example.com/products', 'http://([[:alnum:]]+\.?){3,4}/?') url FROM dual
+----
+URL
+http://www.example.com/
+SELECT 1
+
+rows
+SELECT REGEXP_SUBSTR('1234567890', '(123)(4(56)(78))', 1, 1, 'i', 4) sub4, REGEXP_INSTR('1234567890', '(123)(4(56)(78))', 1, 1, 0, 'i', 4) at4 FROM dual
+----
+SUB4|AT4
+78|7
+SELECT 1
+
+rows
+SELECT REGEXP_INSTR('500 Oracle Parkway, Redwood Shores, CA', '[^ ]+', 1, 6) sixth, REGEXP_INSTR('500 Oracle Parkway, Redwood Shores, CA', '[s|r|p][[:alpha:]]{6}', 3, 2, 1, 'i') after_second FROM dual
+----
+SIXTH|AFTER_SECOND
+37|28
+SELECT 1
+
+rows
+SELECT REGEXP_COUNT('123123123123123', '(12)3', 1, 'i') n, REGEXP_COUNT('123123123123', '123', 3, 'i') from_three FROM dual
+----
+N|FROM_THREE
+5|3
+SELECT 1
+
+rows
+SELECT REGEXP_REPLACE('a.b.c', '\.', '-', 1, 2) second_only, REGEXP_REPLACE('a.b.c', '\.', '-') every_one, REGEXP_SUBSTR('ab', 'a|ab') first_alternative FROM dual
+----
+SECOND_ONLY|EVERY_ONE|FIRST_ALTERNATIVE
+a.b-c|a-b-c|a
+SELECT 1
+
+rows
+SELECT REGEXP_SUBSTR('abc', 'x') no_match, REGEXP_REPLACE('aaa', 'a') emptied, REGEXP_COUNT(NULL, 'a') no_source FROM dual
+----
+NO_MATCH|EMPTIED|NO_SOURCE
+NULL|NULL|NULL
+SELECT 1
+
+error 22003 1428
+SELECT REGEXP_SUBSTR('abc', 'b', 0) FROM dual
+
+error 22023 1760
+SELECT REGEXP_COUNT('abc', 'b', 1, 'g') FROM dual
+
+ok
+DROP TABLE emp332r
+
 chapter "Hierarchical Queries": START WITH ... CONNECT BY PRIOR, LEVEL, SYS_CONNECT_BY_PATH, CONNECT_BY_ROOT, CONNECT_BY_ISLEAF and ORDER SIBLINGS BY
 ok
 CREATE TABLE emp304 (employee_id NUMBER PRIMARY KEY, last_name VARCHAR2(20), manager_id NUMBER)
