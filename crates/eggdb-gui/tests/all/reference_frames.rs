@@ -2,8 +2,8 @@
 //! 1x and 2x, the PNG must equal the library's own render byte for byte, and its checksum must
 //! equal the one in `tests/data/reference-frames.txt` on every OS (the rasterizer is our own
 //! CPU code and the box typeface needs no font file, so the pixels are the same everywhere).
-//! `EGGDB_GUI_UPDATE_REFERENCES=1 cargo test -p eggdb-gui --test reference_frames` rewrites the
-//! list from this system's frames; each frame is kept in `target/gui/reference/` to look at.
+//! `EGGDB_GUI_UPDATE_REFERENCES=1 cargo test -p eggdb-gui --test all reference_frames` rewrites
+//! the list from this system's frames; each frame is kept in `target/gui/reference/` to look at.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -184,7 +184,7 @@ fn the_connect_card_renders_the_reference_pixels_in_every_theme_and_scale() {
     assert!(
         problems.is_empty(),
         "the connect card's pixels changed:\n{}\nIf the change is intended, run \
-         {UPDATE_VARIABLE}=1 cargo test -p eggdb-gui --test reference_frames and commit \
+         {UPDATE_VARIABLE}=1 cargo test -p eggdb-gui --test all reference_frames and commit \
          crates/eggdb-gui/tests/data/reference-frames.txt",
         problems.join("\n")
     );

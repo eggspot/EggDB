@@ -16,7 +16,7 @@ file `main.rs` doesn't declare and on a package without the setting. A test keep
 gains its file's module (`cargo test serve` still finds `serve::...`); a test that runs its own
 program again as a child names itself with that module (`--exact process::...`). Debug and test
 builds keep line tables only (`debug = "line-tables-only"`), enough for a panic's file and line
-and a backtrace's, and no debug information for third-party test crates.
+and a backtrace's; packages from outside the workspace (none today, D1) get no debug information.
 
 ## The whole stack: the crash sweep (D85)
 `crates/eggdb-storage/src/crash_sweep_tests.rs` runs a seeded B+tree workload through the page

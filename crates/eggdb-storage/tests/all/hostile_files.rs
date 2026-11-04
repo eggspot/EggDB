@@ -5,7 +5,7 @@
 //!
 //! `EGGDB_FUZZ_CASES` sets how many cases run (800 by default) and `EGGDB_FUZZ_SEED` the
 //! seed they are drawn from, so a long campaign runs as
-//! `EGGDB_FUZZ_CASES=200000 cargo test --release -p eggdb-storage --test hostile_files`, and
+//! `EGGDB_FUZZ_CASES=200000 cargo test --release -p eggdb-storage --test all hostile_files`, and
 //! a failure names the seed and case that reproduce it.
 
 use eggdb_platform::{
