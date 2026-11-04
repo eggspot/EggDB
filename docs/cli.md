@@ -193,8 +193,12 @@ checked app.db as of commit 2026-10-26 09:14:07.123456 UTC (stamp 17930060471234
 ok: every page passed its checksum, every key is in order, and every page of the file is accounted for.
 ```
 
-Leaked pages (pages the file lost track of) are harmless and still exit 0. Damage exits 4 and
-says what to do:
+Leaked pages (pages the file lost track of) are harmless and still exit 0. `check` also reads
+every collection's kept entry count (D320) and compares it with a scan of the collection's keys,
+expired ones included until the sweep removes them; a count that is damaged or differs exits 4
+with `the collection "<name>" keeps a count of … but holds …`, which names both figures and says
+to restore from a backup or remove the collection with `eggdb collection delete`. Damage exits 4
+and says what to do:
 
 ```
 checked app.db as of commit 2026-10-26 09:14:07.123456 UTC (stamp 1793006047123456.0003)
@@ -682,7 +686,8 @@ eggdb collection delete app.db cache
 - `stats --collections` adds each collection's entries, key bytes and value bytes from its kept
   count (`"collections":[{"name","entries","key_bytes","value_bytes"}]` in JSON), so it stays as
   instant as plain `stats`.
-- SQL does not see collections in this release, and `check` reports the whole file.
+- SQL does not see collections in this release, and `check` reports the whole file, every
+  collection's kept count compared with its keys included.
 
 ## Expiring keys and counters
 

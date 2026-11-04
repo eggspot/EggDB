@@ -2346,7 +2346,12 @@ block that created a table leaves no table.
   SQL Server 6401). In `eggdb shell` the key-value commands of a block (`put`, `del`, `incr`,
   `expire`, `cas` and the rest) are undone by `ROLLBACK TO SAVEPOINT` with the SQL changes
   made after the savepoint, and embedded code gets the same through
-  `SharedWriteStore::with_open_transaction_undoable` (D319).
+  `SharedWriteStore::with_open_transaction_undoable` (D319). To undo a statement, EggDB keeps
+  the previous value of every key it writes, with 64 bytes per entry, against the statement's
+  1 GiB work memory: inside a savepoint in every dialect, and inside any transaction in the
+  dialects other than PostgreSQL's. A statement that passes it fails with `53200` (out of
+  memory) and is undone like any failed statement (D317). The savepoint's log holds its entries
+  in memory until `RELEASE`, `ROLLBACK TO` or `COMMIT`.
 - **Row locks.** `SELECT ... FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY SHARE` with
   `OF`, `NOWAIT`, `SKIP LOCKED` (and Oracle's `WAIT n`, MySQL's `LOCK IN SHARE MODE`) and
   `LOCK TABLE ... IN ... MODE [NOWAIT]` are accepted. A transaction block holds the database's
@@ -4486,6 +4491,10 @@ two, `COPY` in the binary format and in another encoding, now match). The other 
   statement.
 - `UPDATE` and `DELETE` collect the rows they change before changing them, in memory.
 - A whole transaction must fit in the page cache (`--cache`), as for every write (D86).
+- Inside a savepoint, each statement keeps the previous value of every key it writes (plus 64
+  bytes per entry) against its 1 GiB work memory, and a statement that passes that fails with
+  `53200` and is undone (D317); PostgreSQL has no such limit. The savepoint's undo log keeps
+  those entries until `RELEASE`, `ROLLBACK TO` or `COMMIT`, in memory.
 - Type checks happen as rows are evaluated, so a type mismatch in a `WHERE` on an empty table
   is not reported (PostgreSQL reports it when planning).
 - `DEFAULT` expressions are checked for column references when the table is created and

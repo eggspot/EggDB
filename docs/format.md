@@ -454,7 +454,10 @@ Recovery is analysis and redo from `checkpoint_lsn`, with no undo pass:
   ever sees. The `0x07` count is written with the collection and changed by the commit of every
   write to its `0x03` keys, so it always equals what a scan of the stored keys (expired ones
   included, until the sweep removes them) would count; a drop removes it in its first commit.
-  A collection made before D320 has none, and is counted once from its keys, then kept. The first
+  A collection made before D320 has none, and is counted once from its keys, then kept.
+  `Database::check` (`eggdb check`) reads every kept count and compares it with a scan of the
+  collection's stored keys in the same snapshot: a count that is damaged or differs is `Corrupt`,
+  naming the collection and both figures. The first
   commit that writes a count sets the read-only-compatible feature `COLLECTION_COUNTS`, so a
   release before D320, which would change keys without their count, only reads the file. A count
   record with a version above 1 is refused as written by a newer release; one of any other

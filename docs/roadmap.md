@@ -414,6 +414,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `default_transaction_read_only` applies to a procedure `CALL` that commits inside it (D318).
 - `ROLLBACK TO SAVEPOINT` undoes key-value writes made through `eggdb serve`'s RESP and wire
   sessions once those share a block with SQL (D319).
+- The savepoint undo log bounded as a whole against the session's memory budget, or spilled to
+  disk: each statement's before-images stop at 1 GiB with `53200` (D317), but the log keeps every
+  statement's and key-value write's entries until `RELEASE`, `ROLLBACK TO` or `COMMIT` (D266,
+  D307, D319).
 
 ### M4 Embedded key-value and the single file
 - A benchmark against SQLite's `:memory:` in the compare job (D175).
@@ -424,6 +428,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (D320).
 - `eggdb export`, `import` and `restore` show their progress on the shared progress line
   (`cli/progress.rs`) (D320).
+- Claude Fable's review of the built CLI and UI text for collection counts, renames and drop
+  progress (D320).
 - SQLite's `speedtest1` and the standard embedded benchmarks on the `embedded` profile (D41).
   Check: the compare job, gated.
 - On-disk overhead per row and per index entry, measured and gated with the other budgets (D6).
@@ -724,8 +730,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (refused with 42501 for now); writes to tables listed with columns, foreign keys to unlisted
   tables and column lists on views (whose query text no catalog shows) are built (D306).
 - MCP key writes for agents acting as a role, through key-level grants (D328).
-- A per-session key allow-list, so the MCP key-value tools work under `--mcp-tables` (D328).
+- A per-session key allow-list, so the MCP key-value tools work under `--tables` and
+  `--mcp-tables` (D328).
 - Counters, compare-and-set and `expire` as MCP tools (D328).
+- `expires_at` in the MCP `put` tool's result, matching `eggdb put --json` (D328).
 - Backup, restore and administration tools (D11).
 - Tools that query documents, search indexes, vectors, graphs and keys in their own query
   languages (D10, D11).
@@ -752,6 +760,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - The editor keeps its focused look while its menu is open (D329).
 - `Paste` in the browser reads the clipboard (D329).
 - `menu`, `menuitem` and `searchbox` roles in the platform layer's accessibility (D329).
+- `Stop` interrupting a RESP reconnect's TCP connect itself, which now takes effect when that
+  connect ends (D329).
 - Rows streamed into the grid with pages fetched on scroll (D275).
 - The value view's text selection and SQL type names; menu, dialog and scroll bar accessibility
   roles; scrollbars that hide and fade; the editor's draggable and horizontal scrollbars; the
@@ -765,12 +775,13 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   portal and `View > Reduce motion` (D311).
 - Showing in the plan view the join-step times and Oracle's measured plans (`DISPLAY_CURSOR`)
   once M6c's `EXPLAIN` builds them, and the plan tooltip in the accessibility tree (D277, D312).
-- Connecting over the MySQL, TDS and RESP protocols, recent connections in the sidebar, the
-  password field's `Show` button, and `verify-ca`/`verify-full` certificate checks in the GUI
-  (D274).
+- Connecting over the MySQL and TDS protocols, recent connections in the sidebar, the password
+  field's `Show` button, and `verify-ca`/`verify-full` certificate checks in the GUI (D274);
+  RESP connections are built (D329).
 - Every data model in the object browser: documents, search, series, graphs, vectors and queues,
   each opened in its own form (D15, D276).
-- Completion, formatting and error help with `Fix` buttons in the query editor (D15, D275).
+- Completion and error help with `Fix` buttons in the query editor; `Format statement` is built
+  (D15, D275, D329).
 - Editing data in the grid (D15).
 - Import, export, backup and restore screens, with import wizards (D13, D15, D42).
 - Users and permissions screens (D15).
