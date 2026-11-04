@@ -182,12 +182,35 @@ pub(crate) fn encode_message(
     out.bytes
 }
 
-fn decode_message(stored: &[u8]) -> Parsed<(String, String, Vec<u8>, Vec<u8>)> {
-    let mut args = Args::new(stored);
-    let exchange = args.shortstr()?;
-    let routing_key = args.shortstr()?;
-    let properties = args.longstr()?.to_vec();
-    Ok((exchange, routing_key, properties, args.rest().to_vec()))
+struct StoredMessage<'m> {
+    exchange: String,
+    routing_key: String,
+    properties: &'m [u8],
+    body: &'m [u8],
+}
+
+impl<'m> StoredMessage<'m> {
+    fn framed(stored: &'m [u8]) -> Parsed<Self> {
+        let mut args = Args::new(stored);
+        let exchange = args.shortstr()?;
+        let routing_key = args.shortstr()?;
+        let properties = args.longstr()?;
+        Ok(Self {
+            exchange,
+            routing_key,
+            properties,
+            body: args.rest(),
+        })
+    }
+
+    fn read(queue: &str, stored: &'m [u8]) -> Self {
+        Self::framed(stored).unwrap_or_else(|_| Self {
+            exchange: String::new(),
+            routing_key: queue.to_owned(),
+            properties: &[],
+            body: stored,
+        })
+    }
 }
 
 struct Consumer {
@@ -270,22 +293,23 @@ impl Connection<'_, '_> {
         }
     }
 
-    fn deliver_message(&mut self, channel: u16, out: Out, stored: &[u8]) -> Parsed<()> {
-        let (_, _, properties, body) = decode_message(stored)?;
+    fn deliver_message(&mut self, channel: u16, out: Out, message: &StoredMessage<'_>) {
         self.send(channel, out);
         let mut header = Out::default();
-        header.short(60).short(0).longlong(body.len() as u64);
-        header.bytes.extend_from_slice(if properties.is_empty() {
+        header
+            .short(60)
+            .short(0)
+            .longlong(message.body.len() as u64);
+        header.bytes.extend_from_slice(if message.properties.is_empty() {
             &[0, 0]
         } else {
-            &properties
+            message.properties
         });
         self.outgoing
             .push_back(frame(FRAME_HEADER, channel, &header.bytes));
-        for chunk in body.chunks((FRAME_MAX - 8) as usize) {
+        for chunk in message.body.chunks((FRAME_MAX - 8) as usize) {
             self.outgoing.push_back(frame(FRAME_BODY, channel, chunk));
         }
-        Ok(())
     }
 
     fn pump(&mut self, held: &mut Reservation<'_>) -> bool {
@@ -368,10 +392,7 @@ impl Connection<'_, '_> {
     ) {
         let mut messages = messages.into_iter();
         while let Some(message) = messages.next() {
-            let decoded = decode_message(&message.body);
-            let (Some(state), Ok((exchange, routing_key, _, _))) =
-                (self.channels.get_mut(&channel), decoded)
-            else {
+            let Some(state) = self.channels.get_mut(&channel) else {
                 let now = now_ms();
                 for unsent in std::iter::once(message).chain(messages) {
                     let _ = self.broker.queues.unlease(queue, unsent.id, now);
@@ -387,15 +408,14 @@ impl Connection<'_, '_> {
                     .unacked
                     .insert(delivery_tag, (queue.to_owned(), message.id));
             }
+            let stored = StoredMessage::read(queue, &message.body);
             let mut out = Out::method(60, 60);
             out.shortstr(tag)
                 .longlong(delivery_tag)
                 .octet(u8::from(message.receive_count > 1))
-                .shortstr(&exchange)
-                .shortstr(&routing_key);
-            if self.deliver_message(channel, out, &message.body).is_err() {
-                return;
-            }
+                .shortstr(&stored.exchange)
+                .shortstr(&stored.routing_key);
+            self.deliver_message(channel, out, &stored);
         }
     }
 
@@ -895,14 +915,14 @@ impl Connection<'_, '_> {
                                 .unacked
                                 .insert(delivery_tag, (queue.clone(), message.id));
                         }
-                        let (exchange, routing_key, _, _) = decode_message(&message.body)?;
+                        let stored = StoredMessage::read(&queue, &message.body);
                         let mut out = Out::method(60, 71);
                         out.longlong(delivery_tag)
                             .octet(u8::from(message.receive_count > 1))
-                            .shortstr(&exchange)
-                            .shortstr(&routing_key)
+                            .shortstr(&stored.exchange)
+                            .shortstr(&stored.routing_key)
                             .long(remaining as u32);
-                        self.deliver_message(channel, out, &message.body)?;
+                        self.deliver_message(channel, out, &stored);
                     }
                 }
             }

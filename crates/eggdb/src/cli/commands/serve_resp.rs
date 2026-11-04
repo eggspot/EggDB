@@ -34,6 +34,19 @@ fn visit_scanned(
     Ok(())
 }
 
+fn visit_entries(
+    scan: impl Iterator<Item = Result<(Vec<u8>, Vec<u8>), eggdb::Error>>,
+    visit: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool, String>,
+) -> Result<(), String> {
+    for entry in scan {
+        let (key, value) = entry.map_err(|error| failed(&error))?;
+        if !visit(&key, &value)? {
+            break;
+        }
+    }
+    Ok(())
+}
+
 struct ReadKeys<'c> {
     collection: Option<ReadCollection<'c>>,
 }
@@ -75,6 +88,17 @@ impl KeysRead for ReadKeys<'_> {
             .map(|entry| entry.map_err(|error| failed(&error)))
             .collect()
     }
+
+    fn visit_prefix(
+        &self,
+        prefix: &[u8],
+        visit: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool, String>,
+    ) -> Result<(), String> {
+        let Some(collection) = &self.collection else {
+            return Ok(());
+        };
+        visit_entries(collection.scan_prefix(prefix), visit)
+    }
 }
 
 struct WriteKeys<'t, 'db> {
@@ -105,6 +129,14 @@ impl KeysRead for WriteKeys<'_, '_> {
             .scan_prefix(prefix)
             .map(|entry| entry.map_err(|error| failed(&error)))
             .collect()
+    }
+
+    fn visit_prefix(
+        &self,
+        prefix: &[u8],
+        visit: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool, String>,
+    ) -> Result<(), String> {
+        visit_entries(self.collection.scan_prefix(prefix), visit)
     }
 }
 

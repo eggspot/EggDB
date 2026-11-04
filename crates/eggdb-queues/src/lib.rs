@@ -88,7 +88,21 @@ struct Stored {
     body: Vec<u8>,
 }
 
+const STORED_HEADER_BYTES: usize = 20;
+
 impl Stored {
+    fn visible_ms_and_body_length(bytes: &[u8]) -> Result<(u64, usize)> {
+        let visible = bytes
+            .get(..8)
+            .and_then(|visible| <[u8; 8]>::try_from(visible).ok())
+            .ok_or_else(|| QueueError::Storage("a stored message is damaged".to_owned()))?;
+        let body_length = bytes
+            .len()
+            .checked_sub(STORED_HEADER_BYTES)
+            .ok_or_else(|| QueueError::Storage("a stored message is damaged".to_owned()))?;
+        Ok((u64::from_be_bytes(visible), body_length))
+    }
+
     fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(20 + self.body.len());
         out.extend_from_slice(&self.visible_ms.to_be_bytes());
@@ -336,20 +350,32 @@ impl<'k> Queues<'k> {
                 return Err(QueueError::NoQueue(name.to_owned()));
             }
             let mut chosen = Vec::new();
-            for (key, value) in keys.scan(&messages_prefix(name)).map_err(storage)? {
+            let mut damaged = None;
+            keys.visit_prefix(&messages_prefix(name), &mut |key, value| {
                 if chosen.len() >= max {
-                    break;
+                    return Ok(false);
                 }
-                let stored = Stored::decode(&value)?;
-                if stored.visible_ms > now_ms {
-                    continue;
+                let (visible_ms, body_length) = match Stored::visible_ms_and_body_length(value) {
+                    Ok(header) => header,
+                    Err(error) => {
+                        damaged = Some(error);
+                        return Ok(false);
+                    }
+                };
+                if visible_ms > now_ms {
+                    return Ok(true);
                 }
-                if !fits(stored.body.len()) {
-                    break;
+                if !fits(body_length) {
+                    return Ok(false);
                 }
-                chosen.push(key);
+                chosen.push(key.to_vec());
+                Ok(true)
+            })
+            .map_err(storage)?;
+            match damaged {
+                Some(error) => Err(error),
+                None => Ok(chosen),
             }
-            Ok(chosen)
         })?;
         if chosen.is_empty() {
             return Ok(Vec::new());
@@ -426,14 +452,23 @@ impl<'k> Queues<'k> {
                 return Err(QueueError::NoQueue(name.to_owned()));
             }
             let mut depth = Depth::default();
-            for (_, value) in keys.scan(&messages_prefix(name)).map_err(storage)? {
-                if Stored::decode(&value)?.visible_ms <= now_ms {
-                    depth.ready += 1;
-                } else {
-                    depth.waiting += 1;
+            let mut damaged = None;
+            keys.visit_prefix(&messages_prefix(name), &mut |_, value| {
+                match Stored::visible_ms_and_body_length(value) {
+                    Ok((visible_ms, _)) if visible_ms <= now_ms => depth.ready += 1,
+                    Ok(_) => depth.waiting += 1,
+                    Err(error) => {
+                        damaged = Some(error);
+                        return Ok(false);
+                    }
                 }
+                Ok(true)
+            })
+            .map_err(storage)?;
+            match damaged {
+                Some(error) => Err(error),
+                None => Ok(depth),
             }
-            Ok(depth)
         })
     }
 }

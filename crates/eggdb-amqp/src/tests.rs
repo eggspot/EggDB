@@ -397,3 +397,60 @@ fn a_small_budget_delivers_every_queued_message_to_every_consumer_without_redeli
     assert_eq!(queues.receive("huge", 1, 1, 1).unwrap()[0].receive_count, 1);
     assert_eq!(budget.used_bytes(), 0);
 }
+
+#[test]
+fn a_body_another_protocol_stored_reaches_amqp_consumers_as_a_plain_message() {
+    let keyspace = MemoryKeyspace::default();
+    let broker = Broker::new(&keyspace);
+    let queues = eggdb_queues::Queues::new(&keyspace);
+    queues.declare("jobs").unwrap();
+    queues.send("jobs", b"raw from sqs", 0, 0).unwrap();
+    queues
+        .send("jobs", &encode_message("", "jobs", &[], b"framed"), 0, 0)
+        .unwrap();
+    queues.send("jobs", b"", 0, 0).unwrap();
+    let mut input = login("secret");
+    input.extend(method(1, 60, 20, |out| {
+        out.short(0)
+            .shortstr("jobs")
+            .shortstr("c1")
+            .octet(2)
+            .empty_table();
+    }));
+    let reader = PolledInput {
+        input: &input,
+        idle_polls: 5,
+    };
+    let mut output = Vec::new();
+    serve_stream(&broker, &config(), reader, &mut output, &|| false).unwrap();
+    let answers = methods(&output);
+    let deliveries: Vec<&Vec<u8>> = answers
+        .iter()
+        .filter(|(kind, class, id, _)| *kind == FRAME_METHOD && (*class, *id) == (60, 60))
+        .map(|(_, _, _, payload)| payload)
+        .collect();
+    assert_eq!(deliveries.len(), 3);
+    assert_eq!(&deliveries[0][16..22], b"\x00\x04jobs");
+    let bodies: Vec<&Vec<u8>> = answers
+        .iter()
+        .filter(|(kind, _, _, _)| *kind == FRAME_BODY)
+        .map(|(_, _, _, payload)| payload)
+        .collect();
+    assert_eq!(bodies, [&b"raw from sqs".to_vec(), &b"framed".to_vec()]);
+    assert_eq!(
+        queues.depth("jobs", u64::MAX).unwrap(),
+        eggdb_queues::Depth::default()
+    );
+    queues.send("jobs", b"raw again", 0, 0).unwrap();
+    let mut get = login("secret");
+    get.extend(method(1, 60, 70, |out| {
+        out.short(0).shortstr("jobs").octet(1);
+    }));
+    let frames = run(&keyspace, &get);
+    assert!(
+        frames
+            .iter()
+            .any(|(kind, _, _, payload)| *kind == FRAME_BODY && payload == b"raw again")
+    );
+    assert_eq!(queues.depth("jobs", u64::MAX).unwrap().ready, 0);
+}

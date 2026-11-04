@@ -42,6 +42,24 @@ pub trait KeysRead {
         }
         Ok(found)
     }
+    /// Calls `visit` with each key starting with `prefix` and its stored bytes, in key order,
+    /// one entry at a time, until it returns `false` or an error, so a caller that needs only
+    /// the first entries never holds the others.
+    fn visit_prefix(
+        &self,
+        prefix: &[u8],
+        visit: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool, String>,
+    ) -> Result<(), String> {
+        self.visit_keys(&mut |key| {
+            if !key.starts_with(prefix) {
+                return Ok(key.as_slice() < prefix);
+            }
+            match self.get(&key)? {
+                Some(value) => visit(&key, &value),
+                None => Ok(true),
+            }
+        })
+    }
 }
 
 /// Changes one database's keys within a transaction.
@@ -110,6 +128,23 @@ impl KeysRead for MemoryKeys<'_> {
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect())
     }
+
+    fn visit_prefix(
+        &self,
+        prefix: &[u8],
+        visit: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool, String>,
+    ) -> Result<(), String> {
+        for (key, value) in self
+            .map
+            .range(prefix.to_vec()..)
+            .take_while(|(key, _)| key.starts_with(prefix))
+        {
+            if !visit(key, value)? {
+                break;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl KeysWrite for MemoryKeys<'_> {
@@ -156,5 +191,64 @@ impl Keyspace for MemoryKeyspace {
         body(&mut MemoryKeys { map: &mut changed })?;
         *current = changed;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{KeysRead, Keyspace, MemoryKeyspace};
+    use std::collections::BTreeMap;
+
+    struct KeysOnly(BTreeMap<Vec<u8>, Vec<u8>>);
+
+    impl KeysRead for KeysOnly {
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.0.get(key).cloned())
+        }
+
+        fn keys(&self) -> Result<Vec<Vec<u8>>, String> {
+            Ok(self.0.keys().cloned().collect())
+        }
+    }
+
+    fn entries() -> BTreeMap<Vec<u8>, Vec<u8>> {
+        [&b"a"[..], b"b", b"b\x01", b"b\x02", b"b\x03", b"c"]
+            .into_iter()
+            .map(|key| (key.to_vec(), key.to_vec()))
+            .collect()
+    }
+
+    fn first_two_under_b(keys: &dyn KeysRead) -> (Vec<Vec<u8>>, usize) {
+        let mut seen = Vec::new();
+        let mut calls = 0;
+        keys.visit_prefix(b"b", &mut |key, value| {
+            calls += 1;
+            assert_eq!(key, value);
+            seen.push(key.to_vec());
+            Ok(seen.len() < 2)
+        })
+        .unwrap();
+        (seen, calls)
+    }
+
+    #[test]
+    fn visit_prefix_sees_only_the_prefix_and_stops_when_told() {
+        let expected = vec![b"b".to_vec(), b"b\x01".to_vec()];
+        assert_eq!(first_two_under_b(&KeysOnly(entries())), (expected.clone(), 2));
+        let keyspace = MemoryKeyspace::default();
+        keyspace
+            .write(0, &mut |keys| {
+                for (key, value) in entries() {
+                    keys.put(&key, &value)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        keyspace
+            .read(0, &mut |keys| {
+                assert_eq!(first_two_under_b(keys), (expected.clone(), 2));
+                Ok(())
+            })
+            .unwrap();
     }
 }
