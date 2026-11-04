@@ -480,7 +480,7 @@ pub(crate) mod fake_server {
                             .map(|part| part.bytes().unwrap_or_default().to_vec())
                             .collect();
                         log.lock().unwrap().push(parts.clone());
-                        let Some(reply) = answer(&parts) else {
+                        let Some(reply) = answer(parts.as_slice()) else {
                             let _ = stream.shutdown(std::net::Shutdown::Both);
                             return;
                         };
