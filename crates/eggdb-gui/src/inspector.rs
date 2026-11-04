@@ -18,6 +18,7 @@ pub const SAMPLE_ROWS: usize = 5;
 
 const SAMPLE_COLUMNS: usize = 3;
 const DDL_LINES: usize = 12;
+const DDL_RING_OUTSET: f32 = 3.0;
 const PADDING: f32 = 12.0;
 const TOP: f32 = 44.0;
 const BOTTOM: f32 = 776.0;
@@ -62,6 +63,8 @@ pub struct Inspector {
     pub collapsed: Vec<InspectorBlock>,
     /// The selected table's sample, once fetched.
     pub sample: Option<Sample>,
+    /// Whether the `DDL` box has the focus, after `Show DDL` (`docs/ux/workspace.md` 10.9).
+    pub ddl_focused: bool,
 }
 
 impl Inspector {
@@ -478,7 +481,8 @@ pub(crate) fn draw(
             paint.text_right(faces.ui, "Copy", right, top + 4.0, BODY, theme.accent);
         }
         if open {
-            draw_block(paint, description, block, top + 28.0, (left, right));
+            let focused = inspector.ddl_focused && block == InspectorBlock::Ddl;
+            draw_block(paint, description, block, top + 28.0, (left, right), focused);
         }
     }
 }
@@ -489,6 +493,7 @@ fn draw_block(
     block: InspectorBlock,
     top: f32,
     (left, right): (f32, f32),
+    focused: bool,
 ) {
     let theme = paint.theme;
     let faces = paint.faces;
@@ -564,6 +569,17 @@ fn draw_block(
                 height.min(BOTTOM - 8.0 - top).max(0.0),
             );
             paint.canvas.stroke_rect(box_rect, theme.border);
+            if focused {
+                crate::main_window::focus_ring(
+                    paint,
+                    Rect::new(
+                        box_rect.x - DDL_RING_OUTSET,
+                        box_rect.y - DDL_RING_OUTSET,
+                        box_rect.w + 2.0 * DDL_RING_OUTSET,
+                        box_rect.h + 2.0 * DDL_RING_OUTSET,
+                    ),
+                );
+            }
             for (index, line) in lines.iter().enumerate() {
                 let y = top + 4.0 + 16.0 * index as f32;
                 if y + 16.0 > box_rect.y + box_rect.h {

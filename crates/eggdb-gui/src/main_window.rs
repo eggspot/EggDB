@@ -19,6 +19,7 @@ use crate::grid::{
     self, Cell, CellLook, ResultGrid, ValueKind, cell_text, quote_name, visible_columns,
     visible_rows,
 };
+use crate::editor_menu::{self, EditorMenuOrigin};
 use crate::grid_menu::{self, GridMenu};
 use crate::highlight::{Carry, TokenKind, tokens};
 use crate::inspector::{self, Inspector, InspectorBlock};
@@ -45,6 +46,7 @@ const GRID_LEFT: f32 = 308.0;
 const BODY_BOTTOM: f32 = 776.0;
 const EDITOR_TEXT_TOP: f32 = 88.0;
 const EDITOR_TEXT_LEFT: f32 = 320.0;
+const EDITOR_GUTTER_RIGHT: f32 = 308.0;
 const LINE_HEIGHT: f32 = 20.0;
 const CARET_MARGIN_LINES: usize = 4;
 const ELIDE_SCAN_LIMIT: usize = 512;
@@ -193,6 +195,9 @@ pub struct MainWindow {
     pub drawer_open: bool,
     /// The rail item the drawer was opened from.
     pub drawer_from: Option<RailItem>,
+    /// Whether the clipboard held text when the last key or right-click came, which
+    /// enables the editor menu's `Paste` on the desktop (`docs/ux/workspace.md` 10.9).
+    pub clipboard_has_text: bool,
 }
 
 /// One of the rail's buttons while the sidebar is collapsed (`docs/ux/workspace.md` 10.6).
@@ -312,6 +317,7 @@ impl MainWindow {
             dragged_splitter: None,
             drawer_open: false,
             drawer_from: None,
+            clipboard_has_text: true,
         }
     }
 
@@ -846,8 +852,14 @@ impl MainWindow {
             let answer = menu.key(press);
             return self.tree_menu_answer(answer, now);
         }
-        if self.tab.value_view.is_some() || self.tab.grid_menu.is_some() {
+        if self.tab.value_view.is_some()
+            || self.tab.grid_menu.is_some()
+            || self.tab.editor_menu.is_some()
+        {
             return WindowAction::Tab(self.tab.key(press));
+        }
+        if self.inspector.ddl_focused {
+            return self.ddl_key(press);
         }
         if let Some(splitter) = self.focused_splitter {
             return self.splitter_key(splitter, press);
@@ -859,6 +871,11 @@ impl MainWindow {
         if self.drawer_open && press.key == Key::Escape {
             self.close_drawer();
             return WindowAction::Tab(TabAction::None);
+        }
+        if self.focus == WindowFocus::Tab
+            && let Some(action) = self.tab.keys_tab_key(press, now)
+        {
+            return WindowAction::Tab(action);
         }
         if let Some(action) = self.tab_key(press) {
             return action;
@@ -910,6 +927,14 @@ impl MainWindow {
                 self.open_tree_menu(self.tree.current, TreeMenuOrigin::CurrentRow);
                 return WindowAction::Tab(TabAction::None);
             }
+            Key::F10 | Key::ContextMenu
+                if self.focus == WindowFocus::Tab
+                    && self.tab.focus == TabFocus::Editor
+                    && (press.key == Key::ContextMenu || press.modifiers.shift) =>
+            {
+                self.open_editor_menu_at_caret();
+                return WindowAction::Tab(TabAction::None);
+            }
             Key::Character('c' | 'C')
                 if primary && !press.modifiers.shift && self.focus == WindowFocus::Tree =>
             {
@@ -940,6 +965,7 @@ impl MainWindow {
 
     /// Moves the focus to the object tree.
     pub fn focus_tree(&mut self) {
+        self.inspector.ddl_focused = false;
         self.focused_splitter = None;
         self.focus = WindowFocus::Tree;
         self.tab.dialect_menu = None;
@@ -950,6 +976,7 @@ impl MainWindow {
     }
 
     fn focus_tab(&mut self) {
+        self.inspector.ddl_focused = false;
         self.focused_splitter = None;
         self.focus = WindowFocus::Tab;
         self.tab.focus = TabFocus::Editor;
@@ -1033,10 +1060,7 @@ impl MainWindow {
             self.tab.notice = Some(OPEN_WHILE_RUNNING.to_owned());
             return none;
         }
-        let scan = KeySpaceScan {
-            collection: key_space.collection.clone(),
-            total: key_space.keys,
-        };
+        let scan = KeySpaceScan::new(key_space.collection.clone(), key_space.keys);
         let open = (0..self.tab_count()).find(|&position| {
             self.tab_at(position)
                 .and_then(|tab| tab.keys.as_ref())
@@ -1045,7 +1069,9 @@ impl MainWindow {
         match open {
             Some(position) => {
                 self.show_tab(position);
-                self.tab.keys = Some(scan);
+                if let Some(keys) = &mut self.tab.keys {
+                    keys.total = scan.total;
+                }
             }
             None => {
                 let session = self.take_session();
@@ -2985,17 +3011,26 @@ impl MainWindow {
         Some(grid_menu::rect_for(menu.origin, cell, width))
     }
 
-    /// The open popover's rect, the value view's, the grid menu's or the tree's row menu's.
+    /// Where the editor's open menu shows, in window coordinates.
+    pub fn editor_menu_rect(&self) -> Option<Rect> {
+        let menu = self.tab.editor_menu.as_ref()?;
+        Some(editor_menu::rect_for(menu.origin, self.width as f32))
+    }
+
+    /// The open popover's rect: the value view's, the grid menu's, the editor menu's or the
+    /// tree's row menu's.
     pub fn popover_rect(&self) -> Option<Rect> {
         self.value_view_rect()
             .or_else(|| self.grid_menu_rect())
+            .or_else(|| self.editor_menu_rect())
             .or_else(|| self.tree_menu_rect())
     }
 
-    /// Closes the value view, the grid's menu and the tree's row menu.
+    /// Closes the value view, the grid's and the editor's menus and the tree's row menu.
     pub fn close_popovers(&mut self) {
         self.tab.value_view = None;
         self.tab.grid_menu = None;
+        self.tab.editor_menu = None;
         self.tree_menu = None;
     }
 
@@ -3006,6 +3041,9 @@ impl MainWindow {
                 && (id == grid_menu::NODE_GRID_MENU || grid_menu_item_of(id).is_some()))
             || (self.tree_menu.is_some()
                 && (id == tree_menu::NODE_TREE_MENU || tree_menu::item_of_node(id).is_some()))
+            || (self.tab.editor_menu.is_some()
+                && (id == editor_menu::NODE_EDITOR_MENU
+                    || editor_menu::item_of_node(id).is_some()))
     }
 
     /// A press of the primary button while a popover is open: outside it closes the popover
@@ -3107,6 +3145,21 @@ impl MainWindow {
                 return None;
             };
             if let Some(menu) = &mut self.tree_menu {
+                menu.highlighted = Some(index);
+            }
+            let invoked = *action == AccessAction::Invoke;
+            return Some(if invoked {
+                vec![KeyPress::plain(Key::Enter)]
+            } else {
+                Vec::new()
+            });
+        }
+        if self.tab.editor_menu.is_some() {
+            let Some(index) = editor_menu::item_of_node(node.id) else {
+                self.tab.editor_menu = None;
+                return None;
+            };
+            if let Some(menu) = &mut self.tab.editor_menu {
                 menu.highlighted = Some(index);
             }
             let invoked = *action == AccessAction::Invoke;
@@ -3277,7 +3330,115 @@ impl MainWindow {
         self.inspector
             .collapsed
             .retain(|&block| block != InspectorBlock::Ddl);
+        self.inspector.ddl_focused = true;
         WindowAction::Inspect(item)
+    }
+
+    fn ddl_key(&mut self, press: KeyPress) -> WindowAction {
+        let primary = press.modifiers.control || press.modifiers.command;
+        match press.key {
+            Key::Character('c' | 'C') if primary => {
+                let description = inspector::describe(
+                    &self.tree,
+                    self.inspected(),
+                    self.inspector.sample.as_ref(),
+                );
+                let Some(text) = description.ddl else {
+                    return WindowAction::Tab(TabAction::None);
+                };
+                let toast = crate::query_tab::copied_characters_toast(text.chars().count());
+                self.tab.notice = Some(toast.clone());
+                WindowAction::Tab(TabAction::Copy { text, toast })
+            }
+            Key::Escape | Key::Tab => {
+                self.inspector.ddl_focused = false;
+                self.focus_tree();
+                WindowAction::Tab(TabAction::None)
+            }
+            _ => WindowAction::Tab(TabAction::None),
+        }
+    }
+
+    /// Opens the editor's right-click menu from `Shift+F10` or the menu key
+    /// (`docs/ux/workspace.md` 10.9): below the caret's line box (the selection's end), or in
+    /// a keys tab below the line's start at x 320.
+    pub fn open_editor_menu_at_caret(&mut self) {
+        let shift = self
+            .placed(Area::Editor)
+            .map_or((0.0, 0.0), |placed| placed.shift);
+        let tab = &self.tab;
+        let lines = tab.editor.lines();
+        let at = if tab.is_keys() {
+            crate::editor::Position::default()
+        } else {
+            tab.editor
+                .selection()
+                .map_or(tab.editor.caret(), |(_, end)| end)
+        };
+        let visible =
+            (((editor_bottom(tab) - EDITOR_TEXT_TOP) / LINE_HEIGHT).floor() as usize).max(1);
+        let first =
+            first_visible_line(tab.editor.caret().line, visible).min(lines.len().saturating_sub(1));
+        let row = at.line.clamp(first, first + visible - 1) - first;
+        let before: String = lines
+            .get(at.line)
+            .map(|line| line.chars().take(at.column).collect())
+            .unwrap_or_default();
+        let origin = EditorMenuOrigin::Caret {
+            x: EDITOR_TEXT_LEFT + crate::grid::measured(&before) + shift.0,
+            line_top: EDITOR_TEXT_TOP + LINE_HEIGHT * row as f32 + shift.1,
+            line_height: LINE_HEIGHT,
+        };
+        let clipboard = self.clipboard_has_text;
+        self.tab.open_editor_menu(origin, clipboard);
+    }
+
+    /// A right-click at (`x`, `y`) over the editor (`docs/ux/workspace.md` 10.9): on the text
+    /// the caret moves to the click (a click inside the selection keeps it), on the gutter
+    /// the line is selected, then the editor's menu opens at the pointer; the error strip and
+    /// the scrollbar open nothing. Returns whether it opened.
+    pub fn editor_context_press(
+        &mut self,
+        faces: Faces<'_>,
+        tree: &[AccessNode],
+        x: f32,
+        y: f32,
+    ) -> bool {
+        let Some(editor) = tree
+            .iter()
+            .find(|node| node.id == NODE_EDITOR && pointer::contains(node.bounds, x, y))
+        else {
+            return false;
+        };
+        let shift = self
+            .placed(Area::Editor)
+            .map_or((0.0, 0.0), |placed| placed.shift);
+        let scrollbar = x >= editor.bounds.x + editor.bounds.width - 12.0;
+        let strip = y - shift.1 >= editor_bottom(&self.tab);
+        if scrollbar || strip {
+            return false;
+        }
+        self.close_popovers();
+        self.focus_tab();
+        if !self.tab.is_keys() {
+            let at = self.editor_position_at(faces, x, y);
+            if x - shift.0 < EDITOR_GUTTER_RIGHT {
+                self.tab.editor.select_line(at.line);
+            } else {
+                let inside = self
+                    .tab
+                    .editor
+                    .selection()
+                    .is_some_and(|(start, end)| start <= at && at <= end);
+                if !inside {
+                    self.tab.editor.place_caret(at);
+                }
+            }
+        }
+        let clipboard = self.clipboard_has_text;
+        self.tab
+            .open_editor_menu(EditorMenuOrigin::Pointer { x, y }, clipboard);
+        true
     }
 
     fn drop_target(&self, row: TreeItem) -> Option<DropTarget> {
@@ -3701,11 +3862,16 @@ fn popovers(paint: &mut Painter<'_, '_>, window: &MainWindow) {
         let hovered = window.pointer.hovered.and_then(tree_menu::item_of_node);
         tree_menu::draw(paint, menu, rect, hovered);
     }
+    if let (Some(menu), Some(rect)) = (&window.tab.editor_menu, window.editor_menu_rect()) {
+        let hovered = window.pointer.hovered.and_then(editor_menu::item_of_node);
+        editor_menu::draw(paint, menu, rect, hovered);
+    }
 }
 
 fn popover_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
     let open = window.tab.value_view.is_some()
         || window.tab.grid_menu.is_some()
+        || window.tab.editor_menu.is_some()
         || window.tree_menu.is_some();
     if !open {
         return;
@@ -3721,6 +3887,9 @@ fn popover_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
     }
     if let (Some(menu), Some(rect)) = (&window.tree_menu, window.tree_menu_rect()) {
         tree_menu::nodes(nodes, menu, rect, NODE_MAIN_WINDOW);
+    }
+    if let (Some(menu), Some(rect)) = (&window.tab.editor_menu, window.editor_menu_rect()) {
+        editor_menu::nodes(nodes, menu, rect, NODE_EDITOR);
     }
 }
 
@@ -4478,7 +4647,9 @@ fn sidebar_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
         });
         item.state.expanded = row.expanded;
         item.state.selected = tree.selected == Some(row.item);
-        item.state.focused = window.focus == WindowFocus::Tree && tree.current == row.item;
+        item.state.focused = window.focus == WindowFocus::Tree
+            && tree.current == row.item
+            && !window.inspector.ddl_focused;
         nodes.push(item);
     }
 }
@@ -4533,6 +4704,7 @@ fn inspector_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
             );
             ddl.value = description.ddl.clone();
             ddl.state.read_only = true;
+            ddl.state.focused = window.inspector.ddl_focused;
             nodes.push(ddl);
         }
     }

@@ -677,16 +677,17 @@ impl Connection {
         }
     }
 
-    /// A keys tab's scan of `scan`'s key space (`docs/ux/workspace.md` 10.4): its first
-    /// [`crate::key_scan::KEY_SCAN_LIMIT`] keys in key order, in one read transaction and no
-    /// session. A server lists no key spaces yet, so its answer is an empty scan.
+    /// A keys tab's page of `scan`'s key space (`docs/ux/workspace.md` 10.4, 10.10): up to
+    /// [`crate::key_scan::KEY_SCAN_LIMIT`] keys starting with its prefix after its start, in
+    /// key order, in one read transaction and no session. A SQL server reads no key spaces,
+    /// so its answer is an empty page.
     pub fn scan_keys(
         &self,
         scan: &crate::key_scan::KeySpaceScan,
-    ) -> Result<ResultTable, StatementFailure> {
+    ) -> Result<crate::key_scan::KeyPage, StatementFailure> {
         match &self.link {
             Link::File(file) => scan.scan_file(&file.database),
-            Link::Server(_) => Ok(scan.table(&[])),
+            Link::Server(_) => Ok(scan.page(&[])),
         }
     }
 

@@ -1,5 +1,5 @@
 use std::ops::Range;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eggdb::sql::TransactionStatus;
 use eggdb_platform::window::{Key, KeyPress};
@@ -10,7 +10,7 @@ use crate::editor::{self, Editor, Position};
 use crate::editor_menu::{EditorMenu, EditorMenuAnswer, EditorMenuItem, EditorMenuOrigin, EditorState};
 use crate::grid::{GridAnswer, GridMenuItem, ResultGrid, cell_text, column_widths};
 use crate::grid_menu::{GridMenu, MenuAnswer};
-use crate::key_scan::KeySpaceScan;
+use crate::key_scan::{KEY_SCAN_LIMIT, KeyPages, KeySpaceScan, PageEnd, PageStart, unspelled};
 use crate::plan_view::{Plan, PlanAnswer, PlanView, explain_statements};
 use crate::sql_format::{comment_edits, format_sql, is_blank_sql};
 use crate::statements::{source_table, statement_at, statements};
@@ -32,6 +32,9 @@ pub const TRANSACTION_FAILED: &str = "Transaction failed: ROLLBACK to continue";
 /// The plan panel's width and height at the golden frame's size, for keeping the current
 /// node in view.
 pub const PLAN_PANEL: (f32, f32) = (1020.0, 358.0);
+
+/// How long after the last key in a keys tab's prefix field the scan runs again.
+pub const PREFIX_DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// Where the keyboard focus is in the query tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -305,16 +308,17 @@ impl QueryTab {
     pub fn run_request(&self, all: bool) -> Option<RunRequest> {
         let text = self.editor.text();
         if let Some(scan) = &self.keys {
-            return (!all).then(|| RunRequest {
-                statements: vec![text.clone()],
-                starts: vec![0],
-                dialect: self.dialect,
-                all: false,
-                explain: None,
-                source_text: text.clone(),
-                session: self.session,
-                scan: Some(scan.clone()),
-            });
+            if all {
+                return None;
+            }
+            let prefix = unspelled(&self.key_pages.prefix_text).ok()?;
+            return Some(self.scan_request(KeySpaceScan {
+                prefix,
+                start: PageStart::First,
+                first_position: 1,
+                more: false,
+                ..scan.clone()
+            }));
         }
         let ranges: Vec<Range<usize>> = if all {
             statements(&text, self.dialect)
@@ -959,6 +963,248 @@ impl QueryTab {
         }
     }
 
+    fn scan_request(&self, scan: KeySpaceScan) -> RunRequest {
+        let text = scan.statement();
+        RunRequest {
+            statements: vec![text.clone()],
+            starts: vec![0],
+            dialect: self.dialect,
+            all: false,
+            explain: None,
+            source_text: text,
+            session: self.session,
+            scan: Some(scan),
+        }
+    }
+
+    fn page_request(
+        &mut self,
+        start: PageStart,
+        first_position: usize,
+        earlier: Vec<PageStart>,
+        land_on_last: bool,
+    ) -> TabAction {
+        if self.running {
+            self.notice = Some(STILL_RUNNING.to_owned());
+            return TabAction::None;
+        }
+        let prefix = unspelled(&self.key_pages.prefix_text).ok();
+        let (Some(keys), Some(prefix)) = (&self.keys, prefix) else {
+            return TabAction::None;
+        };
+        let scan = KeySpaceScan {
+            prefix,
+            start,
+            first_position,
+            more: false,
+            ..keys.clone()
+        };
+        self.key_pages.pending_earlier = Some(earlier);
+        self.key_pages.land_on_last = land_on_last;
+        self.key_pages.due = None;
+        TabAction::Run(self.scan_request(scan))
+    }
+
+    /// `Next 100` (`Alt+PgDn`, `docs/ux/workspace.md` 10.10): scans from after the last key
+    /// shown; nothing on the last page.
+    pub fn next_page(&mut self) -> TabAction {
+        let (Some(keys), Some(next)) = (&self.keys, self.key_pages.next.clone()) else {
+            return TabAction::None;
+        };
+        let shown = self.grid.as_ref().map_or(0, |grid| grid.rows.len());
+        let mut earlier = self.key_pages.earlier.clone();
+        earlier.push(keys.start.clone());
+        let position = keys.first_position.saturating_add(shown);
+        self.page_request(next, position, earlier, false)
+    }
+
+    /// `Back` (`Alt+PgUp`): the previous page from its recorded start; nothing on page 1.
+    pub fn previous_page(&mut self) -> TabAction {
+        let Some(keys) = &self.keys else {
+            return TabAction::None;
+        };
+        let position = keys.first_position.saturating_sub(KEY_SCAN_LIMIT).max(1);
+        let mut earlier = self.key_pages.earlier.clone();
+        let Some(start) = earlier.pop() else {
+            return TabAction::None;
+        };
+        self.page_request(start, position, earlier, true)
+    }
+
+    /// Page 1 with the prefix the field holds: what `Enter` in the field and a changed
+    /// prefix run.
+    pub fn first_page(&mut self) -> TabAction {
+        self.page_request(PageStart::First, 1, Vec::new(), false)
+    }
+
+    /// Focuses the keys tab's prefix field with its text selected.
+    pub fn focus_prefix(&mut self) {
+        if !self.is_keys() {
+            return;
+        }
+        let pages = &mut self.key_pages;
+        pages.prefix_focused = true;
+        pages.prefix_selected = true;
+        pages.prefix_on_focus = pages.prefix_text.clone();
+        if let Some(grid) = &mut self.grid {
+            grid.focused = false;
+        }
+    }
+
+    fn leave_prefix(&mut self) {
+        self.key_pages.prefix_focused = false;
+        self.key_pages.prefix_selected = false;
+        self.focus(TabFocus::Grid);
+    }
+
+    /// The keys tab's own keys (`docs/ux/workspace.md` 10.10), before the tab's others: the
+    /// prefix field's typing, `/` from the grid or the editor and `Ctrl/Cmd+F` to focus it,
+    /// `Alt+PgDn` / `Alt+PgUp`, and `PgDn` / `PgUp` past the page's edge in the grid. `None`
+    /// leaves the key to the tab.
+    pub fn keys_tab_key(&mut self, press: KeyPress, now: Instant) -> Option<TabAction> {
+        if !self.is_keys()
+            || self.editor_menu.is_some()
+            || self.grid_menu.is_some()
+            || self.value_view.is_some()
+        {
+            return None;
+        }
+        if self.key_pages.prefix_focused {
+            return Some(self.prefix_key(press, now));
+        }
+        let primary = press.modifiers.control || press.modifiers.command;
+        let in_grid = self.focus == TabFocus::Grid;
+        let (on_last_row, on_first_row) = self.grid.as_ref().map_or((false, false), |grid| {
+            (
+                grid.current.row + 1 >= grid.rows.len(),
+                grid.current.row == 0,
+            )
+        });
+        match press.key {
+            Key::Character('f' | 'F') if primary && !press.modifiers.shift => {
+                self.focus_prefix();
+                Some(TabAction::None)
+            }
+            Key::Character('/')
+                if !primary && matches!(self.focus, TabFocus::Grid | TabFocus::Editor) =>
+            {
+                self.focus_prefix();
+                Some(TabAction::None)
+            }
+            Key::PageDown if press.modifiers.alt => Some(self.next_page()),
+            Key::PageUp if press.modifiers.alt => Some(self.previous_page()),
+            Key::PageDown if in_grid && on_last_row && self.key_pages.can_go_next() => {
+                Some(self.next_page())
+            }
+            Key::PageUp if in_grid && on_first_row && self.key_pages.can_go_back() => {
+                Some(self.previous_page())
+            }
+            Key::Escape if self.running && in_grid => Some(TabAction::Stop),
+            _ => None,
+        }
+    }
+
+    fn prefix_key(&mut self, press: KeyPress, now: Instant) -> TabAction {
+        let primary = press.modifiers.control || press.modifiers.command;
+        let pages = &mut self.key_pages;
+        match press.key {
+            Key::Enter => {
+                pages.due = None;
+                self.leave_prefix();
+                return self.first_page();
+            }
+            Key::Escape => {
+                let changed = pages.prefix_text != pages.prefix_on_focus;
+                pages.prefix_text = pages.prefix_on_focus.clone();
+                pages.due = None;
+                self.leave_prefix();
+                return if changed {
+                    self.first_page()
+                } else {
+                    TabAction::None
+                };
+            }
+            Key::Tab => {
+                self.leave_prefix();
+                if press.modifiers.shift {
+                    self.focus(TabFocus::Editor);
+                }
+                return TabAction::None;
+            }
+            Key::F5 => {
+                pages.due = None;
+                return self.first_page();
+            }
+            Key::Character('a' | 'A') if primary => pages.prefix_selected = true,
+            Key::Character('f' | 'F') if primary => pages.prefix_selected = true,
+            Key::Backspace => {
+                if pages.prefix_selected {
+                    pages.prefix_text.clear();
+                } else if pages.prefix_text.pop().is_none() {
+                    return TabAction::None;
+                }
+                pages.prefix_selected = false;
+                pages.due = Some(now + PREFIX_DEBOUNCE);
+            }
+            Key::Character(letter) if !primary && !letter.is_control() => {
+                if pages.prefix_selected {
+                    pages.prefix_text.clear();
+                }
+                pages.prefix_text.push(letter);
+                pages.prefix_selected = false;
+                pages.due = Some(now + PREFIX_DEBOUNCE);
+            }
+            Key::Space if !primary => {
+                if pages.prefix_selected {
+                    pages.prefix_text.clear();
+                }
+                pages.prefix_text.push(' ');
+                pages.prefix_selected = false;
+                pages.due = Some(now + PREFIX_DEBOUNCE);
+            }
+            _ => {}
+        }
+        TabAction::None
+    }
+
+    /// Moves time on for a keys tab's prefix field: once 150 ms passed since the last key,
+    /// page 1 runs with the typed prefix, unless it is invalid or a run is going.
+    pub fn prefix_due(&mut self, now: Instant) -> TabAction {
+        match self.key_pages.due {
+            Some(due) if now >= due && !self.running => {
+                self.key_pages.due = None;
+                if self.key_pages.prefix_error().is_some() {
+                    return TabAction::None;
+                }
+                self.first_page()
+            }
+            _ => TabAction::None,
+        }
+    }
+
+    /// A keys tab's page was read (`docs/ux/workspace.md` 10.10): the tab takes the page's
+    /// start, the pages before it and where the next starts, and its editor line states what
+    /// ran.
+    pub fn key_page_read(&mut self, request: &RunRequest, end: PageEnd) {
+        let Some(scan) = &request.scan else {
+            return;
+        };
+        let pending = self.key_pages.pending_earlier.take();
+        self.key_pages.earlier = if scan.start == PageStart::First {
+            Vec::new()
+        } else {
+            pending.unwrap_or_else(|| self.key_pages.earlier.clone())
+        };
+        let mut shown = scan.clone();
+        if let Some(total) = end.total {
+            shown.total = total;
+        }
+        shown.more = end.next.is_some();
+        self.key_pages.next = end.next;
+        self.editor = Editor::new(&shown.statement());
+        self.keys = Some(shown);
+    }
+
     /// A run of `request` started: `Run` and `Run all` disable, `Stop` enables, the
     /// summary reads `Running · 0.0 s` and the error strip hides.
     pub fn started(&mut self) {
@@ -1003,6 +1249,7 @@ impl QueryTab {
             self.finish_explain(explain, &request.source_text, outcomes, elapsed);
             return;
         }
+        let kept_column = self.grid.as_ref().map_or(0, |grid| grid.current.column);
         let was_stopping = self.stopping;
         self.running = false;
         self.stopping = false;
@@ -1073,10 +1320,19 @@ impl QueryTab {
             ),
             _ => status_line::tag_summary(&last_tag, elapsed),
         };
-        if let Some(scan) = &request.scan {
+        if request.scan.is_some()
+            && let Some(scan) = self.keys.clone()
+        {
             self.summary = scan.summary(shown_rows, elapsed);
+            let land_on_last = std::mem::take(&mut self.key_pages.land_on_last);
             if let Some(grid) = &mut self.grid {
-                grid.key_scan = Some(scan.clone());
+                grid.key_scan = Some(scan);
+                grid.current.column = kept_column.min(grid.columns.len().saturating_sub(1));
+                if land_on_last && !grid.rows.is_empty() {
+                    grid.current.row = grid.rows.len() - 1;
+                }
+                grid.anchor = grid.current;
+                grid.scroll_into_view(ROWS_IN_VIEW, crate::main_window::GRID_BODY_WIDTH);
             }
         }
     }
