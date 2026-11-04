@@ -2,9 +2,11 @@
 //! them, kept on EggDB's key-value transactions through [`eggdb_keyspace::Keyspace`] (database 0,
 //! which the `eggdb` binary stores in the collection `graph0`). [`run`] answers a subset of
 //! Cypher written from the openCypher specification (`MATCH`, `OPTIONAL MATCH`, `WHERE`,
-//! `CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`, `DETACH DELETE`, `UNWIND`, `WITH`, `RETURN` with
-//! aggregation, `ORDER BY`, `SKIP` and `LIMIT`, and `CALL ... YIELD` of the graph algorithms);
-//! a query runs in one transaction. The algorithms are shortest paths, connected components,
+//! `CREATE`, `MERGE` with `ON CREATE SET` and `ON MATCH SET`, `SET`, `REMOVE`, `DELETE`,
+//! `DETACH DELETE`, `FOREACH`, `UNWIND`, `WITH`, `RETURN` with aggregation, `ORDER BY`, `SKIP`
+//! and `LIMIT`, `UNION` and `UNION ALL`, named paths with `shortestPath()` and
+//! `allShortestPaths()`, list and pattern comprehensions, and `CALL ... YIELD` of the graph
+//! algorithms); a query runs in one transaction. The algorithms are shortest paths, connected components,
 //! PageRank, label propagation communities, triangle counts and Jaccard node similarity. Neo4j is a
 //! trademark of its owner; no Neo4j code is used or read.
 
@@ -20,7 +22,7 @@ pub use algorithms::{
     triangle_count,
 };
 pub use execute::display;
-pub use value::{Node, Relationship, Value, equals, order};
+pub use value::{Node, Path, Relationship, Value, equals, order};
 
 use eggdb_keyspace::Keyspace;
 
@@ -81,8 +83,8 @@ pub fn run(
     parameters: &[(String, Value)],
     read_only: bool,
 ) -> GraphResult<QueryResult> {
-    let clauses = cypher::parse(query)?;
-    let writes = clauses.iter().any(cypher::Clause::writes);
+    let parsed = cypher::parse(query)?;
+    let writes = parsed.writes();
     let mut outcome: Option<GraphResult<QueryResult>> = None;
     let storage = if writes {
         if read_only {
@@ -96,7 +98,7 @@ pub fn run(
                 access: execute::Access::Write(store::GraphWrite { keys }),
                 parameters,
             };
-            let result = executor.run(&clauses);
+            let result = executor.run_query(&parsed);
             let failed = result.is_err();
             outcome = Some(result);
             if failed {
@@ -111,7 +113,7 @@ pub fn run(
                 access: execute::Access::Read(store::GraphRead { keys }),
                 parameters,
             };
-            outcome = Some(executor.run(&clauses));
+            outcome = Some(executor.run_query(&parsed));
             Ok(())
         })
     };

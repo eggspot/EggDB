@@ -26,6 +26,16 @@ pub struct Relationship {
     pub properties: Vec<(String, Value)>,
 }
 
+/// A path as a query returns it: its nodes in walking order and the relationships between
+/// them, so `relationships[i]` joins `nodes[i]` and `nodes[i + 1]`, in either direction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Path {
+    /// The nodes, from the start of the path to its end; one more than the relationships.
+    pub nodes: Vec<Node>,
+    /// The relationships, in walking order.
+    pub relationships: Vec<Relationship>,
+}
+
 /// A Cypher value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -47,6 +57,8 @@ pub enum Value {
     Node(Box<Node>),
     /// A relationship.
     Relationship(Box<Relationship>),
+    /// A path.
+    Path(Box<Path>),
 }
 
 impl Value {
@@ -69,6 +81,7 @@ impl Value {
             Value::Node(_) => 1,
             Value::Relationship(_) => 2,
             Value::List(_) => 3,
+            Value::Path(_) => 4,
             Value::String(_) => 5,
             Value::Boolean(_) => 6,
             Value::Integer(_) | Value::Float(_) => 7,
@@ -88,6 +101,7 @@ impl Value {
             Value::Map(_) => "MAP",
             Value::Node(_) => "NODE",
             Value::Relationship(_) => "RELATIONSHIP",
+            Value::Path(_) => "PATH",
         }
     }
 }
@@ -118,6 +132,7 @@ pub fn order(left: &Value, right: &Value) -> Ordering {
         }
         (Value::Node(a), Value::Node(b)) => a.id.cmp(&b.id),
         (Value::Relationship(a), Value::Relationship(b)) => a.id.cmp(&b.id),
+        (Value::Path(a), Value::Path(b)) => path_ids(a).cmp(&path_ids(b)),
         _ => Ordering::Equal,
     }
 }
@@ -145,8 +160,19 @@ pub fn equals(left: &Value, right: &Value) -> Option<bool> {
         }
         (Value::Node(a), Value::Node(b)) => Some(a.id == b.id),
         (Value::Relationship(a), Value::Relationship(b)) => Some(a.id == b.id),
+        (Value::Path(a), Value::Path(b)) => Some(path_ids(a) == path_ids(b)),
         (a, b) => Some(a == b),
     }
+}
+
+fn path_ids(path: &Path) -> (Vec<u64>, Vec<u64>) {
+    (
+        path.nodes.iter().map(|node| node.id).collect(),
+        path.relationships
+            .iter()
+            .map(|relationship| relationship.id)
+            .collect(),
+    )
 }
 
 /// Converts a property value to BSON for storage; nodes, relationships and maps cannot be
