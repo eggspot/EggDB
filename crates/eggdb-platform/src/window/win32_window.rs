@@ -217,17 +217,30 @@ unsafe extern "system" {
     fn DragFinish(drop: Handle);
 }
 
-fn dropped_files(drop: Handle) -> Vec<PathBuf> {
-    let paths = dropped_paths(drop);
+/// The paths of a `WM_DROPFILES` drop, after which the drop is released.
+///
+/// # Safety
+///
+/// `drop` must be the live `HDROP` of the `WM_DROPFILES` message being handled, not used again
+/// after this call.
+unsafe fn dropped_files(drop: Handle) -> Vec<PathBuf> {
+    // SAFETY: the caller passes a live `HDROP`, as this function's contract requires.
+    let paths = unsafe { dropped_paths(drop) };
     // SAFETY: `drop` is the `HDROP` of the `WM_DROPFILES` being handled, released once, after
     // the last query.
     unsafe { DragFinish(drop) };
     paths
 }
 
-fn dropped_paths(drop: Handle) -> Vec<PathBuf> {
-    // SAFETY: `drop` is a live `HDROP` (of `WM_DROPFILES`, or the `CF_HDROP` medium of an OLE
-    // drop); asking for the count with a null buffer writes nothing.
+/// The paths a drop handle holds, at most `MOST_DROPPED_FILES` of them.
+///
+/// # Safety
+///
+/// `drop` must be a live `HDROP` (of `WM_DROPFILES`, or the `CF_HDROP` medium of an OLE drop)
+/// for the whole call.
+unsafe fn dropped_paths(drop: Handle) -> Vec<PathBuf> {
+    // SAFETY: the caller passes a live `HDROP`; asking for the count with a null buffer writes
+    // nothing.
     let count = unsafe { DragQueryFileW(drop, DRAG_QUERY_COUNT, std::ptr::null_mut(), 0) };
     let mut paths = Vec::new();
     for index in 0..count.min(MOST_DROPPED_FILES) {
@@ -739,7 +752,9 @@ fn handle_message(
         WM_GETOBJECT => return state.automation.answer_get_object(window, wparam, lparam),
         WM_CLOSE => state.push(WindowEvent::CloseRequested),
         WM_DROPFILES => {
-            let paths = dropped_files(std::ptr::without_provenance_mut(wparam));
+            // SAFETY: a `WM_DROPFILES` message's `wparam` is the drop's live `HDROP`, which this
+            // handler releases once.
+            let paths = unsafe { dropped_files(std::ptr::without_provenance_mut(wparam)) };
             if !paths.is_empty() {
                 state.push(WindowEvent::FilesDropped(paths));
             }

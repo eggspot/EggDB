@@ -197,7 +197,9 @@ unsafe fn data_paths(data: *mut c_void) -> Vec<PathBuf> {
         return Vec::new();
     }
     let paths = if medium.tymed == TYMED_HGLOBAL && !medium.handle.is_null() {
-        dropped_paths(medium.handle)
+        // SAFETY: a successful `GetData` for `CF_HDROP` on `TYMED_HGLOBAL` gives an `HDROP`
+        // that stays live until `ReleaseStgMedium` below.
+        unsafe { dropped_paths(medium.handle) }
     } else {
         Vec::new()
     };
@@ -262,14 +264,13 @@ unsafe extern "system" fn drag_enter(
     // SAFETY: `data` is the `IDataObject` OLE passes for this call, or null.
     let paths = unsafe { data_paths(data) };
     let mut event = None;
-    // SAFETY: `effect` is OLE's `pdwEffect` for this call.
-    let answer = unsafe {
-        target.answer(effect, |drag, allowed| {
-            let (chosen, entered) = drag.enter(paths, allowed);
-            event = entered;
-            chosen
-        })
+    let choose_enter_effect = |drag: &mut FileDragTarget, allowed: u32| {
+        let (chosen, entered) = drag.enter(paths, allowed);
+        event = entered;
+        chosen
     };
+    // SAFETY: `effect` is OLE's `pdwEffect` for this call.
+    let answer = unsafe { target.answer(effect, choose_enter_effect) };
     if let Some(event) = event {
         target.state.push(event);
     }
@@ -314,14 +315,13 @@ unsafe extern "system" fn drop_files(
     // SAFETY: `data` is the `IDataObject` OLE passes for this call, or null.
     let paths = unsafe { data_paths(data) };
     let mut event = None;
-    // SAFETY: `effect` is OLE's `pdwEffect` for this call.
-    let answer = unsafe {
-        target.answer(effect, |drag, allowed| {
-            let (chosen, dropped) = drag.drop(paths, allowed);
-            event = dropped;
-            chosen
-        })
+    let choose_drop_effect = |drag: &mut FileDragTarget, allowed: u32| {
+        let (chosen, dropped) = drag.drop(paths, allowed);
+        event = dropped;
+        chosen
     };
+    // SAFETY: `effect` is OLE's `pdwEffect` for this call.
+    let answer = unsafe { target.answer(effect, choose_drop_effect) };
     if let Some(event) = event {
         target.state.push(event);
     }
