@@ -623,6 +623,9 @@ pub(crate) fn create_routine(
         _ => {}
     }
     check_returns(&*writer, tables, &definition)?;
+    for (name, _) in &definition.settings {
+        crate::settings::check_parameter_name(name)?;
+    }
     if body_check == BodyCheck::Checked {
         check_body(&definition, create.body_position)?;
     }
@@ -843,6 +846,14 @@ fn change_routine_settings(
     alter: &AlterRoutine,
     changes: &[RoutineSettingChange],
 ) -> SqlResult<()> {
+    for change in changes {
+        match change {
+            RoutineSettingChange::Set { name, .. } | RoutineSettingChange::Reset(name) => {
+                crate::settings::check_parameter_name(name)?;
+            }
+            RoutineSettingChange::ResetAll => {}
+        }
+    }
     let mut routines = stored(&*writer, &located.name)?;
     let Some(routine) = routines
         .iter_mut()

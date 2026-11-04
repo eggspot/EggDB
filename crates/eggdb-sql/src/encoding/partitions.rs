@@ -4,6 +4,7 @@ use crate::partitions::{
     BoundText, IndexLink, KeyPart, MAX_BOUND_VALUES, MAX_INDEX_LINKS, MAX_KEY_COLUMNS,
     PartitionBound, PartitionKey, PartitionRecord, PartitionStrategy,
 };
+use std::collections::BTreeSet;
 
 pub(super) const PARTITION_SPACE: u8 = 0x0E;
 const RECORD_VERSION: u8 = 1;
@@ -179,13 +180,12 @@ fn index_links(reader: &mut Reader<'_>) -> SqlResult<Vec<IndexLink>> {
         return Err(reader.damaged());
     }
     let mut links: Vec<IndexLink> = Vec::with_capacity(count);
+    let mut indexes = BTreeSet::new();
+    let mut parent_indexes = BTreeSet::new();
     for _ in 0..count {
         let index = u32::try_from(reader.varint()?).map_err(|_| reader.damaged())?;
         let parent_index = u32::try_from(reader.varint()?).map_err(|_| reader.damaged())?;
-        if links
-            .iter()
-            .any(|link| link.index == index || link.parent_index == parent_index)
-        {
+        if !indexes.insert(index) || !parent_indexes.insert(parent_index) {
             return Err(reader.damaged());
         }
         links.push(IndexLink {
@@ -194,6 +194,10 @@ fn index_links(reader: &mut Reader<'_>) -> SqlResult<Vec<IndexLink>> {
         });
     }
     Ok(links)
+}
+
+pub(crate) fn written_before_index_links(bytes: &[u8]) -> bool {
+    bytes.first() == Some(&RECORD_VERSION)
 }
 
 pub(crate) fn decode_partitioning(table: &str, bytes: &[u8]) -> SqlResult<PartitionRecord> {

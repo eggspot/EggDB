@@ -367,9 +367,12 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Compressed leaf pages and log records, with compression chosen per column and page (D40, D171).
 - Compression options in the CLI and `eggdb serve` (D171).
 - Partitioning's leftovers from D316: Oracle's `DISABLE ROW MOVEMENT` (ORA-14402), the source's
-  delete and the target's insert row triggers of a moved row, user-defined `IMMUTABLE` functions
-  and operator classes in keys, unique indexes on expression keys, and `relispartition` and
-  `pg_partition_tree` for partition indexes (D316).
+  delete and the target's insert row triggers of a moved row (and the target's `INSERT`
+  statement triggers, which fire for a moved row where PostgreSQL fires only the `UPDATE` ones),
+  user-defined `IMMUTABLE` functions and operator classes in keys, unique indexes on expression
+  keys, `relispartition` and `pg_partition_tree` for partition indexes, attaching a partition's
+  primary key to its parent's, MySQL's allowed partition functions and integer-only keys, and
+  `42883` for an unknown function in a PostgreSQL key (D316).
 - Identity and `AUTO_INCREMENT` columns in partitioned tables, `SELECT ... FROM t PARTITION (p)`,
   Oracle's interval partitioning and SQL Server's partition schemes (D169).
 - MySQL's and Oracle's partition `ALTER`s (add, drop, split, exchange) (D169).

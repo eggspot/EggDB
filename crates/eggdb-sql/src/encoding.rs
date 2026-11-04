@@ -27,6 +27,7 @@ pub(crate) use generated::{GeneratedColumn, generated_without_column};
 pub(crate) use packages::{decode_package, encode_package, package_key, packages_prefix};
 pub(crate) use partitions::{
     decode_partitioning, encode_partitioning, partition_key, partitions_prefix,
+    written_before_index_links,
 };
 pub(crate) use routines::{decode_routines, encode_routines, routine_key, routines_prefix};
 pub(crate) use triggers::{decode_triggers, encode_triggers, trigger_key, triggers_prefix};

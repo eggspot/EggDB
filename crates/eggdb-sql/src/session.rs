@@ -2389,6 +2389,13 @@ impl<'s> Session<'s> {
         }
     }
 
+    fn failing_block_on_error<T>(&mut self, result: SqlResult<T>) -> SqlResult<T> {
+        if result.is_err() {
+            self.fail_block_in_postgresql();
+        }
+        result
+    }
+
     /// Ends the session: an open block is rolled back. Whether one was open.
     fn run_quietly(&mut self, text: &str) -> SqlResult<Vec<QueryResult>> {
         let mut results = Vec::new();
@@ -2648,6 +2655,7 @@ impl<'s> Session<'s> {
             copy.source =
                 CopySource::Query(Box::new(crate::pg_catalog::copy_query(relation, columns)?));
         }
+        let refuses_writes = self.transaction_is_read_only();
         match copy.direction {
             CopyDirection::FromClient => self.write("COPY FROM", |writer, tables| {
                 if let CopySource::Table { name, columns } = &mut copy.source {
@@ -2657,6 +2665,7 @@ impl<'s> Session<'s> {
                         return Err(crate::pg_catalog::read_only(relation.name()).at(name.position));
                     }
                     binding.names(writer, tables, std::slice::from_mut(name))?;
+                    read_only::refuse_permanent_name(refuses_writes, "COPY FROM", name)?;
                     check_copied_columns(
                         writer,
                         binding.settings,
@@ -2942,14 +2951,16 @@ impl<'s> Session<'s> {
         }
         match statement {
             Statement::SetTransaction(characteristics) => {
-                return self.set_transaction_statement(characteristics);
+                let result = self.set_transaction_statement(characteristics);
+                return self.failing_block_on_error(result);
             }
             Statement::Set { name, value, .. }
                 if self.dialect == Dialect::PostgreSql
                     && (name.eq_ignore_ascii_case("transaction_read_only")
                         || name.eq_ignore_ascii_case("transaction_isolation")) =>
             {
-                return self.set_transaction_parameter(name, value.as_deref());
+                let result = self.set_transaction_parameter(name, value.as_deref());
+                return self.failing_block_on_error(result);
             }
             Statement::Set { .. }
             | Statement::Reset { .. }
@@ -2981,6 +2992,7 @@ impl<'s> Session<'s> {
         };
         let binding = &binding;
         let dialect = self.dialect;
+        let refuses_writes = self.transaction_is_read_only();
         let format_only = self.sqlserver() && self.settings.sqlserver.format_only;
         if format_only
             && !matches!(
@@ -3281,6 +3293,7 @@ impl<'s> Session<'s> {
             }),
             Statement::Insert(insert) => self.write_firing_triggers("INSERT", |writer, tables| {
                 binding.insert(writer, tables, insert)?;
+                read_only::refuse_permanent_target(refuses_writes, "INSERT", &insert.table)?;
                 if matches!(dialect, Dialect::PostgreSql | Dialect::MySql)
                     || (dialect == Dialect::SqlServer
                         && crate::routines::insert_calls_marked_routine(insert))
@@ -3291,6 +3304,7 @@ impl<'s> Session<'s> {
             }),
             Statement::Update(update) => self.write_firing_triggers("UPDATE", |writer, tables| {
                 binding.update(writer, tables, update)?;
+                read_only::refuse_permanent_target(refuses_writes, "UPDATE", &update.table)?;
                 if matches!(dialect, Dialect::PostgreSql | Dialect::MySql)
                     || (dialect == Dialect::SqlServer
                         && crate::routines::exprs_call_marked_routine(
@@ -3303,6 +3317,7 @@ impl<'s> Session<'s> {
             }),
             Statement::Delete(delete) => self.write_firing_triggers("DELETE", |writer, tables| {
                 binding.delete(writer, tables, delete)?;
+                read_only::refuse_permanent_target(refuses_writes, "DELETE", &delete.table)?;
                 if matches!(dialect, Dialect::PostgreSql | Dialect::MySql)
                     || (dialect == Dialect::SqlServer
                         && crate::routines::exprs_call_marked_routine(
@@ -3318,6 +3333,7 @@ impl<'s> Session<'s> {
             }),
             Statement::Merge(merge) => self.write_firing_triggers("MERGE", |writer, tables| {
                 binding.merge(writer, tables, merge)?;
+                read_only::refuse_permanent_target(refuses_writes, "MERGE", &merge.target)?;
                 crate::merge::merge(writer, tables, merge)
             }),
             Statement::CreateTrigger(create) => self.write("CREATE TRIGGER", |writer, tables| {
@@ -3707,9 +3723,15 @@ impl<'s> Session<'s> {
             sequences::load_for_sequence_calls(writer)?;
             let result =
                 body(writer, tables).map_err(|error| sequences::explain_missing(writer, error))?;
-            sequences::save_changed(writer).inspect_err(|error| {
+            sequences::save_changed(writer).map_err(|error| {
                 if error.state() == SqlState::READ_ONLY_SQL_TRANSACTION {
+                    let refused = read_only::refused_in_read_only_transaction(
+                        sequences::first_changing_function(),
+                    );
                     sequences::forget_changes();
+                    refused
+                } else {
+                    error
                 }
             })?;
             Ok(result)

@@ -329,6 +329,14 @@ fn unrecognized(name: &str) -> SqlError {
     )
 }
 
+pub(crate) fn check_parameter_name(name: &str) -> SqlResult<()> {
+    if known(name).is_some() || is_custom(name) {
+        Ok(())
+    } else {
+        Err(unrecognized(name))
+    }
+}
+
 pub(crate) fn boolean_setting(value: &str) -> Option<bool> {
     let value = value.trim().to_ascii_lowercase();
     match value.as_str() {

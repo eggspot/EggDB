@@ -1664,6 +1664,15 @@ pub(crate) fn validate_existing(
 }
 
 pub(crate) fn renamed_in_text(text: &str, dialect: Dialect, from: &str, to: &str) -> String {
+    name_replaced_in_text(text, dialect, from, &quoted_in(to, dialect))
+}
+
+pub(crate) fn name_replaced_in_text(
+    text: &str,
+    dialect: Dialect,
+    from: &str,
+    written: &str,
+) -> String {
     let Ok(tokens) = tokenize_in(text, dialect) else {
         return text.to_owned();
     };
@@ -1680,7 +1689,7 @@ pub(crate) fn renamed_in_text(text: &str, dialect: Dialect, from: &str, to: &str
             .is_some_and(|next| next.kind == TokenKind::LeftParen);
         if names_it && !called && token.start >= at && token.end <= text.len() {
             out.push_str(&text[at..token.start]);
-            out.push_str(&quoted_in(to, dialect));
+            out.push_str(written);
             at = token.end;
         }
     }

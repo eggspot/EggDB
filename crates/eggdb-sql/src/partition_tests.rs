@@ -795,3 +795,391 @@ fn partition_records_with_expressions_and_index_links_read_back() {
         Some(plain)
     );
 }
+
+#[test]
+fn partition_keys_that_depend_on_the_session_settings_are_refused() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for key in [
+        "RANGE ((t::date))",
+        "RANGE ((date_trunc('day', t)))",
+        "LIST ((to_char(t, 'YYYY')))",
+        "RANGE ((extract(year FROM t)))",
+        "RANGE ((date_part('year', t)))",
+        "RANGE ((age(t)))",
+        "LIST ((t::text))",
+        "RANGE ((t + interval '1 day'))",
+        "RANGE ((ts::timestamptz))",
+        "RANGE ((s::date))",
+        "LIST ((d::text))",
+    ] {
+        let error = failure(
+            &mut session,
+            &format!(
+                "CREATE TABLE a (t timestamptz, ts timestamp, d date, s text) PARTITION BY {key}"
+            ),
+        );
+        assert_eq!(error.state().code(), "42P17", "{key}: {error}");
+        assert_eq!(
+            error.message(),
+            "functions in partition key expression must be marked IMMUTABLE",
+            "{key}"
+        );
+    }
+    for (name, key) in [
+        ("b1", "RANGE ((date_trunc('day', ts)))"),
+        ("b2", "RANGE ((ts::date))"),
+        ("b3", "RANGE ((extract(year FROM d)))"),
+        ("b4", "RANGE ((ts + interval '1 day'))"),
+    ] {
+        answer(
+            &mut session,
+            &format!(
+                "CREATE TABLE {name} (t timestamptz, ts timestamp, d date, s text) \
+                 PARTITION BY {key}"
+            ),
+        );
+    }
+}
+
+#[test]
+fn an_unparenthesized_postgresql_key_expression_is_a_syntax_error() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let error = failure(
+        &mut session,
+        "CREATE TABLE a (x int, y int) PARTITION BY RANGE (x + y)",
+    );
+    assert_eq!(error.state().code(), "42601", "{error}");
+    assert_eq!(error.message(), "syntax error at or near \"+\"");
+    answer(
+        &mut session,
+        "CREATE TABLE b (x int, name text) PARTITION BY LIST (lower(name))",
+    );
+    let mut mysql = Session::with_dialect(&store, Dialect::MySql);
+    answer(
+        &mut mysql,
+        "CREATE TABLE c (x int, y int) PARTITION BY HASH (x + y) PARTITIONS 2",
+    );
+}
+
+#[test]
+fn renaming_or_dropping_a_key_column_keeps_the_table_readable() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    answer(
+        &mut session,
+        "CREATE TABLE e (id int, name text) PARTITION BY LIST (lower(name));
+         CREATE TABLE e_a PARTITION OF e FOR VALUES IN ('ann');
+         INSERT INTO e VALUES (1, 'Ann');
+         ALTER TABLE e RENAME COLUMN name TO nm",
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT id, nm FROM e"),
+        "id|nm\n1|Ann\nSELECT 1"
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT pg_get_partkeydef('e'::regclass)"),
+        "pg_get_partkeydef\nLIST (lower(nm))\nSELECT 1"
+    );
+    answer(&mut session, "INSERT INTO e VALUES (2, 'ANN')");
+    assert_eq!(
+        answer(&mut session, "SELECT id, nm FROM e_a ORDER BY id"),
+        "id|nm\n1|Ann\n2|ANN\nSELECT 2"
+    );
+    let error = failure(&mut session, "ALTER TABLE e_a RENAME COLUMN nm TO other");
+    assert_eq!(error.state().code(), "42P16", "{error}");
+    assert_eq!(error.message(), "cannot rename inherited column \"nm\"");
+    let error = failure(&mut session, "ALTER TABLE e DROP COLUMN nm");
+    assert_eq!(error.state().code(), "42P16", "{error}");
+    assert_eq!(
+        error.message(),
+        "cannot drop column \"nm\" because it is part of the partition key of relation \"e\""
+    );
+    answer(
+        &mut session,
+        "CREATE TABLE f (a int, b int, c int) PARTITION BY RANGE ((a / b));
+         CREATE TABLE f_low PARTITION OF f FOR VALUES FROM (0) TO (10)
+             PARTITION BY RANGE (c);
+         CREATE TABLE f_low_c PARTITION OF f_low FOR VALUES FROM (0) TO (100);
+         INSERT INTO f VALUES (4, 2, 7)",
+    );
+    let error = failure(&mut session, "ALTER TABLE f DROP COLUMN b");
+    assert_eq!(
+        error.message(),
+        "cannot drop column \"b\" because it is part of the partition key of relation \"f\""
+    );
+    let error = failure(&mut session, "ALTER TABLE f DROP COLUMN c");
+    assert_eq!(
+        error.message(),
+        "cannot drop column \"c\" because it is part of the partition key of relation \"f_low\""
+    );
+    answer(&mut session, "ALTER TABLE f RENAME COLUMN c TO kept");
+    answer(&mut session, "INSERT INTO f VALUES (6, 3, 8)");
+    assert_eq!(
+        answer(&mut session, "SELECT a, b, kept FROM f ORDER BY a"),
+        "a|b|kept\n4|2|7\n6|3|8\nSELECT 2"
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT count(*) FROM f_low_c"),
+        "count\n2\nSELECT 1"
+    );
+}
+
+#[test]
+fn an_index_adopted_on_a_sub_partitioned_partition_reaches_its_partitions() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    answer(
+        &mut session,
+        "CREATE TABLE s (id int, at date, v int) PARTITION BY RANGE (at);
+         CREATE TABLE s_2024 PARTITION OF s FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
+             PARTITION BY RANGE (id);
+         CREATE TABLE s_2024_low PARTITION OF s_2024 FOR VALUES FROM (0) TO (100);
+         CREATE INDEX s_2024_v ON ONLY s_2024 (v);
+         CREATE INDEX s_v ON s (v)",
+    );
+    for index in ["s_v", "s_2024_v"] {
+        assert_eq!(
+            answer(
+                &mut session,
+                &format!(
+                    "SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+                      WHERE c.relname = '{index}'"
+                )
+            ),
+            "indisvalid\nt\nSELECT 1",
+            "{index}"
+        );
+    }
+}
+
+fn pinned_version_1_records() -> Vec<(&'static str, Vec<u8>, crate::partitions::PartitionRecord)> {
+    use crate::partitions::{
+        BoundText, KeyPart, PartitionBound, PartitionKey, PartitionRecord, PartitionStrategy,
+    };
+    vec![
+        (
+            "m",
+            vec![1, 1, 1, 1, 2, b'a', b't'],
+            PartitionRecord {
+                key: Some(PartitionKey {
+                    strategy: PartitionStrategy::Range,
+                    parts: vec![KeyPart::Column("at".to_owned())],
+                }),
+                parent: None,
+                index_links: Vec::new(),
+            },
+        ),
+        (
+            "m_x",
+            vec![1, 3, 3, 1, 2, b'i', b'd', 1, b'm', 2, 3, 0, 1, b'x', 1, 2],
+            PartitionRecord {
+                key: Some(PartitionKey {
+                    strategy: PartitionStrategy::Hash,
+                    parts: vec![KeyPart::Column("id".to_owned())],
+                }),
+                parent: Some((
+                    "m".to_owned(),
+                    PartitionBound::List(vec![
+                        BoundText::Value("x".to_owned()),
+                        BoundText::Null,
+                        BoundText::MinValue,
+                    ]),
+                )),
+                index_links: Vec::new(),
+            },
+        ),
+        (
+            "m_r",
+            vec![1, 2, 1, b'm', 1, 1, 0, 1, b'1', 1, 3],
+            PartitionRecord {
+                key: None,
+                parent: Some((
+                    "m".to_owned(),
+                    PartitionBound::Range {
+                        from: vec![BoundText::Value("1".to_owned())],
+                        to: vec![BoundText::MaxValue],
+                    },
+                )),
+                index_links: Vec::new(),
+            },
+        ),
+        (
+            "m_h",
+            vec![1, 2, 1, b'm', 3, 4, 1],
+            PartitionRecord {
+                key: None,
+                parent: Some((
+                    "m".to_owned(),
+                    PartitionBound::Hash {
+                        modulus: 4,
+                        remainder: 1,
+                    },
+                )),
+                index_links: Vec::new(),
+            },
+        ),
+        (
+            "m_d",
+            vec![1, 2, 1, b'm', 4],
+            PartitionRecord {
+                key: None,
+                parent: Some(("m".to_owned(), PartitionBound::Default)),
+                index_links: Vec::new(),
+            },
+        ),
+    ]
+}
+
+#[test]
+fn version_1_partition_records_keep_their_bytes() {
+    for (table, bytes, record) in pinned_version_1_records() {
+        assert_eq!(
+            crate::encoding::decode_partitioning(table, &bytes).ok(),
+            Some(record.clone()),
+            "{table}"
+        );
+        assert_eq!(
+            crate::encoding::encode_partitioning(&record),
+            bytes,
+            "{table}"
+        );
+    }
+}
+
+fn version_2_record() -> Vec<u8> {
+    vec![
+        2, 3, 2, 1, 1, 0, 11, b'l', b'o', b'w', b'e', b'r', b'(', b'n', b'a', b'm', b'e', b')', 6,
+        b'p', b'e', b'o', b'p', b'l', b'e', 2, 1, 0, 3, b'a', b'n', b'n', 2, 2, 1, 5, 3,
+    ]
+}
+
+#[test]
+fn a_partition_record_from_a_newer_or_hostile_writer_is_refused_without_panicking() {
+    use crate::partitions::{
+        BoundText, IndexLink, KeyPart, PartitionBound, PartitionKey, PartitionRecord,
+        PartitionStrategy,
+    };
+    let valid = version_2_record();
+    assert_eq!(
+        crate::encoding::decode_partitioning("people_a", &valid).ok(),
+        Some(PartitionRecord {
+            key: Some(PartitionKey {
+                strategy: PartitionStrategy::List,
+                parts: vec![KeyPart::Expression {
+                    text: "lower(name)".to_owned(),
+                    dialect: Dialect::PostgreSql,
+                }],
+            }),
+            parent: Some((
+                "people".to_owned(),
+                PartitionBound::List(vec![BoundText::Value("ann".to_owned())]),
+            )),
+            index_links: vec![
+                IndexLink {
+                    index: 2,
+                    parent_index: 1,
+                },
+                IndexLink {
+                    index: 5,
+                    parent_index: 3,
+                },
+            ],
+        })
+    );
+    let mut newer = valid.clone();
+    newer[0] = 3;
+    let error = crate::encoding::decode_partitioning("people_a", &newer).unwrap_err();
+    assert_eq!(error.state(), SqlState::FEATURE_NOT_SUPPORTED, "{error}");
+    assert!(error.message().contains("format version 3"), "{error}");
+    let damaged = |bytes: &[u8]| {
+        let error = crate::encoding::decode_partitioning("people_a", bytes).unwrap_err();
+        assert_eq!(error.state().code(), "XX001", "{bytes:?}: {error}");
+    };
+    let mut unknown_part = valid.clone();
+    unknown_part[4] = 2;
+    damaged(&unknown_part);
+    let mut unknown_dialect = valid.clone();
+    unknown_dialect[5] = 9;
+    damaged(&unknown_dialect);
+    let mut repeated_index = valid.clone();
+    let last = repeated_index.len() - 2;
+    repeated_index[last] = 2;
+    damaged(&repeated_index);
+    let mut repeated_parent_index = valid.clone();
+    let last = repeated_parent_index.len() - 1;
+    repeated_parent_index[last] = 1;
+    damaged(&repeated_parent_index);
+    let mut too_many_links = valid[..valid.len() - 5].to_vec();
+    too_many_links.extend_from_slice(&[0x81, 0x80, 0x04]);
+    damaged(&too_many_links);
+    for at in 0..valid.len() {
+        for byte in [0, 1, 2, 3, 4, 9, 0x7F, 0x80, 0xFF] {
+            let mut mutated = valid.clone();
+            mutated[at] = byte;
+            let _ = crate::encoding::decode_partitioning("people_a", &mutated);
+        }
+    }
+    let mut random = 0x5EED_0316_u64;
+    for _ in 0..20_000 {
+        let mut bytes = vec![2];
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        bytes.extend(random.to_le_bytes().iter().take((random % 9) as usize));
+        let _ = crate::encoding::decode_partitioning("people_a", &bytes);
+    }
+}
+
+#[test]
+fn unique_indexes_of_a_file_from_before_index_links_are_linked_after_the_upgrade() {
+    use crate::store::{KeyValueStore, KeyValueWrite};
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    answer(
+        &mut session,
+        "CREATE TABLE u (id int, at date, v int) PARTITION BY RANGE (at);
+         CREATE TABLE u_1 PARTITION OF u FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
+         CREATE TABLE u_2 PARTITION OF u FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
+         ALTER TABLE u ADD CONSTRAINT u_key UNIQUE (id, at);
+         INSERT INTO u VALUES (1, '2024-05-01', 1)",
+    );
+    drop(session);
+    let mut writer = store.begin_write().unwrap();
+    let catalog = crate::partitions::load(&writer).unwrap();
+    let partitions: Vec<(String, crate::partitions::PartitionRecord)> = catalog
+        .every()
+        .filter(|(_, record)| record.parent.is_some())
+        .map(|(name, record)| (name.to_owned(), record.clone()))
+        .collect();
+    assert_eq!(partitions.len(), 2);
+    for (name, mut record) in partitions {
+        assert_eq!(record.index_links.len(), 1, "{name}");
+        record.index_links.clear();
+        let bytes = crate::encoding::encode_partitioning(&record);
+        assert_eq!(bytes.first(), Some(&1), "{name}");
+        writer
+            .put(&crate::encoding::partition_key(&name), &bytes)
+            .unwrap();
+    }
+    writer.commit().unwrap();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+              WHERE c.relname = 'u_key'"
+        ),
+        "indisvalid\nt\nSELECT 1"
+    );
+    let error = failure(&mut session, "INSERT INTO u VALUES (1, '2024-05-01', 2)");
+    assert_eq!(error.state().code(), "23505", "{error}");
+    answer(&mut session, "ALTER TABLE u DROP CONSTRAINT u_key");
+    assert_eq!(relation_names(&mut session, "u%key"), "relname\nSELECT 0");
+    answer(&mut session, "INSERT INTO u VALUES (1, '2024-05-01', 2)");
+    assert_eq!(
+        answer(&mut session, "SELECT count(*) FROM u_1"),
+        "count\n2\nSELECT 1"
+    );
+}

@@ -1011,7 +1011,7 @@ impl<'a> Resolver<'a> {
         if depth > MAX_QUERY_NESTING {
             return Err(crate::encoding::corrupt("partition tree"));
         }
-        let Some(partitioned) = crate::partitions::Partitioned::of(catalog, table)? else {
+        let Some(partitioned) = crate::partitions::Partitioned::of(catalog, table, None)? else {
             leaves.push(table.name.clone());
             return Ok(());
         };

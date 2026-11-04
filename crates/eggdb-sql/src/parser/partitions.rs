@@ -169,7 +169,15 @@ impl Parser<'_> {
             return Err(self.not_supported("expressions in a partition key"));
         }
         self.at = first_token;
-        let expr = self.expression()?;
+        let expr = if self.postgresql() {
+            let call = self.primary()?;
+            if !self.at_partition_key_end() {
+                return Err(self.unexpected());
+            }
+            call
+        } else {
+            self.expression()?
+        };
         let end = self.previous_end();
         let text = self.text.get(position..end).unwrap_or("").to_owned();
         Ok(key_part(expr, text, position))

@@ -849,6 +849,24 @@ fn alter_function_set_and_reset_change_the_settings_stored_with_the_routine() {
         answer(&mut session, "SELECT check_password('joe')"),
         "check_password\npublic\nSELECT 1"
     );
+    for statement in [
+        "ALTER FUNCTION check_password(text) SET work_mem_of_nothing = '7MB'",
+        "ALTER FUNCTION check_password(text) RESET work_mem_of_nothing",
+        "CREATE FUNCTION tuned() RETURNS int LANGUAGE sql SET work_mem_of_nothing = '7MB' \
+         AS 'SELECT 1'",
+    ] {
+        let error = refusal(&mut session, statement);
+        assert_eq!(error.state().code(), "42704", "{statement}");
+        assert_eq!(
+            error.message(),
+            "unrecognized configuration parameter \"work_mem_of_nothing\"",
+            "{statement}"
+        );
+    }
+    assert_eq!(
+        answer(&mut session, "SELECT check_password('joe')"),
+        "check_password\npublic\nSELECT 1"
+    );
 }
 
 #[test]

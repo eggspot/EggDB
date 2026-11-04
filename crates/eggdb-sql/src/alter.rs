@@ -163,7 +163,7 @@ fn apply(
             cascade,
         } => drop_column(writer, tables, name, column, *if_exists, *cascade, dialect),
         AlterAction::RenameColumn { from, to } => {
-            rename_column(writer, tables, name, from, to, dialect)?;
+            rename_partitioned_column(writer, tables, name, from, to, dialect)?;
             crate::comments::move_part(writer, name, CommentKind::Column, &from.text, &to.text)?;
             crate::roles::move_column(writer, name, &from.text, &to.text)?;
             Ok(None)
@@ -877,6 +877,7 @@ fn drop_column(
             _ => SqlError::not_supported("dropping the only column of a table"),
         });
     }
+    refuse_dropping_a_key_column(writer, tables, &table, &column.text)?;
     let mut also_dropped = Vec::new();
     for dependent in crate::generated_columns::dependents_of(&table, index) {
         if !cascade || dialect != Dialect::PostgreSql {
@@ -1070,6 +1071,73 @@ fn move_column(
     };
     let rebuilt = rebuild(writer, &table, new, &mut map, None)?;
     constraints::register_references(writer, tables, &rebuilt)?;
+    Ok(())
+}
+
+fn refuse_dropping_a_key_column(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    table: &TableDefinition,
+    column: &str,
+) -> SqlResult<()> {
+    let catalog = crate::partitions::catalog(&*writer, tables)?;
+    if catalog.is_empty() {
+        return Ok(());
+    }
+    let keyed = std::iter::once(table.name.clone()).chain(catalog.descendants_of(&table.name));
+    for name in keyed {
+        let Some(key) = catalog.key_of(&name) else {
+            continue;
+        };
+        let definition = current(writer, tables, &name)?;
+        if crate::partitions::key_reads_column(&definition, key, column)? {
+            return Err(SqlError::new(
+                SqlState::INVALID_TABLE_DEFINITION,
+                format!(
+                    "cannot drop column \"{column}\" because it is part of the partition key of \
+                     relation \"{}\"",
+                    crate::schemas::base_name(&name)
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn rename_partitioned_column(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    name: &str,
+    from: &Name,
+    to: &Name,
+    dialect: Dialect,
+) -> SqlResult<()> {
+    let catalog = crate::partitions::catalog(&*writer, tables)?;
+    if catalog.is_empty() {
+        return rename_column(writer, tables, name, from, to, dialect);
+    }
+    if let Some((parent, _)) = catalog.parent_of(name)
+        && current(writer, tables, parent)?
+            .column_index(&from.text)
+            .is_some()
+    {
+        return Err(SqlError::new(
+            SqlState::INVALID_TABLE_DEFINITION,
+            format!("cannot rename inherited column \"{}\"", from.text),
+        )
+        .at(from.position));
+    }
+    rename_column(writer, tables, name, from, to, dialect)?;
+    crate::partitions::rename_key_column(writer, name, &from.text, &to.text)?;
+    for partition in catalog.descendants_of(name) {
+        if current(writer, tables, &partition)?
+            .column_index(&from.text)
+            .is_some()
+        {
+            rename_column(writer, tables, &partition, from, to, dialect)?;
+            crate::partitions::rename_key_column(writer, &partition, &from.text, &to.text)?;
+        }
+    }
     Ok(())
 }
 

@@ -60,6 +60,31 @@ pub(super) fn changes_definitions(command: &str) -> bool {
     })
 }
 
+pub(super) fn refuse_permanent_target(
+    refuses_writes: bool,
+    command: &str,
+    target: &crate::ast::TableReference,
+) -> SqlResult<()> {
+    if target.derived.is_some() || target.generated.is_some() {
+        return Ok(());
+    }
+    refuse_permanent_name(refuses_writes, command, &target.name)
+}
+
+pub(super) fn refuse_permanent_name(
+    refuses_writes: bool,
+    command: &str,
+    target: &crate::ast::Name,
+) -> SqlResult<()> {
+    if refuses_writes
+        && !crate::temporary::is_temporary_name(&target.text)
+        && !crate::temp_tables::is_temp_table(&target.text)
+    {
+        return Err(refused_in_read_only_transaction(command));
+    }
+    Ok(())
+}
+
 fn before_any_query(what: &str) -> SqlError {
     SqlError::new(
         SqlState::ACTIVE_SQL_TRANSACTION,

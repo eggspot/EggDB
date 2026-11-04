@@ -136,6 +136,14 @@ fn nextval_is_refused_in_a_read_only_transaction() {
         "cannot execute nextval() in a read-only transaction"
     );
     answer(&mut session, "ROLLBACK");
+    answer(&mut session, "BEGIN READ ONLY");
+    let error = refusal(&mut session, "SELECT setval('serial_numbers', 10)");
+    assert_eq!(error.state().code(), "25006");
+    assert_eq!(
+        error.message(),
+        "cannot execute setval() in a read-only transaction"
+    );
+    answer(&mut session, "ROLLBACK");
     assert_eq!(
         answer(&mut session, "SELECT nextval('serial_numbers')"),
         "nextval\n1\nSELECT 1"
@@ -364,4 +372,78 @@ fn oracle_read_only_transactions_refuse_changes_with_ora_01456() {
     answer(&mut session, "CREATE TABLE dept (deptno NUMBER)");
     answer(&mut session, "INSERT INTO dept VALUES (10)");
     answer(&mut session, "COMMIT");
+}
+
+#[test]
+fn a_refused_set_transaction_aborts_the_postgresql_transaction() {
+    let store = MemoryStore::default();
+    let mut session = postgresql_session(&store);
+    for refused in [
+        "SET TRANSACTION READ WRITE",
+        "SET transaction_isolation = 'bogus'",
+        "SET transaction_read_only = maybe",
+    ] {
+        answer(&mut session, "BEGIN READ ONLY");
+        answer(&mut session, "SELECT 1");
+        refusal(&mut session, refused);
+        for after in [
+            "SELECT 2",
+            "SAVEPOINT later",
+            "CREATE TEMPORARY TABLE scratch (n integer)",
+        ] {
+            assert_eq!(
+                refusal(&mut session, after).state().code(),
+                "25P02",
+                "{after} after {refused}"
+            );
+        }
+        answer(&mut session, "ROLLBACK");
+    }
+    answer(&mut session, "BEGIN");
+    answer(&mut session, "INSERT INTO films VALUES (2, 'Sleeper')");
+    assert_eq!(
+        refusal(
+            &mut session,
+            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+        )
+        .state()
+        .code(),
+        "25001"
+    );
+    assert_eq!(
+        refusal(&mut session, "INSERT INTO films VALUES (3, 'Zelig')")
+            .state()
+            .code(),
+        "25P02"
+    );
+    assert_eq!(answer(&mut session, "COMMIT"), "ROLLBACK");
+    assert_eq!(
+        answer(&mut session, "SELECT count(*) FROM films"),
+        "count\n1\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_read_only_transaction_refuses_a_write_that_matches_no_rows() {
+    let store = MemoryStore::default();
+    let mut session = postgresql_session(&store);
+    answer(&mut session, "CREATE TABLE empty (id integer)");
+    answer(&mut session, "CREATE TEMPORARY TABLE scratch (id integer)");
+    answer(&mut session, "SET default_transaction_read_only = on");
+    for (statement, command) in [
+        ("UPDATE empty SET id = 1", "UPDATE"),
+        ("DELETE FROM films WHERE false", "DELETE"),
+        ("INSERT INTO empty SELECT 1 WHERE false", "INSERT"),
+    ] {
+        let error = refusal(&mut session, statement);
+        assert_eq!(error.state().code(), "25006", "{statement}");
+        assert_eq!(
+            error.message(),
+            format!("cannot execute {command} in a read-only transaction"),
+            "{statement}"
+        );
+    }
+    answer(&mut session, "UPDATE scratch SET id = 1");
+    answer(&mut session, "INSERT INTO scratch VALUES (1)");
+    answer(&mut session, "DELETE FROM scratch WHERE false");
 }

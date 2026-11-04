@@ -252,12 +252,6 @@ pub(crate) fn move_out(
     old_rows: &mut Vec<Vec<Value>>,
     moved: &mut Vec<MovedRow>,
 ) -> SqlResult<usize> {
-    if changes
-        .iter()
-        .all(|(_, _, new_row)| checks.fits_partition(new_row))
-    {
-        return Ok(0);
-    }
     let kept_old_rows = !old_rows.is_empty();
     let mut old_iter = std::mem::take(old_rows).into_iter();
     let mut leaving: Vec<LeavingRow> = Vec::new();
@@ -273,6 +267,9 @@ pub(crate) fn move_out(
                 new_row,
             });
         }
+    }
+    if leaving.is_empty() {
+        return Ok(0);
     }
     let count = leaving.len();
     let mut propagated = Vec::new();

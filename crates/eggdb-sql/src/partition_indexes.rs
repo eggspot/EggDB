@@ -33,6 +33,26 @@ fn equivalent(
         && column_names(parent, parent_index) == column_names(child, child_index)
 }
 
+pub(crate) fn unique_index_links(
+    parent: &TableDefinition,
+    partition: &TableDefinition,
+) -> Vec<IndexLink> {
+    let mut links: Vec<IndexLink> = Vec::new();
+    for parent_index in parent.indexes.iter().filter(|index| index.unique) {
+        let found = partition.indexes.iter().find(|candidate| {
+            !links.iter().any(|link| link.index == candidate.id)
+                && equivalent(parent, parent_index, partition, candidate)
+        });
+        if let Some(found) = found {
+            links.push(IndexLink {
+                index: found.id,
+                parent_index: parent_index.id,
+            });
+        }
+    }
+    links
+}
+
 fn spec_for(parent: &TableDefinition, index: &IndexDefinition, dialect: Dialect) -> IndexSpec {
     IndexSpec {
         name: (dialect == Dialect::MySql).then(|| Name {
@@ -191,9 +211,25 @@ fn reach(
         .find(|candidate| {
             !linked.contains(&candidate.id) && equivalent(parent, parent_index, &child, candidate)
         })
-        .map(|candidate| candidate.id);
+        .cloned();
     let child_index = match matching {
-        Some(id) => id,
+        Some(adopted) => {
+            if catalog.key_of(child_name).is_some() {
+                for grandchild in children(writer, tables, child_name)? {
+                    reach(
+                        writer,
+                        tables,
+                        &child,
+                        &adopted,
+                        &grandchild,
+                        position,
+                        dialect,
+                        depth + 1,
+                    )?;
+                }
+            }
+            adopted.id
+        }
         None => {
             let spec = spec_for(parent, parent_index, dialect);
             let child_key = catalog.key_of(child_name).cloned();
