@@ -1046,7 +1046,10 @@ impl Database {
         }
     }
 
-    pub(crate) fn has_uncounted_collections(&self) -> Result<bool> {
+    /// Whether a collection made by a release before counts were kept has no count yet, as
+    /// of the last commit. [`Database::collection_stats`] counts such a collection by reading
+    /// its keys and, on a database open for writing, keeps the count.
+    pub fn has_uncounted_collections(&self) -> Result<bool> {
         self.begin_read()?.has_uncounted_collections()
     }
 
