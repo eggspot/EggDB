@@ -398,7 +398,7 @@ fn buckets(job: &str, counts: &[(&str, f64)], time_ms: i64) -> Vec<Series> {
                 &[
                     ("__name__", "http_request_duration_seconds_bucket"),
                     ("job", job),
-                    ("le", le),
+                    ("le", *le),
                 ],
                 &[(time_ms, *count)],
             )
