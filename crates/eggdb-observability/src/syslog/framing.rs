@@ -10,6 +10,7 @@ pub(crate) enum FramingError {
 pub(crate) struct Framer {
     buffer: Vec<u8>,
     start: usize,
+    searched_to: usize,
     most: usize,
 }
 
@@ -18,13 +19,16 @@ impl Framer {
         Self {
             buffer: Vec::new(),
             start: 0,
+            searched_to: 0,
             most,
         }
     }
 
     pub(crate) fn push(&mut self, bytes: &[u8]) {
         if self.start > 0 {
-            self.buffer.drain(..self.start.min(self.buffer.len()));
+            let dropped = self.start.min(self.buffer.len());
+            self.buffer.drain(..dropped);
+            self.searched_to = self.searched_to.saturating_sub(dropped);
             self.start = 0;
         }
         self.buffer.extend_from_slice(bytes);
@@ -41,33 +45,49 @@ impl Framer {
             .take_while(|byte| matches!(byte, b'\n' | b'\r' | b'\0'))
             .count();
         self.start += skipped;
+        self.searched_to = self.searched_to.max(self.start);
     }
 
     pub(crate) fn next_frame(&mut self) -> Result<Option<Vec<u8>>, FramingError> {
         self.skip_separators();
-        let pending = self.pending();
-        let (frame, consumed) = match pending.first() {
+        let line_end = match self.pending().first() {
             None => return Ok(None),
-            Some(b'1'..=b'9') => match octet_counted(pending, self.most)? {
+            Some(b'1'..=b'9') => None,
+            Some(_) => Some(self.line_end()),
+        };
+        let pending = self.pending();
+        let (frame, consumed) = match line_end {
+            None => match octet_counted(pending, self.most)? {
                 Some(found) => found,
                 None => return Ok(None),
             },
-            Some(_) => match pending
-                .iter()
-                .position(|byte| matches!(byte, b'\n' | b'\0'))
-            {
-                Some(end) if end <= self.most => {
-                    let line = pending.get(..end).unwrap_or_default();
-                    (line.strip_suffix(b"\r").unwrap_or(line), end + 1)
-                }
-                Some(_) => return Err(FramingError::TooLong),
-                None if pending.len() > self.most => return Err(FramingError::TooLong),
-                None => return Ok(None),
-            },
+            Some(Some(end)) if end <= self.most => {
+                let line = pending.get(..end).unwrap_or_default();
+                (line.strip_suffix(b"\r").unwrap_or(line), end + 1)
+            }
+            Some(Some(_)) => return Err(FramingError::TooLong),
+            Some(None) if pending.len() > self.most => return Err(FramingError::TooLong),
+            Some(None) => return Ok(None),
         };
         let frame = frame.to_vec();
         self.start += consumed;
+        self.searched_to = self.start;
         Ok(Some(frame))
+    }
+
+    fn line_end(&mut self) -> Option<usize> {
+        let searched = self.searched_to.saturating_sub(self.start);
+        let unsearched = self.pending().get(searched..).unwrap_or_default();
+        match unsearched
+            .iter()
+            .position(|byte| matches!(byte, b'\n' | b'\0'))
+        {
+            Some(at) => Some(searched + at),
+            None => {
+                self.searched_to = self.buffer.len();
+                None
+            }
+        }
     }
 
     pub(crate) fn finish(mut self) -> Option<Vec<u8>> {

@@ -31,6 +31,7 @@ pub(crate) struct Work<'b> {
     reservation: Reservation<'b>,
     kept_samples: usize,
     step_samples: usize,
+    step_label_bytes: usize,
     max_samples: usize,
     subquery_steps: usize,
 }
@@ -41,6 +42,7 @@ impl<'b> Work<'b> {
             reservation: budget.empty_reservation(),
             kept_samples: 0,
             step_samples: 0,
+            step_label_bytes: 0,
             max_samples,
             subquery_steps: 0,
         }
@@ -51,10 +53,10 @@ impl<'b> Work<'b> {
         if held > self.max_samples {
             return Err(Failure::Execution(TOO_MANY_SAMPLES.to_owned()));
         }
-        if !self
-            .reservation
-            .hold_if_large(held.saturating_mul(SAMPLE_BYTES))
-        {
+        if !self.reservation.hold_if_large(
+            held.saturating_mul(SAMPLE_BYTES)
+                .saturating_add(self.step_label_bytes),
+        ) {
             return Err(Failure::Unavailable(
                 "the query needs more memory than the server's memory budget has left".to_owned(),
             ));
@@ -73,18 +75,26 @@ impl<'b> Work<'b> {
         self.hold()
     }
 
-    fn give_back_to(&mut self, step_samples: usize) {
+    fn take_label_bytes(&mut self, bytes: usize) -> Result<(), Failure> {
+        self.step_label_bytes = self.step_label_bytes.saturating_add(bytes);
+        self.hold()
+    }
+
+    fn give_back_to(&mut self, step_samples: usize, step_label_bytes: usize) {
         self.step_samples = self.step_samples.min(step_samples);
+        self.step_label_bytes = self.step_label_bytes.min(step_label_bytes);
         let _ = self.reservation.hold_if_large(
             self.kept_samples
                 .saturating_add(self.step_samples)
-                .saturating_mul(SAMPLE_BYTES),
+                .saturating_mul(SAMPLE_BYTES)
+                .saturating_add(self.step_label_bytes),
         );
     }
 
     /// Gives back what the last evaluation step held.
     pub(crate) fn finish_step(&mut self) {
         self.step_samples = 0;
+        self.step_label_bytes = 0;
         let _ = self
             .reservation
             .hold_if_large(self.kept_samples.saturating_mul(SAMPLE_BYTES));
@@ -505,7 +515,16 @@ impl<'d, 'b> Evaluator<'d, 'b> {
                 let source = text_argument(name, source)?;
                 let pattern = text_argument(name, pattern)?;
                 let vector = self.vector_argument(name, vector, time_ms)?;
-                label_replace(vector, destination, replacement, source, pattern).map(Data::Vector)
+                let work = &mut self.work;
+                label_replace(
+                    vector,
+                    destination,
+                    replacement,
+                    source,
+                    pattern,
+                    &mut |bytes| work.take_label_bytes(bytes),
+                )
+                .map(Data::Vector)
             }
             ("label_join", [vector, destination, separator, sources @ ..]) => {
                 let destination = text_argument(name, destination)?;
@@ -515,7 +534,11 @@ impl<'d, 'b> Evaluator<'d, 'b> {
                     .map(|source| text_argument(name, source))
                     .collect::<Result<Vec<&str>, Failure>>()?;
                 let vector = self.vector_argument(name, vector, time_ms)?;
-                label_join(vector, destination, separator, &sources).map(Data::Vector)
+                let work = &mut self.work;
+                label_join(vector, destination, separator, &sources, &mut |bytes| {
+                    work.take_label_bytes(bytes)
+                })
+                .map(Data::Vector)
             }
             (
                 "time" | "vector" | "scalar" | "histogram_quantile" | "label_replace"
@@ -701,11 +724,12 @@ impl<'d, 'b> Evaluator<'d, 'b> {
         self.work.run_subquery_steps(steps)?;
         let mut series: BTreeMap<Labels, Vec<(i64, f64)>> = BTreeMap::new();
         let held_before = self.work.step_samples;
+        let label_bytes_before = self.work.step_label_bytes;
         let mut collected = 0usize;
         while at <= end {
             let inner = self.evaluate(&subquery.inner, at)?;
             self.work
-                .give_back_to(held_before.saturating_add(collected));
+                .give_back_to(held_before.saturating_add(collected), label_bytes_before);
             match inner {
                 Data::Vector(vector) => {
                     collected = collected.saturating_add(vector.len());

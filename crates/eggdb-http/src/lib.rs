@@ -6,10 +6,11 @@
 //! could be read two ways is refused, as RFC 9112 asks, so requests cannot be smuggled. A
 //! handler answers a whole [`Response`] or a [`StreamedResponse`] sent in chunks as it is
 //! produced. Every length and wait is bounded so a hostile client cannot hold a thread or
-//! memory for long. A listener given [`Limits`] holds every body over 64 KiB, the request's
-//! (a chunked one as it arrives) and then the response's, against the server's one memory
-//! budget (D284, D307), and answers with its own refusal when the budget is spent. A minimal
-//! client posts to plain `http://` URLs, for webhooks.
+//! memory for long; that includes reading a response, which may block the server for 5 seconds
+//! plus one second for each 64 KiB already sent. A listener given [`Limits`] holds every body
+//! over 64 KiB, the request's (a chunked one as it arrives) and then the response's, against the
+//! server's one memory budget (D284, D307), and answers with its own refusal when the budget is
+//! spent. A minimal client posts to plain `http://` URLs, for webhooks.
 
 mod client;
 mod connection;

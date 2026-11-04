@@ -12,7 +12,8 @@ use eggdb_sql::json::{Json, Node, parse_document};
 
 const DEFAULT_SCROLL_SIZE: usize = 1000;
 const MAX_SCROLL_SIZE: usize = 10_000;
-const MATCHED_ENTRY_BYTES: usize = 48;
+const MATCHED_ENTRY_BYTES: usize = 56;
+const BATCH_WRITE_BYTES: usize = 16 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Conflicts {
@@ -30,6 +31,13 @@ enum Change<'s> {
 struct Matched {
     id: String,
     version: u64,
+    fingerprint: u64,
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 #[derive(Debug)]
@@ -119,12 +127,7 @@ impl Slice {
     }
 
     fn holds(self, document_id: &str) -> bool {
-        let hash = document_id
-            .bytes()
-            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-                (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
-            });
-        hash % self.max == self.id
+        fnv1a(document_id.as_bytes()) % self.max == self.id
     }
 }
 
@@ -365,7 +368,10 @@ impl Api<'_> {
             Snapshot::MissingIndex => return Ok(missing_index(index)),
             Snapshot::OverBudget => return Ok(over_memory_budget()),
         };
-        let tally = self.change_matched(index, &matched, change, &options)?;
+        let mut tally = self.change_matched(index, &matched, change, &options)?;
+        if let Some(max_docs) = options.max_docs {
+            tally.total = tally.total.min(max_docs);
+        }
         let took = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let status = if tally.failures.is_empty() {
             200
@@ -408,7 +414,11 @@ impl Api<'_> {
                         over_budget = true;
                         return Ok(false);
                     }
-                    matched.push(Matched { id, version });
+                    matched.push(Matched {
+                        id,
+                        version,
+                        fingerprint: fnv1a(source.as_bytes()),
+                    });
                 }
                 Ok(true)
             })?;
@@ -430,28 +440,34 @@ impl Api<'_> {
         let mut tally = Tally::default();
         let mut done = 0u64;
         let reached = |done: u64| options.max_docs.is_some_and(|max| done >= max);
-        for batch in matched.chunks(options.scroll_size) {
+        let mut next = 0;
+        while let Some(rest) = matched.get(next..).filter(|rest| !rest.is_empty()) {
             if reached(done) {
                 break;
             }
+            let batch = rest.get(..options.scroll_size).unwrap_or(rest);
             tally.batches += 1;
             let mut step = Tally::default();
             let mut conflicted: Vec<&str> = Vec::new();
             let mut script_failure: Option<(&str, String)> = None;
             let mut batch_done = done;
+            let mut consumed = 0;
+            let mut written_bytes = 0usize;
             let outcome = write(self.keyspace, |keys| {
                 for item in batch {
-                    if reached(batch_done) {
+                    if reached(batch_done) || written_bytes > BATCH_WRITE_BYTES {
                         break;
                     }
+                    consumed += 1;
                     let key = document_key(index, &item.id);
-                    let current = keys
-                        .get(&key)?
-                        .as_deref()
-                        .and_then(unstored)
-                        .filter(|(version, _)| *version == item.version);
+                    let current = keys.get(&key)?.as_deref().and_then(unstored).filter(
+                        |(version, source)| {
+                            *version == item.version && fnv1a(source.as_bytes()) == item.fingerprint
+                        },
+                    );
                     let Some((version, source)) = current else {
                         step.version_conflicts += 1;
+                        step.total += 1;
                         conflicted.push(item.id.as_str());
                         continue;
                     };
@@ -461,6 +477,7 @@ impl Api<'_> {
                         Change::Update(Some(script)) => {
                             match scripted(script, index, &item.id, version, &source) {
                                 Ok((Operation::Index, changed)) => {
+                                    written_bytes = written_bytes.saturating_add(changed.len());
                                     keys.put(&key, &stored(version + 1, &changed))?;
                                     step.updated += 1;
                                     step.total += 1;
@@ -477,6 +494,7 @@ impl Api<'_> {
                     };
                     match operation {
                         Operation::Index => {
+                            written_bytes = written_bytes.saturating_add(source.len());
                             keys.put(&key, &stored(version + 1, &source))?;
                             step.updated += 1;
                         }
@@ -504,6 +522,7 @@ impl Api<'_> {
             outcome?;
             tally.add(&step);
             done = batch_done;
+            next += consumed.max(1);
             if options.conflicts == Conflicts::Abort && !conflicted.is_empty() {
                 for id in conflicted {
                     tally.fail(
@@ -558,8 +577,13 @@ mod tests {
             .change_matched("logs", &matched, Change::Delete, &options)
             .expect("the deletes run");
         assert_eq!(
-            (tally.deleted, tally.version_conflicts, tally.batches),
-            (2, 1, 3)
+            (
+                tally.total,
+                tally.deleted,
+                tally.version_conflicts,
+                tally.batches
+            ),
+            (3, 2, 1, 3)
         );
         assert!(tally.failures.is_empty());
         let kept = api.answer(&request("GET", "/logs/_doc/2", ""));
@@ -590,5 +614,42 @@ mod tests {
         );
         assert_eq!(tally.status, 409);
         assert!(tally.failures[0].contains("version_conflict_engine_exception"));
+    }
+
+    #[test]
+    fn a_document_deleted_and_created_again_is_a_version_conflict() {
+        let keyspace = MemoryKeyspace::default();
+        let api = api(&keyspace);
+        for id in ["1", "2"] {
+            let response = api.answer(&request(
+                "PUT",
+                &format!("/logs/_doc/{id}"),
+                "{\"level\":\"debug\"}",
+            ));
+            assert_eq!(response.status, 201);
+        }
+        let mut options = ByQuery::of(&request("POST", "/logs/_delete_by_query", "{}"), false)
+            .expect("valid options");
+        options.conflicts = Conflicts::Proceed;
+        let mut reservation = api.memory_budget.empty_reservation();
+        let Ok(Snapshot::Matched(matched)) =
+            api.matched_documents("logs", &options, &mut reservation)
+        else {
+            panic!("the snapshot reads the index");
+        };
+        assert_eq!(
+            api.answer(&request("DELETE", "/logs/_doc/2", "")).status,
+            200
+        );
+        let recreated = api.answer(&request("PUT", "/logs/_doc/2", "{\"level\":\"keep\"}"));
+        assert_eq!(recreated.status, 201);
+        let tally = api
+            .change_matched("logs", &matched, Change::Delete, &options)
+            .expect("the deletes run");
+        assert_eq!(
+            (tally.total, tally.deleted, tally.version_conflicts),
+            (2, 1, 1)
+        );
+        assert_eq!(api.answer(&request("GET", "/logs/_doc/2", "")).status, 200);
     }
 }

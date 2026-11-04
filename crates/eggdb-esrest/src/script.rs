@@ -159,14 +159,19 @@ impl Script {
     /// Runs the script on `context`; an error leaves `context` partly changed, so the caller
     /// discards it.
     pub(crate) fn run(&self, context: &mut Context<'_>) -> Result<(), String> {
+        let mut source_bytes = footprint(&context.source, 0)?;
         for statement in &self.statements {
-            self.execute(statement, context)?;
-            within_limits(&context.source)?;
+            source_bytes = self.execute(statement, context, source_bytes)?;
         }
         Ok(())
     }
 
-    fn execute(&self, statement: &Statement, context: &mut Context<'_>) -> Result<(), String> {
+    fn execute(
+        &self,
+        statement: &Statement,
+        context: &mut Context<'_>,
+        source_bytes: usize,
+    ) -> Result<usize, String> {
         match statement {
             Statement::SetSource {
                 path,
@@ -181,7 +186,16 @@ impl Script {
                     }
                     None => value,
                 };
-                assign(&mut context.source, path, value)
+                let added = footprint(&value, path.len())?;
+                let grown = match (path.last(), lookup(&context.source, path)) {
+                    (None, _) => added,
+                    (Some(_), Some(replaced)) => {
+                        (source_bytes + added).saturating_sub(footprint(replaced, path.len())?)
+                    }
+                    (Some(name), None) => source_bytes + member_overhead(name) + added,
+                };
+                assign(&mut context.source, path, value)?;
+                within_limit(grown)
             }
             Statement::SetOperation(value) => {
                 context.operation = match self.evaluate(value, context, 0)? {
@@ -195,7 +209,7 @@ impl Script {
                         ));
                     }
                 };
-                Ok(())
+                Ok(source_bytes)
             }
             Statement::Step { path, delta } => {
                 let current = match lookup(&context.source, path) {
@@ -209,7 +223,10 @@ impl Script {
                 };
                 let stepped =
                     arithmetic(&current, Arithmetic::Add, &Json::Number(delta.to_string()))?;
-                assign(&mut context.source, path, stepped)
+                let grown = (source_bytes + footprint(&stepped, path.len())?)
+                    .saturating_sub(footprint(&current, path.len())?);
+                assign(&mut context.source, path, stepped)?;
+                within_limit(grown)
             }
             Statement::Remove { path, key } => {
                 let key = match self.evaluate(key, context, 0)? {
@@ -217,15 +234,20 @@ impl Script {
                     other => display(&other),
                 };
                 let members = object_at(&mut context.source, path)?;
+                let mut removed = 0usize;
+                for (name, member) in members.iter().filter(|(name, _)| *name == key) {
+                    removed += member_overhead(name) + footprint(&member.value, 0)?;
+                }
                 members.retain(|(name, _)| *name != key);
-                Ok(())
+                Ok(source_bytes.saturating_sub(removed))
             }
             Statement::Add { path, value } => {
                 let value = self.evaluate(value, context, 0)?;
+                let grown = source_bytes + 1 + footprint(&value, path.len() + 1)?;
                 match value_at(&mut context.source, path)? {
                     Json::Array(items) => {
                         items.push(node(value));
-                        Ok(())
+                        within_limit(grown)
                     }
                     _ => Err(format!(
                         "cannot add to [ctx._source.{}]: it is not a list",
@@ -324,14 +346,30 @@ fn float_text(value: f64) -> Result<String, String> {
     }
 }
 
-fn within_limits(source: &Json) -> Result<(), String> {
-    let mut remaining = MAX_VALUE_BYTES;
-    if fits(source, 0, &mut remaining) {
-        Ok(())
+fn too_large() -> String {
+    format!(
+        "the document would grow past {MAX_VALUE_BYTES} bytes or {MAX_SOURCE_DEPTH} levels of nesting"
+    )
+}
+
+fn within_limit(source_bytes: usize) -> Result<usize, String> {
+    if source_bytes > MAX_VALUE_BYTES {
+        Err(too_large())
     } else {
-        Err(format!(
-            "the document would grow past {MAX_VALUE_BYTES} bytes or {MAX_SOURCE_DEPTH} levels of nesting"
-        ))
+        Ok(source_bytes)
+    }
+}
+
+fn member_overhead(name: &str) -> usize {
+    name.len() + 4
+}
+
+fn footprint(value: &Json, depth: usize) -> Result<usize, String> {
+    let mut remaining = MAX_VALUE_BYTES;
+    if fits(value, depth, &mut remaining) {
+        Ok(MAX_VALUE_BYTES - remaining)
+    } else {
+        Err(too_large())
     }
 }
 
@@ -341,9 +379,15 @@ fn fits(value: &Json, depth: usize, remaining: &mut usize) -> bool {
     }
     let own = match value {
         Json::Null | Json::Boolean(_) => 5,
-        Json::Number(text) | Json::String(text) => text.len() + 2,
+        Json::Number(text) => text.len(),
+        Json::String(text) => text.len() + 2,
         Json::Array(items) => items.len() + 2,
-        Json::Object(members) => members.iter().map(|(key, _)| key.len() + 4).sum(),
+        Json::Object(members) => {
+            2 + members
+                .iter()
+                .map(|(key, _)| member_overhead(key))
+                .sum::<usize>()
+        }
     };
     let Some(left) = remaining.checked_sub(own) else {
         return false;
@@ -660,14 +704,14 @@ impl Parser<'_> {
             } else {
                 -1
             };
-            return match self.path()? {
+            return match self.path(0)? {
                 Path::Reference(Reference::Source(path)) if !path.is_empty() => {
                     Ok(Statement::Step { path, delta })
                 }
                 _ => Err("only fields of ctx._source can be incremented".to_owned()),
             };
         }
-        match self.path()? {
+        match self.path(0)? {
             Path::Call {
                 target: Reference::Source(path),
                 method,
@@ -723,7 +767,7 @@ impl Parser<'_> {
         }
     }
 
-    fn path(&mut self) -> Result<Path, String> {
+    fn path(&mut self, depth: usize) -> Result<Path, String> {
         let root = match self.next() {
             Some(Token::Name(name)) => name,
             _ => return Err("expected [ctx] or [params]".to_owned()),
@@ -738,8 +782,9 @@ impl Parser<'_> {
                     };
                     if self.peek() == Some(&Token::OpenParen) {
                         self.at += 1;
-                        let arguments = self.arguments()?;
+                        self.count_operation()?;
                         let target = reference(&root, steps)?;
+                        let arguments = self.arguments(depth + 1)?;
                         return Ok(Path::Call {
                             target,
                             method: name,
@@ -762,14 +807,15 @@ impl Parser<'_> {
         Ok(Path::Reference(reference(&root, steps)?))
     }
 
-    fn arguments(&mut self) -> Result<Vec<Expression>, String> {
+    fn arguments(&mut self, depth: usize) -> Result<Vec<Expression>, String> {
         let mut arguments = Vec::new();
         if self.peek() == Some(&Token::CloseParen) {
             self.at += 1;
             return Ok(arguments);
         }
         loop {
-            arguments.push(self.expression(0)?);
+            self.count_operation()?;
+            arguments.push(self.expression(depth)?);
             match self.next() {
                 Some(Token::Comma) => {}
                 Some(Token::CloseParen) => return Ok(arguments),
@@ -837,7 +883,7 @@ impl Parser<'_> {
                 self.at += 1;
                 Ok(Expression::Literal(Json::Null))
             }
-            Some(Token::Name(_)) => match self.path()? {
+            Some(Token::Name(_)) => match self.path(depth)? {
                 Path::Reference(reference) => Ok(Expression::Read(reference)),
                 Path::Call { method, .. } => Err(format!(
                     "method [{method}] is not supported in update scripts"
@@ -1075,5 +1121,67 @@ mod tests {
         let fits = format!("\"{}\"", "ctx._source.s += ctx._source.s; ".repeat(10));
         let (written, _) = run(&fits, "{\"s\":\"x\"}").expect("1 KiB fits");
         assert_eq!(written.len(), "{\"s\":\"\"}".len() + 1024);
+    }
+
+    #[test]
+    fn nested_calls_stop_at_the_nesting_limit_instead_of_the_stack() {
+        let levels = 100_000;
+        for root in ["params", "ctx._source.list", "a", "ctx"] {
+            let script = format!(
+                "\"ctx._source.n = {}1{}\"",
+                format!("{root}.f(").repeat(levels),
+                ")".repeat(levels)
+            );
+            let error = run(&script, "{\"list\":[]}").expect_err("nested calls are refused");
+            assert!(
+                error.contains("nests too deeply")
+                    || error.contains("cannot resolve")
+                    || error.contains("ctx offers"),
+                "{root}: {error}"
+            );
+        }
+        let statement = format!(
+            "\"{}1{}\"",
+            "ctx._source.list.add(".repeat(levels),
+            ")".repeat(levels)
+        );
+        let error = run(&statement, "{\"list\":[]}").expect_err("nested adds are refused");
+        assert!(error.contains("nests too deeply"), "{error}");
+    }
+
+    #[test]
+    fn many_statements_on_a_large_document_do_not_rescan_it() {
+        let items = vec!["1"; 200_000].join(",");
+        let source = format!("{{\"a\":[{items}],\"n\":0}}");
+        let script = format!(
+            "\"{}\"",
+            "ctx.op = 'index'; ctx._source.x = 1; ctx._source.n++; ".repeat(333)
+        );
+        let started = std::time::Instant::now();
+        let (written, operation) = run(&script, &source).expect("the script fits");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(operation, Operation::Index);
+        assert!(
+            written.ends_with(",\"n\":333,\"x\":1}"),
+            "{}",
+            &written[written.len() - 20..]
+        );
+    }
+
+    #[test]
+    fn removing_and_re_adding_a_member_keeps_the_size_exact() {
+        let big = "x".repeat(600_000);
+        let source = format!("{{\"big\":\"{big}\"}}");
+        let script = format!(
+            "{{\"source\":\"{}\",\"params\":{{\"big\":\"{big}\"}}}}",
+            "ctx._source.remove('big'); ctx._source.big = params.big; ".repeat(5)
+        );
+        let (written, _) = run(&script, &source).expect("the document stays the same size");
+        assert_eq!(written, source);
+        let twice = format!(
+            "{{\"source\":\"ctx._source.other = params.big\",\"params\":{{\"big\":\"{big}\"}}}}"
+        );
+        let error = run(&twice, &source).expect_err("two copies pass 1 MiB");
+        assert!(error.contains("bytes"), "{error}");
     }
 }

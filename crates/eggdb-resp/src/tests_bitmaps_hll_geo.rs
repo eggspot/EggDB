@@ -129,6 +129,48 @@ fn setbit_far_past_the_end_stops_at_the_servers_memory_budget() {
 }
 
 #[test]
+fn bitop_stops_at_the_servers_memory_budget_before_it_copies_every_source() {
+    let mut redis = Harness::new();
+    let big = vec![0xA5_u8; 300_000];
+    redis.run(&[b"SET", b"big", &big]);
+    redis.run(&[b"SET", b"over", &vec![1_u8; (1 << 20) + 1]]);
+    redis.reply_room_bytes = 1 << 20;
+    let over_budget = "-OOM command not allowed: the value would pass the server's memory budget|";
+    assert_eq!(redis.text("BITOP OR d over"), over_budget);
+    assert_eq!(redis.text("EXISTS d"), ":0|");
+    let repeated = format!("BITOP OR d{}", " big".repeat(100_000));
+    let started = std::time::Instant::now();
+    assert_eq!(redis.text(&repeated), over_budget);
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(redis.text("EXISTS d"), ":0|");
+    assert_eq!(redis.text("BITOP OR d big big big"), ":300000|");
+    assert_eq!(redis.value("d"), big);
+}
+
+#[test]
+fn bitop_over_many_missing_keys_costs_nothing_per_byte() {
+    let mut redis = Harness::new();
+    redis.run(&[b"SET", b"big", &vec![0xFF_u8; 1 << 20]]);
+    let missing: String = (0..100_000).map(|index| format!(" m{index}")).collect();
+    let started = std::time::Instant::now();
+    assert_eq!(
+        redis.text(&format!("BITOP AND d big{missing}")),
+        format!(":{}|", 1 << 20)
+    );
+    assert_eq!(
+        redis.text(&format!("BITOP ONE d big{missing}")),
+        format!(":{}|", 1 << 20)
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    assert_eq!(redis.text("BITCOUNT d"), format!(":{}|", 8 << 20));
+    assert_eq!(
+        redis.text(&format!("BITOP AND d big{missing}")),
+        format!(":{}|", 1 << 20)
+    );
+    assert_eq!(redis.text("BITCOUNT d"), ":0|");
+}
+
+#[test]
 fn bitcount_counts_byte_and_bit_ranges_like_the_command_page() {
     let mut redis = Harness::new();
     assert_eq!(redis.text("SET mykey foobar"), "+OK|");

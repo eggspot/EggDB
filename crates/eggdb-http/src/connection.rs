@@ -12,6 +12,7 @@ const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 const BODY_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const SLOWEST_BODY_BYTES_PER_SECOND: u64 = 64 * 1024;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const SLOWEST_RESPONSE_BYTES_PER_SECOND: u64 = 64 * 1024;
 const LINGER_TIMEOUT: Duration = Duration::from_secs(1);
 const LINGER_BYTES: usize = 1 << 20;
 const COALESCED_BODY_BYTES: usize = 64 * 1024;
@@ -21,6 +22,64 @@ fn deadline_after(timeout: Duration) -> Instant {
     now.checked_add(timeout)
         .or_else(|| now.checked_add(Duration::from_secs(24 * 60 * 60)))
         .unwrap_or(now)
+}
+
+struct PacedWriter<W: Write> {
+    out: W,
+    grace: Duration,
+    slowest_bytes_per_second: u64,
+    blocked: Duration,
+    sent: u64,
+}
+
+impl<W: Write> PacedWriter<W> {
+    fn new(out: W) -> Self {
+        Self::with_pace(out, WRITE_TIMEOUT, SLOWEST_RESPONSE_BYTES_PER_SECOND)
+    }
+
+    fn with_pace(out: W, grace: Duration, slowest_bytes_per_second: u64) -> Self {
+        Self {
+            out,
+            grace,
+            slowest_bytes_per_second,
+            blocked: Duration::ZERO,
+            sent: 0,
+        }
+    }
+
+    fn allowed_blocking(&self) -> Duration {
+        let paced_millis = self
+            .sent
+            .saturating_mul(1000)
+            .checked_div(self.slowest_bytes_per_second)
+            .unwrap_or(u64::MAX);
+        self.grace
+            .saturating_add(Duration::from_millis(paced_millis))
+    }
+}
+
+impl<W: Write> Write for PacedWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.blocked >= self.allowed_blocking() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        let started = Instant::now();
+        let written = self.out.write(bytes);
+        self.blocked = self.blocked.saturating_add(started.elapsed());
+        let count = written?;
+        self.sent = self.sent.saturating_add(count as u64);
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.blocked >= self.allowed_blocking() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        let started = Instant::now();
+        let flushed = self.out.flush();
+        self.blocked = self.blocked.saturating_add(started.elapsed());
+        flushed
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -202,7 +261,7 @@ pub(crate) fn write_whole(
 }
 
 fn write_streamed(
-    out: &mut TcpStream,
+    out: &mut impl Write,
     streamed: StreamedResponse<'_>,
     head_only: bool,
     version: Version,
@@ -306,7 +365,12 @@ pub(crate) fn serve_connection<'h>(
             Err(error) => {
                 if let Some(response) = refusal(&error, limits) {
                     held.resize(0);
-                    let _ = write_whole(&mut writer, &response, false, ConnectionHeader::Close);
+                    let _ = write_whole(
+                        &mut PacedWriter::new(&mut writer),
+                        &response,
+                        false,
+                        ConnectionHeader::Close,
+                    );
                     linger(&mut reader.source, &writer);
                 }
                 return;
@@ -319,6 +383,7 @@ pub(crate) fn serve_connection<'h>(
         let head_only = request.method == "HEAD";
         let reply = handler(&request);
         drop(request);
+        let mut paced = PacedWriter::new(&mut writer);
         let kept = match reply {
             Reply::Whole(response) => {
                 let response = if held.hold_if_large(response.body.len()) {
@@ -330,19 +395,20 @@ pub(crate) fn serve_connection<'h>(
                 };
                 let keep = keep && whole_response_frames_itself(&response, head_only);
                 let connection = ConnectionHeader::of(version, keep);
-                write_whole(&mut writer, &response, head_only, connection).is_ok()
+                write_whole(&mut paced, &response, head_only, connection).is_ok()
                     && connection.keeps()
             }
             Reply::Streamed(streamed) => {
-                if held.hold_if_large(streamed.held_bytes) {
-                    write_streamed(&mut writer, streamed, head_only, version, keep)
+                let body_bytes = if head_only { 0 } else { streamed.held_bytes };
+                if held.hold_if_large(body_bytes) {
+                    write_streamed(&mut paced, streamed, head_only, version, keep)
                 } else {
                     drop(streamed);
                     held.resize(0);
                     let response = (limits.over_memory_budget)();
                     let keep = keep && whole_response_frames_itself(&response, head_only);
                     let connection = ConnectionHeader::of(version, keep);
-                    write_whole(&mut writer, &response, head_only, connection).is_ok()
+                    write_whole(&mut paced, &response, head_only, connection).is_ok()
                         && connection.keeps()
                 }
             }
@@ -352,5 +418,52 @@ pub(crate) fn serve_connection<'h>(
             linger(&mut reader.source, &writer);
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PacedWriter;
+    use std::io::{self, Write};
+    use std::time::{Duration, Instant};
+
+    struct SlowReader {
+        delay: Duration,
+    }
+
+    impl Write for SlowReader {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            std::thread::sleep(self.delay);
+            Ok(bytes.len().min(1))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_client_reading_slower_than_the_pace_is_cut_off_however_steady_it_is() {
+        let slow = SlowReader {
+            delay: Duration::from_millis(5),
+        };
+        let mut paced = PacedWriter::with_pace(slow, Duration::from_millis(50), 1000);
+        let started = Instant::now();
+        let error = paced
+            .write_all(&[0u8; 1_000_000])
+            .expect_err("the response deadline passes");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(paced.sent < 1000, "{}", paced.sent);
+    }
+
+    #[test]
+    fn a_client_reading_at_the_pace_gets_the_whole_response() {
+        let mut paced = PacedWriter::with_pace(Vec::new(), Duration::from_millis(50), 100);
+        paced
+            .write_all(&[7u8; 100_000])
+            .expect("an eager reader is never cut off");
+        paced.flush().expect("flushed");
+        assert_eq!(paced.out.len(), 100_000);
     }
 }

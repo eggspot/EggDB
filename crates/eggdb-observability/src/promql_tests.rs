@@ -625,8 +625,10 @@ fn label_replace_and_label_join_answer_the_prometheus_docs_examples() {
 
 #[test]
 fn replacement_templates_expand_as_go_regexp_expand_does() {
-    use crate::promql::expand;
     let groups = [Some("a:c".to_owned()), Some("a".to_owned()), None];
+    let expand = |template: &str, groups: &[Option<String>]| {
+        crate::promql::expand(template, groups, usize::MAX).expect("no limit")
+    };
     assert_eq!(expand("$1", &groups), "a");
     assert_eq!(expand("${1}x", &groups), "ax");
     assert_eq!(expand("$1x", &groups), "");
@@ -636,6 +638,15 @@ fn replacement_templates_expand_as_go_regexp_expand_does() {
     assert_eq!(expand("cost: $", &groups), "cost: $");
     assert_eq!(expand("${", &groups), "${");
     assert_eq!(expand("$0", &groups), "a:c");
+    assert_eq!(
+        crate::promql::expand("$1$1$1", &groups, 2),
+        None,
+        "a limit stops the expansion"
+    );
+    assert_eq!(
+        crate::promql::expand("$1$1", &groups, 2).as_deref(),
+        Some("aa")
+    );
 }
 
 fn counter() -> Fetched {
@@ -762,6 +773,55 @@ fn a_query_past_its_samples_limit_or_the_memory_budget_is_refused() {
         "{over_budget:?}"
     );
     assert_eq!(empty.used_bytes(), 0);
+}
+
+#[test]
+fn nested_label_join_and_label_replace_stop_before_a_huge_label_value() {
+    let data = Fetched::new();
+    let wide_separator = "x".repeat(1000);
+    let missing_sources = vec!["\"b\""; 1000].join(",");
+    let repeat_a = |count: usize| vec!["\"a\""; count].join(",");
+    let joined = format!(
+        "count(label_join(label_join(label_join(vector(1),\"a\",\"{wide_separator}\",{missing_sources}),\"a\",\"\",{}),\"c\",\"\",{}))",
+        repeat_a(200),
+        repeat_a(20)
+    );
+    let started = std::time::Instant::now();
+    let message = failure(&joined, 60_000, &data);
+    assert!(
+        message.contains("label_join() would build a label value longer than"),
+        "{message}"
+    );
+    let one_level = format!("label_join(vector(1),\"a\",\"{wide_separator}\",{missing_sources})");
+    let rows = sorted(&one_level, 60_000, &data);
+    assert_eq!(rows[0].0[0].1.len(), 999 * 1000);
+    let replaced = format!(
+        "label_replace(label_replace(vector(1),\"a\",\"{wide_separator}\",\"\",\"\"),\"a\",\"{}\",\"a\",\"(.*)\")",
+        "$1".repeat(2000)
+    );
+    let message = failure(&replaced, 60_000, &data);
+    assert!(
+        message.contains("label_replace() would build a label value longer than"),
+        "{message}"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    let tight = MemoryBudget::new(256 * 1024);
+    let expr = parse(&one_level).unwrap();
+    let refused = Evaluator::new(&data, Work::new(&tight, usize::MAX)).evaluate(&expr, 60_000);
+    assert!(
+        matches!(refused, Err(Failure::Unavailable(_))),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn quantile_orders_nan_first_as_go_does() {
+    let nan_one_two = "quantile({q}, label_replace(vector(0) / 0, \"k\", \"n\", \"\", \"\") or label_replace(vector(1), \"k\", \"one\", \"\", \"\") or label_replace(vector(2), \"k\", \"two\", \"\", \"\"))";
+    let data = Fetched::new();
+    let lowest = sorted(&nan_one_two.replace("{q}", "0"), 60_000, &data);
+    assert!(lowest[0].1.is_nan(), "{lowest:?}");
+    let highest = sorted(&nan_one_two.replace("{q}", "1"), 60_000, &data);
+    assert_eq!(highest[0].1, 2.0);
 }
 
 fn encoded(query: &str) -> String {

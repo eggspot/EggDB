@@ -7,6 +7,8 @@ use crate::source_filter::{SourceFilter, matches};
 use eggdb_http::{Request, Response};
 use eggdb_sql::json::{Json, Node, parse_document};
 
+const MAX_SEARCHES_PER_MSEARCH: usize = 1000;
+
 struct Wanted {
     index: String,
     id: String,
@@ -252,6 +254,15 @@ impl Api<'_> {
         }
         if lines.is_empty() {
             return Ok(validation(&["no requests added".to_owned()]));
+        }
+        if lines.len() / 2 > MAX_SEARCHES_PER_MSEARCH {
+            return Ok(error(
+                400,
+                "illegal_argument_exception",
+                &format!(
+                    "an msearch request holds at most {MAX_SEARCHES_PER_MSEARCH} searches; split it into several requests"
+                ),
+            ));
         }
         if lines.len() % 2 == 1 {
             return Ok(error(

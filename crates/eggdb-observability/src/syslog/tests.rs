@@ -267,6 +267,28 @@ fn tcp_frames_split_by_octet_counts_and_line_ends_at_any_read_boundary() {
 }
 
 #[test]
+fn a_line_trickled_one_byte_at_a_time_is_searched_once() {
+    let line = vec![b'x'; MAX_SYSLOG_MESSAGE_BYTES - 1];
+    let mut stream = Vec::new();
+    for _ in 0..20 {
+        stream.extend_from_slice(&line);
+        stream.push(b'\n');
+    }
+    let mut framer = Framer::new(MAX_SYSLOG_MESSAGE_BYTES);
+    let mut frames = 0;
+    let started = std::time::Instant::now();
+    for byte in &stream {
+        framer.push(std::slice::from_ref(byte));
+        while let Some(frame) = framer.next_frame().unwrap() {
+            assert_eq!(frame, line);
+            frames += 1;
+        }
+    }
+    assert_eq!(frames, 20);
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+}
+
+#[test]
 fn tcp_frames_longer_than_the_limit_or_with_a_bad_count_are_refused() {
     let mut framer = Framer::new(8);
     framer.push(b"9 <13>abcdef");

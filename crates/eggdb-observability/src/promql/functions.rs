@@ -140,7 +140,12 @@ pub(crate) fn quantile(quantile: f64, mut values: Vec<f64>) -> f64 {
     if quantile > 1.0 {
         return f64::INFINITY;
     }
-    values.sort_by(f64::total_cmp);
+    values.sort_by(|a, b| match (a.is_nan(), b.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        (false, false) => a.total_cmp(b),
+    });
     let last = values.len() - 1;
     let rank = quantile * last as f64;
     let lower = (rank.floor() as usize).min(last);
@@ -330,11 +335,16 @@ fn is_group_name(name: &str) -> bool {
 
 /// Go's `regexp.Expand`, which Prometheus's `label_replace` uses: `$1` and `${1}` are capture
 /// groups, `$$` is a dollar sign, a name that is no group's (`$1x` included) is empty, and a `$`
-/// with no name after it stays as it is.
-pub(crate) fn expand(template: &str, groups: &[Option<String>]) -> String {
-    let mut out = String::with_capacity(template.len());
+/// with no name after it stays as it is; `None` when the expansion would be longer than `limit`
+/// bytes.
+pub(crate) fn expand(template: &str, groups: &[Option<String>], limit: usize) -> Option<String> {
+    let mut out = String::with_capacity(template.len().min(limit));
     let mut rest = template;
+    let fits = |out: &String, more: usize| out.len().saturating_add(more) <= limit;
     while let Some(at) = rest.find('$') {
+        if !fits(&out, at + 1) {
+            return None;
+        }
         out.push_str(&rest[..at]);
         let after = &rest[at + 1..];
         if let Some(stripped) = after.strip_prefix('$') {
@@ -361,6 +371,9 @@ pub(crate) fn expand(template: &str, groups: &[Option<String>]) -> String {
                     .ok()
                     .and_then(|index| groups.get(index))
                 {
+                    if !fits(&out, text.len()) {
+                        return None;
+                    }
                     out.push_str(text);
                 }
                 rest = remaining;
@@ -371,19 +384,34 @@ pub(crate) fn expand(template: &str, groups: &[Option<String>]) -> String {
             }
         }
     }
+    if !fits(&out, rest.len()) {
+        return None;
+    }
     out.push_str(rest);
-    out
+    Some(out)
+}
+
+/// The longest label value `label_replace` and `label_join` build, so that nesting them cannot
+/// grow a value without bound.
+pub(crate) const MAX_LABEL_VALUE_BYTES: usize = 1 << 20;
+
+fn label_too_long(function: &str) -> Failure {
+    Failure::Execution(format!(
+        "{function}() would build a label value longer than {MAX_LABEL_VALUE_BYTES} bytes"
+    ))
 }
 
 /// `label_replace`: for each series whose `source` label fully matches `pattern`, sets
 /// `destination` to `replacement` with the capture groups expanded (removing it when that is
-/// empty); other series pass unchanged.
+/// empty); other series pass unchanged. `hold` is given the bytes of each value it builds, which
+/// are at most [`MAX_LABEL_VALUE_BYTES`].
 pub(crate) fn label_replace(
     vector: Vec<(Labels, f64)>,
     destination: &str,
     replacement: &str,
     source: &str,
     pattern: &str,
+    hold: &mut dyn FnMut(usize) -> Result<(), Failure>,
 ) -> Result<Vec<(Labels, f64)>, Failure> {
     if !is_label_name(destination) {
         return Err(Failure::BadData(format!(
@@ -402,7 +430,9 @@ pub(crate) fn label_replace(
         let captured =
             eggdb_sql::regex_captures(label_value(&labels, source), &regex).map_err(invalid)?;
         if let Some(groups) = captured {
-            let expanded = expand(replacement, &groups);
+            let expanded = expand(replacement, &groups, MAX_LABEL_VALUE_BYTES)
+                .ok_or_else(|| label_too_long("label_replace"))?;
+            hold(expanded.len())?;
             set_label(&mut labels, destination, expanded);
         }
         out.push((labels, value));
@@ -411,12 +441,14 @@ pub(crate) fn label_replace(
 }
 
 /// `label_join`: sets `destination` to the values of the `sources` labels joined by
-/// `separator` (removing it when that is empty).
+/// `separator` (removing it when that is empty). `hold` is given the bytes of each value it
+/// builds, which are at most [`MAX_LABEL_VALUE_BYTES`].
 pub(crate) fn label_join(
     vector: Vec<(Labels, f64)>,
     destination: &str,
     separator: &str,
     sources: &[&str],
+    hold: &mut dyn FnMut(usize) -> Result<(), Failure>,
 ) -> Result<Vec<(Labels, f64)>, Failure> {
     if !is_label_name(destination) {
         return Err(Failure::BadData(format!(
@@ -429,7 +461,17 @@ pub(crate) fn label_join(
         )));
     }
     let mut out = Vec::with_capacity(vector.len());
+    let separators = separator
+        .len()
+        .saturating_mul(sources.len().saturating_sub(1));
     for (mut labels, value) in vector {
+        let joined_bytes = sources.iter().fold(separators, |bytes, source| {
+            bytes.saturating_add(label_value(&labels, source).len())
+        });
+        if joined_bytes > MAX_LABEL_VALUE_BYTES {
+            return Err(label_too_long("label_join"));
+        }
+        hold(joined_bytes)?;
         let joined = sources
             .iter()
             .map(|source| label_value(&labels, source))

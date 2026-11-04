@@ -573,6 +573,11 @@ fn msearch_refuses_malformed_bodies_as_a_whole() {
             body(&response)
         );
     }
+    let too_many = api.answer(&request("POST", "/_msearch", &"{}\n{}\n".repeat(1001)));
+    assert_eq!(too_many.status, 400);
+    assert!(body(&too_many).contains("at most 1000 searches"));
+    let most = api.answer(&request("POST", "/_msearch", &"{}\n{}\n".repeat(1000)));
+    assert_eq!(most.status, 200);
     let bad_name = body(&api.answer(&request("POST", "/_msearch", "{\"index\":\"Bad\"}\n{}\n")));
     assert!(
         bad_name.contains("invalid_index_name_exception"),

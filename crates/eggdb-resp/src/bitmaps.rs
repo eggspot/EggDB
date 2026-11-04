@@ -346,27 +346,82 @@ impl BitOperation {
             _ => None,
         }
     }
+}
 
-    fn combine(self, bytes: &[u8]) -> u8 {
-        let first = bytes.first().copied().unwrap_or(0);
-        let rest = bytes.get(1..).unwrap_or(&[]);
-        let any_of_rest = rest.iter().fold(0u8, |all, byte| all | byte);
-        match self {
-            Self::And => bytes.iter().fold(0xFF_u8, |all, byte| all & byte),
-            Self::Or => first | any_of_rest,
-            Self::Xor => bytes.iter().fold(0u8, |all, byte| all ^ byte),
-            Self::Not => !first,
-            Self::Diff => first & !any_of_rest,
-            Self::Diff1 => !first & any_of_rest,
-            Self::AndOr => first & any_of_rest,
-            Self::One => {
-                let (mut once, mut more) = (0u8, 0u8);
-                for byte in bytes {
-                    more |= once & byte;
-                    once |= byte;
+#[derive(Debug, Default)]
+struct BitFold {
+    first: Vec<u8>,
+    running: Vec<u8>,
+    repeated: Vec<u8>,
+    longest: usize,
+    folded: usize,
+}
+
+fn fold_into(running: &mut Vec<u8>, value: &[u8], merge: impl Fn(u8, u8) -> u8) {
+    if running.len() < value.len() {
+        running.resize(value.len(), 0);
+    }
+    for (slot, byte) in running.iter_mut().zip(value) {
+        *slot = merge(*slot, *byte);
+    }
+}
+
+impl BitFold {
+    fn add(&mut self, operation: BitOperation, value: Vec<u8>) {
+        self.longest = self.longest.max(value.len());
+        let first_source = self.folded == 0;
+        self.folded += 1;
+        match operation {
+            BitOperation::And if first_source => self.running = value,
+            BitOperation::And => {
+                self.running.truncate(value.len());
+                for (slot, byte) in self.running.iter_mut().zip(&value) {
+                    *slot &= byte;
                 }
-                once & !more
             }
+            BitOperation::Or => fold_into(&mut self.running, &value, |all, byte| all | byte),
+            BitOperation::Xor => fold_into(&mut self.running, &value, |all, byte| all ^ byte),
+            BitOperation::Not => self.first = value,
+            BitOperation::Diff | BitOperation::Diff1 | BitOperation::AndOr if first_source => {
+                self.first = value;
+            }
+            BitOperation::Diff | BitOperation::Diff1 | BitOperation::AndOr => {
+                fold_into(&mut self.running, &value, |all, byte| all | byte);
+            }
+            BitOperation::One => {
+                if self.repeated.len() < value.len() {
+                    self.repeated.resize(value.len(), 0);
+                }
+                for ((more, once), byte) in self.repeated.iter_mut().zip(&self.running).zip(&value)
+                {
+                    *more |= once & byte;
+                }
+                fold_into(&mut self.running, &value, |all, byte| all | byte);
+            }
+        }
+    }
+
+    fn finish(mut self, operation: BitOperation) -> Vec<u8> {
+        let length = self.longest;
+        let at = |bytes: &[u8], index: usize| bytes.get(index).copied().unwrap_or(0);
+        match operation {
+            BitOperation::And | BitOperation::Or | BitOperation::Xor => {
+                self.running.resize(length, 0);
+                self.running
+            }
+            BitOperation::Not => self.first.iter().map(|byte| !byte).collect(),
+            BitOperation::Diff => (0..length)
+                .map(|index| at(&self.first, index) & !at(&self.running, index))
+                .collect(),
+            BitOperation::Diff1 => (0..length)
+                .map(|index| !at(&self.first, index) & at(&self.running, index))
+                .collect(),
+            BitOperation::AndOr => (0..length)
+                .map(|index| at(&self.first, index) & at(&self.running, index))
+                .collect(),
+            BitOperation::One => (0..length)
+                .map(|index| at(&self.running, index) & !at(&self.repeated, index))
+                .collect(),
         }
     }
 }
@@ -388,23 +443,19 @@ fn bitop(context: &Context<'_>, db: u32, args: &[Vec<u8>]) -> Reply {
         ));
     }
     writing(context, db, |keys| {
-        let mut values = Vec::with_capacity(sources.len());
+        let mut fold = BitFold::default();
+        let mut loaded_bytes = 0usize;
         for key in sources {
-            values.push(owned_string(load(keys, key, now)?)?.0);
+            let value = owned_string(load(keys, key, now)?)?.0;
+            loaded_bytes = loaded_bytes.saturating_add(value.len());
+            context.check_value_room(loaded_bytes)?;
+            fold.add(operation, value);
         }
-        let length = values.iter().map(Vec::len).max().unwrap_or(0);
+        let result = fold.finish(operation);
+        let length = result.len();
         if length == 0 {
             keys.delete(destination)?;
             return Ok(Reply::Integer(0));
-        }
-        context.check_value_room(length)?;
-        let mut column = vec![0u8; values.len()];
-        let mut result = Vec::with_capacity(length);
-        for index in 0..length {
-            for (slot, value) in column.iter_mut().zip(&values) {
-                *slot = value.get(index).copied().unwrap_or(0);
-            }
-            result.push(operation.combine(&column));
         }
         save(
             keys,
