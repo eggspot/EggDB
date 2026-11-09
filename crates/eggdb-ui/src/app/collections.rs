@@ -3,12 +3,17 @@ use super::{Hint, Pane, READ_ONLY_TOAST, ToastKind, Ui};
 use crate::frame::Frame;
 use crate::source::Source;
 use crate::terminal::{KeyCode, KeyEvent};
+use crate::text;
 use crate::theme::{Role, Symbol};
 use crate::width::{char_width, text_width};
 
 pub(super) const DEFAULT_KEY_SPACE: &str = "default key space";
 const LONGEST_NAME_BYTES: usize = 128;
 const PICKER_COLS: usize = 46;
+const SMALLEST_NAME_BESIDE_A_COUNT: usize = 12;
+const ADDING_TITLE: &str = "Add collection: ";
+const RENAMING_TITLE: &str = "Rename ";
+const RENAMING_TITLE_TO: &str = " to: ";
 const SIDEBAR_FROM_COLS: u16 = 110;
 const SIDEBAR_SMALLEST: u16 = 20;
 const SIDEBAR_LARGEST: u16 = 24;
@@ -32,10 +37,13 @@ impl NameEdit {
         }
     }
 
-    fn title(&self) -> String {
+    fn title(&self, cells: usize, ellipsis: char) -> String {
         match self {
-            Self::Adding(text) => format!("Add collection: {text}"),
-            Self::Renaming { from, text } => format!("Rename {from} to: {text}"),
+            Self::Adding(text) => {
+                let room = cells.saturating_sub(text_width(ADDING_TITLE));
+                format!("{ADDING_TITLE}{}", tail_to_cells(text, room, ellipsis))
+            }
+            Self::Renaming { from, text } => renaming_title(from, text, cells, ellipsis),
         }
     }
 
@@ -77,12 +85,59 @@ pub(super) fn cut_to_cells(text: &str, cells: usize, ellipsis: char) -> String {
     cut
 }
 
+fn tail_to_cells(text: &str, cells: usize, ellipsis: char) -> String {
+    if text_width(text) <= cells {
+        return text.to_owned();
+    }
+    let mut tail = Vec::new();
+    let mut used = 0;
+    for c in text.chars().rev() {
+        let width = char_width(c);
+        if used + width + 1 > cells {
+            break;
+        }
+        used += width;
+        tail.push(c);
+    }
+    std::iter::once(ellipsis).chain(tail.into_iter().rev()).collect()
+}
+
+fn renaming_title(from: &str, text: &str, cells: usize, ellipsis: char) -> String {
+    let whole = format!("{RENAMING_TITLE}{from}{RENAMING_TITLE_TO}{text}");
+    if text_width(&whole) <= cells {
+        return whole;
+    }
+    let fixed = text_width(RENAMING_TITLE) + text_width(RENAMING_TITLE_TO);
+    let from_room = cells.saturating_sub(fixed + text_width(text));
+    if from_room > 0 {
+        return format!(
+            "{RENAMING_TITLE}{}{RENAMING_TITLE_TO}{text}",
+            cut_to_cells(from, from_room, ellipsis)
+        );
+    }
+    let text_room = cells.saturating_sub(fixed + 1);
+    format!(
+        "{RENAMING_TITLE}{ellipsis}{RENAMING_TITLE_TO}{}",
+        tail_to_cells(text, text_room, ellipsis)
+    )
+}
+
 impl<S: Source> Ui<S> {
     pub(super) fn refresh_collections(&mut self) {
-        match self.source.collections() {
-            Ok(names) => self.collection_names = names,
+        match self.source.kept_collection_counts() {
+            Ok(counted) => {
+                let (names, counts): (Vec<String>, Vec<Option<u64>>) =
+                    counted.into_iter().unzip();
+                self.collection_names = names;
+                self.collection_counts = counts;
+            }
             Err(error) => self.error(error),
         }
+    }
+
+    fn count_at(&self, row: usize) -> Option<u64> {
+        let index = row.checked_sub(1)?;
+        self.collection_counts.get(index).copied().flatten()
     }
 
     pub(super) fn has_collections(&self) -> bool {
@@ -480,11 +535,12 @@ impl<S: Source> Ui<S> {
         let plain = self.theme.style(Role::Plain);
         let horizontal = self.theme.symbol(Symbol::HorizontalLine);
         let vertical = self.theme.symbol(Symbol::VerticalLine);
+        let ellipsis = self.theme.ellipsis();
         let title = match &picker.editing {
-            Some(editing) => editing.title(),
+            Some(editing) => editing.title(width.saturating_sub(4), ellipsis),
             None => "Collections".to_owned(),
         };
-        let title_shown = cut_to_cells(&title, width.saturating_sub(4), self.theme.ellipsis());
+        let title_shown = cut_to_cells(&title, width.saturating_sub(4), ellipsis);
         let top_line = format!(
             "{} {title_shown} {}{}",
             self.theme.symbol(Symbol::TopLeft),
@@ -498,20 +554,29 @@ impl<S: Source> Ui<S> {
             frame.cursor = Some((at.min(col + width_cells - 2), top));
         }
         let text_room = u16::try_from(inner).unwrap_or(width_cells);
+        let count_column = self.picker_count_column(inner);
         let mut row = top;
-        let mut body = |frame: &mut Frame, text: &str, role: Role, centred: bool| {
-            row += 1;
-            frame.fill(col, row, width_cells, plain);
-            self.put(frame, col, row, vertical, Role::Plain, 1);
-            let used = u16::try_from(text_width(text)).unwrap_or(text_room);
-            let start = if centred {
-                col + 2 + text_room.saturating_sub(used) / 2
-            } else {
-                col + 2
+        let mut body =
+            |frame: &mut Frame, text: &str, role: Role, centred: bool, count: Option<&str>| {
+                row += 1;
+                frame.fill(col, row, width_cells, plain);
+                self.put(frame, col, row, vertical, Role::Plain, 1);
+                let used = u16::try_from(text_width(text)).unwrap_or(text_room);
+                let start = if centred {
+                    col + 2 + text_room.saturating_sub(used) / 2
+                } else {
+                    col + 2
+                };
+                self.put(frame, start, row, text, role, text_room);
+                if let Some(count) = count {
+                    let count_role = match role {
+                        Role::Selected => Role::Selected,
+                        _ => Role::Dim,
+                    };
+                    self.put_right(frame, col + 2 + text_room, row, count, count_role);
+                }
+                self.put(frame, col + width_cells - 1, row, vertical, Role::Plain, 1);
             };
-            self.put(frame, start, row, text, role, text_room);
-            self.put(frame, col + width_cells - 1, row, vertical, Role::Plain, 1);
-        };
         let spaces = std::iter::once(DEFAULT_KEY_SPACE)
             .chain(self.collection_names.iter().map(String::as_str))
             .enumerate()
@@ -525,19 +590,33 @@ impl<S: Source> Ui<S> {
             } else {
                 Role::Plain
             };
-            body(frame, &format!("{marker}{label}"), role, false);
+            let count = count_column
+                .and_then(|column| self.count_at(index).map(|count| (column, text::count(count))));
+            match count {
+                Some((column, count)) => {
+                    let name_room = inner.saturating_sub(2 + column + 2);
+                    let name = format!("{marker}{}", cut_to_cells(label, name_room, ellipsis));
+                    let padding = if highlighted {
+                        " ".repeat(inner.saturating_sub(text_width(&name) + text_width(&count)))
+                    } else {
+                        String::new()
+                    };
+                    body(frame, &format!("{name}{padding}"), role, false, Some(&count));
+                }
+                None => body(frame, &format!("{marker}{label}"), role, false, None),
+            }
         }
-        body(frame, "", Role::Plain, false);
+        body(frame, "", Role::Plain, false, None);
         for line in &footer {
-            body(frame, line, Role::Plain, false);
+            body(frame, line, Role::Plain, false, None);
         }
-        body(frame, "", Role::Plain, false);
+        body(frame, "", Role::Plain, false, None);
         let keys = match &picker.editing {
             Some(editing) => editing.keys(),
             None if text_width(PICKER_KEYS) <= inner => PICKER_KEYS,
             None => NARROW_PICKER_KEYS,
         };
-        body(frame, keys, Role::Plain, true);
+        body(frame, keys, Role::Plain, true, None);
         let bottom_row = row + 1;
         let bottom = format!(
             "{}{}{}",
@@ -548,17 +627,59 @@ impl<S: Source> Ui<S> {
         frame.fill(col, bottom_row, width_cells, plain);
         self.put(frame, col, bottom_row, &bottom, Role::Plain, width_cells);
     }
+
+    fn picker_count_column(&self, inner: usize) -> Option<usize> {
+        let widest = self
+            .collection_counts
+            .iter()
+            .flatten()
+            .map(|count| text_width(&text::count(*count)))
+            .max()?;
+        let name_room = inner.saturating_sub(2 + widest + 2);
+        (name_room >= SMALLEST_NAME_BESIDE_A_COUNT).then_some(widest)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{cut_to_cells, is_collection_name};
+    use super::{NameEdit, cut_to_cells, is_collection_name, tail_to_cells};
 
     #[test]
     fn names_are_cut_to_the_cells_they_have() {
         assert_eq!(cut_to_cells("users", 10, '…'), "users");
         assert_eq!(cut_to_cells("a-very-long-collection", 8, '…'), "a-very-…");
         assert_eq!(cut_to_cells("日本語の名前", 5, '…'), "日本…");
+    }
+
+    #[test]
+    fn text_being_typed_keeps_its_end() {
+        assert_eq!(tail_to_cells("users", 10, '…'), "users");
+        assert_eq!(tail_to_cells("a-very-long-collection", 8, '…'), "…lection");
+        assert_eq!(tail_to_cells("日本語の名前", 5, '…'), "…名前");
+    }
+
+    #[test]
+    fn a_long_title_cuts_the_old_name_and_never_the_text_being_typed() {
+        let renaming = NameEdit::Renaming {
+            from: "customer-orders-2024".to_owned(),
+            text: "orders".to_owned(),
+        };
+        assert_eq!(
+            renaming.title(42, '…'),
+            "Rename customer-orders-2024 to: orders"
+        );
+        assert_eq!(renaming.title(30, '…'), "Rename customer-or… to: orders");
+        let typed_long = NameEdit::Renaming {
+            from: "users".to_owned(),
+            text: "a-collection-name-longer-than-the-title".to_owned(),
+        };
+        assert_eq!(typed_long.title(30, '…'), "Rename … to: …r-than-the-title");
+        let adding = NameEdit::Adding("a-collection-name-longer-than-the-title".to_owned());
+        assert_eq!(adding.title(30, '…'), "Add collection: …han-the-title");
+        assert_eq!(
+            NameEdit::Adding("logs".to_owned()).title(30, '…'),
+            "Add collection: logs"
+        );
     }
 
     #[test]

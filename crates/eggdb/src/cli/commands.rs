@@ -84,6 +84,7 @@ struct Session<'a> {
     stdin: &'a mut dyn Read,
     stdin_is_terminal: bool,
     stdin_taken: bool,
+    stdout_is_terminal: bool,
     stderr_is_terminal: bool,
 }
 
@@ -136,6 +137,7 @@ fn session_for<'a>(
         stdin: &mut *console.stdin,
         stdin_is_terminal: terminal.stdin,
         stdin_taken: false,
+        stdout_is_terminal: terminal.stdout,
         stderr_is_terminal: terminal.stderr,
     }
 }

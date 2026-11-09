@@ -18,7 +18,8 @@ pub enum CatalogType {
     NodeTree,
     /// `xid`: a transaction identifier, an unsigned 32-bit number.
     Xid,
-    /// `aclitem`: an access privilege; always NULL in EggDB's catalog.
+    /// `aclitem`: one item of an access control list, held as PostgreSQL's
+    /// `grantee=privileges/grantor` text.
     AclItem,
     /// `anyarray`: an array of any type; always NULL in EggDB's catalog, and a polymorphic
     /// parameter or result type of a routine.
@@ -289,9 +290,8 @@ pub(crate) fn parse_input(text: &str, kind: CatalogType) -> SqlResult<Value> {
         CatalogType::RefCursor => Ok(Value::Text(text.to_owned())),
         CatalogType::InternalChar => Ok(Value::Text(first_character(text))),
         CatalogType::NodeTree => Err(node_tree_input()),
-        CatalogType::AclItem | CatalogType::AnyArray | CatalogType::Pseudo(_) => {
-            Err(always_null(kind))
-        }
+        CatalogType::AclItem => super::acl::item_input(text),
+        CatalogType::AnyArray | CatalogType::Pseudo(_) => Err(always_null(kind)),
         CatalogType::Void => Ok(Value::Text(String::new())),
         CatalogType::Reg(reg) => super::snapshot::reg_from_text(reg, text).map(boxed),
     }
@@ -418,9 +418,11 @@ pub(crate) fn convert(value: Value, kind: CatalogType, conversion: Conversion) -
             Value::Text(_) => Ok(Value::Text(String::new())),
             other => Err(cannot_cast(&other, kind.name())),
         },
-        CatalogType::AclItem | CatalogType::AnyArray | CatalogType::Pseudo(_) => {
-            Err(always_null(kind))
-        }
+        CatalogType::AclItem => match value {
+            Value::Text(text) | Value::Bpchar(text) => super::acl::item_input(&text),
+            other => Err(cannot_cast(&other, kind.name())),
+        },
+        CatalogType::AnyArray | CatalogType::Pseudo(_) => Err(always_null(kind)),
     }
 }
 

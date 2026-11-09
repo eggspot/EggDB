@@ -5,13 +5,13 @@ use crate::ast::{
 use crate::dialect::Dialect;
 use crate::encoding::TableDefinition;
 use crate::error::{SqlError, SqlResult, SqlState};
-use crate::execute::{self, TableCache};
+use crate::execute::{self, AutoIncrementPlace, TableCache};
 use crate::partitions::{KeyPart, PartitionBound, PartitionKey, PartitionStrategy};
 use crate::session::QueryResult;
 use crate::store::KeyValueWrite;
 use std::sync::Arc;
 
-const MYSQL_PARTITION_MARKER: &str = "#P#";
+pub(crate) const MYSQL_PARTITION_MARKER: &str = "#P#";
 
 pub(crate) fn wants(create: &CreateTable) -> bool {
     create.partition_of.is_some() || create.partition_by.is_some()
@@ -168,12 +168,6 @@ fn validated_key(
         )
         .at(by.position));
     }
-    if table.columns.iter().any(|column| column.auto_increment) {
-        return Err(unsupported(
-            "AUTO_INCREMENT and identity columns in a partitioned table",
-            by.position,
-        ));
-    }
     let key = PartitionKey {
         strategy: by.strategy,
         parts,
@@ -232,7 +226,13 @@ pub(crate) fn create_table(
             partition_of: None,
             ..create.clone()
         };
-        return execute::create_table(writer, tables, &plain, dialect);
+        return execute::create_unpartitioned_table(
+            writer,
+            tables,
+            &plain,
+            dialect,
+            AutoIncrementPlace::AnyOfPrimaryKey,
+        );
     }
     if let Some(of) = &create.partition_of {
         let parent_name = crate::schemas::resolve_relation(writer, &of.parent.text)?;
@@ -258,7 +258,13 @@ pub(crate) fn create_table(
         partition_of: None,
         ..create.clone()
     };
-    let result = execute::create_table(writer, tables, &plain, dialect)?;
+    let result = execute::create_unpartitioned_table(
+        writer,
+        tables,
+        &plain,
+        dialect,
+        AutoIncrementPlace::AnyOfPrimaryKey,
+    )?;
     let table = tables.require_target(writer, &create.name, "partition")?;
     let key = validated_key(&table, by, dialect)?;
     let mut record = crate::partitions::stored(writer, &table.name)?;

@@ -453,6 +453,7 @@ pub(super) fn connect_by(mut select: Select, clause: HierarchicalClause) -> SqlR
                 hierarchy: Some(Box::new(hierarchy)),
             })),
             generated: None,
+            partition_selection: None,
         },
         joins: Vec::new(),
     });

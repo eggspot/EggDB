@@ -10,8 +10,9 @@
 //!   and reaped as [`IoCompletion`]s in any order, each [`IoOp`] owning its [`IoBuffer`] while
 //!   it is in flight;
 //! - [`Network`]: TCP listeners and connections, with a [`NetQueue`] of accepts, connects,
-//!   receives and sends ([`NetOp`]) reaped as [`NetCompletion`]s in any order, and UDP
-//!   sockets ([`DatagramSocket`]);
+//!   receives and sends ([`NetOp`]) reaped as [`NetCompletion`]s in any order, UDP sockets
+//!   ([`DatagramSocket`]), and TCP keep-alives ([`TcpKeepAlive`]) for a listener's connections
+//!   ([`set_tcp_keep_alive`]) or one connection ([`NetStream::set_keep_alive`]);
 //! - [`Clock`]: a monotonic clock for timeouts and a wall clock for hybrid logical clock
 //!   timestamps (D20);
 //! - [`Memory`]: the operating system's page sizes, and zeroed page-aligned [`MemoryRegion`]s
@@ -60,6 +61,7 @@ mod os_io;
 mod os_io_uring;
 mod os_iocp;
 mod os_iocp_net;
+mod os_keep_alive;
 mod os_memory;
 mod os_net;
 mod os_net_readiness;
@@ -149,12 +151,13 @@ pub use memory::{Memory, MemoryRegion, PageMode};
 pub use memory_file::MemoryFile;
 pub use net::{
     Address, DatagramSocket, MAX_DATAGRAM_BYTES, NetBackend, NetCompletion, NetListener, NetOp,
-    NetOutput, NetQueue, NetQueueOptions, NetStream, Network, RejectedNetOp,
+    NetOutput, NetQueue, NetQueueOptions, NetStream, Network, RejectedNetOp, TcpKeepAlive,
 };
 pub use os_cpus::OsCpus;
 pub use os_datagram::OsDatagramSocket;
 pub use os_fs::{OsFile, OsFileSystem};
 pub use os_io::OsIoQueue;
+pub use os_keep_alive::{set_tcp_keep_alive, set_tcp_keep_alive_stream};
 pub use os_memory::OsMemory;
 pub use os_net::{OsListener, OsNetQueue, OsNetwork, OsStream};
 pub use sim_cpus::SimCpus;

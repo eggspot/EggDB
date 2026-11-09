@@ -1869,6 +1869,7 @@ impl Parser<'_> {
                     column_names: Vec::new(),
                     position,
                 }))),
+                partition_selection: None,
             }
         };
         self.expect(&TokenKind::RightParen)?;
@@ -1908,6 +1909,7 @@ impl Parser<'_> {
                 column_names: Vec::new(),
                 position,
             }))),
+            partition_selection: None,
         })
     }
 }

@@ -493,7 +493,7 @@ impl Api<'_> {
                         }
                     };
                     match operation {
-                        Operation::Index => {
+                        Operation::Index | Operation::Create => {
                             written_bytes = written_bytes.saturating_add(source.len());
                             keys.put(&key, &stored(version + 1, &source))?;
                             step.updated += 1;

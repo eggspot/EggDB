@@ -90,7 +90,7 @@ fn text_of(value: &Value) -> Option<String> {
     Dialect::Sqlite.value_text(value)
 }
 
-fn numeric_prefix(text: &str) -> f64 {
+pub(crate) fn numeric_prefix(text: &str) -> f64 {
     let trimmed = text.trim_start();
     let mut end = 0;
     let bytes = trimmed.as_bytes();
@@ -366,6 +366,10 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
                 .filter_map(|code| u32::try_from(code).ok().and_then(char::from_u32))
                 .collect(),
         ),
+        "sqlite_sqrt" => match crate::square_root::square_root(first, Dialect::Sqlite) {
+            Some(result) => result?,
+            None => Value::Null,
+        },
         "sqlite_sign" => match first {
             Value::Null => Value::Null,
             Value::Text(text) if text.trim().parse::<f64>().is_err() => Value::Null,

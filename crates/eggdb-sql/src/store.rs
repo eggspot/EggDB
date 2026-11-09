@@ -173,6 +173,60 @@ pub trait KeyValueWrite: KeyValueRead {
         Err(no_key_value_writes())
     }
 
+    /// Adds `by` to the counter under `key`, in the collection named `collection` when there is
+    /// one, and returns the new count; a negative `by` subtracts. A counter is a decimal integer
+    /// stored as text, from `i64::MIN` to `i64::MAX`, an absent key counts as 0, and the key
+    /// keeps its time to live. `None`, with nothing changed, when there is no such collection.
+    /// For the key-value tools (D346); SQL never calls it. A store without counters, the
+    /// default, refuses with `0A000`.
+    fn increment(
+        &mut self,
+        _collection: Option<&str>,
+        _key: &[u8],
+        _by: i64,
+    ) -> SqlResult<Option<i64>> {
+        Err(no_key_value_writes())
+    }
+
+    /// Stores `new` under `key`, or removes the key when `new` is `None`, only while its value
+    /// is `expected` (`None`: the key is absent), in the collection named `collection` when
+    /// there is one. Returns whether it swapped and the value that was there before, or `None`,
+    /// with nothing changed, when there is no such collection. A value stored this way has no
+    /// time to live. For the key-value tools (D346); SQL never calls it. A store without
+    /// compare-and-set, the default, refuses with `0A000`.
+    fn compare_and_set(
+        &mut self,
+        _collection: Option<&str>,
+        _key: &[u8],
+        _expected: Option<&[u8]>,
+        _new: Option<&[u8]>,
+    ) -> SqlResult<Option<(bool, Option<Vec<u8>>)>> {
+        Err(no_key_value_writes())
+    }
+
+    /// Gives `key`, in the collection named `collection` when there is one, a time to live of
+    /// `ttl` from now, replacing any it had; a `ttl` of zero removes the key. Returns whether
+    /// the key was there (an absent key stays absent), or `None`, with nothing changed, when
+    /// there is no such collection. For the key-value tools (D346); SQL never calls it. A store
+    /// without times to live, the default, refuses with `0A000`.
+    fn set_expiry(
+        &mut self,
+        _collection: Option<&str>,
+        _key: &[u8],
+        _ttl: Duration,
+    ) -> SqlResult<Option<bool>> {
+        Err(no_key_value_writes())
+    }
+
+    /// Removes the time to live of `key`, in the collection named `collection` when there is
+    /// one, so it stays until it is deleted; a key without one is left as it is. Returns
+    /// whether the key is there, or `None` when there is no such collection. For the key-value
+    /// tools (D346); SQL never calls it. A store without times to live, the default, refuses
+    /// with `0A000`.
+    fn clear_expiry(&mut self, _collection: Option<&str>, _key: &[u8]) -> SqlResult<Option<bool>> {
+        Err(no_key_value_writes())
+    }
+
     /// Puts `key` back as it was before a write made outside SQL in the same transaction:
     /// holding `previous`, or absent when it is `None`. `key` and `previous` are what the store
     /// itself keeps, which can include keys [`put`](Self::put) refuses, such as the ones a
@@ -375,6 +429,38 @@ impl KeyValueWrite for Box<dyn BoxedWrite + '_> {
 
     fn collection_delete(&mut self, name: &str, key: &[u8]) -> SqlResult<Option<bool>> {
         (**self).collection_delete(name, key)
+    }
+
+    fn increment(
+        &mut self,
+        collection: Option<&str>,
+        key: &[u8],
+        by: i64,
+    ) -> SqlResult<Option<i64>> {
+        (**self).increment(collection, key, by)
+    }
+
+    fn compare_and_set(
+        &mut self,
+        collection: Option<&str>,
+        key: &[u8],
+        expected: Option<&[u8]>,
+        new: Option<&[u8]>,
+    ) -> SqlResult<Option<(bool, Option<Vec<u8>>)>> {
+        (**self).compare_and_set(collection, key, expected, new)
+    }
+
+    fn set_expiry(
+        &mut self,
+        collection: Option<&str>,
+        key: &[u8],
+        ttl: Duration,
+    ) -> SqlResult<Option<bool>> {
+        (**self).set_expiry(collection, key, ttl)
+    }
+
+    fn clear_expiry(&mut self, collection: Option<&str>, key: &[u8]) -> SqlResult<Option<bool>> {
+        (**self).clear_expiry(collection, key)
     }
 
     fn restore(&mut self, key: &[u8], previous: Option<&[u8]>) -> SqlResult<()> {

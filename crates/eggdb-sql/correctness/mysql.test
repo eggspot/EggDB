@@ -1353,6 +1353,111 @@ DROP TABLE nulls321
 ok
 DROP TABLE stats321
 
+chapter "LIMIT Query Optimization", "Working with NULL Values": ORDER BY ... LIMIT on a nullable indexed column gives NULLs first for ASC and last for DESC, also after an equality on the index's leading column and with a WHERE that excludes NULL
+ok
+CREATE TABLE nulls341 (id INT PRIMARY KEY, kind INT, v INT)
+
+ok
+CREATE INDEX nulls341_v ON nulls341 (v)
+
+ok
+CREATE INDEX nulls341_kind_v ON nulls341 (kind, v)
+
+ok
+INSERT INTO nulls341 VALUES (1, 1, 30), (2, 1, NULL), (3, 2, 10), (4, 1, 20), (5, 2, NULL), (6, 1, 15)
+
+rows
+SELECT id FROM nulls341 ORDER BY v LIMIT 3
+----
+id
+2
+5
+3
+SELECT 3
+
+rows
+SELECT id FROM nulls341 ORDER BY v DESC LIMIT 4
+----
+id
+1
+4
+6
+3
+SELECT 4
+
+rows
+SELECT id FROM nulls341 ORDER BY v DESC, id DESC LIMIT 2 OFFSET 3
+----
+id
+3
+5
+SELECT 2
+
+rows
+SELECT id FROM nulls341 ORDER BY v DESC, id DESC LIMIT 2 OFFSET 4
+----
+id
+5
+2
+SELECT 2
+
+rows
+SELECT id FROM nulls341 WHERE kind = 1 ORDER BY v LIMIT 2
+----
+id
+2
+6
+SELECT 2
+
+rows
+SELECT id FROM nulls341 WHERE kind = 1 ORDER BY v DESC LIMIT 4
+----
+id
+1
+4
+6
+2
+SELECT 4
+
+rows
+SELECT id FROM nulls341 WHERE v IS NOT NULL ORDER BY v LIMIT 2
+----
+id
+3
+6
+SELECT 2
+
+rows
+SELECT id FROM nulls341 WHERE v > 12 ORDER BY v DESC LIMIT 5
+----
+id
+1
+4
+6
+SELECT 3
+
+ok
+DROP TABLE nulls341
+
+chapter "Aggregate Function Descriptions": MySQL has no REGR_*, COVAR_* or CORR aggregate
+ok
+CREATE TABLE regr340 (y DOUBLE, x INT)
+
+ok
+INSERT INTO regr340 VALUES (3, 1), (5, 2)
+
+error 42000 1305
+SELECT REGR_SLOPE(y, x) FROM regr340
+
+error 42000 1305
+SELECT CORR(y, x) FROM regr340
+
+error 42000 1305
+SELECT COVAR_POP(y, x) FROM regr340
+
+ok
+DROP TABLE regr340
+
 
 chapter "CREATE TABLE and Generated Columns": a VIRTUAL or STORED generated column is computed from the other columns, DEFAULT is the only value it takes (3105 otherwise), and SHOW COLUMNS names its kind
 ok
@@ -1416,3 +1521,313 @@ DROP TABLE ctas323_copy
 
 ok
 DROP TABLE ctas323
+
+
+chapter "Partition Selection" and "AUTO_INCREMENT Handling": PARTITION (p1, p2) after a table name reads and writes only those partitions (1748 for a row outside them, 1735 for an unknown partition, 1747 for a table that is not partitioned), and AUTO_INCREMENT numbers a partitioned table's rows in statement order
+ok
+CREATE TABLE employees337 (id INT NOT NULL AUTO_INCREMENT, fname VARCHAR(25) NOT NULL, store_id INT NOT NULL, PRIMARY KEY (id, store_id)) PARTITION BY RANGE (store_id) (PARTITION p0 VALUES LESS THAN (5), PARTITION p1 VALUES LESS THAN (10), PARTITION p2 VALUES LESS THAN (15), PARTITION p3 VALUES LESS THAN MAXVALUE)
+
+rows
+INSERT INTO employees337 (fname, store_id) VALUES ('Bob', 3), ('Jim', 12), ('Mary', 7), ('Linda', 2), ('Ellen', 17)
+----
+INSERT 0 5
+
+rows
+SELECT LAST_INSERT_ID()
+----
+LAST_INSERT_ID()
+1
+SELECT 1
+
+rows
+SELECT id, fname FROM employees337 PARTITION (p0, p2) ORDER BY id
+----
+id|fname
+1|Bob
+2|Jim
+4|Linda
+SELECT 3
+
+error HY000 1748
+INSERT INTO employees337 PARTITION (p0) (fname, store_id) VALUES ('Ann', 8)
+
+ok
+INSERT INTO employees337 PARTITION (p1) (fname, store_id) VALUES ('Ann', 8)
+
+rows
+SELECT e.id FROM employees337 PARTITION (p1) AS e ORDER BY e.id
+----
+id
+3
+6
+SELECT 2
+
+error HY000 1748
+UPDATE employees337 PARTITION (p0) SET store_id = 9 WHERE fname = 'Bob'
+
+ok
+DELETE FROM employees337 PARTITION (p3)
+
+rows
+SELECT count(*) FROM employees337
+----
+count(*)
+5
+SELECT 1
+
+error HY000 1735
+SELECT * FROM employees337 PARTITION (p9)
+
+ok
+CREATE TABLE plain337 (id INT PRIMARY KEY)
+
+error HY000 1747
+SELECT * FROM plain337 PARTITION (p0)
+
+error HY000 1747
+INSERT INTO plain337 PARTITION (p0) VALUES (1)
+
+ok
+DROP TABLE plain337
+
+ok
+DROP TABLE employees337
+
+
+chapter "TABLE Statement" and "CREATE TABLE ... LIKE Statement": TABLE t returns every row with ORDER BY and LIMIT, and LIKE copies columns, defaults and indexes but not foreign keys
+ok
+CREATE TABLE t342 (a INT NOT NULL, b INT DEFAULT 7, KEY b_key (b))
+
+ok
+INSERT INTO t342 VALUES (1, 2), (6, 7), (9, 5)
+
+rows
+TABLE t342 ORDER BY b LIMIT 2
+----
+a|b
+1|2
+9|5
+SELECT 2
+
+rows
+TABLE t342 UNION TABLE t342 ORDER BY a DESC
+----
+a|b
+9|5
+6|7
+1|2
+SELECT 3
+
+ok
+CREATE TABLE t342_copy LIKE t342
+
+ok
+INSERT INTO t342_copy (a) VALUES (3)
+
+rows
+TABLE t342_copy
+----
+a|b
+3|7
+SELECT 1
+
+error 23000 1048
+INSERT INTO t342_copy (a) VALUES (NULL)
+
+error 42S01 1050
+CREATE TABLE t342_copy LIKE t342
+
+error 42S02 1146
+CREATE TABLE t342_other LIKE t342_missing
+
+ok
+DROP TABLE t342_copy
+
+ok
+DROP TABLE t342
+
+chapter "Mathematical Functions": SQRT, NULL for a negative argument
+rows
+SELECT SQRT(4), SQRT(6.25), SQRT(-16), SQRT(NULL)
+----
+SQRT(4)|SQRT(6.25)|SQRT(-16)|SQRT(NULL)
+2|2.5|NULL|NULL
+SELECT 1
+
+error 42000 1582
+SELECT SQRT(4, 2)
+
+chapter "Date and Time Functions": YEAR, QUARTER, MONTH, DAY, DAYOFMONTH, DAYOFWEEK, DAYOFYEAR, WEEKDAY, HOUR, MINUTE, SECOND, MICROSECOND
+rows
+SELECT YEAR('1987-01-01'), QUARTER('2008-04-01'), MONTH('2008-02-03'), DAYOFMONTH('2007-02-03'), DAY('2007-02-03'), DAYOFWEEK('2007-02-03'), DAYOFYEAR('2007-02-03'), WEEKDAY('2008-02-03 22:23:00'), WEEKDAY('2007-11-06')
+----
+YEAR('1987-01-01')|QUARTER('2008-04-01')|MONTH('2008-02-03')|DAYOFMONTH('2007-02-03')|DAY('2007-02-03')|DAYOFWEEK('2007-02-03')|DAYOFYEAR('2007-02-03')|WEEKDAY('2008-02-03 22:23:00')|WEEKDAY('2007-11-06')
+1987|2|2|3|3|7|34|6|1
+SELECT 1
+
+rows
+SELECT HOUR('10:05:03'), HOUR('272:59:59'), MINUTE('2008-02-03 10:05:03'), SECOND('10:05:03'), MICROSECOND('12:00:00.123456'), MICROSECOND('2019-12-31 23:59:59.000010')
+----
+HOUR('10:05:03')|HOUR('272:59:59')|MINUTE('2008-02-03 10:05:03')|SECOND('10:05:03')|MICROSECOND('12:00:00.123456')|MICROSECOND('2019-12-31 23:59:59.000010')
+10|272|5|3|123456|10
+SELECT 1
+
+rows
+SELECT YEAR(NULL), YEAR('0000-00-00'), MONTH('0000-00-00'), DAYOFWEEK('0000-00-00'), WEEKDAY('0000-00-00'), DAYOFYEAR('2024-02-30')
+----
+YEAR(NULL)|YEAR('0000-00-00')|MONTH('0000-00-00')|DAYOFWEEK('0000-00-00')|WEEKDAY('0000-00-00')|DAYOFYEAR('2024-02-30')
+NULL|0|0|NULL|NULL|NULL
+SELECT 1
+
+ok
+CREATE TABLE dates350 (d DATE, t DATETIME(6), c TIME)
+
+ok
+INSERT INTO dates350 VALUES ('2024-02-29', '2024-02-29 13:45:01.5', '13:45:01')
+
+rows
+SELECT YEAR(d), MONTH(d), DAYOFWEEK(d), WEEKDAY(d), DAYOFYEAR(d), QUARTER(d), HOUR(t), MINUTE(t), SECOND(t), MICROSECOND(t), HOUR(c) FROM dates350
+----
+YEAR(d)|MONTH(d)|DAYOFWEEK(d)|WEEKDAY(d)|DAYOFYEAR(d)|QUARTER(d)|HOUR(t)|MINUTE(t)|SECOND(t)|MICROSECOND(t)|HOUR(c)
+2024|2|5|3|60|1|13|45|1|500000|13
+SELECT 1
+
+error 42000 1582
+SELECT YEAR('2024-01-01', 1)
+
+ok
+DROP TABLE dates350
+
+chapter "15.1.9 ALTER TABLE Statement": ADD INDEX, ADD KEY, ADD UNIQUE INDEX, RENAME INDEX, DROP INDEX and DROP KEY
+ok
+CREATE TABLE idx350 (id INT PRIMARY KEY, a INT, b VARCHAR(10))
+
+ok
+INSERT INTO idx350 VALUES (1, 10, 'x'), (2, 20, 'y')
+
+ok
+ALTER TABLE idx350 ADD INDEX by_a (a), ADD KEY (b)
+
+error 42000 1061
+ALTER TABLE idx350 ADD INDEX by_a (b)
+
+ok
+ALTER TABLE idx350 ADD UNIQUE INDEX uk_b (b)
+
+ok
+ALTER TABLE idx350 RENAME INDEX by_a TO by_a2
+
+error 42000 1176
+ALTER TABLE idx350 RENAME KEY nope TO other
+
+error 42000 1061
+ALTER TABLE idx350 RENAME INDEX by_a2 TO b
+
+rows
+SHOW INDEX FROM idx350
+----
+Table|Non_unique|Key_name|Seq_in_index|Column_name|Collation|Cardinality|Sub_part|Packed|Null|Index_type|Comment|Index_comment|Visible|Expression
+idx350|0|PRIMARY|1|id|A|NULL|NULL|NULL||BTREE|||YES|NULL
+idx350|1|by_a2|1|a|A|NULL|NULL|NULL|YES|BTREE|||YES|NULL
+idx350|1|b|1|b|A|NULL|NULL|NULL|YES|BTREE|||YES|NULL
+idx350|0|uk_b|1|b|A|NULL|NULL|NULL|YES|BTREE|||YES|NULL
+SELECT 4
+
+rows
+SELECT id FROM idx350 WHERE a = 20
+----
+id
+2
+SELECT 1
+
+error 42000 1235
+ALTER TABLE idx350 ADD FULLTEXT INDEX ft (b)
+
+error 42000 1235
+ALTER TABLE idx350 ADD SPATIAL INDEX sp (b)
+
+ok
+ALTER TABLE idx350 DROP INDEX by_a2
+
+error 42000 1091
+ALTER TABLE idx350 DROP KEY by_a2
+
+ok
+ALTER TABLE idx350 DROP KEY b
+
+ok
+DROP TABLE idx350
+
+chapter "EXPLAIN Statement", "Obtaining Information with EXPLAIN ANALYZE": FORMAT=JSON, FORMAT=TREE with estimates and aggregates, EXPLAIN ANALYZE of a multi-table UPDATE and DELETE and of TABLE, and 1235 for a single-table write or FORMAT=JSON under EXPLAIN ANALYZE
+ok
+CREATE TABLE explained345 (id INT PRIMARY KEY, a INT, b INT)
+
+ok
+CREATE TABLE joined345 (c1 INT, c2 INT)
+
+ok
+INSERT INTO explained345 VALUES (1, 1, 10), (2, 2, 20), (3, 3, 30)
+
+ok
+INSERT INTO joined345 VALUES (1, 1), (2, 2), (5, 5)
+
+ok
+EXPLAIN FORMAT=JSON SELECT * FROM explained345 WHERE a > 1
+
+ok
+EXPLAIN FORMAT=TREE SELECT a, count(*) FROM explained345 GROUP BY a ORDER BY a
+
+ok
+EXPLAIN TABLE explained345
+
+ok
+EXPLAIN ANALYZE TABLE explained345 ORDER BY b LIMIT 2
+
+ok
+EXPLAIN FORMAT=JSON UPDATE explained345 JOIN joined345 ON explained345.id = joined345.c1 SET explained345.b = 0
+
+rows
+SELECT id, b FROM explained345 ORDER BY id
+----
+id|b
+1|10
+2|20
+3|30
+SELECT 3
+
+ok
+EXPLAIN ANALYZE UPDATE explained345 JOIN joined345 ON explained345.id = joined345.c1 SET explained345.b = 0
+
+rows
+SELECT id, b FROM explained345 ORDER BY id
+----
+id|b
+1|0
+2|0
+3|30
+SELECT 3
+
+ok
+EXPLAIN ANALYZE DELETE explained345 FROM explained345 JOIN joined345 ON explained345.id = joined345.c1 WHERE joined345.c2 = 2
+
+error 42000 1235
+EXPLAIN ANALYZE DELETE FROM explained345 WHERE id = 1
+
+error 42000 1235
+EXPLAIN ANALYZE UPDATE explained345 SET b = 1
+
+error 42000 1235
+EXPLAIN ANALYZE FORMAT=JSON SELECT * FROM explained345
+
+rows
+SELECT count(*) AS n FROM explained345
+----
+n
+2
+SELECT 1
+
+ok
+DROP TABLE explained345
+
+ok
+DROP TABLE joined345

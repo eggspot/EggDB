@@ -344,6 +344,8 @@ pub(crate) fn classify(
             false,
         )),
         Statement::CreateTable(_)
+        | Statement::CreateTableLike(_)
+        | Statement::Prepared(crate::ast::PreparedCommand::Prepare(_))
         | Statement::Begin { .. }
         | Statement::SetTransaction(_)
         | Statement::Commit
@@ -397,6 +399,9 @@ pub(crate) fn classify(
             vec!["DO".to_owned()],
             false,
         )),
+        Statement::Prepared(crate::ast::PreparedCommand::Execute(execute)) => {
+            run_code(vec![execute.name.text.clone()])
+        }
         Statement::PlsqlBlock(_) => Some(DestructiveStatement::new(
             DestructiveKind::RunCode,
             vec![crate::plsql::ANONYMOUS_BLOCK_NAME.to_owned()],
@@ -1079,6 +1084,8 @@ fn altered(table: &Name, actions: &[AlterAction]) -> Option<DestructiveStatement
             | AlterAction::DetachPartition(_)
             | AlterAction::AttachIndex(_)
             | AlterAction::MoveColumn { .. }
+            | AlterAction::AddIndex(_)
+            | AlterAction::RenameIndex { .. }
             | AlterAction::Accepted => continue,
         };
         match &mut found {

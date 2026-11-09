@@ -18,20 +18,20 @@ What is still to build for each milestone is listed in [What is left, per milest
 | M5 | SQL: parser, planner, optimizer and executor; SQLite-compatible embedded SQL and the SQLite file format; the stable C API and the first official drivers (Rust, C#, Java, Node.js, Python, Go) in embedded mode (D16); the `eggdb` CLI client (D15) | **in progress**: `ANALYZE` row counts and `approx_count_distinct` (D178), batched integer aggregates as the first vectorized operator (D179), SQLite files read by our own reader and queried as copies in memory (D180), SQLite's C API as `libsqlite3` (D181), the first official drivers over the C API: Python's DB-API, .NET's ADO.NET, Java's JDBC, Node.js and Go's `database/sql` (D182); next: column statistics and joins ordered by cost |
 | M6a | Server and the PostgreSQL wire protocol and SQL dialect, with authentication (SCRAM), TLS and roles from the start, since the server never listens without authentication (D22, D23, D45); PostgreSQL tools (psql, pgAdmin, DBeaver) working (D12); restoring plain-SQL `pg_dump` output (D13) | **started** (item 21): the PostgreSQL protocol v3 over loopback with SCRAM-SHA-256, simple and extended query; implicit transactions per `Query` message and per pipeline up to `Sync`, portals that end with their transaction, and `CancelRequest` (item 45, D135); TLS 1.3 and 1.2 of our own on every listener, with `SSLRequest`, direct TLS, SCRAM-SHA-256-PLUS and listeners beyond loopback only with TLS (part 4.M6a-1, D161); stored roles (D183, under M6b) and `LISTEN`/`NOTIFY` between sessions of `eggdb serve`; users on a shared machine can no longer be locked out by idle sockets or have the server's memory exhausted: logins take the slot of idle ones and get 5 seconds, idle sessions close after an hour (`--idle-timeout`), and PostgreSQL statements, portals and every SQL listener's buffered bytes are capped under one memory budget ([issue #79](https://github.com/eggspot/EggDB/issues/79), D254); suspended portals' rows, RESP, MongoDB, CQL and memcached hold against that budget and `--max-connection-memory` sets its size (D284); users can now keep Kafka, MQTT, AMQP 0-9-1 and 1.0, NATS, STOMP, Bolt and HTTP clients and RESP pub/sub queues within that one budget, and print connection options and roles in debug output without their secrets (D307); Next: measure replies (RESP `EXEC`, single large values, a Bolt record, HTTP response bodies) before they are built |
 | M6b | The rest of security: LDAP, Kerberos, OpenID Connect, client certificates, row- and column-level security, masking (D22) | **started**: stored roles and table privileges (D183), several databases per server (D184), created and dropped while serving with `CREATE DATABASE` and `DROP DATABASE` over every protocol (D270), refusing a `USE` that would leave a temporary table or session lock behind (D294), LDAP and OpenID Connect logins per user (D185), row-level security policies (D186), column privileges and evaluated `WITH CHECK` policies (D285), encryption at rest (D187); left: Kerberos, client certificates, masking |
-| M6c | Operations: metrics, logs, slow queries, statement statistics, `EXPLAIN ANALYZE` (D25) | **started**: Prometheus metrics from `eggdb serve --metrics-listen` over our own HTTP crate (D188); statement statistics as `pg_stat_statements`, the slow-statement log (`--log-slow-statements`) and `EXPLAIN (ANALYZE, BUFFERS)` (D286); users can now read `(actual time=a..b rows=n loops=1)` on the top node, scans, a join's top, sorts and `Append` branches in `EXPLAIN ANALYZE`, and run Oracle's `EXPLAIN PLAN` with `DBMS_XPLAN.DISPLAY` and SQL Server's showplan options, also through `eggdb explain --dialect oracle|sqlserver` and MCP's `explain_query` on a read-only file (D312); users can now see subqueries as `InitPlan`/`SubPlan` nodes with their loops in `EXPLAIN [ANALYZE]` and use MySQL's `EXPLAIN FORMAT=TREE` and `EXPLAIN ANALYZE` (D327); left: logs (OTLP), per-node buffers, times on the steps inside a join, wait events, `pg_stat_activity` for every session |
-| M6d | The built-in MCP server: schema discovery, querying, agent permissions, prompt-injection safety (D11, D45) | **in progress**, brought forward to v0.2.0 (owner, 2026-10-28): `eggdb mcp` over stdio, read-only, with an audit log (item 49a, D119, D120); writes with `--allow-write` and the user's confirmation (item 49b-1, D121); `--tables`, a gap between calls and engine-wide value and row limits (item 49b-2, D156); confirmation for every statement that can change many rows ([issue #80](https://github.com/eggspot/EggDB/issues/80), D255), `--tables` with `--allow-write` (item 49b-3, D257), column lists and referenced-table inserts (item 49b-4, D281), writers that wait for a busy file and an engine-side deadline and row cap (D258), busy waits for every file command and set-returning functions stopped by `LIMIT` (D287), and writes to tables listed with columns, inserts into a listed table whose foreign key points at an unlisted one and column lists on views (D306); key writes with `put` and `del` and `--mcp-tables` on `eggdb serve` (D328); next: the rest in [What is left](#what-is-left-per-milestone), M6d |
+| M6c | Operations: metrics, logs, slow queries, statement statistics, `EXPLAIN ANALYZE` (D25) | **started**: Prometheus metrics from `eggdb serve --metrics-listen` over our own HTTP crate (D188); statement statistics as `pg_stat_statements`, the slow-statement log (`--log-slow-statements`) and `EXPLAIN (ANALYZE, BUFFERS)` (D286); users can now read `(actual time=a..b rows=n loops=1)` on the top node, scans, a join's top, sorts and `Append` branches in `EXPLAIN ANALYZE`, and run Oracle's `EXPLAIN PLAN` with `DBMS_XPLAN.DISPLAY` and SQL Server's showplan options, also through `eggdb explain --dialect oracle|sqlserver` and MCP's `explain_query` on a read-only file (D312); users can now see subqueries as `InitPlan`/`SubPlan` nodes with their loops in `EXPLAIN [ANALYZE]` and use MySQL's `EXPLAIN FORMAT=TREE` and `EXPLAIN ANALYZE` (D327); users can now read MySQL's `EXPLAIN FORMAT=JSON`, `(cost=... rows=...)` estimates with `Aggregate`, `Group aggregate` and `Stream results` in the tree, and explain (and `EXPLAIN ANALYZE`) multi-table `UPDATE`/`DELETE` and `TABLE t` (D345); left: logs (OTLP), per-node buffers, times on the steps inside a join, wait events, `pg_stat_activity` for every session |
+| M6d | The built-in MCP server: schema discovery, querying, agent permissions, prompt-injection safety (D11, D45) | **in progress**, brought forward to v0.2.0 (owner, 2026-10-28): `eggdb mcp` over stdio, read-only, with an audit log (item 49a, D119, D120); writes with `--allow-write` and the user's confirmation (item 49b-1, D121); `--tables`, a gap between calls and engine-wide value and row limits (item 49b-2, D156); confirmation for every statement that can change many rows ([issue #80](https://github.com/eggspot/EggDB/issues/80), D255), `--tables` with `--allow-write` (item 49b-3, D257), column lists and referenced-table inserts (item 49b-4, D281), writers that wait for a busy file and an engine-side deadline and row cap (D258), busy waits for every file command and set-returning functions stopped by `LIMIT` (D287), and writes to tables listed with columns, inserts into a listed table whose foreign key points at an unlisted one and column lists on views (D306); key writes with `put` and `del` and `--mcp-tables` on `eggdb serve` (D328); counters, compare-and-set and times to live as tools (`incr`, `cas`, `expire`, `persist`) and `expires_at` in `put`'s result (D346); next: the rest in [What is left](#what-is-left-per-milestone), M6d |
 | M6e | The first GUI client screens on the desktop and in the browser, designed by Claude Fable (D15) | **started**: our own GUI toolkit `eggdb-gui` (software rasterizer, TrueType reader, PNG encoder) drawing the main window from Fable's `docs/ux/gui.md`, tested offscreen (D191); users can now open the connect screen in native windows on Linux (X11), Windows (Win32, per-monitor DPI) and macOS (Cocoa, Retina) with the separate `eggdb-gui` binary, in light, dark and high contrast with a keyboard focus ring, with its focus, names and roles exposed to VoiceOver, Narrator and Orca (NSAccessibility, UI Automation, AT-SPI2; not yet checked by hand), and see it in a browser on a canvas drawn by the same toolkit ([issue #29](https://github.com/eggspot/EggDB/issues/29)'s first slice, D256); users can now open a typed, browsed (macOS and Windows file dialogs) or dropped `.eggdb` file from the connect card, or connect to a server from its `Connect to a server` segment (its `URL`, in libpq form or as `eggdb://`, filling the fields, with `Use TLS`), see the open's progress and stop it with `Esc`, read the `Error`/`Try:` lines when it fails (a server's on the field they are about), and land in the main window on it (D274); users can now write SQL in the main window's query tab with the dialect pill (PostgreSQL, MySQL, SQL Server, Oracle, SQLite, re-highlighting the same text), run the statement under the caret with `Ctrl/Cmd+Enter` or all of them with `Ctrl/Cmd+Shift+Enter` without the window blocking, stop it with `Esc`, read the summary (`3 rows · 0.4 ms · 1.2 KB`) and the engine's errors inline (squiggle, `Error 42P01: … · Ln 1, Col 15`, `Messages`), and move, select and copy (TSV, with header, as `INSERT`) in a virtualized grid that keeps 100,000 rows with a banner (D275); users can now browse the database in the sidebar's tree (tables with their columns and indexes, views, indexes, sequences and key spaces with their counts), filter it, move through it with the arrows, `Home`/`End`, `*` and type-ahead, open a table with `Enter` as `SELECT * FROM <name> LIMIT 100;` in a new query tab, insert a name with `Shift+Enter`, and read the inspector's columns, indexes, DDL and sample rows, docked from 1440 px and an overlay with `Ctrl/Cmd+I` below (D276); users can now press `Ctrl/Cmd+E` to see the statement under the caret's plan as a tree in the results' `Plan` segment (cost and rows per node when the engine gives them), `Ctrl/Cmd+Shift+E` to measure it (own time, rows and buffers per node, writes rolled back), spot hot nodes by their `warning`/`error` borders and printed share, walk and select nodes from the keyboard with the node's table highlighted in the editor, and read the text form with `Alt+T` (D277); screen readers now read the connect card's and the main window's values (with the caret and selection), states (checked, expanded, selected, invalid, read-only), shortcuts and the grid's and trees' rows, columns and levels, and press buttons, tick checkboxes, expand tree rows, move the focus and type values through UI Automation's patterns, AT-SPI2's `Action`, `Text`, `EditableText`, `Selection` and `Table`, NSAccessibility and ARIA (D278); users can now point and click: hover and pressed fills, a click focuses inputs, the editor, grid cells and tree rows with the caret at the click, a drag selects, a double-click selects a word or opens a tree row, a release outside a button cancels it, the wheel scrolls the grid and the tree, `Ctrl/Cmd+C`, `X` and `V` use the system clipboard on macOS, Windows and X11 (a paste over 1 MB is refused), the caret blinks and greys when the window is inactive, and the window relayouts on every resize (D279); users can now pick a familiar layout (works like SQL Server Management Studio, pgAdmin 4, DBeaver, DataGrip, MySQL Workbench, MongoDB Compass or Redis Insight) from the connect card's `Where are you coming from?`, `Ctrl/Cmd+K L` or the status bar's `Works like` item, and the main window lays out with that layout's regions, run button, result view and tree names and keys (`F5` executes in SSMS's), kept in the client's settings for the next start (D309); users can now open more query tabs (`Ctrl/Cmd+T`, the strip's `+`), move between them (`Ctrl+Tab`), close them (`Ctrl/Cmd+W`, middle-click, asking first when one runs, holds a transaction or text), and run each on its own session kept between runs, so a `BEGIN` outlasts its run, with the open transaction shown on the tab and in the status bar (D310); users can now open a cell's full value with `Enter`, `F2` or a double-click (JSON pretty-printed, blobs in full hex, copied whole), right-click the grid or press `Shift+F10` or the menu key for `Copy`, `Copy with header`, `Copy as INSERT`, `Copy as CSV`, `Copy as JSON`, `Open value` and the select items, resize columns by dragging a header edge, fit one with a double-click on it or `Alt+Enter` and step it with `Alt+Left`/`Alt+Right`, widths kept across runs with the same columns, and page and drag the grid's scrollbars, with the editor's showing its position (D310); users can now see each table's triggers in the tree's `Triggers` group (events as right text, the action in the inspector, `Triggers (n)` in a table's), right-click a tree row or press `Shift+F10` for `Copy name`, `Show DDL`, `Refresh` and `Drop…` (the statement in the tab's dialect, run in its own session after a confirm dialog), press `Enter` on a key space for a tab of its first 100 keys, values and sizes, drag or key the sidebar, results and inspector splitters with the sizes kept per layout, collapse the sidebar to a 36 px rail with its drawer with `Ctrl/Cmd+B`, use windows from 800 px wide with the docked inspector closing under 1440, and see hover and pressed fills fade over 80 ms, changing at once when the system's reduce-motion setting (macOS, Windows, X11; read at start and when the window gains the focus) or `--reduced-motion` asks (D311); users can now explain in Oracle's dialect (`EXPLAIN PLAN FOR` with `DBMS_XPLAN.DISPLAY`, rolled back) and SQL Server's (`SET SHOWPLAN_ALL`, and `SET STATISTICS PROFILE` rolled back with `Ctrl/Cmd+Shift+E`) in the plan view, hover a node, read its full text in a tooltip after 600 ms or with `Ctrl/Cmd+Shift+Space`, and click a node to select it, and see the own time and share of the top node, scans, a join's top, sorts and `Append` branches from EggDB's own `Ctrl/Cmd+Shift+E` (D312); users can now click, drag and double-click in the browser card as on the desktop, copy and paste there through the async clipboard when the browser sends no clipboard event, copy and paste text larger than one X11 request (`INCR`), and see the drag-over ring and drop files on Windows (an OLE drop target) and on X11 (XDND) (D313); users can now right-click the editor or press `Shift+F10` for `Cut`, `Copy`, `Paste`, `Select all`, `Run statement`, `Explain`, `Toggle comment` and `Format statement`, filter a keys tab by a key prefix and page it 100 keys at a time with `Next 100` and `Back`, browse a RESP server's keys over `redis://` with each key's type, and see `Show DDL` move the focus to the DDL box (D329); left: checking the screen readers by hand (VoiceOver, Narrator, Orca and a browser screen reader), UI Automation's Text pattern, IME, Wayland, streaming rows into the grid, document and other model groups, times in the plan view for the steps inside a join (scans, a join's top, sorts and `Append` branches have them, D312), the remaining screens; Next for the familiar layouts (D309): each layout's own region contents (pgAdmin's Query Tool toolbar, DBeaver's run column, Compass's filter bar and document cards, Redis Insight's result cards and CLI, Workbench's output rows, SSMS's `F4` properties), the hidden extra regions, per-layout splitter memory, `View > Layout` and the palette, `F7` in the platform layer, comment/format/new-tab keys, the connect screen's `Coming from another client?` row, the picker in the browser build and dialog/list box/option accessibility roles; Next for the query tabs (D310): the `Transaction open` item's `COMMIT`/`ROLLBACK` popover and its click on another tab's item, disabled rows in the locked dialect menu, a double-click on the strip adding a tab, the tab strip in the familiar layouts' own tab rows, naming the tab that holds a file's write transaction in another tab's `55P03` error (`Query 1 holds the write transaction; COMMIT or ROLLBACK it first`; a file's tabs share one session thread, so the second writer fails at once instead of waiting), a session advisory lock (`pg_advisory_lock`) wanted by a second tab of a file while another holds it, which waits until `Stop` because the holder cannot run meanwhile (run each tab's session on a thread of its own, or answer `55P03` at once), and a Fable design for the 400-tab cap's message; Next for the tree, splitters and motion (D311): the whole value in a keys tab's value view (its cell keeps the first 64 bytes), `alertdialog` and `menu`/`menuitem` roles for the Drop dialog and the row menu, the results grid growing into a taller results region, the results and inspector splitters as `Tab` stops, the resize cursor, the rail's hover, tooltips and accessibility roles (and the splitters' and drawer's), the drawer returning focus to where it was, splitters in the familiar layouts, hover fills that fade on tree rows, grid rows, rail items, status bar pills, dialog buttons and menus' highlighted rows, redrawing at the display's rate, the OS's reduced-motion change notifications, the browser's `prefers-reduced-motion`, Wayland's settings portal and `View > Reduce motion`; Next for the platform layer (D313): dropping files on the browser card (opened in memory), touch gestures beyond a tap and a drag, `INCR` for `PRIMARY`, XDND's `XdndProxy`, actions other than copy and a landing property per drag, dragging out of the client (`DoDragDrop`, an XDND source), Wayland's data device and a hand check on real desktops; Next for the grid (D310): the value view's partial text selection and the column's SQL type in its header, the menu, dialog and scroll bar accessibility roles in the platform layer (the popovers expose groups and buttons now), the scrollbars hiding 800 ms after the last scroll and fading (they stay shown, the reduced-motion look), the editor's own scroll offset with a draggable thumb and a horizontal scrollbar, and the column-resize pointer cursor |
 | M6f | The official drivers over the network and their main ORMs (D16, D17) | **started**: the C API's SQL session over the network through `eggdb_sql_connect` and a `postgresql://` URL, which every driver built on it inherits (D192); left: the per-language drivers' own network tests and their ORMs |
-| M7 | Caching: in-memory tables with expiry and eviction, pub/sub, streams; Redis RESP | **started**: RESP2/RESP3 with typed values and expiry (`eggdb serve --resp-listen`, D193), memcached's text and meta protocol on loopback (D194); users can now restore Redis 7's multi-part AOF by pointing `eggdb restore` at `appendonlydir/`, replayed in the manifest's order with hostile manifests and RDB preambles refused (D13, D193); users can now run transactions (`MULTI`/`EXEC`/`WATCH`), pub/sub, streams without consumer groups, and `maxmemory`-style eviction under `--resp-max-memory` and `--resp-eviction` (D193 parts 4.M7-2 and 4.M7-3), with pub/sub queues held against the server's memory budget (D307). Next: consumer groups and blocking commands, scripting, ACL users and cluster mode, in [What is left](#what-is-left-per-milestone), M7 |
+| M7 | Caching: in-memory tables with expiry and eviction, pub/sub, streams; Redis RESP | **started**: RESP2/RESP3 with typed values and expiry (`eggdb serve --resp-listen`, D193), memcached's text and meta protocol on loopback (D194); users can now restore Redis 7's multi-part AOF by pointing `eggdb restore` at `appendonlydir/`, replayed in the manifest's order with hostile manifests and RDB preambles refused (D13, D193); users can now run transactions (`MULTI`/`EXEC`/`WATCH`), pub/sub, streams without consumer groups, and `maxmemory`-style eviction under `--resp-max-memory` and `--resp-eviction` (D193 parts 4.M7-2 and 4.M7-3), with pub/sub queues held against the server's memory budget (D307). users can now block on lists, sorted sets and streams (`BLPOP`, `BLMOVE`, `BZPOPMIN`, `BLMPOP`, `XREAD BLOCK` and the rest, served first-come first-served) and use `LMOVE`, `LMPOP`, `ZPOPMIN` and `ZMPOP` (D347). Next: consumer groups, scripting, ACL users and cluster mode, in [What is left](#what-is-left-per-milestone), M7 |
 | M8 | Full-text search: analyzers, inverted indexes, BM25 ranking; Elasticsearch/OpenSearch REST | **started**: an Elasticsearch/OpenSearch-compatible REST API on the key-value store (`eggdb serve --es-listen`, D196) |
-| M9 | Documents and JSON; the MongoDB wire protocol | **started**: BSON, a document store with MongoDB's query and update operators and aggregation pipeline, the MongoDB wire protocol (`eggdb serve --mongo-listen`) and `mongodump` restores (D197) |
+| M9 | Documents and JSON; the MongoDB wire protocol | **started**: BSON, a document store with MongoDB's query and update operators and aggregation pipeline, the MongoDB wire protocol (`eggdb serve --mongo-listen`) and `mongodump` restores (D197); users can now update array elements with `$`, `$[]` and `$[<identifier>]` with `arrayFilters` (nested too), and send pipeline-style updates (`$set`/`$addFields`, `$project`, `$unset`, `$replaceRoot`/`$replaceWith`) in `update` and `findAndModify`, with MongoDB's error codes (D349) |
 | M10 | The other SQL dialects, each as itself (D10): MySQL/MariaDB, Microsoft SQL Server (T-SQL, TDS) and Oracle (SQL, PL/SQL) | **started**: restoring `mysqldump` output (D198), MySQL stored procedures and functions (D199), `pg_cron` jobs run by `eggdb serve` (D200) |
 | M11 | Columnar storage and analytics; time series | **started**: columnar encodings and integer chunks (D201), `time_bucket`, Parquet import and export (D202) |
 | M12 | Vectors (approximate nearest neighbours) and geospatial | **started**: HNSW vector indexes with pgvector-style types and operators (D203), geometry functions (D204), built-in embeddings and hybrid ranking (D205) |
-| M13 | Graphs | **started**: property graphs with Cypher and graph algorithms (D206), the Bolt protocol (`eggdb serve --bolt-listen`, D207), algorithms as `CALL` procedures with communities, triangles and similarity (D248), Cypher's named paths, shortest paths, `MERGE` actions, `FOREACH`, `UNION` and comprehensions (D333) |
+| M13 | Graphs | **started**: property graphs with Cypher and graph algorithms (D206), the Bolt protocol (`eggdb serve --bolt-listen`, D207), algorithms as `CALL` procedures with communities, triangles and similarity (D248), Cypher's named paths, shortest paths, `MERGE` actions, `FOREACH`, `UNION` and comprehensions (D333), label predicates, `CALL {}` subqueries and shortest paths as expressions (D351) |
 | M14 | Backup, point-in-time recovery and verified restores (D24); replication and high availability: read replicas (synchronous, asynchronous, cascading), failover, consistency per request (D18) | **started**: continuous archiving and point-in-time restore (D208), dumps in every dialect's plain SQL (`eggdb export --sql`), read replicas and failover (D209), change streams through a transactional outbox to webhooks and queues (D210, D217), materialized views |
 | M15 | Sharding (hash, range, time, region) with online resharding, distributed SQL with consensus and serializable distributed transactions, multi-region clusters (D4, D18) | **started**: Raft consensus checked by deterministic simulation (D211), shard maps with online moves and two-phase commit across shards (D212) |
-| M16 | Messaging and queues (D33), in order: Kafka, AMQP 0-9-1 (RabbitMQ), MQTT, SQS, NATS, AMQP 1.0, STOMP, with transactional outbox and inbox; wide-column (CQL), objects (S3), InfluxDB line protocol | **started**: Kafka (D213), AMQP 0-9-1 and 1.0 on durable queues (D214, D217), MQTT (D215), SQS and NATS (D216), STOMP and the outbox relay (D217), Cassandra CQL on SQL tables (D218), S3-compatible objects (D219), InfluxDB line protocol and Prometheus remote write with PromQL (D220); syslog over UDP and TCP into SQL (D315); DynamoDB-compatible tables and queries (D241) |
+| M16 | Messaging and queues (D33), in order: Kafka, AMQP 0-9-1 (RabbitMQ), MQTT, SQS, NATS, AMQP 1.0, STOMP, with transactional outbox and inbox; wide-column (CQL), objects (S3), InfluxDB line protocol | **started**: Kafka (D213), AMQP 0-9-1 and 1.0 on durable queues (D214, D217), MQTT (D215), SQS and NATS (D216), STOMP and the outbox relay (D217), Cassandra CQL on SQL tables (D218), S3-compatible objects (D219), InfluxDB line protocol and Prometheus remote write with PromQL (D220); syslog over UDP and TCP into SQL (D315); heart-beats for STOMP and AMQP 0-9-1, and syslog idle limits and dropped-message counts (D352); DynamoDB-compatible tables and queries (D241) |
 | M17 | Every platform: Windows, macOS, BSDs, Android, iOS, EggOS, WebAssembly, `no_std` (D8); packages and cloud deployments | **started**: EggDB in the browser as a WebAssembly (WASI) module with OPFS persistence and a playground page (D221); Android through a Kotlin wrapper over JNI and the C API, iOS through an XCFramework (D222); the file format without the standard library, with pages on raw flash, built for Cortex-M (D223); tests on 32-bit x86 and ARM and big-endian s390x in CI; the image on GHCR for amd64 and arm64 with AWS, Azure and Google Cloud templates (D224) |
 | M18 | The other ways of scaling (D18): multi-primary, leaderless quorums, storage separated from compute, serverless, tiered storage, edge copies, offline-first sync, federation | **started**: leaderless quorums with version vectors, last-writer-wins or siblings, read repair, hinted handoff and anti-entropy (D225); archives in S3-compatible buckets and nodes that start from them (D226); read-only edge copies cached by their SHA-256 (D227); offline-first sync of key-value data (D228); federation through `eggdb_foreign` over allowed EggDB, PostgreSQL and Parquet sources (D229) |
 
@@ -79,7 +79,7 @@ writers yet. Feature freeze
 | 30 | Users can write subqueries (scalar, `IN`, `EXISTS`, in `FROM`), `WITH` queries, `UNION`/`INTERSECT`/`EXCEPT`, and `RIGHT`/`FULL` joins; check: the PostgreSQL manual's cases and a differential run against the `postgres` container | **done** (D112): scalar, `IN`, `EXISTS` and `ANY`/`ALL` subqueries, correlated ones run per distinct outer value with key and index lookups, derived tables with column lists, `WITH` and `WITH RECURSIVE`, `UNION`/`INTERSECT`/`EXCEPT` (`MINUS` in Oracle) with `ALL`, parentheses and `ORDER BY`/`LIMIT` on the result, `RIGHT` and `FULL` joins, `greatest`/`least`, standalone subqueries in `INSERT`, `UPDATE` and `DELETE`, in all four dialects with their errors; 116 new correctness cases, a seeded differential test against join forms and a reference in Rust with and without indexes, fuzzing in every dialect. The differential run against the `postgres` container waits for that container in CI. Built since, in item 30b (D151): `LATERAL`, `FULL JOIN ... USING`, correlated subqueries at any depth, in grouped select lists and in `UPDATE`/`DELETE`, data-modifying `WITH`, and `VALUES` as a query in PostgreSQL. Next: `VALUES` as a query in the other dialects (M5) |
 | 31 | Users can store `time`, `interval`, `bytea`, `uuid` and `char(n)`, sent to clients in text and binary form; check: every type round-trips through a standard driver as PostgreSQL prints it | **done** (D113): `time(p)`, `timetz`, `interval` with fields and precision (PostgreSQL and ISO 8601 input, `postgres` output, equality by 30-day months, arithmetic with month-end clamping, `justify_*`, `age`, `extract`), `bytea` (hex and escape, `encode`/`decode`, `get_byte`, `substring`, `||`), `uuid` with `gen_random_uuid()`, blank-padded `character(n)`; PostgreSQL's wire protocol in text and binary with their OIDs, MySQL's `TIME` and `BLOB`; MySQL's `TIME` and binary types and Oracle's `CHAR`, `RAW` and `BLOB` map to them; table definitions in format version 5; 37 new PostgreSQL correctness cases and more in the other dialects, a differential test with and without indexes, pg8000 and PyMySQL round trips. Built since: infinite intervals, `AT TIME ZONE` (item 31b), `make_interval`, MySQL's `TIME` values beyond a day (`-838:59:59` to `838:59:59`), Oracle's `INTERVAL` types and SQLite `BLOB` columns (D153) |
 | 31b | Users can now use named time zones (`SET TimeZone = 'Europe/Paris'`, `AT TIME ZONE 'America/New_York'`, `timestamptz` input and output with each region's daylight saving time and history), PostgreSQL 17's infinite intervals, MySQL's `TIME` past a day and below zero with `time_zone` applied, Oracle's region names in `TIME_ZONE`, `TZR`, `FROM_TZ` and `TZ_OFFSET`, and SQLite `BLOB` columns that hold every storage class with `x'...'` literals; check: PostgreSQL, MySQL, Oracle and SQLite suite cases, DST edges against the published rules, the `pg-functions` differential job | **written** (D153): the IANA 2026e time zone database (its public-domain `tzdata.zi` source, embedded and compiled per region on first use by our own compiler into transitions plus each region's continuing rules), `TimeZone` validated (`22023`), a gap taking the offset from before and a repeated hour the offset after, calendar `timestamptz ± interval`, region names in input and `to_char`'s `TZ` abbreviation, `pg_timezone_names`; `infinity`/`-infinity` intervals; `TIME` from `-838:59:59` to `838:59:59` stored as before; `SqlType::Dynamic` for SQLite `BLOB` columns in table-definition version 10. Users can now write time zone abbreviations (`2024-01-01 10:00 PST`, PostgreSQL's `Default` set, listed in `pg_timezone_abbrevs`), POSIX rule strings in `TimeZone` and `AT TIME ZONE` (`EST5EDT,M3.2.0,M11.1.0`, `<+03>-3`), and `infinity`/`-infinity` dates and time stamps with PostgreSQL 17's arithmetic, stored as PostgreSQL's sentinels with no format change (D271). Users can now use SQL Server's `AT TIME ZONE` with the Windows zone names of `sys.time_zone_info`, get infinite dates refused as out of range by SQL Server's and Oracle's functions, and keep `Infinity` in `numeric`, which `extract` of an infinite value returns (D290). Users can now keep dynamic typing in `TEXT`, `NUMERIC`, `REAL` and untyped columns and key and index every dynamic column (D305). Not yet: dynamic typing for `INTEGER` columns |
-| 32 | Users can use sequences (`CREATE SEQUENCE`, `nextval`, `currval`, `setval`, `OWNED BY`) and `ALTER TABLE` (columns, primary key, unique, check and enforced foreign keys, defaults, `NOT NULL`); secondary indexes are done in 19c; check: the manual's foreign-key and check cases | **done** (D114): sequences as catalog objects (`CREATE`/`ALTER`/`DROP SEQUENCE` with `AS`, `START`, `INCREMENT`, `MINVALUE`/`MAXVALUE`, `CACHE`, `CYCLE`, `OWNED BY`, `RESTART`), `nextval`/`currval`/`lastval`/`setval`, `::regclass` and `pg_catalog.` calls in PostgreSQL, `seq.NEXTVAL`/`CURRVAL` in Oracle, non-transactional and durable with the transaction that used them; `CHECK` and `FOREIGN KEY` (`CASCADE`, `SET NULL`, `SET DEFAULT`, `RESTRICT`, `NO ACTION`, self-references, multi-column) enforced in every dialect with its errors, SQLite's after `PRAGMA foreign_keys = ON`; `ALTER TABLE` `ADD`/`DROP`/`RENAME COLUMN`, `RENAME TO`, `SET`/`DROP DEFAULT`, `SET`/`DROP NOT NULL`, `TYPE`, `ADD`/`DROP CONSTRAINT`, `OWNER TO`, MySQL's `MODIFY`/`CHANGE`/`DROP FOREIGN KEY`, Oracle's `ADD (...)`/`MODIFY (...)`, SQLite's limited `ALTER`; `DROP TABLE ... CASCADE`; table definitions in format version 6 only for tables with constraints; the `pg_dump` forms run as one psql-style script; 120 new correctness cases, a model test of referential actions with and without an index, a killed-process test, format and fuzz tests. Users can now add constraints `NOT VALID` and validate or rename them later, move MySQL columns with `FIRST`/`AFTER` in `ADD`, `MODIFY` and `CHANGE`, see foreign keys and checks in MySQL's `SHOW CREATE TABLE`, read a SQLite table's `CREATE TABLE` text as written in `sqlite_schema` and the shell's `.schema`, kept across `ADD COLUMN` and `RENAME TO`, with indexes', views' and triggers' text as written (D294), read a sequence as a one-row relation (`SELECT last_value, is_called FROM s`, which `pg_dump` sends) and query the `pg_sequences` view (D106, D114, D152, D273). Built since: deferred constraint checks and identity options (item 35b). Next, in [What is left](#what-is-left-per-milestone): `ADD INDEX` in MySQL's `ALTER TABLE` and MariaDB sequences (M10), SQLite's stored text after `RENAME COLUMN`/`DROP COLUMN` (M5), `pg_sequences.last_value` for identity columns (M6a) |
+| 32 | Users can use sequences (`CREATE SEQUENCE`, `nextval`, `currval`, `setval`, `OWNED BY`) and `ALTER TABLE` (columns, primary key, unique, check and enforced foreign keys, defaults, `NOT NULL`); secondary indexes are done in 19c; check: the manual's foreign-key and check cases | **done** (D114): sequences as catalog objects (`CREATE`/`ALTER`/`DROP SEQUENCE` with `AS`, `START`, `INCREMENT`, `MINVALUE`/`MAXVALUE`, `CACHE`, `CYCLE`, `OWNED BY`, `RESTART`), `nextval`/`currval`/`lastval`/`setval`, `::regclass` and `pg_catalog.` calls in PostgreSQL, `seq.NEXTVAL`/`CURRVAL` in Oracle, non-transactional and durable with the transaction that used them; `CHECK` and `FOREIGN KEY` (`CASCADE`, `SET NULL`, `SET DEFAULT`, `RESTRICT`, `NO ACTION`, self-references, multi-column) enforced in every dialect with its errors, SQLite's after `PRAGMA foreign_keys = ON`; `ALTER TABLE` `ADD`/`DROP`/`RENAME COLUMN`, `RENAME TO`, `SET`/`DROP DEFAULT`, `SET`/`DROP NOT NULL`, `TYPE`, `ADD`/`DROP CONSTRAINT`, `OWNER TO`, MySQL's `MODIFY`/`CHANGE`/`DROP FOREIGN KEY`, Oracle's `ADD (...)`/`MODIFY (...)`, SQLite's limited `ALTER`; `DROP TABLE ... CASCADE`; table definitions in format version 6 only for tables with constraints; the `pg_dump` forms run as one psql-style script; 120 new correctness cases, a model test of referential actions with and without an index, a killed-process test, format and fuzz tests. Users can now add constraints `NOT VALID` and validate or rename them later, move MySQL columns with `FIRST`/`AFTER` in `ADD`, `MODIFY` and `CHANGE`, see foreign keys and checks in MySQL's `SHOW CREATE TABLE`, read a SQLite table's `CREATE TABLE` text as written in `sqlite_schema` and the shell's `.schema`, kept across `ADD COLUMN` and `RENAME TO`, with indexes', views' and triggers' text as written (D294), read a sequence as a one-row relation (`SELECT last_value, is_called FROM s`, which `pg_dump` sends) and query the `pg_sequences` view (D106, D114, D152, D273). Built since: deferred constraint checks and identity options (item 35b), and `ADD INDEX`, `RENAME INDEX` and `DROP INDEX` in MySQL's `ALTER TABLE` (D350). Next, in [What is left](#what-is-left-per-milestone): MariaDB sequences (M10), SQLite's stored text after `RENAME COLUMN`/`DROP COLUMN` (M5), `pg_sequences.last_value` for identity columns (M6a) |
 | 33 | Users can use schemas (`CREATE SCHEMA`, `search_path`), views and `COMMENT ON`; check: a view over a join answers as on PostgreSQL | **done** (D116): `CREATE`/`DROP SCHEMA` (`IF [NOT] EXISTS`, `CASCADE`/`RESTRICT`), `ALTER SCHEMA ... RENAME TO`, schema-qualified names everywhere, `ALTER TABLE ... SET SCHEMA`, `search_path` with `SET`, `RESET`, `SHOW`, `set_config`, `current_schema()` and `current_schemas()`; `CREATE [OR REPLACE] VIEW [(columns)]`, `DROP VIEW`, `ALTER VIEW ... RENAME TO`/`SET SCHEMA`, views over joins, subqueries, set operations and other views, expanded at use with depth, size and cycle limits, `2BP01` for tables, columns and views that views use; `COMMENT ON` tables, views, sequences, columns, indexes, constraints and schemas; the `pg_dump` forms (owners, `GRANT`/`REVOKE`, `ALTER DEFAULT PRIVILEGES`, `CREATE EXTENSION plpgsql`, parenthesized joins in view text) run as one psql-style script; views in MySQL (`ALGORITHM`, `DEFINER`, `SQL SECURITY`, `SHOW CREATE VIEW`, `COMMENT` options), SQLite (`IF NOT EXISTS`, `main.`) and Oracle (`FORCE`, `WITH READ ONLY`, `USER_VIEWS`, `USER_TAB_COMMENTS`, `USER_COL_COMMENTS`); tables in schemas in format version 7, views in version 8; 144 new correctness cases, a seeded test of views against their inline queries with and without indexes, a killed-process test, format and fuzz tests. Built since: MySQL's `CREATE DATABASE` and `USE` of other databases (D270), updatable views and `WITH CHECK OPTION` (item 30b), materialized and temporary views, recursive views (D299), roles and privileges (D183) and `obj_description` (item 37). Next: renaming what a view uses (M5, [What is left](#what-is-left-per-milestone)) |
 | 33b | Users can create and run triggers in SQLite, MySQL, SQL Server and PostgreSQL syntax (row and statement level, `BEFORE`/`AFTER`/`INSTEAD OF`, `UPDATE OF`, `WHEN`, `REFERENCING`); check: each dialect's documented trigger examples, a killed process keeps a trigger's changes with its statement, an SSMS script's trigger restores | **written** (D157): users can now create and run triggers: SQLite's (`NEW`/`OLD`, `WHEN`, `RAISE(IGNORE)`/`RAISE(ABORT, ...)`, `INSTEAD OF` on views), MySQL's (`SET NEW.col`, `BEGIN ... END` with `DECLARE`, `IF`, `WHILE`, `SIGNAL`, `FOLLOWS`/`PRECEDES`, upserts firing `UPDATE` triggers, `SHOW TRIGGERS`), SQL Server's (`AFTER` and `INSTEAD OF` on the batch interpreter with `inserted`/`deleted` and `UPDATE(col)`, `ENABLE`/`DISABLE TRIGGER`, `sys.triggers`), and PostgreSQL's `CREATE TRIGGER ... EXECUTE FUNCTION`, which runs once PL/pgSQL functions arrive (3.14); triggers show in `sqlite_schema`, `pg_trigger`, `pg_get_triggerdef` and `information_schema.triggers`, fire inside their statement's transaction, nest at most 32 deep, and SQL Server restores run them instead of reporting them; users' row triggers now fire for rows that cascading foreign keys and MySQL's `REPLACE` change or remove, each dialect as its own database does, so `eggdb_cdc`, `eggdb_tenancy` and `eggdb_retention` work on tables with cascades (D260); next: a PL/SQL cascade trigger test, transition tables on cascades, statement triggers on self-referencing tables checked against PostgreSQL |
 | 33c | Users can create and call PostgreSQL functions and procedures in `LANGUAGE sql` and PL/pgSQL (`CREATE [OR REPLACE] FUNCTION/PROCEDURE`, `CALL`, `DO`, `RETURNS TABLE`/`SETOF`, `RAISE`, exceptions, cursors, `PERFORM`, `EXECUTE`), PL/pgSQL trigger functions, and `\df` shows them; check: PL/pgSQL manual examples, the `pg_dump` fixture with functions and triggers restores and its triggers run | **written** (D158, batch part 3.14): users can now create PostgreSQL functions and procedures in `LANGUAGE sql` (`AS`, `RETURN`, `BEGIN ATOMIC`) and PL/pgSQL with overloads, `IN`/`OUT`/`INOUT`/`VARIADIC` parameters, defaults, `RETURNS TABLE`/`SETOF`, `STRICT`, volatility and `SET`; drop, rename and move them; call them with `SELECT f(...)`, in any expression, as a `FROM` item (`WITH ORDINALITY`), with `CALL` (`INOUT` results) and named arguments, and run `DO` blocks. PL/pgSQL covers declarations (`%TYPE`, `%ROWTYPE`, `record`, `CONSTANT`, `ALIAS`, cursors), blocks with labels, `IF`, `CASE`, every loop form, `EXIT`/`CONTINUE`, `SELECT INTO [STRICT]`, `PERFORM`, dynamic `EXECUTE ... USING`, `GET DIAGNOSTICS`, `FOUND`, `RETURN NEXT`/`QUERY`, `RAISE` with notices sent to the client, `ASSERT`, exception handlers that undo their block's writes, and cursors; bodies are checked at `CREATE` unless `check_function_bodies` is off; trigger functions run PostgreSQL row and statement triggers (also on `TRUNCATE`) with `NEW`, `OLD` and `TG_*`; routines show in `pg_proc`, `pg_language`, `pg_get_functiondef`, `information_schema.routines`/`parameters` and psql's `\df`; `pg_dump` restores create and run their `sql`/`plpgsql` functions, procedures and triggers; calls nest at most 100 deep and loops can be cancelled (D45). Users can now `COMMIT` and `ROLLBACK` inside procedures and `DO` blocks called outside a transaction block, read the refcursors functions and procedures return with `FETCH` as Npgsql and psycopg do, and use SQL `DECLARE CURSOR [WITH HOLD]`, `FETCH`, `MOVE` and `CLOSE` (D262); users can write functions and procedures with polymorphic parameters and results (`anyelement`, `anyarray`, `anynonarray`, `anyenum`, `anycompatible` and their arrays), resolved on each call, and `AFTER ... FOR EACH STATEMENT` triggers that read `REFERENCING OLD TABLE`/`NEW TABLE` transition tables (D264). A `COMMIT` or `ROLLBACK` inside a procedure now closes the cursors other than `WITH HOLD` and releases transaction-level advisory locks, a procedure with a `SET` clause cannot commit, `refcursor` is a type of its own (OID 1790 on the wire) and `pg_typeof` names any value's type (D280). Users can now use `SET LOCAL` and `set_config(..., true)` (ended at the transaction's end, also at a procedure's `COMMIT`), get a `SET` undone by its transaction's `ROLLBACK` or `ROLLBACK TO SAVEPOINT`, run `SET`, `SET LOCAL`, `RESET` and `set_config` inside routines, have a routine's own `SET` clause (and `SET ... FROM CURRENT`) applied while it runs, `search_path` and `TimeZone` included, and use `refcursor[]` arrays (D301); a `COMMIT` that fails its deferred checks now undoes the transaction's settings with its data, `SET ... TO DEFAULT` takes the connection's value as `RESET` does, and a routine running `SET` in a loop costs linear time (D301, review round 1). Not yet: writes from functions called per row, user-defined `SETOF` functions in a select list, `$0`, transition tables in row-level triggers, `regprocedure`; users can now run `RESET ALL` and `SET eggdb.dialect` inside routines, change a routine's settings with `ALTER FUNCTION ... SET`/`RESET`, and read with `current_setting` what a routine set earlier in the same statement (D318); next: `refcursor` and `refcursor[]` table columns kept as their own types (needs a file format change, D35) |
@@ -194,7 +194,7 @@ everywhere but SQLite, `GROUPING_ID()` and Oracle's `GROUP_ID()`, in one pass ov
 (D298). Next for grouping sets: SQL Server's and Oracle's one-argument limit for `GROUPING`
 and their own error numbers for grouping-set mistakes, grouping sets in a query with window
 functions checked against each manual, `GROUPING` of an outer query's keys inside a subquery
-(`42803` today); MySQL's NULL ordering is built (D321).
+(`42803` today); MySQL's, SQLite's and SQL Server's NULL ordering is built (D321, D340).
 Users can now keep one row per key with PostgreSQL's `DISTINCT ON (...)` in `ORDER BY` order,
 join by every shared column name with `NATURAL [INNER | LEFT | RIGHT | FULL] JOIN` (PostgreSQL,
 MySQL, SQLite, Oracle), name their own escape character with `LIKE ... ESCAPE` in every dialect
@@ -220,8 +220,8 @@ Users can now write Transact-SQL `MERGE` with two `WHEN MATCHED` clauses (one `U
 (with a second `OUTPUT` to the client), in one change with the statement; and create a table from
 a query with `SELECT ... INTO new_table` in Transact-SQL (`#temporary` included) and PostgreSQL
 (`INTO [TEMPORARY] [TABLE]`) (D303). Next for these: `deleted.` in a Transact-SQL `UPDATE`'s
-`OUTPUT`, `CREATE TABLE ... AS`, `SELECT ... INTO` keeping the source columns' `NOT NULL` and
-identity, `DELETE` triggers fired by `MERGE`'s deletes, SQL Server's refusal of an `OUTPUT ...
+`OUTPUT`, `CREATE TABLE ... AS`, `SELECT ... INTO` keeping the source columns' identity (their
+`NOT NULL` is kept, D342), `DELETE` triggers fired by `MERGE`'s deletes, SQL Server's refusal of an `OUTPUT ...
 INTO` target with triggers, checks or foreign keys, PostgreSQL's `MERGE`, describing a prepared
 `OUTPUT ... INTO` that still returns rows, `SELECT ... INTO` deriving a computed column's
 `decimal(p, s)` and a literal's own type as SQL Server does, dropping a procedure's `#temporary`
@@ -333,10 +333,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Check: simulator tests of a timed reap and a cancel on files.
 - kqueue changes folded into the waiting `kevent` call, so a wait costs no change call (D74).
   Check: system calls per wait, measured on macOS and FreeBSD.
-- Keep-alives (`SO_KEEPALIVE` in the platform layer and in the simulated network),
-  acknowledgements that take latency to return, and packet loss, duplication and reordering
-  below the stream level in simulation (D314). Check: a simulator test where keep-alives fail an
-  idle connection across a long cut.
+- Acknowledgements that take latency to return, and packet loss, duplication and reordering
+  below the stream level in simulation (D314). Check: simulator tests of each.
 - Non-blocking connects in the `poll(2)` backend on the BSDs and illumos (D73).
 - OpenBSD and DragonFly on the `poll(2)` backend, with CI runners for them (D73).
 - Solaris: file locks, and sends that never raise `SIGPIPE` (D73, D78).
@@ -374,8 +372,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   keys, `relispartition` and `pg_partition_tree` for partition indexes, attaching a partition's
   primary key to its parent's, MySQL's allowed partition functions and integer-only keys, and
   `42883` for an unknown function in a PostgreSQL key (D316).
-- Identity and `AUTO_INCREMENT` columns in partitioned tables, `SELECT ... FROM t PARTITION (p)`,
-  Oracle's interval partitioning and SQL Server's partition schemes (D169).
+- Oracle's interval partitioning and SQL Server's partition schemes (D169); MySQL's
+  `SUBPARTITION BY`, `LOAD DATA ... PARTITION`, `INSERT IGNORE` skipping rows outside a
+  `PARTITION (...)` set with a warning, and ids for rows written straight into a partition of a
+  table with an identity column (D337).
 - MySQL's and Oracle's partition `ALTER`s (add, drop, split, exchange) (D169).
 - Online upgrades with a tested downgrade path to the previous minor version (D20, D35). Check:
   the upgrade, downgrade and mixed-version file tests in CI.
@@ -403,16 +403,11 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A failing statement inside a MySQL `CALL` keeps the procedure's statements before it (D317).
 - SQL Server rolls back the whole transaction for a batch-aborting error that fails before
   writing, and dooms the transaction for such an error inside `TRY` (D317).
-- SQLite's `UPDATE OR ...` and the conflict clauses of table constraints (D317).
+- SQLite's conflict clauses of table constraints (D317), and `UPDATE OR FAIL | IGNORE | REPLACE`
+  with `FROM` or on a view (D338).
 - A benchmark of a bulk write inside a transaction in MySQL's, SQLite's, Oracle's and SQL
   Server's dialects, measuring statement-level rollback's extra read per key (D317).
 - PostgreSQL's exported snapshots: `pg_export_snapshot()` and `SET TRANSACTION SNAPSHOT` (D318).
-- `SELECT ... FOR UPDATE | SHARE` and `LOCK TABLE` refused with `25006` in a read-only
-  transaction (D318).
-- `SET TRANSACTION READ ONLY` in an implicit transaction, before it writes (D318).
-- A writing volatile function called from a `SELECT` in `BEGIN READ ONLY` answers `25006`, not
-  `0A000` (D318).
-- `default_transaction_read_only` applies to a procedure `CALL` that commits inside it (D318).
 - `ROLLBACK TO SAVEPOINT` undoes key-value writes made through `eggdb serve`'s RESP and wire
   sessions once those share a block with SQL (D319).
 - The savepoint undo log bounded as a whole against the session's memory budget, or spilled to
@@ -425,12 +420,6 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `ATTACH` of in-memory, EggDB and SQLite files, in every dialect that has it (D175, sql.md).
 - SQL tables kept in their own collection, named `sql` (D139: "SQL in collections is later work").
 - Collections in the C API and the language drivers beyond D139 (D292).
-- A dim entry count on each row of `eggdb ui`'s collection picker, as designed in ux/ui.md
-  (D320).
-- `eggdb export`, `import` and `restore` show their progress on the shared progress line
-  (`cli/progress.rs`) (D320).
-- Claude Fable's review of the built CLI and UI text for collection counts, renames and drop
-  progress (D320).
 - SQLite's `speedtest1` and the standard embedded benchmarks on the `embedded` profile (D41).
   Check: the compare job, gated.
 - On-disk overhead per row and per index entry, measured and gated with the other budgets (D6).
@@ -452,8 +441,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   the per-row pass, then `linux sqlite_compare.sql_join` (1.396) lowered in
   `benchmarks/baseline.txt`, with the Linux join's `perf` profiles (item 19e, D7, D100).
 - The 1.0 check of every compare line on Linux and macOS in CI's `compare` job (item 19e, D7).
-- Top-N sorts for `ORDER BY ... LIMIT`, and sorts, joins and groups that spill to disk instead of
-  failing at 1 GiB (D100).
+- Sorts, joins and groups that spill to disk instead of failing at 1 GiB, and a top-N for
+  `WITH TIES`, `PERCENT` and `DISTINCT ON` limits, which still sort every row (D100, D341).
 - A resumable executor that streams rows, so portals, the C API and `COPY TO` send rows as they
   come (D284, D287, D293).
 - Set-returning functions stopped by a `LIMIT` given as a parameter or an expression, joined with
@@ -468,19 +457,16 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   DISTINCT` (D32).
 - GIN, GiST, SP-GiST, BRIN and bitmap index methods, and Oracle's bitmap, function-based and
   reverse-key indexes (D32, sql.md).
-- `regr_*`, `covar_samp`, `covar_pop` and `corr`, Oracle's `STATS_*` functions and its 38-digit
-  results, and `42803` for a hypothetical-set aggregate's direct argument that names an ungrouped
-  column; `stddev`, `variance` and the hypothetical-set aggregates are built (D321).
+- Oracle's `STATS_*`, `CORR_S` and `CORR_K` functions and its 38-digit `NUMBER` results for the
+  statistical aggregates; `stddev`, `variance`, the hypothetical-set aggregates, `regr_*`,
+  `covar_samp`, `covar_pop` and `corr` are built (D321, D340).
 - Grouping sets: SQL Server's and Oracle's one-argument `GROUPING` and their own error numbers
   for grouping-set mistakes, grouping sets beside window functions checked against each manual,
   and `GROUPING` of outer references in a subquery; `ROLLUP`, `CUBE`, `GROUPING SETS` and
   `WITH ROLLUP` are built (D298).
-- SQLite's and SQL Server's NULL ordering: NULLs sort first for `ASC` and last for `DESC` there
-  too; MySQL's is built (D321).
-- MySQL's `ORDER BY` on a nullable indexed column read from the index again: read the index's
-  NULL entries first for `ASC` and last for `DESC`, so `ORDER BY created_at DESC LIMIT 10` stops
-  after ten entries instead of sorting every row; benchmark
-  `sql_mysql.order_by_nullable_index_limit` (D321).
+- An index read in place of the sort when a nullable column whose NULLs must move is not the
+  first `ORDER BY` column after the ones fixed by `=`, or a later `ORDER BY` column may hold
+  NULLs (D341 reads the first such column in two ranges only).
 - `DISTINCT ON` an expression outside the select list of a grouped query or beside a window
   function, `NATURAL` joins with a `LATERAL` item, SQLite's error for a wrong `ESCAPE` computed
   at run time and Oracle's for a wrong `ESCAPE`, and Transact-SQL's `[...]` classes in `LIKE` (D299).
@@ -488,11 +474,12 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   table or a table with row-level security as the target, `EXPLAIN` of them, SQLite's refusal
   of `FROM` tables in `RETURNING`, and `OUTPUT deleted.` of a joined Transact-SQL `UPDATE`
   (D297).
-- PostgreSQL's `CREATE TABLE ... AS EXECUTE` of a prepared statement, and `USING`, `WITH (...)`
-  and `TABLESPACE` in `CREATE TABLE ... AS` (D323).
-- PostgreSQL's `TABLE t` as a query (D323).
-- MySQL's `CREATE TABLE ... LIKE` (D323).
-- SQL Server's `SELECT ... INTO` keeps the source columns' `NOT NULL` (D323).
+- PostgreSQL's `EXECUTE` of the extended protocol's named prepared statements (they and SQL
+  `PREPARE` are kept apart), `USING`, `WITH (...)` and `TABLESPACE` in a plain `CREATE TABLE`, and
+  `EXPLAIN TABLE t` (D342).
+- SQL Server's `SELECT ... INTO` transferring the identity property (needs an identity counter
+  outside the primary key, a file format change) and keeping `NOT NULL` through inner joins and
+  of non-null expressions (D342).
 - A correlated `(a, b) IN (SELECT ...)` looked up by key instead of scanned (D323).
 - A data-modifying `WITH` query that resolves conflicts (sql.md); `CREATE RECURSIVE VIEW` is
   built (D299).
@@ -568,8 +555,6 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - S3 `GetObject` of a large object sent as a stream (D325, D188).
 - Prometheus query results sent as a stream (D325).
 - Large HTTP request bodies handed to the handler as they arrive (D325).
-- `gzip` and `deflate` HTTP request bodies (D325).
-- `400` for an HTTP/1.1 request without a `Host` header (D325).
 - PostgreSQL's function call protocol (D103).
 - PostgreSQL's network address, geometric, bit string, `money`, `xml` and multirange types (D19).
 - `tsvector`, `tsquery` and `jsonpath` as types of their own (D195, D289).
@@ -629,12 +614,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - MySQL and TDS logins for stored roles (D183).
 - `SET ROLE`, object owners, `WITH GRANT OPTION`, and schema, sequence and routine privileges
   (D183).
-- PostgreSQL's `aclexplode`, `acldefault` and `makeaclitem` (D326).
-- `has_type_privilege`, `has_tablespace_privilege`, `has_server_privilege` and
-  `has_parameter_privilege` answered from grants (D326).
-- `information_schema.routine_privileges`, `udt_privileges`, `enabled_roles` and
-  `applicable_roles` (D326).
-- `pg_namespace.nspacl` showing schema grants (D326).
+- Schema, type, parameter (`GRANT SET ON PARAMETER`) and tablespace grants stored, so the
+  inquiry functions and `pg_namespace.nspacl` follow them; `information_schema.role_routine_grants`
+  and `role_udt_grants` (D326, D344).
 - `FORCE ROW LEVEL SECURITY` taking effect once object owners land, and roles with `BYPASSRLS`
   (D326).
 - SQL Server's column `GRANT` and `DENY`, column privileges on sequences, `MERGE` and `ON CONFLICT
@@ -688,10 +670,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `sys.dm_exec_query_stats` (D25, D286).
 - SQLite's `.scanstats on|off` in `eggdb sql`'s shell: after each `SELECT` the shell prints its
   `QUERY PLAN` with `--SCAN t (loops=1 rows=3)` lines (D327).
-- MySQL's `EXPLAIN FORMAT=TREE` shows `(cost=... rows=...)` and the `Aggregate`, `Group` and
-  `Stream results` iterators (D327).
-- MySQL's `EXPLAIN FORMAT=JSON` (D327).
-- MySQL's `EXPLAIN ANALYZE` of `UPDATE`, `DELETE` and `TABLE` (D327).
+- MySQL's `EXPLAIN FORMAT=JSON`: `key_length`, `used_columns`, `data_read_per_join`, subqueries
+  (`attached_subqueries`), conditions in MySQL's `` `db`.`t`.`c` `` spelling, format version 2;
+  `EXPLAIN FORMAT=TREE|JSON` of `INSERT` and `REPLACE`; measured steps under a multi-table
+  write's `Update`/`Delete` iterator (D345).
 - Subqueries in `EXPLAIN` of `UPDATE` and `DELETE`, and of derived tables, `WITH` and set
   operations (D327).
 - Subqueries in Oracle's, SQL Server's, SQLite's and MySQL's tabular plans (D327).
@@ -733,8 +715,6 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - MCP key writes for agents acting as a role, through key-level grants (D328).
 - A per-session key allow-list, so the MCP key-value tools work under `--tables` and
   `--mcp-tables` (D328).
-- Counters, compare-and-set and `expire` as MCP tools (D328).
-- `expires_at` in the MCP `put` tool's result, matching `eggdb put --json` (D328).
 - Backup, restore and administration tools (D11).
 - Tools that query documents, search indexes, vectors, graphs and keys in their own query
   languages (D10, D11).
@@ -846,7 +826,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 ### M7 Caching and Redis
 - Per-element storage for large lists, sets, hashes and sorted sets (D193).
 - Lua scripting (`EVAL`) and Redis Functions on our own Lua interpreter (D27, D193).
-- Stream consumer groups, and blocking commands (`XREAD BLOCK`, `BLPOP` and the rest) (D193).
+- Stream consumer groups (`XGROUP`, `XREADGROUP` with `BLOCK`, `XACK`, `XPENDING`, `XCLAIM`,
+  `XAUTOCLAIM`, `XINFO`) as their own security-critical format part: group state kept with the
+  stream in a new stored value kind 6, with pinned test vectors, truncation and byte-flip tests
+  and `docs/format.md`'s RESP value section (D35, D193, D347).
 - Geo searches over the geohash ranges of the nine neighbouring cells instead of every member,
   and RESP3 double replies for `GEOPOS`/`WITHCOORD` coordinates (D330).
 - Keyspace notifications, the rest of `CLIENT` (`LIST`, `KILL`, ...), `INFO`'s real sections,
@@ -874,12 +857,17 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `wait_for_completion=false` tasks for the by-query APIs (D331).
 - `_rethrottle` and parallel `slices` for the by-query APIs (D331).
 - `_update_by_query` and `_delete_by_query` over several indices or patterns (D331).
-- `_msearch/template` (D331).
-- `upsert` and `detect_noop` on `_update` (D331).
-- `_source` filtering on `_search` and `GET _doc` (D331).
+- `_search/template` and `_msearch/template` with Mustache `{{var}}` and `{{#toJson}}` (D331,
+  D348).
+- `if_seq_no`/`if_primary_term` and `retry_on_conflict` on `_update` (D348).
+- `_source` filtering on `GET _doc` (D331, D348).
 - Painless beyond D331's update subset (conditions, loops, comparisons, more methods, stored
   scripts), `query_string` syntax and highlighting (D196, D331).
-- Scroll and `search_after` (D196).
+- Scroll (`scroll=1m`, `_search/scroll`, `DELETE _search/scroll`) with contexts bounded in count
+  and memory and expired by their keep-alive, and point in time (`pit`) for `search_after`
+  (D196, D348).
+- `_script`, `_geo_distance` and `nested` sorts, and refusing sorts on unmapped fields once
+  mappings apply (D348).
 - Nested and bucket aggregations beyond `terms` (D196).
 - Aliases, index templates and the rest of `_cat` (D196).
 - Kibana and OpenSearch Dashboards working against EggDB (D12, D196). Check: `compatibility` job.
@@ -890,7 +878,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 
 ### M9 Documents and MongoDB
 - Indexes used by queries, unique indexes and collations (D197).
-- Positional and `arrayFilters` updates, and pipeline-style updates (D197).
+- `$$NOW` and `$$CLUSTER_TIME` in `aggregate`, and `$$CLUSTER_TIME` in pipeline-style updates
+  (D349).
 - `$text`, `$expr`, `$jsonSchema`, `$where` and the projection operators (D197).
 - `$facet`, `$bucket`, `$out`, `$merge` and `$lookup` with a pipeline (D197).
 - Change streams and multi-document transactions, with the replica-set handshake (D197).
@@ -913,9 +902,11 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   conversion, `sql_mode`, and `1 / 0` as `NULL` with a warning (D10, sql.md).
 - The rest of MySQL's date and time functions, `STR_TO_DATE` and `ON UPDATE CURRENT_TIMESTAMP`
   (sql.md).
-- MySQL's `YEAR()` and `SQRT()`, missing from MySQL's dialect today (D316's and D322's tests use
-  `EXTRACT(YEAR FROM d)` and avoid square roots until then) (sql.md).
-- Prefix indexes and `ADD INDEX` in `ALTER TABLE` (sql.md).
+- MySQL's `WEEK()` with its modes and `DATE_FORMAT()`; `YEAR()`, `MONTH()`, `DAYOFWEEK()` and
+  the other date-part functions and `SQRT()` are built (D350) (sql.md).
+- Prefix indexes: a key on `name(10)` indexes the whole value until the index definition can
+  record the prefix length (a format change); `ADD INDEX`, `RENAME INDEX` and `DROP INDEX` in
+  `ALTER TABLE` are built (D350) (sql.md).
 - MySQL stored programs: handlers, cursors, named conditions, `RESIGNAL`, `GET DIAGNOSTICS`,
   variables set in bodies, and MySQL's error numbers (D199).
 - `SHOW CREATE PROCEDURE` and `information_schema.ROUTINES` details, and compound bodies in
@@ -937,7 +928,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `SELECT ... INTO` are built (sql.md, D300, D303).
 - `MERGE`: `DELETE` triggers fired by its deletes (by-source deletes too), SQL Server's refusal of
   an `OUTPUT ... INTO` target with triggers, checks or foreign keys, `SELECT ... INTO` keeping the
-  source's `NOT NULL` and identity, describing a prepared `OUTPUT ... INTO` that still returns
+  source's identity (`NOT NULL` is built, D342), describing a prepared `OUTPUT ... INTO` that still returns
   rows, and PostgreSQL's `MERGE`; two `WHEN MATCHED` clauses, `$action`, `TOP` and `OUTPUT ...
   INTO` are built (D303).
 - SQL Server's application locks choosing one victim when two waiters close a cycle (PR #91).
@@ -1072,11 +1063,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 ### M13 Graphs
 - SQL/PGQ and GQL, and graph views over tables (D10, D206).
 - Cypher path predicates pushed into the shortest-path search (D333).
-- Cypher's `shortestPath()` as an expression (D333).
 - GQL quantified paths and `SHORTEST k` (D333).
-- Cypher's `CALL {}` subqueries (D333).
-- Label predicates in Cypher expressions (`WHERE n:Label`) (D333).
-- Cypher's `MERGE` answering its error for a null property (D333).
+- Cypher's `CALL (a, b) { ... }` scope form, `CALL { ... } IN TRANSACTIONS`, and the label-expression
+  operators `&`, `!` and `%` (D351).
 - Indexes on labels and properties, and uniqueness constraints (D206).
 - Bolt: open transactions across messages, `LOGON` (5.1 and later), routing tables and bookmarks
   (D207).
@@ -1165,7 +1154,6 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (D33, D214).
 - AMQP 0-9-1 `tx` transactions (D33, D214).
 - Dead-letter exchanges, message and queue TTL, delayed messages and priorities (D33, D214).
-- Heartbeats sent by the server (D214).
 - Replicated (quorum-style) queues (D33).
 - A benchmark against RabbitMQ (D33, D214).
 - MQTT persistent sessions, and QoS 1 and 2 redelivery to subscribers (D33, D215).
@@ -1178,9 +1166,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - NATS no-responders, token and NKey authentication, clusters and leaf nodes (D216).
 - Benchmarks against ElasticMQ and nats-server (D216).
 - AMQP 1.0: annotations and properties end to end, transactions, dynamic nodes, link resumption,
-  `amqp:modified` and an enforced idle timeout (D217).
+  `amqp:modified`, and the `idle-time-out` enforced and heartbeats sent (D217, D352).
 - JMS clients over AMQP 1.0, and Azure Service Bus-style use after D58's legal check (D33).
-- STOMP heart-beats, `/exchange/` destinations and selectors (D217).
+- STOMP `/exchange/` destinations and selectors (D217).
 - A dead-letter queue for rejected messages, and an in-process inbox for embedded consumers
   (D217).
 - CQL collections, tuples, user-defined types and counters (D19, D218).
@@ -1198,7 +1186,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   virtual-hosted buckets and conditional requests (D219).
 - S3, after D58's legal check: large objects streamed, and listing without loading a bucket's
   descriptions (D219). Check: a benchmark against MinIO.
-- InfluxQL and Flux, gzip bodies, and points with the same series and time deduplicated (D220).
+- InfluxQL and Flux, and points with the same series and time deduplicated (D220).
 - Remote write 2.0, native histograms and exemplars (D220).
 - PromQL's remaining functions and modifiers: the `@` modifier and negative offsets, `limitk`
   and `limit_ratio`, `clamp*`, `predict_linear`, `deriv`, `resets`, `changes`, `absent*`,
@@ -1210,10 +1198,6 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Loki's push API, and Jaeger and Zipkin traces (D39).
 - Syslog over TLS (RFC 5425) and beyond loopback, the sender's address as a column, and rsyslog
   and syslog-ng in CI (D315).
-- A TCP syslog connection that stays silent is closed after an idle limit, so silent connections
-  cannot take every `--max-connections` slot (D315).
-- The syslog collector reports a batch it fails to store (a changed `syslog` table, a revoked
-  privilege) and still stores the batch's other chunks (D315).
 - LogQL and TraceQL, with the Loki and Tempo query HTTP APIs Grafana uses (D39).
 - Telegraf and Prometheus in CI, and benchmarks against InfluxDB and Prometheus (D220).
 - Streaming SQL: event time, watermarks, and tumbling, hopping and session windows (D55).

@@ -24,6 +24,7 @@ mod aggregate;
 mod alter;
 mod arrays;
 mod ast;
+mod bivariate_aggregates;
 mod bulk_load;
 mod bytea;
 mod cancel;
@@ -32,11 +33,13 @@ pub mod cdc;
 mod citext;
 mod column_privileges;
 mod comments;
+mod conflict_resolution;
 mod console;
 mod constraints;
 mod coordination;
 mod copy;
 mod create_table_as;
+mod create_table_like;
 mod datetime;
 mod deferred_checks;
 mod destructive;
@@ -78,6 +81,7 @@ mod merge;
 mod migration;
 mod multitable_insert;
 mod mysql_catalog;
+mod mysql_date_parts;
 mod mysql_errors;
 mod mysql_variables;
 mod name_resolution;
@@ -103,6 +107,7 @@ mod parser;
 mod partition_ddl;
 mod partition_dml;
 mod partition_indexes;
+mod partition_selection;
 mod partitions;
 mod pg_binary;
 mod pg_catalog;
@@ -153,6 +158,7 @@ mod sqlserver_functions;
 mod sqlserver_numbers;
 mod sqlserver_strings;
 mod sqlserver_types;
+mod square_root;
 mod stack_depth;
 mod standards;
 pub mod statement_statistics;
@@ -169,6 +175,7 @@ mod temporary;
 mod tenancy;
 mod text_search;
 mod time_zones;
+mod top_n;
 mod triggers;
 mod tsql;
 mod type_affinity;
@@ -244,6 +251,8 @@ mod output_into_tests;
 #[cfg(test)]
 mod partition_tests;
 #[cfg(test)]
+mod partition_selection_tests;
+#[cfg(test)]
 mod read_only_transaction_tests;
 #[cfg(test)]
 mod regex_tests;
@@ -273,6 +282,8 @@ mod table_ddl_tests;
 mod tests;
 #[cfg(test)]
 mod time_series_tests;
+#[cfg(test)]
+mod top_n_tests;
 #[cfg(test)]
 mod transaction_settings_tests;
 #[cfg(test)]

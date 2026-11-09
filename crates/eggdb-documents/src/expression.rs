@@ -186,7 +186,8 @@ fn string_of(value: &Bson) -> Option<String> {
 
 /// Evaluates an aggregation expression against `root`: field paths (`"$a.b"`), `$$ROOT`,
 /// literals, object and array expressions, and the operators MongoDB documents for
-/// arithmetic, comparison, logic, conditions, strings and arrays. `None` is a missing value.
+/// arithmetic, comparison, logic, conditions, strings, arrays and objects. `None` is a
+/// missing value.
 pub fn evaluate(expression: &Bson, root: &Document) -> DocumentResult<Option<Bson>> {
     evaluate_at(expression, root, 0)
 }
@@ -466,6 +467,50 @@ fn operator(
                 values
             };
             accumulate_values(name, &values)
+        }
+        "$concatArrays" => {
+            let mut out = Vec::new();
+            for value in all(argument)? {
+                match value {
+                    Bson::Array(items) => out.extend(items),
+                    Bson::Null | Bson::Undefined => return Ok(Some(Bson::Null)),
+                    other => {
+                        return Err(DocumentError {
+                            code: 28664,
+                            code_name: "Location28664",
+                            message: format!(
+                                "$concatArrays only supports arrays, not {}",
+                                other.type_name()
+                            ),
+                        });
+                    }
+                }
+            }
+            Bson::Array(out)
+        }
+        "$mergeObjects" => {
+            let mut out = Document::new();
+            for value in all(argument)? {
+                match value {
+                    Bson::Document(inner) => {
+                        for (name, field) in inner.iter() {
+                            out.insert(name.clone(), field.clone());
+                        }
+                    }
+                    Bson::Null | Bson::Undefined => {}
+                    other => {
+                        return Err(DocumentError {
+                            code: 40400,
+                            code_name: "Location40400",
+                            message: format!(
+                                "$mergeObjects requires object inputs, but input is of type {}",
+                                other.type_name()
+                            ),
+                        });
+                    }
+                }
+            }
+            Bson::Document(out)
         }
         other => {
             return Err(DocumentError::bad_value(format!(

@@ -10,7 +10,7 @@ use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const PROTOCOL_HEADER: &[u8; 8] = b"AMQP\x00\x00\x09\x01";
 const ACCEPT_POLL: Duration = Duration::from_millis(100);
@@ -19,6 +19,7 @@ const LEASE_MS: u64 = 30 * 60 * 1000;
 const MAX_CHANNELS: u16 = 2047;
 const MAX_BODY_BYTES: u64 = 16 << 20;
 const MOST_BUFFERED_BYTES: usize = 64 << 20;
+const PROPOSED_HEARTBEAT_SECONDS: u16 = 60;
 
 const NOT_FOUND: u16 = 404;
 const ACCESS_REFUSED: u16 = 403;
@@ -245,6 +246,7 @@ struct Connection<'s, 'b> {
     outgoing: VecDeque<Vec<u8>>,
     bodies_held: Reservation<'b>,
     next_consumer: usize,
+    heartbeat: Option<Duration>,
 }
 
 fn method(out: &Out, channel: u16) -> Vec<u8> {
@@ -598,11 +600,19 @@ impl Connection<'_, '_> {
                     return Ok(false);
                 }
                 let mut out = Out::method(10, 30);
-                out.short(MAX_CHANNELS).long(FRAME_MAX).short(0);
+                out.short(MAX_CHANNELS)
+                    .long(FRAME_MAX)
+                    .short(PROPOSED_HEARTBEAT_SECONDS);
                 self.send(0, out);
                 self.stage = Stage::TuneSent;
             }
-            (Stage::TuneSent, 10, 31) => {}
+            (Stage::TuneSent, 10, 31) => {
+                let _channel_max = args.short()?;
+                let _frame_max = args.long()?;
+                let heartbeat_seconds = args.short()?;
+                self.heartbeat = (heartbeat_seconds > 0)
+                    .then(|| Duration::from_secs(u64::from(heartbeat_seconds)));
+            }
             (Stage::TuneSent, 10, 40) => {
                 let mut out = Out::method(10, 41);
                 out.shortstr("");
@@ -1043,7 +1053,10 @@ pub(crate) fn serve_stream(
         outgoing: VecDeque::new(),
         bodies_held: config.memory_budget.empty_reservation(),
         next_consumer: 0,
+        heartbeat: None,
     };
+    let mut last_received = Instant::now();
+    let mut last_sent = Instant::now();
     let mut read_held = config.memory_budget.empty_reservation();
     let mut outgoing_held = config.memory_budget.empty_reservation();
     let mut buffer = Vec::new();
@@ -1063,6 +1076,7 @@ pub(crate) fn serve_stream(
                     break Ok(());
                 }
                 buffer.extend_from_slice(&chunk[..read]);
+                last_received = Instant::now();
             }
             Err(error)
                 if matches!(
@@ -1107,6 +1121,17 @@ pub(crate) fn serve_stream(
         read_held.hold_if_large(buffer.len());
         if keep_going && matches!(connection.stage, Stage::Open) {
             keep_going = connection.pump(&mut outgoing_held);
+        }
+        if keep_going && let Some(interval) = connection.heartbeat {
+            if last_received.elapsed() >= interval.saturating_mul(2) {
+                break Ok(());
+            }
+            if connection.outgoing.is_empty() && last_sent.elapsed() >= interval / 2 {
+                connection.outgoing.push_back(frame(FRAME_HEARTBEAT, 0, &[]));
+            }
+        }
+        if !connection.outgoing.is_empty() {
+            last_sent = Instant::now();
         }
         while let Some(bytes) = connection.outgoing.pop_front() {
             writer.write_all(&bytes)?;

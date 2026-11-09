@@ -371,6 +371,7 @@ impl Parser<'_> {
                 column_names,
                 position,
             }))),
+            partition_selection: None,
         })
     }
 
@@ -461,6 +462,7 @@ impl Parser<'_> {
                         column_names,
                         position,
                     }))),
+                    partition_selection: None,
                 },
                 joins: Vec::new(),
             }),

@@ -867,3 +867,313 @@ fn messages_and_cursors_past_the_memory_budget_fail_with_exceeded_memory_limit()
     serve_stream(&shared, &mut session(true), kill.as_slice(), &mut output).unwrap();
     assert_eq!(budget.used_bytes(), 0);
 }
+
+fn ints(values: &[i32]) -> Bson {
+    Bson::Array(values.iter().map(|value| Bson::Int32(*value)).collect())
+}
+
+fn update_one(query: Bson, update: Bson, extra: Vec<(&str, Bson)>) -> Bson {
+    let mut statement = vec![("q", query), ("u", update)];
+    statement.extend(extra);
+    sub(statement)
+}
+
+fn first_write_error_code(reply: &Document) -> Option<&Bson> {
+    reply
+        .get_array("writeErrors")
+        .and_then(|errors| errors.first())
+        .and_then(Bson::as_document)
+        .and_then(|error| error.get("code"))
+}
+
+fn grades_by_id(harness: &mut Harness<'_>) -> Vec<Bson> {
+    let found = harness.run(doc(vec![
+        ("find", text("students")),
+        ("sort", sub(vec![("_id", Bson::Int32(1))])),
+    ]));
+    batch(&found, "firstBatch")
+        .iter()
+        .filter_map(|student| student.as_document()?.get("grades").cloned())
+        .collect()
+}
+
+fn insert_students(harness: &mut Harness<'_>) {
+    harness.run(doc(vec![
+        ("insert", text("students")),
+        (
+            "documents",
+            Bson::Array(vec![
+                sub(vec![("_id", Bson::Int32(1)), ("grades", ints(&[85, 80, 80]))]),
+                sub(vec![("_id", Bson::Int32(2)), ("grades", ints(&[88, 90, 92]))]),
+                sub(vec![("_id", Bson::Int32(3)), ("grades", ints(&[85, 100, 90]))]),
+            ]),
+        ),
+    ]));
+}
+
+#[test]
+fn positional_updates_change_the_matched_and_filtered_elements() {
+    with_harness(|harness| {
+        insert_students(harness);
+        let positional = harness.run(doc(vec![
+            ("update", text("students")),
+            (
+                "updates",
+                Bson::Array(vec![update_one(
+                    sub(vec![("_id", Bson::Int32(1)), ("grades", Bson::Int32(80))]),
+                    sub(vec![("$set", sub(vec![("grades.$", Bson::Int32(82))]))]),
+                    Vec::new(),
+                )]),
+            ),
+        ]));
+        assert_eq!(positional.get("nModified"), Some(&Bson::Int32(1)));
+        let every = harness.run(doc(vec![
+            ("update", text("students")),
+            (
+                "updates",
+                Bson::Array(vec![update_one(
+                    sub(vec![]),
+                    sub(vec![("$inc", sub(vec![("grades.$[]", Bson::Int32(10))]))]),
+                    vec![("multi", Bson::Boolean(true))],
+                )]),
+            ),
+        ]));
+        assert_eq!(every.get("nModified"), Some(&Bson::Int32(3)));
+        let filtered = harness.run(doc(vec![
+            ("update", text("students")),
+            (
+                "updates",
+                Bson::Array(vec![update_one(
+                    sub(vec![]),
+                    sub(vec![(
+                        "$set",
+                        sub(vec![("grades.$[element]", Bson::Int32(100))]),
+                    )]),
+                    vec![
+                        ("multi", Bson::Boolean(true)),
+                        (
+                            "arrayFilters",
+                            Bson::Array(vec![sub(vec![(
+                                "element",
+                                sub(vec![("$gte", Bson::Int32(100))]),
+                            )])]),
+                        ),
+                    ],
+                )]),
+            ),
+        ]));
+        assert_eq!(
+            (filtered.get("n"), filtered.get("nModified")),
+            (Some(&Bson::Int32(3)), Some(&Bson::Int32(2)))
+        );
+        assert_eq!(
+            grades_by_id(harness),
+            vec![
+                ints(&[95, 92, 90]),
+                ints(&[98, 100, 100]),
+                ints(&[95, 100, 100])
+            ]
+        );
+    });
+}
+
+#[test]
+fn positional_update_errors_carry_mongodb_codes() {
+    with_harness(|harness| {
+        insert_students(harness);
+        let set = |path: &str| sub(vec![("$set", sub(vec![(path, Bson::Int32(1))]))]);
+        let cases = vec![
+            (
+                update_one(sub(vec![]), set("grades.$[x]"), Vec::new()),
+                2,
+            ),
+            (
+                update_one(sub(vec![("_id", Bson::Int32(1))]), set("grades.$"), Vec::new()),
+                2,
+            ),
+            (
+                update_one(
+                    sub(vec![]),
+                    set("grades.$[x]"),
+                    vec![(
+                        "arrayFilters",
+                        Bson::Array(vec![
+                            sub(vec![("x", Bson::Int32(1))]),
+                            sub(vec![("unused", Bson::Int32(1))]),
+                        ]),
+                    )],
+                ),
+                9,
+            ),
+            (
+                update_one(
+                    sub(vec![]),
+                    Bson::Array(vec![set("a")]),
+                    vec![("arrayFilters", Bson::Array(Vec::new()))],
+                ),
+                72,
+            ),
+            (
+                update_one(sub(vec![]), set("grades.$[].x"), Vec::new()),
+                28,
+            ),
+        ];
+        for (statement, code) in cases {
+            let reply = harness.run(doc(vec![
+                ("update", text("students")),
+                ("updates", Bson::Array(vec![statement.clone()])),
+            ]));
+            assert!(ok(&reply), "{reply:?}");
+            assert_eq!(
+                first_write_error_code(&reply),
+                Some(&Bson::Int32(code)),
+                "{statement:?} gave {reply:?}"
+            );
+        }
+        assert_eq!(
+            grades_by_id(harness),
+            vec![ints(&[85, 80, 80]), ints(&[88, 90, 92]), ints(&[85, 100, 90])]
+        );
+    });
+}
+
+#[test]
+fn find_and_modify_takes_pipelines_and_array_filters() {
+    with_harness(|harness| {
+        insert_students(harness);
+        let totalled = harness.run(doc(vec![
+            ("findAndModify", text("students")),
+            ("query", sub(vec![("_id", Bson::Int32(2))])),
+            (
+                "update",
+                Bson::Array(vec![sub(vec![(
+                    "$set",
+                    sub(vec![("total", sub(vec![("$sum", text("$grades"))]))]),
+                )])]),
+            ),
+            ("new", Bson::Boolean(true)),
+        ]));
+        assert_eq!(
+            totalled
+                .get_document("value")
+                .and_then(|value| value.get("total"))
+                .and_then(Bson::as_i64),
+            Some(270)
+        );
+        let lowered = harness.run(doc(vec![
+            ("findAndModify", text("students")),
+            ("query", sub(vec![("_id", Bson::Int32(3))])),
+            (
+                "update",
+                sub(vec![(
+                    "$set",
+                    sub(vec![("grades.$[high]", Bson::Int32(99))]),
+                )]),
+            ),
+            (
+                "arrayFilters",
+                Bson::Array(vec![sub(vec![(
+                    "high",
+                    sub(vec![("$gte", Bson::Int32(90))]),
+                )])]),
+            ),
+            ("new", Bson::Boolean(true)),
+        ]));
+        assert_eq!(
+            lowered
+                .get_document("value")
+                .and_then(|value| value.get("grades")),
+            Some(&ints(&[85, 99, 99]))
+        );
+        let refused = harness.run(doc(vec![
+            ("findAndModify", text("students")),
+            ("query", sub(vec![("_id", Bson::Int32(3))])),
+            (
+                "update",
+                Bson::Array(vec![sub(vec![("$set", sub(vec![("a", Bson::Int32(1))]))])]),
+            ),
+            ("arrayFilters", Bson::Array(Vec::new())),
+        ]));
+        assert_eq!(
+            (refused.get("code"), refused.get("codeName")),
+            (Some(&Bson::Int32(72)), Some(&text("InvalidOptions")))
+        );
+    });
+}
+
+#[test]
+fn an_update_with_array_filters_runs_over_the_wire() {
+    let keyspace = MemoryKeyspace::default();
+    let store = Store::new(&keyspace, [1; 8]);
+    let config = config();
+    let shared = shared(&store, &config);
+    let mut input = op_msg(
+        1,
+        &doc(vec![("insert", text("students")), ("$db", text("app"))]),
+        0,
+        Some((
+            "documents",
+            &[doc(vec![
+                ("_id", Bson::Int32(1)),
+                (
+                    "grades",
+                    Bson::Array(vec![
+                        sub(vec![
+                            ("type", text("quiz")),
+                            ("questions", ints(&[10, 8, 5])),
+                        ]),
+                        sub(vec![("type", text("hw")), ("questions", ints(&[5, 4, 3]))]),
+                    ]),
+                ),
+            ])],
+        )),
+    );
+    input.extend(op_msg(
+        2,
+        &doc(vec![("update", text("students")), ("$db", text("app"))]),
+        0,
+        Some((
+            "updates",
+            &[doc(vec![
+                ("q", sub(vec![])),
+                (
+                    "u",
+                    sub(vec![(
+                        "$inc",
+                        sub(vec![("grades.$[t].questions.$[score]", Bson::Int32(2))]),
+                    )]),
+                ),
+                (
+                    "arrayFilters",
+                    Bson::Array(vec![
+                        sub(vec![("t.type", text("quiz"))]),
+                        sub(vec![("score", sub(vec![("$gte", Bson::Int32(8))]))]),
+                    ]),
+                ),
+                ("multi", Bson::Boolean(true)),
+            ])],
+        )),
+    ));
+    input.extend(op_msg(
+        3,
+        &doc(vec![("find", text("students")), ("$db", text("app"))]),
+        0,
+        None,
+    ));
+    let mut output = Vec::new();
+    serve_stream(&shared, &mut session(true), input.as_slice(), &mut output).unwrap();
+    let answered = replies(&output);
+    assert_eq!(answered.len(), 3);
+    assert_eq!(answered[1].2.get("nModified"), Some(&Bson::Int32(1)));
+    let student = batch(&answered[2].2, "firstBatch")[0].as_document().unwrap();
+    assert_eq!(
+        student.get("grades"),
+        Some(&Bson::Array(vec![
+            sub(vec![
+                ("type", text("quiz")),
+                ("questions", ints(&[12, 10, 5])),
+            ]),
+            sub(vec![("type", text("hw")), ("questions", ints(&[5, 4, 3]))]),
+        ]))
+    );
+}

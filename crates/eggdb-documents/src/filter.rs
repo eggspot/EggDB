@@ -1,5 +1,5 @@
 use crate::error::{DocumentError, DocumentResult};
-use crate::path::{Reached, reached};
+use crate::path::{Reached, index_of, reached, reached_in};
 use eggdb_bson::{Bson, Document, compare, type_rank};
 use std::cmp::Ordering;
 
@@ -444,6 +444,87 @@ pub fn matches(filter: &Filter, document: &Document) -> bool {
         Filter::Or(any) => any.iter().any(|inner| matches(inner, document)),
         Filter::Nor(none) => !none.iter().any(|inner| matches(inner, document)),
         Filter::Field { path, condition } => condition_holds(condition, &reached(document, path)),
+    }
+}
+
+/// The position of the array element through which `filter` matched `document`, as the
+/// positional `$` update operator uses it, or `None` when no condition matched through an
+/// array. When several conditions match through arrays, the first one gives the position.
+pub fn matched_array_index(filter: &Filter, document: &Document) -> Option<usize> {
+    match filter {
+        Filter::And(all) => all
+            .iter()
+            .find_map(|inner| matched_array_index(inner, document)),
+        Filter::Or(any) => any
+            .iter()
+            .filter(|inner| matches(inner, document))
+            .find_map(|inner| matched_array_index(inner, document)),
+        Filter::Nor(_) => None,
+        Filter::Field { path, condition } => {
+            if !records_position(condition) {
+                return None;
+            }
+            let parts: Vec<&str> = path.split('.').collect();
+            let (first, rest) = parts.split_first()?;
+            matched_index_in(document.get(first)?, rest, condition)
+        }
+    }
+}
+
+fn records_position(condition: &Condition) -> bool {
+    !matches!(
+        condition,
+        Condition::Ne(_)
+            | Condition::Nin(_)
+            | Condition::Not(_)
+            | Condition::Exists(_)
+            | Condition::Size(_)
+    )
+}
+
+fn matched_index_in(value: &Bson, parts: &[&str], condition: &Condition) -> Option<usize> {
+    match value {
+        Bson::Document(inner) => {
+            let (first, rest) = parts.split_first()?;
+            matched_index_in(inner.get(first)?, rest, condition)
+        }
+        Bson::Array(items) => {
+            if let Some((first, rest)) = parts.split_first()
+                && let Some(at) = index_of(first)
+            {
+                return items
+                    .get(at)
+                    .and_then(|item| matched_index_in(item, rest, condition));
+            }
+            items
+                .iter()
+                .position(|item| element_holds(item, parts, condition))
+                .or_else(|| match condition {
+                    Condition::Every(all) => all.first().and_then(|first| {
+                        items
+                            .iter()
+                            .position(|item| element_holds(item, parts, first))
+                    }),
+                    _ => None,
+                })
+        }
+        _ => None,
+    }
+}
+
+fn element_holds(item: &Bson, parts: &[&str], condition: &Condition) -> bool {
+    if !parts.is_empty() {
+        return matches!(item, Bson::Document(_) | Bson::Array(_))
+            && condition_holds(condition, &reached_in(item, parts));
+    }
+    let one = [Reached::Value(item)];
+    match condition {
+        Condition::ElemMatchValue(all) => all.iter().all(|inner| condition_holds(inner, &one)),
+        Condition::ElemMatchDocument(filter) => {
+            matches!(item, Bson::Document(inner) if matches(filter, inner))
+        }
+        Condition::Every(all) => all.iter().all(|inner| element_holds(item, parts, inner)),
+        other => condition_holds(other, &one),
     }
 }
 

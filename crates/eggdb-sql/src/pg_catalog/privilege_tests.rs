@@ -1,3 +1,4 @@
+use super::acl::item_rights;
 use super::privilege_inquiry::privilege_list_parses;
 use crate::Session;
 use crate::error::{SqlResult, SqlState};
@@ -630,6 +631,282 @@ fn random_privilege_lists_never_panic() {
         let of_role = next() % 2 == 0;
         if let Ok(count) = privilege_list_parses(&text, of_role) {
             assert_eq!(count, text.split(',').count(), "{text:?}");
+        }
+    }
+}
+
+#[test]
+fn types_tablespaces_servers_and_parameters_answer_for_a_checked_role() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut joe = as_role(&store, "joe");
+    assert_eq!(
+        shown(
+            &mut joe,
+            "SELECT has_type_privilege('integer', 'USAGE') AS type_usage, \
+             has_type_privilege('integer', 'USAGE WITH GRANT OPTION') AS type_option, \
+             has_tablespace_privilege('pg_default', 'CREATE') AS tablespace, \
+             has_parameter_privilege('work_mem', 'SET') AS parameter, \
+             has_type_privilege('boss', 'integer', 'USAGE WITH GRANT OPTION') AS superuser_option, \
+             has_parameter_privilege('boss', 'work_mem', 'ALTER SYSTEM') AS superuser_parameter"
+        ),
+        "type_usage|type_option|tablespace|parameter|superuser_option|superuser_parameter\n\
+         t|f|f|f|t|t\nSELECT 1"
+    );
+    for (sql, state) in [
+        (
+            "SELECT has_type_privilege('nobody', 'integer', 'USAGE')",
+            SqlState::UNDEFINED_OBJECT,
+        ),
+        (
+            "SELECT has_type_privilege('no_such_type', 'USAGE')",
+            SqlState::UNDEFINED_OBJECT,
+        ),
+        (
+            "SELECT has_type_privilege('integer', 'CREATE')",
+            SqlState::INVALID_PARAMETER_VALUE,
+        ),
+        (
+            "SELECT has_tablespace_privilege('nowhere', 'CREATE')",
+            SqlState::UNDEFINED_OBJECT,
+        ),
+        (
+            "SELECT has_server_privilege('remote', 'USAGE')",
+            SqlState::UNDEFINED_OBJECT,
+        ),
+        (
+            "SELECT has_foreign_data_wrapper_privilege('postgres_fdw', 'USAGE')",
+            SqlState::UNDEFINED_OBJECT,
+        ),
+        (
+            "SELECT has_parameter_privilege('work_mem', 'USAGE')",
+            SqlState::INVALID_PARAMETER_VALUE,
+        ),
+    ] {
+        fails_with(&mut joe, sql, state);
+    }
+    assert_eq!(
+        fails_with(
+            &mut joe,
+            "SELECT has_tablespace_privilege('nowhere', 'CREATE')",
+            SqlState::UNDEFINED_OBJECT
+        ),
+        "tablespace \"nowhere\" does not exist"
+    );
+    assert_eq!(
+        fails_with(
+            &mut joe,
+            "SELECT has_foreign_data_wrapper_privilege('postgres_fdw', 'USAGE')",
+            SqlState::UNDEFINED_OBJECT
+        ),
+        "foreign-data wrapper \"postgres_fdw\" does not exist"
+    );
+}
+
+#[test]
+fn user_defined_types_answer_by_name_and_oid() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    shown(&mut admin, "CREATE TYPE mood AS ENUM ('sad', 'happy')");
+    let mut joe = as_role(&store, "joe");
+    assert_eq!(
+        shown(
+            &mut joe,
+            "SELECT has_type_privilege('mood', 'USAGE') AS by_name, \
+             has_type_privilege(oid, 'USAGE') AS by_oid, \
+             has_type_privilege(4000000000::oid, 'USAGE') AS no_type \
+             FROM pg_catalog.pg_type WHERE typname = 'mood'"
+        ),
+        "by_name|by_oid|no_type\nt|t|NULL\nSELECT 1"
+    );
+}
+
+#[test]
+fn the_role_and_default_privilege_views_show_the_current_users_roles() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    shown(&mut admin, "CREATE TYPE pair AS (a integer, b text)");
+    let mut carol = as_role(&store, "carol");
+    assert_eq!(
+        shown(
+            &mut carol,
+            "SELECT role_name FROM information_schema.enabled_roles ORDER BY role_name"
+        ),
+        "role_name\ncarol\nstaff\nSELECT 2"
+    );
+    assert_eq!(
+        shown(
+            &mut carol,
+            "SELECT grantee, role_name, is_grantable FROM information_schema.applicable_roles"
+        ),
+        "grantee|role_name|is_grantable\ncarol|staff|NO\nSELECT 1"
+    );
+    assert_eq!(
+        shown(
+            &mut carol,
+            "SELECT grantee, routine_name, privilege_type, is_grantable \
+             FROM information_schema.routine_privileges"
+        ),
+        "grantee|routine_name|privilege_type|is_grantable\nPUBLIC|add_one|EXECUTE|NO\nSELECT 1"
+    );
+    assert_eq!(
+        shown(
+            &mut carol,
+            "SELECT grantee, udt_name, privilege_type, is_grantable \
+             FROM information_schema.udt_privileges"
+        ),
+        "grantee|udt_name|privilege_type|is_grantable\nPUBLIC|pair|TYPE USAGE|NO\nSELECT 1"
+    );
+    assert_eq!(
+        shown(
+            &mut admin,
+            "SELECT grantee, role_name FROM information_schema.applicable_roles ORDER BY grantee"
+        ),
+        "grantee|role_name\ncarol|staff\neggdb|pg_database_owner\nSELECT 2"
+    );
+    assert_eq!(
+        shown(
+            &mut admin,
+            "SELECT grantee, is_grantable FROM information_schema.routine_privileges \
+             WHERE routine_name = 'add_one'"
+        ),
+        "grantee|is_grantable\nPUBLIC|NO\neggdb|YES\nSELECT 2"
+    );
+    assert_eq!(
+        shown(
+            &mut admin,
+            "SELECT count(*) FROM information_schema.enabled_roles \
+             WHERE role_name IN ('eggdb', 'joe', 'boss', 'staff', 'pg_monitor')"
+        ),
+        "count\n5\nSELECT 1"
+    );
+}
+
+#[test]
+fn nspacl_writes_what_every_schema_allows() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    assert_eq!(
+        shown(
+            &mut admin,
+            "SELECT nspname, nspacl FROM pg_catalog.pg_namespace \
+             WHERE nspname IN ('myschema', 'public', 'information_schema') ORDER BY nspname"
+        ),
+        "nspname|nspacl\n\
+         information_schema|{eggdb=UC/eggdb,=U/eggdb}\n\
+         myschema|{eggdb=UC/eggdb,=U/eggdb}\n\
+         public|{pg_database_owner=UC/pg_database_owner,=U/pg_database_owner}\nSELECT 3"
+    );
+}
+
+#[test]
+fn aclexplode_lists_relacl_and_acldefault_item_by_item() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    assert_eq!(
+        shown(
+            &mut admin,
+            "SELECT grantee = 0 AS to_public, privilege_type, is_grantable \
+             FROM aclexplode((SELECT relacl FROM pg_catalog.pg_class \
+             WHERE oid = 'myschema.mytable'::regclass)) WHERE grantee <> 10 ORDER BY 1, 2"
+        ),
+        "to_public|privilege_type|is_grantable\n\
+         f|INSERT|f\nf|SELECT|f\nf|UPDATE|f\nt|SELECT|f\nSELECT 4"
+    );
+    assert_eq!(
+        shown(&mut admin, "SELECT aclexplode(acldefault('T', 10))"),
+        "aclexplode\n(10,0,USAGE,f)\n(10,10,USAGE,f)\nSELECT 2"
+    );
+    assert_eq!(
+        shown(
+            &mut admin,
+            "SELECT count(*) FROM aclexplode(NULL::aclitem[])"
+        ),
+        "count\n0\nSELECT 1"
+    );
+    assert_eq!(
+        shown(
+            &mut admin,
+            "SELECT makeaclitem((SELECT oid FROM pg_roles WHERE rolname = 'joe'), 10, \
+             'SELECT, ALTER SYSTEM', true) AS item, acldefault('p', 10) AS parameter, \
+             acldefault('L', 10) AS large_object, makeaclitem(NULL, 10, 'SELECT', false) AS no_role"
+        ),
+        "item|parameter|large_object|no_role\njoe=r*A*/eggdb|{eggdb=sA/eggdb}|{eggdb=rw/eggdb}|NULL\nSELECT 1"
+    );
+    shown(&mut admin, "CREATE ROLE \"Mixed Case\"");
+    assert_eq!(
+        shown(
+            &mut admin,
+            "SELECT '\"Mixed Case\"=r/eggdb'::aclitem AS quoted, \
+             'group staff=r'::aclitem AS keyword, acldefault('r', 4000000000::oid) AS unknown_owner"
+        ),
+        "quoted|keyword|unknown_owner\n\"Mixed Case\"=r/eggdb|staff=r/eggdb|{4000000000=arwdDxt/4000000000}\nSELECT 1"
+    );
+}
+
+#[test]
+fn acl_items_parse_as_postgresql_reads_them() {
+    const SELECT: u16 = 1 << 1;
+    const UPDATE: u16 = 1 << 2;
+    const USAGE: u16 = 1 << 8;
+    for (text, rights) in [
+        ("=r/eggdb", (SELECT, 0)),
+        ("joe=r*w/eggdb", (SELECT | UPDATE, SELECT)),
+        ("  joe=U  ", (USAGE, 0)),
+        ("user joe=w/eggdb", (UPDATE, 0)),
+        ("\"odd \"\"name\"=rw*/\"x y\"", (SELECT | UPDATE, UPDATE)),
+        ("joe=/eggdb", (0, 0)),
+    ] {
+        assert_eq!(item_rights(text).ok(), Some(rights), "{text}");
+    }
+    for (text, state) in [
+        ("joe", SqlState::INVALID_TEXT_REPRESENTATION),
+        ("joe r/eggdb", SqlState::INVALID_TEXT_REPRESENTATION),
+        ("group", SqlState::INVALID_TEXT_REPRESENTATION),
+        ("joe = r/eggdb", SqlState::INVALID_TEXT_REPRESENTATION),
+        ("joe=q/eggdb", SqlState::INVALID_TEXT_REPRESENTATION),
+        ("joe=r/", SqlState::INVALID_TEXT_REPRESENTATION),
+        ("joe=r/eggdb,", SqlState::INVALID_TEXT_REPRESENTATION),
+    ] {
+        assert_eq!(
+            item_rights(text).map_err(|error| error.state()),
+            Err(state),
+            "{text}"
+        );
+    }
+    let longest = format!("{}=r", "a".repeat(63));
+    assert!(item_rights(&longest).is_ok());
+    assert_eq!(
+        item_rights(&format!("{}=r", "a".repeat(64))).map_err(|error| error.state()),
+        Err(SqlState::NAME_TOO_LONG)
+    );
+}
+
+#[test]
+fn random_acl_items_never_panic() {
+    const PIECES: [&str; 18] = [
+        "=", "/", "*", "\"", "\"\"", " ", "r", "a", "Q", "joe", "group", "user", "é", "\u{0}",
+        "\u{10ffff}", ",", "\t", "1664",
+    ];
+    let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for _ in 0..20_000 {
+        let length = (next() % 10) as usize;
+        let mut text = String::new();
+        for _ in 0..length {
+            text.push_str(PIECES[(next() % PIECES.len() as u64) as usize]);
+        }
+        if let Ok((rights, grant_options)) = item_rights(&text) {
+            assert_eq!(grant_options & !rights, 0, "{text:?}");
         }
     }
 }

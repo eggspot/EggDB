@@ -68,6 +68,9 @@ fn store_error(error: Error) -> SqlError {
     if error.kind() == ErrorKind::ReservedKey {
         return SqlError::new(SqlState::INVALID_PARAMETER_VALUE, error.to_string());
     }
+    if error.kind() == ErrorKind::NotAnInteger {
+        return SqlError::new(SqlState::DATA_EXCEPTION, error.to_string());
+    }
     let failure = match error.kind() {
         ErrorKind::Locked | ErrorKind::WriterActive => StoreFailure::Busy,
         ErrorKind::ReadOnly => StoreFailure::ReadOnly,
@@ -219,6 +222,90 @@ fn delete_from_collection(
     collection.delete(key).map(Some).map_err(store_error)
 }
 
+fn increment_in(
+    transaction: &mut WriteTransaction<'_>,
+    collection: Option<&str>,
+    key: &[u8],
+    by: i64,
+) -> SqlResult<Option<i64>> {
+    let Some(name) = collection else {
+        return transaction
+            .increment(key, by)
+            .map(Some)
+            .map_err(store_error);
+    };
+    let Some(mut named) = writable_collection(transaction, name)? else {
+        return Ok(None);
+    };
+    named.increment(key, by).map(Some).map_err(store_error)
+}
+
+fn compare_and_set_in(
+    transaction: &mut WriteTransaction<'_>,
+    collection: Option<&str>,
+    key: &[u8],
+    expected: Option<&[u8]>,
+    new: Option<&[u8]>,
+) -> SqlResult<Option<(bool, Option<Vec<u8>>)>> {
+    let Some(name) = collection else {
+        let found = transaction.get(key).map_err(store_error)?;
+        let swapped = transaction
+            .compare_and_set(key, expected, new)
+            .map_err(store_error)?;
+        return Ok(Some((swapped, found)));
+    };
+    let Some(mut named) = writable_collection(transaction, name)? else {
+        return Ok(None);
+    };
+    let found = named.get(key).map_err(store_error)?;
+    let swapped = named
+        .compare_and_set(key, expected, new)
+        .map_err(store_error)?;
+    Ok(Some((swapped, found)))
+}
+
+fn set_expiry_in(
+    transaction: &mut WriteTransaction<'_>,
+    collection: Option<&str>,
+    key: &[u8],
+    ttl: Duration,
+) -> SqlResult<Option<bool>> {
+    let Some(name) = collection else {
+        return transaction
+            .set_expiry(key, ttl)
+            .map(Some)
+            .map_err(store_error);
+    };
+    let Some(mut named) = writable_collection(transaction, name)? else {
+        return Ok(None);
+    };
+    named.set_expiry(key, ttl).map(Some).map_err(store_error)
+}
+
+fn clear_expiry_in(
+    transaction: &mut WriteTransaction<'_>,
+    collection: Option<&str>,
+    key: &[u8],
+) -> SqlResult<Option<bool>> {
+    let Some(name) = collection else {
+        let present = transaction
+            .get_with(key, |_| ())
+            .map_err(store_error)?
+            .is_some();
+        transaction.clear_expiry(key).map_err(store_error)?;
+        return Ok(Some(present));
+    };
+    let Some(mut named) = writable_collection(transaction, name)? else {
+        return Ok(None);
+    };
+    let present = named
+        .get_with(key, |_| ())
+        .map_err(store_error)?
+        .is_some();
+    named.clear_expiry(key).map_err(store_error)?;
+    Ok(Some(present))
+}
+
 fn writable_collection<'t, 'db>(
     transaction: &'t mut WriteTransaction<'db>,
     name: &str,
@@ -294,6 +381,38 @@ impl KeyValueWrite for SqlWriter<'_> {
 
     fn collection_delete(&mut self, name: &str, key: &[u8]) -> SqlResult<Option<bool>> {
         delete_from_collection(&mut self.0, name, key)
+    }
+
+    fn increment(
+        &mut self,
+        collection: Option<&str>,
+        key: &[u8],
+        by: i64,
+    ) -> SqlResult<Option<i64>> {
+        increment_in(&mut self.0, collection, key, by)
+    }
+
+    fn compare_and_set(
+        &mut self,
+        collection: Option<&str>,
+        key: &[u8],
+        expected: Option<&[u8]>,
+        new: Option<&[u8]>,
+    ) -> SqlResult<Option<(bool, Option<Vec<u8>>)>> {
+        compare_and_set_in(&mut self.0, collection, key, expected, new)
+    }
+
+    fn set_expiry(
+        &mut self,
+        collection: Option<&str>,
+        key: &[u8],
+        ttl: Duration,
+    ) -> SqlResult<Option<bool>> {
+        set_expiry_in(&mut self.0, collection, key, ttl)
+    }
+
+    fn clear_expiry(&mut self, collection: Option<&str>, key: &[u8]) -> SqlResult<Option<bool>> {
+        clear_expiry_in(&mut self.0, collection, key)
     }
 
     fn commit(self) -> SqlResult<()> {
@@ -735,6 +854,38 @@ impl KeyValueWrite for SharedWriter<'_, '_> {
         self.writing(|transaction| delete_from_collection(transaction, name, key))
     }
 
+    fn increment(
+        &mut self,
+        collection: Option<&str>,
+        key: &[u8],
+        by: i64,
+    ) -> SqlResult<Option<i64>> {
+        self.writing(|transaction| increment_in(transaction, collection, key, by))
+    }
+
+    fn compare_and_set(
+        &mut self,
+        collection: Option<&str>,
+        key: &[u8],
+        expected: Option<&[u8]>,
+        new: Option<&[u8]>,
+    ) -> SqlResult<Option<(bool, Option<Vec<u8>>)>> {
+        self.writing(|transaction| compare_and_set_in(transaction, collection, key, expected, new))
+    }
+
+    fn set_expiry(
+        &mut self,
+        collection: Option<&str>,
+        key: &[u8],
+        ttl: Duration,
+    ) -> SqlResult<Option<bool>> {
+        self.writing(|transaction| set_expiry_in(transaction, collection, key, ttl))
+    }
+
+    fn clear_expiry(&mut self, collection: Option<&str>, key: &[u8]) -> SqlResult<Option<bool>> {
+        self.writing(|transaction| clear_expiry_in(transaction, collection, key))
+    }
+
     fn restore(&mut self, key: &[u8], previous: Option<&[u8]>) -> SqlResult<()> {
         self.writing(|transaction| {
             transaction
@@ -907,6 +1058,107 @@ mod tests {
             Some(b"Grace".to_vec())
         );
         assert_eq!(db.collection("sessions").get("s:1")?, None);
+        Ok(())
+    }
+
+    fn counts_swaps_and_expires(
+        writer: &mut impl KeyValueWrite,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(writer.increment(None, b"hits", 5)?, Some(5));
+        assert_eq!(writer.increment(None, b"hits", -7)?, Some(-2));
+        assert_eq!(writer.increment(Some("sessions"), b"n", 1)?, Some(1));
+        assert_eq!(writer.increment(Some("nowhere"), b"n", 1)?, None);
+        let not_a_counter = writer.increment(None, b"name", 1).unwrap_err();
+        assert_eq!(not_a_counter.state(), SqlState::DATA_EXCEPTION);
+        assert_eq!(
+            writer.compare_and_set(None, b"lock", None, Some(b"me".as_slice()))?,
+            Some((true, None))
+        );
+        assert_eq!(
+            writer.compare_and_set(None, b"lock", Some(b"you".as_slice()), None)?,
+            Some((false, Some(b"me".to_vec())))
+        );
+        assert_eq!(
+            writer.compare_and_set(Some("sessions"), b"s:1", Some(b"Ada".as_slice()), None)?,
+            Some((true, Some(b"Ada".to_vec())))
+        );
+        assert_eq!(
+            writer.compare_and_set(Some("nowhere"), b"k", None, None)?,
+            None
+        );
+        assert_eq!(
+            writer.set_expiry(None, b"lock", Duration::from_secs(60))?,
+            Some(true)
+        );
+        assert_eq!(
+            writer.set_expiry(None, b"absent", Duration::from_secs(60))?,
+            Some(false)
+        );
+        assert_eq!(
+            writer.set_expiry(None, b"name", Duration::ZERO)?,
+            Some(true)
+        );
+        assert_eq!(writer.get(b"name")?, None);
+        assert_eq!(
+            writer.set_expiry(Some("sessions"), b"n", Duration::from_secs(60))?,
+            Some(true)
+        );
+        assert_eq!(writer.clear_expiry(Some("sessions"), b"n")?, Some(true));
+        assert_eq!(writer.clear_expiry(None, b"absent")?, Some(false));
+        assert_eq!(writer.clear_expiry(Some("nowhere"), b"k")?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn both_writers_count_swap_and_set_times_to_live_for_the_key_value_tools()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for shared in [false, true] {
+            let db = Database::in_memory()?;
+            db.create_collection("sessions")?;
+            db.collection("sessions").put("s:1", "Ada")?;
+            db.put("name", "Ada")?;
+            if shared {
+                let store = SharedWriteStore::new(&db);
+                let mut writer = store.begin_write()?;
+                counts_swaps_and_expires(&mut writer)?;
+                writer.commit()?;
+            } else {
+                let store = db.sql_store();
+                let mut writer = store.begin_write()?;
+                counts_swaps_and_expires(&mut writer)?;
+                writer.commit()?;
+            }
+            assert_eq!(db.get("hits")?, Some(b"-2".to_vec()));
+            assert!(db.time_to_live("lock")?.is_some());
+            assert_eq!(db.get("name")?, None);
+            let sessions = db.collection("sessions");
+            assert_eq!(sessions.get("s:1")?, None);
+            assert_eq!(sessions.get("n")?, Some(b"1".to_vec()));
+            assert_eq!(sessions.time_to_live("n")?, None);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_key_the_engine_keeps_is_never_counted_swapped_or_expired()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let db = Database::in_memory()?;
+        let store = db.sql_store();
+        let mut writer = store.begin_write()?;
+        let mut kept = crate::collection::COLLECTIONS_PREFIX.to_vec();
+        kept.push(0);
+        let refused = writer.increment(None, &kept, 1).unwrap_err();
+        assert_eq!(refused.state(), SqlState::INVALID_PARAMETER_VALUE);
+        assert!(
+            writer
+                .compare_and_set(None, &kept, None, Some(b"x".as_slice()))
+                .is_err()
+        );
+        assert_eq!(
+            writer.set_expiry(None, &kept, Duration::ZERO)?,
+            Some(false)
+        );
+        writer.rollback()?;
         Ok(())
     }
 

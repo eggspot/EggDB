@@ -650,6 +650,88 @@ and pressing it shows the read-only toast of the Starting section; the empty-sta
 `app.db has no collections. Quit, then add one with eggdb collection add app.db <name>.` (a
 read-only UI holds a shared lock that keeps a writer out, section 2 of cli.md).
 
+### Entry counts in the picker (D320, designed by Claude Fable)
+Each collection's row ends with its entry count, the number the collection keeps up to date on
+every write (D320), so the picker shows it without reading a key:
+
+```
+┌ Collections ───────────────────────────────┐
+│   default key space                        │
+│ > users                                312 │
+│   sessions                           1,204 │
+│   cache                         18,220,113 │
+│   audit-2024                               │
+│   tmp                                    0 │
+│                                            │
+│ Delete one after quitting, with            │
+│ eggdb collection delete app.db <name>      │
+│                                            │
+│  Enter show   a add   e rename   Esc back  │
+└────────────────────────────────────────────┘
+```
+
+- **Placement.** The count is right-aligned to the picker's inner right edge, as a key's size is
+  in the key list. The count column is as wide as the widest count of every row in the list, not
+  only the rows in view, so it does not move while the list scrolls. Two spaces at least separate
+  a name from its count.
+- **The number.** Digits grouped with commas, as `1,204 keys` in the header and every count in
+  the CLI, never shortened (`18,220,113`, not `18.2 M`): it is the same figure `eggdb collection
+  list` prints. No unit word: the column holds one kind of number, and the help screen names it.
+  An empty collection shows `0`. Like every count in EggDB it includes keys whose time to live has
+  run out until the sweep removes them, so it can be above the key list's `of N` for a moment.
+- **Style.** The `dimmed` role (bright black; plain under `NO_COLOR` and in the plain build),
+  the style of the key list's sizes. On the highlighted row the count takes the row's style
+  (inverse), as the size does on a selected key.
+- **Rows without a count** end blank, and their name may use the whole row:
+  - the default key space, which keeps no count (it is not a collection; its count is the key
+    list's `of N` when it is shown);
+  - a collection made by a release before counts were kept and not counted since (`audit-2024`
+    above). The picker never reads a collection's keys to fill the column, so it opens at once
+    on any file. `eggdb collection list` and `eggdb stats --collections` count such a collection
+    once and keep the count, and its row shows it from the next time the picker opens.
+
+  When no row has a count there is no column, and the picker is as it was before D320.
+- **When it is read.** With the names: when the picker opens, and after an add or a rename. An
+  added collection shows `0`; a renamed one keeps its count.
+- **Long names.** A row with a count gives its name `inner − 2 − (count column + 2)` cells and
+  cuts it with `…` (the width table decides cells, so a wide character never straddles the cut).
+  At the reference size that is `42 − 2 − 12 = 28` cells beside `18,220,113`.
+- **Narrow terminals.** The picker is at most `cols − 4` wide, so at the 40-column minimum the
+  rows have 32 cells. Counts stay as long as a name keeps 12 cells; if the widest count would
+  leave less (a count of 16 cells or more at 40 columns, never at 80), the column is left out for
+  every row rather than shown for some.
+  ```
+  ┌ Collections ─────────────────────┐
+  │   default key space              │
+  │ > customer-orde…  98,441,207,113 │
+  │   users                      312 │
+  ```
+- **While adding or renaming** (` Add collection: █`, ` Rename users to: users█`) the rows and
+  their counts stay as they are.
+- **The sidebar** shows no counts: at 20 to 24 columns a name needs the room.
+- **Screen readers and no colour.** The count is text in a fixed place at the end of the row, so
+  the plain build reads `users 312`; nothing depends on the dim style. A row without a count
+  reads as the name alone.
+- **Help screen.** The second Collections line becomes
+  `e renames; the dim number counts keys; Tab: sidebar at 110 columns`
+  (deleting is already explained in the picker's footer).
+
+Scenarios: 42. With `cache` (18,220,113 keys), `sessions` (1,204), `tmp` (0) and `users` (312)
+the picker at 80 × 24 reads as the mock, the counts dim and the highlighted row's inverse.
+43. A file from before D320 opened `--read-only`: the uncounted collection's row ends blank, the
+others show counts, and no key of it is read. 44. At 40 × 10 a 40-character name is cut with `…`
+before its count; a count of 16 cells drops the column for every row. 45. `a` adds `logs` and
+its row shows `0`; `e` renames `users` and the count stays; a `put` into the shown collection
+shows in the count the next time the picker opens.
+
+**Review of the built text (Claude Fable, D320).** Verdict: the built wording for counts,
+renames and the drop's progress matches this design and the CLI's voice, and ships as it is but
+for five points, none of them blocking: the picker's title while renaming or adding must cut the
+old name, never the text being typed; the help's `the CLI deletes` gives way to the line above;
+`eggdb collection list` pads names by display cells, not characters; the drop's progress never
+reads `0 of no entries`; and the shell's refusal inside a block names `rename` too. The exact
+strings are in the review's list in the PR.
+
 ### Editing in a collection
 `e`, `a` and `d` act on the shown space through `WriteTransaction::collection(name)`. The confirm
 modals (`Replace value`, `Add key`, `Delete key`) gain a line `In     collection users` under
@@ -710,7 +792,7 @@ and redraw, so a collection added elsewhere appears on the next `r` or redraw.
 A line pair after `Find`:
 ```
  Collections C  pick the collection shown (default key space first); a adds one
-             e renames, the CLI deletes; Tab reaches the sidebar at 110 columns
+             e renames; the dim number counts keys; Tab: sidebar at 110 columns
 ```
 
 ### Scenarios for the tests

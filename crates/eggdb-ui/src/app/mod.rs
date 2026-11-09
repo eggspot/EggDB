@@ -141,6 +141,7 @@ pub struct Ui<S> {
     quit: bool,
     collection: Option<String>,
     collection_names: Vec<String>,
+    collection_counts: Vec<Option<u64>>,
     picker: Option<Picker>,
     prompt: Option<KeyPrompt>,
 }
@@ -176,6 +177,7 @@ impl<S: Source> Ui<S> {
             quit: false,
             collection: None,
             collection_names: Vec::new(),
+            collection_counts: Vec::new(),
             picker: None,
             prompt: None,
         };
@@ -1853,7 +1855,7 @@ fn help_lines<S: Source>(ui: &Ui<S>) -> Vec<String> {
         lines.extend([
             "Collections C  pick the collection shown (default key space first); a adds one"
                 .to_owned(),
-            "            e renames, the CLI deletes; Tab reaches the sidebar at 110 columns"
+            "            e renames; the dim number counts keys; Tab: sidebar at 110 columns"
                 .to_owned(),
         ]);
     }

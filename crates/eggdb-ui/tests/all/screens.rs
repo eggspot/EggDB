@@ -26,6 +26,7 @@ struct Hooks {
 struct MapSource {
     entries: BTreeMap<Vec<u8>, Vec<u8>>,
     collections: BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>,
+    kept_counts: Option<BTreeMap<String, u64>>,
     shown: Option<String>,
     read_only: bool,
     largest_value: usize,
@@ -274,6 +275,20 @@ impl Source for MapSource {
         Ok(self.collections.keys().cloned().collect())
     }
 
+    fn kept_collection_counts(&self) -> Result<Vec<(String, Option<u64>)>, SourceError> {
+        Ok(self
+            .collections
+            .keys()
+            .map(|name| {
+                let count = self
+                    .kept_counts
+                    .as_ref()
+                    .and_then(|kept| kept.get(name).copied());
+                (name.clone(), count)
+            })
+            .collect())
+    }
+
     fn show_collection(&mut self, name: Option<&str>) -> Result<(), SourceError> {
         if let Some(name) = name
             && !self.collections.contains_key(name)
@@ -295,6 +310,9 @@ impl Source for MapSource {
             ));
         }
         self.collections.insert(name.to_owned(), BTreeMap::new());
+        if let Some(kept) = &mut self.kept_counts {
+            kept.insert(name.to_owned(), 0);
+        }
         Ok("09:14:05Z".to_owned())
     }
 
@@ -312,6 +330,11 @@ impl Source for MapSource {
             ));
         };
         self.collections.insert(new_name.to_owned(), keys);
+        if let Some(kept) = &mut self.kept_counts
+            && let Some(count) = kept.remove(name)
+        {
+            kept.insert(new_name.to_owned(), count);
+        }
         Ok("09:14:06Z".to_owned())
     }
 
@@ -376,6 +399,7 @@ fn fixture() -> MapSource {
     MapSource {
         entries,
         collections: BTreeMap::new(),
+        kept_counts: None,
         shown: None,
         read_only: false,
         largest_value: 1 << 30,
@@ -1799,6 +1823,123 @@ fn with_collections() -> MapSource {
         );
     }
     source
+}
+
+fn with_counted_collections() -> MapSource {
+    let mut source = fixture();
+    for name in ["audit-2024", "cache", "sessions", "tmp", "users"] {
+        source.collections.insert(name.to_owned(), BTreeMap::new());
+    }
+    source.kept_counts = Some(BTreeMap::from([
+        ("cache".to_owned(), 18_220_113),
+        ("sessions".to_owned(), 1_204),
+        ("tmp".to_owned(), 0),
+        ("users".to_owned(), 312),
+    ]));
+    source
+}
+
+fn picker_row(name: &str, count: &str, inner: usize) -> String {
+    let gap = inner - name.chars().count() - count.chars().count();
+    format!("│ {name}{}{count} │", " ".repeat(gap))
+}
+
+fn row_containing(s: &Scenario, text: &str) -> u16 {
+    let found = s.screen().lines().position(|line| line.contains(text));
+    match found.and_then(|row| u16::try_from(row).ok()) {
+        Some(row) => row,
+        None => panic!("no row contains {text}: {}", s.screen()),
+    }
+}
+
+#[test]
+fn scenario_42_43_the_picker_ends_each_counted_row_with_its_dim_count() {
+    let mut s = Scenario::with(80, 24, Capabilities::FULL, with_counted_collections());
+    s.press(&["C"]);
+    let screen = s.screen();
+    for (name, count) in [
+        ("> default key space", ""),
+        ("  audit-2024", ""),
+        ("  cache", "18,220,113"),
+        ("  sessions", "1,204"),
+        ("  tmp", "0"),
+        ("  users", "312"),
+    ] {
+        let row = picker_row(name, count, 42);
+        assert!(screen.contains(&row), "{row}\n{screen}");
+    }
+    let users = row_containing(&s, "│   users ");
+    let count_end = (80 - 46) / 2 + 2 + 42 - 1;
+    let dim = s.terminal.styled(users, count_end);
+    assert_eq!(dim.fg, eggdb_ui::Color::Ansi(8));
+    assert!(!dim.inverse);
+    s.press(&["End"]);
+    let users = row_containing(&s, "│ > users ");
+    assert!(s.terminal.styled(users, count_end).inverse);
+    assert!(s.terminal.styled(users, count_end - 10).inverse);
+}
+
+#[test]
+fn scenario_44_a_long_name_is_cut_before_its_count_and_a_wide_count_drops_the_column() {
+    let long_name = "customer-orders-of-the-year-2024-archive";
+    let mut source = with_counted_collections();
+    source.collections.clear();
+    for name in [long_name, "users"] {
+        source.collections.insert(name.to_owned(), BTreeMap::new());
+    }
+    source.kept_counts = Some(BTreeMap::from([
+        (long_name.to_owned(), 98_441_207_113),
+        ("users".to_owned(), 312),
+    ]));
+    let mut s = Scenario::with(40, 20, Capabilities::FULL, source);
+    s.press(&["C"]);
+    let screen = s.screen();
+    for (name, count) in [
+        ("  customer-orde…", "98,441,207,113"),
+        ("  users", "312"),
+    ] {
+        let row = picker_row(name, count, 32);
+        assert!(screen.contains(&row), "{row}\n{screen}");
+    }
+
+    let mut source = with_counted_collections();
+    source.kept_counts = Some(BTreeMap::from([
+        ("cache".to_owned(), 1_000_000_000_000),
+        ("users".to_owned(), 312),
+    ]));
+    let mut s = Scenario::with(40, 20, Capabilities::FULL, source);
+    s.press(&["C"]);
+    let screen = s.screen();
+    assert!(!screen.contains("1,000,000,000,000"), "{screen}");
+    let row = picker_row("  users", "", 32);
+    assert!(screen.contains(&row), "{row}\n{screen}");
+}
+
+#[test]
+fn scenario_45_an_added_collection_counts_0_and_a_renamed_one_keeps_its_count() {
+    let mut s = Scenario::with(80, 24, Capabilities::FULL, with_counted_collections());
+    s.press(&["C", "a"]);
+    s.type_str("logs");
+    s.press(&["Enter", "C"]);
+    let row = picker_row("> logs", "0", 42);
+    assert!(s.screen().contains(&row), "{row}\n{}", s.screen());
+    s.press(&["End", "e"]);
+    for _ in 0.."users".len() {
+        s.press(&["Backspace"]);
+    }
+    s.type_str("people");
+    s.press(&["Enter"]);
+    let row = picker_row("> people", "312", 42);
+    assert!(s.screen().contains(&row), "{row}\n{}", s.screen());
+    s.press(&["Esc"]);
+    let help = {
+        s.press(&["?"]);
+        s.screen()
+    };
+    assert!(
+        help.contains("e renames; the dim number counts keys; Tab: sidebar at 110 columns"),
+        "{help}"
+    );
 }
 
 #[test]

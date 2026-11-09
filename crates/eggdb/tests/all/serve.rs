@@ -575,6 +575,29 @@ fn max_connection_memory_needs_a_size_of_at_least_one_mebibyte() {
 }
 
 #[test]
+fn tcp_keepalive_needs_whole_seconds_up_to_what_every_system_takes() {
+    let file = TempPath::new("serve-keepalive");
+    let path = file.path().to_str().unwrap();
+    for refused in ["lots", "1.5", "32768"] {
+        let output = eggdb(
+            &["serve", path, "--create", "--tcp-keepalive", refused],
+            Some("secret"),
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{refused}: {}",
+            stderr(&output)
+        );
+        assert!(
+            stderr(&output).contains("--tcp-keepalive needs a whole number of seconds up to 32767"),
+            "{refused}: {}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
 fn max_connection_memory_bounds_what_a_resp_client_may_send_and_others_go_on() {
     let file = TempPath::new("serve-memory-resp");
     let path = file.path().to_str().unwrap().to_owned();

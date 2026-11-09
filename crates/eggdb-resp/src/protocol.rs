@@ -45,6 +45,18 @@ pub enum Reply {
     Push(Vec<Reply>),
     /// Keyed results: a map in RESP3, an array of two-element arrays in RESP2 (as `XREAD`).
     PairArray(Vec<(Reply, Reply)>),
+    /// Two-element entries such as members and their scores: an array of two-element arrays in
+    /// RESP3, one flat array in RESP2 (as `ZPOPMIN` with a count).
+    Pairs(Vec<(Reply, Reply)>),
+}
+
+fn encode_nested_pairs(pairs: &[(Reply, Reply)], out: &mut Vec<u8>, resp3: bool) {
+    out.extend_from_slice(format!("*{}\r\n", pairs.len()).as_bytes());
+    for (key, value) in pairs {
+        out.extend_from_slice(b"*2\r\n");
+        key.encode(out, resp3);
+        value.encode(out, resp3);
+    }
 }
 
 impl Reply {
@@ -102,10 +114,11 @@ impl Reply {
                     Self::bulk(text).encode(out, resp3);
                 }
             }
-            Self::PairArray(pairs) if !resp3 => {
-                out.extend_from_slice(format!("*{}\r\n", pairs.len()).as_bytes());
+            Self::PairArray(pairs) if !resp3 => encode_nested_pairs(pairs, out, resp3),
+            Self::Pairs(pairs) if resp3 => encode_nested_pairs(pairs, out, resp3),
+            Self::Pairs(pairs) => {
+                out.extend_from_slice(format!("*{}\r\n", pairs.len() * 2).as_bytes());
                 for (key, value) in pairs {
-                    out.extend_from_slice(b"*2\r\n");
                     key.encode(out, resp3);
                     value.encode(out, resp3);
                 }

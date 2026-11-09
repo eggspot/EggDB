@@ -2615,6 +2615,42 @@ impl<W: KeyValueWrite> KeyValueWrite for VisibleWrite<W> {
         self.inner.collection_delete(name, key)
     }
 
+    fn increment(
+        &mut self,
+        collection: Option<&str>,
+        key: &[u8],
+        by: i64,
+    ) -> SqlResult<Option<i64>> {
+        self.refuse_key_value_write_when_confined()?;
+        self.inner.increment(collection, key, by)
+    }
+
+    fn compare_and_set(
+        &mut self,
+        collection: Option<&str>,
+        key: &[u8],
+        expected: Option<&[u8]>,
+        new: Option<&[u8]>,
+    ) -> SqlResult<Option<(bool, Option<Vec<u8>>)>> {
+        self.refuse_key_value_write_when_confined()?;
+        self.inner.compare_and_set(collection, key, expected, new)
+    }
+
+    fn set_expiry(
+        &mut self,
+        collection: Option<&str>,
+        key: &[u8],
+        ttl: std::time::Duration,
+    ) -> SqlResult<Option<bool>> {
+        self.refuse_key_value_write_when_confined()?;
+        self.inner.set_expiry(collection, key, ttl)
+    }
+
+    fn clear_expiry(&mut self, collection: Option<&str>, key: &[u8]) -> SqlResult<Option<bool>> {
+        self.refuse_key_value_write_when_confined()?;
+        self.inner.clear_expiry(collection, key)
+    }
+
     fn commit(self) -> SqlResult<()> {
         let Some(confined) = &self.confined else {
             return self.inner.commit();

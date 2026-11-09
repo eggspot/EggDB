@@ -1195,16 +1195,7 @@ impl Evaluator<'_> {
                 [_, Value::Null] | [Value::Null, _],
             ) => Ok(Value::Null),
             ("mysql_extract", [Value::Text(unit), value]) => {
-                let (_, local, _) = match local_instant(value) {
-                    Ok(Some(found)) => found,
-                    Ok(None) => return None,
-                    Err(error) => return Some(Err(error)),
-                };
-                datetime::mysql_extract(unit, local)
-                    .map(Value::BigInt)
-                    .ok_or_else(|| {
-                        SqlError::syntax(format!("syntax error at or near \"{unit}\""), 0)
-                    })
+                crate::mysql_date_parts::extract(unit, value)
             }
             ("extract" | "date_part", [Value::Text(field), value])
                 if infinite_instant(value).is_some() =>
@@ -1599,6 +1590,9 @@ impl Evaluator<'_> {
             return result;
         }
         if let Some(result) = numeric_function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::square_root::function(name, &values) {
             return result;
         }
         if let Some(result) = json_function(name, &values) {

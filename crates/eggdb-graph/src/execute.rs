@@ -1,6 +1,6 @@
 use crate::cypher::{
-    Clause, Direction, Expr, NodePattern, Operator, Pattern, Projecting, Query,
-    RelationshipPattern, SetItem, Shortest,
+    Clause, Direction, Expr, Imports, LabelExpression, NodePattern, Operator, Pattern, Projecting,
+    Query, RelationshipPattern, SetItem, Shortest, Subquery,
 };
 use crate::store::{GraphRead, GraphWrite};
 use crate::value::{Node, Path, Relationship, Value, equals, order};
@@ -133,6 +133,53 @@ fn syntax_error(message: impl Into<String>) -> GraphError {
     GraphError::new("Neo.ClientError.Statement.SyntaxError", message)
 }
 
+fn semantic_error(message: impl Into<String>) -> GraphError {
+    GraphError::new("Neo.ClientError.Statement.SemanticError", message)
+}
+
+fn literal_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => format!("'{text}'"),
+        other => display(other),
+    }
+}
+
+fn pattern_element_text(names: String, properties: &[(String, Value)]) -> String {
+    let mut text = names;
+    if !properties.is_empty() {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        let entries: Vec<String> = properties
+            .iter()
+            .map(|(name, value)| format!("{name}: {}", literal_text(value)))
+            .collect();
+        let _ = write!(text, "{{{}}}", entries.join(", "));
+    }
+    text
+}
+
+fn null_property(properties: &[(String, Value)]) -> Option<&str> {
+    properties
+        .iter()
+        .find(|(_, value)| matches!(value, Value::Null))
+        .map(|(name, _)| name.as_str())
+}
+
+fn imported_row(imports: &Imports, row: &Row) -> GraphResult<Row> {
+    match imports {
+        Imports::Everything => Ok(row.clone()),
+        Imports::Variables(names) => names
+            .iter()
+            .map(|name| {
+                lookup(row, name)
+                    .map(|value| (name.clone(), value.clone()))
+                    .ok_or_else(|| syntax_error(format!("Variable `{name}` not defined")))
+            })
+            .collect(),
+    }
+}
+
 fn walks_back(
     reached: &[Reached],
     end: usize,
@@ -197,7 +244,8 @@ fn is_aggregate(expr: &Expr) -> bool {
         Expr::Not(inner)
         | Expr::Negate(inner)
         | Expr::IsNull(inner, _)
-        | Expr::Property(inner, _) => is_aggregate(inner),
+        | Expr::Property(inner, _)
+        | Expr::LabelPredicate(inner, _) => is_aggregate(inner),
         Expr::List(items) => items.iter().any(is_aggregate),
         _ => false,
     }
@@ -447,6 +495,47 @@ impl<'g> Executor<'g, '_> {
                 }
                 Value::List(out)
             }
+            Expr::LabelPredicate(target, labels) => match self.evaluate(target, row)? {
+                Value::Node(node) => Value::Boolean(labels.matches(&node.labels)),
+                Value::Relationship(relationship) => {
+                    Value::Boolean(labels.matches(std::slice::from_ref(&relationship.kind)))
+                }
+                Value::Null => Value::Null,
+                other => {
+                    return Err(type_error(format!(
+                        "Type mismatch: expected Node or Relationship but was {}",
+                        other.type_name()
+                    )));
+                }
+            },
+            Expr::ShortestPath(pattern) => self.shortest_path_value(pattern, row)?,
+        })
+    }
+
+    fn shortest_path_value(&self, pattern: &Pattern, row: &Row) -> GraphResult<Value> {
+        let (Some(shortest), Some((_, end))) = (pattern.shortest, pattern.steps.first()) else {
+            return Err(syntax_error(
+                "shortestPath(...) requires a pattern containing a single relationship",
+            ));
+        };
+        for node in [&pattern.start, end] {
+            match self.bound_node(node, row)? {
+                Some(Some(_)) => {}
+                Some(None) => return Ok(Value::Null),
+                None => {
+                    return Err(semantic_error(
+                        "shortestPath(...) used as an expression needs both of its end nodes bound to variables",
+                    ));
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        for (_, origin, relationships) in self.shortest_walks(row, pattern, shortest, true)? {
+            paths.push(self.path_value(origin, &relationships)?);
+        }
+        Ok(match shortest {
+            Shortest::One => paths.into_iter().next().unwrap_or(Value::Null),
+            Shortest::All => Value::List(paths),
         })
     }
 
@@ -693,11 +782,7 @@ impl<'g> Executor<'g, '_> {
     }
 
     fn node_matches(&self, node: &Node, pattern: &NodePattern, row: &Row) -> GraphResult<bool> {
-        if !pattern
-            .labels
-            .iter()
-            .all(|label| node.labels.contains(label))
-        {
+        if !pattern.labels.matches(&node.labels) {
             return Ok(false);
         }
         for (name, expected) in &pattern.properties {
@@ -1052,6 +1137,26 @@ impl<'g> Executor<'g, '_> {
         pattern: &Pattern,
         shortest: Shortest,
     ) -> GraphResult<Vec<Row>> {
+        let mut out = Vec::new();
+        for (mut matched, origin, relationships) in
+            self.shortest_walks(row, pattern, shortest, pattern.path.is_some())?
+        {
+            if let Some(name) = &pattern.path {
+                let path = self.path_value(origin, &relationships)?;
+                bind_path(&mut matched, name, path)?;
+            }
+            out.push(matched);
+        }
+        Ok(out)
+    }
+
+    fn shortest_walks(
+        &self,
+        row: &Row,
+        pattern: &Pattern,
+        shortest: Shortest,
+        keep_relationships: bool,
+    ) -> GraphResult<Vec<(Row, u64, Vec<Relationship>)>> {
         let Some((relationship_pattern, end_pattern)) = pattern.steps.first() else {
             return Ok(Vec::new());
         };
@@ -1114,11 +1219,12 @@ impl<'g> Executor<'g, '_> {
                     if let Some(name) = &end_pattern.variable {
                         bind(&mut next_row, name, Value::Node(Box::new(end_node.clone())));
                     }
-                    if let Some(name) = &pattern.path {
-                        let path = self.path_value(start.id, &relationships)?;
-                        bind_path(&mut next_row, name, path)?;
-                    }
-                    out.push(next_row);
+                    let kept = if keep_relationships {
+                        relationships
+                    } else {
+                        Vec::new()
+                    };
+                    out.push((next_row, start.id, kept));
                     if out.len() > MAX_ROWS {
                         return Err(out_of_memory("the query matches too many rows"));
                     }
@@ -1162,10 +1268,13 @@ impl<'g> Executor<'g, '_> {
             }
             return Ok(node.id);
         }
+        let LabelExpression::AllOf(labels) = &pattern.labels else {
+            return Err(syntax_error(
+                "Label expressions with '|' are not allowed in CREATE and MERGE patterns; join the labels of a node with ':'",
+            ));
+        };
         let properties = self.properties(&pattern.properties, row)?;
-        let id = self
-            .writer()?
-            .put_node(None, &pattern.labels, &properties)?;
+        let id = self.writer()?.put_node(None, labels, &properties)?;
         if let Some(name) = &pattern.variable {
             let node = self.read().node(id)?.ok_or_else(|| {
                 GraphError::new(
@@ -1552,13 +1661,27 @@ impl<'g> Executor<'g, '_> {
     }
 
     pub(crate) fn run_query(&mut self, query: &Query) -> GraphResult<QueryResult> {
-        let mut parts = query.parts.iter();
-        let Some(first) = parts.next() else {
+        let parts = query
+            .parts
+            .iter()
+            .map(|clauses| (clauses.as_slice(), Row::new()))
+            .collect();
+        self.run_union(parts, query.union_all)
+    }
+
+    fn run_union(
+        &mut self,
+        parts: Vec<(&[Clause], Row)>,
+        union_all: bool,
+    ) -> GraphResult<QueryResult> {
+        let several = parts.len() > 1;
+        let mut parts = parts.into_iter();
+        let Some((first, start)) = parts.next() else {
             return Ok(QueryResult::default());
         };
-        let mut result = self.run(first)?;
-        for part in parts {
-            let next = self.run(part)?;
+        let mut result = self.run_rows(first, vec![start])?;
+        for (part, start) in parts {
+            let next = self.run_rows(part, vec![start])?;
             if next.columns != result.columns {
                 return Err(syntax_error(
                     "All sub queries in an UNION must have the same return column names",
@@ -1569,7 +1692,7 @@ impl<'g> Executor<'g, '_> {
                 return Err(out_of_memory("the UNION returns too many rows"));
             }
         }
-        if query.parts.len() > 1 && !query.union_all {
+        if several && !union_all {
             let mut seen = HashSet::new();
             result
                 .rows
@@ -1594,6 +1717,7 @@ impl<'g> Executor<'g, '_> {
             } => {
                 let mut next = Vec::new();
                 for row in rows {
+                    self.refuse_null_merge_properties(pattern, &row)?;
                     let found = self.match_pattern(&row, pattern)?;
                     if found.is_empty() {
                         let mut created = row;
@@ -1663,6 +1787,9 @@ impl<'g> Executor<'g, '_> {
                     self.refresh(row)?;
                 }
             }
+            Clause::Subquery(subquery) => {
+                rows = self.run_subquery(subquery, rows)?;
+            }
             Clause::Match { .. }
             | Clause::Unwind(..)
             | Clause::Call { .. }
@@ -1670,6 +1797,85 @@ impl<'g> Executor<'g, '_> {
             | Clause::Return(_) => {}
         }
         Ok(rows)
+    }
+
+    fn refuse_null_merge_properties(&self, pattern: &Pattern, row: &Row) -> GraphResult<()> {
+        for node in pattern.nodes() {
+            if self.bound_node(node, row)?.is_some() {
+                continue;
+            }
+            let properties = self.properties(&node.properties, row)?;
+            if let Some(name) = null_property(&properties) {
+                return Err(semantic_error(format!(
+                    "Cannot merge the following node because of null property value for '{name}': ({})",
+                    pattern_element_text(node.labels.written(), &properties)
+                )));
+            }
+        }
+        for (relationship, _) in &pattern.steps {
+            let properties = self.properties(&relationship.properties, row)?;
+            if let Some(name) = null_property(&properties) {
+                let kinds = if relationship.kinds.is_empty() {
+                    String::new()
+                } else {
+                    format!(":{}", relationship.kinds.join("|"))
+                };
+                let element = pattern_element_text(kinds, &properties);
+                let written = match relationship.direction {
+                    Direction::Outgoing => format!("()-[{element}]->()"),
+                    Direction::Incoming => format!("()<-[{element}]-()"),
+                    Direction::Either => format!("()-[{element}]-()"),
+                };
+                return Err(semantic_error(format!(
+                    "Cannot merge the following relationship because of null property value for '{name}': {written}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn run_subquery(&mut self, subquery: &Subquery, rows: Vec<Row>) -> GraphResult<Vec<Row>> {
+        let returns = subquery.returns();
+        let writes = subquery.writes();
+        let mut next = Vec::new();
+        for mut row in rows {
+            let mut parts = Vec::with_capacity(subquery.parts.len());
+            for part in &subquery.parts {
+                parts.push((
+                    part.clauses.as_slice(),
+                    imported_row(&part.imports, &row)?,
+                ));
+            }
+            let result = self.run_union(parts, subquery.union_all)?;
+            if writes {
+                self.refresh(&mut row)?;
+            }
+            if !returns {
+                next.push(row);
+            } else {
+                if let Some(name) = result
+                    .columns
+                    .iter()
+                    .find(|name| lookup(&row, name).is_some())
+                {
+                    return Err(semantic_error(format!(
+                        "Variable `{name}` already declared in outer scope"
+                    )));
+                }
+                for values in result.rows {
+                    let mut extended = row.clone();
+                    extended.extend(result.columns.iter().cloned().zip(values));
+                    next.push(extended);
+                    if next.len() > MAX_ROWS {
+                        return Err(out_of_memory("CALL { ... } makes too many rows"));
+                    }
+                }
+            }
+            if next.len() > MAX_ROWS {
+                return Err(out_of_memory("CALL { ... } makes too many rows"));
+            }
+        }
+        Ok(next)
     }
 
     fn delete_relationships_of(&mut self, value: Value, nodes: &mut Vec<u64>) -> GraphResult<()> {
@@ -1699,10 +1905,13 @@ impl<'g> Executor<'g, '_> {
         Ok(())
     }
 
-    fn run(&mut self, clauses: &[Clause]) -> GraphResult<QueryResult> {
-        let mut rows: Vec<Row> = vec![Row::new()];
+    fn run_rows(&mut self, clauses: &[Clause], mut rows: Vec<Row>) -> GraphResult<QueryResult> {
         let mut result = QueryResult::default();
         for clause in clauses {
+            if let Clause::Subquery(subquery) = clause {
+                rows = self.run_subquery(subquery, rows)?;
+                continue;
+            }
             if clause.writes() {
                 rows = self.update(clause, rows)?;
                 continue;
@@ -1880,7 +2089,8 @@ impl<'g> Executor<'g, '_> {
                 | Clause::Set(_)
                 | Clause::Remove(_)
                 | Clause::Delete { .. }
-                | Clause::Foreach { .. } => {}
+                | Clause::Foreach { .. }
+                | Clause::Subquery(_) => {}
             }
         }
         Ok(result)

@@ -836,6 +836,12 @@ impl<'a> Resolver<'a> {
         if let Some(Relation::Table(table)) = &relation
             && self.row_security_view(reference, table)?
         {
+            if reference.partition_selection.is_some() {
+                return Err(SqlError::not_supported(
+                    "PARTITION () on a table whose row-level security policies apply",
+                )
+                .at(reference.name.position));
+            }
             return Ok(item);
         }
         if relation.is_some() && self.recorded_at.is_some() {
@@ -843,7 +849,13 @@ impl<'a> Resolver<'a> {
             self.record(&name);
         }
         match relation {
-            Some(Relation::View(view)) => self.expand(reference, view)?,
+            Some(Relation::View(view)) => {
+                if reference.partition_selection.is_some() {
+                    return Err(crate::partition_selection::not_partitioned(&view.name)
+                        .at(reference.name.position));
+                }
+                self.expand(reference, view)?
+            }
             Some(Relation::Table(table)) => self.expand_partitioned(reference, &table, filter)?,
             None => self.sequence_reference(reference)?,
         }
@@ -898,11 +910,17 @@ impl<'a> Resolver<'a> {
         table: &crate::encoding::TableDefinition,
         filter: Option<&Expr>,
     ) -> SqlResult<()> {
+        let selection = reference.partition_selection.take();
+        let position = reference.name.position;
         let catalog = crate::partitions::catalog(self.reader, self.tables)?;
         if catalog.is_empty() || catalog.key_of(&table.name).is_none() {
-            return Ok(());
+            return match selection {
+                Some(_) => {
+                    Err(crate::partition_selection::not_partitioned(&table.name).at(position))
+                }
+                None => Ok(()),
+            };
         }
-        let position = reference.name.position;
         let label = reference
             .alias
             .clone()
@@ -910,6 +928,12 @@ impl<'a> Resolver<'a> {
         let qualifiers = [label.as_str(), base_name(&table.name)];
         let mut leaves = Vec::new();
         self.surviving_leaves(&catalog, table, filter, &qualifiers, 0, &mut leaves)?;
+        if let Some(selection) = &selection {
+            let selected =
+                crate::partition_selection::SelectedPartitions::of(&catalog, table, selection)
+                    .map_err(|error| error.at_if_unplaced(position))?;
+            leaves = selected.narrowed(&catalog, leaves);
+        }
         if leaves.is_empty() {
             return Ok(());
         }
@@ -1345,6 +1369,7 @@ fn select_from(
                     hierarchy: None,
                 })),
                 generated: None,
+                partition_selection: None,
             },
             joins: Vec::new(),
         }),
@@ -1993,6 +2018,7 @@ impl Binding<'_> {
                 filter,
                 returning,
                 from,
+                ..
             } = &mut *update;
             let Some(joined) = from else {
                 return Ok(());

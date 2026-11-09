@@ -95,6 +95,88 @@ pub trait NetStream: Send + Sync + fmt::Debug {
     /// Ends this end's sending: once the peer has received everything sent before, its
     /// receives transfer 0 bytes. Receiving still works.
     fn shutdown_write(&self) -> Result<()>;
+
+    /// Turns TCP keep-alives on with `keep_alive`'s timing, or off with `None`: an end that
+    /// has heard nothing from its peer for the idle time probes it, and fails its next
+    /// operation with [`ErrorKind::TimedOut`] once enough probes in a row go unanswered, so a
+    /// connection whose peer vanished without a word does not wait forever. Fails with
+    /// [`ErrorKind::Unsupported`] where the network has no keep-alives, which is what a network
+    /// that does not implement this method says, and with [`ErrorKind::NotConnected`] after the
+    /// connection was reset or timed out.
+    fn set_keep_alive(&self, keep_alive: Option<TcpKeepAlive>) -> Result<()> {
+        let _ = keep_alive;
+        Err(Error::new(ErrorKind::Unsupported))
+    }
+}
+
+/// When TCP keep-alives probe an idle connection: after [`TcpKeepAlive::idle`] without hearing
+/// from the peer, then every [`TcpKeepAlive::interval`] while no probe is answered, giving up
+/// with [`ErrorKind::TimedOut`] after [`TcpKeepAlive::count`] unanswered probes, so a peer that
+/// vanished is noticed [`TcpKeepAlive::gives_up_after`] the last time it was heard at most.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TcpKeepAlive {
+    idle: Duration,
+    interval: Duration,
+    count: u32,
+}
+
+impl TcpKeepAlive {
+    /// The longest idle time and interval, in seconds: the most Linux takes, and the most this
+    /// type allows everywhere so a setting means the same on every system.
+    pub const MAX_SECONDS: u64 = 32_767;
+
+    /// The most unanswered probes before giving up: the most Linux takes.
+    pub const MAX_COUNT: u32 = 127;
+
+    /// Keep-alives that probe after `idle`, then every `interval`, giving up after `count`
+    /// unanswered probes. Each time is whole seconds from 1 to [`TcpKeepAlive::MAX_SECONDS`],
+    /// and `count` is from 1 to [`TcpKeepAlive::MAX_COUNT`], since operating systems count in
+    /// seconds; anything else is refused with [`ErrorKind::InvalidInput`].
+    pub fn new(idle: Duration, interval: Duration, count: u32) -> Result<Self> {
+        let whole_seconds = |time: Duration| {
+            time.subsec_nanos() == 0 && (1..=Self::MAX_SECONDS).contains(&time.as_secs())
+        };
+        let counted = (1..=Self::MAX_COUNT).contains(&count);
+        if !whole_seconds(idle) || !whole_seconds(interval) || !counted {
+            return Err(Error::new(ErrorKind::InvalidInput));
+        }
+        Ok(Self {
+            idle,
+            interval,
+            count,
+        })
+    }
+
+    /// Keep-alives that probe after `idle`, then every third of it (one second at least),
+    /// giving up after three unanswered probes, as Redis's `tcp-keepalive` does, so a vanished
+    /// peer is noticed within twice `idle`. Refuses an `idle` that [`TcpKeepAlive::new`]
+    /// refuses.
+    pub fn after_idle(idle: Duration) -> Result<Self> {
+        let interval = Duration::from_secs((idle.as_secs() / 3).max(1));
+        Self::new(idle, interval, 3)
+    }
+
+    /// How long a connection stays silent before the first probe.
+    pub fn idle(self) -> Duration {
+        self.idle
+    }
+
+    /// How long between unanswered probes.
+    pub fn interval(self) -> Duration {
+        self.interval
+    }
+
+    /// How many probes in a row go unanswered before the connection fails.
+    pub fn count(self) -> u32 {
+        self.count
+    }
+
+    /// How long after the peer was last heard an end gives up when no probe is answered:
+    /// the idle time and every interval.
+    pub fn gives_up_after(self) -> Duration {
+        let probing = self.interval.saturating_mul(self.count);
+        self.idle.saturating_add(probing)
+    }
 }
 
 /// One asynchronous operation on a network, owning what it uses until it completes.
@@ -390,8 +472,9 @@ pub(crate) fn net_queue_full<L, S>(op: NetOp<L, S>) -> RejectedNetOp<L, S> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Address, NetQueueOptions};
+    use super::{Address, NetQueueOptions, TcpKeepAlive};
     use crate::ErrorKind;
+    use std::time::Duration;
 
     #[test]
     fn options_reject_empty_and_oversized_queues() {
@@ -404,6 +487,42 @@ mod tests {
                 ErrorKind::InvalidInput
             );
         }
+    }
+
+    #[test]
+    fn keep_alive_timing_is_whole_seconds_within_what_every_system_takes() {
+        let second = Duration::from_secs(1);
+        let most = Duration::from_secs(TcpKeepAlive::MAX_SECONDS);
+        assert!(TcpKeepAlive::new(second, second, 1).is_ok());
+        assert!(TcpKeepAlive::new(most, most, TcpKeepAlive::MAX_COUNT).is_ok());
+        for (idle, interval, count) in [
+            (Duration::ZERO, second, 1),
+            (second, Duration::ZERO, 1),
+            (second, second, 0),
+            (most + second, second, 1),
+            (second, most + second, 1),
+            (second, second, TcpKeepAlive::MAX_COUNT + 1),
+            (Duration::from_millis(1500), second, 1),
+        ] {
+            assert_eq!(
+                TcpKeepAlive::new(idle, interval, count)
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::InvalidInput,
+                "{idle:?} {interval:?} {count}"
+            );
+        }
+    }
+
+    #[test]
+    fn keep_alives_after_an_idle_time_probe_three_times_a_third_of_it_apart() {
+        let keep_alive = TcpKeepAlive::after_idle(Duration::from_secs(300)).unwrap();
+        assert_eq!(keep_alive.idle(), Duration::from_secs(300));
+        assert_eq!(keep_alive.interval(), Duration::from_secs(100));
+        assert_eq!(keep_alive.count(), 3);
+        assert_eq!(keep_alive.gives_up_after(), Duration::from_secs(600));
+        let short = TcpKeepAlive::after_idle(Duration::from_secs(2)).unwrap();
+        assert_eq!(short.interval(), Duration::from_secs(1));
     }
 
     #[test]

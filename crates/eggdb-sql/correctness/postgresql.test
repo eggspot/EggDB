@@ -5138,6 +5138,85 @@ SELECT cume_dist(2, 'b') FROM hyp321
 ok
 DROP TABLE hyp321
 
+chapter functions-aggregate, "Aggregate Functions for Statistics": regr_count, regr_slope, regr_intercept, regr_r2, regr_avgx, regr_avgy, regr_sxx, regr_syy, regr_sxy, covar_pop, covar_samp and corr over (Y, X) pairs, skipping pairs with a NULL, NULL for too few rows and for no spread
+ok
+CREATE TABLE regr340 (g int, y double precision, x int)
+
+ok
+INSERT INTO regr340 VALUES (1, 3, 1), (1, 5, 2), (1, 7, 3), (1, 9, 4), (1, NULL, 5), (1, 100, NULL), (2, 4, 2), (3, 1, 2), (3, 5, 2)
+
+rows
+SELECT regr_count(y, x), regr_slope(y, x), regr_intercept(y, x), regr_r2(y, x), corr(y, x) FROM regr340 WHERE g = 1
+----
+regr_count|regr_slope|regr_intercept|regr_r2|corr
+4|2|1|1|1
+SELECT 1
+
+rows
+SELECT regr_avgx(y, x), regr_avgy(y, x), regr_sxx(y, x), regr_syy(y, x), regr_sxy(y, x), covar_pop(y, x), covar_samp(y, x) FROM regr340 WHERE g = 1
+----
+regr_avgx|regr_avgy|regr_sxx|regr_syy|regr_sxy|covar_pop|covar_samp
+2.5|6|5|20|10|2.5|3.3333333333333335
+SELECT 1
+
+rows
+SELECT g, regr_count(y, x), regr_slope(y, x), regr_sxx(y, x), covar_pop(y, x), covar_samp(y, x), corr(y, x) FROM regr340 GROUP BY g ORDER BY g
+----
+g|regr_count|regr_slope|regr_sxx|covar_pop|covar_samp|corr
+1|4|2|5|2.5|3.3333333333333335|1
+2|1|NULL|0|0|NULL|NULL
+3|2|NULL|0|0|0|NULL
+SELECT 3
+
+rows
+SELECT regr_count(y, x), regr_slope(y, x) FROM regr340 WHERE false
+----
+regr_count|regr_slope
+0|NULL
+SELECT 1
+
+rows
+SELECT regr_count(DISTINCT y, x), covar_pop(y, x) FILTER (WHERE g = 1 AND x > 2) FROM regr340
+----
+regr_count|covar_pop
+6|0.5
+SELECT 1
+
+rows
+SELECT x, regr_slope(y, x) OVER (ORDER BY x) AS slope, regr_count(y, x) OVER (ORDER BY x) AS n FROM regr340 WHERE g = 1 AND x < 5 ORDER BY x
+----
+x|slope|n
+1|NULL|1
+2|2|2
+3|2|3
+4|2|4
+SELECT 4
+
+error 42883
+SELECT regr_slope(y) FROM regr340
+
+error 42883
+SELECT corr(y, x::text) FROM regr340
+
+chapter functions-aggregate, "Hypothetical-Set Aggregate Functions": a direct argument may name only grouped columns
+rows
+SELECT g, rank(g) WITHIN GROUP (ORDER BY x) FROM regr340 GROUP BY g ORDER BY g
+----
+g|rank
+1|1
+2|1
+3|3
+SELECT 3
+
+error 42803
+SELECT rank(x) WITHIN GROUP (ORDER BY x) FROM regr340
+
+error 42803
+SELECT g, cume_dist(y) WITHIN GROUP (ORDER BY x) FROM regr340 GROUP BY g
+
+ok
+DROP TABLE regr340
+
 chapter ddl-generated-columns, "Generated Columns": a STORED column is computed on INSERT and on UPDATE of the columns it reads, refuses a written value with 428C9 but takes DEFAULT, and its expression must be immutable and may not read another generated column
 ok
 CREATE TABLE gen322 (height_cm int, height_mm int GENERATED ALWAYS AS (height_cm * 10) STORED)
@@ -5299,6 +5378,194 @@ DROP TABLE priv_accounts
 
 ok
 DROP ROLE priv_joe
+
+chapter functions-info, "Access Privilege Inquiry Functions" and "System Catalog Information Functions": types, tablespaces, servers and parameters answered from what the engine enforces; aclexplode, acldefault and makeaclitem
+ok
+CREATE ROLE acl_staff
+
+ok
+CREATE USER acl_ann LOGIN IN ROLE acl_staff
+
+ok
+CREATE TYPE acl_pair AS (a integer, b text)
+
+ok
+CREATE TABLE acl_items (id integer)
+
+ok
+GRANT SELECT, UPDATE ON acl_items TO acl_ann
+
+ok
+CREATE FUNCTION acl_add(x integer) RETURNS integer LANGUAGE sql AS 'SELECT x + 1'
+
+rows
+SELECT has_type_privilege('acl_ann', 'integer', 'USAGE') AS builtin, has_type_privilege('acl_ann', 'acl_pair', 'usage') AS composite, has_type_privilege('acl_ann', 'int4', 'USAGE WITH GRANT OPTION') AS ann_option, has_type_privilege('int4', 'USAGE WITH GRANT OPTION') AS mine, has_type_privilege(4000000000::oid, 'USAGE') AS no_type
+----
+builtin|composite|ann_option|mine|no_type
+t|t|f|t|NULL
+SELECT 1
+
+rows
+SELECT has_tablespace_privilege('pg_default', 'CREATE') AS mine, has_tablespace_privilege('acl_ann', 'pg_default', 'CREATE') AS ann, has_tablespace_privilege('acl_ann', 1664::oid, 'create') AS ann_global, has_tablespace_privilege(4000000000::oid, 'CREATE') AS no_tablespace
+----
+mine|ann|ann_global|no_tablespace
+t|f|f|NULL
+SELECT 1
+
+rows
+SELECT has_parameter_privilege('work_mem', 'SET') AS mine, has_parameter_privilege('acl_ann', 'work_mem', 'SET') AS ann, has_parameter_privilege('acl_ann', 'shared_buffers', 'ALTER SYSTEM') AS ann_alter, has_parameter_privilege('public', 'work_mem', 'SET, ALTER SYSTEM') AS everyone, has_server_privilege(4000000000::oid, 'USAGE') AS no_server
+----
+mine|ann|ann_alter|everyone|no_server
+t|f|f|f|NULL
+SELECT 1
+
+error 42704
+SELECT has_type_privilege('acl_no_such_type', 'USAGE')
+
+error 42704
+SELECT has_tablespace_privilege('acl_space', 'CREATE')
+
+error 42704
+SELECT has_server_privilege('acl_server', 'USAGE')
+
+error 42704
+SELECT has_foreign_data_wrapper_privilege('acl_wrapper', 'USAGE')
+
+error 42704
+SELECT has_parameter_privilege('acl_nobody', 'work_mem', 'SET')
+
+error 22023
+SELECT has_type_privilege('integer', 'EXECUTE')
+
+error 22023
+SELECT has_parameter_privilege('work_mem', 'USAGE')
+
+rows
+SELECT acldefault('r', 10) AS relation_acl, acldefault('s', 10) AS sequence_acl, acldefault('f', 10) AS function_acl, acldefault('n', 10) AS schema_acl, acldefault('d', 10) AS database_acl, acldefault('c', 10) AS column_acl
+----
+relation_acl|sequence_acl|function_acl|schema_acl|database_acl|column_acl
+{eggdb=arwdDxt/eggdb}|{eggdb=rwU/eggdb}|{=X/eggdb,eggdb=X/eggdb}|{eggdb=UC/eggdb}|{=Tc/eggdb,eggdb=CTc/eggdb}|{}
+SELECT 1
+
+error XX000
+SELECT acldefault('z', 10)
+
+rows
+SELECT makeaclitem(0, 10, 'SELECT, INSERT', false) AS public_item, makeaclitem((SELECT oid FROM pg_roles WHERE rolname = 'acl_ann'), 10, 'update', true) AS ann_item, makeaclitem(10, 10, 'TEMP, connect, RULE', false) AS rule_ignored
+----
+public_item|ann_item|rule_ignored
+=ar/eggdb|acl_ann=w*/eggdb|eggdb=Tc/eggdb
+SELECT 1
+
+error 22023
+SELECT makeaclitem(0, 10, 'FLY', false)
+
+rows
+SELECT * FROM aclexplode(acldefault('f', 10))
+----
+grantor|grantee|privilege_type|is_grantable
+10|0|EXECUTE|f
+10|10|EXECUTE|f
+SELECT 2
+
+rows
+SELECT grantor, grantee = 0 AS to_public, privilege_type, is_grantable FROM aclexplode('{acl_ann=r*w/eggdb,=a/eggdb}')
+----
+grantor|to_public|privilege_type|is_grantable
+10|f|SELECT|t
+10|f|UPDATE|f
+10|t|INSERT|f
+SELECT 3
+
+rows
+SELECT r.rolname, a.privilege_type FROM aclexplode('{acl_ann=r*w/eggdb}') a JOIN pg_roles r ON r.oid = a.grantee ORDER BY a.privilege_type
+----
+rolname|privilege_type
+acl_ann|SELECT
+acl_ann|UPDATE
+SELECT 2
+
+error 42704
+SELECT * FROM aclexplode('{=r/acl_nobody}')
+
+error 22004
+SELECT * FROM aclexplode('{=r/eggdb,NULL}')
+
+rows
+SELECT 'acl_ann=r*w/eggdb'::aclitem AS item, ' =a/eggdb '::aclitem AS public_item
+----
+item|public_item
+acl_ann=r*w/eggdb|=a/eggdb
+SELECT 1
+
+error 42704
+SELECT 'acl_nobody=r/eggdb'::aclitem
+
+error 22P02
+SELECT 'acl_ann=q/eggdb'::aclitem
+
+error 22P02
+SELECT 'acl_ann r/eggdb'::aclitem
+
+error 22P02
+SELECT 'acl_ann=r/eggdb extra'::aclitem
+
+rows
+SELECT nspname, nspacl FROM pg_namespace WHERE nspname IN ('public', 'pg_catalog', 'pg_toast') ORDER BY nspname
+----
+nspname|nspacl
+pg_catalog|{eggdb=UC/eggdb,=U/eggdb}
+pg_toast|NULL
+public|{pg_database_owner=UC/pg_database_owner,=U/pg_database_owner}
+SELECT 3
+
+rows
+SELECT grantor, grantee, routine_name, privilege_type, is_grantable FROM information_schema.routine_privileges WHERE routine_name = 'acl_add'
+----
+grantor|grantee|routine_name|privilege_type|is_grantable
+eggdb|PUBLIC|acl_add|EXECUTE|NO
+eggdb|eggdb|acl_add|EXECUTE|YES
+SELECT 2
+
+rows
+SELECT grantee, udt_name, privilege_type, is_grantable FROM information_schema.udt_privileges WHERE udt_name = 'acl_pair'
+----
+grantee|udt_name|privilege_type|is_grantable
+PUBLIC|acl_pair|TYPE USAGE|NO
+eggdb|acl_pair|TYPE USAGE|YES
+SELECT 2
+
+rows
+SELECT role_name FROM information_schema.enabled_roles WHERE role_name IN ('eggdb', 'acl_ann', 'pg_monitor') ORDER BY role_name
+----
+role_name
+acl_ann
+eggdb
+pg_monitor
+SELECT 3
+
+rows
+SELECT grantee, role_name, is_grantable FROM information_schema.applicable_roles WHERE grantee = 'acl_ann' OR role_name = 'pg_database_owner'
+----
+grantee|role_name|is_grantable
+acl_ann|acl_staff|NO
+eggdb|pg_database_owner|NO
+SELECT 2
+
+ok
+DROP FUNCTION acl_add(integer)
+
+ok
+DROP TABLE acl_items
+
+ok
+DROP TYPE acl_pair
+
+ok
+DROP ROLE acl_ann
+
+ok
+DROP ROLE acl_staff
 
 
 chapter "CREATE TABLE AS" and row constructors: a table made from a query, WITH NO DATA, and row comparisons with SQL's NULL rules
@@ -5563,3 +5830,201 @@ WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) CYCL
 
 ok
 DROP TABLE graph323
+
+
+chapter "Table Partitioning" and "CREATE TABLE" (identity columns): partition after a table name is an alias, and an identity column numbers a partitioned table's rows across its partitions
+ok
+CREATE TABLE ev337 (id bigint GENERATED ALWAYS AS IDENTITY, created_at date NOT NULL, PRIMARY KEY (created_at, id)) PARTITION BY RANGE (created_at)
+
+ok
+CREATE TABLE ev337_2024 PARTITION OF ev337 FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
+
+ok
+CREATE TABLE ev337_2025 PARTITION OF ev337 FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')
+
+ok
+INSERT INTO ev337 (created_at) VALUES ('2025-03-01'), ('2024-03-01')
+
+ok
+INSERT INTO ev337 (created_at) VALUES ('2025-04-01')
+
+rows
+SELECT partition.id, partition.created_at FROM ev337 partition ORDER BY partition.id
+----
+id|created_at
+1|2025-03-01
+2|2024-03-01
+3|2025-04-01
+SELECT 3
+
+error 0A000
+SELECT * FROM ev337 partition (p1)
+
+error 428C9
+INSERT INTO ev337 (id, created_at) VALUES (5, '2024-05-05')
+
+ok
+DROP TABLE ev337
+
+
+chapter sql-createtableas, "CREATE TABLE AS" and sql-select, "TABLE Command": TABLE name is SELECT * FROM name, CREATE TABLE AS EXECUTE runs a prepared SELECT, and USING heap, WITH (...) and TABLESPACE pg_default are taken
+ok
+CREATE TABLE films342 (code char(5) PRIMARY KEY, title varchar(40) NOT NULL, date_prod date, kind varchar(10))
+
+ok
+INSERT INTO films342 VALUES ('UA502', 'Bananas', '1971-07-13', 'Comedy'), ('T_601', 'Yojimbo', '1961-06-16', 'Drama'), ('B6717', 'Tampopo', '2003-11-02', 'Comedy')
+
+rows
+TABLE films342 ORDER BY code LIMIT 1
+----
+code|title|date_prod|kind
+B6717|Tampopo|2003-11-02|Comedy
+SELECT 1
+
+rows
+SELECT count(*) FROM (TABLE films342 UNION ALL TABLE ONLY films342) AS twice
+----
+count
+6
+SELECT 1
+
+rows
+WITH f AS (TABLE films342) SELECT title FROM f WHERE kind = 'Drama'
+----
+title
+Yojimbo
+SELECT 1
+
+ok
+PREPARE recentfilms342(date) AS SELECT * FROM films342 WHERE date_prod > $1
+
+ok
+CREATE TABLE films342_recent USING heap WITH (fillfactor = 70) TABLESPACE pg_default AS EXECUTE recentfilms342('2002-01-01')
+
+rows
+SELECT title FROM films342_recent
+----
+title
+Tampopo
+SELECT 1
+
+error 26000
+CREATE TABLE films342_none AS EXECUTE missing342('2002-01-01')
+
+error 42601
+EXECUTE recentfilms342()
+
+error 42704
+CREATE TABLE films342_x USING columnar AS TABLE films342
+
+error 42704
+CREATE TABLE films342_x TABLESPACE fast AS TABLE films342
+
+error 22023
+CREATE TABLE films342_x WITH (colour = 1) AS TABLE films342
+
+error 22023
+CREATE TABLE films342_x WITH (fillfactor = 200) AS TABLE films342
+
+ok
+DEALLOCATE recentfilms342
+
+ok
+DROP TABLE films342_recent
+
+ok
+DROP TABLE films342
+
+chapter functions-math: sqrt of double precision and of numeric, 2201F for a negative argument
+rows
+SELECT sqrt(2) AS a, sqrt(2::numeric) AS b, sqrt(16) AS c, sqrt(NULL::float8) AS d
+----
+a|b|c|d
+1.4142135623730951|1.414213562373095|4|NULL
+SELECT 1
+
+error 2201F
+SELECT sqrt(-1)
+
+error 2201F
+SELECT sqrt(-1::numeric)
+
+chapter sql-select, "The Locking Clause", and sql-set-transaction: a read-only transaction refuses SELECT FOR UPDATE, FOR NO KEY UPDATE, FOR SHARE and FOR KEY SHARE with 25006 and takes LOCK TABLE; a writing function called from SELECT is 25006; default_transaction_read_only applies to each transaction of a procedure that commits
+ok
+CREATE TABLE ro338 (id integer PRIMARY KEY)
+
+ok
+INSERT INTO ro338 VALUES (1)
+
+ok
+BEGIN READ ONLY
+
+ok
+LOCK TABLE ro338 IN SHARE MODE
+
+error 25006
+SELECT id FROM ro338 FOR UPDATE
+
+error 25P02
+SELECT 1
+
+ok
+ROLLBACK
+
+ok
+BEGIN READ ONLY
+
+error 25006
+SELECT id FROM ro338 FOR KEY SHARE
+
+ok
+ROLLBACK
+
+ok
+CREATE FUNCTION add338() RETURNS integer LANGUAGE plpgsql AS $$ BEGIN INSERT INTO ro338 VALUES (2); RETURN 2; END $$
+
+ok
+BEGIN READ ONLY
+
+error 25006
+SELECT add338()
+
+ok
+ROLLBACK
+
+ok
+CREATE PROCEDURE commit338() LANGUAGE plpgsql AS $$ BEGIN PERFORM count(*) FROM ro338; COMMIT; PERFORM count(*) FROM ro338; END $$
+
+ok
+CREATE PROCEDURE commit_then_add338() LANGUAGE plpgsql AS $$ BEGIN COMMIT; INSERT INTO ro338 VALUES (3); END $$
+
+ok
+SET default_transaction_read_only = on
+
+ok
+CALL commit338()
+
+error 25006
+CALL commit_then_add338()
+
+ok
+SET default_transaction_read_only = off
+
+rows
+SELECT id FROM ro338 ORDER BY id
+----
+id
+1
+SELECT 1
+
+ok
+DROP PROCEDURE commit_then_add338()
+
+ok
+DROP PROCEDURE commit338()
+
+ok
+DROP FUNCTION add338()
+
+ok
+DROP TABLE ro338

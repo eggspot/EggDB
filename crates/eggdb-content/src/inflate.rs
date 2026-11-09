@@ -1,4 +1,6 @@
 use crate::ContentError;
+use crate::zip::crc32;
+use std::fmt;
 
 const LENGTH_BASES: [u16; 29] = [
     3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
@@ -19,6 +21,21 @@ const CODE_LENGTH_ORDER: [usize; 19] = [
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
 ];
 const MAX_BITS: usize = 15;
+const GZIP_DEFLATE: u8 = 8;
+const GZIP_HEADER_CRC: u8 = 0x02;
+const GZIP_EXTRA: u8 = 0x04;
+const GZIP_NAME: u8 = 0x08;
+const GZIP_COMMENT: u8 = 0x10;
+const GZIP_RESERVED_FLAGS: u8 = 0xe0;
+const GZIP_FIXED_HEADER_BYTES: usize = 10;
+const GZIP_TRAILER_BYTES: usize = 8;
+const ZLIB_DEFLATE: u8 = 8;
+const ZLIB_MAX_WINDOW_INFO: u8 = 7;
+const ZLIB_PRESET_DICTIONARY: u8 = 0x20;
+const ZLIB_HEADER_BYTES: usize = 2;
+const ZLIB_TRAILER_BYTES: usize = 4;
+const ADLER_MODULUS: u32 = 65_521;
+const ADLER_BYTES_BEFORE_OVERFLOW: usize = 5_552;
 
 fn corrupt(message: &str) -> ContentError {
     ContentError(format!("the compressed data is corrupt: {message}"))
@@ -168,7 +185,7 @@ fn codes(
     literals: &Huffman,
     distances: &Huffman,
     limit: usize,
-) -> Result<(), ContentError> {
+) -> Result<(), DecompressError> {
     loop {
         let symbol = usize::from(literals.decode(bits)?);
         if symbol < 256 {
@@ -189,7 +206,7 @@ fn codes(
                 .ok_or_else(|| corrupt("a distance code is out of range"))?;
             let distance = usize::from(base) + bits.take(u32::from(extra))? as usize;
             if distance > out.len() {
-                return Err(corrupt("a distance reaches before the start"));
+                return Err(corrupt("a distance reaches before the start").into());
             }
             let start = out.len() - distance;
             for offset in 0..length {
@@ -198,15 +215,47 @@ fn codes(
             }
         }
         if out.len() > limit {
-            return Err(ContentError(format!(
-                "the content expands past {limit} bytes"
-            )));
+            return Err(DecompressError::PastLimit(limit));
         }
     }
 }
 
-/// Decompresses a raw DEFLATE stream (RFC 1951), refusing to produce more than `limit` bytes.
-pub fn inflate(data: &[u8], limit: usize) -> Result<Vec<u8>, ContentError> {
+/// Why compressed data could not be decompressed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecompressError {
+    /// It expands past the limit given, in bytes.
+    PastLimit(usize),
+    /// It is damaged, cut short or not in the format asked for.
+    Corrupt(ContentError),
+}
+
+impl fmt::Display for DecompressError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PastLimit(limit) => write!(formatter, "the content expands past {limit} bytes"),
+            Self::Corrupt(error) => fmt::Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl std::error::Error for DecompressError {}
+
+impl From<ContentError> for DecompressError {
+    fn from(error: ContentError) -> Self {
+        Self::Corrupt(error)
+    }
+}
+
+impl From<DecompressError> for ContentError {
+    fn from(error: DecompressError) -> Self {
+        match error {
+            DecompressError::Corrupt(error) => error,
+            past_limit @ DecompressError::PastLimit(_) => ContentError(past_limit.to_string()),
+        }
+    }
+}
+
+fn inflate_prefix(data: &[u8], limit: usize) -> Result<(Vec<u8>, usize), DecompressError> {
     let mut bits = Bits {
         data,
         at: 0,
@@ -222,23 +271,19 @@ pub fn inflate(data: &[u8], limit: usize) -> Result<Vec<u8>, ContentError> {
                 let header = data
                     .get(bits.at..bits.at + 4)
                     .ok_or_else(|| corrupt("a stored block ends early"))?;
-                let length = usize::from(u16::from_le_bytes([header[0], header[1]]));
-                if u16::from_le_bytes([header[0], header[1]])
-                    != !u16::from_le_bytes([header[2], header[3]])
-                {
-                    return Err(corrupt("a stored block's length check fails"));
+                let length = u16::from_le_bytes([header[0], header[1]]);
+                if length != !u16::from_le_bytes([header[2], header[3]]) {
+                    return Err(corrupt("a stored block's length check fails").into());
                 }
                 bits.at += 4;
                 let stored = data
-                    .get(bits.at..bits.at + length)
+                    .get(bits.at..bits.at + usize::from(length))
                     .ok_or_else(|| corrupt("a stored block ends early"))?;
-                out.extend_from_slice(stored);
-                bits.at += length;
-                if out.len() > limit {
-                    return Err(ContentError(format!(
-                        "the content expands past {limit} bytes"
-                    )));
+                if out.len() + stored.len() > limit {
+                    return Err(DecompressError::PastLimit(limit));
                 }
+                out.extend_from_slice(stored);
+                bits.at += stored.len();
             }
             1 => {
                 let (literals, distances) = fixed_tables()?;
@@ -248,10 +293,172 @@ pub fn inflate(data: &[u8], limit: usize) -> Result<Vec<u8>, ContentError> {
                 let (literals, distances) = dynamic_tables(&mut bits)?;
                 codes(&mut bits, &mut out, &literals, &distances, limit)?;
             }
-            _ => return Err(corrupt("a block has the reserved type 3")),
+            _ => return Err(corrupt("a block has the reserved type 3").into()),
         }
         if last {
+            return Ok((out, bits.at));
+        }
+    }
+}
+
+/// Decompresses a raw DEFLATE stream (RFC 1951), refusing to produce more than `limit` bytes.
+pub fn inflate(data: &[u8], limit: usize) -> Result<Vec<u8>, ContentError> {
+    inflate_prefix(data, limit)
+        .map(|(out, _)| out)
+        .map_err(ContentError::from)
+}
+
+fn u16_le_at(data: &[u8], at: usize) -> Option<usize> {
+    data.get(at..at + 2)
+        .map(|bytes| usize::from(u16::from_le_bytes([bytes[0], bytes[1]])))
+}
+
+fn gzip_header_bytes(member: &[u8]) -> Result<usize, DecompressError> {
+    let ends_early = || corrupt("a gzip header ends early");
+    let &[0x1f, 0x8b, method, flags, ..] = member else {
+        return Err(corrupt("the data is not gzip").into());
+    };
+    if member.len() < GZIP_FIXED_HEADER_BYTES {
+        return Err(ends_early().into());
+    }
+    if method != GZIP_DEFLATE {
+        return Err(corrupt("a gzip member is not compressed with DEFLATE").into());
+    }
+    if flags & GZIP_RESERVED_FLAGS != 0 {
+        return Err(corrupt("a gzip header sets reserved flags").into());
+    }
+    let mut at = GZIP_FIXED_HEADER_BYTES;
+    if flags & GZIP_EXTRA != 0 {
+        at += 2 + u16_le_at(member, at).ok_or_else(ends_early)?;
+    }
+    for field in [GZIP_NAME, GZIP_COMMENT] {
+        if flags & field != 0 {
+            let text = member.get(at..).ok_or_else(ends_early)?;
+            at += 1 + text
+                .iter()
+                .position(|&byte| byte == 0)
+                .ok_or_else(ends_early)?;
+        }
+    }
+    if flags & GZIP_HEADER_CRC != 0 {
+        let stored = u16_le_at(member, at).ok_or_else(ends_early)?;
+        let header = member.get(..at).ok_or_else(ends_early)?;
+        if crc32(header) & 0xffff != stored as u32 {
+            return Err(corrupt("a gzip header's CRC-16 does not match").into());
+        }
+        at += 2;
+    }
+    if at > member.len() {
+        return Err(ends_early().into());
+    }
+    Ok(at)
+}
+
+fn past_limit_of_whole(limit: usize) -> impl Fn(DecompressError) -> DecompressError {
+    move |error| match error {
+        DecompressError::PastLimit(_) => DecompressError::PastLimit(limit),
+        other @ DecompressError::Corrupt(_) => other,
+    }
+}
+
+/// Decompresses gzip data (RFC 1952), every member of it one after another, checking each
+/// member's CRC-32 and length, and refusing to produce more than `limit` bytes in all.
+pub fn gunzip(data: &[u8], limit: usize) -> Result<Vec<u8>, DecompressError> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut at = 0;
+    loop {
+        let member = data.get(at..).unwrap_or_default();
+        let header_bytes = gzip_header_bytes(member)?;
+        let (decoded, consumed) = inflate_prefix(
+            member.get(header_bytes..).unwrap_or_default(),
+            limit.saturating_sub(out.len()),
+        )
+        .map_err(past_limit_of_whole(limit))?;
+        let trailer_at = header_bytes + consumed;
+        let trailer = member
+            .get(trailer_at..trailer_at + GZIP_TRAILER_BYTES)
+            .ok_or_else(|| corrupt("a gzip member ends before its trailer"))?;
+        let stored_crc = u32::from_le_bytes([trailer[0], trailer[1], trailer[2], trailer[3]]);
+        let stored_size = u32::from_le_bytes([trailer[4], trailer[5], trailer[6], trailer[7]]);
+        if crc32(&decoded) != stored_crc {
+            return Err(corrupt("a gzip member's CRC-32 does not match").into());
+        }
+        if decoded.len() as u32 != stored_size {
+            return Err(corrupt("a gzip member's length does not match").into());
+        }
+        if out.is_empty() {
+            out = decoded;
+        } else {
+            out.extend_from_slice(&decoded);
+        }
+        at += trailer_at + GZIP_TRAILER_BYTES;
+        if at >= data.len() {
             return Ok(out);
         }
+    }
+}
+
+pub(crate) fn adler32(bytes: &[u8]) -> u32 {
+    let (mut low, mut high) = (1u32, 0u32);
+    for run in bytes.chunks(ADLER_BYTES_BEFORE_OVERFLOW) {
+        for &byte in run {
+            low += u32::from(byte);
+            high += low;
+        }
+        low %= ADLER_MODULUS;
+        high %= ADLER_MODULUS;
+    }
+    (high << 16) | low
+}
+
+fn has_zlib_header(compression: u8, flags: u8) -> bool {
+    compression & 0x0f == ZLIB_DEFLATE
+        && compression >> 4 <= ZLIB_MAX_WINDOW_INFO
+        && ((u16::from(compression) << 8) | u16::from(flags)) % 31 == 0
+}
+
+fn zlib_stream(data: &[u8], flags: u8, limit: usize) -> Result<Vec<u8>, DecompressError> {
+    if flags & ZLIB_PRESET_DICTIONARY != 0 {
+        return Err(corrupt("a zlib stream needs a preset dictionary").into());
+    }
+    let (out, consumed) = inflate_prefix(data.get(ZLIB_HEADER_BYTES..).unwrap_or_default(), limit)?;
+    let trailer_at = ZLIB_HEADER_BYTES + consumed;
+    let trailer = data
+        .get(trailer_at..trailer_at + ZLIB_TRAILER_BYTES)
+        .ok_or_else(|| corrupt("a zlib stream ends before its Adler-32"))?;
+    if adler32(&out) != u32::from_be_bytes([trailer[0], trailer[1], trailer[2], trailer[3]]) {
+        return Err(corrupt("a zlib stream's Adler-32 does not match").into());
+    }
+    if trailer_at + ZLIB_TRAILER_BYTES != data.len() {
+        return Err(corrupt("bytes follow the zlib stream").into());
+    }
+    Ok(out)
+}
+
+fn whole_raw_deflate(data: &[u8], limit: usize) -> Result<Vec<u8>, DecompressError> {
+    let (out, consumed) = inflate_prefix(data, limit)?;
+    if consumed != data.len() {
+        return Err(corrupt("bytes follow the DEFLATE stream").into());
+    }
+    Ok(out)
+}
+
+/// Decompresses the HTTP `deflate` coding: a zlib stream (RFC 1950) with its Adler-32
+/// checked, or, as browsers also accept, a raw DEFLATE stream (RFC 1951) without the zlib
+/// wrapper; refuses to produce more than `limit` bytes.
+pub fn zlib_inflate(data: &[u8], limit: usize) -> Result<Vec<u8>, DecompressError> {
+    let &[compression, flags, ..] = data else {
+        return whole_raw_deflate(data, limit);
+    };
+    if !has_zlib_header(compression, flags) {
+        return whole_raw_deflate(data, limit);
+    }
+    match zlib_stream(data, flags, limit) {
+        Err(DecompressError::Corrupt(zlib_error)) => match whole_raw_deflate(data, limit) {
+            Ok(out) => Ok(out),
+            Err(past_limit @ DecompressError::PastLimit(_)) => Err(past_limit),
+            Err(DecompressError::Corrupt(_)) => Err(DecompressError::Corrupt(zlib_error)),
+        },
+        decoded => decoded,
     }
 }

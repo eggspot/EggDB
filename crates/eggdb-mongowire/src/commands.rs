@@ -4,7 +4,7 @@ use eggdb_auth::scram::{ScramExchange, ScramFailure, ScramVerifier};
 use eggdb_bson::{Bson, Document, compare};
 use eggdb_documents::{
     DocumentError, Filter, Modification, Projection, SortSpec, Store, UpdateOptions, parse_filter,
-    parse_projection, parse_sort, parse_update,
+    parse_projection, parse_sort, parse_update_statement,
 };
 use std::cmp::Ordering;
 use std::collections::VecDeque;
@@ -778,11 +778,8 @@ fn update_statement(
 ) -> Result<eggdb_documents::UpdateOutcome, DocumentError> {
     let filter = filter_of(statement, "q")?;
     let update = match statement.get("u") {
-        Some(Bson::Document(update)) => parse_update(update)?,
-        Some(Bson::Array(_)) => {
-            return Err(DocumentError::not_implemented(
-                "pipeline-style updates are not supported yet",
-            ));
+        Some(update @ (Bson::Document(_) | Bson::Array(_))) => {
+            parse_update_statement(update, statement.get("arrayFilters"))?
         }
         _ => {
             return Err(DocumentError::failed_to_parse(
@@ -790,11 +787,6 @@ fn update_statement(
             ));
         }
     };
-    if statement.contains_key("arrayFilters") {
-        return Err(DocumentError::not_implemented(
-            "arrayFilters are not supported yet",
-        ));
-    }
     let options = UpdateOptions {
         multi: statement.get_bool("multi") == Some(true),
         upsert: statement.get_bool("upsert") == Some(true),
@@ -897,16 +889,11 @@ fn find_and_modify(
     let remove = body.get_bool("remove") == Some(true);
     let modification = match (remove, body.get("update")) {
         (true, None) => Modification::Remove,
-        (false, Some(Bson::Document(update))) => Modification::Update {
-            update: parse_update(update)?,
+        (false, Some(update @ (Bson::Document(_) | Bson::Array(_)))) => Modification::Update {
+            update: parse_update_statement(update, body.get("arrayFilters"))?,
             upsert: body.get_bool("upsert") == Some(true),
             new: body.get_bool("new") == Some(true),
         },
-        (false, Some(Bson::Array(_))) => {
-            return Err(DocumentError::not_implemented(
-                "pipeline-style updates are not supported yet",
-            ));
-        }
         (true, Some(_)) => {
             return Err(DocumentError::failed_to_parse(
                 "Cannot specify both an update and remove=true",

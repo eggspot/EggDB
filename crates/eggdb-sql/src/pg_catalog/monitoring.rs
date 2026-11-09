@@ -921,6 +921,9 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         | "has_column_privilege"
         | "has_tablespace_privilege"
         | "has_type_privilege"
+        | "has_foreign_data_wrapper_privilege"
+        | "has_server_privilege"
+        | "has_parameter_privilege"
         | "has_any_column_privilege"
         | "pg_has_role"
         | "pg_is_in_recovery"
@@ -1063,7 +1066,7 @@ mod tests {
     }
 
     #[test]
-    fn tablespace_privileges_are_granted_and_unknowns_are_none() {
+    fn privilege_inquiries_need_the_catalog_and_unknowns_are_none() {
         assert_eq!(
             function(
                 "has_tablespace_privilege",
@@ -1072,8 +1075,8 @@ mod tests {
                     Value::Text("CREATE".to_owned())
                 ]
             )
-            .map(Result::ok),
-            Some(Some(Value::Boolean(true)))
+            .map(|answer| answer.map_err(|error| error.state())),
+            Some(Err(SqlState::FEATURE_NOT_SUPPORTED))
         );
         assert!(function("not_a_function", &[]).is_none());
         assert_eq!(

@@ -1,4 +1,6 @@
-use crate::{ContentError, ZipArchive, crc32, extract_text, inflate};
+use crate::{
+    ContentError, DecompressError, ZipArchive, crc32, extract_text, gunzip, inflate, zlib_inflate,
+};
 
 const DYNAMIC_STREAM: [&str; 7] = [
     "1d515b0ac43008fcef29bc9a900185a01027f7dfc9b6c4b6d6c73c92037c2898031170041446871dfcd0040bcadd2f72",
@@ -23,6 +25,14 @@ const DOCX: [&str; 11] = [
     "4e010000110000000000000000000000800150000000776f72642f646f63756d656e742e786d6c504b05060000000002",
     "00020080000000570100000000",
 ];
+
+const GZIP_TEXT: &str = "1f8b08000000000002ffcb48cdc9c957c840903a0ae95599050a8979290a29a969398925a90a99790aaee9e92e4e5c001422d2702d000000";
+const GZIP_NAMED_TEXT: &str = "1f8b08080000000002ff6e6f7465732e74787400cb48cdc9c957c840903a0ae95599050a8979290a29a969398925a90a99790aaee9e92e4e5c001422d2702d000000";
+const ZLIB_TEXT: &str =
+    "78dacb48cdc9c957c840903a0ae95599050a8979290a29a969398925a90a99790aaee9e92e4e5c0076bc0f85";
+const RAW_TEXT: &str =
+    "cb48cdc9c957c840903a0ae95599050a8979290a29a969398925a90a99790aaee9e92e4e5c00";
+const PLAIN_TEXT: &[u8] = b"hello hello hello, gzip and deflate in EggDB\n";
 
 fn bytes(parts: &[&str]) -> Vec<u8> {
     let hex: String = parts.concat();
@@ -220,5 +230,152 @@ fn mutated_streams_and_archives_are_errors_or_text_never_panics() {
     for _ in 0..cases {
         let _ = inflate(&mutated(&dynamic, &mut random), 1 << 16);
         let _ = extract_text(&mutated(&docx, &mut random), 1 << 16);
+    }
+}
+
+fn gzip_member(deflated: &[u8], plain: &[u8]) -> Vec<u8> {
+    let mut member = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
+    member.extend_from_slice(deflated);
+    member.extend_from_slice(&crc32(plain).to_le_bytes());
+    member.extend_from_slice(&(plain.len() as u32).to_le_bytes());
+    member
+}
+
+fn zlib_stream(deflated: &[u8], plain: &[u8]) -> Vec<u8> {
+    let mut stream = vec![0x78, 0x9c];
+    stream.extend_from_slice(deflated);
+    stream.extend_from_slice(&crate::inflate::adler32(plain).to_be_bytes());
+    stream
+}
+
+#[test]
+fn gzip_members_from_the_gzip_tool_decompress_with_their_checks() {
+    assert_eq!(gunzip(&bytes(&[GZIP_TEXT]), 100).unwrap(), PLAIN_TEXT);
+    assert_eq!(gunzip(&bytes(&[GZIP_NAMED_TEXT]), 100).unwrap(), PLAIN_TEXT);
+    let two = [bytes(&[GZIP_TEXT]), bytes(&[GZIP_NAMED_TEXT])].concat();
+    assert_eq!(
+        gunzip(&two, 200).unwrap(),
+        [PLAIN_TEXT, PLAIN_TEXT].concat()
+    );
+    let mut flagged = bytes(&[GZIP_TEXT]);
+    flagged[3] |= 0x02;
+    let header_crc = (crc32(&flagged[..10]) as u16).to_le_bytes();
+    let with_header_crc = [&flagged[..10], &header_crc[..], &flagged[10..]].concat();
+    assert_eq!(gunzip(&with_header_crc, 100).unwrap(), PLAIN_TEXT);
+    let mut flagged = bytes(&[GZIP_TEXT]);
+    flagged[3] |= 0x04;
+    let extra = [
+        &flagged[..10],
+        &[3u8, 0, b'a', b'b', b'c'][..],
+        &flagged[10..],
+    ]
+    .concat();
+    assert_eq!(gunzip(&extra, 100).unwrap(), PLAIN_TEXT);
+    let dynamic = inflate(&bytes(&DYNAMIC_STREAM), 1_000).unwrap();
+    let wrapped = gzip_member(&bytes(&DYNAMIC_STREAM), &dynamic);
+    assert_eq!(gunzip(&wrapped, 600).unwrap(), dynamic);
+    assert_eq!(gunzip(&wrapped, 599), Err(DecompressError::PastLimit(599)));
+    let empty = gzip_member(&[3, 0], b"");
+    assert_eq!(gunzip(&[empty, wrapped].concat(), 600).unwrap(), dynamic);
+}
+
+#[test]
+fn damaged_gzip_is_refused_as_corrupt() {
+    let valid = bytes(&[GZIP_TEXT]);
+    let corrupt = |data: &[u8]| matches!(gunzip(data, 1_000), Err(DecompressError::Corrupt(_)));
+    let mut wrong_crc = valid.clone();
+    let crc_at = wrong_crc.len() - 8;
+    wrong_crc[crc_at] ^= 1;
+    let mut wrong_size = valid.clone();
+    let size_at = wrong_size.len() - 4;
+    wrong_size[size_at] ^= 1;
+    let mut reserved_flag = valid.clone();
+    reserved_flag[3] |= 0x20;
+    let mut other_method = valid.clone();
+    other_method[2] = 7;
+    let mut flagged = valid.clone();
+    flagged[3] |= 0x02;
+    let wrong_header_crc = [&flagged[..10], &[0u8, 0][..], &flagged[10..]].concat();
+    for damaged in [
+        wrong_crc,
+        wrong_size,
+        reserved_flag,
+        other_method,
+        wrong_header_crc,
+        valid[..valid.len() - 1].to_vec(),
+        valid[..9].to_vec(),
+        [&valid[..], &b"x"[..]].concat(),
+        [&valid[..], &[0x1f_u8, 0x8b][..]].concat(),
+        Vec::new(),
+        PLAIN_TEXT.to_vec(),
+    ] {
+        assert!(corrupt(&damaged), "{damaged:?}");
+    }
+    let two = [valid.clone(), valid].concat();
+    assert_eq!(
+        gunzip(&two, PLAIN_TEXT.len() * 2 - 1),
+        Err(DecompressError::PastLimit(PLAIN_TEXT.len() * 2 - 1))
+    );
+}
+
+#[test]
+fn deflate_bodies_decompress_as_zlib_or_raw_deflate() {
+    assert_eq!(crate::inflate::adler32(b"Wikipedia"), 0x11E6_0398);
+    assert_eq!(zlib_inflate(&bytes(&[ZLIB_TEXT]), 100).unwrap(), PLAIN_TEXT);
+    assert_eq!(zlib_inflate(&bytes(&[RAW_TEXT]), 100).unwrap(), PLAIN_TEXT);
+    let dynamic = inflate(&bytes(&DYNAMIC_STREAM), 1_000).unwrap();
+    let wrapped = zlib_stream(&bytes(&DYNAMIC_STREAM), &dynamic);
+    assert_eq!(zlib_inflate(&wrapped, 600).unwrap(), dynamic);
+    assert_eq!(
+        zlib_inflate(&wrapped, 599),
+        Err(DecompressError::PastLimit(599))
+    );
+    assert_eq!(
+        zlib_inflate(&bytes(&DYNAMIC_STREAM), 599),
+        Err(DecompressError::PastLimit(599))
+    );
+    let valid = bytes(&[ZLIB_TEXT]);
+    let mut wrong_adler = valid.clone();
+    let adler_at = wrong_adler.len() - 1;
+    wrong_adler[adler_at] ^= 1;
+    let mut preset_dictionary = valid.clone();
+    preset_dictionary[1] = 0xbb;
+    for damaged in [
+        wrong_adler,
+        preset_dictionary,
+        valid[..valid.len() - 2].to_vec(),
+        [&valid[..], &b"x"[..]].concat(),
+        [&bytes(&[RAW_TEXT])[..], &b"x"[..]].concat(),
+        Vec::new(),
+        vec![0x78],
+    ] {
+        assert!(
+            matches!(
+                zlib_inflate(&damaged, 1_000),
+                Err(DecompressError::Corrupt(_))
+            ),
+            "{damaged:?}"
+        );
+    }
+}
+
+#[test]
+fn mutated_gzip_and_zlib_bodies_are_errors_or_bytes_never_panics() {
+    let cases: usize = std::env::var("EGGDB_FUZZ_CASES")
+        .ok()
+        .and_then(|cases| cases.parse().ok())
+        .unwrap_or(20_000);
+    let mut random = Seeded(0x9e37_79b9_7f4a_7c15);
+    let dynamic = inflate(&bytes(&DYNAMIC_STREAM), 1_000).unwrap();
+    let gzip = [
+        bytes(&[GZIP_NAMED_TEXT]),
+        gzip_member(&bytes(&DYNAMIC_STREAM), &dynamic),
+    ]
+    .concat();
+    let zlib = zlib_stream(&bytes(&DYNAMIC_STREAM), &dynamic);
+    for _ in 0..cases {
+        let _ = gunzip(&mutated(&gzip, &mut random), 1 << 16);
+        let _ = zlib_inflate(&mutated(&zlib, &mut random), 1 << 16);
+        let _ = zlib_inflate(&mutated(&bytes(&[RAW_TEXT]), &mut random), 1 << 16);
     }
 }

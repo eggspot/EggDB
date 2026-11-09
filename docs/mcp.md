@@ -54,15 +54,21 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --allow-write
 | `kv_get` | the value under one key of the key-value store, by text or hexadecimal key; `collection` reads a named collection instead of the default key space (D292) |
 | `kv_scan` | keys and values in key order, by prefix or range, a page at a time; `collection` lists a named collection instead of the default key space (D292) |
 | `row_list` | the rows of one table in the order they are stored, a page at a time: `limit` rows (100 by default, at most 1,000) and at most 1 MiB, then `next_cursor` to send back as `after`; pages neither repeat nor skip rows while others write (D145) |
-| `put` | only with `--allow-write`: stores a value under one key and commits, replacing any value and time to live there; `ttl` (`30s`, `5m`, `1h30m`, `7d`, `1500ms`) makes the key expire, `collection` writes in a named collection (below, D328) |
+| `put` | only with `--allow-write`: stores a value under one key and commits, replacing any value and time to live there; `ttl` (`30s`, `5m`, `1h30m`, `7d`, `1500ms`) makes the key expire, and the result then says when (`ttl_ms`, `expires_at`, as `eggdb put --json`); `collection` writes in a named collection (below, D328, D346) |
 | `del` | only with `--allow-write`: deletes one key and commits, after your confirmation every time; `deleted` says whether it was there (below, D328) |
+| `incr` | only with `--allow-write`: adds `by` (1 by default; negative subtracts) to a whole-number counter under one key and commits, returning the new `value`; a missing key counts as 0 (below, D346) |
+| `cas` | only with `--allow-write`: replaces a key's value with `new` only while it is `expected` (or, with `if_absent`, only while the key is not there), in one transaction; `delete: true` removes the key instead and needs your confirmation (below, D346) |
+| `expire` | only with `--allow-write`: gives a key a time to live of `ttl` seconds and commits; `ttl` 0 deletes the key at once and needs your confirmation (below, D346) |
+| `persist` | only with `--allow-write`: removes a key's time to live, so it stays until deleted (below, D346) |
 
 The tools, their arguments, descriptions and annotations come from EggDB's command registry
 (D143), the same definitions `eggdb help --json` prints, with each tool's CLI twin: `kv_get` is
 `eggdb get --json`, `kv_scan` is `eggdb scan --json`, `run_sql` is `eggdb sql --read-only
 --json`, `write_sql` is `eggdb sql --json`, `list_tables`, `describe_table` and `sample_rows` are
 `eggdb table list|show|sample --json`, `explain_query` is `eggdb explain --json` (D144), and
-`row_list` is `eggdb row list --json` (D145), so
+`row_list` is `eggdb row list --json` (D145), and `put`, `del`, `incr`, `cas`, `expire` and
+`persist` are the `eggdb` commands of the same names with `--json` (D328, D346; `incr` with a
+negative `by` is `eggdb decr`, and `expire`'s `ttl` is the CLI's time in seconds), so
 what an agent did can be repeated at the command line. Each returns the same values as its twin once its envelope (the data
 notice, the per-call limits and what the call reports about itself) is taken away. The
 `instructions` the server sends at `initialize` are generated from it too: the effects (`read`,
@@ -139,9 +145,9 @@ or is named itself.
 - **Views read with the agent's eyes.** A view you list works when every table it reads is
   listed too; a view over an unlisted table fails as missing, so listing a view never exposes the
   table behind it.
-- **The keys are off.** `kv_get`, `kv_scan`, `put` and `del` are not offered, and a call to one
-  answers `limited_to_tables`, with or without a `collection`: collections are keys too (D292,
-  D328).
+- **The keys are off.** `kv_get`, `kv_scan`, `put`, `del`, `incr`, `cas`, `expire` and `persist`
+  are not offered, and a call to one answers `limited_to_tables`, with or without a
+  `collection`: collections are keys too (D292, D328, D346).
 - **What it still shows.** The names of schemas and of user-defined types, and what a listed
   table's own definition says: a foreign key or a listed view's text names the table it refers
   to, though that table stays unreadable. Internal numbers are not renumbered, so gaps in them
@@ -348,6 +354,28 @@ client that asks, the call needs `confirm: true`. Each `put` and `del` is record
 log before it runs and again with its outcome, as `write_sql` is. Agents that act as a role get
 neither (D190).
 
+The same agents also get four tools that work like `eggdb incr`, `eggdb cas`, `eggdb expire` and
+`eggdb persist` (D346), with the same keys, collections, refusals, audit records and grant:
+
+- `incr` adds `by` (1 when left out, negative to subtract, any 64-bit whole number) to the
+  counter under the key and returns the new `value`, as text like `eggdb incr --json`. A
+  counter is a whole number stored as text; a missing key counts as 0, and the key keeps its time
+  to live. A value that is not a counter, or a sum outside the 64-bit range, fails with
+  `sql_error` and SQLSTATE `22000`, and nothing changes.
+- `cas` compares and stores in one transaction: `expected` (or `expected_hex`), or
+  `if_absent: true` for "not there"; then `new` (or `new_hex`), or `delete: true` to remove the
+  key. `swapped` says whether it did; when it did not, `value` (or `value_hex`) is what the key
+  holds. A swap that stores makes the key permanent, as `put` does. A `cas` with `delete: true`
+  and an `expected` value deletes a key, so it asks you first, as `del` does.
+- `expire` takes `ttl` in whole seconds (at most about 100 years). `expires` says whether the key
+  was there (an absent key stays absent), with `ttl_ms` and `expires_at`. A `ttl` of 0 deletes
+  the key at once, as Redis's `EXPIRE key 0` does, so it asks you first, as `del` does, and
+  answers `deleted`.
+- `persist` removes the time to live; `persisted` says whether the key is there.
+
+None of them reaches SQL's key space: a key there is refused with `invalid_arguments` before the
+file is opened, so a counter, a swap or a time to live never lands on a table's row.
+
 ## Over HTTP, from eggdb serve
 
 `eggdb serve app.db --mcp-listen 127.0.0.1:8765 --mcp-token-file mcp-token.txt` also serves MCP
@@ -390,7 +418,7 @@ agent can act on it whatever the code; every code's category is in
 | Code | When | Fix |
 |------|------|-----|
 | `read_only` | the statement needs to write: the server has no `--allow-write`, or it went to `run_sql` | read with `run_sql`, or ask for `--allow-write`; send writes with `write_sql` |
-| `needs_confirmation` | a destructive `write_sql` without `confirm: true` on a client that cannot ask | ask the user, then send `confirm: true` |
+| `needs_confirmation` | a destructive `write_sql`, a `del`, an `expire` with `ttl` 0 or a `cas` with `delete`, without `confirm: true` on a client that cannot ask | ask the user, then send `confirm: true` |
 | `declined_by_user` | the user said no to a destructive statement | |
 | `confirmation_failed` | the client answered the question with an error | |
 | `not_writable` | the file or its directory cannot be opened for writing by this user | |
@@ -506,9 +534,11 @@ Things to know about the audit file:
   characters made visible, so the question cannot be made to say something else. What runs is
   exactly the statement you saw.
 - **`put` does not ask, `del` does.** A `put` replaces a key's value and time to live without a
-  confirmation (one named key, like an `UPDATE` of one pinned row, D328), so with `--allow-write`
+  confirmation (one named key, like an `UPDATE` of one pinned row, D328), and so do `incr`,
+  `persist`, a `cas` that stores and an `expire` above 0 (D346), so with `--allow-write`
   an agent can overwrite, or give a short time to live to, any key it can name in the default
-  key space and the collections. Every `put` is in the audit log with the key; keep
+  key space and the collections. Only the calls that delete at once ask: `del`, `expire` with
+  `ttl` 0 and `cas` with `delete`. Every key write is in the audit log with the key; keep
   `--allow-write` off, or limit the server with `--tables` (`--mcp-tables` for `eggdb serve`),
   which withdraws the key-value tools, when old values must not be overwritten.
 - **A stopped call never half-writes.** A call still running a second past its time limit ends

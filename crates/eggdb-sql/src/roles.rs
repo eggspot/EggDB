@@ -599,7 +599,9 @@ pub(crate) fn owner_acl_item(owner: &str) -> String {
     format!("{name}={letters}/{name}")
 }
 
-fn acl_role_name(name: &str) -> String {
+/// A role's name as PostgreSQL writes it in an `aclitem`: as it is when it holds only ASCII
+/// letters, digits and underscores, and otherwise in double quotes with `"` doubled.
+pub(crate) fn acl_role_name(name: &str) -> String {
     if !name.is_empty()
         && name
             .bytes()
@@ -830,6 +832,7 @@ pub(crate) fn check_statement(settings: &Settings, statement: &Statement) -> Sql
         statement,
         Statement::CreateTable(_)
             | Statement::CreateTableAs(_)
+            | Statement::CreateTableLike(_)
             | Statement::AlterTable(_)
             | Statement::CreateIndex(_)
             | Statement::CreateView(_)

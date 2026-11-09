@@ -1,7 +1,7 @@
 use super::{Access, Session, cache_for_value};
 use crate::cli::args::{CommandName, Format};
 use crate::cli::failure::{Exit, Failure};
-use crate::cli::render::{self, JsonObject, TimeStyle};
+use crate::cli::render::{self, JsonObject};
 use eggdb::{Database, ErrorKind};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -329,37 +329,39 @@ pub(super) fn with_time_to_live(object: JsonObject, left: Option<Duration>) -> J
                 "ttl_ms",
                 u64::try_from(left.as_millis()).unwrap_or(u64::MAX),
             )
-            .string("expires_at", &expires_at(left)),
+            .string("expires_at", &eggdb_commands::expires_at(now_unix_micros(), left)),
         None => object.raw("ttl_ms", "null").raw("expires_at", "null"),
     }
 }
 
-fn expires_at(left: Duration) -> String {
-    let now = SystemTime::now()
+fn now_unix_micros() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {
             u64::try_from(since.as_micros()).unwrap_or(u64::MAX)
-        });
-    let left = u64::try_from(left.as_micros()).unwrap_or(u64::MAX);
-    let micros = render::utc_time(now.saturating_add(left), TimeStyle::Rfc3339);
-    let without_micros = micros
-        .strip_suffix('Z')
-        .and_then(|time| time.get(..time.len().saturating_sub(3)))
-        .unwrap_or(&micros);
-    format!("{without_micros}Z")
+        })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{expires_at, is_counter, shown_value};
+    use super::{is_counter, shown_value, with_time_to_live};
+    use crate::cli::render::JsonObject;
     use std::time::Duration;
 
     #[test]
     fn an_expiry_time_is_utc_with_milliseconds() {
-        let at = expires_at(Duration::from_secs(60));
+        let line = with_time_to_live(JsonObject::new(), Some(Duration::from_secs(60))).line();
+        let Some(at) = line
+            .split("\"expires_at\":\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+        else {
+            panic!("{line}");
+        };
         assert_eq!(at.len(), "2026-10-30T09:44:07.123Z".len(), "{at}");
         assert!(at.ends_with('Z') && at.as_bytes()[10] == b'T', "{at}");
         assert_eq!(at.as_bytes()[19], b'.');
+        assert!(line.contains("\"ttl_ms\":60000"), "{line}");
     }
 
     #[test]

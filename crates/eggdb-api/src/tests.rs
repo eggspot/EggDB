@@ -322,7 +322,7 @@ fn rows_are_streamed_in_chunks_over_a_kept_connection() {
             .set_read_timeout(Some(std::time::Duration::from_secs(10)))
             .unwrap();
         let head = format!(
-            "GET /readings?order=id HTTP/1.1\r\nAuthorization: {authorization}\r\n\r\nGET /readings?id=eq.7 HTTP/1.1\r\nAuthorization: {authorization}\r\nConnection: close\r\n\r\n"
+            "GET /readings?order=id HTTP/1.1\r\nHost: x\r\nAuthorization: {authorization}\r\n\r\nGET /readings?id=eq.7 HTTP/1.1\r\nHost: x\r\nAuthorization: {authorization}\r\nConnection: close\r\n\r\n"
         );
         client.write_all(head.as_bytes()).unwrap();
         let mut answer = Vec::new();

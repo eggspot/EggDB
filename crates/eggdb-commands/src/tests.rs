@@ -308,7 +308,10 @@ fn a_server_limited_to_tables_withdraws_exactly_the_key_value_tools() {
         .filter(|tool| matches!(tool.grant, Grant::KeyValueStore | Grant::KeyValueWrite))
         .map(|tool| tool.name)
         .collect();
-    assert_eq!(withdrawn, vec!["kv_get", "kv_scan", "put", "del"]);
+    assert_eq!(
+        withdrawn,
+        vec!["kv_get", "kv_scan", "put", "del", "incr", "cas", "expire", "persist"]
+    );
     assert_eq!(Grant::KeyValueStore.name(), Some("key_value_store"));
     assert_eq!(Grant::KeyValueWrite.name(), Some("key_value_write"));
     let deleting = tool("del").map(|found| (found.max_effect, found.confirm));
@@ -318,6 +321,15 @@ fn a_server_limited_to_tables_withdraws_exactly_the_key_value_tools() {
     );
     let storing = tool("put").map(|found| (found.max_effect, found.confirm));
     assert_eq!(storing, Some((Effect::Change, None)));
+    for (name, effect, confirm) in [
+        ("incr", Effect::Change, None),
+        ("persist", Effect::Change, None),
+        ("cas", Effect::Destroy, Some(ConfirmCheck::KeyDelete)),
+        ("expire", Effect::Destroy, Some(ConfirmCheck::KeyDelete)),
+    ] {
+        let found = tool(name).map(|found| (found.max_effect, found.confirm, found.grant));
+        assert_eq!(found, Some((effect, confirm, Grant::KeyValueWrite)), "{name}");
+    }
     let refusal = ERROR_CODES
         .iter()
         .find(|known| known.code == "limited_to_tables")

@@ -238,7 +238,7 @@ pub fn parse_pipeline(stages: &[Bson]) -> DocumentResult<Vec<Stage>> {
 }
 
 fn set_path(document: &mut Document, path: &str, value: Bson) -> DocumentResult<()> {
-    if let Some(target) = slot(document, path, true).map_err(DocumentError::bad_value)? {
+    if let Some(target) = slot(document, path, true)? {
         target.set(value);
     }
     Ok(())

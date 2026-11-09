@@ -336,7 +336,7 @@ fn help_json_lists_exactly_the_registry() {
                     matches!(when, Some(Json::String(text)) if text.starts_with("the statement is destructive: DROP, TRUNCATE")),
                     "{when:?}"
                 );
-            } else if name == "del" {
+            } else if matches!(name.as_str(), "del" | "cas" | "expire") {
                 assert_eq!(string_at(tool, &["confirm"]).as_deref(), Some("key_delete"));
                 assert_eq!(
                     string_at(tool, &["grant"]).as_deref(),

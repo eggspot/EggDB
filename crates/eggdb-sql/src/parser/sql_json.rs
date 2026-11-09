@@ -607,6 +607,7 @@ impl Parser<'_> {
             alias,
             derived: None,
             generated: Some(Box::new(GeneratedTable::Function(function))),
+            partition_selection: None,
         })
     }
 

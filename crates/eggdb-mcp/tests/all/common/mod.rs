@@ -5,7 +5,7 @@ use eggdb_mcp::{DatabaseOpener, OpenRefusal, Server, ServerConfig};
 use eggdb_sql::json::{Json, Node, parse_document};
 use eggdb_sql::{
     Dialect, EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection, Session,
-    SqlResult,
+    SqlError, SqlResult, SqlState,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -93,6 +93,74 @@ impl KeyValueWrite for MapWrite<'_> {
         Ok(self.map.remove(key).is_some())
     }
 
+    fn put_with_expiry(&mut self, key: &[u8], value: &[u8], _ttl: Duration) -> SqlResult<()> {
+        self.map.insert(key.to_vec(), value.to_vec());
+        Ok(())
+    }
+
+    fn increment(
+        &mut self,
+        collection: Option<&str>,
+        key: &[u8],
+        by: i64,
+    ) -> SqlResult<Option<i64>> {
+        refuse_collections(collection)?;
+        let current = match self.map.get(key) {
+            None => 0,
+            Some(value) => std::str::from_utf8(value)
+                .ok()
+                .and_then(|text| text.parse::<i64>().ok())
+                .ok_or_else(|| SqlError::new(SqlState::DATA_EXCEPTION, "not a counter"))?,
+        };
+        let count = current
+            .checked_add(by)
+            .ok_or_else(|| SqlError::new(SqlState::DATA_EXCEPTION, "out of range"))?;
+        self.map.insert(key.to_vec(), count.to_string().into_bytes());
+        Ok(Some(count))
+    }
+
+    fn compare_and_set(
+        &mut self,
+        collection: Option<&str>,
+        key: &[u8],
+        expected: Option<&[u8]>,
+        new: Option<&[u8]>,
+    ) -> SqlResult<Option<(bool, Option<Vec<u8>>)>> {
+        refuse_collections(collection)?;
+        let found = self.map.get(key).cloned();
+        let swapped = found.as_deref() == expected;
+        if swapped {
+            match new {
+                Some(new) => {
+                    self.map.insert(key.to_vec(), new.to_vec());
+                }
+                None => {
+                    self.map.remove(key);
+                }
+            }
+        }
+        Ok(Some((swapped, found)))
+    }
+
+    fn set_expiry(
+        &mut self,
+        collection: Option<&str>,
+        key: &[u8],
+        ttl: Duration,
+    ) -> SqlResult<Option<bool>> {
+        refuse_collections(collection)?;
+        let there = self.map.contains_key(key);
+        if ttl.is_zero() {
+            self.map.remove(key);
+        }
+        Ok(Some(there))
+    }
+
+    fn clear_expiry(&mut self, collection: Option<&str>, key: &[u8]) -> SqlResult<Option<bool>> {
+        refuse_collections(collection)?;
+        Ok(Some(self.map.contains_key(key)))
+    }
+
     fn commit(self) -> SqlResult<()> {
         *self.store.committed.borrow_mut() = Rc::new(self.map);
         Ok(())
@@ -100,6 +168,16 @@ impl KeyValueWrite for MapWrite<'_> {
 
     fn rollback(self) -> SqlResult<()> {
         Ok(())
+    }
+}
+
+fn refuse_collections(collection: Option<&str>) -> SqlResult<()> {
+    match collection {
+        Some(_) => Err(SqlError::new(
+            SqlState::FEATURE_NOT_SUPPORTED,
+            "this store keeps no collections",
+        )),
+        None => Ok(()),
     }
 }
 

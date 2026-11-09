@@ -46,10 +46,14 @@ pub(crate) enum Tool {
     RowList,
     Put,
     Del,
+    Incr,
+    Cas,
+    Expire,
+    Persist,
 }
 
 impl Tool {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 15] = [
         Self::ListTables,
         Self::DescribeTable,
         Self::RunSql,
@@ -61,6 +65,10 @@ impl Tool {
         Self::RowList,
         Self::Put,
         Self::Del,
+        Self::Incr,
+        Self::Cas,
+        Self::Expire,
+        Self::Persist,
     ];
 
     pub(crate) fn definition(self) -> &'static ToolDefinition {
@@ -73,6 +81,13 @@ impl Tool {
 
     pub(crate) fn named(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|tool| tool.name() == name)
+    }
+
+    pub(crate) fn changes_keys(self) -> bool {
+        matches!(
+            self,
+            Self::Put | Self::Del | Self::Incr | Self::Cas | Self::Expire | Self::Persist
+        )
     }
 }
 
@@ -106,6 +121,16 @@ fn input_schema(definition: &ToolDefinition, out: &mut JsonOut) {
                     .unsigned(most)
                     .key("default")
                     .unsigned(default);
+            }
+            ArgumentType::SignedInteger {
+                least,
+                most,
+                default,
+            } => {
+                out.key("minimum").signed(least).key("maximum").signed(most);
+                if let Some(default) = default {
+                    out.key("default").signed(default);
+                }
             }
             ArgumentType::Boolean { default } => {
                 out.key("default").boolean(default);
@@ -363,6 +388,40 @@ impl<'n> Arguments<'n> {
             None | Some(Json::Null) => Ok(false),
             Some(Json::Boolean(value)) => Ok(*value),
             Some(_) => Err(ToolError::invalid(format!("{name} must be true or false"))),
+        }
+    }
+
+    fn whole_number(&self, tool: Tool, name: &str) -> Result<Option<i64>, ToolError> {
+        let declared = tool
+            .definition()
+            .arguments
+            .iter()
+            .find(|argument| argument.name == name)
+            .and_then(|argument| match argument.kind {
+                ArgumentType::SignedInteger {
+                    least,
+                    most,
+                    default,
+                } => Some((least, most, default)),
+                _ => None,
+            });
+        let Some((least, most, default)) = declared else {
+            return Err(ToolError::new(
+                "not_supported",
+                format!("{} takes no whole number named {name}", tool.name()),
+            ));
+        };
+        let refused =
+            || ToolError::invalid(format!("{name} must be a whole number from {least} to {most}"));
+        match self.value(name) {
+            None | Some(Json::Null) => Ok(default),
+            Some(Json::Number(text)) => text
+                .parse::<i64>()
+                .ok()
+                .filter(|number| (least..=most).contains(number))
+                .map(Some)
+                .ok_or_else(refused),
+            Some(_) => Err(refused()),
         }
     }
 
@@ -668,7 +727,9 @@ pub(crate) fn run<O: DatabaseOpener>(
         Tool::KvGet => kv_get(arguments, call),
         Tool::KvScan => kv_scan(arguments, call),
         Tool::RowList => row_list(arguments, call),
-        Tool::Put | Tool::Del => Err(key_writes_refused(call)),
+        Tool::Put | Tool::Del | Tool::Incr | Tool::Cas | Tool::Expire | Tool::Persist => {
+            Err(key_writes_refused(call))
+        }
     }
 }
 
@@ -1671,6 +1732,28 @@ pub(crate) enum KeyChange {
         ttl: Option<Duration>,
     },
     Delete,
+    Increment {
+        by: i64,
+    },
+    CompareAndSet {
+        expected: Option<Vec<u8>>,
+        new: Option<Vec<u8>>,
+    },
+    SetExpiry {
+        ttl: Duration,
+    },
+    ClearExpiry,
+}
+
+impl KeyChange {
+    pub(crate) fn deletes_a_key(&self) -> bool {
+        match self {
+            Self::Delete => true,
+            Self::SetExpiry { ttl } => ttl.is_zero(),
+            Self::CompareAndSet { expected, new } => expected.is_some() && new.is_none(),
+            Self::Put { .. } | Self::Increment { .. } | Self::ClearExpiry => false,
+        }
+    }
 }
 
 pub(crate) struct KeyWriteRequest<'n> {
@@ -1695,22 +1778,25 @@ pub(crate) fn key_write_request<'n>(
             "that key is in SQL's key space; change tables with write_sql",
         ));
     }
-    let change = if tool == Tool::Del {
-        KeyChange::Delete
-    } else {
-        let value = arguments
-            .bytes("value", "value_hex")?
-            .ok_or_else(|| ToolError::invalid("give value or value_hex"))?;
-        if value.len() > MAX_VALUE_BYTES {
-            return Err(ToolError::invalid(format!(
-                "value holds {} bytes; a call stores at most {MAX_VALUE_BYTES}",
-                value.len()
-            )));
+    let change = match tool {
+        Tool::Put => stored_change(arguments)?,
+        Tool::Del => KeyChange::Delete,
+        Tool::Incr => KeyChange::Increment {
+            by: arguments.whole_number(tool, "by")?.unwrap_or(1),
+        },
+        Tool::Cas => compare_and_set_change(arguments)?,
+        Tool::Expire => KeyChange::SetExpiry {
+            ttl: expiry_seconds(tool, arguments)?,
+        },
+        Tool::Persist => KeyChange::ClearExpiry,
+        _ => {
+            return Err(ToolError::new(
+                "not_supported",
+                format!("{} does not change keys", tool.name()),
+            ));
         }
-        let ttl = arguments.string("ttl")?.map(time_to_live).transpose()?;
-        KeyChange::Put { value, ttl }
     };
-    let confirm = tool == Tool::Del && arguments.boolean("confirm")?;
+    let confirm = arguments.boolean("confirm")?;
     Ok(KeyWriteRequest {
         tool,
         collection,
@@ -1718,6 +1804,66 @@ pub(crate) fn key_write_request<'n>(
         change,
         confirm,
     })
+}
+
+fn stored_change(arguments: &Arguments<'_>) -> Result<KeyChange, ToolError> {
+    let value = arguments
+        .bytes("value", "value_hex")?
+        .ok_or_else(|| ToolError::invalid("give value or value_hex"))?;
+    refuse_too_large_a_value(&value)?;
+    let ttl = arguments.string("ttl")?.map(time_to_live).transpose()?;
+    Ok(KeyChange::Put { value, ttl })
+}
+
+fn refuse_too_large_a_value(value: &[u8]) -> Result<(), ToolError> {
+    if value.len() > MAX_VALUE_BYTES {
+        return Err(ToolError::invalid(format!(
+            "value holds {} bytes; a call stores at most {MAX_VALUE_BYTES}",
+            value.len()
+        )));
+    }
+    Ok(())
+}
+
+fn compare_and_set_change(arguments: &Arguments<'_>) -> Result<KeyChange, ToolError> {
+    let expected = match (
+        arguments.bytes("expected", "expected_hex")?,
+        arguments.boolean("if_absent")?,
+    ) {
+        (Some(_), true) => {
+            return Err(ToolError::invalid("give expected or if_absent: true, not both"));
+        }
+        (None, false) => {
+            return Err(ToolError::invalid(
+                "give expected or expected_hex, or if_absent: true to swap only while the key is not there",
+            ));
+        }
+        (expected, _) => expected,
+    };
+    let new = match (arguments.bytes("new", "new_hex")?, arguments.boolean("delete")?) {
+        (Some(_), true) => {
+            return Err(ToolError::invalid("give new or delete: true, not both"));
+        }
+        (None, false) => {
+            return Err(ToolError::invalid(
+                "give new or new_hex, or delete: true to remove the key instead",
+            ));
+        }
+        (new, _) => new,
+    };
+    if let Some(new) = &new {
+        refuse_too_large_a_value(new)?;
+    }
+    Ok(KeyChange::CompareAndSet { expected, new })
+}
+
+fn expiry_seconds(tool: Tool, arguments: &Arguments<'_>) -> Result<Duration, ToolError> {
+    let seconds = arguments.whole_number(tool, "ttl")?.ok_or_else(|| {
+        ToolError::invalid("give ttl: the seconds until the key expires, or 0 to delete it now")
+    })?;
+    u64::try_from(seconds)
+        .map(Duration::from_secs)
+        .map_err(|_| ToolError::invalid("ttl must be 0 or more seconds"))
 }
 
 fn time_to_live(text: &str) -> Result<Duration, ToolError> {
@@ -1751,6 +1897,13 @@ pub(crate) fn key_delete_needs_confirmation() -> ToolError {
 enum KeyWritten {
     Stored,
     Deleted(bool),
+    Counted(i64),
+    Swapped {
+        swapped: bool,
+        found: Option<Vec<u8>>,
+    },
+    Expires(bool),
+    Persisted(bool),
     NoCollection,
 }
 
@@ -1759,6 +1912,7 @@ fn apply_key_write(
     request: &KeyWriteRequest<'_>,
 ) -> Result<KeyWritten, SqlError> {
     let key = request.key.as_slice();
+    let collection = request.collection;
     let in_collection = |found: bool| {
         if found {
             KeyWritten::Stored
@@ -1766,7 +1920,7 @@ fn apply_key_write(
             KeyWritten::NoCollection
         }
     };
-    match (&request.change, request.collection) {
+    match (&request.change, collection) {
         (KeyChange::Put { value, ttl: None }, None) => {
             writer.put(key, value).map(|()| KeyWritten::Stored)
         }
@@ -1786,7 +1940,37 @@ fn apply_key_write(
         (KeyChange::Delete, Some(name)) => writer
             .collection_delete(name, key)
             .map(|deleted| deleted.map_or(KeyWritten::NoCollection, KeyWritten::Deleted)),
+        (KeyChange::Increment { by }, _) => writer
+            .increment(collection, key, *by)
+            .map(|count| count.map_or(KeyWritten::NoCollection, KeyWritten::Counted)),
+        (KeyChange::CompareAndSet { expected, new }, _) => writer
+            .compare_and_set(collection, key, expected.as_deref(), new.as_deref())
+            .map(|outcome| {
+                outcome.map_or(KeyWritten::NoCollection, |(swapped, found)| {
+                    KeyWritten::Swapped { swapped, found }
+                })
+            }),
+        (KeyChange::SetExpiry { ttl }, _) => writer
+            .set_expiry(collection, key, *ttl)
+            .map(|there| there.map_or(KeyWritten::NoCollection, KeyWritten::Expires)),
+        (KeyChange::ClearExpiry, _) => writer
+            .clear_expiry(collection, key)
+            .map(|there| there.map_or(KeyWritten::NoCollection, KeyWritten::Persisted)),
     }
+}
+
+fn with_counter_fix(request: &KeyWriteRequest<'_>, error: ToolError) -> ToolError {
+    let counting = matches!(request.change, KeyChange::Increment { .. });
+    let refused_as_a_counter = error
+        .sql
+        .as_ref()
+        .is_some_and(|sql| sql.state() == SqlState::DATA_EXCEPTION);
+    if counting && refused_as_a_counter {
+        return error.with_fix(
+            "Count in a key whose value is a whole number, or store one there with put first (such as 0).",
+        );
+    }
+    error
 }
 
 pub(crate) fn write_key<O: DatabaseOpener>(
@@ -1801,7 +1985,7 @@ pub(crate) fn write_key<O: DatabaseOpener>(
             Ok(written) => written,
             Err(error) => {
                 let _ = writer.rollback();
-                return Err(call.sql_failure(limits, error));
+                return Err(with_counter_fix(request, call.sql_failure(limits, error)));
             }
         };
         if matches!(written, KeyWritten::NoCollection) {
@@ -1827,6 +2011,13 @@ pub(crate) fn write_key<O: DatabaseOpener>(
     }
 }
 
+fn time_to_live_fields(out: &mut JsonOut, ttl: Duration) {
+    out.key("ttl_ms")
+        .unsigned(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))
+        .key("expires_at")
+        .string(&eggdb_commands::expires_at(crate::audit::now_unix_micros(), ttl));
+}
+
 fn key_written(
     request: &KeyWriteRequest<'_>,
     written: &KeyWritten,
@@ -1848,11 +2039,42 @@ fn key_written(
             out.key("deleted").boolean(*deleted);
             u64::from(*deleted)
         }
+        KeyWritten::Counted(count) => {
+            out.key("value").string(&count.to_string());
+            1
+        }
+        KeyWritten::Swapped { swapped, found } => {
+            out.key("swapped").boolean(*swapped);
+            if !*swapped && let Some(found) = found {
+                bytes_field(&mut out, "value", found);
+            }
+            u64::from(*swapped)
+        }
+        KeyWritten::Expires(there) => {
+            match &request.change {
+                KeyChange::SetExpiry { ttl } if ttl.is_zero() => {
+                    out.key("deleted").boolean(*there);
+                }
+                KeyChange::SetExpiry { ttl } => {
+                    out.key("expires").boolean(*there);
+                    if *there {
+                        time_to_live_fields(&mut out, *ttl);
+                    }
+                }
+                _ => {
+                    out.key("expires").boolean(*there);
+                }
+            }
+            u64::from(*there)
+        }
+        KeyWritten::Persisted(there) => {
+            out.key("persisted").boolean(*there);
+            u64::from(*there)
+        }
         KeyWritten::Stored | KeyWritten::NoCollection => {
             out.key("stored").boolean(true);
             if let KeyChange::Put { ttl: Some(ttl), .. } = &request.change {
-                out.key("ttl_ms")
-                    .unsigned(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX));
+                time_to_live_fields(&mut out, *ttl);
             }
             1
         }
@@ -1906,7 +2128,13 @@ mod tests {
                 Tool::SampleRows => "sample_rows",
                 Tool::KvGet => "kv_get",
                 Tool::KvScan => "kv_scan",
-                Tool::RowList | Tool::Put | Tool::Del => not_shipped(),
+                Tool::RowList
+                | Tool::Put
+                | Tool::Del
+                | Tool::Incr
+                | Tool::Cas
+                | Tool::Expire
+                | Tool::Persist => not_shipped(),
             }
         }
 
@@ -1935,7 +2163,13 @@ mod tests {
                 Tool::SampleRows => "Sample rows",
                 Tool::KvGet => "Get a key",
                 Tool::KvScan => "Scan keys",
-                Tool::RowList | Tool::Put | Tool::Del => not_shipped(),
+                Tool::RowList
+                | Tool::Put
+                | Tool::Del
+                | Tool::Incr
+                | Tool::Cas
+                | Tool::Expire
+                | Tool::Persist => not_shipped(),
             }
         }
 
@@ -1972,7 +2206,13 @@ mod tests {
                 Tool::KvScan => {
                     "Lists keys of the database's key-value store in key order with their values, by prefix or by range, a page at a time: pass a cut result's next_start_hex as start_hex to read on. Give a collection to list that named key space instead of the default one. Keys under SQL's tables are left out; read tables with run_sql."
                 }
-                Tool::RowList | Tool::Put | Tool::Del => not_shipped(),
+                Tool::RowList
+                | Tool::Put
+                | Tool::Del
+                | Tool::Incr
+                | Tool::Cas
+                | Tool::Expire
+                | Tool::Persist => not_shipped(),
             }
         }
 
@@ -2098,7 +2338,13 @@ mod tests {
                         .end_object();
                     property(out, "collection", "string", COLLECTION_DESCRIPTION);
                 }
-                Tool::RowList | Tool::Put | Tool::Del => not_shipped(),
+                Tool::RowList
+                | Tool::Put
+                | Tool::Del
+                | Tool::Incr
+                | Tool::Cas
+                | Tool::Expire
+                | Tool::Persist => not_shipped(),
             }
             out.end_object();
             if !required.is_empty() {
@@ -2355,10 +2601,30 @@ mod tests {
         assert!(!listed.contains("write_sql"));
         let writing = tools_list(served(true));
         assert!(eggdb_sql::json::parse_document(&writing).is_ok());
-        assert_eq!(writing.matches("\"readOnlyHint\":false").count(), 3);
-        assert_eq!(writing.matches("\"destructiveHint\":true").count(), 2);
+        assert_eq!(writing.matches("\"readOnlyHint\":false").count(), 7);
+        assert_eq!(writing.matches("\"destructiveHint\":true").count(), 4);
         assert!(writing.contains("{\"name\":\"put\",\"title\":\"Store a key\""));
         assert!(writing.contains("{\"name\":\"del\",\"title\":\"Delete a key\""));
+        for (tool, title) in [
+            ("incr", "Add to a counter"),
+            ("cas", "Compare and set a key"),
+            ("expire", "Give a key a time to live"),
+            ("persist", "Remove a key's time to live"),
+        ] {
+            assert!(
+                writing.contains(&format!("{{\"name\":\"{tool}\",\"title\":\"{title}\"")),
+                "{tool}"
+            );
+            assert!(!listed.contains(&format!("\"name\":\"{tool}\"")), "{tool}");
+        }
+        assert!(
+            writing.contains("\"by\":{\"type\":\"integer\",\"minimum\":-9223372036854775808,\"maximum\":9223372036854775807,\"default\":1,"),
+            "{writing}"
+        );
+        assert!(
+            writing.contains("\"ttl\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":3155760000,\"description\":"),
+            "{writing}"
+        );
         let limited_writing = tools_list(Grants {
             allow_write: true,
             key_value_store: false,
@@ -2366,6 +2632,7 @@ mod tests {
         assert!(limited_writing.contains("\"name\":\"write_sql\""));
         assert!(!limited_writing.contains("\"name\":\"put\""));
         assert!(!limited_writing.contains("\"name\":\"del\""));
+        assert!(!limited_writing.contains("\"name\":\"expire\""));
     }
 
     #[test]

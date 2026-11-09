@@ -1,4 +1,6 @@
+use super::read_only::refused_in_read_only_transaction;
 use super::{Session, read_only_refusal};
+use crate::encoding::is_temporary_key;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::TableCache;
 use crate::notifications::Notifications;
@@ -15,6 +17,7 @@ pub(super) struct NonatomicWrite<'a, 's> {
     writer: Option<Box<dyn BoxedWrite + 's>>,
     objects: &'a mut TemporaryObjects,
     notifications: &'a mut Notifications,
+    read_only_command: Option<&'a str>,
 }
 
 fn no_transaction() -> SqlError {
@@ -42,8 +45,30 @@ impl NonatomicWrite<'_, '_> {
         }
     }
 
+    fn refuse_when_read_only(&self, key: &[u8]) -> SqlResult<()> {
+        match self.read_only_command {
+            Some(command) if !is_temporary_key(key) => {
+                Err(refused_in_read_only_transaction(command))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn save_sequences(&mut self) -> SqlResult<()> {
+        sequences::save_changed(&mut *self).map_err(|error| {
+            if error.state() == SqlState::READ_ONLY_SQL_TRANSACTION {
+                let refused =
+                    refused_in_read_only_transaction(sequences::first_changing_function());
+                sequences::forget_changes();
+                refused
+            } else {
+                error
+            }
+        })
+    }
+
     fn commit_current(&mut self, tables: &mut TableCache) -> SqlResult<()> {
-        sequences::save_changed(&mut self.routed()?)?;
+        self.save_sequences()?;
         let writer = self.writer.take().ok_or_else(no_transaction)?;
         let pending = crate::deferred_checks::take_statement_pending();
         if !pending.is_empty() {
@@ -139,14 +164,17 @@ impl KeyValueRead for NonatomicWrite<'_, '_> {
 
 impl KeyValueWrite for NonatomicWrite<'_, '_> {
     fn put(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
+        self.refuse_when_read_only(key)?;
         self.routed()?.put(key, value)
     }
 
     fn put_if_absent(&mut self, key: &[u8], value: &[u8]) -> SqlResult<bool> {
+        self.refuse_when_read_only(key)?;
         self.routed()?.put_if_absent(key, value)
     }
 
     fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {
+        self.refuse_when_read_only(key)?;
         self.routed()?.delete(key)
     }
 
@@ -172,7 +200,6 @@ impl<'s> Session<'s> {
             && self.autocommit()
             && (!self.implicit_transaction || self.statement_stands_alone)
             && !self.savepoints.is_active()
-            && !self.new_transactions_read_only()
     }
 
     pub(super) fn write_nonatomic(
@@ -186,11 +213,13 @@ impl<'s> Session<'s> {
             .store
             .begin_boxed_write()
             .map_err(|error| read_only_refusal(error, command))?;
+        let read_only_command = self.new_transactions_read_only().then_some(command);
         let mut control = NonatomicWrite {
             store: self.store,
             writer: Some(writer),
             objects: &mut self.temporary,
             notifications: &mut self.notifications,
+            read_only_command,
         };
         let outcome = run_nonatomic(&mut control, &mut self.tables, body);
         let Some(writer) = control.writer.take() else {
@@ -208,6 +237,6 @@ fn run_nonatomic(
     sequences::load_for_sequence_calls(&*control)?;
     let result = body(&mut *control, tables)
         .map_err(|error| sequences::explain_missing(&*control, error))?;
-    sequences::save_changed(control)?;
+    control.save_sequences()?;
     Ok(result)
 }

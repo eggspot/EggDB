@@ -1,4 +1,5 @@
 use crate::frame::{Frame, next_frame, pending_frame_bytes};
+use crate::server::{HeartBeatOffer, HeartBeats, negotiate, serve_offering};
 use crate::{ServerConfig, serve};
 use eggdb_keyspace::MemoryKeyspace;
 use eggdb_platform::connection_limits::MemoryBudget;
@@ -7,7 +8,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn now_ms() -> u64 {
     u64::try_from(
@@ -46,18 +47,50 @@ impl Client {
     }
 
     fn connected(address: SocketAddr) -> Self {
-        let mut client = Self::open(address);
-        client.send(
-            &Frame::new("CONNECT")
-                .with("accept-version", "1.1,1.2")
-                .with("host", "eggdb")
-                .with("login", "eggdb")
-                .with("passcode", "secret"),
-        );
-        let reply = client.next();
+        let (client, reply) = Self::connecting(address, None);
         assert_eq!(reply.command, "CONNECTED", "{reply:?}");
         assert_eq!(reply.header("version"), Some("1.2"));
         client
+    }
+
+    fn connecting(address: SocketAddr, heart_beat: Option<&str>) -> (Self, Frame) {
+        let mut client = Self::open(address);
+        let mut connect = Frame::new("CONNECT")
+            .with("accept-version", "1.1,1.2")
+            .with("host", "eggdb")
+            .with("login", "eggdb")
+            .with("passcode", "secret");
+        if let Some(heart_beat) = heart_beat {
+            connect = connect.with("heart-beat", heart_beat);
+        }
+        client.send(&connect);
+        let reply = client.next();
+        (client, reply)
+    }
+
+    fn bytes_within(&mut self, wait: Duration) -> Vec<u8> {
+        let mut bytes = std::mem::take(&mut self.buffer);
+        self.stream
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        let deadline = Instant::now() + wait;
+        let mut chunk = [0; 4096];
+        while Instant::now() < deadline {
+            match self.stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => panic!("{error}"),
+            }
+        }
+        self.stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        bytes
     }
 
     fn send(&mut self, frame: &Frame) {
@@ -99,6 +132,30 @@ impl Drop for StopOnDrop<'_> {
 fn with_server(test: impl FnOnce(SocketAddr, &Queues<'_>)) {
     with_server_config(&config(), test);
 }
+
+fn with_server_offering(offer: HeartBeatOffer, test: impl FnOnce(SocketAddr)) {
+    let keyspace = MemoryKeyspace::default();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = AtomicBool::new(false);
+    let config = config();
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            serve_offering(&keyspace, &listener, &config, offer, &|| {
+                stop.load(Ordering::Relaxed)
+            })
+        });
+        let stopping = StopOnDrop(&stop);
+        test(address);
+        drop(stopping);
+        server.join().unwrap().unwrap();
+    });
+}
+
+const QUICK_HEART_BEATS: HeartBeatOffer = HeartBeatOffer {
+    send: Duration::from_millis(100),
+    expect: Duration::from_millis(100),
+};
 
 fn with_server_config(config: &ServerConfig, test: impl FnOnce(SocketAddr, &Queues<'_>)) {
     let keyspace = MemoryKeyspace::default();
@@ -414,4 +471,119 @@ fn a_small_budget_delivers_every_queued_message_to_every_subscription_without_re
         assert_eq!(untouched[0].receive_count, 1);
     });
     assert_eq!(budget.used_bytes(), 0);
+}
+
+#[test]
+fn heart_beats_are_negotiated_as_the_specification_says() {
+    let standard = HeartBeatOffer::STANDARD;
+    let seconds = |count| Some(Duration::from_secs(count));
+    assert_eq!(negotiate(standard, None), Some(HeartBeats::default()));
+    assert_eq!(negotiate(standard, Some("0,0")), Some(HeartBeats::default()));
+    assert_eq!(
+        negotiate(standard, Some("5000,20000")),
+        Some(HeartBeats {
+            send_every: seconds(20),
+            silence_limit: seconds(20),
+        })
+    );
+    assert_eq!(
+        negotiate(standard, Some("30000, 1000")),
+        Some(HeartBeats {
+            send_every: seconds(10),
+            silence_limit: seconds(60),
+        })
+    );
+    assert_eq!(
+        negotiate(standard, Some("0,1")),
+        Some(HeartBeats {
+            send_every: seconds(10),
+            silence_limit: None,
+        })
+    );
+    let silent = HeartBeatOffer {
+        send: Duration::ZERO,
+        expect: Duration::ZERO,
+    };
+    assert_eq!(
+        negotiate(silent, Some("1000,1000")),
+        Some(HeartBeats::default())
+    );
+    for malformed in ["", "10", "a,b", "-1,0", "1,2,3", "99999999999999999999,0"] {
+        assert_eq!(negotiate(standard, Some(malformed)), None, "{malformed}");
+    }
+}
+
+#[test]
+fn connected_offers_ten_second_heart_beats_and_a_malformed_header_is_refused() {
+    with_server(|address, _| {
+        let (_, reply) = Client::connecting(address, Some("0,0"));
+        assert_eq!(reply.command, "CONNECTED", "{reply:?}");
+        assert_eq!(reply.header("heart-beat"), Some("10000,10000"));
+        let (_, refusal) = Client::connecting(address, Some("often"));
+        assert_eq!(refusal.command, "ERROR", "{refusal:?}");
+        assert!(
+            String::from_utf8_lossy(&refusal.body).contains("heart-beat"),
+            "{refusal:?}"
+        );
+    });
+}
+
+#[test]
+fn the_server_sends_heart_beats_only_to_a_client_that_wants_them() {
+    with_server_offering(QUICK_HEART_BEATS, |address| {
+        let (mut wanting, reply) = Client::connecting(address, Some("0,50"));
+        assert_eq!(reply.header("heart-beat"), Some("100,100"));
+        let beats = wanting.bytes_within(Duration::from_millis(700));
+        assert!(
+            beats.len() >= 3 && beats.iter().all(|&byte| byte == b'\n'),
+            "{beats:?}"
+        );
+        let (mut quiet, _) = Client::connecting(address, Some("0,0"));
+        assert_eq!(quiet.bytes_within(Duration::from_millis(400)), b"");
+        quiet.receipt(Frame::new("DISCONNECT"), "bye");
+    });
+}
+
+#[test]
+fn a_silent_client_is_dropped_after_twice_the_agreed_interval() {
+    with_server_offering(QUICK_HEART_BEATS, |address| {
+        let (mut silent, _) = Client::connecting(address, Some("60,0"));
+        let started = Instant::now();
+        let mut chunk = [0; 64];
+        let closed = loop {
+            match silent.stream.read(&mut chunk) {
+                Ok(0) | Err(_) => break started.elapsed(),
+                Ok(_) => {}
+            }
+        };
+        assert!(
+            closed >= Duration::from_millis(200) && closed < Duration::from_secs(4),
+            "{closed:?}"
+        );
+    });
+}
+
+#[test]
+fn a_client_sending_heart_beats_stays_connected() {
+    with_server_offering(QUICK_HEART_BEATS, |address| {
+        let (mut talking, _) = Client::connecting(address, Some("60,0"));
+        for _ in 0..12 {
+            talking.stream.write_all(b"\n").unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        talking.receipt(
+            Frame::new("SEND")
+                .with("destination", "/topic/pulse")
+                .with_body(b"alive"),
+            "still-here",
+        );
+        let (mut free, _) = Client::connecting(address, Some("0,0"));
+        std::thread::sleep(Duration::from_millis(500));
+        free.receipt(
+            Frame::new("SEND")
+                .with("destination", "/topic/pulse")
+                .with_body(b"no limit"),
+            "no-limit",
+        );
+    });
 }

@@ -254,6 +254,7 @@ impl CommandName {
             | OptionName::LogSlowStatements
             | OptionName::StatementStatistics
             | OptionName::IdleTimeout
+            | OptionName::TcpKeepalive
             | OptionName::SocketDir
             | OptionName::MysqlSocket
             | OptionName::TlsCertificate
@@ -439,6 +440,7 @@ enum OptionName {
     LogSlowStatements,
     StatementStatistics,
     IdleTimeout,
+    TcpKeepalive,
     SocketDir,
     MysqlSocket,
     TlsCertificate,
@@ -548,6 +550,7 @@ impl OptionName {
             b"log-slow-statements" => Self::LogSlowStatements,
             b"statement-statistics" => Self::StatementStatistics,
             b"idle-timeout" => Self::IdleTimeout,
+            b"tcp-keepalive" => Self::TcpKeepalive,
             b"socket-dir" => Self::SocketDir,
             b"mysql-socket" => Self::MysqlSocket,
             b"tls-certificate" => Self::TlsCertificate,
@@ -844,6 +847,7 @@ pub(crate) struct ServeOptions {
     pub(crate) max_connections: Option<usize>,
     pub(crate) max_connection_memory: Option<usize>,
     pub(crate) idle_timeout_seconds: Option<u64>,
+    pub(crate) tcp_keepalive_seconds: Option<u64>,
     pub(crate) log_slow_statements_ms: Option<u64>,
     pub(crate) statement_statistics: Option<usize>,
     pub(crate) socket_dir: Option<PathBuf>,
@@ -1478,6 +1482,19 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     ))
                 })?;
                 request.serve.idle_timeout_seconds = Some(seconds);
+            }
+            OptionName::TcpKeepalive => {
+                let seconds = parse_whole_number(value.as_encoded_bytes())
+                    .filter(|&seconds| seconds <= eggdb_platform::TcpKeepAlive::MAX_SECONDS)
+                    .ok_or_else(|| {
+                        usage(format!(
+                            "{} needs a whole number of seconds up to {}, 0 for no keep-alives, not '{}'",
+                            option.spelled,
+                            eggdb_platform::TcpKeepAlive::MAX_SECONDS,
+                            shown(value)
+                        ))
+                    })?;
+                request.serve.tcp_keepalive_seconds = Some(seconds);
             }
             OptionName::LogSlowStatements => {
                 let milliseconds =

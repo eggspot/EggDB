@@ -240,3 +240,152 @@ pub(super) fn usage_privileges_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value
     }
     rows
 }
+
+impl Viewer {
+    fn enables(&self, role: &str) -> bool {
+        match self {
+            Self::Grantor => true,
+            Self::EnabledRoles(enabled) => enabled.contains(role),
+        }
+    }
+
+    fn is_grantor(&self) -> bool {
+        matches!(self, Self::Grantor)
+    }
+}
+
+const DATABASE_OWNER_ROLE: &str = "pg_database_owner";
+
+fn every_role_name(snapshot: &CatalogSnapshot) -> Vec<&str> {
+    let stored = |name: &str| snapshot.stored_roles.iter().any(|role| role.name == name);
+    let mut names = Vec::new();
+    if !stored(&snapshot.user) {
+        names.push(snapshot.user.as_str());
+    }
+    for (_, name) in crate::pg_catalog::PREDEFINED_ROLES {
+        if name != snapshot.user && !stored(name) {
+            names.push(name);
+        }
+    }
+    names.extend(snapshot.stored_roles.iter().map(|role| role.name.as_str()));
+    names
+}
+
+/// `enabled_roles`: the current user and every role it belongs to, directly or through other
+/// roles; a superuser session uses every role, as PostgreSQL's `pg_has_role` answers it.
+pub(super) fn enabled_roles_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let viewer = Viewer::of(snapshot);
+    every_role_name(snapshot)
+        .into_iter()
+        .filter(|name| viewer.enables(name))
+        .map(|name| {
+            InformationRow::new(InformationRelation::EnabledRoles)
+                .set("role_name", identifier(name))
+                .done()
+        })
+        .collect()
+}
+
+fn applicable_role_row(grantee: &str, role: &str) -> Vec<Value> {
+    InformationRow::new(InformationRelation::ApplicableRoles)
+        .set("grantee", identifier(grantee))
+        .set("role_name", identifier(role))
+        .set("is_grantable", yes_or_no(false))
+        .done()
+}
+
+/// `applicable_roles`: each membership whose member is an enabled role of the current user, and
+/// for a superuser session also the database owner's implicit membership in
+/// `pg_database_owner`. No membership carries `ADMIN OPTION`, since only superusers grant roles.
+pub(super) fn applicable_roles_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let viewer = Viewer::of(snapshot);
+    let mut rows = Vec::new();
+    for member in &snapshot.stored_roles {
+        if !viewer.enables(&member.name) {
+            continue;
+        }
+        for role in &member.member_of {
+            rows.push(applicable_role_row(&member.name, role));
+        }
+    }
+    if viewer.is_grantor() {
+        rows.push(applicable_role_row(&snapshot.user, DATABASE_OWNER_ROLE));
+    }
+    rows
+}
+
+struct DefaultGrant<'a> {
+    grantee: &'a str,
+    is_grantable: bool,
+}
+
+fn default_grants<'a>(snapshot: &'a CatalogSnapshot, viewer: &Viewer) -> Vec<DefaultGrant<'a>> {
+    let mut grants = vec![DefaultGrant {
+        grantee: "PUBLIC",
+        is_grantable: false,
+    }];
+    if viewer.is_grantor() {
+        grants.push(DefaultGrant {
+            grantee: &snapshot.user,
+            is_grantable: true,
+        });
+    }
+    grants
+}
+
+/// `routine_privileges`: `EXECUTE` on every routine, which `PUBLIC` holds by PostgreSQL's
+/// default and EggDB does not check, and, for a superuser session, the owner's own `EXECUTE`
+/// with its grant option, in the order `aclexplode(acldefault('f', proowner))` lists them.
+pub(super) fn routine_privileges_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let viewer = Viewer::of(snapshot);
+    let grants = default_grants(snapshot, &viewer);
+    let mut rows = Vec::new();
+    for routine in &snapshot.routines {
+        let specific = super::specific_name(routine);
+        for grant in &grants {
+            rows.push(
+                InformationRow::new(InformationRelation::RoutinePrivileges)
+                    .set("grantor", identifier(&snapshot.user))
+                    .set("grantee", identifier(grant.grantee))
+                    .set("specific_catalog", identifier(&snapshot.database))
+                    .set("specific_schema", identifier(&routine.schema))
+                    .set("specific_name", identifier(&specific))
+                    .set("routine_catalog", identifier(&snapshot.database))
+                    .set("routine_schema", identifier(&routine.schema))
+                    .set("routine_name", identifier(&routine.name))
+                    .set("privilege_type", character_data("EXECUTE"))
+                    .set("is_grantable", yes_or_no(grant.is_grantable))
+                    .done(),
+            );
+        }
+    }
+    rows
+}
+
+/// `udt_privileges`: `TYPE USAGE` on every composite type, held by `PUBLIC` by PostgreSQL's
+/// default and never checked by EggDB, and, for a superuser session, by the owner with its grant
+/// option.
+pub(super) fn udt_privileges_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let viewer = Viewer::of(snapshot);
+    let grants = default_grants(snapshot, &viewer);
+    let mut rows = Vec::new();
+    for found in snapshot.user_types.types() {
+        if !matches!(found.body, crate::user_types::TypeBody::Composite(_)) {
+            continue;
+        }
+        for grant in &grants {
+            rows.push(
+                InformationRow::new(InformationRelation::UdtPrivileges)
+                    .set("grantor", identifier(&snapshot.user))
+                    .set("grantee", identifier(grant.grantee))
+                    .set("udt_catalog", identifier(&snapshot.database))
+                    .set("udt_schema", identifier(crate::schemas::schema_of(&found.name)))
+                    .set("udt_name", identifier(crate::schemas::base_name(&found.name)))
+                    .set("privilege_type", character_data("TYPE USAGE"))
+                    .set("is_grantable", yes_or_no(grant.is_grantable))
+                    .done(),
+            );
+        }
+    }
+    rows
+}

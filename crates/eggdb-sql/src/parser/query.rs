@@ -60,6 +60,49 @@ impl Parser<'_> {
             || (self.reads_values_lists()
                 && self.is_word_at(ahead, "values")
                 && (!self.mysql() || self.is_word_at(ahead + 1, "row")))
+            || self.at_table_query_at(ahead)
+    }
+
+    pub(super) fn at_table_query_at(&self, ahead: usize) -> bool {
+        (self.postgresql() || self.mysql())
+            && self.is_word_at(ahead, "table")
+            && matches!(
+                self.peek_kind_at(ahead + 1),
+                TokenKind::Word(_) | TokenKind::QuotedIdentifier(_)
+            )
+    }
+
+    fn table_query(&mut self) -> SqlResult<Select> {
+        let position = self.position();
+        self.expect_word("table")?;
+        let only = self.postgresql() && self.take_word("only");
+        let parenthesized = only && self.take(&TokenKind::LeftParen);
+        let name = self.table_name()?;
+        if parenthesized {
+            self.expect(&TokenKind::RightParen)?;
+        } else if self.postgresql() && !only {
+            self.take_operator("*");
+        }
+        Ok(Select {
+            distinct: false,
+            items: vec![crate::ast::SelectItem::Wildcard {
+                qualifier: None,
+                position,
+            }],
+            from: Some(crate::ast::FromClause {
+                first: TableReference::named(name, None),
+                joins: Vec::new(),
+            }),
+            filter: None,
+            group_by: Vec::new(),
+            grouping_sets: None,
+            distinct_on: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            source_row_limit: None,
+        })
     }
 
     fn reads_values_lists(&self) -> bool {
@@ -526,6 +569,9 @@ impl Parser<'_> {
         if self.reads_values_lists() && self.is_word("values") {
             return Ok(SetExpr::Select(Box::new(self.values_list()?)));
         }
+        if self.at_table_query_at(0) {
+            return Ok(SetExpr::Select(Box::new(self.table_query()?)));
+        }
         if !self.is_word("select") {
             if self.is_word("values") || self.is_word("table") {
                 return Err(self.not_supported("a VALUES or TABLE statement"));
@@ -563,7 +609,7 @@ impl Parser<'_> {
                     self.expect_word("last")?;
                     Some(false)
                 }
-            } else if self.mysql() {
+            } else if self.mysql() || self.sqlite() || self.sqlserver() {
                 Some(!descending)
             } else {
                 None
@@ -745,6 +791,7 @@ impl Parser<'_> {
                 alias,
                 derived: None,
                 generated: Some(Box::new(GeneratedTable::Values(list))),
+                partition_selection: None,
             });
         }
         Ok(TableReference {
@@ -758,6 +805,7 @@ impl Parser<'_> {
                 hierarchy: None,
             })),
             generated: None,
+            partition_selection: None,
         })
     }
 

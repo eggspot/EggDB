@@ -3910,6 +3910,69 @@ SELECT RANK(15500) WITHIN GROUP (ORDER BY salary, commission_pct) FROM emp321
 ok
 DROP TABLE emp321
 
+chapter "REGR_ (Linear Regression) Functions", "CORR", "COVAR_POP", "COVAR_SAMP": the least-squares line through the non-null (expr1, expr2) pairs, NULL for too few rows, also as analytic functions
+ok
+CREATE TABLE regr340 (g NUMBER, y NUMBER, x NUMBER)
+
+ok
+INSERT INTO regr340 VALUES (1, 3, 1)
+
+ok
+INSERT INTO regr340 VALUES (1, 5, 2)
+
+ok
+INSERT INTO regr340 VALUES (1, 7, 3)
+
+ok
+INSERT INTO regr340 VALUES (1, 9, 4)
+
+ok
+INSERT INTO regr340 VALUES (1, NULL, 5)
+
+ok
+INSERT INTO regr340 VALUES (2, 4, 2)
+
+rows
+SELECT REGR_COUNT(y, x) n, REGR_SLOPE(y, x) slope, REGR_INTERCEPT(y, x) icpt, REGR_R2(y, x) r2, CORR(y, x) c, COVAR_POP(y, x) cp FROM regr340 WHERE g = 1
+----
+N|SLOPE|ICPT|R2|C|CP
+4|2|1|1|1|2.5
+SELECT 1
+
+rows
+SELECT REGR_AVGX(y, x) ax, REGR_AVGY(y, x) ay, REGR_SXX(y, x) sxx, REGR_SYY(y, x) syy, REGR_SXY(y, x) sxy FROM regr340 WHERE g = 1
+----
+AX|AY|SXX|SYY|SXY
+2.5|6|5|20|10
+SELECT 1
+
+rows
+SELECT REGR_COUNT(y, x) n, REGR_SLOPE(y, x) slope, COVAR_SAMP(y, x) cs, COVAR_POP(y, x) cp, CORR(y, x) c FROM regr340 WHERE g = 2
+----
+N|SLOPE|CS|CP|C
+1|NULL|NULL|0|NULL
+SELECT 1
+
+rows
+SELECT x, REGR_SLOPE(y, x) OVER (ORDER BY x) slope FROM regr340 WHERE g = 1 ORDER BY x
+----
+X|SLOPE
+1|NULL
+2|2
+3|2
+4|2
+5|2
+SELECT 5
+
+error 42601 30482
+SELECT CORR(DISTINCT y, x) FROM regr340
+
+error 42601 909
+SELECT REGR_SLOPE(y) FROM regr340
+
+ok
+DROP TABLE regr340
+
 
 chapter "CREATE TABLE AS SELECT": the WHERE 1 = 0 idiom copies the shape and NOT NULL, and multi-column IN
 ok
@@ -3943,3 +4006,95 @@ DROP TABLE ctas323_shape
 
 ok
 DROP TABLE ctas323
+
+
+chapter "SELECT", "INSERT", "UPDATE", "DELETE" (partition_extension_clause): PARTITION (p) and PARTITION FOR (key) read and write one partition, ORA-14401 for a row outside it, ORA-02149 for an unknown partition, ORA-14501 for a table that is not partitioned
+ok
+CREATE TABLE sales337 (id NUMBER, region VARCHAR2(10)) PARTITION BY LIST (region) (PARTITION east VALUES ('E'), PARTITION west VALUES ('W'), PARTITION other VALUES (DEFAULT))
+
+ok
+INSERT INTO sales337 VALUES (1, 'E')
+
+ok
+INSERT INTO sales337 VALUES (2, 'W')
+
+ok
+INSERT INTO sales337 VALUES (3, 'N')
+
+rows
+SELECT id FROM sales337 PARTITION (east)
+----
+ID
+1
+SELECT 1
+
+rows
+SELECT s.id FROM sales337 PARTITION FOR ('Z') s
+----
+ID
+3
+SELECT 1
+
+error 23514 14401
+INSERT INTO sales337 PARTITION (east) VALUES (4, 'W')
+
+ok
+DELETE FROM sales337 PARTITION FOR ('W')
+
+rows
+SELECT id FROM sales337 ORDER BY id
+----
+ID
+1
+3
+SELECT 2
+
+error 42704 2149
+SELECT * FROM sales337 PARTITION (nowhere)
+
+ok
+CREATE TABLE plain337 (id NUMBER)
+
+error 42809 14501
+SELECT * FROM plain337 PARTITION (p)
+
+ok
+DROP TABLE plain337
+
+ok
+DROP TABLE sales337
+
+chapter "SET TRANSACTION": a read-only transaction refuses SELECT ... FOR UPDATE with ORA-01456 and takes LOCK TABLE
+ok
+COMMIT
+
+ok
+CREATE TABLE ro338 (id NUMBER PRIMARY KEY)
+
+ok
+INSERT INTO ro338 VALUES (1)
+
+ok
+COMMIT
+
+ok
+SET TRANSACTION READ ONLY
+
+error 25006 1456
+SELECT id FROM ro338 FOR UPDATE
+
+ok
+LOCK TABLE ro338 IN EXCLUSIVE MODE
+
+rows
+SELECT id FROM ro338
+----
+ID
+1
+SELECT 1
+
+ok
+COMMIT
+
+ok
+DROP TABLE ro338

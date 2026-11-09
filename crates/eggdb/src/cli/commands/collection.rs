@@ -6,6 +6,7 @@ use crate::cli::progress::ProgressLine;
 use crate::cli::render::{self, JsonObject};
 use crate::cli::reports;
 use eggdb::{CollectionStats, Database, DropProgress, ErrorKind};
+use eggdb_ui::text_width;
 use std::time::Duration;
 
 pub(super) struct CountedCollections {
@@ -208,7 +209,7 @@ pub(crate) fn listed_with_counts(stats: &[CollectionStats]) -> String {
         .collect();
     let name_width = stats
         .iter()
-        .map(|one| one.name.chars().count())
+        .map(|one| text_width(&one.name))
         .max()
         .unwrap_or(0);
     let count_width = counts
@@ -219,18 +220,21 @@ pub(crate) fn listed_with_counts(stats: &[CollectionStats]) -> String {
     stats
         .iter()
         .zip(&counts)
-        .map(|(one, count)| format!("{:<name_width$}  {count:>count_width$}\n", one.name))
+        .map(|(one, count)| {
+            let padding = " ".repeat(name_width - text_width(&one.name));
+            format!("{}{padding}  {count:>count_width$}\n", one.name)
+        })
         .collect()
 }
 
 fn drop_progress_line(name: &str, step: DropProgress) -> String {
     match step.entries {
-        Some(entries) => format!(
+        Some(entries) if entries > 0 => format!(
             "deleting collection {name}: {} of {}…",
             render::count(step.removed),
             render::entries(entries)
         ),
-        None => format!(
+        _ => format!(
             "deleting collection {name}: {}…",
             render::entries(step.removed)
         ),
@@ -288,6 +292,38 @@ mod tests {
                 .map(|step| drop_progress_line("cache", *step))
                 .collect::<Vec<_>>(),
             ["deleting collection cache: 1 of 1 entry…"]
+        );
+    }
+
+    #[test]
+    fn the_list_pads_names_by_the_cells_they_take() {
+        let db = Database::in_memory().unwrap();
+        for name in ["日本", "ab"] {
+            db.create_collection(name).unwrap();
+        }
+        let stats: Vec<CollectionStats> = db.collection_stats().unwrap();
+        assert_eq!(
+            listed_with_counts(&stats),
+            "ab    no entries\n日本  no entries\n"
+        );
+    }
+
+    #[test]
+    fn a_drop_without_entries_left_to_count_never_reads_of_no_entries() {
+        let db = Database::in_memory().unwrap();
+        db.create_collection("cache").unwrap();
+        db.collection("cache").put("k", "v").unwrap();
+        let mut seen: Vec<DropProgress> = Vec::new();
+        db.drop_collection_with_progress("cache", |step| seen.push(step))
+            .unwrap();
+        let Some(step) = seen.first() else {
+            panic!("no progress");
+        };
+        let mut emptied = *step;
+        emptied.entries = Some(0);
+        assert_eq!(
+            drop_progress_line("cache", emptied),
+            "deleting collection cache: 1 entry…"
         );
     }
 

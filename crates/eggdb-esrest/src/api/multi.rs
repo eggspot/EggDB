@@ -33,7 +33,7 @@ fn text_of(node: &Node) -> Option<String> {
     }
 }
 
-fn flag_filter(request: &Request) -> SourceFilter {
+pub(super) fn flag_filter(request: &Request) -> SourceFilter {
     let includes =
         query_flag(request, "_source_includes").or_else(|| query_flag(request, "_source_include"));
     let excludes =

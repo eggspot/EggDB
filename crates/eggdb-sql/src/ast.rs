@@ -93,9 +93,11 @@ pub(crate) enum Statement {
     SqlServer(SqlServerStatement),
     Merge(Box<MergeStatement>),
     CreateTableAs(Box<CreateTableAs>),
+    CreateTableLike(Box<CreateTableLike>),
     MultitableInsert(Box<MultitableInsert>),
     AlterSession(Vec<(String, String)>),
     Discard(DiscardTarget),
+    Prepared(PreparedCommand),
     Cursor(CursorCommand),
     With(Box<WithStatement>),
     CreateType(Box<CreateType>),
@@ -450,6 +452,33 @@ pub(crate) struct CreateTableAs {
     pub(crate) with_data: bool,
     pub(crate) on_duplicate: OnDuplicate,
     pub(crate) on_commit: Option<OnCommit>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreateTableLike {
+    pub(crate) name: Name,
+    pub(crate) temporary: bool,
+    pub(crate) if_not_exists: bool,
+    pub(crate) source: Name,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PreparedCommand {
+    Prepare(PrepareStatement),
+    Execute(ExecutePrepared),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PrepareStatement {
+    pub(crate) name: Name,
+    pub(crate) parameter_types: Vec<SqlType>,
+    pub(crate) text: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ExecutePrepared {
+    pub(crate) name: Name,
+    pub(crate) arguments: Vec<Expr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -959,6 +988,11 @@ pub(crate) enum AlterAction {
         column: Name,
         placement: ColumnPlacement,
     },
+    AddIndex(IndexSpec),
+    RenameIndex {
+        from: Name,
+        to: Name,
+    },
     Accepted,
 }
 
@@ -999,6 +1033,7 @@ pub(crate) enum ExplainStyle {
     Plan,
     QueryPlan,
     Tree,
+    Json,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1238,6 +1273,7 @@ pub(crate) struct TableReference {
     pub(crate) alias: Option<String>,
     pub(crate) derived: Option<Box<DerivedTable>>,
     pub(crate) generated: Option<Box<GeneratedTable>>,
+    pub(crate) partition_selection: Option<Box<PartitionSelection>>,
 }
 
 impl TableReference {
@@ -1247,8 +1283,15 @@ impl TableReference {
             alias,
             derived: None,
             generated: None,
+            partition_selection: None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PartitionSelection {
+    Named(Vec<Name>),
+    HoldingKey { values: Vec<Expr>, position: usize },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1618,6 +1661,31 @@ pub(crate) enum OnDuplicate {
     Update(Vec<(Name, Expr)>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConflictResolution {
+    Rollback,
+    Abort,
+    Fail,
+    Ignore,
+    Replace,
+}
+
+impl ConflictResolution {
+    pub(crate) fn into_insert_fields(self) -> (OnDuplicate, bool, bool) {
+        match self {
+            Self::Rollback => (OnDuplicate::Fail, true, false),
+            Self::Abort => (OnDuplicate::Fail, false, false),
+            Self::Fail => (OnDuplicate::Fail, false, true),
+            Self::Ignore => (OnDuplicate::Ignore, false, false),
+            Self::Replace => (OnDuplicate::Replace, false, false),
+        }
+    }
+
+    pub(crate) fn resolves_row_by_row(self) -> bool {
+        matches!(self, Self::Fail | Self::Ignore | Self::Replace)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Update {
     pub(crate) table: TableReference,
@@ -1625,6 +1693,7 @@ pub(crate) struct Update {
     pub(crate) filter: Option<Expr>,
     pub(crate) returning: Option<Vec<SelectItem>>,
     pub(crate) from: Option<JoinedTables>,
+    pub(crate) conflict_resolution: ConflictResolution,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1848,10 +1917,22 @@ pub(crate) enum AggregateFunction {
     DenseRank,
     PercentRank,
     CumeDist,
+    RegrCount,
+    RegrSxx,
+    RegrSyy,
+    RegrSxy,
+    RegrAvgx,
+    RegrAvgy,
+    RegrR2,
+    RegrSlope,
+    RegrIntercept,
+    CovarPop,
+    CovarSamp,
+    Corr,
 }
 
 impl AggregateFunction {
-    pub(crate) const ALL: [Self; 30] = [
+    pub(crate) const ALL: [Self; 42] = [
         Self::Count,
         Self::Sum,
         Self::Avg,
@@ -1882,7 +1963,55 @@ impl AggregateFunction {
         Self::DenseRank,
         Self::PercentRank,
         Self::CumeDist,
+        Self::RegrCount,
+        Self::RegrSxx,
+        Self::RegrSyy,
+        Self::RegrSxy,
+        Self::RegrAvgx,
+        Self::RegrAvgy,
+        Self::RegrR2,
+        Self::RegrSlope,
+        Self::RegrIntercept,
+        Self::CovarPop,
+        Self::CovarSamp,
+        Self::Corr,
     ];
+
+    pub(crate) fn bivariate_named(name: &str) -> Option<Self> {
+        Some(match name {
+            "regr_count" => Self::RegrCount,
+            "regr_sxx" => Self::RegrSxx,
+            "regr_syy" => Self::RegrSyy,
+            "regr_sxy" => Self::RegrSxy,
+            "regr_avgx" => Self::RegrAvgx,
+            "regr_avgy" => Self::RegrAvgy,
+            "regr_r2" => Self::RegrR2,
+            "regr_slope" => Self::RegrSlope,
+            "regr_intercept" => Self::RegrIntercept,
+            "covar_pop" => Self::CovarPop,
+            "covar_samp" => Self::CovarSamp,
+            "corr" => Self::Corr,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn is_bivariate(self) -> bool {
+        matches!(
+            self,
+            Self::RegrCount
+                | Self::RegrSxx
+                | Self::RegrSyy
+                | Self::RegrSxy
+                | Self::RegrAvgx
+                | Self::RegrAvgy
+                | Self::RegrR2
+                | Self::RegrSlope
+                | Self::RegrIntercept
+                | Self::CovarPop
+                | Self::CovarSamp
+                | Self::Corr
+        )
+    }
 
     pub(crate) fn hypothetical_named(name: &str) -> Option<Self> {
         Some(match name {
@@ -1989,6 +2118,18 @@ impl AggregateFunction {
             Self::DenseRank => "dense_rank",
             Self::PercentRank => "percent_rank",
             Self::CumeDist => "cume_dist",
+            Self::RegrCount => "regr_count",
+            Self::RegrSxx => "regr_sxx",
+            Self::RegrSyy => "regr_syy",
+            Self::RegrSxy => "regr_sxy",
+            Self::RegrAvgx => "regr_avgx",
+            Self::RegrAvgy => "regr_avgy",
+            Self::RegrR2 => "regr_r2",
+            Self::RegrSlope => "regr_slope",
+            Self::RegrIntercept => "regr_intercept",
+            Self::CovarPop => "covar_pop",
+            Self::CovarSamp => "covar_samp",
+            Self::Corr => "corr",
         }
     }
 

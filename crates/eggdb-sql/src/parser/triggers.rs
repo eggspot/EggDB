@@ -963,6 +963,7 @@ impl<'t> Parser<'t> {
             generated: Some(Box::new(GeneratedTable::Variable(name.text.clone()))),
             name,
             derived: None,
+            partition_selection: None,
         }))
     }
 }

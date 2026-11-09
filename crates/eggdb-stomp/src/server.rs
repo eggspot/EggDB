@@ -2,6 +2,7 @@ use crate::frame::{Frame, next_frame, pending_frame_bytes};
 use eggdb_keyspace::Keyspace;
 use eggdb_platform::connection_limits::{MemoryBudget, Reservation};
 use eggdb_queues::{QueueError, Queues};
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -23,6 +24,63 @@ const VERSIONS: [&str; 3] = ["1.2", "1.1", "1.0"];
 const MESSAGE_HEADER_BYTES: usize = 256;
 pub(crate) const OUT_OF_MEMORY_BUDGET: &str =
     "the server's connections already hold their memory budget";
+const HEART_BEAT: &[u8] = b"\n";
+
+/// The heart-beats the server offers in `CONNECTED` (STOMP 1.1 and 1.2): `send` is how often it
+/// can send them (the specification's `sx`), `expect` how often it wants the client's (`sy`).
+/// Zero turns that direction off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HeartBeatOffer {
+    pub(crate) send: Duration,
+    pub(crate) expect: Duration,
+}
+
+impl HeartBeatOffer {
+    pub(crate) const STANDARD: Self = Self {
+        send: Duration::from_secs(10),
+        expect: Duration::from_secs(10),
+    };
+
+    fn header(self) -> String {
+        format!("{},{}", self.send.as_millis(), self.expect.as_millis())
+    }
+}
+
+/// What a connection agreed to: how often the server sends a heart-beat when it has sent
+/// nothing else, and how long the client may stay silent before the server drops it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct HeartBeats {
+    pub(crate) send_every: Option<Duration>,
+    pub(crate) silence_limit: Option<Duration>,
+}
+
+fn client_heart_beat(header: &str) -> Option<(u64, u64)> {
+    let (send, expect) = header.split_once(',')?;
+    Some((send.trim().parse().ok()?, expect.trim().parse().ok()?))
+}
+
+/// The heart-beats agreed from the server's `offer` and the client's `heart-beat` header
+/// (`cx,cy`): the server sends every max(sx, cy) when both are above zero, and drops a client
+/// silent for twice max(cx, sy) when both are above zero; `None` when the header is not two
+/// non-negative integers.
+pub(crate) fn negotiate(offer: HeartBeatOffer, header: Option<&str>) -> Option<HeartBeats> {
+    let (client_send, client_expect) = match header {
+        Some(text) => client_heart_beat(text)?,
+        None => (0, 0),
+    };
+    let send_every = (client_expect > 0 && !offer.send.is_zero())
+        .then(|| offer.send.max(Duration::from_millis(client_expect)));
+    let silence_limit = (client_send > 0 && !offer.expect.is_zero()).then(|| {
+        offer
+            .expect
+            .max(Duration::from_millis(client_send))
+            .saturating_mul(2)
+    });
+    Some(HeartBeats {
+        send_every,
+        silence_limit,
+    })
+}
 
 /// How the STOMP server runs.
 #[derive(Clone)]
@@ -54,11 +112,13 @@ struct TopicSubscriber {
     writer: SharedWriter,
 }
 
-/// What every connection shares: the durable queues and the current topic subscribers.
+/// What every connection shares: the durable queues, the current topic subscribers and the
+/// heart-beats the server offers.
 pub(crate) struct Broker<'k> {
     queues: Queues<'k>,
     topics: Mutex<BTreeMap<String, Vec<TopicSubscriber>>>,
     next_topic_message: AtomicU64,
+    heart_beat_offer: HeartBeatOffer,
 }
 
 fn now_ms() -> u64 {
@@ -94,11 +154,15 @@ fn queue_failure(error: &QueueError) -> String {
 }
 
 impl<'k> Broker<'k> {
-    pub(crate) fn new(keyspace: &'k (dyn Keyspace + Sync)) -> Self {
+    pub(crate) fn new(
+        keyspace: &'k (dyn Keyspace + Sync),
+        heart_beat_offer: HeartBeatOffer,
+    ) -> Self {
         Self {
             queues: Queues::new(keyspace),
             topics: Mutex::new(BTreeMap::new()),
             next_topic_message: AtomicU64::new(1),
+            heart_beat_offer,
         }
     }
 
@@ -210,6 +274,8 @@ enum Next {
 struct Session<'b, 'k> {
     broker: &'b Broker<'k>,
     config: &'b ServerConfig,
+    heart_beats: HeartBeats,
+    last_sent: Cell<Instant>,
     staged_held: Reservation<'b>,
     id: u64,
     writer: SharedWriter,
@@ -222,10 +288,23 @@ struct Session<'b, 'k> {
 
 impl Session<'_, '_> {
     fn send(&self, frame: &Frame) -> io::Result<()> {
+        self.send_bytes(&frame.encode())
+    }
+
+    fn send_bytes(&self, bytes: &[u8]) -> io::Result<()> {
         self.writer
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .write_all(&frame.encode())
+            .write_all(bytes)?;
+        self.last_sent.set(Instant::now());
+        Ok(())
+    }
+
+    fn send_heart_beat_when_due(&self) -> io::Result<()> {
+        match self.heart_beats.send_every {
+            Some(every) if self.last_sent.get().elapsed() >= every => self.send_bytes(HEART_BEAT),
+            _ => Ok(()),
+        }
     }
 
     fn refuse(&self, message: &str, request: Option<&Frame>) -> io::Result<Next> {
@@ -266,10 +345,18 @@ impl Session<'_, '_> {
                 None,
             );
         }
+        let offer = self.broker.heart_beat_offer;
+        let Some(heart_beats) = negotiate(offer, frame.header("heart-beat")) else {
+            return self.refuse(
+                "the heart-beat header must be two non-negative integers separated by a comma, such as 10000,10000",
+                None,
+            );
+        };
+        self.heart_beats = heart_beats;
         self.connected = true;
         let connected = Frame::new("CONNECTED")
             .with("version", version)
-            .with("heart-beat", "0,0")
+            .with("heart-beat", &offer.header())
             .with("server", "EggDB")
             .with("session", &self.id.to_string());
         self.send(&connected)?;
@@ -715,6 +802,7 @@ impl Session<'_, '_> {
 
     fn run(&mut self, mut reader: impl Read, stop: &(dyn Fn() -> bool + Sync)) -> io::Result<()> {
         let started = Instant::now();
+        let mut last_received = started;
         let config = self.config;
         let mut held = config.memory_budget.empty_reservation();
         let mut buffer = Vec::new();
@@ -735,11 +823,23 @@ impl Session<'_, '_> {
                     }
                 }
             }
+            let heart_beats = buffer
+                .iter()
+                .take_while(|&&byte| byte == b'\n' || byte == b'\r')
+                .count();
+            buffer.drain(..heart_beats);
             if stop() || (!self.connected && started.elapsed() > CONNECT_WAIT) {
                 return Ok(());
             }
-            if self.connected && matches!(self.pump()?, Next::Close) {
-                return Ok(());
+            if self.connected {
+                let silent_too_long = self
+                    .heart_beats
+                    .silence_limit
+                    .is_some_and(|limit| last_received.elapsed() > limit);
+                if silent_too_long || matches!(self.pump()?, Next::Close) {
+                    return Ok(());
+                }
+                self.send_heart_beat_when_due()?;
             }
             if !held.hold_if_large(pending_frame_bytes(&buffer)) {
                 self.refuse(OUT_OF_MEMORY_BUDGET, None)?;
@@ -754,6 +854,7 @@ impl Session<'_, '_> {
                         return Ok(());
                     }
                     buffer.extend_from_slice(&chunk[..read]);
+                    last_received = Instant::now();
                 }
                 Err(error)
                     if matches!(
@@ -779,6 +880,8 @@ pub(crate) fn serve_stream(
     let mut session = Session {
         broker,
         config,
+        heart_beats: HeartBeats::default(),
+        last_sent: Cell::new(Instant::now()),
         staged_held: config.memory_budget.empty_reservation(),
         id,
         writer,
@@ -802,8 +905,18 @@ pub fn serve(
     config: &ServerConfig,
     stop: &(dyn Fn() -> bool + Sync),
 ) -> io::Result<()> {
+    serve_offering(keyspace, listener, config, HeartBeatOffer::STANDARD, stop)
+}
+
+pub(crate) fn serve_offering(
+    keyspace: &(dyn Keyspace + Sync),
+    listener: &TcpListener,
+    config: &ServerConfig,
+    offer: HeartBeatOffer,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> io::Result<()> {
     listener.set_nonblocking(true)?;
-    let broker = Broker::new(keyspace);
+    let broker = Broker::new(keyspace, offer);
     let active = AtomicUsize::new(0);
     let next_id = AtomicU64::new(1);
     std::thread::scope(|scope| {

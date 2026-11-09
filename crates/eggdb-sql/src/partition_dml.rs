@@ -3,13 +3,18 @@ use crate::ast::{
     TableReference, Update,
 };
 use crate::constraints::{PreparedChecks, RowChange};
-use crate::encoding::TableDefinition;
+use crate::dialect::Dialect;
+use crate::encoding::{
+    IdentitySeed, IndexMethod, TableDefinition, decode_key_values, decode_row, index_prefix,
+    prefix_end, rows_prefix,
+};
 use crate::error::{SqlError, SqlResult};
 use crate::eval::{Evaluator, Scope};
 use crate::execute::{self, RowUpdate, TableCache};
-use crate::partitions::Partitioned;
+use crate::partition_selection::SelectedPartitions;
+use crate::partitions::{PartitionCatalog, Partitioned};
 use crate::session::QueryResult;
-use crate::store::KeyValueWrite;
+use crate::store::{KeyValueRead, KeyValueWrite, ScanDirection};
 use crate::types::{Conversion, Value, convert};
 use std::sync::Arc;
 
@@ -113,6 +118,209 @@ fn evaluated(expr: &Expr, table: &TableDefinition, column: usize) -> SqlResult<V
     convert(value, sql_type, Conversion::Assignment)
 }
 
+struct ParentIdentity {
+    column: usize,
+    seed: IdentitySeed,
+    next: Option<i64>,
+    first_generated: Option<u64>,
+    ignores_given: bool,
+}
+
+impl ParentIdentity {
+    fn of(table: &TableDefinition, overriding: Option<Overriding>) -> Option<Self> {
+        Some(Self {
+            column: table.auto_increment_column()?,
+            seed: table.identity_seed(),
+            next: None,
+            first_generated: None,
+            ignores_given: overriding == Some(Overriding::UserValue),
+        })
+    }
+
+    fn fill(
+        &mut self,
+        reader: &dyn KeyValueRead,
+        catalog: &PartitionCatalog,
+        table: &TableDefinition,
+        columns: &mut Vec<usize>,
+        values: &mut Vec<InsertValue>,
+    ) -> SqlResult<()> {
+        let Some(column) = table.columns.get(self.column) else {
+            return Ok(());
+        };
+        let slot = columns.iter().position(|&target| target == self.column);
+        let given = match slot.and_then(|at| values.get(at)) {
+            Some(InsertValue::Expr(expr)) if !self.ignores_given => {
+                Some(evaluated(expr, table, self.column)?)
+            }
+            _ => None,
+        };
+        let next = match self.next {
+            Some(next) => next,
+            None => self
+                .seed
+                .next_after(furthest_identity_value(
+                    reader,
+                    catalog,
+                    table,
+                    self.column,
+                    self.seed,
+                )?)
+                .ok_or_else(|| execute::auto_increment_exhausted(column))?,
+        };
+        let given_number = given.as_ref().and_then(Value::as_integer);
+        let kept = match given_number {
+            Some(0) => crate::constraints::current_dialect() != Dialect::MySql,
+            other => other.is_some(),
+        };
+        let value = match (given, given_number) {
+            (Some(value), Some(number)) if kept => {
+                self.next = match self.seed.next_after(Some(number)) {
+                    Some(after) if self.seed.is_beyond(after, next) => Some(after),
+                    Some(_) => Some(next),
+                    None => None,
+                };
+                value
+            }
+            _ => {
+                let value = convert(Value::BigInt(next), column.sql_type, Conversion::Assignment)
+                    .map_err(|_| execute::auto_increment_exhausted(column))?;
+                self.first_generated.get_or_insert(next as u64);
+                self.next = next.checked_add(self.seed.increment);
+                value
+            }
+        };
+        match slot {
+            Some(at) => {
+                if let Some(written) = values.get_mut(at) {
+                    *written = InsertValue::Expr(constant(value));
+                }
+            }
+            None => {
+                columns.push(self.column);
+                values.push(InsertValue::Expr(constant(value)));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn furthest_in_partition(
+    reader: &dyn KeyValueRead,
+    table: &TableDefinition,
+    column: usize,
+    seed: IdentitySeed,
+) -> SqlResult<Option<i64>> {
+    let direction = if seed.scans_backward() {
+        ScanDirection::Backward
+    } else {
+        ScanDirection::Forward
+    };
+    let rows = rows_prefix(table.id);
+    let mut found = None;
+    if table.primary_key.first() == Some(&column) {
+        reader.scan(&rows, &prefix_end(&rows), direction, &mut |_, bytes| {
+            found = decode_row(bytes, &table.columns)?
+                .get(column)
+                .and_then(Value::as_integer);
+            Ok(found.is_none())
+        })?;
+        return Ok(found);
+    }
+    let Some(sql_type) = table.columns.get(column).map(|definition| definition.sql_type) else {
+        return Ok(None);
+    };
+    if let Some(index) = table.indexes.iter().find(|index| {
+        index.columns.first() == Some(&column)
+            && index.method == IndexMethod::BTree
+            && index.sort_options.is_default()
+    }) {
+        let entries = index_prefix(table.id, index.id);
+        let mut decoded = Vec::with_capacity(1);
+        reader.scan(
+            &entries,
+            &prefix_end(&entries),
+            direction,
+            &mut |key, _| {
+                decoded.clear();
+                let Some(values) = key.get(entries.len()..) else {
+                    return Err(crate::encoding::corrupt("index entry"));
+                };
+                decode_key_values(values, std::iter::once(sql_type), &mut decoded)?;
+                found = decoded.first().and_then(Value::as_integer);
+                Ok(found.is_none())
+            },
+        )?;
+        return Ok(found);
+    }
+    reader.scan(
+        &rows,
+        &prefix_end(&rows),
+        ScanDirection::Forward,
+        &mut |_, bytes| {
+            if let Some(value) = decode_row(bytes, &table.columns)?
+                .get(column)
+                .and_then(Value::as_integer)
+            {
+                found = Some(match found {
+                    Some(best) if !seed.is_beyond(value, best) => best,
+                    _ => value,
+                });
+            }
+            Ok(true)
+        },
+    )?;
+    Ok(found)
+}
+
+fn furthest_identity_value(
+    reader: &dyn KeyValueRead,
+    catalog: &PartitionCatalog,
+    table: &TableDefinition,
+    column: usize,
+    seed: IdentitySeed,
+) -> SqlResult<Option<i64>> {
+    let Some(name) = table.columns.get(column).map(|definition| definition.name.as_str()) else {
+        return Ok(None);
+    };
+    let mut furthest: Option<i64> = None;
+    for partition in catalog.descendants_of(&table.name) {
+        if catalog.key_of(&partition).is_some() {
+            continue;
+        }
+        let damaged = || crate::encoding::corrupt("partition tree");
+        let definition =
+            crate::partitions::stored_definition(reader, &partition)?.ok_or_else(damaged)?;
+        let at = definition.column_index(name).ok_or_else(damaged)?;
+        if let Some(value) = furthest_in_partition(reader, &definition, at, seed)? {
+            furthest = Some(match furthest {
+                Some(best) if !seed.is_beyond(value, best) => best,
+                _ => value,
+            });
+        }
+    }
+    Ok(furthest)
+}
+
+/// The value the identity or `AUTO_INCREMENT` column of `table` gives its next row: for a
+/// partitioned table, the one past the furthest value any of its partitions holds.
+pub(crate) fn next_identity_value(
+    reader: &dyn KeyValueRead,
+    catalog: &PartitionCatalog,
+    table: &TableDefinition,
+) -> SqlResult<Option<i64>> {
+    if catalog.key_of(&table.name).is_none() {
+        return execute::StoredRows::next_identity_value(reader, table);
+    }
+    let Some(column) = table.auto_increment_column() else {
+        return Ok(None);
+    };
+    let seed = table.identity_seed();
+    Ok(seed.next_after(furthest_identity_value(
+        reader, catalog, table, column, seed,
+    )?))
+}
+
 pub(crate) fn insert(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
@@ -134,16 +342,30 @@ pub(crate) fn insert(
             ));
         }
     };
+    execute::check_generated_always(table, &targets, rows, insert.overriding)?;
+    let mut identity = ParentIdentity::of(table, insert.overriding);
+    let catalog = if identity.is_some() || insert.table.partition_selection.is_some() {
+        Some(crate::partitions::catalog(writer, tables)?)
+    } else {
+        None
+    };
+    let selected = match &catalog {
+        Some(catalog) => SelectedPartitions::of_reference(catalog, table, &insert.table)?,
+        None => None,
+    };
     let mut groups: Vec<(String, Vec<usize>, Vec<Vec<InsertValue>>)> = Vec::new();
     let mut key_row = vec![Value::Null; table.columns.len()];
     let key_columns = partitioned.columns_read();
     for row in rows {
         let mut values: Vec<InsertValue> = row.clone();
         let mut columns = targets.clone();
+        if let (Some(identity), Some(catalog)) = (identity.as_mut(), catalog.as_deref()) {
+            identity.fill(&*writer, catalog, table, &mut columns, &mut values)?;
+        }
         for &key in &key_columns {
-            let value = match targets.iter().position(|&target| target == key) {
+            let value = match columns.iter().position(|&target| target == key) {
                 Some(at) => {
-                    let value = match row.get(at) {
+                    let value = match values.get(at) {
                         Some(InsertValue::Expr(expr)) => evaluated(expr, table, key)?,
                         Some(InsertValue::Default) | None => execute::default_of(table, key)?,
                     };
@@ -166,6 +388,12 @@ pub(crate) fn insert(
         let Some(child) = partitioned.route(&key_row)? else {
             return Err(partitioned.no_partition(&key_row));
         };
+        if let Some(selected) = &selected
+            && !selected.contains(child)
+        {
+            return Err(crate::partition_selection::row_outside_selection()
+                .at(insert.table.name.position));
+        }
         match groups
             .iter_mut()
             .find(|(name, group_columns, _)| name == child && *group_columns == columns)
@@ -200,7 +428,35 @@ pub(crate) fn insert(
         };
         merged.add(execute::insert(writer, tables, &routed)?);
     }
-    Ok(merged.finish("INSERT 0 0"))
+    let mut result = merged.finish("INSERT 0 0");
+    if let Some(identity) = identity {
+        result.last_insert_id = identity.first_generated;
+    }
+    Ok(result)
+}
+
+fn surviving_selected(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    partitioned: &Partitioned,
+    written: &TableReference,
+    filter: Option<&Expr>,
+) -> SqlResult<Vec<String>> {
+    let surviving = partitioned
+        .surviving(filter, &qualifiers(written))
+        .into_iter()
+        .map(str::to_owned);
+    if written.partition_selection.is_none() {
+        return Ok(surviving.collect());
+    }
+    let catalog = crate::partitions::catalog(reader, tables)?;
+    let damaged = || crate::encoding::corrupt("partition tree");
+    let table = tables
+        .table(reader, &partitioned.table)?
+        .ok_or_else(damaged)?;
+    let selected =
+        SelectedPartitions::of_reference(&catalog, &table, written)?.ok_or_else(damaged)?;
+    Ok(surviving.filter(|child| selected.contains(child)).collect())
 }
 
 pub(crate) fn update(
@@ -210,11 +466,13 @@ pub(crate) fn update(
     partitioned: &Partitioned,
     moved: Option<&mut Vec<MovedRow>>,
 ) -> SqlResult<QueryResult> {
-    let children: Vec<String> = partitioned
-        .surviving(update.filter.as_ref(), &qualifiers(&update.table))
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
+    let children = surviving_selected(
+        writer,
+        tables,
+        partitioned,
+        &update.table,
+        update.filter.as_ref(),
+    )?;
     let mut own_moves = Vec::new();
     let routes_moves = moved.is_none();
     let moved = moved.unwrap_or(&mut own_moves);
@@ -232,7 +490,15 @@ pub(crate) fn update(
         )?);
     }
     if routes_moves {
-        insert_moved_rows(writer, tables, &partitioned.table, own_moves)?;
+        let mut target = TableReference::named(
+            Name {
+                text: partitioned.table.clone(),
+                position: update.table.name.position,
+            },
+            None,
+        );
+        target.partition_selection = update.table.partition_selection.clone();
+        insert_moved_rows(writer, tables, target, own_moves)?;
     }
     Ok(merged.finish("UPDATE 0"))
 }
@@ -308,7 +574,7 @@ pub(crate) fn move_out(
 fn insert_moved_rows(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
-    target: &str,
+    target: TableReference,
     moved: Vec<MovedRow>,
 ) -> SqlResult<()> {
     let mut groups: Vec<(Arc<TableDefinition>, Vec<Vec<InsertValue>>)> = Vec::new();
@@ -335,13 +601,7 @@ fn insert_moved_rows(
             })
             .collect();
         let insert = Insert {
-            table: TableReference::named(
-                Name {
-                    text: target.to_owned(),
-                    position: 0,
-                },
-                None,
-            ),
+            table: target.clone(),
             columns: Some(columns),
             source: InsertSource::Values(rows),
             returning: None,
@@ -362,11 +622,13 @@ pub(crate) fn delete(
     delete: &Delete,
     partitioned: &Partitioned,
 ) -> SqlResult<QueryResult> {
-    let children: Vec<String> = partitioned
-        .surviving(delete.filter.as_ref(), &qualifiers(&delete.table))
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
+    let children = surviving_selected(
+        writer,
+        tables,
+        partitioned,
+        &delete.table,
+        delete.filter.as_ref(),
+    )?;
     let mut merged = Merged::default();
     for child in children {
         let routed = Delete {

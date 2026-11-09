@@ -685,7 +685,7 @@ fn power(base: &Value, exponent: &Value) -> SqlResult<Value> {
     }
 }
 
-fn square_root(value: &Value) -> SqlResult<Value> {
+pub(crate) fn square_root(value: &Value) -> SqlResult<Value> {
     let Some(number) = number_of(value)? else {
         return Ok(Value::Null);
     };

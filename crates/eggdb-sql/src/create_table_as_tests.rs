@@ -613,16 +613,19 @@ fn postgresql_create_table_as_takes_on_commit_and_refuses_storage_options() {
         fails(&mut session, "SELECT a FROM v2").state().code(),
         "42P01"
     );
-    for create in [
-        "CREATE TABLE v3 USING heap AS SELECT 1 AS a",
-        "CREATE TABLE v3 WITH (fillfactor = 70) AS SELECT 1 AS a",
-        "CREATE TABLE v3 (a) TABLESPACE pg_default AS SELECT 1",
-    ] {
-        assert_eq!(
-            fails(&mut session, create).state().code(),
-            "0A000",
-            "{create}"
-        );
+    for (number, create) in [
+        "CREATE TABLE v3_{n} USING heap AS SELECT 1 AS a",
+        "CREATE TABLE v3_{n} WITH (fillfactor = 70, autovacuum_enabled = off) AS SELECT 1 AS a",
+        "CREATE TABLE v3_{n} (a) TABLESPACE pg_default AS SELECT 1",
+        "CREATE TABLE v3_{n} WITHOUT OIDS AS SELECT 1 AS a",
+        "CREATE TABLE v3_{n} USING heap WITH (toast.autovacuum_enabled = false, oids = false) \
+         TABLESPACE pg_default AS SELECT 1 AS a",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let create = create.replace("{n}", &number.to_string());
+        assert_eq!(last(&mut session, &create), "SELECT 1", "{create}");
     }
     assert_eq!(
         fails(
@@ -632,5 +635,266 @@ fn postgresql_create_table_as_takes_on_commit_and_refuses_storage_options() {
         .state()
         .code(),
         "42P16"
+    );
+}
+
+#[test]
+fn postgresql_create_table_as_refuses_unknown_storage_options_as_postgresql_does() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for (create, code) in [
+        ("CREATE TABLE w USING columnar AS SELECT 1 AS a", "42704"),
+        ("CREATE TABLE w USING btree AS SELECT 1 AS a", "42809"),
+        ("CREATE TABLE w TABLESPACE fast AS SELECT 1 AS a", "42704"),
+        ("CREATE TABLE w TABLESPACE pg_global AS SELECT 1 AS a", "22023"),
+        ("CREATE TABLE w WITH (colour = 1) AS SELECT 1 AS a", "22023"),
+        ("CREATE TABLE w WITH (fillfactor = 5) AS SELECT 1 AS a", "22023"),
+        ("CREATE TABLE w WITH (fillfactor = 'x') AS SELECT 1 AS a", "22023"),
+        ("CREATE TABLE w WITH (fillfactor = 70, fillfactor = 80) AS SELECT 1 AS a", "22023"),
+        ("CREATE TABLE w WITH (toast.fillfactor = 70) AS SELECT 1 AS a", "22023"),
+        ("CREATE TABLE w WITH (heap.fillfactor = 70) AS SELECT 1 AS a", "22023"),
+        ("CREATE TABLE w WITH (autovacuum_enabled = maybe) AS SELECT 1 AS a", "22023"),
+        ("CREATE TABLE w WITH (oids = true) AS SELECT 1 AS a", "0A000"),
+    ] {
+        assert_eq!(fails(&mut session, create).state().code(), code, "{create}");
+    }
+    let error = fails(
+        &mut session,
+        "CREATE TABLE w WITH (fillfactor = 5) AS SELECT 1 AS a",
+    );
+    assert_eq!(error.message(), "value 5 out of bounds for option \"fillfactor\"");
+    assert_eq!(
+        fails(&mut session, "SELECT * FROM w").state().code(),
+        "42P01"
+    );
+}
+
+#[test]
+fn postgresql_table_is_a_query_in_statements_set_operations_and_subqueries() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    films(&mut session);
+    assert_eq!(
+        last(&mut session, "TABLE films ORDER BY code LIMIT 1"),
+        "code|title|date_prod|kind\nB6717|Tampopo|2003-11-02|Comedy\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM (TABLE films UNION ALL TABLE ONLY films) AS both_copies"),
+        "count\n6\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "WITH f AS (TABLE films) SELECT title FROM f WHERE code = 'T_601'"
+        ),
+        "title\nYojimbo\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT count(*) FROM films WHERE (code, title, date_prod, kind) IN (TABLE films)"
+        ),
+        "count\n3\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "CREATE TABLE films2 AS TABLE films"),
+        "SELECT 3"
+    );
+    last(&mut session, "INSERT INTO films2 TABLE films");
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM films2"),
+        "count\n6\nSELECT 1"
+    );
+    assert_eq!(
+        fails(&mut session, "TABLE missing").state().code(),
+        "42P01"
+    );
+}
+
+#[test]
+fn postgresql_create_table_as_execute_runs_a_prepared_select() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    films(&mut session);
+    assert_eq!(
+        last(
+            &mut session,
+            "PREPARE recentfilms(date) AS SELECT * FROM films WHERE date_prod > $1"
+        ),
+        "PREPARE"
+    );
+    last(&mut session, "BEGIN");
+    assert_eq!(
+        last(
+            &mut session,
+            "CREATE TEMP TABLE films_recent ON COMMIT DROP AS EXECUTE recentfilms('2002-01-01')"
+        ),
+        "SELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT title FROM films_recent"),
+        "title\nTampopo\nSELECT 1"
+    );
+    last(&mut session, "COMMIT");
+    let recent = last(&mut session, "EXECUTE recentfilms('1965-01-01')");
+    assert!(recent.starts_with("code|title|date_prod|kind\n"), "{recent}");
+    assert!(recent.ends_with("\nSELECT 2"), "{recent}");
+    assert_eq!(
+        last(
+            &mut session,
+            "CREATE TABLE none_yet AS EXECUTE recentfilms('2002-01-01') WITH NO DATA"
+        ),
+        "CREATE TABLE AS"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM none_yet"),
+        "count\n0\nSELECT 1"
+    );
+    last(
+        &mut session,
+        "PREPARE add_film(char(5), varchar(40)) AS INSERT INTO films (code, title) VALUES ($1, $2)",
+    );
+    assert_eq!(last(&mut session, "EXECUTE add_film('Z9', 'Ran')"), "INSERT 0 1");
+    for (statement, code) in [
+        ("CREATE TABLE bad AS EXECUTE add_film('Z8', 'Kagemusha')", "42809"),
+        ("CREATE TABLE bad AS EXECUTE nothing(1)", "26000"),
+        ("EXECUTE recentfilms('2002-01-01', 2)", "42601"),
+        ("PREPARE recentfilms AS SELECT 1", "42P05"),
+        ("PREPARE p AS CREATE TABLE q (a int)", "42601"),
+    ] {
+        assert_eq!(fails(&mut session, statement).state().code(), code, "{statement}");
+    }
+    last(&mut session, "DEALLOCATE recentfilms");
+    assert_eq!(
+        fails(&mut session, "EXECUTE recentfilms('2002-01-01')")
+            .state()
+            .code(),
+        "26000"
+    );
+}
+
+#[test]
+fn mysql_table_statement_with_order_by_and_limit() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    last(&mut session, "CREATE TABLE t (a INT, b INT)");
+    last(&mut session, "INSERT INTO t VALUES (1, 2), (6, 7), (9, 5)");
+    assert_eq!(
+        last(&mut session, "TABLE t ORDER BY b DESC LIMIT 2"),
+        "a|b\n6|7\n9|5\nSELECT 2"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT a FROM t WHERE a IN (SELECT a FROM t WHERE b > 4) AND (a, b) IN (TABLE t) ORDER BY a"),
+        "a\n6\n9\nSELECT 2"
+    );
+    last(&mut session, "CREATE TABLE t2 LIKE t");
+    last(&mut session, "INSERT INTO t2 TABLE t");
+    assert_eq!(
+        last(&mut session, "TABLE t2 ORDER BY a LIMIT 1 OFFSET 1"),
+        "a|b\n6|7\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "TABLE t UNION TABLE t2 ORDER BY a"),
+        "a|b\n1|2\n6|7\n9|5\nSELECT 3"
+    );
+}
+
+#[test]
+fn mysql_create_table_like_copies_the_definition_but_not_foreign_keys() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    last(&mut session, "CREATE TABLE parent (id INT PRIMARY KEY)");
+    last(&mut session, "INSERT INTO parent VALUES (1)");
+    last(
+        &mut session,
+        "CREATE TABLE t1 (id INT NOT NULL AUTO_INCREMENT, code VARCHAR(10) NOT NULL DEFAULT 'none' \
+         COMMENT 'the code', parent_id INT, doubled INT AS (parent_id * 2), PRIMARY KEY (id), \
+         UNIQUE KEY code_key (code), KEY parent_key (parent_id), \
+         CONSTRAINT t1_parent FOREIGN KEY (parent_id) REFERENCES parent (id)) COMMENT 'first'",
+    );
+    last(&mut session, "INSERT INTO t1 (code, parent_id) VALUES ('a', 1)");
+    last(&mut session, "CREATE TABLE t2 LIKE t1");
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM t2"),
+        "count(*)\n0\nSELECT 1"
+    );
+    last(&mut session, "INSERT INTO t2 (parent_id) VALUES (42)");
+    assert_eq!(
+        last(&mut session, "SELECT id, code, parent_id, doubled FROM t2"),
+        "id|code|parent_id|doubled\n1|none|42|84\nSELECT 1"
+    );
+    fails(&mut session, "INSERT INTO t2 (code) VALUES ('none')");
+    fails(&mut session, "INSERT INTO t2 (code) VALUES (NULL)");
+    let shown = last(&mut session, "SHOW CREATE TABLE t2");
+    assert!(shown.contains("UNIQUE KEY `code_key` (`code`)"), "{shown}");
+    assert!(shown.contains("KEY `parent_key` (`parent_id`)"), "{shown}");
+    assert!(shown.contains("COMMENT 'the code'"), "{shown}");
+    assert!(!shown.contains("FOREIGN KEY"), "{shown}");
+    last(&mut session, "CREATE TABLE t3 (LIKE t1)");
+    last(&mut session, "CREATE TABLE IF NOT EXISTS t3 LIKE t1");
+    last(&mut session, "CREATE TEMPORARY TABLE t4 LIKE t1");
+    last(&mut session, "INSERT INTO t4 (code) VALUES ('x')");
+    let exists = fails(&mut session, "CREATE TABLE t2 LIKE t1");
+    assert_eq!(exists.vendor_code(), Some(1050));
+    let missing = fails(&mut session, "CREATE TABLE t5 LIKE nothing");
+    assert_eq!(missing.vendor_code(), Some(1146));
+    last(&mut session, "CREATE VIEW v1 AS SELECT id FROM t1");
+    let view = fails(&mut session, "CREATE TABLE t6 LIKE v1");
+    assert_eq!(view.vendor_code(), Some(1347));
+}
+
+#[test]
+fn mysql_create_table_like_copies_partitioning() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    last(
+        &mut session,
+        "CREATE TABLE sales (id INT NOT NULL, year INT NOT NULL, PRIMARY KEY (id, year)) \
+         PARTITION BY RANGE (year) (PARTITION p0 VALUES LESS THAN (2000), \
+         PARTITION p1 VALUES LESS THAN MAXVALUE)",
+    );
+    last(&mut session, "CREATE TABLE sales_copy LIKE sales");
+    last(
+        &mut session,
+        "INSERT INTO sales_copy VALUES (1, 1990), (2, 2010)",
+    );
+    assert_eq!(
+        last(&mut session, "SELECT id FROM sales_copy ORDER BY id"),
+        "id\n1\n2\nSELECT 2"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM sales"),
+        "count(*)\n0\nSELECT 1"
+    );
+    let temporary = fails(&mut session, "CREATE TEMPORARY TABLE sales_tmp LIKE sales");
+    assert_eq!(temporary.vendor_code(), Some(1562));
+}
+
+#[test]
+fn sqlserver_select_into_keeps_not_null_of_copied_columns() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    last(
+        &mut session,
+        "CREATE TABLE products (id int IDENTITY(1, 1) PRIMARY KEY, name nvarchar(20) NOT NULL, note nvarchar(20))",
+    );
+    last(
+        &mut session,
+        "INSERT INTO products (name, note) VALUES (N'egg', NULL), (N'milk', N'cold')",
+    );
+    last(&mut session, "SELECT id, name, note INTO copied FROM products");
+    assert_eq!(
+        fails(&mut session, "INSERT INTO copied VALUES (3, NULL, N'x')").vendor_code(),
+        Some(515)
+    );
+    assert_eq!(
+        fails(&mut session, "INSERT INTO copied VALUES (NULL, N'salt', N'x')").vendor_code(),
+        Some(515)
+    );
+    last(&mut session, "INSERT INTO copied VALUES (3, N'salt', NULL)");
+    last(&mut session, "SELECT * INTO everything FROM products");
+    assert_eq!(
+        fails(&mut session, "INSERT INTO everything VALUES (4, NULL, NULL)").vendor_code(),
+        Some(515)
     );
 }

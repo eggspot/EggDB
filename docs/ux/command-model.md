@@ -133,17 +133,25 @@ command of the parser that is not. `eggdb help --json` prints these definitions;
 | `kv_get` | `get --json` | read | | yes | | `notice`, `collection` when one was named, `found`; in `entry`, `key_hex` when `key` is there, and `value_bytes` |
 | `kv_scan` | `scan --json` | read | | yes | | `notice`, `collection` when one was named, `returned_entries`, `truncated`, `next_start_hex`; in each entry, as `kv_get` |
 | `row_list` | `row list --json` | read | | yes | | `notice`, `columns`, `truncated_by`; `truncated` and `next_cursor` are the twin's page trailer |
-| `put` | `put --json` | change | `key_value_write`: `--allow-write` without `--tables` or a role | no | | `collection` when one was named, `key_hex`, `committed`, `warning`; no `expires_at` (D328) |
+| `put` | `put --json` | change | `key_value_write`: `--allow-write` without `--tables` or a role | no | | `collection` when one was named, `key_hex`, `committed`, `warning`; `ttl_ms` and `expires_at` with a `ttl`, as the twin (D328, D346) |
 | `del` | `del --json` | destroy | `key_value_write` | yes | `key_delete`: the call deletes a key, whose value cannot be brought back through the agent (D328) | `collection` when one was named, `key_hex`, `committed`, `warning` |
+| `incr` | `incr --json` (`decr --json` for a negative `by`) | change | `key_value_write` | no | | `collection` when one was named, `key_hex`, `committed`, `warning` (D346) |
+| `cas` | `cas --json` | destroy | `key_value_write` | yes | `key_delete`, when it has `delete` and an `expected` value (D346) | `collection` when one was named, `key_hex`, `committed`, `warning` |
+| `expire` | `expire --json` | destroy | `key_value_write` | no | `key_delete`, when `ttl` is 0, which deletes the key as Redis's `EXPIRE key 0` does (D346) | `collection` when one was named, `key_hex`, `committed`, `warning`; `deleted` instead of `expires` for a `ttl` of 0, which the twin refuses |
+| `persist` | `persist --json` | change | `key_value_write` | yes | | `collection` when one was named, `key_hex`, `committed`, `warning` (D346) |
 
 No tool reaches outside the database (`openWorldHint` is false for all). Their names are the
-shipped ones (D119, D121), and `row_list` (D145), `put` and `del` (D328) join their command's
-words with `_`, as every new tool's name does. `help --json` shows each tool's `confirm` check by name and, in
+shipped ones (D119, D121), and `row_list` (D145), `put` and `del` (D328), `incr`, `cas`,
+`expire` and `persist` (D346) join their command's words with `_`, as every new tool's name
+does. `help --json` shows each tool's `confirm` check by name and, in
 `confirm_when`, the sentence saying when it asks. Arguments map
 to the twin: `sql` to `-c`, `dialect` to `--dialect`, `key` and `key_hex` to the key operand
 (hex as `0x…`), `prefix`, `start` and `end` (and their `_hex` forms) to `--prefix`, `--from` and
 `--to`, `max_entries` to `--limit`, `keys_only` to `--keys-only`, `schema` to `--schema`, `table`
-to the table operand, `sample_rows`'s `max_rows` to `--limit`; `run_sql`'s and `write_sql`'s
+to the table operand, `sample_rows`'s `max_rows` to `--limit`, `incr`'s `by` to `<n>` (its
+size; a negative `by` is `decr`), `expire`'s `ttl` to `<time>` in seconds (`60` is `60s`),
+`cas`'s `expected`, `new` (and their `_hex` forms), `if_absent` and `delete` to `<expected>`,
+`<new>`, `--if-absent` and `--delete`; `run_sql`'s and `write_sql`'s
 `max_rows` is a limit of the call, and `confirm` the user's confirmation, which the CLI never
 asks for. A missing key is `found: false` from `kv_get` and exit 1 with nothing printed from
 `get`, a result in both. A missing table is `not_found` from the tools and `table_not_found`

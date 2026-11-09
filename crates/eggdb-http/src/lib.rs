@@ -10,10 +10,14 @@
 //! plus one second for each 64 KiB already sent. A listener given [`Limits`] holds every body
 //! over 64 KiB, the request's (a chunked one as it arrives) and then the response's, against the
 //! server's one memory budget (D284, D307), and answers with its own refusal when the budget is
-//! spent. A minimal client posts to plain `http://` URLs, for webhooks.
+//! spent. An HTTP/1.1 request without exactly one `Host` header is refused with `400`, as RFC
+//! 9112 asks. A listener can decode request bodies sent with `Content-Encoding: gzip`,
+//! `x-gzip` or `deflate` (stacked too) before its handler sees them, bounded by its body limit
+//! and the memory budget (D343). A minimal client posts to plain `http://` URLs, for webhooks.
 
 mod client;
 mod connection;
+mod content_coding;
 mod reader;
 mod streamed;
 
@@ -124,6 +128,12 @@ pub enum HttpError {
     OverMemoryBudget,
     /// The body is sent with a transfer coding other than `chunked`.
     UnsupportedTransferCoding,
+    /// An HTTP/1.1 request has no `Host` header, or a request has more than one.
+    InvalidHost,
+    /// The body is sent with a content coding the listener does not decode.
+    UnsupportedContentCoding,
+    /// The body does not decode as its `Content-Encoding` says.
+    CorruptContentCoding,
 }
 
 impl fmt::Display for HttpError {
@@ -135,6 +145,9 @@ impl fmt::Display for HttpError {
             Self::Malformed => "the request is not HTTP/1.1",
             Self::OverMemoryBudget => "the server's connections already hold their memory budget",
             Self::UnsupportedTransferCoding => "the request's transfer coding is not supported",
+            Self::InvalidHost => "the request does not have exactly one Host header",
+            Self::UnsupportedContentCoding => "the request's content coding is not supported",
+            Self::CorruptContentCoding => "the request body does not decode as its content coding",
         })
     }
 }
@@ -159,6 +172,7 @@ fn reason(status: u16) -> &'static str {
         411 => "Length Required",
         412 => "Precondition Failed",
         413 => "Content Too Large",
+        415 => "Unsupported Media Type",
         416 => "Range Not Satisfiable",
         429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
@@ -253,6 +267,20 @@ pub struct Limits<'b> {
     pub keep_alive_idle_timeout: Duration,
     /// The most requests one connection is served; the last answer says `Connection: close`.
     pub max_requests_per_connection: usize,
+    /// Which requests have their body's `Content-Encoding` (`gzip`, `x-gzip`, `deflate`,
+    /// `identity`, stacked) decoded before the handler sees them; the handler then gets the
+    /// decoded body with its `Content-Length` and no `Content-Encoding`. A decoded body past
+    /// `max_body_bytes` is answered `413`, one the budget cannot take with
+    /// `over_memory_budget()`, a damaged one `400` and another coding `415`. None by default.
+    pub decode_content_encoding: fn(&Request) -> bool,
+}
+
+fn no_request(_: &Request) -> bool {
+    false
+}
+
+fn every_request(_: &Request) -> bool {
+    true
 }
 
 impl<'b> Limits<'b> {
@@ -265,6 +293,22 @@ impl<'b> Limits<'b> {
             over_memory_budget: over_memory_budget_response,
             keep_alive_idle_timeout: KEEP_ALIVE_IDLE_TIMEOUT,
             max_requests_per_connection: MAX_REQUESTS_PER_CONNECTION,
+            decode_content_encoding: no_request,
+        }
+    }
+
+    /// These limits, decoding every request body's `Content-Encoding` before the handler sees
+    /// it.
+    pub fn decoding_content_encoding(self) -> Self {
+        self.decoding_content_encoding_of(every_request)
+    }
+
+    /// These limits, decoding the `Content-Encoding` of the request bodies `wanted` picks
+    /// before the handler sees them.
+    pub fn decoding_content_encoding_of(self, wanted: fn(&Request) -> bool) -> Self {
+        Self {
+            decode_content_encoding: wanted,
+            ..self
         }
     }
 
@@ -388,6 +432,9 @@ pub fn serve_replies_with_limits<'h>(
 }
 
 #[cfg(test)]
+mod content_coding_tests;
+
+#[cfg(test)]
 mod keep_alive_tests;
 
 #[cfg(test)]
@@ -399,14 +446,14 @@ mod tests {
     fn a_body_limit_is_kept_and_a_waiting_client_is_told_to_continue() {
         let mut continued = 0;
         let request = read_request_limited(
-            &mut &b"PUT /b/k HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 2000000\r\n\r\n"[..],
+            &mut &b"PUT /b/k HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 2000000\r\n\r\n"[..],
             1,
             &mut || continued += 1,
         );
         assert_eq!((request, continued), (Err(HttpError::BodyTooLarge), 0));
         let body = vec![7u8; 2_000_000];
         let mut bytes =
-            b"PUT /b/k HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 2000000\r\n\r\n"
+            b"PUT /b/k HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 2000000\r\n\r\n"
                 .to_vec();
         let head = bytes.len();
         bytes.extend_from_slice(&body);
@@ -451,39 +498,101 @@ mod tests {
         assert_eq!(request.query.as_deref(), Some("x=1"));
         assert_eq!(request.header("accept"), Some("text/plain"));
         for (bytes, expected) in [
-            (&b"GET / HTTP/1.1\r\n"[..], HttpError::Closed),
+            (&b"GET / HTTP/1.1\r\nHost: x\r\n"[..], HttpError::Closed),
             (b"GET /\r\n\r\n", HttpError::Malformed),
-            (b"GET x HTTP/1.1\r\n\r\n", HttpError::Malformed),
-            (b"get / HTTP/1.1\r\n\r\n", HttpError::Malformed),
+            (b"GET x HTTP/1.1\r\nHost: x\r\n\r\n", HttpError::Malformed),
+            (b"get / HTTP/1.1\r\nHost: x\r\n\r\n", HttpError::Malformed),
             (
-                b"GET / HTTP/1.1\r\nbad header\r\n\r\n",
+                b"GET / HTTP/1.1\r\nHost: x\r\nbad header\r\n\r\n",
                 HttpError::Malformed,
             ),
-            (b"GET / HTTP/1.1\r\n\xff: x\r\n\r\n", HttpError::Malformed),
+            (
+                b"GET / HTTP/1.1\r\nHost: x\r\n\xff: x\r\n\r\n",
+                HttpError::Malformed,
+            ),
         ] {
             assert_eq!(read_request(&mut &bytes[..]), Err(expected), "{bytes:?}");
         }
-        let posted =
-            read_request(&mut &b"POST /x HTTP/1.1\r\nContent-Length: 3\r\n\r\nabcdef"[..]).unwrap();
+        let posted = read_request(
+            &mut &b"POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nabcdef"[..],
+        )
+        .unwrap();
         assert_eq!(posted.body, b"abc");
         for hostile in [
-            &b"POST / HTTP/1.1\r\nContent-Length: x\r\n\r\n"[..],
-            b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 3\r\n\r\n",
+            &b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: x\r\n\r\n"[..],
+            b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nContent-Length: 3\r\n\r\n",
         ] {
             assert_eq!(read_request(&mut &hostile[..]), Err(HttpError::Malformed));
         }
         assert_eq!(
-            read_request(&mut &b"POST / HTTP/1.1\r\nContent-Length: 99999999\r\n\r\n"[..]),
+            read_request(
+                &mut &b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 99999999\r\n\r\n"[..]
+            ),
             Err(HttpError::BodyTooLarge)
         );
         let endless = vec![b'a'; MAX_HEAD_BYTES + 10];
         assert_eq!(read_request(&mut &endless[..]), Err(HttpError::TooLarge));
-        let mut many = b"GET / HTTP/1.1\r\n".to_vec();
+        let mut many = b"GET / HTTP/1.1\r\nHost: x\r\n".to_vec();
         for index in 0..=MAX_HEADERS {
             many.extend_from_slice(format!("h{index}: v\r\n").as_bytes());
         }
         many.extend_from_slice(b"\r\n");
         assert_eq!(read_request(&mut &many[..]), Err(HttpError::TooLarge));
+    }
+
+    #[test]
+    fn an_http_1_1_request_needs_exactly_one_host_header() {
+        for (bytes, expected) in [
+            (&b"GET / HTTP/1.1\r\n\r\n"[..], Err(HttpError::InvalidHost)),
+            (
+                b"GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n",
+                Err(HttpError::InvalidHost),
+            ),
+            (
+                b"GET / HTTP/1.0\r\nHost: a\r\nhost: a\r\n\r\n",
+                Err(HttpError::InvalidHost),
+            ),
+            (
+                b"POST / HTTP/1.1\r\nContent-Length: 2\r\n\r\nhi",
+                Err(HttpError::InvalidHost),
+            ),
+            (b"GET /old HTTP/1.0\r\n\r\n", Ok("/old")),
+            (b"GET /empty HTTP/1.1\r\nhOsT:\r\n\r\n", Ok("/empty")),
+            (b"GET /one HTTP/1.1\r\nHost: db:9200\r\n\r\n", Ok("/one")),
+        ] {
+            assert_eq!(
+                read_request(&mut &bytes[..]).map(|request| request.path),
+                expected.map(str::to_owned),
+                "{}",
+                String::from_utf8_lossy(bytes)
+            );
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let stopped = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                serve(
+                    &listener,
+                    &|request| Response::ok("text/plain", request.path.clone()),
+                    &|| stopped.load(Ordering::Acquire),
+                )
+                .unwrap();
+            });
+            for request in [
+                &b"GET /none HTTP/1.1\r\n\r\nGET /after HTTP/1.1\r\nHost: x\r\n\r\n"[..],
+                b"GET /two HTTP/1.1\r\nHost: x\r\nHost: y\r\n\r\n",
+            ] {
+                let mut client = TcpStream::connect(address).unwrap();
+                client.write_all(request).unwrap();
+                let mut answer = String::new();
+                client.read_to_string(&mut answer).unwrap();
+                assert!(answer.starts_with("HTTP/1.1 400 "), "{answer}");
+                assert!(answer.contains("Connection: close\r\n"), "{answer}");
+                assert!(answer.ends_with("exactly one Host header\n"), "{answer}");
+            }
+            stopped.store(true, Ordering::Release);
+        });
     }
 
     #[test]
@@ -505,7 +614,7 @@ mod tests {
         let mut held = budget.empty_reservation();
         let mut continued = 0;
         let refused = read_request_holding(
-            &mut &b"PUT /b/k HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 200000\r\n\r\n"[..],
+            &mut &b"PUT /b/k HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 200000\r\n\r\n"[..],
             1 << 20,
             &mut held,
             &mut || continued += 1,
@@ -514,7 +623,7 @@ mod tests {
             (refused, continued, budget.used_bytes()),
             (Err(HttpError::OverMemoryBudget), 0, 0)
         );
-        let mut bytes = b"PUT /b/k HTTP/1.1\r\nContent-Length: 90000\r\n\r\n".to_vec();
+        let mut bytes = b"PUT /b/k HTTP/1.1\r\nHost: x\r\nContent-Length: 90000\r\n\r\n".to_vec();
         bytes.extend_from_slice(&[1u8; 90_000]);
         let request = read_request_holding(&mut &bytes[..], 1 << 20, &mut held, &mut || {});
         assert_eq!(request.map(|request| request.body.len()), Ok(90_000));
@@ -557,17 +666,18 @@ mod tests {
             });
             let refused = exchange(
                 address,
-                b"POST /echo HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 300000\r\n\r\n",
+                b"POST /echo HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 300000\r\n\r\n",
             );
             assert!(refused.starts_with("HTTP/1.1 429 "), "{refused}");
             assert!(refused.ends_with("slow down\n"), "{refused}");
-            let large = exchange(address, b"GET /large HTTP/1.1\r\n\r\n");
+            let large = exchange(address, b"GET /large HTTP/1.1\r\nHost: x\r\n\r\n");
             assert!(large.starts_with("HTTP/1.1 429 "), "{large}");
-            let mut fitting = b"POST /echo HTTP/1.1\r\nContent-Length: 100000\r\n\r\n".to_vec();
+            let mut fitting =
+                b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 100000\r\n\r\n".to_vec();
             fitting.extend_from_slice(&[7u8; 100_000]);
             let served = exchange(address, &fitting);
             assert!(served.ends_with("100000 bytes"), "{served}");
-            let small = exchange(address, b"GET /small HTTP/1.1\r\n\r\n");
+            let small = exchange(address, b"GET /small HTTP/1.1\r\nHost: x\r\n\r\n");
             assert!(small.ends_with("0 bytes"), "{small}");
             stopped.store(true, Ordering::Release);
         });

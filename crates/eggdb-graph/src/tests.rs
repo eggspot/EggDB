@@ -909,3 +909,474 @@ fn a_path_variable_is_declared_once_and_deleting_paths_checks_nodes_after_the_cl
         "Neo.ClientError.Schema.ConstraintValidationFailed"
     );
 }
+
+fn labelled() -> MemoryKeyspace {
+    let keyspace = MemoryKeyspace::default();
+    query(
+        &keyspace,
+        "CREATE (hub:Hub), (ab:A:B {name: 'ab'}), (a:A {name: 'a'}), (b:B {name: 'b'}), (c:C {name: 'c'}),
+                (hub)-[:T]->(ab), (hub)-[:U]->(a), (hub)-[:V]->(b), (hub)-[:T]->(c)",
+    );
+    keyspace
+}
+
+fn names(result: QueryResult) -> Vec<Value> {
+    result.rows.into_iter().flatten().collect()
+}
+
+#[test]
+fn label_predicates_test_nodes_and_relationships_in_expressions() {
+    let keyspace = labelled();
+    assert_eq!(
+        names(query(
+            &keyspace,
+            "MATCH (n) WHERE n:A:B RETURN n.name"
+        )),
+        vec![text("ab")]
+    );
+    assert_eq!(
+        names(query(
+            &keyspace,
+            "MATCH (n) WHERE n:A|B RETURN n.name ORDER BY n.name"
+        )),
+        vec![text("a"), text("ab"), text("b")]
+    );
+    assert_eq!(
+        query(
+            &keyspace,
+            "MATCH (n) WHERE n.name IS NOT NULL RETURN n.name, n:C AS c, NOT n:A AS notA ORDER BY n.name"
+        )
+        .rows,
+        vec![
+            vec![text("a"), Value::Boolean(false), Value::Boolean(false)],
+            vec![text("ab"), Value::Boolean(false), Value::Boolean(false)],
+            vec![text("b"), Value::Boolean(false), Value::Boolean(true)],
+            vec![text("c"), Value::Boolean(true), Value::Boolean(true)],
+        ]
+    );
+    assert_eq!(
+        names(query(
+            &keyspace,
+            "MATCH (:Hub)-[r]->(m) WHERE r:T|U RETURN m.name ORDER BY m.name"
+        )),
+        vec![text("a"), text("ab"), text("c")]
+    );
+    assert_eq!(
+        names(query(
+            &keyspace,
+            "MATCH (:Hub)-[r]->(m) RETURN r:V AS v ORDER BY m.name"
+        )),
+        vec![
+            Value::Boolean(false),
+            Value::Boolean(false),
+            Value::Boolean(true),
+            Value::Boolean(false)
+        ]
+    );
+    assert_eq!(
+        names(query(
+            &keyspace,
+            "OPTIONAL MATCH (n:Nothing) RETURN n:A AS x"
+        )),
+        vec![Value::Null]
+    );
+    assert_eq!(
+        error_code(&keyspace, "RETURN 1:A AS x"),
+        "Neo.ClientError.Statement.TypeError"
+    );
+    for mixed in [
+        "MATCH (n) WHERE n:A:B|C RETURN n",
+        "MATCH (n) WHERE n:A|B:C RETURN n",
+        "MATCH (n) WHERE n:A|:B RETURN n",
+        "MATCH (n:A:B|C) RETURN n",
+    ] {
+        assert_eq!(
+            error_code(&keyspace, mixed),
+            "Neo.ClientError.Statement.SyntaxError",
+            "{mixed}"
+        );
+    }
+}
+
+#[test]
+fn label_alternatives_match_in_patterns_and_are_refused_when_creating() {
+    let keyspace = labelled();
+    assert_eq!(
+        names(query(&keyspace, "MATCH (n:A|C) RETURN count(n)")),
+        vec![Value::Integer(3)]
+    );
+    assert_eq!(
+        names(query(&keyspace, "MATCH (:Hub)-[r:T|U]->() RETURN count(r)")),
+        vec![Value::Integer(3)]
+    );
+    for refused in [
+        "CREATE (n:A|B)",
+        "MERGE (n:A|B {name: 'x'})",
+        "FOREACH (x IN [1] | CREATE (:A|B))",
+    ] {
+        assert_eq!(
+            error_code(&keyspace, refused),
+            "Neo.ClientError.Statement.SyntaxError",
+            "{refused}"
+        );
+    }
+    assert_eq!(
+        names(query(&keyspace, "MATCH (n) RETURN count(n)")),
+        vec![Value::Integer(5)]
+    );
+}
+
+#[test]
+fn a_bar_after_a_label_ends_a_comprehension_predicate_or_foreach_list() {
+    let keyspace = labelled();
+    let found = "MATCH (n) WHERE n.name IS NOT NULL WITH collect(n) AS found ";
+    assert_eq!(
+        names(query(
+            &keyspace,
+            &format!("{found}RETURN [x IN found WHERE x:C | x.name] AS names")
+        )),
+        vec![Value::List(vec![text("c")])]
+    );
+    assert_eq!(
+        names(query(
+            &keyspace,
+            &format!("{found}RETURN [x IN found WHERE x:A:B | x.name] AS names")
+        )),
+        vec![Value::List(vec![text("ab")])]
+    );
+    assert_eq!(
+        names(query(
+            &keyspace,
+            &format!("{found}RETURN size([x IN found WHERE (x:A|B) | x.name]) AS n")
+        )),
+        vec![Value::Integer(3)]
+    );
+    assert_eq!(
+        names(query(
+            &keyspace,
+            &format!("{found}RETURN size([b IN [x IN found | x:A|B] WHERE b]) AS n")
+        )),
+        vec![Value::Integer(3)]
+    );
+    assert_eq!(
+        error_code(
+            &keyspace,
+            &format!("{found}RETURN [x IN found WHERE x:A|B | x.name] AS names")
+        ),
+        "Neo.ClientError.Statement.SyntaxError"
+    );
+    assert_eq!(
+        names(query(
+            &keyspace,
+            "MATCH (h:Hub) RETURN size([(h)-->(m) WHERE m:B | m.name]) AS b,
+                    size([(h)-->(m) WHERE (m:A|C) | m.name]) AS ac,
+                    size([(h)-->(m:A|C) | m]) AS pattern"
+        )),
+        vec![Value::Integer(2), Value::Integer(3), Value::Integer(3)]
+    );
+    query(
+        &keyspace,
+        &format!("{found}FOREACH (x IN [y IN found WHERE (y:A|B)] | SET x.flag = true)"),
+    );
+    assert_eq!(
+        names(query(
+            &keyspace,
+            "MATCH (n) WHERE n.flag RETURN count(n)"
+        )),
+        vec![Value::Integer(3)]
+    );
+    query(
+        &keyspace,
+        &format!("{found}FOREACH (x IN found | SET x.either = x:A|C)"),
+    );
+    assert_eq!(
+        names(query(
+            &keyspace,
+            "MATCH (n) WHERE n.either RETURN n.name ORDER BY n.name"
+        )),
+        vec![text("a"), text("ab"), text("c")]
+    );
+}
+
+fn people() -> MemoryKeyspace {
+    let keyspace = MemoryKeyspace::default();
+    query(
+        &keyspace,
+        "CREATE (a:Person:Child {age: 20, name: 'Alice'}), (b:Person {age: 27, name: 'Bob'}),
+                (c:Person:Parent {age: 65, name: 'Charlie'}), (d:Person {age: 30, name: 'Dora'})
+         CREATE (a)-[:FRIEND_OF]->(b), (a)-[:CHILD_OF]->(c), (:Counter {count: 0})",
+    );
+    keyspace
+}
+
+#[test]
+fn call_subqueries_import_variables_and_return_rows_for_each_row() {
+    let keyspace = people();
+    assert_eq!(
+        query(
+            &keyspace,
+            "UNWIND [0, 1, 2] AS x CALL { WITH x RETURN x * 10 AS y } RETURN x, y"
+        )
+        .rows,
+        vec![
+            vec![Value::Integer(0), Value::Integer(0)],
+            vec![Value::Integer(1), Value::Integer(10)],
+            vec![Value::Integer(2), Value::Integer(20)],
+        ]
+    );
+    assert_eq!(
+        query(
+            &keyspace,
+            "CALL {
+               MATCH (p:Person) RETURN p ORDER BY p.age ASC LIMIT 1
+               UNION
+               MATCH (p:Person) RETURN p ORDER BY p.age DESC LIMIT 1
+             }
+             RETURN p.name, p.age ORDER BY p.name"
+        )
+        .rows,
+        vec![
+            vec![text("Alice"), Value::Integer(20)],
+            vec![text("Charlie"), Value::Integer(65)],
+        ]
+    );
+    assert_eq!(
+        query(
+            &keyspace,
+            "MATCH (p:Person)
+             CALL { WITH p MATCH (p)-[:FRIEND_OF]-(c:Person) RETURN c.name AS friend }
+             RETURN p.name AS name, friend ORDER BY name"
+        )
+        .rows,
+        vec![
+            vec![text("Alice"), text("Bob")],
+            vec![text("Bob"), text("Alice")],
+        ]
+    );
+    assert_eq!(
+        query(
+            &keyspace,
+            "UNWIND [1, 2, 3] AS x
+             CALL { MATCH (n:Counter) SET n.count = n.count + 1 RETURN n.count AS innerCount }
+             WITH innerCount MATCH (n:Counter) RETURN innerCount, n.count AS totalCount"
+        )
+        .rows,
+        vec![
+            vec![Value::Integer(1), Value::Integer(3)],
+            vec![Value::Integer(2), Value::Integer(3)],
+            vec![Value::Integer(3), Value::Integer(3)],
+        ]
+    );
+    assert_eq!(
+        names(query(
+            &keyspace,
+            "WITH 1 AS a, 2 AS b CALL { WITH * RETURN a + b AS c } RETURN c"
+        )),
+        vec![Value::Integer(3)]
+    );
+    assert_eq!(
+        names(query(
+            &keyspace,
+            "UNWIND [1, 2] AS x CALL { WITH x CALL { WITH x RETURN x * 2 AS y } RETURN y * 10 AS z } RETURN z"
+        )),
+        vec![Value::Integer(20), Value::Integer(40)]
+    );
+}
+
+#[test]
+fn unit_call_subqueries_write_and_pass_the_outer_rows_through() {
+    let keyspace = people();
+    assert_eq!(
+        names(query(
+            &keyspace,
+            "MATCH (p:Person) CALL { WITH p UNWIND range(1, 5) AS i CREATE (:Person {name: p.name}) } RETURN count(*) AS n"
+        )),
+        vec![Value::Integer(4)]
+    );
+    assert_eq!(
+        names(query(&keyspace, "MATCH (p:Person) RETURN count(p)")),
+        vec![Value::Integer(24)]
+    );
+    query(
+        &keyspace,
+        "MATCH (p:Person {age: 30}) CALL { WITH p SET p.seen = true }",
+    );
+    assert_eq!(
+        names(query(
+            &keyspace,
+            "MATCH (p:Person) WHERE p.seen RETURN p.age"
+        )),
+        vec![Value::Integer(30)]
+    );
+    let refused = run(
+        &keyspace,
+        "MATCH (p:Person) CALL { WITH p SET p.refused = true } RETURN count(*) AS n",
+        &[],
+        true,
+    )
+    .unwrap_err();
+    assert_eq!(refused.code, "Neo.ClientError.Statement.AccessMode");
+    let reading = run(
+        &keyspace,
+        "CALL { MATCH (p:Person {age: 65}) RETURN p.name AS name } RETURN name",
+        &[],
+        true,
+    )
+    .unwrap();
+    assert_eq!(names(reading), vec![text("Charlie")]);
+}
+
+#[test]
+fn call_subquery_errors_follow_neo4j() {
+    let keyspace = people();
+    for (text, code) in [
+        (
+            "UNWIND [1] AS x CALL { RETURN 1 AS x } RETURN x",
+            "Neo.ClientError.Statement.SemanticError",
+        ),
+        (
+            "WITH 1 AS x CALL { WITH x RETURN x } RETURN x",
+            "Neo.ClientError.Statement.SemanticError",
+        ),
+        (
+            "WITH 1 AS x CALL { WITH x AS y RETURN y AS z } RETURN z",
+            "Neo.ClientError.Statement.SemanticError",
+        ),
+        (
+            "WITH 1 AS x CALL { WITH x WHERE x > 0 RETURN x AS y } RETURN y",
+            "Neo.ClientError.Statement.SemanticError",
+        ),
+        (
+            "WITH 1 AS x CALL { WITH x ORDER BY x RETURN x AS y } RETURN y",
+            "Neo.ClientError.Statement.SemanticError",
+        ),
+        (
+            "WITH 1 AS x CALL { RETURN x AS y } RETURN y",
+            "Neo.ClientError.Statement.SyntaxError",
+        ),
+        (
+            "UNWIND [1] AS x CALL { WITH x CREATE (:Batch) } IN TRANSACTIONS",
+            "Neo.ClientError.Statement.FeatureNotSupported",
+        ),
+        (
+            "UNWIND [1] AS x CALL { WITH x CREATE (:Batch) } IN TRANSACTIONS OF 10 ROWS",
+            "Neo.ClientError.Statement.FeatureNotSupported",
+        ),
+        (
+            "CALL { RETURN 1 AS x }",
+            "Neo.ClientError.Statement.SyntaxError",
+        ),
+        (
+            "CALL { RETURN 1 AS x UNION RETURN 2 AS y } RETURN x",
+            "Neo.ClientError.Statement.SyntaxError",
+        ),
+        (
+            "CALL { MATCH (p:Person) } RETURN 1 AS x",
+            "Neo.ClientError.Statement.SyntaxError",
+        ),
+        (
+            "FOREACH (x IN [1] | CALL { CREATE (:Batch) })",
+            "Neo.ClientError.Statement.SyntaxError",
+        ),
+    ] {
+        assert_eq!(error_code(&keyspace, text), code, "{text}");
+    }
+    assert_eq!(
+        names(query(&keyspace, "MATCH (n:Batch) RETURN count(n)")),
+        vec![Value::Integer(0)]
+    );
+}
+
+#[test]
+fn shortest_paths_work_as_expressions() {
+    let keyspace = movies();
+    assert_eq!(
+        names(query(
+            &keyspace,
+            "MATCH (martin:Person {name: 'Martin Sheen'}), (oliver:Person {name: 'Oliver Stone'})
+             RETURN length(shortestPath((martin)-[*..15]-(oliver))) AS hops"
+        )),
+        vec![Value::Integer(2)]
+    );
+    assert_eq!(
+        names(query(
+            &keyspace,
+            "MATCH (martin:Person {name: 'Martin Sheen'}), (michael:Person {name: 'Michael Douglas'})
+             RETURN [p IN allShortestPaths((martin)-[*]-(michael)) | length(p)] AS lengths"
+        )),
+        vec![Value::List(vec![Value::Integer(2), Value::Integer(2)])]
+    );
+    assert_eq!(
+        query(
+            &keyspace,
+            "MATCH (charlie:Person {name: 'Charlie Sheen'}), (rob:Person {name: 'Rob Reiner'})
+             RETURN shortestPath((charlie)-[*..2]-(rob)) AS one, allShortestPaths((charlie)-[*..2]-(rob)) AS every"
+        )
+        .rows,
+        vec![vec![Value::Null, Value::List(Vec::new())]]
+    );
+    assert_eq!(
+        names(query(
+            &keyspace,
+            "MATCH (a:Person), (b:Person)
+             WHERE a.name = 'Charlie Sheen' AND shortestPath((a)-[:FATHER]->(b)) IS NOT NULL
+             RETURN b.name"
+        )),
+        vec![text("Martin Sheen")]
+    );
+    assert_eq!(
+        error_code(
+            &keyspace,
+            "MATCH (martin:Person {name: 'Martin Sheen'}) RETURN shortestPath((martin)-[*]-(other)) AS p"
+        ),
+        "Neo.ClientError.Statement.SemanticError"
+    );
+}
+
+#[test]
+fn merge_refuses_a_null_property_value() {
+    let keyspace = MemoryKeyspace::default();
+    let refused = |text: &str, parameters: &[(String, Value)]| {
+        let error = run(&keyspace, text, parameters, false).unwrap_err();
+        assert_eq!(error.code, "Neo.ClientError.Statement.SemanticError", "{text}");
+        error.message
+    };
+    assert_eq!(
+        refused("MERGE (n:L {x: null})", &[]),
+        "Cannot merge the following node because of null property value for 'x': (:L {x: null})"
+    );
+    assert_eq!(
+        refused(
+            "MERGE (n:L {x: $value})",
+            &[("value".to_owned(), Value::Null)]
+        ),
+        "Cannot merge the following node because of null property value for 'x': (:L {x: null})"
+    );
+    assert_eq!(
+        refused("MERGE (n:L {a: 'one', x: null}) RETURN n", &[]),
+        "Cannot merge the following node because of null property value for 'x': (:L {a: 'one', x: null})"
+    );
+    query(&keyspace, "CREATE (:A {id: 1}), (:B {id: 2})");
+    assert_eq!(
+        refused(
+            "MATCH (a:A), (b:B) MERGE (a)-[:R {since: $since}]->(b)",
+            &[("since".to_owned(), Value::Null)]
+        ),
+        "Cannot merge the following relationship because of null property value for 'since': ()-[:R {since: null}]->()"
+    );
+    assert_eq!(
+        query(
+            &keyspace,
+            "MATCH (n) OPTIONAL MATCH (n)-[r]->() RETURN count(DISTINCT n) AS nodes, count(r) AS relationships"
+        )
+        .rows,
+        vec![vec![Value::Integer(2), Value::Integer(0)]]
+    );
+    assert_eq!(
+        names(query(
+            &keyspace,
+            "MERGE (n:L {x: 1}) RETURN n.x"
+        )),
+        vec![Value::Integer(1)]
+    );
+}

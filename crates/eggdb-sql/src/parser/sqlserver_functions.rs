@@ -756,6 +756,13 @@ impl Parser<'_> {
                     position,
                 )
             }
+            "sqrt" => Expr {
+                kind: ExprKind::Function {
+                    name: crate::square_root::SQLSERVER.to_owned(),
+                    arguments: self.sqlserver_arguments(name, 1..=1)?,
+                },
+                position,
+            },
             "count" => self.sqlserver_aggregate_result(name, AggregateFunction::Count)?,
             "sum" => self.sqlserver_aggregate_result(name, AggregateFunction::Sum)?,
             "avg" => self.sqlserver_aggregate_result(name, AggregateFunction::Avg)?,
@@ -949,6 +956,7 @@ impl Parser<'_> {
                 column_names: Vec::new(),
                 position,
             }))),
+            partition_selection: None,
         };
         Ok(derived_rows(
             rows,
@@ -1015,6 +1023,7 @@ impl Parser<'_> {
                 column_names: Vec::new(),
                 position,
             }))),
+            partition_selection: None,
         })
     }
 
@@ -1109,6 +1118,7 @@ impl Parser<'_> {
                 column_names: Vec::new(),
                 position,
             }))),
+            partition_selection: None,
         };
         Ok(derived_rows(
             rows,
@@ -1160,6 +1170,7 @@ fn derived_rows(
             hierarchy: None,
         })),
         generated: None,
+        partition_selection: None,
     }
 }
 

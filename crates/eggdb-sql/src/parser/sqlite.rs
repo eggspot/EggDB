@@ -1,7 +1,7 @@
 use super::{Level, Parser};
 use crate::ast::{
-    BinaryOperator, ColumnDefinition, ConflictTarget, Expr, ExprKind, Literal, Name, OnDuplicate,
-    Pragma, Statement, TableReference, UnaryOperator,
+    BinaryOperator, ColumnDefinition, ConflictResolution, ConflictTarget, Expr, ExprKind, Literal,
+    Name, OnDuplicate, Pragma, Statement, TableReference, UnaryOperator,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::children_mut;
@@ -644,17 +644,17 @@ impl<'t> Parser<'t> {
         Ok(())
     }
 
-    pub(super) fn sqlite_conflict_resolution(&mut self) -> SqlResult<(OnDuplicate, bool, bool)> {
+    pub(super) fn sqlite_conflict_resolution(&mut self) -> SqlResult<ConflictResolution> {
         let resolution = if self.take_word("replace") {
-            (OnDuplicate::Replace, false, false)
+            ConflictResolution::Replace
         } else if self.take_word("ignore") {
-            (OnDuplicate::Ignore, false, false)
+            ConflictResolution::Ignore
         } else if self.take_word("rollback") {
-            (OnDuplicate::Fail, true, false)
+            ConflictResolution::Rollback
         } else if self.take_word("fail") {
-            (OnDuplicate::Fail, false, true)
+            ConflictResolution::Fail
         } else if self.take_word("abort") {
-            (OnDuplicate::Fail, false, false)
+            ConflictResolution::Abort
         } else {
             return Err(self.unexpected());
         };
@@ -884,6 +884,7 @@ impl<'t> Parser<'t> {
             "unicode" => ("sqlite_unicode", &[1]),
             "char" => ("sqlite_char", &[]),
             "sign" => ("sqlite_sign", &[1]),
+            "sqrt" => ("sqlite_sqrt", &[1]),
             _ => return Ok(None),
         };
         let arguments = self.call_arguments()?;

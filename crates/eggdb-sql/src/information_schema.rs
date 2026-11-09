@@ -50,10 +50,14 @@ pub(crate) enum InformationRelation {
     RoleTableGrants,
     RoleColumnGrants,
     UsagePrivileges,
+    RoutinePrivileges,
+    UdtPrivileges,
+    EnabledRoles,
+    ApplicableRoles,
 }
 
 impl InformationRelation {
-    pub(crate) const ALL: [Self; 18] = [
+    pub(crate) const ALL: [Self; 22] = [
         Self::Schemata,
         Self::Tables,
         Self::Columns,
@@ -72,6 +76,10 @@ impl InformationRelation {
         Self::RoleTableGrants,
         Self::RoleColumnGrants,
         Self::UsagePrivileges,
+        Self::RoutinePrivileges,
+        Self::UdtPrivileges,
+        Self::EnabledRoles,
+        Self::ApplicableRoles,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -94,6 +102,10 @@ impl InformationRelation {
             Self::RoleTableGrants => "role_table_grants",
             Self::RoleColumnGrants => "role_column_grants",
             Self::UsagePrivileges => "usage_privileges",
+            Self::RoutinePrivileges => "routine_privileges",
+            Self::UdtPrivileges => "udt_privileges",
+            Self::EnabledRoles => "enabled_roles",
+            Self::ApplicableRoles => "applicable_roles",
         }
     }
 
@@ -129,6 +141,10 @@ impl InformationRelation {
             Self::ColumnPrivileges | Self::RoleColumnGrants => COLUMN_PRIVILEGES_COLUMNS,
             Self::TablePrivileges | Self::RoleTableGrants => TABLE_PRIVILEGES_COLUMNS,
             Self::UsagePrivileges => USAGE_PRIVILEGES_COLUMNS,
+            Self::RoutinePrivileges => ROUTINE_PRIVILEGES_COLUMNS,
+            Self::UdtPrivileges => UDT_PRIVILEGES_COLUMNS,
+            Self::EnabledRoles => ENABLED_ROLES_COLUMNS,
+            Self::ApplicableRoles => APPLICABLE_ROLES_COLUMNS,
         }
     }
 }
@@ -248,6 +264,37 @@ const USAGE_PRIVILEGES_COLUMNS: &[CatalogColumn] = &[
     column("object_name", SQL_IDENTIFIER),
     column("object_type", CHARACTER_DATA),
     column("privilege_type", CHARACTER_DATA),
+    column("is_grantable", YES_OR_NO),
+];
+
+const ROUTINE_PRIVILEGES_COLUMNS: &[CatalogColumn] = &[
+    column("grantor", SQL_IDENTIFIER),
+    column("grantee", SQL_IDENTIFIER),
+    column("specific_catalog", SQL_IDENTIFIER),
+    column("specific_schema", SQL_IDENTIFIER),
+    column("specific_name", SQL_IDENTIFIER),
+    column("routine_catalog", SQL_IDENTIFIER),
+    column("routine_schema", SQL_IDENTIFIER),
+    column("routine_name", SQL_IDENTIFIER),
+    column("privilege_type", CHARACTER_DATA),
+    column("is_grantable", YES_OR_NO),
+];
+
+const UDT_PRIVILEGES_COLUMNS: &[CatalogColumn] = &[
+    column("grantor", SQL_IDENTIFIER),
+    column("grantee", SQL_IDENTIFIER),
+    column("udt_catalog", SQL_IDENTIFIER),
+    column("udt_schema", SQL_IDENTIFIER),
+    column("udt_name", SQL_IDENTIFIER),
+    column("privilege_type", CHARACTER_DATA),
+    column("is_grantable", YES_OR_NO),
+];
+
+const ENABLED_ROLES_COLUMNS: &[CatalogColumn] = &[column("role_name", SQL_IDENTIFIER)];
+
+const APPLICABLE_ROLES_COLUMNS: &[CatalogColumn] = &[
+    column("grantee", SQL_IDENTIFIER),
+    column("role_name", SQL_IDENTIFIER),
     column("is_grantable", YES_OR_NO),
 ];
 
@@ -540,6 +587,10 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: InformationRelation) ->
             privileges::table_privileges_rows(snapshot, privileges::Shown::RolesOnly)
         }
         InformationRelation::UsagePrivileges => privileges::usage_privileges_rows(snapshot),
+        InformationRelation::RoutinePrivileges => privileges::routine_privileges_rows(snapshot),
+        InformationRelation::UdtPrivileges => privileges::udt_privileges_rows(snapshot),
+        InformationRelation::EnabledRoles => privileges::enabled_roles_rows(snapshot),
+        InformationRelation::ApplicableRoles => privileges::applicable_roles_rows(snapshot),
     }
 }
 

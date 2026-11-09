@@ -1,3 +1,4 @@
+use crate::content_coding::decode_request_body;
 use crate::reader::{RequestReader, RequestSource, Version};
 use crate::streamed::{BodyWriter, Reply, StreamedResponse};
 use crate::{HttpError, Limits, Request, Response, reason};
@@ -302,6 +303,18 @@ fn refusal(error: &HttpError, limits: &Limits<'_>) -> Option<Response> {
             501,
             "the request's transfer coding is not supported; send it with Content-Length or chunked",
         ),
+        HttpError::InvalidHost => {
+            Response::text(400, "an HTTP/1.1 request needs exactly one Host header")
+        }
+        HttpError::UnsupportedContentCoding => Response::text(
+            415,
+            "the request's content coding is not supported; send it with gzip, deflate or identity",
+        )
+        .with_header("Accept-Encoding", "gzip, deflate"),
+        HttpError::CorruptContentCoding => Response::text(
+            400,
+            "the request body does not decode as its Content-Encoding says",
+        ),
         HttpError::OverMemoryBudget => (limits.over_memory_budget)(),
         HttpError::Closed => return None,
     })
@@ -358,7 +371,19 @@ pub(crate) fn serve_connection<'h>(
             let mut send_continue = || {
                 let _ = writer.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
             };
-            reader.next_request(limits.max_body_bytes, &mut held, &mut send_continue)
+            reader
+                .next_request(limits.max_body_bytes, &mut held, &mut send_continue)
+                .and_then(|(mut request, version)| {
+                    if (limits.decode_content_encoding)(&request) {
+                        decode_request_body(
+                            &mut request,
+                            limits.max_body_bytes,
+                            &mut held,
+                            limits.memory_budget,
+                        )?;
+                    }
+                    Ok((request, version))
+                })
         };
         let (request, version) = match read {
             Ok(read) => read,

@@ -109,35 +109,13 @@ pub(crate) enum TimeStyle {
 }
 
 pub(crate) fn utc_time(unix_micros: u64, style: TimeStyle) -> String {
-    let seconds = unix_micros / 1_000_000;
-    let micros = unix_micros % 1_000_000;
-    let (year, month, day) = civil_from_days(seconds / 86_400);
-    let of_day = seconds % 86_400;
-    let (hour, minute, second) = (of_day / 3600, of_day / 60 % 60, of_day % 60);
-    let date = format!("{year:04}-{month:02}-{day:02}");
-    let time = format!("{hour:02}:{minute:02}:{second:02}.{micros:06}");
-    match style {
-        TimeStyle::Readable => format!("{date} {time} UTC"),
-        TimeStyle::Rfc3339 => format!("{date}T{time}Z"),
+    let rfc3339 = eggdb_commands::utc_rfc3339(unix_micros);
+    if style == TimeStyle::Readable
+        && let Some(time) = rfc3339.strip_suffix('Z')
+    {
+        return format!("{} UTC", time.replacen('T', " ", 1));
     }
-}
-
-fn civil_from_days(days_since_epoch: u64) -> (u64, u64, u64) {
-    let shifted = days_since_epoch + 719_468;
-    let era = shifted / 146_097;
-    let day_of_era = shifted % 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_from_march = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_from_march + 2) / 5 + 1;
-    let month = if month_from_march < 10 {
-        month_from_march + 3
-    } else {
-        month_from_march - 9
-    };
-    let year = year_of_era + era * 400 + u64::from(month <= 2);
-    (year, month, day)
+    rfc3339
 }
 
 #[derive(Debug, Default)]

@@ -320,6 +320,11 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
         ("abs", [argument]) => static_type(argument, scope)
             .filter(|sql_type| sql_type.is_numeric())
             .map(SqlType::without_modifier),
+        (crate::square_root::POSTGRESQL, [argument]) => match static_type(argument, scope) {
+            Some(SqlType::Numeric(_)) => Some(SqlType::Numeric(None)),
+            _ => Some(SqlType::Double),
+        },
+        (crate::square_root::MYSQL | crate::square_root::SQLSERVER, [_]) => Some(SqlType::Double),
         (
             "now"
             | "current_timestamp"

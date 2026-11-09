@@ -123,7 +123,7 @@ pub(super) fn key_value_in_block(
             return Ok(InBlock::ReadsTheLastCommit);
         }
         return Err(Failure::usage(
-            "collection add, delete and move run outside a transaction block: COMMIT or ROLLBACK first",
+            "collection add, delete, move and rename run outside a transaction block: COMMIT or ROLLBACK first",
             Some(command),
         ));
     }

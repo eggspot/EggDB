@@ -525,7 +525,10 @@ pub(crate) fn stored(reader: &dyn KeyValueRead, table: &str) -> SqlResult<Partit
     }
 }
 
-fn stored_definition(reader: &dyn KeyValueRead, table: &str) -> SqlResult<Option<TableDefinition>> {
+pub(crate) fn stored_definition(
+    reader: &dyn KeyValueRead,
+    table: &str,
+) -> SqlResult<Option<TableDefinition>> {
     reader
         .get(&table_key(table))?
         .map(|bytes| TableDefinition::decode(table, &bytes))
@@ -1138,6 +1141,18 @@ impl Partitioned {
 
     pub(crate) fn route(&self, row: &[Value]) -> SqlResult<Option<&str>> {
         Ok(self.chosen(&self.key.read(row)?))
+    }
+
+    pub(crate) fn key_types(&self) -> &[SqlType] {
+        &self.key.types
+    }
+
+    pub(crate) fn partition_holding(&self, key: &[Value]) -> Option<&str> {
+        self.chosen(key)
+    }
+
+    pub(crate) fn no_partition_for_key(&self, key: &[Value]) -> SqlError {
+        no_partition_error(&self.table, &self.key_names, key)
     }
 
     pub(crate) fn no_partition(&self, row: &[Value]) -> SqlError {

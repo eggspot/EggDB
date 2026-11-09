@@ -1,5 +1,6 @@
 //! EggDB's content extraction for full-text search (D56): [`inflate`] decompresses DEFLATE
-//! (RFC 1951), [`ZipArchive`] reads ZIP archives (PKWARE's APPNOTE, stored and deflated
+//! (RFC 1951), [`gunzip`] gzip (RFC 1952) and [`zlib_inflate`] the zlib format (RFC 1950) that
+//! HTTP's `deflate` coding names (D343), [`ZipArchive`] reads ZIP archives (PKWARE's APPNOTE, stored and deflated
 //! entries, CRC-checked), and [`extract_text`] returns the text of Office Open XML (ECMA-376:
 //! `.docx`, `.xlsx`, `.pptx`) and OpenDocument (OASIS ODF: `.odt`, `.ods`, `.odp`) files. Every
 //! reader bounds what it produces, so a hostile file cannot exhaust memory.
@@ -8,7 +9,7 @@ mod inflate;
 mod text;
 mod zip;
 
-pub use inflate::inflate;
+pub use inflate::{DecompressError, gunzip, inflate, zlib_inflate};
 pub use zip::{ZipArchive, ZipEntry, crc32};
 
 /// Why content could not be read.

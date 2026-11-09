@@ -1054,6 +1054,7 @@ fn namespace_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 .set("oid", oid(schema.oid))
                 .set("nspname", text(&schema.name))
                 .set("nspowner", oid(schema.owner))
+                .set("nspacl", super::acl::schema_acl(snapshot, schema))
                 .done()
         })
         .collect()

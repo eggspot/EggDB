@@ -1143,6 +1143,7 @@ impl Parser<'_> {
             name,
             derived: None,
             generated: Some(Box::new(generated)),
+            partition_selection: None,
         })
     }
 }
