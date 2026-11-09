@@ -227,7 +227,11 @@ fn furthest_in_partition(
         })?;
         return Ok(found);
     }
-    let Some(sql_type) = table.columns.get(column).map(|definition| definition.sql_type) else {
+    let Some(sql_type) = table
+        .columns
+        .get(column)
+        .map(|definition| definition.sql_type)
+    else {
         return Ok(None);
     };
     if let Some(index) = table.indexes.iter().find(|index| {
@@ -237,20 +241,15 @@ fn furthest_in_partition(
     }) {
         let entries = index_prefix(table.id, index.id);
         let mut decoded = Vec::with_capacity(1);
-        reader.scan(
-            &entries,
-            &prefix_end(&entries),
-            direction,
-            &mut |key, _| {
-                decoded.clear();
-                let Some(values) = key.get(entries.len()..) else {
-                    return Err(crate::encoding::corrupt("index entry"));
-                };
-                decode_key_values(values, std::iter::once(sql_type), &mut decoded)?;
-                found = decoded.first().and_then(Value::as_integer);
-                Ok(found.is_none())
-            },
-        )?;
+        reader.scan(&entries, &prefix_end(&entries), direction, &mut |key, _| {
+            decoded.clear();
+            let Some(values) = key.get(entries.len()..) else {
+                return Err(crate::encoding::corrupt("index entry"));
+            };
+            decode_key_values(values, std::iter::once(sql_type), &mut decoded)?;
+            found = decoded.first().and_then(Value::as_integer);
+            Ok(found.is_none())
+        })?;
         return Ok(found);
     }
     reader.scan(
@@ -280,7 +279,11 @@ fn furthest_identity_value(
     column: usize,
     seed: IdentitySeed,
 ) -> SqlResult<Option<i64>> {
-    let Some(name) = table.columns.get(column).map(|definition| definition.name.as_str()) else {
+    let Some(name) = table
+        .columns
+        .get(column)
+        .map(|definition| definition.name.as_str())
+    else {
         return Ok(None);
     };
     let mut furthest: Option<i64> = None;
@@ -391,8 +394,9 @@ pub(crate) fn insert(
         if let Some(selected) = &selected
             && !selected.contains(child)
         {
-            return Err(crate::partition_selection::row_outside_selection()
-                .at(insert.table.name.position));
+            return Err(
+                crate::partition_selection::row_outside_selection().at(insert.table.name.position)
+            );
         }
         match groups
             .iter_mut()

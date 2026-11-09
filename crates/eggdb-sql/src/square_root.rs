@@ -186,10 +186,7 @@ mod tests {
             error.message(),
             "cannot take square root of a negative number"
         );
-        assert_eq!(
-            shown(function(POSTGRESQL, &[numeric("-4")])),
-            "error 2201F"
-        );
+        assert_eq!(shown(function(POSTGRESQL, &[numeric("-4")])), "error 2201F");
         assert_eq!(
             shown(function(POSTGRESQL, &[Value::Boolean(true)])),
             "no such function"
@@ -211,7 +208,10 @@ mod tests {
             "NULL"
         );
         assert_eq!(
-            shown(square_root(&Value::Text(" 6.25 ".to_owned()), Dialect::Sqlite)),
+            shown(square_root(
+                &Value::Text(" 6.25 ".to_owned()),
+                Dialect::Sqlite
+            )),
             "2.5"
         );
     }

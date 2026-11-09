@@ -411,8 +411,11 @@ impl<'n> Arguments<'n> {
                 format!("{} takes no whole number named {name}", tool.name()),
             ));
         };
-        let refused =
-            || ToolError::invalid(format!("{name} must be a whole number from {least} to {most}"));
+        let refused = || {
+            ToolError::invalid(format!(
+                "{name} must be a whole number from {least} to {most}"
+            ))
+        };
         match self.value(name) {
             None | Some(Json::Null) => Ok(default),
             Some(Json::Number(text)) => text
@@ -1831,7 +1834,9 @@ fn compare_and_set_change(arguments: &Arguments<'_>) -> Result<KeyChange, ToolEr
         arguments.boolean("if_absent")?,
     ) {
         (Some(_), true) => {
-            return Err(ToolError::invalid("give expected or if_absent: true, not both"));
+            return Err(ToolError::invalid(
+                "give expected or if_absent: true, not both",
+            ));
         }
         (None, false) => {
             return Err(ToolError::invalid(
@@ -1840,7 +1845,10 @@ fn compare_and_set_change(arguments: &Arguments<'_>) -> Result<KeyChange, ToolEr
         }
         (expected, _) => expected,
     };
-    let new = match (arguments.bytes("new", "new_hex")?, arguments.boolean("delete")?) {
+    let new = match (
+        arguments.bytes("new", "new_hex")?,
+        arguments.boolean("delete")?,
+    ) {
         (Some(_), true) => {
             return Err(ToolError::invalid("give new or delete: true, not both"));
         }
@@ -2015,7 +2023,10 @@ fn time_to_live_fields(out: &mut JsonOut, ttl: Duration) {
     out.key("ttl_ms")
         .unsigned(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))
         .key("expires_at")
-        .string(&eggdb_commands::expires_at(crate::audit::now_unix_micros(), ttl));
+        .string(&eggdb_commands::expires_at(
+            crate::audit::now_unix_micros(),
+            ttl,
+        ));
 }
 
 fn key_written(

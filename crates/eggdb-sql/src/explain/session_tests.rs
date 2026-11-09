@@ -417,7 +417,10 @@ fn mysql_tree_draws_aggregate_group_aggregate_and_stream_results() {
     );
     let lines: Vec<&str> = text.lines().collect();
     assert!(lines[1].starts_with("-> Sort: t2.c2  (cost="), "{text}");
-    assert!(lines[2].starts_with("    -> Stream results  (cost="), "{text}");
+    assert!(
+        lines[2].starts_with("    -> Stream results  (cost="),
+        "{text}"
+    );
     assert!(
         lines[3].starts_with("        -> Nested loop inner join  (cost="),
         "{text}"
@@ -450,9 +453,8 @@ fn mysql_explain_analyze_runs_the_select_and_prints_actual_time_rows_and_loops()
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines[0], "EXPLAIN", "{text}");
     assert!(
-        lines[1].starts_with(
-            "-> Inner hash join (t1.a = t2.c2)  (cost=1.7 rows=0.9) (actual time="
-        ),
+        lines[1]
+            .starts_with("-> Inner hash join (t1.a = t2.c2)  (cost=1.7 rows=0.9) (actual time="),
         "{text}"
     );
     assert!(lines[1].ends_with(" rows=2 loops=1)"), "{text}");
@@ -533,7 +535,10 @@ fn mysql_format_json_answers_mysql_8s_query_block() {
 }"#
     );
     assert_eq!(
-        json_of(&mut session, "EXPLAIN FORMAT = JSON SELECT * FROM t1 WHERE id = 2"),
+        json_of(
+            &mut session,
+            "EXPLAIN FORMAT = JSON SELECT * FROM t1 WHERE id = 2"
+        ),
         r#"{
   "query_block": {
     "select_id": 1,
@@ -582,7 +587,10 @@ fn mysql_format_json_nests_joins_ordering_and_grouping() {
     let ordering = json.find("\"ordering_operation\": {").unwrap_or(usize::MAX);
     let grouping = json.find("\"grouping_operation\": {").unwrap_or(usize::MAX);
     let nested = json.find("\"nested_loop\": [").unwrap_or(usize::MAX);
-    assert!(ordering < grouping && grouping < nested && nested < json.len(), "{json}");
+    assert!(
+        ordering < grouping && grouping < nested && nested < json.len(),
+        "{json}"
+    );
     assert!(json.contains("\"using_filesort\": true"), "{json}");
     assert!(json.contains("\"using_temporary_table\": true"), "{json}");
     assert!(json.contains("\"access_type\": \"eq_ref\""), "{json}");
@@ -616,7 +624,10 @@ fn mysql_explain_of_writes_marks_the_written_table_and_runs_nothing() {
         &mut session,
         "EXPLAIN FORMAT=JSON DELETE FROM t1 WHERE a > 1",
     );
-    assert!(json.contains("\"delete\": true,\n      \"table_name\": \"t1\""), "{json}");
+    assert!(
+        json.contains("\"delete\": true,\n      \"table_name\": \"t1\""),
+        "{json}"
+    );
     assert!(!json.contains("cost_info"), "{json}");
     let text = last(
         &mut session,
@@ -631,9 +642,7 @@ fn mysql_explain_of_writes_marks_the_written_table_and_runs_nothing() {
     );
     assert_eq!(json.matches("\"delete\": true").count(), 2, "{json}");
     assert!(json.contains("\"query_cost\""), "{json}");
-    assert!(
-        last(&mut session, "SELECT b FROM t1 ORDER BY id").ends_with("\n10\n20\n30\nSELECT 3")
-    );
+    assert!(last(&mut session, "SELECT b FROM t1 ORDER BY id").ends_with("\n10\n20\n30\nSELECT 3"));
 }
 
 #[test]
@@ -651,9 +660,7 @@ fn mysql_explain_analyze_runs_a_multi_table_update_and_delete() {
     );
     assert!(lines[1].ends_with(" rows=0 loops=1)"), "{text}");
     assert!(lines[2].starts_with("    -> "), "{text}");
-    assert!(
-        last(&mut session, "SELECT b FROM t1 ORDER BY id").ends_with("\n0\n0\n30\nSELECT 3")
-    );
+    assert!(last(&mut session, "SELECT b FROM t1 ORDER BY id").ends_with("\n0\n0\n30\nSELECT 3"));
     let text = last(
         &mut session,
         "EXPLAIN ANALYZE DELETE t1 FROM t1 JOIN t2 ON t1.id = t2.c1 WHERE t2.c2 = 2",
@@ -672,7 +679,10 @@ fn mysql_explain_and_explain_analyze_accept_table_statements() {
     let store = MemoryStore::default();
     let mut session = mysql_tables(&store);
     assert_eq!(
-        last(&mut session, "EXPLAIN FORMAT=TREE TABLE t1 ORDER BY b LIMIT 2"),
+        last(
+            &mut session,
+            "EXPLAIN FORMAT=TREE TABLE t1 ORDER BY b LIMIT 2"
+        ),
         last(
             &mut session,
             "EXPLAIN FORMAT=TREE SELECT * FROM t1 ORDER BY b LIMIT 2"
@@ -735,5 +745,8 @@ fn mysql_refuses_explain_analyze_of_single_table_writes_and_other_formats() {
 fn postgresql_explains_a_table_statement_as_its_select() {
     let store = MemoryStore::default();
     let mut session = postgresql_tables(&store);
-    assert_eq!(plan(&mut session, "EXPLAIN TABLE onek"), ["Seq Scan on onek", "EXPLAIN"]);
+    assert_eq!(
+        plan(&mut session, "EXPLAIN TABLE onek"),
+        ["Seq Scan on onek", "EXPLAIN"]
+    );
 }

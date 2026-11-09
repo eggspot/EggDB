@@ -73,7 +73,9 @@ fn declare(channel: u16, queue: &str) -> Vec<u8> {
     })
 }
 
-fn methods(output: &[u8]) -> Vec<(u8, u16, u16, Vec<u8>)> {
+type Method = (u8, u16, u16, Vec<u8>);
+
+fn methods(output: &[u8]) -> Vec<Method> {
     let mut buffer = output.to_vec();
     let mut out = Vec::new();
     while let Some(found) = take_frame(&mut buffer).unwrap() {
@@ -90,7 +92,7 @@ fn methods(output: &[u8]) -> Vec<(u8, u16, u16, Vec<u8>)> {
     out
 }
 
-fn run(keyspace: &MemoryKeyspace, input: &[u8]) -> Vec<(u8, u16, u16, Vec<u8>)> {
+fn run(keyspace: &MemoryKeyspace, input: &[u8]) -> Vec<Method> {
     let broker = Broker::new(keyspace);
     let mut output = Vec::new();
     serve_stream(&broker, &config(), input, &mut output, &|| false).unwrap();
@@ -512,7 +514,7 @@ fn heartbeats(frames: &[(u8, u16, u16, Vec<u8>)]) -> usize {
         .count()
 }
 
-fn served_for(input: TimedInput) -> (Duration, Vec<(u8, u16, u16, Vec<u8>)>) {
+fn served_for(input: TimedInput) -> (Duration, Vec<Method>) {
     let keyspace = MemoryKeyspace::default();
     let broker = Broker::new(&keyspace);
     let mut output = Vec::new();

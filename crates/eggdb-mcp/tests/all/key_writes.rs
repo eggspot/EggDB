@@ -365,7 +365,11 @@ fn every_key_tool_refuses_a_key_of_a_sql_row_before_opening_the_file() {
             };
             let answer = call(&mut server, id, tool, &arguments);
             id += 1;
-            assert_eq!(error_code(&answer), "invalid_arguments", "{tool} {arguments}");
+            assert_eq!(
+                error_code(&answer),
+                "invalid_arguments",
+                "{tool} {arguments}"
+            );
             let message = text_at(structured(&answer), &["error", "message"]);
             assert!(message.contains("SQL's key space"), "{tool}: {message}");
         }

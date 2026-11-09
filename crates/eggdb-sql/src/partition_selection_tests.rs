@@ -88,8 +88,14 @@ fn mysql_select_reads_only_the_named_partitions() {
 fn mysql_writes_through_named_partitions_refuse_rows_outside_them() {
     let store = MemoryStore::default();
     let mut session = mysql_years(&store);
-    answer(&mut session, "INSERT INTO o PARTITION (p1) VALUES (5, 2015)");
-    let error = failure(&mut session, "INSERT INTO o PARTITION (p1) VALUES (6, 1980)");
+    answer(
+        &mut session,
+        "INSERT INTO o PARTITION (p1) VALUES (5, 2015)",
+    );
+    let error = failure(
+        &mut session,
+        "INSERT INTO o PARTITION (p1) VALUES (6, 1980)",
+    );
     assert_eq!(error.vendor_code(), Some(1748), "{error}");
     assert_eq!(
         error.message(),
@@ -104,7 +110,10 @@ fn mysql_writes_through_named_partitions_refuse_rows_outside_them() {
         &mut session,
         "INSERT INTO o PARTITION (p0, p1) (id, y) VALUES (7, 1500), (8, 2001)",
     );
-    answer(&mut session, "REPLACE INTO o PARTITION (p1) VALUES (8, 2001)");
+    answer(
+        &mut session,
+        "REPLACE INTO o PARTITION (p1) VALUES (8, 2001)",
+    );
     assert_eq!(
         listed(&mut session, "SELECT id FROM o ORDER BY id"),
         ["1", "2", "3", "4", "5", "7", "8"]
@@ -128,7 +137,10 @@ fn mysql_writes_through_named_partitions_refuse_rows_outside_them() {
         ["2", "5", "8", "101"]
     );
     answer(&mut session, "DELETE FROM o PARTITION (p2)");
-    answer(&mut session, "DELETE FROM o AS x PARTITION (p1) WHERE x.id = 2");
+    answer(
+        &mut session,
+        "DELETE FROM o AS x PARTITION (p1) WHERE x.id = 2",
+    );
     assert_eq!(
         listed(&mut session, "SELECT id FROM o ORDER BY id"),
         ["5", "8", "101", "104", "107"]
@@ -293,107 +305,133 @@ fn mysql_auto_increment_in_a_hash_partitioned_table_numbers_rows_in_statement_or
 
 #[test]
 fn mysql_auto_increment_takes_the_furthest_id_of_every_range_partition() {
-    for primary_key in [
-        "PRIMARY KEY (id, created_at)",
-        "PRIMARY KEY (created_at, id), KEY id_key (id)",
-    ] {
-        let store = MemoryStore::default();
-        let mut session = Session::with_dialect(&store, Dialect::MySql);
-        answer(
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    answer(
+        &mut session,
+        "CREATE TABLE r (id int NOT NULL AUTO_INCREMENT, created_at date NOT NULL,
+             PRIMARY KEY (id, created_at))
+             PARTITION BY RANGE COLUMNS (created_at) (
+               PARTITION p2024 VALUES LESS THAN ('2025-01-01'),
+               PARTITION p2025 VALUES LESS THAN MAXVALUE
+             )",
+    );
+    answer(
+        &mut session,
+        "INSERT INTO r (created_at) VALUES ('2025-03-01'), ('2024-03-01'), ('2025-06-01')",
+    );
+    answer(
+        &mut session,
+        "INSERT INTO r (created_at) VALUES ('2024-05-01')",
+    );
+    assert_eq!(
+        listed(
             &mut session,
-            &format!(
-                "CREATE TABLE r (id int NOT NULL AUTO_INCREMENT, created_at date NOT NULL,
-                     {primary_key})
-                     PARTITION BY RANGE COLUMNS (created_at) (
-                       PARTITION p2024 VALUES LESS THAN ('2025-01-01'),
-                       PARTITION p2025 VALUES LESS THAN MAXVALUE
-                     )"
-            ),
-        );
-        answer(
+            "SELECT id FROM r PARTITION (p2024) ORDER BY id"
+        ),
+        ["2", "4"]
+    );
+    assert_eq!(
+        listed(
             &mut session,
-            "INSERT INTO r (created_at) VALUES ('2025-03-01'), ('2024-03-01'), ('2025-06-01')",
-        );
-        answer(&mut session, "INSERT INTO r (created_at) VALUES ('2024-05-01')");
-        assert_eq!(
-            listed(&mut session, "SELECT id FROM r PARTITION (p2024) ORDER BY id"),
-            ["2", "4"],
-            "{primary_key}"
-        );
-        assert_eq!(
-            listed(&mut session, "SELECT id FROM r PARTITION (p2025) ORDER BY id"),
-            ["1", "3"],
-            "{primary_key}"
-        );
-        assert_eq!(listed(&mut session, "SELECT LAST_INSERT_ID()"), ["4"]);
-        answer(
+            "SELECT id FROM r PARTITION (p2025) ORDER BY id"
+        ),
+        ["1", "3"]
+    );
+    assert_eq!(listed(&mut session, "SELECT LAST_INSERT_ID()"), ["4"]);
+    answer(
+        &mut session,
+        "UPDATE r SET created_at = '2024-12-31' WHERE id = 3",
+    );
+    answer(
+        &mut session,
+        "INSERT INTO r (created_at) VALUES ('2025-02-02')",
+    );
+    assert_eq!(
+        listed(
             &mut session,
-            "UPDATE r SET created_at = '2024-12-31' WHERE id = 3",
-        );
-        answer(&mut session, "INSERT INTO r (created_at) VALUES ('2025-02-02')");
-        assert_eq!(
-            listed(&mut session, "SELECT id FROM r PARTITION (p2024) ORDER BY id"),
-            ["2", "3", "4"],
-            "a moved row keeps its id: {primary_key}"
-        );
-        assert_eq!(
-            listed(&mut session, "SELECT max(id) FROM r"),
-            ["5"],
-            "{primary_key}"
-        );
-    }
+            "SELECT id FROM r PARTITION (p2024) ORDER BY id"
+        ),
+        ["2", "3", "4"],
+        "a moved row keeps its id"
+    );
+    assert_eq!(listed(&mut session, "SELECT max(id) FROM r"), ["5"]);
+}
+
+#[test]
+fn an_auto_increment_column_after_the_partition_key_in_the_primary_key_is_refused() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    let error = failure(
+        &mut session,
+        "CREATE TABLE r (id int NOT NULL AUTO_INCREMENT, created_at date NOT NULL,
+             PRIMARY KEY (created_at, id), KEY id_key (id))
+             PARTITION BY RANGE COLUMNS (created_at) (
+               PARTITION p2024 VALUES LESS THAN ('2025-01-01'),
+               PARTITION p2025 VALUES LESS THAN MAXVALUE
+             )",
+    );
+    assert!(
+        error.to_string().starts_with("ERROR 1075 (42000)"),
+        "{error}"
+    );
+    let mut session = Session::new(&store);
+    let error = failure(
+        &mut session,
+        "CREATE TABLE ev (id bigint GENERATED ALWAYS AS IDENTITY, created_at date NOT NULL,
+             PRIMARY KEY (created_at, id)) PARTITION BY RANGE (created_at)",
+    );
+    assert_eq!(error.state().code(), "42P16", "{error}");
+    let error = failure(&mut session, "SELECT * FROM ev");
+    assert_eq!(error.state().code(), "42P01", "{error}");
 }
 
 #[test]
 fn postgresql_identity_columns_share_one_counter_across_partitions() {
-    for primary_key in ["PRIMARY KEY (id, created_at)", "PRIMARY KEY (created_at, id)"] {
-        let store = MemoryStore::default();
-        let mut session = Session::new(&store);
-        answer(
-            &mut session,
-            &format!(
-                "CREATE TABLE ev (id bigint GENERATED ALWAYS AS IDENTITY, created_at date NOT NULL,
-                     {primary_key}) PARTITION BY RANGE (created_at);
-                 CREATE TABLE ev_2024 PARTITION OF ev FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
-                 CREATE TABLE ev_2025 PARTITION OF ev FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')"
-            ),
-        );
-        answer(
-            &mut session,
-            "INSERT INTO ev (created_at) VALUES ('2025-03-01'), ('2024-03-01'), ('2025-01-02')",
-        );
-        answer(&mut session, "INSERT INTO ev (created_at) VALUES ('2024-01-05')");
-        assert_eq!(
-            listed(&mut session, "SELECT id FROM ev_2024 ORDER BY id"),
-            ["2", "4"],
-            "{primary_key}"
-        );
-        assert_eq!(
-            listed(&mut session, "SELECT last_value FROM ev_id_seq"),
-            ["4"],
-            "{primary_key}"
-        );
-        let error = failure(
-            &mut session,
-            "INSERT INTO ev (id, created_at) VALUES (50, '2024-02-02')",
-        );
-        assert_eq!(error.state().code(), "428C9", "{error}");
-        answer(
-            &mut session,
-            "INSERT INTO ev (id, created_at) OVERRIDING SYSTEM VALUE VALUES (50, '2024-02-02')",
-        );
-        answer(
-            &mut session,
-            "INSERT INTO ev (id, created_at) OVERRIDING USER VALUE VALUES (7, '2025-05-05')",
-        );
-        assert_eq!(
-            listed(&mut session, "SELECT id FROM ev_2025 ORDER BY id"),
-            ["1", "3", "51"],
-            "{primary_key}"
-        );
-        let error = failure(&mut session, "UPDATE ev SET id = 5 WHERE id = 1");
-        assert_eq!(error.state().code(), "428C9", "{error}");
-    }
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    answer(
+        &mut session,
+        "CREATE TABLE ev (id bigint GENERATED ALWAYS AS IDENTITY, created_at date NOT NULL,
+             PRIMARY KEY (id, created_at)) PARTITION BY RANGE (created_at);
+         CREATE TABLE ev_2024 PARTITION OF ev FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
+         CREATE TABLE ev_2025 PARTITION OF ev FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')",
+    );
+    answer(
+        &mut session,
+        "INSERT INTO ev (created_at) VALUES ('2025-03-01'), ('2024-03-01'), ('2025-01-02')",
+    );
+    answer(
+        &mut session,
+        "INSERT INTO ev (created_at) VALUES ('2024-01-05')",
+    );
+    assert_eq!(
+        listed(&mut session, "SELECT id FROM ev_2024 ORDER BY id"),
+        ["2", "4"]
+    );
+    assert_eq!(
+        listed(&mut session, "SELECT last_value FROM ev_id_seq"),
+        ["4"]
+    );
+    let error = failure(
+        &mut session,
+        "INSERT INTO ev (id, created_at) VALUES (50, '2024-02-02')",
+    );
+    assert_eq!(error.state().code(), "428C9", "{error}");
+    answer(
+        &mut session,
+        "INSERT INTO ev (id, created_at) OVERRIDING SYSTEM VALUE VALUES (50, '2024-02-02')",
+    );
+    answer(
+        &mut session,
+        "INSERT INTO ev (id, created_at) OVERRIDING USER VALUE VALUES (7, '2025-05-05')",
+    );
+    assert_eq!(
+        listed(&mut session, "SELECT id FROM ev_2025 ORDER BY id"),
+        ["1", "3", "51"]
+    );
+    let error = failure(&mut session, "UPDATE ev SET id = 5 WHERE id = 1");
+    assert_eq!(error.state().code(), "428C9", "{error}");
 }
 
 #[test]

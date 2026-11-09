@@ -249,7 +249,7 @@ impl Parser<'_> {
             }
             PartitionStrategy::List => {
                 self.expect_word("values")?;
-                if self.oracle() && self.take_word("default") {
+                if self.oracle() && self.take_oracle_default_values() {
                     NamedPartitionBound::In(Vec::new())
                 } else {
                     self.take_word("in");
@@ -260,6 +260,19 @@ impl Parser<'_> {
         };
         self.skip_partition_options()?;
         Ok(NamedPartition { name, bound })
+    }
+
+    fn take_oracle_default_values(&mut self) -> bool {
+        if self.take_word("default") {
+            return true;
+        }
+        let parenthesized = self.peek_kind() == &TokenKind::LeftParen
+            && self.is_word_at(1, "default")
+            && self.peek_kind_at(2) == &TokenKind::RightParen;
+        if parenthesized {
+            self.at += 3;
+        }
+        parenthesized
     }
 
     fn skip_partition_options(&mut self) -> SqlResult<()> {

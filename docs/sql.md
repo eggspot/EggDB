@@ -2743,8 +2743,8 @@ ALTER TABLE measurements DETACH PARTITION old_rows;
 - **Identity and `AUTO_INCREMENT`.** The partitioned table numbers its rows: an `INSERT` gives
   each row its id in statement order before routing it (so `HASH (id)` routes on the new id),
   from one counter past the furthest id any partition holds, and `LAST_INSERT_ID()` is the
-  first id it gave. The column may be any column of the primary key (`PRIMARY KEY
-  (created_at, id)`). A row written straight into a partition gets no id (D337).
+  first id it gave. The column must lead the primary key (`PRIMARY KEY (id, created_at)`), as
+  in every table. A row written straight into a partition gets no id (D337).
 - **Catalogs and restores.** `pg_class` shows `relkind` `p` and `relispartition`, `pg_inherits`
   links partitions to their parent, `pg_partitioned_table`, `pg_get_partkeydef` and
   `pg_get_expr(relpartbound, oid)` describe them, and `pg_dump` files restore with their

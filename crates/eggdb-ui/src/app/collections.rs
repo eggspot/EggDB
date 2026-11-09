@@ -99,7 +99,9 @@ fn tail_to_cells(text: &str, cells: usize, ellipsis: char) -> String {
         used += width;
         tail.push(c);
     }
-    std::iter::once(ellipsis).chain(tail.into_iter().rev()).collect()
+    std::iter::once(ellipsis)
+        .chain(tail.into_iter().rev())
+        .collect()
 }
 
 fn renaming_title(from: &str, text: &str, cells: usize, ellipsis: char) -> String {
@@ -126,8 +128,7 @@ impl<S: Source> Ui<S> {
     pub(super) fn refresh_collections(&mut self) {
         match self.source.kept_collection_counts() {
             Ok(counted) => {
-                let (names, counts): (Vec<String>, Vec<Option<u64>>) =
-                    counted.into_iter().unzip();
+                let (names, counts): (Vec<String>, Vec<Option<u64>>) = counted.into_iter().unzip();
                 self.collection_names = names;
                 self.collection_counts = counts;
             }
@@ -590,8 +591,10 @@ impl<S: Source> Ui<S> {
             } else {
                 Role::Plain
             };
-            let count = count_column
-                .and_then(|column| self.count_at(index).map(|count| (column, text::count(count))));
+            let count = count_column.and_then(|column| {
+                self.count_at(index)
+                    .map(|count| (column, text::count(count)))
+            });
             match count {
                 Some((column, count)) => {
                     let name_room = inner.saturating_sub(2 + column + 2);
@@ -601,7 +604,13 @@ impl<S: Source> Ui<S> {
                     } else {
                         String::new()
                     };
-                    body(frame, &format!("{name}{padding}"), role, false, Some(&count));
+                    body(
+                        frame,
+                        &format!("{name}{padding}"),
+                        role,
+                        false,
+                        Some(&count),
+                    );
                 }
                 None => body(frame, &format!("{marker}{label}"), role, false, None),
             }

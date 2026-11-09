@@ -95,7 +95,8 @@ fn conflicting_rows(
         }
     }
     for (position, index) in table.indexes.iter().enumerate() {
-        let Some(row_key) = indexes::unique_conflict(reader, table, index, new_row, old_key)? else {
+        let Some(row_key) = indexes::unique_conflict(reader, table, index, new_row, old_key)?
+        else {
             continue;
         };
         if found.iter().any(|conflict| conflict.row_key == row_key) {

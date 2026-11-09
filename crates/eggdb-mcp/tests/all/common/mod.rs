@@ -115,7 +115,8 @@ impl KeyValueWrite for MapWrite<'_> {
         let count = current
             .checked_add(by)
             .ok_or_else(|| SqlError::new(SqlState::DATA_EXCEPTION, "out of range"))?;
-        self.map.insert(key.to_vec(), count.to_string().into_bytes());
+        self.map
+            .insert(key.to_vec(), count.to_string().into_bytes());
         Ok(Some(count))
     }
 

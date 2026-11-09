@@ -361,9 +361,8 @@ fn syslog_sent_over_udp_and_tcp_is_read_back_through_sql() {
     let stopped = AtomicBool::new(false);
     let stop = || stopped.load(Ordering::Acquire);
     std::thread::scope(|scope| {
-        let server = scope.spawn(|| {
-            collector.serve(Some(&datagrams), Some(&listener), &stop, &|_: &str| {})
-        });
+        let server = scope
+            .spawn(|| collector.serve(Some(&datagrams), Some(&listener), &stop, &|_: &str| {}));
         let stop_even_on_a_failure = StopOnDrop(&stopped);
         let sender = UdpSocket::bind(loopback).unwrap();
         sender.send_to(RFC5424_SU, address).unwrap();

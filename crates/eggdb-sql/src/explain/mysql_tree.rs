@@ -2,8 +2,8 @@ use super::estimates::{self, Estimate, ROW_COST, TableRows};
 use super::expression_text::{ExpressionText, Spelling};
 use super::subplans::{Subplan, SubplanPlace};
 use super::{
-    Analyzed, ExplainedGrouping, Measured, Planned, PlannedStatement, PlannedWrite, Step,
-    key_name, measured_steps, milliseconds, source_measured, steps,
+    Analyzed, ExplainedGrouping, Measured, Planned, PlannedStatement, PlannedWrite, Step, key_name,
+    measured_steps, milliseconds, source_measured, steps,
 };
 use crate::ast::{BinaryOperator, Expr, ExprKind};
 use crate::dialect::Dialect;
@@ -428,23 +428,25 @@ impl Tree<'_> {
                 cost: 0.0,
                 rows: 1.0,
             },
-            Step::Append => children.iter().fold(Estimate::default(), |sum, child| Estimate {
-                cost: sum.cost + child.cost,
-                rows: sum.rows + child.rows,
-            }),
+            Step::Append => children
+                .iter()
+                .fold(Estimate::default(), |sum, child| Estimate {
+                    cost: sum.cost + child.cost,
+                    rows: sum.rows + child.rows,
+                }),
             Step::Sort => Estimate {
                 cost: first.cost + estimates::sort_cost(first.rows),
                 rows: query.row_limit.map_or(first.rows, |limit| {
-                    first.rows.min(limit.saturating_add(query.row_offset) as f64)
+                    first
+                        .rows
+                        .min(limit.saturating_add(query.row_offset) as f64)
                 }),
             },
             Step::Limit => {
                 let left = (first.rows - query.row_offset as f64).max(0.0);
                 Estimate {
                     cost: first.cost,
-                    rows: query
-                        .row_limit
-                        .map_or(left, |limit| left.min(limit as f64)),
+                    rows: query.row_limit.map_or(left, |limit| left.min(limit as f64)),
                 }
             }
             Step::Hash => first,

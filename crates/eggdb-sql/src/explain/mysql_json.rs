@@ -334,7 +334,11 @@ fn query_block(planned: &Planned) -> PlanJson {
             ),
         )],
     };
-    if query.grouping.as_ref().is_some_and(|grouping| grouping.keyed) {
+    if query
+        .grouping
+        .as_ref()
+        .is_some_and(|grouping| grouping.keyed)
+    {
         let mut grouping = vec![
             ("using_temporary_table", PlanJson::Flag(true)),
             ("using_filesort", PlanJson::Flag(false)),

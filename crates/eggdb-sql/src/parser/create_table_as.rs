@@ -201,9 +201,11 @@ impl Parser<'_> {
             self.expect(&TokenKind::RightParen)?;
         }
         self.expect_word("as")?;
-        let preparable = ["select", "with", "insert", "update", "delete", "merge", "values"]
-            .iter()
-            .any(|word| self.is_word(word))
+        let preparable = [
+            "select", "with", "insert", "update", "delete", "merge", "values",
+        ]
+        .iter()
+        .any(|word| self.is_word(word))
             || self.at_table_query_at(0)
             || self.starts_query_in_parentheses();
         if !preparable {
@@ -444,10 +446,10 @@ fn check_storage_parameter(
             if value.trim().eq_ignore_ascii_case("auto") || option_boolean(value).is_some() {
                 return Ok(());
             }
-            Err(invalid_option(format!(
-                "invalid value for enum option \"{name}\": {value}"
-            ))
-            .with_detail("Valid values are \"on\", \"off\", and \"auto\"."))
+            Err(
+                invalid_option(format!("invalid value for enum option \"{name}\": {value}"))
+                    .with_detail("Valid values are \"on\", \"off\", and \"auto\"."),
+            )
         }
         StorageOption::Integer(lowest, highest) => {
             let number = value

@@ -118,7 +118,7 @@ fn insert(session: &mut Session<'_>, batch: &[Received]) -> Option<Refused> {
     let mut refused: Option<Refused> = None;
     for rows in batch.chunks(ROWS_PER_INSERT) {
         if let Err(error) = insert_rows(session, rows) {
-            let entry = refused.get_or_insert_with(|| Refused { messages: 0, error });
+            let entry = refused.get_or_insert(Refused { messages: 0, error });
             entry.messages += rows.len();
         }
     }

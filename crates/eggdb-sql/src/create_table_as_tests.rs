@@ -646,15 +646,39 @@ fn postgresql_create_table_as_refuses_unknown_storage_options_as_postgresql_does
         ("CREATE TABLE w USING columnar AS SELECT 1 AS a", "42704"),
         ("CREATE TABLE w USING btree AS SELECT 1 AS a", "42809"),
         ("CREATE TABLE w TABLESPACE fast AS SELECT 1 AS a", "42704"),
-        ("CREATE TABLE w TABLESPACE pg_global AS SELECT 1 AS a", "22023"),
+        (
+            "CREATE TABLE w TABLESPACE pg_global AS SELECT 1 AS a",
+            "22023",
+        ),
         ("CREATE TABLE w WITH (colour = 1) AS SELECT 1 AS a", "22023"),
-        ("CREATE TABLE w WITH (fillfactor = 5) AS SELECT 1 AS a", "22023"),
-        ("CREATE TABLE w WITH (fillfactor = 'x') AS SELECT 1 AS a", "22023"),
-        ("CREATE TABLE w WITH (fillfactor = 70, fillfactor = 80) AS SELECT 1 AS a", "22023"),
-        ("CREATE TABLE w WITH (toast.fillfactor = 70) AS SELECT 1 AS a", "22023"),
-        ("CREATE TABLE w WITH (heap.fillfactor = 70) AS SELECT 1 AS a", "22023"),
-        ("CREATE TABLE w WITH (autovacuum_enabled = maybe) AS SELECT 1 AS a", "22023"),
-        ("CREATE TABLE w WITH (oids = true) AS SELECT 1 AS a", "0A000"),
+        (
+            "CREATE TABLE w WITH (fillfactor = 5) AS SELECT 1 AS a",
+            "22023",
+        ),
+        (
+            "CREATE TABLE w WITH (fillfactor = 'x') AS SELECT 1 AS a",
+            "22023",
+        ),
+        (
+            "CREATE TABLE w WITH (fillfactor = 70, fillfactor = 80) AS SELECT 1 AS a",
+            "22023",
+        ),
+        (
+            "CREATE TABLE w WITH (toast.fillfactor = 70) AS SELECT 1 AS a",
+            "22023",
+        ),
+        (
+            "CREATE TABLE w WITH (heap.fillfactor = 70) AS SELECT 1 AS a",
+            "22023",
+        ),
+        (
+            "CREATE TABLE w WITH (autovacuum_enabled = maybe) AS SELECT 1 AS a",
+            "22023",
+        ),
+        (
+            "CREATE TABLE w WITH (oids = true) AS SELECT 1 AS a",
+            "0A000",
+        ),
     ] {
         assert_eq!(fails(&mut session, create).state().code(), code, "{create}");
     }
@@ -662,7 +686,10 @@ fn postgresql_create_table_as_refuses_unknown_storage_options_as_postgresql_does
         &mut session,
         "CREATE TABLE w WITH (fillfactor = 5) AS SELECT 1 AS a",
     );
-    assert_eq!(error.message(), "value 5 out of bounds for option \"fillfactor\"");
+    assert_eq!(
+        error.message(),
+        "value 5 out of bounds for option \"fillfactor\""
+    );
     assert_eq!(
         fails(&mut session, "SELECT * FROM w").state().code(),
         "42P01"
@@ -679,7 +706,10 @@ fn postgresql_table_is_a_query_in_statements_set_operations_and_subqueries() {
         "code|title|date_prod|kind\nB6717|Tampopo|2003-11-02|Comedy\nSELECT 1"
     );
     assert_eq!(
-        last(&mut session, "SELECT count(*) FROM (TABLE films UNION ALL TABLE ONLY films) AS both_copies"),
+        last(
+            &mut session,
+            "SELECT count(*) FROM (TABLE films UNION ALL TABLE ONLY films) AS both_copies"
+        ),
         "count\n6\nSELECT 1"
     );
     assert_eq!(
@@ -705,10 +735,7 @@ fn postgresql_table_is_a_query_in_statements_set_operations_and_subqueries() {
         last(&mut session, "SELECT count(*) FROM films2"),
         "count\n6\nSELECT 1"
     );
-    assert_eq!(
-        fails(&mut session, "TABLE missing").state().code(),
-        "42P01"
-    );
+    assert_eq!(fails(&mut session, "TABLE missing").state().code(), "42P01");
 }
 
 #[test]
@@ -737,7 +764,10 @@ fn postgresql_create_table_as_execute_runs_a_prepared_select() {
     );
     last(&mut session, "COMMIT");
     let recent = last(&mut session, "EXECUTE recentfilms('1965-01-01')");
-    assert!(recent.starts_with("code|title|date_prod|kind\n"), "{recent}");
+    assert!(
+        recent.starts_with("code|title|date_prod|kind\n"),
+        "{recent}"
+    );
     assert!(recent.ends_with("\nSELECT 2"), "{recent}");
     assert_eq!(
         last(
@@ -754,15 +784,25 @@ fn postgresql_create_table_as_execute_runs_a_prepared_select() {
         &mut session,
         "PREPARE add_film(char(5), varchar(40)) AS INSERT INTO films (code, title) VALUES ($1, $2)",
     );
-    assert_eq!(last(&mut session, "EXECUTE add_film('Z9', 'Ran')"), "INSERT 0 1");
+    assert_eq!(
+        last(&mut session, "EXECUTE add_film('Z9', 'Ran')"),
+        "INSERT 0 1"
+    );
     for (statement, code) in [
-        ("CREATE TABLE bad AS EXECUTE add_film('Z8', 'Kagemusha')", "42809"),
+        (
+            "CREATE TABLE bad AS EXECUTE add_film('Z8', 'Kagemusha')",
+            "42809",
+        ),
         ("CREATE TABLE bad AS EXECUTE nothing(1)", "26000"),
         ("EXECUTE recentfilms('2002-01-01', 2)", "42601"),
         ("PREPARE recentfilms AS SELECT 1", "42P05"),
         ("PREPARE p AS CREATE TABLE q (a int)", "42601"),
     ] {
-        assert_eq!(fails(&mut session, statement).state().code(), code, "{statement}");
+        assert_eq!(
+            fails(&mut session, statement).state().code(),
+            code,
+            "{statement}"
+        );
     }
     last(&mut session, "DEALLOCATE recentfilms");
     assert_eq!(
@@ -784,7 +824,10 @@ fn mysql_table_statement_with_order_by_and_limit() {
         "a|b\n6|7\n9|5\nSELECT 2"
     );
     assert_eq!(
-        last(&mut session, "SELECT a FROM t WHERE a IN (SELECT a FROM t WHERE b > 4) AND (a, b) IN (TABLE t) ORDER BY a"),
+        last(
+            &mut session,
+            "SELECT a FROM t WHERE a IN (SELECT a FROM t WHERE b > 4) AND (a, b) IN (TABLE t) ORDER BY a"
+        ),
         "a\n6\n9\nSELECT 2"
     );
     last(&mut session, "CREATE TABLE t2 LIKE t");
@@ -812,7 +855,10 @@ fn mysql_create_table_like_copies_the_definition_but_not_foreign_keys() {
          UNIQUE KEY code_key (code), KEY parent_key (parent_id), \
          CONSTRAINT t1_parent FOREIGN KEY (parent_id) REFERENCES parent (id)) COMMENT 'first'",
     );
-    last(&mut session, "INSERT INTO t1 (code, parent_id) VALUES ('a', 1)");
+    last(
+        &mut session,
+        "INSERT INTO t1 (code, parent_id) VALUES ('a', 1)",
+    );
     last(&mut session, "CREATE TABLE t2 LIKE t1");
     assert_eq!(
         last(&mut session, "SELECT count(*) FROM t2"),
@@ -882,19 +928,30 @@ fn sqlserver_select_into_keeps_not_null_of_copied_columns() {
         &mut session,
         "INSERT INTO products (name, note) VALUES (N'egg', NULL), (N'milk', N'cold')",
     );
-    last(&mut session, "SELECT id, name, note INTO copied FROM products");
+    last(
+        &mut session,
+        "SELECT id, name, note INTO copied FROM products",
+    );
     assert_eq!(
         fails(&mut session, "INSERT INTO copied VALUES (3, NULL, N'x')").vendor_code(),
         Some(515)
     );
     assert_eq!(
-        fails(&mut session, "INSERT INTO copied VALUES (NULL, N'salt', N'x')").vendor_code(),
+        fails(
+            &mut session,
+            "INSERT INTO copied VALUES (NULL, N'salt', N'x')"
+        )
+        .vendor_code(),
         Some(515)
     );
     last(&mut session, "INSERT INTO copied VALUES (3, N'salt', NULL)");
     last(&mut session, "SELECT * INTO everything FROM products");
     assert_eq!(
-        fails(&mut session, "INSERT INTO everything VALUES (4, NULL, NULL)").vendor_code(),
+        fails(
+            &mut session,
+            "INSERT INTO everything VALUES (4, NULL, NULL)"
+        )
+        .vendor_code(),
         Some(515)
     );
 }

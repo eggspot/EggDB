@@ -176,7 +176,14 @@ fn bad_filters_are_errors() {
 
 fn updated(update: Document) -> Document {
     let mut document = person();
-    apply_update(&parse_update(&update).unwrap(), &mut document, None, false, 1_000).unwrap();
+    apply_update(
+        &parse_update(&update).unwrap(),
+        &mut document,
+        None,
+        false,
+        1_000,
+    )
+    .unwrap();
     document
 }
 
@@ -732,7 +739,10 @@ fn grade(grade: i32, mean: i32, std: i32) -> Bson {
 
 #[test]
 fn the_positional_operator_changes_the_element_the_query_matched() {
-    let students = doc(vec![("_id", Bson::Int32(1)), ("grades", ints(&[85, 80, 80]))]);
+    let students = doc(vec![
+        ("_id", Bson::Int32(1)),
+        ("grades", ints(&[85, 80, 80])),
+    ]);
     let changed = changed_by(
         students.clone(),
         doc(vec![("_id", Bson::Int32(1)), ("grades", Bson::Int32(80))]),
@@ -751,7 +761,10 @@ fn the_positional_operator_changes_the_element_the_query_matched() {
     ]);
     let changed = changed_by(
         fourth,
-        doc(vec![("_id", Bson::Int32(4)), ("grades.grade", Bson::Int32(85))]),
+        doc(vec![
+            ("_id", Bson::Int32(4)),
+            ("grades.grade", Bson::Int32(85)),
+        ]),
         sub(vec![("$set", sub(vec![("grades.$.std", Bson::Int32(6))]))]),
         None,
     )
@@ -820,7 +833,10 @@ fn the_positional_operator_changes_the_element_the_query_matched() {
 fn all_positional_and_filtered_positional_paths_change_every_matching_element() {
     let everyone = Document::new();
     let changed = changed_by(
-        doc(vec![("_id", Bson::Int32(1)), ("grades", ints(&[85, 82, 80]))]),
+        doc(vec![
+            ("_id", Bson::Int32(1)),
+            ("grades", ints(&[85, 82, 80])),
+        ]),
         everyone.clone(),
         sub(vec![("$inc", sub(vec![("grades.$[]", Bson::Int32(10))]))]),
         None,
@@ -837,7 +853,10 @@ fn all_positional_and_filtered_positional_paths_change_every_matching_element() 
             ),
         ]),
         everyone.clone(),
-        sub(vec![("$inc", sub(vec![("grades.$[].std", Bson::Int32(-2))]))]),
+        sub(vec![(
+            "$inc",
+            sub(vec![("grades.$[].std", Bson::Int32(-2))]),
+        )]),
         None,
     )
     .unwrap();
@@ -851,7 +870,10 @@ fn all_positional_and_filtered_positional_paths_change_every_matching_element() 
     );
 
     let changed = changed_by(
-        doc(vec![("_id", Bson::Int32(2)), ("grades", ints(&[98, 100, 102]))]),
+        doc(vec![
+            ("_id", Bson::Int32(2)),
+            ("grades", ints(&[98, 100, 102])),
+        ]),
         everyone.clone(),
         sub(vec![(
             "$set",
@@ -1039,26 +1061,19 @@ fn positional_updates_are_refused_with_the_documented_codes() {
         (pipeline_with_filters.code, pipeline_with_filters.code_name),
         (72, "InvalidOptions")
     );
-    let match_stage = refused_statement(
-        Bson::Array(vec![sub(vec![("$match", sub(vec![]))])]),
-        None,
-    );
+    let match_stage =
+        refused_statement(Bson::Array(vec![sub(vec![("$match", sub(vec![]))])]), None);
     assert_eq!(match_stage.code, 72);
 
     let numbers = doc(vec![("_id", Bson::Int32(1)), ("grades", ints(&[85, 80]))]);
-    let not_viable = changed_by(
-        numbers.clone(),
-        Document::new(),
-        set("grades.$[].x"),
-        None,
-    )
-    .unwrap_err();
+    let not_viable =
+        changed_by(numbers.clone(), Document::new(), set("grades.$[].x"), None).unwrap_err();
     assert_eq!(
         (not_viable.code, not_viable.code_name),
         (28, "PathNotViable")
     );
-    let no_array = changed_by(numbers.clone(), Document::new(), set("missing.$[]"), None)
-        .unwrap_err();
+    let no_array =
+        changed_by(numbers.clone(), Document::new(), set("missing.$[]"), None).unwrap_err();
     assert_eq!(
         (no_array.code, no_array.message.as_str()),
         (
@@ -1066,8 +1081,7 @@ fn positional_updates_are_refused_with_the_documented_codes() {
             "The path 'missing' must exist in the document in order to apply array updates."
         )
     );
-    let not_array = changed_by(numbers.clone(), Document::new(), set("_id.$[]"), None)
-        .unwrap_err();
+    let not_array = changed_by(numbers.clone(), Document::new(), set("_id.$[]"), None).unwrap_err();
     assert_eq!(not_array.code, 2);
     let conflict = changed_by(
         numbers,
@@ -1095,7 +1109,10 @@ fn pipeline_updates_run_their_stages_over_the_document() {
         doc(vec![("_id", Bson::Int32(3))]),
         Bson::Array(vec![sub(vec![(
             "$set",
-            sub(vec![("test3", Bson::Int32(98)), ("modified", text("$$NOW"))]),
+            sub(vec![
+                ("test3", Bson::Int32(98)),
+                ("modified", text("$$NOW")),
+            ]),
         )])]),
         None,
     )
@@ -1189,7 +1206,10 @@ fn pipeline_updates_run_their_stages_over_the_document() {
     let new_id = changed_by(
         students,
         Document::new(),
-        Bson::Array(vec![sub(vec![("$set", sub(vec![("_id", Bson::Int32(9))]))])]),
+        Bson::Array(vec![sub(vec![(
+            "$set",
+            sub(vec![("_id", Bson::Int32(9))]),
+        )])]),
         None,
     )
     .unwrap_err();
@@ -1200,11 +1220,8 @@ fn pipeline_updates_run_their_stages_over_the_document() {
 fn a_pipeline_upsert_starts_from_the_query_equalities() {
     let keyspace = MemoryKeyspace::default();
     let store = store(&keyspace);
-    let filter = parse_filter(&doc(vec![
-        ("_id", Bson::Int32(7)),
-        ("name", text("Grace")),
-    ]))
-    .unwrap();
+    let filter =
+        parse_filter(&doc(vec![("_id", Bson::Int32(7)), ("name", text("Grace"))])).unwrap();
     let update = parse_update_statement(
         &Bson::Array(vec![sub(vec![(
             "$set",

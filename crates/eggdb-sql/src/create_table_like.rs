@@ -183,10 +183,7 @@ fn copied_definition(source: &TableDefinition, target: &TableDefinition) -> Tabl
     copy
 }
 
-fn children(
-    reader: &dyn KeyValueRead,
-    parent: &str,
-) -> SqlResult<Vec<(String, PartitionBound)>> {
+fn children(reader: &dyn KeyValueRead, parent: &str) -> SqlResult<Vec<(String, PartitionBound)>> {
     let catalog = crate::partitions::load(reader)?;
     Ok(catalog
         .children_of(parent)

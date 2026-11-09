@@ -505,9 +505,7 @@ mod tests {
             (Duration::from_millis(1500), second, 1),
         ] {
             assert_eq!(
-                TcpKeepAlive::new(idle, interval, count)
-                    .unwrap_err()
-                    .kind(),
+                TcpKeepAlive::new(idle, interval, count).unwrap_err().kind(),
                 ErrorKind::InvalidInput,
                 "{idle:?} {interval:?} {count}"
             );

@@ -194,6 +194,7 @@ impl<'t> Parser<'t> {
                     && !self.is_word_at(1, "update")
                     && !self.is_word_at(1, "delete")
                     && !self.is_word_at(1, "analyze")
+                    && !self.at_table_query_at(1)
                     && !(self.is_word_at(1, "format")
                         && matches!(self.peek_kind_at(2), TokenKind::Operator("="))) =>
             {

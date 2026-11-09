@@ -37,16 +37,17 @@ enum Moment {
 }
 
 pub(crate) fn extract(unit: &str, value: &Value) -> SqlResult<Value> {
-    let part = match moment_of(unit, value)? {
-        None => None,
-        Some(Moment::Local(local)) => Some(local_part(unit, local).ok_or_else(|| {
-            SqlError::syntax(format!("syntax error at or near \"{unit}\""), 0)
-        })?),
-        Some(Moment::ZeroDate { of_day }) => zero_date_part(unit, of_day),
-        Some(Moment::Duration(micros)) => micros
-            .checked_abs()
-            .and_then(|length| clock_part(unit, length)),
-    };
+    let part =
+        match moment_of(unit, value)? {
+            None => None,
+            Some(Moment::Local(local)) => Some(local_part(unit, local).ok_or_else(|| {
+                SqlError::syntax(format!("syntax error at or near \"{unit}\""), 0)
+            })?),
+            Some(Moment::ZeroDate { of_day }) => zero_date_part(unit, of_day),
+            Some(Moment::Duration(micros)) => micros
+                .checked_abs()
+                .and_then(|length| clock_part(unit, length)),
+        };
     Ok(part.map_or(Value::Null, Value::BigInt))
 }
 
@@ -148,7 +149,14 @@ fn number_moment(number: i64) -> Option<Moment> {
         (date.get(0..4)?.parse::<i64>().ok()?, 4)
     } else {
         let short = field(date, 0)?;
-        (if short < 70 { 2000 + short } else { 1900 + short }, 2)
+        (
+            if short < 70 {
+                2000 + short
+            } else {
+                1900 + short
+            },
+            2,
+        )
     };
     let month = field(date, month_at)?;
     let day = field(date, month_at + 2)?;
@@ -235,9 +243,7 @@ mod tests {
         assert_eq!(part("weekday", date.clone()), Some(3));
         assert_eq!(part("dayofyear", date.clone()), Some(60));
         assert_eq!(part("quarter", date), Some(1));
-        let time = Value::Time(
-            crate::datetime::parse_mysql_time("13:45:01.5").expect("a time"),
-        );
+        let time = Value::Time(crate::datetime::parse_mysql_time("13:45:01.5").expect("a time"));
         assert_eq!(part("hour", time.clone()), Some(13));
         assert_eq!(part("microsecond", time), Some(500_000));
     }

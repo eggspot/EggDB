@@ -36,7 +36,10 @@ pub(crate) fn run(
     }
     let selected = selected_rows(writer, tables, binding, dialect, &mut create.query)?;
     let columns = selected.columns.unwrap_or_default();
-    let kept = if matches!(dialect, Dialect::MySql | Dialect::Oracle | Dialect::SqlServer) {
+    let kept = if matches!(
+        dialect,
+        Dialect::MySql | Dialect::Oracle | Dialect::SqlServer
+    ) {
         kept_not_null(&*writer, tables, &create.query, columns.len())
     } else {
         vec![false; columns.len()]

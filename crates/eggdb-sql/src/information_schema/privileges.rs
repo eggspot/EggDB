@@ -379,8 +379,14 @@ pub(super) fn udt_privileges_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>>
                     .set("grantor", identifier(&snapshot.user))
                     .set("grantee", identifier(grant.grantee))
                     .set("udt_catalog", identifier(&snapshot.database))
-                    .set("udt_schema", identifier(crate::schemas::schema_of(&found.name)))
-                    .set("udt_name", identifier(crate::schemas::base_name(&found.name)))
+                    .set(
+                        "udt_schema",
+                        identifier(crate::schemas::schema_of(&found.name)),
+                    )
+                    .set(
+                        "udt_name",
+                        identifier(crate::schemas::base_name(&found.name)),
+                    )
                     .set("privilege_type", character_data("TYPE USAGE"))
                     .set("is_grantable", yes_or_no(grant.is_grantable))
                     .done(),

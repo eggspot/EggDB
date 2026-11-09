@@ -492,9 +492,10 @@ fn check_pair_types(
     else {
         return Ok(());
     };
-    let (Some(dependent), Some(independent)) =
-        (static_type(dependent, scope), static_type(independent, scope))
-    else {
+    let (Some(dependent), Some(independent)) = (
+        static_type(dependent, scope),
+        static_type(independent, scope),
+    ) else {
         return Ok(());
     };
     let accepted =

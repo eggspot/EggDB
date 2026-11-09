@@ -298,10 +298,7 @@ fn clear_expiry_in(
     let Some(mut named) = writable_collection(transaction, name)? else {
         return Ok(None);
     };
-    let present = named
-        .get_with(key, |_| ())
-        .map_err(store_error)?
-        .is_some();
+    let present = named.get_with(key, |_| ()).map_err(store_error)?.is_some();
     named.clear_expiry(key).map_err(store_error)?;
     Ok(Some(present))
 }
@@ -1154,10 +1151,7 @@ mod tests {
                 .compare_and_set(None, &kept, None, Some(b"x".as_slice()))
                 .is_err()
         );
-        assert_eq!(
-            writer.set_expiry(None, &kept, Duration::ZERO)?,
-            Some(false)
-        );
+        assert_eq!(writer.set_expiry(None, &kept, Duration::ZERO)?, Some(false));
         writer.rollback()?;
         Ok(())
     }

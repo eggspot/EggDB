@@ -216,11 +216,13 @@ mod tests {
             db.begin_read().unwrap().kept_collection_counts().unwrap(),
             [("new".to_owned(), Some(2)), ("old".to_owned(), None)]
         );
-        assert!(Database::in_memory()
-            .unwrap()
-            .kept_collection_counts()
-            .unwrap()
-            .is_empty());
+        assert!(
+            Database::in_memory()
+                .unwrap()
+                .kept_collection_counts()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

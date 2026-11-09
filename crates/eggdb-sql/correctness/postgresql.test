@@ -5834,7 +5834,7 @@ DROP TABLE graph323
 
 chapter "Table Partitioning" and "CREATE TABLE" (identity columns): partition after a table name is an alias, and an identity column numbers a partitioned table's rows across its partitions
 ok
-CREATE TABLE ev337 (id bigint GENERATED ALWAYS AS IDENTITY, created_at date NOT NULL, PRIMARY KEY (created_at, id)) PARTITION BY RANGE (created_at)
+CREATE TABLE ev337 (id bigint GENERATED ALWAYS AS IDENTITY, created_at date NOT NULL, PRIMARY KEY (id, created_at)) PARTITION BY RANGE (created_at)
 
 ok
 CREATE TABLE ev337_2024 PARTITION OF ev337 FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
@@ -5862,6 +5862,9 @@ SELECT * FROM ev337 partition (p1)
 
 error 428C9
 INSERT INTO ev337 (id, created_at) VALUES (5, '2024-05-05')
+
+error 42P16
+CREATE TABLE ev337_late_id (id bigint GENERATED ALWAYS AS IDENTITY, created_at date NOT NULL, PRIMARY KEY (created_at, id)) PARTITION BY RANGE (created_at)
 
 ok
 DROP TABLE ev337

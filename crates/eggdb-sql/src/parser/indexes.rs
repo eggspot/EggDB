@@ -456,9 +456,8 @@ impl Parser<'_> {
             } else if self.take_word("json") {
                 ExplainStyle::Json
             } else {
-                return Err(self.mysql_not_supported(
-                    "EXPLAIN formats other than TREE, JSON and TRADITIONAL",
-                ));
+                return Err(self
+                    .mysql_not_supported("EXPLAIN formats other than TREE, JSON and TRADITIONAL"));
             };
         }
         if !(self.is_word("select")

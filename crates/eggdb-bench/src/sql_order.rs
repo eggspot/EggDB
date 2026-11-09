@@ -27,7 +27,7 @@ fn execute(db: &Database, dialect: Dialect, sql: &str) -> Result<(), String> {
 }
 
 fn created_at(row: usize) -> String {
-    if row % NULL_EVERY == 0 {
+    if row.is_multiple_of(NULL_EVERY) {
         "NULL".to_owned()
     } else {
         ((row * 7919) % ROWS).to_string()

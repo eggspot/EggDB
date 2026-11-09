@@ -402,7 +402,6 @@ mod tests {
         cfg!(any(
             target_os = "linux",
             target_os = "android",
-            target_vendor = "apple",
             target_os = "freebsd",
             target_os = "dragonfly",
             target_os = "netbsd",
@@ -426,6 +425,13 @@ mod tests {
         assert!(on, "an accepted connection inherits SO_KEEPALIVE");
         if expects_timing_read_back() {
             assert_eq!(read_timing, Some(timing()));
+        }
+        if cfg!(target_vendor = "apple") {
+            let inherited = read_timing.unwrap();
+            assert_eq!(
+                (inherited.interval(), inherited.count()),
+                (timing().interval(), timing().count())
+            );
         }
     }
 

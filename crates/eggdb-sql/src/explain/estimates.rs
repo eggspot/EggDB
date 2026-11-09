@@ -28,7 +28,11 @@ impl Estimate {
     }
 
     pub(crate) fn group(self) -> String {
-        format!("(cost={} rows={})", readable(self.cost), readable(self.rows))
+        format!(
+            "(cost={} rows={})",
+            readable(self.cost),
+            readable(self.rows)
+        )
     }
 }
 
@@ -113,11 +117,7 @@ pub(crate) fn scanned_rows(source: &ExplainedSource, table_rows: &TableRows) -> 
     }
 }
 
-pub(crate) fn lookup_rows(
-    source: &ExplainedSource,
-    key: KeyChoice,
-    table_rows: &TableRows,
-) -> f64 {
+pub(crate) fn lookup_rows(source: &ExplainedSource, key: KeyChoice, table_rows: &TableRows) -> f64 {
     let table = table_rows.of(&source.table);
     match key {
         KeyChoice::Primary => table.min(1.0),
@@ -162,8 +162,9 @@ fn selectivity_at(expr: &Expr, depth: usize) -> f64 {
                 .product::<f64>()
         }
         ExprKind::Unary(UnaryOperator::Not, operand) => 1.0 - selectivity_at(operand, depth),
-        ExprKind::Binary(BinaryOperator::Equal, _, _)
-        | ExprKind::IsNull { negated: false, .. } => EQUAL_SELECTIVITY,
+        ExprKind::Binary(BinaryOperator::Equal, _, _) | ExprKind::IsNull { negated: false, .. } => {
+            EQUAL_SELECTIVITY
+        }
         ExprKind::Binary(BinaryOperator::NotEqual, _, _)
         | ExprKind::IsNull { negated: true, .. } => 1.0 - EQUAL_SELECTIVITY,
         ExprKind::InList { list, negated, .. } => {
@@ -256,7 +257,11 @@ mod tests {
     #[test]
     fn equalities_keep_a_tenth_ranges_a_third_and_conjunctions_multiply() {
         let equal = expr(ExprKind::Binary(BinaryOperator::Equal, column("a"), one()));
-        let greater = expr(ExprKind::Binary(BinaryOperator::Greater, column("b"), one()));
+        let greater = expr(ExprKind::Binary(
+            BinaryOperator::Greater,
+            column("b"),
+            one(),
+        ));
         assert!((selectivity(&equal) - 0.1).abs() < 1e-12);
         assert!((selectivity(&greater) - 1.0 / 3.0).abs() < 1e-12);
         let both = expr(ExprKind::And(vec![equal.clone(), greater.clone()]));

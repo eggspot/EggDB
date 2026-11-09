@@ -1232,7 +1232,11 @@ pub const TOOLS: &[ToolDefinition] = &[
         read_only_server_description: None,
         command: Some(&["persist"]),
         fixed: &["--format", "json"],
-        arguments: &[KEY_TEXT_ARGUMENT, KEY_HEX_ARGUMENT, WRITE_COLLECTION_ARGUMENT],
+        arguments: &[
+            KEY_TEXT_ARGUMENT,
+            KEY_HEX_ARGUMENT,
+            WRITE_COLLECTION_ARGUMENT,
+        ],
         max_effect: Effect::Change,
         grant: Grant::KeyValueWrite,
         idempotent: true,

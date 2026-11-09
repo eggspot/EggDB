@@ -265,28 +265,6 @@ pub(crate) fn create_table(
         }
         return crate::partition_ddl::create_table(writer, tables, create, dialect);
     }
-    create_unpartitioned_table(
-        writer,
-        tables,
-        create,
-        dialect,
-        AutoIncrementPlace::FirstOfPrimaryKey,
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AutoIncrementPlace {
-    FirstOfPrimaryKey,
-    AnyOfPrimaryKey,
-}
-
-pub(crate) fn create_unpartitioned_table(
-    writer: &mut dyn KeyValueWrite,
-    tables: &mut TableCache,
-    create: &CreateTable,
-    dialect: Dialect,
-    auto_increment_place: AutoIncrementPlace,
-) -> SqlResult<QueryResult> {
     if create.columns.len() > MAX_COLUMNS {
         return Err(SqlError::new(
             SqlState::TOO_MANY_COLUMNS,
@@ -367,7 +345,7 @@ pub(crate) fn create_unpartitioned_table(
             .map_or(create.name.position, |column| column.name.position);
         indexes::check_orderable(columns[index].sql_type, position)?;
     }
-    check_auto_increment(create, &columns, &primary_key, auto_increment_place)?;
+    check_auto_increment(create, &columns, &primary_key)?;
     if crate::sequences::relation_exists(writer, &create.name.text)? {
         if create.if_not_exists {
             return Ok(QueryResult::command("CREATE TABLE").with_notice(format!(
@@ -540,7 +518,6 @@ fn check_auto_increment(
     create: &CreateTable,
     columns: &[Column],
     primary_key: &[usize],
-    place: AutoIncrementPlace,
 ) -> SqlResult<()> {
     let auto: Vec<usize> = (0..columns.len())
         .filter(|&index| columns[index].auto_increment)
@@ -552,12 +529,8 @@ fn check_auto_increment(
         columns[first].sql_type,
         SqlType::SmallInt | SqlType::Integer | SqlType::BigInt
     );
-    let keyed = match place {
-        AutoIncrementPlace::FirstOfPrimaryKey => primary_key.first() == Some(&first),
-        AutoIncrementPlace::AnyOfPrimaryKey => primary_key.contains(&first),
-    };
     if auto.len() > 1
-        || !keyed
+        || primary_key.first() != Some(&first)
         || !integer
         || columns[first].default.is_some()
     {
@@ -4739,12 +4712,7 @@ fn update_rows(
     };
     let written = if resolution.resolves_row_by_row() {
         let resolved = write_updated_rows_resolving_conflicts(
-            writer,
-            tables,
-            &table,
-            &changes,
-            &old_rows,
-            resolution,
+            writer, tables, &table, &changes, &old_rows, resolution,
         )?;
         if resolved.stopped.is_some() {
             stopped = resolved.stopped;

@@ -111,7 +111,10 @@ fn path_part(part: &str) -> PathPart<'_> {
     if part == "$" {
         return PathPart::MatchedElement;
     }
-    match part.strip_prefix("$[").and_then(|rest| rest.strip_suffix(']')) {
+    match part
+        .strip_prefix("$[")
+        .and_then(|rest| rest.strip_suffix(']'))
+    {
         Some("") => PathPart::AllElements,
         Some(identifier) => PathPart::FilteredElements(identifier),
         None => PathPart::Field(part),
@@ -986,12 +989,9 @@ fn value_with_now(value: &Bson, now: &Bson) -> Bson {
         )])),
         Bson::Document(inner) if inner.contains_key("$literal") => value.clone(),
         Bson::Document(inner) => Bson::Document(document_with_now(inner, now)),
-        Bson::Array(items) => Bson::Array(
-            items
-                .iter()
-                .map(|item| value_with_now(item, now))
-                .collect(),
-        ),
+        Bson::Array(items) => {
+            Bson::Array(items.iter().map(|item| value_with_now(item, now)).collect())
+        }
         other => other.clone(),
     }
 }

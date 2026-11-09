@@ -1024,8 +1024,8 @@ impl World {
             for side in [CLIENT, SERVER] {
                 let [from, to] = connection.hosts(side);
                 let cut = is_cut(cuts, from, to) || is_cut(cuts, to, from);
-                let idle_end = connection.failed[side].is_none()
-                    && !connection.flows[side].unacknowledged;
+                let idle_end =
+                    connection.failed[side].is_none() && !connection.flows[side].unacknowledged;
                 let watch = &mut connection.keep_alives[side];
                 let Some(timing) = watch.timing else {
                     continue;
@@ -1746,7 +1746,9 @@ mod tests {
     fn keep_alives_fail_an_idle_connection_across_a_long_cut() {
         let mut pair = Pair::new(30);
         let (client, server) = pair.connect();
-        server.set_keep_alive(Some(keep_alive_every_minute())).unwrap();
+        server
+            .set_keep_alive(Some(keep_alive_every_minute()))
+            .unwrap();
         pair.network.partition(CLIENT, SERVER);
         pair.receive(&server, 8, 0);
         let completion = pair.reap(1).pop().unwrap();
@@ -1770,7 +1772,9 @@ mod tests {
     fn keep_alives_count_the_idle_time_from_the_last_bytes_heard() {
         let mut pair = Pair::new(31);
         let (client, server) = pair.connect();
-        server.set_keep_alive(Some(keep_alive_every_minute())).unwrap();
+        server
+            .set_keep_alive(Some(keep_alive_every_minute()))
+            .unwrap();
         pair.receive(&server, 8, 0);
         let fifty_seconds = Duration::from_secs(50);
         assert!(pair.reap_for(1, fifty_seconds).is_empty());
@@ -1796,10 +1800,13 @@ mod tests {
     fn keep_alives_keep_an_idle_connection_whose_cut_heals_before_they_give_up() {
         let mut pair = Pair::new(32);
         let (client, server) = pair.connect();
-        server.set_keep_alive(Some(keep_alive_every_minute())).unwrap();
+        server
+            .set_keep_alive(Some(keep_alive_every_minute()))
+            .unwrap();
         pair.network.partition(CLIENT, SERVER);
         pair.receive(&server, 8, 0);
-        let short_of_giving_up = keep_alive_every_minute().gives_up_after() - Duration::from_secs(1);
+        let short_of_giving_up =
+            keep_alive_every_minute().gives_up_after() - Duration::from_secs(1);
         assert!(pair.reap_for(1, short_of_giving_up).is_empty());
         pair.network.heal_all();
         assert!(pair.reap_for(1, Duration::from_secs(3600)).is_empty());

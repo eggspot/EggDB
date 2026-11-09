@@ -3013,7 +3013,7 @@ impl<'s> Session<'s> {
         if refuses_writes
             && let Some(command) = self.statement_row_locking
             && matches!(dialect, Dialect::PostgreSql | Dialect::Oracle)
-            && read_only::locks_permanent_rows(statement)
+            && self.locks_permanent_rows(binding, statement)
         {
             let refused = Err(read_only::refused_in_read_only_transaction(command));
             return self.failing_block_on_error(refused);

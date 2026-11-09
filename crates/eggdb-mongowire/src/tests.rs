@@ -903,9 +903,18 @@ fn insert_students(harness: &mut Harness<'_>) {
         (
             "documents",
             Bson::Array(vec![
-                sub(vec![("_id", Bson::Int32(1)), ("grades", ints(&[85, 80, 80]))]),
-                sub(vec![("_id", Bson::Int32(2)), ("grades", ints(&[88, 90, 92]))]),
-                sub(vec![("_id", Bson::Int32(3)), ("grades", ints(&[85, 100, 90]))]),
+                sub(vec![
+                    ("_id", Bson::Int32(1)),
+                    ("grades", ints(&[85, 80, 80])),
+                ]),
+                sub(vec![
+                    ("_id", Bson::Int32(2)),
+                    ("grades", ints(&[88, 90, 92])),
+                ]),
+                sub(vec![
+                    ("_id", Bson::Int32(3)),
+                    ("grades", ints(&[85, 100, 90])),
+                ]),
             ]),
         ),
     ]));
@@ -983,12 +992,13 @@ fn positional_update_errors_carry_mongodb_codes() {
         insert_students(harness);
         let set = |path: &str| sub(vec![("$set", sub(vec![(path, Bson::Int32(1))]))]);
         let cases = vec![
+            (update_one(sub(vec![]), set("grades.$[x]"), Vec::new()), 2),
             (
-                update_one(sub(vec![]), set("grades.$[x]"), Vec::new()),
-                2,
-            ),
-            (
-                update_one(sub(vec![("_id", Bson::Int32(1))]), set("grades.$"), Vec::new()),
+                update_one(
+                    sub(vec![("_id", Bson::Int32(1))]),
+                    set("grades.$"),
+                    Vec::new(),
+                ),
                 2,
             ),
             (
@@ -1013,10 +1023,7 @@ fn positional_update_errors_carry_mongodb_codes() {
                 ),
                 72,
             ),
-            (
-                update_one(sub(vec![]), set("grades.$[].x"), Vec::new()),
-                28,
-            ),
+            (update_one(sub(vec![]), set("grades.$[].x"), Vec::new()), 28),
         ];
         for (statement, code) in cases {
             let reply = harness.run(doc(vec![
@@ -1032,7 +1039,11 @@ fn positional_update_errors_carry_mongodb_codes() {
         }
         assert_eq!(
             grades_by_id(harness),
-            vec![ints(&[85, 80, 80]), ints(&[88, 90, 92]), ints(&[85, 100, 90])]
+            vec![
+                ints(&[85, 80, 80]),
+                ints(&[88, 90, 92]),
+                ints(&[85, 100, 90])
+            ]
         );
     });
 }
@@ -1165,7 +1176,9 @@ fn an_update_with_array_filters_runs_over_the_wire() {
     let answered = replies(&output);
     assert_eq!(answered.len(), 3);
     assert_eq!(answered[1].2.get("nModified"), Some(&Bson::Int32(1)));
-    let student = batch(&answered[2].2, "firstBatch")[0].as_document().unwrap();
+    let student = batch(&answered[2].2, "firstBatch")[0]
+        .as_document()
+        .unwrap();
     assert_eq!(
         student.get("grades"),
         Some(&Bson::Array(vec![

@@ -1449,7 +1449,10 @@ fn mysql_alter_table_indexes_reach_every_partition_of_a_year_partitioned_table()
         assert!(!shown.contains("\nby_d\n"), "{table}: {shown}");
     }
     assert_eq!(
-        answer(&mut session, "SELECT id FROM sales350 WHERE d = '2024-06-01'"),
+        answer(
+            &mut session,
+            "SELECT id FROM sales350 WHERE d = '2024-06-01'"
+        ),
         "id\n2\nSELECT 1"
     );
     answer(&mut session, "ALTER TABLE sales350 DROP INDEX by_day");

@@ -310,7 +310,9 @@ fn a_server_limited_to_tables_withdraws_exactly_the_key_value_tools() {
         .collect();
     assert_eq!(
         withdrawn,
-        vec!["kv_get", "kv_scan", "put", "del", "incr", "cas", "expire", "persist"]
+        vec![
+            "kv_get", "kv_scan", "put", "del", "incr", "cas", "expire", "persist"
+        ]
     );
     assert_eq!(Grant::KeyValueStore.name(), Some("key_value_store"));
     assert_eq!(Grant::KeyValueWrite.name(), Some("key_value_write"));
@@ -328,7 +330,11 @@ fn a_server_limited_to_tables_withdraws_exactly_the_key_value_tools() {
         ("expire", Effect::Destroy, Some(ConfirmCheck::KeyDelete)),
     ] {
         let found = tool(name).map(|found| (found.max_effect, found.confirm, found.grant));
-        assert_eq!(found, Some((effect, confirm, Grant::KeyValueWrite)), "{name}");
+        assert_eq!(
+            found,
+            Some((effect, confirm, Grant::KeyValueWrite)),
+            "{name}"
+        );
     }
     let refusal = ERROR_CODES
         .iter()

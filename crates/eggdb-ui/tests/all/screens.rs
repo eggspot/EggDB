@@ -1894,10 +1894,7 @@ fn scenario_44_a_long_name_is_cut_before_its_count_and_a_wide_count_drops_the_co
     let mut s = Scenario::with(40, 20, Capabilities::FULL, source);
     s.press(&["C"]);
     let screen = s.screen();
-    for (name, count) in [
-        ("  customer-orde…", "98,441,207,113"),
-        ("  users", "312"),
-    ] {
+    for (name, count) in [("  customer-orde…", "98,441,207,113"), ("  users", "312")] {
         let row = picker_row(name, count, 32);
         assert!(screen.contains(&row), "{row}\n{screen}");
     }

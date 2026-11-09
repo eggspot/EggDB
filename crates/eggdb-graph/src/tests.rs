@@ -928,10 +928,7 @@ fn names(result: QueryResult) -> Vec<Value> {
 fn label_predicates_test_nodes_and_relationships_in_expressions() {
     let keyspace = labelled();
     assert_eq!(
-        names(query(
-            &keyspace,
-            "MATCH (n) WHERE n:A:B RETURN n.name"
-        )),
+        names(query(&keyspace, "MATCH (n) WHERE n:A:B RETURN n.name")),
         vec![text("ab")]
     );
     assert_eq!(
@@ -1079,10 +1076,7 @@ fn a_bar_after_a_label_ends_a_comprehension_predicate_or_foreach_list() {
         &format!("{found}FOREACH (x IN [y IN found WHERE (y:A|B)] | SET x.flag = true)"),
     );
     assert_eq!(
-        names(query(
-            &keyspace,
-            "MATCH (n) WHERE n.flag RETURN count(n)"
-        )),
+        names(query(&keyspace, "MATCH (n) WHERE n.flag RETURN count(n)")),
         vec![Value::Integer(3)]
     );
     query(
@@ -1338,7 +1332,10 @@ fn merge_refuses_a_null_property_value() {
     let keyspace = MemoryKeyspace::default();
     let refused = |text: &str, parameters: &[(String, Value)]| {
         let error = run(&keyspace, text, parameters, false).unwrap_err();
-        assert_eq!(error.code, "Neo.ClientError.Statement.SemanticError", "{text}");
+        assert_eq!(
+            error.code, "Neo.ClientError.Statement.SemanticError",
+            "{text}"
+        );
         error.message
     };
     assert_eq!(
@@ -1373,10 +1370,7 @@ fn merge_refuses_a_null_property_value() {
         vec![vec![Value::Integer(2), Value::Integer(0)]]
     );
     assert_eq!(
-        names(query(
-            &keyspace,
-            "MERGE (n:L {x: 1}) RETURN n.x"
-        )),
+        names(query(&keyspace, "MERGE (n:L {x: 1}) RETURN n.x")),
         vec![Value::Integer(1)]
     );
 }

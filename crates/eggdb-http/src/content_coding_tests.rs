@@ -48,7 +48,7 @@ struct BitWriter {
 
 impl BitWriter {
     fn bit(&mut self, set: bool) {
-        if self.bits % 8 == 0 {
+        if self.bits.is_multiple_of(8) {
             self.bytes.push(0);
         }
         if set {

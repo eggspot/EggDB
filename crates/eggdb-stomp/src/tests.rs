@@ -478,7 +478,10 @@ fn heart_beats_are_negotiated_as_the_specification_says() {
     let standard = HeartBeatOffer::STANDARD;
     let seconds = |count| Some(Duration::from_secs(count));
     assert_eq!(negotiate(standard, None), Some(HeartBeats::default()));
-    assert_eq!(negotiate(standard, Some("0,0")), Some(HeartBeats::default()));
+    assert_eq!(
+        negotiate(standard, Some("0,0")),
+        Some(HeartBeats::default())
+    );
     assert_eq!(
         negotiate(standard, Some("5000,20000")),
         Some(HeartBeats {

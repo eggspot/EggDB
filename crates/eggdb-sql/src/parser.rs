@@ -1983,7 +1983,7 @@ impl<'t> Parser<'t> {
             self.sqlserver_table_tail()?;
         }
         if self.oracle() {
-            self.skip_physical_properties()?;
+            self.skip_table_physical_properties()?;
         }
         if let Some(action) = self.on_commit_clause(temporary.is_some())? {
             temporary = Some(action);

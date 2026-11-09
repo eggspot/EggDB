@@ -139,10 +139,9 @@ impl SelectedPartitions {
                 let descendants = catalog.descendants_of(&table.name);
                 let mut named = Vec::with_capacity(names.len());
                 for name in names {
-                    let Some(found) = descendants
-                        .iter()
-                        .find(|partition| partition_name(partition).eq_ignore_ascii_case(&name.text))
-                    else {
+                    let Some(found) = descendants.iter().find(|partition| {
+                        partition_name(partition).eq_ignore_ascii_case(&name.text)
+                    }) else {
                         return Err(unknown_partition(&name.text, &table.name).at(name.position));
                     };
                     named.push(found.clone());

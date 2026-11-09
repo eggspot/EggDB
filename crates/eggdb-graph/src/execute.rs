@@ -1841,10 +1841,7 @@ impl<'g> Executor<'g, '_> {
         for mut row in rows {
             let mut parts = Vec::with_capacity(subquery.parts.len());
             for part in &subquery.parts {
-                parts.push((
-                    part.clauses.as_slice(),
-                    imported_row(&part.imports, &row)?,
-                ));
+                parts.push((part.clauses.as_slice(), imported_row(&part.imports, &row)?));
             }
             let result = self.run_union(parts, subquery.union_all)?;
             if writes {

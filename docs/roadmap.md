@@ -335,6 +335,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Check: system calls per wait, measured on macOS and FreeBSD.
 - Acknowledgements that take latency to return, and packet loss, duplication and reordering
   below the stream level in simulation (D314). Check: simulator tests of each.
+- The keep-alive idle time set on each accepted socket on macOS, which copies only `SO_KEEPALIVE`,
+  the interval and the count from the listener (D336); with the shared listener crate (D122).
 - Non-blocking connects in the `poll(2)` backend on the BSDs and illumos (D73).
 - OpenBSD and DragonFly on the `poll(2)` backend, with CI runners for them (D73).
 - Solaris: file locks, and sends that never raise `SIGPIPE` (D73, D78).
@@ -376,6 +378,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `SUBPARTITION BY`, `LOAD DATA ... PARTITION`, `INSERT IGNORE` skipping rows outside a
   `PARTITION (...)` set with a warning, and ids for rows written straight into a partition of a
   table with an identity column (D337).
+- An identity or `AUTO_INCREMENT` column anywhere in the primary key, as MySQL allows, with table
+  definition version 15 and its D35 review (D337).
 - MySQL's and Oracle's partition `ALTER`s (add, drop, split, exchange) (D169).
 - Online upgrades with a tested downgrade path to the previous minor version (D20, D35). Check:
   the upgrade, downgrade and mixed-version file tests in CI.
@@ -921,6 +925,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - MySQL's own test suite run from outside the repo, with its pass rate published (D1, D10, D45).
 - MySQL and TDS clients refused an infinite `numeric` or date written by a PostgreSQL session, as
   the dialect's out-of-range error, instead of sent as text (D290).
+- SQL Server's ranking and offset window functions (`ROW_NUMBER`, `RANK`, `DENSE_RANK`, `NTILE`,
+  `LAG`, `LEAD`, `FIRST_VALUE`, `LAST_VALUE`) with its errors 10753 and 4112; only aggregates take
+  `OVER` in that dialect today (found while building D340).
 - SQL Server's `rowversion`, `sql_variant`, `xml` and `hierarchyid` (D19).
 - `datetimeoffset` keeping its offset, and the declared `varchar` or `nvarchar` kept (D19, D133).
 - `deleted.` in a Transact-SQL `UPDATE`'s `OUTPUT`, `TOP ... PERCENT` in `UPDATE`, `DELETE` and

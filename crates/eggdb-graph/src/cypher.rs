@@ -505,7 +505,13 @@ fn importing_with(projecting: &Projecting) -> GraphResult<Option<Imports>> {
     Ok(Some(if projecting.star {
         Imports::Everything
     } else {
-        Imports::Variables(projecting.items.iter().map(|item| item.name.clone()).collect())
+        Imports::Variables(
+            projecting
+                .items
+                .iter()
+                .map(|item| item.name.clone())
+                .collect(),
+        )
     }))
 }
 

@@ -184,7 +184,9 @@ mod tests {
                 return format!("error: {}", error.message());
             }
         }
-        sums.finish(function).to_text().unwrap_or_else(|| "NULL".to_owned())
+        sums.finish(function)
+            .to_text()
+            .unwrap_or_else(|| "NULL".to_owned())
     }
 
     fn doubles(pairs: &[(f64, f64)]) -> Vec<(Value, Value)> {

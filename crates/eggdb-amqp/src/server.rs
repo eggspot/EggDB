@@ -1127,7 +1127,9 @@ pub(crate) fn serve_stream(
                 break Ok(());
             }
             if connection.outgoing.is_empty() && last_sent.elapsed() >= interval / 2 {
-                connection.outgoing.push_back(frame(FRAME_HEARTBEAT, 0, &[]));
+                connection
+                    .outgoing
+                    .push_back(frame(FRAME_HEARTBEAT, 0, &[]));
             }
         }
         if !connection.outgoing.is_empty() {

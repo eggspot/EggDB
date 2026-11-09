@@ -139,7 +139,7 @@ fn is_word(token: &Token<'_>, word: &str) -> bool {
     matches!(&token.kind, TokenKind::Word(found) if found.eq_ignore_ascii_case(word))
 }
 
-pub(super) fn locks_permanent_rows(statement: &Statement) -> bool {
+fn locks_permanent_rows(statement: &Statement) -> bool {
     match statement {
         Statement::Select(select) => select_reads_permanent_table(select),
         Statement::Query(query) => query_reads_permanent_table(query),
@@ -255,6 +255,26 @@ fn mysql_isolation(level: &str) -> String {
 }
 
 impl<'s> Session<'s> {
+    pub(super) fn locks_permanent_rows(
+        &mut self,
+        binding: &crate::name_resolution::Binding<'_>,
+        statement: &Statement,
+    ) -> bool {
+        if !matches!(statement, Statement::Select(_) | Statement::Query(_)) {
+            return false;
+        }
+        let mut bound = statement.clone();
+        self.read(|reader, tables| {
+            match &mut bound {
+                Statement::Select(select) => binding.select(reader, tables, select)?,
+                Statement::Query(query) => binding.query(reader, tables, query)?,
+                _ => {}
+            }
+            Ok(locks_permanent_rows(&bound))
+        })
+        .unwrap_or(false)
+    }
+
     pub(super) fn transaction_is_read_only(&self) -> bool {
         match self.block {
             Block::Reading(_) => true,

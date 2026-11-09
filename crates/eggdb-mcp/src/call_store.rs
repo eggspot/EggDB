@@ -366,7 +366,8 @@ impl<W: KeyValueWrite> KeyValueWrite for LimitedWrite<'_, W> {
         by: i64,
     ) -> SqlResult<Option<i64>> {
         self.limits.check()?;
-        self.limits.count_written(named_key_bytes(collection, key) + LONGEST_COUNTER_BYTES)?;
+        self.limits
+            .count_written(named_key_bytes(collection, key) + LONGEST_COUNTER_BYTES)?;
         self.inner.increment(collection, key, by)
     }
 
@@ -378,7 +379,8 @@ impl<W: KeyValueWrite> KeyValueWrite for LimitedWrite<'_, W> {
         new: Option<&[u8]>,
     ) -> SqlResult<Option<(bool, Option<Vec<u8>>)>> {
         self.limits.check()?;
-        self.limits.count_written(named_key_bytes(collection, key) + new.map_or(0, <[u8]>::len))?;
+        self.limits
+            .count_written(named_key_bytes(collection, key) + new.map_or(0, <[u8]>::len))?;
         self.inner.compare_and_set(collection, key, expected, new)
     }
 
@@ -389,13 +391,15 @@ impl<W: KeyValueWrite> KeyValueWrite for LimitedWrite<'_, W> {
         ttl: Duration,
     ) -> SqlResult<Option<bool>> {
         self.limits.check()?;
-        self.limits.count_written(named_key_bytes(collection, key))?;
+        self.limits
+            .count_written(named_key_bytes(collection, key))?;
         self.inner.set_expiry(collection, key, ttl)
     }
 
     fn clear_expiry(&mut self, collection: Option<&str>, key: &[u8]) -> SqlResult<Option<bool>> {
         self.limits.check()?;
-        self.limits.count_written(named_key_bytes(collection, key))?;
+        self.limits
+            .count_written(named_key_bytes(collection, key))?;
         self.inner.clear_expiry(collection, key)
     }
 

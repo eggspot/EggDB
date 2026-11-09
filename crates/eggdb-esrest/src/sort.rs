@@ -259,7 +259,7 @@ fn chosen_number(mut values: Vec<(f64, String)>, mode: Mode, integral: bool) -> 
         }
         Mode::Median => {
             let middle = values.len() / 2;
-            let median = if values.len() % 2 == 0 {
+            let median = if values.len().is_multiple_of(2) {
                 match (values.get(middle.wrapping_sub(1)), values.get(middle)) {
                     (Some(low), Some(high)) => Some((low.0 + high.0) / 2.0),
                     _ => None,

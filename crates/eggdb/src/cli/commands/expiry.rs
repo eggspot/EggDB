@@ -329,7 +329,10 @@ pub(super) fn with_time_to_live(object: JsonObject, left: Option<Duration>) -> J
                 "ttl_ms",
                 u64::try_from(left.as_millis()).unwrap_or(u64::MAX),
             )
-            .string("expires_at", &eggdb_commands::expires_at(now_unix_micros(), left)),
+            .string(
+                "expires_at",
+                &eggdb_commands::expires_at(now_unix_micros(), left),
+            ),
         None => object.raw("ttl_ms", "null").raw("expires_at", "null"),
     }
 }

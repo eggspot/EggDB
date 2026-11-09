@@ -249,9 +249,9 @@ mod oracle_tests;
 #[cfg(test)]
 mod output_into_tests;
 #[cfg(test)]
-mod partition_tests;
-#[cfg(test)]
 mod partition_selection_tests;
+#[cfg(test)]
+mod partition_tests;
 #[cfg(test)]
 mod read_only_transaction_tests;
 #[cfg(test)]

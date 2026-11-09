@@ -889,8 +889,24 @@ fn acl_items_parse_as_postgresql_reads_them() {
 #[test]
 fn random_acl_items_never_panic() {
     const PIECES: [&str; 18] = [
-        "=", "/", "*", "\"", "\"\"", " ", "r", "a", "Q", "joe", "group", "user", "é", "\u{0}",
-        "\u{10ffff}", ",", "\t", "1664",
+        "=",
+        "/",
+        "*",
+        "\"",
+        "\"\"",
+        " ",
+        "r",
+        "a",
+        "Q",
+        "joe",
+        "group",
+        "user",
+        "é",
+        "\u{0}",
+        "\u{10ffff}",
+        ",",
+        "\t",
+        "1664",
     ];
     let mut state: u64 = 0x2545_f491_4f6c_dd1d;
     let mut next = move || {

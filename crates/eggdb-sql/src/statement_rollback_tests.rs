@@ -417,7 +417,10 @@ fn sqlite_update_or_rollback_ends_the_transaction() {
     let mut session = sqlite_codes(&store);
     run(&mut session, "BEGIN");
     run(&mut session, "INSERT INTO t VALUES (4, 40, 'd')");
-    let error = fails(&mut session, "UPDATE OR ROLLBACK t SET code = 20 WHERE id = 1");
+    let error = fails(
+        &mut session,
+        "UPDATE OR ROLLBACK t SET code = 20 WHERE id = 1",
+    );
     assert_eq!(error.message(), "UNIQUE constraint failed: t.code");
     assert!(!session.in_block());
     assert_eq!(

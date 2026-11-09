@@ -397,8 +397,9 @@ struct ExportProgress {
 impl ExportProgress {
     fn show(&mut self, messages: &mut Output<'_>, entries: u64) {
         let (file, collection, total) = (&self.file, self.collection.as_deref(), self.total);
-        self.shown
-            .show(messages, || exporting_line(file, collection, total, entries));
+        self.shown.show(messages, || {
+            exporting_line(file, collection, total, entries)
+        });
     }
 
     fn clear(&mut self, messages: &mut Output<'_>) {
@@ -427,7 +428,10 @@ fn exporting_line(
 }
 
 fn importing_line(source: &str, file: &str, entries: u64) -> String {
-    format!("importing {source} into {file}: {}…", render::entries(entries))
+    format!(
+        "importing {source} into {file}: {}…",
+        render::entries(entries)
+    )
 }
 
 fn checking_line(source: &str, entries: u64) -> String {

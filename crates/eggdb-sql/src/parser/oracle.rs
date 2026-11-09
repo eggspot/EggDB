@@ -1568,6 +1568,14 @@ impl Parser<'_> {
     }
 
     pub(super) fn skip_physical_properties(&mut self) -> SqlResult<()> {
+        self.skip_physical_properties_of(PartitioningClause::Skipped)
+    }
+
+    pub(super) fn skip_table_physical_properties(&mut self) -> SqlResult<()> {
+        self.skip_physical_properties_of(PartitioningClause::KeptWhenSupported)
+    }
+
+    fn skip_physical_properties_of(&mut self, partitioning: PartitioningClause) -> SqlResult<()> {
         loop {
             if self.is_word("segment") && self.is_word_at(1, "creation") {
                 self.at += 2;
@@ -1660,6 +1668,11 @@ impl Parser<'_> {
                 self.at += 2;
                 self.oracle_collation()?;
             } else if self.is_word("partition") && self.is_word_at(1, "by") {
+                if partitioning == PartitioningClause::KeptWhenSupported
+                    && self.partitioning_ends_statement()
+                {
+                    return Ok(());
+                }
                 self.skip_partitioning()?;
             } else if self.is_word("cluster") {
                 return Err(self.not_supported("tables in a CLUSTER"));
@@ -1669,6 +1682,22 @@ impl Parser<'_> {
                 return Ok(());
             }
         }
+    }
+
+    fn partitioning_ends_statement(&mut self) -> bool {
+        let start = self.at;
+        let depth = self.depth;
+        let placeholders_seen = self.placeholders_seen;
+        let query_depth = self.query_depth;
+        let queries = self.queries;
+        let ends = self.partition_by().is_ok()
+            && matches!(self.peek_kind(), TokenKind::End | TokenKind::Semicolon);
+        self.at = start;
+        self.depth = depth;
+        self.placeholders_seen = placeholders_seen;
+        self.query_depth = query_depth;
+        self.queries = queries;
+        ends
     }
 
     fn at_physical_end(&self) -> bool {
@@ -1965,4 +1994,10 @@ fn oracle_identity_seed(
 pub(super) struct ConstraintStates {
     pub(super) enabled: bool,
     pub(super) using_index: Option<Name>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartitioningClause {
+    Skipped,
+    KeptWhenSupported,
 }

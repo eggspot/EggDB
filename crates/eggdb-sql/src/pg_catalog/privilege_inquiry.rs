@@ -740,11 +740,8 @@ impl Inquiry<'_> {
                 true
             }
         };
-        let wanted = parse_privileges(
-            &written_name(list),
-            &TABLESPACE_PRIVILEGES,
-            &[GRANT_OPTION],
-        )?;
+        let wanted =
+            parse_privileges(&written_name(list), &TABLESPACE_PRIVILEGES, &[GRANT_OPTION])?;
         answer(exists.then_some(()), |()| {
             Ok(held_without_option(holder, &wanted, |_| {
                 crate::roles::may_define_objects(holder.checked_role())
@@ -764,11 +761,7 @@ impl Inquiry<'_> {
     }
 
     fn has_parameter_privilege(&self, holder: &Holder, list: &Value) -> SqlResult<Value> {
-        let wanted = parse_privileges(
-            &written_name(list),
-            &PARAMETER_PRIVILEGES,
-            &[GRANT_OPTION],
-        )?;
+        let wanted = parse_privileges(&written_name(list), &PARAMETER_PRIVILEGES, &[GRANT_OPTION])?;
         Ok(Value::Boolean(held_without_option(holder, &wanted, |_| {
             CHECKED_ROLES_HOLD_PARAMETER_PRIVILEGES
         })))
