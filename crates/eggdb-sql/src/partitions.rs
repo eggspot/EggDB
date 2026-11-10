@@ -928,7 +928,31 @@ fn function_is_immutable(name: &str, arguments: &[Option<SqlType>]) -> bool {
     }
 }
 
-fn expression_columns(expr: &Expr, table: &TableDefinition, found: &mut Vec<usize>) {
+pub(crate) fn mysql_key_columns(table: &TableDefinition, key: &PartitionKey) -> Option<Vec<String>> {
+    let mut found = Vec::new();
+    for part in &key.parts {
+        match part {
+            KeyPart::Column(name) => {
+                found.push(table.column_index(name)?);
+            }
+            KeyPart::Expression { text, dialect } => {
+                if *dialect != Dialect::MySql {
+                    return None;
+                }
+                let expr = parse_key_expression(text, *dialect).ok()?;
+                expression_columns(&expr, table, &mut found);
+            }
+        }
+    }
+    Some(
+        found
+            .into_iter()
+            .filter_map(|position| table.columns.get(position).map(|column| column.name.clone()))
+            .collect(),
+    )
+}
+
+pub(crate) fn expression_columns(expr: &Expr, table: &TableDefinition, found: &mut Vec<usize>) {
     if let ExprKind::Column { name, .. } = &expr.kind
         && let Some(position) = table.column_index(name)
         && !found.contains(&position)

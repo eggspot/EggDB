@@ -91,7 +91,24 @@ fn spec_for(parent: &TableDefinition, index: &IndexDefinition, dialect: Dialect)
     }
 }
 
-fn check_unique_covers_key(key: &PartitionKey, columns: &[&str], position: usize) -> SqlResult<()> {
+fn check_unique_covers_key(
+    table: &TableDefinition,
+    key: &PartitionKey,
+    columns: &[&str],
+    position: usize,
+) -> SqlResult<()> {
+    if key.has_expressions()
+        && let Some(read) = crate::partitions::mysql_key_columns(table, key)
+    {
+        return if read
+            .iter()
+            .all(|column| columns.iter().any(|named| named.eq_ignore_ascii_case(column)))
+        {
+            Ok(())
+        } else {
+            Err(crate::partition_ddl::unique_lacks_key(position))
+        };
+    }
     if key.has_expressions() {
         return Err(SqlError::new(
             SqlState::FEATURE_NOT_SUPPORTED,
@@ -157,7 +174,7 @@ pub(crate) fn create_on_partitioned(
             .iter()
             .map(|name| name.text.as_str())
             .collect();
-        check_unique_covers_key(key, &columns, position)?;
+        check_unique_covers_key(table, key, &columns, position)?;
     }
     let (definition, at) =
         crate::indexes::add_index(writer, table, &create.index, dialect, constraint)?;
@@ -260,7 +277,7 @@ fn reach(
             {
                 let columns: Vec<&str> =
                     spec.columns.iter().map(|name| name.text.as_str()).collect();
-                check_unique_covers_key(key, &columns, position)?;
+                check_unique_covers_key(&child, key, &columns, position)?;
             }
             let (definition, at) = crate::indexes::add_index(
                 writer,
