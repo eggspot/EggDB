@@ -17,7 +17,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-const SNAPSHOT_FUNCTIONS: [&str; 39] = [
+const SNAPSHOT_FUNCTIONS: [&str; 42] = [
+    "pg_partition_ancestors",
+    "pg_partition_tree",
+    "pg_partition_root",
     "has_table_privilege",
     "has_column_privilege",
     "has_any_column_privilege",

@@ -381,7 +381,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   delete and the target's insert row triggers of a moved row (and the target's `INSERT`
   statement triggers, which fire for a moved row where PostgreSQL fires only the `UPDATE` ones),
   user-defined `IMMUTABLE` functions and operator classes in keys, unique indexes on expression
-  keys, `relispartition` and `pg_partition_tree` for partition indexes, attaching a partition's
+  keys, `relispartition` and `pg_partition_tree` for partition indexes (**code written, unbuilt**,
+  code-only mode, 2026-11-10, D365), attaching a partition's
   primary key to its parent's, MySQL's allowed partition functions and integer-only keys, and
   `42883` for an unknown function in a PostgreSQL key (D316). MySQL's functions and integer-only keys and
   `42883`: **code written, unbuilt** (code-only mode, 2026-11-10, D359). Oracle's `DISABLE ROW

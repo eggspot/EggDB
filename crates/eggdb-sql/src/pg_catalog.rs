@@ -29,7 +29,9 @@ use crate::oracle_dictionary::OracleRelation;
 use crate::sqlserver_catalog::SqlServerRelation;
 pub(crate) use deparse::{check_text, default_text};
 pub(crate) use functions::{
-    argument_types, function, partition_ancestors_rows, partition_ancestors_type, result_type,
+    PARTITION_TREE, PARTITION_TREE_COLUMNS, argument_types, function, partition_ancestors_rows,
+    partition_ancestors_type, partition_tree_records, partition_tree_rows, partition_tree_type,
+    result_type,
 };
 pub(crate) use monitoring::{
     function as monitoring_function, result_type as monitoring_result_type,

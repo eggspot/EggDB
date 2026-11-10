@@ -1749,3 +1749,42 @@ fn a_row_written_straight_into_a_partition_takes_the_parents_next_id() {
         "id\n1\n2\n3\nSELECT 3"
     );
 }
+
+#[test]
+fn the_partition_tree_functions_and_relispartition_cover_tables_and_indexes() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    answer(
+        &mut session,
+        "CREATE TABLE p (a int, b int) PARTITION BY RANGE (a);
+         CREATE TABLE p1 PARTITION OF p FOR VALUES FROM (0) TO (10) PARTITION BY RANGE (a);
+         CREATE TABLE p1a PARTITION OF p1 FOR VALUES FROM (0) TO (5);
+         CREATE TABLE p2 PARTITION OF p FOR VALUES FROM (10) TO (20);
+         CREATE UNIQUE INDEX pa ON p (a)",
+    );
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT relid, parentrelid, isleaf, level FROM pg_partition_tree('p')"
+        ),
+        "relid|parentrelid|isleaf|level\np||f|0\np1|p|f|1\np2|p|t|1\np1a|p1|t|2\nSELECT 4"
+    );
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT relid FROM pg_partition_ancestors('p1a')"
+        ),
+        "relid\np1a\np1\np\nSELECT 3"
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT pg_partition_root('p1a')"),
+        "pg_partition_root\np\nSELECT 1"
+    );
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT count(*) FROM pg_class WHERE relkind = 'i' AND relispartition"
+        ),
+        "count\n3\nSELECT 1"
+    );
+}

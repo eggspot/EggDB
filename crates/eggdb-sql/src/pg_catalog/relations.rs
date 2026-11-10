@@ -292,6 +292,26 @@ fn table_oid(snapshot: &CatalogSnapshot, internal: &str) -> Option<u32> {
         .map(|entry| entry.oid)
 }
 
+fn index_attached_to_parent(
+    snapshot: &CatalogSnapshot,
+    owner: &TableDefinition,
+    index: IndexSource,
+) -> bool {
+    let IndexSource::Secondary(at) = index else {
+        return false;
+    };
+    let Some(definition) = owner.indexes.get(at) else {
+        return false;
+    };
+    snapshot.partitions.record(&owner.name).is_some_and(|record| {
+        record.parent.is_some()
+            && record
+                .index_links
+                .iter()
+                .any(|link| link.index == definition.id)
+    })
+}
+
 fn index_oids(snapshot: &CatalogSnapshot) -> std::collections::HashMap<(&str, u32), u32> {
     let mut found = std::collections::HashMap::new();
     for entry in &snapshot.relations {
@@ -324,6 +344,13 @@ fn inherits_row(child: u32, parent: u32) -> Vec<Value> {
 }
 
 fn inherits_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    inheritance_pairs(snapshot)
+        .into_iter()
+        .map(|(child, parent)| inherits_row(child, parent))
+        .collect()
+}
+
+pub(crate) fn inheritance_pairs(snapshot: &CatalogSnapshot) -> Vec<(u32, u32)> {
     let mut rows = Vec::new();
     let indexes = index_oids(snapshot);
     for (child, record) in snapshot.partitions.every() {
@@ -335,16 +362,31 @@ fn inherits_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 indexes.get(&(child, link.index)),
                 indexes.get(&(parent.as_str(), link.parent_index)),
             ) {
-                rows.push(inherits_row(*child_index, *parent_index));
+                rows.push((*child_index, *parent_index));
             }
         }
         let (Some(child), Some(parent)) = (table_oid(snapshot, child), table_oid(snapshot, parent))
         else {
             continue;
         };
-        rows.push(inherits_row(child, parent));
+        rows.push((child, parent));
     }
     rows
+}
+
+pub(crate) fn is_partitioned_relation(snapshot: &CatalogSnapshot, oid: u32) -> bool {
+    let Some(entry) = snapshot.relation(oid) else {
+        return false;
+    };
+    match &entry.source {
+        RelationSource::Table(table) => snapshot.partitions.key_of(&table.name).is_some(),
+        RelationSource::Index { table, .. } => snapshot
+            .relations
+            .get(*table)
+            .and_then(|owner| owner.table())
+            .is_some_and(|owner| snapshot.partitions.key_of(&owner.name).is_some()),
+        _ => false,
+    }
 }
 
 pub(crate) fn partitioned_table_rows(snapshot: &CatalogSnapshot) -> Vec<(u32, &'static str, i64)> {
@@ -383,6 +425,7 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
         let mut pages = 0;
         let mut file_node = entry.oid;
         let mut partition_bound = None;
+        let mut index_is_partition = false;
         let mut has_subclass = false;
         let mut row_security = crate::row_security::RowSecuritySwitch::default();
         match &entry.source {
@@ -427,6 +470,9 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                     kind = "I";
                     file_node = 0;
                 }
+                index_is_partition = owner.is_some_and(|owner| {
+                    index_attached_to_parent(snapshot, owner, *index)
+                });
                 natts = owner.map_or(0, |owner| index_columns(owner, *index).len());
                 am = access_method_oid(
                     owner.map_or(IndexMethod::BTree, |owner| index_method(owner, *index)),
@@ -473,7 +519,10 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 .set("relforcerowsecurity", flag(row_security.forced))
                 .set("relispopulated", flag(true))
                 .set("relreplident", text(replident))
-                .set("relispartition", flag(partition_bound.is_some()))
+                .set(
+                    "relispartition",
+                    flag(partition_bound.is_some() || index_is_partition),
+                )
                 .set(
                     "relpartbound",
                     partition_bound.map_or(Value::Null, Value::Text),

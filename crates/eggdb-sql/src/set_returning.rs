@@ -18,7 +18,7 @@ pub(crate) struct SetReturningFunction {
     fields: bool,
 }
 
-const FUNCTIONS: [SetReturningFunction; 36] = [
+const FUNCTIONS: [SetReturningFunction; 37] = [
     to_records("json_to_record"),
     to_records("jsonb_to_record"),
     to_records("json_to_recordset"),
@@ -167,6 +167,12 @@ const FUNCTIONS: [SetReturningFunction; 36] = [
         rows: crate::pg_catalog::acl::exploded_rows,
         fields: true,
     },
+    SetReturningFunction {
+        name: crate::pg_catalog::PARTITION_TREE,
+        result_type: crate::pg_catalog::partition_tree_type,
+        rows: crate::pg_catalog::partition_tree_rows,
+        fields: true,
+    },
 ];
 
 fn hstore_keys_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
@@ -196,6 +202,15 @@ fn hstore_each_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> Sql
 }
 
 fn record_columns(name: &str) -> Vec<OutputColumn> {
+    if name == crate::pg_catalog::PARTITION_TREE {
+        return crate::pg_catalog::PARTITION_TREE_COLUMNS
+            .iter()
+            .map(|(column, sql_type)| OutputColumn {
+                name: (*column).to_owned(),
+                sql_type: Some(*sql_type),
+            })
+            .collect();
+    }
     if name == crate::pg_catalog::acl::EXPLODE {
         return crate::pg_catalog::acl::EXPLODED_COLUMNS
             .iter()
@@ -233,6 +248,8 @@ fn record_rows(
         crate::hstore_functions::each_records(values, sink)
     } else if name == crate::pg_catalog::acl::EXPLODE {
         crate::pg_catalog::acl::exploded_records(values, sink)
+    } else if name == crate::pg_catalog::PARTITION_TREE {
+        crate::pg_catalog::partition_tree_records(values, sink)
     } else if name == crate::json_functions::OPENJSON_PAIRS {
         crate::json_functions::openjson_pair_rows(values, sink)
     } else {
