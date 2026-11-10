@@ -2000,7 +2000,8 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
 - `SET [SESSION | LOCAL] name {TO | =} value | DEFAULT`, `SET [LOCAL] TIME ZONE`, `SET NAMES`,
   `RESET name | ALL`, `SHOW name | ALL`: PostgreSQL's run-time parameters (D104). `client_encoding`
   takes `UTF8` (and `SQL_ASCII`, which passes bytes through) only; settings EggDB does not apply
-  yet, such as `lock_timeout`, are remembered and shown. `max_identifier_length`,
+  yet are remembered and shown. `lock_timeout` limits how long a statement waits for the
+  database's single writer (`55P03 canceling statement due to lock timeout`, D393). `max_identifier_length`,
   `max_index_keys` and `max_function_args` are fixed, as PostgreSQL's server limits. Settings
   follow transactions as in PostgreSQL (D301): a `SET` inside a transaction is undone by its
   `ROLLBACK` (and by `ROLLBACK TO SAVEPOINT` to a savepoint set before it) and kept by its
@@ -2530,8 +2531,8 @@ ID). Sessions in the MySQL, SQL Server and Oracle dialects read them as
 kept (5000 by default); a full table drops its least-called twentieth. `--log-slow-statements
 <milliseconds>` logs each statement that takes at least that long to stderr, on every
 protocol, as one line: `slow statement duration_ms=... database=... user=... protocol=...
-rows=... query="..."` after the UTC time, with the same normalized text. `lock_timeout` and
-limits per role are not there yet.
+rows=... query="..."` after the UTC time, with the same normalized text. `lock_timeout` is
+applied to the wait for the writer (D393); limits per role are not there yet.
 
 ## Plans in Oracle's and SQL Server's dialects
 

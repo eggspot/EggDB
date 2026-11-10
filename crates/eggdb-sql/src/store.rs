@@ -298,6 +298,13 @@ pub trait KeyValueStore {
     /// Begins the write transaction, waiting for another writer as the store does.
     fn begin_write(&self) -> SqlResult<Self::Write<'_>>;
 
+    /// Begins the write transaction, waiting at most `limit` for another writer, for
+    /// PostgreSQL's `lock_timeout`. By default it waits as [`KeyValueStore::begin_write`] does.
+    fn begin_write_waiting(&self, limit: std::time::Duration) -> SqlResult<Self::Write<'_>> {
+        let _ = limit;
+        self.begin_write()
+    }
+
     /// Begins a read of the snapshot `handle` names, while a read of it is still open; `None`
     /// when the handle is not this store's or the store cannot share snapshots, the default.
     fn begin_read_from(&self, handle: &SnapshotHandle) -> SqlResult<Option<Self::Read<'_>>> {
@@ -357,6 +364,10 @@ impl<S: KeyValueStore> KeyValueStore for &S {
         (**self).begin_write()
     }
 
+    fn begin_write_waiting(&self, limit: std::time::Duration) -> SqlResult<S::Write<'_>> {
+        (**self).begin_write_waiting(limit)
+    }
+
     fn begin_read_from(&self, handle: &SnapshotHandle) -> SqlResult<Option<S::Read<'_>>> {
         (**self).begin_read_from(handle)
     }
@@ -386,6 +397,10 @@ impl<S: KeyValueStore> KeyValueStore for std::sync::Arc<S> {
 
     fn begin_write(&self) -> SqlResult<S::Write<'_>> {
         (**self).begin_write()
+    }
+
+    fn begin_write_waiting(&self, limit: std::time::Duration) -> SqlResult<S::Write<'_>> {
+        (**self).begin_write_waiting(limit)
     }
 
     fn begin_read_from(&self, handle: &SnapshotHandle) -> SqlResult<Option<S::Read<'_>>> {
@@ -553,6 +568,14 @@ impl KeyValueRead for Box<dyn KeyValueRead + '_> {
     }
 }
 
+fn lock_timeout() -> Option<std::time::Duration> {
+    let value = crate::pg_catalog::statement_settings()
+        .get("lock_timeout")
+        .ok()?;
+    let millis = crate::session::milliseconds_setting(&value)?;
+    (millis > 0).then(|| std::time::Duration::from_millis(millis.unsigned_abs()))
+}
+
 pub(crate) trait ErasedStore {
     fn begin_boxed_read(&self) -> SqlResult<Box<dyn KeyValueRead + '_>>;
 
@@ -574,7 +597,19 @@ impl<S: KeyValueStore> ErasedStore for S {
     }
 
     fn begin_boxed_write(&self) -> SqlResult<Box<dyn BoxedWrite + '_>> {
-        Ok(Box::new(self.begin_write()?))
+        match lock_timeout() {
+            Some(limit) => match self.begin_write_waiting(limit) {
+                Ok(writer) => Ok(Box::new(writer)),
+                Err(error) if error.state() == crate::error::SqlState::LOCK_NOT_AVAILABLE => {
+                    Err(crate::error::SqlError::new(
+                        crate::error::SqlState::LOCK_NOT_AVAILABLE,
+                        "canceling statement due to lock timeout",
+                    ))
+                }
+                Err(error) => Err(error),
+            },
+            None => Ok(Box::new(self.begin_write()?)),
+        }
     }
 
     fn erased_page_lookups(&self) -> Option<PageLookups> {

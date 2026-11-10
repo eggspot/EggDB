@@ -4296,7 +4296,7 @@ fn view_renamed_by(
     }))
 }
 
-fn milliseconds_setting(value: &str) -> Option<i64> {
+pub(crate) fn milliseconds_setting(value: &str) -> Option<i64> {
     let value = value.trim();
     let (number, unit) = value
         .find(|character: char| !character.is_ascii_digit() && character != '-')

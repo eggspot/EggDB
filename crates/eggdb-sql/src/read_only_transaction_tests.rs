@@ -765,3 +765,19 @@ fn an_exported_snapshot_shows_another_session_what_the_exporter_sees() {
     let error = refusal(&mut importer, "SELECT pg_export_snapshot()");
     assert_eq!(error.state().code(), "0A000", "{error}");
 }
+
+#[test]
+fn lock_timeout_cancels_a_statement_waiting_for_the_writer() {
+    let store = MemoryStore::default();
+    let mut holder = Session::new(&store);
+    let mut waiter = Session::new(&store);
+    answer(&mut holder, "CREATE TABLE lt (x int)");
+    answer(&mut holder, "BEGIN");
+    answer(&mut holder, "INSERT INTO lt VALUES (1)");
+    answer(&mut waiter, "SET lock_timeout = '10ms'");
+    let error = refusal(&mut waiter, "INSERT INTO lt VALUES (2)");
+    assert_eq!(error.state().code(), "55P03", "{error}");
+    assert_eq!(error.message(), "canceling statement due to lock timeout");
+    answer(&mut holder, "COMMIT");
+    answer(&mut waiter, "INSERT INTO lt VALUES (2)");
+}

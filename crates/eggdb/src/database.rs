@@ -363,7 +363,7 @@ impl Database {
         self.begin_write_within(Duration::ZERO)
     }
 
-    fn begin_write_within(&self, timeout: Duration) -> Result<WriteTransaction<'_>> {
+    pub(crate) fn begin_write_within(&self, timeout: Duration) -> Result<WriteTransaction<'_>> {
         if self.read_only {
             return Err(Error::storage(StorageError::ReadOnly));
         }

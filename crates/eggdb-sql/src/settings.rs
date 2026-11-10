@@ -172,7 +172,7 @@ const KNOWN: &[Known] = &[
         default: fixed_text!("0"),
         change: Change::Free,
         reported: false,
-        description: "Remembered, not applied yet: a second writer waits the database's write timeout.",
+        description: "Sets the longest a statement waits for the database's writer; 0 waits the database's write timeout.",
     },
     Known {
         name: "log_min_duration_statement",

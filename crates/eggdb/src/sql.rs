@@ -474,6 +474,13 @@ impl KeyValueStore for Store<'_> {
         self.0.begin_write().map(SqlWriter).map_err(store_error)
     }
 
+    fn begin_write_waiting(&self, limit: Duration) -> SqlResult<SqlWriter<'_>> {
+        self.0
+            .begin_write_within(limit)
+            .map(SqlWriter)
+            .map_err(store_error)
+    }
+
     fn page_lookups(&self) -> Option<eggdb_sql::PageLookups> {
         Some(this_threads_page_lookups())
     }
@@ -515,6 +522,13 @@ impl KeyValueStore for OwnedStore {
 
     fn begin_write(&self) -> SqlResult<SqlWriter<'_>> {
         self.0.begin_write().map(SqlWriter).map_err(store_error)
+    }
+
+    fn begin_write_waiting(&self, limit: Duration) -> SqlResult<SqlWriter<'_>> {
+        self.0
+            .begin_write_within(limit)
+            .map(SqlWriter)
+            .map_err(store_error)
     }
 
     fn page_lookups(&self) -> Option<eggdb_sql::PageLookups> {
