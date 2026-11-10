@@ -39,9 +39,14 @@ pub(crate) struct PairSums {
     sum_y: f64,
     sum_yy: f64,
     sum_xy: f64,
+    pairs: Vec<(f64, f64)>,
 }
 
 impl PairSums {
+    pub(crate) fn held_bytes(&self) -> usize {
+        self.pairs.len().saturating_mul(std::mem::size_of::<(f64, f64)>())
+    }
+
     pub(crate) fn add(
         &mut self,
         function: AggregateFunction,
@@ -58,6 +63,16 @@ impl PairSums {
                 &independent.type_name(),
             ));
         };
+        if matches!(function, AggregateFunction::CorrS | AggregateFunction::CorrK) {
+            if x.is_nan() || y.is_nan() {
+                return Ok(());
+            }
+            self.pairs
+                .try_reserve(1)
+                .map_err(|_| SqlError::new(SqlState::OUT_OF_MEMORY, "out of memory"))?;
+            self.pairs.push((x, y));
+            return Ok(());
+        }
         self.add_pair(y, x)
     }
 
@@ -109,18 +124,25 @@ impl PairSums {
                 sum_xy = f64::NAN;
             }
         }
-        *self = Self {
-            count: self.count.saturating_add(1),
-            sum_x,
-            sum_xx,
-            sum_y,
-            sum_yy,
-            sum_xy,
-        };
+        self.count = self.count.saturating_add(1);
+        self.sum_x = sum_x;
+        self.sum_xx = sum_xx;
+        self.sum_y = sum_y;
+        self.sum_yy = sum_yy;
+        self.sum_xy = sum_xy;
         Ok(())
     }
 
     pub(crate) fn finish(&self, function: AggregateFunction) -> Value {
+        match function {
+            AggregateFunction::CorrS => {
+                return spearman(&self.pairs).map_or(Value::Null, Value::Double);
+            }
+            AggregateFunction::CorrK => {
+                return kendall_tau_b(&self.pairs).map_or(Value::Null, Value::Double);
+            }
+            _ => {}
+        }
         if function == AggregateFunction::RegrCount {
             return Value::BigInt(self.count);
         }
@@ -168,6 +190,99 @@ impl PairSums {
         }
         Some((self.sum_xy * self.sum_xy) / (self.sum_xx * self.sum_yy))
     }
+}
+
+fn average_ranks(values: &[f64]) -> Vec<f64> {
+    let mut order: Vec<usize> = (0..values.len()).collect();
+    order.sort_by(|&left, &right| values[left].total_cmp(&values[right]));
+    let mut ranks = vec![0.0; values.len()];
+    let mut start = 0;
+    while start < order.len() {
+        let mut end = start + 1;
+        while end < order.len() && values[order[end]] == values[order[start]] {
+            end += 1;
+        }
+        let rank = (start + end + 1) as f64 / 2.0;
+        for &at in &order[start..end] {
+            ranks[at] = rank;
+        }
+        start = end;
+    }
+    ranks
+}
+
+fn spearman(pairs: &[(f64, f64)]) -> Option<f64> {
+    if pairs.len() < 2 {
+        return None;
+    }
+    let xs: Vec<f64> = pairs.iter().map(|&(x, _)| x).collect();
+    let ys: Vec<f64> = pairs.iter().map(|&(_, y)| y).collect();
+    let mut sums = PairSums::default();
+    for (y, x) in average_ranks(&ys).into_iter().zip(average_ranks(&xs)) {
+        sums.add_pair(y, x).ok()?;
+    }
+    sums.correlation()
+}
+
+fn tied_pairs<T: PartialEq>(sorted: &[T]) -> u64 {
+    let mut total = 0u64;
+    let mut start = 0;
+    while start < sorted.len() {
+        let mut end = start + 1;
+        while end < sorted.len() && sorted[end] == sorted[start] {
+            end += 1;
+        }
+        let run = (end - start) as u64;
+        total = total.saturating_add(run * (run - 1) / 2);
+        start = end;
+    }
+    total
+}
+
+fn count_inversions(values: &mut [f64], scratch: &mut Vec<f64>) -> u64 {
+    if values.len() < 2 {
+        return 0;
+    }
+    let middle = values.len() / 2;
+    let (left, right) = values.split_at_mut(middle);
+    let mut inversions = count_inversions(left, scratch) + count_inversions(right, scratch);
+    scratch.clear();
+    let (mut i, mut j) = (0, 0);
+    while i < left.len() && j < right.len() {
+        if right[j] < left[i] {
+            scratch.push(right[j]);
+            inversions += (left.len() - i) as u64;
+            j += 1;
+        } else {
+            scratch.push(left[i]);
+            i += 1;
+        }
+    }
+    scratch.extend_from_slice(&left[i..]);
+    scratch.extend_from_slice(&right[j..]);
+    values.copy_from_slice(scratch);
+    inversions
+}
+
+fn kendall_tau_b(pairs: &[(f64, f64)]) -> Option<f64> {
+    let count = pairs.len() as u64;
+    if count < 2 {
+        return None;
+    }
+    let mut sorted = pairs.to_vec();
+    sorted.sort_by(|left, right| left.0.total_cmp(&right.0).then(left.1.total_cmp(&right.1)));
+    let xs: Vec<f64> = sorted.iter().map(|&(x, _)| x).collect();
+    let tied_x = tied_pairs(&xs);
+    let tied_both = tied_pairs(&sorted);
+    let mut ys: Vec<f64> = sorted.iter().map(|&(_, y)| y).collect();
+    let mut scratch = Vec::with_capacity(ys.len());
+    let discordant = count_inversions(&mut ys, &mut scratch);
+    let tied_y = tied_pairs(&ys);
+    let total = count * (count - 1) / 2;
+    let difference = total as f64 - tied_x as f64 - tied_y as f64 + tied_both as f64
+        - 2.0 * discordant as f64;
+    let spread = ((total - tied_x) as f64).sqrt() * ((total - tied_y) as f64).sqrt();
+    (spread != 0.0).then(|| difference / spread)
 }
 
 #[cfg(test)]
@@ -283,5 +398,30 @@ mod tests {
             finished(&pairs, AggregateFunction::Corr),
             "error: function corr(text, integer) does not exist"
         );
+    }
+
+    #[test]
+    fn rank_correlations_follow_spearman_and_kendall_tau_b() {
+        let pairs: Vec<(Value, Value)> = [(1, 10), (2, 20), (3, 25), (4, 40)]
+            .iter()
+            .map(|&(y, x)| (Value::Integer(y), Value::Integer(x)))
+            .collect();
+        assert_eq!(finished(&pairs, AggregateFunction::CorrS), "1");
+        assert_eq!(finished(&pairs, AggregateFunction::CorrK), "1");
+        let reversed: Vec<(Value, Value)> = [(4, 10), (3, 20), (2, 30), (1, 40)]
+            .iter()
+            .map(|&(y, x)| (Value::Integer(y), Value::Integer(x)))
+            .collect();
+        assert_eq!(finished(&reversed, AggregateFunction::CorrS), "-1");
+        assert_eq!(finished(&reversed, AggregateFunction::CorrK), "-1");
+        let tied: Vec<(Value, Value)> = [(1, 1), (2, 1), (3, 2), (3, 3)]
+            .iter()
+            .map(|&(y, x)| (Value::Integer(y), Value::Integer(x)))
+            .collect();
+        let tau = finished(&tied, AggregateFunction::CorrK)
+            .parse::<f64>()
+            .unwrap_or(f64::NAN);
+        assert!((tau - 0.8).abs() < 1e-12, "{tau}");
+        assert_eq!(finished(&pairs[..1], AggregateFunction::CorrS), "NULL");
     }
 }

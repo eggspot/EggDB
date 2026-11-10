@@ -1919,7 +1919,11 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   when Y has none. They are computed with running sums of deviations (the Youngs-Cramer method),
   so large offsets cost no precision, and take `FILTER`, `OVER` and, in PostgreSQL, `DISTINCT`
   (ORA-30482 in Oracle). A non-numeric argument is `42883`; MySQL, SQL Server and SQLite have
-  none of them and answer their unknown-function errors.
+  none of them and answer their unknown-function errors. Oracle's rank correlations
+  `CORR_S(expr1, expr2)` (Spearman's rho, with average ranks for ties) and `CORR_K(expr1,
+  expr2)` (Kendall's tau-b, counted in n log n) return the coefficient, NULL for fewer than two
+  pairs or no spread; their third argument (`ONE_SIDED_SIG` and the other significances) is not
+  taken yet (D374).
 - **Ordered-set aggregates** (D151): `percentile_cont(fraction) WITHIN GROUP (ORDER BY expr)`
   (`double precision`, interpolated between the two nearest values), `percentile_disc(fraction)
   WITHIN GROUP (ORDER BY expr)` (the first value whose position reaches the fraction, in the
