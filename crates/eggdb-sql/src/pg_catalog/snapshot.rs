@@ -509,7 +509,10 @@ struct PendingRelation {
     source: RelationSource,
 }
 
-fn implicit_identity_sequences(pending: &[PendingRelation]) -> Vec<PendingRelation> {
+fn implicit_identity_sequences(
+    reader: &dyn KeyValueRead,
+    pending: &[PendingRelation],
+) -> Vec<PendingRelation> {
     let mut implicit: Vec<PendingRelation> = Vec::new();
     if crate::constraints::current_dialect() != crate::Dialect::PostgreSql {
         return implicit;
@@ -539,6 +542,10 @@ fn implicit_identity_sequences(pending: &[PendingRelation]) -> Vec<PendingRelati
             let (low, high) =
                 crate::encoding::integer_type_range(sql_type).unwrap_or((i64::MIN, i64::MAX));
             let seed = table.identity_seed();
+            let furthest =
+                crate::partition_dml::furthest_in_table(reader, table, index, seed)
+                    .ok()
+                    .flatten();
             let (min, max) = if seed.increment < 0 {
                 (low, -1)
             } else {
@@ -558,8 +565,8 @@ fn implicit_identity_sequences(pending: &[PendingRelation]) -> Vec<PendingRelati
                     max,
                     cache: 1,
                     cycle: false,
-                    last_value: seed.seed,
-                    is_called: false,
+                    last_value: furthest.unwrap_or(seed.seed),
+                    is_called: furthest.is_some(),
                     owned_by: Some(owned),
                 })),
             });
@@ -685,7 +692,7 @@ impl CatalogSnapshot {
                 source: RelationSource::Sequence(Box::new(sequence)),
             });
         }
-        let implicit = implicit_identity_sequences(&pending);
+        let implicit = implicit_identity_sequences(reader, &pending);
         pending.extend(implicit);
         let assigned = oids::assign(
             Space::Relation,

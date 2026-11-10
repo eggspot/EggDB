@@ -415,3 +415,4 @@ its full title with its status.
 - [D388](decisions/D388.md) Code-only batch 35 (M5): `ALTER COLUMN ... TYPE ... USING expr`
 - [D389](decisions/D389.md) Code-only batch 36 (M6a): PostgreSQL's `IntervalStyle` output
 - [D390](decisions/D390.md) Code-only batch 37 (M6a): PostgreSQL's `regprocedure`
+- [D391](decisions/D391.md) Code-only batch 38 (M6a): `pg_sequences.last_value` for identity columns
