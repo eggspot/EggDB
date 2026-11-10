@@ -374,6 +374,13 @@ pub(crate) fn create_table(
     };
     crate::partitions::save(writer, &table.name, &record)?;
     create_named_partitions(writer, tables, &table, &key, by, dialect)?;
+    if let Some(text) = &by.interval {
+        let interval =
+            crate::partition_interval::validated(writer, tables, &table, &key, text, by.position)?;
+        let mut record = crate::partitions::stored(writer, &table.name)?;
+        record.interval = Some(interval);
+        crate::partitions::save(writer, &table.name, &record)?;
+    }
     Ok(result)
 }
 
@@ -518,6 +525,7 @@ fn subpartitioning(
         mysql_integer_key: sub.mysql_integer_key,
         subpartition_by: None,
         row_movement: Some(true),
+        interval: None,
         position: sub.position,
     }))
 }

@@ -711,7 +711,9 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
   attached to (no id repeated on either side). Record version 3 (D361) is written only when a
   partitioned table has options: it reads as version 2, the flag byte may also carry `4`
   (options follow), and the record ends with an options byte (`1` Oracle's row movement is
-  disabled; no other bit, never zero, only on a partitioned table). An older EggDB reports
+  disabled, `2` interval partitioning (D362); no other bit, never zero, only on a partitioned
+  table); with `2`, the interval expression's Oracle text and the transition point as one bound
+  value list of length 1 follow (only on a range key of one column). An older EggDB reports
   version 3 as a newer format. Subpartitions are partitions that are themselves partitioned,
   as in PostgreSQL. Rows stay in each partition's own
   table; a partitioned table holds none. Table-definition version 11 (D259) is written only for

@@ -238,6 +238,13 @@ pub(crate) struct PartitionRecord {
     pub(crate) parent: Option<(String, PartitionBound)>,
     pub(crate) index_links: Vec<IndexLink>,
     pub(crate) row_movement_disabled: bool,
+    pub(crate) interval: Option<IntervalPartitioning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IntervalPartitioning {
+    pub(crate) text: String,
+    pub(crate) transition: Vec<BoundText>,
 }
 
 impl PartitionRecord {
@@ -1190,6 +1197,10 @@ impl Partitioned {
         &self.key.types
     }
 
+    pub(crate) fn key_of_row(&self, row: &[Value]) -> SqlResult<Vec<Value>> {
+        self.key.read(row)
+    }
+
     pub(crate) fn partition_holding(&self, key: &[Value]) -> Option<&str> {
         self.chosen(key)
     }
@@ -1675,7 +1686,7 @@ fn shared_definition(
     }
 }
 
-fn bound_value_text(
+pub(crate) fn bound_value_text(
     value: &PartitionBoundValue,
     sql_type: SqlType,
     position: usize,

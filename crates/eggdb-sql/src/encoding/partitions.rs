@@ -1,8 +1,8 @@
 use super::{NAMESPACE, Reader, dialect_code, dialect_of, put_bytes, put_varint};
 use crate::error::SqlResult;
 use crate::partitions::{
-    BoundText, IndexLink, KeyPart, MAX_BOUND_VALUES, MAX_INDEX_LINKS, MAX_KEY_COLUMNS,
-    PartitionBound, PartitionKey, PartitionRecord, PartitionStrategy,
+    BoundText, IndexLink, IntervalPartitioning, KeyPart, MAX_BOUND_VALUES, MAX_INDEX_LINKS,
+    MAX_KEY_COLUMNS, PartitionBound, PartitionKey, PartitionRecord, PartitionStrategy,
 };
 use std::collections::BTreeSet;
 
@@ -17,7 +17,8 @@ const PARENT_FLAG: u8 = 2;
 const OPTIONS_FLAG: u8 = 4;
 const KNOWN_FLAGS: u8 = KEY_FLAG | PARENT_FLAG;
 const ROW_MOVEMENT_DISABLED: u8 = 1;
-const KNOWN_OPTIONS: u8 = ROW_MOVEMENT_DISABLED;
+const INTERVAL: u8 = 2;
+const KNOWN_OPTIONS: u8 = ROW_MOVEMENT_DISABLED | INTERVAL;
 const RANGE: u8 = 1;
 const LIST: u8 = 2;
 const HASH: u8 = 3;
@@ -97,11 +98,17 @@ fn needs_version_2(record: &PartitionRecord) -> bool {
 }
 
 fn options_of(record: &PartitionRecord) -> u8 {
-    if record.key.is_some() && record.row_movement_disabled {
-        ROW_MOVEMENT_DISABLED
-    } else {
-        0
+    if record.key.is_none() {
+        return 0;
     }
+    let mut options = 0;
+    if record.row_movement_disabled {
+        options |= ROW_MOVEMENT_DISABLED;
+    }
+    if record.interval.is_some() {
+        options |= INTERVAL;
+    }
+    options
 }
 
 pub(crate) fn encode_partitioning(record: &PartitionRecord) -> Vec<u8> {
@@ -174,6 +181,12 @@ pub(crate) fn encode_partitioning(record: &PartitionRecord) -> Vec<u8> {
     }
     if options != 0 {
         out.push(options);
+    }
+    if options & INTERVAL != 0
+        && let Some(interval) = &record.interval
+    {
+        put_bytes(&mut out, interval.text.as_bytes());
+        put_values(&mut out, &interval.transition);
     }
     out
 }
@@ -298,11 +311,25 @@ pub(crate) fn decode_partitioning(table: &str, bytes: &[u8]) -> SqlResult<Partit
     } else {
         0
     };
+    let interval = if options & INTERVAL != 0 {
+        let text = reader.text()?;
+        let transition = values(&mut reader)?;
+        let single_range = key.as_ref().is_some_and(|key| {
+            key.strategy == PartitionStrategy::Range && key.parts.len() == 1
+        });
+        if text.is_empty() || transition.len() != 1 || !single_range {
+            return Err(reader.damaged());
+        }
+        Some(IntervalPartitioning { text, transition })
+    } else {
+        None
+    };
     reader.finish()?;
     Ok(PartitionRecord {
         key,
         parent,
         index_links,
         row_movement_disabled: options & ROW_MOVEMENT_DISABLED != 0,
+        interval,
     })
 }

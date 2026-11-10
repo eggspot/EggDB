@@ -1254,6 +1254,7 @@ pub(crate) struct PartitionBy {
     pub(crate) mysql_integer_key: bool,
     pub(crate) subpartition_by: Option<Box<SubpartitionBy>>,
     pub(crate) row_movement: Option<bool>,
+    pub(crate) interval: Option<String>,
     pub(crate) position: usize,
 }
 

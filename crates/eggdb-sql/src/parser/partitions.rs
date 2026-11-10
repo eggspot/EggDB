@@ -100,10 +100,28 @@ impl Parser<'_> {
             mysql_integer_key,
             subpartition_by: None,
             row_movement: None,
+            interval: None,
             position,
         };
         if self.postgresql() {
             return Ok(partition_by);
+        }
+        if self.oracle() && self.is_word("interval") && self.peek_kind_at(1) == &TokenKind::LeftParen {
+            self.at += 2;
+            let start = self.position();
+            self.expression()?;
+            let end = self.previous_end();
+            self.expect(&TokenKind::RightParen)?;
+            partition_by.interval = Some(self.text.get(start..end).unwrap_or("").to_owned());
+            if self.is_word("store") && self.is_word_at(1, "in") {
+                self.at += 2;
+                self.expect(&TokenKind::LeftParen)?;
+                self.name()?;
+                while self.take(&TokenKind::Comma) {
+                    self.name()?;
+                }
+                self.expect(&TokenKind::RightParen)?;
+            }
         }
         if self.take_word("partitions") {
             partition_by.hash_partitions = Some(self.partition_count()?);

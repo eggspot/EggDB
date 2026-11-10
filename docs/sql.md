@@ -2792,6 +2792,15 @@ ALTER TABLE measurements DETACH PARTITION old_rows;
   `ORA-14160`). A subpartition is a partition that is itself partitioned; `PARTITION (...)` and
   Oracle's `SUBPARTITION (...)` select subpartitions by name. `ADD`, `REORGANIZE` and the other
   maintenance `ALTER`s do not create subpartitions yet.
+- **Interval partitioning** (Oracle, D362). `PARTITION BY RANGE (c) INTERVAL (expr) [STORE IN
+  (...)] (PARTITION ...)` keeps the highest bound of the listed partitions as the transition
+  point; a row at or above it creates the partition `[transition + (k - 1) * interval,
+  transition + k * interval)` that holds it, named `SYS_P<n>`, as Oracle does. The key is one
+  column (`ORA-14750`), the interval a positive constant of the key's type, such as a number or
+  `NUMTOYMINTERVAL(1, 'MONTH')` (`ORA-14752`), no listed partition may be `MAXVALUE`
+  (`ORA-14761`), `ADD PARTITION` is `ORA-14760`, and a key more than 1048575 intervals above
+  the transition is `ORA-14300`. An `UPDATE` that moves a row above the transition does not
+  create a partition yet.
 - **Row movement** (Oracle, D361). A partitioned table created in the Oracle dialect refuses an
   `UPDATE` that would move a row to another partition with `ORA-14402`, as Oracle does, until
   `ENABLE ROW MOVEMENT` (in `CREATE TABLE` or `ALTER TABLE`); `DISABLE ROW MOVEMENT` turns it off

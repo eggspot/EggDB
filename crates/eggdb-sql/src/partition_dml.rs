@@ -336,6 +336,11 @@ pub(crate) fn next_identity_value(
     )?))
 }
 
+enum Routed {
+    Done(QueryResult),
+    NeedsPartition(Vec<Value>),
+}
+
 pub(crate) fn insert(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
@@ -343,6 +348,47 @@ pub(crate) fn insert(
     table: &TableDefinition,
     partitioned: &Partitioned,
 ) -> SqlResult<QueryResult> {
+    let mut refreshed: Option<Partitioned> = None;
+    loop {
+        let routing = refreshed.as_ref().unwrap_or(partitioned);
+        let key = match insert_routed(writer, tables, insert, table, routing)? {
+            Routed::Done(result) => return Ok(result),
+            Routed::NeedsPartition(key) => key,
+        };
+        let root = tables.require_target(
+            writer,
+            &Name {
+                text: routing.table.clone(),
+                position: insert.table.name.position,
+            },
+            "insert into",
+        )?;
+        let no_partition = routing.no_partition_for_key(&key);
+        let sql_type = routing.key_types().first().copied();
+        let interval = crate::partitions::stored(writer, &root.name)?.interval;
+        let (Some(interval), Some(sql_type)) = (interval, sql_type) else {
+            return Err(no_partition);
+        };
+        let dialect = crate::constraints::current_dialect();
+        if !crate::partition_interval::create_for(
+            writer, tables, &root, &interval, &key, sql_type, dialect,
+        )? {
+            return Err(no_partition);
+        }
+        refreshed = Some(
+            crate::partitions::partitioned(writer, tables, table)?
+                .ok_or_else(|| crate::encoding::corrupt("partition tree"))?,
+        );
+    }
+}
+
+fn insert_routed(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    insert: &Insert,
+    table: &TableDefinition,
+    partitioned: &Partitioned,
+) -> SqlResult<Routed> {
     let targets = match &insert.columns {
         Some(names) => execute::target_columns(table, names)?,
         None => (0..table.columns.len()).collect(),
@@ -371,6 +417,10 @@ pub(crate) fn insert(
     let mut groups: Vec<(String, Vec<usize>, Vec<Vec<InsertValue>>)> = Vec::new();
     let ignores_rows = matches!(insert.on_duplicate, OnDuplicate::Ignore)
         && crate::constraints::current_dialect() == Dialect::MySql;
+    let grows_by_interval = selected.is_none()
+        && crate::partitions::stored(&*writer, &partitioned.table)?
+            .interval
+            .is_some();
     let mut skipped: Vec<crate::mysql_errors::Warning> = Vec::new();
     let mut key_row = vec![Value::Null; table.columns.len()];
     let key_columns = partitioned.columns_read();
@@ -404,6 +454,9 @@ pub(crate) fn insert(
             }
         }
         let Some(child) = partitioned.route(&key_row)? else {
+            if grows_by_interval {
+                return Ok(Routed::NeedsPartition(partitioned.key_of_row(&key_row)?));
+            }
             if ignores_rows {
                 skipped.push(skipped_row(partitioned.no_partition(&key_row)));
                 continue;
@@ -463,7 +516,7 @@ pub(crate) fn insert(
     if let Some(identity) = identity {
         result.last_insert_id = identity.first_generated;
     }
-    Ok(result)
+    Ok(Routed::Done(result))
 }
 
 fn skipped_row(error: SqlError) -> crate::mysql_errors::Warning {
