@@ -470,6 +470,11 @@ impl<'k> Api<'k> {
             ("GET", ["_cluster", "health"]) => Ok(json(200, "{\"cluster_name\":\"eggdb\",\"status\":\"green\",\"timed_out\":false,\"number_of_nodes\":1,\"number_of_data_nodes\":1,\"active_primary_shards\":0,\"active_shards\":0,\"relocating_shards\":0,\"initializing_shards\":0,\"unassigned_shards\":0}".to_owned())),
             ("GET", ["_cat", "indices"]) => self.cat_indices(),
             ("POST", ["_bulk"]) => self.bulk(None, request),
+            ("GET" | "POST", ["_search", "template"]) => self.search_template(None, request),
+            ("GET" | "POST", ["_render", "template"]) => self.render_template(request),
+            ("GET" | "POST", [index, "_search", "template"]) => {
+                self.search_template(Some(std::slice::from_ref(index)), request)
+            }
             ("GET" | "POST", ["_search"]) => self.search(None, request, false),
             ("GET" | "POST", ["_count"]) => self.search(None, request, true),
             ("GET" | "POST", ["_mget"]) => self.mget(None, request),
@@ -922,6 +927,81 @@ impl<'k> Api<'k> {
                 items.join(",")
             ),
         ))
+    }
+
+    fn rendered_template(request: &Request) -> Result<String, Response> {
+        let text = String::from_utf8_lossy(&request.body).into_owned();
+        let parsed = parse_document(&text)
+            .map_err(|_| error(400, "parse_exception", "the template request is not JSON"))?;
+        let Json::Object(members) = &parsed.value else {
+            return Err(error(400, "parse_exception", "the template request is not an object"));
+        };
+        let mut source = None;
+        let mut params = None;
+        for (key, node) in members {
+            match key.as_str() {
+                "source" | "inline" => source = Some(node),
+                "params" => params = Some(node),
+                "id" => {
+                    return Err(error(
+                        400,
+                        "resource_not_found_exception",
+                        "stored search templates are not supported",
+                    ));
+                }
+                "explain" | "profile" => {}
+                other => {
+                    return Err(error(
+                        400,
+                        "parse_exception",
+                        &format!("unknown key [{other}] in the template request"),
+                    ));
+                }
+            }
+        }
+        let Some(source) = source else {
+            return Err(error(
+                400,
+                "action_request_validation_exception",
+                "Validation Failed: 1: template is missing;",
+            ));
+        };
+        let template = match &source.value {
+            Json::String(text) => text.clone(),
+            _ => crate::mustache::json_of(source),
+        };
+        let empty = eggdb_sql::json::Node {
+            value: Json::Object(Vec::new()),
+            start: 0,
+            end: 0,
+        };
+        crate::mustache::render(&template, params.unwrap_or(&empty))
+            .map_err(|reason| error(400, "general_script_exception", &reason))
+    }
+
+    fn search_template(&self, indices: Option<&[&str]>, request: &Request) -> Answer {
+        let rendered = match Self::rendered_template(request) {
+            Ok(rendered) => rendered,
+            Err(refusal) => return Ok(refusal),
+        };
+        let mut inner = request.clone();
+        inner.body = rendered.into_bytes();
+        self.search(indices, &inner, false)
+    }
+
+    fn render_template(&self, request: &Request) -> Answer {
+        let rendered = match Self::rendered_template(request) {
+            Ok(rendered) => rendered,
+            Err(refusal) => return Ok(refusal),
+        };
+        Ok(match parse_document(&rendered) {
+            Ok(_) => json(200, format!("{{\"template_output\":{rendered}}}")),
+            Err(_) => error(
+                400,
+                "parse_exception",
+                "the rendered template is not JSON",
+            ),
+        })
     }
 
     fn search(&self, indices: Option<&[&str]>, request: &Request, count_only: bool) -> Answer {

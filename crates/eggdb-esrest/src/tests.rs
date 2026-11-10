@@ -1406,3 +1406,27 @@ fn search_and_by_query_take_lists_and_patterns_of_indices() {
     let missing = api.answer(&request("POST", "/books,nowhere/_delete_by_query", "{}"));
     assert_eq!(missing.status, 404);
 }
+
+#[test]
+fn search_templates_render_mustache_and_run_the_search() {
+    let keyspace = MemoryKeyspace::default();
+    let api = seeded(&keyspace);
+    let found = body(&api.answer(&request(
+        "POST",
+        "/books/_search/template",
+        "{\"source\":{\"query\":{\"match\":{\"title\":\"{{q}}\"}}},\"params\":{\"q\":\"turtle\"}}",
+    )));
+    assert!(found.contains("\"_id\":\"3\"") && !found.contains("\"_id\":\"1\""), "{found}");
+    let rendered = body(&api.answer(&request(
+        "POST",
+        "/_render/template",
+        "{\"source\":\"{\\\"size\\\":{{size}}{{#sort}},\\\"sort\\\":{{#toJson}}sort{{/toJson}}{{/sort}}}\",\"params\":{\"size\":2,\"sort\":[\"pages\"]}}",
+    )));
+    assert_eq!(rendered, "{\"template_output\":{\"size\":2,\"sort\":[\"pages\"]}}");
+    let broken = api.answer(&request(
+        "POST",
+        "/_render/template",
+        "{\"source\":\"{{#open}}\",\"params\":{}}",
+    ));
+    assert_eq!(broken.status, 400);
+}

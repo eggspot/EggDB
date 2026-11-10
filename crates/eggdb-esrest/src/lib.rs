@@ -8,6 +8,7 @@
 
 mod api;
 mod json_out;
+mod mustache;
 mod query;
 mod script;
 mod sort;
