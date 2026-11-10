@@ -887,7 +887,9 @@ SECURITY`, `COMMENT`, `LANGUAGE SQL`). The body is one statement or a compound s
 - `RETURN expr` in functions and `SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = ...`.
 
 `CALL name(...)` (or `CALL name` without parentheses) runs a procedure; an `OUT` or `INOUT`
-argument written as a user variable (`@total`) receives the value. `DROP PROCEDURE` and `DROP
+argument written as a user variable (`@total`) receives the value. When a statement inside the
+procedure fails, only that statement is undone: the statements before it keep their changes
+(committed in autocommit mode), as in MySQL (D370). `DROP PROCEDURE` and `DROP
 FUNCTION` take `IF EXISTS`. Not yet: `DECLARE ... HANDLER`, cursors, named conditions,
 `GET DIAGNOSTICS`, `RESIGNAL`, setting user or system variables inside a body, and events.
 

@@ -432,6 +432,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A failing Oracle statement trigger or SQL Server `AFTER` trigger undoes only its own
   statement, as those databases do (D317).
 - A failing statement inside a MySQL `CALL` keeps the procedure's statements before it (D317).
+  **Code written, unbuilt** (code-only mode, 2026-11-10, D370).
 - SQL Server rolls back the whole transaction for a batch-aborting error that fails before
   writing, and dooms the transaction for such an error inside `TRY` (D317).
 - SQLite's conflict clauses of table constraints (D317), and `UPDATE OR FAIL | IGNORE | REPLACE`

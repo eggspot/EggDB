@@ -3868,6 +3868,18 @@ impl<'s> Session<'s> {
         let keeps_ddl_open = self.sqlserver();
         let implicit = self.implicit_transaction;
         let rolls_back_statements = self.dialect != Dialect::PostgreSql;
+        let keeps_procedure_statements =
+            self.dialect == Dialect::MySql && command.eq_ignore_ascii_case("CALL");
+        crate::undo_marks::begin_statement();
+        let undo_start = |statement_start: usize, length: usize| {
+            if keeps_procedure_statements {
+                crate::undo_marks::take_procedure_statement_start()
+                    .filter(|&kept| kept >= statement_start && kept <= length)
+                    .unwrap_or(statement_start)
+            } else {
+                statement_start
+            }
+        };
         let keeps_failed_changes = std::mem::take(&mut self.keeps_failed_statement_changes);
         self.failed_statement_was_undone = false;
         let undoes = |result: &SqlResult<QueryResult>| {
@@ -3900,8 +3912,9 @@ impl<'s> Session<'s> {
                     ),
                     tables,
                 );
-                if undoes(&result) && log.len() > statement_start {
-                    let undone = savepoints::undo_back_to(&mut routed, log, statement_start);
+                let undo_to = undo_start(statement_start, log.len());
+                if undoes(&result) && log.len() > undo_to {
+                    let undone = savepoints::undo_back_to(&mut routed, log, undo_to);
                     return self.end_undone_statement(result, undone);
                 }
                 result
@@ -3920,8 +3933,9 @@ impl<'s> Session<'s> {
                     ),
                     tables,
                 );
-                if undoes(&result) && !log.is_empty() {
-                    let undone = savepoints::undo_back_to(&mut routed, &mut log, 0);
+                let undo_to = undo_start(0, log.len());
+                if undoes(&result) && log.len() > undo_to {
+                    let undone = savepoints::undo_back_to(&mut routed, &mut log, undo_to);
                     return self.end_undone_statement(result, undone);
                 }
                 result
@@ -3956,6 +3970,47 @@ impl<'s> Session<'s> {
                     return self.end_undone_statement(result, undone);
                 }
                 result
+            }
+            Block::None | Block::Failed if keeps_procedure_statements => {
+                let mut writer = self
+                    .store
+                    .begin_boxed_write()
+                    .map_err(|error| read_only_refusal(error, command))?;
+                let mut log = savepoints::Undo::new();
+                let outcome = body(
+                    &mut savepoints::UndoWrite::new(
+                        &mut crate::temporary::TemporaryWrite {
+                            inner: &mut writer,
+                            objects,
+                        },
+                        &mut log,
+                        savepoints::UndoKeptFor::FailedStatement,
+                    ),
+                    tables,
+                );
+                let kept = undo_start(0, log.len());
+                if outcome.is_err() && kept > 0 && !keep_open && !implicit {
+                    let undone = savepoints::undo_back_to(
+                        &mut crate::temporary::TemporaryWrite {
+                            inner: &mut writer,
+                            objects,
+                        },
+                        &mut log,
+                        kept,
+                    );
+                    if undone.is_ok() {
+                        self.tables = TableCache::default();
+                        return self.commit_statement(writer).and(outcome);
+                    }
+                }
+                self.end_autocommit_statement(
+                    writer,
+                    outcome,
+                    command,
+                    keep_open,
+                    keeps_ddl_open,
+                    implicit,
+                )
             }
             Block::None | Block::Failed => {
                 let mut writer = self

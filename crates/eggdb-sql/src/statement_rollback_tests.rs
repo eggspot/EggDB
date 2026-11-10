@@ -445,3 +445,26 @@ fn sqlite_update_or_ignore_with_from_is_refused() {
     );
     assert_eq!(error.state(), SqlState::FEATURE_NOT_SUPPORTED);
 }
+
+#[test]
+fn a_failing_mysql_call_keeps_the_procedure_statements_before_the_failing_one() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    run(
+        &mut session,
+        "CREATE TABLE t (id int PRIMARY KEY);
+         CREATE PROCEDURE fill() BEGIN
+           INSERT INTO t VALUES (1);
+           INSERT INTO t VALUES (2), (3);
+           INSERT INTO t VALUES (4), (1);
+         END",
+    );
+    let error = fails(&mut session, "CALL fill()");
+    assert_eq!(error.vendor_code(), Some(1062), "{error}");
+    assert_eq!(shown(&mut session, "SELECT id FROM t ORDER BY id"), ["1", "2", "3"]);
+    run(&mut session, "DELETE FROM t; START TRANSACTION");
+    let error = fails(&mut session, "CALL fill()");
+    assert_eq!(error.vendor_code(), Some(1062), "{error}");
+    run(&mut session, "COMMIT");
+    assert_eq!(shown(&mut session, "SELECT id FROM t ORDER BY id"), ["1", "2", "3"]);
+}
