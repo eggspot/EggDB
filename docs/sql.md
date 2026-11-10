@@ -838,8 +838,9 @@ SELECT @@VERSION
   statement for the errors SQL Server ends only the statement for (a duplicate key, `NOT NULL`,
   `CHECK` and foreign-key violations, truncation): the statement's own changes are rolled back,
   a multi-row `INSERT` leaving none of its rows, and the transaction and the batch go on
-  (D317). A run-time error that ends the batch (a conversion or arithmetic error) still rolls
-  the transaction back when its statement had changed rows. Syntax errors and `RAISERROR` are not affected,
+  (D317). A run-time error that ends the batch (a conversion or arithmetic error) rolls the
+  transaction back, whether or not its statement had changed rows, and inside `TRY` dooms it
+  (D371). Syntax errors and `RAISERROR` are not affected,
   as in SQL Server; `THROW` is. Inside `TRY` the error moves to `CATCH` and leaves the
   transaction open but uncommittable: `XACT_STATE()` is -1, `ROLLBACK` ends it, and `COMMIT` or
   any write is Msg 3930; a batch that ends with it still open rolls it back with Msg 3998.
@@ -4973,9 +4974,7 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   follows the largest one in the table (the smallest for a negative increment), so a deleted
   largest value is used again and an emptied table starts again at its seed, where SQL Server
   keeps a counter.
-- A run-time error that ends the batch (a conversion or arithmetic error) rolls the
-  transaction back only when its statement had changed rows; SQL Server rolls it back either
-  way. An unknown column of an existing table is found when the statement runs, after
+- An unknown column of an existing table is found when the statement runs, after
   the statements before it in the batch ran (SQL Server finds it when the batch compiles).
 - A `DEFAULT` that names a column or holds a subquery is `0A000` (SQL Server's 128 and 1046
   not yet), and a Transact-SQL default's implicit conversions inside the expression follow the

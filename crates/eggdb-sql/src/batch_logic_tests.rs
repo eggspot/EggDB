@@ -785,3 +785,27 @@ fn xact_abort_on_inside_try_leaves_an_uncommittable_transaction_for_the_catch_bl
         vec![vec!["0".to_owned(), "0".to_owned()]]
     );
 }
+
+#[test]
+fn a_batch_aborting_error_before_any_write_rolls_back_or_dooms_the_transaction() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    batch(&mut session, "CREATE TABLE t (id INT PRIMARY KEY)");
+    let aborted = batch(
+        &mut session,
+        "BEGIN TRAN\nINSERT INTO t VALUES (1)\nSELECT CAST('x' AS INT) AS n\nINSERT INTO t VALUES (2)",
+    );
+    assert_eq!(errors(&aborted), vec![Some(245)]);
+    assert!(!session.in_block());
+    assert_eq!(
+        shown(&last_rows(&batch(&mut session, "SELECT COUNT(*) AS n FROM t"))),
+        vec![vec!["0".to_owned()]]
+    );
+    let caught = batch(
+        &mut session,
+        "BEGIN TRY\n  BEGIN TRAN\n  INSERT INTO t VALUES (3)\n  SELECT CAST('x' AS INT) AS n\nEND TRY\nBEGIN CATCH\n  SELECT XACT_STATE() AS state\n  ROLLBACK\nEND CATCH",
+    );
+    assert!(errors(&caught).is_empty(), "{caught:?}");
+    assert_eq!(shown(&last_rows(&caught)), vec![vec!["-1".to_owned()]]);
+    assert!(!session.in_block());
+}
