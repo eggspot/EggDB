@@ -4,7 +4,10 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-const SETTLE: Duration = Duration::from_millis(150);
+const READ_AHEAD_TIME: Duration = Duration::from_millis(450);
+const WAKE_HANDLING_TIME: Duration = Duration::from_millis(150);
+const BLOCKED_CLIENTS_LIMIT: Duration = Duration::from_secs(10);
+const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const WRONG_TYPE_REPLY: &str =
     "-WRONGTYPE Operation against a key holding the wrong kind of value|";
 
@@ -36,6 +39,7 @@ impl Harness {
             password_sha256: None,
             now_ms: 1_000_000,
             reply_room_bytes: usize::MAX,
+            blocked_clients: 0,
         };
         let mut out = Vec::new();
         execute(&context, &mut self.client, &Self::arguments(line))
@@ -49,6 +53,7 @@ impl Harness {
             password_sha256: None,
             now_ms: 1_000_000,
             reply_room_bytes: usize::MAX,
+            blocked_clients: 0,
         };
         let mut out = Vec::new();
         execute_with_transactions(&context, &mut self.client, &Self::arguments(line))
@@ -138,6 +143,28 @@ impl RespClient {
         self.reply()
     }
 
+    fn blocked_clients(&mut self) -> Option<usize> {
+        let info = self.call("INFO");
+        let (_, after) = info.split_once("blocked_clients:")?;
+        let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok()
+    }
+
+    fn wait_for_blocked_clients(&mut self, expected: usize) {
+        let deadline = Instant::now() + BLOCKED_CLIENTS_LIMIT;
+        loop {
+            let blocked = self.blocked_clients();
+            if blocked == Some(expected) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "INFO reported blocked_clients {blocked:?} for {BLOCKED_CLIENTS_LIMIT:?}, never {expected}"
+            );
+            std::thread::sleep(POLL_INTERVAL);
+        }
+    }
+
     fn read_reply_into(&mut self, text: &mut String) {
         let mut line = String::new();
         self.reader.read_line(&mut line).unwrap();
@@ -168,6 +195,45 @@ impl RespClient {
             _ => {}
         }
     }
+}
+
+fn pings_once_a_connection_is_free(address: SocketAddr) -> bool {
+    let deadline = Instant::now() + BLOCKED_CLIENTS_LIMIT;
+    while Instant::now() < deadline {
+        if let Ok(mut stream) = TcpStream::connect(address) {
+            let _ = stream.set_read_timeout(Some(BLOCKED_CLIENTS_LIMIT));
+            let _ = stream.write_all(b"*1\r\n$4\r\nPING\r\n");
+            let mut line = String::new();
+            if BufReader::new(stream).read_line(&mut line).is_ok() && line == "+PONG\r\n" {
+                return true;
+            }
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    false
+}
+
+#[test]
+fn info_reports_the_clients_blocked_now() {
+    let mut redis = Harness::new();
+    assert!(redis.text("INFO").contains("# Clients|blocked_clients:0|"));
+    with_server(|address| {
+        let mut observer = RespClient::connect(address);
+        assert_eq!(observer.blocked_clients(), Some(0));
+        let mut first = RespClient::connect(address);
+        let mut second = RespClient::connect(address);
+        first.send("BLPOP queue 0");
+        second.send("XREAD BLOCK 0 STREAMS events $");
+        observer.wait_for_blocked_clients(2);
+        assert_eq!(observer.call("RPUSH queue a"), ":1|");
+        assert_eq!(first.reply(), "*2|$5|queue|$1|a|");
+        assert_eq!(observer.blocked_clients(), Some(1));
+        assert_eq!(observer.call("MULTI"), "+OK|");
+        assert_eq!(observer.call("INFO"), "+QUEUED|");
+        assert!(observer.call("EXEC").contains("blocked_clients:1"));
+        drop(second);
+        observer.wait_for_blocked_clients(0);
+    });
 }
 
 #[test]
@@ -389,14 +455,17 @@ fn replaying_an_append_only_file_never_blocks() {
 #[test]
 fn blocked_clients_are_served_first_come_first_served() {
     with_server(|address| {
+        let mut pusher = RespClient::connect(address);
         let mut first = RespClient::connect(address);
         let mut second = RespClient::connect(address);
         let mut third = RespClient::connect(address);
-        for client in [&mut first, &mut second, &mut third] {
+        for (blocked, client) in [&mut first, &mut second, &mut third]
+            .into_iter()
+            .enumerate()
+        {
             client.send("BLPOP queue 0");
-            std::thread::sleep(SETTLE);
+            pusher.wait_for_blocked_clients(blocked + 1);
         }
-        let mut pusher = RespClient::connect(address);
         assert_eq!(pusher.call("RPUSH queue a b c"), ":3|");
         assert_eq!(first.reply(), "*2|$5|queue|$1|a|");
         assert_eq!(second.reply(), "*2|$5|queue|$1|b|");
@@ -409,14 +478,13 @@ fn blocked_clients_are_served_first_come_first_served() {
 #[test]
 fn a_blocked_client_that_disconnects_takes_no_element() {
     with_server(|address| {
+        let mut pusher = RespClient::connect(address);
         let mut gone = RespClient::connect(address);
         gone.send("BLPOP queue 0");
-        std::thread::sleep(SETTLE);
+        pusher.wait_for_blocked_clients(1);
         drop(gone);
-        std::thread::sleep(SETTLE);
-        let mut pusher = RespClient::connect(address);
+        pusher.wait_for_blocked_clients(0);
         assert_eq!(pusher.call("RPUSH queue a"), ":1|");
-        std::thread::sleep(SETTLE);
         assert_eq!(pusher.call("LRANGE queue 0 -1"), "*1|$1|a|");
     });
 }
@@ -440,9 +508,10 @@ fn stopping_the_server_ends_a_client_blocked_without_a_timeout() {
             )
             .unwrap()
         });
+        let mut observer = RespClient::connect(address);
         let mut blocked = RespClient::connect(address);
         blocked.send("BLPOP queue 0");
-        std::thread::sleep(SETTLE);
+        observer.wait_for_blocked_clients(1);
         let asked = Instant::now();
         stopped.store(true, Ordering::Release);
         server.join().unwrap();
@@ -476,18 +545,18 @@ fn writes_wake_list_move_sorted_set_and_stream_waiters() {
         let mut writer = RespClient::connect(address);
 
         waiter.send("BLMOVE source target LEFT RIGHT 0");
-        std::thread::sleep(SETTLE);
+        writer.wait_for_blocked_clients(1);
         assert_eq!(writer.call("RPUSH source a b"), ":2|");
         assert_eq!(waiter.reply(), "$1|a|");
         assert_eq!(writer.call("LRANGE target 0 -1"), "*1|$1|a|");
 
         waiter.send("BZPOPMAX scores 0");
-        std::thread::sleep(SETTLE);
+        writer.wait_for_blocked_clients(1);
         assert_eq!(writer.call("ZADD scores 1 low 2 high"), ":2|");
         assert_eq!(waiter.reply(), "*3|$6|scores|$4|high|$1|2|");
 
         waiter.send("XREAD BLOCK 0 STREAMS events $");
-        std::thread::sleep(SETTLE);
+        writer.wait_for_blocked_clients(1);
         assert_eq!(writer.call("XADD events 7-1 field value"), "$3|7-1|");
         assert_eq!(
             waiter.reply(),
@@ -501,7 +570,7 @@ fn writes_wake_list_move_sorted_set_and_stream_waiters() {
         assert_eq!(waiter.reply(), "*2|$6|source|*1|$1|b|");
 
         waiter.send("BRPOP first second 0");
-        std::thread::sleep(SETTLE);
+        writer.wait_for_blocked_clients(1);
         assert_eq!(writer.call("LPUSH second x"), ":1|");
         assert_eq!(waiter.reply(), "*2|$6|second|$1|x|");
     });
@@ -513,16 +582,17 @@ fn a_key_retyped_while_waited_on_keeps_the_client_blocked() {
         let mut waiter = RespClient::connect(address);
         let mut writer = RespClient::connect(address);
         waiter.send("BLPOP queue 0");
-        std::thread::sleep(SETTLE);
+        writer.wait_for_blocked_clients(1);
         assert_eq!(writer.call("ZADD queue 1 member"), ":1|");
-        std::thread::sleep(SETTLE);
+        std::thread::sleep(WAKE_HANDLING_TIME);
+        writer.wait_for_blocked_clients(1);
         assert_eq!(writer.call("DEL queue"), ":1|");
         assert_eq!(writer.call("RPUSH queue item"), ":1|");
         assert_eq!(waiter.reply(), "*2|$5|queue|$4|item|");
 
         assert_eq!(writer.call("SET target text"), "+OK|");
         waiter.send("BLMOVE source target LEFT LEFT 0");
-        std::thread::sleep(SETTLE);
+        writer.wait_for_blocked_clients(1);
         assert_eq!(writer.call("RPUSH source x"), ":1|");
         assert_eq!(waiter.reply(), WRONG_TYPE_REPLY);
         assert_eq!(writer.call("LLEN source"), ":1|");
@@ -589,19 +659,20 @@ fn a_client_that_closes_behind_a_pipelined_blocking_command_takes_no_element() {
         ..test_config()
     };
     with_server_on(&MemoryKeyspace::default(), config, |address| {
+        let mut pusher = RespClient::connect(address);
         let mut gone = TcpStream::connect(address).unwrap();
         gone.write_all(b"*3\r\n$5\r\nBLPOP\r\n$5\r\nqueue\r\n$1\r\n0\r\n")
             .unwrap();
-        std::thread::sleep(SETTLE);
+        pusher.wait_for_blocked_clients(1);
         gone.write_all(b"*1\r\n$4\r\nPING\r\n").unwrap();
         drop(gone);
-        std::thread::sleep(SETTLE * 4);
-        let mut pusher = RespClient::connect(address);
+        pusher.wait_for_blocked_clients(0);
         assert_eq!(pusher.call("LPUSH queue x"), ":1|");
-        std::thread::sleep(SETTLE);
         assert_eq!(pusher.call("LLEN queue"), ":1|");
-        let mut another = RespClient::connect(address);
-        assert_eq!(another.call("PING"), "+PONG|");
+        assert!(
+            pings_once_a_connection_is_free(address),
+            "the closed client's connection was never freed"
+        );
     });
 }
 
@@ -621,6 +692,7 @@ fn stream_reads_stop_with_oom_once_they_pass_the_reply_room() {
             password_sha256: None,
             now_ms: 1_000_000,
             reply_room_bytes,
+            blocked_clients: 0,
         };
         let mut out = Vec::new();
         execute(&context, &mut redis.client, &Harness::arguments(line)).encode(&mut out, false);
@@ -649,9 +721,10 @@ fn a_blocked_client_pipelining_past_the_read_ahead_cap_leaves_the_rest_to_tcp() 
     }
     assert!(pipeline.len() > 8 * UNCOUNTED_BUFFER_BYTES);
     with_server_on(&MemoryKeyspace::default(), config, |address| {
+        let mut observer = RespClient::connect(address);
         let mut client = RespClient::connect(address);
         client.send("BLPOP queue 2");
-        std::thread::sleep(SETTLE);
+        observer.wait_for_blocked_clients(1);
         let mut writer = client.writer.try_clone().unwrap();
         std::thread::scope(|scope| {
             let sending = scope.spawn(move || writer.write_all(&pipeline));
@@ -683,13 +756,13 @@ fn a_blocked_client_pipelining_past_the_read_ahead_cap_leaves_the_rest_to_tcp() 
 #[test]
 fn commands_pipelined_behind_a_blocked_client_answer_in_order_after_its_reply() {
     with_server(|address| {
+        let mut pusher = RespClient::connect(address);
         let mut client = RespClient::connect(address);
         client.send("BLPOP q 0");
-        std::thread::sleep(SETTLE);
+        pusher.wait_for_blocked_clients(1);
         client.send("PING");
         client.send("QUIT");
-        std::thread::sleep(SETTLE * 3);
-        let mut pusher = RespClient::connect(address);
+        std::thread::sleep(READ_AHEAD_TIME);
         assert_eq!(pusher.call("LPUSH q x"), ":1|");
         assert_eq!(client.reply(), "*2|$1|q|$1|x|");
         assert_eq!(client.reply(), "+PONG|");

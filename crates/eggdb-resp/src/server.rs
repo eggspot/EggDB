@@ -337,6 +337,7 @@ fn serve_connection(
                 password_sha256: config.password_sha256.as_ref(),
                 now_ms: now_ms(),
                 reply_room_bytes: reply_room(&config.memory_budget, held.bytes(), out.len()),
+                blocked_clients: waiters.blocked_clients(),
             };
             let blocking = if client.queued.is_none() {
                 BlockingCommand::parse(&name, arguments.get(1..).unwrap_or_default())
@@ -366,6 +367,7 @@ fn serve_connection(
                                     password_sha256: config.password_sha256.as_ref(),
                                     now_ms: now_ms(),
                                     reply_room_bytes,
+                                    blocked_clients: waiters.blocked_clients(),
                                 };
                                 command.attempt(&context, db, OnWrongType::Wait)
                             };

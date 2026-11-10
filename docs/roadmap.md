@@ -335,8 +335,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Check: system calls per wait, measured on macOS and FreeBSD.
 - Acknowledgements that take latency to return, and packet loss, duplication and reordering
   below the stream level in simulation (D314). Check: simulator tests of each.
-- The keep-alive idle time set on each accepted socket on macOS, which copies only `SO_KEEPALIVE`,
-  the interval and the count from the listener (D336); with the shared listener crate (D122).
+- The keep-alive timing set on each accepted socket on macOS and NetBSD: macOS copies only
+  `SO_KEEPALIVE`, the interval and the count from the listener, and NetBSD only `SO_KEEPALIVE`,
+  none of the timing (D336); with the shared listener crate (D122).
 - Non-blocking connects in the `poll(2)` backend on the BSDs and illumos (D73).
 - OpenBSD and DragonFly on the `poll(2)` backend, with CI runners for them (D73).
 - Solaris: file locks, and sends that never raise `SIGPIPE` (D73, D78).
@@ -839,8 +840,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   and `docs/format.md`'s RESP value section (D35, D193, D347).
 - Geo searches over the geohash ranges of the nine neighbouring cells instead of every member,
   and RESP3 double replies for `GEOPOS`/`WITHCOORD` coordinates (D330).
-- Keyspace notifications, the rest of `CLIENT` (`LIST`, `KILL`, ...), `INFO`'s real sections,
-  `OBJECT` and `DEBUG` (D12, D193).
+- Keyspace notifications, the rest of `CLIENT` (`LIST`, `KILL`, ...), the rest of `INFO`
+  (it has only `blocked_clients`, D347), `OBJECT` and `DEBUG` (D12, D193).
 - Cluster mode: slots, the cluster commands and sharded pub/sub (`SSUBSCRIBE`) (D193).
 - The rest of Redis's commands, tracked per command (D5, D193). Check: Redis client libraries'
   own test suites.

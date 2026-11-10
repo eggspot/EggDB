@@ -443,6 +443,10 @@ impl WaiterRegistry {
         }
     }
 
+    pub(crate) fn blocked_clients(&self) -> usize {
+        self.registered.load(Ordering::SeqCst)
+    }
+
     pub(crate) fn notify_written(&self, written: &[Slot]) {
         if written.is_empty() || self.registered.load(Ordering::SeqCst) == 0 {
             return;

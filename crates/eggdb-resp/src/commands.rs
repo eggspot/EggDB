@@ -41,6 +41,9 @@ pub struct Context<'k> {
     /// The most bytes one reply may take: a command that reads many keys stops with `-OOM`
     /// before it copies past it. `usize::MAX` for no limit.
     pub reply_room_bytes: usize,
+    /// How many clients wait in a blocking command now, which `INFO` reports as
+    /// `blocked_clients`. 0 where nothing can block (a replay, `EXEC`, an embedded caller).
+    pub blocked_clients: usize,
 }
 
 const REPLY_OVER_BUDGET: &str =
@@ -339,7 +342,9 @@ fn connection_command(
                 client.authenticated = true;
                 Reply::ok()
             } else {
-                Reply::Error("WRONGPASS invalid username-password pair or user is disabled.".to_owned())
+                Reply::Error(
+                    "WRONGPASS invalid username-password pair or user is disabled.".to_owned(),
+                )
             }
         }
         "hello" => {
@@ -348,16 +353,24 @@ fn connection_command(
                 match integer(version) {
                     Ok(2) => client.resp3 = false,
                     Ok(3) => client.resp3 = true,
-                    _ => return Some(Reply::Error("NOPROTO unsupported protocol version".to_owned())),
+                    _ => {
+                        return Some(Reply::Error(
+                            "NOPROTO unsupported protocol version".to_owned(),
+                        ));
+                    }
                 }
                 rest = tail;
             }
             while let Some((option, tail)) = rest.split_first() {
-                match String::from_utf8_lossy(option).to_ascii_lowercase().as_str() {
+                match String::from_utf8_lossy(option)
+                    .to_ascii_lowercase()
+                    .as_str()
+                {
                     "auth" if tail.len() >= 2 => {
                         if !check_password(context, &tail[1]) {
                             return Some(Reply::Error(
-                                "WRONGPASS invalid username-password pair or user is disabled.".to_owned(),
+                                "WRONGPASS invalid username-password pair or user is disabled."
+                                    .to_owned(),
                             ));
                         }
                         client.authenticated = true;
@@ -376,7 +389,10 @@ fn connection_command(
             Reply::Map(vec![
                 (Reply::bulk("server"), Reply::bulk("redis")),
                 (Reply::bulk("version"), Reply::bulk("7.2.0")),
-                (Reply::bulk("proto"), Reply::Integer(if client.resp3 { 3 } else { 2 })),
+                (
+                    Reply::bulk("proto"),
+                    Reply::Integer(if client.resp3 { 3 } else { 2 }),
+                ),
                 (Reply::bulk("id"), Reply::Integer(1)),
                 (Reply::bulk("mode"), Reply::bulk("standalone")),
                 (Reply::bulk("role"), Reply::bulk("master")),
@@ -394,7 +410,10 @@ fn connection_command(
             },
             _ => wrong_arguments(name),
         },
-        "client" => match args.first().map(|word| String::from_utf8_lossy(word).to_ascii_lowercase()) {
+        "client" => match args
+            .first()
+            .map(|word| String::from_utf8_lossy(word).to_ascii_lowercase())
+        {
             Some(word) if word == "setname" && args.len() == 2 => {
                 client.name = Some(args[1].clone());
                 Reply::ok()
@@ -405,9 +424,10 @@ fn connection_command(
             _ => Reply::Error("ERR unknown subcommand for 'client'".to_owned()),
         },
         "command" => Reply::Array(Some(Vec::new())),
-        "info" => Reply::bulk(
-            "# Server\r\nredis_version:7.2.0\r\nredis_mode:standalone\r\nos:EggDB\r\n# Keyspace\r\n".to_owned(),
-        ),
+        "info" => Reply::bulk(format!(
+            "# Server\r\nredis_version:7.2.0\r\nredis_mode:standalone\r\nos:EggDB\r\n# Clients\r\nblocked_clients:{}\r\n# Keyspace\r\n",
+            context.blocked_clients
+        )),
         _ => return None,
     })
 }
