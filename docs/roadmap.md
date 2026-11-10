@@ -944,7 +944,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 ### M9 Documents and MongoDB
 - Indexes used by queries, unique indexes and collations (D197).
 - `$$NOW` and `$$CLUSTER_TIME` in `aggregate`, and `$$CLUSTER_TIME` in pipeline-style updates
-  (D349).
+  (D349). **Code written, unbuilt** (code-only mode, 2026-11-10, D404).
 - `$text`, `$expr`, `$jsonSchema`, `$where` and the projection operators (D197).
 - `$facet`, `$bucket`, `$out`, `$merge` and `$lookup` with a pipeline (D197).
 - Change streams and multi-document transactions, with the replica-set handshake (D197).

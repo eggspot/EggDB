@@ -993,12 +993,25 @@ fn apply_operators(
     Ok(())
 }
 
+fn literal(value: Bson) -> Bson {
+    Bson::Document(Document::from_entries(vec![("$literal".to_owned(), value)]))
+}
+
+fn cluster_time(now: &Bson) -> Bson {
+    let seconds = match now {
+        Bson::DateTime(millis) => u32::try_from(millis.div_euclid(1000)).unwrap_or(0),
+        _ => 0,
+    };
+    Bson::Timestamp {
+        time: seconds,
+        increment: 1,
+    }
+}
+
 fn value_with_now(value: &Bson, now: &Bson) -> Bson {
     match value {
-        Bson::String(text) if text == "$$NOW" => Bson::Document(Document::from_entries(vec![(
-            "$literal".to_owned(),
-            now.clone(),
-        )])),
+        Bson::String(text) if text == "$$NOW" => literal(now.clone()),
+        Bson::String(text) if text == "$$CLUSTER_TIME" => literal(cluster_time(now)),
         Bson::Document(inner) if inner.contains_key("$literal") => value.clone(),
         Bson::Document(inner) => Bson::Document(document_with_now(inner, now)),
         Bson::Array(items) => {
@@ -1014,6 +1027,44 @@ fn document_with_now(spec: &Document, now: &Bson) -> Document {
             .map(|(name, value)| (name.clone(), value_with_now(value, now)))
             .collect(),
     )
+}
+
+/// The aggregation pipeline `stages` with `$$NOW` and `$$CLUSTER_TIME` bound to the time
+/// `now_ms`, once for the whole command as MongoDB binds them: in every stage's expressions,
+/// and in `$match` only inside `$expr`, where a filter holds expressions.
+pub fn pipeline_with_time(stages: &[Bson], now_ms: i64) -> Vec<Bson> {
+    let now = Bson::DateTime(now_ms);
+    stages
+        .iter()
+        .map(|stage| match stage {
+            Bson::Document(spec) => Bson::Document(Document::from_entries(
+                spec.iter()
+                    .map(|(name, value)| {
+                        let bound = match (name.as_str(), value) {
+                            ("$match", Bson::Document(filter)) => {
+                                Bson::Document(Document::from_entries(
+                                    filter
+                                        .iter()
+                                        .map(|(field, condition)| {
+                                            let condition = if field == "$expr" {
+                                                value_with_now(condition, &now)
+                                            } else {
+                                                condition.clone()
+                                            };
+                                            (field.clone(), condition)
+                                        })
+                                        .collect(),
+                                ))
+                            }
+                            _ => value_with_now(value, &now),
+                        };
+                        (name.clone(), bound)
+                    })
+                    .collect(),
+            )),
+            other => other.clone(),
+        })
+        .collect()
 }
 
 fn stage_with_now(stage: &Stage, now: &Bson) -> Stage {

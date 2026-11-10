@@ -2,7 +2,7 @@ use crate::commands::{Shared, cursor_reply};
 use eggdb_bson::{Bson, Document};
 use eggdb_documents::{
     DocumentError, SortSpec, Stage, check_collection_name, parse_filter, parse_pipeline,
-    run_pipeline,
+    pipeline_with_time, run_pipeline,
 };
 
 pub(crate) use eggdb_documents::field_value;
@@ -46,7 +46,8 @@ pub(crate) fn aggregate(
             "$out and $merge are not supported yet",
         ));
     }
-    let stages = parse_pipeline(pipeline)?;
+    let bound = pipeline_with_time(pipeline, crate::commands::now_ms());
+    let stages = parse_pipeline(&bound)?;
     let (first_filter, rest) = match stages.first().and_then(Stage::as_match) {
         Some(filter) => (filter.clone(), &stages[1..]),
         None => (parse_filter(&Document::new())?, &stages[..]),

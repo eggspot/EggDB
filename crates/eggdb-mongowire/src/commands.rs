@@ -60,7 +60,7 @@ fn command_failure(code: i32, code_name: &'static str, message: impl Into<String
     })
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {

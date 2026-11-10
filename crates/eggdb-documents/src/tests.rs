@@ -1445,3 +1445,45 @@ fn pipeline_expressions_that_grow_past_the_limit_are_refused_early() {
         Some(&text(&"x".repeat(2 * MEBIBYTE)))
     );
 }
+
+#[test]
+fn aggregate_pipelines_bind_now_and_cluster_time_once() {
+    let pipeline = vec![
+        sub(vec![(
+            "$addFields",
+            sub(vec![("at", text("$$NOW")), ("clock", text("$$CLUSTER_TIME"))]),
+        )]),
+        sub(vec![(
+            "$match",
+            sub(vec![("name", text("$$NOW")), ("$expr", text("$$NOW"))]),
+        )]),
+    ];
+    let bound = crate::pipeline_with_time(&pipeline, 5_000);
+    let Bson::Document(first) = &bound[0] else {
+        panic!("{bound:?}");
+    };
+    let fields = first.get_document("$addFields").unwrap();
+    assert_eq!(
+        fields.get("at"),
+        Some(&sub(vec![("$literal", Bson::DateTime(5_000))]))
+    );
+    assert_eq!(
+        fields.get("clock"),
+        Some(&sub(vec![(
+            "$literal",
+            Bson::Timestamp {
+                time: 5,
+                increment: 1
+            }
+        )]))
+    );
+    let Bson::Document(second) = &bound[1] else {
+        panic!("{bound:?}");
+    };
+    let filter = second.get_document("$match").unwrap();
+    assert_eq!(filter.get("name"), Some(&text("$$NOW")));
+    assert_eq!(
+        filter.get("$expr"),
+        Some(&sub(vec![("$literal", Bson::DateTime(5_000))]))
+    );
+}
