@@ -1349,3 +1349,18 @@ fn catalog_functions_are_recognised_in_any_case_and_ordinary_words_are_not() {
         assert!(!mentions(ordinary), "{ordinary}");
     }
 }
+
+#[test]
+fn every_pg_catalog_relation_name_starts_with_the_prefix_lookups_test_first() {
+    let names = super::CatalogRelation::IN_PG_CATALOG
+        .into_iter()
+        .map(super::CatalogRelation::name)
+        .chain(super::monitoring::MonitoringRelation::ALL.map(|relation| relation.name()));
+    for name in names {
+        assert!(name.starts_with(super::CATALOG_NAME_PREFIX), "{name}");
+        assert!(
+            super::CatalogRelation::named_in(crate::schemas::CATALOG_SCHEMA, name).is_some(),
+            "{name}"
+        );
+    }
+}

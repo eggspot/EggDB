@@ -146,8 +146,6 @@ pub(crate) fn mentions_catalog(tokens: &[Token<'_>]) -> bool {
 
 struct Frame {
     wanted: bool,
-    user: String,
-    database: String,
     settings: Arc<Settings>,
     snapshot: Option<Rc<CatalogSnapshot>>,
 }
@@ -179,8 +177,6 @@ impl Drop for EnteredStatement {
 pub(crate) fn enter_statement(wanted: bool, settings: &Arc<Settings>) -> EnteredStatement {
     let frame = Frame {
         wanted,
-        user: settings.get("session_authorization").unwrap_or_default(),
-        database: settings.database.clone(),
         settings: Arc::clone(settings),
         snapshot: None,
     };
@@ -273,8 +269,8 @@ pub(crate) fn snapshot_for(reader: &dyn KeyValueRead) -> SqlResult<Rc<CatalogSna
         frames.try_borrow().ok().and_then(|frames| {
             frames.last().map(|frame| {
                 (
-                    frame.user.clone(),
-                    frame.database.clone(),
+                    user_of(&frame.settings),
+                    frame.settings.database.clone(),
                     Arc::clone(&frame.settings),
                 )
             })
@@ -298,12 +294,16 @@ pub(crate) fn snapshot_for(reader: &dyn KeyValueRead) -> SqlResult<Rc<CatalogSna
     Ok(loaded)
 }
 
+fn user_of(settings: &Settings) -> String {
+    settings.get("session_authorization").unwrap_or_default()
+}
+
 pub(crate) fn session_user() -> Option<String> {
     FRAMES.with(|frames| {
         frames
             .try_borrow()
             .ok()
-            .and_then(|frames| frames.last().map(|frame| frame.user.clone()))
+            .and_then(|frames| frames.last().map(|frame| user_of(&frame.settings)))
     })
 }
 

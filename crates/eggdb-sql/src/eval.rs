@@ -1,3 +1,5 @@
+mod children;
+
 use crate::arrays::ArrayElement;
 use crate::ast::{BinaryOperator, Expr, ExprKind, Literal, TruthTest, UnaryOperator};
 use crate::datetime::{self, DateTimeKind, LocalTime};
@@ -9,6 +11,7 @@ use crate::types::{
     Conversion, SqlType, Value, comparable, compare_values, convert, float_overflow, integer_value,
     out_of_range, parse_input,
 };
+pub(crate) use children::{children, children_mut};
 use std::cmp::Ordering;
 
 const UNKNOWN_TYPE_OID: u32 = 705;
@@ -180,108 +183,6 @@ impl Sources<'_> {
             found = Some(offset);
         }
         found.ok_or_else(|| missing_column(None, name, position))
-    }
-}
-
-pub(crate) fn children(expr: &Expr) -> Vec<&Expr> {
-    match &expr.kind {
-        ExprKind::Literal(_)
-        | ExprKind::Column { .. }
-        | ExprKind::Slot { .. }
-        | ExprKind::SessionValue { .. }
-        | ExprKind::CurrentSetting { .. }
-        | ExprKind::OuterColumn { .. }
-        | ExprKind::Constant { .. } => Vec::new(),
-        ExprKind::Subquery(subquery) => subquery.test.operand().into_iter().collect(),
-        ExprKind::Unary(_, operand)
-        | ExprKind::IsNull { expr: operand, .. }
-        | ExprKind::IsTruth { expr: operand, .. }
-        | ExprKind::Cast { expr: operand, .. } => vec![operand],
-        ExprKind::Binary(_, left, right)
-        | ExprKind::IsDistinctFrom { left, right, .. }
-        | ExprKind::Like {
-            expr: left,
-            pattern: right,
-            ..
-        } => vec![left, right],
-        ExprKind::Between {
-            expr, low, high, ..
-        } => vec![expr, low, high],
-        ExprKind::InList { expr, list, .. } => {
-            let mut all = vec![expr.as_ref()];
-            all.extend(list);
-            all
-        }
-        ExprKind::And(operands) | ExprKind::Or(operands) => operands.iter().collect(),
-        ExprKind::Case {
-            operand,
-            branches,
-            otherwise,
-        } => {
-            let mut all: Vec<&Expr> = operand.iter().map(AsRef::as_ref).collect();
-            for (condition, result) in branches {
-                all.push(condition);
-                all.push(result);
-            }
-            all.extend(otherwise.iter().map(AsRef::as_ref));
-            all
-        }
-        ExprKind::Function { arguments, .. }
-        | ExprKind::SqliteFunction { arguments, .. }
-        | ExprKind::OracleFunction { arguments, .. }
-        | ExprKind::SqlServerFunction { arguments, .. } => arguments.iter().collect(),
-        ExprKind::Aggregate { argument, .. } => argument.iter().map(AsRef::as_ref).collect(),
-    }
-}
-
-pub(crate) fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
-    match &mut expr.kind {
-        ExprKind::Literal(_)
-        | ExprKind::Column { .. }
-        | ExprKind::Slot { .. }
-        | ExprKind::SessionValue { .. }
-        | ExprKind::CurrentSetting { .. }
-        | ExprKind::OuterColumn { .. }
-        | ExprKind::Constant { .. } => Vec::new(),
-        ExprKind::Subquery(subquery) => subquery.test.operand_mut().into_iter().collect(),
-        ExprKind::Unary(_, operand)
-        | ExprKind::IsNull { expr: operand, .. }
-        | ExprKind::IsTruth { expr: operand, .. }
-        | ExprKind::Cast { expr: operand, .. } => vec![operand],
-        ExprKind::Binary(_, left, right)
-        | ExprKind::IsDistinctFrom { left, right, .. }
-        | ExprKind::Like {
-            expr: left,
-            pattern: right,
-            ..
-        } => vec![left, right],
-        ExprKind::Between {
-            expr, low, high, ..
-        } => vec![expr, low, high],
-        ExprKind::InList { expr, list, .. } => {
-            let mut all = vec![expr.as_mut()];
-            all.extend(list.iter_mut());
-            all
-        }
-        ExprKind::And(operands) | ExprKind::Or(operands) => operands.iter_mut().collect(),
-        ExprKind::Case {
-            operand,
-            branches,
-            otherwise,
-        } => {
-            let mut all: Vec<&mut Expr> = operand.iter_mut().map(AsMut::as_mut).collect();
-            for (condition, result) in branches {
-                all.push(condition);
-                all.push(result);
-            }
-            all.extend(otherwise.iter_mut().map(AsMut::as_mut));
-            all
-        }
-        ExprKind::Function { arguments, .. }
-        | ExprKind::SqliteFunction { arguments, .. }
-        | ExprKind::OracleFunction { arguments, .. }
-        | ExprKind::SqlServerFunction { arguments, .. } => arguments.iter_mut().collect(),
-        ExprKind::Aggregate { argument, .. } => argument.iter_mut().map(AsMut::as_mut).collect(),
     }
 }
 

@@ -1,5 +1,5 @@
 use crate::ast::{
-    BinaryOperator, CommonTable, Expr, ExprKind, FromClause, GeneratedTable, JoinCondition,
+    BinaryOperator, CommonTable, Expr, ExprKind, FromClause, GeneratedTable, Join, JoinCondition,
     Literal, Query, Select, SelectItem, SetExpr, Subquery, SubqueryRows, SubqueryState,
     SubqueryTest, TableFunction, TableReference,
 };
@@ -610,9 +610,7 @@ fn key_query(query: &Query, shape: LookupShape) -> Option<KeyQueries> {
         || !select.group_by.is_empty()
         || select.having.is_some()
         || crate::aggregate::is_aggregate_query(select) != (shape == LookupShape::Aggregate)
-        || select_expressions(select)
-            .into_iter()
-            .any(mentions_correlated)
+        || select_expressions(select).any(mentions_correlated)
     {
         return None;
     }
@@ -1180,63 +1178,88 @@ fn for_each_select(query: &Query, visit: &mut dyn FnMut(&Select)) {
     }
 }
 
-pub(crate) fn select_expressions_mut(select: &mut Select) -> Vec<&mut Expr> {
-    let mut exprs: Vec<&mut Expr> = Vec::new();
-    for item in &mut select.items {
-        if let SelectItem::Expr { expr, .. } = item {
-            exprs.push(expr);
-        }
-    }
-    exprs.extend(select.filter.iter_mut());
-    exprs.extend(select.group_by.iter_mut());
-    exprs.extend(select.having.iter_mut());
-    exprs.extend(select.distinct_on.iter_mut());
-    exprs.extend(select.order_by.iter_mut().map(|item| &mut item.expr));
-    exprs.extend(select.limit.iter_mut());
-    exprs.extend(select.offset.iter_mut());
-    if let Some(from) = &mut select.from {
-        if let Some(generated) = &mut from.first.generated {
-            exprs.extend(crate::set_returning::expressions_mut(generated));
-        }
-        for join in &mut from.joins {
-            if let JoinCondition::On(expr) = &mut join.condition {
-                exprs.push(expr);
-            }
-            if let Some(generated) = &mut join.table.generated {
-                exprs.extend(crate::set_returning::expressions_mut(generated));
-            }
-        }
-    }
-    exprs
+pub(crate) fn select_expressions_mut(select: &mut Select) -> impl Iterator<Item = &mut Expr> {
+    let Select {
+        items,
+        from,
+        filter,
+        group_by,
+        distinct_on,
+        having,
+        order_by,
+        limit,
+        offset,
+        ..
+    } = select;
+    items
+        .iter_mut()
+        .filter_map(|item| match item {
+            SelectItem::Expr { expr, .. } => Some(expr),
+            SelectItem::Wildcard { .. } => None,
+        })
+        .chain(filter.iter_mut())
+        .chain(group_by.iter_mut())
+        .chain(having.iter_mut())
+        .chain(distinct_on.iter_mut())
+        .chain(order_by.iter_mut().map(|item| &mut item.expr))
+        .chain(limit.iter_mut())
+        .chain(offset.iter_mut())
+        .chain(from.iter_mut().flat_map(|from| {
+            let FromClause { first, joins } = from;
+            first
+                .generated
+                .iter_mut()
+                .flat_map(|generated| crate::set_returning::expressions_mut(generated))
+                .chain(joins.iter_mut().flat_map(|join| {
+                    let Join {
+                        table, condition, ..
+                    } = join;
+                    let on = match condition {
+                        JoinCondition::On(expr) => Some(expr),
+                        _ => None,
+                    };
+                    on.into_iter().chain(
+                        table
+                            .generated
+                            .iter_mut()
+                            .flat_map(|generated| crate::set_returning::expressions_mut(generated)),
+                    )
+                }))
+        }))
 }
 
-pub(crate) fn select_expressions(select: &Select) -> Vec<&Expr> {
-    let mut exprs: Vec<&Expr> = Vec::new();
-    for item in &select.items {
-        if let SelectItem::Expr { expr, .. } = item {
-            exprs.push(expr);
-        }
-    }
-    exprs.extend(select.filter.iter());
-    exprs.extend(select.group_by.iter());
-    exprs.extend(select.having.iter());
-    exprs.extend(select.distinct_on.iter());
-    exprs.extend(select.order_by.iter().map(|item| &item.expr));
-    exprs.extend(select.limit.iter());
-    exprs.extend(select.offset.iter());
-    if let Some(from) = &select.from {
-        for table in std::iter::once(&from.first).chain(from.joins.iter().map(|join| &join.table)) {
-            if let Some(generated) = &table.generated {
-                exprs.extend(crate::set_returning::expressions(generated));
-            }
-        }
-        for join in &from.joins {
-            if let JoinCondition::On(expr) = &join.condition {
-                exprs.push(expr);
-            }
-        }
-    }
-    exprs
+pub(crate) fn select_expressions(select: &Select) -> impl Iterator<Item = &Expr> {
+    let tables = select.from.iter().flat_map(|from| {
+        std::iter::once(&from.first).chain(from.joins.iter().map(|join| &join.table))
+    });
+    let join_conditions = select
+        .from
+        .iter()
+        .flat_map(|from| from.joins.iter())
+        .filter_map(|join| match &join.condition {
+            JoinCondition::On(expr) => Some(expr),
+            _ => None,
+        });
+    select
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SelectItem::Expr { expr, .. } => Some(expr),
+            SelectItem::Wildcard { .. } => None,
+        })
+        .chain(select.filter.iter())
+        .chain(select.group_by.iter())
+        .chain(select.having.iter())
+        .chain(select.distinct_on.iter())
+        .chain(select.order_by.iter().map(|item| &item.expr))
+        .chain(select.limit.iter())
+        .chain(select.offset.iter())
+        .chain(
+            tables
+                .filter_map(|table| table.generated.as_ref())
+                .flat_map(|generated| crate::set_returning::expressions(generated)),
+        )
+        .chain(join_conditions)
 }
 
 pub(crate) fn mentions_subquery(expr: &Expr) -> bool {
@@ -1313,9 +1336,7 @@ pub(crate) fn needs_preparation(select: &Select) -> bool {
             .from
             .as_ref()
             .is_some_and(crate::join::has_full_using)
-        || select_expressions(select)
-            .into_iter()
-            .any(mentions_subquery)
+        || select_expressions(select).any(mentions_subquery)
         || crate::set_returning::select_needs_expansion(select)
 }
 
@@ -1368,9 +1389,7 @@ fn explains_as_subplans(select: &Select) -> bool {
     });
     plain_from
         && !crate::set_returning::select_needs_expansion(select)
-        && select_expressions(select)
-            .into_iter()
-            .all(subqueries_explain_as_subplans)
+        && select_expressions(select).all(subqueries_explain_as_subplans)
 }
 
 pub(crate) fn prepare_for_explain(

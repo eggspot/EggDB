@@ -102,8 +102,11 @@ fn walks_expressions(tokens: &[Token<'_>]) -> bool {
     queries > 1 || queries == 1 && !leads_with_query
 }
 
+/// What a statement's tokens say it needs: expression walks, row locks, sequences, the
+/// catalog. They depend only on the tokens that are not constants, so the plan cache keeps them
+/// with a statement's shape.
 #[derive(Debug, Clone, Copy)]
-struct StatementFlags {
+pub(crate) struct StatementFlags {
     walks_expressions: bool,
     row_locking: Option<&'static str>,
     uses_sequences: bool,
@@ -111,7 +114,7 @@ struct StatementFlags {
 }
 
 impl StatementFlags {
-    fn from_tokens(tokens: Option<&[Token<'_>]>, dialect: Dialect) -> Self {
+    pub(crate) fn from_tokens(tokens: Option<&[Token<'_>]>, dialect: Dialect) -> Self {
         Self {
             walks_expressions: tokens.is_none_or(walks_expressions),
             row_locking: tokens.and_then(read_only::row_locking_command),
@@ -2046,13 +2049,13 @@ impl<'s> Session<'s> {
                 None => CachedStatement::NeverCached,
             };
             let parsed_unknown_shape = matches!(cached, CachedStatement::Unknown);
-            let parsed = match (condition, cached, shape) {
-                (true, _, _) => parser.sqlserver_condition(),
-                (false, CachedStatement::Parsed(statement), Some(shape)) => {
+            let (parsed, cached_flags) = match (condition, cached, shape) {
+                (true, _, _) => (parser.sqlserver_condition(), None),
+                (false, CachedStatement::Parsed { statement, flags }, Some(shape)) => {
                     parser = parser.resuming_at((shape.stop(), statement_point.1));
-                    Ok(*statement)
+                    (Ok(statement), Some(flags))
                 }
-                (false, _, _) => parser.statement(),
+                (false, _, _) => (parser.statement(), None),
             };
             let setting_changes = parser.take_setting_changes();
             resume = parser.resume_point();
@@ -2103,7 +2106,8 @@ impl<'s> Session<'s> {
                     return Err(error);
                 }
             };
-            let mut flags = StatementFlags::from_tokens(statement_tokens, self.dialect);
+            let mut flags = cached_flags
+                .unwrap_or_else(|| StatementFlags::from_tokens(statement_tokens, self.dialect));
             if let Some(executed) = self.executed_prepared_flags(&statement) {
                 flags = flags.combined_with(executed);
             }
@@ -2894,14 +2898,15 @@ impl<'s> Session<'s> {
     /// The `log_min_duration_statement` threshold: statements that take at least this long are
     /// worth logging, or `None` when it is off (`-1`, the default).
     pub fn slow_statement_threshold(&self) -> Option<std::time::Duration> {
-        let millis = milliseconds_setting(&self.settings.get("log_min_duration_statement").ok()?)?;
+        let millis =
+            milliseconds_setting(self.settings.known_value("log_min_duration_statement")?)?;
         Some(std::time::Duration::from_millis(
             u64::try_from(millis).ok()?,
         ))
     }
 
     fn statement_timeout(&self) -> Option<std::time::Duration> {
-        let millis = milliseconds_setting(&self.settings.get("statement_timeout").ok()?)?;
+        let millis = milliseconds_setting(self.settings.known_value("statement_timeout")?)?;
         (millis > 0).then(|| std::time::Duration::from_millis(millis.unsigned_abs()))
     }
 

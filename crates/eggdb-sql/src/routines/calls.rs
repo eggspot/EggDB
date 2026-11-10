@@ -112,9 +112,7 @@ pub(crate) fn select_calls_marked_routine(select: &Select) -> bool {
         .from
         .as_ref()
         .is_some_and(|from| is_user_table_function(&from.first))
-        || crate::subquery::select_expressions(select)
-            .into_iter()
-            .any(mentions_routine_call)
+        || crate::subquery::select_expressions(select).any(mentions_routine_call)
 }
 
 pub(crate) fn query_calls_marked_routine(query: &Query) -> bool {
@@ -346,7 +344,7 @@ fn chosen_procedure(
         settings,
         prefetch: Prefetch::Everything,
     }
-    .exprs(arguments.iter_mut().collect())?;
+    .exprs(arguments.iter_mut())?;
     let evaluator = constant_evaluator();
     let mut values = Vec::with_capacity(arguments.len());
     for argument in &arguments {
@@ -406,9 +404,7 @@ pub(crate) fn run_do_nonatomic(
 
 pub(crate) fn select_may_write(select: &Select) -> bool {
     match &select.from {
-        None => crate::subquery::select_expressions(select)
-            .into_iter()
-            .any(calls_any_function),
+        None => crate::subquery::select_expressions(select).any(calls_any_function),
         Some(from) => is_user_table_function(&from.first),
     }
 }
@@ -476,11 +472,7 @@ pub(crate) fn prepare_select(
         .from
         .as_ref()
         .is_some_and(|from| is_user_table_function(&from.first));
-    if !in_from
-        && !crate::subquery::select_expressions(select)
-            .into_iter()
-            .any(calls_any_function)
-    {
+    if !in_from && !crate::subquery::select_expressions(select).any(calls_any_function) {
         return Ok(());
     }
     let mut preparing = Preparing {
@@ -627,7 +619,7 @@ struct Preparing<'p> {
 }
 
 impl Preparing<'_> {
-    fn exprs(&mut self, exprs: Vec<&mut Expr>) -> SqlResult<()> {
+    fn exprs<'e>(&mut self, exprs: impl IntoIterator<Item = &'e mut Expr>) -> SqlResult<()> {
         for expr in exprs {
             self.expr(expr)?;
         }

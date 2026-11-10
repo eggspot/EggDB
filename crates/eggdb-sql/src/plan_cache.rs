@@ -2,6 +2,7 @@ use crate::ast::{Expr, ExprKind, Literal, Select, SelectItem, Statement};
 use crate::dialect::Dialect;
 use crate::eval::children_mut;
 use crate::lexer::{Token, TokenKind};
+use crate::session::StatementFlags;
 use crate::settings::Settings;
 use std::sync::Arc;
 
@@ -22,6 +23,7 @@ struct CachedPlan {
     dialect: Dialect,
     settings: Arc<Settings>,
     template: Option<Select>,
+    flags: StatementFlags,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,8 +39,12 @@ impl StatementShape {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum CachedStatement {
-    Parsed(Box<Statement>),
+    Parsed {
+        statement: Statement,
+        flags: StatementFlags,
+    },
     NeverCached,
     Unknown,
 }
@@ -108,22 +114,17 @@ fn literal_of(kind: &TokenKind<'_>) -> Option<Literal> {
     })
 }
 
-fn collect_literals<'e>(expr: &'e mut Expr, found: &mut Vec<&'e mut Expr>) {
+fn each_literal(expr: &mut Expr, visit: &mut impl FnMut(&mut Expr) -> bool) -> bool {
     if matches!(expr.kind, ExprKind::Literal(_)) {
-        found.push(expr);
-        return;
+        return visit(expr);
     }
-    for child in children_mut(expr) {
-        collect_literals(child, found);
-    }
+    children_mut(expr)
+        .into_iter()
+        .all(|child| each_literal(child, visit))
 }
 
-fn literals_of(select: &mut Select) -> Vec<&mut Expr> {
-    let mut found = Vec::new();
-    for expr in crate::subquery::select_expressions_mut(select) {
-        collect_literals(expr, &mut found);
-    }
-    found
+fn every_literal_of(select: &mut Select, mut visit: impl FnMut(&mut Expr) -> bool) -> bool {
+    crate::subquery::select_expressions_mut(select).all(|expr| each_literal(expr, &mut visit))
 }
 
 fn literal_tokens<'k, 't>(
@@ -143,6 +144,15 @@ fn token_at(literals: &[&Token<'_>], position: usize) -> Option<usize> {
         .ok()
 }
 
+fn literal_token_at<'k, 't>(statement: &'k [Token<'t>], position: usize) -> Option<&'k Token<'t>> {
+    let index = statement
+        .binary_search_by_key(&position, |token| token.start)
+        .ok()?;
+    statement
+        .get(index)
+        .filter(|token| literal_class(&token.kind) != NOT_A_LITERAL)
+}
+
 fn literals_come_from_tokens(
     template: &mut Select,
     tokens: &[Token<'_>],
@@ -150,7 +160,7 @@ fn literals_come_from_tokens(
 ) -> bool {
     let literals: Vec<&Token<'_>> = literal_tokens(tokens, shape).collect();
     let mut used = vec![false; literals.len()];
-    for slot in literals_of(template) {
+    let matched = every_literal_of(template, |slot| {
         let ExprKind::Literal(found) = &slot.kind else {
             return false;
         };
@@ -166,8 +176,9 @@ fn literals_come_from_tokens(
         if let Some(seen) = used.get_mut(index) {
             *seen = true;
         }
-    }
-    used.iter().all(|&seen| seen)
+        true
+    });
+    matched && used.iter().all(|&seen| seen)
 }
 
 fn with_literals_of(
@@ -175,13 +186,18 @@ fn with_literals_of(
     tokens: &[Token<'_>],
     shape: StatementShape,
 ) -> Option<Select> {
-    let literals: Vec<&Token<'_>> = literal_tokens(tokens, shape).collect();
+    let statement = tokens.get(shape.first..shape.stop).unwrap_or(&[]);
     let mut select = template.clone();
-    for slot in literals_of(&mut select) {
-        let token = literals.get(token_at(&literals, slot.position)?)?;
-        slot.kind = ExprKind::Literal(literal_of(&token.kind)?);
-    }
-    Some(select)
+    every_literal_of(&mut select, |slot| {
+        let Some(literal) =
+            literal_token_at(statement, slot.position).and_then(|token| literal_of(&token.kind))
+        else {
+            return false;
+        };
+        slot.kind = ExprKind::Literal(literal);
+        true
+    })
+    .then_some(select)
 }
 
 impl PlanCache {
@@ -260,21 +276,23 @@ impl PlanCache {
         let Some(index) = self.entry(shape, dialect, settings) else {
             return CachedStatement::Unknown;
         };
-        match self
-            .entries
-            .get(index)
-            .and_then(|entry| entry.template.as_ref())
-        {
+        let Some(entry) = self.entries.get(index) else {
+            return CachedStatement::Unknown;
+        };
+        match &entry.template {
             None => CachedStatement::NeverCached,
             Some(template) => match with_literals_of(template, tokens, shape) {
-                Some(select) => CachedStatement::Parsed(Box::new(Statement::Select(select))),
+                Some(select) => CachedStatement::Parsed {
+                    statement: Statement::Select(select),
+                    flags: entry.flags,
+                },
                 None => CachedStatement::Unknown,
             },
         }
     }
 
-    /// Keeps `parsed`, the statement of `shape` that the parser ended at token `end`, for the
-    /// statements of the same shape that follow. A statement that is not a plain `SELECT`, or
+    /// Keeps `parsed`, the statement of `shape` that the parser ended at token `end`, and the
+    /// [`StatementFlags`] of its tokens, for the statements of the same shape that follow. A statement that is not a plain `SELECT`, or
     /// one with a literal the parser did not take from exactly one of its constants, is
     /// remembered as never cached, so its shape is not examined again.
     pub(crate) fn remember(
@@ -304,6 +322,10 @@ impl PlanCache {
             dialect,
             settings: Arc::clone(settings),
             template,
+            flags: StatementFlags::from_tokens(
+                tokens.get(shape.first..end.min(tokens.len())),
+                dialect,
+            ),
         };
         if self.entries.len() < MOST_ENTRIES {
             self.entries.push(plan);
@@ -323,6 +345,7 @@ mod tests {
     use crate::dialect::Dialect;
     use crate::lexer::tokenize_in;
     use crate::parser::{Parameters, Parser};
+    use crate::session::StatementFlags;
     use crate::settings::Settings;
     use std::sync::Arc;
 
@@ -356,13 +379,14 @@ mod tests {
             panic!("not a select");
         };
         let mut select = select.clone();
-        super::literals_of(&mut select)
-            .into_iter()
-            .filter_map(|expr| match &expr.kind {
-                ExprKind::Literal(literal) => Some(literal.clone()),
-                _ => None,
-            })
-            .collect()
+        let mut found = Vec::new();
+        super::every_literal_of(&mut select, |expr| {
+            if let ExprKind::Literal(literal) = &expr.kind {
+                found.push(literal.clone());
+            }
+            true
+        });
+        found
     }
 
     #[test]
@@ -375,12 +399,12 @@ mod tests {
             cached(&mut cache, first, Dialect::PostgreSql, &settings),
             CachedStatement::Unknown
         ));
-        let CachedStatement::Parsed(statement) =
+        let CachedStatement::Parsed { statement, .. } =
             cached(&mut cache, second, Dialect::PostgreSql, &settings)
         else {
             panic!("the second statement was not cached");
         };
-        assert_eq!(*statement, parsed(second, Dialect::PostgreSql, &settings).0);
+        assert_eq!(statement, parsed(second, Dialect::PostgreSql, &settings).0);
         assert_eq!(
             literals(&statement),
             vec![Literal::Integer(97), Literal::String("cd".to_owned())]
@@ -398,13 +422,57 @@ mod tests {
                 "SELECT a + 9.5, 'z' FROM t WHERE b BETWEEN 99999999999999999999 AND 20 ORDER BY 1 LIMIT 5",
             ];
             for text in texts {
-                if let CachedStatement::Parsed(statement) =
+                if let CachedStatement::Parsed { statement, .. } =
                     cached(&mut cache, text, dialect, &settings)
                 {
-                    assert_eq!(*statement, parsed(text, dialect, &settings).0, "{text}");
+                    assert_eq!(statement, parsed(text, dialect, &settings).0, "{text}");
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_cached_statement_carries_the_flags_of_its_own_tokens() {
+        let settings = Arc::new(Settings::default());
+        let mut parsed_from_cache = 0;
+        for (first, second) in [
+            (
+                "SELECT a FROM t WHERE id = 1 FOR UPDATE",
+                "SELECT a FROM t WHERE id = 2 FOR UPDATE",
+            ),
+            (
+                "SELECT current_schema, 5 FROM t",
+                "SELECT current_schema, 6 FROM t",
+            ),
+            (
+                "SELECT nextval('s'), 7 FROM t",
+                "SELECT nextval('r'), 8 FROM t",
+            ),
+            (
+                "SELECT relname FROM pg_class WHERE oid = 1",
+                "SELECT relname FROM pg_class WHERE oid = 2",
+            ),
+            (
+                "SELECT a FROM t WHERE b IN (SELECT c FROM u WHERE d = 1)",
+                "SELECT a FROM t WHERE b IN (SELECT c FROM u WHERE d = 2)",
+            ),
+        ] {
+            let mut cache = PlanCache::default();
+            cached(&mut cache, first, Dialect::PostgreSql, &settings);
+            let tokens = tokenize_in(second, Dialect::PostgreSql).expect("tokens");
+            let shape = cache
+                .shape(second, &tokens, 0, Dialect::PostgreSql)
+                .expect("shape");
+            if let CachedStatement::Parsed { flags, .. } =
+                cache.find(shape, &tokens, Dialect::PostgreSql, &settings)
+            {
+                parsed_from_cache += 1;
+                let own =
+                    StatementFlags::from_tokens(tokens.get(..shape.stop()), Dialect::PostgreSql);
+                assert_eq!(format!("{flags:?}"), format!("{own:?}"), "{second}");
+            }
+        }
+        assert!(parsed_from_cache >= 3);
     }
 
     #[test]
