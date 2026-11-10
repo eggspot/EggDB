@@ -94,7 +94,10 @@ impl WhenMatched {
             WhenMatched::Pipeline { stages, variables } => {
                 let mut bound = Vec::with_capacity(variables.len());
                 for (name, expression) in variables {
-                    bound.push((name.clone(), crate::expression::evaluate(expression, result)?));
+                    bound.push((
+                        name.clone(),
+                        crate::expression::evaluate(expression, result)?,
+                    ));
                 }
                 let stages = crate::pipeline::pipeline_with_variables(stages, &bound);
                 Some(parse_update_statement(&Bson::Array(stages), None)?)
@@ -141,11 +144,19 @@ pub fn split_output(stages: &[Bson]) -> DocumentResult<(&[Bson], Option<Pipeline
         ));
     }
     let argument = stage.get(&name).cloned().unwrap_or(Bson::Null);
-    let output = if name == "$out" { out_of(&argument)? } else { merge_of(&argument)? };
+    let output = if name == "$out" {
+        out_of(&argument)?
+    } else {
+        merge_of(&argument)?
+    };
     Ok((rest, Some(output)))
 }
 
-fn target(argument: &Bson, stage: &str, collection_field: &str) -> DocumentResult<(Option<String>, String)> {
+fn target(
+    argument: &Bson,
+    stage: &str,
+    collection_field: &str,
+) -> DocumentResult<(Option<String>, String)> {
     let (database, collection) = match argument {
         Bson::String(collection) => (None, collection.clone()),
         Bson::Document(spec) => {
@@ -182,7 +193,10 @@ fn target(argument: &Bson, stage: &str, collection_field: &str) -> DocumentResul
 
 fn out_of(argument: &Bson) -> DocumentResult<PipelineOutput> {
     let (database, collection) = target(argument, "$out", "coll")?;
-    Ok(PipelineOutput::Out { database, collection })
+    Ok(PipelineOutput::Out {
+        database,
+        collection,
+    })
 }
 
 fn merge_of(argument: &Bson) -> DocumentResult<PipelineOutput> {
@@ -229,7 +243,9 @@ fn merge_of(argument: &Bson) -> DocumentResult<PipelineOutput> {
             .map(|(name, expression)| (name.clone(), expression.clone()))
             .collect(),
         Some(_) => {
-            return Err(DocumentError::type_mismatch("$merge 'let' must be an object"));
+            return Err(DocumentError::type_mismatch(
+                "$merge 'let' must be an object",
+            ));
         }
     };
     let when_matched = match spec.get("whenMatched") {
@@ -247,7 +263,10 @@ fn merge_of(argument: &Bson) -> DocumentResult<PipelineOutput> {
         },
         Some(Bson::Array(stages)) => {
             parse_update_statement(&Bson::Array(stages.clone()), None)?;
-            WhenMatched::Pipeline { stages: stages.clone(), variables: variables.clone() }
+            WhenMatched::Pipeline {
+                stages: stages.clone(),
+                variables: variables.clone(),
+            }
         }
         Some(_) => {
             return Err(DocumentError::type_mismatch(
@@ -280,7 +299,12 @@ fn merge_of(argument: &Bson) -> DocumentResult<PipelineOutput> {
             ));
         }
     };
-    Ok(PipelineOutput::Merge { database, collection, when_matched, when_not_matched })
+    Ok(PipelineOutput::Merge {
+        database,
+        collection,
+        when_matched,
+        when_not_matched,
+    })
 }
 
 pub(crate) fn not_matched_error() -> DocumentError {

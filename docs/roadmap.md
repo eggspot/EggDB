@@ -946,7 +946,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `$$NOW` and `$$CLUSTER_TIME` in `aggregate`, and `$$CLUSTER_TIME` in pipeline-style updates
   (D349). **Code written, unbuilt** (code-only mode, 2026-11-10, D404).
 - `$text`, `$expr`, `$jsonSchema`, `$where` and the projection operators (D197). `$expr`: **code
-  written, unbuilt** (code-only mode, 2026-11-10, D406).
+  written, unbuilt** (code-only mode, 2026-11-10, D406); the projection operators and
+  expressions: **code written, unbuilt** (D408).
 - `$facet`, `$bucket`, `$out`, `$merge` and `$lookup` with a pipeline (D197). `$facet`, `$bucket`
   and `$switch`: **code written, unbuilt** (code-only mode, 2026-11-10, D405); `$lookup` with `let` and
   `pipeline`: **code written, unbuilt** (D406); `$out` and `$merge`: **code written,

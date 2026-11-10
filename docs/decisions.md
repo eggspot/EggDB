@@ -432,3 +432,4 @@ its full title with its status.
 - [D405](decisions/D405.md) Code-only batch 52 (M9): MongoDB's `$facet`, `$bucket` and `$switch`
 - [D406](decisions/D406.md) Code-only batch 53 (M9): MongoDB's `$expr` and `$lookup` with `let` and `pipeline`
 - [D407](decisions/D407.md) Code-only batch 54 (M9): MongoDB's `$out` and `$merge`
+- [D408](decisions/D408.md) Code-only batch 55 (M9): MongoDB's projection operators and expressions in `find`

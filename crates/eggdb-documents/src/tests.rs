@@ -1636,3 +1636,55 @@ fn lookup_refuses_a_let_name_that_starts_with_a_capital() {
     )])];
     assert!(crate::parse_pipeline(&pipeline).is_err());
 }
+
+#[test]
+fn projection_operators_slice_match_and_compute() {
+    let order = doc(vec![
+        ("_id", Bson::Int32(7)),
+        ("customer", text("Ada")),
+        (
+            "items",
+            Bson::Array(vec![
+                sub(vec![("sku", text("a")), ("qty", Bson::Int32(1))]),
+                sub(vec![("sku", text("b")), ("qty", Bson::Int32(5))]),
+                sub(vec![("sku", text("c")), ("qty", Bson::Int32(9))]),
+            ]),
+        ),
+        ("price", Bson::Int32(4)),
+    ]);
+    let sliced = parse_projection(&doc(vec![("items", sub(vec![("$slice", Bson::Int32(-1))]))])).unwrap();
+    let shown = sliced.apply(&order);
+    assert_eq!(shown.get("customer"), Some(&text("Ada")));
+    assert_eq!(
+        shown.get("items"),
+        Some(&Bson::Array(vec![sub(vec![("sku", text("c")), ("qty", Bson::Int32(9))])]))
+    );
+    let matched = parse_projection(&doc(vec![(
+        "items",
+        sub(vec![("$elemMatch", sub(vec![("qty", sub(vec![("$gt", Bson::Int32(2))]))]))]),
+    )]))
+    .unwrap();
+    assert_eq!(
+        matched.apply(&order),
+        doc(vec![
+            ("_id", Bson::Int32(7)),
+            ("items", Bson::Array(vec![sub(vec![("sku", text("b")), ("qty", Bson::Int32(5))])])),
+        ])
+    );
+    let query = parse_filter(&doc(vec![("items.sku", text("c"))])).unwrap();
+    let positional = parse_projection(&doc(vec![("items.$", Bson::Int32(1))])).unwrap();
+    assert_eq!(
+        positional.apply_matching(&order, &query).get("items"),
+        Some(&Bson::Array(vec![sub(vec![("sku", text("c")), ("qty", Bson::Int32(9))])]))
+    );
+    let computed = parse_projection(&doc(vec![
+        ("customer", Bson::Int32(1)),
+        ("doubled", sub(vec![("$multiply", Bson::Array(vec![text("$price"), Bson::Int32(2)]))])),
+    ]))
+    .unwrap();
+    assert_eq!(
+        computed.apply(&order),
+        doc(vec![("_id", Bson::Int32(7)), ("customer", text("Ada")), ("doubled", Bson::Int32(8))])
+    );
+    assert!(parse_projection(&doc(vec![("items.$", Bson::Int32(0))])).is_err());
+}

@@ -678,7 +678,7 @@ fn find(shared: &Shared<'_>, database: &str, body: &Document) -> Result<Document
     if let Some(projection) = projection {
         remaining = remaining
             .iter()
-            .map(|document| projection.apply(document))
+            .map(|document| projection.apply_matching(document, &filter))
             .collect();
     }
     let first = batch_size.map_or(DEFAULT_FIRST_BATCH, |size| size as usize);
@@ -921,7 +921,9 @@ fn find_and_modify(
     }
     let value = match found {
         Some(found) => {
-            Bson::Document(projection.map_or(found.clone(), |projection| projection.apply(&found)))
+            Bson::Document(projection.map_or(found.clone(), |projection| {
+                projection.apply_matching(&found, &filter)
+            }))
         }
         None => Bson::Null,
     };
