@@ -1854,3 +1854,39 @@ fn mysql_unique_keys_cover_the_columns_a_partitioning_expression_reads() {
     assert_eq!(error.vendor_code(), Some(1503), "{error}");
     answer(&mut session, "CREATE UNIQUE INDEX by_sold ON sales (sold, id)");
 }
+
+#[test]
+fn a_moved_row_fires_the_sources_delete_and_the_targets_insert_row_triggers_only() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    answer(
+        &mut session,
+        "CREATE TABLE log (what text);
+         CREATE TABLE m (k int, v int) PARTITION BY LIST (k);
+         CREATE TABLE m1 PARTITION OF m FOR VALUES IN (1);
+         CREATE TABLE m2 PARTITION OF m FOR VALUES IN (2);
+         CREATE FUNCTION note() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           INSERT INTO log VALUES (TG_TABLE_NAME || ' ' || TG_OP || ' ' || TG_LEVEL);
+           RETURN COALESCE(NEW, OLD);
+         END $$;
+         CREATE TRIGGER m1_del BEFORE DELETE ON m1 FOR EACH ROW EXECUTE FUNCTION note();
+         CREATE TRIGGER m2_ins AFTER INSERT ON m2 FOR EACH ROW EXECUTE FUNCTION note();
+         CREATE TRIGGER m_ins AFTER INSERT ON m FOR EACH STATEMENT EXECUTE FUNCTION note();
+         INSERT INTO m VALUES (1, 10)",
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT what FROM log"),
+        "what\nm INSERT STATEMENT\nSELECT 1"
+    );
+    answer(&mut session, "DELETE FROM log");
+    answer(&mut session, "UPDATE m SET k = 2");
+    assert_eq!(
+        answer(&mut session, "SELECT what FROM log ORDER BY what"),
+        "what\nm1 DELETE ROW\nm2 INSERT ROW\nSELECT 2"
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT k, v FROM m2"),
+        "k|v\n2|10\nSELECT 1"
+    );
+}

@@ -392,3 +392,4 @@ its full title with its status.
 - [D365](decisions/D365.md) Code-only batch 11 (M2): `pg_partition_tree`, `pg_partition_ancestors`, `pg_partition_root`, `relispartition` for partition indexes (closes part of D316)
 - [D366](decisions/D366.md) Code-only batch 12 (M2): a partition's primary key attached to its parent's (closes part of D316)
 - [D367](decisions/D367.md) Code-only batch 13 (M2): MySQL unique keys on tables partitioned by an expression (1503) (closes part of D316)
+- [D368](decisions/D368.md) Code-only batch 14 (M2): triggers of a row moved to another partition (closes part of D316)

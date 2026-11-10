@@ -379,7 +379,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   mode, 2026-11-10, D357): `--compress lz4|zstd|off`.
 - Partitioning's leftovers from D316: Oracle's `DISABLE ROW MOVEMENT` (ORA-14402), the source's
   delete and the target's insert row triggers of a moved row (and the target's `INSERT`
-  statement triggers, which fire for a moved row where PostgreSQL fires only the `UPDATE` ones),
+  statement triggers, which fire for a moved row where PostgreSQL fires only the `UPDATE` ones;
+  **code written, unbuilt**, code-only mode, 2026-11-10, D368),
   user-defined `IMMUTABLE` functions and operator classes in keys, unique indexes on expression
   keys (MySQL's: **code written, unbuilt**, code-only mode, 2026-11-10, D367; PostgreSQL refuses
   them too), `relispartition` and `pg_partition_tree` for partition indexes (**code written, unbuilt**,

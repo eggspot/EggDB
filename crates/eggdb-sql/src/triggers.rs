@@ -789,6 +789,44 @@ struct State {
 
 thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
+    static MOVING_INTO: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) struct MovingRows {
+    added: usize,
+}
+
+impl Drop for MovingRows {
+    fn drop(&mut self) {
+        MOVING_INTO.with(|moving| {
+            if let Ok(mut moving) = moving.try_borrow_mut() {
+                let keep = moving.len().saturating_sub(self.added);
+                moving.truncate(keep);
+            }
+        });
+    }
+}
+
+pub(crate) fn moving_rows_into(tables: Vec<String>) -> MovingRows {
+    let added = tables.len();
+    let pushed = MOVING_INTO.with(|moving| match moving.try_borrow_mut() {
+        Ok(mut moving) => {
+            moving.extend(tables);
+            true
+        }
+        Err(_) => false,
+    });
+    MovingRows {
+        added: if pushed { added } else { 0 },
+    }
+}
+
+fn receives_moved_rows(table: &str) -> bool {
+    MOVING_INTO.with(|moving| {
+        moving
+            .try_borrow()
+            .is_ok_and(|moving| moving.iter().any(|name| name == table))
+    })
 }
 
 pub(crate) struct StatementScope {
@@ -981,7 +1019,26 @@ impl Firing {
         event: TriggerEvent,
         updated: &[usize],
     ) -> SqlResult<Option<Self>> {
-        let firing = Self::chosen_for_table(writer, tables, table, event, updated, &|_| true)?;
+        let moved_in = event == TriggerEvent::Insert && receives_moved_rows(&table.name);
+        let firing = Self::chosen_for_table(writer, tables, table, event, updated, &|trigger| {
+            !(moved_in && trigger.level == TriggerLevel::Statement)
+        })?;
+        Self::fire_before_statement(writer, tables, firing)
+    }
+
+    pub(crate) fn for_moved_row(
+        writer: &mut dyn KeyValueWrite,
+        tables: &mut TableCache,
+        table: &TableDefinition,
+    ) -> SqlResult<Option<Self>> {
+        let firing = Self::chosen_for_table(
+            writer,
+            tables,
+            table,
+            TriggerEvent::Delete,
+            &[],
+            &|trigger| trigger.level == TriggerLevel::Row,
+        )?;
         Self::fire_before_statement(writer, tables, firing)
     }
 
