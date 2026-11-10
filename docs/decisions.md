@@ -388,3 +388,4 @@ its full title with its status.
 - [D361](decisions/D361.md) Code-only batch 7 (M2): MySQL `SUBPARTITION BY` and Oracle composite partitioning; Oracle's row movement switch and `ORA-14402`, with partition record version 3 and its D35 review (extends D169, D316, D337)
 - [D362](decisions/D362.md) Code-only batch 8 (M2): Oracle interval partitioning, partitions created as rows arrive (extends D169, D361)
 - [D363](decisions/D363.md) Code-only batch 9 (M2): ids for rows written straight into a partition, subpartitions selected alone (closes part of D337)
+- [D364](decisions/D364.md) Code-only batch 10 (M2): identity or AUTO_INCREMENT column anywhere in the primary key, table definition version 15 with its D35 review (closes D337's leftover)
