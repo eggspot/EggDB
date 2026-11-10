@@ -82,7 +82,7 @@ fn table_name(text: &str, position: usize) -> Name {
     }
 }
 
-fn create_child(
+pub(crate) fn create_child(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
     parent: &TableDefinition,
@@ -114,6 +114,14 @@ pub(crate) fn add(
     dialect: Dialect,
 ) -> SqlResult<()> {
     let state = partitioned(writer, tables, parent, position)?;
+    if partitions::stored(writer, &parent.name)?.interval.is_some() {
+        return Err(SqlError::new(
+            SqlState::FEATURE_NOT_SUPPORTED,
+            "ADD PARTITION is not permitted on Interval partitioned objects",
+        )
+        .with_oracle_code(14760)
+        .at(position));
+    }
     match state.key.strategy {
         PartitionStrategy::Range => {
             let catalog = partitions::catalog(writer, tables)?;

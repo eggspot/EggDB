@@ -105,6 +105,7 @@ mod oracle_regexp;
 mod output_into;
 mod parser;
 mod partition_alter;
+mod partition_interval;
 mod partition_ddl;
 mod partition_dml;
 mod partition_indexes;

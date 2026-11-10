@@ -771,7 +771,7 @@ fn partition_records_with_expressions_and_index_links_read_back() {
             parent_index: 1,
         }],
         row_movement_disabled: false,
-    };
+        interval: None,    };
     let bytes = crate::encoding::encode_partitioning(&linked);
     assert_eq!(bytes.first(), Some(&2));
     assert_eq!(
@@ -789,7 +789,7 @@ fn partition_records_with_expressions_and_index_links_read_back() {
         parent: None,
         index_links: Vec::new(),
         row_movement_disabled: false,
-    };
+        interval: None,    };
     let bytes = crate::encoding::encode_partitioning(&plain);
     assert_eq!(bytes.first(), Some(&1));
     assert_eq!(
@@ -983,7 +983,7 @@ fn pinned_version_1_records() -> Vec<(&'static str, Vec<u8>, crate::partitions::
                 parent: None,
                 index_links: Vec::new(),
                 row_movement_disabled: false,
-            },
+                interval: None,            },
         ),
         (
             "m_x",
@@ -1003,7 +1003,7 @@ fn pinned_version_1_records() -> Vec<(&'static str, Vec<u8>, crate::partitions::
                 )),
                 index_links: Vec::new(),
                 row_movement_disabled: false,
-            },
+                interval: None,            },
         ),
         (
             "m_r",
@@ -1019,7 +1019,7 @@ fn pinned_version_1_records() -> Vec<(&'static str, Vec<u8>, crate::partitions::
                 )),
                 index_links: Vec::new(),
                 row_movement_disabled: false,
-            },
+                interval: None,            },
         ),
         (
             "m_h",
@@ -1035,7 +1035,7 @@ fn pinned_version_1_records() -> Vec<(&'static str, Vec<u8>, crate::partitions::
                 )),
                 index_links: Vec::new(),
                 row_movement_disabled: false,
-            },
+                interval: None,            },
         ),
         (
             "m_d",
@@ -1045,7 +1045,7 @@ fn pinned_version_1_records() -> Vec<(&'static str, Vec<u8>, crate::partitions::
                 parent: Some(("m".to_owned(), PartitionBound::Default)),
                 index_links: Vec::new(),
                 row_movement_disabled: false,
-            },
+                interval: None,            },
         ),
     ]
 }
@@ -1105,7 +1105,7 @@ fn a_partition_record_from_a_newer_or_hostile_writer_is_refused_without_panickin
                 },
             ],
             row_movement_disabled: false,
-        })
+            interval: None,        })
     );
     let mut newer = valid.clone();
     newer[0] = 3;
@@ -1600,6 +1600,7 @@ fn a_partition_record_keeps_disabled_row_movement_in_version_3() {
         parent: None,
         index_links: Vec::new(),
         row_movement_disabled: true,
+        interval: None,
     };
     let bytes = crate::encoding::encode_partitioning(&record);
     assert_eq!(bytes.first(), Some(&3));
@@ -1609,8 +1610,85 @@ fn a_partition_record_keeps_disabled_row_movement_in_version_3() {
     );
     let enabled = PartitionRecord {
         row_movement_disabled: false,
-        ..record
+        interval: None,        ..record
     };
     let bytes = crate::encoding::encode_partitioning(&enabled);
     assert_eq!(bytes.first(), Some(&1));
+}
+
+#[test]
+fn oracle_interval_partitioning_creates_partitions_as_rows_arrive() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    answer(
+        &mut session,
+        "CREATE TABLE readings (id NUMBER, n NUMBER)
+             PARTITION BY RANGE (n) INTERVAL (100) (
+               PARTITION p0 VALUES LESS THAN (100)
+             )",
+    );
+    answer(
+        &mut session,
+        "INSERT INTO readings VALUES (1, 50);
+         INSERT INTO readings VALUES (2, 150);
+         INSERT INTO readings VALUES (3, 199);
+         INSERT INTO readings VALUES (4, 1250)",
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT id FROM readings PARTITION FOR (120) ORDER BY id"),
+        "ID\n2\n3\nSELECT 2"
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT id FROM readings PARTITION FOR (1299)"),
+        "ID\n4\nSELECT 1"
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT COUNT(*) FROM readings PARTITION (SYS_P2)"),
+        "COUNT(*)\n2\nSELECT 1"
+    );
+    let error = failure(
+        &mut session,
+        "ALTER TABLE readings ADD PARTITION p9 VALUES LESS THAN (99999)",
+    );
+    assert_eq!(error.vendor_code(), Some(14760), "{error}");
+    let error = failure(
+        &mut session,
+        "CREATE TABLE capped (id NUMBER, n NUMBER)
+             PARTITION BY RANGE (n) INTERVAL (10) (
+               PARTITION top VALUES LESS THAN (MAXVALUE)
+             )",
+    );
+    assert_eq!(error.vendor_code(), Some(14761), "{error}");
+}
+
+#[test]
+fn oracle_interval_partitioning_by_month() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    answer(
+        &mut session,
+        "CREATE TABLE sales (id NUMBER, sold DATE)
+             PARTITION BY RANGE (sold) INTERVAL (NUMTOYMINTERVAL(1, 'MONTH')) (
+               PARTITION before_2024 VALUES LESS THAN (DATE '2024-01-01')
+             )",
+    );
+    answer(
+        &mut session,
+        "INSERT INTO sales VALUES (1, DATE '2024-03-15');
+         INSERT INTO sales VALUES (2, DATE '2024-03-31')",
+    );
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT COUNT(*) FROM sales PARTITION FOR (DATE '2024-03-01')"
+        ),
+        "COUNT(*)\n2\nSELECT 1"
+    );
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT COUNT(*) FROM sales PARTITION FOR (DATE '2024-02-29')"
+        ),
+        "COUNT(*)\n0\nSELECT 1"
+    )
 }
