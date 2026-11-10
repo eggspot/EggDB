@@ -3141,7 +3141,8 @@ it, and a statement that fails in a trigger leaves nothing behind.
   `ORA-25001`/`ORA-25002` for the wrong timing on a view or table, `PLS-00049` for a `:NEW` or
   `:OLD` column the table does not have, and `ORA-04092` for `COMMIT` or `ROLLBACK` in a
   trigger. An error in a trigger reaches the client with `ORA-06512: at "TRIGGER", line N` and
-  `ORA-04088: error during execution of trigger 'TRIGGER'`; a trigger body that does not
+  `ORA-04088: error during execution of trigger 'TRIGGER'`, and undoes the statement with
+  everything its triggers did while the transaction goes on (D372); a trigger body that does not
   compile is refused at `CREATE` (`ORA-06550`) instead of being kept invalid. Line numbers count
   from the block's first line, as in Oracle. Compound, DDL, database event and crossedition
   triggers are `0A000`, and a trigger does not fire itself again.

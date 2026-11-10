@@ -14,6 +14,8 @@ fn transaction_ended_in_trigger() -> SqlError {
     .with_sqlserver_code(3609)
 }
 
+const STATEMENT_MARK: &str = "\u{0}statement";
+
 fn statement_level_statements() -> SqlError {
     SqlError::not_supported("statement-level triggers with a statement body")
 }
@@ -24,6 +26,14 @@ impl<'s> Session<'s> {
         command: &str,
         body: impl FnOnce(&mut dyn KeyValueWrite, &mut TableCache) -> SqlResult<QueryResult>,
     ) -> SqlResult<QueryResult> {
+        let guards_statement = self.dialect == Dialect::Oracle && self.in_block();
+        let mark = crate::ast::Name {
+            text: STATEMENT_MARK.to_owned(),
+            position: 0,
+        };
+        if guards_statement {
+            self.set_savepoint(&mark)?;
+        }
         let scope = crate::triggers::enter_statement(Arc::clone(&self.settings));
         let written = self.write(command, body);
         let pending = scope.take_pending();
@@ -37,6 +47,13 @@ impl<'s> Session<'s> {
         if opened {
             let finished = self.finish_trigger_transaction(result.is_ok());
             return finished.and(result);
+        }
+        if guards_statement && self.in_block() && self.holds_statement_mark() {
+            if fired && result.is_err() && self.rollback_to_savepoint(&mark).is_ok() {
+                let _ = self.release_savepoint(&mark);
+                return result;
+            }
+            let _ = self.release_savepoint(&mark);
         }
         if fired && result.is_err() && self.in_block() {
             if self.sqlserver() {

@@ -430,7 +430,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Two-phase commit and XA: `PREPARE TRANSACTION`, `COMMIT PREPARED`, MySQL's `XA` and TDS's
   distributed transactions (D32, D173).
 - A failing Oracle statement trigger or SQL Server `AFTER` trigger undoes only its own
-  statement, as those databases do (D317).
+  statement, as those databases do (D317). Oracle's: **code written, unbuilt** (code-only mode,
+  2026-11-10, D372); SQL Server keeps rolling the transaction back, as it does (D372).
 - A failing statement inside a MySQL `CALL` keeps the procedure's statements before it (D317).
   **Code written, unbuilt** (code-only mode, 2026-11-10, D370).
 - SQL Server rolls back the whole transaction for a batch-aborting error that fails before
