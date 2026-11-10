@@ -276,6 +276,7 @@ const fn column(name: &'static str, sql_type: SqlType) -> CatalogColumn {
     CatalogColumn { name, sql_type }
 }
 
+const CATALOG_NAME_PREFIX: &str = "pg_";
 const OID: SqlType = SqlType::Catalog(CatalogType::Oid);
 const NAME: SqlType = SqlType::Catalog(CatalogType::Name);
 const CHAR: SqlType = SqlType::Catalog(CatalogType::InternalChar);
@@ -452,7 +453,7 @@ impl CatalogRelation {
         if schema == crate::schemas::INFORMATION_SCHEMA {
             return InformationRelation::named(name).map(Self::Information);
         }
-        if schema != crate::schemas::CATALOG_SCHEMA {
+        if schema != crate::schemas::CATALOG_SCHEMA || !name.starts_with(CATALOG_NAME_PREFIX) {
             return None;
         }
         Self::IN_PG_CATALOG

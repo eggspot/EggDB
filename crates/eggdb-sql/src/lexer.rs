@@ -209,6 +209,21 @@ fn is_operator_char(byte: u8) -> bool {
     b"+-*/<>=~!@#%^&|`?".contains(&byte)
 }
 
+const COMMON_WORDS: [&str; 47] = [
+    "all", "and", "as", "asc", "begin", "between", "by", "case", "commit", "create", "delete",
+    "desc", "distinct", "else", "end", "exists", "from", "group", "having", "in", "inner",
+    "insert", "into", "is", "join", "key", "left", "like", "limit", "not", "null", "offset", "on",
+    "or", "order", "primary", "rollback", "select", "set", "table", "then", "union", "update",
+    "values", "when", "where", "with",
+];
+
+fn common_word(text: &str) -> Option<&'static str> {
+    COMMON_WORDS
+        .iter()
+        .copied()
+        .find(|word| word.eq_ignore_ascii_case(text))
+}
+
 fn truncated_identifier(mut name: String) -> String {
     if name.len() > MAX_IDENTIFIER_BYTES {
         let mut cut = MAX_IDENTIFIER_BYTES;
@@ -553,6 +568,9 @@ impl<'t> Lexer<'t> {
         {
             return TokenKind::Word(Cow::Borrowed(text));
         }
+        if let Some(word) = common_word(text) {
+            return TokenKind::Word(Cow::Borrowed(word));
+        }
         TokenKind::Word(Cow::Owned(truncated_identifier(text.to_ascii_lowercase())))
     }
 
@@ -812,6 +830,56 @@ mod tests {
                 TokenKind::End,
             ]
         );
+    }
+
+    #[test]
+    fn upper_and_mixed_case_common_key_words_fold_to_borrowed_lower_case_words() {
+        for dialect in [
+            crate::dialect::Dialect::PostgreSql,
+            crate::dialect::Dialect::MySql,
+        ] {
+            let tokens =
+                super::tokenize_in("SELECT Name FROM People wHeRe", dialect).expect("tokens");
+            let words: Vec<(&str, bool)> = tokens
+                .iter()
+                .filter_map(|token| match &token.kind {
+                    TokenKind::Word(word) => {
+                        Some((word.as_ref(), matches!(word, std::borrow::Cow::Borrowed(_))))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                words,
+                [
+                    ("select", true),
+                    ("name", false),
+                    ("from", true),
+                    ("people", false),
+                    ("where", true)
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn common_words_are_lower_case_key_words() {
+        assert!(super::COMMON_WORDS.iter().all(|word| {
+            crate::pg_keywords::category(word).is_some()
+                && !word.bytes().any(|byte| byte.is_ascii_uppercase())
+        }));
+    }
+
+    #[test]
+    fn a_long_mixed_case_word_is_still_cut_to_the_identifier_limit() {
+        let long = format!("Select{}", "x".repeat(super::MAX_IDENTIFIER_BYTES));
+        match kinds(&long).as_slice() {
+            [TokenKind::Word(word), TokenKind::End] => {
+                assert_eq!(word.len(), super::MAX_IDENTIFIER_BYTES);
+                assert!(word.starts_with("selectx"));
+            }
+            other => panic!("not one word: {other:?}"),
+        }
     }
 
     #[test]

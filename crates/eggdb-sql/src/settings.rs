@@ -525,6 +525,9 @@ impl Default for Settings {
 
 impl Settings {
     pub(crate) fn get(&self, name: &str) -> SqlResult<String> {
+        if let Some(value) = self.values.get(name) {
+            return Ok(value.clone());
+        }
         if let Some(known) = known(name) {
             return Ok(self.values.get(known.name).cloned().unwrap_or_default());
         }
