@@ -1092,9 +1092,9 @@ fn drop_column_here(
     if new.primary_key.is_empty() {
         new.primary_key_name = None;
     }
-    let first_key = new.primary_key.first().copied();
+    let key_columns = new.primary_key.clone();
     for (position, column) in new.columns.iter_mut().enumerate() {
-        if column.auto_increment && first_key != Some(position) {
+        if column.auto_increment && !key_columns.contains(&position) {
             column.auto_increment = false;
         }
     }

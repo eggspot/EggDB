@@ -732,7 +732,12 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
   virtual, `1` stored), a dialect byte and the expression's text (varint length, UTF-8). Every
   other table keeps its version and bytes; an empty list, a position out of range or out of
   order, a generated column with a default or auto-increment, an unknown kind or dialect, or an
-  empty expression is damage, and an older release refuses version 14 by name. For the version
+  empty expression is damage, and an older release refuses version 14 by name. Table-definition
+  version 15 (D364) is written only for a table whose identity or auto-increment column is in
+  its primary key but not first: every section of version 14, with the generated-column count
+  allowed to be 0. A version 15 table whose identity column leads its key or is outside it, or
+  an older version with the column after the first key column, is damage, and an older release
+  refuses version 15 by name. For the version
   13 columns, keys and
   index entries of these columns use a class-ordered encoding (numbers by exact value, then
   text, then blobs, NULL last), and rows keep the four storage-class tags. A SQLite

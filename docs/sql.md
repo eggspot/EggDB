@@ -539,8 +539,8 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   `USER_IND_COLUMNS`/`ALL_IND_COLUMNS`; `ORA-00001` for a duplicate, `ORA-01452` when `CREATE
   UNIQUE INDEX` finds one, `ORA-00955` for a name in use and `ORA-01418` for a missing index.
 - **Identity columns**: `GENERATED [ALWAYS | BY DEFAULT [ON NULL [FOR INSERT ONLY | FOR INSERT
-  AND UPDATE]]] AS IDENTITY [(options)]` on the first column of the primary key, in a
-  partitioned table too (D106, D150, D337).
+  AND UPDATE]]] AS IDENTITY [(options)]` on a column of the primary key, in a
+  partitioned table too (D106, D150, D337, D364).
   `ALWAYS` is kept and enforced: a value given in `INSERT` is `ORA-32795` and an `UPDATE` of the
   column `ORA-32796` (`DEFAULT` is allowed); `eggdb restore` and `COPY` keep the values they
   bring. Options, in parentheses or bare as SQL Developer writes them: `START WITH` (default
@@ -2008,8 +2008,8 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   (D111). A `GENERATED ALWAYS` column refuses a value: `INSERT` with one is `428C9 cannot insert
   a non-DEFAULT value into column "id"` unless it says `OVERRIDING SYSTEM VALUE`, and `UPDATE`
   may only set it to `DEFAULT` (`428C9`); `COPY` and bulk loads keep the values they bring, as in
-  PostgreSQL (D146). The column must be the first column of the primary key, in a partitioned
-  table too (D337); a named sequence and
+  PostgreSQL (D146). The column must be a column of the primary key, at any position, in a
+  partitioned table too (D337, D364); a named sequence and
   `DEFAULT nextval('s')` have no such limit. Identity options in `CREATE TABLE` (`GENERATED ...
   AS IDENTITY (START WITH 100 INCREMENT BY 5)`) are kept; `MINVALUE`, `MAXVALUE` and `CYCLE`
   that end the identity before its type's range answer `0A000`. `ALTER COLUMN c SET GENERATED
@@ -2752,8 +2752,9 @@ ALTER TABLE measurements DETACH PARTITION old_rows;
 - **Identity and `AUTO_INCREMENT`.** The partitioned table numbers its rows: an `INSERT` gives
   each row its id in statement order before routing it (so `HASH (id)` routes on the new id),
   from one counter past the furthest id any partition holds, and `LAST_INSERT_ID()` is the
-  first id it gave. The column must lead the primary key (`PRIMARY KEY (id, created_at)`), as
-  in every table. A row written straight into a partition gets no id (D337).
+  first id it gave. The column may sit anywhere in the primary key (`PRIMARY KEY (created_at,
+  id)`, D364; in MySQL it must also lead the key or an index, as InnoDB requires). A row written
+  straight into a partition takes the next id of its partitioned table (D363).
 - **Catalogs and restores.** `pg_class` shows `relkind` `p` and `relispartition`, `pg_inherits`
   links partitions to their parent, `pg_partitioned_table`, `pg_get_partkeydef` and
   `pg_get_expr(relpartbound, oid)` describe them, and `pg_dump` files restore with their
@@ -4510,9 +4511,8 @@ print its own form.
 The correctness suite (`crates/eggdb-sql/correctness/postgresql.test`, [correctness.md](correctness.md))
 checks the PostgreSQL manual's documented behaviour and marks these as differing until they
 are fixed:
-- An identity column must lead the primary key, in a partitioned table too, so `PRIMARY KEY
-  (created_at, id)` with an identity `id` is `42P16`, where PostgreSQL takes it; allowing it is a
-  file format change that waits for table definition version 15 (D337).
+- An identity column must be a column of the primary key (at any position, D364), where
+  PostgreSQL allows one outside it.
 - A table in `FROM` takes no column alias list (`FROM t AS x (a, b)`, or `FROM t partition (p1)`,
   where `partition` is an alias and `p1` renames the first column): `0A000`.
 
@@ -4702,10 +4702,9 @@ Reference Manual's documented behaviour) marks these as differing until they are
   accents; collations come with D30.
 - A view made with `ALGORITHM=TEMPTABLE` still takes `INSERT`, `UPDATE` and `DELETE` when its
   query could; MySQL refuses them (error 1288).
-- An `AUTO_INCREMENT` column must lead the primary key, in a partitioned table too: `PRIMARY KEY
-  (store_id, id)` with a key that `id` leads is error 1075, where InnoDB needs only some index
-  that the column leads; allowing it is a file format change that waits for table definition
-  version 15 (D337).
+- An `AUTO_INCREMENT` column must be a column of the primary key that leads the primary key or
+  an index (`PRIMARY KEY (store_id, id), KEY (id)` works since D364); InnoDB needs only the
+  index, not the primary key.
 - `FULLTEXT` and `SPATIAL` keys, in `CREATE TABLE` and `ALTER TABLE ... ADD`, answer 1235: InnoDB
   makes a `FULLTEXT` index on a `CHAR`, `VARCHAR` or `TEXT` column, and a `SPATIAL` one on a
   column that is no geometry is MySQL's 1687.
@@ -4820,7 +4819,7 @@ Language Reference and PL/SQL Language Reference, never Oracle's software) marks
   where Oracle shows their nine-digit precisions (`+000000001 12:00:00.000000000`). A column's
   declared leading precision (`DAY(5)`) is accepted but not kept, and fractional seconds keep
   six digits (D149).
-- An identity column that is not the first column of the primary key.
+- An identity column outside the primary key.
 
 And more, not in the suite yet:
 - Sequences hold 64-bit values: `NOMAXVALUE` is 9223372036854775807 (Oracle's is 10^28 - 1) and
@@ -4961,7 +4960,7 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   triggers, and `SELECT ... INTO` does not keep an identity column's identity property: the new
   column is a plain `NOT NULL` one, so an `INSERT` without a column list takes a value for it where
   SQL Server answers error 8101, and one that leaves it out is error 515 (D342).
-- An identity column that is not the first column of the primary key. The next identity number
+- An identity column outside the primary key. The next identity number
   follows the largest one in the table (the smallest for a negative increment), so a deleted
   largest value is used again and an emptied table starts again at its seed, where SQL Server
   keeps a counter.

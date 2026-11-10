@@ -529,8 +529,18 @@ fn check_auto_increment(
         columns[first].sql_type,
         SqlType::SmallInt | SqlType::Integer | SqlType::BigInt
     );
+    let leads_a_key = primary_key.first() == Some(&first)
+        || create.columns[first].unique.is_some()
+        || create.indexes.iter().any(|index| {
+            index
+                .columns
+                .first()
+                .is_some_and(|column| column.text.eq_ignore_ascii_case(&columns[first].name))
+        });
+    let placed = primary_key.contains(&first)
+        && (leads_a_key || crate::constraints::current_dialect() != crate::dialect::Dialect::MySql);
     if auto.len() > 1
-        || primary_key.first() != Some(&first)
+        || !placed
         || !integer
         || columns[first].default.is_some()
     {
@@ -538,7 +548,7 @@ fn check_auto_increment(
             SqlState::INVALID_TABLE_DEFINITION,
             "Incorrect table definition; there can be only one auto column and it must be defined as a key",
         )
-        .with_hint("EggDB needs the AUTO_INCREMENT column to be an integer, without a DEFAULT, and the first column of the primary key.")
+        .with_hint("EggDB needs the AUTO_INCREMENT column to be an integer, without a DEFAULT, and a column of the primary key; MySQL also needs it to lead the primary key or an index.")
         .at(create.columns[first].name.position));
     }
     Ok(())
@@ -2122,6 +2132,14 @@ impl<'a> StoredRows<'a> {
         reader: &dyn KeyValueRead,
         index: usize,
     ) -> SqlResult<Option<i64>> {
+        if self.table.primary_key.first() != Some(&index) {
+            return crate::partition_dml::furthest_in_table(
+                reader,
+                self.table,
+                index,
+                self.identity_seed,
+            );
+        }
         let prefix = rows_prefix(self.table.id);
         let direction = if self.identity_seed.scans_backward() {
             ScanDirection::Backward

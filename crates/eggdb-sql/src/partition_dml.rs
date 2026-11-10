@@ -217,7 +217,7 @@ impl ParentIdentity {
     }
 }
 
-fn furthest_in_partition(
+pub(crate) fn furthest_in_table(
     reader: &dyn KeyValueRead,
     table: &TableDefinition,
     column: usize,
@@ -307,7 +307,7 @@ fn furthest_identity_value(
         let definition =
             crate::partitions::stored_definition(reader, &partition)?.ok_or_else(damaged)?;
         let at = definition.column_index(name).ok_or_else(damaged)?;
-        if let Some(value) = furthest_in_partition(reader, &definition, at, seed)? {
+        if let Some(value) = furthest_in_table(reader, &definition, at, seed)? {
             furthest = Some(match furthest {
                 Some(best) if !seed.is_beyond(value, best) => best,
                 _ => value,

@@ -50,7 +50,8 @@ const DEFINED_TYPES_FORMAT_VERSION: u8 = 10;
 const BASE_TYPES_FORMAT_VERSION: u8 = 11;
 const AFFINITY_FORMAT_VERSION: u8 = 13;
 const GENERATED_COLUMNS_FORMAT_VERSION: u8 = 14;
-const NEWEST_TABLE_FORMAT_VERSION: u8 = GENERATED_COLUMNS_FORMAT_VERSION;
+const IDENTITY_ANYWHERE_FORMAT_VERSION: u8 = 15;
+const NEWEST_TABLE_FORMAT_VERSION: u8 = IDENTITY_ANYWHERE_FORMAT_VERSION;
 pub(crate) const BASE_TYPES_VIEW_FORMAT_VERSION: u8 = 12;
 const _: () = assert!(
     NEWEST_TABLE_FORMAT_VERSION != VIEW_FORMAT_VERSION
@@ -1034,8 +1035,15 @@ impl TableDefinition {
         }
     }
 
+    pub(crate) fn identity_after_first_key_column(&self) -> bool {
+        self.auto_increment_column()
+            .is_some_and(|column| self.primary_key.first() != Some(&column))
+    }
+
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let version = if !self.generated.is_empty() {
+        let version = if self.identity_after_first_key_column() {
+            IDENTITY_ANYWHERE_FORMAT_VERSION
+        } else if !self.generated.is_empty() {
             GENERATED_COLUMNS_FORMAT_VERSION
         } else if self.needs_affinity_version() {
             AFFINITY_FORMAT_VERSION
@@ -1173,7 +1181,8 @@ impl TableDefinition {
             | DEFINED_TYPES_FORMAT_VERSION
             | BASE_TYPES_FORMAT_VERSION
             | AFFINITY_FORMAT_VERSION
-            | GENERATED_COLUMNS_FORMAT_VERSION => true,
+            | GENERATED_COLUMNS_FORMAT_VERSION
+            | IDENTITY_ANYWHERE_FORMAT_VERSION => true,
             _ => !qualified,
         };
         if !name_fits_version || !crate::schemas::is_well_formed(name) {
@@ -1283,7 +1292,8 @@ impl TableDefinition {
             | DEFINED_TYPES_FORMAT_VERSION
             | BASE_TYPES_FORMAT_VERSION
             | AFFINITY_FORMAT_VERSION
-            | GENERATED_COLUMNS_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), true)?,
+            | GENERATED_COLUMNS_FORMAT_VERSION
+            | IDENTITY_ANYWHERE_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), true)?,
             _ => Vec::new(),
         };
         let constraints = if version >= CONSTRAINTS_FORMAT_VERSION {
@@ -1301,7 +1311,12 @@ impl TableDefinition {
         } else {
             (Vec::new(), Vec::new())
         };
-        let generated = if generated_allowed {
+        let generated = if version >= IDENTITY_ANYWHERE_FORMAT_VERSION
+            && reader.bytes.get(reader.at) == Some(&0)
+        {
+            reader.byte()?;
+            Vec::new()
+        } else if generated_allowed {
             generated::decode_generated(&mut reader, &columns)?
         } else {
             Vec::new()
@@ -1333,8 +1348,16 @@ impl TableDefinition {
         if version == AUTO_INCREMENT_FORMAT_VERSION && (auto_columns != 1 || !auto_first_key) {
             return Err(reader.damaged());
         }
+        let auto_in_key = columns
+            .iter()
+            .position(|column| column.auto_increment)
+            .is_some_and(|auto| primary_key.contains(&auto));
+        let auto_later_in_key = auto_columns == 1 && !auto_first_key && auto_in_key;
         if (version >= INDEXES_FORMAT_VERSION && auto_columns > 1)
-            || (auto_columns == 1 && !auto_first_key)
+            || (auto_columns == 1
+                && !auto_first_key
+                && !(version >= IDENTITY_ANYWHERE_FORMAT_VERSION && auto_in_key))
+            || (version == IDENTITY_ANYWHERE_FORMAT_VERSION && !auto_later_in_key)
         {
             return Err(reader.damaged());
         }
@@ -3256,9 +3279,27 @@ mod tests {
         assert!(damaged(&no_auto));
         assert!(damaged(&two_columns([true, true], vec![0]).encode()));
         assert!(damaged(&two_columns([false, true], vec![0]).encode()));
-        assert!(damaged(&two_columns([false, true], vec![0, 1]).encode()));
         assert!(damaged(&two_columns([true, false], Vec::new()).encode()));
         assert!(!damaged(&two_columns([true, false], vec![0, 1]).encode()));
+    }
+
+    #[test]
+    fn an_identity_after_the_first_key_column_is_version_15_and_round_trips() {
+        let table = two_columns([false, true], vec![0, 1]);
+        let encoded = table.encode();
+        assert_eq!(encoded[0], 15);
+        assert_eq!(TableDefinition::decode("t", &encoded), Ok(table));
+        for cut in 0..encoded.len() {
+            assert!(TableDefinition::decode("t", &encoded[..cut]).is_err());
+        }
+        let leading = two_columns([true, false], vec![0, 1]).encode();
+        assert_ne!(leading[0], 15);
+        let mut relabeled = leading.clone();
+        relabeled[0] = 15;
+        assert!(damaged(&relabeled));
+        let mut older = encoded;
+        older[0] = 14;
+        assert!(damaged(&older));
     }
 
     #[test]
