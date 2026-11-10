@@ -134,8 +134,8 @@ fn with_server(limits: &Limits<'_>, test: impl FnOnce(SocketAddr)) {
             )
             .unwrap();
         });
+        let _stop_even_on_a_failure = crate::content_coding_tests::StopOnDrop(&stopped);
         test(address);
-        stopped.store(true, Ordering::Release);
     });
 }
 

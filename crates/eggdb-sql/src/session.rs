@@ -72,24 +72,75 @@ fn check_copied_columns(
     )
 }
 
+fn starts_query(tokens: &[Token<'_>], at: usize) -> bool {
+    match tokens.get(at).map(|token| &token.kind) {
+        Some(TokenKind::Word(word)) if word.eq_ignore_ascii_case("select") => true,
+        Some(TokenKind::Word(word)) if word.eq_ignore_ascii_case("table") => matches!(
+            tokens.get(at + 1).map(|token| &token.kind),
+            Some(TokenKind::Word(_) | TokenKind::QuotedIdentifier(_))
+        ),
+        _ => false,
+    }
+}
+
 fn walks_expressions(tokens: &[Token<'_>]) -> bool {
-    let mut selects = 0;
-    for token in tokens {
+    let mut queries = 0;
+    for (at, token) in tokens.iter().enumerate() {
         match &token.kind {
-            TokenKind::Word(word) if word.eq_ignore_ascii_case("select") => selects += 1,
             TokenKind::Word(word) if word.starts_with("current_schema") => return true,
             TokenKind::QuotedIdentifier(name) if name.starts_with("current_schema") => {
                 return true;
             }
+            _ if starts_query(tokens, at) => queries += 1,
             _ => {}
         }
     }
-    selects > 1
-        || selects == 1
-            && !tokens.first().is_some_and(|token| {
-                matches!(&token.kind, TokenKind::Word(word)
-                    if word.eq_ignore_ascii_case("select") || word.eq_ignore_ascii_case("with"))
-            })
+    let leads_with_query = starts_query(tokens, 0)
+        || tokens.first().is_some_and(
+            |token| matches!(&token.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("with")),
+        );
+    queries > 1 || queries == 1 && !leads_with_query
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StatementFlags {
+    walks_expressions: bool,
+    row_locking: Option<&'static str>,
+    uses_sequences: bool,
+    wants_catalog: bool,
+}
+
+impl StatementFlags {
+    fn from_tokens(tokens: Option<&[Token<'_>]>, dialect: Dialect) -> Self {
+        Self {
+            walks_expressions: tokens.is_none_or(walks_expressions),
+            row_locking: tokens.and_then(read_only::row_locking_command),
+            uses_sequences: tokens.is_some_and(mentions_sequence_functions),
+            wants_catalog: match dialect {
+                Dialect::PostgreSql => tokens.is_some_and(crate::pg_catalog::mentions_catalog),
+                Dialect::SqlServer => {
+                    tokens.is_some_and(crate::sqlserver_catalog::mentions_metadata)
+                }
+                _ => false,
+            },
+        }
+    }
+
+    fn combined_with(self, other: Self) -> Self {
+        Self {
+            walks_expressions: self.walks_expressions || other.walks_expressions,
+            row_locking: self.row_locking.or(other.row_locking),
+            uses_sequences: self.uses_sequences || other.uses_sequences,
+            wants_catalog: self.wants_catalog || other.wants_catalog,
+        }
+    }
+}
+
+fn is_sql_prepare(statement: &Statement) -> bool {
+    matches!(
+        statement,
+        Statement::Prepared(crate::ast::PreparedCommand::Prepare(_))
+    )
 }
 
 fn only_separators_after(tokens: &[Token<'_>], at: usize) -> bool {
@@ -1298,7 +1349,7 @@ impl<'s> Session<'s> {
         let _path = self.enter_search_path(&settings);
         let _types = crate::user_types::enter(None);
         let mut retried = false;
-        let mut parser = loop {
+        let (mut parser, prepares_statement) = loop {
             let mut parser = Parser::new(text, &tokens)
                 .with_context(Parameters::Types(declared_types), &settings)
                 .in_dialect(self.dialect);
@@ -1310,18 +1361,18 @@ impl<'s> Session<'s> {
                 });
             }
             crate::user_types::take_wanted();
-            if parser.literal_rows().is_none()
-                && let Err(error) = parser.statement()
-            {
-                if !retried && crate::user_types::take_wanted() {
+            if parser.literal_rows().is_some() {
+                break (parser, false);
+            }
+            match parser.statement() {
+                Ok(statement) => break (parser, is_sql_prepare(&statement)),
+                Err(_) if !retried && crate::user_types::take_wanted() => {
                     retried = true;
                     let registry = self.read(|reader, _| crate::user_types::load(reader))?;
                     crate::user_types::install(registry);
-                    continue;
                 }
-                return Err(error);
+                Err(error) => return Err(error),
             }
-            break parser;
         };
         parser.skip_empty_statements();
         if !parser.at_end() {
@@ -1330,8 +1381,13 @@ impl<'s> Session<'s> {
                 parser.position(),
             ));
         }
+        let parameter_count = if prepares_statement {
+            declared_types.len()
+        } else {
+            highest_parameter(&tokens).max(declared_types.len())
+        };
         Ok(PreparedStatement {
-            parameter_count: highest_parameter(&tokens).max(declared_types.len()),
+            parameter_count,
             is_empty: false,
         })
     }
@@ -1399,6 +1455,9 @@ impl<'s> Session<'s> {
                 columns: None,
             });
         };
+        if is_sql_prepare(&statement) {
+            parameter_types.truncate(declared_types.len());
+        }
         if matches!(
             statement,
             Statement::Begin { .. }
@@ -2037,9 +2096,6 @@ impl<'s> Session<'s> {
             self.statement_stands_alone =
                 self.statements_in_text == 1 && only_separators_after(tokens, resume.0);
             let statement_tokens = tokens.get(first_token..resume.0.min(tokens.len()));
-            let uses_sequences = statement_tokens.is_some_and(mentions_sequence_functions);
-            self.statement_walks_expressions = statement_tokens.is_none_or(walks_expressions);
-            self.statement_row_locking = statement_tokens.and_then(read_only::row_locking_command);
             let mut statement = match parsed {
                 Ok(statement) => statement,
                 Err(error) => {
@@ -2047,6 +2103,13 @@ impl<'s> Session<'s> {
                     return Err(error);
                 }
             };
+            let mut flags = StatementFlags::from_tokens(statement_tokens, self.dialect);
+            if let Some(executed) = self.executed_prepared_flags(&statement) {
+                flags = flags.combined_with(executed);
+            }
+            self.statement_walks_expressions =
+                flags.walks_expressions || self.settings.checked_role.is_some();
+            self.statement_row_locking = flags.row_locking;
             let diagnostic = matches!(
                 statement,
                 Statement::MySql(
@@ -2060,17 +2123,8 @@ impl<'s> Session<'s> {
                 consumed: None,
                 bulk_rows: reborrowed_rows(&mut client.bulk_rows),
             };
-            let wants_catalog = match self.dialect {
-                Dialect::PostgreSql => {
-                    statement_tokens.is_some_and(crate::pg_catalog::mentions_catalog)
-                }
-                Dialect::SqlServer => {
-                    statement_tokens.is_some_and(crate::sqlserver_catalog::mentions_metadata)
-                }
-                _ => false,
-            };
-            let _catalog = crate::pg_catalog::enter_statement(wants_catalog, &settings);
-            self.enter_sequences(uses_sequences);
+            let _catalog = crate::pg_catalog::enter_statement(flags.wants_catalog, &settings);
+            self.enter_sequences(flags.uses_sequences);
             self.extra_results.clear();
             crate::deferred_checks::enter(&self.deferred.modes);
             let leftover_changes = crate::routine_settings::take_for_session(true);

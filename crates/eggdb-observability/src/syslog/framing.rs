@@ -4,6 +4,7 @@ const MOST_LENGTH_DIGITS: usize = 9;
 pub(crate) enum FramingError {
     BadLength,
     TooLong,
+    CutShort,
 }
 
 #[derive(Debug)]
@@ -90,11 +91,15 @@ impl Framer {
         }
     }
 
-    pub(crate) fn finish(mut self) -> Option<Vec<u8>> {
+    pub(crate) fn finish(mut self) -> Result<Option<Vec<u8>>, FramingError> {
         self.skip_separators();
         let rest = self.pending();
-        let counted = matches!(rest.first(), Some(b'1'..=b'9'));
-        (!rest.is_empty() && !counted && rest.len() <= self.most).then(|| rest.to_vec())
+        match rest.first() {
+            None => Ok(None),
+            Some(b'1'..=b'9') => Err(FramingError::CutShort),
+            Some(_) if rest.len() > self.most => Err(FramingError::TooLong),
+            Some(_) => Ok(Some(rest.to_vec())),
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 use crate::{
-    ContentError, DecompressError, ZipArchive, crc32, extract_text, gunzip, inflate, zlib_inflate,
+    ContentError, DecompressError, ZipArchive, crc32, extract_text, gunzip, gunzip_within_memory,
+    inflate, zlib_inflate, zlib_inflate_within_memory,
 };
 
 const DYNAMIC_STREAM: [&str; 7] = [
@@ -277,6 +278,134 @@ fn gzip_members_from_the_gzip_tool_decompress_with_their_checks() {
     assert_eq!(gunzip(&wrapped, 599), Err(DecompressError::PastLimit(599)));
     let empty = gzip_member(&[3, 0], b"");
     assert_eq!(gunzip(&[empty, wrapped].concat(), 600).unwrap(), dynamic);
+}
+
+struct BitWriter {
+    bytes: Vec<u8>,
+    bits: usize,
+}
+
+impl BitWriter {
+    fn bit(&mut self, set: bool) {
+        if self.bits.is_multiple_of(8) {
+            self.bytes.push(0);
+        }
+        if set {
+            let last = self.bytes.len() - 1;
+            self.bytes[last] |= 1 << (self.bits % 8);
+        }
+        self.bits += 1;
+    }
+
+    fn value(&mut self, value: u32, count: u32) {
+        for at in 0..count {
+            self.bit((value >> at) & 1 == 1);
+        }
+    }
+
+    fn huffman_code(&mut self, code: u32, length: u32) {
+        for at in (0..length).rev() {
+            self.bit((code >> at) & 1 == 1);
+        }
+    }
+}
+
+fn zeros_deflate(copies: usize) -> Vec<u8> {
+    let mut out = BitWriter {
+        bytes: Vec::new(),
+        bits: 0,
+    };
+    out.value(1, 1);
+    out.value(1, 2);
+    out.huffman_code(0x30, 8);
+    for _ in 0..copies {
+        out.huffman_code(0b1100_0101, 8);
+        out.huffman_code(0, 5);
+    }
+    out.huffman_code(0, 7);
+    out.bytes
+}
+
+fn zeros(copies: usize) -> Vec<u8> {
+    vec![0; 1 + 258 * copies]
+}
+
+#[test]
+fn decompressed_output_never_reserves_past_its_limit() {
+    let dynamic = inflate(&bytes(&DYNAMIC_STREAM), 1_000).unwrap();
+    let length = dynamic.len();
+    assert!(inflate(&bytes(&DYNAMIC_STREAM), length).unwrap().capacity() <= length);
+    let wrapped = gzip_member(&bytes(&DYNAMIC_STREAM), &dynamic);
+    assert!(gunzip(&wrapped, length).unwrap().capacity() <= length);
+    let twice = gunzip(&[wrapped.clone(), wrapped].concat(), 2 * length).unwrap();
+    assert_eq!(twice, [dynamic.clone(), dynamic.clone()].concat());
+    assert!(twice.capacity() <= 2 * length);
+    let zlib = zlib_stream(&bytes(&DYNAMIC_STREAM), &dynamic);
+    assert!(zlib_inflate(&zlib, length).unwrap().capacity() <= length);
+    let plain = zeros(4_000);
+    let decoded = zlib_inflate(&zeros_deflate(4_000), plain.len()).unwrap();
+    assert_eq!(decoded, plain);
+    assert!(decoded.capacity() <= plain.len());
+}
+
+#[test]
+fn output_past_its_memory_is_only_counted_to_tell_the_memory_from_the_limit() {
+    let plain = zeros(4_000);
+    let bomb = gzip_member(&zeros_deflate(4_000), &plain);
+    assert_eq!(
+        gunzip_within_memory(&bomb, 2_000_000, 10_000),
+        Err(DecompressError::PastMemory(10_000))
+    );
+    assert_eq!(
+        gunzip_within_memory(&bomb, 1_000_000, 10_000),
+        Err(DecompressError::PastLimit(1_000_000))
+    );
+    assert_eq!(
+        gunzip_within_memory(&bomb, plain.len(), plain.len() - 1),
+        Err(DecompressError::PastMemory(plain.len() - 1))
+    );
+    assert_eq!(
+        gunzip_within_memory(&bomb, plain.len() - 1, 10),
+        Err(DecompressError::PastLimit(plain.len() - 1))
+    );
+    assert_eq!(
+        gunzip_within_memory(&bomb, plain.len(), plain.len()).unwrap(),
+        plain
+    );
+    let small = gzip_member(&zeros_deflate(10), &zeros(10));
+    let both = [small.clone(), bomb.clone(), small].concat();
+    assert_eq!(
+        gunzip_within_memory(&both, 2_000_000, 10_000),
+        Err(DecompressError::PastMemory(10_000))
+    );
+    assert_eq!(
+        gunzip_within_memory(&both, plain.len() + 2_000, 10_000),
+        Err(DecompressError::PastLimit(plain.len() + 2_000))
+    );
+    let mut wrong_size = bomb.clone();
+    let size_at = wrong_size.len() - 4;
+    wrong_size[size_at] ^= 1;
+    assert!(matches!(
+        gunzip_within_memory(&wrong_size, 2_000_000, 10_000),
+        Err(DecompressError::Corrupt(_))
+    ));
+    let zlib = zlib_stream(&zeros_deflate(4_000), &plain);
+    assert_eq!(
+        zlib_inflate_within_memory(&zlib, 2_000_000, 10_000),
+        Err(DecompressError::PastMemory(10_000))
+    );
+    assert_eq!(
+        zlib_inflate_within_memory(&zlib, 1_000_000, 10_000),
+        Err(DecompressError::PastLimit(1_000_000))
+    );
+    assert_eq!(
+        zlib_inflate_within_memory(&zeros_deflate(4_000), 2_000_000, 10_000),
+        Err(DecompressError::PastMemory(10_000))
+    );
+    assert_eq!(
+        zlib_inflate_within_memory(&zlib, 2_000_000, 2_000_000).unwrap(),
+        plain
+    );
 }
 
 #[test]

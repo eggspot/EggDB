@@ -5,8 +5,8 @@ use crate::ast::{
 use crate::constraints::{PreparedChecks, RowChange};
 use crate::dialect::Dialect;
 use crate::encoding::{
-    IdentitySeed, IndexMethod, TableDefinition, decode_key_values, decode_row, index_prefix,
-    prefix_end, rows_prefix,
+    Column, IdentitySeed, IndexMethod, TableDefinition, decode_key_values, decode_row,
+    index_prefix, prefix_end, rows_prefix,
 };
 use crate::error::{SqlError, SqlResult};
 use crate::eval::{Evaluator, Scope};
@@ -121,7 +121,8 @@ fn evaluated(expr: &Expr, table: &TableDefinition, column: usize) -> SqlResult<V
 struct ParentIdentity {
     column: usize,
     seed: IdentitySeed,
-    next: Option<i64>,
+    furthest: Option<i64>,
+    read_stored: bool,
     first_generated: Option<u64>,
     ignores_given: bool,
 }
@@ -131,10 +132,44 @@ impl ParentIdentity {
         Some(Self {
             column: table.auto_increment_column()?,
             seed: table.identity_seed(),
-            next: None,
+            furthest: None,
+            read_stored: false,
             first_generated: None,
             ignores_given: overriding == Some(Overriding::UserValue),
         })
+    }
+
+    fn reach(&mut self, value: i64) {
+        self.furthest = Some(match self.furthest {
+            Some(best) if !self.seed.is_beyond(value, best) => best,
+            _ => value,
+        });
+    }
+
+    fn generate(
+        &mut self,
+        reader: &dyn KeyValueRead,
+        catalog: &PartitionCatalog,
+        table: &TableDefinition,
+        column: &Column,
+    ) -> SqlResult<Value> {
+        if !self.read_stored {
+            if let Some(stored) =
+                furthest_identity_value(reader, catalog, table, self.column, self.seed)?
+            {
+                self.reach(stored);
+            }
+            self.read_stored = true;
+        }
+        let next = self
+            .seed
+            .next_after(self.furthest)
+            .ok_or_else(|| execute::auto_increment_exhausted(column))?;
+        let value = convert(Value::BigInt(next), column.sql_type, Conversion::Assignment)
+            .map_err(|_| execute::auto_increment_exhausted(column))?;
+        self.first_generated.get_or_insert(next as u64);
+        self.furthest = Some(next);
+        Ok(value)
     }
 
     fn fill(
@@ -155,19 +190,6 @@ impl ParentIdentity {
             }
             _ => None,
         };
-        let next = match self.next {
-            Some(next) => next,
-            None => self
-                .seed
-                .next_after(furthest_identity_value(
-                    reader,
-                    catalog,
-                    table,
-                    self.column,
-                    self.seed,
-                )?)
-                .ok_or_else(|| execute::auto_increment_exhausted(column))?,
-        };
         let given_number = given.as_ref().and_then(Value::as_integer);
         let kept = match given_number {
             Some(0) => crate::constraints::current_dialect() != Dialect::MySql,
@@ -175,20 +197,10 @@ impl ParentIdentity {
         };
         let value = match (given, given_number) {
             (Some(value), Some(number)) if kept => {
-                self.next = match self.seed.next_after(Some(number)) {
-                    Some(after) if self.seed.is_beyond(after, next) => Some(after),
-                    Some(_) => Some(next),
-                    None => None,
-                };
+                self.reach(number);
                 value
             }
-            _ => {
-                let value = convert(Value::BigInt(next), column.sql_type, Conversion::Assignment)
-                    .map_err(|_| execute::auto_increment_exhausted(column))?;
-                self.first_generated.get_or_insert(next as u64);
-                self.next = next.checked_add(self.seed.increment);
-                value
-            }
+            _ => self.generate(reader, catalog, table, column)?,
         };
         match slot {
             Some(at) => {

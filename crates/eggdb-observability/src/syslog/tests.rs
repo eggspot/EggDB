@@ -4,7 +4,7 @@ use crate::tests::MemoryStore;
 use eggdb_platform::{DatagramSocket, Network, OsNetwork};
 use eggdb_sql::{Session, Value};
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -253,7 +253,7 @@ fn tcp_frames_split_by_octet_counts_and_line_ends_at_any_read_boundary() {
                 frames.push(frame);
             }
         }
-        frames.extend(framer.finish());
+        frames.extend(framer.finish().unwrap());
         assert_eq!(
             frames,
             [
@@ -304,6 +304,17 @@ fn tcp_frames_longer_than_the_limit_or_with_a_bad_count_are_refused() {
     framer.push(b"3 <1>");
     assert_eq!(framer.next_frame(), Ok(Some(b"<1>".to_vec())));
     assert_eq!(framer.next_frame(), Ok(None));
+    assert_eq!(framer.finish(), Ok(None));
+    let mut framer = Framer::new(8);
+    framer.push(b"\n7 <13>ab");
+    assert_eq!(framer.next_frame(), Ok(None));
+    assert_eq!(framer.finish(), Err(FramingError::CutShort));
+    let mut framer = Framer::new(8);
+    framer.push(b"<13>ab\r\n");
+    assert_eq!(framer.next_frame(), Ok(Some(b"<13>ab".to_vec())));
+    framer.push(b"<13>cd");
+    assert_eq!(framer.next_frame(), Ok(None));
+    assert_eq!(framer.finish(), Ok(Some(b"<13>cd".to_vec())));
 }
 
 fn query(store: &MemoryStore, sql: &str) -> Vec<Vec<Option<String>>> {
@@ -493,6 +504,42 @@ fn a_silent_tcp_connection_is_closed_after_the_idle_timeout_and_keeps_its_last_l
         ]
     );
     assert_eq!(collector.messages_dropped(), 0);
+}
+
+#[test]
+fn an_octet_counted_frame_cut_short_by_a_close_or_the_idle_timeout_is_counted_as_dropped() {
+    let store = MemoryStore::default();
+    let idle_timeout = Duration::from_millis(300);
+    let collector = SyslogCollector::new(&store, "eggdb", "eggdb", 4, Some(idle_timeout));
+    collector.prepare().unwrap();
+    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+    let address = listener.local_addr().unwrap();
+    let stopped = AtomicBool::new(false);
+    let stop = || stopped.load(Ordering::Acquire);
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            collector.serve::<eggdb_platform::OsDatagramSocket>(
+                None,
+                Some(&listener),
+                &stop,
+                &|_: &str| {},
+            )
+        });
+        let stop_even_on_a_failure = StopOnDrop(&stopped);
+        let mut closing = TcpStream::connect(address).unwrap();
+        closing.write_all(b"<13>first\n40 <13>cut short").unwrap();
+        closing.shutdown(Shutdown::Write).unwrap();
+        let mut silent = TcpStream::connect(address).unwrap();
+        silent.write_all(b"12 <13>half").unwrap();
+        wait_until(|| collector.messages_dropped() == 2);
+        wait_for_rows(&store, 1);
+        drop(stop_even_on_a_failure);
+        server.join().unwrap().unwrap();
+        drop((closing, silent));
+    });
+    let messages = query(&store, "SELECT message FROM syslog ORDER BY message");
+    assert_eq!(messages, vec![vec![Some("first".to_owned())]]);
+    assert_eq!(collector.messages_dropped(), 2);
 }
 
 #[test]

@@ -1,5 +1,10 @@
+use crate::ast::{BinaryOperator, Expr, ExprKind};
+use crate::eval::{Scope, Source};
 use crate::memory_store::MemoryStore;
+use crate::plan::{self, OrderRequest};
+use crate::store::{KeyValueRead, KeyValueStore};
 use crate::tests::render;
+use crate::types::Value;
 use crate::{Dialect, Session, SqlError};
 
 fn run(session: &mut Session<'_>, sql: &str) -> Result<Vec<String>, SqlError> {
@@ -411,4 +416,48 @@ fn a_short_null_range_is_followed_by_the_smallest_values() {
         ["498", "499", "451", "300", "7"]
     );
     assert!(store.entries_read() - before <= 1_100);
+}
+
+#[test]
+fn a_range_read_whose_nulls_sort_at_the_other_end_is_left_unordered() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    events(&mut session, 50, 10);
+    let Ok(read) = store.begin_read() else {
+        panic!("the store opens a read");
+    };
+    let Ok(Some(bytes)) = read.get(&crate::encoding::table_key("events")) else {
+        panic!("events is stored");
+    };
+    let Ok(table) = crate::encoding::TableDefinition::decode("events", &bytes) else {
+        panic!("events decodes");
+    };
+    let Some(created_at) = table.column_index("created_at") else {
+        panic!("events has created_at");
+    };
+    let expr = |kind| Expr { kind, position: 0 };
+    let filter = expr(ExprKind::Binary(
+        BinaryOperator::Greater,
+        Box::new(expr(ExprKind::Column {
+            qualifier: None,
+            name: "created_at".to_owned(),
+        })),
+        Box::new(expr(ExprKind::Constant {
+            value: Value::Integer(5),
+            sql_type: None,
+        })),
+    ));
+    let order = OrderRequest {
+        columns: vec![(created_at, false)],
+        limited: true,
+        nulls_at_other_end: vec![created_at],
+    };
+    let source = Source {
+        table: &table,
+        label: "events",
+        offset: 0,
+    };
+    let access = plan::plan(&table, Scope::One(source), Some(&filter), Some(&order));
+    assert!(matches!(access.used, plan::Use::Range));
+    assert!(!access.ordered);
 }

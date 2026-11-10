@@ -657,3 +657,74 @@ fn resetting_the_session_authorization_keeps_the_checked_role_and_its_policies()
         "is_superuser\non\nSHOW"
     );
 }
+
+fn reader_of_pub(store: &MemoryStore) {
+    let mut admin = Session::new(store);
+    for sql in [
+        "CREATE TABLE pub (id integer PRIMARY KEY)",
+        "CREATE TABLE secret (id integer PRIMARY KEY)",
+        "INSERT INTO pub VALUES (1), (2)",
+        "INSERT INTO secret VALUES (2)",
+        "CREATE USER reader LOGIN",
+        "GRANT SELECT ON pub TO reader",
+    ] {
+        run(&mut admin, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
+}
+
+#[test]
+fn table_subqueries_and_executed_statements_check_privileges() {
+    let store = MemoryStore::default();
+    reader_of_pub(&store);
+    let mut reader = as_role(&store, "reader");
+    run(
+        &mut reader,
+        "PREPARE p AS SELECT * FROM pub WHERE id IN (SELECT id FROM secret)",
+    )
+    .unwrap();
+    for sql in [
+        "SELECT (TABLE secret)",
+        "SELECT * FROM pub WHERE id IN (TABLE secret)",
+        "SELECT EXISTS (TABLE secret)",
+        "EXECUTE p",
+    ] {
+        let error = run(&mut reader, sql).unwrap_err();
+        assert_eq!(
+            error.state(),
+            SqlState::INSUFFICIENT_PRIVILEGE,
+            "{sql}: {error}"
+        );
+    }
+    assert_eq!(
+        run(&mut reader, "SELECT * FROM pub WHERE id IN (TABLE pub)").unwrap(),
+        "id\n1\n2\nSELECT 2"
+    );
+}
+
+#[test]
+fn row_security_filters_table_subqueries_and_executed_statements() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    for sql in [
+        "CREATE USER nobody LOGIN",
+        "GRANT SELECT ON notes TO nobody",
+    ] {
+        run(&mut admin, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
+    let mut nobody = as_role(&store, "nobody");
+    assert_eq!(
+        run(&mut nobody, "SELECT EXISTS (TABLE notes)").unwrap(),
+        run(&mut nobody, "SELECT EXISTS (SELECT * FROM notes)").unwrap()
+    );
+    let mut ada = as_role(&store, "ada");
+    run(
+        &mut ada,
+        "PREPARE counted AS SELECT (SELECT count(*) FROM notes) AS visible",
+    )
+    .unwrap();
+    assert_eq!(
+        run(&mut ada, "EXECUTE counted").unwrap(),
+        "visible\n2\nSELECT 1"
+    );
+}

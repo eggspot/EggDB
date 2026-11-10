@@ -238,6 +238,11 @@ fn kind_of(field: &str, documents: &[&Node]) -> Kind {
     }
 }
 
+fn computed_number(value: f64, integral: bool) -> (f64, String) {
+    let value = if integral { value.round() } else { value };
+    (value, number_text(value))
+}
+
 fn chosen_number(mut values: Vec<(f64, String)>, mode: Mode, integral: bool) -> SortValue {
     values.sort_by(|left, right| left.0.total_cmp(&right.0));
     let picked = match mode {
@@ -250,12 +255,7 @@ fn chosen_number(mut values: Vec<(f64, String)>, mode: Mode, integral: bool) -> 
         Mode::Avg => {
             let average =
                 values.iter().map(|(value, _)| value).sum::<f64>() / values.len().max(1) as f64;
-            let shown = if integral {
-                number_text(average.round())
-            } else {
-                number_text(average)
-            };
-            Some((if integral { average.round() } else { average }, shown))
+            Some(computed_number(average, integral))
         }
         Mode::Median => {
             let middle = values.len() / 2;
@@ -267,7 +267,7 @@ fn chosen_number(mut values: Vec<(f64, String)>, mode: Mode, integral: bool) -> 
             } else {
                 values.get(middle).map(|(value, _)| *value)
             };
-            median.map(|value| (value, number_text(value)))
+            median.map(|value| computed_number(value, integral))
         }
     };
     match picked {
@@ -645,6 +645,23 @@ mod tests {
                     shown: shown.to_owned()
                 }],
                 "{spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_median_of_an_even_count_of_whole_numbers_rounds_like_the_average() {
+        for (values, shown) in [("[2,3]", "3"), ("[3,9,1,4]", "4"), ("[2.0,3.5]", "2.75")] {
+            let source = document(&format!("{{\"n\":{values}}}"));
+            let sort = sort("{\"n\":{\"mode\":\"median\"}}").expect("a sort");
+            let ordered = sort.over(&[&source]);
+            assert_eq!(
+                ordered.values_of(0.0, 0, &source),
+                vec![SortValue::Number {
+                    value: shown.parse().expect("a number"),
+                    shown: shown.to_owned()
+                }],
+                "{values}"
             );
         }
     }

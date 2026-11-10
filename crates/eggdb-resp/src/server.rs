@@ -2,12 +2,12 @@ use crate::blocking::{BlockingCommand, WaiterRegistry};
 use crate::commands::{Client, Context};
 use crate::keyspace::{EntryVisitor, KeysRead, KeysWrite, Keyspace};
 use crate::pops::OnWrongType;
-use crate::protocol::{ProtocolError, Reply, RequestReader};
+use crate::protocol::{ProtocolError, ReadAhead, Reply, RequestReader};
 use crate::pubsub::{Hub, Kind, Queued};
 use crate::transactions::execute_with_transactions;
 use eggdb_platform::connection_limits::{MemoryBudget, UNCOUNTED_BUFFER_BYTES};
 use std::cell::RefCell;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
@@ -189,27 +189,23 @@ impl Connection<'_> {
         writer.write_all(bytes)
     }
 
-    fn peer_closed(&self) -> bool {
-        let stream = self
+    fn read_ahead(
+        &self,
+        reader: &mut RequestReader<StopAwareStream<'_>>,
+        admit: &mut dyn FnMut(usize) -> bool,
+    ) -> ReadAhead {
+        let mut stream = self
             .writer
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if stream.set_nonblocking(true).is_err() {
-            return true;
+            return ReadAhead::Closed;
         }
-        let mut probe = [0u8; 1];
-        let peeked = stream.peek(&mut probe);
+        let ahead = reader.read_ahead(&mut |buffer| stream.read(buffer), admit);
         if stream.set_nonblocking(false).is_err() {
-            return true;
+            return ReadAhead::Closed;
         }
-        match peeked {
-            Ok(0) => true,
-            Ok(_) => false,
-            Err(error) => !matches!(
-                error.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-            ),
-        }
+        ahead
     }
 
     fn start_outbox(&mut self, resp3: bool) {
@@ -375,7 +371,18 @@ fn serve_connection(
                                 };
                                 command.attempt(&context, db, OnWrongType::Wait)
                             };
-                            let mut abandoned = || stop() || connection.peer_closed();
+                            let arguments_held = held.bytes();
+                            let mut over_budget = false;
+                            let mut abandoned = || {
+                                if stop() {
+                                    return true;
+                                }
+                                let ahead = connection.read_ahead(&mut reader, &mut |bytes| {
+                                    held.hold_if_large(arguments_held.saturating_add(bytes))
+                                });
+                                over_budget = ahead == ReadAhead::OverBudget;
+                                ahead != ReadAhead::Open
+                            };
                             match waiters.wait(
                                 db,
                                 &mut command,
@@ -384,7 +391,14 @@ fn serve_connection(
                                 &mut abandoned,
                             ) {
                                 Some(reply) => vec![reply],
-                                None => break,
+                                None => {
+                                    if over_budget {
+                                        Reply::Error(OUT_OF_BUDGET.to_owned())
+                                            .encode(&mut out, client.resp3);
+                                        let _ = connection.send(&out);
+                                    }
+                                    break;
+                                }
                             }
                         }
                     }

@@ -99,7 +99,8 @@ relations psql's `\d` family reads.
   sent when it connected (`RESET` and `RESET ALL` do the same); `DISCARD PLANS`, `TEMP` and
   `SEQUENCES` are accepted too. Inside a block `DISCARD ALL` is `25001`.
 - **`DEALLOCATE [PREPARE] {name | ALL}`** forgets the connection's prepared statements of that
-  name, or all of them (psycopg sends it after a rollback). Not yet: `26000` for a name that was
+  name, or all of them (psycopg sends it after a rollback), both the protocol's and those made
+  with SQL `PREPARE`. Not yet: `26000` for a name that was
   never prepared, which is ignored instead.
 
 psql's describe commands (`\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\l`, `\du` and their `+`
@@ -1714,8 +1715,10 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
 - **`PREPARE name [(type, ...)] AS statement` and `EXECUTE name[(argument, ...)]`** (D342):
   PostgreSQL's SQL-level prepared statements, kept by the session for `SELECT`, `VALUES`,
   `TABLE`, `INSERT`, `UPDATE`, `DELETE`, `MERGE` and `WITH`. The arguments are evaluated and
-  bound to `$1`, `$2`, ... as the extended protocol binds values, typed by the declared types; a
-  wrong count is `42601`, an existing name `42P05`, an unknown one `26000`. `DEALLOCATE` and
+  bound to `$1`, `$2`, ... as the extended protocol binds values, typed by the declared types
+  (an undeclared one is a constant of unknown type, typed by where it stands); a wrong count is
+  `42601`, an existing name `42P05`, an unknown one `26000`, and each of them, as any error,
+  aborts a transaction block. `DEALLOCATE` and
   `DISCARD ALL` forget them. A session keeps at most 4096 of them and 64 MiB of their text
   (`54000`). Not yet: running the extended protocol's named statements with `EXECUTE` (the two
   are kept apart).
@@ -1964,7 +1967,9 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   cannot execute SELECT FOR UPDATE in a read-only transaction` (Oracle's read-only transaction
   answers `ORA-01456`); `LOCK TABLE` is accepted, as in PostgreSQL. A writing function called
   from `SELECT` is `25006` too, and a procedure that commits runs every transaction it starts
-  read-only under `default_transaction_read_only` (D338).
+  read-only under `default_transaction_read_only` (D338). Under `default_transaction_read_only =
+  on` a top-level `CALL` or `DO` runs non-atomic and holds the single writer for the whole
+  procedure (D338).
   `SHOW transaction_read_only` and `current_setting('transaction_read_only')` say whether the
   current transaction is read-only. A transaction that wrote may turn read-only and still commit
   what it wrote, but `SET TRANSACTION READ WRITE` after the transaction's first query is `25001

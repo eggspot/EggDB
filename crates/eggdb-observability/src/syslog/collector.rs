@@ -154,8 +154,9 @@ impl<'s, S: KeyValueStore + Sync> SyslogCollector<'s, S> {
     }
 
     /// The messages this collector has dropped: datagrams longer than
-    /// [`MAX_SYSLOG_MESSAGE_BYTES`], a TCP frame whose length or framing is refused, and every
-    /// message of a batch the `syslog` table refused to store.
+    /// [`MAX_SYSLOG_MESSAGE_BYTES`], a TCP frame whose length or framing is refused, an
+    /// octet-counted TCP frame cut short when its connection closed or went idle too long, and
+    /// every message of a batch the `syslog` table refused to store.
     pub fn messages_dropped(&self) -> u64 {
         self.messages_dropped.load(Ordering::Relaxed)
     }
@@ -343,9 +344,13 @@ impl<'s, S: KeyValueStore + Sync> SyslogCollector<'s, S> {
                 return;
             }
         };
-        if sender_finished && let Some(last) = framer.finish() {
-            let received_at = now_micros();
-            batch.push((received_at, parse(&last, received_at)));
+        match framer.finish() {
+            Ok(None) => {}
+            Ok(Some(last)) if sender_finished => {
+                let received_at = now_micros();
+                batch.push((received_at, parse(&last, received_at)));
+            }
+            Ok(Some(_)) | Err(_) => self.count_dropped(1),
         }
         self.store_batch(&mut session, &mut batch, log);
     }

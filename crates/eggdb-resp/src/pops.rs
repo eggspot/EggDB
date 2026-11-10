@@ -157,6 +157,34 @@ fn stored_sorted(
     }
 }
 
+pub(crate) fn any_list_to_pop(
+    keys: &dyn KeysRead,
+    list_keys: &[Vec<u8>],
+    now: u64,
+    on_wrong_type: OnWrongType,
+) -> Result<bool, String> {
+    for key in list_keys {
+        if stored_list(keys, key, now, on_wrong_type)?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub(crate) fn any_sorted_to_pop(
+    keys: &dyn KeysRead,
+    sorted_keys: &[Vec<u8>],
+    now: u64,
+    on_wrong_type: OnWrongType,
+) -> Result<bool, String> {
+    for key in sorted_keys {
+        if stored_sorted(keys, key, now, on_wrong_type)?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn save_list(
     keys: &mut dyn KeysWrite,
     key: &[u8],
@@ -260,11 +288,7 @@ pub(crate) fn pop_sorted(
     else {
         return Ok(None);
     };
-    let ordered = set.ordered();
-    let chosen: Vec<(f64, Vec<u8>)> = match end {
-        ScoreEnd::Lowest => ordered.into_iter().take(count).collect(),
-        ScoreEnd::Highest => ordered.into_iter().rev().take(count).collect(),
-    };
+    let chosen = set.first(count, end == ScoreEnd::Highest);
     let mut popped = Vec::with_capacity(chosen.len());
     let mut reply_bytes = 0usize;
     for (score, member) in chosen {

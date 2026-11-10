@@ -1,7 +1,7 @@
 use super::*;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 const SETTLE: Duration = Duration::from_millis(150);
@@ -74,16 +74,22 @@ fn test_config() -> ServerConfig {
 }
 
 fn with_server(test: impl FnOnce(SocketAddr)) {
-    let keyspace = MemoryKeyspace::default();
+    with_server_on(&MemoryKeyspace::default(), test_config(), test);
+}
+
+fn with_server_on(
+    keyspace: &(dyn Keyspace + Sync),
+    config: ServerConfig,
+    test: impl FnOnce(SocketAddr),
+) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let stopped = AtomicBool::new(false);
-    let config = test_config();
     std::thread::scope(|scope| {
         let _stop = StopOnDrop(&stopped);
         scope.spawn(|| {
             serve(
-                &keyspace,
+                keyspace,
                 &listener,
                 &config,
                 &|| stopped.load(Ordering::Acquire),
@@ -533,4 +539,94 @@ fn inside_multi_a_connection_never_blocks() {
         assert_eq!(client.call("XREAD BLOCK 0 STREAMS events $"), "+QUEUED|");
         assert_eq!(client.call("EXEC"), "*3|*-1|$-1|*-1|");
     });
+}
+
+#[derive(Default)]
+struct CountingKeyspace {
+    inner: MemoryKeyspace,
+    writes: AtomicUsize,
+}
+
+impl Keyspace for CountingKeyspace {
+    fn read(
+        &self,
+        db: u32,
+        body: &mut dyn FnMut(&dyn KeysRead) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.inner.read(db, body)
+    }
+
+    fn write(
+        &self,
+        db: u32,
+        body: &mut dyn FnMut(&mut dyn KeysWrite) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        self.inner.write(db, body)
+    }
+}
+
+#[test]
+fn a_client_blocked_on_empty_keys_opens_no_write_transaction() {
+    let keyspace = CountingKeyspace::default();
+    with_server_on(&keyspace, test_config(), |address| {
+        let mut client = RespClient::connect(address);
+        let asked = Instant::now();
+        assert_eq!(client.call("BLPOP queue other 1"), "*-1|");
+        assert!(asked.elapsed() >= Duration::from_secs(1));
+        assert_eq!(client.call("BZPOPMIN scores 0.5"), "*-1|");
+        assert_eq!(client.call("BLMOVE queue target LEFT LEFT 0.5"), "*-1|");
+        assert_eq!(keyspace.writes.load(Ordering::SeqCst), 0);
+        assert_eq!(client.call("RPUSH queue a"), ":1|");
+        assert_eq!(client.call("BLPOP queue 1"), "*2|$5|queue|$1|a|");
+    });
+}
+
+#[test]
+fn a_client_that_closes_behind_a_pipelined_blocking_command_takes_no_element() {
+    let config = ServerConfig {
+        max_connections: 2,
+        ..test_config()
+    };
+    with_server_on(&MemoryKeyspace::default(), config, |address| {
+        let mut gone = TcpStream::connect(address).unwrap();
+        gone.write_all(b"*3\r\n$5\r\nBLPOP\r\n$5\r\nqueue\r\n$1\r\n0\r\n")
+            .unwrap();
+        std::thread::sleep(SETTLE);
+        gone.write_all(b"*1\r\n$4\r\nPING\r\n").unwrap();
+        drop(gone);
+        std::thread::sleep(SETTLE * 4);
+        let mut pusher = RespClient::connect(address);
+        assert_eq!(pusher.call("LPUSH queue x"), ":1|");
+        std::thread::sleep(SETTLE);
+        assert_eq!(pusher.call("LLEN queue"), ":1|");
+        let mut another = RespClient::connect(address);
+        assert_eq!(another.call("PING"), "+PONG|");
+    });
+}
+
+#[test]
+fn stream_reads_stop_with_oom_once_they_pass_the_reply_room() {
+    let mut redis = Harness::new();
+    let value = "v".repeat(1000);
+    for id in 1..=4 {
+        assert_eq!(
+            redis.text(&format!("XADD events {id}-1 field {value}")),
+            format!("${}|{id}-1|", 3)
+        );
+    }
+    let mut run = |line: &str, reply_room_bytes: usize| {
+        let context = Context {
+            keyspace: &redis.keyspace,
+            password_sha256: None,
+            now_ms: 1_000_000,
+            reply_room_bytes,
+        };
+        let mut out = Vec::new();
+        execute(&context, &mut redis.client, &Harness::arguments(line)).encode(&mut out, false);
+        String::from_utf8(out).unwrap()
+    };
+    assert!(run("XREAD STREAMS events 0", 2500).starts_with("-OOM "));
+    assert!(run("XREAD COUNT 2 STREAMS events 0", 2500).starts_with("*1\r\n"));
+    assert!(run("XREAD STREAMS events 0", 8000).starts_with("*1\r\n"));
 }

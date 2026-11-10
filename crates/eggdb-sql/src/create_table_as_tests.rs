@@ -955,3 +955,123 @@ fn sqlserver_select_into_keeps_not_null_of_copied_columns() {
         Some(515)
     );
 }
+
+#[test]
+fn postgresql_execute_runs_with_the_prepared_statements_own_needs() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for sql in [
+        "CREATE TABLE t (id integer PRIMARY KEY)",
+        "INSERT INTO t VALUES (1)",
+        "CREATE SEQUENCE q",
+        "PREPARE s AS SELECT * FROM t FOR UPDATE",
+        "PREPARE n AS SELECT nextval('q')",
+    ] {
+        last(&mut session, sql);
+    }
+    assert_eq!(last(&mut session, "EXECUTE n"), "nextval\n1\nSELECT 1");
+    assert_eq!(last(&mut session, "EXECUTE n"), "nextval\n2\nSELECT 1");
+    assert_eq!(
+        last(&mut session, "SELECT currval('q')"),
+        "currval\n2\nSELECT 1"
+    );
+    last(&mut session, "BEGIN READ ONLY");
+    assert_eq!(fails(&mut session, "EXECUTE s").state().code(), "25006");
+    last(&mut session, "ROLLBACK");
+    assert_eq!(last(&mut session, "EXECUTE s"), "id\n1\nSELECT 1");
+}
+
+#[test]
+fn postgresql_untyped_prepare_parameters_take_their_type_from_the_statement() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "CREATE TABLE t (ts timestamp)");
+    last(&mut session, "PREPARE r AS INSERT INTO t (ts) VALUES ($1)");
+    assert_eq!(last(&mut session, "EXECUTE r('2024-01-01')"), "INSERT 0 1");
+    assert_eq!(
+        last(&mut session, "SELECT ts FROM t"),
+        "ts\n2024-01-01 00:00:00\nSELECT 1"
+    );
+}
+
+#[test]
+fn postgresql_prepare_and_execute_errors_abort_the_transaction_block() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    films(&mut session);
+    last(&mut session, "PREPARE one(int) AS SELECT $1");
+    last(
+        &mut session,
+        "PREPARE add_film(char(5), varchar(40)) AS INSERT INTO films (code, title) VALUES ($1, $2)",
+    );
+    for (failing, code) in [
+        ("EXECUTE missing", "26000"),
+        ("EXECUTE one(1, 2)", "42601"),
+        ("EXECUTE one(1 / 0)", "22012"),
+        ("PREPARE one AS SELECT 1", "42P05"),
+        ("CREATE TABLE copied AS EXECUTE missing", "26000"),
+        (
+            "CREATE TABLE copied AS EXECUTE add_film('Z1', 'x')",
+            "42809",
+        ),
+    ] {
+        last(&mut session, "BEGIN");
+        assert_eq!(
+            fails(&mut session, failing).state().code(),
+            code,
+            "{failing}"
+        );
+        assert_eq!(
+            fails(&mut session, "SELECT 1").state().code(),
+            "25P02",
+            "{failing}"
+        );
+        last(&mut session, "ROLLBACK");
+    }
+}
+
+#[test]
+fn postgresql_extended_protocol_counts_no_parameters_for_a_prepare_body() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let prepared = session
+        .prepare("PREPARE p(int) AS SELECT $1 + $2", &[])
+        .unwrap();
+    assert_eq!(prepared.parameter_count, 0);
+    let described = session
+        .describe("PREPARE p(int) AS SELECT $1 + $2", &[])
+        .unwrap();
+    assert!(described.parameter_types.is_empty(), "{described:?}");
+    assert_eq!(
+        session
+            .prepare("EXECUTE p($1, 2)", &[])
+            .unwrap()
+            .parameter_count,
+        1
+    );
+}
+
+#[test]
+fn postgresql_table_subqueries_follow_the_search_path_and_expand_views() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for sql in [
+        "CREATE SCHEMA side",
+        "CREATE TABLE side.only_here (id integer)",
+        "INSERT INTO side.only_here VALUES (7)",
+        "CREATE TABLE ids (id integer)",
+        "INSERT INTO ids VALUES (1), (2)",
+        "CREATE VIEW big_ids AS SELECT id FROM ids WHERE id > 1",
+        "SET search_path = side, public",
+    ] {
+        last(&mut session, sql);
+    }
+    assert_eq!(
+        last(&mut session, "SELECT 7 IN (TABLE only_here) AS found"),
+        "found\nt\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT (TABLE big_ids) AS big"),
+        "big\n2\nSELECT 1"
+    );
+}

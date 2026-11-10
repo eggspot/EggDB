@@ -99,6 +99,14 @@ fn echo(request: &Request) -> Response {
         .with_header("X-Seen-Transfer-Encoding", &seen("transfer-encoding"))
 }
 
+pub(crate) struct StopOnDrop<'a>(pub(crate) &'a AtomicBool);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 fn with_server(limits: &Limits<'_>, test: impl FnOnce(SocketAddr)) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -113,8 +121,8 @@ fn with_server(limits: &Limits<'_>, test: impl FnOnce(SocketAddr)) {
             )
             .unwrap();
         });
+        let _stop_even_on_a_failure = StopOnDrop(&stopped);
         test(address);
-        stopped.store(true, Ordering::Release);
     });
 }
 
@@ -295,6 +303,16 @@ fn a_zip_bomb_is_refused_with_413_and_the_budget_bounds_what_decodes() {
         let refused = post(address, "/echo", "Content-Encoding: gzip\r\n", &fitting);
         assert_eq!(refused.status, 503);
         assert_eq!(refused.header("retry-after"), Some("1"));
+        let too_large = post(address, "/echo", "Content-Encoding: gzip\r\n", &bomb);
+        assert_eq!(too_large.status, 413);
+        assert_eq!(too_large.header("retry-after"), None);
+        let nested = post(
+            address,
+            "/echo",
+            "Content-Encoding: gzip, gzip\r\n",
+            &gzip(&bomb),
+        );
+        assert_eq!(nested.status, 413);
     });
     assert_eq!(small.used_bytes(), 0);
 }

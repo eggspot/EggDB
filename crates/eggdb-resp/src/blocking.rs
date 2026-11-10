@@ -1,7 +1,7 @@
 use crate::commands::{Context, integer, reading, writing};
 use crate::pops::{
-    ListEnd, ManyPop, OnWrongType, ScoreEnd, list_many_reply, move_list_item, parse_many_pop,
-    pop_first_list, pop_first_sorted, sorted_many_reply,
+    ListEnd, ManyPop, OnWrongType, ScoreEnd, any_list_to_pop, any_sorted_to_pop, list_many_reply,
+    move_list_item, parse_many_pop, pop_first_list, pop_first_sorted, sorted_many_reply,
 };
 use crate::protocol::Reply;
 use crate::streams::{StreamRead, parse_xread, read_new_entries};
@@ -182,12 +182,40 @@ impl BlockingCommand {
         }
     }
 
+    fn may_take(&self, context: &Context<'_>, db: u32, on_wrong_type: OnWrongType) -> bool {
+        let now = context.now_ms;
+        let mut found = true;
+        reading(context, db, |store| {
+            found = match &self.wanted {
+                Wanted::FirstOfLists { keys, .. } => {
+                    any_list_to_pop(store, keys, now, on_wrong_type)?
+                }
+                Wanted::Move { source, .. } => {
+                    any_list_to_pop(store, std::slice::from_ref(source), now, on_wrong_type)?
+                }
+                Wanted::ManyOfLists(pop) => any_list_to_pop(store, &pop.keys, now, on_wrong_type)?,
+                Wanted::FirstOfSorted { keys, .. } => {
+                    any_sorted_to_pop(store, keys, now, on_wrong_type)?
+                }
+                Wanted::ManyOfSorted(pop) => {
+                    any_sorted_to_pop(store, &pop.keys, now, on_wrong_type)?
+                }
+                Wanted::Stream(_) => true,
+            };
+            Ok(Reply::ok())
+        });
+        found
+    }
+
     pub(crate) fn attempt(
         &mut self,
         context: &Context<'_>,
         db: u32,
         on_wrong_type: OnWrongType,
     ) -> Option<Reply> {
+        if !self.may_take(context, db, on_wrong_type) {
+            return None;
+        }
         let mut taken = None;
         let outcome = match &mut self.wanted {
             Wanted::FirstOfLists { keys, end } => writing(context, db, |store| {
@@ -245,7 +273,7 @@ impl BlockingCommand {
                 Ok(Reply::ok())
             }),
             Wanted::Stream(read) => reading(context, db, |store| {
-                taken = read_new_entries(store, read, context.now_ms, on_wrong_type)?;
+                taken = read_new_entries(store, read, context, on_wrong_type)?;
                 Ok(Reply::ok())
             }),
         };

@@ -50,6 +50,37 @@ impl SortedSet {
         all.sort_by(order);
         all
     }
+
+    /// The `count` members with the lowest scores, lowest first, or with `highest` the `count`
+    /// with the highest scores, highest first; ties order by member bytes as in
+    /// [`SortedSet::ordered`]. Only the chosen members are copied.
+    pub fn first(&self, count: usize, highest: bool) -> Vec<(f64, Vec<u8>)> {
+        let compare = |left: &(f64, &[u8]), right: &(f64, &[u8])| {
+            let ascending = left.0.total_cmp(&right.0).then_with(|| left.1.cmp(right.1));
+            if highest {
+                ascending.reverse()
+            } else {
+                ascending
+            }
+        };
+        let mut all: Vec<(f64, &[u8])> = self
+            .scores
+            .iter()
+            .map(|(member, score)| (*score, member.as_slice()))
+            .collect();
+        let count = count.min(all.len());
+        if count == 0 {
+            return Vec::new();
+        }
+        if count < all.len() {
+            all.select_nth_unstable_by(count - 1, compare);
+            all.truncate(count);
+        }
+        all.sort_by(compare);
+        all.into_iter()
+            .map(|(score, member)| (score, member.to_vec()))
+            .collect()
+    }
 }
 
 /// A stream's entry identifier: milliseconds and a sequence number.
@@ -331,6 +362,21 @@ mod tests {
             &[1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255],
         ] {
             assert_eq!(Entry::decode(damaged), None);
+        }
+    }
+
+    #[test]
+    fn the_first_members_from_either_end_match_the_full_order() {
+        let mut zset = SortedSet::default();
+        for (member, score) in [("d", 4.0), ("b", 2.0), ("a", 2.0), ("c", -1.5), ("e", 9.0)] {
+            zset.insert(member.as_bytes().to_vec(), score);
+        }
+        let ordered = zset.ordered();
+        for count in 0..=6 {
+            let lowest: Vec<_> = ordered.iter().take(count).cloned().collect();
+            let highest: Vec<_> = ordered.iter().rev().take(count).cloned().collect();
+            assert_eq!(zset.first(count, false), lowest, "{count}");
+            assert_eq!(zset.first(count, true), highest, "{count}");
         }
     }
 }

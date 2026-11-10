@@ -3,6 +3,8 @@ use std::io::{self, Read};
 const MAX_ARGUMENTS: usize = 1 << 20;
 const MAX_BULK_BYTES: usize = 512 << 20;
 const MAX_LINE_BYTES: usize = 64 * 1024;
+const MAX_READ_AHEAD_BYTES: usize = MAX_BULK_BYTES;
+const READ_CHUNK_BYTES: usize = 16 * 1024;
 
 /// Why a request could not be read.
 #[derive(Debug, PartialEq, Eq)]
@@ -20,6 +22,13 @@ impl From<io::Error> for ProtocolError {
     fn from(_: io::Error) -> Self {
         Self::Closed
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadAhead {
+    Open,
+    Closed,
+    OverBudget,
 }
 
 /// A reply, written in RESP2 or RESP3 by [`Reply::encode`].
@@ -194,13 +203,42 @@ impl<R: Read> RequestReader<R> {
             self.buffer.clear();
             self.start = 0;
         }
-        let mut chunk = [0u8; 16 * 1024];
+        let mut chunk = [0u8; READ_CHUNK_BYTES];
         let count = self.inner.read(&mut chunk)?;
         if count == 0 {
             return Err(ProtocolError::Closed);
         }
         self.buffer.extend_from_slice(&chunk[..count]);
         Ok(())
+    }
+
+    pub(crate) fn read_ahead(
+        &mut self,
+        receive: &mut dyn FnMut(&mut [u8]) -> io::Result<usize>,
+        admit: &mut dyn FnMut(usize) -> bool,
+    ) -> ReadAhead {
+        if self.start > 0 {
+            self.buffer.drain(..self.start);
+            self.start = 0;
+        }
+        let mut chunk = [0u8; READ_CHUNK_BYTES];
+        loop {
+            let unread = self.buffer.len();
+            let wanted = chunk.len().min(MAX_READ_AHEAD_BYTES.saturating_sub(unread));
+            if wanted == 0 {
+                return ReadAhead::Open;
+            }
+            if !admit(unread.saturating_add(wanted)) {
+                return ReadAhead::OverBudget;
+            }
+            match receive(&mut chunk[..wanted]) {
+                Ok(0) => return ReadAhead::Closed,
+                Ok(count) => self.buffer.extend_from_slice(&chunk[..count]),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return ReadAhead::Open,
+                Err(_) => return ReadAhead::Closed,
+            }
+        }
     }
 
     fn line(&mut self) -> Result<Vec<u8>, ProtocolError> {
@@ -344,6 +382,40 @@ mod tests {
         assert_eq!(
             reader.next_request_within(&mut |bytes| bytes < 50),
             Ok(vec![b"PING".to_vec()])
+        );
+    }
+
+    #[test]
+    fn read_ahead_buffers_ready_bytes_and_sees_the_close_behind_them() {
+        let mut reader = RequestReader::new(&b"*1\r\n$4\r\nPING\r\n*1\r\n$4\r\nPING\r\n"[..]);
+        assert_eq!(reader.next_request(), Ok(vec![b"PING".to_vec()]));
+        let mut arrivals = vec![b"*1\r\n$4\r\nECHO".to_vec(), Vec::new()].into_iter();
+        let mut receive = |buffer: &mut [u8]| match arrivals.next() {
+            Some(bytes) => {
+                buffer[..bytes.len()].copy_from_slice(&bytes);
+                Ok(bytes.len())
+            }
+            None => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+        };
+        let mut asked = Vec::new();
+        let outcome = reader.read_ahead(&mut receive, &mut |bytes| {
+            asked.push(bytes);
+            true
+        });
+        assert_eq!(outcome, ReadAhead::Closed);
+        assert_eq!(asked, [14 + READ_CHUNK_BYTES, 26 + READ_CHUNK_BYTES]);
+        assert_eq!(reader.next_request(), Ok(vec![b"PING".to_vec()]));
+        assert!(reader.has_buffered());
+
+        let mut waiting = |_: &mut [u8]| Err(io::Error::from(io::ErrorKind::WouldBlock));
+        let mut reader = RequestReader::new(&b""[..]);
+        assert_eq!(
+            reader.read_ahead(&mut waiting, &mut |_| true),
+            ReadAhead::Open
+        );
+        assert_eq!(
+            reader.read_ahead(&mut waiting, &mut |_| false),
+            ReadAhead::OverBudget
         );
     }
 

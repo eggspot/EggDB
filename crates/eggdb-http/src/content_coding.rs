@@ -23,10 +23,15 @@ impl ContentCoding {
         }
     }
 
-    fn decode(self, data: &[u8], limit: usize) -> Result<Vec<u8>, DecompressError> {
+    fn decode(
+        self,
+        data: &[u8],
+        limit: usize,
+        memory_bytes: usize,
+    ) -> Result<Vec<u8>, DecompressError> {
         match self {
-            Self::Gzip => eggdb_content::gunzip(data, limit),
-            Self::Deflate => eggdb_content::zlib_inflate(data, limit),
+            Self::Gzip => eggdb_content::gunzip_within_memory(data, limit, memory_bytes),
+            Self::Deflate => eggdb_content::zlib_inflate_within_memory(data, limit, memory_bytes),
         }
     }
 }
@@ -55,6 +60,28 @@ fn codings_in_applied_order(request: &Request) -> Result<Vec<ContentCoding>, Htt
     Ok(codings)
 }
 
+fn hold_memory_for_decoding(
+    held: &mut Reservation<'_>,
+    budget: &MemoryBudget,
+    compressed: usize,
+    max_body_bytes: usize,
+) -> usize {
+    if held.hold_if_large(compressed.saturating_add(max_body_bytes)) {
+        return max_body_bytes;
+    }
+    let room = budget
+        .limit_bytes()
+        .saturating_sub(budget.used_bytes())
+        .saturating_add(held.bytes())
+        .max(UNCOUNTED_BUFFER_BYTES);
+    let memory_bytes = room.saturating_sub(compressed).min(max_body_bytes);
+    if held.hold_if_large(compressed.saturating_add(memory_bytes)) {
+        memory_bytes
+    } else {
+        0
+    }
+}
+
 pub(crate) fn decode_request_body(
     request: &mut Request,
     max_body_bytes: usize,
@@ -71,25 +98,20 @@ pub(crate) fn decode_request_body(
     let codings = codings_in_applied_order(request)?;
     if !request.body.is_empty() {
         for coding in codings.iter().rev() {
-            let budget_left = budget
-                .limit_bytes()
-                .saturating_sub(budget.used_bytes())
-                .max(UNCOUNTED_BUFFER_BYTES);
-            let limit = max_body_bytes.min(budget_left);
+            let compressed = request.body.len();
+            let memory_bytes = hold_memory_for_decoding(held, budget, compressed, max_body_bytes);
             let decoded = coding
-                .decode(&request.body, limit)
+                .decode(&request.body, max_body_bytes, memory_bytes)
                 .map_err(|error| match error {
-                    DecompressError::PastLimit(_) if limit < max_body_bytes => {
-                        HttpError::OverMemoryBudget
-                    }
                     DecompressError::PastLimit(_) => HttpError::BodyTooLarge,
+                    DecompressError::PastMemory(_) => HttpError::OverMemoryBudget,
                     DecompressError::Corrupt(_) => HttpError::CorruptContentCoding,
                 })?;
-            if !held.hold_if_large(request.body.len().saturating_add(decoded.len())) {
+            if !held.hold_if_large(compressed.saturating_add(decoded.capacity())) {
                 return Err(HttpError::OverMemoryBudget);
             }
             request.body = decoded;
-            if !held.hold_if_large(request.body.len()) {
+            if !held.hold_if_large(request.body.capacity()) {
                 return Err(HttpError::OverMemoryBudget);
             }
         }

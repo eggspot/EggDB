@@ -9,7 +9,10 @@ mod inflate;
 mod text;
 mod zip;
 
-pub use inflate::{DecompressError, gunzip, inflate, zlib_inflate};
+pub use inflate::{
+    DecompressError, gunzip, gunzip_within_memory, inflate, zlib_inflate,
+    zlib_inflate_within_memory,
+};
 pub use zip::{ZipArchive, ZipEntry, crc32};
 
 /// Why content could not be read.

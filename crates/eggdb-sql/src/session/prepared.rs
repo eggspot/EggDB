@@ -1,4 +1,4 @@
-use super::{OutputColumn, Parameter, QueryResult, Session, highest_parameter};
+use super::{OutputColumn, Parameter, QueryResult, Session, StatementFlags, highest_parameter};
 use crate::ast::{ExecutePrepared, Expr, PrepareStatement, PreparedCommand, Statement};
 use crate::copy::CopyIo;
 use crate::dialect::Dialect;
@@ -59,23 +59,39 @@ impl Session<'_> {
         command: &PreparedCommand,
         io: &mut CopyIo<'_, '_>,
     ) -> SqlResult<QueryResult> {
-        match command {
+        let result = match command {
             PreparedCommand::Prepare(prepare) => self.remember_prepared(prepare),
-            PreparedCommand::Execute(execute) => {
-                let mut statement = self.prepared_statement(execute)?;
-                self.run_statement(&mut statement, io)
-            }
-        }
+            PreparedCommand::Execute(execute) => self
+                .prepared_statement(execute)
+                .and_then(|mut statement| self.run_statement(&mut statement, io)),
+        };
+        self.failing_block_on_error(result)
+    }
+
+    pub(super) fn executed_prepared_flags(&self, statement: &Statement) -> Option<StatementFlags> {
+        let execute = match statement {
+            Statement::Prepared(PreparedCommand::Execute(execute)) => execute,
+            Statement::CreateTableAs(create) => match &create.query {
+                Statement::Prepared(PreparedCommand::Execute(execute)) => execute,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let prepared = self.sql_prepared.statements.get(&execute.name.text)?;
+        let tokens = tokenize_in(&prepared.text, prepared.dialect).ok()?;
+        Some(StatementFlags::from_tokens(Some(&tokens), prepared.dialect))
     }
 
     pub(super) fn prepared_query(&mut self, execute: &ExecutePrepared) -> SqlResult<Statement> {
-        let statement = self.prepared_statement(execute)?;
+        let statement = self.prepared_statement(execute);
+        let statement = self.failing_block_on_error(statement)?;
         if !matches!(statement, Statement::Select(_) | Statement::Query(_)) {
-            return Err(SqlError::new(
+            let refused = Err(SqlError::new(
                 SqlState::WRONG_OBJECT_TYPE,
                 "prepared statement is not a SELECT",
             )
             .at(execute.name.position));
+            return self.failing_block_on_error(refused);
         }
         Ok(statement)
     }
@@ -161,11 +177,7 @@ impl Session<'_> {
             .iter()
             .enumerate()
             .map(|(index, value)| Parameter {
-                declared_type: prepared
-                    .parameter_types
-                    .get(index)
-                    .copied()
-                    .or_else(|| value.sql_type()),
+                declared_type: prepared.parameter_types.get(index).copied(),
                 value: prepared.dialect.value_text(value),
             })
             .collect();

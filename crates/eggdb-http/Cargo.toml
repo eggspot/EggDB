@@ -1,5 +1,6 @@
 [package]
 name = "eggdb-http"
+autotests = false
 description = "EggDB's own HTTP/1.1 server (RFC 9110 and RFC 9112), small and bounded, for the metrics endpoint and later HTTP APIs."
 version.workspace = true
 edition.workspace = true
@@ -12,3 +13,7 @@ eggdb-platform = { path = "../eggdb-platform" }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "all"
+path = "tests/all/main.rs"

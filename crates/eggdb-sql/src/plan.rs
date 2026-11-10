@@ -619,7 +619,10 @@ pub(crate) fn plan(
         let direction = order.and_then(|order| {
             let direction = order_direction(&best.order_columns, best.equal, best.single, order)?;
             let apart = reads_nulls_apart(table, &best.order_columns, best.equal, order)?;
-            Some((direction, apart && !best.ranged))
+            if apart && best.ranged {
+                return None;
+            }
+            Some((direction, apart))
         });
         let used = if best.point {
             Use::Point
