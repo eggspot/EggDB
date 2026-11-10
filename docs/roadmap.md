@@ -887,7 +887,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   stream in a new stored value kind 6, with pinned test vectors, truncation and byte-flip tests
   and `docs/format.md`'s RESP value section (D35, D193, D347).
 - Geo searches over the geohash ranges of the nine neighbouring cells instead of every member,
-  and RESP3 double replies for `GEOPOS`/`WITHCOORD` coordinates (D330).
+  and RESP3 double replies for `GEOPOS`/`WITHCOORD` coordinates (D330). RESP3 doubles: **code
+  written, unbuilt** (code-only mode, 2026-11-10, D394).
 - Keyspace notifications, the rest of `CLIENT` (`LIST`, `KILL`, ...), the rest of `INFO`
   (it has only `blocked_clients`, D347), `OBJECT` and `DEBUG` (D12, D193).
 - Cluster mode: slots, the cluster commands and sharded pub/sub (`SSUBSCRIBE`) (D193).

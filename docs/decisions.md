@@ -418,3 +418,4 @@ its full title with its status.
 - [D391](decisions/D391.md) Code-only batch 38 (M6a): `pg_sequences.last_value` for identity columns
 - [D392](decisions/D392.md) Code-only batch 39 (M6b): ledger tables refuse `TRUNCATE` and `DROP TABLE`
 - [D393](decisions/D393.md) Code-only batch 40 (M6c): `lock_timeout` on the wait for the writer
+- [D394](decisions/D394.md) Code-only batch 41 (M7): RESP3 double replies for `GEOPOS` and `WITHCOORD`

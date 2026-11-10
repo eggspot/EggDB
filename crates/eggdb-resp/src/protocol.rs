@@ -46,6 +46,9 @@ pub enum Reply {
     Array(Option<Vec<Reply>>),
     /// A floating-point number: RESP3's `,`, a bulk string in RESP2.
     Double(f64),
+    /// A floating-point number: RESP3's `,`, and in RESP2 the bulk string given, for replies
+    /// whose RESP2 text Redis writes its own way (as `GEOPOS`'s coordinates).
+    DoubleWithText(f64, Vec<u8>),
     /// Field-value pairs: RESP3's `%`, a flat array in RESP2.
     Map(Vec<(Reply, Reply)>),
     /// Members: RESP3's `~`, an array in RESP2.
@@ -121,6 +124,13 @@ impl Reply {
                     out.extend_from_slice(format!(",{text}\r\n").as_bytes());
                 } else {
                     Self::bulk(text).encode(out, resp3);
+                }
+            }
+            Self::DoubleWithText(number, text) => {
+                if resp3 {
+                    out.extend_from_slice(format!(",{}\r\n", format_double(*number)).as_bytes());
+                } else {
+                    Self::bulk(text.clone()).encode(out, resp3);
                 }
             }
             Self::PairArray(pairs) if !resp3 => encode_nested_pairs(pairs, out, resp3),

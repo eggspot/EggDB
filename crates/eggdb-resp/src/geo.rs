@@ -73,8 +73,8 @@ fn distance_text(meters: f64, unit_meters: f64) -> Vec<u8> {
 
 fn coordinates_reply(point: Point) -> Reply {
     Reply::Array(Some(vec![
-        Reply::bulk(coordinate_text(point.longitude)),
-        Reply::bulk(coordinate_text(point.latitude)),
+        Reply::DoubleWithText(point.longitude, coordinate_text(point.longitude)),
+        Reply::DoubleWithText(point.latitude, coordinate_text(point.latitude)),
     ]))
 }
 

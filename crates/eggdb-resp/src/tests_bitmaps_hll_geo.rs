@@ -844,3 +844,35 @@ fn setbit_and_pfadd_queue_in_multi_and_touch_watched_keys() {
     assert_eq!(redis.transacted("PFCOUNT visits"), "+QUEUED|");
     assert_eq!(redis.transacted("EXEC"), "*-1|");
 }
+
+#[test]
+fn geopos_coordinates_are_doubles_in_resp3_and_redis_text_in_resp2() {
+    let mut stream = Vec::new();
+    stream.extend(wire_request(&[b"GEOADD", b"Sicily", b"13.361389", b"38.115556", b"Palermo"]));
+    stream.extend_from_slice(b"GEOPOS Sicily Palermo\r\n");
+    stream.extend(wire_request(&[b"HELLO", b"3"]));
+    stream.extend_from_slice(b"GEOPOS Sicily Palermo\r\n");
+    let mut reader = RequestReader::new(stream.as_slice());
+    let keyspace = MemoryKeyspace::default();
+    let mut client = Client {
+        authenticated: true,
+        ..Client::default()
+    };
+    let mut answers = Vec::new();
+    while let Ok(request) = reader.next_request() {
+        let context = Context {
+            keyspace: &keyspace,
+            password_sha256: None,
+            now_ms: 1_000_000,
+            reply_room_bytes: usize::MAX,
+            blocked_clients: 0,
+        };
+        let reply = execute(&context, &mut client, &request);
+        let mut out = Vec::new();
+        reply.encode(&mut out, client.resp3);
+        answers.push(String::from_utf8_lossy(&out).into_owned());
+    }
+    assert_eq!(answers.len(), 4);
+    assert!(answers[1].starts_with("*1\r\n*2\r\n$"), "{}", answers[1]);
+    assert!(answers[3].starts_with("*1\r\n*2\r\n,13.36138"), "{}", answers[3]);
+}
