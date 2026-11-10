@@ -17,6 +17,7 @@ struct Options {
     baseline: PathBuf,
     results: Option<PathBuf>,
     only: Option<String>,
+    skip: Vec<String>,
 }
 
 pub(crate) fn exit_code(program: &str, outcome: Result<bool, String>) -> ExitCode {
@@ -39,6 +40,7 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
         )),
         results: None,
         only: None,
+        skip: Vec::new(),
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -51,6 +53,11 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
             }
             "--only" => {
                 options.only = Some(args.next().ok_or("--only needs a benchmark family")?);
+            }
+            "--skip" => {
+                options
+                    .skip
+                    .push(args.next().ok_or("--skip needs a benchmark family")?);
             }
             other => return Err(format!("unknown argument `{other}`")),
         }
@@ -73,12 +80,7 @@ pub(crate) fn run(
         Err(error) => return Err(format!("{}: {error}", options.baseline.display())),
     };
     let mut results = Vec::new();
-    let chosen = |name: &str| {
-        options
-            .only
-            .as_deref()
-            .is_none_or(|family| name.split('.').next() == Some(family))
-    };
+    let chosen = |name: &str| is_chosen(&options, name);
     for (name, mut benchmark) in benchmarks.into_iter().filter(|(name, _)| chosen(name)) {
         let mut metrics = benchmark()?;
         if !options.update && blocking_ceiling(&metrics, &baseline) {
@@ -103,6 +105,18 @@ pub(crate) fn run(
         println!("wrote {}", path.display());
     }
     Ok(report.passed)
+}
+
+fn is_chosen(options: &Options, name: &str) -> bool {
+    let family = name.split('.').next();
+    options
+        .only
+        .as_deref()
+        .is_none_or(|only| family == Some(only))
+        && !options
+            .skip
+            .iter()
+            .any(|skipped| family == Some(skipped.as_str()))
 }
 
 fn write_results(path: &std::path::Path, lines: &str) -> std::io::Result<()> {
@@ -212,7 +226,7 @@ fn write_summary(title: &str, table: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{OS, Report, parse_options, report, write_results};
+    use super::{OS, Report, is_chosen, parse_options, report, write_results};
     use crate::baseline::{Baseline, Metric};
 
     fn baseline() -> Baseline {
@@ -268,6 +282,20 @@ mod tests {
         assert_eq!(options.results.unwrap().to_str(), Some("out/results.txt"));
         assert!(parse_options(["--results".to_string()].into_iter()).is_err());
         assert!(parse_options(std::iter::empty()).unwrap().results.is_none());
+    }
+
+    #[test]
+    fn skipped_families_are_not_run_and_only_and_skip_combine() {
+        let args = ["--skip", "footprint", "--skip", "lsm"].map(String::from);
+        let options = parse_options(args.into_iter()).unwrap();
+        assert!(!is_chosen(&options, "footprint.binary"));
+        assert!(!is_chosen(&options, "lsm.put"));
+        assert!(is_chosen(&options, "btree.get"));
+        assert!(is_chosen(&options, "footprints.other"));
+        let args = ["--only", "footprint", "--skip", "footprint"].map(String::from);
+        let options = parse_options(args.into_iter()).unwrap();
+        assert!(!is_chosen(&options, "footprint.binary"));
+        assert!(parse_options(["--skip".to_string()].into_iter()).is_err());
     }
 
     #[test]
