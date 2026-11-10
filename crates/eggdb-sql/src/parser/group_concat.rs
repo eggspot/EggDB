@@ -140,4 +140,77 @@ impl Parser<'_> {
             position,
         })
     }
+
+    pub(super) fn sqlite_json_aggregate(&mut self, name: &Name) -> SqlResult<Expr> {
+        let position = name.position;
+        let object = name.text.eq_ignore_ascii_case("json_group_object");
+        self.expect(&TokenKind::LeftParen)?;
+        let mut arguments = vec![self.expression()?];
+        while self.take(&TokenKind::Comma) {
+            arguments.push(self.expression()?);
+        }
+        let order = if self.take_word("order") {
+            self.expect_word("by")?;
+            self.order_items()?
+        } else {
+            Vec::new()
+        };
+        self.expect(&TokenKind::RightParen)?;
+        let wanted = if object { 2 } else { 1 };
+        if arguments.len() != wanted {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_FUNCTION,
+                format!("wrong number of arguments to function {}()", name.text),
+            )
+            .with_sqlite_code(1)
+            .at(position));
+        }
+        let (function, argument) = if object {
+            let pair = Expr {
+                kind: ExprKind::Function {
+                    name: "object_agg_arguments".to_owned(),
+                    arguments,
+                },
+                position,
+            };
+            (AggregateFunction::JsonObjectAgg, pair)
+        } else {
+            let mut arguments = arguments.into_iter();
+            let value = arguments
+                .next()
+                .ok_or_else(|| SqlError::new(SqlState::SYNTAX_ERROR, "json_group_array needs an argument"))?;
+            (AggregateFunction::JsonAgg, value)
+        };
+        let argument = if order.is_empty() {
+            argument
+        } else {
+            crate::aggregate::ordered_arguments(argument, order)
+        };
+        let aggregate = Expr {
+            kind: ExprKind::Aggregate {
+                function,
+                argument: Some(Box::new(argument)),
+                distinct: false,
+            },
+            position,
+        };
+        let empty = constant(
+            Value::Json(if object { "{}" } else { "[]" }.to_owned()),
+            position,
+        );
+        Ok(Expr {
+            kind: ExprKind::SqliteFunction {
+                name: "sqlite_json",
+                arguments: vec![Expr {
+                    kind: ExprKind::Function {
+                        name: "coalesce".to_owned(),
+                        arguments: vec![aggregate, empty],
+                    },
+                    position,
+                }],
+            },
+            position,
+        })
+    }
 }
+

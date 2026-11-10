@@ -1893,3 +1893,27 @@ SELECT '{"a":{"b":[1,"x"]}}' -> '$.a' AS j, '{"a":{"b":[1,"x"]}}' ->> '$.a.b[1]'
 j|t|label|last|missing
 {"b":[1,"x"]}|x|v|30|NULL
 SELECT 1
+
+chapter "JSON Functions And Operators": json_group_array and json_group_object (D381)
+ok
+CREATE TABLE jg381 (k TEXT, v INTEGER)
+
+ok
+INSERT INTO jg381 VALUES ('a', 1), ('b', NULL), ('c', 3)
+
+rows
+SELECT json_group_array(v) AS a, json_group_object(k, v) AS o FROM jg381
+----
+a|o
+[1,null,3]|{"a":1,"b":null,"c":3}
+SELECT 1
+
+rows
+SELECT json_group_array(v) AS a FROM jg381 WHERE v > 10
+----
+a
+[]
+SELECT 1
+
+ok
+DROP TABLE jg381
