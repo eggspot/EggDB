@@ -212,6 +212,8 @@ impl PartitionKey {
     }
 }
 
+pub(crate) const PRIMARY_KEY_LINK: u32 = u32::MAX;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct IndexLink {
     pub(crate) index: u32,
@@ -383,7 +385,11 @@ pub(crate) fn load(reader: &dyn KeyValueRead) -> SqlResult<PartitionCatalog> {
 }
 
 fn index_ids(definition: &TableDefinition) -> Vec<u32> {
-    definition.indexes.iter().map(|index| index.id).collect()
+    let mut ids: Vec<u32> = definition.indexes.iter().map(|index| index.id).collect();
+    if !definition.primary_key.is_empty() {
+        ids.push(PRIMARY_KEY_LINK);
+    }
+    ids
 }
 
 fn linked_records(reader: &dyn KeyValueRead) -> SqlResult<BTreeMap<String, PartitionRecord>> {

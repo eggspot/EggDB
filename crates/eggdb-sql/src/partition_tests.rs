@@ -1788,3 +1788,43 @@ fn the_partition_tree_functions_and_relispartition_cover_tables_and_indexes() {
         "count\n3\nSELECT 1"
     );
 }
+
+#[test]
+fn a_partitions_primary_key_is_attached_to_its_parents() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    answer(
+        &mut session,
+        "CREATE TABLE p (a int, b int, PRIMARY KEY (a)) PARTITION BY RANGE (a);
+         CREATE TABLE p1 PARTITION OF p FOR VALUES FROM (0) TO (10)",
+    );
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+              JOIN pg_class parent ON parent.oid = i.inhparent
+             WHERE parent.relname = 'p_pkey'"
+        ),
+        "relname\np1_pkey\nSELECT 1"
+    );
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT relispartition FROM pg_class WHERE relname = 'p1_pkey'"
+        ),
+        "relispartition\nt\nSELECT 1"
+    );
+    answer(
+        &mut session,
+        "CREATE TABLE p2 (a int, b int, PRIMARY KEY (a));
+         ALTER TABLE p ATTACH PARTITION p2 FOR VALUES FROM (10) TO (20);
+         ALTER INDEX p_pkey ATTACH PARTITION p2_pkey",
+    );
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT count(*) FROM pg_partition_tree('p_pkey')"
+        ),
+        "count\n3\nSELECT 1"
+    );
+}

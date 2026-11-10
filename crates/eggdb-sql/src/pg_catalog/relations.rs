@@ -297,38 +297,37 @@ fn index_attached_to_parent(
     owner: &TableDefinition,
     index: IndexSource,
 ) -> bool {
-    let IndexSource::Secondary(at) = index else {
-        return false;
-    };
-    let Some(definition) = owner.indexes.get(at) else {
-        return false;
+    let id = match index {
+        IndexSource::Primary => crate::partitions::PRIMARY_KEY_LINK,
+        IndexSource::Secondary(at) => match owner.indexes.get(at) {
+            Some(definition) => definition.id,
+            None => return false,
+        },
     };
     snapshot.partitions.record(&owner.name).is_some_and(|record| {
-        record.parent.is_some()
-            && record
-                .index_links
-                .iter()
-                .any(|link| link.index == definition.id)
+        record.parent.is_some() && record.index_links.iter().any(|link| link.index == id)
     })
 }
 
 fn index_oids(snapshot: &CatalogSnapshot) -> std::collections::HashMap<(&str, u32), u32> {
     let mut found = std::collections::HashMap::new();
     for entry in &snapshot.relations {
-        let RelationSource::Index {
-            table,
-            index: IndexSource::Secondary(at),
-        } = &entry.source
-        else {
+        let RelationSource::Index { table, index } = &entry.source else {
             continue;
         };
-        if let Some(owner) = snapshot
+        let Some(owner) = snapshot
             .relations
             .get(*table)
             .and_then(|owner| owner.table())
-            && let Some(index) = owner.indexes.get(*at)
-        {
-            found.insert((owner.name.as_str(), index.id), entry.oid);
+        else {
+            continue;
+        };
+        let id = match index {
+            IndexSource::Primary => Some(crate::partitions::PRIMARY_KEY_LINK),
+            IndexSource::Secondary(at) => owner.indexes.get(*at).map(|definition| definition.id),
+        };
+        if let Some(id) = id {
+            found.insert((owner.name.as_str(), id), entry.oid);
         }
     }
     found
