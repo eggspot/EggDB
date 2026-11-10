@@ -153,7 +153,7 @@ pub struct PageCache<F: File> {
     images: RefCell<BeforeImages>,
     new_chains: RefCell<BTreeMap<u64, Box<[u8]>>>,
     value_compression: Cell<crate::compression::ValueCompression>,
-    compressed_written: Cell<bool>,
+    compressed_written: Cell<u64>,
 }
 
 impl<F: File> PageCache<F> {
@@ -168,8 +168,9 @@ impl<F: File> PageCache<F> {
         self.value_compression.get()
     }
 
-    pub(crate) fn note_compressed_value(&self) {
-        self.compressed_written.set(true);
+    pub(crate) fn note_compressed_value(&self, feature: u64) {
+        self.compressed_written
+            .set(self.compressed_written.get() | feature);
     }
 
     /// Keeps the cache's memory in RAM, never swapped out, for as long as the cache lives.
@@ -211,7 +212,7 @@ impl<F: File> PageCache<F> {
             images: RefCell::new(BeforeImages::new(frames)),
             new_chains: RefCell::new(BTreeMap::new()),
             value_compression: Cell::new(crate::compression::ValueCompression::Off),
-            compressed_written: Cell::new(false),
+            compressed_written: Cell::new(0),
         })
     }
 
@@ -417,12 +418,10 @@ impl<F: File> PageCache<F> {
         let compressed = self.compressed_written.get();
         let committed = self.write_and_commit(&order, stamp, |superblock| {
             update(superblock);
-            if compressed {
-                superblock.features.incompatible |= crate::format::Features::COMPRESSED_VALUES;
-            }
+            superblock.features.incompatible |= compressed;
         });
         if committed.is_ok() {
-            self.compressed_written.set(false);
+            self.compressed_written.set(0);
         }
         if committed.is_ok() {
             self.images.get_mut().commit();
@@ -451,7 +450,7 @@ impl<F: File> PageCache<F> {
     /// commit.
     pub fn rollback(&mut self) -> Result<(), StorageError> {
         self.new_chains.get_mut().clear();
-        self.compressed_written.set(false);
+        self.compressed_written.set(0);
         self.drop_changes();
         self.images.get_mut().discard_pending();
         self.file.get_mut().rollback()

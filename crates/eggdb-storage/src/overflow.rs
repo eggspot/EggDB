@@ -7,6 +7,7 @@ use eggdb_platform::{Error, ErrorKind, File};
 
 pub(crate) const LAYOUT: u8 = 1;
 pub(crate) const COMPRESSED_LAYOUT: u8 = 2;
+pub(crate) const ZSTD_LAYOUT: u8 = 3;
 const COMPRESSION_THRESHOLD: usize = 4096;
 const COMPRESSED_LENGTH_BYTES: usize = 4;
 pub(crate) const REFERENCE_BYTES: usize = 16;
@@ -30,11 +31,20 @@ const COMPRESSED_HEADER: PageHeader = PageHeader {
     ..HEADER
 };
 
-fn compressed_form(value: &[u8]) -> Option<Vec<u8>> {
+const ZSTD_HEADER: PageHeader = PageHeader {
+    layout: ZSTD_LAYOUT,
+    ..HEADER
+};
+
+pub(crate) fn is_compressed(layout: u8) -> bool {
+    layout == COMPRESSED_LAYOUT || layout == ZSTD_LAYOUT
+}
+
+fn compressed_form(value: &[u8], compress: fn(&[u8]) -> Vec<u8>) -> Option<Vec<u8>> {
     if value.len() < COMPRESSION_THRESHOLD {
         return None;
     }
-    let block = crate::compression::lz4::compress(value);
+    let block = compress(value);
     let stored = block.len() + COMPRESSED_LENGTH_BYTES;
     if stored > value.len() - value.len() / 16 {
         return None;
@@ -91,13 +101,26 @@ pub(crate) fn write_value<F: File>(
     value: &[u8],
 ) -> Result<OverflowReference, StorageError> {
     let compressed = match cache.value_compression() {
-        crate::compression::ValueCompression::Lz4 => compressed_form(value),
+        crate::compression::ValueCompression::Lz4 => {
+            compressed_form(value, crate::compression::lz4::compress).map(|stored| {
+                (
+                    stored,
+                    COMPRESSED_HEADER,
+                    crate::format::Features::COMPRESSED_VALUES,
+                )
+            })
+        }
+        crate::compression::ValueCompression::Zstd => {
+            compressed_form(value, crate::compression::zstd::compress).map(|stored| {
+                (stored, ZSTD_HEADER, crate::format::Features::ZSTD_VALUES)
+            })
+        }
         crate::compression::ValueCompression::Off => None,
     };
     let (value, header) = match &compressed {
-        Some(stored) => {
-            cache.note_compressed_value();
-            (stored.as_slice(), COMPRESSED_HEADER)
+        Some((stored, header, feature)) => {
+            cache.note_compressed_value(*feature);
+            (stored.as_slice(), *header)
         }
         None => (value, HEADER),
     };
@@ -133,7 +156,8 @@ pub(crate) fn read_value(
     value: &mut Vec<u8>,
 ) -> Result<(), StorageError> {
     let length = checked_length(pages, reference)?;
-    if chain_layout(pages, reference)? == COMPRESSED_LAYOUT {
+    let layout = chain_layout(pages, reference)?;
+    if is_compressed(layout) {
         let mut stored = Vec::new();
         stored
             .try_reserve_exact(length)
@@ -142,7 +166,7 @@ pub(crate) fn read_value(
             stored.extend_from_slice(data);
             Ok(())
         })?;
-        let expanded = decompressed(&stored, reference.first_page)?;
+        let expanded = decompressed(&stored, reference.first_page, layout)?;
         if value.is_empty() {
             *value = expanded;
         } else {
@@ -173,10 +197,15 @@ fn stored_length(stored: &[u8], first_page: u64) -> Result<usize, StorageError> 
     Ok(length)
 }
 
-fn decompressed(stored: &[u8], first_page: u64) -> Result<Vec<u8>, StorageError> {
+fn decompressed(stored: &[u8], first_page: u64, layout: u8) -> Result<Vec<u8>, StorageError> {
     let length = stored_length(stored, first_page)?;
-    crate::compression::lz4::decompress(&stored[COMPRESSED_LENGTH_BYTES..], length)
-        .map_err(|problem| corrupt(first_page, problem))
+    let body = &stored[COMPRESSED_LENGTH_BYTES..];
+    let expanded = if layout == ZSTD_LAYOUT {
+        crate::compression::zstd::decompress(body, length)
+    } else {
+        crate::compression::lz4::decompress(body, length)
+    };
+    expanded.map_err(|problem| corrupt(first_page, problem))
 }
 
 pub(crate) fn chain_layout(
@@ -185,7 +214,7 @@ pub(crate) fn chain_layout(
 ) -> Result<u8, StorageError> {
     let page = pages.page(reference.first_page)?;
     match page.header().layout {
-        layout @ (LAYOUT | COMPRESSED_LAYOUT) => Ok(layout),
+        layout @ (LAYOUT | COMPRESSED_LAYOUT | ZSTD_LAYOUT) => Ok(layout),
         _ => Err(corrupt(
             reference.first_page,
             "the page has an unknown layout",
@@ -198,7 +227,7 @@ pub(crate) fn value_length(
     reference: &OverflowReference,
 ) -> Result<usize, StorageError> {
     let length = checked_length(pages, reference)?;
-    if chain_layout(pages, reference)? != COMPRESSED_LAYOUT {
+    if !is_compressed(chain_layout(pages, reference)?) {
         return Ok(length);
     }
     let page = pages.page(reference.first_page)?;

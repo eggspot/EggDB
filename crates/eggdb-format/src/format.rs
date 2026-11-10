@@ -195,9 +195,13 @@ impl Features {
     /// The incompatible bit of a file whose data pages are encrypted (D187): it opens only with
     /// its key, and a release that does not know it would read ciphertext as damaged pages.
     pub const ENCRYPTED_PAGES: u64 = 1 << 1;
+    /// The incompatible bit of a file with at least one value compressed with Zstandard
+    /// (overflow layout 3, D357): a release that does not know it would refuse the layout.
+    pub const ZSTD_VALUES: u64 = 1 << 2;
     /// The incompatible features this release knows: [`Features::COMPRESSED_VALUES`] and
     /// [`Features::ENCRYPTED_PAGES`].
-    pub const KNOWN_INCOMPATIBLE: u64 = Self::COMPRESSED_VALUES | Self::ENCRYPTED_PAGES;
+    pub const KNOWN_INCOMPATIBLE: u64 =
+        Self::COMPRESSED_VALUES | Self::ENCRYPTED_PAGES | Self::ZSTD_VALUES;
 
     /// Whether this release may open a file with these features for `access`. Unknown
     /// compatible bits are ignored, unknown read-only-compatible bits refuse a write, and

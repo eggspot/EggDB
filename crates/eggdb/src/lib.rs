@@ -81,6 +81,7 @@ pub use concurrent::{ConcurrentTransaction, Isolation};
 pub use database::{BackupReport, CheckReport, CompactReport, Database, Stats};
 pub use eggdb_platform::{Clock, SimClock};
 pub use eggdb_storage::CommitStamp;
+pub use eggdb_storage::ValueCompression;
 pub use error::{Error, ErrorKind, Result};
 pub use options::{Durability, Options};
 pub use scan::{KeyRange, Scan};

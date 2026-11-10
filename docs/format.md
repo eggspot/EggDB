@@ -129,6 +129,7 @@ other than 0, compression and encryption. The bits defined so far:
 | read-only compatible | 1 | `COLLECTION_COUNTS` | the first commit that writes a collection's kept count (D320), which every new collection has. A release without kept counts would write a collection's keys without changing its count, so it may only read the file. The bit stays set. |
 | incompatible | 0 | `COMPRESSED_VALUES` | the first commit that writes a value compressed on overflow pages of layout 2 (D171). A release without them would refuse those pages as damaged, so it refuses the file at open instead. The bit stays set. |
 | incompatible | 1 | `ENCRYPTED_PAGES` | the data pages are encrypted with AES-256-CTR under a key derived from the user's (D187); the file opens only with that key, checked against `page_key_check` |
+| incompatible | 2 | `ZSTD_VALUES` | the first commit that writes a value compressed with Zstandard on overflow pages of layout 3 (D357). The bit stays set. |
 
 ## Pages
 Every page except the header slots starts with a 16-byte header:
@@ -612,6 +613,11 @@ has layout 2. Everything else about the chain is as above: the reference's `valu
 stored length, and pages, indexes, counts and the zero tail are checked the same way. A chain
 mixing layouts, a length above 1 GiB, or a block that does not give exactly that many bytes is
 damage. Writing one sets the incompatible feature `COMPRESSED_VALUES`.
+
+**Zstandard chains (layout 3, D357).** The same as layout 2, except that the bytes after the
+4-byte length are Zstandard frames of RFC 8878 (EggDB writes one single-segment frame with its
+content size and checksum; dictionaries are damage). Writing one sets the incompatible feature
+`ZSTD_VALUES`.
 ## Hybrid-clock stamps (item 9)
 - A commit stamp is a `u64`: 52 bits of microseconds since **2026-01-01T00:00:00Z** (Unix time
   1767225600), followed by a 12-bit logical counter.

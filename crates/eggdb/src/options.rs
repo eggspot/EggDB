@@ -74,7 +74,7 @@ pub struct Options {
     pub(crate) busy_timeout: Duration,
     pub(crate) clock: ClockChoice,
     pub(crate) lock_cache: bool,
-    pub(crate) compress_values: bool,
+    pub(crate) value_compression: eggdb_storage::ValueCompression,
     pub(crate) encryption_key: Option<EncryptionKey>,
 }
 
@@ -136,7 +136,7 @@ impl Options {
             busy_timeout: Duration::ZERO,
             clock: ClockChoice::default(),
             lock_cache: false,
-            compress_values: false,
+            value_compression: eggdb_storage::ValueCompression::Off,
             encryption_key: None,
         }
     }
@@ -191,7 +191,22 @@ impl Options {
     /// The first compressed value marks the file, so a release from before compressed values
     /// refuses to open it rather than misread it; reading needs no option.
     pub fn compress_values(mut self, compress: bool) -> Self {
-        self.compress_values = compress;
+        self.value_compression = if compress {
+            eggdb_storage::ValueCompression::Lz4
+        } else {
+            eggdb_storage::ValueCompression::Off
+        };
+        self
+    }
+
+    /// Chooses how values of 4 KiB or more written from now on are compressed:
+    /// [`ValueCompression::Lz4`](crate::ValueCompression::Lz4) is what
+    /// [`Options::compress_values`] turns on, and
+    /// [`ValueCompression::Zstd`](crate::ValueCompression::Zstd) uses EggDB's own Zstandard codec,
+    /// slower to write and meant for cold data. Either marks the file with its own incompatible
+    /// feature at the first compressed value; reading needs no option.
+    pub fn value_compression(mut self, compression: crate::ValueCompression) -> Self {
+        self.value_compression = compression;
         self
     }
 
