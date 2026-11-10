@@ -1335,3 +1335,24 @@ fn search_filters_each_hit_source() {
         400
     );
 }
+
+#[test]
+fn get_doc_and_get_source_filter_the_source_by_url_parameters() {
+    let keyspace = MemoryKeyspace::default();
+    let api = seeded(&keyspace);
+    let hidden = body(&api.answer(&request("GET", "/books/_doc/1?_source=false", "")));
+    assert!(!hidden.contains("_source") && hidden.contains("\"found\":true"), "{hidden}");
+    let picked = body(&api.answer(&request(
+        "GET",
+        "/books/_doc/2?_source_includes=genre,pages",
+        "",
+    )));
+    assert!(
+        picked.contains("\"_source\":{\"genre\":\"nature\",\"pages\":300}"),
+        "{picked}"
+    );
+    let source = body(&api.answer(&request("GET", "/books/_source/2?_source=genre", "")));
+    assert_eq!(source, "{\"genre\":\"nature\"}");
+    let missing = api.answer(&request("GET", "/books/_source/99", ""));
+    assert_eq!(missing.status, 404);
+}

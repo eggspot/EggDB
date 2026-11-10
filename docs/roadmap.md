@@ -921,7 +921,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `_search/template` and `_msearch/template` with Mustache `{{var}}` and `{{#toJson}}` (D331,
   D348).
 - `if_seq_no`/`if_primary_term` and `retry_on_conflict` on `_update` (D348).
-- `_source` filtering on `GET _doc` (D331, D348).
+- `_source` filtering on `GET _doc` (D331, D348). **Code written, unbuilt** (code-only mode,
+  2026-11-10, D399), with `GET <index>/_source/<id>`.
 - Painless beyond D331's update subset (conditions, loops, comparisons, more methods, stored
   scripts), `query_string` syntax and highlighting (D196, D331).
 - Scroll (`scroll=1m`, `_search/scroll`, `DELETE _search/scroll`) with contexts bounded in count

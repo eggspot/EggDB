@@ -369,7 +369,12 @@ impl<'k> Api<'k> {
             }
             ("PUT" | "POST", [index, "_doc", id]) => self.index_document(index, id, request, false),
             ("PUT" | "POST", [index, "_create", id]) => self.index_document(index, id, request, true),
-            ("GET" | "HEAD", [index, "_doc", id]) => self.get_document(index, id, method == "HEAD"),
+            ("GET" | "HEAD", [index, "_doc", id]) => {
+                self.get_document(index, id, request, method == "HEAD")
+            }
+            ("GET" | "HEAD", [index, "_source", id]) => {
+                self.get_source(index, id, request, method == "HEAD")
+            }
             ("DELETE", [index, "_doc", id]) => self.delete_document(index, id),
             ("POST", [index, "_update", id]) => self.update_document(index, id, request),
             _ => Ok(error(405, "method_not_allowed", &format!("Incorrect HTTP method for uri [{}] and method [{method}]", request.path))),
@@ -549,24 +554,31 @@ impl<'k> Api<'k> {
         ))
     }
 
-    fn get_document(&self, index: &str, id: &str, head: bool) -> Answer {
+    fn get_document(&self, index: &str, id: &str, request: &Request, head: bool) -> Answer {
         let found = read(self.keyspace, |keys| {
             Ok(keys
                 .get(&document_key(index, id))?
                 .as_deref()
                 .and_then(unstored))
         })?;
+        let filter = multi::flag_filter(request);
         Ok(match found {
             Some(_) if head => json(200, String::new()),
-            Some((version, source)) => json(
-                200,
-                format!(
-                    "{{\"_index\":{},\"_id\":{},\"_version\":{version},\"_seq_no\":{},\"_primary_term\":1,\"found\":true,\"_source\":{source}}}",
-                    escaped(index),
-                    escaped(id),
-                    version.saturating_sub(1)
-                ),
-            ),
+            Some((version, source)) => {
+                let shown = filter
+                    .apply(&source)
+                    .map(|filtered| format!(",\"_source\":{filtered}"))
+                    .unwrap_or_default();
+                json(
+                    200,
+                    format!(
+                        "{{\"_index\":{},\"_id\":{},\"_version\":{version},\"_seq_no\":{},\"_primary_term\":1,\"found\":true{shown}}}",
+                        escaped(index),
+                        escaped(id),
+                        version.saturating_sub(1)
+                    ),
+                )
+            }
             None => json(
                 404,
                 format!(
@@ -574,6 +586,25 @@ impl<'k> Api<'k> {
                     escaped(index),
                     escaped(id)
                 ),
+            ),
+        })
+    }
+
+    fn get_source(&self, index: &str, id: &str, request: &Request, head: bool) -> Answer {
+        let found = read(self.keyspace, |keys| {
+            Ok(keys
+                .get(&document_key(index, id))?
+                .as_deref()
+                .and_then(unstored))
+        })?;
+        let filter = multi::flag_filter(request);
+        Ok(match found {
+            Some(_) if head => json(200, String::new()),
+            Some((_, source)) => json(200, filter.apply(&source).unwrap_or_else(|| "{}".to_owned())),
+            None => error(
+                404,
+                "resource_not_found_exception",
+                &format!("Document not found [{index}]/[{id}]"),
             ),
         })
     }
