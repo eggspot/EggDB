@@ -372,7 +372,28 @@ impl<'t> Parser<'t> {
                 }
             }
             "replace" if self.is_word_at(1, "into") => self.insert()?,
-            "attach" | "detach" | "vacuum" | "reindex" => {
+            "vacuum" | "reindex" => {
+                let tag = if word.eq_ignore_ascii_case("vacuum") {
+                    "VACUUM"
+                } else {
+                    "REINDEX"
+                };
+                self.at += 1;
+                if tag == "VACUUM" {
+                    if matches!(self.peek_kind(), TokenKind::Word(_) | TokenKind::QuotedIdentifier(_))
+                        && !self.is_word("into")
+                    {
+                        self.name()?;
+                    }
+                    if self.is_word("into") {
+                        return Err(self.not_supported("VACUUM INTO"));
+                    }
+                } else if matches!(self.peek_kind(), TokenKind::Word(_) | TokenKind::QuotedIdentifier(_)) {
+                    self.table_name()?;
+                }
+                Statement::Ignored { tag, notice: None }
+            }
+            "attach" | "detach" => {
                 return Err(self.not_supported(&word.to_ascii_uppercase()));
             }
             _ => return Ok(None),

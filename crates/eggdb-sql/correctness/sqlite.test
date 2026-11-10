@@ -1982,3 +1982,16 @@ DROP TABLE tt383
 
 ok
 DROP TABLE log383
+
+chapter "VACUUM", "REINDEX": accepted; EggDB reuses freed pages and its indexes never go stale (D384)
+ok
+VACUUM
+
+ok
+VACUUM main
+
+ok
+REINDEX
+
+error 0A000 1
+VACUUM INTO 'copy.db'

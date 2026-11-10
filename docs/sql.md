@@ -4817,7 +4817,7 @@ And more, not in the suite yet:
 - `PRAGMA user_version`, `foreign_keys`, `journal_mode` and `synchronous` are per session, not
   kept in the file; foreign keys are never enforced.
 - Not supported yet: `CREATE INDEX`, `UNIQUE` and `CHECK` constraints, `COLLATE NOCASE`,
-  views, `ATTACH`, `VACUUM`, and bare columns in aggregate
+  views, `ATTACH`, `VACUUM INTO`, and bare columns in aggregate
   queries. `group_concat(X [, Y])` (with `DISTINCT` and `ORDER BY`) and `total(X)` are built
   (D376), and so are SQLite's math functions (`acos` ... `trunc`, `log(B, X)`, `pi()`, NULL for
   an argument that does not look like a number or is out of the function's domain) and `unhex`,
@@ -4832,6 +4832,9 @@ And more, not in the suite yet:
   `json_each(X [, P])` and `json_tree(X [, P])` with SQLite's columns `key`, `value`, `type`,
   `atom`, `id`, `parent`, `fullkey` and `path` (D382). `CREATE TEMP TRIGGER` defines a trigger,
   on a temporary or a main table, that only its session sees and that ends with it (D383).
+  `VACUUM [schema]` and `REINDEX [name]` are accepted and change nothing: EggDB's file reuses
+  freed pages, `eggdb compact` shrinks it, and its indexes are kept exact; `VACUUM INTO` is
+  `0A000` (D384).
 
 ## Known differences from Oracle
 The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 773 cases from Oracle's SQL

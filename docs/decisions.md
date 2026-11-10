@@ -408,3 +408,4 @@ its full title with its status.
 - [D381](decisions/D381.md) Code-only batch 27 (M5): SQLite's `json_group_array` and `json_group_object`
 - [D382](decisions/D382.md) Code-only batch 28 (M5): SQLite's `json_each` and `json_tree`
 - [D383](decisions/D383.md) Code-only batch 29 (M5): SQLite's temporary triggers
+- [D384](decisions/D384.md) Code-only batch 30 (M5): SQLite's `VACUUM` and `REINDEX` accepted
