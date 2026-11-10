@@ -1192,6 +1192,7 @@ pub(crate) struct TransactionCharacteristics {
     pub(crate) target: CharacteristicsTarget,
     pub(crate) read_only: Option<bool>,
     pub(crate) isolation: Option<String>,
+    pub(crate) snapshot: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

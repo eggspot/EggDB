@@ -29,11 +29,20 @@ pub(crate) fn use_seeded_random_bytes() {
     crate::set_random_source(seeded_random_bytes);
 }
 
+type Exports = Rc<RefCell<Vec<(u64, std::rc::Weak<Map>)>>>;
+
+#[derive(Debug, Clone, Copy)]
+struct MemorySnapshot {
+    store: usize,
+    version: u64,
+}
+
 pub(crate) struct MemoryStore {
     committed: RefCell<Rc<Map>>,
     commits: Cell<u64>,
     writing: Cell<bool>,
     reads: Rc<Cell<u64>>,
+    exports: Exports,
 }
 
 impl Default for MemoryStore {
@@ -44,6 +53,7 @@ impl Default for MemoryStore {
             commits: Cell::default(),
             writing: Cell::default(),
             reads: Rc::default(),
+            exports: Rc::default(),
         }
     }
 }
@@ -52,6 +62,7 @@ pub(crate) struct MemoryRead {
     map: Rc<Map>,
     version: u64,
     reads: Rc<Cell<u64>>,
+    exports: Exports,
 }
 
 pub(crate) struct MemoryWrite<'s> {
@@ -107,6 +118,16 @@ impl KeyValueRead for MemoryRead {
 
     fn committed_version(&self) -> Option<u64> {
         Some(self.version)
+    }
+
+    fn snapshot_handle(&self) -> Option<crate::store::SnapshotHandle> {
+        let mut exports = self.exports.try_borrow_mut().ok()?;
+        exports.retain(|(_, map)| map.strong_count() > 0);
+        exports.push((self.version, Rc::downgrade(&self.map)));
+        Some(crate::store::SnapshotHandle::new(MemorySnapshot {
+            store: Rc::as_ptr(&self.exports).addr(),
+            version: self.version,
+        }))
     }
 
     fn scan(
@@ -173,7 +194,29 @@ impl KeyValueStore for MemoryStore {
             map: Rc::clone(&self.committed.borrow()),
             version: self.commits.get(),
             reads: Rc::clone(&self.reads),
+            exports: Rc::clone(&self.exports),
         })
+    }
+
+    fn begin_read_from(
+        &self,
+        handle: &crate::store::SnapshotHandle,
+    ) -> SqlResult<Option<MemoryRead>> {
+        let Some(snapshot) = handle.token::<MemorySnapshot>() else {
+            return Ok(None);
+        };
+        if snapshot.store != Rc::as_ptr(&self.exports).addr() {
+            return Ok(None);
+        }
+        let map = self.exports.borrow().iter().find_map(|(version, map)| {
+            (*version == snapshot.version).then(|| map.upgrade()).flatten()
+        });
+        Ok(map.map(|map| MemoryRead {
+            map,
+            version: snapshot.version,
+            reads: Rc::clone(&self.reads),
+            exports: Rc::clone(&self.exports),
+        }))
     }
 
     fn begin_write(&self) -> SqlResult<MemoryWrite<'_>> {

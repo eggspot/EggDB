@@ -3725,33 +3725,59 @@ impl<'s> Session<'s> {
         body: impl FnOnce(&dyn crate::store::KeyValueRead, &mut TableCache) -> SqlResult<T>,
     ) -> SqlResult<T> {
         let _types = crate::user_types::enter_if_absent();
+        let store_id = self.store.erased_store_id();
         let tables = &mut self.tables;
         let objects = &self.temporary;
-        match &self.block {
-            Block::Writing(writer) => body(
-                &crate::temporary::TemporaryRead {
-                    inner: writer,
-                    objects,
-                },
-                tables,
-            ),
-            Block::Reading(reader) => body(
-                &crate::temporary::TemporaryRead {
-                    inner: reader,
-                    objects,
-                },
-                tables,
-            ),
-            Block::None | Block::Failed => {
-                let reader = self.store.begin_boxed_read()?;
+        let (result, exported) = match &self.block {
+            Block::Writing(writer) => (
                 body(
                     &crate::temporary::TemporaryRead {
-                        inner: &reader,
+                        inner: writer,
                         objects,
                     },
                     tables,
+                ),
+                Vec::new(),
+            ),
+            Block::Reading(reader) => {
+                let scope = crate::exported_snapshots::enter(store_id, reader.snapshot_handle());
+                let result = body(
+                    &crate::temporary::TemporaryRead {
+                        inner: reader,
+                        objects,
+                    },
+                    tables,
+                );
+                let exported = crate::exported_snapshots::take_exported();
+                drop(scope);
+                (result, exported)
+            }
+            Block::None | Block::Failed => {
+                let reader = self.store.begin_boxed_read()?;
+                (
+                    body(
+                        &crate::temporary::TemporaryRead {
+                            inner: &reader,
+                            objects,
+                        },
+                        tables,
+                    ),
+                    Vec::new(),
                 )
             }
+        };
+        if !exported.is_empty() {
+            self.keep_exported_snapshots(exported);
+        }
+        result
+    }
+
+    fn keep_exported_snapshots(&mut self, ids: Vec<String>) {
+        if let Block::Reading(reader) = std::mem::replace(&mut self.block, Block::None) {
+            self.block = Block::Reading(Box::new(crate::exported_snapshots::ExportingRead {
+                inner: reader,
+                ids,
+            }));
         }
     }
 

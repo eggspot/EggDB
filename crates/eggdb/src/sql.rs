@@ -105,6 +105,27 @@ fn scan_through(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SnapshotOf {
+    database: usize,
+    token: eggdb_storage::SnapshotToken,
+}
+
+fn read_from<'db>(
+    database: &'db Database,
+    handle: &eggdb_sql::SnapshotHandle,
+) -> SqlResult<Option<SqlSnapshot<'db>>> {
+    let Some(snapshot) = handle.token::<SnapshotOf>() else {
+        return Ok(None);
+    };
+    if snapshot.database != std::ptr::from_ref(database).addr() {
+        return Ok(None);
+    }
+    ReadTransaction::begin_from(database, snapshot.token)
+        .map(|read| Some(SqlSnapshot(read)))
+        .map_err(store_error)
+}
+
 /// A snapshot that SQL reads, as [`Store`] gives it.
 #[derive(Debug)]
 pub struct SqlSnapshot<'db>(ReadTransaction<'db>);
@@ -142,6 +163,13 @@ impl KeyValueRead for SqlSnapshot<'_> {
 
     fn committed_version(&self) -> Option<u64> {
         Some(self.0.stamp().bits())
+    }
+
+    fn snapshot_handle(&self) -> Option<eggdb_sql::SnapshotHandle> {
+        Some(eggdb_sql::SnapshotHandle::new(SnapshotOf {
+            database: self.0.database_address(),
+            token: self.0.snapshot_token(),
+        }))
     }
 
     fn collection_names(&self) -> SqlResult<Vec<String>> {
@@ -435,6 +463,13 @@ impl KeyValueStore for Store<'_> {
         self.0.begin_read().map(SqlSnapshot).map_err(store_error)
     }
 
+    fn begin_read_from(
+        &self,
+        handle: &eggdb_sql::SnapshotHandle,
+    ) -> SqlResult<Option<SqlSnapshot<'_>>> {
+        read_from(&self.0, handle)
+    }
+
     fn begin_write(&self) -> SqlResult<SqlWriter<'_>> {
         self.0.begin_write().map(SqlWriter).map_err(store_error)
     }
@@ -469,6 +504,13 @@ impl KeyValueStore for OwnedStore {
 
     fn begin_read(&self) -> SqlResult<SqlSnapshot<'_>> {
         self.0.begin_read().map(SqlSnapshot).map_err(store_error)
+    }
+
+    fn begin_read_from(
+        &self,
+        handle: &eggdb_sql::SnapshotHandle,
+    ) -> SqlResult<Option<SqlSnapshot<'_>>> {
+        read_from(&self.0, handle)
     }
 
     fn begin_write(&self) -> SqlResult<SqlWriter<'_>> {

@@ -93,6 +93,13 @@ pub trait KeyValueRead {
         None
     }
 
+    /// A handle that [`KeyValueStore::begin_read_from`] opens another read on this snapshot
+    /// with, for PostgreSQL's `pg_export_snapshot()`; `None`, the default, when the store
+    /// cannot share snapshots or this read is not a snapshot.
+    fn snapshot_handle(&self) -> Option<SnapshotHandle> {
+        None
+    }
+
     /// The names of the store's collections, in byte order: named key spaces of their own
     /// beside the one this trait reads, which SQL never uses (D139). A store without
     /// collections, the default, has none.
@@ -250,6 +257,29 @@ pub trait KeyValueWrite: KeyValueRead {
         Self: Sized;
 }
 
+/// A snapshot of a store that another session may open while a read of it is still open,
+/// as [`KeyValueRead::snapshot_handle`] gives it; what it holds is the store's own.
+#[derive(Clone)]
+pub struct SnapshotHandle(std::sync::Arc<dyn std::any::Any + Send + Sync>);
+
+impl SnapshotHandle {
+    /// A handle holding `token`, which only the store that made it reads.
+    pub fn new<T: std::any::Any + Send + Sync>(token: T) -> Self {
+        Self(std::sync::Arc::new(token))
+    }
+
+    /// The token, when it is a `T`.
+    pub fn token<T: std::any::Any>(&self) -> Option<&T> {
+        self.0.downcast_ref::<T>()
+    }
+}
+
+impl std::fmt::Debug for SnapshotHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SnapshotHandle")
+    }
+}
+
 /// An ordered byte-string key-value store that SQL keeps its catalog and tables in: one writer
 /// and snapshot readers.
 pub trait KeyValueStore {
@@ -267,6 +297,13 @@ pub trait KeyValueStore {
 
     /// Begins the write transaction, waiting for another writer as the store does.
     fn begin_write(&self) -> SqlResult<Self::Write<'_>>;
+
+    /// Begins a read of the snapshot `handle` names, while a read of it is still open; `None`
+    /// when the handle is not this store's or the store cannot share snapshots, the default.
+    fn begin_read_from(&self, handle: &SnapshotHandle) -> SqlResult<Option<Self::Read<'_>>> {
+        let _ = handle;
+        Ok(None)
+    }
 
     /// A number naming this store among the stores of the process, the same through every
     /// handle on it (a reference, an [`Arc`](std::sync::Arc)): sessions on one store share its
@@ -320,6 +357,10 @@ impl<S: KeyValueStore> KeyValueStore for &S {
         (**self).begin_write()
     }
 
+    fn begin_read_from(&self, handle: &SnapshotHandle) -> SqlResult<Option<S::Read<'_>>> {
+        (**self).begin_read_from(handle)
+    }
+
     fn store_id(&self) -> usize {
         (**self).store_id()
     }
@@ -345,6 +386,10 @@ impl<S: KeyValueStore> KeyValueStore for std::sync::Arc<S> {
 
     fn begin_write(&self) -> SqlResult<S::Write<'_>> {
         (**self).begin_write()
+    }
+
+    fn begin_read_from(&self, handle: &SnapshotHandle) -> SqlResult<Option<S::Read<'_>>> {
+        (**self).begin_read_from(handle)
     }
 
     fn store_id(&self) -> usize {
@@ -499,6 +544,10 @@ impl KeyValueRead for Box<dyn KeyValueRead + '_> {
         (**self).scan(start, end, direction, visit)
     }
 
+    fn snapshot_handle(&self) -> Option<SnapshotHandle> {
+        (**self).snapshot_handle()
+    }
+
     fn committed_version(&self) -> Option<u64> {
         (**self).committed_version()
     }
@@ -510,6 +559,13 @@ pub(crate) trait ErasedStore {
     fn begin_boxed_write(&self) -> SqlResult<Box<dyn BoxedWrite + '_>>;
 
     fn erased_page_lookups(&self) -> Option<PageLookups>;
+
+    fn begin_boxed_read_from(
+        &self,
+        handle: &SnapshotHandle,
+    ) -> SqlResult<Option<Box<dyn KeyValueRead + '_>>>;
+
+    fn erased_store_id(&self) -> usize;
 }
 
 impl<S: KeyValueStore> ErasedStore for S {
@@ -523,6 +579,19 @@ impl<S: KeyValueStore> ErasedStore for S {
 
     fn erased_page_lookups(&self) -> Option<PageLookups> {
         self.page_lookups()
+    }
+
+    fn begin_boxed_read_from(
+        &self,
+        handle: &SnapshotHandle,
+    ) -> SqlResult<Option<Box<dyn KeyValueRead + '_>>> {
+        Ok(self
+            .begin_read_from(handle)?
+            .map(|read| Box::new(read) as Box<dyn KeyValueRead + '_>))
+    }
+
+    fn erased_store_id(&self) -> usize {
+        self.store_id()
     }
 }
 

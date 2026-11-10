@@ -1982,7 +1982,11 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   level the block began with, or `serializable`, is the current one); inside a savepoint both
   are `25001`. Outside a block `SET TRANSACTION` warns `SET TRANSACTION can only be used in
   transaction blocks` and changes nothing; in an implicit transaction (a multi-statement
-  `Query`) it sets that transaction (D338). `SET TRANSACTION SNAPSHOT` is `0A000`.
+  `Query`) it sets that transaction (D338). `pg_export_snapshot()` in a `READ ONLY` block names
+  its snapshot (`0A000` elsewhere), and another session's `SET TRANSACTION SNAPSHOT 'id'`, as
+  the first statement of its block (`25001` after a query, `25P01` outside a block), then sees
+  exactly that snapshot while the exporting block is open (`22023 invalid snapshot identifier`
+  after it ends); a read-write block takes it only when nothing has committed since (D369).
 - `SET [SESSION | LOCAL] name {TO | =} value | DEFAULT`, `SET [LOCAL] TIME ZONE`, `SET NAMES`,
   `RESET name | ALL`, `SHOW name | ALL`: PostgreSQL's run-time parameters (D104). `client_encoding`
   takes `UTF8` (and `SQL_ASCII`, which passes bytes through) only; settings EggDB does not apply
