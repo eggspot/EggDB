@@ -1,7 +1,8 @@
-//! EggDB's server for memcached's text protocol and the basic meta commands (D194), written from
-//! memcached's published protocol description, storing items in an EggDB keyspace (each command
-//! one transaction), so memcached clients connect unchanged.
+//! EggDB's server for memcached's text protocol, the basic meta commands (D194) and the binary
+//! protocol (D398), written from memcached's published protocol descriptions, storing items in an
+//! EggDB keyspace (each command one transaction), so memcached clients connect unchanged.
 
+mod binary;
 mod commands;
 mod item;
 mod server;
@@ -125,4 +126,71 @@ mod tests {
             "a refused gat touches nothing"
         );
     }
+
+    fn binary_request(opcode: u8, extras: &[u8], key: &[u8], value: &[u8], opaque: u32) -> Vec<u8> {
+        let mut out = vec![0x80, opcode];
+        out.extend_from_slice(&(key.len() as u16).to_be_bytes());
+        out.push(extras.len() as u8);
+        out.push(0);
+        out.extend_from_slice(&[0, 0]);
+        out.extend_from_slice(&((extras.len() + key.len() + value.len()) as u32).to_be_bytes());
+        out.extend_from_slice(&opaque.to_be_bytes());
+        out.extend_from_slice(&0u64.to_be_bytes());
+        out.extend_from_slice(extras);
+        out.extend_from_slice(key);
+        out.extend_from_slice(value);
+        out
+    }
+
+    fn binary_responses(bytes: &[u8]) -> Vec<(u8, u16, u32, Vec<u8>)> {
+        let mut found = Vec::new();
+        let mut at = 0;
+        while at + 24 <= bytes.len() {
+            let header = &bytes[at..at + 24];
+            let opcode = header[1];
+            let status = u16::from_be_bytes([header[6], header[7]]);
+            let body = u32::from_be_bytes([header[8], header[9], header[10], header[11]]) as usize;
+            let opaque = u32::from_be_bytes([header[12], header[13], header[14], header[15]]);
+            let key = u16::from_be_bytes([header[2], header[3]]) as usize;
+            let extras = header[4] as usize;
+            let value = bytes[at + 24 + extras + key..at + 24 + body].to_vec();
+            found.push((opcode, status, opaque, value));
+            at += 24 + body;
+        }
+        found
+    }
+
+    #[test]
+    fn the_binary_protocol_stores_reads_counts_and_stays_quiet_when_asked() {
+        let keyspace = MemoryKeyspace::default();
+        let shared = Shared {
+            keyspace: &keyspace,
+            next_cas: AtomicU64::new(1),
+        };
+        let mut set_extras = 7u32.to_be_bytes().to_vec();
+        set_extras.extend_from_slice(&0u32.to_be_bytes());
+        let mut counter_extras = 5u64.to_be_bytes().to_vec();
+        counter_extras.extend_from_slice(&10u64.to_be_bytes());
+        counter_extras.extend_from_slice(&0u32.to_be_bytes());
+        let mut input = Vec::new();
+        input.extend(binary_request(0x01, &set_extras, b"k", b"hello", 1));
+        input.extend(binary_request(0x00, &[], b"k", b"", 2));
+        input.extend(binary_request(0x09, &[], b"missing", b"", 3));
+        input.extend(binary_request(0x00, &[], b"missing", b"", 4));
+        input.extend(binary_request(0x05, &counter_extras, b"n", b"", 5));
+        input.extend(binary_request(0x05, &counter_extras, b"n", b"", 6));
+        input.extend(binary_request(0x11, &set_extras, b"q", b"z", 7));
+        input.extend(binary_request(0x0a, &[], b"", b"", 8));
+        input.extend(binary_request(0x07, &[], b"", b"", 9));
+        let mut out = Vec::new();
+        serve_stream(&shared, &MemoryBudget::default(), input.as_slice(), &mut out).unwrap();
+        let responses = binary_responses(&out);
+        let opaques: Vec<u32> = responses.iter().map(|(_, _, opaque, _)| *opaque).collect();
+        assert_eq!(opaques, vec![1, 2, 4, 5, 6, 8, 9]);
+        assert_eq!(responses[1].3, b"hello".to_vec());
+        assert_eq!(responses[2].1, 0x0001);
+        assert_eq!(responses[3].3, 10u64.to_be_bytes().to_vec());
+        assert_eq!(responses[4].3, 15u64.to_be_bytes().to_vec());
+    }
 }
+

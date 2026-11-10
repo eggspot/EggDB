@@ -11,9 +11,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const MAX_LINE_BYTES: usize = 2048;
 const ACCEPT_POLL: Duration = Duration::from_millis(100);
 const READ_POLL: Duration = Duration::from_millis(200);
-const VERSION: &str = "1.6.0 EggDB";
+pub(crate) const VERSION: &str = "1.6.0 EggDB";
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {
@@ -114,6 +114,9 @@ pub fn serve_stream(
     writer: &mut impl Write,
 ) -> io::Result<()> {
     let mut reader = BufReader::new(reader);
+    if reader.fill_buf()?.first() == Some(&crate::binary::REQUEST_MAGIC) {
+        return crate::binary::serve_binary(shared, budget, reader, writer);
+    }
     let mut held = budget.empty_reservation();
     loop {
         let Some(request) = (match line(&mut reader) {

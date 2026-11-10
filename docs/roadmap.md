@@ -900,7 +900,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Memory-only collections in the engine, with expiry and eviction (D2, D193).
 - Benchmarks with redis-benchmark and memtier against Redis, Valkey and Dragonfly, gated (D7,
   D177).
-- memcached's binary protocol and SASL (D194).
+- memcached's binary protocol and SASL (D194). **Code written, unbuilt** (code-only mode,
+  2026-11-10, D398).
 - The rest of memcached's meta flags, `stats` details and LRU eviction for its items (D194).
 
 ### M8 Full-text search

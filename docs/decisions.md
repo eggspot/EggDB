@@ -422,3 +422,4 @@ its full title with its status.
 - [D395](decisions/D395.md) Code-only batch 42 (M7): Redis's `OBJECT` command
 - [D396](decisions/D396.md) Code-only batch 43 (M7): Redis's `INFO` sections
 - [D397](decisions/D397.md) Code-only batch 44 (M7): Redis's `DEBUG OBJECT`, `SLEEP`, `SET-ACTIVE-EXPIRE` and `HELP`
+- [D398](decisions/D398.md) Code-only batch 45 (M7): memcached's binary protocol
