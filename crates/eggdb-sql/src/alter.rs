@@ -422,6 +422,12 @@ fn apply(
         AlterAction::DropIdentity { column, if_exists } => {
             drop_identity(writer, tables, name, column, *if_exists, dialect)
         }
+        AlterAction::SetExpression { column, generation } => {
+            set_expression(writer, tables, name, column, generation, dialect).map(|()| None)
+        }
+        AlterAction::DropExpression { column, if_exists } => {
+            drop_expression(writer, tables, name, column, *if_exists, dialect)
+        }
         AlterAction::DropPrimaryKey(position) => {
             let table = current(writer, tables, name)?;
             if table.primary_key.is_empty() {
@@ -2800,3 +2806,105 @@ fn drop_identity(
     }
     Ok(None)
 }
+
+fn not_generated(table: &TableDefinition, column: &Name) -> SqlError {
+    SqlError::new(
+        SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE,
+        format!(
+            "column \"{}\" of relation \"{}\" is not a generated column",
+            column.text,
+            crate::schemas::display(&table.name)
+        ),
+    )
+    .at(column.position)
+}
+
+fn set_expression(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    name: &str,
+    column: &Name,
+    generation: &crate::ast::GenerationSpec,
+    dialect: Dialect,
+) -> SqlResult<()> {
+    let mut table = current(writer, tables, name)?;
+    let index = column_index(&table, column, dialect)?;
+    let Some(entry) = table.generation_of(index).cloned() else {
+        return Err(not_generated(&table, column));
+    };
+    let keyed = table.primary_key.contains(&index)
+        || table
+            .indexes
+            .iter()
+            .any(|found| found.unique && found.columns.contains(&index));
+    if keyed {
+        return Err(SqlError::not_supported(
+            "SET EXPRESSION on a generated column in a primary key or unique index",
+        )
+        .at(column.position));
+    }
+    let old = table.clone();
+    table.generated.retain(|found| found.column != index);
+    let spec = crate::ast::GenerationSpec {
+        stored: entry.stored,
+        ..generation.clone()
+    };
+    crate::generated_columns::define(&mut table, &[(index, &spec)], dialect)?;
+    let generator = crate::generated_columns::Generator::of(&table)?;
+    let checks = PreparedChecks::of(&table)?;
+    let indexed = !table.indexes.is_empty();
+    if indexed {
+        indexes::delete_every_index_entry(writer, &old)?;
+    }
+    save(writer, &table)?;
+    let mut map = |mut row: Vec<Value>| -> SqlResult<Vec<Value>> {
+        if let Some(generator) = &generator {
+            generator.fill(&table, &mut row)?;
+        }
+        execute::check_not_null_of(&table, &row)?;
+        if !checks.is_empty() {
+            checks.check(&table, &row)?;
+        }
+        Ok(row)
+    };
+    rewrite_in_place(writer, &table, &table.columns, &mut map)?;
+    if indexed {
+        for (key, row) in execute::every_row(&*writer, &table)? {
+            indexes::put_entries(writer, &table, &row, &key)?;
+        }
+    }
+    Ok(())
+}
+
+fn drop_expression(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    name: &str,
+    column: &Name,
+    if_exists: bool,
+    dialect: Dialect,
+) -> SqlResult<Option<String>> {
+    let mut table = current(writer, tables, name)?;
+    let index = column_index(&table, column, dialect)?;
+    if table.generation_of(index).is_none() {
+        if if_exists {
+            return Ok(Some(format!(
+                "NOTICE:  column \"{}\" of relation \"{}\" is not a stored generated column, skipping",
+                column.text,
+                crate::schemas::display(&table.name)
+            )));
+        }
+        return Err(not_generated(&table, column));
+    }
+    let dependents = crate::generated_columns::dependents_of(&table, index);
+    if dependents.iter().any(|&other| other != index) {
+        return Err(SqlError::not_supported(
+            "DROP EXPRESSION on a generated column that other generated columns read",
+        )
+        .at(column.position));
+    }
+    table.generated.retain(|found| found.column != index);
+    save(writer, &table)?;
+    Ok(None)
+}
+

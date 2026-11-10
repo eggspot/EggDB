@@ -3080,7 +3080,11 @@ would; the catalogs still name it virtual.
 - **Indexes** work on generated columns as on any other, except PostgreSQL's virtual ones
   (`0A000`, as in PostgreSQL 18).
 - **ALTER TABLE.** `ADD COLUMN ... GENERATED ALWAYS AS (...)` computes the value of every
-  existing row (SQLite refuses a `STORED` one, `Cannot add a STORED column`). Renaming a column
+  existing row (SQLite refuses a `STORED` one, `Cannot add a STORED column`). PostgreSQL's
+  `ALTER COLUMN c SET EXPRESSION AS (expr)` recomputes every row and the column's indexes
+  (`0A000` for a column in the primary key or a unique index), and `DROP EXPRESSION [IF EXISTS]`
+  keeps the values and makes the column an ordinary one (`55000` when it is not generated)
+  (D385). Renaming a column
   rewrites the expressions that read it. Dropping a column a generated column reads fails:
   PostgreSQL's `2BP01` (`cannot drop column a of table t because other objects depend on it`),
   with `CASCADE` dropping the generated column too; MySQL's 3108, SQL Server's 5074, Oracle's

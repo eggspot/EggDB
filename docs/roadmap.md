@@ -532,7 +532,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   ... SET EXPRESSION`/`DROP EXPRESSION`, MySQL `MODIFY` of a generated column, virtual columns
   computed on read (then SQL Server's non-persisted computed columns over `GETDATE()` or
   `NEWID()`), generated columns in partitioned tables, user-defined `IMMUTABLE` functions and
-  PostgreSQL's stable casts checked in generation expressions.
+  PostgreSQL's stable casts checked in generation expressions. `ALTER COLUMN ... SET EXPRESSION`/`DROP EXPRESSION`: **code written, unbuilt**
+  (code-only mode, 2026-11-10, D385).
 - The rest of `ALTER TABLE`: `ALTER COLUMN ... TYPE ... USING`, adding a serial or identity
   column, renaming what a view uses (D32).
 - A published SQL:2023 conformance list, first Part 2's feature IDs (E011, F031, ...) with each

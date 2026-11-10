@@ -979,6 +979,14 @@ pub(crate) enum AlterAction {
         column: Name,
         if_exists: bool,
     },
+    SetExpression {
+        column: Name,
+        generation: GenerationSpec,
+    },
+    DropExpression {
+        column: Name,
+        if_exists: bool,
+    },
     AttachPartition {
         partition: Name,
         bound: PartitionBoundSpec,

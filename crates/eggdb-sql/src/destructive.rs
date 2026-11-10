@@ -1116,6 +1116,8 @@ fn altered(table: &Name, actions: &[AlterAction]) -> Option<DestructiveStatement
             | AlterAction::RenameConstraint { .. }
             | AlterAction::AlterIdentity { .. }
             | AlterAction::DropIdentity { .. }
+            | AlterAction::SetExpression { .. }
+            | AlterAction::DropExpression { .. }
             | AlterAction::AttachPartition { .. }
             | AlterAction::DetachPartition(_)
             | AlterAction::AddPartitions { .. }

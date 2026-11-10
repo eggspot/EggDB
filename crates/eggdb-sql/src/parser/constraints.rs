@@ -1173,9 +1173,41 @@ impl Parser<'_> {
             if self.postgresql() && self.at_identity_option() {
                 return self.alter_identity_action(column, true);
             }
+            if self.postgresql() && self.take_word("expression") {
+                self.expect_word("as")?;
+                let position = self.position();
+                self.expect(&TokenKind::LeftParen)?;
+                let start = self.position();
+                let expr = self.expression()?;
+                let end = self.previous_end();
+                let text = self
+                    .text_without_column_qualifiers(&expr, start, end)
+                    .trim()
+                    .to_owned();
+                self.expect(&TokenKind::RightParen)?;
+                return Ok(AlterAction::SetExpression {
+                    column,
+                    generation: crate::ast::GenerationSpec {
+                        expr,
+                        text,
+                        stored: true,
+                        type_given: true,
+                        position,
+                    },
+                });
+            }
             return Err(self.unexpected());
         }
         if self.take_word("drop") {
+            if self.postgresql() && self.take_word("expression") {
+                let if_exists = if self.take_word("if") {
+                    self.expect_word("exists")?;
+                    true
+                } else {
+                    false
+                };
+                return Ok(AlterAction::DropExpression { column, if_exists });
+            }
             if self.take_word("default") {
                 return Ok(AlterAction::SetDefault {
                     column,

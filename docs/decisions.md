@@ -409,3 +409,4 @@ its full title with its status.
 - [D382](decisions/D382.md) Code-only batch 28 (M5): SQLite's `json_each` and `json_tree`
 - [D383](decisions/D383.md) Code-only batch 29 (M5): SQLite's temporary triggers
 - [D384](decisions/D384.md) Code-only batch 30 (M5): SQLite's `VACUUM` and `REINDEX` accepted
+- [D385](decisions/D385.md) Code-only batch 31 (M5): PostgreSQL's `ALTER COLUMN ... SET EXPRESSION` and `DROP EXPRESSION`
