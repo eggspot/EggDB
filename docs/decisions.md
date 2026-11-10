@@ -387,3 +387,4 @@ its full title with its status.
 - [D360](decisions/D360.md) Code-only batch 6 (M2): MySQL `COALESCE PARTITION`, Oracle `MERGE PARTITIONS` and `MODIFY PARTITION ... ADD | DROP VALUES`, `INSERT IGNORE` skipping rows outside a partition set (extends D358, D337)
 - [D361](decisions/D361.md) Code-only batch 7 (M2): MySQL `SUBPARTITION BY` and Oracle composite partitioning; Oracle's row movement switch and `ORA-14402`, with partition record version 3 and its D35 review (extends D169, D316, D337)
 - [D362](decisions/D362.md) Code-only batch 8 (M2): Oracle interval partitioning, partitions created as rows arrive (extends D169, D361)
+- [D363](decisions/D363.md) Code-only batch 9 (M2): ids for rows written straight into a partition, subpartitions selected alone (closes part of D337)

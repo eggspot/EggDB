@@ -1,4 +1,4 @@
-use crate::ast::{Expr, PartitionSelection, TableReference};
+use crate::ast::{Expr, Name, PartitionSelection, TableReference};
 use crate::dialect::Dialect;
 use crate::encoding::TableDefinition;
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -181,6 +181,39 @@ impl SelectedPartitions {
 
     pub(crate) fn contains(&self, table: &str) -> bool {
         self.tables.contains(table)
+    }
+
+    pub(crate) fn admits(&self, catalog: &PartitionCatalog, routed: &str) -> bool {
+        self.contains(routed)
+            || catalog
+                .descendants_of(routed)
+                .iter()
+                .any(|descendant| self.contains(descendant))
+    }
+
+    pub(crate) fn selection_below(
+        &self,
+        catalog: &PartitionCatalog,
+        routed: &str,
+        position: usize,
+    ) -> Option<PartitionSelection> {
+        if self.contains(routed) {
+            return None;
+        }
+        let names: Vec<Name> = catalog
+            .descendants_of(routed)
+            .iter()
+            .filter(|descendant| self.contains(descendant))
+            .map(|descendant| Name {
+                text: partition_name(descendant).to_owned(),
+                position,
+            })
+            .collect();
+        if names.is_empty() {
+            None
+        } else {
+            Some(PartitionSelection::Named(names))
+        }
     }
 
     pub(crate) fn narrowed(&self, catalog: &PartitionCatalog, leaves: Vec<String>) -> Vec<String> {

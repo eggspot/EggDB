@@ -394,7 +394,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   table with an identity column (D337). `SUBPARTITION BY` (MySQL and Oracle's composite
   partitioning): **code written, unbuilt** (code-only mode, 2026-11-10, D361); left: subpartitions
   in the maintenance `ALTER`s and Oracle's `SUBPARTITION TEMPLATE`. `INSERT IGNORE` skipping rows outside a `PARTITION (...)`
-  set: **code written, unbuilt** (code-only mode, 2026-11-10, D360).
+  set: **code written, unbuilt** (code-only mode, 2026-11-10, D360). Ids for rows written straight
+  into a partition: **code written, unbuilt** (code-only mode, 2026-11-10, D363). `LOAD DATA ...
+  PARTITION` waits for `LOAD DATA` itself (M10).
 - An identity or `AUTO_INCREMENT` column anywhere in the primary key, as MySQL allows, with table
   definition version 15 and its D35 review (D337).
 - MySQL's and Oracle's partition `ALTER`s (add, drop, split, exchange) (D169). **Code written, unbuilt**

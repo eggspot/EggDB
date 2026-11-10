@@ -336,6 +336,81 @@ pub(crate) fn next_identity_value(
     )?))
 }
 
+pub(crate) fn numbered_for_partition(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    insert: &Insert,
+    table: &TableDefinition,
+) -> SqlResult<Option<Insert>> {
+    if table.auto_increment_column().is_some() {
+        return Ok(None);
+    }
+    let catalog = crate::partitions::catalog(writer, tables)?;
+    let Some(mut root) = catalog.parent_of(&table.name).map(|(parent, _)| parent.to_owned()) else {
+        return Ok(None);
+    };
+    while let Some((parent, _)) = catalog.parent_of(&root) {
+        root = parent.to_owned();
+    }
+    let root = tables.require_target(
+        writer,
+        &Name {
+            text: root,
+            position: insert.table.name.position,
+        },
+        "insert into",
+    )?;
+    let Some(column) = root.auto_increment_column() else {
+        return Ok(None);
+    };
+    let same_place = table
+        .column_index(&root.columns[column].name)
+        .is_some_and(|index| index == column);
+    if !same_place {
+        return Ok(None);
+    }
+    let all_defaults: Vec<Vec<InsertValue>> = vec![Vec::new()];
+    let rows = match &insert.source {
+        InsertSource::Values(rows) => rows,
+        InsertSource::DefaultValues => &all_defaults,
+        InsertSource::Query(_) => return Ok(None),
+    };
+    let mut targets = match &insert.columns {
+        Some(names) => execute::target_columns(table, names)?,
+        None => (0..table.columns.len()).collect(),
+    };
+    execute::check_generated_always(&root, &targets, rows, insert.overriding)?;
+    let adds_column = !targets.contains(&column);
+    if adds_column {
+        targets.push(column);
+    }
+    let Some(mut identity) = ParentIdentity::of(&root, insert.overriding) else {
+        return Ok(None);
+    };
+    let mut numbered = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut values = row.clone();
+        let mut columns = targets.clone();
+        if adds_column {
+            values.push(InsertValue::Default);
+        }
+        identity.fill(&*writer, &catalog, &root, &mut columns, &mut values)?;
+        numbered.push(values);
+    }
+    let names = targets
+        .iter()
+        .map(|&index| Name {
+            text: table.columns[index].name.clone(),
+            position: insert.table.name.position,
+        })
+        .collect();
+    Ok(Some(Insert {
+        columns: Some(names),
+        source: InsertSource::Values(numbered),
+        ..insert.clone()
+    }))
+}
+
 enum Routed {
     Done(QueryResult),
     NeedsPartition(Vec<Value>),
@@ -463,8 +538,8 @@ fn insert_routed(
             }
             return Err(partitioned.no_partition(&key_row));
         };
-        if let Some(selected) = &selected
-            && !selected.contains(child)
+        if let (Some(selected), Some(catalog)) = (&selected, &catalog)
+            && !selected.admits(catalog, child)
         {
             let outside =
                 crate::partition_selection::row_outside_selection().at(insert.table.name.position);
@@ -495,8 +570,14 @@ fn insert_routed(
                 position: insert.table.name.position,
             })
             .collect();
+        let mut routed_table = reference_to(&child, &insert.table);
+        if let (Some(selected), Some(catalog)) = (&selected, &catalog) {
+            routed_table.partition_selection = selected
+                .selection_below(catalog, &child, insert.table.name.position)
+                .map(Box::new);
+        }
         let routed = Insert {
-            table: reference_to(&child, &insert.table),
+            table: routed_table,
             columns: Some(names),
             source: InsertSource::Values(rows),
             returning: insert.returning.clone(),

@@ -1329,6 +1329,8 @@ fn insert_rows(
         return crate::partition_dml::insert(writer, tables, insert, &table, &partitioned);
     }
     crate::partition_selection::refuse_on_unpartitioned(&insert.table)?;
+    let numbered = crate::partition_dml::numbered_for_partition(writer, tables, insert, &table)?;
+    let insert = numbered.as_ref().unwrap_or(insert);
     if crate::sequences::mentions_nextval(&table) {
         crate::sequences::load_all(writer)?;
     }
