@@ -396,7 +396,7 @@ pub fn serve_replies_with_limits<'h>(
     let active = AtomicUsize::new(0);
     std::thread::scope(|scope| {
         while !stop() {
-            let stream = match listener.accept() {
+            let stream = match eggdb_platform::accept_tcp(listener) {
                 Ok((stream, _)) => stream,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     std::thread::sleep(ACCEPT_POLL);

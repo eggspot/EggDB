@@ -60,7 +60,9 @@ pub trait FileSystem: Send + Sync {
     /// [`AlignedBuffer::ALIGNMENT`](crate::AlignedBuffer::ALIGNMENT): use
     /// [`AlignedBuffer`](crate::AlignedBuffer) and whole pages. Bypassing the cache does not
     /// make writes durable, so [`File::sync_data`] is still required. Fails with
-    /// [`ErrorKind::Unsupported`] when the platform or the file system refuses, and leaves the
+    /// [`ErrorKind::Unsupported`] when the platform or the file system refuses, or when the
+    /// device needs an alignment that does not divide [`AlignedBuffer::ALIGNMENT`] (read with
+    /// `statx` on Linux 6.1 and later and from the logical sector size on Windows), and leaves the
     /// choice of falling back to [`FileSystem::open`] to the caller. A refused
     /// [`OpenMode::CreateNew`] leaves no file behind; a refused [`OpenMode::Create`] may leave
     /// an empty one, as the operating system creates the file before refusing.

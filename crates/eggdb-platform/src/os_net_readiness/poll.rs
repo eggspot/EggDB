@@ -99,6 +99,7 @@ impl Selector {
                     fd: entry.fd,
                     read: entry.revents & (POLLIN | failed) != 0,
                     write: entry.revents & (POLLOUT | failed) != 0,
+                    change_error: None,
                 }),
         );
         Ok(())

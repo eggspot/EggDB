@@ -24,6 +24,18 @@ pub fn set_tcp_keep_alive_stream(stream: &TcpStream, keep_alive: TcpKeepAlive) -
     Ok(system::apply(stream, Some(keep_alive))?)
 }
 
+/// Accepts one connection from `listener`, as [`TcpListener::accept`] does, and gives it the
+/// listener's TCP keep-alive timing on the systems that copy only part of it to accepted
+/// sockets: macOS copies `SO_KEEPALIVE`, the interval and the count but not the idle time, and
+/// NetBSD copies only `SO_KEEPALIVE`. Elsewhere the accepted socket already has all of it.
+/// Fails with the error `accept` gives; a failure to copy the timing leaves the connection with
+/// the system's timing rather than failing it.
+pub fn accept_tcp(listener: &TcpListener) -> std::io::Result<(TcpStream, std::net::SocketAddr)> {
+    let (stream, peer) = listener.accept()?;
+    let _ = system::copy_from_listener(listener, &stream);
+    Ok((stream, peer))
+}
+
 pub(crate) fn switch_tcp_keep_alive(
     stream: &TcpStream,
     keep_alive: Option<TcpKeepAlive>,
@@ -79,7 +91,7 @@ cfg_select! {
                     value: *const c_void,
                     length: u32,
                 ) -> c_int;
-                #[cfg(test)]
+                #[cfg(any(test, target_vendor = "apple", target_os = "netbsd"))]
                 fn getsockopt(
                     fd: c_int,
                     level: c_int,
@@ -102,6 +114,29 @@ cfg_select! {
                     Some(keep_alive) => timing::set(fd, keep_alive),
                     None => Ok(()),
                 }
+            }
+
+            #[cfg(any(target_vendor = "apple", target_os = "netbsd"))]
+            pub(crate) fn copy_from_listener(
+                listener: &impl AsRawFd,
+                accepted: &impl AsRawFd,
+            ) -> io::Result<()> {
+                let from = listener.as_raw_fd();
+                if get(from, SOL_SOCKET, SO_KEEPALIVE)? == 0 {
+                    return Ok(());
+                }
+                match timing::get(from)? {
+                    Some(keep_alive) => timing::set(accepted.as_raw_fd(), keep_alive),
+                    None => Ok(()),
+                }
+            }
+
+            #[cfg(not(any(target_vendor = "apple", target_os = "netbsd")))]
+            pub(crate) fn copy_from_listener(
+                _: &impl AsRawFd,
+                _: &impl AsRawFd,
+            ) -> io::Result<()> {
+                Ok(())
             }
 
             #[cfg(test)]
@@ -183,7 +218,7 @@ cfg_select! {
                             super::set(fd, IPPROTO_TCP, TCP_KEEPCNT, count)
                         }
 
-                        #[cfg(test)]
+                        #[cfg(any(test, target_vendor = "apple", target_os = "netbsd"))]
                         pub(super) fn get(fd: RawFd) -> io::Result<Option<TcpKeepAlive>> {
                             let seconds = |name: c_int| -> io::Result<Duration> {
                                 let value = super::get(fd, IPPROTO_TCP, name)?;
@@ -216,7 +251,7 @@ cfg_select! {
                 Ok(())
             }
 
-            #[cfg(test)]
+            #[cfg(any(test, target_vendor = "apple", target_os = "netbsd"))]
             fn get(fd: RawFd, level: c_int, name: c_int) -> io::Result<c_int> {
                 let mut value: c_int = 0;
                 let mut length = size_of::<c_int>() as u32;
@@ -278,6 +313,13 @@ cfg_select! {
 
             #[cfg(test)]
             pub(crate) const SUPPORTED: bool = true;
+
+            pub(crate) fn copy_from_listener(
+                _: &impl AsRawSocket,
+                _: &impl AsRawSocket,
+            ) -> io::Result<()> {
+                Ok(())
+            }
 
             pub(crate) fn apply(
                 socket: &impl AsRawSocket,
@@ -380,6 +422,10 @@ cfg_select! {
                 Err(io::Error::from(io::ErrorKind::Unsupported))
             }
 
+            pub(crate) fn copy_from_listener<L, S>(_: &L, _: &S) -> io::Result<()> {
+                Ok(())
+            }
+
             #[cfg(test)]
             pub(crate) fn read_back<S>(_: &S) -> io::Result<(bool, Option<TcpKeepAlive>)> {
                 Err(io::Error::from(io::ErrorKind::Unsupported))
@@ -390,7 +436,9 @@ cfg_select! {
 
 #[cfg(test)]
 mod tests {
-    use super::{set_tcp_keep_alive, set_tcp_keep_alive_stream, switch_tcp_keep_alive, system};
+    use super::{
+        accept_tcp, set_tcp_keep_alive, set_tcp_keep_alive_stream, switch_tcp_keep_alive, system,
+    };
     use crate::{ErrorKind, TcpKeepAlive};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
@@ -437,6 +485,21 @@ mod tests {
                 (inherited.interval(), inherited.count()),
                 (timing().interval(), timing().count())
             );
+        }
+    }
+
+    #[test]
+    fn a_connection_from_accept_tcp_has_the_listeners_whole_timing() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        if set_tcp_keep_alive(&listener, timing()).is_err() {
+            return;
+        }
+        let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (accepted, _) = accept_tcp(&listener).unwrap();
+        let (on, read_timing) = system::read_back(&accepted).unwrap();
+        assert!(on);
+        if expects_timing_read_back() || cfg!(target_vendor = "apple") {
+            assert_eq!(read_timing, Some(timing()));
         }
     }
 

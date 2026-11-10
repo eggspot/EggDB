@@ -389,7 +389,7 @@ impl OsFile {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "solaris")))]
 impl Drop for OsFile {
     fn drop(&mut self) {
         if *self.locked.get_mut() {
@@ -398,7 +398,24 @@ impl Drop for OsFile {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "solaris")]
+impl Drop for OsFile {
+    fn drop(&mut self) {
+        if *self.locked.get_mut() {
+            solaris_lock::release(&self.file);
+        }
+    }
+}
+
+#[cfg(target_os = "solaris")]
+fn lock_file(file: &fs::File, lock: FileLock) -> Result<()> {
+    solaris_lock::acquire(file, lock)
+}
+
+#[cfg(target_os = "solaris")]
+mod solaris_lock;
+
+#[cfg(not(any(windows, target_os = "solaris")))]
 fn lock_file(file: &fs::File, lock: FileLock) -> Result<()> {
     let locked = match lock {
         FileLock::Shared => file.try_lock_shared(),

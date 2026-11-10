@@ -18,6 +18,7 @@ const EVFILT_WRITE: i16 = -2;
 const EV_ADD: u16 = 0x1;
 const EV_DELETE: u16 = 0x2;
 const EV_ONESHOT: u16 = 0x10;
+const EV_ERROR: u16 = 0x4000;
 
 const AF_INET: c_int = 2;
 const AF_INET6: c_int = 30;
@@ -82,6 +83,7 @@ pub(super) struct Selector {
     kqueue: OwnedFd,
     events: Vec<Kevent>,
     armed: HashMap<RawFd, Interest>,
+    pending_adds: Vec<Kevent>,
 }
 
 impl Selector {
@@ -98,6 +100,7 @@ impl Selector {
             kqueue,
             events: vec![Kevent::default(); capacity.clamp(1, MOST_EVENTS)],
             armed: HashMap::new(),
+            pending_adds: Vec::new(),
         })
     }
 
@@ -108,12 +111,17 @@ impl Selector {
             (EVFILT_READ, &mut armed.read, wanted.read),
             (EVFILT_WRITE, &mut armed.write, wanted.write),
         ] {
-            if *now != wanted {
-                let changed = self.change_filter(fd, filter, wanted);
-                if changed.is_ok() || !wanted {
-                    *now = wanted;
-                }
-                outcome = outcome.and(changed);
+            if *now == wanted {
+                continue;
+            }
+            if wanted {
+                self.pending_adds.push(add_once(fd, filter));
+                *now = true;
+            } else if self.drop_pending_add(fd, filter) {
+                *now = false;
+            } else {
+                outcome = outcome.and(self.delete_filter(fd, filter));
+                *now = false;
             }
         }
         if armed != Interest::NONE {
@@ -122,19 +130,31 @@ impl Selector {
         outcome
     }
 
-    fn change_filter(&self, fd: RawFd, filter: i16, wanted: bool) -> io::Result<()> {
+    fn drop_pending_add(&mut self, fd: RawFd, filter: i16) -> bool {
+        let ident = fd.unsigned_abs() as usize;
+        let before = self.pending_adds.len();
+        self.pending_adds
+            .retain(|change| change.ident != ident || change.filter != filter);
+        self.pending_adds.len() != before
+    }
+
+    fn delete_filter(&self, fd: RawFd, filter: i16) -> io::Result<()> {
         let change = Kevent {
             ident: fd.unsigned_abs() as usize,
             filter,
-            flags: if wanted { EV_ADD | EV_ONESHOT } else { EV_DELETE },
+            flags: EV_DELETE,
             ..Kevent::default()
         };
+        self.apply_alone(&change)
+    }
+
+    fn apply_alone(&self, change: &Kevent) -> io::Result<()> {
         // SAFETY: change is a valid kevent read during the call; no events are asked for, so
         // the call returns at once without writing through a null pointer.
         let result = unsafe {
             kevent(
                 self.kqueue.as_raw_fd(),
-                &change,
+                change,
                 1,
                 ptr::null_mut(),
                 0,
@@ -147,12 +167,48 @@ impl Selector {
         Ok(())
     }
 
+    fn apply_pending_one_by_one(&mut self, ready: &mut Vec<Readiness>) {
+        let pending = std::mem::take(&mut self.pending_adds);
+        for change in &pending {
+            if let Err(error) = self.apply_alone(change) {
+                let fd = RawFd::try_from(change.ident).unwrap_or(RawFd::MAX);
+                self.forget_armed(fd, change.filter);
+                ready.push(Readiness {
+                    fd,
+                    read: change.filter == EVFILT_READ,
+                    write: change.filter == EVFILT_WRITE,
+                    change_error: Some(error.raw_os_error().unwrap_or(0)),
+                });
+            }
+        }
+        self.pending_adds = pending;
+        self.pending_adds.clear();
+    }
+
+    fn forget_armed(&mut self, fd: RawFd, filter: i16) {
+        if let Some(armed) = self.armed.get_mut(&fd) {
+            if filter == EVFILT_READ {
+                armed.read = false;
+            } else {
+                armed.write = false;
+            }
+            if *armed == Interest::NONE {
+                self.armed.remove(&fd);
+            }
+        }
+    }
+
     pub(super) fn wait(
         &mut self,
         timeout: Option<Duration>,
         ready: &mut Vec<Readiness>,
     ) -> io::Result<()> {
         let room = c_int::try_from(self.events.len()).unwrap_or(c_int::MAX);
+        let changes = c_int::try_from(self.pending_adds.len()).unwrap_or(c_int::MAX);
+        if changes == c_int::MAX {
+            self.apply_pending_one_by_one(ready);
+            return Ok(());
+        }
         let timespec = timeout.map(|timeout| {
             let timeout = timeout.min(LONGEST_WAIT);
             Timespec {
@@ -161,13 +217,19 @@ impl Selector {
             }
         });
         let limit: *const Timespec = timespec.as_ref().map_or(ptr::null(), ptr::from_ref);
-        // SAFETY: events holds room initialised kevents the kernel may overwrite, and limit is
-        // null or points at timespec, which outlives the call.
+        let change_list: *const Kevent = if changes == 0 {
+            ptr::null()
+        } else {
+            self.pending_adds.as_ptr()
+        };
+        // SAFETY: change_list is null or points at changes initialised kevents the kernel only
+        // reads, events holds room initialised kevents the kernel may overwrite, the two do not
+        // overlap, and limit is null or points at timespec, which outlives the call.
         let count = unsafe {
             kevent(
                 self.kqueue.as_raw_fd(),
-                ptr::null(),
-                0,
+                change_list,
+                changes,
                 self.events.as_mut_ptr(),
                 room,
                 limit,
@@ -176,27 +238,44 @@ impl Selector {
         if count < 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() == Some(EINTR) {
+                self.pending_adds.clear();
+                return Ok(());
+            }
+            if changes > 0 {
+                self.apply_pending_one_by_one(ready);
                 return Ok(());
             }
             return Err(error);
         }
+        self.pending_adds.clear();
         let count = count.unsigned_abs() as usize;
-        for event in self.events.iter().take(count) {
-            let readiness = Readiness {
-                fd: RawFd::try_from(event.ident).unwrap_or(RawFd::MAX),
+        for at in 0..count {
+            let event = self.events[at];
+            let fd = RawFd::try_from(event.ident).unwrap_or(RawFd::MAX);
+            let change_error = (event.flags & EV_ERROR != 0)
+                .then(|| i32::try_from(event.data).unwrap_or(i32::MAX))
+                .filter(|&code| code != 0);
+            if event.flags & EV_ERROR != 0 && change_error.is_none() {
+                continue;
+            }
+            self.forget_armed(fd, event.filter);
+            ready.push(Readiness {
+                fd,
                 read: event.filter == EVFILT_READ,
                 write: event.filter == EVFILT_WRITE,
-            };
-            if let Some(armed) = self.armed.get_mut(&readiness.fd) {
-                armed.read &= !readiness.read;
-                armed.write &= !readiness.write;
-                if *armed == Interest::NONE {
-                    self.armed.remove(&readiness.fd);
-                }
-            }
-            ready.push(readiness);
+                change_error,
+            });
         }
         Ok(())
+    }
+}
+
+fn add_once(fd: RawFd, filter: i16) -> Kevent {
+    Kevent {
+        ident: fd.unsigned_abs() as usize,
+        filter,
+        flags: EV_ADD | EV_ONESHOT,
+        ..Kevent::default()
     }
 }
 

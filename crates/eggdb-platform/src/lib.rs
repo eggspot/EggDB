@@ -157,7 +157,7 @@ pub use os_cpus::OsCpus;
 pub use os_datagram::OsDatagramSocket;
 pub use os_fs::{OsFile, OsFileSystem};
 pub use os_io::OsIoQueue;
-pub use os_keep_alive::{set_tcp_keep_alive, set_tcp_keep_alive_stream};
+pub use os_keep_alive::{accept_tcp, set_tcp_keep_alive, set_tcp_keep_alive_stream};
 pub use os_memory::OsMemory;
 pub use os_net::{OsListener, OsNetQueue, OsNetwork, OsStream};
 pub use sim_cpus::SimCpus;

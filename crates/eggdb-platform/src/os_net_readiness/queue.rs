@@ -34,19 +34,11 @@ pub(super) struct Readiness {
     pub(super) fd: RawFd,
     pub(super) read: bool,
     pub(super) write: bool,
+    pub(super) change_error: Option<i32>,
 }
 
 pub(crate) enum Connecting {
     Connected(TcpStream),
-    #[cfg_attr(
-        any(
-            target_os = "freebsd",
-            target_os = "netbsd",
-            target_os = "illumos",
-            target_os = "solaris"
-        ),
-        expect(dead_code)
-    )]
     Pending(TcpStream),
 }
 
@@ -225,11 +217,37 @@ impl ReadinessQueue {
             return;
         }
         self.touched.push(readiness.fd);
+        if let Some(code) = readiness.change_error {
+            self.fail_direction(readiness, code, completions);
+            return;
+        }
         if readiness.read {
             self.wake_until_one_waits(readiness.fd, |waiters| &mut waiters.readers, completions);
         }
         if readiness.write {
             self.wake_until_one_waits(readiness.fd, |waiters| &mut waiters.writers, completions);
+        }
+    }
+
+    fn fail_direction(
+        &mut self,
+        readiness: Readiness,
+        code: i32,
+        completions: &mut Vec<Completion>,
+    ) {
+        let Some(waiters) = self.waiters.get_mut(&readiness.fd) else {
+            return;
+        };
+        let mut failed = Vec::new();
+        if readiness.read {
+            failed.append(&mut waiters.readers);
+        }
+        if readiness.write {
+            failed.append(&mut waiters.writers);
+        }
+        let error = io::Error::from_raw_os_error(code);
+        for slot in failed {
+            self.complete(slot, Err(copy_of(&error)), completions);
         }
     }
 

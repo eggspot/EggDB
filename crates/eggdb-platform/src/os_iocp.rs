@@ -11,7 +11,7 @@ mod port {
     use crate::io::{IoCompletion, IoOp, RejectedOp};
     use crate::os_fs::OsFile;
     use crate::os_io::{Job, Pool};
-    use std::collections::VecDeque;
+    use std::collections::{HashSet, VecDeque};
     use std::ffi::c_void;
     use std::fs;
     use std::io;
@@ -138,7 +138,7 @@ mod port {
     #[derive(Debug)]
     pub(crate) struct Port {
         id: u64,
-        in_port: usize,
+        in_port: HashSet<usize>,
         at_workers: usize,
         ready: VecDeque<IoCompletion<OsFile>>,
         inline: VecDeque<Job>,
@@ -177,7 +177,7 @@ mod port {
             };
             Ok(Self {
                 id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
-                in_port: 0,
+                in_port: HashSet::new(),
                 at_workers: 0,
                 ready: VecDeque::new(),
                 inline: VecDeque::new(),
@@ -276,7 +276,7 @@ mod port {
             let started = unsafe { begin(pending) };
             match started {
                 Ok(Started::InFlight) => {
-                    self.in_port += 1;
+                    self.in_port.insert(pending.addr());
                     Ok(())
                 }
                 Ok(Started::Finished) => {
@@ -292,7 +292,7 @@ mod port {
                     // packet for it and holds no pointer into it.
                     let pending = unsafe { Box::from_raw(pending) };
                     let code = error.raw_os_error();
-                    if self.in_port > 0
+                    if !self.in_port.is_empty()
                         && matches!(
                             code,
                             Some(ERROR_INVALID_USER_BUFFER | ERROR_NOT_ENOUGH_MEMORY)
@@ -324,7 +324,7 @@ mod port {
             milliseconds: u32,
         ) -> Result<()> {
             let mut wait = milliseconds;
-            while self.in_port > 0 || self.at_workers > 0 {
+            while !self.in_port.is_empty() || self.at_workers > 0 {
                 if self.dequeue(completions, wait)? < ENTRIES_PER_WAIT {
                     break;
                 }
@@ -369,14 +369,14 @@ mod port {
             }
             let removed = (removed as usize).min(ENTRIES_PER_WAIT);
             for entry in &entries[..removed] {
-                if entry.overlapped.is_null() {
+                if entry.overlapped.is_null() || !self.in_port.remove(&entry.overlapped.addr()) {
                     continue;
                 }
-                // SAFETY: every packet with an overlapped structure on this port comes from an
-                // operation `start` handed to the system, whose `Pending` begins with that
-                // structure; the packet ends the system's use of it, so this is its only owner.
+                // SAFETY: the packet names an operation `start` handed to the system and still
+                // counts in flight, whose `Pending` begins with that overlapped structure; the
+                // packet ends the system's use of it, so this is its only owner. A packet for an
+                // operation that finished at once was skipped above.
                 let pending = unsafe { Box::from_raw(entry.overlapped.cast::<Pending>()) };
-                self.in_port -= 1;
                 completions.push(finish(*pending));
             }
             Ok(removed)
@@ -387,7 +387,7 @@ mod port {
         fn drop(&mut self) {
             self.inline.drain(..).for_each(|job| drop(job.run()));
             let mut finished = Vec::new();
-            while self.in_port > 0 {
+            while !self.in_port.is_empty() {
                 let collected = self.collect(&mut finished, INFINITE);
                 finished.clear();
                 if collected.is_err() {

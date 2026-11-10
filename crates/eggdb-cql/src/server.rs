@@ -1088,7 +1088,7 @@ pub fn serve<S: KeyValueStore + Sync>(
     let active = AtomicUsize::new(0);
     std::thread::scope(|scope| {
         while !stop() {
-            let stream = match listener.accept() {
+            let stream = match eggdb_platform::accept_tcp(listener) {
                 Ok((stream, _)) => stream,
                 Err(_) => {
                     std::thread::sleep(ACCEPT_POLL);

@@ -248,7 +248,7 @@ pub fn serve_directory<D: DatabaseDirectory + Sync>(
     let next_connection_id = AtomicU32::new(51);
     std::thread::scope(|scope| {
         while !stop() {
-            let (stream, peer) = match listener.accept() {
+            let (stream, peer) = match eggdb_platform::accept_tcp(listener) {
                 Ok(accepted) => accepted,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     std::thread::sleep(ACCEPT_POLL_INTERVAL);
