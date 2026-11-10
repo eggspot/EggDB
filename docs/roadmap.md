@@ -253,7 +253,8 @@ More tracks that run alongside the milestones, each starting where its dependenc
 - **The project (D21):** contributing guide, code of conduct, security policy, the stability
   promise, and signed and reproducible releases. Started: `CONTRIBUTING.md`,
   `CODE_OF_CONDUCT.md`, [stability.md](stability.md), a CI check that two builds are identical,
-  and footprint budgets per build profile (D230).
+  and final size, memory and startup targets per build profile, checked by the weekly pass
+  (D230, D354).
 - **Security and compliance (D22, D23, D26):** with the server first, deepened every release.
   Started: hash-chained audit records and `eggdb audit --verify` (D231).
 - **Operations (D24, D25):** backups and monitoring as soon as there is data to protect and a
@@ -430,9 +431,11 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Collections in the C API and the language drivers beyond D139 (D292).
 - SQLite's `speedtest1` and the standard embedded benchmarks on the `embedded` profile (D41).
   Check: the compare job, gated.
-- On-disk overhead per row and per index entry, measured and gated with the other budgets (D6).
-- The `server` profile split of the binary, with its own size, idle-memory and first-start lines
-  (D230, D253). Check: `benchmarks/footprint.txt`.
+- On-disk overhead per row and per index entry, measured with a target beside the others (D6,
+  D354).
+- The `server` profile split of the binary, with its own size, idle-memory and first-start targets
+  (D230, D354), and `serve`'s time to its first line in `scripts/footprint.sh`. Check:
+  `benchmarks/footprint.txt`.
 - YCSB workloads against SQLite and Redis (D7).
 - A published branch-coverage target for the core, rising every release toward SQLite's (D41).
 - Published descriptions of the CI runners the benchmarks use, a public results page, conformance

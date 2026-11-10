@@ -21,7 +21,8 @@
 //! <metric> <value> <baseline> <change> <verdict>`) for CI to keep per pull request, and the
 //! table is added to `$GITHUB_STEP_SUMMARY` when it is set. `--only <family>` runs only the
 //! benchmarks whose names start with `<family>.`, such as `sql_copy`, so `--update` can add one
-//! family's lines without measuring the rest again.
+//! family's lines without measuring the rest again, and `--skip <family>` leaves a family out
+//! (CI's `bench` job skips `footprint`, which the weekly pass checks against its targets, D354).
 
 mod allocations;
 mod baseline;

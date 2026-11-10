@@ -3,7 +3,8 @@
 EggDB measures itself against the best database for each workload on the same machine (D7). For
 v0.2.0's embedded key-value store that database is SQLite, and this page says how they are
 compared, with what settings, and what the numbers are today. It also covers the `eggdb`
-binary's size, start time and peak memory, which may only shrink (D6, D14). The decision behind
+binary's size, start time and peak memory, which have final targets that the weekly performance
+pass checks (D6, D14, D354). The decision behind
 all of it is D94; the harness is D80; how a slower result is handled is D101.
 
 ## Running them
@@ -54,6 +55,9 @@ limit that fails the run. The results files are named
 `benchmarks-pr-<number>-<head sha>` and `sqlite-compare-pr-<number>-<head sha>` (`push` in place of
 `pr-<number>` on `main`) and kept 90 days, so a regression can be traced to the pull request that
 caused it; each line is `<os> <benchmark> <metric> <value> <baseline> <change> <verdict>`.
+
+CI's `bench` job passes `--skip footprint`: the binary's size, start time and peak memory never
+block a pull request (D354). The weekly pass checks them against their targets (below).
 
 ## How EggDB is compared with SQLite
 
@@ -122,13 +126,16 @@ again when a cause is fixed.
 
 ## The `eggdb` binary
 
-| Benchmark | Metric | Gate (D101) |
+| Benchmark | Metric | Tolerance when run by hand (D101) |
 |-----------|--------|------|
 | `footprint.binary` | size of the stripped release binary, in bytes | 1% above the line |
 | `footprint.start` | `eggdb --version`: start time as a ratio to starting a Rust program that exits at once | 50% above the line |
 | `footprint.start` | its peak resident memory, in bytes | 10% above the line |
 | `footprint.open_and_get` | `eggdb get` of one key from a closed 10,000-entry file: the same ratio | 50% above the line |
 | `footprint.open_and_get` | its peak resident memory, in bytes | 10% above the line |
+
+CI skips these (`--skip footprint`); `scripts/footprint.sh` runs them with `--only footprint` and
+checks them against the targets in "Footprint per build profile" (D354).
 
 Times and memory are medians of 20 runs each. Memory is measured from outside the process
 through the platform layer: on Linux the child's `VmHWM` when it exits, on Apple's systems
@@ -175,13 +182,36 @@ when it only printed its version) is the storage engine, the command-line tool, 
 `export`/`import`, each stated with its reason when it landed (D90 to D93).
 
 ## Footprint per build profile
-`scripts/footprint.sh` builds the `embedded` artifacts (the C API library, and the WebAssembly
-module when it has been built) and the `full` binary in release, strips them, and checks each
-size against `benchmarks/footprint.txt` (D6, D34, D230). CI runs it on Linux and macOS; a size
-over its budget fails until the budget is raised with a stated reason, and `--update` rewrites
-the current system's lines.
+`benchmarks/footprint.txt` holds final targets, ceilings for the finished product, one per system,
+build profile and metric (D354):
 
-Budgets raised under D253, with their reasons:
+| Metric | Linux x86-64 | macOS arm64 |
+|--------|--------------|-------------|
+| `full` binary (`eggdb`), stripped | 64 MiB | 48 MiB |
+| `embedded` C API library, stripped | 16 MiB | 12 MiB |
+| `eggdb serve` idle, resident | 32 MiB | 32 MiB |
+| `eggdb --version`, peak resident | 8 MiB | 8 MiB |
+| `eggdb --version`, start ratio | 2.0 | 2.0 |
+| `eggdb get` on a 10,000-entry file, peak resident | 16 MiB | 16 MiB |
+| `eggdb get` on a 10,000-entry file, start ratio | 3.0 | 3.0 |
+
+D354 gives the measurements behind them: SQLite, PostgreSQL and EggDB on the same Mac, and Redis
+from its documentation until the weekly pass measures it on CI's Linux runner.
+
+**The weekly performance pass (Saturdays) runs `scripts/footprint.sh` on Linux and macOS.** CI
+does not. The script:
+- builds the `embedded` artifacts (the C API library, and the WebAssembly module when it has been
+  built) and the `full` binary in release, and strips them;
+- measures `eggdb serve`'s idle resident memory 2 seconds after it starts;
+- runs `eggdb-bench --only footprint` for the start ratios and peak memory;
+- prints each value against its target with its share, and writes that table to the job summary
+  when `GITHUB_STEP_SUMMARY` is set.
+
+A value over its target (`OVER`) fails the script, and the pass trims it in that pass. A value at
+80% of its target or more (`NEAR`) is the trend warning, and the pass trims it before the next
+one. Targets change only by a new decision; per-change budget raises ended with D354.
+
+Budgets raised under D253 before D354, with their reasons:
 - 2026-11-02, the batch that finished what was still open (D254 to D273): `citext` and `hstore`
   as base types with their operators and binary forms, SQL/JSON path, `json_to_record`, time zone
   abbreviations and POSIX rules, T-SQL cursors and dynamic SQL, `bcp` format files, Oracle
