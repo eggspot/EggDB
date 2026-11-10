@@ -406,6 +406,39 @@ fn operator(
             };
             return evaluate_at(chosen, root, depth);
         }
+        "$switch" => {
+            let Bson::Document(parts) = argument else {
+                return Err(DocumentError::bad_value(
+                    "$switch requires an object as an argument",
+                ));
+            };
+            let Some(Bson::Array(branches)) = parts.get("branches") else {
+                return Err(DocumentError::bad_value(
+                    "$switch requires at least one branch",
+                ));
+            };
+            for branch in branches {
+                let Some(branch) = branch.as_document() else {
+                    return Err(DocumentError::bad_value(
+                        "$switch expected each branch to be an object",
+                    ));
+                };
+                let (Some(case), Some(then)) = (branch.get("case"), branch.get("then")) else {
+                    return Err(DocumentError::bad_value(
+                        "$switch requires each branch have a 'case' and a 'then' expression",
+                    ));
+                };
+                if value_of(case, root, depth + 1)?.is_truthy() {
+                    return evaluate_at(then, root, depth + 1);
+                }
+            }
+            return match parts.get("default") {
+                Some(default) => evaluate_at(default, root, depth + 1),
+                None => Err(DocumentError::bad_value(
+                    "$switch could not find a matching branch for an input, and no default was specified.",
+                )),
+            };
+        }
         "$ifNull" => {
             let items = arguments(argument);
             if items.len() < 2 {

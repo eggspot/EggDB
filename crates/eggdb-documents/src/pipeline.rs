@@ -50,6 +50,8 @@ pub enum Stage {
     },
     /// `$replaceRoot` or `$replaceWith`, the new document's expression.
     ReplaceRoot(Bson),
+    /// `$facet`: each output field's sub-pipeline, all run over the same input.
+    Facet(Vec<(String, Vec<Stage>)>),
 }
 
 const ACCUMULATORS: [&str; 9] = [
@@ -208,12 +210,140 @@ fn parse_stage(stage: &Document) -> DocumentResult<Stage> {
             }
         },
         "$replaceWith" => Stage::ReplaceRoot(argument.clone()),
+        "$facet" => {
+            let spec = document_argument()?;
+            let mut facets = Vec::with_capacity(spec.len());
+            for (field, pipeline) in spec.iter() {
+                let Bson::Array(stages) = pipeline else {
+                    return Err(DocumentError::type_mismatch(format!(
+                        "arguments to $facet must be arrays, {field} is not"
+                    )));
+                };
+                let refused = stages.iter().any(|stage| {
+                    stage.as_document().is_some_and(|stage| {
+                        ["$facet", "$out", "$merge"]
+                            .iter()
+                            .any(|name| stage.contains_key(name))
+                    })
+                });
+                if refused {
+                    return Err(DocumentError::bad_value(
+                        "$facet sub-pipelines may not contain $facet, $out or $merge",
+                    ));
+                }
+                facets.push((field.clone(), parse_pipeline(stages)?));
+            }
+            if facets.is_empty() {
+                return Err(DocumentError::bad_value(
+                    "the $facet specification must be a non-empty object",
+                ));
+            }
+            Stage::Facet(facets)
+        }
         other => return Err(not_supported(other)),
     })
 }
 
-/// Reads a pipeline (the `pipeline` array of `aggregate`), expanding `$sortByCount` into the
-/// `$group` and `$sort` it stands for.
+fn operator(name: &str, arguments: Vec<Bson>) -> Bson {
+    Bson::Document(Document::from_entries(vec![(
+        name.to_owned(),
+        Bson::Array(arguments),
+    )]))
+}
+
+fn bucket_stages(spec: &Bson) -> DocumentResult<Vec<Stage>> {
+    let Bson::Document(spec) = spec else {
+        return Err(DocumentError::failed_to_parse(
+            "the $bucket specification must be an object",
+        ));
+    };
+    let Some(group_by) = spec.get("groupBy").cloned() else {
+        return Err(DocumentError::failed_to_parse(
+            "$bucket requires 'groupBy' and 'boundaries' to be specified",
+        ));
+    };
+    let Some(boundaries) = spec.get_array("boundaries") else {
+        return Err(DocumentError::failed_to_parse(
+            "$bucket requires 'groupBy' and 'boundaries' to be specified",
+        ));
+    };
+    if boundaries.len() < 2 {
+        return Err(DocumentError::bad_value(
+            "The $bucket 'boundaries' field must have at least 2 values",
+        ));
+    }
+    let ascending = boundaries.windows(2).all(|pair| {
+        eggdb_bson::compare(&pair[0], &pair[1]) == std::cmp::Ordering::Less
+    });
+    if !ascending {
+        return Err(DocumentError::bad_value(
+            "The 'boundaries' option to $bucket must be sorted in ascending order",
+        ));
+    }
+    let branches: Vec<Bson> = boundaries
+        .windows(2)
+        .map(|pair| {
+            Bson::Document(Document::from_entries(vec![
+                (
+                    "case".to_owned(),
+                    operator(
+                        "$and",
+                        vec![
+                            operator("$gte", vec![group_by.clone(), pair[0].clone()]),
+                            operator("$lt", vec![group_by.clone(), pair[1].clone()]),
+                        ],
+                    ),
+                ),
+                ("then".to_owned(), pair[0].clone()),
+            ]))
+        })
+        .collect();
+    let mut switch = vec![("branches".to_owned(), Bson::Array(branches))];
+    if let Some(default) = spec.get("default") {
+        switch.push(("default".to_owned(), default.clone()));
+    }
+    let key = Bson::Document(Document::from_entries(vec![(
+        "$switch".to_owned(),
+        Bson::Document(Document::from_entries(switch)),
+    )]));
+    let accumulators = match spec.get("output") {
+        None => vec![("count".to_owned(), "$sum".to_owned(), Bson::Int32(1))],
+        Some(Bson::Document(output)) => {
+            let mut accumulators = Vec::with_capacity(output.len());
+            for (field, accumulator) in output.iter() {
+                let Some((name, expression)) =
+                    accumulator.as_document().and_then(Document::first)
+                else {
+                    return Err(DocumentError::bad_value(format!(
+                        "The field '{field}' must be an accumulator object"
+                    )));
+                };
+                if !ACCUMULATORS.contains(&name.as_str()) {
+                    return Err(DocumentError::bad_value(format!(
+                        "unknown group operator '{name}'"
+                    )));
+                }
+                accumulators.push((field.clone(), name.clone(), expression.clone()));
+            }
+            accumulators
+        }
+        Some(_) => {
+            return Err(DocumentError::type_mismatch(
+                "The $bucket 'output' field must be an object",
+            ));
+        }
+    };
+    Ok(vec![
+        Stage::Group(key, accumulators),
+        Stage::Sort(parse_sort(&Document::from_entries(vec![(
+            "_id".to_owned(),
+            Bson::Int32(1),
+        )]))?),
+    ])
+}
+
+/// Reads a pipeline (the `pipeline` array of `aggregate`), expanding `$sortByCount` and
+/// `$bucket` into the `$group` and `$sort` they stand for.
 pub fn parse_pipeline(stages: &[Bson]) -> DocumentResult<Vec<Stage>> {
     let mut out = Vec::new();
     for stage in stages {
@@ -222,6 +352,10 @@ pub fn parse_pipeline(stages: &[Bson]) -> DocumentResult<Vec<Stage>> {
                 "Each element of the 'pipeline' array must be an object",
             ));
         };
+        if let Some(spec) = stage.get("$bucket").filter(|_| stage.len() == 1) {
+            out.extend(bucket_stages(spec)?);
+            continue;
+        }
         if let Some(expression) = stage.get("$sortByCount").filter(|_| stage.len() == 1) {
             out.push(Stage::Group(
                 expression.clone(),
@@ -510,6 +644,17 @@ pub fn run_pipeline(
                 }
             }
             Stage::Group(key, accumulators) => run_group(documents, key, accumulators)?,
+            Stage::Facet(facets) => {
+                let mut output = Vec::with_capacity(facets.len());
+                for (field, stages) in facets {
+                    let results = run_pipeline(stages, documents.clone(), load)?;
+                    output.push((
+                        field.clone(),
+                        Bson::Array(results.into_iter().map(Bson::Document).collect()),
+                    ));
+                }
+                vec![Document::from_entries(output)]
+            }
             Stage::Unwind { path, index_field, preserve_empty } => unwind(documents, path, index_field.as_deref(), *preserve_empty)?,
             Stage::Lookup { from, local_field, foreign_field, as_field } => {
                 let foreign = load(from)?;

@@ -1487,3 +1487,63 @@ fn aggregate_pipelines_bind_now_and_cluster_time_once() {
         Some(&sub(vec![("$literal", Bson::DateTime(5_000))]))
     );
 }
+
+#[test]
+fn bucket_groups_by_boundaries_and_facet_runs_each_sub_pipeline() {
+    let input: Vec<Document> = [5, 15, 25, 40]
+        .iter()
+        .map(|price| doc(vec![("price", Bson::Int32(*price))]))
+        .collect();
+    let pipeline = vec![sub(vec![(
+        "$facet",
+        sub(vec![
+            (
+                "byPrice",
+                Bson::Array(vec![sub(vec![(
+                    "$bucket",
+                    sub(vec![
+                        ("groupBy", text("$price")),
+                        (
+                            "boundaries",
+                            Bson::Array(vec![Bson::Int32(0), Bson::Int32(10), Bson::Int32(30)]),
+                        ),
+                        ("default", text("Other")),
+                    ]),
+                )])]),
+            ),
+            (
+                "total",
+                Bson::Array(vec![sub(vec![("$count", text("n"))])]),
+            ),
+        ]),
+    )])];
+    let stages = crate::parse_pipeline(&pipeline).unwrap();
+    let no_other = |_: &str| -> crate::DocumentResult<Vec<Document>> { Ok(Vec::new()) };
+    let out = crate::run_pipeline(&stages, input, &no_other).unwrap();
+    assert_eq!(out.len(), 1);
+    let Some(Bson::Array(buckets)) = out[0].get("byPrice") else {
+        panic!("{out:?}");
+    };
+    let counts: Vec<(Bson, Bson)> = buckets
+        .iter()
+        .filter_map(Bson::as_document)
+        .map(|bucket| {
+            (
+                bucket.get("_id").cloned().unwrap_or(Bson::Null),
+                bucket.get("count").cloned().unwrap_or(Bson::Null),
+            )
+        })
+        .collect();
+    assert_eq!(
+        counts,
+        vec![
+            (Bson::Int32(0), Bson::Int32(1)),
+            (Bson::Int32(10), Bson::Int32(2)),
+            (text("Other"), Bson::Int32(1)),
+        ]
+    );
+    let Some(Bson::Array(total)) = out[0].get("total") else {
+        panic!("{out:?}");
+    };
+    assert_eq!(total[0].as_document().and_then(|count| count.get("n")), Some(&Bson::Int32(4)));
+}

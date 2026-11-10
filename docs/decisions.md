@@ -429,3 +429,4 @@ its full title with its status.
 - [D402](decisions/D402.md) Code-only batch 49 (M8): Elasticsearch search templates with our own Mustache
 - [D403](decisions/D403.md) Code-only batch 50 (M8): Elasticsearch's `_msearch/template`
 - [D404](decisions/D404.md) Code-only batch 51 (M9): `$$NOW` and `$$CLUSTER_TIME` in `aggregate` and update pipelines
+- [D405](decisions/D405.md) Code-only batch 52 (M9): MongoDB's `$facet`, `$bucket` and `$switch`
