@@ -1547,3 +1547,92 @@ fn bucket_groups_by_boundaries_and_facet_runs_each_sub_pipeline() {
     };
     assert_eq!(total[0].as_document().and_then(|count| count.get("n")), Some(&Bson::Int32(4)));
 }
+
+#[test]
+fn expr_filter_compares_two_fields_of_the_document() {
+    let filter = crate::parse_filter(&Document::from_entries(vec![(
+        "$expr".to_owned(),
+        sub(vec![("$gt", Bson::Array(vec![text("$spent"), text("$budget")]))]),
+    )]))
+    .unwrap();
+    let over = doc(vec![("spent", Bson::Int32(12)), ("budget", Bson::Int32(10))]);
+    let under = doc(vec![("spent", Bson::Int32(8)), ("budget", Bson::Int32(10))]);
+    assert!(crate::matches(&filter, &over));
+    assert!(!crate::matches(&filter, &under));
+}
+
+#[test]
+fn lookup_pipeline_binds_let_variables_for_each_document() {
+    let orders = vec![
+        doc(vec![("item", text("almonds")), ("ordered", Bson::Int32(12))]),
+        doc(vec![("item", text("pecans")), ("ordered", Bson::Int32(1))]),
+    ];
+    let stock = vec![
+        doc(vec![("sku", text("almonds")), ("instock", Bson::Int32(120))]),
+        doc(vec![("sku", text("almonds")), ("instock", Bson::Int32(5))]),
+        doc(vec![("sku", text("pecans")), ("instock", Bson::Int32(70))]),
+    ];
+    let pipeline = vec![sub(vec![(
+        "$lookup",
+        sub(vec![
+            ("from", text("warehouses")),
+            (
+                "let",
+                sub(vec![("order_item", text("$item")), ("order_qty", text("$ordered"))]),
+            ),
+            (
+                "pipeline",
+                Bson::Array(vec![
+                    sub(vec![(
+                        "$match",
+                        sub(vec![(
+                            "$expr",
+                            sub(vec![(
+                                "$and",
+                                Bson::Array(vec![
+                                    sub(vec![("$eq", Bson::Array(vec![text("$sku"), text("$$order_item")]))]),
+                                    sub(vec![("$gte", Bson::Array(vec![text("$instock"), text("$$order_qty")]))]),
+                                ]),
+                            )]),
+                        )]),
+                    )]),
+                    sub(vec![("$project", sub(vec![("sku", Bson::Int32(0))]))]),
+                ]),
+            ),
+            ("as", text("stockdata")),
+        ]),
+    )])];
+    let stages = crate::parse_pipeline(&pipeline).unwrap();
+    let load = |name: &str| -> crate::DocumentResult<Vec<Document>> {
+        assert_eq!(name, "warehouses");
+        Ok(stock.clone())
+    };
+    let out = crate::run_pipeline(&stages, orders, &load).unwrap();
+    let joined: Vec<usize> = out
+        .iter()
+        .map(|order| match order.get("stockdata") {
+            Some(Bson::Array(items)) => items.len(),
+            _ => usize::MAX,
+        })
+        .collect();
+    assert_eq!(joined, vec![1, 1]);
+    let first = out[0].get("stockdata").and_then(|items| match items {
+        Bson::Array(items) => items[0].as_document().cloned(),
+        _ => None,
+    });
+    assert_eq!(first.and_then(|stock| stock.get("instock").cloned()), Some(Bson::Int32(120)));
+}
+
+#[test]
+fn lookup_refuses_a_let_name_that_starts_with_a_capital() {
+    let pipeline = vec![sub(vec![(
+        "$lookup",
+        sub(vec![
+            ("from", text("other")),
+            ("let", sub(vec![("Item", text("$item"))])),
+            ("pipeline", Bson::Array(Vec::new())),
+            ("as", text("joined")),
+        ]),
+    )])];
+    assert!(crate::parse_pipeline(&pipeline).is_err());
+}

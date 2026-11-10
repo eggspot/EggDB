@@ -14,6 +14,8 @@ pub enum Filter {
     Or(Vec<Filter>),
     /// None holds.
     Nor(Vec<Filter>),
+    /// `$expr`: an aggregation expression over the document that must be truthy.
+    Expr(Bson),
     /// The values at a dotted path meet a condition.
     Field {
         /// The dotted path.
@@ -114,7 +116,8 @@ fn parse_at(filter: &Document, depth: usize) -> DocumentResult<Filter> {
             "$or" => all.push(Filter::Or(filters_of(value, "$or", depth)?)),
             "$nor" => all.push(Filter::Nor(filters_of(value, "$nor", depth)?)),
             "$comment" => {}
-            "$where" | "$expr" | "$text" | "$jsonSchema" => {
+            "$expr" => all.push(Filter::Expr(value.clone())),
+            "$where" | "$text" | "$jsonSchema" => {
                 return Err(DocumentError::not_implemented(format!(
                     "{name} is not supported yet"
                 )));
@@ -443,6 +446,10 @@ pub fn matches(filter: &Filter, document: &Document) -> bool {
         Filter::And(all) => all.iter().all(|inner| matches(inner, document)),
         Filter::Or(any) => any.iter().any(|inner| matches(inner, document)),
         Filter::Nor(none) => !none.iter().any(|inner| matches(inner, document)),
+        Filter::Expr(expression) => crate::expression::evaluate(expression, document)
+            .ok()
+            .flatten()
+            .is_some_and(|value| value.is_truthy()),
         Filter::Field { path, condition } => condition_holds(condition, &reached(document, path)),
     }
 }
@@ -459,7 +466,7 @@ pub fn matched_array_index(filter: &Filter, document: &Document) -> Option<usize
             .iter()
             .filter(|inner| matches(inner, document))
             .find_map(|inner| matched_array_index(inner, document)),
-        Filter::Nor(_) => None,
+        Filter::Nor(_) | Filter::Expr(_) => None,
         Filter::Field { path, condition } => {
             if !records_position(condition) {
                 return None;

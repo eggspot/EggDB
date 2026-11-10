@@ -1067,6 +1067,36 @@ pub fn pipeline_with_time(stages: &[Bson], now_ms: i64) -> Vec<Bson> {
         .collect()
 }
 
+/// The query filter `filter` with `$$NOW` and `$$CLUSTER_TIME` bound to `now_ms` inside its
+/// `$expr` expressions, at the top level and under `$and`, `$or` and `$nor`.
+pub fn filter_with_time(filter: &Document, now_ms: i64) -> Document {
+    filter_bound_to(filter, &Bson::DateTime(now_ms))
+}
+
+fn filter_bound_to(filter: &Document, now: &Bson) -> Document {
+    Document::from_entries(
+        filter
+            .iter()
+            .map(|(field, condition)| {
+                let condition = match (field.as_str(), condition) {
+                    ("$expr", _) => value_with_now(condition, now),
+                    ("$and" | "$or" | "$nor", Bson::Array(filters)) => Bson::Array(
+                        filters
+                            .iter()
+                            .map(|inner| match inner {
+                                Bson::Document(inner) => Bson::Document(filter_bound_to(inner, now)),
+                                other => other.clone(),
+                            })
+                            .collect(),
+                    ),
+                    _ => condition.clone(),
+                };
+                (field.clone(), condition)
+            })
+            .collect(),
+    )
+}
+
 fn stage_with_now(stage: &Stage, now: &Bson) -> Stage {
     match stage {
         Stage::AddFields(spec) => Stage::AddFields(document_with_now(spec, now)),

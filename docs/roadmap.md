@@ -945,9 +945,11 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Indexes used by queries, unique indexes and collations (D197).
 - `$$NOW` and `$$CLUSTER_TIME` in `aggregate`, and `$$CLUSTER_TIME` in pipeline-style updates
   (D349). **Code written, unbuilt** (code-only mode, 2026-11-10, D404).
-- `$text`, `$expr`, `$jsonSchema`, `$where` and the projection operators (D197).
+- `$text`, `$expr`, `$jsonSchema`, `$where` and the projection operators (D197). `$expr`: **code
+  written, unbuilt** (code-only mode, 2026-11-10, D406).
 - `$facet`, `$bucket`, `$out`, `$merge` and `$lookup` with a pipeline (D197). `$facet`, `$bucket`
-  and `$switch`: **code written, unbuilt** (code-only mode, 2026-11-10, D405).
+  and `$switch`: **code written, unbuilt** (code-only mode, 2026-11-10, D405); `$lookup` with `let` and
+  `pipeline`: **code written, unbuilt** (D406).
 - Change streams and multi-document transactions, with the replica-set handshake (D197).
 - `explain`, `renameCollection`, capped and time-series collections, and GridFS (D197).
 - SCRAM-SHA-1, other users and roles (D197).

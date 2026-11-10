@@ -33,7 +33,7 @@ pub use store::{
 };
 pub use update::{
     ArrayFilter, Operator, Update, apply_update, parse_update, parse_update_statement,
-    pipeline_with_time, upsert_document,
+    filter_with_time, pipeline_with_time, upsert_document,
 };
 
 #[cfg(test)]

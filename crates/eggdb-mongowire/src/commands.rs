@@ -3,8 +3,8 @@ use crate::server::{ServerConfig, Session};
 use eggdb_auth::scram::{ScramExchange, ScramFailure, ScramVerifier};
 use eggdb_bson::{Bson, Document, compare};
 use eggdb_documents::{
-    DocumentError, Filter, Modification, Projection, SortSpec, Store, UpdateOptions, parse_filter,
-    parse_projection, parse_sort, parse_update_statement,
+    DocumentError, Filter, Modification, Projection, SortSpec, Store, UpdateOptions,
+    filter_with_time, parse_filter, parse_projection, parse_sort, parse_update_statement,
 };
 use std::cmp::Ordering;
 use std::collections::VecDeque;
@@ -84,7 +84,7 @@ fn collection_name<'b>(body: &'b Document, command: &str) -> Result<&'b str, Doc
 fn filter_of(body: &Document, name: &str) -> Result<Filter, DocumentError> {
     match body.get(name) {
         None | Some(Bson::Null) => parse_filter(&Document::new()),
-        Some(Bson::Document(filter)) => parse_filter(filter),
+        Some(Bson::Document(filter)) => parse_filter(&filter_with_time(filter, now_ms())),
         Some(other) => Err(DocumentError::type_mismatch(format!(
             "BSON field '{name}' is the wrong type '{}', expected type 'object'",
             other.type_name()

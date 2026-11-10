@@ -48,6 +48,20 @@ pub enum Stage {
         /// The output array field.
         as_field: String,
     },
+    /// `$lookup` with `let` and `pipeline`: the sub-pipeline runs over the other collection
+    /// once per document, with the variables bound to that document's values.
+    LookupPipeline {
+        /// The other collection.
+        from: String,
+        /// The equality fields that narrow the other collection first, when both are given.
+        fields: Option<(String, String)>,
+        /// The `let` variables and their expressions over these documents.
+        variables: Vec<(String, Bson)>,
+        /// The sub-pipeline as written, bound to the variables before each run.
+        pipeline: Vec<Bson>,
+        /// The output array field.
+        as_field: String,
+    },
     /// `$replaceRoot` or `$replaceWith`, the new document's expression.
     ReplaceRoot(Bson),
     /// `$facet`: each output field's sub-pipeline, all run over the same input.
@@ -182,10 +196,8 @@ fn parse_stage(stage: &Document) -> DocumentResult<Stage> {
         },
         "$lookup" => {
             let spec = document_argument()?;
-            if spec.contains_key("pipeline") {
-                return Err(DocumentError::not_implemented(
-                    "$lookup with a pipeline is not supported yet",
-                ));
+            if spec.contains_key("pipeline") || spec.contains_key("let") {
+                return lookup_pipeline(spec);
             }
             let field = |name: &str| {
                 spec.get_str(name).map(str::to_owned).ok_or_else(|| {
@@ -675,6 +687,44 @@ pub fn run_pipeline(
                     })
                     .collect::<DocumentResult<_>>()?
             }
+            Stage::LookupPipeline { from, fields, variables, pipeline, as_field } => {
+                let foreign = load(from)?;
+                documents
+                    .into_iter()
+                    .map(|mut document| {
+                        let mut bound = Vec::with_capacity(variables.len());
+                        for (name, expression) in variables {
+                            bound.push((name.clone(), evaluate(expression, &document)?));
+                        }
+                        let candidates: Vec<Document> = match fields {
+                            Some((local_field, foreign_field)) => {
+                                let wanted = lookup_values(&document, local_field);
+                                foreign
+                                    .iter()
+                                    .filter(|other| {
+                                        lookup_values(other, foreign_field).iter().any(|value| {
+                                            wanted.iter().any(|want| compare(value, want) == Ordering::Equal)
+                                        })
+                                    })
+                                    .cloned()
+                                    .collect()
+                            }
+                            None => foreign.clone(),
+                        };
+                        let stages = parse_pipeline(&pipeline_with_variables(pipeline, &bound))?;
+                        let joined = run_pipeline(&stages, candidates, load)?;
+                        let mut budget = ByteBudget::default();
+                        let mut values = Vec::with_capacity(joined.len());
+                        for other in joined {
+                            let value = Bson::Document(other);
+                            budget.add(value_size(&value))?;
+                            values.push(value);
+                        }
+                        set_path(&mut document, as_field, Bson::Array(values))?;
+                        Ok(document)
+                    })
+                    .collect::<DocumentResult<_>>()?
+            }
             Stage::ReplaceRoot(expression) => documents
                 .iter()
                 .map(|document| match evaluate(expression, document)? {
@@ -697,5 +747,180 @@ impl Stage {
             Stage::Match(filter) => Some(filter),
             _ => None,
         }
+    }
+}
+
+const REFUSED_IN_LOOKUP: [&str; 2] = ["$out", "$merge"];
+
+fn lookup_pipeline(spec: &Document) -> DocumentResult<Stage> {
+    let text = |name: &str| {
+        spec.get_str(name).map(str::to_owned).ok_or_else(|| {
+            DocumentError::failed_to_parse(format!("$lookup needs the string field '{name}'"))
+        })
+    };
+    let from = text("from")?;
+    let as_field = text("as")?;
+    let fields = match (spec.get("localField"), spec.get("foreignField")) {
+        (None, None) => None,
+        (Some(_), Some(_)) => Some((text("localField")?, text("foreignField")?)),
+        _ => {
+            return Err(DocumentError::failed_to_parse(
+                "$lookup requires both or neither of 'localField' and 'foreignField' to be specified",
+            ));
+        }
+    };
+    let pipeline = match spec.get("pipeline") {
+        None => Vec::new(),
+        Some(Bson::Array(stages)) => stages.clone(),
+        Some(_) => {
+            return Err(DocumentError::failed_to_parse(
+                "'pipeline' option must be specified as an array",
+            ));
+        }
+    };
+    let refused = pipeline.iter().find_map(|stage| {
+        stage
+            .as_document()
+            .and_then(Document::first)
+            .map(|(name, _)| name.as_str())
+            .filter(|name| REFUSED_IN_LOOKUP.contains(name))
+    });
+    if let Some(name) = refused {
+        return Err(DocumentError::failed_to_parse(format!(
+            "{name} is not allowed within a $lookup's sub-pipeline"
+        )));
+    }
+    let mut variables = Vec::new();
+    match spec.get("let") {
+        None => {}
+        Some(Bson::Document(names)) => {
+            for (name, expression) in names.iter() {
+                user_variable_name(name)?;
+                variables.push((name.clone(), expression.clone()));
+            }
+        }
+        Some(_) => {
+            return Err(DocumentError::failed_to_parse(
+                "$lookup argument 'let' must be an object",
+            ));
+        }
+    }
+    parse_pipeline(&pipeline)?;
+    Ok(Stage::LookupPipeline { from, fields, variables, pipeline, as_field })
+}
+
+fn user_variable_name(name: &str) -> DocumentResult<()> {
+    let mut characters = name.chars();
+    let starts_well = characters
+        .next()
+        .is_some_and(|first| first.is_ascii_lowercase() || !first.is_ascii());
+    if !starts_well {
+        return Err(DocumentError::failed_to_parse(format!(
+            "'{name}' starts with an invalid character for a user variable name"
+        )));
+    }
+    if !characters.all(|rest| rest.is_ascii_alphanumeric() || rest == '_' || !rest.is_ascii()) {
+        return Err(DocumentError::failed_to_parse(format!(
+            "'{name}' contains an invalid character for a variable name"
+        )));
+    }
+    Ok(())
+}
+
+fn pipeline_with_variables(stages: &[Bson], bound: &[(String, Option<Bson>)]) -> Vec<Bson> {
+    stages.iter().map(|stage| stage_with_variables(stage, bound)).collect()
+}
+
+fn stage_with_variables(stage: &Bson, bound: &[(String, Option<Bson>)]) -> Bson {
+    let Bson::Document(spec) = stage else {
+        return stage.clone();
+    };
+    Bson::Document(Document::from_entries(
+        spec.iter()
+            .map(|(name, value)| {
+                let value = match (name.as_str(), value) {
+                    ("$match", Bson::Document(filter)) => Bson::Document(Document::from_entries(
+                        filter
+                            .iter()
+                            .map(|(field, condition)| {
+                                let condition = if field == "$expr" {
+                                    value_with_variables(condition, bound)
+                                } else {
+                                    condition.clone()
+                                };
+                                (field.clone(), condition)
+                            })
+                            .collect(),
+                    )),
+                    ("$facet", Bson::Document(facets)) => Bson::Document(Document::from_entries(
+                        facets
+                            .iter()
+                            .map(|(field, inner)| {
+                                let inner = match inner {
+                                    Bson::Array(stages) => {
+                                        Bson::Array(pipeline_with_variables(stages, bound))
+                                    }
+                                    other => other.clone(),
+                                };
+                                (field.clone(), inner)
+                            })
+                            .collect(),
+                    )),
+                    ("$lookup", Bson::Document(lookup)) => Bson::Document(Document::from_entries(
+                        lookup
+                            .iter()
+                            .map(|(field, inner)| {
+                                let inner = match (field.as_str(), inner) {
+                                    ("pipeline", Bson::Array(stages)) => {
+                                        Bson::Array(pipeline_with_variables(stages, bound))
+                                    }
+                                    ("let", _) => value_with_variables(inner, bound),
+                                    _ => inner.clone(),
+                                };
+                                (field.clone(), inner)
+                            })
+                            .collect(),
+                    )),
+                    _ => value_with_variables(value, bound),
+                };
+                (name.clone(), value)
+            })
+            .collect(),
+    ))
+}
+
+fn value_with_variables(value: &Bson, bound: &[(String, Option<Bson>)]) -> Bson {
+    match value {
+        Bson::String(text) if text.starts_with("$$") => {
+            let (variable, rest) = text[2..]
+                .split_once('.')
+                .map_or((&text[2..], None), |(name, rest)| (name, Some(rest)));
+            let Some((_, found)) = bound.iter().find(|(name, _)| name == variable) else {
+                return value.clone();
+            };
+            let reached = match (found, rest) {
+                (Some(found), None) => Some(found.clone()),
+                (Some(Bson::Document(inner)), Some(path)) => field_value(inner, path),
+                _ => None,
+            };
+            match reached {
+                Some(reached) => Bson::Document(Document::from_entries(vec![(
+                    "$literal".to_owned(),
+                    reached,
+                )])),
+                None => Bson::String("$$REMOVE".to_owned()),
+            }
+        }
+        Bson::Document(inner) if inner.contains_key("$literal") => value.clone(),
+        Bson::Document(inner) => Bson::Document(Document::from_entries(
+            inner
+                .iter()
+                .map(|(name, item)| (name.clone(), value_with_variables(item, bound)))
+                .collect(),
+        )),
+        Bson::Array(items) => Bson::Array(
+            items.iter().map(|item| value_with_variables(item, bound)).collect(),
+        ),
+        other => other.clone(),
     }
 }
