@@ -402,3 +402,4 @@ its full title with its status.
 - [D375](decisions/D375.md) Code-only batch 21 (M5): Oracle's `STATS_MODE` as `mode() WITHIN GROUP`
 - [D376](decisions/D376.md) Code-only batch 22 (M5): SQLite `group_concat` and `total`, MySQL `GROUP_CONCAT`
 - [D377](decisions/D377.md) Code-only batch 23 (M5): SQLite's math functions, `unhex`, `zeroblob`, `randomblob`
+- [D378](decisions/D378.md) Code-only batch 24 (M5): SQLite's reading and building JSON functions

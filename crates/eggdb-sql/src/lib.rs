@@ -171,6 +171,7 @@ mod store;
 mod exported_snapshots;
 mod undo_marks;
 mod sqlite_math;
+mod sqlite_json;
 mod string_functions;
 mod subquery;
 mod table_variables;
