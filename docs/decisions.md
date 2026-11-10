@@ -410,3 +410,4 @@ its full title with its status.
 - [D383](decisions/D383.md) Code-only batch 29 (M5): SQLite's temporary triggers
 - [D384](decisions/D384.md) Code-only batch 30 (M5): SQLite's `VACUUM` and `REINDEX` accepted
 - [D385](decisions/D385.md) Code-only batch 31 (M5): PostgreSQL's `ALTER COLUMN ... SET EXPRESSION` and `DROP EXPRESSION`
+- [D386](decisions/D386.md) Code-only batch 32 (M5): storage options in a plain PostgreSQL `CREATE TABLE`

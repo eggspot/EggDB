@@ -2008,6 +2008,14 @@ impl<'t> Parser<'t> {
         } else {
             None
         };
+        if self.postgresql() {
+            self.table_access_method()?;
+            self.storage_parameters()?;
+            if let Some(action) = self.on_commit_clause(temporary.is_some())? {
+                temporary = Some(action);
+            }
+            self.table_space()?;
+        }
         if self.is_word("partition") || self.is_word("inherits") || self.is_word("with") {
             return Err(self.not_supported("table options"));
         }

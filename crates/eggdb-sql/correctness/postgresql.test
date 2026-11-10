@@ -6083,3 +6083,22 @@ ALTER TABLE gx385 ALTER COLUMN b DROP EXPRESSION IF EXISTS
 
 ok
 DROP TABLE gx385
+
+chapter "CREATE TABLE": USING heap, WITH (storage parameters), WITHOUT OIDS and TABLESPACE pg_default in a plain CREATE TABLE (D386)
+ok
+CREATE TABLE so386 (id int PRIMARY KEY) USING heap WITH (fillfactor = 70) TABLESPACE pg_default
+
+ok
+CREATE TABLE so386b (id int) WITHOUT OIDS
+
+error 22023
+CREATE TABLE so386c (id int) WITH (fillfactor = 5)
+
+error 42704
+CREATE TABLE so386d (id int) TABLESPACE elsewhere
+
+ok
+DROP TABLE so386
+
+ok
+DROP TABLE so386b

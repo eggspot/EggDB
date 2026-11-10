@@ -242,7 +242,7 @@ impl Parser<'_> {
         Ok(ExecutePrepared { name, arguments })
     }
 
-    fn table_access_method(&mut self) -> SqlResult<()> {
+    pub(super) fn table_access_method(&mut self) -> SqlResult<()> {
         if !self.take_word("using") {
             return Ok(());
         }
@@ -264,7 +264,7 @@ impl Parser<'_> {
         Err(error.at(method.position))
     }
 
-    fn table_space(&mut self) -> SqlResult<()> {
+    pub(super) fn table_space(&mut self) -> SqlResult<()> {
         if !self.take_word("tablespace") {
             return Ok(());
         }
@@ -283,7 +283,7 @@ impl Parser<'_> {
         Err(error.at(space.position))
     }
 
-    fn storage_parameters(&mut self) -> SqlResult<()> {
+    pub(super) fn storage_parameters(&mut self) -> SqlResult<()> {
         if self.is_word("without") && self.is_word_at(1, "oids") {
             self.at += 2;
             return Ok(());

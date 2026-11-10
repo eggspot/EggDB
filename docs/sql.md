@@ -1712,7 +1712,8 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   for an expression) and keeps the text `CREATE TABLE t(a INT,c)` in `sqlite_schema`. Oracle
   needs an alias for an expression (`ORA-00998`), and `WHERE 1 = 0` copies the shape.
   PostgreSQL's `CREATE TABLE name [(column, ...)] [USING heap] [WITH (option = value, ...) |
-  WITHOUT OIDS] [ON COMMIT ...] [TABLESPACE pg_default] AS ...` (D342) checks the options as
+  WITHOUT OIDS] [ON COMMIT ...] [TABLESPACE pg_default] AS ...` (D342), and a plain `CREATE
+  TABLE` with the same clauses after its columns (and `PARTITION BY`) (D386), checks the options as
   PostgreSQL does and keeps nothing from them: another access method is `42704` (an index method
   such as `btree` `42809`), another tablespace `42704` (`pg_global` `22023`), an unknown storage
   parameter, a value out of its range or a parameter given twice `22023`, and `oids = true`
