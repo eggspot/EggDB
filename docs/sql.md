@@ -4817,9 +4817,11 @@ And more, not in the suite yet:
 - `PRAGMA user_version`, `foreign_keys`, `journal_mode` and `synchronous` are per session, not
   kept in the file; foreign keys are never enforced.
 - Not supported yet: `CREATE INDEX`, `UNIQUE` and `CHECK` constraints, `COLLATE NOCASE`,
-  views, `ATTACH`, `VACUUM`, the JSON and math functions and bare columns in aggregate
+  views, `ATTACH`, `VACUUM`, the JSON functions and bare columns in aggregate
   queries. `group_concat(X [, Y])` (with `DISTINCT` and `ORDER BY`) and `total(X)` are built
-  (D376).
+  (D376), and so are SQLite's math functions (`acos` ... `trunc`, `log(B, X)`, `pi()`, NULL for
+  an argument that does not look like a number or is out of the function's domain) and `unhex`,
+  `zeroblob` and `randomblob` (D377).
 
 ## Known differences from Oracle
 The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 773 cases from Oracle's SQL

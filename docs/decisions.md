@@ -401,3 +401,4 @@ its full title with its status.
 - [D374](decisions/D374.md) Code-only batch 20 (M5): Oracle's `CORR_S` and `CORR_K` coefficients (extends D340)
 - [D375](decisions/D375.md) Code-only batch 21 (M5): Oracle's `STATS_MODE` as `mode() WITHIN GROUP`
 - [D376](decisions/D376.md) Code-only batch 22 (M5): SQLite `group_concat` and `total`, MySQL `GROUP_CONCAT`
+- [D377](decisions/D377.md) Code-only batch 23 (M5): SQLite's math functions, `unhex`, `zeroblob`, `randomblob`
