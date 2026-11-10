@@ -157,6 +157,7 @@ pub struct CpuTopology {
     logical_cpus: Option<NonZeroUsize>,
     packages: Option<NonZeroUsize>,
     cache_line_size: Option<NonZeroUsize>,
+    performance_logical_cpus: Option<NonZeroUsize>,
 }
 
 /// How [`CpuTopology::symmetric`] numbers the hardware threads of a core.
@@ -216,6 +217,7 @@ impl CpuTopology {
             logical_cpus: NonZeroUsize::new(locations.len()),
             locations,
             cache_line_size,
+            performance_logical_cpus: None,
         })
     }
 
@@ -241,6 +243,7 @@ impl CpuTopology {
             logical_cpus,
             packages,
             cache_line_size,
+            performance_logical_cpus: None,
         })
     }
 
@@ -322,6 +325,25 @@ impl CpuTopology {
     /// depend on a value read at run time.
     pub fn cache_line_size(&self) -> Option<NonZeroUsize> {
         self.cache_line_size
+    }
+
+    /// The topology with `count` logical CPUs on performance cores, for systems that give the
+    /// number of performance CPUs without saying which they are (Apple's `hw.perflevel0`); a
+    /// count above the logical CPUs is ignored.
+    pub fn with_performance_core_count(mut self, count: Option<NonZeroUsize>) -> Self {
+        self.performance_logical_cpus =
+            count.filter(|count| self.logical_cpus.is_none_or(|logical| *count <= logical));
+        self
+    }
+
+    /// How many logical CPUs a hybrid processor has on its performance cores, from the CPUs'
+    /// locations or, where the system gives only counts, from
+    /// [`CpuTopology::with_performance_core_count`]; `None` when the processor is not hybrid or
+    /// does not say.
+    pub fn performance_cpu_count(&self) -> Option<NonZeroUsize> {
+        self.performance_cpus()
+            .and_then(|cpus| NonZeroUsize::new(cpus.len()))
+            .or(self.performance_logical_cpus)
     }
 
     /// The CPUs on performance cores of a hybrid processor, or `None` when the processor is not

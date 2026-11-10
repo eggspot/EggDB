@@ -1277,7 +1277,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [freebsd, netbsd, omnios]
+        os: [freebsd, netbsd, omnios, openbsd, dragonflybsd]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1315,6 +1315,22 @@ jobs:
             . "$HOME/.cargo/env"
             rustup toolchain install
             cargo test -p eggdb-platform -p eggdb-storage -p eggdb --lib
+      - name: Test the platform layer natively in openbsd with its packaged Rust (a VM through vmactions, MIT, test tooling only; rustup has no OpenBSD toolchain)
+        if: matrix.os == 'openbsd'
+        uses: vmactions/openbsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkg_add rust
+          run: |
+            cargo test -p eggdb-platform --lib
+      - name: Test the platform layer natively in dragonflybsd with its packaged Rust (a VM through vmactions, MIT, test tooling only; rustup has no DragonFly toolchain)
+        if: matrix.os == 'dragonflybsd'
+        uses: vmactions/dragonflybsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkg install -y rust
+          run: |
+            cargo test -p eggdb-platform --lib
 
   browser:
     needs: changes

@@ -50,6 +50,86 @@ pub(crate) fn unlock(ptr: NonNull<u8>, len: usize) {
     platform::unlock(ptr, len);
 }
 
+pub(crate) fn place_on_numa_node(ptr: NonNull<u8>, len: usize, node: u32) -> Result<()> {
+    numa::place(ptr, len, node)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod numa {
+    use crate::error::{Error, ErrorKind, Result};
+    use std::ffi::{c_long, c_ulong};
+    use std::io;
+    use std::ptr::NonNull;
+
+    const MPOL_BIND: c_long = 2;
+    const MPOL_MF_MOVE: c_long = 1 << 1;
+    const MOST_NODES: usize = 1024;
+    const WORD_BITS: usize = c_ulong::BITS as usize;
+    const EINVAL: i32 = 22;
+    const ENOSYS: i32 = 38;
+
+    cfg_select! {
+        target_arch = "x86_64" => { const SYS_MBIND: Option<c_long> = Some(237); }
+        target_arch = "x86" => { const SYS_MBIND: Option<c_long> = Some(274); }
+        target_arch = "arm" => { const SYS_MBIND: Option<c_long> = Some(319); }
+        any(target_arch = "powerpc", target_arch = "powerpc64") => {
+            const SYS_MBIND: Option<c_long> = Some(259);
+        }
+        target_arch = "s390x" => { const SYS_MBIND: Option<c_long> = Some(268); }
+        any(target_arch = "aarch64", target_arch = "riscv64", target_arch = "loongarch64") => {
+            const SYS_MBIND: Option<c_long> = Some(235);
+        }
+        _ => { const SYS_MBIND: Option<c_long> = None; }
+    }
+
+    unsafe extern "C" {
+        fn syscall(number: c_long, ...) -> c_long;
+    }
+
+    pub(super) fn place(ptr: NonNull<u8>, len: usize, node: u32) -> Result<()> {
+        let number = SYS_MBIND.ok_or_else(|| Error::new(ErrorKind::Unsupported))?;
+        let node = node as usize;
+        if node >= MOST_NODES {
+            return Err(Error::new(ErrorKind::InvalidInput));
+        }
+        let mut mask: [c_ulong; MOST_NODES / WORD_BITS] = [0; MOST_NODES / WORD_BITS];
+        mask[node / WORD_BITS] |= 1 << (node % WORD_BITS);
+        // SAFETY: the range is a mapping this process owns for the region's whole life, and
+        // mbind only reads the mask, whose MOST_NODES bits it is told about (the kernel reads one
+        // bit fewer than maxnode).
+        let result = unsafe {
+            syscall(
+                number,
+                ptr.as_ptr(),
+                len as c_ulong,
+                MPOL_BIND,
+                mask.as_ptr(),
+                (MOST_NODES + 1) as c_ulong,
+                MPOL_MF_MOVE,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        Err(match error.raw_os_error() {
+            Some(EINVAL) => Error::from(error).with_kind(ErrorKind::InvalidInput),
+            Some(ENOSYS) => Error::from(error).with_kind(ErrorKind::Unsupported),
+            _ => Error::from(error),
+        })
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+mod numa {
+    use crate::error::{Error, ErrorKind, Result};
+    use std::ptr::NonNull;
+
+    pub(super) fn place(_: NonNull<u8>, _: usize, _: u32) -> Result<()> {
+        Err(Error::new(ErrorKind::Unsupported))
+    }
+}
+
 fn checked_power_of_two(size: usize) -> Option<usize> {
     size.is_power_of_two().then_some(size)
 }

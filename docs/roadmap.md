@@ -341,16 +341,19 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   none of the timing (D336); with the shared listener crate (D122). **Code written, unbuilt** (code-only mode, 2026-11-10). `eggdb_platform::accept_tcp` copies the
   listener's timing and every server's accept loop uses it.
 - Non-blocking connects in the `poll(2)` backend on the BSDs and illumos (D73). **Code written, unbuilt** (code-only mode, 2026-11-10).
-- OpenBSD and DragonFly on the `poll(2)` backend, with CI runners for them (D73).
+- OpenBSD and DragonFly on the `poll(2)` backend, with CI runners for them (D73). **Code written, unbuilt** (code-only mode, 2026-11-10, D356): VM jobs with the
+  systems' packaged Rust, since rustup has no toolchain for them.
 - Solaris: file locks, and sends that never raise `SIGPIPE` (D73, D78). File locks: **Code written, unbuilt** (code-only mode, 2026-11-10). `SIGPIPE`: left.
 - Datagrams in the network completion queue (`NetOp`) and batched receives, for QUIC (D315).
 - Windows named pipes, for the mysql client and SQL Server clients on Windows (D267, Where we are).
 - Per-device alignment for direct I/O (Where we are). **Code written, unbuilt** (code-only mode, 2026-11-10). Uncached opens are refused when the device's
   alignment does not divide 4096 (`statx` on Linux, the logical sector size on Windows).
 - NUMA memory placement and work placed by NUMA node, so one machine is used fully (D18, D65,
-  PR #86).
+  PR #86). Placement: **Code written, unbuilt** (code-only mode, 2026-11-10, D356): `MemoryRegion::place_on_numa_node` on Linux. Left: the page cache
+  and the shards using it.
 - Performance and efficiency cores on Windows and macOS, and hot work placed on performance cores
-  (D65, PR #86).
+  (D65, PR #86). **Code written, unbuilt** (code-only mode, 2026-11-10, D356): Windows' efficiency classes, macOS's `hw.perflevel0` count,
+  `ThreadOptions::hot`. Left: marking the engine's hot threads.
 - Thread pinning and CPU topology on the BSDs (Where we are). **Code written, unbuilt** (code-only mode, 2026-11-10). FreeBSD, DragonFly and NetBSD; OpenBSD has
   no affinity call.
 - EggDB's own allocator as the default build, once the benchmarks show it (D166).
