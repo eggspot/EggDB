@@ -1837,3 +1837,21 @@ DROP TABLE explained345
 
 ok
 DROP TABLE joined345
+
+chapter "14.19.1 Aggregate Function Descriptions": GROUP_CONCAT with DISTINCT, ORDER BY and SEPARATOR (D376)
+ok
+CREATE TABLE gc376 (k INT, v VARCHAR(10))
+
+ok
+INSERT INTO gc376 VALUES (1, 'a'), (1, 'b'), (1, 'b'), (2, 'c')
+
+rows
+SELECT k, GROUP_CONCAT(DISTINCT v ORDER BY v DESC SEPARATOR ';') AS g FROM gc376 GROUP BY k ORDER BY k
+----
+k|g
+1|b;a
+2|c
+SELECT 2
+
+ok
+DROP TABLE gc376

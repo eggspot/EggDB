@@ -4817,9 +4817,9 @@ And more, not in the suite yet:
 - `PRAGMA user_version`, `foreign_keys`, `journal_mode` and `synchronous` are per session, not
   kept in the file; foreign keys are never enforced.
 - Not supported yet: `CREATE INDEX`, `UNIQUE` and `CHECK` constraints, `COLLATE NOCASE`,
-  views, `ATTACH`, `VACUUM`,
-  `group_concat` and `total`, the JSON and math functions and bare columns in aggregate
-  queries.
+  views, `ATTACH`, `VACUUM`, the JSON and math functions and bare columns in aggregate
+  queries. `group_concat(X [, Y])` (with `DISTINCT` and `ORDER BY`) and `total(X)` are built
+  (D376).
 
 ## Known differences from Oracle
 The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 773 cases from Oracle's SQL

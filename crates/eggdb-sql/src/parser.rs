@@ -4,6 +4,7 @@ mod create_table_as;
 mod cursors;
 mod databases;
 mod generated;
+mod group_concat;
 mod grouping_sets;
 mod hierarchy;
 mod indexes;
@@ -4965,6 +4966,15 @@ impl<'t> Parser<'t> {
         }
         if text == "string_agg" && self.postgresql() {
             return self.string_agg(name);
+        }
+        if text == "group_concat"
+            && (self.sqlite() || self.mysql())
+            && self.peek_kind() == &TokenKind::LeftParen
+        {
+            return self.group_concat(&name);
+        }
+        if text == "total" && self.sqlite() && self.peek_kind() == &TokenKind::LeftParen {
+            return self.sqlite_total(&name);
         }
         if self.postgresql()
             && let Some(expr) = self.postgresql_function(&name)?

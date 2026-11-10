@@ -564,7 +564,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   columns and keys on every dynamic column are built (D305). Check: keyed lookups on `TEXT` keys
   benchmarked against SQLite.
 - SQLite's `VACUUM` in SQL, blob, JSON and math functions, `group_concat`, `total` and
-  temporary triggers (PR #86, sql.md); `GLOB` classes and temporary views are built (D299,
+  temporary triggers (PR #86, sql.md); `group_concat`, `total` and MySQL's `GROUP_CONCAT`:
+  **code written, unbuilt** (code-only mode, 2026-11-10, D376); `GLOB` classes and temporary views are built (D299,
   D151). Check: the SQLite suite.
 - SQLite's own text in `sqlite_schema` after `RENAME COLUMN`, `DROP COLUMN` and renamed
   references in views and triggers (D273, D294).
