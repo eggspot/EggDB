@@ -391,9 +391,12 @@ fn apply(
             dialect,
         )
         .map(|()| None),
-        AlterAction::SetType { column, sql_type } => {
-            set_type(writer, tables, name, column, *sql_type, dialect).map(|()| None)
-        }
+        AlterAction::SetType {
+            column,
+            sql_type,
+            using,
+        } => set_type(writer, tables, name, column, *sql_type, using.as_ref(), dialect)
+            .map(|()| None),
         AlterAction::Redefine { old_name, column } => {
             redefine(writer, tables, name, old_name, column, dialect).map(|()| None)
         }
@@ -1827,14 +1830,27 @@ fn set_type(
     name: &str,
     column: &Name,
     sql_type: SqlType,
+    using: Option<&crate::ast::Expr>,
     dialect: Dialect,
 ) -> SqlResult<()> {
     let (sql_type, domain) = execute::column_storage(sql_type, column.position)?;
     let table = current(writer, tables, name)?;
     let index = column_index(&table, column, dialect)?;
-    if table.columns[index].sql_type == sql_type && table.domain_of(index) == domain {
+    if using.is_none()
+        && table.columns[index].sql_type == sql_type
+        && table.domain_of(index) == domain
+    {
         return Ok(());
     }
+    if let Some(expr) = using {
+        if crate::subquery::mentions_subquery(expr) {
+            return Err(SqlError::not_supported("cannot use subquery in transform expression")
+                .at(expr.position));
+        }
+        crate::eval::reject_aggregates(expr, "transform expressions")?;
+        crate::eval::check_columns(expr, crate::partitions::table_scope(&table))?;
+    }
+    let old_table = table.clone();
     if table.columns[index].auto_increment
         && !matches!(
             sql_type,
@@ -1858,8 +1874,22 @@ fn set_type(
     new.set_domain(index, domain);
     let target = new.columns[index].clone();
     let mut map = |mut row: Vec<Value>| -> SqlResult<Vec<Value>> {
+        let transformed = match using {
+            Some(expr) => Some(
+                crate::eval::Evaluator {
+                    scope: crate::partitions::table_scope(&old_table),
+                    row: &row,
+                    correlation: None,
+                }
+                .eval(expr, Some(sql_type))?,
+            ),
+            None => None,
+        };
         if let Some(value) = row.get_mut(index) {
-            let taken = std::mem::replace(value, Value::Null);
+            let taken = match transformed {
+                Some(found) => found,
+                None => std::mem::replace(value, Value::Null),
+            };
             *value = convert(taken, sql_type, Conversion::Assignment).map_err(|error| {
                 if error.state() == SqlState::CANNOT_COERCE {
                     SqlError::new(
@@ -2013,7 +2043,7 @@ fn redefine(
     if old_name.text != column.name.text {
         rename_column(writer, tables, name, old_name, &column.name, dialect)?;
     }
-    set_type(writer, tables, name, &column.name, column.sql_type, dialect)?;
+    set_type(writer, tables, name, &column.name, column.sql_type, None, dialect)?;
     let mut table = current(writer, tables, name)?;
     let index = table.column_index(&column.name.text).unwrap_or(index);
     let in_key = table.primary_key.contains(&index);

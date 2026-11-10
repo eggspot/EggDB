@@ -412,3 +412,4 @@ its full title with its status.
 - [D385](decisions/D385.md) Code-only batch 31 (M5): PostgreSQL's `ALTER COLUMN ... SET EXPRESSION` and `DROP EXPRESSION`
 - [D386](decisions/D386.md) Code-only batch 32 (M5): storage options in a plain PostgreSQL `CREATE TABLE`
 - [D387](decisions/D387.md) Code-only batch 34 (M5): `ALTER TABLE ... ADD COLUMN ... serial` as a sequence-backed default
+- [D388](decisions/D388.md) Code-only batch 35 (M5): `ALTER COLUMN ... TYPE ... USING expr`

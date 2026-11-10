@@ -939,6 +939,7 @@ pub(crate) enum AlterAction {
     SetType {
         column: Name,
         sql_type: SqlType,
+        using: Option<Expr>,
     },
     Redefine {
         old_name: Name,

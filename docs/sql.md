@@ -3005,8 +3005,9 @@ and `CHECK constraint failed: name` (an unnamed check is named by its text); MyS
   expressions follow.
 - `ALTER [COLUMN] c SET DEFAULT expr | DROP DEFAULT | SET NOT NULL | DROP NOT NULL |
   [SET DATA] TYPE type`: `SET NOT NULL` checks every row; `TYPE` converts every row as an
-  assignment would (`42804 column "c" cannot be cast automatically to type t` otherwise;
-  `USING` is not supported yet).
+  assignment would (`42804 column "c" cannot be cast automatically to type t` otherwise), or
+  with `USING expr` sets each row's value to the expression over the row's old values (a
+  subquery or aggregate in it is refused) (D388).
 - `ADD [CONSTRAINT name] PRIMARY KEY (columns) | UNIQUE (columns) | CHECK (expr) | FOREIGN KEY
   ...`: existing rows are checked first (`could not create unique index "t_pkey"`, `check
   constraint "c" of relation "t" is violated by some row`). `DROP CONSTRAINT [IF EXISTS] name
@@ -4630,8 +4631,8 @@ The other differences:
 - Constraints are checked when each statement ends, except deferred foreign keys (checked at
   `COMMIT`); `RESTRICT` behaves as `NO ACTION`, so a statement that changes a referenced key and puts it
   back, such as the key swap `UPDATE p SET id = 3 - id` over ids 1 and 2, passes where
-  PostgreSQL's immediate `RESTRICT` refuses it. `ALTER COLUMN ... TYPE ... USING` and `ADD
-  COLUMN` of a `serial` or identity column answer `0A000`.
+  PostgreSQL's immediate `RESTRICT` refuses it. `ADD COLUMN` of an identity column answers
+  `0A000` (a `serial` one is built, D387).
 - A sequence's `CACHE` is remembered, not used: every value is saved. A value handed out by a
   transaction that rolled back can be handed out once more if another connection's writer starts
   between the rollback and the re-saving of the sequence (D114); a committed value never is.

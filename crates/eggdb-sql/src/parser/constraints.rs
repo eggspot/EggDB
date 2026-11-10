@@ -670,6 +670,7 @@ impl Parser<'_> {
             actions.push(AlterAction::SetType {
                 column: column.clone(),
                 sql_type,
+                using: None,
             });
             actions.push(AlterAction::SetNotNull { column, not_null });
             return Ok(());
@@ -864,6 +865,7 @@ impl Parser<'_> {
             actions.push(AlterAction::SetType {
                 column: column.clone(),
                 sql_type,
+                using: None,
             });
             changed = true;
         }
@@ -1365,10 +1367,19 @@ impl Parser<'_> {
 
     fn set_type_action(&mut self, column: Name) -> SqlResult<AlterAction> {
         let sql_type = self.sql_type()?;
-        if self.is_word("using") || self.is_word("collate") {
-            return Err(self.not_supported("ALTER COLUMN TYPE with USING or COLLATE"));
+        if self.is_word("collate") {
+            return Err(self.not_supported("ALTER COLUMN TYPE with COLLATE"));
         }
-        Ok(AlterAction::SetType { column, sql_type })
+        let using = if self.take_word("using") {
+            Some(self.expression()?)
+        } else {
+            None
+        };
+        Ok(AlterAction::SetType {
+            column,
+            sql_type,
+            using,
+        })
     }
 }
 
