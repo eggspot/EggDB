@@ -1237,6 +1237,7 @@ pub(crate) struct PartitionBy {
     pub(crate) key: Vec<PartitionKeyPart>,
     pub(crate) partitions: Vec<NamedPartition>,
     pub(crate) hash_partitions: Option<u32>,
+    pub(crate) mysql_integer_key: bool,
     pub(crate) position: usize,
 }
 

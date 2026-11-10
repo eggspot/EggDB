@@ -153,3 +153,37 @@ fn mysql_adds_hash_partitions_and_spreads_the_rows_again() {
         "count(*)\n6\nSELECT 1"
     );
 }
+
+#[test]
+fn mysql_partitions_by_range_list_and_hash_take_only_integers_and_its_own_functions() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    let error = failure(
+        &mut session,
+        "CREATE TABLE d (id int NOT NULL, at date NOT NULL) PARTITION BY RANGE (at)
+             (PARTITION p0 VALUES LESS THAN (10))",
+    );
+    assert_eq!(error.vendor_code(), Some(1659), "{error}");
+    let error = failure(
+        &mut session,
+        "CREATE TABLE n (id int NOT NULL, name varchar(20) NOT NULL)
+             PARTITION BY HASH (length(name)) PARTITIONS 2",
+    );
+    assert_eq!(error.vendor_code(), Some(1564), "{error}");
+    answer(
+        &mut session,
+        "CREATE TABLE c (id int NOT NULL, at date NOT NULL) PARTITION BY RANGE COLUMNS (at)
+             (PARTITION p0 VALUES LESS THAN ('2020-01-01'))",
+    );
+}
+
+#[test]
+fn a_postgresql_partition_key_with_an_unknown_function_is_42883() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let error = failure(
+        &mut session,
+        "CREATE TABLE f (id int, v text) PARTITION BY LIST (no_such_function(v))",
+    );
+    assert_eq!(error.state().code(), "42883", "{error}");
+}
