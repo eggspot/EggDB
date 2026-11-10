@@ -1863,3 +1863,25 @@ SELECT 1
 
 error 22023 1
 SELECT json_extract('{"a":1}', 'a')
+
+chapter "JSON Functions And Operators": json_set, json_insert, json_replace, json_remove and json_patch (D379)
+rows
+SELECT json_set('{"a":1}', '$.a', 2, '$.b', 3) AS s, json_insert('{"a":1}', '$.a', 2, '$.c', 'x') AS i, json_replace('{"a":1}', '$.a', 2, '$.d', 4) AS r
+----
+s|i|r
+{"a":2,"b":3}|{"a":1,"c":"x"}|{"a":2}
+SELECT 1
+
+rows
+SELECT json_set('[1,2]', '$[#]', 3) AS appended, json_set('{}', '$.a.b', json('[1]')) AS nested, json_remove('[0,1,2,3]', '$[1]', '$[#-1]') AS removed
+----
+appended|nested|removed
+[1,2,3]|{"a":{"b":[1]}}|[0,2]
+SELECT 1
+
+rows
+SELECT json_patch('{"a":1,"b":{"c":2,"d":3}}', '{"a":null,"b":{"c":9},"e":4}') AS p
+----
+p
+{"b":{"c":9,"d":3},"e":4}
+SELECT 1

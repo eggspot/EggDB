@@ -403,3 +403,4 @@ its full title with its status.
 - [D376](decisions/D376.md) Code-only batch 22 (M5): SQLite `group_concat` and `total`, MySQL `GROUP_CONCAT`
 - [D377](decisions/D377.md) Code-only batch 23 (M5): SQLite's math functions, `unhex`, `zeroblob`, `randomblob`
 - [D378](decisions/D378.md) Code-only batch 24 (M5): SQLite's reading and building JSON functions
+- [D379](decisions/D379.md) Code-only batch 25 (M5): SQLite's `json_set`, `json_insert`, `json_replace`, `json_remove` and `json_patch`
