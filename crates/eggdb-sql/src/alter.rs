@@ -191,6 +191,64 @@ fn apply(
             crate::partition_ddl::detach(writer, tables, &parent, partition)?;
             Ok(None)
         }
+        AlterAction::AddPartitions {
+            partitions,
+            hash_count,
+            position,
+        } => {
+            let parent = current(writer, tables, name)?;
+            crate::partition_alter::add(
+                writer,
+                tables,
+                &parent,
+                partitions,
+                *hash_count,
+                *position,
+                dialect,
+            )?;
+            Ok(None)
+        }
+        AlterAction::DropPartitions(partitions) => {
+            let parent = current(writer, tables, name)?;
+            crate::partition_alter::drop(writer, tables, &parent, partitions, dialect)?;
+            Ok(None)
+        }
+        AlterAction::TruncatePartitions(partitions) => {
+            let parent = current(writer, tables, name)?;
+            crate::partition_alter::truncate(writer, tables, &parent, partitions)?;
+            Ok(None)
+        }
+        AlterAction::ReorganizePartitions {
+            from,
+            into,
+            position,
+        } => {
+            let parent = current(writer, tables, name)?;
+            crate::partition_alter::reorganize(
+                writer, tables, &parent, from, into, *position, dialect,
+            )?;
+            Ok(None)
+        }
+        AlterAction::SplitPartition {
+            partition,
+            point,
+            into,
+        } => {
+            let parent = current(writer, tables, name)?;
+            crate::partition_alter::split(writer, tables, &parent, partition, point, into, dialect)?;
+            Ok(None)
+        }
+        AlterAction::ExchangePartition {
+            partition,
+            table,
+            validate,
+        } => {
+            let parent = current(writer, tables, name)?;
+            crate::partition_alter::exchange(
+                writer, tables, &parent, partition, table, *validate, dialect,
+            )?;
+            Ok(None)
+        }
         AlterAction::AttachIndex(partition_index) => {
             let index = Name {
                 text: name.clone(),

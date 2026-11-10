@@ -2,7 +2,7 @@ use super::Parser;
 use crate::ast::{
     AlterAction, AlterTable, CreateTable, ExprKind, Name, NamedPartition, NamedPartitionBound,
     OnCommit, PartitionBoundSpec, PartitionBoundValue, PartitionBy, PartitionKeyPart, PartitionOf,
-    PartitionSelection, PartitionStrategy, Statement,
+    PartitionSelection, PartitionStrategy, SplitPoint, Statement,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
@@ -260,6 +260,203 @@ impl Parser<'_> {
         };
         self.skip_partition_options()?;
         Ok(NamedPartition { name, bound })
+    }
+
+    pub(super) fn partition_definition(&mut self) -> SqlResult<NamedPartition> {
+        self.take_word("partition");
+        let name = self.name()?;
+        let bound = if self.is_word("values")
+            && self.is_word_at(1, "less")
+            && self.is_word_at(2, "than")
+        {
+            self.at += 3;
+            if self.take_word("maxvalue") {
+                NamedPartitionBound::LessThan(vec![PartitionBoundValue::MaxValue])
+            } else {
+                NamedPartitionBound::LessThan(self.bound_values()?)
+            }
+        } else if self.take_word("values") {
+            if self.oracle() && self.take_oracle_default_values() {
+                NamedPartitionBound::In(Vec::new())
+            } else {
+                self.take_word("in");
+                NamedPartitionBound::In(self.bound_values()?)
+            }
+        } else {
+            NamedPartitionBound::Hash
+        };
+        self.skip_partition_options()?;
+        Ok(NamedPartition { name, bound })
+    }
+
+    pub(super) fn partition_definitions(&mut self) -> SqlResult<Vec<NamedPartition>> {
+        let parenthesized = self.take(&TokenKind::LeftParen);
+        let mut partitions = vec![self.partition_definition()?];
+        while self.take(&TokenKind::Comma) {
+            if !parenthesized && !self.is_word("partition") {
+                self.at -= 1;
+                break;
+            }
+            partitions.push(self.partition_definition()?);
+        }
+        if parenthesized {
+            self.expect(&TokenKind::RightParen)?;
+        }
+        Ok(partitions)
+    }
+
+    pub(super) fn partition_names(&mut self) -> SqlResult<Vec<Name>> {
+        let mut names = vec![self.name()?];
+        while self.peek_kind() == &TokenKind::Comma && !self.is_word_at(1, "partition") {
+            self.at += 1;
+            if self.is_word("add")
+                || self.is_word("drop")
+                || self.is_word("modify")
+                || self.is_word("truncate")
+            {
+                self.at -= 1;
+                break;
+            }
+            names.push(self.name()?);
+        }
+        Ok(names)
+    }
+
+    pub(super) fn partition_alter_action(
+        &mut self,
+        actions: &mut Vec<AlterAction>,
+    ) -> SqlResult<bool> {
+        if !(self.mysql() || self.oracle()) {
+            return Ok(false);
+        }
+        let position = self.position();
+        let partition_word = |parser: &Self, at: usize| {
+            parser.is_word_at(at, "partition") || parser.is_word_at(at, "partitions")
+        };
+        if self.is_word("add") && partition_word(self, 1) {
+            self.at += 1;
+            if self.mysql() && self.take_word("partitions") {
+                let count = self.partition_count()?;
+                actions.push(AlterAction::AddPartitions {
+                    partitions: Vec::new(),
+                    hash_count: Some(count),
+                    position,
+                });
+                return Ok(true);
+            }
+            self.at += 1;
+            let partitions = if self.peek_kind() == &TokenKind::LeftParen {
+                self.partition_definitions()?
+            } else {
+                let mut first = vec![self.partition_definition()?];
+                while self.peek_kind() == &TokenKind::Comma && self.is_word_at(1, "partition") {
+                    self.at += 1;
+                    first.push(self.partition_definition()?);
+                }
+                first
+            };
+            actions.push(AlterAction::AddPartitions {
+                partitions,
+                hash_count: None,
+                position,
+            });
+            return Ok(true);
+        }
+        if self.is_word("drop") && partition_word(self, 1) {
+            self.at += 2;
+            actions.push(AlterAction::DropPartitions(self.partition_names()?));
+            self.skip_oracle_index_clauses();
+            return Ok(true);
+        }
+        if self.is_word("truncate") && partition_word(self, 1) {
+            self.at += 2;
+            actions.push(AlterAction::TruncatePartitions(self.partition_names()?));
+            self.skip_oracle_index_clauses();
+            return Ok(true);
+        }
+        if self.mysql() && self.is_word("reorganize") && self.is_word_at(1, "partition") {
+            self.at += 2;
+            let from = if self.is_word("into") {
+                Vec::new()
+            } else {
+                self.partition_names()?
+            };
+            self.expect_word("into")?;
+            let into = self.partition_definitions()?;
+            actions.push(AlterAction::ReorganizePartitions {
+                from,
+                into,
+                position,
+            });
+            return Ok(true);
+        }
+        if self.oracle() && self.is_word("split") && self.is_word_at(1, "partition") {
+            self.at += 2;
+            let partition = self.name()?;
+            let point = if self.take_word("at") {
+                SplitPoint::At(self.bound_values()?)
+            } else {
+                self.expect_word("values")?;
+                SplitPoint::Values(self.bound_values()?)
+            };
+            self.expect_word("into")?;
+            self.expect(&TokenKind::LeftParen)?;
+            self.expect_word("partition")?;
+            let first = self.name()?;
+            self.skip_partition_options()?;
+            self.expect(&TokenKind::Comma)?;
+            self.expect_word("partition")?;
+            let second = self.name()?;
+            self.skip_partition_options()?;
+            self.expect(&TokenKind::RightParen)?;
+            self.skip_oracle_index_clauses();
+            actions.push(AlterAction::SplitPartition {
+                partition,
+                point,
+                into: [first, second],
+            });
+            return Ok(true);
+        }
+        if self.is_word("exchange") && self.is_word_at(1, "partition") {
+            self.at += 2;
+            let partition = self.name()?;
+            self.expect_word("with")?;
+            self.expect_word("table")?;
+            let table = self.table_name()?;
+            self.skip_oracle_index_clauses();
+            let mut validate = true;
+            if self.is_word("with") && self.is_word_at(1, "validation") {
+                self.at += 2;
+            } else if self.is_word("without") && self.is_word_at(1, "validation") {
+                self.at += 2;
+                validate = false;
+            }
+            self.skip_oracle_index_clauses();
+            actions.push(AlterAction::ExchangePartition {
+                partition,
+                table,
+                validate,
+            });
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn skip_oracle_index_clauses(&mut self) {
+        loop {
+            if (self.is_word("including") || self.is_word("excluding"))
+                && self.is_word_at(1, "indexes")
+            {
+                self.at += 2;
+            } else if self.is_word("update") && self.is_word_at(1, "global") {
+                self.at += 2;
+                self.take_word("indexes");
+            } else if self.is_word("update") && self.is_word_at(1, "indexes") {
+                self.at += 2;
+            } else {
+                return;
+            }
+        }
     }
 
     fn take_oracle_default_values(&mut self) -> bool {

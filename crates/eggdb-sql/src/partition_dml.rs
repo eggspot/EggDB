@@ -587,6 +587,32 @@ pub(crate) fn move_out(
     Ok(count)
 }
 
+pub(crate) fn reinsert_rows(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    parent: &Arc<TableDefinition>,
+    rows: Vec<Vec<Value>>,
+) -> SqlResult<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let target = TableReference::named(
+        Name {
+            text: parent.name.clone(),
+            position: 0,
+        },
+        None,
+    );
+    let moved = rows
+        .into_iter()
+        .map(|row| MovedRow {
+            from: Arc::clone(parent),
+            row,
+        })
+        .collect();
+    insert_moved_rows(writer, tables, target, moved)
+}
+
 fn insert_moved_rows(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,

@@ -104,6 +104,7 @@ mod oracle_numerals;
 mod oracle_regexp;
 mod output_into;
 mod parser;
+mod partition_alter;
 mod partition_ddl;
 mod partition_dml;
 mod partition_indexes;
@@ -248,6 +249,8 @@ mod oracle_analytic_tests;
 mod oracle_tests;
 #[cfg(test)]
 mod output_into_tests;
+#[cfg(test)]
+mod partition_alter_tests;
 #[cfg(test)]
 mod partition_selection_tests;
 #[cfg(test)]

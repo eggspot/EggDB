@@ -115,6 +115,8 @@ pub enum DestructiveKind {
     DropConstraint,
     /// MySQL's `ALTER TABLE ... DROP PRIMARY KEY`.
     DropPrimaryKey,
+    /// MySQL's and Oracle's `ALTER TABLE ... DROP PARTITION`, which removes the partition's rows.
+    DropPartition,
     /// `ALTER TABLE ... ALTER COLUMN ... TYPE`, or MySQL's `MODIFY` and `CHANGE`.
     ChangeColumnType,
     /// `TRUNCATE`.
@@ -171,6 +173,7 @@ impl DestructiveKind {
             Self::DropColumn => "ALTER TABLE ... DROP COLUMN",
             Self::DropConstraint => "ALTER TABLE ... DROP of a constraint, key or index",
             Self::DropPrimaryKey => "ALTER TABLE ... DROP PRIMARY KEY",
+            Self::DropPartition => "ALTER TABLE ... DROP PARTITION",
             Self::ChangeColumnType => "a change of a column's type",
             Self::Truncate => "TRUNCATE",
             Self::DeleteWithoutFilter => "DELETE of the whole table",
@@ -1071,6 +1074,24 @@ fn altered(table: &Name, actions: &[AlterAction]) -> Option<DestructiveStatement
             AlterAction::DropPrimaryKey(_) => {
                 (DestructiveKind::DropPrimaryKey, table.clone(), false)
             }
+            AlterAction::DropPartitions(partitions) => (
+                DestructiveKind::DropPartition,
+                partitions
+                    .iter()
+                    .map(|partition| format!("{table}.{}", shown(partition)))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                false,
+            ),
+            AlterAction::TruncatePartitions(partitions) => (
+                DestructiveKind::Truncate,
+                partitions
+                    .iter()
+                    .map(|partition| format!("{table}.{}", shown(partition)))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                false,
+            ),
             AlterAction::SetType { column, .. } => (
                 DestructiveKind::ChangeColumnType,
                 format!("{table}.{}", shown(column)),
@@ -1097,6 +1118,10 @@ fn altered(table: &Name, actions: &[AlterAction]) -> Option<DestructiveStatement
             | AlterAction::DropIdentity { .. }
             | AlterAction::AttachPartition { .. }
             | AlterAction::DetachPartition(_)
+            | AlterAction::AddPartitions { .. }
+            | AlterAction::ReorganizePartitions { .. }
+            | AlterAction::SplitPartition { .. }
+            | AlterAction::ExchangePartition { .. }
             | AlterAction::AttachIndex(_)
             | AlterAction::MoveColumn { .. }
             | AlterAction::AddIndex(_)
