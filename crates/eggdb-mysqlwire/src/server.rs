@@ -309,7 +309,7 @@ fn accept_next(
             log(&format!("accepting a connection failed: {error}"));
         }
     };
-    match listener.accept() {
+    match eggdb_platform::accept_tcp(listener) {
         Ok((stream, _)) => return Some(ServerConnection::Plain(stream)),
         Err(error) => report(error),
     }

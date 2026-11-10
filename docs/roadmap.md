@@ -333,27 +333,30 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Batched io_uring submission, and timed reaps and cancel on the file I/O queue (D72, Where we are).
   Check: simulator tests of a timed reap and a cancel on files.
 - kqueue changes folded into the waiting `kevent` call, so a wait costs no change call (D74).
-  Check: system calls per wait, measured on macOS and FreeBSD.
+  Check: system calls per wait, measured on macOS and FreeBSD. **Code written, unbuilt** (code-only mode, 2026-11-10).
 - Acknowledgements that take latency to return, and packet loss, duplication and reordering
   below the stream level in simulation (D314). Check: simulator tests of each.
 - The keep-alive timing set on each accepted socket on macOS and NetBSD: macOS copies only
   `SO_KEEPALIVE`, the interval and the count from the listener, and NetBSD only `SO_KEEPALIVE`,
-  none of the timing (D336); with the shared listener crate (D122).
-- Non-blocking connects in the `poll(2)` backend on the BSDs and illumos (D73).
+  none of the timing (D336); with the shared listener crate (D122). **Code written, unbuilt** (code-only mode, 2026-11-10). `eggdb_platform::accept_tcp` copies the
+  listener's timing and every server's accept loop uses it.
+- Non-blocking connects in the `poll(2)` backend on the BSDs and illumos (D73). **Code written, unbuilt** (code-only mode, 2026-11-10).
 - OpenBSD and DragonFly on the `poll(2)` backend, with CI runners for them (D73).
-- Solaris: file locks, and sends that never raise `SIGPIPE` (D73, D78).
+- Solaris: file locks, and sends that never raise `SIGPIPE` (D73, D78). File locks: **Code written, unbuilt** (code-only mode, 2026-11-10). `SIGPIPE`: left.
 - Datagrams in the network completion queue (`NetOp`) and batched receives, for QUIC (D315).
 - Windows named pipes, for the mysql client and SQL Server clients on Windows (D267, Where we are).
-- Per-device alignment for direct I/O (Where we are).
+- Per-device alignment for direct I/O (Where we are). **Code written, unbuilt** (code-only mode, 2026-11-10). Uncached opens are refused when the device's
+  alignment does not divide 4096 (`statx` on Linux, the logical sector size on Windows).
 - NUMA memory placement and work placed by NUMA node, so one machine is used fully (D18, D65,
   PR #86).
 - Performance and efficiency cores on Windows and macOS, and hot work placed on performance cores
   (D65, PR #86).
-- Thread pinning and CPU topology on the BSDs (Where we are).
+- Thread pinning and CPU topology on the BSDs (Where we are). **Code written, unbuilt** (code-only mode, 2026-11-10). FreeBSD, DragonFly and NetBSD; OpenBSD has
+  no affinity call.
 - EggDB's own allocator as the default build, once the benchmarks show it (D166).
   Check: the benchmark lines with and without it.
 - The M1 review's IOCP follow-ups: a guard against packets after an immediate success, and tests
-  that cancel a pending connect and mix port and worker operations (Where we are).
+  that cancel a pending connect and mix port and worker operations (Where we are). The guard: **Code written, unbuilt** (code-only mode, 2026-11-10). The tests: left.
 - `NotConnected` after a reset checked against Windows' sockets in the contract test (D314).
 - Optional accelerators behind build features: first CXL memory placed as a NUMA node for the
   page cache, with no `mmap`, on D65 and the NUMA item above (D40, D45). Check: cache benchmarks.

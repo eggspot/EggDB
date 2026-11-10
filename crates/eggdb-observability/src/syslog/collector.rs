@@ -267,7 +267,7 @@ impl<'s, S: KeyValueStore + Sync> SyslogCollector<'s, S> {
         let active = AtomicUsize::new(0);
         std::thread::scope(|connections| {
             while !stop() {
-                let stream = match listener.accept() {
+                let stream = match eggdb_platform::accept_tcp(listener) {
                     Ok((stream, _)) => stream,
                     Err(_) => {
                         std::thread::sleep(ACCEPT_POLL);

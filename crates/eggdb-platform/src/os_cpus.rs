@@ -284,7 +284,323 @@ mod platform {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "android", windows)))]
+#[cfg(any(target_os = "freebsd", target_os = "dragonfly", target_os = "netbsd"))]
+mod platform {
+    use super::{CpuSet, CpuTopology, Error, Result};
+    use crate::cpus::CpuId;
+    use std::ffi::{CStr, c_char, c_int, c_void};
+    use std::io;
+    use std::num::NonZeroUsize;
+
+    unsafe extern "C" {
+        fn sysctlbyname(
+            name: *const c_char,
+            old: *mut c_void,
+            old_length: *mut usize,
+            new: *const c_void,
+            new_length: usize,
+        ) -> c_int;
+    }
+
+    fn number(name: &CStr) -> Option<NonZeroUsize> {
+        let mut value = [0_u8; 8];
+        let mut length = value.len();
+        // SAFETY: `name` is NUL-terminated, `value` has `length` writable bytes, and a null new
+        // value with length 0 sets nothing.
+        let result = unsafe {
+            sysctlbyname(
+                name.as_ptr(),
+                value.as_mut_ptr().cast(),
+                &mut length,
+                std::ptr::null(),
+                0,
+            )
+        };
+        if result != 0 {
+            return None;
+        }
+        let number = match length {
+            4 => u64::from(u32::from_ne_bytes([value[0], value[1], value[2], value[3]])),
+            8 => u64::from_ne_bytes(value),
+            _ => return None,
+        };
+        usize::try_from(number).ok().and_then(NonZeroUsize::new)
+    }
+
+    pub(super) fn topology() -> CpuTopology {
+        let logical = number(c"hw.ncpu");
+        let cores = number(c"kern.smp.cores").filter(|cores| logical.is_none_or(|l| *cores <= l));
+        CpuTopology::from_counts(cores, logical, None, None).unwrap_or_default()
+    }
+
+    #[cfg(any(target_os = "freebsd", target_os = "dragonfly"))]
+    mod mask {
+        use super::{CpuId, CpuSet};
+        use std::ffi::c_ulong;
+
+        pub(super) const WORD_BITS: usize = c_ulong::BITS as usize;
+
+        pub(super) fn from_words(words: &[c_ulong]) -> CpuSet {
+            let mut set = CpuSet::new();
+            for (at, word) in words.iter().enumerate() {
+                for bit in 0..WORD_BITS {
+                    if word & (1 << bit) == 0 {
+                        continue;
+                    }
+                    let index = at * WORD_BITS + bit;
+                    if let Some(cpu) = u32::try_from(index).ok().and_then(|i| CpuId::new(i).ok()) {
+                        set.insert(cpu);
+                    }
+                }
+            }
+            set
+        }
+
+        pub(super) fn to_words(cpus: &CpuSet, words: usize) -> Option<Vec<c_ulong>> {
+            let mut mask = vec![0; words];
+            for cpu in cpus.iter() {
+                let index = cpu.index() as usize;
+                let word = mask.get_mut(index / WORD_BITS)?;
+                *word |= 1 << (index % WORD_BITS);
+            }
+            Some(mask)
+        }
+    }
+
+    #[cfg(target_os = "freebsd")]
+    mod affinity {
+        use super::mask::{WORD_BITS, from_words, to_words};
+        use super::{CpuSet, Error, Result, io};
+        use crate::error::ErrorKind;
+        use std::ffi::{c_int, c_ulong};
+
+        const CPU_LEVEL_WHICH: c_int = 3;
+        const CPU_WHICH_TID: c_int = 1;
+        const CURRENT_THREAD: i64 = -1;
+        const ERANGE: i32 = 34;
+        const MASK_BITS: [usize; 2] = [1024, 256];
+
+        unsafe extern "C" {
+            fn cpuset_getaffinity(
+                level: c_int,
+                which: c_int,
+                id: i64,
+                size: usize,
+                mask: *mut c_ulong,
+            ) -> c_int;
+            fn cpuset_setaffinity(
+                level: c_int,
+                which: c_int,
+                id: i64,
+                size: usize,
+                mask: *const c_ulong,
+            ) -> c_int;
+        }
+
+        pub(in super::super) fn available() -> Option<CpuSet> {
+            for bits in MASK_BITS {
+                let mut mask: Vec<c_ulong> = vec![0; bits / WORD_BITS];
+                let size = mask.len() * size_of::<c_ulong>();
+                // SAFETY: `mask` holds `size` writable bytes for the kernel to fill, and id -1
+                // with CPU_WHICH_TID means the calling thread.
+                let result = unsafe {
+                    cpuset_getaffinity(
+                        CPU_LEVEL_WHICH,
+                        CPU_WHICH_TID,
+                        CURRENT_THREAD,
+                        size,
+                        mask.as_mut_ptr(),
+                    )
+                };
+                if result == 0 {
+                    return Some(from_words(&mask));
+                }
+                if io::Error::last_os_error().raw_os_error() != Some(ERANGE) {
+                    return None;
+                }
+            }
+            None
+        }
+
+        pub(in super::super) fn pin_current_thread(cpus: &CpuSet) -> Result<()> {
+            let mut last = Error::new(ErrorKind::InvalidInput);
+            for bits in MASK_BITS {
+                let Some(mask) = to_words(cpus, bits / WORD_BITS) else {
+                    continue;
+                };
+                // SAFETY: `mask` holds the given number of readable bytes, and id -1 with
+                // CPU_WHICH_TID means the calling thread.
+                let result = unsafe {
+                    cpuset_setaffinity(
+                        CPU_LEVEL_WHICH,
+                        CPU_WHICH_TID,
+                        CURRENT_THREAD,
+                        mask.len() * size_of::<c_ulong>(),
+                        mask.as_ptr(),
+                    )
+                };
+                if result == 0 {
+                    return Ok(());
+                }
+                let error = io::Error::last_os_error();
+                let too_wide = error.raw_os_error() == Some(ERANGE);
+                last = Error::from(error);
+                if !too_wide {
+                    break;
+                }
+            }
+            Err(last)
+        }
+    }
+
+    #[cfg(target_os = "dragonfly")]
+    mod affinity {
+        use super::mask::{WORD_BITS, from_words, to_words};
+        use super::{CpuSet, Error, Result, io};
+        use crate::error::ErrorKind;
+        use std::ffi::{c_int, c_ulong, c_void};
+
+        const MASK_BITS: usize = 256;
+
+        unsafe extern "C" {
+            fn pthread_self() -> *mut c_void;
+            fn pthread_getaffinity_np(thread: *mut c_void, size: usize, mask: *mut c_ulong)
+            -> c_int;
+            fn pthread_setaffinity_np(
+                thread: *mut c_void,
+                size: usize,
+                mask: *const c_ulong,
+            ) -> c_int;
+        }
+
+        pub(in super::super) fn available() -> Option<CpuSet> {
+            let mut mask: Vec<c_ulong> = vec![0; MASK_BITS / WORD_BITS];
+            // SAFETY: pthread_self takes no arguments and names the calling thread.
+            let thread = unsafe { pthread_self() };
+            // SAFETY: `mask` holds the given number of writable bytes for the call to fill.
+            let result = unsafe {
+                pthread_getaffinity_np(
+                    thread,
+                    mask.len() * size_of::<c_ulong>(),
+                    mask.as_mut_ptr(),
+                )
+            };
+            (result == 0).then(|| from_words(&mask))
+        }
+
+        pub(in super::super) fn pin_current_thread(cpus: &CpuSet) -> Result<()> {
+            let mask = to_words(cpus, MASK_BITS / WORD_BITS)
+                .ok_or_else(|| Error::new(ErrorKind::InvalidInput))?;
+            // SAFETY: pthread_self takes no arguments and names the calling thread.
+            let thread = unsafe { pthread_self() };
+            // SAFETY: `mask` holds the given number of readable bytes.
+            let result = unsafe {
+                pthread_setaffinity_np(thread, mask.len() * size_of::<c_ulong>(), mask.as_ptr())
+            };
+            if result != 0 {
+                return Err(Error::from(io::Error::from_raw_os_error(result)));
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(target_os = "netbsd")]
+    mod affinity {
+        use super::{CpuId, CpuSet, Error, Result, io, number};
+        use crate::error::ErrorKind;
+        use std::ffi::{c_int, c_ulong, c_void};
+
+        unsafe extern "C" {
+            fn pthread_self() -> *mut c_void;
+            fn pthread_getaffinity_np(thread: *mut c_void, size: usize, set: *mut c_void) -> c_int;
+            fn pthread_setaffinity_np(
+                thread: *mut c_void,
+                size: usize,
+                set: *const c_void,
+            ) -> c_int;
+            fn _cpuset_create() -> *mut c_void;
+            fn _cpuset_destroy(set: *mut c_void);
+            fn _cpuset_size(set: *const c_void) -> usize;
+            fn _cpuset_set(cpu: c_ulong, set: *mut c_void) -> c_int;
+            fn _cpuset_isset(cpu: c_ulong, set: *const c_void) -> c_int;
+        }
+
+        struct OwnedCpuSet(*mut c_void);
+
+        impl OwnedCpuSet {
+            fn new() -> Option<Self> {
+                // SAFETY: _cpuset_create takes no arguments; a null result means no memory.
+                let set = unsafe { _cpuset_create() };
+                (!set.is_null()).then_some(Self(set))
+            }
+
+            fn size(&self) -> usize {
+                // SAFETY: self.0 is a live set from _cpuset_create.
+                unsafe { _cpuset_size(self.0) }
+            }
+        }
+
+        impl Drop for OwnedCpuSet {
+            fn drop(&mut self) {
+                // SAFETY: self.0 came from _cpuset_create and is destroyed only here.
+                unsafe { _cpuset_destroy(self.0) };
+            }
+        }
+
+        fn known_cpus() -> usize {
+            number(c"hw.ncpu").map_or(1, std::num::NonZeroUsize::get)
+        }
+
+        pub(in super::super) fn available() -> Option<CpuSet> {
+            let set = OwnedCpuSet::new()?;
+            // SAFETY: pthread_self takes no arguments and names the calling thread.
+            let thread = unsafe { pthread_self() };
+            // SAFETY: set is a live set of set.size() bytes for the call to fill.
+            let result = unsafe { pthread_getaffinity_np(thread, set.size(), set.0) };
+            if result != 0 {
+                return None;
+            }
+            let mut cpus = CpuSet::new();
+            for index in 0..known_cpus().min(CpuSet::MAX_CPUS) {
+                // SAFETY: set is a live set; an index past its size reads as unset.
+                let member = unsafe { _cpuset_isset(index as c_ulong, set.0) } > 0;
+                if member && let Ok(cpu) = CpuId::new(index as u32) {
+                    cpus.insert(cpu);
+                }
+            }
+            Some(cpus).filter(|cpus| !cpus.is_empty())
+        }
+
+        pub(in super::super) fn pin_current_thread(cpus: &CpuSet) -> Result<()> {
+            let set = OwnedCpuSet::new().ok_or_else(|| Error::new(ErrorKind::OutOfMemory))?;
+            for cpu in cpus.iter() {
+                // SAFETY: set is a live set; _cpuset_set refuses an index past its size.
+                if unsafe { _cpuset_set(c_ulong::from(cpu.index()), set.0) } != 0 {
+                    return Err(Error::new(ErrorKind::InvalidInput));
+                }
+            }
+            // SAFETY: pthread_self takes no arguments and names the calling thread.
+            let thread = unsafe { pthread_self() };
+            // SAFETY: set is a live set of set.size() readable bytes.
+            let result = unsafe { pthread_setaffinity_np(thread, set.size(), set.0) };
+            if result != 0 {
+                return Err(Error::from(io::Error::from_raw_os_error(result)));
+            }
+            Ok(())
+        }
+    }
+
+    pub(super) use affinity::{available, pin_current_thread};
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    windows,
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd"
+)))]
 mod platform {
     use super::{CpuSet, CpuTopology, Error, ErrorKind, Result};
 

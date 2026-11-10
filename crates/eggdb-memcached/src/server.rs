@@ -379,7 +379,7 @@ pub fn serve(
     let budget: &MemoryBudget = &config.memory_budget;
     std::thread::scope(|scope| {
         while !stop() {
-            let stream = match listener.accept() {
+            let stream = match eggdb_platform::accept_tcp(listener) {
                 Ok((stream, _)) => stream,
                 Err(_) => {
                     std::thread::sleep(ACCEPT_POLL);

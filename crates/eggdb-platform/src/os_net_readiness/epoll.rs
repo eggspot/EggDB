@@ -156,6 +156,7 @@ impl Selector {
                 fd,
                 read: failed || events & EPOLLIN != 0,
                 write: failed || events & EPOLLOUT != 0,
+                change_error: None,
             });
         }
         Ok(())

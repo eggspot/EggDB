@@ -229,7 +229,7 @@ pub fn serve(
     let next_id = AtomicI32::new(1);
     std::thread::scope(|scope| {
         while !stop() {
-            let (stream, peer) = match listener.accept() {
+            let (stream, peer) = match eggdb_platform::accept_tcp(listener) {
                 Ok(accepted) => accepted,
                 Err(_) => {
                     std::thread::sleep(ACCEPT_POLL);
