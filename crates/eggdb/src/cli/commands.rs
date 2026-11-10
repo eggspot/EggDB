@@ -776,6 +776,9 @@ impl<'a> Session<'a> {
         if let Some(page_size) = self.request.page_size {
             options = options.page_size_bytes(page_size);
         }
+        if let Some(compression) = self.request.value_compression {
+            options = options.value_compression(compression);
+        }
         if let Some(key) = &self.request.encryption_key {
             options = options.encryption_key(key.0);
         }

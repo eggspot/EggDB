@@ -695,7 +695,7 @@ fn a_chain_leading_to_a_page_of_another_type_or_layout_is_refused() {
         let mut page = cache.write(chain[0]).unwrap();
         let header = page.header();
         page.set_header(PageHeader {
-            layout: overflow::COMPRESSED_LAYOUT + 1,
+            layout: overflow::ZSTD_LAYOUT + 1,
             ..header
         })
         .unwrap();

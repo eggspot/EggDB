@@ -96,6 +96,12 @@ few milliseconds, and exits 5 (busy) only when the file is still taken after tha
 `--busy-timeout <ms>` sets the wait for any command (0 to 3,600,000; `--busy-timeout 0` fails at
 once). Programs using the Rust API set it with `Options::busy_timeout` (D258).
 
+**Compressing large values.** `--compress lz4|zstd|off` on `create`, `put`, `import`, `sql`,
+`shell`, `serve`, `restore` and `follow` compresses values of 4 KiB or more that the command
+writes, with EggDB's own LZ4 codec or its own Zstandard codec (slower, for cold data). The first
+compressed value marks the file so older releases refuse it; reading needs no option. Programs
+using the Rust API set it with `Options::value_compression` (D357).
+
 ## Keys and values
 
 Every key, value and range argument is read by its first characters:

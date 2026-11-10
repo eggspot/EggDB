@@ -205,6 +205,17 @@ impl CommandName {
             OptionName::Verify => self == Self::Audit,
             OptionName::Kql => self == Self::Sql,
             OptionName::PageSize => matches!(self, Self::Create | Self::Import),
+            OptionName::Compress => matches!(
+                self,
+                Self::Put
+                    | Self::Import
+                    | Self::Sql
+                    | Self::Serve
+                    | Self::Shell
+                    | Self::Restore
+                    | Self::Follow
+                    | Self::Create
+            ),
             OptionName::Create => {
                 matches!(
                     self,
@@ -385,6 +396,7 @@ enum OptionName {
     Help,
     Version,
     PageSize,
+    Compress,
     Create,
     Prefix,
     From,
@@ -495,6 +507,7 @@ impl OptionName {
             b"help" => Self::Help,
             b"version" => Self::Version,
             b"page-size" => Self::PageSize,
+            b"compress" => Self::Compress,
             b"create" => Self::Create,
             b"prefix" => Self::Prefix,
             b"from" => Self::From,
@@ -691,6 +704,7 @@ pub(crate) struct Request {
     pub(crate) busy_timeout_ms: Option<u64>,
     pub(crate) encryption_key: Option<EncryptionKey>,
     pub(crate) page_size: Option<usize>,
+    pub(crate) value_compression: Option<crate::ValueCompression>,
     pub(crate) create: bool,
     pub(crate) scan: ScanOptions,
     pub(crate) mono: bool,
@@ -1125,6 +1139,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         busy_timeout_ms: None,
         encryption_key: None,
         page_size: None,
+        value_compression: None,
         create: false,
         scan: ScanOptions::default(),
         mono: false,
@@ -1201,6 +1216,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             }
             OptionName::PageSize => {
                 request.page_size = Some(parse_page_size(&option.spelled, value).map_err(usage)?);
+            }
+            OptionName::Compress => {
+                request.value_compression =
+                    Some(parse_compression(&option.spelled, value).map_err(usage)?);
             }
             OptionName::Create => request.create = true,
             OptionName::Prefix => request.scan.prefix = Some(byte_argument()?),
@@ -2445,6 +2464,18 @@ fn parse_size(option: &str, value: &OsStr) -> Result<usize, String> {
     let number = parse_whole_number(digits).ok_or_else(refused)?;
     let scaled = number.checked_mul(1 << shift).ok_or_else(refused)?;
     usize::try_from(scaled).map_err(|_| refused())
+}
+
+fn parse_compression(option: &str, value: &OsStr) -> Result<crate::ValueCompression, String> {
+    match value.as_encoded_bytes() {
+        b"lz4" => Ok(crate::ValueCompression::Lz4),
+        b"zstd" => Ok(crate::ValueCompression::Zstd),
+        b"off" => Ok(crate::ValueCompression::Off),
+        _ => Err(format!(
+            "{option} must be lz4, zstd or off, not '{}'",
+            shown(value)
+        )),
+    }
 }
 
 fn parse_page_size(option: &str, value: &OsStr) -> Result<usize, String> {
