@@ -33,9 +33,7 @@ pub(crate) fn aggregate(
         ));
     };
     if body.get_bool("explain") == Some(true) {
-        return Err(DocumentError::not_implemented(
-            "explain for aggregate is not supported yet",
-        ));
+        return crate::explain::explain_aggregate(shared, database, body);
     }
     let bound = pipeline_with_time(pipeline, crate::commands::now_ms());
     let (bound, written_to) = split_output(&bound)?;

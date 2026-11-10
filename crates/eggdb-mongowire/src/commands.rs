@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_WIRE_VERSION: i32 = 17;
-const COMPATIBLE_VERSION: &str = "6.0.0";
+pub(crate) const COMPATIBLE_VERSION: &str = "6.0.0";
 const DEFAULT_FIRST_BATCH: usize = 101;
 const MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WRITE_BATCH: usize = 100_000;
@@ -25,11 +25,11 @@ pub(crate) struct Shared<'s> {
     pub(crate) started: Instant,
 }
 
-fn text(value: &str) -> Bson {
+pub(crate) fn text(value: &str) -> Bson {
     Bson::String(value.to_owned())
 }
 
-fn document(entries: Vec<(&str, Bson)>) -> Document {
+pub(crate) fn document(entries: Vec<(&str, Bson)>) -> Document {
     Document::from_entries(
         entries
             .into_iter()
@@ -38,7 +38,7 @@ fn document(entries: Vec<(&str, Bson)>) -> Document {
     )
 }
 
-fn ok(mut reply: Document) -> Document {
+pub(crate) fn ok(mut reply: Document) -> Document {
     reply.insert("ok", Bson::Double(1.0));
     reply
 }
@@ -68,7 +68,10 @@ pub(crate) fn now_ms() -> i64 {
         })
 }
 
-fn collection_name<'b>(body: &'b Document, command: &str) -> Result<&'b str, DocumentError> {
+pub(crate) fn collection_name<'b>(
+    body: &'b Document,
+    command: &str,
+) -> Result<&'b str, DocumentError> {
     match body.get(command) {
         Some(Bson::String(name)) => {
             eggdb_documents::check_collection_name(name)?;
@@ -81,7 +84,7 @@ fn collection_name<'b>(body: &'b Document, command: &str) -> Result<&'b str, Doc
     }
 }
 
-fn filter_of(body: &Document, name: &str) -> Result<Filter, DocumentError> {
+pub(crate) fn filter_of(body: &Document, name: &str) -> Result<Filter, DocumentError> {
     match body.get(name) {
         None | Some(Bson::Null) => parse_filter(&Document::new()),
         Some(Bson::Document(filter)) => parse_filter(&filter_with_time(filter, now_ms())),
@@ -523,6 +526,7 @@ pub(crate) fn run(
                 ("count", Bson::Int64(count as i64)),
             ])))
         }),
+        "explain" => crate::explain::explain(shared, database, body),
         "aggregate" => crate::aggregate::aggregate(shared, database, body),
         other => Err(DocumentError {
             code: 59,

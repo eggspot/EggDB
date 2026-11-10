@@ -8,6 +8,7 @@
 mod aggregate;
 mod commands;
 mod cursors;
+mod explain;
 mod message;
 mod server;
 

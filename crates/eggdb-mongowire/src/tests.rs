@@ -631,6 +631,49 @@ fn collections_are_renamed_through_the_admin_database() {
 }
 
 #[test]
+fn explain_reports_a_collection_scan_or_an_id_lookup() {
+    with_harness(|harness| {
+        assert!(ok(&harness.run(doc(vec![
+            ("insert", text("logs")),
+            (
+                "documents",
+                Bson::Array(vec![
+                    sub(vec![("_id", Bson::Int32(1)), ("level", text("warn"))]),
+                    sub(vec![("_id", Bson::Int32(2)), ("level", text("info"))]),
+                ]),
+            ),
+        ]))));
+        let scanned = harness.run(doc(vec![
+            (
+                "explain",
+                sub(vec![("find", text("logs")), ("filter", sub(vec![("level", text("warn"))]))]),
+            ),
+            ("verbosity", text("executionStats")),
+        ]));
+        assert!(ok(&scanned));
+        let planner = scanned.get_document("queryPlanner").cloned().unwrap_or_default();
+        assert_eq!(
+            planner.get_document("winningPlan").and_then(|plan| plan.get_str("stage")),
+            Some("COLLSCAN")
+        );
+        let statistics = scanned.get_document("executionStats").cloned().unwrap_or_default();
+        assert_eq!(statistics.get("nReturned"), Some(&Bson::Int64(1)));
+        assert_eq!(statistics.get("totalDocsExamined"), Some(&Bson::Int64(2)));
+        let by_id = harness.run(doc(vec![(
+            "explain",
+            sub(vec![("find", text("logs")), ("filter", sub(vec![("_id", Bson::Int32(2))]))]),
+        )]));
+        assert_eq!(
+            by_id
+                .get_document("queryPlanner")
+                .and_then(|planner| planner.get_document("winningPlan"))
+                .and_then(|plan| plan.get_str("stage")),
+            Some("IDHACK")
+        );
+    });
+}
+
+#[test]
 fn namespaces_and_indexes_are_listed() {
     with_harness(|harness| {
         assert!(ok(&harness.run(doc(vec![("create", text("logs"))]))));
