@@ -169,7 +169,11 @@ pub(crate) fn validated(
         text: text.to_owned(),
         transition,
     };
-    let grid = Grid::new(&interval, types[0], position)?;
+    let sql_type = types
+        .first()
+        .copied()
+        .ok_or_else(|| crate::encoding::corrupt("partition key"))?;
+    let grid = Grid::new(&interval, sql_type, position)?;
     let first = grid.edge(1, position)?;
     if !grid.above(&first, &grid.transition_text(position)?) {
         return Err(not_constant(position));
