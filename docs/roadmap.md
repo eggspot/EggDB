@@ -949,7 +949,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   written, unbuilt** (code-only mode, 2026-11-10, D406).
 - `$facet`, `$bucket`, `$out`, `$merge` and `$lookup` with a pipeline (D197). `$facet`, `$bucket`
   and `$switch`: **code written, unbuilt** (code-only mode, 2026-11-10, D405); `$lookup` with `let` and
-  `pipeline`: **code written, unbuilt** (D406).
+  `pipeline`: **code written, unbuilt** (D406); `$out` and `$merge`: **code written,
+  unbuilt** (D407).
 - Change streams and multi-document transactions, with the replica-set handshake (D197).
 - `explain`, `renameCollection`, capped and time-series collections, and GridFS (D197).
 - SCRAM-SHA-1, other users and roles (D197).

@@ -1,5 +1,6 @@
 use crate::error::{DocumentError, DocumentResult};
 use crate::filter::{Filter, matches, only_id};
+use crate::output::{WhenMatched, WhenNotMatched};
 use crate::sort::{SortSpec, sort_documents};
 use crate::update::{Update, apply_update, upsert_document};
 use eggdb_bson::{Bson, Document, new_object_id, type_rank};
@@ -585,6 +586,103 @@ impl<'k> Store<'k> {
                 }
             }
             Ok(outcome)
+        })
+    }
+
+    /// Replaces every document of a collection with `documents`, in one transaction, keeping
+    /// the collection and its indexes, as `$out` does; returns how many were written.
+    pub fn replace_documents(
+        &self,
+        database: &str,
+        collection: &str,
+        documents: Vec<Document>,
+    ) -> DocumentResult<u64> {
+        self.write(|keys| {
+            ensure_collection(keys, database, collection)?;
+            let mut prepared = Vec::with_capacity(documents.len());
+            let mut seen = std::collections::BTreeSet::new();
+            for mut document in documents {
+                let id = match document.get("_id").cloned() {
+                    Some(id) => id,
+                    None => Bson::ObjectId(self.new_object_id()),
+                };
+                document.insert_first("_id", id.clone());
+                let key = document_key(database, collection, &id);
+                if !seen.insert(key.clone()) {
+                    return Err(duplicate(database, collection, &id));
+                }
+                prepared.push((key, check_document(&document)?));
+            }
+            for (key, _) in keys
+                .scan(&documents_prefix(database, collection))
+                .map_err(DocumentError::storage)?
+            {
+                keys.delete(&key).map_err(DocumentError::storage)?;
+            }
+            let written = prepared.len() as u64;
+            for (key, bytes) in prepared {
+                keys.put(&key, &bytes).map_err(DocumentError::storage)?;
+            }
+            Ok(written)
+        })
+    }
+
+    /// Merges `documents` into a collection by `_id`, in one transaction, as `$merge` does.
+    pub fn merge_documents(
+        &self,
+        database: &str,
+        collection: &str,
+        documents: Vec<Document>,
+        when_matched: &WhenMatched,
+        when_not_matched: WhenNotMatched,
+    ) -> DocumentResult<()> {
+        let now = now_ms();
+        self.write(|keys| {
+            ensure_collection(keys, database, collection)?;
+            for mut document in documents {
+                let id = match document.get("_id").cloned() {
+                    Some(Bson::Null | Bson::Undefined | Bson::Array(_)) => {
+                        return Err(DocumentError::new(
+                            51132,
+                            "Location51132",
+                            "$merge write error: 'on' field cannot be missing, null, undefined or an array",
+                        ));
+                    }
+                    Some(id) => id,
+                    None => Bson::ObjectId(self.new_object_id()),
+                };
+                document.insert_first("_id", id.clone());
+                let key = document_key(database, collection, &id);
+                match keys.get(&key).map_err(DocumentError::storage)? {
+                    Some(bytes) => {
+                        if matches!(when_matched, WhenMatched::Fail) {
+                            return Err(duplicate(database, collection, &id));
+                        }
+                        let Some(update) = when_matched.update_for(&document)? else {
+                            continue;
+                        };
+                        let mut existing = decoded(&bytes)?;
+                        if apply_update(&update, &mut existing, None, false, now)? {
+                            if existing.get("_id") != Some(&id) {
+                                return Err(DocumentError::immutable_field(
+                                    "$merge failed to update the matching document, the (immutable) field '_id' was found to have been altered",
+                                ));
+                            }
+                            keys.put(&key, &check_document(&existing)?)
+                                .map_err(DocumentError::storage)?;
+                        }
+                    }
+                    None => match when_not_matched {
+                        WhenNotMatched::Insert => {
+                            keys.put(&key, &check_document(&document)?)
+                                .map_err(DocumentError::storage)?;
+                        }
+                        WhenNotMatched::Discard => {}
+                        WhenNotMatched::Fail => return Err(crate::output::not_matched_error()),
+                    },
+                }
+            }
+            Ok(())
         })
     }
 

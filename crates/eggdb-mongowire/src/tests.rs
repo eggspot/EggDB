@@ -541,6 +541,69 @@ fn aggregation_groups_unwinds_and_looks_up() {
 }
 
 #[test]
+fn aggregation_writes_its_results_with_out_and_merge() {
+    with_harness(|harness| {
+        assert!(ok(&harness.run(doc(vec![
+            ("insert", text("sales")),
+            (
+                "documents",
+                Bson::Array(vec![
+                    sub(vec![("_id", Bson::Int32(1)), ("region", text("north")), ("amount", Bson::Int32(5))]),
+                    sub(vec![("_id", Bson::Int32(2)), ("region", text("north")), ("amount", Bson::Int32(7))]),
+                    sub(vec![("_id", Bson::Int32(3)), ("region", text("south")), ("amount", Bson::Int32(4))]),
+                ]),
+            ),
+        ]))));
+        let totals = || {
+            sub(vec![(
+                "$group",
+                sub(vec![("_id", text("$region")), ("total", sub(vec![("$sum", text("$amount"))]))]),
+            )])
+        };
+        let out = harness.run(doc(vec![
+            ("aggregate", text("sales")),
+            ("pipeline", Bson::Array(vec![totals(), sub(vec![("$out", text("totals"))])])),
+            ("cursor", sub(vec![])),
+        ]));
+        assert!(ok(&out));
+        assert!(batch(&out, "firstBatch").is_empty());
+        let found = harness.run(doc(vec![
+            ("find", text("totals")),
+            ("filter", sub(vec![("_id", text("north"))])),
+        ]));
+        assert_eq!(
+            batch(&found, "firstBatch")[0].as_document().and_then(|row| row.get("total")),
+            Some(&Bson::Int32(12))
+        );
+        let merged = harness.run(doc(vec![
+            ("aggregate", text("sales")),
+            (
+                "pipeline",
+                Bson::Array(vec![
+                    sub(vec![("$match", sub(vec![("region", text("south"))]))]),
+                    totals(),
+                    sub(vec![(
+                        "$merge",
+                        sub(vec![("into", text("totals")), ("whenMatched", text("fail"))]),
+                    )]),
+                ]),
+            ),
+            ("cursor", sub(vec![])),
+        ]));
+        assert_eq!(merged.get("code"), Some(&Bson::Int32(11000)));
+        let misplaced = harness.run(doc(vec![
+            ("aggregate", text("sales")),
+            (
+                "pipeline",
+                Bson::Array(vec![sub(vec![("$out", text("totals"))]), totals()]),
+            ),
+            ("cursor", sub(vec![])),
+        ]));
+        assert_eq!(misplaced.get("code"), Some(&Bson::Int32(40601)));
+    });
+}
+
+#[test]
 fn namespaces_and_indexes_are_listed() {
     with_harness(|harness| {
         assert!(ok(&harness.run(doc(vec![("create", text("logs"))]))));

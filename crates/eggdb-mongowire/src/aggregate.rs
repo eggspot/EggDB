@@ -1,8 +1,8 @@
 use crate::commands::{Shared, cursor_reply};
 use eggdb_bson::{Bson, Document};
 use eggdb_documents::{
-    DocumentError, SortSpec, Stage, check_collection_name, parse_filter, parse_pipeline,
-    pipeline_with_time, run_pipeline,
+    DocumentError, PipelineOutput, SortSpec, Stage, check_collection_name, check_database_name,
+    parse_filter, parse_pipeline, pipeline_with_time, run_pipeline, split_output,
 };
 
 pub(crate) use eggdb_documents::field_value;
@@ -37,17 +37,9 @@ pub(crate) fn aggregate(
             "explain for aggregate is not supported yet",
         ));
     }
-    if pipeline.iter().any(|stage| {
-        stage
-            .as_document()
-            .is_some_and(|stage| stage.contains_key("$out") || stage.contains_key("$merge"))
-    }) {
-        return Err(DocumentError::not_implemented(
-            "$out and $merge are not supported yet",
-        ));
-    }
     let bound = pipeline_with_time(pipeline, crate::commands::now_ms());
-    let stages = parse_pipeline(&bound)?;
+    let (bound, written_to) = split_output(&bound)?;
+    let stages = parse_pipeline(bound)?;
     let (first_filter, rest) = match stages.first().and_then(Stage::as_match) {
         Some(filter) => (filter.clone(), &stages[1..]),
         None => (parse_filter(&Document::new())?, &stages[..]),
@@ -62,7 +54,10 @@ pub(crate) fn aggregate(
             .store
             .find(database, name, &everything, &SortSpec::default())
     };
-    let output = run_pipeline(rest, input, &load)?;
+    let mut output = run_pipeline(rest, input, &load)?;
+    if let Some(written_to) = written_to {
+        write_output(shared, database, written_to, std::mem::take(&mut output))?;
+    }
     let first_batch = body
         .get_document("cursor")
         .and_then(|cursor| cursor.get_i64("batchSize"))
@@ -75,4 +70,31 @@ pub(crate) fn aggregate(
         first_batch,
         false,
     ))
+}
+
+fn write_output(
+    shared: &Shared<'_>,
+    database: &str,
+    written_to: PipelineOutput,
+    documents: Vec<Document>,
+) -> Result<(), DocumentError> {
+    match written_to {
+        PipelineOutput::Out { database: target, collection } => {
+            let target = target.as_deref().unwrap_or(database);
+            check_database_name(target)?;
+            shared.store.replace_documents(target, &collection, documents)?;
+        }
+        PipelineOutput::Merge { database: target, collection, when_matched, when_not_matched } => {
+            let target = target.as_deref().unwrap_or(database);
+            check_database_name(target)?;
+            shared.store.merge_documents(
+                target,
+                &collection,
+                documents,
+                &when_matched,
+                when_not_matched,
+            )?;
+        }
+    }
+    Ok(())
 }

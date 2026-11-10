@@ -13,7 +13,7 @@ pub struct DocumentError {
 }
 
 impl DocumentError {
-    fn new(code: i32, code_name: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: i32, code_name: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             code_name,

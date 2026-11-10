@@ -827,7 +827,10 @@ fn user_variable_name(name: &str) -> DocumentResult<()> {
     Ok(())
 }
 
-fn pipeline_with_variables(stages: &[Bson], bound: &[(String, Option<Bson>)]) -> Vec<Bson> {
+pub(crate) fn pipeline_with_variables(
+    stages: &[Bson],
+    bound: &[(String, Option<Bson>)],
+) -> Vec<Bson> {
     stages.iter().map(|stage| stage_with_variables(stage, bound)).collect()
 }
 
