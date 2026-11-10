@@ -4606,7 +4606,9 @@ The other differences:
   clause are missing, and Oracle's `IS JSON` (lax syntax, `STRICT`), `JSON_SERIALIZE` options and
   `JSON_SCALAR` are not parsed in Oracle's dialect yet. `IS JSON` on a document nested deeper
   than the JSON parser's 256 levels is false (PostgreSQL says true).
-- `interval` (D113): only the `postgres` `IntervalStyle` is printed. PostgreSQL 17's `infinity`
+- `interval` (D113): every `IntervalStyle` is printed (`postgres`, `postgres_verbose`,
+  `sql_standard`, `iso_8601`, D389), as values become text, so casts to text follow it too, as in
+  PostgreSQL; any other value is `22023`. PostgreSQL 17's `infinity`
   and `-infinity` intervals read, print, compare, add, multiply, divide, `justify`, and give
   `isfinite` false and `date_part` an infinite double as PostgreSQL's do (D153), but a time stamp
   plus an infinite interval fails with `22008` where PostgreSQL gives an infinite time stamp

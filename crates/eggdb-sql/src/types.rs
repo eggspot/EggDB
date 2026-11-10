@@ -532,7 +532,10 @@ impl Value {
                 micros,
                 offset_seconds,
             } => datetime::format_time_tz(*micros, *offset_seconds),
-            Self::Interval(interval) => interval.to_string(),
+            Self::Interval(interval) => crate::interval_style::styled(
+                interval,
+                crate::interval_style::IntervalStyle::current(),
+            ),
             Self::Bytea(bytes) => crate::bytea::format_hex(bytes),
             Self::Uuid(bytes) => crate::bytea::format_uuid(bytes),
             Self::Array(array) => crate::arrays::format_text(array),

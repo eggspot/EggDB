@@ -66,6 +66,7 @@ mod hypothetical_set;
 mod indexes;
 mod information_schema;
 mod interval;
+mod interval_style;
 pub mod jobs;
 mod join;
 mod joined_dml;

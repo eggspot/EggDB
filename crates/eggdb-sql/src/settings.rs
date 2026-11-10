@@ -550,6 +550,16 @@ impl Settings {
             };
             return Ok(());
         };
+        if known.name == "IntervalStyle"
+            && let Some(given) = value
+            && crate::interval_style::IntervalStyle::named(given).is_none()
+        {
+            return Err(SqlError::new(
+                SqlState::INVALID_PARAMETER_VALUE,
+                format!("invalid value for parameter \"IntervalStyle\": \"{given}\""),
+            )
+            .with_hint("Available values: postgres, postgres_verbose, sql_standard, iso_8601."));
+        }
         let value = match value {
             None if known.change == Change::Fixed => return Ok(()),
             None => (known.default)(),

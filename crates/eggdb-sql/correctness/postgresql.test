@@ -6183,3 +6183,40 @@ ALTER TABLE ut388 ALTER COLUMN id TYPE int USING (SELECT 1)
 
 ok
 DROP TABLE ut388
+
+chapter "Interval Output": IntervalStyle postgres_verbose, sql_standard and iso_8601 (D389)
+ok
+SET IntervalStyle = 'sql_standard'
+
+rows
+SELECT interval '1 year 2 months' AS a, interval '3 days 04:05:06' AS b, interval '1 year -3 days' AS c
+----
+a|b|c
+1-2|3 4:05:06|+1-0 -3 +0:00:00
+SELECT 1
+
+ok
+SET IntervalStyle = 'iso_8601'
+
+rows
+SELECT interval '1 year 2 months 3 days 4 hours 5 minutes 6.5 seconds' AS a, interval '0' AS b
+----
+a|b
+P1Y2M3DT4H5M6.5S|PT0S
+SELECT 1
+
+ok
+SET IntervalStyle = 'postgres_verbose'
+
+rows
+SELECT interval '1 day 2 hours' AS a, interval '-1 day' AS b
+----
+a|b
+@ 1 day 2 hours|@ 1 day ago
+SELECT 1
+
+error 22023
+SET IntervalStyle = 'nonsense'
+
+ok
+RESET IntervalStyle
