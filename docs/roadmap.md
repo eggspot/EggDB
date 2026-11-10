@@ -977,7 +977,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - The rest of MySQL's date and time functions, `STR_TO_DATE` and `ON UPDATE CURRENT_TIMESTAMP`
   (sql.md).
 - MySQL's `WEEK()` with its modes and `DATE_FORMAT()`; `YEAR()`, `MONTH()`, `DAYOFWEEK()` and
-  the other date-part functions and `SQRT()` are built (D350) (sql.md).
+  the other date-part functions and `SQRT()` are built (D350) (sql.md). `WEEK()`, `YEARWEEK()`,
+  `WEEKOFYEAR()` and `DATE_FORMAT()`: **code written, unbuilt** (code-only mode, 2026-11-10, D414).
 - Prefix indexes: a key on `name(10)` indexes the whole value until the index definition can
   record the prefix length (a format change); `ADD INDEX`, `RENAME INDEX` and `DROP INDEX` in
   `ALTER TABLE` are built (D350) (sql.md).

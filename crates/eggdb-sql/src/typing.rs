@@ -336,7 +336,8 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
         ("localtimestamp" | "mysql_now" | "mysql_utc_now", []) => Some(SqlType::Timestamp(None)),
         ("current_date", []) => Some(SqlType::Date),
         ("extract" | "oracle_extract", [_, _]) => Some(SqlType::Numeric(None)),
-        ("mysql_extract", [_, _]) => Some(SqlType::BigInt),
+        ("mysql_extract" | "mysql_week" | "mysql_yearweek", [_, _]) => Some(SqlType::BigInt),
+        ("mysql_date_format", [_, _]) => Some(SqlType::Text),
         ("date_part", [_, _]) => Some(SqlType::Double),
         ("date_trunc", [_, argument]) => match static_type(argument, scope)? {
             SqlType::Timestamp(_) => Some(SqlType::Timestamp(None)),

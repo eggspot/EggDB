@@ -1083,6 +1083,9 @@ impl<'t> Parser<'t> {
             "greatest" => "mysql_greatest",
             "least" => "mysql_least",
             "sqrt" => crate::square_root::MYSQL,
+            "week" | "weekofyear" => crate::mysql_date_parts::WEEK_FUNCTION,
+            "yearweek" => crate::mysql_date_parts::YEARWEEK_FUNCTION,
+            "date_format" => crate::mysql_date_parts::DATE_FORMAT_FUNCTION,
             other if crate::mysql_date_parts::unit_of_function(other).is_some() => {
                 crate::mysql_date_parts::EXTRACT_FUNCTION
             }
@@ -1099,11 +1102,24 @@ impl<'t> Parser<'t> {
             }
             self.expect(&TokenKind::RightParen)?;
         }
+        let defaulted_mode = match name.text.as_str() {
+            "weekofyear" if arguments.len() == 1 => Some(crate::mysql_date_parts::WEEK_OF_YEAR_MODE),
+            "week" | "yearweek" if arguments.len() == 1 => Some(
+                self.settings_or_default(|settings| settings.mysql.default_week_format()),
+            ),
+            _ => None,
+        };
+        if let Some(mode) = defaulted_mode {
+            arguments.push(value_expr(Value::BigInt(mode), position));
+        }
         let expected = match renamed {
             "coalesce" => Some(2),
             "if" => Some(3),
             "octet_length" | "upper" | "lower" => Some(1),
             crate::square_root::MYSQL | crate::mysql_date_parts::EXTRACT_FUNCTION => Some(1),
+            crate::mysql_date_parts::WEEK_FUNCTION
+            | crate::mysql_date_parts::YEARWEEK_FUNCTION
+            | crate::mysql_date_parts::DATE_FORMAT_FUNCTION => Some(2),
             _ => None,
         };
         if expected.is_some_and(|count| count != arguments.len())

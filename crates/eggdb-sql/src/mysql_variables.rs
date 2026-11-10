@@ -26,6 +26,7 @@ const SYSTEM_VARIABLES: &[(&str, Default)] = &[
     ("collation_database", Default::Text("utf8mb4_0900_ai_ci")),
     ("collation_server", Default::Text("utf8mb4_0900_ai_ci")),
     ("default_storage_engine", Default::Text("EggDB")),
+    ("default_week_format", Default::Number(0)),
     ("div_precision_increment", Default::Number(4)),
     ("explicit_defaults_for_timestamp", Default::Number(1)),
     ("foreign_key_checks", Default::Number(1)),
@@ -189,6 +190,13 @@ impl MySqlVariables {
 
     pub(crate) fn set_user(&mut self, name: &str, value: Value) {
         self.user.insert(name.to_lowercase(), value);
+    }
+
+    pub(crate) fn default_week_format(&self) -> i64 {
+        self.system
+            .get("default_week_format")
+            .and_then(Value::as_integer)
+            .map_or(0, |mode| mode.clamp(0, 7))
     }
 
     pub(crate) fn autocommit(&self) -> bool {

@@ -438,3 +438,4 @@ its full title with its status.
 - [D411](decisions/D411.md) Code-only batch 58 (M9): MongoDB's `explain`
 - [D412](decisions/D412.md) Code-only batch 59 (M9): MongoDB's `OP_COMPRESSED` with snappy and zlib
 - [D413](decisions/D413.md) Code-only batch 60 (M9): `eggdb restore` of `mongodump --gzip` and `--archive` output
+- [D414](decisions/D414.md) Code-only batch 61 (M10): MySQL's `WEEK()`, `YEARWEEK()`, `WEEKOFYEAR()` and `DATE_FORMAT()`

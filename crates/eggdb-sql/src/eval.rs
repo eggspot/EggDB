@@ -1098,6 +1098,11 @@ impl Evaluator<'_> {
             ("mysql_extract", [Value::Text(unit), value]) => {
                 crate::mysql_date_parts::extract(unit, value)
             }
+            ("mysql_week", [value, mode]) => crate::mysql_date_parts::week(value, mode),
+            ("mysql_yearweek", [value, mode]) => crate::mysql_date_parts::year_week(value, mode),
+            ("mysql_date_format", [value, format]) => {
+                crate::mysql_date_parts::date_format(value, format)
+            }
             ("extract" | "date_part", [Value::Text(field), value])
                 if infinite_instant(value).is_some() =>
             {

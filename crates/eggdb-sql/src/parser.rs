@@ -302,7 +302,7 @@ const NAMED_PARAMETERS: [(&str, &[&str]); 5] = [
     ),
 ];
 
-const INTERNAL_FUNCTIONS: [&str; 32] = [
+const INTERNAL_FUNCTIONS: [&str; 35] = [
     crate::row_values::ROW_ORDERING,
     crate::row_values::ROW_MEMBERSHIP,
     crate::triggers::RAISE_FUNCTION,
@@ -316,6 +316,9 @@ const INTERNAL_FUNCTIONS: [&str; 32] = [
     "mysql_now",
     "mysql_utc_now",
     "mysql_extract",
+    "mysql_week",
+    "mysql_yearweek",
+    "mysql_date_format",
     "oracle_extract",
     "concat_or_null",
     "array_constructor",
