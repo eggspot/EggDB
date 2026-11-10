@@ -424,12 +424,86 @@ fn connection_command(
             _ => Reply::Error("ERR unknown subcommand for 'client'".to_owned()),
         },
         "command" => Reply::Array(Some(Vec::new())),
-        "info" => Reply::bulk(format!(
-            "# Server\r\nredis_version:7.2.0\r\nredis_mode:standalone\r\nos:EggDB\r\n# Clients\r\nblocked_clients:{}\r\n# Keyspace\r\n",
-            context.blocked_clients
-        )),
+        "info" => info(context, args),
         _ => return None,
     })
+}
+
+fn keyspace_counts(context: &Context<'_>, db: u32) -> Option<(usize, usize)> {
+    let now = context.now_ms;
+    let mut counts = None;
+    let outcome = context.keyspace.read(db, &mut |keys| {
+        let live = live_keys(keys, now)?;
+        let mut expiring = 0usize;
+        for key in &live {
+            if load(keys, key, now)?.is_some_and(|entry| entry.expires_at_ms.is_some()) {
+                expiring += 1;
+            }
+        }
+        counts = Some((live.len(), expiring));
+        Ok(())
+    });
+    outcome.ok().and(counts)
+}
+
+const INFO_SECTIONS: [&str; 8] = [
+    "server",
+    "clients",
+    "memory",
+    "persistence",
+    "stats",
+    "replication",
+    "cpu",
+    "keyspace",
+];
+
+fn info_section(context: &Context<'_>, section: &str) -> String {
+    match section {
+        "server" => "# Server\r\nredis_version:7.2.0\r\nredis_mode:standalone\r\nos:EggDB\r\narch_bits:64\r\nprocess_id:1\r\ntcp_port:6379\r\n".to_owned(),
+        "clients" => format!(
+            "# Clients\r\nblocked_clients:{}\r\nconnected_clients:1\r\nmaxclients:10000\r\n",
+            context.blocked_clients
+        ),
+        "memory" => "# Memory\r\nused_memory:0\r\nmaxmemory:0\r\nmaxmemory_policy:noeviction\r\nmem_allocator:eggdb\r\n".to_owned(),
+        "persistence" => "# Persistence\r\nloading:0\r\nrdb_changes_since_last_save:0\r\naof_enabled:0\r\n".to_owned(),
+        "stats" => "# Stats\r\ntotal_connections_received:0\r\ntotal_commands_processed:0\r\nkeyspace_hits:0\r\nkeyspace_misses:0\r\n".to_owned(),
+        "replication" => "# Replication\r\nrole:master\r\nconnected_slaves:0\r\n".to_owned(),
+        "cpu" => "# CPU\r\nused_cpu_sys:0.000000\r\nused_cpu_user:0.000000\r\n".to_owned(),
+        "keyspace" => {
+            let mut out = "# Keyspace\r\n".to_owned();
+            for db in 0..DATABASES {
+                if let Some((keys, expires)) = keyspace_counts(context, db)
+                    && keys > 0
+                {
+                    out.push_str(&format!("db{db}:keys={keys},expires={expires},avg_ttl=0\r\n"));
+                }
+            }
+            out
+        }
+        _ => String::new(),
+    }
+}
+
+fn info(context: &Context<'_>, args: &[Vec<u8>]) -> Reply {
+    let asked: Vec<String> = args
+        .iter()
+        .map(|word| String::from_utf8_lossy(word).to_ascii_lowercase())
+        .collect();
+    let every = asked.is_empty()
+        || asked
+            .iter()
+            .any(|word| matches!(word.as_str(), "all" | "default" | "everything"));
+    let sections: Vec<&str> = INFO_SECTIONS
+        .iter()
+        .copied()
+        .filter(|section| every || asked.iter().any(|word| word == section))
+        .collect();
+    let text: Vec<String> = sections
+        .iter()
+        .map(|section| info_section(context, section))
+        .filter(|part| !part.is_empty())
+        .collect();
+    Reply::bulk(text.join("\r\n"))
 }
 
 fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> Reply {

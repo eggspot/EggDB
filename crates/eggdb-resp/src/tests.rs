@@ -374,3 +374,17 @@ fn object_encoding_names_redis_s_representations() {
     assert!(redis.text("OBJECT FREQ n").starts_with("-ERR An LFU"));
     assert!(redis.text("OBJECT NOPE n").starts_with("-ERR unknown subcommand"));
 }
+
+#[test]
+fn info_answers_every_section_or_the_ones_asked_for() {
+    let mut redis = Harness::new();
+    redis.run("SET a 1");
+    redis.run("SET b 2 PX 100000");
+    let every = redis.text("INFO");
+    for section in ["# Server", "# Clients", "# Memory", "# Persistence", "# Stats", "# Replication", "# CPU", "# Keyspace"] {
+        assert!(every.contains(section), "{section}: {every}");
+    }
+    assert!(every.contains("db0:keys=2,expires=1,avg_ttl=0"), "{every}");
+    let keyspace = redis.text("INFO keyspace");
+    assert!(keyspace.contains("# Keyspace") && !keyspace.contains("# Server"), "{keyspace}");
+}

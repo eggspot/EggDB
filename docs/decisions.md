@@ -420,3 +420,4 @@ its full title with its status.
 - [D393](decisions/D393.md) Code-only batch 40 (M6c): `lock_timeout` on the wait for the writer
 - [D394](decisions/D394.md) Code-only batch 41 (M7): RESP3 double replies for `GEOPOS` and `WITHCOORD`
 - [D395](decisions/D395.md) Code-only batch 42 (M7): Redis's `OBJECT` command
+- [D396](decisions/D396.md) Code-only batch 43 (M7): Redis's `INFO` sections
