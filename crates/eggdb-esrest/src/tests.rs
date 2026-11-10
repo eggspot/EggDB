@@ -1430,3 +1430,18 @@ fn search_templates_render_mustache_and_run_the_search() {
     ));
     assert_eq!(broken.status, 400);
 }
+
+#[test]
+fn msearch_template_renders_each_search_and_reports_a_bad_one_in_place() {
+    let keyspace = MemoryKeyspace::default();
+    let api = seeded(&keyspace);
+    let lines = concat!(
+        "{\"index\":\"books\"}\n",
+        "{\"source\":{\"query\":{\"match\":{\"title\":\"{{q}}\"}}},\"params\":{\"q\":\"turtle\"}}\n",
+        "{\"index\":\"books\"}\n",
+        "{\"source\":\"{{#open}}\",\"params\":{}}\n",
+    );
+    let text = body(&api.answer(&request("POST", "/_msearch/template", lines)));
+    assert!(text.contains("\"_id\":\"3\""), "{text}");
+    assert!(text.contains("general_script_exception"), "{text}");
+}

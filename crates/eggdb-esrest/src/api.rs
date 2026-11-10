@@ -479,6 +479,10 @@ impl<'k> Api<'k> {
             ("GET" | "POST", ["_count"]) => self.search(None, request, true),
             ("GET" | "POST", ["_mget"]) => self.mget(None, request),
             ("GET" | "POST", ["_msearch"]) => self.msearch(None, request),
+            ("GET" | "POST", ["_msearch", "template"]) => self.msearch_template(None, request),
+            ("GET" | "POST", [index, "_msearch", "template"]) => {
+                self.msearch_template(Some(index), request)
+            }
             ("POST", ["_refresh"]) => Ok(refreshed()),
             (_, [index, ..]) if !valid_index(index) => {
                 Ok(error(400, "invalid_index_name_exception", &format!("Invalid index name [{index}]")))
@@ -929,7 +933,7 @@ impl<'k> Api<'k> {
         ))
     }
 
-    fn rendered_template(request: &Request) -> Result<String, Response> {
+    pub(super) fn rendered_template(request: &Request) -> Result<String, Response> {
         let text = String::from_utf8_lossy(&request.body).into_owned();
         let parsed = parse_document(&text)
             .map_err(|_| error(400, "parse_exception", "the template request is not JSON"))?;

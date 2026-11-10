@@ -921,7 +921,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   written, unbuilt** (code-only mode, 2026-11-10, D401), with `_search` and `_count` too.
 - `_search/template` and `_msearch/template` with Mustache `{{var}}` and `{{#toJson}}` (D331,
   D348). `_search/template` and `_render/template`: **code written, unbuilt** (code-only mode,
-  2026-11-10, D402); left: `_msearch/template` and stored templates.
+  2026-11-10, D402), `_msearch/template` (D403); left: stored templates.
 - `if_seq_no`/`if_primary_term` and `retry_on_conflict` on `_update` (D348). **Code written,
   unbuilt** (code-only mode, 2026-11-10, D400), on indexing and deleting too.
 - `_source` filtering on `GET _doc` (D331, D348). **Code written, unbuilt** (code-only mode,

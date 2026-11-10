@@ -243,6 +243,14 @@ impl Api<'_> {
     }
 
     pub(super) fn msearch(&self, default_index: Option<&str>, request: &Request) -> Answer {
+        self.msearch_of(default_index, request, false)
+    }
+
+    pub(super) fn msearch_template(&self, default_index: Option<&str>, request: &Request) -> Answer {
+        self.msearch_of(default_index, request, true)
+    }
+
+    fn msearch_of(&self, default_index: Option<&str>, request: &Request, templated: bool) -> Answer {
         let started = std::time::Instant::now();
         let body = String::from_utf8_lossy(&request.body).into_owned();
         let mut lines: Vec<&str> = body
@@ -283,7 +291,14 @@ impl Api<'_> {
             if !search_line.trim().is_empty() {
                 parse_document(search_line)?;
             }
-            searches.push((header, *search_line));
+            let search = if templated {
+                let mut inner = request.clone();
+                inner.body = search_line.as_bytes().to_vec();
+                Api::rendered_template(&inner)
+            } else {
+                Ok((*search_line).to_owned())
+            };
+            searches.push((header, search));
         }
         let mut reservation = self.memory_budget.empty_reservation();
         let mut held = 0usize;
@@ -296,7 +311,10 @@ impl Api<'_> {
             } else {
                 header.indices
             };
-            let answer = self.one_search(&indices, header.ignore_unavailable, search_line);
+            let answer = match &search_line {
+                Ok(line) => self.one_search(&indices, header.ignore_unavailable, line),
+                Err(refusal) => refusal.clone(),
+            };
             let text = String::from_utf8_lossy(&answer.body).into_owned();
             let item = if answer.status < 300 {
                 format!(

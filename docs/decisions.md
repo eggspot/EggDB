@@ -427,3 +427,4 @@ its full title with its status.
 - [D400](decisions/D400.md) Code-only batch 47 (M8): Elasticsearch `if_seq_no`/`if_primary_term` and `retry_on_conflict`
 - [D401](decisions/D401.md) Code-only batch 48 (M8): index lists and patterns in Elasticsearch URLs
 - [D402](decisions/D402.md) Code-only batch 49 (M8): Elasticsearch search templates with our own Mustache
+- [D403](decisions/D403.md) Code-only batch 50 (M8): Elasticsearch's `_msearch/template`
