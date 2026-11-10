@@ -954,7 +954,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `pipeline`: **code written, unbuilt** (D406); `$out` and `$merge`: **code written,
   unbuilt** (D407).
 - Change streams and multi-document transactions, with the replica-set handshake (D197).
-- `explain`, `renameCollection`, capped and time-series collections, and GridFS (D197).
+- `explain`, `renameCollection`, capped and time-series collections, and GridFS (D197). `renameCollection`:
+  **code written, unbuilt** (code-only mode, 2026-11-10, D410).
 - SCRAM-SHA-1, other users and roles (D197).
 - `OP_COMPRESSED` (D197).
 - `mongorestore` inputs: `--gzip`, `--archive`, unique indexes, and a smoke-test sample dump

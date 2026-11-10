@@ -434,3 +434,4 @@ its full title with its status.
 - [D407](decisions/D407.md) Code-only batch 54 (M9): MongoDB's `$out` and `$merge`
 - [D408](decisions/D408.md) Code-only batch 55 (M9): MongoDB's projection operators and expressions in `find`
 - [D409](decisions/D409.md) Code-only batch 56 (M9): MongoDB's `$jsonSchema` query operator
+- [D410](decisions/D410.md) Code-only batch 57 (M9): MongoDB's `renameCollection`

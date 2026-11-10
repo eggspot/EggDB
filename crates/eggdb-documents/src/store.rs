@@ -418,6 +418,56 @@ impl<'k> Store<'k> {
         })
     }
 
+    /// Renames a collection, moving its documents and index definitions in one transaction,
+    /// to another name in the same or another database; an existing target is dropped first
+    /// only with `drop_target`.
+    pub fn rename_collection(
+        &self,
+        from: (&str, &str),
+        to: (&str, &str),
+        drop_target: bool,
+    ) -> DocumentResult<()> {
+        let ((from_database, from_collection), (to_database, to_collection)) = (from, to);
+        self.write(|keys| {
+            check_database_name(to_database)?;
+            check_collection_name(to_collection)?;
+            let source = collection_key(from_database, from_collection);
+            let Some(record) = keys.get(&source).map_err(DocumentError::storage)? else {
+                return Err(DocumentError::namespace_not_found(format!(
+                    "Source collection {from_database}.{from_collection} does not exist"
+                )));
+            };
+            if from == to {
+                return Err(DocumentError::new(
+                    20,
+                    "IllegalOperation",
+                    "Can't rename a collection to itself",
+                ));
+            }
+            let target = collection_key(to_database, to_collection);
+            let target_prefix = documents_prefix(to_database, to_collection);
+            if keys.get(&target).map_err(DocumentError::storage)?.is_some() {
+                if !drop_target {
+                    return Err(DocumentError::namespace_exists("target namespace exists"));
+                }
+                for (document, _) in keys.scan(&target_prefix).map_err(DocumentError::storage)? {
+                    keys.delete(&document).map_err(DocumentError::storage)?;
+                }
+                keys.delete(&target).map_err(DocumentError::storage)?;
+            }
+            let source_prefix = documents_prefix(from_database, from_collection);
+            for (document, bytes) in keys.scan(&source_prefix).map_err(DocumentError::storage)? {
+                let mut moved = target_prefix.clone();
+                moved.extend_from_slice(&document[source_prefix.len()..]);
+                keys.put(&moved, &bytes).map_err(DocumentError::storage)?;
+                keys.delete(&document).map_err(DocumentError::storage)?;
+            }
+            keys.put(&target, &record).map_err(DocumentError::storage)?;
+            keys.delete(&source).map_err(DocumentError::storage)?;
+            Ok(())
+        })
+    }
+
     /// Drops every collection of `database`.
     pub fn drop_database(&self, database: &str) -> DocumentResult<()> {
         for (collection, _) in self.collections_of(database)? {

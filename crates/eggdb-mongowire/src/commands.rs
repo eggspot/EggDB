@@ -477,6 +477,7 @@ pub(crate) fn run(
                 ("ns", text(&format!("{database}.{name}"))),
             ])))
         }),
+        "renameCollection" => rename_collection(shared, database, body),
         "dropDatabase" => shared
             .store
             .drop_database(database)
@@ -649,6 +650,42 @@ fn insert(shared: &Shared<'_>, database: &str, body: &Document) -> Result<Docume
         reply.insert("writeErrors", write_errors(outcome.errors));
     }
     Ok(ok(reply))
+}
+
+fn namespace_parts<'b>(
+    body: &'b Document,
+    field: &str,
+) -> Result<(&'b str, &'b str), DocumentError> {
+    let Some(namespace) = body.get_str(field) else {
+        return Err(DocumentError::type_mismatch(format!(
+            "BSON field 'renameCollection.{field}' needs a string"
+        )));
+    };
+    namespace
+        .split_once('.')
+        .filter(|(database, collection)| !database.is_empty() && !collection.is_empty())
+        .ok_or_else(|| {
+            DocumentError::invalid_namespace(format!("Invalid namespace specified '{namespace}'"))
+        })
+}
+
+fn rename_collection(
+    shared: &Shared<'_>,
+    database: &str,
+    body: &Document,
+) -> Result<Document, DocumentError> {
+    if database != "admin" {
+        return Err(DocumentError {
+            code: 13,
+            code_name: "Unauthorized",
+            message: "renameCollection may only be run against the admin database.".to_owned(),
+        });
+    }
+    let from = namespace_parts(body, "renameCollection")?;
+    let to = namespace_parts(body, "to")?;
+    let drop_target = body.get("dropTarget").is_some_and(Bson::is_truthy);
+    shared.store.rename_collection(from, to, drop_target)?;
+    Ok(ok(Document::new()))
 }
 
 fn find(shared: &Shared<'_>, database: &str, body: &Document) -> Result<Document, DocumentError> {

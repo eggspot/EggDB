@@ -85,6 +85,10 @@ impl Harness<'_> {
     fn run(&mut self, body: Document) -> Document {
         run(&self.shared, &mut self.session, "app", &body)
     }
+
+    fn run_in(&mut self, database: &str, body: Document) -> Document {
+        run(&self.shared, &mut self.session, database, &body)
+    }
 }
 
 fn with_harness(test: impl FnOnce(&mut Harness<'_>)) {
@@ -600,6 +604,29 @@ fn aggregation_writes_its_results_with_out_and_merge() {
             ("cursor", sub(vec![])),
         ]));
         assert_eq!(misplaced.get("code"), Some(&Bson::Int32(40601)));
+    });
+}
+
+#[test]
+fn collections_are_renamed_through_the_admin_database() {
+    with_harness(|harness| {
+        assert!(ok(&harness.run(doc(vec![
+            ("insert", text("drafts")),
+            ("documents", Bson::Array(vec![sub(vec![("_id", Bson::Int32(1))])])),
+        ]))));
+        let renamed = harness.run_in(
+            "admin",
+            doc(vec![("renameCollection", text("app.drafts")), ("to", text("app.posts"))]),
+        );
+        assert!(ok(&renamed));
+        let found = harness.run(doc(vec![("find", text("posts"))]));
+        assert_eq!(batch(&found, "firstBatch").len(), 1);
+        assert!(batch(&harness.run(doc(vec![("find", text("drafts"))])), "firstBatch").is_empty());
+        let missing = harness.run_in(
+            "admin",
+            doc(vec![("renameCollection", text("app.drafts")), ("to", text("app.posts"))]),
+        );
+        assert_eq!(missing.get("code"), Some(&Bson::Int32(26)));
     });
 }
 
