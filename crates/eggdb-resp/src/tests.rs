@@ -388,3 +388,18 @@ fn info_answers_every_section_or_the_ones_asked_for() {
     let keyspace = redis.text("INFO keyspace");
     assert!(keyspace.contains("# Keyspace") && !keyspace.contains("# Server"), "{keyspace}");
 }
+
+#[test]
+fn debug_object_sleep_and_help_answer_as_redis_does() {
+    let mut redis = Harness::new();
+    redis.run("SET s hello");
+    let object = redis.text("DEBUG OBJECT s");
+    assert!(
+        object.starts_with("+Value at:0x0 refcount:1 encoding:embstr serializedlength:5"),
+        "{object}"
+    );
+    assert_eq!(redis.text("DEBUG OBJECT missing"), "-ERR no such key|");
+    assert_eq!(redis.text("DEBUG SLEEP 0"), "+OK|");
+    assert_eq!(redis.text("DEBUG SET-ACTIVE-EXPIRE 0"), "+OK|");
+    assert!(redis.text("DEBUG NOPE").starts_with("-ERR unknown subcommand"));
+}

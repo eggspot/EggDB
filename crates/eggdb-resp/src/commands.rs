@@ -697,6 +697,7 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
             Ok(Reply::Integer(found))
         }),
         ("object", count) if count >= 1 => object(context, db, args),
+        ("debug", count) if count >= 1 => debug(context, db, args),
         ("type", 1) => reading(context, db, |keys| {
             Ok(Reply::Status(
                 load(keys, &args[0], now)?
@@ -854,6 +855,7 @@ fn is_known(name: &str) -> bool {
             | "exists"
             | "type"
             | "object"
+            | "debug"
             | "expire"
             | "pexpire"
             | "expireat"
@@ -971,6 +973,74 @@ fn object(context: &Context<'_>, db: u32, args: &[Vec<u8>]) -> Reply {
             ),
         })
     })
+}
+
+const MOST_DEBUG_SLEEP_SECONDS: f64 = 60.0;
+
+fn serialized_length(data: &Data) -> usize {
+    match data {
+        Data::String(bytes) => bytes.len(),
+        Data::Hash(map) => map.iter().map(|(field, value)| field.len() + value.len()).sum(),
+        Data::List(list) => list.iter().map(Vec::len).sum(),
+        Data::Set(set) => set.iter().map(Vec::len).sum(),
+        Data::SortedSet(set) => set
+            .ordered()
+            .iter()
+            .map(|(_, member)| member.len() + 8)
+            .sum(),
+        Data::Stream(_) => 0,
+    }
+}
+
+fn debug(context: &Context<'_>, db: u32, args: &[Vec<u8>]) -> Reply {
+    let now = context.now_ms;
+    let subcommand = String::from_utf8_lossy(&args[0]).to_ascii_lowercase();
+    match (subcommand.as_str(), args.len()) {
+        ("help", 1) => Reply::Array(Some(
+            [
+                "DEBUG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+                "OBJECT <key>",
+                "    Show low level info about the key and associated value.",
+                "SLEEP <seconds>",
+                "    Stop the server for <seconds>. Decimals allowed.",
+                "SET-ACTIVE-EXPIRE <0|1>",
+                "    Setting it to 0 disables expiring keys in background when they are not accessed.",
+                "HELP",
+                "    Print this help.",
+            ]
+            .iter()
+            .map(|line| Reply::Status((*line).to_owned()))
+            .collect(),
+        )),
+        ("object", 2) => reading(context, db, |keys| {
+            let Some(entry) = load(keys, &args[1], now)? else {
+                return Ok(Reply::Error("ERR no such key".to_owned()));
+            };
+            Ok(Reply::Status(format!(
+                "Value at:0x0 refcount:1 encoding:{} serializedlength:{} lru:0 lru_seconds_idle:0",
+                encoding_of(&entry.data),
+                serialized_length(&entry.data)
+            )))
+        }),
+        ("sleep", 2) => {
+            let seconds = String::from_utf8_lossy(&args[1])
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|seconds| seconds.is_finite() && *seconds >= 0.0);
+            let Some(seconds) = seconds else {
+                return Reply::Error("ERR value is not a valid float".to_owned());
+            };
+            std::thread::sleep(std::time::Duration::from_secs_f64(
+                seconds.min(MOST_DEBUG_SLEEP_SECONDS),
+            ));
+            Reply::ok()
+        }
+        ("set-active-expire", 2) => Reply::ok(),
+        _ => Reply::Error(format!(
+            "ERR unknown subcommand or wrong number of arguments for '{subcommand}'. Try DEBUG HELP."
+        )),
+    }
 }
 
 fn increment(context: &Context<'_>, db: u32, key: &[u8], by: i64) -> Reply {
