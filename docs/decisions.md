@@ -405,3 +405,4 @@ its full title with its status.
 - [D378](decisions/D378.md) Code-only batch 24 (M5): SQLite's reading and building JSON functions
 - [D379](decisions/D379.md) Code-only batch 25 (M5): SQLite's `json_set`, `json_insert`, `json_replace`, `json_remove` and `json_patch`
 - [D380](decisions/D380.md) Code-only batch 26 (M5): SQLite's `->` and `->>` JSON operators
+- [D381](decisions/D381.md) Code-only batch 27 (M5): SQLite's `json_group_array` and `json_group_object`

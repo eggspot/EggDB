@@ -4996,6 +4996,12 @@ impl<'t> Parser<'t> {
         if text == "total" && self.sqlite() && self.peek_kind() == &TokenKind::LeftParen {
             return self.sqlite_total(&name);
         }
+        if (text == "json_group_array" || text == "json_group_object")
+            && self.sqlite()
+            && self.peek_kind() == &TokenKind::LeftParen
+        {
+            return self.sqlite_json_aggregate(&name);
+        }
         if self.postgresql()
             && let Some(expr) = self.postgresql_function(&name)?
         {
