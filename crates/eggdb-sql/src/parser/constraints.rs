@@ -750,6 +750,9 @@ impl Parser<'_> {
 
     fn alter_action(&mut self, actions: &mut Vec<AlterAction>) -> SqlResult<()> {
         let position = self.position();
+        if self.partition_alter_action(actions)? {
+            return Ok(());
+        }
         if self.take_word("rename") {
             return self.rename_action(actions);
         }

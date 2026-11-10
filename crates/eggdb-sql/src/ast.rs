@@ -983,6 +983,28 @@ pub(crate) enum AlterAction {
         bound: PartitionBoundSpec,
     },
     DetachPartition(Name),
+    AddPartitions {
+        partitions: Vec<NamedPartition>,
+        hash_count: Option<u32>,
+        position: usize,
+    },
+    DropPartitions(Vec<Name>),
+    TruncatePartitions(Vec<Name>),
+    ReorganizePartitions {
+        from: Vec<Name>,
+        into: Vec<NamedPartition>,
+        position: usize,
+    },
+    SplitPartition {
+        partition: Name,
+        point: SplitPoint,
+        into: [Name; 2],
+    },
+    ExchangePartition {
+        partition: Name,
+        table: Name,
+        validate: bool,
+    },
     AttachIndex(Name),
     MoveColumn {
         column: Name,
@@ -994,6 +1016,12 @@ pub(crate) enum AlterAction {
         to: Name,
     },
     Accepted,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SplitPoint {
+    At(Vec<PartitionBoundValue>),
+    Values(Vec<PartitionBoundValue>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

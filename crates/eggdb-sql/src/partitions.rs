@@ -2059,3 +2059,141 @@ pub(crate) fn with_descendants(
     }
     Ok(Some(expanded))
 }
+
+pub(crate) fn highest_range_end(
+    catalog: &PartitionCatalog,
+    parent: &str,
+    types: &[SqlType],
+) -> SqlResult<Option<Vec<BoundText>>> {
+    let mut highest: Option<(Vec<Edge>, Vec<BoundText>)> = None;
+    for (_, bound) in catalog.children_of(parent) {
+        let PartitionBound::Range { to, .. } = bound else {
+            continue;
+        };
+        let TypedBound::Range { to: edges, .. } = typed(bound, types)? else {
+            continue;
+        };
+        let higher = highest
+            .as_ref()
+            .is_none_or(|(best, _)| compare_edge_lists(&edges, best) == Ordering::Greater);
+        if higher {
+            highest = Some((edges, to.clone()));
+        }
+    }
+    Ok(highest.map(|(_, texts)| texts))
+}
+
+pub(crate) fn range_bound_from(
+    from: Vec<BoundText>,
+    to: &[PartitionBoundValue],
+    types: &[SqlType],
+    position: usize,
+) -> SqlResult<PartitionBound> {
+    let width = types.len();
+    let to: Vec<PartitionBoundValue> = if to.len() == 1 && to[0] == PartitionBoundValue::MaxValue {
+        vec![PartitionBoundValue::MaxValue; width]
+    } else {
+        to.to_vec()
+    };
+    if to.len() != width || from.len() != width {
+        return Err(invalid_bound(
+            "VALUES LESS THAN must give one value for each partition key column",
+            position,
+        ));
+    }
+    let to = to
+        .iter()
+        .zip(types)
+        .map(|(value, sql_type)| bound_value_text(value, *sql_type, position))
+        .collect::<SqlResult<Vec<_>>>()?;
+    if to.contains(&BoundText::Null) {
+        return Err(invalid_bound(
+            "cannot specify NULL in range bound",
+            position,
+        ));
+    }
+    let bound = PartitionBound::Range { from, to };
+    if let TypedBound::Range { from, to } = typed(&bound, types)?
+        && compare_edge_lists(&from, &to) != Ordering::Less
+    {
+        return Err(invalid_bound(
+            "VALUES LESS THAN value must be strictly increasing for each partition",
+            position,
+        ));
+    }
+    Ok(bound)
+}
+
+pub(crate) fn list_bound(
+    values: &[PartitionBoundValue],
+    key: &PartitionKey,
+    types: &[SqlType],
+    position: usize,
+) -> SqlResult<PartitionBound> {
+    if values.is_empty() {
+        return Ok(PartitionBound::Default);
+    }
+    bound_of(
+        &PartitionBoundSpec::List(values.to_vec()),
+        key,
+        types,
+        position,
+    )
+}
+
+pub(crate) fn checked_range(
+    from: Vec<BoundText>,
+    to: Vec<BoundText>,
+    types: &[SqlType],
+    position: usize,
+) -> SqlResult<PartitionBound> {
+    let bound = PartitionBound::Range { from, to };
+    if let TypedBound::Range { from, to } = typed(&bound, types)?
+        && compare_edge_lists(&from, &to) != Ordering::Less
+    {
+        return Err(invalid_bound(
+            "the split point must lie inside the partition's range",
+            position,
+        ));
+    }
+    Ok(bound)
+}
+
+pub(crate) fn range_start(bound: &PartitionBound) -> Option<&[BoundText]> {
+    match bound {
+        PartitionBound::Range { from, .. } => Some(from),
+        _ => None,
+    }
+}
+
+pub(crate) fn range_end(bound: &PartitionBound) -> Option<&[BoundText]> {
+    match bound {
+        PartitionBound::Range { to, .. } => Some(to),
+        _ => None,
+    }
+}
+
+pub(crate) fn list_values(bound: &PartitionBound) -> Option<&[BoundText]> {
+    match bound {
+        PartitionBound::List(values) => Some(values),
+        _ => None,
+    }
+}
+
+pub(crate) fn compare_bound_texts(
+    left: &[BoundText],
+    right: &[BoundText],
+    types: &[SqlType],
+) -> Ordering {
+    let edges = |texts: &[BoundText]| -> Option<Vec<Edge>> {
+        texts
+            .iter()
+            .zip(types)
+            .map(|(text, sql_type)| typed_edge(text, *sql_type).ok())
+            .collect()
+    };
+    match (edges(left), edges(right)) {
+        (Some(left), Some(right)) => compare_edge_lists(&left, &right),
+        _ => Ordering::Equal,
+    }
+}

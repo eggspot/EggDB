@@ -76,7 +76,7 @@ fn names_of(table: &TableDefinition, columns: &[usize], position: usize) -> Vec<
         .collect()
 }
 
-fn copy_of(parent: &TableDefinition, name: Name) -> SqlResult<CreateTable> {
+pub(crate) fn copy_of(parent: &TableDefinition, name: Name) -> SqlResult<CreateTable> {
     let position = name.position;
     let columns = (0..parent.columns.len())
         .map(|index| copied_column(parent, index, position))
@@ -262,7 +262,7 @@ pub(crate) fn create_table(
     Ok(result)
 }
 
-fn named_child(table: &TableDefinition, partition: &str, position: usize) -> Name {
+pub(crate) fn named_child(table: &TableDefinition, partition: &str, position: usize) -> Name {
     Name {
         text: format!("{}{MYSQL_PARTITION_MARKER}{partition}", table.name),
         position,
@@ -329,7 +329,7 @@ fn create_named_partitions(
     Ok(())
 }
 
-fn same_columns(
+pub(crate) fn same_columns(
     parent: &TableDefinition,
     child: &TableDefinition,
     position: usize,
@@ -385,6 +385,32 @@ pub(crate) fn attach(
     bound: &PartitionBoundSpec,
 ) -> SqlResult<()> {
     let position = partition.position;
+    attach_with(writer, tables, parent, partition, &|key, types| {
+        crate::partitions::bound_of(bound, key, types, position)
+    })
+}
+
+pub(crate) fn attach_resolved(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    parent: &TableDefinition,
+    partition: &Name,
+    bound: PartitionBound,
+) -> SqlResult<()> {
+    attach_with(writer, tables, parent, partition, &|_, _| Ok(bound.clone()))
+}
+
+type BoundResolver<'b> =
+    dyn Fn(&PartitionKey, &[crate::types::SqlType]) -> SqlResult<PartitionBound> + 'b;
+
+fn attach_with(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    parent: &TableDefinition,
+    partition: &Name,
+    resolve: &BoundResolver<'_>,
+) -> SqlResult<()> {
+    let position = partition.position;
     let catalog = crate::partitions::catalog(writer, tables)?;
     let Some(key) = catalog.key_of(&parent.name).cloned() else {
         return Err(not_partitioned(&parent.name, position));
@@ -426,7 +452,7 @@ pub(crate) fn attach(
     }
     same_columns(parent, &child, position)?;
     let types = crate::partitions::key_types(parent, &key)?;
-    let bound = crate::partitions::bound_of(bound, &key, &types, position)?;
+    let bound = resolve(&key, &types)?;
     crate::partitions::check_no_overlap(
         &catalog,
         &parent.name,

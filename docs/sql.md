@@ -2765,6 +2765,17 @@ ALTER TABLE measurements DETACH PARTITION old_rows;
   `DELETE`, and Oracle's `PARTITION (p)` and `PARTITION FOR (key)`, read and write only the
   named partitions: a row outside them is MySQL `1748` / `ORA-14401`, an unknown partition
   `1735` / `ORA-02149`, and a table that is not partitioned `1747` / `ORA-14501` (D337).
+- **Partition maintenance** (MySQL and Oracle, D358). `ALTER TABLE t ADD PARTITION (PARTITION p
+  VALUES LESS THAN (...) | VALUES IN (...), ...)` (Oracle without the parentheses) adds range
+  partitions above the last one (`1493`, strictly increasing) and list partitions; on a hash table
+  `ADD PARTITION PARTITIONS n` spreads every row over the new count. `DROP PARTITION p, ...`
+  removes partitions with their rows (`1508` / `ORA-14083` for all of them, `1512` on hash
+  tables), `TRUNCATE PARTITION p, ... | ALL` empties them, MySQL's `REORGANIZE PARTITION p, ...
+  INTO (PARTITION ...)` and Oracle's `SPLIT PARTITION p AT (v) | VALUES (...) INTO (PARTITION a,
+  PARTITION b)` rebuild them and route every row again, and `EXCHANGE PARTITION p WITH TABLE t`
+  swaps a partition with a table of the same columns, always checking that the table's rows fit
+  the partition (`WITHOUT VALIDATION` does not skip it). Oracle's `INCLUDING | EXCLUDING INDEXES`
+  and `UPDATE [GLOBAL] INDEXES` are accepted.
 - **Hash values.** Hash partitions assign rows by EggDB's own hash of the key, not PostgreSQL's,
   so a `COPY` of a hash partition's rows from a `pg_dump` is routed through the partitioned
   table, as `pg_dump --load-via-partition-root` would.
