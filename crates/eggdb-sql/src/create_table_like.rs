@@ -138,6 +138,7 @@ fn commented_column(
         default: None,
         default_dialect: Dialect::MySql,
         auto_increment: false,
+        serial: false,
         identity_seed: None,
         generated_always: false,
         unique: None,

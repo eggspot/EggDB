@@ -537,7 +537,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   PostgreSQL's stable casts checked in generation expressions. `ALTER COLUMN ... SET EXPRESSION`/`DROP EXPRESSION`: **code written, unbuilt**
   (code-only mode, 2026-11-10, D385).
 - The rest of `ALTER TABLE`: `ALTER COLUMN ... TYPE ... USING`, adding a serial or identity
-  column, renaming what a view uses (D32).
+  column, renaming what a view uses (D32). Adding a serial column: **code written, unbuilt**
+  (code-only mode, 2026-11-10, D387).
 - A published SQL:2023 conformance list, first Part 2's feature IDs (E011, F031, ...) with each
   one's status and test (D32). Check: a CI test that every feature marked done has a case.
 - The Unicode Collation Algorithm with CLDR tailorings (`COLLATE "de-DE"`), with MySQL's and SQL

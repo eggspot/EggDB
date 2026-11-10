@@ -522,6 +522,7 @@ impl<'t> Parser<'t> {
             default: None,
             default_dialect: crate::Dialect::PostgreSql,
             auto_increment: false,
+            serial: false,
             identity_seed: None,
             generated_always: false,
             unique: None,

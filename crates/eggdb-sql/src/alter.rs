@@ -632,6 +632,12 @@ fn add_column(
     if_not_exists: bool,
     dialect: Dialect,
 ) -> SqlResult<Option<String>> {
+    if definition.serial && !definition.primary_key && dialect == Dialect::PostgreSql {
+        let existing = current(writer, tables, name)?;
+        if existing.column_index(&definition.name.text).is_none() {
+            return add_serial_column(writer, tables, name, definition, dialect);
+        }
+    }
     let mut table = current(writer, tables, name)?;
     constraints::check_identifier(&definition.name)?;
     if let Some((_, text)) = &definition.default {
@@ -2906,5 +2912,96 @@ fn drop_expression(
     table.generated.retain(|found| found.column != index);
     save(writer, &table)?;
     Ok(None)
+}
+
+fn serial_sequence_name(
+    writer: &mut dyn KeyValueWrite,
+    table: &str,
+    column: &str,
+) -> SqlResult<String> {
+    let schema = crate::schemas::schema_of(table);
+    let base = format!("{}_{column}_seq", crate::schemas::base_name(table));
+    let mut candidate = crate::schemas::qualified(schema, &base);
+    let mut suffix = 1u32;
+    while crate::sequences::relation_exists(writer, &candidate)? {
+        candidate = crate::schemas::qualified(schema, &format!("{base}{suffix}"));
+        suffix = suffix.saturating_add(1);
+        if suffix > 10_000 {
+            return Err(SqlError::new(
+                SqlState::DUPLICATE_TABLE,
+                format!("no free name for the sequence of column \"{column}\""),
+            ));
+        }
+    }
+    Ok(candidate)
+}
+
+fn add_serial_column(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    name: &str,
+    definition: &ColumnDefinition,
+    dialect: Dialect,
+) -> SqlResult<Option<String>> {
+    let position = definition.name.position;
+    let sequence = serial_sequence_name(writer, name, &definition.name.text)?;
+    let sequence_name = Name {
+        text: sequence.clone(),
+        position,
+    };
+    crate::sequences::create_sequence(
+        writer,
+        tables,
+        &crate::ast::CreateSequence {
+            name: sequence_name.clone(),
+            if_not_exists: false,
+            options: crate::ast::SequenceOptions {
+                sql_type: Some((definition.sql_type, position)),
+                ..crate::ast::SequenceOptions::default()
+            },
+        },
+        dialect,
+    )?;
+    let shown = crate::schemas::display(&sequence);
+    let text = format!("nextval('{shown}'::regclass)");
+    let call = crate::ast::Expr {
+        kind: crate::ast::ExprKind::Function {
+            name: "nextval".to_owned(),
+            arguments: vec![crate::ast::Expr {
+                kind: crate::ast::ExprKind::Literal(crate::ast::Literal::String(shown)),
+                position,
+            }],
+        },
+        position,
+    };
+    let plain = ColumnDefinition {
+        auto_increment: false,
+        serial: false,
+        not_null: true,
+        default: Some((call, text)),
+        ..definition.clone()
+    };
+    let notice = add_column(writer, tables, name, &plain, false, dialect)?;
+    crate::sequences::alter_sequence(
+        writer,
+        tables,
+        &crate::ast::AlterSequence {
+            name: sequence_name,
+            if_exists: false,
+            options: crate::ast::SequenceOptions {
+                owned_by: Some(Some((
+                    Name {
+                        text: name.to_owned(),
+                        position,
+                    },
+                    definition.name.clone(),
+                ))),
+                ..crate::ast::SequenceOptions::default()
+            },
+            rename: None,
+        },
+        dialect,
+    )?;
+    Ok(notice)
 }
 

@@ -2125,6 +2125,7 @@ impl<'t> Parser<'t> {
             default: None,
             default_dialect: Dialect::PostgreSql,
             auto_increment: serial.is_some(),
+            serial: serial.is_some(),
             identity_seed: None,
             generated_always: false,
             unique: None,

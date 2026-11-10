@@ -6116,3 +6116,35 @@ EXPLAIN
 
 ok
 DROP TABLE ex342
+
+chapter "ALTER TABLE": ADD COLUMN ... serial numbers the existing rows from a sequence it owns (D387)
+ok
+CREATE TABLE sr387 (name text)
+
+ok
+INSERT INTO sr387 VALUES ('a'), ('b')
+
+ok
+ALTER TABLE sr387 ADD COLUMN id serial
+
+ok
+INSERT INTO sr387 (name) VALUES ('c')
+
+rows
+SELECT name, id FROM sr387 ORDER BY id
+----
+name|id
+a|1
+b|2
+c|3
+SELECT 3
+
+rows
+SELECT pg_get_serial_sequence('sr387', 'id') AS s
+----
+s
+public.sr387_id_seq
+SELECT 1
+
+ok
+DROP TABLE sr387

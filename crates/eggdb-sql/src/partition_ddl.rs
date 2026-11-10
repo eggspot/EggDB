@@ -57,6 +57,7 @@ fn copied_column(
         default,
         default_dialect: dialect,
         auto_increment: false,
+        serial: false,
         identity_seed: None,
         generated_always: false,
         unique: None,
