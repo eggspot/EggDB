@@ -389,6 +389,9 @@ impl<'s> Session<'s> {
         &mut self,
         characteristics: &TransactionCharacteristics,
     ) -> SqlResult<QueryResult> {
+        if let Some(id) = &characteristics.snapshot {
+            return self.import_snapshot(id);
+        }
         match self.dialect {
             Dialect::PostgreSql => self.set_postgresql_transaction(characteristics),
             Dialect::MySql => self.set_mysql_transaction(characteristics),
@@ -406,6 +409,7 @@ impl<'s> Session<'s> {
             target: CharacteristicsTarget::CurrentTransaction,
             read_only: None,
             isolation: None,
+            snapshot: None,
         };
         if name.eq_ignore_ascii_case("transaction_read_only") {
             let read_only = match value {
@@ -598,5 +602,63 @@ impl<'s> Session<'s> {
             self.begin(true)?;
         }
         Ok(QueryResult::command("SET TRANSACTION"))
+    }
+}
+
+impl Session<'_> {
+    fn import_snapshot(&mut self, id: &str) -> SqlResult<QueryResult> {
+        if !matches!(self.block, Block::Reading(_) | Block::Writing(_)) || self.block_is_implicit {
+            return Err(SqlError::new(
+                SqlState::NO_ACTIVE_SQL_TRANSACTION,
+                "SET TRANSACTION SNAPSHOT must be called inside a transaction",
+            ));
+        }
+        if self.savepoints.is_active() {
+            return Err(SqlError::new(
+                SqlState::ACTIVE_SQL_TRANSACTION,
+                "SET TRANSACTION SNAPSHOT must not be called in a subtransaction",
+            ));
+        }
+        if self.transaction_mode.has_read {
+            return Err(before_any_query("SET TRANSACTION SNAPSHOT"));
+        }
+        if self
+            .transaction_mode
+            .isolation
+            .as_deref()
+            .is_some_and(|level| level.eq_ignore_ascii_case("read committed"))
+        {
+            return Err(SqlError::new(
+                SqlState::FEATURE_NOT_SUPPORTED,
+                "a snapshot-importing transaction must have isolation level SERIALIZABLE or REPEATABLE READ",
+            ));
+        }
+        let handle = crate::exported_snapshots::find(self.store.erased_store_id(), id)?;
+        if matches!(self.block, Block::Writing(_)) {
+            let current = self.store.begin_boxed_read()?;
+            let exported = self
+                .store
+                .begin_boxed_read_from(&handle)
+                .map_err(|_| crate::exported_snapshots::invalid_identifier(id))?
+                .ok_or_else(|| crate::exported_snapshots::invalid_identifier(id))?;
+            let same = current.committed_version().is_some()
+                && current.committed_version() == exported.committed_version();
+            if !same {
+                return Err(SqlError::new(
+                    SqlState::FEATURE_NOT_SUPPORTED,
+                    "EggDB imports a snapshot into a read-write transaction only when nothing has committed since it was exported",
+                )
+                .with_hint("Import it in a READ ONLY transaction instead."));
+            }
+            return Ok(QueryResult::command("SET"));
+        }
+        let reader = self
+            .store
+            .begin_boxed_read_from(&handle)
+            .map_err(|_| crate::exported_snapshots::invalid_identifier(id))?
+            .ok_or_else(|| crate::exported_snapshots::invalid_identifier(id))?;
+        self.block = Block::Reading(reader);
+        self.tables = crate::execute::TableCache::default();
+        Ok(QueryResult::command("SET"))
     }
 }

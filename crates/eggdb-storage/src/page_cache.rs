@@ -505,6 +505,10 @@ impl<F: File> PageCache<F> {
         kept.map(|()| version)
     }
 
+    pub(crate) fn join_snapshot(&mut self, version: u64) -> Result<(), StorageError> {
+        self.images.get_mut().join_reader(version)
+    }
+
     pub(crate) fn end_snapshot(&mut self, version: u64) {
         self.images.get_mut().release_reader(version);
     }

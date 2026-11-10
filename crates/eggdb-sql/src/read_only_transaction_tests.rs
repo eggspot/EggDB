@@ -734,3 +734,34 @@ fn row_locking_a_table_with_row_security_is_refused_for_a_checked_role_in_a_read
     assert_eq!(error.state().code(), "25006");
     answer(&mut ada, "ROLLBACK");
 }
+
+#[test]
+fn an_exported_snapshot_shows_another_session_what_the_exporter_sees() {
+    let store = MemoryStore::default();
+    let mut exporter = Session::new(&store);
+    let mut writer = Session::new(&store);
+    let mut importer = Session::new(&store);
+    answer(&mut exporter, "CREATE TABLE t (x int); INSERT INTO t VALUES (1)");
+    answer(&mut exporter, "BEGIN READ ONLY");
+    let exported = answer(&mut exporter, "SELECT pg_export_snapshot()");
+    let id = exported.lines().nth(1).unwrap_or_default().to_owned();
+    answer(&mut writer, "INSERT INTO t VALUES (2)");
+    answer(&mut importer, "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    answer(&mut importer, &format!("SET TRANSACTION SNAPSHOT '{id}'"));
+    assert_eq!(
+        answer(&mut importer, "SELECT count(*) FROM t"),
+        "count\n1\nSELECT 1"
+    );
+    let error = refusal(&mut importer, &format!("SET TRANSACTION SNAPSHOT '{id}'"));
+    assert_eq!(error.state().code(), "25001", "{error}");
+    answer(&mut importer, "COMMIT");
+    answer(&mut exporter, "COMMIT");
+    answer(&mut importer, "BEGIN READ ONLY");
+    let error = refusal(&mut importer, &format!("SET TRANSACTION SNAPSHOT '{id}'"));
+    assert_eq!(error.state().code(), "22023", "{error}");
+    answer(&mut importer, "ROLLBACK");
+    let error = refusal(&mut importer, "SET TRANSACTION SNAPSHOT '00000001-00000001-1'");
+    assert_eq!(error.state().code(), "25P01", "{error}");
+    let error = refusal(&mut importer, "SELECT pg_export_snapshot()");
+    assert_eq!(error.state().code(), "0A000", "{error}");
+}

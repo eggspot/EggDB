@@ -62,6 +62,18 @@ impl BeforeImages {
         Ok(version)
     }
 
+    pub(crate) fn join_reader(&mut self, version: u64) -> Result<(), StorageError> {
+        self.check_live(version)?;
+        let Ok(index) = self
+            .readers
+            .binary_search_by_key(&version, |&(listed, _)| listed)
+        else {
+            return Err(StorageError::SnapshotTooOld);
+        };
+        self.readers[index].1 += 1;
+        Ok(())
+    }
+
     pub(crate) fn release_reader(&mut self, version: u64) {
         let Ok(index) = self
             .readers

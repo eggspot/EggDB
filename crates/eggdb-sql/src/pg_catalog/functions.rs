@@ -37,6 +37,7 @@ pub(crate) fn argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         | "pg_get_function_result"
         | "pg_get_partkeydef" => &[OID],
         "pg_get_statisticsobjdef_columns" => &[OID],
+        "pg_export_snapshot" => &[],
         "pg_partition_root" => &[REGCLASS],
         "pg_get_expr" => &[NODE_TREE, OID, BOOLEAN],
         "pg_get_constraintdef" | "pg_get_viewdef" | "pg_get_triggerdef" | "pg_get_ruledef" => {
@@ -82,6 +83,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         | "pg_get_function_result"
         | "pg_get_partkeydef" => SqlType::Text,
         "to_regclass" | "pg_partition_root" => SqlType::Catalog(CatalogType::Reg(RegKind::Class)),
+        "pg_export_snapshot" => SqlType::Text,
         "to_regtype" | "pg_typeof" => SqlType::Catalog(CatalogType::Reg(RegKind::Type)),
         "acldefault" => SqlType::Array(crate::arrays::ArrayElement::AclItem),
         "makeaclitem" => SqlType::Catalog(CatalogType::AclItem),
@@ -261,6 +263,9 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     argument_types(name)?;
     if super::acl::is_scalar(name) {
         return Some(super::acl::function(name, values));
+    }
+    if name == crate::exported_snapshots::EXPORT_FUNCTION {
+        return Some(crate::exported_snapshots::export().map(Value::Text));
     }
     if values.first().is_some_and(Value::is_null) {
         return Some(Ok(Value::Null));

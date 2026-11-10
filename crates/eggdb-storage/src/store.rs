@@ -100,6 +100,22 @@ impl<F: File> Store<F> {
         })
     }
 
+    /// Begins a read transaction that sees exactly what the read transaction `token` came from
+    /// sees, while some read transaction of that snapshot is still open; otherwise it fails
+    /// with [`StorageError::SnapshotTooOld`].
+    pub fn begin_read_from(&self, token: SnapshotToken) -> Result<ReadTransaction<'_, F>, StorageError> {
+        let mut state = self.lock()?;
+        state.cache.join_snapshot(token.version)?;
+        Ok(ReadTransaction {
+            store: self,
+            version: token.version,
+            stamp: token.stamp,
+            catalog_root: token.catalog_root,
+            features: token.features,
+            page_size: state.cache.page_size(),
+        })
+    }
+
     /// Begins the write transaction. While it is open, another fails with
     /// [`StorageError::WriterActive`]. A store over a file opened read-only refuses it with
     /// [`StorageError::ReadOnly`], and one whose last write or sync failed with
@@ -249,7 +265,27 @@ pub struct ReadTransaction<'s, F: File> {
     page_size: PageSize,
 }
 
+/// What [`Store::begin_read_from`] needs to open another read transaction on the snapshot a
+/// read transaction sees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotToken {
+    version: u64,
+    stamp: CommitStamp,
+    catalog_root: u64,
+    features: Features,
+}
+
 impl<'s, F: File> ReadTransaction<'s, F> {
+    /// The token that opens another read transaction on this one's snapshot.
+    pub fn token(&self) -> SnapshotToken {
+        SnapshotToken {
+            version: self.version,
+            stamp: self.stamp,
+            catalog_root: self.catalog_root,
+            features: self.features,
+        }
+    }
+
     /// The stamp of the commit this transaction sees, or [`CommitStamp::NONE`] when no
     /// transaction has committed to the file yet.
     pub fn stamp(&self) -> CommitStamp {

@@ -168,6 +168,7 @@ mod statistical_aggregates;
 mod statistics;
 mod step_times;
 mod store;
+mod exported_snapshots;
 mod string_functions;
 mod subquery;
 mod table_variables;
@@ -370,7 +371,7 @@ pub use sqlserver_catalog::is_catalog_procedure;
 pub use stack_depth::{SESSION_STACK_BYTES, set_thread_stack_size};
 pub use store::{
     EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, PageLookups, ScanDirection,
-    StoreFailure,
+    SnapshotHandle, StoreFailure,
 };
 pub use time_zones::TimeZone;
 pub use type_affinity::TypeAffinity;

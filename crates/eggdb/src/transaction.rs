@@ -36,11 +36,34 @@ pub struct ReadTransaction<'db> {
     inner: eggdb_storage::ReadTransaction<'db, DatabaseFile>,
     tree: Option<BTree>,
     expiry_now: Option<Moment>,
+    database_address: usize,
 }
 
 impl<'db> ReadTransaction<'db> {
     pub(crate) fn begin(database: &'db Database) -> Result<Self> {
         let inner = database.store().begin_read().map_err(Error::storage)?;
+        Self::over(database, inner)
+    }
+
+    pub(crate) fn begin_from(
+        database: &'db Database,
+        token: eggdb_storage::SnapshotToken,
+    ) -> Result<Self> {
+        let inner = database
+            .store()
+            .begin_read_from(token)
+            .map_err(Error::storage)?;
+        Self::over(database, inner)
+    }
+
+    pub(crate) fn snapshot_token(&self) -> eggdb_storage::SnapshotToken {
+        self.inner.token()
+    }
+
+    fn over(
+        database: &'db Database,
+        inner: eggdb_storage::ReadTransaction<'db, DatabaseFile>,
+    ) -> Result<Self> {
         let tree = database.tree_at(inner.catalog_root(), |root| inner.open_tree(root))?;
         let expiry_now = database
             .has_expiring_keys()
@@ -49,7 +72,12 @@ impl<'db> ReadTransaction<'db> {
             inner,
             tree,
             expiry_now,
+            database_address: std::ptr::from_ref(database).addr(),
         })
+    }
+
+    pub(crate) fn database_address(&self) -> usize {
+        self.database_address
     }
 
     /// The value stored under `key` in the default key space, or `None` when the key is

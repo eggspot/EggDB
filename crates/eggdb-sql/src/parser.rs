@@ -1263,8 +1263,18 @@ impl<'t> Parser<'t> {
             self.expect_word("as")?;
         }
         self.expect_word("transaction")?;
-        if self.is_word("snapshot") {
-            return Err(self.not_supported("SET TRANSACTION SNAPSHOT"));
+        if !characteristics && self.postgresql() && self.take_word("snapshot") {
+            let TokenKind::String(id) = self.peek_kind() else {
+                return Err(self.unexpected());
+            };
+            let id = id.as_ref().to_owned();
+            self.at += 1;
+            return Ok(Statement::SetTransaction(TransactionCharacteristics {
+                target: CharacteristicsTarget::CurrentTransaction,
+                read_only: None,
+                isolation: None,
+                snapshot: Some(id),
+            }));
         }
         let target = if characteristics {
             CharacteristicsTarget::Session
@@ -1307,6 +1317,7 @@ impl<'t> Parser<'t> {
             target,
             read_only,
             isolation,
+            snapshot: None,
         })
     }
 
