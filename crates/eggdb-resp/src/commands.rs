@@ -622,6 +622,7 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
             }
             Ok(Reply::Integer(found))
         }),
+        ("object", count) if count >= 1 => object(context, db, args),
         ("type", 1) => reading(context, db, |keys| {
             Ok(Reply::Status(
                 load(keys, &args[0], now)?
@@ -778,6 +779,7 @@ fn is_known(name: &str) -> bool {
             | "unlink"
             | "exists"
             | "type"
+            | "object"
             | "expire"
             | "pexpire"
             | "expireat"
@@ -791,6 +793,110 @@ fn is_known(name: &str) -> bool {
             | "scan"
             | "dbsize"
     )
+}
+
+const SMALL_ENTRIES: usize = 128;
+const SMALL_ELEMENT_BYTES: usize = 64;
+const SMALL_INTEGER_SET: usize = 512;
+const EMBEDDED_STRING_BYTES: usize = 44;
+
+fn small<'e>(mut elements: impl Iterator<Item = &'e [u8]>, count: usize) -> bool {
+    count <= SMALL_ENTRIES && elements.all(|element| element.len() <= SMALL_ELEMENT_BYTES)
+}
+
+fn is_integer_text(bytes: &[u8]) -> bool {
+    bytes.len() <= 20
+        && std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|text| text.parse::<i64>().ok())
+            .is_some_and(|number| number.to_string().as_bytes() == bytes)
+}
+
+fn encoding_of(data: &Data) -> &'static str {
+    match data {
+        Data::String(bytes) if is_integer_text(bytes) => "int",
+        Data::String(bytes) if bytes.len() <= EMBEDDED_STRING_BYTES => "embstr",
+        Data::String(_) => "raw",
+        Data::Hash(map)
+            if small(
+                map.iter()
+                    .flat_map(|(field, value)| [field.as_slice(), value.as_slice()]),
+                map.len(),
+            ) =>
+        {
+            "listpack"
+        }
+        Data::Hash(_) => "hashtable",
+        Data::List(list) if small(list.iter().map(Vec::as_slice), list.len()) => "listpack",
+        Data::List(_) => "quicklist",
+        Data::Set(set)
+            if set.len() <= SMALL_INTEGER_SET && set.iter().all(|member| is_integer_text(member)) =>
+        {
+            "intset"
+        }
+        Data::Set(set) if small(set.iter().map(Vec::as_slice), set.len()) => "listpack",
+        Data::Set(_) => "hashtable",
+        Data::SortedSet(set) => {
+            let ordered = set.ordered();
+            if small(ordered.iter().map(|(_, member)| member.as_slice()), ordered.len()) {
+                "listpack"
+            } else {
+                "skiplist"
+            }
+        }
+        Data::Stream(_) => "stream",
+    }
+}
+
+fn object(context: &Context<'_>, db: u32, args: &[Vec<u8>]) -> Reply {
+    let now = context.now_ms;
+    let subcommand = String::from_utf8_lossy(&args[0]).to_ascii_lowercase();
+    if subcommand == "help" && args.len() == 1 {
+        return Reply::Array(Some(
+            [
+                "OBJECT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+                "ENCODING <key>",
+                "    Return the kind of internal representation used in order to store the value",
+                "    associated with a <key>.",
+                "FREQ <key>",
+                "    Return the access frequency index of the <key>. The returned integer is",
+                "    proportional to the logarithm of the recent access frequency of the key.",
+                "IDLETIME <key>",
+                "    Return the idle time of the <key>, that is the approximated number of",
+                "    seconds elapsed since the last access to the key.",
+                "REFCOUNT <key>",
+                "    Return the number of references of the value associated with the specified",
+                "    <key>.",
+                "HELP",
+                "    Print this help.",
+            ]
+            .iter()
+            .map(|line| Reply::Status((*line).to_owned()))
+            .collect(),
+        ));
+    }
+    let known = matches!(
+        subcommand.as_str(),
+        "encoding" | "freq" | "idletime" | "refcount"
+    );
+    if !known || args.len() != 2 {
+        return Reply::Error(format!(
+            "ERR unknown subcommand or wrong number of arguments for '{subcommand}'. Try OBJECT HELP."
+        ));
+    }
+    reading(context, db, |keys| {
+        let Some(entry) = load(keys, &args[1], now)? else {
+            return Ok(Reply::Bulk(None));
+        };
+        Ok(match subcommand.as_str() {
+            "encoding" => Reply::bulk(encoding_of(&entry.data)),
+            "refcount" => Reply::Integer(1),
+            "idletime" => Reply::Integer(0),
+            _ => Reply::Error(
+                "ERR An LFU maxmemory policy is not selected, access frequency not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust.".to_owned(),
+            ),
+        })
+    })
 }
 
 fn increment(context: &Context<'_>, db: u32, key: &[u8], by: i64) -> Reply {

@@ -353,3 +353,24 @@ fn replies_of_many_keys_stop_with_oom_once_they_pass_the_reply_room() {
     assert!(run("KEYS *", 20).starts_with("-OOM "));
     assert!(run("MGET a b", 2500).starts_with("*2\r\n"));
 }
+
+#[test]
+fn object_encoding_names_redis_s_representations() {
+    let mut redis = Harness::new();
+    redis.run("SET n 12345");
+    redis.run("SET s hello");
+    redis.run("SET r 0123456789012345678901234567890123456789012345");
+    redis.run("SADD ints 1 2 3");
+    redis.run("SADD words a b");
+    redis.run("RPUSH l a b");
+    assert_eq!(redis.text("OBJECT ENCODING n"), "$3|int|");
+    assert_eq!(redis.text("OBJECT ENCODING s"), "$6|embstr|");
+    assert_eq!(redis.text("OBJECT ENCODING r"), "$3|raw|");
+    assert_eq!(redis.text("OBJECT ENCODING ints"), "$6|intset|");
+    assert_eq!(redis.text("OBJECT ENCODING words"), "$8|listpack|");
+    assert_eq!(redis.text("OBJECT ENCODING l"), "$8|listpack|");
+    assert_eq!(redis.text("OBJECT ENCODING missing"), "$-1|");
+    assert_eq!(redis.text("OBJECT REFCOUNT n"), ":1|");
+    assert!(redis.text("OBJECT FREQ n").starts_with("-ERR An LFU"));
+    assert!(redis.text("OBJECT NOPE n").starts_with("-ERR unknown subcommand"));
+}

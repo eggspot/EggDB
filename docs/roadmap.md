@@ -890,7 +890,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   and RESP3 double replies for `GEOPOS`/`WITHCOORD` coordinates (D330). RESP3 doubles: **code
   written, unbuilt** (code-only mode, 2026-11-10, D394).
 - Keyspace notifications, the rest of `CLIENT` (`LIST`, `KILL`, ...), the rest of `INFO`
-  (it has only `blocked_clients`, D347), `OBJECT` and `DEBUG` (D12, D193).
+  (it has only `blocked_clients`, D347), `OBJECT` and `DEBUG` (D12, D193). `OBJECT`: **code
+  written, unbuilt** (code-only mode, 2026-11-10, D395).
 - Cluster mode: slots, the cluster commands and sharded pub/sub (`SSUBSCRIBE`) (D193).
 - The rest of Redis's commands, tracked per command (D5, D193). Check: Redis client libraries'
   own test suites.
