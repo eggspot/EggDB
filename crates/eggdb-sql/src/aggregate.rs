@@ -424,7 +424,9 @@ fn result_type(function: AggregateFunction, argument: Option<SqlType>) -> Option
         | AggregateFunction::RegrIntercept
         | AggregateFunction::CovarPop
         | AggregateFunction::CovarSamp
-        | AggregateFunction::Corr => Some(SqlType::Double),
+        | AggregateFunction::Corr
+        | AggregateFunction::CorrS
+        | AggregateFunction::CorrK => Some(SqlType::Double),
     }
 }
 
@@ -1132,6 +1134,7 @@ impl Accumulator {
                         .sum::<usize>()
                 })
                 .sum(),
+            Self::Paired(sums) => sums.held_bytes(),
             _ => 0,
         }
     }
@@ -1213,7 +1216,9 @@ impl Call {
             | AggregateFunction::RegrIntercept
             | AggregateFunction::CovarPop
             | AggregateFunction::CovarSamp
-            | AggregateFunction::Corr => {
+            | AggregateFunction::Corr
+            | AggregateFunction::CorrS
+            | AggregateFunction::CorrK => {
                 Accumulator::Paired(crate::bivariate_aggregates::PairSums::default())
             }
         }

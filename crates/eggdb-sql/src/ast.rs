@@ -1986,10 +1986,12 @@ pub(crate) enum AggregateFunction {
     CovarPop,
     CovarSamp,
     Corr,
+    CorrS,
+    CorrK,
 }
 
 impl AggregateFunction {
-    pub(crate) const ALL: [Self; 42] = [
+    pub(crate) const ALL: [Self; 44] = [
         Self::Count,
         Self::Sum,
         Self::Avg,
@@ -2032,6 +2034,8 @@ impl AggregateFunction {
         Self::CovarPop,
         Self::CovarSamp,
         Self::Corr,
+        Self::CorrS,
+        Self::CorrK,
     ];
 
     pub(crate) fn bivariate_named(name: &str) -> Option<Self> {
@@ -2048,6 +2052,8 @@ impl AggregateFunction {
             "covar_pop" => Self::CovarPop,
             "covar_samp" => Self::CovarSamp,
             "corr" => Self::Corr,
+            "corr_s" => Self::CorrS,
+            "corr_k" => Self::CorrK,
             _ => return None,
         })
     }
@@ -2067,6 +2073,8 @@ impl AggregateFunction {
                 | Self::CovarPop
                 | Self::CovarSamp
                 | Self::Corr
+                | Self::CorrS
+                | Self::CorrK
         )
     }
 
@@ -2187,6 +2195,8 @@ impl AggregateFunction {
             Self::CovarPop => "covar_pop",
             Self::CovarSamp => "covar_samp",
             Self::Corr => "corr",
+            Self::CorrS => "corr_s",
+            Self::CorrK => "corr_k",
         }
     }
 

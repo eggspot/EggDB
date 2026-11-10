@@ -4910,6 +4910,8 @@ impl<'t> Parser<'t> {
         }
         if (self.postgresql() || self.oracle())
             && let Some(function) = AggregateFunction::bivariate_named(&name.text)
+            && (self.oracle()
+                || !matches!(function, AggregateFunction::CorrS | AggregateFunction::CorrK))
         {
             return self.bivariate_aggregate(&name, function);
         }
