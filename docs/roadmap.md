@@ -500,8 +500,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - GIN, GiST, SP-GiST, BRIN and bitmap index methods, and Oracle's bitmap, function-based and
   reverse-key indexes (D32, sql.md).
 - Oracle's `STATS_*`, `CORR_S` and `CORR_K` functions and its 38-digit `NUMBER` results for the
-  statistical aggregates (`CORR_S` and `CORR_K` coefficients: **code written, unbuilt**,
-  code-only mode, 2026-11-10, D374); `stddev`, `variance`, the hypothetical-set aggregates, `regr_*`,
+  statistical aggregates (`CORR_S` and `CORR_K` coefficients and `STATS_MODE`: **code written,
+  unbuilt**, code-only mode, 2026-11-10, D374, D375); `stddev`, `variance`, the hypothetical-set aggregates, `regr_*`,
   `covar_samp`, `covar_pop` and `corr` are built (D321, D340).
 - Grouping sets: SQL Server's and Oracle's one-argument `GROUPING` and their own error numbers
   for grouping-set mistakes, grouping sets beside window functions checked against each manual,

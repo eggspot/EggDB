@@ -555,6 +555,28 @@ impl Parser<'_> {
         })
     }
 
+    pub(super) fn stats_mode(&mut self, name: &Name) -> SqlResult<Expr> {
+        self.expect(&TokenKind::LeftParen)?;
+        let expr = self.expression()?;
+        self.expect(&TokenKind::RightParen)?;
+        let item = OrderItem {
+            expr: expr.clone(),
+            descending: false,
+            nulls_first: None,
+        };
+        Ok(Expr {
+            kind: ExprKind::Aggregate {
+                function: AggregateFunction::Mode,
+                argument: Some(Box::new(crate::aggregate::ordered_arguments(
+                    expr,
+                    vec![item],
+                ))),
+                distinct: false,
+            },
+            position: name.position,
+        })
+    }
+
     pub(super) fn ordered_set_aggregate(
         &mut self,
         name: Name,

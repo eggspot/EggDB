@@ -4985,6 +4985,12 @@ impl<'t> Parser<'t> {
                 expr
             });
         }
+        if self.oracle()
+            && name.text.eq_ignore_ascii_case("stats_mode")
+            && self.peek_kind() == &TokenKind::LeftParen
+        {
+            return self.stats_mode(&name);
+        }
         if !self.mysql()
             && !self.sqlite()
             && let Some(function) = AggregateFunction::ordered_set_named(&name.text)
