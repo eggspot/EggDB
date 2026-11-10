@@ -2784,6 +2784,19 @@ ALTER TABLE measurements DETACH PARTITION old_rows;
   in the default partition, `ORA-14518` for dropped values that still have rows) (D360).
   MySQL's `INSERT IGNORE` skips a row outside the named `PARTITION (...)` set (`1748`) or with no
   partition at all (`1526`) with a warning, as MySQL does.
+- **Subpartitions** (D361). MySQL's `SUBPARTITION BY HASH | KEY (...) [SUBPARTITIONS n]` under a
+  range or list table (`1500` under a hash table), with generated names `<partition>sp<n>` or
+  each partition's own `(SUBPARTITION s, ...)` (`1485` when the count disagrees), and Oracle's
+  composite partitioning with `SUBPARTITION BY HASH | RANGE | LIST` and each partition's
+  subpartitions and their bounds (a range or list subpartitioning names them in every partition,
+  `ORA-14160`). A subpartition is a partition that is itself partitioned; `PARTITION (...)` and
+  Oracle's `SUBPARTITION (...)` select subpartitions by name. `ADD`, `REORGANIZE` and the other
+  maintenance `ALTER`s do not create subpartitions yet.
+- **Row movement** (Oracle, D361). A partitioned table created in the Oracle dialect refuses an
+  `UPDATE` that would move a row to another partition with `ORA-14402`, as Oracle does, until
+  `ENABLE ROW MOVEMENT` (in `CREATE TABLE` or `ALTER TABLE`); `DISABLE ROW MOVEMENT` turns it off
+  again. Tables of the other dialects, and Oracle tables created before EggDB kept the switch,
+  move rows.
 - **Hash values.** Hash partitions assign rows by EggDB's own hash of the key, not PostgreSQL's,
   so a `COPY` of a hash partition's rows from a `pg_dump` is routed through the partitioned
   table, as `pg_dump --load-via-partition-root` would.

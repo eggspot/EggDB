@@ -1,6 +1,6 @@
 use crate::ast::{
-    ColumnDefinition, ConstraintKind, ConstraintSpec, CreateTable, Name, NamedPartitionBound,
-    PartitionBoundSpec, PartitionBoundValue, PartitionBy, PartitionKeyPart,
+    ColumnDefinition, ConstraintKind, ConstraintSpec, CreateTable, Name, NamedPartition,
+    NamedPartitionBound, PartitionBoundSpec, PartitionBoundValue, PartitionBy, PartitionKeyPart,
 };
 use crate::dialect::Dialect;
 use crate::encoding::TableDefinition;
@@ -368,6 +368,10 @@ pub(crate) fn create_table(
     let key = validated_key(&table, by, dialect, &mut user_function_exists)?;
     let mut record = crate::partitions::stored(writer, &table.name)?;
     record.key = Some(key.clone());
+    record.row_movement_disabled = match by.row_movement {
+        Some(enabled) => !enabled,
+        None => dialect == Dialect::Oracle && create.partition_of.is_none(),
+    };
     crate::partitions::save(writer, &table.name, &record)?;
     create_named_partitions(writer, tables, &table, &key, by, dialect)?;
     Ok(result)
@@ -391,7 +395,7 @@ fn create_named_partitions(
     let position = by.position;
     let width = key.parts.len();
     let mut previous: Vec<PartitionBoundValue> = vec![PartitionBoundValue::MinValue; width];
-    let mut planned: Vec<(Name, PartitionBoundSpec)> = Vec::new();
+    let mut planned: Vec<(Name, PartitionBoundSpec, Option<PartitionBy>)> = Vec::new();
     for (number, partition) in by.partitions.iter().enumerate() {
         let name = named_child(table, &partition.name.text, partition.name.position);
         let bound = match &partition.bound {
@@ -417,27 +421,105 @@ fn create_named_partitions(
                 remainder: u32::try_from(number).unwrap_or(u32::MAX),
             },
         };
-        planned.push((name, bound));
+        let subpartitioned = subpartitioning(by, &partition.name.text, &partition.subpartitions)?;
+        planned.push((name, bound, subpartitioned));
     }
     if planned.is_empty()
         && let Some(count) = by.hash_partitions
     {
         for remainder in 0..count {
+            let short = format!("p{remainder}");
+            let subpartitioned = subpartitioning(by, &short, &[])?;
             planned.push((
-                named_child(table, &format!("p{remainder}"), position),
+                named_child(table, &short, position),
                 PartitionBoundSpec::Hash {
                     modulus: count,
                     remainder,
                 },
+                subpartitioned,
             ));
         }
     }
-    for (name, bound) in planned {
-        let child = copy_of(table, name.clone())?;
-        execute::create_table(writer, tables, &child, dialect)?;
+    if by.subpartition_by.is_none()
+        && let Some(partition) = by
+            .partitions
+            .iter()
+            .find(|partition| !partition.subpartitions.is_empty())
+    {
+        return Err(SqlError::new(
+            SqlState::INVALID_TABLE_DEFINITION,
+            "Subpartitions can only be defined with SUBPARTITION BY",
+        )
+        .with_vendor_code(1500)
+        .at(partition.name.position));
+    }
+    for (name, bound, subpartitioned) in planned {
+        let mut child = copy_of(table, name.clone())?;
+        match subpartitioned {
+            Some(sub) => {
+                child.partition_by = Some(sub);
+                create_table(writer, tables, &child, dialect)?;
+            }
+            None => {
+                execute::create_table(writer, tables, &child, dialect)?;
+            }
+        }
         attach(writer, tables, table, &name, &bound)?;
     }
     Ok(())
+}
+
+fn subpartitioning(
+    by: &PartitionBy,
+    partition: &str,
+    named: &[NamedPartition],
+) -> SqlResult<Option<PartitionBy>> {
+    let Some(sub) = &by.subpartition_by else {
+        return Ok(None);
+    };
+    let partitions = if named.is_empty() {
+        if sub.strategy != PartitionStrategy::Hash {
+            return Err(SqlError::new(
+                SqlState::INVALID_TABLE_DEFINITION,
+                "range and list subpartitions must be named in each partition",
+            )
+            .with_oracle_code(14160)
+            .at(sub.position));
+        }
+        let count = sub.count.unwrap_or(1);
+        (0..count)
+            .map(|number| NamedPartition {
+                name: Name {
+                    text: format!("{partition}sp{number}"),
+                    position: sub.position,
+                },
+                bound: NamedPartitionBound::Hash,
+                subpartitions: Vec::new(),
+            })
+            .collect()
+    } else {
+        if let Some(count) = sub.count
+            && usize::try_from(count).ok() != Some(named.len())
+        {
+            return Err(SqlError::new(
+                SqlState::INVALID_TABLE_DEFINITION,
+                "Wrong number of subpartitions defined, mismatch with previous setting",
+            )
+            .with_vendor_code(1485)
+            .at(named.first().map_or(sub.position, |first| first.name.position)));
+        }
+        named.to_vec()
+    };
+    Ok(Some(PartitionBy {
+        strategy: sub.strategy,
+        key: sub.key.clone(),
+        partitions,
+        hash_partitions: None,
+        mysql_integer_key: sub.mysql_integer_key,
+        subpartition_by: None,
+        row_movement: Some(true),
+        position: sub.position,
+    }))
 }
 
 pub(crate) fn same_columns(

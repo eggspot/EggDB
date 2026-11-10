@@ -270,6 +270,15 @@ fn apply(
             )?;
             Ok(None)
         }
+        AlterAction::RowMovement(enabled) => {
+            let table = current(writer, tables, name)?;
+            let mut record = crate::partitions::stored(writer, &table.name)?;
+            if record.key.is_some() && record.row_movement_disabled == *enabled {
+                record.row_movement_disabled = !enabled;
+                crate::partitions::save(writer, &table.name, &record)?;
+            }
+            Ok(None)
+        }
         AlterAction::AttachIndex(partition_index) => {
             let index = Name {
                 text: name.clone(),
