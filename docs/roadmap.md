@@ -520,7 +520,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - PostgreSQL's `EXECUTE` of the extended protocol's named prepared statements (they and SQL
   `PREPARE` are kept apart), `USING`, `WITH (...)` and `TABLESPACE` in a plain `CREATE TABLE`, and
   `EXPLAIN TABLE t` (D342). `WITH (...)`, `USING` and `TABLESPACE` in a plain `CREATE TABLE`:
-  **code written, unbuilt** (code-only mode, 2026-11-10, D386).
+  **code written, unbuilt** (code-only mode, 2026-11-10, D386); `EXPLAIN TABLE t`: the parser
+  already routes it, a correctness case added (unbuilt).
 - SQL Server's `SELECT ... INTO` transferring the identity property (needs an identity counter
   outside the primary key, a file format change) and keeping `NOT NULL` through inner joins and
   of non-null expressions (D342).

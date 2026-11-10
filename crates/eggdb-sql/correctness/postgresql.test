@@ -6102,3 +6102,17 @@ DROP TABLE so386
 
 ok
 DROP TABLE so386b
+
+chapter "EXPLAIN": EXPLAIN TABLE t plans the table query as SELECT * FROM t (D342 leftover)
+ok
+CREATE TABLE ex342 (id int)
+
+rows
+EXPLAIN TABLE ex342
+----
+QUERY PLAN
+Seq Scan on ex342
+EXPLAIN
+
+ok
+DROP TABLE ex342

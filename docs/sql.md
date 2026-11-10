@@ -1734,7 +1734,7 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
 - **`TABLE name`** (D342) is `SELECT * FROM name` in PostgreSQL (`TABLE ONLY name` too) and MySQL
   (`TABLE t [ORDER BY ...] [LIMIT ...]`): a statement, a set operand, a `WITH` query, a derived
   table, a subquery (`IN (TABLE t)`), the source of `INSERT INTO t2 TABLE t1` and the query of
-  `CREATE TABLE ... AS TABLE t`. `EXPLAIN TABLE t` is not built yet.
+  `CREATE TABLE ... AS TABLE t`. `EXPLAIN TABLE t` plans it as `SELECT * FROM t` (code written, unbuilt: the parser routes it, a correctness case checks it).
 - **`CREATE [TEMPORARY] TABLE [IF NOT EXISTS] new LIKE old`** and `(LIKE old)` (MySQL, D342)
   make an empty table with `old`'s columns, types, `NOT NULL`, defaults, `AUTO_INCREMENT`,
   generated columns, primary key, indexes, checks, comments and partitions, without its rows,
