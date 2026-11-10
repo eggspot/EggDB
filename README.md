@@ -31,9 +31,9 @@ One database for every kind of data, written from scratch in Rust.
   more, with each one's exact behavior.
 - **Everywhere:** every OS, every CPU and every cloud.
 
-## Today: v0.4.0, a database for the first dialects and protocols, in one file
+## Today: v0.5.0, a database for the first dialects and protocols, in one file
 
-Everything above is the goal; the releases people can use are smaller. v0.4.0 is an
+Everything above is the goal; the releases people can use are smaller. v0.5.0 is an
 embedded, crash-safe, transactional key-value store: one file, a Rust API, the `eggdb` command
 and `eggdb ui`, a full-screen terminal UI, and `eggdb sql` runs the first parts of the PostgreSQL
 dialect on the same file: tables, joins, `GROUP BY` with aggregates ([docs/sql.md](docs/sql.md)).
@@ -49,8 +49,8 @@ can drop data or change many rows waits for your yes, but a client that cannot a
 agent answer for you (`confirm: true`), so `--allow-write` then lets the agent change anything
 it can see: add `--tables a,b` to limit it to those tables (for reads and writes), and give unattended agents read-only
 access. What is in it:
-[docs/releases/v0.4.0.md](docs/releases/v0.4.0.md); everything it doesn't do yet, in one list:
-its [Limits](docs/releases/v0.4.0.md#limits);
+[docs/releases/v0.5.0.md](docs/releases/v0.5.0.md); everything it doesn't do yet, in one list:
+its [Limits](docs/releases/v0.5.0.md#limits);
 what is tested and what is not: [docs/correctness.md](docs/correctness.md); the plan:
 [docs/roadmap.md](docs/roadmap.md) and [docs/decisions.md](docs/decisions.md).
 
@@ -76,8 +76,8 @@ per platform holding the `eggdb` binary, which needs nothing else (the Linux `mu
 static and run on any distribution). On Linux on x86-64:
 
 ```sh
-curl -fsSL https://github.com/eggspot/EggDB/releases/download/v0.4.0/eggdb-v0.4.0-x86_64-unknown-linux-musl.tar.gz | tar -xz
-sudo mv eggdb-v0.4.0-x86_64-unknown-linux-musl/eggdb /usr/local/bin/
+curl -fsSL https://github.com/eggspot/EggDB/releases/download/v0.5.0/eggdb-v0.5.0-x86_64-unknown-linux-musl.tar.gz | tar -xz
+sudo mv eggdb-v0.5.0-x86_64-unknown-linux-musl/eggdb /usr/local/bin/
 eggdb version
 ```
 
@@ -120,7 +120,7 @@ Or work in one session, with history and tab completion:
 
 ```text
 $ eggdb shell shop.db
-EggDB 0.4.0: shop.db, open read-write (1 table)
+EggDB 0.5.0: shop.db, open read-write (1 table)
 Type .help for help. SQL ends with ; and .quit or Ctrl-D quits.
 shop=> insert into items values (1, 'egg'), (2, 'bread');
 INSERT 0 2
@@ -156,7 +156,7 @@ What each format restores, and the ones that are refused with the command to use
 
 ```toml
 [dependencies]
-eggdb = { git = "https://github.com/eggspot/EggDB", tag = "v0.4.0" }
+eggdb = { git = "https://github.com/eggspot/EggDB", tag = "v0.5.0" }
 ```
 
 ```rust,no_run
