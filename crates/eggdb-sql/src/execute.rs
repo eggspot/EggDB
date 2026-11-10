@@ -602,6 +602,7 @@ pub(crate) fn drop_tables(
         let Some(dropped) = tables.table(writer, &name.text)? else {
             continue;
         };
+        crate::ledger::refuse_dropping(&*writer, tables, &dropped.name)?;
         if dialect == Dialect::PostgreSql {
             crate::views::drop_dependent_views(
                 writer,

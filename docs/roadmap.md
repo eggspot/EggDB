@@ -693,7 +693,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   and every backup, with holds that override it (D26, D53, D231, D246).
 - Classification and tagging of personal data (D26).
 - Evidence reports for SOC 2, HIPAA and PCI DSS audits (D26).
-- Ledger tables: `TRUNCATE` and `DROP` refused, digests published outside the database and checked
+- Ledger tables: `TRUNCATE` and `DROP` refused (**code written, unbuilt**, code-only mode,
+  2026-11-10, D392), digests published outside the database and checked
   against backups, Merkle proofs, SQL Server's `WITH (LEDGER = ON)` (D38, D236).
 - A ledger on a table that already has rows (D236).
 - Retention: holds over some rows, engine-level WORM, records schedules and eDiscovery export in

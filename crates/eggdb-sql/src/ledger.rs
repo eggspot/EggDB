@@ -32,6 +32,7 @@ BEGIN
     EXECUTE format('ALTER TABLE %I.%I ADD COLUMN ledger_hash text', schema_name, table_name);
     EXECUTE format('CREATE TRIGGER eggdb_ledger_append BEFORE INSERT ON %I.%I FOR EACH ROW EXECUTE FUNCTION eggdb_ledger.append()', schema_name, table_name);
     EXECUTE format('CREATE TRIGGER eggdb_ledger_refuse BEFORE UPDATE OR DELETE ON %I.%I FOR EACH ROW EXECUTE FUNCTION eggdb_ledger.refuse()', schema_name, table_name);
+    EXECUTE format('CREATE TRIGGER eggdb_ledger_truncate BEFORE TRUNCATE ON %I.%I FOR EACH STATEMENT EXECUTE FUNCTION eggdb_ledger.refuse()', schema_name, table_name);
     INSERT INTO eggdb_ledger.chains (table_schema, table_name, last_hash) VALUES (schema_name, table_name, '0000000000000000000000000000000000000000000000000000000000000000');
 END
 $$;
@@ -44,6 +45,44 @@ BEGIN
 END
 $$;
 ";
+
+const CHAINS: &str = "chains";
+const LEDGER_SCHEMA: &str = "eggdb_ledger";
+
+pub(crate) fn refuse_dropping(
+    reader: &dyn crate::store::KeyValueRead,
+    tables: &mut crate::execute::TableCache,
+    table: &str,
+) -> crate::error::SqlResult<()> {
+    let chains_name = crate::schemas::qualified(LEDGER_SCHEMA, CHAINS);
+    if table == chains_name {
+        return Ok(());
+    }
+    let Some(chains) = tables.table(reader, &chains_name)? else {
+        return Ok(());
+    };
+    let (Some(schema_column), Some(name_column)) = (
+        chains.column_index("table_schema"),
+        chains.column_index("table_name"),
+    ) else {
+        return Ok(());
+    };
+    let schema = crate::schemas::schema_of(table);
+    let name = crate::schemas::base_name(table);
+    let protected = crate::execute::every_row(reader, &chains)?
+        .into_iter()
+        .any(|(_, row)| {
+            matches!(row.get(schema_column), Some(crate::types::Value::Text(found)) if found == schema)
+                && matches!(row.get(name_column), Some(crate::types::Value::Text(found)) if found == name)
+        });
+    if protected {
+        return Err(crate::error::SqlError::new(
+            crate::error::SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE,
+            format!("table {schema}.{name} is a ledger: it can never be dropped"),
+        ));
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -114,5 +153,32 @@ mod tests {
             "broken\n1\nSELECT 1"
         );
         assert_eq!(run(&mut session, "SELECT length(encode(sha256('abc'), 'hex')) AS n, encode(sha256('abc'), 'hex') = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad' AS right").unwrap(), "n|right\n64|t\nSELECT 1");
+    }
+
+    #[test]
+    fn a_ledger_table_can_be_neither_truncated_nor_dropped() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        for sql in [
+            "CREATE EXTENSION eggdb_ledger",
+            "CREATE TABLE receipts (id integer PRIMARY KEY)",
+            "SELECT eggdb_ledger.protect('public', 'receipts')",
+            "INSERT INTO receipts (id) VALUES (1)",
+            "CREATE TABLE scratch (id integer)",
+        ] {
+            run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        for sql in ["TRUNCATE receipts", "DROP TABLE receipts"] {
+            assert_eq!(
+                run(&mut session, sql).unwrap_err().state().code(),
+                "55000",
+                "{sql}"
+            );
+        }
+        run(&mut session, "DROP TABLE scratch").unwrap();
+        assert_eq!(
+            run(&mut session, "SELECT count(*) AS n FROM receipts").unwrap(),
+            "n\n1\nSELECT 1"
+        );
     }
 }

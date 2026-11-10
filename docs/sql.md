@@ -3401,7 +3401,7 @@ SELECT eggdb_ledger.verify('public', 'payments');
 ```
 
 `protect` adds `ledger_seq`, `ledger_previous` and `ledger_hash` columns: each new row carries
-the hash of the row before it and its own SHA-256, and updates and deletes fail with SQLSTATE
+the hash of the row before it and its own SHA-256, and updates, deletes, `TRUNCATE` and `DROP TABLE` (D392) fail with SQLSTATE
 `55000`. `verify` recomputes the chain and returns how many rows do not match (0 when intact).
 Protect a table before adding rows to it. `sha256(x)` and `sha512(x)` return a digest as
 `bytea`, of `bytea` or of text's UTF-8 bytes.
