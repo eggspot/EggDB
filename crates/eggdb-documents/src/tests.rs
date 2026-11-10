@@ -1688,3 +1688,40 @@ fn projection_operators_slice_match_and_compute() {
     );
     assert!(parse_projection(&doc(vec![("items.$", Bson::Int32(0))])).is_err());
 }
+
+#[test]
+fn json_schema_filters_by_types_bounds_and_required_fields() {
+    let filter = parse_filter(&doc(vec![(
+        "$jsonSchema",
+        sub(vec![
+            ("bsonType", text("object")),
+            ("required", Bson::Array(vec![text("name"), text("age")])),
+            (
+                "properties",
+                sub(vec![
+                    ("name", sub(vec![("bsonType", text("string")), ("minLength", Bson::Int32(2))])),
+                    (
+                        "age",
+                        sub(vec![
+                            ("bsonType", text("int")),
+                            ("minimum", Bson::Int32(0)),
+                            ("maximum", Bson::Int32(150)),
+                        ]),
+                    ),
+                    ("tags", sub(vec![("bsonType", text("array")), ("uniqueItems", Bson::Boolean(true))])),
+                ]),
+            ),
+        ]),
+    )]))
+    .unwrap();
+    let good = doc(vec![("name", text("Ada")), ("age", Bson::Int32(36)), ("tags", Bson::Array(vec![text("a"), text("b")]))]);
+    let missing = doc(vec![("name", text("Ada"))]);
+    let too_old = doc(vec![("name", text("Ada")), ("age", Bson::Int32(200))]);
+    let repeated = doc(vec![("name", text("Ada")), ("age", Bson::Int32(1)), ("tags", Bson::Array(vec![text("a"), text("a")]))]);
+    assert!(crate::matches(&filter, &good));
+    assert!(!crate::matches(&filter, &missing));
+    assert!(!crate::matches(&filter, &too_old));
+    assert!(!crate::matches(&filter, &repeated));
+    assert!(parse_filter(&doc(vec![("$jsonSchema", sub(vec![("format", text("email"))]))])).is_err());
+    assert!(parse_filter(&doc(vec![("$jsonSchema", sub(vec![("bogus", Bson::Int32(1))]))])).is_err());
+}

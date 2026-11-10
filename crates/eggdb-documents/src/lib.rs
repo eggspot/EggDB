@@ -10,6 +10,7 @@ mod error;
 mod expression;
 mod extended_json;
 mod filter;
+mod json_schema;
 mod output;
 mod path;
 mod pipeline;

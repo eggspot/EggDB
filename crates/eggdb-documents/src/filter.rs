@@ -16,6 +16,8 @@ pub enum Filter {
     Nor(Vec<Filter>),
     /// `$expr`: an aggregation expression over the document that must be truthy.
     Expr(Bson),
+    /// `$jsonSchema`: a checked JSON Schema the document must satisfy.
+    JsonSchema(Document),
     /// The values at a dotted path meet a condition.
     Field {
         /// The dotted path.
@@ -117,7 +119,14 @@ fn parse_at(filter: &Document, depth: usize) -> DocumentResult<Filter> {
             "$nor" => all.push(Filter::Nor(filters_of(value, "$nor", depth)?)),
             "$comment" => {}
             "$expr" => all.push(Filter::Expr(value.clone())),
-            "$where" | "$text" | "$jsonSchema" => {
+            "$jsonSchema" => {
+                let Bson::Document(schema) = value else {
+                    return Err(DocumentError::type_mismatch("$jsonSchema must be an object"));
+                };
+                crate::json_schema::check_schema(schema, 0)?;
+                all.push(Filter::JsonSchema(schema.clone()));
+            }
+            "$where" | "$text" => {
                 return Err(DocumentError::not_implemented(format!(
                     "{name} is not supported yet"
                 )));
@@ -151,7 +160,7 @@ fn number_of(value: &Bson, operator: &str) -> DocumentResult<i64> {
     }
 }
 
-fn type_code(value: &Bson) -> DocumentResult<i32> {
+pub(crate) fn type_code(value: &Bson) -> DocumentResult<i32> {
     if let Some(number) = value.as_i64() {
         return Ok(number as i32);
     }
@@ -303,7 +312,7 @@ fn equal(value: &Bson, wanted: &Bson) -> bool {
     }
 }
 
-fn regex_matches(value: &Bson, pattern: &str, options: &str) -> bool {
+pub(crate) fn regex_matches(value: &Bson, pattern: &str, options: &str) -> bool {
     match value {
         Bson::String(text) | Bson::Symbol(text) => {
             eggdb_sql::regex_matches_with_flags(text, pattern, options).unwrap_or(false)
@@ -450,6 +459,9 @@ pub fn matches(filter: &Filter, document: &Document) -> bool {
             .ok()
             .flatten()
             .is_some_and(|value| value.is_truthy()),
+        Filter::JsonSchema(schema) => {
+            crate::json_schema::schema_holds(schema, &Bson::Document(document.clone()), 0)
+        }
         Filter::Field { path, condition } => condition_holds(condition, &reached(document, path)),
     }
 }
@@ -466,7 +478,7 @@ pub fn matched_array_index(filter: &Filter, document: &Document) -> Option<usize
             .iter()
             .filter(|inner| matches(inner, document))
             .find_map(|inner| matched_array_index(inner, document)),
-        Filter::Nor(_) | Filter::Expr(_) => None,
+        Filter::Nor(_) | Filter::Expr(_) | Filter::JsonSchema(_) => None,
         Filter::Field { path, condition } => {
             if !records_position(condition) {
                 return None;
