@@ -1777,3 +1777,35 @@ SELECT 2
 
 ok
 DROP TABLE up338
+
+chapter "Built-in Aggregate Functions": group_concat(X), group_concat(X, Y) and total(X) (D376)
+ok
+CREATE TABLE gc376 (k INTEGER, v TEXT)
+
+ok
+INSERT INTO gc376 VALUES (1, 'a'), (1, 'b'), (2, NULL), (2, 'c')
+
+rows
+SELECT k, group_concat(v) AS g FROM gc376 GROUP BY k ORDER BY k
+----
+k|g
+1|a,b
+2|c
+SELECT 2
+
+rows
+SELECT group_concat(v, '-') AS g, total(k) AS t FROM gc376
+----
+g|t
+a-b-c|6.0
+SELECT 1
+
+rows
+SELECT total(k) AS t FROM gc376 WHERE k > 5
+----
+t
+0.0
+SELECT 1
+
+ok
+DROP TABLE gc376
