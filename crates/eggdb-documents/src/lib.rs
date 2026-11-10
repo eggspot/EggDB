@@ -28,7 +28,10 @@ pub use filter::{Condition, Filter, matched_array_index, matches, only_id, parse
 pub use output::{PipelineOutput, WhenMatched, WhenNotMatched, split_output};
 pub use pipeline::{Stage, parse_pipeline, run_pipeline};
 pub use projection::{Projection, parse_projection};
-pub use restore::{RestoredCollection, restore_collection};
+pub use restore::{
+    ArchivedCollection, MAX_GUNZIPPED_DUMP_BYTES, MONGODUMP_ARCHIVE_MAGIC, RestoredCollection,
+    gunzip_dump, read_mongodump_archive, restore_collection,
+};
 pub use sort::{SortSpec, compare_by, parse_sort, sort_documents};
 pub use store::{
     InsertOutcome, MAX_DOCUMENT_BYTES, Modification, Store, UpdateOptions, UpdateOutcome,

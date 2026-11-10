@@ -1725,3 +1725,37 @@ fn json_schema_filters_by_types_bounds_and_required_fields() {
     assert!(parse_filter(&doc(vec![("$jsonSchema", sub(vec![("format", text("email"))]))])).is_err());
     assert!(parse_filter(&doc(vec![("$jsonSchema", sub(vec![("bogus", Bson::Int32(1))]))])).is_err());
 }
+
+#[test]
+fn mongodump_archives_are_read_per_collection_across_interleaved_blocks() {
+    let mut archive = crate::MONGODUMP_ARCHIVE_MAGIC.to_vec();
+    doc(vec![("version", text("0.1"))]).write(&mut archive);
+    doc(vec![("db", text("shop")), ("collection", text("orders")), ("metadata", text("{\"indexes\":[]}"))])
+        .write(&mut archive);
+    doc(vec![("db", text("shop")), ("collection", text("users")), ("metadata", text(""))]).write(&mut archive);
+    archive.extend_from_slice(&[0xff; 4]);
+    let header = |collection: &str, eof: bool| {
+        doc(vec![("db", text("shop")), ("collection", text(collection)), ("EOF", Bson::Boolean(eof))])
+    };
+    header("orders", false).write(&mut archive);
+    doc(vec![("_id", Bson::Int32(1))]).write(&mut archive);
+    archive.extend_from_slice(&[0xff; 4]);
+    header("users", false).write(&mut archive);
+    doc(vec![("_id", text("ada"))]).write(&mut archive);
+    archive.extend_from_slice(&[0xff; 4]);
+    header("orders", false).write(&mut archive);
+    doc(vec![("_id", Bson::Int32(2))]).write(&mut archive);
+    archive.extend_from_slice(&[0xff; 4]);
+    header("orders", true).write(&mut archive);
+    archive.extend_from_slice(&[0xff; 4]);
+    let collections = crate::read_mongodump_archive(&archive).unwrap();
+    assert_eq!(collections.len(), 2);
+    assert_eq!(collections[0].collection, "orders");
+    assert_eq!(collections[0].metadata.as_deref(), Some("{\"indexes\":[]}"));
+    let mut expected = Vec::new();
+    doc(vec![("_id", Bson::Int32(1))]).write(&mut expected);
+    doc(vec![("_id", Bson::Int32(2))]).write(&mut expected);
+    assert_eq!(collections[0].documents, expected);
+    assert_eq!(collections[1].metadata, None);
+    assert!(crate::read_mongodump_archive(b"not an archive").is_err());
+}

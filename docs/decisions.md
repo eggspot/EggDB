@@ -437,3 +437,4 @@ its full title with its status.
 - [D410](decisions/D410.md) Code-only batch 57 (M9): MongoDB's `renameCollection`
 - [D411](decisions/D411.md) Code-only batch 58 (M9): MongoDB's `explain`
 - [D412](decisions/D412.md) Code-only batch 59 (M9): MongoDB's `OP_COMPRESSED` with snappy and zlib
+- [D413](decisions/D413.md) Code-only batch 60 (M9): `eggdb restore` of `mongodump --gzip` and `--archive` output

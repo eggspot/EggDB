@@ -136,3 +136,123 @@ pub fn restore_collection(
     }
     Ok(outcome)
 }
+
+/// The first four bytes of a `mongodump --archive` file.
+pub const MONGODUMP_ARCHIVE_MAGIC: [u8; 4] = [0x6d, 0xe2, 0x99, 0x81];
+
+const ARCHIVE_TERMINATOR: [u8; 4] = [0xff; 4];
+
+/// The most bytes a gzipped dump file may expand to.
+pub const MAX_GUNZIPPED_DUMP_BYTES: usize = u32::MAX as usize;
+
+/// One collection read out of a `mongodump --archive` file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArchivedCollection {
+    /// The database.
+    pub database: String,
+    /// The collection.
+    pub collection: String,
+    /// Its metadata JSON (options and indexes), as a `.metadata.json` file holds it.
+    pub metadata: Option<String>,
+    /// Its documents one after another, as a `.bson` file holds them.
+    pub documents: Vec<u8>,
+}
+
+/// Decompresses a gzipped `mongodump` file (`--gzip` output, or a gzipped archive).
+pub fn gunzip_dump(bytes: &[u8]) -> DocumentResult<Vec<u8>> {
+    eggdb_content::gunzip(bytes, MAX_GUNZIPPED_DUMP_BYTES).map_err(|error| {
+        DocumentError::failed_to_parse(format!("the gzipped dump cannot be read: {error}"))
+    })
+}
+
+fn archive_document(bytes: &[u8], at: usize) -> DocumentResult<(Document, usize)> {
+    let rest = bytes.get(at..).unwrap_or_default();
+    eggdb_bson::read_document(rest).map_err(|error| {
+        DocumentError::failed_to_parse(format!("the archive is damaged at byte {at}: {error}"))
+    })
+}
+
+fn at_terminator(bytes: &[u8], at: usize) -> bool {
+    bytes.get(at..at + 4) == Some(&ARCHIVE_TERMINATOR[..])
+}
+
+/// Reads a `mongodump --archive` file: the magic number, a prelude (a header document, then
+/// one metadata document per collection, then a terminator), and blocks of documents, each
+/// after a namespace header and ending with a terminator, possibly interleaved between
+/// collections.
+pub fn read_mongodump_archive(bytes: &[u8]) -> DocumentResult<Vec<ArchivedCollection>> {
+    if !bytes.starts_with(&MONGODUMP_ARCHIVE_MAGIC) {
+        return Err(DocumentError::failed_to_parse(
+            "the file is not a mongodump archive: its magic number is missing",
+        ));
+    }
+    let mut at = MONGODUMP_ARCHIVE_MAGIC.len();
+    let (_, used) = archive_document(bytes, at)?;
+    at += used;
+    let mut collections: Vec<ArchivedCollection> = Vec::new();
+    let position_of = |collections: &mut Vec<ArchivedCollection>, database: &str, collection: &str| {
+        match collections
+            .iter()
+            .position(|known| known.database == database && known.collection == collection)
+        {
+            Some(position) => position,
+            None => {
+                collections.push(ArchivedCollection {
+                    database: database.to_owned(),
+                    collection: collection.to_owned(),
+                    ..ArchivedCollection::default()
+                });
+                collections.len() - 1
+            }
+        }
+    };
+    loop {
+        if at_terminator(bytes, at) {
+            at += 4;
+            break;
+        }
+        if at >= bytes.len() {
+            return Err(DocumentError::failed_to_parse("the archive's prelude is not terminated"));
+        }
+        let (metadata, used) = archive_document(bytes, at)?;
+        at += used;
+        let database = metadata.get_str("db").unwrap_or_default().to_owned();
+        let collection = metadata.get_str("collection").unwrap_or_default().to_owned();
+        let position = position_of(&mut collections, &database, &collection);
+        collections[position].metadata = metadata
+            .get_str("metadata")
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned);
+    }
+    while at < bytes.len() {
+        let (header, used) = archive_document(bytes, at)?;
+        at += used;
+        let database = header.get_str("db").unwrap_or_default().to_owned();
+        let collection = header.get_str("collection").unwrap_or_default().to_owned();
+        let position = position_of(&mut collections, &database, &collection);
+        loop {
+            if at_terminator(bytes, at) {
+                at += 4;
+                break;
+            }
+            let length = bytes
+                .get(at..at + 4)
+                .and_then(|length| length.try_into().ok())
+                .map(i32::from_le_bytes)
+                .and_then(|length| usize::try_from(length).ok())
+                .filter(|length| (5..=MAX_DOCUMENT_BYTES).contains(length))
+                .ok_or_else(|| {
+                    DocumentError::failed_to_parse(format!(
+                        "the archive has a document of impossible length at byte {at}"
+                    ))
+                })?;
+            let Some(document) = bytes.get(at..at + length) else {
+                return Err(DocumentError::failed_to_parse("the archive ends inside a document"));
+            };
+            collections[position].documents.extend_from_slice(document);
+            at += length;
+        }
+    }
+    collections.retain(|archived| !archived.collection.is_empty());
+    Ok(collections)
+}
