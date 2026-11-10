@@ -495,7 +495,10 @@ impl<'s> Session<'s> {
                 && let Some(index) = code.program.try_around(at_instruction)
                 && let Some(block) = code.program.tries.get(index)
             {
-                if xact_abort && self.in_block() && !self.settings.sqlserver.uncommittable {
+                if (xact_abort || rolls_back)
+                    && self.in_block()
+                    && !self.settings.sqlserver.uncommittable
+                {
                     Arc::make_mut(&mut self.settings).sqlserver.uncommittable = true;
                 }
                 let line =
