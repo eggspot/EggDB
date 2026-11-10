@@ -6220,3 +6220,27 @@ SET IntervalStyle = 'nonsense'
 
 ok
 RESET IntervalStyle
+
+chapter "Object Identifier Types": regprocedure names a function with its argument types (D390)
+ok
+CREATE FUNCTION add390(a integer, b integer) RETURNS integer LANGUAGE sql AS $$ SELECT a + b $$
+
+rows
+SELECT 'add390(integer, integer)'::regprocedure AS p
+----
+p
+add390(integer,integer)
+SELECT 1
+
+rows
+SELECT 'add390(int4,int4)'::regprocedure::oid = 'add390'::regproc::oid AS same
+----
+same
+t
+SELECT 1
+
+error 42883
+SELECT 'add390(text)'::regprocedure
+
+ok
+DROP FUNCTION add390

@@ -613,7 +613,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `refcursor` and `refcursor[]` table columns kept as their own types, a file format change with
   its security review; `refcursor[]` values are built (D35, D301).
 - `regprocedure`, transition tables in row-level triggers, and `pg_sequences.last_value` for
-  identity columns (D158, D264, sql.md).
+  identity columns (D158, D264, sql.md). `regprocedure`: **code written, unbuilt** (code-only
+  mode, 2026-11-10, D390).
 - Partial unique indexes and indexes on expressions, and their `ON CONFLICT` inference (the
   predicate implying the index's, `ON CONFLICT (lower(email))`); `COLLATE` and operator classes on
   conflict target columns; `DO UPDATE ... WHERE` (D324).

@@ -4090,7 +4090,9 @@ trigger's `CREATE TRIGGER` as written), and `pg_get_ruledef`, `pg_get_statistics
 and `shobj_description`, which return NULL.
 `regproc` takes and shows the name of the built-in functions EggDB names: `array_in`,
 `array_out`, `array_recv` and `array_send`, the `typinput`, `typoutput`, `typreceive` and
-`typsend` of every array type in `pg_type`; another name is `42883`.
+`typsend` of every array type in `pg_type`; another name is `42883`. `regprocedure` (oid 2202)
+takes `name(type, ...)`, finds the function with exactly those input argument types (built-in or
+user routine), and shows it as `name(type,...)` (D390).
 
 psql's `+` forms (`\d+`, `\dt+`, `\dv+`, `\ds+`, `\di+`, `\dn+`, `\df+`: owner, access
 method, storage, size and descriptions), `\df`, `\dT`, `\dD`, `\dp` (grants as PostgreSQL's

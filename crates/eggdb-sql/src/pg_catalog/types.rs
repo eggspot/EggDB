@@ -109,6 +109,8 @@ pub enum RegKind {
     Role,
     /// `regproc`: a function.
     Proc,
+    /// `regprocedure`: a function named with its argument types.
+    Procedure,
 }
 
 /// A `reg*` value: an object identifier with the name its type shows for it.
@@ -131,6 +133,7 @@ impl RegKind {
             Self::Namespace => "regnamespace",
             Self::Role => "regrole",
             Self::Proc => "regproc",
+            Self::Procedure => "regprocedure",
         }
     }
 }
@@ -184,6 +187,7 @@ pub(crate) fn cast_type_named(word: &str) -> Option<SqlType> {
         "regnamespace" => SqlType::Catalog(CatalogType::Reg(RegKind::Namespace)),
         "regrole" => SqlType::Catalog(CatalogType::Reg(RegKind::Role)),
         "regproc" => SqlType::Catalog(CatalogType::Reg(RegKind::Proc)),
+        "regprocedure" => SqlType::Catalog(CatalogType::Reg(RegKind::Procedure)),
         "int2vector" => SqlType::Array(ArrayElement::Int2Vector),
         "oidvector" => SqlType::Array(ArrayElement::OidVector),
         _ => return None,

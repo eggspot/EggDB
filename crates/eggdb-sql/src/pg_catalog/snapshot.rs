@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-const SNAPSHOT_FUNCTIONS: [&str; 42] = [
+const SNAPSHOT_FUNCTIONS: [&str; 43] = [
     "pg_partition_ancestors",
     "pg_partition_tree",
     "pg_partition_root",
@@ -60,6 +60,7 @@ const SNAPSHOT_FUNCTIONS: [&str; 42] = [
     "regnamespace",
     "regrole",
     "regproc",
+    "regprocedure",
 ];
 
 const SNAPSHOT_FUNCTION_INITIALS: [bool; 256] = initials(&SNAPSHOT_FUNCTIONS);
@@ -1246,6 +1247,7 @@ pub(crate) fn reg_from_text(kind: RegKind, text: &str) -> SqlResult<RegValue> {
     };
     let reg = match kind {
         RegKind::Type => found(super::types::regtype_oid(text)?),
+        RegKind::Procedure => found(procedure_oid(text)?),
         RegKind::Proc => {
             let (schema, name) = split_object_name(text, kind)?;
             let known = schema
@@ -1317,6 +1319,106 @@ fn user_routine_oid(schema: Option<&str>, name: &str, text: &str) -> SqlResult<u
     }
 }
 
+fn argument_list(text: &str) -> SqlResult<(String, Vec<String>)> {
+    let Some(open) = text.find('(') else {
+        return Err(SqlError::new(
+            SqlState::INVALID_TEXT_REPRESENTATION,
+            format!("expected a left parenthesis in \"{}\"", text.trim()),
+        ));
+    };
+    let name = text[..open].trim().to_owned();
+    let inside = text[open + 1..].trim_end();
+    let Some(inside) = inside.strip_suffix(')') else {
+        return Err(SqlError::new(
+            SqlState::INVALID_TEXT_REPRESENTATION,
+            format!("expected a right parenthesis in \"{}\"", text.trim()),
+        ));
+    };
+    let mut arguments = Vec::new();
+    let mut depth = 0usize;
+    let mut current = String::new();
+    for character in inside.chars() {
+        match character {
+            '(' => {
+                depth += 1;
+                current.push(character);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                current.push(character);
+            }
+            ',' if depth == 0 => {
+                arguments.push(std::mem::take(&mut current).trim().to_owned());
+            }
+            _ => current.push(character),
+        }
+    }
+    if !current.trim().is_empty() || !arguments.is_empty() {
+        arguments.push(current.trim().to_owned());
+    }
+    Ok((name, arguments))
+}
+
+fn input_argument_oids(definition: &crate::routines::RoutineDefinition) -> Vec<u32> {
+    definition
+        .parameters
+        .iter()
+        .filter(|parameter| parameter.mode != crate::routines::ParameterMode::Out)
+        .map(|parameter| oids::type_oid(parameter.sql_type))
+        .collect()
+}
+
+fn procedure_oid(text: &str) -> SqlResult<u32> {
+    let (name, arguments) = argument_list(text)?;
+    let wanted: Vec<u32> = arguments
+        .iter()
+        .map(|argument| super::types::regtype_oid(argument))
+        .collect::<SqlResult<_>>()?;
+    let (schema, base) = split_object_name(&name, RegKind::Proc)?;
+    let known = schema
+        .as_deref()
+        .is_none_or(|schema| schema == crate::schemas::CATALOG_SCHEMA);
+    if let Some(function) = oids::BUILTIN_FUNCTIONS
+        .iter()
+        .find(|function| known && function.name == base && function.argument_types == wanted.as_slice())
+    {
+        return Ok(function.oid);
+    }
+    let snapshot = current();
+    let found = snapshot.as_ref().and_then(|snapshot| {
+        snapshot
+            .routines_named(schema.as_deref(), &base)
+            .into_iter()
+            .find(|routine| input_argument_oids(&routine.definition) == wanted)
+            .map(|routine| routine.oid)
+    });
+    found.ok_or_else(|| missing(SqlState::UNDEFINED_FUNCTION, "function", text.trim()))
+}
+
+fn procedure_display_name(snapshot: Option<&CatalogSnapshot>, oid: u32) -> Option<String> {
+    let shown_arguments = |types: &[u32]| {
+        types
+            .iter()
+            .map(|&type_oid| oids::format_type(type_oid, None))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    if let Some(function) = oids::BUILTIN_FUNCTIONS.iter().find(|function| function.oid == oid) {
+        return Some(format!(
+            "{}({})",
+            function.name,
+            shown_arguments(function.argument_types)
+        ));
+    }
+    let snapshot = snapshot?;
+    let routine = snapshot.routine(oid)?;
+    let name = routine_display_name(snapshot, oid)?;
+    Some(format!(
+        "{name}({})",
+        shown_arguments(&input_argument_oids(&routine.definition))
+    ))
+}
+
 fn routine_display_name(snapshot: &CatalogSnapshot, oid: u32) -> Option<String> {
     let routine = snapshot.routine(oid)?;
     Some(if snapshot.routine_is_visible(routine) {
@@ -1367,6 +1469,7 @@ pub(crate) fn reg_from_oid(kind: RegKind, oid: u32) -> RegValue {
                     .map(|(_, name)| (*name).to_owned())
             })
             .map(|name| quote_ident(&name)),
+        RegKind::Procedure => procedure_display_name(snapshot.as_deref(), oid),
         RegKind::Proc => oids::BUILTIN_FUNCTIONS
             .iter()
             .find(|function| function.oid == oid)

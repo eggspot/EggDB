@@ -414,3 +414,4 @@ its full title with its status.
 - [D387](decisions/D387.md) Code-only batch 34 (M5): `ALTER TABLE ... ADD COLUMN ... serial` as a sequence-backed default
 - [D388](decisions/D388.md) Code-only batch 35 (M5): `ALTER COLUMN ... TYPE ... USING expr`
 - [D389](decisions/D389.md) Code-only batch 36 (M6a): PostgreSQL's `IntervalStyle` output
+- [D390](decisions/D390.md) Code-only batch 37 (M6a): PostgreSQL's `regprocedure`
