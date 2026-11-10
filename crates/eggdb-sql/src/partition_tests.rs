@@ -1828,3 +1828,29 @@ fn a_partitions_primary_key_is_attached_to_its_parents() {
         "count\n3\nSELECT 1"
     );
 }
+
+#[test]
+fn mysql_unique_keys_cover_the_columns_a_partitioning_expression_reads() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    answer(
+        &mut session,
+        "CREATE TABLE sales (id int NOT NULL, sold date NOT NULL, PRIMARY KEY (id, sold))
+             PARTITION BY RANGE (YEAR(sold)) (
+               PARTITION p2024 VALUES LESS THAN (2025),
+               PARTITION p2025 VALUES LESS THAN (2026)
+             )",
+    );
+    answer(&mut session, "INSERT INTO sales VALUES (1, '2024-05-01'), (1, '2025-05-01')");
+    let error = failure(&mut session, "INSERT INTO sales VALUES (1, '2025-05-01')");
+    assert_eq!(error.vendor_code(), Some(1062), "{error}");
+    let error = failure(
+        &mut session,
+        "CREATE TABLE narrow (id int NOT NULL, sold date NOT NULL, PRIMARY KEY (id))
+             PARTITION BY RANGE (YEAR(sold)) (PARTITION p VALUES LESS THAN (2030))",
+    );
+    assert_eq!(error.vendor_code(), Some(1503), "{error}");
+    let error = failure(&mut session, "CREATE UNIQUE INDEX by_id ON sales (id)");
+    assert_eq!(error.vendor_code(), Some(1503), "{error}");
+    answer(&mut session, "CREATE UNIQUE INDEX by_sold ON sales (sold, id)");
+}

@@ -161,6 +161,15 @@ fn validated_key(
                     *position,
                     user_function_exists,
                 )?;
+                if dialect == Dialect::MySql {
+                    let mut read = Vec::new();
+                    crate::partitions::expression_columns(expr, table, &mut read);
+                    for column in read {
+                        if !positions.contains(&column) {
+                            positions.push(column);
+                        }
+                    }
+                }
                 parts.push(KeyPart::Expression {
                     text: text.clone(),
                     dialect,
@@ -183,7 +192,10 @@ fn validated_key(
         parts,
     };
     let has_unique_index = table.indexes.iter().any(|index| index.unique);
-    if key.has_expressions() && (!table.primary_key.is_empty() || has_unique_index) {
+    if key.has_expressions()
+        && dialect != Dialect::MySql
+        && (!table.primary_key.is_empty() || has_unique_index)
+    {
         let kind = if table.primary_key.is_empty() {
             "UNIQUE"
         } else {
@@ -307,6 +319,14 @@ fn check_mysql_integer_key(table: &TableDefinition, by: &PartitionBy) -> SqlResu
 }
 
 pub(crate) fn unique_lacks_key(position: usize) -> SqlError {
+    if crate::constraints::current_dialect() == Dialect::MySql {
+        return SqlError::new(
+            SqlState::INVALID_TABLE_DEFINITION,
+            "A UNIQUE INDEX must include all columns in the table's partitioning function",
+        )
+        .with_vendor_code(1503)
+        .at(position);
+    }
     SqlError::new(
         SqlState::FEATURE_NOT_SUPPORTED,
         "unique constraint on partitioned table must include all partitioning columns",
