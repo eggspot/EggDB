@@ -411,6 +411,10 @@ mod tests {
         ))
     }
 
+    fn accepted_connections_inherit_the_timing() -> bool {
+        expects_timing_read_back() && !cfg!(target_os = "netbsd")
+    }
+
     #[test]
     fn a_connection_accepted_by_a_keep_alive_listener_reads_its_keep_alives_back() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -424,7 +428,7 @@ mod tests {
         let (accepted, _) = listener.accept().unwrap();
         let (on, read_timing) = system::read_back(&accepted).unwrap();
         assert!(on, "an accepted connection inherits SO_KEEPALIVE");
-        if expects_timing_read_back() {
+        if accepted_connections_inherit_the_timing() {
             assert_eq!(read_timing, Some(timing()));
         }
         if cfg!(target_vendor = "apple") {
