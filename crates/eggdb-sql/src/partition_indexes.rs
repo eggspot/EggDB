@@ -3,7 +3,7 @@ use crate::dialect::Dialect;
 use crate::encoding::{IndexDefinition, TableDefinition};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::TableCache;
-use crate::partitions::{IndexLink, KeyPart, PartitionKey};
+use crate::partitions::{IndexLink, KeyPart, PRIMARY_KEY_LINK, PartitionKey};
 use crate::session::QueryResult;
 use crate::store::{KeyValueRead, KeyValueWrite};
 use std::sync::Arc;
@@ -50,7 +50,25 @@ pub(crate) fn unique_index_links(
             });
         }
     }
+    if primary_keys_match(parent, partition) {
+        links.push(IndexLink {
+            index: PRIMARY_KEY_LINK,
+            parent_index: PRIMARY_KEY_LINK,
+        });
+    }
     links
+}
+
+fn key_column_names(table: &TableDefinition) -> Vec<&str> {
+    table
+        .primary_key
+        .iter()
+        .filter_map(|&column| table.columns.get(column).map(|found| found.name.as_str()))
+        .collect()
+}
+
+pub(crate) fn primary_keys_match(parent: &TableDefinition, partition: &TableDefinition) -> bool {
+    !parent.primary_key.is_empty() && key_column_names(parent) == key_column_names(partition)
 }
 
 fn spec_for(parent: &TableDefinition, index: &IndexDefinition, dialect: Dialect) -> IndexSpec {
@@ -174,6 +192,10 @@ pub(crate) fn reach_partition(
     let dialect = crate::constraints::current_dialect();
     for index in &parent.indexes {
         reach(writer, tables, &parent, index, child, position, dialect, 0)?;
+    }
+    let partition = table_named(writer, tables, child, position)?;
+    if primary_keys_match(&parent, &partition) {
+        link(writer, child, PRIMARY_KEY_LINK, PRIMARY_KEY_LINK)?;
     }
     Ok(())
 }
@@ -552,6 +574,15 @@ pub(crate) fn attach_index(
     }
     let (Found::Index(_, parent_index), Found::Index(_, child_index)) = (parent_found, child_found)
     else {
+        if !primary_keys_match(parent_table, child_table) {
+            return Err(cannot_attach(
+                partition_index_name,
+                index_name,
+                "The index definitions do not match.".to_owned(),
+                position,
+            ));
+        }
+        link(writer, &child_table.name, PRIMARY_KEY_LINK, PRIMARY_KEY_LINK)?;
         return Ok(result);
     };
     if catalog.parent_index_of(&child_table.name, child_index.id)

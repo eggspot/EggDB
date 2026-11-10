@@ -390,3 +390,4 @@ its full title with its status.
 - [D363](decisions/D363.md) Code-only batch 9 (M2): ids for rows written straight into a partition, subpartitions selected alone (closes part of D337)
 - [D364](decisions/D364.md) Code-only batch 10 (M2): identity or AUTO_INCREMENT column anywhere in the primary key, table definition version 15 with its D35 review (closes D337's leftover)
 - [D365](decisions/D365.md) Code-only batch 11 (M2): `pg_partition_tree`, `pg_partition_ancestors`, `pg_partition_root`, `relispartition` for partition indexes (closes part of D316)
+- [D366](decisions/D366.md) Code-only batch 12 (M2): a partition's primary key attached to its parent's (closes part of D316)
