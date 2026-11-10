@@ -566,7 +566,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - SQLite's `VACUUM` in SQL, blob, JSON and math functions, `group_concat`, `total` and
   temporary triggers (PR #86, sql.md); `group_concat`, `total` and MySQL's `GROUP_CONCAT`:
   **code written, unbuilt** (code-only mode, 2026-11-10, D376); the math functions, `unhex`,
-  `zeroblob` and `randomblob`: **code written, unbuilt** (D377); `GLOB` classes and temporary views are built (D299,
+  `zeroblob` and `randomblob`: **code written, unbuilt** (D377); the reading and building JSON
+  functions: **code written, unbuilt** (D378; left: `json_set`/`insert`/`replace`/`remove`/`patch`,
+  `->`/`->>`, `json_group_array`/`object`, `json_each`/`json_tree`); `GLOB` classes and temporary views are built (D299,
   D151). Check: the SQLite suite.
 - SQLite's own text in `sqlite_schema` after `RENAME COLUMN`, `DROP COLUMN` and renamed
   references in views and triggers (D273, D294).

@@ -885,7 +885,7 @@ impl<'t> Parser<'t> {
             "char" => ("sqlite_char", &[]),
             "sign" => ("sqlite_sign", &[1]),
             "sqrt" => ("sqlite_sqrt", &[1]),
-            other => match crate::sqlite_math::named(other) {
+            other => match crate::sqlite_math::named(other).or_else(|| crate::sqlite_json::named(other)) {
                 Some(found) => found,
                 None => return Ok(None),
             },
@@ -896,6 +896,7 @@ impl<'t> Parser<'t> {
                 "sqlite_coalesce" => arguments.len() >= 2,
                 "sqlite_date" | "sqlite_time" | "sqlite_datetime" | "sqlite_julianday"
                 | "sqlite_unixepoch" | "sqlite_char" => true,
+                found if crate::sqlite_json::takes_any_count(found) => true,
                 _ => !arguments.is_empty(),
             }
         } else {

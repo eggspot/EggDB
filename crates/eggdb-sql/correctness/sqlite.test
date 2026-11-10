@@ -1831,3 +1831,35 @@ SELECT hex(unhex('0aFF')) AS a, unhex('0a-ff', '-') IS NULL AS b, unhex('0g') IS
 a|b|c|d|e
 0AFF|0|1|4|16
 SELECT 1
+
+chapter "JSON Functions And Operators": json, json_valid, json_type, json_extract, json_array, json_object, json_array_length, json_quote (D378)
+rows
+SELECT json(' { "a" : [1, 2.5, "x"] } ') AS j, json_valid('{"a":1}') AS v, json_valid('{a:1}') AS w
+----
+j|v|w
+{"a":[1,2.5,"x"]}|1|0
+SELECT 1
+
+rows
+SELECT json_extract('{"a":[1,2.5,"x",null,true]}', '$.a[0]') AS i, json_extract('{"a":[1,2.5,"x"]}', '$.a[#-1]') AS last, json_extract('{"a":[1,2]}', '$.a') AS arr, json_extract('{"a":1,"b":2}', '$.a', '$.b') AS both
+----
+i|last|arr|both
+1|x|[1,2]|[1,2]
+SELECT 1
+
+rows
+SELECT json_type('{"a":[1,2.5]}', '$.a[1]') AS t, json_type('{"a":1}', '$.b') AS missing, json_array_length('[1,2,3]') AS n
+----
+t|missing|n
+real|NULL|3
+SELECT 1
+
+rows
+SELECT json_array(1, 'two', NULL, json('[3]')) AS a, json_object('k', 1, 's', 'v') AS o, json_quote('a"b') AS q
+----
+a|o|q
+[1,"two",null,[3]]|{"k":1,"s":"v"}|"a\"b"
+SELECT 1
+
+error 22023 1
+SELECT json_extract('{"a":1}', 'a')

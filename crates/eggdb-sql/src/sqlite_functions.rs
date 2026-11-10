@@ -253,6 +253,9 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
     if let Some(value) = crate::sqlite_math::call(name, values) {
         return Ok(value);
     }
+    if let Some(result) = crate::sqlite_json::call(name, values) {
+        return result;
+    }
     let text = |index: usize| values.get(index).and_then(text_of);
     let any_null = values.iter().any(Value::is_null);
     let null = Value::Null;
