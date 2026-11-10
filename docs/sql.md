@@ -1923,7 +1923,8 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   `CORR_S(expr1, expr2)` (Spearman's rho, with average ranks for ties) and `CORR_K(expr1,
   expr2)` (Kendall's tau-b, counted in n log n) return the coefficient, NULL for fewer than two
   pairs or no spread; their third argument (`ONE_SIDED_SIG` and the other significances) is not
-  taken yet (D374).
+  taken yet (D374). `STATS_MODE(expr)` returns the most frequent non-null value, the smallest
+  of several equally frequent ones (Oracle picks any of them) (D375).
 - **Ordered-set aggregates** (D151): `percentile_cont(fraction) WITHIN GROUP (ORDER BY expr)`
   (`double precision`, interpolated between the two nearest values), `percentile_disc(fraction)
   WITHIN GROUP (ORDER BY expr)` (the first value whose position reaches the fraction, in the

@@ -399,3 +399,4 @@ its full title with its status.
 - [D372](decisions/D372.md) Code-only batch 18 (M3): a failing Oracle statement trigger undoes only its statement; SQL Server keeps its rollback (closes part of D317)
 - [D373](decisions/D373.md) Code-only batch 19 (M3): SQLite `UPDATE OR FAIL | IGNORE | REPLACE` with `FROM` and on a view with an `INSTEAD OF` trigger (closes part of D338)
 - [D374](decisions/D374.md) Code-only batch 20 (M5): Oracle's `CORR_S` and `CORR_K` coefficients (extends D340)
+- [D375](decisions/D375.md) Code-only batch 21 (M5): Oracle's `STATS_MODE` as `mode() WITHIN GROUP`

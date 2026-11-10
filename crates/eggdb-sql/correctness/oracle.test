@@ -4098,3 +4098,39 @@ COMMIT
 
 ok
 DROP TABLE ro338
+
+chapter "STATS_MODE", "CORR_S", "CORR_K": the most frequent value, and Spearman's and Kendall's rank correlations of the non-null pairs (D374, D375)
+ok
+CREATE TABLE stats375 (y NUMBER, x NUMBER)
+
+ok
+INSERT INTO stats375 VALUES (1, 10)
+
+ok
+INSERT INTO stats375 VALUES (2, 20)
+
+ok
+INSERT INTO stats375 VALUES (2, 25)
+
+ok
+INSERT INTO stats375 VALUES (4, 40)
+
+ok
+INSERT INTO stats375 VALUES (NULL, 50)
+
+rows
+SELECT STATS_MODE(y) m FROM stats375
+----
+M
+2
+SELECT 1
+
+rows
+SELECT CORR_S(y, x) s FROM stats375 WHERE y <> 2 OR x = 20
+----
+S
+1
+SELECT 1
+
+ok
+DROP TABLE stats375
