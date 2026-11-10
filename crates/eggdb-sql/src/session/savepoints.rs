@@ -329,6 +329,13 @@ impl Session<'_> {
         }
     }
 
+    pub(super) fn holds_statement_mark(&self) -> bool {
+        self.savepoints
+            .marks
+            .last()
+            .is_some_and(|mark| mark.name.starts_with('\u{0}'))
+    }
+
     pub(super) fn set_savepoint(&mut self, name: &Name) -> SqlResult<QueryResult> {
         if !self.in_block() {
             match self.dialect {

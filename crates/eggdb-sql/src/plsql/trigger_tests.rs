@@ -425,3 +425,28 @@ fn hostile_trigger_text_returns_errors() {
         assert!(session.execute(text, &mut |_| {}).is_err(), "{text}");
     }
 }
+
+#[test]
+fn a_failing_statement_trigger_undoes_only_its_statement() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    run(
+        &mut session,
+        "CREATE TRIGGER emp_limit AFTER INSERT ON emp
+DECLARE
+  n NUMBER;
+BEGIN
+  SELECT COUNT(*) INTO n FROM emp;
+  INSERT INTO log VALUES (n, 'counted');
+  IF n > 1 THEN
+    RAISE_APPLICATION_ERROR(-20002, 'too many');
+  END IF;
+END;",
+    );
+    run(&mut session, "INSERT INTO emp VALUES (1, 'KING', 5000)");
+    let error = failure(&mut session, "INSERT INTO emp VALUES (2, 'BLAKE', 2850)");
+    assert_eq!(error.vendor_code(), Some(20002));
+    run(&mut session, "COMMIT");
+    assert_eq!(texts(&mut session, "SELECT id FROM emp"), vec![row(&["1"])]);
+    assert_eq!(messages(&mut session), row(&["counted"]));
+}
