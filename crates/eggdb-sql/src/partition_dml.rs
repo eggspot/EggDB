@@ -528,6 +528,9 @@ pub(crate) fn update(
             Some(&mut *moved),
         )?);
     }
+    if routes_moves && !own_moves.is_empty() {
+        refuse_disabled_row_movement(writer, tables, partitioned)?;
+    }
     if routes_moves {
         let mut target = TableReference::named(
             Name {
@@ -540,6 +543,25 @@ pub(crate) fn update(
         insert_moved_rows(writer, tables, target, own_moves)?;
     }
     Ok(merged.finish("UPDATE 0"))
+}
+
+fn refuse_disabled_row_movement(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    partitioned: &Partitioned,
+) -> SqlResult<()> {
+    let catalog = crate::partitions::catalog(reader, tables)?;
+    let disabled = catalog
+        .record(&partitioned.table)
+        .is_some_and(|record| record.row_movement_disabled);
+    if disabled {
+        return Err(SqlError::new(
+            crate::error::SqlState::CHECK_VIOLATION,
+            "updating partition key column would cause a partition change",
+        )
+        .with_oracle_code(14402));
+    }
+    Ok(())
 }
 
 struct LeavingRow {

@@ -384,11 +384,14 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   keys, `relispartition` and `pg_partition_tree` for partition indexes, attaching a partition's
   primary key to its parent's, MySQL's allowed partition functions and integer-only keys, and
   `42883` for an unknown function in a PostgreSQL key (D316). MySQL's functions and integer-only keys and
-  `42883`: **code written, unbuilt** (code-only mode, 2026-11-10, D359).
+  `42883`: **code written, unbuilt** (code-only mode, 2026-11-10, D359). Oracle's `DISABLE ROW
+  MOVEMENT` and `ORA-14402`: **code written, unbuilt** (code-only mode, 2026-11-10, D361).
 - Oracle's interval partitioning and SQL Server's partition schemes (D169); MySQL's
   `SUBPARTITION BY`, `LOAD DATA ... PARTITION`, `INSERT IGNORE` skipping rows outside a
   `PARTITION (...)` set with a warning, and ids for rows written straight into a partition of a
-  table with an identity column (D337). `INSERT IGNORE` skipping rows outside a `PARTITION (...)`
+  table with an identity column (D337). `SUBPARTITION BY` (MySQL and Oracle's composite
+  partitioning): **code written, unbuilt** (code-only mode, 2026-11-10, D361); left: subpartitions
+  in the maintenance `ALTER`s and Oracle's `SUBPARTITION TEMPLATE`. `INSERT IGNORE` skipping rows outside a `PARTITION (...)`
   set: **code written, unbuilt** (code-only mode, 2026-11-10, D360).
 - An identity or `AUTO_INCREMENT` column anywhere in the primary key, as MySQL allows, with table
   definition version 15 and its D35 review (D337).

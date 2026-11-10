@@ -9,11 +9,15 @@ use std::collections::BTreeSet;
 pub(super) const PARTITION_SPACE: u8 = 0x0E;
 const RECORD_VERSION: u8 = 1;
 const EXPRESSIONS_AND_INDEXES_VERSION: u8 = 2;
+const OPTIONS_VERSION: u8 = 3;
 const COLUMN_PART: u8 = 0;
 const EXPRESSION_PART: u8 = 1;
 const KEY_FLAG: u8 = 1;
 const PARENT_FLAG: u8 = 2;
+const OPTIONS_FLAG: u8 = 4;
 const KNOWN_FLAGS: u8 = KEY_FLAG | PARENT_FLAG;
+const ROW_MOVEMENT_DISABLED: u8 = 1;
+const KNOWN_OPTIONS: u8 = ROW_MOVEMENT_DISABLED;
 const RANGE: u8 = 1;
 const LIST: u8 = 2;
 const HASH: u8 = 3;
@@ -92,19 +96,34 @@ fn needs_version_2(record: &PartitionRecord) -> bool {
         || (record.parent.is_some() && !record.index_links.is_empty())
 }
 
+fn options_of(record: &PartitionRecord) -> u8 {
+    if record.key.is_some() && record.row_movement_disabled {
+        ROW_MOVEMENT_DISABLED
+    } else {
+        0
+    }
+}
+
 pub(crate) fn encode_partitioning(record: &PartitionRecord) -> Vec<u8> {
-    let version_2 = needs_version_2(record);
-    let mut out = vec![if version_2 {
+    let options = options_of(record);
+    let version = if options != 0 {
+        OPTIONS_VERSION
+    } else if needs_version_2(record) {
         EXPRESSIONS_AND_INDEXES_VERSION
     } else {
         RECORD_VERSION
-    }];
+    };
+    let version_2 = version >= EXPRESSIONS_AND_INDEXES_VERSION;
+    let mut out = vec![version];
     let mut flags = 0;
     if record.key.is_some() {
         flags |= KEY_FLAG;
     }
     if record.parent.is_some() {
         flags |= PARENT_FLAG;
+    }
+    if options != 0 {
+        flags |= OPTIONS_FLAG;
     }
     out.push(flags);
     if let Some(key) = &record.key {
@@ -152,6 +171,9 @@ pub(crate) fn encode_partitioning(record: &PartitionRecord) -> Vec<u8> {
                 put_varint(&mut out, u64::from(link.parent_index));
             }
         }
+    }
+    if options != 0 {
+        out.push(options);
     }
     out
 }
@@ -202,12 +224,17 @@ pub(crate) fn written_before_index_links(bytes: &[u8]) -> bool {
 
 pub(crate) fn decode_partitioning(table: &str, bytes: &[u8]) -> SqlResult<PartitionRecord> {
     let mut reader = Reader::new(bytes, "partitioning");
-    let version = reader.version_up_to(EXPRESSIONS_AND_INDEXES_VERSION)?;
+    let version = reader.version_up_to(OPTIONS_VERSION)?;
     if table.is_empty() || !crate::schemas::is_well_formed(table) {
         return Err(reader.damaged());
     }
     let flags = reader.byte()?;
-    if flags == 0 || flags & !KNOWN_FLAGS != 0 {
+    let known = if version >= OPTIONS_VERSION {
+        KNOWN_FLAGS | OPTIONS_FLAG
+    } else {
+        KNOWN_FLAGS
+    };
+    if flags & (KEY_FLAG | PARENT_FLAG) == 0 || flags & !known != 0 {
         return Err(reader.damaged());
     }
     let key = if flags & KEY_FLAG != 0 {
@@ -262,10 +289,20 @@ pub(crate) fn decode_partitioning(table: &str, bytes: &[u8]) -> SqlResult<Partit
     } else {
         Vec::new()
     };
+    let options = if flags & OPTIONS_FLAG != 0 {
+        let options = reader.byte()?;
+        if options == 0 || options & !KNOWN_OPTIONS != 0 || key.is_none() {
+            return Err(reader.damaged());
+        }
+        options
+    } else {
+        0
+    };
     reader.finish()?;
     Ok(PartitionRecord {
         key,
         parent,
         index_links,
+        row_movement_disabled: options & ROW_MOVEMENT_DISABLED != 0,
     })
 }

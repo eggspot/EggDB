@@ -770,6 +770,7 @@ fn partition_records_with_expressions_and_index_links_read_back() {
             index: 2,
             parent_index: 1,
         }],
+        row_movement_disabled: false,
     };
     let bytes = crate::encoding::encode_partitioning(&linked);
     assert_eq!(bytes.first(), Some(&2));
@@ -787,6 +788,7 @@ fn partition_records_with_expressions_and_index_links_read_back() {
         }),
         parent: None,
         index_links: Vec::new(),
+        row_movement_disabled: false,
     };
     let bytes = crate::encoding::encode_partitioning(&plain);
     assert_eq!(bytes.first(), Some(&1));
@@ -980,6 +982,7 @@ fn pinned_version_1_records() -> Vec<(&'static str, Vec<u8>, crate::partitions::
                 }),
                 parent: None,
                 index_links: Vec::new(),
+                row_movement_disabled: false,
             },
         ),
         (
@@ -999,6 +1002,7 @@ fn pinned_version_1_records() -> Vec<(&'static str, Vec<u8>, crate::partitions::
                     ]),
                 )),
                 index_links: Vec::new(),
+                row_movement_disabled: false,
             },
         ),
         (
@@ -1014,6 +1018,7 @@ fn pinned_version_1_records() -> Vec<(&'static str, Vec<u8>, crate::partitions::
                     },
                 )),
                 index_links: Vec::new(),
+                row_movement_disabled: false,
             },
         ),
         (
@@ -1029,6 +1034,7 @@ fn pinned_version_1_records() -> Vec<(&'static str, Vec<u8>, crate::partitions::
                     },
                 )),
                 index_links: Vec::new(),
+                row_movement_disabled: false,
             },
         ),
         (
@@ -1038,6 +1044,7 @@ fn pinned_version_1_records() -> Vec<(&'static str, Vec<u8>, crate::partitions::
                 key: None,
                 parent: Some(("m".to_owned(), PartitionBound::Default)),
                 index_links: Vec::new(),
+                row_movement_disabled: false,
             },
         ),
     ]
@@ -1097,6 +1104,7 @@ fn a_partition_record_from_a_newer_or_hostile_writer_is_refused_without_panickin
                     parent_index: 3,
                 },
             ],
+            row_movement_disabled: false,
         })
     );
     let mut newer = valid.clone();
@@ -1461,4 +1469,148 @@ fn mysql_alter_table_indexes_reach_every_partition_of_a_year_partitioned_table()
     }
     let error = failure(&mut session, "ALTER TABLE sales350 DROP INDEX by_day");
     assert_eq!(error.vendor_code(), Some(1091), "{error}");
+}
+
+#[test]
+fn mysql_subpartitions_by_hash_split_every_partition() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    answer(
+        &mut session,
+        "CREATE TABLE ts (id int NOT NULL, purchased int NOT NULL)
+             PARTITION BY RANGE (purchased) SUBPARTITION BY HASH (id) SUBPARTITIONS 2 (
+               PARTITION p0 VALUES LESS THAN (1990),
+               PARTITION p1 VALUES LESS THAN MAXVALUE
+             )",
+    );
+    answer(
+        &mut session,
+        "INSERT INTO ts VALUES (1, 1980), (2, 1985), (3, 2000), (4, 2010)",
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT count(*) FROM ts PARTITION (p0sp0, p0sp1)"),
+        "count(*)\n2\nSELECT 1"
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT count(*) FROM ts PARTITION (p1)"),
+        "count(*)\n2\nSELECT 1"
+    );
+    answer(
+        &mut session,
+        "CREATE TABLE named (id int NOT NULL, y int NOT NULL)
+             PARTITION BY RANGE (y) SUBPARTITION BY KEY (id) (
+               PARTITION a VALUES LESS THAN (10) (SUBPARTITION a0, SUBPARTITION a1),
+               PARTITION b VALUES LESS THAN (20) (SUBPARTITION b0, SUBPARTITION b1)
+             )",
+    );
+    answer(&mut session, "INSERT INTO named VALUES (1, 5), (2, 15)");
+    assert_eq!(
+        answer(&mut session, "SELECT count(*) FROM named PARTITION (b0, b1)"),
+        "count(*)\n1\nSELECT 1"
+    );
+    let error = failure(
+        &mut session,
+        "CREATE TABLE wrong (id int NOT NULL, y int NOT NULL)
+             PARTITION BY RANGE (y) SUBPARTITION BY HASH (id) SUBPARTITIONS 3 (
+               PARTITION a VALUES LESS THAN (10) (SUBPARTITION a0, SUBPARTITION a1)
+             )",
+    );
+    assert_eq!(error.vendor_code(), Some(1485), "{error}");
+}
+
+#[test]
+fn oracle_composite_list_subpartitions_route_by_both_keys() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    answer(
+        &mut session,
+        "CREATE TABLE orders (id NUMBER, y NUMBER, region VARCHAR2(2))
+             PARTITION BY RANGE (y) SUBPARTITION BY LIST (region) (
+               PARTITION old VALUES LESS THAN (2000) (
+                 SUBPARTITION old_e VALUES ('E'),
+                 SUBPARTITION old_rest VALUES (DEFAULT)
+               ),
+               PARTITION new VALUES LESS THAN (MAXVALUE) (
+                 SUBPARTITION new_e VALUES ('E'),
+                 SUBPARTITION new_rest VALUES (DEFAULT)
+               )
+             )",
+    );
+    answer(
+        &mut session,
+        "INSERT INTO orders VALUES (1, 1990, 'E');
+         INSERT INTO orders VALUES (2, 2010, 'W');
+         INSERT INTO orders VALUES (3, 2020, 'E')",
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT id FROM orders SUBPARTITION (new_e)"),
+        "ID\n3\nSELECT 1"
+    );
+}
+
+#[test]
+fn oracle_refuses_moving_a_row_until_row_movement_is_enabled() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    answer(
+        &mut session,
+        "CREATE TABLE r (id NUMBER, y NUMBER) PARTITION BY RANGE (y) (
+             PARTITION p0 VALUES LESS THAN (10),
+             PARTITION p1 VALUES LESS THAN (20)
+         )",
+    );
+    answer(&mut session, "INSERT INTO r VALUES (1, 5)");
+    answer(&mut session, "UPDATE r SET y = 6 WHERE id = 1");
+    let error = failure(&mut session, "UPDATE r SET y = 15 WHERE id = 1");
+    assert_eq!(error.vendor_code(), Some(14402), "{error}");
+    assert_eq!(
+        answer(&mut session, "SELECT y FROM r PARTITION (p0)"),
+        "Y\n6\nSELECT 1"
+    );
+    answer(&mut session, "ALTER TABLE r ENABLE ROW MOVEMENT");
+    answer(&mut session, "UPDATE r SET y = 15 WHERE id = 1");
+    assert_eq!(
+        answer(&mut session, "SELECT id FROM r PARTITION (p1)"),
+        "ID\n1\nSELECT 1"
+    );
+    answer(&mut session, "ALTER TABLE r DISABLE ROW MOVEMENT");
+    let error = failure(&mut session, "UPDATE r SET y = 5 WHERE id = 1");
+    assert_eq!(error.vendor_code(), Some(14402), "{error}");
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    answer(
+        &mut session,
+        "CREATE TABLE m (id NUMBER, y NUMBER) PARTITION BY RANGE (y) (
+             PARTITION p0 VALUES LESS THAN (10),
+             PARTITION p1 VALUES LESS THAN (20)
+         ) ENABLE ROW MOVEMENT",
+    );
+    answer(&mut session, "INSERT INTO m VALUES (1, 5)");
+    answer(&mut session, "UPDATE m SET y = 15 WHERE id = 1");
+}
+
+#[test]
+fn a_partition_record_keeps_disabled_row_movement_in_version_3() {
+    use crate::partitions::{KeyPart, PartitionKey, PartitionRecord, PartitionStrategy};
+    let record = PartitionRecord {
+        key: Some(PartitionKey {
+            strategy: PartitionStrategy::Range,
+            parts: vec![KeyPart::Column("y".to_owned())],
+        }),
+        parent: None,
+        index_links: Vec::new(),
+        row_movement_disabled: true,
+    };
+    let bytes = crate::encoding::encode_partitioning(&record);
+    assert_eq!(bytes.first(), Some(&3));
+    assert_eq!(
+        crate::encoding::decode_partitioning("r", &bytes).ok(),
+        Some(record.clone())
+    );
+    let enabled = PartitionRecord {
+        row_movement_disabled: false,
+        ..record
+    };
+    let bytes = crate::encoding::encode_partitioning(&enabled);
+    assert_eq!(bytes.first(), Some(&1));
 }

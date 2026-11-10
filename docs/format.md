@@ -708,7 +708,12 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
   key part starts with a kind byte (`0` a column name; `1` an expression, then the dialect byte
   of the table definitions and the expression's text), and a partition's bound is followed by a
   count and that many pairs of varints, the partition's index id and the parent index id it is
-  attached to (no id repeated on either side). Rows stay in each partition's own
+  attached to (no id repeated on either side). Record version 3 (D361) is written only when a
+  partitioned table has options: it reads as version 2, the flag byte may also carry `4`
+  (options follow), and the record ends with an options byte (`1` Oracle's row movement is
+  disabled; no other bit, never zero, only on a partitioned table). An older EggDB reports
+  version 3 as a newer format. Subpartitions are partitions that are themselves partitioned,
+  as in PostgreSQL. Rows stay in each partition's own
   table; a partitioned table holds none. Table-definition version 11 (D259) is written only for
   a table with a `citext` or `hstore` column (defined-type kind `5`, a built-in base type, with
   OID 9000 or 9002), whose values in rows are tags `27` (`citext`, its text) and `28` (`hstore`,

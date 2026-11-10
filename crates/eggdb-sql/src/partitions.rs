@@ -237,6 +237,7 @@ pub(crate) struct PartitionRecord {
     pub(crate) key: Option<PartitionKey>,
     pub(crate) parent: Option<(String, PartitionBound)>,
     pub(crate) index_links: Vec<IndexLink>,
+    pub(crate) row_movement_disabled: bool,
 }
 
 impl PartitionRecord {

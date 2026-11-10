@@ -1018,6 +1018,7 @@ pub(crate) enum AlterAction {
         values: Vec<PartitionBoundValue>,
         adding: bool,
     },
+    RowMovement(bool),
     AttachIndex(Name),
     MoveColumn {
         column: Name,
@@ -1251,6 +1252,17 @@ pub(crate) struct PartitionBy {
     pub(crate) partitions: Vec<NamedPartition>,
     pub(crate) hash_partitions: Option<u32>,
     pub(crate) mysql_integer_key: bool,
+    pub(crate) subpartition_by: Option<Box<SubpartitionBy>>,
+    pub(crate) row_movement: Option<bool>,
+    pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SubpartitionBy {
+    pub(crate) strategy: PartitionStrategy,
+    pub(crate) key: Vec<PartitionKeyPart>,
+    pub(crate) count: Option<u32>,
+    pub(crate) mysql_integer_key: bool,
     pub(crate) position: usize,
 }
 
@@ -1268,6 +1280,7 @@ pub(crate) enum PartitionKeyPart {
 pub(crate) struct NamedPartition {
     pub(crate) name: Name,
     pub(crate) bound: NamedPartitionBound,
+    pub(crate) subpartitions: Vec<NamedPartition>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -2,7 +2,7 @@ use super::Parser;
 use crate::ast::{
     AlterAction, AlterTable, CreateTable, ExprKind, Name, NamedPartition, NamedPartitionBound,
     OnCommit, PartitionBoundSpec, PartitionBoundValue, PartitionBy, PartitionKeyPart, PartitionOf,
-    PartitionSelection, PartitionStrategy, SplitPoint, Statement,
+    PartitionSelection, PartitionStrategy, SplitPoint, Statement, SubpartitionBy,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
@@ -98,6 +98,8 @@ impl Parser<'_> {
             partitions: Vec::new(),
             hash_partitions: None,
             mysql_integer_key,
+            subpartition_by: None,
+            row_movement: None,
             position,
         };
         if self.postgresql() {
@@ -106,6 +108,21 @@ impl Parser<'_> {
         if self.take_word("partitions") {
             partition_by.hash_partitions = Some(self.partition_count()?);
         }
+        if self.is_word("subpartition") && self.is_word_at(1, "by") {
+            if strategy == PartitionStrategy::Hash {
+                return Err(SqlError::new(
+                    SqlState::SYNTAX_ERROR,
+                    "It is only possible to mix RANGE/LIST partitioning with HASH/KEY partitioning for subpartitioning",
+                )
+                .with_vendor_code(1500)
+                .at(self.position()));
+            }
+            partition_by.subpartition_by = Some(Box::new(self.subpartition_by()?));
+        }
+        let subpartition_strategy = partition_by
+            .subpartition_by
+            .as_ref()
+            .map(|sub| sub.strategy);
         if self.peek_kind() == &TokenKind::LeftParen {
             self.at += 1;
             loop {
@@ -114,7 +131,7 @@ impl Parser<'_> {
                 }
                 partition_by
                     .partitions
-                    .push(self.named_partition(strategy)?);
+                    .push(self.named_partition(strategy, subpartition_strategy)?);
                 if !self.take(&TokenKind::Comma) {
                     break;
                 }
@@ -122,9 +139,85 @@ impl Parser<'_> {
             self.expect(&TokenKind::RightParen)?;
         }
         if self.oracle() {
-            self.oracle_row_movement()?;
+            partition_by.row_movement = self.oracle_row_movement();
         }
         Ok(partition_by)
+    }
+
+    fn subpartition_by(&mut self) -> SqlResult<SubpartitionBy> {
+        let position = self.position();
+        self.expect_word("subpartition")?;
+        self.expect_word("by")?;
+        let mut by_key = false;
+        let strategy = if self.take_word("hash") {
+            PartitionStrategy::Hash
+        } else if self.mysql() && self.take_word("key") {
+            by_key = true;
+            PartitionStrategy::Hash
+        } else if self.oracle() && self.take_word("range") {
+            PartitionStrategy::Range
+        } else if self.oracle() && self.take_word("list") {
+            PartitionStrategy::List
+        } else {
+            return Err(SqlError::new(
+                SqlState::SYNTAX_ERROR,
+                "It is only possible to mix RANGE/LIST partitioning with HASH/KEY partitioning for subpartitioning",
+            )
+            .with_vendor_code(1500)
+            .at(self.position()));
+        };
+        if by_key {
+            self.take_word("algorithm");
+            if self.take_operator("=") {
+                self.partition_number()?;
+            }
+        }
+        let key = self.partition_key()?;
+        let count = if self.take_word("subpartitions") {
+            Some(self.partition_count()?)
+        } else {
+            None
+        };
+        Ok(SubpartitionBy {
+            strategy,
+            key,
+            count,
+            mysql_integer_key: self.mysql() && !by_key,
+            position,
+        })
+    }
+
+    fn subpartition_definitions(
+        &mut self,
+        strategy: Option<PartitionStrategy>,
+    ) -> SqlResult<Vec<NamedPartition>> {
+        let Some(strategy) = strategy else {
+            return Ok(Vec::new());
+        };
+        if !(self.peek_kind() == &TokenKind::LeftParen && self.is_word_at(1, "subpartition")) {
+            return Ok(Vec::new());
+        }
+        self.at += 1;
+        let mut subpartitions = Vec::new();
+        loop {
+            if subpartitions.len() >= MAX_NAMED_PARTITIONS {
+                return Err(too_many_partitions(self.position()));
+            }
+            self.expect_word("subpartition")?;
+            let name = self.name()?;
+            let bound = self.named_bound(strategy)?;
+            self.skip_partition_options()?;
+            subpartitions.push(NamedPartition {
+                name,
+                bound,
+                subpartitions: Vec::new(),
+            });
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RightParen)?;
+        Ok(subpartitions)
     }
 
     fn partition_key(&mut self) -> SqlResult<Vec<PartitionKeyPart>> {
@@ -237,10 +330,26 @@ impl Parser<'_> {
         matches!(self.peek_kind(), TokenKind::Comma | TokenKind::RightParen)
     }
 
-    fn named_partition(&mut self, strategy: PartitionStrategy) -> SqlResult<NamedPartition> {
+    fn named_partition(
+        &mut self,
+        strategy: PartitionStrategy,
+        subpartition_strategy: Option<PartitionStrategy>,
+    ) -> SqlResult<NamedPartition> {
         self.expect_word("partition")?;
         let name = self.name()?;
-        let bound = match strategy {
+        let bound = self.named_bound(strategy)?;
+        self.skip_partition_options()?;
+        let subpartitions = self.subpartition_definitions(subpartition_strategy)?;
+        self.skip_partition_options()?;
+        Ok(NamedPartition {
+            name,
+            bound,
+            subpartitions,
+        })
+    }
+
+    fn named_bound(&mut self, strategy: PartitionStrategy) -> SqlResult<NamedPartitionBound> {
+        Ok(match strategy {
             PartitionStrategy::Range => {
                 self.expect_word("values")?;
                 self.expect_word("less")?;
@@ -261,9 +370,7 @@ impl Parser<'_> {
                 }
             }
             PartitionStrategy::Hash => NamedPartitionBound::Hash,
-        };
-        self.skip_partition_options()?;
-        Ok(NamedPartition { name, bound })
+        })
     }
 
     pub(super) fn partition_definition(&mut self) -> SqlResult<NamedPartition> {
@@ -290,7 +397,11 @@ impl Parser<'_> {
             NamedPartitionBound::Hash
         };
         self.skip_partition_options()?;
-        Ok(NamedPartition { name, bound })
+        Ok(NamedPartition {
+            name,
+            bound,
+            subpartitions: Vec::new(),
+        })
     }
 
     pub(super) fn partition_definitions(&mut self) -> SqlResult<Vec<NamedPartition>> {
@@ -427,6 +538,16 @@ impl Parser<'_> {
             actions.push(AlterAction::CoalescePartitions { count, position });
             return Ok(true);
         }
+        if self.oracle()
+            && (self.is_word("enable") || self.is_word("disable"))
+            && self.is_word_at(1, "row")
+            && self.is_word_at(2, "movement")
+        {
+            if let Some(enabled) = self.oracle_row_movement() {
+                actions.push(AlterAction::RowMovement(enabled));
+            }
+            return Ok(true);
+        }
         if self.oracle() && self.is_word("merge") && self.is_word_at(1, "partitions") {
             self.at += 2;
             let mut from = vec![self.name()?];
@@ -558,14 +679,16 @@ impl Parser<'_> {
         }))
     }
 
-    fn oracle_row_movement(&mut self) -> SqlResult<()> {
+    pub(super) fn oracle_row_movement(&mut self) -> Option<bool> {
         if (self.is_word("enable") || self.is_word("disable"))
             && self.is_word_at(1, "row")
             && self.is_word_at(2, "movement")
         {
+            let enabled = self.is_word("enable");
             self.at += 3;
+            return Some(enabled);
         }
-        Ok(())
+        None
     }
 
     fn bound_values(&mut self) -> SqlResult<Vec<PartitionBoundValue>> {
