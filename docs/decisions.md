@@ -397,3 +397,4 @@ its full title with its status.
 - [D370](decisions/D370.md) Code-only batch 16 (M3): a failing MySQL `CALL` keeps the procedure's statements before the failing one (closes part of D317)
 - [D371](decisions/D371.md) Code-only batch 17 (M3): SQL Server batch-aborting errors roll back or doom the transaction before any write (closes part of D317)
 - [D372](decisions/D372.md) Code-only batch 18 (M3): a failing Oracle statement trigger undoes only its statement; SQL Server keeps its rollback (closes part of D317)
+- [D373](decisions/D373.md) Code-only batch 19 (M3): SQLite `UPDATE OR FAIL | IGNORE | REPLACE` with `FROM` and on a view with an `INSTEAD OF` trigger (closes part of D338)

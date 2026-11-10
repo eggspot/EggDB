@@ -7,7 +7,7 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope, Source, Sources, check_columns, reject_aggregates};
 use crate::execute::{self, TableCache};
 use crate::memory::WorkMemory;
-use crate::merge::{PlannedUpdate, source_definition, store_updates};
+use crate::merge::{PlannedUpdate, source_definition, store_updates_resolving};
 use crate::session::{OutputColumn, QueryResult};
 use crate::store::{KeyValueRead, KeyValueWrite};
 use crate::triggers::{Firing, RowOutcome, TriggerEvent};
@@ -605,7 +605,7 @@ pub(crate) fn update(
                 source_index: Some(joined_row),
             });
         }
-        let stored = store_updates(
+        let stored = store_updates_resolving(
             writer,
             tables,
             table,
@@ -613,6 +613,7 @@ pub(crate) fn update(
             &columns,
             planned,
             &mut memory,
+            update.conflict_resolution,
         )?;
         affected += stored.changes.len();
         if at == main && update.returning.is_some() {

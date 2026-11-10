@@ -781,6 +781,31 @@ pub(crate) fn store_updates(
     planned: Vec<PlannedUpdate>,
     memory: &mut WorkMemory,
 ) -> SqlResult<StoredUpdates> {
+    store_updates_resolving(
+        writer,
+        tables,
+        table,
+        target_rows,
+        updated_columns,
+        planned,
+        memory,
+        crate::ast::ConflictResolution::Abort,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn store_updates_resolving(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    table: &std::sync::Arc<TableDefinition>,
+    target_rows: &[(Vec<u8>, Vec<Value>)],
+    updated_columns: &[usize],
+    planned: Vec<PlannedUpdate>,
+    memory: &mut WorkMemory,
+    resolution: crate::ast::ConflictResolution,
+) -> SqlResult<StoredUpdates> {
+    let row_by_row = resolution.resolves_row_by_row();
+    let mut stopped: Option<SqlError> = None;
     let checks = PreparedChecks::of(table)?.with_partitions(writer, tables, table)?;
     let mut stored = StoredUpdates {
         changes: Vec::with_capacity(planned.len()),
@@ -809,9 +834,23 @@ pub(crate) fn store_updates(
             continue;
         }
         checks.generate(table, &mut new_row)?;
-        execute::check_not_null_of(table, &new_row)?;
-        if !checks.is_empty() {
-            checks.check(table, &new_row)?;
+        let fits = execute::check_not_null_of(table, &new_row).and_then(|()| {
+            if checks.is_empty() {
+                Ok(())
+            } else {
+                checks.check(table, &new_row)
+            }
+        });
+        match fits {
+            Ok(()) => {}
+            Err(_) if row_by_row && resolution == crate::ast::ConflictResolution::Ignore => {
+                continue;
+            }
+            Err(error) if row_by_row && resolution == crate::ast::ConflictResolution::Fail => {
+                stopped = Some(error);
+                break;
+            }
+            Err(error) => return Err(error),
         }
         let new_key = if table.primary_key.is_empty() {
             old_key.clone()
@@ -824,14 +863,47 @@ pub(crate) fn store_updates(
         stored.changes.push((old_key.clone(), new_key, new_row));
         stored.sources.push(source_index);
     }
-    execute::write_updated_rows(
-        writer,
-        tables,
-        table,
-        &stored.changes,
-        &stored.old_rows,
-        &mut |_| Ok(()),
-    )?;
+    if row_by_row {
+        let resolved = crate::conflict_resolution::write_updated_rows_resolving_conflicts(
+            writer,
+            tables,
+            table,
+            &stored.changes,
+            &stored.old_rows,
+            resolution,
+        )?;
+        if stopped.is_none() {
+            stopped = resolved.stopped;
+        }
+        let mut written = resolved.written.into_iter();
+        let mut kept = StoredUpdates {
+            changes: Vec::with_capacity(stored.changes.len()),
+            old_rows: Vec::with_capacity(stored.changes.len()),
+            sources: Vec::with_capacity(stored.changes.len()),
+        };
+        for ((change, old_row), source) in stored
+            .changes
+            .into_iter()
+            .zip(stored.old_rows)
+            .zip(stored.sources)
+        {
+            if written.next() == Some(true) {
+                kept.changes.push(change);
+                kept.old_rows.push(old_row);
+                kept.sources.push(source);
+            }
+        }
+        stored = kept;
+    } else {
+        execute::write_updated_rows(
+            writer,
+            tables,
+            table,
+            &stored.changes,
+            &stored.old_rows,
+            &mut |_| Ok(()),
+        )?;
+    }
     if let Some(mut firing) = firing {
         for ((_, _, new_row), old_row) in stored.changes.iter().zip(&stored.old_rows) {
             firing.after_row(
@@ -842,6 +914,9 @@ pub(crate) fn store_updates(
             )?;
         }
         firing.finish();
+    }
+    if let Some(error) = stopped {
+        return Err(error);
     }
     Ok(stored)
 }

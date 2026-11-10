@@ -4542,13 +4542,13 @@ fn update_rows(
     }
     if crate::updatable_views::is_view(writer, tables, &update.table)? {
         crate::partition_selection::refuse_on_unpartitioned(&update.table)?;
-        if update.conflict_resolution.resolves_row_by_row() {
-            return Err(SqlError::not_supported(
-                "UPDATE OR FAIL, OR IGNORE or OR REPLACE of a view is not supported yet",
-            ));
-        }
         if let Some(result) = crate::triggers::update_instead_of_view(writer, tables, update)? {
             return Ok(result);
+        }
+        if update.conflict_resolution.resolves_row_by_row() {
+            return Err(SqlError::not_supported(
+                "UPDATE OR FAIL, OR IGNORE or OR REPLACE of a view without an INSTEAD OF trigger",
+            ));
         }
         return crate::updatable_views::update(writer, tables, update);
     }

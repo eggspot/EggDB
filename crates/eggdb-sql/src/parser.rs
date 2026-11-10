@@ -3105,9 +3105,6 @@ impl<'t> Parser<'t> {
                 None
             }
         };
-        if from.is_some() && conflict_resolution.resolves_row_by_row() {
-            return Err(self.not_supported("UPDATE OR FAIL, OR IGNORE or OR REPLACE with FROM"));
-        }
         let filter = self.filter()?;
         let (returning, output_into) = match output {
             Some(clause) => (
