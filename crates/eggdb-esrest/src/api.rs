@@ -176,6 +176,78 @@ fn valid_index(name: &str) -> bool {
         })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ExpectedSequence {
+    seq_no: i64,
+    primary_term: i64,
+}
+
+fn expected_sequence(request: &Request) -> Result<Option<ExpectedSequence>, Response> {
+    let seq_no = query_flag(request, "if_seq_no");
+    let primary_term = query_flag(request, "if_primary_term");
+    if let Some(retries) = query_flag(request, "retry_on_conflict")
+        && retries.parse::<u32>().is_err()
+    {
+        return Err(error(
+            400,
+            "illegal_argument_exception",
+            &format!("Failed to parse int parameter [retry_on_conflict] with value [{retries}]"),
+        ));
+    }
+    let parsed = |name: &str, text: &str| {
+        text.parse::<i64>().map_err(|_| {
+            error(
+                400,
+                "illegal_argument_exception",
+                &format!("Failed to parse long parameter [{name}] with value [{text}]"),
+            )
+        })
+    };
+    match (seq_no, primary_term) {
+        (None, None) => Ok(None),
+        (Some(seq_no), Some(primary_term)) => Ok(Some(ExpectedSequence {
+            seq_no: parsed("if_seq_no", &seq_no)?,
+            primary_term: parsed("if_primary_term", &primary_term)?,
+        })),
+        (Some(_), None) => Err(error(
+            400,
+            "action_request_validation_exception",
+            "Validation Failed: 1: ifSeqNo is set, but primary term is [0];",
+        )),
+        (None, Some(_)) => Err(error(
+            400,
+            "action_request_validation_exception",
+            "Validation Failed: 1: ifSeqNo is unassigned, but primary term is set;",
+        )),
+    }
+}
+
+fn sequence_conflict(id: &str, expected: ExpectedSequence, current: Option<u64>) -> Option<Response> {
+    let required = format!(
+        "required seqNo [{}], primary term [{}]",
+        expected.seq_no, expected.primary_term
+    );
+    match current {
+        None => Some(error(
+            409,
+            "version_conflict_engine_exception",
+            &format!("[{id}]: version conflict, {required} but no document was found"),
+        )),
+        Some(version) => {
+            let seq_no = i64::try_from(version.saturating_sub(1)).unwrap_or(i64::MAX);
+            (seq_no != expected.seq_no || expected.primary_term != 1).then(|| {
+                error(
+                    409,
+                    "version_conflict_engine_exception",
+                    &format!(
+                        "[{id}]: version conflict, {required}. current document has seqNo [{seq_no}] and primary term [1]"
+                    ),
+                )
+            })
+        }
+    }
+}
+
 fn query_flag(request: &Request, name: &str) -> Option<String> {
     request.query.as_deref()?.split('&').find_map(|pair| {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
@@ -375,7 +447,7 @@ impl<'k> Api<'k> {
             ("GET" | "HEAD", [index, "_source", id]) => {
                 self.get_source(index, id, request, method == "HEAD")
             }
-            ("DELETE", [index, "_doc", id]) => self.delete_document(index, id),
+            ("DELETE", [index, "_doc", id]) => self.delete_document(index, id, request),
             ("POST", [index, "_update", id]) => self.update_document(index, id, request),
             _ => Ok(error(405, "method_not_allowed", &format!("Incorrect HTTP method for uri [{}] and method [{method}]", request.path))),
         };
@@ -521,6 +593,11 @@ impl<'k> Api<'k> {
             }
         };
         let source = written(&parsed);
+        let expected = match expected_sequence(request) {
+            Ok(expected) => expected,
+            Err(refusal) => return Ok(refusal),
+        };
+        let mut conflict = None;
         let outcome = write(self.keyspace, |keys| {
             ensure_index(keys, index)?;
             let key = document_key(index, id);
@@ -529,6 +606,12 @@ impl<'k> Api<'k> {
                 .as_deref()
                 .and_then(unstored)
                 .map(|(version, _)| version);
+            if let Some(expected) = expected
+                && let Some(refusal) = sequence_conflict(id, expected, previous)
+            {
+                conflict = Some(refusal);
+                return Ok(None);
+            }
             if create_only && previous.is_some() {
                 return Ok(None);
             }
@@ -536,6 +619,9 @@ impl<'k> Api<'k> {
             keys.put(&key, &stored(version, &source))?;
             Ok(Some((version, previous.is_none())))
         })?;
+        if let Some(refusal) = conflict {
+            return Ok(refusal);
+        }
         let Some((version, created)) = outcome else {
             return Ok(error(
                 409,
@@ -609,7 +695,12 @@ impl<'k> Api<'k> {
         })
     }
 
-    fn delete_document(&self, index: &str, id: &str) -> Answer {
+    fn delete_document(&self, index: &str, id: &str, request: &Request) -> Answer {
+        let expected = match expected_sequence(request) {
+            Ok(expected) => expected,
+            Err(refusal) => return Ok(refusal),
+        };
+        let mut conflict = None;
         let removed = write(self.keyspace, |keys| {
             let key = document_key(index, id);
             let version = keys
@@ -617,11 +708,20 @@ impl<'k> Api<'k> {
                 .as_deref()
                 .and_then(unstored)
                 .map(|(version, _)| version);
+            if let Some(expected) = expected
+                && let Some(refusal) = sequence_conflict(id, expected, version)
+            {
+                conflict = Some(refusal);
+                return Ok(None);
+            }
             if version.is_some() {
                 keys.delete(&key)?;
             }
             Ok(version)
         })?;
+        if let Some(refusal) = conflict {
+            return Ok(refusal);
+        }
         Ok(match removed {
             Some(version) => json(200, write_result(index, id, version + 1, "deleted")),
             None => json(404, write_result(index, id, 1, "not_found")),
@@ -635,9 +735,21 @@ impl<'k> Api<'k> {
             Ok(update) => update,
             Err(refusal) => return Ok(refusal),
         };
+        let expected = match expected_sequence(request) {
+            Ok(expected) => expected,
+            Err(refusal) => return Ok(refusal),
+        };
+        let mut conflict = None;
         let outcome = write(self.keyspace, |keys| {
             let key = document_key(index, id);
             let current = keys.get(&key)?.as_deref().and_then(unstored);
+            if let Some(expected) = expected
+                && let Some(refusal) =
+                    sequence_conflict(id, expected, current.as_ref().map(|(version, _)| *version))
+            {
+                conflict = Some(refusal);
+                return Ok(UpdateOutcome::Missing);
+            }
             let outcome = planned_update(&update, index, id, current)?;
             match &outcome {
                 UpdateOutcome::Created { source } => {
@@ -657,6 +769,9 @@ impl<'k> Api<'k> {
             }
             Ok(outcome)
         })?;
+        if let Some(refusal) = conflict {
+            return Ok(refusal);
+        }
         Ok(update_response(
             index,
             id,
@@ -722,7 +837,7 @@ impl<'k> Api<'k> {
                 "index" => self.index_document(&index, &id, &fake, false)?,
                 "create" => self.index_document(&index, &id, &fake, true)?,
                 "update" => self.update_document(&index, &id, &fake)?,
-                "delete" => self.delete_document(&index, &id)?,
+                "delete" => self.delete_document(&index, &id, &fake)?,
                 other => {
                     return Ok(error(
                         400,

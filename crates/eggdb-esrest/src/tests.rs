@@ -1356,3 +1356,32 @@ fn get_doc_and_get_source_filter_the_source_by_url_parameters() {
     let missing = api.answer(&request("GET", "/books/_source/99", ""));
     assert_eq!(missing.status, 404);
 }
+
+#[test]
+fn if_seq_no_and_if_primary_term_guard_index_update_and_delete() {
+    let keyspace = MemoryKeyspace::default();
+    let api = seeded(&keyspace);
+    let stale = api.answer(&request(
+        "PUT",
+        "/books/_doc/1?if_seq_no=5&if_primary_term=1",
+        "{\"title\":\"x\"}",
+    ));
+    assert_eq!(stale.status, 409);
+    assert!(body(&stale).contains("version_conflict_engine_exception"));
+    let fresh = api.answer(&request(
+        "PUT",
+        "/books/_doc/1?if_seq_no=0&if_primary_term=1",
+        "{\"title\":\"x\"}",
+    ));
+    assert_eq!(fresh.status, 200, "{}", body(&fresh));
+    let half = api.answer(&request("DELETE", "/books/_doc/1?if_seq_no=1", ""));
+    assert_eq!(half.status, 400);
+    let update = api.answer(&request(
+        "POST",
+        "/books/_update/1?if_seq_no=0&if_primary_term=1&retry_on_conflict=3",
+        "{\"doc\":{\"title\":\"y\"}}",
+    ));
+    assert_eq!(update.status, 409);
+    let deleted = api.answer(&request("DELETE", "/books/_doc/1?if_seq_no=1&if_primary_term=1", ""));
+    assert_eq!(deleted.status, 200, "{}", body(&deleted));
+}
