@@ -1,4 +1,4 @@
 darwin embedded c_api_library_bytes 8549000
 darwin full eggdb_binary_bytes 13944000
-linux embedded c_api_library_bytes 10911000
-linux full eggdb_binary_bytes 18159000
+linux embedded c_api_library_bytes 10912000
+linux full eggdb_binary_bytes 18162000
