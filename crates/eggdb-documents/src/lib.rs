@@ -14,6 +14,7 @@ mod path;
 mod pipeline;
 mod projection;
 mod restore;
+mod size;
 mod sort;
 mod store;
 mod update;

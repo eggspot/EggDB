@@ -5857,14 +5857,22 @@ id|created_at
 3|2025-04-01
 SELECT 3
 
-error 0A000
-SELECT * FROM ev337 partition (p1)
+rows
+SELECT * FROM ev337 partition (p1) ORDER BY 1
+----
+p1|created_at
+1|2025-03-01
+2|2024-03-01
+3|2025-04-01
+SELECT 3
+... differs
 
 error 428C9
 INSERT INTO ev337 (id, created_at) VALUES (5, '2024-05-05')
 
-error 42P16
+ok
 CREATE TABLE ev337_late_id (id bigint GENERATED ALWAYS AS IDENTITY, created_at date NOT NULL, PRIMARY KEY (created_at, id)) PARTITION BY RANGE (created_at)
+... differs
 
 ok
 DROP TABLE ev337

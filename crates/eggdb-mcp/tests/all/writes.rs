@@ -315,6 +315,7 @@ fn a_write_that_can_change_many_rows_needs_confirmation_and_one_pinned_by_its_ke
     asked.extend([
         ("mysql", "REPLACE INTO scratch VALUES (1, 'r')"),
         ("sqlite", "INSERT OR REPLACE INTO scratch VALUES (1, 'r')"),
+        ("sqlite", "UPDATE OR REPLACE scratch SET id = 2 WHERE id = 1"),
         (
             "mysql",
             "INSERT INTO scratch VALUES (1, 'r') ON DUPLICATE KEY UPDATE note = 'r'",

@@ -1,8 +1,8 @@
 use crate::OutputColumn;
 use crate::ast::{
-    AlterAction, AlterTable, ConstraintKind, CreateTable, Delete, DerivedTable, Expr, ExprKind,
-    FromClause, GeneratedTable, Insert, InsertSource, InsertValue, JoinCondition, JoinedTables,
-    MergeStatement, Name, OnDuplicate, Query, Select, SelectItem, SetExpr, Statement,
+    AlterAction, AlterTable, ConflictResolution, ConstraintKind, CreateTable, Delete, DerivedTable,
+    Expr, ExprKind, FromClause, GeneratedTable, Insert, InsertSource, InsertValue, JoinCondition,
+    JoinedTables, MergeStatement, Name, OnDuplicate, Query, Select, SelectItem, SetExpr, Statement,
     TableReference, Update,
 };
 use crate::column_privileges::{ColumnScopes, ScopeItem};
@@ -380,12 +380,23 @@ impl<'a> Resolver<'a> {
                     "INSERT ... ON CONFLICT DO UPDATE",
                 )
             }
-            OnDuplicate::Replace => {
-                self.check_privilege(table, crate::roles::Privilege::Delete)?;
-                (crate::row_security::PolicyCommand::Delete, "REPLACE")
-            }
+            OnDuplicate::Replace => return self.check_replacing_deletes(table, "REPLACE"),
             OnDuplicate::Fail | OnDuplicate::Ignore => return Ok(()),
         };
+        self.refuse_under_row_security(table, command, form)
+    }
+
+    fn check_replacing_deletes(&self, table: &str, form: &str) -> SqlResult<()> {
+        self.check_privilege(table, crate::roles::Privilege::Delete)?;
+        self.refuse_under_row_security(table, crate::row_security::PolicyCommand::Delete, form)
+    }
+
+    fn refuse_under_row_security(
+        &self,
+        table: &str,
+        command: crate::row_security::PolicyCommand,
+        form: &str,
+    ) -> SqlResult<()> {
         if self.row_security_filter(table, command)?.is_some() {
             return Err(SqlError::not_supported(format!(
                 "{form} on a table with row-level security for this role"
@@ -802,11 +813,13 @@ impl<'a> Resolver<'a> {
             return Ok(self.opaque_item(reference));
         }
         if ctes.contains(&reference.name.text) {
+            refuse_partition_selection(reference)?;
             return Ok(self.opaque_item(reference));
         }
         if let Some(relation) =
             crate::pg_catalog::catalog_reference(self.reader, &reference.name.text)?
         {
+            refuse_partition_selection(reference)?;
             if reference.alias.is_none() {
                 reference.alias = Some(relation.name().to_owned());
             }
@@ -1328,6 +1341,16 @@ fn by_source_position(
     select_from(items, query, renamed, label, view.dialect, position)
 }
 
+fn refuse_partition_selection(reference: &TableReference) -> SqlResult<()> {
+    match reference.partition_selection {
+        Some(_) => Err(
+            crate::partition_selection::not_partitioned(&reference.name.text)
+                .at(reference.name.position),
+        ),
+        None => Ok(()),
+    }
+}
+
 fn column_items<'n>(names: impl Iterator<Item = &'n str>, position: usize) -> Vec<SelectItem> {
     names
         .map(|name| SelectItem::Expr {
@@ -1581,6 +1604,9 @@ impl Binding<'_> {
                 .map(|(name, _)| name.text.clone())
                 .collect();
             resolver.check_written_columns(&table, crate::roles::Privilege::Update, &written)?;
+            if update.conflict_resolution == ConflictResolution::Replace {
+                resolver.check_replacing_deletes(&table, "UPDATE OR REPLACE")?;
+            }
         }
         let reads_rows = update_reads_rows(update);
         let mut exprs: Vec<&mut Expr> = update

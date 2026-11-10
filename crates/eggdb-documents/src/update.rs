@@ -2,6 +2,7 @@ use crate::error::{DocumentError, DocumentResult};
 use crate::filter::{Condition, Filter, matched_array_index, matches, parse_filter};
 use crate::path::{Slot, get_exact, slot};
 use crate::pipeline::{Stage, parse_pipeline, run_pipeline};
+use crate::size::{ByteBudget, document_size, value_size};
 use crate::sort::{SortSpec, parse_sort, sort_documents};
 use eggdb_bson::{Bson, Document, compare, relaxed_json};
 use std::cmp::Ordering;
@@ -949,6 +950,7 @@ fn apply_operators(
     now_ms: i64,
 ) -> DocumentResult<()> {
     let mut changed = ChangedPaths::default();
+    let mut budget = None;
     for (operator, path, argument) in changes {
         if *operator == Operator::SetOnInsert && !inserting {
             continue;
@@ -970,8 +972,18 @@ fn apply_operators(
                 )));
             }
         }
+        if paths.len() > 1 && budget.is_none() {
+            budget = Some(ByteBudget::starting_at(document_size(working))?);
+        }
         for concrete in &paths {
+            let Some(budget) = budget.as_mut() else {
+                apply_one(working, *operator, concrete, argument, inserting, now_ms)?;
+                continue;
+            };
+            let removed = get_exact(working, concrete).map_or(0, value_size);
             apply_one(working, *operator, concrete, argument, inserting, now_ms)?;
+            let added = get_exact(working, concrete).map_or(0, value_size);
+            budget.replace(removed, added)?;
         }
         changed.0.extend(paths);
         if let Some(target) = rename_target {

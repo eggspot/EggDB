@@ -186,10 +186,7 @@ fn check_document(document: &Document) -> DocumentResult<Vec<u8>> {
     }
     let bytes = document.to_bytes();
     if bytes.len() > MAX_DOCUMENT_BYTES {
-        return Err(DocumentError::bad_value(format!(
-            "object to insert too large. size in bytes: {}, max size: {MAX_DOCUMENT_BYTES}",
-            bytes.len()
-        )));
+        return Err(DocumentError::document_too_large(bytes.len()));
     }
     Ok(bytes)
 }

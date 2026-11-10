@@ -1256,3 +1256,192 @@ fn a_pipeline_upsert_starts_from_the_query_equalities() {
         ])]
     );
 }
+
+const MEBIBYTE: usize = 1024 * 1024;
+
+fn reported_size(error: &DocumentError) -> usize {
+    error
+        .message
+        .split("size in bytes: ")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .and_then(|size| size.parse().ok())
+        .unwrap_or(usize::MAX)
+}
+
+fn assert_refused_early(error: &DocumentError) {
+    assert_eq!((error.code, error.code_name), (2, "BadValue"));
+    assert!(
+        error.message.starts_with("object to insert too large"),
+        "{}",
+        error.message
+    );
+    let size = reported_size(error);
+    assert!(
+        size > crate::MAX_DOCUMENT_BYTES && size <= crate::MAX_DOCUMENT_BYTES + 2 * MEBIBYTE,
+        "the update was built to {size} bytes before it was refused"
+    );
+}
+
+fn stored_with_array(store: &Store<'_>, elements: Vec<Bson>) -> Document {
+    let document = doc(vec![
+        ("_id", Bson::Int32(1)),
+        ("s", text(&"x".repeat(MEBIBYTE))),
+        ("a", Bson::Array(elements)),
+    ]);
+    store
+        .insert("app", "big", vec![document.clone()], true)
+        .unwrap();
+    document
+}
+
+fn update_stored(store: &Store<'_>, update: Bson) -> Result<(), DocumentError> {
+    let update = parse_update_statement(&update, None)?;
+    store
+        .update(
+            "app",
+            "big",
+            &parse_filter(&Document::new()).unwrap(),
+            &update,
+            UpdateOptions::default(),
+        )
+        .map(|_| ())
+}
+
+fn stored(store: &Store<'_>) -> Vec<Document> {
+    store
+        .find(
+            "app",
+            "big",
+            &parse_filter(&Document::new()).unwrap(),
+            &SortSpec::default(),
+        )
+        .unwrap()
+}
+
+#[test]
+fn the_counted_size_is_the_encoded_size() {
+    let mut document = person();
+    document.insert(
+        "many",
+        Bson::Array((0..1_234).map(Bson::Int32).collect::<Vec<_>>()),
+    );
+    document.insert(
+        "bytes",
+        Bson::Binary {
+            subtype: 0,
+            bytes: vec![7; 33],
+        },
+    );
+    assert_eq!(
+        crate::size::document_size(&document),
+        document.to_bytes().len()
+    );
+}
+
+#[test]
+fn an_update_that_copies_its_argument_past_the_limit_is_refused_early() {
+    let keyspace = MemoryKeyspace::default();
+    let store = store(&keyspace);
+    let before = stored_with_array(&store, vec![Bson::Int32(0); 64]);
+    let big = text(&"y".repeat(MEBIBYTE));
+    let set_all = sub(vec![("$set", sub(vec![("a.$[]", big.clone())]))]);
+    assert_refused_early(&update_stored(&store, set_all).unwrap_err());
+    assert_eq!(stored(&store), vec![before.clone()]);
+
+    let filtered = parse_update_statement(
+        &sub(vec![("$set", sub(vec![("a.$[zero]", big.clone())]))]),
+        Some(&Bson::Array(vec![sub(vec![("zero", Bson::Int32(0))])])),
+    )
+    .unwrap();
+    let error = store
+        .update(
+            "app",
+            "big",
+            &parse_filter(&Document::new()).unwrap(),
+            &filtered,
+            UpdateOptions::default(),
+        )
+        .unwrap_err();
+    assert_refused_early(&error);
+    assert_eq!(stored(&store), vec![before]);
+
+    update_stored(
+        &store,
+        sub(vec![("$set", sub(vec![("a.$[]", Bson::Int32(5))]))]),
+    )
+    .unwrap();
+    assert_eq!(
+        stored(&store)[0].get("a"),
+        Some(&Bson::Array(vec![Bson::Int32(5); 64]))
+    );
+}
+
+#[test]
+fn push_and_add_to_set_with_each_over_many_arrays_are_refused_early() {
+    let keyspace = MemoryKeyspace::default();
+    let store = store(&keyspace);
+    let before = stored_with_array(&store, vec![Bson::Array(Vec::new()); 64]);
+    let each = sub(vec![(
+        "$each",
+        Bson::Array(vec![
+            text(&"z".repeat(MEBIBYTE / 2)),
+            text(&"w".repeat(MEBIBYTE / 2)),
+        ]),
+    )]);
+    for operator in ["$push", "$addToSet"] {
+        let update = sub(vec![(operator, sub(vec![("a.$[]", each.clone())]))]);
+        assert_refused_early(&update_stored(&store, update).unwrap_err());
+        assert_eq!(stored(&store), vec![before.clone()]);
+    }
+    update_stored(
+        &store,
+        sub(vec![("$push", sub(vec![("a.$[]", Bson::Int32(1))]))]),
+    )
+    .unwrap();
+    assert_eq!(
+        stored(&store)[0].get("a"),
+        Some(&Bson::Array(vec![ints(&[1]); 64]))
+    );
+}
+
+#[test]
+fn pipeline_expressions_that_grow_past_the_limit_are_refused_early() {
+    let keyspace = MemoryKeyspace::default();
+    let store = store(&keyspace);
+    let before = stored_with_array(&store, vec![Bson::Int32(0); 4]);
+    let copies = |reference: &str| Bson::Array(vec![text(reference); 40]);
+    let one_field =
+        |expression: Bson| Bson::Array(vec![sub(vec![("$set", sub(vec![("b", expression)]))])]);
+    let mut many_fields = Document::new();
+    for at in 0..40 {
+        many_fields.insert(format!("f{at}"), text("$s"));
+    }
+    let updates = [
+        one_field(sub(vec![("$concat", copies("$s"))])),
+        one_field(sub(vec![(
+            "$concatArrays",
+            Bson::Array(vec![Bson::Array(vec![text("$s")]); 40]),
+        )])),
+        one_field(copies("$s")),
+        one_field(sub(vec![("$sum", copies("$s"))])),
+        Bson::Array(vec![sub(vec![(
+            "$set",
+            Bson::Document(many_fields.clone()),
+        )])]),
+        Bson::Array(vec![sub(vec![("$project", Bson::Document(many_fields))])]),
+    ];
+    for update in updates {
+        assert_refused_early(&update_stored(&store, update).unwrap_err());
+        assert_eq!(stored(&store), vec![before.clone()]);
+    }
+    update_stored(
+        &store,
+        one_field(sub(vec![("$concat", Bson::Array(vec![text("$s"); 2]))])),
+    )
+    .unwrap();
+    assert_eq!(
+        stored(&store)[0].get("b"),
+        Some(&text(&"x".repeat(2 * MEBIBYTE)))
+    );
+}

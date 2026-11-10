@@ -301,8 +301,9 @@ or of one of its unique indexes, to values, in parts joined by a top-level `AND`
 So `DELETE FROM t WHERE id = 7` runs, while `WHERE id = id`, `WHERE id IS NOT NULL`,
 `WHERE id >= 0 OR id < 0`, `WHERE id > 5`, `WHERE NOT (id <> 7)`, `WHERE id IN (SELECT ...)`,
 a `WHERE` on a column outside every key, and any `DELETE` or `UPDATE` of a table without a key
-ask first. `REPLACE`, `INSERT OR REPLACE`, `ON DUPLICATE KEY UPDATE`, `ON CONFLICT ... DO UPDATE`
-and a `MERGE` that updates or deletes always ask, since they overwrite rows chosen by the data.
+ask first. `REPLACE`, `INSERT OR REPLACE`, `UPDATE OR REPLACE` (even pinned by its key),
+`ON DUPLICATE KEY UPDATE`, `ON CONFLICT ... DO UPDATE` and a `MERGE` that updates or deletes
+always ask, since they overwrite rows chosen by the data.
 Other `INSERT`s into a table without an `INSERT` trigger (`ON CONFLICT DO NOTHING`,
 `INSERT IGNORE` and an insert-only `MERGE` too), `CREATE`, renames, `ADD COLUMN` and the like
 run without asking. Code that runs later asks first: `CREATE OR REPLACE` (Transact-SQL's `ALTER

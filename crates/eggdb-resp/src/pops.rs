@@ -1,9 +1,10 @@
 use crate::commands::{
-    Context, NOT_INTEGER, SYNTAX, WRONG_TYPE, bulk_reply_bytes, integer, load, save, writing,
+    Context, DAMAGED_VALUE, NOT_INTEGER, SYNTAX, WRONG_TYPE, bulk_reply_bytes, integer, load, save,
+    writing,
 };
 use crate::keyspace::{KeysRead, KeysWrite};
 use crate::protocol::Reply;
-use crate::value::{Data, Entry, SortedSet};
+use crate::value::{Data, Entry, SortedSet, StoredHeader, StoredKind};
 use std::collections::VecDeque;
 
 const NAMES: &[&str] = &["lmove", "rpoplpush", "zpopmin", "zpopmax", "lmpop", "zmpop"];
@@ -157,6 +158,29 @@ fn stored_sorted(
     }
 }
 
+fn holds_elements(
+    keys: &dyn KeysRead,
+    key: &[u8],
+    kind: StoredKind,
+    now: u64,
+    on_wrong_type: OnWrongType,
+) -> Result<bool, String> {
+    let Some(bytes) = keys.get(key)? else {
+        return Ok(false);
+    };
+    let header = StoredHeader::read(&bytes).ok_or_else(|| DAMAGED_VALUE.to_owned())?;
+    if header.expired(now) {
+        return Ok(false);
+    }
+    if header.kind != kind {
+        return match on_wrong_type {
+            OnWrongType::Refuse => Err(WRONG_TYPE.to_owned()),
+            OnWrongType::Wait => Ok(false),
+        };
+    }
+    Ok(header.elements > 0)
+}
+
 pub(crate) fn any_list_to_pop(
     keys: &dyn KeysRead,
     list_keys: &[Vec<u8>],
@@ -164,7 +188,7 @@ pub(crate) fn any_list_to_pop(
     on_wrong_type: OnWrongType,
 ) -> Result<bool, String> {
     for key in list_keys {
-        if stored_list(keys, key, now, on_wrong_type)?.is_some() {
+        if holds_elements(keys, key, StoredKind::List, now, on_wrong_type)? {
             return Ok(true);
         }
     }
@@ -178,7 +202,7 @@ pub(crate) fn any_sorted_to_pop(
     on_wrong_type: OnWrongType,
 ) -> Result<bool, String> {
     for key in sorted_keys {
-        if stored_sorted(keys, key, now, on_wrong_type)?.is_some() {
+        if holds_elements(keys, key, StoredKind::SortedSet, now, on_wrong_type)? {
             return Ok(true);
         }
     }

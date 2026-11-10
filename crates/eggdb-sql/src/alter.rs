@@ -2321,7 +2321,7 @@ fn drop_constraint(
         .indexes
         .iter()
         .find(|index| {
-            index.name == constraint.text
+            indexes::same_index_name(&index.name, &constraint.text, dialect)
                 && (dialect != Dialect::PostgreSql || index.backs_unique_constraint)
         })
         .cloned()
@@ -2508,7 +2508,7 @@ fn rename_index(
     let Some(position) = table
         .indexes
         .iter()
-        .position(|index| index.name == from.text)
+        .position(|index| indexes::same_index_name(&index.name, &from.text, Dialect::MySql))
     else {
         return Err(SqlError::new(
             SqlState::MYSQL_SYNTAX_OR_ACCESS,
@@ -2521,7 +2521,8 @@ fn rename_index(
         .with_vendor_code(1176)
         .at(from.position));
     };
-    if from.text == to.text {
+    let stored = table.indexes[position].name.clone();
+    if stored == to.text {
         return Ok(());
     }
     if to.text.eq_ignore_ascii_case("primary") {
@@ -2532,7 +2533,10 @@ fn rename_index(
         .with_vendor_code(1280)
         .at(to.position));
     }
-    if table.index_named(&to.text).is_some() {
+    let taken = table.indexes.iter().enumerate().any(|(at, index)| {
+        at != position && indexes::same_index_name(&index.name, &to.text, Dialect::MySql)
+    });
+    if taken {
         return Err(SqlError::new(
             SqlState::MYSQL_SYNTAX_OR_ACCESS,
             format!("Duplicate key name '{}'", to.text),
@@ -2545,15 +2549,15 @@ fn rename_index(
     };
     index.name = to.text.clone();
     let index_id = index.id;
-    table.rename_status(&from.text, &to.text);
+    table.rename_status(&stored, &to.text);
     save(writer, &table)?;
-    crate::comments::move_part(writer, name, CommentKind::Index, &from.text, &to.text)?;
+    crate::comments::move_part(writer, name, CommentKind::Index, &stored, &to.text)?;
     crate::partition_indexes::rename_linked(
         writer,
         tables,
         &table,
         index_id,
-        (from.text.as_str(), to.text.as_str()),
+        (stored.as_str(), to.text.as_str()),
         0,
     )
 }

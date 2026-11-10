@@ -1,9 +1,10 @@
+use eggdb_platform::connection_limits::UNCOUNTED_BUFFER_BYTES;
 use std::io::{self, Read};
 
 const MAX_ARGUMENTS: usize = 1 << 20;
 const MAX_BULK_BYTES: usize = 512 << 20;
 const MAX_LINE_BYTES: usize = 64 * 1024;
-const MAX_READ_AHEAD_BYTES: usize = MAX_BULK_BYTES;
+const MAX_READ_AHEAD_BYTES: usize = UNCOUNTED_BUFFER_BYTES;
 const READ_CHUNK_BYTES: usize = 16 * 1024;
 
 /// Why a request could not be read.
@@ -28,7 +29,6 @@ impl From<io::Error> for ProtocolError {
 pub(crate) enum ReadAhead {
     Open,
     Closed,
-    OverBudget,
 }
 
 /// A reply, written in RESP2 or RESP3 by [`Reply::encode`].
@@ -198,11 +198,26 @@ impl<R: Read> RequestReader<R> {
         self.start < self.buffer.len()
     }
 
-    fn fill(&mut self) -> Result<(), ProtocolError> {
-        if self.start > 0 && self.start == self.buffer.len() {
-            self.buffer.clear();
+    fn discard_consumed(&mut self) {
+        if self.start > 0 {
+            self.buffer.drain(..self.start);
             self.start = 0;
         }
+        if self.buffer.len() <= UNCOUNTED_BUFFER_BYTES {
+            self.buffer.shrink_to(UNCOUNTED_BUFFER_BYTES);
+        }
+    }
+
+    fn release_spare_capacity(&mut self) {
+        if self.buffer.capacity() > UNCOUNTED_BUFFER_BYTES
+            && self.buffer.len() - self.start <= UNCOUNTED_BUFFER_BYTES
+        {
+            self.discard_consumed();
+        }
+    }
+
+    fn fill(&mut self) -> Result<(), ProtocolError> {
+        self.discard_consumed();
         let mut chunk = [0u8; READ_CHUNK_BYTES];
         let count = self.inner.read(&mut chunk)?;
         if count == 0 {
@@ -215,21 +230,15 @@ impl<R: Read> RequestReader<R> {
     pub(crate) fn read_ahead(
         &mut self,
         receive: &mut dyn FnMut(&mut [u8]) -> io::Result<usize>,
-        admit: &mut dyn FnMut(usize) -> bool,
     ) -> ReadAhead {
-        if self.start > 0 {
-            self.buffer.drain(..self.start);
-            self.start = 0;
-        }
+        self.discard_consumed();
         let mut chunk = [0u8; READ_CHUNK_BYTES];
         loop {
-            let unread = self.buffer.len();
-            let wanted = chunk.len().min(MAX_READ_AHEAD_BYTES.saturating_sub(unread));
+            let wanted = chunk
+                .len()
+                .min(MAX_READ_AHEAD_BYTES.saturating_sub(self.buffer.len()));
             if wanted == 0 {
                 return ReadAhead::Open;
-            }
-            if !admit(unread.saturating_add(wanted)) {
-                return ReadAhead::OverBudget;
             }
             match receive(&mut chunk[..wanted]) {
                 Ok(0) => return ReadAhead::Closed,
@@ -293,6 +302,7 @@ impl<R: Read> RequestReader<R> {
         &mut self,
         admit: &mut dyn FnMut(usize) -> bool,
     ) -> Result<Vec<Vec<u8>>, ProtocolError> {
+        self.release_spare_capacity();
         loop {
             let line = self.line()?;
             match line.first() {
@@ -397,26 +407,41 @@ mod tests {
             }
             None => Err(io::Error::from(io::ErrorKind::WouldBlock)),
         };
-        let mut asked = Vec::new();
-        let outcome = reader.read_ahead(&mut receive, &mut |bytes| {
-            asked.push(bytes);
-            true
-        });
-        assert_eq!(outcome, ReadAhead::Closed);
-        assert_eq!(asked, [14 + READ_CHUNK_BYTES, 26 + READ_CHUNK_BYTES]);
+        assert_eq!(reader.read_ahead(&mut receive), ReadAhead::Closed);
         assert_eq!(reader.next_request(), Ok(vec![b"PING".to_vec()]));
         assert!(reader.has_buffered());
 
         let mut waiting = |_: &mut [u8]| Err(io::Error::from(io::ErrorKind::WouldBlock));
         let mut reader = RequestReader::new(&b""[..]);
-        assert_eq!(
-            reader.read_ahead(&mut waiting, &mut |_| true),
-            ReadAhead::Open
-        );
-        assert_eq!(
-            reader.read_ahead(&mut waiting, &mut |_| false),
-            ReadAhead::OverBudget
-        );
+        assert_eq!(reader.read_ahead(&mut waiting), ReadAhead::Open);
+    }
+
+    #[test]
+    fn read_ahead_stops_at_the_uncounted_buffer_size_and_reports_the_connection_open() {
+        let mut reader = RequestReader::new(&b""[..]);
+        let mut received = 0usize;
+        let mut endless = |buffer: &mut [u8]| {
+            buffer.fill(b'a');
+            received += buffer.len();
+            Ok(buffer.len())
+        };
+        assert_eq!(reader.read_ahead(&mut endless), ReadAhead::Open);
+        assert_eq!(received, MAX_READ_AHEAD_BYTES);
+        assert_eq!(reader.buffer.len(), UNCOUNTED_BUFFER_BYTES);
+    }
+
+    #[test]
+    fn the_request_buffer_gives_back_its_capacity_once_a_large_request_is_read() {
+        let value = vec![b'v'; 4 * UNCOUNTED_BUFFER_BYTES];
+        let mut input = format!("*3\r\n$3\r\nSET\r\n$1\r\nk\r\n${}\r\n", value.len()).into_bytes();
+        input.extend_from_slice(&value);
+        input.extend_from_slice(b"\r\n*1\r\n$4\r\nPING\r\n");
+        let mut reader = RequestReader::new(&input[..]);
+        let set = reader.next_request().unwrap();
+        assert_eq!(set[2].len(), value.len());
+        assert!(reader.buffer.capacity() > UNCOUNTED_BUFFER_BYTES);
+        assert_eq!(reader.next_request(), Ok(vec![b"PING".to_vec()]));
+        assert!(reader.buffer.capacity() <= UNCOUNTED_BUFFER_BYTES);
     }
 
     #[test]

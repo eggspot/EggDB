@@ -630,3 +630,73 @@ fn stream_reads_stop_with_oom_once_they_pass_the_reply_room() {
     assert!(run("XREAD COUNT 2 STREAMS events 0", 2500).starts_with("*1\r\n"));
     assert!(run("XREAD STREAMS events 0", 8000).starts_with("*1\r\n"));
 }
+
+#[test]
+fn a_blocked_client_pipelining_past_the_read_ahead_cap_leaves_the_rest_to_tcp() {
+    use eggdb_platform::connection_limits::{MemoryBudget, UNCOUNTED_BUFFER_BYTES};
+    let budget = std::sync::Arc::new(MemoryBudget::new(64 << 20));
+    let config = ServerConfig {
+        memory_budget: std::sync::Arc::clone(&budget),
+        ..test_config()
+    };
+    let count = 40_000;
+    let mut pipeline = Vec::new();
+    for index in 0..count {
+        let word = index.to_string();
+        pipeline.extend_from_slice(
+            format!("*2\r\n$4\r\nECHO\r\n${}\r\n{word}\r\n", word.len()).as_bytes(),
+        );
+    }
+    assert!(pipeline.len() > 8 * UNCOUNTED_BUFFER_BYTES);
+    with_server_on(&MemoryKeyspace::default(), config, |address| {
+        let mut client = RespClient::connect(address);
+        client.send("BLPOP queue 2");
+        std::thread::sleep(SETTLE);
+        let mut writer = client.writer.try_clone().unwrap();
+        std::thread::scope(|scope| {
+            let sending = scope.spawn(move || writer.write_all(&pipeline));
+            let blocked_until = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < blocked_until {
+                assert!(
+                    budget.used_bytes() <= UNCOUNTED_BUFFER_BYTES,
+                    "{} bytes held while blocked",
+                    budget.used_bytes()
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(client.reply(), "*-1|");
+            for index in 0..count {
+                let word = index.to_string();
+                assert_eq!(client.reply(), format!("${}|{word}|", word.len()));
+            }
+            sending.join().unwrap().unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while budget.used_bytes() != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(budget.used_bytes(), 0);
+        assert_eq!(client.call("PING"), "+PONG|");
+    });
+}
+
+#[test]
+fn commands_pipelined_behind_a_blocked_client_answer_in_order_after_its_reply() {
+    with_server(|address| {
+        let mut client = RespClient::connect(address);
+        client.send("BLPOP q 0");
+        std::thread::sleep(SETTLE);
+        client.send("PING");
+        client.send("QUIT");
+        std::thread::sleep(SETTLE * 3);
+        let mut pusher = RespClient::connect(address);
+        assert_eq!(pusher.call("LPUSH q x"), ":1|");
+        assert_eq!(client.reply(), "*2|$1|q|$1|x|");
+        assert_eq!(client.reply(), "+PONG|");
+        assert_eq!(client.reply(), "+OK|");
+        let mut rest = Vec::new();
+        client.reader.read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty(), "{rest:?}");
+        assert_eq!(pusher.call("LLEN q"), ":0|");
+    });
+}

@@ -1,4 +1,5 @@
 use crate::error::{DocumentError, DocumentResult};
+use crate::size::{ByteBudget, value_size};
 use eggdb_bson::{Bson, Document, compare};
 use std::cmp::Ordering;
 
@@ -196,6 +197,22 @@ fn value_of(expression: &Bson, root: &Document, depth: usize) -> DocumentResult<
     Ok(evaluate_at(expression, root, depth)?.unwrap_or(Bson::Null))
 }
 
+fn bounded_values<'e>(
+    expressions: impl IntoIterator<Item = &'e Bson>,
+    root: &Document,
+    depth: usize,
+) -> DocumentResult<Vec<Bson>> {
+    let mut budget = ByteBudget::default();
+    expressions
+        .into_iter()
+        .map(|expression| {
+            let value = value_of(expression, root, depth)?;
+            budget.add(value_size(&value))?;
+            Ok(value)
+        })
+        .collect()
+}
+
 fn evaluate_at(expression: &Bson, root: &Document, depth: usize) -> DocumentResult<Option<Bson>> {
     if depth > MAX_DEPTH {
         return Err(DocumentError::bad_value(
@@ -226,12 +243,7 @@ fn evaluate_at(expression: &Bson, root: &Document, depth: usize) -> DocumentResu
             }
             Ok(field_value(root, &text[1..]))
         }
-        Bson::Array(items) => Ok(Some(Bson::Array(
-            items
-                .iter()
-                .map(|item| value_of(item, root, depth + 1))
-                .collect::<DocumentResult<_>>()?,
-        ))),
+        Bson::Array(items) => Ok(Some(Bson::Array(bounded_values(items, root, depth + 1)?))),
         Bson::Document(inner) => match inner.first() {
             Some((name, argument)) if name.starts_with('$') => {
                 if inner.len() != 1 {
@@ -243,8 +255,10 @@ fn evaluate_at(expression: &Bson, root: &Document, depth: usize) -> DocumentResu
             }
             _ => {
                 let mut out = Document::new();
+                let mut budget = ByteBudget::default();
                 for (name, value) in inner.iter() {
                     if let Some(result) = evaluate_at(value, root, depth + 1)? {
+                        budget.add(value_size(&result))?;
                         out.insert(name.clone(), result);
                     }
                 }
@@ -262,10 +276,7 @@ fn operator(
     depth: usize,
 ) -> DocumentResult<Option<Bson>> {
     let all = |argument: &Bson| -> DocumentResult<Vec<Bson>> {
-        arguments(argument)
-            .into_iter()
-            .map(|item| value_of(item, root, depth))
-            .collect()
+        bounded_values(arguments(argument), root, depth)
     };
     Ok(Some(match name {
         "$literal" => argument.clone(),

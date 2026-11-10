@@ -197,8 +197,8 @@ What it reads, on top of the statements of "What runs today":
   is named by its text (`SELECT 1+1` gives a column `1+1`). `STD`, `STDDEV`, `STDDEV_POP`,
   `STDDEV_SAMP`, `VARIANCE`, `VAR_POP` and `VAR_SAMP` return `DOUBLE` (D321).
 - **NULL ordering**: NULL sorts first for `ORDER BY ... ASC` and last for `DESC`, as in MySQL,
-  in queries and window definitions; an index on a column that may hold NULLs is then not read
-  in place of the sort (D321).
+  in queries and window definitions; an index on a column that may hold NULLs is read in two
+  ranges, its NULL entries first, in place of the sort (D321, D341).
 - **Errors** with MySQL's numbers, SQLSTATEs and wording: `ERROR 1146 (42S02): Table
   'eggdb.missing' doesn't exist` (`eggdb` is the database name in `eggdb sql` and `eggdb shell`;
   through the server it is `--database`'s), 1064 for syntax errors (`... near '...' at line 1`), 1054,
@@ -275,6 +275,9 @@ What it reads, on top of the statements of "What runs today":
   changed before the conflict are kept), `IGNORE` (conflicting rows are left as they were) and
   `REPLACE` (the rows in the way are deleted, and a `NULL` for a `NOT NULL` column takes its
   default), with SQLite's `UNIQUE constraint failed: t.c` (D338); not with `FROM` or on a view.
+  Since `UPDATE OR REPLACE` deletes rows, a checked role needs `DELETE` on the table too
+  (`42501` without it), and where a row-level security `DELETE` policy applies to the role it is
+  refused (`0A000`), as `REPLACE` and `INSERT OR REPLACE` are (D338).
 - **Names starting with `sqlite_`** are reserved, as in SQLite: `CREATE TABLE sqlite_x` is
   refused with `object name reserved for internal use`.
 - **Length limit**: a function result longer than 1,000,000,000 bytes (SQLite's default
@@ -536,8 +539,8 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   `USER_IND_COLUMNS`/`ALL_IND_COLUMNS`; `ORA-00001` for a duplicate, `ORA-01452` when `CREATE
   UNIQUE INDEX` finds one, `ORA-00955` for a name in use and `ORA-01418` for a missing index.
 - **Identity columns**: `GENERATED [ALWAYS | BY DEFAULT [ON NULL [FOR INSERT ONLY | FOR INSERT
-  AND UPDATE]]] AS IDENTITY [(options)]` on the first column of the primary key (any column of
-  a partitioned table's primary key, D337) (D106, D150).
+  AND UPDATE]]] AS IDENTITY [(options)]` on the first column of the primary key, in a
+  partitioned table too (D106, D150, D337).
   `ALWAYS` is kept and enforced: a value given in `INSERT` is `ORA-32795` and an `UPDATE` of the
   column `ORA-32796` (`DEFAULT` is allowed); `eggdb restore` and `COPY` keep the values they
   bring. Options, in parentheses or bare as SQL Developer writes them: `START WITH` (default
@@ -683,7 +686,8 @@ SELECT @@VERSION
   the operators `+ - * / % = <> != < > <= >= !< !>`.
 - **NULL ordering**: NULL is the lowest value, so it sorts first for `ORDER BY ... ASC` and last
   for `DESC`, in queries, `UNION`s, window definitions and `STRING_AGG ... WITHIN GROUP`; an
-  index on a column that may hold NULLs is then not read in place of the sort (D340).
+  index on a column that may hold NULLs is read in two ranges, its NULL entries first, in place
+  of the sort (D340, D341).
 - **Types** (item 39, D123), written bare or bracketed in any case (`[decimal](18, 2)`, `AS
   DateTime2`), each kept as one of the engine's types, so PostgreSQL SQL reads the same columns:
 
@@ -2004,8 +2008,8 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   (D111). A `GENERATED ALWAYS` column refuses a value: `INSERT` with one is `428C9 cannot insert
   a non-DEFAULT value into column "id"` unless it says `OVERRIDING SYSTEM VALUE`, and `UPDATE`
   may only set it to `DEFAULT` (`428C9`); `COPY` and bulk loads keep the values they bring, as in
-  PostgreSQL (D146). The column must be the first column of the primary key (any column of a
-  partitioned table's, D337); a named sequence and
+  PostgreSQL (D146). The column must be the first column of the primary key, in a partitioned
+  table too (D337); a named sequence and
   `DEFAULT nextval('s')` have no such limit. Identity options in `CREATE TABLE` (`GENERATED ...
   AS IDENTITY (START WITH 100 INCREMENT BY 5)`) are kept; `MINVALUE`, `MAXVALUE` and `CYCLE`
   that end the identity before its type's range answer `0A000`. `ALTER COLUMN c SET GENERATED
@@ -4463,8 +4467,15 @@ expression whose display EggDB does not work out is shown as stored, where Postg
 print its own form.
 
 The correctness suite (`crates/eggdb-sql/correctness/postgresql.test`, [correctness.md](correctness.md))
-checks the PostgreSQL manual's documented behaviour and marks no case as differing (the last
-two, `COPY` in the binary format and in another encoding, now match). The other differences:
+checks the PostgreSQL manual's documented behaviour and marks these as differing until they
+are fixed:
+- An identity column must lead the primary key, in a partitioned table too, so `PRIMARY KEY
+  (created_at, id)` with an identity `id` is `42P16`, where PostgreSQL takes it; allowing it is a
+  file format change that waits for table definition version 15 (D337).
+- A table in `FROM` takes no column alias list (`FROM t AS x (a, b)`, or `FROM t partition (p1)`,
+  where `partition` is an alias and `p1` renames the first column): `0A000`.
+
+The other differences:
 
 - One statement at a time is planned by simple rules without statistics ([Indexes](#indexes)):
   a `WHERE` that fixes every primary-key column with `=` reads one row (in a join, of the first
@@ -4650,6 +4661,13 @@ Reference Manual's documented behaviour) marks these as differing until they are
   accents; collations come with D30.
 - A view made with `ALGORITHM=TEMPTABLE` still takes `INSERT`, `UPDATE` and `DELETE` when its
   query could; MySQL refuses them (error 1288).
+- An `AUTO_INCREMENT` column must lead the primary key, in a partitioned table too: `PRIMARY KEY
+  (store_id, id)` with a key that `id` leads is error 1075, where InnoDB needs only some index
+  that the column leads; allowing it is a file format change that waits for table definition
+  version 15 (D337).
+- `FULLTEXT` and `SPATIAL` keys, in `CREATE TABLE` and `ALTER TABLE ... ADD`, answer 1235: InnoDB
+  makes a `FULLTEXT` index on a `CHAR`, `VARCHAR` or `TEXT` column, and a `SPATIAL` one on a
+  column that is no geometry is MySQL's 1687.
 - A `TIME` outside `-838:59:59` to `838:59:59` is an error (`22007`, error 1292) where MySQL's
   non-strict modes clip it with a warning, and `HOUR()`, `TIME_TO_SEC()` and the other `TIME` functions are
   missing.
@@ -4689,9 +4707,9 @@ And more, not in the suite yet:
 - `AVG` of integers and `SUM`/`AVG` of `DECIMAL` use PostgreSQL's result scale (`AVG(2, 3)` is
   `2.5000000000000000`) where MySQL adds 4 digits to the argument's scale (`2.5000`).
 - Indexes: a key on a column prefix (`KEY k (name(10))`) indexes the whole value, and a
-  `UNIQUE` one answers 1235; `FULLTEXT` and `SPATIAL` keys answer 1235. `SHOW INDEX` gives
+  `UNIQUE` one answers 1235. `SHOW INDEX` gives
   `Cardinality` and `Sub_part` as `NULL`, and `EXPLAIN` gives `key_len`, `ref` and `rows` as
-  `NULL`. `ALTER TABLE ... ADD FULLTEXT|SPATIAL` answers 1235. Foreign keys are
+  `NULL`. Foreign keys are
   checked when the statement ends, not row by row, and
   creating one makes no index on the child's columns (InnoDB makes one).
 
@@ -4898,7 +4916,9 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
 - Not yet: `deleted.` in `UPDATE`, global `##temporary` tables (`##name` is the session's own
   table, like `#name`), and `OUTPUT ... INTO` refusing a target with triggers, checks or foreign
   keys, as SQL Server does (EggDB fires and checks them). A `MERGE`'s deletes do not fire `DELETE`
-  triggers, and `SELECT ... INTO` keeps neither the source columns' `NOT NULL` nor their identity.
+  triggers, and `SELECT ... INTO` does not keep an identity column's identity property: the new
+  column is a plain `NOT NULL` one, so an `INSERT` without a column list takes a value for it where
+  SQL Server answers error 8101, and one that leaves it out is error 515 (D342).
 - An identity column that is not the first column of the primary key. The next identity number
   follows the largest one in the table (the smallest for a negative increment), so a deleted
   largest value is used again and an emptied table starts again at its seed, where SQL Server

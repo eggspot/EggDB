@@ -72,6 +72,16 @@ impl DocumentError {
         Self::new(73, "InvalidNamespace", message)
     }
 
+    /// A document, or a value an update or expression builds, larger than
+    /// [`crate::MAX_DOCUMENT_BYTES`] (`BadValue`, 2); `size` is its size in bytes, or the size
+    /// it had reached when the work stopped.
+    pub fn document_too_large(size: usize) -> Self {
+        Self::bad_value(format!(
+            "object to insert too large. size in bytes: {size}, max size: {}",
+            crate::store::MAX_DOCUMENT_BYTES
+        ))
+    }
+
     /// A feature not implemented yet (`NotImplemented`, 238).
     pub fn not_implemented(message: impl Into<String>) -> Self {
         Self::new(238, "NotImplemented", message)

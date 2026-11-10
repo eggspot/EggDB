@@ -546,3 +546,24 @@ fn given_and_generated_identities_mix_with_the_furthest_stored_id() {
         ]
     );
 }
+
+#[test]
+fn partition_selection_on_a_with_query_or_a_catalog_table_is_refused_as_unpartitioned() {
+    let store = MemoryStore::default();
+    let mut session = mysql_years(&store);
+    for sql in [
+        "WITH c AS (SELECT id FROM o) SELECT * FROM c PARTITION (p0)",
+        "SELECT * FROM information_schema.tables PARTITION (p0)",
+    ] {
+        let error = failure(&mut session, sql);
+        assert_eq!(error.vendor_code(), Some(1747), "{sql}: {error}");
+    }
+    let mut oracle = Session::with_dialect(&store, Dialect::Oracle);
+    for sql in [
+        "WITH c AS (SELECT 1 AS x FROM dual) SELECT * FROM c PARTITION (p)",
+        "SELECT * FROM user_tables PARTITION (p)",
+    ] {
+        let error = failure(&mut oracle, sql);
+        assert_eq!(error.vendor_code(), Some(14501), "{sql}: {error}");
+    }
+}

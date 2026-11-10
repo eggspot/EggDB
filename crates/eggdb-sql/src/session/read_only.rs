@@ -139,34 +139,85 @@ fn is_word(token: &Token<'_>, word: &str) -> bool {
     matches!(&token.kind, TokenKind::Word(found) if found.eq_ignore_ascii_case(word))
 }
 
+struct CommonTableInScope<'q> {
+    name: &'q str,
+    query: &'q Query,
+    entered: bool,
+}
+
 fn locks_permanent_rows(statement: &Statement) -> bool {
+    let mut scope = Vec::new();
     match statement {
-        Statement::Select(select) => select_reads_permanent_table(select),
-        Statement::Query(query) => query_reads_permanent_table(query),
+        Statement::Select(select) => select_locks_permanent_rows(select, &mut scope),
+        Statement::Query(query) => query_locks_permanent_rows(query, &mut scope),
         _ => false,
     }
 }
 
-fn query_reads_permanent_table(query: &Query) -> bool {
-    match &query.body {
-        SetExpr::Select(select) => select_reads_permanent_table(select),
-        SetExpr::Query(inner) => query_reads_permanent_table(inner),
-        SetExpr::Operation(_) => true,
+fn query_locks_permanent_rows<'q>(
+    query: &'q Query,
+    scope: &mut Vec<CommonTableInScope<'q>>,
+) -> bool {
+    let outer = scope.len();
+    scope.extend(query.with.iter().map(|table| CommonTableInScope {
+        name: table.name.text.as_str(),
+        query: &table.query,
+        entered: false,
+    }));
+    let locks = set_locks_permanent_rows(&query.body, scope);
+    scope.truncate(outer);
+    locks
+}
+
+fn set_locks_permanent_rows<'q>(
+    body: &'q SetExpr,
+    scope: &mut Vec<CommonTableInScope<'q>>,
+) -> bool {
+    match body {
+        SetExpr::Select(select) => select_locks_permanent_rows(select, scope),
+        SetExpr::Query(inner) => query_locks_permanent_rows(inner, scope),
+        SetExpr::Operation(operation) => {
+            set_locks_permanent_rows(&operation.left, scope)
+                || set_locks_permanent_rows(&operation.right, scope)
+        }
     }
 }
 
-fn select_reads_permanent_table(select: &Select) -> bool {
+fn select_locks_permanent_rows<'q>(
+    select: &'q Select,
+    scope: &mut Vec<CommonTableInScope<'q>>,
+) -> bool {
     select.from.as_ref().is_some_and(|from| {
         std::iter::once(&from.first)
             .chain(from.joins.iter().map(|join| &join.table))
-            .any(is_permanent_table)
+            .any(|table| reference_locks_permanent_rows(table, scope))
     })
 }
 
-fn is_permanent_table(table: &TableReference) -> bool {
-    table.derived.is_none()
-        && table.generated.is_none()
-        && !crate::temporary::is_temporary_name(&table.name.text)
+fn reference_locks_permanent_rows<'q>(
+    table: &'q TableReference,
+    scope: &mut Vec<CommonTableInScope<'q>>,
+) -> bool {
+    if let Some(derived) = &table.derived {
+        return query_locks_permanent_rows(&derived.query, scope);
+    }
+    if table.generated.is_some() {
+        return false;
+    }
+    if let Some(at) = scope
+        .iter()
+        .rposition(|common| common.name == table.name.text)
+    {
+        if scope[at].entered {
+            return false;
+        }
+        scope[at].entered = true;
+        let query = scope[at].query;
+        let locks = query_locks_permanent_rows(query, scope);
+        scope[at].entered = false;
+        return locks;
+    }
+    !crate::temporary::is_temporary_name(&table.name.text)
         && !crate::temp_tables::is_temp_table(&table.name.text)
 }
 

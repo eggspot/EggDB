@@ -189,11 +189,7 @@ impl Connection<'_> {
         writer.write_all(bytes)
     }
 
-    fn read_ahead(
-        &self,
-        reader: &mut RequestReader<StopAwareStream<'_>>,
-        admit: &mut dyn FnMut(usize) -> bool,
-    ) -> ReadAhead {
+    fn read_ahead(&self, reader: &mut RequestReader<StopAwareStream<'_>>) -> ReadAhead {
         let mut stream = self
             .writer
             .lock()
@@ -201,7 +197,7 @@ impl Connection<'_> {
         if stream.set_nonblocking(true).is_err() {
             return ReadAhead::Closed;
         }
-        let ahead = reader.read_ahead(&mut |buffer| stream.read(buffer), admit);
+        let ahead = reader.read_ahead(&mut |buffer| stream.read(buffer));
         if stream.set_nonblocking(false).is_err() {
             return ReadAhead::Closed;
         }
@@ -371,18 +367,8 @@ fn serve_connection(
                                 };
                                 command.attempt(&context, db, OnWrongType::Wait)
                             };
-                            let arguments_held = held.bytes();
-                            let mut over_budget = false;
-                            let mut abandoned = || {
-                                if stop() {
-                                    return true;
-                                }
-                                let ahead = connection.read_ahead(&mut reader, &mut |bytes| {
-                                    held.hold_if_large(arguments_held.saturating_add(bytes))
-                                });
-                                over_budget = ahead == ReadAhead::OverBudget;
-                                ahead != ReadAhead::Open
-                            };
+                            let mut abandoned =
+                                || stop() || connection.read_ahead(&mut reader) != ReadAhead::Open;
                             match waiters.wait(
                                 db,
                                 &mut command,
@@ -391,14 +377,7 @@ fn serve_connection(
                                 &mut abandoned,
                             ) {
                                 Some(reply) => vec![reply],
-                                None => {
-                                    if over_budget {
-                                        Reply::Error(OUT_OF_BUDGET.to_owned())
-                                            .encode(&mut out, client.resp3);
-                                        let _ = connection.send(&out);
-                                    }
-                                    break;
-                                }
+                                None => break,
                             }
                         }
                     }

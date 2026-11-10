@@ -659,3 +659,78 @@ fn set_transaction_in_an_implicit_transaction_before_it_writes_sets_that_transac
 fn shown_setting(session: &mut Session<'_>) -> String {
     shown(session, "transaction_read_only")
 }
+
+#[test]
+fn row_locking_reaches_the_tables_behind_partitions_views_and_derived_tables() {
+    let store = MemoryStore::default();
+    let mut session = postgresql_session(&store);
+    for sql in [
+        "CREATE TABLE parted (id integer, day date) PARTITION BY RANGE (day)",
+        "CREATE TABLE parted_2024 PARTITION OF parted FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')",
+        "INSERT INTO parted VALUES (1, '2024-05-05')",
+        "CREATE VIEW film_titles AS SELECT title FROM films",
+        "CREATE TEMP TABLE scratch (n integer)",
+        "INSERT INTO scratch VALUES (7)",
+    ] {
+        answer(&mut session, sql);
+    }
+    for query in [
+        "SELECT * FROM parted FOR UPDATE",
+        "SELECT * FROM film_titles FOR SHARE",
+        "SELECT * FROM (SELECT * FROM films) s FOR UPDATE",
+        "SELECT * FROM (SELECT * FROM (SELECT title FROM film_titles) i) s FOR UPDATE",
+        "SELECT n FROM scratch, LATERAL (SELECT title FROM films) f FOR UPDATE",
+        "WITH c AS (SELECT * FROM parted) SELECT * FROM c FOR UPDATE",
+        "DECLARE locked CURSOR FOR SELECT * FROM films FOR UPDATE",
+    ] {
+        answer(&mut session, "BEGIN READ ONLY");
+        let error = refusal(&mut session, query);
+        assert_eq!(error.state().code(), "25006", "{query}");
+        answer(&mut session, "ROLLBACK");
+    }
+    answer(&mut session, "BEGIN READ ONLY");
+    for (query, rows) in [
+        (
+            "SELECT * FROM (SELECT n FROM scratch) s FOR UPDATE",
+            "n\n7\nSELECT 1",
+        ),
+        (
+            "WITH c AS (SELECT n FROM scratch) SELECT n FROM c FOR UPDATE",
+            "n\n7\nSELECT 1",
+        ),
+        (
+            "WITH RECURSIVE c (n) AS (SELECT n FROM scratch UNION ALL SELECT n + 1 FROM c WHERE n < 8) SELECT n FROM c FOR UPDATE",
+            "n\n7\n8\nSELECT 2",
+        ),
+    ] {
+        assert_eq!(answer(&mut session, query), rows, "{query}");
+    }
+    answer(&mut session, "COMMIT");
+}
+
+#[test]
+fn row_locking_a_table_with_row_security_is_refused_for_a_checked_role_in_a_read_only_transaction()
+{
+    let store = MemoryStore::default();
+    let mut admin = postgresql_session(&store);
+    for sql in [
+        "CREATE USER ada LOGIN",
+        "GRANT SELECT ON films TO ada",
+        "ALTER TABLE films ENABLE ROW LEVEL SECURITY",
+        "CREATE POLICY every_film ON films FOR SELECT TO PUBLIC USING (true)",
+    ] {
+        answer(&mut admin, sql);
+    }
+    let mut ada = Session::new(&store);
+    if let Err(error) = ada.identify_role("ada", "eggdb") {
+        panic!("ada: {error}");
+    }
+    assert_eq!(
+        answer(&mut ada, "SELECT title FROM films"),
+        "title\nBananas\nSELECT 1"
+    );
+    answer(&mut ada, "BEGIN READ ONLY");
+    let error = refusal(&mut ada, "SELECT title FROM films FOR UPDATE");
+    assert_eq!(error.state().code(), "25006");
+    answer(&mut ada, "ROLLBACK");
+}

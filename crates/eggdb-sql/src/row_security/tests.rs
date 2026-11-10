@@ -277,6 +277,56 @@ fn merge_needs_the_privilege_of_each_action() {
     .unwrap();
 }
 
+#[test]
+fn update_or_replace_needs_the_delete_privilege_for_the_rows_it_deletes() {
+    let store = MemoryStore::default();
+    setup(&store);
+    reader_of_payroll(&store, "SELECT, UPDATE");
+    let mut clerk = Session::with_dialect(&store, crate::Dialect::Sqlite);
+    clerk.identify_role("clerk", "eggdb").unwrap();
+    let replacing = "UPDATE OR REPLACE payroll SET id = 2 WHERE id = 1";
+    assert_eq!(
+        run(&mut clerk, replacing).unwrap_err().state(),
+        SqlState::INSUFFICIENT_PRIVILEGE
+    );
+    run(
+        &mut clerk,
+        "UPDATE OR IGNORE payroll SET pay = 11 WHERE id = 1",
+    )
+    .unwrap();
+    let mut admin = Session::new(&store);
+    run(&mut admin, "GRANT DELETE ON payroll TO clerk").unwrap();
+    run(&mut clerk, replacing).unwrap();
+    assert_eq!(
+        run(&mut admin, "SELECT id, pay FROM payroll ORDER BY id").unwrap(),
+        "id|pay\n2|11\nSELECT 1"
+    );
+}
+
+#[test]
+fn update_or_replace_is_refused_where_a_delete_policy_applies() {
+    let store = MemoryStore::default();
+    owned_documents(
+        &store,
+        &["CREATE POLICY own ON docs USING (owner = current_user)"],
+    );
+    let before = stored_rows(&store);
+    let mut ada = Session::with_dialect(&store, crate::Dialect::Sqlite);
+    ada.identify_role("ada", "eggdb").unwrap();
+    let error = run(&mut ada, "UPDATE OR REPLACE docs SET id = 2 WHERE id = 1").unwrap_err();
+    assert_eq!(error.state(), SqlState::FEATURE_NOT_SUPPORTED, "{error}");
+    assert_eq!(
+        error.message(),
+        "UPDATE OR REPLACE on a table with row-level security for this role"
+    );
+    assert_eq!(stored_rows(&store), before);
+    run(
+        &mut ada,
+        "UPDATE OR ABORT docs SET body = 'a3' WHERE id = 1",
+    )
+    .unwrap();
+}
+
 fn owned_documents(store: &MemoryStore, policies: &[&str]) {
     crate::memory_store::use_seeded_random_bytes();
     let mut admin = Session::new(store);

@@ -2689,7 +2689,7 @@ DROP TABLE Nulls341
 
 
 
-chapter "SELECT - INTO Clause (Transact-SQL)": each new column has the nullability of the column it copies
+chapter "SELECT - INTO Clause (Transact-SQL)": each new column has the nullability of the column it copies, and an identity column keeps its identity property
 ok
 CREATE TABLE Parts342 (PartID int IDENTITY(1, 1) PRIMARY KEY, Name nvarchar(20) NOT NULL, Note nvarchar(20))
 
@@ -2700,10 +2700,15 @@ ok
 SELECT PartID, Name, Note INTO PartsCopy342 FROM Parts342
 
 error 23502 515
-INSERT INTO PartsCopy342 VALUES (3, NULL, N'x')
+INSERT INTO PartsCopy342 (Name, Note) VALUES (NULL, N'x')
 
-ok
+error 42P10 8101
+INSERT INTO PartsCopy342 VALUES (3, NULL, N'x')
+... differs
+
+error 42P10 8101
 INSERT INTO PartsCopy342 VALUES (3, N'Washer', NULL)
+... differs
 
 ok
 DROP TABLE PartsCopy342

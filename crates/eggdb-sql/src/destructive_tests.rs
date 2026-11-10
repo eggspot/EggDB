@@ -469,6 +469,46 @@ fn upserts_and_merges_that_overwrite_rows_are_destructive() {
 }
 
 #[test]
+fn update_or_replace_pinned_by_its_key_is_destructive_because_it_deletes_colliding_rows() {
+    let store = keyed_store();
+    let pinned = "UPDATE OR REPLACE t SET code = 'c2' WHERE id = 1";
+    assert_eq!(
+        kind_with_keys(&store, Dialect::Sqlite, pinned),
+        Some(DestructiveKind::UpdateOverwritingRows)
+    );
+    assert_eq!(
+        kind_with_keys(
+            &store,
+            Dialect::Sqlite,
+            "UPDATE t SET code = 'c2' WHERE id = 1"
+        ),
+        None
+    );
+    for resolution in ["ABORT", "FAIL", "IGNORE", "ROLLBACK"] {
+        let text = format!("UPDATE OR {resolution} t SET code = 'c2' WHERE id = 1");
+        assert_eq!(
+            kind_with_keys(&store, Dialect::Sqlite, &text),
+            None,
+            "{text}"
+        );
+    }
+    let mut session = Session::with_dialect(&store, Dialect::Sqlite);
+    let whole = session
+        .destructive_statement("UPDATE OR REPLACE t SET code = 'c2'")
+        .unwrap()
+        .unwrap();
+    let kinds: Vec<DestructiveKind> = whole.parts.iter().map(|part| part.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            DestructiveKind::UpdateWithoutFilter,
+            DestructiveKind::UpdateOverwritingRows
+        ]
+    );
+    assert_eq!(whole.objects().collect::<Vec<_>>(), ["t", "t"]);
+}
+
+#[test]
 fn creating_inserting_renaming_and_reading_are_not_destructive() {
     for dialect in Dialect::ALL {
         for text in [

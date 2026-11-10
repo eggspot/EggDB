@@ -413,7 +413,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Server's dialects, measuring statement-level rollback's extra read per key (D317).
 - PostgreSQL's exported snapshots: `pg_export_snapshot()` and `SET TRANSACTION SNAPSHOT` (D318).
 - The locking clause kept in the statement's tree, so `FOR UPDATE` in a read-only transaction is
-  found exactly (D338).
+  found exactly: a column named `share` after `FOR`, `FOR UPDATE OF` naming only temporary
+  tables, and an outer clause over a `WITH` query, which PostgreSQL does not lock (D338).
 - `ROLLBACK TO SAVEPOINT` undoes key-value writes made through `eggdb serve`'s RESP and wire
   sessions once those share a block with SQL (D319).
 - The savepoint undo log bounded as a whole against the session's memory budget, or spilled to
