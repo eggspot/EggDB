@@ -1,5 +1,5 @@
 use crate::cpus::{CpuId, CpuSet};
-use crate::topology::{CpuTopology, NumaNodeId, TopologyReport, number_groups};
+use crate::topology::{CoreKind, CpuTopology, NumaNodeId, TopologyReport, number_groups};
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
@@ -13,6 +13,7 @@ const CACHE_DATA: u32 = 2;
 const HEADER_SIZE: usize = 8;
 const PROCESSOR_MASKS: usize = 32;
 const PROCESSOR_GROUP_COUNT: usize = 30;
+const PROCESSOR_EFFICIENCY_CLASS: usize = 9;
 const NUMA_NODE_NUMBER: usize = 8;
 const CACHE_LEVEL: usize = 8;
 const CACHE_LINE_SIZE: usize = 10;
@@ -53,6 +54,7 @@ impl AffinityLayout {
 #[derive(Debug, Default)]
 struct Records {
     cores: Vec<CpuSet>,
+    core_classes: Vec<u8>,
     packages: Vec<CpuSet>,
     numa_nodes: BTreeMap<CpuId, NumaNodeId>,
     numa_conflict: bool,
@@ -75,12 +77,16 @@ fn parse_records(mut buffer: &[u8], layout: AffinityLayout) -> Option<Records> {
         let (record, rest) = buffer.split_at(size);
         buffer = rest;
         match relationship {
-            RELATION_PROCESSOR_CORE => records.cores.push(masks(
-                record,
-                PROCESSOR_GROUP_COUNT,
-                PROCESSOR_MASKS,
-                layout,
-            )?),
+            RELATION_PROCESSOR_CORE => {
+                records.cores.push(masks(
+                    record,
+                    PROCESSOR_GROUP_COUNT,
+                    PROCESSOR_MASKS,
+                    layout,
+                )?);
+                let [class] = field(record, PROCESSOR_EFFICIENCY_CLASS)?;
+                records.core_classes.push(class);
+            }
             RELATION_PROCESSOR_PACKAGE => records.packages.push(masks(
                 record,
                 PROCESSOR_GROUP_COUNT,
@@ -130,10 +136,29 @@ fn build(records: Records) -> CpuTopology {
         numa_nodes: (!records.numa_conflict && every_cpu_has_a_node).then_some(records.numa_nodes),
         last_level_caches: last_level_caches(&records.caches, &cpus).and_then(number_groups),
         cache_line_size: records.cache_line_size,
-        kinds: None,
+        kinds: core_kinds(&records.cores, &records.core_classes),
         cpus,
     }
     .into_topology()
+}
+
+fn core_kinds(cores: &[CpuSet], classes: &[u8]) -> Option<BTreeMap<CpuId, CoreKind>> {
+    let fastest = *classes.iter().max()?;
+    if classes.iter().all(|&class| class == fastest) {
+        return None;
+    }
+    let mut kinds = BTreeMap::new();
+    for (core, &class) in cores.iter().zip(classes) {
+        let kind = if class == fastest {
+            CoreKind::Performance
+        } else {
+            CoreKind::Efficiency
+        };
+        for cpu in core.iter() {
+            kinds.insert(cpu, kind);
+        }
+    }
+    Some(kinds)
 }
 
 fn placed_cpus(group: &CpuSet, cpus: &CpuSet) -> CpuSet {
@@ -266,6 +291,29 @@ mod tests {
     fn two_by_two_by_two() -> CpuTopology {
         let two = NonZeroUsize::new(2).unwrap();
         CpuTopology::symmetric(two, two, two, SiblingNumbering::Adjacent).unwrap()
+    }
+
+    #[test]
+    fn efficiency_classes_mark_performance_and_efficiency_cores() {
+        let layout = AffinityLayout::Wide;
+        let mut buffer = Vec::new();
+        buffer.extend(record(0, &[(9, &[1])], 30, &[(0, 0b11)], layout));
+        buffer.extend(record(0, &[(9, &[0])], 30, &[(0, 0b100)], layout));
+        buffer.extend(record(0, &[(9, &[0])], 30, &[(0, 0b1000)], layout));
+        let topology = parse(&buffer, layout);
+        assert_eq!(topology.performance_cpus(), Some(CpuSet::parse_list("0-1").unwrap()));
+    }
+
+    #[test]
+    fn one_efficiency_class_marks_no_kinds() {
+        let layout = AffinityLayout::Wide;
+        let buffer = two_packages_of_two_cores_with_two_threads(layout);
+        assert!(
+            parse(&buffer, layout)
+                .locations()
+                .iter()
+                .all(|location| location.kind().is_none())
+        );
     }
 
     #[test]

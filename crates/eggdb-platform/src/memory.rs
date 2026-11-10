@@ -170,6 +170,19 @@ impl MemoryRegion {
     pub fn is_locked(&self) -> bool {
         self.locked
     }
+
+    /// Moves the region's pages to NUMA node `node` and keeps the pages it touches later
+    /// there, so the threads pinned to that node's CPUs read local memory. Fails with
+    /// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput) for a node the machine does
+    /// not have, and with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a region
+    /// from the heap or where the platform cannot place memory (everywhere but Linux and
+    /// Android).
+    pub fn place_on_numa_node(&mut self, node: crate::topology::NumaNodeId) -> Result<()> {
+        if matches!(self.release, Release::Heap { .. }) {
+            return Err(Error::new(ErrorKind::Unsupported));
+        }
+        crate::os_memory::place_on_numa_node(self.ptr, self.len, node.index())
+    }
 }
 
 impl Deref for MemoryRegion {

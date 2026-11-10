@@ -654,6 +654,13 @@ mod platform {
             number(c"hw.packages"),
             number(c"hw.cachelinesize").filter(|size| size.is_power_of_two()),
         )
+        .map(|topology| {
+            topology.with_performance_core_count(
+                number(c"hw.nperflevels")
+                    .filter(|levels| levels.get() > 1)
+                    .and_then(|_| number(c"hw.perflevel0.logicalcpu")),
+            )
+        })
         .unwrap_or_default()
     }
 

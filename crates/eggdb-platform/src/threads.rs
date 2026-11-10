@@ -16,6 +16,7 @@ pub struct ThreadOptions {
     name: Option<String>,
     stack_size: Option<usize>,
     cpus: Option<CpuSet>,
+    hot: bool,
 }
 
 impl ThreadOptions {
@@ -40,6 +41,17 @@ impl ThreadOptions {
     /// Pins the thread to `cpus` through [`Cpus::pin_current_thread`] before it runs.
     pub fn pin(mut self, cpus: CpuSet) -> Self {
         self.cpus = Some(cpus);
+        self
+    }
+
+    /// Marks the thread as latency-critical work, which a hybrid processor should run on its
+    /// performance cores: on Apple's systems the thread asks for the user-interactive quality
+    /// of service, which the scheduler keeps on performance cores; elsewhere, when the thread is
+    /// not pinned and the topology names performance cores, it is pinned to those among the
+    /// available CPUs. Either step is best effort: a refusal leaves the thread where the system
+    /// puts it.
+    pub fn hot(mut self) -> Self {
+        self.hot = true;
         self
     }
 
@@ -69,8 +81,12 @@ impl ThreadOptions {
         }
         let (pinned_sender, pinned) = mpsc::sync_channel(1);
         let pin = self.cpus;
+        let hot = self.hot;
         let cpus = cpus.clone();
         let handle = builder.spawn(move || {
+            if hot {
+                prefer_performance_cores(&cpus, pin.is_some());
+            }
             let outcome = pin.map_or(Ok(()), |set| cpus.pin_current_thread(&set));
             let run = outcome.is_ok();
             let _ = pinned_sender.send(outcome);
@@ -87,6 +103,43 @@ impl ThreadOptions {
                 Err(Error::new(ErrorKind::Other))
             }
         }
+    }
+}
+
+fn prefer_performance_cores<C: Cpus>(cpus: &C, pinned_by_caller: bool) {
+    if quality_of_service::ask_for_user_interactive() || pinned_by_caller {
+        return;
+    }
+    let Some(performance) = cpus.topology().performance_cpus() else {
+        return;
+    };
+    let available = cpus.available();
+    let wanted: CpuSet = performance.iter().filter(|cpu| available.contains(*cpu)).collect();
+    if !wanted.is_empty() {
+        let _ = cpus.pin_current_thread(&wanted);
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+mod quality_of_service {
+    use std::ffi::c_int;
+
+    const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+
+    unsafe extern "C" {
+        fn pthread_set_qos_class_self_np(class: u32, relative_priority: c_int) -> c_int;
+    }
+
+    pub(super) fn ask_for_user_interactive() -> bool {
+        // SAFETY: the call takes two integers and changes only the calling thread's class.
+        unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) == 0 }
+    }
+}
+
+#[cfg(not(target_vendor = "apple"))]
+mod quality_of_service {
+    pub(super) fn ask_for_user_interactive() -> bool {
+        false
     }
 }
 
