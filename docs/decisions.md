@@ -425,3 +425,4 @@ its full title with its status.
 - [D398](decisions/D398.md) Code-only batch 45 (M7): memcached's binary protocol
 - [D399](decisions/D399.md) Code-only batch 46 (M8): `_source` filtering on `GET _doc` and `GET <index>/_source/<id>`
 - [D400](decisions/D400.md) Code-only batch 47 (M8): Elasticsearch `if_seq_no`/`if_primary_term` and `retry_on_conflict`
+- [D401](decisions/D401.md) Code-only batch 48 (M8): index lists and patterns in Elasticsearch URLs

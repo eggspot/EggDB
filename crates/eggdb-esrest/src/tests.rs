@@ -1385,3 +1385,24 @@ fn if_seq_no_and_if_primary_term_guard_index_update_and_delete() {
     let deleted = api.answer(&request("DELETE", "/books/_doc/1?if_seq_no=1&if_primary_term=1", ""));
     assert_eq!(deleted.status, 200, "{}", body(&deleted));
 }
+
+#[test]
+fn search_and_by_query_take_lists_and_patterns_of_indices() {
+    let keyspace = MemoryKeyspace::default();
+    let api = seeded(&keyspace);
+    api.answer(&request("PUT", "/bookmarks/_doc/9", "{\"title\":\"fox notes\"}"));
+    let counted = body(&api.answer(&request("GET", "/books,bookmarks/_count", "")));
+    assert!(counted.contains("\"count\":4"), "{counted}");
+    let pattern = body(&api.answer(&request("GET", "/book*/_count", "")));
+    assert!(pattern.contains("\"count\":4"), "{pattern}");
+    let excluded = body(&api.answer(&request("GET", "/book*,-bookmarks/_count", "")));
+    assert!(excluded.contains("\"count\":3"), "{excluded}");
+    let deleted = body(&api.answer(&request(
+        "POST",
+        "/book*/_delete_by_query",
+        "{\"query\":{\"match\":{\"title\":\"fox\"}}}",
+    )));
+    assert!(deleted.contains("\"deleted\":2"), "{deleted}");
+    let missing = api.answer(&request("POST", "/books,nowhere/_delete_by_query", "{}"));
+    assert_eq!(missing.status, 404);
+}

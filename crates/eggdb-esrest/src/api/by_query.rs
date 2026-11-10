@@ -1,7 +1,7 @@
 use super::{
     Answer, Api, document_key, document_prefix, error, index_key, json, missing_index,
-    over_memory_budget, query_flag, read, script_error, scripted, stored, unstored, validation,
-    write,
+    over_memory_budget, query_flag, read, resolve_indices, script_error, scripted, stored,
+    unstored, validation, write,
 };
 use crate::json_out::{Out, escaped};
 use crate::query::{Query, Stats, analyze, parse, score};
@@ -362,13 +362,29 @@ impl Api<'_> {
         } else {
             Change::Delete
         };
-        let mut reservation = self.memory_budget.empty_reservation();
-        let matched = match self.matched_documents(index, &options, &mut reservation)? {
-            Snapshot::Matched(matched) => matched,
-            Snapshot::MissingIndex => return Ok(missing_index(index)),
-            Snapshot::OverBudget => return Ok(over_memory_budget()),
+        let ignore_unavailable =
+            query_flag(request, "ignore_unavailable").as_deref() == Some("true");
+        let resolved = read(self.keyspace, |keys| {
+            resolve_indices(keys, &[index], ignore_unavailable)
+        })?;
+        let targets = match resolved {
+            Ok(targets) => targets,
+            Err(missing) => return Ok(missing_index(&missing)),
         };
-        let mut tally = self.change_matched(index, &matched, change, &options)?;
+        let mut tally = Tally::default();
+        for target in &targets {
+            let mut reservation = self.memory_budget.empty_reservation();
+            let matched = match self.matched_documents(target, &options, &mut reservation)? {
+                Snapshot::Matched(matched) => matched,
+                Snapshot::MissingIndex => return Ok(missing_index(target)),
+                Snapshot::OverBudget => return Ok(over_memory_budget()),
+            };
+            let part = self.change_matched(target, &matched, change, &options)?;
+            tally.add(&part);
+            tally.batches += part.batches;
+            tally.failures.extend(part.failures);
+            tally.status = tally.status.max(part.status);
+        }
         if let Some(max_docs) = options.max_docs {
             tally.total = tally.total.min(max_docs);
         }

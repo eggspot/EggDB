@@ -312,6 +312,65 @@ fn indices_of(keys: &dyn KeysRead) -> Result<Vec<String>, String> {
         .collect())
 }
 
+fn index_glob(pattern: &str, name: &str) -> bool {
+    let pieces: Vec<&str> = pattern.split('*').collect();
+    let [first, middle @ .., last] = pieces.as_slice() else {
+        return pattern == name;
+    };
+    if !name.starts_with(first) {
+        return false;
+    }
+    let mut rest = &name[first.len()..];
+    for piece in middle {
+        match rest.find(piece) {
+            Some(at) => rest = &rest[at + piece.len()..],
+            None => return false,
+        }
+    }
+    rest.len() >= last.len() && rest.ends_with(last)
+}
+
+pub(super) fn resolve_indices(
+    keys: &dyn KeysRead,
+    written: &[&str],
+    ignore_unavailable: bool,
+) -> Result<Result<Vec<String>, String>, String> {
+    let mut resolved: Vec<String> = Vec::new();
+    let mut every: Option<Vec<String>> = None;
+    for part in written.iter().flat_map(|names| names.split(',')) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(excluded) = part.strip_prefix('-')
+            && !resolved.is_empty()
+        {
+            resolved.retain(|name| !index_glob(excluded, name));
+            continue;
+        }
+        if part == "_all" || part.contains('*') {
+            if every.is_none() {
+                every = Some(indices_of(keys)?);
+            }
+            for name in every.iter().flatten() {
+                let pattern = if part == "_all" { "*" } else { part };
+                if index_glob(pattern, name) && !resolved.contains(name) {
+                    resolved.push(name.clone());
+                }
+            }
+            continue;
+        }
+        if keys.get(&index_key(part))?.is_some() {
+            if !resolved.iter().any(|name| name == part) {
+                resolved.push(part.to_owned());
+            }
+        } else if !ignore_unavailable {
+            return Ok(Err(part.to_owned()));
+        }
+    }
+    Ok(Ok(resolved))
+}
+
 fn ensure_index(keys: &mut dyn KeysWrite, index: &str) -> Result<(), String> {
     if keys.get(&index_key(index))?.is_none() {
         keys.put(&index_key(index), b"{}")?;
@@ -933,17 +992,10 @@ impl<'k> Api<'k> {
             query_flag(request, "ignore_unavailable").as_deref() == Some("true");
         let gathered = read(self.keyspace, |keys| {
             let searched = match indices {
-                Some(named) => {
-                    let mut searched = Vec::new();
-                    for index in named {
-                        if keys.get(&index_key(index))?.is_some() {
-                            searched.push((*index).to_owned());
-                        } else if !ignore_unavailable {
-                            return Ok(Err((*index).to_owned()));
-                        }
-                    }
-                    searched
-                }
+                Some(named) => match resolve_indices(keys, named, ignore_unavailable)? {
+                    Ok(searched) => searched,
+                    Err(missing) => return Ok(Err(missing)),
+                },
                 None => indices_of(keys)?,
             };
             let mut all = Vec::new();
