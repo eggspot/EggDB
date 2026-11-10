@@ -37,6 +37,7 @@ pub(crate) fn argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         | "pg_get_function_result"
         | "pg_get_partkeydef" => &[OID],
         "pg_get_statisticsobjdef_columns" => &[OID],
+        "pg_partition_root" => &[REGCLASS],
         "pg_get_expr" => &[NODE_TREE, OID, BOOLEAN],
         "pg_get_constraintdef" | "pg_get_viewdef" | "pg_get_triggerdef" | "pg_get_ruledef" => {
             &[OID, BOOLEAN]
@@ -80,7 +81,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         | "pg_get_function_identity_arguments"
         | "pg_get_function_result"
         | "pg_get_partkeydef" => SqlType::Text,
-        "to_regclass" => SqlType::Catalog(CatalogType::Reg(RegKind::Class)),
+        "to_regclass" | "pg_partition_root" => SqlType::Catalog(CatalogType::Reg(RegKind::Class)),
         "to_regtype" | "pg_typeof" => SqlType::Catalog(CatalogType::Reg(RegKind::Type)),
         "acldefault" => SqlType::Array(crate::arrays::ArrayElement::AclItem),
         "makeaclitem" => SqlType::Catalog(CatalogType::AclItem),
@@ -98,12 +99,150 @@ pub(crate) fn partition_ancestors_type(types: &[Option<SqlType>]) -> SqlResult<S
     }
 }
 
+pub(crate) const PARTITION_TREE: &str = "pg_partition_tree";
+
+pub(crate) const PARTITION_TREE_COLUMNS: [(&str, SqlType); 4] = [
+    ("relid", SqlType::Catalog(CatalogType::Reg(RegKind::Class))),
+    ("parentrelid", SqlType::Catalog(CatalogType::Reg(RegKind::Class))),
+    ("isleaf", SqlType::Boolean),
+    ("level", SqlType::Integer),
+];
+
+struct Inheritance {
+    pairs: Vec<(u32, u32)>,
+}
+
+impl Inheritance {
+    fn of(snapshot: &CatalogSnapshot) -> Self {
+        Self {
+            pairs: super::relations::inheritance_pairs(snapshot),
+        }
+    }
+
+    fn parent(&self, oid: u32) -> Option<u32> {
+        self.pairs
+            .iter()
+            .find(|(child, _)| *child == oid)
+            .map(|(_, parent)| *parent)
+    }
+
+    fn children(&self, oid: u32) -> Vec<u32> {
+        let mut found: Vec<u32> = self
+            .pairs
+            .iter()
+            .filter(|(_, parent)| *parent == oid)
+            .map(|(child, _)| *child)
+            .collect();
+        found.sort_unstable();
+        found
+    }
+
+    fn takes_part(&self, snapshot: &CatalogSnapshot, oid: u32) -> bool {
+        self.parent(oid).is_some() || super::relations::is_partitioned_relation(snapshot, oid)
+    }
+
+    fn ancestors(&self, oid: u32) -> Vec<u32> {
+        let mut found = vec![oid];
+        let mut at = oid;
+        while let Some(parent) = self.parent(at) {
+            if found.contains(&parent) {
+                break;
+            }
+            found.push(parent);
+            at = parent;
+        }
+        found
+    }
+}
+
+fn regclass(oid: u32) -> Value {
+    Value::Reg(Box::new(snapshot::reg_from_oid(RegKind::Class, oid)))
+}
+
+fn relation_argument(values: &[Value]) -> Option<u32> {
+    match values {
+        [value] if !value.is_null() => identifier(value),
+        _ => None,
+    }
+}
+
 pub(crate) fn partition_ancestors_rows(
-    _: &[Value],
+    values: &[Value],
     _: SqlType,
-    _: &mut (dyn FnMut(Value) -> SqlResult<()> + '_),
+    sink: &mut (dyn FnMut(Value) -> SqlResult<()> + '_),
 ) -> SqlResult<()> {
+    let Some(oid) = relation_argument(values) else {
+        return Ok(());
+    };
+    let snapshot = snapshot::require()?;
+    let inheritance = Inheritance::of(&snapshot);
+    if !inheritance.takes_part(&snapshot, oid) {
+        return Ok(());
+    }
+    for ancestor in inheritance.ancestors(oid) {
+        sink(regclass(ancestor))?;
+    }
     Ok(())
+}
+
+pub(crate) fn partition_tree_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    match types {
+        [_] => Ok(SqlType::Defined(crate::types::DefinedType::RECORD)),
+        _ => Err(crate::error::SqlError::new(
+            crate::error::SqlState::UNDEFINED_FUNCTION,
+            "function pg_partition_tree() takes one argument",
+        )),
+    }
+}
+
+pub(crate) fn partition_tree_records(
+    values: &[Value],
+    sink: &mut crate::json_functions::RecordSink<'_>,
+) -> SqlResult<()> {
+    let Some(oid) = relation_argument(values) else {
+        return Ok(());
+    };
+    let snapshot = snapshot::require()?;
+    let inheritance = Inheritance::of(&snapshot);
+    if !inheritance.takes_part(&snapshot, oid) {
+        return Ok(());
+    }
+    let mut pending = vec![(oid, 0i32)];
+    let mut seen = Vec::new();
+    while let Some((at, level)) = pending.first().copied() {
+        pending.remove(0);
+        if seen.contains(&at) {
+            continue;
+        }
+        seen.push(at);
+        let children = inheritance.children(at);
+        let leaf = children.is_empty() && !super::relations::is_partitioned_relation(&snapshot, at);
+        sink(vec![
+            regclass(at),
+            inheritance.parent(at).map_or(Value::Null, regclass),
+            Value::Boolean(leaf),
+            Value::Integer(level),
+        ])?;
+        pending.extend(children.into_iter().map(|child| (child, level.saturating_add(1))));
+    }
+    Ok(())
+}
+
+pub(crate) fn partition_tree_rows(
+    values: &[Value],
+    _: SqlType,
+    sink: &mut (dyn FnMut(Value) -> SqlResult<()> + '_),
+) -> SqlResult<()> {
+    partition_tree_records(values, &mut |fields| {
+        sink(crate::records::record_value(
+            crate::records::RECORD_OID,
+            fields,
+            PARTITION_TREE_COLUMNS
+                .iter()
+                .map(|(name, _)| (*name).to_owned())
+                .collect(),
+        ))
+    })
 }
 
 fn identifier(value: &Value) -> Option<u32> {
@@ -258,6 +397,17 @@ fn with_snapshot(name: &str, values: &[Value], first: Option<u32>) -> SqlResult<
             pretty(rest.first()),
         )),
         ("pg_get_partkeydef", [_]) => text(snapshot.partition_key_definition(object)),
+        ("pg_partition_root", [_]) => {
+            let inheritance = Inheritance::of(&snapshot);
+            if inheritance.takes_part(&snapshot, object) {
+                inheritance
+                    .ancestors(object)
+                    .last()
+                    .map_or(Value::Null, |root| regclass(*root))
+            } else {
+                Value::Null
+            }
+        }
         ("pg_get_triggerdef", _) => text(
             snapshot
                 .trigger(object)

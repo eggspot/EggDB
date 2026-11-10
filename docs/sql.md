@@ -4058,7 +4058,7 @@ builds the catalog; naming a table there is `42809 "t" is not a sequence`. `pg_g
 only the catalog's `pg_node_tree` columns, as PostgreSQL does. The functions:
 `format_type`, `pg_get_userbyid`, `pg_table_is_visible`, `pg_type_is_visible`, `pg_get_expr`,
 `pg_get_constraintdef`, `pg_get_indexdef`, `pg_get_viewdef` (the view's stored text),
-`pg_relation_is_publishable`, `pg_partition_ancestors` (no rows: there are no partitions),
+`pg_relation_is_publishable`, `pg_partition_ancestors`, `pg_partition_tree` and `pg_partition_root` (tables and indexes, D365),
 `pg_encoding_to_char`, `obj_description`, `col_description`, `pg_get_serial_sequence` (the
 sequence a `serial` column owns, schema-qualified, or NULL), `to_regclass` and `to_regtype`
 (NULL for a name that does not exist), `pg_typeof` (the `regtype` of its argument's type,
