@@ -18,7 +18,7 @@ pub(crate) struct SetReturningFunction {
     fields: bool,
 }
 
-const FUNCTIONS: [SetReturningFunction; 37] = [
+const FUNCTIONS: [SetReturningFunction; 39] = [
     to_records("json_to_record"),
     to_records("jsonb_to_record"),
     to_records("json_to_recordset"),
@@ -168,6 +168,18 @@ const FUNCTIONS: [SetReturningFunction; 37] = [
         fields: true,
     },
     SetReturningFunction {
+        name: crate::sqlite_json::EACH,
+        result_type: crate::sqlite_json::each_type,
+        rows: sqlite_json_each_rows,
+        fields: true,
+    },
+    SetReturningFunction {
+        name: crate::sqlite_json::TREE,
+        result_type: crate::sqlite_json::each_type,
+        rows: sqlite_json_tree_rows,
+        fields: true,
+    },
+    SetReturningFunction {
         name: crate::pg_catalog::PARTITION_TREE,
         result_type: crate::pg_catalog::partition_tree_type,
         rows: crate::pg_catalog::partition_tree_rows,
@@ -201,7 +213,24 @@ fn hstore_each_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> Sql
     })
 }
 
+fn sqlite_json_each_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::sqlite_json::each_rows(crate::sqlite_json::EACH, values, sink)
+}
+
+fn sqlite_json_tree_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::sqlite_json::each_rows(crate::sqlite_json::TREE, values, sink)
+}
+
 fn record_columns(name: &str) -> Vec<OutputColumn> {
+    if name == crate::sqlite_json::EACH || name == crate::sqlite_json::TREE {
+        return crate::sqlite_json::EACH_COLUMNS
+            .iter()
+            .map(|(column, sql_type)| OutputColumn {
+                name: (*column).to_owned(),
+                sql_type: Some(*sql_type),
+            })
+            .collect();
+    }
     if name == crate::pg_catalog::PARTITION_TREE {
         return crate::pg_catalog::PARTITION_TREE_COLUMNS
             .iter()
@@ -250,6 +279,8 @@ fn record_rows(
         crate::pg_catalog::acl::exploded_records(values, sink)
     } else if name == crate::pg_catalog::PARTITION_TREE {
         crate::pg_catalog::partition_tree_records(values, sink)
+    } else if name == crate::sqlite_json::EACH || name == crate::sqlite_json::TREE {
+        crate::sqlite_json::each_records(name, values, sink)
     } else if name == crate::json_functions::OPENJSON_PAIRS {
         crate::json_functions::openjson_pair_rows(values, sink)
     } else {

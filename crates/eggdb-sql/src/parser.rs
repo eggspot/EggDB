@@ -2847,6 +2847,24 @@ impl<'t> Parser<'t> {
         if self.postgresql() && self.at_table_function() {
             return self.table_function();
         }
+        if self.sqlite()
+            && (self.is_word("json_each") || self.is_word("json_tree"))
+            && self.peek_kind_at(1) == &TokenKind::LeftParen
+        {
+            let tree = self.is_word("json_tree");
+            let mut reference = self.table_function()?;
+            if let Some(generated) = reference.generated.as_deref_mut()
+                && let crate::ast::GeneratedTable::Function(function) = generated
+            {
+                function.name = if tree {
+                    crate::sqlite_json::TREE
+                } else {
+                    crate::sqlite_json::EACH
+                }
+                .to_owned();
+            }
+            return Ok(reference);
+        }
         if self.oracle() && self.is_word("table") && self.peek_kind_at(1) == &TokenKind::LeftParen {
             return self.oracle_collection_table();
         }

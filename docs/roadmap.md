@@ -568,7 +568,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   **code written, unbuilt** (code-only mode, 2026-11-10, D376); the math functions, `unhex`,
   `zeroblob` and `randomblob`: **code written, unbuilt** (D377); the reading and building JSON
   functions: **code written, unbuilt** (D378), the editing ones (D379), `->`/`->>` (D380) and
-  `json_group_array`/`object` (D381); left: `json_each`/`json_tree`; `GLOB` classes and temporary views are built (D299,
+  `json_group_array`/`object` (D381) and `json_each`/`json_tree` (D382); `GLOB` classes and temporary views are built (D299,
   D151). Check: the SQLite suite.
 - SQLite's own text in `sqlite_schema` after `RENAME COLUMN`, `DROP COLUMN` and renamed
   references in views and triggers (D273, D294).

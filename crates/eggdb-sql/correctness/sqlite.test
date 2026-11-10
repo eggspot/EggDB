@@ -1917,3 +1917,29 @@ SELECT 1
 
 ok
 DROP TABLE jg381
+
+chapter "JSON Functions And Operators": the json_each and json_tree table-valued functions (D382)
+rows
+SELECT key, value, type, fullkey FROM json_each('{"a":1,"b":[2,3]}')
+----
+key|value|type|fullkey
+a|1|integer|$.a
+b|[2,3]|array|$.b
+SELECT 2
+
+rows
+SELECT fullkey, type, atom FROM json_tree('{"a":[true,"x"]}') ORDER BY id
+----
+fullkey|type|atom
+$|object|NULL
+$.a|array|NULL
+$.a[0]|true|1
+$.a[1]|text|x
+SELECT 4
+
+rows
+SELECT value FROM json_each('[10,20,30]', '$') WHERE key = 1
+----
+value
+20
+SELECT 1

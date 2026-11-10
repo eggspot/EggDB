@@ -586,3 +586,151 @@ fn arrow(name: &str, values: &[Value]) -> SqlResult<Value> {
     })
 }
 
+pub(crate) const EACH: &str = "sqlite_json_each";
+pub(crate) const TREE: &str = "sqlite_json_tree";
+
+pub(crate) const EACH_COLUMNS: [(&str, crate::types::SqlType); 8] = [
+    ("key", crate::types::SqlType::DYNAMIC),
+    ("value", crate::types::SqlType::DYNAMIC),
+    ("type", crate::types::SqlType::Text),
+    ("atom", crate::types::SqlType::DYNAMIC),
+    ("id", crate::types::SqlType::BigInt),
+    ("parent", crate::types::SqlType::BigInt),
+    ("fullkey", crate::types::SqlType::Text),
+    ("path", crate::types::SqlType::Text),
+];
+
+pub(crate) fn each_type(types: &[Option<crate::types::SqlType>]) -> SqlResult<crate::types::SqlType> {
+    if types.is_empty() || types.len() > 2 {
+        return Err(SqlError::new(
+            SqlState::UNDEFINED_FUNCTION,
+            "wrong number of arguments to function json_each()",
+        )
+        .with_sqlite_code(1));
+    }
+    Ok(crate::types::SqlType::Defined(crate::types::DefinedType::RECORD))
+}
+
+fn child_path(path: &str, key: &Value) -> String {
+    match key {
+        Value::BigInt(index) => format!("{path}[{index}]"),
+        Value::Text(name)
+            if !name.is_empty()
+                && name.chars().all(|character| character.is_ascii_alphanumeric() || character == '_') =>
+        {
+            format!("{path}.{name}")
+        }
+        Value::Text(name) => format!("{path}.\"{name}\""),
+        _ => path.to_owned(),
+    }
+}
+
+fn atom(node: &Node) -> Value {
+    match &node.value {
+        Json::Array(_) | Json::Object(_) => Value::Null,
+        _ => sql_value(node),
+    }
+}
+
+struct Walk<'s, 'r> {
+    sink: &'s mut crate::json_functions::RecordSink<'r>,
+    next_id: i64,
+}
+
+impl Walk<'_, '_> {
+    fn emit(
+        &mut self,
+        node: &Node,
+        key: Value,
+        parent: Option<i64>,
+        fullkey: &str,
+        path: &str,
+    ) -> SqlResult<i64> {
+        let id = self.next_id;
+        self.next_id += 1;
+        (self.sink)(vec![
+            key,
+            sql_value(node),
+            Value::Text(type_name(node).to_owned()),
+            atom(node),
+            Value::BigInt(id),
+            parent.map_or(Value::Null, Value::BigInt),
+            Value::Text(fullkey.to_owned()),
+            Value::Text(path.to_owned()),
+        ])?;
+        Ok(id)
+    }
+
+    fn children(node: &Node) -> Vec<(Value, &Node)> {
+        match &node.value {
+            Json::Array(items) => items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| (Value::BigInt(index as i64), item))
+                .collect(),
+            Json::Object(members) => members
+                .iter()
+                .map(|(name, item)| (Value::Text(name.clone()), item))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn tree(&mut self, node: &Node, key: Value, parent: Option<i64>, fullkey: &str, path: &str) -> SqlResult<()> {
+        let id = self.emit(node, key, parent, fullkey, path)?;
+        for (child_key, child) in Self::children(node) {
+            let child_fullkey = child_path(fullkey, &child_key);
+            self.tree(child, child_key, Some(id), &child_fullkey, fullkey)?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn each_records(
+    name: &str,
+    values: &[Value],
+    sink: &mut crate::json_functions::RecordSink<'_>,
+) -> SqlResult<()> {
+    let Some((_, root)) = document(values.first().unwrap_or(&Value::Null))? else {
+        return Ok(());
+    };
+    let start = match values.get(1) {
+        Some(path) => match path_text(path)? {
+            Some(path) => path,
+            None => return Ok(()),
+        },
+        None => "$".to_owned(),
+    };
+    let Some(node) = at(&root, &start)? else {
+        return Ok(());
+    };
+    let mut walk = Walk { sink, next_id: 1 };
+    if name == TREE {
+        return walk.tree(node, Value::Null, None, &start, &start);
+    }
+    let children = Walk::children(node);
+    if children.is_empty() && !matches!(node.value, Json::Array(_) | Json::Object(_)) {
+        walk.emit(node, Value::Null, None, &start, &start)?;
+        return Ok(());
+    }
+    for (key, child) in children {
+        let fullkey = child_path(&start, &key);
+        walk.emit(child, key, None, &fullkey, &start)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn each_rows(
+    name: &str,
+    values: &[Value],
+    sink: &mut crate::set_returning::RowSink<'_>,
+) -> SqlResult<()> {
+    each_records(name, values, &mut |fields| {
+        sink(crate::records::record_value(
+            crate::records::RECORD_OID,
+            fields,
+            EACH_COLUMNS.iter().map(|(column, _)| (*column).to_owned()).collect(),
+        ))
+    })
+}
+
