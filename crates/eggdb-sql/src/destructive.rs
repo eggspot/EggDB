@@ -1122,6 +1122,9 @@ fn altered(table: &Name, actions: &[AlterAction]) -> Option<DestructiveStatement
             | AlterAction::ReorganizePartitions { .. }
             | AlterAction::SplitPartition { .. }
             | AlterAction::ExchangePartition { .. }
+            | AlterAction::CoalescePartitions { .. }
+            | AlterAction::MergePartitions { .. }
+            | AlterAction::ModifyPartitionValues { .. }
             | AlterAction::AttachIndex(_)
             | AlterAction::MoveColumn { .. }
             | AlterAction::AddIndex(_)

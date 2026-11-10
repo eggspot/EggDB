@@ -421,6 +421,48 @@ impl Parser<'_> {
             });
             return Ok(true);
         }
+        if self.mysql() && self.is_word("coalesce") && self.is_word_at(1, "partition") {
+            self.at += 2;
+            let count = self.partition_count()?;
+            actions.push(AlterAction::CoalescePartitions { count, position });
+            return Ok(true);
+        }
+        if self.oracle() && self.is_word("merge") && self.is_word_at(1, "partitions") {
+            self.at += 2;
+            let mut from = vec![self.name()?];
+            while self.take(&TokenKind::Comma) {
+                from.push(self.name()?);
+            }
+            self.expect_word("into")?;
+            self.expect_word("partition")?;
+            let into = self.name()?;
+            self.skip_partition_options()?;
+            self.skip_oracle_index_clauses();
+            actions.push(AlterAction::MergePartitions { from, into });
+            return Ok(true);
+        }
+        if self.oracle()
+            && self.is_word("modify")
+            && self.is_word_at(1, "partition")
+            && (self.is_word_at(3, "add") || self.is_word_at(3, "drop"))
+            && self.is_word_at(4, "values")
+        {
+            self.at += 2;
+            let partition = self.name()?;
+            let adding = self.take_word("add");
+            if !adding {
+                self.expect_word("drop")?;
+            }
+            self.expect_word("values")?;
+            let values = self.bound_values()?;
+            self.skip_oracle_index_clauses();
+            actions.push(AlterAction::ModifyPartitionValues {
+                partition,
+                values,
+                adding,
+            });
+            return Ok(true);
+        }
         if self.is_word("exchange") && self.is_word_at(1, "partition") {
             self.at += 2;
             let partition = self.name()?;

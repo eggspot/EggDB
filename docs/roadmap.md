@@ -388,11 +388,14 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Oracle's interval partitioning and SQL Server's partition schemes (D169); MySQL's
   `SUBPARTITION BY`, `LOAD DATA ... PARTITION`, `INSERT IGNORE` skipping rows outside a
   `PARTITION (...)` set with a warning, and ids for rows written straight into a partition of a
-  table with an identity column (D337).
+  table with an identity column (D337). `INSERT IGNORE` skipping rows outside a `PARTITION (...)`
+  set: **code written, unbuilt** (code-only mode, 2026-11-10, D360).
 - An identity or `AUTO_INCREMENT` column anywhere in the primary key, as MySQL allows, with table
   definition version 15 and its D35 review (D337).
 - MySQL's and Oracle's partition `ALTER`s (add, drop, split, exchange) (D169). **Code written, unbuilt**
-  (code-only mode, 2026-11-10, D358). Left: `COALESCE`, `MERGE PARTITIONS`, `MODIFY PARTITION`.
+  (code-only mode, 2026-11-10, D358). `COALESCE PARTITION`, `MERGE PARTITIONS` and `MODIFY PARTITION
+  ... ADD | DROP VALUES`: **code written, unbuilt** (code-only mode, 2026-11-10, D360). Left:
+  Oracle's `MERGE PARTITIONS a TO b` range form, `REBUILD`, `ANALYZE`, `CHECK`, `OPTIMIZE`, `REPAIR`.
 - Online upgrades with a tested downgrade path to the previous minor version (D20, D35). Check:
   the upgrade, downgrade and mixed-version file tests in CI.
 - Online schema changes and reindexing that block neither reads nor writes (D20). Check: a

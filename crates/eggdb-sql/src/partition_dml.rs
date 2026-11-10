@@ -369,6 +369,9 @@ pub(crate) fn insert(
         None => None,
     };
     let mut groups: Vec<(String, Vec<usize>, Vec<Vec<InsertValue>>)> = Vec::new();
+    let ignores_rows = matches!(insert.on_duplicate, OnDuplicate::Ignore)
+        && crate::constraints::current_dialect() == Dialect::MySql;
+    let mut skipped: Vec<crate::mysql_errors::Warning> = Vec::new();
     let mut key_row = vec![Value::Null; table.columns.len()];
     let key_columns = partitioned.columns_read();
     for row in rows {
@@ -401,14 +404,22 @@ pub(crate) fn insert(
             }
         }
         let Some(child) = partitioned.route(&key_row)? else {
+            if ignores_rows {
+                skipped.push(skipped_row(partitioned.no_partition(&key_row)));
+                continue;
+            }
             return Err(partitioned.no_partition(&key_row));
         };
         if let Some(selected) = &selected
             && !selected.contains(child)
         {
-            return Err(
-                crate::partition_selection::row_outside_selection().at(insert.table.name.position)
-            );
+            let outside =
+                crate::partition_selection::row_outside_selection().at(insert.table.name.position);
+            if ignores_rows {
+                skipped.push(skipped_row(outside));
+                continue;
+            }
+            return Err(outside);
         }
         match groups
             .iter_mut()
@@ -445,10 +456,22 @@ pub(crate) fn insert(
         merged.add(execute::insert(writer, tables, &routed)?);
     }
     let mut result = merged.finish("INSERT 0 0");
+    if !skipped.is_empty() {
+        skipped.append(&mut result.warnings);
+        result.warnings = skipped;
+    }
     if let Some(identity) = identity {
         result.last_insert_id = identity.first_generated;
     }
     Ok(result)
+}
+
+fn skipped_row(error: SqlError) -> crate::mysql_errors::Warning {
+    crate::mysql_errors::Warning {
+        level: "Warning",
+        code: error.vendor_code().unwrap_or(1748),
+        message: error.message().to_owned(),
+    }
 }
 
 fn surviving_selected(

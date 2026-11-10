@@ -1005,6 +1005,19 @@ pub(crate) enum AlterAction {
         table: Name,
         validate: bool,
     },
+    CoalescePartitions {
+        count: u32,
+        position: usize,
+    },
+    MergePartitions {
+        from: Vec<Name>,
+        into: Name,
+    },
+    ModifyPartitionValues {
+        partition: Name,
+        values: Vec<PartitionBoundValue>,
+        adding: bool,
+    },
     AttachIndex(Name),
     MoveColumn {
         column: Name,

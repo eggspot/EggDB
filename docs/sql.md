@@ -2775,7 +2775,15 @@ ALTER TABLE measurements DETACH PARTITION old_rows;
   PARTITION b)` rebuild them and route every row again, and `EXCHANGE PARTITION p WITH TABLE t`
   swaps a partition with a table of the same columns, always checking that the table's rows fit
   the partition (`WITHOUT VALIDATION` does not skip it). Oracle's `INCLUDING | EXCLUDING INDEXES`
-  and `UPDATE [GLOBAL] INDEXES` are accepted.
+  and `UPDATE [GLOBAL] INDEXES` are accepted. MySQL's `COALESCE PARTITION n` removes the last `n`
+  hash partitions and spreads their rows over the rest (`1509` on range and list tables, `1508`
+  for all of them); Oracle's `MERGE PARTITIONS a, b, ... INTO PARTITION c` joins adjacent range
+  partitions (`ORA-14274` otherwise) or list partitions (with a `DEFAULT` one the result is the
+  default), and `MODIFY PARTITION p ADD VALUES (...) | DROP VALUES (...)` changes a list
+  partition's values (`ORA-14312`, `ORA-14313`, `ORA-14314`, `ORA-14324` for values whose rows sit
+  in the default partition, `ORA-14518` for dropped values that still have rows) (D360).
+  MySQL's `INSERT IGNORE` skips a row outside the named `PARTITION (...)` set (`1748`) or with no
+  partition at all (`1526`) with a warning, as MySQL does.
 - **Hash values.** Hash partitions assign rows by EggDB's own hash of the key, not PostgreSQL's,
   so a `COPY` of a hash partition's rows from a `pg_dump` is routed through the partitioned
   table, as `pg_dump --load-via-partition-root` would.
@@ -4689,7 +4697,8 @@ And more, not in the suite yet:
   integers. Strings are not converted to numbers implicitly (`'5' + 1` with a typed string).
 - `AUTO_INCREMENT` continues from the largest value in the table, so the value of a deleted last
   row is given again, which MySQL 8 does not do; `AUTO_INCREMENT=n` table options are ignored.
-- `INSERT IGNORE` skips duplicate keys only; other errors still fail the statement.
+- `INSERT IGNORE` skips duplicate keys, and rows of a partitioned table outside the named
+  partitions or with no partition (D360); other errors still fail the statement.
 - `CHAR(n)` is `varchar(n)`: trailing spaces a value is given are kept, where MySQL removes them
   when the value is read (D113).
 - `BINARY(n)` is not padded with zero bytes and `VARBINARY(n)` and the `BLOB` sizes do not limit

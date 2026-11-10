@@ -249,6 +249,27 @@ fn apply(
             )?;
             Ok(None)
         }
+        AlterAction::CoalescePartitions { count, position } => {
+            let parent = current(writer, tables, name)?;
+            crate::partition_alter::coalesce(writer, tables, &parent, *count, *position, dialect)?;
+            Ok(None)
+        }
+        AlterAction::MergePartitions { from, into } => {
+            let parent = current(writer, tables, name)?;
+            crate::partition_alter::merge(writer, tables, &parent, from, into, dialect)?;
+            Ok(None)
+        }
+        AlterAction::ModifyPartitionValues {
+            partition,
+            values,
+            adding,
+        } => {
+            let parent = current(writer, tables, name)?;
+            crate::partition_alter::modify_values(
+                writer, tables, &parent, partition, values, *adding, dialect,
+            )?;
+            Ok(None)
+        }
         AlterAction::AttachIndex(partition_index) => {
             let index = Name {
                 text: name.clone(),
