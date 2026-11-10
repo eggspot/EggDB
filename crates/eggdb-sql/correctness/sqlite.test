@@ -1809,3 +1809,25 @@ SELECT 1
 
 ok
 DROP TABLE gc376
+
+chapter "Built-In Mathematical SQL Functions", "Built-In Scalar SQL Functions": unhex, zeroblob, randomblob (D377)
+rows
+SELECT ceil(1.2) AS c, floor(-1.2) AS f, trunc(-1.7) AS t, ceil(4) AS i, mod(7, 3) AS m, pow(2, 10) AS p
+----
+c|f|t|i|m|p
+2.0|-2.0|-1.0|4|1.0|1024.0
+SELECT 1
+
+rows
+SELECT log(100) AS a, log(2, 8) AS b, ln(-1) AS c, acos(2) AS d, sqrt(16) AS e, degrees(pi()) AS g
+----
+a|b|c|d|e|g
+2.0|3.0|NULL|NULL|4.0|180.0
+SELECT 1
+
+rows
+SELECT hex(unhex('0aFF')) AS a, unhex('0a-ff', '-') IS NULL AS b, unhex('0g') IS NULL AS c, length(zeroblob(4)) AS d, length(randomblob(16)) AS e
+----
+a|b|c|d|e
+0AFF|0|1|4|16
+SELECT 1

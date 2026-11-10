@@ -885,7 +885,10 @@ impl<'t> Parser<'t> {
             "char" => ("sqlite_char", &[]),
             "sign" => ("sqlite_sign", &[1]),
             "sqrt" => ("sqlite_sqrt", &[1]),
-            _ => return Ok(None),
+            other => match crate::sqlite_math::named(other) {
+                Some(found) => found,
+                None => return Ok(None),
+            },
         };
         let arguments = self.call_arguments()?;
         let count_ok = if counts.is_empty() {

@@ -250,6 +250,9 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
     if let Some(function) = crate::sqlite_datetime::DateFunction::of_internal_name(name) {
         return Ok(crate::sqlite_datetime::call(function, values));
     }
+    if let Some(value) = crate::sqlite_math::call(name, values) {
+        return Ok(value);
+    }
     let text = |index: usize| values.get(index).and_then(text_of);
     let any_null = values.iter().any(Value::is_null);
     let null = Value::Null;
