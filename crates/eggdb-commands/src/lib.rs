@@ -13,7 +13,8 @@
 //! - A paging cursor ([`encode_cursor`], [`decode_cursor`]) is what a list command prints and
 //!   a list tool returns as `next_cursor`, so the next page starts after the last item (D145).
 //! - A time to live ([`parse_time_to_live`]) is read the same way by `eggdb put --ttl`, the MCP
-//!   tool `put` and `eggdb ui`.
+//!   tool `put` and `eggdb ui`, and a key's expiry time ([`expires_at`], over [`utc_rfc3339`]) is
+//!   written the same way by the CLI's JSON and the MCP tools.
 //!
 //! The shared part of the model is EggOS's `docs/ux/command-model.md`; EggDB's tables are in
 //! `docs/ux/command-model.md` in this repository. The registry is `'static` data with no
@@ -22,6 +23,7 @@
 mod cursor;
 mod registry;
 mod time_to_live;
+mod utc_time;
 
 pub use cursor::{
     CursorList, CursorRefusal, LONGEST_CURSOR, check_cursor, decode_cursor, encode_cursor,
@@ -31,6 +33,7 @@ pub use registry::{
     COMMANDS, COMMON_OPTIONS, CORE_VERBS, ERROR_CODES, KEPT_NAMES, NOUNS, SHIPPED_TOOL_NAMES, TOOLS,
 };
 pub use time_to_live::{TimeToLiveError, parse_time_to_live};
+pub use utc_time::{expires_at, utc_rfc3339};
 
 /// The most a use of a command or a call of a tool can do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -497,6 +500,16 @@ pub enum ArgumentType {
         /// The value when it is left out.
         default: u64,
     },
+    /// A whole number, possibly negative, from `least` to `most`, `default` when it is left out
+    /// and there is one.
+    SignedInteger {
+        /// The smallest value.
+        least: i64,
+        /// The largest value.
+        most: i64,
+        /// The value when it is left out, or `None` when it has no default.
+        default: Option<i64>,
+    },
     /// `true` or `false`, `default` when it is left out.
     Boolean {
         /// The value when it is left out.
@@ -511,7 +524,7 @@ impl ArgumentType {
     pub const fn json_type(self) -> &'static str {
         match self {
             Self::String | Self::Dialect => "string",
-            Self::Integer { .. } => "integer",
+            Self::Integer { .. } | Self::SignedInteger { .. } => "integer",
             Self::Boolean { .. } => "boolean",
         }
     }
@@ -575,7 +588,8 @@ pub enum ConfirmCheck {
     /// key or of a unique key to values, `REPLACE` or an upsert, or a `MERGE` that updates or
     /// deletes.
     DestructiveStatement,
-    /// The call deletes a key of the key-value store, which cannot be brought back (D328).
+    /// The call deletes a key of the key-value store, which cannot be brought back: every
+    /// `del` (D328), and `expire` with a `ttl` of 0 and `cas` with `delete` (D346).
     KeyDelete,
 }
 

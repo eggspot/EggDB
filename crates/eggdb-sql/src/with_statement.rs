@@ -78,6 +78,7 @@ fn replace_reference(
         alias: Some(label),
         derived: None,
         generated: Some(Box::new(GeneratedTable::Variable(variable.clone()))),
+        partition_selection: None,
     };
     Ok(())
 }

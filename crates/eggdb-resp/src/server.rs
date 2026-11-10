@@ -1,10 +1,13 @@
+use crate::blocking::{BlockingCommand, WaiterRegistry};
 use crate::commands::{Client, Context};
-use crate::keyspace::Keyspace;
-use crate::protocol::{ProtocolError, Reply, RequestReader};
+use crate::keyspace::{EntryVisitor, KeysRead, KeysWrite, Keyspace};
+use crate::pops::OnWrongType;
+use crate::protocol::{ProtocolError, ReadAhead, Reply, RequestReader};
 use crate::pubsub::{Hub, Kind, Queued};
 use crate::transactions::execute_with_transactions;
 use eggdb_platform::connection_limits::{MemoryBudget, UNCOUNTED_BUFFER_BYTES};
-use std::io::{self, Write};
+use std::cell::RefCell;
+use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
@@ -81,6 +84,95 @@ impl io::Read for StopAwareStream<'_> {
     }
 }
 
+struct RecordingKeys<'k, 'w> {
+    inner: &'k mut dyn KeysWrite,
+    written: &'w mut Vec<Vec<u8>>,
+}
+
+impl KeysRead for RecordingKeys<'_, '_> {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        self.inner.get(key)
+    }
+
+    fn keys(&self) -> Result<Vec<Vec<u8>>, String> {
+        self.inner.keys()
+    }
+
+    fn visit_keys(
+        &self,
+        visit: &mut dyn FnMut(Vec<u8>) -> Result<bool, String>,
+    ) -> Result<(), String> {
+        self.inner.visit_keys(visit)
+    }
+
+    fn scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
+        self.inner.scan(prefix)
+    }
+
+    fn visit_prefix(&self, prefix: &[u8], visit: &mut EntryVisitor<'_>) -> Result<(), String> {
+        self.inner.visit_prefix(prefix, visit)
+    }
+}
+
+impl KeysWrite for RecordingKeys<'_, '_> {
+    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), String> {
+        self.inner.put(key, value)?;
+        self.written.push(key.to_vec());
+        Ok(())
+    }
+
+    fn delete(&mut self, key: &[u8]) -> Result<bool, String> {
+        self.inner.delete(key)
+    }
+
+    fn clear(&mut self) -> Result<(), String> {
+        self.inner.clear()
+    }
+}
+
+struct NotifyingKeyspace<'k> {
+    inner: &'k dyn Keyspace,
+    written: RefCell<Vec<(u32, Vec<u8>)>>,
+}
+
+impl NotifyingKeyspace<'_> {
+    fn take_written(&self) -> Vec<(u32, Vec<u8>)> {
+        self.written
+            .try_borrow_mut()
+            .map(|mut written| std::mem::take(&mut *written))
+            .unwrap_or_default()
+    }
+}
+
+impl Keyspace for NotifyingKeyspace<'_> {
+    fn read(
+        &self,
+        db: u32,
+        body: &mut dyn FnMut(&dyn KeysRead) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.inner.read(db, body)
+    }
+
+    fn write(
+        &self,
+        db: u32,
+        body: &mut dyn FnMut(&mut dyn KeysWrite) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut written = Vec::new();
+        self.inner.write(db, &mut |keys| {
+            written.clear();
+            body(&mut RecordingKeys {
+                inner: keys,
+                written: &mut written,
+            })
+        })?;
+        if let Ok(mut recorded) = self.written.try_borrow_mut() {
+            recorded.extend(written.into_iter().map(|key| (db, key)));
+        }
+        Ok(())
+    }
+}
+
 struct Connection<'s> {
     id: u64,
     hub: &'s Hub,
@@ -95,6 +187,21 @@ impl Connection<'_> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         writer.write_all(bytes)
+    }
+
+    fn read_ahead(&self, reader: &mut RequestReader<StopAwareStream<'_>>) -> ReadAhead {
+        let mut stream = self
+            .writer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if stream.set_nonblocking(true).is_err() {
+            return ReadAhead::Closed;
+        }
+        let ahead = reader.read_ahead(&mut |buffer| stream.read(buffer));
+        if stream.set_nonblocking(false).is_err() {
+            return ReadAhead::Closed;
+        }
+        ahead
     }
 
     fn start_outbox(&mut self, resp3: bool) {
@@ -159,6 +266,7 @@ fn serve_connection(
     stream: TcpStream,
     id: u64,
     hub: &Hub,
+    waiters: &WaiterRegistry,
     keyspace: &dyn Keyspace,
     config: &ServerConfig,
     stop: &(dyn Fn() -> bool + Sync),
@@ -166,6 +274,10 @@ fn serve_connection(
     if stream.set_read_timeout(Some(READ_POLL)).is_err() || stream.set_nodelay(true).is_err() {
         return;
     }
+    let notifying = NotifyingKeyspace {
+        inner: keyspace,
+        written: RefCell::default(),
+    };
     let Ok(writer) = stream.try_clone() else {
         return;
     };
@@ -210,7 +322,9 @@ fn serve_connection(
             && name != "quit"
         {
             vec![Reply::Error("NOAUTH Authentication required.".to_owned())]
-        } else if let Some(replies) = connection.pubsub(&client, &name, &arguments[1..]) {
+        } else if let Some(replies) =
+            connection.pubsub(&client, &name, arguments.get(1..).unwrap_or_default())
+        {
             replies
         } else if subscribed && !client.resp3 && !matches!(name.as_str(), "ping" | "quit" | "reset")
         {
@@ -219,13 +333,60 @@ fn serve_connection(
             ))]
         } else {
             let context = Context {
-                keyspace,
+                keyspace: &notifying,
                 password_sha256: config.password_sha256.as_ref(),
                 now_ms: now_ms(),
                 reply_room_bytes: reply_room(&config.memory_budget, held.bytes(), out.len()),
             };
-            vec![execute_with_transactions(&context, &mut client, &arguments)]
+            let blocking = if client.queued.is_none() {
+                BlockingCommand::parse(&name, arguments.get(1..).unwrap_or_default())
+            } else {
+                None
+            };
+            match blocking {
+                None => vec![execute_with_transactions(&context, &mut client, &arguments)],
+                Some(Err(error)) => vec![Reply::Error(error)],
+                Some(Ok(mut command)) => {
+                    let db = client.db;
+                    match command.attempt(&context, db, OnWrongType::Refuse) {
+                        Some(reply) => vec![reply],
+                        None => {
+                            if !out.is_empty() {
+                                if connection.send(&out).is_err() {
+                                    break;
+                                }
+                                out.clear();
+                                out.shrink_to(UNCOUNTED_BUFFER_BYTES);
+                            }
+                            let reply_room_bytes =
+                                reply_room(&config.memory_budget, held.bytes(), 0);
+                            let mut retry = |command: &mut BlockingCommand| {
+                                let context = Context {
+                                    keyspace: &notifying,
+                                    password_sha256: config.password_sha256.as_ref(),
+                                    now_ms: now_ms(),
+                                    reply_room_bytes,
+                                };
+                                command.attempt(&context, db, OnWrongType::Wait)
+                            };
+                            let mut abandoned =
+                                || stop() || connection.read_ahead(&mut reader) != ReadAhead::Open;
+                            match waiters.wait(
+                                db,
+                                &mut command,
+                                READ_POLL,
+                                &mut retry,
+                                &mut abandoned,
+                            ) {
+                                Some(reply) => vec![reply],
+                                None => break,
+                            }
+                        }
+                    }
+                }
+            }
         };
+        waiters.notify_written(&notifying.take_written());
         let replied_from = out.len();
         for reply in &replies {
             reply.encode(&mut out, client.resp3);
@@ -265,6 +426,7 @@ pub fn serve(
     listener.set_nonblocking(true)?;
     let active = AtomicUsize::new(0);
     let hub = Hub::new(Arc::clone(&config.memory_budget));
+    let waiters = WaiterRegistry::default();
     let next_id = AtomicU64::new(1);
     std::thread::scope(|scope| {
         while !stop() {
@@ -294,11 +456,12 @@ pub fn serve(
             }
             let active = &active;
             let hub = &hub;
+            let waiters = &waiters;
             let id = next_id.fetch_add(1, Ordering::Relaxed);
             let spawned = std::thread::Builder::new()
                 .name("eggdb-resp".to_owned())
                 .spawn_scoped(scope, move || {
-                    serve_connection(stream, id, hub, keyspace, config, stop);
+                    serve_connection(stream, id, hub, waiters, keyspace, config, stop);
                     active.fetch_sub(1, Ordering::AcqRel);
                 });
             if spawned.is_err() {

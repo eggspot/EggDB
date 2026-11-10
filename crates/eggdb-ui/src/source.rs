@@ -51,6 +51,17 @@ pub trait Source {
         Ok(Vec::new())
     }
 
+    /// The names of [`Source::collections`], each with the entry count the collection keeps
+    /// up to date on every write, or `None` for a collection that keeps none. It never reads a
+    /// collection's keys. A source that keeps no counts gives every name `None`.
+    fn kept_collection_counts(&self) -> Result<Vec<(String, Option<u64>)>, SourceError> {
+        Ok(self
+            .collections()?
+            .into_iter()
+            .map(|name| (name, None))
+            .collect())
+    }
+
     /// Makes [`Source::keys`], [`Source::value`], [`Source::count`] and [`Source::write`] act on
     /// the collection `name` from now on, or on the default key space for `None`. It fails with
     /// [`ErrorKind::CollectionNotFound`] when there is no such collection.

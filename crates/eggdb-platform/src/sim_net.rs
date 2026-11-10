@@ -2,7 +2,7 @@ use crate::clock::{Clock, SimClock};
 use crate::error::{Error, ErrorKind, Result};
 use crate::net::{
     Address, NetCompletion, NetListener, NetOp, NetOutput, NetQueue, NetQueueOptions, NetStream,
-    Network, RejectedNetOp, answered_at_once, net_queue_full,
+    Network, RejectedNetOp, TcpKeepAlive, answered_at_once, net_queue_full,
 };
 use crate::rng::SplitMix64;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -64,6 +64,17 @@ pub use datagram::SimDatagramSocket;
 /// or a timeout, the end's [`NetStream::peer_address`] and [`NetStream::shutdown_write`] fail
 /// with [`ErrorKind::NotConnected`], as the operating systems' do.
 ///
+/// An end with keep-alives ([`NetStream::set_keep_alive`]) and nothing of its own left
+/// unacknowledged probes its peer once it has heard nothing for the idle time. A peer it can
+/// reach both ways answers every probe, so keep-alives never end a connection between hosts
+/// that can reach each other, and cost the simulation nothing while they do. Across a cut the
+/// probes go unanswered: the first one goes out at the end of the idle time that started when
+/// the peer was last heard (or at the end of the first idle period the cut reaches, since the
+/// probes before it were answered), and after [`TcpKeepAlive::count`] probes
+/// [`TcpKeepAlive::interval`] apart the end gives up as after its retransmissions, its next
+/// operation failing with [`ErrorKind::TimedOut`] once. When the cut heals first, the next probe
+/// is answered and the end counts its idle time again from then.
+///
 /// Datagrams ([`SimDatagramSocket`]) cross the same latency, links and cuts: a datagram sent
 /// across a cut is lost rather than held, datagrams may overtake each other when their latency
 /// differs, and a socket holds at most [`SimNetwork::DATAGRAM_BUFFER_BYTES`] in transit and
@@ -115,6 +126,31 @@ struct Connection {
     failed: [Option<ErrorKind>; 2],
     timeout_reported: [bool; 2],
     peer_ended_before_timeout: [bool; 2],
+    keep_alives: [KeepAliveWatch; 2],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct KeepAliveWatch {
+    timing: Option<TcpKeepAlive>,
+    last_heard: Duration,
+    gives_up_at: Option<Duration>,
+}
+
+impl KeepAliveWatch {
+    fn heard_at(at: Duration) -> Self {
+        Self {
+            timing: None,
+            last_heard: at,
+            gives_up_at: None,
+        }
+    }
+}
+
+fn first_unanswered_probe(last_heard: Duration, idle: Duration, cut_seen: Duration) -> Duration {
+    let silent = cut_seen.saturating_sub(last_heard).as_nanos();
+    let idle_periods = silent.div_ceil(idle.as_nanos().max(1)).max(1);
+    let idle_periods = u32::try_from(idle_periods).unwrap_or(u32::MAX);
+    last_heard.saturating_add(idle.saturating_mul(idle_periods))
 }
 
 impl Connection {
@@ -146,6 +182,13 @@ impl Connection {
 
     fn hosts(&self, side: usize) -> [IpAddr; 2] {
         [self.ends[side].ip(), self.ends[1 - side].ip()]
+    }
+
+    fn hear(&mut self, sending_side: usize, acknowledged: bool, at: Duration) {
+        self.keep_alives[1 - sending_side].last_heard = at;
+        if acknowledged {
+            self.keep_alives[sending_side].last_heard = at;
+        }
     }
 }
 
@@ -556,6 +599,19 @@ impl NetStream for SimStream {
         world.end_flow(self.connection, self.side);
         Ok(())
     }
+
+    fn set_keep_alive(&self, keep_alive: Option<TcpKeepAlive>) -> Result<()> {
+        let mut world = lock(&self.network.shared);
+        self.connected(&world)?;
+        let connection = world
+            .connections
+            .get_mut(&self.connection)
+            .ok_or_else(|| Error::new(ErrorKind::NotConnected))?;
+        let watch = &mut connection.keep_alives[self.side];
+        watch.timing = keep_alive;
+        watch.gives_up_at = None;
+        Ok(())
+    }
 }
 
 impl Drop for SimStream {
@@ -712,6 +768,7 @@ impl SimNetQueue {
         let mut reaped = 0;
         let outcome = loop {
             world.watch_retransmissions();
+            world.watch_keep_alives();
             world.deliver_some();
             let done = self.perform(&mut world, completions);
             reaped += done;
@@ -913,7 +970,14 @@ impl World {
                 } else {
                     flow.next_event()
                 };
-                for at in arrival.into_iter().chain(flow.retransmission_deadline()) {
+                let keep_alive_deadline = connection.keep_alives[side]
+                    .gives_up_at
+                    .filter(|_| connection.failed[side].is_none());
+                let deadlines = arrival
+                    .into_iter()
+                    .chain(flow.retransmission_deadline())
+                    .chain(keep_alive_deadline);
+                for at in deadlines {
                     next = Some(next.map_or(at, |next| next.min(at)));
                 }
             }
@@ -947,6 +1011,41 @@ impl World {
                 }
                 let since = *flow.retransmitting_since.get_or_insert(now);
                 if now.saturating_sub(since) >= SimNetwork::RETRANSMISSION_TIMEOUT {
+                    connection.time_out(side);
+                }
+            }
+        }
+    }
+
+    fn watch_keep_alives(&mut self) {
+        let now = self.now();
+        let cuts = &self.cuts;
+        for connection in self.connections.values_mut() {
+            for side in [CLIENT, SERVER] {
+                let [from, to] = connection.hosts(side);
+                let cut = is_cut(cuts, from, to) || is_cut(cuts, to, from);
+                let idle_end =
+                    connection.failed[side].is_none() && !connection.flows[side].unacknowledged;
+                let watch = &mut connection.keep_alives[side];
+                let Some(timing) = watch.timing else {
+                    continue;
+                };
+                if !idle_end {
+                    watch.gives_up_at = None;
+                    continue;
+                }
+                if !cut {
+                    if watch.gives_up_at.take().is_some() {
+                        watch.last_heard = now;
+                    }
+                    continue;
+                }
+                let last_heard = watch.last_heard;
+                let gives_up_at = *watch.gives_up_at.get_or_insert_with(|| {
+                    let probing = timing.interval().saturating_mul(timing.count());
+                    first_unanswered_probe(last_heard, timing.idle(), now).saturating_add(probing)
+                });
+                if now >= gives_up_at {
                     connection.time_out(side);
                 }
             }
@@ -1009,14 +1108,22 @@ impl World {
                 }
                 let flow = &mut connection.flows[side];
                 let due = flow.due(now);
-                if due > 0 {
+                let arrived = if due > 0 {
                     let arriving = 1 + usize::try_from(rng.next_u64() % due as u64).unwrap_or(0);
                     flow.deliver(arriving);
+                    true
                 } else if flow.end_due(now) {
                     flow.end_arrived = true;
-                }
-                if !is_cut(cuts, to, from) && flow.everything_arrived() {
+                    true
+                } else {
+                    false
+                };
+                let acknowledged = !is_cut(cuts, to, from);
+                if acknowledged && flow.everything_arrived() {
                     flow.unacknowledged = false;
+                }
+                if arrived {
+                    connection.hear(side, acknowledged, now);
                 }
             }
         }
@@ -1034,16 +1141,22 @@ impl World {
                 let [from, to] = connection.hosts(side);
                 let flow = &mut connection.flows[side];
                 let due = flow.due(now);
+                let mut arrived = false;
                 if due > 0 {
                     flow.deliver(due);
-                    delivered = true;
+                    arrived = true;
                 }
                 if flow.end_due(now) {
                     flow.end_arrived = true;
-                    delivered = true;
+                    arrived = true;
                 }
-                if !is_cut(cuts, to, from) && flow.everything_arrived() {
+                let acknowledged = !is_cut(cuts, to, from);
+                if acknowledged && flow.everything_arrived() {
                     flow.unacknowledged = false;
+                }
+                if arrived {
+                    connection.hear(side, acknowledged, now);
+                    delivered = true;
                 }
             }
         }
@@ -1164,6 +1277,7 @@ impl World {
                 failed: [None, None],
                 timeout_reported: [false, false],
                 peer_ended_before_timeout: [false, false],
+                keep_alives: [KeepAliveWatch::heard_at(now); 2],
             },
         );
         self.listeners.get_mut(&address)?.push_back(id);
@@ -1284,7 +1398,7 @@ mod tests {
     use super::SimNetwork;
     use crate::{
         Address, Clock, ErrorKind, NetCompletion, NetListener, NetOp, NetQueue, NetQueueOptions,
-        NetStream, Network, SimClock, SimListener, SimNetQueue, SimStream,
+        NetStream, Network, SimClock, SimListener, SimNetQueue, SimStream, TcpKeepAlive,
     };
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Arc;
@@ -1622,6 +1736,100 @@ mod tests {
             assert_eq!(server.peer_address().unwrap_err().kind(), not_connected);
         }
         assert_eq!(pair.network.connection_count(), 0);
+    }
+
+    fn keep_alive_every_minute() -> TcpKeepAlive {
+        TcpKeepAlive::new(Duration::from_secs(60), Duration::from_secs(10), 3).unwrap()
+    }
+
+    #[test]
+    fn keep_alives_fail_an_idle_connection_across_a_long_cut() {
+        let mut pair = Pair::new(30);
+        let (client, server) = pair.connect();
+        server
+            .set_keep_alive(Some(keep_alive_every_minute()))
+            .unwrap();
+        pair.network.partition(CLIENT, SERVER);
+        pair.receive(&server, 8, 0);
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::TimedOut);
+        assert_eq!(pair.now(), keep_alive_every_minute().gives_up_after());
+        assert_eq!(
+            server.peer_address().unwrap_err().kind(),
+            ErrorKind::NotConnected
+        );
+        assert_eq!(
+            server.set_keep_alive(None).unwrap_err().kind(),
+            ErrorKind::NotConnected
+        );
+        pair.receive(&server, 8, 1);
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.result.unwrap().transferred(), Some(0));
+        assert!(client.peer_address().is_ok());
+    }
+
+    #[test]
+    fn keep_alives_count_the_idle_time_from_the_last_bytes_heard() {
+        let mut pair = Pair::new(31);
+        let (client, server) = pair.connect();
+        server
+            .set_keep_alive(Some(keep_alive_every_minute()))
+            .unwrap();
+        pair.receive(&server, 8, 0);
+        let fifty_seconds = Duration::from_secs(50);
+        assert!(pair.reap_for(1, fifty_seconds).is_empty());
+        pair.send(&client, b"x", 1);
+        let completions = pair.reap(2);
+        let received = completions
+            .iter()
+            .find(|completion| completion.user_data == 0)
+            .unwrap();
+        assert_eq!(received.result.as_ref().unwrap().transferred(), Some(1));
+        assert_eq!(pair.now(), fifty_seconds);
+        pair.network.partition(CLIENT, SERVER);
+        pair.receive(&server, 8, 2);
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::TimedOut);
+        assert_eq!(
+            pair.now(),
+            fifty_seconds + keep_alive_every_minute().gives_up_after()
+        );
+    }
+
+    #[test]
+    fn keep_alives_keep_an_idle_connection_whose_cut_heals_before_they_give_up() {
+        let mut pair = Pair::new(32);
+        let (client, server) = pair.connect();
+        server
+            .set_keep_alive(Some(keep_alive_every_minute()))
+            .unwrap();
+        pair.network.partition(CLIENT, SERVER);
+        pair.receive(&server, 8, 0);
+        let short_of_giving_up =
+            keep_alive_every_minute().gives_up_after() - Duration::from_secs(1);
+        assert!(pair.reap_for(1, short_of_giving_up).is_empty());
+        pair.network.heal_all();
+        assert!(pair.reap_for(1, Duration::from_secs(3600)).is_empty());
+        assert!(server.peer_address().is_ok());
+        pair.send(&client, b"x", 1);
+        let completions = pair.reap(2);
+        let received = completions
+            .iter()
+            .find(|completion| completion.user_data == 0)
+            .unwrap();
+        assert_eq!(received.result.as_ref().unwrap().transferred(), Some(1));
+    }
+
+    #[test]
+    fn an_idle_connection_without_keep_alives_waits_out_a_long_cut() {
+        let mut pair = Pair::new(33);
+        let (_client, server) = pair.connect();
+        pair.network.partition(CLIENT, SERVER);
+        pair.receive(&server, 8, 0);
+        let mut completions = Vec::new();
+        let stalled = pair.queue.reap(&mut completions, 1);
+        assert_eq!(stalled.unwrap_err().kind(), ErrorKind::Stalled);
+        assert!(server.peer_address().is_ok());
     }
 
     #[test]

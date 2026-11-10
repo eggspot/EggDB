@@ -8,6 +8,7 @@ pub(crate) const WRONG_TYPE: &str =
 pub(crate) const NOT_INTEGER: &str = "ERR value is not an integer or out of range";
 const NOT_FLOAT: &str = "ERR value is not a valid float";
 pub(crate) const SYNTAX: &str = "ERR syntax error";
+pub(crate) const DAMAGED_VALUE: &str = "ERR the stored value is damaged";
 
 /// One connection's state: its database, protocol version, login, and a transaction it is
 /// queueing.
@@ -108,8 +109,7 @@ pub(crate) fn load(keys: &dyn KeysRead, key: &[u8], now: u64) -> Result<Option<E
     match keys.get(key)? {
         None => Ok(None),
         Some(bytes) => {
-            let entry = Entry::decode(&bytes)
-                .ok_or_else(|| "ERR the stored value is damaged".to_owned())?;
+            let entry = Entry::decode(&bytes).ok_or_else(|| DAMAGED_VALUE.to_owned())?;
             Ok((!entry.expired(now)).then_some(entry))
         }
     }
@@ -711,12 +711,15 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
             Reply::ok()
         }
         _ => crate::aggregates::execute(context, db, name, args)
+            .or_else(|| crate::pops::execute(context, db, name, args))
+            .or_else(|| crate::blocking::execute(context, db, name, args))
             .or_else(|| crate::streams::execute(context, db, name, args))
             .or_else(|| crate::bitmaps::execute(context, db, name, args))
             .or_else(|| crate::hyperloglog::execute(context, db, name, args))
             .or_else(|| crate::geo::execute(context, db, name, args))
             .unwrap_or_else(|| {
                 if crate::aggregates::is_known(name)
+                    || crate::pops::is_known(name)
                     || crate::streams::is_known(name)
                     || crate::bitmaps::is_known(name)
                     || crate::hyperloglog::is_known(name)

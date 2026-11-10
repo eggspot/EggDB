@@ -1,8 +1,12 @@
 use super::{Block, Session};
-use crate::ast::{CharacteristicsTarget, TransactionCharacteristics};
+use crate::ast::{
+    CharacteristicsTarget, Query, Select, SetExpr, Statement, TableReference,
+    TransactionCharacteristics,
+};
 use crate::dialect::Dialect;
 use crate::encoding::is_temporary_key;
 use crate::error::{SqlError, SqlResult, SqlState};
+use crate::lexer::{Token, TokenKind};
 use crate::session::QueryResult;
 use crate::settings::{SettingScope, boolean_setting};
 use crate::store::{EntryVisitor, KeyValueRead, KeyValueWrite, ScanDirection};
@@ -22,6 +26,13 @@ const DEFINITION_COMMANDS: [&str; 9] = [
     "TRUNCATE",
     "SECURITY LABEL",
     "SELECT INTO",
+];
+
+const ROW_LOCK_STRENGTHS: [(&[&str], &str); 4] = [
+    (&["update"], "SELECT FOR UPDATE"),
+    (&["no", "key", "update"], "SELECT FOR NO KEY UPDATE"),
+    (&["share"], "SELECT FOR SHARE"),
+    (&["key", "share"], "SELECT FOR KEY SHARE"),
 ];
 
 #[derive(Debug, Default)]
@@ -103,6 +114,111 @@ pub(super) fn refuse_permanent_name(
         return Err(refused_in_read_only_transaction(command));
     }
     Ok(())
+}
+
+pub(super) fn row_locking_command(tokens: &[Token<'_>]) -> Option<&'static str> {
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| is_word(token, "for"))
+        .find_map(|(at, _)| {
+            ROW_LOCK_STRENGTHS
+                .iter()
+                .find(|(words, _)| {
+                    words.iter().enumerate().all(|(offset, word)| {
+                        tokens
+                            .get(at + 1 + offset)
+                            .is_some_and(|token| is_word(token, word))
+                    })
+                })
+                .map(|(_, command)| *command)
+        })
+}
+
+fn is_word(token: &Token<'_>, word: &str) -> bool {
+    matches!(&token.kind, TokenKind::Word(found) if found.eq_ignore_ascii_case(word))
+}
+
+struct CommonTableInScope<'q> {
+    name: &'q str,
+    query: &'q Query,
+    entered: bool,
+}
+
+fn locks_permanent_rows(statement: &Statement) -> bool {
+    let mut scope = Vec::new();
+    match statement {
+        Statement::Select(select) => select_locks_permanent_rows(select, &mut scope),
+        Statement::Query(query) => query_locks_permanent_rows(query, &mut scope),
+        _ => false,
+    }
+}
+
+fn query_locks_permanent_rows<'q>(
+    query: &'q Query,
+    scope: &mut Vec<CommonTableInScope<'q>>,
+) -> bool {
+    let outer = scope.len();
+    scope.extend(query.with.iter().map(|table| CommonTableInScope {
+        name: table.name.text.as_str(),
+        query: &table.query,
+        entered: false,
+    }));
+    let locks = set_locks_permanent_rows(&query.body, scope);
+    scope.truncate(outer);
+    locks
+}
+
+fn set_locks_permanent_rows<'q>(
+    body: &'q SetExpr,
+    scope: &mut Vec<CommonTableInScope<'q>>,
+) -> bool {
+    match body {
+        SetExpr::Select(select) => select_locks_permanent_rows(select, scope),
+        SetExpr::Query(inner) => query_locks_permanent_rows(inner, scope),
+        SetExpr::Operation(operation) => {
+            set_locks_permanent_rows(&operation.left, scope)
+                || set_locks_permanent_rows(&operation.right, scope)
+        }
+    }
+}
+
+fn select_locks_permanent_rows<'q>(
+    select: &'q Select,
+    scope: &mut Vec<CommonTableInScope<'q>>,
+) -> bool {
+    select.from.as_ref().is_some_and(|from| {
+        std::iter::once(&from.first)
+            .chain(from.joins.iter().map(|join| &join.table))
+            .any(|table| reference_locks_permanent_rows(table, scope))
+    })
+}
+
+fn reference_locks_permanent_rows<'q>(
+    table: &'q TableReference,
+    scope: &mut Vec<CommonTableInScope<'q>>,
+) -> bool {
+    if let Some(derived) = &table.derived {
+        return query_locks_permanent_rows(&derived.query, scope);
+    }
+    if table.generated.is_some() {
+        return false;
+    }
+    if let Some(at) = scope
+        .iter()
+        .rposition(|common| common.name == table.name.text)
+    {
+        if scope[at].entered {
+            return false;
+        }
+        scope[at].entered = true;
+        let query = scope[at].query;
+        let locks = query_locks_permanent_rows(query, scope);
+        scope[at].entered = false;
+        return locks;
+    }
+    !crate::temporary::is_temporary_name(&table.name.text)
+        && !crate::temp_tables::is_temp_table(&table.name.text)
 }
 
 fn before_any_query(what: &str) -> SqlError {
@@ -190,6 +306,26 @@ fn mysql_isolation(level: &str) -> String {
 }
 
 impl<'s> Session<'s> {
+    pub(super) fn locks_permanent_rows(
+        &mut self,
+        binding: &crate::name_resolution::Binding<'_>,
+        statement: &Statement,
+    ) -> bool {
+        if !matches!(statement, Statement::Select(_) | Statement::Query(_)) {
+            return false;
+        }
+        let mut bound = statement.clone();
+        self.read(|reader, tables| {
+            match &mut bound {
+                Statement::Select(select) => binding.select(reader, tables, select)?,
+                Statement::Query(query) => binding.query(reader, tables, query)?,
+                _ => {}
+            }
+            Ok(locks_permanent_rows(&bound))
+        })
+        .unwrap_or(false)
+    }
+
     pub(super) fn transaction_is_read_only(&self) -> bool {
         match self.block {
             Block::Reading(_) => true,
@@ -297,10 +433,26 @@ impl<'s> Session<'s> {
             }
             characteristics.isolation = Some(level);
         }
-        if matches!(self.block, Block::None) {
+        if matches!(self.block, Block::None) && !self.in_implicit_transaction() {
             return Ok(QueryResult::command("SET"));
         }
         self.set_postgresql_transaction(&characteristics)
+    }
+
+    fn in_implicit_transaction(&self) -> bool {
+        self.implicit_transaction && !self.statement_stands_alone
+    }
+
+    fn open_implicit_transaction(&mut self, read_only: Option<bool>) -> SqlResult<()> {
+        let default_read_only = self.new_transactions_read_only();
+        self.block = match read_only {
+            Some(true) => Block::Reading(self.store.begin_boxed_read()?),
+            Some(false) if default_read_only => Block::Writing(self.store.begin_boxed_write()?),
+            Some(false) | None => return Ok(()),
+        };
+        self.block_is_implicit = true;
+        self.transaction_mode.writing_block_read_only = false;
+        Ok(())
     }
 
     fn set_postgresql_transaction(
@@ -319,7 +471,13 @@ impl<'s> Session<'s> {
             return Ok(set);
         }
         if matches!(self.block, Block::None) {
-            return Ok(set.with_notice(SET_TRANSACTION_OUTSIDE_TRANSACTION.into()));
+            if !self.in_implicit_transaction() {
+                return Ok(set.with_notice(SET_TRANSACTION_OUTSIDE_TRANSACTION.into()));
+            }
+            self.open_implicit_transaction(characteristics.read_only)?;
+            if matches!(self.block, Block::None) {
+                return Ok(set);
+            }
         }
         if let Some(level) = &characteristics.isolation {
             let current = self

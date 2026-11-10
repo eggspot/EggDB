@@ -63,7 +63,7 @@ use crate::ast::{
     JoinKind, JoinedTables, Literal, Name, OnDuplicate, Overriding, Select, SelectItem, Statement,
     TableReference, TruthTest, UnaryOperator, Update,
 };
-use crate::ast::{CharacteristicsTarget, TransactionCharacteristics};
+use crate::ast::{CharacteristicsTarget, ConflictResolution, TransactionCharacteristics};
 use crate::dialect::Dialect;
 use crate::encoding::{IndexMethod, SortOptions};
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -301,7 +301,7 @@ const NAMED_PARAMETERS: [(&str, &[&str]); 5] = [
     ),
 ];
 
-const INTERNAL_FUNCTIONS: [&str; 31] = [
+const INTERNAL_FUNCTIONS: [&str; 32] = [
     crate::row_values::ROW_ORDERING,
     crate::row_values::ROW_MEMBERSHIP,
     crate::triggers::RAISE_FUNCTION,
@@ -332,6 +332,7 @@ const INTERNAL_FUNCTIONS: [&str; 31] = [
     crate::aggregate::FILTERED_ARGUMENTS,
     crate::aggregate::ORDERED_SET_ARGUMENTS,
     crate::hypothetical_set::HYPOTHETICAL_ARGUMENTS,
+    crate::bivariate_aggregates::PAIRED_ARGUMENTS,
     crate::window::WINDOW_CALL,
 ];
 
@@ -601,7 +602,7 @@ impl<'t> Parser<'t> {
 
     fn literal_rows_after_into(&mut self) -> Option<LiteralRows<'t>> {
         let table = self.table_reference().ok()?;
-        if table.alias.is_some() || !self.is_word("values") {
+        if table.alias.is_some() || table.partition_selection.is_some() || !self.is_word("values") {
             return None;
         }
         let first = self.at + 1;
@@ -953,6 +954,7 @@ impl<'t> Parser<'t> {
             "values" if self.postgresql() || self.mysql() || self.sqlite() => {
                 self.query_statement()
             }
+            "table" if self.at_table_query_at(0) => self.query_statement(),
             "values" | "table" => Err(self.not_supported("a VALUES or TABLE statement")),
             "set" => self.set(),
             "show" => self.show(),
@@ -1011,6 +1013,12 @@ impl<'t> Parser<'t> {
             "copy" if self.postgresql() || self.oracle() => self.copy(),
             "discard" if self.postgresql() => self.discard(),
             "deallocate" if self.postgresql() => self.deallocate(),
+            "prepare" if self.postgresql() && !self.is_word_at(1, "transaction") => {
+                self.prepare_statement()
+            }
+            "execute" if self.postgresql() => Ok(Statement::Prepared(
+                crate::ast::PreparedCommand::Execute(self.execute_prepared()?),
+            )),
             "declare" if self.postgresql() => self.declare_cursor(),
             "fetch" | "move" if self.postgresql() => self.fetch_cursor(),
             "close" if self.postgresql() => self.close_cursor(),
@@ -1864,6 +1872,9 @@ impl<'t> Parser<'t> {
         if self.postgresql() && self.is_word("partition") && self.is_word_at(1, "of") {
             return self.create_partition_of(name, temporary, if_not_exists);
         }
+        if self.at_create_table_like() {
+            return self.create_table_like(name, temporary.is_some(), if_not_exists);
+        }
         if self.at_create_table_as() {
             return self.create_table_as(name, temporary.is_some(), if_not_exists, None);
         }
@@ -1972,7 +1983,7 @@ impl<'t> Parser<'t> {
             self.sqlserver_table_tail()?;
         }
         if self.oracle() {
-            self.skip_physical_properties()?;
+            self.skip_table_physical_properties()?;
         }
         if let Some(action) = self.on_commit_clause(temporary.is_some())? {
             temporary = Some(action);
@@ -2863,6 +2874,7 @@ impl<'t> Parser<'t> {
             self.at += 1;
         }
         let name = self.table_name()?;
+        let partition_selection = self.partition_selection()?;
         let alias = if self.take_word("as") || self.at_bare_alias() {
             Some(self.name()?.text)
         } else {
@@ -2871,7 +2883,9 @@ impl<'t> Parser<'t> {
         if self.peek_kind() == &TokenKind::LeftParen && alias.is_some() {
             return Err(self.not_supported("column aliases in FROM"));
         }
-        Ok(TableReference::named(name, alias))
+        let mut reference = TableReference::named(name, alias);
+        reference.partition_selection = partition_selection;
+        Ok(reference)
     }
 
     fn at_bare_alias(&self) -> bool {
@@ -2900,7 +2914,7 @@ impl<'t> Parser<'t> {
                     on_duplicate,
                     rollback_on_conflict,
                     keeps_changes_on_conflict,
-                ) = self.sqlite_conflict_resolution()?;
+                ) = self.sqlite_conflict_resolution()?.into_insert_fields();
             }
             self.expect_word("into")?;
         } else if self.sqlserver() {
@@ -2977,6 +2991,7 @@ impl<'t> Parser<'t> {
             InsertSource::Values(rows)
         } else if self.is_word("select")
             || self.is_word("with")
+            || self.at_table_query_at(0)
             || self.peek_kind() == &TokenKind::LeftParen
         {
             InsertSource::Query(Box::new(self.insert_query()?))
@@ -3035,6 +3050,11 @@ impl<'t> Parser<'t> {
 
     fn update(&mut self) -> SqlResult<Statement> {
         self.at += 1;
+        let conflict_resolution = if self.sqlite() && self.take_word("or") {
+            self.sqlite_conflict_resolution()?
+        } else {
+            ConflictResolution::Abort
+        };
         let (mut table, listed) = self.update_target()?;
         self.expect_word("set")?;
         let mut assignments = Vec::new();
@@ -3074,6 +3094,9 @@ impl<'t> Parser<'t> {
                 None
             }
         };
+        if from.is_some() && conflict_resolution.resolves_row_by_row() {
+            return Err(self.not_supported("UPDATE OR FAIL, OR IGNORE or OR REPLACE with FROM"));
+        }
         let filter = self.filter()?;
         let (returning, output_into) = match output {
             Some(clause) => (
@@ -3092,6 +3115,7 @@ impl<'t> Parser<'t> {
             filter,
             returning,
             from,
+            conflict_resolution,
         });
         Ok(sqlserver_functions::with_output_into(
             statement,
@@ -3112,6 +3136,9 @@ impl<'t> Parser<'t> {
             self.expect_word("from")?;
         }
         let mut table = self.table_reference()?;
+        if table.partition_selection.is_none() && table.alias.is_some() {
+            table.partition_selection = self.partition_selection()?;
+        }
         let mut using = if self.is_word("using") {
             if !self.postgresql() {
                 return Err(self.unexpected());
@@ -4873,6 +4900,11 @@ impl<'t> Parser<'t> {
                 expr
             });
         }
+        if (self.postgresql() || self.oracle())
+            && let Some(function) = AggregateFunction::bivariate_named(&name.text)
+        {
+            return self.bivariate_aggregate(&name, function);
+        }
         if self.mysql()
             && let Some(expr) = self.mysql_function(&name)?
         {
@@ -4902,7 +4934,10 @@ impl<'t> Parser<'t> {
         let postgresql_only = (!self.postgresql() && is_postgresql_only(text))
             || (self.mysql() && NOT_IN_MYSQL.contains(&text))
             || (self.sqlite() && NOT_IN_SQLITE.contains(&text));
-        if postgresql_only || INTERNAL_FUNCTIONS.contains(&name.text.as_str()) {
+        if postgresql_only
+            || INTERNAL_FUNCTIONS.contains(&name.text.as_str())
+            || crate::square_root::INTERNAL_NAMES.contains(&text)
+        {
             return Err(SqlError::new(
                 SqlState::UNDEFINED_FUNCTION,
                 format!("function {}() does not exist", name.text),

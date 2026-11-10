@@ -463,3 +463,79 @@ fn vector_or_scalar(data: Result<Data, String>) -> Option<f64> {
         _ => None,
     }
 }
+
+const GZIP_LINES: [u8; 56] = [
+    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x4b, 0x2e, 0x28, 0xd5, 0xc9, 0xc8,
+    0x2f, 0x2e, 0xb1, 0x4d, 0x54, 0x28, 0x2d, 0x4e, 0x4c, 0x4f, 0xb5, 0x35, 0xd4, 0x33, 0x55, 0x30,
+    0x34, 0x37, 0x40, 0x07, 0x5c, 0xc9, 0x30, 0x85, 0x49, 0x50, 0x85, 0x46, 0x38, 0x14, 0x02, 0x00,
+    0x35, 0xbc, 0x95, 0x04, 0x52, 0x00, 0x00, 0x00,
+];
+
+#[test]
+fn gzip_line_protocol_is_decoded_by_the_listener_and_remote_write_stays_snappy() {
+    let to = |path: &str| Request {
+        method: "POST".to_owned(),
+        path: path.to_owned(),
+        query: None,
+        headers: Vec::new(),
+        body: Vec::new(),
+    };
+    assert!(!crate::wants_content_decoded(&to("/api/v1/write")));
+    assert!(crate::wants_content_decoded(&to("/api/v2/write")));
+    assert!(crate::wants_content_decoded(&to("/write")));
+    let store = MemoryStore::default();
+    let endpoint = Endpoint::new(&store, "eggdb", eggdb_crypto::sha256(b"secret"), "eggdb");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let target = eggdb_http::HttpTarget {
+        host: "127.0.0.1".to_owned(),
+        port: listener.local_addr().unwrap().port(),
+        path: "/".to_owned(),
+    };
+    let budget = MemoryBudget::default();
+    let limits = eggdb_http::Limits::new(crate::MAX_REQUEST_BYTES, &budget)
+        .decoding_content_encoding_of(crate::wants_content_decoded);
+    let stopped = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            eggdb_http::serve_with_limits(
+                &listener,
+                &|request| endpoint.answer(request),
+                &|| stopped.load(std::sync::atomic::Ordering::Acquire),
+                &limits,
+            )
+            .unwrap();
+        });
+        let send = |path: &str, coding: &str, body: &[u8]| {
+            eggdb_http::request(
+                &target,
+                "POST",
+                path,
+                &[
+                    ("Authorization".to_owned(), "Token secret".to_owned()),
+                    ("Content-Encoding".to_owned(), coding.to_owned()),
+                ],
+                body,
+                std::time::Duration::from_secs(10),
+                1 << 20,
+            )
+            .unwrap()
+            .status
+        };
+        assert_eq!(send("/api/v2/write?precision=ns", "gzip", &GZIP_LINES), 204);
+        let remote = remote_write_body(&[(&[("__name__", "up"), ("job", "db")], &[(1.0, 61_000)])]);
+        assert_eq!(send("/api/v1/write", "snappy", &remote), 204);
+        assert_eq!(send("/write", "br", b"cpu usage=1"), 415);
+        stopped.store(true, std::sync::atomic::Ordering::Release);
+    });
+    let mut session = eggdb_sql::Session::new(&store);
+    let mut total = None;
+    session
+        .execute("SELECT count(*) FROM metrics.cpu", &mut |result| {
+            total = result
+                .rows
+                .first()
+                .and_then(|row| row.first().and_then(eggdb_sql::Value::to_text))
+        })
+        .unwrap();
+    assert_eq!(total.as_deref(), Some("2"));
+}

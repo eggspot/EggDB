@@ -90,16 +90,20 @@ enum Statement {
     },
 }
 
-/// What a script decided for its document: write it, leave it, or delete it.
+/// What a script decided for its document: write it, leave it, delete it, or (for a scripted
+/// upsert) create it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Operation {
     Index,
     Noop,
     Delete,
+    Create,
 }
 
 /// The document a script runs on: its `_source` (changed in place), `ctx.op`, and the
-/// read-only `ctx._index`, `ctx._id` and `ctx._version`.
+/// read-only `ctx._index`, `ctx._id` and `ctx._version`. A scripted upsert (`upsert` true)
+/// runs on the `upsert` document of a missing one: `ctx.op` starts as `create`, may become
+/// only `create` or `noop`, and `ctx._version` is `null`.
 #[derive(Debug)]
 pub(crate) struct Context<'c> {
     pub(crate) source: Json,
@@ -107,6 +111,7 @@ pub(crate) struct Context<'c> {
     pub(crate) index: &'c str,
     pub(crate) id: &'c str,
     pub(crate) version: u64,
+    pub(crate) upsert: bool,
 }
 
 /// A compiled update script: the subset of Painless that changes `ctx._source` and `ctx.op`.
@@ -198,9 +203,17 @@ impl Script {
                 within_limit(grown)
             }
             Statement::SetOperation(value) => {
+                let upsert = context.upsert;
                 context.operation = match self.evaluate(value, context, 0)? {
-                    Json::String(op) if op == "index" => Operation::Index,
                     Json::String(op) if op == "noop" || op == "none" => Operation::Noop,
+                    Json::String(op) if upsert && op == "create" => Operation::Create,
+                    other if upsert => {
+                        return Err(format!(
+                            "Operation type [{}] not allowed, only [noop, create] are allowed",
+                            display(&other)
+                        ));
+                    }
+                    Json::String(op) if op == "index" => Operation::Index,
                     Json::String(op) if op == "delete" => Operation::Delete,
                     other => {
                         return Err(format!(
@@ -280,6 +293,7 @@ impl Script {
                     Operation::Index => "index",
                     Operation::Noop => "noop",
                     Operation::Delete => "delete",
+                    Operation::Create => "create",
                 }
                 .to_owned(),
             ),
@@ -287,6 +301,7 @@ impl Script {
             Expression::Read(Reference::Meta(Meta::Index)) => {
                 Json::String(context.index.to_owned())
             }
+            Expression::Read(Reference::Meta(Meta::Version)) if context.upsert => Json::Null,
             Expression::Read(Reference::Meta(Meta::Version)) => {
                 Json::Number(context.version.to_string())
             }
@@ -935,6 +950,7 @@ mod tests {
             index: "my-index-000001",
             id: "1",
             version: 3,
+            upsert: false,
         };
         script.run(&mut context)?;
         let written = crate::json_out::written(&eggdb_sql::json::Node {
@@ -1183,5 +1199,51 @@ mod tests {
         );
         let error = run(&twice, &source).expect_err("two copies pass 1 MiB");
         assert!(error.contains("bytes"), "{error}");
+    }
+
+    fn run_upsert(script: &str, source: &str) -> Result<(String, Operation), String> {
+        let script = Script::from_node(&parse_document(script).expect("the script is JSON"))?;
+        let mut context = Context {
+            source: parse_document(source).expect("the source is JSON").value,
+            operation: Operation::Create,
+            index: "sessions",
+            id: "dh3sgudg8gsrgl",
+            version: 0,
+            upsert: true,
+        };
+        script.run(&mut context)?;
+        let written = crate::json_out::written(&eggdb_sql::json::Node {
+            value: context.source,
+            start: 0,
+            end: 0,
+        });
+        Ok((written, context.operation))
+    }
+
+    #[test]
+    fn a_scripted_upsert_starts_as_create_and_may_only_create_or_skip() {
+        assert_eq!(
+            run_upsert(
+                "{\"source\":\"ctx._source.op = ctx.op; ctx._source.v = ctx._version\"}",
+                "{}"
+            ),
+            Ok((
+                "{\"op\":\"create\",\"v\":null}".to_owned(),
+                Operation::Create
+            ))
+        );
+        assert_eq!(
+            run_upsert("\"ctx.op = 'none'\"", "{}"),
+            Ok(("{}".to_owned(), Operation::Noop))
+        );
+        assert_eq!(
+            run_upsert("\"ctx.op = 'noop'; ctx.op = 'create'\"", "{}"),
+            Ok(("{}".to_owned(), Operation::Create))
+        );
+        assert_eq!(
+            run_upsert("\"ctx.op = 'delete'\"", "{}"),
+            Err("Operation type [delete] not allowed, only [noop, create] are allowed".to_owned())
+        );
+        assert!(run("\"ctx.op = 'create'\"", "{}").is_err());
     }
 }

@@ -385,7 +385,15 @@ impl ExpressionText<'_> {
                 } else {
                     ""
                 };
-                let argument = argument.as_deref().map_or_else(|| "*".to_owned(), text);
+                let argument = match argument.as_deref().map(|argument| &argument.kind) {
+                    None => "*".to_owned(),
+                    Some(ExprKind::Function { name, arguments })
+                        if name == crate::bivariate_aggregates::PAIRED_ARGUMENTS =>
+                    {
+                        self.joined(arguments, ", ", depth)
+                    }
+                    Some(_) => argument.as_deref().map_or_else(String::new, text),
+                };
                 format!("{}({distinct}{argument})", function.name())
             }
             ExprKind::Subquery(subquery) => self.subquery(subquery, depth),

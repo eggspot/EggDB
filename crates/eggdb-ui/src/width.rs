@@ -271,7 +271,10 @@ pub(crate) fn is_unprintable(character: char) -> bool {
     character.is_control() || in_ranges(&UNPRINTABLE_FORMATS, u32::from(character))
 }
 
-pub(crate) fn text_width(text: &str) -> usize {
+/// The cells `text` takes in a terminal, by the width tables the UI draws with: two for a wide
+/// character (CJK, Hangul, fullwidth forms, emoji), none for a combining or format character,
+/// one for anything else.
+pub fn text_width(text: &str) -> usize {
     text.chars().map(char_width).sum()
 }
 

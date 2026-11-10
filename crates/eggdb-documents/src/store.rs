@@ -186,10 +186,7 @@ fn check_document(document: &Document) -> DocumentResult<Vec<u8>> {
     }
     let bytes = document.to_bytes();
     if bytes.len() > MAX_DOCUMENT_BYTES {
-        return Err(DocumentError::bad_value(format!(
-            "object to insert too large. size in bytes: {}, max size: {MAX_DOCUMENT_BYTES}",
-            bytes.len()
-        )));
+        return Err(DocumentError::document_too_large(bytes.len()));
     }
     Ok(bytes)
 }
@@ -632,7 +629,7 @@ impl<'k> Store<'k> {
                     .take(if options.multi { usize::MAX } else { 1 })
             {
                 outcome.matched += 1;
-                if apply_update(update, &mut document, false, now)? {
+                if apply_update(update, &mut document, Some(filter), false, now)? {
                     keys.put(&key, &check_document(&document)?)
                         .map_err(DocumentError::storage)?;
                     outcome.modified += 1;
@@ -709,7 +706,7 @@ impl<'k> Store<'k> {
                 (Modification::Update { update, new, .. }, Some((key, document))) => {
                     let mut changed = document.clone();
                     outcome.matched = 1;
-                    if apply_update(update, &mut changed, false, now)? {
+                    if apply_update(update, &mut changed, Some(filter), false, now)? {
                         keys.put(&key, &check_document(&changed)?)
                             .map_err(DocumentError::storage)?;
                         outcome.modified = 1;

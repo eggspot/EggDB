@@ -1185,3 +1185,33 @@ fn descending_and_hash_indexes_keep_their_options_and_find_the_same_rows() {
         .collect();
     assert_eq!(collations, ["D", "A", "D", "A"]);
 }
+
+#[test]
+fn mysql_index_names_match_in_any_letter_case_when_renamed_or_dropped() {
+    let store = MemoryStore::default();
+    let mut postgresql = Session::new(&store);
+    last(
+        &mut postgresql,
+        "CREATE TABLE cased (id integer PRIMARY KEY, a integer, b integer, c integer);
+         CREATE INDEX \"ByA\" ON cased (a);
+         CREATE INDEX \"ByB\" ON cased (b);
+         CREATE INDEX \"ByC\" ON cased (c)",
+    );
+    let exact = fails(&mut postgresql, "DROP INDEX \"bya\"");
+    assert_eq!(exact.state().code(), "42704", "{exact}");
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    let taken = fails(&mut session, "ALTER TABLE cased RENAME INDEX bya TO byb");
+    assert_eq!(taken.vendor_code(), Some(1061), "{taken}");
+    last(&mut session, "ALTER TABLE cased RENAME INDEX bya TO by_a2");
+    let shown = last(&mut session, "SHOW INDEX FROM cased");
+    assert!(shown.contains("|by_a2|"), "{shown}");
+    let missing = fails(&mut session, "ALTER TABLE cased RENAME INDEX nope TO other");
+    assert_eq!(missing.vendor_code(), Some(1176), "{missing}");
+    last(&mut session, "ALTER TABLE cased DROP INDEX byb");
+    last(&mut session, "DROP INDEX byc ON cased");
+    last(&mut session, "ALTER TABLE cased DROP KEY by_a2");
+    let shown = last(&mut session, "SHOW INDEX FROM cased");
+    assert_eq!(shown.lines().count(), 3, "{shown}");
+    let gone = fails(&mut session, "ALTER TABLE cased DROP KEY byb");
+    assert_eq!(gone.vendor_code(), Some(1091), "{gone}");
+}

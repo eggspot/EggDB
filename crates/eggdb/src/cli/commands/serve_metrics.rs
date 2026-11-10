@@ -62,6 +62,16 @@ pub(super) fn metrics_text(databases: &[(&str, &Database)]) -> String {
     ] {
         metric(&mut out, name, kind, help, &[(String::new(), value)]);
     }
+    metric(
+        &mut out,
+        "eggdb_syslog_messages_dropped_total",
+        "counter",
+        "Syslog messages dropped: too long, badly framed, or refused by the syslog table.",
+        &[(
+            String::new(),
+            eggdb_observability::syslog_messages_dropped(),
+        )],
+    );
     let stats: Vec<(String, eggdb::Stats)> = databases
         .iter()
         .filter_map(|(name, db)| db.stats().ok().map(|stats| (label(name), stats)))
@@ -146,6 +156,9 @@ mod tests {
         for name in [
             "eggdb_up 1",
             "# TYPE eggdb_statements_total counter",
+            "# HELP eggdb_syslog_messages_dropped_total Syslog messages dropped",
+            "# TYPE eggdb_syslog_messages_dropped_total counter",
+            "eggdb_syslog_messages_dropped_total ",
             "eggdb_file_bytes{database=\"shop\\\"x\"}",
         ] {
             assert!(text.contains(name), "{name} missing from:\n{text}");

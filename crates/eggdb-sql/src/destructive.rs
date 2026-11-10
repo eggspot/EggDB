@@ -1,10 +1,11 @@
 use crate::ast::{
     AlterAction, AlterRoutine, AlterRoutineAction, AlterTriggerAction, AssignedValue,
-    BinaryOperator, CopySource, CreateRoutine, CursorCommand, Delete, DropRoutine, Expr, ExprKind,
-    FromClause, GeneratedTable, Insert, InsertSource, InsertValue, JoinCondition, Literal,
-    MaterializedViewCommand, MergeStatement, MultitableInsert, MySqlStatement, Name, OnDuplicate,
-    OutputInto, OutputTarget, Query, ReferentialAction, RoutineTarget, Select, SelectItem, SetExpr,
-    SqlServerStatement, Statement, TableReference, UnaryOperator, Update, VariableSource,
+    BinaryOperator, ConflictResolution, CopySource, CreateRoutine, CursorCommand, Delete,
+    DropRoutine, Expr, ExprKind, FromClause, GeneratedTable, Insert, InsertSource, InsertValue,
+    JoinCondition, Literal, MaterializedViewCommand, MergeStatement, MultitableInsert,
+    MySqlStatement, Name, OnDuplicate, OutputInto, OutputTarget, Query, ReferentialAction,
+    RoutineTarget, Select, SelectItem, SetExpr, SqlServerStatement, Statement, TableReference,
+    UnaryOperator, Update, VariableSource,
 };
 use crate::dialect::Dialect;
 use crate::encoding::TableDefinition;
@@ -131,6 +132,9 @@ pub enum DestructiveKind {
     /// An `INSERT` that overwrites the rows it collides with: `REPLACE`, `INSERT OR REPLACE`,
     /// `ON DUPLICATE KEY UPDATE` or `ON CONFLICT ... DO UPDATE`.
     InsertOverwritingRows,
+    /// SQLite's `UPDATE OR REPLACE`, which deletes the rows holding a primary key or unique
+    /// value its new rows take, even when its `WHERE` pins the rows it changes.
+    UpdateOverwritingRows,
     /// Code that may change or drop anything: `CALL` of a procedure, a `DO` or PL/SQL block,
     /// Transact-SQL's `EXEC`, a `SELECT` of a function, or an `INSERT` whose table fires a
     /// trigger (or that the classifier cannot look up, such as a view).
@@ -175,6 +179,9 @@ impl DestructiveKind {
             Self::UpdateOfManyRows => "UPDATE that can change many rows",
             Self::InsertOverwritingRows => {
                 "INSERT that overwrites existing rows (REPLACE or an upsert)"
+            }
+            Self::UpdateOverwritingRows => {
+                "UPDATE OR REPLACE that deletes the rows it collides with"
             }
             Self::RunCode => {
                 "code that may change or drop data (CALL, DO, EXEC, a function or a trigger)"
@@ -344,6 +351,8 @@ pub(crate) fn classify(
             false,
         )),
         Statement::CreateTable(_)
+        | Statement::CreateTableLike(_)
+        | Statement::Prepared(crate::ast::PreparedCommand::Prepare(_))
         | Statement::Begin { .. }
         | Statement::SetTransaction(_)
         | Statement::Commit
@@ -397,6 +406,9 @@ pub(crate) fn classify(
             vec!["DO".to_owned()],
             false,
         )),
+        Statement::Prepared(crate::ast::PreparedCommand::Execute(execute)) => {
+            run_code(vec![execute.name.text.clone()])
+        }
         Statement::PlsqlBlock(_) => Some(DestructiveStatement::new(
             DestructiveKind::RunCode,
             vec![crate::plsql::ANONYMOUS_BLOCK_NAME.to_owned()],
@@ -593,10 +605,18 @@ fn updated(update: &Update, keys: &mut CatalogLookup<'_>) -> Option<DestructiveS
     if let Some(joined) = &update.from {
         from_user_functions(&joined.tables, keys, &mut functions);
     }
-    DestructiveStatement::combined(
-        kind.map(|kind| DestructiveStatement::new(kind, updated_tables(update), false)),
-        running(functions.user),
-    )
+    let mut found = kind.map(|kind| DestructiveStatement::new(kind, updated_tables(update), false));
+    if update.conflict_resolution == ConflictResolution::Replace {
+        found = DestructiveStatement::combined(
+            found,
+            Some(DestructiveStatement::new(
+                DestructiveKind::UpdateOverwritingRows,
+                vec![shown(&update.table.name)],
+                false,
+            )),
+        );
+    }
+    DestructiveStatement::combined(found, running(functions.user))
 }
 
 fn updated_tables(update: &Update) -> Vec<String> {
@@ -1079,6 +1099,8 @@ fn altered(table: &Name, actions: &[AlterAction]) -> Option<DestructiveStatement
             | AlterAction::DetachPartition(_)
             | AlterAction::AttachIndex(_)
             | AlterAction::MoveColumn { .. }
+            | AlterAction::AddIndex(_)
+            | AlterAction::RenameIndex { .. }
             | AlterAction::Accepted => continue,
         };
         match &mut found {

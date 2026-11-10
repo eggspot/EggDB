@@ -2,6 +2,7 @@ use crate::error::{DocumentError, DocumentResult};
 use crate::expression::{accumulate_values, evaluate, field_value};
 use crate::filter::{Filter, matches, parse_filter};
 use crate::path::slot;
+use crate::size::{ByteBudget, value_size};
 use crate::sort::{SortSpec, compare_by, parse_sort};
 use eggdb_bson::{Bson, Document, compare};
 use std::cmp::Ordering;
@@ -238,7 +239,7 @@ pub fn parse_pipeline(stages: &[Bson]) -> DocumentResult<Vec<Stage>> {
 }
 
 fn set_path(document: &mut Document, path: &str, value: Bson) -> DocumentResult<()> {
-    if let Some(target) = slot(document, path, true).map_err(DocumentError::bad_value)? {
+    if let Some(target) = slot(document, path, true)? {
         target.set(value);
     }
     Ok(())
@@ -314,6 +315,7 @@ fn project(document: &Document, spec: &Document) -> DocumentResult<Document> {
             }
         }
     }
+    let mut budget = ByteBudget::default();
     for (path, value, kind) in fields {
         let result = if kind == ProjectedField::Include {
             field_value(document, path)
@@ -321,6 +323,7 @@ fn project(document: &Document, spec: &Document) -> DocumentResult<Document> {
             evaluate(value, document)?
         };
         if let Some(result) = result {
+            budget.add(value_size(&result))?;
             set_path(&mut out, path, result)?;
         }
     }
@@ -465,9 +468,13 @@ pub fn run_pipeline(
             Stage::AddFields(spec) => documents
                 .into_iter()
                 .map(|mut document| {
+                    let mut budget = ByteBudget::default();
                     for (path, expression) in spec.iter() {
                         match evaluate(expression, &document)? {
-                            Some(value) => set_path(&mut document, path, value)?,
+                            Some(value) => {
+                                budget.add(value_size(&value))?;
+                                set_path(&mut document, path, value)?
+                            }
                             None => {
                                 if let Ok(Some(target)) = slot(&mut document, path, false) {
                                     target.remove();

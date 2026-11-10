@@ -372,6 +372,66 @@ fn drop_partition_indexes(
     Ok(())
 }
 
+pub(crate) fn rename_linked(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    parent: &TableDefinition,
+    parent_index: u32,
+    (from, to): (&str, &str),
+    depth: usize,
+) -> SqlResult<()> {
+    if depth > MAX_DEPTH {
+        return Err(crate::encoding::corrupt("partition tree"));
+    }
+    let catalog = crate::partitions::catalog(writer, tables)?;
+    let linked: Vec<(String, u32)> = catalog
+        .children_of(&parent.name)
+        .into_iter()
+        .filter_map(|(child, _)| {
+            catalog
+                .child_index_of(child, parent_index)
+                .map(|index| (child.to_owned(), index))
+        })
+        .collect();
+    for (child, child_index) in linked {
+        let Some(definition) = tables.table(writer, &child)? else {
+            continue;
+        };
+        let mut definition = (*definition).clone();
+        if definition.index_named(to).is_some() {
+            continue;
+        }
+        let Some(index) = definition
+            .indexes
+            .iter_mut()
+            .find(|candidate| candidate.id == child_index && candidate.name == from)
+        else {
+            continue;
+        };
+        index.name = to.to_owned();
+        writer.put(
+            &crate::encoding::table_key(&definition.name),
+            &definition.encode(),
+        )?;
+        crate::comments::move_part(
+            writer,
+            &definition.name,
+            crate::encoding::CommentKind::Index,
+            from,
+            to,
+        )?;
+        rename_linked(
+            writer,
+            tables,
+            &definition,
+            child_index,
+            (from, to),
+            depth + 1,
+        )?;
+    }
+    Ok(())
+}
+
 enum Found<'t> {
     Index(&'t TableDefinition, &'t IndexDefinition),
     PrimaryKey(&'t TableDefinition),

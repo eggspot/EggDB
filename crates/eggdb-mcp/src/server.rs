@@ -10,8 +10,8 @@ use crate::jsonrpc::{
     MessageReader, RESOURCE_NOT_FOUND, error_line, parse_message, request_id, result_line,
 };
 use crate::tools::{
-    self, Arguments, Call, KeyChange, SCHEMA_URI, Tool, ToolError, ToolSuccess, WriteOutcome,
-    resources_list, tools_list,
+    self, Arguments, Call, SCHEMA_URI, Tool, ToolError, ToolSuccess, WriteOutcome, resources_list,
+    tools_list,
 };
 use crate::watchdog::Watchdog;
 use eggdb_commands::{Category, ConfirmCheck, Effect, Grants};
@@ -621,7 +621,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
         {
             return self.write_call(id, &arguments, &arguments_text, link);
         }
-        if matches!(tool, Tool::Put | Tool::Del) && tool.definition().offered(self.grants()) {
+        if tool.changes_keys() && tool.definition().offered(self.grants()) {
             return self.key_write_call(id, tool, &arguments, &arguments_text, link);
         }
         let call_id = self.next_call_id();
@@ -695,7 +695,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
             }
         };
         let mut confirmation = None;
-        if matches!(request.change, KeyChange::Delete) {
+        if request.change.deletes_a_key() {
             let asked = Asked::KeyDelete {
                 collection: request.collection,
                 key: &request.key,

@@ -958,3 +958,380 @@ fn scripts_that_would_corrupt_or_explode_a_document_are_refused() {
     );
     assert!(eggdb_sql::json::parse_document(&document).is_ok());
 }
+
+#[test]
+fn update_upserts_a_missing_document_from_the_reference_examples() {
+    let keyspace = MemoryKeyspace::default();
+    let api = api(&keyspace);
+    let with_upsert = "{\"script\":{\"source\":\"ctx._source.counter += params.count\",\"lang\":\"painless\",\"params\":{\"count\":4}},\"upsert\":{\"counter\":1}}";
+    let created = api.answer(&request("POST", "/test/_update/1", with_upsert));
+    assert_eq!(created.status, 201, "{}", body(&created));
+    assert!(
+        body(&created).contains("\"_version\":1,\"result\":\"created\""),
+        "{}",
+        body(&created)
+    );
+    let document = body(&api.answer(&request("GET", "/test/_doc/1", "")));
+    assert!(
+        document.contains("\"_source\":{\"counter\":1}"),
+        "{document}"
+    );
+    let updated = api.answer(&request("POST", "/test/_update/1", with_upsert));
+    assert_eq!(updated.status, 200, "{}", body(&updated));
+    assert!(body(&updated).contains("\"_version\":2,\"result\":\"updated\""));
+    let document = body(&api.answer(&request("GET", "/test/_doc/1", "")));
+    assert!(
+        document.contains("\"_source\":{\"counter\":5}"),
+        "{document}"
+    );
+
+    let as_upsert = "{\"doc\":{\"name\":\"new_name\"},\"doc_as_upsert\":true}";
+    let created = api.answer(&request("POST", "/test/_update/2", as_upsert));
+    assert_eq!(created.status, 201, "{}", body(&created));
+    let document = body(&api.answer(&request("GET", "/test/_doc/2", "")));
+    assert!(
+        document.contains("\"_source\":{\"name\":\"new_name\"}"),
+        "{document}"
+    );
+    let again = body(&api.answer(&request("POST", "/test/_update/2", as_upsert)));
+    assert!(
+        again.contains("\"_version\":1,\"result\":\"noop\",\"_shards\":{\"total\":0,\"successful\":0,\"failed\":0}"),
+        "{again}"
+    );
+
+    let scripted = "{\"scripted_upsert\":true,\"script\":{\"source\":\"ctx._source.counter = params.count\",\"params\":{\"count\":4}},\"upsert\":{}}";
+    let created = api.answer(&request("POST", "/test/_update/3", scripted));
+    assert_eq!(created.status, 201, "{}", body(&created));
+    let document = body(&api.answer(&request("GET", "/test/_doc/3", "")));
+    assert!(
+        document.contains("\"_source\":{\"counter\":4}"),
+        "{document}"
+    );
+    let skipped = api.answer(&request(
+        "POST",
+        "/test/_update/4",
+        "{\"scripted_upsert\":true,\"script\":\"ctx.op = 'none'\",\"upsert\":{\"a\":1}}",
+    ));
+    assert_eq!(skipped.status, 200, "{}", body(&skipped));
+    assert!(
+        body(&skipped).contains("\"_version\":-1,\"result\":\"noop\""),
+        "{}",
+        body(&skipped)
+    );
+    assert_eq!(api.answer(&request("GET", "/test/_doc/4", "")).status, 404);
+    let refused = api.answer(&request(
+        "POST",
+        "/test/_update/4",
+        "{\"scripted_upsert\":true,\"script\":\"ctx.op = 'delete'\",\"upsert\":{}}",
+    ));
+    assert_eq!(refused.status, 400, "{}", body(&refused));
+    assert!(body(&refused).contains("script_exception"));
+    assert_eq!(api.answer(&request("GET", "/test/_doc/4", "")).status, 404);
+    let plain = api.answer(&request(
+        "POST",
+        "/test/_update/5",
+        "{\"script\":\"ctx._source.n++\",\"upsert\":{\"n\":0}}",
+    ));
+    assert_eq!(plain.status, 201, "{}", body(&plain));
+    let document = body(&api.answer(&request("GET", "/test/_doc/5", "")));
+    assert!(document.contains("\"_source\":{\"n\":0}"), "{document}");
+
+    let missing = api.answer(&request("POST", "/test/_update/6", "{\"doc\":{\"a\":1}}"));
+    assert_eq!(missing.status, 404);
+    assert!(body(&missing).contains("document_missing_exception"));
+    let fresh = api.answer(&request(
+        "POST",
+        "/fresh/_update/1",
+        "{\"doc\":{\"a\":1},\"doc_as_upsert\":true}",
+    ));
+    assert_eq!(fresh.status, 201, "{}", body(&fresh));
+    assert_eq!(api.answer(&request("HEAD", "/fresh", "")).status, 200);
+}
+
+#[test]
+fn update_validates_upsert_options_as_elasticsearch_does() {
+    let keyspace = MemoryKeyspace::default();
+    let api = api(&keyspace);
+    let refused = api.answer(&request(
+        "POST",
+        "/test/_update/1",
+        "{\"doc_as_upsert\":true,\"script\":\"ctx.op = 'noop'\"}",
+    ));
+    assert_eq!(refused.status, 400);
+    assert!(
+        body(&refused)
+            .contains("Validation Failed: 1: doc must be specified if doc_as_upsert is enabled;"),
+        "{}",
+        body(&refused)
+    );
+    let refused = api.answer(&request("POST", "/test/_update/1", "{\"upsert\":{}}"));
+    assert!(
+        body(&refused).contains("Validation Failed: 1: script or doc is missing;"),
+        "{}",
+        body(&refused)
+    );
+    for bad in [
+        "{\"doc\":{},\"detect_noop\":5}",
+        "{\"doc\":5}",
+        "{\"doc\":{},\"upsert\":[1]}",
+        "{\"doc\":{},\"_source\":5}",
+        "[1]",
+    ] {
+        let response = api.answer(&request("POST", "/test/_update/1", bad));
+        assert_eq!(response.status, 400, "{bad} {}", body(&response));
+    }
+    assert_eq!(api.answer(&request("HEAD", "/test", "")).status, 404);
+}
+
+#[test]
+fn a_doc_update_merges_nested_objects_and_detects_noops() {
+    let keyspace = MemoryKeyspace::default();
+    let api = api(&keyspace);
+    assert_eq!(
+        api.answer(&request(
+            "PUT",
+            "/test/_doc/1",
+            "{\"user\":{\"name\":\"Ada\",\"age\":36},\"tags\":[\"x\"],\"n\":1}"
+        ))
+        .status,
+        201
+    );
+    let updated = body(&api.answer(&request(
+        "POST",
+        "/test/_update/1",
+        "{\"doc\":{\"user\":{\"age\":37}}}",
+    )));
+    assert!(
+        updated.contains("\"_version\":2,\"result\":\"updated\""),
+        "{updated}"
+    );
+    let document = body(&api.answer(&request("GET", "/test/_doc/1", "")));
+    assert!(
+        document.contains(
+            "\"_source\":{\"user\":{\"name\":\"Ada\",\"age\":37},\"tags\":[\"x\"],\"n\":1}"
+        ),
+        "{document}"
+    );
+    let unchanged = body(&api.answer(&request(
+        "POST",
+        "/test/_update/1",
+        "{\"doc\":{\"user\":{\"age\":37},\"n\":1,\"tags\":[\"x\"]}}",
+    )));
+    assert!(
+        unchanged.contains("\"_version\":2,\"result\":\"noop\",\"_shards\":{\"total\":0,\"successful\":0,\"failed\":0},\"_seq_no\":1,\"_primary_term\":1"),
+        "{unchanged}"
+    );
+    let forced = body(&api.answer(&request(
+        "POST",
+        "/test/_update/1",
+        "{\"doc\":{\"user\":{\"age\":37}},\"detect_noop\":false}",
+    )));
+    assert!(
+        forced.contains("\"_version\":3,\"result\":\"updated\""),
+        "{forced}"
+    );
+    let bulk = concat!(
+        "{\"update\":{\"_index\":\"test\",\"_id\":\"1\"}}\n",
+        "{\"doc\":{\"user\":{\"city\":\"London\"}}}\n",
+        "{\"update\":{\"_index\":\"test\",\"_id\":\"2\"}}\n",
+        "{\"doc\":{\"n\":2},\"doc_as_upsert\":true}\n",
+        "{\"update\":{\"_index\":\"test\",\"_id\":\"1\"}}\n",
+        "{\"doc\":{\"user\":{\"city\":\"London\"}}}\n",
+    );
+    let answer = body(&api.answer(&request("POST", "/_bulk", bulk)));
+    assert!(answer.contains("\"errors\":false"), "{answer}");
+    assert!(
+        answer.contains("\"result\":\"created\"") && answer.contains("\"status\":201"),
+        "{answer}"
+    );
+    assert!(answer.contains("\"result\":\"noop\""), "{answer}");
+    let document = body(&api.answer(&request("GET", "/test/_doc/1", "")));
+    assert!(
+        document.contains("\"user\":{\"name\":\"Ada\",\"age\":37,\"city\":\"London\"}"),
+        "{document}"
+    );
+    let decimal = body(&api.answer(&request("POST", "/test/_update/1", "{\"doc\":{\"n\":1.0}}")));
+    assert!(decimal.contains("\"result\":\"updated\""), "{decimal}");
+}
+
+#[test]
+fn update_returns_the_new_source_when_asked() {
+    let keyspace = MemoryKeyspace::default();
+    let api = api(&keyspace);
+    assert_eq!(
+        api.answer(&request("PUT", "/test/_doc/1", "{\"a\":1,\"b\":2}"))
+            .status,
+        201
+    );
+    let filtered = body(&api.answer(&request(
+        "POST",
+        "/test/_update/1?_source=a",
+        "{\"doc\":{\"b\":3}}",
+    )));
+    assert!(
+        filtered.contains(
+            "\"get\":{\"_seq_no\":1,\"_primary_term\":1,\"found\":true,\"_source\":{\"a\":1}}"
+        ),
+        "{filtered}"
+    );
+    let whole = body(&api.answer(&request(
+        "POST",
+        "/test/_update/1",
+        "{\"doc\":{\"b\":4},\"_source\":true}",
+    )));
+    assert!(whole.contains("\"_source\":{\"a\":1,\"b\":4}}"), "{whole}");
+    let plain = body(&api.answer(&request("POST", "/test/_update/1", "{\"doc\":{\"b\":5}}")));
+    assert!(!plain.contains("\"get\""), "{plain}");
+}
+
+#[test]
+fn search_after_pages_through_a_multi_field_sort() {
+    let keyspace = MemoryKeyspace::default();
+    let api = seeded(&keyspace);
+    let page = |query: &str| body(&api.answer(&request("POST", "/books/_search", query)));
+    let first = page("{\"size\":1,\"sort\":[{\"pages\":\"desc\"},\"_doc\"]}");
+    assert!(
+        first.contains("\"_id\":\"2\",\"_score\":null")
+            && first.contains("\"sort\":[300,1]")
+            && first.contains("\"total\":{\"value\":3,"),
+        "{first}"
+    );
+    let second =
+        page("{\"size\":1,\"sort\":[{\"pages\":\"desc\"},\"_doc\"],\"search_after\":[300,1]}");
+    assert!(
+        second.contains("\"_id\":\"1\"") && second.contains("\"sort\":[120,0]"),
+        "{second}"
+    );
+    let third =
+        page("{\"size\":1,\"sort\":[{\"pages\":\"desc\"},\"_doc\"],\"search_after\":[120,0]}");
+    assert!(
+        third.contains("\"_id\":\"3\"") && third.contains("\"sort\":[80,2]"),
+        "{third}"
+    );
+    let done =
+        page("{\"size\":1,\"sort\":[{\"pages\":\"desc\"},\"_doc\"],\"search_after\":[80,2]}");
+    assert!(
+        done.contains("\"hits\":[]") && done.contains("\"value\":3,"),
+        "{done}"
+    );
+    for (query, reason) in [
+        (
+            "{\"from\":1,\"sort\":[\"pages\"],\"search_after\":[1]}",
+            "`from` parameter must be set to 0 when `search_after` is used.",
+        ),
+        (
+            "{\"sort\":[\"pages\",\"_doc\"],\"search_after\":[1]}",
+            "search_after has 1 value(s) but sort has 2.",
+        ),
+        (
+            "{\"search_after\":[1]}",
+            "Sort must contain at least one field.",
+        ),
+        (
+            "{\"sort\":[\"pages\"],\"search_after\":[\"many\"]}",
+            "Failed to parse search_after value for field [pages].",
+        ),
+        ("{\"sort\":[{\"pages\":\"up\"}]}", "Unknown SortOrder [up]"),
+        ("{\"sort\":[\"pages\"],\"search_after\":5}", "search_after"),
+    ] {
+        let response = api.answer(&request("POST", "/books/_search", query));
+        assert_eq!(response.status, 400, "{query} {}", body(&response));
+        assert!(
+            body(&response).contains(reason),
+            "{query} {}",
+            body(&response)
+        );
+    }
+}
+
+#[test]
+fn sort_orders_text_then_numbers_with_missing_values_last() {
+    let keyspace = MemoryKeyspace::default();
+    let api = seeded(&keyspace);
+    assert_eq!(
+        api.answer(&request(
+            "PUT",
+            "/books/_doc/4",
+            "{\"title\":\"Untitled\",\"genre\":\"nature\"}"
+        ))
+        .status,
+        201
+    );
+    let position = |text: &str, id: &str| {
+        text.find(&format!("\"_id\":\"{id}\""))
+            .unwrap_or(usize::MAX)
+    };
+    let text = body(&api.answer(&request(
+        "POST",
+        "/books/_search",
+        "{\"sort\":[{\"genre.keyword\":\"asc\"},{\"pages\":{\"order\":\"desc\"}}]}",
+    )));
+    assert!(
+        position(&text, "1") < position(&text, "3")
+            && position(&text, "3") < position(&text, "2")
+            && position(&text, "2") < position(&text, "4"),
+        "{text}"
+    );
+    assert!(text.contains("\"sort\":[\"fable\",120]"), "{text}");
+    assert!(
+        text.contains("\"sort\":[\"nature\",-9223372036854775808]"),
+        "{text}"
+    );
+    let first = body(&api.answer(&request(
+        "POST",
+        "/books/_search",
+        "{\"sort\":[{\"pages\":{\"order\":\"asc\",\"missing\":\"_first\"}}]}",
+    )));
+    assert!(
+        position(&first, "4") < position(&first, "3")
+            && first.contains("\"sort\":[-9223372036854775808]"),
+        "{first}"
+    );
+    let flagged = body(&api.answer(&request("GET", "/books/_search?sort=pages:desc", "")));
+    assert!(
+        position(&flagged, "2") < position(&flagged, "1")
+            && position(&flagged, "1") < position(&flagged, "3")
+            && position(&flagged, "3") < position(&flagged, "4"),
+        "{flagged}"
+    );
+    let scored = body(&api.answer(&request(
+        "POST",
+        "/books/_search",
+        "{\"sort\":[\"pages\"],\"track_scores\":true}",
+    )));
+    assert!(!scored.contains("\"_score\":null"), "{scored}");
+}
+
+#[test]
+fn search_filters_each_hit_source() {
+    let keyspace = MemoryKeyspace::default();
+    let api = seeded(&keyspace);
+    let titles = body(&api.answer(&request(
+        "POST",
+        "/books/_search",
+        "{\"_source\":[\"title\"],\"size\":1,\"sort\":[\"_doc\"]}",
+    )));
+    assert!(
+        titles.contains("\"_source\":{\"title\":\"The quick brown fox\"}"),
+        "{titles}"
+    );
+    let excluded = body(&api.answer(&request(
+        "POST",
+        "/books/_search",
+        "{\"_source\":{\"excludes\":[\"title\"]},\"size\":1,\"sort\":[\"_doc\"]}",
+    )));
+    assert!(
+        excluded.contains("\"_source\":{\"genre\":\"fable\",\"pages\":120}"),
+        "{excluded}"
+    );
+    let hidden = body(&api.answer(&request("GET", "/books/_search?_source=false", "")));
+    assert!(
+        !hidden.contains("_source") && hidden.contains("\"_id\":\"1\""),
+        "{hidden}"
+    );
+    assert_eq!(
+        api.answer(&request("POST", "/books/_search", "{\"_source\":5}"))
+            .status,
+        400
+    );
+}

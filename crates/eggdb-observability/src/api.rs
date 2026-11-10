@@ -12,9 +12,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const MAX_REQUEST_BYTES: usize = 16 << 20;
 const MAX_POINTS_PER_SERIES: i64 = 11_000;
 const VERSION: &str = "2.53.0";
+const REMOTE_WRITE_PATH: &str = "/api/v1/write";
 /// The most samples one PromQL query may hold at once, as Prometheus's `--query.max-samples`
 /// defaults to.
 pub const DEFAULT_MAX_QUERY_SAMPLES: usize = 50_000_000;
+
+/// Whether the HTTP server decodes `request`'s `Content-Encoding` (gzip or deflate) before
+/// [`Endpoint::answer`] sees it: for every route but Prometheus remote write, whose body is
+/// snappy-compressed and decoded by the endpoint itself (D343).
+pub fn wants_content_decoded(request: &Request) -> bool {
+    request.path != REMOTE_WRITE_PATH
+}
 
 /// The metrics endpoint: InfluxDB writes, Prometheus remote write and the Prometheus query API.
 pub struct Endpoint<'s, S: KeyValueStore> {
@@ -346,7 +354,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             ("POST", "/write" | "/api/v2/write") => {
                 self.write_lines(request, value("precision").unwrap_or("ns"))
             }
-            ("POST", "/api/v1/write") => self.remote_write(request),
+            ("POST", REMOTE_WRITE_PATH) => self.remote_write(request),
             ("GET" | "POST", "/api/v1/query") => self.query(value("query"), value("time")),
             ("GET" | "POST", "/api/v1/query_range") => {
                 self.query_range(value("query"), value("start"), value("end"), value("step"))
@@ -375,12 +383,6 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
     }
 
     fn write_lines(&self, request: &Request, precision: &str) -> Response {
-        if request
-            .header("content-encoding")
-            .is_some_and(|encoding| !encoding.eq_ignore_ascii_case("identity"))
-        {
-            return json(415, "{\"code\":\"unsupported media type\",\"message\":\"compressed line protocol is not supported yet\"}".to_owned());
-        }
         let Some(unit) = precision_ns(precision) else {
             return json(
                 400,

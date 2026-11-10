@@ -10,6 +10,12 @@ const READS_BETWEEN_CLOCK_CHECKS: u64 = 256;
 
 pub(crate) const MAX_WRITTEN_BYTES: u64 = 256 << 20;
 
+const LONGEST_COUNTER_BYTES: usize = 20;
+
+fn named_key_bytes(collection: Option<&str>, key: &[u8]) -> usize {
+    collection.map_or(0, str::len) + key.len()
+}
+
 #[derive(Debug)]
 pub(crate) struct CallLimits {
     deadline: Instant,
@@ -353,6 +359,50 @@ impl<W: KeyValueWrite> KeyValueWrite for LimitedWrite<'_, W> {
         self.inner.collection_delete(name, key)
     }
 
+    fn increment(
+        &mut self,
+        collection: Option<&str>,
+        key: &[u8],
+        by: i64,
+    ) -> SqlResult<Option<i64>> {
+        self.limits.check()?;
+        self.limits
+            .count_written(named_key_bytes(collection, key) + LONGEST_COUNTER_BYTES)?;
+        self.inner.increment(collection, key, by)
+    }
+
+    fn compare_and_set(
+        &mut self,
+        collection: Option<&str>,
+        key: &[u8],
+        expected: Option<&[u8]>,
+        new: Option<&[u8]>,
+    ) -> SqlResult<Option<(bool, Option<Vec<u8>>)>> {
+        self.limits.check()?;
+        self.limits
+            .count_written(named_key_bytes(collection, key) + new.map_or(0, <[u8]>::len))?;
+        self.inner.compare_and_set(collection, key, expected, new)
+    }
+
+    fn set_expiry(
+        &mut self,
+        collection: Option<&str>,
+        key: &[u8],
+        ttl: Duration,
+    ) -> SqlResult<Option<bool>> {
+        self.limits.check()?;
+        self.limits
+            .count_written(named_key_bytes(collection, key))?;
+        self.inner.set_expiry(collection, key, ttl)
+    }
+
+    fn clear_expiry(&mut self, collection: Option<&str>, key: &[u8]) -> SqlResult<Option<bool>> {
+        self.limits.check()?;
+        self.limits
+            .count_written(named_key_bytes(collection, key))?;
+        self.inner.clear_expiry(collection, key)
+    }
+
     fn commit(self) -> SqlResult<()> {
         if let Some(watchdog) = self.watchdog
             && watchdog.disarm_for_commit().is_err()
@@ -569,6 +619,25 @@ mod tests {
         writer.commit().unwrap();
         assert!(limits.committed());
         assert_eq!(counted.committed.get(), 1);
+    }
+
+    #[test]
+    fn the_key_value_tools_count_what_they_write_against_the_call_s_limit() {
+        use eggdb_sql::KeyValueWrite;
+        let counted = Counted::default();
+        let limits = CallLimits::new(Instant::now() + Duration::from_secs(600));
+        let store = super::WritingCallStore::new(&counted, &limits, None, None);
+        let mut writer = store.begin_write().unwrap();
+        let value = vec![0u8; 1 << 20];
+        for _ in 0..255 {
+            writer.put(b"k", &value).unwrap();
+        }
+        let refused = writer
+            .compare_and_set(None, b"k", None, Some(value.as_slice()))
+            .unwrap_err();
+        assert_eq!(refused.state().code(), "54000");
+        assert!(limits.write_too_large());
+        writer.rollback().unwrap();
     }
 
     #[test]

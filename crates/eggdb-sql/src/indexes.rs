@@ -619,6 +619,19 @@ pub(crate) fn remove_index(
     writer.put(&table_key(&definition.name), &definition.encode())
 }
 
+/// Whether an index stored as `stored` is the one a statement names `given`: MySQL index names
+/// match in any letter case, every other dialect's exactly.
+pub(crate) fn same_index_name(stored: &str, given: &str, dialect: Dialect) -> bool {
+    stored == given || (dialect == Dialect::MySql && stored.eq_ignore_ascii_case(given))
+}
+
+fn has_index_named(table: &TableDefinition, given: &str, dialect: Dialect) -> bool {
+    table
+        .indexes
+        .iter()
+        .any(|index| same_index_name(&index.name, given, dialect))
+}
+
 fn index_missing(name: &Name, dialect: Dialect) -> SqlError {
     match dialect {
         Dialect::MySql => SqlError::new(
@@ -694,9 +707,7 @@ pub(crate) fn drop_index(
         let holder = match &drop.table {
             Some(table) => {
                 let definition = tables.require(writer, table)?;
-                definition
-                    .index_named(crate::schemas::base_name(&name.text))
-                    .is_some()
+                has_index_named(&definition, crate::schemas::base_name(&name.text), dialect)
                     .then(|| (*definition).clone())
             }
             None => {
@@ -712,7 +723,7 @@ pub(crate) fn drop_index(
                         .iter()
                         .filter(|table| {
                             crate::schemas::schema_of(&table.name) == schema
-                                && table.index_named(index).is_some()
+                                && has_index_named(table, index, dialect)
                         })
                         .cloned()
                         .collect();
@@ -746,7 +757,7 @@ pub(crate) fn drop_index(
         let Some(position) = definition
             .indexes
             .iter()
-            .position(|index| index.name == index_name)
+            .position(|index| same_index_name(&index.name, index_name, dialect))
         else {
             return Err(index_missing(name, dialect));
         };

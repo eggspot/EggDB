@@ -1,8 +1,11 @@
 use crate::aggregate::{self, shape_of};
 use crate::ast::{
-    BinaryOperator, ConflictTarget, ConstraintKind, CreateTable, Delete, Expr, ExprKind, Insert,
-    InsertSource, InsertValue, Name, OnDuplicate, OrderItem, Overriding, Select, SelectItem,
-    TableReference, Update,
+    BinaryOperator, ConflictResolution, ConflictTarget, ConstraintKind, CreateTable, Delete, Expr,
+    ExprKind, Insert, InsertSource, InsertValue, Name, OnDuplicate, OrderItem, Overriding, Select,
+    SelectItem, TableReference, Update,
+};
+use crate::conflict_resolution::{
+    conflict_resolution_applies, settle_row_constraints, write_updated_rows_resolving_conflicts,
 };
 use crate::constraints::{self, PreparedChecks, RowChange};
 use crate::dialect::Dialect;
@@ -967,7 +970,7 @@ fn check_not_null(table: &TableDefinition, row: &[Value]) -> SqlResult<()> {
     Ok(())
 }
 
-fn duplicate_key(table: &TableDefinition, row: &[Value]) -> SqlError {
+pub(crate) fn duplicate_key(table: &TableDefinition, row: &[Value]) -> SqlError {
     let names: Vec<&str> = table
         .primary_key
         .iter()
@@ -1300,6 +1303,7 @@ fn insert_rows(
     insert: &Insert,
 ) -> SqlResult<QueryResult> {
     if crate::updatable_views::is_view(writer, tables, &insert.table)? {
+        crate::partition_selection::refuse_on_unpartitioned(&insert.table)?;
         if let Some(result) = crate::triggers::insert_instead_of_view(writer, tables, insert)? {
             return Ok(result);
         }
@@ -1324,6 +1328,7 @@ fn insert_rows(
     if let Some(partitioned) = crate::partitions::partitioned(writer, tables, &table)? {
         return crate::partition_dml::insert(writer, tables, insert, &table, &partitioned);
     }
+    crate::partition_selection::refuse_on_unpartitioned(&insert.table)?;
     if crate::sequences::mentions_nextval(&table) {
         crate::sequences::load_all(writer)?;
     }
@@ -1616,7 +1621,7 @@ impl UpsertOutcome {
     }
 }
 
-fn check_generated_always(
+pub(crate) fn check_generated_always(
     table: &TableDefinition,
     targets: &[usize],
     rows: &[Vec<InsertValue>],
@@ -2006,7 +2011,7 @@ pub(crate) fn stored_row(
     }
 }
 
-fn delete_row(
+pub(crate) fn delete_row(
     writer: &mut dyn KeyValueWrite,
     table: &TableDefinition,
     row_key: &[u8],
@@ -2408,7 +2413,7 @@ impl<'a> StoredRows<'a> {
     }
 }
 
-fn auto_increment_exhausted(column: &Column) -> SqlError {
+pub(crate) fn auto_increment_exhausted(column: &Column) -> SqlError {
     SqlError::new(
         SqlState::NUMERIC_VALUE_OUT_OF_RANGE,
         format!(
@@ -3608,6 +3613,7 @@ pub(crate) struct ExplainedQuery {
     pub(crate) row_limit: Option<u64>,
     pub(crate) row_offset: u64,
     pub(crate) subplans: Vec<crate::explain::Subplan>,
+    pub(crate) grouping: Option<crate::explain::ExplainedGrouping>,
 }
 
 pub(crate) fn explain_select(
@@ -3831,6 +3837,9 @@ fn select_or_explain(
         out.order_by = select.order_by.clone();
         out.row_limit = limit.count;
         out.row_offset = offset;
+        out.grouping = grouping
+            .as_ref()
+            .map(|_| crate::explain::ExplainedGrouping::of(select));
         if let Some(from) = &select.from
             && joined.is_some()
         {
@@ -4000,6 +4009,7 @@ fn order_request(
         return None;
     }
     let mut columns = Vec::with_capacity(sort_keys.len());
+    let mut nulls_at_other_end = Vec::new();
     for (item, key) in select.order_by.iter().zip(sort_keys) {
         let column = match key {
             SortKey::Output(index) => projection.source_column(*index)?,
@@ -4011,14 +4021,18 @@ fn order_request(
             },
         };
         let nulls_first = item.nulls_first.unwrap_or(item.descending);
-        if nulls_first != item.descending && !table.columns.get(column)?.not_null {
-            return None;
+        if nulls_first != item.descending
+            && !table.columns.get(column)?.not_null
+            && !plan::rejects_null(select.filter.as_ref(), scope, column)
+        {
+            nulls_at_other_end.push(column);
         }
         columns.push((column, item.descending));
     }
     Some(OrderRequest {
         columns,
         limited: select.limit.is_some(),
+        nulls_at_other_end,
     })
 }
 
@@ -4043,6 +4057,14 @@ struct Window {
     skip: usize,
     limit: RowLimit,
     distinct: bool,
+}
+
+fn top_n_wanted(window: Window, distinct_on: &[SortKey<'_>]) -> Option<usize> {
+    if window.limit.with_ties || window.limit.percent.is_some() || !distinct_on.is_empty() {
+        return None;
+    }
+    let count = usize::try_from(window.limit.count?).ok()?;
+    count.checked_add(window.skip)
 }
 
 impl Window {
@@ -4332,6 +4354,9 @@ fn sorted_rows(
     let correlation = source.correlation;
     let mut rows = Vec::new();
     let mut seen = window.distinct.then(HashSet::new);
+    let mut top = top_n_wanted(window, keys_of.distinct_on)
+        .map(|wanted| crate::top_n::TopRows::new(order_by, wanted));
+    let mut sortable = crate::top_n::SortabilityCheck::new(order_by.len());
     source.for_each_row(&mut |row| {
         let output = projection.project(&row)?;
         if let Some(seen) = &mut seen
@@ -4361,11 +4386,22 @@ fn sorted_rows(
             bytes.add(&value)?;
             keys.push(value);
         }
+        if let Some(top) = &mut top {
+            sortable.check(order_by, &keys);
+            top.offer(keys, output, memory)?;
+            return Ok(true);
+        }
         memory.charge_row(&output)?;
         memory.charge_row(&keys)?;
         rows.push((keys, output));
         Ok(true)
     })?;
+    if let Some(top) = top {
+        sortable.finish()?;
+        let kept = top.into_sorted();
+        let take = window.limit.rows_to_take(kept.len());
+        return Ok(rows_within_limit(kept.into_iter(), window.skip, take, None));
+    }
     check_sortable(order_by, &rows)?;
     rows.sort_by(|(left, _), (right, _)| compare_sort_keys(order_by, left, right));
     if !keys_of.distinct_on.is_empty() {
@@ -4485,6 +4521,12 @@ fn update_rows(
         return crate::joined_dml::update(writer, tables, update, joined);
     }
     if crate::updatable_views::is_view(writer, tables, &update.table)? {
+        crate::partition_selection::refuse_on_unpartitioned(&update.table)?;
+        if update.conflict_resolution.resolves_row_by_row() {
+            return Err(SqlError::not_supported(
+                "UPDATE OR FAIL, OR IGNORE or OR REPLACE of a view is not supported yet",
+            ));
+        }
         if let Some(result) = crate::triggers::update_instead_of_view(writer, tables, update)? {
             return Ok(result);
         }
@@ -4500,13 +4542,25 @@ fn update_rows(
     let update = prepared.as_ref().unwrap_or(update);
     let table = tables.require_target(writer, &update.table.name, "update")?;
     if let Some(partitioned) = crate::partitions::partitioned(writer, tables, &table)? {
+        if table.auto_increment_column().is_some() {
+            let names: Vec<Name> = update
+                .assignments
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect();
+            let targets = target_columns(&table, &names)?;
+            check_updated_to_default(&table, &targets, &update.assignments)?;
+        }
         return crate::partition_dml::update(writer, tables, update, &partitioned, moved);
     }
+    crate::partition_selection::refuse_on_unpartitioned(&update.table)?;
     if crate::sequences::mentions_nextval(&table) {
         crate::sequences::load_all(writer)?;
     }
     let checks = PreparedChecks::of(&table)?.with_partitions(writer, tables, &table)?;
     let may_move = moved.is_some();
+    let resolution = update.conflict_resolution;
+    let mut stopped = None;
     let rule = assignment_rule(constraints::current_dialect());
     let referenced = constraints::is_referenced(&table);
     let keep_old = !table.indexes.is_empty() || referenced || !table.foreign_keys.is_empty();
@@ -4579,9 +4633,14 @@ fn update_rows(
                 new_row[index] = assigned_value(&evaluator, value, &table, index, rule)?;
             }
             checks.generate(&table, &mut new_row)?;
-            check_not_null(&table, &new_row)?;
-            if !checks.is_empty() && !(may_move && !checks.fits_partition(&new_row)) {
-                checks.check(&table, &new_row)?;
+            match settle_row_constraints(&table, &checks, &mut new_row, resolution, may_move) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) if stops_keeping_changes(resolution, &error) => {
+                    stopped = Some(error);
+                    break;
+                }
+                Err(error) => return Err(error),
             }
             if let Some(projection) = &returning {
                 result_rows.push(projection.project(&new_row)?);
@@ -4617,9 +4676,14 @@ fn update_rows(
                 continue;
             }
             checks.generate(&table, &mut new_row)?;
-            check_not_null(&table, &new_row)?;
-            if !checks.is_empty() && !(may_move && !checks.fits_partition(&new_row)) {
-                checks.check(&table, &new_row)?;
+            match settle_row_constraints(&table, &checks, &mut new_row, resolution, may_move) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) if stops_keeping_changes(resolution, &error) => {
+                    stopped = Some(error);
+                    break;
+                }
+                Err(error) => return Err(error),
             }
             let new_key = if table.primary_key.is_empty() {
                 old_key.clone()
@@ -4646,9 +4710,28 @@ fn update_rows(
         )?,
         None => 0,
     };
-    write_updated_rows(writer, tables, &table, &changes, &old_rows, &mut |_| Ok(()))?;
+    let written = if resolution.resolves_row_by_row() {
+        let resolved = write_updated_rows_resolving_conflicts(
+            writer, tables, &table, &changes, &old_rows, resolution,
+        )?;
+        if resolved.stopped.is_some() {
+            stopped = resolved.stopped;
+        }
+        Some(resolved.written)
+    } else {
+        write_updated_rows(writer, tables, &table, &changes, &old_rows, &mut |_| Ok(()))?;
+        None
+    };
+    let was_written = |position: usize| {
+        written
+            .as_ref()
+            .is_none_or(|written| written.get(position) == Some(&true))
+    };
     if let Some(mut firing) = firing {
-        for ((_, _, new_row), old_row) in changes.iter().zip(&old_rows) {
+        for (position, ((_, _, new_row), old_row)) in changes.iter().zip(&old_rows).enumerate() {
+            if !was_written(position) {
+                continue;
+            }
             firing.after_row(
                 writer,
                 tables,
@@ -4658,11 +4741,32 @@ fn update_rows(
         }
         firing.finish();
     }
-    let tag = format!("UPDATE {}", changes.len() + moved_count);
+    if let Some(error) = stopped {
+        return Err(error);
+    }
+    let updated = written.as_ref().map_or(changes.len(), |written| {
+        written.iter().filter(|written| **written).count()
+    });
+    let tag = format!("UPDATE {}", updated + moved_count);
     Ok(match columns {
-        Some(columns) => QueryResult::rows(tag, columns, result_rows),
+        Some(columns) => {
+            let result_rows = match &written {
+                Some(_) => result_rows
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(position, _)| was_written(*position))
+                    .map(|(_, row)| row)
+                    .collect(),
+                None => result_rows,
+            };
+            QueryResult::rows(tag, columns, result_rows)
+        }
         None => QueryResult::command(tag),
     })
+}
+
+fn stops_keeping_changes(resolution: ConflictResolution, error: &SqlError) -> bool {
+    resolution == ConflictResolution::Fail && conflict_resolution_applies(error)
 }
 
 pub(crate) type RowUpdate = (Vec<u8>, Vec<u8>, Vec<Value>);
@@ -4840,6 +4944,7 @@ fn delete_matching(
     fires_triggers: bool,
 ) -> SqlResult<QueryResult> {
     if crate::updatable_views::is_view(writer, tables, &delete.table)? {
+        crate::partition_selection::refuse_on_unpartitioned(&delete.table)?;
         if fires_triggers
             && let Some(result) = crate::triggers::delete_instead_of_view(writer, tables, delete)?
         {
@@ -4861,6 +4966,7 @@ fn delete_matching(
     if let Some(partitioned) = crate::partitions::partitioned(writer, tables, &table)? {
         return crate::partition_dml::delete(writer, tables, delete, &partitioned);
     }
+    crate::partition_selection::refuse_on_unpartitioned(&delete.table)?;
     let scope = scope_of(&table, &delete.table);
     if let Some(filter) = &delete.filter {
         reject_aggregates(filter, "WHERE")?;

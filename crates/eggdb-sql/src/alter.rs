@@ -202,6 +202,22 @@ fn apply(
         AlterAction::MoveColumn { column, placement } => {
             move_column(writer, tables, name, column, placement).map(|()| None)
         }
+        AlterAction::AddIndex(index) => {
+            let create = CreateIndex {
+                index: index.clone(),
+                table: Name {
+                    text: name.clone(),
+                    position: index.position,
+                },
+                only: false,
+                if_not_exists: false,
+                sqlite_text: None,
+            };
+            indexes::create_index(writer, tables, &create, dialect).map(|_| None)
+        }
+        AlterAction::RenameIndex { from, to } => {
+            rename_index(writer, tables, name, from, to).map(|()| None)
+        }
         AlterAction::SetSchema(schema) => {
             if crate::temporary::is_temporary_name(name) || schema.text == crate::temporary::SCHEMA
             {
@@ -2305,7 +2321,7 @@ fn drop_constraint(
         .indexes
         .iter()
         .find(|index| {
-            index.name == constraint.text
+            indexes::same_index_name(&index.name, &constraint.text, dialect)
                 && (dialect != Dialect::PostgreSql || index.backs_unique_constraint)
         })
         .cloned()
@@ -2479,6 +2495,71 @@ fn rename_constraint(
     table.rename_status(&from.text, &to.text);
     save(writer, &table)?;
     crate::comments::move_part(writer, name, CommentKind::Constraint, &from.text, &to.text)
+}
+
+fn rename_index(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    name: &str,
+    from: &Name,
+    to: &Name,
+) -> SqlResult<()> {
+    let mut table = current(writer, tables, name)?;
+    let Some(position) = table
+        .indexes
+        .iter()
+        .position(|index| indexes::same_index_name(&index.name, &from.text, Dialect::MySql))
+    else {
+        return Err(SqlError::new(
+            SqlState::MYSQL_SYNTAX_OR_ACCESS,
+            format!(
+                "Key '{}' doesn't exist in table '{}'",
+                from.text,
+                crate::schemas::base_name(&table.name)
+            ),
+        )
+        .with_vendor_code(1176)
+        .at(from.position));
+    };
+    let stored = table.indexes[position].name.clone();
+    if stored == to.text {
+        return Ok(());
+    }
+    if to.text.eq_ignore_ascii_case("primary") {
+        return Err(SqlError::new(
+            SqlState::MYSQL_SYNTAX_OR_ACCESS,
+            format!("Incorrect index name '{}'", to.text),
+        )
+        .with_vendor_code(1280)
+        .at(to.position));
+    }
+    let taken = table.indexes.iter().enumerate().any(|(at, index)| {
+        at != position && indexes::same_index_name(&index.name, &to.text, Dialect::MySql)
+    });
+    if taken {
+        return Err(SqlError::new(
+            SqlState::MYSQL_SYNTAX_OR_ACCESS,
+            format!("Duplicate key name '{}'", to.text),
+        )
+        .with_vendor_code(1061)
+        .at(to.position));
+    }
+    let Some(index) = table.indexes.get_mut(position) else {
+        return Err(crate::encoding::corrupt("index"));
+    };
+    index.name = to.text.clone();
+    let index_id = index.id;
+    table.rename_status(&stored, &to.text);
+    save(writer, &table)?;
+    crate::comments::move_part(writer, name, CommentKind::Index, &stored, &to.text)?;
+    crate::partition_indexes::rename_linked(
+        writer,
+        tables,
+        &table,
+        index_id,
+        (stored.as_str(), to.text.as_str()),
+        0,
+    )
 }
 
 fn check_index_name_free(

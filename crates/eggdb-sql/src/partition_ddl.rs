@@ -11,7 +11,7 @@ use crate::session::QueryResult;
 use crate::store::KeyValueWrite;
 use std::sync::Arc;
 
-const MYSQL_PARTITION_MARKER: &str = "#P#";
+pub(crate) const MYSQL_PARTITION_MARKER: &str = "#P#";
 
 pub(crate) fn wants(create: &CreateTable) -> bool {
     create.partition_of.is_some() || create.partition_by.is_some()
@@ -167,12 +167,6 @@ fn validated_key(
             "cannot use \"list\" partition strategy with more than one column",
         )
         .at(by.position));
-    }
-    if table.columns.iter().any(|column| column.auto_increment) {
-        return Err(unsupported(
-            "AUTO_INCREMENT and identity columns in a partitioned table",
-            by.position,
-        ));
     }
     let key = PartitionKey {
         strategy: by.strategy,

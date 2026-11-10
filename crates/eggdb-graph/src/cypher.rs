@@ -25,6 +25,16 @@ fn syntax(message: impl Into<String>) -> GraphError {
     GraphError::new("Neo.ClientError.Statement.SyntaxError", message)
 }
 
+fn semantic(message: impl Into<String>) -> GraphError {
+    GraphError::new("Neo.ClientError.Statement.SemanticError", message)
+}
+
+fn mixed_label_symbols() -> GraphError {
+    syntax(
+        "Mixing label expression symbols ('|', '&', '!', and '%') with colon (':') is not allowed. Please only use one set of symbols.",
+    )
+}
+
 fn tokenize(text: &str) -> GraphResult<Vec<(Token, usize)>> {
     let bytes = text.as_bytes();
     let mut tokens = Vec::new();
@@ -228,6 +238,42 @@ pub(crate) enum Expr {
         filter: Option<Box<Expr>>,
         map: Box<Expr>,
     },
+    LabelPredicate(Box<Expr>, LabelExpression),
+    ShortestPath(Box<Pattern>),
+}
+
+/// The labels a node (or the type a relationship) must have: `:A:B` asks for all of them,
+/// `:A|B` for any of them.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum LabelExpression {
+    AllOf(Vec<String>),
+    AnyOf(Vec<String>),
+}
+
+impl LabelExpression {
+    pub(crate) fn matches(&self, held: &[String]) -> bool {
+        match self {
+            LabelExpression::AllOf(labels) => labels.iter().all(|label| held.contains(label)),
+            LabelExpression::AnyOf(labels) => labels.iter().any(|label| held.contains(label)),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            LabelExpression::AllOf(labels) | LabelExpression::AnyOf(labels) => labels.is_empty(),
+        }
+    }
+
+    pub(crate) fn written(&self) -> String {
+        let (labels, separator) = match self {
+            LabelExpression::AllOf(labels) => (labels, ":"),
+            LabelExpression::AnyOf(labels) => (labels, "|"),
+        };
+        if labels.is_empty() {
+            return String::new();
+        }
+        format!(":{}", labels.join(separator))
+    }
 }
 
 /// The direction a relationship pattern follows.
@@ -241,7 +287,7 @@ pub(crate) enum Direction {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct NodePattern {
     pub(crate) variable: Option<String>,
-    pub(crate) labels: Vec<String>,
+    pub(crate) labels: LabelExpression,
     pub(crate) properties: Vec<(String, Expr)>,
 }
 
@@ -325,6 +371,46 @@ pub(crate) enum Clause {
     },
     With(Projecting),
     Return(Projecting),
+    Subquery(Box<Subquery>),
+}
+
+/// Which outer variables a part of a `CALL { ... }` subquery sees: the ones its importing
+/// `WITH a, b` names, or all of them for `WITH *`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Imports {
+    Variables(Vec<String>),
+    Everything,
+}
+
+/// One part of a `CALL { ... }` subquery (several when it holds `UNION`), without its importing
+/// `WITH`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SubqueryPart {
+    pub(crate) imports: Imports,
+    pub(crate) clauses: Vec<Clause>,
+}
+
+/// A `CALL { ... }` subquery, run once for each incoming row.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Subquery {
+    pub(crate) parts: Vec<SubqueryPart>,
+    pub(crate) union_all: bool,
+}
+
+impl Subquery {
+    pub(crate) fn writes(&self) -> bool {
+        self.parts
+            .iter()
+            .flat_map(|part| &part.clauses)
+            .any(Clause::writes)
+    }
+
+    pub(crate) fn returns(&self) -> bool {
+        self.parts
+            .first()
+            .and_then(|part| part.clauses.last())
+            .is_some_and(|clause| matches!(clause, Clause::Return(_) | Clause::Call { .. }))
+    }
 }
 
 /// A parsed query: one part, or several joined by `UNION` (`union_all` keeps duplicates).
@@ -342,16 +428,106 @@ impl Query {
 
 impl Clause {
     pub(crate) fn writes(&self) -> bool {
-        matches!(
-            self,
+        match self {
             Clause::Create(_)
-                | Clause::Merge { .. }
-                | Clause::Foreach { .. }
-                | Clause::Set(_)
-                | Clause::Remove(_)
-                | Clause::Delete { .. }
-        )
+            | Clause::Merge { .. }
+            | Clause::Foreach { .. }
+            | Clause::Set(_)
+            | Clause::Remove(_)
+            | Clause::Delete { .. } => true,
+            Clause::Subquery(subquery) => subquery.writes(),
+            Clause::Match { .. }
+            | Clause::Unwind(..)
+            | Clause::Call { .. }
+            | Clause::With(_)
+            | Clause::Return(_) => false,
+        }
     }
+}
+
+impl Pattern {
+    pub(crate) fn nodes(&self) -> impl Iterator<Item = &NodePattern> {
+        std::iter::once(&self.start).chain(self.steps.iter().map(|(_, node)| node))
+    }
+}
+
+fn refuse_label_alternatives(patterns: &[Pattern]) -> GraphResult<()> {
+    let alternatives = patterns.iter().any(|pattern| {
+        pattern
+            .nodes()
+            .any(|node| matches!(node.labels, LabelExpression::AnyOf(_)))
+    });
+    if alternatives {
+        return Err(syntax(
+            "Label expressions with '|' are not allowed in CREATE and MERGE patterns; join the labels of a node with ':'",
+        ));
+    }
+    Ok(())
+}
+
+fn importing_with(projecting: &Projecting) -> GraphResult<Option<Imports>> {
+    if !projecting
+        .items
+        .iter()
+        .all(|item| matches!(item.expr, Expr::Variable(_)))
+    {
+        return Ok(None);
+    }
+    let refuse = |what: &str| {
+        semantic(format!(
+            "Importing WITH should consist only of simple references to outside variables. {what} is not allowed."
+        ))
+    };
+    if projecting
+        .items
+        .iter()
+        .any(|item| !matches!(&item.expr, Expr::Variable(name) if *name == item.name))
+    {
+        return Err(semantic(
+            "Importing WITH should consist only of simple references to outside variables. Aliasing or expressions are not supported.",
+        ));
+    }
+    if projecting.distinct {
+        return Err(refuse("DISTINCT"));
+    }
+    if !projecting.order.is_empty() {
+        return Err(refuse("ORDER BY"));
+    }
+    if projecting.skip.is_some() {
+        return Err(refuse("SKIP"));
+    }
+    if projecting.limit.is_some() {
+        return Err(refuse("LIMIT"));
+    }
+    if projecting.filter.is_some() {
+        return Err(refuse("WHERE"));
+    }
+    Ok(Some(if projecting.star {
+        Imports::Everything
+    } else {
+        Imports::Variables(
+            projecting
+                .items
+                .iter()
+                .map(|item| item.name.clone())
+                .collect(),
+        )
+    }))
+}
+
+fn subquery_part(mut clauses: Vec<Clause>) -> GraphResult<SubqueryPart> {
+    let imports = match clauses.first() {
+        Some(Clause::With(projecting)) => importing_with(projecting)?,
+        _ => None,
+    };
+    let imports = match imports {
+        Some(imports) => {
+            clauses.remove(0);
+            imports
+        }
+        None => Imports::Variables(Vec::new()),
+    };
+    Ok(SubqueryPart { imports, clauses })
 }
 
 struct Parser<'t> {
@@ -360,6 +536,7 @@ struct Parser<'t> {
     at: usize,
     depth: usize,
     operators: usize,
+    bar_ends_part: bool,
 }
 
 impl Parser<'_> {
@@ -485,10 +662,11 @@ impl Parser<'_> {
             Some(Token::Word(_) | Token::Quoted(_)) => Some(self.name()?),
             _ => None,
         };
-        let mut labels = Vec::new();
-        while self.take_symbol(":") {
-            labels.push(self.name()?);
-        }
+        let labels = if self.is_symbol(":") {
+            self.label_expression(false)?
+        } else {
+            LabelExpression::AllOf(Vec::new())
+        };
         let properties = if self.is_symbol("{") {
             self.map_literal()?
         } else {
@@ -500,6 +678,33 @@ impl Parser<'_> {
             labels,
             properties,
         })
+    }
+
+    fn label_expression(&mut self, bar_may_end_it: bool) -> GraphResult<LabelExpression> {
+        self.expect_symbol(":")?;
+        let mut labels = vec![self.name()?];
+        if self.is_symbol(":") {
+            while self.take_symbol(":") {
+                labels.push(self.name()?);
+            }
+            if self.is_symbol("|") && !bar_may_end_it {
+                return Err(mixed_label_symbols());
+            }
+            return Ok(LabelExpression::AllOf(labels));
+        }
+        if bar_may_end_it || !self.is_symbol("|") {
+            return Ok(LabelExpression::AllOf(labels));
+        }
+        while self.take_symbol("|") {
+            if self.is_symbol(":") {
+                return Err(mixed_label_symbols());
+            }
+            labels.push(self.name()?);
+        }
+        if self.is_symbol(":") {
+            return Err(mixed_label_symbols());
+        }
+        Ok(LabelExpression::AnyOf(labels))
     }
 
     fn relationship_pattern(&mut self) -> GraphResult<Option<RelationshipPattern>> {
@@ -626,9 +831,9 @@ impl Parser<'_> {
     fn list_comprehension(&mut self) -> GraphResult<Expr> {
         let variable = self.name()?;
         self.expect_keyword("in")?;
-        let list = Box::new(self.expression()?);
+        let list = Box::new(self.expression_ended_by_bar()?);
         let filter = if self.take_keyword("where") {
-            Some(Box::new(self.expression()?))
+            Some(Box::new(self.expression_ended_by_bar()?))
         } else {
             None
         };
@@ -661,7 +866,7 @@ impl Parser<'_> {
             ));
         }
         let filter = if self.take_keyword("where") {
-            Some(Box::new(self.expression()?))
+            Some(Box::new(self.expression_ended_by_bar()?))
         } else {
             None
         };
@@ -705,11 +910,21 @@ impl Parser<'_> {
     }
 
     fn expression(&mut self) -> GraphResult<Expr> {
+        self.expression_where_bar_ends(false)
+    }
+
+    fn expression_ended_by_bar(&mut self) -> GraphResult<Expr> {
+        self.expression_where_bar_ends(true)
+    }
+
+    fn expression_where_bar_ends(&mut self, bar_ends_part: bool) -> GraphResult<Expr> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
             return Err(syntax("the expression is nested too deeply"));
         }
+        let outer = std::mem::replace(&mut self.bar_ends_part, bar_ends_part);
         let parsed = self.or();
+        self.bar_ends_part = outer;
         self.depth -= 1;
         parsed
     }
@@ -872,6 +1087,10 @@ impl Parser<'_> {
                 let index = self.expression()?;
                 self.expect_symbol("]")?;
                 expr = Expr::Index(Box::new(expr), Box::new(index));
+            } else if self.is_symbol(":") {
+                self.count_operator()?;
+                let labels = self.label_expression(self.bar_ends_part)?;
+                return Ok(Expr::LabelPredicate(Box::new(expr), labels));
             } else {
                 return Ok(expr);
             }
@@ -949,6 +1168,11 @@ impl Parser<'_> {
                         Ok(Expr::Literal(Value::Null))
                     }
                     "case" => self.case(),
+                    "shortestpath" | "allshortestpaths"
+                        if matches!(self.peek_at(1), Some(Token::Symbol("("))) =>
+                    {
+                        Ok(Expr::ShortestPath(Box::new(self.pattern()?)))
+                    }
                     _ if matches!(self.peek_at(1), Some(Token::Symbol("("))) => self.call(lower),
                     _ => {
                         self.at += 1;
@@ -1135,6 +1359,7 @@ impl Parser<'_> {
             if patterns.iter().any(|pattern| pattern.shortest.is_some()) {
                 return Err(syntax("shortestPath(...) cannot be used to CREATE"));
             }
+            refuse_label_alternatives(&patterns)?;
             return Ok(Clause::Create(patterns));
         }
         if self.take_keyword("merge") {
@@ -1142,6 +1367,7 @@ impl Parser<'_> {
             if pattern.shortest.is_some() {
                 return Err(syntax("shortestPath(...) cannot be used to MERGE"));
             }
+            refuse_label_alternatives(std::slice::from_ref(&pattern))?;
             let mut on_create = Vec::new();
             let mut on_match = Vec::new();
             while self.take_keyword("on") {
@@ -1213,7 +1439,7 @@ impl Parser<'_> {
         self.expect_symbol("(")?;
         let variable = self.name()?;
         self.expect_keyword("in")?;
-        let list = self.expression()?;
+        let list = self.expression_ended_by_bar()?;
         self.expect_symbol("|")?;
         let mut body = Vec::new();
         while !self.take_symbol(")") {
@@ -1221,7 +1447,7 @@ impl Parser<'_> {
                 return Err(self.unexpected());
             }
             let clause = self.clause()?;
-            if !clause.writes() {
+            if !clause.writes() || matches!(clause, Clause::Subquery(_)) {
                 return Err(syntax(
                     "Invalid use of a reading clause inside FOREACH: only CREATE, MERGE, SET, REMOVE, DELETE and FOREACH can be used",
                 ));
@@ -1238,7 +1464,34 @@ impl Parser<'_> {
         })
     }
 
+    fn subquery_rest(&mut self) -> GraphResult<Clause> {
+        self.expect_symbol("{")?;
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(syntax("CALL subqueries are nested too deeply"));
+        }
+        let body = self.query();
+        self.depth -= 1;
+        let body = body?;
+        self.expect_symbol("}")?;
+        if self.is_keyword("in") {
+            return Err(GraphError::not_supported("CALL { ... } IN TRANSACTIONS"));
+        }
+        let parts = body
+            .parts
+            .into_iter()
+            .map(subquery_part)
+            .collect::<GraphResult<_>>()?;
+        Ok(Clause::Subquery(Box::new(Subquery {
+            parts,
+            union_all: body.union_all,
+        })))
+    }
+
     fn call_rest(&mut self) -> GraphResult<Clause> {
+        if self.is_symbol("{") {
+            return self.subquery_rest();
+        }
         let mut procedure = self.name()?;
         while self.take_symbol(".") {
             procedure.push('.');
@@ -1290,6 +1543,50 @@ impl Parser<'_> {
             filter,
         })
     }
+
+    fn ends_a_part(&self) -> bool {
+        self.peek().is_none()
+            || self.is_symbol(";")
+            || self.is_symbol("}")
+            || self.is_keyword("union")
+    }
+
+    fn query(&mut self) -> GraphResult<Query> {
+        let mut parts = Vec::new();
+        let mut union_all = None;
+        loop {
+            let mut clauses = Vec::new();
+            while !self.ends_a_part() {
+                clauses.push(self.clause()?);
+            }
+            check_part(&clauses)?;
+            parts.push(clauses);
+            if !self.take_keyword("union") {
+                break;
+            }
+            let all = self.take_keyword("all");
+            if union_all.is_some_and(|known| known != all) {
+                return Err(syntax("Invalid combination of UNION and UNION ALL"));
+            }
+            union_all = Some(all);
+        }
+        if parts.len() > 1
+            && parts.iter().any(|clauses| {
+                !matches!(
+                    clauses.last(),
+                    Some(Clause::Return(_) | Clause::Call { .. })
+                )
+            })
+        {
+            return Err(syntax(
+                "All sub queries in an UNION must end with a RETURN clause",
+            ));
+        }
+        Ok(Query {
+            parts,
+            union_all: union_all.unwrap_or(false),
+        })
+    }
 }
 
 /// Parses a query into its parts and clauses.
@@ -1301,45 +1598,14 @@ pub(crate) fn parse(text: &str) -> GraphResult<Query> {
         at: 0,
         depth: 0,
         operators: 0,
+        bar_ends_part: false,
     };
-    let mut parts = Vec::new();
-    let mut union_all = None;
-    loop {
-        let mut clauses = Vec::new();
-        while parser.peek().is_some() && !parser.is_symbol(";") && !parser.is_keyword("union") {
-            clauses.push(parser.clause()?);
-        }
-        check_part(&clauses)?;
-        parts.push(clauses);
-        if !parser.take_keyword("union") {
-            break;
-        }
-        let all = parser.take_keyword("all");
-        if union_all.is_some_and(|known| known != all) {
-            return Err(syntax("Invalid combination of UNION and UNION ALL"));
-        }
-        union_all = Some(all);
-    }
+    let query = parser.query()?;
     parser.take_symbol(";");
     if parser.peek().is_some() {
         return Err(parser.unexpected());
     }
-    if parts.len() > 1
-        && parts.iter().any(|clauses| {
-            !matches!(
-                clauses.last(),
-                Some(Clause::Return(_) | Clause::Call { .. })
-            )
-        })
-    {
-        return Err(syntax(
-            "All sub queries in an UNION must end with a RETURN clause",
-        ));
-    }
-    Ok(Query {
-        parts,
-        union_all: union_all.unwrap_or(false),
-    })
+    Ok(query)
 }
 
 fn check_part(clauses: &[Clause]) -> GraphResult<()> {

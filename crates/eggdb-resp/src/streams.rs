@@ -1,4 +1,9 @@
-use crate::commands::{Context, SYNTAX, WRONG_TYPE, integer, load, reading, save, writing};
+use crate::blocking::milliseconds_timeout;
+use crate::commands::{
+    Context, SYNTAX, WRONG_TYPE, bulk_reply_bytes, integer, load, reading, save, writing,
+};
+use crate::keyspace::KeysRead;
+use crate::pops::OnWrongType;
 use crate::protocol::Reply;
 use crate::value::{Data, Entry, Stream, StreamId};
 
@@ -52,6 +57,16 @@ fn bound(bytes: &[u8], low: bool) -> Result<(StreamId, bool), String> {
             Ok((parse_id(rest, if low { 0 } else { u64::MAX })?, exclusive))
         }
     }
+}
+
+fn entry_reply_bytes(id: StreamId, pairs: &[(Vec<u8>, Vec<u8>)]) -> usize {
+    pairs
+        .iter()
+        .fold(bulk_reply_bytes(&id_text(id)), |bytes, (field, value)| {
+            bytes
+                .saturating_add(bulk_reply_bytes(field))
+                .saturating_add(bulk_reply_bytes(value))
+        })
 }
 
 fn entry_reply(id: StreamId, pairs: &[(Vec<u8>, Vec<u8>)]) -> Reply {
@@ -286,62 +301,121 @@ fn xadd(context: &Context<'_>, db: u32, args: &[Vec<u8>]) -> Reply {
     })
 }
 
-fn xread(context: &Context<'_>, db: u32, args: &[Vec<u8>]) -> Reply {
-    let now = context.now_ms;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamStart {
+    After(StreamId),
+    NewEntries,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StreamRead {
+    pub(crate) keys: Vec<Vec<u8>>,
+    starts: Vec<StreamStart>,
+    count: usize,
+    pub(crate) block_ms: Option<u64>,
+}
+
+pub(crate) fn parse_xread(args: &[Vec<u8>]) -> Result<StreamRead, String> {
     let mut at = 0;
-    let mut limit = usize::MAX;
-    while let Some(word) = args
-        .get(at)
-        .map(|word| String::from_utf8_lossy(word).to_ascii_lowercase())
-    {
-        match word.as_str() {
+    let mut count = usize::MAX;
+    let mut block_ms = None;
+    let streams_at = loop {
+        let (Some(word), Some(value)) = (args.get(at), args.get(at + 1)) else {
+            return Err(SYNTAX.to_owned());
+        };
+        match String::from_utf8_lossy(word).to_ascii_lowercase().as_str() {
             "count" => {
-                match args.get(at + 1).map(|value| integer(value)) {
-                    Some(Ok(count)) => limit = count.max(0) as usize,
-                    _ => return Reply::Error(SYNTAX.to_owned()),
-                }
+                let wanted = integer(value)?;
+                count = if wanted <= 0 {
+                    usize::MAX
+                } else {
+                    usize::try_from(wanted).unwrap_or(usize::MAX)
+                };
                 at += 2;
             }
             "block" => {
-                return Reply::Error(
-                    "ERR XREAD BLOCK is not supported yet; read without BLOCK".to_owned(),
-                );
+                block_ms = Some(milliseconds_timeout(value)?);
+                at += 2;
             }
-            "streams" => {
-                at += 1;
-                break;
-            }
-            _ => return Reply::Error(SYNTAX.to_owned()),
+            "streams" => break at + 1,
+            _ => return Err(SYNTAX.to_owned()),
         }
+    };
+    let rest = args.get(streams_at..).unwrap_or_default();
+    if !rest.len().is_multiple_of(2) {
+        return Err("ERR Unbalanced 'xread' list of streams: for each stream key an ID or '$' must be specified.".to_owned());
     }
-    let rest = &args[at.min(args.len())..];
-    if rest.is_empty() || !rest.len().is_multiple_of(2) {
-        return Reply::Error("ERR Unbalanced 'xread' list of streams: for each stream key an ID or '$' must be specified.".to_owned());
-    }
-    let (names, ids) = rest.split_at(rest.len() / 2);
-    reading(context, db, |keys| {
-        let mut streams = Vec::new();
-        for (key, id) in names.iter().zip(ids) {
-            let stream = stream_of(load(keys, key, now)?.as_ref())?;
-            let after = if id.as_slice() == b"$" {
-                stream.last
-            } else {
-                parse_id(id, 0)?
-            };
-            let entries: Vec<Reply> = stream
-                .entries
-                .range((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded))
-                .take(limit)
-                .map(|(id, pairs)| entry_reply(*id, pairs))
-                .collect();
-            if !entries.is_empty() {
-                streams.push((Reply::bulk(key.clone()), Reply::Array(Some(entries))));
-            }
-        }
-        Ok(if streams.is_empty() {
-            Reply::Array(None)
+    let (keys, ids) = rest.split_at(rest.len() / 2);
+    let mut starts = Vec::with_capacity(ids.len());
+    for id in ids {
+        starts.push(if id.as_slice() == b"$" {
+            StreamStart::NewEntries
         } else {
-            Reply::PairArray(streams)
-        })
+            StreamStart::After(parse_id(id, 0)?)
+        });
+    }
+    Ok(StreamRead {
+        keys: keys.to_vec(),
+        starts,
+        count,
+        block_ms,
+    })
+}
+
+pub(crate) fn read_new_entries(
+    keys: &dyn KeysRead,
+    read: &mut StreamRead,
+    context: &Context<'_>,
+    on_wrong_type: OnWrongType,
+) -> Result<Option<Reply>, String> {
+    let mut streams = Vec::new();
+    let mut reply_bytes = 0usize;
+    for (key, start) in read.keys.iter().zip(read.starts.iter_mut()) {
+        let stream = match load(keys, key, context.now_ms)? {
+            None => Stream::default(),
+            Some(Entry {
+                data: Data::Stream(stream),
+                ..
+            }) => stream,
+            Some(_) if on_wrong_type == OnWrongType::Wait => continue,
+            Some(_) => return Err(WRONG_TYPE.to_owned()),
+        };
+        let after = match *start {
+            StreamStart::After(id) => id,
+            StreamStart::NewEntries => {
+                *start = StreamStart::After(stream.last);
+                stream.last
+            }
+        };
+        let mut entries = Vec::new();
+        for (id, pairs) in stream
+            .entries
+            .range((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded))
+            .take(read.count)
+        {
+            if entries.is_empty() {
+                reply_bytes = reply_bytes.saturating_add(bulk_reply_bytes(key));
+            }
+            reply_bytes = reply_bytes.saturating_add(entry_reply_bytes(*id, pairs));
+            context.check_reply_room(reply_bytes)?;
+            entries.push(entry_reply(*id, pairs));
+        }
+        if !entries.is_empty() {
+            streams.push((Reply::bulk(key.clone()), Reply::Array(Some(entries))));
+        }
+    }
+    Ok((!streams.is_empty()).then_some(Reply::PairArray(streams)))
+}
+
+fn xread(context: &Context<'_>, db: u32, args: &[Vec<u8>]) -> Reply {
+    let mut read = match parse_xread(args) {
+        Ok(read) => read,
+        Err(error) => return Reply::Error(error),
+    };
+    reading(context, db, |keys| {
+        Ok(
+            read_new_entries(keys, &mut read, context, OnWrongType::Refuse)?
+                .unwrap_or(Reply::Array(None)),
+        )
     })
 }

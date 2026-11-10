@@ -1494,6 +1494,7 @@ fn values_table(
                 .collect(),
             position,
         }))),
+        partition_selection: None,
     }
 }
 

@@ -1,22 +1,131 @@
+use super::estimates::{self, Estimate, ROW_COST, TableRows};
 use super::expression_text::{ExpressionText, Spelling};
 use super::subplans::{Subplan, SubplanPlace};
-use super::{Analyzed, Measured, Step, key_name, measured_steps, milliseconds, steps};
+use super::{
+    Analyzed, ExplainedGrouping, Measured, Planned, PlannedStatement, PlannedWrite, Step, key_name,
+    measured_steps, milliseconds, source_measured, steps,
+};
 use crate::ast::{BinaryOperator, Expr, ExprKind};
 use crate::dialect::Dialect;
 use crate::execute::{ExplainedQuery, ExplainedSource};
+use crate::join::JoinMethod;
 use crate::plan::{KeyChoice, Use};
-use crate::step_times::MeasuredSubplan;
+use crate::step_times::{MeasuredSelect, MeasuredSubplan, RowTimes};
+
+const NOT_EXECUTABLE: &str = "<not executable by iterator executor>";
 
 struct TreeLine {
     level: usize,
     text: String,
+    estimate: Option<Estimate>,
     measured: Option<Measured>,
 }
 
 struct Tree<'q> {
     numbers: Vec<(usize, usize)>,
     measured_subplans: Option<&'q [MeasuredSubplan]>,
+    table_rows: &'q TableRows,
     lines: Vec<TreeLine>,
+}
+
+#[derive(Default)]
+struct QueryMeasures {
+    steps: Vec<Option<Measured>>,
+    grouped: Option<Measured>,
+}
+
+enum Wrapper<'q> {
+    Stream,
+    Having(&'q Expr),
+    Aggregate(&'q ExplainedGrouping),
+    Where(&'q Expr),
+}
+
+fn streams_results(query: &ExplainedQuery) -> bool {
+    query.sorted && !query.appended && (query.grouping.is_some() || query.sources.len() > 1)
+}
+
+fn wrappers<'q>(query: &'q ExplainedQuery, filter: Option<&'q Expr>) -> Vec<Wrapper<'q>> {
+    let mut wrappers = Vec::new();
+    if streams_results(query) {
+        wrappers.push(Wrapper::Stream);
+    }
+    if let Some(grouping) = &query.grouping {
+        if let Some(having) = &grouping.having {
+            wrappers.push(Wrapper::Having(having));
+        }
+        wrappers.push(Wrapper::Aggregate(grouping));
+    }
+    if let Some(filter) = filter {
+        wrappers.push(Wrapper::Where(filter));
+    }
+    wrappers
+}
+
+fn child_positions(all: &[(usize, Step<'_>)], at: usize) -> Vec<usize> {
+    let Some((level, _)) = all.get(at) else {
+        return Vec::new();
+    };
+    let mut children = Vec::new();
+    for (offset, (child_level, _)) in all.iter().enumerate().skip(at + 1) {
+        if *child_level <= *level {
+            break;
+        }
+        if *child_level == level + 1 {
+            children.push(offset);
+        }
+    }
+    children
+}
+
+fn groups_measured(select: &MeasuredSelect) -> Measured {
+    let Some(source) = select.source else {
+        return Measured::NeverExecuted;
+    };
+    Measured::Ran(RowTimes {
+        first_row: source.last_row,
+        last_row: source.last_row,
+        rows: select.output.rows.saturating_add(select.skipped),
+    })
+}
+
+fn tree_measures(query: &ExplainedQuery, analyzed: &Analyzed) -> QueryMeasures {
+    let mut steps = measured_steps(query, analyzed);
+    let mut grouped = None;
+    if query.grouping.is_some()
+        && !query.appended
+        && let Some(select) = analyzed.selects.first()
+    {
+        let attach = usize::from(query.limited) + usize::from(query.sorted);
+        grouped = Some(if attach == 0 {
+            steps
+                .first()
+                .copied()
+                .flatten()
+                .unwrap_or(Measured::NeverExecuted)
+        } else {
+            groups_measured(select)
+        });
+        if let Some(step) = steps.get_mut(attach) {
+            *step = Some(source_measured(select));
+        }
+    }
+    QueryMeasures { steps, grouped }
+}
+
+fn write_text(query: &ExplainedQuery, write: &PlannedWrite) -> String {
+    let tables: Vec<String> = write
+        .targets
+        .iter()
+        .filter_map(|&at| query.sources.get(at))
+        .map(|source| format!("{} (buffered)", source.label))
+        .collect();
+    match write.statement {
+        PlannedStatement::Delete => format!("Delete from {}", tables.join(", ")),
+        PlannedStatement::Update | PlannedStatement::Select => {
+            format!("Update {}", tables.join(", "))
+        }
+    }
 }
 
 fn collect_positions(query: &ExplainedQuery, out: &mut Vec<usize>) {
@@ -42,6 +151,19 @@ fn conjuncts(expr: &Expr) -> Vec<&Expr> {
         ExprKind::And(parts) => parts.iter().flat_map(conjuncts).collect(),
         _ => vec![expr],
     }
+}
+
+pub(super) fn unconsumed_filter(query: &ExplainedQuery) -> Option<&Expr> {
+    let filter = query.filter.as_ref()?;
+    let consumed = match query.sources.as_slice() {
+        [only] if only.join.is_none() && !query.appended => {
+            only.access.key().is_some()
+                && !super::subplans::mentions_subplan(filter)
+                && conjuncts(filter).len() == only.access.conditions.len()
+        }
+        _ => false,
+    };
+    (!consumed).then_some(filter)
 }
 
 fn names_column(expr: &Expr, label: &str, column: &str) -> bool {
@@ -271,17 +393,181 @@ impl Tree<'_> {
         }
     }
 
-    fn filter_needed(query: &ExplainedQuery) -> Option<&Expr> {
-        let filter = query.filter.as_ref()?;
-        let consumed = match query.sources.as_slice() {
-            [only] if only.join.is_none() && !query.appended => {
-                only.access.key().is_some()
-                    && !super::subplans::mentions_subplan(filter)
-                    && conjuncts(filter).len() == only.access.conditions.len()
-            }
-            _ => false,
+    fn join_fraction(query: &ExplainedQuery, all: &[(usize, Step<'_>)], at: usize) -> f64 {
+        let Some(source) = Self::join_source(all, at) else {
+            return 1.0;
         };
-        (!consumed).then_some(filter)
+        if matches!(
+            source.join,
+            Some(JoinMethod::PrimaryKey | JoinMethod::Index(_))
+        ) {
+            return 1.0;
+        }
+        query
+            .sources
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, source))
+            .and_then(|position| query.join_conditions.get(position))
+            .and_then(Option::as_ref)
+            .map_or(1.0, estimates::selectivity)
+    }
+
+    fn step_estimate(
+        &self,
+        query: &ExplainedQuery,
+        all: &[(usize, Step<'_>)],
+        at: usize,
+        children: &[Estimate],
+    ) -> Estimate {
+        let first = children.first().copied().unwrap_or_default();
+        let Some((_, step)) = all.get(at) else {
+            return Estimate::default();
+        };
+        match step {
+            Step::Result => Estimate {
+                cost: 0.0,
+                rows: 1.0,
+            },
+            Step::Append => children
+                .iter()
+                .fold(Estimate::default(), |sum, child| Estimate {
+                    cost: sum.cost + child.cost,
+                    rows: sum.rows + child.rows,
+                }),
+            Step::Sort => Estimate {
+                cost: first.cost + estimates::sort_cost(first.rows),
+                rows: query.row_limit.map_or(first.rows, |limit| {
+                    first
+                        .rows
+                        .min(limit.saturating_add(query.row_offset) as f64)
+                }),
+            },
+            Step::Limit => {
+                let left = (first.rows - query.row_offset as f64).max(0.0);
+                Estimate {
+                    cost: first.cost,
+                    rows: query.row_limit.map_or(left, |limit| left.min(limit as f64)),
+                }
+            }
+            Step::Hash => first,
+            Step::NestedLoop | Step::HashJoin => {
+                let inner = children.get(1).copied().unwrap_or_default();
+                let rows = first.rows * inner.rows * Self::join_fraction(query, all, at);
+                let cost = if matches!(step, Step::HashJoin) {
+                    first.cost + inner.cost + ROW_COST * (first.rows + inner.rows)
+                } else {
+                    first.cost + first.rows * inner.cost
+                };
+                Estimate { cost, rows }
+            }
+            Step::Scan(source) => Estimate::read(estimates::scanned_rows(source, self.table_rows)),
+            Step::FullScan(source) => Estimate::read(self.table_rows.of(&source.table)),
+            Step::KeyLookup(source, key) => {
+                Estimate::read(estimates::lookup_rows(source, *key, self.table_rows))
+            }
+        }
+    }
+
+    fn filter_base(&self, query: &ExplainedQuery, below: Estimate) -> f64 {
+        match query.sources.as_slice() {
+            [only] if only.join.is_none() && !query.appended => self.table_rows.of(&only.table),
+            _ => below.rows,
+        }
+    }
+
+    fn wrapper_estimates(
+        &self,
+        query: &ExplainedQuery,
+        wrappers: &[Wrapper<'_>],
+        source: Estimate,
+    ) -> Vec<Estimate> {
+        let mut found = vec![Estimate::default(); wrappers.len()];
+        let mut below = source;
+        for (at, wrapper) in wrappers.iter().enumerate().rev() {
+            let estimate = match wrapper {
+                Wrapper::Where(filter) => Estimate {
+                    cost: below.cost,
+                    rows: (self.filter_base(query, below) * estimates::selectivity(filter))
+                        .min(below.rows),
+                },
+                Wrapper::Aggregate(grouping) => estimates::aggregated(below, grouping.keyed),
+                Wrapper::Having(having) => Estimate {
+                    cost: below.cost,
+                    rows: below.rows * estimates::selectivity(having),
+                },
+                Wrapper::Stream => below,
+            };
+            if let Some(slot) = found.get_mut(at) {
+                *slot = estimate;
+            }
+            below = estimate;
+        }
+        found
+    }
+
+    fn step_estimates(
+        &self,
+        query: &ExplainedQuery,
+        all: &[(usize, Step<'_>)],
+        attach: usize,
+        wrappers: &[Wrapper<'_>],
+    ) -> (Vec<Estimate>, Vec<Estimate>) {
+        let mut own = vec![Estimate::default(); all.len()];
+        let mut handed_up = vec![Estimate::default(); all.len()];
+        let mut wrapped = Vec::new();
+        for at in (0..all.len()).rev() {
+            let children: Vec<Estimate> = child_positions(all, at)
+                .into_iter()
+                .filter_map(|child| handed_up.get(child).copied())
+                .collect();
+            let estimate = self.step_estimate(query, all, at, &children);
+            let top = if at == attach {
+                wrapped = self.wrapper_estimates(query, wrappers, estimate);
+                wrapped.first().copied().unwrap_or(estimate)
+            } else {
+                estimate
+            };
+            if let Some(slot) = own.get_mut(at) {
+                *slot = estimate;
+            }
+            if let Some(slot) = handed_up.get_mut(at) {
+                *slot = top;
+            }
+        }
+        (own, wrapped)
+    }
+
+    fn aggregate_text(&self, query: &ExplainedQuery, grouping: &ExplainedGrouping) -> String {
+        let mut calls: Vec<String> = Vec::new();
+        for call in &grouping.aggregates {
+            let text = match &call.kind {
+                ExprKind::Aggregate {
+                    function,
+                    argument: None,
+                    ..
+                } => format!("{}(0)", function.name()),
+                _ => self.text(query, call),
+            };
+            if !calls.contains(&text) {
+                calls.push(text);
+            }
+        }
+        match (grouping.keyed, calls.is_empty()) {
+            (true, true) => "Group (no aggregates)".to_owned(),
+            (true, false) => format!("Group aggregate: {}", calls.join(", ")),
+            (false, true) => "Aggregate".to_owned(),
+            (false, false) => format!("Aggregate: {}", calls.join(", ")),
+        }
+    }
+
+    fn wrapper_text(&self, query: &ExplainedQuery, wrapper: &Wrapper<'_>) -> String {
+        match wrapper {
+            Wrapper::Stream => "Stream results".to_owned(),
+            Wrapper::Having(condition) | Wrapper::Where(condition) => {
+                format!("Filter: {}", self.text(query, condition))
+            }
+            Wrapper::Aggregate(grouping) => self.aggregate_text(query, grouping),
+        }
     }
 
     fn subplan_label(&self, subplan: &Subplan) -> String {
@@ -317,6 +603,7 @@ impl Tree<'_> {
             self.lines.push(TreeLine {
                 level,
                 text: label,
+                estimate: None,
                 measured: None,
             });
             let measured = self.subplan_measured(subplan);
@@ -328,39 +615,63 @@ impl Tree<'_> {
         &mut self,
         query: &ExplainedQuery,
         level: usize,
-        measured: Option<&[Option<Measured>]>,
+        measures: Option<&QueryMeasures>,
         top: Option<Measured>,
     ) {
         let all = steps(query);
         let attach = usize::from(query.limited) + usize::from(query.sorted);
-        let filter = Self::filter_needed(query);
+        let filter = unconsumed_filter(query);
+        let wrappers = wrappers(query, filter);
+        let (own_estimates, wrapped) = self.step_estimates(query, &all, attach, &wrappers);
+        let step_measured =
+            |at: usize| measures.and_then(|measures| measures.steps.get(at).copied().flatten());
+        let grouped = measures.and_then(|measures| measures.grouped);
+        let where_offset = wrappers
+            .iter()
+            .position(|wrapper| matches!(wrapper, Wrapper::Where(_)));
         let first = self.lines.len();
         for (at, (step_level, step)) in all.iter().enumerate() {
             let mut line_level = level + step_level;
-            if at == attach
-                && let Some(filter) = filter
-            {
-                let text = format!("Filter: {}", self.text(query, filter));
-                self.lines.push(TreeLine {
-                    level: line_level,
-                    text,
-                    measured: measured.and_then(|steps| steps.get(at).copied().flatten()),
-                });
+            if at == attach {
+                for (offset, wrapper) in wrappers.iter().enumerate() {
+                    let measured = match wrapper {
+                        Wrapper::Stream if query.grouping.is_some() => grouped,
+                        Wrapper::Stream | Wrapper::Where(_) => step_measured(at),
+                        Wrapper::Aggregate(grouping) if grouping.having.is_some() => None,
+                        Wrapper::Aggregate(_) | Wrapper::Having(_) => grouped,
+                    };
+                    let text = self.wrapper_text(query, wrapper);
+                    self.lines.push(TreeLine {
+                        level: line_level + offset,
+                        text,
+                        estimate: wrapped.get(offset).copied(),
+                        measured,
+                    });
+                }
             }
-            if at >= attach && filter.is_some() {
-                line_level += 1;
+            if at >= attach {
+                line_level += wrappers.len();
             }
             let text = self.step_text(query, &all, at, step);
             let filtered_here = at == attach && filter.is_some();
+            let estimate = if matches!(step, Step::Hash) {
+                None
+            } else {
+                own_estimates.get(at).copied()
+            };
             self.lines.push(TreeLine {
                 level: line_level,
                 text,
-                measured: measured
-                    .filter(|_| !filtered_here)
-                    .and_then(|steps| steps.get(at).copied().flatten()),
+                estimate,
+                measured: if filtered_here {
+                    None
+                } else {
+                    step_measured(at)
+                },
             });
             if at == all.len().saturating_sub(1) {
-                self.add_subplans(query, SubplanPlace::Condition, level + attach + 1);
+                let condition_level = level + attach + where_offset.unwrap_or(wrappers.len()) + 1;
+                self.add_subplans(query, SubplanPlace::Condition, condition_level);
             }
         }
         if let Some(line) = self.lines.get_mut(first)
@@ -374,15 +685,15 @@ impl Tree<'_> {
 
 fn actual_text(measured: Measured) -> String {
     match measured {
-        Measured::NeverExecuted => "  (never executed)".to_owned(),
+        Measured::NeverExecuted => "(never executed)".to_owned(),
         Measured::Ran(times) => format!(
-            "  (actual time={:.3}..{:.3} rows={} loops=1)",
+            "(actual time={:.3}..{:.3} rows={} loops=1)",
             milliseconds(times.first_row.min(times.last_row)),
             milliseconds(times.last_row),
             times.rows
         ),
         Measured::Looped { times, loops } => format!(
-            "  (actual time={:.3}..{:.3} rows={} loops={loops})",
+            "(actual time={:.3}..{:.3} rows={} loops={loops})",
             milliseconds(times.first_row.min(times.last_row)),
             milliseconds(times.last_row),
             times.rows
@@ -390,20 +701,58 @@ fn actual_text(measured: Measured) -> String {
     }
 }
 
-pub(crate) fn tree_text(query: &ExplainedQuery, analyzed: Option<&Analyzed>) -> String {
-    let measured = analyzed.map(|analyzed| measured_steps(query, analyzed));
+/// MySQL 8's iterator tree for `EXPLAIN FORMAT=TREE` and `EXPLAIN ANALYZE`: one `-> ` line per
+/// iterator, four spaces per level, each with EggDB's `(cost=... rows=...)` estimate and, when
+/// analyzed, the measured `(actual time=... rows=... loops=...)`. A multi-table `UPDATE` or
+/// `DELETE` puts its `Update`/`Delete from` iterator over the join it reads; a single-table one
+/// is not run by MySQL's iterator executor, and says so.
+pub(crate) fn tree_text(planned: &Planned, analyzed: Option<&Analyzed>) -> String {
+    let query = &planned.query;
     let mut tree = Tree {
         numbers: select_numbers(query),
         measured_subplans: analyzed.map(|analyzed| analyzed.subplans.as_slice()),
+        table_rows: &planned.table_rows,
         lines: Vec::new(),
     };
-    tree.add_query(query, 0, measured.as_deref(), None);
+    match &planned.write {
+        Some(write) if !write.joined => tree.lines.push(TreeLine {
+            level: 0,
+            text: NOT_EXECUTABLE.to_owned(),
+            estimate: None,
+            measured: None,
+        }),
+        Some(write) => {
+            let measured = analyzed.map(|analyzed| {
+                Measured::Ran(RowTimes {
+                    first_row: analyzed.execution,
+                    last_row: analyzed.execution,
+                    rows: 0,
+                })
+            });
+            tree.lines.push(TreeLine {
+                level: 0,
+                text: write_text(query, write),
+                estimate: None,
+                measured,
+            });
+            tree.add_query(query, 1, None, None);
+        }
+        None => {
+            let measures = analyzed.map(|analyzed| tree_measures(query, analyzed));
+            tree.add_query(query, 0, measures.as_ref(), None);
+        }
+    }
     let mut text = String::new();
     for line in &tree.lines {
         text.push_str(&"    ".repeat(line.level));
         text.push_str("-> ");
         text.push_str(&line.text);
+        if let Some(estimate) = line.estimate {
+            text.push_str("  ");
+            text.push_str(&estimate.group());
+        }
         if let Some(measured) = line.measured {
+            text.push_str(if line.estimate.is_some() { " " } else { "  " });
             text.push_str(&actual_text(measured));
         }
         text.push('\n');

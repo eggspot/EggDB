@@ -411,7 +411,11 @@ impl Parser<'_> {
             }
             ExplainStyle::Plan
         };
-        if !(self.is_word("select") || self.is_word("update") || self.is_word("delete")) {
+        if !(self.is_word("select")
+            || self.is_word("update")
+            || self.is_word("delete")
+            || self.at_table_query_at(0))
+        {
             return Err(
                 self.not_supported("EXPLAIN of a statement other than SELECT, UPDATE or DELETE")
             );
@@ -447,23 +451,34 @@ impl Parser<'_> {
                 return Err(self.mysql_not_supported("EXPLAIN ANALYZE with TRADITIONAL format"));
             } else if self.take_word("traditional") {
                 ExplainStyle::Plan
+            } else if self.is_word("json") && analyze {
+                return Err(self.mysql_not_supported("EXPLAIN ANALYZE with JSON format"));
+            } else if self.take_word("json") {
+                ExplainStyle::Json
             } else {
-                return Err(
-                    self.mysql_not_supported("EXPLAIN formats other than TREE and TRADITIONAL")
-                );
+                return Err(self
+                    .mysql_not_supported("EXPLAIN formats other than TREE, JSON and TRADITIONAL"));
             };
         }
-        if style == ExplainStyle::Tree && !self.is_word("select") {
+        if !(self.is_word("select")
+            || self.is_word("update")
+            || self.is_word("delete")
+            || self.at_table_query_at(0))
+        {
             return Err(self.mysql_not_supported(
-                "EXPLAIN ANALYZE and EXPLAIN FORMAT=TREE of a statement other than SELECT",
+                "EXPLAIN of a statement other than SELECT, TABLE, UPDATE or DELETE",
             ));
         }
-        if !(self.is_word("select") || self.is_word("update") || self.is_word("delete")) {
-            return Err(self.mysql_not_supported(
-                "EXPLAIN of a statement other than SELECT, UPDATE or DELETE",
-            ));
-        }
+        let position = self.position();
         let statement = self.statement_body()?;
+        let single_table_write = match &statement {
+            Statement::Update(update) => update.from.is_none(),
+            Statement::Delete(delete) => delete.using.is_none(),
+            _ => false,
+        };
+        if analyze && single_table_write {
+            return Err(SqlError::not_supported("EXPLAIN ANALYZE for this statement").at(position));
+        }
         Ok(Statement::Explain(Explain {
             style,
             analyze,

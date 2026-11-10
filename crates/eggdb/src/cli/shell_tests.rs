@@ -996,7 +996,7 @@ fn the_shell_lists_collections_in_a_block_and_renames_them_only_outside_one() {
     assert_eq!(ran.exit, 2, "{}", text(&ran.stderr));
     assert!(
         text(&ran.stderr).contains(
-            "collection add, delete and move run outside a transaction block: COMMIT or ROLLBACK first"
+            "collection add, delete, move and rename run outside a transaction block: COMMIT or ROLLBACK first"
         ),
         "{}",
         text(&ran.stderr)

@@ -1,13 +1,14 @@
-//! `put` and `del` (D328): offered only with `--allow-write` and the key-value store, refused
-//! for a read-only server, a server limited to tables and an agent signed in with a role, a
-//! delete confirmed through `confirm: true` or `elicitation/create`, SQL's key space refused,
+//! `put` and `del` (D328), and `incr`, `cas`, `expire` and `persist` (D346): offered only with
+//! `--allow-write` and the key-value store, refused for a read-only server, a server limited to
+//! tables and an agent signed in with a role, a delete (or an `expire` to 0, or a `cas` that
+//! deletes) confirmed through `confirm: true` or `elicitation/create`, SQL's key space refused,
 //! and every key write recorded in the audit file before it runs and after.
 
 use crate::common;
 
 use common::{
-    MapOpener, TempAudit, call, error_code, initialized, is_error, parsed, sample_store, served,
-    structured, tables_config, text_at, writing_config, writing_server,
+    MapOpener, TempAudit, call, error_code, initialized, is_error, member, parsed, sample_store,
+    served, structured, tables_config, text_at, writing_config, writing_server,
 };
 use eggdb_mcp::{Server, ServerConfig};
 use eggdb_sql::RESERVED_KEY_PREFIX;
@@ -279,4 +280,355 @@ fn a_collection_needs_a_store_that_keeps_them() {
     );
     assert!(is_error(&put), "{put:?}");
     assert_eq!(text_at(structured(&put), &["error", "sqlstate"]), "0A000");
+}
+
+const COUNTING_AND_EXPIRING: [(&str, &str); 4] = [
+    ("incr", r#"{"key":"hits"}"#),
+    ("cas", r#"{"key":"lock","if_absent":true,"new":"me"}"#),
+    ("expire", r#"{"key":"greeting","ttl":0,"confirm":true}"#),
+    ("persist", r#"{"key":"greeting"}"#),
+];
+
+#[test]
+fn counters_compare_and_set_and_expiry_are_refused_without_writes_tables_or_a_role() {
+    for (name, config_of, code) in [
+        ("read-only", 0, "read_only"),
+        ("tables", 1, "limited_to_tables"),
+        ("role", 2, "limited_to_role"),
+    ] {
+        let audit = TempAudit::new(&format!("key-tools-{name}"));
+        let opener = MapOpener::new(sample_store());
+        opener.store.put(b"greeting", b"hello");
+        let config = match config_of {
+            0 => common::config(&audit),
+            1 => ServerConfig {
+                allow_write: true,
+                ..tables_config(&audit, &["users"])
+            },
+            _ => ServerConfig {
+                agent_role: Some("reporter".to_owned()),
+                ..writing_config(&audit)
+            },
+        };
+        let before = opener.store.snapshot();
+        let mut server = Server::new(&opener, config).unwrap();
+        initialize(&mut server);
+        let tools = listed_tools(&mut server);
+        for (id, (tool, arguments)) in (2..).zip(COUNTING_AND_EXPIRING) {
+            assert!(
+                !tools.contains(&format!("\"name\":\"{tool}\"")),
+                "{name}: {tools}"
+            );
+            let answer = call(&mut server, id, tool, arguments);
+            assert_eq!(error_code(&answer), code, "{name}: {tool}");
+        }
+        assert_eq!(opener.store.snapshot(), before, "{name}");
+        assert_eq!(opener.write_opens.get(), 0, "{name}");
+        let refused = audit
+            .lines()
+            .iter()
+            .filter(|line| line.contains(&format!("\"error_code\":\"{code}\"")))
+            .count();
+        assert_eq!(refused, 4, "{name}");
+    }
+}
+
+#[test]
+fn every_key_tool_refuses_a_key_of_a_sql_row_before_opening_the_file() {
+    let audit = TempAudit::new("key-tools-sql-rows");
+    let opener = MapOpener::new(sample_store());
+    let before = opener.store.snapshot();
+    let row_keys: Vec<String> = before
+        .keys()
+        .filter(|key| key.starts_with(RESERVED_KEY_PREFIX))
+        .map(|key| key.iter().map(|byte| format!("{byte:02x}")).collect())
+        .collect();
+    assert!(row_keys.len() > 3, "{row_keys:?}");
+    let mut server = writing_server(&opener, &audit, "{}");
+    let mut id = 2;
+    for key_hex in &row_keys {
+        for (tool, rest) in [
+            ("incr", r#""by":5"#),
+            ("incr", r#""by":-5"#),
+            ("expire", r#""ttl":60"#),
+            ("expire", r#""ttl":0,"confirm":true"#),
+            ("persist", ""),
+            ("cas", r#""if_absent":true,"new":"x""#),
+            ("cas", r#""expected":"x","delete":true,"confirm":true"#),
+            ("put", r#""value":"x""#),
+            ("del", r#""confirm":true"#),
+        ] {
+            let arguments = if rest.is_empty() {
+                format!(r#"{{"key_hex":"{key_hex}"}}"#)
+            } else {
+                format!(r#"{{"key_hex":"{key_hex}",{rest}}}"#)
+            };
+            let answer = call(&mut server, id, tool, &arguments);
+            id += 1;
+            assert_eq!(
+                error_code(&answer),
+                "invalid_arguments",
+                "{tool} {arguments}"
+            );
+            let message = text_at(structured(&answer), &["error", "message"]);
+            assert!(message.contains("SQL's key space"), "{tool}: {message}");
+        }
+    }
+    assert_eq!(opener.store.snapshot(), before);
+    assert_eq!(opener.write_opens.get(), 0);
+}
+
+#[test]
+fn incr_adds_and_subtracts_and_a_value_that_is_not_a_counter_changes_nothing() {
+    let audit = TempAudit::new("key-tools-incr");
+    let opener = MapOpener::new(sample_store());
+    let mut server = writing_server(&opener, &audit, "{}");
+    let first = call(&mut server, 2, "incr", r#"{"key":"hits"}"#);
+    assert!(!is_error(&first), "{first:?}");
+    assert_eq!(text_at(structured(&first), &["value"]), "1");
+    assert_eq!(text_at(structured(&first), &["committed"]), "true");
+    let more = call(&mut server, 3, "incr", r#"{"key":"hits","by":41}"#);
+    assert_eq!(text_at(structured(&more), &["value"]), "42");
+    let less = call(&mut server, 4, "incr", r#"{"key_hex":"68697473","by":-50}"#);
+    assert_eq!(text_at(structured(&less), &["value"]), "-8");
+    assert_eq!(stored(&opener, b"hits"), Some(b"-8".to_vec()));
+    let not_a_counter = call(&mut server, 5, "incr", r#"{"key":"user:1"}"#);
+    assert_eq!(error_code(&not_a_counter), "sql_error");
+    let error = get_error(&not_a_counter);
+    assert_eq!(text_at(error, &["sqlstate"]), "22000");
+    assert!(text_at(error, &["fix"]).contains("whole number"));
+    assert_eq!(stored(&opener, b"user:1"), Some(b"Ada".to_vec()));
+    for (id, arguments) in [
+        (6, r#"{"key":"hits","by":1.5}"#),
+        (7, r#"{"key":"hits","by":"2"}"#),
+        (8, r#"{"key":"hits","by":9223372036854775808}"#),
+        (9, r#"{"key":"hits","confirm":true}"#),
+    ] {
+        let refused = call(&mut server, id, "incr", arguments);
+        assert_eq!(error_code(&refused), "invalid_arguments", "{arguments}");
+    }
+    assert_eq!(stored(&opener, b"hits"), Some(b"-8".to_vec()));
+    let records = audit_records(&audit);
+    let counted = records
+        .iter()
+        .filter(|record| text_at(record, &["event"]) == "call_started")
+        .filter(|record| text_at(record, &["tool"]) == "incr")
+        .count();
+    assert_eq!(counted, 4, "{records:?}");
+}
+
+fn get_error(answer: &Node) -> &Node {
+    let Some(error) = member(structured(answer), "error") else {
+        panic!("{answer:?}");
+    };
+    error
+}
+
+#[test]
+fn cas_swaps_only_while_the_value_is_expected_and_deleting_needs_confirmation() {
+    let audit = TempAudit::new("key-tools-cas");
+    let opener = MapOpener::new(sample_store());
+    let mut server = writing_server(&opener, &audit, "{}");
+    let taken = call(
+        &mut server,
+        2,
+        "cas",
+        r#"{"key":"lock","if_absent":true,"new":"worker-7"}"#,
+    );
+    assert!(!is_error(&taken), "{taken:?}");
+    assert_eq!(text_at(structured(&taken), &["swapped"]), "true");
+    assert!(member(structured(&taken), "value").is_none());
+    let not_taken = call(
+        &mut server,
+        3,
+        "cas",
+        r#"{"key":"lock","if_absent":true,"new":"worker-8"}"#,
+    );
+    assert_eq!(text_at(structured(&not_taken), &["swapped"]), "false");
+    assert_eq!(text_at(structured(&not_taken), &["value"]), "worker-7");
+    assert_eq!(stored(&opener, b"lock"), Some(b"worker-7".to_vec()));
+    let binary = call(
+        &mut server,
+        4,
+        "cas",
+        r#"{"key":"user:2","expected":"x","new":"y"}"#,
+    );
+    assert_eq!(text_at(structured(&binary), &["swapped"]), "false");
+    assert_eq!(text_at(structured(&binary), &["value_hex"]), "009f9296");
+    let unconfirmed = call(
+        &mut server,
+        5,
+        "cas",
+        r#"{"key":"lock","expected":"worker-7","delete":true}"#,
+    );
+    assert_eq!(error_code(&unconfirmed), "needs_confirmation");
+    assert_eq!(stored(&opener, b"lock"), Some(b"worker-7".to_vec()));
+    let released = call(
+        &mut server,
+        6,
+        "cas",
+        r#"{"key":"lock","expected_hex":"776f726b65722d37","delete":true,"confirm":true}"#,
+    );
+    assert_eq!(text_at(structured(&released), &["swapped"]), "true");
+    assert_eq!(stored(&opener, b"lock"), None);
+    for (id, arguments, expected) in [
+        (7, r#"{"key":"lock","new":"a"}"#, "if_absent"),
+        (8, r#"{"key":"lock","if_absent":true}"#, "delete: true"),
+        (
+            9,
+            r#"{"key":"lock","expected":"a","if_absent":true,"new":"b"}"#,
+            "not both",
+        ),
+        (
+            10,
+            r#"{"key":"lock","expected":"a","new":"b","delete":true}"#,
+            "not both",
+        ),
+    ] {
+        let refused = call(&mut server, id, "cas", arguments);
+        assert_eq!(error_code(&refused), "invalid_arguments", "{arguments}");
+        let message = text_at(get_error(&refused), &["message"]);
+        assert!(message.contains(expected), "{arguments}: {message}");
+    }
+    let records = audit_records(&audit);
+    let confirmed = records
+        .iter()
+        .filter(|record| text_at(record, &["event"]) == "call")
+        .filter(|record| text_at(record, &["tool"]) == "cas")
+        .filter(|record| {
+            member(record, "confirmation").is_some()
+                && text_at(record, &["confirmation"]) == "confirm_argument"
+        })
+        .count();
+    assert_eq!(confirmed, 1, "{records:?}");
+}
+
+#[test]
+fn expire_gives_a_time_to_live_and_0_deletes_the_key_only_once_confirmed() {
+    let audit = TempAudit::new("key-tools-expire");
+    let opener = MapOpener::new(sample_store());
+    opener.store.put(b"session:1", b"open");
+    let mut server = writing_server(&opener, &audit, "{}");
+    let expiring = call(
+        &mut server,
+        2,
+        "expire",
+        r#"{"key":"session:1","ttl":1800}"#,
+    );
+    assert!(!is_error(&expiring), "{expiring:?}");
+    let result = structured(&expiring);
+    assert_eq!(text_at(result, &["expires"]), "true");
+    assert_eq!(text_at(result, &["ttl_ms"]), "1800000");
+    let at = text_at(result, &["expires_at"]);
+    assert_eq!(at.len(), "2026-10-30T09:44:07.123Z".len(), "{at}");
+    assert!(at.ends_with('Z') && at.as_bytes()[10] == b'T', "{at}");
+    let absent = call(&mut server, 3, "expire", r#"{"key":"nobody","ttl":60}"#);
+    assert_eq!(text_at(structured(&absent), &["expires"]), "false");
+    assert!(member(structured(&absent), "expires_at").is_none());
+    let unconfirmed = call(&mut server, 4, "expire", r#"{"key":"session:1","ttl":0}"#);
+    assert_eq!(error_code(&unconfirmed), "needs_confirmation");
+    assert_eq!(stored(&opener, b"session:1"), Some(b"open".to_vec()));
+    let deleted = call(
+        &mut server,
+        5,
+        "expire",
+        r#"{"key":"session:1","ttl":0,"confirm":true}"#,
+    );
+    assert!(!is_error(&deleted), "{deleted:?}");
+    assert_eq!(text_at(structured(&deleted), &["deleted"]), "true");
+    assert!(member(structured(&deleted), "expires").is_none());
+    assert_eq!(stored(&opener, b"session:1"), None);
+    for (id, arguments) in [
+        (6, r#"{"key":"k"}"#),
+        (7, r#"{"key":"k","ttl":-1}"#),
+        (8, r#"{"key":"k","ttl":"30s"}"#),
+        (9, r#"{"key":"k","ttl":3155760001}"#),
+    ] {
+        let refused = call(&mut server, id, "expire", arguments);
+        assert_eq!(error_code(&refused), "invalid_arguments", "{arguments}");
+    }
+    let persisted = call(&mut server, 10, "persist", r#"{"key":"user:1"}"#);
+    assert_eq!(text_at(structured(&persisted), &["persisted"]), "true");
+    let missing = call(&mut server, 11, "persist", r#"{"key":"session:1"}"#);
+    assert_eq!(text_at(structured(&missing), &["persisted"]), "false");
+}
+
+#[test]
+fn a_client_that_can_ask_is_asked_before_expire_deletes_a_key() {
+    for (answer, deletes) in [
+        (r#"{"action":"accept","content":{"run":true}}"#, true),
+        (r#"{"action":"decline"}"#, false),
+    ] {
+        let audit = TempAudit::new("key-tools-expire-elicit");
+        let opener = MapOpener::new(sample_store());
+        opener.store.put(b"session:1", b"open");
+        let mut server = Server::new(&opener, writing_config(&audit)).unwrap();
+        let script = [
+            r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"elicitation":{}},"clientInfo":{"name":"test-client","version":"1.0"}}}"#.to_owned(),
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"expire","arguments":{"key":"session:1","ttl":0,"confirm":true}}}"#.to_owned(),
+            format!(r#"{{"jsonrpc":"2.0","id":"eggdb-confirm-1","result":{answer}}}"#),
+        ]
+        .join("\n")
+            + "\n";
+        let answers = served(&mut server, &script);
+        assert_eq!(answers.len(), 3, "{answers:?}");
+        let message = text_at(&answers[1], &["params", "message"]);
+        assert!(
+            message.contains("delete the key \"session:1\" from the default key space of app.db."),
+            "{message}"
+        );
+        if deletes {
+            assert!(!is_error(&answers[2]), "{:?}", answers[2]);
+        } else {
+            assert_eq!(error_code(&answers[2]), "declined_by_user");
+        }
+        assert_eq!(stored(&opener, b"session:1").is_none(), deletes);
+    }
+}
+
+#[test]
+fn put_with_a_time_to_live_says_when_the_key_expires_as_eggdb_put_does() {
+    let audit = TempAudit::new("key-tools-put-expires-at");
+    let opener = MapOpener::new(sample_store());
+    let mut server = writing_server(&opener, &audit, "{}");
+    let timed = call(
+        &mut server,
+        2,
+        "put",
+        r#"{"key":"s:1","value":"v","ttl":"30m"}"#,
+    );
+    let result = structured(&timed);
+    assert_eq!(text_at(result, &["ttl_ms"]), "1800000");
+    let at = text_at(result, &["expires_at"]);
+    assert_eq!(at.len(), "2026-10-30T09:44:07.123Z".len(), "{at}");
+    let plain = call(&mut server, 3, "put", r#"{"key":"s:2","value":"v"}"#);
+    assert!(member(structured(&plain), "expires_at").is_none());
+    assert!(member(structured(&plain), "ttl_ms").is_none());
+}
+
+#[test]
+fn a_writer_confined_to_tables_refuses_counters_compare_and_set_and_expiry() {
+    use eggdb_sql::{KeyValueStore, KeyValueWrite};
+    let store = sample_store();
+    let before = store.snapshot();
+    let tables = eggdb_sql::VisibleTables::new(["users"]);
+    let mut writer = tables.write(store.begin_write().unwrap()).unwrap();
+    let refusals = [
+        writer.increment(None, b"hits", 1).map(|_| ()),
+        writer
+            .compare_and_set(None, b"lock", None, Some(b"me".as_slice()))
+            .map(|_| ()),
+        writer
+            .set_expiry(None, b"user:1", std::time::Duration::ZERO)
+            .map(|_| ()),
+        writer.clear_expiry(Some("sessions"), b"user:1").map(|_| ()),
+    ];
+    for refusal in refusals {
+        let Err(error) = refusal else {
+            panic!("a confined writer changed the key-value store");
+        };
+        assert_eq!(error.state().code(), "42501");
+    }
+    writer.commit().unwrap();
+    assert_eq!(store.snapshot(), before);
 }

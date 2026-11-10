@@ -5,6 +5,7 @@ mod mysql;
 mod nonatomic;
 mod oracle;
 mod oracle_over_tds;
+mod prepared;
 mod read_only;
 mod restore;
 mod savepoints;
@@ -28,6 +29,7 @@ use crate::ast::{
     SqlServerStatement, Statement,
 };
 use crate::bulk_load::BulkRows;
+use crate::conflict_resolution::conflict_resolution_applies;
 use crate::copy::{CopyChannel, CopyIo, NoCopyChannel};
 use crate::destructive::DestructiveStatement;
 use crate::dialect::Dialect;
@@ -70,24 +72,75 @@ fn check_copied_columns(
     )
 }
 
+fn starts_query(tokens: &[Token<'_>], at: usize) -> bool {
+    match tokens.get(at).map(|token| &token.kind) {
+        Some(TokenKind::Word(word)) if word.eq_ignore_ascii_case("select") => true,
+        Some(TokenKind::Word(word)) if word.eq_ignore_ascii_case("table") => matches!(
+            tokens.get(at + 1).map(|token| &token.kind),
+            Some(TokenKind::Word(_) | TokenKind::QuotedIdentifier(_))
+        ),
+        _ => false,
+    }
+}
+
 fn walks_expressions(tokens: &[Token<'_>]) -> bool {
-    let mut selects = 0;
-    for token in tokens {
+    let mut queries = 0;
+    for (at, token) in tokens.iter().enumerate() {
         match &token.kind {
-            TokenKind::Word(word) if word.eq_ignore_ascii_case("select") => selects += 1,
             TokenKind::Word(word) if word.starts_with("current_schema") => return true,
             TokenKind::QuotedIdentifier(name) if name.starts_with("current_schema") => {
                 return true;
             }
+            _ if starts_query(tokens, at) => queries += 1,
             _ => {}
         }
     }
-    selects > 1
-        || selects == 1
-            && !tokens.first().is_some_and(|token| {
-                matches!(&token.kind, TokenKind::Word(word)
-                    if word.eq_ignore_ascii_case("select") || word.eq_ignore_ascii_case("with"))
-            })
+    let leads_with_query = starts_query(tokens, 0)
+        || tokens.first().is_some_and(
+            |token| matches!(&token.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("with")),
+        );
+    queries > 1 || queries == 1 && !leads_with_query
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StatementFlags {
+    walks_expressions: bool,
+    row_locking: Option<&'static str>,
+    uses_sequences: bool,
+    wants_catalog: bool,
+}
+
+impl StatementFlags {
+    fn from_tokens(tokens: Option<&[Token<'_>]>, dialect: Dialect) -> Self {
+        Self {
+            walks_expressions: tokens.is_none_or(walks_expressions),
+            row_locking: tokens.and_then(read_only::row_locking_command),
+            uses_sequences: tokens.is_some_and(mentions_sequence_functions),
+            wants_catalog: match dialect {
+                Dialect::PostgreSql => tokens.is_some_and(crate::pg_catalog::mentions_catalog),
+                Dialect::SqlServer => {
+                    tokens.is_some_and(crate::sqlserver_catalog::mentions_metadata)
+                }
+                _ => false,
+            },
+        }
+    }
+
+    fn combined_with(self, other: Self) -> Self {
+        Self {
+            walks_expressions: self.walks_expressions || other.walks_expressions,
+            row_locking: self.row_locking.or(other.row_locking),
+            uses_sequences: self.uses_sequences || other.uses_sequences,
+            wants_catalog: self.wants_catalog || other.wants_catalog,
+        }
+    }
+}
+
+fn is_sql_prepare(statement: &Statement) -> bool {
+    matches!(
+        statement,
+        Statement::Prepared(crate::ast::PreparedCommand::Prepare(_))
+    )
 }
 
 fn only_separators_after(tokens: &[Token<'_>], at: usize) -> bool {
@@ -411,11 +464,15 @@ fn double_quoted_key_part(part: &str) -> String {
     format!("\"{}\"", part.replace('"', "\"\""))
 }
 
-fn conflict_resolution_applies(error: &SqlError) -> bool {
-    matches!(
-        error.state(),
-        SqlState::UNIQUE_VIOLATION | SqlState::NOT_NULL_VIOLATION | SqlState::CHECK_VIOLATION
-    )
+fn rolls_back_transaction_on_conflict(statement: &Statement, error: &SqlError) -> bool {
+    let rolls_back = match statement {
+        Statement::Insert(insert) => insert.rollback_on_conflict,
+        Statement::Update(update) => {
+            update.conflict_resolution == crate::ast::ConflictResolution::Rollback
+        }
+        _ => false,
+    };
+    rolls_back && conflict_resolution_applies(error)
 }
 
 fn aborted_block() -> SqlError {
@@ -456,6 +513,7 @@ pub struct Session<'s> {
     pending_sequences: Vec<SequenceAdvance>,
     statement_uses_sequences: bool,
     statement_walks_expressions: bool,
+    statement_row_locking: Option<&'static str>,
     search_path_cache: crate::schemas::PathCache,
     transaction_settings: crate::settings::TransactionSettings,
     max_value_bytes: usize,
@@ -500,6 +558,7 @@ pub struct Session<'s> {
     advisory_locks: crate::advisory_locks::AdvisoryLocks,
     notifications: crate::notifications::Notifications,
     deallocated: Vec<Option<String>>,
+    sql_prepared: prepared::SqlPreparedStatements,
     _open: crate::activity::OpenSession,
     temporary: crate::temporary::TemporaryObjects,
     portals: crate::portals::Portals,
@@ -541,6 +600,7 @@ impl<'s> Session<'s> {
             pending_sequences: Vec::new(),
             statement_uses_sequences: false,
             statement_walks_expressions: true,
+            statement_row_locking: None,
             search_path_cache: crate::schemas::PathCache::default(),
             transaction_settings: crate::settings::TransactionSettings::default(),
             max_value_bytes: crate::memory::MAX_VALUE_BYTES,
@@ -587,6 +647,7 @@ impl<'s> Session<'s> {
             portals: crate::portals::Portals::default(),
             notifications: crate::notifications::Notifications::default(),
             deallocated: Vec::new(),
+            sql_prepared: prepared::SqlPreparedStatements::default(),
             _open: crate::activity::OpenSession::new(),
             deferred: crate::deferred_checks::DeferredState::default(),
             pending_user_types: None,
@@ -1222,6 +1283,7 @@ impl<'s> Session<'s> {
                 crate::portals::take();
                 self.temporary.discard();
                 self.temporary.commit();
+                self.sql_prepared.forget(None);
                 Ok(QueryResult::command("DISCARD ALL"))
             }
             DiscardTarget::Plans => Ok(QueryResult::command("DISCARD PLANS")),
@@ -1242,6 +1304,7 @@ impl<'s> Session<'s> {
                 } else {
                     "DEALLOCATE ALL"
                 };
+                self.sql_prepared.forget(name.as_deref());
                 match &name {
                     Some(named) => self
                         .deallocated
@@ -1286,7 +1349,7 @@ impl<'s> Session<'s> {
         let _path = self.enter_search_path(&settings);
         let _types = crate::user_types::enter(None);
         let mut retried = false;
-        let mut parser = loop {
+        let (mut parser, prepares_statement) = loop {
             let mut parser = Parser::new(text, &tokens)
                 .with_context(Parameters::Types(declared_types), &settings)
                 .in_dialect(self.dialect);
@@ -1298,18 +1361,18 @@ impl<'s> Session<'s> {
                 });
             }
             crate::user_types::take_wanted();
-            if parser.literal_rows().is_none()
-                && let Err(error) = parser.statement()
-            {
-                if !retried && crate::user_types::take_wanted() {
+            if parser.literal_rows().is_some() {
+                break (parser, false);
+            }
+            match parser.statement() {
+                Ok(statement) => break (parser, is_sql_prepare(&statement)),
+                Err(_) if !retried && crate::user_types::take_wanted() => {
                     retried = true;
                     let registry = self.read(|reader, _| crate::user_types::load(reader))?;
                     crate::user_types::install(registry);
-                    continue;
                 }
-                return Err(error);
+                Err(error) => return Err(error),
             }
-            break parser;
         };
         parser.skip_empty_statements();
         if !parser.at_end() {
@@ -1318,8 +1381,13 @@ impl<'s> Session<'s> {
                 parser.position(),
             ));
         }
+        let parameter_count = if prepares_statement {
+            declared_types.len()
+        } else {
+            highest_parameter(&tokens).max(declared_types.len())
+        };
         Ok(PreparedStatement {
-            parameter_count: highest_parameter(&tokens).max(declared_types.len()),
+            parameter_count,
             is_empty: false,
         })
     }
@@ -1387,6 +1455,9 @@ impl<'s> Session<'s> {
                 columns: None,
             });
         };
+        if is_sql_prepare(&statement) {
+            parameter_types.truncate(declared_types.len());
+        }
         if matches!(
             statement,
             Statement::Begin { .. }
@@ -1448,6 +1519,9 @@ impl<'s> Session<'s> {
                 crate::with_statement::describe(reader, tables, with, binding)
             }),
             Statement::Show { name } => Ok(Some(self.show_columns(name.as_deref()))),
+            Statement::Prepared(crate::ast::PreparedCommand::Execute(execute)) => {
+                self.prepared_columns(execute, binding)
+            }
             Statement::MySql(statement) => self.describe_mysql(statement),
             Statement::Pragma(pragma) => Ok(self.pragma_columns(pragma)),
             Statement::Explain(explain) if explain.plan_table.is_some() => Ok(None),
@@ -2022,8 +2096,6 @@ impl<'s> Session<'s> {
             self.statement_stands_alone =
                 self.statements_in_text == 1 && only_separators_after(tokens, resume.0);
             let statement_tokens = tokens.get(first_token..resume.0.min(tokens.len()));
-            let uses_sequences = statement_tokens.is_some_and(mentions_sequence_functions);
-            self.statement_walks_expressions = statement_tokens.is_none_or(walks_expressions);
             let mut statement = match parsed {
                 Ok(statement) => statement,
                 Err(error) => {
@@ -2031,6 +2103,13 @@ impl<'s> Session<'s> {
                     return Err(error);
                 }
             };
+            let mut flags = StatementFlags::from_tokens(statement_tokens, self.dialect);
+            if let Some(executed) = self.executed_prepared_flags(&statement) {
+                flags = flags.combined_with(executed);
+            }
+            self.statement_walks_expressions =
+                flags.walks_expressions || self.settings.checked_role.is_some();
+            self.statement_row_locking = flags.row_locking;
             let diagnostic = matches!(
                 statement,
                 Statement::MySql(
@@ -2044,17 +2123,8 @@ impl<'s> Session<'s> {
                 consumed: None,
                 bulk_rows: reborrowed_rows(&mut client.bulk_rows),
             };
-            let wants_catalog = match self.dialect {
-                Dialect::PostgreSql => {
-                    statement_tokens.is_some_and(crate::pg_catalog::mentions_catalog)
-                }
-                Dialect::SqlServer => {
-                    statement_tokens.is_some_and(crate::sqlserver_catalog::mentions_metadata)
-                }
-                _ => false,
-            };
-            let _catalog = crate::pg_catalog::enter_statement(wants_catalog, &settings);
-            self.enter_sequences(uses_sequences);
+            let _catalog = crate::pg_catalog::enter_statement(flags.wants_catalog, &settings);
+            self.enter_sequences(flags.uses_sequences);
             self.extra_results.clear();
             crate::deferred_checks::enter(&self.deferred.modes);
             let leftover_changes = crate::routine_settings::take_for_session(true);
@@ -2777,14 +2847,10 @@ impl<'s> Session<'s> {
         let planning = std::time::Instant::now();
         let before_planning = lookups();
         let mut planned = (*explain.statement).clone();
-        let with_subplans = crate::explain::shows_subplans(explain.style, self.dialect);
+        let (style, dialect) = (explain.style, self.dialect);
         let plan = self.read(|reader, tables| {
             binding.statement(reader, tables, &mut planned)?;
-            if with_subplans {
-                execute::explain_with_subplans(reader, tables, &planned)
-            } else {
-                execute::explain(reader, tables, &planned)
-            }
+            crate::explain::plan(reader, tables, &planned, style, dialect)
         })?;
         let planning = planning.elapsed();
         let before_execution = lookups();
@@ -2821,7 +2887,7 @@ impl<'s> Session<'s> {
         Ok(if explain.style == crate::ast::ExplainStyle::Tree {
             crate::explain::render_analyzed_tree(&plan, analyzed)
         } else {
-            crate::explain::render_analyzed(&plan, analyzed)
+            crate::explain::render_analyzed(&plan.query, analyzed)
         })
     }
 
@@ -2859,10 +2925,13 @@ impl<'s> Session<'s> {
     ) -> SqlResult<QueryResult> {
         self.refuse_after_database_switch()?;
         self.failed_statement_was_undone = false;
-        self.keeps_failed_statement_changes = matches!(
-            statement,
-            Statement::Insert(insert) if insert.keeps_changes_on_conflict
-        );
+        self.keeps_failed_statement_changes = match statement {
+            Statement::Insert(insert) => insert.keeps_changes_on_conflict,
+            Statement::Update(update) => {
+                update.conflict_resolution == crate::ast::ConflictResolution::Fail
+            }
+            _ => false,
+        };
         match statement {
             Statement::Set { name, value, .. } if is_dialect_setting(name) => {
                 return self
@@ -2948,6 +3017,9 @@ impl<'s> Session<'s> {
         if let Statement::Savepoint(command) = statement {
             return self.savepoint_command(command);
         }
+        if let Statement::Prepared(command) = statement {
+            return self.run_prepared_command(command, io);
+        }
         match statement {
             Statement::SetTransaction(characteristics) => {
                 let result = self.set_transaction_statement(characteristics);
@@ -2992,6 +3064,14 @@ impl<'s> Session<'s> {
         let binding = &binding;
         let dialect = self.dialect;
         let refuses_writes = self.transaction_is_read_only();
+        if refuses_writes
+            && let Some(command) = self.statement_row_locking
+            && matches!(dialect, Dialect::PostgreSql | Dialect::Oracle)
+            && self.locks_permanent_rows(binding, statement)
+        {
+            let refused = Err(read_only::refused_in_read_only_transaction(command));
+            return self.failing_block_on_error(refused);
+        }
         let format_only = self.sqlserver() && self.settings.sqlserver.format_only;
         if format_only
             && !matches!(
@@ -3099,7 +3179,6 @@ impl<'s> Session<'s> {
             }
             Statement::Select(select)
                 if dialect == Dialect::PostgreSql
-                    && !matches!(self.block, Block::Reading(_))
                     && crate::routines::select_may_write(&*select)
                     && self
                         .read(|reader, tables| {
@@ -3272,16 +3351,14 @@ impl<'s> Session<'s> {
                 let explain = explain.clone();
                 self.explain_analyze(&explain, io)
             }
-            Statement::Explain(explain) => self
-                .read(|reader, tables| {
+            Statement::Explain(explain) => {
+                let style = explain.style;
+                self.read(|reader, tables| {
                     binding.statement(reader, tables, &mut explain.statement)?;
-                    if crate::explain::shows_subplans(explain.style, dialect) {
-                        execute::explain_with_subplans(reader, tables, &explain.statement)
-                    } else {
-                        execute::explain(reader, tables, &explain.statement)
-                    }
+                    crate::explain::plan(reader, tables, &explain.statement, style, dialect)
                 })
-                .map(|query| crate::explain::render(&query, explain.style, dialect)),
+                .map(|planned| crate::explain::render(&planned, style, dialect))
+            }
             Statement::DropTable {
                 names,
                 if_exists,
@@ -3485,11 +3562,23 @@ impl<'s> Session<'s> {
                 self.set_constraints(names.as_deref(), *deferred)
             }
             Statement::CreateTableAs(create) => {
+                let execute = match &create.query {
+                    Statement::Prepared(crate::ast::PreparedCommand::Execute(execute)) => {
+                        Some(execute.clone())
+                    }
+                    _ => None,
+                };
+                if let Some(execute) = execute {
+                    create.query = self.prepared_query(&execute)?;
+                }
                 let command = create.command();
                 self.write(command, |writer, tables| {
                     crate::create_table_as::run(writer, tables, binding, dialect, create)
                 })
             }
+            Statement::CreateTableLike(like) => self.write("CREATE TABLE", |writer, tables| {
+                crate::create_table_like::run(writer, tables, binding, dialect, like)
+            }),
             Statement::MultitableInsert(insert) => self
                 .write_firing_triggers("INSERT", |writer, tables| {
                     crate::multitable_insert::run(writer, tables, binding, insert)
@@ -3504,6 +3593,7 @@ impl<'s> Session<'s> {
             | Statement::Savepoint(_)
             | Statement::InstallExtension { .. }
             | Statement::MaterializedView(_)
+            | Statement::Prepared(_)
             | Statement::SqlServer(_) => {
                 return Err(SqlError::new(
                     SqlState::INTERNAL_ERROR,
@@ -3520,10 +3610,9 @@ impl<'s> Session<'s> {
                 Some(rows),
             ));
         }
-        if result.is_err() {
+        if let Err(error) = &result {
             self.fail_block_in_postgresql();
-            if let Statement::Insert(insert) = statement
-                && insert.rollback_on_conflict
+            if rolls_back_transaction_on_conflict(statement, error)
                 && let Block::Writing(writer) = std::mem::replace(&mut self.block, Block::None)
             {
                 self.temporary.rollback();
@@ -3544,6 +3633,7 @@ impl<'s> Session<'s> {
             && matches!(
                 statement,
                 Statement::CreateTable(_)
+                    | Statement::CreateTableLike(_)
                     | Statement::DropTable { .. }
                     | Statement::Truncate(_)
                     | Statement::CreateIndex(_)
@@ -4029,6 +4119,15 @@ impl<'s> Session<'s> {
         ended
     }
 
+    fn committed(&self, implicit: bool) -> QueryResult {
+        let committed = QueryResult::command("COMMIT");
+        if implicit && self.dialect == Dialect::PostgreSql {
+            committed.with_notice(NO_TRANSACTION_WARNING.into())
+        } else {
+            committed
+        }
+    }
+
     fn end_block_for_commit(
         &mut self,
         implicit: bool,
@@ -4037,17 +4136,12 @@ impl<'s> Session<'s> {
         match std::mem::replace(&mut self.block, Block::None) {
             Block::Writing(writer) => {
                 self.commit_writes(writer, pending)?;
-                let committed = QueryResult::command("COMMIT");
-                Ok(if implicit && self.dialect == Dialect::PostgreSql {
-                    committed.with_notice(NO_TRANSACTION_WARNING.into())
-                } else {
-                    committed
-                })
+                Ok(self.committed(implicit))
             }
             Block::Reading(_) => {
                 self.temporary.commit();
                 self.notifications.commit();
-                Ok(QueryResult::command("COMMIT"))
+                Ok(self.committed(implicit))
             }
             Block::Failed => {
                 self.notifications.rollback();

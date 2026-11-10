@@ -5,8 +5,10 @@
 //! `CREATE`, `MERGE` with `ON CREATE SET` and `ON MATCH SET`, `SET`, `REMOVE`, `DELETE`,
 //! `DETACH DELETE`, `FOREACH`, `UNWIND`, `WITH`, `RETURN` with aggregation, `ORDER BY`, `SKIP`
 //! and `LIMIT`, `UNION` and `UNION ALL`, named paths with `shortestPath()` and
-//! `allShortestPaths()`, list and pattern comprehensions, and `CALL ... YIELD` of the graph
-//! algorithms); a query runs in one transaction. The algorithms are shortest paths, connected components,
+//! `allShortestPaths()` (also as expressions), list and pattern comprehensions, label predicates
+//! such as `n:A:B`, `n:A|B` and `r:T|U`, `CALL { ... }` subqueries, and `CALL ... YIELD` of the
+//! graph algorithms); a query runs in one transaction, and one that writes anywhere, a subquery
+//! included, needs write access. The algorithms are shortest paths, connected components,
 //! PageRank, label propagation communities, triangle counts and Jaccard node similarity. Neo4j is a
 //! trademark of its owner; no Neo4j code is used or read.
 

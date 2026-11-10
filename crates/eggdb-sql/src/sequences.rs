@@ -134,6 +134,7 @@ fn load_identity_counters(reader: &dyn KeyValueRead) -> SqlResult<()> {
     }
     let mut tables = crate::indexes::every_table(reader)?;
     tables.sort_by(|a, b| a.name.cmp(&b.name));
+    let catalog = crate::partitions::load(reader)?;
     let mut found = Vec::new();
     for table in &tables {
         let schema = crate::schemas::schema_of(&table.name);
@@ -145,7 +146,7 @@ fn load_identity_counters(reader: &dyn KeyValueRead) -> SqlResult<()> {
             let name =
                 crate::schemas::qualified(schema, &implicit_sequence_name(base, &column.name));
             let next = if table.auto_increment_column() == Some(index) {
-                crate::execute::StoredRows::next_identity_value(reader, table)?
+                crate::partition_dml::next_identity_value(reader, &catalog, table)?
             } else {
                 None
             };
@@ -422,6 +423,7 @@ fn identity_relation_state(
     name: &str,
 ) -> SqlResult<Option<(i64, bool)>> {
     let wanted_schema = crate::schemas::schema_of(name);
+    let catalog = crate::partitions::load(reader)?;
     for table in crate::indexes::every_table(reader)? {
         let schema = crate::schemas::schema_of(&table.name);
         if schema != wanted_schema {
@@ -437,7 +439,7 @@ fn identity_relation_state(
             }
             let seed = table.identity_seed();
             let next = if table.auto_increment_column() == Some(index) {
-                crate::execute::StoredRows::next_identity_value(reader, &table)?
+                crate::partition_dml::next_identity_value(reader, &catalog, &table)?
             } else {
                 None
             };

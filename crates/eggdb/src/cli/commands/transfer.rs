@@ -3,6 +3,7 @@ use crate::cli::args::{CommandName, ConflictPolicy, ExportFile, Format};
 use crate::cli::failure::{Exit, Failure, output_failure};
 use crate::cli::jsonl::{self, ExportReader, Header, Item, ReadError};
 use crate::cli::output::{Output, Style};
+use crate::cli::progress::ProgressLine;
 use crate::cli::render::{self, JsonObject, TimeStyle};
 use eggdb::{
     Database, Durability, Error, ErrorKind, Options, ReadTransaction, Scan, WriteTransaction,
@@ -13,13 +14,12 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::io::{BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 const OUTPUT_BUFFER_BYTES: usize = 256 * 1024;
 const BATCH_BYTES: usize = 4 << 20;
 const BATCH_PAGE_BYTES: usize = 2 << 20;
 const IMPORT_CACHE_BYTES: usize = 32 << 20;
-const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 const SHOWN_KEY_BYTES: usize = 64;
 const STAGING_SUFFIX: &str = ".importing";
 const COLLECTION_KEY_PREFIX_BYTES: usize = 10;
@@ -50,7 +50,16 @@ impl Session<'_> {
                     self.key_space_failure(&error, &format!("cannot export {}", self.file))
                 })?;
         }
-        let mut progress = Progress::new(self.stderr_is_terminal, "exported");
+        let to_stdout = !matches!(self.request.export_file, Some(ExportFile::Path(_)));
+        let mut progress = ExportProgress {
+            shown: ProgressLine::new(export_progress_shown(
+                self.stderr_is_terminal,
+                to_stdout && self.stdout_is_terminal,
+            )),
+            file: self.file.clone(),
+            collection: only.clone(),
+            total: None,
+        };
         let result = match self.request.export_file.clone() {
             Some(ExportFile::Path(path)) => {
                 self.export_to_file(&db, &header, only.as_deref(), &path, &mut progress)
@@ -68,7 +77,7 @@ impl Session<'_> {
         db: &Database,
         header: &Header,
         only: Option<&str>,
-        progress: &mut Progress,
+        progress: &mut ExportProgress,
     ) -> Result<Exit, Failure> {
         let mut writer = BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, self.out.sink()?);
         let written = write_export(db, header, only, &mut writer, progress, &mut self.messages);
@@ -104,7 +113,7 @@ impl Session<'_> {
         header: &Header,
         only: Option<&str>,
         path: &Path,
-        progress: &mut Progress,
+        progress: &mut ExportProgress,
     ) -> Result<Exit, Failure> {
         let out_display = path.display().to_string();
         let out = render::text(out_display.as_bytes());
@@ -247,14 +256,7 @@ impl Session<'_> {
             requested_page_size: self.request.page_size,
             staging_opened: false,
             messages: &mut self.messages,
-            progress: Progress::new(
-                self.stderr_is_terminal,
-                if self.request.dry_run {
-                    "checked"
-                } else {
-                    "imported"
-                },
-            ),
+            progress: ProgressLine::new(self.stderr_is_terminal),
             tally: Tally::default(),
         };
         let result = if self.request.dry_run {
@@ -294,7 +296,7 @@ fn write_export(
     header: &Header,
     only: Option<&str>,
     out: &mut dyn Write,
-    progress: &mut Progress,
+    progress: &mut ExportProgress,
     messages: &mut Output<'_>,
 ) -> Result<Exported, ExportFailure> {
     let transaction = db.begin_read().map_err(ExportFailure::Read)?;
@@ -307,6 +309,8 @@ fn write_export(
     match only {
         Some(name) => {
             let collection = transaction.collection(name).map_err(ExportFailure::Read)?;
+            written.progress.total =
+                kept_entries(&transaction, name).map_err(ExportFailure::Read)?;
             jsonl::write_header(written.out, header).map_err(ExportFailure::Write)?;
             written.all(None, collection.scan(..))?;
         }
@@ -344,7 +348,7 @@ struct Exported {
 
 struct Written<'w, 'o> {
     out: &'w mut dyn Write,
-    progress: &'w mut Progress,
+    progress: &'w mut ExportProgress,
     messages: &'w mut Output<'o>,
     exported: Exported,
 }
@@ -357,7 +361,7 @@ impl Written<'_, '_> {
                 .map_err(ExportFailure::Write)?;
             any = true;
             self.exported.entries += 1;
-            self.progress.tick(self.messages, self.exported.entries);
+            self.progress.show(self.messages, self.exported.entries);
         }
         Ok(any)
     }
@@ -371,47 +375,67 @@ fn now() -> Option<String> {
     Some(render::utc_time(micros, TimeStyle::Rfc3339))
 }
 
-struct Progress {
-    enabled: bool,
-    verb: &'static str,
-    last: Instant,
-    width: usize,
+fn export_progress_shown(stderr_is_terminal: bool, export_to_terminal: bool) -> bool {
+    stderr_is_terminal && !export_to_terminal
 }
 
-impl Progress {
-    fn new(enabled: bool, verb: &'static str) -> Self {
-        Self {
-            enabled,
-            verb,
-            last: Instant::now(),
-            width: 0,
-        }
-    }
+fn kept_entries(transaction: &ReadTransaction<'_>, name: &str) -> Result<Option<u64>, Error> {
+    Ok(transaction
+        .kept_collection_counts()?
+        .into_iter()
+        .find(|(kept, _)| kept == name)
+        .and_then(|(_, entries)| entries))
+}
 
-    fn tick(&mut self, messages: &mut Output<'_>, entries: u64) {
-        if !self.enabled || self.last.elapsed() < PROGRESS_EVERY {
-            return;
-        }
-        self.last = Instant::now();
-        let line = format!("{} {}…", self.verb, render::entries(entries));
-        let width = line.chars().count();
-        messages.text("\r");
-        messages.text(&line);
-        messages.text(&" ".repeat(self.width.saturating_sub(width)));
-        self.width = width;
-        let _ = messages.finish();
+struct ExportProgress {
+    shown: ProgressLine,
+    file: String,
+    collection: Option<String>,
+    total: Option<u64>,
+}
+
+impl ExportProgress {
+    fn show(&mut self, messages: &mut Output<'_>, entries: u64) {
+        let (file, collection, total) = (&self.file, self.collection.as_deref(), self.total);
+        self.shown.show(messages, || {
+            exporting_line(file, collection, total, entries)
+        });
     }
 
     fn clear(&mut self, messages: &mut Output<'_>) {
-        if self.width == 0 {
-            return;
-        }
-        messages.text("\r");
-        messages.text(&" ".repeat(self.width));
-        messages.text("\r");
-        self.width = 0;
-        let _ = messages.finish();
+        self.shown.clear(messages);
     }
+}
+
+fn exporting_line(
+    file: &str,
+    collection: Option<&str>,
+    total: Option<u64>,
+    entries: u64,
+) -> String {
+    match (collection, total) {
+        (None, _) => format!("exporting {file}: {}…", render::entries(entries)),
+        (Some(name), Some(total)) if total > 0 => format!(
+            "exporting collection {name} of {file}: {} of {}…",
+            render::count(entries),
+            render::entries(total)
+        ),
+        (Some(name), _) => format!(
+            "exporting collection {name} of {file}: {}…",
+            render::entries(entries)
+        ),
+    }
+}
+
+fn importing_line(source: &str, file: &str, entries: u64) -> String {
+    format!(
+        "importing {source} into {file}: {}…",
+        render::entries(entries)
+    )
+}
+
+fn checking_line(source: &str, entries: u64) -> String {
+    format!("checking {source}: {}…", render::entries(entries))
 }
 
 enum Input<'s> {
@@ -540,7 +564,7 @@ struct Import<'s, 'a> {
     requested_page_size: Option<usize>,
     staging_opened: bool,
     messages: &'s mut Output<'a>,
-    progress: Progress,
+    progress: ProgressLine,
     tally: Tally,
 }
 
@@ -763,8 +787,12 @@ impl Import<'_, '_> {
                 let entry_bytes = key.len().saturating_add(value.len());
                 import.tally.largest_entry_bytes =
                     import.tally.largest_entry_bytes.max(entry_bytes);
-                import.tally.entries = reader.entries();
-                import.progress.tick(import.messages, reader.entries());
+                let entries = reader.entries();
+                import.tally.entries = entries;
+                let source = &import.source_shown;
+                import
+                    .progress
+                    .show(import.messages, || checking_line(source, entries));
             }
             import.tally.entries = reader.entries();
             Ok(())
@@ -960,8 +988,11 @@ impl Import<'_, '_> {
             }
             self.count(decision);
             state.pending = false;
-            self.tally.entries = reader.entries();
-            self.progress.tick(self.messages, self.tally.imported);
+            let entries = reader.entries();
+            self.tally.entries = entries;
+            let (source, file) = (&self.source_shown, self.file);
+            self.progress
+                .show(self.messages, || importing_line(source, file, entries));
             if batch.bytes >= BATCH_BYTES {
                 self.commit(transaction.take(), &mut batch)?;
             }
@@ -1296,5 +1327,66 @@ fn with_note(failure: Failure, note: &str) -> Failure {
             code,
         },
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        checking_line, export_progress_shown, exporting_line, importing_line, kept_entries,
+    };
+    use eggdb::Database;
+
+    #[test]
+    fn the_export_line_names_the_file_and_a_collection_s_kept_total() {
+        assert_eq!(
+            exporting_line("app.db", None, None, 1_204_000),
+            "exporting app.db: 1,204,000 entries…"
+        );
+        assert_eq!(
+            exporting_line("app.db", Some("cache"), Some(1_000_000), 120_000),
+            "exporting collection cache of app.db: 120,000 of 1,000,000 entries…"
+        );
+        assert_eq!(
+            exporting_line("app.db", Some("cache"), None, 120_000),
+            "exporting collection cache of app.db: 120,000 entries…"
+        );
+        assert_eq!(
+            exporting_line("app.db", Some("cache"), Some(0), 1),
+            "exporting collection cache of app.db: 1 entry…"
+        );
+    }
+
+    #[test]
+    fn the_import_line_says_whether_it_writes() {
+        assert_eq!(
+            importing_line("dump.eggdb", "app.db", 1_204_000),
+            "importing dump.eggdb into app.db: 1,204,000 entries…"
+        );
+        assert_eq!(
+            importing_line("stdin", "app.db", 1),
+            "importing stdin into app.db: 1 entry…"
+        );
+        assert_eq!(
+            checking_line("dump.eggdb", 1_204_000),
+            "checking dump.eggdb: 1,204,000 entries…"
+        );
+    }
+
+    #[test]
+    fn an_export_to_the_terminal_shows_no_progress() {
+        assert!(export_progress_shown(true, false));
+        assert!(!export_progress_shown(true, true));
+        assert!(!export_progress_shown(false, false));
+    }
+
+    #[test]
+    fn a_collection_s_total_is_its_kept_count() {
+        let db = Database::in_memory().unwrap();
+        db.create_collection("cache").unwrap();
+        db.collection("cache").put("k", "v").unwrap();
+        let transaction = db.begin_read().unwrap();
+        assert_eq!(kept_entries(&transaction, "cache").unwrap(), Some(1));
+        assert_eq!(kept_entries(&transaction, "other").unwrap(), None);
     }
 }

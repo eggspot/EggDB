@@ -1,6 +1,10 @@
-use crate::codec::{FRAME_BODY, FRAME_HEADER, FRAME_METHOD, Out, frame, take_frame};
+use crate::codec::{
+    FRAME_BODY, FRAME_HEADER, FRAME_HEARTBEAT, FRAME_METHOD, Out, frame, take_frame,
+};
 use crate::server::{Broker, ServerConfig, encode_message, serve_stream, topic_matches};
 use eggdb_keyspace::MemoryKeyspace;
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 fn config() -> ServerConfig {
     ServerConfig {
@@ -18,6 +22,10 @@ fn method(channel: u16, class: u16, id: u16, body: impl FnOnce(&mut Out)) -> Vec
 }
 
 fn login(password: &str) -> Vec<u8> {
+    login_with_heartbeat(password, 0)
+}
+
+fn login_with_heartbeat(password: &str, heartbeat_seconds: u16) -> Vec<u8> {
     let mut input = b"AMQP\x00\x00\x09\x01".to_vec();
     input.extend(method(0, 10, 11, |out| {
         let mut response = vec![0];
@@ -30,7 +38,7 @@ fn login(password: &str) -> Vec<u8> {
             .shortstr("en_US");
     }));
     input.extend(method(0, 10, 31, |out| {
-        out.short(2047).long(131_072).short(0);
+        out.short(2047).long(131_072).short(heartbeat_seconds);
     }));
     input.extend(method(0, 10, 40, |out| {
         out.shortstr("/").shortstr("").octet(0);
@@ -65,7 +73,9 @@ fn declare(channel: u16, queue: &str) -> Vec<u8> {
     })
 }
 
-fn methods(output: &[u8]) -> Vec<(u8, u16, u16, Vec<u8>)> {
+type Method = (u8, u16, u16, Vec<u8>);
+
+fn methods(output: &[u8]) -> Vec<Method> {
     let mut buffer = output.to_vec();
     let mut out = Vec::new();
     while let Some(found) = take_frame(&mut buffer).unwrap() {
@@ -82,7 +92,7 @@ fn methods(output: &[u8]) -> Vec<(u8, u16, u16, Vec<u8>)> {
     out
 }
 
-fn run(keyspace: &MemoryKeyspace, input: &[u8]) -> Vec<(u8, u16, u16, Vec<u8>)> {
+fn run(keyspace: &MemoryKeyspace, input: &[u8]) -> Vec<Method> {
     let broker = Broker::new(keyspace);
     let mut output = Vec::new();
     serve_stream(&broker, &config(), input, &mut output, &|| false).unwrap();
@@ -453,4 +463,113 @@ fn a_body_another_protocol_stored_reaches_amqp_consumers_as_a_plain_message() {
             .any(|(kind, _, _, payload)| *kind == FRAME_BODY && payload == b"raw again")
     );
     assert_eq!(queues.depth("jobs", u64::MAX).unwrap().ready, 0);
+}
+
+struct TimedInput {
+    steps: VecDeque<(Duration, Vec<u8>)>,
+    pending: Vec<u8>,
+    started: Instant,
+    ends_after: Duration,
+}
+
+impl TimedInput {
+    fn new(steps: Vec<(Duration, Vec<u8>)>, ends_after: Duration) -> Self {
+        Self {
+            steps: steps.into(),
+            pending: Vec::new(),
+            started: Instant::now(),
+            ends_after,
+        }
+    }
+}
+
+impl std::io::Read for TimedInput {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let elapsed = self.started.elapsed();
+        if self.pending.is_empty()
+            && let Some((at, _)) = self.steps.front()
+            && *at <= elapsed
+            && let Some((_, bytes)) = self.steps.pop_front()
+        {
+            self.pending = bytes;
+        }
+        if !self.pending.is_empty() {
+            let count = buffer.len().min(self.pending.len());
+            buffer[..count].copy_from_slice(&self.pending[..count]);
+            self.pending.drain(..count);
+            return Ok(count);
+        }
+        if self.steps.is_empty() && elapsed >= self.ends_after {
+            return Ok(0);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        Err(std::io::ErrorKind::WouldBlock.into())
+    }
+}
+
+fn heartbeats(frames: &[(u8, u16, u16, Vec<u8>)]) -> usize {
+    frames
+        .iter()
+        .filter(|(kind, _, _, _)| *kind == FRAME_HEARTBEAT)
+        .count()
+}
+
+fn served_for(input: TimedInput) -> (Duration, Vec<Method>) {
+    let keyspace = MemoryKeyspace::default();
+    let broker = Broker::new(&keyspace);
+    let mut output = Vec::new();
+    let started = Instant::now();
+    serve_stream(&broker, &config(), input, &mut output, &|| false).unwrap();
+    (started.elapsed(), methods(&output))
+}
+
+#[test]
+fn the_server_proposes_a_sixty_second_heartbeat_and_sends_none_when_the_client_turns_it_off() {
+    let keyspace = MemoryKeyspace::default();
+    let frames = run(&keyspace, &login("secret"));
+    let tune = &frames[1];
+    assert_eq!((tune.1, tune.2), (10, 30));
+    assert_eq!(tune.3.get(10..12), Some(&60u16.to_be_bytes()[..]));
+    let quiet = TimedInput::new(
+        vec![(Duration::ZERO, login_with_heartbeat("secret", 0))],
+        Duration::from_millis(1_500),
+    );
+    let (elapsed, frames) = served_for(quiet);
+    assert!(elapsed >= Duration::from_millis(1_500), "{elapsed:?}");
+    assert_eq!(heartbeats(&frames), 0);
+}
+
+#[test]
+fn a_silent_client_gets_heartbeats_every_half_interval_and_is_closed_after_two_intervals() {
+    let silent = TimedInput::new(
+        vec![(Duration::ZERO, login_with_heartbeat("secret", 1))],
+        Duration::from_secs(10),
+    );
+    let (elapsed, frames) = served_for(silent);
+    assert!(
+        elapsed >= Duration::from_secs(2) && elapsed < Duration::from_secs(5),
+        "{elapsed:?}"
+    );
+    assert!(heartbeats(&frames) >= 2, "{frames:?}");
+    assert!(
+        frames
+            .iter()
+            .all(|(kind, class, id, _)| *kind != FRAME_METHOD || (*class, *id) != (10, 50)),
+        "a dead peer is closed without the close handshake"
+    );
+}
+
+#[test]
+fn heartbeats_from_the_client_keep_its_connection_open() {
+    let mut steps = vec![(Duration::ZERO, login_with_heartbeat("secret", 1))];
+    for beat in 1..=8u64 {
+        steps.push((
+            Duration::from_millis(400 * beat),
+            frame(FRAME_HEARTBEAT, 0, &[]),
+        ));
+    }
+    let talking = TimedInput::new(steps, Duration::from_millis(3_500));
+    let (elapsed, frames) = served_for(talking);
+    assert!(elapsed >= Duration::from_millis(3_500), "{elapsed:?}");
+    assert!(heartbeats(&frames) >= 4, "{frames:?}");
 }

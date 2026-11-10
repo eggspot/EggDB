@@ -7,8 +7,9 @@
 //! Prometheus HTTP API (`/api/v1/query`, `query_range`, `labels`, `label/<name>/values` and
 //! `series`), each query bounded by a samples limit and the server's memory budget. Syslog
 //! messages (RFC 5424 and RFC 3164) taken over UDP and TCP by [`SyslogCollector`] land as rows
-//! of the `syslog` table (D315). InfluxDB is a trademark of InfluxData and Prometheus of the
-//! Linux Foundation; EggDB is compatible with their protocols.
+//! of the `syslog` table (D315); the messages it drops are counted in
+//! [`syslog_messages_dropped`] (D352). InfluxDB is a trademark of InfluxData and Prometheus of
+//! the Linux Foundation; EggDB is compatible with their protocols.
 
 mod api;
 mod line_protocol;
@@ -17,8 +18,8 @@ mod remote_write;
 mod store;
 mod syslog;
 
-pub use api::{DEFAULT_MAX_QUERY_SAMPLES, Endpoint, MAX_REQUEST_BYTES};
-pub use syslog::{MAX_SYSLOG_MESSAGE_BYTES, SyslogCollector};
+pub use api::{DEFAULT_MAX_QUERY_SAMPLES, Endpoint, MAX_REQUEST_BYTES, wants_content_decoded};
+pub use syslog::{MAX_SYSLOG_MESSAGE_BYTES, SyslogCollector, syslog_messages_dropped};
 
 #[cfg(test)]
 mod promql_tests;

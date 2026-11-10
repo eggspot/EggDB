@@ -486,7 +486,7 @@ as written, it did this, and the sections above were updated where they changed:
     adds `Choose what happens to keys already there: --on-conflict overwrite or --on-conflict
     skip`; the empty key appears as `""`, and a key longer than 64 bytes is cut with its length.
     Progress (`imported 1,204,000 entries…`) is redrawn on stderr once a second, only on a
-    terminal.
+    terminal. Its wording is now section 20's "The shared progress line" (D320).
 
 ## 14. `eggdb serve`: the file over the PostgreSQL protocol (item 21, D102, D103)
 
@@ -1702,7 +1702,7 @@ shell as every key-value command does, without `eggdb <command> <file>`:
 `collection move sessions old-sessions`. Output, errors and exit codes are the command line's.
 `collection list` reads the last commit, so it runs anywhere; `add`, `delete` and `move` need a
 commit of their own and are refused inside a transaction block:
-`collection add, delete and move run outside a transaction block: COMMIT or ROLLBACK first`
+`collection add, delete, move and rename run outside a transaction block: COMMIT or ROLLBACK first`
 (exit 2). Tab completes the verbs, and a collection name after `delete` and `move`. When the
 collection in use is renamed the shell follows it and says so after the command's own line; when
 it is deleted the shell returns to the default key space:
@@ -1726,6 +1726,70 @@ JSON adds `counts` in `stats --collections`'s shape so one reader serves both; c
 expired keys the sweep has not removed, and the docs say so where counts are shown; the delete
 progress line follows `export`'s; the shell follows a rename of the collection in use and leaves
 a deleted one; `add`, `delete` and `move` are refused inside a block rather than half-joining it.
+
+### The shared progress line: `export`, `import` and `restore` (D320, designed by Claude Fable)
+Every long command draws its progress through one line (`cli/progress.rs`), so they behave
+alike. The rules, which `collection delete` already follows:
+
+- **Where and when.** On stderr, and only when stderr is a terminal. Nothing in a pipe, a file
+  or CI. `--format json` changes nothing: JSON goes to stdout and the line never does, so a
+  person watching `eggdb export app.db --format json > out` still sees it. One exception:
+  `eggdb export` writing the export itself to a terminal's stdout shows no line, since it would
+  land in the middle of the data.
+- **Timing.** First drawn one second after the command starts, then at most once a second. A
+  command that ends within a second shows nothing.
+- **Form.** `<doing> <what>: <how far>…`, lowercase, present participle, counts with commas,
+  the units in `stats`'s words (`1 entry`, `1,204 entries`), ending in `…`. No colour, no
+  spinner, no bar, no percentage, no rate and no time left: the line moves once a second, which
+  shows the speed, and an estimate from an export's or a dump's uneven entries would mislead.
+  A total (`of N`) appears only when the file already keeps it.
+- **Redraw and end.** Each draw starts with `\r` and pads over the previous draw. Before the
+  result line, an error or the answer to Ctrl-C, the line is erased (`\r`, spaces, `\r`), so
+  nothing of it stays on the screen or in the scrollback and the next text starts at column 0.
+  The result line is the record of what happened; the progress line never is.
+- **Names** are shown as the command's result line shows them (`stdin` for `-`).
+
+**`eggdb export`.** Entries written so far, across the default key space and every collection:
+```
+exporting app.db: 1,204,000 entries…
+```
+With `-C <name>` and a kept count, the total, as `collection delete` shows it; without a kept
+count, the first form with the collection named:
+```
+exporting collection cache of app.db: 120,000 of 1,000,000 entries…
+exporting collection cache of app.db: 120,000 entries…
+```
+
+**`eggdb import`.** Entries read from the export so far (the stream has no total); entries a
+conflict policy skips still count, since the line says how far the input is read, and the
+result line gives what was imported and skipped:
+```
+importing dump.eggdb into app.db: 1,204,000 entries…
+importing stdin into app.db: 1,204,000 entries…
+```
+`--dry-run` writes nothing, so it says what it does:
+```
+checking dump.eggdb: 1,204,000 entries…
+```
+As built (D339): an import from a regular file checks the whole export before it writes, so
+its first pass shows the `checking` form and its second the `importing` form.
+`import --csv` and `--parquet` load one table in one transaction and keep their own design.
+
+**`eggdb restore`.** Unchanged in words (section 16), now drawn by the shared line:
+```
+restoring dump.sql: line 41,220, 14 tables, 1,180,002 rows…
+restoring stdin: line 41,220, 14 tables, 1,180,002 rows…
+```
+`1 table` and `1 row` in the singular. During a long `COPY` the rows move and the line number
+stays the `COPY` statement's. A dry run reads `restoring` too (section 25). The Redis and
+`mongodump` restores show no line in this release.
+
+Decided by this design: one line and one set of rules for every command; present participle
+with the file named (`exporting app.db: …`) instead of the earlier `exported 1,204,000
+entries…`, which read like a result and named nothing; no rate or estimate; a total only where
+the file keeps one; progress follows stderr alone, so JSON output does not silence it; no line
+when the export itself goes to the terminal. Not in this release: cutting the line to the
+terminal's width (a path longer than the terminal wraps, and the erase then leaves a row).
 
 ### As built (D139)
 - The shell's "collection dropped by another program" warning is left out: the shell holds the

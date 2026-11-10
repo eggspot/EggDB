@@ -2547,3 +2547,182 @@ SELECT 4
 ok
 DROP TABLE Stats321
 
+chapter "SELECT - ORDER BY Clause (Transact-SQL)": NULL values are treated as the lowest possible values, so they come first for ASC and last for DESC, with or without an index; no REGR_*, COVAR_* or CORR aggregate
+ok
+CREATE TABLE Nulls340 (id INT PRIMARY KEY, v INT)
+
+ok
+INSERT INTO Nulls340 VALUES (1, 20), (2, NULL), (3, 10)
+
+rows
+SELECT id FROM Nulls340 ORDER BY v
+----
+id
+2
+3
+1
+SELECT 3
+
+rows
+SELECT id FROM Nulls340 ORDER BY v DESC
+----
+id
+1
+3
+2
+SELECT 3
+
+ok
+CREATE INDEX Nulls340_v ON Nulls340 (v)
+
+rows
+SELECT TOP 2 id FROM Nulls340 ORDER BY v
+----
+id
+2
+3
+SELECT 2
+
+rows
+SELECT id, COUNT(*) OVER (ORDER BY v ROWS UNBOUNDED PRECEDING) AS rn FROM Nulls340 ORDER BY id
+----
+id|rn
+1|3
+2|1
+3|2
+SELECT 3
+
+error 42883 195
+SELECT REGR_SLOPE(v, id) FROM Nulls340
+
+error 42883 195
+SELECT CORR(v, id) FROM Nulls340
+
+ok
+DROP TABLE Nulls340
+
+chapter "SELECT - ORDER BY Clause (Transact-SQL)", "TOP (Transact-SQL)": TOP and OFFSET ... FETCH on a nullable indexed column give NULLs first for ASC and last for DESC, also after an equality on the index's leading column and with a WHERE that excludes NULL
+ok
+CREATE TABLE Nulls341 (id INT PRIMARY KEY, kind INT, v INT)
+
+ok
+CREATE INDEX Nulls341_v ON Nulls341 (v)
+
+ok
+CREATE INDEX Nulls341_kind_v ON Nulls341 (kind, v)
+
+ok
+INSERT INTO Nulls341 VALUES (1, 1, 30), (2, 1, NULL), (3, 2, 10), (4, 1, 20), (5, 2, NULL), (6, 1, 15)
+
+rows
+SELECT TOP 3 id FROM Nulls341 ORDER BY v
+----
+id
+2
+5
+3
+SELECT 3
+
+rows
+SELECT TOP 4 id FROM Nulls341 ORDER BY v DESC
+----
+id
+1
+4
+6
+3
+SELECT 4
+
+rows
+SELECT id FROM Nulls341 ORDER BY v DESC, id DESC OFFSET 3 ROWS FETCH NEXT 2 ROWS ONLY
+----
+id
+3
+5
+SELECT 2
+
+rows
+SELECT id FROM Nulls341 ORDER BY v DESC, id DESC OFFSET 4 ROWS FETCH NEXT 2 ROWS ONLY
+----
+id
+5
+2
+SELECT 2
+
+rows
+SELECT TOP 2 id FROM Nulls341 WHERE kind = 1 ORDER BY v
+----
+id
+2
+6
+SELECT 2
+
+rows
+SELECT TOP 4 id FROM Nulls341 WHERE kind = 1 ORDER BY v DESC
+----
+id
+1
+4
+6
+2
+SELECT 4
+
+rows
+SELECT TOP 2 id FROM Nulls341 WHERE v IS NOT NULL ORDER BY v
+----
+id
+3
+6
+SELECT 2
+
+rows
+SELECT TOP 5 id FROM Nulls341 WHERE v > 12 ORDER BY v DESC
+----
+id
+1
+4
+6
+SELECT 3
+
+ok
+DROP TABLE Nulls341
+
+
+
+chapter "SELECT - INTO Clause (Transact-SQL)": each new column has the nullability of the column it copies, and an identity column keeps its identity property
+ok
+CREATE TABLE Parts342 (PartID int IDENTITY(1, 1) PRIMARY KEY, Name nvarchar(20) NOT NULL, Note nvarchar(20))
+
+ok
+INSERT INTO Parts342 (Name, Note) VALUES (N'Bolt', NULL), (N'Nut', N'small')
+
+ok
+SELECT PartID, Name, Note INTO PartsCopy342 FROM Parts342
+
+error 23502 515
+INSERT INTO PartsCopy342 (Name, Note) VALUES (NULL, N'x')
+
+error 42P10 8101
+INSERT INTO PartsCopy342 VALUES (3, NULL, N'x')
+... differs
+
+error 42P10 8101
+INSERT INTO PartsCopy342 VALUES (3, N'Washer', NULL)
+... differs
+
+ok
+DROP TABLE PartsCopy342
+
+ok
+DROP TABLE Parts342
+
+chapter "SQRT (Transact-SQL)": a float result, error 3623 for a negative argument
+rows
+SELECT SQRT(16) AS a, SQRT(6.25) AS b, SQRT(NULL) AS c
+----
+a|b|c
+4|2.5|NULL
+SELECT 1
+
+error 2201F 3623
+SELECT SQRT(-1)

@@ -1,4 +1,5 @@
-use eggdb_bson::{Bson, Document};
+use crate::error::{DocumentError, DocumentResult};
+use eggdb_bson::{Bson, Document, relaxed_json};
 
 /// A value a path reaches in a document, or the note that it reaches nothing.
 #[derive(Debug, Clone, PartialEq)]
@@ -7,7 +8,7 @@ pub(crate) enum Reached<'d> {
     Missing,
 }
 
-fn index_of(part: &str) -> Option<usize> {
+pub(crate) fn index_of(part: &str) -> Option<usize> {
     if part.is_empty() || part.len() > 9 || !part.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
@@ -56,6 +57,13 @@ pub(crate) fn reached<'d>(document: &'d Document, path: &str) -> Vec<Reached<'d>
     out
 }
 
+/// Every value the path `parts` reaches from `value`, the way [`reached`] reads a document.
+pub(crate) fn reached_in<'d>(value: &'d Bson, parts: &[&str]) -> Vec<Reached<'d>> {
+    let mut out = Vec::new();
+    reach(value, parts, &mut out);
+    out
+}
+
 /// The one value `path` names exactly (numeric parts index arrays), as updates and
 /// projections read it.
 pub(crate) fn get_exact<'d>(document: &'d Document, path: &str) -> Option<&'d Bson> {
@@ -79,31 +87,47 @@ pub(crate) enum Slot<'d> {
     Element(&'d mut Vec<Bson>, usize),
 }
 
+fn not_viable(field: &str, container_name: &str, container: Bson) -> DocumentError {
+    DocumentError::path_not_viable(format!(
+        "Cannot create field '{field}' in element {}",
+        relaxed_json(&Document::from_entries(vec![(
+            container_name.to_owned(),
+            container
+        )]))
+    ))
+}
+
+fn too_large_index() -> DocumentError {
+    DocumentError::bad_value("the array index is too large")
+}
+
 /// The slot `path` names, creating embedded documents on the way when `create` is set.
-/// Fails with a message when a part goes through a value that is neither a document nor an
-/// array.
+/// Fails with `PathNotViable` when a part goes through a value that is neither a document
+/// nor an array, or names a field of an array.
 pub(crate) fn slot<'d>(
     document: &'d mut Document,
     path: &str,
     create: bool,
-) -> Result<Option<Slot<'d>>, String> {
+) -> DocumentResult<Option<Slot<'d>>> {
     let parts: Vec<&str> = path.split('.').collect();
     if parts.len() > MAX_PATH_PARTS {
-        return Err(format!(
+        return Err(DocumentError::bad_value(format!(
             "The update path has {} parts; a path may have at most {MAX_PATH_PARTS}.",
             parts.len()
-        ));
+        )));
     }
     if parts.iter().any(|part| part.is_empty()) {
-        return Err(format!(
+        return Err(DocumentError::bad_value(format!(
             "The update path '{path}' contains an empty field name, which is not allowed."
-        ));
+        )));
     }
-    let (last, middle) = parts
-        .split_last()
-        .ok_or_else(|| "an empty path".to_owned())?;
+    let Some((last, middle)) = parts.split_last() else {
+        return Err(DocumentError::bad_value("an empty path"));
+    };
     let mut container = ContainerMut::Document(document);
-    for part in middle {
+    let mut container_name = "";
+    for (at, part) in middle.iter().enumerate() {
+        let next_part = parts.get(at + 1).copied().unwrap_or(*last);
         container = match container {
             ContainerMut::Document(inner) => {
                 if inner.get(part).is_none() {
@@ -116,55 +140,53 @@ pub(crate) fn slot<'d>(
                     Some(Bson::Document(next)) => ContainerMut::Document(next),
                     Some(Bson::Array(next)) => ContainerMut::Array(next),
                     Some(other) if create => {
-                        return Err(format!(
-                            "Cannot create field '{part}' in element {{{part}: {}}}",
-                            other.type_name()
-                        ));
+                        return Err(not_viable(next_part, part, other.clone()));
                     }
                     _ => return Ok(None),
                 }
             }
             ContainerMut::Array(items) => {
-                let Some(at) = index_of(part) else {
-                    return Err(format!("Cannot create field '{part}' in an array"));
+                let Some(index) = index_of(part) else {
+                    return Err(not_viable(part, container_name, Bson::Array(items.clone())));
                 };
-                if at >= items.len() {
+                if index >= items.len() {
                     if !create {
                         return Ok(None);
                     }
-                    if at > items.len() + 1_000_000 {
-                        return Err("the array index is too large".to_owned());
+                    if index > items.len() + 1_000_000 {
+                        return Err(too_large_index());
                     }
-                    items.resize(at, Bson::Null);
+                    items.resize(index, Bson::Null);
                     items.push(Bson::Document(Document::new()));
                 }
-                if create && matches!(items[at], Bson::Null) {
-                    items[at] = Bson::Document(Document::new());
+                let Some(element) = items.get_mut(index) else {
+                    return Ok(None);
+                };
+                if create && matches!(element, Bson::Null) {
+                    *element = Bson::Document(Document::new());
                 }
-                match &mut items[at] {
+                match element {
                     Bson::Document(next) => ContainerMut::Document(next),
                     Bson::Array(next) => ContainerMut::Array(next),
                     other if create => {
-                        return Err(format!(
-                            "Cannot create field '{part}' in element {{{part}: {}}}",
-                            other.type_name()
-                        ));
+                        return Err(not_viable(next_part, part, other.clone()));
                     }
                     _ => return Ok(None),
                 }
             }
         };
+        container_name = *part;
     }
     Ok(Some(match container {
         ContainerMut::Document(inner) => Slot::Field(inner, (*last).to_owned()),
         ContainerMut::Array(items) => {
-            let Some(at) = index_of(last) else {
-                return Err(format!("Cannot create field '{last}' in an array"));
+            let Some(index) = index_of(last) else {
+                return Err(not_viable(last, container_name, Bson::Array(items.clone())));
             };
-            if at > items.len() + 1_000_000 {
-                return Err("the array index is too large".to_owned());
+            if index > items.len() + 1_000_000 {
+                return Err(too_large_index());
             }
-            Slot::Element(items, at)
+            Slot::Element(items, index)
         }
     }))
 }

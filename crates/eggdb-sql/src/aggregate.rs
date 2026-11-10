@@ -413,6 +413,18 @@ fn result_type(function: AggregateFunction, argument: Option<SqlType>) -> Option
         }
         AggregateFunction::Rank | AggregateFunction::DenseRank => Some(SqlType::BigInt),
         AggregateFunction::PercentRank | AggregateFunction::CumeDist => Some(SqlType::Double),
+        AggregateFunction::RegrCount => Some(SqlType::BigInt),
+        AggregateFunction::RegrSxx
+        | AggregateFunction::RegrSyy
+        | AggregateFunction::RegrSxy
+        | AggregateFunction::RegrAvgx
+        | AggregateFunction::RegrAvgy
+        | AggregateFunction::RegrR2
+        | AggregateFunction::RegrSlope
+        | AggregateFunction::RegrIntercept
+        | AggregateFunction::CovarPop
+        | AggregateFunction::CovarSamp
+        | AggregateFunction::Corr => Some(SqlType::Double),
     }
 }
 
@@ -438,7 +450,8 @@ fn joined_parts(argument: &Expr) -> Option<(&Expr, &Expr)> {
         ExprKind::Function { name, arguments }
             if name == "string_agg_arguments"
                 || name == "object_agg_arguments"
-                || name == ORDERED_SET_ARGUMENTS =>
+                || name == ORDERED_SET_ARGUMENTS
+                || name == crate::bivariate_aggregates::PAIRED_ARGUMENTS =>
         {
             match arguments.as_slice() {
                 [value, delimiter] => Some((value, delimiter)),
@@ -467,6 +480,34 @@ fn argument_type(
         }
         _ => static_type(argument, scope),
     }
+}
+
+fn check_pair_types(
+    function: AggregateFunction,
+    argument: &Expr,
+    scope: Scope<'_>,
+) -> SqlResult<()> {
+    let Some((dependent, independent)) =
+        unfiltered(argument).and_then(|argument| joined_parts(ordered_parts(argument).0))
+    else {
+        return Ok(());
+    };
+    let (Some(dependent), Some(independent)) = (
+        static_type(dependent, scope),
+        static_type(independent, scope),
+    ) else {
+        return Ok(());
+    };
+    let accepted =
+        |sql_type: SqlType| sql_type.is_dynamic() || sql_type.without_modifier().is_numeric();
+    if accepted(dependent) && accepted(independent) {
+        return Ok(());
+    }
+    Err(crate::bivariate_aggregates::no_such_function(
+        function,
+        &dependent.name(),
+        &independent.name(),
+    ))
 }
 
 fn undefined_aggregate(function: AggregateFunction, type_name: &str) -> SqlError {
@@ -653,6 +694,16 @@ impl Analyzer<'_> {
         })
     }
 
+    fn check_direct_arguments(&mut self, argument: &Expr) -> SqlResult<()> {
+        let Some(argument) = unfiltered(argument) else {
+            return Ok(());
+        };
+        for direct in crate::hypothetical_set::direct_arguments(argument) {
+            self.rewrite(direct)?;
+        }
+        Ok(())
+    }
+
     fn group_column_slot(&mut self, column: GroupColumn) -> usize {
         let found = self
             .group_columns
@@ -770,6 +821,13 @@ impl Analyzer<'_> {
                     if let Some(sql_type) = argument_type(*function, argument, self.scope) {
                         check_argument_type(*function, sql_type)
                             .map_err(|error| error.at(expr.position))?;
+                    }
+                    if function.is_bivariate() {
+                        check_pair_types(*function, argument, self.scope)
+                            .map_err(|error| error.at(expr.position))?;
+                    }
+                    if function.is_hypothetical() {
+                        self.check_direct_arguments(argument)?;
                     }
                 }
                 let call = match self.calls.iter().position(|call| call.shape == shape) {
@@ -1042,6 +1100,7 @@ pub(crate) enum Accumulator {
     Sketch(crate::hyperloglog::Sketch),
     Moments(crate::statistical_aggregates::Moments),
     Standing(crate::hypothetical_set::Standing),
+    Paired(crate::bivariate_aggregates::PairSums),
 }
 
 struct Group {
@@ -1143,6 +1202,20 @@ impl Call {
             | AggregateFunction::CumeDist => {
                 Accumulator::Standing(crate::hypothetical_set::Standing::default())
             }
+            AggregateFunction::RegrCount
+            | AggregateFunction::RegrSxx
+            | AggregateFunction::RegrSyy
+            | AggregateFunction::RegrSxy
+            | AggregateFunction::RegrAvgx
+            | AggregateFunction::RegrAvgy
+            | AggregateFunction::RegrR2
+            | AggregateFunction::RegrSlope
+            | AggregateFunction::RegrIntercept
+            | AggregateFunction::CovarPop
+            | AggregateFunction::CovarSamp
+            | AggregateFunction::Corr => {
+                Accumulator::Paired(crate::bivariate_aggregates::PairSums::default())
+            }
         }
     }
 
@@ -1156,6 +1229,12 @@ impl Call {
         match extra {
             Some(member) if self.function.builds_object() => {
                 self.add_member(accumulator, &value, &member)
+            }
+            Some(independent) if self.function.is_bivariate() => {
+                if let Accumulator::Paired(sums) = accumulator {
+                    sums.add(self.function, &value, &independent)?;
+                }
+                Ok(())
             }
             Some(delimiter) => self.join(accumulator, value, delimiter),
             None if self.function.builds_json() => self.add_element(accumulator, &value, whole_row),
@@ -1431,7 +1510,8 @@ impl Call {
             Accumulator::Joined(_)
             | Accumulator::JsonParts(_)
             | Accumulator::Ordered(_)
-            | Accumulator::Standing(_) => {}
+            | Accumulator::Standing(_)
+            | Accumulator::Paired(_) => {}
         }
         Ok(())
     }
@@ -1550,6 +1630,7 @@ impl Call {
             Accumulator::Ordered(inputs) => self.finish_ordered(inputs)?,
             Accumulator::Moments(moments) => moments.finish(self.function)?,
             Accumulator::Standing(standing) => standing.result(self.function),
+            Accumulator::Paired(sums) => sums.finish(self.function),
         })
     }
 }
@@ -1900,6 +1981,10 @@ impl Grouping {
                     evaluator.eval(key, Some(SqlType::Text))?,
                     Some(evaluator.eval(member, None)?),
                 ),
+                Some((dependent, independent)) if call.function.is_bivariate() => (
+                    evaluator.eval(dependent, Some(SqlType::Double))?,
+                    Some(evaluator.eval(independent, Some(SqlType::Double))?),
+                ),
                 _ => (evaluator.eval(argument, None)?, None),
             };
             if value.is_null() && !call.function.keeps_nulls() {
@@ -1908,6 +1993,11 @@ impl Grouping {
             if call.distinct {
                 distinct_key.clear();
                 equality_key(distinct_key, &value);
+                if call.function.is_bivariate()
+                    && let Some(independent) = &delimiter
+                {
+                    equality_key(distinct_key, independent);
+                }
                 if group.seen[number].contains(distinct_key.as_slice()) {
                     continue;
                 }

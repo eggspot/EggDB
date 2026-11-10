@@ -564,6 +564,7 @@ impl Parser<'_> {
                 column_names: Vec::new(),
                 position,
             }))),
+            partition_selection: None,
         })
     }
 

@@ -22,16 +22,33 @@ fn u32_at(data: &[u8], at: usize) -> Result<u32, ContentError> {
         .ok_or_else(|| invalid("a header ends early"))
 }
 
-/// The CRC-32 (ISO 3309, as ZIP uses it) of `bytes`.
-pub fn crc32(bytes: &[u8]) -> u32 {
-    !bytes.iter().fold(!0u32, |crc, byte| {
-        (0..8).fold(crc ^ u32::from(*byte), |crc, _| {
-            if crc & 1 == 1 {
-                (crc >> 1) ^ 0xEDB8_8320
+const CRC32_POLYNOMIAL: u32 = 0xEDB8_8320;
+const CRC32_TABLE: [u32; 256] = crc32_table();
+
+const fn crc32_table() -> [u32; 256] {
+    let mut table = [0u32; 256];
+    let mut index = 0;
+    while index < 256 {
+        let mut crc = index as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ CRC32_POLYNOMIAL
             } else {
                 crc >> 1
-            }
-        })
+            };
+            bit += 1;
+        }
+        table[index] = crc;
+        index += 1;
+    }
+    table
+}
+
+/// The CRC-32 (ISO 3309, as ZIP and gzip use it) of `bytes`.
+pub fn crc32(bytes: &[u8]) -> u32 {
+    !bytes.iter().fold(!0u32, |crc, &byte| {
+        CRC32_TABLE[usize::from((crc as u8) ^ byte)] ^ (crc >> 8)
     })
 }
 

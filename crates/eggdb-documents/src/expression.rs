@@ -1,4 +1,5 @@
 use crate::error::{DocumentError, DocumentResult};
+use crate::size::{ByteBudget, value_size};
 use eggdb_bson::{Bson, Document, compare};
 use std::cmp::Ordering;
 
@@ -186,13 +187,30 @@ fn string_of(value: &Bson) -> Option<String> {
 
 /// Evaluates an aggregation expression against `root`: field paths (`"$a.b"`), `$$ROOT`,
 /// literals, object and array expressions, and the operators MongoDB documents for
-/// arithmetic, comparison, logic, conditions, strings and arrays. `None` is a missing value.
+/// arithmetic, comparison, logic, conditions, strings, arrays and objects. `None` is a
+/// missing value.
 pub fn evaluate(expression: &Bson, root: &Document) -> DocumentResult<Option<Bson>> {
     evaluate_at(expression, root, 0)
 }
 
 fn value_of(expression: &Bson, root: &Document, depth: usize) -> DocumentResult<Bson> {
     Ok(evaluate_at(expression, root, depth)?.unwrap_or(Bson::Null))
+}
+
+fn bounded_values<'e>(
+    expressions: impl IntoIterator<Item = &'e Bson>,
+    root: &Document,
+    depth: usize,
+) -> DocumentResult<Vec<Bson>> {
+    let mut budget = ByteBudget::default();
+    expressions
+        .into_iter()
+        .map(|expression| {
+            let value = value_of(expression, root, depth)?;
+            budget.add(value_size(&value))?;
+            Ok(value)
+        })
+        .collect()
 }
 
 fn evaluate_at(expression: &Bson, root: &Document, depth: usize) -> DocumentResult<Option<Bson>> {
@@ -225,12 +243,7 @@ fn evaluate_at(expression: &Bson, root: &Document, depth: usize) -> DocumentResu
             }
             Ok(field_value(root, &text[1..]))
         }
-        Bson::Array(items) => Ok(Some(Bson::Array(
-            items
-                .iter()
-                .map(|item| value_of(item, root, depth + 1))
-                .collect::<DocumentResult<_>>()?,
-        ))),
+        Bson::Array(items) => Ok(Some(Bson::Array(bounded_values(items, root, depth + 1)?))),
         Bson::Document(inner) => match inner.first() {
             Some((name, argument)) if name.starts_with('$') => {
                 if inner.len() != 1 {
@@ -242,8 +255,10 @@ fn evaluate_at(expression: &Bson, root: &Document, depth: usize) -> DocumentResu
             }
             _ => {
                 let mut out = Document::new();
+                let mut budget = ByteBudget::default();
                 for (name, value) in inner.iter() {
                     if let Some(result) = evaluate_at(value, root, depth + 1)? {
+                        budget.add(value_size(&result))?;
                         out.insert(name.clone(), result);
                     }
                 }
@@ -261,10 +276,7 @@ fn operator(
     depth: usize,
 ) -> DocumentResult<Option<Bson>> {
     let all = |argument: &Bson| -> DocumentResult<Vec<Bson>> {
-        arguments(argument)
-            .into_iter()
-            .map(|item| value_of(item, root, depth))
-            .collect()
+        bounded_values(arguments(argument), root, depth)
     };
     Ok(Some(match name {
         "$literal" => argument.clone(),
@@ -466,6 +478,50 @@ fn operator(
                 values
             };
             accumulate_values(name, &values)
+        }
+        "$concatArrays" => {
+            let mut out = Vec::new();
+            for value in all(argument)? {
+                match value {
+                    Bson::Array(items) => out.extend(items),
+                    Bson::Null | Bson::Undefined => return Ok(Some(Bson::Null)),
+                    other => {
+                        return Err(DocumentError {
+                            code: 28664,
+                            code_name: "Location28664",
+                            message: format!(
+                                "$concatArrays only supports arrays, not {}",
+                                other.type_name()
+                            ),
+                        });
+                    }
+                }
+            }
+            Bson::Array(out)
+        }
+        "$mergeObjects" => {
+            let mut out = Document::new();
+            for value in all(argument)? {
+                match value {
+                    Bson::Document(inner) => {
+                        for (name, field) in inner.iter() {
+                            out.insert(name.clone(), field.clone());
+                        }
+                    }
+                    Bson::Null | Bson::Undefined => {}
+                    other => {
+                        return Err(DocumentError {
+                            code: 40400,
+                            code_name: "Location40400",
+                            message: format!(
+                                "$mergeObjects requires object inputs, but input is of type {}",
+                                other.type_name()
+                            ),
+                        });
+                    }
+                }
+            }
+            Bson::Document(out)
         }
         other => {
             return Err(DocumentError::bad_value(format!(

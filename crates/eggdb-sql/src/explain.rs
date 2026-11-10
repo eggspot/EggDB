@@ -1,4 +1,6 @@
+mod estimates;
 mod expression_text;
+mod mysql_json;
 mod mysql_tree;
 mod oracle_plan;
 #[cfg(test)]
@@ -14,16 +16,21 @@ pub(crate) use oracle_plan::{
 pub(crate) use showplan::{showplan_all, showplan_text};
 pub(crate) use subplans::{Subplan, explain_subplans};
 
-use crate::ast::{ExplainStyle, Statement};
+use crate::ast::{
+    ExplainStyle, Expr, ExprKind, JoinedTables, Select, SelectItem, Statement, TableReference,
+    Update,
+};
 use crate::dialect::Dialect;
 use crate::encoding::TableDefinition;
-use crate::execute::{ExplainedQuery, ExplainedSource};
+use crate::error::SqlResult;
+use crate::execute::{self, ExplainedQuery, ExplainedSource, TableCache};
 use crate::join::JoinMethod;
 use crate::plan::{KeyChoice, Use};
 use crate::session::{OutputColumn, QueryResult};
 use crate::step_times::{MeasuredSelect, MeasuredSubplan, RowTimes};
-use crate::store::PageLookups;
+use crate::store::{KeyValueRead, PageLookups};
 use crate::types::{SqlType, Value};
+use estimates::TableRows;
 use expression_text::{ExpressionText, Spelling};
 use std::time::Duration;
 
@@ -52,7 +59,7 @@ pub(crate) fn columns(style: ExplainStyle, dialect: Dialect) -> Vec<OutputColumn
         sql_type: Some(SqlType::BigInt),
     };
     match (style, dialect) {
-        (ExplainStyle::Tree, _) => vec![text("EXPLAIN")],
+        (ExplainStyle::Tree | ExplainStyle::Json, _) => vec![text("EXPLAIN")],
         (ExplainStyle::QueryPlan, _) | (_, Dialect::Sqlite) => vec![
             number("id"),
             number("parent"),
@@ -77,13 +84,215 @@ pub(crate) fn shows_subplans(style: ExplainStyle, dialect: Dialect) -> bool {
     match style {
         ExplainStyle::Tree => true,
         ExplainStyle::Plan => dialect == Dialect::PostgreSql,
-        ExplainStyle::QueryPlan => false,
+        ExplainStyle::QueryPlan | ExplainStyle::Json => false,
     }
 }
 
-pub(crate) fn render(query: &ExplainedQuery, style: ExplainStyle, dialect: Dialect) -> QueryResult {
+const MOST_AGGREGATE_DEPTH: usize = 32;
+
+/// What `EXPLAIN` knows of a `SELECT`'s aggregation: whether it has groups (`GROUP BY` or
+/// grouping sets), the aggregate calls of its select list, `HAVING` and `ORDER BY`, and its
+/// `HAVING` condition.
+pub(crate) struct ExplainedGrouping {
+    pub(crate) keyed: bool,
+    pub(crate) aggregates: Vec<Expr>,
+    pub(crate) having: Option<Expr>,
+}
+
+fn collect_aggregates<'e>(expr: &'e Expr, depth: usize, out: &mut Vec<&'e Expr>) {
+    if depth > MOST_AGGREGATE_DEPTH {
+        return;
+    }
+    match &expr.kind {
+        ExprKind::Aggregate { .. } => out.push(expr),
+        ExprKind::Subquery(_) => {}
+        _ => {
+            for child in crate::eval::children(expr) {
+                collect_aggregates(child, depth + 1, out);
+            }
+        }
+    }
+}
+
+impl ExplainedGrouping {
+    pub(crate) fn of(select: &Select) -> Self {
+        let mut aggregates = Vec::new();
+        let expressions = select
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                SelectItem::Expr { expr, .. } => Some(expr),
+                SelectItem::Wildcard { .. } => None,
+            })
+            .chain(select.having.iter())
+            .chain(select.order_by.iter().map(|item| &item.expr));
+        for expr in expressions {
+            collect_aggregates(expr, 0, &mut aggregates);
+        }
+        Self {
+            keyed: !select.group_by.is_empty() || select.grouping_sets.is_some(),
+            aggregates: aggregates.into_iter().cloned().collect(),
+            having: select.having.clone(),
+        }
+    }
+}
+
+/// The table an `UPDATE` or `DELETE` writes, as MySQL's plans name it: the positions of the
+/// written tables among the plan's sources, and whether the statement joins other tables.
+pub(crate) struct PlannedWrite {
+    pub(crate) statement: PlannedStatement,
+    pub(crate) targets: Vec<usize>,
+    pub(crate) joined: bool,
+}
+
+/// A statement planned for `EXPLAIN`: the planner's steps, the write on top of them for an
+/// `UPDATE` or `DELETE` in MySQL's dialect, and the row counts MySQL's tree and JSON forms
+/// estimate from.
+pub(crate) struct Planned {
+    pub(crate) query: ExplainedQuery,
+    pub(crate) write: Option<PlannedWrite>,
+    pub(crate) table_rows: TableRows,
+}
+
+fn explained(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    statement: &Statement,
+    with_subplans: bool,
+) -> SqlResult<ExplainedQuery> {
+    if with_subplans {
+        execute::explain_with_subplans(reader, tables, statement)
+    } else {
+        execute::explain(reader, tables, statement)
+    }
+}
+
+fn joined_write_plan(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    target: &TableReference,
+    joined: &JoinedTables,
+    filter: Option<&Expr>,
+    with_subplans: bool,
+) -> SqlResult<ExplainedQuery> {
+    let select = crate::joined_dml::every_column_select(
+        crate::joined_dml::full_from(target, joined),
+        vec![SelectItem::Wildcard {
+            qualifier: None,
+            position: target.name.position,
+        }],
+        filter.cloned(),
+    );
+    explained(reader, tables, &Statement::Select(select), with_subplans)
+}
+
+fn update_targets(update: &Update, joined: &JoinedTables) -> Vec<usize> {
+    let main = joined.target_at.unwrap_or(0);
+    let mut targets = Vec::new();
+    for at in 0..update.assignments.len() {
+        let target = match joined.assigned_at.get(at).copied().flatten() {
+            Some(listed_at) => crate::joined_dml::from_position(joined, listed_at),
+            None => main,
+        };
+        if !targets.contains(&target) {
+            targets.push(target);
+        }
+    }
+    if targets.is_empty() {
+        targets.push(main);
+    }
+    targets
+}
+
+fn delete_targets(joined: &JoinedTables) -> Vec<usize> {
+    let mut targets = vec![joined.target_at.unwrap_or(0)];
+    for &listed_at in &joined.more_targets_at {
+        let target = crate::joined_dml::from_position(joined, listed_at);
+        if !targets.contains(&target) {
+            targets.push(target);
+        }
+    }
+    targets
+}
+
+/// Plans `statement` for `EXPLAIN` in `style`: with subplans where the style draws them, a
+/// MySQL multi-table `UPDATE` or `DELETE` as the join it reads, and the tables' row counts
+/// when MySQL's tree or JSON form will print estimates.
+pub(crate) fn plan(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    statement: &Statement,
+    style: ExplainStyle,
+    dialect: Dialect,
+) -> SqlResult<Planned> {
+    let with_subplans = shows_subplans(style, dialect);
+    let mysql = dialect == Dialect::MySql;
+    let (query, write) = match statement {
+        Statement::Update(update) if mysql => {
+            let (query, targets, joined) = match &update.from {
+                Some(joined) => (
+                    joined_write_plan(
+                        reader,
+                        tables,
+                        &update.table,
+                        joined,
+                        update.filter.as_ref(),
+                        with_subplans,
+                    )?,
+                    update_targets(update, joined),
+                    true,
+                ),
+                None => (execute::explain(reader, tables, statement)?, vec![0], false),
+            };
+            let write = PlannedWrite {
+                statement: PlannedStatement::Update,
+                targets,
+                joined,
+            };
+            (query, Some(write))
+        }
+        Statement::Delete(delete) if mysql => {
+            let (query, targets, joined) = match &delete.using {
+                Some(joined) => (
+                    joined_write_plan(
+                        reader,
+                        tables,
+                        &delete.table,
+                        joined,
+                        delete.filter.as_ref(),
+                        with_subplans,
+                    )?,
+                    delete_targets(joined),
+                    true,
+                ),
+                None => (execute::explain(reader, tables, statement)?, vec![0], false),
+            };
+            let write = PlannedWrite {
+                statement: PlannedStatement::Delete,
+                targets,
+                joined,
+            };
+            (query, Some(write))
+        }
+        _ => (explained(reader, tables, statement, with_subplans)?, None),
+    };
+    let table_rows = if mysql && matches!(style, ExplainStyle::Tree | ExplainStyle::Json) {
+        TableRows::read(reader, &query)?
+    } else {
+        TableRows::default()
+    };
+    Ok(Planned {
+        query,
+        write,
+        table_rows,
+    })
+}
+
+pub(crate) fn render(planned: &Planned, style: ExplainStyle, dialect: Dialect) -> QueryResult {
+    let query = &planned.query;
     let rows = match (style, dialect) {
-        (ExplainStyle::Tree, _) => vec![vec![Value::Text(mysql_tree::tree_text(query, None))]],
+        (ExplainStyle::Tree, _) => vec![vec![Value::Text(mysql_tree::tree_text(planned, None))]],
+        (ExplainStyle::Json, _) => vec![vec![Value::Text(mysql_json::json_text(planned))]],
         (ExplainStyle::QueryPlan, _) | (_, Dialect::Sqlite) => sqlite_rows(query),
         (ExplainStyle::Plan, Dialect::MySql) => mysql_rows(query),
         (ExplainStyle::Plan, _) => postgresql_lines(query)
@@ -566,15 +775,33 @@ fn postgresql_lines(query: &ExplainedQuery) -> Vec<String> {
     lines
 }
 
-pub(crate) fn render_analyzed_tree(query: &ExplainedQuery, analyzed: Analyzed) -> QueryResult {
+pub(crate) fn render_analyzed_tree(planned: &Planned, analyzed: Analyzed) -> QueryResult {
     QueryResult::rows(
         "SELECT 1".to_owned(),
         columns(ExplainStyle::Tree, Dialect::MySql),
         vec![vec![Value::Text(mysql_tree::tree_text(
-            query,
+            planned,
             Some(&analyzed),
         ))]],
     )
+}
+
+fn mysql_access(source: &ExplainedSource) -> (&'static str, Option<KeyChoice>) {
+    match source.join {
+        Some(JoinMethod::PrimaryKey) => ("eq_ref", Some(KeyChoice::Primary)),
+        Some(JoinMethod::Index(index)) => ("ref", Some(KeyChoice::Index(index))),
+        Some(JoinMethod::Hash | JoinMethod::Loop) => ("ALL", None),
+        None => (
+            match source.access.used {
+                Use::Scan => "ALL",
+                Use::Point => "const",
+                Use::Equal => "ref",
+                Use::Range => "range",
+                Use::Order => "index",
+            },
+            source.access.key(),
+        ),
+    }
 }
 
 fn mysql_rows(query: &ExplainedQuery) -> Vec<Vec<Value>> {
@@ -586,21 +813,7 @@ fn mysql_rows(query: &ExplainedQuery) -> Vec<Vec<Value>> {
         .enumerate()
         .map(|(position, source)| {
             let table = &source.table;
-            let (kind, key) = match source.join {
-                Some(JoinMethod::PrimaryKey) => ("eq_ref", Some(KeyChoice::Primary)),
-                Some(JoinMethod::Index(index)) => ("ref", Some(KeyChoice::Index(index))),
-                Some(JoinMethod::Hash | JoinMethod::Loop) => ("ALL", None),
-                None => (
-                    match source.access.used {
-                        Use::Scan => "ALL",
-                        Use::Point => "const",
-                        Use::Equal => "ref",
-                        Use::Range => "range",
-                        Use::Order => "index",
-                    },
-                    source.access.key(),
-                ),
-            };
+            let (kind, key) = mysql_access(source);
             let mut extra = Vec::new();
             if query.filtered && kind != "const" {
                 extra.push("Using where");

@@ -9,7 +9,9 @@ use eggdb_pgwire::{
     DEFAULT_AUTHENTICATION_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_MAX_CONNECTIONS, ListenError,
     MIN_SCRAM_ITERATIONS, MemoryBudget, SCRAM_SALT_BYTES, ScramVerifier, ServerConfig,
 };
-use eggdb_platform::{DatagramSocket, Network, OsNetwork, secure_random, stop_signals};
+use eggdb_platform::{
+    DatagramSocket, Network, OsNetwork, TcpKeepAlive, secure_random, stop_signals,
+};
 use std::io::BufRead;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
@@ -18,6 +20,7 @@ use std::sync::Arc;
 const DEFAULT_USER: &str = "eggdb";
 const DEFAULT_PORT: u16 = 5432;
 const PASSWORD_VARIABLE: &str = "EGGDB_PASSWORD";
+const DEFAULT_TCP_KEEPALIVE_SECONDS: u64 = 300;
 
 fn stamped(line: &str) -> String {
     let micros = std::time::SystemTime::now()
@@ -646,6 +649,33 @@ impl Session<'_> {
             mysql: mysql_bound,
             tds: tds_bound,
         };
+        self.turn_on_tcp_keep_alives(
+            options.tcp_keepalive_seconds,
+            [
+                Some(&listener),
+                mysql_listener.as_ref(),
+                tds_listener.as_ref(),
+                metrics_listener.as_ref(),
+                mcp_listener.as_ref().map(|(listener, _)| listener),
+                resp_listener.as_ref(),
+                memcached_listener.as_ref(),
+                es_listener.as_ref(),
+                mongo_listener.as_ref(),
+                bolt_listener.as_ref(),
+                kafka_listener.as_ref(),
+                amqp_listener.as_ref(),
+                mqtt_listener.as_ref(),
+                sqs_listener.as_ref(),
+                s3_listener.as_ref(),
+                dynamodb_listener.as_ref(),
+                observability_listener.as_ref(),
+                rest_listener.as_ref(),
+                cql_listener.as_ref(),
+                stomp_listener.as_ref(),
+                nats_listener.as_ref(),
+                syslog_sockets.as_ref().map(|(_, listener)| listener),
+            ],
+        );
         self.print_listening(bound, &config, read_only, tls.as_ref(), &sockets);
         self.out.finish()?;
         let _ = stop_signals::watch();
@@ -665,6 +695,7 @@ impl Session<'_> {
         let (events, received) = std::sync::mpsc::channel::<String>();
         let mysql_events = events.clone();
         let tds_events = events.clone();
+        let syslog_events = events.clone();
         eggdb_sql::statement_statistics::collect(
             options
                 .statement_statistics
@@ -684,6 +715,7 @@ impl Session<'_> {
             &config.user,
             &config.database,
             max_connections,
+            idle_timeout,
         );
         if syslog_sockets.is_some() {
             syslog_collector.prepare().map_err(|error| {
@@ -844,7 +876,8 @@ impl Session<'_> {
                     &eggdb_http::Limits::new(
                         eggdb_observability::MAX_REQUEST_BYTES,
                         &memory_budget,
-                    ),
+                    )
+                    .decoding_content_encoding_of(eggdb_observability::wants_content_decoded),
                 ),
                 None => Ok(()),
             });
@@ -853,7 +886,8 @@ impl Session<'_> {
                     listener,
                     &|request| rest_endpoint.reply(request),
                     &stop_signals::requested,
-                    &eggdb_http::Limits::new(eggdb_api::MAX_REQUEST_BYTES, &memory_budget),
+                    &eggdb_http::Limits::new(eggdb_api::MAX_REQUEST_BYTES, &memory_budget)
+                        .decoding_content_encoding(),
                 ),
                 None => Ok(()),
             });
@@ -917,7 +951,8 @@ impl Session<'_> {
                     &|request| es_api.answer(request),
                     &stop_signals::requested,
                     &eggdb_http::Limits::new(eggdb_http::MAX_BODY_BYTES, &memory_budget)
-                        .answering_over_budget_with(eggdb_esrest::over_memory_budget),
+                        .answering_over_budget_with(eggdb_esrest::over_memory_budget)
+                        .decoding_content_encoding(),
                 ),
                 None => Ok(()),
             });
@@ -951,12 +986,21 @@ impl Session<'_> {
                 }
             });
             let syslog_server = scope.spawn(|| match &syslog_sockets {
-                Some((datagrams, listener)) => syslog_collector.serve(
-                    Some(datagrams),
-                    Some(listener),
-                    &stop_signals::requested,
-                ),
-                None => Ok(()),
+                Some((datagrams, listener)) => {
+                    let log = move |line: &str| {
+                        let _ = syslog_events.send(stamped(&format!("syslog {line}")));
+                    };
+                    syslog_collector.serve(
+                        Some(datagrams),
+                        Some(listener),
+                        &stop_signals::requested,
+                        &log,
+                    )
+                }
+                None => {
+                    drop(syslog_events);
+                    Ok(())
+                }
             });
             let nats_server = scope.spawn(|| match &nats_listener {
                 Some(listener) => {
@@ -1131,6 +1175,36 @@ impl Session<'_> {
         }
         self.close(db)?;
         Ok(Exit::Done)
+    }
+
+    fn turn_on_tcp_keep_alives<'l>(
+        &mut self,
+        seconds: Option<u64>,
+        listeners: impl IntoIterator<Item = Option<&'l std::net::TcpListener>>,
+    ) {
+        let seconds = seconds.unwrap_or(DEFAULT_TCP_KEEPALIVE_SECONDS);
+        if seconds == 0 {
+            return;
+        }
+        let Ok(keep_alive) = TcpKeepAlive::after_idle(std::time::Duration::from_secs(seconds))
+        else {
+            return;
+        };
+        for listener in listeners.into_iter().flatten() {
+            let Err(error) = eggdb_platform::set_tcp_keep_alive(listener, keep_alive) else {
+                continue;
+            };
+            let address = listener
+                .local_addr()
+                .map_or_else(|_| "a listener".to_owned(), |address| address.to_string());
+            self.messages.text(&stamped(&format!(
+                "TCP keep-alives are off for connections to {address}: {error}"
+            )));
+            let _ = self.messages.finish();
+            if error.kind() == eggdb_platform::ErrorKind::Unsupported {
+                return;
+            }
+        }
     }
 
     fn auth_rules(&self) -> Result<Option<Arc<eggdb_auth::AuthRules>>, Failure> {

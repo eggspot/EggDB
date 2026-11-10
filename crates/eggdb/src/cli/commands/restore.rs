@@ -4,6 +4,7 @@ use super::{Access, Session, open_failure};
 use crate::cli::args::{CommandName, ExportFile, Format};
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::output::{Output, Style};
+use crate::cli::progress::ProgressLine;
 use crate::cli::render::{self, JsonObject};
 use eggdb::sql::Store as DatabaseStore;
 use eggdb::{Database, Durability, Options};
@@ -24,7 +25,6 @@ const READ_BUFFER_BYTES: usize = 64 * 1024;
 const HEAD_BYTES: usize = 64 * 1024;
 const SHOWN_TABLES: usize = 20;
 const SHOWN_DESCRIPTION_CHARS: usize = 60;
-const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Archive {
@@ -300,7 +300,7 @@ impl Session<'_> {
             )
         })?;
         let started = Instant::now();
-        let mut progress = Progress::new(self.stderr_is_terminal, &dump_shown);
+        let mut progress = ProgressLine::new(self.stderr_is_terminal);
         let includes = FileIncludes::new(path.clone());
         let defines = self.request.restore.defines.clone();
         let options = RestoreOptions {
@@ -314,6 +314,7 @@ impl Session<'_> {
             dialect,
             options,
             &mut progress,
+            &dump_shown,
             &mut self.messages,
         );
         match report.scripts.first_mut() {
@@ -519,7 +520,8 @@ fn run_restore(
     input: &mut dyn std::io::BufRead,
     dialect: Dialect,
     options: RestoreOptions<'_>,
-    progress: &mut Progress,
+    progress: &mut ProgressLine,
+    dump_shown: &str,
     messages: &mut Output<'_>,
 ) -> RestoreReport {
     let store = DatabaseStore(db);
@@ -528,7 +530,9 @@ fn run_restore(
         &mut session,
         input,
         options,
-        &mut |step: &RestoreProgress| progress.tick(messages, step),
+        &mut |step: &RestoreProgress| {
+            progress.show(messages, || restoring_line(dump_shown, step));
+        },
     );
     let _ = session.close();
     report
@@ -1449,59 +1453,41 @@ fn json_report(outcome: &Outcome<'_>) -> String {
         .line()
 }
 
-struct Progress {
-    enabled: bool,
-    dump: String,
-    last: Instant,
-    width: usize,
-}
-
-impl Progress {
-    fn new(enabled: bool, dump: &str) -> Self {
-        Self {
-            enabled,
-            dump: dump.to_owned(),
-            last: Instant::now(),
-            width: 0,
-        }
-    }
-
-    fn tick(&mut self, messages: &mut Output<'_>, step: &RestoreProgress) {
-        if !self.enabled || self.last.elapsed() < PROGRESS_EVERY {
-            return;
-        }
-        self.last = Instant::now();
-        let line = format!(
-            "restoring {}: line {}, {}, {}…",
-            self.dump,
-            render::count(step.line),
-            counted(step.tables, "table", "tables"),
-            counted(step.rows, "row", "rows")
-        );
-        let width = line.chars().count();
-        messages.text("\r");
-        messages.text(&line);
-        messages.text(&" ".repeat(self.width.saturating_sub(width)));
-        self.width = width;
-        let _ = messages.finish();
-    }
-
-    fn clear(&mut self, messages: &mut Output<'_>) {
-        if self.width == 0 {
-            return;
-        }
-        messages.text("\r");
-        messages.text(&" ".repeat(self.width));
-        messages.text("\r");
-        self.width = 0;
-        let _ = messages.finish();
-    }
+fn restoring_line(dump_shown: &str, step: &RestoreProgress) -> String {
+    format!(
+        "restoring {dump_shown}: line {}, {}, {}…",
+        render::count(step.line),
+        counted(step.tables, "table", "tables"),
+        counted(step.rows, "row", "rows")
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Archive, BinaryKind, archive_of, cut, plural};
-    use eggdb_sql::Dialect;
+    use super::{Archive, BinaryKind, archive_of, cut, plural, restoring_line};
+    use eggdb_sql::{Dialect, RestoreProgress};
+
+    #[test]
+    fn the_progress_line_names_the_dump_and_counts_in_words() {
+        let step = RestoreProgress {
+            line: 41_220,
+            tables: 14,
+            rows: 1_180_002,
+        };
+        assert_eq!(
+            restoring_line("dump.sql", &step),
+            "restoring dump.sql: line 41,220, 14 tables, 1,180,002 rows…"
+        );
+        let first = RestoreProgress {
+            line: 3,
+            tables: 1,
+            rows: 1,
+        };
+        assert_eq!(
+            restoring_line("stdin", &first),
+            "restoring stdin: line 3, 1 table, 1 row…"
+        );
+    }
 
     #[test]
     fn archives_are_known_by_their_first_bytes() {

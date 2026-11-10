@@ -710,6 +710,18 @@ impl ReadTransaction<'_> {
         Ok(records.iter().any(|record| record.count.is_none()))
     }
 
+    /// Each collection's name and the entry count it keeps, as this transaction sees them, in
+    /// the byte order of the names: `None` for a collection written by a release before counts
+    /// were kept and not counted since. This reads one record per collection and never a
+    /// collection's keys, unlike [`ReadTransaction::collection_stats`].
+    pub fn kept_collection_counts(&self) -> Result<Vec<(String, Option<u64>)>> {
+        let records = kept_records(self.reader(), self.tree())?;
+        Ok(records
+            .into_iter()
+            .map(|record| (record.name, record.count.map(|count| count.entries)))
+            .collect())
+    }
+
     /// The collection named `name`, as this transaction sees it (see [`ReadCollection`]). It
     /// fails with [`ErrorKind::CollectionNotFound`] when the snapshot has no such collection,
     /// and with [`ErrorKind::InvalidCollectionName`] for a name no collection can have.
@@ -1092,6 +1104,14 @@ impl Database {
     /// its keys and, on a database open for writing, keeps the count.
     pub fn has_uncounted_collections(&self) -> Result<bool> {
         self.begin_read()?.has_uncounted_collections()
+    }
+
+    /// Each collection's name and the entry count it keeps as of the last commit, in the byte
+    /// order of the names: `None` for a collection written by a release before counts were kept
+    /// and not counted since. Unlike [`Database::collection_stats`] this never reads a
+    /// collection's keys and never writes, so it answers at once on any file.
+    pub fn kept_collection_counts(&self) -> Result<Vec<(String, Option<u64>)>> {
+        self.begin_read()?.kept_collection_counts()
     }
 
     /// The names of the database's collections as of the last commit, in byte order.

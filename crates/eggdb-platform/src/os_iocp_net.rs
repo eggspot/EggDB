@@ -754,6 +754,30 @@ mod port {
         }
     }
 
+    pub(crate) fn control_socket(socket: usize, code: u32, input: &[u8]) -> io::Result<()> {
+        let mut returned = 0_u32;
+        // SAFETY: `input` holds `input.len()` bytes read only during the call, which has no
+        // output buffer and runs at once, without an overlapped structure.
+        let done = unsafe {
+            WSAIoctl(
+                socket,
+                code,
+                input.as_ptr().cast(),
+                input.len() as u32,
+                ptr::null_mut(),
+                0,
+                &raw mut returned,
+                ptr::null_mut(),
+                ptr::null(),
+            )
+        };
+        if done == SOCKET_ERROR {
+            Err(last_socket_error())
+        } else {
+            Ok(())
+        }
+    }
+
     fn new_socket(family: i32) -> Result<OwnedSocket> {
         // SAFETY: WSASocketW takes no pointers here; an invalid result is reported as an error.
         let socket = unsafe {

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 const FORMAT_VERSION: u8 = 1;
+const HEADER_BYTES: usize = 10;
 
 /// A sorted set: each member's score, and the members in score order.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -49,6 +50,37 @@ impl SortedSet {
             .collect();
         all.sort_by(order);
         all
+    }
+
+    /// The `count` members with the lowest scores, lowest first, or with `highest` the `count`
+    /// with the highest scores, highest first; ties order by member bytes as in
+    /// [`SortedSet::ordered`]. Only the chosen members are copied.
+    pub fn first(&self, count: usize, highest: bool) -> Vec<(f64, Vec<u8>)> {
+        let compare = |left: &(f64, &[u8]), right: &(f64, &[u8])| {
+            let ascending = left.0.total_cmp(&right.0).then_with(|| left.1.cmp(right.1));
+            if highest {
+                ascending.reverse()
+            } else {
+                ascending
+            }
+        };
+        let mut all: Vec<(f64, &[u8])> = self
+            .scores
+            .iter()
+            .map(|(member, score)| (*score, member.as_slice()))
+            .collect();
+        let count = count.min(all.len());
+        if count == 0 {
+            return Vec::new();
+        }
+        if count < all.len() {
+            all.select_nth_unstable_by(count - 1, compare);
+            all.truncate(count);
+        }
+        all.sort_by(compare);
+        all.into_iter()
+            .map(|(score, member)| (score, member.to_vec()))
+            .collect()
     }
 }
 
@@ -110,6 +142,80 @@ impl Data {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum StoredKind {
+    String = 0,
+    Hash = 1,
+    List = 2,
+    Set = 3,
+    SortedSet = 4,
+    Stream = 5,
+}
+
+impl StoredKind {
+    fn of(data: &Data) -> Self {
+        match data {
+            Data::String(_) => Self::String,
+            Data::Hash(_) => Self::Hash,
+            Data::List(_) => Self::List,
+            Data::Set(_) => Self::Set,
+            Data::SortedSet(_) => Self::SortedSet,
+            Data::Stream(_) => Self::Stream,
+        }
+    }
+
+    fn from_code(code: u8) -> Option<Self> {
+        [
+            Self::String,
+            Self::Hash,
+            Self::List,
+            Self::Set,
+            Self::SortedSet,
+            Self::Stream,
+        ]
+        .into_iter()
+        .find(|kind| *kind as u8 == code)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StoredHeader {
+    pub(crate) kind: StoredKind,
+    pub(crate) expires_at_ms: Option<u64>,
+    pub(crate) elements: usize,
+}
+
+impl StoredHeader {
+    pub(crate) fn read(bytes: &[u8]) -> Option<Self> {
+        let [FORMAT_VERSION, code, ..] = bytes else {
+            return None;
+        };
+        let kind = StoredKind::from_code(*code)?;
+        let mut cursor = Cursor { bytes, at: 2 };
+        let expires = u64::from_le_bytes(cursor.take(8)?.try_into().ok()?);
+        let elements = match kind {
+            StoredKind::String => bytes.len() - HEADER_BYTES,
+            StoredKind::Stream => {
+                cursor.take(16)?;
+                cursor.count()?
+            }
+            StoredKind::Hash | StoredKind::List | StoredKind::Set | StoredKind::SortedSet => {
+                cursor.count()?
+            }
+        };
+        Some(Self {
+            kind,
+            expires_at_ms: (expires != 0).then_some(expires),
+            elements,
+        })
+    }
+
+    pub(crate) fn expired(&self, now_ms: u64) -> bool {
+        self.expires_at_ms.is_some_and(|at| at <= now_ms)
+    }
+}
+
 /// A stored key's value and its expiry time (milliseconds since 1970), if any.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
@@ -156,15 +262,7 @@ impl Cursor<'_> {
 impl Entry {
     /// The entry as stored bytes.
     pub fn encode(&self) -> Vec<u8> {
-        let kind = match &self.data {
-            Data::String(_) => 0u8,
-            Data::Hash(_) => 1,
-            Data::List(_) => 2,
-            Data::Set(_) => 3,
-            Data::SortedSet(_) => 4,
-            Data::Stream(_) => 5,
-        };
-        let mut out = vec![FORMAT_VERSION, kind];
+        let mut out = vec![FORMAT_VERSION, StoredKind::of(&self.data) as u8];
         out.extend_from_slice(&self.expires_at_ms.unwrap_or(0).to_le_bytes());
         match &self.data {
             Data::String(bytes) => out.extend_from_slice(bytes),
@@ -214,14 +312,15 @@ impl Entry {
 
     /// Reads stored bytes, or `None` when they are not an entry.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        let [FORMAT_VERSION, kind, ..] = bytes else {
+        let [FORMAT_VERSION, code, ..] = bytes else {
             return None;
         };
+        let kind = StoredKind::from_code(*code)?;
         let mut cursor = Cursor { bytes, at: 2 };
         let expires = u64::from_le_bytes(cursor.take(8)?.try_into().ok()?);
         let data = match kind {
-            0 => Data::String(bytes[cursor.at..].to_vec()),
-            1 => {
+            StoredKind::String => Data::String(bytes[cursor.at..].to_vec()),
+            StoredKind::Hash => {
                 let count = cursor.count()?;
                 let mut map = BTreeMap::new();
                 for _ in 0..count {
@@ -230,7 +329,7 @@ impl Entry {
                 }
                 Data::Hash(map)
             }
-            2 => {
+            StoredKind::List => {
                 let count = cursor.count()?;
                 let mut list = VecDeque::with_capacity(count.min(1024));
                 for _ in 0..count {
@@ -238,7 +337,7 @@ impl Entry {
                 }
                 Data::List(list)
             }
-            3 => {
+            StoredKind::Set => {
                 let count = cursor.count()?;
                 let mut set = BTreeSet::new();
                 for _ in 0..count {
@@ -246,7 +345,7 @@ impl Entry {
                 }
                 Data::Set(set)
             }
-            4 => {
+            StoredKind::SortedSet => {
                 let count = cursor.count()?;
                 let mut set = SortedSet::default();
                 for _ in 0..count {
@@ -258,7 +357,7 @@ impl Entry {
                 }
                 Data::SortedSet(set)
             }
-            5 => {
+            StoredKind::Stream => {
                 let mut word = || -> Option<u64> {
                     Some(u64::from_le_bytes(cursor.take(8)?.try_into().ok()?))
                 };
@@ -278,9 +377,8 @@ impl Entry {
                 }
                 Data::Stream(Stream { last, entries })
             }
-            _ => return None,
         };
-        if *kind != 0 && cursor.at != bytes.len() {
+        if kind != StoredKind::String && cursor.at != bytes.len() {
             return None;
         }
         Some(Self {
@@ -298,6 +396,17 @@ impl Entry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn elements(data: &Data) -> usize {
+        match data {
+            Data::String(bytes) => bytes.len(),
+            Data::Hash(map) => map.len(),
+            Data::List(list) => list.len(),
+            Data::Set(set) => set.len(),
+            Data::SortedSet(set) => set.len(),
+            Data::Stream(stream) => stream.entries.len(),
+        }
+    }
 
     #[test]
     fn every_type_round_trips_and_damaged_bytes_are_refused() {
@@ -317,7 +426,12 @@ mod tests {
                 data,
                 expires_at_ms: Some(42),
             };
-            assert_eq!(Entry::decode(&entry.encode()), Some(entry));
+            let bytes = entry.encode();
+            let header = StoredHeader::read(&bytes).unwrap();
+            assert_eq!(header.kind, StoredKind::of(&entry.data));
+            assert_eq!(header.expires_at_ms, Some(42));
+            assert_eq!(header.elements, elements(&entry.data));
+            assert_eq!(Entry::decode(&bytes), Some(entry));
         }
         let ordered: Vec<Vec<u8>> = zset
             .ordered()
@@ -331,6 +445,29 @@ mod tests {
             &[1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255],
         ] {
             assert_eq!(Entry::decode(damaged), None);
+        }
+        for damaged in [
+            &[][..],
+            &[9, 0],
+            &[1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            &[1, 6],
+        ] {
+            assert_eq!(StoredHeader::read(damaged), None);
+        }
+    }
+
+    #[test]
+    fn the_first_members_from_either_end_match_the_full_order() {
+        let mut zset = SortedSet::default();
+        for (member, score) in [("d", 4.0), ("b", 2.0), ("a", 2.0), ("c", -1.5), ("e", 9.0)] {
+            zset.insert(member.as_bytes().to_vec(), score);
+        }
+        let ordered = zset.ordered();
+        for count in 0..=6 {
+            let lowest: Vec<_> = ordered.iter().take(count).cloned().collect();
+            let highest: Vec<_> = ordered.iter().rev().take(count).cloned().collect();
+            assert_eq!(zset.first(count, false), lowest, "{count}");
+            assert_eq!(zset.first(count, true), highest, "{count}");
         }
     }
 }

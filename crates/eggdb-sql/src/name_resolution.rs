@@ -1,8 +1,8 @@
 use crate::OutputColumn;
 use crate::ast::{
-    AlterAction, AlterTable, ConstraintKind, CreateTable, Delete, DerivedTable, Expr, ExprKind,
-    FromClause, GeneratedTable, Insert, InsertSource, InsertValue, JoinCondition, JoinedTables,
-    MergeStatement, Name, OnDuplicate, Query, Select, SelectItem, SetExpr, Statement,
+    AlterAction, AlterTable, ConflictResolution, ConstraintKind, CreateTable, Delete, DerivedTable,
+    Expr, ExprKind, FromClause, GeneratedTable, Insert, InsertSource, InsertValue, JoinCondition,
+    JoinedTables, MergeStatement, Name, OnDuplicate, Query, Select, SelectItem, SetExpr, Statement,
     TableReference, Update,
 };
 use crate::column_privileges::{ColumnScopes, ScopeItem};
@@ -380,12 +380,23 @@ impl<'a> Resolver<'a> {
                     "INSERT ... ON CONFLICT DO UPDATE",
                 )
             }
-            OnDuplicate::Replace => {
-                self.check_privilege(table, crate::roles::Privilege::Delete)?;
-                (crate::row_security::PolicyCommand::Delete, "REPLACE")
-            }
+            OnDuplicate::Replace => return self.check_replacing_deletes(table, "REPLACE"),
             OnDuplicate::Fail | OnDuplicate::Ignore => return Ok(()),
         };
+        self.refuse_under_row_security(table, command, form)
+    }
+
+    fn check_replacing_deletes(&self, table: &str, form: &str) -> SqlResult<()> {
+        self.check_privilege(table, crate::roles::Privilege::Delete)?;
+        self.refuse_under_row_security(table, crate::row_security::PolicyCommand::Delete, form)
+    }
+
+    fn refuse_under_row_security(
+        &self,
+        table: &str,
+        command: crate::row_security::PolicyCommand,
+        form: &str,
+    ) -> SqlResult<()> {
         if self.row_security_filter(table, command)?.is_some() {
             return Err(SqlError::not_supported(format!(
                 "{form} on a table with row-level security for this role"
@@ -802,11 +813,13 @@ impl<'a> Resolver<'a> {
             return Ok(self.opaque_item(reference));
         }
         if ctes.contains(&reference.name.text) {
+            refuse_partition_selection(reference)?;
             return Ok(self.opaque_item(reference));
         }
         if let Some(relation) =
             crate::pg_catalog::catalog_reference(self.reader, &reference.name.text)?
         {
+            refuse_partition_selection(reference)?;
             if reference.alias.is_none() {
                 reference.alias = Some(relation.name().to_owned());
             }
@@ -836,6 +849,12 @@ impl<'a> Resolver<'a> {
         if let Some(Relation::Table(table)) = &relation
             && self.row_security_view(reference, table)?
         {
+            if reference.partition_selection.is_some() {
+                return Err(SqlError::not_supported(
+                    "PARTITION () on a table whose row-level security policies apply",
+                )
+                .at(reference.name.position));
+            }
             return Ok(item);
         }
         if relation.is_some() && self.recorded_at.is_some() {
@@ -843,7 +862,13 @@ impl<'a> Resolver<'a> {
             self.record(&name);
         }
         match relation {
-            Some(Relation::View(view)) => self.expand(reference, view)?,
+            Some(Relation::View(view)) => {
+                if reference.partition_selection.is_some() {
+                    return Err(crate::partition_selection::not_partitioned(&view.name)
+                        .at(reference.name.position));
+                }
+                self.expand(reference, view)?
+            }
             Some(Relation::Table(table)) => self.expand_partitioned(reference, &table, filter)?,
             None => self.sequence_reference(reference)?,
         }
@@ -898,11 +923,17 @@ impl<'a> Resolver<'a> {
         table: &crate::encoding::TableDefinition,
         filter: Option<&Expr>,
     ) -> SqlResult<()> {
+        let selection = reference.partition_selection.take();
+        let position = reference.name.position;
         let catalog = crate::partitions::catalog(self.reader, self.tables)?;
         if catalog.is_empty() || catalog.key_of(&table.name).is_none() {
-            return Ok(());
+            return match selection {
+                Some(_) => {
+                    Err(crate::partition_selection::not_partitioned(&table.name).at(position))
+                }
+                None => Ok(()),
+            };
         }
-        let position = reference.name.position;
         let label = reference
             .alias
             .clone()
@@ -910,6 +941,12 @@ impl<'a> Resolver<'a> {
         let qualifiers = [label.as_str(), base_name(&table.name)];
         let mut leaves = Vec::new();
         self.surviving_leaves(&catalog, table, filter, &qualifiers, 0, &mut leaves)?;
+        if let Some(selection) = &selection {
+            let selected =
+                crate::partition_selection::SelectedPartitions::of(&catalog, table, selection)
+                    .map_err(|error| error.at_if_unplaced(position))?;
+            leaves = selected.narrowed(&catalog, leaves);
+        }
         if leaves.is_empty() {
             return Ok(());
         }
@@ -1304,6 +1341,16 @@ fn by_source_position(
     select_from(items, query, renamed, label, view.dialect, position)
 }
 
+fn refuse_partition_selection(reference: &TableReference) -> SqlResult<()> {
+    match reference.partition_selection {
+        Some(_) => Err(
+            crate::partition_selection::not_partitioned(&reference.name.text)
+                .at(reference.name.position),
+        ),
+        None => Ok(()),
+    }
+}
+
 fn column_items<'n>(names: impl Iterator<Item = &'n str>, position: usize) -> Vec<SelectItem> {
     names
         .map(|name| SelectItem::Expr {
@@ -1345,6 +1392,7 @@ fn select_from(
                     hierarchy: None,
                 })),
                 generated: None,
+                partition_selection: None,
             },
             joins: Vec::new(),
         }),
@@ -1556,6 +1604,9 @@ impl Binding<'_> {
                 .map(|(name, _)| name.text.clone())
                 .collect();
             resolver.check_written_columns(&table, crate::roles::Privilege::Update, &written)?;
+            if update.conflict_resolution == ConflictResolution::Replace {
+                resolver.check_replacing_deletes(&table, "UPDATE OR REPLACE")?;
+            }
         }
         let reads_rows = update_reads_rows(update);
         let mut exprs: Vec<&mut Expr> = update
@@ -1993,6 +2044,7 @@ impl Binding<'_> {
                 filter,
                 returning,
                 from,
+                ..
             } = &mut *update;
             let Some(joined) = from else {
                 return Ok(());

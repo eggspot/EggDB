@@ -194,6 +194,38 @@ mod tests {
     }
 
     #[test]
+    fn kept_counts_leave_a_collection_without_a_count_uncounted() {
+        let db = Database::in_memory().unwrap();
+        db.create_collection("old").unwrap();
+        db.create_collection("new").unwrap();
+        db.write(|tx| {
+            tx.collection("old")?.put("a", "1")?;
+            let mut new = tx.collection("new")?;
+            new.put("a", "1")?;
+            new.put("b", "2")?;
+            Ok(())
+        })
+        .unwrap();
+        forget_every_count(&db, &[1]);
+        assert_eq!(
+            db.kept_collection_counts().unwrap(),
+            [("new".to_owned(), Some(2)), ("old".to_owned(), None)]
+        );
+        assert!(db.has_uncounted_collections().unwrap());
+        assert_eq!(
+            db.begin_read().unwrap().kept_collection_counts().unwrap(),
+            [("new".to_owned(), Some(2)), ("old".to_owned(), None)]
+        );
+        assert!(
+            Database::in_memory()
+                .unwrap()
+                .kept_collection_counts()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn a_journaled_drop_and_put_undone_in_reverse_restore_the_count() {
         let db = Database::in_memory().unwrap();
         db.create_collection("c").unwrap();

@@ -1,6 +1,7 @@
 use crate::{
-    Modification, SortSpec, Store, Update, UpdateOptions, apply_update, matches, parse_filter,
-    parse_projection, parse_sort, parse_update, sort_documents,
+    DocumentError, Modification, SortSpec, Store, Update, UpdateOptions, apply_update, matches,
+    parse_filter, parse_projection, parse_sort, parse_update, parse_update_statement,
+    sort_documents,
 };
 use eggdb_bson::{Bson, Document};
 use eggdb_keyspace::MemoryKeyspace;
@@ -175,7 +176,14 @@ fn bad_filters_are_errors() {
 
 fn updated(update: Document) -> Document {
     let mut document = person();
-    apply_update(&parse_update(&update).unwrap(), &mut document, false, 1_000).unwrap();
+    apply_update(
+        &parse_update(&update).unwrap(),
+        &mut document,
+        None,
+        false,
+        1_000,
+    )
+    .unwrap();
     document
 }
 
@@ -275,7 +283,7 @@ fn bad_updates_are_errors_and_change_nothing() {
     ]))
     .unwrap();
     assert_eq!(
-        apply_update(&inc_text, &mut document, false, 0)
+        apply_update(&inc_text, &mut document, None, false, 0)
             .unwrap_err()
             .code,
         14
@@ -283,7 +291,7 @@ fn bad_updates_are_errors_and_change_nothing() {
     assert_eq!(document, person());
     let change_id = parse_update(&doc(vec![op("$set", vec![("_id", Bson::Int32(2))])])).unwrap();
     assert_eq!(
-        apply_update(&change_id, &mut document, false, 0)
+        apply_update(&change_id, &mut document, None, false, 0)
             .unwrap_err()
             .code,
         66
@@ -291,7 +299,7 @@ fn bad_updates_are_errors_and_change_nothing() {
     let overflow =
         parse_update(&doc(vec![op("$inc", vec![("age", Bson::Int64(i64::MAX))])])).unwrap();
     let mut big = doc(vec![("age", Bson::Int64(2))]);
-    assert!(apply_update(&overflow, &mut big, false, 0).is_err());
+    assert!(apply_update(&overflow, &mut big, None, false, 0).is_err());
 }
 
 #[test]
@@ -299,7 +307,7 @@ fn a_replacement_keeps_the_id() {
     let replacement = parse_update(&doc(vec![("name", text("Grace"))])).unwrap();
     assert!(matches!(replacement, Update::Replacement(_)));
     let mut document = person();
-    apply_update(&replacement, &mut document, false, 0).unwrap();
+    apply_update(&replacement, &mut document, None, false, 0).unwrap();
     assert_eq!(
         document,
         doc(vec![("_id", Bson::Int32(1)), ("name", text("Grace"))])
@@ -694,4 +702,746 @@ fn updates_that_would_nest_too_deeply_are_refused_and_change_nothing() {
         .find("app", "deep", &everyone, &SortSpec::default())
         .unwrap();
     assert_eq!(found, vec![doc(vec![("_id", Bson::Int32(1))])]);
+}
+
+fn sub(entries: Vec<(&str, Bson)>) -> Bson {
+    Bson::Document(doc(entries))
+}
+
+fn ints(values: &[i32]) -> Bson {
+    Bson::Array(values.iter().map(|value| Bson::Int32(*value)).collect())
+}
+
+fn changed_by(
+    document: Document,
+    query: Document,
+    update: Bson,
+    array_filters: Option<Bson>,
+) -> Result<Document, DocumentError> {
+    let update = parse_update_statement(&update, array_filters.as_ref())?;
+    let query = parse_filter(&query)?;
+    let mut document = document;
+    apply_update(&update, &mut document, Some(&query), false, 1_000)?;
+    Ok(document)
+}
+
+fn refused_statement(update: Bson, array_filters: Option<Bson>) -> DocumentError {
+    parse_update_statement(&update, array_filters.as_ref()).unwrap_err()
+}
+
+fn grade(grade: i32, mean: i32, std: i32) -> Bson {
+    sub(vec![
+        ("grade", Bson::Int32(grade)),
+        ("mean", Bson::Int32(mean)),
+        ("std", Bson::Int32(std)),
+    ])
+}
+
+#[test]
+fn the_positional_operator_changes_the_element_the_query_matched() {
+    let students = doc(vec![
+        ("_id", Bson::Int32(1)),
+        ("grades", ints(&[85, 80, 80])),
+    ]);
+    let changed = changed_by(
+        students.clone(),
+        doc(vec![("_id", Bson::Int32(1)), ("grades", Bson::Int32(80))]),
+        sub(vec![("$set", sub(vec![("grades.$", Bson::Int32(82))]))]),
+        None,
+    )
+    .unwrap();
+    assert_eq!(changed.get("grades"), Some(&ints(&[85, 82, 80])));
+
+    let fourth = doc(vec![
+        ("_id", Bson::Int32(4)),
+        (
+            "grades",
+            Bson::Array(vec![grade(80, 75, 8), grade(85, 90, 5), grade(85, 85, 8)]),
+        ),
+    ]);
+    let changed = changed_by(
+        fourth,
+        doc(vec![
+            ("_id", Bson::Int32(4)),
+            ("grades.grade", Bson::Int32(85)),
+        ]),
+        sub(vec![("$set", sub(vec![("grades.$.std", Bson::Int32(6))]))]),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        changed.get("grades"),
+        Some(&Bson::Array(vec![
+            grade(80, 75, 8),
+            grade(85, 90, 6),
+            grade(85, 85, 8)
+        ]))
+    );
+
+    let fifth = doc(vec![
+        ("_id", Bson::Int32(5)),
+        (
+            "grades",
+            Bson::Array(vec![grade(80, 75, 8), grade(85, 90, 5), grade(90, 85, 3)]),
+        ),
+    ]);
+    let changed = changed_by(
+        fifth,
+        doc(vec![
+            ("_id", Bson::Int32(5)),
+            (
+                "grades",
+                sub(vec![(
+                    "$elemMatch",
+                    sub(vec![
+                        ("grade", sub(vec![("$lte", Bson::Int32(90))])),
+                        ("mean", sub(vec![("$gt", Bson::Int32(80))])),
+                    ]),
+                )]),
+            ),
+        ]),
+        sub(vec![("$set", sub(vec![("grades.$.std", Bson::Int32(6))]))]),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        changed.get("grades"),
+        Some(&Bson::Array(vec![
+            grade(80, 75, 8),
+            grade(85, 90, 6),
+            grade(90, 85, 3)
+        ]))
+    );
+
+    let unmatched = changed_by(
+        students,
+        doc(vec![("_id", Bson::Int32(1))]),
+        sub(vec![("$set", sub(vec![("grades.$", Bson::Int32(1))]))]),
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(
+        (unmatched.code, unmatched.message.as_str()),
+        (
+            2,
+            "The positional operator did not find the match needed from the query."
+        )
+    );
+}
+
+#[test]
+fn all_positional_and_filtered_positional_paths_change_every_matching_element() {
+    let everyone = Document::new();
+    let changed = changed_by(
+        doc(vec![
+            ("_id", Bson::Int32(1)),
+            ("grades", ints(&[85, 82, 80])),
+        ]),
+        everyone.clone(),
+        sub(vec![("$inc", sub(vec![("grades.$[]", Bson::Int32(10))]))]),
+        None,
+    )
+    .unwrap();
+    assert_eq!(changed.get("grades"), Some(&ints(&[95, 92, 90])));
+
+    let changed = changed_by(
+        doc(vec![
+            ("_id", Bson::Int32(1)),
+            (
+                "grades",
+                Bson::Array(vec![grade(80, 75, 8), grade(85, 90, 5), grade(85, 85, 8)]),
+            ),
+        ]),
+        everyone.clone(),
+        sub(vec![(
+            "$inc",
+            sub(vec![("grades.$[].std", Bson::Int32(-2))]),
+        )]),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        changed.get("grades"),
+        Some(&Bson::Array(vec![
+            grade(80, 75, 6),
+            grade(85, 90, 3),
+            grade(85, 85, 6)
+        ]))
+    );
+
+    let changed = changed_by(
+        doc(vec![
+            ("_id", Bson::Int32(2)),
+            ("grades", ints(&[98, 100, 102])),
+        ]),
+        everyone.clone(),
+        sub(vec![(
+            "$set",
+            sub(vec![("grades.$[element]", Bson::Int32(100))]),
+        )]),
+        Some(Bson::Array(vec![sub(vec![(
+            "element",
+            sub(vec![("$gte", Bson::Int32(100))]),
+        )])])),
+    )
+    .unwrap();
+    assert_eq!(changed.get("grades"), Some(&ints(&[98, 100, 100])));
+
+    let changed = changed_by(
+        doc(vec![
+            ("_id", Bson::Int32(1)),
+            (
+                "grades",
+                Bson::Array(vec![grade(80, 75, 6), grade(85, 90, 4), grade(85, 85, 6)]),
+            ),
+        ]),
+        everyone,
+        sub(vec![(
+            "$set",
+            sub(vec![("grades.$[elem].mean", Bson::Int32(100))]),
+        )]),
+        Some(Bson::Array(vec![sub(vec![(
+            "elem.grade",
+            sub(vec![("$gte", Bson::Int32(85))]),
+        )])])),
+    )
+    .unwrap();
+    assert_eq!(
+        changed.get("grades"),
+        Some(&Bson::Array(vec![
+            grade(80, 75, 6),
+            grade(85, 100, 4),
+            grade(85, 100, 6)
+        ]))
+    );
+}
+
+fn questions(kind: &str, scores: &[i32]) -> Bson {
+    sub(vec![("type", text(kind)), ("questions", ints(scores))])
+}
+
+fn quizzes() -> Document {
+    doc(vec![
+        ("_id", Bson::Int32(1)),
+        (
+            "grades",
+            Bson::Array(vec![
+                questions("quiz", &[10, 8, 5]),
+                questions("quiz", &[8, 9, 6]),
+                questions("hw", &[5, 4, 3]),
+                questions("exam", &[25, 10, 23, 0]),
+            ]),
+        ),
+    ])
+}
+
+#[test]
+fn nested_identifiers_filter_each_array_level() {
+    let changed = changed_by(
+        quizzes(),
+        Document::new(),
+        sub(vec![(
+            "$inc",
+            sub(vec![("grades.$[t].questions.$[score]", Bson::Int32(2))]),
+        )]),
+        Some(Bson::Array(vec![
+            sub(vec![("t.type", text("quiz"))]),
+            sub(vec![("score", sub(vec![("$gte", Bson::Int32(8))]))]),
+        ])),
+    )
+    .unwrap();
+    assert_eq!(
+        changed.get("grades"),
+        Some(&Bson::Array(vec![
+            questions("quiz", &[12, 10, 5]),
+            questions("quiz", &[10, 11, 6]),
+            questions("hw", &[5, 4, 3]),
+            questions("exam", &[25, 10, 23, 0]),
+        ]))
+    );
+
+    let changed = changed_by(
+        quizzes(),
+        Document::new(),
+        sub(vec![(
+            "$inc",
+            sub(vec![("grades.$[].questions.$[score]", Bson::Int32(2))]),
+        )]),
+        Some(Bson::Array(vec![sub(vec![(
+            "score",
+            sub(vec![("$gte", Bson::Int32(8))]),
+        )])])),
+    )
+    .unwrap();
+    assert_eq!(
+        changed.get("grades"),
+        Some(&Bson::Array(vec![
+            questions("quiz", &[12, 10, 5]),
+            questions("quiz", &[10, 11, 6]),
+            questions("hw", &[5, 4, 3]),
+            questions("exam", &[27, 12, 25, 0]),
+        ]))
+    );
+}
+
+#[test]
+fn positional_updates_are_refused_with_the_documented_codes() {
+    let set = |path: &str| sub(vec![("$set", sub(vec![(path, Bson::Int32(1))]))]);
+    let filters = |entries: Vec<Bson>| Some(Bson::Array(entries));
+
+    let missing = refused_statement(set("grades.$[x]"), None);
+    assert_eq!(
+        (missing.code, missing.message.as_str()),
+        (
+            2,
+            "No array filter found for identifier 'x' in path 'grades.$[x]'"
+        )
+    );
+    let unused = refused_statement(
+        set("grades.$[x]"),
+        filters(vec![
+            sub(vec![("x", Bson::Int32(1))]),
+            sub(vec![("y", Bson::Int32(2))]),
+        ]),
+    );
+    assert_eq!(unused.code, 9);
+    assert!(
+        unused
+            .message
+            .starts_with("The array filter for identifier 'y' was not used in the update"),
+        "{unused:?}"
+    );
+    let unused_by_replacement = refused_statement(
+        sub(vec![("name", text("Ada"))]),
+        filters(vec![sub(vec![("x", Bson::Int32(1))])]),
+    );
+    assert_eq!(unused_by_replacement.code, 9);
+    let capital = refused_statement(
+        set("grades.$[X]"),
+        filters(vec![sub(vec![("X", Bson::Int32(1))])]),
+    );
+    assert_eq!(capital.code, 2);
+    assert!(
+        capital
+            .message
+            .ends_with("beginning with a lowercase letter, found 'X'"),
+        "{capital:?}"
+    );
+    let two_names = refused_statement(
+        set("grades.$[x]"),
+        filters(vec![sub(vec![
+            ("x", Bson::Int32(1)),
+            ("y", Bson::Int32(2)),
+        ])]),
+    );
+    assert_eq!(two_names.code, 9);
+    let twice = refused_statement(
+        set("grades.$[x]"),
+        filters(vec![
+            sub(vec![("x", Bson::Int32(1))]),
+            sub(vec![("x", Bson::Int32(2))]),
+        ]),
+    );
+    assert_eq!(twice.code, 9);
+    assert_eq!(refused_statement(set("a.$.b.$"), None).code, 2);
+    assert_eq!(refused_statement(set("$[]"), None).code, 2);
+    assert_eq!(
+        refused_statement(
+            sub(vec![("$rename", sub(vec![("a.$[]", text("b"))]))]),
+            None
+        )
+        .code,
+        2
+    );
+    let pipeline_with_filters = refused_statement(
+        Bson::Array(vec![sub(vec![("$set", sub(vec![("a", Bson::Int32(1))]))])]),
+        filters(Vec::new()),
+    );
+    assert_eq!(
+        (pipeline_with_filters.code, pipeline_with_filters.code_name),
+        (72, "InvalidOptions")
+    );
+    let match_stage =
+        refused_statement(Bson::Array(vec![sub(vec![("$match", sub(vec![]))])]), None);
+    assert_eq!(match_stage.code, 72);
+
+    let numbers = doc(vec![("_id", Bson::Int32(1)), ("grades", ints(&[85, 80]))]);
+    let not_viable =
+        changed_by(numbers.clone(), Document::new(), set("grades.$[].x"), None).unwrap_err();
+    assert_eq!(
+        (not_viable.code, not_viable.code_name),
+        (28, "PathNotViable")
+    );
+    let no_array =
+        changed_by(numbers.clone(), Document::new(), set("missing.$[]"), None).unwrap_err();
+    assert_eq!(
+        (no_array.code, no_array.message.as_str()),
+        (
+            2,
+            "The path 'missing' must exist in the document in order to apply array updates."
+        )
+    );
+    let not_array = changed_by(numbers.clone(), Document::new(), set("_id.$[]"), None).unwrap_err();
+    assert_eq!(not_array.code, 2);
+    let conflict = changed_by(
+        numbers,
+        Document::new(),
+        sub(vec![
+            ("$set", sub(vec![("grades.$[]", Bson::Int32(1))])),
+            ("$inc", sub(vec![("grades.0", Bson::Int32(1))])),
+        ]),
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(conflict.code, 40);
+}
+
+#[test]
+fn pipeline_updates_run_their_stages_over_the_document() {
+    let students = doc(vec![
+        ("_id", Bson::Int32(3)),
+        ("test1", Bson::Int32(95)),
+        ("test2", Bson::Int32(110)),
+        ("modified", Bson::DateTime(0)),
+    ]);
+    let changed = changed_by(
+        students.clone(),
+        doc(vec![("_id", Bson::Int32(3))]),
+        Bson::Array(vec![sub(vec![(
+            "$set",
+            sub(vec![
+                ("test3", Bson::Int32(98)),
+                ("modified", text("$$NOW")),
+            ]),
+        )])]),
+        None,
+    )
+    .unwrap();
+    assert_eq!(changed.get("test3"), Some(&Bson::Int32(98)));
+    assert_eq!(changed.get("modified"), Some(&Bson::DateTime(1_000)));
+
+    let defaults = changed_by(
+        doc(vec![
+            ("_id", Bson::Int32(1)),
+            ("quiz1", Bson::Int32(8)),
+            ("test2", Bson::Int32(100)),
+            ("quiz2", Bson::Int32(9)),
+        ]),
+        Document::new(),
+        Bson::Array(vec![
+            sub(vec![(
+                "$replaceRoot",
+                sub(vec![(
+                    "newRoot",
+                    sub(vec![(
+                        "$mergeObjects",
+                        Bson::Array(vec![
+                            sub(vec![
+                                ("quiz1", Bson::Int32(0)),
+                                ("quiz2", Bson::Int32(0)),
+                                ("test1", Bson::Int32(0)),
+                                ("test2", Bson::Int32(0)),
+                            ]),
+                            text("$$ROOT"),
+                        ]),
+                    )]),
+                )]),
+            )]),
+            sub(vec![("$set", sub(vec![("modified", text("$$NOW"))]))]),
+        ]),
+        None,
+    )
+    .unwrap();
+    assert_eq!(defaults.first().map(|(name, _)| name.as_str()), Some("_id"));
+    assert_eq!(defaults.get("quiz1"), Some(&Bson::Int32(8)));
+    assert_eq!(defaults.get("quiz2"), Some(&Bson::Int32(9)));
+    assert_eq!(defaults.get("test1"), Some(&Bson::Int32(0)));
+    assert_eq!(defaults.get("test2"), Some(&Bson::Int32(100)));
+    assert_eq!(defaults.get("modified"), Some(&Bson::DateTime(1_000)));
+
+    let unset = changed_by(
+        students.clone(),
+        Document::new(),
+        Bson::Array(vec![sub(vec![(
+            "$unset",
+            Bson::Array(vec![text("test1"), text("modified")]),
+        )])]),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        unset,
+        doc(vec![("_id", Bson::Int32(3)), ("test2", Bson::Int32(110))])
+    );
+    let projected = changed_by(
+        students.clone(),
+        Document::new(),
+        Bson::Array(vec![sub(vec![(
+            "$project",
+            sub(vec![("test2", Bson::Int32(1))]),
+        )])]),
+        None,
+    )
+    .unwrap();
+    assert_eq!(projected, unset);
+
+    let longer = changed_by(
+        doc(vec![("_id", Bson::Int32(2)), ("quizzes", ints(&[5, 6, 7]))]),
+        Document::new(),
+        Bson::Array(vec![sub(vec![(
+            "$set",
+            sub(vec![(
+                "quizzes",
+                sub(vec![(
+                    "$concatArrays",
+                    Bson::Array(vec![text("$quizzes"), ints(&[8, 6])]),
+                )]),
+            )]),
+        )])]),
+        None,
+    )
+    .unwrap();
+    assert_eq!(longer.get("quizzes"), Some(&ints(&[5, 6, 7, 8, 6])));
+
+    let new_id = changed_by(
+        students,
+        Document::new(),
+        Bson::Array(vec![sub(vec![(
+            "$set",
+            sub(vec![("_id", Bson::Int32(9))]),
+        )])]),
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(new_id.code, 66);
+}
+
+#[test]
+fn a_pipeline_upsert_starts_from_the_query_equalities() {
+    let keyspace = MemoryKeyspace::default();
+    let store = store(&keyspace);
+    let filter =
+        parse_filter(&doc(vec![("_id", Bson::Int32(7)), ("name", text("Grace"))])).unwrap();
+    let update = parse_update_statement(
+        &Bson::Array(vec![sub(vec![(
+            "$set",
+            sub(vec![("visits", Bson::Int32(1))]),
+        )])]),
+        None,
+    )
+    .unwrap();
+    assert!(matches!(update, Update::Pipeline(_)));
+    let outcome = store
+        .update(
+            "app",
+            "people",
+            &filter,
+            &update,
+            UpdateOptions {
+                multi: true,
+                upsert: true,
+            },
+        )
+        .unwrap();
+    assert_eq!(outcome.upserted, Some(Bson::Int32(7)));
+    let found = store
+        .find("app", "people", &filter, &SortSpec::default())
+        .unwrap();
+    assert_eq!(
+        found,
+        vec![doc(vec![
+            ("_id", Bson::Int32(7)),
+            ("name", text("Grace")),
+            ("visits", Bson::Int32(1)),
+        ])]
+    );
+}
+
+const MEBIBYTE: usize = 1024 * 1024;
+
+fn reported_size(error: &DocumentError) -> usize {
+    error
+        .message
+        .split("size in bytes: ")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .and_then(|size| size.parse().ok())
+        .unwrap_or(usize::MAX)
+}
+
+fn assert_refused_early(error: &DocumentError) {
+    assert_eq!((error.code, error.code_name), (2, "BadValue"));
+    assert!(
+        error.message.starts_with("object to insert too large"),
+        "{}",
+        error.message
+    );
+    let size = reported_size(error);
+    assert!(
+        size > crate::MAX_DOCUMENT_BYTES && size <= crate::MAX_DOCUMENT_BYTES + 2 * MEBIBYTE,
+        "the update was built to {size} bytes before it was refused"
+    );
+}
+
+fn stored_with_array(store: &Store<'_>, elements: Vec<Bson>) -> Document {
+    let document = doc(vec![
+        ("_id", Bson::Int32(1)),
+        ("s", text(&"x".repeat(MEBIBYTE))),
+        ("a", Bson::Array(elements)),
+    ]);
+    store
+        .insert("app", "big", vec![document.clone()], true)
+        .unwrap();
+    document
+}
+
+fn update_stored(store: &Store<'_>, update: Bson) -> Result<(), DocumentError> {
+    let update = parse_update_statement(&update, None)?;
+    store
+        .update(
+            "app",
+            "big",
+            &parse_filter(&Document::new()).unwrap(),
+            &update,
+            UpdateOptions::default(),
+        )
+        .map(|_| ())
+}
+
+fn stored(store: &Store<'_>) -> Vec<Document> {
+    store
+        .find(
+            "app",
+            "big",
+            &parse_filter(&Document::new()).unwrap(),
+            &SortSpec::default(),
+        )
+        .unwrap()
+}
+
+#[test]
+fn the_counted_size_is_the_encoded_size() {
+    let mut document = person();
+    document.insert(
+        "many",
+        Bson::Array((0..1_234).map(Bson::Int32).collect::<Vec<_>>()),
+    );
+    document.insert(
+        "bytes",
+        Bson::Binary {
+            subtype: 0,
+            bytes: vec![7; 33],
+        },
+    );
+    assert_eq!(
+        crate::size::document_size(&document),
+        document.to_bytes().len()
+    );
+}
+
+#[test]
+fn an_update_that_copies_its_argument_past_the_limit_is_refused_early() {
+    let keyspace = MemoryKeyspace::default();
+    let store = store(&keyspace);
+    let before = stored_with_array(&store, vec![Bson::Int32(0); 64]);
+    let big = text(&"y".repeat(MEBIBYTE));
+    let set_all = sub(vec![("$set", sub(vec![("a.$[]", big.clone())]))]);
+    assert_refused_early(&update_stored(&store, set_all).unwrap_err());
+    assert_eq!(stored(&store), vec![before.clone()]);
+
+    let filtered = parse_update_statement(
+        &sub(vec![("$set", sub(vec![("a.$[zero]", big.clone())]))]),
+        Some(&Bson::Array(vec![sub(vec![("zero", Bson::Int32(0))])])),
+    )
+    .unwrap();
+    let error = store
+        .update(
+            "app",
+            "big",
+            &parse_filter(&Document::new()).unwrap(),
+            &filtered,
+            UpdateOptions::default(),
+        )
+        .unwrap_err();
+    assert_refused_early(&error);
+    assert_eq!(stored(&store), vec![before]);
+
+    update_stored(
+        &store,
+        sub(vec![("$set", sub(vec![("a.$[]", Bson::Int32(5))]))]),
+    )
+    .unwrap();
+    assert_eq!(
+        stored(&store)[0].get("a"),
+        Some(&Bson::Array(vec![Bson::Int32(5); 64]))
+    );
+}
+
+#[test]
+fn push_and_add_to_set_with_each_over_many_arrays_are_refused_early() {
+    let keyspace = MemoryKeyspace::default();
+    let store = store(&keyspace);
+    let before = stored_with_array(&store, vec![Bson::Array(Vec::new()); 64]);
+    let each = sub(vec![(
+        "$each",
+        Bson::Array(vec![
+            text(&"z".repeat(MEBIBYTE / 2)),
+            text(&"w".repeat(MEBIBYTE / 2)),
+        ]),
+    )]);
+    for operator in ["$push", "$addToSet"] {
+        let update = sub(vec![(operator, sub(vec![("a.$[]", each.clone())]))]);
+        assert_refused_early(&update_stored(&store, update).unwrap_err());
+        assert_eq!(stored(&store), vec![before.clone()]);
+    }
+    update_stored(
+        &store,
+        sub(vec![("$push", sub(vec![("a.$[]", Bson::Int32(1))]))]),
+    )
+    .unwrap();
+    assert_eq!(
+        stored(&store)[0].get("a"),
+        Some(&Bson::Array(vec![ints(&[1]); 64]))
+    );
+}
+
+#[test]
+fn pipeline_expressions_that_grow_past_the_limit_are_refused_early() {
+    let keyspace = MemoryKeyspace::default();
+    let store = store(&keyspace);
+    let before = stored_with_array(&store, vec![Bson::Int32(0); 4]);
+    let copies = |reference: &str| Bson::Array(vec![text(reference); 40]);
+    let one_field =
+        |expression: Bson| Bson::Array(vec![sub(vec![("$set", sub(vec![("b", expression)]))])]);
+    let mut many_fields = Document::new();
+    for at in 0..40 {
+        many_fields.insert(format!("f{at}"), text("$s"));
+    }
+    let updates = [
+        one_field(sub(vec![("$concat", copies("$s"))])),
+        one_field(sub(vec![(
+            "$concatArrays",
+            Bson::Array(vec![Bson::Array(vec![text("$s")]); 40]),
+        )])),
+        one_field(copies("$s")),
+        one_field(sub(vec![("$sum", copies("$s"))])),
+        Bson::Array(vec![sub(vec![(
+            "$set",
+            Bson::Document(many_fields.clone()),
+        )])]),
+        Bson::Array(vec![sub(vec![("$project", Bson::Document(many_fields))])]),
+    ];
+    for update in updates {
+        assert_refused_early(&update_stored(&store, update).unwrap_err());
+        assert_eq!(stored(&store), vec![before.clone()]);
+    }
+    update_stored(
+        &store,
+        one_field(sub(vec![("$concat", Bson::Array(vec![text("$s"); 2]))])),
+    )
+    .unwrap();
+    assert_eq!(
+        stored(&store)[0].get("b"),
+        Some(&text(&"x".repeat(2 * MEBIBYTE)))
+    );
 }

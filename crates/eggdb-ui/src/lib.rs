@@ -44,6 +44,7 @@ pub use terminal::{Capabilities, Colors, Event, KeyCode, KeyEvent, Modifiers, Si
 pub use time_to_live::{
     TimeToLiveError, format_time_left, format_time_left_short, parse_time_to_live,
 };
+pub use width::text_width;
 
 use std::io;
 use std::time::Duration;

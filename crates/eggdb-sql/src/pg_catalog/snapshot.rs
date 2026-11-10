@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-const SNAPSHOT_FUNCTIONS: [&str; 30] = [
+const SNAPSHOT_FUNCTIONS: [&str; 39] = [
     "has_table_privilege",
     "has_column_privilege",
     "has_any_column_privilege",
@@ -25,7 +25,16 @@ const SNAPSHOT_FUNCTIONS: [&str; 30] = [
     "has_database_privilege",
     "has_sequence_privilege",
     "has_function_privilege",
+    "has_type_privilege",
+    "has_tablespace_privilege",
+    "has_foreign_data_wrapper_privilege",
+    "has_server_privilege",
+    "has_parameter_privilege",
     "pg_has_role",
+    "aclexplode",
+    "acldefault",
+    "makeaclitem",
+    "aclitem",
     "pg_get_serial_sequence",
     "pg_get_functiondef",
     "pg_get_function_arguments",
@@ -75,7 +84,7 @@ fn names_snapshot_function(word: &str) -> bool {
 
 const SEQUENCE_FUNCTIONS: [&str; 3] = ["nextval", "currval", "setval"];
 
-const CATALOG_TEXT_HINTS: [&str; 4] = ["reg", "pg_", "description", "privilege"];
+const CATALOG_TEXT_HINTS: [&str; 5] = ["reg", "pg_", "description", "privilege", "acl"];
 
 pub(crate) fn text_needs_catalog(text: &str) -> bool {
     CATALOG_TEXT_HINTS

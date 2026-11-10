@@ -15,7 +15,9 @@
 //!   otherwise through the agent's `confirm: true`.
 //! - With [`ServerConfig::allow_write`] and the key-value store granted, it also offers `put`,
 //!   which stores a key (with a time to live, in a collection), and `del`, which deletes one
-//!   and always needs the same confirmation (D328).
+//!   and always needs the same confirmation (D328), and `incr`, `cas`, `expire` and `persist`
+//!   for counters, compare-and-set and times to live, where an `expire` to 0 and a `cas` that
+//!   deletes need it too (D346).
 //! - With [`ServerConfig::tables`] a read-only server shows only the listed tables and views:
 //!   every other table, view and sequence reads as missing under the SQL engine, in every
 //!   dialect and catalog, and the key-value tools are withdrawn (D156).

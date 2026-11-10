@@ -99,7 +99,8 @@ relations psql's `\d` family reads.
   sent when it connected (`RESET` and `RESET ALL` do the same); `DISCARD PLANS`, `TEMP` and
   `SEQUENCES` are accepted too. Inside a block `DISCARD ALL` is `25001`.
 - **`DEALLOCATE [PREPARE] {name | ALL}`** forgets the connection's prepared statements of that
-  name, or all of them (psycopg sends it after a rollback). Not yet: `26000` for a name that was
+  name, or all of them (psycopg sends it after a rollback), both the protocol's and those made
+  with SQL `PREPARE`. Not yet: `26000` for a name that was
   never prepared, which is ignored instead.
 
 psql's describe commands (`\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\l`, `\du` and their `+`
@@ -139,9 +140,14 @@ What it reads, on top of the statements of "What runs today":
   table options such as `ENGINE=` and `DEFAULT CHARSET=`; `KEY`/`INDEX` and `UNIQUE [KEY]`
   entries and `UNIQUE` columns make indexes (an unnamed one is named after its first column,
   then `_2`, `_3`), and `CREATE [UNIQUE] INDEX name [USING BTREE] ON t (...)`, `DROP INDEX name
-  ON t`, `SHOW INDEX|INDEXES|KEYS FROM t` and `EXPLAIN SELECT` (MySQL's columns: `type` `ALL`,
+  ON t`, `ALTER TABLE t ADD INDEX|KEY [name] (...)`, `ADD UNIQUE [INDEX|KEY] [name] (...)`,
+  `RENAME INDEX|KEY a TO b` and `DROP INDEX|KEY name` (errors 1061 for a name the table already
+  has, 1176 for renaming a key the table lacks, 1091 for dropping one; on a partitioned table
+  the index reaches every partition, D316, D350), `SHOW INDEX|INDEXES|KEYS FROM t` and
+  `EXPLAIN SELECT` (MySQL's columns: `type` `ALL`,
   `const`, `ref`, `range` or `index`, the `key`, and `Extra`; also `FORMAT=TRADITIONAL`) work as
-  in MySQL, and so do `EXPLAIN FORMAT=TREE SELECT` and `EXPLAIN ANALYZE [FORMAT=TREE] SELECT`
+  in MySQL, and so do `EXPLAIN FORMAT=TREE|JSON`, `EXPLAIN ANALYZE [FORMAT=TREE]` of a
+  `SELECT`, a `TABLE t` and a multi-table `UPDATE` or `DELETE`
   (see [EXPLAIN ANALYZE and the slow-statement log](#explain-analyze-and-the-slow-statement-log)); `SHOW CREATE
   TABLE` lists the keys and `DESCRIBE` marks `UNI` and `MUL` columns.
 - **Types** as the engine's: `TINYINT(1)` and `BOOLEAN` are booleans (shown as `1` and `0`),
@@ -168,7 +174,13 @@ What it reads, on top of the statements of "What runs today":
   `LOCALTIMESTAMP` (the session's local time, to the second), `UTC_TIMESTAMP()`, `CURDATE()` and
   `CURRENT_DATE`, also as a column's `DEFAULT`; `EXTRACT(unit FROM d)` with MySQL's units
   (`MICROSECOND` to `YEAR`, `WEEK` in mode 0, and the compound units `SECOND_MICROSECOND` to
-  `YEAR_MONTH`) as integers; another unit is error 1064. `TIMESTAMP '...'` and `DATE '...'`
+  `YEAR_MONTH`) as integers; another unit is error 1064. `YEAR()`, `QUARTER()`, `MONTH()`,
+  `DAY()`/`DAYOFMONTH()`, `HOUR()`, `MINUTE()`, `SECOND()`, `MICROSECOND()`, `DAYOFWEEK()`
+  (1 = Sunday), `DAYOFYEAR()` and `WEEKDAY()` (0 = Monday) read a date, datetime, timestamp,
+  time (`HOUR('272:59:59')` is 272), a string in those forms or a number such as `20240203`;
+  NULL, an invalid date or a string that is no date gives NULL, and the zero date
+  `'0000-00-00'` gives 0 for its year, quarter, month and day and NULL for the day of the week
+  or year, as MySQL's (D350). `TIMESTAMP '...'` and `DATE '...'`
   literals. A binary-protocol row with a date outside years 0 to 9999 is error 1292.
 - **Subqueries, `WITH` and set operations** as in "What runs today", with MySQL's rules: a
   derived table needs an alias (error 1248) and unique column names (error 1060), `WITH RECURSIVE` stops after 1,000 steps (error 3636,
@@ -177,15 +189,16 @@ What it reads, on top of the statements of "What runs today":
   ("Subquery returns more than 1 row"), 1241 ("Operand should contain 1 column(s)") and 1222.
   `GREATEST` and `LEAST` are NULL when any argument is.
 - **Functions and operators**: `IFNULL`, `IF`, `CONCAT`, `LENGTH` (bytes), `CHAR_LENGTH`,
-  `UPPER`/`UCASE`, `LOWER`/`LCASE`, `COALESCE`, `NULLIF`, `ABS`, `DATABASE()`, `SCHEMA()`,
+  `UPPER`/`UCASE`, `LOWER`/`LCASE`, `COALESCE`, `NULLIF`, `ABS`, `SQRT` (a `DOUBLE`, NULL for
+  a negative argument; D350), `DATABASE()`, `SCHEMA()`,
   `VERSION()`, `USER()`, `CURRENT_USER()`, `CONNECTION_ID()`, `LAST_INSERT_ID()`, `@@var`
   (`@@version`, `@@sql_mode`, `@@max_allowed_packet`, ...), `@var`, `DIV`, `MOD`, `/` in
   floating point, `<=>`, `||` and `&&` as `OR` and `AND`, `!`. A result column without an alias
   is named by its text (`SELECT 1+1` gives a column `1+1`). `STD`, `STDDEV`, `STDDEV_POP`,
   `STDDEV_SAMP`, `VARIANCE`, `VAR_POP` and `VAR_SAMP` return `DOUBLE` (D321).
 - **NULL ordering**: NULL sorts first for `ORDER BY ... ASC` and last for `DESC`, as in MySQL,
-  in queries and window definitions; an index on a column that may hold NULLs is then not read
-  in place of the sort (D321).
+  in queries and window definitions; an index on a column that may hold NULLs is read in two
+  ranges, its NULL entries first, in place of the sort (D321, D341).
 - **Errors** with MySQL's numbers, SQLSTATEs and wording: `ERROR 1146 (42S02): Table
   'eggdb.missing' doesn't exist` (`eggdb` is the database name in `eggdb sql` and `eggdb shell`;
   through the server it is `--database`'s), 1064 for syntax errors (`... near '...' at line 1`), 1054,
@@ -257,7 +270,14 @@ What it reads, on top of the statements of "What runs today":
   `COMMIT` or `ROLLBACK` outside one; a failing statement inside a transaction backs out its
   own changes and leaves the transaction open (SQLite's default `ABORT`, also `INSERT OR
   ABORT`), `INSERT OR FAIL` keeps the rows it wrote before the conflict (in a transaction and
-  on its own), and `INSERT OR ROLLBACK` rolls the transaction back (D317).
+  on its own), and `INSERT OR ROLLBACK` rolls the transaction back on a conflict (D317, D338);
+  `UPDATE OR ROLLBACK|ABORT|FAIL|IGNORE|REPLACE` likewise, row by row for `FAIL` (the rows
+  changed before the conflict are kept), `IGNORE` (conflicting rows are left as they were) and
+  `REPLACE` (the rows in the way are deleted, and a `NULL` for a `NOT NULL` column takes its
+  default), with SQLite's `UNIQUE constraint failed: t.c` (D338); not with `FROM` or on a view.
+  Since `UPDATE OR REPLACE` deletes rows, a checked role needs `DELETE` on the table too
+  (`42501` without it), and where a row-level security `DELETE` policy applies to the role it is
+  refused (`0A000`), as `REPLACE` and `INSERT OR REPLACE` are (D338).
 - **Names starting with `sqlite_`** are reserved, as in SQLite: `CREATE TABLE sqlite_x` is
   refused with `object name reserved for internal use`.
 - **Length limit**: a function result longer than 1,000,000,000 bytes (SQLite's default
@@ -300,7 +320,8 @@ What it reads, on top of the statements of "What runs today":
   result columns".
 - **Functions**: `ifnull`, `nullif`, `coalesce`, `iif`, `typeof`, `length`, `substr` and
   `substring`, `upper`, `lower` (ASCII only, as SQLite's), `trim`, `ltrim`, `rtrim`, `replace`,
-  `instr`, `abs`, `round`, scalar `min` and `max`, `random`, `hex`, `quote`, `printf` and
+  `instr`, `abs`, `round`, `sqrt` (NULL for a negative argument or text that is no number;
+  D350), scalar `min` and `max`, `random`, `hex`, `quote`, `printf` and
   `format`, `like`, `glob`, `sqlite_version()` (`3.46.0`), `last_insert_rowid`, `changes`,
   `total_changes`, `unicode`, `char`, `sign`, and the aggregates `count`, `sum`, `avg`, `min`
   and `max`.
@@ -312,6 +333,10 @@ What it reads, on top of the statements of "What runs today":
   day|month|year`, `weekday N`, `unixepoch`, `julianday`, `auto`, `localtime` and `utc` (in
   the session's time zone), `subsec`, `ceiling` and `floor`. An invalid value or modifier
   gives `NULL`, as in SQLite.
+- **NULL ordering**: NULL is smaller than any other value, so it sorts first for `ORDER BY ...
+  ASC` and last for `DESC`, in queries, compound selects and window definitions, unless
+  `NULLS FIRST` or `NULLS LAST` says otherwise; an index on a column that may hold NULLs is
+  read in two ranges, its NULL entries first, in place of the sort (D340, D341).
 - **Values print as SQLite prints them**: reals with up to 15 significant digits and a decimal
   point (`2.0`, `0.333333333333333`, `1.0e+20`).
 - **Errors** with SQLite's wording and result codes: `Error: near "FORM": syntax error`, `no
@@ -514,7 +539,8 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   `USER_IND_COLUMNS`/`ALL_IND_COLUMNS`; `ORA-00001` for a duplicate, `ORA-01452` when `CREATE
   UNIQUE INDEX` finds one, `ORA-00955` for a name in use and `ORA-01418` for a missing index.
 - **Identity columns**: `GENERATED [ALWAYS | BY DEFAULT [ON NULL [FOR INSERT ONLY | FOR INSERT
-  AND UPDATE]]] AS IDENTITY [(options)]` on the first column of the primary key (D106, D150).
+  AND UPDATE]]] AS IDENTITY [(options)]` on the first column of the primary key, in a
+  partitioned table too (D106, D150, D337).
   `ALWAYS` is kept and enforced: a value given in `INSERT` is `ORA-32795` and an `UPDATE` of the
   column `ORA-32796` (`DEFAULT` is allowed); `eggdb restore` and `COPY` keep the values they
   bring. Options, in parentheses or bare as SQL Developer writes them: `START WITH` (default
@@ -658,6 +684,10 @@ SELECT @@VERSION
   rounded up; outside 0 to 100 is error 1031) and `WITH TIES` (the rows after the last one that
   sort equal to it; without `ORDER BY` it is error 1062) (D300); `N'...'` strings; `--` and nested `/* */` comments;
   the operators `+ - * / % = <> != < > <= >= !< !>`.
+- **NULL ordering**: NULL is the lowest value, so it sorts first for `ORDER BY ... ASC` and last
+  for `DESC`, in queries, `UNION`s, window definitions and `STRING_AGG ... WITHIN GROUP`; an
+  index on a column that may hold NULLs is read in two ranges, its NULL entries first, in place
+  of the sort (D340, D341).
 - **Types** (item 39, D123), written bare or bracketed in any case (`[decimal](18, 2)`, `AS
   DateTime2`), each kept as one of the engine's types, so PostgreSQL SQL reads the same columns:
 
@@ -712,7 +742,8 @@ SELECT @@VERSION
   (skipping NULLs), `DATALENGTH`, `ASCII`, `CHAR`, `UNICODE`, `NCHAR`, `IIF`, `CHOOSE`,
   `FORMAT` (.NET's standard and custom number, date and time formats, `time` as a time span
   whose separators are escaped, cultures `en-US` and invariant), `ROUND` (keeping the type and
-  scale, with truncation as its third argument), `CEILING`, `FLOOR`, `NEWID()`,
+  scale, with truncation as its third argument), `CEILING`, `FLOOR`, `SQRT` (a `float`; error
+  3623 `An invalid floating point operation occurred.` for a negative argument, D350), `NEWID()`,
   `SCOPE_IDENTITY()`, `UPPER`, `LOWER`, `ABS`, `COALESCE`, `NULLIF` and the aggregates:
   `COUNT` returning `int` and `COUNT_BIG` `bigint`, `SUM` and `AVG` with SQL Server's result
   types (`int` for `tinyint`, `smallint` and `int`, `bigint`, `decimal(38, s)` and for `AVG`
@@ -763,7 +794,8 @@ SELECT @@VERSION
   target's key, `NOT NULL` or types, or the target is missing (Msg 208), nothing the statement did
   is kept. A column count that does not match the target's is Msg 213.
 - **`SELECT ... INTO new_table [FROM ...]`** (D303): creates `new_table` with the query's columns
-  (their names and types; all of them nullable, without keys, defaults or identity) and fills it
+  (their names and types, without keys, defaults or identity; a column copied directly from the
+  one table of the query keeps its `NOT NULL`, every other column is nullable, D342) and fills it
   with the query's rows; the tag is `SELECT n`. `#name` makes a temporary table. An existing name
   is Msg 2714, a column without a name Msg 1038, and `INTO` in a later query of a `UNION`,
   `INTERSECT` or `EXCEPT` Msg 196; in a subquery it is 40517.
@@ -1674,9 +1706,35 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   the same name, keeps the keys and indexes defined, and reports the rows as affected. SQLite
   declares each column by its expression's affinity (`INT`, `TEXT`, `REAL`, `NUM`, or no type
   for an expression) and keeps the text `CREATE TABLE t(a INT,c)` in `sqlite_schema`. Oracle
-  needs an alias for an expression (`ORA-00998`), and `WHERE 1 = 0` copies the shape. `CREATE
-  TABLE AS EXECUTE`, PostgreSQL's `TABLE t` as the query and MySQL's `CREATE TABLE ... LIKE`
-  answer `0A000` or a syntax error.
+  needs an alias for an expression (`ORA-00998`), and `WHERE 1 = 0` copies the shape.
+  PostgreSQL's `CREATE TABLE name [(column, ...)] [USING heap] [WITH (option = value, ...) |
+  WITHOUT OIDS] [ON COMMIT ...] [TABLESPACE pg_default] AS ...` (D342) checks the options as
+  PostgreSQL does and keeps nothing from them: another access method is `42704` (an index method
+  such as `btree` `42809`), another tablespace `42704` (`pg_global` `22023`), an unknown storage
+  parameter, a value out of its range or a parameter given twice `22023`, and `oids = true`
+  `0A000`; the heap parameters (`fillfactor`, `autovacuum_*`, `toast.*`, `parallel_workers` and
+  the rest) are accepted. `CREATE TABLE name AS EXECUTE statement[(argument, ...)] [WITH [NO]
+  DATA]` makes the table from a prepared `SELECT` (`42809` for another kind of statement,
+  `26000` for an unknown name).
+- **`PREPARE name [(type, ...)] AS statement` and `EXECUTE name[(argument, ...)]`** (D342):
+  PostgreSQL's SQL-level prepared statements, kept by the session for `SELECT`, `VALUES`,
+  `TABLE`, `INSERT`, `UPDATE`, `DELETE`, `MERGE` and `WITH`. The arguments are evaluated and
+  bound to `$1`, `$2`, ... as the extended protocol binds values, typed by the declared types
+  (an undeclared one is a constant of unknown type, typed by where it stands); a wrong count is
+  `42601`, an existing name `42P05`, an unknown one `26000`, and each of them, as any error,
+  aborts a transaction block. `DEALLOCATE` and
+  `DISCARD ALL` forget them. A session keeps at most 4096 of them and 64 MiB of their text
+  (`54000`). Not yet: running the extended protocol's named statements with `EXECUTE` (the two
+  are kept apart).
+- **`TABLE name`** (D342) is `SELECT * FROM name` in PostgreSQL (`TABLE ONLY name` too) and MySQL
+  (`TABLE t [ORDER BY ...] [LIMIT ...]`): a statement, a set operand, a `WITH` query, a derived
+  table, a subquery (`IN (TABLE t)`), the source of `INSERT INTO t2 TABLE t1` and the query of
+  `CREATE TABLE ... AS TABLE t`. `EXPLAIN TABLE t` is not built yet.
+- **`CREATE [TEMPORARY] TABLE [IF NOT EXISTS] new LIKE old`** and `(LIKE old)` (MySQL, D342)
+  make an empty table with `old`'s columns, types, `NOT NULL`, defaults, `AUTO_INCREMENT`,
+  generated columns, primary key, indexes, checks, comments and partitions, without its rows,
+  foreign keys or triggers. An existing name is `1050`, a missing `old` `1146`, a view `1347`
+  ("is not BASE TABLE"), and a `TEMPORARY` copy of a partitioned table `1562`.
 - **`VALUES` as a query** (D323): in MySQL `VALUES ROW(1, 2), ROW(3, 4)` is a statement and a
   derived table with columns `column_0`, `column_1`, ...; in SQLite `VALUES (1, 2), (3, 4)` names
   them `column1`, `column2`, ...; a derived table's alias list (`(VALUES ...) AS t(a, b)`, also in
@@ -1846,7 +1904,18 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   expressions (else `42883`, ORA-00909), each column's `ASC`, `DESC` and `NULLS FIRST` or
   `LAST`; `rank` and `dense_rank` are `bigint`, `percent_rank` (`(rank - 1) / rows`) and
   `cume_dist` (`(rows before or equal to it + 1) / (rows + 1)`) `double precision`. Over no rows
-  they are 1, 1, 0 and 1. They take `FILTER`, not `OVER` (`0A000`).
+  they are 1, 1, 0 and 1. They take `FILTER`, not `OVER` (`0A000`). A direct argument may
+  name only grouped columns (else `42803`, D340).
+- **Two-variable statistics** (D340), in PostgreSQL and Oracle: `regr_count`, `regr_sxx`,
+  `regr_syy`, `regr_sxy`, `regr_avgx`, `regr_avgy`, `regr_r2`, `regr_slope`, `regr_intercept`,
+  `covar_pop`, `covar_samp` and `corr`, each `(Y, X)` with the dependent value first, skipping
+  pairs with a NULL on either side. `regr_count` is a `bigint` (0 over no pairs); the others are
+  `double precision`, NULL over no pairs, `covar_samp` NULL for one pair, `regr_slope`,
+  `regr_intercept`, `regr_r2` and `corr` NULL when X has no spread, `corr` NULL and `regr_r2` 1
+  when Y has none. They are computed with running sums of deviations (the Youngs-Cramer method),
+  so large offsets cost no precision, and take `FILTER`, `OVER` and, in PostgreSQL, `DISTINCT`
+  (ORA-30482 in Oracle). A non-numeric argument is `42883`; MySQL, SQL Server and SQLite have
+  none of them and answer their unknown-function errors.
 - **Ordered-set aggregates** (D151): `percentile_cont(fraction) WITHIN GROUP (ORDER BY expr)`
   (`double precision`, interpolated between the two nearest values), `percentile_disc(fraction)
   WITHIN GROUP (ORDER BY expr)` (the first value whose position reaches the fraction, in the
@@ -1897,7 +1966,14 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   single statements outside a block included. A read-only transaction refuses `INSERT`,
   `UPDATE`, `DELETE`, `MERGE` and `COPY FROM` unless they write a temporary table, every
   `CREATE`, `ALTER` and `DROP` (temporary ones too), `COMMENT`, `GRANT`, `REVOKE`, `TRUNCATE`
-  and `nextval()`, with `25006 cannot execute INSERT in a read-only transaction`.
+  and `nextval()`, with `25006 cannot execute INSERT in a read-only transaction`, and
+  `SELECT ... FOR UPDATE | NO KEY UPDATE | SHARE | KEY SHARE` of a permanent table, with `25006
+  cannot execute SELECT FOR UPDATE in a read-only transaction` (Oracle's read-only transaction
+  answers `ORA-01456`); `LOCK TABLE` is accepted, as in PostgreSQL. A writing function called
+  from `SELECT` is `25006` too, and a procedure that commits runs every transaction it starts
+  read-only under `default_transaction_read_only` (D338). Under `default_transaction_read_only =
+  on` a top-level `CALL` or `DO` runs non-atomic and holds the single writer for the whole
+  procedure (D338).
   `SHOW transaction_read_only` and `current_setting('transaction_read_only')` say whether the
   current transaction is read-only. A transaction that wrote may turn read-only and still commit
   what it wrote, but `SET TRANSACTION READ WRITE` after the transaction's first query is `25001
@@ -1905,7 +1981,8 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   after it is `25001 SET TRANSACTION ISOLATION LEVEL must be called before any query` (the
   level the block began with, or `serializable`, is the current one); inside a savepoint both
   are `25001`. Outside a block `SET TRANSACTION` warns `SET TRANSACTION can only be used in
-  transaction blocks` and changes nothing. `SET TRANSACTION SNAPSHOT` is `0A000`.
+  transaction blocks` and changes nothing; in an implicit transaction (a multi-statement
+  `Query`) it sets that transaction (D338). `SET TRANSACTION SNAPSHOT` is `0A000`.
 - `SET [SESSION | LOCAL] name {TO | =} value | DEFAULT`, `SET [LOCAL] TIME ZONE`, `SET NAMES`,
   `RESET name | ALL`, `SHOW name | ALL`: PostgreSQL's run-time parameters (D104). `client_encoding`
   takes `UTF8` (and `SQL_ASCII`, which passes bytes through) only; settings EggDB does not apply
@@ -1931,7 +2008,8 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   (D111). A `GENERATED ALWAYS` column refuses a value: `INSERT` with one is `428C9 cannot insert
   a non-DEFAULT value into column "id"` unless it says `OVERRIDING SYSTEM VALUE`, and `UPDATE`
   may only set it to `DEFAULT` (`428C9`); `COPY` and bulk loads keep the values they bring, as in
-  PostgreSQL (D146). The column must be the first column of the primary key; a named sequence and
+  PostgreSQL (D146). The column must be the first column of the primary key, in a partitioned
+  table too (D337); a named sequence and
   `DEFAULT nextval('s')` have no such limit. Identity options in `CREATE TABLE` (`GENERATED ...
   AS IDENTITY (START WITH 100 INCREMENT BY 5)`) are kept; `MINVALUE`, `MAXVALUE` and `CYCLE`
   that end the identity before its type's range answer `0A000`. `ALTER COLUMN c SET GENERATED
@@ -2016,7 +2094,10 @@ half away from zero, and a value with more than `p - s` digits before the point 
 `22003` (`numeric field overflow`); a negative `s` rounds to tens, hundreds and so on. A cast to
 an integer rounds half away from zero; a float becomes `numeric` with its 15 (`real`: 6)
 significant digits, as PostgreSQL's cast. `round`, `trunc` (both with an optional number of
-places), `ceil`/`ceiling`, `floor` and `abs` take `numeric` (and floats). `NaN` is accepted,
+places), `ceil`/`ceiling`, `floor` and `abs` take `numeric` (and floats). `sqrt` of a
+`numeric` is a `numeric` with at least 16 significant digits (`sqrt(2::numeric)` is
+`1.414213562373095`), of an integer or float a `double precision`, and of a negative number
+`2201F` (`cannot take square root of a negative number`) (D350). `NaN` is accepted,
 equals itself and sorts above every number. A result with more than 1,000 digits before the
 point fails with `22003` (`value overflows numeric format`) before it is computed, and `^` with
 an integer exponent is exact up to that size (otherwise computed in double precision, through
@@ -2354,7 +2435,8 @@ block that created a table leaves no table.
   in memory until `RELEASE`, `ROLLBACK TO` or `COMMIT`.
 - **Row locks.** `SELECT ... FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY SHARE` with
   `OF`, `NOWAIT`, `SKIP LOCKED` (and Oracle's `WAIT n`, MySQL's `LOCK IN SHARE MODE`) and
-  `LOCK TABLE ... IN ... MODE [NOWAIT]` are accepted. A transaction block holds the database's
+  `LOCK TABLE ... IN ... MODE [NOWAIT]` are accepted (in a read-only transaction the `SELECT`
+  forms are `25006` in PostgreSQL's and Oracle's dialects, D338). A transaction block holds the database's
   one writer from `BEGIN` on, so no other session changes the rows it read, and the lock
   clauses need nothing more; they will take part when SQL sessions run on concurrent
   transactions (D172).
@@ -2394,11 +2476,20 @@ says `(never executed)` (D327). In MySQL's dialect, `EXPLAIN FORMAT=TREE SELECT 
 `EXPLAIN ANALYZE [FORMAT=TREE] SELECT ...` answer MySQL 8's tree in one row of one `EXPLAIN`
 column: `-> ` iterators indented four spaces per level (`Table scan on t`, `Single-row index
 lookup on t using PRIMARY (id=2)`, `Index lookup`, `Index range scan`, `Index scan`, `Filter:
-(t.a > 1)`, `Sort: t.b DESC`, `Limit: 2 row(s)`, `Nested loop inner join`, `Inner hash join
-(t1.a = t2.c2)` over `Hash`, `Rows fetched before execution`, and `Select #2 (subquery in
-condition; run only once)` or `dependent` for a subquery), with `(actual time=a..b rows=n
-loops=n)` under `ANALYZE` where EggDB measures, and no `(cost=...)` group since EggDB's planner
-has no estimates. `FORMAT=JSON` and a tree of an `UPDATE` or `DELETE` answer `0A000` (D327).
+(t.a > 1)`, `Aggregate: count(0)`, `Group aggregate: sum(t.b)`, `Group (no aggregates)`,
+`Stream results`, `Sort: t.b DESC`, `Limit: 2 row(s)`, `Nested loop inner join`, `Inner hash
+join (t1.a = t2.c2)` over `Hash`, `Rows fetched before execution`, and `Select #2 (subquery in
+condition; run only once)` or `dependent` for a subquery), each with `  (cost=c rows=r)` and,
+under `ANALYZE`, ` (actual time=a..b rows=n loops=n)` where EggDB measures. The estimates come
+from EggDB's own cost model over the row counts `ANALYZE TABLE` recorded (a table never analyzed
+is counted up to 10,000 rows), stated in D345, and differ from the numbers MySQL prints.
+`EXPLAIN FORMAT=JSON` answers MySQL 8's `query_block` document (`cost_info`,
+`ordering_operation`, `grouping_operation`, `table` or `nested_loop`, each table's
+`access_type`, `key`, `rows_examined_per_scan`, `rows_produced_per_join`, `filtered`,
+`cost_info` and `attached_condition`). A multi-table `UPDATE` or `DELETE` is explained as the
+join it reads under `Update t1 (buffered)` or `Delete from t1 (buffered)`, and `EXPLAIN ANALYZE`
+runs it; a single-table one under `EXPLAIN ANALYZE` answers 1235 as MySQL does, and its tree is
+`<not executable by iterator executor>`. `TABLE t` is explained as `SELECT * FROM t` (D345).
 `EXPLAIN (ANALYZE,
 BUFFERS)` adds the page cache's lookups in PostgreSQL's form: `Buffers: shared hit=N read=M`
 under the top node for the whole statement (pages found in memory, pages read from the file;
@@ -2526,6 +2617,25 @@ does not exist gives NULL. `information_schema.table_privileges`, `role_table_gr
 the current user, a role it belongs to or (except in the `role_*` views) `PUBLIC`, as the SQL
 standard defines them; a superuser sees every grant.
 
+The rest of PostgreSQL's privilege catalog answers from the same model (D344):
+`has_type_privilege` (every role uses every type), `has_tablespace_privilege` (`pg_default` and
+`pg_global`, `CREATE` for superusers), `has_parameter_privilege` (`SET` and `ALTER SYSTEM` for
+superusers, as no parameter grants are stored), and `has_server_privilege` and
+`has_foreign_data_wrapper_privilege` (there are no foreign servers, so a name is `42704`).
+`aclexplode`, `acldefault` and `makeaclitem` read and build ACLs as pgAdmin and DBeaver use them,
+and a cast to `aclitem` reads PostgreSQL's item text with its errors:
+
+```sql
+SELECT * FROM aclexplode((SELECT relacl FROM pg_class WHERE relname = 'accounts'));
+SELECT acldefault('f', 10);                         -- {=X/eggdb,eggdb=X/eggdb}
+SELECT makeaclitem(0, 10, 'SELECT, INSERT', false); -- =ar/eggdb
+```
+
+`pg_namespace.nspacl` shows what every schema allows (its owner `USAGE` and `CREATE`, `PUBLIC`
+`USAGE`), and `information_schema.enabled_roles`, `applicable_roles`, `routine_privileges` and
+`udt_privileges` list the current user's roles, their memberships and the default `EXECUTE` and
+`TYPE USAGE` held by `PUBLIC` (and by the owner, for a superuser session).
+
 Privileges can also be granted on single columns, as PostgreSQL (and MySQL) write them (D285):
 
 ```sql
@@ -2638,15 +2748,23 @@ ALTER TABLE measurements DETACH PARTITION old_rows;
   INDEX ... ON ONLY t` makes the parent's index alone, which `pg_index.indisvalid` shows as false
   until `ALTER INDEX t_idx ATTACH PARTITION p_idx` has attached an index of every partition.
   `DROP INDEX` of the parent's index drops the partitions' indexes; an attached partition index
-  can't be dropped alone (`2BP01`). `AUTO_INCREMENT` and identity columns are
-  refused in partitioned tables for now; `serial` columns share their sequence.
+  can't be dropped alone (`2BP01`). `serial` columns share their sequence.
+- **Identity and `AUTO_INCREMENT`.** The partitioned table numbers its rows: an `INSERT` gives
+  each row its id in statement order before routing it (so `HASH (id)` routes on the new id),
+  from one counter past the furthest id any partition holds, and `LAST_INSERT_ID()` is the
+  first id it gave. The column must lead the primary key (`PRIMARY KEY (id, created_at)`), as
+  in every table. A row written straight into a partition gets no id (D337).
 - **Catalogs and restores.** `pg_class` shows `relkind` `p` and `relispartition`, `pg_inherits`
   links partitions to their parent, `pg_partitioned_table`, `pg_get_partkeydef` and
   `pg_get_expr(relpartbound, oid)` describe them, and `pg_dump` files restore with their
   partitions (`ATTACH PARTITION`).
 - **MySQL and Oracle.** `PARTITION BY RANGE|LIST|HASH|KEY (...)` with named partitions inside
   `CREATE TABLE` (`VALUES LESS THAN`, `VALUES IN`, `PARTITIONS n`, Oracle's `VALUES (DEFAULT)`)
-  makes one partition per name, stored as a table named `<table>#P#<partition>`.
+  makes one partition per name, stored as a table named `<table>#P#<partition>`. MySQL's
+  `t PARTITION (p1, p2)` after a table name in `SELECT`, `INSERT`, `REPLACE`, `UPDATE` and
+  `DELETE`, and Oracle's `PARTITION (p)` and `PARTITION FOR (key)`, read and write only the
+  named partitions: a row outside them is MySQL `1748` / `ORA-14401`, an unknown partition
+  `1735` / `ORA-02149`, and a table that is not partitioned `1747` / `ORA-14501` (D337).
 - **Hash values.** Hash partitions assign rows by EggDB's own hash of the key, not PostgreSQL's,
   so a `COPY` of a hash partition's rows from a `pg_dump` is routed through the partitioned
   table, as `pg_dump --load-via-partition-root` would.
@@ -2733,8 +2851,14 @@ unique key fully matched by `=`, the longest equality run, a range, then the pri
 an index. `ORDER BY` columns that follow the matched columns in a key, all ascending or all
 descending, read the key in order (backward for `DESC`) and skip the sort; with `LIMIT` the
 read stops early, and with no `WHERE` an index is read in order when the query has a `LIMIT`.
-`ORDER BY` with `NULLS FIRST` on an ascending column (or `NULLS LAST` on a descending one) still
-sorts unless the column is `NOT NULL`. A join looks rows of its inner table up through an index
+`ORDER BY` with `NULLS FIRST` on an ascending column (or `NULLS LAST` on a descending one), the
+default in MySQL's, SQLite's and SQL Server's dialects, reads the key in two ranges, its NULL
+entries first for `ASC` and last for `DESC`, when that column is the first `ORDER BY` column
+after the ones fixed by `=` and every later `ORDER BY` column is `NOT NULL`; a `WHERE` that
+excludes NULL from the column (a comparison, `IS NOT NULL`, `BETWEEN`, `IN` or `LIKE`) reads
+one range; anything else sorts (D341). An `ORDER BY` with `LIMIT n [OFFSET m]` that no key
+serves keeps only the first n + m rows while it reads, in a bounded heap whose ties keep their
+arrival order, so it returns the rows the full sort would (D341). A join looks rows of its inner table up through an index
 on its join columns when the outer side is a key lookup or the inner table does not fit the
 64 MiB hash table. Every other condition still filters the rows an index finds, so results are
 the same as a full scan's: a test runs random queries and changes with and without indexes and
@@ -3876,7 +4000,8 @@ folded into 16385 to 4294967295, a collision taking the next free number in a fi
 it is the same in every statement and after a restart, and changes when the object is renamed.
 
 **Types and functions.** `oid`, `xid`, `name`, `pg_node_tree`, `aclitem` (PostgreSQL's `grantee=privileges/grantor` text, as `pg_class.relacl`
-and `\dp` show a table's grants, and `pg_attribute.attacl` a column's; NULL where an object has no grants),
+and `\dp` show a table's grants, and `pg_attribute.attacl` a column's; NULL where an object has no grants;
+a cast to `aclitem` reads the same text),
 `int2vector` and `oidvector` (subscripts from 0, written separated by spaces), and `regclass`,
 `regtype`, `regnamespace`, `regrole` and `regproc` work in expressions and casts but are not
 column types of tables; `"char"` is the type of the catalog's kind columns only, and `"char"`
@@ -4342,16 +4467,23 @@ expression whose display EggDB does not work out is shown as stored, where Postg
 print its own form.
 
 The correctness suite (`crates/eggdb-sql/correctness/postgresql.test`, [correctness.md](correctness.md))
-checks the PostgreSQL manual's documented behaviour and marks no case as differing (the last
-two, `COPY` in the binary format and in another encoding, now match). The other differences:
+checks the PostgreSQL manual's documented behaviour and marks these as differing until they
+are fixed:
+- An identity column must lead the primary key, in a partitioned table too, so `PRIMARY KEY
+  (created_at, id)` with an identity `id` is `42P16`, where PostgreSQL takes it; allowing it is a
+  file format change that waits for table definition version 15 (D337).
+- A table in `FROM` takes no column alias list (`FROM t AS x (a, b)`, or `FROM t partition (p1)`,
+  where `partition` is an alias and `p1` renames the first column): `0A000`.
+
+The other differences:
 
 - One statement at a time is planned by simple rules without statistics ([Indexes](#indexes)):
   a `WHERE` that fixes every primary-key column with `=` reads one row (in a join, of the first
   table), conditions on a leading part of the primary key or an index read that range, and
   anything else reads the whole table. Each statement's result
   is built in memory before it prints (a `SELECT` without `ORDER BY` holds only the rows it
-  returns; `ORDER BY` holds every matching row and sorts them, with no top-N for `LIMIT` yet,
-  unless a key gives the order).
+  returns; `ORDER BY` holds every matching row and sorts them, unless a key gives the order or
+  a `LIMIT` lets it keep only the first rows, D341).
 - Indexes: partial indexes (`WHERE`), indexes on expressions, `INCLUDE`, `CONCURRENTLY`,
   `NULLS [NOT] DISTINCT` and index methods other than B-tree and hash answer `0A000`; a `USING
   hash` index is kept and shown as `hash` but stored like a B-tree, so it also serves ranges and
@@ -4472,10 +4604,9 @@ two, `COPY` in the binary format and in another encoding, now match). The other 
   `0A000`; `FULL JOIN ... USING` columns cannot be named unqualified from a subquery (`42702`). An `IN` list of constants is compared item by item (a list of
   more than 256 items is not used to choose a key range either), so a very long list against
   many rows is slow; `IN (SELECT ...)` looks values up in a hash set.
-- `percentile_cont` and `percentile_disc` over an array of fractions, `percentile_cont` between
-  two `interval` values, and `regr_*`, `covar_*` and `corr` fail with `0A000` or `42883`; the
-  direct arguments of a hypothetical-set aggregate are not checked to name only grouped columns
-  (D321). Window functions (D151) do not take `DISTINCT`
+- `percentile_cont` and `percentile_disc` over an array of fractions and `percentile_cont`
+  between two `interval` values fail with `0A000`; Oracle's two-variable statistics return
+  `double precision` where Oracle returns `NUMBER` for `NUMBER` arguments (D340). Window functions (D151) do not take `DISTINCT`
   or `ORDER BY` inside an aggregate's parentheses (`0A000`, as in PostgreSQL); a window whose
   frame does not start at `UNBOUNDED PRECEDING`, or that excludes rows, recomputes its aggregate
   for each row, so a long sliding frame costs its length per row; a correlated subquery cannot
@@ -4530,6 +4661,13 @@ Reference Manual's documented behaviour) marks these as differing until they are
   accents; collations come with D30.
 - A view made with `ALGORITHM=TEMPTABLE` still takes `INSERT`, `UPDATE` and `DELETE` when its
   query could; MySQL refuses them (error 1288).
+- An `AUTO_INCREMENT` column must lead the primary key, in a partitioned table too: `PRIMARY KEY
+  (store_id, id)` with a key that `id` leads is error 1075, where InnoDB needs only some index
+  that the column leads; allowing it is a file format change that waits for table definition
+  version 15 (D337).
+- `FULLTEXT` and `SPATIAL` keys, in `CREATE TABLE` and `ALTER TABLE ... ADD`, answer 1235: InnoDB
+  makes a `FULLTEXT` index on a `CHAR`, `VARCHAR` or `TEXT` column, and a `SPATIAL` one on a
+  column that is no geometry is MySQL's 1687.
 - A `TIME` outside `-838:59:59` to `838:59:59` is an error (`22007`, error 1292) where MySQL's
   non-strict modes clip it with a warning, and `HOUR()`, `TIME_TO_SEC()` and the other `TIME` functions are
   missing.
@@ -4559,17 +4697,19 @@ And more, not in the suite yet:
 - `DESCRIBE` shows the engine's types (`smallint` for `TINYINT`).
 - Dates and times: `DATE` and `DATETIME` take years 4714 BC to 5874897 (MySQL: 1000 to 9999),
   zero dates (`0000-00-00`) are refused, a `DATETIME(fsp)` prints without trailing zeros in its
-  fraction, `YEAR`, `DATE_FORMAT`, `STR_TO_DATE`, `DATE_ADD`, `UNIX_TIMESTAMP` and
-  `ON UPDATE CURRENT_TIMESTAMP` are not supported yet.
+  fraction, the `YEAR` type, `WEEK()`, `DATE_FORMAT`, `STR_TO_DATE`, `DATE_ADD`,
+  `UNIX_TIMESTAMP` and `ON UPDATE CURRENT_TIMESTAMP` are not supported yet. The date-part
+  functions give no warning 1292 for a string that is no date, and read a date with a zero
+  month or day other than `'0000-00-00'` (`'2024-00-00'`) as NULL.
 - A value rounded to fit a `DECIMAL(p,s)`'s scale gives no note 1265.
 - `EXTRACT` gives integers and accepts no `WEEK` mode but 0; `EXTRACT` of a negative compound
   value and of years before 1000 are not checked against MySQL.
 - `AVG` of integers and `SUM`/`AVG` of `DECIMAL` use PostgreSQL's result scale (`AVG(2, 3)` is
   `2.5000000000000000`) where MySQL adds 4 digits to the argument's scale (`2.5000`).
 - Indexes: a key on a column prefix (`KEY k (name(10))`) indexes the whole value, and a
-  `UNIQUE` one answers 1235; `FULLTEXT` and `SPATIAL` keys answer 1235. `SHOW INDEX` gives
+  `UNIQUE` one answers 1235. `SHOW INDEX` gives
   `Cardinality` and `Sub_part` as `NULL`, and `EXPLAIN` gives `key_len`, `ref` and `rows` as
-  `NULL`. `ALTER TABLE ... ADD INDEX` answers 1235 (use `CREATE INDEX`). Foreign keys are
+  `NULL`. Foreign keys are
   checked when the statement ends, not row by row, and
   creating one makes no index on the child's columns (InnoDB makes one).
 
@@ -4619,7 +4759,7 @@ And more, not in the suite yet:
 - `PRAGMA user_version`, `foreign_keys`, `journal_mode` and `synchronous` are per session, not
   kept in the file; foreign keys are never enforced.
 - Not supported yet: `CREATE INDEX`, `UNIQUE` and `CHECK` constraints, `COLLATE NOCASE`,
-  views, `ATTACH`, `VACUUM`, `UPDATE OR ...`,
+  views, `ATTACH`, `VACUUM`,
   `group_concat` and `total`, the JSON and math functions and bare columns in aggregate
   queries.
 
@@ -4776,7 +4916,9 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
 - Not yet: `deleted.` in `UPDATE`, global `##temporary` tables (`##name` is the session's own
   table, like `#name`), and `OUTPUT ... INTO` refusing a target with triggers, checks or foreign
   keys, as SQL Server does (EggDB fires and checks them). A `MERGE`'s deletes do not fire `DELETE`
-  triggers, and `SELECT ... INTO` keeps neither the source columns' `NOT NULL` nor their identity.
+  triggers, and `SELECT ... INTO` does not keep an identity column's identity property: the new
+  column is a plain `NOT NULL` one, so an `INSERT` without a column list takes a value for it where
+  SQL Server answers error 8101, and one that leaves it out is error 515 (D342).
 - An identity column that is not the first column of the primary key. The next identity number
   follows the largest one in the table (the smallest for a negative increment), so a deleted
   largest value is used again and an emptied table starts again at its seed, where SQL Server
@@ -4853,7 +4995,7 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
 - `JSON_TABLE`'s `PLAN` clause, and Oracle's `IS JSON`, `JSON_SERIALIZE` and `JSON_SCALAR`.
 - Point `SELECT`s as fast as SQLite's everywhere: an AST that borrows the SQL text and a plan
   cache; table statistics for choosing between key lookups and hash joins.
-- `regr_*`, `covar_*` and `corr`; `DISTINCT ON` over any expression in a grouped query and beside window functions; `LATERAL ... NATURAL JOIN`.
+- `DISTINCT ON` over any expression in a grouped query and beside window functions; `LATERAL ... NATURAL JOIN`.
 - Then the other dialects (item 23), each with its own correctness suite; for the PostgreSQL protocol,
   TLS, `information_schema` and the catalog queries of GUI tools beyond psql's `\d` family,
   and `LISTEN`/`NOTIFY` (M6a).

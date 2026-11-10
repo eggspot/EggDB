@@ -4,6 +4,8 @@ mod multi;
 use crate::json_out::{Out, escaped, written};
 use crate::query::{Stats, numbers, parse, score, term_buckets};
 use crate::script::{Context, Operation, Script};
+use crate::sort::{Sort, SortValue, write_values};
+use crate::source_filter::SourceFilter;
 use eggdb_http::{Request, Response};
 use eggdb_keyspace::{KeysRead, KeysWrite, Keyspace};
 use eggdb_platform::connection_limits::MemoryBudget;
@@ -598,98 +600,38 @@ impl<'k> Api<'k> {
     fn update_document(&self, index: &str, id: &str, request: &Request) -> Answer {
         let body = String::from_utf8_lossy(&request.body).into_owned();
         let parsed = parse_document(&body)?;
-        if let Some(script) = member_of(&parsed, "script") {
-            if member_of(&parsed, "doc").is_some() {
-                return Ok(error(
-                    400,
-                    "action_request_validation_exception",
-                    "Validation Failed: 1: can't provide both script and doc;",
-                ));
-            }
-            return match Script::from_node(&script) {
-                Ok(script) => self.update_document_with_script(index, id, &script),
-                Err(reason) => Ok(script_error(&format!("compile error: {reason}"))),
-            };
-        }
-        let Some(Json::Object(changes)) = parsed.value.clone().into_object().and_then(|members| {
-            members
-                .into_iter()
-                .find(|(key, _)| key == "doc")
-                .map(|(_, node)| node.value)
-        }) else {
-            return Ok(error(
-                400,
-                "action_request_validation_exception",
-                "Validation Failed: 1: script or doc is missing;",
-            ));
+        let update = match update_request_of(&parsed, request) {
+            Ok(update) => update,
+            Err(refusal) => return Ok(refusal),
         };
         let outcome = write(self.keyspace, |keys| {
             let key = document_key(index, id);
-            let Some((version, source)) = keys.get(&key)?.as_deref().and_then(unstored) else {
-                return Ok(None);
-            };
-            let current = parse_document(&source).map_err(|error| error.message)?;
-            let Json::Object(mut members) = current.value else {
-                return Ok(None);
-            };
-            for (name, value) in &changes {
-                match members.iter_mut().find(|(key, _)| key == name) {
-                    Some((_, existing)) => *existing = value.clone(),
-                    None => members.push((name.clone(), value.clone())),
+            let current = keys.get(&key)?.as_deref().and_then(unstored);
+            let outcome = planned_update(&update, index, id, current)?;
+            match &outcome {
+                UpdateOutcome::Created { source } => {
+                    ensure_index(keys, index)?;
+                    keys.put(&key, &stored(1, source))?;
                 }
-            }
-            let merged = written(&Node {
-                value: Json::Object(members),
-                start: 0,
-                end: 0,
-            });
-            keys.put(&key, &stored(version + 1, &merged))?;
-            Ok(Some(version + 1))
-        })?;
-        Ok(match outcome {
-            Some(version) => json(200, write_result(index, id, version, "updated")),
-            None => error(
-                404,
-                "document_missing_exception",
-                &format!("[{id}]: document missing"),
-            ),
-        })
-    }
-
-    fn update_document_with_script(&self, index: &str, id: &str, script: &Script) -> Answer {
-        let mut failure = None;
-        let outcome = write(self.keyspace, |keys| {
-            let key = document_key(index, id);
-            let Some((version, source)) = keys.get(&key)?.as_deref().and_then(unstored) else {
-                return Ok(None);
-            };
-            match scripted(script, index, id, version, &source) {
-                Ok((Operation::Index, changed)) => {
-                    keys.put(&key, &stored(version + 1, &changed))?;
-                    Ok(Some((version + 1, "updated")))
+                UpdateOutcome::Updated { version, source } => {
+                    keys.put(&key, &stored(*version, source))?;
                 }
-                Ok((Operation::Noop, _)) => Ok(Some((version, "noop"))),
-                Ok((Operation::Delete, _)) => {
+                UpdateOutcome::Deleted { .. } => {
                     keys.delete(&key)?;
-                    Ok(Some((version + 1, "deleted")))
                 }
-                Err(reason) => {
-                    failure = Some(reason);
-                    Err("the script failed".to_owned())
-                }
+                UpdateOutcome::Noop { .. }
+                | UpdateOutcome::SkippedUpsert
+                | UpdateOutcome::Missing
+                | UpdateOutcome::ScriptFailed(_) => {}
             }
-        });
-        if let Some(reason) = failure {
-            return Ok(script_error(&format!("runtime error: {reason}")));
-        }
-        Ok(match outcome? {
-            Some((version, result)) => json(200, write_result(index, id, version, result)),
-            None => error(
-                404,
-                "document_missing_exception",
-                &format!("[{id}]: document missing"),
-            ),
-        })
+            Ok(outcome)
+        })?;
+        Ok(update_response(
+            index,
+            id,
+            outcome,
+            update.returned_source.as_ref(),
+        ))
     }
 
     fn bulk(&self, default_index: Option<&str>, request: &Request) -> Answer {
@@ -826,6 +768,21 @@ impl<'k> Api<'k> {
                 "Result window is too large, from + size must be less than or equal to: [10000]",
             ));
         }
+        let presentation = if count_only {
+            HitPresentation::default()
+        } else {
+            match presentation_of(
+                member("sort"),
+                member("search_after"),
+                member("_source"),
+                member("track_scores"),
+                request,
+                from,
+            ) {
+                Ok(presentation) => presentation,
+                Err(refusal) => return Ok(refusal),
+            }
+        };
         let ignore_unavailable =
             query_flag(request, "ignore_unavailable").as_deref() == Some("true");
         let gathered = read(self.keyspace, |keys| {
@@ -855,12 +812,15 @@ impl<'k> Api<'k> {
             Ok(gathered) => gathered,
             Err(missing) => return Ok(missing_index(&missing)),
         };
-        let documents: Vec<(String, Node)> = gathered
+        let (documents, origins): (Vec<(String, Node)>, Vec<usize>) = gathered
             .iter()
-            .filter_map(|(_, id, source)| {
-                parse_document(source).ok().map(|node| (id.clone(), node))
+            .enumerate()
+            .filter_map(|(origin, (_, id, source))| {
+                parse_document(source)
+                    .ok()
+                    .map(|node| ((id.clone(), node), origin))
             })
-            .collect();
+            .unzip();
         let query = expand_wildcard_fields(query, &documents);
         let stats = Stats::of(&query, &documents);
         let mut hits: Vec<(f64, usize)> = documents
@@ -879,23 +839,36 @@ impl<'k> Api<'k> {
                 ),
             ));
         }
-        let sort_field = member("sort").and_then(|node| sort_of(&node));
-        match &sort_field {
-            Some((field, descending)) => hits.sort_by(|left, right| {
-                let value = |at: usize| {
-                    crate::query::values_at(&documents[at].1, field)
-                        .first()
-                        .map(|node| node.value.clone())
-                };
-                let ordering = compare_values(value(left.1).as_ref(), value(right.1).as_ref());
-                if *descending {
-                    ordering.reverse()
-                } else {
-                    ordering
-                }
-            }),
-            None => {
-                hits.sort_by(|left, right| right.0.total_cmp(&left.0).then(left.1.cmp(&right.1)))
+        let matched: Vec<&Node> = hits.iter().map(|(_, at)| &documents[*at].1).collect();
+        let sort = &presentation.sort;
+        let reports_scores = sort.is_empty() || sort.uses_score() || presentation.track_scores;
+        let mut ranked: Vec<(f64, usize, Vec<SortValue>)> = Vec::with_capacity(hits.len());
+        if sort.is_empty() {
+            hits.sort_by(|left, right| right.0.total_cmp(&left.0).then(left.1.cmp(&right.1)));
+            ranked.extend(hits.iter().map(|&(value, at)| (value, at, Vec::new())));
+        } else {
+            let ordered = sort.over(&matched);
+            let after = match &presentation.search_after {
+                Some(values) => match ordered.after(values) {
+                    Ok(after) => Some(after),
+                    Err(reason) => return Ok(error(400, "illegal_argument_exception", &reason)),
+                },
+                None => None,
+            };
+            ranked.extend(
+                hits.iter().map(|&(value, at)| {
+                    (value, at, ordered.values_of(value, at, &documents[at].1))
+                }),
+            );
+            ranked.sort_by(|left, right| {
+                ordered
+                    .compare(&left.2, &right.2)
+                    .then(left.1.cmp(&right.1))
+            });
+            if let Some(after) = &after {
+                ranked.retain(|(_, _, values)| {
+                    ordered.compare(values, after) == std::cmp::Ordering::Greater
+                });
             }
         }
         let total = hits.len();
@@ -924,28 +897,38 @@ impl<'k> Api<'k> {
             .end_object()
             .key("max_score");
         match max_score {
-            Some(value) if sort_field.is_none() => out.number(value),
+            Some(value) if reports_scores => out.number(value),
             _ => out.null(),
         };
         out.key("hits").begin_array();
-        for (value, at) in hits.iter().skip(from).take(size) {
-            let (index, id, source) = &gathered[*at];
+        for (value, at, sort_values) in ranked.iter().skip(from).take(size) {
+            let Some((index, id, source)) =
+                origins.get(*at).and_then(|origin| gathered.get(*origin))
+            else {
+                continue;
+            };
             out.begin_object()
                 .key("_index")
                 .string(index)
                 .key("_id")
                 .string(id)
                 .key("_score");
-            if sort_field.is_some() {
-                out.null();
-            } else {
+            if reports_scores {
                 out.number(*value);
+            } else {
+                out.null();
             }
-            out.key("_source").raw(source).end_object();
+            if let Some(filtered) = presentation.source_filter.apply(source) {
+                out.key("_source").raw(&filtered);
+            }
+            if !sort.is_empty() {
+                out.key("sort");
+                write_values(&mut out, sort_values);
+            }
+            out.end_object();
         }
         out.end_array().end_object();
         if let Some(aggregations) = member("aggs").or_else(|| member("aggregations")) {
-            let matched: Vec<&Node> = hits.iter().map(|(_, at)| &documents[*at].1).collect();
             out.key("aggregations");
             aggregate(&mut out, &aggregations, &matched);
         }
@@ -978,39 +961,79 @@ fn expand_wildcard_fields(
     }
 }
 
-fn compare_values(left: Option<&Json>, right: Option<&Json>) -> std::cmp::Ordering {
-    match (left, right) {
-        (Some(Json::Number(a)), Some(Json::Number(b))) => a
-            .parse::<f64>()
-            .unwrap_or(0.0)
-            .total_cmp(&b.parse::<f64>().unwrap_or(0.0)),
-        (Some(Json::String(a)), Some(Json::String(b))) => a.cmp(b),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        _ => std::cmp::Ordering::Equal,
-    }
+/// How a search lays out its hits: their order (`sort`, empty for relevance), the page after
+/// which they start (`search_after`), which part of each source they show (`_source`) and
+/// whether a sorted search still reports scores (`track_scores`).
+#[derive(Debug, Default)]
+struct HitPresentation {
+    sort: Sort,
+    search_after: Option<Vec<Node>>,
+    source_filter: SourceFilter,
+    track_scores: bool,
 }
 
-fn sort_of(node: &Node) -> Option<(String, bool)> {
-    let first = match &node.value {
-        Json::Array(items) => items.first()?.clone(),
-        _ => node.clone(),
-    };
-    match first.value {
-        Json::String(field) => Some((field, false)),
-        Json::Object(members) => {
-            let (field, spec) = members.into_iter().next()?;
-            let descending = match spec.value {
-                Json::String(order) => order == "desc",
-                Json::Object(inner) => inner.iter().any(|(key, value)| {
-                    key == "order" && value.value == Json::String("desc".to_owned())
-                }),
-                _ => false,
-            };
-            Some((field, descending))
+fn presentation_of(
+    sort: Option<Node>,
+    search_after: Option<Node>,
+    source: Option<Node>,
+    track_scores: Option<Node>,
+    request: &Request,
+    from: usize,
+) -> Result<HitPresentation, Response> {
+    let search_after = match search_after.map(|node| node.value) {
+        None | Some(Json::Null) => None,
+        Some(Json::Array(values)) if values.is_empty() => None,
+        Some(Json::Array(values)) => Some(values),
+        Some(_) => {
+            return Err(error(
+                400,
+                "parsing_exception",
+                "[search_after] must be an array of sort values",
+            ));
         }
-        _ => None,
+    };
+    if search_after.is_some() && from > 0 {
+        return Err(error(
+            400,
+            "illegal_argument_exception",
+            "`from` parameter must be set to 0 when `search_after` is used.",
+        ));
     }
+    let sort = match (sort, query_flag(request, "sort")) {
+        (Some(node), _) => Sort::from_node(&node),
+        (None, Some(text)) => Sort::from_flag(&text),
+        (None, None) => Ok(Sort::default()),
+    }
+    .map_err(|reason| error(400, "parsing_exception", &reason))?;
+    if search_after.is_some() && sort.is_empty() {
+        return Err(error(
+            400,
+            "illegal_argument_exception",
+            "Sort must contain at least one field.",
+        ));
+    }
+    let source_filter = match source {
+        Some(node) => SourceFilter::from_node(&node)
+            .map_err(|reason| error(400, "parsing_exception", &reason))?,
+        None => multi::flag_filter(request),
+    };
+    let track_scores = match track_scores.map(|node| node.value) {
+        None | Some(Json::Null) => false,
+        Some(Json::Boolean(value)) => value,
+        Some(_) => {
+            return Err(error(
+                400,
+                "parsing_exception",
+                "[track_scores] must be a boolean",
+            ));
+        }
+    };
+    Ok(HitPresentation {
+        sort,
+        search_after,
+        source_filter,
+        track_scores,
+    })
 }
 
 fn aggregate(out: &mut Out, aggregations: &Node, matched: &[&Node]) {
@@ -1097,20 +1120,393 @@ fn scripted(
     source: &str,
 ) -> Result<(Operation, String), String> {
     let parsed = parse_document(source).map_err(|error| error.message)?;
-    let mut context = Context {
-        source: parsed.value,
-        operation: Operation::Index,
-        index,
-        id,
-        version,
-    };
+    ran(
+        script,
+        Context {
+            source: parsed.value,
+            operation: Operation::Index,
+            index,
+            id,
+            version,
+            upsert: false,
+        },
+    )
+}
+
+fn scripted_upsert(
+    script: &Script,
+    index: &str,
+    id: &str,
+    upsert: &Node,
+) -> Result<(Operation, String), String> {
+    ran(
+        script,
+        Context {
+            source: upsert.value.clone(),
+            operation: Operation::Create,
+            index,
+            id,
+            version: 0,
+            upsert: true,
+        },
+    )
+}
+
+fn ran(script: &Script, mut context: Context<'_>) -> Result<(Operation, String), String> {
     script.run(&mut context)?;
-    let changed = written(&Node {
-        value: context.source,
+    let changed = written(&detached(context.source));
+    Ok((context.operation, changed))
+}
+
+fn detached(value: Json) -> Node {
+    Node {
+        value,
         start: 0,
         end: 0,
-    });
-    Ok((context.operation, changed))
+    }
+}
+
+enum Modification {
+    Doc(Vec<(String, Node)>),
+    Script(Script),
+}
+
+/// An `_update` request's body: the partial document or script, the document to insert when
+/// the target is missing (`upsert`, or `doc` itself with `doc_as_upsert`), whether the script
+/// builds that document (`scripted_upsert`), whether an unchanged `doc` is a `noop`
+/// (`detect_noop`, true unless turned off) and which part of the new source the answer's `get`
+/// returns (`_source`).
+struct UpdateRequest {
+    modification: Modification,
+    upsert: Option<Node>,
+    scripted_upsert: bool,
+    detect_noop: bool,
+    returned_source: Option<SourceFilter>,
+}
+
+enum UpdateOutcome {
+    Created { source: String },
+    Updated { version: u64, source: String },
+    Noop { version: u64, source: String },
+    SkippedUpsert,
+    Deleted { version: u64 },
+    Missing,
+    ScriptFailed(String),
+}
+
+fn update_flag(name: &str, value: &Node) -> Result<bool, Response> {
+    match &value.value {
+        Json::Boolean(flag) => Ok(*flag),
+        Json::String(text) if text == "true" => Ok(true),
+        Json::String(text) if text == "false" => Ok(false),
+        _ => Err(error(
+            400,
+            "x_content_parse_exception",
+            &format!("[UpdateRequest] failed to parse field [{name}]: it must be a boolean"),
+        )),
+    }
+}
+
+fn update_object(name: &str, value: &Node) -> Result<Option<Node>, Response> {
+    match &value.value {
+        Json::Object(_) => Ok(Some(value.clone())),
+        Json::Null => Ok(None),
+        _ => Err(error(
+            400,
+            "x_content_parse_exception",
+            &format!("[UpdateRequest] failed to parse field [{name}]: it must be an object"),
+        )),
+    }
+}
+
+fn returned_source_of(
+    request: &Request,
+    body: Option<&Node>,
+) -> Result<Option<SourceFilter>, Response> {
+    let filter = match body {
+        Some(node) => SourceFilter::from_node(node)
+            .map_err(|reason| error(400, "x_content_parse_exception", &reason))?,
+        None => {
+            let asked = [
+                "_source",
+                "_source_includes",
+                "_source_include",
+                "_source_excludes",
+                "_source_exclude",
+            ]
+            .iter()
+            .any(|name| query_flag(request, name).is_some());
+            if !asked {
+                return Ok(None);
+            }
+            multi::flag_filter(request)
+        }
+    };
+    Ok((filter != SourceFilter::Hidden).then_some(filter))
+}
+
+fn update_request_of(parsed: &Node, request: &Request) -> Result<UpdateRequest, Response> {
+    let Json::Object(members) = &parsed.value else {
+        return Err(error(
+            400,
+            "x_content_parse_exception",
+            "[UpdateRequest] the request body must be a JSON object",
+        ));
+    };
+    let mut doc = None;
+    let mut script = None;
+    let mut upsert = None;
+    let mut doc_as_upsert = false;
+    let mut scripted_upsert = false;
+    let mut detect_noop = true;
+    let mut source_member = None;
+    for (key, value) in members {
+        match key.as_str() {
+            "doc" => doc = update_object(key, value)?,
+            "upsert" => upsert = update_object(key, value)?,
+            "script" => script = Some(value),
+            "doc_as_upsert" => doc_as_upsert = update_flag(key, value)?,
+            "scripted_upsert" => scripted_upsert = update_flag(key, value)?,
+            "detect_noop" => detect_noop = update_flag(key, value)?,
+            "_source" => source_member = Some(value),
+            _ => {}
+        }
+    }
+    let mut problems = Vec::new();
+    if script.is_none() && doc.is_none() {
+        problems.push("script or doc is missing".to_owned());
+    }
+    if script.is_some() && doc.is_some() {
+        problems.push("can't provide both script and doc".to_owned());
+    }
+    if doc.is_none() && doc_as_upsert {
+        problems.push("doc must be specified if doc_as_upsert is enabled".to_owned());
+    }
+    if !problems.is_empty() {
+        return Err(validation(&problems));
+    }
+    let returned_source = returned_source_of(request, source_member)?;
+    let modification = match (doc, script) {
+        (Some(doc), _) => {
+            if doc_as_upsert {
+                upsert = Some(doc.clone());
+            }
+            match doc.value {
+                Json::Object(changes) => Modification::Doc(changes),
+                _ => Modification::Doc(Vec::new()),
+            }
+        }
+        (None, Some(script)) => match Script::from_node(script) {
+            Ok(script) => Modification::Script(script),
+            Err(reason) => return Err(script_error(&format!("compile error: {reason}"))),
+        },
+        (None, None) => return Err(validation(&["script or doc is missing".to_owned()])),
+    };
+    Ok(UpdateRequest {
+        modification,
+        upsert,
+        scripted_upsert,
+        detect_noop,
+        returned_source,
+    })
+}
+
+fn planned_update(
+    update: &UpdateRequest,
+    index: &str,
+    id: &str,
+    current: Option<(u64, String)>,
+) -> Result<UpdateOutcome, String> {
+    let Some((version, source)) = current else {
+        return Ok(planned_upsert(update, index, id));
+    };
+    match &update.modification {
+        Modification::Script(script) => Ok(match scripted(script, index, id, version, &source) {
+            Ok((Operation::Index, changed)) => UpdateOutcome::Updated {
+                version: version + 1,
+                source: changed,
+            },
+            Ok((Operation::Delete, _)) => UpdateOutcome::Deleted {
+                version: version + 1,
+            },
+            Ok((Operation::Noop | Operation::Create, _)) => UpdateOutcome::Noop { version, source },
+            Err(reason) => UpdateOutcome::ScriptFailed(reason),
+        }),
+        Modification::Doc(changes) => {
+            let current = parse_document(&source).map_err(|error| error.message)?;
+            let Json::Object(mut members) = current.value else {
+                return Ok(UpdateOutcome::Missing);
+            };
+            let differs = merged_into(&mut members, changes);
+            Ok(if differs || !update.detect_noop {
+                UpdateOutcome::Updated {
+                    version: version + 1,
+                    source: written(&detached(Json::Object(members))),
+                }
+            } else {
+                UpdateOutcome::Noop { version, source }
+            })
+        }
+    }
+}
+
+fn planned_upsert(update: &UpdateRequest, index: &str, id: &str) -> UpdateOutcome {
+    let Some(upsert) = &update.upsert else {
+        return UpdateOutcome::Missing;
+    };
+    match &update.modification {
+        Modification::Script(script) if update.scripted_upsert => {
+            match scripted_upsert(script, index, id, upsert) {
+                Ok((Operation::Create, created)) => UpdateOutcome::Created { source: created },
+                Ok(_) => UpdateOutcome::SkippedUpsert,
+                Err(reason) => UpdateOutcome::ScriptFailed(reason),
+            }
+        }
+        _ => UpdateOutcome::Created {
+            source: written(upsert),
+        },
+    }
+}
+
+/// Merges a partial document into a source as Elasticsearch does: objects present on both
+/// sides merge member by member, anything else is replaced. Answers whether the source changed.
+fn merged_into(members: &mut Vec<(String, Node)>, changes: &[(String, Node)]) -> bool {
+    let mut differs = false;
+    for (name, value) in changes {
+        let Some((_, existing)) = members.iter_mut().find(|(key, _)| key == name) else {
+            members.push((name.clone(), value.clone()));
+            differs = true;
+            continue;
+        };
+        if let (Json::Object(inner), Json::Object(inner_changes)) =
+            (&mut existing.value, &value.value)
+        {
+            differs |= merged_into(inner, inner_changes);
+            continue;
+        }
+        differs |= !same_json(&existing.value, &value.value);
+        *existing = value.clone();
+    }
+    differs
+}
+
+fn same_number(left: &str, right: &str) -> bool {
+    let integral = |text: &str| !text.contains(['.', 'e', 'E']);
+    match (integral(left), integral(right)) {
+        (true, true) => left == right,
+        (false, false) => match (left.parse::<f64>(), right.parse::<f64>()) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => left == right,
+        },
+        _ => false,
+    }
+}
+
+fn sorted_members(members: &[(String, Node)]) -> Vec<&(String, Node)> {
+    let mut sorted: Vec<&(String, Node)> = members.iter().collect();
+    sorted.sort_by(|left, right| left.0.cmp(&right.0));
+    sorted
+}
+
+/// Whether two JSON values are equal as Elasticsearch compares parsed sources: object members
+/// in any order, numbers by value within integers or within decimals.
+fn same_json(left: &Json, right: &Json) -> bool {
+    match (left, right) {
+        (Json::Null, Json::Null) => true,
+        (Json::Boolean(left), Json::Boolean(right)) => left == right,
+        (Json::String(left), Json::String(right)) => left == right,
+        (Json::Number(left), Json::Number(right)) => same_number(left, right),
+        (Json::Array(left), Json::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| same_json(&left.value, &right.value))
+        }
+        (Json::Object(left), Json::Object(right)) => {
+            left.len() == right.len()
+                && sorted_members(left)
+                    .into_iter()
+                    .zip(sorted_members(right))
+                    .all(|(left, right)| {
+                        left.0 == right.0 && same_json(&left.1.value, &right.1.value)
+                    })
+        }
+        _ => false,
+    }
+}
+
+fn update_response(
+    index: &str,
+    id: &str,
+    outcome: UpdateOutcome,
+    returned_source: Option<&SourceFilter>,
+) -> Response {
+    let (status, version, result, shards, source) = match outcome {
+        UpdateOutcome::Created { source } => (201, Some(1), "created", 1, Some(source)),
+        UpdateOutcome::Updated { version, source } => {
+            (200, Some(version), "updated", 1, Some(source))
+        }
+        UpdateOutcome::Noop { version, source } => (200, Some(version), "noop", 0, Some(source)),
+        UpdateOutcome::SkippedUpsert => (200, None, "noop", 0, None),
+        UpdateOutcome::Deleted { version } => (200, Some(version), "deleted", 1, None),
+        UpdateOutcome::Missing => {
+            return error(
+                404,
+                "document_missing_exception",
+                &format!("[{id}]: document missing"),
+            );
+        }
+        UpdateOutcome::ScriptFailed(reason) => {
+            return script_error(&format!("runtime error: {reason}"));
+        }
+    };
+    let mut out = Out::default();
+    out.begin_object()
+        .key("_index")
+        .string(index)
+        .key("_id")
+        .string(id)
+        .key("_version");
+    match version {
+        Some(version) => out.integer(version),
+        None => out.raw("-1"),
+    };
+    out.key("result")
+        .string(result)
+        .key("_shards")
+        .begin_object()
+        .key("total")
+        .integer(shards)
+        .key("successful")
+        .integer(shards)
+        .key("failed")
+        .integer(0)
+        .end_object();
+    if let Some(version) = version {
+        out.key("_seq_no")
+            .integer(version.saturating_sub(1))
+            .key("_primary_term")
+            .integer(1);
+        if let Some(filtered) = returned_source
+            .zip(source.as_deref())
+            .and_then(|(filter, source)| filter.apply(source))
+        {
+            out.key("get")
+                .begin_object()
+                .key("_seq_no")
+                .integer(version.saturating_sub(1))
+                .key("_primary_term")
+                .integer(1)
+                .key("found")
+                .boolean(true)
+                .key("_source")
+                .raw(&filtered)
+                .end_object();
+        }
+    }
+    out.end_object();
+    json(status, out.finish())
 }
 
 fn refreshed() -> Response {

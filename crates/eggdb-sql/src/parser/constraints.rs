@@ -911,6 +911,13 @@ impl Parser<'_> {
             actions.push(AlterAction::RenameConstraint { from, to });
             return Ok(());
         }
+        if self.mysql() && (self.take_word("index") || self.take_word("key")) {
+            let from = self.name()?;
+            self.expect_word("to")?;
+            let to = self.name()?;
+            actions.push(AlterAction::RenameIndex { from, to });
+            return Ok(());
+        }
         if self.is_word("constraint") {
             return Err(self.not_supported("RENAME CONSTRAINT"));
         }
@@ -965,8 +972,11 @@ impl Parser<'_> {
             actions.push(AlterAction::AddConstraint(spec));
             return Ok(());
         }
-        if self.mysql() && (self.is_word("index") || self.is_word("key")) {
-            return Err(self.not_supported("ADD INDEX in ALTER TABLE (use CREATE INDEX)"));
+        if self.mysql()
+            && let Some(index) = self.mysql_index_entry()?
+        {
+            actions.push(AlterAction::AddIndex(index));
+            return Ok(());
         }
         if self.oracle() && self.take(&TokenKind::LeftParen) {
             loop {

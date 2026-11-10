@@ -86,6 +86,7 @@ pub(crate) fn variable_table(variable: &Name) -> TableReference {
         alias: Some(variable.text.clone()),
         derived: None,
         generated: Some(Box::new(GeneratedTable::Variable(variable.text.clone()))),
+        partition_selection: None,
     }
 }
 

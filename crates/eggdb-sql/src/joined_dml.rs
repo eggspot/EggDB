@@ -130,7 +130,11 @@ pub(crate) fn stored_table(
     tables.table(reader, &reference.name.text)
 }
 
-fn every_column_select(from: FromClause, items: Vec<SelectItem>, filter: Option<Expr>) -> Select {
+pub(crate) fn every_column_select(
+    from: FromClause,
+    items: Vec<SelectItem>,
+    filter: Option<Expr>,
+) -> Select {
     Select {
         distinct: false,
         items,

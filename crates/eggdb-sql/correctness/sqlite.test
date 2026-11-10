@@ -1427,6 +1427,168 @@ SELECT stddev(1)
 error 42883 1
 SELECT variance(1)
 
+chapter "Built-In Aggregate Functions": SQLite has no regr_*, covar_* or corr aggregate
+ok
+CREATE TABLE regr340 (y REAL, x INTEGER)
+
+ok
+INSERT INTO regr340 VALUES (3, 1), (5, 2)
+
+error 42883 1
+SELECT regr_slope(y, x) FROM regr340
+
+error 42883 1
+SELECT corr(y, x) FROM regr340
+
+error 42883 1
+SELECT covar_samp(y, x) FROM regr340
+
+chapter lang_select.html, "The ORDER BY clause": NULLs are smaller than any other value, so they come first for ASC and last for DESC, with or without an index
+ok
+CREATE TABLE nulls340 (id INTEGER PRIMARY KEY, v INTEGER)
+
+ok
+INSERT INTO nulls340 VALUES (1, 20), (2, NULL), (3, 10)
+
+rows
+SELECT id FROM nulls340 ORDER BY v
+----
+id
+2
+3
+1
+SELECT 3
+
+rows
+SELECT id FROM nulls340 ORDER BY v DESC
+----
+id
+1
+3
+2
+SELECT 3
+
+rows
+SELECT id FROM nulls340 ORDER BY v NULLS LAST
+----
+id
+3
+1
+2
+SELECT 3
+
+ok
+CREATE INDEX nulls340_v ON nulls340 (v)
+
+rows
+SELECT id FROM nulls340 ORDER BY v LIMIT 2
+----
+id
+2
+3
+SELECT 2
+
+rows
+SELECT id, row_number() OVER (ORDER BY v) AS rn FROM nulls340 ORDER BY id
+----
+id|rn
+1|3
+2|1
+3|2
+SELECT 3
+
+ok
+DROP TABLE nulls340
+
+ok
+DROP TABLE regr340
+
+chapter lang_select.html, "The ORDER BY clause", "The LIMIT clause": ORDER BY ... LIMIT on a nullable indexed column gives NULLs first for ASC and last for DESC, also after an equality on the index's leading column and with a WHERE that excludes NULL
+ok
+CREATE TABLE nulls341 (id INTEGER PRIMARY KEY, kind INT, v INT)
+
+ok
+CREATE INDEX nulls341_v ON nulls341 (v)
+
+ok
+CREATE INDEX nulls341_kind_v ON nulls341 (kind, v)
+
+ok
+INSERT INTO nulls341 VALUES (1, 1, 30), (2, 1, NULL), (3, 2, 10), (4, 1, 20), (5, 2, NULL), (6, 1, 15)
+
+rows
+SELECT id FROM nulls341 ORDER BY v LIMIT 3
+----
+id
+2
+5
+3
+SELECT 3
+
+rows
+SELECT id FROM nulls341 ORDER BY v DESC LIMIT 4
+----
+id
+1
+4
+6
+3
+SELECT 4
+
+rows
+SELECT id FROM nulls341 ORDER BY v DESC, id DESC LIMIT 2 OFFSET 3
+----
+id
+3
+5
+SELECT 2
+
+rows
+SELECT id FROM nulls341 ORDER BY v DESC, id DESC LIMIT 2 OFFSET 4
+----
+id
+5
+2
+SELECT 2
+
+rows
+SELECT id FROM nulls341 WHERE kind = 1 ORDER BY v LIMIT 2
+----
+id
+2
+6
+SELECT 2
+
+rows
+SELECT id FROM nulls341 WHERE kind = 1 ORDER BY v DESC LIMIT 4
+----
+id
+1
+4
+6
+2
+SELECT 4
+
+rows
+SELECT id FROM nulls341 WHERE v IS NOT NULL ORDER BY v LIMIT 2
+----
+id
+3
+6
+SELECT 2
+
+rows
+SELECT id FROM nulls341 WHERE v > 12 ORDER BY v DESC LIMIT 5
+----
+id
+1
+4
+6
+SELECT 3
+
+ok
+DROP TABLE nulls341
+
 
 chapter gencol, "Generated Columns": VIRTUAL and STORED columns are computed from their row, an INSERT without a column list leaves them out, and naming one in an INSERT fails
 ok
@@ -1516,3 +1678,102 @@ SELECT 1
 
 ok
 DROP TABLE vocabulary324
+
+chapter "Built-In Mathematical SQL Functions": sqrt, NULL for a negative argument or text that is not a number
+rows
+SELECT sqrt(16), sqrt(6.25), sqrt(-1), sqrt('abc'), sqrt(NULL)
+----
+sqrt(16)|sqrt(6.25)|sqrt(-1)|sqrt('abc')|sqrt(NULL)
+4.0|2.5|NULL|NULL|NULL
+SELECT 1
+
+chapter "UPDATE" and "The ON CONFLICT Clause": UPDATE OR FAIL keeps the rows changed before the conflict, OR IGNORE skips the rows that conflict, OR REPLACE deletes the rows in the way and fills NOT NULL columns from their defaults, OR ROLLBACK ends the transaction
+ok
+CREATE TABLE up338 (id INTEGER PRIMARY KEY, code INTEGER UNIQUE, note TEXT NOT NULL DEFAULT 'none')
+
+ok
+INSERT INTO up338 VALUES (1, 1, 'a'), (2, 2, 'b'), (3, 3, 'c')
+
+error 23505 2067
+UPDATE OR FAIL up338 SET code = CASE id WHEN 2 THEN 3 ELSE code + 10 END
+
+rows
+SELECT id, code FROM up338 ORDER BY id
+----
+id|code
+1|11
+2|2
+3|3
+SELECT 3
+
+error 23505 2067
+UPDATE OR ABORT up338 SET code = CASE id WHEN 2 THEN 3 ELSE code + 10 END WHERE id < 3
+
+rows
+SELECT id, code FROM up338 ORDER BY id
+----
+id|code
+1|11
+2|2
+3|3
+SELECT 3
+
+ok
+UPDATE up338 SET code = id
+
+rows
+UPDATE OR IGNORE up338 SET code = code + 1
+----
+UPDATE 1
+
+rows
+SELECT id, code FROM up338 ORDER BY id
+----
+id|code
+1|1
+2|2
+3|4
+SELECT 3
+
+rows
+UPDATE OR IGNORE up338 SET note = NULL
+----
+UPDATE 0
+
+rows
+UPDATE OR REPLACE up338 SET code = code + 1 WHERE id < 3
+----
+UPDATE 1
+
+rows
+UPDATE OR REPLACE up338 SET note = NULL WHERE id = 1
+----
+UPDATE 1
+
+rows
+SELECT id, code, note FROM up338 ORDER BY id
+----
+id|code|note
+1|2|none
+3|4|c
+SELECT 2
+
+ok
+BEGIN
+
+ok
+INSERT INTO up338 VALUES (5, 5, 'e')
+
+error 23505 2067
+UPDATE OR ROLLBACK up338 SET code = 4 WHERE id = 5
+
+rows
+SELECT id FROM up338 ORDER BY id
+----
+id
+1
+3
+SELECT 2
+
+ok
+DROP TABLE up338

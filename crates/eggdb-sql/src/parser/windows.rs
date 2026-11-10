@@ -185,7 +185,9 @@ impl Parser<'_> {
                         .at(position));
                     }
                     ExprKind::Function { name, arguments }
-                        if name == "string_agg_arguments" || name == "object_agg_arguments" =>
+                        if name == "string_agg_arguments"
+                            || name == "object_agg_arguments"
+                            || name == crate::bivariate_aggregates::PAIRED_ARGUMENTS =>
                     {
                         arguments
                     }
@@ -499,6 +501,55 @@ impl Parser<'_> {
                     name.position,
                 ))),
                 distinct: false,
+            },
+            position: name.position,
+        })
+    }
+
+    pub(super) fn bivariate_aggregate(
+        &mut self,
+        name: &Name,
+        function: AggregateFunction,
+    ) -> SqlResult<Expr> {
+        if self.oracle() && self.is_word_at(1, "distinct") {
+            self.at += 1;
+            return Err(self.distinct_refused());
+        }
+        self.expect(&TokenKind::LeftParen)?;
+        let distinct = self.take_word("distinct");
+        if !distinct {
+            self.take_word("all");
+        }
+        let mut arguments = Vec::new();
+        if !self.take(&TokenKind::RightParen) {
+            loop {
+                arguments.push(self.expression()?);
+                if !self.take(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(&TokenKind::RightParen)?;
+        }
+        let count = arguments.len();
+        let mut arguments = arguments.into_iter();
+        let (Some(dependent), Some(independent), None) =
+            (arguments.next(), arguments.next(), arguments.next())
+        else {
+            return Err(if self.oracle() {
+                SqlError::syntax("invalid number of arguments", name.position).with_oracle_code(909)
+            } else {
+                no_such_function(&name.text, count, name.position)
+            });
+        };
+        Ok(Expr {
+            kind: ExprKind::Aggregate {
+                function,
+                argument: Some(Box::new(crate::bivariate_aggregates::arguments(
+                    dependent,
+                    independent,
+                    name.position,
+                ))),
+                distinct,
             },
             position: name.position,
         })

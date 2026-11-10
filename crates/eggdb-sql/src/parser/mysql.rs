@@ -194,6 +194,7 @@ impl<'t> Parser<'t> {
                     && !self.is_word_at(1, "update")
                     && !self.is_word_at(1, "delete")
                     && !self.is_word_at(1, "analyze")
+                    && !self.at_table_query_at(1)
                     && !(self.is_word_at(1, "format")
                         && matches!(self.peek_kind_at(2), TokenKind::Operator("="))) =>
             {
@@ -1081,6 +1082,10 @@ impl<'t> Parser<'t> {
             "if" => "if",
             "greatest" => "mysql_greatest",
             "least" => "mysql_least",
+            "sqrt" => crate::square_root::MYSQL,
+            other if crate::mysql_date_parts::unit_of_function(other).is_some() => {
+                crate::mysql_date_parts::EXTRACT_FUNCTION
+            }
             _ => return Ok(None),
         };
         self.expect(&TokenKind::LeftParen)?;
@@ -1098,11 +1103,12 @@ impl<'t> Parser<'t> {
             "coalesce" => Some(2),
             "if" => Some(3),
             "octet_length" | "upper" | "lower" => Some(1),
+            crate::square_root::MYSQL | crate::mysql_date_parts::EXTRACT_FUNCTION => Some(1),
             _ => None,
         };
         if expected.is_some_and(|count| count != arguments.len())
             || renamed == "concat_or_null" && arguments.is_empty()
-            || renamed.starts_with("mysql_") && arguments.len() < 2
+            || renamed.starts_with("mysql_") && expected.is_none() && arguments.len() < 2
         {
             return Err(SqlError::new(
                 SqlState::UNDEFINED_FUNCTION,
@@ -1129,6 +1135,15 @@ impl<'t> Parser<'t> {
                 },
                 position,
             }));
+        }
+        if let Some(unit) = crate::mysql_date_parts::unit_of_function(&name.text) {
+            arguments.insert(
+                0,
+                Expr {
+                    kind: ExprKind::Literal(Literal::String(unit.to_owned())),
+                    position,
+                },
+            );
         }
         Ok(Some(Expr {
             kind: ExprKind::Function {

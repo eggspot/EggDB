@@ -1449,3 +1449,85 @@ fn an_agent_stores_and_deletes_keys_only_with_writes_and_a_delete_waits_for_the_
     assert!(text.contains("ok, agent confirmed"), "{text}");
     assert!(text.contains("declined_by_user"), "{text}");
 }
+
+#[test]
+fn an_agent_counts_swaps_and_expires_keys_that_eggdb_reads_back() {
+    let (file, _audit) = sample("mcp-key-tools", 0);
+    let path = file.path().to_str().unwrap();
+    let added = eggdb(&["collection", "add", path, "sessions"]);
+    assert!(added.status.success(), "{}", stderr(&added));
+
+    let mut mcp = Mcp::start(file.path(), &["--allow-write"]);
+    mcp.initialize();
+    let counted = mcp.call("incr", r#"{"key":"hits","by":41}"#);
+    assert_eq!(text_at(ok(&counted), &["value"]), "41");
+    let counted = mcp.call("incr", r#"{"key":"hits","by":-42}"#);
+    assert_eq!(text_at(ok(&counted), &["value"]), "-1");
+    let in_collection = mcp.call("incr", r#"{"key":"n","collection":"sessions"}"#);
+    assert_eq!(text_at(ok(&in_collection), &["value"]), "1");
+    let not_a_counter = mcp.call("incr", r#"{"key":"greeting"}"#);
+    assert_eq!(error_code(&not_a_counter), "sql_error");
+    assert_eq!(
+        text_at(result(&not_a_counter), &["error", "sqlstate"]),
+        "22000"
+    );
+    let taken = mcp.call(
+        "cas",
+        r#"{"key":"lock","if_absent":true,"new":"worker-7","collection":"sessions"}"#,
+    );
+    assert_eq!(text_at(ok(&taken), &["swapped"]), "true");
+    let refused = mcp.call(
+        "cas",
+        r#"{"key":"lock","if_absent":true,"new":"worker-8","collection":"sessions"}"#,
+    );
+    assert_eq!(text_at(ok(&refused), &["swapped"]), "false");
+    assert_eq!(text_at(ok(&refused), &["value"]), "worker-7");
+    let expiring = mcp.call("expire", r#"{"key":"hits","ttl":3600}"#);
+    assert_eq!(text_at(ok(&expiring), &["expires"]), "true");
+    let at = text_at(ok(&expiring), &["expires_at"]);
+    assert!(at.starts_with("20") && at.ends_with('Z'), "{at}");
+    let stored = mcp.call("put", r#"{"key":"timed","value":"t","ttl":"1h"}"#);
+    assert_eq!(
+        text_at(ok(&stored), &["expires_at"]).len(),
+        "2026-10-30T09:44:07.123Z".len()
+    );
+    let unconfirmed = mcp.call("expire", r#"{"key":"greeting","ttl":0}"#);
+    assert_eq!(error_code(&unconfirmed), "needs_confirmation");
+    let sql_row = mcp.call("incr", r#"{"key_hex":"ff53514c0001","by":1}"#);
+    assert_eq!(error_code(&sql_row), "invalid_arguments");
+    let sql_row = mcp.call(
+        "expire",
+        r#"{"key_hex":"ff53514c0001","ttl":0,"confirm":true}"#,
+    );
+    assert_eq!(error_code(&sql_row), "invalid_arguments");
+    let (status, messages) = mcp.finish();
+    assert!(status.success(), "{messages}");
+
+    let hits = eggdb(&["get", path, "hits"]);
+    assert_eq!(stdout(&hits).trim_end(), "-1", "{}", stderr(&hits));
+    let left = eggdb(&["ttl", path, "hits", "--format", "json"]);
+    let left = parse_document(stdout(&left).trim()).unwrap();
+    let left_ms: u64 = text_at(&left, &["ttl_ms"]).parse().unwrap();
+    assert!((3_000_000..=3_600_000).contains(&left_ms), "{left_ms}");
+    let lock = eggdb(&["get", path, "lock", "-C", "sessions"]);
+    assert_eq!(stdout(&lock).trim_end(), "worker-7", "{}", stderr(&lock));
+    let greeting = eggdb(&["get", path, "greeting"]);
+    assert_eq!(stdout(&greeting).trim_end(), "hello");
+    assert_eq!(user_count(path), 3);
+
+    let mut persisting = Mcp::start(file.path(), &["--allow-write"]);
+    persisting.initialize();
+    let persisted = persisting.call("persist", r#"{"key":"hits"}"#);
+    assert_eq!(text_at(ok(&persisted), &["persisted"]), "true");
+    let deleted = persisting.call(
+        "expire",
+        r#"{"key":"lock","ttl":0,"collection":"sessions","confirm":true}"#,
+    );
+    assert_eq!(text_at(ok(&deleted), &["deleted"]), "true");
+    let (status, messages) = persisting.finish();
+    assert!(status.success(), "{messages}");
+    let permanent = eggdb(&["ttl", path, "hits", "--format", "text"]);
+    assert_eq!(stdout(&permanent).trim_end(), "never");
+    let gone = eggdb(&["get", path, "lock", "-C", "sessions"]);
+    assert_eq!(gone.status.code(), Some(1));
+}

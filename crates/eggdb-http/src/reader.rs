@@ -243,6 +243,7 @@ impl<S: RequestSource> RequestReader<S> {
     ) -> Result<(Request, Version), HttpError> {
         let head = self.read_head()?;
         let (mut request, version) = parse_head(&head)?;
+        check_host(&request, version)?;
         let framing = framing(&request, version)?;
         let declared = match framing {
             Framing::Empty => 0,
@@ -358,6 +359,18 @@ fn parse_head(head: &[u8]) -> Result<(Request, Version), HttpError> {
         },
         version,
     ))
+}
+
+fn check_host(request: &Request, version: Version) -> Result<(), HttpError> {
+    let hosts = request
+        .headers
+        .iter()
+        .filter(|(name, _)| name == "host")
+        .count();
+    match (hosts, version) {
+        (1, _) | (0, Version::Http10) => Ok(()),
+        _ => Err(HttpError::InvalidHost),
+    }
 }
 
 fn framing(request: &Request, version: Version) -> Result<Framing, HttpError> {

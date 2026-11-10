@@ -4,7 +4,7 @@ mod framing;
 #[cfg(test)]
 mod tests;
 
-pub use collector::{MAX_SYSLOG_MESSAGE_BYTES, SyslogCollector};
+pub use collector::{MAX_SYSLOG_MESSAGE_BYTES, SyslogCollector, syslog_messages_dropped};
 
 const MICROS_PER_SECOND: i64 = 1_000_000;
 const SECONDS_PER_DAY: i64 = 86_400;

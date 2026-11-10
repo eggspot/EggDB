@@ -2,7 +2,7 @@ use super::Parser;
 use crate::ast::{
     AlterAction, AlterTable, CreateTable, ExprKind, Name, NamedPartition, NamedPartitionBound,
     OnCommit, PartitionBoundSpec, PartitionBoundValue, PartitionBy, PartitionKeyPart, PartitionOf,
-    PartitionStrategy, Statement,
+    PartitionSelection, PartitionStrategy, Statement,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
@@ -249,7 +249,7 @@ impl Parser<'_> {
             }
             PartitionStrategy::List => {
                 self.expect_word("values")?;
-                if self.oracle() && self.take_word("default") {
+                if self.oracle() && self.take_oracle_default_values() {
                     NamedPartitionBound::In(Vec::new())
                 } else {
                     self.take_word("in");
@@ -260,6 +260,19 @@ impl Parser<'_> {
         };
         self.skip_partition_options()?;
         Ok(NamedPartition { name, bound })
+    }
+
+    fn take_oracle_default_values(&mut self) -> bool {
+        if self.take_word("default") {
+            return true;
+        }
+        let parenthesized = self.peek_kind() == &TokenKind::LeftParen
+            && self.is_word_at(1, "default")
+            && self.peek_kind_at(2) == &TokenKind::RightParen;
+        if parenthesized {
+            self.at += 3;
+        }
+        parenthesized
     }
 
     fn skip_partition_options(&mut self) -> SqlResult<()> {
@@ -364,6 +377,39 @@ impl Parser<'_> {
         }
         self.at += 1;
         Ok(number)
+    }
+
+    pub(super) fn partition_selection(&mut self) -> SqlResult<Option<Box<PartitionSelection>>> {
+        let selects_partitions = self.mysql() || self.oracle();
+        let at_keyword =
+            self.is_word("partition") || (self.oracle() && self.is_word("subpartition"));
+        if !(selects_partitions && at_keyword) {
+            return Ok(None);
+        }
+        let holding_key = self.oracle()
+            && self.is_word_at(1, "for")
+            && self.peek_kind_at(2) == &TokenKind::LeftParen;
+        if !holding_key && self.peek_kind_at(1) != &TokenKind::LeftParen {
+            return Ok(None);
+        }
+        let position = self.position();
+        self.at += if holding_key { 2 } else { 1 };
+        self.expect(&TokenKind::LeftParen)?;
+        let selection = if holding_key {
+            let mut values = vec![self.expression()?];
+            while self.take(&TokenKind::Comma) {
+                values.push(self.expression()?);
+            }
+            PartitionSelection::HoldingKey { values, position }
+        } else {
+            let mut names = vec![self.name()?];
+            while self.mysql() && self.take(&TokenKind::Comma) {
+                names.push(self.name()?);
+            }
+            PartitionSelection::Named(names)
+        };
+        self.expect(&TokenKind::RightParen)?;
+        Ok(Some(Box::new(selection)))
     }
 }
 

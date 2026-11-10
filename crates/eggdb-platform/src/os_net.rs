@@ -1,13 +1,14 @@
 use crate::error::{Error, ErrorKind, Result};
 use crate::net::{
     Address, NetBackend, NetCompletion, NetListener, NetOp, NetOutput, NetQueue, NetQueueOptions,
-    NetStream, Network, RejectedNetOp, answered_at_once, net_queue_full,
+    NetStream, Network, RejectedNetOp, TcpKeepAlive, answered_at_once, net_queue_full,
 };
 use crate::os_datagram::OsDatagramSocket;
 use crate::os_io_uring::NetRing;
 use crate::os_iocp_net::NetPort;
 #[cfg(windows)]
 use crate::os_iocp_net::PortBinding;
+use crate::os_keep_alive::switch_tcp_keep_alive;
 use crate::os_net_readiness::{
     NATIVE, ReadinessQueue, accept, prepare_listener, supports, suppress_sigpipe,
 };
@@ -139,6 +140,10 @@ impl NetStream for OsStream {
     fn shutdown_write(&self) -> Result<()> {
         let shutdown = self.stream.shutdown(Shutdown::Write);
         Ok(shutdown.map_err(not_connected_once_reset)?)
+    }
+
+    fn set_keep_alive(&self, keep_alive: Option<TcpKeepAlive>) -> Result<()> {
+        switch_tcp_keep_alive(&self.stream, keep_alive)
     }
 }
 

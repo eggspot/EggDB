@@ -6,7 +6,7 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::roles::{PUBLIC, Privilege};
 use crate::types::Value;
 
-const INQUIRIES: [&str; 8] = [
+const INQUIRIES: [&str; 13] = [
     "has_table_privilege",
     "has_column_privilege",
     "has_any_column_privilege",
@@ -15,14 +15,28 @@ const INQUIRIES: [&str; 8] = [
     "has_sequence_privilege",
     "has_function_privilege",
     "pg_has_role",
+    "has_type_privilege",
+    "has_tablespace_privilege",
+    "has_foreign_data_wrapper_privilege",
+    "has_server_privilege",
+    "has_parameter_privilege",
 ];
 
 const GRANT_OPTION: &str = " WITH GRANT OPTION";
+const FOREIGN_DATA_WRAPPER: &str = "foreign-data wrapper";
+const SERVER: &str = "server";
 const ADMIN_OPTION: &str = " WITH ADMIN OPTION";
 const SEQUENCE_COLUMNS: [&str; 3] = ["last_value", "log_cnt", "is_called"];
 const EVERY_ROLE_USES_EVERY_SEQUENCE: bool = true;
 const EVERY_ROLE_EXECUTES_EVERY_ROUTINE: bool = true;
 const EVERY_ROLE_USES_EVERY_SCHEMA: bool = true;
+const EVERY_ROLE_USES_EVERY_TYPE: bool = true;
+const CHECKED_ROLES_HOLD_PARAMETER_PRIVILEGES: bool = false;
+const GLOBAL_TABLESPACE: u32 = 1664;
+const TABLESPACES: [(u32, &str); 2] = [
+    (oids::DEFAULT_TABLESPACE, "pg_default"),
+    (GLOBAL_TABLESPACE, "pg_global"),
+];
 
 /// Whether `name` is one of PostgreSQL's privilege inquiry functions this module answers.
 pub(crate) fn is_inquiry(name: &str) -> bool {
@@ -41,6 +55,7 @@ enum Asked {
     Execute,
     Member,
     Set,
+    AlterSystem,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,17 +100,26 @@ const DATABASE_PRIVILEGES: [(&str, Asked); 4] = [
 
 const FUNCTION_PRIVILEGES: [(&str, Asked); 1] = [("EXECUTE", Asked::Execute)];
 
+const TYPE_PRIVILEGES: [(&str, Asked); 1] = [("USAGE", Asked::Usage)];
+
+const TABLESPACE_PRIVILEGES: [(&str, Asked); 1] = [("CREATE", Asked::Create)];
+
+const FOREIGN_PRIVILEGES: [(&str, Asked); 1] = [("USAGE", Asked::Usage)];
+
+const PARAMETER_PRIVILEGES: [(&str, Asked); 2] =
+    [("SET", Asked::Set), ("ALTER SYSTEM", Asked::AlterSystem)];
+
 const ROLE_PRIVILEGES: [(&str, Asked); 3] = [
     ("MEMBER", Asked::Member),
     ("USAGE", Asked::Usage),
     ("SET", Asked::Set),
 ];
 
-fn is_postgresql_space(character: char) -> bool {
+pub(super) fn is_postgresql_space(character: char) -> bool {
     matches!(character, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c')
 }
 
-fn unrecognized(chunk: &str) -> SqlError {
+pub(super) fn unrecognized(chunk: &str) -> SqlError {
     SqlError::new(
         SqlState::INVALID_PARAMETER_VALUE,
         format!("unrecognized privilege type: \"{chunk}\""),
@@ -657,6 +681,100 @@ impl Inquiry<'_> {
         let held = crate::roles::role_closure(&self.snapshot.access, member)?;
         Ok(Value::Boolean(held.contains(&target)))
     }
+
+    fn type_exists(&self, oid: u32) -> bool {
+        oids::builtin_type(oid).is_some() || self.snapshot.user_types.of_oid(oid).is_some()
+    }
+
+    fn type_named(&self, text: &str) -> SqlResult<u32> {
+        match super::types::regtype_oid(text) {
+            Err(error) if error.state() == SqlState::UNDEFINED_OBJECT => {
+                let (schema, name) = split_object_name(text, RegKind::Type)?;
+                self.snapshot
+                    .user_types
+                    .resolve(schema.as_deref(), &name)
+                    .map(|found| found.oid)
+                    .ok_or(error)
+            }
+            found => found,
+        }
+    }
+
+    fn has_type_privilege(
+        &self,
+        holder: &Holder,
+        object: &Value,
+        list: &Value,
+    ) -> SqlResult<Value> {
+        let exists = match object_oid(object) {
+            Some(oid) => self.type_exists(oid),
+            None => {
+                self.type_named(&written_name(object))?;
+                true
+            }
+        };
+        let wanted = parse_privileges(&written_name(list), &TYPE_PRIVILEGES, &[GRANT_OPTION])?;
+        answer(exists.then_some(()), |()| {
+            Ok(held_without_option(holder, &wanted, |_| {
+                EVERY_ROLE_USES_EVERY_TYPE
+            }))
+        })
+    }
+
+    fn has_tablespace_privilege(
+        &self,
+        holder: &Holder,
+        object: &Value,
+        list: &Value,
+    ) -> SqlResult<Value> {
+        let exists = match object_oid(object) {
+            Some(oid) => TABLESPACES.iter().any(|(found, _)| *found == oid),
+            None => {
+                let name = written_name(object);
+                if !TABLESPACES.iter().any(|(_, found)| *found == name) {
+                    return Err(SqlError::new(
+                        SqlState::UNDEFINED_OBJECT,
+                        format!("tablespace \"{name}\" does not exist"),
+                    ));
+                }
+                true
+            }
+        };
+        let wanted =
+            parse_privileges(&written_name(list), &TABLESPACE_PRIVILEGES, &[GRANT_OPTION])?;
+        answer(exists.then_some(()), |()| {
+            Ok(held_without_option(holder, &wanted, |_| {
+                crate::roles::may_define_objects(holder.checked_role())
+            }))
+        })
+    }
+
+    fn has_foreign_privilege(&self, kind: &str, object: &Value, list: &Value) -> SqlResult<Value> {
+        if object_oid(object).is_none() {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_OBJECT,
+                format!("{kind} \"{}\" does not exist", written_name(object)),
+            ));
+        }
+        parse_privileges(&written_name(list), &FOREIGN_PRIVILEGES, &[GRANT_OPTION])?;
+        Ok(Value::Null)
+    }
+
+    fn has_parameter_privilege(&self, holder: &Holder, list: &Value) -> SqlResult<Value> {
+        let wanted = parse_privileges(&written_name(list), &PARAMETER_PRIVILEGES, &[GRANT_OPTION])?;
+        Ok(Value::Boolean(held_without_option(holder, &wanted, |_| {
+            CHECKED_ROLES_HOLD_PARAMETER_PRIVILEGES
+        })))
+    }
+}
+
+fn held_without_option(holder: &Holder, wanted: &[Wanted], held: impl Fn(Asked) -> bool) -> bool {
+    match holder {
+        Holder::Superuser => true,
+        Holder::Role(_) => wanted
+            .iter()
+            .any(|wanted| !wanted.with_option && held(wanted.asked)),
+    }
 }
 
 fn holds_object_privilege(holder: &Holder, wanted: Wanted, connected_here: bool) -> bool {
@@ -671,7 +789,12 @@ fn holds_object_privilege(holder: &Holder, wanted: Wanted, connected_here: bool)
         Asked::Connect => connected_here,
         Asked::Usage => EVERY_ROLE_USES_EVERY_SCHEMA,
         Asked::Execute => EVERY_ROLE_EXECUTES_EVERY_ROUTINE,
-        Asked::Table(_) | Asked::Maintain | Asked::Rule | Asked::Member | Asked::Set => false,
+        Asked::Table(_)
+        | Asked::Maintain
+        | Asked::Rule
+        | Asked::Member
+        | Asked::Set
+        | Asked::AlterSystem => false,
     }
 }
 
@@ -788,6 +911,39 @@ pub(crate) fn function(name: &str, values: &[Value]) -> SqlResult<Value> {
             inquiry.has_function_privilege(&holder, object, list)
         }
         ("pg_has_role", [role, list]) => inquiry.pg_has_role(&session, role, list),
+        ("has_type_privilege", [object, list]) => {
+            inquiry.has_type_privilege(&session, object, list)
+        }
+        ("has_type_privilege", [role, object, list]) => {
+            let holder = inquiry.holder(role, true)?;
+            inquiry.has_type_privilege(&holder, object, list)
+        }
+        ("has_tablespace_privilege", [object, list]) => {
+            inquiry.has_tablespace_privilege(&session, object, list)
+        }
+        ("has_tablespace_privilege", [role, object, list]) => {
+            let holder = inquiry.holder(role, true)?;
+            inquiry.has_tablespace_privilege(&holder, object, list)
+        }
+        ("has_foreign_data_wrapper_privilege", [object, list]) => {
+            inquiry.has_foreign_privilege(FOREIGN_DATA_WRAPPER, object, list)
+        }
+        ("has_foreign_data_wrapper_privilege", [role, object, list]) => {
+            inquiry.holder(role, true)?;
+            inquiry.has_foreign_privilege(FOREIGN_DATA_WRAPPER, object, list)
+        }
+        ("has_server_privilege", [object, list]) => {
+            inquiry.has_foreign_privilege(SERVER, object, list)
+        }
+        ("has_server_privilege", [role, object, list]) => {
+            inquiry.holder(role, true)?;
+            inquiry.has_foreign_privilege(SERVER, object, list)
+        }
+        ("has_parameter_privilege", [_, list]) => inquiry.has_parameter_privilege(&session, list),
+        ("has_parameter_privilege", [role, _, list]) => {
+            let holder = inquiry.holder(role, true)?;
+            inquiry.has_parameter_privilege(&holder, list)
+        }
         ("pg_has_role", [member, role, list]) => {
             let holder = inquiry.holder(member, false)?;
             inquiry.pg_has_role(&holder, role, list)

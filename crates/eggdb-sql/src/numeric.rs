@@ -750,6 +750,14 @@ impl Numeric {
         root.rounded(i64::try_from(scale).unwrap_or(MAX_SCALE as i64))
     }
 
+    pub(crate) fn square_root_to_significant_digits(&self) -> SqlResult<Self> {
+        let (weight, _) = self.base_10000_weight();
+        let scale = (MIN_SIGNIFICANT_DIGITS - 1 - 2 * weight)
+            .max(i64::from(self.scale))
+            .clamp(0, MAX_SCALE as i64);
+        self.square_root(scale as usize)
+    }
+
     fn square_root_estimate(&self) -> SqlResult<Self> {
         let estimate = self.to_f64().sqrt();
         if estimate.is_finite() && estimate > 0.0 {

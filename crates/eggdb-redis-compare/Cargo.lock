@@ -176,6 +176,7 @@ dependencies = [
 name = "eggdb-http"
 version = "0.4.0"
 dependencies = [
+ "eggdb-content",
  "eggdb-platform",
 ]
 

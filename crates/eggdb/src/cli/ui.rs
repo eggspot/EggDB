@@ -367,6 +367,12 @@ impl Source for DatabaseSource {
             .map_err(|error| source_error(&error))
     }
 
+    fn kept_collection_counts(&self) -> Result<Vec<(String, Option<u64>)>, SourceError> {
+        self.db()?
+            .kept_collection_counts()
+            .map_err(|error| source_error(&error))
+    }
+
     fn show_collection(&mut self, name: Option<&str>) -> Result<(), SourceError> {
         if let Some(name) = name {
             self.db()?
@@ -751,6 +757,34 @@ mod tests {
             db.get("s:2").unwrap_or_else(|error| panic!("get: {error}")),
             None
         );
+    }
+
+    #[test]
+    fn the_picker_shows_each_kept_count_and_a_put_on_its_next_opening() {
+        let (file, db) = database("picker-counts");
+        db.create_collection("sessions")
+            .unwrap_or_else(|error| panic!("create: {error}"));
+        db.collection("sessions")
+            .put("s:1", "alice")
+            .unwrap_or_else(|error| panic!("put: {error}"));
+        db.close().unwrap_or_else(|error| panic!("close: {error}"));
+        let mut screen = Screen::new(source_at(&file.0, Options::new()));
+        let shown = screen.keys(&["C"]);
+        assert!(
+            shown.contains(&format!("  sessions{}1 │", " ".repeat(31))),
+            "{shown}"
+        );
+        screen.keys(&["End", "Enter", "a"]);
+        screen.typed("s:2");
+        screen.keys(&["Enter"]);
+        screen.typed("bob");
+        screen.keys(&["Enter", "Enter"]);
+        let shown = screen.keys(&["C"]);
+        assert!(
+            shown.contains(&format!("> sessions{}2 │", " ".repeat(31))),
+            "{shown}"
+        );
+        screen.close();
     }
 
     #[test]

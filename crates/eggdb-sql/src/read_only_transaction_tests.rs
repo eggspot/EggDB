@@ -511,3 +511,226 @@ fn call_and_do_outside_a_block_are_refused_when_new_transactions_are_read_only()
         "count\n1\nSELECT 1"
     );
 }
+
+#[test]
+fn row_locking_selects_are_refused_in_a_read_only_transaction_and_lock_table_is_taken() {
+    let store = MemoryStore::default();
+    let mut session = postgresql_session(&store);
+    answer(&mut session, "CREATE TEMP TABLE scratch (n integer)");
+    for (clause, command) in [
+        ("FOR UPDATE", "SELECT FOR UPDATE"),
+        ("FOR NO KEY UPDATE", "SELECT FOR NO KEY UPDATE"),
+        ("FOR SHARE", "SELECT FOR SHARE"),
+        ("FOR KEY SHARE", "SELECT FOR KEY SHARE"),
+        ("FOR UPDATE OF films NOWAIT", "SELECT FOR UPDATE"),
+    ] {
+        answer(&mut session, "BEGIN READ ONLY");
+        let error = refusal(&mut session, &format!("SELECT * FROM films {clause}"));
+        assert_eq!(error.state().code(), "25006", "{clause}");
+        assert_eq!(
+            error.message(),
+            format!("cannot execute {command} in a read-only transaction")
+        );
+        assert_eq!(
+            refusal(&mut session, "SELECT 1").state().code(),
+            "25P02",
+            "{clause}"
+        );
+        answer(&mut session, "ROLLBACK");
+    }
+    answer(&mut session, "BEGIN READ ONLY");
+    answer(&mut session, "INSERT INTO scratch VALUES (1)");
+    assert_eq!(
+        answer(&mut session, "SELECT n FROM scratch FOR UPDATE"),
+        "n\n1\nSELECT 1"
+    );
+    answer(&mut session, "LOCK TABLE films IN ACCESS EXCLUSIVE MODE");
+    answer(&mut session, "COMMIT");
+    answer(&mut session, "SET default_transaction_read_only = on");
+    assert_eq!(
+        refusal(&mut session, "SELECT title FROM films FOR SHARE")
+            .state()
+            .code(),
+        "25006"
+    );
+    answer(&mut session, "SET default_transaction_read_only = off");
+    assert_eq!(
+        answer(&mut session, "SELECT title FROM films FOR UPDATE"),
+        "title\nBananas\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_writing_function_called_from_select_in_a_read_only_block_is_refused_with_25006() {
+    let store = MemoryStore::default();
+    let mut session = postgresql_session(&store);
+    answer(
+        &mut session,
+        "CREATE FUNCTION add_film() RETURNS integer LANGUAGE plpgsql AS $$ BEGIN INSERT INTO films VALUES (9, 'Added'); RETURN 9; END $$",
+    );
+    answer(
+        &mut session,
+        "CREATE FUNCTION film_count() RETURNS bigint LANGUAGE plpgsql AS $$ BEGIN RETURN (SELECT count(*) FROM films); END $$",
+    );
+    answer(&mut session, "BEGIN READ ONLY");
+    assert_eq!(
+        answer(&mut session, "SELECT film_count()"),
+        "film_count\n1\nSELECT 1"
+    );
+    let error = refusal(&mut session, "SELECT add_film()");
+    assert_eq!(error.state().code(), "25006");
+    answer(&mut session, "ROLLBACK");
+    assert_eq!(
+        answer(&mut session, "SELECT add_film()"),
+        "add_film\n9\nSELECT 1"
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT count(*) FROM films"),
+        "count\n2\nSELECT 1"
+    );
+}
+
+#[test]
+fn default_transaction_read_only_applies_to_each_transaction_of_a_procedure_that_commits() {
+    let store = MemoryStore::default();
+    let mut session = postgresql_session(&store);
+    answer(
+        &mut session,
+        "CREATE PROCEDURE count_and_commit() LANGUAGE plpgsql AS $$ BEGIN PERFORM count(*) FROM films; COMMIT; PERFORM count(*) FROM films; END $$",
+    );
+    answer(
+        &mut session,
+        "CREATE PROCEDURE commit_then_add(n integer) LANGUAGE plpgsql AS $$ BEGIN COMMIT; INSERT INTO films VALUES (n, 'Added'); END $$",
+    );
+    answer(&mut session, "SET default_transaction_read_only = on");
+    assert_eq!(answer(&mut session, "CALL count_and_commit()"), "CALL");
+    let error = refusal(&mut session, "CALL commit_then_add(2)");
+    assert_eq!(error.state().code(), "25006");
+    assert_eq!(
+        error.message(),
+        "cannot execute CALL in a read-only transaction"
+    );
+    answer(&mut session, "SET default_transaction_read_only = off");
+    answer(&mut session, "CALL commit_then_add(3)");
+    assert_eq!(
+        answer(&mut session, "SELECT code FROM films ORDER BY code"),
+        "code\n1\n3\nSELECT 2"
+    );
+}
+
+#[test]
+fn set_transaction_in_an_implicit_transaction_before_it_writes_sets_that_transaction() {
+    let store = MemoryStore::default();
+    let mut session = postgresql_session(&store);
+    session.start_implicit_transaction();
+    let outputs = results(
+        &mut session,
+        "SET TRANSACTION READ ONLY; SHOW transaction_read_only",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert!(outputs[0].notices.is_empty(), "{:?}", outputs[0].notices);
+    assert_eq!(render(&outputs[1]).lines().nth(1), Some("on"));
+    let error = refusal(&mut session, "INSERT INTO films VALUES (2, 'Sleeper')");
+    assert_eq!(error.state().code(), "25006");
+    session.roll_back_implicit_transaction().unwrap();
+    assert_eq!(shown_setting(&mut session), "off");
+
+    answer(&mut session, "SET default_transaction_read_only = on");
+    session.start_implicit_transaction();
+    results(
+        &mut session,
+        "SET TRANSACTION READ WRITE; INSERT INTO films VALUES (2, 'Sleeper')",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    session.commit_implicit_transaction().unwrap();
+    assert_eq!(shown_setting(&mut session), "on");
+    assert_eq!(
+        answer(&mut session, "SELECT count(*) FROM films"),
+        "count\n2\nSELECT 1"
+    );
+
+    let warned = notices(&mut session, "SET TRANSACTION READ ONLY");
+    assert_eq!(
+        warned,
+        ["WARNING:  SET TRANSACTION can only be used in transaction blocks"]
+    );
+}
+
+fn shown_setting(session: &mut Session<'_>) -> String {
+    shown(session, "transaction_read_only")
+}
+
+#[test]
+fn row_locking_reaches_the_tables_behind_partitions_views_and_derived_tables() {
+    let store = MemoryStore::default();
+    let mut session = postgresql_session(&store);
+    for sql in [
+        "CREATE TABLE parted (id integer, day date) PARTITION BY RANGE (day)",
+        "CREATE TABLE parted_2024 PARTITION OF parted FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')",
+        "INSERT INTO parted VALUES (1, '2024-05-05')",
+        "CREATE VIEW film_titles AS SELECT title FROM films",
+        "CREATE TEMP TABLE scratch (n integer)",
+        "INSERT INTO scratch VALUES (7)",
+    ] {
+        answer(&mut session, sql);
+    }
+    for query in [
+        "SELECT * FROM parted FOR UPDATE",
+        "SELECT * FROM film_titles FOR SHARE",
+        "SELECT * FROM (SELECT * FROM films) s FOR UPDATE",
+        "SELECT * FROM (SELECT * FROM (SELECT title FROM film_titles) i) s FOR UPDATE",
+        "SELECT n FROM scratch, LATERAL (SELECT title FROM films) f FOR UPDATE",
+        "WITH c AS (SELECT * FROM parted) SELECT * FROM c FOR UPDATE",
+        "DECLARE locked CURSOR FOR SELECT * FROM films FOR UPDATE",
+    ] {
+        answer(&mut session, "BEGIN READ ONLY");
+        let error = refusal(&mut session, query);
+        assert_eq!(error.state().code(), "25006", "{query}");
+        answer(&mut session, "ROLLBACK");
+    }
+    answer(&mut session, "BEGIN READ ONLY");
+    for (query, rows) in [
+        (
+            "SELECT * FROM (SELECT n FROM scratch) s FOR UPDATE",
+            "n\n7\nSELECT 1",
+        ),
+        (
+            "WITH c AS (SELECT n FROM scratch) SELECT n FROM c FOR UPDATE",
+            "n\n7\nSELECT 1",
+        ),
+        (
+            "WITH RECURSIVE c (n) AS (SELECT n FROM scratch UNION ALL SELECT n + 1 FROM c WHERE n < 8) SELECT n FROM c FOR UPDATE",
+            "n\n7\n8\nSELECT 2",
+        ),
+    ] {
+        assert_eq!(answer(&mut session, query), rows, "{query}");
+    }
+    answer(&mut session, "COMMIT");
+}
+
+#[test]
+fn row_locking_a_table_with_row_security_is_refused_for_a_checked_role_in_a_read_only_transaction()
+{
+    let store = MemoryStore::default();
+    let mut admin = postgresql_session(&store);
+    for sql in [
+        "CREATE USER ada LOGIN",
+        "GRANT SELECT ON films TO ada",
+        "ALTER TABLE films ENABLE ROW LEVEL SECURITY",
+        "CREATE POLICY every_film ON films FOR SELECT TO PUBLIC USING (true)",
+    ] {
+        answer(&mut admin, sql);
+    }
+    let mut ada = Session::new(&store);
+    if let Err(error) = ada.identify_role("ada", "eggdb") {
+        panic!("ada: {error}");
+    }
+    assert_eq!(
+        answer(&mut ada, "SELECT title FROM films"),
+        "title\nBananas\nSELECT 1"
+    );
+    answer(&mut ada, "BEGIN READ ONLY");
+    let error = refusal(&mut ada, "SELECT title FROM films FOR UPDATE");
+    assert_eq!(error.state().code(), "25006");
+    answer(&mut ada, "ROLLBACK");
+}

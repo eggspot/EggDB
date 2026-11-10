@@ -16,6 +16,7 @@ const REGCLASS: Option<SqlType> = Some(SqlType::Catalog(CatalogType::Reg(RegKind
 const INTEGER: Option<SqlType> = Some(SqlType::Integer);
 const BOOLEAN: Option<SqlType> = Some(SqlType::Boolean);
 const TEXT: Option<SqlType> = Some(SqlType::Text);
+const INTERNAL_CHAR: Option<SqlType> = Some(SqlType::Catalog(CatalogType::InternalChar));
 const NOT_FOUND: [&str; 3] = ["42P01", "3F000", "42704"];
 const PG_CLASS: u32 = 1259;
 const PG_NAMESPACE: u32 = 2615;
@@ -47,6 +48,8 @@ pub(crate) fn argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         "col_description" => &[OID, INTEGER],
         "pg_get_serial_sequence" => &[TEXT, TEXT],
         "to_regclass" | "to_regtype" => &[TEXT],
+        "acldefault" => &[INTERNAL_CHAR, OID],
+        "makeaclitem" => &[OID, OID, TEXT, BOOLEAN],
         _ => return None,
     })
 }
@@ -79,6 +82,8 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         | "pg_get_partkeydef" => SqlType::Text,
         "to_regclass" => SqlType::Catalog(CatalogType::Reg(RegKind::Class)),
         "to_regtype" | "pg_typeof" => SqlType::Catalog(CatalogType::Reg(RegKind::Type)),
+        "acldefault" => SqlType::Array(crate::arrays::ArrayElement::AclItem),
+        "makeaclitem" => SqlType::Catalog(CatalogType::AclItem),
         _ => return None,
     })
 }
@@ -115,6 +120,9 @@ fn text(value: Option<String>) -> Value {
 
 pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
     argument_types(name)?;
+    if super::acl::is_scalar(name) {
+        return Some(super::acl::function(name, values));
+    }
     if values.first().is_some_and(Value::is_null) {
         return Some(Ok(Value::Null));
     }

@@ -1403,3 +1403,62 @@ fn a_stale_index_link_from_an_older_writer_attaches_no_later_index() {
     let error = failure(&mut session, "INSERT INTO s VALUES (1, 2)");
     assert_eq!(error.state().code(), "23505", "{error}");
 }
+
+#[test]
+fn mysql_alter_table_indexes_reach_every_partition_of_a_year_partitioned_table() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    answer(
+        &mut session,
+        "CREATE TABLE sales350 (id int NOT NULL, d date NOT NULL)
+             PARTITION BY RANGE (YEAR(d)) (
+               PARTITION p_old VALUES LESS THAN (2000),
+               PARTITION p_new VALUES LESS THAN MAXVALUE
+             );
+         INSERT INTO sales350 VALUES (1, '1999-12-31'), (2, '2024-06-01');
+         ALTER TABLE sales350 ADD INDEX by_d (d)",
+    );
+    assert_eq!(
+        answer(
+            &mut Session::new(&store),
+            "SELECT id FROM \"sales350#P#p_old\""
+        ),
+        "id\n1\nSELECT 1"
+    );
+    let keys = |table: &str| {
+        answer(
+            &mut Session::new(&store),
+            &format!(
+                "SELECT c.relname FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+                  JOIN pg_class t ON t.oid = i.indrelid WHERE t.relname = '{table}'"
+            ),
+        )
+    };
+    for table in ["sales350", "sales350#P#p_old", "sales350#P#p_new"] {
+        assert!(keys(table).contains("\nby_d\n"), "{table}");
+    }
+    let error = failure(&mut session, "ALTER TABLE sales350 ADD KEY by_d (id)");
+    assert_eq!(error.vendor_code(), Some(1061), "{error}");
+    answer(
+        &mut session,
+        "ALTER TABLE sales350 RENAME INDEX by_d TO by_day",
+    );
+    for table in ["sales350", "sales350#P#p_old", "sales350#P#p_new"] {
+        let shown = keys(table);
+        assert!(shown.contains("\nby_day\n"), "{table}: {shown}");
+        assert!(!shown.contains("\nby_d\n"), "{table}: {shown}");
+    }
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT id FROM sales350 WHERE d = '2024-06-01'"
+        ),
+        "id\n2\nSELECT 1"
+    );
+    answer(&mut session, "ALTER TABLE sales350 DROP INDEX by_day");
+    for table in ["sales350", "sales350#P#p_old", "sales350#P#p_new"] {
+        assert!(!keys(table).contains("by_day"), "{table}");
+    }
+    let error = failure(&mut session, "ALTER TABLE sales350 DROP INDEX by_day");
+    assert_eq!(error.vendor_code(), Some(1091), "{error}");
+}

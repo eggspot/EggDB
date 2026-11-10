@@ -41,6 +41,11 @@ impl DocumentError {
         Self::new(26, "NamespaceNotFound", message)
     }
 
+    /// A path an update cannot create, such as a field inside a number (`PathNotViable`, 28).
+    pub fn path_not_viable(message: impl Into<String>) -> Self {
+        Self::new(28, "PathNotViable", message)
+    }
+
     /// Two update operators on the same path (`ConflictingUpdateOperators`, 40).
     pub fn conflicting_update(message: impl Into<String>) -> Self {
         Self::new(40, "ConflictingUpdateOperators", message)
@@ -56,9 +61,25 @@ impl DocumentError {
         Self::new(66, "ImmutableField", message)
     }
 
+    /// Options that cannot go together, such as `arrayFilters` with a pipeline-style update
+    /// (`InvalidOptions`, 72).
+    pub fn invalid_options(message: impl Into<String>) -> Self {
+        Self::new(72, "InvalidOptions", message)
+    }
+
     /// A database or collection name that is not allowed (`InvalidNamespace`, 73).
     pub fn invalid_namespace(message: impl Into<String>) -> Self {
         Self::new(73, "InvalidNamespace", message)
+    }
+
+    /// A document, or a value an update or expression builds, larger than
+    /// [`crate::MAX_DOCUMENT_BYTES`] (`BadValue`, 2); `size` is its size in bytes, or the size
+    /// it had reached when the work stopped.
+    pub fn document_too_large(size: usize) -> Self {
+        Self::bad_value(format!(
+            "object to insert too large. size in bytes: {size}, max size: {}",
+            crate::store::MAX_DOCUMENT_BYTES
+        ))
     }
 
     /// A feature not implemented yet (`NotImplemented`, 238).

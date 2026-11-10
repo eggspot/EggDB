@@ -82,6 +82,7 @@ impl Access {
 pub(crate) struct OrderRequest {
     pub(crate) columns: Vec<(usize, bool)>,
     pub(crate) limited: bool,
+    pub(crate) nulls_at_other_end: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -278,6 +279,50 @@ fn predicates(expr: &Expr, table: &TableDefinition, scope: Scope<'_>, out: &mut 
         }
         _ => {}
     }
+}
+
+fn is_column(expr: &Expr, scope: Scope<'_>, column: usize) -> bool {
+    column_of(expr, scope) == Some(column)
+}
+
+pub(crate) fn rejects_null(filter: Option<&Expr>, scope: Scope<'_>, column: usize) -> bool {
+    let Some(filter) = filter else {
+        return false;
+    };
+    let mut parts = Vec::new();
+    conjuncts(filter, &mut parts);
+    parts.iter().any(|part| match &part.kind {
+        ExprKind::Binary(
+            BinaryOperator::Equal
+            | BinaryOperator::NotEqual
+            | BinaryOperator::Less
+            | BinaryOperator::LessOrEqual
+            | BinaryOperator::Greater
+            | BinaryOperator::GreaterOrEqual,
+            left,
+            right,
+        ) => is_column(left, scope, column) || is_column(right, scope, column),
+        ExprKind::IsNull {
+            expr,
+            negated: true,
+        }
+        | ExprKind::Between {
+            expr,
+            negated: false,
+            ..
+        }
+        | ExprKind::InList {
+            expr,
+            negated: false,
+            ..
+        }
+        | ExprKind::Like {
+            expr,
+            negated: false,
+            ..
+        } => is_column(expr, scope, column),
+        _ => false,
+    })
 }
 
 struct Candidate {
@@ -485,6 +530,47 @@ fn order_direction(
     Some(descending)
 }
 
+fn reads_nulls_apart(
+    table: &TableDefinition,
+    columns: &[usize],
+    equal: usize,
+    order: &OrderRequest,
+) -> Option<bool> {
+    let bound = &columns[..equal.min(columns.len())];
+    let moved =
+        |column: &usize| order.nulls_at_other_end.contains(column) && !bound.contains(column);
+    if !order.nulls_at_other_end.iter().any(moved) {
+        return Some(false);
+    }
+    let mut remaining = order
+        .columns
+        .iter()
+        .map(|(column, _)| *column)
+        .filter(|column| !bound.contains(column));
+    let first = remaining.next()?;
+    if !moved(&first) {
+        return None;
+    }
+    remaining
+        .all(|column| {
+            table
+                .columns
+                .get(column)
+                .is_some_and(|definition| definition.not_null)
+        })
+        .then_some(true)
+}
+
+fn nulls_first_ranges(ranges: Vec<(Vec<u8>, Vec<u8>)>) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut split = Vec::with_capacity(ranges.len() * 2);
+    for (start, _) in ranges {
+        let nulls = with(&start, &[NULL_IN_KEY]);
+        split.push((nulls.clone(), prefix_end(&nulls)));
+        split.push((start, nulls));
+    }
+    split
+}
+
 fn key_columns(table: &TableDefinition, key: KeyChoice) -> Vec<usize> {
     match key {
         KeyChoice::Primary => table.primary_key.clone(),
@@ -530,8 +616,14 @@ pub(crate) fn plan(
         .filter_map(|(key, columns, unique)| candidate(table, *key, columns, *unique, &bounds))
         .max_by(|left, right| left.score().cmp(&right.score()));
     if let Some(best) = best {
-        let direction = order
-            .and_then(|order| order_direction(&best.order_columns, best.equal, best.single, order));
+        let direction = order.and_then(|order| {
+            let direction = order_direction(&best.order_columns, best.equal, best.single, order)?;
+            let apart = reads_nulls_apart(table, &best.order_columns, best.equal, order)?;
+            if apart && best.ranged {
+                return None;
+            }
+            Some((direction, apart))
+        });
         let used = if best.point {
             Use::Point
         } else if best.ranged {
@@ -540,14 +632,18 @@ pub(crate) fn plan(
             Use::Equal
         };
         let mut ranges = best.ranges;
-        if direction == Some(true) {
+        if let Some((_, true)) = direction {
+            ranges = nulls_first_ranges(ranges);
+        }
+        let backward = matches!(direction, Some((true, _)));
+        if backward {
             ranges.reverse();
         }
         return Access {
             path: Path::Ranges {
                 key: best.key,
                 ranges,
-                backward: direction == Some(true),
+                backward,
             },
             ordered: direction.is_some(),
             used,
@@ -562,15 +658,25 @@ pub(crate) fn plan(
         let Some(backward) = order_direction(&columns, 0, true, order) else {
             continue;
         };
+        let Some(apart) = reads_nulls_apart(table, &columns, 0, order) else {
+            continue;
+        };
         if *key != KeyChoice::Primary && !order.limited {
             continue;
         }
         let prefix = key_prefix(table, *key);
         let end = prefix_end(&prefix);
+        let mut ranges = vec![(prefix, end)];
+        if apart {
+            ranges = nulls_first_ranges(ranges);
+            if backward {
+                ranges.reverse();
+            }
+        }
         return Access {
             path: Path::Ranges {
                 key: *key,
-                ranges: vec![(prefix, end)],
+                ranges,
                 backward,
             },
             ordered: true,

@@ -134,8 +134,8 @@ fn with_server(limits: &Limits<'_>, test: impl FnOnce(SocketAddr)) {
             )
             .unwrap();
         });
+        let _stop_even_on_a_failure = crate::content_coding_tests::StopOnDrop(&stopped);
         test(address);
-        stopped.store(true, Ordering::Release);
     });
 }
 
@@ -184,7 +184,7 @@ fn pipelined_requests_are_answered_in_order() {
         let (mut client, mut reader) = connect(address);
         client
             .write_all(
-                b"GET /a HTTP/1.1\r\n\r\nPOST /b HTTP/1.1\r\nContent-Length: 2\r\n\r\nhi\r\nPOST /c HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\nGET /d HTTP/1.1\r\nConnection: close\r\n\r\n",
+                b"GET /a HTTP/1.1\r\nHost: x\r\n\r\nPOST /b HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\nhi\r\nPOST /c HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\nGET /d HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
             )
             .unwrap();
         let answers: Vec<String> = (0..4)
@@ -198,12 +198,12 @@ fn pipelined_requests_are_answered_in_order() {
 #[test]
 fn chunked_uploads_ignore_extensions_and_discard_trailers() {
     let request = read_request(
-        &mut &b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5;name=value;flag\r\nhello\r\n6 ; x=\"quoted\"\r\n world\r\n000\r\nExpires: never\r\nX-Checksum: 1\r\n\r\n"[..],
+        &mut &b"POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5;name=value;flag\r\nhello\r\n6 ; x=\"quoted\"\r\n world\r\n000\r\nExpires: never\r\nX-Checksum: 1\r\n\r\n"[..],
     )
     .unwrap();
     assert_eq!(request.body, b"hello world");
     assert_eq!(request.header("expires"), None);
-    let mut bytes = b"PUT /k HTTP/1.1\r\nTransfer-Encoding: Chunked\r\n\r\n".to_vec();
+    let mut bytes = b"PUT /k HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: Chunked\r\n\r\n".to_vec();
     for _ in 0..10 {
         bytes.extend_from_slice(b"2710\r\n");
         bytes.extend_from_slice(&[b'z'; 10_000]);
@@ -217,7 +217,7 @@ fn chunked_uploads_ignore_extensions_and_discard_trailers() {
         let (mut client, mut reader) = connect(address);
         client
             .write_all(
-                b"POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\nExpect: 100-continue\r\n\r\n",
+                b"POST /up HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nExpect: 100-continue\r\n\r\n",
             )
             .unwrap();
         let interim = read_answer(&mut reader, true);
@@ -233,7 +233,9 @@ fn streamed_responses_are_sent_chunked_and_the_connection_goes_on() {
     let budget = MemoryBudget::new(100_000);
     with_server(&default_limits(&budget), |address| {
         let (mut client, mut reader) = connect(address);
-        client.write_all(b"GET /rows HTTP/1.1\r\n\r\n").unwrap();
+        client
+            .write_all(b"GET /rows HTTP/1.1\r\nHost: x\r\n\r\n")
+            .unwrap();
         let rows = read_answer(&mut reader, false);
         assert_eq!(rows.header("transfer-encoding").as_deref(), Some("chunked"));
         assert_eq!(rows.header("content-length"), None);
@@ -242,10 +244,14 @@ fn streamed_responses_are_sent_chunked_and_the_connection_goes_on() {
         assert!(text.starts_with("{\"row\":0}\n{\"row\":1}\n"));
         assert!(text.ends_with("{\"row\":4999}\n"));
         assert!(rows.body.len() > STREAM_CHUNK_BYTES);
-        client.write_all(b"HEAD /rows HTTP/1.1\r\n\r\n").unwrap();
+        client
+            .write_all(b"HEAD /rows HTTP/1.1\r\nHost: x\r\n\r\n")
+            .unwrap();
         let head = read_answer(&mut reader, true);
         assert_eq!(head.header("transfer-encoding").as_deref(), Some("chunked"));
-        client.write_all(b"GET /after HTTP/1.1\r\n\r\n").unwrap();
+        client
+            .write_all(b"GET /after HTTP/1.1\r\nHost: x\r\n\r\n")
+            .unwrap();
         assert_eq!(read_answer(&mut reader, false).text(), "GET /after ");
         let (mut old, mut old_reader) = connect(address);
         old.write_all(b"GET /rows HTTP/1.0\r\nConnection: keep-alive\r\n\r\n")
@@ -285,26 +291,26 @@ fn smuggling_attempts_are_refused_and_their_connection_closed() {
     let budget = MemoryBudget::default();
     with_server(&default_limits(&budget), |address| {
         for (attempt, status) in [
-            (&b"POST /x HTTP/1.1\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\n\r\n"[..], 400),
-            (b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 4\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\n\r\n", 400),
-            (b"POST /x HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\nGET /smuggled HTTP/1.1\r\n\r\n", 400),
-            (b"POST /x HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\n\r\n", 501),
-            (b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked, chunked\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\n\r\n", 400),
-            (b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: identity\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\n\r\n", 400),
-            (b"POST /x HTTP/1.1\r\nTransfer-Encoding:\r\n\r\nGET /smuggled HTTP/1.1\r\n\r\n", 400),
-            (b"POST /x HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\n\r\n", 400),
-            (b"POST /x HTTP/1.1\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\nhiGET /smuggled HTTP/1.1\r\n\r\n", 400),
-            (b"POST /x HTTP/1.1\r\nContent-Length: 2, 2\r\n\r\nhiGET /smuggled HTTP/1.1\r\n\r\n", 400),
-            (b"POST /x HTTP/1.1\r\nContent-Length: +2\r\n\r\nhiGET /smuggled HTTP/1.1\r\n\r\n", 400),
-            (b"POST /x HTTP/1.1\r\nTransfer-Encoding : chunked\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\n\r\n", 400),
-            (b"POST /x HTTP/1.1\r\nX: y\r\n Transfer-Encoding: chunked\r\n\r\nGET /smuggled HTTP/1.1\r\n\r\n", 400),
-            (b"POST /x HTTP/1.1\r\nX: a\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\n\r\n", 400),
-            (b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\nabc\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\n\r\n", 400),
-            (b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3x\r\nabc\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\n\r\n", 400),
-            (b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n-3\r\nabc\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\n\r\n", 400),
-            (b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabcd\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\n\r\n", 400),
-            (b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nbad trailer\r\n\r\nGET /smuggled HTTP/1.1\r\n\r\n", 400),
-            (b"GET /x HTTP/1.2.3\r\n\r\nGET /smuggled HTTP/1.1\r\n\r\n", 400),
+            (&b"POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n"[..], 400),
+            (b"POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nContent-Length: 4\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n", 400),
+            (b"POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n", 400),
+            (b"POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n", 501),
+            (b"POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked, chunked\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n", 400),
+            (b"POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: identity\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n", 400),
+            (b"POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding:\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n", 400),
+            (b"POST /x HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n", 400),
+            (b"POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\nhiGET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n", 400),
+            (b"POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: 2, 2\r\n\r\nhiGET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n", 400),
+            (b"POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: +2\r\n\r\nhiGET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n", 400),
+            (b"POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding : chunked\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n", 400),
+            (b"POST /x HTTP/1.1\r\nHost: x\r\nX: y\r\n Transfer-Encoding: chunked\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n", 400),
+            (b"POST /x HTTP/1.1\r\nHost: x\r\nX: a\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n", 400),
+            (b"POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n3\nabc\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n", 400),
+            (b"POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n3x\r\nabc\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n", 400),
+            (b"POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n-3\r\nabc\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n", 400),
+            (b"POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabcd\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n", 400),
+            (b"POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nbad trailer\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n", 400),
+            (b"GET /x HTTP/1.2.3\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n", 400),
         ] {
             let (mut client, mut reader) = connect(address);
             client.write_all(attempt).unwrap();
@@ -325,15 +331,15 @@ fn smuggling_attempts_are_refused_and_their_connection_closed() {
 fn oversized_chunks_are_refused_and_the_budget_returns_to_zero() {
     for (bytes, expected) in [
         (
-            &b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n100001\r\n"[..],
+            &b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n100001\r\n"[..],
             HttpError::BodyTooLarge,
         ),
         (
-            b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffffff\r\n",
+            b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffffff\r\n",
             HttpError::BodyTooLarge,
         ),
         (
-            b"POST / HTTP/1.1\r\nContent-Length: 99999999999999999999999\r\n\r\n",
+            b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 99999999999999999999999\r\n\r\n",
             HttpError::BodyTooLarge,
         ),
     ] {
@@ -345,10 +351,10 @@ fn oversized_chunks_are_refused_and_the_budget_returns_to_zero() {
         );
     }
     let zeros = read_request(
-        &mut &b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n00000000000000000000001\r\nx\r\n0\r\n\r\n"[..],
+        &mut &b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n00000000000000000000001\r\nx\r\n0\r\n\r\n"[..],
     );
     assert_eq!(zeros.map(|request| request.body), Ok(b"x".to_vec()));
-    let mut many = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+    let mut many = b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
     for _ in 0..30_000 {
         many.extend_from_slice(b"1;padding-padding-padding\r\nx\r\n");
     }
@@ -361,7 +367,8 @@ fn oversized_chunks_are_refused_and_the_budget_returns_to_zero() {
         .answering_over_budget_with(|| Response::text(429, "slow down"));
     with_server(&limits, |address| {
         let (mut client, mut reader) = connect(address);
-        let mut upload = b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        let mut upload =
+            b"POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
         for _ in 0..4 {
             upload.extend_from_slice(b"10000\r\n");
             upload.extend_from_slice(&[b'u'; 0x10000]);
@@ -375,10 +382,13 @@ fn oversized_chunks_are_refused_and_the_budget_returns_to_zero() {
         );
         assert!(closed(&mut reader));
         let (mut big, mut big_reader) = connect(address);
-        let _ = big.write_all(b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n200000\r\n");
+        let _ = big.write_all(
+            b"POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n200000\r\n",
+        );
         assert_eq!(read_answer(&mut big_reader, false).status(), 413);
         let (mut fitting, mut fitting_reader) = connect(address);
-        let mut upload = b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        let mut upload =
+            b"POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
         upload.extend_from_slice(b"186a0\r\n");
         upload.extend_from_slice(&[b'f'; 100_000]);
         upload.extend_from_slice(b"\r\n0\r\n\r\n");
@@ -395,14 +405,16 @@ fn an_idle_connection_is_closed_and_the_last_allowed_request_says_close() {
     let limits = default_limits(&budget).with_keep_alive(Duration::from_millis(300), 2);
     with_server(&limits, |address| {
         let (mut client, mut reader) = connect(address);
-        client.write_all(b"GET /a HTTP/1.1\r\n\r\n").unwrap();
+        client
+            .write_all(b"GET /a HTTP/1.1\r\nHost: x\r\n\r\n")
+            .unwrap();
         read_answer(&mut reader, false);
         let waited = Instant::now();
         assert!(closed(&mut reader));
         assert!(waited.elapsed() < Duration::from_secs(5));
         let (mut client, mut reader) = connect(address);
         client
-            .write_all(b"GET /a HTTP/1.1\r\n\r\nGET /b HTTP/1.1\r\n\r\nGET /c HTTP/1.1\r\n\r\n")
+            .write_all(b"GET /a HTTP/1.1\r\nHost: x\r\n\r\nGET /b HTTP/1.1\r\nHost: x\r\n\r\nGET /c HTTP/1.1\r\nHost: x\r\n\r\n")
             .unwrap();
         assert_eq!(read_answer(&mut reader, false).header("connection"), None);
         let second = read_answer(&mut reader, false);
@@ -426,7 +438,7 @@ fn a_streamed_body_whose_source_outgrows_the_budget_gets_the_over_budget_answer(
     with_server(&limits, |address| {
         let (mut client, mut reader) = connect(address);
         client
-            .write_all(b"GET /held HTTP/1.1\r\n\r\nGET /rows HTTP/1.1\r\nConnection: close\r\n\r\n")
+            .write_all(b"GET /held HTTP/1.1\r\nHost: x\r\n\r\nGET /rows HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
             .unwrap();
         let refused = read_answer(&mut reader, false);
         assert_eq!(
@@ -442,7 +454,7 @@ fn a_streamed_body_whose_source_outgrows_the_budget_gets_the_over_budget_answer(
     with_server(&default_limits(&roomy), |address| {
         let (mut client, mut reader) = connect(address);
         client
-            .write_all(b"GET /held HTTP/1.1\r\nConnection: close\r\n\r\n")
+            .write_all(b"GET /held HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
             .unwrap();
         let held = read_answer(&mut reader, false);
         assert_eq!((held.status(), held.text()), (200, "held".to_owned()));
@@ -456,7 +468,7 @@ fn a_body_trickled_slower_than_the_slowest_rate_is_cut_off() {
     with_server(&default_limits(&budget), |address| {
         let (mut client, mut reader) = connect(address);
         client
-            .write_all(b"POST /slow HTTP/1.1\r\nContent-Length: 1000\r\n\r\n")
+            .write_all(b"POST /slow HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\n\r\n")
             .unwrap();
         let started = Instant::now();
         std::thread::scope(|scope| {
@@ -485,10 +497,10 @@ fn a_body_trickled_slower_than_the_slowest_rate_is_cut_off() {
 #[test]
 fn hostile_requests_return_errors_and_never_panic() {
     let seeds: [&[u8]; 4] = [
-        b"POST /a?b=c HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5;e=1\r\nhello\r\n0\r\nT: v\r\n\r\nGET / HTTP/1.1\r\n\r\n",
-        b"PUT /k HTTP/1.1\r\nContent-Length: 5\r\nExpect: 100-continue\r\n\r\nhelloGET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n",
+        b"POST /a?b=c HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5;e=1\r\nhello\r\n0\r\nT: v\r\n\r\nGET / HTTP/1.1\r\nHost: x\r\n\r\n",
+        b"PUT /k HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nExpect: 100-continue\r\n\r\nhelloGET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n",
         b"GET / HTTP/1.0\r\nConnection: close, keep-alive\r\n\r\n",
-        b"POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\nContent-Length: 0\r\n\r\n0\r\n\r\n",
+        b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip, chunked\r\nContent-Length: 0\r\n\r\n0\r\n\r\n",
     ];
     let alphabet = b"\r\n:; 0123456789abcdefABCDEF\t,-\x00\xff";
     let mut state = 0x9e37_79b9_7f4a_7c15u64;

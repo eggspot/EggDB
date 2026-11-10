@@ -55,6 +55,10 @@ fn parts(argument: &Expr) -> Option<Parts<'_>> {
     })
 }
 
+pub(crate) fn direct_arguments(argument: &Expr) -> &[Expr] {
+    parts(argument).map_or(&[][..], |parts| parts.hypothetical)
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct Standing {
     rows: i64,
