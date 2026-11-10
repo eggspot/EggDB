@@ -322,7 +322,9 @@ fn serve_connection(
             && name != "quit"
         {
             vec![Reply::Error("NOAUTH Authentication required.".to_owned())]
-        } else if let Some(replies) = connection.pubsub(&client, &name, &arguments[1..]) {
+        } else if let Some(replies) =
+            connection.pubsub(&client, &name, arguments.get(1..).unwrap_or_default())
+        {
             replies
         } else if subscribed && !client.resp3 && !matches!(name.as_str(), "ping" | "quit" | "reset")
         {
@@ -337,7 +339,7 @@ fn serve_connection(
                 reply_room_bytes: reply_room(&config.memory_budget, held.bytes(), out.len()),
             };
             let blocking = if client.queued.is_none() {
-                BlockingCommand::parse(&name, &arguments[1..])
+                BlockingCommand::parse(&name, arguments.get(1..).unwrap_or_default())
             } else {
                 None
             };

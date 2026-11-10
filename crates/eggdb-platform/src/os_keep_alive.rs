@@ -338,8 +338,9 @@ cfg_select! {
                     milliseconds(keep_alive.interval()),
                 ];
                 let mut values = [0_u8; 12];
-                for (slot, field) in values.chunks_exact_mut(4).zip(fields) {
-                    slot.copy_from_slice(&field.to_ne_bytes());
+                let (slots, _) = values.as_chunks_mut::<4>();
+                for (slot, field) in slots.iter_mut().zip(fields) {
+                    *slot = field.to_ne_bytes();
                 }
                 control_socket(socket, SIO_KEEPALIVE_VALS, &values)
             }
