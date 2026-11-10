@@ -501,3 +501,272 @@ pub(crate) fn exchange(
         other => other,
     }
 }
+
+pub(crate) fn coalesce(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    parent: &TableDefinition,
+    count: u32,
+    position: usize,
+    dialect: Dialect,
+) -> SqlResult<()> {
+    let state = partitioned(writer, tables, parent, position)?;
+    if state.key.strategy != PartitionStrategy::Hash {
+        return Err(SqlError::new(
+            SqlState::FEATURE_NOT_SUPPORTED,
+            "COALESCE PARTITION can only be used on HASH/KEY partitions",
+        )
+        .with_vendor_code(1509)
+        .at(position));
+    }
+    let mut names = hash_partition_names(&state, parent);
+    let removed = usize::try_from(count).unwrap_or(usize::MAX);
+    if removed >= names.len() {
+        return Err(SqlError::new(
+            SqlState::INVALID_TABLE_DEFINITION,
+            "Cannot remove all partitions, use DROP TABLE instead",
+        )
+        .with_vendor_code(1508)
+        .at(position));
+    }
+    names.truncate(names.len() - removed);
+    rehash(writer, tables, parent, &state, &names, position, dialect)
+}
+
+pub(crate) fn merge(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    parent: &TableDefinition,
+    from: &[Name],
+    into: &Name,
+    dialect: Dialect,
+) -> SqlResult<()> {
+    let position = from.first().map_or(into.position, |name| name.position);
+    let state = partitioned(writer, tables, parent, position)?;
+    if from.len() < 2 {
+        return Err(SqlError::new(
+            SqlState::INVALID_TABLE_DEFINITION,
+            "MERGE PARTITIONS needs at least two partitions",
+        )
+        .with_oracle_code(14004)
+        .at(position));
+    }
+    let mut old: Vec<(String, PartitionBound)> = Vec::with_capacity(from.len());
+    for partition in from {
+        let found = existing(&state, parent, partition)?;
+        if old.iter().any(|(name, _)| *name == found.0) {
+            return Err(SqlError::new(
+                SqlState::DUPLICATE_OBJECT,
+                format!("partition \"{}\" is named twice", partition.text),
+            )
+            .with_oracle_code(14004)
+            .at(partition.position));
+        }
+        old.push(found.clone());
+    }
+    let merged = match state.key.strategy {
+        PartitionStrategy::Range => merged_range(&mut old, &state.types, position)?,
+        PartitionStrategy::List => merged_list(&old),
+        PartitionStrategy::Hash => {
+            return Err(SqlError::new(
+                SqlState::FEATURE_NOT_SUPPORTED,
+                "MERGE PARTITIONS is for range and list partitions",
+            )
+            .with_oracle_code(14255)
+            .at(position));
+        }
+    };
+    let old_names: Vec<String> = old.into_iter().map(|(name, _)| name).collect();
+    let new = vec![(named_child(parent, &into.text, into.position), merged)];
+    rebuild(writer, tables, parent, &old_names, new, position, dialect)
+}
+
+fn merged_range(
+    old: &mut [(String, PartitionBound)],
+    types: &[SqlType],
+    position: usize,
+) -> SqlResult<PartitionBound> {
+    old.sort_by(|(_, left), (_, right)| {
+        partitions::compare_bound_texts(
+            range_start(left).unwrap_or_default(),
+            range_start(right).unwrap_or_default(),
+            types,
+        )
+    });
+    let not_adjacent = || {
+        SqlError::new(
+            SqlState::INVALID_TABLE_DEFINITION,
+            "partitions being merged are not adjacent",
+        )
+        .with_oracle_code(14274)
+        .at(position)
+    };
+    for pair in old.windows(2) {
+        let (Some(end), Some(start)) = (range_end(&pair[0].1), range_start(&pair[1].1)) else {
+            return Err(not_adjacent());
+        };
+        if partitions::compare_bound_texts(end, start, types) != std::cmp::Ordering::Equal {
+            return Err(not_adjacent());
+        }
+    }
+    let from = old
+        .first()
+        .and_then(|(_, bound)| range_start(bound))
+        .ok_or_else(|| crate::encoding::corrupt("partition bound"))?
+        .to_vec();
+    let to = old
+        .last()
+        .and_then(|(_, bound)| range_end(bound))
+        .ok_or_else(|| crate::encoding::corrupt("partition bound"))?
+        .to_vec();
+    checked_range(from, to, types, position)
+}
+
+fn merged_list(old: &[(String, PartitionBound)]) -> PartitionBound {
+    if old
+        .iter()
+        .any(|(_, bound)| matches!(bound, PartitionBound::Default))
+    {
+        return PartitionBound::Default;
+    }
+    let mut values: Vec<BoundText> = Vec::new();
+    for value in old
+        .iter()
+        .filter_map(|(_, bound)| list_values(bound))
+        .flatten()
+    {
+        if !values.contains(value) {
+            values.push(value.clone());
+        }
+    }
+    PartitionBound::List(values)
+}
+
+pub(crate) fn modify_values(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    parent: &TableDefinition,
+    partition: &Name,
+    values: &[crate::ast::PartitionBoundValue],
+    adding: bool,
+    dialect: Dialect,
+) -> SqlResult<()> {
+    let position = partition.position;
+    let state = partitioned(writer, tables, parent, position)?;
+    let (child, bound) = existing(&state, parent, partition)?.clone();
+    let PartitionBound::List(kept) = &bound else {
+        return Err(SqlError::new(
+            SqlState::INVALID_TABLE_DEFINITION,
+            "ADD VALUES and DROP VALUES are for list partitions other than DEFAULT",
+        )
+        .with_oracle_code(14457)
+        .at(position));
+    };
+    let PartitionBound::List(changed) = list_bound(values, &state.key, &state.types, position)?
+    else {
+        return Err(SqlError::new(
+            SqlState::INVALID_TABLE_DEFINITION,
+            "ADD VALUES and DROP VALUES need at least one value",
+        )
+        .at(position));
+    };
+    let new_values = if adding {
+        if let Some(present) = changed.iter().find(|value| kept.contains(value)) {
+            return Err(SqlError::new(
+                SqlState::INVALID_TABLE_DEFINITION,
+                format!("value {} already exists in partition", bound_text_shown(present)),
+            )
+            .with_oracle_code(14312)
+            .at(position));
+        }
+        let mut values = kept.clone();
+        values.extend(changed.iter().cloned());
+        values
+    } else {
+        if let Some(missing) = changed.iter().find(|value| !kept.contains(value)) {
+            return Err(SqlError::new(
+                SqlState::INVALID_TABLE_DEFINITION,
+                format!("value {} does not exist in partition", bound_text_shown(missing)),
+            )
+            .with_oracle_code(14313)
+            .at(position));
+        }
+        let rest: Vec<BoundText> = kept
+            .iter()
+            .filter(|value| !changed.contains(value))
+            .cloned()
+            .collect();
+        if rest.is_empty() {
+            return Err(SqlError::new(
+                SqlState::INVALID_TABLE_DEFINITION,
+                "resulting list partition must contain at least one value",
+            )
+            .with_oracle_code(14314)
+            .at(position));
+        }
+        rest
+    };
+    let default = state
+        .children
+        .iter()
+        .find(|(_, bound)| matches!(bound, PartitionBound::Default))
+        .map(|(name, _)| name.clone());
+    let watched = if adding { default.clone() } else { Some(child.clone()) };
+    let rows_before = match &watched {
+        Some(name) => row_count(writer, tables, name, position)?,
+        None => 0,
+    };
+    let mut old = vec![child.clone()];
+    let mut new = vec![(table_name(&child, position), PartitionBound::List(new_values))];
+    if let Some(default) = default {
+        old.push(default.clone());
+        new.push((table_name(&default, position), PartitionBound::Default));
+    }
+    let rebuilt = rebuild(writer, tables, parent, &old, new, position, dialect);
+    let moved_out = || {
+        if adding {
+            SqlError::new(
+                SqlState::INVALID_TABLE_DEFINITION,
+                "values being added already exist in DEFAULT partition",
+            )
+            .with_oracle_code(14324)
+            .at(position)
+        } else {
+            SqlError::new(
+                SqlState::INVALID_TABLE_DEFINITION,
+                "partition contains rows corresponding to values being dropped",
+            )
+            .with_oracle_code(14518)
+            .at(position)
+        }
+    };
+    match rebuilt {
+        Err(error) if !adding && error.vendor_code() == Some(14400) => return Err(moved_out()),
+        other => other?,
+    }
+    if let Some(name) = &watched
+        && row_count(writer, tables, name, position)? < rows_before
+    {
+        return Err(moved_out());
+    }
+    Ok(())
+}
+
+fn row_count(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    child: &str,
+    position: usize,
+) -> SqlResult<usize> {
+    let table = tables.require_target(writer, &table_name(child, position), "modify")?;
+    Ok(execute::every_row(writer, &table)?.len())
+}
+
+fn bound_text_shown(value: &BoundText) -> String {
+    match value {
+        BoundText::Value(text) => text.clone(),
+        BoundText::Null => "NULL".to_owned(),
+        BoundText::MinValue => "MINVALUE".to_owned(),
+        BoundText::MaxValue => "MAXVALUE".to_owned(),
+    }
+}

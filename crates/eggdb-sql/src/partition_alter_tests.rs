@@ -187,3 +187,138 @@ fn a_postgresql_partition_key_with_an_unknown_function_is_42883() {
     );
     assert_eq!(error.state().code(), "42883", "{error}");
 }
+
+fn regions(store: &MemoryStore) -> Session<'_> {
+    let mut session = Session::with_dialect(store, Dialect::Oracle);
+    answer(
+        &mut session,
+        "CREATE TABLE sales (id NUMBER, region VARCHAR2(10))
+             PARTITION BY LIST (region) (
+               PARTITION east VALUES ('E'),
+               PARTITION west VALUES ('W'),
+               PARTITION other VALUES (DEFAULT)
+             )",
+    );
+    answer(
+        &mut session,
+        "INSERT INTO sales VALUES (1, 'E');
+         INSERT INTO sales VALUES (2, 'W');
+         INSERT INTO sales VALUES (3, 'N')",
+    );
+    session
+}
+
+#[test]
+fn mysql_coalesces_hash_partitions_and_keeps_every_row() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    answer(
+        &mut session,
+        "CREATE TABLE h (id int NOT NULL, PRIMARY KEY (id)) PARTITION BY HASH (id) PARTITIONS 4;
+         INSERT INTO h VALUES (1), (2), (3), (4), (5), (6)",
+    );
+    answer(&mut session, "ALTER TABLE h COALESCE PARTITION 2");
+    assert_eq!(
+        answer(&mut session, "SELECT count(*) FROM h PARTITION (p0, p1)"),
+        "count(*)\n6\nSELECT 1"
+    );
+    let error = failure(&mut session, "ALTER TABLE h COALESCE PARTITION 2");
+    assert_eq!(error.vendor_code(), Some(1508), "{error}");
+    let mut ranged = years(&store, Dialect::MySql);
+    let error = failure(&mut ranged, "ALTER TABLE o COALESCE PARTITION 1");
+    assert_eq!(error.vendor_code(), Some(1509), "{error}");
+}
+
+#[test]
+fn oracle_merges_adjacent_range_partitions_and_refuses_gaps() {
+    let store = MemoryStore::default();
+    let mut session = years(&store, Dialect::Oracle);
+    answer(
+        &mut session,
+        "ALTER TABLE o ADD PARTITION p2 VALUES LESS THAN (2030)",
+    );
+    let error = failure(
+        &mut session,
+        "ALTER TABLE o MERGE PARTITIONS p0, p2 INTO PARTITION p02",
+    );
+    assert_eq!(error.vendor_code(), Some(14274), "{error}");
+    answer(
+        &mut session,
+        "ALTER TABLE o MERGE PARTITIONS p1, p0 INTO PARTITION p01",
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT COUNT(*) FROM o PARTITION (p01)"),
+        "COUNT(*)\n3\nSELECT 1"
+    );
+}
+
+#[test]
+fn oracle_merges_list_partitions_into_the_default() {
+    let store = MemoryStore::default();
+    let mut session = regions(&store);
+    answer(
+        &mut session,
+        "ALTER TABLE sales MERGE PARTITIONS west, other INTO PARTITION rest",
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT id FROM sales PARTITION (rest) ORDER BY id"),
+        "ID\n2\n3\nSELECT 2"
+    );
+    answer(&mut session, "INSERT INTO sales VALUES (4, 'S')");
+    assert_eq!(
+        answer(&mut session, "SELECT COUNT(*) FROM sales PARTITION (rest)"),
+        "COUNT(*)\n3\nSELECT 1"
+    );
+}
+
+#[test]
+fn oracle_adds_and_drops_list_values() {
+    let store = MemoryStore::default();
+    let mut session = regions(&store);
+    let error = failure(
+        &mut session,
+        "ALTER TABLE sales MODIFY PARTITION east ADD VALUES ('N')",
+    );
+    assert_eq!(error.vendor_code(), Some(14324), "{error}");
+    answer(&mut session, "ALTER TABLE sales MODIFY PARTITION east ADD VALUES ('X')");
+    answer(&mut session, "INSERT INTO sales VALUES (5, 'X')");
+    assert_eq!(
+        answer(&mut session, "SELECT id FROM sales PARTITION (east) ORDER BY id"),
+        "ID\n1\n5\nSELECT 2"
+    );
+    let error = failure(
+        &mut session,
+        "ALTER TABLE sales MODIFY PARTITION east DROP VALUES ('X')",
+    );
+    assert_eq!(error.vendor_code(), Some(14518), "{error}");
+    let error = failure(
+        &mut session,
+        "ALTER TABLE sales MODIFY PARTITION west DROP VALUES ('W')",
+    );
+    assert_eq!(error.vendor_code(), Some(14314), "{error}");
+    let error = failure(
+        &mut session,
+        "ALTER TABLE sales MODIFY PARTITION west ADD VALUES ('W')",
+    );
+    assert_eq!(error.vendor_code(), Some(14312), "{error}");
+}
+
+#[test]
+fn mysql_insert_ignore_skips_rows_outside_the_named_partitions_with_a_warning() {
+    let store = MemoryStore::default();
+    let mut session = years(&store, Dialect::MySql);
+    answer(
+        &mut session,
+        "INSERT IGNORE INTO o PARTITION (p0) VALUES (7, 1990), (8, 2010), (9, 2050)",
+    );
+    assert_eq!(answer(&mut session, "SELECT count(*) FROM o"), "count(*)\n4\nSELECT 1");
+    assert_eq!(
+        answer(&mut session, "SELECT id FROM o PARTITION (p0) ORDER BY id"),
+        "id\n1\n7\nSELECT 2"
+    );
+    let error = failure(
+        &mut session,
+        "INSERT INTO o PARTITION (p0) VALUES (10, 2010)",
+    );
+    assert_eq!(error.vendor_code(), Some(1748), "{error}");
+}
