@@ -30,9 +30,10 @@ Check each task against these before starting and again before opening the PR.
 3. **Single.** One binary that is both the server and an embeddable library (in-process, like
    SQLite). One process, one data directory (or one file when embedded), one config, one backup.
    No helper services to install. (D3)
-4. **Lightweight.** The binary size, idle memory, startup time and on-disk overhead are measured
-   for every release and may only shrink. Features the user doesn't use cost nothing at runtime.
-   Any growth needs a stated reason and is handled like a performance regression. (D6)
+4. **Lightweight.** Binary size, idle memory and startup time have final targets
+   (`benchmarks/footprint.txt`), checked and trimmed in the Saturday weekly performance pass, not in
+   CI; every release still publishes its sizes. Features the user doesn't use cost nothing at
+   runtime. (D6, D354)
 5. **The fastest, with the best performance.** Every hot path gets a benchmark when it is written,
    compared with the best existing database for that workload (SQLite, PostgreSQL, MySQL, DuckDB,
    ClickHouse, Redis/Valkey/Dragonfly, Elasticsearch, MongoDB, Cassandra/ScyllaDB and others) on the
