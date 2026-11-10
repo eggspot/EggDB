@@ -2,7 +2,7 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::json::{Json, Node, Step};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [(&str, &str, &[usize]); 8] = [
+pub(crate) const FUNCTIONS: [(&str, &str, &[usize]); 13] = [
     ("json", "sqlite_json", &[1]),
     ("json_valid", "sqlite_json_valid", &[1]),
     ("json_type", "sqlite_json_type", &[1, 2]),
@@ -11,6 +11,11 @@ pub(crate) const FUNCTIONS: [(&str, &str, &[usize]); 8] = [
     ("json_object", "sqlite_json_object", &[]),
     ("json_array_length", "sqlite_json_array_length", &[1, 2]),
     ("json_quote", "sqlite_json_quote", &[1]),
+    ("json_set", "sqlite_json_set", &[]),
+    ("json_insert", "sqlite_json_insert", &[]),
+    ("json_replace", "sqlite_json_replace", &[]),
+    ("json_remove", "sqlite_json_remove", &[]),
+    ("json_patch", "sqlite_json_patch", &[2]),
 ];
 
 pub(crate) fn named(name: &str) -> Option<(&'static str, &'static [usize])> {
@@ -23,7 +28,13 @@ pub(crate) fn named(name: &str) -> Option<(&'static str, &'static [usize])> {
 pub(crate) fn takes_any_count(internal: &str) -> bool {
     matches!(
         internal,
-        "sqlite_json_extract" | "sqlite_json_array" | "sqlite_json_object"
+        "sqlite_json_extract"
+            | "sqlite_json_array"
+            | "sqlite_json_object"
+            | "sqlite_json_set"
+            | "sqlite_json_insert"
+            | "sqlite_json_replace"
+            | "sqlite_json_remove"
     )
 }
 
@@ -52,40 +63,65 @@ fn document(value: &Value) -> SqlResult<Option<(String, Node)>> {
     Ok(Some((text, node)))
 }
 
-fn steps(path: &str) -> SqlResult<Vec<Step>> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PathStep {
+    Key(String),
+    Index(i64),
+    End,
+}
+
+fn reading_steps(path: &str) -> SqlResult<Vec<Step>> {
+    path_steps(path)?
+        .into_iter()
+        .map(|step| match step {
+            PathStep::Key(key) => Ok(Step::Key(key)),
+            PathStep::Index(index) => Ok(Step::Index(index)),
+            PathStep::End => Ok(Step::Index(i64::MAX)),
+        })
+        .collect()
+}
+
+fn path_steps(path: &str) -> SqlResult<Vec<PathStep>> {
     let mut rest = path.strip_prefix('$').ok_or_else(|| bad_path(path))?;
     let mut found = Vec::new();
     while !rest.is_empty() {
         if let Some(after) = rest.strip_prefix('.') {
             if let Some(quoted) = after.strip_prefix('"') {
                 let end = quoted.find('"').ok_or_else(|| bad_path(path))?;
-                found.push(Step::Key(quoted[..end].to_owned()));
+                found.push(PathStep::Key(quoted[..end].to_owned()));
                 rest = &quoted[end + 1..];
             } else {
                 let end = after.find(['.', '[']).unwrap_or(after.len());
                 if end == 0 {
                     return Err(bad_path(path));
                 }
-                found.push(Step::Key(after[..end].to_owned()));
+                found.push(PathStep::Key(after[..end].to_owned()));
                 rest = &after[end..];
             }
         } else if let Some(after) = rest.strip_prefix('[') {
             let end = after.find(']').ok_or_else(|| bad_path(path))?;
             let inside = after[..end].trim();
-            let index = if let Some(back) = inside.strip_prefix('#') {
+            let step = if let Some(back) = inside.strip_prefix('#') {
                 let back = back.trim();
                 if back.is_empty() {
-                    return Err(bad_path(path));
+                    PathStep::End
+                } else {
+                    let count: i64 = back
+                        .strip_prefix('-')
+                        .and_then(|digits| digits.trim().parse().ok())
+                        .ok_or_else(|| bad_path(path))?;
+                    PathStep::Index(count.checked_neg().ok_or_else(|| bad_path(path))?)
                 }
-                let count: i64 = back
-                    .strip_prefix('-')
-                    .and_then(|digits| digits.trim().parse().ok())
-                    .ok_or_else(|| bad_path(path))?;
-                count.checked_neg().ok_or_else(|| bad_path(path))?
             } else {
-                inside.parse::<i64>().ok().filter(|index| *index >= 0).ok_or_else(|| bad_path(path))?
+                PathStep::Index(
+                    inside
+                        .parse::<i64>()
+                        .ok()
+                        .filter(|index| *index >= 0)
+                        .ok_or_else(|| bad_path(path))?,
+                )
             };
-            found.push(Step::Index(index));
+            found.push(step);
             rest = &after[end + 1..];
         } else {
             return Err(bad_path(path));
@@ -96,7 +132,7 @@ fn steps(path: &str) -> SqlResult<Vec<Step>> {
 
 fn at<'n>(node: &'n Node, path: &str) -> SqlResult<Option<&'n Node>> {
     let mut current = node;
-    for step in steps(path)? {
+    for step in reading_steps(path)? {
         match crate::json::child(current, &step, false) {
             Some(next) => current = next,
             None => return Ok(None),
@@ -313,6 +349,11 @@ pub(crate) fn call(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
             out.push('}');
             Ok(Value::Json(out))
         })(),
+        "sqlite_json_set" | "sqlite_json_insert" | "sqlite_json_replace" => {
+            edited(name, values)
+        }
+        "sqlite_json_remove" => removed(values),
+        "sqlite_json_patch" => patched(values),
         "sqlite_json_quote" => (|| {
             let mut out = String::new();
             write_sql_value(first, &mut out)?;
@@ -321,3 +362,196 @@ pub(crate) fn call(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
         _ => return None,
     })
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Edit {
+    Set,
+    Insert,
+    Replace,
+}
+
+fn bare(value: Json) -> Node {
+    Node {
+        value,
+        start: 0,
+        end: 0,
+    }
+}
+
+fn json_of_value(value: &Value) -> SqlResult<Json> {
+    let mut text = String::new();
+    write_sql_value(value, &mut text)?;
+    crate::json::parse(&text, false)
+        .map(|node| node.value)
+        .map_err(|_| malformed())
+}
+
+fn array_position(length: usize, index: i64) -> Option<usize> {
+    let position = if index < 0 {
+        i64::try_from(length).ok()?.checked_add(index)?
+    } else {
+        index
+    };
+    usize::try_from(position).ok()
+}
+
+fn place(target: &mut Json, path: &[PathStep], new: Json, edit: Edit) {
+    let Some((step, rest)) = path.split_first() else {
+        if edit != Edit::Insert {
+            *target = new;
+        }
+        return;
+    };
+    match (target, step) {
+        (Json::Object(members), PathStep::Key(key)) => {
+            match members.iter_mut().find(|(name, _)| name == key) {
+                Some((_, child)) => place(&mut child.value, rest, new, edit),
+                None if edit != Edit::Replace => {
+                    let mut created = if rest.is_empty() {
+                        new
+                    } else if matches!(rest.first(), Some(PathStep::Key(_))) {
+                        Json::Object(Vec::new())
+                    } else {
+                        Json::Array(Vec::new())
+                    };
+                    if !rest.is_empty() {
+                        place(&mut created, rest, new, edit);
+                    }
+                    members.push((key.clone(), bare(created)));
+                }
+                None => {}
+            }
+        }
+        (Json::Array(items), PathStep::Index(index)) => {
+            if let Some(position) = array_position(items.len(), *index) {
+                if let Some(child) = items.get_mut(position) {
+                    place(&mut child.value, rest, new, edit);
+                } else if position == items.len() && edit != Edit::Replace && rest.is_empty() {
+                    items.push(bare(new));
+                }
+            }
+        }
+        (Json::Array(items), PathStep::End) if edit != Edit::Replace => {
+            if rest.is_empty() {
+                items.push(bare(new));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn edited(name: &str, values: &[Value]) -> SqlResult<Value> {
+    let edit = match name {
+        "sqlite_json_insert" => Edit::Insert,
+        "sqlite_json_replace" => Edit::Replace,
+        _ => Edit::Set,
+    };
+    if values.len() % 2 == 0 {
+        return Err(SqlError::new(
+            SqlState::UNDEFINED_FUNCTION,
+            "json_set() needs an odd number of arguments",
+        )
+        .with_sqlite_code(1));
+    }
+    let Some((_, node)) = document(values.first().unwrap_or(&Value::Null))? else {
+        return Ok(Value::Null);
+    };
+    let mut root = node.value;
+    for pair in values[1..].chunks(2) {
+        let Some(path) = path_text(&pair[0])? else {
+            return Ok(Value::Null);
+        };
+        let steps = path_steps(&path)?;
+        let new = json_of_value(pair.get(1).unwrap_or(&Value::Null))?;
+        place(&mut root, &steps, new, edit);
+    }
+    Ok(Value::Json(minified(&root)))
+}
+
+fn remove_at(target: &mut Json, path: &[PathStep]) {
+    let Some((step, rest)) = path.split_first() else {
+        return;
+    };
+    match (target, step) {
+        (Json::Object(members), PathStep::Key(key)) => {
+            let Some(position) = members.iter().position(|(name, _)| name == key) else {
+                return;
+            };
+            if rest.is_empty() {
+                members.remove(position);
+            } else if let Some((_, child)) = members.get_mut(position) {
+                remove_at(&mut child.value, rest);
+            }
+        }
+        (Json::Array(items), PathStep::Index(index)) => {
+            let Some(position) = array_position(items.len(), *index) else {
+                return;
+            };
+            if position >= items.len() {
+                return;
+            }
+            if rest.is_empty() {
+                items.remove(position);
+            } else if let Some(child) = items.get_mut(position) {
+                remove_at(&mut child.value, rest);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn removed(values: &[Value]) -> SqlResult<Value> {
+    let Some((_, node)) = document(values.first().unwrap_or(&Value::Null))? else {
+        return Ok(Value::Null);
+    };
+    let mut root = node.value;
+    for path in &values[1..] {
+        let Some(path) = path_text(path)? else {
+            return Ok(Value::Null);
+        };
+        let steps = path_steps(&path)?;
+        if steps.is_empty() {
+            return Ok(Value::Null);
+        }
+        remove_at(&mut root, &steps);
+    }
+    Ok(Value::Json(minified(&root)))
+}
+
+fn merge_patch(target: Json, patch: Json) -> Json {
+    let Json::Object(changes) = patch else {
+        return patch;
+    };
+    let mut members = match target {
+        Json::Object(members) => members,
+        _ => Vec::new(),
+    };
+    for (key, change) in changes {
+        let position = members.iter().position(|(name, _)| *name == key);
+        if matches!(change.value, Json::Null) {
+            if let Some(position) = position {
+                members.remove(position);
+            }
+            continue;
+        }
+        match position {
+            Some(position) => {
+                let current = std::mem::replace(&mut members[position].1.value, Json::Null);
+                members[position].1.value = merge_patch(current, change.value);
+            }
+            None => members.push((key, bare(merge_patch(Json::Null, change.value)))),
+        }
+    }
+    Json::Object(members)
+}
+
+fn patched(values: &[Value]) -> SqlResult<Value> {
+    let (Some((_, target)), Some((_, patch))) = (
+        document(values.first().unwrap_or(&Value::Null))?,
+        document(values.get(1).unwrap_or(&Value::Null))?,
+    ) else {
+        return Ok(Value::Null);
+    };
+    Ok(Value::Json(minified(&merge_patch(target.value, patch.value))))
+}
+
