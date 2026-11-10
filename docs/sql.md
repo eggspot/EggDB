@@ -274,7 +274,8 @@ What it reads, on top of the statements of "What runs today":
   `UPDATE OR ROLLBACK|ABORT|FAIL|IGNORE|REPLACE` likewise, row by row for `FAIL` (the rows
   changed before the conflict are kept), `IGNORE` (conflicting rows are left as they were) and
   `REPLACE` (the rows in the way are deleted, and a `NULL` for a `NOT NULL` column takes its
-  default), with SQLite's `UNIQUE constraint failed: t.c` (D338); not with `FROM` or on a view.
+  default), with SQLite's `UNIQUE constraint failed: t.c` (D338), with `FROM` too, and on a view
+  through its `INSTEAD OF` trigger (D373).
   Since `UPDATE OR REPLACE` deletes rows, a checked role needs `DELETE` on the table too
   (`42501` without it), and where a row-level security `DELETE` policy applies to the role it is
   refused (`0A000`), as `REPLACE` and `INSERT OR REPLACE` are (D338).

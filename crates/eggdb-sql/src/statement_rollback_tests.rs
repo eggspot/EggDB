@@ -468,3 +468,41 @@ fn a_failing_mysql_call_keeps_the_procedure_statements_before_the_failing_one() 
     run(&mut session, "COMMIT");
     assert_eq!(shown(&mut session, "SELECT id FROM t ORDER BY id"), ["1", "2", "3"]);
 }
+
+#[test]
+fn sqlite_update_or_ignore_and_or_replace_work_with_from_and_on_a_view_with_a_trigger() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Sqlite);
+    run(
+        &mut session,
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER UNIQUE);
+         CREATE TABLE s (id INTEGER, nv INTEGER);
+         INSERT INTO t VALUES (1, 10), (2, 20), (3, 30);
+         INSERT INTO s VALUES (1, 20), (3, 31)",
+    );
+    run(
+        &mut session,
+        "UPDATE OR IGNORE t SET v = s.nv FROM s WHERE t.id = s.id",
+    );
+    assert_eq!(
+        shown(&mut session, "SELECT v FROM t ORDER BY id"),
+        ["10", "20", "31"]
+    );
+    run(
+        &mut session,
+        "UPDATE OR REPLACE t SET v = s.nv FROM s WHERE t.id = s.id",
+    );
+    assert_eq!(
+        shown(&mut session, "SELECT id, v FROM t ORDER BY id"),
+        ["1|20", "3|31"]
+    );
+    run(
+        &mut session,
+        "CREATE VIEW tv AS SELECT * FROM t;
+         CREATE TRIGGER tv_up INSTEAD OF UPDATE ON tv BEGIN
+           UPDATE t SET v = NEW.v WHERE id = OLD.id;
+         END",
+    );
+    run(&mut session, "UPDATE OR IGNORE tv SET v = 99 WHERE id = 3");
+    assert_eq!(shown(&mut session, "SELECT v FROM t WHERE id = 3"), ["99"]);
+}

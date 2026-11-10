@@ -438,7 +438,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   writing, and dooms the transaction for such an error inside `TRY` (D317). **Code written,
   unbuilt** (code-only mode, 2026-11-10, D371).
 - SQLite's conflict clauses of table constraints (D317), and `UPDATE OR FAIL | IGNORE | REPLACE`
-  with `FROM` or on a view (D338).
+  with `FROM` or on a view (D338). `UPDATE OR ...` with `FROM` and on a view: **code written,
+  unbuilt** (code-only mode, 2026-11-10, D373).
 - A benchmark of a bulk write inside a transaction in MySQL's, SQLite's, Oracle's and SQL
   Server's dialects, measuring statement-level rollback's extra read per key (D317).
 - PostgreSQL's exported snapshots: `pg_export_snapshot()` and `SET TRANSACTION SNAPSHOT` (D318).
