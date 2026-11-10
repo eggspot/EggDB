@@ -2735,7 +2735,10 @@ ALTER TABLE measurements DETACH PARTITION old_rows;
   partitioned table reach every partition. An `UPDATE` through the partitioned table that
   changes a row's key moves the row to the partition that takes it (its count and `RETURNING`
   include it), or fails with `23514 no partition ... found for row` when none does; an `UPDATE`
-  that names a partition moves rows only within it (D316).
+  that names a partition moves rows only within it (D316). As in PostgreSQL, a moved row fires
+  the `BEFORE UPDATE` row triggers, then the source partition's `DELETE` row triggers (a `BEFORE
+  DELETE` trigger returning NULL keeps the row where it is) and the target partition's `INSERT`
+  row triggers, and no `INSERT` statement triggers (D368).
 - **Pruning.** A query reads only the partitions its `WHERE` can match: comparisons, `BETWEEN`,
   `IN` and `IS NULL` on the key (a key expression written as in the key, such as
   `lower(name) = 'ann'`) against constants. `EXPLAIN` lists the partitions read; when one

@@ -732,20 +732,34 @@ pub(crate) fn move_out(
     if leaving.is_empty() {
         return Ok(0);
     }
-    let count = leaving.len();
+    let mut deleting = crate::triggers::Firing::for_moved_row(writer, tables, table)?;
+    let mut count = 0usize;
     let mut propagated = Vec::new();
     for LeavingRow {
         old_key,
-        old_row,
+        mut old_row,
         new_row,
     } in leaving
     {
+        if let Some(firing) = deleting.as_mut() {
+            if old_row.is_none() {
+                old_row = execute::stored_row(&*writer, table, &old_key)?;
+            }
+            let outcome = firing.before_row(writer, tables, old_row.as_deref(), None)?;
+            if outcome == crate::triggers::RowOutcome::Skip {
+                continue;
+            }
+        }
+        count += 1;
         if let Some(old_row) = &old_row
             && !table.indexes.is_empty()
         {
             crate::indexes::delete_entries(writer, table, old_row, &old_key)?;
         }
         writer.delete(&old_key)?;
+        if let Some(firing) = deleting.as_mut() {
+            firing.after_row(writer, tables, old_row.as_deref(), None)?;
+        }
         if let Some(old_row) = old_row
             && crate::constraints::is_referenced(table)
         {
@@ -759,6 +773,9 @@ pub(crate) fn move_out(
             from: Arc::clone(table),
             row: new_row,
         });
+    }
+    if let Some(firing) = deleting {
+        firing.finish();
     }
     if !propagated.is_empty() {
         crate::constraints::propagate(writer, tables, propagated)?;
@@ -798,6 +815,12 @@ fn insert_moved_rows(
     target: TableReference,
     moved: Vec<MovedRow>,
 ) -> SqlResult<()> {
+    if moved.is_empty() {
+        return Ok(());
+    }
+    let mut receiving = crate::partitions::catalog(writer, tables)?.descendants_of(&target.name.text);
+    receiving.push(target.name.text.clone());
+    let _moving = crate::triggers::moving_rows_into(receiving);
     let mut groups: Vec<(Arc<TableDefinition>, Vec<Vec<InsertValue>>)> = Vec::new();
     for MovedRow { from, row } in moved {
         let values = row
