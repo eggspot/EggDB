@@ -436,3 +436,4 @@ its full title with its status.
 - [D409](decisions/D409.md) Code-only batch 56 (M9): MongoDB's `$jsonSchema` query operator
 - [D410](decisions/D410.md) Code-only batch 57 (M9): MongoDB's `renameCollection`
 - [D411](decisions/D411.md) Code-only batch 58 (M9): MongoDB's `explain`
+- [D412](decisions/D412.md) Code-only batch 59 (M9): MongoDB's `OP_COMPRESSED` with snappy and zlib

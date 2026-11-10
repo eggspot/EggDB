@@ -1323,3 +1323,21 @@ fn an_update_with_array_filters_runs_over_the_wire() {
         ]))
     );
 }
+
+#[test]
+fn compressed_replies_restore_to_the_same_message() {
+    use crate::compression::{Compressor, compress_reply, decompress_body};
+    let reply = crate::message::message_reply(
+        7,
+        3,
+        &doc(vec![("ok", Bson::Double(1.0)), ("note", text(&"x".repeat(70_000)))]),
+    );
+    for compressor in [Compressor::Noop, Compressor::Snappy, Compressor::Zlib] {
+        let compressed = compress_reply(&reply, compressor);
+        assert_eq!(&compressed[4..12], &reply[4..12]);
+        let (op_code, used, body) = decompress_body(&compressed[16..]).unwrap();
+        assert_eq!(op_code, crate::message::OP_MSG);
+        assert_eq!(used, compressor);
+        assert_eq!(body, reply[16..].to_vec());
+    }
+}

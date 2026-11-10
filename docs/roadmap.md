@@ -958,7 +958,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   **code written, unbuilt** (code-only mode, 2026-11-10, D410); `explain`: **code written,
   unbuilt** (D411).
 - SCRAM-SHA-1, other users and roles (D197).
-- `OP_COMPRESSED` (D197).
+- `OP_COMPRESSED` (D197). **Code written, unbuilt** (code-only mode, 2026-11-10, D412).
 - `mongorestore` inputs: `--gzip`, `--archive`, unique indexes, and a smoke-test sample dump
   (D197).
 - Following a live MongoDB through its change streams for a switch with no downtime (D13).

@@ -7,6 +7,7 @@
 
 mod aggregate;
 mod commands;
+mod compression;
 mod cursors;
 mod explain;
 mod message;

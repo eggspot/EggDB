@@ -12,6 +12,8 @@ workspace = true
 [dependencies]
 eggdb-auth = { path = "../eggdb-auth" }
 eggdb-bson = { path = "../eggdb-bson" }
+eggdb-columnar = { path = "../eggdb-columnar" }
+eggdb-content = { path = "../eggdb-content" }
 eggdb-documents = { path = "../eggdb-documents" }
 eggdb-keyspace = { path = "../eggdb-keyspace" }
 eggdb-platform = { path = "../eggdb-platform" }

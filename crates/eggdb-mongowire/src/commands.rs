@@ -215,6 +215,15 @@ fn hello(session: &Session, body: &Document, legacy: bool) -> Document {
     reply.insert("minWireVersion", Bson::Int32(0));
     reply.insert("maxWireVersion", Bson::Int32(MAX_WIRE_VERSION));
     reply.insert("readOnly", Bson::Boolean(false));
+    if let Some(Bson::Array(offered)) = body.get("compression") {
+        let agreed: Vec<Bson> = offered
+            .iter()
+            .filter_map(Bson::as_str)
+            .filter(|name| crate::compression::NEGOTIATED.contains(name))
+            .map(text)
+            .collect();
+        reply.insert("compression", Bson::Array(agreed));
+    }
     if body.get_str("saslSupportedMechs").is_some() {
         reply.insert(
             "saslSupportedMechs",

@@ -1,4 +1,5 @@
 use crate::commands::{Shared, exceeded_memory_limit, run};
+use crate::compression::{OP_COMPRESSED, compress_reply, decompress_body};
 use crate::cursors::Cursors;
 use crate::message::{
     HEADER_BYTES, OP_MSG, OP_QUERY, Request, message_reply, query_reply, read_header, read_message,
@@ -151,7 +152,28 @@ pub(crate) fn serve_stream(
         }
         let mut body = vec![0u8; header.length - HEADER_BYTES];
         reader.read_exact(&mut body)?;
-        let request = match header.op_code {
+        let (op_code, compressor, body) = if header.op_code == OP_COMPRESSED {
+            let Ok((op_code, compressor, restored)) = decompress_body(&body) else {
+                return Ok(());
+            };
+            if !held.hold_if_large(restored.len() + HEADER_BYTES) {
+                let refusal = exceeded_memory_limit(&format!(
+                    "a message of {} bytes",
+                    restored.len() + HEADER_BYTES
+                ));
+                writer.write_all(&refusal_reply(
+                    op_code,
+                    next_reply_id,
+                    header.request_id,
+                    &refusal,
+                ))?;
+                return Ok(());
+            }
+            (op_code, Some(compressor), restored)
+        } else {
+            (header.op_code, None, body)
+        };
+        let request = match op_code {
             OP_MSG => read_message(&body),
             OP_QUERY => read_query(&body),
             _ => return Ok(()),
@@ -199,7 +221,10 @@ pub(crate) fn serve_stream(
         }
         next_reply_id = next_reply_id.wrapping_add(1);
         if let Some(reply) = reply {
-            writer.write_all(&reply)?;
+            match compressor {
+                Some(compressor) => writer.write_all(&compress_reply(&reply, compressor))?,
+                None => writer.write_all(&reply)?,
+            }
         }
         held.hold_if_large(0);
     }
