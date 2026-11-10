@@ -694,7 +694,7 @@ impl TypedBound {
     }
 }
 
-fn table_scope(table: &TableDefinition) -> Scope<'_> {
+pub(crate) fn table_scope(table: &TableDefinition) -> Scope<'_> {
     Scope::One(Source {
         table,
         label: &table.name,
@@ -860,6 +860,42 @@ fn cast_reads_settings(from: SqlType, to: SqlType) -> bool {
     zone_to_local || local_to_zone || datetime_to_text || text_to_datetime || text_to_catalog
 }
 
+fn first_unknown_function(
+    expr: &Expr,
+    table: &TableDefinition,
+    user_function_exists: &mut dyn FnMut(&str) -> bool,
+) -> Option<SqlError> {
+    let mut found = None;
+    let mut parts = vec![expr];
+    while let Some(part) = parts.pop() {
+        if let ExprKind::Function { name, arguments } = &part.kind {
+            let lowered = name.to_ascii_lowercase();
+            let bare = lowered.strip_prefix("pg_catalog.").unwrap_or(&lowered);
+            if !crate::eval::is_builtin_function(bare) && !user_function_exists(&lowered) {
+                let types: Vec<String> = arguments
+                    .iter()
+                    .map(|argument| {
+                        crate::typing::static_type(argument, table_scope(table))
+                            .map_or_else(|| "unknown".to_owned(), SqlType::name)
+                    })
+                    .collect();
+                found = Some(
+                    SqlError::new(
+                        SqlState::UNDEFINED_FUNCTION,
+                        format!("function {name}({}) does not exist", types.join(", ")),
+                    )
+                    .with_hint(
+                        "No function matches the given name and argument types. You might need to add explicit type casts.",
+                    ),
+                );
+                break;
+            }
+        }
+        parts.extend(crate::eval::children(part));
+    }
+    found
+}
+
 fn function_is_immutable(name: &str, arguments: &[Option<SqlType>]) -> bool {
     let has_zoned = arguments
         .iter()
@@ -895,8 +931,14 @@ pub(crate) fn check_key_expression(
     expr: &Expr,
     dialect: Dialect,
     position: usize,
+    user_function_exists: &mut dyn FnMut(&str) -> bool,
 ) -> SqlResult<()> {
     crate::eval::check_columns(expr, table_scope(table))?;
+    if dialect == Dialect::PostgreSql
+        && let Some(missing) = first_unknown_function(expr, table, user_function_exists)
+    {
+        return Err(missing.at(position));
+    }
     if any_part(expr, &|part| matches!(part.kind, ExprKind::Subquery(_))) {
         return Err(SqlError::new(
             SqlState::FEATURE_NOT_SUPPORTED,

@@ -121,6 +121,7 @@ fn validated_key(
     table: &TableDefinition,
     by: &PartitionBy,
     dialect: Dialect,
+    user_function_exists: &mut dyn FnMut(&str) -> bool,
 ) -> SqlResult<PartitionKey> {
     let mut parts: Vec<KeyPart> = Vec::with_capacity(by.key.len());
     let mut positions = Vec::with_capacity(by.key.len());
@@ -153,13 +154,22 @@ fn validated_key(
                 text,
                 position,
             } => {
-                crate::partitions::check_key_expression(table, expr, dialect, *position)?;
+                crate::partitions::check_key_expression(
+                    table,
+                    expr,
+                    dialect,
+                    *position,
+                    user_function_exists,
+                )?;
                 parts.push(KeyPart::Expression {
                     text: text.clone(),
                     dialect,
                 });
             }
         }
+    }
+    if by.mysql_integer_key {
+        check_mysql_integer_key(table, by)?;
     }
     if by.strategy == PartitionStrategy::List && parts.len() != 1 {
         return Err(SqlError::new(
@@ -199,6 +209,101 @@ fn validated_key(
         return Err(unique_lacks_key(by.position));
     }
     Ok(key)
+}
+
+const MYSQL_PARTITION_FUNCTIONS: [&str; 23] = [
+    "abs",
+    "ceiling",
+    "datediff",
+    "day",
+    "dayofmonth",
+    "dayofweek",
+    "dayofyear",
+    "extract",
+    "floor",
+    "hour",
+    "microsecond",
+    "minute",
+    "mod",
+    "month",
+    "quarter",
+    "second",
+    "time_to_sec",
+    "to_days",
+    "to_seconds",
+    "unix_timestamp",
+    "weekday",
+    "year",
+    "yearweek",
+];
+
+fn is_mysql_integer(sql_type: crate::types::SqlType) -> bool {
+    use crate::types::SqlType;
+    matches!(
+        sql_type,
+        SqlType::SmallInt | SqlType::Integer | SqlType::BigInt
+    )
+}
+
+fn is_mysql_number(sql_type: crate::types::SqlType) -> bool {
+    use crate::types::SqlType;
+    is_mysql_integer(sql_type)
+        || matches!(
+            sql_type,
+            SqlType::Numeric(_) | SqlType::Real | SqlType::Double
+        )
+}
+
+fn check_mysql_integer_key(table: &TableDefinition, by: &PartitionBy) -> SqlResult<()> {
+    for part in &by.key {
+        match part {
+            PartitionKeyPart::Column(column) => {
+                let Some(index) = table.column_index(&column.text) else {
+                    continue;
+                };
+                if !is_mysql_integer(table.columns[index].sql_type) {
+                    return Err(SqlError::new(
+                        SqlState::INVALID_TABLE_DEFINITION,
+                        format!(
+                            "Field '{}' is of a not allowed type for this type of partitioning",
+                            column.text
+                        ),
+                    )
+                    .with_vendor_code(1659)
+                    .at(column.position));
+                }
+            }
+            PartitionKeyPart::Expression { expr, position, .. } => {
+                let refused_function = crate::partitions::any_part(expr, &|part| {
+                    matches!(
+                        &part.kind,
+                        crate::ast::ExprKind::Function { name, .. }
+                            if !MYSQL_PARTITION_FUNCTIONS
+                                .contains(&name.to_ascii_lowercase().as_str())
+                    )
+                });
+                if refused_function {
+                    return Err(SqlError::new(
+                        SqlState::INVALID_TABLE_DEFINITION,
+                        "This partition function is not allowed",
+                    )
+                    .with_vendor_code(1564)
+                    .at(*position));
+                }
+                let known_type =
+                    crate::typing::static_type(expr, crate::partitions::table_scope(table));
+                if known_type.is_some_and(|sql_type| !is_mysql_number(sql_type)) {
+                    return Err(SqlError::new(
+                        SqlState::INVALID_TABLE_DEFINITION,
+                        "The PARTITION function returns the wrong type",
+                    )
+                    .with_vendor_code(1491)
+                    .at(*position));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn unique_lacks_key(position: usize) -> SqlError {
@@ -254,7 +359,13 @@ pub(crate) fn create_table(
     };
     let result = execute::create_table(writer, tables, &plain, dialect)?;
     let table = tables.require_target(writer, &create.name, "partition")?;
-    let key = validated_key(&table, by, dialect)?;
+    let mut user_function_exists = |name: &str| {
+        crate::routines::of_name(&*writer, tables, name)
+            .ok()
+            .flatten()
+            .is_some()
+    };
+    let key = validated_key(&table, by, dialect, &mut user_function_exists)?;
     let mut record = crate::partitions::stored(writer, &table.name)?;
     record.key = Some(key.clone());
     crate::partitions::save(writer, &table.name, &record)?;

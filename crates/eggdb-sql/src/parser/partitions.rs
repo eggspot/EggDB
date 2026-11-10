@@ -76,24 +76,28 @@ impl Parser<'_> {
         let position = self.position();
         self.expect_word("partition")?;
         self.expect_word("by")?;
+        let mut by_key = false;
         let strategy = if self.take_word("range") {
             PartitionStrategy::Range
         } else if self.take_word("list") {
             PartitionStrategy::List
-        } else if self.take_word("hash") || (self.mysql() && self.take_word("key")) {
+        } else if self.take_word("hash") {
+            PartitionStrategy::Hash
+        } else if self.mysql() && self.take_word("key") {
+            by_key = true;
             PartitionStrategy::Hash
         } else {
             return Err(self.unexpected());
         };
-        if !self.postgresql() {
-            self.take_word("columns");
-        }
+        let by_columns = !self.postgresql() && self.take_word("columns");
+        let mysql_integer_key = self.mysql() && !by_key && !by_columns;
         let key = self.partition_key()?;
         let mut partition_by = PartitionBy {
             strategy,
             key,
             partitions: Vec::new(),
             hash_partitions: None,
+            mysql_integer_key,
             position,
         };
         if self.postgresql() {
