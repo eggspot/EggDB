@@ -407,3 +407,4 @@ its full title with its status.
 - [D380](decisions/D380.md) Code-only batch 26 (M5): SQLite's `->` and `->>` JSON operators
 - [D381](decisions/D381.md) Code-only batch 27 (M5): SQLite's `json_group_array` and `json_group_object`
 - [D382](decisions/D382.md) Code-only batch 28 (M5): SQLite's `json_each` and `json_tree`
+- [D383](decisions/D383.md) Code-only batch 29 (M5): SQLite's temporary triggers

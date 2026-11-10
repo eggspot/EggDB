@@ -255,7 +255,36 @@ fn any_enabled(
     }))
 }
 
+pub(crate) fn temporary_owner(table: &str) -> String {
+    let shown = table.replace(crate::schemas::QUALIFIER, "\u{2}");
+    crate::temporary::internal_name(&format!("\u{1}{shown}"))
+}
+
 pub(crate) fn of_table(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    table: &str,
+) -> SqlResult<Option<Arc<TableTriggers>>> {
+    let permanent = permanent_of_table(reader, tables, table)?;
+    if !crate::temporary::active() || crate::temporary::is_temporary_name(table) {
+        return Ok(permanent);
+    }
+    let owner = temporary_owner(table);
+    let Some(bytes) = reader.get(&trigger_key(&owner))? else {
+        return Ok(permanent);
+    };
+    let temporary = decode_triggers(&owner, &bytes)?;
+    let mut triggers = permanent
+        .map(|found| found.triggers.clone())
+        .unwrap_or_default();
+    triggers.extend(temporary.triggers);
+    Ok(Some(Arc::new(TableTriggers {
+        table: table.to_owned(),
+        triggers,
+    })))
+}
+
+fn permanent_of_table(
     reader: &dyn KeyValueRead,
     tables: &mut TableCache,
     table: &str,
@@ -577,7 +606,12 @@ pub(crate) fn create_trigger(
         TriggerAction::Statements(_) | TriggerAction::Batch(_) => {}
     }
     let mut result = QueryResult::command("CREATE TRIGGER");
-    let mut triggers = stored(&*writer, &create.table.text)?;
+    let owner_table = if create.temporary {
+        temporary_owner(&create.table.text)
+    } else {
+        create.table.text.clone()
+    };
+    let mut triggers = stored(&*writer, &owner_table)?;
     if let Some(owner) = already_named(&*writer, &create.table.text, &definition.name, dialect)? {
         if create.if_not_exists {
             if dialect == Dialect::MySql {
@@ -590,7 +624,7 @@ pub(crate) fn create_trigger(
                 errors::duplicate(&definition.name, &owner, dialect).at(create.name.position)
             );
         }
-        if owner != create.table.text {
+        if owner != owner_table {
             if matches!(dialect, Dialect::SqlServer | Dialect::Oracle) {
                 let mut other = stored(&*writer, &owner)?;
                 other

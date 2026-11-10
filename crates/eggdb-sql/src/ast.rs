@@ -244,6 +244,7 @@ pub(crate) enum RoutineSettingChange {
 pub(crate) struct CreateTrigger {
     pub(crate) name: Name,
     pub(crate) table: Name,
+    pub(crate) temporary: bool,
     pub(crate) replace: bool,
     pub(crate) if_not_exists: bool,
     pub(crate) placement: Option<TriggerPlacement>,

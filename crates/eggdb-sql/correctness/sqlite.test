@@ -1943,3 +1943,42 @@ SELECT value FROM json_each('[10,20,30]', '$') WHERE key = 1
 value
 20
 SELECT 1
+
+chapter "CREATE TRIGGER": TEMP triggers on a main table fire in their own session only (D383)
+ok
+CREATE TABLE tt383 (id INTEGER PRIMARY KEY, n INTEGER)
+
+ok
+CREATE TABLE log383 (msg TEXT)
+
+ok
+CREATE TEMP TRIGGER tt383_log AFTER INSERT ON tt383 BEGIN INSERT INTO log383 VALUES ('added ' || NEW.id); END
+
+ok
+INSERT INTO tt383 VALUES (1, 10)
+
+rows
+SELECT msg FROM log383
+----
+msg
+added 1
+SELECT 1
+
+ok
+DROP TRIGGER tt383_log
+
+ok
+INSERT INTO tt383 VALUES (2, 20)
+
+rows
+SELECT count(*) AS n FROM log383
+----
+n
+1
+SELECT 1
+
+ok
+DROP TABLE tt383
+
+ok
+DROP TABLE log383

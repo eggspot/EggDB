@@ -4830,7 +4830,8 @@ And more, not in the suite yet:
   array index (negative from the end) (D380), and the aggregates `json_group_array(X)` and
   `json_group_object(NAME, VALUE)` (`[]` and `{}` over no rows) (D381), and the table-valued
   `json_each(X [, P])` and `json_tree(X [, P])` with SQLite's columns `key`, `value`, `type`,
-  `atom`, `id`, `parent`, `fullkey` and `path` (D382).
+  `atom`, `id`, `parent`, `fullkey` and `path` (D382). `CREATE TEMP TRIGGER` defines a trigger,
+  on a temporary or a main table, that only its session sees and that ends with it (D383).
 
 ## Known differences from Oracle
 The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 773 cases from Oracle's SQL

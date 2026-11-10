@@ -109,6 +109,7 @@ impl<'t> Parser<'t> {
         Ok(Statement::CreateTrigger(Box::new(CreateTrigger {
             name,
             table: heading.table,
+            temporary: false,
             replace,
             if_not_exists: false,
             placement: heading.placement,

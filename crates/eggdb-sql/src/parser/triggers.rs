@@ -229,9 +229,13 @@ impl<'t> Parser<'t> {
             }
             replace = true;
         }
-        if self.is_word("temp") || self.is_word("temporary") {
-            return Err(self.not_supported("CREATE TEMP TRIGGER"));
-        }
+        let temporary = (self.is_word("temp") || self.is_word("temporary")) && {
+            if !self.sqlite() {
+                return Err(self.not_supported("CREATE TEMP TRIGGER"));
+            }
+            self.at += 1;
+            true
+        };
         if self.is_word("constraint") {
             return Err(self.not_supported("CREATE CONSTRAINT TRIGGER"));
         }
@@ -275,6 +279,7 @@ impl<'t> Parser<'t> {
         Ok(Statement::CreateTrigger(Box::new(CreateTrigger {
             name,
             table: parts.table,
+            temporary,
             replace,
             if_not_exists,
             placement: parts.placement,
