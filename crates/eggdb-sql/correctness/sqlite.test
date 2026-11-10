@@ -1885,3 +1885,11 @@ SELECT json_patch('{"a":1,"b":{"c":2,"d":3}}', '{"a":null,"b":{"c":9},"e":4}') A
 p
 {"b":{"c":9,"d":3},"e":4}
 SELECT 1
+
+chapter "JSON Functions And Operators": the -> and ->> operators (D380)
+rows
+SELECT '{"a":{"b":[1,"x"]}}' -> '$.a' AS j, '{"a":{"b":[1,"x"]}}' ->> '$.a.b[1]' AS t, '{"k":"v"}' ->> 'k' AS label, '[10,20,30]' ->> -1 AS last, '{"a":1}' -> 'b' AS missing
+----
+j|t|label|last|missing
+{"b":[1,"x"]}|x|v|30|NULL
+SELECT 1

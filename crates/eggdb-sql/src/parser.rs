@@ -4010,6 +4010,26 @@ impl<'t> Parser<'t> {
                     let right = self.expression_above(Level::Additive)?;
                     return Ok(Self::binary(left, operator, right));
                 }
+                if self.sqlite()
+                    && let TokenKind::Operator(symbol) = self.peek_kind()
+                    && (*symbol == "->" || *symbol == "->>")
+                {
+                    let name = if *symbol == "->" {
+                        "sqlite_json_arrow"
+                    } else {
+                        "sqlite_json_arrow_text"
+                    };
+                    self.at += 1;
+                    let right = self.expression_above(Level::Additive)?;
+                    let position = left.position;
+                    return Ok(Expr {
+                        kind: ExprKind::SqliteFunction {
+                            name,
+                            arguments: vec![left, right],
+                        },
+                        position,
+                    });
+                }
                 if self.postgresql() && self.take_operator("#=") {
                     let right = self.expression_above(Level::Additive)?;
                     let position = left.position;

@@ -349,6 +349,7 @@ pub(crate) fn call(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
             out.push('}');
             Ok(Value::Json(out))
         })(),
+        "sqlite_json_arrow" | "sqlite_json_arrow_text" => arrow(name, values),
         "sqlite_json_set" | "sqlite_json_insert" | "sqlite_json_replace" => {
             edited(name, values)
         }
@@ -553,5 +554,35 @@ fn patched(values: &[Value]) -> SqlResult<Value> {
         return Ok(Value::Null);
     };
     Ok(Value::Json(minified(&merge_patch(target.value, patch.value))))
+}
+
+fn arrow_path(right: &Value) -> Option<String> {
+    match right {
+        Value::Null => None,
+        Value::Text(text) if text.starts_with('$') => Some(text.clone()),
+        Value::Text(text) => Some(format!("$.\"{text}\"")),
+        other => match other.as_integer() {
+            Some(index) if index >= 0 => Some(format!("$[{index}]")),
+            Some(index) => Some(format!("$[#{index}]")),
+            None => other.to_text().map(|text| format!("$.\"{text}\"")),
+        },
+    }
+}
+
+fn arrow(name: &str, values: &[Value]) -> SqlResult<Value> {
+    let Some((_, node)) = document(values.first().unwrap_or(&Value::Null))? else {
+        return Ok(Value::Null);
+    };
+    let Some(path) = arrow_path(values.get(1).unwrap_or(&Value::Null)) else {
+        return Ok(Value::Null);
+    };
+    let Some(found) = at(&node, &path)? else {
+        return Ok(Value::Null);
+    };
+    Ok(if name == "sqlite_json_arrow" {
+        Value::Json(minified(&found.value))
+    } else {
+        sql_value(found)
+    })
 }
 
