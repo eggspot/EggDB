@@ -257,6 +257,8 @@ version = "0.5.0"
 dependencies = [
  "eggdb-auth",
  "eggdb-bson",
+ "eggdb-columnar",
+ "eggdb-content",
  "eggdb-crypto",
  "eggdb-documents",
  "eggdb-keyspace",
