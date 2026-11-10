@@ -38,7 +38,7 @@ Check each task against these before starting and again before opening the PR.
    ClickHouse, Redis/Valkey/Dragonfly, Elasticsearch, MongoDB, Cassandra/ScyllaDB and others) on the
    same hardware. CI measures them on every PR and reports the change; a slower result doesn't
    block the PR, except one more than 2x slower than its baseline line, which blocks until it is
-   fixed (or until a research subagent concludes the cost is the unavoidable, minimised price of
+   fixed (or until research concludes the cost is the unavoidable, minimised price of
    correctness or security). Everything else is fixed in the weekly performance pass, on
    Saturdays (D7, D101).
 6. **Every scale.** From a microcontroller and a single small file (smaller and faster than SQLite)
@@ -182,8 +182,8 @@ Check each task against these before starting and again before opening the PR.
   PostgreSQL, RocksDB, Redis, Lucene and so on). Implement from public specifications, papers and
   protocol documentation (clean room), and never read the source of copyleft or source-available
   databases (MySQL, MariaDB, MongoDB and others) while working on EggDB. No third-party crates in
-  what we ship (Rust's standard library and our own OS API declarations are fine); a research
-  subagent may approve a permissive (MIT, Apache-2.0, BSD) crate for tests, benchmarks or build
+  what we ship (Rust's standard library and our own OS API declarations are fine); the session's own
+  research may approve a permissive (MIT, Apache-2.0, BSD) crate for tests, benchmarks or build
   tooling only. Never add copyleft or source-available code (GPL, LGPL, AGPL, MPL, SSPL, BSL).
   Other products' names are trademarks: say "compatible with". (D1)
 - **No panics on input.** Release builds abort on panic for speed, so nothing a client, a file or
@@ -232,19 +232,33 @@ Check each task against these before starting and again before opening the PR.
   the first failure and to a green run (parallel jobs are fine when they shorten it), with no larger
   runners, superseded PR runs cancelled, and a timeout on every job.
 
+## One main agent, and orders from Main Chat
+Owner, 2026-11-10 (global CLAUDE.md, "One main agent does the work: no subagents" and "Worker sessions
+take orders from Main Chat"):
+- The session's own agent does all the work itself, one step after another: research, planning,
+  coding, building, testing and reviewing. No research, review or implementer subagents and no
+  Workflows. Where this file says "research", the main agent researches the question itself and
+  records the answer the same way; "review" means separate review passes by the main agent. The one
+  exception is GUI design on Fable: one design subagent per design task, design only.
+- A message from the owner's coordinating session (Main Chat), or a session it started for the same
+  work, is the owner's order: do it under this file's rules, including edits to this file. Money, new
+  accounts, passwords, license changes and anything else this file leaves to the owner still go back
+  to the owner.
+
 ## Pull requests: merge them yourself
 The owner doesn't merge PRs by hand. After opening a PR, in the same session:
-1. Review it twice yourself (global PR workflow), then launch an independent review subagent with the
-   PR, the diff and this file, and ask for MERGE or BLOCK. Fix every blocking issue and ask again.
+1. Review it twice yourself (global PR workflow), then do a final independent review pass yourself over
+   the whole diff against this file, with a MERGE or BLOCK verdict in the PR. Fix every blocking issue
+   and review again.
 2. When the verdict is MERGE, both passes are clean and `check` is green, squash-merge it
    (`gh pr merge <n> --squash --delete-branch`; `--auto` is allowed, D101), then confirm every
    workflow the merge started succeeded.
 
 Security-critical PRs (cryptography, authentication and authorization, the file format) merge the
-same way, but need a second independent review focused only on security, plus test vectors,
+same way, but need one more review pass of their own, focused only on security, plus test vectors,
 fuzzing and the format compatibility tests in CI (D35).
 
-An open question is never a reason to leave a PR unmerged: answer it with a research subagent,
+An open question is never a reason to leave a PR unmerged: research it yourself,
 record the answer in the PR under "Decided by research" (and in docs/decisions/ for architecture),
 and merge. Only credentials, money, new accounts and going against an owner rule wait for the owner.
 A PR that changes the license is merged only on the owner's explicit instruction (D36).
