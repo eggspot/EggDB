@@ -7,13 +7,27 @@ on:
     branches: [main]
     paths: ['.github/workflows/release.yml', 'docs/releases/**', 'scripts/smoke-test.sh', 'crates/eggdb/tests/data/**']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: An existing release tag to publish again (vMAJOR.MINOR.PATCH); empty for a dry run of main
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        description: The release tag to build and publish (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
+
+env:
+  TAG: ${{ inputs.tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}
 
 jobs:
   build:
@@ -68,8 +82,16 @@ jobs:
       TARGET: ${{ matrix.target }}
       EXE: ${{ matrix.exe }}
     steps:
+      - name: Check the release tag's form
+        if: env.TAG != ''
+        run: |
+          if ! printf '%s\n' "$TAG" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "::error::release tag $TAG is not vMAJOR.MINOR.PATCH"
+            exit 1
+          fi
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 1
       - name: Install the pinned toolchain and the target
         run: |
@@ -81,10 +103,10 @@ jobs:
           echo "VERSION=$version" >> "$GITHUB_ENV"
           echo "PACKAGE=eggdb-$version-$TARGET" >> "$GITHUB_ENV"
       - name: Check the tag names the version being built
-        if: startsWith(github.ref, 'refs/tags/')
+        if: env.TAG != ''
         run: |
-          if [ "$VERSION" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match the workspace version $VERSION"
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "::error::tag $TAG does not match the workspace version $VERSION"
             exit 1
           fi
       - name: Check the shipped binary depends only on our own crates
@@ -201,28 +223,46 @@ jobs:
 
   publish:
     needs: build
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    if: inputs.tag != '' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
       id-token: write
       attestations: write
+    outputs:
+      latest: ${{ steps.state.outputs.latest }}
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 1
+      - name: Read the release's state and whether it is the newest version
+        id: state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || echo missing)
+          echo "release=$draft" >> "$GITHUB_OUTPUT"
+          newest=$(git ls-remote --tags origin 'refs/tags/v*' | sed -n 's|.*refs/tags/\(v[0-9][0-9.]*\)$|\1|p' | sort -V | tail -n 1)
+          if [ "$newest" = "$TAG" ]; then
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/download-artifact@v8
+        if: steps.state.outputs.release != 'false'
         with:
           pattern: eggdb-*
           path: dist
           merge-multiple: true
       - name: Write the checksums and the release notes
+        if: steps.state.outputs.release != 'false'
         run: |
           cd dist
           sha256sum eggdb-*.tar.gz eggdb-*.zip > SHA256SUMS
           {
-            cat "../docs/releases/$GITHUB_REF_NAME.md"
+            cat "../docs/releases/$TAG.md"
             echo
             echo '## Sizes'
             echo
@@ -237,18 +277,28 @@ jobs:
           } > ../release-notes.md
           rm ./*.size
       - uses: actions/attest-build-provenance@v4.2.2
+        if: steps.state.outputs.release != 'false'
         with:
           subject-path: dist/*
       - name: Publish the GitHub Release
+        if: steps.state.outputs.release != 'false'
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ steps.state.outputs.release }}
+          LATEST: ${{ steps.state.outputs.latest }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --verify-tag --title "EggDB $GITHUB_REF_NAME" --notes-file release-notes.md
+          if [ "$RELEASE" = "true" ]; then
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" --notes-file release-notes.md
+          else
+            gh release create "$TAG" dist/* --draft \
+              --verify-tag --title "EggDB $TAG" --notes-file release-notes.md
+          fi
+          gh release edit "$TAG" --draft=false --latest="$LATEST"
 
   image:
     needs: publish
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    if: inputs.tag != '' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -257,6 +307,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 1
       - uses: actions/download-artifact@v8
         with:
@@ -268,15 +319,16 @@ jobs:
           for pair in x86_64:amd64 aarch64:arm64; do
             target="${pair%%:*}-unknown-linux-musl"
             platform="${pair##*:}"
-            tar -xzf "dist/eggdb-$GITHUB_REF_NAME-$target.tar.gz" -C "$RUNNER_TEMP"
+            tar -xzf "dist/eggdb-$TAG-$target.tar.gz" -C "$RUNNER_TEMP"
             mkdir -p "deploy/linux/$platform"
-            cp "$RUNNER_TEMP/eggdb-$GITHUB_REF_NAME-$target/eggdb" "deploy/linux/$platform/eggdb"
+            cp "$RUNNER_TEMP/eggdb-$TAG-$target/eggdb" "deploy/linux/$platform/eggdb"
           done
       - name: Build, push and smoke test the image on the GitHub Container Registry
         env:
           GH_TOKEN: ${{ github.token }}
+          LATEST: ${{ needs.publish.outputs.latest }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${TAG#v}"
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker buildx create --use
@@ -287,6 +339,10 @@ jobs:
               --label "org.opencontainers.image.licenses=MIT OR Apache-2.0" \
               -t "$image:$version-$platform" --push
           done
-          docker buildx imagetools create -t "$image:$version" -t "$image:latest" "$image:$version-amd64" "$image:$version-arm64"
+          if [ "$LATEST" = "true" ]; then
+            docker buildx imagetools create -t "$image:$version" -t "$image:latest" "$image:$version-amd64" "$image:$version-arm64"
+          else
+            docker buildx imagetools create -t "$image:$version" "$image:$version-amd64" "$image:$version-arm64"
+          fi
           docker run --rm "$image:$version" --version | grep -F "$version"
 

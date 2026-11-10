@@ -15,7 +15,8 @@ one `[[test]]`, so a new top-level `tests/*.rs` file would never be compiled:
  CI's `lint-and-test`, fails on it, on a module
 file `main.rs` doesn't declare and on a package without the setting. A test keeps its name and only
 gains its file's module (`cargo test serve` still finds `serve::...`); a test that runs its own
-program again as a child names itself with that module (`--exact process::...`). Debug and test
+program again as a child names itself with that module (`--exact process::...`). The release tag script has its own test, `scripts/release/test-tag-from-trailer.sh`, which CI's
+`lint-and-test` runs next to the layout check (D353). Debug and test
 builds keep line tables only (`debug = "line-tables-only"`), enough for a panic's file and line
 and a backtrace's; packages from outside the workspace (none today, D1) get no debug information.
 

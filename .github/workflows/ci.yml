@@ -53,6 +53,8 @@ jobs:
           fetch-depth: 1
       - name: One integration-test program per package
         run: scripts/check-test-layout.sh
+      - name: Test the release tag script
+        run: scripts/release/test-tag-from-trailer.sh
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
