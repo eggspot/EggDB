@@ -169,6 +169,7 @@ mod statistics;
 mod step_times;
 mod store;
 mod exported_snapshots;
+mod undo_marks;
 mod string_functions;
 mod subquery;
 mod table_variables;

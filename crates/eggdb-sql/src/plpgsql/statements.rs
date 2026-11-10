@@ -60,6 +60,9 @@ fn run_statement(
     dialect: Dialect,
 ) -> SqlResult<QueryResult> {
     crate::cancel::check()?;
+    if dialect == Dialect::MySql {
+        crate::undo_marks::mark_procedure_statement();
+    }
     crate::triggers::replace_transition_tables(&mut statement)?;
     crate::roles::check_statement(settings, &statement)?;
     let binding = Binding {

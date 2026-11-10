@@ -84,6 +84,7 @@ impl<'w> UndoWrite<'w> {
         log: &'w mut Undo,
         kept_for: UndoKeptFor,
     ) -> Self {
+        crate::undo_marks::note_undo_length(log.len());
         Self {
             inner,
             log,
@@ -91,6 +92,11 @@ impl<'w> UndoWrite<'w> {
             most_bytes: crate::memory::WORK_MEMORY_LIMIT,
             kept_for,
         }
+    }
+
+    fn logged(&mut self, entry: UndoEntry) {
+        self.log.push(entry);
+        crate::undo_marks::note_undo_length(self.log.len());
     }
 
     #[cfg(test)]
@@ -177,7 +183,7 @@ impl KeyValueWrite for UndoWrite<'_> {
         let previous = self.inner.get(key)?;
         self.hold(key, previous.as_deref())?;
         self.inner.put(key, value)?;
-        self.log.push(UndoEntry::statement(key, previous));
+        self.logged(UndoEntry::statement(key, previous));
         Ok(())
     }
 
@@ -185,7 +191,7 @@ impl KeyValueWrite for UndoWrite<'_> {
         self.hold(key, None)?;
         let inserted = self.inner.put_if_absent(key, value)?;
         if inserted {
-            self.log.push(UndoEntry::statement(key, None));
+            self.logged(UndoEntry::statement(key, None));
         }
         Ok(inserted)
     }
@@ -195,7 +201,7 @@ impl KeyValueWrite for UndoWrite<'_> {
         self.hold(key, previous.as_deref())?;
         let deleted = self.inner.delete(key)?;
         if deleted {
-            self.log.push(UndoEntry::statement(key, previous));
+            self.logged(UndoEntry::statement(key, previous));
         }
         Ok(deleted)
     }

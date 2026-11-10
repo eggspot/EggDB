@@ -394,3 +394,4 @@ its full title with its status.
 - [D367](decisions/D367.md) Code-only batch 13 (M2): MySQL unique keys on tables partitioned by an expression (1503) (closes part of D316)
 - [D368](decisions/D368.md) Code-only batch 14 (M2): triggers of a row moved to another partition (closes part of D316)
 - [D369](decisions/D369.md) Code-only batch 15 (M3): `pg_export_snapshot()` and `SET TRANSACTION SNAPSHOT`, with storage reads joining a live snapshot (finishes D318's leftover)
+- [D370](decisions/D370.md) Code-only batch 16 (M3): a failing MySQL `CALL` keeps the procedure's statements before the failing one (closes part of D317)
