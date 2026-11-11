@@ -28,6 +28,9 @@ pub struct ServerConfig {
     /// The memory every connection's requests and replies hold together, shared with the
     /// server's other listeners.
     pub memory_budget: Arc<MemoryBudget>,
+    /// Whether the server answers as a Redis Cluster of one node that holds every slot
+    /// (`CLUSTER` commands, `cluster_enabled:1`), for cluster clients.
+    pub cluster: bool,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -37,6 +40,7 @@ impl std::fmt::Debug for ServerConfig {
             .field("requires_password", &self.password_sha256.is_some())
             .field("max_connections", &self.max_connections)
             .field("memory_budget", &self.memory_budget)
+            .field("cluster", &self.cluster)
             .finish()
     }
 }
@@ -238,12 +242,16 @@ impl Connection<'_> {
         let kind = match name {
             "subscribe" | "unsubscribe" => Kind::Channel,
             "psubscribe" | "punsubscribe" => Kind::Pattern,
-            "publish" => {
+            "ssubscribe" | "sunsubscribe" => Kind::Shard,
+            "publish" | "spublish" => {
                 return Some(vec![match args {
+                    [channel, message] if name == "spublish" => {
+                        Reply::Integer(self.hub.publish_shard(channel, message) as i64)
+                    }
                     [channel, message] => Reply::Integer(self.hub.publish(channel, message) as i64),
-                    _ => Reply::Error(
-                        "ERR wrong number of arguments for 'publish' command".to_owned(),
-                    ),
+                    _ => Reply::Error(format!(
+                        "ERR wrong number of arguments for '{name}' command"
+                    )),
                 }]);
             }
             _ => return None,
@@ -274,6 +282,9 @@ fn serve_connection(
     if stream.set_read_timeout(Some(READ_POLL)).is_err() || stream.set_nodelay(true).is_err() {
         return;
     }
+    let Ok(local_address) = stream.local_addr() else {
+        return;
+    };
     let notifying = NotifyingKeyspace {
         inner: keyspace,
         written: RefCell::default(),
@@ -345,6 +356,15 @@ fn serve_connection(
                 None
             };
             match blocking {
+                None if name == "cluster" && config.cluster => vec![crate::cluster::command(
+                    &context,
+                    &mut client,
+                    arguments.get(1..).unwrap_or_default(),
+                    local_address,
+                )],
+                None if name == "cluster" => vec![Reply::Error(
+                    "ERR This instance has cluster support disabled".to_owned(),
+                )],
                 None => vec![execute_with_transactions(&context, &mut client, &arguments)],
                 Some(Err(error)) => vec![Reply::Error(error)],
                 Some(Ok(mut command)) => {

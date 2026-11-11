@@ -10,6 +10,7 @@ mod aof;
 mod aof_manifest;
 mod bitmaps;
 mod blocking;
+mod cluster;
 mod commands;
 mod eviction;
 mod geo;
@@ -29,6 +30,7 @@ mod transactions;
 mod value;
 
 pub use aof::{AofReplay, AofReport, replay_aof};
+pub use cluster::key_slot;
 pub use aof_manifest::{AofFileKind, AofManifest, AofManifestFile, parse_aof_manifest};
 pub use commands::{Client, Context, execute};
 pub use eviction::{EvictingKeyspace, EvictionPolicy};

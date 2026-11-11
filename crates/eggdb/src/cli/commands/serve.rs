@@ -886,6 +886,7 @@ impl Session<'_> {
             password_sha256: resp_password,
             max_connections: config.max_connections,
             memory_budget: Arc::clone(&memory_budget),
+            cluster: options.resp_cluster,
         };
         let served = std::thread::scope(|scope| {
             let server = scope.spawn(|| {

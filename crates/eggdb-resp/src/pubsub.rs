@@ -20,6 +20,7 @@ pub struct Queued {
 struct Subscriber {
     channels: BTreeSet<Vec<u8>>,
     patterns: BTreeSet<Vec<u8>>,
+    shard_channels: BTreeSet<Vec<u8>>,
     resp3: bool,
     sender: Sender<Queued>,
     pending: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -45,6 +46,8 @@ pub enum Kind {
     Channel,
     /// Glob patterns (`PSUBSCRIBE`).
     Pattern,
+    /// Shard channels (`SSUBSCRIBE`), which only `SPUBLISH` reaches.
+    Shard,
 }
 
 fn frame(reply: &Reply, resp3: bool) -> Vec<u8> {
@@ -126,6 +129,46 @@ impl Hub {
         delivered
     }
 
+    /// Publishes `message` on shard channel `channel` (`SPUBLISH`), as `smessage` to the
+    /// connections that `SSUBSCRIBE`d to it; returns how many received it.
+    pub fn publish_shard(&self, channel: &[u8], message: &[u8]) -> usize {
+        let subscribers = self.locked();
+        let mut delivered = 0;
+        for subscriber in subscribers.values() {
+            if !subscriber.shard_channels.contains(channel)
+                || subscriber
+                    .pending
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    >= MAX_PENDING_PER_SUBSCRIBER
+            {
+                continue;
+            }
+            let frame_bytes = message
+                .len()
+                .saturating_add(channel.len())
+                .saturating_add(PUSH_FRAME_BYTES);
+            let Some(held) = MemoryBudget::reserve_owned(&self.memory_budget, frame_bytes) else {
+                continue;
+            };
+            let reply = Reply::Push(vec![
+                Reply::bulk("smessage"),
+                Reply::bulk(channel.to_vec()),
+                Reply::bulk(message.to_vec()),
+            ]);
+            let queued = Queued {
+                frame: frame(&reply, subscriber.resp3),
+                held,
+            };
+            if subscriber.sender.send(queued).is_ok() {
+                subscriber
+                    .pending
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                delivered += 1;
+            }
+        }
+        delivered
+    }
+
     /// Registers connection `id`'s outbox, the first time it subscribes.
     pub fn attach(
         &self,
@@ -137,6 +180,7 @@ impl Hub {
         self.locked().entry(id).or_insert(Subscriber {
             channels: BTreeSet::new(),
             patterns: BTreeSet::new(),
+            shard_channels: BTreeSet::new(),
             resp3,
             sender,
             pending,
@@ -156,14 +200,18 @@ impl Hub {
             (Kind::Channel, false) => "unsubscribe",
             (Kind::Pattern, true) => "psubscribe",
             (Kind::Pattern, false) => "punsubscribe",
+            (Kind::Shard, true) => "ssubscribe",
+            (Kind::Shard, false) => "sunsubscribe",
         };
         let other = match kind {
             Kind::Channel => subscriber.patterns.len(),
             Kind::Pattern => subscriber.channels.len(),
+            Kind::Shard => 0,
         };
         let set = match kind {
             Kind::Channel => &mut subscriber.channels,
             Kind::Pattern => &mut subscriber.patterns,
+            Kind::Shard => &mut subscriber.shard_channels,
         };
         let names: Vec<Vec<u8>> = if names.is_empty() && !subscribe {
             set.iter().cloned().collect()
@@ -197,7 +245,9 @@ impl Hub {
     /// How many channels and patterns connection `id` holds.
     pub fn held(&self, id: u64) -> usize {
         self.locked().get(&id).map_or(0, |subscriber| {
-            subscriber.channels.len() + subscriber.patterns.len()
+            subscriber.channels.len()
+                + subscriber.patterns.len()
+                + subscriber.shard_channels.len()
         })
     }
 
@@ -212,6 +262,23 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn shard_channels_are_apart_from_channels() {
+        let hub = Hub::default();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        hub.attach(1, false, sender, Arc::new(AtomicUsize::new(0)));
+        hub.change(1, Kind::Shard, true, &[b"orders".to_vec()]);
+        assert_eq!(hub.publish(b"orders", b"x"), 0, "PUBLISH does not reach shard channels");
+        assert_eq!(hub.publish_shard(b"orders", b"paid"), 1);
+        assert_eq!(
+            receiver.recv().unwrap().frame,
+            b"*3\r\n$8\r\nsmessage\r\n$6\r\norders\r\n$4\r\npaid\r\n"
+        );
+        hub.change(1, Kind::Channel, true, &[b"orders".to_vec()]);
+        assert_eq!(hub.publish_shard(b"orders", b"again"), 1);
+        assert_eq!(hub.held(1), 2);
+    }
 
     #[test]
     fn messages_reach_channel_and_pattern_subscribers() {

@@ -589,3 +589,4 @@ its full title with its status.
 - [D562](decisions/D562.md) Code-only batch 210 (M8): the nested query and aggregation
 - [D563](decisions/D563.md) Code-only batch 211 (M8): the completion suggester
 - [D564](decisions/D564.md) Code-only batch 212 (M8): flattened fields and the sparse_vector query
+- [D565](decisions/D565.md) Code-only batch 213 (M7): a Redis Cluster of one node, and sharded pub/sub

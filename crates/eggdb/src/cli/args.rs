@@ -261,6 +261,7 @@ impl CommandName {
             | OptionName::McpTokenFile
             | OptionName::McpTables
             | OptionName::LogBatches
+            | OptionName::RespCluster
             | OptionName::User
             | OptionName::Database
             | OptionName::MaxConnections
@@ -457,6 +458,7 @@ enum OptionName {
     McpTokenFile,
     McpTables,
     LogBatches,
+    RespCluster,
     Dialect,
     User,
     PasswordFile,
@@ -578,6 +580,7 @@ impl OptionName {
             b"mcp-token-file" => Self::McpTokenFile,
             b"mcp-tables" => Self::McpTables,
             b"log-batches" => Self::LogBatches,
+            b"resp-cluster" => Self::RespCluster,
             b"dialect" => Self::Dialect,
             b"user" => Self::User,
             b"password-file" => Self::PasswordFile,
@@ -677,6 +680,7 @@ impl OptionName {
                 | Self::Native
                 | Self::AllowWrite
                 | Self::LogBatches
+                | Self::RespCluster
                 | Self::TlsSelfSigned
                 | Self::IfAbsent
                 | Self::Delete
@@ -895,6 +899,7 @@ pub(crate) struct ServeOptions {
     pub(crate) resp_max_memory: Option<u64>,
     pub(crate) resp_eviction: Option<eggdb_resp::EvictionPolicy>,
     pub(crate) log_batches: bool,
+    pub(crate) resp_cluster: bool,
     pub(crate) user: Option<String>,
     pub(crate) password_file: Option<ExportFile>,
     pub(crate) database: Option<String>,
@@ -1281,6 +1286,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::Kql => request.kql = true,
             OptionName::AllowWrite => request.allow_write = true,
             OptionName::LogBatches => request.serve.log_batches = true,
+            OptionName::RespCluster => request.serve.resp_cluster = true,
             OptionName::TlsSelfSigned => request.serve.tls_self_signed = true,
             OptionName::OnConflict => {
                 request.on_conflict = parse_on_conflict(value).map_err(usage)?

@@ -142,6 +142,7 @@ fn the_server_config_debug_output_never_shows_the_password_hash() {
         password_sha256: Some([0xab; 32]),
         max_connections: 8,
         memory_budget: std::sync::Arc::default(),
+        cluster: false,
     };
     let shown = format!("{config:?}");
     assert!(!shown.contains("171"), "{shown}");
@@ -159,6 +160,7 @@ fn a_server_answers_a_pipelined_client_over_tcp() {
         password_sha256: None,
         max_connections: 8,
         memory_budget: std::sync::Arc::default(),
+        cluster: false,
     };
     std::thread::scope(|scope| {
         scope.spawn(|| {
@@ -274,6 +276,7 @@ fn requests_and_replies_past_the_memory_budget_get_oom_and_other_clients_go_on()
         password_sha256: None,
         max_connections: 8,
         memory_budget: std::sync::Arc::clone(&budget),
+        cluster: false,
     };
     std::thread::scope(|scope| {
         scope.spawn(|| {

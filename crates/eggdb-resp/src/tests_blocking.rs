@@ -75,6 +75,7 @@ fn test_config() -> ServerConfig {
         password_sha256: None,
         max_connections: 16,
         memory_budget: std::sync::Arc::default(),
+        cluster: false,
     }
 }
 

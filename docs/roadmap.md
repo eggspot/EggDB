@@ -932,7 +932,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   written, unbuilt** (code-only mode, 2026-11-10, D395); `INFO`'s sections: **code written,
   unbuilt** (D396); `DEBUG OBJECT | SLEEP | SET-ACTIVE-EXPIRE | HELP`: **code written, unbuilt**
   (D397).
-- Cluster mode: slots, the cluster commands and sharded pub/sub (`SSUBSCRIBE`) (D193).
+- Cluster mode: slots, the cluster commands and sharded pub/sub (`SSUBSCRIBE`) (D193). One node holding every slot, the
+  cluster commands and sharded pub/sub: **code written, unbuilt** (code-only mode, 2026-11-11, D565).
+  Left: several nodes, `MOVED`/`ASK` and resharding (with M15).
 - The rest of Redis's commands, tracked per command (D5, D193). Check: Redis client libraries'
   own test suites. `GETEX`, `SETRANGE`, `MSETNX`, `LCS`,
   `TOUCH`, `EXPIRETIME`, `RANDOMKEY`, `HSTRLEN`, `HINCRBYFLOAT`, `HRANDFIELD`, `HSCAN`, `LPOS`, `SMISMEMBER`,
