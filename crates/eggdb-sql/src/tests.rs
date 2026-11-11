@@ -2940,7 +2940,7 @@ fn explain_analyze_runs_the_statement_and_reports_rows_and_times() {
         "count\n2\nSELECT 1"
     );
     assert_eq!(
-        fails(&mut session, "EXPLAIN (FORMAT JSON) SELECT 1").state(),
+        fails(&mut session, "EXPLAIN (FORMAT XML) SELECT 1").state(),
         crate::SqlState::FEATURE_NOT_SUPPORTED
     );
 }
