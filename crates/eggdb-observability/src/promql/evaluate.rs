@@ -162,6 +162,17 @@ pub(crate) fn without_name(labels: &Labels) -> Labels {
         .collect()
 }
 
+fn labels_hash(labels: &[(String, String)]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for (name, value) in labels {
+        for byte in name.bytes().chain([0xff]).chain(value.bytes()).chain([0xfe]) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    hash
+}
+
 pub(crate) fn window(samples: &[(i64, f64)], start: i64, end: i64) -> &[(i64, f64)] {
     let from = samples.partition_point(|(time, _)| *time <= start);
     let to = samples.partition_point(|(time, _)| *time <= end);
@@ -418,11 +429,27 @@ fn whole_number(value: f64) -> Result<i64, Failure> {
 pub(crate) struct Evaluator<'d, 'b> {
     data: &'d Fetched,
     pub(crate) work: Work<'b>,
+    range: Option<(i64, i64)>,
 }
 
 impl<'d, 'b> Evaluator<'d, 'b> {
     pub(crate) fn new(data: &'d Fetched, work: Work<'b>) -> Self {
-        Self { data, work }
+        Self { data, work, range: None }
+    }
+
+    /// The query's start and end, which `@ start()` and `@ end()` read.
+    pub(crate) fn over(mut self, start_ms: i64, end_ms: i64) -> Self {
+        self.range = Some((start_ms, end_ms));
+        self
+    }
+
+    fn base_time(&self, at: Option<super::At>, time_ms: i64) -> i64 {
+        match at {
+            None => time_ms,
+            Some(super::At::Fixed(fixed)) => fixed,
+            Some(super::At::Start) => self.range.map_or(time_ms, |(start, _)| start),
+            Some(super::At::End) => self.range.map_or(time_ms, |(_, end)| end),
+        }
     }
 
     /// Evaluates `expr` at `time_ms`.
@@ -449,7 +476,9 @@ impl<'d, 'b> Evaluator<'d, 'b> {
     }
 
     fn select(&mut self, selector: &Selector, time_ms: i64) -> Result<Data, Failure> {
-        let at = time_ms.saturating_sub(selector.offset_ms);
+        let at = self
+            .base_time(selector.at, time_ms)
+            .saturating_sub(selector.offset_ms);
         let chosen = chosen(selector, self.data);
         match selector.range_ms {
             Some(range) => {
@@ -758,6 +787,35 @@ impl<'d, 'b> Evaluator<'d, 'b> {
                     out.extend(members);
                 }
             }
+            "limitk" => {
+                let k = whole_number(parameter)?;
+                let taken = usize::try_from(k).unwrap_or(0);
+                for (_, mut members) in groups {
+                    members.sort_by_key(|(labels, _)| labels_hash(labels));
+                    members.truncate(taken);
+                    out.extend(members);
+                }
+            }
+            "limit_ratio" => {
+                if !(-1.0..=1.0).contains(&parameter) {
+                    return Err(Failure::BadData(format!(
+                        "invalid ratio {parameter} for limit_ratio, must be between -1 and 1"
+                    )));
+                }
+                for (_, members) in groups {
+                    for (labels, value) in members {
+                        let share = labels_hash(&labels) as f64 / u64::MAX as f64;
+                        let kept = if parameter >= 0.0 {
+                            share < parameter
+                        } else {
+                            share >= 1.0 + parameter
+                        };
+                        if kept {
+                            out.push((labels, value));
+                        }
+                    }
+                }
+            }
             "count_values" => {
                 let label = match &aggregation.parameter {
                     Some(Expr::Text(label)) => label.as_str(),
@@ -835,7 +893,9 @@ impl<'d, 'b> Evaluator<'d, 'b> {
 
     fn subquery(&mut self, subquery: &Subquery, time_ms: i64) -> Result<Data, Failure> {
         let step = subquery.step_ms.unwrap_or(DEFAULT_SUBQUERY_STEP_MS);
-        let end = time_ms.saturating_sub(subquery.offset_ms);
+        let end = self
+            .base_time(subquery.at, time_ms)
+            .saturating_sub(subquery.offset_ms);
         let start = end.saturating_sub(subquery.range_ms);
         let Some(mut at) = start.div_euclid(step).checked_mul(step) else {
             return Ok(Data::Matrix(Vec::new()));

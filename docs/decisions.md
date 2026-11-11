@@ -635,3 +635,4 @@ its full title with its status.
 - [D608](decisions/D608.md) Code-only batch 256 (M12): ST_AsMVT
 - [D609](decisions/D609.md) Code-only batch 257 (M12): S2 cell ids
 - [D610](decisions/D610.md) Code-only batch 258 (M14): Debezium's schema section
+- [D611](decisions/D611.md) Code-only batch 259 (M16): PromQL's @ modifier, negative offsets, limitk and limit_ratio

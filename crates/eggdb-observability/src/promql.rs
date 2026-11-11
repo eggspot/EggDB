@@ -111,12 +111,21 @@ pub(crate) fn is_label_name(name: &str) -> bool {
         && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
+/// The `@` modifier: the evaluation time a selector or subquery reads at, instead of the step's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum At {
+    Fixed(i64),
+    Start,
+    End,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Selector {
     pub(crate) name: Option<String>,
     pub(crate) matchers: Vec<Matcher>,
     pub(crate) range_ms: Option<i64>,
     pub(crate) offset_ms: i64,
+    pub(crate) at: Option<At>,
 }
 
 impl Selector {
@@ -180,6 +189,7 @@ pub(crate) struct Subquery {
     pub(crate) range_ms: i64,
     pub(crate) step_ms: Option<i64>,
     pub(crate) offset_ms: i64,
+    pub(crate) at: Option<At>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -206,7 +216,7 @@ enum Token {
 
 const SYMBOLS: &[&str] = &[
     "==", "!=", "=~", "!~", ">=", "<=", "{", "}", "(", ")", ",", "=", "+", "-", "*", "/", "%", "^",
-    ">", "<",
+    ">", "<", "@",
 ];
 
 /// A duration such as `5m`, `1h30m` or `250ms`, in milliseconds.
@@ -364,6 +374,8 @@ const AGGREGATIONS: &[&str] = &[
     "stdvar",
     "topk",
     "bottomk",
+    "limitk",
+    "limit_ratio",
     "quantile",
     "count_values",
 ];
@@ -371,7 +383,7 @@ const AGGREGATIONS: &[&str] = &[
 fn takes_parameter(aggregation: &str) -> bool {
     matches!(
         aggregation,
-        "topk" | "bottomk" | "quantile" | "count_values"
+        "topk" | "bottomk" | "limitk" | "limit_ratio" | "quantile" | "count_values"
     )
 }
 
@@ -510,15 +522,39 @@ impl Parser {
         Ok(matchers)
     }
 
-    fn offset(&mut self) -> Result<i64, String> {
-        if !self.eat_word("offset") {
-            return Ok(0);
+    fn modifiers(&mut self) -> Result<(i64, Option<At>), String> {
+        let mut offset = None;
+        let mut at = None;
+        loop {
+            if offset.is_none() && self.eat_word("offset") {
+                let negative = self.eat("-");
+                let ms = match self.next() {
+                    Some(Token::Duration(ms)) => ms,
+                    Some(Token::Number(number)) if number == 0.0 => 0,
+                    _ => return Err("expected a duration after offset".to_owned()),
+                };
+                offset = Some(if negative { -ms } else { ms });
+                continue;
+            }
+            if at.is_none() && self.eat("@") {
+                let negative = self.eat("-");
+                at = Some(match self.next() {
+                    Some(Token::Number(seconds)) if seconds.is_finite() => {
+                        let millis = (seconds * 1000.0).round() as i64;
+                        At::Fixed(if negative { -millis } else { millis })
+                    }
+                    Some(Token::Name(word)) if !negative && (word == "start" || word == "end") => {
+                        self.expect("(")?;
+                        self.expect(")")?;
+                        if word == "start" { At::Start } else { At::End }
+                    }
+                    _ => return Err("expected a timestamp, start() or end() after @".to_owned()),
+                });
+                continue;
+            }
+            break;
         }
-        match self.next() {
-            Some(Token::Duration(ms)) => Ok(ms),
-            Some(Token::Number(0.0)) => Ok(0),
-            _ => Err("expected a duration after offset".to_owned()),
-        }
+        Ok((offset.unwrap_or(0), at))
     }
 
     fn selector(&mut self, name: Option<String>) -> Result<Expr, String> {
@@ -554,12 +590,13 @@ impl Parser {
             }
             _ => None,
         };
-        let offset_ms = self.offset()?;
+        let (offset_ms, at) = self.modifiers()?;
         Ok(Expr::Selector(Selector {
             name,
             matchers,
             range_ms,
             offset_ms,
+            at,
         }))
     }
 
@@ -683,12 +720,13 @@ impl Parser {
                     "subquery is only allowed on instant vector, got range vector".to_owned(),
                 );
             }
-            let offset_ms = self.offset()?;
+            let (offset_ms, at) = self.modifiers()?;
             expr = Expr::Subquery(Box::new(Subquery {
                 inner: expr,
                 range_ms,
                 step_ms,
                 offset_ms,
+                at,
             }));
         }
         Ok(expr)
@@ -785,6 +823,62 @@ pub(crate) fn parse(text: &str) -> Result<Expr, String> {
         return Err("unexpected text after the expression".to_owned());
     }
     Ok(expr)
+}
+
+/// How far past an evaluation time `expr` reads through negative offsets, counting `ahead_ms`
+/// more for the subqueries around it.
+pub(crate) fn forward_reach(expr: &Expr, ahead_ms: i64) -> i64 {
+    match expr {
+        Expr::Number(_) | Expr::Text(_) => ahead_ms.max(0),
+        Expr::Selector(selector) => ahead_ms.saturating_sub(selector.offset_ms).max(0),
+        Expr::Call(_, arguments) => arguments
+            .iter()
+            .map(|argument| forward_reach(argument, ahead_ms))
+            .max()
+            .unwrap_or(0),
+        Expr::Aggregate(aggregation) => {
+            let inner = forward_reach(&aggregation.inner, ahead_ms);
+            aggregation
+                .parameter
+                .as_ref()
+                .map_or(inner, |parameter| inner.max(forward_reach(parameter, ahead_ms)))
+        }
+        Expr::Binary(binary) => {
+            forward_reach(&binary.left, ahead_ms).max(forward_reach(&binary.right, ahead_ms))
+        }
+        Expr::Subquery(subquery) => {
+            forward_reach(&subquery.inner, ahead_ms.saturating_sub(subquery.offset_ms))
+        }
+    }
+}
+
+/// The fixed `@` times in `expr`, so the read covers them as well as the query's own range.
+pub(crate) fn fixed_times(expr: &Expr, out: &mut Vec<i64>) {
+    match expr {
+        Expr::Number(_) | Expr::Text(_) => {}
+        Expr::Selector(selector) => {
+            if let Some(At::Fixed(time)) = selector.at {
+                out.push(time);
+            }
+        }
+        Expr::Call(_, arguments) => arguments.iter().for_each(|argument| fixed_times(argument, out)),
+        Expr::Aggregate(aggregation) => {
+            if let Some(parameter) = &aggregation.parameter {
+                fixed_times(parameter, out);
+            }
+            fixed_times(&aggregation.inner, out);
+        }
+        Expr::Binary(binary) => {
+            fixed_times(&binary.left, out);
+            fixed_times(&binary.right, out);
+        }
+        Expr::Subquery(subquery) => {
+            if let Some(At::Fixed(time)) = subquery.at {
+                out.push(time);
+            }
+            fixed_times(&subquery.inner, out);
+        }
+    }
 }
 
 /// Every selector in `expr`, with how far before an evaluation time it reads, counting

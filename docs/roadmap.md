@@ -1472,7 +1472,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   resolution, such as `max_over_time(rate({__name__=~".+"}[1m])[127d:1s])`, stays under the step
   cap but can hold a thread for hours), and label matchers pushed down into the SQL read (D334). The functions (`clamp*`, `predict_linear`, `deriv`, `resets`,
   `changes`, `absent*`, `sort*`, date, trigonometric and the other `*_over_time`): **code written,
-  unbuilt** (code-only mode, 2026-11-11, D441).
+  unbuilt** (code-only mode, 2026-11-11, D441). The `@` modifier, negative offsets, `limitk` and `limit_ratio`:
+  **code written, unbuilt** (code-only mode, 2026-11-12, D611).
 - OTLP ingest of metrics, logs and traces (D39). OTLP/HTTP in JSON and protobuf: **code written,
   unbuilt** (code-only mode, 2026-11-11, D498); gRPC is not written.
 - Loki's push API, and Jaeger and Zipkin traces (D39). Loki's push API: **code written, unbuilt**

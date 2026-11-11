@@ -992,3 +992,25 @@ fn the_remaining_functions_follow_prometheus() {
     assert_eq!(scalar_function("sgn", -3.0), Some(-1.0));
     assert_eq!(scalar_function("deg", std::f64::consts::PI), Some(180.0));
 }
+
+#[test]
+fn the_at_modifier_negative_offsets_and_limits_follow_prometheus() {
+    let data = http_requests();
+    let total = |query: &str, time_ms: i64| values(&sorted(query, time_ms, &data));
+    assert_eq!(total("sum(http_requests @ 30)", 1_000_000), vec![3600.0]);
+    assert_eq!(total("sum(http_requests offset 0s @ 30)", 1_000_000), vec![3600.0]);
+    assert!(total("sum(http_requests)", 1_000_000).is_empty());
+    assert_eq!(total("sum(http_requests offset -20s)", 10_000), vec![3600.0]);
+    assert!(total("sum(http_requests)", 10_000).is_empty());
+    assert_eq!(total("count(limitk(2, http_requests))", 60_000), vec![2.0]);
+    assert_eq!(
+        total("count by (job) (limitk by (job) (1, http_requests))", 60_000),
+        vec![1.0, 1.0]
+    );
+    assert_eq!(total("count(limit_ratio(1, http_requests))", 60_000), vec![8.0]);
+    let half = total("count(limit_ratio(0.5, http_requests))", 60_000).iter().sum::<f64>();
+    let rest = total("count(limit_ratio(-0.5, http_requests))", 60_000).iter().sum::<f64>();
+    assert_eq!(half + rest, 8.0);
+    assert!(parse("http_requests @ foo").is_err());
+    assert!(failure("limit_ratio(2, http_requests)", 60_000, &data).contains("ratio"));
+}

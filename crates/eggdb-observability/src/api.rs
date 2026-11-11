@@ -827,13 +827,21 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                 *entry = (*entry).max(before);
             }
         }
+        let mut fixed = Vec::new();
+        promql::fixed_times(expr, &mut fixed);
+        let earliest = fixed.iter().copied().fold(start, i64::min);
+        let latest = fixed
+            .iter()
+            .copied()
+            .fold(end, i64::max)
+            .saturating_add(promql::forward_reach(expr, 0));
         for (name, before) in reach {
             let series = store::read(
                 &mut session,
                 &tables,
                 &name,
-                start.saturating_sub(before),
-                end,
+                earliest.saturating_sub(before),
+                latest,
                 work.remaining_samples().saturating_add(1),
             )?;
             work.keep(series.iter().map(|series| series.samples.len()).sum())?;
@@ -847,7 +855,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         let time = time_param(time, now_ms()).map_err(Failure::BadData)?;
         let mut work = self.work();
         let data = self.fetch(&expr, time, time, &mut work)?;
-        let result = Evaluator::new(&data, work).evaluate(&expr, time)?;
+        let result = Evaluator::new(&data, work).over(time, time).evaluate(&expr, time)?;
         Ok((result, time))
     }
 
@@ -904,7 +912,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         }
         let mut work = self.work();
         let data = self.fetch(&expr, start, end, &mut work)?;
-        let mut evaluator = Evaluator::new(&data, work);
+        let mut evaluator = Evaluator::new(&data, work).over(start, end);
         let mut series: BTreeMap<Labels, Vec<(i64, f64)>> = BTreeMap::new();
         let mut time = start;
         while time <= end {
