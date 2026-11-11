@@ -660,6 +660,21 @@ impl Evaluator<'_> {
         match self.eval(expr, Some(SqlType::Boolean))? {
             Value::Null => Ok(None),
             Value::Boolean(flag) => Ok(Some(flag)),
+            Value::Double(number) if crate::constraints::current_dialect() == crate::Dialect::MySql => {
+                Ok(Some(number != 0.0))
+            }
+            Value::Real(number) if crate::constraints::current_dialect() == crate::Dialect::MySql => {
+                Ok(Some(number != 0.0))
+            }
+            Value::SmallInt(number) if crate::constraints::current_dialect() == crate::Dialect::MySql => {
+                Ok(Some(number != 0))
+            }
+            Value::Integer(number) if crate::constraints::current_dialect() == crate::Dialect::MySql => {
+                Ok(Some(number != 0))
+            }
+            Value::BigInt(number) if crate::constraints::current_dialect() == crate::Dialect::MySql => {
+                Ok(Some(number != 0))
+            }
             other => Err(SqlError::new(
                 SqlState::DATATYPE_MISMATCH,
                 format!(
@@ -1391,6 +1406,9 @@ impl Evaluator<'_> {
             "pg_typeof" => return self.pg_typeof(arguments),
             name if crate::hstore_functions::is_populate(name) => {
                 return crate::hstore_functions::populate_record(self, name, arguments);
+            }
+            crate::parser::mysql_match::MATCH_FUNCTION => {
+                return crate::mysql_fulltext::match_against(&self.arguments(arguments)?);
             }
             "to_tsvector"
             | "to_tsquery"

@@ -537,3 +537,4 @@ its full title with its status.
 - [D510](decisions/D510.md) Code-only batch 158 (M10): ClickHouse's HTTP interface
 - [D511](decisions/D511.md) Code-only batch 159 (M10): Trino's client REST protocol
 - [D512](decisions/D512.md) Code-only batch 160 (M7): Redis stream consumer groups
+- [D513](decisions/D513.md) Code-only batch 161 (M8): MySQL MATCH ... AGAINST

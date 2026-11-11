@@ -6,6 +6,7 @@ mod cursors;
 mod databases;
 mod generated;
 mod group_concat;
+pub(crate) mod mysql_match;
 mod grouping_sets;
 mod hierarchy;
 mod indexes;
@@ -5185,6 +5186,9 @@ impl<'t> Parser<'t> {
         }
         if text == "string_agg" && self.postgresql() {
             return self.string_agg(name);
+        }
+        if text == "match" && self.mysql() && self.peek_kind() == &TokenKind::LeftParen {
+            return self.mysql_match(&name);
         }
         if text == "group_concat"
             && (self.sqlite() || self.mysql())

@@ -190,6 +190,7 @@ mod temp_tables;
 mod temporal;
 mod temporary;
 mod tenancy;
+mod mysql_fulltext;
 mod text_search;
 mod time_zones;
 mod top_n;
