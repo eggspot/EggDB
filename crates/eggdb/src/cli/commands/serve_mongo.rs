@@ -15,6 +15,12 @@ pub(super) fn config(
     Ok(eggdb_mongowire::ServerConfig {
         user: user.to_owned(),
         verifier: ScramVerifier::derive(password.as_bytes(), &salt, MONGO_SCRAM_ITERATIONS),
+        sha1_verifier: Some(eggdb_auth::scram_sha1::ScramSha1Verifier::for_mongodb(
+            user,
+            password,
+            &salt,
+            MONGO_SCRAM_ITERATIONS,
+        )),
         unknown_user_secret,
         max_connections,
         random: eggdb_platform::secure_random::fill,

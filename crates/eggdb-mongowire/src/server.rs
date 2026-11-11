@@ -5,7 +5,8 @@ use crate::message::{
     HEADER_BYTES, OP_MSG, OP_QUERY, Request, message_reply, query_reply, read_header, read_message,
     read_query,
 };
-use eggdb_auth::scram::{ScramExchange, ScramVerifier};
+use eggdb_auth::scram::{ScramExchange, ScramFailure, ScramVerifier};
+use eggdb_auth::scram_sha1::{ScramSha1Exchange, ScramSha1Verifier};
 use eggdb_bson::{Bson, Document};
 use eggdb_documents::Store;
 use eggdb_platform::connection_limits::MemoryBudget;
@@ -25,6 +26,9 @@ pub struct ServerConfig {
     pub user: String,
     /// That user's SCRAM-SHA-256 verifier (the password is not kept).
     pub verifier: ScramVerifier,
+    /// That user's SCRAM-SHA-1 verifier, for drivers that ask for SCRAM-SHA-1; `None` offers
+    /// SCRAM-SHA-256 only.
+    pub sha1_verifier: Option<ScramSha1Verifier>,
     /// Random bytes that make an unknown user's exchange look like a real one's.
     pub unknown_user_secret: [u8; 32],
     /// The most connections served at once.
@@ -45,9 +49,30 @@ impl std::fmt::Debug for ServerConfig {
     }
 }
 
+pub(crate) enum Exchange {
+    Sha256(ScramExchange),
+    Sha1(ScramSha1Exchange),
+}
+
+impl Exchange {
+    pub(crate) fn client_first(&mut self, message: &[u8]) -> Result<String, ScramFailure> {
+        match self {
+            Self::Sha256(exchange) => exchange.client_first(message),
+            Self::Sha1(exchange) => exchange.client_first(message),
+        }
+    }
+
+    pub(crate) fn client_final(&mut self, message: &[u8]) -> Result<String, ScramFailure> {
+        match self {
+            Self::Sha256(exchange) => exchange.client_final(message),
+            Self::Sha1(exchange) => exchange.client_final(message),
+        }
+    }
+}
+
 pub(crate) enum Conversation {
     AwaitingFinal {
-        exchange: Box<ScramExchange>,
+        exchange: Box<Exchange>,
         skip_empty: bool,
         user: String,
     },

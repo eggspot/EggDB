@@ -22,6 +22,7 @@ fn config() -> ServerConfig {
     ServerConfig {
         user: "eggdb".to_owned(),
         verifier: ScramVerifier::derive(PASSWORD.as_bytes(), b"0123456789abcdef", 4096),
+        sha1_verifier: None,
         unknown_user_secret: [9; 32],
         max_connections: 4,
         random: fill,

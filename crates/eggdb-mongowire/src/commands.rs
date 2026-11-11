@@ -1,6 +1,7 @@
 use crate::cursors::Cursors;
 use crate::server::{ServerConfig, Session};
 use eggdb_auth::scram::{ScramExchange, ScramFailure, ScramVerifier};
+use eggdb_auth::scram_sha1::{SCRAM_SHA_1, ScramSha1Exchange, ScramSha1Verifier};
 use eggdb_bson::{Bson, Document, compare};
 use eggdb_documents::{
     DocumentError, Filter, Modification, Projection, SortSpec, Store, UpdateOptions,
@@ -189,7 +190,7 @@ pub(crate) fn cursor_reply(
     )]))
 }
 
-fn hello(session: &Session, body: &Document, legacy: bool) -> Document {
+fn hello(session: &Session, body: &Document, legacy: bool, sha1: bool) -> Document {
     let mut reply = Document::new();
     reply.insert("helloOk", Bson::Boolean(true));
     reply.insert(
@@ -227,7 +228,11 @@ fn hello(session: &Session, body: &Document, legacy: bool) -> Document {
     if body.get_str("saslSupportedMechs").is_some() {
         reply.insert(
             "saslSupportedMechs",
-            Bson::Array(vec![text(eggdb_auth::scram::SCRAM_SHA_256)]),
+            Bson::Array(if sha1 {
+                vec![text(SCRAM_SHA_1), text(eggdb_auth::scram::SCRAM_SHA_256)]
+            } else {
+                vec![text(eggdb_auth::scram::SCRAM_SHA_256)]
+            }),
         );
     }
     ok(reply)
@@ -268,7 +273,8 @@ fn payload_reply(done: bool, payload: Vec<u8>) -> Document {
 
 fn sasl_start(shared: &Shared<'_>, session: &mut Session, body: &Document) -> Document {
     let mechanism = body.get_str("mechanism").unwrap_or_default();
-    if mechanism != eggdb_auth::scram::SCRAM_SHA_256 {
+    let sha1 = mechanism == SCRAM_SHA_1 && shared.config.sha1_verifier.is_some();
+    if mechanism != eggdb_auth::scram::SCRAM_SHA_256 && !sha1 {
         return command_failure(
             334,
             "MechanismUnavailable",
@@ -279,20 +285,37 @@ fn sasl_start(shared: &Shared<'_>, session: &mut Session, body: &Document) -> Do
         return authentication_failed();
     };
     let user = sasl_user(&payload).unwrap_or_default();
-    let verifier = if user == shared.config.user {
-        shared.config.verifier.clone()
-    } else {
-        ScramVerifier::for_unknown_user(
-            &shared.config.unknown_user_secret,
-            &user,
-            shared.config.verifier.iterations(),
-        )
-    };
     let mut nonce = [0u8; 18];
     if (shared.config.random)(&mut nonce).is_err() {
         return command_failure(1, "InternalError", "could not generate a random nonce");
     }
-    let mut exchange = ScramExchange::new(verifier, &nonce);
+    let known = user == shared.config.user;
+    let mut exchange = match &shared.config.sha1_verifier {
+        Some(sha1_verifier) if sha1 => {
+            let verifier = if known {
+                sha1_verifier.clone()
+            } else {
+                ScramSha1Verifier::for_unknown_user(
+                    &shared.config.unknown_user_secret,
+                    &user,
+                    sha1_verifier.iterations(),
+                )
+            };
+            crate::server::Exchange::Sha1(ScramSha1Exchange::new(verifier, &nonce))
+        }
+        _ => {
+            let verifier = if known {
+                shared.config.verifier.clone()
+            } else {
+                ScramVerifier::for_unknown_user(
+                    &shared.config.unknown_user_secret,
+                    &user,
+                    shared.config.verifier.iterations(),
+                )
+            };
+            crate::server::Exchange::Sha256(ScramExchange::new(verifier, &nonce))
+        }
+    };
     match exchange.client_first(&payload) {
         Ok(server_first) => {
             let skip_empty = body
@@ -386,8 +409,10 @@ pub(crate) fn run(
         return failure(&error);
     }
     let outcome = match command.as_str() {
-        "hello" => Ok(hello(session, body, false)),
-        "isMaster" | "ismaster" => Ok(hello(session, body, true)),
+        "hello" => Ok(hello(session, body, false, shared.config.sha1_verifier.is_some())),
+        "isMaster" | "ismaster" => {
+            Ok(hello(session, body, true, shared.config.sha1_verifier.is_some()))
+        }
         "ping" => Ok(ok(Document::new())),
         "buildInfo" | "buildinfo" => Ok(ok(document(vec![
             ("version", text(COMPATIBLE_VERSION)),

@@ -978,7 +978,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `explain`, `renameCollection`, capped and time-series collections, and GridFS (D197). `renameCollection`:
   **code written, unbuilt** (code-only mode, 2026-11-10, D410); `explain`: **code written,
   unbuilt** (D411).
-- SCRAM-SHA-1, other users and roles (D197).
+- SCRAM-SHA-1, other users and roles (D197). SCRAM-SHA-1: **code written, unbuilt** (code-only mode,
+  2026-11-11, D475).
 - `OP_COMPRESSED` (D197). **Code written, unbuilt** (code-only mode, 2026-11-10, D412).
 - `mongorestore` inputs: `--gzip`, `--archive`, unique indexes, and a smoke-test sample dump
   (D197) `--gzip` and `--archive`: **code written,

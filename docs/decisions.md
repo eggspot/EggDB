@@ -499,3 +499,4 @@ its full title with its status.
 - [D472](decisions/D472.md) Code-only batch 120 (M8): Elasticsearch aliases and more of `_cat`
 - [D473](decisions/D473.md) Code-only batch 121 (M8): by-query tasks, `_tasks`, `_rethrottle` and `slices`
 - [D474](decisions/D474.md) Code-only batch 122 (M7): memcached's meta flags, `ma`, `me` and `stats` counts
+- [D475](decisions/D475.md) Code-only batch 123 (M9): SCRAM-SHA-1 for MongoDB drivers
