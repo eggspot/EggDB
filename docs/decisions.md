@@ -491,3 +491,4 @@ its full title with its status.
 - [D464](decisions/D464.md) Code-only batch 112 (M6a): Prometheus `query_range` results streamed
 - [D465](decisions/D465.md) Code-only batch 113 (M6a): PostgreSQL's special date and time inputs
 - [D466](decisions/D466.md) Code-only batch 114 (M6a): `ON CONFLICT ... DO UPDATE ... WHERE`
+- [D467](decisions/D467.md) Code-only batch 115 (M8): Elasticsearch scroll

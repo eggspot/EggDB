@@ -1,5 +1,6 @@
 mod by_query;
 mod multi;
+mod scroll;
 
 use crate::json_out::{Out, escaped, written};
 use crate::query::{Stats, numbers, parse, score, term_buckets};
@@ -27,6 +28,7 @@ pub struct Api<'k> {
     password_sha256: [u8; 32],
     next_id: AtomicU64,
     memory_budget: Arc<MemoryBudget>,
+    scrolls: scroll::Scrolls,
 }
 
 impl std::fmt::Debug for Api<'_> {
@@ -392,6 +394,7 @@ impl<'k> Api<'k> {
             password_sha256,
             next_id: AtomicU64::new(seed),
             memory_budget: Arc::new(MemoryBudget::default()),
+            scrolls: scroll::Scrolls::default(),
         }
     }
 
@@ -446,7 +449,8 @@ impl<'k> Api<'k> {
     pub fn reply(&self, request: &Request) -> Reply<'static> {
         let searched = matches!(request.method.as_str(), "GET" | "POST")
             && self.authorized(request)
-            && !request.path.contains('%');
+            && !request.path.contains('%')
+            && query_flag(request, "scroll").is_none();
         if searched {
             let parts: Vec<&str> = request.path.split('/').filter(|part| !part.is_empty()).collect();
             let indices = match parts.as_slice() {
@@ -457,7 +461,7 @@ impl<'k> Api<'k> {
             if let Some(index) = indices {
                 let holder: Vec<&str> = index.into_iter().collect();
                 let named = index.map(|_| holder.as_slice());
-                return match self.search_page(named, request, false) {
+                return match self.search_page(named, request, false, false) {
                     Ok(SearchOutcome::Page(page)) => Reply::Streamed(page.stream()),
                     Ok(SearchOutcome::Whole(response)) => Reply::Whole(response),
                     Err(Failure::BadRequest(reason)) => {
@@ -503,6 +507,18 @@ impl<'k> Api<'k> {
             ("GET", ["_cat", "indices"]) => self.cat_indices(),
             ("POST", ["_bulk"]) => self.bulk(None, request),
             ("GET" | "POST", ["_search", "template"]) => self.search_template(None, request),
+            ("GET" | "POST", ["_search", "scroll"]) => self.continue_scroll(request, None),
+            ("GET" | "POST", ["_search", "scroll", id]) => self.continue_scroll(request, Some(id)),
+            ("DELETE", ["_search", "scroll"]) => self.clear_scroll(request, None),
+            ("DELETE", ["_search", "scroll", id]) => self.clear_scroll(request, Some(id)),
+            ("GET" | "POST", ["_search"]) if query_flag(request, "scroll").is_some() => {
+                self.open_scroll(None, request)
+            }
+            ("GET" | "POST", [index, "_search"])
+                if valid_index(index) && query_flag(request, "scroll").is_some() =>
+            {
+                self.open_scroll(Some(std::slice::from_ref(index)), request)
+            }
             ("GET" | "POST", ["_render", "template"]) => self.render_template(request),
             ("GET" | "POST", [index, "_search", "template"]) => {
                 self.search_template(Some(std::slice::from_ref(index)), request)
@@ -1041,7 +1057,7 @@ impl<'k> Api<'k> {
     }
 
     fn search(&self, indices: Option<&[&str]>, request: &Request, count_only: bool) -> Answer {
-        Ok(match self.search_page(indices, request, count_only)? {
+        Ok(match self.search_page(indices, request, count_only, false)? {
             SearchOutcome::Whole(response) => response,
             SearchOutcome::Page(page) => json(200, page.whole()),
         })
@@ -1052,6 +1068,7 @@ impl<'k> Api<'k> {
         indices: Option<&[&str]>,
         request: &Request,
         count_only: bool,
+        scrolling: bool,
     ) -> Result<SearchOutcome, Failure> {
         let body_text = String::from_utf8_lossy(&request.body).into_owned();
         let body = if body_text.trim().is_empty() {
@@ -1096,7 +1113,8 @@ impl<'k> Api<'k> {
         };
         let size = number("size", DEFAULT_SIZE);
         let from = number("from", 0);
-        if from.saturating_add(size) > MAX_RESULT_WINDOW {
+        let window_end = if scrolling { size } else { from.saturating_add(size) };
+        if window_end > MAX_RESULT_WINDOW {
             return Ok(SearchOutcome::Whole(error(
                 400,
                 "illegal_argument_exception",
@@ -1245,10 +1263,11 @@ impl<'k> Api<'k> {
         }
         tail.push('}');
         let sorted = !sort.is_empty();
+        let (skipped, taken) = if scrolling { (0, usize::MAX) } else { (from, size) };
         let page_hits = ranked
             .into_iter()
-            .skip(from)
-            .take(size)
+            .skip(skipped)
+            .take(taken)
             .filter_map(|(value, at, sort_values)| {
                 let origin = *origins.get(at)?;
                 Some(PageHit {
@@ -1265,6 +1284,7 @@ impl<'k> Api<'k> {
             hits: page_hits,
             source_filter: presentation.source_filter,
             tail,
+            size,
         }))
     }
 }
@@ -1286,6 +1306,7 @@ struct SearchPage {
     hits: Vec<PageHit>,
     source_filter: SourceFilter,
     tail: String,
+    size: usize,
 }
 
 impl SearchPage {
