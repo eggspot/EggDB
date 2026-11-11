@@ -40,6 +40,7 @@ impl Harness {
             now_ms: 1_000_000,
             reply_room_bytes: usize::MAX,
             blocked_clients: 0,
+            scripts: None,
         };
         let mut out = Vec::new();
         execute(&context, &mut self.client, &Self::arguments(line))
@@ -54,6 +55,7 @@ impl Harness {
             now_ms: 1_000_000,
             reply_room_bytes: usize::MAX,
             blocked_clients: 0,
+            scripts: None,
         };
         let mut out = Vec::new();
         execute_with_transactions(&context, &mut self.client, &Self::arguments(line))
@@ -694,6 +696,7 @@ fn stream_reads_stop_with_oom_once_they_pass_the_reply_room() {
             now_ms: 1_000_000,
             reply_room_bytes,
             blocked_clients: 0,
+            scripts: None,
         };
         let mut out = Vec::new();
         execute(&context, &mut redis.client, &Harness::arguments(line)).encode(&mut out, false);

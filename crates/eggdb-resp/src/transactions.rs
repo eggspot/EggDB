@@ -5,9 +5,9 @@ use std::cell::RefCell;
 
 const NOT_IN_MULTI: &[&str] = &["multi", "exec", "discard", "watch", "unwatch"];
 
-struct OpenTransaction<'t> {
-    db: u32,
-    keys: RefCell<&'t mut dyn KeysWrite>,
+pub(crate) struct OpenTransaction<'t> {
+    pub(crate) db: u32,
+    pub(crate) keys: RefCell<&'t mut dyn KeysWrite>,
 }
 
 impl Keyspace for OpenTransaction<'_> {
@@ -72,6 +72,7 @@ fn exec(context: &Context<'_>, client: &mut Client) -> Reply {
             now_ms: context.now_ms,
             reply_room_bytes: context.reply_room_bytes,
             blocked_clients: context.blocked_clients,
+            scripts: context.scripts,
         };
         let mut gathered = Vec::with_capacity(queued.len());
         for arguments in &queued {

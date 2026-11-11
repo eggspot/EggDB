@@ -336,6 +336,7 @@ mod tests {
                 now_ms: 1000,
                 reply_room_bytes: usize::MAX,
                 blocked_clients: 0,
+                scripts: None,
             },
             client,
             &arguments,

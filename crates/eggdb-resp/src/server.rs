@@ -6,6 +6,7 @@ use crate::notifications::{self, Notifications};
 use crate::pops::OnWrongType;
 use crate::protocol::{ProtocolError, ReadAhead, Reply, RequestReader};
 use crate::pubsub::{Hub, Kind, Queued};
+use crate::scripting::ScriptCache;
 use crate::transactions::execute_with_transactions;
 use eggdb_platform::connection_limits::{MemoryBudget, UNCOUNTED_BUFFER_BYTES};
 use std::cell::RefCell;
@@ -297,6 +298,7 @@ struct Shared<'s> {
     waiters: &'s WaiterRegistry,
     clients: &'s Clients,
     notifications: &'s Notifications,
+    scripts: &'s ScriptCache,
 }
 
 fn config_command(
@@ -356,6 +358,7 @@ fn serve_connection(
         waiters,
         clients,
         notifications,
+        scripts,
     } = *shared;
     if stream.set_read_timeout(Some(READ_POLL)).is_err() || stream.set_nodelay(true).is_err() {
         return;
@@ -431,6 +434,7 @@ fn serve_connection(
                 now_ms: now_ms(),
                 reply_room_bytes: reply_room(&config.memory_budget, held.bytes(), out.len()),
                 blocked_clients: waiters.blocked_clients(),
+                scripts: Some(scripts),
             };
             let blocking = if client.queued.is_none() {
                 BlockingCommand::parse(&name, arguments.get(1..).unwrap_or_default())
@@ -479,6 +483,7 @@ fn serve_connection(
                                     now_ms: now_ms(),
                                     reply_room_bytes,
                                     blocked_clients: waiters.blocked_clients(),
+                                    scripts: Some(scripts),
                                 };
                                 command.attempt(&context, db, OnWrongType::Wait)
                             };
@@ -549,11 +554,13 @@ pub fn serve(
     let waiters = WaiterRegistry::default();
     let clients = Clients::default();
     let notifications = Notifications::default();
+    let scripts = ScriptCache::default();
     let shared = Shared {
         hub: &hub,
         waiters: &waiters,
         clients: &clients,
         notifications: &notifications,
+        scripts: &scripts,
     };
     let next_id = AtomicU64::new(1);
     std::thread::scope(|scope| {

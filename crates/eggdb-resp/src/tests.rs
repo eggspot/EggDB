@@ -31,6 +31,7 @@ impl Harness {
             now_ms: self.now_ms,
             reply_room_bytes: usize::MAX,
             blocked_clients: 0,
+            scripts: None,
         };
         execute(&context, &mut self.client, &arguments)
     }
@@ -198,6 +199,7 @@ fn transactions_queue_and_run_together_and_watch_aborts_them() {
             now_ms: redis.now_ms,
             reply_room_bytes: usize::MAX,
             blocked_clients: 0,
+            scripts: None,
         };
         let mut out = Vec::new();
         execute_with_transactions(&context, &mut redis.client, &arguments).encode(&mut out, false);
@@ -343,6 +345,7 @@ fn replies_of_many_keys_stop_with_oom_once_they_pass_the_reply_room() {
             now_ms: redis.now_ms,
             reply_room_bytes,
             blocked_clients: 0,
+            scripts: None,
         };
         let mut out = Vec::new();
         execute(&context, &mut redis.client, &arguments).encode(&mut out, false);

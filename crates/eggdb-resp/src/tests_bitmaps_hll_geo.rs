@@ -26,6 +26,7 @@ impl Harness {
             now_ms: 1_000_000,
             reply_room_bytes: self.reply_room_bytes,
             blocked_clients: 0,
+            scripts: None,
         };
         execute(&context, &mut self.client, &arguments)
     }
@@ -52,6 +53,7 @@ impl Harness {
             now_ms: 1_000_000,
             reply_room_bytes: self.reply_room_bytes,
             blocked_clients: 0,
+            scripts: None,
         };
         let mut out = Vec::new();
         execute_with_transactions(&context, &mut self.client, &arguments)
@@ -722,6 +724,7 @@ fn a_redis_cli_session_over_the_wire_gets_resp_replies() {
             now_ms: 1_000_000,
             reply_room_bytes: usize::MAX,
             blocked_clients: 0,
+            scripts: None,
         };
         let reply = execute(&context, &mut client, &request);
         let mut out = Vec::new();
@@ -866,6 +869,7 @@ fn geopos_coordinates_are_doubles_in_resp3_and_redis_text_in_resp2() {
             now_ms: 1_000_000,
             reply_room_bytes: usize::MAX,
             blocked_clients: 0,
+            scripts: None,
         };
         let reply = execute(&context, &mut client, &request);
         let mut out = Vec::new();

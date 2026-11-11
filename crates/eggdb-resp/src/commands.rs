@@ -44,6 +44,9 @@ pub struct Context<'k> {
     /// How many clients wait in a blocking command now, which `INFO` reports as
     /// `blocked_clients`. 0 where nothing can block (a replay, `EXEC`, an embedded caller).
     pub blocked_clients: usize,
+    /// The server's script cache for `EVALSHA` and `SCRIPT`, or `None` where scripts are not
+    /// kept (a replay, an embedded caller): `EVAL` still runs, `EVALSHA` finds nothing.
+    pub scripts: Option<&'k crate::scripting::ScriptCache>,
 }
 
 const REPLY_OVER_BUDGET: &str =
@@ -297,6 +300,9 @@ pub fn execute(context: &Context<'_>, client: &mut Client, arguments: &[Vec<u8>]
     let args = &arguments[1..];
     if !client.authenticated && !matches!(name.as_str(), "auth" | "hello" | "quit" | "ping") {
         return Reply::Error("NOAUTH Authentication required.".to_owned());
+    }
+    if let Some(reply) = crate::scripting::command(context, client, &name, args) {
+        return reply;
     }
     match connection_command(context, client, &name, args) {
         Some(reply) => reply,

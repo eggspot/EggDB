@@ -25,6 +25,7 @@ use eggdb_keyspace as keyspace;
 mod pops;
 mod protocol;
 mod pubsub;
+mod scripting;
 mod server;
 mod stream_groups;
 mod streams;
@@ -38,6 +39,7 @@ pub use commands::{Client, Context, execute};
 pub use eviction::{EvictingKeyspace, EvictionPolicy};
 pub use keyspace::{EntryVisitor, KeysRead, KeysWrite, Keyspace, MemoryKeyspace};
 pub use protocol::{ProtocolError, Reply, RequestReader, format_double};
+pub use scripting::ScriptCache;
 pub use server::{ServerConfig, serve};
 pub use transactions::execute_with_transactions;
 pub use value::{Data, Entry, SortedSet};
@@ -48,3 +50,5 @@ mod tests;
 mod tests_bitmaps_hll_geo;
 #[cfg(test)]
 mod tests_blocking;
+#[cfg(test)]
+mod tests_scripting;
