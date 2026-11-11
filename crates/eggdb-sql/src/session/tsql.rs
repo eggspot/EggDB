@@ -973,6 +973,9 @@ impl<'s> Session<'s> {
             values.get(3..).unwrap_or_default(),
         )
         .map_err(|error| error.at(raise.position))?;
+        if raise.logged {
+            self.fire_agent_alerts(message.number, message.severity, &message.text)?;
+        }
         if message.severity > 10 {
             return Err(SqlError::raised_in_sqlserver(
                 message.number,

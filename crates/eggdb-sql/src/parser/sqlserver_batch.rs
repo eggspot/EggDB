@@ -867,11 +867,14 @@ impl Parser<'_> {
         }
         self.expect(&TokenKind::RightParen)?;
         let mut set_error = false;
+        let mut logged = false;
         if self.take_word("with") {
             loop {
                 if self.take_word("seterror") {
                     set_error = true;
-                } else if !(self.take_word("log") || self.take_word("nowait")) {
+                } else if self.take_word("log") {
+                    logged = true;
+                } else if !self.take_word("nowait") {
                     return Err(self.unexpected());
                 }
                 if !self.take(&TokenKind::Comma) {
@@ -886,6 +889,7 @@ impl Parser<'_> {
                 state,
                 arguments,
                 set_error,
+                logged,
                 position,
             },
         )))

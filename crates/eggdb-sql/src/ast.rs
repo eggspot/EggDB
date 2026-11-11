@@ -712,6 +712,7 @@ pub(crate) struct RaiseError {
     pub(crate) state: Expr,
     pub(crate) arguments: Vec<Expr>,
     pub(crate) set_error: bool,
+    pub(crate) logged: bool,
     pub(crate) position: usize,
 }
 

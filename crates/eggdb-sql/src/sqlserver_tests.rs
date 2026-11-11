@@ -1987,6 +1987,56 @@ fn top_percent_limits_updates_and_deletes_and_top_limits_inserts() {
 }
 
 #[test]
+fn agent_alerts_count_logged_errors_run_their_job_and_notify_operators() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(&mut session, "CREATE TABLE ticks (n INT)");
+    values(&mut session, "EXEC msdb.dbo.sp_add_job @job_name = N'respond'");
+    values(
+        &mut session,
+        "EXEC msdb.dbo.sp_add_jobstep @job_name = N'respond', @step_name = N'one', @command = N'INSERT INTO ticks VALUES (1)'",
+    );
+    values(
+        &mut session,
+        "EXEC msdb.dbo.sp_add_operator @name = N'dba', @email_address = N'dba@example.com'",
+    );
+    values(
+        &mut session,
+        "EXEC msdb.dbo.sp_add_alert @name = N'low_space', @severity = 10, @job_name = N'respond'",
+    );
+    values(
+        &mut session,
+        "EXEC msdb.dbo.sp_add_notification @alert_name = N'low_space', @operator_name = N'dba', @notification_method = 1",
+    );
+    values(&mut session, "RAISERROR('disk is almost full', 10, 1) WITH LOG");
+    values(&mut session, "RAISERROR('not written to the log', 10, 1)");
+    assert_eq!(
+        values(&mut session, "SELECT occurrence_count, has_notification FROM msdb.dbo.sysalerts"),
+        vec![vec![Value::Integer(1), Value::Integer(1)]]
+    );
+    assert_eq!(
+        values(&mut session, "SELECT COUNT(*) FROM ticks"),
+        vec![vec![Value::Integer(1)]]
+    );
+    assert_eq!(
+        values(&mut session, "SELECT COUNT(*) FROM msdb.dbo.sysnotifications"),
+        vec![vec![Value::Integer(1)]]
+    );
+    let refused = session
+        .execute(
+            "EXEC msdb.dbo.sp_add_alert @name = N'both', @message_id = 50001, @severity = 10",
+            &mut |_| {},
+        )
+        .expect_err("a message id and a severity together");
+    assert_eq!(refused.vendor_code(), Some(14500), "{refused}");
+    values(&mut session, "EXEC msdb.dbo.sp_delete_operator @name = N'dba'");
+    assert_eq!(
+        values(&mut session, "SELECT COUNT(*) FROM msdb.dbo.sysnotifications"),
+        vec![vec![Value::Integer(0)]]
+    );
+}
+
+#[test]
 fn msdb_views_show_agent_jobs_steps_and_history() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::SqlServer);

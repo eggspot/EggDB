@@ -6,6 +6,8 @@ use crate::eval::{Evaluator, Scope};
 use crate::session::mysql_events::quoted;
 use crate::types::Value;
 
+mod alerts;
+
 pub(crate) const JOBS_TABLE: &str = "eggdb_internal.sqlserver_agent_jobs";
 pub(crate) const STEPS_TABLE: &str = "eggdb_internal.sqlserver_agent_steps";
 pub(crate) const SCHEDULES_TABLE: &str = "eggdb_internal.sqlserver_agent_schedules";
@@ -32,7 +34,16 @@ const CREATE_TABLES: &str = "CREATE SCHEMA IF NOT EXISTS eggdb_internal; \
     CREATE OR REPLACE VIEW eggdb_internal.sqlserver_agent_sysjobhistory AS SELECT (row_number() OVER (ORDER BY h.run_time, h.job_name, h.step_id, h.run_status DESC))::integer AS instance_id, md5(h.job_name)::uuid AS job_id, h.step_id, coalesce(st.step_name, '(Job outcome)') AS step_name, h.message, h.run_status, to_char(h.run_time, 'YYYYMMDD')::integer AS run_date, to_char(h.run_time, 'HH24MISS')::integer AS run_time, 0 AS run_duration, 0 AS sql_message_id, 0 AS sql_severity FROM eggdb_internal.sqlserver_agent_history h LEFT JOIN eggdb_internal.sqlserver_agent_steps st ON st.job_name = h.job_name AND st.step_id = h.step_id";
 
 /// The `msdb.dbo` views SQL Server Agent's tools read, each kept as a view over the Agent tables.
-pub(crate) const AGENT_VIEWS: [&str; 5] = ["sysjobs", "sysjobsteps", "sysschedules", "sysjobschedules", "sysjobhistory"];
+pub(crate) const AGENT_VIEWS: [&str; 8] = [
+    "sysjobs",
+    "sysjobsteps",
+    "sysschedules",
+    "sysjobschedules",
+    "sysjobhistory",
+    "sysoperators",
+    "sysalerts",
+    "sysnotifications",
+];
 const MAX_MESSAGE_CHARS: usize = 1_000;
 const SUPPORTED_FREQUENCIES: [i64; 4] = [1, 4, 8, 16];
 
@@ -50,6 +61,15 @@ pub(crate) enum AgentProcedure {
     AddJobSchedule,
     AddJobServer,
     StartJob,
+    AddOperator,
+    UpdateOperator,
+    DeleteOperator,
+    AddAlert,
+    UpdateAlert,
+    DeleteAlert,
+    AddNotification,
+    DeleteNotification,
+    NotifyOperator,
 }
 
 impl AgentProcedure {
@@ -67,6 +87,15 @@ impl AgentProcedure {
             "sp_add_jobschedule" => Self::AddJobSchedule,
             "sp_add_jobserver" => Self::AddJobServer,
             "sp_start_job" => Self::StartJob,
+            "sp_add_operator" => Self::AddOperator,
+            "sp_update_operator" => Self::UpdateOperator,
+            "sp_delete_operator" => Self::DeleteOperator,
+            "sp_add_alert" => Self::AddAlert,
+            "sp_update_alert" => Self::UpdateAlert,
+            "sp_delete_alert" => Self::DeleteAlert,
+            "sp_add_notification" => Self::AddNotification,
+            "sp_delete_notification" => Self::DeleteNotification,
+            "sp_notify_operator" => Self::NotifyOperator,
             _ => return None,
         })
     }
@@ -138,6 +167,54 @@ impl AgentProcedure {
             ],
             Self::AddJobServer => &["@job_id", "@job_name", "@server_name"],
             Self::StartJob => &["@job_name", "@job_id", "@server_name", "@step_name"],
+            Self::AddOperator | Self::UpdateOperator => &[
+                "@name",
+                "@new_name",
+                "@enabled",
+                "@email_address",
+                "@pager_address",
+                "@weekday_pager_start_time",
+                "@weekday_pager_end_time",
+                "@saturday_pager_start_time",
+                "@saturday_pager_end_time",
+                "@sunday_pager_start_time",
+                "@sunday_pager_end_time",
+                "@pager_days",
+                "@netsend_address",
+                "@category_name",
+            ],
+            Self::DeleteOperator => &["@name", "@reassign_to_operator"],
+            Self::AddAlert | Self::UpdateAlert => &[
+                "@name",
+                "@message_id",
+                "@severity",
+                "@enabled",
+                "@delay_between_responses",
+                "@notification_message",
+                "@include_event_description_in",
+                "@database_name",
+                "@event_description_keyword",
+                "@job_id",
+                "@job_name",
+                "@raise_snmp_trap",
+                "@performance_condition",
+                "@category_name",
+                "@wmi_namespace",
+                "@wmi_query",
+                "@new_name",
+                "@occurrence_count",
+            ],
+            Self::DeleteAlert => &["@name"],
+            Self::AddNotification | Self::DeleteNotification => &["@alert_name", "@operator_name", "@notification_method"],
+            Self::NotifyOperator => &[
+                "@profile_name",
+                "@id",
+                "@name",
+                "@subject",
+                "@body",
+                "@file_attachments",
+                "@mail_database",
+            ],
         }
     }
 }
@@ -305,6 +382,20 @@ impl Session<'_> {
         }
         let procedure_name = call.procedure.text.clone();
         self.agent_sql(CREATE_TABLES)?;
+        if matches!(
+            procedure,
+            AgentProcedure::AddOperator
+                | AgentProcedure::UpdateOperator
+                | AgentProcedure::DeleteOperator
+                | AgentProcedure::AddAlert
+                | AgentProcedure::UpdateAlert
+                | AgentProcedure::DeleteAlert
+                | AgentProcedure::AddNotification
+                | AgentProcedure::DeleteNotification
+                | AgentProcedure::NotifyOperator
+        ) {
+            return self.agent_alert_procedure(procedure, &arguments, &procedure_name);
+        }
         match procedure {
             AgentProcedure::AddJob => {
                 let job = arguments.required("@job_name", &procedure_name)?;
