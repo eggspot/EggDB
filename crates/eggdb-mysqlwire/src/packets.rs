@@ -15,7 +15,7 @@ pub const CLIENT_LONG_FLAG: u32 = 1 << 2;
 pub const CLIENT_CONNECT_WITH_DB: u32 = 1 << 3;
 /// `CLIENT_COMPRESS`, never offered.
 pub const CLIENT_COMPRESS: u32 = 1 << 5;
-/// `CLIENT_LOCAL_FILES`, never offered.
+/// `CLIENT_LOCAL_FILES`: `LOAD DATA LOCAL INFILE`, offered since D423.
 pub const CLIENT_LOCAL_FILES: u32 = 1 << 7;
 /// `CLIENT_PROTOCOL_41`: the protocol every client since MySQL 4.1 speaks; required.
 pub const CLIENT_PROTOCOL_41: u32 = 1 << 9;
@@ -46,6 +46,7 @@ pub const SERVER_CAPABILITIES: u32 = CLIENT_LONG_PASSWORD
     | CLIENT_FOUND_ROWS
     | CLIENT_LONG_FLAG
     | CLIENT_CONNECT_WITH_DB
+    | CLIENT_LOCAL_FILES
     | CLIENT_PROTOCOL_41
     | CLIENT_TRANSACTIONS
     | CLIENT_SECURE_CONNECTION

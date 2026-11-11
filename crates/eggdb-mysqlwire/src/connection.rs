@@ -1,6 +1,6 @@
 use crate::auth::{CACHING_SHA2_PASSWORD, MYSQL_NATIVE_PASSWORD, NONCE_BYTES};
 use crate::packets::{
-    BoundValue, CLIENT_MULTI_STATEMENTS, CLIENT_PLUGIN_AUTH, CLIENT_SSL, ColumnDefinition, Command,
+    BoundValue, CLIENT_LOCAL_FILES, CLIENT_MULTI_STATEMENTS, CLIENT_PLUGIN_AUTH, CLIENT_SSL, ColumnDefinition, Command,
     ParameterType, Payload, SERVER_CAPABILITIES, STATUS_AUTOCOMMIT, STATUS_IN_TRANSACTION,
     STATUS_MORE_RESULTS, TYPE_BLOB, TYPE_DATE, TYPE_DATETIME, TYPE_DOUBLE, TYPE_FLOAT, TYPE_JSON,
     TYPE_LONG, TYPE_LONGLONG, TYPE_NEWDECIMAL, TYPE_SHORT, TYPE_TIME, TYPE_TIMESTAMP, TYPE_TINY,
@@ -1190,10 +1190,18 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                     results.push(result);
                     true
                 }),
-            None => self.session.execute_while(text, &mut |result| {
-                results.push(result);
-                true
-            }),
+            None => {
+                let allowed = self.capabilities & CLIENT_LOCAL_FILES != 0;
+                let mut channel = crate::local_infile::LocalInfile::new(&mut self.wire, allowed);
+                self.session.execute_with_copy(
+                    text,
+                    &mut |result| {
+                        results.push(result);
+                        true
+                    },
+                    &mut channel,
+                )
+            }
         };
         let count = results.len();
         for (index, result) in results.iter().enumerate() {

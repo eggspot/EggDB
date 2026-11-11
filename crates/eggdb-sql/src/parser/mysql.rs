@@ -187,6 +187,9 @@ impl<'t> Parser<'t> {
                 self.mysql_drop_routine()?
             }
             "call" => self.call_routine()?,
+            "load" if self.is_word_at(1, "data") || self.is_word_at(1, "xml") => {
+                self.mysql_load_data()?
+            }
             "show" => self.mysql_show()?,
             "describe" | "desc" => {
                 self.at += 1;

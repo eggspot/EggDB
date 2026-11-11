@@ -16,11 +16,13 @@
 //! - `COM_QUERY` with text result sets and several statements per query, and prepared
 //!   statements (`COM_STMT_PREPARE`, `COM_STMT_EXECUTE` with binary parameters and rows,
 //!   `COM_STMT_SEND_LONG_DATA`, `COM_STMT_RESET`, `COM_STMT_CLOSE`).
+//! - `LOAD DATA LOCAL INFILE`: the server asks the client for the file and reads its content.
 //!
 //! The guide is "Connecting with mysql" in `docs/sql.md` in the repository.
 
 mod auth;
 mod connection;
+mod local_infile;
 pub mod packets;
 mod server;
 mod wire;

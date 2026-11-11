@@ -46,6 +46,9 @@ pub struct CopyStart {
     pub format: CopyFormat,
     /// How many columns each row has.
     pub columns: usize,
+    /// The file a MySQL `LOAD DATA LOCAL INFILE` names, whose content the client sends; `None`
+    /// for a `COPY ... FROM STDIN`.
+    pub file: Option<String>,
 }
 
 /// The client end of `COPY ... FROM STDIN` and `COPY ... TO STDOUT`: where the rows a `COPY`
@@ -711,6 +714,7 @@ pub(crate) fn copy_from_client(
     let start = CopyStart {
         format: copy.options.format,
         columns: loader.targets.len(),
+        file: None,
     };
     let loaded = match io.inline {
         Some(bytes) => {
@@ -1065,6 +1069,7 @@ pub(crate) fn copy_table_to_client(
     channel.start_copy_out(&CopyStart {
         format: copy.options.format,
         columns: targets.len(),
+        file: None,
     })?;
     send_header(channel, copy, &names)?;
     let prefix = rows_prefix(table.id);
@@ -1121,6 +1126,7 @@ pub(crate) fn copy_rows_to_client(
     channel.start_copy_out(&CopyStart {
         format: copy.options.format,
         columns: names.len(),
+        file: None,
     })?;
     send_header(channel, copy, &names)?;
     let all: Vec<usize> = (0..names.len()).collect();

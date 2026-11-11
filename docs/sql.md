@@ -945,7 +945,7 @@ What the server does:
 - **Several connections**, up to `--max-connections` (64) for this listener, at most 16 of them
   still logging in; the next gets error 1040. A stop ends idle connections with error 1053.
 
-Not yet: TLS, compression, `LOAD DATA LOCAL INFILE`, `CLIENT_DEPRECATE_EOF`, query attributes,
+`LOAD DATA LOCAL INFILE` reads the client's file (D423). Not yet: TLS, compression, `CLIENT_DEPRECATE_EOF`, query attributes,
 `information_schema` and the catalog queries of GUI tools (MySQL Workbench, DBeaver), dates and
 times, stored users, and `caching_sha2_password`'s full authentication (which needs TLS or RSA;
 the fast path always applies, since the server checks every password itself).

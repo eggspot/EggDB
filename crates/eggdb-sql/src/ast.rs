@@ -1143,6 +1143,7 @@ pub(crate) enum MySqlStatement {
         like: Option<String>,
     },
     CreateEvent(Box<EventDefinition>),
+    LoadData(Box<LoadData>),
     AlterEvent(Box<AlterEvent>),
     DropEvent {
         name: Name,
@@ -1173,6 +1174,38 @@ pub(crate) enum MySqlStatement {
     Use(Name),
     Set(Vec<Assignment>),
     Accepted(&'static str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoadDuplicates {
+    Error,
+    Replace,
+    Ignore,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum LoadTarget {
+    Column(String),
+    Variable(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LoadData {
+    pub(crate) local: bool,
+    pub(crate) file: String,
+    pub(crate) duplicates: LoadDuplicates,
+    pub(crate) table: Name,
+    pub(crate) table_text: String,
+    pub(crate) partitions: Option<String>,
+    pub(crate) fields_terminated: Vec<u8>,
+    pub(crate) enclosed: Option<u8>,
+    pub(crate) optionally_enclosed: bool,
+    pub(crate) escaped: Option<u8>,
+    pub(crate) lines_starting: Vec<u8>,
+    pub(crate) lines_terminated: Vec<u8>,
+    pub(crate) ignore_lines: u64,
+    pub(crate) targets: Option<Vec<LoadTarget>>,
+    pub(crate) assignments: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

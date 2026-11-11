@@ -14,6 +14,7 @@ mod multitable_insert;
 mod mysql;
 mod mysql_dates;
 mod mysql_events;
+mod mysql_load;
 mod mysql_routines;
 mod oracle;
 mod partitions;

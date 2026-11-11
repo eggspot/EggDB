@@ -652,6 +652,7 @@ mod tests {
         CopyStart {
             format: CopyFormat::Text,
             columns: 2,
+            file: None,
         }
     }
 

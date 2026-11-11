@@ -620,7 +620,8 @@ break')",
         client.started_out,
         Some(CopyStart {
             format: CopyFormat::Text,
-            columns: 3
+            columns: 3,
+            file: None,
         })
     );
     let cases = [
@@ -1266,7 +1267,8 @@ fn copy_to_stdout_in_the_binary_format_writes_postgresqls_file_layout() {
         client.started_out,
         Some(CopyStart {
             format: CopyFormat::Binary,
-            columns: 1
+            columns: 1,
+            file: None,
         })
     );
     rows(&mut session, "DELETE FROM pair");

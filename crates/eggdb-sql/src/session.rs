@@ -3,6 +3,7 @@ mod cursors;
 pub(crate) mod database_switch;
 mod mysql;
 pub(crate) mod mysql_events;
+mod mysql_load;
 mod nonatomic;
 mod oracle;
 mod oracle_over_tds;
@@ -3107,6 +3108,7 @@ impl<'s> Session<'s> {
                 binding.query(reader, tables, query)?;
                 execute::query(reader, tables, query, true)
             }),
+            Statement::MySql(MySqlStatement::LoadData(load)) => self.load_data(load, io, binding),
             Statement::MySql(statement) => self.run_mysql(statement),
             Statement::Pragma(pragma) => self.run_pragma(pragma),
             Statement::Select(select)

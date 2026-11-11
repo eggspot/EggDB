@@ -222,7 +222,8 @@ impl<'s> Session<'s> {
             }
             MySqlStatement::CreateEvent(_)
             | MySqlStatement::AlterEvent(_)
-            | MySqlStatement::DropEvent { .. } => None,
+            | MySqlStatement::DropEvent { .. }
+            | MySqlStatement::LoadData(_) => None,
             MySqlStatement::ShowTriggers { .. } => Some(triggers_columns()),
             MySqlStatement::ShowIndex(_) => Some(index_columns()),
             MySqlStatement::ShowVariables { .. } | MySqlStatement::ShowStatus => {
@@ -336,6 +337,9 @@ impl<'s> Session<'s> {
                 Ok(rows_result(triggers_columns(), rows))
             }
             MySqlStatement::CreateEvent(definition) => self.create_event(definition),
+            MySqlStatement::LoadData(_) => Err(SqlError::not_supported(
+                "LOAD DATA without a client connection",
+            )),
             MySqlStatement::AlterEvent(alter) => self.alter_event(alter),
             MySqlStatement::DropEvent { name, if_exists } => self.drop_event(name, *if_exists),
             MySqlStatement::ShowEvents { like } => self.show_events(like.as_deref()),
