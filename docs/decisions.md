@@ -642,3 +642,4 @@ its full title with its status.
 - [D615](decisions/D615.md) Code-only batch 263 (M16): AMQP priority queues
 - [D616](decisions/D616.md) Code-only batch 264 (M16): Kafka log compaction
 - [D617](decisions/D617.md) Code-only batch 265 (M16): Ed25519 and NATS NKey authentication
+- [D618](decisions/D618.md) Code-only batch 266 (M10): MySQL's information_schema.TRIGGERS

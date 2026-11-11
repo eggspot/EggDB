@@ -218,11 +218,88 @@ const TRIGGERS: &[CatalogColumn] = &[
     column("trigger_schema", NAME),
     column("trigger_name", NAME),
     column("event_manipulation", NAME),
+    column("event_object_catalog", NAME),
     column("event_object_schema", NAME),
     column("event_object_table", NAME),
+    column("action_order", NUMBER),
+    column("action_condition", TEXT),
     column("action_statement", TEXT),
+    column("action_orientation", NAME),
     column("action_timing", NAME),
+    column("action_reference_old_table", NAME),
+    column("action_reference_new_table", NAME),
+    column("action_reference_old_row", NAME),
+    column("action_reference_new_row", NAME),
+    column("created", STAMP),
+    column("sql_mode", TEXT),
+    column("definer", NAME),
+    column("character_set_client", NAME),
+    column("collation_connection", NAME),
+    column("database_collation", NAME),
 ];
+
+fn trigger_body(text: &str) -> String {
+    let lowered = text.to_ascii_lowercase();
+    match lowered.find("for each row") {
+        Some(at) => text[at + "for each row".len()..].trim().to_owned(),
+        None => text.trim().to_owned(),
+    }
+}
+
+fn trigger_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    let mut order: std::collections::HashMap<(usize, &'static str, &'static str), i64> =
+        std::collections::HashMap::new();
+    for entry in &snapshot.triggers {
+        let definition = &entry.definition;
+        if definition.dialect != crate::dialect::Dialect::MySql {
+            continue;
+        }
+        let Some(relation) = snapshot.relations.get(entry.relation) else {
+            continue;
+        };
+        let schema = mysql_schema(snapshot, Some(relation.schema.clone()));
+        let timing = match definition.timing {
+            crate::triggers::TriggerTiming::Before => "BEFORE",
+            crate::triggers::TriggerTiming::After => "AFTER",
+            crate::triggers::TriggerTiming::InsteadOf => "INSTEAD OF",
+        };
+        for event in definition.events.listed() {
+            let manipulation = match event {
+                crate::triggers::TriggerEvent::Insert => "INSERT",
+                crate::triggers::TriggerEvent::Update => "UPDATE",
+                crate::triggers::TriggerEvent::Delete => "DELETE",
+                crate::triggers::TriggerEvent::Truncate => continue,
+            };
+            let position = order.entry((entry.relation, timing, manipulation)).or_insert(0);
+            *position += 1;
+            rows.push(build(
+                TRIGGERS,
+                vec![
+                    ("trigger_catalog", text(CATALOG)),
+                    ("trigger_schema", schema.clone()),
+                    ("trigger_name", Value::Text(definition.name.clone())),
+                    ("event_manipulation", text(manipulation)),
+                    ("event_object_catalog", text(CATALOG)),
+                    ("event_object_schema", schema.clone()),
+                    ("event_object_table", Value::Text(relation.name.clone())),
+                    ("action_order", Value::BigInt(*position)),
+                    ("action_statement", Value::Text(trigger_body(&definition.text))),
+                    ("action_orientation", text("ROW")),
+                    ("action_timing", text(timing)),
+                    ("action_reference_old_row", text("OLD")),
+                    ("action_reference_new_row", text("NEW")),
+                    ("sql_mode", text("ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION")),
+                    ("definer", Value::Text(format!("{}@%", snapshot.user))),
+                    ("character_set_client", text(CHARACTER_SET)),
+                    ("collation_connection", text(COLLATION)),
+                    ("database_collation", text(COLLATION)),
+                ],
+            ));
+        }
+    }
+    rows
+}
 
 const EVENTS: &[CatalogColumn] = &[
     column("event_catalog", NAME),
@@ -1266,7 +1343,8 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MySqlRelation) -> Vec<V
             })
             .collect(),
         MySqlRelation::Events => event_rows(snapshot),
-        MySqlRelation::Triggers | MySqlRelation::Partitions | MySqlRelation::Plugins => Vec::new(),
+        MySqlRelation::Triggers => trigger_rows(snapshot),
+        MySqlRelation::Partitions | MySqlRelation::Plugins => Vec::new(),
     }
 }
 

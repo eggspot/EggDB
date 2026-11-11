@@ -124,6 +124,24 @@ fn mysql_show_create_table_shows_on_update_current_timestamp() {
 }
 
 #[test]
+fn mysql_information_schema_lists_triggers() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    last(&mut session, "CREATE TABLE t (id INT PRIMARY KEY, n INT)");
+    last(
+        &mut session,
+        "CREATE TRIGGER t_bi BEFORE INSERT ON t FOR EACH ROW SET NEW.n = NEW.n + 1",
+    );
+    let shown = last(
+        &mut session,
+        "SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING, ACTION_ORDER, ACTION_STATEMENT FROM information_schema.TRIGGERS WHERE EVENT_OBJECT_TABLE = 't'",
+    );
+    for expected in ["t_bi", "INSERT", "BEFORE", "1", "SET NEW.n = NEW.n + 1"] {
+        assert!(shown.contains(expected), "{expected} in {shown}");
+    }
+}
+
+#[test]
 fn sqlite_schema_keeps_the_create_table_text_as_written() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Sqlite);
