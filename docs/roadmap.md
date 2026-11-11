@@ -1414,8 +1414,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - AMQP 0-9-1 `tx` transactions (D33, D214). **Code written, unbuilt** (code-only mode, 2026-11-11, D483).
 - Dead-letter exchanges, message and queue TTL, delayed messages and priorities (D33, D214). Dead-letter
   exchanges, message TTL and delayed messages: **code written, unbuilt** (code-only mode,
-  2026-11-11, D516); `x-death`: **code written, unbuilt** (code-only mode, 2026-11-12, D613). Left: queue TTL
-  (`x-expires`) and priorities.
+  2026-11-11, D516); `x-death`: **code written, unbuilt** (code-only mode, 2026-11-12, D613). Queue TTL
+  (`x-expires`): **code written, unbuilt** (code-only mode, 2026-11-12, D614). Left: priorities.
 - Replicated (quorum-style) queues (D33).
 - A benchmark against RabbitMQ (D33, D214).
 - MQTT persistent sessions, and QoS 1 and 2 redelivery to subscribers (D33, D215). **Code written,

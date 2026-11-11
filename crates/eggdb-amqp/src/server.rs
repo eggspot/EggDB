@@ -83,6 +83,7 @@ struct QueuePolicy {
     message_ttl_ms: Option<u64>,
     dead_letter_exchange: Option<String>,
     dead_letter_routing_key: Option<String>,
+    expires_ms: Option<u64>,
 }
 
 impl QueuePolicy {
@@ -91,8 +92,15 @@ impl QueuePolicy {
             message_ttl_ms: integer_named(arguments, "x-message-ttl"),
             dead_letter_exchange: text_named(arguments, "x-dead-letter-exchange"),
             dead_letter_routing_key: text_named(arguments, "x-dead-letter-routing-key"),
+            expires_ms: integer_named(arguments, "x-expires").filter(|expires| *expires > 0),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct Usage {
+    consumers: usize,
+    last_used_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -109,6 +117,7 @@ pub(crate) struct Broker<'s> {
     exclusive_owners: Mutex<BTreeMap<String, u64>>,
     auto_delete: Mutex<BTreeMap<String, AutoDelete>>,
     policies: Mutex<BTreeMap<String, QueuePolicy>>,
+    usage: Mutex<BTreeMap<String, Usage>>,
 }
 
 impl<'s> Broker<'s> {
@@ -136,6 +145,47 @@ impl<'s> Broker<'s> {
             exclusive_owners: Mutex::new(BTreeMap::new()),
             auto_delete: Mutex::new(BTreeMap::new()),
             policies: Mutex::new(BTreeMap::new()),
+            usage: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn used(&self, queue: &str, now: u64) {
+        self.usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(queue.to_owned())
+            .or_default()
+            .last_used_ms = now;
+    }
+
+    /// Deletes the queues declared with `x-expires` that have had no consumer, no `basic.get`
+    /// and no redeclaration for that long, as RabbitMQ's queue TTL does.
+    fn delete_expired_queues(&self, now: u64) {
+        let expiring: Vec<(String, u64)> = self
+            .policies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter_map(|(queue, policy)| policy.expires_ms.map(|expires| (queue.clone(), expires)))
+            .collect();
+        if expiring.is_empty() {
+            return;
+        }
+        let gone: Vec<String> = {
+            let usage = self.usage.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            expiring
+                .into_iter()
+                .filter(|(queue, expires)| {
+                    usage.get(queue).is_some_and(|used| {
+                        used.consumers == 0 && now.saturating_sub(used.last_used_ms) >= *expires
+                    })
+                })
+                .map(|(queue, _)| queue)
+                .collect()
+        };
+        for queue in gone {
+            let _ = self.queues.delete(&queue);
+            self.forget_queue(&queue);
         }
     }
 
@@ -211,6 +261,12 @@ impl<'s> Broker<'s> {
     }
 
     fn consumer_started(&self, queue: &str) {
+        {
+            let mut usage = self.usage.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = usage.entry(queue.to_owned()).or_default();
+            entry.consumers += 1;
+            entry.last_used_ms = now_ms();
+        }
         let mut auto_delete = self
             .auto_delete
             .lock()
@@ -222,6 +278,15 @@ impl<'s> Broker<'s> {
     }
 
     fn consumer_ended(&self, queue: &str) {
+        if let Some(entry) = self
+            .usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(queue)
+        {
+            entry.consumers = entry.consumers.saturating_sub(1);
+            entry.last_used_ms = now_ms();
+        }
         let emptied = {
             let mut auto_delete = self
                 .auto_delete
@@ -247,6 +312,10 @@ impl<'s> Broker<'s> {
 
     fn forget_queue(&self, queue: &str) {
         self.policies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(queue);
+        self.usage
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(queue);
@@ -1020,6 +1089,7 @@ impl Connection<'_, '_> {
                 let auto_delete = args.bit()?;
                 let no_wait = args.bit()?;
                 let arguments = crate::field_table::decode_table(args.table()?)?;
+                self.broker.delete_expired_queues(now_ms());
                 if arguments.iter().any(|(argument, _)| argument == "x-max-priority") {
                     self.close_channel(
                         channel,
@@ -1061,6 +1131,7 @@ impl Connection<'_, '_> {
                 if !passive {
                     self.broker.set_policy(&name, QueuePolicy::of(&arguments));
                 }
+                self.broker.used(&name, now_ms());
                 if !exists && !passive {
                     if exclusive {
                         self.broker
@@ -1192,6 +1263,7 @@ impl Connection<'_, '_> {
                 if self.locked_by_another(channel, &queue, 60, 20) {
                     return Ok(true);
                 }
+                self.broker.delete_expired_queues(now_ms());
                 if !self
                     .broker
                     .queues
@@ -1253,6 +1325,7 @@ impl Connection<'_, '_> {
                 let _reserved = args.short()?;
                 let exchange = args.shortstr()?;
                 let routing_key = args.shortstr()?;
+                self.broker.delete_expired_queues(now_ms());
                 if let Some(state) = self.channels.get_mut(&channel) {
                     state.publishing = Some((exchange, routing_key));
                     state.header = None;
@@ -1266,6 +1339,8 @@ impl Connection<'_, '_> {
                 if self.locked_by_another(channel, &queue, 60, 70) {
                     return Ok(true);
                 }
+                self.broker.delete_expired_queues(now_ms());
+                self.broker.used(&queue, now_ms());
                 let messages = match self.broker.queues.receive(&queue, 1, LEASE_MS, now_ms()) {
                     Ok(messages) => messages,
                     Err(_) => {
@@ -1647,4 +1722,33 @@ pub fn serve(
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod queue_expiry_tests {
+    use super::{Broker, QueuePolicy};
+    use eggdb_keyspace::MemoryKeyspace;
+
+    #[test]
+    fn a_queue_unused_for_its_x_expires_is_deleted_unless_it_has_a_consumer() {
+        let keyspace = MemoryKeyspace::default();
+        let broker = Broker::new(&keyspace);
+        for queue in ["idle", "watched"] {
+            broker.queues.declare(queue).unwrap();
+            broker.set_policy(
+                queue,
+                QueuePolicy {
+                    expires_ms: Some(10),
+                    ..QueuePolicy::default()
+                },
+            );
+            broker.used(queue, 0);
+        }
+        broker.consumer_started("watched");
+        broker.delete_expired_queues(5);
+        assert!(broker.queues.exists("idle").unwrap());
+        broker.delete_expired_queues(u64::MAX);
+        assert!(!broker.queues.exists("idle").unwrap());
+        assert!(broker.queues.exists("watched").unwrap());
+    }
 }
