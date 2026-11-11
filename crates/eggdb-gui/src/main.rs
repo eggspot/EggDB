@@ -21,7 +21,7 @@ use eggdb_gui::layout::Layout;
 use eggdb_gui::main_window::{self, Faces};
 use eggdb_gui::png::encode_png;
 use eggdb_gui::pointer::clamp_to_minimum;
-use eggdb_gui::settings::{SETTINGS_VARIABLE, settings_path};
+use eggdb_gui::settings::{ClientSettings, SETTINGS_VARIABLE, settings_path};
 use eggdb_gui::workspace::{Screen, Workspace, WorkspaceCommand};
 use eggdb_gui::{BoxFace, Canvas, SystemFaces, Theme, ThemeKind};
 use eggdb_platform::window::{
@@ -52,6 +52,9 @@ Shows EggDB's connect screen.
 ";
 
 const SCRIPTED_FRAME_INTERVAL: Duration = Duration::from_millis(50);
+const WINDOW_WIDTH_SETTING: &str = "window.width";
+const WINDOW_HEIGHT_SETTING: &str = "window.height";
+const LARGEST_REMEMBERED_SIDE: u32 = 16_384;
 const OPENING_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const SCRIPTED_OPEN_LIMIT: Duration = Duration::from_secs(30);
 
@@ -284,12 +287,43 @@ fn screen_tree(workspace: &Workspace, faces: Faces<'_>, logical: (u32, u32)) -> 
     }
 }
 
+fn remembered_size(settings: &ClientSettings) -> (u32, u32) {
+    let side = |name: &str, default: u32, minimum: u32| {
+        settings
+            .value(name)
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|side| (minimum..=LARGEST_REMEMBERED_SIDE).contains(side))
+            .unwrap_or(default)
+    };
+    (
+        side(WINDOW_WIDTH_SETTING, DEFAULT_WIDTH, MIN_WIDTH),
+        side(WINDOW_HEIGHT_SETTING, DEFAULT_HEIGHT, MIN_HEIGHT),
+    )
+}
+
+fn remember_size(logical: (u32, u32)) {
+    let Some(path) = settings_path() else {
+        return;
+    };
+    let mut settings = ClientSettings::load(&path);
+    settings.set(WINDOW_WIDTH_SETTING, &logical.0.to_string());
+    settings.set(WINDOW_HEIGHT_SETTING, &logical.1.to_string());
+    let _ = settings.save(&path);
+}
+
 fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
+    let (width, height) = if options.frames.is_some() {
+        (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+    } else {
+        settings_path().map_or((DEFAULT_WIDTH, DEFAULT_HEIGHT), |path| {
+            remembered_size(&ClientSettings::load(&path))
+        })
+    };
     let window: Rc<RefCell<Box<dyn Window>>> = Rc::new(RefCell::new(
         open_window(&WindowOptions {
             title: TITLE.to_owned(),
-            width: DEFAULT_WIDTH,
-            height: DEFAULT_HEIGHT,
+            width,
+            height,
             min_width: MIN_WIDTH,
             min_height: MIN_HEIGHT,
         })
@@ -416,7 +450,12 @@ fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
                 dirty = true;
                 continue;
             }
-            Some(WindowEvent::CloseRequested) => return Ok(()),
+            Some(WindowEvent::CloseRequested) => {
+                if options.frames.is_none() {
+                    remember_size(logical_size(size, scale));
+                }
+                return Ok(());
+            }
             Some(WindowEvent::Focused(active)) => {
                 if active {
                     let system_reduced_motion = window.borrow_mut().reduced_motion();
@@ -481,6 +520,18 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_remembered_window_size_is_kept_within_bounds() {
+        let settings = ClientSettings::parse("window.width = 1600\nwindow.height = 10\n");
+        assert_eq!(remembered_size(&settings), (1600, DEFAULT_HEIGHT));
+        assert_eq!(
+            remembered_size(&ClientSettings::default()),
+            (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+        );
+        let huge = ClientSettings::parse("window.width = 99999\nwindow.height = 900\n");
+        assert_eq!(remembered_size(&huge), (DEFAULT_WIDTH, 900.max(MIN_HEIGHT)));
+    }
 
     fn parse(args: &[&str]) -> Result<Option<Options>, String> {
         parse_options(args.iter().map(OsString::from))

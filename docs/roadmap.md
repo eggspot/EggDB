@@ -876,7 +876,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   above and with a pinned Arabic font (D42). Check: golden frames of the connect card in Arabic.
 - The client's speed measured like the engine's: opening a database, running a query and
   scrolling a large result (D15).
-- Small screens, remembered window size and position, and the OS's theme (D15, D256).
+- Small screens, remembered window size and position, and the OS's theme (D15, D256). Remembered size: **code written,
+  unbuilt** (code-only mode, 2026-11-12, D570). Left: position, small screens and the OS's theme.
 - The `eggdb gui` command in the command model (D191).
 - The interactive ER view, with diagrams across schemas, views, indexes and checks (D237).
 - An admin web console served by the server (D42).
