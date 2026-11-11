@@ -732,13 +732,16 @@ impl Session<'_> {
             &config.database,
         )
         .with_memory_budget(Arc::clone(&memory_budget));
-        let rest_endpoint = eggdb_api::Endpoint::new(
+        let mut rest_endpoint = eggdb_api::Endpoint::new(
             &store,
             &config.user,
             server_password_sha256,
             &config.database,
             "public",
         );
+        if let Some(rules) = &config.auth_rules {
+            rest_endpoint = rest_endpoint.with_auth_rules(Arc::clone(rules));
+        }
         let mcp_opener = super::serve_mcp::SharedOpener { db: &db };
         let mcp_endpoint = mcp_listener.as_ref().map(|(_, tokens)| {
             super::serve_mcp::McpEndpoint::new(

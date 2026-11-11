@@ -482,3 +482,4 @@ its full title with its status.
 - [D455](decisions/D455.md) Code-only batch 103 (M10): Oracle's `IS [NOT] A SET` and `IS [NOT] EMPTY`
 - [D456](decisions/D456.md) Code-only batch 104 (M6a): PostgREST's `or=` and `and=` logic groups
 - [D457](decisions/D457.md) Code-only batch 105 (M6a): REST upserts, `/rpc/<function>` and an OpenAPI document
+- [D458](decisions/D458.md) Code-only batch 106 (M6a): bearer tokens on the REST API, run as the token's role

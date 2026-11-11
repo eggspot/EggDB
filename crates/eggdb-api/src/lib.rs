@@ -14,7 +14,9 @@ use eggdb_http::{Reply, Request, Response, StreamedResponse};
 use eggdb_sql::json::{Json, Node, parse_document};
 use eggdb_sql::{Dialect, KeyValueStore, QueryResult, Session, Value};
 use request::{Query, call_arguments, identifier, literal};
+use eggdb_auth::{AuthMethod, AuthRules};
 use std::io::{self, Write};
+use std::sync::Arc;
 
 /// The largest request body the API accepts.
 pub const MAX_REQUEST_BYTES: usize = 8 << 20;
@@ -26,6 +28,13 @@ pub struct Endpoint<'s, S: KeyValueStore> {
     password_sha256: [u8; 32],
     database: String,
     schema: String,
+    auth_rules: Option<Arc<AuthRules>>,
+}
+
+enum Caller {
+    Server,
+    Role(String),
+    Refused(String),
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Endpoint<'_, S> {
@@ -179,6 +188,68 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             password_sha256,
             database: database.to_owned(),
             schema: schema.to_owned(),
+            auth_rules: None,
+        }
+    }
+
+    /// Also accepts `Authorization: Bearer <token>` for the users whose rule in `rules` is
+    /// `jwt`: the request then runs as the role the token names, under that role's privileges
+    /// and row-level security.
+    #[must_use]
+    pub fn with_auth_rules(mut self, rules: Arc<AuthRules>) -> Self {
+        self.auth_rules = Some(rules);
+        self
+    }
+
+    fn caller(&self, request: &Request) -> Caller {
+        let Some(token) = request
+            .header("authorization")
+            .and_then(|header| header.strip_prefix("Bearer "))
+        else {
+            return if self.authorized(request) {
+                Caller::Server
+            } else {
+                Caller::Refused("sign in with the server's user and password (HTTP Basic)".to_owned())
+            };
+        };
+        let Some(rules) = &self.auth_rules else {
+            return Caller::Refused("this server takes no bearer tokens".to_owned());
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX));
+        let mut why = "this server takes no bearer tokens".to_owned();
+        for (keys, policy) in rules.bearer_methods() {
+            match eggdb_auth::jwt::verify(token.trim(), keys, policy, now) {
+                Ok(role) => {
+                    if !matches!(rules.method_for(&role), AuthMethod::Jwt { .. }) {
+                        return Caller::Refused(format!("{role} does not sign in with a token"));
+                    }
+                    let may_log_in = self
+                        .store
+                        .begin_read()
+                        .ok()
+                        .and_then(|reader| eggdb_sql::stored_role(&reader, &role).ok().flatten())
+                        .is_some_and(|stored| stored.login);
+                    if !may_log_in {
+                        return Caller::Refused(format!("{role} may not log in"));
+                    }
+                    return Caller::Role(role);
+                }
+                Err(error) => why = error.to_string(),
+            }
+        }
+        Caller::Refused(why)
+    }
+
+    fn acting_as(&self, role: String) -> Self {
+        Self {
+            store: self.store,
+            user: role,
+            password_sha256: self.password_sha256,
+            database: self.database.clone(),
+            schema: self.schema.clone(),
+            auth_rules: None,
         }
     }
 
@@ -219,18 +290,25 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
     /// Answers one HTTP request; the rows of a `GET` are a [`StreamedResponse`], written as
     /// they are sent.
     pub fn reply(&self, request: &Request) -> Reply<'static> {
-        if !self.authorized(request) {
-            let mut response = failure(
-                401,
-                "PGRST301",
-                "sign in with the server's user and password (HTTP Basic)",
-            );
-            response.headers.push((
-                "WWW-Authenticate".to_owned(),
-                "Basic realm=\"eggdb\"".to_owned(),
-            ));
-            return response.into();
+        match self.caller(request) {
+            Caller::Server => self.serve(request),
+            Caller::Role(role) => self.acting_as(role).serve(request),
+            Caller::Refused(why) => {
+                let mut response = failure(401, "PGRST301", &why);
+                response.headers.push((
+                    "WWW-Authenticate".to_owned(),
+                    if self.auth_rules.is_some() {
+                        "Bearer realm=\"eggdb\", Basic realm=\"eggdb\"".to_owned()
+                    } else {
+                        "Basic realm=\"eggdb\"".to_owned()
+                    },
+                ));
+                response.into()
+            }
         }
+    }
+
+    fn serve(&self, request: &Request) -> Reply<'static> {
         let path = request.path.trim_matches('/');
         if path.is_empty() {
             let wants_openapi = request

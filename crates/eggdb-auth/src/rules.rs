@@ -206,6 +206,15 @@ impl AuthRules {
         })
     }
 
+    /// The key sets and policies of the `jwt` rules, in order, for clients that send a bearer
+    /// token without naming a user first.
+    pub fn bearer_methods(&self) -> impl Iterator<Item = (&JwtKeys, &JwtPolicy)> {
+        self.rules.iter().filter_map(|rule| match &rule.method {
+            AuthMethod::Jwt { keys, policy } => Some((keys, policy)),
+            _ => None,
+        })
+    }
+
     /// The method for `user`.
     pub fn method_for(&self, user: &str) -> &AuthMethod {
         self.rules
