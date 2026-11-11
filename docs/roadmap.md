@@ -767,7 +767,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   written, unbuilt** (code-only mode, 2026-11-11, D489); `performance_schema` waits for that schema.
 - SQLite's `.scanstats on|off` in `eggdb sql`'s shell: after each `SELECT` the shell prints its
   `QUERY PLAN` with `--SCAN t (loops=1 rows=3)` lines (D327).
-- MySQL's `EXPLAIN FORMAT=JSON`: `key_length`, `used_columns`, `data_read_per_join`, subqueries
+- MySQL's `EXPLAIN FORMAT=JSON`: `key_length` (**code written, unbuilt**, code-only mode, 2026-11-12, D663),
+  `used_columns`, `data_read_per_join`, subqueries
   (`attached_subqueries`), conditions in MySQL's `` `db`.`t`.`c` `` spelling, format version 2;
   `EXPLAIN FORMAT=TREE|JSON` of `INSERT` and `REPLACE`; measured steps under a multi-table
   write's `Update`/`Delete` iterator (D345).

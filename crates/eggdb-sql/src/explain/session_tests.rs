@@ -555,6 +555,7 @@ fn mysql_format_json_answers_mysql_8s_query_block() {
       "used_key_parts": [
         "id"
       ],
+      "key_length": "4",
       "ref": [
         "const"
       ],

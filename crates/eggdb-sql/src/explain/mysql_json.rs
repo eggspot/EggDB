@@ -91,7 +91,49 @@ fn condition_text(query: &ExplainedQuery, expr: &Expr) -> String {
     .text(expr)
 }
 
-fn key_parts(source: &ExplainedSource, key: KeyChoice) -> Vec<String> {
+const DECIMAL_LEFTOVER_BYTES: [u64; 9] = [0, 1, 1, 2, 2, 3, 3, 4, 4];
+const DECIMAL_DIGITS_PER_WORD: u64 = 9;
+const DECIMAL_WORD_BYTES: u64 = 4;
+const UTF8MB4_BYTES: u64 = 4;
+const LENGTH_PREFIX_BYTES: u64 = 2;
+const LONGEST_KEY_PART_BYTES: u64 = 3_072;
+
+fn fraction_bytes(digits: Option<u8>) -> u64 {
+    u64::from(digits.unwrap_or(0)).div_ceil(2)
+}
+
+fn decimal_bytes(digits: u64) -> u64 {
+    digits / DECIMAL_DIGITS_PER_WORD * DECIMAL_WORD_BYTES
+        + DECIMAL_LEFTOVER_BYTES[(digits % DECIMAL_DIGITS_PER_WORD) as usize]
+}
+
+fn key_part_bytes(column: &crate::encoding::Column) -> u64 {
+    use crate::types::SqlType;
+    let stored = match column.sql_type {
+        SqlType::Boolean => 1,
+        SqlType::SmallInt => 2,
+        SqlType::Integer | SqlType::Real => 4,
+        SqlType::BigInt | SqlType::Double => 8,
+        SqlType::Date => 3,
+        SqlType::Time(digits) => 3 + fraction_bytes(digits),
+        SqlType::Timestamp(digits) => 5 + fraction_bytes(digits),
+        SqlType::TimestampTz(digits) => 4 + fraction_bytes(digits),
+        SqlType::Uuid => 16,
+        SqlType::Numeric(Some(modifier)) => {
+            let scale = u64::try_from(modifier.scale.max(0)).unwrap_or(0);
+            let precision = u64::from(modifier.precision);
+            decimal_bytes(precision.saturating_sub(scale)) + decimal_bytes(scale)
+        }
+        SqlType::Numeric(None) => decimal_bytes(10),
+        SqlType::Varchar(Some(length)) | SqlType::Bpchar(Some(length)) => {
+            (u64::from(length) * UTF8MB4_BYTES).min(LONGEST_KEY_PART_BYTES) + LENGTH_PREFIX_BYTES
+        }
+        _ => LONGEST_KEY_PART_BYTES + LENGTH_PREFIX_BYTES,
+    };
+    stored + u64::from(!column.not_null)
+}
+
+fn key_columns(source: &ExplainedSource, key: KeyChoice) -> Vec<usize> {
     let table = &source.table;
     let columns: Vec<usize> = match (source.join, source.access.used, key) {
         (Some(JoinMethod::Index(_)), _, KeyChoice::Index(position)) => table
@@ -117,10 +159,22 @@ fn key_parts(source: &ExplainedSource, key: KeyChoice) -> Vec<String> {
             .unwrap_or_default(),
     };
     columns
+}
+
+fn key_parts(source: &ExplainedSource, key: KeyChoice) -> Vec<String> {
+    key_columns(source, key)
         .into_iter()
-        .filter_map(|column| table.columns.get(column))
+        .filter_map(|column| source.table.columns.get(column))
         .map(|column| column.name.clone())
         .collect()
+}
+
+fn key_length(source: &ExplainedSource, key: KeyChoice) -> u64 {
+    key_columns(source, key)
+        .into_iter()
+        .filter_map(|column| source.table.columns.get(column))
+        .map(key_part_bytes)
+        .sum()
 }
 
 struct Walk<'p> {
@@ -211,6 +265,10 @@ impl Walk<'_> {
             members.push((
                 "used_key_parts",
                 PlanJson::Array(parts.iter().map(|part| text(part)).collect()),
+            ));
+            members.push((
+                "key_length",
+                PlanJson::Text(key_length(source, key).to_string()),
             ));
             if source.join.is_none() && matches!(source.access.used, Use::Point | Use::Equal) {
                 members.push((
