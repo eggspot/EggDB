@@ -18,6 +18,7 @@ pub(crate) const MAX_KEY_COLUMNS: usize = 32;
 pub(crate) const MAX_BOUND_VALUES: usize = 65_536;
 pub(crate) const MAX_INDEX_LINKS: usize = 65_536;
 const CHANGING_FUNCTIONS: &[&str] = &[
+    "eggdb_tablesample",
     "random",
     "rand",
     "now",

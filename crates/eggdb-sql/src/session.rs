@@ -2015,6 +2015,7 @@ impl<'s> Session<'s> {
                     self.batch_resume = Some(resume);
                 }
                 crate::mysql_errors::clear_evaluation_warnings();
+            crate::table_sample::reset();
                 crate::mysql_errors::set_strict_write(self.mysql());
                 self.enter_sequences(false);
                 crate::deferred_checks::enter(&self.deferred.modes);
@@ -2134,6 +2135,7 @@ impl<'s> Session<'s> {
             };
             let _catalog = crate::pg_catalog::enter_statement(flags.wants_catalog, &settings);
             crate::mysql_errors::clear_evaluation_warnings();
+            crate::table_sample::reset();
             crate::mysql_errors::set_strict_write(
                 self.mysql() && matches!(statement, Statement::Insert(_) | Statement::Update(_)),
             );

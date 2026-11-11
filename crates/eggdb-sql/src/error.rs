@@ -93,6 +93,8 @@ impl SqlState {
     pub const INVALID_REGULAR_EXPRESSION: Self = Self(*b"2201B");
     /// `22012` division_by_zero.
     pub const DIVISION_BY_ZERO: Self = Self(*b"22012");
+    /// `2202H`: a `TABLESAMPLE` argument out of range.
+    pub const INVALID_TABLESAMPLE_ARGUMENT: Self = Self(*b"2202H");
     /// `22033` invalid_sql_json_subscript: an array subscript outside a strict path's array.
     pub const INVALID_SQL_JSON_SUBSCRIPT: Self = Self(*b"22033");
     /// `22030` duplicate_json_object_key_value: `WITH UNIQUE KEYS` found a key twice.

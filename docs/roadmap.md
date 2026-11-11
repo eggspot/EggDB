@@ -493,7 +493,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   kernels and grouped aggregates, with SIMD chosen at runtime (D40, D179, D201).
 - A query compiler for hot prepared statements' expressions, compiled to a flat program, after
   parsed plans are kept in prepared statements (below) (D40). Check: TPC-H Q1 and Q6 times.
-- `TABLESAMPLE`, t-digest and the other `APPROX_*` functions (D40).
+- `TABLESAMPLE`, t-digest and the other `APPROX_*` functions (D40). `TABLESAMPLE`: **code written, unbuilt** (code-only
+  mode, 2026-11-11, D541).
 - TPC-C against PostgreSQL and MySQL (D7).
 - Partial, expression and covering (`INCLUDE`) indexes, `CREATE INDEX CONCURRENTLY` and `NULLS NOT
   DISTINCT` (D32).

@@ -176,6 +176,7 @@ fn added_function_type(
         | "normalize" => Some(SqlType::Text),
         "ts_rank" | "ts_rank_cd" => Some(SqlType::Real),
         crate::parser::mysql_match::MATCH_FUNCTION => Some(SqlType::Double),
+        crate::table_sample::FUNCTION => Some(SqlType::Integer),
         crate::sqlserver_fulltext::CONTAINS_FUNCTION | crate::sqlserver_fulltext::FREETEXT_FUNCTION => {
             Some(SqlType::Boolean)
         }

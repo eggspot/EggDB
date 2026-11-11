@@ -2996,19 +2996,65 @@ impl<'t> Parser<'t> {
         if self.is_word("only") {
             self.at += 1;
         }
+        let name_start = self.peek().start;
         let name = self.table_name()?;
+        let name_text = self.slice(name_start, self.previous_end());
         let partition_selection = self.partition_selection()?;
-        let alias = if self.take_word("as") || self.at_bare_alias() {
+        let alias = if !self.is_word("tablesample") && (self.take_word("as") || self.at_bare_alias()) {
             Some(self.name()?.text)
         } else {
             None
         };
+        if self.is_word("tablesample") && !self.sqlite() {
+            let sampled_alias = alias.clone().unwrap_or_else(|| crate::schemas::base_name(&name.text).to_owned());
+            return self.table_sample(&name_text, &sampled_alias);
+        }
         if self.peek_kind() == &TokenKind::LeftParen && alias.is_some() {
             return Err(self.not_supported("column aliases in FROM"));
         }
         let mut reference = TableReference::named(name, alias);
         reference.partition_selection = partition_selection;
         Ok(reference)
+    }
+
+    fn table_sample(&mut self, table: &str, alias: &str) -> SqlResult<TableReference> {
+        self.at += 1;
+        if !(self.take_word("bernoulli") || self.take_word("system")) && !self.sqlserver() {
+            return Err(self.not_supported("TABLESAMPLE methods other than BERNOULLI and SYSTEM"));
+        }
+        self.expect(&TokenKind::LeftParen)?;
+        let start = self.peek().start;
+        self.expression()?;
+        let percent = self.slice(start, self.previous_end());
+        if self.sqlserver() {
+            if self.take_word("rows") {
+                return Err(self.not_supported("TABLESAMPLE by ROWS"));
+            }
+            self.take_word("percent");
+        }
+        self.expect(&TokenKind::RightParen)?;
+        let seed = if self.take_word("repeatable") {
+            self.expect(&TokenKind::LeftParen)?;
+            let start = self.peek().start;
+            self.expression()?;
+            let seed = self.slice(start, self.previous_end());
+            self.expect(&TokenKind::RightParen)?;
+            seed
+        } else {
+            "NULL".to_owned()
+        };
+        let quoted = match self.dialect {
+            Dialect::MySql => format!("`{}`", alias.replace('`', "``")),
+            Dialect::SqlServer => format!("[{}]", alias.replace(']', "]]")),
+            _ => format!("\"{}\"", alias.replace('"', "\"\"")),
+        };
+        let text = format!(
+            "(SELECT * FROM {table} WHERE {}({percent}, {seed}) = 1) {quoted}",
+            crate::table_sample::FUNCTION
+        );
+        let tokens = crate::lexer::tokenize_in(&text, self.dialect)?;
+        let mut parser = Parser::new(&text, &tokens).in_dialect(self.dialect);
+        parser.derived_table()
     }
 
     fn at_bare_alias(&self) -> bool {

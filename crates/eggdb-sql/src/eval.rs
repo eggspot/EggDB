@@ -1407,6 +1407,9 @@ impl Evaluator<'_> {
             name if crate::hstore_functions::is_populate(name) => {
                 return crate::hstore_functions::populate_record(self, name, arguments);
             }
+            crate::table_sample::FUNCTION => {
+                return crate::table_sample::function(&self.arguments(arguments)?);
+            }
             crate::parser::mysql_match::MATCH_FUNCTION => {
                 return crate::mysql_fulltext::match_against(&self.arguments(arguments)?);
             }
