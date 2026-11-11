@@ -23,7 +23,7 @@ use crate::grid::{
 use crate::grid_menu::{self, GridMenu};
 use crate::highlight::{Carry, TokenKind, tokens};
 use crate::inspector::{self, Inspector, InspectorBlock};
-use crate::key_scan::KeySpaceScan;
+use crate::key_scan::{KeySpaceScan, PagingButton};
 use crate::layout::{Layout, LayoutAction};
 use crate::layout_picker::{self, LayoutPicker, PickerOutcome};
 use crate::object_browser::{
@@ -2747,11 +2747,14 @@ fn keys_header(paint: &mut Painter<'_, '_>, tab: &QueryTab, centre_right: f32) {
             theme.error,
         );
     }
-    for (rect, label, enabled) in [
-        (back, "Back", pages.can_go_back() && !tab.running),
-        (next, "Next 100", pages.can_go_next() && !tab.running),
+    for (rect, label, enabled, button) in [
+        (back, "Back", pages.can_go_back() && !tab.running, PagingButton::Back),
+        (next, "Next 100", pages.can_go_next() && !tab.running, PagingButton::Next),
     ] {
         paint.button(rect, Button::Ghost);
+        if pages.paging_focus == Some(button) {
+            focus_ring(paint, rect);
+        }
         let ink = if enabled {
             theme.text_primary
         } else {
@@ -2788,13 +2791,14 @@ fn keys_header_nodes(nodes: &mut Vec<AccessNode>, tab: &QueryTab, centre_right: 
     prefix.actions.focus = true;
     prefix.actions.set_value = true;
     nodes.push(prefix);
-    for (id, rect, name, shortcut, enabled) in [
+    for (id, rect, name, shortcut, enabled, paging) in [
         (
             NODE_KEYS_BACK,
             back,
             "Back",
             "Alt+PgUp",
             pages.can_go_back(),
+            PagingButton::Back,
         ),
         (
             NODE_KEYS_NEXT,
@@ -2802,6 +2806,7 @@ fn keys_header_nodes(nodes: &mut Vec<AccessNode>, tab: &QueryTab, centre_right: 
             "Next 100",
             "Alt+PgDn",
             pages.can_go_next(),
+            PagingButton::Next,
         ),
     ] {
         let mut button = node(
@@ -2812,6 +2817,7 @@ fn keys_header_nodes(nodes: &mut Vec<AccessNode>, tab: &QueryTab, centre_right: 
             (rect.x, rect.y, rect.w, rect.h),
         );
         button.shortcut = Some(shortcut.to_owned());
+        button.state.focused = pages.paging_focus == Some(paging);
         button.state.disabled = !enabled || tab.running;
         button.actions.invoke = enabled && !tab.running;
         nodes.push(button);

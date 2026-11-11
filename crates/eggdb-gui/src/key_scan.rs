@@ -591,6 +591,8 @@ pub struct KeyPages {
     pub prefix_selected: bool,
     /// Where the field's caret is, in characters from the start of its text.
     pub prefix_caret: usize,
+    /// The paging button that has the focus, between the field and the grid in `Tab` order.
+    pub paging_focus: Option<PagingButton>,
     /// The prefix that was active when the field took the focus, which `Esc` restores.
     pub prefix_on_focus: String,
     /// The start of every page shown before the current one, page 1's first.
@@ -604,6 +606,15 @@ pub struct KeyPages {
     /// Which row the current cell goes to when the page arrives: the first after `Next 100`,
     /// the last after `Back`.
     pub land_on_last: bool,
+}
+
+/// A keys tab's paging buttons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PagingButton {
+    /// `Back` (`Alt+PgUp`).
+    Back,
+    /// `Next 100` (`Alt+PgDn`).
+    Next,
 }
 
 /// Where a caret key moves the prefix field's caret.

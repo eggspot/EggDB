@@ -13,7 +13,7 @@ use crate::editor_menu::{
 use crate::grid::{GridAnswer, GridMenuItem, ResultGrid, cell_text, column_widths};
 use crate::grid_menu::{GridMenu, MenuAnswer};
 use crate::key_scan::{
-    KEY_SCAN_LIMIT, KeyPages, KeySpaceScan, PageEnd, PageStart, PrefixCaretMove,
+    KEY_SCAN_LIMIT, KeyPages, KeySpaceScan, PageEnd, PageStart, PagingButton, PrefixCaretMove,
     forget_old_shown_keys, unspelled,
 };
 use crate::plan_view::{Plan, PlanAnswer, PlanView, explain_statements};
@@ -523,6 +523,7 @@ impl QueryTab {
     /// Moves the focus to `focus`: the grid or the plan only when they show something,
     /// the editor otherwise.
     pub fn focus(&mut self, focus: TabFocus) {
+        self.key_pages.paging_focus = None;
         let results = matches!(focus, TabFocus::Grid | TabFocus::Plan);
         if results && self.view == ResultView::Plan && self.plan.is_some() {
             self.focus_plan();
@@ -1057,6 +1058,7 @@ impl QueryTab {
             return;
         }
         let pages = &mut self.key_pages;
+        pages.paging_focus = None;
         pages.prefix_focused = true;
         pages.prefix_selected = true;
         pages.prefix_on_focus = pages.prefix_text.clone();
@@ -1087,6 +1089,9 @@ impl QueryTab {
         if self.key_pages.prefix_focused {
             return Some(self.prefix_key(press, now));
         }
+        if let Some(button) = self.key_pages.paging_focus {
+            return Some(self.paging_key(button, press));
+        }
         let primary = press.modifiers.control || press.modifiers.command;
         let in_grid = self.focus == TabFocus::Grid;
         let (on_last_row, on_first_row) = self.grid.as_ref().map_or((false, false), |grid| {
@@ -1115,7 +1120,74 @@ impl QueryTab {
                 Some(self.previous_page())
             }
             Key::Escape if self.running && in_grid => Some(TabAction::Stop),
+            Key::Tab if in_grid && press.modifiers.shift => {
+                match self.enabled_paging_buttons().last().copied() {
+                    Some(button) => self.focus_paging(button),
+                    None => self.focus_prefix(),
+                }
+                Some(TabAction::None)
+            }
             _ => None,
+        }
+    }
+
+    fn enabled_paging_buttons(&self) -> Vec<PagingButton> {
+        if self.running {
+            return Vec::new();
+        }
+        let pages = &self.key_pages;
+        [
+            (PagingButton::Back, pages.can_go_back()),
+            (PagingButton::Next, pages.can_go_next()),
+        ]
+        .into_iter()
+        .filter_map(|(button, enabled)| enabled.then_some(button))
+        .collect()
+    }
+
+    fn focus_paging(&mut self, button: PagingButton) {
+        self.focus(TabFocus::Grid);
+        if let Some(grid) = &mut self.grid {
+            grid.focused = false;
+        }
+        self.key_pages.prefix_focused = false;
+        self.key_pages.prefix_selected = false;
+        self.key_pages.paging_focus = Some(button);
+    }
+
+    /// A key on a focused paging button (`docs/ux/workspace.md` 10.10's `Tab` order: the
+    /// prefix field, `Back`, `Next 100`, the grid); disabled buttons are skipped.
+    fn paging_key(&mut self, button: PagingButton, press: KeyPress) -> TabAction {
+        let enabled = self.enabled_paging_buttons();
+        match press.key {
+            Key::Enter | Key::Space => match button {
+                _ if !enabled.contains(&button) => TabAction::None,
+                PagingButton::Back => self.previous_page(),
+                PagingButton::Next => self.next_page(),
+            },
+            Key::Tab if press.modifiers.shift => {
+                if button == PagingButton::Next && enabled.contains(&PagingButton::Back) {
+                    self.key_pages.paging_focus = Some(PagingButton::Back);
+                } else {
+                    self.focus_prefix();
+                }
+                TabAction::None
+            }
+            Key::Tab => {
+                if button == PagingButton::Back && enabled.contains(&PagingButton::Next) {
+                    self.key_pages.paging_focus = Some(PagingButton::Next);
+                } else {
+                    self.focus(TabFocus::Grid);
+                }
+                TabAction::None
+            }
+            Key::Escape => {
+                self.focus(TabFocus::Grid);
+                TabAction::None
+            }
+            Key::PageDown if press.modifiers.alt => self.next_page(),
+            Key::PageUp if press.modifiers.alt => self.previous_page(),
+            _ => TabAction::None,
         }
     }
 
@@ -1141,9 +1213,12 @@ impl QueryTab {
                 };
             }
             Key::Tab => {
+                let first = self.enabled_paging_buttons().first().copied();
                 self.leave_prefix();
                 if press.modifiers.shift {
                     self.focus(TabFocus::Editor);
+                } else if let Some(button) = first {
+                    self.focus_paging(button);
                 }
                 return TabAction::None;
             }
@@ -2079,6 +2154,40 @@ mod tests {
         read_resp_page(&mut tab, back, &mut connection);
         assert_eq!(tab.editor.text(), "SCAN resp0 CURSOR 120 LIMIT 100");
         assert_eq!(tab.summary, "Keys 101–200 of 242 · 0.5 ms");
+    }
+
+    #[test]
+    fn tab_from_the_prefix_field_stops_on_the_enabled_paging_buttons() {
+        let scan = KeySpaceScan::new(
+            Some("users".to_owned()),
+            crate::catalog::KeyCount::Exactly(242),
+        );
+        let mut tab = QueryTab::keys(scan);
+        let now = Instant::now();
+        tab.key_pages.next = Some(PageStart::After(b"user:0099".to_vec()));
+        tab.focus_prefix();
+        tab.keys_tab_key(press(Key::Tab, false, false), now);
+        assert_eq!(
+            tab.key_pages.paging_focus,
+            Some(PagingButton::Next),
+            "Back is disabled on page 1, so Tab skips it"
+        );
+        assert!(!tab.key_pages.prefix_focused);
+        assert!(matches!(
+            tab.keys_tab_key(press(Key::Enter, false, false), now),
+            Some(TabAction::Run(_))
+        ));
+        tab.key_pages.earlier.push(PageStart::First);
+        tab.keys_tab_key(press(Key::Tab, true, false), now);
+        assert_eq!(tab.key_pages.paging_focus, Some(PagingButton::Back));
+        tab.keys_tab_key(press(Key::Tab, true, false), now);
+        assert_eq!(tab.key_pages.paging_focus, None);
+        assert!(tab.key_pages.prefix_focused, "Shift+Tab from Back goes to the field");
+        tab.keys_tab_key(press(Key::Tab, false, false), now);
+        tab.keys_tab_key(press(Key::Tab, false, false), now);
+        assert_eq!(tab.key_pages.paging_focus, Some(PagingButton::Next));
+        tab.keys_tab_key(press(Key::Tab, false, false), now);
+        assert_eq!(tab.key_pages.paging_focus, None, "Tab from Next 100 leaves for the grid");
     }
 
     #[test]
