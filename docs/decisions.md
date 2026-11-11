@@ -466,3 +466,4 @@ its full title with its status.
 - [D439](decisions/D439.md) Code-only batch 87 (M12): in-database linear and logistic regression (`eggdb_fit`, `eggdb_predict`)
 - [D440](decisions/D440.md) Code-only batch 88 (M15): JsonLogic targeting and fractional rollouts for feature flags
 - [D441](decisions/D441.md) Code-only batch 89 (M16): PromQL's remaining functions
+- [D442](decisions/D442.md) Code-only batch 90 (M18): CRDT counters and sets as resolution policies

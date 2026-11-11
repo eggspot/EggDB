@@ -1360,7 +1360,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 ### M18 The other ways of scaling
 - Leaderless quorums over the network, wired under `eggdb serve` (D225).
 - Merkle trees for anti-entropy (D225).
-- CRDT types (counters, sets) as resolution policies (D18, D225).
+- CRDT types (counters, sets) as resolution policies (D18, D225). **Code written, unbuilt** (code-only mode,
+  2026-11-11, D442).
 - Multi-primary SQL rows with conflict rules per table: last writer wins, application rules or
   CRDTs (D18, D225).
 - Tombstones collected once every replica has seen them, and membership changes by epoch (D225).

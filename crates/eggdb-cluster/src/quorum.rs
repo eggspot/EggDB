@@ -67,6 +67,8 @@ pub enum Resolution {
     LastWriterWins,
     /// Concurrent versions are kept as siblings; a write that read them all replaces them.
     KeepSiblings,
+    /// Concurrent versions are merged as a conflict-free replicated data type.
+    Crdt(crate::crdt::CrdtKind),
 }
 
 /// One node's copy of the keys it replicates.
@@ -93,6 +95,27 @@ impl Replica {
         }
         held.retain(|version| !incoming.vector.descends(&version.vector));
         held.push(incoming.clone());
+        if let Resolution::Crdt(kind) = resolution
+            && held.len() > 1
+        {
+            let mut merged = VersionVector::default();
+            let mut value: Option<Vec<u8>> = None;
+            let mut stamp = Stamp::default();
+            for version in held.iter() {
+                merged.merge(&version.vector);
+                stamp = stamp.max(version.stamp);
+                value = Some(crate::crdt::merged(
+                    kind,
+                    value.as_deref(),
+                    version.value.as_deref(),
+                ));
+            }
+            *held = vec![Version {
+                vector: merged,
+                stamp,
+                value,
+            }];
+        }
         if resolution == Resolution::LastWriterWins && held.len() > 1 {
             let mut merged = VersionVector::default();
             for version in held.iter() {

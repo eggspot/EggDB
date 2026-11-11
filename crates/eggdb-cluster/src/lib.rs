@@ -7,6 +7,7 @@
 //! changes that span shards with two-phase commit. [`quorum`] replicates keys without a leader:
 //! any node takes writes, quorums decide success, and replicas converge.
 
+pub mod crdt;
 pub mod quorum;
 mod shards;
 pub mod transaction;

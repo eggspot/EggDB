@@ -377,3 +377,37 @@ fn a_presumed_abort_stands_against_a_later_commit_and_no_votes_never_commit() {
     assert_eq!(coordinator.decide(normal, &[Vote::No]), Decision::Commit);
     assert_eq!(coordinator.outcome(normal), Decision::Commit);
 }
+
+#[cfg(test)]
+mod crdt_tests {
+    use crate::crdt::{CrdtKind, OrSet, PnCounter, merged};
+
+    #[test]
+    fn counters_merge_to_the_sum_of_every_replicas_changes() {
+        let mut a = PnCounter::default();
+        let mut b = PnCounter::default();
+        a.change(1, 5);
+        b.change(2, 3);
+        b.change(2, -1);
+        let state = merged(CrdtKind::Counter, Some(&a.encode()), Some(&b.encode()));
+        let again = merged(CrdtKind::Counter, Some(&state), Some(&b.encode()));
+        assert_eq!(PnCounter::decode(&state).unwrap().value(), 7);
+        assert_eq!(state, again);
+    }
+
+    #[test]
+    fn a_concurrent_add_survives_a_remove_that_did_not_see_it() {
+        let mut a = OrSet::default();
+        a.add(1, b"milk");
+        let mut b = a.clone();
+        b.remove(b"milk");
+        a.add(1, b"milk");
+        let state = merged(CrdtKind::Set, Some(&a.encode()), Some(&b.encode()));
+        let set = OrSet::decode(&state).unwrap();
+        assert!(set.contains(b"milk"));
+        let mut c = set.clone();
+        c.remove(b"milk");
+        assert!(!c.contains(b"milk"));
+        assert!(OrSet::decode(b"junk").is_none());
+    }
+}
