@@ -1210,7 +1210,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - GQL quantified paths and `SHORTEST k` (D333).
 - Cypher's `CALL (a, b) { ... }` scope form, `CALL { ... } IN TRANSACTIONS`, and the label-expression
   operators `&`, `!` and `%` (D351). The label-expression operators: **code
-  written, unbuilt** (code-only mode, 2026-11-11, D478).
+  written, unbuilt** (code-only mode, 2026-11-11, D478); the scope form and `IN TRANSACTIONS` (in one
+  transaction, `ON ERROR FAIL` only): **code written, unbuilt** (code-only mode, 2026-11-11, D479).
 - Indexes on labels and properties, and uniqueness constraints (D206).
 - Bolt: open transactions across messages, `LOGON` (5.1 and later), routing tables and bookmarks
   (D207).

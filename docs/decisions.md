@@ -503,3 +503,4 @@ its full title with its status.
 - [D476](decisions/D476.md) Code-only batch 124 (M16): NATS no-responders and token authentication
 - [D477](decisions/D477.md) Code-only batch 125 (M16): STOMP `/exchange/` destinations, forwarded headers and selectors
 - [D478](decisions/D478.md) Code-only batch 126 (M13): Cypher's GQL label expressions
+- [D479](decisions/D479.md) Code-only batch 127 (M13): Cypher's `CALL (a, b) { ... }` scope form and `IN TRANSACTIONS`

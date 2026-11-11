@@ -1575,7 +1575,69 @@ impl Parser<'_> {
         })
     }
 
+    fn scope_imports(&mut self) -> GraphResult<Imports> {
+        self.expect_symbol("(")?;
+        if self.take_symbol("*") {
+            self.expect_symbol(")")?;
+            return Ok(Imports::Everything);
+        }
+        let mut names = Vec::new();
+        if !self.take_symbol(")") {
+            loop {
+                let name = self.name()?;
+                if names.contains(&name) {
+                    return Err(semantic(format!(
+                        "Variable `{name}` is imported into the CALL subquery twice"
+                    )));
+                }
+                names.push(name);
+                if !self.take_symbol(",") {
+                    break;
+                }
+            }
+            self.expect_symbol(")")?;
+        }
+        Ok(Imports::Variables(names))
+    }
+
+    fn in_transactions(&mut self) -> GraphResult<()> {
+        if matches!(self.peek(), Some(Token::Integer(_))) {
+            self.at += 1;
+            self.expect_keyword("concurrent")?;
+        } else {
+            let _ = self.take_keyword("concurrent");
+        }
+        self.expect_keyword("transactions")?;
+        if self.take_keyword("of") {
+            match self.peek() {
+                Some(Token::Integer(rows)) if *rows > 0 => self.at += 1,
+                _ => return Err(syntax("OF needs a positive number of rows")),
+            }
+            if !self.take_keyword("rows") {
+                self.expect_keyword("row")?;
+            }
+        }
+        if self.take_keyword("on") {
+            self.expect_keyword("error")?;
+            if !self.take_keyword("fail") {
+                return Err(GraphError::not_supported(
+                    "CALL { ... } IN TRANSACTIONS ON ERROR CONTINUE or BREAK",
+                ));
+            }
+        }
+        if self.is_keyword("report") {
+            return Err(GraphError::not_supported(
+                "CALL { ... } IN TRANSACTIONS REPORT STATUS",
+            ));
+        }
+        Ok(())
+    }
+
     fn subquery_rest(&mut self) -> GraphResult<Clause> {
+        self.subquery_with_scope(None)
+    }
+
+    fn subquery_with_scope(&mut self, scope: Option<Imports>) -> GraphResult<Clause> {
         self.expect_symbol("{")?;
         self.depth += 1;
         if self.depth > MAX_DEPTH {
@@ -1585,14 +1647,33 @@ impl Parser<'_> {
         self.depth -= 1;
         let body = body?;
         self.expect_symbol("}")?;
-        if self.is_keyword("in") {
-            return Err(GraphError::not_supported("CALL { ... } IN TRANSACTIONS"));
+        if self.take_keyword("in") {
+            self.in_transactions()?;
         }
-        let parts = body
-            .parts
-            .into_iter()
-            .map(subquery_part)
-            .collect::<GraphResult<_>>()?;
+        let parts: Vec<SubqueryPart> = match scope {
+            None => body
+                .parts
+                .into_iter()
+                .map(subquery_part)
+                .collect::<GraphResult<_>>()?,
+            Some(imports) => {
+                let mut parts = Vec::with_capacity(body.parts.len());
+                for clauses in body.parts {
+                    if let Some(Clause::With(projecting)) = clauses.first()
+                        && importing_with(projecting)?.is_some()
+                    {
+                        return Err(semantic(
+                            "Importing WITH is not allowed in a CALL subquery with a variable scope clause",
+                        ));
+                    }
+                    parts.push(SubqueryPart {
+                        imports: imports.clone(),
+                        clauses,
+                    });
+                }
+                parts
+            }
+        };
         Ok(Clause::Subquery(Box::new(Subquery {
             parts,
             union_all: body.union_all,
@@ -1602,6 +1683,10 @@ impl Parser<'_> {
     fn call_rest(&mut self) -> GraphResult<Clause> {
         if self.is_symbol("{") {
             return self.subquery_rest();
+        }
+        if self.is_symbol("(") {
+            let imports = self.scope_imports()?;
+            return self.subquery_with_scope(Some(imports));
         }
         let mut procedure = self.name()?;
         while self.take_symbol(".") {
