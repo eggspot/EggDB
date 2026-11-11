@@ -319,6 +319,19 @@ impl ResultGrid {
         self.rows.get(cell.row)?.get(cell.column)?.as_deref()
     }
 
+    /// The text a cell draws and how: as [`cell_text`] says, except that a RESP keys grid
+    /// draws its aggregate counts in `textSecondary` and its `–` and `(gone)` cells in
+    /// `textDisabled` (`docs/ux/workspace.md` 10.10).
+    pub fn cell_look(&self, cell: Cell) -> (String, CellLook) {
+        let (text, look) = cell_text(self.value(cell), self.kind(cell.column));
+        if !self.key_scan.as_ref().is_some_and(|scan| scan.over_resp) {
+            return (text, look);
+        }
+        let row = self.rows.get(cell.row).map(Vec::as_slice).unwrap_or_default();
+        let look = crate::resp_keys::dimmed_look(row, cell.column).unwrap_or(look);
+        (text, look)
+    }
+
     /// The selection: the rows and columns between the anchor and the current cell.
     pub fn selection(&self) -> (Range<usize>, Range<usize>) {
         let rows = self.anchor.row.min(self.current.row)..self.anchor.row.max(self.current.row) + 1;

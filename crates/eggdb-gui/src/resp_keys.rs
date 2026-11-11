@@ -1,6 +1,6 @@
 use crate::catalog::{Catalog, KeyCount, KeySpace};
 use crate::connection::{CancelHandle, ResultTable, StatementFailure};
-use crate::grid::ValueKind;
+use crate::grid::{CellLook, ValueKind};
 use crate::key_scan::{
     CarriedKeys, KEY_SCAN_LIMIT, KeyPage, KeySpaceScan, PageEnd, PageStart, SHOWN_VALUE_BYTES,
     ShownKeys, spelled,
@@ -19,6 +19,26 @@ pub const MAX_SCAN_ROUND_TRIPS: usize = 1_000;
 pub const NO_VALUE: &str = "–";
 /// What a `value` cell shows for a key that expired between the page's two reads.
 pub const GONE: &str = "(gone)";
+const TYPE_COLUMN: usize = 1;
+const VALUE_COLUMN: usize = 2;
+const BYTES_COLUMN: usize = 3;
+
+/// The dimmed look of a RESP keys grid's cell, when it has one: `–` and `(gone)` in
+/// `textDisabled`, an aggregate's count in `textSecondary`. A string's own value always has its
+/// byte count beside it, so a string that reads `(gone)` or `–` is never dimmed.
+pub fn dimmed_look(row: &[Option<String>], column: usize) -> Option<CellLook> {
+    let at = |index: usize| row.get(index).and_then(|cell| cell.as_deref());
+    let text = at(column)?;
+    let no_bytes = at(BYTES_COLUMN) == Some(NO_VALUE);
+    match column {
+        TYPE_COLUMN | BYTES_COLUMN if text == NO_VALUE => Some(CellLook::Null),
+        VALUE_COLUMN if no_bytes && (text == GONE || text == NO_VALUE) => Some(CellLook::Null),
+        VALUE_COLUMN if no_bytes && at(TYPE_COLUMN).is_some_and(|kind| kind != "string") => {
+            Some(CellLook::Secondary)
+        }
+        _ => None,
+    }
+}
 
 /// The key space name a RESP database has in the tree and the keys tab: `resp3`.
 pub fn database_name(index: u32) -> String {
@@ -732,6 +752,15 @@ mod tests {
             ["events", "stream", "40 entries", "–"]
         );
         assert_eq!(row(&first, "gone"), ["gone", "hash", "(gone)", "–"]);
+        let cells = |texts: [&str; 4]| texts.map(|text| Some(text.to_owned())).to_vec();
+        let hash = cells(["cart:1", "hash", "12 fields", NO_VALUE]);
+        assert_eq!(dimmed_look(&hash, 2), Some(CellLook::Secondary));
+        assert_eq!(dimmed_look(&hash, 3), Some(CellLook::Null));
+        assert_eq!(dimmed_look(&hash, 0), None);
+        let gone = cells(["gone", "hash", GONE, NO_VALUE]);
+        assert_eq!(dimmed_look(&gone, 2), Some(CellLook::Null));
+        let string = cells(["note", "string", GONE, "6"]);
+        assert_eq!(dimmed_look(&string, 2), None, "a string that reads (gone) is its value");
         assert_eq!(
             row(&first, "user:000")[2],
             format!("{}…", "x".repeat(SHOWN_VALUE_BYTES))

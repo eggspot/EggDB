@@ -3002,7 +3002,7 @@ fn grid_body(paint: &mut Painter<'_, '_>, grid: &ResultGrid, top: f32) {
                 paint.rect(left, y, right - left, 24.0, color);
             }
             let kind = grid.kind(column);
-            let (text, look) = cell_text(grid.value(cell), kind);
+            let (text, look) = grid.cell_look(cell);
             let color = match look {
                 CellLook::Primary => theme.text_primary,
                 CellLook::Secondary => theme.text_secondary,

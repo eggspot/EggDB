@@ -815,7 +815,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   built (D274, D279, D313).
 - The full-value view of a RESP aggregate (`HGETALL`, `LRANGE`, `SMEMBERS`, `ZRANGE …
   WITHSCORES`, `XRANGE` shown as JSON) (D329).
-- The dimmed looks of the RESP keys tab's count, `–` and `(gone)` cells (D329).
+- The dimmed looks of the RESP keys tab's count, `–` and `(gone)` cells (D329). **Code written,
+  unbuilt** (code-only mode, 2026-11-11, D549).
 - RESP over TLS in the client (`rediss://`, shown as `RESP · TLS`) (D329).
 - A RESP connection opens without an empty `Query 1` tab (D329). **Code written, unbuilt** (code-only
   mode, 2026-11-11, D547).
