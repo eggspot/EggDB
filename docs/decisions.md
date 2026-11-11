@@ -510,3 +510,4 @@ its full title with its status.
 - [D483](decisions/D483.md) Code-only batch 131 (M16): AMQP 0-9-1 `tx` transactions
 - [D484](decisions/D484.md) Code-only batch 132 (M6b): column grants follow MySQL's `CHANGE COLUMN`
 - [D485](decisions/D485.md) Code-only batch 133 (M7): more of Redis's commands (strings, keys, hashes, lists, sets, sorted sets)
+- [D486](decisions/D486.md) Code-only batch 134 (M7): Redis reverse and lexicographic ranges, SPOP, LINSERT, TIME, CONFIG GET

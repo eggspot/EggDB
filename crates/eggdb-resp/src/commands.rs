@@ -814,6 +814,7 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
             .or_else(|| crate::hyperloglog::execute(context, db, name, args))
             .or_else(|| crate::geo::execute(context, db, name, args))
             .or_else(|| crate::more_commands::execute(context, db, name, args))
+            .or_else(|| crate::more_commands_ordered::execute(context, db, name, args))
             .unwrap_or_else(|| {
                 if crate::aggregates::is_known(name)
                     || crate::pops::is_known(name)
@@ -822,6 +823,7 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
                     || crate::hyperloglog::is_known(name)
                     || crate::geo::is_known(name)
                     || crate::more_commands::is_known(name)
+                    || crate::more_commands_ordered::is_known(name)
                     || is_known(name)
                 {
                     wrong_arguments(name)

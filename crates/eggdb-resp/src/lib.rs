@@ -16,6 +16,7 @@ mod geo;
 mod geohash;
 mod hyperloglog;
 mod more_commands;
+mod more_commands_ordered;
 mod more_commands_sets;
 use eggdb_keyspace as keyspace;
 mod pops;

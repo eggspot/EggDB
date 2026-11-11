@@ -913,7 +913,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `TOUCH`, `EXPIRETIME`, `RANDOMKEY`, `HSTRLEN`, `HINCRBYFLOAT`, `HRANDFIELD`, `HSCAN`, `LPOS`, `SMISMEMBER`,
   `SRANDMEMBER`, `SMOVE`, `SINTERCARD`, the set `...STORE` commands, `SSCAN`, `ZMSCORE`, `ZRANDMEMBER`,
   `ZSCAN`, `ZUNION`/`ZINTER`/`ZDIFF` and their stores, `ZINTERCARD`: **code written, unbuilt** (code-only
-  mode, 2026-11-11, D485).
+  mode, 2026-11-11, D485). The reverse and lexicographic sorted-set ranges and removals, `ZREVRANK`, `SPOP`,
+  `LINSERT`, `LPUSHX`/`RPUSHX`, `TIME`, `LASTSAVE` and `CONFIG GET`: **code written, unbuilt** (code-only mode,
+  2026-11-11, D486).
 - Memory-only collections in the engine, with expiry and eviction (D2, D193).
 - Benchmarks with redis-benchmark and memtier against Redis, Valkey and Dragonfly, gated (D7,
   D177).
