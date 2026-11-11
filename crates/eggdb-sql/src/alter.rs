@@ -2048,6 +2048,13 @@ fn redefine(
     }
     if old_name.text != column.name.text {
         rename_column(writer, tables, name, old_name, &column.name, dialect)?;
+        crate::comments::move_part(
+            writer,
+            name,
+            CommentKind::Column,
+            &old_name.text,
+            &column.name.text,
+        )?;
         crate::roles::move_column(writer, name, &old_name.text, &column.name.text)?;
     }
     set_type(writer, tables, name, &column.name, column.sql_type, None, dialect)?;
