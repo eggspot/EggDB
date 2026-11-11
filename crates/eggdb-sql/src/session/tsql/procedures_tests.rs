@@ -240,6 +240,25 @@ fn insert_exec_fills_a_table_variable_from_a_procedures_result_set() {
 }
 
 #[test]
+fn insert_exec_fills_a_table_from_every_result_set_of_a_procedure() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    succeeds(&mut session, "CREATE TABLE totals (label VARCHAR(10), n INT)");
+    succeeds(
+        &mut session,
+        "CREATE PROCEDURE two_sets AS BEGIN SELECT 'a', 1; SELECT 'b', 2; END",
+    );
+    succeeds(&mut session, "CREATE PROCEDURE no_rows AS SELECT 'z', 9 WHERE 1 = 0");
+    succeeds(&mut session, "INSERT INTO totals EXEC two_sets");
+    succeeds(&mut session, "INSERT totals (label, n) EXEC dbo.no_rows");
+    let steps = succeeds(&mut session, "SELECT COUNT(*), SUM(n) FROM totals");
+    assert_eq!(
+        rows(&steps),
+        vec![vec![Value::Integer(2), Value::Integer(3)]]
+    );
+}
+
+#[test]
 fn a_procedure_that_leaves_a_transaction_open_reports_error_266() {
     let store = MemoryStore::default();
     let mut session = session(&store);

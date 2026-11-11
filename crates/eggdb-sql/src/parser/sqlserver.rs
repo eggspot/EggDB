@@ -786,6 +786,7 @@ impl<'t> Parser<'t> {
             "throw" => self.sqlserver_throw()?,
             "select" if self.select_assigns_variables() => self.sqlserver_select_assignment()?,
             "insert" if self.at_insert_into_variable() => self.sqlserver_insert_variable()?,
+            "insert" if self.at_insert_execute() => self.sqlserver_insert_execute()?,
             "update" if self.at_variable(1) => self.sqlserver_update_variable()?,
             "delete"
                 if self.at_variable(1) || (self.is_word_at(1, "from") && self.at_variable(2)) =>

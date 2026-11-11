@@ -583,6 +583,80 @@ impl Parser<'_> {
         }
     }
 
+    pub(super) fn at_insert_execute(&self) -> bool {
+        let kind = |at: usize| self.tokens.get(at).map(|token| &token.kind);
+        let is_execute = |at: usize| {
+            matches!(kind(at), Some(TokenKind::Word(word)) if word == "exec" || word == "execute")
+        };
+        let mut at = self.at + 1;
+        if matches!(kind(at), Some(TokenKind::Word(word)) if word == "into") {
+            at += 1;
+        }
+        let start = at;
+        while !is_execute(at)
+            && matches!(
+                kind(at),
+                Some(TokenKind::Word(_) | TokenKind::QuotedIdentifier(_) | TokenKind::Dot)
+            )
+        {
+            at += 1;
+        }
+        if at == start {
+            return false;
+        }
+        if matches!(kind(at), Some(TokenKind::LeftParen)) {
+            let mut depth = 0usize;
+            loop {
+                match kind(at) {
+                    Some(TokenKind::LeftParen) => depth += 1,
+                    Some(TokenKind::RightParen) => {
+                        depth -= 1;
+                        if depth == 0 {
+                            at += 1;
+                            break;
+                        }
+                    }
+                    None | Some(TokenKind::End) => return false,
+                    _ => {}
+                }
+                at += 1;
+            }
+        }
+        is_execute(at)
+    }
+
+    pub(super) fn sqlserver_insert_execute(&mut self) -> SqlResult<Statement> {
+        self.at += 1;
+        self.take_word("into");
+        let table = self.table_name()?;
+        let columns = if self.take(&TokenKind::LeftParen) {
+            let mut names = vec![self.name()?];
+            while self.take(&TokenKind::Comma) {
+                names.push(self.name()?);
+            }
+            self.expect(&TokenKind::RightParen)?;
+            Some(names)
+        } else {
+            None
+        };
+        let position = self.position();
+        self.at += 1;
+        if self.peek_kind() == &TokenKind::LeftParen {
+            return Err(not_supported("INSERT ... EXEC of dynamic SQL").at(position));
+        }
+        let call = self.procedure_call(position)?;
+        if call.procedure.text == "sp_executesql" {
+            return Err(not_supported("INSERT ... EXEC sp_executesql").at(position));
+        }
+        Ok(Statement::SqlServer(SqlServerStatement::InsertExecute(Box::new(
+            crate::ast::InsertExecute {
+                table,
+                columns,
+                call,
+            },
+        ))))
+    }
+
     pub(super) fn at_insert_into_variable(&self) -> bool {
         let at = if self.is_word_at(1, "into") { 2 } else { 1 };
         self.at_variable(at)

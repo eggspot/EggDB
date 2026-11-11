@@ -605,9 +605,11 @@ impl<'s> Session<'s> {
             SqlServerStatement::CloseCursor(cursor) => self.run_close_cursor(cursor),
             SqlServerStatement::DeallocateCursor(cursor) => self.run_deallocate_cursor(cursor),
             SqlServerStatement::WaitFor { until_time, time } => self.run_waitfor(*until_time, time),
-            SqlServerStatement::OutputInto(_) | SqlServerStatement::TopRows(_) => Err(SqlError::new(
+            SqlServerStatement::OutputInto(_)
+            | SqlServerStatement::TopRows(_)
+            | SqlServerStatement::InsertExecute(_) => Err(SqlError::new(
                 SqlState::INTERNAL_ERROR,
-                "an OUTPUT ... INTO or TOP statement reached the SQL Server statement runner",
+                "an OUTPUT ... INTO, TOP or INSERT ... EXEC statement reached the SQL Server statement runner",
             )),
         }
     }

@@ -1143,7 +1143,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Cursor variables, `WHERE CURRENT OF` on `FOR UPDATE` cursors (in PostgreSQL too), `sp_cursor*`
   server cursors and cursors reset by `sp_reset_connection` (D291).
 - `INSERT ... EXEC` of dynamic SQL, `EXEC AS`, three-part names and other databases in a batch
-  (sql.md).
+  (sql.md). `INSERT ... EXEC` of a procedure into a table or a temporary table: **code written, unbuilt**
+  (code-only mode, 2026-11-12, D648).
 - Numbered procedures and temporary functions (roadmap item 33d). Numbered procedures: **code written, unbuilt**
   (code-only mode, 2026-11-12, D643); temporary functions are refused, as SQL Server refuses them.
 - SQL Server Agent jobs on the job scheduler (D27, D200). **Code written, unbuilt** (code-only mode, 2026-11-11, D523).

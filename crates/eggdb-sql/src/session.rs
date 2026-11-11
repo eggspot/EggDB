@@ -3013,6 +3013,10 @@ impl<'s> Session<'s> {
                     return self.run_insert_bulk(bulk, io);
                 }
                 Statement::SqlServer(SqlServerStatement::OutputInto(_)) => {}
+                Statement::SqlServer(SqlServerStatement::InsertExecute(insert)) => {
+                    let mut statement = self.insert_execute_statement(insert)?;
+                    return self.run_statement(&mut statement, io);
+                }
                 Statement::SqlServer(SqlServerStatement::TopRows(top)) => {
                     let percent = matches!(
                         &top.count.kind,

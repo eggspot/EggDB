@@ -444,6 +444,7 @@ fn sqlserver(
             ..
         } => run_code(vec![shown(&call.procedure)]),
         SqlServerStatement::ExecuteDynamic(_) => run_code(vec!["EXEC".to_owned()]),
+        SqlServerStatement::InsertExecute(insert) => run_code(vec![shown(&insert.call.procedure)]),
         SqlServerStatement::InsertVariable {
             source: VariableSource::Query(query),
             ..

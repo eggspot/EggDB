@@ -1344,7 +1344,9 @@ the caught error came from; over TDS the `ERROR` token carries that procedure's 
 multi-statement) whose arguments read the columns of an earlier `FROM` item: the function runs
 once for each distinct set of argument values. `CREATE PROCEDURE #name` makes a temporary
 procedure that only its session sees and that goes away with the session (`DROP PROCEDURE #name`
-drops it sooner); temporary functions are refused, as SQL Server refuses them. Numbered
+drops it sooner); temporary functions are refused, as SQL Server refuses them. `INSERT [INTO]
+table [(columns)] EXEC procedure ...` inserts the rows of every result set the procedure returns
+into a table or a `#temporary` table, as `INSERT @t EXEC` does for a table variable. Numbered
 procedures (`CREATE PROCEDURE name;2`) form a group with `name` (which is `name;1`): `EXEC
 name;2` runs the second, and `DROP PROCEDURE name` drops the whole group.
 

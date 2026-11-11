@@ -592,6 +592,7 @@ pub(crate) struct MergeInsert {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SqlServerStatement {
     TopRows(Box<TopRows>),
+    InsertExecute(Box<InsertExecute>),
     Use(Name),
     NoCount(bool),
     ImplicitTransactions(bool),
@@ -690,6 +691,15 @@ pub(crate) struct VariableDeclaration {
     pub(crate) name: Name,
     pub(crate) declared: crate::sqlserver_types::SqlServerType,
     pub(crate) initial: Option<Expr>,
+}
+
+/// Transact-SQL's `INSERT [INTO] table [(columns)] EXEC procedure ...`: the rows of every result
+/// set the procedure returns, inserted into a table.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct InsertExecute {
+    pub(crate) table: Name,
+    pub(crate) columns: Option<Vec<Name>>,
+    pub(crate) call: ProcedureCall,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -151,6 +151,7 @@ pub(crate) fn refused_in_function(
                 ..
             } => "INSERT EXEC",
             SqlServerStatement::InsertVariable { .. } => return None,
+            SqlServerStatement::InsertExecute(_) => "INSERT EXEC",
             SqlServerStatement::Execute(_) => return Some(executes_procedure(position)),
             SqlServerStatement::Print(_) => "PRINT",
             SqlServerStatement::RaiseError(_) => "RAISERROR",

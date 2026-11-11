@@ -242,6 +242,55 @@ impl<'s> Session<'s> {
             .unwrap_or(Value::Null))
     }
 
+    pub(in crate::session) fn insert_execute_statement(
+        &mut self,
+        insert: &crate::ast::InsertExecute,
+    ) -> SqlResult<crate::ast::Statement> {
+        use crate::ast::{Insert, InsertSource, InsertValue, OnDuplicate, Statement, TableReference};
+        let mut rows = Vec::new();
+        for result in self.procedure_results(&insert.call)? {
+            if result.columns.is_none() {
+                self.extra_results.push(result);
+                continue;
+            }
+            rows.extend(result.rows);
+        }
+        if rows.is_empty() {
+            return Ok(Statement::Ignored {
+                tag: "INSERT 0 0",
+                notice: None,
+            });
+        }
+        let position = insert.table.position;
+        let values: Vec<Vec<InsertValue>> = rows
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|value| {
+                        InsertValue::Expr(Expr {
+                            kind: crate::ast::ExprKind::Constant {
+                                sql_type: value.sql_type(),
+                                value,
+                            },
+                            position,
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        Ok(Statement::Insert(Insert {
+            table: TableReference::named(insert.table.clone(), None),
+            columns: insert.columns.clone(),
+            source: InsertSource::Values(values),
+            returning: None,
+            on_duplicate: OnDuplicate::Fail,
+            conflict_target: None,
+            rollback_on_conflict: false,
+            keeps_changes_on_conflict: false,
+            overriding: None,
+        }))
+    }
+
     pub(in crate::session) fn user_procedure_run(
         &mut self,
         call: &ProcedureCall,
