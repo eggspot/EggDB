@@ -559,6 +559,14 @@ impl<'k> Api<'k> {
             ("PUT" | "POST", ["_index_template", name]) => {
                 self.put_template(templates::TemplateKind::Index, name, request)
             }
+            ("PUT" | "POST", ["_template", name]) => {
+                self.put_template(templates::TemplateKind::Legacy, name, request)
+            }
+            ("GET", ["_template"]) => self.get_templates(templates::TemplateKind::Legacy, None, false),
+            ("GET" | "HEAD", ["_template", name]) => {
+                self.get_templates(templates::TemplateKind::Legacy, Some(name), method == "HEAD")
+            }
+            ("DELETE", ["_template", name]) => self.delete_template(templates::TemplateKind::Legacy, name),
             ("GET", ["_index_template"]) => self.get_templates(templates::TemplateKind::Index, None, false),
             ("GET" | "HEAD", ["_index_template", name]) => {
                 self.get_templates(templates::TemplateKind::Index, Some(name), method == "HEAD")

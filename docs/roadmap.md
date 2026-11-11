@@ -1013,7 +1013,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   2026-11-11, D471); the `nested` aggregation: **code written, unbuilt** (code-only mode, 2026-11-11, D562).
 - Aliases, index templates and the rest of `_cat` (D196). Aliases, `_cat/aliases`, `count` and `health`:
   **code written, unbuilt** (code-only mode, 2026-11-11, D472); index and component templates: **code
-  written, unbuilt** (code-only mode, 2026-11-12, D594).
+  written, unbuilt** (code-only mode, 2026-11-12, D594); legacy `_template`: **code written, unbuilt** (D626).
 - Kibana and OpenSearch Dashboards working against EggDB (D12, D196). Check: `compatibility` job.
 - A benchmark against OpenSearch (D7, D196).
 - Enterprise search that respects each user's permissions (D56).

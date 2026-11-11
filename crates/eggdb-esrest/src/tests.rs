@@ -1538,6 +1538,41 @@ fn index_templates_shape_the_indices_their_patterns_match() {
 }
 
 #[test]
+fn legacy_templates_merge_by_order_when_no_index_template_matches() {
+    let keyspace = MemoryKeyspace::default();
+    let api = api(&keyspace);
+    let high = api.answer(&request(
+        "PUT",
+        "/_template/old",
+        "{\"index_patterns\":[\"old-*\"],\"order\":1,\"mappings\":{\"properties\":{\"code\":{\"type\":\"keyword\"}}},\"aliases\":{\"all-old\":{}}}",
+    ));
+    assert_eq!(high.status, 200, "{}", body(&high));
+    let low = api.answer(&request(
+        "PUT",
+        "/_template/older",
+        "{\"index_patterns\":[\"old-*\"],\"order\":0,\"mappings\":{\"properties\":{\"code\":{\"type\":\"text\"},\"n\":{\"type\":\"long\"}}}}",
+    ));
+    assert_eq!(low.status, 200);
+    assert_eq!(api.answer(&request("PUT", "/old-1/_doc/1", "{\"code\":\"a\",\"n\":1}")).status, 201);
+    let shown = body(&api.answer(&request("GET", "/old-1", "")));
+    assert!(shown.contains("\"code\":{\"type\":\"keyword\"}") && shown.contains("\"n\":{\"type\":\"long\"}"), "{shown}");
+    assert!(body(&api.answer(&request("GET", "/all-old/_count", ""))).contains("\"count\":1"));
+    let listed = body(&api.answer(&request("GET", "/_template/old", "")));
+    assert!(listed.starts_with("{\"old\":{"), "{listed}");
+    let composable = api.answer(&request(
+        "PUT",
+        "/_index_template/new-style",
+        "{\"index_patterns\":[\"old-2*\"],\"template\":{\"mappings\":{\"properties\":{\"code\":{\"type\":\"long\"}}}}}",
+    ));
+    assert_eq!(composable.status, 200);
+    api.answer(&request("PUT", "/old-2", ""));
+    let preferred = body(&api.answer(&request("GET", "/old-2", "")));
+    assert!(preferred.contains("\"code\":{\"type\":\"long\"}") && !preferred.contains("\"n\":"), "{preferred}");
+    assert_eq!(api.answer(&request("DELETE", "/_template/old", "")).status, 200);
+    assert_eq!(api.answer(&request("GET", "/_template/old", "")).status, 404);
+}
+
+#[test]
 fn msearch_template_renders_each_search_and_reports_a_bad_one_in_place() {
     let keyspace = MemoryKeyspace::default();
     let api = seeded(&keyspace);

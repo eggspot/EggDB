@@ -650,3 +650,4 @@ its full title with its status.
 - [D623](decisions/D623.md) Code-only batch 271 (M10): msdb's SQL Server Agent views
 - [D624](decisions/D624.md) Code-only batch 272 (M10): SQL Server Agent step flow and retries
 - [D625](decisions/D625.md) Code-only batch 273 (M10): DBMS_SCHEDULER programs and named schedules
+- [D626](decisions/D626.md) Code-only batch 274 (M8): Elasticsearch's legacy _template API
