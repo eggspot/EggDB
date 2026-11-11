@@ -656,3 +656,4 @@ its full title with its status.
 - [D629](decisions/D629.md) Code-only batch 277 (M2): MySQL partition maintenance statements
 - [D630](decisions/D630.md) Code-only batch 278 (M2): Oracle MERGE PARTITIONS first TO last
 - [D631](decisions/D631.md) Code-only batch 279 (M5): SQLite's VACUUM INTO and a writer of whole SQLite files
+- [D632](decisions/D632.md) Code-only batch 280 (M10): TOP PERCENT in Transact-SQL DML, and INSERT TOP

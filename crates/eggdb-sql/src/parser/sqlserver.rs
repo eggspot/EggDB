@@ -419,17 +419,28 @@ pub(super) fn ties_without_order_by(position: usize) -> SqlError {
 
 impl Parser<'_> {
     fn sqlserver_top_dml(&mut self) -> SqlResult<Statement> {
-        let updates = self.is_word("update");
+        let verb = if self.is_word("update") {
+            "update"
+        } else if self.is_word("insert") {
+            "insert"
+        } else {
+            "delete"
+        };
         self.at += 1;
         self.expect_word("top")?;
+        let position = self.position();
         self.expect(&TokenKind::LeftParen)?;
-        let count = self.expression()?;
+        let mut count = self.expression()?;
         self.expect(&TokenKind::RightParen)?;
-        if self.is_word("percent") {
-            return Err(not_supported("TOP ... PERCENT in UPDATE and DELETE").at(self.position()));
+        if self.take_word("percent") {
+            count = top_limit(count, true, false, position);
         }
         self.at -= 1;
-        let statement = if updates { self.update()? } else { self.delete()? };
+        let statement = match verb {
+            "update" => self.update()?,
+            "insert" => self.insert()?,
+            _ => self.delete()?,
+        };
         Ok(Statement::SqlServer(SqlServerStatement::TopRows(Box::new(
             crate::ast::TopRows { count, statement },
         ))))
@@ -813,13 +824,12 @@ impl<'t> Parser<'t> {
                 let name = self.table_name()?;
                 Statement::Truncate(TableReference::named(name, None))
             }
-            "update" | "delete" if self.is_word_at(1, "top") => self.sqlserver_top_dml()?,
+            "update" | "delete" | "insert" if self.is_word_at(1, "top") => {
+                self.sqlserver_top_dml()?
+            }
             "insert" if self.is_word_at(1, "bulk") => self.sqlserver_insert_bulk()?,
             "bulk" if self.is_word_at(1, "insert") => self.sqlserver_bulk_insert()?,
             "merge" => self.sqlserver_merge()?,
-            "insert" if self.is_word_at(1, "top") => {
-                return Err(not_supported("TOP in INSERT").at(position));
-            }
             word if NOT_SUPPORTED_STATEMENTS.contains(&word) => {
                 return Err(not_supported(&self.keyword_text()).at(position));
             }

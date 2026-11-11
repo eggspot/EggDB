@@ -1316,6 +1316,22 @@ fn insert_rows(
     tables: &mut TableCache,
     insert: &Insert,
 ) -> SqlResult<QueryResult> {
+    if let Some(limit) = crate::dml_row_limit::take() {
+        if crate::updatable_views::is_view(writer, tables, &insert.table)? {
+            return Err(SqlError::not_supported("TOP in an INSERT into a view"));
+        }
+        let mut limited = match &insert.source {
+            InsertSource::Query(query) => with_selected_rows(writer, tables, insert, query)?,
+            InsertSource::Values(_) | InsertSource::DefaultValues => insert.clone(),
+        };
+        if let InsertSource::Values(rows) = &mut limited.source {
+            rows.truncate(limit.of_usize(rows.len()));
+            if rows.is_empty() {
+                return Ok(QueryResult::command("INSERT 0 0".to_owned()));
+            }
+        }
+        return self::insert(writer, tables, &limited);
+    }
     if crate::updatable_views::is_view(writer, tables, &insert.table)? {
         crate::partition_selection::refuse_on_unpartitioned(&insert.table)?;
         if let Some(result) = crate::triggers::insert_instead_of_view(writer, tables, insert)? {
@@ -4711,6 +4727,30 @@ fn update_rows(
             projection.correlation = correlation.as_ref();
         }
         let mut taken = 0u64;
+        let most = match row_limit {
+            Some(crate::dml_row_limit::DmlRowLimit::Rows(rows)) => Some(rows),
+            Some(percent) => {
+                let passing = match &late {
+                    None => matched.len(),
+                    Some(late) => {
+                        let mut passing = 0;
+                        for (_, row) in &matched {
+                            let evaluator = Evaluator {
+                                scope,
+                                row,
+                                correlation: correlation.as_ref(),
+                            };
+                            if evaluator.boolean(late, "WHERE")? == Some(true) {
+                                passing += 1;
+                            }
+                        }
+                        passing
+                    }
+                };
+                Some(percent.of(passing))
+            }
+            None => None,
+        };
         for (old_key, old_row) in matched {
             let evaluator = Evaluator {
                 scope,
@@ -4722,7 +4762,7 @@ fn update_rows(
             {
                 continue;
             }
-            if row_limit.is_some_and(|most| taken >= most) {
+            if most.is_some_and(|most| taken >= most) {
                 break;
             }
             taken += 1;
@@ -5053,7 +5093,7 @@ fn delete_matching(
     tables: &mut TableCache,
     delete: &Delete,
     fires_triggers: bool,
-    row_limit: Option<u64>,
+    row_limit: Option<crate::dml_row_limit::DmlRowLimit>,
 ) -> SqlResult<QueryResult> {
     if row_limit.is_some() && crate::updatable_views::is_view(writer, tables, &delete.table)? {
         return Err(SqlError::not_supported("TOP in a DELETE of a view"));
@@ -5117,8 +5157,8 @@ fn delete_matching(
             }
             matched = kept;
         }
-        if let Some(most) = row_limit {
-            matched.truncate(usize::try_from(most).unwrap_or(usize::MAX));
+        if let Some(limit) = row_limit {
+            matched.truncate(limit.of_usize(matched.len()));
         }
         if let Some(projection) = &returning {
             for (_, row) in &matched {

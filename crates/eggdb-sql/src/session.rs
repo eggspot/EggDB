@@ -3014,8 +3014,20 @@ impl<'s> Session<'s> {
                 }
                 Statement::SqlServer(SqlServerStatement::OutputInto(_)) => {}
                 Statement::SqlServer(SqlServerStatement::TopRows(top)) => {
-                    let count = crate::execute::row_count(Some(&top.count), "TOP")?;
-                    let _limited = crate::dml_row_limit::limit(count);
+                    let percent = matches!(
+                        &top.count.kind,
+                        crate::ast::ExprKind::OracleFunction { name, .. }
+                            if *name == "sqlserver_top_percent"
+                    );
+                    let limit = if percent {
+                        crate::execute::row_limit(Some(&top.count))?
+                            .percent
+                            .map(crate::dml_row_limit::DmlRowLimit::Percent)
+                    } else {
+                        crate::execute::row_count(Some(&top.count), "TOP")?
+                            .map(crate::dml_row_limit::DmlRowLimit::Rows)
+                    };
+                    let _limited = crate::dml_row_limit::limit(limit);
                     return self.run_statement(&mut top.statement, io);
                 }
                 Statement::SqlServer(statement) => return self.run_sqlserver(statement),

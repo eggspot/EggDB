@@ -1875,8 +1875,8 @@ impl ConflictResolution {
     }
 }
 
-/// Transact-SQL's `UPDATE TOP (n)` or `DELETE TOP (n)`: the statement, run on at most `count`
-/// of the rows it matches.
+/// Transact-SQL's `INSERT`, `UPDATE` or `DELETE` with `TOP (n) [PERCENT]`: the statement, run on
+/// at most `count` (or that percentage) of the rows it matches or inserts.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TopRows {
     pub(crate) count: Expr,

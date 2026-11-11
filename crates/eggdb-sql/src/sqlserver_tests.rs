@@ -1944,9 +1944,44 @@ fn top_limits_the_rows_an_update_or_delete_changes() {
         values(&mut session, "SELECT COUNT(*) FROM queue"),
         vec![vec![Value::Integer(0)]]
     );
+}
+
+#[test]
+fn top_percent_limits_updates_and_deletes_and_top_limits_inserts() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(&mut session, "CREATE TABLE queue (id INT PRIMARY KEY, state VARCHAR(10))");
+    values(
+        &mut session,
+        "INSERT INTO queue VALUES (1, 'new'), (2, 'new'), (3, 'new'), (4, 'new'), (5, 'done')",
+    );
+    values(
+        &mut session,
+        "UPDATE TOP (50) PERCENT queue SET state = 'taken' WHERE state = 'new'",
+    );
+    assert_eq!(
+        values(&mut session, "SELECT COUNT(*) FROM queue WHERE state = 'taken'"),
+        vec![vec![Value::Integer(2)]]
+    );
+    values(&mut session, "DELETE TOP (10) PERCENT FROM queue");
+    assert_eq!(
+        values(&mut session, "SELECT COUNT(*) FROM queue"),
+        vec![vec![Value::Integer(4)]]
+    );
+    values(&mut session, "CREATE TABLE archive (id INT PRIMARY KEY, state VARCHAR(10))");
+    values(&mut session, "INSERT TOP (2) INTO archive SELECT id, state FROM queue");
+    assert_eq!(
+        values(&mut session, "SELECT COUNT(*) FROM archive"),
+        vec![vec![Value::Integer(2)]]
+    );
+    values(&mut session, "INSERT TOP (50) PERCENT archive VALUES (10, 'a'), (11, 'b'), (12, 'c')");
+    assert_eq!(
+        values(&mut session, "SELECT COUNT(*) FROM archive"),
+        vec![vec![Value::Integer(4)]]
+    );
     assert!(
         session
-            .execute("UPDATE TOP (50) PERCENT queue SET state = 'x'", &mut |_| {})
+            .execute("UPDATE TOP (101) PERCENT queue SET state = 'x'", &mut |_| {})
             .is_err()
     );
 }
