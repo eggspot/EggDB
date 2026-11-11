@@ -309,7 +309,7 @@ fn read_values(body: &mut Body<'_>) -> Result<Vec<Cell>, String> {
     (0..count).map(|_| body.bytes()).collect()
 }
 
-fn query_parameters(body: &mut Body<'_>) -> Result<Vec<Cell>, String> {
+fn query_parameters(body: &mut Body<'_>) -> Result<(Vec<Cell>, crate::paging::PageRequest), String> {
     body.short()?;
     let flags = body.byte()?;
     if flags & 0x40 != 0 {
@@ -320,11 +320,12 @@ fn query_parameters(body: &mut Body<'_>) -> Result<Vec<Cell>, String> {
     } else {
         Vec::new()
     };
+    let mut paging = crate::paging::PageRequest::default();
     if flags & 0x04 != 0 {
-        body.int()?;
+        paging.page_size = usize::try_from(body.int()?).ok().filter(|size| *size > 0);
     }
     if flags & 0x08 != 0 {
-        body.bytes()?;
+        paging.state = body.bytes()?;
     }
     if flags & 0x10 != 0 {
         body.short()?;
@@ -332,7 +333,7 @@ fn query_parameters(body: &mut Body<'_>) -> Result<Vec<Cell>, String> {
     if flags & 0x20 != 0 {
         body.long()?;
     }
-    Ok(values)
+    Ok((values, paging))
 }
 
 fn prepared_id(keyspace: Option<&str>, text: &str) -> Vec<u8> {
@@ -425,9 +426,11 @@ impl<'s> Connection<'_, 's> {
             REGISTER => Ok((READY, Vec::new())),
             QUERY => {
                 let text = body.long_string().map_err(protocol)?;
-                let values = query_parameters(&mut body).map_err(protocol)?;
+                let (values, paging) = query_parameters(&mut body).map_err(protocol)?;
                 let current = self.keyspace.clone();
-                Ok((RESULT, self.run_text(&text, current.as_deref(), &values)?))
+                let result = self.run_text(&text, current.as_deref(), &values)?;
+                let fingerprint = crate::paging::fingerprint(&text, &values);
+                Ok((RESULT, crate::paging::page(result, &paging, fingerprint).map_err(protocol)?))
             }
             PREPARE => {
                 let text = body.long_string().map_err(protocol)?;
@@ -435,9 +438,11 @@ impl<'s> Connection<'_, 's> {
             }
             EXECUTE => {
                 let id = body.short_bytes().map_err(protocol)?;
-                let values = query_parameters(&mut body).map_err(protocol)?;
+                let (values, paging) = query_parameters(&mut body).map_err(protocol)?;
                 let (text, keyspace) = self.prepared_text(&id)?;
-                Ok((RESULT, self.run_text(&text, keyspace.as_deref(), &values)?))
+                let result = self.run_text(&text, keyspace.as_deref(), &values)?;
+                let fingerprint = crate::paging::fingerprint(&text, &values);
+                Ok((RESULT, crate::paging::page(result, &paging, fingerprint).map_err(protocol)?))
             }
             BATCH => Ok((RESULT, self.batch(&mut body)?)),
             other => Err(failure(

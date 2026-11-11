@@ -1363,7 +1363,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (D217).
 - CQL collections, tuples, user-defined types and counters (D19, D218).
 - CQL TTL, `USING TIMESTAMP`, and lightweight transactions beyond `IF NOT EXISTS` (D218).
-- CQL paging, protocol v5 framing and compression (D218).
+- CQL paging, protocol v5 framing and compression (D218). Paging: **code written, unbuilt** (code-only mode,
+  2026-11-11, D519).
 - CQL secondary indexes, materialized views, `ALTER TABLE`, schema events and prepared statements
   shared between connections (D218).
 - A benchmark against ScyllaDB and Cassandra (D7, D218).

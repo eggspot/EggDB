@@ -8,6 +8,7 @@
 
 mod cql;
 mod frame;
+mod paging;
 mod server;
 mod translate;
 mod types;

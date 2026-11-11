@@ -97,6 +97,10 @@ impl<'b> Body<'b> {
         Self { bytes, at: 0 }
     }
 
+    pub(crate) fn position(&self) -> usize {
+        self.at
+    }
+
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.at >= self.bytes.len()
