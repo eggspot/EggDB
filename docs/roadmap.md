@@ -942,8 +942,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   scripts), `query_string` syntax and highlighting (D196, D331).
 - Scroll (`scroll=1m`, `_search/scroll`, `DELETE _search/scroll`) with contexts bounded in count
   and memory and expired by their keep-alive, and point in time (`pit`) for `search_after`
-  (D196, D348). **Code written, unbuilt** (code-only
-  mode, 2026-11-11, D467).
+  (D196, D348). Scroll: **code written, unbuilt** (code-only mode, 2026-11-11, D467); point in
+  time is not written.
 - `_script`, `_geo_distance` and `nested` sorts, and refusing sorts on unmapped fields once
   mappings apply (D348).
 - Nested and bucket aggregations beyond `terms` (D196).
