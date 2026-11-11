@@ -454,3 +454,4 @@ its full title with its status.
 - [D427](decisions/D427.md) Code-only batch 74 (M10): SQL Server's ranking and offset window functions
 - [D428](decisions/D428.md) Code-only batch 75 (M10): Oracle's `MODIFY col DROP IDENTITY` and `MODIFY col GENERATED ... AS IDENTITY`
 - [D429](decisions/D429.md) Code-only batch 76 (M10): pg_cron's `'n seconds'` and `$` schedules, `cron.alter_job`, and jobs run as their user
+- [D430](decisions/D430.md) Code-only batch 77 (M10): `deleted.` in a Transact-SQL `UPDATE`'s `OUTPUT`

@@ -18,6 +18,33 @@ struct SplitOutput {
     returned: QueryResult,
 }
 
+/// The label `deleted.` takes in a Transact-SQL `UPDATE`'s `OUTPUT`: the row before the change.
+pub(crate) const DELETED_LABEL: &str = "\u{0}deleted";
+
+fn expr_mentions_deleted(expr: &crate::ast::Expr) -> bool {
+    if let crate::ast::ExprKind::Column {
+        qualifier: Some(qualifier),
+        ..
+    } = &expr.kind
+        && qualifier == DELETED_LABEL
+    {
+        return true;
+    }
+    crate::eval::children(expr)
+        .into_iter()
+        .any(expr_mentions_deleted)
+}
+
+/// Whether a `RETURNING` list reads the old row through `deleted.`.
+pub(crate) fn mentions_deleted(items: &Option<Vec<crate::ast::SelectItem>>) -> bool {
+    items.iter().flatten().any(|item| match item {
+        crate::ast::SelectItem::Wildcard { qualifier, .. } => {
+            qualifier.as_deref() == Some(DELETED_LABEL)
+        }
+        crate::ast::SelectItem::Expr { expr, .. } => expr_mentions_deleted(expr),
+    })
+}
+
 pub(crate) fn command(statement: &Statement) -> &'static str {
     match statement {
         Statement::Insert(_) => "INSERT",

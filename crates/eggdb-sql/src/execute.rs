@@ -16,7 +16,7 @@ use crate::encoding::{
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{
-    Evaluator, Scope, Source, check_columns, children_mut, compare_truth, output_name,
+    Evaluator, Scope, Source, Sources, check_columns, children_mut, compare_truth, output_name,
     reject_aggregates,
 };
 use crate::indexes;
@@ -4591,6 +4591,29 @@ fn update_rows(
     let referenced = constraints::is_referenced(&table);
     let keep_old = !table.indexes.is_empty() || referenced || !table.foreign_keys.is_empty();
     let scope = scope_of(&table, &update.table);
+    let returns_old_values = crate::output_into::mentions_deleted(&update.returning);
+    let old_and_new = Sources {
+        list: vec![
+            Source {
+                table: &table,
+                label: update.table.alias.as_deref().unwrap_or(&table.name),
+                offset: 0,
+            },
+            Source {
+                table: &table,
+                label: crate::output_into::DELETED_LABEL,
+                offset: table.columns.len(),
+            },
+        ],
+        merged: Vec::new(),
+        out_of_reach: Vec::new(),
+        star: (0..table.columns.len()).collect(),
+    };
+    let returning_scope = if returns_old_values {
+        Scope::Many(&old_and_new)
+    } else {
+        scope
+    };
     let names: Vec<Name> = update
         .assignments
         .iter()
@@ -4639,7 +4662,7 @@ fn update_rows(
             .as_ref()
             .filter(|found| found.is_correlated())
             .map(|found| found.correlation(reader));
-        let mut returning = returning(&update.returning, scope)?;
+        let mut returning = returning(&update.returning, returning_scope)?;
         if let Some(projection) = &mut returning {
             projection.correlation = correlation.as_ref();
         }
@@ -4670,7 +4693,14 @@ fn update_rows(
                 Err(error) => return Err(error),
             }
             if let Some(projection) = &returning {
-                result_rows.push(projection.project(&new_row)?);
+                let projected = if returns_old_values {
+                    let mut both = new_row.clone();
+                    both.extend_from_slice(&old_row);
+                    projection.project(&both)?
+                } else {
+                    projection.project(&new_row)?
+                };
+                result_rows.push(projected);
             }
             let new_key = if table.primary_key.is_empty() {
                 old_key.clone()

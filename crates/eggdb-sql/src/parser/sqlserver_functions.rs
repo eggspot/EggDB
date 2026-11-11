@@ -151,8 +151,11 @@ fn bound_output_column(
             Some("deleted") if statement == OutputStatement::Delete => {
                 *qualifier = target.map(str::to_owned);
             }
+            Some("deleted") if statement == OutputStatement::Update => {
+                *qualifier = Some(crate::output_into::DELETED_LABEL.to_owned());
+            }
             Some("deleted") => {
-                return Err(not_supported("OUTPUT deleted. in UPDATE").at(expr.position));
+                return Err(not_supported("OUTPUT deleted. here").at(expr.position));
             }
             Some(other @ "inserted") => return Err(not_bound(other, name, expr.position)),
             _ => {}
@@ -182,8 +185,11 @@ pub(super) fn bound_output(
                 Some("deleted") if statement == OutputStatement::Delete => {
                     *qualifier = target.map(str::to_owned);
                 }
+                Some("deleted") if statement == OutputStatement::Update => {
+                    *qualifier = Some(crate::output_into::DELETED_LABEL.to_owned());
+                }
                 Some("deleted") => {
-                    return Err(not_supported("OUTPUT deleted. in UPDATE").at(*position));
+                    return Err(not_supported("OUTPUT deleted. here").at(*position));
                 }
                 Some(other) => return Err(not_bound(other, "*", *position)),
                 None => {}
