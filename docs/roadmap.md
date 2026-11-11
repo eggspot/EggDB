@@ -923,7 +923,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   2026-11-11, D469).
 - Stemmers for every major language, and word segmentation for Chinese, Japanese, Korean and Thai
   (D30).
-- Synonyms, stop words, and fuzzy and phonetic matching (D30).
+- Synonyms, stop words, and fuzzy and phonetic matching (D30). Fuzzy and phonetic functions:
+  **code written, unbuilt** (code-only mode, 2026-11-11, D470).
 - MySQL's `MATCH ... AGAINST` with `FULLTEXT` keys, SQL Server's `CONTAINS` and `FREETEXT`, and
   SQLite's FTS5 (D10, D195).
 - Elasticsearch mappings applied to field types: `text` and `keyword`, dates, `ip`, geo, `nested`,

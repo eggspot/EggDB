@@ -1511,6 +1511,9 @@ impl Evaluator<'_> {
         if let Some(result) = crate::learning::function(name, &values) {
             return result;
         }
+        if let Some(result) = crate::fuzzy_functions::function(name, &values) {
+            return result;
+        }
         if let Some(result) = crate::mysql_named_locks::function(name, &values) {
             return result;
         }

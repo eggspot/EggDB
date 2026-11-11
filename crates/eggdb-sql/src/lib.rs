@@ -52,6 +52,7 @@ mod eval;
 mod execute;
 mod explain;
 mod foreign;
+mod fuzzy_functions;
 mod generated_columns;
 #[cfg(test)]
 mod generated_columns_tests;
