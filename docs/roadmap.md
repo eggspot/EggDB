@@ -1381,8 +1381,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Benchmarks at scale: TPC-C and YCSB on a cluster (D7, D18).
 
 ### M16 Messaging, wide-column, objects and observability
-- Kafka consumer groups (D33, D213). **Code written, unbuilt** (code-only mode, 2026-11-11, D525). Left:
-  static membership and the new rebalance protocol. The group listing APIs: **code written,
+- Kafka consumer groups (D33, D213). **Code written, unbuilt** (code-only mode, 2026-11-11, D525). Static
+  membership: **code written, unbuilt** (code-only mode, 2026-11-12, D589). Left: the new rebalance
+  protocol. The group listing APIs: **code written,
   unbuilt** (code-only mode, 2026-11-11, D545).
 - Kafka transactions and idempotent producers (D33, D213). Idempotent producers: **code written,
   unbuilt** (code-only mode, 2026-11-11, D546). Left: transactions.

@@ -355,6 +355,93 @@ fn a_lone_consumer_joins_syncs_and_commits_offsets() {
 }
 
 #[test]
+fn a_static_member_restarts_without_a_rebalance_and_fences_its_old_id() {
+    use crate::groups::Coordinator;
+    use crate::server::{Login, answer_for};
+    let keyspace = MemoryKeyspace::default();
+    let coordinator = Coordinator::default();
+    let call = |frame: Vec<u8>| {
+        let mut login = Login::Done;
+        let framed = answer_for(&keyspace, &config(), &coordinator, &frame, &mut login).expect("an answer");
+        framed[8..].to_vec()
+    };
+    let join = || {
+        request(11, 5, |writer| {
+            writer
+                .string(Some("static"))
+                .i32(10_000)
+                .i32(10_000)
+                .string(Some(""))
+                .string(Some("reader-1"))
+                .string(Some("consumer"))
+                .count(1)
+                .string(Some("range"))
+                .bytes(b"meta");
+        })
+    };
+    let read_join = |answer: &[u8]| {
+        let mut reader = Reader::new(answer);
+        assert_eq!(reader.i32().unwrap(), 0);
+        assert_eq!(reader.i16().unwrap(), 0);
+        let generation = reader.i32().unwrap();
+        assert_eq!(reader.string().unwrap().as_deref(), Some("range"));
+        let leader = reader.string().unwrap().unwrap();
+        let member = reader.string().unwrap().unwrap();
+        assert_eq!(leader, member);
+        assert_eq!(reader.i32().unwrap(), 1);
+        assert_eq!(reader.string().unwrap().as_deref(), Some(member.as_str()));
+        assert_eq!(reader.string().unwrap().as_deref(), Some("reader-1"));
+        (generation, member)
+    };
+    let (generation, first) = read_join(&call(join()));
+    assert_eq!(generation, 1);
+    let synced = call(request(14, 3, |writer| {
+        writer
+            .string(Some("static"))
+            .i32(generation)
+            .string(Some(&first))
+            .string(Some("reader-1"))
+            .count(1)
+            .string(Some(&first))
+            .bytes(b"assigned");
+    }));
+    let mut reader = Reader::new(&synced);
+    reader.i32().unwrap();
+    assert_eq!(reader.i16().unwrap(), 0);
+    let (again, second) = read_join(&call(join()));
+    assert_eq!(again, generation);
+    assert_ne!(second, first);
+    let fenced = call(request(12, 3, |writer| {
+        writer.string(Some("static")).i32(generation).string(Some(&first)).string(Some("reader-1"));
+    }));
+    let mut reader = Reader::new(&fenced);
+    reader.i32().unwrap();
+    assert_eq!(reader.i16().unwrap(), 82);
+    let resynced = call(request(14, 3, |writer| {
+        writer
+            .string(Some("static"))
+            .i32(generation)
+            .string(Some(&second))
+            .string(Some("reader-1"))
+            .count(0);
+    }));
+    let mut reader = Reader::new(&resynced);
+    reader.i32().unwrap();
+    assert_eq!(reader.i16().unwrap(), 0);
+    assert_eq!(reader.bytes().unwrap(), Some(&b"assigned"[..]));
+    let left = call(request(13, 3, |writer| {
+        writer.string(Some("static")).count(1).string(Some("")).string(Some("reader-1"));
+    }));
+    let mut reader = Reader::new(&left);
+    reader.i32().unwrap();
+    assert_eq!(reader.i16().unwrap(), 0);
+    assert_eq!(reader.i32().unwrap(), 1);
+    reader.string().unwrap();
+    assert_eq!(reader.string().unwrap().as_deref(), Some("reader-1"));
+    assert_eq!(reader.i16().unwrap(), 0);
+}
+
+#[test]
 fn group_listing_describes_unknown_groups_as_dead_and_deletes_committed_offsets() {
     let keyspace = MemoryKeyspace::default();
     let listed = response(&keyspace, &request(16, 1, |_| {}));

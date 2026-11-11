@@ -15,6 +15,7 @@ const INVALID_SESSION_TIMEOUT: i16 = 26;
 const REBALANCE_IN_PROGRESS: i16 = 27;
 const NON_EMPTY_GROUP: i16 = 68;
 const GROUP_ID_NOT_FOUND: i16 = 69;
+const FENCED_INSTANCE_ID: i16 = 82;
 const MIN_SESSION_TIMEOUT: Duration = Duration::from_secs(6);
 const MAX_SESSION_TIMEOUT: Duration = Duration::from_secs(1800);
 const MAX_REBALANCE_WAIT: Duration = Duration::from_secs(60);
@@ -35,6 +36,7 @@ struct Member {
     session_timeout: Duration,
     last_seen: Instant,
     joined_round: u64,
+    instance: Option<String>,
 }
 
 #[derive(Debug)]
@@ -47,6 +49,7 @@ struct Group {
     leader: Option<String>,
     members: BTreeMap<String, Member>,
     assignments: BTreeMap<String, Vec<u8>>,
+    instances: BTreeMap<String, String>,
     next_member: u64,
 }
 
@@ -61,6 +64,7 @@ impl Group {
             leader: None,
             members: BTreeMap::new(),
             assignments: BTreeMap::new(),
+            instances: BTreeMap::new(),
             next_member: 1,
         }
     }
@@ -69,7 +73,57 @@ impl Group {
         let before = self.members.len();
         self.members
             .retain(|_, member| member.last_seen.elapsed() <= member.session_timeout);
+        self.forget_departed_instances();
         before != self.members.len()
+    }
+
+    fn forget_departed_instances(&mut self) {
+        let members = &self.members;
+        self.instances.retain(|_, member| members.contains_key(member));
+    }
+
+    fn remove_member(&mut self, member_id: &str) -> bool {
+        let removed = self.members.remove(member_id).is_some();
+        self.assignments.remove(member_id);
+        self.forget_departed_instances();
+        removed
+    }
+
+    fn fenced(&self, member_id: &str, instance: Option<&str>) -> bool {
+        instance
+            .and_then(|instance| self.instances.get(instance))
+            .is_some_and(|known| known != member_id)
+    }
+
+    fn replace_static_member(&mut self, old: &str, new: &str, instance: &str) {
+        if let Some(mut member) = self.members.remove(old) {
+            member.last_seen = Instant::now();
+            self.members.insert(new.to_owned(), member);
+        }
+        if let Some(assignment) = self.assignments.remove(old) {
+            self.assignments.insert(new.to_owned(), assignment);
+        }
+        if self.leader.as_deref() == Some(old) {
+            self.leader = Some(new.to_owned());
+        }
+        self.instances.insert(instance.to_owned(), new.to_owned());
+    }
+
+    fn write_members(&self, version: i16, protocol: &str, body: &mut Writer) {
+        body.count(self.members.len());
+        for (id, member) in &self.members {
+            let metadata = member
+                .protocols
+                .iter()
+                .find(|(name, _)| name == protocol)
+                .map(|(_, metadata)| metadata.as_slice())
+                .unwrap_or_default();
+            body.string(Some(id));
+            if version >= 5 {
+                body.string(member.instance.as_deref());
+            }
+            body.bytes(metadata);
+        }
     }
 
     fn start_rebalance(&mut self) {
@@ -87,6 +141,7 @@ impl Group {
     fn complete_join(&mut self) {
         let round = self.round;
         self.members.retain(|_, member| member.joined_round == round);
+        self.forget_departed_instances();
         self.generation = self.generation.wrapping_add(1).max(1);
         self.leader = self.members.keys().next().cloned();
         self.protocol = self.leader.as_ref().and_then(|leader| {
@@ -193,6 +248,11 @@ impl Coordinator {
             session_timeout
         };
         let member_id = request.string()?.unwrap_or_default();
+        let instance = if version >= 5 {
+            request.string()?.filter(|instance| !instance.is_empty())
+        } else {
+            None
+        };
         let protocol_type = request.string()?.unwrap_or_default();
         let protocols = request.array(|reader| {
             let name = reader.string()?.unwrap_or_default();
@@ -229,8 +289,19 @@ impl Coordinator {
             refuse(body, INCONSISTENT_GROUP_PROTOCOL, &member_id);
             return Ok(());
         }
+        if !member_id.is_empty() && group.fenced(&member_id, instance.as_deref()) {
+            refuse(body, FENCED_INSTANCE_ID, &member_id);
+            return Ok(());
+        }
+        let previous = match (&instance, member_id.is_empty()) {
+            (Some(instance), true) => group.instances.get(instance).cloned(),
+            _ => None,
+        };
         let member_id = if member_id.is_empty() {
-            let id = format!("member-{}-{}", group.generation.max(0), group.next_member);
+            let id = match &instance {
+                Some(instance) => format!("{instance}-{}", group.next_member),
+                None => format!("member-{}-{}", group.generation.max(0), group.next_member),
+            };
             group.next_member += 1;
             id
         } else if group.members.contains_key(&member_id) {
@@ -239,6 +310,29 @@ impl Coordinator {
             refuse(body, UNKNOWN_MEMBER_ID, &member_id);
             return Ok(());
         };
+        if let (Some(old), Some(instance_id)) = (&previous, &instance) {
+            let unchanged = group.phase == Phase::Stable
+                && group.protocol.is_some()
+                && group.members.get(old).is_some_and(|member| member.protocols == protocols);
+            if unchanged {
+                group.replace_static_member(old, &member_id, instance_id);
+                self.changed.notify_all();
+                let protocol = group.protocol.clone().unwrap_or_default();
+                let leader = group.leader.clone().unwrap_or_default();
+                body.i16(log::error::NONE)
+                    .i32(group.generation)
+                    .string(Some(&protocol))
+                    .string(Some(&leader))
+                    .string(Some(&member_id));
+                if member_id == leader {
+                    group.write_members(version, &protocol, body);
+                } else {
+                    body.count(0);
+                }
+                return Ok(());
+            }
+            group.remove_member(old);
+        }
         if !group.members.contains_key(&member_id) && group.members.len() >= MAX_MEMBERS {
             refuse(body, NOT_COORDINATOR, &member_id);
             return Ok(());
@@ -252,8 +346,12 @@ impl Coordinator {
                 session_timeout,
                 last_seen: Instant::now(),
                 joined_round: round,
+                instance: instance.clone(),
             },
         );
+        if let Some(instance) = &instance {
+            group.instances.insert(instance.clone(), member_id.clone());
+        }
         self.changed.notify_all();
         let deadline = Instant::now() + rebalance_timeout.min(MAX_REBALANCE_WAIT);
         let mut groups = self.wait_until(groups, deadline, |groups| {
@@ -280,16 +378,7 @@ impl Coordinator {
             .string(Some(&leader))
             .string(Some(&member_id));
         if member_id == leader {
-            body.count(group.members.len());
-            for (id, member) in &group.members {
-                let metadata = member
-                    .protocols
-                    .iter()
-                    .find(|(name, _)| *name == protocol)
-                    .map(|(_, metadata)| metadata.as_slice())
-                    .unwrap_or_default();
-                body.string(Some(id)).bytes(metadata);
-            }
+            group.write_members(version, &protocol, body);
         } else {
             body.count(0);
         }
@@ -300,6 +389,7 @@ impl Coordinator {
         let group_id = request.string()?.unwrap_or_default();
         let generation = request.i32()?;
         let member_id = request.string()?.unwrap_or_default();
+        let instance = if version >= 3 { request.string()? } else { None };
         let assignments = request.array(|reader| {
             let member = reader.string()?.unwrap_or_default();
             let assignment = reader.bytes()?.unwrap_or_default().to_vec();
@@ -309,6 +399,7 @@ impl Coordinator {
         let mut groups = self.locked();
         let code = match groups.get_mut(&group_id) {
             None => UNKNOWN_MEMBER_ID,
+            Some(group) if group.fenced(&member_id, instance.as_deref()) => FENCED_INSTANCE_ID,
             Some(group) if !group.members.contains_key(&member_id) => UNKNOWN_MEMBER_ID,
             Some(group) if group.generation != generation => ILLEGAL_GENERATION,
             Some(group) if group.phase == Phase::Joining => REBALANCE_IN_PROGRESS,
@@ -350,10 +441,12 @@ impl Coordinator {
         let group_id = request.string()?.unwrap_or_default();
         let generation = request.i32()?;
         let member_id = request.string()?.unwrap_or_default();
+        let instance = if version >= 3 { request.string()? } else { None };
         throttle(version, 1, body);
         let mut groups = self.locked();
         let code = match groups.get_mut(&group_id) {
             None => UNKNOWN_MEMBER_ID,
+            Some(group) if group.fenced(&member_id, instance.as_deref()) => FENCED_INSTANCE_ID,
             Some(group) => {
                 if group.expire() {
                     group.start_rebalance();
@@ -380,24 +473,59 @@ impl Coordinator {
 
     pub(crate) fn leave_group(&self, version: i16, request: &mut Reader<'_>, body: &mut Writer) -> Parsed<()> {
         let group_id = request.string()?.unwrap_or_default();
-        let member_id = request.string()?.unwrap_or_default();
+        let leaving = if version >= 3 {
+            request.array(|reader| {
+                let member_id = reader.string()?.unwrap_or_default();
+                let instance = reader.string()?.filter(|instance| !instance.is_empty());
+                Ok((member_id, instance))
+            })?
+        } else {
+            vec![(request.string()?.unwrap_or_default(), None)]
+        };
         throttle(version, 1, body);
         let mut groups = self.locked();
-        let removed = groups
-            .get_mut(&group_id)
-            .is_some_and(|group| group.members.remove(&member_id).is_some());
-        let code = if removed {
+        let mut outcomes = Vec::with_capacity(leaving.len());
+        let mut any_left = false;
+        for (member_id, instance) in &leaving {
+            let code = match groups.get_mut(&group_id) {
+                None => UNKNOWN_MEMBER_ID,
+                Some(group) => {
+                    let target = match instance {
+                        Some(instance) => match group.instances.get(instance) {
+                            None => Err(UNKNOWN_MEMBER_ID),
+                            Some(known) if !member_id.is_empty() && known != member_id => Err(FENCED_INSTANCE_ID),
+                            Some(known) => Ok(known.clone()),
+                        },
+                        None => Ok(member_id.clone()),
+                    };
+                    match target {
+                        Ok(target) if group.remove_member(&target) => {
+                            any_left = true;
+                            log::error::NONE
+                        }
+                        Ok(_) => UNKNOWN_MEMBER_ID,
+                        Err(code) => code,
+                    }
+                }
+            };
+            outcomes.push(code);
+        }
+        if any_left {
             if groups.get(&group_id).is_some_and(|group| group.members.is_empty()) {
                 groups.remove(&group_id);
             } else if let Some(group) = groups.get_mut(&group_id) {
                 group.start_rebalance();
             }
             self.changed.notify_all();
-            log::error::NONE
-        } else {
-            UNKNOWN_MEMBER_ID
-        };
-        body.i16(code);
+        }
+        if version < 3 {
+            body.i16(outcomes.first().copied().unwrap_or(UNKNOWN_MEMBER_ID));
+            return Ok(());
+        }
+        body.i16(log::error::NONE).count(leaving.len());
+        for ((member_id, instance), code) in leaving.iter().zip(outcomes) {
+            body.string(Some(member_id)).string(instance.as_deref()).i16(code);
+        }
         Ok(())
     }
 
@@ -411,12 +539,18 @@ impl Coordinator {
         let group_id = request.string()?.unwrap_or_default();
         let generation = request.i32()?;
         let member_id = request.string()?.unwrap_or_default();
-        let _retention = request.i64()?;
+        let instance = if version >= 7 { request.string()? } else { None };
+        if version <= 4 {
+            request.i64()?;
+        }
         let topics = request.array(|reader| {
             let name = reader.string()?.unwrap_or_default();
             let partitions = reader.array(|partition| {
                 let index = partition.i32()?;
                 let offset = partition.i64()?;
+                if version >= 6 {
+                    partition.i32()?;
+                }
                 let metadata = partition.string()?;
                 Ok((index, offset, metadata))
             })?;
@@ -428,6 +562,7 @@ impl Coordinator {
         } else {
             match self.locked().get(&group_id) {
                 None => UNKNOWN_MEMBER_ID,
+                Some(group) if group.fenced(&member_id, instance.as_deref()) => FENCED_INSTANCE_ID,
                 Some(group) if !group.members.contains_key(&member_id) => UNKNOWN_MEMBER_ID,
                 Some(group) if group.generation != generation => ILLEGAL_GENERATION,
                 Some(group) if group.phase == Phase::Joining => REBALANCE_IN_PROGRESS,
