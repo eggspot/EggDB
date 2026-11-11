@@ -4,7 +4,30 @@ use crate::types::{SqlType, Value};
 use eggdb_geo::{Coord, Geometry, Spatial};
 
 /// The spatial functions EggDB answers, PostGIS's names (also MySQL's `ST_` functions).
-pub(crate) const FUNCTIONS: [&str; 36] = [
+pub(crate) const FUNCTIONS: [&str; 59] = [
+    "st_centroid",
+    "st_perimeter",
+    "st_convexhull",
+    "st_isvalid",
+    "st_isvalidreason",
+    "st_numgeometries",
+    "st_geometryn",
+    "st_startpoint",
+    "st_endpoint",
+    "st_pointn",
+    "st_exteriorring",
+    "st_numinteriorrings",
+    "st_reverse",
+    "st_flipcoordinates",
+    "st_translate",
+    "st_scale",
+    "st_makeline",
+    "st_makeenvelope",
+    "st_xmin",
+    "st_xmax",
+    "st_ymin",
+    "st_ymax",
+    "st_simplify",
     "st_geomfromtext",
     "st_geometryfromtext",
     "st_geomfromewkt",
@@ -47,12 +70,13 @@ pub(crate) const FUNCTIONS: [&str; 36] = [
 pub(crate) fn result_type(name: &str) -> Option<SqlType> {
     Some(match name {
         "st_asbinary" | "st_asewkb" => SqlType::Bytea,
-        "st_x" | "st_y" | "st_distance" | "st_area" | "st_length" | "st_distancesphere" => {
-            SqlType::Double
+        "st_x" | "st_y" | "st_distance" | "st_area" | "st_length" | "st_distancesphere"
+        | "st_perimeter" | "st_xmin" | "st_xmax" | "st_ymin" | "st_ymax" => SqlType::Double,
+        "st_srid" | "st_npoints" | "st_numgeometries" | "st_numinteriorrings" => {
+            SqlType::Integer
         }
-        "st_srid" | "st_npoints" => SqlType::Integer,
         "st_dwithin" | "st_contains" | "st_within" | "st_intersects" | "st_disjoint"
-        | "st_isempty" | "st_equals" => SqlType::Boolean,
+        | "st_isempty" | "st_equals" | "st_isvalid" => SqlType::Boolean,
         name if FUNCTIONS.contains(&name) => SqlType::Text,
         _ => return None,
     })
@@ -425,6 +449,171 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
                     ));
                 }
             }
+        }
+        ("st_centroid", [_]) => {
+            let source = spatial(0)?;
+            geometry_value(&Spatial {
+                srid: source.srid,
+                geometry: Geometry::Point(eggdb_geo::centroid(&source.geometry)),
+            })
+        }
+        ("st_perimeter", [_]) => Value::Double(eggdb_geo::perimeter(&spatial(0)?.geometry)),
+        ("st_convexhull", [_]) => {
+            let source = spatial(0)?;
+            geometry_value(&Spatial {
+                srid: source.srid,
+                geometry: eggdb_geo::convex_hull(&source.geometry),
+            })
+        }
+        ("st_isvalid", [_]) => {
+            Value::Boolean(eggdb_geo::invalidity(&spatial(0)?.geometry).is_none())
+        }
+        ("st_isvalidreason", [_]) => Value::Text(
+            eggdb_geo::invalidity(&spatial(0)?.geometry)
+                .unwrap_or_else(|| "Valid Geometry".to_owned()),
+        ),
+        ("st_numgeometries", [_]) => {
+            let source = spatial(0)?;
+            Value::Integer(if source.geometry.is_empty() {
+                0
+            } else {
+                eggdb_geo::parts(&source.geometry).len() as i32
+            })
+        }
+        ("st_geometryn", [_, at]) => {
+            let source = spatial(0)?;
+            let parts = eggdb_geo::parts(&source.geometry);
+            match at
+                .as_integer()
+                .and_then(|at| usize::try_from(at).ok())
+                .filter(|at| *at >= 1)
+                .and_then(|at| parts.get(at - 1))
+            {
+                Some(part) => geometry_value(&Spatial {
+                    srid: source.srid,
+                    geometry: part.clone(),
+                }),
+                None => Value::Null,
+            }
+        }
+        ("st_startpoint" | "st_endpoint" | "st_pointn", [_, rest @ ..]) => {
+            let source = spatial(0)?;
+            let Geometry::LineString(points) = &source.geometry else {
+                return Ok(Value::Null);
+            };
+            let picked = match (name, rest.first()) {
+                ("st_startpoint", None) => points.first(),
+                ("st_endpoint", None) => points.last(),
+                ("st_pointn", Some(at)) => match at.as_integer() {
+                    Some(at) if at >= 1 => usize::try_from(at - 1).ok().and_then(|at| points.get(at)),
+                    Some(at) if at < 0 => usize::try_from(-at)
+                        .ok()
+                        .and_then(|back| points.len().checked_sub(back))
+                        .and_then(|at| points.get(at)),
+                    _ => None,
+                },
+                _ => None,
+            };
+            match picked {
+                Some(point) => geometry_value(&Spatial {
+                    srid: source.srid,
+                    geometry: Geometry::Point(Some(*point)),
+                }),
+                None => Value::Null,
+            }
+        }
+        ("st_exteriorring", [_]) => {
+            let source = spatial(0)?;
+            match &source.geometry {
+                Geometry::Polygon(rings) => geometry_value(&Spatial {
+                    srid: source.srid,
+                    geometry: Geometry::LineString(rings.first().cloned().unwrap_or_default()),
+                }),
+                _ => Value::Null,
+            }
+        }
+        ("st_numinteriorrings", [_]) => match spatial(0)?.geometry {
+            Geometry::Polygon(rings) => Value::Integer(rings.len().saturating_sub(1) as i32),
+            _ => Value::Null,
+        },
+        ("st_reverse" | "st_flipcoordinates", [_]) => {
+            let source = spatial(0)?;
+            let geometry = if name == "st_reverse" {
+                eggdb_geo::reversed(&source.geometry)
+            } else {
+                eggdb_geo::flipped(&source.geometry)
+            };
+            geometry_value(&Spatial {
+                srid: source.srid,
+                geometry,
+            })
+        }
+        ("st_translate" | "st_scale", [_, x, y]) => {
+            let source = spatial(0)?;
+            let (x, y) = (number(x)?, number(y)?);
+            let geometry = if name == "st_translate" {
+                eggdb_geo::translated(&source.geometry, x, y)
+            } else {
+                eggdb_geo::scaled(&source.geometry, x, y)
+            };
+            geometry_value(&Spatial {
+                srid: source.srid,
+                geometry,
+            })
+        }
+        ("st_simplify", [_, tolerance, ..]) => {
+            let source = spatial(0)?;
+            let tolerance = number(tolerance)?;
+            geometry_value(&Spatial {
+                srid: source.srid,
+                geometry: eggdb_geo::simplified(&source.geometry, tolerance),
+            })
+        }
+        ("st_makeline", [_, _]) => {
+            let (left, right) = pair()?;
+            let mut points = left.geometry.coords();
+            points.extend(right.geometry.coords());
+            geometry_value(&Spatial {
+                srid: left.srid,
+                geometry: Geometry::LineString(points),
+            })
+        }
+        ("st_makeenvelope", [xmin, ymin, xmax, ymax, rest @ ..]) => {
+            let (xmin, ymin, xmax, ymax) = (number(xmin)?, number(ymin)?, number(xmax)?, number(ymax)?);
+            let srid = match rest.first() {
+                Some(srid) => srid_of(srid)?,
+                None => None,
+            };
+            let corner = |x: f64, y: f64| Coord { x, y };
+            geometry_value(&Spatial {
+                srid,
+                geometry: Geometry::Polygon(vec![vec![
+                    corner(xmin, ymin),
+                    corner(xmin, ymax),
+                    corner(xmax, ymax),
+                    corner(xmax, ymin),
+                    corner(xmin, ymin),
+                ]]),
+            })
+        }
+        ("st_xmin" | "st_xmax" | "st_ymin" | "st_ymax", [_]) => {
+            let points = spatial(0)?.geometry.coords();
+            let pick = |values: &mut dyn Iterator<Item = f64>, largest: bool| {
+                values.fold(None::<f64>, |found, value| {
+                    Some(match found {
+                        None => value,
+                        Some(found) if largest => found.max(value),
+                        Some(found) => found.min(value),
+                    })
+                })
+            };
+            let found = match name {
+                "st_xmin" => pick(&mut points.iter().map(|point| point.x), false),
+                "st_xmax" => pick(&mut points.iter().map(|point| point.x), true),
+                "st_ymin" => pick(&mut points.iter().map(|point| point.y), false),
+                _ => pick(&mut points.iter().map(|point| point.y), true),
+            };
+            found.map_or(Value::Null, Value::Double)
         }
         _ => {
             return Err(SqlError::new(

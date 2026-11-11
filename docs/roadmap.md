@@ -1150,7 +1150,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - R-tree spatial indexes, with MySQL's `SPATIAL` keys (D204, sql.md).
 - Z and M coordinates, and geography on the WGS 84 spheroid (D204).
 - `ST_Transform` between any projections, overlay operations (union, intersection, buffer) and
-  validity checks (D204, D250). Check: the OGC test suite cases.
+  validity checks (D204, D250). Check: the OGC test suite cases. Validity checks (rings and
+  self-crossings) and 22 more functions: **code written, unbuilt** (code-only mode, 2026-11-11,
+  D438). Left: overlays, full validity, projections.
 - SQL Server's `geometry` and `geography` types with their methods (D19, D204).
 - Vector tiles (`ST_AsMVT`, `ST_AsMVTGeom`), and H3 and S2 indexes (D57, D250).
 - Raster, GeoTIFF and Cloud-Optimized GeoTIFF (D57).

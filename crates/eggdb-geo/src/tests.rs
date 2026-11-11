@@ -1,6 +1,7 @@
 use crate::{
-    Coord, Geometry, area, contains, distance, envelope, from_wkb, from_wkt, intersects, length,
-    sphere_distance, to_geojson, to_wkb, to_wkt,
+    Coord, Geometry, area, centroid, contains, convex_hull, distance, envelope, from_wkb, from_wkt,
+    intersects, invalidity, length, parts, perimeter, simplified, sphere_distance, to_geojson,
+    to_wkb, to_wkt, translated,
 };
 
 fn geometry(text: &str) -> Geometry {
@@ -170,4 +171,30 @@ fn web_mercator_tiles_and_geohashes_match_their_definitions() {
         "u4pruydqqvj"
     );
     assert!(geohash(Coord { x: 0.0, y: 0.0 }, 0).is_err());
+}
+
+#[test]
+fn centroids_hulls_validity_and_simplification_follow_postgis() {
+    let square = from_wkt("POLYGON((0 0,0 2,2 2,2 0,0 0))").unwrap().geometry;
+    assert_eq!(centroid(&square), Some(Coord { x: 1.0, y: 1.0 }));
+    assert_eq!(perimeter(&square), 8.0);
+    let line = from_wkt("LINESTRING(0 0,2 0)").unwrap().geometry;
+    assert_eq!(centroid(&line), Some(Coord { x: 1.0, y: 0.0 }));
+    let points = from_wkt("MULTIPOINT((0 0),(2 0),(1 1),(1 3),(2 2))").unwrap().geometry;
+    let hull = convex_hull(&points);
+    assert!(matches!(&hull, Geometry::Polygon(rings) if rings[0].len() == 5));
+    assert_eq!(area(&hull), 4.0);
+    assert_eq!(invalidity(&square), None);
+    let bowtie = from_wkt("POLYGON((0 0,2 2,2 0,0 2,0 0))").unwrap().geometry;
+    assert!(invalidity(&bowtie).is_some_and(|reason| reason.starts_with("Self-intersection")));
+    let wiggly = from_wkt("LINESTRING(0 0,1 0.01,2 0)").unwrap().geometry;
+    assert_eq!(
+        simplified(&wiggly, 0.1),
+        Geometry::LineString(vec![Coord { x: 0.0, y: 0.0 }, Coord { x: 2.0, y: 0.0 }])
+    );
+    assert_eq!(
+        translated(&line, 1.0, 1.0),
+        Geometry::LineString(vec![Coord { x: 1.0, y: 1.0 }, Coord { x: 3.0, y: 1.0 }])
+    );
+    assert_eq!(parts(&points).len(), 5);
 }

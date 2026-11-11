@@ -462,3 +462,4 @@ its full title with its status.
 - [D435](decisions/D435.md) Code-only batch 82 (M11): TimescaleDB's `first(value, time)` and `last(value, time)`
 - [D436](decisions/D436.md) Code-only batch 83 (M13): betweenness and closeness centrality, k-core, Louvain and weighted shortest paths as graph procedures
 - [D437](decisions/D437.md) Code-only batch 85 (M12): pgvector's `subvector`, `binary_quantize`, bit distances and `sparsevec` text
+- [D438](decisions/D438.md) Code-only batch 86 (M12): more PostGIS functions (centroids, hulls, validity, accessors, affine moves, simplification)
