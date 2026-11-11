@@ -259,11 +259,9 @@ impl<'k> Broker<'k> {
         }
     }
 
-    fn resume(&self, id: u64, client: &str, writer: &SharedWriter, version: u8, keep_for: Duration) -> bool {
+    fn resume(&self, id: u64, client: &str, writer: &SharedWriter, version: u8, keep_for: Duration) -> Option<Vec<Vec<u8>>> {
         let now = Instant::now();
-        let Some(stored) = self.stored().remove(client).filter(|session| session.expires_at > now) else {
-            return false;
-        };
+        let stored = self.stored().remove(client).filter(|session| session.expires_at > now)?;
         let mut subscriber = Subscriber {
             filters: stored.filters,
             writer: Arc::clone(writer),
@@ -292,13 +290,7 @@ impl<'k> Broker<'k> {
             subscriber.inflight.insert(packet_id, (message, false));
         }
         self.live().insert(id, subscriber);
-        let mut writer = writer.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        for packet in packets {
-            if writer.write_all(&packet).is_err() {
-                break;
-            }
-        }
-        true
+        Some(packets)
     }
 
     fn settle(&self, id: u64, kind: u8, packet_id: u16) {
@@ -875,12 +867,14 @@ pub(crate) fn serve_stream(
                                     broker.forget_session(&connected.client);
                                 }
                             }
-                            let resumed = allowed
-                                && !connected.clean
-                                && keep_for.is_some_and(|keep| {
+                            let resumed = if allowed && !connected.clean {
+                                keep_for.and_then(|keep| {
                                     broker.resume(id, &connected.client, &writer, version, keep)
-                                });
-                            let mut ack = vec![u8::from(resumed), code];
+                                })
+                            } else {
+                                None
+                            };
+                            let mut ack = vec![u8::from(resumed.is_some()), code];
                             if version >= 5 {
                                 ack.extend_from_slice(&[3, 0x22]);
                                 ack.extend_from_slice(&TOPIC_ALIAS_MAXIMUM.to_be_bytes());
@@ -889,6 +883,16 @@ pub(crate) fn serve_stream(
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .write_all(&encode(CONNACK, 0, &ack));
+                            if let Some(packets) = resumed {
+                                let mut held = writer
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                for packet in packets {
+                                    if held.write_all(&packet).is_err() {
+                                        break;
+                                    }
+                                }
+                            }
                             if !allowed {
                                 std::thread::sleep(Duration::from_millis(250));
                                 finished = Some(true);
