@@ -1325,7 +1325,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   lineage in `eggdb_catalog` (D46, D244). Check: a model graph run in dependency order.
 - Pipeline orchestration on the job scheduler, first dependencies, retries with backoff and
   backfills (D46, D200). Check: a test that fails a step and sees it retried.
-- FIX and EDIFACT dictionaries, HL7 v2 message building and ACKs, and FHIR validation (D50, D243).
+- FIX and EDIFACT dictionaries, HL7 v2 message building and ACKs, and FHIR validation (D50, D243). HL7
+  building and ACKs, FIX building and name dictionaries: **code written, unbuilt** (code-only mode,
+  2026-11-11, D445). Left: full dictionaries and FHIR validation.
 - ISO 20022 and DICOM (D50).
 - IoT models: W3C Web of Things, and DTDL after D58's legal check (D57).
 - OPC UA, Modbus and Sparkplug ingest (D57).

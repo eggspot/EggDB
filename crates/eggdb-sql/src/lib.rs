@@ -171,6 +171,7 @@ mod square_root;
 mod stack_depth;
 mod standards;
 pub mod statement_statistics;
+mod standards_build;
 mod statistical_aggregates;
 mod statistics;
 mod step_times;

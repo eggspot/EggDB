@@ -1497,6 +1497,9 @@ impl Evaluator<'_> {
         if let Some(result) = numeric_function(name, &values) {
             return result;
         }
+        if let Some(result) = crate::standards_build::function(name, &values) {
+            return result;
+        }
         if let Some(result) = crate::jsonlogic::function(name, &values) {
             return result;
         }
