@@ -965,6 +965,7 @@ impl<'t> Parser<'t> {
                 let database = self.settings_or_default(|settings| settings.database.clone());
                 text_value(database, position)
             }
+            "interval" if !called => self.mysql_interval_operand(position)?,
             "current_user" => {
                 self.at += 1;
                 if called {

@@ -10,6 +10,7 @@ pub(crate) const TIMESTAMPDIFF: &str = "mysql_timestampdiff";
 pub(crate) const STR_TO_DATE: &str = "mysql_str_to_date";
 pub(crate) const STR_TO_DATETIME: &str = "mysql_str_to_datetime";
 pub(crate) const STR_TO_TIME: &str = "mysql_str_to_time";
+pub(crate) const INTERVAL_OPERAND: &str = "mysql_interval";
 const UNIX_TIMESTAMP: &str = "mysql_unix_timestamp";
 const FROM_UNIXTIME: &str = "mysql_from_unixtime";
 const FROM_UNIXTIME_FORMATTED: &str = "mysql_from_unixtime_formatted";
@@ -29,7 +30,8 @@ const SEC_TO_TIME: &str = "mysql_sec_to_time";
 const PERIOD_ADD: &str = "mysql_period_add";
 const PERIOD_DIFF: &str = "mysql_period_diff";
 
-pub(crate) const INTERNAL_NAMES: [&str; 24] = [
+pub(crate) const INTERNAL_NAMES: [&str; 25] = [
+    INTERVAL_OPERAND,
     DATE_ADD,
     DATE_SUB,
     TIMESTAMPDIFF,
@@ -211,6 +213,13 @@ pub(crate) fn result_type(
 pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
     if !INTERNAL_NAMES.contains(&name) {
         return None;
+    }
+    if name == INTERVAL_OPERAND {
+        return Some(Err(crate::error::SqlError::syntax(
+            "You have an error in your SQL syntax near 'INTERVAL': an interval only adds to or subtracts from a date"
+                .to_owned(),
+            0,
+        )));
     }
     if values.iter().any(Value::is_null) {
         return Some(Ok(Value::Null));

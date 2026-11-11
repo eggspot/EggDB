@@ -1,5 +1,5 @@
 use super::Parser;
-use crate::ast::{Expr, ExprKind, Literal, Name};
+use crate::ast::{BinaryOperator, Expr, ExprKind, Literal, Name};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
 use crate::mysql_date_functions as functions;
@@ -33,7 +33,60 @@ fn wrong_count(name: &Name) -> SqlError {
     .at(name.position)
 }
 
+fn interval_parts(expr: Expr) -> Result<(Expr, Expr), Expr> {
+    match expr.kind {
+        ExprKind::Function { name, arguments }
+            if name == functions::INTERVAL_OPERAND && arguments.len() == 2 =>
+        {
+            let mut arguments = arguments.into_iter();
+            match (arguments.next(), arguments.next()) {
+                (Some(amount), Some(unit)) => Ok((amount, unit)),
+                _ => Err(Expr {
+                    kind: ExprKind::Literal(Literal::Null),
+                    position: expr.position,
+                }),
+            }
+        }
+        kind => Err(Expr {
+            kind,
+            position: expr.position,
+        }),
+    }
+}
+
+pub(super) fn with_interval(left: Expr, operator: BinaryOperator, right: Expr) -> Expr {
+    let position = left.position;
+    let right = match interval_parts(right) {
+        Ok((amount, unit)) => {
+            let internal = if operator == BinaryOperator::Subtract {
+                functions::DATE_SUB
+            } else {
+                functions::DATE_ADD
+            };
+            return call(internal, vec![left, amount, unit], position);
+        }
+        Err(right) => right,
+    };
+    if operator == BinaryOperator::Add {
+        match interval_parts(left) {
+            Ok((amount, unit)) => {
+                return call(functions::DATE_ADD, vec![right, amount, unit], position);
+            }
+            Err(left) => return Parser::binary(left, operator, right),
+        }
+    }
+    Parser::binary(left, operator, right)
+}
+
 impl Parser<'_> {
+    pub(super) fn mysql_interval_operand(&mut self, position: usize) -> SqlResult<Expr> {
+        self.at += 1;
+        let amount = self.expression()?;
+        let unit_position = self.position();
+        let unit = unit_expr(self.mysql_unit(false)?, unit_position);
+        Ok(call(functions::INTERVAL_OPERAND, vec![amount, unit], position))
+    }
+
     pub(super) fn mysql_date_function(&mut self, name: &Name) -> SqlResult<Option<Expr>> {
         let text = name.text.as_str();
         let special = functions::SPECIAL_SYNTAX.contains(&text);

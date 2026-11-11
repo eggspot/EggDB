@@ -4766,8 +4766,7 @@ And more, not in the suite yet:
 - `DESCRIBE` shows the engine's types (`smallint` for `TINYINT`).
 - Dates and times: `DATE` and `DATETIME` take years 4714 BC to 5874897 (MySQL: 1000 to 9999),
   zero dates (`0000-00-00`) are refused, a `DATETIME(fsp)` prints without trailing zeros in its
-  fraction, the `YEAR` type and `date + INTERVAL n unit` as an operator are not
-  supported yet; `SHOW CREATE TABLE` leaves out `ON UPDATE CURRENT_TIMESTAMP` (D416). `FROM_DAYS`, `STR_TO_DATE` and `MAKEDATE` give `NULL`
+  fraction, the `YEAR` type is not supported yet; `SHOW CREATE TABLE` leaves out `ON UPDATE CURRENT_TIMESTAMP` (D416). `FROM_DAYS`, `STR_TO_DATE` and `MAKEDATE` give `NULL`
   where MySQL gives a zero date, `STR_TO_DATE` doesn't read the week specifiers, and
   `UNIX_TIMESTAMP` gives whole seconds (D415). The date-part
   functions give no warning 1292 for a string that is no date, and read a date with a zero

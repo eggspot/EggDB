@@ -4114,6 +4114,9 @@ impl<'t> Parser<'t> {
                     BinaryOperator::Subtract
                 };
                 let right = self.expression_above(Level::Multiplicative)?;
+                if self.mysql() {
+                    return Ok(mysql_dates::with_interval(left, operator, right));
+                }
                 Ok(Self::binary(left, operator, right))
             }
             Level::Multiplicative => {
