@@ -732,6 +732,11 @@ impl<'s> Session<'s> {
                 if let Some(zone) = zone {
                     Arc::make_mut(&mut self.settings).time_zone = zone;
                 }
+                if name.eq_ignore_ascii_case("event_scheduler")
+                    && let Some(Value::Text(state)) = self.settings.mysql.system("event_scheduler")
+                {
+                    self.store_event_scheduler(&state)?;
+                }
                 if !was_autocommit
                     && self.autocommit()
                     && let Block::Writing(_) = self.block

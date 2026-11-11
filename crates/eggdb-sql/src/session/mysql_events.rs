@@ -10,6 +10,9 @@ use crate::mysql_date_functions::{
 use crate::types::{SqlType, Value};
 
 pub(crate) const EVENTS_TABLE: &str = "eggdb_internal.mysql_events";
+pub(crate) const SETTINGS_TABLE: &str = "eggdb_internal.mysql_settings";
+const CREATE_SETTINGS_TABLE: &str = "CREATE SCHEMA IF NOT EXISTS eggdb_internal; \
+    CREATE TABLE IF NOT EXISTS eggdb_internal.mysql_settings (name text PRIMARY KEY, value text NOT NULL)";
 const CREATE_EVENTS_TABLE: &str = "CREATE SCHEMA IF NOT EXISTS eggdb_internal; \
     CREATE TABLE IF NOT EXISTS eggdb_internal.mysql_events (\
     event_key text PRIMARY KEY, db text NOT NULL, name text NOT NULL, body text NOT NULL, \
@@ -240,6 +243,17 @@ fn shown_time(seconds: Option<i64>) -> Value {
 }
 
 impl Session<'_> {
+    /// Keeps `SET GLOBAL event_scheduler` in the file, where the job scheduler reads it.
+    pub(super) fn store_event_scheduler(&mut self, state: &str) -> SqlResult<()> {
+        self.internal_sql(CREATE_SETTINGS_TABLE)?;
+        self.internal_sql(&format!(
+            "DELETE FROM {SETTINGS_TABLE} WHERE name = 'event_scheduler'; \
+             INSERT INTO {SETTINGS_TABLE} VALUES ('event_scheduler', {})",
+            quoted(state)
+        ))?;
+        Ok(())
+    }
+
     fn internal_sql(&mut self, text: &str) -> SqlResult<Vec<QueryResult>> {
         let dialect = self.dialect;
         self.dialect = Dialect::PostgreSql;

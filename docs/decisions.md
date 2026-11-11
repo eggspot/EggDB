@@ -598,3 +598,4 @@ its full title with its status.
 - [D571](decisions/D571.md) Code-only batch 219 (M6e): eggdb gui in the command model
 - [D572](decisions/D572.md) Code-only batch 220 (M11): Parquet files written with row groups and statistics
 - [D573](decisions/D573.md) Code-only batch 221 (M11): reading Apache Arrow IPC streams and files
+- [D574](decisions/D574.md) Code-only batch 222 (M10): MySQL's event_scheduler switch

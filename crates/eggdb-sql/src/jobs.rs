@@ -447,6 +447,23 @@ pub fn run_due_events<S: KeyValueStore>(store: &S, epoch_seconds: i64) -> SqlRes
         EVENTS_TABLE, StoredEvent, event_key, number_or_null, quoted,
     };
     let mut session = Session::with_dialect(store, Dialect::PostgreSql);
+    let mut switched_off = false;
+    let _ = session.execute(
+        &format!(
+            "SELECT value FROM {} WHERE name = 'event_scheduler'",
+            crate::session::mysql_events::SETTINGS_TABLE
+        ),
+        &mut |result| {
+            switched_off = result
+                .rows
+                .first()
+                .and_then(|row| row.first())
+                .is_some_and(|value| matches!(value, Value::Text(state) if state == "OFF"));
+        },
+    );
+    if switched_off {
+        return Ok(JobsRun::default());
+    }
     let mut rows = Vec::new();
     let listed = session.execute(
         &format!(

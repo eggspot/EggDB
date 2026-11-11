@@ -79,6 +79,7 @@ const SYSTEM_VARIABLES: &[(&str, Default)] = &[
     ("default_storage_engine", Default::Text("EggDB")),
     ("default_week_format", Default::Number(0)),
     ("div_precision_increment", Default::Number(4)),
+    ("event_scheduler", Default::Text("ON")),
     ("explicit_defaults_for_timestamp", Default::Number(1)),
     ("foreign_key_checks", Default::Number(1)),
     ("have_ssl", Default::Text("DISABLED")),
@@ -192,6 +193,23 @@ fn switch(value: &Value) -> Option<i64> {
     }
 }
 
+/// `ON` or `OFF` for a value `SET GLOBAL event_scheduler` takes (`ON`, `OFF`, `1`, `0`, any
+/// case); `DISABLED` is a start-up setting MySQL refuses at run time, as EggDB does.
+pub(crate) fn event_scheduler_state(value: &Value) -> Option<&'static str> {
+    let text = match value {
+        Value::Text(text) => text.trim().to_ascii_uppercase(),
+        Value::BigInt(number) => number.to_string(),
+        Value::Integer(number) => number.to_string(),
+        Value::Boolean(flag) => u8::from(*flag).to_string(),
+        _ => return None,
+    };
+    match text.as_str() {
+        "ON" | "1" | "TRUE" => Some("ON"),
+        "OFF" | "0" | "FALSE" => Some("OFF"),
+        _ => None,
+    }
+}
+
 impl MySqlVariables {
     pub(crate) fn system(&self, name: &str) -> Option<Value> {
         let name = name.to_ascii_lowercase();
@@ -221,6 +239,11 @@ impl MySqlVariables {
                 Value::BigInt(switch(&value).ok_or(SetRefused::WrongValue)?)
             }
             (Some(value), _) => value,
+        };
+        let value = if name == "event_scheduler" {
+            Value::Text(event_scheduler_state(&value).ok_or(SetRefused::WrongValue)?.to_owned())
+        } else {
+            value
         };
         if matches!(name.as_str(), "transaction_isolation" | "tx_isolation") {
             for alias in ["transaction_isolation", "tx_isolation"] {
