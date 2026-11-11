@@ -956,8 +956,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - memcached's binary protocol and SASL (D194). **Code written, unbuilt** (code-only mode,
   2026-11-10, D398).
 - The rest of memcached's meta flags, `stats` details and LRU eviction for its items (D194). Meta
-  flags and `stats` counts: **code written, unbuilt** (code-only mode, 2026-11-11, D474); LRU eviction
-  is not written.
+  flags and `stats` counts: **code written, unbuilt** (code-only mode, 2026-11-11, D474); LRU eviction:
+  **code written, unbuilt** (code-only mode, 2026-11-12, D592).
 
 ### M8 Full-text search
 - An inverted index in the file, with BM25 in SQL served from it (D195). Check: a benchmark

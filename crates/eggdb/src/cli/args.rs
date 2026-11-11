@@ -263,6 +263,7 @@ impl CommandName {
             | OptionName::NatsListen
             | OptionName::SyslogListen
             | OptionName::RespMaxMemory
+            | OptionName::MemcachedMaxMemory
             | OptionName::RespEviction
             | OptionName::McpTokenFile
             | OptionName::McpTables
@@ -462,6 +463,7 @@ enum OptionName {
     NatsListen,
     SyslogListen,
     RespMaxMemory,
+    MemcachedMaxMemory,
     RespEviction,
     McpTokenFile,
     McpTables,
@@ -586,6 +588,7 @@ impl OptionName {
             b"nats-listen" => Self::NatsListen,
             b"syslog-listen" => Self::SyslogListen,
             b"resp-max-memory" => Self::RespMaxMemory,
+            b"memcached-max-memory" => Self::MemcachedMaxMemory,
             b"resp-eviction" => Self::RespEviction,
             b"mcp-token-file" => Self::McpTokenFile,
             b"mcp-tables" => Self::McpTables,
@@ -909,6 +912,7 @@ pub(crate) struct ServeOptions {
     pub(crate) nats_listen: Option<SocketAddr>,
     pub(crate) syslog_listen: Option<SocketAddr>,
     pub(crate) resp_max_memory: Option<u64>,
+    pub(crate) memcached_max_memory: Option<u64>,
     pub(crate) resp_eviction: Option<eggdb_resp::EvictionPolicy>,
     pub(crate) log_batches: bool,
     pub(crate) resp_cluster: bool,
@@ -1375,6 +1379,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             }
             OptionName::RespMaxMemory => {
                 request.serve.resp_max_memory =
+                    Some(parse_size(&option.spelled, value).map_err(usage)? as u64);
+            }
+            OptionName::MemcachedMaxMemory => {
+                request.serve.memcached_max_memory =
                     Some(parse_size(&option.spelled, value).map_err(usage)? as u64);
             }
             OptionName::RespEviction => {

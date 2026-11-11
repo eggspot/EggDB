@@ -5,11 +5,13 @@
 mod binary;
 mod commands;
 mod item;
+mod lru;
 mod meta;
 mod server;
 
 pub use commands::{Arithmetic, Counters, Mode, Shared, Stored};
 pub use item::{Item, expiry_of};
+pub use lru::{Lru, item_bytes};
 pub use server::{ServerConfig, serve, serve_stream};
 
 #[cfg(test)]
@@ -36,6 +38,7 @@ mod tests {
             keyspace: &keyspace,
             next_cas: AtomicU64::new(1),
             counters: Default::default(),
+            lru: Default::default(),
         };
         let answer = converse(
             &shared,
@@ -54,6 +57,7 @@ mod tests {
             keyspace: &keyspace,
             next_cas: AtomicU64::new(100),
             counters: Default::default(),
+            lru: Default::default(),
         };
         let answer = converse(
             &shared,
@@ -72,6 +76,7 @@ mod tests {
             keyspace: &keyspace,
             next_cas: AtomicU64::new(1),
             counters: Default::default(),
+            lru: Default::default(),
         };
         let budget = MemoryBudget::new(256 * 1024);
         let value = "v".repeat(200 * 1024);
@@ -102,6 +107,7 @@ mod tests {
             keyspace: &keyspace,
             next_cas: AtomicU64::new(1),
             counters: Default::default(),
+            lru: Default::default(),
         };
         let budget = MemoryBudget::new(256 * 1024);
         let value = "v".repeat(60 * 1024);
@@ -172,6 +178,7 @@ mod tests {
             keyspace: &keyspace,
             next_cas: AtomicU64::new(1),
             counters: Default::default(),
+            lru: Default::default(),
         };
         let mut set_extras = 7u32.to_be_bytes().to_vec();
         set_extras.extend_from_slice(&0u32.to_be_bytes());
@@ -197,6 +204,40 @@ mod tests {
         assert_eq!(responses[2].1, 0x0001);
         assert_eq!(responses[3].3, 10u64.to_be_bytes().to_vec());
         assert_eq!(responses[4].3, 15u64.to_be_bytes().to_vec());
+    }
+
+    #[test]
+    fn items_past_the_memory_limit_evict_the_least_recently_used() {
+        let keyspace = MemoryKeyspace::default();
+        let value = "v".repeat(1000);
+        let room = 3 * item_bytes(b"k0", &Item {
+            data: value.as_bytes().to_vec(),
+            flags: 0,
+            cas: 0,
+            expires_at_ms: None,
+        }
+        .encode());
+        let shared = Shared {
+            keyspace: &keyspace,
+            next_cas: AtomicU64::new(1),
+            counters: Default::default(),
+            lru: Lru::with_limit(room),
+        };
+        let mut input = Vec::new();
+        for key in ["k0", "k1", "k2"] {
+            input.extend(format!("set {key} 0 0 {}\r\n{value}\r\n", value.len()).into_bytes());
+        }
+        input.extend(b"get k0\r\n".to_vec());
+        input.extend(format!("set k3 0 0 {}\r\n{value}\r\n", value.len()).into_bytes());
+        converse(&shared, &input);
+        assert_eq!(converse(&shared, b"get k1\r\n"), "END|");
+        assert!(converse(&shared, b"get k0\r\n").starts_with("VALUE k0 "));
+        assert!(converse(&shared, b"get k3\r\n").starts_with("VALUE k3 "));
+        assert_eq!(shared.lru.evictions(), 1);
+        let stats = converse(&shared, b"stats\r\n");
+        assert!(stats.contains("STAT evictions 1|"), "{stats}");
+        assert!(stats.contains(&format!("STAT limit_maxbytes {room}|")), "{stats}");
+        assert!(stats.contains("STAT curr_items 3|"), "{stats}");
     }
 }
 

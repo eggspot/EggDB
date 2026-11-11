@@ -818,6 +818,7 @@ impl Session<'_> {
             keyspace: &memcached_database,
             next_cas: std::sync::atomic::AtomicU64::new(1),
             counters: Default::default(),
+            lru: eggdb_memcached::Lru::with_limit(options.memcached_max_memory.unwrap_or(0)),
         };
         let es_database = super::serve_resp::DatabaseKeyspace {
             db: &db,

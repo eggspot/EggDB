@@ -1,4 +1,5 @@
 use crate::item::{Item, expiry_of};
+use crate::lru::{Change, Lru, item_bytes};
 use eggdb_keyspace::{KeysRead, KeysWrite, Keyspace};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -13,6 +14,8 @@ pub struct Shared<'k> {
     pub next_cas: AtomicU64,
     /// What `stats` reports.
     pub counters: Counters,
+    /// The items' memory limit and order of last use (`-m`).
+    pub lru: Lru,
 }
 
 /// The counts `stats` reports, since the server started or `stats reset`.
@@ -127,6 +130,136 @@ impl Shared<'_> {
     fn cas(&self) -> u64 {
         self.next_cas.fetch_add(1, Ordering::Relaxed)
     }
+
+    /// The `stats` reply: the counters, then the items' bytes, count, limit and evictions.
+    pub(crate) fn stats(&self, version: &str) -> Vec<u8> {
+        let mut out = self.counters.report(version);
+        out.truncate(out.len().saturating_sub(b"END\r\n".len()));
+        if self.lru.is_on() {
+            load_lru(self);
+        }
+        let (bytes, items) = self.lru.usage();
+        out.extend(
+            format!(
+                "STAT bytes {bytes}\r\nSTAT curr_items {items}\r\nSTAT limit_maxbytes {}\r\nSTAT evictions {}\r\nEND\r\n",
+                self.lru.limit_bytes(),
+                self.lru.evictions()
+            )
+            .into_bytes(),
+        );
+        out
+    }
+}
+
+struct RecordingRead<'k> {
+    inner: &'k dyn KeysRead,
+    hits: std::cell::RefCell<Vec<Vec<u8>>>,
+}
+
+impl KeysRead for RecordingRead<'_> {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        let found = self.inner.get(key)?;
+        if found.is_some()
+            && let Ok(mut hits) = self.hits.try_borrow_mut()
+        {
+            hits.push(key.to_vec());
+        }
+        Ok(found)
+    }
+
+    fn keys(&self) -> Result<Vec<Vec<u8>>, String> {
+        self.inner.keys()
+    }
+
+    fn visit_keys(&self, visit: &mut dyn FnMut(Vec<u8>) -> Result<bool, String>) -> Result<(), String> {
+        self.inner.visit_keys(visit)
+    }
+}
+
+struct RecordingWrite<'k> {
+    inner: &'k mut dyn KeysWrite,
+    hits: std::cell::RefCell<Vec<Vec<u8>>>,
+    changes: Vec<Change>,
+}
+
+impl KeysRead for RecordingWrite<'_> {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        let found = self.inner.get(key)?;
+        if found.is_some()
+            && let Ok(mut hits) = self.hits.try_borrow_mut()
+        {
+            hits.push(key.to_vec());
+        }
+        Ok(found)
+    }
+
+    fn keys(&self) -> Result<Vec<Vec<u8>>, String> {
+        self.inner.keys()
+    }
+
+    fn visit_keys(&self, visit: &mut dyn FnMut(Vec<u8>) -> Result<bool, String>) -> Result<(), String> {
+        self.inner.visit_keys(visit)
+    }
+}
+
+impl KeysWrite for RecordingWrite<'_> {
+    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), String> {
+        self.inner.put(key, value)?;
+        self.changes.push(Change::Put(key.to_vec(), item_bytes(key, value)));
+        Ok(())
+    }
+
+    fn delete(&mut self, key: &[u8]) -> Result<bool, String> {
+        let deleted = self.inner.delete(key)?;
+        if deleted {
+            self.changes.push(Change::Deleted(key.to_vec()));
+        }
+        Ok(deleted)
+    }
+
+    fn clear(&mut self) -> Result<(), String> {
+        self.inner.clear()?;
+        self.changes.push(Change::Cleared);
+        Ok(())
+    }
+}
+
+fn load_lru(shared: &Shared<'_>) {
+    if shared.lru.is_loaded() {
+        return;
+    }
+    let mut items = Vec::new();
+    let scanned = shared.keyspace.read(0, &mut |keys| {
+        items.clear();
+        keys.visit_prefix(b"", &mut |key, value| {
+            items.push((key.to_vec(), item_bytes(key, value)));
+            Ok(true)
+        })
+    });
+    if scanned.is_ok() {
+        shared.lru.load(items);
+    }
+}
+
+fn evict(shared: &Shared<'_>, keep: &[Vec<u8>]) {
+    let victims = shared.lru.victims(keep);
+    if victims.is_empty() {
+        return;
+    }
+    let mut evicted = Vec::new();
+    let outcome = shared.keyspace.write(0, &mut |keys| {
+        evicted.clear();
+        for key in &victims {
+            if keys.delete(key)? {
+                evicted.push(Change::Deleted(key.clone()));
+            }
+        }
+        Ok(())
+    });
+    if outcome.is_ok() {
+        shared.lru.note_evicted(evicted.len());
+        shared.lru.note_written(&evicted);
+    }
 }
 
 fn valid_key(key: &[u8]) -> bool {
@@ -152,12 +285,22 @@ fn read<T>(
 ) -> Result<T, String> {
     let mut body = Some(body);
     let mut out = None;
+    let mut hits = Vec::new();
     shared.keyspace.read(0, &mut |keys| {
         if let Some(body) = body.take() {
-            out = Some(body(keys)?);
+            let recording = RecordingRead {
+                inner: keys,
+                hits: std::cell::RefCell::default(),
+            };
+            out = Some(body(&recording)?);
+            hits = recording.hits.into_inner();
         }
         Ok(())
     })?;
+    if shared.lru.is_on() {
+        load_lru(shared);
+        shared.lru.note_read(&hits);
+    }
     out.ok_or_else(|| "the read did not run".to_owned())
 }
 
@@ -165,14 +308,40 @@ fn write<T>(
     shared: &Shared<'_>,
     body: impl FnOnce(&mut dyn KeysWrite) -> Result<T, String>,
 ) -> Result<T, String> {
+    if shared.lru.is_on() {
+        load_lru(shared);
+    }
     let mut body = Some(body);
     let mut out = None;
+    let mut hits = Vec::new();
+    let mut changes = Vec::new();
     shared.keyspace.write(0, &mut |keys| {
         if let Some(body) = body.take() {
-            out = Some(body(keys)?);
+            let mut recording = RecordingWrite {
+                inner: keys,
+                hits: std::cell::RefCell::default(),
+                changes: Vec::new(),
+            };
+            out = Some(body(&mut recording)?);
+            hits = recording.hits.into_inner();
+            changes = recording.changes;
         }
         Ok(())
     })?;
+    if shared.lru.is_on() {
+        shared.lru.note_read(&hits);
+        shared.lru.note_written(&changes);
+        let written: Vec<Vec<u8>> = changes
+            .iter()
+            .filter_map(|change| match change {
+                Change::Put(key, _) => Some(key.clone()),
+                _ => None,
+            })
+            .collect();
+        if !written.is_empty() {
+            evict(shared, &written);
+        }
+    }
     out.ok_or_else(|| "the write did not run".to_owned())
 }
 

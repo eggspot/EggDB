@@ -616,3 +616,4 @@ its full title with its status.
 - [D589](decisions/D589.md) Code-only batch 237 (M16): Kafka static membership
 - [D590](decisions/D590.md) Code-only batch 238 (M7): geo searches over nine geohash cells
 - [D591](decisions/D591.md) Code-only batch 239 (M7): keyspace notifications and CLIENT LIST, INFO and KILL
+- [D592](decisions/D592.md) Code-only batch 240 (M7): LRU eviction for memcached items

@@ -320,13 +320,15 @@ pub fn serve_stream(
             b"version" => format!("VERSION {VERSION}\r\n").into_bytes(),
             b"verbosity" => b"OK\r\n".to_vec(),
             b"stats" => match words.get(1).copied() {
-                None => shared.counters.report(VERSION),
+                None => shared.stats(VERSION),
                 Some(b"reset") => {
                     shared.counters.reset();
                     b"RESET\r\n".to_vec()
                 }
                 Some(b"settings") => format!(
-                    "STAT maxbytes 0\r\nSTAT item_size_max {MAX_ITEM_BYTES}\r\nSTAT evictions off\r\nSTAT cas_enabled yes\r\nSTAT binding_protocol auto-negotiate\r\nEND\r\n"
+                    "STAT maxbytes {}\r\nSTAT item_size_max {MAX_ITEM_BYTES}\r\nSTAT evictions {}\r\nSTAT cas_enabled yes\r\nSTAT binding_protocol auto-negotiate\r\nEND\r\n",
+                    shared.lru.limit_bytes(),
+                    if shared.lru.is_on() { "on" } else { "off" }
                 )
                 .into_bytes(),
                 Some(b"items" | b"slabs" | b"sizes" | b"conns") => b"END\r\n".to_vec(),
