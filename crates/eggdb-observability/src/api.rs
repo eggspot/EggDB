@@ -105,6 +105,7 @@ fn failed(failure: &Failure) -> Response {
     match failure {
         Failure::BadData(_) => bad_data(message),
         Failure::Execution(_) => error_json(422, "execution", message),
+        Failure::Timeout(_) => error_json(503, "timeout", message),
         Failure::Unavailable(_) => {
             let mut response = error_json(503, "unavailable", message);
             response

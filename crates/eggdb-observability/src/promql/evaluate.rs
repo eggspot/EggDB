@@ -13,6 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 const SAMPLE_BYTES: usize = std::mem::size_of::<(i64, f64)>();
 const DEFAULT_SUBQUERY_STEP_MS: i64 = 60_000;
 const MAX_SUBQUERY_STEPS: usize = 11_000_000;
+/// Prometheus's default `query.timeout`: a query still evaluating after it stops.
+pub(crate) const QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 const TOO_MANY_SAMPLES: &str =
     "query processing would load too many samples into memory in query execution";
 
@@ -34,6 +36,7 @@ pub(crate) struct Work<'b> {
     step_label_bytes: usize,
     max_samples: usize,
     subquery_steps: usize,
+    deadline: std::time::Instant,
 }
 
 impl<'b> Work<'b> {
@@ -45,7 +48,23 @@ impl<'b> Work<'b> {
             step_label_bytes: 0,
             max_samples,
             subquery_steps: 0,
+            deadline: std::time::Instant::now() + QUERY_TIMEOUT,
         }
+    }
+
+    /// The query stops with a timeout once `limit` has passed, instead of [`QUERY_TIMEOUT`].
+    pub(crate) fn with_timeout(mut self, limit: std::time::Duration) -> Self {
+        self.deadline = std::time::Instant::now() + limit;
+        self
+    }
+
+    fn check_time(&self) -> Result<(), Failure> {
+        if std::time::Instant::now() >= self.deadline {
+            return Err(Failure::Timeout(
+                "query timed out in expression evaluation".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     fn hold(&mut self) -> Result<(), Failure> {
@@ -71,6 +90,7 @@ impl<'b> Work<'b> {
     }
 
     fn take(&mut self, samples: usize) -> Result<(), Failure> {
+        self.check_time()?;
         self.step_samples = self.step_samples.saturating_add(samples);
         self.hold()
     }
@@ -107,6 +127,7 @@ impl<'b> Work<'b> {
     }
 
     fn run_subquery_steps(&mut self, steps: usize) -> Result<(), Failure> {
+        self.check_time()?;
         self.subquery_steps = self.subquery_steps.saturating_add(steps);
         if self.subquery_steps > MAX_SUBQUERY_STEPS {
             return Err(Failure::Execution(format!(

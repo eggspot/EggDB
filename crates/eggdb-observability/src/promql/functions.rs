@@ -480,6 +480,69 @@ fn is_group_name(name: &str) -> bool {
 /// with no name after it stays as it is; `None` when the expansion would be longer than `limit`
 /// bytes.
 pub(crate) fn expand(template: &str, groups: &[Option<String>], limit: usize) -> Option<String> {
+    expand_named(template, groups, &[], limit)
+}
+
+/// The pattern with Go's named groups (`(?P<name>…)` and `(?<name>…)`) made plain capturing
+/// groups, and each name with its group's number, counted as Go counts capturing groups.
+pub(crate) fn named_groups(pattern: &str) -> (String, Vec<(String, usize)>) {
+    let mut plain = String::with_capacity(pattern.len());
+    let mut names = Vec::new();
+    let mut group = 0usize;
+    let mut in_class = false;
+    let mut characters = pattern.char_indices().peekable();
+    while let Some((at, character)) = characters.next() {
+        match character {
+            '\\' => {
+                plain.push(character);
+                if let Some((_, escaped)) = characters.next() {
+                    plain.push(escaped);
+                }
+            }
+            '[' if !in_class => {
+                in_class = true;
+                plain.push(character);
+            }
+            ']' if in_class => {
+                in_class = false;
+                plain.push(character);
+            }
+            '(' if !in_class => {
+                let rest = &pattern[at + 1..];
+                let named = rest
+                    .strip_prefix("?P<")
+                    .or_else(|| rest.strip_prefix("?<").filter(|after| !after.starts_with(['=', '!'])));
+                match named.and_then(|after| after.find('>').map(|end| &after[..end])) {
+                    Some(name) if is_group_name(name) => {
+                        group += 1;
+                        names.push((name.to_owned(), group));
+                        plain.push('(');
+                        let skipped = rest.len() - named.map_or(0, str::len) + name.len() + 1;
+                        for _ in 0..skipped {
+                            characters.next();
+                        }
+                    }
+                    _ => {
+                        if !rest.starts_with('?') {
+                            group += 1;
+                        }
+                        plain.push(character);
+                    }
+                }
+            }
+            _ => plain.push(character),
+        }
+    }
+    (plain, names)
+}
+
+/// [`expand`] where a name may also be one of `names`, a named group with its number.
+pub(crate) fn expand_named(
+    template: &str,
+    groups: &[Option<String>],
+    names: &[(String, usize)],
+    limit: usize,
+) -> Option<String> {
     let mut out = String::with_capacity(template.len().min(limit));
     let mut rest = template;
     let fits = |out: &String, more: usize| out.len().saturating_add(more) <= limit;
@@ -508,11 +571,13 @@ pub(crate) fn expand(template: &str, groups: &[Option<String>], limit: usize) ->
         };
         match named {
             Some((name, remaining)) if is_group_name(name) => {
-                if let Some(Some(text)) = name
-                    .parse::<usize>()
-                    .ok()
-                    .and_then(|index| groups.get(index))
-                {
+                let index = name.parse::<usize>().ok().or_else(|| {
+                    names
+                        .iter()
+                        .find(|(known, _)| known == name)
+                        .map(|(_, index)| *index)
+                });
+                if let Some(Some(text)) = index.and_then(|index| groups.get(index)) {
                     if !fits(&out, text.len()) {
                         return None;
                     }
@@ -560,7 +625,8 @@ pub(crate) fn label_replace(
             "invalid destination label name in label_replace(): {destination}"
         )));
     }
-    let regex = anchored(pattern);
+    let (plain, names) = named_groups(pattern);
+    let regex = anchored(&plain);
     let invalid = |error: String| {
         Failure::BadData(format!(
             "invalid regular expression in label_replace(): {pattern}: {error}"
@@ -572,7 +638,7 @@ pub(crate) fn label_replace(
         let captured =
             eggdb_sql::regex_captures(label_value(&labels, source), &regex).map_err(invalid)?;
         if let Some(groups) = captured {
-            let expanded = expand(replacement, &groups, MAX_LABEL_VALUE_BYTES)
+            let expanded = expand_named(replacement, &groups, &names, MAX_LABEL_VALUE_BYTES)
                 .ok_or_else(|| label_too_long("label_replace"))?;
             hold(expanded.len())?;
             set_label(&mut labels, destination, expanded);

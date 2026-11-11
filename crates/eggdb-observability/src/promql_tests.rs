@@ -1014,3 +1014,34 @@ fn the_at_modifier_negative_offsets_and_limits_follow_prometheus() {
     assert!(parse("http_requests @ foo").is_err());
     assert!(failure("limit_ratio(2, http_requests)", 60_000, &data).contains("ratio"));
 }
+
+#[test]
+fn label_replace_expands_named_capture_groups() {
+    let (plain, names) = crate::promql::functions::named_groups("(a)(?:b)(?P<x>c)[(](?<y>d)(?<=e)");
+    assert_eq!(plain, "(a)(?:b)(c)[(](d)(?<=e)");
+    assert_eq!(names, vec![("x".to_owned(), 2), ("y".to_owned(), 3)]);
+    let data = fetched(vec![series(
+        &[("__name__", "up"), ("instance", "host-1:9100")],
+        &[(30_000, 1.0)],
+    )]);
+    let rows = sorted(
+        r#"label_replace(up, "host", "$name-${port}", "instance", "(?P<name>[^:]+):(?<port>.*)")"#,
+        60_000,
+        &data,
+    );
+    assert_eq!(rows.len(), 1);
+    assert!(
+        rows[0].0.contains(&("host".to_owned(), "host-1-9100".to_owned())),
+        "{rows:?}"
+    );
+}
+
+#[test]
+fn a_query_past_its_time_limit_stops_with_a_timeout() {
+    let data = http_requests();
+    let roomy = MemoryBudget::new(usize::MAX);
+    let expr = parse("max_over_time(sum(http_requests)[10m:1s])").unwrap();
+    let stopped = Evaluator::new(&data, Work::new(&roomy, usize::MAX).with_timeout(std::time::Duration::ZERO))
+        .evaluate(&expr, 60_000);
+    assert!(matches!(stopped, Err(Failure::Timeout(_))), "{stopped:?}");
+}

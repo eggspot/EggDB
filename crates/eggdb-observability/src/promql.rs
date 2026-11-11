@@ -36,14 +36,16 @@ pub(crate) enum Failure {
     BadData(String),
     Execution(String),
     Unavailable(String),
+    Timeout(String),
 }
 
 impl Failure {
     pub(crate) fn message(&self) -> &str {
         match self {
-            Self::BadData(message) | Self::Execution(message) | Self::Unavailable(message) => {
-                message
-            }
+            Self::BadData(message)
+            | Self::Execution(message)
+            | Self::Unavailable(message)
+            | Self::Timeout(message) => message,
         }
     }
 }
