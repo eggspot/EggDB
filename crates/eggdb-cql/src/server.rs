@@ -185,6 +185,13 @@ struct Prepared {
     keyspace: Option<String>,
 }
 
+static PREPARED: std::sync::Mutex<BTreeMap<Vec<u8>, Prepared>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+fn prepared_statements() -> std::sync::MutexGuard<'static, BTreeMap<Vec<u8>, Prepared>> {
+    PREPARED.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 struct Connection<'c, 's> {
     config: &'c ServerConfig,
     session: Session<'s>,
@@ -192,7 +199,6 @@ struct Connection<'c, 's> {
     started: bool,
     authenticated: bool,
     keyspace: Option<String>,
-    prepared: BTreeMap<Vec<u8>, Prepared>,
     tables: BTreeMap<(String, String), TableInfo>,
 }
 
@@ -453,7 +459,7 @@ impl<'s> Connection<'_, 's> {
     }
 
     fn prepared_text(&self, id: &[u8]) -> Result<(String, Option<String>), Failure> {
-        match self.prepared.get(id) {
+        match prepared_statements().get(id) {
             Some(prepared) => Ok((prepared.text.clone(), prepared.keyspace.clone())),
             None => {
                 let mut extra = Out::default();
@@ -489,16 +495,18 @@ impl<'s> Connection<'_, 's> {
             }
         };
         let id = prepared_id(current.as_deref(), text);
-        if self.prepared.len() >= MAX_PREPARED {
-            self.prepared.clear();
+        let mut prepared = prepared_statements();
+        if prepared.len() >= MAX_PREPARED && !prepared.contains_key(&id) {
+            prepared.clear();
         }
-        self.prepared.insert(
+        prepared.insert(
             id.clone(),
             Prepared {
                 text: text.to_owned(),
                 keyspace: current,
             },
         );
+        drop(prepared);
         let mut out = Out::default();
         out.int(4)
             .short_bytes(&id)
@@ -994,7 +1002,6 @@ pub(crate) fn serve_stream<S: KeyValueStore>(
         started: false,
         authenticated: false,
         keyspace: None,
-        prepared: BTreeMap::new(),
         tables: BTreeMap::new(),
     };
     let mut buffer = Vec::new();
