@@ -12,6 +12,8 @@ pub(crate) enum Target {
     Lz4,
     Sqlite,
     Arrow,
+    Parquet,
+    Bson,
 }
 
 fn sample_text(random: &mut Random) -> Vec<u8> {
@@ -43,6 +45,8 @@ impl Target {
             "lz4" => Self::Lz4,
             "sqlite" => Self::Sqlite,
             "arrow" => Self::Arrow,
+            "parquet" => Self::Parquet,
+            "bson" => Self::Bson,
             _ => return None,
         })
     }
@@ -53,6 +57,8 @@ impl Target {
             Self::Lz4 => "lz4",
             Self::Sqlite => "sqlite",
             Self::Arrow => "arrow",
+            Self::Parquet => "parquet",
+            Self::Bson => "bson",
         }
     }
 
@@ -64,6 +70,8 @@ impl Target {
                 Self::Lz4 => eggdb_storage::compress_lz4_frame(&sample_text(random)),
                 Self::Sqlite => sqlite_sample(random),
                 Self::Arrow => arrow_sample(random),
+                Self::Parquet => eggdb_parquet::write(&sample_columns(random)).unwrap_or_default(),
+                Self::Bson => bson_sample(random),
             })
             .collect()
     }
@@ -103,6 +111,23 @@ impl Target {
                 guarded(|| eggdb_arrow::read(input))?;
                 Ok(())
             }
+            Self::Parquet => {
+                guarded(|| eggdb_parquet::read(input))?;
+                Ok(())
+            }
+            Self::Bson => {
+                let decoded = guarded(|| eggdb_bson::read_document(input))?;
+                if let Ok((document, used)) = decoded {
+                    let again = document.to_bytes();
+                    if again != input[..used] {
+                        let reread = guarded(|| eggdb_bson::read_document(&again))?;
+                        if reread.map(|(document_again, _)| document_again) != Ok(document) {
+                            return Err("a decoded BSON document does not round-trip".to_owned());
+                        }
+                    }
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -125,7 +150,24 @@ fn sqlite_sample(random: &mut Random) -> Vec<u8> {
     eggdb_sqlite_format::write_database(&objects).unwrap_or_default()
 }
 
+fn bson_sample(random: &mut Random) -> Vec<u8> {
+    let mut inner = eggdb_bson::Document::new();
+    inner.insert("n", eggdb_bson::Bson::Double(random.next() as f64));
+    let mut document = eggdb_bson::Document::new();
+    document.insert("name", eggdb_bson::Bson::String(String::from_utf8_lossy(&sample_text(random)).into_owned()));
+    document.insert("inner", eggdb_bson::Bson::Document(inner));
+    document.insert(
+        "list",
+        eggdb_bson::Bson::Array((0..random.below(10)).map(|at| eggdb_bson::Bson::Double(at as f64)).collect()),
+    );
+    document.to_bytes()
+}
+
 fn arrow_sample(random: &mut Random) -> Vec<u8> {
+    eggdb_arrow::write_stream(&sample_columns(random)).unwrap_or_default()
+}
+
+fn sample_columns(random: &mut Random) -> Vec<Column> {
     let count = random.below(50);
     let numbers = Column {
         name: "n".to_owned(),
@@ -139,5 +181,5 @@ fn arrow_sample(random: &mut Random) -> Vec<u8> {
         nullable: false,
         cells: (0..count).map(|at| Cell::Bytes(format!("row {at}").into_bytes())).collect(),
     };
-    eggdb_arrow::write_stream(&[numbers, texts]).unwrap_or_default()
+    vec![numbers, texts]
 }

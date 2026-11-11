@@ -11,7 +11,8 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 const DEFAULT_SECONDS: u64 = 60;
-const USAGE: &str = "usage: eggdb-fuzz zstd|lz4|sqlite|arrow [--seconds N] [--seed S] [--out DIR]";
+const USAGE: &str =
+    "usage: eggdb-fuzz zstd|lz4|sqlite|arrow|parquet|bson [--seconds N] [--seed S] [--out DIR]";
 
 struct Options {
     target: targets::Target,
