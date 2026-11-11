@@ -41,6 +41,67 @@ fn infinite_input(text: &str) -> Option<bool> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpecialInput {
+    Epoch,
+    Now,
+    Today,
+    Tomorrow,
+    Yesterday,
+    Allballs,
+}
+
+fn special_input(text: &str) -> Option<SpecialInput> {
+    let trimmed = text.trim();
+    [
+        ("epoch", SpecialInput::Epoch),
+        ("now", SpecialInput::Now),
+        ("today", SpecialInput::Today),
+        ("tomorrow", SpecialInput::Tomorrow),
+        ("yesterday", SpecialInput::Yesterday),
+        ("allballs", SpecialInput::Allballs),
+    ]
+    .into_iter()
+    .find(|(word, _)| trimmed.eq_ignore_ascii_case(word))
+    .map(|(_, special)| special)
+}
+
+fn local_now() -> i64 {
+    let now = statement_now();
+    now.saturating_add(i64::from(session_offset_at(now)) * MICROS_PER_SECOND)
+}
+
+fn local_today() -> i64 {
+    local_now().div_euclid(MICROS_PER_DAY)
+}
+
+fn special_local_day(special: SpecialInput) -> Option<i64> {
+    match special {
+        SpecialInput::Epoch => Some(-UNIX_EPOCH_DAYS),
+        SpecialInput::Now | SpecialInput::Today => Some(local_today()),
+        SpecialInput::Tomorrow => Some(local_today() + 1),
+        SpecialInput::Yesterday => Some(local_today() - 1),
+        SpecialInput::Allballs => None,
+    }
+}
+
+fn special_timestamp(special: SpecialInput, with_zone: bool) -> Option<i64> {
+    match special {
+        SpecialInput::Epoch => Some(-UNIX_EPOCH_DAYS * MICROS_PER_DAY),
+        SpecialInput::Now if with_zone => Some(statement_now()),
+        SpecialInput::Now => Some(local_now()),
+        SpecialInput::Allballs => None,
+        day => {
+            let local = special_local_day(day)? * MICROS_PER_DAY;
+            Some(if with_zone {
+                local - i64::from(session_zone().offset_of_local(local)) * MICROS_PER_SECOND
+            } else {
+                local
+            })
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StatementClock {
     pub(crate) now: Option<i64>,
     pub(crate) zone: TimeZone,
@@ -525,6 +586,11 @@ pub(crate) fn parse_date(text: &str) -> SqlResult<i32> {
         });
     }
     let kind = DateTimeKind::Date;
+    if let Some(special) = special_input(text) {
+        let days = special_local_day(special)
+            .ok_or_else(|| input_error(kind, text, Failure::Syntax))?;
+        return checked_date(days).map_err(|_| out_of_range_input(kind, text));
+    }
     let parsed = parse_parts(text).map_err(|failure| input_error(kind, text, failure))?;
     checked_date(parsed.days).map_err(|_| out_of_range_input(kind, text))
 }
@@ -542,6 +608,11 @@ pub(crate) fn parse_timestamp(text: &str, with_zone: bool) -> SqlResult<i64> {
     } else {
         DateTimeKind::Timestamp
     };
+    if let Some(special) = special_input(text) {
+        let micros = special_timestamp(special, with_zone)
+            .ok_or_else(|| input_error(kind, text, Failure::Syntax))?;
+        return checked_timestamp(i128::from(micros)).map_err(|_| out_of_range_input(kind, text));
+    }
     let parsed = parse_parts(text).map_err(|failure| input_error(kind, text, failure))?;
     let local = i128::from(parsed.days) * i128::from(MICROS_PER_DAY) + i128::from(parsed.micros);
     let micros = if with_zone {
@@ -633,6 +704,14 @@ pub(crate) fn valid_offset(offset: i32) -> bool {
 }
 
 pub(crate) fn parse_time_of_day(text: &str, with_zone: bool) -> SqlResult<(i64, i32)> {
+    match special_input(text) {
+        Some(SpecialInput::Allballs) => return Ok((0, 0)),
+        Some(SpecialInput::Now) => {
+            return Ok((local_now().rem_euclid(MICROS_PER_DAY), session_offset_now()));
+        }
+        Some(_) => return Err(time_input_error(with_zone, text, Failure::Syntax)),
+        None => {}
+    }
     let (micros, offset) =
         clock_parts(text).map_err(|failure| time_input_error(with_zone, text, failure))?;
     if !valid_time(micros) {
