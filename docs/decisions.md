@@ -479,3 +479,4 @@ its full title with its status.
 - [D452](decisions/D452.md) Code-only batch 100 (M10): the rest of Oracle's regular-expression syntax
 - [D453](decisions/D453.md) Code-only batch 101 (M10): `DISTINCT` in Oracle's window aggregates
 - [D454](decisions/D454.md) Code-only batch 102 (M10): SQL/XML publishing functions in the PostgreSQL and Oracle dialects
+- [D455](decisions/D455.md) Code-only batch 103 (M10): Oracle's `IS [NOT] A SET` and `IS [NOT] EMPTY`

@@ -4266,6 +4266,28 @@ impl<'t> Parser<'t> {
             self.expect_word("from")?;
             let right = self.expression_above(Level::Comparison)?;
             return crate::row_values::distinctness(self.dialect, expr, right, negated, position);
+        } else if self.oracle()
+            && ((self.is_word("a") && self.is_word_at(1, "set")) || self.is_word("empty"))
+        {
+            let name = if self.take_word("empty") {
+                crate::oracle_collections::IS_EMPTY
+            } else {
+                self.at += 2;
+                crate::oracle_collections::IS_A_SET
+            };
+            return Ok(Expr {
+                kind: ExprKind::Function {
+                    name: name.to_owned(),
+                    arguments: vec![
+                        expr,
+                        Expr {
+                            kind: ExprKind::Literal(Literal::Boolean(negated)),
+                            position,
+                        },
+                    ],
+                },
+                position,
+            });
         } else if (self.postgresql() || self.oracle()) && self.take_word("json") {
             return Ok(self.is_json_predicate(expr, negated));
         } else if self.sqlite() {

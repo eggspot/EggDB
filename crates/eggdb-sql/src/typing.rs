@@ -286,6 +286,9 @@ fn defined_function_type(
 }
 
 fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<SqlType> {
+    if name == crate::oracle_collections::IS_A_SET || name == crate::oracle_collections::IS_EMPTY {
+        return Some(SqlType::Boolean);
+    }
     if let Some(sql_type) = crate::xml_functions::result_type(name) {
         return Some(sql_type);
     }

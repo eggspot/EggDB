@@ -47,6 +47,32 @@ fn is_collection(record: &RecordValue) -> bool {
         && record.names.iter().all(|name| name.parse::<u32>().is_ok())
 }
 
+pub(crate) const IS_A_SET: &str = "oracle_is_a_set";
+pub(crate) const IS_EMPTY: &str = "oracle_is_empty";
+
+/// Oracle's `nested_table IS [NOT] A SET` and `IS [NOT] EMPTY`; `None` for another name.
+pub(crate) fn predicate(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
+    if name != IS_A_SET && name != IS_EMPTY {
+        return None;
+    }
+    let [value, negated] = values else {
+        return None;
+    };
+    if value.is_null() {
+        return Some(Ok(Value::Null));
+    }
+    let negated = matches!(negated, Value::Boolean(true));
+    Some((|| {
+        let found = elements(value).ok_or_else(|| not_a_collection(name))?;
+        let holds = if name == IS_EMPTY {
+            found.is_empty()
+        } else {
+            distinct(found.iter().collect())?.len() == found.len()
+        };
+        Ok(Value::Boolean(holds != negated))
+    })())
+}
+
 pub(crate) fn cardinality(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
     if name != "cardinality" {
         return None;
