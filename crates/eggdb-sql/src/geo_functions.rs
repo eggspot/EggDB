@@ -4,7 +4,7 @@ use crate::types::{SqlType, Value};
 use eggdb_geo::{Coord, Geometry, Spatial};
 
 /// The spatial functions EggDB answers, PostGIS's names (also MySQL's `ST_` functions).
-pub(crate) const FUNCTIONS: [&str; 59] = [
+pub(crate) const FUNCTIONS: [&str; 60] = [
     "st_centroid",
     "st_perimeter",
     "st_convexhull",
@@ -64,6 +64,7 @@ pub(crate) const FUNCTIONS: [&str; 59] = [
     "st_transform",
     "st_tileenvelope",
     "st_geohash",
+    "st_asmvtgeom",
 ];
 
 /// The result type of a spatial function.
@@ -432,6 +433,51 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
                 srid: Some(3857),
                 geometry,
             })
+        }
+        ("st_asmvtgeom", [_, _, ..]) if arguments.len() <= 5 => {
+            let source = spatial(0)?;
+            let bounds = spatial(1)?;
+            let Some(Geometry::Polygon(rings)) = eggdb_geo::envelope(&bounds.geometry) else {
+                return Err(SqlError::new(
+                    SqlState::INVALID_PARAMETER_VALUE,
+                    "ST_AsMVTGeom: the tile bounds must cover an area",
+                ));
+            };
+            let corners = rings.first().cloned().unwrap_or_default();
+            let fold = |pick: fn(&eggdb_geo::Coord) -> f64, low: bool| {
+                corners.iter().map(pick).fold(if low { f64::INFINITY } else { f64::NEG_INFINITY }, |held, value| {
+                    if low { held.min(value) } else { held.max(value) }
+                })
+            };
+            let whole = |at: usize, default: u32, what: &str| -> SqlResult<u32> {
+                match arguments.get(at) {
+                    None | Some(Value::Null) => Ok(default),
+                    Some(value) => {
+                        let found = number(value)?;
+                        if found.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&found) {
+                            Ok(found as u32)
+                        } else {
+                            Err(SqlError::new(
+                                SqlState::INVALID_PARAMETER_VALUE,
+                                format!("ST_AsMVTGeom: {what} must be a non-negative whole number"),
+                            ))
+                        }
+                    }
+                }
+            };
+            let grid = eggdb_geo::TileGrid {
+                min_x: fold(|coord| coord.x, true),
+                min_y: fold(|coord| coord.y, true),
+                max_x: fold(|coord| coord.x, false),
+                max_y: fold(|coord| coord.y, false),
+                extent: whole(2, 4096, "the extent")?,
+                buffer: whole(3, 256, "the buffer")?,
+            };
+            let clip = !matches!(arguments.get(4), Some(Value::Boolean(false)));
+            match eggdb_geo::tile_geometry(&source.geometry, &grid, clip) {
+                Some(geometry) => geometry_value(&Spatial { srid: None, geometry }),
+                None => Value::Null,
+            }
         }
         ("st_geohash", [_, ..]) if arguments.len() <= 2 => {
             let precision = match arguments.get(1) {

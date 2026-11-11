@@ -6,6 +6,7 @@
 mod algorithms;
 mod geojson;
 mod operations;
+mod tile_geometry;
 mod tiles;
 mod wkb;
 mod wkt;
@@ -16,6 +17,7 @@ pub use operations::{
     centroid, convex_hull, flipped, invalidity, parts, perimeter, reversed, scaled, simplified,
     translated,
 };
+pub use tile_geometry::{TileGrid, tile_geometry};
 pub use tiles::{WEB_MERCATOR_RADIUS, from_web_mercator, geohash, tile_envelope, to_web_mercator};
 pub use wkb::{from_wkb, to_wkb};
 pub use wkt::{from_wkt, to_wkt};

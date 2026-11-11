@@ -544,3 +544,4 @@ its full title with its status.
 - [D517](decisions/D517.md) Code-only batch 165 (M16): MQTT over WebSockets
 - [D518](decisions/D518.md) Code-only batch 166 (M8): Elasticsearch _geo_distance sort
 - [D519](decisions/D519.md) Code-only batch 167 (M16): CQL result paging
+- [D520](decisions/D520.md) Code-only batch 168 (M12): ST_AsMVTGeom
