@@ -909,7 +909,11 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (D397).
 - Cluster mode: slots, the cluster commands and sharded pub/sub (`SSUBSCRIBE`) (D193).
 - The rest of Redis's commands, tracked per command (D5, D193). Check: Redis client libraries'
-  own test suites.
+  own test suites. `GETEX`, `SETRANGE`, `MSETNX`, `LCS`,
+  `TOUCH`, `EXPIRETIME`, `RANDOMKEY`, `HSTRLEN`, `HINCRBYFLOAT`, `HRANDFIELD`, `HSCAN`, `LPOS`, `SMISMEMBER`,
+  `SRANDMEMBER`, `SMOVE`, `SINTERCARD`, the set `...STORE` commands, `SSCAN`, `ZMSCORE`, `ZRANDMEMBER`,
+  `ZSCAN`, `ZUNION`/`ZINTER`/`ZDIFF` and their stores, `ZINTERCARD`: **code written, unbuilt** (code-only
+  mode, 2026-11-11, D485).
 - Memory-only collections in the engine, with expiry and eviction (D2, D193).
 - Benchmarks with redis-benchmark and memtier against Redis, Valkey and Dragonfly, gated (D7,
   D177).
