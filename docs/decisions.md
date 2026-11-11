@@ -592,3 +592,4 @@ its full title with its status.
 - [D565](decisions/D565.md) Code-only batch 213 (M7): a Redis Cluster of one node, and sharded pub/sub
 - [D566](decisions/D566.md) Code-only batch 214 (M9): MongoDB multi-document transactions on a one-member replica set
 - [D567](decisions/D567.md) Code-only batch 215 (M6c): OTLP export of the server's metrics
+- [D568](decisions/D568.md) Code-only batch 216 (M5): eggdb restore from an SQLite file

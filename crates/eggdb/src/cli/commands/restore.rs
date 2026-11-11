@@ -179,6 +179,12 @@ impl Session<'_> {
         {
             return self.restore_mongodump(path, layout);
         }
+        if let Some(path) = &path
+            && path.is_file()
+            && crate::cli::sqlite_import::is_sqlite_file(path)
+        {
+            return self.restore_sqlite(path);
+        }
         let mut file = None;
         let mut size = 0;
         if let Some(path) = &path {

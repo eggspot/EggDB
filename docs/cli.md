@@ -1292,6 +1292,11 @@ writing, so `eggdb put`, `sql` and the read-only commands exit 5 meanwhile.
 (D13, D118): `pg_dump`'s plain SQL, or the plain SQL that `pg_restore -f dump.sql <archive>`
 writes from a custom, directory or tar archive. [migrate.md](migrate.md) is the guide.
 
+A file in SQLite's format given as the dump (`eggdb restore --create app.db app.sqlite`) is
+read as `eggdb sql` reads one, with its tables, rows, indexes, views and triggers and the committed
+pages in its `-wal` file, and written into the EggDB file; statements EggDB refuses are listed as
+skipped (D568).
+
 ```sh
 pg_dump app > app.sql
 eggdb restore --create app.db app.sql

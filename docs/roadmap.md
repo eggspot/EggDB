@@ -562,7 +562,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Users can write SQLite files: the B-tree writer, the rollback journal and the WAL (D180).
   Check: files EggDB writes pass `PRAGMA integrity_check`.
 - `WITHOUT ROWID` tables and UTF-16 databases in SQLite files (D180).
-- `eggdb restore` from an SQLite file into an EggDB file (D13, D180).
+- `eggdb restore` from an SQLite file into an EggDB file (D13, D180). **Code written, unbuilt** (code-only mode, 2026-11-12,
+  D568).
 - SQLite's dynamic typing for `INTEGER` columns (text kept as text, reals as reals), an integer
   compared with a `TEXT` column turned into text first, a `TEXT` or untyped column's values
   turned into numbers when compared with a `NUMERIC` or `REAL` column, `CAST(x AS NUMERIC)`

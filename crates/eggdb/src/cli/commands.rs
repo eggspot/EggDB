@@ -34,6 +34,7 @@ mod parquet_io;
 mod restore;
 mod restore_aof;
 mod restore_mongodump;
+mod restore_sqlite;
 mod row;
 mod serve;
 mod serve_databases;
