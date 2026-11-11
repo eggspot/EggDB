@@ -244,6 +244,52 @@ fn next_offset(keys: &dyn KeysRead, topic: &str, partition: i32) -> Result<i64, 
     }))
 }
 
+fn put_varint(out: &mut Vec<u8>, value: i64) {
+    let mut zigzag = ((value << 1) ^ (value >> 63)) as u64;
+    loop {
+        let byte = (zigzag & 0x7f) as u8;
+        zigzag >>= 7;
+        if zigzag == 0 {
+            out.push(byte);
+            return;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+/// A record batch (magic 2) holding one record with no key, `value` and no headers, stamped now.
+pub(crate) fn single_record_batch(value: &[u8]) -> Vec<u8> {
+    let mut record = vec![0u8];
+    put_varint(&mut record, 0);
+    put_varint(&mut record, 0);
+    put_varint(&mut record, -1);
+    put_varint(&mut record, value.len() as i64);
+    record.extend_from_slice(value);
+    put_varint(&mut record, 0);
+    let mut records = Vec::with_capacity(record.len() + 5);
+    put_varint(&mut records, record.len() as i64);
+    records.extend(record);
+    let now = now_ms();
+    let mut tail = Vec::with_capacity(records.len() + 40);
+    tail.extend_from_slice(&0i16.to_be_bytes());
+    tail.extend_from_slice(&0i32.to_be_bytes());
+    tail.extend_from_slice(&now.to_be_bytes());
+    tail.extend_from_slice(&now.to_be_bytes());
+    tail.extend_from_slice(&(-1i64).to_be_bytes());
+    tail.extend_from_slice(&(-1i16).to_be_bytes());
+    tail.extend_from_slice(&(-1i32).to_be_bytes());
+    tail.extend_from_slice(&1i32.to_be_bytes());
+    tail.extend(records);
+    let mut out = Vec::with_capacity(tail.len() + 21);
+    out.extend_from_slice(&0i64.to_be_bytes());
+    out.extend_from_slice(&((4 + 1 + 4 + tail.len()) as i32).to_be_bytes());
+    out.extend_from_slice(&0i32.to_be_bytes());
+    out.push(2);
+    out.extend_from_slice(&crc32c(&tail).to_be_bytes());
+    out.extend(tail);
+    out
+}
+
 /// Appends the record batches in `records` to a partition, assigning offsets; returns the base
 /// offset of the first, or a Kafka error code.
 pub(crate) fn append(

@@ -91,6 +91,21 @@ pub(super) fn deliver_changes_to_queue(
     }
 }
 
+pub(super) fn deliver_changes_to_topic(
+    store: &impl eggdb_sql::KeyValueStore,
+    database: &str,
+    keyspace: &(dyn eggdb_keyspace::Keyspace + Sync),
+    topic: &str,
+    stop: &(dyn Fn() -> bool + Sync),
+) {
+    while !stop() {
+        std::thread::sleep(DELIVER_EVERY);
+        let _ = eggdb_sql::cdc::deliver_changes(store, database, EVENTS_PER_ROUND, &mut |event| {
+            eggdb_kafka::publish(keyspace, topic, event.as_bytes()).is_ok()
+        });
+    }
+}
+
 const REPORT_TARGETS: &str = "EGGDB_REPORT_TARGETS";
 
 pub(super) fn deliver_reports(

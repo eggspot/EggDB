@@ -1287,6 +1287,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - PostgreSQL's replication protocol served, so other systems can follow EggDB (D18, D103).
 - Change streams to Kafka topics, AMQP exchanges, MQTT and NATS, and `https://` webhooks;
   `--cdc-queue` already feeds AMQP, STOMP and SQS queues (D28, D210, D217).
+  Kafka topics (`--cdc-topic`): **code written, unbuilt** (code-only mode, 2026-11-11, D527).
 - Retries with backoff and a dead-letter table, Debezium's `schema` section and transaction
   metadata (D210). Check: a consumer test that receives every commit of a workload.
 - Change capture without triggers (D210).

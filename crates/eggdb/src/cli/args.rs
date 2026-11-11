@@ -240,6 +240,7 @@ impl CommandName {
             | OptionName::BoltListen
             | OptionName::CdcWebhook
             | OptionName::CdcQueue
+            | OptionName::CdcTopic
             | OptionName::StompListen
             | OptionName::CqlListen
             | OptionName::S3Listen
@@ -435,6 +436,7 @@ enum OptionName {
     BoltListen,
     CdcWebhook,
     CdcQueue,
+    CdcTopic,
     StompListen,
     CqlListen,
     S3Listen,
@@ -555,6 +557,7 @@ impl OptionName {
             b"bolt-listen" => Self::BoltListen,
             b"cdc-webhook" => Self::CdcWebhook,
             b"cdc-queue" => Self::CdcQueue,
+            b"cdc-topic" => Self::CdcTopic,
             b"stomp-listen" => Self::StompListen,
             b"cql-listen" => Self::CqlListen,
             b"s3-listen" => Self::S3Listen,
@@ -873,6 +876,7 @@ pub(crate) struct ServeOptions {
     pub(crate) bolt_listen: Option<SocketAddr>,
     pub(crate) cdc_webhook: Option<String>,
     pub(crate) cdc_queue: Option<String>,
+    pub(crate) cdc_topic: Option<String>,
     pub(crate) stomp_listen: Option<SocketAddr>,
     pub(crate) cql_listen: Option<SocketAddr>,
     pub(crate) s3_listen: Option<SocketAddr>,
@@ -1396,6 +1400,16 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 let url = value.to_str().unwrap_or_default();
                 eggdb_http::parse_http_url(url).map_err(usage)?;
                 request.serve.cdc_webhook = Some(url.to_owned());
+            }
+            OptionName::CdcTopic => {
+                let name = value.to_str().unwrap_or_default();
+                if !eggdb_kafka::valid_topic_name(name) {
+                    return Err(usage(format!(
+                        "{}: a topic name is 1 to 249 letters, digits, '.', '_' and '-'",
+                        option.spelled
+                    )));
+                }
+                request.serve.cdc_topic = Some(name.to_owned());
             }
             OptionName::CdcQueue => {
                 let name = value.to_str().unwrap_or_default();

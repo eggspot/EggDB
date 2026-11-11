@@ -1050,6 +1050,17 @@ impl Session<'_> {
                 ),
                 None => Ok(()),
             });
+            let cdc_topic_delivery = scope.spawn(|| {
+                if let Some(topic) = &options.cdc_topic {
+                    super::serve_jobs::deliver_changes_to_topic(
+                        &store,
+                        &config.database,
+                        &kafka_database,
+                        topic,
+                        &stop_signals::requested,
+                    );
+                }
+            });
             let cdc_queue_delivery = scope.spawn(|| {
                 if let Some(queue) = &options.cdc_queue {
                     super::serve_jobs::deliver_changes_to_queue(
@@ -1209,6 +1220,7 @@ impl Session<'_> {
             let _ = clickhouse_server.join();
             let _ = trino_server.join();
             let _ = cdc_queue_delivery.join();
+            let _ = cdc_topic_delivery.join();
             let _ = sqs_server.join();
             let _ = s3_server.join();
             let _ = dynamodb_server.join();
