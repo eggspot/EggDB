@@ -24,7 +24,8 @@ fn epoch_minutes_become_calendar_minutes() {
             hour: 0,
             day: 1,
             month: 1,
-            weekday: 1
+            weekday: 1,
+            last_day_of_month: false
         }
     );
     assert_eq!(
@@ -34,7 +35,8 @@ fn epoch_minutes_become_calendar_minutes() {
             hour: 13,
             day: 29,
             month: 2,
-            weekday: 2
+            weekday: 2,
+            last_day_of_month: true
         }
     );
     assert_eq!(
@@ -44,7 +46,8 @@ fn epoch_minutes_become_calendar_minutes() {
             hour: 23,
             day: 31,
             month: 12,
-            weekday: 3
+            weekday: 3,
+            last_day_of_month: true
         }
     );
 }
@@ -63,6 +66,21 @@ fn schedules_fire_in_the_minutes_cron_documents() {
     );
     assert!(!fires("0 0 15 * tue", at(0)));
     assert!(fires("5,10,20-22/2 * * * *", at(22)) && !fires("5,10,20-22/2 * * * *", at(21)));
+}
+
+#[test]
+fn the_last_day_of_the_month_and_second_schedules_read_as_pg_cron_reads_them() {
+    let january_31 = at(30 * 24 * 60);
+    assert!(fires("0 0 $ * *", january_31));
+    assert!(!fires("0 0 $ * *", at(29 * 24 * 60)));
+    assert!(fires("0 0 1,$ * *", at(0)));
+    let every_ten = CronSchedule::parse("10 seconds").unwrap();
+    assert!(every_ten.runs_in_seconds());
+    assert!(!every_ten.fires_in(Minute::of_epoch(at(0))));
+    assert!(every_ten.fires_at_second(MONDAY_2024_01_01_00_00 + 20));
+    assert!(!every_ten.fires_at_second(MONDAY_2024_01_01_00_00 + 25));
+    assert!(CronSchedule::parse("60 seconds").is_err());
+    assert!(CronSchedule::parse("0 seconds").is_err());
 }
 
 #[test]

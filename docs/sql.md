@@ -3666,13 +3666,14 @@ SELECT * FROM cron.job_run_details ORDER BY start_time DESC LIMIT 5;
 Schedules are cron's five fields (minute, hour, day of month, month, day of week) with `*`,
 lists, ranges, `/` steps and month and weekday names, or `@hourly`, `@daily`, `@weekly`,
 `@monthly` and `@yearly`; when both day fields are restricted, either one matching fires the
-job. A job whose schedule does not read never runs. Every job runs with a superuser's rights,
-whoever scheduled it, so scheduling needs writing `cron.job`: grant that to administrators only,
-as pg_cron's superuser-only table is. Not yet: running a job as its `username`, pg_cron's
-`'n seconds'`
-schedules and `$` for the last day of the month, `cron.alter_job`, `cron.schedule_in_database`,
-`cron.timezone`, checking a schedule when it is added, SQL Server Agent jobs, MySQL events and
-Oracle's `DBMS_SCHEDULER`.
+job; `$` in the day of the month is the month's last day, and `'n seconds'` (1 to 59) runs a job
+every n seconds of each minute. A job whose schedule does not read never runs. Each job runs as
+its `username` (`SET SESSION AUTHORIZATION`; a job whose user doesn't exist fails), so scheduling
+still needs writing `cron.job`: grant that to administrators only, as pg_cron's superuser-only
+table is. `cron.alter_job(job_id, schedule, command, database, username, active)` changes the
+arguments given (installations made before D429 lack it). Not yet: `cron.schedule_in_database`,
+`cron.timezone`, checking a schedule when it is added, SQL Server Agent jobs and Oracle's
+`DBMS_SCHEDULER`; MySQL events run on the same scheduler (D421).
 
 ## Functions, procedures and DO blocks
 

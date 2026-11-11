@@ -10,13 +10,25 @@ fn epoch_minute() -> i64 {
         })
 }
 
+fn epoch_second() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX))
+}
+
 pub(super) fn run_scheduled_jobs(
     store: &impl eggdb_sql::KeyValueStore,
     stop: &(dyn Fn() -> bool + Sync),
 ) {
     let mut last = epoch_minute();
+    let mut last_second = epoch_second();
     while !stop() {
         std::thread::sleep(CHECK_EVERY);
+        let second = epoch_second();
+        if second > last_second {
+            last_second = second;
+            let _ = eggdb_sql::jobs::run_due_second_jobs(store, second);
+        }
         let now = epoch_minute();
         if now > last {
             last = now;

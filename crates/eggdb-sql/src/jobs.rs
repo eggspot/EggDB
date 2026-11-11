@@ -62,6 +62,20 @@ BEGIN
     RETURN id;
 END
 $$;
+CREATE FUNCTION cron.alter_job(job_id bigint, schedule text DEFAULT NULL, command text DEFAULT NULL, database text DEFAULT NULL, username text DEFAULT NULL, active boolean DEFAULT NULL) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE cron.job SET
+        schedule = coalesce(alter_job.schedule, cron.job.schedule),
+        command = coalesce(alter_job.command, cron.job.command),
+        database = coalesce(alter_job.database, cron.job.database),
+        username = coalesce(alter_job.username, cron.job.username),
+        active = coalesce(alter_job.active, cron.job.active)
+        WHERE jobid = job_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Job % does not exist', job_id;
+    END IF;
+END
+$$;
 CREATE FUNCTION cron.unschedule(job_id bigint) RETURNS boolean LANGUAGE plpgsql AS $$
 BEGIN
     DELETE FROM cron.job WHERE jobid = job_id;
@@ -89,6 +103,8 @@ pub struct CronSchedule {
     fields: [u64; 5],
     any_day_of_month: bool,
     any_day_of_week: bool,
+    last_day_of_month: bool,
+    every_seconds: Option<u32>,
 }
 
 /// A calendar minute in UTC.
@@ -104,6 +120,8 @@ pub struct Minute {
     pub month: u32,
     /// 0 (Sunday) to 6.
     pub weekday: u32,
+    /// Whether the day is its month's last.
+    pub last_day_of_month: bool,
 }
 
 impl Minute {
@@ -112,12 +130,14 @@ impl Minute {
         let days = epoch_seconds.div_euclid(86_400);
         let seconds = epoch_seconds.rem_euclid(86_400);
         let (_, month, day) = civil_from_days(days);
+        let (_, next_month, _) = civil_from_days(days + 1);
         Self {
             minute: ((seconds / 60) % 60) as u32,
             hour: (seconds / 3_600) as u32,
             day,
             month,
             weekday: (days + 4).rem_euclid(7) as u32,
+            last_day_of_month: next_month != month,
         }
     }
 }
@@ -138,6 +158,16 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     } as u32;
     let year = year_of_era + era * 400 + i64::from(month <= 2);
     (year, month, day)
+}
+
+fn every_seconds(schedule: &str) -> Option<u32> {
+    let mut words = schedule.split_ascii_whitespace();
+    let count = words.next()?.parse::<u32>().ok()?;
+    let unit = words.next()?.to_ascii_lowercase();
+    if words.next().is_some() || !matches!(unit.as_str(), "second" | "seconds") {
+        return None;
+    }
+    (1..=59).contains(&count).then_some(count)
 }
 
 fn invalid(schedule: &str) -> SqlError {
@@ -204,6 +234,15 @@ impl CronSchedule {
     /// month and weekday names), or `@yearly`, `@annually`, `@monthly`, `@weekly`, `@daily`,
     /// `@midnight` or `@hourly`.
     pub fn parse(schedule: &str) -> SqlResult<Self> {
+        if let Some(seconds) = every_seconds(schedule) {
+            return Ok(Self {
+                fields: [0; 5],
+                any_day_of_month: false,
+                any_day_of_week: false,
+                last_day_of_month: false,
+                every_seconds: Some(seconds),
+            });
+        }
         let expanded = match schedule.trim() {
             "@yearly" | "@annually" => "0 0 1 1 *",
             "@monthly" => "0 0 1 * *",
@@ -217,21 +256,49 @@ impl CronSchedule {
             return Err(invalid(schedule));
         };
         let mut fields = [0u64; 5];
+        let mut last_day_of_month = false;
         for (at, text) in [minute, hour, day, month, weekday].into_iter().enumerate() {
+            if at == 2 && text.split(',').any(|part| part == "$") {
+                last_day_of_month = true;
+                let rest: Vec<&str> = text.split(',').filter(|part| *part != "$").collect();
+                fields[at] = if rest.is_empty() {
+                    0
+                } else {
+                    parse_field(&rest.join(","), at).ok_or_else(|| invalid(schedule))?
+                };
+                continue;
+            }
             fields[at] = parse_field(text, at).ok_or_else(|| invalid(schedule))?;
         }
         Ok(Self {
             fields,
             any_day_of_month: *day == "*",
             any_day_of_week: *weekday == "*",
+            last_day_of_month,
+            every_seconds: None,
         })
+    }
+
+    /// Whether the schedule runs every few seconds (`'10 seconds'`) rather than in minutes.
+    pub fn runs_in_seconds(&self) -> bool {
+        self.every_seconds.is_some()
+    }
+
+    /// Whether a schedule of seconds runs at `epoch_seconds`: every `n` seconds, counted from
+    /// the start of each minute.
+    pub fn fires_at_second(&self, epoch_seconds: i64) -> bool {
+        self.every_seconds
+            .is_some_and(|every| epoch_seconds.rem_euclid(60) % i64::from(every) == 0)
     }
 
     /// Whether the schedule fires in `minute`. When both the day of the month and the day of
     /// the week are restricted, either one matching is enough, as cron has always done.
     pub fn fires_in(&self, minute: Minute) -> bool {
+        if self.every_seconds.is_some() {
+            return false;
+        }
         let has = |field: usize, value: u32| self.fields[field] & (1 << value) != 0;
-        let day_of_month = has(2, minute.day);
+        let day_of_month = has(2, minute.day) || (self.last_day_of_month && minute.last_day_of_month);
         let day_of_week = has(4, minute.weekday);
         let day = match (self.any_day_of_month, self.any_day_of_week) {
             (false, false) => day_of_month || day_of_week,
@@ -267,10 +334,27 @@ fn quoted(text: &str) -> String {
 /// minute holding `epoch_seconds`, each in its own transaction, and records each run in
 /// `cron.job_run_details`. A file without the `cron` schema has no jobs.
 pub fn run_due_jobs<S: KeyValueStore>(store: &S, epoch_seconds: i64) -> SqlResult<JobsRun> {
+    run_jobs(store, epoch_seconds, false)
+}
+
+/// Runs the active jobs of `cron.job` whose schedule runs every few seconds (pg_cron's
+/// `'n seconds'`) and is due at `epoch_seconds`; the server calls it once a second.
+pub fn run_due_second_jobs<S: KeyValueStore>(
+    store: &S,
+    epoch_seconds: i64,
+) -> SqlResult<JobsRun> {
+    run_jobs(store, epoch_seconds, true)
+}
+
+fn quoted_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+fn run_jobs<S: KeyValueStore>(store: &S, epoch_seconds: i64, seconds: bool) -> SqlResult<JobsRun> {
     let mut session = Session::with_dialect(store, Dialect::PostgreSql);
     let mut rows = Vec::new();
     let listed = session.execute(
-        "SELECT jobid, schedule, command FROM cron.job WHERE active ORDER BY jobid",
+        "SELECT jobid, schedule, command, username FROM cron.job WHERE active ORDER BY jobid",
         &mut |result| {
             rows = result.rows;
         },
@@ -295,15 +379,29 @@ pub fn run_due_jobs<S: KeyValueStore>(store: &S, epoch_seconds: i64) -> SqlResul
             continue;
         };
         let Ok(parsed) = CronSchedule::parse(&schedule) else {
-            outcome.invalid_schedules += 1;
+            if !seconds {
+                outcome.invalid_schedules += 1;
+            }
             continue;
         };
-        if !parsed.fires_in(minute) {
+        let due = if seconds {
+            parsed.fires_at_second(epoch_seconds)
+        } else {
+            parsed.fires_in(minute)
+        };
+        if !due {
             continue;
         }
         let mut job = Session::with_dialect(store, Dialect::PostgreSql);
         let mut tag = String::new();
-        let ran = job.execute(&command, &mut |result| tag = result.tag);
+        let became = match row.get(3).and_then(text_of) {
+            Some(user) if !user.is_empty() => job.execute(
+                &format!("SET SESSION AUTHORIZATION {}", quoted_identifier(&user)),
+                &mut |_| {},
+            ),
+            _ => Ok(()),
+        };
+        let ran = became.and_then(|()| job.execute(&command, &mut |result| tag = result.tag));
         let _ = job.close();
         let (status, message) = match ran {
             Ok(()) => {
