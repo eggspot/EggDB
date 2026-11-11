@@ -44,6 +44,7 @@ mod sqlserver_routines;
 mod triggers;
 mod types;
 mod windows;
+mod xml;
 
 pub(crate) use mysql_routines::mysql_program;
 pub use oracle::ORACLE_COMPATIBLE_VERSION;
@@ -5043,6 +5044,9 @@ impl<'t> Parser<'t> {
         if let Some(expr) = self.sql_json_function(&name)? {
             return Ok(expr);
         }
+        if let Some(expr) = self.xml_function(&name)? {
+            return Ok(expr);
+        }
         if (self.postgresql() || self.oracle())
             && let Some(function) = AggregateFunction::hypothetical_named(&name.text)
             && self.within_group_follows_arguments()
@@ -5120,6 +5124,7 @@ impl<'t> Parser<'t> {
             || crate::square_root::INTERNAL_NAMES.contains(&text)
             || crate::mysql_date_functions::INTERNAL_NAMES.contains(&text)
             || crate::mysql_named_locks::INTERNAL_NAMES.contains(&text)
+            || crate::xml_functions::INTERNAL_NAMES.contains(&text)
         {
             return Err(SqlError::new(
                 SqlState::UNDEFINED_FUNCTION,

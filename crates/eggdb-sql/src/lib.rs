@@ -321,6 +321,7 @@ mod visible_writes_tests;
 mod window_tests;
 #[cfg(test)]
 mod with_statement_tests;
+mod xml_functions;
 
 pub use arrays::{ArrayElement, ArrayValue};
 pub use bulk_load::{

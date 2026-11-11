@@ -478,3 +478,4 @@ its full title with its status.
 - [D451](decisions/D451.md) Code-only batch 99 (M10): more NLS languages and territories
 - [D452](decisions/D452.md) Code-only batch 100 (M10): the rest of Oracle's regular-expression syntax
 - [D453](decisions/D453.md) Code-only batch 101 (M10): `DISTINCT` in Oracle's window aggregates
+- [D454](decisions/D454.md) Code-only batch 102 (M10): SQL/XML publishing functions in the PostgreSQL and Oracle dialects
