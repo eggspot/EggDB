@@ -487,3 +487,4 @@ its full title with its status.
 - [D460](decisions/D460.md) Code-only batch 108 (M6a): `--rate-limit` on every generated HTTP API
 - [D461](decisions/D461.md) Code-only batch 109 (M6a): PostgreSQL's function call protocol
 - [D462](decisions/D462.md) Code-only batch 110 (M6a): S3 `GetObject` streamed with `Content-Length`
+- [D463](decisions/D463.md) Code-only batch 111 (M6a): Elasticsearch `_search` hits streamed

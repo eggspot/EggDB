@@ -6,7 +6,8 @@ use crate::query::{Stats, numbers, parse, score, term_buckets};
 use crate::script::{Context, Operation, Script};
 use crate::sort::{Sort, SortValue, write_values};
 use crate::source_filter::SourceFilter;
-use eggdb_http::{Request, Response};
+use eggdb_http::{Reply, Request, Response, StreamedResponse};
+use std::io::Write;
 use eggdb_keyspace::{KeysRead, KeysWrite, Keyspace};
 use eggdb_platform::connection_limits::MemoryBudget;
 use eggdb_sql::json::{Json, JsonSyntaxError, Node, parse_document};
@@ -440,7 +441,38 @@ impl<'k> Api<'k> {
         id
     }
 
-    /// Answers one request.
+    /// Answers one request; the hits of a `_search` are a [`StreamedResponse`], each hit
+    /// rendered as it is sent.
+    pub fn reply(&self, request: &Request) -> Reply<'static> {
+        let searched = matches!(request.method.as_str(), "GET" | "POST")
+            && self.authorized(request)
+            && !request.path.contains('%');
+        if searched {
+            let parts: Vec<&str> = request.path.split('/').filter(|part| !part.is_empty()).collect();
+            let indices = match parts.as_slice() {
+                ["_search"] => Some(None),
+                [index, "_search"] if valid_index(index) => Some(Some(*index)),
+                _ => None,
+            };
+            if let Some(index) = indices {
+                let holder: Vec<&str> = index.into_iter().collect();
+                let named = index.map(|_| holder.as_slice());
+                return match self.search_page(named, request, false) {
+                    Ok(SearchOutcome::Page(page)) => Reply::Streamed(page.stream()),
+                    Ok(SearchOutcome::Whole(response)) => Reply::Whole(response),
+                    Err(Failure::BadRequest(reason)) => {
+                        Reply::Whole(error(400, "parse_exception", &reason))
+                    }
+                    Err(Failure::Storage(reason)) => {
+                        Reply::Whole(error(500, "eggdb_exception", &reason))
+                    }
+                };
+            }
+        }
+        Reply::Whole(self.answer(request))
+    }
+
+    /// Answers one request with its whole response in memory.
     pub fn answer(&self, request: &Request) -> Response {
         if !self.authorized(request) {
             return error(
@@ -1009,6 +1041,18 @@ impl<'k> Api<'k> {
     }
 
     fn search(&self, indices: Option<&[&str]>, request: &Request, count_only: bool) -> Answer {
+        Ok(match self.search_page(indices, request, count_only)? {
+            SearchOutcome::Whole(response) => response,
+            SearchOutcome::Page(page) => json(200, page.whole()),
+        })
+    }
+
+    fn search_page(
+        &self,
+        indices: Option<&[&str]>,
+        request: &Request,
+        count_only: bool,
+    ) -> Result<SearchOutcome, Failure> {
         let body_text = String::from_utf8_lossy(&request.body).into_owned();
         let body = if body_text.trim().is_empty() {
             None
@@ -1028,7 +1072,9 @@ impl<'k> Api<'k> {
         let query = match member("query") {
             Some(node) => match parse(&node, 0) {
                 Ok(query) => query,
-                Err(reason) => return Ok(error(400, "parsing_exception", &reason)),
+                Err(reason) => {
+                    return Ok(SearchOutcome::Whole(error(400, "parsing_exception", &reason)));
+                }
             },
             None => match query_flag(request, "q") {
                 Some(text) => crate::query::Query::Match {
@@ -1051,11 +1097,11 @@ impl<'k> Api<'k> {
         let size = number("size", DEFAULT_SIZE);
         let from = number("from", 0);
         if from.saturating_add(size) > MAX_RESULT_WINDOW {
-            return Ok(error(
+            return Ok(SearchOutcome::Whole(error(
                 400,
                 "illegal_argument_exception",
                 "Result window is too large, from + size must be less than or equal to: [10000]",
-            ));
+            )));
         }
         let presentation = if count_only {
             HitPresentation::default()
@@ -1069,7 +1115,7 @@ impl<'k> Api<'k> {
                 from,
             ) {
                 Ok(presentation) => presentation,
-                Err(refusal) => return Ok(refusal),
+                Err(refusal) => return Ok(SearchOutcome::Whole(refusal)),
             }
         };
         let ignore_unavailable =
@@ -1092,7 +1138,7 @@ impl<'k> Api<'k> {
         })?;
         let gathered = match gathered {
             Ok(gathered) => gathered,
-            Err(missing) => return Ok(missing_index(&missing)),
+            Err(missing) => return Ok(SearchOutcome::Whole(missing_index(&missing))),
         };
         let (documents, origins): (Vec<(String, Node)>, Vec<usize>) = gathered
             .iter()
@@ -1113,13 +1159,13 @@ impl<'k> Api<'k> {
             })
             .collect();
         if count_only {
-            return Ok(json(
+            return Ok(SearchOutcome::Whole(json(
                 200,
                 format!(
                     "{{\"count\":{},\"_shards\":{{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0}}}}",
                     hits.len()
                 ),
-            ));
+            )));
         }
         let matched: Vec<&Node> = hits.iter().map(|(_, at)| &documents[*at].1).collect();
         let sort = &presentation.sort;
@@ -1133,7 +1179,13 @@ impl<'k> Api<'k> {
             let after = match &presentation.search_after {
                 Some(values) => match ordered.after(values) {
                     Ok(after) => Some(after),
-                    Err(reason) => return Ok(error(400, "illegal_argument_exception", &reason)),
+                    Err(reason) => {
+                        return Ok(SearchOutcome::Whole(error(
+                            400,
+                            "illegal_argument_exception",
+                            &reason,
+                        )));
+                    }
                 },
                 None => None,
             };
@@ -1183,39 +1235,115 @@ impl<'k> Api<'k> {
             _ => out.null(),
         };
         out.key("hits").begin_array();
-        for (value, at, sort_values) in ranked.iter().skip(from).take(size) {
-            let Some((index, id, source)) =
-                origins.get(*at).and_then(|origin| gathered.get(*origin))
-            else {
-                continue;
-            };
-            out.begin_object()
-                .key("_index")
-                .string(index)
-                .key("_id")
-                .string(id)
-                .key("_score");
-            if reports_scores {
-                out.number(*value);
-            } else {
-                out.null();
-            }
-            if let Some(filtered) = presentation.source_filter.apply(source) {
-                out.key("_source").raw(&filtered);
-            }
-            if !sort.is_empty() {
-                out.key("sort");
-                write_values(&mut out, sort_values);
-            }
-            out.end_object();
-        }
-        out.end_array().end_object();
+        let head = out.finish();
+        let mut tail = "]}".to_owned();
         if let Some(aggregations) = member("aggs").or_else(|| member("aggregations")) {
-            out.key("aggregations");
-            aggregate(&mut out, &aggregations, &matched);
+            let mut rendered = Out::default();
+            aggregate(&mut rendered, &aggregations, &matched);
+            tail.push_str(",\"aggregations\":");
+            tail.push_str(&rendered.finish());
+        }
+        tail.push('}');
+        let sorted = !sort.is_empty();
+        let page_hits = ranked
+            .into_iter()
+            .skip(from)
+            .take(size)
+            .filter_map(|(value, at, sort_values)| {
+                let origin = *origins.get(at)?;
+                Some(PageHit {
+                    score: reports_scores.then_some(value),
+                    origin,
+                    sort_values: sorted.then_some(sort_values),
+                })
+            })
+            .collect();
+        drop(matched);
+        Ok(SearchOutcome::Page(SearchPage {
+            head,
+            gathered,
+            hits: page_hits,
+            source_filter: presentation.source_filter,
+            tail,
+        }))
+    }
+}
+
+enum SearchOutcome {
+    Whole(Response),
+    Page(SearchPage),
+}
+
+struct PageHit {
+    score: Option<f64>,
+    origin: usize,
+    sort_values: Option<Vec<SortValue>>,
+}
+
+struct SearchPage {
+    head: String,
+    gathered: Vec<(String, String, String)>,
+    hits: Vec<PageHit>,
+    source_filter: SourceFilter,
+    tail: String,
+}
+
+impl SearchPage {
+    fn hit(&self, hit: &PageHit) -> Option<String> {
+        let (index, id, source) = self.gathered.get(hit.origin)?;
+        let mut out = Out::default();
+        out.begin_object()
+            .key("_index")
+            .string(index)
+            .key("_id")
+            .string(id)
+            .key("_score");
+        match hit.score {
+            Some(value) => out.number(value),
+            None => out.null(),
+        };
+        if let Some(filtered) = self.source_filter.apply(source) {
+            out.key("_source").raw(&filtered);
+        }
+        if let Some(values) = &hit.sort_values {
+            out.key("sort");
+            write_values(&mut out, values);
         }
         out.end_object();
-        Ok(json(200, out.finish()))
+        Some(out.finish())
+    }
+
+    fn whole(&self) -> String {
+        let mut text = self.head.clone();
+        let mut first = true;
+        for hit in &self.hits {
+            if let Some(rendered) = self.hit(hit) {
+                if !first {
+                    text.push(',');
+                }
+                first = false;
+                text.push_str(&rendered);
+            }
+        }
+        text.push_str(&self.tail);
+        text
+    }
+
+    fn stream(self) -> StreamedResponse<'static> {
+        StreamedResponse::new(200, "application/json; charset=UTF-8", move |out| {
+            out.write_all(self.head.as_bytes())?;
+            let mut first = true;
+            for hit in &self.hits {
+                if let Some(rendered) = self.hit(hit) {
+                    if !first {
+                        out.write_all(b",")?;
+                    }
+                    first = false;
+                    out.write_all(rendered.as_bytes())?;
+                }
+            }
+            out.write_all(self.tail.as_bytes())
+        })
     }
 }
 

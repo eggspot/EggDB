@@ -952,9 +952,9 @@ impl Session<'_> {
                 None => Ok(()),
             });
             let es_server = scope.spawn(|| match &es_listener {
-                Some(listener) => eggdb_http::serve_with_limits(
+                Some(listener) => eggdb_http::serve_replies_with_limits(
                     listener,
-                    &|request| es_api.answer(request),
+                    &|request| es_api.reply(request),
                     &stop_signals::requested,
                     &eggdb_http::Limits::new(eggdb_http::MAX_BODY_BYTES, &memory_budget).with_rate_limit(rate_limiter.as_ref())
                         .answering_over_budget_with(eggdb_esrest::over_memory_budget)
