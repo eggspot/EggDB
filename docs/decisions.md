@@ -523,3 +523,4 @@ its full title with its status.
 - [D496](decisions/D496.md) Code-only batch 144 (M16): LogQL log queries and Loki's label endpoints
 - [D497](decisions/D497.md) Code-only batch 145 (M16): Zipkin span ingest and query API
 - [D498](decisions/D498.md) Code-only batch 146 (M16): OTLP/HTTP JSON ingest of metrics, logs and traces
+- [D499](decisions/D499.md) Code-only batch 147 (M16): the syslog sender's address as a column

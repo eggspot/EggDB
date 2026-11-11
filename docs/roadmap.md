@@ -1373,7 +1373,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (code-only mode, 2026-11-11, D495); Zipkin traces: **code written, unbuilt** (code-only mode,
   2026-11-11, D497).
 - Syslog over TLS (RFC 5425) and beyond loopback, the sender's address as a column, and rsyslog
-  and syslog-ng in CI (D315).
+  and syslog-ng in CI (D315). The sender's address: **code written,
+  unbuilt** (code-only mode, 2026-11-11, D499).
 - LogQL and TraceQL, with the Loki and Tempo query HTTP APIs Grafana uses (D39). LogQL log queries with Loki's
   query and label APIs: **code written, unbuilt** (code-only mode, 2026-11-11, D496).
 - Telegraf and Prometheus in CI, and benchmarks against InfluxDB and Prometheus (D220).

@@ -19,7 +19,7 @@ const RECEIVE_WAIT: Duration = Duration::from_millis(50);
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
 const READ_CHUNK_BYTES: usize = 16 * 1024;
 
-type Received = (i64, Message);
+type Received = (i64, Message, Option<String>);
 
 static MESSAGES_DROPPED: AtomicU64 = AtomicU64::new(0);
 
@@ -68,7 +68,7 @@ fn optional(value: Option<&str>) -> String {
     value.map_or_else(|| "NULL".to_owned(), literal)
 }
 
-fn row((received_at, message): &Received) -> String {
+fn row((received_at, message, sender): &Received) -> String {
     let cells = [
         timestamp_literal(*received_at),
         message.facility.to_string(),
@@ -82,6 +82,7 @@ fn row((received_at, message): &Received) -> String {
         optional(message.msgid.as_deref()),
         optional(message.structured_data.as_deref()),
         literal(&message.message),
+        optional(sender.as_deref()),
     ];
     format!("({})", cells.join(", "))
 }
@@ -90,7 +91,7 @@ fn create_table(session: &mut Session<'_>) -> Result<(), String> {
     run(
         session,
         &format!(
-            "CREATE TABLE IF NOT EXISTS {TABLE} (received_at timestamptz NOT NULL, facility smallint NOT NULL, severity smallint NOT NULL, \"timestamp\" timestamptz, hostname text, app_name text, procid text, msgid text, structured_data text, message text NOT NULL)"
+            "CREATE TABLE IF NOT EXISTS {TABLE} (received_at timestamptz NOT NULL, facility smallint NOT NULL, severity smallint NOT NULL, \"timestamp\" timestamptz, hostname text, app_name text, procid text, msgid text, structured_data text, message text NOT NULL, sender text)"
         ),
     )
     .map(|_| ())
@@ -99,11 +100,15 @@ fn create_table(session: &mut Session<'_>) -> Result<(), String> {
 fn insert_rows(session: &mut Session<'_>, rows: &[Received]) -> Result<(), String> {
     let values: Vec<String> = rows.iter().map(row).collect();
     let statement = format!(
-        "INSERT INTO {TABLE} (received_at, facility, severity, \"timestamp\", hostname, app_name, procid, msgid, structured_data, message) VALUES {}",
+        "INSERT INTO {TABLE} (received_at, facility, severity, \"timestamp\", hostname, app_name, procid, msgid, structured_data, message, sender) VALUES {}",
         values.join(", ")
     );
     if run(session, &statement).is_err() {
         create_table(session)?;
+        let _ = run(
+            session,
+            &format!("ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS sender text"),
+        );
         run(session, &statement)?;
     }
     Ok(())
@@ -235,13 +240,17 @@ impl<'s, S: KeyValueStore + Sync> SyslogCollector<'s, S> {
         let mut batch_started = Instant::now();
         while !stop() {
             match socket.receive_from(&mut buffer, RECEIVE_WAIT) {
-                Ok((length, _)) if length <= MAX_SYSLOG_MESSAGE_BYTES => {
+                Ok((length, sender)) if length <= MAX_SYSLOG_MESSAGE_BYTES => {
                     if let Some(datagram) = buffer.get(..length).filter(|bytes| !bytes.is_empty()) {
                         if batch.is_empty() {
                             batch_started = Instant::now();
                         }
                         let received_at = now_micros();
-                        batch.push((received_at, parse(datagram, received_at)));
+                        batch.push((
+                            received_at,
+                            parse(datagram, received_at),
+                            Some(sender.ip().to_string()),
+                        ));
                     }
                 }
                 Ok(_) => self.count_dropped(1),
@@ -309,6 +318,7 @@ impl<'s, S: KeyValueStore + Sync> SyslogCollector<'s, S> {
         log: &(dyn Fn(&str) + Sync),
     ) {
         let mut session = self.session();
+        let sender = stream.peer_addr().ok().map(|address| address.ip().to_string());
         let mut framer = Framer::new(MAX_SYSLOG_MESSAGE_BYTES);
         let mut chunk = vec![0; READ_CHUNK_BYTES];
         let mut batch: Vec<Received> = Vec::new();
@@ -333,7 +343,9 @@ impl<'s, S: KeyValueStore + Sync> SyslogCollector<'s, S> {
             let received_at = now_micros();
             let framed = loop {
                 match framer.next_frame() {
-                    Ok(Some(frame)) => batch.push((received_at, parse(&frame, received_at))),
+                    Ok(Some(frame)) => {
+                        batch.push((received_at, parse(&frame, received_at), sender.clone()));
+                    }
                     Ok(None) => break true,
                     Err(_) => break false,
                 }
@@ -348,7 +360,7 @@ impl<'s, S: KeyValueStore + Sync> SyslogCollector<'s, S> {
             Ok(None) => {}
             Ok(Some(last)) if sender_finished => {
                 let received_at = now_micros();
-                batch.push((received_at, parse(&last, received_at)));
+                batch.push((received_at, parse(&last, received_at), sender.clone()));
             }
             Ok(Some(_)) | Err(_) => self.count_dropped(1),
         }
