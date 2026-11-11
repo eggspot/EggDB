@@ -504,3 +504,4 @@ its full title with its status.
 - [D477](decisions/D477.md) Code-only batch 125 (M16): STOMP `/exchange/` destinations, forwarded headers and selectors
 - [D478](decisions/D478.md) Code-only batch 126 (M13): Cypher's GQL label expressions
 - [D479](decisions/D479.md) Code-only batch 127 (M13): Cypher's `CALL (a, b) { ... }` scope form and `IN TRANSACTIONS`
+- [D480](decisions/D480.md) Code-only batch 128 (M16): MQTT 5 topic aliases, message expiry, forwarded properties and reason strings

@@ -1,7 +1,7 @@
 use crate::packet::{
     CONNACK, CONNECT, DISCONNECT, Fields, PINGREQ, PINGRESP, PUBACK, PUBCOMP, PUBLISH, PUBREC,
-    PUBREL, Parsed, SUBACK, SUBSCRIBE, UNSUBACK, UNSUBSCRIBE, encode, filter_matches,
-    pending_packet_bytes, put_string, take_packet, valid_filter,
+    PUBREL, Parsed, PublishProperties, SUBACK, SUBSCRIBE, UNSUBACK, UNSUBSCRIBE, encode,
+    filter_matches, pending_packet_bytes, put_string, put_variable, take_packet, valid_filter,
 };
 use eggdb_keyspace::Keyspace;
 use eggdb_platform::connection_limits::{MemoryBudget, Reservation};
@@ -44,7 +44,53 @@ impl std::fmt::Debug for ServerConfig {
 }
 
 type SharedWriter = Arc<Mutex<dyn Write + Send>>;
-type RetainedMessage = (String, u8, Vec<u8>);
+type RetainedMessage = (String, u8, Vec<u8>, Vec<u8>);
+
+const TOPIC_ALIAS_MAXIMUM: u16 = 16;
+const PROTOCOL_ERROR: u8 = 0x82;
+const TOPIC_ALIAS_INVALID: u8 = 0x94;
+const RETAINED_WITH_PROPERTIES: u8 = 0x80;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+}
+
+fn retained_value(qos: u8, payload: &[u8], properties: &PublishProperties) -> Vec<u8> {
+    let expires_at_ms = properties
+        .message_expiry
+        .map_or(0, |seconds| now_ms().saturating_add(u64::from(seconds) * 1000));
+    let encoded = properties.encoded(None);
+    let mut value = vec![RETAINED_WITH_PROPERTIES | qos];
+    value.extend_from_slice(&expires_at_ms.to_be_bytes());
+    value.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+    value.extend_from_slice(&encoded);
+    value.extend_from_slice(payload);
+    value
+}
+
+fn read_retained(value: &[u8], now: u64) -> Option<(u8, Vec<u8>, Vec<u8>)> {
+    let (&first, rest) = value.split_first()?;
+    if first & RETAINED_WITH_PROPERTIES == 0 {
+        return Some((first, Vec::new(), rest.to_vec()));
+    }
+    let expires_at_ms = u64::from_be_bytes(rest.get(..8)?.try_into().ok()?);
+    let length = u32::from_be_bytes(rest.get(8..12)?.try_into().ok()?) as usize;
+    let stored = rest.get(12..12 + length)?;
+    let payload = rest.get(12 + length..)?;
+    let mut properties = Vec::new();
+    if expires_at_ms != 0 {
+        if expires_at_ms <= now {
+            return None;
+        }
+        let remaining = (expires_at_ms - now).div_ceil(1000);
+        properties.push(0x02);
+        properties.extend_from_slice(&u32::try_from(remaining).unwrap_or(u32::MAX).to_be_bytes());
+    }
+    properties.extend_from_slice(stored);
+    Some((first & 3, properties, payload.to_vec()))
+}
 
 const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -68,6 +114,7 @@ fn publish_packet(
     qos: u8,
     retain: bool,
     id: u16,
+    properties: &[u8],
 ) -> Vec<u8> {
     let mut body = Vec::new();
     put_string(&mut body, topic.as_bytes());
@@ -75,7 +122,8 @@ fn publish_packet(
         body.extend_from_slice(&id.to_be_bytes());
     }
     if version >= 5 {
-        body.push(0);
+        put_variable(&mut body, properties.len());
+        body.extend_from_slice(properties);
     }
     body.extend_from_slice(payload);
     encode(PUBLISH, (qos << 1) | u8::from(retain), &body)
@@ -89,7 +137,14 @@ impl<'k> Broker<'k> {
         }
     }
 
-    fn deliver(&self, topic: &str, payload: &[u8], qos: u8, budget: &MemoryBudget) {
+    fn deliver(
+        &self,
+        topic: &str,
+        payload: &[u8],
+        qos: u8,
+        properties: &[u8],
+        budget: &MemoryBudget,
+    ) {
         let mut deliveries: Vec<(SharedWriter, u8, u8, u16)> = Vec::new();
         let mut subscribers = self
             .subscribers
@@ -120,13 +175,14 @@ impl<'k> Broker<'k> {
         let packet_bytes = payload
             .len()
             .saturating_add(topic.len())
+            .saturating_add(properties.len())
             .saturating_add(PUBLISH_HEADER_BYTES);
         let mut held = budget.empty_reservation();
         for (writer, version, qos, id) in deliveries {
             if !held.hold_if_large(packet_bytes) {
                 continue;
             }
-            let packet = publish_packet(version, topic, payload, qos, false, id);
+            let packet = publish_packet(version, topic, payload, qos, false, id, properties);
             let mut writer = writer
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -134,14 +190,18 @@ impl<'k> Broker<'k> {
         }
     }
 
-    fn retain(&self, topic: &str, payload: &[u8], qos: u8) -> Result<(), String> {
+    fn retain(
+        &self,
+        topic: &str,
+        payload: &[u8],
+        qos: u8,
+        properties: &PublishProperties,
+    ) -> Result<(), String> {
         self.keyspace.write(0, &mut |keys| {
-            if payload.is_empty() {
+            if payload.is_empty() || properties.message_expiry == Some(0) {
                 keys.delete(topic.as_bytes())?;
             } else {
-                let mut value = vec![qos];
-                value.extend_from_slice(payload);
-                keys.put(topic.as_bytes(), &value)?;
+                keys.put(topic.as_bytes(), &retained_value(qos, payload, properties))?;
             }
             Ok(())
         })
@@ -155,22 +215,24 @@ impl<'k> Broker<'k> {
         let mut found = Vec::new();
         let mut held = budget.empty_reservation();
         let mut found_bytes = 0usize;
+        let now = now_ms();
         self.keyspace.read(0, &mut |keys| {
             for (key, value) in keys.scan(b"")? {
                 let Ok(topic) = String::from_utf8(key) else {
                     continue;
                 };
                 if filter_matches(filter, &topic)
-                    && let Some((&qos, payload)) = value.split_first()
+                    && let Some((qos, properties, payload)) = read_retained(&value, now)
                 {
                     found_bytes = found_bytes
                         .saturating_add(payload.len())
+                        .saturating_add(properties.len())
                         .saturating_add(topic.len())
                         .saturating_add(PUBLISH_HEADER_BYTES);
                     if !held.hold_if_large(found_bytes) {
                         return Err(OUT_OF_MEMORY_BUDGET.to_owned());
                     }
-                    found.push((topic, qos, payload.to_vec()));
+                    found.push((topic, qos, properties, payload));
                 }
             }
             Ok(())
@@ -184,12 +246,14 @@ impl<'k> Broker<'k> {
         payload: &[u8],
         qos: u8,
         retain: bool,
+        properties: &PublishProperties,
         budget: &MemoryBudget,
     ) -> Result<(), String> {
         if retain {
-            self.retain(topic, payload, qos)?;
+            self.retain(topic, payload, qos, properties)?;
         }
-        self.deliver(topic, payload, qos, budget);
+        let forwarded = properties.encoded(properties.message_expiry);
+        self.deliver(topic, payload, qos, &forwarded, budget);
         Ok(())
     }
 }
@@ -209,6 +273,7 @@ struct Session<'b, 'k> {
     writer: SharedWriter,
     will: Option<Will>,
     incoming_qos2: BTreeSet<u16>,
+    topic_aliases: BTreeMap<u16, String>,
 }
 
 impl Session<'_, '_> {
@@ -227,19 +292,41 @@ impl Session<'_, '_> {
                 if qos == 3 {
                     return Err("a PUBLISH has QoS 3".to_owned());
                 }
-                let topic = fields.string()?;
+                let mut topic = fields.string()?;
+                let packet_id = if qos > 0 { fields.short()? } else { 0 };
+                let properties = if self.version >= 5 {
+                    fields.publish_properties()?
+                } else {
+                    PublishProperties::default()
+                };
+                if let Some(alias) = properties.topic_alias {
+                    if alias == 0 || alias > TOPIC_ALIAS_MAXIMUM {
+                        return Err(format!("topic alias {alias} is outside 1 to {TOPIC_ALIAS_MAXIMUM}"));
+                    }
+                    if topic.is_empty() {
+                        topic = self
+                            .topic_aliases
+                            .get(&alias)
+                            .cloned()
+                            .ok_or_else(|| format!("topic alias {alias} names no topic yet"))?;
+                    } else {
+                        self.topic_aliases.insert(alias, topic.clone());
+                    }
+                }
                 if topic.is_empty() || topic.contains(['+', '#', '\0']) {
                     return Err("a PUBLISH names an invalid topic".to_owned());
-                }
-                let packet_id = if qos > 0 { fields.short()? } else { 0 };
-                if self.version >= 5 {
-                    fields.skip_properties()?;
                 }
                 let payload = fields.rest().to_vec();
                 let duplicate = qos == 2 && !self.incoming_qos2.insert(packet_id);
                 if !duplicate {
-                    self.broker
-                        .publish(&topic, &payload, qos, flags & 1 == 1, self.budget)?;
+                    self.broker.publish(
+                        &topic,
+                        &payload,
+                        qos,
+                        flags & 1 == 1,
+                        &properties,
+                        self.budget,
+                    )?;
                 }
                 match qos {
                     1 => self
@@ -317,7 +404,7 @@ impl Session<'_, '_> {
                     .map_err(|error| error.to_string())?;
                 for (filter, granted) in accepted {
                     let (retained, _held) = self.broker.retained(&filter, self.budget)?;
-                    for (topic, qos, payload) in retained {
+                    for (topic, qos, properties, payload) in retained {
                         let qos = qos.min(granted);
                         self.send(&publish_packet(
                             self.version,
@@ -326,6 +413,7 @@ impl Session<'_, '_> {
                             qos,
                             true,
                             1,
+                            &properties,
                         ))
                         .map_err(|error| error.to_string())?;
                     }
@@ -495,7 +583,8 @@ pub(crate) fn serve_stream(
                             let refused = if version >= 5 { 0x87 } else { 5 };
                             let mut ack = vec![0, if allowed { 0 } else { refused }];
                             if version >= 5 {
-                                ack.push(0);
+                                ack.extend_from_slice(&[3, 0x22]);
+                                ack.extend_from_slice(&TOPIC_ALIAS_MAXIMUM.to_be_bytes());
                             }
                             let _ = writer
                                 .lock()
@@ -515,6 +604,7 @@ pub(crate) fn serve_stream(
                                 writer: Arc::clone(&writer),
                                 will,
                                 incoming_qos2: BTreeSet::new(),
+                                topic_aliases: BTreeMap::new(),
                             });
                         }
                         Some(active) => {
@@ -527,6 +617,18 @@ pub(crate) fn serve_stream(
                                 Err(problem) => {
                                     if problem == OUT_OF_MEMORY_BUDGET {
                                         refuse_over_budget(&writer, Some(&*active));
+                                    } else if active.version >= 5 {
+                                        let code = if problem.starts_with("topic alias") {
+                                            TOPIC_ALIAS_INVALID
+                                        } else {
+                                            PROTOCOL_ERROR
+                                        };
+                                        let mut properties = vec![0x1F];
+                                        put_string(&mut properties, problem.as_bytes());
+                                        let mut body = vec![code];
+                                        put_variable(&mut body, properties.len());
+                                        body.extend_from_slice(&properties);
+                                        let _ = active.send(&encode(DISCONNECT, 0, &body));
                                     }
                                     finished = Some(false);
                                     break;
@@ -563,7 +665,14 @@ pub(crate) fn serve_stream(
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&id);
         if !clean_end && let Some(will) = active.will {
-            let _ = broker.publish(&will.topic, &will.payload, will.qos, will.retain, budget);
+            let _ = broker.publish(
+                &will.topic,
+                &will.payload,
+                will.qos,
+                will.retain,
+                &PublishProperties::default(),
+                budget,
+            );
         }
     }
     Ok(())

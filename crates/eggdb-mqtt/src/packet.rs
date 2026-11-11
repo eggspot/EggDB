@@ -100,6 +100,67 @@ pub(crate) struct Fields<'b> {
 
 pub(crate) type Parsed<T> = Result<T, String>;
 
+/// The MQTT 5 properties of a `PUBLISH` the broker keeps and forwards.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct PublishProperties {
+    pub(crate) payload_format: Option<u8>,
+    pub(crate) message_expiry: Option<u32>,
+    pub(crate) topic_alias: Option<u16>,
+    pub(crate) content_type: Option<String>,
+    pub(crate) response_topic: Option<String>,
+    pub(crate) correlation_data: Option<Vec<u8>>,
+    pub(crate) user_properties: Vec<(String, String)>,
+}
+
+const MAX_USER_PROPERTIES: usize = 256;
+
+pub(crate) fn put_variable(out: &mut Vec<u8>, mut value: usize) {
+    loop {
+        let mut byte = (value % 128) as u8;
+        value /= 128;
+        if value > 0 {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if value == 0 {
+            break;
+        }
+    }
+}
+
+impl PublishProperties {
+    /// The properties written as a `PUBLISH` to a subscriber carries them (without the topic
+    /// alias, which is per connection), with `expiry` as the remaining message expiry.
+    pub(crate) fn encoded(&self, expiry: Option<u32>) -> Vec<u8> {
+        let mut out = Vec::new();
+        if let Some(format) = self.payload_format {
+            out.extend_from_slice(&[0x01, format]);
+        }
+        if let Some(seconds) = expiry {
+            out.push(0x02);
+            out.extend_from_slice(&seconds.to_be_bytes());
+        }
+        if let Some(content_type) = &self.content_type {
+            out.push(0x03);
+            put_string(&mut out, content_type.as_bytes());
+        }
+        if let Some(topic) = &self.response_topic {
+            out.push(0x08);
+            put_string(&mut out, topic.as_bytes());
+        }
+        if let Some(data) = &self.correlation_data {
+            out.push(0x09);
+            put_string(&mut out, data);
+        }
+        for (name, value) in &self.user_properties {
+            out.push(0x26);
+            put_string(&mut out, name.as_bytes());
+            put_string(&mut out, value.as_bytes());
+        }
+        out
+    }
+}
+
 impl<'b> Fields<'b> {
     pub(crate) fn new(bytes: &'b [u8]) -> Self {
         Self { bytes, at: 0 }
@@ -127,6 +188,66 @@ impl<'b> Fields<'b> {
 
     pub(crate) fn string(&mut self) -> Parsed<String> {
         String::from_utf8(self.binary()?.to_vec()).map_err(|_| "a string is not UTF-8".to_owned())
+    }
+
+    pub(crate) fn variable(&mut self) -> Parsed<usize> {
+        let mut value = 0usize;
+        let mut multiplier = 1usize;
+        for _ in 0..4 {
+            let byte = self.byte()?;
+            value += usize::from(byte & 0x7f) * multiplier;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+            multiplier *= 128;
+        }
+        Err("a variable byte integer is longer than four bytes".to_owned())
+    }
+
+    fn four(&mut self) -> Parsed<u32> {
+        Ok(u32::from(self.short()?) << 16 | u32::from(self.short()?))
+    }
+
+    pub(crate) fn publish_properties(&mut self) -> Parsed<PublishProperties> {
+        let length = self.variable()?;
+        let end = self
+            .at
+            .checked_add(length)
+            .filter(|end| *end <= self.bytes.len())
+            .ok_or("properties run past the packet")?;
+        let mut inner = Fields::new(&self.bytes[self.at..end]);
+        self.at = end;
+        let mut properties = PublishProperties::default();
+        while !inner.finished() {
+            let id = inner.variable()?;
+            match id {
+                0x01 => properties.payload_format = Some(inner.byte()?),
+                0x02 => properties.message_expiry = Some(inner.four()?),
+                0x23 => properties.topic_alias = Some(inner.short()?),
+                0x03 => properties.content_type = Some(inner.string()?),
+                0x08 => {
+                    let topic = inner.string()?;
+                    if topic.contains(['+', '#']) {
+                        return Err("a response topic may not hold wildcards".to_owned());
+                    }
+                    properties.response_topic = Some(topic);
+                }
+                0x09 => properties.correlation_data = Some(inner.binary()?.to_vec()),
+                0x26 => {
+                    if properties.user_properties.len() >= MAX_USER_PROPERTIES {
+                        return Err("a PUBLISH carries too many user properties".to_owned());
+                    }
+                    let name = inner.string()?;
+                    let value = inner.string()?;
+                    properties.user_properties.push((name, value));
+                }
+                0x0B => {
+                    return Err("a client may not send a subscription identifier in PUBLISH".to_owned());
+                }
+                other => return Err(format!("property {other:#04x} is not allowed in PUBLISH")),
+            }
+        }
+        Ok(properties)
     }
 
     pub(crate) fn skip_properties(&mut self) -> Parsed<()> {
