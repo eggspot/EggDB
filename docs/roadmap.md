@@ -1382,7 +1382,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - STOMP `/exchange/` destinations and selectors (D217). **Code written, unbuilt** (code-only mode,
   2026-11-11, D477); selectors on `/queue/` subscriptions are not written.
 - A dead-letter queue for rejected messages, and an in-process inbox for embedded consumers
-  (D217).
+  (D217). The dead-letter queue: **code written, unbuilt** (code-only mode, 2026-11-11, D540).
 - CQL collections, tuples, user-defined types and counters (D19, D218).
 - CQL TTL, `USING TIMESTAMP`, and lightweight transactions beyond `IF NOT EXISTS` (D218).
 - CQL paging, protocol v5 framing and compression (D218). Paging: **code written, unbuilt** (code-only mode,

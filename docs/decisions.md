@@ -564,3 +564,4 @@ its full title with its status.
 - [D537](decisions/D537.md) Code-only batch 185 (M10): MySQL implicit string-to-number conversion in arithmetic
 - [D538](decisions/D538.md) Code-only batch 186 (M16): AMQP 1.0 dynamic nodes
 - [D539](decisions/D539.md) Code-only batch 187 (M16): AMQP 1.0 idle time-out enforced
+- [D540](decisions/D540.md) Code-only batch 188 (M16): a dead-letter queue for rejected messages

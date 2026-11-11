@@ -318,13 +318,21 @@ enum Staged {
     },
     Ack(String),
     Nack(String),
+    Reject(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Settlement {
+    Accept,
+    Requeue,
+    DeadLetter,
 }
 
 impl Staged {
     fn body_bytes(&self) -> usize {
         match self {
             Self::Send { body, .. } => body.len(),
-            Self::Ack(_) | Self::Nack(_) => 0,
+            Self::Ack(_) | Self::Nack(_) | Self::Reject(_) => 0,
         }
     }
 }
@@ -453,7 +461,7 @@ impl Session<'_, '_> {
         Ok(())
     }
 
-    fn settle(&mut self, token: &str, accepted: bool) -> Result<(), String> {
+    fn settle(&mut self, token: &str, settlement: Settlement) -> Result<(), String> {
         let Some(chosen) = self.pending.get(token) else {
             return Err(format!(
                 "no message waits for an acknowledgement with id {token}"
@@ -477,12 +485,10 @@ impl Session<'_, '_> {
         };
         for token in tokens {
             if let Some(pending) = self.pending.remove(&token) {
-                let outcome = if accepted {
-                    self.broker.queues.ack(&pending.queue, pending.id)
-                } else {
-                    self.broker
-                        .queues
-                        .release(&pending.queue, pending.id, now_ms())
+                let outcome = match settlement {
+                    Settlement::Accept => self.broker.queues.ack(&pending.queue, pending.id),
+                    Settlement::Requeue => self.broker.queues.release(&pending.queue, pending.id, now_ms()),
+                    Settlement::DeadLetter => self.broker.queues.dead_letter(&pending.queue, pending.id, now_ms()),
                 };
                 outcome.map_err(|error| queue_failure(&error))?;
             }
@@ -693,8 +699,9 @@ impl Session<'_, '_> {
                         );
                     }
                 }
-                Staged::Ack(token) => self.settle(&token, true)?,
-                Staged::Nack(token) => self.settle(&token, false)?,
+                Staged::Ack(token) => self.settle(&token, Settlement::Accept)?,
+                Staged::Nack(token) => self.settle(&token, Settlement::Requeue)?,
+                Staged::Reject(token) => self.settle(&token, Settlement::DeadLetter)?,
             }
         }
         Ok(())
@@ -729,17 +736,21 @@ impl Session<'_, '_> {
                 let token = Self::ack_token(frame)
                     .ok_or("ACK and NACK need an id header")?
                     .to_owned();
-                let accepted = frame.command == "ACK";
+                let settlement = match (frame.command.as_str(), frame.header("requeue")) {
+                    ("ACK", _) => Settlement::Accept,
+                    (_, Some("false")) => Settlement::DeadLetter,
+                    _ => Settlement::Requeue,
+                };
                 match transaction {
                     Some(transaction) => self.stage(
                         &transaction,
-                        if accepted {
-                            Staged::Ack(token)
-                        } else {
-                            Staged::Nack(token)
+                        match settlement {
+                            Settlement::Accept => Staged::Ack(token),
+                            Settlement::Requeue => Staged::Nack(token),
+                            Settlement::DeadLetter => Staged::Reject(token),
                         },
                     )?,
-                    None => self.settle(&token, accepted)?,
+                    None => self.settle(&token, settlement)?,
                 }
             }
             "BEGIN" => {

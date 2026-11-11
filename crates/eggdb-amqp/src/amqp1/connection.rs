@@ -689,6 +689,7 @@ impl Connection<'_, '_> {
         let settled = body.field(3).flag().unwrap_or(false);
         let state = body.field(4).clone();
         let accepted = !matches!(state.descriptor(), Some(RELEASED | MODIFIED));
+        let rejected = state.descriptor() == Some(REJECTED);
         let session = self.session(channel)?;
         let mut done = Vec::new();
         let mut id = first;
@@ -703,7 +704,9 @@ impl Connection<'_, '_> {
         }
         let now = now_ms();
         for unsettled in done {
-            let _ = if accepted {
+            let _ = if rejected {
+                self.broker.queues.dead_letter(&unsettled.queue, unsettled.id, now)
+            } else if accepted {
                 self.broker.queues.ack(&unsettled.queue, unsettled.id)
             } else {
                 self.broker

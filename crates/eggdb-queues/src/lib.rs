@@ -11,6 +11,8 @@ const QUEUE: u8 = 1;
 const MESSAGE: u8 = 2;
 const MAX_QUEUE_NAME: usize = 255;
 const MAX_MESSAGE_BYTES: usize = 16 << 20;
+/// The suffix of the queue that takes a queue's rejected messages.
+pub const DEAD_LETTER_SUFFIX: &str = ".dlq";
 
 /// A leased message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -411,6 +413,30 @@ impl<'k> Queues<'k> {
     /// Removes a received message; returns whether it was there.
     pub fn ack(&self, name: &str, id: u64) -> Result<bool> {
         self.write(|keys| keys.delete(&message_key(name, id)).map_err(storage))
+    }
+
+    /// Moves a received message to the dead-letter queue `<name>.dlq` (created when missing),
+    /// keeping its body and when it was sent, for a consumer that rejected it; a queue whose
+    /// name leaves no room for the suffix has its rejected messages dropped. Returns whether the
+    /// message was there.
+    pub fn dead_letter(&self, name: &str, id: u64, now_ms: u64) -> Result<bool> {
+        let target = format!("{name}{DEAD_LETTER_SUFFIX}");
+        let keep = check_name(&target).is_ok();
+        self.write(|keys| {
+            let key = message_key(name, id);
+            let Some(value) = keys.get(&key).map_err(storage)? else {
+                return Ok(false);
+            };
+            let stored = Stored::decode(&value)?;
+            keys.delete(&key).map_err(storage)?;
+            if keep {
+                if keys.get(&queue_key(&target)).map_err(storage)?.is_none() {
+                    keys.put(&queue_key(&target), &0u64.to_be_bytes()).map_err(storage)?;
+                }
+                append(keys, &target, &stored.body, 0, now_ms)?;
+            }
+            Ok(true)
+        })
     }
 
     /// Makes a leased message visible again at `now_ms` (a negative acknowledgement, or its
