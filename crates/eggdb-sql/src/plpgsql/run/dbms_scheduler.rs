@@ -10,6 +10,12 @@ const UNIX_EPOCH_FROM_2000_SECONDS: i64 = 946_684_800;
 use crate::jobs::ORACLE_SCHEDULER_TABLE as SCHEDULER_TABLE;
 const CREATE_SCHEMA: &str = "CREATE SCHEMA IF NOT EXISTS eggdb_internal";
 const CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS eggdb_internal.oracle_scheduler_jobs (job_name text PRIMARY KEY, job_type text NOT NULL, job_action text NOT NULL, start_epoch bigint NOT NULL, repeat_interval text, end_epoch bigint, enabled boolean NOT NULL, auto_drop boolean NOT NULL, last_run bigint)";
+const PROGRAMS_TABLE: &str = "eggdb_internal.oracle_scheduler_programs";
+const SCHEDULES_TABLE: &str = "eggdb_internal.oracle_scheduler_schedules";
+const CREATE_OBJECT_TABLES: [&str; 2] = [
+    "CREATE TABLE IF NOT EXISTS eggdb_internal.oracle_scheduler_programs (program_name text PRIMARY KEY, program_type text NOT NULL, program_action text NOT NULL, enabled boolean NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS eggdb_internal.oracle_scheduler_schedules (schedule_name text PRIMARY KEY, start_epoch bigint NOT NULL, repeat_interval text, end_epoch bigint)",
+];
 const JOB_TYPES: [&str; 2] = ["PLSQL_BLOCK", "STORED_PROCEDURE"];
 
 struct SchedulerCall {
@@ -153,7 +159,20 @@ impl Run<'_> {
                 "enabled",
                 "auto_drop",
                 "comments",
+                "program_name",
+                "schedule_name",
             ],
+            "create_program" => &[
+                "program_name",
+                "program_type",
+                "program_action",
+                "number_of_arguments",
+                "enabled",
+                "comments",
+            ],
+            "drop_program" => &["program_name", "force"],
+            "create_schedule" => &["schedule_name", "start_date", "repeat_interval", "end_date", "comments"],
+            "drop_schedule" => &["schedule_name", "force"],
             "run_job" => &["job_name", "use_current_session"],
             "drop_job" => &["job_name", "force", "defer"],
             "enable" => &["name", "commit_semantics"],
@@ -177,27 +196,131 @@ impl Run<'_> {
         let text_of = |name: &str| value(name).and_then(|value| value.to_text());
         let job = text_of("job_name")
             .or_else(|| text_of("name"))
+            .or_else(|| text_of("program_name"))
+            .or_else(|| text_of("schedule_name"))
             .map(|name| name.trim().to_ascii_uppercase())
             .ok_or_else(|| scheduler_error(27_452, "invalid parameter value for the job name".to_owned()))?;
         self.scheduler_sql(CREATE_SCHEMA)?;
         self.scheduler_sql(CREATE_TABLE)?;
+        for statement in CREATE_OBJECT_TABLES {
+            self.scheduler_sql(statement)?;
+        }
+        let validated_interval = |interval: &str| {
+            crate::jobs::CalendarRule::parse(interval)
+                .map(|_| ())
+                .map_err(|message| scheduler_error(27_465, format!("invalid value {interval} for attribute REPEAT_INTERVAL: {message}")))
+        };
         match call.member.as_str() {
+            "create_program" => {
+                let program_type = text_of("program_type").unwrap_or_else(|| "PLSQL_BLOCK".to_owned()).to_ascii_uppercase();
+                if !JOB_TYPES.contains(&program_type.as_str()) {
+                    return Err(SqlError::not_supported(&format!("DBMS_SCHEDULER programs of type {program_type}; EggDB runs PLSQL_BLOCK and STORED_PROCEDURE programs")));
+                }
+                let action = text_of("program_action").ok_or_else(|| scheduler_error(27_452, "program_action is required".to_owned()))?;
+                let found = self.scheduler_sql(&format!("SELECT 1 FROM {PROGRAMS_TABLE} WHERE program_name = {}", quoted(&job)))?;
+                if !found.rows.is_empty() {
+                    return Err(scheduler_error(27_477, format!("\"{job}\" already exists")));
+                }
+                let enabled = matches!(value("enabled"), Some(Value::Boolean(true)));
+                self.scheduler_sql(&format!(
+                    "INSERT INTO {PROGRAMS_TABLE} VALUES ({}, {}, {}, {enabled})",
+                    quoted(&job),
+                    quoted(&program_type),
+                    quoted(&action)
+                ))?;
+            }
+            "create_schedule" => {
+                let found = self.scheduler_sql(&format!("SELECT 1 FROM {SCHEDULES_TABLE} WHERE schedule_name = {}", quoted(&job)))?;
+                if !found.rows.is_empty() {
+                    return Err(scheduler_error(27_477, format!("\"{job}\" already exists")));
+                }
+                let interval = text_of("repeat_interval");
+                if let Some(interval) = &interval {
+                    validated_interval(interval)?;
+                }
+                let start = value("start_date").and_then(|value| epoch_of(&value)).unwrap_or_else(now_epoch);
+                let end = value("end_date").and_then(|value| epoch_of(&value));
+                self.scheduler_sql(&format!(
+                    "INSERT INTO {SCHEDULES_TABLE} VALUES ({}, {start}, {}, {})",
+                    quoted(&job),
+                    interval.as_deref().map_or_else(|| "NULL".to_owned(), quoted),
+                    end.map_or_else(|| "NULL".to_owned(), |end| end.to_string()),
+                ))?;
+            }
+            "drop_program" | "drop_schedule" => {
+                let (table, column) = if call.member == "drop_program" {
+                    (PROGRAMS_TABLE, "program_name")
+                } else {
+                    (SCHEDULES_TABLE, "schedule_name")
+                };
+                let removed = self.scheduler_sql(&format!(
+                    "DELETE FROM {table} WHERE {column} = {} RETURNING 1",
+                    quoted(&job)
+                ))?;
+                if removed.rows.is_empty() {
+                    return Err(scheduler_error(27_476, format!("\"{job}\" does not exist")));
+                }
+            }
             "create_job" => {
                 if self.job_exists(&job)? {
                     return Err(scheduler_error(27_477, format!("\"{job}\" already exists")));
                 }
-                let job_type = text_of("job_type").unwrap_or_else(|| "PLSQL_BLOCK".to_owned()).to_ascii_uppercase();
+                let program = match text_of("program_name") {
+                    Some(program) => {
+                        let program = program.trim().to_ascii_uppercase();
+                        let found = self.scheduler_sql(&format!(
+                            "SELECT program_type, program_action FROM {PROGRAMS_TABLE} WHERE program_name = {}",
+                            quoted(&program)
+                        ))?;
+                        let Some(row) = found.rows.first() else {
+                            return Err(scheduler_error(27_476, format!("\"{program}\" does not exist")));
+                        };
+                        Some((
+                            row.first().and_then(Value::to_text).unwrap_or_default(),
+                            row.get(1).and_then(Value::to_text).unwrap_or_default(),
+                        ))
+                    }
+                    None => None,
+                };
+                let schedule = match text_of("schedule_name") {
+                    Some(schedule) => {
+                        let schedule = schedule.trim().to_ascii_uppercase();
+                        let found = self.scheduler_sql(&format!(
+                            "SELECT start_epoch, repeat_interval, end_epoch FROM {SCHEDULES_TABLE} WHERE schedule_name = {}",
+                            quoted(&schedule)
+                        ))?;
+                        let Some(row) = found.rows.first() else {
+                            return Err(scheduler_error(27_476, format!("\"{schedule}\" does not exist")));
+                        };
+                        Some((
+                            row.first().and_then(Value::as_integer),
+                            row.get(1).and_then(Value::to_text),
+                            row.get(2).and_then(Value::as_integer),
+                        ))
+                    }
+                    None => None,
+                };
+                let job_type = text_of("job_type")
+                    .or_else(|| program.as_ref().map(|(kind, _)| kind.clone()))
+                    .unwrap_or_else(|| "PLSQL_BLOCK".to_owned())
+                    .to_ascii_uppercase();
                 if !JOB_TYPES.contains(&job_type.as_str()) {
                     return Err(SqlError::not_supported(&format!("DBMS_SCHEDULER jobs of type {job_type}; EggDB runs PLSQL_BLOCK and STORED_PROCEDURE jobs")));
                 }
-                let action = text_of("job_action").ok_or_else(|| scheduler_error(27_452, "job_action is required".to_owned()))?;
-                let interval = text_of("repeat_interval");
+                let action = text_of("job_action")
+                    .or_else(|| program.as_ref().map(|(_, action)| action.clone()))
+                    .ok_or_else(|| scheduler_error(27_452, "job_action is required".to_owned()))?;
+                let interval = text_of("repeat_interval").or_else(|| schedule.as_ref().and_then(|(_, interval, _)| interval.clone()));
                 if let Some(interval) = &interval {
-                    crate::jobs::CalendarRule::parse(interval)
-                        .map_err(|message| scheduler_error(27_465, format!("invalid value {interval} for attribute REPEAT_INTERVAL: {message}")))?;
+                    validated_interval(interval)?;
                 }
-                let start = value("start_date").and_then(|value| epoch_of(&value)).unwrap_or_else(now_epoch);
-                let end = value("end_date").and_then(|value| epoch_of(&value));
+                let start = value("start_date")
+                    .and_then(|value| epoch_of(&value))
+                    .or_else(|| schedule.as_ref().and_then(|(start, _, _)| *start))
+                    .unwrap_or_else(now_epoch);
+                let end = value("end_date")
+                    .and_then(|value| epoch_of(&value))
+                    .or_else(|| schedule.as_ref().and_then(|(_, _, end)| *end));
                 let enabled = matches!(value("enabled"), Some(Value::Boolean(true)));
                 let auto_drop = !matches!(value("auto_drop"), Some(Value::Boolean(false)));
                 self.scheduler_sql(&format!(

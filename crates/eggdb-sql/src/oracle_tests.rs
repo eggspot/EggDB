@@ -812,3 +812,39 @@ fn listagg_distinct_over_a_partition_lists_each_value_once() {
         ]
     );
 }
+
+#[test]
+fn scheduler_jobs_take_their_action_from_a_program_and_their_timing_from_a_schedule() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    values(&mut session, "CREATE TABLE ticks (n NUMBER)");
+    values(
+        &mut session,
+        "BEGIN DBMS_SCHEDULER.CREATE_PROGRAM(program_name => 'tick_program', program_type => 'PLSQL_BLOCK', program_action => 'INSERT INTO ticks VALUES (1);', enabled => TRUE); END;",
+    );
+    values(
+        &mut session,
+        "BEGIN DBMS_SCHEDULER.CREATE_SCHEDULE(schedule_name => 'nightly', repeat_interval => 'FREQ=DAILY;BYHOUR=2'); END;",
+    );
+    values(
+        &mut session,
+        "BEGIN DBMS_SCHEDULER.CREATE_JOB(job_name => 'tick_job', program_name => 'tick_program', schedule_name => 'nightly', enabled => TRUE); END;",
+    );
+    values(&mut session, "BEGIN DBMS_SCHEDULER.RUN_JOB('tick_job'); END;");
+    assert_eq!(values(&mut session, "SELECT COUNT(*) FROM ticks"), vec![vec![number(1)]]);
+    let missing = failure(
+        &mut session,
+        "BEGIN DBMS_SCHEDULER.CREATE_JOB(job_name => 'orphan', program_name => 'no_such_program'); END;",
+    );
+    assert!(missing.message().contains("does not exist"), "{missing}");
+    values(&mut session, "BEGIN DBMS_SCHEDULER.DROP_PROGRAM('tick_program'); END;");
+    failure(&mut session, "BEGIN DBMS_SCHEDULER.DROP_PROGRAM('tick_program'); END;");
+    assert!(
+        session
+            .execute(
+                "BEGIN DBMS_SCHEDULER.CREATE_SCHEDULE(schedule_name => 'broken', repeat_interval => 'FREQ=SOMETIMES'); END;",
+                &mut |_| {}
+            )
+            .is_err()
+    );
+}
