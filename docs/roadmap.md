@@ -989,7 +989,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   written, unbuilt** (code-only mode, 2026-11-10, D401), with `_search` and `_count` too.
 - `_search/template` and `_msearch/template` with Mustache `{{var}}` and `{{#toJson}}` (D331,
   D348). `_search/template` and `_render/template`: **code written, unbuilt** (code-only mode,
-  2026-11-10, D402), `_msearch/template` (D403); left: stored templates.
+  2026-11-10, D402), `_msearch/template` (D403); stored templates: **code written, unbuilt** (code-only mode,
+  2026-11-12, D593).
 - `if_seq_no`/`if_primary_term` and `retry_on_conflict` on `_update` (D348). **Code written,
   unbuilt** (code-only mode, 2026-11-10, D400), on indexing and deleting too.
 - `_source` filtering on `GET _doc` (D331, D348). **Code written, unbuilt** (code-only mode,
@@ -997,7 +998,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Painless beyond D331's update subset (conditions, loops, comparisons, more methods, stored
   scripts), `query_string` syntax and highlighting (D196, D331).
   `query_string`, `simple_query_string` and highlighting: **code written, unbuilt** (code-only
-  mode, 2026-11-11, D515).
+  mode, 2026-11-11, D515); stored scripts: **code written, unbuilt** (code-only mode, 2026-11-12, D593).
 - Scroll (`scroll=1m`, `_search/scroll`, `DELETE _search/scroll`) with contexts bounded in count
   and memory and expired by their keep-alive, and point in time (`pit`) for `search_after`
   (D196, D348). Scroll: **code written, unbuilt** (code-only mode, 2026-11-11, D467); point in

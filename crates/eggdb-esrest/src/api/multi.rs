@@ -294,7 +294,7 @@ impl Api<'_> {
             let search = if templated {
                 let mut inner = request.clone();
                 inner.body = search_line.as_bytes().to_vec();
-                Api::rendered_template(&inner)
+                self.rendered_template(&inner)
             } else {
                 Ok((*search_line).to_owned())
             };

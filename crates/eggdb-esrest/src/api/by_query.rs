@@ -380,7 +380,12 @@ impl Api<'_> {
             Ok(options) => options,
             Err(response) => return Ok(response),
         };
-        let script = match &options.script {
+        let resolved = match options.script.as_ref().map(|node| self.resolved_script(node)) {
+            Some(Ok(resolved)) => Some(resolved),
+            Some(Err(refusal)) => return Ok(refusal),
+            None => None,
+        };
+        let script = match &resolved {
             Some(node) => match Script::from_node(node) {
                 Ok(script) => Some(script),
                 Err(reason) => return Ok(script_error(&format!("compile error: {reason}"))),

@@ -617,3 +617,4 @@ its full title with its status.
 - [D590](decisions/D590.md) Code-only batch 238 (M7): geo searches over nine geohash cells
 - [D591](decisions/D591.md) Code-only batch 239 (M7): keyspace notifications and CLIENT LIST, INFO and KILL
 - [D592](decisions/D592.md) Code-only batch 240 (M7): LRU eviction for memcached items
+- [D593](decisions/D593.md) Code-only batch 241 (M8): stored scripts and stored search templates

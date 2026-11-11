@@ -3,6 +3,7 @@ mod by_query;
 mod multi;
 mod pit;
 mod scroll;
+mod stored_scripts;
 mod tasks;
 
 use crate::json_out::{Out, escaped, written};
@@ -550,6 +551,10 @@ impl<'k> Api<'k> {
             }
             ("POST", ["_bulk"]) => self.bulk(None, request),
             ("GET" | "POST", ["_search", "template"]) => self.search_template(None, request),
+            ("PUT" | "POST", ["_scripts", id]) => self.put_stored_script(id, request),
+            ("PUT" | "POST", ["_scripts", id, _context]) => self.put_stored_script(id, request),
+            ("GET", ["_scripts", id]) => self.get_stored_script(id),
+            ("DELETE", ["_scripts", id]) => self.delete_stored_script(id),
             ("GET" | "POST", ["_search", "scroll"]) => self.continue_scroll(request, None),
             ("GET" | "POST", ["_search", "scroll", id]) => self.continue_scroll(request, Some(id)),
             ("DELETE", ["_search", "scroll"]) => self.clear_scroll(request, None),
@@ -920,7 +925,17 @@ impl<'k> Api<'k> {
 
     fn update_document(&self, index: &str, id: &str, request: &Request) -> Answer {
         let body = String::from_utf8_lossy(&request.body).into_owned();
-        let parsed = parse_document(&body)?;
+        let mut parsed = parse_document(&body)?;
+        if let Json::Object(members) = &mut parsed.value {
+            for (key, value) in members.iter_mut() {
+                if *key == "script" {
+                    match self.resolved_script(value) {
+                        Ok(resolved) => *value = resolved,
+                        Err(refusal) => return Ok(refusal),
+                    }
+                }
+            }
+        }
         let update = match update_request_of(&parsed, request) {
             Ok(update) => update,
             Err(refusal) => return Ok(refusal),
@@ -1055,7 +1070,7 @@ impl<'k> Api<'k> {
         ))
     }
 
-    pub(super) fn rendered_template(request: &Request) -> Result<String, Response> {
+    pub(super) fn rendered_template(&self, request: &Request) -> Result<String, Response> {
         let text = String::from_utf8_lossy(&request.body).into_owned();
         let parsed = parse_document(&text)
             .map_err(|_| error(400, "parse_exception", "the template request is not JSON"))?;
@@ -1064,17 +1079,15 @@ impl<'k> Api<'k> {
         };
         let mut source = None;
         let mut params = None;
+        let mut stored_id = None;
         for (key, node) in members {
             match key.as_str() {
                 "source" | "inline" => source = Some(node),
                 "params" => params = Some(node),
-                "id" => {
-                    return Err(error(
-                        400,
-                        "resource_not_found_exception",
-                        "stored search templates are not supported",
-                    ));
-                }
+                "id" => match &node.value {
+                    Json::String(id) => stored_id = Some(id.clone()),
+                    _ => return Err(error(400, "parse_exception", "[id] must be a string")),
+                },
                 "explain" | "profile" => {}
                 other => {
                     return Err(error(
@@ -1085,16 +1098,26 @@ impl<'k> Api<'k> {
                 }
             }
         }
-        let Some(source) = source else {
-            return Err(error(
-                400,
-                "action_request_validation_exception",
-                "Validation Failed: 1: template is missing;",
-            ));
-        };
-        let template = match &source.value {
-            Json::String(text) => text.clone(),
-            _ => crate::mustache::json_of(source),
+        let template = match (source, stored_id) {
+            (Some(_), Some(_)) => {
+                return Err(error(
+                    400,
+                    "action_request_validation_exception",
+                    "Validation Failed: 1: template source and stored script id are mutually exclusive;",
+                ));
+            }
+            (Some(source), None) => match &source.value {
+                Json::String(text) => text.clone(),
+                _ => crate::mustache::json_of(source),
+            },
+            (None, Some(id)) => self.stored_template(&id)?,
+            (None, None) => {
+                return Err(error(
+                    400,
+                    "action_request_validation_exception",
+                    "Validation Failed: 1: template is missing;",
+                ));
+            }
         };
         let empty = eggdb_sql::json::Node {
             value: Json::Object(Vec::new()),
@@ -1106,7 +1129,7 @@ impl<'k> Api<'k> {
     }
 
     fn search_template(&self, indices: Option<&[&str]>, request: &Request) -> Answer {
-        let rendered = match Self::rendered_template(request) {
+        let rendered = match self.rendered_template(request) {
             Ok(rendered) => rendered,
             Err(refusal) => return Ok(refusal),
         };
@@ -1116,7 +1139,7 @@ impl<'k> Api<'k> {
     }
 
     fn render_template(&self, request: &Request) -> Answer {
-        let rendered = match Self::rendered_template(request) {
+        let rendered = match self.rendered_template(request) {
             Ok(rendered) => rendered,
             Err(refusal) => return Ok(refusal),
         };

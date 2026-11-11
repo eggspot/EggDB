@@ -1432,6 +1432,61 @@ fn search_templates_render_mustache_and_run_the_search() {
 }
 
 #[test]
+fn stored_templates_and_scripts_are_kept_and_run_by_id() {
+    let keyspace = MemoryKeyspace::default();
+    let api = seeded(&keyspace);
+    let stored = api.answer(&request(
+        "PUT",
+        "/_scripts/by-title",
+        "{\"script\":{\"lang\":\"mustache\",\"source\":{\"query\":{\"match\":{\"title\":\"{{q}}\"}}}}}",
+    ));
+    assert_eq!(stored.status, 200, "{}", body(&stored));
+    let fetched = body(&api.answer(&request("GET", "/_scripts/by-title", "")));
+    assert!(fetched.contains("\"found\":true") && fetched.contains("\"lang\":\"mustache\""), "{fetched}");
+    let found = body(&api.answer(&request(
+        "POST",
+        "/books/_search/template",
+        "{\"id\":\"by-title\",\"params\":{\"q\":\"turtle\"}}",
+    )));
+    assert!(found.contains("\"_id\":\"3\"") && !found.contains("\"_id\":\"1\""), "{found}");
+    let both = api.answer(&request(
+        "POST",
+        "/books/_search/template",
+        "{\"id\":\"by-title\",\"source\":\"{}\"}",
+    ));
+    assert_eq!(both.status, 400);
+    let painless = api.answer(&request(
+        "PUT",
+        "/_scripts/add-pages",
+        "{\"script\":{\"lang\":\"painless\",\"source\":\"ctx._source.pages = params.pages\"}}",
+    ));
+    assert_eq!(painless.status, 200, "{}", body(&painless));
+    let updated = body(&api.answer(&request(
+        "POST",
+        "/books/_update/3",
+        "{\"script\":{\"id\":\"add-pages\",\"params\":{\"pages\":999}}}",
+    )));
+    assert!(updated.contains("\"result\":\"updated\""), "{updated}");
+    let document = body(&api.answer(&request("GET", "/books/_doc/3", "")));
+    assert!(document.contains("\"pages\":999"), "{document}");
+    let wrong_kind = api.answer(&request(
+        "POST",
+        "/books/_search/template",
+        "{\"id\":\"add-pages\"}",
+    ));
+    assert_eq!(wrong_kind.status, 400);
+    assert_eq!(api.answer(&request("DELETE", "/_scripts/by-title", "")).status, 200);
+    assert_eq!(api.answer(&request("DELETE", "/_scripts/by-title", "")).status, 404);
+    assert_eq!(api.answer(&request("GET", "/_scripts/by-title", "")).status, 404);
+    let gone = api.answer(&request(
+        "POST",
+        "/books/_search/template",
+        "{\"id\":\"by-title\"}",
+    ));
+    assert_eq!(gone.status, 404);
+}
+
+#[test]
 fn msearch_template_renders_each_search_and_reports_a_bad_one_in_place() {
     let keyspace = MemoryKeyspace::default();
     let api = seeded(&keyspace);
