@@ -396,22 +396,25 @@ impl Parser<'_> {
                 options.sql_type = Some((sql_type, position));
             } else if self.take_word("increment") {
                 self.take_word("by");
+                self.mysql_option_equals();
                 options.increment = Some(self.signed_integer()?);
             } else if self.take_word("minvalue") {
+                self.mysql_option_equals();
                 options.min = Some(if self.oracle() {
                     self.oracle_bound()?
                 } else {
                     Some(self.signed_integer()?)
                 });
             } else if self.take_word("maxvalue") {
+                self.mysql_option_equals();
                 options.max = Some(if self.oracle() {
                     self.oracle_bound()?
                 } else {
                     Some(self.signed_integer()?)
                 });
-            } else if self.oracle() && self.take_word("nominvalue") {
+            } else if (self.oracle() || self.mysql()) && self.take_word("nominvalue") {
                 options.min = Some(None);
-            } else if self.oracle() && self.take_word("nomaxvalue") {
+            } else if (self.oracle() || self.mysql()) && self.take_word("nomaxvalue") {
                 options.max = Some(None);
             } else if !self.oracle() && self.is_word("no") && self.is_word_at(1, "minvalue") {
                 self.at += 2;
@@ -424,12 +427,13 @@ impl Parser<'_> {
                 options.cycle = Some(false);
             } else if self.take_word("start") {
                 self.take_word("with");
+                self.mysql_option_equals();
                 if self.oracle() && self.is_word("limit") {
                     return Err(self.not_supported("START WITH LIMIT VALUE"));
                 }
                 options.start = Some(self.signed_integer()?);
             } else if alter && self.take_word("restart") {
-                let with = self.take_word("with");
+                let with = self.take_word("with") || (self.mysql() && self.take_operator("="));
                 options.restart = Some(
                     if with
                         || matches!(self.peek_kind(), TokenKind::Integer(_))
@@ -441,12 +445,13 @@ impl Parser<'_> {
                     },
                 );
             } else if self.take_word("cache") {
+                self.mysql_option_equals();
                 options.cache = Some(self.signed_integer()?);
-            } else if self.oracle() && self.take_word("nocache") {
+            } else if (self.oracle() || self.mysql()) && self.take_word("nocache") {
                 options.cache = Some(1);
             } else if self.take_word("cycle") {
                 options.cycle = Some(true);
-            } else if self.oracle() && self.take_word("nocycle") {
+            } else if (self.oracle() || self.mysql()) && self.take_word("nocycle") {
                 options.cycle = Some(false);
             } else if self.oracle()
                 && (self.take_word("order")
@@ -482,9 +487,19 @@ impl Parser<'_> {
                     }
                     options.owned_by = Some(Some((table, column)));
                 }
+            } else if self.mysql() && (self.is_word("engine") || self.is_word("comment")) {
+                self.at += 1;
+                self.mysql_option_equals();
+                self.at += 1;
             } else {
                 return Ok(options);
             }
+        }
+    }
+
+    fn mysql_option_equals(&mut self) {
+        if self.mysql() {
+            let _ = self.take_operator("=");
         }
     }
 

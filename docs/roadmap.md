@@ -1003,7 +1003,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   mysqlpump and MySQL Shell dumps (D198). Check: a PyMySQL check of a restored file. `LOAD DATA
   LOCAL INFILE`: **code written, unbuilt** (code-only mode, 2026-11-11, D423); server-side files
   stay refused.
-- MariaDB's sequences (D10, roadmap item 32).
+- MariaDB's sequences (D10, roadmap item 32). **Code written, unbuilt** (code-only mode, 2026-11-11, D424). Left:
+  reading a sequence as a table, `CREATE OR REPLACE SEQUENCE`, `SHOW CREATE SEQUENCE`.
 - MySQL's `JSON_VALUE` and `JSON_TABLE` with MySQL's path language (D289).
 - Following a live MySQL through its binlog for a switch with no downtime (D13).
 - MySQL's own test suite run from outside the repo, with its pass rate published (D1, D10, D45).

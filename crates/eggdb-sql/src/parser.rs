@@ -15,6 +15,7 @@ mod mysql;
 mod mysql_dates;
 mod mysql_events;
 mod mysql_load;
+mod mysql_sequences;
 mod mysql_routines;
 mod oracle;
 mod partitions;
@@ -982,7 +983,7 @@ impl<'t> Parser<'t> {
                 self.at += 1;
                 self.alter_index()
             }
-            "alter" if self.postgresql() && self.is_word_at(1, "sequence") => {
+            "alter" if (self.postgresql() || self.mysql()) && self.is_word_at(1, "sequence") => {
                 self.at += 1;
                 self.alter_sequence()
             }
@@ -1817,7 +1818,7 @@ impl<'t> Parser<'t> {
         {
             return self.create_view(false);
         }
-        if self.postgresql() && self.is_word("sequence") {
+        if (self.postgresql() || self.mysql()) && self.is_word("sequence") {
             return self.create_sequence();
         }
         if self.postgresql() && self.is_word("type") {
@@ -2795,7 +2796,7 @@ impl<'t> Parser<'t> {
                 crate::ast::MaterializedViewCommand::Drop { names, if_exists },
             ));
         }
-        if self.postgresql() && self.is_word("sequence") {
+        if (self.postgresql() || self.mysql()) && self.is_word("sequence") {
             return self.drop_sequence();
         }
         if self.postgresql() && (self.is_word("type") || self.is_word("domain")) {
@@ -4972,6 +4973,11 @@ impl<'t> Parser<'t> {
                 || !matches!(function, AggregateFunction::CorrS | AggregateFunction::CorrK))
         {
             return self.bivariate_aggregate(&name, function);
+        }
+        if self.mysql()
+            && let Some(expr) = self.mysql_sequence_function(&name)?
+        {
+            return Ok(expr);
         }
         if self.mysql()
             && let Some(expr) = self.mysql_date_function(&name)?

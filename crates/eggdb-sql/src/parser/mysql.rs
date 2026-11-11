@@ -1008,6 +1008,10 @@ impl<'t> Parser<'t> {
                 text_value(database, position)
             }
             "interval" if !called => self.mysql_interval_operand(position)?,
+            "next" | "previous" if !called => match self.mysql_sequence_value(word, position)? {
+                Some(expr) => expr,
+                None => return Ok(None),
+            },
             "current_user" => {
                 self.at += 1;
                 if called {
