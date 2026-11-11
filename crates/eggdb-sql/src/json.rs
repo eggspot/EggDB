@@ -344,12 +344,22 @@ impl Parser<'_> {
 }
 
 pub(crate) fn parse(text: &str, binary: bool) -> SqlResult<Node> {
+    parse_with(text, binary, false)
+}
+
+/// Reads `text` as PostgreSQL's `json` type checks it on input, `\u0000` in strings included,
+/// which only turning it into text or `jsonb` refuses; `IS JSON` answers by this.
+pub(crate) fn parse_json_input(text: &str) -> SqlResult<Node> {
+    parse_with(text, false, true)
+}
+
+fn parse_with(text: &str, binary: bool, allows_nul: bool) -> SqlResult<Node> {
     let mut parser = Parser {
         text,
         bytes: text.as_bytes(),
         at: 0,
         type_name: if binary { "jsonb" } else { "json" },
-        allows_nul: false,
+        allows_nul,
     };
     let node = parser.value(0)?;
     parser.spaces();
@@ -824,5 +834,7 @@ mod tests {
         let deep = "[".repeat(MAX_DEPTH + 2);
         assert!(parse_document(&deep).unwrap_err().message.contains("256"));
         assert!(parse(r#""\u0000""#, false).is_err());
+        assert!(parse_json_input(r#"{"a": "x\u0000y"}"#).is_ok());
+        assert!(parse_json_input(r#""\u0000"#).is_err());
     }
 }

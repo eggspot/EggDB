@@ -633,7 +633,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   row type as its base row, and `JSON_TABLE`'s `PLAN` clause; a non-NULL base row is built (D289,
   D302).
 - `IS JSON` on a `json` value holding `\u0000`; PostgreSQL's `JSON_SERIALIZE`, `JSON_SCALAR`,
-  `JSON()`, `IS JSON` and `.decimal()` are built (D302).
+  `JSON()`, `IS JSON` and `.decimal()` are built (D302). **Code written, unbuilt** (code-only mode,
+  2026-11-11, D552).
 - `DateStyle` and `IntervalStyle` beyond ISO and `postgres`, and the special date and time inputs
   (D19, sql.md). `IntervalStyle`: **code written, unbuilt** (code-only mode, 2026-11-10, D389);
   the special date and time inputs: **code written, unbuilt** (code-only mode, 2026-11-11, D465).

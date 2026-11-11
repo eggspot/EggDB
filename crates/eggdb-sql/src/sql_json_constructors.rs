@@ -486,7 +486,7 @@ fn is_json(evaluator: &Evaluator<'_>, arguments: &[Expr]) -> SqlResult<Value> {
         Some(Ok(JsonText::Normalized(text))) => {
             json::parse(&text, true).is_ok_and(|node| shape.holds(&node.value))
         }
-        Some(Ok(JsonText::Text(text))) => json::parse(&text, false).is_ok_and(|node| {
+        Some(Ok(JsonText::Text(text))) => json::parse_json_input(&text).is_ok_and(|node| {
             shape.holds(&node.value) && !(unique_keys && has_duplicate_keys(&node))
         }),
     };

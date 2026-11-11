@@ -592,6 +592,8 @@ fn is_json_tests_shape_and_unique_keys() {
         ("SELECT 'abc' IS JSON", "f"),
         ("SELECT 'abc' IS NOT JSON", "t"),
         ("SELECT '[1, 2]' IS JSON ARRAY", "t"),
+        ("SELECT '\"\\u0000\"' IS JSON", "t"),
+        ("SELECT '{\"a\": \"\\u0000\"}' IS JSON OBJECT", "t"),
         ("SELECT '[1, 2]' IS JSON OBJECT", "f"),
         ("SELECT '\"x\"' IS JSON SCALAR", "t"),
         ("SELECT '{}' IS JSON SCALAR", "f"),
