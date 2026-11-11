@@ -1311,7 +1311,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - SQS, after D58's legal check: FIFO queues, attributes, batches, long polling, dead-letter
   queues and a non-zero `ChangeMessageVisibility` (D33, D216).
 - NATS JetStream: durable streams and consumers (D33, D216).
-- NATS no-responders, token and NKey authentication, clusters and leaf nodes (D216).
+- NATS no-responders, token and NKey authentication, clusters and leaf nodes (D216). No-responders and
+  token authentication: **code written, unbuilt** (code-only mode, 2026-11-11, D476).
 - Benchmarks against ElasticMQ and nats-server (D216).
 - AMQP 1.0: annotations and properties end to end, transactions, dynamic nodes, link resumption,
   `amqp:modified`, and the `idle-time-out` enforced and heartbeats sent (D217, D352).

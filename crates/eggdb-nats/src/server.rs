@@ -55,7 +55,10 @@ struct Client {
     subscriptions: BTreeMap<String, Subscription>,
     echo: bool,
     headers: bool,
+    no_responders: bool,
 }
+
+const NO_RESPONDERS_HEADER: &[u8] = b"NATS/1.0 503\r\n\r\n";
 
 /// What every connection shares: who subscribes to what.
 pub(crate) struct Broker {
@@ -107,6 +110,29 @@ impl Broker {
         let turn = self.turn.fetch_add(1, Ordering::Relaxed);
         for members in groups.into_values() {
             targets.push(members[turn % members.len()].clone());
+        }
+        if targets.is_empty()
+            && let Some(reply) = published.reply
+            && let Some(publisher) = clients.get(&published.from)
+            && publisher.no_responders
+            && publisher.headers
+        {
+            let answers: Vec<String> = publisher
+                .subscriptions
+                .iter()
+                .filter(|(_, subscription)| subject_matches(&subscription.subject, reply))
+                .map(|(sid, _)| sid.clone())
+                .collect();
+            let writer = Arc::clone(&publisher.writer);
+            drop(clients);
+            for sid in answers {
+                let packet = message(reply, &sid, None, NO_RESPONDERS_HEADER, b"", true);
+                let _ = writer
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .write_all(&packet);
+            }
+            return;
         }
         let mut deliveries: Vec<(SharedWriter, String, bool)> = Vec::with_capacity(targets.len());
         for (id, sid) in targets {
@@ -219,12 +245,24 @@ impl Session<'_> {
         };
         let user = text(&options, "user").unwrap_or_default();
         let password = text(&options, "pass").unwrap_or_default();
-        let authorized =
-            eggdb_crypto::constant_time_eq(user.as_bytes(), self.config.user.as_bytes())
-                && eggdb_crypto::constant_time_eq(
-                    &eggdb_crypto::sha256(password.as_bytes()),
-                    &self.config.password_sha256,
-                );
+        let authorized = match text(&options, "auth_token") {
+            Some(token) if user.is_empty() => eggdb_crypto::constant_time_eq(
+                &eggdb_crypto::sha256(token.as_bytes()),
+                &self.config.password_sha256,
+            ),
+            _ => {
+                eggdb_crypto::constant_time_eq(user.as_bytes(), self.config.user.as_bytes())
+                    && eggdb_crypto::constant_time_eq(
+                        &eggdb_crypto::sha256(password.as_bytes()),
+                        &self.config.password_sha256,
+                    )
+            }
+        };
+        let headers = flag(&options, "headers", false);
+        if flag(&options, "no_responders", false) && !headers {
+            self.error("no responders requires headers support")?;
+            return Ok(Next::Close);
+        }
         if !authorized {
             self.error("Authorization Violation")?;
             return Ok(Next::Close);
@@ -238,7 +276,8 @@ impl Session<'_> {
                     writer: Arc::clone(&self.writer),
                     subscriptions: BTreeMap::new(),
                     echo: flag(&options, "echo", true),
-                    headers: flag(&options, "headers", false),
+                    headers,
+                    no_responders: flag(&options, "no_responders", false),
                 },
             );
         }
