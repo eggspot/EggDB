@@ -117,13 +117,14 @@ impl Target {
             }
             Self::Bson => {
                 let decoded = guarded(|| eggdb_bson::read_document(input))?;
-                if let Ok((document, used)) = decoded {
+                if let Ok((document, _)) = decoded {
                     let again = document.to_bytes();
-                    if again != input[..used] {
-                        let reread = guarded(|| eggdb_bson::read_document(&again))?;
-                        if reread.map(|(document_again, _)| document_again) != Ok(document) {
-                            return Err("a decoded BSON document does not round-trip".to_owned());
-                        }
+                    let stable = match guarded(|| eggdb_bson::read_document(&again))? {
+                        Ok((reread, _)) => reread.to_bytes() == again,
+                        Err(_) => false,
+                    };
+                    if !stable {
+                        return Err("a decoded BSON document does not round-trip".to_owned());
                     }
                 }
                 Ok(())
