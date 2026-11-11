@@ -157,7 +157,7 @@ impl<'s> Broker<'s> {
         }
     }
 
-    fn dead_letter(&self, queue: &str, stored: &[u8], now: u64) {
+    fn dead_letter(&self, queue: &str, stored: &[u8], now: u64, reason: &str) {
         let policy = self.policy_of(queue);
         let Some(exchange) = policy.dead_letter_exchange else {
             return;
@@ -166,11 +166,20 @@ impl<'s> Broker<'s> {
         let routing_key = policy
             .dead_letter_routing_key
             .unwrap_or_else(|| message.routing_key.clone());
-        let headers = crate::field_table::message_headers(message.properties);
+        let headers = crate::field_table::with_death(
+            crate::field_table::message_headers(message.properties),
+            queue,
+            reason,
+            &message.exchange,
+            &message.routing_key,
+            now / 1000,
+        );
+        let properties = crate::field_table::with_headers(message.properties, &headers)
+            .unwrap_or_else(|| message.properties.to_vec());
         let Some(targets) = self.route(&exchange, &routing_key, &headers) else {
             return;
         };
-        let republished = encode_message(&exchange, &routing_key, message.properties, message.body);
+        let republished = encode_message(&exchange, &routing_key, &properties, message.body);
         for target in targets.iter().filter(|target| target.as_str() != queue) {
             if self.queues.exists(target).unwrap_or(false) {
                 let _ = self.queues.send(target, &republished, 0, now);
@@ -189,7 +198,7 @@ impl<'s> Broker<'s> {
             return false;
         }
         let _ = self.queues.ack(queue, message.id);
-        self.dead_letter(queue, &message.body, now);
+        self.dead_letter(queue, &message.body, now, "expired");
         true
     }
 
@@ -710,7 +719,7 @@ impl Connection<'_, '_> {
                     Some(false) => {
                         let _ = self.broker.queues.ack(&queue, id);
                         if let Some(body) = rejected_body {
-                            self.broker.dead_letter(&queue, &body, now);
+                            self.broker.dead_letter(&queue, &body, now, "rejected");
                         }
                     }
                     None => {

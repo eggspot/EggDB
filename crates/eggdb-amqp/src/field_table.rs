@@ -182,6 +182,159 @@ pub(crate) fn message_expiration(properties: &[u8]) -> Option<u64> {
     reader.shortstr().ok()?.trim().parse().ok()
 }
 
+fn encode_value(value: &FieldValue, out: &mut Vec<u8>) {
+    match value {
+        FieldValue::Boolean(flag) => {
+            out.push(b't');
+            out.push(u8::from(*flag));
+        }
+        FieldValue::Integer(number) => {
+            out.push(b'l');
+            out.extend_from_slice(&(*number as i64).to_be_bytes());
+        }
+        FieldValue::Float(number) => {
+            out.push(b'd');
+            out.extend_from_slice(&number.to_be_bytes());
+        }
+        FieldValue::Decimal(scale, digits) => {
+            out.push(b'D');
+            out.push(*scale);
+            out.extend_from_slice(&digits.to_be_bytes());
+        }
+        FieldValue::Bytes(bytes) => {
+            out.push(b'S');
+            out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            out.extend_from_slice(bytes);
+        }
+        FieldValue::Array(items) => {
+            let mut inner = Vec::new();
+            for item in items {
+                encode_value(item, &mut inner);
+            }
+            out.push(b'A');
+            out.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+            out.extend_from_slice(&inner);
+        }
+        FieldValue::Timestamp(seconds) => {
+            out.push(b'T');
+            out.extend_from_slice(&seconds.to_be_bytes());
+        }
+        FieldValue::Table(entries) => {
+            let inner = encode_table(entries);
+            out.push(b'F');
+            out.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+            out.extend_from_slice(&inner);
+        }
+        FieldValue::Void => out.push(b'V'),
+    }
+}
+
+/// A field table's bytes (without its length prefix).
+pub(crate) fn encode_table(entries: &[(String, FieldValue)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (name, value) in entries {
+        let name = &name.as_bytes()[..name.len().min(255)];
+        out.push(name.len() as u8);
+        out.extend_from_slice(name);
+        encode_value(value, &mut out);
+    }
+    out
+}
+
+/// The content header's properties with `headers` as their headers table, the other
+/// properties kept as they were; `None` when the properties cannot be read.
+pub(crate) fn with_headers(properties: &[u8], headers: &[(String, FieldValue)]) -> Option<Vec<u8>> {
+    let mut reader = Reader {
+        bytes: properties,
+        at: 0,
+    };
+    let flags = reader.array::<2>().map(u16::from_be_bytes).ok()?;
+    let has = |bit: u16| flags & (1 << bit) != 0;
+    for bit in [15, 14] {
+        if has(bit) {
+            reader.shortstr().ok()?;
+        }
+    }
+    let before_headers = reader.at;
+    if has(13) {
+        reader.longstr().ok()?;
+    }
+    let after_headers = reader.at;
+    let table = encode_table(headers);
+    let mut out = Vec::with_capacity(properties.len() + table.len() + 4);
+    out.extend_from_slice(&(flags | (1 << 13)).to_be_bytes());
+    out.extend_from_slice(&properties[2..before_headers]);
+    out.extend_from_slice(&(table.len() as u32).to_be_bytes());
+    out.extend_from_slice(&table);
+    out.extend_from_slice(&properties[after_headers..]);
+    Some(out)
+}
+
+/// The headers with RabbitMQ's dead-letter record added: the `x-death` entry for this queue and
+/// reason counted up and moved first (or a new one with count 1), and the `x-first-death-*` and
+/// `x-last-death-*` headers.
+pub(crate) fn with_death(
+    mut headers: Vec<(String, FieldValue)>,
+    queue: &str,
+    reason: &str,
+    exchange: &str,
+    routing_key: &str,
+    now_seconds: u64,
+) -> Vec<(String, FieldValue)> {
+    let text = |value: &str| FieldValue::Bytes(value.as_bytes().to_vec());
+    let mut deaths = match headers.iter().position(|(name, _)| name == "x-death") {
+        Some(at) => match headers.remove(at).1 {
+            FieldValue::Array(items) => items,
+            _ => Vec::new(),
+        },
+        None => Vec::new(),
+    };
+    let same = |entry: &FieldValue| match entry {
+        FieldValue::Table(fields) => {
+            text_named(fields, "queue").as_deref() == Some(queue)
+                && text_named(fields, "reason").as_deref() == Some(reason)
+        }
+        _ => false,
+    };
+    let count = match deaths.iter().position(same) {
+        Some(at) => match deaths.remove(at) {
+            FieldValue::Table(fields) => integer_named(&fields, "count").unwrap_or(0) + 1,
+            _ => 1,
+        },
+        None => 1,
+    };
+    deaths.insert(
+        0,
+        FieldValue::Table(vec![
+            ("count".to_owned(), FieldValue::Integer(i128::from(count))),
+            ("reason".to_owned(), text(reason)),
+            ("queue".to_owned(), text(queue)),
+            ("time".to_owned(), FieldValue::Timestamp(now_seconds)),
+            ("exchange".to_owned(), text(exchange)),
+            ("routing-keys".to_owned(), FieldValue::Array(vec![text(routing_key)])),
+        ]),
+    );
+    headers.insert(0, ("x-death".to_owned(), FieldValue::Array(deaths)));
+    for (name, value) in [
+        ("x-first-death-reason", reason),
+        ("x-first-death-queue", queue),
+        ("x-first-death-exchange", exchange),
+    ] {
+        if !headers.iter().any(|(known, _)| known == name) {
+            headers.push((name.to_owned(), text(value)));
+        }
+    }
+    for (name, value) in [
+        ("x-last-death-reason", reason),
+        ("x-last-death-queue", queue),
+        ("x-last-death-exchange", exchange),
+    ] {
+        headers.retain(|(known, _)| known != name);
+        headers.push((name.to_owned(), text(value)));
+    }
+    headers
+}
+
 /// The non-negative integer value of argument or header `name`, if it has one.
 pub(crate) fn integer_named(table: &[(String, FieldValue)], name: &str) -> Option<u64> {
     table.iter().find(|(key, _)| key == name).and_then(|(_, value)| match value {
@@ -288,4 +441,38 @@ mod tests {
         assert_eq!(integer_named(&arguments, "x-message-ttl"), Some(500));
         assert_eq!(text_named(&arguments, "x-dead-letter-exchange").as_deref(), Some("dlx"));
     }
+
+    #[test]
+    fn dead_lettered_messages_carry_x_death_and_keep_their_other_properties() {
+        let mut properties = ((1u16 << 15) | (1 << 12)).to_be_bytes().to_vec();
+        properties.push(10);
+        properties.extend_from_slice(b"text/plain");
+        properties.push(2);
+        let first = with_death(Vec::new(), "work", "rejected", "jobs", "job.new", 100);
+        let rewritten = with_headers(&properties, &first).unwrap();
+        let headers = message_headers(&rewritten);
+        let Some((_, FieldValue::Array(deaths))) = headers.iter().find(|(name, _)| name == "x-death") else {
+            panic!("no x-death in {headers:?}");
+        };
+        assert_eq!(deaths.len(), 1);
+        assert_eq!(text_named(&headers, "x-first-death-queue").as_deref(), Some("work"));
+        assert_eq!(rewritten[rewritten.len() - 1], 2, "the delivery mode stays after the headers");
+        let again = with_death(headers, "work", "rejected", "jobs", "job.new", 200);
+        let Some((_, FieldValue::Array(deaths))) = again.iter().find(|(name, _)| name == "x-death") else {
+            panic!("no x-death in {again:?}");
+        };
+        assert_eq!(deaths.len(), 1);
+        let FieldValue::Table(entry) = &deaths[0] else {
+            panic!("an x-death entry is a table");
+        };
+        assert_eq!(integer_named(entry, "count"), Some(2));
+        let other = with_death(again, "slow", "expired", "", "slow", 300);
+        let Some((_, FieldValue::Array(deaths))) = other.iter().find(|(name, _)| name == "x-death") else {
+            panic!("no x-death in {other:?}");
+        };
+        assert_eq!(deaths.len(), 2);
+        assert_eq!(text_named(&other, "x-first-death-reason").as_deref(), Some("rejected"));
+        assert_eq!(text_named(&other, "x-last-death-reason").as_deref(), Some("expired"));
+    }
+
 }
