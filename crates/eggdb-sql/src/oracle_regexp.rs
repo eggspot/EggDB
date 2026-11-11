@@ -18,6 +18,7 @@ fn illegal_argument() -> SqlError {
 fn options_of(match_parameter: Option<String>) -> SqlResult<Options> {
     let mut options = Options {
         leftmost_first: true,
+        negated_classes_take_newline: true,
         ..Options::default()
     };
     let mut dot_matches_newline = false;
@@ -33,6 +34,120 @@ fn options_of(match_parameter: Option<String>) -> SqlResult<Options> {
     }
     options.newline_excluded = !dot_matches_newline;
     Ok(options)
+}
+
+const EQUIVALENTS: [(char, &str); 20] = [
+    ('a', "aàáâãäåāăą"),
+    ('c', "cçćĉċč"),
+    ('d', "dď"),
+    ('e', "eèéêëēĕėęě"),
+    ('g', "gĝğġģ"),
+    ('i', "iìíîïĩīĭį"),
+    ('l', "lĺļľł"),
+    ('n', "nñńņňŉ"),
+    ('o', "oòóôõöøōŏő"),
+    ('r', "rŕŗř"),
+    ('s', "sśŝşš"),
+    ('t', "tţť"),
+    ('u', "uùúûüũūŭůűų"),
+    ('y', "yýÿŷ"),
+    ('z', "zźżž"),
+    ('A', "AÀÁÂÃÄÅĀĂĄ"),
+    ('E', "EÈÉÊËĒĔĖĘĚ"),
+    ('I', "IÌÍÎÏĨĪĬĮ"),
+    ('O', "OÒÓÔÕÖØŌŎŐ"),
+    ('U', "UÙÚÛÜŨŪŬŮŰŲ"),
+];
+
+fn equivalents_of(letter: char) -> String {
+    EQUIVALENTS
+        .iter()
+        .find(|(_, members)| members.contains(letter))
+        .map_or_else(|| letter.to_string(), |(_, members)| (*members).to_owned())
+}
+
+fn invalid_collation() -> SqlError {
+    SqlError::new(
+        SqlState::INVALID_REGULAR_EXPRESSION,
+        "invalid collation class in regular expression",
+    )
+    .with_oracle_code(12731)
+}
+
+/// Oracle's regular-expression syntax in the engine's: `\z` (the very end) becomes `\Z`, and an
+/// equivalence class `[=e=]` inside brackets becomes every letter with the same base (`eèéêë...`).
+/// A collating element of several characters (`[.ch.]`) is ORA-12731 under binary sorting, as in
+/// Oracle.
+fn oracle_pattern(pattern: &str) -> SqlResult<String> {
+    let characters: Vec<char> = pattern.chars().collect();
+    let mut out = String::with_capacity(pattern.len());
+    let mut in_brackets = false;
+    let mut at = 0;
+    while let Some(&character) = characters.get(at) {
+        if character == '\\' && !in_brackets {
+            match characters.get(at + 1) {
+                Some('z') => out.push_str("\\Z"),
+                Some(next) => {
+                    out.push('\\');
+                    out.push(*next);
+                }
+                None => out.push('\\'),
+            }
+            at += 2;
+            continue;
+        }
+        if !in_brackets && character == '[' {
+            in_brackets = true;
+            out.push('[');
+            at += 1;
+            if characters.get(at) == Some(&'^') {
+                out.push('^');
+                at += 1;
+            }
+            if characters.get(at) == Some(&']') {
+                out.push(']');
+                at += 1;
+            }
+            continue;
+        }
+        if in_brackets && character == '[' {
+            let delimiter = characters.get(at + 1).copied();
+            if matches!(delimiter, Some('=' | '.' | ':')) {
+                let delimiter = delimiter.unwrap_or('=');
+                let rest = &characters[at + 2..];
+                let closing = rest
+                    .windows(2)
+                    .position(|pair| pair[0] == delimiter && pair[1] == ']')
+                    .ok_or_else(invalid_collation)?;
+                let name: String = rest[..closing].iter().collect();
+                match delimiter {
+                    '=' => {
+                        let mut letters = name.chars();
+                        let (Some(letter), None) = (letters.next(), letters.next()) else {
+                            return Err(invalid_collation());
+                        };
+                        out.push_str(&equivalents_of(letter));
+                    }
+                    '.' if name.chars().count() > 1 => return Err(invalid_collation()),
+                    _ => {
+                        out.push('[');
+                        out.push(delimiter);
+                        out.push_str(&name);
+                        out.push(delimiter);
+                        out.push(']');
+                    }
+                }
+                at += 2 + closing + 2;
+                continue;
+            }
+        }
+        if in_brackets && character == ']' {
+            in_brackets = false;
+        }
+        out.push(character);
+        at += 1;
+    }
+    Ok(out)
 }
 
 fn given_text(value: Option<&Value>) -> Option<String> {
@@ -74,7 +189,7 @@ impl Search {
         };
         let position = at_least(position, 1)?;
         let options = options_of(values.get(match_parameter_at).and_then(text_of))?;
-        let regex = compiled_with(&pattern, options)?;
+        let regex = compiled_with(&oracle_pattern(&pattern)?, options)?;
         Ok(Some(Self {
             chars: source.chars().collect(),
             regex,
@@ -334,6 +449,23 @@ mod tests {
             call("oracle_regexp_substr", &[text("aaa"), text("a+?")]),
             Ok(text("a"))
         );
+    }
+
+    #[test]
+    fn oracles_own_syntax_reads_equivalence_classes_newlines_and_the_very_end() {
+        assert_eq!(
+            call("oracle_regexp_like", &[text("caf\u{e9}"), text("caf[[=e=]]$")]),
+            Ok(Value::Boolean(true))
+        );
+        assert_eq!(
+            call("oracle_regexp_like", &[text("a\nb"), text("a[^x]b")]),
+            Ok(Value::Boolean(true))
+        );
+        assert_eq!(
+            call("oracle_regexp_like", &[text("ab"), text("b\\z")]),
+            Ok(Value::Boolean(true))
+        );
+        assert!(call("oracle_regexp_like", &[text("ch"), text("[[.ch.]]")]).is_err());
     }
 
     #[test]

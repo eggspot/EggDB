@@ -280,6 +280,7 @@ pub(crate) struct Finder<'r, 't> {
     classes: &'r [CharClass],
     case: CaseSensitivity,
     newline_excluded: bool,
+    negated_classes_take_newline: bool,
     leftmost_first: bool,
     text: &'t [char],
     visited: Option<Visited>,
@@ -322,6 +323,7 @@ impl<'r, 't> Finder<'r, 't> {
             classes: &regex.classes,
             case: regex.options.case,
             newline_excluded: regex.options.newline_excluded,
+            negated_classes_take_newline: regex.options.negated_classes_take_newline,
             leftmost_first: regex.options.leftmost_first,
             text,
             visited,
@@ -406,7 +408,11 @@ impl<'r, 't> Finder<'r, 't> {
         let Some(class) = self.classes.get(class as usize) else {
             return false;
         };
-        if self.newline_excluded && character == '\n' && class.negated {
+        if self.newline_excluded
+            && !self.negated_classes_take_newline
+            && character == '\n'
+            && class.negated
+        {
             return false;
         }
         class.matches(character, self.case)

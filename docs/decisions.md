@@ -476,3 +476,4 @@ its full title with its status.
 - [D449](decisions/D449.md) Code-only batch 97 (M10): SQL Server's `sp_sequence_get_range`
 - [D450](decisions/D450.md) Code-only batch 98 (M10): Oracle's lax `IS JSON`, `JSON_SERIALIZE` options and `JSON_SCALAR`
 - [D451](decisions/D451.md) Code-only batch 99 (M10): more NLS languages and territories
+- [D452](decisions/D452.md) Code-only batch 100 (M10): the rest of Oracle's regular-expression syntax

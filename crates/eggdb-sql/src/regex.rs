@@ -32,6 +32,7 @@ pub(crate) struct Options {
     pub(crate) expanded: bool,
     pub(crate) literal: bool,
     pub(crate) leftmost_first: bool,
+    pub(crate) negated_classes_take_newline: bool,
 }
 
 pub(crate) enum OptionLetter {
