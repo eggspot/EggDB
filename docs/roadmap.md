@@ -778,7 +778,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Writes with confirmation over HTTP (D189, D190).
 - Server-sent event streams (D189). Answers as SSE when the client asks: **code written, unbuilt**
   (code-only mode, 2026-11-11, D487); progress streams wait for tools that report progress.
-- Per-agent time limits and quotas, and the agent's role in each audit record (D190).
+- Per-agent time limits and quotas, and the agent's role in each audit record (D190). **Code written,
+  unbuilt** (code-only mode, 2026-11-11, D491) for `eggdb serve`'s MCP endpoint.
 - Table resources beyond the schema document (D190).
 - The 2026-07-28 protocol revision (D190).
 - `eggdb mcp --tables`: deleting rows of a table listed with columns, inserts whose hidden column

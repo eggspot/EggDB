@@ -13,7 +13,9 @@ type McpSession<'d> = (Option<String>, Server<'d, SharedOpener<'d>>);
 const MAX_SESSIONS: usize = 64;
 const SESSION_HEADER: &str = "mcp-session-id";
 const TIME_LIMIT: Duration = Duration::from_secs(5);
+const MAX_TIME_LIMIT: Duration = Duration::from_secs(300);
 const MIN_TOKEN_BYTES: usize = 16;
+const QUOTA_WINDOW: Duration = Duration::from_secs(60);
 
 pub(super) struct SharedOpener<'d> {
     pub(super) db: &'d Database,
@@ -45,12 +47,15 @@ pub(super) struct McpEndpoint<'d> {
     audit: PathBuf,
     sessions: Mutex<HashMap<String, McpSession<'d>>>,
     order: Mutex<Vec<String>>,
+    usage: Mutex<HashMap<usize, (std::time::Instant, u32)>>,
 }
 
 #[derive(Clone)]
 pub(super) struct AgentToken {
     role: Option<String>,
     token: String,
+    time_limit: Duration,
+    calls_per_minute: Option<u32>,
 }
 
 pub(super) fn read_tokens(path: &std::path::Path) -> Result<Vec<AgentToken>, String> {
@@ -64,13 +69,50 @@ pub(super) fn read_tokens(path: &std::path::Path) -> Result<Vec<AgentToken>, Str
     };
     let mut tokens = Vec::new();
     for (index, line) in text.lines().enumerate() {
-        let words: Vec<&str> = line.split_whitespace().collect();
+        let (options, words): (Vec<&str>, Vec<&str>) =
+            line.split_whitespace().partition(|word| word.contains('='));
         let (role, token) = match words.as_slice() {
-            [] => continue,
+            [] if options.is_empty() => continue,
             [token] => (None, *token),
             [role, token] => (Some((*role).to_owned()), *token),
             _ => return Err(wrong(index + 1)),
         };
+        let mut time_limit = TIME_LIMIT;
+        let mut calls_per_minute = None;
+        for option in options {
+            let (name, value) = option.split_once('=').unwrap_or((option, ""));
+            let bad = || {
+                format!(
+                    "--mcp-token-file {} line {}: {name}= takes a whole number (time_limit in seconds up to {}, calls_per_minute at least 1)",
+                    path.display(),
+                    index + 1,
+                    MAX_TIME_LIMIT.as_secs()
+                )
+            };
+            match name {
+                "time_limit" => {
+                    let seconds: u64 = value.parse().map_err(|_| bad())?;
+                    if seconds == 0 || seconds > MAX_TIME_LIMIT.as_secs() {
+                        return Err(bad());
+                    }
+                    time_limit = Duration::from_secs(seconds);
+                }
+                "calls_per_minute" => {
+                    let calls: u32 = value.parse().map_err(|_| bad())?;
+                    if calls == 0 {
+                        return Err(bad());
+                    }
+                    calls_per_minute = Some(calls);
+                }
+                _ => {
+                    return Err(format!(
+                        "--mcp-token-file {} line {}: unknown option {name}=; use time_limit= or calls_per_minute=",
+                        path.display(),
+                        index + 1
+                    ));
+                }
+            }
+        }
         if token.len() < MIN_TOKEN_BYTES || !token.is_ascii() {
             return Err(wrong(index + 1));
         }
@@ -84,6 +126,8 @@ pub(super) fn read_tokens(path: &std::path::Path) -> Result<Vec<AgentToken>, Str
         tokens.push(AgentToken {
             role,
             token: token.to_owned(),
+            time_limit,
+            calls_per_minute,
         });
     }
     if tokens.is_empty() {
@@ -128,28 +172,55 @@ impl<'d> McpEndpoint<'d> {
             audit,
             sessions: Mutex::new(HashMap::new()),
             order: Mutex::new(Vec::new()),
+            usage: Mutex::new(HashMap::new()),
         }
     }
 
-    fn agent(&self, request: &eggdb_http::Request) -> Option<Option<String>> {
+    fn agent_index(&self, request: &eggdb_http::Request) -> Option<usize> {
         let given = request
             .header("authorization")
             .and_then(|value| value.strip_prefix("Bearer "))?
             .trim();
         let mut found = None;
-        for agent in &self.tokens {
+        for (index, agent) in self.tokens.iter().enumerate() {
             if eggdb_crypto::constant_time_eq(given.as_bytes(), agent.token.as_bytes()) {
-                found = Some(agent.role.clone());
+                found = Some(index);
             }
         }
         found
+    }
+
+    fn over_quota(&self, index: usize) -> Option<u64> {
+        let limit = self.tokens.get(index)?.calls_per_minute?;
+        let mut usage = self
+            .usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = std::time::Instant::now();
+        let entry = usage.entry(index).or_insert((now, 0));
+        if now.duration_since(entry.0) >= QUOTA_WINDOW {
+            *entry = (now, 0);
+        }
+        if entry.1 >= limit {
+            let wait = QUOTA_WINDOW.saturating_sub(now.duration_since(entry.0));
+            return Some(wait.as_secs().max(1));
+        }
+        entry.1 += 1;
+        None
+    }
+
+    fn time_limit_of(&self, role: &Option<String>) -> Duration {
+        self.tokens
+            .iter()
+            .find(|agent| &agent.role == role)
+            .map_or(TIME_LIMIT, |agent| agent.time_limit)
     }
 
     fn new_session(&self, role: Option<String>) -> Option<(String, Server<'d, SharedOpener<'d>>)> {
         let config = ServerConfig {
             database_name: self.database_name.clone(),
             server_version: eggdb::VERSION.to_owned(),
-            time_limit: TIME_LIMIT,
+            time_limit: self.time_limit_of(&role),
             audit: AuditLog::new(self.audit.clone()),
             allow_write: false,
             tables: self.tables.clone(),
@@ -169,10 +240,17 @@ impl<'d> McpEndpoint<'d> {
         if request.header("origin").is_some() {
             return eggdb_http::Response::text(403, "requests from web pages are refused");
         }
-        let Some(role) = self.agent(request) else {
+        let Some(index) = self.agent_index(request) else {
             return eggdb_http::Response::text(401, "a Bearer token is required")
                 .with_header("WWW-Authenticate", "Bearer");
         };
+        let role = self.tokens[index].role.clone();
+        if request.method == "POST"
+            && let Some(wait) = self.over_quota(index)
+        {
+            return json_error(429, "this agent's calls_per_minute quota is spent")
+                .with_header("Retry-After", &wait.to_string());
+        }
         if request.method == "DELETE" {
             if let Some(id) = request.header(SESSION_HEADER) {
                 let mut sessions = self

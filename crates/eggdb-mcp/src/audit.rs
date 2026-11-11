@@ -294,6 +294,7 @@ pub(crate) struct CallRequest<'a> {
     pub(crate) client_name: Option<&'a str>,
     pub(crate) client_version: Option<&'a str>,
     pub(crate) protocol: Option<&'a str>,
+    pub(crate) role: Option<&'a str>,
     pub(crate) tool: &'a str,
     pub(crate) arguments: &'a str,
 }
@@ -331,6 +332,7 @@ fn request_fields(out: &mut JsonOut, event: &str, request: &CallRequest<'_>) {
             .end_object();
     }
     out.optional_string("protocol", request.protocol)
+        .optional_string("role", request.role)
         .key("tool")
         .string(request.tool);
     let arguments = request.arguments;
@@ -449,6 +451,8 @@ pub struct AuditEntry {
     /// For a call-started record: no call with its id follows, so the server stopped during
     /// the call and its outcome is unknown.
     pub outcome_unknown: bool,
+    /// The role the agent acted as, for a call made over HTTP with a token tied to a role.
+    pub role: Option<String>,
 }
 
 /// One line of the audit file as [`read_audit`] found it.
@@ -761,6 +765,7 @@ fn record_of(line: &str) -> Option<(String, AuditEntry)> {
         tables: texts_of(&members, "tables"),
         call_gap_ms: number_of(&members, "call_gap_ms"),
         outcome_unknown: false,
+        role: text_of(&members, "role"),
     };
     Some((ascii.finish(), entry))
 }
@@ -826,6 +831,7 @@ mod tests {
             client_name: Some("claude-code"),
             client_version: Some("2.1.0"),
             protocol: Some("2025-11-25"),
+            role: None,
             tool,
             arguments,
         }

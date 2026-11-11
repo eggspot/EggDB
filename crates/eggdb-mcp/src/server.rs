@@ -471,6 +471,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
             client_name: self.client.name.as_deref(),
             client_version: self.client.version.as_deref(),
             protocol: self.client.protocol.as_deref(),
+            role: self.config.agent_role.as_deref(),
             tool,
             arguments,
         }
