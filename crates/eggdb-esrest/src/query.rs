@@ -59,6 +59,14 @@ pub(crate) enum Query {
         low: u128,
         high: u128,
     },
+    FlattenedTerm {
+        field: String,
+        value: Json,
+    },
+    SparseVector {
+        field: String,
+        weights: Vec<(String, f64)>,
+    },
     Nested {
         path: String,
         query: Box<Query>,
@@ -291,6 +299,7 @@ pub(crate) fn parse(node: &Node, depth: usize) -> Result<Query, String> {
                 mode,
             }
         }
+        "sparse_vector" | "text_expansion" => sparse_vector(kind, body)?,
         "geo_distance" => geo_distance(body)?,
         "geo_bounding_box" => geo_bounding_box(body)?,
         "query_string" => crate::query_string::parse(body, false)?,
@@ -608,6 +617,35 @@ pub(crate) fn score(query: &Query, id: &str, source: &Node, stats: &Stats) -> Op
                     })
             })
             .then_some(1.0),
+        Query::FlattenedTerm { field, value } => {
+            let wanted = match value {
+                Json::String(text) | Json::Number(text) => text.clone(),
+                Json::Boolean(flag) => flag.to_string(),
+                _ => return None,
+            };
+            let mut leaves = Vec::new();
+            for node in values_at(source, field) {
+                flattened_leaves(node, 0, &mut leaves);
+            }
+            leaves.contains(&wanted).then_some(1.0)
+        }
+        Query::SparseVector { field, weights } => {
+            let stored = values_at(source, field);
+            let mut total = 0.0;
+            let mut matched = false;
+            for node in stored {
+                for (token, weight) in weights {
+                    if let Some(held) = member(node, token).and_then(|held| match &held.value {
+                        Json::Number(text) => text.parse::<f64>().ok(),
+                        _ => None,
+                    }) {
+                        total += weight * held;
+                        matched = true;
+                    }
+                }
+            }
+            matched.then_some(total)
+        }
         Query::Nested { path, query, mode } => {
             let scores: Vec<f64> = nested_objects(source, path)
                 .into_iter()
@@ -717,5 +755,62 @@ pub(crate) fn wrapped(path: &str, object: &Node) -> Node {
         value: Json::Object(vec![(part.to_owned(), inner)]),
         start: 0,
         end: 0,
+    })
+}
+
+const MAX_FLATTENED_DEPTH: usize = 20;
+
+fn flattened_leaves(node: &Node, depth: usize, out: &mut Vec<String>) {
+    if depth > MAX_FLATTENED_DEPTH {
+        return;
+    }
+    match &node.value {
+        Json::String(text) | Json::Number(text) => out.push(text.clone()),
+        Json::Boolean(flag) => out.push(flag.to_string()),
+        Json::Array(items) => {
+            for item in items {
+                flattened_leaves(item, depth + 1, out);
+            }
+        }
+        Json::Object(members) => {
+            for (_, member) in members {
+                flattened_leaves(member, depth + 1, out);
+            }
+        }
+        Json::Null => {}
+    }
+}
+
+fn sparse_vector(kind: &str, body: &Node) -> Result<Query, String> {
+    let (field, spec) = if kind == "text_expansion" {
+        single(body, kind)?
+    } else {
+        let field = member(body, "field")
+            .and_then(|node| match &node.value {
+                Json::String(field) => Some(field.as_str()),
+                _ => None,
+            })
+            .ok_or_else(|| "[sparse_vector] requires a field".to_owned())?;
+        (field, body)
+    };
+    let tokens = member(spec, "query_vector")
+        .or_else(|| member(spec, "tokens"))
+        .ok_or_else(|| format!("[{kind}] requires a query_vector; inference is not available"))?;
+    let Json::Object(members) = &tokens.value else {
+        return Err(format!("[{kind}] query_vector must be an object of token weights"));
+    };
+    let weights = members
+        .iter()
+        .map(|(token, weight)| match &weight.value {
+            Json::Number(text) => text
+                .parse::<f64>()
+                .map(|weight| (token.clone(), weight))
+                .map_err(|_| format!("[{kind}] weight of [{token}] is not a number")),
+            _ => Err(format!("[{kind}] weight of [{token}] is not a number")),
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(Query::SparseVector {
+        field: field.to_owned(),
+        weights,
     })
 }

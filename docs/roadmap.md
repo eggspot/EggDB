@@ -970,7 +970,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   mode, 2026-11-11, D560); `dense_vector` with `knn` search: **code written, unbuilt** (code-only
   mode, 2026-11-11, D561); the `nested` query: **code written, unbuilt** (code-only mode,
   2026-11-11, D562); `completion` suggestions: **code written, unbuilt** (code-only mode,
-  2026-11-11, D563).
+  2026-11-11, D563); `flattened` and `sparse_vector`: **code written, unbuilt** (code-only mode,
+  2026-11-11, D564).
 - `wait_for_completion=false` tasks for the by-query APIs (D331). **Code written, unbuilt** (code-only
   mode, 2026-11-11, D473): the task finishes in the request and is kept for `_tasks`.
 - `_rethrottle` and parallel `slices` for the by-query APIs (D331). **Code written, unbuilt** (code-only

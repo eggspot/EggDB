@@ -588,3 +588,4 @@ its full title with its status.
 - [D561](decisions/D561.md) Code-only batch 209 (M8): knn search over dense_vector fields
 - [D562](decisions/D562.md) Code-only batch 210 (M8): the nested query and aggregation
 - [D563](decisions/D563.md) Code-only batch 211 (M8): the completion suggester
+- [D564](decisions/D564.md) Code-only batch 212 (M8): flattened fields and the sparse_vector query

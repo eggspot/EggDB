@@ -1582,3 +1582,28 @@ fn a_nested_query_needs_one_object_to_match_every_condition() {
     assert!(counted.contains("\"comments\":{\"doc_count\":4"), "{counted}");
     assert!(counted.contains("\"top\":{\"value\":5"), "{counted}");
 }
+
+#[test]
+fn flattened_fields_match_any_leaf_and_sparse_vectors_score_by_weights() {
+    let keyspace = MemoryKeyspace::default();
+    let api = api(&keyspace);
+    let created = api.answer(&request(
+        "PUT",
+        "/tickets",
+        "{\"mappings\":{\"properties\":{\"labels\":{\"type\":\"flattened\"},\"tokens\":{\"type\":\"sparse_vector\"}}}}",
+    ));
+    assert_eq!(created.status, 200, "{}", body(&created));
+    for (id, document) in [
+        ("1", "{\"labels\":{\"priority\":\"urgent\",\"team\":{\"name\":\"db\"}},\"tokens\":{\"cat\":1.5,\"dog\":0.2}}"),
+        ("2", "{\"labels\":{\"priority\":\"low\"},\"tokens\":{\"dog\":3.0}}"),
+    ] {
+        let indexed = api.answer(&request("PUT", &format!("/tickets/_doc/{id}"), document));
+        assert!(indexed.status < 300, "{}", body(&indexed));
+    }
+    let search = |query: &str| body(&api.answer(&request("POST", "/tickets/_search", query)));
+    let team = search("{\"query\":{\"term\":{\"labels\":\"db\"}}}");
+    assert!(team.contains("\"_id\":\"1\"") && !team.contains("\"_id\":\"2\""), "{team}");
+    let cats = search("{\"query\":{\"sparse_vector\":{\"field\":\"tokens\",\"query_vector\":{\"cat\":2.0}}}}");
+    assert!(cats.contains("\"_id\":\"1\"") && cats.contains("\"_score\":3"), "{cats}");
+    assert!(!cats.contains("\"_id\":\"2\""), "{cats}");
+}

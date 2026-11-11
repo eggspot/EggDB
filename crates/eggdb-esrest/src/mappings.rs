@@ -19,6 +19,7 @@ pub(crate) enum FieldType {
     Keyword,
     Date,
     Ip,
+    Flattened,
     Other,
 }
 
@@ -29,6 +30,7 @@ impl FieldType {
             "keyword" | "constant_keyword" | "wildcard" => Self::Keyword,
             "date" | "date_nanos" => Self::Date,
             "ip" => Self::Ip,
+            "flattened" => Self::Flattened,
             _ => Self::Other,
         }
     }
@@ -161,6 +163,10 @@ pub(crate) fn apply(query: Query, types: &FieldTypes, now_millis: i64) -> Query 
                     terms: vec![wanted],
                     all: false,
                 },
+                (FieldType::Flattened, value) => Query::FlattenedTerm {
+                    field: mapped.source,
+                    value,
+                },
                 (FieldType::Ip, Json::String(wanted)) => match cidr(&wanted) {
                     Some((low, high)) => Query::IpRange {
                         field: mapped.source,
@@ -176,7 +182,12 @@ pub(crate) fn apply(query: Query, types: &FieldTypes, now_millis: i64) -> Query 
             }
         }
         Query::Terms { field, values } => match types.resolve(&field) {
-            Some(mapped) if matches!(mapped.kind, FieldType::Text | FieldType::Ip) => {
+            Some(mapped)
+                if matches!(
+                    mapped.kind,
+                    FieldType::Text | FieldType::Ip | FieldType::Flattened
+                ) =>
+            {
                 any_of(
                     values
                         .into_iter()
