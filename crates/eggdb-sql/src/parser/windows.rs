@@ -249,6 +249,29 @@ impl Parser<'_> {
         self.windowed(function, arguments, None, name.position)
     }
 
+    /// A window function call whose null treatment (`IGNORE NULLS`) was read with its arguments,
+    /// as Transact-SQL writes it after the closing parenthesis.
+    pub(super) fn treated_window_call(
+        &mut self,
+        function: WindowFunction,
+        arguments: Vec<Expr>,
+        treatment: ValueTreatment,
+        name: &Name,
+    ) -> SqlResult<Expr> {
+        if !function.accepts_arguments(arguments.len()) {
+            return Err(no_such_function(&name.text, arguments.len(), name.position));
+        }
+        let window = self.window_reference()?;
+        Ok(crate::window::call(WindowCall {
+            function,
+            treatment,
+            arguments,
+            filter: None,
+            window,
+            position: name.position,
+        }))
+    }
+
     pub(super) fn whole_partition_aggregate(
         &mut self,
         function: AggregateFunction,
@@ -344,7 +367,7 @@ impl Parser<'_> {
         Ok(partition)
     }
 
-    fn window_reference(&mut self) -> SqlResult<WindowReference> {
+    pub(super) fn window_reference(&mut self) -> SqlResult<WindowReference> {
         self.expect_word("over")?;
         if self.peek_kind() != &TokenKind::LeftParen {
             return Ok(WindowReference::Named(self.name()?));

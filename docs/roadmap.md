@@ -1108,7 +1108,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - SQL Server's ranking and offset window functions (`ROW_NUMBER`, `RANK`, `DENSE_RANK`, `NTILE`,
   `LAG`, `LEAD`, `FIRST_VALUE`, `LAST_VALUE`) with its errors 10753 and 4112; only aggregates take
   `OVER` in that dialect today (found while building D340). **Code written, unbuilt** (code-only
-  mode, 2026-11-11, D427). Left: `IGNORE NULLS` and `ORDER BY` through a named window.
+  mode, 2026-11-11, D427). `IGNORE NULLS` and `ORDER BY` through a named window: **code written, unbuilt** (code-only mode,
+  2026-11-12, D600).
 - SQL Server's `rowversion`, `sql_variant`, `xml` and `hierarchyid` (D19).
 - `datetimeoffset` keeping its offset, and the declared `varchar` or `nvarchar` kept (D19, D133).
 - `deleted.` in a Transact-SQL `UPDATE`'s `OUTPUT`, `TOP ... PERCENT` in `UPDATE`, `DELETE` and

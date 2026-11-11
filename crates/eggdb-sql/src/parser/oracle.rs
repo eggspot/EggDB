@@ -974,7 +974,7 @@ impl<'t> Parser<'t> {
         ))
     }
 
-    fn null_treatment(&mut self, treatment: &mut ValueTreatment) {
+    pub(super) fn null_treatment(&mut self, treatment: &mut ValueTreatment) {
         if self.is_word_at(1, "nulls") {
             if self.is_word("ignore") {
                 self.at += 2;

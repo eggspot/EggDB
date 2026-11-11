@@ -653,8 +653,25 @@ impl Parser<'_> {
         }
     }
 
+    fn over_names_a_window(&self) -> bool {
+        if !self.is_word("over") {
+            return false;
+        }
+        match self.peek_kind_at(1) {
+            TokenKind::LeftParen => match self.peek_kind_at(2) {
+                TokenKind::Word(word) => {
+                    !matches!(word.as_str(), "partition" | "order" | "rows" | "range" | "groups")
+                }
+                TokenKind::QuotedIdentifier(_) => true,
+                _ => false,
+            },
+            TokenKind::Word(_) | TokenKind::QuotedIdentifier(_) => true,
+            _ => false,
+        }
+    }
+
     fn sqlserver_window_function(&mut self, name: &Name) -> SqlResult<Option<Expr>> {
-        use crate::window::WindowFunction;
+        use crate::window::{ValueTreatment, WindowFunction};
         let Some(function) = WindowFunction::named(&name.text) else {
             return Ok(None);
         };
@@ -669,6 +686,10 @@ impl Parser<'_> {
             _ => return Ok(None),
         };
         let arguments = self.sqlserver_arguments(name, count)?;
+        let mut treatment = ValueTreatment::default();
+        if function.takes_value_treatment() {
+            self.null_treatment(&mut treatment);
+        }
         let shown = name.text.to_ascii_uppercase();
         if !self.is_word("over") {
             return Err(SqlError::raised_in_sqlserver(
@@ -680,7 +701,7 @@ impl Parser<'_> {
             )
             .at(name.position));
         }
-        if !self.over_has_order_by() {
+        if !self.over_has_order_by() && !self.over_names_a_window() {
             return Err(SqlError::raised_in_sqlserver(
                 4112,
                 15,
@@ -690,7 +711,7 @@ impl Parser<'_> {
             )
             .at(name.position));
         }
-        self.window_call(function, arguments, None, name).map(Some)
+        self.treated_window_call(function, arguments, treatment, name).map(Some)
     }
 
     pub(super) fn sqlserver_call(&mut self, name: &Name) -> SqlResult<Option<Expr>> {

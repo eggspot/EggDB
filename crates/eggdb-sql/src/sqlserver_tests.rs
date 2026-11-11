@@ -1896,3 +1896,26 @@ fn sqlclient_get_schema_databases_lists_the_databases() {
     assert!(!values(&mut session, "SELECT name FROM dbo.sysdatabases").is_empty());
     assert!(!values(&mut session, "SELECT name FROM sys.sysdatabases").is_empty());
 }
+
+#[test]
+fn offset_functions_ignore_nulls_and_named_windows_carry_the_order() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(&mut session, "CREATE TABLE readings (id INT PRIMARY KEY, v INT NULL)");
+    values(&mut session, "INSERT INTO readings VALUES (1, 10), (2, NULL), (3, NULL), (4, 40)");
+    let rows = values(
+        &mut session,
+        "SELECT id, LAG(v) IGNORE NULLS OVER (ORDER BY id), LAG(v) OVER (ORDER BY id) FROM readings ORDER BY id",
+    );
+    assert_eq!(rows[2], vec![Value::Integer(3), Value::Integer(10), Value::Null]);
+    assert_eq!(rows[3], vec![Value::Integer(4), Value::Integer(10), Value::Null]);
+    let named = values(
+        &mut session,
+        "SELECT id, ROW_NUMBER() OVER w FROM readings WINDOW w AS (ORDER BY id DESC) ORDER BY id",
+    );
+    assert_eq!(named[0], vec![Value::Integer(1), Value::BigInt(4)]);
+    match batch(&mut session, "SELECT RANK() OVER (PARTITION BY v) FROM readings") {
+        Err(error) => assert_eq!(error.vendor_code(), Some(4112)),
+        Ok(steps) => assert!(codes(&steps).contains(&Some(4112))),
+    }
+}

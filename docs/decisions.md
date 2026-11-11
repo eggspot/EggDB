@@ -624,3 +624,4 @@ its full title with its status.
 - [D597](decisions/D597.md) Code-only batch 245 (M9): MongoDB text scores
 - [D598](decisions/D598.md) Code-only batch 246 (M10): ON UPDATE CURRENT_TIMESTAMP in SHOW CREATE TABLE
 - [D599](decisions/D599.md) Code-only batch 247 (M10): MySQL's JSON error numbers
+- [D600](decisions/D600.md) Code-only batch 248 (M10): Transact-SQL IGNORE NULLS and named windows
