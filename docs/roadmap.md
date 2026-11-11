@@ -1303,7 +1303,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - AMQP 0-9-1: durable exchanges and bindings, headers exchanges, exclusive and auto-delete queues
   (D33, D214). Headers exchanges and exclusive and auto-delete queues: **code written, unbuilt**
   (code-only mode, 2026-11-11, D482).
-- AMQP 0-9-1 `tx` transactions (D33, D214).
+- AMQP 0-9-1 `tx` transactions (D33, D214). **Code written, unbuilt** (code-only mode, 2026-11-11, D483).
 - Dead-letter exchanges, message and queue TTL, delayed messages and priorities (D33, D214).
 - Replicated (quorum-style) queues (D33).
 - A benchmark against RabbitMQ (D33, D214).

@@ -305,8 +305,26 @@ struct Consumer {
     no_ack: bool,
 }
 
+const MAX_STAGED_OPERATIONS: usize = 10_000;
+const MAX_STAGED_BYTES: usize = 64 << 20;
+
+#[derive(Default)]
+struct Transaction {
+    publishes: Vec<(Vec<String>, Vec<u8>)>,
+    settlements: Vec<(u64, bool, Option<bool>)>,
+    staged_bytes: usize,
+}
+
+impl Transaction {
+    fn full(&self, more_bytes: usize) -> bool {
+        self.publishes.len() + self.settlements.len() >= MAX_STAGED_OPERATIONS
+            || self.staged_bytes.saturating_add(more_bytes) > MAX_STAGED_BYTES
+    }
+}
+
 #[derive(Default)]
 struct Channel {
+    transaction: Option<Transaction>,
     consumers: Vec<Consumer>,
     prefetch: u16,
     unacked: BTreeMap<u64, (String, u64)>,
@@ -531,6 +549,58 @@ impl Connection<'_, '_> {
         }
     }
 
+    fn settle_or_stage(&mut self, channel: u16, tag: u64, multiple: bool, outcome: Option<bool>) {
+        let staged = match self
+            .channels
+            .get_mut(&channel)
+            .and_then(|state| state.transaction.as_mut())
+        {
+            Some(transaction) if !transaction.full(0) => {
+                transaction.settlements.push((tag, multiple, outcome));
+                true
+            }
+            Some(_) => {
+                self.close_channel(
+                    channel,
+                    PRECONDITION_FAILED,
+                    "PRECONDITION_FAILED - the transaction holds too many acknowledgements",
+                    60,
+                    80,
+                );
+                true
+            }
+            None => false,
+        };
+        if !staged {
+            self.acknowledge(channel, tag, multiple, outcome);
+        }
+    }
+
+    fn commit_transaction(&mut self, channel: u16) -> Parsed<()> {
+        let Some(transaction) = self
+            .channels
+            .get_mut(&channel)
+            .and_then(|state| state.transaction.replace(Transaction::default()))
+        else {
+            return Ok(());
+        };
+        let now = now_ms();
+        for (queues, stored) in transaction.publishes {
+            for queue in queues {
+                if self.broker.queues.exists(&queue).unwrap_or(false) {
+                    self.broker
+                        .queues
+                        .send(&queue, &stored, 0, now)
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+        }
+        for (tag, multiple, outcome) in transaction.settlements {
+            self.acknowledge(channel, tag, multiple, outcome);
+        }
+        Ok(())
+    }
+
     fn acknowledge(&mut self, channel: u16, tag: u64, multiple: bool, outcome: Option<bool>) {
         let Some(state) = self.channels.get_mut(&channel) else {
             return;
@@ -588,6 +658,25 @@ impl Connection<'_, '_> {
             return Ok(());
         };
         let stored = encode_message(&exchange, &routing_key, &properties, &body);
+        if let Some(transaction) = self
+            .channels
+            .get_mut(&channel)
+            .and_then(|state| state.transaction.as_mut())
+        {
+            if transaction.full(stored.len()) {
+                self.close_channel(
+                    channel,
+                    PRECONDITION_FAILED,
+                    "PRECONDITION_FAILED - the transaction holds too many messages",
+                    60,
+                    40,
+                );
+                return Ok(());
+            }
+            transaction.staged_bytes = transaction.staged_bytes.saturating_add(stored.len());
+            transaction.publishes.push((queues, stored));
+            return Ok(());
+        }
         let now = now_ms();
         for queue in queues {
             if self.broker.queues.exists(&queue).unwrap_or(false) {
@@ -1112,18 +1201,18 @@ impl Connection<'_, '_> {
             (Stage::Open, 60, 80) => {
                 let tag = args.longlong()?;
                 let multiple = args.bit()?;
-                self.acknowledge(channel, tag, multiple, None);
+                self.settle_or_stage(channel, tag, multiple, None);
             }
             (Stage::Open, 60, 90) => {
                 let tag = args.longlong()?;
                 let requeue = args.bit()?;
-                self.acknowledge(channel, tag, false, Some(requeue));
+                self.settle_or_stage(channel, tag, false, Some(requeue));
             }
             (Stage::Open, 60, 120) => {
                 let tag = args.longlong()?;
                 let multiple = args.bit()?;
                 let requeue = args.bit()?;
-                self.acknowledge(channel, tag, multiple, Some(requeue));
+                self.settle_or_stage(channel, tag, multiple, Some(requeue));
             }
             (Stage::Open, 60, 110) => {
                 self.acknowledge(channel, 0, true, Some(true));
@@ -1131,6 +1220,20 @@ impl Connection<'_, '_> {
             }
             (Stage::Open, 85, 10) => {
                 let no_wait = args.bit()?;
+                if self
+                    .channels
+                    .get(&channel)
+                    .is_some_and(|state| state.transaction.is_some())
+                {
+                    self.close_channel(
+                        channel,
+                        PRECONDITION_FAILED,
+                        "PRECONDITION_FAILED - cannot switch from tx to confirm mode",
+                        85,
+                        10,
+                    );
+                    return Ok(true);
+                }
                 if let Some(state) = self.channels.get_mut(&channel) {
                     state.confirms.get_or_insert(0);
                 }
@@ -1138,14 +1241,47 @@ impl Connection<'_, '_> {
                     self.send(channel, Out::method(85, 11));
                 }
             }
-            (Stage::Open, 90, _) => {
-                self.close_channel(
-                    channel,
-                    NOT_IMPLEMENTED,
-                    "NOT_IMPLEMENTED - transactions are not supported yet",
-                    class,
-                    method_id,
-                );
+            (Stage::Open, 90, 10) => {
+                let refused = self
+                    .channels
+                    .get(&channel)
+                    .is_some_and(|state| state.confirms.is_some());
+                if refused {
+                    self.close_channel(
+                        channel,
+                        PRECONDITION_FAILED,
+                        "PRECONDITION_FAILED - cannot switch from confirm to tx mode",
+                        90,
+                        10,
+                    );
+                    return Ok(true);
+                }
+                if let Some(state) = self.channels.get_mut(&channel) {
+                    state.transaction.get_or_insert_with(Transaction::default);
+                }
+                self.send(channel, Out::method(90, 11));
+            }
+            (Stage::Open, 90, 20 | 30) => {
+                let selected = self
+                    .channels
+                    .get(&channel)
+                    .is_some_and(|state| state.transaction.is_some());
+                if !selected {
+                    self.close_channel(
+                        channel,
+                        PRECONDITION_FAILED,
+                        "PRECONDITION_FAILED - channel is not transactional",
+                        90,
+                        method_id,
+                    );
+                    return Ok(true);
+                }
+                if method_id == 20 {
+                    self.commit_transaction(channel)?;
+                } else if let Some(state) = self.channels.get_mut(&channel) {
+                    state.transaction = Some(Transaction::default());
+                }
+                self.send(channel, Out::method(90, method_id + 1));
             }
             _ => {
                 self.close_connection(
