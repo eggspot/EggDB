@@ -1315,8 +1315,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Apache TinkerPop Gremlin, and Cosmos DB's Gremlin API after D58's legal check (D48).
 - Louvain, Leiden, betweenness and closeness centrality, weighted shortest paths, k-core and graph
   embeddings (D55, D248). Louvain, betweenness, closeness, weighted shortest paths and k-core:
-  **code written, unbuilt** (code-only mode, 2026-11-11, D436), with FastRP embeddings. Left:
-  Leiden and learned embeddings.
+  **code written, unbuilt** (code-only mode, 2026-11-11, D436), with FastRP embeddings; Leiden: **code
+  written, unbuilt** (code-only mode, 2026-11-12, D607). Left: learned embeddings.
 - The graph algorithms as procedures in SQL/PGQ (D248).
 - RDF triples and quads with SPARQL 1.1 (D38). Check: the W3C SPARQL suite.
 - The LDBC benchmark against Neo4j (D7, D206).

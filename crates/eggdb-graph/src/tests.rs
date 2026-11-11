@@ -312,6 +312,11 @@ fn centrality_communities_cores_and_weighted_paths_come_out_of_call() {
         "CALL eggdb.louvain() YIELD communityId AS community RETURN count(DISTINCT community) AS communities",
     );
     assert_eq!(louvain.rows, vec![vec![Value::Integer(2)]]);
+    let leiden = query(
+        &keyspace,
+        "CALL eggdb.leiden() YIELD communityId AS community RETURN count(DISTINCT community) AS communities",
+    );
+    assert_eq!(leiden.rows, vec![vec![Value::Integer(2)]]);
     let cores = query(
         &keyspace,
         "CALL eggdb.kCore() YIELD coreNumber RETURN max(coreNumber) AS deepest",

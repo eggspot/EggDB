@@ -3,14 +3,15 @@ use crate::algorithms::{
     shortest_path_in, triangle_count_in,
 };
 use crate::centrality::{
-    betweenness_in, closeness_in, fast_rp_in, k_core_in, louvain_in, weighted_shortest_path_in,
+    betweenness_in, closeness_in, fast_rp_in, k_core_in, leiden_in, louvain_in,
+    weighted_shortest_path_in,
 };
 use crate::store::GraphRead;
 use crate::{GraphError, GraphResult, Value};
 
 type Records = (Vec<&'static str>, Vec<Vec<Value>>);
 
-const PROCEDURES: [&str; 12] = [
+const PROCEDURES: [&str; 13] = [
     "eggdb.fastRP",
     "eggdb.pageRank",
     "eggdb.connectedComponents",
@@ -22,6 +23,7 @@ const PROCEDURES: [&str; 12] = [
     "eggdb.closeness",
     "eggdb.kCore",
     "eggdb.louvain",
+    "eggdb.leiden",
     "eggdb.weightedShortestPath",
 ];
 
@@ -88,7 +90,8 @@ pub(crate) fn call(
 ) -> GraphResult<Records> {
     let most = match procedure {
         "eggdb.pageRank" | "eggdb.shortestPath" | "eggdb.weightedShortestPath" => 4,
-        "eggdb.labelPropagation" | "eggdb.betweenness" | "eggdb.closeness" | "eggdb.louvain" => 1,
+        "eggdb.labelPropagation" | "eggdb.betweenness" | "eggdb.closeness" | "eggdb.louvain"
+        | "eggdb.leiden" => 1,
         "eggdb.fastRP" => 2,
         _ if PROCEDURES.contains(&procedure) => 0,
         _ => {
@@ -169,6 +172,11 @@ pub(crate) fn call(
             "nodeId",
             "communityId",
             louvain_in(graph, count_argument(arguments.first(), 10, "maxLevels")?)?,
+        ),
+        "eggdb.leiden" => pairs(
+            "nodeId",
+            "communityId",
+            leiden_in(graph, count_argument(arguments.first(), 10, "maxLevels")?)?,
         ),
         "eggdb.weightedShortestPath" => {
             let from = node_argument(arguments.first(), "the start")?;

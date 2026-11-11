@@ -382,6 +382,107 @@ pub(crate) fn louvain_in(graph: &GraphRead<'_>, max_levels: usize) -> GraphResul
         .collect())
 }
 
+fn refined(level: &Level, community: &[usize]) -> Vec<usize> {
+    let count = level.links.len();
+    let degrees: Vec<f64> = (0..count).map(|node| level.degree(node)).collect();
+    let twice_total: f64 = degrees.iter().sum();
+    let mut cluster: Vec<usize> = (0..count).collect();
+    if twice_total == 0.0 {
+        return cluster;
+    }
+    let mut community_totals: HashMap<usize, f64> = HashMap::new();
+    for node in 0..count {
+        *community_totals.entry(community[node]).or_insert(0.0) += degrees[node];
+    }
+    let mut totals = degrees.clone();
+    let mut members = vec![1usize; count];
+    for node in 0..count {
+        if members[cluster[node]] != 1 {
+            continue;
+        }
+        let own = community[node];
+        let inside_community: f64 = level.links[node]
+            .iter()
+            .filter(|(next, _)| community[**next] == own)
+            .map(|(_, weight)| weight)
+            .sum();
+        let community_total = community_totals.get(&own).copied().unwrap_or(0.0);
+        if inside_community < degrees[node] * (community_total - degrees[node]) / twice_total {
+            continue;
+        }
+        let mut toward: BTreeMap<usize, f64> = BTreeMap::new();
+        for (&next, &weight) in &level.links[node] {
+            if community[next] == own && cluster[next] != cluster[node] {
+                *toward.entry(cluster[next]).or_insert(0.0) += weight;
+            }
+        }
+        let mut best = None;
+        let mut best_gain = 0.0;
+        for (&target, &links) in &toward {
+            let gain = links - totals[target] * degrees[node] / twice_total;
+            if gain > best_gain + 1e-12 {
+                best = Some(target);
+                best_gain = gain;
+            }
+        }
+        if let Some(target) = best {
+            let from = cluster[node];
+            totals[from] -= degrees[node];
+            members[from] -= 1;
+            cluster[node] = target;
+            totals[target] += degrees[node];
+            members[target] += 1;
+        }
+    }
+    cluster
+}
+
+/// Each node's community by the Leiden method: Louvain's local moves, then a refinement that
+/// splits each community into well-connected sub-communities (a node joins a neighbouring
+/// sub-community of its own community only when it is well connected to that community and the
+/// move gains modularity), and aggregation by the refined partition, so no community comes out
+/// disconnected. Deterministic, like [`louvain_in`]; a community is named by its smallest id.
+pub(crate) fn leiden_in(graph: &GraphRead<'_>, max_levels: usize) -> GraphResult<Vec<(u64, u64)>> {
+    let Indexed { ids, neighbours } = indexed(graph, false)?;
+    let mut level = Level {
+        links: neighbours
+            .iter()
+            .map(|next| next.iter().map(|&node| (node, 1.0)).collect())
+            .collect(),
+        inside: vec![0.0; ids.len()],
+    };
+    let mut assignment: Vec<usize> = (0..ids.len()).collect();
+    for _ in 0..max_levels.max(1) {
+        let (community, moved) = local_moves(&level);
+        if !moved {
+            break;
+        }
+        let clusters = refined(&level, &community);
+        let (next, mapping) = aggregated(&level, &clusters);
+        for slot in &mut assignment {
+            *slot = mapping[*slot];
+        }
+        if next.links.len() == level.links.len() {
+            let (_, final_mapping) = aggregated(&next, &local_moves(&next).0);
+            for slot in &mut assignment {
+                *slot = final_mapping[*slot];
+            }
+            break;
+        }
+        level = next;
+    }
+    let mut smallest: HashMap<usize, u64> = HashMap::new();
+    for (at, &found) in assignment.iter().enumerate() {
+        let entry = smallest.entry(found).or_insert(ids[at]);
+        *entry = (*entry).min(ids[at]);
+    }
+    Ok(ids
+        .iter()
+        .zip(&assignment)
+        .map(|(id, found)| (*id, smallest[found]))
+        .collect())
+}
+
 fn mixed(mut state: u64) -> u64 {
     state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
     state = (state ^ (state >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
