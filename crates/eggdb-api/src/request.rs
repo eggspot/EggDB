@@ -209,9 +209,84 @@ fn logic_group(text: &str, joiner: &str, depth: usize) -> Result<String, String>
     Ok(format!("({})", rendered.join(joiner)))
 }
 
+const MAX_EMBEDS: usize = 8;
+
+fn select_column(item: &str) -> Result<(String, String), String> {
+    let (alias, column) = item.split_once(':').unwrap_or(("", item));
+    let quoted = identifier(column).ok_or_else(|| format!("{column} is not a column name"))?;
+    if !alias.is_empty() && identifier(alias).is_none() {
+        return Err(format!("{alias} is not a valid alias"));
+    }
+    Ok((alias.to_owned(), quoted))
+}
+
+#[derive(Debug)]
+pub(crate) struct Embed {
+    pub(crate) label: String,
+    pub(crate) table: String,
+    pub(crate) hint: Option<String>,
+    pub(crate) columns: Option<Vec<(String, String)>>,
+}
+
+impl Embed {
+    fn parse(item: &str) -> Result<Self, String> {
+        let open = item.find('(').unwrap_or(item.len());
+        let inner = item
+            .get(open + 1..)
+            .and_then(|rest| rest.strip_suffix(')'))
+            .ok_or_else(|| format!("{item} does not close its parenthesis"))?;
+        let head = &item[..open];
+        let (alias, relation) = head.split_once(':').unwrap_or(("", head));
+        let (table, hint) = match relation.split_once('!') {
+            Some((table, hint)) => (table, Some(hint)),
+            None => (relation, None),
+        };
+        if identifier(table).is_none() {
+            return Err(format!("{table} is not a table name"));
+        }
+        if let Some(hint) = hint
+            && identifier(hint).is_none()
+        {
+            return Err(format!("{hint} is not a relationship name"));
+        }
+        if !alias.is_empty() && identifier(alias).is_none() {
+            return Err(format!("{alias} is not a valid alias"));
+        }
+        let columns = if inner.trim().is_empty() || inner.trim() == "*" {
+            None
+        } else {
+            let mut columns = Vec::new();
+            for column in split_top_level(inner)? {
+                let column = column.trim();
+                if column.contains('(') {
+                    return Err("embedded resources nest one level deep".to_owned());
+                }
+                if column.is_empty() {
+                    continue;
+                }
+                let (label, quoted) = select_column(column)?;
+                let label = if label.is_empty() {
+                    column.to_owned()
+                } else {
+                    label
+                };
+                columns.push((label, quoted));
+            }
+            Some(columns)
+        };
+        Ok(Self {
+            label: if alias.is_empty() { table } else { alias }.to_owned(),
+            table: table.to_owned(),
+            hint: hint.map(str::to_owned),
+            columns,
+        })
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Query {
     select: Option<Vec<String>>,
+    pub(crate) embeds: Vec<Embed>,
     conditions: Vec<String>,
     order: Vec<String>,
     pub(crate) limit: Option<u64>,
@@ -242,28 +317,37 @@ impl Query {
             let (name, value) = (percent_decode(name), percent_decode(value));
             match name.as_str() {
                 "select" => {
-                    if value.trim() != "*" {
-                        let mut columns = Vec::new();
-                        for item in value
-                            .split(',')
-                            .map(str::trim)
-                            .filter(|item| !item.is_empty())
-                        {
-                            let (alias, column) = item.split_once(':').unwrap_or(("", item));
-                            let column = identifier(column)
-                                .ok_or_else(|| format!("{column} is not a column name"))?;
-                            columns.push(if alias.is_empty() {
+                    let mut columns = Vec::new();
+                    let mut star = false;
+                    for item in split_top_level(&value)? {
+                        let item = item.trim();
+                        if item.is_empty() {
+                            continue;
+                        }
+                        if item == "*" {
+                            star = true;
+                        } else if item.contains('(') {
+                            if query.embeds.len() >= MAX_EMBEDS {
+                                return Err("too many embedded resources".to_owned());
+                            }
+                            query.embeds.push(Embed::parse(item)?);
+                        } else {
+                            let (label, column) = select_column(item)?;
+                            columns.push(if label.is_empty() {
                                 column
                             } else {
-                                format!(
-                                    "{column} AS {}",
-                                    identifier(alias)
-                                        .ok_or_else(|| format!("{alias} is not a valid alias"))?
-                                )
+                                format!("{column} AS {}", identifier(&label).unwrap_or_default())
                             });
                         }
-                        query.select = Some(columns);
                     }
+                    query.select = if star && columns.is_empty() {
+                        None
+                    } else {
+                        if star {
+                            columns.insert(0, "*".to_owned());
+                        }
+                        Some(columns)
+                    };
                 }
                 "order" => {
                     for item in value
@@ -341,9 +425,26 @@ impl Query {
     }
 
     pub(crate) fn projection(&self) -> String {
-        self.select
-            .as_ref()
-            .map_or_else(|| "*".to_owned(), |columns| columns.join(", "))
+        match &self.select {
+            Some(columns) if !columns.is_empty() => columns.join(", "),
+            _ => "*".to_owned(),
+        }
+    }
+
+    pub(crate) fn parent_columns(&self) -> Vec<String> {
+        match &self.select {
+            None => vec!["eggdb_parent.*".to_owned()],
+            Some(columns) => columns
+                .iter()
+                .map(|column| {
+                    if column == "*" {
+                        "eggdb_parent.*".to_owned()
+                    } else {
+                        format!("eggdb_parent.{column}")
+                    }
+                })
+                .collect(),
+        }
     }
 
     pub(crate) fn where_clause(&self) -> String {

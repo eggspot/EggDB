@@ -13,7 +13,7 @@ mod request;
 use eggdb_http::{Reply, Request, Response, StreamedResponse};
 use eggdb_sql::json::{Json, Node, parse_document};
 use eggdb_sql::{Dialect, KeyValueStore, QueryResult, Session, Value};
-use request::{Query, call_arguments, identifier, literal};
+use request::{Embed, Query, call_arguments, identifier, literal};
 use eggdb_auth::{AuthMethod, AuthRules};
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -356,7 +356,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             None
         };
         match request.method.as_str() {
-            "GET" | "HEAD" => self.read(&target, &query, prefer.contains("count=exact")),
+            "GET" | "HEAD" => self.read(&target, path, &query, prefer.contains("count=exact")),
             "POST" => self
                 .insert(&target, &request.body, representation, &query, resolution)
                 .into(),
@@ -415,14 +415,133 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         }
     }
 
-    fn read(&self, target: &str, query: &Query, count: bool) -> Reply<'static> {
+    fn relationship(&self, parent: &str, embed: &Embed) -> Result<String, Response> {
+        let schema_literal = literal(&self.schema);
         let sql = format!(
-            "SELECT {} FROM {target}{}{}{}",
-            query.projection(),
-            query.where_clause(),
-            query.order_clause(),
-            query.page_clause()
+            "SELECT fk.constraint_name, fk.table_name, fk.column_name, pk.table_name, pk.column_name FROM information_schema.referential_constraints rc JOIN information_schema.key_column_usage fk ON fk.constraint_schema = rc.constraint_schema AND fk.constraint_name = rc.constraint_name JOIN information_schema.key_column_usage pk ON pk.constraint_schema = rc.unique_constraint_schema AND pk.constraint_name = rc.unique_constraint_name AND pk.ordinal_position = fk.position_in_unique_constraint WHERE fk.table_schema = {schema_literal} AND ((fk.table_name = {parent_literal} AND pk.table_name = {child_literal}) OR (fk.table_name = {child_literal} AND pk.table_name = {parent_literal})) ORDER BY fk.constraint_name, fk.ordinal_position",
+            parent_literal = literal(parent),
+            child_literal = literal(&embed.table),
         );
+        let rows = self.run(&sql).map_err(|error| sql_failure(&error))?;
+        let mut constraints: Vec<(String, bool, Vec<(String, String)>)> = Vec::new();
+        for row in rows
+            .iter()
+            .filter(|result| result.columns.is_some())
+            .flat_map(|result| result.rows.iter())
+        {
+            let text = |at: usize| row.get(at).and_then(Value::to_text).unwrap_or_default();
+            let (name, fk_table, fk_column, pk_table, pk_column) =
+                (text(0), text(1), text(2), text(3), text(4));
+            let to_one = fk_table == parent && pk_table == embed.table;
+            let pair = if to_one {
+                (pk_column, fk_column)
+            } else {
+                (fk_column, pk_column)
+            };
+            match constraints.last_mut() {
+                Some((last, _, pairs)) if *last == name => pairs.push(pair),
+                _ => constraints.push((name, to_one, vec![pair])),
+            }
+        }
+        if let Some(hint) = &embed.hint {
+            constraints.retain(|(name, _, pairs)| {
+                name == hint || pairs.iter().any(|(child, parent)| child == hint || parent == hint)
+            });
+        }
+        let (to_one, pairs) = match constraints.as_slice() {
+            [] => {
+                return Err(failure(
+                    400,
+                    "PGRST200",
+                    &format!("no foreign key relates {parent} and {}", embed.table),
+                ));
+            }
+            [(_, to_one, pairs)] => (*to_one, pairs.clone()),
+            _ => {
+                return Err(failure(
+                    300,
+                    "PGRST201",
+                    &format!(
+                        "more than one foreign key relates {parent} and {}; name one with {}!<constraint>",
+                        embed.table, embed.table
+                    ),
+                ));
+            }
+        };
+        let fields = match &embed.columns {
+            Some(columns) => columns
+                .iter()
+                .map(|(label, column)| format!("{}, eggdb_embed.{column}", literal(label)))
+                .collect::<Vec<String>>(),
+            None => {
+                let sql = format!(
+                    "SELECT column_name FROM information_schema.columns WHERE table_schema = {schema_literal} AND table_name = {} ORDER BY ordinal_position",
+                    literal(&embed.table)
+                );
+                let rows = self.run(&sql).map_err(|error| sql_failure(&error))?;
+                rows.iter()
+                    .filter(|result| result.columns.is_some())
+                    .flat_map(|result| result.rows.iter())
+                    .filter_map(|row| row.first().and_then(Value::to_text))
+                    .filter_map(|name| {
+                        identifier(&name)
+                            .map(|quoted| format!("{}, eggdb_embed.{quoted}", literal(&name)))
+                    })
+                    .collect()
+            }
+        };
+        let joined: Vec<String> = pairs
+            .iter()
+            .filter_map(|(child, parent)| {
+                Some(format!(
+                    "eggdb_embed.{} = eggdb_parent.{}",
+                    identifier(child)?,
+                    identifier(parent)?
+                ))
+            })
+            .collect();
+        let schema = identifier(&self.schema).unwrap_or_else(|| "public".to_owned());
+        let child = identifier(&embed.table).unwrap_or_default();
+        let label = identifier(&embed.label).unwrap_or_default();
+        let object = format!("json_build_object({})", fields.join(", "));
+        Ok(if to_one {
+            format!(
+                "(SELECT {object} FROM {schema}.{child} AS eggdb_embed WHERE {} LIMIT 1) AS {label}",
+                joined.join(" AND ")
+            )
+        } else {
+            format!(
+                "(SELECT coalesce(json_agg({object}), '[]'::json) FROM {schema}.{child} AS eggdb_embed WHERE {}) AS {label}",
+                joined.join(" AND ")
+            )
+        })
+    }
+
+    fn read(&self, target: &str, table: &str, query: &Query, count: bool) -> Reply<'static> {
+        let sql = if query.embeds.is_empty() {
+            format!(
+                "SELECT {} FROM {target}{}{}{}",
+                query.projection(),
+                query.where_clause(),
+                query.order_clause(),
+                query.page_clause()
+            )
+        } else {
+            let mut items = query.parent_columns();
+            for embed in &query.embeds {
+                match self.relationship(table, embed) {
+                    Ok(item) => items.push(item),
+                    Err(response) => return response.into(),
+                }
+            }
+            format!(
+                "SELECT {} FROM {target} AS eggdb_parent{}{}{}",
+                items.join(", "),
+                query.where_clause(),
+                query.order_clause(),
+                query.page_clause()
+            )
+        };
         let rows = match self.run(&sql) {
             Ok(results) => results
                 .into_iter()
