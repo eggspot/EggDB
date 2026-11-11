@@ -1,5 +1,5 @@
 mod evaluate;
-mod functions;
+pub(crate) mod functions;
 
 use crate::store::Series;
 use std::collections::BTreeMap;

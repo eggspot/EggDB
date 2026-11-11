@@ -974,3 +974,21 @@ fn results_with_the_same_labels_once_the_name_is_dropped_are_refused() {
         "Scalar value 10000000000000000000 overflows int64"
     );
 }
+
+#[test]
+fn the_remaining_functions_follow_prometheus() {
+    use crate::promql::functions::{date_function, range_function, regression, scalar_function};
+    let samples = [(0, 1.0), (60_000, 3.0), (120_000, 2.0), (180_000, 5.0)];
+    assert_eq!(range_function("changes", &samples, 0, 180_000).unwrap(), Some(3.0));
+    assert_eq!(range_function("resets", &samples, 0, 180_000).unwrap(), Some(1.0));
+    assert_eq!(range_function("idelta", &samples, 0, 180_000).unwrap(), Some(3.0));
+    assert_eq!(range_function("present_over_time", &samples, 0, 180_000).unwrap(), Some(1.0));
+    let line = [(0, 0.0), (10_000, 10.0), (20_000, 20.0)];
+    let (slope, intercept) = regression(&line, 20_000).unwrap();
+    assert!((slope - 1.0).abs() < 1e-9 && (intercept - 20.0).abs() < 1e-9);
+    assert_eq!(date_function("year", 951_782_400.0), Some(2000.0));
+    assert_eq!(date_function("days_in_month", 951_782_400.0), Some(29.0));
+    assert_eq!(date_function("day_of_week", 0.0), Some(4.0));
+    assert_eq!(scalar_function("sgn", -3.0), Some(-1.0));
+    assert_eq!(scalar_function("deg", std::f64::consts::PI), Some(180.0));
+}

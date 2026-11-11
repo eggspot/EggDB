@@ -99,12 +99,154 @@ pub(crate) fn range_function(
         "max_over_time" => values().reduce(f64::max),
         "count_over_time" => (!samples.is_empty()).then_some(samples.len() as f64),
         "last_over_time" => samples.last().map(|(_, value)| *value),
+        "present_over_time" => (!samples.is_empty()).then_some(1.0),
+        "stdvar_over_time" => {
+            (!samples.is_empty()).then(|| variance(&values().collect::<Vec<f64>>()))
+        }
+        "stddev_over_time" => {
+            (!samples.is_empty()).then(|| variance(&values().collect::<Vec<f64>>()).sqrt())
+        }
+        "mad_over_time" => (!samples.is_empty()).then(|| {
+            let all: Vec<f64> = values().collect();
+            let median = quantile(0.5, all.clone());
+            quantile(0.5, all.iter().map(|value| (value - median).abs()).collect())
+        }),
+        "changes" => (!samples.is_empty()).then(|| {
+            samples
+                .windows(2)
+                .filter(|pair| pair[0].1 != pair[1].1 && !(pair[0].1.is_nan() && pair[1].1.is_nan()))
+                .count() as f64
+        }),
+        "resets" => (!samples.is_empty()).then(|| {
+            samples.windows(2).filter(|pair| pair[1].1 < pair[0].1).count() as f64
+        }),
+        "idelta" => match samples {
+            [.., before, last] => Some(last.1 - before.1),
+            _ => None,
+        },
+        "deriv" => regression(samples, samples.first().map_or(0, |(time, _)| *time)).map(|(slope, _)| slope),
         other => return Err(Failure::BadData(format!("unknown function {other}"))),
     })
 }
 
-pub(crate) fn scalar_function(name: &str, value: f64) -> Option<f64> {
+/// The least-squares line through `samples`, times taken in seconds from `origin_ms`: its slope per
+/// second and its value at the origin; `None` for fewer than two samples.
+pub(crate) fn regression(samples: &[(i64, f64)], origin_ms: i64) -> Option<(f64, f64)> {
+    if samples.len() < 2 {
+        return None;
+    }
+    let count = samples.len() as f64;
+    let (mut sum_x, mut sum_y, mut sum_xy, mut sum_xx) = (0.0, 0.0, 0.0, 0.0);
+    for (time, value) in samples {
+        let x = (time - origin_ms) as f64 / 1000.0;
+        sum_x += x;
+        sum_y += value;
+        sum_xy += x * value;
+        sum_xx += x * x;
+    }
+    let covariance = sum_xy - sum_x * sum_y / count;
+    let spread = sum_xx - sum_x * sum_x / count;
+    if spread.abs() < SMALL_DELTA_TOLERANCE {
+        return Some((0.0, sum_y / count));
+    }
+    let slope = covariance / spread;
+    Some((slope, sum_y / count - slope * sum_x / count))
+}
+
+fn civil(seconds: f64) -> Option<(i64, u32, u32, u32, u32, u32)> {
+    if !seconds.is_finite() {
+        return None;
+    }
+    let whole = seconds.floor() as i64;
+    let days = whole.div_euclid(86_400);
+    let of_day = whole.rem_euclid(86_400);
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = (day_of_year - (153 * month_index + 2) / 5 + 1) as u32;
+    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 } as u32;
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    let weekday = (days + 4).rem_euclid(7) as u32;
+    Some((year, month, day, (of_day / 3600) as u32, ((of_day / 60) % 60) as u32, weekday))
+}
+
+fn leap(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn month_days(year: i64, month: u32) -> u32 {
+    match month {
+        2 if leap(year) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+/// Prometheus's date functions on a value read as seconds since 1970 UTC.
+pub(crate) fn date_function(name: &str, seconds: f64) -> Option<f64> {
+    let (year, month, day, hour, minute, weekday) = civil(seconds)?;
     Some(match name {
+        "year" => year as f64,
+        "month" => f64::from(month),
+        "day_of_month" => f64::from(day),
+        "day_of_week" => f64::from(weekday),
+        "day_of_year" => {
+            let before: u32 = (1..month).map(|earlier| month_days(year, earlier)).sum();
+            f64::from(before + day)
+        }
+        "days_in_month" => f64::from(month_days(year, month)),
+        "hour" => f64::from(hour),
+        "minute" => f64::from(minute),
+        _ => return None,
+    })
+}
+
+pub(crate) const DATE_FUNCTIONS: [&str; 8] = [
+    "year",
+    "month",
+    "day_of_month",
+    "day_of_week",
+    "day_of_year",
+    "days_in_month",
+    "hour",
+    "minute",
+];
+
+pub(crate) fn scalar_function(name: &str, value: f64) -> Option<f64> {
+    if DATE_FUNCTIONS.contains(&name) {
+        return date_function(name, value);
+    }
+    Some(match name {
+        "sin" => value.sin(),
+        "cos" => value.cos(),
+        "tan" => value.tan(),
+        "asin" => value.asin(),
+        "acos" => value.acos(),
+        "atan" => value.atan(),
+        "sinh" => value.sinh(),
+        "cosh" => value.cosh(),
+        "tanh" => value.tanh(),
+        "asinh" => value.asinh(),
+        "acosh" => value.acosh(),
+        "atanh" => value.atanh(),
+        "deg" => value.to_degrees(),
+        "rad" => value.to_radians(),
+        "sgn" => {
+            if value.is_nan() {
+                f64::NAN
+            } else if value > 0.0 {
+                1.0
+            } else if value < 0.0 {
+                -1.0
+            } else {
+                0.0
+            }
+        }
         "abs" => value.abs(),
         "ceil" => value.ceil(),
         "floor" => value.floor(),

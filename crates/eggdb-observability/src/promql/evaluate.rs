@@ -137,6 +137,23 @@ pub(crate) fn chosen<'d>(selector: &Selector, data: &'d Fetched) -> Vec<&'d Seri
         .collect()
 }
 
+fn absent_labels(argument: &Expr) -> Labels {
+    let selector = match argument {
+        Expr::Selector(selector) => Some(selector),
+        Expr::Subquery(_) | Expr::Number(_) | Expr::Text(_) | Expr::Call(..) => None,
+        Expr::Aggregate(_) | Expr::Binary(_) => None,
+    };
+    let mut labels: Labels = Vec::new();
+    if let Some(selector) = selector {
+        for matcher in &selector.matchers {
+            if matcher.op == super::MatchOp::Equal && matcher.name != "__name__" {
+                set_label(&mut labels, &matcher.name, matcher.value.clone());
+            }
+        }
+    }
+    labels
+}
+
 pub(crate) fn without_name(labels: &Labels) -> Labels {
     labels
         .iter()
@@ -490,9 +507,122 @@ impl<'d, 'b> Evaluator<'d, 'b> {
         }
     }
 
+    fn range_argument(
+        &mut self,
+        name: &str,
+        argument: &Expr,
+        time_ms: i64,
+    ) -> Result<(Vec<(Labels, Vec<(i64, f64)>)>, i64, i64), Failure> {
+        match (self.evaluate(argument, time_ms)?, range_and_offset(argument)) {
+            (Data::Matrix(matrix), Some((range, offset))) => {
+                let end = time_ms.saturating_sub(offset);
+                Ok((matrix, end.saturating_sub(range), end))
+            }
+            _ => Err(Failure::BadData(format!("{name} needs a range selector"))),
+        }
+    }
+
+    fn mapped(
+        &mut self,
+        name: &str,
+        argument: &Expr,
+        time_ms: i64,
+        change: impl Fn(f64) -> f64,
+    ) -> Result<Data, Failure> {
+        let vector = self.vector_argument(name, argument, time_ms)?;
+        Ok(Data::Vector(
+            vector
+                .into_iter()
+                .map(|(labels, value)| (without_name(&labels), change(value)))
+                .collect(),
+        ))
+    }
+
     fn call(&mut self, name: &str, arguments: &[Expr], time_ms: i64) -> Result<Data, Failure> {
         match (name, arguments) {
             ("time", []) => Ok(Data::Scalar(time_ms as f64 / 1000.0)),
+            (date, []) if super::functions::DATE_FUNCTIONS.contains(&date) => {
+                let value = super::functions::date_function(date, time_ms as f64 / 1000.0)
+                    .unwrap_or(f64::NAN);
+                Ok(Data::Vector(vec![(Vec::new(), value)]))
+            }
+            ("clamp", [vector, low, high]) => {
+                let low = self.scalar_argument(name, low, time_ms)?;
+                let high = self.scalar_argument(name, high, time_ms)?;
+                if low > high {
+                    return Ok(Data::Vector(Vec::new()));
+                }
+                self.mapped(name, vector, time_ms, |value| value.max(low).min(high))
+            }
+            ("clamp_min", [vector, low]) => {
+                let low = self.scalar_argument(name, low, time_ms)?;
+                self.mapped(name, vector, time_ms, |value| value.max(low))
+            }
+            ("clamp_max", [vector, high]) => {
+                let high = self.scalar_argument(name, high, time_ms)?;
+                self.mapped(name, vector, time_ms, |value| value.min(high))
+            }
+            ("round", [vector, nearest]) => {
+                let nearest = self.scalar_argument(name, nearest, time_ms)?;
+                let inverse = 1.0 / nearest;
+                self.mapped(name, vector, time_ms, |value| (value * inverse + 0.5).floor() / inverse)
+            }
+            ("sort" | "sort_desc", [vector]) => {
+                let mut vector = self.vector_argument(name, vector, time_ms)?;
+                let descending = name == "sort_desc";
+                vector.sort_by(|(_, a), (_, b)| {
+                    let order = match (a.is_nan(), b.is_nan()) {
+                        (true, true) => std::cmp::Ordering::Equal,
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        (false, false) if descending => b.total_cmp(a),
+                        (false, false) => a.total_cmp(b),
+                    };
+                    order
+                });
+                Ok(Data::Vector(vector))
+            }
+            ("absent", [argument]) => {
+                let vector = self.vector_argument(name, argument, time_ms)?;
+                Ok(Data::Vector(if vector.is_empty() {
+                    vec![(absent_labels(argument), 1.0)]
+                } else {
+                    Vec::new()
+                }))
+            }
+            ("absent_over_time", [argument]) => {
+                let (matrix, _, _) = self.range_argument(name, argument, time_ms)?;
+                Ok(Data::Vector(if matrix.iter().all(|(_, samples)| samples.is_empty()) {
+                    vec![(absent_labels(argument), 1.0)]
+                } else {
+                    Vec::new()
+                }))
+            }
+            ("predict_linear", [range, seconds]) => {
+                let seconds = self.scalar_argument(name, seconds, time_ms)?;
+                let (matrix, _, end) = self.range_argument(name, range, time_ms)?;
+                let mut out = Vec::new();
+                for (labels, samples) in matrix {
+                    if let Some((slope, intercept)) = super::functions::regression(&samples, end) {
+                        out.push((without_name(&labels), intercept + slope * seconds));
+                    }
+                }
+                Ok(Data::Vector(out))
+            }
+            ("quantile_over_time", [phi, range]) => {
+                let phi = self.scalar_argument(name, phi, time_ms)?;
+                let (matrix, _, _) = self.range_argument(name, range, time_ms)?;
+                Ok(Data::Vector(
+                    matrix
+                        .into_iter()
+                        .filter(|(_, samples)| !samples.is_empty())
+                        .map(|(labels, samples)| {
+                            let values = samples.iter().map(|(_, value)| *value).collect();
+                            (without_name(&labels), super::functions::quantile(phi, values))
+                        })
+                        .collect(),
+                ))
+            }
             ("vector", [argument]) => {
                 let value = self.scalar_argument(name, argument, time_ms)?;
                 Ok(Data::Vector(vec![(Vec::new(), value)]))
