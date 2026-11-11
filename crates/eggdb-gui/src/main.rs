@@ -530,7 +530,7 @@ mod tests {
             (DEFAULT_WIDTH, DEFAULT_HEIGHT)
         );
         let huge = ClientSettings::parse("window.width = 99999\nwindow.height = 900\n");
-        assert_eq!(remembered_size(&huge), (DEFAULT_WIDTH, 900.max(MIN_HEIGHT)));
+        assert_eq!(remembered_size(&huge), (DEFAULT_WIDTH, 900));
     }
 
     fn parse(args: &[&str]) -> Result<Option<Options>, String> {
