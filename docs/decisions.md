@@ -683,3 +683,4 @@ its full title with its status.
 - [D656](decisions/D656.md) Code-only batch 304 (M8): a French stemmer and the french text-search configuration
 - [D657](decisions/D657.md) Code-only batch 305 (M10): variables a MySQL stored function sets outside CALL
 - [D658](decisions/D658.md) Code-only batch 306 (M10): DBMS_LOB's locator procedures in PL/SQL
+- [D659](decisions/D659.md) Code-only batch 307 (M10): DBMS_RANDOM, DBMS_ASSERT and UTL_MATCH

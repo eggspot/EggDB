@@ -5005,8 +5005,33 @@ impl<'t> Parser<'t> {
                     &first.text.to_ascii_lowercase(),
                     &column.text.to_ascii_lowercase(),
                 )
+                .or_else(|| {
+                    crate::oracle_more_packages::internal_name(
+                        &first.text.to_ascii_lowercase(),
+                        &column.text.to_ascii_lowercase(),
+                    )
+                })
             {
                 return self.oracle_package_call(internal, least, most, &column);
+            }
+            if self.oracle()
+                && self.peek_kind() != &TokenKind::LeftParen
+                && crate::oracle_more_packages::takes_no_parentheses(
+                    &first.text.to_ascii_lowercase(),
+                    &column.text.to_ascii_lowercase(),
+                )
+                && let Some((internal, _, _)) = crate::oracle_more_packages::internal_name(
+                    &first.text.to_ascii_lowercase(),
+                    &column.text.to_ascii_lowercase(),
+                )
+            {
+                return Ok(crate::ast::Expr {
+                    kind: crate::ast::ExprKind::OracleFunction {
+                        name: internal,
+                        arguments: Vec::new(),
+                    },
+                    position: first.position,
+                });
             }
             if self.oracle() && self.peek_kind() == &TokenKind::LeftParen {
                 let qualifier = if swap_uniform_case(&first.text) == self.oracle_user() {

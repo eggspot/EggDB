@@ -463,6 +463,9 @@ fn concatenation_type(left: &Expr, right: &Expr, scope: Scope<'_>) -> SqlType {
 }
 
 fn oracle_function_type(name: &str, arguments: &[Expr]) -> Option<SqlType> {
+    if let Some(sql_type) = crate::oracle_more_packages::result_type(name) {
+        return Some(sql_type);
+    }
     if let Some(sql_type) = crate::oracle_packages::result_type(name) {
         return Some(sql_type);
     }

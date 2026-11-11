@@ -1186,7 +1186,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   object types and schema-level collection types (D19).
 - `UTL_RAW`, `DBMS_LOB` and the other Oracle-supplied packages (sql.md). `UTL_RAW`'s and `DBMS_LOB`'s
   functions: **code written, unbuilt** (code-only mode, 2026-11-11, D434); `DBMS_LOB`'s locator procedures:
-  **code written, unbuilt** (code-only mode, 2026-11-12, D658). Left: the other packages.
+  **code written, unbuilt** (code-only mode, 2026-11-12, D658); `DBMS_RANDOM`, `DBMS_ASSERT` and `UTL_MATCH`:
+  **code written, unbuilt** (code-only mode, 2026-11-12, D659). Left: the other packages.
 - PL/SQL: autonomous transactions (after concurrent writers, M3), compound triggers, the
   mutating-table check, `IS A SET`, `IS EMPTY`, `MULTISET`, `MULTISET (subquery)`, `SET()` and
   `TABLE()` correlated in a join (roadmap item 33e). `IS A SET` and `IS EMPTY`: **code written, unbuilt** (code-only mode,

@@ -113,6 +113,7 @@ mod oracle_listagg;
 mod oracle_nls;
 mod oracle_number_model;
 mod oracle_numerals;
+mod oracle_more_packages;
 mod oracle_packages;
 mod oracle_regexp;
 mod output_into;

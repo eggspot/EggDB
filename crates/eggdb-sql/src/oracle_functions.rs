@@ -913,6 +913,9 @@ pub(crate) fn call(name: &str, values: &[Value], declared: &[Option<SqlType>]) -
             })?;
             Ok(text_or_null(change(&text)))
         };
+    if let Some(result) = crate::oracle_more_packages::call(name, values) {
+        return result;
+    }
     if let Some(result) = crate::oracle_packages::call(name, values) {
         return result;
     }
