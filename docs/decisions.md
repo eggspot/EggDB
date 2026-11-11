@@ -690,3 +690,4 @@ its full title with its status.
 - [D663](decisions/D663.md) Code-only batch 311 (M6c): key_length in MySQL's EXPLAIN FORMAT=JSON
 - [D664](decisions/D664.md) Code-only batch 312 (M5): eggdb-sqllogictest, a runner of sqllogictest files
 - [D665](decisions/D665.md) Code-only batch 313 (M16): Prometheus remote write 2.0
+- [D666](decisions/D666.md) Code-only batch 314 (M6c): OTLP export of the server's logs and slow statements

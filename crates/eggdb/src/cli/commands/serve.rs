@@ -741,11 +741,17 @@ impl Session<'_> {
                 .statement_statistics
                 .unwrap_or(eggdb_sql::statement_statistics::DEFAULT_CAPACITY),
         );
+        let held_telemetry = std::sync::Arc::new(super::serve_otlp::HeldTelemetry::default());
+        let exports_telemetry = options.otlp_endpoint.is_some();
         if let Some(milliseconds) = options.log_slow_statements_ms {
             let slow_events = events.clone();
+            let slow_spans = std::sync::Arc::clone(&held_telemetry);
             eggdb_sql::statement_statistics::log_slow_statements(
                 std::time::Duration::from_millis(milliseconds),
                 Box::new(move |statement| {
+                    if exports_telemetry {
+                        slow_spans.slow_statement(statement);
+                    }
                     let _ = slow_events.send(stamped(&statement.to_string()));
                 }),
             );
@@ -996,9 +1002,10 @@ impl Session<'_> {
             });
             scope.spawn(|| {
                 if let Some(endpoint) = &options.otlp_endpoint {
-                    super::serve_otlp::export_metrics(
+                    super::serve_otlp::export_telemetry(
                         endpoint,
                         &|| served_databases.with_databases(super::serve_metrics::families),
+                        &held_telemetry,
                         &stop_signals::requested,
                     );
                 }
@@ -1206,6 +1213,9 @@ impl Session<'_> {
                 }
             });
             for line in received {
+                if exports_telemetry {
+                    held_telemetry.log(&line);
+                }
                 self.messages.text(&line);
                 let _ = self.messages.finish();
             }
