@@ -4,6 +4,7 @@ use std::cell::RefCell;
 const NEAR_TEXT_CHARACTERS: usize = 80;
 const MOST_EVALUATION_WARNINGS: usize = 64;
 const DIVISION_BY_ZERO_CODE: u16 = 1365;
+const TRUNCATED_VALUE_CODE: u16 = 1292;
 
 thread_local! {
     static EVALUATION_WARNINGS: RefCell<Vec<Warning>> = const { RefCell::new(Vec::new()) };
@@ -31,6 +32,20 @@ pub(crate) fn strict_write() -> bool {
 /// The warnings expressions raised during the statement, such as MySQL's division by zero.
 pub(crate) fn take_evaluation_warnings() -> Vec<Warning> {
     EVALUATION_WARNINGS.with(|warnings| std::mem::take(&mut *warnings.borrow_mut()))
+}
+
+/// Records MySQL's warning 1292 for text that does not read wholly as a number in arithmetic.
+pub(crate) fn warn_truncated_number(text: &str) {
+    EVALUATION_WARNINGS.with(|warnings| {
+        let mut warnings = warnings.borrow_mut();
+        if warnings.len() < MOST_EVALUATION_WARNINGS {
+            warnings.push(Warning {
+                level: "Warning",
+                code: TRUNCATED_VALUE_CODE,
+                message: format!("Truncated incorrect DOUBLE value: '{text}'"),
+            });
+        }
+    });
 }
 
 /// Records MySQL's warning 1365 for a division or modulo by zero, which then gives `NULL`.

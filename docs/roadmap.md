@@ -1022,7 +1022,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - MySQL's semantics: `DECIMAL` division, booleans as integers, implicit string-to-number
   conversion, `sql_mode`, and `1 / 0` as `NULL` with a warning (D10, sql.md). `1 / 0` as `NULL` with
   warning 1365, and numbers as conditions: **code written, unbuilt** (code-only mode, 2026-11-11,
-  D536, D513).
+  D536, D513); string-to-number conversion in arithmetic: **code written, unbuilt** (D537).
 - The rest of MySQL's date and time functions, `STR_TO_DATE` and `ON UPDATE CURRENT_TIMESTAMP`
   (sql.md). `DATE_ADD`/`DATE_SUB` with `INTERVAL`, `TIMESTAMPADD`/`TIMESTAMPDIFF`, `STR_TO_DATE`,
   `UNIX_TIMESTAMP`, `FROM_UNIXTIME` and the day-number, period and clock functions: **code written,

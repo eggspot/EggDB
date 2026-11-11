@@ -2415,6 +2415,56 @@ fn division_by_zero() -> SqlError {
     SqlError::new(SqlState::DIVISION_BY_ZERO, "division by zero")
 }
 
+/// The number MySQL reads from text in arithmetic: its longest leading decimal number (after
+/// spaces), `0` when there is none, and whether that took the whole text.
+fn mysql_text_number(text: &str) -> (f64, bool) {
+    let trimmed = text.trim_start();
+    let bytes = trimmed.as_bytes();
+    let mut end = 0;
+    if matches!(bytes.first(), Some(b'+' | b'-')) {
+        end = 1;
+    }
+    let digits_start = end;
+    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+        end += 1;
+    }
+    if bytes.get(end) == Some(&b'.') {
+        end += 1;
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end += 1;
+        }
+    }
+    let has_digits = trimmed[digits_start..end].bytes().any(|byte| byte.is_ascii_digit());
+    if has_digits && matches!(bytes.get(end), Some(b'e' | b'E')) {
+        let mut exponent = end + 1;
+        if matches!(bytes.get(exponent), Some(b'+' | b'-')) {
+            exponent += 1;
+        }
+        if bytes.get(exponent).is_some_and(u8::is_ascii_digit) {
+            while bytes.get(exponent).is_some_and(u8::is_ascii_digit) {
+                exponent += 1;
+            }
+            end = exponent;
+        }
+    }
+    if !has_digits {
+        return (0.0, trimmed.is_empty());
+    }
+    let number = trimmed[..end].parse().unwrap_or(0.0);
+    (number, trimmed[end..].trim_end().is_empty())
+}
+
+fn mysql_numeric_operand(value: &Value) -> Option<Value> {
+    let Value::Text(text) = value else {
+        return None;
+    };
+    let (number, whole) = mysql_text_number(text);
+    if !whole {
+        crate::mysql_errors::warn_truncated_number(text);
+    }
+    Some(Value::Double(number))
+}
+
 fn mysql_divides_to_null(operator: BinaryOperator, right: &Value) -> bool {
     matches!(operator, BinaryOperator::Divide | BinaryOperator::Modulo)
         && crate::constraints::current_dialect() == crate::Dialect::MySql
@@ -2439,6 +2489,21 @@ pub(crate) fn arithmetic(
     }
     refuse_infinite_date_without_infinities(left)?;
     refuse_infinite_date_without_infinities(right)?;
+    if crate::constraints::current_dialect() == crate::Dialect::MySql
+        && matches!(
+            operator,
+            BinaryOperator::Add
+                | BinaryOperator::Subtract
+                | BinaryOperator::Multiply
+                | BinaryOperator::Divide
+                | BinaryOperator::Modulo
+        )
+        && (matches!(left, Value::Text(_)) || matches!(right, Value::Text(_)))
+    {
+        let left = mysql_numeric_operand(left).unwrap_or_else(|| left.clone());
+        let right = mysql_numeric_operand(right).unwrap_or_else(|| right.clone());
+        return arithmetic(operator, &left, &right);
+    }
     if mysql_divides_to_null(operator, right) && !matches!(left, Value::Null) && !crate::mysql_errors::strict_write() {
         crate::mysql_errors::warn_division_by_zero();
         return Ok(Value::Null);
@@ -2808,5 +2873,20 @@ mod tests {
             assert_eq!(like(text, pattern), Ok(expected), "{text} LIKE {pattern}");
         }
         assert!(like("a", "a\\").is_err());
+    }
+}
+
+#[cfg(test)]
+mod mysql_number_tests {
+    use super::mysql_text_number;
+
+    #[test]
+    fn text_reads_as_mysql_reads_it_in_arithmetic() {
+        assert_eq!(mysql_text_number("5"), (5.0, true));
+        assert_eq!(mysql_text_number("  -2.5e1 "), (-25.0, true));
+        assert_eq!(mysql_text_number("12abc"), (12.0, false));
+        assert_eq!(mysql_text_number("abc"), (0.0, false));
+        assert_eq!(mysql_text_number(""), (0.0, true));
+        assert_eq!(mysql_text_number("1e"), (1.0, false));
     }
 }
