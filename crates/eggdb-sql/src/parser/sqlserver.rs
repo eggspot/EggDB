@@ -1472,6 +1472,7 @@ impl<'t> Parser<'t> {
         Ok(Statement::CreateSequence(CreateSequence {
             name,
             if_not_exists: false,
+            or_replace: false,
             options,
         }))
     }

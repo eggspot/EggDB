@@ -3247,6 +3247,16 @@ impl<'s> Session<'s> {
             }),
             Statement::CreateSequence(create) => self.write("CREATE SEQUENCE", |writer, tables| {
                 create.name.text = crate::schemas::creation_name(writer, &create.name)?;
+                if create.or_replace && sequences::read(writer, &create.name.text)?.is_some() {
+                    sequences::drop_sequences(
+                        writer,
+                        tables,
+                        std::slice::from_ref(&create.name),
+                        true,
+                        false,
+                        dialect,
+                    )?;
+                }
                 sequences::create_sequence(writer, tables, create, dialect)
             }),
             Statement::AlterSequence(alter) => self.write("ALTER SEQUENCE", |writer, tables| {

@@ -1851,6 +1851,26 @@ impl<'t> Parser<'t> {
         if self.is_word("or") && self.sqlite() {
             return Err(self.unexpected());
         }
+        if self.mysql()
+            && self.is_word("or")
+            && self.is_word_at(1, "replace")
+            && self.is_word_at(2, "sequence")
+        {
+            self.at += 2;
+            let position = self.position();
+            let mut statement = self.create_sequence()?;
+            if let Statement::CreateSequence(create) = &mut statement {
+                if create.if_not_exists {
+                    return Err(SqlError::new(
+                        SqlState::SYNTAX_ERROR,
+                        "OR REPLACE and IF NOT EXISTS cannot be used together",
+                    )
+                    .at(position));
+                }
+                create.or_replace = true;
+            }
+            return Ok(statement);
+        }
         if self.is_word("or") && self.is_word_at(1, "replace") {
             self.at += 2;
             return self.create_view(true);

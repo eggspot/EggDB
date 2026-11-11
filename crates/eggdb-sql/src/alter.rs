@@ -1749,6 +1749,7 @@ fn add_identity(
             position,
         },
         if_not_exists: false,
+        or_replace: false,
         options,
     };
     crate::sequences::create_sequence(writer, tables, &create, dialect)?;
@@ -3000,6 +3001,7 @@ fn add_serial_column(
         &crate::ast::CreateSequence {
             name: sequence_name.clone(),
             if_not_exists: false,
+            or_replace: false,
             options: crate::ast::SequenceOptions {
                 sql_type: Some((definition.sql_type, position)),
                 ..crate::ast::SequenceOptions::default()

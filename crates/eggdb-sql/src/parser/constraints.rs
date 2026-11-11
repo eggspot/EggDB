@@ -517,6 +517,7 @@ impl Parser<'_> {
         Ok(Statement::CreateSequence(CreateSequence {
             name,
             if_not_exists,
+            or_replace: false,
             options,
         }))
     }

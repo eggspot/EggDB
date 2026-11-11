@@ -831,6 +831,7 @@ pub(crate) struct SequenceOptions {
 pub(crate) struct CreateSequence {
     pub(crate) name: Name,
     pub(crate) if_not_exists: bool,
+    pub(crate) or_replace: bool,
     pub(crate) options: SequenceOptions,
 }
 
