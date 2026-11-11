@@ -3,6 +3,77 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 const MAX_POSITION: u32 = 16_383;
+const WEIGHT_SHIFT: u32 = 14;
+
+/// A position's weight, from `setweight`: `A` highest, `D` the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Weight {
+    /// The default weight, not written in the text form.
+    D,
+    /// Weight `C`.
+    C,
+    /// Weight `B`.
+    B,
+    /// Weight `A`.
+    A,
+}
+
+impl Weight {
+    /// The weight a letter (`A` to `D`, any case) names.
+    pub fn named(letter: char) -> Option<Self> {
+        match letter.to_ascii_uppercase() {
+            'A' => Some(Self::A),
+            'B' => Some(Self::B),
+            'C' => Some(Self::C),
+            'D' => Some(Self::D),
+            _ => None,
+        }
+    }
+
+    fn code(self) -> u32 {
+        match self {
+            Self::D => 0,
+            Self::C => 1,
+            Self::B => 2,
+            Self::A => 3,
+        }
+    }
+
+    fn of_code(code: u32) -> Self {
+        match code & 3 {
+            3 => Self::A,
+            2 => Self::B,
+            1 => Self::C,
+            _ => Self::D,
+        }
+    }
+
+    /// The index of this weight in a `ts_rank` weights array (`{D, C, B, A}`).
+    pub fn rank_index(self) -> usize {
+        self.code() as usize
+    }
+
+    fn letter(self) -> Option<char> {
+        match self {
+            Self::A => Some('A'),
+            Self::B => Some('B'),
+            Self::C => Some('C'),
+            Self::D => None,
+        }
+    }
+}
+
+fn position_of(stored: u32) -> u32 {
+    stored & MAX_POSITION
+}
+
+fn weight_of(stored: u32) -> Weight {
+    Weight::of_code(stored >> WEIGHT_SHIFT)
+}
+
+fn stored(position: u32, weight: Weight) -> u32 {
+    position.min(MAX_POSITION) | (weight.code() << WEIGHT_SHIFT)
+}
 
 /// How text becomes lexemes, named as PostgreSQL's text search configurations are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +152,18 @@ impl TsVector {
                 let end = list.find(' ').unwrap_or(list.len());
                 for part in list[..end].split(',') {
                     let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
-                    positions.push(digits.parse().ok()?);
+                    let weight = match &part[digits.len()..] {
+                        "" => Weight::D,
+                        letter if letter.chars().count() == 1 => {
+                            Weight::named(letter.chars().next()?)?
+                        }
+                        _ => return None,
+                    };
+                    let position: u32 = digits.parse().ok()?;
+                    if position == 0 {
+                        return None;
+                    }
+                    positions.push(stored(position, weight));
                 }
                 after = &list[end..];
             }
@@ -98,17 +180,48 @@ impl TsVector {
 
     /// The positions of `lexeme`, or of every lexeme starting with it when `prefix`.
     pub fn positions(&self, lexeme: &str, prefix: bool) -> Vec<u32> {
-        if !prefix {
-            return self.lexemes.get(lexeme).cloned().unwrap_or_default();
-        }
         let mut all: Vec<u32> = self
-            .lexemes
-            .range(lexeme.to_owned()..)
-            .take_while(|(key, _)| key.starts_with(lexeme))
-            .flat_map(|(_, positions)| positions.iter().copied())
+            .weighted_positions(lexeme, prefix)
+            .into_iter()
+            .map(|(position, _)| position)
+            .collect();
+        all.dedup();
+        all
+    }
+
+    /// The positions of `lexeme` (or of every lexeme starting with it when `prefix`) with
+    /// their weights, in position order.
+    pub fn weighted_positions(&self, lexeme: &str, prefix: bool) -> Vec<(u32, Weight)> {
+        let stored_positions: Vec<u32> = if prefix {
+            self.lexemes
+                .range(lexeme.to_owned()..)
+                .take_while(|(key, _)| key.starts_with(lexeme))
+                .flat_map(|(_, positions)| positions.iter().copied())
+                .collect()
+        } else {
+            self.lexemes.get(lexeme).cloned().unwrap_or_default()
+        };
+        let mut all: Vec<(u32, Weight)> = stored_positions
+            .into_iter()
+            .map(|stored| (position_of(stored), weight_of(stored)))
             .collect();
         all.sort_unstable();
         all
+    }
+
+    /// The same vector with every position's weight set to `weight`, or only those of the
+    /// lexemes in `only` when it is given, as `setweight` does.
+    pub fn with_weight(&self, weight: Weight, only: Option<&[String]>) -> Self {
+        let mut lexemes = self.lexemes.clone();
+        for (lexeme, positions) in &mut lexemes {
+            if only.is_some_and(|listed| !listed.iter().any(|named| named == lexeme)) {
+                continue;
+            }
+            for position in positions.iter_mut() {
+                *position = stored(position_of(*position), weight);
+            }
+        }
+        Self { lexemes }
     }
 
     /// Whether `lexeme` is in the vector.
@@ -165,7 +278,16 @@ impl fmt::Display for TsVector {
             first = false;
             f.write_str(&quote(lexeme))?;
             if !positions.is_empty() {
-                let listed: Vec<String> = positions.iter().map(u32::to_string).collect();
+                let listed: Vec<String> = positions
+                    .iter()
+                    .map(|stored| {
+                        let mut text = position_of(*stored).to_string();
+                        if let Some(letter) = weight_of(*stored).letter() {
+                            text.push(letter);
+                        }
+                        text
+                    })
+                    .collect();
                 write!(f, ":{}", listed.join(","))?;
             }
         }

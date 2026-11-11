@@ -5,11 +5,13 @@
 //! protocol and query language can search with it.
 
 mod english;
+mod headline;
 mod query;
 mod rank;
 mod vector;
 
 pub use english::{is_stop_word, stem};
 pub use query::TsQuery;
-pub use rank::{bm25, ts_rank};
-pub use vector::{Config, TsVector, words};
+pub use rank::{DEFAULT_RANK_WEIGHTS, bm25, ts_rank, ts_rank_weighted};
+pub use headline::{HeadlineOptions, headline};
+pub use vector::{Config, TsVector, Weight, words};

@@ -1,6 +1,6 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
-use eggdb_search::{Config, TsQuery, TsVector};
+use eggdb_search::{Config, HeadlineOptions, TsQuery, TsVector, Weight};
 
 const DEFAULT_CONFIG: Config = Config::English;
 
@@ -76,17 +76,146 @@ fn with_config(values: &[Value]) -> SqlResult<Option<(Config, String)>> {
     }
 }
 
+fn rank_weights(value: &Value) -> SqlResult<[f64; 4]> {
+    let numbers: Vec<Option<f64>> = match value {
+        Value::Array(array) => array
+            .items
+            .iter()
+            .map(|item| text(item).and_then(|text| text.trim().parse().ok()))
+            .collect(),
+        other => text(other)
+            .unwrap_or_default()
+            .trim()
+            .trim_start_matches('{')
+            .trim_end_matches('}')
+            .split(',')
+            .map(|item| item.trim().parse().ok())
+            .collect(),
+    };
+    let refused = || {
+        SqlError::new(
+            SqlState::INVALID_PARAMETER_VALUE,
+            "array of weight must be one-dimensional with four non-null values between 0 and 1",
+        )
+    };
+    let numbers: Vec<f64> = numbers.into_iter().collect::<Option<Vec<f64>>>().ok_or_else(refused)?;
+    let [d, c, b, a] = numbers.as_slice() else {
+        return Err(refused());
+    };
+    let weights = [*d, *c, *b, *a];
+    if weights.iter().any(|weight| !(0.0..=1.0).contains(weight)) {
+        return Err(refused());
+    }
+    Ok(weights)
+}
+
+fn setweight(values: &[Value]) -> SqlResult<Value> {
+    let (vector, weight, only) = match values {
+        [vector, weight] => (vector, weight, None),
+        [vector, weight, lexemes] => (vector, weight, Some(lexemes)),
+        _ => {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_FUNCTION,
+                "function setweight takes a tsvector, a weight and optionally an array of lexemes",
+            ));
+        }
+    };
+    let (Some(vector), Some(weight)) = (text(vector), text(weight)) else {
+        return Ok(Value::Null);
+    };
+    let mut letters = weight.chars();
+    let (Some(letter), None) = (letters.next(), letters.next()) else {
+        return Err(SqlError::new(
+            SqlState::INVALID_PARAMETER_VALUE,
+            format!("unrecognized weight: \"{weight}\""),
+        ));
+    };
+    let weight = Weight::named(letter).ok_or_else(|| {
+        SqlError::new(
+            SqlState::INVALID_PARAMETER_VALUE,
+            format!("unrecognized weight: {}", u32::from(letter)),
+        )
+    })?;
+    let listed: Option<Vec<String>> = match only {
+        None => None,
+        Some(Value::Null) => return Ok(Value::Null),
+        Some(Value::Array(array)) => Some(array.items.iter().filter_map(text).collect()),
+        Some(other) => Some(
+            text(other)
+                .unwrap_or_default()
+                .trim()
+                .trim_start_matches('{')
+                .trim_end_matches('}')
+                .split(',')
+                .map(|item| item.trim().trim_matches('"').to_owned())
+                .filter(|item| !item.is_empty())
+                .collect(),
+        ),
+    };
+    Ok(Value::Text(
+        vector_of(&vector)
+            .with_weight(weight, listed.as_deref())
+            .to_string(),
+    ))
+}
+
+fn ts_headline(values: &[Value]) -> SqlResult<Value> {
+    let options_like = |value: &Value| text(value).is_some_and(|text| text.contains('='));
+    let (config, document, query, options) = match values {
+        [document, query] => (None, document, query, None),
+        [document, query, options] if options_like(options) => {
+            (None, document, query, Some(options))
+        }
+        [config, document, query] => (Some(config), document, query, None),
+        [config, document, query, options] => (Some(config), document, query, Some(options)),
+        _ => {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_FUNCTION,
+                "function ts_headline takes an optional configuration, a document, a tsquery and optional options",
+            ));
+        }
+    };
+    let config = match config.map(text) {
+        None => DEFAULT_CONFIG,
+        Some(None) => return Ok(Value::Null),
+        Some(Some(name)) => config_named(&name)?,
+    };
+    let (Some(document), Some(query)) = (text(document), text(query)) else {
+        return Ok(Value::Null);
+    };
+    let options = match options.map(text) {
+        None => HeadlineOptions::default(),
+        Some(None) => return Ok(Value::Null),
+        Some(Some(written)) => HeadlineOptions::parse(&written)
+            .map_err(|message| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, message))?,
+    };
+    Ok(Value::Text(eggdb_search::headline(
+        config,
+        &document,
+        &query_of(&query),
+        &options,
+    )))
+}
+
 /// The text-search functions: `to_tsvector`, `to_tsquery`, `plainto_tsquery`,
 /// `phraseto_tsquery`, `websearch_to_tsquery`, `ts_rank` and `ts_rank_cd`.
 pub(crate) fn function(name: &str, values: &[Value]) -> SqlResult<Value> {
     match name {
+        "setweight" => setweight(values),
+        "ts_headline" => ts_headline(values),
         "ts_rank" | "ts_rank_cd" => {
-            let (vector, query) = match values {
-                [vector, query] => (vector, query),
-                [Value::Array(_), vector, query] | [Value::Array(_), vector, query, _] => {
-                    (vector, query)
+            let weights_given =
+                |value: &Value| match value {
+                    Value::Array(_) => true,
+                    Value::Text(text) => text.trim_start().starts_with('{'),
+                    _ => false,
+                };
+            let (weights, vector, query) = match values {
+                [vector, query] => (None, vector, query),
+                [weights, vector, query] | [weights, vector, query, _] if weights_given(weights) => {
+                    (Some(rank_weights(weights)?), vector, query)
                 }
-                [vector, query, _] => (vector, query),
+                [vector, query, _] => (None, vector, query),
                 _ => {
                     return Err(SqlError::new(
                         SqlState::UNDEFINED_FUNCTION,
@@ -97,9 +226,12 @@ pub(crate) fn function(name: &str, values: &[Value]) -> SqlResult<Value> {
             let (Some(vector), Some(query)) = (text(vector), text(query)) else {
                 return Ok(Value::Null);
             };
-            Ok(Value::Real(
-                eggdb_search::ts_rank(&vector_of(&vector), &query_of(&query)) as f32,
-            ))
+            let weights = weights.unwrap_or(eggdb_search::DEFAULT_RANK_WEIGHTS);
+            Ok(Value::Real(eggdb_search::ts_rank_weighted(
+                &vector_of(&vector),
+                &query_of(&query),
+                weights,
+            ) as f32))
         }
         _ => {
             let Some((config, input)) = with_config(values)? else {

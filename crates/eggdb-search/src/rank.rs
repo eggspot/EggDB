@@ -9,6 +9,15 @@ const B: f64 = 0.75;
 /// `0` when the query does not match. It orders documents as PostgreSQL's `ts_rank` does for
 /// plain term queries, but its values are EggDB's own.
 pub fn ts_rank(vector: &TsVector, query: &TsQuery) -> f64 {
+    ts_rank_weighted(vector, query, DEFAULT_RANK_WEIGHTS)
+}
+
+/// PostgreSQL's default weights of `D`, `C`, `B` and `A` positions in `ts_rank`.
+pub const DEFAULT_RANK_WEIGHTS: [f64; 4] = [0.1, 0.2, 0.4, 1.0];
+
+/// [`ts_rank`] with each position counted by its weight's entry in `weights` (`{D, C, B, A}`),
+/// relative to the default `D` weight, so unweighted vectors rank as [`ts_rank`] ranks them.
+pub fn ts_rank_weighted(vector: &TsVector, query: &TsQuery, weights: [f64; 4]) -> f64 {
     if !query.matches(vector) {
         return 0.0;
     }
@@ -19,7 +28,13 @@ pub fn ts_rank(vector: &TsVector, query: &TsQuery) -> f64 {
     let total: f64 = terms
         .iter()
         .map(|(lexeme, prefix)| {
-            let frequency = vector.positions(lexeme, *prefix).len() as f64;
+            let frequency: f64 = vector
+                .weighted_positions(lexeme, *prefix)
+                .iter()
+                .map(|(_, weight)| {
+                    weights[weight.rank_index()] / DEFAULT_RANK_WEIGHTS[0]
+                })
+                .sum();
             frequency / (frequency + 1.0)
         })
         .sum();

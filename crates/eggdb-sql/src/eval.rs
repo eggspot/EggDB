@@ -1398,7 +1398,9 @@ impl Evaluator<'_> {
             | "phraseto_tsquery"
             | "websearch_to_tsquery"
             | "ts_rank"
-            | "ts_rank_cd" => {
+            | "ts_rank_cd"
+            | "setweight"
+            | "ts_headline" => {
                 return crate::text_search::function(name, &self.arguments(arguments)?);
             }
             name if crate::geo_functions::FUNCTIONS.contains(&name) => {

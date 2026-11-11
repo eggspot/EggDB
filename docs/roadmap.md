@@ -919,7 +919,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 ### M8 Full-text search
 - An inverted index in the file, with BM25 in SQL served from it (D195). Check: a benchmark
   against SQLite FTS5 and Elasticsearch.
-- Weights (`setweight`) and `ts_headline` (D195).
+- Weights (`setweight`) and `ts_headline` (D195). **Code written, unbuilt** (code-only mode,
+  2026-11-11, D469).
 - Stemmers for every major language, and word segmentation for Chinese, Japanese, Korean and Thai
   (D30).
 - Synonyms, stop words, and fuzzy and phonetic matching (D30).

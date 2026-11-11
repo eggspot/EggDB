@@ -493,3 +493,4 @@ its full title with its status.
 - [D466](decisions/D466.md) Code-only batch 114 (M6a): `ON CONFLICT ... DO UPDATE ... WHERE`
 - [D467](decisions/D467.md) Code-only batch 115 (M8): Elasticsearch scroll
 - [D468](decisions/D468.md) Code-only batch 116 (M8): Elasticsearch point in time
+- [D469](decisions/D469.md) Code-only batch 117 (M8): text-search weights and `ts_headline`

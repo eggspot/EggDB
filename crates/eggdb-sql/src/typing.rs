@@ -171,6 +171,8 @@ fn added_function_type(
         | "plainto_tsquery"
         | "phraseto_tsquery"
         | "websearch_to_tsquery"
+        | "setweight"
+        | "ts_headline"
         | "normalize" => Some(SqlType::Text),
         "ts_rank" | "ts_rank_cd" => Some(SqlType::Real),
         "l2_distance" | "cosine_distance" | "inner_product" | "l1_distance" | "vector_norm"
