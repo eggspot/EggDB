@@ -645,7 +645,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - PostgreSQL's regression suite run from outside the repo, with its pass rate published and a
   stated minimum, as for every protocol and dialect (D10, D45).
 - Generated REST: JWT sign-in with roles per request, embedded resources, `or=`/`and=` groups,
-  `POST /rpc/<function>`, upserts and an OpenAPI document (D235).
+  `POST /rpc/<function>`, upserts and an OpenAPI document (D235). `or=`/`and=` groups: **code written,
+  unbuilt** (code-only mode, 2026-11-11, D456).
 - A GraphQL API generated from the schema, in Hasura's style (D37).
 - gRPC and OData APIs generated from the schema, OData for Excel, Power BI and SAP (D37).
 - Realtime subscriptions over WebSocket and Server-Sent Events on live queries (D37).

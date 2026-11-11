@@ -119,6 +119,96 @@ fn condition(column: &str, expression: &str) -> Result<String, String> {
     })
 }
 
+const MAX_GROUP_DEPTH: usize = 16;
+
+fn split_top_level(text: &str) -> Result<Vec<String>, String> {
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut quoted = false;
+    for character in text.chars() {
+        match character {
+            '"' => {
+                quoted = !quoted;
+                current.push(character);
+            }
+            '(' if !quoted => {
+                depth += 1;
+                current.push(character);
+            }
+            ')' if !quoted => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or("a logic group closes a parenthesis it never opened")?;
+                current.push(character);
+            }
+            ',' if !quoted && depth == 0 => items.push(std::mem::take(&mut current)),
+            other => current.push(other),
+        }
+    }
+    if quoted || depth != 0 {
+        return Err("a logic group is not closed".to_owned());
+    }
+    if !current.is_empty() {
+        items.push(current);
+    }
+    Ok(items)
+}
+
+fn unquoted_value(expression: &str) -> String {
+    match expression.split_once('.') {
+        Some((operator, value))
+            if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') =>
+        {
+            format!("{operator}.{}", value[1..value.len() - 1].replace("\"\"", "\""))
+        }
+        _ => expression.to_owned(),
+    }
+}
+
+fn logic_item(item: &str, depth: usize) -> Result<String, String> {
+    let item = item.trim();
+    let (negated, rest) = match item.strip_prefix("not.") {
+        Some(rest) if rest.starts_with("and(") || rest.starts_with("or(") => (true, rest),
+        _ => (false, item),
+    };
+    for (word, joiner) in [("and", " AND "), ("or", " OR ")] {
+        if let Some(inner) = rest
+            .strip_prefix(word)
+            .and_then(|rest| rest.strip_prefix('('))
+            .and_then(|rest| rest.strip_suffix(')'))
+        {
+            let group = logic_group(inner, joiner, depth + 1)?;
+            return Ok(if negated {
+                format!("NOT {group}")
+            } else {
+                group
+            });
+        }
+    }
+    let (column, expression) = item
+        .split_once('.')
+        .ok_or_else(|| format!("{item}: write column.operator.value inside a logic group"))?;
+    let quoted =
+        identifier(column).ok_or_else(|| format!("{column} is not a column name"))?;
+    condition(&quoted, &unquoted_value(expression))
+}
+
+fn logic_group(text: &str, joiner: &str, depth: usize) -> Result<String, String> {
+    if depth > MAX_GROUP_DEPTH {
+        return Err("logic groups are nested too deeply".to_owned());
+    }
+    let items = split_top_level(text)?;
+    if items.is_empty() {
+        return Err("a logic group needs at least one condition".to_owned());
+    }
+    let rendered = items
+        .iter()
+        .map(|item| logic_item(item, depth))
+        .collect::<Result<Vec<String>, String>>()?;
+    Ok(format!("({})", rendered.join(joiner)))
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Query {
     select: Option<Vec<String>>,
@@ -194,6 +284,22 @@ impl Query {
                             .parse()
                             .map_err(|_| format!("offset={value} is not a count"))?,
                     )
+                }
+                "or" | "and" | "not.or" | "not.and" => {
+                    let inner = value
+                        .strip_prefix('(')
+                        .and_then(|rest| rest.strip_suffix(')'))
+                        .ok_or_else(|| format!("{name} needs its conditions in parentheses"))?;
+                    let joiner = if name.ends_with("or") { " OR " } else { " AND " };
+                    let group = logic_group(inner, joiner, 0)?;
+                    if query.conditions.len() >= MAX_CONDITIONS {
+                        return Err("too many filters".to_owned());
+                    }
+                    query.conditions.push(if name.starts_with("not.") {
+                        format!("NOT {group}")
+                    } else {
+                        group
+                    });
                 }
                 column => {
                     let quoted = identifier(column)
