@@ -603,3 +603,4 @@ its full title with its status.
 - [D576](decisions/D576.md) Code-only batch 224 (M10): MySQL events run to the second
 - [D577](decisions/D577.md) Code-only batch 225 (M10): Oracle's USER_SCHEDULER_JOBS
 - [D578](decisions/D578.md) Code-only batch 226 (M5): the SQL:2023 conformance list and its check
+- [D579](decisions/D579.md) Code-only batch 227 (M8): the by-query APIs apply the index's mappings

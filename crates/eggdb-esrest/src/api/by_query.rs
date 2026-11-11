@@ -434,9 +434,17 @@ impl Api<'_> {
         reservation: &mut Reservation<'_>,
     ) -> Result<Snapshot, String> {
         read(self.keyspace, |keys| {
-            if keys.get(&index_key(index))?.is_none() {
+            let Some(stored) = keys.get(&index_key(index))? else {
                 return Ok(Snapshot::MissingIndex);
+            };
+            let mut types = crate::mappings::FieldTypes::default();
+            if let Some(mappings) = String::from_utf8(stored)
+                .ok()
+                .and_then(|text| parse_document(&text).ok())
+            {
+                types.add_mappings(&mappings);
             }
+            let query = crate::mappings::apply(options.query.clone(), &types, super::now_millis());
             let prefix = document_prefix(index);
             let mut matched = Vec::new();
             let mut held = 0usize;
@@ -454,7 +462,7 @@ impl Api<'_> {
                 let Ok(document) = parse_document(&source) else {
                     return Ok(true);
                 };
-                if matches(&options.query, &id, &document) {
+                if matches(&query, &id, &document) {
                     held = held.saturating_add(id.len() + MATCHED_ENTRY_BYTES);
                     if !reservation.hold_if_large(held) {
                         over_budget = true;
