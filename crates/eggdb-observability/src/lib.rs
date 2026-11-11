@@ -15,6 +15,7 @@ mod api;
 mod line_protocol;
 mod logql;
 mod loki;
+mod otlp;
 mod promql;
 mod remote_write;
 mod store;

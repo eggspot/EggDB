@@ -3,7 +3,7 @@ use crate::remote_write::{Field, Reader, text};
 use eggdb_sql::json::{Json, Node, parse_document};
 
 pub(crate) const PUSH_PATH: &str = "/loki/api/v1/push";
-const MEASUREMENT: &str = "logs";
+pub(crate) const MEASUREMENT: &str = "logs";
 const MAX_DECOMPRESSED: usize = 64 << 20;
 const MOST_LINES: usize = 1 << 20;
 const MAX_LABELS: usize = 64;
