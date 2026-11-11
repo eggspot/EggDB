@@ -532,3 +532,4 @@ its full title with its status.
 - [D505](decisions/D505.md) Code-only batch 153 (M11): NDJSON import and export
 - [D506](decisions/D506.md) Code-only batch 154 (M11): Excel .xlsx import and export
 - [D507](decisions/D507.md) Code-only batch 155 (M11): dBase .dbf import
+- [D508](decisions/D508.md) Code-only batch 156 (M11): COBOL copybooks and EBCDIC records

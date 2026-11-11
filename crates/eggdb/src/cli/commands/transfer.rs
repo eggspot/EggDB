@@ -209,6 +209,11 @@ impl Session<'_> {
         if let Some(source) = self.request.csv.dbf.clone() {
             return self.import_dbf(&source);
         }
+        if let (Some(copybook), Some(source)) =
+            (self.request.csv.copybook.clone(), self.request.csv.ebcdic.clone())
+        {
+            return self.import_mainframe(&copybook, &source);
+        }
         if let Some(source) = self.request.csv.source.clone() {
             return self.import_csv(source);
         }

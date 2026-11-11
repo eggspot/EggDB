@@ -295,7 +295,7 @@ impl CommandName {
                 matches!(self, Self::Import | Self::Export)
             }
             OptionName::Arrow => self == Self::Export,
-            OptionName::Dbf => self == Self::Import,
+            OptionName::Dbf | OptionName::Copybook | OptionName::Ebcdic => self == Self::Import,
             OptionName::SqlDump => self == Self::Export,
             OptionName::OnConflict
             | OptionName::Csv
@@ -477,6 +477,8 @@ enum OptionName {
     Ndjson,
     Xlsx,
     Dbf,
+    Copybook,
+    Ebcdic,
     Arrow,
     SqlDump,
     Table,
@@ -592,6 +594,8 @@ impl OptionName {
             b"ndjson" => Self::Ndjson,
             b"xlsx" => Self::Xlsx,
             b"dbf" => Self::Dbf,
+            b"copybook" => Self::Copybook,
+            b"ebcdic" => Self::Ebcdic,
             b"arrow" => Self::Arrow,
             b"sql" => Self::SqlDump,
             b"table" => Self::Table,
@@ -801,6 +805,8 @@ pub(crate) struct CsvOptions {
     pub(crate) ndjson: Option<PathBuf>,
     pub(crate) xlsx: Option<PathBuf>,
     pub(crate) dbf: Option<PathBuf>,
+    pub(crate) copybook: Option<PathBuf>,
+    pub(crate) ebcdic: Option<PathBuf>,
     pub(crate) arrow: Option<PathBuf>,
     pub(crate) sql_dump: Option<eggdb_sql::Dialect>,
 }
@@ -1572,6 +1578,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::Ndjson => request.csv.ndjson = Some(PathBuf::from(value)),
             OptionName::Xlsx => request.csv.xlsx = Some(PathBuf::from(value)),
             OptionName::Dbf => request.csv.dbf = Some(PathBuf::from(value)),
+            OptionName::Copybook => request.csv.copybook = Some(PathBuf::from(value)),
+            OptionName::Ebcdic => request.csv.ebcdic = Some(PathBuf::from(value)),
             OptionName::Arrow => request.csv.arrow = Some(PathBuf::from(value)),
             OptionName::SqlDump => {
                 request.csv.sql_dump = Some(match value.to_str().unwrap_or_default() {
@@ -2144,6 +2152,24 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
             return Err(
                 "--sql writes every table; it does not go with --parquet or --table".to_owned(),
             );
+        }
+        return Ok(());
+    }
+    if csv.copybook.is_some() || csv.ebcdic.is_some() {
+        if csv.copybook.is_none() || csv.ebcdic.is_none() {
+            return Err("--copybook <file> and --ebcdic <file> go together: the record layout and the records".to_owned());
+        }
+        if csv.dbf.is_some()
+            || csv.xlsx.is_some()
+            || csv.ndjson.is_some()
+            || csv.parquet.is_some()
+            || csv.source.is_some()
+            || request.export_file.is_some()
+        {
+            return Err("--copybook and --ebcdic go without --dbf, --xlsx, --ndjson, --parquet, --csv or a second argument".to_owned());
+        }
+        if csv.table.is_none() {
+            return Err("--ebcdic needs --table <name>, the table to load".to_owned());
         }
         return Ok(());
     }
