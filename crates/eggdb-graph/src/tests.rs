@@ -1440,4 +1440,21 @@ fn list_predicates_answer_and_steer_shortest_paths() {
         light.rows,
         vec![vec![Value::List(vec![text("a"), text("d"), text("e"), text("c")])]]
     );
+    let two = query(
+        &keyspace,
+        "MATCH p = SHORTEST 2 PATHS (a:N {name: 'a'})-[:R]->+(c:N {name: 'c'})
+         RETURN [n IN nodes(p) | n.name] AS names ORDER BY length(p)",
+    );
+    assert_eq!(
+        two.rows,
+        vec![
+            vec![Value::List(vec![text("a"), text("b"), text("c")])],
+            vec![Value::List(vec![text("a"), text("d"), text("e"), text("c")])]
+        ]
+    );
+    let any = query(
+        &keyspace,
+        "MATCH p = ANY SHORTEST (a:N {name: 'a'})-[:R]->{1,5}(c:N {name: 'c'}) RETURN length(p)",
+    );
+    assert_eq!(any.rows, vec![vec![Value::Integer(2)]]);
 }

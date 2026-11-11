@@ -663,7 +663,7 @@ impl<'g> Executor<'g, '_> {
         }
         Ok(match shortest {
             Shortest::One => paths.into_iter().next().unwrap_or(Value::Null),
-            Shortest::All => Value::List(paths),
+            Shortest::All | Shortest::Count(_) => Value::List(paths),
         })
     }
 
@@ -1231,6 +1231,72 @@ impl<'g> Executor<'g, '_> {
         Ok(true)
     }
 
+    /// Up to `count` shortest paths from `origin` to each node it reaches (to `target` only
+    /// when bound), in order of length, as GQL's `SHORTEST k` asks: a breadth-first search over
+    /// paths that never visit a node twice, within the hop bounds and the query's search budget.
+    #[allow(clippy::too_many_arguments)]
+    fn counted_shortest(
+        &self,
+        origin: u64,
+        pattern: &RelationshipPattern,
+        row: &Row,
+        (min, max): (u32, u32),
+        target: Option<u64>,
+        count: u32,
+        conditions: &[StepCondition],
+    ) -> GraphResult<Vec<(u64, Vec<u64>)>> {
+        let mut found: Vec<(u64, Vec<u64>)> = Vec::new();
+        let mut per_end: HashMap<u64, u32> = HashMap::new();
+        let mut frontier: Vec<(u64, Vec<u64>, Vec<u64>)> = vec![(origin, Vec::new(), vec![origin])];
+        if min == 0 && target.is_none_or(|target| target == origin) {
+            per_end.insert(origin, 1);
+            found.push((origin, Vec::new()));
+        }
+        for hop in 1..=max {
+            let mut next_frontier = Vec::new();
+            for (at, walk, visited) in &frontier {
+                for (relationship, next) in self.steps_from(*at, pattern, row, &[])? {
+                    let steps = self.shortest_path_steps.get() + 1;
+                    self.shortest_path_steps.set(steps);
+                    if steps > MAX_SHORTEST_PATH_STEPS {
+                        return Err(out_of_memory(format!(
+                            "the query's shortest path searches expand more than {MAX_SHORTEST_PATH_STEPS} relationships; bound them with fewer hops, fewer start nodes or a more selective pattern"
+                        )));
+                    }
+                    if visited.contains(&next)
+                        || (!conditions.is_empty() && !self.step_allowed(conditions, row, &relationship, next)?)
+                    {
+                        continue;
+                    }
+                    let mut longer = walk.clone();
+                    longer.push(relationship.id);
+                    let mut seen = visited.clone();
+                    seen.push(next);
+                    if hop >= min && target.is_none_or(|target| target == next) {
+                        let held = per_end.entry(next).or_insert(0);
+                        if *held < count {
+                            *held += 1;
+                            let total = self.shortest_path_relationships_returned.get().saturating_add(longer.len());
+                            self.shortest_path_relationships_returned.set(total);
+                            if total > MAX_SHORTEST_PATH_RELATIONSHIPS_RETURNED {
+                                return Err(out_of_memory(format!(
+                                    "the query's shortest paths hold more than {MAX_SHORTEST_PATH_RELATIONSHIPS_RETURNED} relationships together; bound them with fewer hops, fewer start nodes or a more selective pattern"
+                                )));
+                            }
+                            found.push((next, longer.clone()));
+                        }
+                    }
+                    next_frontier.push((next, longer, seen));
+                }
+            }
+            if next_frontier.is_empty() || target.is_some_and(|target| per_end.get(&target).is_some_and(|held| *held >= count)) {
+                break;
+            }
+            frontier = next_frontier;
+        }
+        Ok(found)
+    }
+
     fn match_pattern_with(&self, row: &Row, pattern: &Pattern, filter: Option<&Expr>) -> GraphResult<Vec<Row>> {
         match pattern.shortest {
             Some(shortest) => {
@@ -1363,29 +1429,40 @@ impl<'g> Executor<'g, '_> {
             if let Some(name) = &pattern.start.variable {
                 bind(&mut start_row, name, Value::Node(Box::new(start.clone())));
             }
-            let reached = self.breadth_first(
-                start.id,
-                relationship_pattern,
-                &start_row,
-                max,
-                target,
-                all,
-                conditions,
-            )?;
-            for (end, step) in reached.iter().enumerate() {
-                if step.distance < min || target.is_some_and(|target| target != step.node) {
-                    continue;
+            let mut found: Vec<(u64, Vec<u64>)> = Vec::new();
+            if let Shortest::Count(count) = shortest {
+                for (end, walk) in self.counted_shortest(start.id, relationship_pattern, &start_row, (min, max), target, count, conditions)? {
+                    let end_node = self.existing_node(end)?;
+                    if self.node_matches(&end_node, end_pattern, &start_row)? {
+                        found.push((end, walk));
+                    }
                 }
-                let end_node = self.existing_node(step.node)?;
-                if !self.node_matches(&end_node, end_pattern, &start_row)? {
-                    continue;
-                }
-                for walk in walks_back(
-                    &reached,
-                    end,
+            } else {
+                let reached = self.breadth_first(
+                    start.id,
+                    relationship_pattern,
+                    &start_row,
+                    max,
+                    target,
                     all,
-                    &self.shortest_path_relationships_returned,
-                )? {
+                    conditions,
+                )?;
+                for (end, step) in reached.iter().enumerate() {
+                    if step.distance < min || target.is_some_and(|target| target != step.node) {
+                        continue;
+                    }
+                    let end_node = self.existing_node(step.node)?;
+                    if !self.node_matches(&end_node, end_pattern, &start_row)? {
+                        continue;
+                    }
+                    for walk in walks_back(&reached, end, all, &self.shortest_path_relationships_returned)? {
+                        found.push((step.node, walk));
+                    }
+                }
+            }
+            for (end, walk) in found {
+                let end_node = self.existing_node(end)?;
+                {
                     let relationships = walk
                         .iter()
                         .map(|id| self.existing_relationship(*id))

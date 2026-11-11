@@ -371,6 +371,7 @@ pub(crate) struct RelationshipPattern {
 pub(crate) enum Shortest {
     One,
     All,
+    Count(u32),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -833,6 +834,65 @@ impl Parser<'_> {
         Ok(LabelTerm::Name(self.name()?))
     }
 
+    /// GQL's path search prefixes: `ANY SHORTEST`, `ALL SHORTEST` and `SHORTEST k`, each with an
+    /// optional `PATH` or `PATHS`.
+    fn gql_shortest(&mut self) -> GraphResult<Option<Shortest>> {
+        let word_at = |parser: &Self, at: usize, wanted: &str| {
+            matches!(parser.peek_at(at), Some(Token::Word(word)) if word.eq_ignore_ascii_case(wanted))
+        };
+        let shortest = if word_at(self, 0, "any") && word_at(self, 1, "shortest") {
+            self.at += 2;
+            Shortest::One
+        } else if word_at(self, 0, "all") && word_at(self, 1, "shortest") {
+            self.at += 2;
+            Shortest::All
+        } else if word_at(self, 0, "shortest") && matches!(self.peek_at(1), Some(Token::Integer(_))) {
+            self.at += 1;
+            let count = self.integer()?;
+            if count == 0 {
+                return Err(syntax("SHORTEST needs a path count of at least 1"));
+            }
+            if word_at(self, 0, "groups") {
+                return Err(GraphError::new(
+                    "Neo.ClientError.Statement.FeatureNotSupported",
+                    "SHORTEST k GROUPS is not supported yet",
+                ));
+            }
+            Shortest::Count(count)
+        } else {
+            return Ok(None);
+        };
+        let _ = self.take_keyword("paths") || self.take_keyword("path");
+        Ok(Some(shortest))
+    }
+
+    /// A GQL quantifier after a relationship: `{m,n}`, `{m,}`, `{,n}`, `{n}`, `+` or `*`.
+    fn gql_quantifier(&mut self) -> GraphResult<Option<(u32, u32)>> {
+        if self.take_symbol("+") {
+            return Ok(Some((1, MAX_HOPS)));
+        }
+        if self.take_symbol("*") {
+            return Ok(Some((0, MAX_HOPS)));
+        }
+        if !(self.is_symbol("{") && matches!(self.peek_at(1), Some(Token::Integer(_) | Token::Symbol(",")))) {
+            return Ok(None);
+        }
+        self.at += 1;
+        let low = if matches!(self.peek(), Some(Token::Integer(_))) { Some(self.integer()?) } else { None };
+        let bounds = if self.take_symbol(",") {
+            let high = if matches!(self.peek(), Some(Token::Integer(_))) { Some(self.integer()?) } else { None };
+            (low.unwrap_or(0), high.unwrap_or(MAX_HOPS))
+        } else {
+            let exact = low.ok_or_else(|| syntax("a quantifier needs a number"))?;
+            (exact, exact)
+        };
+        self.expect_symbol("}")?;
+        if bounds.1 > MAX_HOPS || bounds.0 > bounds.1 {
+            return Err(syntax(format!("variable-length relationships go at most {MAX_HOPS} hops")));
+        }
+        Ok(Some(bounds))
+    }
+
     fn relationship_pattern(&mut self) -> GraphResult<Option<RelationshipPattern>> {
         let incoming = if self.is_symbol("<") && matches!(self.peek_at(1), Some(Token::Symbol("-")))
         {
@@ -900,6 +960,12 @@ impl Parser<'_> {
             (false, true) => Direction::Outgoing,
             (false, false) => Direction::Either,
         };
+        if let Some(bounds) = self.gql_quantifier()? {
+            if pattern.hops.is_some() {
+                return Err(syntax("a relationship takes either * in its brackets or a quantifier after it, not both"));
+            }
+            pattern.hops = Some(bounds);
+        }
         Ok(Some(pattern))
     }
 
@@ -913,8 +979,10 @@ impl Parser<'_> {
         } else {
             None
         };
-        let shortest = match self.peek() {
-            Some(Token::Word(word)) if matches!(self.peek_at(1), Some(Token::Symbol("("))) => {
+        let gql_shortest = self.gql_shortest()?;
+        let shortest = match (gql_shortest, self.peek()) {
+            (Some(shortest), _) => Some(shortest),
+            (None, Some(Token::Word(word))) if matches!(self.peek_at(1), Some(Token::Symbol("("))) => {
                 if word.eq_ignore_ascii_case("shortestpath") {
                     Some(Shortest::One)
                 } else if word.eq_ignore_ascii_case("allshortestpaths") {
@@ -925,7 +993,8 @@ impl Parser<'_> {
             }
             _ => None,
         };
-        if shortest.is_some() {
+        let wrapped = shortest.is_some() && gql_shortest.is_none();
+        if wrapped {
             self.at += 2;
         }
         let start = self.node_pattern()?;
@@ -933,8 +1002,10 @@ impl Parser<'_> {
         while let Some(relationship) = self.relationship_pattern()? {
             steps.push((relationship, self.node_pattern()?));
         }
-        if shortest.is_some() {
+        if wrapped {
             self.expect_symbol(")")?;
+        }
+        if shortest.is_some() {
             let [(relationship, _)] = steps.as_slice() else {
                 return Err(syntax(
                     "shortestPath(...) requires a pattern containing a single relationship",
