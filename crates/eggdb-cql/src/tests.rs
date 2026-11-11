@@ -621,3 +621,23 @@ fn frames_and_results_past_the_memory_budget_get_overloaded_and_other_sessions_g
     assert_eq!(error_code(body), 0x1001);
     assert_eq!(budget.used_bytes(), 0);
 }
+
+#[test]
+fn alter_table_adds_drops_and_renames_and_keeps_the_cql_types() {
+    let added = sql("ALTER TABLE t ADD (note text, seen timestamp)", &[]);
+    assert!(added.contains("ALTER TABLE ks.t ADD COLUMN note"), "{added}");
+    assert!(added.contains("UPDATE eggdb_cql.tables"), "{added}");
+    assert!(added.contains("note\ttext"), "{added}");
+    let dropped = sql("ALTER TABLE t DROP v", &[]);
+    assert!(dropped.contains("DROP COLUMN v"), "{dropped}");
+    let renamed = sql("ALTER TABLE t RENAME c TO position", &[]);
+    assert!(renamed.contains("RENAME COLUMN c TO position"), "{renamed}");
+    assert_eq!(sql("ALTER TABLE t WITH comment = 'x'", &[]), "");
+    let refused = |cql: &str| {
+        let (statement, markers) = parse(cql).unwrap();
+        translate(&statement, markers, Some("ks"), &mut FixedCatalog).unwrap_err()
+    };
+    assert!(refused("ALTER TABLE t DROP k").contains("PRIMARY KEY"));
+    assert!(refused("ALTER TABLE t ADD v int").contains("conflicts"));
+    assert!(refused("ALTER TABLE t RENAME v TO w").contains("non PRIMARY KEY"));
+}

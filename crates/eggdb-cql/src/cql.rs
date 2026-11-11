@@ -213,6 +213,14 @@ pub(crate) struct ColumnDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AlterChange {
+    Add(Vec<ColumnDefinition>),
+    Drop(Vec<String>),
+    Rename(Vec<(String, String)>),
+    Options,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Statement {
     Use(String),
     CreateKeyspace {
@@ -234,6 +242,10 @@ pub(crate) enum Statement {
     DropTable {
         table: TableName,
         if_exists: bool,
+    },
+    AlterTable {
+        table: TableName,
+        change: AlterChange,
     },
     Truncate(TableName),
     Insert {
@@ -831,6 +843,63 @@ impl Parser {
                         "this DROP statement (only keyspaces and tables are)",
                     ))
                 }
+            }
+            "alter" => {
+                if !(self.eat_word("table") || self.eat_word("columnfamily")) {
+                    return Err(unsupported("this ALTER statement (only tables are)"));
+                }
+                let table = self.table_name()?;
+                let change = if self.eat_word("add") {
+                    let _ = self.if_not_exists()?;
+                    let mut columns = Vec::new();
+                    let listed = self.eat_symbol("(");
+                    loop {
+                        let name = self.identifier()?;
+                        let cql = self.cql_type()?;
+                        columns.push(ColumnDefinition { name, cql });
+                        if !listed || !self.eat_symbol(",") {
+                            break;
+                        }
+                    }
+                    if listed {
+                        self.expect_symbol(")")?;
+                    }
+                    AlterChange::Add(columns)
+                } else if self.eat_word("drop") {
+                    let _ = self.if_exists()?;
+                    let mut names = Vec::new();
+                    let listed = self.eat_symbol("(");
+                    loop {
+                        names.push(self.identifier()?);
+                        if !listed || !self.eat_symbol(",") {
+                            break;
+                        }
+                    }
+                    if listed {
+                        self.expect_symbol(")")?;
+                    }
+                    AlterChange::Drop(names)
+                } else if self.eat_word("rename") {
+                    let _ = self.if_exists()?;
+                    let mut pairs = Vec::new();
+                    loop {
+                        let from = self.identifier()?;
+                        if !self.eat_word("to") {
+                            return Err("line 1: mismatched input, expecting TO".to_owned());
+                        }
+                        pairs.push((from, self.identifier()?));
+                        if !self.eat_word("and") {
+                            break;
+                        }
+                    }
+                    AlterChange::Rename(pairs)
+                } else if self.eat_word("with") {
+                    self.skip_options();
+                    AlterChange::Options
+                } else {
+                    return Err(unsupported("this ALTER TABLE change (ADD, DROP, RENAME and WITH are)"));
+                };
+                Ok(Statement::AlterTable { table, change })
             }
             "truncate" => {
                 self.eat_word("table");

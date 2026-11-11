@@ -608,3 +608,4 @@ its full title with its status.
 - [D581](decisions/D581.md) Code-only batch 229 (M16): MQTT sessions kept in the file
 - [D582](decisions/D582.md) Code-only batch 230 (M16): MQTT flow control, Receive Maximum
 - [D583](decisions/D583.md) Code-only batch 231 (M16): CQL prepared statements shared between connections
+- [D584](decisions/D584.md) Code-only batch 232 (M16): CQL ALTER TABLE

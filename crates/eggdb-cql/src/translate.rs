@@ -502,6 +502,102 @@ fn statement(
                 table.table.clone(),
             )
         }
+        Statement::AlterTable { table, change } => {
+            let keyspace = keyspace_of(table, current)?;
+            let mut info = catalog.table(&keyspace, &table.table)?;
+            let target = qualified(&keyspace, &table.table);
+            let in_key = |info: &TableInfo, name: &str| {
+                info.partition.iter().chain(&info.clustering).any(|key| key == name)
+            };
+            let mut sql = Vec::new();
+            match change {
+                crate::cql::AlterChange::Add(columns) => {
+                    for column in columns {
+                        if info.columns.iter().any(|(name, _)| *name == column.name) {
+                            return Err(format!(
+                                "Invalid column name {} because it conflicts with an existing column",
+                                column.name
+                            ));
+                        }
+                        sql.push(format!(
+                            "ALTER TABLE {target} ADD COLUMN {} {}",
+                            identifier(&column.name),
+                            column.cql.sql()
+                        ));
+                        info.columns.push((column.name.clone(), column.cql));
+                    }
+                }
+                crate::cql::AlterChange::Drop(names) => {
+                    for name in names {
+                        if in_key(&info, name) {
+                            return Err(format!("Cannot drop PRIMARY KEY column {name}"));
+                        }
+                        if !info.columns.iter().any(|(known, _)| known == name) {
+                            return Err(format!("Column {name} was not found in table {}", table.table));
+                        }
+                        sql.push(format!("ALTER TABLE {target} DROP COLUMN {}", identifier(name)));
+                        info.columns.retain(|(known, _)| known != name);
+                    }
+                }
+                crate::cql::AlterChange::Rename(pairs) => {
+                    for (from, to) in pairs {
+                        if !in_key(&info, from) {
+                            return Err(format!(
+                                "Cannot rename non PRIMARY KEY column {from}"
+                            ));
+                        }
+                        if info.columns.iter().any(|(known, _)| known == to) {
+                            return Err(format!(
+                                "Cannot rename column {from} to {to} in table {}; another column has that name",
+                                table.table
+                            ));
+                        }
+                        sql.push(format!(
+                            "ALTER TABLE {target} RENAME COLUMN {} TO {}",
+                            identifier(from),
+                            identifier(to)
+                        ));
+                        let renamed = |name: &mut String| {
+                            if name == from {
+                                *name = to.clone();
+                            }
+                        };
+                        info.columns.iter_mut().for_each(|(name, _)| renamed(name));
+                        info.partition.iter_mut().for_each(renamed);
+                        info.clustering.iter_mut().for_each(renamed);
+                        info.descending.iter_mut().for_each(renamed);
+                    }
+                }
+                crate::cql::AlterChange::Options => {}
+            }
+            if !sql.is_empty() {
+                let types: Vec<String> = info
+                    .columns
+                    .iter()
+                    .map(|(name, cql)| format!("{name}\t{}", cql.name()))
+                    .collect();
+                sql.push(format!(
+                    "{METADATA_DDL}; UPDATE eggdb_cql.tables SET partition_key = {}, clustering_key = {}, descending = {}, column_types = {} WHERE keyspace_name = {} AND table_name = {}",
+                    literal(&info.partition.join("\n")),
+                    literal(&info.clustering.join("\n")),
+                    literal(&info.descending.join("\n")),
+                    literal(&types.join("\n")),
+                    literal(&keyspace),
+                    literal(&table.table)
+                ));
+                builder.sql(&sql.join("; "));
+            }
+            (
+                Outcome::SchemaChange {
+                    change: "UPDATED",
+                    target: "TABLE",
+                    keyspace: keyspace.clone(),
+                    name: Some(table.table.clone()),
+                },
+                keyspace,
+                table.table.clone(),
+            )
+        }
         Statement::DropTable { table, if_exists } => {
             let keyspace = keyspace_of(table, current)?;
             builder.sql(&format!(
