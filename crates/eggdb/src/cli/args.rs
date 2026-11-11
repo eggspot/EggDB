@@ -295,6 +295,7 @@ impl CommandName {
                 matches!(self, Self::Import | Self::Export)
             }
             OptionName::Arrow => self == Self::Export,
+            OptionName::Dbf => self == Self::Import,
             OptionName::SqlDump => self == Self::Export,
             OptionName::OnConflict
             | OptionName::Csv
@@ -475,6 +476,7 @@ enum OptionName {
     Parquet,
     Ndjson,
     Xlsx,
+    Dbf,
     Arrow,
     SqlDump,
     Table,
@@ -589,6 +591,7 @@ impl OptionName {
             b"parquet" => Self::Parquet,
             b"ndjson" => Self::Ndjson,
             b"xlsx" => Self::Xlsx,
+            b"dbf" => Self::Dbf,
             b"arrow" => Self::Arrow,
             b"sql" => Self::SqlDump,
             b"table" => Self::Table,
@@ -797,6 +800,7 @@ pub(crate) struct CsvOptions {
     pub(crate) parquet: Option<PathBuf>,
     pub(crate) ndjson: Option<PathBuf>,
     pub(crate) xlsx: Option<PathBuf>,
+    pub(crate) dbf: Option<PathBuf>,
     pub(crate) arrow: Option<PathBuf>,
     pub(crate) sql_dump: Option<eggdb_sql::Dialect>,
 }
@@ -1567,6 +1571,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::Parquet => request.csv.parquet = Some(PathBuf::from(value)),
             OptionName::Ndjson => request.csv.ndjson = Some(PathBuf::from(value)),
             OptionName::Xlsx => request.csv.xlsx = Some(PathBuf::from(value)),
+            OptionName::Dbf => request.csv.dbf = Some(PathBuf::from(value)),
             OptionName::Arrow => request.csv.arrow = Some(PathBuf::from(value)),
             OptionName::SqlDump => {
                 request.csv.sql_dump = Some(match value.to_str().unwrap_or_default() {
@@ -2139,6 +2144,20 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
             return Err(
                 "--sql writes every table; it does not go with --parquet or --table".to_owned(),
             );
+        }
+        return Ok(());
+    }
+    if csv.dbf.is_some() {
+        if csv.xlsx.is_some()
+            || csv.ndjson.is_some()
+            || csv.parquet.is_some()
+            || csv.source.is_some()
+            || request.export_file.is_some()
+        {
+            return Err("--dbf <file> goes without --xlsx, --ndjson, --parquet, --csv or a second argument".to_owned());
+        }
+        if csv.table.is_none() {
+            return Err("--dbf needs --table <name>, the table to load".to_owned());
         }
         return Ok(());
     }

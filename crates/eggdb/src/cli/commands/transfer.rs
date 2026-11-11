@@ -206,6 +206,9 @@ impl Session<'_> {
         if let Some(source) = self.request.csv.xlsx.clone() {
             return self.import_xlsx(&source);
         }
+        if let Some(source) = self.request.csv.dbf.clone() {
+            return self.import_dbf(&source);
+        }
         if let Some(source) = self.request.csv.source.clone() {
             return self.import_csv(source);
         }

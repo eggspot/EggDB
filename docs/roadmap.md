@@ -1170,7 +1170,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Excel files read and written as tables: `.xlsx` (OOXML), and `.xls` (MS-XLS) after D58's
   legal check (D49). `.xlsx`: **code written, unbuilt** (code-only mode, 2026-11-11, D506).
 - Mainframe loaders: COBOL copybooks, EBCDIC, packed decimal, and VSAM and IMS exports (D49, D242).
-- dBase, ISAM and Btrieve readers where public specifications exist (D49).
+- dBase, ISAM and Btrieve readers where public specifications exist (D49). dBase: **code written,
+  unbuilt** (code-only mode, 2026-11-11, D507).
 - KQL, after D58's legal check: `join`, `union`, `let`, `parse`, `mv-expand`, `make-series`,
   `render`, percentiles and a Kusto-compatible REST endpoint (D49, D242).
 - Splunk's SPL, with HTTP Event Collector ingest, after D58's legal check (D49).
