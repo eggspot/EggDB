@@ -1430,6 +1430,25 @@ impl<'k> Api<'k> {
             tail.push_str(",\"aggregations\":");
             tail.push_str(&rendered.finish());
         }
+        if let Some(suggest) = member("suggest") {
+            let candidates: Vec<crate::suggest::Candidate<'_>> = documents
+                .iter()
+                .zip(&origins)
+                .filter_map(|((id, source), origin)| {
+                    let (index, _, source_text) = gathered.get(*origin)?;
+                    Some(crate::suggest::Candidate {
+                        index,
+                        id,
+                        source,
+                        source_text,
+                    })
+                })
+                .collect();
+            let mut rendered = Out::default();
+            crate::suggest::write(&mut rendered, &suggest, &candidates);
+            tail.push_str(",\"suggest\":");
+            tail.push_str(&rendered.finish());
+        }
         tail.push('}');
         let sorted = !sort.is_empty();
         let (skipped, taken) = if scrolling { (0, usize::MAX) } else { (from, size) };

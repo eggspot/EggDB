@@ -18,6 +18,7 @@ mod query_string;
 mod script;
 mod sort;
 mod source_filter;
+mod suggest;
 
 pub use api::{Api, over_memory_budget};
 
