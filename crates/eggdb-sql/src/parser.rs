@@ -12,6 +12,7 @@ mod joined_dml;
 mod merge;
 mod multitable_insert;
 mod mysql;
+mod mysql_dates;
 mod mysql_routines;
 mod oracle;
 mod partitions;
@@ -4967,6 +4968,11 @@ impl<'t> Parser<'t> {
             return self.bivariate_aggregate(&name, function);
         }
         if self.mysql()
+            && let Some(expr) = self.mysql_date_function(&name)?
+        {
+            return Ok(expr);
+        }
+        if self.mysql()
             && let Some(expr) = self.mysql_function(&name)?
         {
             return Ok(expr);
@@ -4998,6 +5004,7 @@ impl<'t> Parser<'t> {
         if postgresql_only
             || INTERNAL_FUNCTIONS.contains(&name.text.as_str())
             || crate::square_root::INTERNAL_NAMES.contains(&text)
+            || crate::mysql_date_functions::INTERNAL_NAMES.contains(&text)
         {
             return Err(SqlError::new(
                 SqlState::UNDEFINED_FUNCTION,

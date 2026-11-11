@@ -286,6 +286,11 @@ fn defined_function_type(
 }
 
 fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<SqlType> {
+    if let Some(sql_type) = crate::mysql_date_functions::result_type(name, arguments, |argument| {
+        static_type(argument, scope)
+    }) {
+        return sql_type;
+    }
     if let Some(sql_type) = crate::sequences::result_type(name) {
         return Some(sql_type);
     }

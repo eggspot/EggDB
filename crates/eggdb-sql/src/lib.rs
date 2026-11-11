@@ -82,6 +82,7 @@ mod merge;
 mod migration;
 mod multitable_insert;
 mod mysql_catalog;
+mod mysql_date_functions;
 mod mysql_date_parts;
 mod mysql_errors;
 mod mysql_variables;

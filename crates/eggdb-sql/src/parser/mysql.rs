@@ -1071,9 +1071,6 @@ impl<'t> Parser<'t> {
                 self.empty_or_precision()?;
                 return Ok(Some(clock_call("mysql_curtime", position)));
             }
-            "utc_date" | "unix_timestamp" => {
-                return Err(self.not_supported("this date and time function"));
-            }
             "ifnull" => "coalesce",
             "length" | "octet_length" => "octet_length",
             "ucase" => "upper",

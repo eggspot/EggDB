@@ -185,7 +185,7 @@ pub(crate) const WEEK_OF_YEAR_MODE: i64 = 3;
 const MONDAY_FIRST: i64 = 1;
 const WEEK_YEAR: i64 = 2;
 const FIRST_WEEKDAY: i64 = 4;
-const WEEKDAY_NAMES: [&str; 7] = [
+pub(crate) const WEEKDAY_NAMES: [&str; 7] = [
     "Sunday",
     "Monday",
     "Tuesday",
@@ -194,7 +194,7 @@ const WEEKDAY_NAMES: [&str; 7] = [
     "Friday",
     "Saturday",
 ];
-const MONTH_NAMES: [&str; 12] = [
+pub(crate) const MONTH_NAMES: [&str; 12] = [
     "January",
     "February",
     "March",
@@ -262,7 +262,7 @@ fn calendar_week(days: i64, behaviour: i64) -> (i64, i64) {
     (year, elapsed / 7 + 1)
 }
 
-fn local_of(value: &Value) -> SqlResult<Option<Result<LocalTime, i64>>> {
+pub(crate) fn local_moment(value: &Value) -> SqlResult<Option<Result<LocalTime, i64>>> {
     Ok(match moment_of("day", value)? {
         None => None,
         Some(Moment::Local(local)) => Some(Ok(local)),
@@ -277,7 +277,7 @@ fn mode_of(mode: &Value) -> Option<i64> {
 
 /// MySQL's `WEEK(date, mode)`.
 pub(crate) fn week(value: &Value, mode: &Value) -> SqlResult<Value> {
-    let (Some(Ok(local)), Some(mode)) = (local_of(value)?, mode_of(mode)) else {
+    let (Some(Ok(local)), Some(mode)) = (local_moment(value)?, mode_of(mode)) else {
         return Ok(Value::Null);
     };
     Ok(Value::BigInt(calendar_week(local.days, behaviour_of(mode)).1))
@@ -285,7 +285,7 @@ pub(crate) fn week(value: &Value, mode: &Value) -> SqlResult<Value> {
 
 /// MySQL's `YEARWEEK(date, mode)`: the year and week as `YYYYWW`.
 pub(crate) fn year_week(value: &Value, mode: &Value) -> SqlResult<Value> {
-    let (Some(Ok(local)), Some(mode)) = (local_of(value)?, mode_of(mode)) else {
+    let (Some(Ok(local)), Some(mode)) = (local_moment(value)?, mode_of(mode)) else {
         return Ok(Value::Null);
     };
     let (year, week) = calendar_week(local.days, behaviour_of(mode) | WEEK_YEAR);
@@ -312,7 +312,7 @@ pub(crate) fn date_format(value: &Value, format: &Value) -> SqlResult<Value> {
             Value::Text(String::new())
         });
     };
-    let Some(moment) = local_of(value)? else {
+    let Some(moment) = local_moment(value)? else {
         return Ok(Value::Null);
     };
     let (days, of_day) = match moment {
