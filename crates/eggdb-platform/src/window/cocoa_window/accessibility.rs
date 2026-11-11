@@ -489,6 +489,12 @@ impl WindowState {
                 c"setAccessibilitySubrole:",
                 cocoa::SECURE_TEXT_FIELD_SUBROLE,
             );
+        } else if node.role == AccessRole::SearchBox {
+            self.set_string(
+                element,
+                c"setAccessibilitySubrole:",
+                cocoa::SEARCH_FIELD_SUBROLE,
+            );
         }
         element
     }

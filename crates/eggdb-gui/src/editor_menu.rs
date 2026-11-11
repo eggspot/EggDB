@@ -406,7 +406,7 @@ pub(crate) fn nodes(nodes: &mut Vec<AccessNode>, menu: &EditorMenu, rect: Rect, 
     nodes.push(AccessNode {
         id: NODE_EDITOR_MENU,
         parent: Some(parent),
-        role: AccessRole::Group,
+        role: AccessRole::Menu,
         name: "Editor menu".to_owned(),
         bounds: bounds(rect),
         ..AccessNode::default()
@@ -416,7 +416,7 @@ pub(crate) fn nodes(nodes: &mut Vec<AccessNode>, menu: &EditorMenu, rect: Rect, 
         let mut node = AccessNode {
             id: NODE_FIRST_EDITOR_MENU_ITEM + index as u32,
             parent: Some(NODE_EDITOR_MENU),
-            role: AccessRole::Button,
+            role: AccessRole::MenuItem,
             name: item.label(menu.run_label).to_owned(),
             shortcut: Some(item.shortcut(primary)),
             bounds: bounds(Rect::new(

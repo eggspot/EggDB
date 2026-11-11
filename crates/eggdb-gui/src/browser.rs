@@ -112,6 +112,9 @@ pub fn aria_role(role: AccessRole) -> &'static str {
         AccessRole::Grid => "grid",
         AccessRole::ColumnHeader => "columnheader",
         AccessRole::Cell => "gridcell",
+        AccessRole::Menu => "menu",
+        AccessRole::MenuItem => "menuitem",
+        AccessRole::SearchBox => "searchbox",
     }
 }
 
@@ -196,7 +199,10 @@ fn finite(x: f32, y: f32) -> bool {
 }
 
 fn is_text_input(role: AccessRole) -> bool {
-    matches!(role, AccessRole::TextField | AccessRole::TextArea)
+    matches!(
+        role,
+        AccessRole::TextField | AccessRole::SearchBox | AccessRole::TextArea
+    )
 }
 
 fn caret_state(card: &ConnectCard) -> Option<(usize, Option<(usize, usize)>)> {
@@ -309,7 +315,9 @@ impl CardPointer {
             return PointerAnswer::CHANGED;
         };
         let action = match node.role {
-            AccessRole::Button | AccessRole::Link | AccessRole::ComboBox => AccessAction::Invoke,
+            AccessRole::Button | AccessRole::Link | AccessRole::ComboBox | AccessRole::MenuItem => {
+                AccessAction::Invoke
+            }
             AccessRole::CheckBox => AccessAction::Toggle,
             AccessRole::Tab => AccessAction::Select,
             _ => return PointerAnswer::CHANGED,

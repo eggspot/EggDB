@@ -357,6 +357,12 @@ pub enum AccessRole {
     ColumnHeader,
     /// One cell of a grid, with its row and column index.
     Cell,
+    /// A popup menu of commands (the editor's, the grid's and the tree's right-click menus).
+    Menu,
+    /// One command of a menu.
+    MenuItem,
+    /// A single-line field that filters or searches as it is typed in (the keys tab's prefix).
+    SearchBox,
 }
 
 /// Rectangle of an accessibility node in logical pixels, from the window's top-left corner.

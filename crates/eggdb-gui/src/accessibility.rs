@@ -29,8 +29,9 @@ pub fn default_actions(node: &AccessNode) -> AccessActions {
         | AccessRole::Toolbar
         | AccessRole::Tree
         | AccessRole::Grid
-        | AccessRole::ColumnHeader => AccessActions::default(),
-        AccessRole::Button | AccessRole::Link => AccessActions {
+        | AccessRole::ColumnHeader
+        | AccessRole::Menu => AccessActions::default(),
+        AccessRole::Button | AccessRole::Link | AccessRole::MenuItem => AccessActions {
             invoke: true,
             ..focus_only
         },
@@ -42,7 +43,7 @@ pub fn default_actions(node: &AccessNode) -> AccessActions {
             select: true,
             ..focus_only
         },
-        AccessRole::TextField | AccessRole::TextArea => AccessActions {
+        AccessRole::TextField | AccessRole::SearchBox | AccessRole::TextArea => AccessActions {
             set_value: !node.state.read_only,
             ..focus_only
         },
@@ -239,6 +240,9 @@ fn role_word(role: AccessRole) -> &'static str {
         AccessRole::Grid => "grid",
         AccessRole::ColumnHeader => "columnheader",
         AccessRole::Cell => "cell",
+        AccessRole::Menu => "menu",
+        AccessRole::MenuItem => "menuitem",
+        AccessRole::SearchBox => "searchbox",
     }
 }
 

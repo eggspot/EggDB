@@ -2778,7 +2778,7 @@ fn keys_header_nodes(nodes: &mut Vec<AccessNode>, tab: &QueryTab, centre_right: 
     let mut prefix = node(
         NODE_KEY_PREFIX,
         NODE_MAIN_WINDOW,
-        AccessRole::TextField,
+        AccessRole::SearchBox,
         "Key prefix",
         (field.x, field.y, field.w, field.h),
     );
@@ -6523,6 +6523,7 @@ mod tests {
             .find(|node| node.id == NODE_KEY_PREFIX)
             .expect("the keys tab has its prefix field");
         assert_eq!(prefix.name, "Key prefix");
+        assert_eq!(prefix.role, AccessRole::SearchBox);
         assert_eq!(prefix.placeholder.as_deref(), Some("Prefix"));
         let back = tree
             .iter()

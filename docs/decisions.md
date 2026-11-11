@@ -575,3 +575,4 @@ its full title with its status.
 - [D548](decisions/D548.md) Code-only batch 196 (M6e): the keys tab's prefix caret, and a solid editor caret under its menu
 - [D549](decisions/D549.md) Code-only batch 197 (M6e): the RESP keys grid dims its counts, dashes and gone cells
 - [D550](decisions/D550.md) Code-only batch 198 (M6e): Tab stops on the keys tab's Back and Next 100
+- [D551](decisions/D551.md) Code-only batch 199 (M6e): menu, menuitem and searchbox accessibility roles

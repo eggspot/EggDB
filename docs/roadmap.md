@@ -826,7 +826,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - The editor keeps its focused look while its menu is open (D329). **Code written, unbuilt** (code-only
   mode, 2026-11-11, D548).
 - `Paste` in the browser reads the clipboard (D329).
-- `menu`, `menuitem` and `searchbox` roles in the platform layer's accessibility (D329).
+- `menu`, `menuitem` and `searchbox` roles in the platform layer's accessibility (D329). **Code written,
+  unbuilt** (code-only mode, 2026-11-11, D551).
 - `Stop` interrupting a RESP reconnect's TCP connect itself, which now takes effect when that
   connect ends (D329).
 - Rows streamed into the grid with pages fetched on scroll (D275).

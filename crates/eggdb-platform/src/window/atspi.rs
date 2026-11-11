@@ -82,6 +82,10 @@ pub const ROLE_COMBO_BOX: u32 = 11;
 pub const ROLE_FRAME: u32 = 23;
 /// `ATSPI_ROLE_PAGE_TAB`.
 pub const ROLE_PAGE_TAB: u32 = 37;
+/// `ATSPI_ROLE_MENU`.
+pub const ROLE_MENU: u32 = 33;
+/// `ATSPI_ROLE_MENU_ITEM`.
+pub const ROLE_MENU_ITEM: u32 = 35;
 /// `ATSPI_ROLE_PAGE_TAB_LIST`.
 pub const ROLE_PAGE_TAB_LIST: u32 = 38;
 /// `ATSPI_ROLE_PANEL`.
@@ -207,7 +211,7 @@ pub fn role(role: AccessRole) -> u32 {
         AccessRole::TabList => ROLE_PAGE_TAB_LIST,
         AccessRole::Tab => ROLE_PAGE_TAB,
         AccessRole::Status => ROLE_STATUS_BAR,
-        AccessRole::TextField => ROLE_ENTRY,
+        AccessRole::TextField | AccessRole::SearchBox => ROLE_ENTRY,
         AccessRole::Button => ROLE_PUSH_BUTTON,
         AccessRole::CheckBox => ROLE_CHECK_BOX,
         AccessRole::Link => ROLE_LINK,
@@ -220,6 +224,8 @@ pub fn role(role: AccessRole) -> u32 {
         AccessRole::Grid => ROLE_TABLE,
         AccessRole::ColumnHeader => ROLE_TABLE_COLUMN_HEADER,
         AccessRole::Cell => ROLE_TABLE_CELL,
+        AccessRole::Menu => ROLE_MENU,
+        AccessRole::MenuItem => ROLE_MENU_ITEM,
     }
 }
 
@@ -232,7 +238,7 @@ pub fn role_name(role: AccessRole) -> &'static str {
         AccessRole::TabList => "page tab list",
         AccessRole::Tab => "page tab",
         AccessRole::Status => "status bar",
-        AccessRole::TextField => "entry",
+        AccessRole::TextField | AccessRole::SearchBox => "entry",
         AccessRole::Button => "push button",
         AccessRole::CheckBox => "check box",
         AccessRole::Link => "link",
@@ -245,6 +251,8 @@ pub fn role_name(role: AccessRole) -> &'static str {
         AccessRole::Grid => "table",
         AccessRole::ColumnHeader => "table column header",
         AccessRole::Cell => "table cell",
+        AccessRole::Menu => "menu",
+        AccessRole::MenuItem => "menu item",
     }
 }
 
@@ -267,7 +275,10 @@ pub fn node_role_name(node: &AccessNode) -> &'static str {
 }
 
 fn is_text_role(role: AccessRole) -> bool {
-    matches!(role, AccessRole::TextField | AccessRole::TextArea)
+    matches!(
+        role,
+        AccessRole::TextField | AccessRole::SearchBox | AccessRole::TextArea
+    )
 }
 
 fn is_focusable(node: &AccessNode) -> bool {
@@ -336,7 +347,7 @@ pub fn states(node: &AccessNode, window_active: bool) -> Vec<u32> {
         None => {}
     }
     match node.role {
-        AccessRole::TextField => states.push(STATE_SINGLE_LINE),
+        AccessRole::TextField | AccessRole::SearchBox => states.push(STATE_SINGLE_LINE),
         AccessRole::TextArea => states.push(STATE_MULTI_LINE),
         AccessRole::ComboBox => states.push(STATE_HAS_POPUP),
         _ => {}

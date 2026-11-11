@@ -225,6 +225,9 @@ pub struct AxRole {
 /// The NSAccessibility subrole of a password field.
 pub const SECURE_TEXT_FIELD_SUBROLE: &str = "AXSecureTextField";
 
+/// The NSAccessibility subrole of a search field.
+pub const SEARCH_FIELD_SUBROLE: &str = "AXSearchField";
+
 /// The NSAccessibility role for `role`, `None` for the window, which `NSWindow` already exposes.
 pub fn ax_role(role: AccessRole) -> Option<AxRole> {
     let (role, name_is_value) = match role {
@@ -234,7 +237,7 @@ pub fn ax_role(role: AccessRole) -> Option<AxRole> {
         AccessRole::TabList => ("AXTabGroup", false),
         AccessRole::Tab => ("AXRadioButton", false),
         AccessRole::Status => ("AXStaticText", true),
-        AccessRole::TextField => ("AXTextField", false),
+        AccessRole::TextField | AccessRole::SearchBox => ("AXTextField", false),
         AccessRole::Button => ("AXButton", false),
         AccessRole::CheckBox => ("AXCheckBox", false),
         AccessRole::Link => ("AXLink", false),
@@ -246,6 +249,8 @@ pub fn ax_role(role: AccessRole) -> Option<AxRole> {
         AccessRole::TreeItem => ("AXRow", false),
         AccessRole::Grid => ("AXTable", false),
         AccessRole::ColumnHeader | AccessRole::Cell => ("AXCell", false),
+        AccessRole::Menu => ("AXMenu", false),
+        AccessRole::MenuItem => ("AXMenuItem", false),
     };
     Some(AxRole {
         role,
@@ -613,6 +618,9 @@ mod tests {
             (AccessRole::Grid, "AXTable"),
             (AccessRole::ColumnHeader, "AXCell"),
             (AccessRole::Cell, "AXCell"),
+            (AccessRole::Menu, "AXMenu"),
+            (AccessRole::MenuItem, "AXMenuItem"),
+            (AccessRole::SearchBox, "AXTextField"),
         ];
         for (role, expected) in cases {
             assert_eq!(

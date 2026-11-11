@@ -78,6 +78,10 @@ pub const HEADING_LEVEL_1: i32 = 80051;
 
 /// `UIA_ButtonControlTypeId`.
 pub const BUTTON_CONTROL: i32 = 50000;
+/// `UIA_MenuControlTypeId`.
+pub const MENU_CONTROL: i32 = 50009;
+/// `UIA_MenuItemControlTypeId`.
+pub const MENU_ITEM_CONTROL: i32 = 50011;
 /// `UIA_CheckBoxControlTypeId`.
 pub const CHECK_BOX_CONTROL: i32 = 50002;
 /// `UIA_ComboBoxControlTypeId`.
@@ -226,7 +230,7 @@ pub fn control_type(role: AccessRole) -> Option<i32> {
         AccessRole::Heading | AccessRole::Status | AccessRole::Alert => TEXT_CONTROL,
         AccessRole::TabList => TAB_CONTROL,
         AccessRole::Tab => TAB_ITEM_CONTROL,
-        AccessRole::TextField | AccessRole::TextArea => EDIT_CONTROL,
+        AccessRole::TextField | AccessRole::SearchBox | AccessRole::TextArea => EDIT_CONTROL,
         AccessRole::Button => BUTTON_CONTROL,
         AccessRole::CheckBox => CHECK_BOX_CONTROL,
         AccessRole::Link => HYPERLINK_CONTROL,
@@ -237,6 +241,8 @@ pub fn control_type(role: AccessRole) -> Option<i32> {
         AccessRole::Grid => DATA_GRID_CONTROL,
         AccessRole::ColumnHeader => HEADER_ITEM_CONTROL,
         AccessRole::Cell => DATA_ITEM_CONTROL,
+        AccessRole::Menu => MENU_CONTROL,
+        AccessRole::MenuItem => MENU_ITEM_CONTROL,
     })
 }
 
@@ -248,6 +254,7 @@ pub fn is_keyboard_focusable(node: &AccessNode) -> bool {
             || matches!(
                 node.role,
                 AccessRole::TextField
+                    | AccessRole::SearchBox
                     | AccessRole::Button
                     | AccessRole::CheckBox
                     | AccessRole::Tab
@@ -267,6 +274,7 @@ pub fn supports_pattern(node: &AccessNode, pattern: i32) -> bool {
                 && matches!(
                     node.role,
                     AccessRole::TextField
+                        | AccessRole::SearchBox
                         | AccessRole::TextArea
                         | AccessRole::ComboBox
                         | AccessRole::Cell

@@ -527,7 +527,7 @@ impl Workspace {
         };
         let mut command = WorkspaceCommand::None;
         match node.role {
-            AccessRole::TextField | AccessRole::TextArea => {
+            AccessRole::TextField | AccessRole::SearchBox | AccessRole::TextArea => {
                 self.access(&request(AccessAction::Focus), &tree, now);
                 match &mut self.screen {
                     Screen::Connect(card) => {
@@ -682,7 +682,9 @@ impl Workspace {
             return WorkspaceCommand::None;
         };
         let action = match node.role {
-            AccessRole::Button | AccessRole::Link | AccessRole::ComboBox => AccessAction::Invoke,
+            AccessRole::Button | AccessRole::Link | AccessRole::ComboBox | AccessRole::MenuItem => {
+                AccessAction::Invoke
+            }
             AccessRole::CheckBox => AccessAction::Toggle,
             AccessRole::Tab => AccessAction::Select,
             _ => return WorkspaceCommand::None,
