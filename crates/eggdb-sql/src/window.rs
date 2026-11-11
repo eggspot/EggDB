@@ -15,6 +15,7 @@ const KEPT_FIRST_PREFIX: &str = "keep first ";
 const KEPT_LAST_PREFIX: &str = "keep last ";
 const IGNORE_NULLS_SUFFIX: &str = " ignore nulls";
 const FROM_LAST_SUFFIX: &str = " from last";
+const DISTINCT_SUFFIX: &str = " distinct";
 const HEADER: usize = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +42,7 @@ pub(crate) enum WindowFunction {
 pub(crate) struct ValueTreatment {
     pub(crate) ignore_nulls: bool,
     pub(crate) from_last: bool,
+    pub(crate) distinct: bool,
 }
 
 impl ValueTreatment {
@@ -52,10 +54,17 @@ impl ValueTreatment {
         if self.ignore_nulls {
             text.push_str(IGNORE_NULLS_SUFFIX);
         }
+        if self.distinct {
+            text.push_str(DISTINCT_SUFFIX);
+        }
         text
     }
 
     fn decoded(text: &str) -> Option<(WindowFunction, Self)> {
+        let (text, distinct) = match text.strip_suffix(DISTINCT_SUFFIX) {
+            Some(rest) => (rest, true),
+            None => (text, false),
+        };
         let (text, ignore_nulls) = match text.strip_suffix(IGNORE_NULLS_SUFFIX) {
             Some(rest) => (rest, true),
             None => (text, false),
@@ -70,6 +79,7 @@ impl ValueTreatment {
             Self {
                 ignore_nulls,
                 from_last,
+                distinct,
             },
         ))
     }
@@ -1441,6 +1451,28 @@ impl<'k> Partition<'k> {
         Ok((start, end.max(start)))
     }
 
+    fn feed_once(
+        &self,
+        aggregate: &mut WindowAggregate,
+        spec: &WindowSpec,
+        position: usize,
+        seen: &mut Vec<Value>,
+    ) -> SqlResult<()> {
+        if spec.treatment.distinct && spec.arguments > 0 {
+            if let Some(filter) = self.layout.filter
+                && !matches!(self.value(position, filter), Value::Boolean(true))
+            {
+                return Ok(());
+            }
+            let value = self.value(position, 0);
+            if seen.contains(&value) {
+                return Ok(());
+            }
+            seen.push(value);
+        }
+        self.feed(aggregate, spec, position)
+    }
+
     fn feed(
         &self,
         aggregate: &mut WindowAggregate,
@@ -1481,18 +1513,20 @@ impl<'k> Partition<'k> {
                 && frame.exclusion == FrameExclusion::NoOthers;
             let mut aggregate = WindowAggregate::new(function, argument_type, spec.position);
             let mut added = 0;
+            let mut seen: Vec<Value> = Vec::new();
             for position in 0..count {
                 let (start, end) = self.frame_range(frame, offsets, direction, position)?;
                 if running {
                     while added < end {
-                        self.feed(&mut aggregate, spec, added)?;
+                        self.feed_once(&mut aggregate, spec, added, &mut seen)?;
                         added += 1;
                     }
                 } else {
                     aggregate.reset();
+                    seen.clear();
                     for candidate in start..end {
                         if !self.excluded(frame.exclusion, position, candidate) {
-                            self.feed(&mut aggregate, spec, candidate)?;
+                            self.feed_once(&mut aggregate, spec, candidate, &mut seen)?;
                         }
                     }
                 }

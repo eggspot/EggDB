@@ -165,7 +165,7 @@ impl Parser<'_> {
             ))
             .at(position));
         }
-        if distinct {
+        if distinct && !self.oracle() {
             return Err(SqlError::not_supported(
                 "DISTINCT is not implemented for window functions",
             )
@@ -195,6 +195,26 @@ impl Parser<'_> {
                 }
             }
         };
+        if distinct {
+            let window = self.window_reference()?;
+            if let WindowReference::Inline(definition) = &window
+                && !definition.order.is_empty()
+            {
+                return Err(SqlError::syntax("ORDER BY not allowed here", position)
+                    .with_oracle_code(30487));
+            }
+            return Ok(crate::window::call(WindowCall {
+                function: WindowFunction::Aggregate(function),
+                treatment: ValueTreatment {
+                    distinct: true,
+                    ..ValueTreatment::default()
+                },
+                arguments,
+                filter,
+                window,
+                position,
+            }));
+        }
         self.windowed(
             WindowFunction::Aggregate(function),
             arguments,
