@@ -106,3 +106,46 @@ fn an_endless_loop_stops_at_the_step_budget() {
     let caught = run("return pcall(function() while true do end end)");
     assert!(caught.is_err(), "pcall must not catch the budget kill");
 }
+
+fn text(values: &[crate::Value], at: usize) -> String {
+    String::from_utf8(values[at].to_bytes().expect("a string")).expect("utf-8")
+}
+
+#[test]
+fn string_functions_slice_and_search_with_patterns() {
+    let values = run("local s = 'hello world' return s:sub(1, 5), s:upper(), ('x'):rep(3), s:len(), s:byte(1)").expect("runs");
+    assert_eq!(text(&values, 0), "hello");
+    assert_eq!(text(&values, 1), "HELLO WORLD");
+    assert_eq!(text(&values, 2), "xxx");
+    assert_eq!(values[3].to_number(), Some(11.0));
+    assert_eq!(values[4].to_number(), Some(104.0));
+    let values = run("return string.find('key:42:end', ':(%d+):'), string.match('a=1, b=2', '(%w+)=(%w+)')").expect("runs");
+    assert_eq!(values[0].to_number(), Some(4.0));
+    assert_eq!(values[1].to_number(), Some(7.0));
+    assert_eq!(text(&values, 2), "42");
+    assert_eq!(text(&values, 3), "a");
+    assert_eq!(text(&values, 4), "1");
+}
+
+#[test]
+fn gsub_and_gmatch_follow_lua_semantics() {
+    let values = run("return string.gsub('hello world', '(%w+)', '<%1>')").expect("runs");
+    assert_eq!(text(&values, 0), "<hello> <world>");
+    assert_eq!(values[1].to_number(), Some(2.0));
+    let values = run("return (string.gsub('abc', '', '-'))").expect("runs");
+    assert_eq!(text(&values, 0), "-a-b-c-");
+    let values = run("local n = 0 for word in string.gmatch('one two three', '%a+') do n = n + #word end return n").expect("runs");
+    assert_eq!(values[0].to_number(), Some(11.0));
+    let values = run("return (string.gsub('$name is $age', '%$(%w+)', {name = 'Ann', age = 30}))").expect("runs");
+    assert_eq!(text(&values, 0), "Ann is 30");
+    let values = run("return string.find('f(a(b)c)', '%b()'), string.find('THE (quick) fox', '%f[%a]%a+', 5)").expect("runs");
+    assert_eq!(values[0].to_number(), Some(2.0));
+    assert_eq!(values[1].to_number(), Some(8.0));
+    assert_eq!(values[2].to_number(), Some(6.0));
+}
+
+#[test]
+fn format_follows_c_printf() {
+    let values = run("return string.format('%5d|%-5s|%05.2f|%x|%g|%e|%q', 42, 'ab', 3.14159, 255, 0.0001, 12345.678, 'a\"b')").expect("runs");
+    assert_eq!(text(&values, 0), "   42|ab   |03.14|ff|0.0001|1.234568e+04|\"a\\\"b\"");
+}

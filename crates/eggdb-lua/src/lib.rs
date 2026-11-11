@@ -4,11 +4,14 @@
 //! and no C library is involved.
 
 mod ast;
+mod format;
 mod host;
 mod interpreter;
 mod lexer;
 mod parser;
+mod pattern;
 mod stdlib;
+mod string_library;
 mod value;
 
 pub use host::{Host, NoHost, Reply};

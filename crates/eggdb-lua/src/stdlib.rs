@@ -419,4 +419,5 @@ pub(crate) fn install(interpreter: &mut Interpreter) {
     }
     let _ = math.set(Value::string("pi"), Value::Number(std::f64::consts::PI));
     let _ = math.set(Value::string("huge"), Value::Number(f64::INFINITY));
+    crate::string_library::install(interpreter);
 }
