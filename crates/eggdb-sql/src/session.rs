@@ -453,8 +453,13 @@ fn is_one_statement_naming_the_postgresql_catalog(text: &str) -> bool {
 }
 
 fn materialized_view_key(name: &str) -> String {
+    crate::dump::sql_string(&materialized_view_key_text(name))
+}
+
+/// The name a materialized view is kept under in `eggdb_internal.materialized_views`.
+pub(crate) fn materialized_view_key_text(name: &str) -> String {
     let name = crate::schemas::normalized(name);
-    let key = match name.split_once(crate::schemas::QUALIFIER) {
+    match name.split_once(crate::schemas::QUALIFIER) {
         Some((schema, relation)) => format!(
             "{}.{}",
             double_quoted_key_part(schema),
@@ -462,8 +467,7 @@ fn materialized_view_key(name: &str) -> String {
         ),
         None if name.starts_with('"') => double_quoted_key_part(name),
         None => name.to_owned(),
-    };
-    crate::dump::sql_string(&key)
+    }
 }
 
 fn double_quoted_key_part(part: &str) -> String {

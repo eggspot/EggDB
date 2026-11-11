@@ -436,6 +436,12 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                     file_node = 0;
                     has_subclass = !snapshot.partitions.children_of(&table.name).is_empty();
                 }
+                if snapshot
+                    .materialized_views
+                    .contains(&crate::session::materialized_view_key_text(&entry.internal))
+                {
+                    kind = "m";
+                }
                 partition_bound = snapshot.partition_bound_definition(table);
                 if let Some(&rows) = snapshot.row_counts.get(&table.name) {
                     tuples = rows as f32;

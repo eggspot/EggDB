@@ -1364,3 +1364,19 @@ fn every_pg_catalog_relation_name_starts_with_the_prefix_lookups_test_first() {
         );
     }
 }
+
+#[test]
+fn a_materialized_view_is_relkind_m_and_a_table_stays_r() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    last(&mut session, "CREATE TABLE orders (id integer PRIMARY KEY, total integer)");
+    last(
+        &mut session,
+        "CREATE MATERIALIZED VIEW order_totals AS SELECT sum(total) AS total FROM orders",
+    );
+    let kinds = last(
+        &mut session,
+        "SELECT relname, relkind FROM pg_class WHERE relname IN ('orders', 'order_totals') ORDER BY relname",
+    );
+    assert_eq!(rows_of(&kinds), ["order_totals|m", "orders|r"]);
+}

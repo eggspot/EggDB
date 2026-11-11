@@ -475,6 +475,7 @@ pub(crate) struct CatalogSnapshot {
     pub(crate) user_types: Arc<crate::user_types::Registry>,
     pub(crate) partitions: crate::partitions::PartitionCatalog,
     pub(crate) row_counts: std::collections::HashMap<String, u64>,
+    pub(crate) materialized_views: std::collections::HashSet<String>,
     pub(crate) stored_roles: Vec<crate::roles::StoredRole>,
     pub(crate) grants: Vec<crate::roles::TableGrant>,
     pub(crate) column_grants: Vec<crate::roles::ColumnGrant>,
@@ -742,6 +743,7 @@ impl CatalogSnapshot {
                 source: RelationSource::Catalog(relation),
             });
         }
+        let materialized_views = materialized_view_keys(reader, &relations)?;
         let mut snapshot = Self {
             user,
             database,
@@ -766,6 +768,7 @@ impl CatalogSnapshot {
             user_types,
             partitions: crate::partitions::load(reader)?,
             row_counts: crate::statistics::every_row_count(reader)?,
+            materialized_views,
             stored_roles: crate::roles::stored_roles(reader)?,
             grants: crate::roles::every_grant(reader)?,
             column_grants: crate::roles::every_column_grant(reader)?,
@@ -1502,4 +1505,25 @@ pub(crate) fn reg_from_oid(kind: RegKind, oid: u32) -> RegValue {
         oid,
         name: name.unwrap_or_else(|| oid.to_string()),
     }
+}
+
+fn materialized_view_keys(
+    reader: &dyn KeyValueRead,
+    relations: &[RelationEntry],
+) -> SqlResult<std::collections::HashSet<String>> {
+    let registry = crate::schemas::qualified("eggdb_internal", "materialized_views");
+    let Some(table) = relations
+        .iter()
+        .find(|entry| entry.internal == registry)
+        .and_then(RelationEntry::table)
+    else {
+        return Ok(std::collections::HashSet::new());
+    };
+    Ok(crate::execute::every_row(reader, table)?
+        .into_iter()
+        .filter_map(|(_, row)| match row.into_iter().next() {
+            Some(Value::Text(name)) => Some(name),
+            _ => None,
+        })
+        .collect())
 }
