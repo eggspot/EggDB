@@ -51,6 +51,7 @@ DECLARE
     flag record;
     rule jsonb;
     attribute text;
+    chosen text;
 BEGIN
     SELECT * INTO flag FROM eggdb_coordination.flags f WHERE f.flag_key = wanted;
     IF NOT FOUND THEN
@@ -58,6 +59,13 @@ BEGIN
     END IF;
     IF NOT flag.enabled THEN
         RETURN jsonb_build_object('flagKey', wanted, 'value', flag.variants -> flag.default_variant, 'variant', flag.default_variant, 'reason', 'DISABLED');
+    END IF;
+    IF jsonb_typeof(flag.targeting) = 'object' THEN
+        chosen := eggdb_jsonlogic(flag.targeting, coalesce(evaluation_context, '{}'::jsonb) || jsonb_build_object('$flagd', jsonb_build_object('flagKey', wanted, 'timestamp', extract(epoch FROM now())::bigint))) #>> '{}';
+        IF chosen IS NOT NULL AND flag.variants ? chosen THEN
+            RETURN jsonb_build_object('flagKey', wanted, 'value', flag.variants -> chosen, 'variant', chosen, 'reason', 'TARGETING_MATCH');
+        END IF;
+        RETURN jsonb_build_object('flagKey', wanted, 'value', flag.variants -> flag.default_variant, 'variant', flag.default_variant, 'reason', 'DEFAULT');
     END IF;
     FOR rule IN SELECT value FROM jsonb_array_elements(flag.targeting) LOOP
         attribute := evaluation_context ->> (rule ->> 'attribute');

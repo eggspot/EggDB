@@ -1253,7 +1253,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (D58, D251).
 - The etcd v3 gRPC API and the ZooKeeper protocol (D54, D247).
 - Watches and service discovery on change streams (D54, D247).
-- JsonLogic targeting and fractional rollouts for feature flags (D247).
+- JsonLogic targeting and fractional rollouts for feature flags (D247). **Code written, unbuilt** (code-only
+  mode, 2026-11-11, D440).
 - Benchmarks at scale: TPC-C and YCSB on a cluster (D7, D18).
 
 ### M16 Messaging, wide-column, objects and observability

@@ -464,3 +464,4 @@ its full title with its status.
 - [D437](decisions/D437.md) Code-only batch 85 (M12): pgvector's `subvector`, `binary_quantize`, bit distances and `sparsevec` text
 - [D438](decisions/D438.md) Code-only batch 86 (M12): more PostGIS functions (centroids, hulls, validity, accessors, affine moves, simplification)
 - [D439](decisions/D439.md) Code-only batch 87 (M12): in-database linear and logistic regression (`eggdb_fit`, `eggdb_predict`)
+- [D440](decisions/D440.md) Code-only batch 88 (M15): JsonLogic targeting and fractional rollouts for feature flags
