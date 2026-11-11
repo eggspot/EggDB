@@ -544,9 +544,17 @@ impl Value {
                 text.clone()
             }
             Self::Numeric(value) => value.to_string(),
-            Self::Date(days) => datetime::format_date(*days),
-            Self::Timestamp(micros) => datetime::format_timestamp(*micros),
-            Self::TimestampTz(micros) => datetime::format_timestamptz(*micros),
+            Self::Date(days) => {
+                crate::date_style::styled_date(*days, crate::date_style::DateStyle::current())
+            }
+            Self::Timestamp(micros) => crate::date_style::styled_timestamp(
+                *micros,
+                crate::date_style::DateStyle::current(),
+            ),
+            Self::TimestampTz(micros) => crate::date_style::styled_timestamptz(
+                *micros,
+                crate::date_style::DateStyle::current(),
+            ),
             Self::Time(micros) => datetime::format_time(*micros),
             Self::TimeTz {
                 micros,

@@ -373,6 +373,10 @@ impl Scanner<'_> {
 }
 
 fn parse_parts(text: &str) -> Result<Parsed, Failure> {
+    let reordered = crate::date_style::iso_date_prefix(text.trim(), || {
+        crate::date_style::DateStyle::current().order
+    });
+    let text = reordered.as_deref().unwrap_or(text);
     let mut scan = Scanner {
         bytes: text.trim().as_bytes(),
         at: 0,

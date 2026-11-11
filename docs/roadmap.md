@@ -637,7 +637,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   2026-11-11, D552).
 - `DateStyle` and `IntervalStyle` beyond ISO and `postgres`, and the special date and time inputs
   (D19, sql.md). `IntervalStyle`: **code written, unbuilt** (code-only mode, 2026-11-10, D389);
-  the special date and time inputs: **code written, unbuilt** (code-only mode, 2026-11-11, D465).
+  the special date and time inputs: **code written, unbuilt** (code-only mode, 2026-11-11, D465);
+  `DateStyle`: **code written, unbuilt** (code-only mode, 2026-11-11, D554).
 - `hstore_to_matrix` and `%#` of a non-empty hstore, which need multidimensional arrays, and the
   citext part's security-only second review (D35, D288); citext's regexp and string functions
   are built (D302).

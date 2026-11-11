@@ -68,6 +68,7 @@ mod indexes;
 mod information_schema;
 mod interval;
 mod interval_style;
+mod date_style;
 pub mod jobs;
 mod join;
 mod joined_dml;

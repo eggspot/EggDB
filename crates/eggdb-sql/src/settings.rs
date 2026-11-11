@@ -610,7 +610,22 @@ impl Settings {
                 }
             },
         };
-        let value = if known.name == "TimeZone" {
+        let value = if known.name == "DateStyle" {
+            let current = crate::date_style::DateStyle::parse(
+                &self.get(known.name).unwrap_or_default(),
+                crate::date_style::DateStyle::DEFAULT,
+            )
+            .unwrap_or(crate::date_style::DateStyle::DEFAULT);
+            crate::date_style::DateStyle::parse(&value, current)
+                .ok_or_else(|| {
+                    SqlError::new(
+                        SqlState::INVALID_PARAMETER_VALUE,
+                        format!("invalid value for parameter \"DateStyle\": \"{value}\""),
+                    )
+                    .with_hint("Available values: ISO, SQL, Postgres, German, with DMY, MDY or YMD.")
+                })?
+                .setting_text()
+        } else if known.name == "TimeZone" {
             let zone = setting_zone(&value).ok_or_else(|| {
                 SqlError::new(
                     SqlState::INVALID_PARAMETER_VALUE,

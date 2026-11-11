@@ -2259,8 +2259,24 @@ fn set_show_and_reset_remember_run_time_parameters() {
     assert_eq!(last(&mut session, "SET datestyle TO iso, mdy"), "SET");
     assert_eq!(
         last(&mut session, "SHOW DateStyle"),
-        "DateStyle\niso, mdy\nSHOW"
+        "DateStyle\nISO, MDY\nSHOW"
     );
+    assert_eq!(last(&mut session, "SET datestyle TO sql, dmy"), "SET");
+    assert_eq!(
+        last(&mut session, "SELECT DATE '2024-03-05', TIMESTAMP '2024-03-05 10:20:30'"),
+        "date|timestamp\n05/03/2024|05/03/2024 10:20:30\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT CAST('05/03/2024' AS date) = DATE '2024-03-05'"),
+        "?column?\nt\nSELECT 1"
+    );
+    assert_eq!(last(&mut session, "SET datestyle TO postgres, mdy"), "SET");
+    assert_eq!(
+        last(&mut session, "SELECT TIMESTAMP '1997-12-17 07:37:16'"),
+        "timestamp\nWed Dec 17 07:37:16 1997\nSELECT 1"
+    );
+    assert!(session.execute("SET datestyle TO klingon", &mut |_| {}).is_err());
+    assert_eq!(last(&mut session, "SET datestyle TO DEFAULT"), "SET");
     assert_eq!(last(&mut session, "SET TIME ZONE 'Europe/Paris'"), "SET");
     assert_eq!(session.parameter("timezone").unwrap(), "Europe/Paris");
     assert_eq!(last(&mut session, "SET client_encoding = 'utf-8'"), "SET");
