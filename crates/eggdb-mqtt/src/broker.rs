@@ -105,6 +105,20 @@ struct Subscriber {
 pub(crate) struct Broker<'k> {
     keyspace: &'k (dyn Keyspace + Sync),
     subscribers: Mutex<BTreeMap<u64, Subscriber>>,
+    shared_turn: AtomicUsize,
+}
+
+fn shared_filter(filter: &str) -> Option<(&str, &str)> {
+    let rest = filter.strip_prefix("$share/")?;
+    let (group, inner) = rest.split_once('/')?;
+    (!group.is_empty() && !group.contains(['+', '#']) && !inner.is_empty()).then_some((group, inner))
+}
+
+fn valid_subscription(filter: &str) -> bool {
+    match filter.strip_prefix("$share/") {
+        Some(_) => shared_filter(filter).is_some_and(|(_, inner)| valid_filter(inner)),
+        None => valid_filter(filter),
+    }
 }
 
 fn publish_packet(
@@ -134,6 +148,7 @@ impl<'k> Broker<'k> {
         Self {
             keyspace,
             subscribers: Mutex::new(BTreeMap::new()),
+            shared_turn: AtomicUsize::new(0),
         }
     }
 
@@ -150,14 +165,34 @@ impl<'k> Broker<'k> {
             .subscribers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for subscriber in subscribers.values_mut() {
-            let Some(granted) = subscriber
+        let mut groups: BTreeMap<String, Vec<(u64, u8)>> = BTreeMap::new();
+        for (&id, subscriber) in subscribers.iter() {
+            for (filter, granted) in &subscriber.filters {
+                if let Some((group, inner)) = shared_filter(filter)
+                    && filter_matches(inner, topic)
+                {
+                    groups
+                        .entry(format!("{group}/{inner}"))
+                        .or_default()
+                        .push((id, *granted));
+                }
+            }
+        }
+        let turn = self.shared_turn.fetch_add(1, Ordering::Relaxed);
+        let mut chosen: BTreeMap<u64, u8> = BTreeMap::new();
+        for members in groups.values() {
+            let (id, granted) = members[turn % members.len()];
+            let held = chosen.entry(id).or_insert(granted);
+            *held = (*held).max(granted);
+        }
+        for (id, subscriber) in subscribers.iter_mut() {
+            let direct = subscriber
                 .filters
                 .iter()
-                .filter(|(filter, _)| filter_matches(filter, topic))
+                .filter(|(filter, _)| !filter.starts_with("$share/") && filter_matches(filter, topic))
                 .map(|(_, granted)| *granted)
-                .max()
-            else {
+                .max();
+            let Some(granted) = direct.max(chosen.get(id).copied()) else {
                 continue;
             };
             let qos = qos.min(granted);
@@ -365,7 +400,7 @@ impl Session<'_, '_> {
                     let filter = fields.string()?;
                     let options = fields.byte()?;
                     let requested = options & 3;
-                    if valid_filter(&filter) && requested < 3 {
+                    if valid_subscription(&filter) && requested < 3 {
                         let granted = requested.min(1);
                         codes.push(granted);
                         accepted.push((filter, granted));
@@ -403,6 +438,9 @@ impl Session<'_, '_> {
                 self.send(&encode(SUBACK, 0, &ack))
                     .map_err(|error| error.to_string())?;
                 for (filter, granted) in accepted {
+                    if filter.starts_with("$share/") {
+                        continue;
+                    }
                     let (retained, _held) = self.broker.retained(&filter, self.budget)?;
                     for (topic, qos, properties, payload) in retained {
                         let qos = qos.min(granted);

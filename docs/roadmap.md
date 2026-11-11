@@ -1308,7 +1308,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A benchmark against RabbitMQ (D33, D214).
 - MQTT persistent sessions, and QoS 1 and 2 redelivery to subscribers (D33, D215).
 - MQTT 5's topic aliases, shared subscriptions, message expiry and reason strings (D33, D215). Topic
-  aliases, message expiry and reason strings: **code written, unbuilt** (code-only mode, 2026-11-11, D480).
+  aliases, message expiry and reason strings: **code written, unbuilt** (code-only mode, 2026-11-11, D480);
+  shared subscriptions: **code written, unbuilt** (code-only mode, 2026-11-11, D481).
 - MQTT over WebSockets (D215).
 - A benchmark against Mosquitto and EMQX (D33, D215).
 - SQS, after D58's legal check: FIFO queues, attributes, batches, long polling, dead-letter
