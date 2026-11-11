@@ -304,6 +304,32 @@ impl<'t> Parser<'t> {
         } else if self.is_word("create") && self.is_word_at(1, "trigger") {
             self.at += 2;
             MySqlStatement::ShowCreateTrigger(self.table_name()?)
+        } else if self.is_word("create")
+            && (self.is_word_at(1, "procedure") || self.is_word_at(1, "function"))
+        {
+            let kind = if self.is_word_at(1, "procedure") {
+                crate::routines::RoutineKind::Procedure
+            } else {
+                crate::routines::RoutineKind::Function
+            };
+            self.at += 2;
+            MySqlStatement::ShowCreateRoutine {
+                kind,
+                name: self.table_name()?,
+            }
+        } else if (self.is_word("procedure") || self.is_word("function"))
+            && self.is_word_at(1, "status")
+        {
+            let kind = if self.is_word("procedure") {
+                crate::routines::RoutineKind::Procedure
+            } else {
+                crate::routines::RoutineKind::Function
+            };
+            self.at += 2;
+            MySqlStatement::ShowRoutineStatus {
+                kind,
+                like: self.like_pattern()?,
+            }
         } else if self.take_word("triggers") {
             self.skip_database_qualifier()?;
             MySqlStatement::ShowTriggers {

@@ -214,6 +214,8 @@ impl<'s> Session<'s> {
             }
             MySqlStatement::ShowCreateView(_) => Some(create_view_columns()),
             MySqlStatement::ShowCreateTrigger(_) => Some(create_trigger_columns()),
+            MySqlStatement::ShowCreateRoutine { kind, .. } => Some(create_routine_columns(*kind)),
+            MySqlStatement::ShowRoutineStatus { .. } => Some(routine_status_columns()),
             MySqlStatement::ShowTriggers { .. } => Some(triggers_columns()),
             MySqlStatement::ShowIndex(_) => Some(index_columns()),
             MySqlStatement::ShowVariables { .. } | MySqlStatement::ShowStatus => {
@@ -325,6 +327,79 @@ impl<'s> Session<'s> {
                     }
                 }
                 Ok(rows_result(triggers_columns(), rows))
+            }
+            MySqlStatement::ShowCreateRoutine { kind, name } => {
+                let wanted = crate::schemas::base_name(&name.text).to_owned();
+                let listed = self.read(|reader, _| crate::routines::every_routine(reader))?;
+                let found = listed
+                    .iter()
+                    .flat_map(|named| named.routines.iter())
+                    .find(|routine| {
+                        routine.kind == *kind
+                            && crate::schemas::base_name(&routine.name).eq_ignore_ascii_case(&wanted)
+                    })
+                    .cloned();
+                let Some(routine) = found else {
+                    return Err(SqlError::new(
+                        SqlState::MYSQL_GENERAL,
+                        format!("{} {} does not exist", kind.keyword(), name.text),
+                    )
+                    .with_vendor_code(1305)
+                    .at(name.position));
+                };
+                Ok(rows_result(
+                    create_routine_columns(*kind),
+                    vec![vec![
+                        Value::Text(crate::schemas::base_name(&routine.name).to_owned()),
+                        Value::Text(String::new()),
+                        Value::Text(routine.text.clone()),
+                        Value::Text("utf8mb4".into()),
+                        Value::Text("utf8mb4_0900_ai_ci".into()),
+                        Value::Text("utf8mb4_0900_ai_ci".into()),
+                    ]],
+                ))
+            }
+            MySqlStatement::ShowRoutineStatus { kind, like } => {
+                let listed = self.read(|reader, _| crate::routines::every_routine(reader))?;
+                let database = self.settings.database.clone();
+                let mut rows = Vec::new();
+                for routine in listed.iter().flat_map(|named| named.routines.iter()) {
+                    let name = crate::schemas::base_name(&routine.name);
+                    if routine.kind != *kind || !matches_pattern(name, like.as_deref())? {
+                        continue;
+                    }
+                    let schema = crate::schemas::schema_of(&routine.name);
+                    let schema = if schema.is_empty() || schema == crate::schemas::DEFAULT_SCHEMA {
+                        database.clone()
+                    } else {
+                        schema.to_owned()
+                    };
+                    rows.push(vec![
+                        Value::Text(schema),
+                        Value::Text(name.to_owned()),
+                        Value::Text(kind.keyword().to_owned()),
+                        Value::Text("root@localhost".into()),
+                        Value::Null,
+                        Value::Null,
+                        Value::Text(
+                            if routine.security_definer { "DEFINER" } else { "INVOKER" }.into(),
+                        ),
+                        Value::Text(String::new()),
+                        Value::Text("utf8mb4".into()),
+                        Value::Text("utf8mb4_0900_ai_ci".into()),
+                        Value::Text("utf8mb4_0900_ai_ci".into()),
+                    ]);
+                }
+                rows.sort_by(|left, right| {
+                    let key = |row: &Vec<Value>| {
+                        (
+                            row.first().and_then(Value::character_text).map(str::to_owned),
+                            row.get(1).and_then(Value::character_text).map(str::to_owned),
+                        )
+                    };
+                    key(left).cmp(&key(right))
+                });
+                Ok(rows_result(routine_status_columns(), rows))
             }
             MySqlStatement::ShowCreateTrigger(name) => {
                 let listed = self.read(|reader, _| crate::triggers::every_trigger(reader))?;
@@ -761,6 +836,43 @@ fn index_rows(table: &TableSchema) -> Vec<Vec<Value>> {
         }
     }
     rows
+}
+
+fn create_routine_columns(kind: crate::routines::RoutineKind) -> Vec<OutputColumn> {
+    let (label, statement) = match kind {
+        crate::routines::RoutineKind::Procedure => ("Procedure", "Create Procedure"),
+        crate::routines::RoutineKind::Function => ("Function", "Create Function"),
+    };
+    [
+        label,
+        "sql_mode",
+        statement,
+        "character_set_client",
+        "collation_connection",
+        "Database Collation",
+    ]
+    .into_iter()
+    .map(text_column)
+    .collect()
+}
+
+fn routine_status_columns() -> Vec<OutputColumn> {
+    [
+        "Db",
+        "Name",
+        "Type",
+        "Definer",
+        "Modified",
+        "Created",
+        "Security_type",
+        "Comment",
+        "character_set_client",
+        "collation_connection",
+        "Database Collation",
+    ]
+    .into_iter()
+    .map(text_column)
+    .collect()
 }
 
 fn create_trigger_columns() -> Vec<OutputColumn> {

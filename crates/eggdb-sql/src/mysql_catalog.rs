@@ -185,9 +185,20 @@ const ROUTINES: &[CatalogColumn] = &[
     column("routine_name", NAME),
     column("routine_type", NAME),
     column("data_type", NAME),
+    column("dtd_identifier", TEXT),
+    column("routine_body", NAME),
     column("routine_definition", TEXT),
+    column("external_language", NAME),
+    column("parameter_style", NAME),
+    column("is_deterministic", NAME),
+    column("sql_data_access", NAME),
+    column("security_type", NAME),
+    column("sql_mode", TEXT),
     column("definer", NAME),
     column("routine_comment", TEXT),
+    column("character_set_client", NAME),
+    column("collation_connection", NAME),
+    column("database_collation", NAME),
 ];
 
 const PARAMETERS: &[CatalogColumn] = &[
@@ -417,6 +428,12 @@ fn build(columns: &'static [CatalogColumn], values: Vec<(&str, Value)>) -> Vec<V
         }
     }
     row
+}
+
+fn mysql_type_of(sql_type: SqlType) -> &'static str {
+    let name = sql_type.name();
+    let base = name.split('(').next().unwrap_or_default().trim().to_owned();
+    mysql_data_type(&base)
 }
 
 fn mysql_data_type(standard: &str) -> &'static str {
@@ -1005,9 +1022,133 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MySqlRelation) -> Vec<V
                 ("state", text("executing")),
             ],
         )],
-        MySqlRelation::Routines
-        | MySqlRelation::Parameters
-        | MySqlRelation::Triggers
+        MySqlRelation::Routines => snapshot
+            .routines
+            .iter()
+            .filter(|routine| routine.definition.dialect == crate::dialect::Dialect::MySql)
+            .map(|routine| {
+                let definition = &routine.definition;
+                let returned = match &definition.returns {
+                    crate::routines::RoutineReturns::One(crate::routines::ReturnType::Type(
+                        sql_type,
+                    )) => Some(*sql_type),
+                    _ => None,
+                };
+                build(
+                    columns,
+                    vec![
+                        ("specific_name", Value::Text(routine.name.clone())),
+                        ("routine_catalog", text(CATALOG)),
+                        ("routine_schema", mysql_schema(snapshot, Some(routine.schema.clone()))),
+                        ("routine_name", Value::Text(routine.name.clone())),
+                        ("routine_type", text(definition.kind.keyword())),
+                        (
+                            "data_type",
+                            returned.map_or_else(|| text(""), |sql_type| {
+                                text(mysql_type_of(sql_type))
+                            }),
+                        ),
+                        (
+                            "dtd_identifier",
+                            returned.map_or(Value::Null, |sql_type| {
+                                Value::Text(mysql_type_of(sql_type).to_owned())
+                            }),
+                        ),
+                        ("routine_body", text("SQL")),
+                        ("routine_definition", Value::Text(definition.body.clone())),
+                        ("external_language", text("SQL")),
+                        ("parameter_style", text("SQL")),
+                        (
+                            "is_deterministic",
+                            text(
+                                if definition.volatility == crate::routines::Volatility::Immutable {
+                                    "YES"
+                                } else {
+                                    "NO"
+                                },
+                            ),
+                        ),
+                        ("sql_data_access", text("CONTAINS SQL")),
+                        (
+                            "security_type",
+                            text(if definition.security_definer { "DEFINER" } else { "INVOKER" }),
+                        ),
+                        ("sql_mode", text("")),
+                        ("definer", text("root@localhost")),
+                        ("routine_comment", text("")),
+                        ("character_set_client", text(CHARACTER_SET)),
+                        ("collation_connection", text(COLLATION)),
+                        ("database_collation", text(COLLATION)),
+                    ],
+                )
+            })
+            .collect(),
+        MySqlRelation::Parameters => snapshot
+            .routines
+            .iter()
+            .filter(|routine| routine.definition.dialect == crate::dialect::Dialect::MySql)
+            .flat_map(|routine| {
+                let definition = &routine.definition;
+                let schema = mysql_schema(snapshot, Some(routine.schema.clone()));
+                let returned = match &definition.returns {
+                    crate::routines::RoutineReturns::One(crate::routines::ReturnType::Type(
+                        sql_type,
+                    )) => Some(*sql_type),
+                    _ => None,
+                };
+                let result_row = returned.map(|sql_type| {
+                    build(
+                        columns,
+                        vec![
+                            ("specific_catalog", text(CATALOG)),
+                            ("specific_schema", schema.clone()),
+                            ("specific_name", Value::Text(routine.name.clone())),
+                            ("ordinal_position", Value::BigInt(0)),
+                            ("data_type", text(mysql_type_of(sql_type))),
+                            ("dtd_identifier", Value::Text(mysql_type_of(sql_type).to_owned())),
+                            ("routine_type", text(definition.kind.keyword())),
+                        ],
+                    )
+                });
+                let parameter_rows = definition.parameters.iter().enumerate().map(|(at, parameter)| {
+                    let mode = match parameter.mode {
+                        crate::routines::ParameterMode::In => "IN",
+                        crate::routines::ParameterMode::Out => "OUT",
+                        crate::routines::ParameterMode::InOut => "INOUT",
+                        _ => "IN",
+                    };
+                    build(
+                        columns,
+                        vec![
+                            ("specific_catalog", text(CATALOG)),
+                            ("specific_schema", schema.clone()),
+                            ("specific_name", Value::Text(routine.name.clone())),
+                            ("ordinal_position", Value::BigInt(at as i64 + 1)),
+                            (
+                                "parameter_mode",
+                                if definition.kind == crate::routines::RoutineKind::Function {
+                                    Value::Null
+                                } else {
+                                    text(mode)
+                                },
+                            ),
+                            (
+                                "parameter_name",
+                                parameter.name.clone().map_or(Value::Null, Value::Text),
+                            ),
+                            ("data_type", text(mysql_type_of(parameter.sql_type))),
+                            (
+                                "dtd_identifier",
+                                Value::Text(mysql_type_of(parameter.sql_type).to_owned()),
+                            ),
+                            ("routine_type", text(definition.kind.keyword())),
+                        ],
+                    )
+                });
+                result_row.into_iter().chain(parameter_rows).collect::<Vec<_>>()
+            })
+            .collect(),
+        MySqlRelation::Triggers
         | MySqlRelation::Events
         | MySqlRelation::Partitions
         | MySqlRelation::Plugins => Vec::new(),

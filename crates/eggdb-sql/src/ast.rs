@@ -1134,6 +1134,14 @@ pub(crate) enum MySqlStatement {
     ShowCreateTable(Name),
     ShowCreateView(Name),
     ShowCreateTrigger(Name),
+    ShowCreateRoutine {
+        kind: crate::routines::RoutineKind,
+        name: Name,
+    },
+    ShowRoutineStatus {
+        kind: crate::routines::RoutineKind,
+        like: Option<String>,
+    },
     ShowTriggers {
         like: Option<String>,
     },

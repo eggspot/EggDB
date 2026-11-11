@@ -444,3 +444,4 @@ its full title with its status.
 - [D417](decisions/D417.md) Code-only batch 64 (M10): MySQL's `date + INTERVAL n unit` operator
 - [D418](decisions/D418.md) Code-only batch 65 (M10): MySQL stored programs' handlers, cursors, named conditions, `RESIGNAL` and `GET DIAGNOSTICS`
 - [D419](decisions/D419.md) Code-only batch 66 (M10): variables set inside MySQL stored programs and `SIGNAL ... SET MYSQL_ERRNO`
+- [D420](decisions/D420.md) Code-only batch 67 (M10): `SHOW CREATE PROCEDURE|FUNCTION`, `SHOW ... STATUS` and MySQL's `ROUTINES` and `PARAMETERS` views
