@@ -66,6 +66,7 @@ pub(crate) enum DictionaryView {
     Arguments,
     Triggers,
     Errors,
+    SchedulerJobs,
 }
 
 /// A relation of Oracle's data dictionary or dynamic performance views that the Oracle
@@ -157,6 +158,9 @@ static NAMED: &[(&str, OracleRelation)] = &[
     ("user_errors", user(DictionaryView::Errors)),
     ("all_errors", all(DictionaryView::Errors)),
     ("dba_errors", dba(DictionaryView::Errors)),
+    ("user_scheduler_jobs", user(DictionaryView::SchedulerJobs)),
+    ("all_scheduler_jobs", all(DictionaryView::SchedulerJobs)),
+    ("dba_scheduler_jobs", dba(DictionaryView::SchedulerJobs)),
     ("tabs", user(DictionaryView::Tables)),
     ("cols", user(DictionaryView::TabColumns)),
     ("ind", user(DictionaryView::Indexes)),
@@ -234,6 +238,7 @@ fn dictionary_columns(scope: DictionaryScope, view: DictionaryView) -> &'static 
         DictionaryView::Arguments => without_owner(ARGUMENTS_COLUMNS),
         DictionaryView::Triggers => without_owner(TRIGGERS_COLUMNS),
         DictionaryView::Errors => without_owner(ERRORS_COLUMNS),
+        DictionaryView::SchedulerJobs => without_owner(SCHEDULER_JOBS_COLUMNS),
     }
 }
 
@@ -562,6 +567,21 @@ static TRIGGERS_COLUMNS: &[CatalogColumn] = &[
     column("instead_of_row", VARCHAR2),
     column("fire_once", VARCHAR2),
     column("apply_server_only", VARCHAR2),
+];
+
+static SCHEDULER_JOBS_COLUMNS: &[CatalogColumn] = &[
+    column("owner", VARCHAR2),
+    column("job_name", VARCHAR2),
+    column("job_type", VARCHAR2),
+    column("job_action", VARCHAR2),
+    column("start_date", SqlType::TimestampTz(Some(6))),
+    column("repeat_interval", VARCHAR2),
+    column("end_date", SqlType::TimestampTz(Some(6))),
+    column("enabled", VARCHAR2),
+    column("auto_drop", VARCHAR2),
+    column("state", VARCHAR2),
+    column("last_start_date", SqlType::TimestampTz(Some(6))),
+    column("comments", VARCHAR2),
 ];
 
 static ERRORS_COLUMNS: &[CatalogColumn] = &[
@@ -937,8 +957,52 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: OracleRelation) -> Vec<
             DictionaryView::Arguments => plsql::argument_rows(&dictionary),
             DictionaryView::Triggers => plsql::trigger_rows(&dictionary),
             DictionaryView::Errors => Vec::new(),
+            DictionaryView::SchedulerJobs => scheduler_job_rows(&dictionary, snapshot),
         },
     }
+}
+
+fn scheduler_job_rows(dictionary: &Dictionary<'_>, snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let stamp = |value: Option<&Value>| match value {
+        Some(Value::BigInt(seconds)) => crate::mysql_date_functions::micros_of_epoch_seconds(*seconds)
+            .map_or(Value::Null, Value::TimestampTz),
+        _ => Value::Null,
+    };
+    let truth = |flag: bool| text(if flag { "TRUE" } else { "FALSE" });
+    let mut rows: Vec<Vec<Value>> = snapshot
+        .oracle_scheduler_jobs
+        .iter()
+        .map(|job| {
+            let field = |name: &str| job.iter().find(|(column, _)| column == name).map(|(_, value)| value);
+            let flag = |name: &str| matches!(field(name), Some(Value::Boolean(true)));
+            let shown = |name: &str| field(name).cloned().unwrap_or(Value::Null);
+            let name = match field("job_name") {
+                Some(Value::Text(name)) => Value::Text(name.to_uppercase()),
+                _ => Value::Null,
+            };
+            dictionary
+                .row()
+                .set("owner", dictionary.owner(crate::schemas::DEFAULT_SCHEMA))
+                .set("job_name", name)
+                .set("job_type", shown("job_type"))
+                .set("job_action", shown("job_action"))
+                .set("start_date", stamp(field("start_epoch")))
+                .set("repeat_interval", shown("repeat_interval"))
+                .set("end_date", stamp(field("end_epoch")))
+                .set("enabled", truth(flag("enabled")))
+                .set("auto_drop", truth(flag("auto_drop")))
+                .set("state", text(if flag("enabled") { "SCHEDULED" } else { "DISABLED" }))
+                .set("last_start_date", stamp(field("last_run")))
+                .done()
+        })
+        .collect();
+    rows.sort_by(|left, right| {
+        left.iter()
+            .map(Value::to_text)
+            .collect::<Vec<_>>()
+            .cmp(&right.iter().map(Value::to_text).collect::<Vec<_>>())
+    });
+    rows
 }
 
 fn table_rows(dictionary: &Dictionary<'_>) -> Vec<Vec<Value>> {

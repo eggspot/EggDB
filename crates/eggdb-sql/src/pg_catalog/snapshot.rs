@@ -477,6 +477,7 @@ pub(crate) struct CatalogSnapshot {
     pub(crate) row_counts: std::collections::HashMap<String, u64>,
     pub(crate) materialized_views: std::collections::HashSet<String>,
     pub(crate) mysql_events: Vec<Vec<(String, Value)>>,
+    pub(crate) oracle_scheduler_jobs: Vec<Vec<(String, Value)>>,
     pub(crate) stored_roles: Vec<crate::roles::StoredRole>,
     pub(crate) grants: Vec<crate::roles::TableGrant>,
     pub(crate) column_grants: Vec<crate::roles::ColumnGrant>,
@@ -746,6 +747,7 @@ impl CatalogSnapshot {
         }
         let materialized_views = materialized_view_keys(reader, &relations)?;
         let mysql_events = internal_rows(reader, &relations, "mysql_events")?;
+        let oracle_scheduler_jobs = internal_rows(reader, &relations, "oracle_scheduler_jobs")?;
         let mut snapshot = Self {
             user,
             database,
@@ -772,6 +774,7 @@ impl CatalogSnapshot {
             row_counts: crate::statistics::every_row_count(reader)?,
             materialized_views,
             mysql_events,
+            oracle_scheduler_jobs,
             stored_roles: crate::roles::stored_roles(reader)?,
             grants: crate::roles::every_grant(reader)?,
             column_grants: crate::roles::every_column_grant(reader)?,

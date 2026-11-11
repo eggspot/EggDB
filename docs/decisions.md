@@ -601,3 +601,4 @@ its full title with its status.
 - [D574](decisions/D574.md) Code-only batch 222 (M10): MySQL's event_scheduler switch
 - [D575](decisions/D575.md) Code-only batch 223 (M10): MySQL's information_schema.EVENTS
 - [D576](decisions/D576.md) Code-only batch 224 (M10): MySQL events run to the second
+- [D577](decisions/D577.md) Code-only batch 225 (M10): Oracle's USER_SCHEDULER_JOBS
