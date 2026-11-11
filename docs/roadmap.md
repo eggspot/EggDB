@@ -1516,7 +1516,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   **code written, unbuilt** (code-only mode, 2026-11-11, D521); `fill()` and `GROUP BY time()` offsets: **code
   written, unbuilt** (code-only mode, 2026-11-12, D675); `GROUP BY *`, `SLIMIT`, several measurements and
   `distinct()`: **code written, unbuilt** (code-only mode, 2026-11-12, D676); math between fields: **code written,
-  unbuilt** (code-only mode, 2026-11-12, D677). Left: Flux, deduplication, subqueries, `INTO` and `tz()`.
+  unbuilt** (code-only mode, 2026-11-12, D677); deduplication: **code written, unbuilt** (code-only mode, 2026-11-12,
+  D678). Left: Flux, subqueries, `INTO` and `tz()`.
 - Remote write 2.0, native histograms and exemplars (D220). Remote write 2.0 with native histograms kept as
   `_count` and `_sum`: **code written, unbuilt** (code-only mode, 2026-11-12, D665). Left: histogram buckets and
   exemplars.

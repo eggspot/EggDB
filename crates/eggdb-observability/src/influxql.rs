@@ -1143,9 +1143,10 @@ fn show(session: &mut Session<'_>, reader: &mut Reader, database: &str) -> Resul
             let result = run(
                 session,
                 &format!(
-                    "SELECT DISTINCT {} FROM {SCHEMA}.{} WHERE {} IS NOT NULL ORDER BY 1",
+                    "SELECT DISTINCT {} FROM {SCHEMA}.{} WHERE {} IS NOT NULL AND {} <> '' ORDER BY 1",
                     column(&key),
                     identifier(name),
+                    column(&key),
                     column(&key)
                 ),
             )?
@@ -1176,6 +1177,7 @@ fn show(session: &mut Session<'_>, reader: &mut Reader, database: &str) -> Resul
                             "bigint" => "integer",
                             "numeric" => "unsigned",
                             "boolean" => "boolean",
+                            "string" => "string",
                             _ => "float",
                         };
                         vec![json_string(column), json_string(field_type)]
