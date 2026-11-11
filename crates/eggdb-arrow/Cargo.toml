@@ -11,3 +11,4 @@ workspace = true
 
 [dependencies]
 eggdb-parquet = { path = "../eggdb-parquet" }
+eggdb-storage = { path = "../eggdb-storage" }

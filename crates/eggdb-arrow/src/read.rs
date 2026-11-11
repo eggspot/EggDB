@@ -19,6 +19,10 @@ const TYPE_TIMESTAMP: u8 = 10;
 const TYPE_LARGE_BINARY: u8 = 19;
 const TYPE_LARGE_UTF8: u8 = 20;
 const MILLIS_PER_DAY: i64 = 86_400_000;
+const CODEC_LZ4_FRAME: u8 = 0;
+const CODEC_ZSTD: u8 = 1;
+const UNCOMPRESSED_BUFFER: i64 = -1;
+const MOST_BUFFER_BYTES: usize = 1 << 28;
 
 fn damaged(what: &str) -> String {
     format!("the Arrow stream is damaged: {what}")
@@ -306,16 +310,62 @@ fn next_message<'b>(bytes: &'b [u8], at: &mut usize) -> Result<Option<Message<'b
     }))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Codec {
+    Lz4Frame,
+    Zstd,
+}
+
+fn codec_of(batch: &Table<'_>) -> Result<Option<Codec>, String> {
+    let Some(compression) = batch.table(3) else {
+        return Ok(None);
+    };
+    if compression.u8(1, 0) != 0 {
+        return Err(damaged("a batch's compression method is not per buffer"));
+    }
+    match compression.u8(0, CODEC_LZ4_FRAME) {
+        CODEC_LZ4_FRAME => Ok(Some(Codec::Lz4Frame)),
+        CODEC_ZSTD => Ok(Some(Codec::Zstd)),
+        _ => Err(damaged("a batch names an unknown compression codec")),
+    }
+}
+
 struct Batch<'b> {
     nodes: Vec<(i64, i64)>,
     buffers: Vec<(i64, i64)>,
     body: &'b [u8],
     next_node: usize,
     next_buffer: usize,
+    codec: Option<Codec>,
 }
 
 impl<'b> Batch<'b> {
-    fn buffer(&mut self) -> Result<&'b [u8], String> {
+    fn buffer(&mut self) -> Result<std::borrow::Cow<'b, [u8]>, String> {
+        let stored = self.stored_buffer()?;
+        let Some(codec) = self.codec else {
+            return Ok(std::borrow::Cow::Borrowed(stored));
+        };
+        if stored.is_empty() {
+            return Ok(std::borrow::Cow::Borrowed(stored));
+        }
+        let length = i64_at(stored, 0).ok_or_else(|| damaged("a compressed buffer has no length"))?;
+        let rest = &stored[8..];
+        if length == UNCOMPRESSED_BUFFER {
+            return Ok(std::borrow::Cow::Borrowed(rest));
+        }
+        let length = usize::try_from(length)
+            .ok()
+            .filter(|length| *length <= MOST_BUFFER_BYTES)
+            .ok_or_else(|| damaged("a compressed buffer's length is out of range"))?;
+        let bytes = match codec {
+            Codec::Lz4Frame => eggdb_storage::decompress_lz4_frame(rest, length),
+            Codec::Zstd => eggdb_storage::decompress_zstd(rest, length),
+        }
+        .map_err(damaged)?;
+        Ok(std::borrow::Cow::Owned(bytes))
+    }
+
+    fn stored_buffer(&mut self) -> Result<&'b [u8], String> {
         let (offset, length) = *self
             .buffers
             .get(self.next_buffer)
@@ -369,10 +419,13 @@ fn decode(kind: Kind, batch: &mut Batch<'_>, rows: usize, cells: &mut Vec<Cell>)
     if usize::try_from(length).ok() != Some(rows) {
         return Err(damaged("a column's length differs from its batch's"));
     }
-    let validity = batch.buffer()?;
+    let validity_buffer = batch.buffer()?;
+    let validity: &[u8] = &validity_buffer;
     let present = |index: usize| nulls == 0 || validity.is_empty() || bit(validity, index).unwrap_or(false);
-    let data = batch.buffer()?;
-    let values = if kind.buffers() == 3 { Some(batch.buffer()?) } else { None };
+    let data_buffer = batch.buffer()?;
+    let data: &[u8] = &data_buffer;
+    let values_buffer = if kind.buffers() == 3 { Some(batch.buffer()?) } else { None };
+    let values: Option<&[u8]> = values_buffer.as_deref();
     for index in 0..rows {
         if !present(index) {
             cells.push(Cell::Null);
@@ -418,8 +471,9 @@ fn decode(kind: Kind, batch: &mut Batch<'_>, rows: usize, cells: &mut Vec<Cell>)
 
 /// Reads an Arrow IPC stream, or an Arrow IPC file (`.arrow`, Feather 2), into columns: its
 /// schema's flat fields and every record batch's rows in order, dictionary-encoded columns read
-/// through their dictionary batches (deltas appended). Damaged or hostile input is an error,
-/// never a panic; compressed batches and nested types are refused by name.
+/// through their dictionary batches (deltas appended), and batches whose buffers are compressed
+/// with `LZ4_FRAME` or `ZSTD` decompressed. Damaged or hostile input is an error, never a panic;
+/// nested types are refused by name.
 pub fn read(bytes: &[u8]) -> Result<Vec<Column>, String> {
     let mut at = if bytes.starts_with(FILE_MAGIC) {
         FILE_MAGIC_PADDED
@@ -453,9 +507,7 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Column>, String> {
                 have_schema = true;
             }
             HEADER_RECORD_BATCH if have_schema => {
-                if message.header.table(3).is_some() {
-                    return Err("compressed Arrow batches are not supported yet".to_owned());
-                }
+                let codec = codec_of(&message.header)?;
                 let rows = u64::try_from(message.header.i64(0, 0)).map_err(|_| damaged("a batch's length is negative"))?;
                 total_rows = total_rows.saturating_add(rows);
                 if total_rows > MAX_ROWS {
@@ -467,6 +519,7 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Column>, String> {
                     body: message.body,
                     next_node: 0,
                     next_buffer: 0,
+                    codec,
                 };
                 let rows = usize::try_from(rows).map_err(|_| damaged("a batch is too long"))?;
                 for (kind, dictionary, column) in &mut columns {
@@ -489,9 +542,7 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Column>, String> {
                     .header
                     .table(1)
                     .ok_or_else(|| damaged("a dictionary batch has no data"))?;
-                if data.table(3).is_some() {
-                    return Err("compressed Arrow batches are not supported yet".to_owned());
-                }
+                let codec = codec_of(&data)?;
                 let kind = columns
                     .iter()
                     .find(|(_, dictionary, _)| dictionary.is_some_and(|dictionary| dictionary.id == id))
@@ -508,6 +559,7 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Column>, String> {
                     body: message.body,
                     next_node: 0,
                     next_buffer: 0,
+                    codec,
                 };
                 let rows = usize::try_from(rows).map_err(|_| damaged("a dictionary is too long"))?;
                 let mut values = Vec::with_capacity(rows);

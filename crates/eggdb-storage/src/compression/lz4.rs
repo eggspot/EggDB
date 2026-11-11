@@ -121,6 +121,14 @@ pub(crate) fn decompress(input: &[u8], expected: usize) -> Result<Vec<u8>, &'sta
     let mut out: Vec<u8> = Vec::new();
     out.try_reserve_exact(expected)
         .map_err(|_| "the decompressed size cannot be allocated")?;
+    append_block(input, &mut out, expected)?;
+    if out.len() != expected {
+        return Err("the block holds another number of bytes than its header says");
+    }
+    Ok(out)
+}
+
+fn append_block(input: &[u8], out: &mut Vec<u8>, expected: usize) -> Result<(), &'static str> {
     let mut at = 0;
     loop {
         let token = usize::from(
@@ -164,8 +172,84 @@ pub(crate) fn decompress(input: &[u8], expected: usize) -> Result<Vec<u8>, &'sta
             out.push(byte);
         }
     }
+    Ok(())
+}
+
+const FRAME_MAGIC: u32 = 0x184D_2204;
+const FRAME_VERSION: u8 = 0b01;
+const BLOCK_CHECKSUM_FLAG: u8 = 1 << 4;
+const CONTENT_SIZE_FLAG: u8 = 1 << 3;
+const CONTENT_CHECKSUM_FLAG: u8 = 1 << 2;
+const DICTIONARY_FLAG: u8 = 1;
+const UNCOMPRESSED_BLOCK: u32 = 1 << 31;
+
+fn frame_bytes<'a>(input: &'a [u8], at: &mut usize, count: usize) -> Result<&'a [u8], &'static str> {
+    let end = at.checked_add(count).ok_or("an LZ4 frame overflows")?;
+    let bytes = input.get(*at..end).ok_or("an LZ4 frame is cut short")?;
+    *at = end;
+    Ok(bytes)
+}
+
+/// Decompresses one LZ4 frame (the LZ4 frame format: magic, descriptor, blocks linked or
+/// independent, end mark, optional checksums, which are skipped) that must give exactly
+/// `expected` bytes. Frames that need a dictionary are refused; hostile input is an error.
+pub(crate) fn decompress_frame(input: &[u8], expected: usize) -> Result<Vec<u8>, &'static str> {
+    let mut at = 0;
+    let magic = frame_bytes(input, &mut at, 4)?;
+    if u32::from_le_bytes([magic[0], magic[1], magic[2], magic[3]]) != FRAME_MAGIC {
+        return Err("the input is not an LZ4 frame");
+    }
+    let descriptor = frame_bytes(input, &mut at, 2)?;
+    let (flags, block_descriptor) = (descriptor[0], descriptor[1]);
+    if flags >> 6 != FRAME_VERSION {
+        return Err("the LZ4 frame has an unknown version");
+    }
+    if flags & DICTIONARY_FLAG != 0 {
+        return Err("LZ4 frames that need a dictionary are not supported");
+    }
+    let most_block = match (block_descriptor >> 4) & 7 {
+        4 => 1 << 16,
+        5 => 1 << 18,
+        6 => 1 << 20,
+        7 => 1 << 22,
+        _ => return Err("the LZ4 frame has an unknown block size"),
+    };
+    if flags & CONTENT_SIZE_FLAG != 0 {
+        frame_bytes(input, &mut at, 8)?;
+    }
+    frame_bytes(input, &mut at, 1)?;
+    let mut out: Vec<u8> = Vec::new();
+    out.try_reserve_exact(expected)
+        .map_err(|_| "the decompressed size cannot be allocated")?;
+    loop {
+        let size = frame_bytes(input, &mut at, 4)?;
+        let size = u32::from_le_bytes([size[0], size[1], size[2], size[3]]);
+        if size == 0 {
+            break;
+        }
+        let length = (size & !UNCOMPRESSED_BLOCK) as usize;
+        if length > most_block {
+            return Err("an LZ4 block is larger than its frame allows");
+        }
+        let block = frame_bytes(input, &mut at, length)?;
+        let room = out.len().saturating_add(most_block).min(expected);
+        if size & UNCOMPRESSED_BLOCK != 0 {
+            if out.len() + block.len() > expected {
+                return Err("an LZ4 block runs past the decompressed size");
+            }
+            out.extend_from_slice(block);
+        } else {
+            append_block(block, &mut out, room)?;
+        }
+        if flags & BLOCK_CHECKSUM_FLAG != 0 {
+            frame_bytes(input, &mut at, 4)?;
+        }
+    }
+    if flags & CONTENT_CHECKSUM_FLAG != 0 {
+        frame_bytes(input, &mut at, 4)?;
+    }
     if out.len() != expected {
-        return Err("the block holds another number of bytes than its header says");
+        return Err("the LZ4 frame holds another number of bytes than expected");
     }
     Ok(out)
 }
@@ -211,6 +295,30 @@ mod tests {
             assert_eq!(decompress(&block, input.len()).unwrap(), input);
         }
         assert!(compress(&vec![7; 100_000]).len() < 1000);
+    }
+
+    #[test]
+    fn frames_decode_linked_and_uncompressed_blocks() {
+        let first: Vec<u8> = b"columnar data, columnar data, ".repeat(40);
+        let second: Vec<u8> = b"more rows after the first block ".repeat(30);
+        let mut frame = FRAME_MAGIC.to_le_bytes().to_vec();
+        frame.extend_from_slice(&[0x40 | 0x20 | CONTENT_CHECKSUM_FLAG, 0x40, 0]);
+        for block in [compress(&first), compress(&second)] {
+            frame.extend_from_slice(&u32::try_from(block.len()).unwrap().to_le_bytes());
+            frame.extend_from_slice(&block);
+        }
+        frame.extend_from_slice(&(3 | UNCOMPRESSED_BLOCK).to_le_bytes());
+        frame.extend_from_slice(b"end");
+        frame.extend_from_slice(&0_u32.to_le_bytes());
+        frame.extend_from_slice(&[0; 4]);
+        let mut expected = first.clone();
+        expected.extend_from_slice(&second);
+        expected.extend_from_slice(b"end");
+        assert_eq!(decompress_frame(&frame, expected.len()).unwrap(), expected);
+        assert!(decompress_frame(&frame, expected.len() + 1).is_err());
+        for cut in 0..frame.len() {
+            let _ = decompress_frame(&frame[..cut], expected.len());
+        }
     }
 
     #[test]

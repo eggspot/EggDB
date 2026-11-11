@@ -272,3 +272,70 @@ fn dictionary_encoded_columns_read_through_their_dictionaries_and_deltas() {
     );
     assert!(read(&dictionary_stream(false)).is_err());
 }
+
+fn zstd_raw_frame(data: &[u8]) -> Vec<u8> {
+    let mut frame = 0xFD2F_B528_u32.to_le_bytes().to_vec();
+    frame.push(0x20);
+    frame.push(u8::try_from(data.len()).unwrap());
+    let header = 1 | (u32::try_from(data.len()).unwrap() << 3);
+    frame.extend_from_slice(&header.to_le_bytes()[..3]);
+    frame.extend_from_slice(data);
+    frame
+}
+
+fn lz4_stored_frame(data: &[u8]) -> Vec<u8> {
+    let mut frame = 0x184D_2204_u32.to_le_bytes().to_vec();
+    frame.extend_from_slice(&[0x60, 0x40, 0]);
+    frame.extend_from_slice(&(u32::try_from(data.len()).unwrap() | 1 << 31).to_le_bytes());
+    frame.extend_from_slice(data);
+    frame.extend_from_slice(&0_u32.to_le_bytes());
+    frame
+}
+
+fn compressed_stream(codec: u8, wrap: impl Fn(&[u8]) -> Vec<u8>) -> Vec<u8> {
+    use crate::flatbuffer::{Builder, Field};
+    let schema = crate::schema_message(&[Column {
+        name: "n".to_owned(),
+        column_type: ColumnType::Int32,
+        nullable: false,
+        cells: Vec::new(),
+    }]);
+    let mut out = Vec::new();
+    crate::frame(&schema, &[], &mut out);
+    let values: Vec<u8> = [7_i32, -1, 300].iter().flat_map(|value| value.to_le_bytes()).collect();
+    let mut stored = 12_i64.to_le_bytes().to_vec();
+    stored.extend_from_slice(&wrap(&values));
+    let mut body = crate::Body {
+        bytes: Vec::new(),
+        buffers: Vec::new(),
+    };
+    body.push(&[]);
+    body.push(&stored);
+    let mut builder = Builder::new();
+    let buffers = builder.structs(&body.buffers);
+    let nodes = builder.structs(&[[3, 0]]);
+    let compression = builder.table(&[Some(Field::U8(codec)), Some(Field::U8(0))]);
+    let batch = builder.table(&[
+        Some(Field::I64(3)),
+        Some(Field::Offset(nodes)),
+        Some(Field::Offset(buffers)),
+        Some(Field::Offset(compression)),
+    ]);
+    let metadata = crate::message(builder, crate::HEADER_RECORD_BATCH, batch, body.bytes.len() as i64);
+    crate::frame(&metadata, &body.bytes, &mut out);
+    out.extend_from_slice(&crate::CONTINUATION);
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    out
+}
+
+#[test]
+fn compressed_batches_read_through_their_codec() {
+    let expected = vec![Cell::Int(7), Cell::Int(-1), Cell::Int(300)];
+    let zstd = read(&compressed_stream(1, zstd_raw_frame)).expect("zstd reads");
+    assert_eq!(zstd[0].cells, expected);
+    let lz4 = read(&compressed_stream(0, lz4_stored_frame)).expect("lz4 reads");
+    assert_eq!(lz4[0].cells, expected);
+    assert!(read(&compressed_stream(9, zstd_raw_frame)).is_err());
+    let broken = read(&compressed_stream(1, |data: &[u8]| data.to_vec()));
+    assert!(broken.is_err());
+}
