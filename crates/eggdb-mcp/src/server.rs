@@ -330,7 +330,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
             "tools/list" => result_line(id, &tools_list(self.grants())),
             "tools/call" => return self.call_tool(id, params, link),
             "resources/list" => result_line(id, &resources_list()),
-            "resources/templates/list" => result_line(id, "{\"resourceTemplates\":[]}"),
+            "resources/templates/list" => result_line(id, &tools::resource_templates_list()),
             "resources/read" => self.read_resource(id, params),
             "prompts/list" => result_line(id, &crate::prompts::prompts_list()),
             "prompts/get" => match crate::prompts::prompt(params) {
@@ -941,7 +941,11 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
                 None,
             );
         };
-        if uri != SCHEMA_URI {
+        let table = uri
+            .strip_prefix(tools::TABLE_URI_PREFIX)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
+        if uri != SCHEMA_URI && table.is_none() {
             let mut data = JsonOut::new();
             data.begin_object()
                 .key("uri")
@@ -954,10 +958,14 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
                 Some(&data.finish()),
             );
         }
-        let arguments = format!("{{\"uri\":{}}}", encoded_string(SCHEMA_URI));
+        let shown_uri = uri.clone();
+        let arguments = format!("{{\"uri\":{}}}", encoded_string(&shown_uri));
         let call_id = self.next_call_id();
         let started = now_rfc3339();
-        let (outcome, duration) = self.timed("resources/read", tools::schema_document);
+        let (outcome, duration) = match &table {
+            Some(table) => self.timed("resources/read", |call| tools::table_resource(call, table)),
+            None => self.timed("resources/read", tools::schema_document),
+        };
         let request = self.request_of(&call_id, &started, "resources/read", &arguments);
         let outcome = match self.audited(request, &outcome, duration, None) {
             Ok(()) => outcome,
@@ -971,7 +979,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
                     .begin_array()
                     .begin_object()
                     .key("uri")
-                    .string(SCHEMA_URI)
+                    .string(&shown_uri)
                     .key("mimeType")
                     .string("application/json")
                     .key("text")

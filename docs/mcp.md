@@ -74,7 +74,9 @@ notice, the per-call limits and what the call reports about itself) is taken awa
 `instructions` the server sends at `initialize` are generated from it too: the effects (`read`,
 `change`, `destroy`), what this session may do, and the error categories.
 
-The resource `eggdb://schema` is the whole catalog as one JSON document. Every tool but
+The resource `eggdb://schema` is the whole catalog as one JSON document. The resource template
+`eggdb://table/{name}` reads a table's or view's first rows, as `sample_rows` gives them, under
+the same grants and `--tables` limits (D569). Every tool but
 `write_sql` is marked `readOnlyHint`, so a client can let it run without asking each time;
 `write_sql` is marked `destructiveHint` and not idempotent, so a client asks before it runs.
 

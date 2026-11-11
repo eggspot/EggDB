@@ -794,7 +794,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (code-only mode, 2026-11-11, D487); progress streams wait for tools that report progress.
 - Per-agent time limits and quotas, and the agent's role in each audit record (D190). **Code written,
   unbuilt** (code-only mode, 2026-11-11, D491) for `eggdb serve`'s MCP endpoint.
-- Table resources beyond the schema document (D190).
+- Table resources beyond the schema document (D190). **Code written, unbuilt** (code-only mode, 2026-11-12, D569).
 - The 2026-07-28 protocol revision (D190).
 - `eggdb mcp --tables`: deleting rows of a table listed with columns, inserts whose hidden column
   takes a generated value, unique indexes and foreign keys over a hidden column checked without
