@@ -389,6 +389,22 @@ impl Session<'_> {
             None => None,
         };
         let server_password_sha256 = eggdb_crypto::sha256(password.as_bytes());
+        let trino_listener = match options.trino_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--trino-listen {address}: the Trino protocol has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for the Trino protocol on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
         let clickhouse_listener = match options.clickhouse_listen {
             Some(address) => {
                 if !address.ip().is_loopback() {
@@ -688,6 +704,7 @@ impl Session<'_> {
                 observability_listener.as_ref(),
                 rest_listener.as_ref(),
                 clickhouse_listener.as_ref(),
+                trino_listener.as_ref(),
                 cql_listener.as_ref(),
                 stomp_listener.as_ref(),
                 nats_listener.as_ref(),
@@ -764,6 +781,12 @@ impl Session<'_> {
             rest_endpoint = rest_endpoint.with_auth_rules(Arc::clone(rules));
         }
         let clickhouse_endpoint = eggdb_clickhouse::Endpoint::new(
+            &store,
+            &config.user,
+            server_password_sha256,
+            &config.database,
+        );
+        let trino_endpoint = eggdb_trino::Endpoint::new(
             &store,
             &config.user,
             server_password_sha256,
@@ -928,6 +951,17 @@ impl Session<'_> {
                     &|request| clickhouse_endpoint.answer(request),
                     &stop_signals::requested,
                     &eggdb_http::Limits::new(eggdb_clickhouse::MAX_REQUEST_BYTES, &memory_budget)
+                        .with_rate_limit(rate_limiter.as_ref())
+                        .decoding_content_encoding(),
+                ),
+                None => Ok(()),
+            });
+            let trino_server = scope.spawn(|| match &trino_listener {
+                Some(listener) => eggdb_http::serve_with_limits(
+                    listener,
+                    &|request| trino_endpoint.answer(request),
+                    &stop_signals::requested,
+                    &eggdb_http::Limits::new(eggdb_trino::MAX_REQUEST_BYTES, &memory_budget)
                         .with_rate_limit(rate_limiter.as_ref())
                         .decoding_content_encoding(),
                 ),
@@ -1173,6 +1207,7 @@ impl Session<'_> {
             let _ = observability_server.join();
             let _ = rest_server.join();
             let _ = clickhouse_server.join();
+            let _ = trino_server.join();
             let _ = cdc_queue_delivery.join();
             let _ = sqs_server.join();
             let _ = s3_server.join();

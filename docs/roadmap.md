@@ -1134,6 +1134,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   D510). Left: ClickHouse's SQL dialect and the native protocol.
 - Trino/Presto SQL: first the client REST protocol (`/v1/statement`) with Trino's types and
   functions (D47). Check: the Trino CLI and JDBC driver against EggDB in CI.
+  The client REST protocol: **code written, unbuilt** (code-only mode, 2026-11-11, D511). Left:
+  Trino's SQL dialect, types' functions and TLS for stock clients.
 - IBM Db2 SQL and SQL PL, after D58's legal check: first DRDA's connect and SQL execution for Db2
   LUW clients, then Informix and Db2 for z/OS (D47). Check: a suite from Db2's SQL reference.
 - Sybase/SAP ASE SQL, after D58's legal check: first ASE's differences on the SQL Server dialect

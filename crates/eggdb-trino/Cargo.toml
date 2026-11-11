@@ -1,0 +1,15 @@
+[package]
+name = "eggdb-trino"
+description = "EggDB's Trino client REST protocol: statements posted to /v1/statement, results paged through nextUri with Trino's type names and signatures, and Trino's error objects."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-crypto = { path = "../eggdb-crypto" }
+eggdb-http = { path = "../eggdb-http" }
+eggdb-sql = { path = "../eggdb-sql" }

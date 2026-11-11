@@ -43,6 +43,7 @@ dependencies = [
  "eggdb-storage",
  "eggdb-tdswire",
  "eggdb-tls",
+ "eggdb-trino",
  "eggdb-ui",
 ]
 
@@ -458,6 +459,15 @@ version = "0.5.0"
 dependencies = [
  "eggdb-crypto",
  "eggdb-platform",
+]
+
+[[package]]
+name = "eggdb-trino"
+version = "0.5.0"
+dependencies = [
+ "eggdb-crypto",
+ "eggdb-http",
+ "eggdb-sql",
 ]
 
 [[package]]
