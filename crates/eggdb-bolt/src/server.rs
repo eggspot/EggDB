@@ -74,8 +74,8 @@ struct Connection<'s> {
     failed: bool,
     pending: Option<QueryResult>,
     in_transaction: bool,
-    wrote_in_transaction: bool,
     read_only_transaction: bool,
+    staged: crate::staged::StagedChanges,
     replies_held: Reservation<'s>,
 }
 
@@ -309,7 +309,7 @@ impl Connection<'_> {
             self.failed = false;
             self.pending = None;
             self.in_transaction = false;
-            self.wrote_in_transaction = false;
+            self.staged = crate::staged::StagedChanges::default();
             replies.push(metadata(&[]));
             return true;
         }
@@ -346,13 +346,18 @@ impl Connection<'_> {
                         message,
                     })
                     .and_then(|parameters| {
-                        eggdb_graph::run(self.keyspace, &query, &parameters, read_only)
+                        if self.in_transaction {
+                            let staged = crate::staged::Staged {
+                                base: self.keyspace,
+                                staged: &self.staged,
+                            };
+                            eggdb_graph::run(&staged, &query, &parameters, read_only)
+                        } else {
+                            eggdb_graph::run(self.keyspace, &query, &parameters, read_only)
+                        }
                     });
                 match outcome {
                     Ok(result) => {
-                        if self.in_transaction && !read_only {
-                            self.wrote_in_transaction = true;
-                        }
                         let columns = Value::List(
                             result.columns.iter().cloned().map(Value::String).collect(),
                         );
@@ -376,7 +381,7 @@ impl Connection<'_> {
             }
             BEGIN => {
                 self.in_transaction = true;
-                self.wrote_in_transaction = false;
+                    self.staged = crate::staged::StagedChanges::default();
                 self.read_only_transaction = fields
                     .first()
                     .and_then(|extra| extra.get("mode"))
@@ -386,22 +391,25 @@ impl Connection<'_> {
             }
             COMMIT => {
                 self.in_transaction = false;
-                replies.push(metadata(&[(
-                    "bookmark",
-                    Value::String("eggdb:committed".to_owned()),
-                )]));
+                let staged = std::mem::take(&mut self.staged);
+                match staged.commit(self.keyspace) {
+                    Ok(()) => replies.push(metadata(&[(
+                        "bookmark",
+                        Value::String("eggdb:committed".to_owned()),
+                    )])),
+                    Err(message) => {
+                        self.failed = true;
+                        replies.push(failure(
+                            "Neo.TransientError.Transaction.TransactionCommitFailed",
+                            &message,
+                        ));
+                    }
+                }
             }
             ROLLBACK => {
                 self.in_transaction = false;
-                if self.wrote_in_transaction {
-                    self.failed = true;
-                    replies.push(failure(
-                        "Neo.ClientError.Transaction.TransactionRollbackFailed",
-                        "the statements of this transaction were each committed when they ran; EggDB cannot roll back an explicit Bolt transaction yet",
-                    ));
-                } else {
-                    replies.push(metadata(&[]));
-                }
+                self.staged = crate::staged::StagedChanges::default();
+                replies.push(metadata(&[]));
             }
             TELEMETRY => replies.push(metadata(&[])),
             ROUTE => {
@@ -469,8 +477,8 @@ pub(crate) fn serve_stream(
         failed: false,
         pending: None,
         in_transaction: false,
-        wrote_in_transaction: false,
         read_only_transaction: false,
+        staged: crate::staged::StagedChanges::default(),
         replies_held: config.memory_budget.empty_reservation(),
     };
     let mut read_held = config.memory_budget.empty_reservation();

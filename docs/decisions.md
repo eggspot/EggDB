@@ -630,3 +630,4 @@ its full title with its status.
 - [D603](decisions/D603.md) Code-only batch 251 (M10): Oracle's CAST ... DEFAULT ON CONVERSION ERROR and VALIDATE_CONVERSION
 - [D604](decisions/D604.md) Code-only batch 252 (M10): LISTAGG (DISTINCT ...) OVER
 - [D605](decisions/D605.md) Code-only batch 253 (M10): TOP in Transact-SQL UPDATE and DELETE
+- [D606](decisions/D606.md) Code-only batch 254 (M13): Bolt transactions held open across messages
