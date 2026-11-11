@@ -155,6 +155,7 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
         call_gap: Duration::from_millis(call_gap_ms),
         agent_role: None,
         exit_process: Some(std::process::exit),
+        asks_mid_call: true,
     };
     let mut server = Server::new(&opener, config).map_err(|failure| match failure {
         StartFailure::Audit(failure) => {

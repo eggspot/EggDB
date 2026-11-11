@@ -92,6 +92,10 @@ pub struct ServerConfig {
     /// Called with exit code 3 when a call is still running a second past its time limit,
     /// after the audit log records it; `None` runs no watchdog.
     pub exit_process: Option<fn(i32) -> !>,
+    /// Whether the transport can send the client a request in the middle of a call, as stdio
+    /// can; Streamable HTTP without an event stream cannot, so there a destructive write needs
+    /// the agent's `confirm: true` even when the client offers elicitation.
+    pub asks_mid_call: bool,
 }
 
 /// Why a [`Server`] could not start.
@@ -378,7 +382,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
             self.client.name = text(info, "name");
             self.client.version = text(info, "version");
         }
-        self.client.can_ask_user = match member(members, "capabilities") {
+        self.client.can_ask_user = self.config.asks_mid_call && match member(members, "capabilities") {
             Some(Json::Object(capabilities)) => match member(capabilities, "elicitation") {
                 Some(Json::Object(modes)) => {
                     modes.is_empty() || modes.iter().any(|(mode, _)| mode == "form")

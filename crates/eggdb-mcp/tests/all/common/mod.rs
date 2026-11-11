@@ -327,6 +327,7 @@ pub fn config(audit: &TempAudit) -> ServerConfig {
         call_gap: Duration::ZERO,
         agent_role: None,
         exit_process: None,
+        asks_mid_call: true,
     }
 }
 

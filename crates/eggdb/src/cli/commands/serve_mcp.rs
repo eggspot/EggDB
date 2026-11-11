@@ -56,6 +56,7 @@ pub(super) struct AgentToken {
     token: String,
     time_limit: Duration,
     calls_per_minute: Option<u32>,
+    writes: bool,
 }
 
 pub(super) fn read_tokens(path: &std::path::Path) -> Result<Vec<AgentToken>, String> {
@@ -79,6 +80,7 @@ pub(super) fn read_tokens(path: &std::path::Path) -> Result<Vec<AgentToken>, Str
         };
         let mut time_limit = TIME_LIMIT;
         let mut calls_per_minute = None;
+        let mut writes = false;
         for option in options {
             let (name, value) = option.split_once('=').unwrap_or((option, ""));
             let bad = || {
@@ -97,6 +99,17 @@ pub(super) fn read_tokens(path: &std::path::Path) -> Result<Vec<AgentToken>, Str
                     }
                     time_limit = Duration::from_secs(seconds);
                 }
+                "writes" => match value {
+                    "confirmed" => writes = true,
+                    "none" => writes = false,
+                    _ => {
+                        return Err(format!(
+                            "--mcp-token-file {} line {}: writes= takes confirmed or none",
+                            path.display(),
+                            index + 1
+                        ));
+                    }
+                },
                 "calls_per_minute" => {
                     let calls: u32 = value.parse().map_err(|_| bad())?;
                     if calls == 0 {
@@ -106,7 +119,7 @@ pub(super) fn read_tokens(path: &std::path::Path) -> Result<Vec<AgentToken>, Str
                 }
                 _ => {
                     return Err(format!(
-                        "--mcp-token-file {} line {}: unknown option {name}=; use time_limit= or calls_per_minute=",
+                        "--mcp-token-file {} line {}: unknown option {name}=; use time_limit=, calls_per_minute= or writes=",
                         path.display(),
                         index + 1
                     ));
@@ -128,6 +141,7 @@ pub(super) fn read_tokens(path: &std::path::Path) -> Result<Vec<AgentToken>, Str
             token: token.to_owned(),
             time_limit,
             calls_per_minute,
+            writes,
         });
     }
     if tokens.is_empty() {
@@ -209,6 +223,13 @@ impl<'d> McpEndpoint<'d> {
         None
     }
 
+    fn writes_allowed(&self, role: &Option<String>) -> bool {
+        self.tokens
+            .iter()
+            .find(|agent| &agent.role == role)
+            .is_some_and(|agent| agent.writes)
+    }
+
     fn time_limit_of(&self, role: &Option<String>) -> Duration {
         self.tokens
             .iter()
@@ -222,11 +243,12 @@ impl<'d> McpEndpoint<'d> {
             server_version: eggdb::VERSION.to_owned(),
             time_limit: self.time_limit_of(&role),
             audit: AuditLog::new(self.audit.clone()),
-            allow_write: false,
+            allow_write: self.writes_allowed(&role),
             tables: self.tables.clone(),
             call_gap: Duration::ZERO,
             agent_role: role,
             exit_process: None,
+            asks_mid_call: false,
         };
         let server = Server::new(self.opener, config).ok()?;
         let id = session_id();

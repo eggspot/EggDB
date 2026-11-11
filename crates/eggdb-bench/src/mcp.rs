@@ -102,6 +102,7 @@ pub(crate) fn tools_call(_allocator: &CountingAllocator) -> Result<Vec<Metric>, 
             tables: None,
             call_gap: Duration::ZERO,
             exit_process: None,
+            asks_mid_call: true,
         },
     )
     .map_err(|failure| format!("start the MCP server: {failure:?}"))?;
@@ -171,6 +172,7 @@ pub(crate) fn write_call(_allocator: &CountingAllocator) -> Result<Vec<Metric>, 
             tables: None,
             call_gap: Duration::ZERO,
             exit_process: None,
+            asks_mid_call: true,
         },
     )
     .map_err(|failure| format!("start the MCP server: {failure:?}"))?;
