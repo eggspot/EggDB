@@ -13,6 +13,7 @@
 
 mod amqp1;
 mod codec;
+mod field_table;
 mod server;
 
 pub use server::{ServerConfig, serve};

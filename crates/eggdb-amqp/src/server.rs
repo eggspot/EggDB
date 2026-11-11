@@ -2,6 +2,7 @@ use crate::codec::{
     Args, FRAME_BODY, FRAME_HEADER, FRAME_HEARTBEAT, FRAME_MAX, FRAME_METHOD, Frame, Out, Parsed,
     frame, take_frame,
 };
+use crate::field_table::{FieldValue, headers_match};
 use eggdb_keyspace::Keyspace;
 use eggdb_platform::connection_limits::{MemoryBudget, Reservation};
 use eggdb_queues::Queues;
@@ -24,6 +25,7 @@ const PROPOSED_HEARTBEAT_SECONDS: u16 = 60;
 const NOT_FOUND: u16 = 404;
 const ACCESS_REFUSED: u16 = 403;
 const PRECONDITION_FAILED: u16 = 406;
+const RESOURCE_LOCKED: u16 = 405;
 const RESOURCE_ERROR: u16 = 506;
 const OUT_OF_MEMORY_BUDGET: &str =
     "RESOURCE_ERROR - the server's connections already hold their memory budget";
@@ -60,12 +62,26 @@ enum Kind {
     Direct,
     Fanout,
     Topic,
+    Headers,
+}
+
+#[derive(Debug, Clone)]
+struct Binding {
+    key: String,
+    queue: String,
+    arguments: Vec<(String, FieldValue)>,
 }
 
 #[derive(Debug, Clone)]
 struct Exchange {
     kind: Kind,
-    bindings: Vec<(String, String)>,
+    bindings: Vec<Binding>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct AutoDelete {
+    consumers: usize,
+    seen: bool,
 }
 
 /// What every connection shares: the queues and the exchanges with their bindings.
@@ -73,6 +89,8 @@ pub(crate) struct Broker<'s> {
     pub(crate) queues: Queues<'s>,
     exchanges: Mutex<BTreeMap<String, Exchange>>,
     next_name: AtomicU64,
+    exclusive_owners: Mutex<BTreeMap<String, u64>>,
+    auto_delete: Mutex<BTreeMap<String, AutoDelete>>,
 }
 
 impl<'s> Broker<'s> {
@@ -82,6 +100,8 @@ impl<'s> Broker<'s> {
             ("amq.direct", Kind::Direct),
             ("amq.fanout", Kind::Fanout),
             ("amq.topic", Kind::Topic),
+            ("amq.headers", Kind::Headers),
+            ("amq.match", Kind::Headers),
         ] {
             exchanges.insert(
                 name.to_owned(),
@@ -95,10 +115,74 @@ impl<'s> Broker<'s> {
             queues: Queues::new(keyspace),
             exchanges: Mutex::new(exchanges),
             next_name: AtomicU64::new(1),
+            exclusive_owners: Mutex::new(BTreeMap::new()),
+            auto_delete: Mutex::new(BTreeMap::new()),
         }
     }
 
-    fn route(&self, exchange: &str, routing_key: &str) -> Option<Vec<String>> {
+    fn owner_of(&self, queue: &str) -> Option<u64> {
+        self.exclusive_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(queue)
+            .copied()
+    }
+
+    fn consumer_started(&self, queue: &str) {
+        let mut auto_delete = self
+            .auto_delete
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = auto_delete.get_mut(queue) {
+            entry.consumers += 1;
+            entry.seen = true;
+        }
+    }
+
+    fn consumer_ended(&self, queue: &str) {
+        let emptied = {
+            let mut auto_delete = self
+                .auto_delete
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match auto_delete.get_mut(queue) {
+                Some(entry) => {
+                    entry.consumers = entry.consumers.saturating_sub(1);
+                    let emptied = entry.seen && entry.consumers == 0;
+                    if emptied {
+                        auto_delete.remove(queue);
+                    }
+                    emptied
+                }
+                None => false,
+            }
+        };
+        if emptied {
+            let _ = self.queues.delete(queue);
+            self.forget_queue(queue);
+        }
+    }
+
+    fn forget_queue(&self, queue: &str) {
+        self.exclusive_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(queue);
+        let mut exchanges = self
+            .exchanges
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for exchange in exchanges.values_mut() {
+            exchange.bindings.retain(|binding| binding.queue != queue);
+        }
+    }
+
+    fn route(
+        &self,
+        exchange: &str,
+        routing_key: &str,
+        headers: &[(String, FieldValue)],
+    ) -> Option<Vec<String>> {
         if exchange.is_empty() {
             return Some(vec![routing_key.to_owned()]);
         }
@@ -110,12 +194,13 @@ impl<'s> Broker<'s> {
         let mut queues: Vec<String> = found
             .bindings
             .iter()
-            .filter(|(key, _)| match found.kind {
-                Kind::Direct => key == routing_key,
+            .filter(|binding| match found.kind {
+                Kind::Direct => binding.key == routing_key,
                 Kind::Fanout => true,
-                Kind::Topic => topic_matches(key, routing_key),
+                Kind::Topic => topic_matches(&binding.key, routing_key),
+                Kind::Headers => headers_match(&binding.arguments, headers),
             })
-            .map(|(_, queue)| queue.clone())
+            .map(|binding| binding.queue.clone())
             .collect();
         queues.sort();
         queues.dedup();
@@ -239,6 +324,8 @@ enum Stage {
 }
 
 struct Connection<'s, 'b> {
+    id: u64,
+    owned: Vec<String>,
     broker: &'b Broker<'s>,
     config: &'b ServerConfig,
     stage: Stage,
@@ -292,6 +379,27 @@ impl Connection<'_, '_> {
             for (_, (queue, id)) in state.unacked {
                 let _ = self.broker.queues.release(&queue, id, now);
             }
+            for consumer in state.consumers {
+                self.broker.consumer_ended(&consumer.queue);
+            }
+        }
+    }
+
+    fn locked_by_another(&mut self, channel: u16, queue: &str, class: u16, method_id: u16) -> bool {
+        match self.broker.owner_of(queue) {
+            Some(owner) if owner != self.id => {
+                self.close_channel(
+                    channel,
+                    RESOURCE_LOCKED,
+                    &format!(
+                        "RESOURCE_LOCKED - cannot obtain exclusive access to locked queue '{queue}'"
+                    ),
+                    class,
+                    method_id,
+                );
+                true
+            }
+            _ => false,
         }
     }
 
@@ -468,7 +576,8 @@ impl Connection<'_, '_> {
             *sequence += 1;
             *sequence
         });
-        let Some(queues) = self.broker.route(&exchange, &routing_key) else {
+        let headers = crate::field_table::message_headers(&properties);
+        let Some(queues) = self.broker.route(&exchange, &routing_key, &headers) else {
             self.close_channel(
                 channel,
                 NOT_FOUND,
@@ -666,6 +775,7 @@ impl Connection<'_, '_> {
                     "direct" => Kind::Direct,
                     "fanout" => Kind::Fanout,
                     "topic" => Kind::Topic,
+                    "headers" => Kind::Headers,
                     other => {
                         self.close_connection(
                             NOT_IMPLEMENTED,
@@ -715,14 +825,17 @@ impl Connection<'_, '_> {
                 let mut name = args.shortstr()?;
                 let passive = args.bit()?;
                 let _durable = args.bit()?;
-                let _exclusive = args.bit()?;
-                let _auto_delete = args.bit()?;
+                let exclusive = args.bit()?;
+                let auto_delete = args.bit()?;
                 let no_wait = args.bit()?;
                 if name.is_empty() {
                     name = format!(
                         "amq.gen-{}",
                         self.broker.next_name.fetch_add(1, Ordering::Relaxed)
                     );
+                }
+                if self.locked_by_another(channel, &name, 50, 10) {
+                    return Ok(true);
                 }
                 let exists = self
                     .broker
@@ -743,6 +856,23 @@ impl Connection<'_, '_> {
                     self.close_channel(channel, PRECONDITION_FAILED, &error.to_string(), 50, 10);
                     return Ok(true);
                 }
+                if !exists && !passive {
+                    if exclusive {
+                        self.broker
+                            .exclusive_owners
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .insert(name.clone(), self.id);
+                        self.owned.push(name.clone());
+                    }
+                    if auto_delete {
+                        self.broker
+                            .auto_delete
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .insert(name.clone(), AutoDelete::default());
+                    }
+                }
                 if !no_wait {
                     let depth = self
                         .broker
@@ -760,6 +890,10 @@ impl Connection<'_, '_> {
                 let exchange = args.shortstr()?;
                 let routing_key = args.shortstr()?;
                 let no_wait = method_id == 20 && args.bit()?;
+                let arguments = crate::field_table::decode_table(args.table()?)?;
+                if self.locked_by_another(channel, &queue, 50, method_id) {
+                    return Ok(true);
+                }
                 let found = {
                     let mut exchanges = self
                         .broker
@@ -768,11 +902,18 @@ impl Connection<'_, '_> {
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     match exchanges.get_mut(&exchange) {
                         Some(found) => {
-                            found
-                                .bindings
-                                .retain(|(key, bound)| !(key == &routing_key && bound == &queue));
+                            found.bindings.retain(|binding| {
+                                !(binding.key == routing_key
+                                    && binding.queue == queue
+                                    && (found.kind != Kind::Headers
+                                        || binding.arguments == arguments))
+                            });
                             if method_id == 20 {
-                                found.bindings.push((routing_key, queue));
+                                found.bindings.push(Binding {
+                                    key: routing_key,
+                                    queue,
+                                    arguments,
+                                });
                             }
                             true
                         }
@@ -794,10 +935,23 @@ impl Connection<'_, '_> {
             (Stage::Open, 50, 30) | (Stage::Open, 50, 40) => {
                 let _reserved = args.short()?;
                 let queue = args.shortstr()?;
+                if self.locked_by_another(channel, &queue, 50, method_id) {
+                    return Ok(true);
+                }
                 let outcome = if method_id == 30 {
                     self.broker.queues.purge(&queue)
                 } else {
-                    self.broker.queues.delete(&queue)
+                    let deleted = self.broker.queues.delete(&queue);
+                    if deleted.is_ok() {
+                        self.broker.forget_queue(&queue);
+                        self.broker
+                            .auto_delete
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(&queue);
+                        self.owned.retain(|owned| owned != &queue);
+                    }
+                    deleted
                 };
                 match outcome {
                     Ok(count) => {
@@ -830,6 +984,9 @@ impl Connection<'_, '_> {
                 let no_ack = args.bit()?;
                 let _exclusive = args.bit()?;
                 let no_wait = args.bit()?;
+                if self.locked_by_another(channel, &queue, 60, 20) {
+                    return Ok(true);
+                }
                 if !self
                     .broker
                     .queues
@@ -852,6 +1009,7 @@ impl Connection<'_, '_> {
                     );
                 }
                 if let Some(state) = self.channels.get_mut(&channel) {
+                    self.broker.consumer_started(&queue);
                     state.consumers.push(Consumer {
                         tag: tag.clone(),
                         queue,
@@ -867,8 +1025,18 @@ impl Connection<'_, '_> {
             (Stage::Open, 60, 30) => {
                 let tag = args.shortstr()?;
                 let no_wait = args.bit()?;
+                let mut ended = Vec::new();
                 if let Some(state) = self.channels.get_mut(&channel) {
-                    state.consumers.retain(|consumer| consumer.tag != tag);
+                    state.consumers.retain(|consumer| {
+                        let keep = consumer.tag != tag;
+                        if !keep {
+                            ended.push(consumer.queue.clone());
+                        }
+                        keep
+                    });
+                }
+                for queue in ended {
+                    self.broker.consumer_ended(&queue);
                 }
                 if !no_wait {
                     let mut out = Out::method(60, 31);
@@ -890,6 +1058,9 @@ impl Connection<'_, '_> {
                 let _reserved = args.short()?;
                 let queue = args.shortstr()?;
                 let no_ack = args.bit()?;
+                if self.locked_by_another(channel, &queue, 60, 70) {
+                    return Ok(true);
+                }
                 let messages = match self.broker.queues.receive(&queue, 1, LEASE_MS, now_ms()) {
                     Ok(messages) => messages,
                     Err(_) => {
@@ -1046,6 +1217,8 @@ pub(crate) fn serve_stream(
     }
     writer.write_all(&start_frame())?;
     let mut connection = Connection {
+        id: broker.next_name.fetch_add(1, Ordering::Relaxed),
+        owned: Vec::new(),
         broker,
         config,
         stage: Stage::StartSent,
@@ -1146,6 +1319,15 @@ pub(crate) fn serve_stream(
     let channels: Vec<u16> = connection.channels.keys().copied().collect();
     for channel in channels {
         connection.release_channel(channel);
+    }
+    for queue in std::mem::take(&mut connection.owned) {
+        let _ = broker.queues.delete(&queue);
+        broker.forget_queue(&queue);
+        broker
+            .auto_delete
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&queue);
     }
     outcome
 }

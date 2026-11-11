@@ -506,3 +506,4 @@ its full title with its status.
 - [D479](decisions/D479.md) Code-only batch 127 (M13): Cypher's `CALL (a, b) { ... }` scope form and `IN TRANSACTIONS`
 - [D480](decisions/D480.md) Code-only batch 128 (M16): MQTT 5 topic aliases, message expiry, forwarded properties and reason strings
 - [D481](decisions/D481.md) Code-only batch 129 (M16): MQTT shared subscriptions
+- [D482](decisions/D482.md) Code-only batch 130 (M16): AMQP headers exchanges, exclusive and auto-delete queues
