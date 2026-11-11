@@ -19,6 +19,171 @@ pub struct DumpReport {
     pub indexes: u64,
     /// Views not written: the catalog does not keep a view's text in a form to write back yet.
     pub views_skipped: u64,
+    /// Sequences written.
+    pub sequences: u64,
+    /// Check and foreign-key constraints written.
+    pub constraints: u64,
+    /// Views written.
+    pub views: u64,
+}
+
+fn query_rows(session: &mut Session<'_>, text: &str) -> SqlResult<Vec<Vec<Value>>> {
+    let mut rows = Vec::new();
+    session.execute(text, &mut |result| rows.extend(result.rows))?;
+    Ok(rows)
+}
+
+fn text_at(row: &[Value], at: usize) -> String {
+    row.get(at)
+        .and_then(Value::character_text)
+        .map(str::to_owned)
+        .unwrap_or_default()
+}
+
+fn qualified_in_postgresql(internal: &str) -> String {
+    let schema = crate::schemas::schema_of(internal);
+    let base = crate::schemas::base_name(internal);
+    if schema.is_empty() || schema == crate::schemas::DEFAULT_SCHEMA {
+        name_in(Dialect::PostgreSql, base)
+    } else {
+        format!(
+            "{}.{}",
+            name_in(Dialect::PostgreSql, schema),
+            name_in(Dialect::PostgreSql, base)
+        )
+    }
+}
+
+fn write_sequences(
+    session: &mut Session<'_>,
+    out: &mut dyn Write,
+    report: &mut DumpReport,
+) -> SqlResult<()> {
+    let sequences = session.read(|reader, _| crate::sequences::every_sequence(reader))?;
+    for (name, sequence) in sequences {
+        let shown = qualified_in_postgresql(&name);
+        writeln!(
+            out,
+            "CREATE SEQUENCE {shown} AS {} INCREMENT BY {} MINVALUE {} MAXVALUE {} START WITH {} CACHE {}{};",
+            sequence.sql_type.name(),
+            sequence.increment,
+            sequence.min,
+            sequence.max,
+            sequence.start,
+            sequence.cache.max(1),
+            if sequence.cycle { " CYCLE" } else { "" }
+        )
+        .map_err(io_error)?;
+        writeln!(
+            out,
+            "SELECT pg_catalog.setval({}, {}, {});",
+            sql_string(&shown),
+            sequence.last_value,
+            sequence.is_called
+        )
+        .map_err(io_error)?;
+        report.sequences += 1;
+    }
+    Ok(())
+}
+
+fn write_constraints(
+    session: &mut Session<'_>,
+    out: &mut dyn Write,
+    report: &mut DumpReport,
+) -> SqlResult<()> {
+    let rows = query_rows(
+        session,
+        "SELECT conrelid::regclass::text, conname, pg_catalog.pg_get_constraintdef(oid), contype FROM pg_catalog.pg_constraint WHERE contype IN ('c', 'f') ORDER BY contype, conname",
+    )?;
+    for row in rows {
+        writeln!(
+            out,
+            "ALTER TABLE {} ADD CONSTRAINT {} {};",
+            text_at(&row, 0),
+            name_in(Dialect::PostgreSql, &text_at(&row, 1)),
+            text_at(&row, 2)
+        )
+        .map_err(io_error)?;
+        report.constraints += 1;
+    }
+    Ok(())
+}
+
+fn write_views(
+    session: &mut Session<'_>,
+    out: &mut dyn Write,
+    report: &mut DumpReport,
+) -> SqlResult<()> {
+    let rows = query_rows(
+        session,
+        "SELECT schemaname, viewname, definition FROM pg_catalog.pg_views WHERE schemaname NOT IN ('pg_catalog', 'information_schema')",
+    )?;
+    for row in rows {
+        let schema = text_at(&row, 0);
+        let name = if schema == crate::schemas::DEFAULT_SCHEMA {
+            name_in(Dialect::PostgreSql, &text_at(&row, 1))
+        } else {
+            format!(
+                "{}.{}",
+                name_in(Dialect::PostgreSql, &schema),
+                name_in(Dialect::PostgreSql, &text_at(&row, 1))
+            )
+        };
+        let definition = text_at(&row, 2);
+        writeln!(
+            out,
+            "\nCREATE VIEW {name} AS\n{};",
+            definition.trim().trim_end_matches(';')
+        )
+        .map_err(io_error)?;
+        report.views += 1;
+    }
+    Ok(())
+}
+
+fn write_comments(
+    out: &mut dyn Write,
+    dialect: Dialect,
+    relations: &[crate::relations::Relation],
+) -> SqlResult<()> {
+    for relation in relations {
+        let (kind, name, comment, columns): (&str, String, &Option<String>, Vec<(&str, &Option<String>)>) =
+            match &relation.kind {
+                RelationKind::Table(table) => (
+                    "TABLE",
+                    table_name_in(dialect, table),
+                    &table.comment,
+                    table
+                        .columns
+                        .iter()
+                        .map(|column| (column.name.as_str(), &column.comment))
+                        .collect(),
+                ),
+                RelationKind::View(view) => (
+                    "VIEW",
+                    qualified_in_postgresql(&view.name),
+                    &view.comment,
+                    Vec::new(),
+                ),
+            };
+        if let Some(comment) = comment {
+            writeln!(out, "COMMENT ON {kind} {name} IS {};", quoted_text(dialect, comment))
+                .map_err(io_error)?;
+        }
+        for (column, comment) in columns {
+            if let Some(comment) = comment {
+                writeln!(
+                    out,
+                    "COMMENT ON COLUMN {name}.{} IS {};",
+                    name_in(dialect, column),
+                    quoted_text(dialect, comment)
+                )
+                .map_err(io_error)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn io_error(error: std::io::Error) -> SqlError {
@@ -265,6 +430,9 @@ pub fn dump_sql(
     if dialect == Dialect::MySql {
         writeln!(out, "SET FOREIGN_KEY_CHECKS=0;").map_err(io_error)?;
     }
+    if dialect == Dialect::PostgreSql {
+        write_sequences(session, out, &mut report)?;
+    }
     for relation in &relations {
         let RelationKind::Table(table) = &relation.kind else {
             continue;
@@ -316,10 +484,18 @@ pub fn dump_sql(
             report.indexes += 1;
         }
     }
-    report.views_skipped = relations
-        .iter()
-        .filter(|relation| matches!(relation.kind, RelationKind::View(_)))
-        .count() as u64;
+    if dialect == Dialect::PostgreSql {
+        write_constraints(session, out, &mut report)?;
+        write_views(session, out, &mut report)?;
+    } else {
+        report.views_skipped = relations
+            .iter()
+            .filter(|relation| matches!(relation.kind, RelationKind::View(_)))
+            .count() as u64;
+    }
+    if matches!(dialect, Dialect::PostgreSql | Dialect::Oracle) {
+        write_comments(out, dialect, &relations)?;
+    }
     if dialect == Dialect::MySql {
         writeln!(out, "SET FOREIGN_KEY_CHECKS=1;").map_err(io_error)?;
     }
