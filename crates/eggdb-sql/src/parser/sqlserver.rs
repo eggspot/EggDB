@@ -2007,12 +2007,21 @@ impl<'t> Parser<'t> {
     pub(super) fn sqlserver_qualified_name(&mut self, first: Name) -> SqlResult<Name> {
         if self.take(&TokenKind::Dot) {
             self.check_sqlserver_database(&first)?;
-            return Ok(compatibility_view(self.name()?));
+            let object = self.name()?;
+            if let Some(view) = agent_view(&first, &object) {
+                return Ok(view);
+            }
+            return Ok(compatibility_view(object));
         }
         let second = self.name()?;
         if self.take(&TokenKind::Dot) {
             self.check_sqlserver_database(&first)?;
             let object = self.name()?;
+            if second.text == "dbo"
+                && let Some(view) = agent_view(&first, &object)
+            {
+                return Ok(view);
+            }
             return self.sqlserver_schema_object(second, object);
         }
         self.sqlserver_schema_object(first, second)
@@ -2057,6 +2066,16 @@ impl<'t> Parser<'t> {
 }
 
 const COMPATIBILITY_VIEWS: [&str; 1] = ["sysdatabases"];
+
+fn agent_view(database: &Name, object: &Name) -> Option<Name> {
+    let wanted = object.text.to_ascii_lowercase();
+    (database.text.eq_ignore_ascii_case("msdb")
+        && crate::session::sqlserver_agent::AGENT_VIEWS.contains(&wanted.as_str()))
+    .then(|| Name {
+        text: crate::schemas::written_qualified("eggdb_internal", &format!("sqlserver_agent_{wanted}")),
+        position: object.position,
+    })
+}
 
 pub(super) fn compatibility_view(name: Name) -> Name {
     if COMPATIBILITY_VIEWS

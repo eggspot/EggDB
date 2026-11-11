@@ -1950,3 +1950,31 @@ fn top_limits_the_rows_an_update_or_delete_changes() {
             .is_err()
     );
 }
+
+#[test]
+fn msdb_views_show_agent_jobs_steps_and_history() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(&mut session, "CREATE TABLE ticks (n INT)");
+    values(&mut session, "EXEC msdb.dbo.sp_add_job @job_name = N'tick'");
+    values(
+        &mut session,
+        "EXEC msdb.dbo.sp_add_jobstep @job_name = N'tick', @step_name = N'one', @command = N'INSERT INTO ticks VALUES (1)'",
+    );
+    values(&mut session, "EXEC msdb.dbo.sp_start_job @job_name = N'tick'");
+    assert_eq!(
+        values(&mut session, "SELECT name, enabled FROM msdb.dbo.sysjobs"),
+        vec![vec![Value::Text("tick".to_owned()), Value::Integer(1)]]
+    );
+    assert_eq!(
+        values(&mut session, "SELECT step_name, subsystem FROM msdb.dbo.sysjobsteps"),
+        vec![vec![Value::Text("one".to_owned()), Value::Text("TSQL".to_owned())]]
+    );
+    let history = values(&mut session, "SELECT step_name, run_status FROM msdb..sysjobhistory");
+    assert!(
+        history
+            .iter()
+            .any(|row| row == &vec![Value::Text("one".to_owned()), Value::Integer(1)]),
+        "{history:?}"
+    );
+}

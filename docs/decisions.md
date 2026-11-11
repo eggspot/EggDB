@@ -647,3 +647,4 @@ its full title with its status.
 - [D620](decisions/D620.md) Code-only batch 268 (M5): t-digest sketches for APPROX_PERCENTILE_CONT
 - [D621](decisions/D621.md) Code-only batch 269 (M6b): SQL Server's DENY
 - [D622](decisions/D622.md) Code-only batch 270 (M5): SQL*Plus bind variables in eggdb shell
+- [D623](decisions/D623.md) Code-only batch 271 (M10): msdb's SQL Server Agent views
