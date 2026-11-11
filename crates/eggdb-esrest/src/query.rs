@@ -705,14 +705,14 @@ fn geo_points_at(source: &Node, field: &str) -> Vec<(f64, f64)> {
     current.into_iter().flat_map(crate::sort::points_of).collect()
 }
 
-fn nested_objects<'n>(source: &'n Node, path: &str) -> Vec<&'n Node> {
+pub(crate) fn nested_objects<'n>(source: &'n Node, path: &str) -> Vec<&'n Node> {
     values_at(source, path)
         .into_iter()
         .filter(|node| matches!(node.value, Json::Object(_)))
         .collect()
 }
 
-fn wrapped(path: &str, object: &Node) -> Node {
+pub(crate) fn wrapped(path: &str, object: &Node) -> Node {
     path.rsplit('.').fold(object.clone(), |inner, part| Node {
         value: Json::Object(vec![(part.to_owned(), inner)]),
         start: 0,

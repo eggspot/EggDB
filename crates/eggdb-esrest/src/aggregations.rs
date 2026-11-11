@@ -108,6 +108,19 @@ fn one(out: &mut Out, spec: &Node, documents: &[&Node], depth: usize) {
             bucket_body(out, &kept, subs, depth);
         }
         "filters" => filters(out, settings, documents, subs, depth),
+        "nested" => {
+            let path = text_setting(settings, "path").unwrap_or_default();
+            let objects: Vec<Node> = documents
+                .iter()
+                .flat_map(|source| {
+                    crate::query::nested_objects(source, &path)
+                        .into_iter()
+                        .map(|object| crate::query::wrapped(&path, object))
+                })
+                .collect();
+            let kept: Vec<&Node> = objects.iter().collect();
+            bucket_body(out, &kept, subs, depth);
+        }
         "missing" => {
             let kept: Vec<&Node> = documents
                 .iter()

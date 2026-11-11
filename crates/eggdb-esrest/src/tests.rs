@@ -1574,4 +1574,11 @@ fn a_nested_query_needs_one_object_to_match_every_condition() {
         "{\"query\":{\"nested\":{\"path\":\"comments\",\"query\":{\"bool\":{\"must\":[{\"term\":{\"comments.author\":\"ada\"}},{\"term\":{\"comments.stars\":5}}]}}}}}",
     )));
     assert!(found.contains("\"_id\":\"1\"") && !found.contains("\"_id\":\"2\""), "{found}");
+    let counted = body(&api.answer(&request(
+        "POST",
+        "/posts/_search",
+        "{\"size\":0,\"aggs\":{\"comments\":{\"nested\":{\"path\":\"comments\"},\"aggs\":{\"top\":{\"max\":{\"field\":\"comments.stars\"}}}}}}",
+    )));
+    assert!(counted.contains("\"comments\":{\"doc_count\":4"), "{counted}");
+    assert!(counted.contains("\"top\":{\"value\":5"), "{counted}");
 }
