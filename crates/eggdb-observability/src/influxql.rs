@@ -221,10 +221,73 @@ fn condition_sql(tokens: &[Token]) -> Result<String, String> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+enum Expr {
+    Field(String),
+    Number(String),
+    Call { function: String, field: Option<String>, argument: Option<String> },
+    Binary(Box<Expr>, char, Box<Expr>),
+}
+
+impl Expr {
+    fn calls(&self) -> bool {
+        match self {
+            Expr::Call { .. } => true,
+            Expr::Binary(left, _, right) => left.calls() || right.calls(),
+            Expr::Field(_) | Expr::Number(_) => false,
+        }
+    }
+
+    fn reads_fields(&self) -> bool {
+        match self {
+            Expr::Field(_) => true,
+            Expr::Binary(left, _, right) => left.reads_fields() || right.reads_fields(),
+            Expr::Call { .. } | Expr::Number(_) => false,
+        }
+    }
+
+    fn names(&self, out: &mut Vec<String>) {
+        match self {
+            Expr::Field(name) => out.push(name.clone()),
+            Expr::Call { function, .. } => out.push(function.clone()),
+            Expr::Binary(left, _, right) => {
+                left.names(out);
+                right.names(out);
+            }
+            Expr::Number(_) => {}
+        }
+    }
+}
+
+fn operator_of(token: &Token) -> Option<(char, u8)> {
+    match token {
+        Token::Star => Some(('*', 2)),
+        Token::Operator(operator) => match operator.as_str() {
+            "+" => Some(('+', 1)),
+            "-" => Some(('-', 1)),
+            "/" => Some(('/', 2)),
+            "%" => Some(('%', 2)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 enum Item {
     All,
     Field { name: String, alias: Option<String> },
     Call { function: String, field: Option<String>, argument: Option<String>, alias: Option<String> },
+    Math { expr: Expr, alias: Option<String> },
+}
+
+impl Item {
+    fn aggregates(&self) -> bool {
+        match self {
+            Item::Call { .. } => true,
+            Item::Math { expr, .. } => expr.calls(),
+            Item::All | Item::Field { .. } => false,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -366,6 +429,58 @@ impl Reader {
             self.at += 1;
             return Ok(Item::All);
         }
+        let expr = self.expression(0)?;
+        let alias = self.alias()?;
+        Ok(match expr {
+            Expr::Field(name) => Item::Field { name, alias },
+            Expr::Call { function, field, argument } => Item::Call { function, field, argument, alias },
+            expr => Item::Math { expr, alias },
+        })
+    }
+
+    fn expression(&mut self, lowest: u8) -> Result<Expr, String> {
+        let mut left = self.operand()?;
+        while let Some((operator, precedence)) = self.peek().and_then(operator_of) {
+            if precedence < lowest {
+                break;
+            }
+            self.at += 1;
+            let right = self.expression(precedence + 1)?;
+            left = Expr::Binary(Box::new(left), operator, Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn operand(&mut self) -> Result<Expr, String> {
+        match self.peek().cloned() {
+            Some(Token::Number(number)) => {
+                self.at += 1;
+                Ok(Expr::Number(number))
+            }
+            Some(Token::Operator(operator)) if operator == "-" => {
+                self.at += 1;
+                match self.next() {
+                    Some(Token::Number(number)) => Ok(Expr::Number(format!("-{number}"))),
+                    other => Err(format!("found {other:?} after -")),
+                }
+            }
+            Some(Token::Open) => {
+                self.at += 1;
+                let inner = self.expression(0)?;
+                if self.next() != Some(Token::Close) {
+                    return Err("a parenthesis is not closed".to_owned());
+                }
+                Ok(inner)
+            }
+            _ => match self.call_or_field()? {
+                Item::Field { name, .. } => Ok(Expr::Field(name)),
+                Item::Call { function, field, argument, .. } => Ok(Expr::Call { function, field, argument }),
+                _ => Err("expected a field or a function".to_owned()),
+            },
+        }
+    }
+
+    fn call_or_field(&mut self) -> Result<Item, String> {
         let name = self.name()?;
         if self.peek() == Some(&Token::Open) {
             self.at += 1;
@@ -387,17 +502,15 @@ impl Reader {
             if self.next() != Some(Token::Close) {
                 return Err(format!("{name}() is not closed"));
             }
-            let alias = self.alias()?;
             return Ok(Item::Call {
                 function: name.to_ascii_lowercase(),
                 field,
                 argument,
-                alias,
+                alias: None,
             });
         }
         self.skip_cast();
-        let alias = self.alias()?;
-        Ok(Item::Field { name, alias })
+        Ok(Item::Field { name, alias: None })
     }
 
     fn select(&mut self) -> Result<Select, String> {
@@ -566,6 +679,28 @@ fn aggregate_sql(function: &str, field: &str, argument: Option<&str>) -> Result<
     })
 }
 
+fn expr_sql(expr: &Expr) -> Result<String, String> {
+    Ok(match expr {
+        Expr::Field(name) => column(name),
+        Expr::Number(number) => number.clone(),
+        Expr::Call { function, .. } if function == "distinct" => {
+            return Err("distinct() cannot be used in an expression".to_owned());
+        }
+        Expr::Call { function, field, argument } => {
+            let field = match field {
+                Some(field) => field.clone(),
+                None if function == "count" => "time".to_owned(),
+                None => return Err(format!("{function}(*) is not supported yet")),
+            };
+            aggregate_sql(function, &field, argument.as_deref())?
+        }
+        Expr::Binary(left, '/', right) => {
+            format!("(({})::double precision / ({}))", expr_sql(left)?, expr_sql(right)?)
+        }
+        Expr::Binary(left, operator, right) => format!("({} {operator} {})", expr_sql(left)?, expr_sql(right)?),
+    })
+}
+
 struct Planned {
     sql: String,
     tag_count: usize,
@@ -594,8 +729,12 @@ fn plan(select: &Select, measurement: &str, columns: &[(String, String)]) -> Res
     if distinct.is_some() && select.items.len() != 1 {
         return Err("aggregate function distinct() cannot be combined with other functions or fields".to_owned());
     }
-    let aggregate = select.items.iter().any(|item| matches!(item, Item::Call { .. }));
-    if aggregate && select.items.iter().any(|item| !matches!(item, Item::Call { .. })) {
+    let aggregate = select.items.iter().any(Item::aggregates);
+    let mixed_expression = select
+        .items
+        .iter()
+        .any(|item| matches!(item, Item::Math { expr, .. } if expr.calls() && expr.reads_fields()));
+    if mixed_expression || (aggregate && select.items.iter().any(|item| !item.aggregates())) {
         return Err("mixing aggregate and non-aggregate queries is not supported".to_owned());
     }
     if select.bucket.is_some() && !aggregate {
@@ -623,6 +762,14 @@ fn plan(select: &Select, measurement: &str, columns: &[(String, String)]) -> Res
             }
             Item::Field { name, alias } => {
                 outputs.push(format!("{} AS {}", column(name), column(alias.as_deref().unwrap_or(name))));
+            }
+            Item::Math { expr, alias } => {
+                let name = alias.clone().unwrap_or_else(|| {
+                    let mut names = Vec::new();
+                    expr.names(&mut names);
+                    if names.is_empty() { "value".to_owned() } else { names.join("_") }
+                });
+                outputs.push(format!("{} AS {}", expr_sql(expr)?, column(&name)));
             }
             Item::Call { function, .. } if function == "distinct" => {
                 if let Some((field, alias)) = distinct {
@@ -1137,6 +1284,14 @@ mod tests {
                 &[("time", "x"), ("dc", "text"), ("host", "text"), ("usage", "double precision")]
             ),
             "SELECT \"dc\" AS \"dc\", \"host\" AS \"host\", '1970-01-01T00:00:00Z'::timestamptz AS \"time\", \"host\" AS \"distinct\" FROM metrics.\"cpu\" GROUP BY 1, 2, 4 ORDER BY 1, 2, 3, 4"
+        );
+        assert_eq!(
+            planned("SELECT a + b * 2, a / b AS ratio FROM m", &[("time", "x"), ("a", "bigint"), ("b", "bigint")]),
+            "SELECT \"time\", (\"a\" + (\"b\" * 2)) AS \"a_b\", ((\"a\")::double precision / (\"b\")) AS \"ratio\" FROM metrics.\"m\" ORDER BY 1"
+        );
+        assert_eq!(
+            planned("SELECT mean(a) * 100 FROM m GROUP BY time(1m) fill(none)", &[("time", "x"), ("a", "double precision")]),
+            "SELECT time_bucket('1 minutes'::interval, \"time\", '1970-01-01T00:00:00Z'::timestamptz) AS \"time\", (avg(\"a\") * 100) AS \"mean\" FROM metrics.\"m\" GROUP BY 1 ORDER BY 1"
         );
     }
 
