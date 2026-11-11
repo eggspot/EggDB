@@ -316,6 +316,27 @@ pub(crate) fn truncate(
     Ok(())
 }
 
+/// Checks that the table is partitioned and that each named partition (or `ALL`) exists, for
+/// MySQL's `ANALYZE`, `CHECK`, `OPTIMIZE`, `REPAIR` and `REBUILD PARTITION`: EggDB keeps no
+/// statistics, fragmentation or damage per partition for them to act on, so naming the
+/// partitions correctly is all there is to check.
+pub(crate) fn check_named(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    parent: &TableDefinition,
+    named: &[Name],
+) -> SqlResult<()> {
+    let position = named.first().map_or(0, |name| name.position);
+    let state = partitioned(writer, tables, parent, position)?;
+    if named.len() == 1 && named[0].text.eq_ignore_ascii_case("all") {
+        return Ok(());
+    }
+    for partition in named {
+        existing(&state, parent, partition)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn reorganize(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,

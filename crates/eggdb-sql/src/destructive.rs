@@ -1129,6 +1129,7 @@ fn altered(table: &Name, actions: &[AlterAction]) -> Option<DestructiveStatement
             | AlterAction::SplitPartition { .. }
             | AlterAction::ExchangePartition { .. }
             | AlterAction::CoalescePartitions { .. }
+            | AlterAction::MaintainPartitions(_)
             | AlterAction::MergePartitions { .. }
             | AlterAction::ModifyPartitionValues { .. }
             | AlterAction::RowMovement(_)

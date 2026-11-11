@@ -1890,3 +1890,29 @@ fn a_moved_row_fires_the_sources_delete_and_the_targets_insert_row_triggers_only
         "k|v\n2|10\nSELECT 1"
     );
 }
+
+#[test]
+fn mysql_partition_maintenance_checks_the_names_it_is_given() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    answer(
+        &mut session,
+        "CREATE TABLE o (id int NOT NULL, y int NOT NULL, PRIMARY KEY (id, y))
+             PARTITION BY RANGE (y) (
+               PARTITION p0 VALUES LESS THAN (2000),
+               PARTITION p1 VALUES LESS THAN MAXVALUE
+             );
+         INSERT INTO o VALUES (1, 1999), (2, 2010)",
+    );
+    for statement in [
+        "ALTER TABLE o ANALYZE PARTITION p0",
+        "ALTER TABLE o CHECK PARTITION ALL",
+        "ALTER TABLE o OPTIMIZE PARTITION p0, p1",
+        "ALTER TABLE o REPAIR PARTITION p1",
+        "ALTER TABLE o REBUILD PARTITION p0",
+    ] {
+        run(&mut session, statement).unwrap_or_else(|error| panic!("{statement}: {error}"));
+    }
+    failure(&mut session, "ALTER TABLE o ANALYZE PARTITION nowhere");
+    assert_eq!(answer(&mut session, "SELECT count(*) FROM o"), "count(*)\n2\nSELECT 1");
+}

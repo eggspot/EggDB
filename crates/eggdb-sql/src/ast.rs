@@ -1003,6 +1003,7 @@ pub(crate) enum AlterAction {
     },
     DropPartitions(Vec<Name>),
     TruncatePartitions(Vec<Name>),
+    MaintainPartitions(Vec<Name>),
     ReorganizePartitions {
         from: Vec<Name>,
         into: Vec<NamedPartition>,

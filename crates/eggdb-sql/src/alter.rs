@@ -218,6 +218,11 @@ fn apply(
             crate::partition_alter::truncate(writer, tables, &parent, partitions)?;
             Ok(None)
         }
+        AlterAction::MaintainPartitions(partitions) => {
+            let parent = current(writer, tables, name)?;
+            crate::partition_alter::check_named(writer, tables, &parent, partitions)?;
+            Ok(None)
+        }
         AlterAction::ReorganizePartitions {
             from,
             into,

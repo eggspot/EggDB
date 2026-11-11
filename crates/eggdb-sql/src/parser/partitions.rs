@@ -550,6 +550,16 @@ impl Parser<'_> {
             });
             return Ok(true);
         }
+        if self.mysql()
+            && ["analyze", "check", "optimize", "repair", "rebuild"]
+                .iter()
+                .any(|word| self.is_word(word))
+            && self.is_word_at(1, "partition")
+        {
+            self.at += 2;
+            actions.push(AlterAction::MaintainPartitions(self.partition_names()?));
+            return Ok(true);
+        }
         if self.mysql() && self.is_word("coalesce") && self.is_word_at(1, "partition") {
             self.at += 2;
             let count = self.partition_count()?;
