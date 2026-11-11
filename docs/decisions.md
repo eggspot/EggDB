@@ -528,3 +528,4 @@ its full title with its status.
 - [D501](decisions/D501.md) Code-only batch 149 (M10): MariaDB's `SHOW CREATE SEQUENCE`
 - [D502](decisions/D502.md) Code-only batch 150 (M10): reading a MariaDB sequence as a table
 - [D503](decisions/D503.md) Code-only batch 151 (M13): Cypher constraints and indexes on labels and properties
+- [D504](decisions/D504.md) Code-only batch 152 (M13): Bolt 5.1–5.4 LOGON/LOGOFF and ROUTE

@@ -29,6 +29,11 @@ const ROLLBACK: u8 = 0x13;
 const DISCARD: u8 = 0x2f;
 const PULL: u8 = 0x3f;
 const TELEMETRY: u8 = 0x54;
+const ROUTE: u8 = 0x66;
+const LOGON: u8 = 0x6a;
+const LOGOFF: u8 = 0x6b;
+const HIGHEST_MINOR: u8 = 4;
+const ROUTING_TTL_SECONDS: i64 = 300;
 
 const SUCCESS: u8 = 0x70;
 const RECORD: u8 = 0x71;
@@ -62,7 +67,9 @@ struct Connection<'s> {
     keyspace: &'s dyn Keyspace,
     config: &'s ServerConfig,
     id: u64,
+    minor: u8,
     element_ids: bool,
+    greeted: bool,
     authenticated: bool,
     failed: bool,
     pending: Option<QueryResult>,
@@ -76,7 +83,10 @@ fn choose_version(proposals: &[u8; 16]) -> Option<(u8, u8)> {
     proposals.chunks(4).find_map(|proposal| {
         let (range, minor, major) = (proposal[1], proposal[2], proposal[3]);
         match major {
-            5 if minor.saturating_sub(range) == 0 => Some((5, 0)),
+            5 => {
+                let chosen = minor.min(HIGHEST_MINOR);
+                (chosen >= minor.saturating_sub(range)).then_some((5, chosen))
+            }
             4 if minor >= 4 && minor.saturating_sub(range) <= 4 => Some((4, 4)),
             _ => None,
         }
@@ -239,11 +249,39 @@ impl Connection<'_> {
         if signature == GOODBYE {
             return false;
         }
-        if !self.authenticated {
+        let logon_flow = self.element_ids && self.minor >= 1;
+        if logon_flow && !self.greeted {
             if signature != HELLO {
                 replies.push(failure(
                     "Neo.ClientError.Request.Invalid",
                     "HELLO must come first",
+                ));
+                return false;
+            }
+            self.greeted = true;
+            replies.push(metadata(&[
+                ("server", Value::String(SERVER_AGENT.to_owned())),
+                ("connection_id", Value::String(format!("bolt-{}", self.id))),
+            ]));
+            return true;
+        }
+        if logon_flow && signature == LOGOFF {
+            self.authenticated = false;
+            self.pending = None;
+            self.in_transaction = false;
+            replies.push(metadata(&[]));
+            return true;
+        }
+        if !self.authenticated {
+            let expected = if logon_flow { LOGON } else { HELLO };
+            if signature != expected {
+                replies.push(failure(
+                    "Neo.ClientError.Request.Invalid",
+                    if logon_flow {
+                        "LOGON must come after HELLO"
+                    } else {
+                        "HELLO must come first"
+                    },
                 ));
                 return false;
             }
@@ -257,10 +295,14 @@ impl Connection<'_> {
                 return false;
             }
             self.authenticated = true;
-            replies.push(metadata(&[
-                ("server", Value::String(SERVER_AGENT.to_owned())),
-                ("connection_id", Value::String(format!("bolt-{}", self.id))),
-            ]));
+            if logon_flow {
+                replies.push(metadata(&[]));
+            } else {
+                replies.push(metadata(&[
+                    ("server", Value::String(SERVER_AGENT.to_owned())),
+                    ("connection_id", Value::String(format!("bolt-{}", self.id))),
+                ]));
+            }
             return true;
         }
         if signature == RESET {
@@ -362,6 +404,32 @@ impl Connection<'_> {
                 }
             }
             TELEMETRY => replies.push(metadata(&[])),
+            ROUTE => {
+                let address = fields
+                    .first()
+                    .and_then(|context| context.get("address"))
+                    .and_then(Packed::as_str)
+                    .unwrap_or("localhost:7687")
+                    .to_owned();
+                let server = |role: &str| {
+                    Value::Map(vec![
+                        (
+                            "addresses".to_owned(),
+                            Value::List(vec![Value::String(address.clone())]),
+                        ),
+                        ("role".to_owned(), Value::String(role.to_owned())),
+                    ])
+                };
+                let table = Value::Map(vec![
+                    ("ttl".to_owned(), Value::Integer(ROUTING_TTL_SECONDS)),
+                    ("db".to_owned(), Value::String("neo4j".to_owned())),
+                    (
+                        "servers".to_owned(),
+                        Value::List(vec![server("WRITE"), server("READ"), server("ROUTE")]),
+                    ),
+                ]);
+                replies.push(metadata(&[("rt", table)]));
+            }
             _ => {
                 self.failed = true;
                 replies.push(failure("Neo.ClientError.Request.Invalid", &format!("message {signature:#04x} is not supported; connect with bolt:// rather than neo4j://")));
@@ -394,7 +462,9 @@ pub(crate) fn serve_stream(
         keyspace,
         config,
         id,
+        minor: if major >= 5 { minor } else { 0 },
         element_ids: major >= 5,
+        greeted: false,
         authenticated: false,
         failed: false,
         pending: None,
