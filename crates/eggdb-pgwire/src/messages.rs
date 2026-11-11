@@ -292,7 +292,18 @@ pub enum FrontendMessage {
     /// `f`: the client fails a `COPY ... FROM STDIN`, with its reason (read leniently, since
     /// the message is dropped outside a copy).
     CopyFail(String),
-    /// A message type this server does not handle, such as a function call.
+    /// `F`: a call of the function with OID `function`, through the function call protocol.
+    FunctionCall {
+        /// The function's OID in `pg_proc`.
+        function: u32,
+        /// Each argument's format: none means text, one applies to all.
+        argument_formats: Vec<Format>,
+        /// The arguments, `None` for NULL.
+        arguments: Vec<Option<Vec<u8>>>,
+        /// The result's format.
+        result_format: Format,
+    },
+    /// A message type this server does not handle.
     Other(u8),
 }
 
@@ -349,6 +360,18 @@ impl std::fmt::Debug for FrontendMessage {
             Self::CopyData => formatter.write_str("CopyData"),
             Self::CopyDone => formatter.write_str("CopyDone"),
             Self::CopyFail(reason) => formatter.debug_tuple("CopyFail").field(reason).finish(),
+            Self::FunctionCall {
+                function,
+                argument_formats,
+                arguments,
+                result_format,
+            } => formatter
+                .debug_struct("FunctionCall")
+                .field("function", function)
+                .field("argument_formats", argument_formats)
+                .field("arguments", arguments)
+                .field("result_format", result_format)
+                .finish(),
             Self::Other(tag) => formatter.debug_tuple("Other").field(tag).finish(),
         }
     }
@@ -425,6 +448,29 @@ pub fn parse_message(tag: u8, body: &[u8]) -> Result<FrontendMessage, MalformedM
         b'C' => {
             let target = target(fields.u8()?)?;
             FrontendMessage::Close(target, fields.string()?.to_owned())
+        }
+        b'F' => {
+            let function = fields.i32()? as u32;
+            let argument_formats = formats(&mut fields)?;
+            let count = fields.count()?;
+            let mut arguments = Vec::with_capacity(count.min(body.len() / 4));
+            for _ in 0..count {
+                let length = fields.i32()?;
+                arguments.push(match length {
+                    -1 => None,
+                    length if length < 0 => {
+                        return Err(malformed(format!("invalid argument length {length}")));
+                    }
+                    length => Some(fields.bytes(length as usize)?.to_vec()),
+                });
+            }
+            let result_format = Format::from_code(fields.i16()?)?;
+            FrontendMessage::FunctionCall {
+                function,
+                argument_formats,
+                arguments,
+                result_format,
+            }
         }
         b'S' => FrontendMessage::Sync,
         b'H' => FrontendMessage::Flush,
@@ -725,6 +771,23 @@ impl Outbox {
                 if let Some(bytes) = value {
                     body.extend_from_slice(bytes);
                 }
+            }
+        });
+        Ok(())
+    }
+
+    /// `V`: the result of a function call, `None` for NULL.
+    pub fn function_call_response(&mut self, value: Option<&[u8]>) -> Result<(), TooLarge> {
+        let length = match value {
+            None => -1i32,
+            Some(bytes) => {
+                i32::try_from(bytes.len()).map_err(|_| TooLarge::ValueBytes(bytes.len()))?
+            }
+        };
+        self.message(b'V', |body| {
+            body.extend_from_slice(&length.to_be_bytes());
+            if let Some(bytes) = value {
+                body.extend_from_slice(bytes);
             }
         });
         Ok(())

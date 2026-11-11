@@ -15,7 +15,7 @@ use eggdb_platform::connection_limits::Reservation;
 use eggdb_sql::{
     CancelSignal, CopyChannel, CopyFormat, CopyStart, DatabaseDirectory, KeyValueStore,
     OutputColumn, Parameter, QueryResult, Session, SqlError, SqlResult, SqlState, SqlType,
-    TransactionStatus,
+    TransactionStatus, Value,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -69,6 +69,10 @@ pub(crate) fn printable(text: &str) -> String {
         }
     }
     shown
+}
+
+fn quote_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 fn too_large(error: TooLarge) -> SqlError {
@@ -1193,17 +1197,29 @@ impl<'a, 's> Connection<'a, 's> {
                 FrontendMessage::CopyData
                 | FrontendMessage::CopyDone
                 | FrontendMessage::CopyFail(_) => true,
-                FrontendMessage::Other(b'F') => {
-                    report_error(
-                        &mut self.wire,
-                        Severity::Error,
-                        &SqlError::new(
-                            SqlState::FEATURE_NOT_SUPPORTED,
-                            "the function call protocol is not supported",
-                        ),
-                        None,
-                    );
-                    self.finish_implicit_transaction(false);
+                FrontendMessage::FunctionCall {
+                    function,
+                    argument_formats,
+                    arguments,
+                    result_format,
+                } => {
+                    self.session.start_implicit_transaction();
+                    let called =
+                        self.function_call(function, &argument_formats, &arguments, result_format);
+                    let succeeded = match called {
+                        Ok(value) => match self.wire.outbox.function_call_response(value.as_deref()) {
+                            Ok(()) => true,
+                            Err(error) => {
+                                report_error(&mut self.wire, Severity::Error, &too_large(error), None);
+                                false
+                            }
+                        },
+                        Err(error) => {
+                            report_error(&mut self.wire, Severity::Error, &error, None);
+                            false
+                        }
+                    };
+                    self.finish_implicit_transaction(succeeded);
                     self.ready_for_query();
                     self.wire.flush().is_ok()
                 }
@@ -1388,6 +1404,77 @@ impl<'a, 's> Connection<'a, 's> {
             took.as_secs_f64() * 1000.0,
             printable(&shown)
         ));
+    }
+
+    fn function_call(
+        &mut self,
+        function: u32,
+        argument_formats: &[Format],
+        arguments: &[Option<Vec<u8>>],
+        result_format: Format,
+    ) -> SqlResult<Option<Vec<u8>>> {
+        let lookup = format!(
+            "SELECT n.nspname, p.proname, p.proargtypes, p.prorettype FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE p.oid = {function}"
+        );
+        let mut found = Vec::new();
+        self.session.execute(&lookup, &mut |result| {
+            if result.columns.is_some() {
+                found.extend(result.rows);
+            }
+        })?;
+        let Some(row) = found.into_iter().next() else {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_FUNCTION,
+                format!("function with OID {function} does not exist"),
+            ));
+        };
+        let text = |at: usize| row.get(at).and_then(Value::to_text).unwrap_or_default();
+        let schema = text(0);
+        let name = text(1);
+        let argument_types: Vec<u32> = text(2)
+            .split(|character: char| !character.is_ascii_digit())
+            .filter(|digits| !digits.is_empty())
+            .filter_map(|digits| digits.parse().ok())
+            .collect();
+        let result_type: u32 = text(3).parse().unwrap_or(TEXT_OID);
+        if argument_types.len() != arguments.len() {
+            return Err(SqlError::new(
+                SqlState::PROTOCOL_VIOLATION,
+                format!(
+                    "function {name} takes {} arguments, the call sent {}",
+                    argument_types.len(),
+                    arguments.len()
+                ),
+            ));
+        }
+        let mut rendered = Vec::with_capacity(arguments.len());
+        for (index, (argument, oid)) in arguments.iter().zip(&argument_types).enumerate() {
+            rendered.push(match argument {
+                None => "NULL".to_owned(),
+                Some(bytes) => {
+                    let value =
+                        decode_parameter(bytes, *oid, format_at(argument_formats, index), index + 1)?;
+                    format!("'{}'", value.replace('\'', "''"))
+                }
+            });
+        }
+        let call = format!(
+            "SELECT {}.{}({})",
+            quote_identifier(&schema),
+            quote_identifier(&name),
+            rendered.join(", ")
+        );
+        let mut value = None;
+        self.session.execute(&call, &mut |result| {
+            if result.columns.is_some() {
+                value = result.rows.into_iter().next().and_then(|row| row.into_iter().next());
+            }
+        })?;
+        let zone = self.session.time_zone();
+        match value {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => encode_value(&value, result_type, result_format, zone),
+        }
     }
 
     fn simple_query(&mut self, text: &str) -> bool {
