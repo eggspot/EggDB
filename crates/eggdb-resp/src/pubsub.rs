@@ -251,6 +251,17 @@ impl Hub {
         })
     }
 
+    /// How many channels, patterns and shard channels connection `id` holds, each on its own.
+    pub fn held_by_kind(&self, id: u64) -> (usize, usize, usize) {
+        self.locked().get(&id).map_or((0, 0, 0), |subscriber| {
+            (
+                subscriber.channels.len(),
+                subscriber.patterns.len(),
+                subscriber.shard_channels.len(),
+            )
+        })
+    }
+
     /// Forgets connection `id`.
     pub fn detach(&self, id: u64) {
         self.locked().remove(&id);

@@ -937,7 +937,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (it has only `blocked_clients`, D347), `OBJECT` and `DEBUG` (D12, D193). `OBJECT`: **code
   written, unbuilt** (code-only mode, 2026-11-10, D395); `INFO`'s sections: **code written,
   unbuilt** (D396); `DEBUG OBJECT | SLEEP | SET-ACTIVE-EXPIRE | HELP`: **code written, unbuilt**
-  (D397).
+  (D397). Keyspace notifications and `CLIENT LIST | INFO | KILL | ID`: **code written, unbuilt** (code-only
+  mode, 2026-11-12, D591).
 - Cluster mode: slots, the cluster commands and sharded pub/sub (`SSUBSCRIBE`) (D193). One node holding every slot, the
   cluster commands and sharded pub/sub: **code written, unbuilt** (code-only mode, 2026-11-11, D565).
   Left: several nodes, `MOVED`/`ASK` and resharding (with M15).

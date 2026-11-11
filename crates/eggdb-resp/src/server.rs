@@ -1,6 +1,8 @@
 use crate::blocking::{BlockingCommand, WaiterRegistry};
+use crate::clients::{Activity, Clients};
 use crate::commands::{Client, Context};
 use crate::keyspace::{EntryVisitor, KeysRead, KeysWrite, Keyspace};
+use crate::notifications::{self, Notifications};
 use crate::pops::OnWrongType;
 use crate::protocol::{ProtocolError, ReadAhead, Reply, RequestReader};
 use crate::pubsub::{Hub, Kind, Queued};
@@ -91,6 +93,7 @@ impl io::Read for StopAwareStream<'_> {
 struct RecordingKeys<'k, 'w> {
     inner: &'k mut dyn KeysWrite,
     written: &'w mut Vec<Vec<u8>>,
+    deleted: &'w mut Vec<Vec<u8>>,
 }
 
 impl KeysRead for RecordingKeys<'_, '_> {
@@ -126,7 +129,11 @@ impl KeysWrite for RecordingKeys<'_, '_> {
     }
 
     fn delete(&mut self, key: &[u8]) -> Result<bool, String> {
-        self.inner.delete(key)
+        let deleted = self.inner.delete(key)?;
+        if deleted {
+            self.deleted.push(key.to_vec());
+        }
+        Ok(deleted)
     }
 
     fn clear(&mut self) -> Result<(), String> {
@@ -137,6 +144,7 @@ impl KeysWrite for RecordingKeys<'_, '_> {
 struct NotifyingKeyspace<'k> {
     inner: &'k dyn Keyspace,
     written: RefCell<Vec<(u32, Vec<u8>)>>,
+    deleted: RefCell<Vec<(u32, Vec<u8>)>>,
 }
 
 impl NotifyingKeyspace<'_> {
@@ -144,6 +152,13 @@ impl NotifyingKeyspace<'_> {
         self.written
             .try_borrow_mut()
             .map(|mut written| std::mem::take(&mut *written))
+            .unwrap_or_default()
+    }
+
+    fn take_deleted(&self) -> Vec<(u32, Vec<u8>)> {
+        self.deleted
+            .try_borrow_mut()
+            .map(|mut deleted| std::mem::take(&mut *deleted))
             .unwrap_or_default()
     }
 }
@@ -163,15 +178,21 @@ impl Keyspace for NotifyingKeyspace<'_> {
         body: &mut dyn FnMut(&mut dyn KeysWrite) -> Result<(), String>,
     ) -> Result<(), String> {
         let mut written = Vec::new();
+        let mut deleted = Vec::new();
         self.inner.write(db, &mut |keys| {
             written.clear();
+            deleted.clear();
             body(&mut RecordingKeys {
                 inner: keys,
                 written: &mut written,
+                deleted: &mut deleted,
             })
         })?;
         if let Ok(mut recorded) = self.written.try_borrow_mut() {
             recorded.extend(written.into_iter().map(|key| (db, key)));
+        }
+        if let Ok(mut recorded) = self.deleted.try_borrow_mut() {
+            recorded.extend(deleted.into_iter().map(|key| (db, key)));
         }
         Ok(())
     }
@@ -270,24 +291,85 @@ impl Connection<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Shared<'s> {
+    hub: &'s Hub,
+    waiters: &'s WaiterRegistry,
+    clients: &'s Clients,
+    notifications: &'s Notifications,
+}
+
+fn config_command(
+    context: &Context<'_>,
+    client: &mut Client,
+    arguments: &[Vec<u8>],
+    notifications: &Notifications,
+) -> Reply {
+    let lower = |word: &Vec<u8>| String::from_utf8_lossy(word).to_ascii_lowercase();
+    match arguments.get(1).map(lower).as_deref() {
+        Some("set") if arguments.len() == 4 && lower(&arguments[2]) == notifications::PARAMETER => {
+            match notifications.set(&arguments[3]) {
+                Ok(()) => Reply::ok(),
+                Err(error) => Reply::Error(error),
+            }
+        }
+        Some("get") => {
+            let mut reply = execute_with_transactions(context, client, arguments);
+            let asked = arguments[2..].iter().any(|pattern| {
+                crate::commands::glob(&pattern.to_ascii_lowercase(), notifications::PARAMETER.as_bytes())
+            });
+            if let (Reply::Array(Some(items)), true) = (&mut reply, asked) {
+                items.push(Reply::bulk(notifications::PARAMETER));
+                items.push(Reply::bulk(notifications::format(notifications.flags())));
+            }
+            reply
+        }
+        _ => execute_with_transactions(context, client, arguments),
+    }
+}
+
+fn activity_of(client: &Client, hub: &Hub, id: u64) -> Activity {
+    let (channels, patterns, shard_channels) = hub.held_by_kind(id);
+    Activity {
+        name: client.name.clone(),
+        db: client.db,
+        resp3: client.resp3,
+        channels,
+        patterns,
+        shard_channels,
+        queued: client.queued.as_ref().map(Vec::len),
+        watched: client.watched.len(),
+        command: String::new(),
+    }
+}
+
 fn serve_connection(
     stream: TcpStream,
     id: u64,
-    hub: &Hub,
-    waiters: &WaiterRegistry,
+    shared: &Shared<'_>,
     keyspace: &dyn Keyspace,
     config: &ServerConfig,
     stop: &(dyn Fn() -> bool + Sync),
 ) {
+    let Shared {
+        hub,
+        waiters,
+        clients,
+        notifications,
+    } = *shared;
     if stream.set_read_timeout(Some(READ_POLL)).is_err() || stream.set_nodelay(true).is_err() {
         return;
     }
     let Ok(local_address) = stream.local_addr() else {
         return;
     };
+    if let Ok(peer_address) = stream.peer_addr() {
+        clients.register(id, peer_address, local_address, stream.try_clone().ok());
+    }
     let notifying = NotifyingKeyspace {
         inner: keyspace,
         written: RefCell::default(),
+        deleted: RefCell::default(),
     };
     let Ok(writer) = stream.try_clone() else {
         return;
@@ -365,6 +447,15 @@ fn serve_connection(
                 None if name == "cluster" => vec![Reply::Error(
                     "ERR This instance has cluster support disabled".to_owned(),
                 )],
+                None if name == "config" && client.queued.is_none() => {
+                    vec![config_command(&context, &mut client, &arguments, notifications)]
+                }
+                None if name == "client" && client.queued.is_none() => {
+                    match clients.command(id, arguments.get(1..).unwrap_or_default()) {
+                        Some(reply) => vec![reply],
+                        None => vec![execute_with_transactions(&context, &mut client, &arguments)],
+                    }
+                }
                 None => vec![execute_with_transactions(&context, &mut client, &arguments)],
                 Some(Err(error)) => vec![Reply::Error(error)],
                 Some(Ok(mut command)) => {
@@ -408,7 +499,13 @@ fn serve_connection(
                 }
             }
         };
-        waiters.notify_written(&notifying.take_written());
+        let written = notifying.take_written();
+        let deleted = notifying.take_deleted();
+        waiters.notify_written(&written);
+        for (channel, message) in notifications.events(&arguments, &written, &deleted) {
+            hub.publish(&channel, &message);
+        }
+        clients.seen(id, activity_of(&client, hub, id), &arguments);
         let replied_from = out.len();
         for reply in &replies {
             reply.encode(&mut out, client.resp3);
@@ -420,7 +517,7 @@ fn serve_connection(
             out.shrink_to(UNCOUNTED_BUFFER_BYTES);
             held.hold_if_large(out.len());
         }
-        let quitting = name == "quit";
+        let quitting = name == "quit" || clients.is_killed(id);
         if quitting || !reader.has_buffered() {
             if connection.send(&out).is_err() {
                 break;
@@ -434,6 +531,7 @@ fn serve_connection(
         }
     }
     hub.detach(id);
+    clients.remove(id);
 }
 
 /// Serves RESP clients on `listener` from `keyspace`, a thread per connection, until `stop`
@@ -449,6 +547,14 @@ pub fn serve(
     let active = AtomicUsize::new(0);
     let hub = Hub::new(Arc::clone(&config.memory_budget));
     let waiters = WaiterRegistry::default();
+    let clients = Clients::default();
+    let notifications = Notifications::default();
+    let shared = Shared {
+        hub: &hub,
+        waiters: &waiters,
+        clients: &clients,
+        notifications: &notifications,
+    };
     let next_id = AtomicU64::new(1);
     std::thread::scope(|scope| {
         while !stop() {
@@ -477,13 +583,12 @@ pub fn serve(
                 continue;
             }
             let active = &active;
-            let hub = &hub;
-            let waiters = &waiters;
+            let shared = &shared;
             let id = next_id.fetch_add(1, Ordering::Relaxed);
             let spawned = std::thread::Builder::new()
                 .name("eggdb-resp".to_owned())
                 .spawn_scoped(scope, move || {
-                    serve_connection(stream, id, hub, waiters, keyspace, config, stop);
+                    serve_connection(stream, id, shared, keyspace, config, stop);
                     active.fetch_sub(1, Ordering::AcqRel);
                 });
             if spawned.is_err() {

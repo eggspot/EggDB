@@ -774,3 +774,57 @@ fn commands_pipelined_behind_a_blocked_client_answer_in_order_after_its_reply() 
         assert_eq!(pusher.call("LLEN q"), ":0|");
     });
 }
+
+#[test]
+fn client_list_names_every_connection_and_kill_closes_the_chosen_one() {
+    with_server(|address| {
+        let mut admin = RespClient::connect(address);
+        let mut victim = RespClient::connect(address);
+        assert_eq!(victim.call("CLIENT SETNAME victim"), "+OK|");
+        let victim_id = victim.call("CLIENT ID");
+        let admin_id = admin.call("CLIENT ID");
+        assert_ne!(victim_id, admin_id);
+        let victim_id = victim_id.trim_start_matches(':').trim_end_matches('|').to_owned();
+        let list = admin.call("CLIENT LIST");
+        assert_eq!(list.matches("id=").count(), 2, "{list}");
+        assert!(list.contains(&format!("id={victim_id} ")), "{list}");
+        assert!(list.contains("name=victim "), "{list}");
+        let info = victim.call("CLIENT INFO");
+        assert!(info.contains("cmd=client|info"), "{info}");
+        assert_eq!(admin.call(&format!("CLIENT KILL ID {victim_id}")), ":1|");
+        let mut rest = Vec::new();
+        let _ = victim.reader.read_to_end(&mut rest);
+        assert!(rest.is_empty(), "{rest:?}");
+        let deadline = Instant::now() + BLOCKED_CLIENTS_LIMIT;
+        while admin.call("CLIENT LIST").matches("id=").count() != 1 {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(POLL_INTERVAL);
+        }
+        assert_eq!(admin.call("CLIENT KILL 1.2.3.4:5"), "-ERR No such client|");
+    });
+}
+
+#[test]
+fn keyspace_notifications_reach_pattern_subscribers_once_turned_on() {
+    with_server(|address| {
+        let mut writer = RespClient::connect(address);
+        let mut listener = RespClient::connect(address);
+        assert_eq!(listener.call("PSUBSCRIBE __key*__:*"), "*3|$10|psubscribe|$10|__key*__:*|:1|");
+        assert_eq!(writer.call("SET quiet 1"), "+OK|");
+        assert_eq!(writer.call("CONFIG SET notify-keyspace-events KEA"), "+OK|");
+        assert_eq!(
+            writer.call("CONFIG GET notify-keyspace-events"),
+            "*2|$22|notify-keyspace-events|$3|AKE|"
+        );
+        assert_eq!(writer.call("LPUSH jobs a"), ":1|");
+        assert_eq!(
+            listener.reply(),
+            "*4|$8|pmessage|$10|__key*__:*|$19|__keyspace@0__:jobs|$5|lpush|"
+        );
+        assert_eq!(
+            listener.reply(),
+            "*4|$8|pmessage|$10|__key*__:*|$20|__keyevent@0__:lpush|$4|jobs|"
+        );
+        assert_eq!(writer.call("CONFIG SET notify-keyspace-events Q"), "-ERR Invalid event class character. Use 'Ag$lshzxeKEtmdn'.|");
+    });
+}

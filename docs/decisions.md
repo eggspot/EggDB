@@ -615,3 +615,4 @@ its full title with its status.
 - [D588](decisions/D588.md) Code-only batch 236 (M9): MongoDB change streams
 - [D589](decisions/D589.md) Code-only batch 237 (M16): Kafka static membership
 - [D590](decisions/D590.md) Code-only batch 238 (M7): geo searches over nine geohash cells
+- [D591](decisions/D591.md) Code-only batch 239 (M7): keyspace notifications and CLIENT LIST, INFO and KILL
