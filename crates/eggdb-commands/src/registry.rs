@@ -78,7 +78,7 @@ const fn verb(name: &'static str, means: &'static str, usual_effect: Effect) -> 
 /// rule: `eggdb`'s top-level commands act on its implied noun, the database file.
 pub const KEPT_NAMES: &[&str] = &[
     "create", "put", "get", "del", "scan", "ttl", "expire", "persist", "incr", "decr", "cas",
-    "check", "stats", "backup", "compact", "ui", "export", "import", "sql", "serve", "shell",
+    "check", "stats", "backup", "compact", "ui", "gui", "export", "import", "sql", "serve", "shell",
     "restore", "follow", "mcp", "audit", "help", "version",
 ];
 
@@ -573,6 +573,7 @@ pub const COMMANDS: &[CommandDefinition] = &[
     files::BACKUP,
     files::COMPACT,
     programs::UI,
+    programs::GUI,
     files::EXPORT,
     files::IMPORT,
     sql::SQL,

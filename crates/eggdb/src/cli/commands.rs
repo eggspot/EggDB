@@ -174,6 +174,7 @@ fn execute_on(
         CommandName::Backup => session.backup(),
         CommandName::Compact => session.compact(),
         CommandName::Ui => session.ui(),
+        CommandName::Gui => session.gui(),
         CommandName::Export => session.export(),
         CommandName::Import => session.import(),
         CommandName::Sql => session.sql(),
@@ -651,6 +652,36 @@ impl<'a> Session<'a> {
 
     fn error_message(&mut self, message: &str) {
         super::error_line(&mut self.messages, message);
+    }
+
+    fn gui(&mut self) -> Result<Exit, Failure> {
+        let name = if cfg!(windows) { "eggdb-gui.exe" } else { "eggdb-gui" };
+        let program = std::env::current_exe()
+            .ok()
+            .and_then(|current| current.parent().map(|directory| directory.join(name)))
+            .filter(|program| program.is_file())
+            .ok_or_else(|| {
+                Failure::database(
+                    format!("the desktop client {name} is not installed beside eggdb"),
+                    Exit::NotFound,
+                )
+            })?;
+        let mut client = std::process::Command::new(&program);
+        client.arg("--open").arg(&self.request.file).arg("--no-create");
+        if self.request.read_only {
+            client.arg("--read-only");
+        }
+        let status = client.status().map_err(|error| {
+            Failure::database(
+                format!("cannot start {}: {error}", program.display()),
+                Exit::DatabaseError,
+            )
+        })?;
+        Ok(if status.success() {
+            Exit::Done
+        } else {
+            Exit::DatabaseError
+        })
     }
 
     fn ui(&mut self) -> Result<Exit, Failure> {

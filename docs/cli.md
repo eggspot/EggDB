@@ -273,6 +273,13 @@ gives `file`, `commit_stamp`, `commit_time`, `entries`, `page_size`, `pages_befo
 is; `export` is the text form that other databases and older releases read. Design:
 [ux/cli.md](ux/cli.md) section 22, [decision D141](decisions/D141.md).
 
+## `eggdb gui`
+
+`eggdb gui app.db [--read-only]` opens the file in EggDB's desktop client, the `eggdb-gui`
+program installed beside `eggdb`, as opening it from the client's connect screen does, and waits
+until its window closes (D571). A missing file is not created. When `eggdb-gui` is not beside
+`eggdb` the command fails with `not_found`; run `eggdb-gui` alone for the connect screen.
+
 ## `eggdb ui`
 
 ```

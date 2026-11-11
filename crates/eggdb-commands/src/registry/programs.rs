@@ -134,6 +134,34 @@ Examples:
     surfaces: "it is itself the terminal front-end; the GUI client (D15) brings the desktop one",
 };
 
+pub(super) const GUI: CommandDefinition = CommandDefinition {
+    words: &["gui"],
+    aliases: &[],
+    synopsis: "<file>",
+    summary: "open the file in the desktop client",
+    description: "Opens the file in EggDB's desktop client, the eggdb-gui program installed beside eggdb, and waits until its window closes. It needs a desktop and has no JSON form.",
+    usage: "eggdb gui <file> [--read-only]",
+    help: "\
+Opens the file in EggDB's desktop client (eggdb-gui, installed beside eggdb): its tables in the
+object tree and an empty query tab, as opening it from the client's connect screen does. The
+command waits until the window closes. Run eggdb-gui alone for the connect screen.
+
+Options:
+  --read-only   open the file read-only
+
+Examples:
+  eggdb gui app.db
+  eggdb gui app.db --read-only
+",
+    options: &[flag("read-only", "open the file read-only")],
+    operands: &[FILE],
+    outputs: &[],
+    max_effect: Effect::Destroy,
+    errors: READING_ERRORS,
+    examples: &["eggdb gui app.db", "eggdb gui app.db --read-only"],
+    surfaces: "it starts the desktop client (D15), whose own screens do the work",
+};
+
 pub(super) const SERVE: CommandDefinition = CommandDefinition {
     words: &["serve"],
     aliases: &[],

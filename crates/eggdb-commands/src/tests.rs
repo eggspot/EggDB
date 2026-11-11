@@ -8,7 +8,7 @@ const SHIPPED_LIST_COMMANDS: &[&str] = &["collection list"];
 const PAGED_RESULT: &[&str] = &["items", "truncated", "truncated_by", "next_cursor"];
 const EXACT_DRY_RUNS: &[&str] = &["import", "restore"];
 
-const WITHOUT_A_FORMAT: &[&str] = &["ui", "shell", "mcp"];
+const WITHOUT_A_FORMAT: &[&str] = &["ui", "gui", "shell", "mcp"];
 const DESCRIBED_BY_THE_MAIN_HELP: &[&str] = &["help", "version"];
 
 fn is_snake_case(name: &str) -> bool {

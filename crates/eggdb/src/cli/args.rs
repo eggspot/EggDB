@@ -26,6 +26,7 @@ pub(crate) enum CommandName {
     Backup,
     Compact,
     Ui,
+    Gui,
     Export,
     Import,
     Sql,
@@ -91,6 +92,7 @@ impl CommandName {
         Self::Backup,
         Self::Compact,
         Self::Ui,
+        Self::Gui,
         Self::Export,
         Self::Import,
         Self::Sql,
@@ -122,6 +124,7 @@ impl CommandName {
             b"backup" => Self::Backup,
             b"compact" => Self::Compact,
             b"ui" => Self::Ui,
+            b"gui" => Self::Gui,
             b"export" => Self::Export,
             b"import" => Self::Import,
             b"sql" => Self::Sql,
@@ -157,6 +160,7 @@ impl CommandName {
             Self::Backup => "backup",
             Self::Compact => "compact",
             Self::Ui => "ui",
+            Self::Gui => "gui",
             Self::Export => "export",
             Self::Import => "import",
             Self::Sql => "sql",
@@ -196,11 +200,11 @@ impl CommandName {
             | OptionName::Version => true,
             OptionName::Color => true,
             OptionName::Format | OptionName::Json => {
-                !matches!(self, Self::Ui | Self::Shell | Self::Mcp)
+                !matches!(self, Self::Ui | Self::Gui | Self::Shell | Self::Mcp)
             }
             OptionName::Mono | OptionName::Ascii => self == Self::Ui,
             OptionName::ReadOnly => {
-                matches!(self, Self::Ui | Self::Serve | Self::Shell | Self::Sql)
+                matches!(self, Self::Ui | Self::Gui | Self::Serve | Self::Shell | Self::Sql)
             }
             OptionName::Verify => self == Self::Audit,
             OptionName::Kql => self == Self::Sql,
@@ -1043,7 +1047,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Invocation, Failure> {
             return Ok(help(None, None));
         }
         return Err(Failure::usage(
-            "no command given. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, row, serve, shell, restore, mcp, audit, collection, help, version.",
+            "no command given. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, gui, export, import, sql, explain, table, row, serve, shell, restore, mcp, audit, collection, help, version.",
             None,
         ));
     };
@@ -1825,6 +1829,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         | CommandName::Stats
         | CommandName::Compact
         | CommandName::Ui
+        | CommandName::Gui
         | CommandName::Serve
         | CommandName::Shell
         | CommandName::Mcp
@@ -2542,7 +2547,7 @@ fn shown(argument: &OsStr) -> String {
 fn unknown_command(name: &[u8]) -> Failure {
     Failure::usage(
         format!(
-            "unknown command '{}'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, row, serve, shell, restore, mcp, audit, collection, help, version.",
+            "unknown command '{}'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, gui, export, import, sql, explain, table, row, serve, shell, restore, mcp, audit, collection, help, version.",
             render::text(name)
         ),
         None,
@@ -3102,7 +3107,7 @@ mod tests {
     fn usage_errors_use_the_designed_wording() {
         assert_eq!(
             usage_message("frobnicate a"),
-            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, row, serve, shell, restore, mcp, audit, collection, help, version."
+            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, gui, export, import, sql, explain, table, row, serve, shell, restore, mcp, audit, collection, help, version."
         );
         assert_eq!(
             usage_message("get a k --prefix x"),
@@ -3145,7 +3150,7 @@ mod tests {
     fn help_for_an_unknown_command_is_the_unknown_command_error() {
         assert_eq!(
             usage_message("frob --help"),
-            "unknown command 'frob'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, row, serve, shell, restore, mcp, audit, collection, help, version."
+            "unknown command 'frob'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, gui, export, import, sql, explain, table, row, serve, shell, restore, mcp, audit, collection, help, version."
         );
         assert_eq!(
             parse_words("ui -h"),
@@ -3158,7 +3163,7 @@ mod tests {
     fn control_characters_in_quoted_arguments_are_shown_as_hex() {
         assert_eq!(
             usage_message("fr\u{1b}[31mob"),
-            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, row, serve, shell, restore, mcp, audit, collection, help, version."
+            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, gui, export, import, sql, explain, table, row, serve, shell, restore, mcp, audit, collection, help, version."
         );
         assert_eq!(
             usage_message("scan a -F j\u{7}"),

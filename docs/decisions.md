@@ -595,3 +595,4 @@ its full title with its status.
 - [D568](decisions/D568.md) Code-only batch 216 (M5): eggdb restore from an SQLite file
 - [D569](decisions/D569.md) Code-only batch 217 (M6d): MCP table resources
 - [D570](decisions/D570.md) Code-only batch 218 (M6e): the client remembers its window size
+- [D571](decisions/D571.md) Code-only batch 219 (M6e): eggdb gui in the command model
