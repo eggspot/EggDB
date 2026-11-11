@@ -5,6 +5,7 @@ mod pit;
 mod scroll;
 mod stored_scripts;
 mod tasks;
+mod templates;
 
 use crate::json_out::{Out, escaped, written};
 use crate::query::{Stats, parse, score};
@@ -391,7 +392,11 @@ pub(super) fn resolve_indices(
 
 fn ensure_index(keys: &mut dyn KeysWrite, index: &str) -> Result<(), String> {
     if keys.get(&index_key(index))?.is_none() {
-        keys.put(&index_key(index), b"{}")?;
+        let applied = templates::template_for(keys, index)?;
+        keys.put(&index_key(index), templates::mappings_text(&applied, None).as_bytes())?;
+        for alias in &applied.aliases {
+            aliases::add_alias(keys, alias, index)?;
+        }
     }
     Ok(())
 }
@@ -551,6 +556,26 @@ impl<'k> Api<'k> {
             }
             ("POST", ["_bulk"]) => self.bulk(None, request),
             ("GET" | "POST", ["_search", "template"]) => self.search_template(None, request),
+            ("PUT" | "POST", ["_index_template", name]) => {
+                self.put_template(templates::TemplateKind::Index, name, request)
+            }
+            ("GET", ["_index_template"]) => self.get_templates(templates::TemplateKind::Index, None, false),
+            ("GET" | "HEAD", ["_index_template", name]) => {
+                self.get_templates(templates::TemplateKind::Index, Some(name), method == "HEAD")
+            }
+            ("DELETE", ["_index_template", name]) => self.delete_template(templates::TemplateKind::Index, name),
+            ("PUT" | "POST", ["_component_template", name]) => {
+                self.put_template(templates::TemplateKind::Component, name, request)
+            }
+            ("GET", ["_component_template"]) => {
+                self.get_templates(templates::TemplateKind::Component, None, false)
+            }
+            ("GET" | "HEAD", ["_component_template", name]) => {
+                self.get_templates(templates::TemplateKind::Component, Some(name), method == "HEAD")
+            }
+            ("DELETE", ["_component_template", name]) => {
+                self.delete_template(templates::TemplateKind::Component, name)
+            }
             ("PUT" | "POST", ["_scripts", id]) => self.put_stored_script(id, request),
             ("PUT" | "POST", ["_scripts", id, _context]) => self.put_stored_script(id, request),
             ("GET", ["_scripts", id]) => self.get_stored_script(id),
@@ -689,27 +714,28 @@ impl<'k> Api<'k> {
 
     fn create_index(&self, index: &str, request: &Request) -> Answer {
         let body = String::from_utf8_lossy(&request.body).into_owned();
-        let mappings = if body.trim().is_empty() {
-            "{}".to_owned()
+        let parsed = if body.trim().is_empty() {
+            None
         } else {
-            let parsed = parse_document(&body)?;
-            parsed
-                .value
-                .clone()
-                .into_object()
-                .and_then(|members| {
-                    members
-                        .into_iter()
-                        .find(|(key, _)| key == "mappings")
-                        .map(|(_, node)| written(&node))
-                })
-                .unwrap_or_else(|| "{}".to_owned())
+            Some(parse_document(&body)?)
         };
+        let requested_mappings = parsed.as_ref().and_then(|parsed| member_of(parsed, "mappings"));
+        let requested_aliases: Vec<String> = parsed
+            .as_ref()
+            .and_then(|parsed| member_of(parsed, "aliases"))
+            .and_then(|node| node.value.into_object())
+            .map(|members| members.into_iter().map(|(name, _)| name).collect())
+            .unwrap_or_default();
         let created = write(self.keyspace, |keys| {
             if keys.get(&index_key(index))?.is_some() {
                 return Ok(false);
             }
+            let applied = templates::template_for(keys, index)?;
+            let mappings = templates::mappings_text(&applied, requested_mappings.as_ref());
             keys.put(&index_key(index), mappings.as_bytes())?;
+            for alias in applied.aliases.iter().chain(&requested_aliases) {
+                aliases::add_alias(keys, alias, index)?;
+            }
             Ok(true)
         })?;
         if !created {

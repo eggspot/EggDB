@@ -24,6 +24,10 @@ fn alias_key(alias: &str, index: &str) -> Vec<u8> {
     key
 }
 
+pub(super) fn add_alias(keys: &mut dyn KeysWrite, alias: &str, index: &str) -> Result<(), String> {
+    keys.put(&alias_key(alias, index), b"{}")
+}
+
 pub(super) fn all_aliases(keys: &dyn KeysRead) -> Result<Vec<(String, String)>, String> {
     Ok(keys
         .scan(&[ALIAS_RECORD])?

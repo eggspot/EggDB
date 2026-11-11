@@ -1487,6 +1487,57 @@ fn stored_templates_and_scripts_are_kept_and_run_by_id() {
 }
 
 #[test]
+fn index_templates_shape_the_indices_their_patterns_match() {
+    let keyspace = MemoryKeyspace::default();
+    let api = api(&keyspace);
+    let component = api.answer(&request(
+        "PUT",
+        "/_component_template/hosts",
+        "{\"template\":{\"mappings\":{\"properties\":{\"host\":{\"type\":\"keyword\"}}}}}",
+    ));
+    assert_eq!(component.status, 200, "{}", body(&component));
+    let template = api.answer(&request(
+        "PUT",
+        "/_index_template/logs",
+        "{\"index_patterns\":[\"logs-*\"],\"priority\":10,\"composed_of\":[\"hosts\"],\"template\":{\"mappings\":{\"properties\":{\"at\":{\"type\":\"date\"}}},\"aliases\":{\"all-logs\":{}}}}",
+    ));
+    assert_eq!(template.status, 200, "{}", body(&template));
+    let lower = api.answer(&request(
+        "PUT",
+        "/_index_template/everything",
+        "{\"index_patterns\":\"*\",\"priority\":1,\"template\":{\"mappings\":{\"properties\":{\"host\":{\"type\":\"text\"}}}}}",
+    ));
+    assert_eq!(lower.status, 200);
+    let indexed = api.answer(&request("PUT", "/logs-1/_doc/1", "{\"host\":\"web-1\",\"at\":\"2026-11-12\"}"));
+    assert_eq!(indexed.status, 201, "{}", body(&indexed));
+    let shown = body(&api.answer(&request("GET", "/logs-1", "")));
+    assert!(shown.contains("\"host\":{\"type\":\"keyword\"}") && shown.contains("\"at\":{\"type\":\"date\"}"), "{shown}");
+    let aliased = body(&api.answer(&request("GET", "/all-logs/_count", "")));
+    assert!(aliased.contains("\"count\":1"), "{aliased}");
+    let found = body(&api.answer(&request("POST", "/logs-1/_search", "{\"query\":{\"term\":{\"host\":\"web-1\"}}}")));
+    assert!(found.contains("\"_id\":\"1\""), "{found}");
+    let created = api.answer(&request(
+        "PUT",
+        "/logs-2",
+        "{\"mappings\":{\"properties\":{\"host\":{\"type\":\"text\"}}}}",
+    ));
+    assert_eq!(created.status, 200);
+    let overridden = body(&api.answer(&request("GET", "/logs-2", "")));
+    assert!(overridden.contains("\"host\":{\"type\":\"text\"}") && overridden.contains("\"at\":{\"type\":\"date\"}"), "{overridden}");
+    let other = body(&api.answer(&request("PUT", "/metrics", "")));
+    assert!(other.contains("\"acknowledged\":true"), "{other}");
+    let other_mappings = body(&api.answer(&request("GET", "/metrics", "")));
+    assert!(other_mappings.contains("\"host\":{\"type\":\"text\"}"), "{other_mappings}");
+    let listed = body(&api.answer(&request("GET", "/_index_template/logs", "")));
+    assert!(listed.contains("\"name\":\"logs\"") && listed.contains("\"index_patterns\""), "{listed}");
+    let again = api.answer(&request("PUT", "/_index_template/logs?create=true", "{\"index_patterns\":\"x\"}"));
+    assert_eq!(again.status, 400);
+    assert_eq!(api.answer(&request("DELETE", "/_index_template/logs", "")).status, 200);
+    assert_eq!(api.answer(&request("GET", "/_index_template/logs", "")).status, 404);
+    assert_eq!(api.answer(&request("HEAD", "/_component_template/hosts", "")).status, 200);
+}
+
+#[test]
 fn msearch_template_renders_each_search_and_reports_a_bad_one_in_place() {
     let keyspace = MemoryKeyspace::default();
     let api = seeded(&keyspace);
