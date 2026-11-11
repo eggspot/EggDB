@@ -943,6 +943,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   and parser (`eggdb-lua`): **code written, unbuilt** (code-only mode, 2026-11-12, D667). The interpreter with
   its step budget and the base, `table` and `math` libraries: **code written, unbuilt** (code-only mode, 2026-11-12,
   D668). The `string` library with Lua patterns: **code written, unbuilt** (code-only mode, 2026-11-12, D669).
+  `cjson`, `bit` and `cmsgpack`: **code written, unbuilt** (code-only mode, 2026-11-12, D670).
 - Stream consumer groups (`XGROUP`, `XREADGROUP` with `BLOCK`, `XACK`, `XPENDING`, `XCLAIM`,
   `XAUTOCLAIM`, `XINFO`) as their own security-critical format part: group state kept with the
   stream in a new stored value kind 6, with pinned test vectors, truncation and byte-flip tests

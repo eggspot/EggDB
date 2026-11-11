@@ -4,10 +4,13 @@
 //! and no C library is involved.
 
 mod ast;
+mod bit_library;
 mod format;
 mod host;
 mod interpreter;
+mod json_library;
 mod lexer;
+mod msgpack_library;
 mod parser;
 mod pattern;
 mod stdlib;

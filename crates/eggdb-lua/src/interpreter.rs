@@ -74,6 +74,7 @@ enum Flow {
 pub struct Interpreter {
     pub(crate) globals: TableRef,
     pub(crate) string_library: TableRef,
+    pub(crate) json_null: TableRef,
     steps_left: u64,
     depth: usize,
 }
@@ -100,6 +101,7 @@ impl Interpreter {
         let mut interpreter = Self {
             globals: TableRef::new(),
             string_library: TableRef::new(),
+            json_null: TableRef::new(),
             steps_left: 0,
             depth: 0,
         };

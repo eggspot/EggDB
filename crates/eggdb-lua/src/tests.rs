@@ -149,3 +149,36 @@ fn format_follows_c_printf() {
     let values = run("return string.format('%5d|%-5s|%05.2f|%x|%g|%e|%q', 42, 'ab', 3.14159, 255, 0.0001, 12345.678, 'a\"b')").expect("runs");
     assert_eq!(text(&values, 0), "   42|ab   |03.14|ff|0.0001|1.234568e+04|\"a\\\"b\"");
 }
+
+#[test]
+fn cjson_round_trips_tables_and_null() {
+    let values = run("return cjson.encode({1, 2, 'x/y'}), cjson.encode({a = true}), cjson.encode({})").expect("runs");
+    assert_eq!(text(&values, 0), "[1,2,\"x\\/y\"]");
+    assert_eq!(text(&values, 1), "{\"a\":true}");
+    assert_eq!(text(&values, 2), "{}");
+    let values = run("local t = cjson.decode('{\"k\":[1,null,\"\\\\u00e9\"]}') return t.k[1], t.k[2] == cjson.null, t.k[3]").expect("runs");
+    assert_eq!(values[0].to_number(), Some(1.0));
+    assert_eq!(values[1], crate::Value::Boolean(true));
+    assert_eq!(text(&values, 2), "é");
+    assert!(run("return cjson.encode({[1] = 1, [100] = 2})").is_err());
+}
+
+#[test]
+fn bit_operations_wrap_to_signed_32_bits() {
+    let values = run("return bit.band(0xff, 0x0f), bit.bor(1, 2, 4), bit.lshift(1, 31), bit.tohex(255), bit.bnot(0)").expect("runs");
+    assert_eq!(values[0].to_number(), Some(15.0));
+    assert_eq!(values[1].to_number(), Some(7.0));
+    assert_eq!(values[2].to_number(), Some(-2_147_483_648.0));
+    assert_eq!(text(&values, 3), "000000ff");
+    assert_eq!(values[4].to_number(), Some(-1.0));
+}
+
+#[test]
+fn cmsgpack_packs_and_unpacks() {
+    let values = run("local packed = cmsgpack.pack({1, 2, 3}, 'hi', -5, 1.5) return #packed, cmsgpack.unpack(packed)").expect("runs");
+    assert_eq!(values[0].to_number(), Some(13.0));
+    assert!(matches!(&values[1], crate::Value::Table(_)));
+    assert_eq!(text(&values, 2), "hi");
+    assert_eq!(values[3].to_number(), Some(-5.0));
+    assert_eq!(values[4].to_number(), Some(1.5));
+}

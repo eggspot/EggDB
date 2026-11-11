@@ -197,6 +197,17 @@ impl TableRef {
         self.0.borrow().length()
     }
 
+    pub(crate) fn pairs(&self) -> Vec<(Value, Value)> {
+        let table = self.0.borrow();
+        let mut pairs = Vec::new();
+        let mut key = Value::Nil;
+        while let Ok(Some((next_key, value))) = table.next(&key) {
+            pairs.push((next_key.clone(), value));
+            key = next_key;
+        }
+        pairs
+    }
+
     pub(crate) fn identity(&self) -> usize {
         Rc::as_ptr(&self.0) as *const u8 as usize
     }

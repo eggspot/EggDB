@@ -694,3 +694,4 @@ its full title with its status.
 - [D667](decisions/D667.md) Code-only batch 315 (M7): eggdb-lua, part 1: the lexer and parser of Lua 5.1
 - [D668](decisions/D668.md) Code-only batch 316 (M7): eggdb-lua, part 2: the interpreter, step budget and the base, `table` and `math` libraries
 - [D669](decisions/D669.md) Code-only batch 317 (M7): eggdb-lua, part 3: the `string` library, Lua patterns and `string.format`
+- [D670](decisions/D670.md) Code-only batch 318 (M7): eggdb-lua, part 4: `cjson`, `bit` and `cmsgpack`
