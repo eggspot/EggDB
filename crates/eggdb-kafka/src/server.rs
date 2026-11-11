@@ -105,6 +105,15 @@ fn create_topics(
                     }
                 }
                 (Some("retention.ms" | "retention.bytes"), _) => retention = None,
+                (Some("cleanup.policy"), _) => match value.as_deref().map(str::trim) {
+                    Some("delete") => {}
+                    Some("compact" | "compact,delete" | "delete,compact") => {
+                        if let Some(kept) = retention.as_mut() {
+                            kept.compact = true;
+                        }
+                    }
+                    _ => retention = None,
+                },
                 _ => {}
             }
         }
@@ -133,7 +142,7 @@ fn create_topics(
         } else if topic.retention.is_none() {
             (
                 INVALID_CONFIG,
-                "retention.ms and retention.bytes take a whole number, -1 for no limit",
+                "retention.ms and retention.bytes take a whole number, -1 for no limit, and cleanup.policy is delete, compact or both",
             )
         } else {
             let retention = topic.retention.unwrap_or(log::Retention::UNLIMITED);

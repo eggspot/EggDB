@@ -27,10 +27,15 @@ const MAX_PARTITIONS: i32 = 1024;
 pub(crate) struct Retention {
     pub(crate) ms: i64,
     pub(crate) bytes: i64,
+    pub(crate) compact: bool,
 }
 
 impl Retention {
-    pub(crate) const UNLIMITED: Self = Self { ms: -1, bytes: -1 };
+    pub(crate) const UNLIMITED: Self = Self {
+        ms: -1,
+        bytes: -1,
+        compact: false,
+    };
 }
 
 fn retention_of(value: &[u8]) -> Retention {
@@ -41,7 +46,11 @@ fn retention_of(value: &[u8]) -> Retention {
             .map(i64::from_be_bytes)
     };
     match (field(4..12), field(12..20)) {
-        (Some(ms), Some(bytes)) => Retention { ms, bytes },
+        (Some(ms), Some(bytes)) => Retention {
+            ms,
+            bytes,
+            compact: value.get(20) == Some(&1),
+        },
         _ => Retention::UNLIMITED,
     }
 }
@@ -58,7 +67,7 @@ fn enforce_retention(
     partition: i32,
     retention: Retention,
 ) -> Result<(), String> {
-    if retention == Retention::UNLIMITED {
+    if retention.ms < 0 && retention.bytes < 0 {
         return Ok(());
     }
     let batches = keys.scan(&partition_prefix(topic, partition))?;
@@ -108,6 +117,7 @@ pub(crate) fn create_topic(
             let mut value = partitions.to_be_bytes().to_vec();
             value.extend_from_slice(&retention.ms.to_be_bytes());
             value.extend_from_slice(&retention.bytes.to_be_bytes());
+            value.push(u8::from(retention.compact));
             keys.put(&topic_key(topic), &value)?;
         }
         Ok(error::NONE)
@@ -335,6 +345,7 @@ pub(crate) fn append(
         };
         let retention = retention_of(&described);
         let mut next = next_offset(&*keys, topic, partition)?;
+        let started = next;
         let mut first = None;
         let mut producers = PartitionProducers::read(&*keys, topic, partition)?;
         let mut accepted = Vec::with_capacity(batches.len());
@@ -364,6 +375,10 @@ pub(crate) fn append(
         }
         producers.store(keys)?;
         enforce_retention(keys, topic, partition, retention)?;
+        let every = crate::compaction::COMPACT_EVERY;
+        if retention.compact && started / every != next / every {
+            crate::compaction::compact(keys, &partition_prefix(topic, partition), now_ms())?;
+        }
         Ok(Ok(first.unwrap_or(next)))
     })
 }

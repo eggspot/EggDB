@@ -6,6 +6,7 @@
 //! created on first use with one partition. Kafka is a trademark of the Apache Software
 //! Foundation; EggDB is compatible with its protocol.
 
+mod compaction;
 mod groups;
 mod log;
 mod producers;

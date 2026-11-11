@@ -640,3 +640,4 @@ its full title with its status.
 - [D613](decisions/D613.md) Code-only batch 261 (M16): AMQP x-death headers
 - [D614](decisions/D614.md) Code-only batch 262 (M16): AMQP queue TTL (x-expires)
 - [D615](decisions/D615.md) Code-only batch 263 (M16): AMQP priority queues
+- [D616](decisions/D616.md) Code-only batch 264 (M16): Kafka log compaction
