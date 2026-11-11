@@ -1,0 +1,15 @@
+[package]
+name = "eggdb-sqllogictest"
+description = "Runs sqllogictest files against EggDB's SQLite dialect and reports the pass rate, failing below a stated minimum."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+eggdb = { path = "../eggdb" }
+eggdb-crypto = { path = "../eggdb-crypto" }
+
+[lints]
+workspace = true

@@ -688,3 +688,4 @@ its full title with its status.
 - [D661](decisions/D661.md) Code-only batch 309 (M10): AES decryption, and DBMS_CRYPTO.ENCRYPT and DECRYPT
 - [D662](decisions/D662.md) Code-only batch 310 (M2): eggdb-fuzz, a long-running fuzzer of the decoders of untrusted bytes
 - [D663](decisions/D663.md) Code-only batch 311 (M6c): key_length in MySQL's EXPLAIN FORMAT=JSON
+- [D664](decisions/D664.md) Code-only batch 312 (M5): eggdb-sqllogictest, a runner of sqllogictest files
