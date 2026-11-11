@@ -28,12 +28,12 @@ pub(super) fn run_scheduled_jobs(
         if second > last_second {
             last_second = second;
             let _ = eggdb_sql::jobs::run_due_second_jobs(store, second);
+            let _ = eggdb_sql::jobs::run_due_events(store, second);
         }
         let now = epoch_minute();
         if now > last {
             last = now;
             let _ = eggdb_sql::jobs::run_due_jobs(store, now * 60);
-            let _ = eggdb_sql::jobs::run_due_events(store, now * 60);
             let _ = eggdb_sql::jobs::run_due_agent_jobs(store, now * 60);
             let _ = eggdb_sql::jobs::run_due_scheduler_jobs(store, now * 60);
         }
