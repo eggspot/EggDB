@@ -1410,6 +1410,12 @@ impl Evaluator<'_> {
             crate::parser::mysql_match::MATCH_FUNCTION => {
                 return crate::mysql_fulltext::match_against(&self.arguments(arguments)?);
             }
+            crate::sqlserver_fulltext::CONTAINS_FUNCTION => {
+                return crate::sqlserver_fulltext::contains(&self.arguments(arguments)?);
+            }
+            crate::sqlserver_fulltext::FREETEXT_FUNCTION => {
+                return crate::sqlserver_fulltext::freetext(&self.arguments(arguments)?);
+            }
             "to_tsvector"
             | "to_tsquery"
             | "plainto_tsquery"

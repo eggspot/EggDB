@@ -176,6 +176,9 @@ fn added_function_type(
         | "normalize" => Some(SqlType::Text),
         "ts_rank" | "ts_rank_cd" => Some(SqlType::Real),
         crate::parser::mysql_match::MATCH_FUNCTION => Some(SqlType::Double),
+        crate::sqlserver_fulltext::CONTAINS_FUNCTION | crate::sqlserver_fulltext::FREETEXT_FUNCTION => {
+            Some(SqlType::Boolean)
+        }
         "l2_distance" | "cosine_distance" | "inner_product" | "l1_distance" | "vector_norm"
         | "hamming_distance" | "jaccard_distance" => Some(SqlType::Double),
         "subvector" | "binary_quantize" => Some(SqlType::Text),

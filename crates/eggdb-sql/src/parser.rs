@@ -7,6 +7,7 @@ mod databases;
 mod generated;
 mod group_concat;
 pub(crate) mod mysql_match;
+mod sqlserver_fulltext;
 mod grouping_sets;
 mod hierarchy;
 mod indexes;
@@ -5189,6 +5190,17 @@ impl<'t> Parser<'t> {
         }
         if text == "match" && self.mysql() && self.peek_kind() == &TokenKind::LeftParen {
             return self.mysql_match(&name);
+        }
+        if (text.eq_ignore_ascii_case("contains") || text.eq_ignore_ascii_case("freetext"))
+            && self.sqlserver()
+            && self.peek_kind() == &TokenKind::LeftParen
+        {
+            let function = if text.eq_ignore_ascii_case("contains") {
+                crate::sqlserver_fulltext::CONTAINS_FUNCTION
+            } else {
+                crate::sqlserver_fulltext::FREETEXT_FUNCTION
+            };
+            return self.sqlserver_full_text(&name, function);
         }
         if text == "group_concat"
             && (self.sqlite() || self.mysql())
