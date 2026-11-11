@@ -6,6 +6,7 @@
 mod algorithms;
 mod geojson;
 mod mvt;
+mod s2;
 mod operations;
 mod tile_geometry;
 mod tiles;
@@ -15,6 +16,7 @@ mod wkt;
 pub use algorithms::{area, contains, distance, envelope, intersects, length, sphere_distance};
 pub use geojson::to_geojson;
 pub use mvt::{MvtFeature, MvtValue, encode_layer};
+pub use s2::{s2_cell_id, s2_token};
 pub use operations::{
     centroid, convex_hull, flipped, invalidity, parts, perimeter, reversed, scaled, simplified,
     translated,

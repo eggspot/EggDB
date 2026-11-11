@@ -4,7 +4,7 @@ use crate::types::{SqlType, Value};
 use eggdb_geo::{Coord, Geometry, Spatial};
 
 /// The spatial functions EggDB answers, PostGIS's names (also MySQL's `ST_` functions).
-pub(crate) const FUNCTIONS: [&str; 60] = [
+pub(crate) const FUNCTIONS: [&str; 62] = [
     "st_centroid",
     "st_perimeter",
     "st_convexhull",
@@ -65,12 +65,16 @@ pub(crate) const FUNCTIONS: [&str; 60] = [
     "st_tileenvelope",
     "st_geohash",
     "st_asmvtgeom",
+    "s2_cellidfrompoint",
+    "s2_cellidtotoken",
 ];
 
 /// The result type of a spatial function.
 pub(crate) fn result_type(name: &str) -> Option<SqlType> {
     Some(match name {
         "st_asbinary" | "st_asewkb" => SqlType::Bytea,
+        "s2_cellidfrompoint" => SqlType::BigInt,
+        "s2_cellidtotoken" => SqlType::Text,
         "st_x" | "st_y" | "st_distance" | "st_area" | "st_length" | "st_distancesphere"
         | "st_perimeter" | "st_xmin" | "st_xmax" | "st_ymin" | "st_ymax" => SqlType::Double,
         "st_srid" | "st_npoints" | "st_numgeometries" | "st_numinteriorrings" => {
@@ -501,6 +505,36 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
                 geometry,
             })
         }
+        ("s2_cellidfrompoint", [_] | [_, _]) => {
+            let Geometry::Point(Some(point)) = spatial(0)?.geometry else {
+                return Err(SqlError::new(
+                    SqlState::INVALID_PARAMETER_VALUE,
+                    "S2_CELLIDFROMPOINT needs a point",
+                ));
+            };
+            let level = match arguments.get(1) {
+                None => 30,
+                Some(value) => match value.as_integer() {
+                    Some(level @ 0..=30) => level as u32,
+                    _ => {
+                        return Err(SqlError::new(
+                            SqlState::INVALID_PARAMETER_VALUE,
+                            "S2_CELLIDFROMPOINT: the level must be from 0 to 30",
+                        ));
+                    }
+                },
+            };
+            Value::BigInt(eggdb_geo::s2_cell_id(point.y, point.x, level) as i64)
+        }
+        ("s2_cellidtotoken", [id]) => match id.as_integer() {
+            Some(id) => Value::Text(eggdb_geo::s2_token(id as u64)),
+            None => {
+                return Err(SqlError::new(
+                    SqlState::INVALID_PARAMETER_VALUE,
+                    "S2_CELLIDTOTOKEN needs a cell id",
+                ));
+            }
+        },
         ("st_tileenvelope", [zoom, x, y]) => {
             let whole = |value: &Value, what: &str| -> SqlResult<u64> {
                 let number = number(value)?;

@@ -1278,7 +1278,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - SQL Server's `geometry` and `geography` types with their methods (D19, D204).
 - Vector tiles (`ST_AsMVT`, `ST_AsMVTGeom`), and H3 and S2 indexes (D57, D250). `ST_AsMVTGeom`:
   **code written, unbuilt** (code-only mode, 2026-11-11, D520); `ST_AsMVT`: **code written, unbuilt** (code-only
-  mode, 2026-11-12, D608). Left: H3 and S2.
+  mode, 2026-11-12, D608); S2 cell ids: **code written, unbuilt** (code-only mode, 2026-11-12, D609). Left: H3.
 - Raster, GeoTIFF and Cloud-Optimized GeoTIFF (D57).
 - Topology and routing at pgRouting's level (D57).
 - The OGC APIs (D57).

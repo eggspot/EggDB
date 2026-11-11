@@ -168,3 +168,23 @@ fn st_asmvt_encodes_a_layer_of_the_rows_tile_geometries() {
     );
     assert_eq!(empty, run(&mut session, "SELECT 0"));
 }
+
+#[test]
+fn s2_cell_ids_and_tokens_come_from_points() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(&mut session, "CREATE EXTENSION IF NOT EXISTS postgis");
+    assert_eq!(
+        run(&mut session, "SELECT S2_CellIdFromPoint(ST_MakePoint(0, 0))"),
+        run(&mut session, "SELECT 1152921504606846977::bigint")
+    );
+    assert_eq!(
+        run(&mut session, "SELECT S2_CellIdToToken(S2_CellIdFromPoint(ST_MakePoint(0, 0), 0))"),
+        run(&mut session, "SELECT '1'")
+    );
+    assert!(
+        session
+            .execute("SELECT S2_CellIdFromPoint(ST_MakePoint(0, 0), 31)", &mut |_| {})
+            .is_err()
+    );
+}
