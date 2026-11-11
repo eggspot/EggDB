@@ -586,7 +586,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (D383) and `VACUUM`/`REINDEX` accepted (D384), and `VACUUM INTO`: **code written, unbuilt** (code-only mode, 2026-11-12, D631); `GLOB` classes and temporary views are built (D299,
   D151). Check: the SQLite suite.
 - SQLite's own text in `sqlite_schema` after `RENAME COLUMN`, `DROP COLUMN` and renamed
-  references in views and triggers (D273, D294).
+  references in views and triggers (D273, D294). Tables' and indexes' text after `RENAME COLUMN` and
+  `DROP COLUMN`: **code written, unbuilt** (code-only mode, 2026-11-12, D642). Left: renamed references in
+  views and triggers.
 - sqllogictest run with its pass rate published and a stated minimum (D10, D45).
 - `libsqlite3`: `sqlite3_create_function`, `sqlite3_backup_*` and the rest of the interface, with
   rows streamed per step (D181). Check: the sqlite3 shell and Python's `sqlite3` module in CI.

@@ -308,6 +308,7 @@ impl AlteredTexts {
         let shown_name = base_name(table);
         let mut text = self.table;
         let mut renamed = false;
+        let mut column_renames: Vec<(&str, &str)> = Vec::new();
         for action in actions {
             match action {
                 AlterAction::Accepted => {}
@@ -318,6 +319,15 @@ impl AlteredTexts {
                 AlterAction::RenameTable(_) => {
                     renamed = true;
                     text = text.and_then(|kept| renamed_table_text(&kept, shown_name));
+                }
+                AlterAction::RenameColumn { from, to } => {
+                    column_renames.push((&from.text, &to.text));
+                    text = text.and_then(|kept| {
+                        renamed_column_text(&kept, shown_name, &from.text, &to.text)
+                    });
+                }
+                AlterAction::DropColumn { name, .. } => {
+                    text = text.and_then(|kept| dropped_column_text(&kept, &name.text));
                 }
                 _ => return Ok(()),
             }
@@ -334,11 +344,14 @@ impl AlteredTexts {
             let Some(index) = index_of(&schema, &name) else {
                 continue;
             };
-            let edited = if renamed {
+            let mut edited = if renamed {
                 renamed_index_text(&original, shown_name)
             } else {
                 Some(original)
             };
+            for (from, to) in &column_renames {
+                edited = edited.and_then(|kept| renamed_index_column_text(&kept, from, to));
+            }
             if let Some(edited) = edited {
                 remember(
                     writer,
@@ -386,6 +399,161 @@ fn renamed_index_text(text: &str, new_table: &str) -> Option<String> {
     let on = tokens.iter().position(|token| is_word(token, "on"))?;
     let table = tokens.get(on + 1).filter(|token| is_name(token))?;
     replaced(text, table.start, table.end, &quoted(new_table))
+}
+
+fn identifier_text<'t>(token: &'t Token<'_>) -> Option<&'t str> {
+    match &token.kind {
+        TokenKind::Word(word) => Some(word.as_ref()),
+        TokenKind::QuotedIdentifier(name) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+fn names_column(token: &Token<'_>, column: &str) -> bool {
+    identifier_text(token).is_some_and(|name| name.eq_ignore_ascii_case(column))
+}
+
+fn with_edits(text: &str, mut spans: Vec<(usize, usize)>, with: &str) -> Option<String> {
+    spans.sort_unstable();
+    let mut edited = text.to_owned();
+    for (start, end) in spans.into_iter().rev() {
+        edited = replaced(&edited, start, end, with)?;
+    }
+    Some(edited)
+}
+
+fn renamed_column_text(text: &str, table: &str, from: &str, to: &str) -> Option<String> {
+    let tokens = tokenize_in(text, Dialect::Sqlite).ok()?;
+    let open = tokens
+        .iter()
+        .position(|token| token.kind == TokenKind::LeftParen)?;
+    let mut depth = 0usize;
+    let mut element_start = false;
+    let mut expecting_referenced = false;
+    let mut referenced_list: Option<usize> = None;
+    let mut other_table_columns = false;
+    let mut spans = Vec::new();
+    for token in tokens.get(open..)? {
+        match token.kind {
+            TokenKind::LeftParen => {
+                depth += 1;
+                if depth == 1 {
+                    element_start = true;
+                }
+                if other_table_columns {
+                    referenced_list = Some(depth);
+                    other_table_columns = false;
+                }
+                continue;
+            }
+            TokenKind::RightParen => {
+                if referenced_list == Some(depth) {
+                    referenced_list = None;
+                }
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    break;
+                }
+                continue;
+            }
+            TokenKind::Comma if depth == 1 => {
+                element_start = true;
+                continue;
+            }
+            TokenKind::End => return None,
+            _ => {}
+        }
+        let first = std::mem::replace(&mut element_start, false);
+        if is_word(token, "references") {
+            expecting_referenced = true;
+            continue;
+        }
+        if expecting_referenced {
+            expecting_referenced = false;
+            other_table_columns = identifier_text(token)
+                .is_some_and(|name| !name.eq_ignore_ascii_case(table));
+            continue;
+        }
+        other_table_columns = false;
+        let renames = (depth == 1 && first) || (depth >= 2 && referenced_list.is_none());
+        if renames && names_column(token, from) {
+            spans.push((token.start, token.end));
+        }
+    }
+    if spans.is_empty() {
+        return None;
+    }
+    with_edits(text, spans, &quoted(to))
+}
+
+fn renamed_index_column_text(text: &str, from: &str, to: &str) -> Option<String> {
+    let tokens = tokenize_in(text, Dialect::Sqlite).ok()?;
+    let on = tokens.iter().position(|token| is_word(token, "on"))?;
+    let open = on
+        + tokens
+            .get(on..)?
+            .iter()
+            .position(|token| token.kind == TokenKind::LeftParen)?;
+    let spans: Vec<(usize, usize)> = tokens
+        .get(open..)?
+        .iter()
+        .filter(|token| names_column(token, from))
+        .map(|token| (token.start, token.end))
+        .collect();
+    with_edits(text, spans, &quoted(to))
+}
+
+fn dropped_column_text(text: &str, column: &str) -> Option<String> {
+    let tokens = tokenize_in(text, Dialect::Sqlite).ok()?;
+    let open = tokens
+        .iter()
+        .position(|token| token.kind == TokenKind::LeftParen)?;
+    let mut depth = 0usize;
+    let mut elements: Vec<(usize, usize, Option<usize>, Option<usize>)> = Vec::new();
+    let mut first: Option<usize> = None;
+    let mut last = 0usize;
+    let mut comma_before: Option<usize> = None;
+    for (index, token) in tokens.iter().enumerate().skip(open) {
+        match token.kind {
+            TokenKind::LeftParen => {
+                depth += 1;
+                if depth == 1 {
+                    continue;
+                }
+            }
+            TokenKind::Comma if depth == 1 => {
+                elements.push((first.take()?, last, comma_before, Some(index)));
+                comma_before = Some(index);
+                continue;
+            }
+            TokenKind::RightParen if depth == 1 => {
+                elements.push((first.take()?, last, comma_before, None));
+                break;
+            }
+            TokenKind::RightParen => depth = depth.checked_sub(1)?,
+            TokenKind::End => return None,
+            _ => {}
+        }
+        if depth >= 1 {
+            if first.is_none() {
+                first = Some(index);
+            }
+            last = index;
+        }
+    }
+    let (start, end, before, after) = elements.into_iter().find(|(start, ..)| {
+        let token = &tokens[*start];
+        names_column(token, column)
+            && !TABLE_CONSTRAINT_WORDS
+                .iter()
+                .any(|word| is_word(token, word))
+    })?;
+    let (cut_from, cut_to) = match (before, after) {
+        (Some(comma), _) => (tokens[comma].start, tokens[end].end),
+        (None, Some(comma)) => (tokens[start].start, tokens.get(comma + 1)?.start),
+        (None, None) => return None,
+    };
+    replaced(text, cut_from, cut_to, "")
 }
 
 fn added_column_text(text: &str, column: &str) -> Option<String> {

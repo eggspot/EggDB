@@ -666,3 +666,4 @@ its full title with its status.
 - [D639](decisions/D639.md) Code-only batch 287 (M2): FSE-compressed Huffman weights in the Zstandard encoder
 - [D640](decisions/D640.md) Code-only batch 288 (M11): reading dictionary-encoded Arrow columns
 - [D641](decisions/D641.md) Code-only batch 289 (M11): reading compressed Arrow batches
+- [D642](decisions/D642.md) Code-only batch 290 (M5): SQLite's own table text after RENAME COLUMN and DROP COLUMN

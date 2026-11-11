@@ -285,10 +285,26 @@ fn sqlite_schema_edits_the_kept_text_after_add_column_and_rename() {
         &mut session,
         "ALTER TABLE animals RENAME COLUMN age TO years",
     );
-    let renamed = sqlite_text(&mut session, "animals");
-    assert!(
-        renamed.starts_with("sql\nCREATE TABLE animals (") && renamed.contains("years"),
-        "{renamed}"
+    assert_eq!(
+        sqlite_text(&mut session, "animals"),
+        "sql\nCREATE TABLE \"animals\"(id integer primary key, name text, \"years\"  integer DEFAULT 0, UNIQUE (name))\nSELECT 1"
+    );
+    last(&mut session, "ALTER TABLE animals RENAME COLUMN name TO label");
+    assert_eq!(
+        sqlite_text(&mut session, "animals"),
+        "sql\nCREATE TABLE \"animals\"(id integer primary key, \"label\" text, \"years\"  integer DEFAULT 0, UNIQUE (\"label\"))\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT sql FROM sqlite_schema WHERE name = 'by_name'"
+        ),
+        "sql\nCREATE INDEX by_name on \"animals\"(\"label\"  desc)\nSELECT 1"
+    );
+    last(&mut session, "ALTER TABLE animals DROP COLUMN years");
+    assert_eq!(
+        sqlite_text(&mut session, "animals"),
+        "sql\nCREATE TABLE \"animals\"(id integer primary key, \"label\" text, UNIQUE (\"label\"))\nSELECT 1"
     );
     last(&mut session, "DROP TABLE animals");
     last(&mut session, "CREATE TABLE animals(kind text)");
