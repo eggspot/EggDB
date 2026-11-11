@@ -679,3 +679,4 @@ its full title with its status.
 - [D652](decisions/D652.md) Code-only batch 300 (M8): an Italian stemmer and the italian text-search configuration
 - [D653](decisions/D653.md) Code-only batch 301 (M8): a Russian stemmer and the russian text-search configuration
 - [D654](decisions/D654.md) Code-only batch 302 (M8): a Dutch stemmer and the dutch text-search configuration
+- [D655](decisions/D655.md) Code-only batch 303 (M8): a Portuguese stemmer and the portuguese text-search configuration

@@ -1,5 +1,5 @@
 //! EggDB's full-text search (D195): analyzers ([`Config`]) that turn text into lexemes with an
-//! English, German, Dutch, Spanish, Italian, Russian, Swedish, Norwegian and Danish stemmers written from the published Snowball algorithm descriptions, text-search
+//! English, German, Dutch, Spanish, Portuguese, Italian, Russian, Swedish, Norwegian and Danish stemmers written from the published Snowball algorithm descriptions, text-search
 //! vectors ([`TsVector`]) and queries ([`TsQuery`]) in PostgreSQL's text forms with phrase and
 //! prefix matching, and ranking ([`ts_rank`], [`bm25`]). It depends on nothing, so every
 //! protocol and query language can search with it.
@@ -8,6 +8,7 @@ mod dutch;
 mod english;
 mod german;
 mod italian;
+mod portuguese;
 mod russian;
 mod scandinavian;
 mod spanish;
