@@ -578,6 +578,7 @@ pub(crate) enum RaiseItem {
     Datatype,
     Table,
     Schema,
+    MySqlErrno,
 }
 
 const RAISE_ITEMS: [(&str, RaiseItem); 9] = [

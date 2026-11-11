@@ -129,6 +129,7 @@ pub(crate) struct RaisedFields {
     pub(crate) detail: Option<String>,
     pub(crate) hint: Option<String>,
     pub(crate) state: Option<SqlState>,
+    pub(crate) vendor_code: Option<u16>,
 }
 
 impl RaisedFields {
@@ -141,6 +142,9 @@ impl RaisedFields {
         }
         if let Some(hint) = self.hint {
             error = error.with_hint(hint);
+        }
+        if let Some(code) = self.vendor_code {
+            error = error.with_vendor_code(code);
         }
         error
     }

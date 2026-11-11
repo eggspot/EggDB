@@ -3469,6 +3469,7 @@ impl<'s> Session<'s> {
             }),
             Statement::Call(call) if dialect == Dialect::MySql => {
                 let mut assigned = Vec::new();
+                crate::mysql_variables::take_routine_assignments();
                 let result = self.write("CALL", |writer, tables| {
                     for argument in &mut call.arguments {
                         binding.condition(&*writer, tables, argument)?;
@@ -3485,6 +3486,7 @@ impl<'s> Session<'s> {
                     }
                     Ok(QueryResult::command("CALL"))
                 });
+                let applied = self.apply_routine_assignments();
                 if result.is_ok() {
                     for (name, value) in assigned {
                         Arc::make_mut(&mut self.settings)
@@ -3492,7 +3494,7 @@ impl<'s> Session<'s> {
                             .set_user(&name, value);
                     }
                 }
-                result
+                result.and_then(|result| applied.map(|()| result))
             }
             Statement::Call(call) if self.runs_procedures_nonatomic() => {
                 self.write_nonatomic("CALL", |control, tables| {

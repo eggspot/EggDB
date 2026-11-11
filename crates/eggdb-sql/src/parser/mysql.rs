@@ -941,8 +941,8 @@ impl<'t> Parser<'t> {
                 system = self.word_text().ok_or_else(|| self.unexpected())?;
                 self.at += 1;
             }
-            let value = self
-                .settings_or_default(|settings| settings.mysql.system(&system))
+            let value = crate::mysql_variables::routine_system(&system)
+                .or_else(|| self.settings_or_default(|settings| settings.mysql.system(&system)))
                 .ok_or_else(|| {
                     SqlError::new(
                         SqlState::UNDEFINED_OBJECT,
@@ -952,7 +952,9 @@ impl<'t> Parser<'t> {
                 })?;
             return Ok(value_expr(value, position));
         }
-        let value = self.settings_or_default(|settings| settings.mysql.user(variable_name(name)));
+        let value = crate::mysql_variables::routine_user(variable_name(name)).unwrap_or_else(|| {
+            self.settings_or_default(|settings| settings.mysql.user(variable_name(name)))
+        });
         Ok(value_expr(value, position))
     }
 

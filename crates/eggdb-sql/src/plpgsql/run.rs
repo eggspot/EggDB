@@ -1061,6 +1061,11 @@ impl<'r> Run<'r> {
     }
 
     fn setting_statement(&mut self, statement: &Statement) -> Option<SqlResult<QueryResult>> {
+        if self.dialect() == Dialect::MySql
+            && let Statement::MySql(crate::ast::MySqlStatement::Set(assignments)) = statement
+        {
+            return Some(self.mysql_assignments(assignments));
+        }
         if self.dialect() != Dialect::PostgreSql {
             return None;
         }
@@ -1077,6 +1082,31 @@ impl<'r> Run<'r> {
             self.change_setting(name, value, scope)
                 .map(|()| QueryResult::command(tag)),
         )
+    }
+
+    fn mysql_assignments(
+        &mut self,
+        assignments: &[crate::ast::Assignment],
+    ) -> SqlResult<QueryResult> {
+        for assignment in assignments {
+            let value = match &assignment.value {
+                crate::ast::AssignedValue::Default => None,
+                crate::ast::AssignedValue::Word(word) => Some(Value::Text(word.clone())),
+                crate::ast::AssignedValue::Expr(expr) => {
+                    self.share_frame();
+                    let value = crate::eval::Evaluator {
+                        scope: crate::eval::Scope::empty(),
+                        row: &[],
+                        correlation: None,
+                    }
+                    .eval(expr, None);
+                    self.adopt_frame();
+                    Some(value?)
+                }
+            };
+            crate::mysql_variables::record_routine_assignment(assignment.target.clone(), value);
+        }
+        Ok(QueryResult::command("SET"))
     }
 
     fn execute_changing_settings(
@@ -2316,6 +2346,15 @@ impl<'r> Run<'r> {
                 RaiseItem::Detail => fields.detail = Some(text),
                 RaiseItem::Hint => fields.hint = Some(text),
                 RaiseItem::Errcode => fields.state = Some(errcode(&text)?),
+                RaiseItem::MySqlErrno => {
+                    fields.vendor_code = Some(text.trim().parse::<u16>().map_err(|_| {
+                        SqlError::new(
+                            SqlState::SYNTAX_ERROR,
+                            format!("Variable 'mysql_errno' can't be set to the value of '{text}'"),
+                        )
+                        .with_vendor_code(1231)
+                    })?);
+                }
                 RaiseItem::Column
                 | RaiseItem::Constraint
                 | RaiseItem::Datatype

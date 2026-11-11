@@ -896,8 +896,9 @@ SECURITY`, `COMMENT`, `LANGUAGE SQL`). The body is one statement or a compound s
 argument written as a user variable (`@total`) receives the value. When a statement inside the
 procedure fails, only that statement is undone: the statements before it keep their changes
 (committed in autocommit mode), as in MySQL (D370). `DROP PROCEDURE` and `DROP
-FUNCTION` take `IF EXISTS`. Not yet: setting user or system variables inside a body,
-`SIGNAL ... SET MYSQL_ERRNO`, and events.
+FUNCTION` take `IF EXISTS`. User and system variables set inside a body
+reach the session when the `CALL` ends (D419); a stored function called from a `SELECT` can't
+set them yet. Not yet: events.
 
 ## Connecting with mysql
 

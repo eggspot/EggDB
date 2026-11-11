@@ -554,6 +554,22 @@ impl<'s> Session<'s> {
                 .eval(expr, None)?,
             ),
         };
+        self.assign_value(target, value)
+    }
+
+    pub(super) fn apply_routine_assignments(&mut self) -> SqlResult<()> {
+        let mut outcome = Ok(());
+        for (target, value) in crate::mysql_variables::take_routine_assignments() {
+            if let Err(error) = self.assign_value(&target, value)
+                && outcome.is_ok()
+            {
+                outcome = Err(error);
+            }
+        }
+        outcome
+    }
+
+    fn assign_value(&mut self, target: &VariableTarget, value: Option<Value>) -> SqlResult<()> {
         match target {
             VariableTarget::User(name) => {
                 Arc::make_mut(&mut self.settings)

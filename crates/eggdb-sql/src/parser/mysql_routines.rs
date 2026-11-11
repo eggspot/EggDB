@@ -841,7 +841,11 @@ impl<'p, 't> Compiler<'p, 't> {
                         item: RaiseItem::Message,
                         value,
                     }),
-                    "mysql_errno" | "class_origin" | "subclass_origin" | "constraint_catalog"
+                    "mysql_errno" => options.push(RaiseOption {
+                        item: RaiseItem::MySqlErrno,
+                        value,
+                    }),
+                    "class_origin" | "subclass_origin" | "constraint_catalog"
                     | "constraint_schema" | "constraint_name" | "catalog_name" | "schema_name"
                     | "table_name" | "column_name" | "cursor_name" => {}
                     _ => {

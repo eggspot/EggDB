@@ -443,3 +443,4 @@ its full title with its status.
 - [D416](decisions/D416.md) Code-only batch 63 (M10): MySQL's `ON UPDATE CURRENT_TIMESTAMP` (table definition format 16)
 - [D417](decisions/D417.md) Code-only batch 64 (M10): MySQL's `date + INTERVAL n unit` operator
 - [D418](decisions/D418.md) Code-only batch 65 (M10): MySQL stored programs' handlers, cursors, named conditions, `RESIGNAL` and `GET DIAGNOSTICS`
+- [D419](decisions/D419.md) Code-only batch 66 (M10): variables set inside MySQL stored programs and `SIGNAL ... SET MYSQL_ERRNO`

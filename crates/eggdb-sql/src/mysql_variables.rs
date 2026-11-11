@@ -1,5 +1,56 @@
+use crate::ast::VariableTarget;
 use crate::types::Value;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+
+thread_local! {
+    static ROUTINE_ASSIGNMENTS: RefCell<Vec<(VariableTarget, Option<Value>)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Records a `SET @x = ...` or `SET SESSION x = ...` run inside a MySQL stored program; the
+/// session applies the assignments once the `CALL` ends.
+pub(crate) fn record_routine_assignment(target: VariableTarget, value: Option<Value>) {
+    ROUTINE_ASSIGNMENTS.with(|assignments| {
+        if let Ok(mut assignments) = assignments.try_borrow_mut() {
+            assignments.push((target, value));
+        }
+    });
+}
+
+fn routine_assignment(wanted: impl Fn(&VariableTarget) -> bool) -> Option<Option<Value>> {
+    ROUTINE_ASSIGNMENTS.with(|assignments| {
+        let assignments = assignments.try_borrow().ok()?;
+        assignments
+            .iter()
+            .rev()
+            .find(|(target, _)| wanted(target))
+            .map(|(_, value)| value.clone())
+    })
+}
+
+pub(crate) fn routine_user(name: &str) -> Option<Value> {
+    routine_assignment(
+        |target| matches!(target, VariableTarget::User(found) if found.eq_ignore_ascii_case(name)),
+    )
+    .map(|value| value.unwrap_or(Value::Null))
+}
+
+pub(crate) fn routine_system(name: &str) -> Option<Value> {
+    routine_assignment(
+        |target| matches!(target, VariableTarget::System(found) if found.eq_ignore_ascii_case(name)),
+    )
+    .flatten()
+}
+
+pub(crate) fn take_routine_assignments() -> Vec<(VariableTarget, Option<Value>)> {
+    ROUTINE_ASSIGNMENTS.with(|assignments| {
+        assignments
+            .try_borrow_mut()
+            .map(|mut assignments| std::mem::take(&mut *assignments))
+            .unwrap_or_default()
+    })
+}
 
 /// The MySQL release whose behaviour EggDB's MySQL dialect follows, as clients read it from
 /// `@@version` and the protocol's handshake.
