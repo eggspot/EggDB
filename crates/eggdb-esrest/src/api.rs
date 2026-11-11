@@ -1137,6 +1137,26 @@ impl<'k> Api<'k> {
         })
     }
 
+    fn field_types<'i>(
+        &self,
+        indices: impl Iterator<Item = &'i str>,
+    ) -> Result<crate::mappings::FieldTypes, Failure> {
+        let mut names: Vec<&str> = indices.collect();
+        names.sort_unstable();
+        names.dedup();
+        let mut types = crate::mappings::FieldTypes::default();
+        for name in names {
+            let stored = read(self.keyspace, |keys| keys.get(&index_key(name)))?;
+            if let Some(mappings) = stored
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .and_then(|text| parse_document(&text).ok())
+            {
+                types.add_mappings(&mappings);
+            }
+        }
+        Ok(types)
+    }
+
     fn gather(
         &self,
         indices: Option<&[&str]>,
@@ -1274,6 +1294,11 @@ impl<'k> Api<'k> {
             })
             .unzip();
         let query = expand_wildcard_fields(query, &documents);
+        let query = crate::mappings::apply(
+            query,
+            &self.field_types(gathered.iter().map(|(index, _, _)| index.as_str()))?,
+            now_millis(),
+        );
         let highlight = match member("highlight") {
             Some(node) if !count_only => match crate::highlight::highlight_of(&node, &query) {
                 Ok(highlight) => Some(highlight),
@@ -2060,6 +2085,12 @@ fn refreshed() -> Response {
         200,
         "{\"_shards\":{\"total\":1,\"successful\":1,\"failed\":0}}".to_owned(),
     )
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
 }
 
 fn epoch_and_clock() -> (u64, String) {

@@ -10,6 +10,7 @@ mod aggregations;
 mod api;
 mod highlight;
 mod json_out;
+mod mappings;
 mod mustache;
 mod query;
 mod query_string;

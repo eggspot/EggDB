@@ -1445,3 +1445,48 @@ fn msearch_template_renders_each_search_and_reports_a_bad_one_in_place() {
     assert!(text.contains("\"_id\":\"3\""), "{text}");
     assert!(text.contains("general_script_exception"), "{text}");
 }
+
+#[test]
+fn dynamic_keyword_subfields_and_mapped_types_shape_term_and_range() {
+    let keyspace = MemoryKeyspace::default();
+    let api = seeded(&keyspace);
+    let fables = body(&api.answer(&request(
+        "POST",
+        "/books/_search",
+        "{\"query\":{\"term\":{\"genre.keyword\":\"fable\"}}}",
+    )));
+    assert!(
+        fables.contains("\"_id\":\"1\"") && fables.contains("\"_id\":\"3\"") && !fables.contains("\"_id\":\"2\""),
+        "{fables}"
+    );
+    let created = api.answer(&request(
+        "PUT",
+        "/logs",
+        "{\"mappings\":{\"properties\":{\"at\":{\"type\":\"date\"},\"client\":{\"type\":\"ip\"},\"msg\":{\"type\":\"text\"}}}}",
+    ));
+    assert_eq!(created.status, 200, "{}", body(&created));
+    for (id, document) in [
+        ("1", "{\"at\":\"2024-01-15T10:00:00Z\",\"client\":\"10.1.2.3\",\"msg\":\"Disk ERROR found\"}"),
+        ("2", "{\"at\":\"2024-02-03\",\"client\":\"192.168.0.9\",\"msg\":\"all good\"}"),
+        ("3", "{\"at\":1704067200000,\"client\":\"10.9.0.1\",\"msg\":\"error again\"}"),
+    ] {
+        let indexed = api.answer(&request("PUT", &format!("/logs/_doc/{id}?refresh=true"), document));
+        assert!(indexed.status < 300, "{}", body(&indexed));
+    }
+    let search = |query: &str| body(&api.answer(&request("POST", "/logs/_search", query)));
+    let january = search("{\"query\":{\"range\":{\"at\":{\"gte\":\"2024-01-01\",\"lt\":\"2024-02-01\"}}}}");
+    assert!(
+        january.contains("\"_id\":\"1\"") && january.contains("\"_id\":\"3\"") && !january.contains("\"_id\":\"2\""),
+        "{january}"
+    );
+    let subnet = search("{\"query\":{\"term\":{\"client\":\"10.0.0.0/8\"}}}");
+    assert!(
+        subnet.contains("\"_id\":\"1\"") && subnet.contains("\"_id\":\"3\"") && !subnet.contains("\"_id\":\"2\""),
+        "{subnet}"
+    );
+    let token = search("{\"query\":{\"term\":{\"msg\":\"error\"}}}");
+    assert!(
+        token.contains("\"_id\":\"1\"") && token.contains("\"_id\":\"3\"") && !token.contains("\"_id\":\"2\""),
+        "{token}"
+    );
+}

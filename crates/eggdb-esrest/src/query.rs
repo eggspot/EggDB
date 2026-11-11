@@ -39,6 +39,16 @@ pub(crate) enum Query {
     Ids {
         values: Vec<String>,
     },
+    DateRange {
+        field: String,
+        low: Option<(i64, bool)>,
+        high: Option<(i64, bool)>,
+    },
+    IpRange {
+        field: String,
+        low: u128,
+        high: u128,
+    },
     Bool {
         must: Vec<Query>,
         filter: Vec<Query>,
@@ -440,6 +450,22 @@ pub(crate) fn score(query: &Query, id: &str, source: &Node, stats: &Stats) -> Op
             .any(|text| text.starts_with(prefix.as_str()))
             .then_some(1.0),
         Query::Ids { values } => values.iter().any(|value| value == id).then_some(1.0),
+        Query::DateRange { field, low, high } => values_at(source, field)
+            .iter()
+            .filter_map(|node| crate::mappings::date_millis(&node.value))
+            .any(|millis| {
+                low.is_none_or(|(bound, inclusive)| millis > bound || (inclusive && millis == bound))
+                    && high.is_none_or(|(bound, inclusive)| {
+                        millis < bound || (inclusive && millis == bound)
+                    })
+            })
+            .then_some(1.0),
+        Query::IpRange { field, low, high } => values_at(source, field)
+            .into_iter()
+            .filter_map(text_of)
+            .filter_map(|text| crate::mappings::ip_number(&text))
+            .any(|address| (*low..=*high).contains(&address))
+            .then_some(1.0),
         Query::Bool {
             must,
             filter,
