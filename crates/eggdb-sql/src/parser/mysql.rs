@@ -331,6 +331,9 @@ impl<'t> Parser<'t> {
         } else if self.is_word("create") && self.is_word_at(1, "event") {
             self.at += 2;
             MySqlStatement::ShowCreateEvent(self.table_name()?)
+        } else if self.is_word("create") && self.is_word_at(1, "sequence") {
+            self.at += 2;
+            MySqlStatement::ShowCreateSequence(self.table_name()?)
         } else if (self.is_word("procedure") || self.is_word("function"))
             && self.is_word_at(1, "status")
         {

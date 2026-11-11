@@ -209,7 +209,7 @@ impl<'s> Session<'s> {
             MySqlStatement::ShowTables { full, .. } => Some(self.tables_columns(*full)),
             MySqlStatement::ShowDatabases { .. } => Some(vec![text_column("Database")]),
             MySqlStatement::ShowColumns { full, .. } => Some(columns_columns(*full)),
-            MySqlStatement::ShowCreateTable(_) => {
+            MySqlStatement::ShowCreateTable(_) | MySqlStatement::ShowCreateSequence(_) => {
                 Some(vec![text_column("Table"), text_column("Create Table")])
             }
             MySqlStatement::ShowCreateView(_) => Some(create_view_columns()),
@@ -344,6 +344,41 @@ impl<'s> Session<'s> {
             MySqlStatement::DropEvent { name, if_exists } => self.drop_event(name, *if_exists),
             MySqlStatement::ShowEvents { like } => self.show_events(like.as_deref()),
             MySqlStatement::ShowCreateEvent(name) => self.show_create_event(name),
+            MySqlStatement::ShowCreateSequence(name) => {
+                let wanted = crate::schemas::base_name(&name.text).to_lowercase();
+                let found = self.read(|reader, _| {
+                    if let Some(definition) = crate::sequences::read(reader, &name.text)? {
+                        return Ok(Some(definition));
+                    }
+                    Ok(crate::sequences::every_sequence(reader)?
+                        .into_iter()
+                        .find(|(stored, _)| crate::schemas::base_name(stored).to_lowercase() == wanted)
+                        .map(|(_, definition)| definition))
+                })?;
+                let Some(definition) = found else {
+                    return Err(SqlError::new(
+                        SqlState::UNDEFINED_TABLE,
+                        format!("Table '{}' doesn't exist", name.text),
+                    )
+                    .with_vendor_code(1146)
+                    .at(name.position));
+                };
+                let base = crate::schemas::base_name(&name.text).to_owned();
+                let text = format!(
+                    "CREATE SEQUENCE `{}` start with {} minvalue {} maxvalue {} increment by {} cache {} {}cycle ENGINE=InnoDB",
+                    base.replace('`', "``"),
+                    definition.start,
+                    definition.min,
+                    definition.max,
+                    definition.increment,
+                    definition.cache,
+                    if definition.cycle { "" } else { "no" }
+                );
+                Ok(rows_result(
+                    vec![text_column("Table"), text_column("Create Table")],
+                    vec![vec![Value::Text(base), Value::Text(text)]],
+                ))
+            }
             MySqlStatement::ShowCreateRoutine { kind, name } => {
                 let wanted = crate::schemas::base_name(&name.text).to_owned();
                 let listed = self.read(|reader, _| crate::routines::every_routine(reader))?;

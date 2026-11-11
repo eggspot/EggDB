@@ -1155,6 +1155,7 @@ pub(crate) enum MySqlStatement {
         like: Option<String>,
     },
     ShowCreateEvent(Name),
+    ShowCreateSequence(Name),
     ShowTriggers {
         like: Option<String>,
     },
