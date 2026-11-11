@@ -519,3 +519,4 @@ its full title with its status.
 - [D492](decisions/D492.md) Code-only batch 140 (M16): Kafka `CreateTopics` and `DeleteTopics`
 - [D493](decisions/D493.md) Code-only batch 141 (M16): Kafka SASL/PLAIN authentication
 - [D494](decisions/D494.md) Code-only batch 142 (M16): Kafka topic retention
+- [D495](decisions/D495.md) Code-only batch 143 (M16): Loki's push API

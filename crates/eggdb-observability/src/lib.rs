@@ -13,6 +13,7 @@
 
 mod api;
 mod line_protocol;
+mod loki;
 mod promql;
 mod remote_write;
 mod store;

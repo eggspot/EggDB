@@ -23,6 +23,10 @@ pub const DEFAULT_MAX_QUERY_SAMPLES: usize = 50_000_000;
 /// snappy-compressed and decoded by the endpoint itself (D343).
 pub fn wants_content_decoded(request: &Request) -> bool {
     request.path != REMOTE_WRITE_PATH
+        && !(request.path == crate::loki::PUSH_PATH
+            && request
+                .header("content-type")
+                .is_some_and(|kind| kind.starts_with("application/x-protobuf")))
 }
 
 /// The metrics endpoint: InfluxDB writes, Prometheus remote write and the Prometheus query API.
@@ -398,6 +402,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                 self.write_lines(request, value("precision").unwrap_or("ns"))
             }
             ("POST", REMOTE_WRITE_PATH) => self.remote_write(request),
+            ("POST", crate::loki::PUSH_PATH) => self.loki_push(request),
             ("GET" | "POST", "/api/v1/query") => self.query(value("query"), value("time")),
             ("GET" | "POST", "/api/v1/query_range") => {
                 self.query_range(value("query"), value("start"), value("end"), value("step"))
@@ -453,6 +458,16 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                     json_string(&message)
                 ),
             ),
+        }
+    }
+
+    fn loki_push(&self, request: &Request) -> Response {
+        let content_type = request.header("content-type").unwrap_or("application/json");
+        match crate::loki::decode(content_type, &request.body)
+            .and_then(|points| store::write(&mut self.session(), &points))
+        {
+            Ok(_) => no_content(),
+            Err(message) => json(400, format!("{{\"message\":{}}}", json_string(&message))),
         }
     }
 

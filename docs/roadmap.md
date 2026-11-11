@@ -1368,7 +1368,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `changes`, `absent*`, `sort*`, date, trigonometric and the other `*_over_time`): **code written,
   unbuilt** (code-only mode, 2026-11-11, D441).
 - OTLP ingest of metrics, logs and traces (D39).
-- Loki's push API, and Jaeger and Zipkin traces (D39).
+- Loki's push API, and Jaeger and Zipkin traces (D39). Loki's push API: **code written, unbuilt**
+  (code-only mode, 2026-11-11, D495).
 - Syslog over TLS (RFC 5425) and beyond loopback, the sender's address as a column, and rsyslog
   and syslog-ng in CI (D315).
 - LogQL and TraceQL, with the Loki and Tempo query HTTP APIs Grafana uses (D39).

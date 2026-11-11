@@ -4,9 +4,9 @@ const MAX_DECOMPRESSED: usize = 64 << 20;
 const MOST_POINTS: usize = 1 << 20;
 const MOST_EXPANDED_BYTES: usize = 256 << 20;
 
-struct Reader<'b> {
-    bytes: &'b [u8],
-    at: usize,
+pub(crate) struct Reader<'b> {
+    pub(crate) bytes: &'b [u8],
+    pub(crate) at: usize,
 }
 
 impl<'b> Reader<'b> {
@@ -25,7 +25,7 @@ impl<'b> Reader<'b> {
         Ok(taken)
     }
 
-    fn next(&mut self) -> Result<Option<(u64, Field<'b>)>, String> {
+    pub(crate) fn next(&mut self) -> Result<Option<(u64, Field<'b>)>, String> {
         if self.at >= self.bytes.len() {
             return Ok(None);
         }
@@ -52,14 +52,14 @@ impl<'b> Reader<'b> {
     }
 }
 
-enum Field<'b> {
+pub(crate) enum Field<'b> {
     Varint(u64),
     Fixed64(u64),
     Bytes(&'b [u8]),
     Other,
 }
 
-fn text(bytes: &[u8]) -> Result<String, String> {
+pub(crate) fn text(bytes: &[u8]) -> Result<String, String> {
     String::from_utf8(bytes.to_vec()).map_err(|_| "a label is not UTF-8".to_owned())
 }
 
