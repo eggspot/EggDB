@@ -371,6 +371,59 @@ const RELATION_COLUMNS: [(&str, SqlType); 3] = [
     ("is_called", SqlType::Boolean),
 ];
 
+const MARIADB_RELATION_COLUMNS: [(&str, SqlType); 8] = [
+    ("next_not_cached_value", SqlType::BigInt),
+    ("minimum_value", SqlType::BigInt),
+    ("maximum_value", SqlType::BigInt),
+    ("start_value", SqlType::BigInt),
+    ("increment", SqlType::BigInt),
+    ("cache_size", SqlType::BigInt),
+    ("cycle_option", SqlType::SmallInt),
+    ("cycle_count", SqlType::BigInt),
+];
+
+fn mariadb_relation_rows(
+    reader: &dyn KeyValueRead,
+    name: &str,
+    columns_only: bool,
+) -> SqlResult<Option<GeneratedRows>> {
+    let columns: Vec<OutputColumn> = MARIADB_RELATION_COLUMNS
+        .iter()
+        .map(|(column, sql_type)| OutputColumn {
+            name: (*column).to_owned(),
+            sql_type: Some(*sql_type),
+        })
+        .collect();
+    let Some(sequence) = read(reader, name)? else {
+        return Ok(None);
+    };
+    if columns_only {
+        return Ok(Some(GeneratedRows::empty(columns)));
+    }
+    let next = if sequence.is_called {
+        sequence.last_value.saturating_add(sequence.increment)
+    } else {
+        sequence.last_value
+    };
+    let row = vec![
+        Value::BigInt(next),
+        Value::BigInt(sequence.min),
+        Value::BigInt(sequence.max),
+        Value::BigInt(sequence.start),
+        Value::BigInt(sequence.increment),
+        Value::BigInt(sequence.cache),
+        Value::SmallInt(i16::from(sequence.cycle)),
+        Value::BigInt(0),
+    ];
+    let mut charge = WorkMemory::new();
+    charge.charge_row(&row)?;
+    Ok(Some(GeneratedRows {
+        columns,
+        rows: vec![row],
+        charge,
+    }))
+}
+
 /// Whether `name` is a sequence that a query can read as PostgreSQL's one-row relation:
 /// a stored sequence or the implicit one behind an identity column.
 pub(crate) fn readable_as_relation(reader: &dyn KeyValueRead, name: &str) -> SqlResult<bool> {
@@ -384,6 +437,11 @@ pub(crate) fn relation_rows(
     name: &str,
     columns_only: bool,
 ) -> SqlResult<GeneratedRows> {
+    if crate::constraints::current_dialect() == Dialect::MySql
+        && let Some(rows) = mariadb_relation_rows(reader, name, columns_only)?
+    {
+        return Ok(rows);
+    }
     let columns: Vec<OutputColumn> = RELATION_COLUMNS
         .iter()
         .map(|(column, sql_type)| OutputColumn {

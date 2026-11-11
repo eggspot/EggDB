@@ -526,3 +526,4 @@ its full title with its status.
 - [D499](decisions/D499.md) Code-only batch 147 (M16): the syslog sender's address as a column
 - [D500](decisions/D500.md) Code-only batch 148 (M10): MariaDB's `CREATE OR REPLACE SEQUENCE`
 - [D501](decisions/D501.md) Code-only batch 149 (M10): MariaDB's `SHOW CREATE SEQUENCE`
+- [D502](decisions/D502.md) Code-only batch 150 (M10): reading a MariaDB sequence as a table
