@@ -331,6 +331,10 @@ fn centrality_communities_cores_and_weighted_paths_come_out_of_call() {
     );
     assert_eq!(weighted.rows, vec![vec![Value::Float(3.0)]]);
     assert!(run(&keyspace, "CALL eggdb.closeness(1)", &[], false).is_err());
+    let embedded = query(&keyspace, "CALL eggdb.fastRP(8, 2)");
+    assert_eq!(embedded.columns, ["nodeId", "embedding"]);
+    assert_eq!(embedded.rows.len(), 6);
+    assert!(embedded.rows.iter().all(|row| matches!(&row[1], Value::List(items) if items.len() == 8)));
 }
 
 #[test]

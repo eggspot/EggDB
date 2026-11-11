@@ -3,14 +3,15 @@ use crate::algorithms::{
     shortest_path_in, triangle_count_in,
 };
 use crate::centrality::{
-    betweenness_in, closeness_in, k_core_in, louvain_in, weighted_shortest_path_in,
+    betweenness_in, closeness_in, fast_rp_in, k_core_in, louvain_in, weighted_shortest_path_in,
 };
 use crate::store::GraphRead;
 use crate::{GraphError, GraphResult, Value};
 
 type Records = (Vec<&'static str>, Vec<Vec<Value>>);
 
-const PROCEDURES: [&str; 11] = [
+const PROCEDURES: [&str; 12] = [
+    "eggdb.fastRP",
     "eggdb.pageRank",
     "eggdb.connectedComponents",
     "eggdb.labelPropagation",
@@ -88,6 +89,7 @@ pub(crate) fn call(
     let most = match procedure {
         "eggdb.pageRank" | "eggdb.shortestPath" | "eggdb.weightedShortestPath" => 4,
         "eggdb.labelPropagation" | "eggdb.betweenness" | "eggdb.closeness" | "eggdb.louvain" => 1,
+        "eggdb.fastRP" => 2,
         _ if PROCEDURES.contains(&procedure) => 0,
         _ => {
             return Err(GraphError::new(
@@ -144,6 +146,25 @@ pub(crate) fn call(
             direction_argument(arguments.first(), false)?,
         )?),
         "eggdb.kCore" => pairs("nodeId", "coreNumber", k_core_in(graph)?),
+        "eggdb.fastRP" => {
+            let dimension = count_argument(arguments.first(), 64, "dimension")?;
+            if dimension == 0 {
+                return Err(argument_error("dimension must be from 1 to 1000"));
+            }
+            let iterations = count_argument(arguments.get(1), 3, "iterations")?.min(20);
+            (
+                vec!["nodeId", "embedding"],
+                fast_rp_in(graph, dimension, iterations)?
+                    .into_iter()
+                    .map(|(node, vector)| {
+                        vec![
+                            id(node),
+                            Value::List(vector.into_iter().map(Value::Float).collect()),
+                        ]
+                    })
+                    .collect(),
+            )
+        }
         "eggdb.louvain" => pairs(
             "nodeId",
             "communityId",

@@ -381,3 +381,75 @@ pub(crate) fn louvain_in(graph: &GraphRead<'_>, max_levels: usize) -> GraphResul
         .map(|(id, found)| (*id, smallest[found]))
         .collect())
 }
+
+fn mixed(mut state: u64) -> u64 {
+    state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    state = (state ^ (state >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    state = (state ^ (state >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    state ^ (state >> 31)
+}
+
+fn initial_vector(node: u64, dimension: usize) -> Vec<f64> {
+    let scale = 3.0f64.sqrt();
+    (0..dimension)
+        .map(|at| match mixed(node.wrapping_mul(1_000_003).wrapping_add(at as u64)) % 6 {
+            0 => scale,
+            1 => -scale,
+            _ => 0.0,
+        })
+        .collect()
+}
+
+fn normalized(mut vector: Vec<f64>) -> Vec<f64> {
+    let length = vector.iter().map(|value| value * value).sum::<f64>().sqrt();
+    if length > 0.0 {
+        vector.iter_mut().for_each(|value| *value /= length);
+    }
+    vector
+}
+
+/// Each node's FastRP embedding: a very sparse random projection seeded by the node id (so a run
+/// is repeatable), then `iterations` rounds of averaging over neighbours (relationships read
+/// without direction), the normalized rounds summed and the sum normalized.
+pub(crate) fn fast_rp_in(
+    graph: &GraphRead<'_>,
+    dimension: usize,
+    iterations: usize,
+) -> GraphResult<Vec<(u64, Vec<f64>)>> {
+    let Indexed { ids, neighbours } = indexed(graph, false)?;
+    let mut current: Vec<Vec<f64>> = ids
+        .iter()
+        .map(|node| initial_vector(*node, dimension))
+        .collect();
+    let mut total = vec![vec![0.0f64; dimension]; ids.len()];
+    for _ in 0..iterations.max(1) {
+        let next: Vec<Vec<f64>> = neighbours
+            .iter()
+            .enumerate()
+            .map(|(node, around)| {
+                if around.is_empty() {
+                    return current[node].clone();
+                }
+                let mut mean = vec![0.0f64; dimension];
+                for &other in around {
+                    for (slot, value) in mean.iter_mut().zip(&current[other]) {
+                        *slot += value;
+                    }
+                }
+                let count = around.len() as f64;
+                normalized(mean.into_iter().map(|value| value / count).collect())
+            })
+            .collect();
+        for (sum, round) in total.iter_mut().zip(&next) {
+            for (slot, value) in sum.iter_mut().zip(round) {
+                *slot += value;
+            }
+        }
+        current = next;
+    }
+    Ok(ids
+        .into_iter()
+        .zip(total)
+        .map(|(id, sum)| (id, normalized(sum)))
+        .collect())
+}
