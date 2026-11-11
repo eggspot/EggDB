@@ -1364,7 +1364,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   2026-11-11, D442).
 - Multi-primary SQL rows with conflict rules per table: last writer wins, application rules or
   CRDTs (D18, D225).
-- Tombstones collected once every replica has seen them, and membership changes by epoch (D225).
+- Tombstones collected once every replica has seen them, and membership changes by epoch (D225). **Code
+  written, unbuilt** (code-only mode, 2026-11-11, D444).
 - Page-level remote storage: the page cache reads missing pages from object storage, and the log
   ships segment by segment (D18, D226).
 - `https://` object storage endpoints, multipart copies of large archives, and uploads without a

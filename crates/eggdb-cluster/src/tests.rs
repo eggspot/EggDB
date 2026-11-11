@@ -307,6 +307,34 @@ mod leaderless {
     }
 
     #[test]
+    fn membership_changes_move_keys_and_tombstones_are_collected_once_everywhere() {
+        let mut quorum = Quorum::new(&NODES, 3, 2, 2, Resolution::LastWriterWins).unwrap();
+        let empty = VersionVector::default();
+        for at in 0..40u32 {
+            quorum
+                .put(1, &at.to_be_bytes(), Some(at.to_be_bytes().to_vec()), &empty, u64::from(at))
+                .unwrap();
+        }
+        assert_eq!(quorum.add_node(99), Ok(1));
+        for at in 0..40u32 {
+            let key = at.to_be_bytes();
+            for home in quorum.order(&key).into_iter().take(3) {
+                assert!(!quorum.replica(home).unwrap().versions(&key).is_empty(), "{at} on {home}");
+            }
+        }
+        assert_eq!(quorum.remove_node(1), Ok(2));
+        for at in 0..40u32 {
+            assert_eq!(quorum.get(&at.to_be_bytes()).unwrap().values, [Some(at.to_be_bytes().to_vec())]);
+        }
+        let key = 7u32.to_be_bytes();
+        let read = quorum.get(&key).unwrap();
+        quorum.put(2, &key, None, &read.context, 1_000).unwrap();
+        quorum.anti_entropy();
+        assert_eq!(quorum.collect_tombstones(), 1);
+        assert!(quorum.get(&key).unwrap().values.is_empty());
+    }
+
+    #[test]
     fn concurrent_writes_become_siblings_until_a_write_supersedes_them() {
         let mut quorum = Quorum::new(&NODES, 3, 2, 2, Resolution::KeepSiblings).unwrap();
         let key = b"cart";

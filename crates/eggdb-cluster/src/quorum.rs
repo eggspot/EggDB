@@ -212,6 +212,7 @@ pub struct Quorum {
     r: usize,
     w: usize,
     resolution: Resolution,
+    epoch: u64,
 }
 
 impl std::fmt::Debug for Quorum {
@@ -249,7 +250,126 @@ impl Quorum {
             r,
             w,
             resolution,
+            epoch: 0,
         })
+    }
+
+    /// The membership epoch: one more for every node added or removed.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Adds `node` to the cluster in a new epoch, and moves to it the keys it is now a home of.
+    pub fn add_node(&mut self, node: NodeId) -> Result<u64, QuorumError> {
+        if self.replicas.contains_key(&node) {
+            return Err(QuorumError::BadConfiguration);
+        }
+        self.replicas.insert(node, Replica::default());
+        self.epoch += 1;
+        self.rebalance();
+        Ok(self.epoch)
+    }
+
+    /// Removes `node` in a new epoch, handing its versions to the keys' homes first; refused when
+    /// fewer nodes than `n` would be left.
+    pub fn remove_node(&mut self, node: NodeId) -> Result<u64, QuorumError> {
+        if !self.replicas.contains_key(&node) || self.replicas.len() <= self.n {
+            return Err(QuorumError::BadConfiguration);
+        }
+        let leaving = self.replicas.remove(&node).unwrap_or_default();
+        self.unreachable.remove(&node);
+        self.clocks.remove(&node);
+        let hinted = self.hints.remove(&node).unwrap_or_default();
+        self.epoch += 1;
+        for (key, versions) in &leaving.versions {
+            let homes: Vec<NodeId> = self.order(key).into_iter().take(self.n).collect();
+            for version in versions {
+                for home in &homes {
+                    self.store(*home, key, version);
+                }
+            }
+        }
+        for hint in hinted {
+            if self.replicas.contains_key(&hint.owner) {
+                self.store(hint.owner, &hint.key, &hint.version);
+            }
+        }
+        self.rebalance();
+        Ok(self.epoch)
+    }
+
+    fn rebalance(&mut self) {
+        let keys: BTreeSet<Vec<u8>> = self
+            .replicas
+            .values()
+            .flat_map(|replica| replica.versions.keys().cloned())
+            .collect();
+        for key in keys {
+            let homes: Vec<NodeId> = self.order(&key).into_iter().take(self.n).collect();
+            let mut merged = Replica::default();
+            for replica in self.replicas.values() {
+                for version in replica.versions(&key) {
+                    merged.apply(&key, version, self.resolution);
+                }
+            }
+            let reconciled: Vec<Version> = merged.versions(&key).to_vec();
+            for home in &homes {
+                if self.reachable(*home) {
+                    for version in &reconciled {
+                        self.store(*home, &key, version);
+                    }
+                }
+            }
+            let every_home_holds = homes.iter().all(|home| {
+                self.reachable(*home) && self.replicas[home].versions(&key) == reconciled.as_slice()
+            });
+            if every_home_holds {
+                for (node, replica) in self.replicas.iter_mut() {
+                    if !homes.contains(node) {
+                        replica.versions.remove(&key);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Drops the deletions every home replica of their key holds (the same single deleted
+    /// version, with no hint for the key still waiting), so tombstones don't pile up; returns how
+    /// many keys were collected. A key with a home that can't be reached keeps its tombstone.
+    pub fn collect_tombstones(&mut self) -> usize {
+        let keys: BTreeSet<Vec<u8>> = self
+            .replicas
+            .values()
+            .flat_map(|replica| replica.versions.keys().cloned())
+            .collect();
+        let hinted: BTreeSet<Vec<u8>> = self
+            .hints
+            .values()
+            .flatten()
+            .map(|hint| hint.key.clone())
+            .collect();
+        let mut collected = 0;
+        for key in keys {
+            if hinted.contains(&key) {
+                continue;
+            }
+            let homes: Vec<NodeId> = self.order(&key).into_iter().take(self.n).collect();
+            let Some(first) = homes.first() else {
+                continue;
+            };
+            let reference = self.replicas[first].versions(&key).to_vec();
+            let settled = matches!(reference.as_slice(), [only] if only.value.is_none())
+                && homes.iter().all(|home| {
+                    self.reachable(*home) && self.replicas[home].versions(&key) == reference.as_slice()
+                });
+            if settled {
+                for replica in self.replicas.values_mut() {
+                    replica.versions.remove(&key);
+                }
+                collected += 1;
+            }
+        }
+        collected
     }
 
     /// Marks `node` reachable or not, as a partition or a crash would.

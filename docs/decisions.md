@@ -468,3 +468,4 @@ its full title with its status.
 - [D441](decisions/D441.md) Code-only batch 89 (M16): PromQL's remaining functions
 - [D442](decisions/D442.md) Code-only batch 90 (M18): CRDT counters and sets as resolution policies
 - [D443](decisions/D443.md) Code-only batch 91 (M18): Merkle trees for anti-entropy
+- [D444](decisions/D444.md) Code-only batch 92 (M18): tombstone collection and membership changes by epoch in the leaderless quorums
