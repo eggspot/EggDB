@@ -1037,7 +1037,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Numbered procedures and temporary functions (roadmap item 33d).
 - SQL Server Agent jobs on the job scheduler (D27, D200).
 - Identity on any column, `NEXT VALUE FOR` returning the sequence's type and its `OVER` form,
-  `sp_sequence_get_range`, and extended properties beyond `MS_Description` (D148).
+  `sp_sequence_get_range`, and extended properties beyond `MS_Description` (D148). `sp_sequence_get_range`:
+  **code written, unbuilt** (code-only mode, 2026-11-11, D449).
 - bcp native files with `varchar` columns, and untrusted constraints for bulk loads (D291).
 - EF Core 9 in the `tds-apps` job, and mssql-jdbc's `getSchemas()` (D291).
 - Oracle's `(+)` outer joins, `RETURNING ... INTO`, synonyms, database links and `ROWID` (sql.md). `(+)`

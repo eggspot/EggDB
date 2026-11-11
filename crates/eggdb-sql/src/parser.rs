@@ -47,7 +47,7 @@ mod windows;
 
 pub(crate) use mysql_routines::mysql_program;
 pub use oracle::ORACLE_COMPATIBLE_VERSION;
-pub(crate) use oracle::{is_reserved as is_oracle_reserved, oracle_table_name};
+pub(crate) use oracle::{dialect_table_name, is_reserved as is_oracle_reserved, oracle_table_name};
 pub(crate) use plpgsql::plpgsql_program;
 pub(crate) use plsql::{plsql_package_program, plsql_program};
 pub(crate) use routines::with_routine_settings_changed;

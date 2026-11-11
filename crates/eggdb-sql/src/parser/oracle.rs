@@ -1583,6 +1583,22 @@ impl<'t> Parser<'t> {
     }
 }
 
+pub(crate) fn dialect_table_name(
+    text: &str,
+    settings: &Settings,
+    dialect: crate::dialect::Dialect,
+) -> SqlResult<Name> {
+    let tokens = crate::lexer::tokenize_in(text, dialect)?;
+    let mut parser = Parser::new(text, &tokens)
+        .with_context(super::Parameters::Absent, settings)
+        .in_dialect(dialect);
+    let name = parser.table_name()?;
+    if !matches!(parser.peek_kind(), TokenKind::End | TokenKind::Semicolon) {
+        return Err(parser.unexpected());
+    }
+    Ok(name)
+}
+
 pub(crate) fn oracle_table_name(text: &str, settings: &Settings) -> SqlResult<Name> {
     let tokens = crate::lexer::tokenize_in(text, crate::dialect::Dialect::Oracle)?;
     let mut parser = Parser::new(text, &tokens)

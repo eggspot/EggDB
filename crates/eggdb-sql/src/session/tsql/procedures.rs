@@ -155,6 +155,13 @@ impl<'s> Session<'s> {
         if let Some(procedure) = ApplicationLockProcedure::named(&call.procedure.text) {
             return self.run_application_lock_procedure(procedure, call);
         }
+        if call
+            .procedure
+            .text
+            .eq_ignore_ascii_case(super::sequence_ranges::PROCEDURE)
+        {
+            return self.run_sequence_get_range(call);
+        }
         let system = crate::session::sqlserver::is_system_procedure(&call.procedure.text);
         if !system
             && self.batch_resume.is_some()

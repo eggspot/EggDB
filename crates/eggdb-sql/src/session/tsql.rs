@@ -29,6 +29,7 @@ mod cursors;
 #[cfg(test)]
 mod cursors_tests;
 mod procedures;
+mod sequence_ranges;
 #[cfg(test)]
 mod procedures_tests;
 mod waitfor;

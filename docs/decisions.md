@@ -473,3 +473,4 @@ its full title with its status.
 - [D446](decisions/D446.md) Code-only batch 94 (M14): `eggdb export --sql` writes sequences, views, comments and check and foreign-key constraints
 - [D447](decisions/D447.md) Code-only batch 95 (M11): ASOF joins
 - [D448](decisions/D448.md) Code-only batch 96 (M10): application-lock deadlocks choose one victim
+- [D449](decisions/D449.md) Code-only batch 97 (M10): SQL Server's `sp_sequence_get_range`
