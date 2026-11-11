@@ -337,6 +337,7 @@ fn linger(source: &mut ConnectionStream<'_>, writer: &TcpStream) {
 
 pub(crate) fn serve_connection<'h>(
     stream: TcpStream,
+    client: std::net::IpAddr,
     handler: &(dyn Fn(&Request) -> Reply<'h> + Sync),
     limits: &Limits<'_>,
     stop: &(dyn Fn() -> bool + Sync),
@@ -406,7 +407,10 @@ pub(crate) fn serve_connection<'h>(
             && active.load(Ordering::Acquire) < crate::KEEP_ALIVE_BELOW_CONNECTIONS
             && !stop();
         let head_only = request.method == "HEAD";
-        let reply = handler(&request);
+        let reply = match limits.rate_limit.map(|limiter| limiter.admit(client)) {
+            Some(Err(wait)) => Reply::Whole(crate::too_many_requests_response(wait)),
+            _ => handler(&request),
+        };
         drop(request);
         let mut paced = PacedWriter::new(&mut writer);
         let kept = match reply {

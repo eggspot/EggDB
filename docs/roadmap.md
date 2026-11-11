@@ -658,7 +658,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - WebAuthn and passkeys for app sign-in (D54).
 - Files in object storage transformed on request (resize, crop, convert) through WebAssembly
   extensions and our own image codecs (D37).
-- Rate limits on every generated API (D25, D37).
+- Rate limits on every generated API (D25, D37). **Code written, unbuilt** (code-only mode, 2026-11-11,
+  D460).
 
 ### M6b The rest of security
 - Kerberos/GSSAPI logins (D22, D185).

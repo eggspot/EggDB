@@ -732,6 +732,9 @@ impl Session<'_> {
             &config.database,
         )
         .with_memory_budget(Arc::clone(&memory_budget));
+        let rate_limiter = options
+            .rate_limit
+            .map(|requests| eggdb_http::RateLimiter::new(requests, requests.saturating_mul(2)));
         let mut rest_endpoint = eggdb_api::Endpoint::new(
             &store,
             &config.user,
@@ -879,7 +882,7 @@ impl Session<'_> {
                     &eggdb_http::Limits::new(
                         eggdb_observability::MAX_REQUEST_BYTES,
                         &memory_budget,
-                    )
+                    ).with_rate_limit(rate_limiter.as_ref())
                     .decoding_content_encoding_of(eggdb_observability::wants_content_decoded),
                 ),
                 None => Ok(()),
@@ -889,7 +892,7 @@ impl Session<'_> {
                     listener,
                     &|request| rest_endpoint.reply(request),
                     &stop_signals::requested,
-                    &eggdb_http::Limits::new(eggdb_api::MAX_REQUEST_BYTES, &memory_budget)
+                    &eggdb_http::Limits::new(eggdb_api::MAX_REQUEST_BYTES, &memory_budget).with_rate_limit(rate_limiter.as_ref())
                         .decoding_content_encoding(),
                 ),
                 None => Ok(()),
@@ -923,7 +926,7 @@ impl Session<'_> {
                         })
                     },
                     &stop_signals::requested,
-                    &eggdb_http::Limits::new(eggdb_http::MAX_BODY_BYTES, &memory_budget),
+                    &eggdb_http::Limits::new(eggdb_http::MAX_BODY_BYTES, &memory_budget).with_rate_limit(rate_limiter.as_ref()),
                 ),
                 None => Ok(()),
             });
@@ -932,7 +935,7 @@ impl Session<'_> {
                     listener,
                     &|request| endpoint.answer(request),
                     &stop_signals::requested,
-                    &eggdb_http::Limits::new(eggdb_http::MAX_BODY_BYTES, &memory_budget),
+                    &eggdb_http::Limits::new(eggdb_http::MAX_BODY_BYTES, &memory_budget).with_rate_limit(rate_limiter.as_ref()),
                 ),
                 _ => Ok(()),
             });
@@ -953,7 +956,7 @@ impl Session<'_> {
                     listener,
                     &|request| es_api.answer(request),
                     &stop_signals::requested,
-                    &eggdb_http::Limits::new(eggdb_http::MAX_BODY_BYTES, &memory_budget)
+                    &eggdb_http::Limits::new(eggdb_http::MAX_BODY_BYTES, &memory_budget).with_rate_limit(rate_limiter.as_ref())
                         .answering_over_budget_with(eggdb_esrest::over_memory_budget)
                         .decoding_content_encoding(),
                 ),
@@ -1016,7 +1019,7 @@ impl Session<'_> {
                     listener,
                     &|request| endpoint.answer(request),
                     &stop_signals::requested,
-                    &eggdb_http::Limits::new(16 << 20, &memory_budget)
+                    &eggdb_http::Limits::new(16 << 20, &memory_budget).with_rate_limit(rate_limiter.as_ref())
                         .answering_over_budget_with(eggdb_dynamodb::over_memory_budget),
                 ),
                 _ => Ok(()),
@@ -1026,7 +1029,7 @@ impl Session<'_> {
                     listener,
                     &|request| endpoint.answer(request),
                     &stop_signals::requested,
-                    &eggdb_http::Limits::new(eggdb_s3::MAX_REQUEST_BYTES, &memory_budget)
+                    &eggdb_http::Limits::new(eggdb_s3::MAX_REQUEST_BYTES, &memory_budget).with_rate_limit(rate_limiter.as_ref())
                         .answering_over_budget_with(eggdb_s3::over_memory_budget),
                 ),
                 _ => Ok(()),
@@ -1036,7 +1039,7 @@ impl Session<'_> {
                     listener,
                     &|request| endpoint.answer(request),
                     &stop_signals::requested,
-                    &eggdb_http::Limits::new(eggdb_http::MAX_BODY_BYTES, &memory_budget),
+                    &eggdb_http::Limits::new(eggdb_http::MAX_BODY_BYTES, &memory_budget).with_rate_limit(rate_limiter.as_ref()),
                 ),
                 _ => Ok(()),
             });

@@ -18,10 +18,12 @@
 mod client;
 mod connection;
 mod content_coding;
+mod rate_limit;
 mod reader;
 mod streamed;
 
 pub use client::{ClientResponse, HttpTarget, host_header, parse_http_url, post, request};
+pub use rate_limit::{RateLimiter, too_many_requests_response};
 pub use streamed::{BodyProducer, BodyWriter, Reply, STREAM_CHUNK_BYTES, StreamedResponse};
 
 use connection::ConnectionHeader;
@@ -273,6 +275,9 @@ pub struct Limits<'b> {
     /// `max_body_bytes` is answered `413`, one the budget cannot take with
     /// `over_memory_budget()`, a damaged one `400` and another coding `415`. None by default.
     pub decode_content_encoding: fn(&Request) -> bool,
+    /// The requests a second each client address may send; a request over it is answered
+    /// `429` with `Retry-After` without reaching the handler. None by default.
+    pub rate_limit: Option<&'b RateLimiter>,
 }
 
 fn no_request(_: &Request) -> bool {
@@ -294,6 +299,15 @@ impl<'b> Limits<'b> {
             keep_alive_idle_timeout: KEEP_ALIVE_IDLE_TIMEOUT,
             max_requests_per_connection: MAX_REQUESTS_PER_CONNECTION,
             decode_content_encoding: no_request,
+            rate_limit: None,
+        }
+    }
+
+    /// These limits, answering `429` to a client address over `limiter`'s rate.
+    pub fn with_rate_limit(self, limiter: Option<&'b RateLimiter>) -> Self {
+        Self {
+            rate_limit: limiter,
+            ..self
         }
     }
 
@@ -396,8 +410,8 @@ pub fn serve_replies_with_limits<'h>(
     let active = AtomicUsize::new(0);
     std::thread::scope(|scope| {
         while !stop() {
-            let stream = match eggdb_platform::accept_tcp(listener) {
-                Ok((stream, _)) => stream,
+            let (stream, peer) = match eggdb_platform::accept_tcp(listener) {
+                Ok(accepted) => accepted,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     std::thread::sleep(ACCEPT_POLL);
                     continue;
@@ -420,7 +434,14 @@ pub fn serve_replies_with_limits<'h>(
             let spawned = std::thread::Builder::new()
                 .name("eggdb-http".to_owned())
                 .spawn_scoped(scope, move || {
-                    connection::serve_connection(stream, handler, limits, stop, active);
+                    connection::serve_connection(
+                        stream,
+                        peer.ip(),
+                        handler,
+                        limits,
+                        stop,
+                        active,
+                    );
                     active.fetch_sub(1, Ordering::AcqRel);
                 });
             if spawned.is_err() {

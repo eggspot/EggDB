@@ -265,6 +265,7 @@ impl CommandName {
             | OptionName::LogSlowStatements
             | OptionName::StatementStatistics
             | OptionName::IdleTimeout
+            | OptionName::RateLimit
             | OptionName::TcpKeepalive
             | OptionName::SocketDir
             | OptionName::MysqlSocket
@@ -452,6 +453,7 @@ enum OptionName {
     LogSlowStatements,
     StatementStatistics,
     IdleTimeout,
+    RateLimit,
     TcpKeepalive,
     SocketDir,
     MysqlSocket,
@@ -563,6 +565,7 @@ impl OptionName {
             b"log-slow-statements" => Self::LogSlowStatements,
             b"statement-statistics" => Self::StatementStatistics,
             b"idle-timeout" => Self::IdleTimeout,
+            b"rate-limit" => Self::RateLimit,
             b"tcp-keepalive" => Self::TcpKeepalive,
             b"socket-dir" => Self::SocketDir,
             b"mysql-socket" => Self::MysqlSocket,
@@ -861,6 +864,7 @@ pub(crate) struct ServeOptions {
     pub(crate) max_connections: Option<usize>,
     pub(crate) max_connection_memory: Option<usize>,
     pub(crate) idle_timeout_seconds: Option<u64>,
+    pub(crate) rate_limit: Option<u32>,
     pub(crate) tcp_keepalive_seconds: Option<u64>,
     pub(crate) log_slow_statements_ms: Option<u64>,
     pub(crate) statement_statistics: Option<usize>,
@@ -1501,6 +1505,19 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     ))
                 })?;
                 request.serve.idle_timeout_seconds = Some(seconds);
+            }
+            OptionName::RateLimit => {
+                let requests = parse_whole_number(value.as_encoded_bytes())
+                    .filter(|&requests| requests >= 1)
+                    .and_then(|requests| u32::try_from(requests).ok())
+                    .ok_or_else(|| {
+                        usage(format!(
+                            "{} needs a whole number of requests a second, at least 1, not '{}'",
+                            option.spelled,
+                            shown(value)
+                        ))
+                    })?;
+                request.serve.rate_limit = Some(requests);
             }
             OptionName::TcpKeepalive => {
                 let seconds = parse_whole_number(value.as_encoded_bytes())

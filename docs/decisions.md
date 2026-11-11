@@ -484,3 +484,4 @@ its full title with its status.
 - [D457](decisions/D457.md) Code-only batch 105 (M6a): REST upserts, `/rpc/<function>` and an OpenAPI document
 - [D458](decisions/D458.md) Code-only batch 106 (M6a): bearer tokens on the REST API, run as the token's role
 - [D459](decisions/D459.md) Code-only batch 107 (M6a): embedded resources in the REST API
+- [D460](decisions/D460.md) Code-only batch 108 (M6a): `--rate-limit` on every generated HTTP API
