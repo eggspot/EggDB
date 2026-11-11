@@ -4874,3 +4874,18 @@ fn scale_min_scale_and_trim_scale_follow_postgresql() {
         "s|m|t\n4|1|2.5\n4|3|3.125\nSELECT 2"
     );
 }
+
+#[test]
+fn a_postgresql_table_may_have_no_columns() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(last(&mut session, "CREATE TABLE nothing ()"), "CREATE TABLE");
+    assert_eq!(last(&mut session, "INSERT INTO nothing DEFAULT VALUES"), "INSERT 0 1");
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM nothing"),
+        "count\n1\nSELECT 1"
+    );
+    assert_eq!(last(&mut session, "ALTER TABLE nothing ADD COLUMN note text"), "ALTER TABLE");
+    let mut mysql = Session::with_dialect(&store, crate::Dialect::MySql);
+    assert!(mysql.execute("CREATE TABLE still_nothing ()", &mut |_| {}).is_err());
+}

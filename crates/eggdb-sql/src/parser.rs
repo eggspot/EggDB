@@ -1980,7 +1980,8 @@ impl<'t> Parser<'t> {
         let mut indexes = Vec::new();
         let mut constraints = Vec::new();
         let mut integer_columns = Vec::new();
-        loop {
+        let no_columns = self.postgresql() && matches!(self.peek_kind(), TokenKind::RightParen);
+        while !no_columns {
             if self.is_word("primary") || self.is_word("constraint") {
                 let position = self.position();
                 let constraint = if self.take_word("constraint") {
