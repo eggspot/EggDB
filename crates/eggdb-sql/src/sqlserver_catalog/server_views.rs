@@ -26,6 +26,8 @@ const fn column(name: &'static str, sql_type: SqlType) -> CatalogColumn {
 pub(crate) enum ServerView {
     Configurations,
     ExecSessions,
+    ExecRequests,
+    ExecQueryStats,
     ServerPrincipals,
     DatabasePrincipals,
     Filegroups,
@@ -67,6 +69,29 @@ const EXEC_SESSIONS: &[CatalogColumn] = &[
     column("status", SYSNAME),
     column("database_id", INT),
     column("is_user_process", BIT),
+];
+
+const EXEC_REQUESTS: &[CatalogColumn] = &[
+    column("session_id", INT),
+    column("request_id", INT),
+    column("start_time", STAMP),
+    column("status", SYSNAME),
+    column("command", SYSNAME),
+    column("database_id", INT),
+    column("wait_type", SYSNAME),
+    column("total_elapsed_time", INT),
+    column("statement_text", SqlType::Text),
+];
+
+const EXEC_QUERY_STATS: &[CatalogColumn] = &[
+    column("query_hash", SqlType::Bytea),
+    column("execution_count", BIGINT),
+    column("total_worker_time", BIGINT),
+    column("total_elapsed_time", BIGINT),
+    column("min_elapsed_time", BIGINT),
+    column("max_elapsed_time", BIGINT),
+    column("total_rows", BIGINT),
+    column("statement_text", SqlType::Text),
 ];
 
 const PRINCIPALS: &[CatalogColumn] = &[
@@ -163,9 +188,11 @@ const TYPE_COLUMNS: &[CatalogColumn] = &[
 ];
 
 impl ServerView {
-    pub(crate) const ALL: [Self; 20] = [
+    pub(crate) const ALL: [Self; 22] = [
         Self::Configurations,
         Self::ExecSessions,
+        Self::ExecRequests,
+        Self::ExecQueryStats,
         Self::ServerPrincipals,
         Self::DatabasePrincipals,
         Self::Filegroups,
@@ -190,6 +217,8 @@ impl ServerView {
         match self {
             Self::Configurations => "configurations",
             Self::ExecSessions => "dm_exec_sessions",
+            Self::ExecRequests => "dm_exec_requests",
+            Self::ExecQueryStats => "dm_exec_query_stats",
             Self::ServerPrincipals => "server_principals",
             Self::DatabasePrincipals => "database_principals",
             Self::Filegroups => "filegroups",
@@ -221,6 +250,8 @@ impl ServerView {
         match self {
             Self::Configurations => CONFIGURATIONS,
             Self::ExecSessions => EXEC_SESSIONS,
+            Self::ExecRequests => EXEC_REQUESTS,
+            Self::ExecQueryStats => EXEC_QUERY_STATS,
             Self::ServerPrincipals | Self::DatabasePrincipals => PRINCIPALS,
             Self::Filegroups | Self::DataSpaces => DATA_SPACES,
             Self::DatabaseFiles | Self::MasterFiles => FILES,
@@ -386,6 +417,90 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, view: ServerView) -> Vec<Vec<Valu
                 .done()
         })
         .collect(),
+        ServerView::ExecSessions if !crate::session_activity::sessions().is_empty() => {
+            crate::session_activity::sessions()
+                .into_iter()
+                .map(|session| {
+                    CatalogRow::new(columns)
+                        .set("session_id", int(i64::from(session.pid)))
+                        .set("login_time", Value::Timestamp(session.backend_start))
+                        .set("host_name", text(&session.client))
+                        .set("program_name", text(&session.application))
+                        .set("login_name", text(&session.user))
+                        .set(
+                            "status",
+                            text(if session.state == "active" { "running" } else { "sleeping" }),
+                        )
+                        .set("database_id", int(DATABASE_ID))
+                        .set("is_user_process", bit(true))
+                        .done()
+                })
+                .collect()
+        }
+        ServerView::ExecRequests => {
+            let sessions = crate::session_activity::sessions();
+            if sessions.is_empty() {
+                vec![
+                    CatalogRow::new(columns)
+                        .set("session_id", int(SESSION_ID))
+                        .set("request_id", int(0))
+                        .set("status", text("running"))
+                        .set("command", text("SELECT"))
+                        .set("database_id", int(DATABASE_ID))
+                        .set("total_elapsed_time", int(0))
+                        .done(),
+                ]
+            } else {
+                sessions
+                    .into_iter()
+                    .filter(|session| session.state == "active")
+                    .map(|session| {
+                        let started = session.query_start.unwrap_or(session.state_change);
+                        let command = session
+                            .query
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or_default()
+                            .to_ascii_uppercase();
+                        CatalogRow::new(columns)
+                            .set("session_id", int(i64::from(session.pid)))
+                            .set("request_id", int(0))
+                            .set("start_time", Value::Timestamp(started))
+                            .set("status", text("running"))
+                            .set("command", text(&command))
+                            .set("database_id", int(DATABASE_ID))
+                            .set(
+                                "total_elapsed_time",
+                                int(crate::session_activity::seconds_since(started).saturating_mul(1000)),
+                            )
+                            .set("statement_text", text(&session.query))
+                            .done()
+                    })
+                    .collect()
+            }
+        }
+        ServerView::ExecQueryStats => crate::statement_statistics::statistics()
+            .into_iter()
+            .map(|statistics| {
+                let micros = |ms: f64| Value::BigInt((ms * 1000.0).round() as i64);
+                CatalogRow::new(columns)
+                    .set("query_hash", Value::Bytea(statistics.query_id.to_be_bytes().to_vec()))
+                    .set(
+                        "execution_count",
+                        Value::BigInt(i64::try_from(statistics.calls).unwrap_or(i64::MAX)),
+                    )
+                    .set("total_worker_time", micros(statistics.total_ms))
+                    .set("total_elapsed_time", micros(statistics.total_ms))
+                    .set("min_elapsed_time", micros(statistics.min_ms))
+                    .set("max_elapsed_time", micros(statistics.max_ms))
+                    .set(
+                        "total_rows",
+                        Value::BigInt(i64::try_from(statistics.rows).unwrap_or(i64::MAX)),
+                    )
+                    .set("statement_text", text(&statistics.query))
+                    .done()
+            })
+            .collect(),
         ServerView::ExecSessions => vec![
             CatalogRow::new(columns)
                 .set("session_id", int(SESSION_ID))

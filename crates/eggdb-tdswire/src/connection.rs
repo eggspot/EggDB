@@ -678,7 +678,18 @@ fn serve_databases<'a, 'd, D: DatabaseDirectory>(
         {
             shared.register(connection_id, session.cancel_signal());
             let attention = AttentionWatch::new(wire.socket(), session.cancel_signal());
+            let peer = wire.peer();
+            let activity =
+                eggdb_sql::session_activity::register(eggdb_sql::session_activity::Connected {
+                    pid: i32::try_from(connection_id).unwrap_or(i32::MAX),
+                    protocol: "tds",
+                    user: &user,
+                    database: &database,
+                    client: &peer,
+                    application: "",
+                });
             connection = Some(Connection {
+                activity,
                 wire,
                 shared,
                 next_transaction: 1,
@@ -726,6 +737,7 @@ fn serve_databases<'a, 'd, D: DatabaseDirectory>(
 }
 
 pub(crate) struct Connection<'a> {
+    activity: eggdb_sql::session_activity::ActivityHandle,
     pub(crate) wire: Wire<'a>,
     pub(crate) shared: &'a Shared<'a>,
     next_transaction: u64,
@@ -1037,7 +1049,14 @@ impl Connection<'_> {
                 printable(&shown)
             ));
         }
-        self.run_batch_text(session, &batch.text)
+        self.activity.started(&batch.text);
+        let keep_going = self.run_batch_text(session, &batch.text);
+        let status = session.transaction_status();
+        self.activity.finished(
+            !matches!(status, eggdb_sql::TransactionStatus::Idle),
+            matches!(status, eggdb_sql::TransactionStatus::Failed),
+        );
+        keep_going
     }
 
     pub(crate) fn run_statements(
