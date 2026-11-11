@@ -814,6 +814,35 @@ fn listagg_distinct_over_a_partition_lists_each_value_once() {
 }
 
 #[test]
+fn dbms_lob_procedures_build_and_read_a_clob_variable() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    values(&mut session, "CREATE TABLE notes (body CLOB)");
+    values(
+        &mut session,
+        "DECLARE
+           v CLOB;
+           part VARCHAR2(20);
+           amount NUMBER := 3;
+         BEGIN
+           DBMS_LOB.CREATETEMPORARY(v, TRUE);
+           DBMS_LOB.WRITEAPPEND(v, 5, 'hello world');
+           DBMS_LOB.APPEND(v, ', there');
+           DBMS_LOB.WRITE(v, 1, 1, 'J');
+           DBMS_LOB.READ(v, amount, 2, part);
+           INSERT INTO notes VALUES (v || '|' || part || '|' || amount);
+           DBMS_LOB.TRIM(v, 4);
+           INSERT INTO notes VALUES (v);
+           DBMS_LOB.FREETEMPORARY(v);
+         END;",
+    );
+    assert_eq!(
+        values(&mut session, "SELECT body FROM notes ORDER BY body"),
+        vec![vec![text("Jell")], vec![text("Jello, there|ell|3")]]
+    );
+}
+
+#[test]
 fn scheduler_chains_run_their_steps_by_their_rules() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Oracle);

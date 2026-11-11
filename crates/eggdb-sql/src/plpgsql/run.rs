@@ -1,4 +1,5 @@
 mod collections;
+mod dbms_lob;
 mod dbms_output;
 mod dbms_scheduler;
 mod plsql;
@@ -1188,6 +1189,11 @@ impl<'r> Run<'r> {
     fn call_step(&mut self, text: &str) -> SqlResult<Flow> {
         if self.oracle
             && let Some(flow) = self.dbms_output_call(text)?
+        {
+            return Ok(flow);
+        }
+        if self.oracle
+            && let Some(flow) = self.dbms_lob_call(text)?
         {
             return Ok(flow);
         }
