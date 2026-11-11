@@ -55,7 +55,7 @@ pub(super) fn deliver_changes(
     };
     while !stop() {
         std::thread::sleep(DELIVER_EVERY);
-        let _ = eggdb_sql::cdc::deliver_changes(store, database, EVENTS_PER_ROUND, &mut |event| {
+        let _ = eggdb_sql::cdc::deliver_changes_with_retries(store, database, "webhook", EVENTS_PER_ROUND, now_ms(), &mut |event| {
             eggdb_http::post(
                 &target,
                 "application/json",
@@ -85,7 +85,7 @@ pub(super) fn deliver_changes_to_queue(
             .map_or(0, |since| {
                 u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
             });
-        let _ = eggdb_sql::cdc::deliver_changes(store, database, EVENTS_PER_ROUND, &mut |event| {
+        let _ = eggdb_sql::cdc::deliver_changes_with_retries(store, database, "queue", EVENTS_PER_ROUND, now_ms(), &mut |event| {
             queues.send(queue, event.as_bytes(), 0, now).is_ok()
         });
     }
@@ -100,10 +100,16 @@ pub(super) fn deliver_changes_to_topic(
 ) {
     while !stop() {
         std::thread::sleep(DELIVER_EVERY);
-        let _ = eggdb_sql::cdc::deliver_changes(store, database, EVENTS_PER_ROUND, &mut |event| {
+        let _ = eggdb_sql::cdc::deliver_changes_with_retries(store, database, "topic", EVENTS_PER_ROUND, now_ms(), &mut |event| {
             eggdb_kafka::publish(keyspace, topic, event.as_bytes()).is_ok()
         });
     }
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
 }
 
 const REPORT_TARGETS: &str = "EGGDB_REPORT_TARGETS";

@@ -94,6 +94,113 @@ pub fn deliver_changes<S: KeyValueStore>(
     limit: u64,
     deliver: &mut dyn FnMut(&str) -> bool,
 ) -> SqlResult<u64> {
+    deliver_outbox(store, database, limit, deliver).map(|(delivered, _)| delivered)
+}
+
+/// How many deliveries of the oldest change may fail before it moves to `eggdb_cdc.dead_letters`.
+pub const MAX_DELIVERY_ATTEMPTS: i64 = 10;
+const FIRST_RETRY_MS: i64 = 1_000;
+const LONGEST_RETRY_MS: i64 = 300_000;
+const DELIVERY_TABLES: [&str; 2] = [
+    "CREATE TABLE IF NOT EXISTS eggdb_cdc.delivery_state (target text PRIMARY KEY, failures integer NOT NULL, retry_at bigint NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS eggdb_cdc.dead_letters (id bigint PRIMARY KEY, target text NOT NULL, event text NOT NULL, failures integer NOT NULL, failed_at timestamptz NOT NULL DEFAULT now())",
+];
+
+fn sql_text(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
+}
+
+/// The wait before retrying after `failures` failed deliveries in a row: one second, doubled
+/// with each failure, at most five minutes.
+pub fn retry_delay_ms(failures: i64) -> i64 {
+    let doublings = u32::try_from(failures.saturating_sub(1).clamp(0, 20)).unwrap_or(20);
+    FIRST_RETRY_MS.saturating_mul(1i64 << doublings).min(LONGEST_RETRY_MS)
+}
+
+/// [`deliver_changes`] for one named delivery `target`, with retries: after a refused change,
+/// the target waits (see [`retry_delay_ms`]) before trying again, and a change refused
+/// [`MAX_DELIVERY_ATTEMPTS`] times in a row moves to `eggdb_cdc.dead_letters` with its event,
+/// so the changes after it flow again. `now_ms` is the time in milliseconds since 1970.
+pub fn deliver_changes_with_retries<S: KeyValueStore>(
+    store: &S,
+    database: &str,
+    target: &str,
+    limit: u64,
+    now_ms: i64,
+    deliver: &mut dyn FnMut(&str) -> bool,
+) -> SqlResult<u64> {
+    let mut session = Session::with_dialect(store, Dialect::PostgreSql);
+    for statement in DELIVERY_TABLES {
+        if let Err(error) = session.execute(statement, &mut |_| {}) {
+            let _ = session.close();
+            return if matches!(error.state(), SqlState::INVALID_SCHEMA_NAME | SqlState::UNDEFINED_TABLE) {
+                Ok(0)
+            } else {
+                Err(error)
+            };
+        }
+    }
+    let mut state = Vec::new();
+    session.execute(
+        &format!(
+            "SELECT failures, retry_at FROM eggdb_cdc.delivery_state WHERE target = {}",
+            sql_text(target)
+        ),
+        &mut |result| {
+            if result.columns.is_some() {
+                state = result.rows;
+            }
+        },
+    )?;
+    let number = |value: Option<&Value>| match value {
+        Some(Value::Integer(number)) => i64::from(*number),
+        Some(Value::BigInt(number)) => *number,
+        _ => 0,
+    };
+    let (failures, retry_at) = state
+        .first()
+        .map_or((0, 0), |row| (number(row.first()), number(row.get(1))));
+    if now_ms < retry_at {
+        session.close()?;
+        return Ok(0);
+    }
+    session.close()?;
+    let (delivered, refused) = deliver_outbox(store, database, limit, deliver)?;
+    let mut session = Session::with_dialect(store, Dialect::PostgreSql);
+    let failures = match &refused {
+        None => 0,
+        Some(_) => failures + 1,
+    };
+    let mut statements = vec![format!("DELETE FROM eggdb_cdc.delivery_state WHERE target = {}", sql_text(target))];
+    match refused {
+        Some((id, event)) if failures >= MAX_DELIVERY_ATTEMPTS => {
+            statements.push(format!(
+                "INSERT INTO eggdb_cdc.dead_letters (id, target, event, failures) VALUES ({id}, {}, {}, {failures}) ON CONFLICT (id) DO NOTHING",
+                sql_text(target),
+                sql_text(&event)
+            ));
+            statements.push(format!("DELETE FROM eggdb_cdc.outbox WHERE id = {id}"));
+        }
+        Some(_) => statements.push(format!(
+            "INSERT INTO eggdb_cdc.delivery_state VALUES ({}, {failures}, {})",
+            sql_text(target),
+            now_ms.saturating_add(retry_delay_ms(failures))
+        )),
+        None => {}
+    }
+    for statement in statements {
+        session.execute(&statement, &mut |_| {})?;
+    }
+    session.close()?;
+    Ok(delivered)
+}
+
+fn deliver_outbox<S: KeyValueStore>(
+    store: &S,
+    database: &str,
+    limit: u64,
+    deliver: &mut dyn FnMut(&str) -> bool,
+) -> SqlResult<(u64, Option<(i64, String)>)> {
     let mut session = Session::with_dialect(store, Dialect::PostgreSql);
     let mut rows = Vec::new();
     let listed = session.execute(
@@ -108,13 +215,14 @@ pub fn deliver_changes<S: KeyValueStore>(
             error.state(),
             SqlState::UNDEFINED_TABLE | SqlState::INVALID_SCHEMA_NAME
         ) {
-            Ok(0)
+            Ok((0, None))
         } else {
             Err(error)
         };
     }
     let mut last_delivered = None;
     let mut delivered = 0;
+    let mut refused = None;
     for row in &rows {
         let Some(Value::BigInt(id)) = row.first() else {
             continue;
@@ -138,6 +246,7 @@ pub fn deliver_changes<S: KeyValueStore>(
             captured_ms,
         );
         if !deliver(&event) {
+            refused = Some((*id, event));
             break;
         }
         last_delivered = Some(*id);
@@ -150,12 +259,12 @@ pub fn deliver_changes<S: KeyValueStore>(
         )?;
     }
     session.close()?;
-    Ok(delivered)
+    Ok((delivered, refused))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{debezium_event, deliver_changes};
+    use super::{MAX_DELIVERY_ATTEMPTS, debezium_event, deliver_changes, deliver_changes_with_retries, retry_delay_ms};
     use crate::memory_store::MemoryStore;
     use crate::session::Session;
 
@@ -270,5 +379,58 @@ mod tests {
     fn events_escape_names() {
         let event = debezium_event("a\"b", "public", "t", "c", None, Some("{}"), 5);
         assert!(event.starts_with("{\"before\":null,\"after\":{},\"source\":{\"connector\":\"eggdb\",\"db\":\"a\\\"b\""), "{event}");
+    }
+
+    #[test]
+    fn refused_changes_back_off_and_then_go_to_the_dead_letters() {
+        assert_eq!(retry_delay_ms(1), 1_000);
+        assert_eq!(retry_delay_ms(3), 4_000);
+        assert_eq!(retry_delay_ms(40), 300_000);
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        for statement in [
+            "CREATE EXTENSION eggdb_cdc",
+            "CREATE TABLE notes (id int PRIMARY KEY)",
+            "CREATE TRIGGER notes_cdc AFTER INSERT ON notes FOR EACH ROW EXECUTE FUNCTION eggdb_cdc.capture()",
+            "INSERT INTO notes VALUES (1)",
+            "INSERT INTO notes VALUES (2)",
+        ] {
+            session
+                .execute(statement, &mut |_| {})
+                .unwrap_or_else(|error| panic!("{statement}: {error}"));
+        }
+        let mut now = 0i64;
+        let mut tries = 0;
+        for _ in 0..MAX_DELIVERY_ATTEMPTS {
+            assert_eq!(
+                deliver_changes_with_retries(&store, "app", "hook", 10, now, &mut |event| {
+                    tries += 1;
+                    !event.contains("\"id\": 1") && !event.contains("\"id\":1")
+                })
+                .unwrap(),
+                0
+            );
+            assert_eq!(deliver_changes_with_retries(&store, "app", "hook", 10, now, &mut |_| true).unwrap(), 0);
+            now += 400_000;
+        }
+        assert_eq!(tries, MAX_DELIVERY_ATTEMPTS);
+        let mut seen = Vec::new();
+        assert_eq!(
+            deliver_changes_with_retries(&store, "app", "hook", 10, now, &mut |event| {
+                seen.push(event.to_owned());
+                true
+            })
+            .unwrap(),
+            1
+        );
+        let mut dead = 0;
+        session
+            .execute("SELECT count(*) FROM eggdb_cdc.dead_letters", &mut |result| {
+                if let Some(row) = result.rows.first() {
+                    dead = row.first().and_then(|value| value.to_text()).unwrap_or_default().parse::<i64>().unwrap_or(0);
+                }
+            })
+            .unwrap();
+        assert_eq!(dead, 1);
     }
 }
