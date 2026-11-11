@@ -272,7 +272,11 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
             stem,
             db,
             store,
-            sql: eggdb_sql::Session::with_dialect(store, dialect),
+            sql: {
+                let mut session = eggdb_sql::Session::with_dialect(store, dialect);
+                session.set_new_file_writer(&eggdb::sql::LOCAL_FILES);
+                session
+            },
             buffer: String::new(),
             entry: String::new(),
             timer: false,

@@ -29,7 +29,7 @@
 use crate::{Database, Error, ErrorKind, ReadTransaction, WriteTransaction};
 use eggdb_sql::StoreFailure;
 pub use eggdb_sql::{
-    CancelSignal, ColumnSchema, CopyChannel, CopyFormat, CopyStart, Dialect, IndexCheck,
+    CancelSignal, NewFileWriter, ColumnSchema, CopyChannel, CopyFormat, CopyStart, Dialect, IndexCheck,
     IndexColumnOrder, IndexSchema, Interval, IntervalFields, Numeric, NumericModifier,
     OneStatementError, OneStatementRefusal, OutputColumn, Parameter, QueryResult,
     RESERVED_KEY_PREFIX, Session, SqlError, SqlResult, SqlState, SqlType, TableSchema,
@@ -48,6 +48,36 @@ impl<'db> Store<'db> {
     pub fn session(&self, dialect: Dialect) -> Session<'_> {
         eggdb_sql::set_random_source(eggdb_platform::secure_random::fill);
         Session::with_dialect(self, dialect)
+    }
+}
+
+/// Creates files on this machine for statements that write one, such as SQLite's `VACUUM
+/// INTO`. Embedded use gives it to a session with [`Session::set_new_file_writer`]; servers
+/// never do.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LocalFiles;
+
+/// The [`LocalFiles`] writer, to hand to [`Session::set_new_file_writer`].
+pub static LOCAL_FILES: LocalFiles = LocalFiles;
+
+impl NewFileWriter for LocalFiles {
+    fn write_new_file(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        use std::io::Write;
+        let target = std::path::Path::new(path);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(target)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    "output file already exists".to_owned()
+                } else {
+                    format!("cannot create {}: {error}", target.display())
+                }
+            })?;
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| format!("cannot write {}: {error}", target.display()))
     }
 }
 

@@ -12,6 +12,7 @@ mod read_only;
 mod restore;
 mod savepoints;
 mod sqlite;
+mod sqlite_copy;
 pub(crate) mod sqlserver;
 pub(crate) mod sqlserver_agent;
 mod transaction_settings;
@@ -577,6 +578,7 @@ pub struct Session<'s> {
     plan_cache: crate::plan_cache::PlanCache,
     trigger_transaction: bool,
     served_databases: Option<&'s dyn crate::served_databases::ServedDatabases>,
+    new_file_writer: Option<&'s dyn crate::new_files::NewFileWriter>,
     database_switch: Option<String>,
     database_listing_version: Option<u64>,
     protocol: Option<&'static str>,
@@ -664,6 +666,7 @@ impl<'s> Session<'s> {
             plan_cache: crate::plan_cache::PlanCache::default(),
             trigger_transaction: false,
             served_databases: None,
+            new_file_writer: None,
             database_switch: None,
             database_listing_version: None,
             protocol: None,
@@ -971,6 +974,12 @@ impl<'s> Session<'s> {
     /// Names every database the server serves, which `pg_database` lists beside this one.
     pub fn set_database_names(&mut self, names: Vec<String>) {
         Arc::make_mut(&mut self.settings).database_names = names;
+    }
+
+    /// Lets the session create files for statements that write one, such as SQLite's
+    /// `VACUUM INTO`; without it those statements are refused.
+    pub fn set_new_file_writer(&mut self, writer: &'s dyn crate::new_files::NewFileWriter) {
+        self.new_file_writer = Some(writer);
     }
 
     /// Gives the session the server's databases: `CREATE DATABASE` and `DROP DATABASE` run
@@ -3131,6 +3140,7 @@ impl<'s> Session<'s> {
             Statement::MySql(MySqlStatement::LoadData(load)) => self.load_data(load, io, binding),
             Statement::MySql(statement) => self.run_mysql(statement),
             Statement::Pragma(pragma) => self.run_pragma(pragma),
+            Statement::VacuumInto(vacuum) => self.vacuum_into(vacuum),
             Statement::Select(select)
                 if self.sqlite()
                     && select

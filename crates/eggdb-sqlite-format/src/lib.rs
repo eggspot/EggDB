@@ -3,7 +3,9 @@
 //! serial types, overflow pages, the `sqlite_schema` table, and the pages of a write-ahead log up
 //! to its last commit. Every length, offset and page number read from the file is checked
 //! before it is used, and every walk is bounded, so a hostile file is an error, never a panic or
-//! a hang. Writing the format is not part of this crate yet.
+//! a hang. [`write_database`] writes a whole new file: table and index b-trees, records and
+//! overflow pages; editing a file in place, with its rollback journal or write-ahead log, is not
+//! part of this crate yet.
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -548,5 +550,11 @@ fn value_of(serial: u64, rest: &[u8]) -> Result<(SqliteValue, usize)> {
     })
 }
 
+mod writer;
+
+pub use writer::{KeyOrder, SqliteObject, compare_values, encode_record, write_database};
+
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod writer_tests;

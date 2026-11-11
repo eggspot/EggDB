@@ -47,6 +47,7 @@ pub(crate) enum Statement {
     },
     MySql(MySqlStatement),
     Pragma(Pragma),
+    VacuumInto(VacuumInto),
     Truncate(TableReference),
     CreateIndex(CreateIndex),
     DropIndex(DropIndex),
@@ -1120,6 +1121,12 @@ pub(crate) enum ShowplanKind {
     Text,
     All,
     StatisticsProfile,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct VacuumInto {
+    pub(crate) path: String,
+    pub(crate) position: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]

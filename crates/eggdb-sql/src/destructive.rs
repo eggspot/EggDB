@@ -376,6 +376,7 @@ pub(crate) fn classify(
         | Statement::Reset { .. }
         | Statement::MySql(_)
         | Statement::Pragma(_)
+        | Statement::VacuumInto(_)
         | Statement::CreateIndex(_)
         | Statement::Explain(_)
         | Statement::CreateSequence(_)

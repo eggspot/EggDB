@@ -562,7 +562,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Event triggers: PostgreSQL's event triggers, SQL Server's DDL triggers and Oracle's DDL and
   database event triggers (D27).
 - Users can write SQLite files: the B-tree writer, the rollback journal and the WAL (D180).
-  Check: files EggDB writes pass `PRAGMA integrity_check`.
+  Check: files EggDB writes pass `PRAGMA integrity_check`. The b-tree writer for whole new files
+  and `VACUUM INTO`: **code written, unbuilt** (code-only mode, 2026-11-12, D631). Left: editing a
+  file in place with the rollback journal and the WAL.
 - `WITHOUT ROWID` tables and UTF-16 databases in SQLite files (D180).
 - `eggdb restore` from an SQLite file into an EggDB file (D13, D180). **Code written, unbuilt** (code-only mode, 2026-11-12,
   D568).
@@ -579,7 +581,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `zeroblob` and `randomblob`: **code written, unbuilt** (D377); the reading and building JSON
   functions: **code written, unbuilt** (D378), the editing ones (D379), `->`/`->>` (D380) and
   `json_group_array`/`object` (D381), `json_each`/`json_tree` (D382), temporary triggers
-  (D383) and `VACUUM`/`REINDEX` accepted (D384; left: `VACUUM INTO`); `GLOB` classes and temporary views are built (D299,
+  (D383) and `VACUUM`/`REINDEX` accepted (D384), and `VACUUM INTO`: **code written, unbuilt** (code-only mode, 2026-11-12, D631); `GLOB` classes and temporary views are built (D299,
   D151). Check: the SQLite suite.
 - SQLite's own text in `sqlite_schema` after `RENAME COLUMN`, `DROP COLUMN` and renamed
   references in views and triggers (D273, D294).

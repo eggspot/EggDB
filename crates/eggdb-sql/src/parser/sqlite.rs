@@ -386,7 +386,17 @@ impl<'t> Parser<'t> {
                         self.name()?;
                     }
                     if self.is_word("into") {
-                        return Err(self.not_supported("VACUUM INTO"));
+                        self.at += 1;
+                        let position = self.position();
+                        let TokenKind::String(path) = self.peek_kind() else {
+                            return Err(self.not_supported("VACUUM INTO with an expression"));
+                        };
+                        let path = path.as_ref().to_owned();
+                        self.at += 1;
+                        return Ok(Some(Statement::VacuumInto(crate::ast::VacuumInto {
+                            path,
+                            position,
+                        })));
                     }
                 } else if matches!(self.peek_kind(), TokenKind::Word(_) | TokenKind::QuotedIdentifier(_)) {
                     self.table_name()?;

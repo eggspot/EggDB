@@ -161,7 +161,7 @@ pub(crate) fn view_text(view: &ViewDefinition) -> String {
     )
 }
 
-fn kept_index_text(
+pub(super) fn kept_index_text(
     reader: &dyn KeyValueRead,
     table: &TableSchema,
     index: &IndexSchema,
@@ -184,12 +184,12 @@ fn kept_index_text(
     ))
 }
 
-struct ListedView {
-    name: String,
-    text: Option<String>,
+pub(super) struct ListedView {
+    pub(super) name: String,
+    pub(super) text: Option<String>,
 }
 
-fn listed_views(reader: &dyn KeyValueRead) -> SqlResult<Vec<ListedView>> {
+pub(super) fn listed_views(reader: &dyn KeyValueRead) -> SqlResult<Vec<ListedView>> {
     let mut listed = Vec::new();
     for view in crate::views::every_view(reader)? {
         if crate::temporary::is_temporary_name(&view.name) {
@@ -214,7 +214,7 @@ fn listed_views(reader: &dyn KeyValueRead) -> SqlResult<Vec<ListedView>> {
     Ok(listed)
 }
 
-fn kept_create_text(reader: &dyn KeyValueRead, table: &TableSchema) -> SqlResult<String> {
+pub(super) fn kept_create_text(reader: &dyn KeyValueRead, table: &TableSchema) -> SqlResult<String> {
     let generated = create_text(table);
     if table.schema != crate::schemas::DEFAULT_SCHEMA {
         return Ok(generated);

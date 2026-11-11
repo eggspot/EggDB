@@ -73,6 +73,7 @@ impl Session<'_> {
         let store = DatabaseStore(&db);
         let dialect = self.request.dialect;
         let mut session = eggdb_sql::Session::with_dialect(&store, dialect);
+        session.set_new_file_writer(&eggdb::sql::LOCAL_FILES);
         if dialect == Dialect::Oracle && !script {
             session.enable_server_output(None);
         }
