@@ -1142,7 +1142,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   entry (D203).
 - `CREATE INDEX ... USING hnsw` and `ivfflat`, kept in the file and used by `ORDER BY ... LIMIT`
   (D203).
-- `halfvec`, `sparsevec`, `int8` and bit vectors, and vector arithmetic (D19, D203).
+- `halfvec`, `sparsevec`, `int8` and bit vectors, and vector arithmetic (D19, D203). Bit distances,
+  `binary_quantize`, `subvector` and `sparsevec` text input: **code written, unbuilt** (code-only
+  mode, 2026-11-11, D437). Left: the stored types and arithmetic.
 - An ANN benchmark (recall and queries per second) against pgvector (D203).
 - A stored geometry type (hex EWKB, the binary wire format, a catalog entry) (D204).
 - R-tree spatial indexes, with MySQL's `SPATIAL` keys (D204, sql.md).

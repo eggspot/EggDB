@@ -461,3 +461,4 @@ its full title with its status.
 - [D434](decisions/D434.md) Code-only batch 81 (M10): Oracle's `UTL_RAW` and `DBMS_LOB` functions
 - [D435](decisions/D435.md) Code-only batch 82 (M11): TimescaleDB's `first(value, time)` and `last(value, time)`
 - [D436](decisions/D436.md) Code-only batch 83 (M13): betweenness and closeness centrality, k-core, Louvain and weighted shortest paths as graph procedures
+- [D437](decisions/D437.md) Code-only batch 85 (M12): pgvector's `subvector`, `binary_quantize`, bit distances and `sparsevec` text

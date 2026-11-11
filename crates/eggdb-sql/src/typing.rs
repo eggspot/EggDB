@@ -173,9 +173,9 @@ fn added_function_type(
         | "websearch_to_tsquery"
         | "normalize" => Some(SqlType::Text),
         "ts_rank" | "ts_rank_cd" => Some(SqlType::Real),
-        "l2_distance" | "cosine_distance" | "inner_product" | "l1_distance" | "vector_norm" => {
-            Some(SqlType::Double)
-        }
+        "l2_distance" | "cosine_distance" | "inner_product" | "l1_distance" | "vector_norm"
+        | "hamming_distance" | "jaccard_distance" => Some(SqlType::Double),
+        "subvector" | "binary_quantize" => Some(SqlType::Text),
         "vector_dims" => Some(SqlType::Integer),
         "eggdb_embed" => Some(SqlType::Text),
         "rrf_score" => Some(SqlType::Double),

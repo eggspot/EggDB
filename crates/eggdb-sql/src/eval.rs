@@ -1407,8 +1407,7 @@ impl Evaluator<'_> {
             "eggdb_embed" | "rrf_score" => {
                 return crate::vector_functions::ai_function(name, &self.arguments(arguments)?);
             }
-            "l2_distance" | "cosine_distance" | "inner_product" | "l1_distance" | "vector_dims"
-            | "vector_norm" | "l2_normalize" => {
+            name if crate::vector_functions::FUNCTIONS.contains(&name) => {
                 return crate::vector_functions::function(name, &self.arguments(arguments)?);
             }
             crate::json_functions::WHOLE_ROW => {
