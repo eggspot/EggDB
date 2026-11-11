@@ -886,14 +886,18 @@ SECURITY`, `COMMENT`, `LANGUAGE SQL`). The body is one statement or a compound s
   matching branch and no `ELSE` fails with SQLSTATE `20000`, as in MySQL);
 - `[label:] WHILE ... DO ... END WHILE`, `REPEAT ... UNTIL ... END REPEAT`, `LOOP ... END LOOP`,
   with `LEAVE label` and `ITERATE label`;
-- `RETURN expr` in functions and `SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = ...`.
+- `RETURN expr` in functions and `SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = ...`;
+- `DECLARE CONTINUE | EXIT HANDLER FOR ...` (error numbers, SQLSTATEs, named conditions,
+  `SQLEXCEPTION`, `SQLWARNING`, `NOT FOUND`), `DECLARE name CONDITION FOR ...`, cursors
+  (`DECLARE c CURSOR FOR`, `OPEN`, `FETCH ... INTO`, `CLOSE`), `RESIGNAL` and `GET DIAGNOSTICS`
+  (D418).
 
 `CALL name(...)` (or `CALL name` without parentheses) runs a procedure; an `OUT` or `INOUT`
 argument written as a user variable (`@total`) receives the value. When a statement inside the
 procedure fails, only that statement is undone: the statements before it keep their changes
 (committed in autocommit mode), as in MySQL (D370). `DROP PROCEDURE` and `DROP
-FUNCTION` take `IF EXISTS`. Not yet: `DECLARE ... HANDLER`, cursors, named conditions,
-`GET DIAGNOSTICS`, `RESIGNAL`, setting user or system variables inside a body, and events.
+FUNCTION` take `IF EXISTS`. Not yet: setting user or system variables inside a body,
+`SIGNAL ... SET MYSQL_ERRNO`, and events.
 
 ## Connecting with mysql
 

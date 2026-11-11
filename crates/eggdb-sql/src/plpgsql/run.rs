@@ -1482,7 +1482,7 @@ impl<'r> Run<'r> {
         let Some(handler) = block
             .handlers
             .iter()
-            .find(|handler| handler.catches(error.state()))
+            .find(|handler| handler.catches_error(&error))
         else {
             self.undo.release();
             crate::routine_settings::release(settings_mark);
@@ -2720,6 +2720,15 @@ fn stacked_item(item: DiagnosticsItem, error: &SqlError) -> String {
             .map(crate::schemas::schema_of)
             .unwrap_or_default()
             .to_owned(),
+        DiagnosticsItem::MySqlErrno => crate::mysql_errors::translate(error.clone(), "", "")
+            .vendor_code()
+            .map_or_else(String::new, |code| code.to_string()),
+        DiagnosticsItem::MySqlReturnedSqlstate => {
+            crate::mysql_errors::translate(error.clone(), "", "")
+                .state()
+                .code()
+                .to_owned()
+        }
         DiagnosticsItem::RowCount
         | DiagnosticsItem::PgContext
         | DiagnosticsItem::PgRoutineOid

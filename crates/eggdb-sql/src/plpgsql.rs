@@ -377,6 +377,8 @@ pub(crate) enum DiagnosticsItem {
     PgExceptionDetail,
     PgExceptionHint,
     PgExceptionContext,
+    MySqlErrno,
+    MySqlReturnedSqlstate,
 }
 
 const DIAGNOSTICS_ITEMS: [(&str, DiagnosticsItem); 13] = [
@@ -618,13 +620,26 @@ pub(crate) enum ExceptionCondition {
     State(SqlState),
     Oracle(u16),
     Declared(String),
+    MySqlErrno(u16),
+    MySqlState(String),
+    MySqlException,
+    MySqlWarning,
+    MySqlNotFound,
 }
 
 impl ExceptionCondition {
     pub(crate) fn catches(&self, state: SqlState) -> bool {
         match self {
             Self::Others => state != SqlState::QUERY_CANCELED && state != SqlState::ASSERT_FAILURE,
-            Self::Oracle(_) | Self::Declared(_) => false,
+            Self::Oracle(_) | Self::Declared(_) | Self::MySqlErrno(_) | Self::MySqlState(_) => {
+                false
+            }
+            Self::MySqlException => {
+                !matches!(state.code().get(..2), Some("00" | "01" | "02"))
+                    && state != SqlState::QUERY_CANCELED
+            }
+            Self::MySqlWarning => state.code().starts_with("01"),
+            Self::MySqlNotFound => state.code().starts_with("02"),
             Self::State(caught) => {
                 let caught = caught.code();
                 let found = state.code();
@@ -642,16 +657,44 @@ impl ExceptionCondition {
             Self::Others => true,
             Self::Oracle(caught) => code == Some(*caught),
             Self::Declared(identity) => declared == Some(identity.as_str()),
-            Self::State(_) => false,
+            Self::State(_)
+            | Self::MySqlErrno(_)
+            | Self::MySqlState(_)
+            | Self::MySqlException
+            | Self::MySqlWarning
+            | Self::MySqlNotFound => false,
+        }
+    }
+
+    pub(crate) fn catches_error(&self, error: &SqlError) -> bool {
+        match self {
+            Self::MySqlErrno(number) => {
+                let translated = crate::mysql_errors::translate(error.clone(), "", "");
+                translated.vendor_code() == Some(*number)
+                    || (*number == MYSQL_NO_DATA && error.state().code() == "02000")
+            }
+            Self::MySqlState(state) => {
+                let translated = crate::mysql_errors::translate(error.clone(), "", "");
+                translated.state().code() == state || error.state().code() == state
+            }
+            other => other.catches(error.state()),
         }
     }
 }
+
+pub(crate) const MYSQL_NO_DATA: u16 = 1329;
 
 impl Handler {
     pub(crate) fn catches(&self, state: SqlState) -> bool {
         self.conditions
             .iter()
             .any(|condition| condition.catches(state))
+    }
+
+    pub(crate) fn catches_error(&self, error: &SqlError) -> bool {
+        self.conditions
+            .iter()
+            .any(|condition| condition.catches_error(error))
     }
 
     pub(crate) fn catches_oracle(&self, code: Option<u16>, declared: Option<&str>) -> bool {

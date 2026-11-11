@@ -2585,7 +2585,13 @@ impl<'p, 't> Compiler<'p, 't> {
         let raised = match self.exception_condition()? {
             ExceptionCondition::Oracle(code) => RaisedException::Oracle(code),
             ExceptionCondition::Declared(identity) => RaisedException::Declared(identity),
-            ExceptionCondition::Others | ExceptionCondition::State(_) => {
+            ExceptionCondition::Others
+            | ExceptionCondition::State(_)
+            | ExceptionCondition::MySqlErrno(_)
+            | ExceptionCondition::MySqlState(_)
+            | ExceptionCondition::MySqlException
+            | ExceptionCondition::MySqlWarning
+            | ExceptionCondition::MySqlNotFound => {
                 return Err(SqlError::syntax(
                     "syntax error at or near \"others\"",
                     name_position,

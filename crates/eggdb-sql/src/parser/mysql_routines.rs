@@ -13,6 +13,8 @@ use crate::routines::{
     RoutineReturns, Volatility,
 };
 
+mod handlers;
+
 const MAX_NESTING: usize = 64;
 
 fn not_supported_yet(what: &str, position: usize) -> SqlError {
@@ -23,6 +25,8 @@ struct Compiler<'p, 't> {
     parser: &'p mut Parser<'t>,
     labels: Vec<String>,
     generated_labels: usize,
+    scopes: Vec<handlers::HandlerScope>,
+    in_handler: usize,
 }
 
 impl<'t> Parser<'t> {
@@ -245,6 +249,8 @@ impl<'p, 't> Compiler<'p, 't> {
             parser,
             labels: Vec::new(),
             generated_labels: 0,
+            scopes: Vec::new(),
+            in_handler: 0,
         }
     }
 
@@ -364,7 +370,8 @@ impl<'p, 't> Compiler<'p, 't> {
             if self.parser.at_end() {
                 return Err(self.parser.unexpected());
             }
-            steps.push(self.step(depth)?);
+            let step = self.step(depth)?;
+            steps.push(self.guard(step));
             self.end_statement()?;
         }
         Ok(steps)
@@ -432,8 +439,16 @@ impl<'p, 't> Compiler<'p, 't> {
                 ));
             }
             Some("signal") | Some("resignal") => self.signal_step()?,
-            Some("open") | Some("fetch") | Some("close") => {
-                return Err(not_supported_yet("cursors", position));
+            Some("open") => self.open_step()?,
+            Some("fetch") => self.fetch_step()?,
+            Some("close") => self.close_step()?,
+            Some("get")
+                if self.parser.is_word_at(1, "diagnostics")
+                    || (self.parser.is_word_at(1, "current")
+                        || self.parser.is_word_at(1, "stacked"))
+                        && self.parser.is_word_at(2, "diagnostics") =>
+            {
+                self.diagnostics_step()?
             }
             Some("set") if self.sets_locals() => self.set_step()?,
             Some("select") => self.select_step()?,
@@ -454,20 +469,25 @@ impl<'p, 't> Compiler<'p, 't> {
         if let Some(label) = &label {
             self.labels.push(label.clone());
         }
-        let mut declarations = Vec::new();
-        while self.is_word("declare") {
-            declarations.extend(self.declaration()?);
-            self.end_statement()?;
-        }
-        let steps = self.steps(depth + 1, &["end"]);
+        let block_label = match &label {
+            Some(label) => label.clone(),
+            None => {
+                self.generated_labels += 1;
+                format!("mysql_block_{}", self.generated_labels)
+            }
+        };
+        self.scopes
+            .push(handlers::HandlerScope::new(block_label.clone()));
+        let contents = self.block_contents(depth);
+        self.scopes.pop();
         if label.is_some() {
             self.labels.pop();
         }
-        let steps = steps?;
+        let (declarations, steps) = contents?;
         self.expect_word("end")?;
         self.end_label(label.as_deref())?;
         Ok(Block {
-            label,
+            label: Some(block_label),
             declarations,
             steps,
             handlers: Vec::new(),
@@ -475,18 +495,33 @@ impl<'p, 't> Compiler<'p, 't> {
         })
     }
 
-    fn declaration(&mut self) -> SqlResult<Vec<Declaration>> {
+    fn block_contents(&mut self, depth: usize) -> SqlResult<(Vec<Declaration>, Vec<Step>)> {
+        let mut declarations = Vec::new();
+        while self.is_word("declare") {
+            declarations.extend(self.declaration(depth)?);
+            self.end_statement()?;
+        }
+        let steps = self.steps(depth + 1, &["end"])?;
+        Ok((declarations, steps))
+    }
+
+    fn declaration(&mut self, depth: usize) -> SqlResult<Vec<Declaration>> {
         let position = self.position();
         self.expect_word("declare")?;
-        if self.parser.is_word_at(1, "cursor") || self.parser.is_word_at(1, "condition") {
-            return Err(not_supported_yet("cursors and named conditions", position));
+        if self.parser.is_word_at(1, "condition") {
+            self.condition_declaration()?;
+            return Ok(Vec::new());
+        }
+        if self.parser.is_word_at(1, "cursor") {
+            return Ok(vec![self.cursor_declaration(position)?]);
         }
         if ["continue", "exit", "undo"]
             .iter()
             .any(|word| self.is_word(word))
             && self.parser.is_word_at(1, "handler")
         {
-            return Err(not_supported_yet("handlers", position));
+            self.handler_declaration(depth, position)?;
+            return Ok(Vec::new());
         }
         let mut names = vec![(self.parser.name()?.text, position)];
         while self.parser.take(&TokenKind::Comma) {
@@ -750,19 +785,47 @@ impl<'p, 't> Compiler<'p, 't> {
 
     fn signal_step(&mut self) -> SqlResult<StepKind> {
         let position = self.position();
+        let resignal = self.is_word("resignal");
         self.parser.at += 1;
-        self.expect_word("sqlstate")?;
-        self.take_word("value");
-        let TokenKind::String(code) = self.parser.peek_kind() else {
-            return Err(not_supported_yet("SIGNAL with a condition name", position));
+        if resignal && !self.in_handler() {
+            return Err(SqlError::new(
+                SqlState::from_text("0K000").unwrap_or(SqlState::SYNTAX_ERROR),
+                "RESIGNAL when handler not active",
+            )
+            .with_vendor_code(1645)
+            .at(position));
+        }
+        let code = if self.take_word("sqlstate") {
+            self.take_word("value");
+            let TokenKind::String(code) = self.parser.peek_kind() else {
+                return Err(self.parser.unexpected());
+            };
+            let code = code.to_string();
+            self.parser.at += 1;
+            Some(code)
+        } else if let Some(name) = self.word_text().filter(|word| word != "set") {
+            let name_position = self.position();
+            self.parser.at += 1;
+            Some(self.condition_state(&name, name_position)?)
+        } else if resignal {
+            None
+        } else {
+            return Err(self.parser.unexpected());
         };
-        let state = SqlState::from_text(code)
-            .filter(|_| code.len() == 5 && !code.starts_with("00"))
-            .ok_or_else(|| {
-                SqlError::new(SqlState::SYNTAX_ERROR, format!("Bad SQLSTATE: '{code}'"))
-                    .at(position)
-            })?;
-        self.parser.at += 1;
+        let state = match code {
+            Some(code) => Some(
+                SqlState::from_text(&code)
+                    .filter(|_| code.len() == 5 && !code.starts_with("00"))
+                    .ok_or_else(|| {
+                        SqlError::new(SqlState::SYNTAX_ERROR, format!("Bad SQLSTATE: '{code}'"))
+                            .at(position)
+                    })?,
+            ),
+            None => None,
+        };
+        if resignal && state.is_none() && !self.is_word("set") {
+            return Ok(StepKind::Reraise);
+        }
         let mut options = Vec::new();
         if self.take_word("set") {
             loop {
@@ -794,17 +857,31 @@ impl<'p, 't> Compiler<'p, 't> {
             }
         }
         if options.is_empty() {
+            let message = if resignal {
+                "sqlerrm"
+            } else {
+                "'Unhandled user-defined exception condition'"
+            };
             options.push(RaiseOption {
                 item: RaiseItem::Message,
                 value: Fragment {
-                    text: "'Unhandled user-defined exception condition'".to_owned(),
+                    text: message.to_owned(),
+                    position,
+                },
+            });
+        }
+        if state.is_none() {
+            options.push(RaiseOption {
+                item: RaiseItem::Errcode,
+                value: Fragment {
+                    text: "sqlstate".to_owned(),
                     position,
                 },
             });
         }
         Ok(StepKind::Raise(Raise {
             level: RaiseLevel::Exception,
-            condition: Some(RaiseCondition::State(state)),
+            condition: state.map(RaiseCondition::State),
             format: None,
             arguments: Vec::new(),
             options,
