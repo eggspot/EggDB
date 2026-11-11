@@ -1077,7 +1077,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   GENERATED` and `DROP IDENTITY` (roadmap item 37c). **Code written, unbuilt** (code-only mode, 2026-11-11, D428):
   the refusals were already there; Oracle's `MODIFY` forms added. Left: `ON NULL`.
 - Oracle's `IS JSON` (lax syntax, `STRICT`, `TYPE (...)`), `JSON_SERIALIZE`'s `PRETTY`, `ASCII`
-  and `TRUNCATE`, and `JSON_SCALAR` in Oracle's dialect (D302).
+  and `TRUNCATE`, and `JSON_SCALAR` in Oracle's dialect (D302). **Code written, unbuilt** (code-only
+  mode, 2026-11-11, D450).
 - GoogleSQL, after D58's legal check: first BigQuery's dialect over the PostgreSQL protocol, then
   Spanner's API (D47, D48). Check: a correctness suite from the GoogleSQL reference.
 - Snowflake SQL, after D58's legal check: first `VARIANT`, `FLATTEN` and its functions over the

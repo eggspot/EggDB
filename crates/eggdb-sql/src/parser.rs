@@ -4265,7 +4265,7 @@ impl<'t> Parser<'t> {
             self.expect_word("from")?;
             let right = self.expression_above(Level::Comparison)?;
             return crate::row_values::distinctness(self.dialect, expr, right, negated, position);
-        } else if self.postgresql() && self.take_word("json") {
+        } else if (self.postgresql() || self.oracle()) && self.take_word("json") {
             return Ok(self.is_json_predicate(expr, negated));
         } else if self.sqlite() {
             let right = self.expression_above(Level::Comparison)?;

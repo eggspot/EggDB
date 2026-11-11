@@ -295,6 +295,39 @@ impl Parser<'_> {
     /// `SCALAR`, `ARRAY` or `OBJECT` and an optional `WITH | WITHOUT UNIQUE [KEYS]`.
     pub(super) fn is_json_predicate(&mut self, subject: Expr, negated: bool) -> Expr {
         let position = subject.position;
+        let mut subject = subject;
+        if self.oracle() {
+            self.json_format_clause().ok();
+            let strict = self.take_word("strict");
+            if !strict {
+                self.take_word("lax");
+            }
+            if (self.is_word("allow") || self.is_word("disallow")) && self.is_word_at(1, "scalars") {
+                self.at += 2;
+            }
+            if !strict {
+                subject = crate::sql_json_constructors::lax_json_call(subject, position);
+            }
+            if self.is_word("type") && self.peek_kind_at(1) == &TokenKind::LeftParen {
+                self.at += 2;
+                let shape = ["scalar", "array", "object"]
+                    .into_iter()
+                    .find(|word| self.is_word(word))
+                    .and_then(JsonShape::named);
+                if shape.is_some() {
+                    self.at += 1;
+                }
+                let _ = self.take(&TokenKind::RightParen);
+                let unique_keys = self.json_unique_keys();
+                return crate::sql_json_constructors::is_json_call(
+                    subject,
+                    shape.unwrap_or(JsonShape::Value),
+                    unique_keys,
+                    negated,
+                    position,
+                );
+            }
+        }
         let named = ["value", "scalar", "array", "object"]
             .into_iter()
             .find(|word| self.is_word(word))
@@ -349,9 +382,28 @@ impl Parser<'_> {
                 } else {
                     None
                 };
+                let mut options = 0u8;
+                if self.oracle() {
+                    loop {
+                        if self.take_word("pretty") {
+                            options |= crate::sql_json_constructors::SERIALIZE_PRETTY;
+                        } else if self.take_word("ascii") {
+                            options |= crate::sql_json_constructors::SERIALIZE_ASCII;
+                        } else if self.take_word("truncate") {
+                            options |= crate::sql_json_constructors::SERIALIZE_TRUNCATE;
+                        } else if (self.is_word("error") || self.is_word("null"))
+                            && self.is_word_at(1, "on")
+                            && self.is_word_at(2, "error")
+                        {
+                            self.at += 3;
+                        } else {
+                            break;
+                        }
+                    }
+                }
                 self.expect(&TokenKind::RightParen)?;
                 Ok(Some(crate::sql_json_constructors::json_serialize_call(
-                    subject, returning, position,
+                    subject, returning, options, position,
                 )))
             }
             _ => Ok(None),
@@ -366,7 +418,8 @@ impl Parser<'_> {
         if !(self.sql_json_dialect() || mysql_value) || self.peek_kind() != &TokenKind::LeftParen {
             return Ok(None);
         }
-        if self.postgresql()
+        if (self.postgresql()
+            || (self.oracle() && matches!(name.text.as_str(), "json_scalar" | "json_serialize")))
             && let Some(expr) = self.sql_json_constructor(name)?
         {
             return Ok(Some(expr));

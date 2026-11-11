@@ -133,10 +133,209 @@ pub(crate) fn unsupported_serialize_type(sql_type: SqlType) -> SqlError {
     )
 }
 
-/// `JSON_SERIALIZE(subject [RETURNING returning])`.
+pub(crate) const SERIALIZE_PRETTY: u8 = 1;
+pub(crate) const SERIALIZE_ASCII: u8 = 2;
+pub(crate) const SERIALIZE_TRUNCATE: u8 = 4;
+const LAX_JSON: &str = "\u{0}oracle_lax_json";
+
+/// Oracle's lax JSON as standard JSON: the subject's text with unquoted keys quoted, single-quoted
+/// strings double-quoted, `TRUE`/`FALSE`/`NULL` in any case lowered and numbers such as `+1`, `.5`
+/// and `1.` written out; text that is not lax JSON is left as it is, so the strict check refuses it.
+pub(crate) fn lax_json_call(subject: Expr, position: usize) -> Expr {
+    call(LAX_JSON, vec![subject], position)
+}
+
+fn read_quoted(characters: &[char], at: &mut usize, quote: char) -> Option<String> {
+    let mut out = String::new();
+    *at += 1;
+    while let Some(&character) = characters.get(*at) {
+        *at += 1;
+        match character {
+            '\\' => {
+                let next = *characters.get(*at)?;
+                *at += 1;
+                if next == '\'' {
+                    out.push('\'');
+                } else {
+                    out.push('\\');
+                    out.push(next);
+                }
+            }
+            found if found == quote => return Some(out),
+            '"' => out.push_str("\\\""),
+            other => out.push(other),
+        }
+    }
+    None
+}
+
+fn strict_text(text: &str) -> Option<String> {
+    let characters: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut at = 0;
+    while let Some(&character) = characters.get(at) {
+        match character {
+            '"' => {
+                let inner = read_quoted(&characters, &mut at, '"')?;
+                out.push('"');
+                out.push_str(&inner);
+                out.push('"');
+            }
+            '\'' => {
+                let inner = read_quoted(&characters, &mut at, '\'')?;
+                out.push('"');
+                out.push_str(&inner);
+                out.push('"');
+            }
+            '{' | '}' | '[' | ']' | ',' | ':' => {
+                out.push(character);
+                at += 1;
+            }
+            space if space.is_whitespace() => {
+                out.push(space);
+                at += 1;
+            }
+            '+' | '-' | '.' | '0'..='9' => {
+                let start = at;
+                while characters
+                    .get(at)
+                    .is_some_and(|next| next.is_ascii_digit() || matches!(next, '+' | '-' | '.' | 'e' | 'E'))
+                {
+                    at += 1;
+                }
+                let mut number: String = characters[start..at].iter().collect();
+                if let Some(rest) = number.strip_prefix('+') {
+                    number = rest.to_owned();
+                }
+                if number.starts_with('.') {
+                    number.insert(0, '0');
+                } else if let Some(rest) = number.strip_prefix("-.") {
+                    number = format!("-0.{rest}");
+                }
+                if number.ends_with('.') {
+                    number.push('0');
+                }
+                out.push_str(&number);
+            }
+            letter if letter.is_alphabetic() || letter == '_' || letter == '$' => {
+                let start = at;
+                while characters
+                    .get(at)
+                    .is_some_and(|next| next.is_alphanumeric() || matches!(next, '_' | '$'))
+                {
+                    at += 1;
+                }
+                let word: String = characters[start..at].iter().collect();
+                let lowered = word.to_ascii_lowercase();
+                let mut ahead = at;
+                while characters.get(ahead).is_some_and(|next| next.is_whitespace()) {
+                    ahead += 1;
+                }
+                if characters.get(ahead) == Some(&':') {
+                    out.push('"');
+                    out.push_str(&word);
+                    out.push('"');
+                } else if matches!(lowered.as_str(), "true" | "false" | "null") {
+                    out.push_str(&lowered);
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+fn lax_json(evaluator: &Evaluator<'_>, arguments: &[Expr]) -> SqlResult<Value> {
+    let [subject] = arguments else {
+        return Err(malformed(IS_JSON));
+    };
+    let value = evaluator.eval(subject, Some(SqlType::Text))?;
+    Ok(match value {
+        Value::Text(text) => Value::Text(strict_text(&text).unwrap_or(text)),
+        other => other,
+    })
+}
+
+fn pretty(node: &crate::json::Node, depth: usize, out: &mut String) {
+    let indent = |depth: usize| "  ".repeat(depth);
+    match &node.value {
+        crate::json::Json::Array(items) if !items.is_empty() => {
+            out.push_str("[\n");
+            for (at, item) in items.iter().enumerate() {
+                out.push_str(&indent(depth + 1));
+                pretty(item, depth + 1, out);
+                if at + 1 < items.len() {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            out.push_str(&indent(depth));
+            out.push(']');
+        }
+        crate::json::Json::Object(members) if !members.is_empty() => {
+            out.push_str("{\n");
+            for (at, (key, value)) in members.iter().enumerate() {
+                out.push_str(&indent(depth + 1));
+                out.push_str(&json_string(key));
+                out.push_str(" : ");
+                pretty(value, depth + 1, out);
+                if at + 1 < members.len() {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            out.push_str(&indent(depth));
+            out.push('}');
+        }
+        crate::json::Json::Array(_) => out.push_str("[]"),
+        crate::json::Json::Object(_) => out.push_str("{}"),
+        crate::json::Json::String(text) => out.push_str(&json_string(text)),
+        crate::json::Json::Number(text) => out.push_str(text),
+        crate::json::Json::Boolean(flag) => out.push_str(if *flag { "true" } else { "false" }),
+        crate::json::Json::Null => out.push_str("null"),
+    }
+}
+
+fn json_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            control if (control as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", control as u32)),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn ascii_only(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character.is_ascii() {
+            out.push(character);
+        } else {
+            let mut units = [0u16; 2];
+            for unit in character.encode_utf16(&mut units) {
+                out.push_str(&format!("\\u{:04X}", unit));
+            }
+        }
+    }
+    out
+}
+
+/// `JSON_SERIALIZE(subject [RETURNING returning] [PRETTY] [ASCII] [TRUNCATE])`.
 pub(crate) fn json_serialize_call(
     subject: Expr,
     returning: Option<SqlType>,
+    options: u8,
     position: usize,
 ) -> Expr {
     let null = Expr {
@@ -153,12 +352,16 @@ pub(crate) fn json_serialize_call(
         },
         None => null,
     };
-    call(JSON_SERIALIZE, vec![subject, returning], position)
+    call(
+        JSON_SERIALIZE,
+        vec![subject, returning, code_literal(i64::from(options), position)],
+        position,
+    )
 }
 
 /// Whether `name` is one of this module's internal functions.
 pub(crate) fn is_constructor(name: &str) -> bool {
-    matches!(name, IS_JSON | JSON | JSON_SCALAR | JSON_SERIALIZE)
+    matches!(name, IS_JSON | JSON | JSON_SCALAR | JSON_SERIALIZE | LAX_JSON)
 }
 
 /// The column name PostgreSQL gives a select-list item that is one of these calls.
@@ -184,6 +387,7 @@ pub(crate) fn result_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> O
         IS_JSON => Some(SqlType::Boolean),
         JSON | JSON_SCALAR => Some(SqlType::Json),
         JSON_SERIALIZE => Some(serialized_type(arguments, scope)),
+        LAX_JSON => Some(SqlType::Text),
         _ => None,
     }
 }
@@ -334,8 +538,16 @@ fn json_scalar(evaluator: &Evaluator<'_>, arguments: &[Expr]) -> SqlResult<Value
 }
 
 fn json_serialize(evaluator: &Evaluator<'_>, arguments: &[Expr]) -> SqlResult<Value> {
-    let [subject, _] = arguments else {
-        return Err(malformed(JSON_SERIALIZE));
+    let (subject, options) = match arguments {
+        [subject, _] => (subject, 0),
+        [subject, _, options] => (
+            subject,
+            match &options.kind {
+                ExprKind::Literal(Literal::Integer(code)) => *code as u8,
+                _ => 0,
+            },
+        ),
+        _ => return Err(malformed(JSON_SERIALIZE)),
     };
     let returning = serialized_type(arguments, evaluator.scope);
     if !serializes_to(returning) {
@@ -345,9 +557,24 @@ fn json_serialize(evaluator: &Evaluator<'_>, arguments: &[Expr]) -> SqlResult<Va
     if value.is_null() {
         return Ok(Value::Null);
     }
-    let text = validated_text(value, false)?;
+    let mut text = validated_text(value, false)?;
+    if options & SERIALIZE_PRETTY != 0
+        && let Ok(node) = crate::json::parse_document(&text)
+    {
+        let mut out = String::new();
+        pretty(&node, 0, &mut out);
+        text = out;
+    }
+    if options & SERIALIZE_ASCII != 0 {
+        text = ascii_only(&text);
+    }
     if returning == SqlType::Bytea {
         return Ok(Value::Bytea(text.into_bytes()));
+    }
+    if options & SERIALIZE_TRUNCATE != 0
+        && let SqlType::Varchar(Some(length)) | SqlType::Bpchar(Some(length)) = returning
+    {
+        text = text.chars().take(length as usize).collect();
     }
     convert(Value::Text(text), returning, Conversion::Explicit)
 }
@@ -362,6 +589,7 @@ pub(crate) fn function(
         IS_JSON => is_json(evaluator, arguments),
         JSON => json_constructor(evaluator, arguments),
         JSON_SCALAR => json_scalar(evaluator, arguments),
+        LAX_JSON => lax_json(evaluator, arguments),
         _ => json_serialize(evaluator, arguments),
     }
 }
