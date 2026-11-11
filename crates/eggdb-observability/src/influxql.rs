@@ -1,0 +1,798 @@
+use crate::api::json_string;
+use crate::store::{SCHEMA, identifier, literal, run};
+use eggdb_sql::{QueryResult, Session, Value};
+
+const UNIX_EPOCH_FROM_2000_MICROS: i64 = 946_684_800_000_000;
+const MICROS_PER_DAY: i64 = 86_400_000_000;
+const STOP_WORDS: [&str; 7] = ["GROUP", "ORDER", "LIMIT", "OFFSET", "SLIMIT", "SOFFSET", "TZ"];
+
+#[derive(Debug, Clone, PartialEq)]
+enum Token {
+    Name { text: String, quoted: bool },
+    Text(String),
+    Number(String),
+    Duration(String),
+    Regex(String),
+    Operator(String),
+    Open,
+    Close,
+    Comma,
+    Star,
+}
+
+impl Token {
+    fn keyword(&self, word: &str) -> bool {
+        matches!(self, Token::Name { text, quoted: false } if text.eq_ignore_ascii_case(word))
+    }
+}
+
+fn duration_sql(number: &str, unit: &str) -> Option<String> {
+    let (amount, unit) = match unit {
+        "ns" => (number.parse::<f64>().ok()? / 1000.0, "microseconds"),
+        "u" | "µ" | "µs" | "us" => (number.parse().ok()?, "microseconds"),
+        "ms" => (number.parse().ok()?, "milliseconds"),
+        "s" => (number.parse().ok()?, "seconds"),
+        "m" => (number.parse().ok()?, "minutes"),
+        "h" => (number.parse().ok()?, "hours"),
+        "d" => (number.parse().ok()?, "days"),
+        "w" => (number.parse().ok()?, "weeks"),
+        _ => return None,
+    };
+    Some(format!("'{amount} {unit}'::interval"))
+}
+
+fn tokens(text: &str) -> Result<Vec<Token>, String> {
+    let characters: Vec<char> = text.chars().collect();
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at < characters.len() {
+        let character = characters[at];
+        if character.is_whitespace() {
+            at += 1;
+            continue;
+        }
+        let quoted_until = |at: usize, quote: char| -> Result<(String, usize), String> {
+            let mut out = String::new();
+            let mut index = at + 1;
+            while index < characters.len() {
+                match characters[index] {
+                    '\\' if index + 1 < characters.len() => {
+                        out.push(characters[index + 1]);
+                        index += 2;
+                    }
+                    found if found == quote => return Ok((out, index + 1)),
+                    other => {
+                        out.push(other);
+                        index += 1;
+                    }
+                }
+            }
+            Err(format!("a quoted {quote} is not closed"))
+        };
+        match character {
+            '"' => {
+                let (text, next) = quoted_until(at, '"')?;
+                found.push(Token::Name { text, quoted: true });
+                at = next;
+            }
+            '\'' => {
+                let (text, next) = quoted_until(at, '\'')?;
+                found.push(Token::Text(text));
+                at = next;
+            }
+            '/' if matches!(found.last(), Some(Token::Operator(operator)) if operator == "=~" || operator == "!~") => {
+                let (text, next) = quoted_until(at, '/')?;
+                found.push(Token::Regex(text));
+                at = next;
+            }
+            '(' => {
+                found.push(Token::Open);
+                at += 1;
+            }
+            ')' => {
+                found.push(Token::Close);
+                at += 1;
+            }
+            ',' => {
+                found.push(Token::Comma);
+                at += 1;
+            }
+            '*' => {
+                found.push(Token::Star);
+                at += 1;
+            }
+            digit if digit.is_ascii_digit() || (digit == '.' && characters.get(at + 1).is_some_and(char::is_ascii_digit)) => {
+                let start = at;
+                while at < characters.len() && (characters[at].is_ascii_digit() || matches!(characters[at], '.' | 'e' | 'E')) {
+                    at += 1;
+                }
+                let number: String = characters[start..at].iter().collect();
+                let unit_start = at;
+                while at < characters.len() && (characters[at].is_alphabetic()) {
+                    at += 1;
+                }
+                let unit: String = characters[unit_start..at].iter().collect();
+                if unit.is_empty() {
+                    found.push(Token::Number(number));
+                } else {
+                    found.push(Token::Duration(
+                        duration_sql(&number, &unit).ok_or_else(|| format!("invalid duration {number}{unit}"))?,
+                    ));
+                }
+            }
+            letter if letter.is_alphabetic() || letter == '_' => {
+                let start = at;
+                while at < characters.len() && (characters[at].is_alphanumeric() || matches!(characters[at], '_' | '.')) {
+                    at += 1;
+                }
+                found.push(Token::Name {
+                    text: characters[start..at].iter().collect(),
+                    quoted: false,
+                });
+            }
+            _ => {
+                let two: String = characters[at..(at + 2).min(characters.len())].iter().collect();
+                let operator = match two.as_str() {
+                    "!=" | "<>" | "<=" | ">=" | "=~" | "!~" | "::" => two,
+                    _ if matches!(character, '=' | '<' | '>' | '+' | '-' | '/' | '%') => character.to_string(),
+                    _ => return Err(format!("unexpected {character}")),
+                };
+                at += operator.chars().count();
+                found.push(Token::Operator(operator));
+            }
+        }
+    }
+    Ok(found)
+}
+
+fn column(name: &str) -> String {
+    identifier(name)
+}
+
+fn condition_sql(tokens: &[Token]) -> Result<String, String> {
+    let mut out = Vec::new();
+    let mut previous_was_time = false;
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        let piece = match token {
+            Token::Name { text, quoted: false } if text.eq_ignore_ascii_case("and") || text.eq_ignore_ascii_case("or") => {
+                text.to_ascii_uppercase()
+            }
+            Token::Name { text, quoted: false } if text.eq_ignore_ascii_case("now") && tokens.get(index + 1) == Some(&Token::Open) => {
+                index += 2;
+                if tokens.get(index) != Some(&Token::Close) {
+                    return Err("now() takes no arguments".to_owned());
+                }
+                "now()".to_owned()
+            }
+            Token::Name { text, .. } => {
+                previous_was_time = text == "time";
+                index += 1;
+                out.push(column(text));
+                continue;
+            }
+            Token::Text(text) => literal(text),
+            Token::Number(number) if previous_was_time => format!("to_timestamp({number}::double precision / 1e9)"),
+            Token::Number(number) => number.clone(),
+            Token::Duration(interval) => interval.clone(),
+            Token::Regex(pattern) => literal(pattern),
+            Token::Operator(operator) => match operator.as_str() {
+                "=~" => "~".to_owned(),
+                "!~" => "!~".to_owned(),
+                "::" => return Err("type casts are not supported in WHERE".to_owned()),
+                other => other.to_owned(),
+            },
+            Token::Open => "(".to_owned(),
+            Token::Close => ")".to_owned(),
+            Token::Comma => ",".to_owned(),
+            Token::Star => "*".to_owned(),
+        };
+        if !matches!(token, Token::Operator(_)) {
+            previous_was_time = previous_was_time && matches!(token, Token::Operator(_));
+        }
+        out.push(piece);
+        index += 1;
+    }
+    Ok(out.join(" "))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Item {
+    All,
+    Field { name: String, alias: Option<String> },
+    Call { function: String, field: Option<String>, argument: Option<String>, alias: Option<String> },
+}
+
+#[derive(Debug, Default)]
+struct Select {
+    items: Vec<Item>,
+    measurement: String,
+    condition: Option<String>,
+    bucket: Option<String>,
+    group_tags: Vec<String>,
+    descending: bool,
+    limit: Option<String>,
+    offset: Option<String>,
+}
+
+struct Reader {
+    tokens: Vec<Token>,
+    at: usize,
+}
+
+impl Reader {
+    fn peek(&self) -> Option<&Token> {
+        self.tokens.get(self.at)
+    }
+
+    fn next(&mut self) -> Option<Token> {
+        let token = self.tokens.get(self.at).cloned();
+        self.at += 1;
+        token
+    }
+
+    fn keyword(&mut self, word: &str) -> bool {
+        if self.peek().is_some_and(|token| token.keyword(word)) {
+            self.at += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect_keyword(&mut self, word: &str) -> Result<(), String> {
+        if self.keyword(word) {
+            Ok(())
+        } else {
+            Err(format!("found {:?}, expected {word}", self.peek()))
+        }
+    }
+
+    fn name(&mut self) -> Result<String, String> {
+        match self.next() {
+            Some(Token::Name { text, .. }) => Ok(text),
+            other => Err(format!("found {other:?}, expected an identifier")),
+        }
+    }
+
+    fn alias(&mut self) -> Result<Option<String>, String> {
+        if self.keyword("as") { self.name().map(Some) } else { Ok(None) }
+    }
+
+    fn skip_cast(&mut self) {
+        if self.peek() == Some(&Token::Operator("::".to_owned())) {
+            self.at += 2;
+        }
+    }
+
+    fn item(&mut self) -> Result<Item, String> {
+        if self.peek() == Some(&Token::Star) {
+            self.at += 1;
+            return Ok(Item::All);
+        }
+        let name = self.name()?;
+        if self.peek() == Some(&Token::Open) {
+            self.at += 1;
+            let field = match self.next() {
+                Some(Token::Star) => None,
+                Some(Token::Name { text, .. }) => Some(text),
+                other => return Err(format!("found {other:?} in {name}()")),
+            };
+            self.skip_cast();
+            let argument = if self.peek() == Some(&Token::Comma) {
+                self.at += 1;
+                match self.next() {
+                    Some(Token::Number(number)) => Some(number),
+                    other => return Err(format!("found {other:?} as the second argument of {name}()")),
+                }
+            } else {
+                None
+            };
+            if self.next() != Some(Token::Close) {
+                return Err(format!("{name}() is not closed"));
+            }
+            let alias = self.alias()?;
+            return Ok(Item::Call {
+                function: name.to_ascii_lowercase(),
+                field,
+                argument,
+                alias,
+            });
+        }
+        self.skip_cast();
+        let alias = self.alias()?;
+        Ok(Item::Field { name, alias })
+    }
+
+    fn select(&mut self) -> Result<Select, String> {
+        let mut select = Select::default();
+        loop {
+            select.items.push(self.item()?);
+            if self.peek() == Some(&Token::Comma) {
+                self.at += 1;
+            } else {
+                break;
+            }
+        }
+        self.expect_keyword("from")?;
+        let measurement = match self.next() {
+            Some(Token::Name { text, quoted: true }) => text,
+            Some(Token::Name { text, quoted: false }) => text.rsplit('.').next().unwrap_or_default().to_owned(),
+            Some(Token::Regex(_)) => return Err("FROM a regular expression is not supported".to_owned()),
+            other => return Err(format!("found {other:?}, expected a measurement")),
+        };
+        select.measurement = measurement;
+        if self.keyword("where") {
+            let start = self.at;
+            let mut depth = 0usize;
+            while let Some(token) = self.peek() {
+                match token {
+                    Token::Open => depth += 1,
+                    Token::Close => depth = depth.saturating_sub(1),
+                    _ if depth == 0 && STOP_WORDS.iter().any(|word| token.keyword(word)) => break,
+                    _ => {}
+                }
+                self.at += 1;
+            }
+            select.condition = Some(condition_sql(&self.tokens[start..self.at])?);
+        }
+        if self.keyword("group") {
+            self.expect_keyword("by")?;
+            loop {
+                if self.peek().is_some_and(|token| token.keyword("time")) && self.tokens.get(self.at + 1) == Some(&Token::Open) {
+                    self.at += 2;
+                    let Some(Token::Duration(interval)) = self.next() else {
+                        return Err("GROUP BY time() needs a duration".to_owned());
+                    };
+                    if self.peek() == Some(&Token::Comma) {
+                        return Err("GROUP BY time() offsets are not supported yet".to_owned());
+                    }
+                    if self.next() != Some(Token::Close) {
+                        return Err("GROUP BY time( is not closed".to_owned());
+                    }
+                    select.bucket = Some(interval);
+                } else if self.peek() == Some(&Token::Star) {
+                    return Err("GROUP BY * is not supported yet; name the tags".to_owned());
+                } else {
+                    select.group_tags.push(self.name()?);
+                }
+                if self.peek() == Some(&Token::Comma) {
+                    self.at += 1;
+                } else {
+                    break;
+                }
+            }
+            if self.keyword("fill") {
+                if self.next() != Some(Token::Open) {
+                    return Err("fill needs ( ".to_owned());
+                }
+                let mode = self.next();
+                if !matches!(&mode, Some(token) if token.keyword("none") || token.keyword("null")) {
+                    return Err("only fill(none) and fill(null) are supported yet".to_owned());
+                }
+                if self.next() != Some(Token::Close) {
+                    return Err("fill( is not closed".to_owned());
+                }
+            }
+        }
+        if self.keyword("order") {
+            self.expect_keyword("by")?;
+            self.expect_keyword("time")?;
+            if self.keyword("desc") {
+                select.descending = true;
+            } else {
+                self.keyword("asc");
+            }
+        }
+        while let Some(token) = self.peek().cloned() {
+            let target = if token.keyword("limit") {
+                &mut select.limit
+            } else if token.keyword("offset") {
+                &mut select.offset
+            } else if token.keyword("slimit") || token.keyword("soffset") {
+                self.at += 2;
+                continue;
+            } else {
+                return Err(format!("unexpected {token:?}"));
+            };
+            self.at += 1;
+            match self.next() {
+                Some(Token::Number(number)) if number.chars().all(|character| character.is_ascii_digit()) => {
+                    *target = Some(number);
+                }
+                other => return Err(format!("found {other:?}, expected a whole number")),
+            }
+        }
+        Ok(select)
+    }
+}
+
+fn aggregate_sql(function: &str, field: &str, argument: Option<&str>) -> Result<String, String> {
+    let column = column(field);
+    Ok(match function {
+        "mean" => format!("avg({column})"),
+        "count" | "sum" | "min" | "max" => format!("{function}({column})"),
+        "median" => format!("percentile_cont(0.5) WITHIN GROUP (ORDER BY {column})"),
+        "percentile" => {
+            let percent: f64 = argument.and_then(|text| text.parse().ok()).ok_or("percentile() needs a percentage")?;
+            format!("percentile_cont({}) WITHIN GROUP (ORDER BY {column})", percent / 100.0)
+        }
+        "spread" => format!("(max({column}) - min({column}))"),
+        "stddev" => format!("stddev_samp({column})"),
+        "first" => format!("first({column}, \"time\")"),
+        "last" => format!("last({column}, \"time\")"),
+        "distinct" => return Err("distinct() is not supported yet".to_owned()),
+        other => return Err(format!("undefined function {other}()")),
+    })
+}
+
+struct Planned {
+    sql: String,
+    tag_count: usize,
+}
+
+fn plan(select: &Select, columns: &[(String, String)]) -> Result<Planned, String> {
+    let aggregate = select.items.iter().any(|item| matches!(item, Item::Call { .. }));
+    if aggregate && select.items.iter().any(|item| !matches!(item, Item::Call { .. })) {
+        return Err("mixing aggregate and non-aggregate queries is not supported".to_owned());
+    }
+    if select.bucket.is_some() && !aggregate {
+        return Err("GROUP BY time() requires an aggregate function".to_owned());
+    }
+    let mut outputs = Vec::new();
+    for tag in &select.group_tags {
+        outputs.push(format!("{} AS {}", column(tag), column(tag)));
+    }
+    outputs.push(match (&select.bucket, aggregate) {
+        (Some(interval), _) => format!("time_bucket({interval}, \"time\") AS \"time\""),
+        (None, true) => "'1970-01-01T00:00:00Z'::timestamptz AS \"time\"".to_owned(),
+        (None, false) => "\"time\"".to_owned(),
+    });
+    for item in &select.items {
+        match item {
+            Item::All => {
+                for (name, _) in columns.iter().filter(|(name, _)| name != "time" && !select.group_tags.contains(name)) {
+                    outputs.push(column(name));
+                }
+            }
+            Item::Field { name, alias } => {
+                outputs.push(format!("{} AS {}", column(name), column(alias.as_deref().unwrap_or(name))));
+            }
+            Item::Call { function, field, argument, alias } => {
+                let field = match field {
+                    Some(field) => field.clone(),
+                    None if function == "count" => "time".to_owned(),
+                    None => return Err(format!("{function}(*) is not supported yet")),
+                };
+                outputs.push(format!(
+                    "{} AS {}",
+                    aggregate_sql(function, &field, argument.as_deref())?,
+                    column(alias.as_deref().unwrap_or(function))
+                ));
+            }
+        }
+    }
+    let mut sql = format!(
+        "SELECT {} FROM {SCHEMA}.{}",
+        outputs.join(", "),
+        identifier(&select.measurement)
+    );
+    if let Some(condition) = &select.condition {
+        sql.push_str(&format!(" WHERE {condition}"));
+    }
+    let tag_positions: Vec<String> = (1..=select.group_tags.len()).map(|at| at.to_string()).collect();
+    let time_position = select.group_tags.len() + 1;
+    if aggregate {
+        let mut keys = tag_positions.clone();
+        if select.bucket.is_some() {
+            keys.push(time_position.to_string());
+        }
+        if !keys.is_empty() {
+            sql.push_str(&format!(" GROUP BY {}", keys.join(", ")));
+        }
+    }
+    let mut order = tag_positions;
+    order.push(format!("{time_position}{}", if select.descending { " DESC" } else { "" }));
+    sql.push_str(&format!(" ORDER BY {}", order.join(", ")));
+    if let Some(limit) = &select.limit {
+        sql.push_str(&format!(" LIMIT {limit}"));
+    }
+    if let Some(offset) = &select.offset {
+        sql.push_str(&format!(" OFFSET {offset}"));
+    }
+    Ok(Planned {
+        sql,
+        tag_count: select.group_tags.len(),
+    })
+}
+
+fn civil(days: i64) -> (i64, i64, i64) {
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
+    (year_of_era + era * 400 + i64::from(month <= 2), month, day)
+}
+
+fn time_json(micros_since_2000: i64, epoch: Option<&str>) -> String {
+    let unix_micros = micros_since_2000.saturating_add(UNIX_EPOCH_FROM_2000_MICROS);
+    match epoch {
+        Some("ns") => (i128::from(unix_micros) * 1000).to_string(),
+        Some("u" | "µ") => unix_micros.to_string(),
+        Some("ms") => unix_micros.div_euclid(1000).to_string(),
+        Some("s") => unix_micros.div_euclid(1_000_000).to_string(),
+        Some("m") => unix_micros.div_euclid(60_000_000).to_string(),
+        Some("h") => unix_micros.div_euclid(3_600_000_000).to_string(),
+        _ => {
+            let (year, month, day) = civil(unix_micros.div_euclid(MICROS_PER_DAY));
+            let of_day = unix_micros.rem_euclid(MICROS_PER_DAY);
+            let seconds = of_day / 1_000_000;
+            let fraction = of_day % 1_000_000;
+            let fraction = if fraction == 0 {
+                String::new()
+            } else {
+                format!(".{fraction:06}").trim_end_matches('0').to_owned()
+            };
+            format!(
+                "\"{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}{fraction}Z\"",
+                seconds / 3600,
+                seconds / 60 % 60,
+                seconds % 60
+            )
+        }
+    }
+}
+
+fn value_json(value: &Value, epoch: Option<&str>) -> String {
+    match value {
+        Value::Null => "null".to_owned(),
+        Value::Boolean(flag) => flag.to_string(),
+        Value::TimestampTz(micros) | Value::Timestamp(micros) => time_json(*micros, epoch),
+        Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_) | Value::Numeric(_) => value.to_text().unwrap_or_default(),
+        Value::Double(number) if number.is_finite() => number.to_string(),
+        Value::Real(number) if number.is_finite() => number.to_string(),
+        Value::Double(_) | Value::Real(_) => "null".to_owned(),
+        other => json_string(&other.to_text().unwrap_or_default()),
+    }
+}
+
+fn series_json(name: &str, tags: Option<&[(String, String)]>, columns: &[String], rows: &[Vec<String>]) -> String {
+    let tags = tags.map_or(String::new(), |tags| {
+        let pairs: Vec<String> = tags.iter().map(|(key, value)| format!("{}:{}", json_string(key), json_string(value))).collect();
+        format!(",\"tags\":{{{}}}", pairs.join(","))
+    });
+    let columns: Vec<String> = columns.iter().map(|name| json_string(name)).collect();
+    let rows: Vec<String> = rows.iter().map(|row| format!("[{}]", row.join(","))).collect();
+    format!(
+        "{{\"name\":{}{tags},\"columns\":[{}],\"values\":[{}]}}",
+        json_string(name),
+        columns.join(","),
+        rows.join(",")
+    )
+}
+
+fn select_series(session: &mut Session<'_>, select: &Select, epoch: Option<&str>) -> Result<Vec<String>, String> {
+    let catalog = crate::store::catalog(session)?;
+    let Some(columns) = catalog.get(&select.measurement) else {
+        return Ok(Vec::new());
+    };
+    let planned = plan(select, columns)?;
+    let result: QueryResult = run(session, &planned.sql)?
+        .into_iter()
+        .rev()
+        .find(|result| result.columns.is_some())
+        .ok_or("the query returned no rows")?;
+    let names: Vec<String> = result.columns.iter().flatten().map(|column| column.name.clone()).collect();
+    let shown: Vec<String> = names[planned.tag_count..].to_vec();
+    let mut series: Vec<(Vec<(String, String)>, Vec<Vec<String>>)> = Vec::new();
+    for row in &result.rows {
+        let tags: Vec<(String, String)> = names[..planned.tag_count]
+            .iter()
+            .zip(row)
+            .map(|(name, value)| (name.clone(), value.to_text().unwrap_or_default()))
+            .collect();
+        let values: Vec<String> = row[planned.tag_count..].iter().map(|value| value_json(value, epoch)).collect();
+        match series.last_mut() {
+            Some((held, rows)) if *held == tags => rows.push(values),
+            _ => series.push((tags, vec![values])),
+        }
+    }
+    Ok(series
+        .iter()
+        .map(|(tags, rows)| {
+            series_json(
+                &select.measurement,
+                (planned.tag_count > 0).then_some(tags.as_slice()),
+                &shown,
+                rows,
+            )
+        })
+        .collect())
+}
+
+type Catalog = std::collections::BTreeMap<String, Vec<(String, String)>>;
+
+fn keys_of<'c>(catalog: &'c Catalog, measurement: Option<&String>) -> Vec<(&'c String, &'c Vec<(String, String)>)> {
+    catalog
+        .iter()
+        .filter(|(name, _)| measurement.is_none_or(|wanted| *name == wanted))
+        .collect()
+}
+
+fn show(session: &mut Session<'_>, reader: &mut Reader, database: &str) -> Result<Vec<String>, String> {
+    let catalog = crate::store::catalog(session)?;
+    let from = |reader: &mut Reader| -> Result<Option<String>, String> {
+        if reader.keyword("from") { reader.name().map(Some) } else { Ok(None) }
+    };
+    let text = |kind: &str| kind == "text";
+    if reader.keyword("databases") {
+        return Ok(vec![series_json("databases", None, &["name".to_owned()], &[vec![json_string(database)]])]);
+    }
+    if reader.keyword("measurements") {
+        let rows: Vec<Vec<String>> = catalog.keys().map(|name| vec![json_string(name)]).collect();
+        return Ok(vec![series_json("measurements", None, &["name".to_owned()], &rows)]);
+    }
+    if reader.keyword("retention") {
+        reader.expect_keyword("policies")?;
+        let columns: Vec<String> = ["name", "duration", "shardGroupDuration", "replicaN", "default"].iter().map(|name| (*name).to_owned()).collect();
+        return Ok(vec![series_json("", None, &columns, &[vec![json_string("autogen"), json_string("0s"), json_string("168h0m0s"), "1".to_owned(), "true".to_owned()]])]);
+    }
+    if reader.keyword("tag") {
+        if reader.keyword("keys") {
+            let measurement = from(reader)?;
+            return Ok(keys_of(&catalog, measurement.as_ref())
+                .into_iter()
+                .map(|(name, columns)| {
+                    let rows: Vec<Vec<String>> = columns.iter().filter(|(_, kind)| text(kind)).map(|(column, _)| vec![json_string(column)]).collect();
+                    series_json(name, None, &["tagKey".to_owned()], &rows)
+                })
+                .collect());
+        }
+        reader.expect_keyword("values")?;
+        let measurement = from(reader)?;
+        reader.expect_keyword("with")?;
+        reader.expect_keyword("key")?;
+        if reader.next() != Some(Token::Operator("=".to_owned())) {
+            return Err("SHOW TAG VALUES needs WITH KEY = \"tag\"".to_owned());
+        }
+        let key = reader.name()?;
+        let mut out = Vec::new();
+        for (name, columns) in keys_of(&catalog, measurement.as_ref()) {
+            if !columns.iter().any(|(column, kind)| *column == key && text(kind)) {
+                continue;
+            }
+            let result = run(
+                session,
+                &format!(
+                    "SELECT DISTINCT {} FROM {SCHEMA}.{} WHERE {} IS NOT NULL ORDER BY 1",
+                    column(&key),
+                    identifier(name),
+                    column(&key)
+                ),
+            )?
+            .into_iter()
+            .rev()
+            .find(|result| result.columns.is_some())
+            .ok_or("the query returned no rows")?;
+            let rows: Vec<Vec<String>> = result
+                .rows
+                .iter()
+                .map(|row| vec![json_string(&key), json_string(&row.first().and_then(Value::to_text).unwrap_or_default())])
+                .collect();
+            out.push(series_json(name, None, &["key".to_owned(), "value".to_owned()], &rows));
+        }
+        return Ok(out);
+    }
+    if reader.keyword("field") {
+        reader.expect_keyword("keys")?;
+        let measurement = from(reader)?;
+        return Ok(keys_of(&catalog, measurement.as_ref())
+            .into_iter()
+            .map(|(name, columns)| {
+                let rows: Vec<Vec<String>> = columns
+                    .iter()
+                    .filter(|(column, kind)| column != "time" && !text(kind))
+                    .map(|(column, kind)| {
+                        let field_type = match kind.as_str() {
+                            "bigint" => "integer",
+                            "numeric" => "unsigned",
+                            "boolean" => "boolean",
+                            _ => "float",
+                        };
+                        vec![json_string(column), json_string(field_type)]
+                    })
+                    .collect();
+                series_json(name, None, &["fieldKey".to_owned(), "fieldType".to_owned()], &rows)
+            })
+            .collect());
+    }
+    Err(format!("SHOW {:?} is not supported", reader.peek()))
+}
+
+fn statements(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    for character in text.chars() {
+        match quote {
+            Some(open) if character == open => quote = None,
+            Some(_) => {}
+            None if matches!(character, '\'' | '"') => quote = Some(character),
+            None if character == ';' => {
+                found.push(std::mem::take(&mut current));
+                continue;
+            }
+            None => {}
+        }
+        current.push(character);
+    }
+    found.push(current);
+    found.into_iter().filter(|statement| !statement.trim().is_empty()).collect()
+}
+
+fn statement(session: &mut Session<'_>, text: &str, database: &str, epoch: Option<&str>) -> Result<Vec<String>, String> {
+    let mut reader = Reader { tokens: tokens(text)?, at: 0 };
+    if reader.keyword("select") {
+        let select = reader.select()?;
+        return select_series(session, &select, epoch);
+    }
+    if reader.keyword("show") {
+        return show(session, &mut reader, database);
+    }
+    if reader.keyword("create") && reader.keyword("database") {
+        return Ok(Vec::new());
+    }
+    Err(format!("error parsing query: found {:?}, expected SELECT, SHOW or CREATE DATABASE", reader.tokens.first()))
+}
+
+/// The answer to InfluxDB 1.x's `/query`: each statement of `text` (InfluxQL `SELECT` over a
+/// measurement's table, `SHOW` of databases, measurements, tag keys, tag values, field keys and
+/// retention policies, `CREATE DATABASE`) as one result with its series or its error.
+pub(crate) fn answer(session: &mut Session<'_>, text: &str, database: &str, epoch: Option<&str>) -> String {
+    let results: Vec<String> = statements(text)
+        .iter()
+        .enumerate()
+        .map(|(index, statement_text)| match statement(session, statement_text, database, epoch) {
+            Ok(series) if series.is_empty() => format!("{{\"statement_id\":{index}}}"),
+            Ok(series) => format!("{{\"statement_id\":{index},\"series\":[{}]}}", series.join(",")),
+            Err(message) => format!("{{\"statement_id\":{index},\"error\":{}}}", json_string(&message)),
+        })
+        .collect();
+    format!("{{\"results\":[{}]}}\n", results.join(","))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn planned(text: &str, columns: &[(&str, &str)]) -> String {
+        let mut reader = Reader { tokens: tokens(text).unwrap(), at: 0 };
+        assert!(reader.keyword("select"));
+        let select = reader.select().unwrap();
+        let columns: Vec<(String, String)> = columns.iter().map(|(name, kind)| ((*name).to_owned(), (*kind).to_owned())).collect();
+        plan(&select, &columns).unwrap().sql
+    }
+
+    #[test]
+    fn influxql_becomes_sql() {
+        assert_eq!(
+            planned(
+                "SELECT mean(\"usage\") FROM cpu WHERE host = 'a' AND time > now() - 1h GROUP BY time(5m), host",
+                &[("time", "timestamp with time zone"), ("host", "text"), ("usage", "double precision")]
+            ),
+            "SELECT \"host\" AS \"host\", time_bucket('5 minutes'::interval, \"time\") AS \"time\", avg(\"usage\") AS \"mean\" FROM metrics.\"cpu\" WHERE \"host\" = 'a' AND \"time\" > now() - '1 hours'::interval GROUP BY 1, 2 ORDER BY 1, 2"
+        );
+        assert_eq!(
+            planned("SELECT * FROM cpu ORDER BY time DESC LIMIT 2", &[("time", "x"), ("host", "text"), ("usage", "double precision")]),
+            "SELECT \"time\", \"host\", \"usage\" FROM metrics.\"cpu\" ORDER BY 1 DESC LIMIT 2"
+        );
+        assert_eq!(time_json(0, None), "\"2000-01-01T00:00:00Z\"");
+        assert_eq!(time_json(0, Some("s")), "946684800");
+        assert_eq!(statements("SHOW DATABASES; SELECT 'a;b' FROM x").len(), 2);
+    }
+}

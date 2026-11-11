@@ -1378,7 +1378,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   virtual-hosted buckets and conditional requests (D219).
 - S3, after D58's legal check: large objects streamed, and listing without loading a bucket's
   descriptions (D219). Check: a benchmark against MinIO.
-- InfluxQL and Flux, and points with the same series and time deduplicated (D220).
+- InfluxQL and Flux, and points with the same series and time deduplicated (D220). InfluxQL's core:
+  **code written, unbuilt** (code-only mode, 2026-11-11, D521). Left: Flux, deduplication and the
+  rest of InfluxQL.
 - Remote write 2.0, native histograms and exemplars (D220).
 - PromQL's remaining functions and modifiers: the `@` modifier and negative offsets, `limitk`
   and `limit_ratio`, `clamp*`, `predict_linear`, `deriv`, `resets`, `changes`, `absent*`,

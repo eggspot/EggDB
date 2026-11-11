@@ -12,6 +12,7 @@
 //! the Linux Foundation; EggDB is compatible with their protocols.
 
 mod api;
+mod influxql;
 mod line_protocol;
 mod logql;
 mod loki;

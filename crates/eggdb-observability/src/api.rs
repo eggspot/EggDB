@@ -55,7 +55,7 @@ fn now_ms() -> i64 {
         })
 }
 
-fn json_string(text: &str) -> String {
+pub(crate) fn json_string(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('"');
     for character in text.chars() {
@@ -420,6 +420,14 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                 .map(|(_, value)| value.as_str())
         };
         match (request.method.as_str(), request.path.as_str()) {
+            ("GET" | "POST", "/query") => match value("q") {
+                Some(text) => {
+                    let database = value("db").unwrap_or(&self.database).to_owned();
+                    let body = crate::influxql::answer(&mut self.session(), text, &database, value("epoch"));
+                    json(200, body)
+                }
+                None => json(400, "{\"error\":\"missing required parameter q\"}".to_owned()),
+            },
             ("POST", "/write" | "/api/v2/write") => {
                 self.write_lines(request, value("precision").unwrap_or("ns"))
             }
