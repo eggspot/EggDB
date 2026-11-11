@@ -543,7 +543,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   column, renaming what a view uses (D32). Adding a serial column: **code written, unbuilt**
   (code-only mode, 2026-11-10, D387); `TYPE ... USING`: **code written, unbuilt** (D388).
 - A published SQL:2023 conformance list, first Part 2's feature IDs (E011, F031, ...) with each
-  one's status and test (D32). Check: a CI test that every feature marked done has a case.
+  one's status and test (D32). Check: a CI test that every feature marked done has a case. Started: [sql-conformance.md](sql-conformance.md) and
+  its test: **code written, unbuilt** (code-only mode, 2026-11-12, D578).
 - The Unicode Collation Algorithm with CLDR tailorings (`COLLATE "de-DE"`), with MySQL's and SQL
   Server's collation names mapped onto it (D30, D233). Check: the collation conformance test.
 - Collation keys in indexes, and locale-aware `upper` and `lower` (D233).

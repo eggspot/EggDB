@@ -56,6 +56,8 @@ mod fuzzy_functions;
 mod generated_columns;
 #[cfg(test)]
 mod generated_columns_tests;
+#[cfg(test)]
+mod conformance_tests;
 mod geo_functions;
 mod grouping_sets;
 mod hash_index;
