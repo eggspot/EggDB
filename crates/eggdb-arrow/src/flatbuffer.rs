@@ -70,6 +70,21 @@ impl Builder {
         Offset(self.len())
     }
 
+    /// A vector of the IPC file footer's `Block` structs: offset, metadata length (padded to
+    /// eight bytes) and body length, 24 bytes each.
+    pub(crate) fn blocks(&mut self, items: &[(i64, i32, i64)]) -> Offset {
+        self.align(8, 24 * items.len());
+        for (offset, metadata_length, body_length) in items.iter().rev() {
+            self.prepend(&body_length.to_le_bytes());
+            self.prepend(&[0, 0, 0, 0]);
+            self.prepend(&metadata_length.to_le_bytes());
+            self.prepend(&offset.to_le_bytes());
+        }
+        self.align(4, 4);
+        self.prepend(&u32::try_from(items.len()).unwrap_or(u32::MAX).to_le_bytes());
+        Offset(self.len())
+    }
+
     pub(crate) fn table(&mut self, fields: &[Option<Field>]) -> Offset {
         let start = self.len();
         let mut positions = vec![0usize; fields.len()];

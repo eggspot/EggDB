@@ -25,6 +25,8 @@ const TYPE_DECIMAL: u8 = 7;
 const TYPE_DATE: u8 = 8;
 const TYPE_TIMESTAMP: u8 = 10;
 const CONTINUATION: [u8; 4] = [0xff; 4];
+const FILE_MAGIC: &[u8] = b"ARROW1\0\0";
+const FILE_TRAILER: &[u8] = b"ARROW1";
 
 fn type_of(builder: &mut Builder, column_type: ColumnType) -> (u8, Offset) {
     match column_type {
@@ -82,6 +84,11 @@ fn frame(metadata: &[u8], body: &[u8], out: &mut Vec<u8>) {
 
 fn schema_message(columns: &[Column]) -> Vec<u8> {
     let mut builder = Builder::new();
+    let schema = schema_table(&mut builder, columns);
+    message(builder, HEADER_SCHEMA, schema, 0)
+}
+
+fn schema_table(builder: &mut Builder, columns: &[Column]) -> Offset {
     let mut fields = Vec::with_capacity(columns.len());
     for column in columns {
         let name = builder.string(&column.name);
@@ -97,8 +104,7 @@ fn schema_message(columns: &[Column]) -> Vec<u8> {
         ]));
     }
     let fields = builder.offsets(&fields);
-    let schema = builder.table(&[Some(Field::I16(0)), Some(Field::Offset(fields))]);
-    message(builder, HEADER_SCHEMA, schema, 0)
+    builder.table(&[Some(Field::I16(0)), Some(Field::Offset(fields))])
 }
 
 struct Body {
@@ -235,12 +241,57 @@ fn column_buffers(column: &Column, body: &mut Body) -> Result<i64, String> {
 /// `columns`, all of the same length, as an Arrow IPC stream: a schema message, one record
 /// batch and the end-of-stream marker.
 pub fn write_stream(columns: &[Column]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    frame(&schema_message(columns), &[], &mut out);
+    let (metadata, body) = record_batch(columns)?;
+    frame(&metadata, &body, &mut out);
+    out.extend_from_slice(&CONTINUATION);
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    Ok(out)
+}
+
+/// `columns` as an Arrow IPC file (`.arrow`, Feather 2): the magic, the stream's messages, and a
+/// footer holding the schema and where the record batch lies, so readers that seek (pyarrow's
+/// `open_file`, DuckDB, Polars' `read_ipc`) open it.
+pub fn write_file(columns: &[Column]) -> Result<Vec<u8>, String> {
+    let mut out = FILE_MAGIC.to_vec();
+    frame(&schema_message(columns), &[], &mut out);
+    let (metadata, body) = record_batch(columns)?;
+    let offset = out.len();
+    frame(&metadata, &body, &mut out);
+    let metadata_length = 8 + metadata.len().div_ceil(8) * 8;
+    out.extend_from_slice(&CONTINUATION);
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    let mut builder = Builder::new();
+    let schema = schema_table(&mut builder, columns);
+    let dictionaries = builder.blocks(&[]);
+    let batches = builder.blocks(&[(
+        i64::try_from(offset).map_err(|_| "the file is too large".to_owned())?,
+        i32::try_from(metadata_length).map_err(|_| "the batch header is too large".to_owned())?,
+        i64::try_from(body.len()).map_err(|_| "the batch is too large".to_owned())?,
+    )]);
+    let footer_table = builder.table(&[
+        Some(Field::I16(METADATA_VERSION_V5)),
+        Some(Field::Offset(schema)),
+        Some(Field::Offset(dictionaries)),
+        Some(Field::Offset(batches)),
+    ]);
+    let footer = builder.finish(footer_table);
+    out.extend_from_slice(&footer);
+    out.extend_from_slice(
+        &i32::try_from(footer.len())
+            .map_err(|_| "the footer is too large".to_owned())?
+            .to_le_bytes(),
+    );
+    out.extend_from_slice(FILE_TRAILER);
+    Ok(out)
+}
+
+fn record_batch(columns: &[Column]) -> Result<(Vec<u8>, Vec<u8>), String> {
     let rows = columns.first().map_or(0, |column| column.cells.len());
     if columns.iter().any(|column| column.cells.len() != rows) {
         return Err("the columns differ in length".to_owned());
     }
-    let mut out = Vec::new();
-    frame(&schema_message(columns), &[], &mut out);
     let mut body = Body {
         bytes: Vec::new(),
         buffers: Vec::new(),
@@ -264,10 +315,7 @@ pub fn write_stream(columns: &[Column]) -> Result<Vec<u8>, String> {
         batch,
         i64::try_from(body.bytes.len()).unwrap_or(i64::MAX),
     );
-    frame(&metadata, &body.bytes, &mut out);
-    out.extend_from_slice(&CONTINUATION);
-    out.extend_from_slice(&[0, 0, 0, 0]);
-    Ok(out)
+    Ok((metadata, body.bytes))
 }
 
 #[cfg(test)]

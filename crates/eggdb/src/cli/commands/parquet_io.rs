@@ -404,7 +404,15 @@ impl Session<'_> {
             Ok(found) => found,
             Err(exit) => return Ok(exit),
         };
-        let bytes = eggdb_arrow::write_stream(&columns).map_err(|error| {
+        let as_file = target.extension().is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("arrow") || extension.eq_ignore_ascii_case("feather")
+        });
+        let written = if as_file {
+            eggdb_arrow::write_file(&columns)
+        } else {
+            eggdb_arrow::write_stream(&columns)
+        };
+        let bytes = written.map_err(|error| {
             Failure::database(
                 format!("cannot write {shown}: {error}"),
                 Exit::DatabaseError,

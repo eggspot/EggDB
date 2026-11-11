@@ -1,4 +1,4 @@
-use crate::{read, write_stream};
+use crate::{read, write_file, write_stream};
 use eggdb_parquet::{Cell, Column, ColumnType};
 
 fn u32_at(bytes: &[u8], at: usize) -> usize {
@@ -153,4 +153,15 @@ fn damaged_streams_are_errors_not_panics() {
         let _ = read(&flipped);
     }
     assert!(read(b"").is_err());
+}
+
+#[test]
+fn a_written_file_has_its_magic_footer_and_reads_back() {
+    let columns = sample();
+    let file = write_file(&columns).expect("the file is written");
+    assert!(file.starts_with(b"ARROW1\0\0") && file.ends_with(b"ARROW1"));
+    let footer_length =
+        i32::from_le_bytes(file[file.len() - 10..file.len() - 6].try_into().unwrap()) as usize;
+    assert!(footer_length > 0 && footer_length < file.len());
+    assert_eq!(read(&file).expect("the file reads"), columns);
 }
