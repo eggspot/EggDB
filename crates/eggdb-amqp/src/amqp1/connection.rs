@@ -140,6 +140,7 @@ struct Connection<'b, 's> {
 }
 
 const DYNAMIC_FIELD: usize = 4;
+const LOCAL_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_DYNAMIC_QUEUES: usize = 1_000;
 
 fn with_address(terminus: &Value, address: &str) -> Value {
@@ -320,6 +321,7 @@ impl Connection<'_, '_> {
                     Value::Null,
                     Value::Uint(MAX_FRAME),
                     Value::Ushort(CHANNEL_MAX),
+                    Value::Uint(u32::try_from(LOCAL_IDLE_TIMEOUT.as_millis()).unwrap_or(u32::MAX)),
                 ],
             ),
         );
@@ -978,13 +980,24 @@ pub(crate) fn serve_stream(
     let mut buffer = Vec::new();
     let mut chunk = vec![0u8; 64 * 1024];
     let mut last_sent = Instant::now();
+    let mut last_received = Instant::now();
     let outcome = loop {
         if stop() {
             break Ok(());
         }
+        if connection.stage == Stage::Open && last_received.elapsed() > LOCAL_IDLE_TIMEOUT {
+            connection.close_with("amqp:resource-limit-exceeded", "local-idle-timeout expired");
+            if !connection.outgoing.is_empty() {
+                let _ = writer.write_all(&connection.outgoing);
+            }
+            break Ok(());
+        }
         match reader.read(&mut chunk) {
             Ok(0) => break Ok(()),
-            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+            Ok(read) => {
+                last_received = Instant::now();
+                buffer.extend_from_slice(&chunk[..read]);
+            }
             Err(error)
                 if matches!(
                     error.kind(),

@@ -563,3 +563,4 @@ its full title with its status.
 - [D536](decisions/D536.md) Code-only batch 184 (M10): MySQL division by zero gives NULL with warning 1365
 - [D537](decisions/D537.md) Code-only batch 185 (M10): MySQL implicit string-to-number conversion in arithmetic
 - [D538](decisions/D538.md) Code-only batch 186 (M16): AMQP 1.0 dynamic nodes
+- [D539](decisions/D539.md) Code-only batch 187 (M16): AMQP 1.0 idle time-out enforced
