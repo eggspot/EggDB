@@ -1,5 +1,6 @@
 mod by_query;
 mod multi;
+mod pit;
 mod scroll;
 
 use crate::json_out::{Out, escaped, written};
@@ -29,6 +30,7 @@ pub struct Api<'k> {
     next_id: AtomicU64,
     memory_budget: Arc<MemoryBudget>,
     scrolls: scroll::Scrolls,
+    pits: pit::Pits,
 }
 
 impl std::fmt::Debug for Api<'_> {
@@ -395,6 +397,7 @@ impl<'k> Api<'k> {
             next_id: AtomicU64::new(seed),
             memory_budget: Arc::new(MemoryBudget::default()),
             scrolls: scroll::Scrolls::default(),
+            pits: pit::Pits::default(),
         }
     }
 
@@ -510,6 +513,8 @@ impl<'k> Api<'k> {
             ("GET" | "POST", ["_search", "scroll"]) => self.continue_scroll(request, None),
             ("GET" | "POST", ["_search", "scroll", id]) => self.continue_scroll(request, Some(id)),
             ("DELETE", ["_search", "scroll"]) => self.clear_scroll(request, None),
+            ("DELETE", ["_pit"]) => self.close_pit(request),
+            ("POST", [index, "_pit"]) if valid_index(index) => self.open_pit(index, request),
             ("DELETE", ["_search", "scroll", id]) => self.clear_scroll(request, Some(id)),
             ("GET" | "POST", ["_search"]) if query_flag(request, "scroll").is_some() => {
                 self.open_scroll(None, request)
@@ -1063,6 +1068,29 @@ impl<'k> Api<'k> {
         })
     }
 
+    fn gather(
+        &self,
+        indices: Option<&[&str]>,
+        ignore_unavailable: bool,
+    ) -> Result<Result<Vec<(String, String, String)>, String>, Failure> {
+        Ok(read(self.keyspace, |keys| {
+            let searched = match indices {
+                Some(named) => match resolve_indices(keys, named, ignore_unavailable)? {
+                    Ok(searched) => searched,
+                    Err(missing) => return Ok(Err(missing)),
+                },
+                None => indices_of(keys)?,
+            };
+            let mut all = Vec::new();
+            for index in searched {
+                for (id, _, source) in documents_of(keys, &index)? {
+                    all.push((index.clone(), id, source));
+                }
+            }
+            Ok(Ok(all))
+        })?)
+    }
+
     fn search_page(
         &self,
         indices: Option<&[&str]>,
@@ -1138,25 +1166,25 @@ impl<'k> Api<'k> {
         };
         let ignore_unavailable =
             query_flag(request, "ignore_unavailable").as_deref() == Some("true");
-        let gathered = read(self.keyspace, |keys| {
-            let searched = match indices {
-                Some(named) => match resolve_indices(keys, named, ignore_unavailable)? {
-                    Ok(searched) => searched,
-                    Err(missing) => return Ok(Err(missing)),
-                },
-                None => indices_of(keys)?,
-            };
-            let mut all = Vec::new();
-            for index in searched {
-                for (id, _, source) in documents_of(keys, &index)? {
-                    all.push((index.clone(), id, source));
+        let pit = member("pit");
+        let (gathered, pit_id) = match &pit {
+            Some(pit) => {
+                if indices.is_some() {
+                    return Ok(SearchOutcome::Whole(error(
+                        400,
+                        "action_request_validation_exception",
+                        "Validation Failed: 1: [indices] cannot be used with point in time;",
+                    )));
+                }
+                match self.pit_documents(pit) {
+                    Ok(found) => found,
+                    Err(refusal) => return Ok(SearchOutcome::Whole(refusal)),
                 }
             }
-            Ok(Ok(all))
-        })?;
-        let gathered = match gathered {
-            Ok(gathered) => gathered,
-            Err(missing) => return Ok(SearchOutcome::Whole(missing_index(&missing))),
+            None => match self.gather(indices, ignore_unavailable)? {
+                Ok(gathered) => (Arc::new(gathered), None),
+                Err(missing) => return Ok(SearchOutcome::Whole(missing_index(&missing))),
+            },
         };
         let (documents, origins): (Vec<(String, Node)>, Vec<usize>) = gathered
             .iter()
@@ -1231,8 +1259,11 @@ impl<'k> Api<'k> {
                 Some(best.map_or(value, |held| held.max(value)))
             });
         let mut out = Out::default();
-        out.begin_object()
-            .key("took")
+        out.begin_object();
+        if let Some(pit_id) = &pit_id {
+            out.key("pit_id").string(pit_id);
+        }
+        out.key("took")
             .integer(0)
             .key("timed_out")
             .boolean(false)
@@ -1302,7 +1333,7 @@ struct PageHit {
 
 struct SearchPage {
     head: String,
-    gathered: Vec<(String, String, String)>,
+    gathered: Arc<Vec<(String, String, String)>>,
     hits: Vec<PageHit>,
     source_filter: SourceFilter,
     tail: String,
