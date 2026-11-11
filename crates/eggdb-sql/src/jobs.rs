@@ -28,7 +28,8 @@ CREATE TABLE cron.job (
     database text NOT NULL DEFAULT current_database(),
     username text NOT NULL DEFAULT current_user,
     active boolean NOT NULL DEFAULT true,
-    jobname text UNIQUE
+    jobname text UNIQUE,
+    timezone text
 );
 CREATE TABLE cron.job_run_details (
     jobid bigint,
@@ -62,14 +63,15 @@ BEGIN
     RETURN id;
 END
 $$;
-CREATE FUNCTION cron.alter_job(job_id bigint, schedule text DEFAULT NULL, command text DEFAULT NULL, database text DEFAULT NULL, username text DEFAULT NULL, active boolean DEFAULT NULL) RETURNS void LANGUAGE plpgsql AS $$
+CREATE FUNCTION cron.alter_job(job_id bigint, schedule text DEFAULT NULL, command text DEFAULT NULL, database text DEFAULT NULL, username text DEFAULT NULL, active boolean DEFAULT NULL, timezone text DEFAULT NULL) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
     UPDATE cron.job SET
         schedule = coalesce(alter_job.schedule, cron.job.schedule),
         command = coalesce(alter_job.command, cron.job.command),
         database = coalesce(alter_job.database, cron.job.database),
         username = coalesce(alter_job.username, cron.job.username),
-        active = coalesce(alter_job.active, cron.job.active)
+        active = coalesce(alter_job.active, cron.job.active),
+        timezone = coalesce(alter_job.timezone, cron.job.timezone)
         WHERE jobid = job_id;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Job % does not exist', job_id;
@@ -359,15 +361,38 @@ fn quoted_identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+/// The minute a job's schedule reads at `epoch_seconds`: in UTC, or in the job's `timezone`
+/// (a region such as `Europe/Paris`, an offset or a POSIX rule); `None` for a zone that names
+/// none of these.
+fn local_minute(epoch_seconds: i64, timezone: Option<&str>) -> Option<Minute> {
+    let zone = match timezone.map(str::trim) {
+        None | Some("") => crate::time_zones::TimeZone::UTC,
+        Some(name) => crate::time_zones::TimeZone::named(name)?,
+    };
+    let offset = i64::from(zone.offset_at(epoch_seconds.saturating_mul(1_000_000)));
+    Some(Minute::of_epoch(epoch_seconds.saturating_add(offset)))
+}
+
 fn run_jobs<S: KeyValueStore>(store: &S, epoch_seconds: i64, seconds: bool) -> SqlResult<JobsRun> {
     let mut session = Session::with_dialect(store, Dialect::PostgreSql);
     let mut rows = Vec::new();
-    let listed = session.execute(
-        "SELECT jobid, schedule, command, username FROM cron.job WHERE active ORDER BY jobid",
+    let mut listed = session.execute(
+        "SELECT jobid, schedule, command, username, timezone FROM cron.job WHERE active ORDER BY jobid",
         &mut |result| {
             rows = result.rows;
         },
     );
+    if listed
+        .as_ref()
+        .is_err_and(|error| error.state() == crate::error::SqlState::UNDEFINED_COLUMN)
+    {
+        listed = session.execute(
+            "SELECT jobid, schedule, command, username, NULL::text FROM cron.job WHERE active ORDER BY jobid",
+            &mut |result| {
+                rows = result.rows;
+            },
+        );
+    }
     if let Err(error) = listed {
         return if error.state() == crate::error::SqlState::UNDEFINED_TABLE
             || error.state() == crate::error::SqlState::INVALID_SCHEMA_NAME
@@ -377,7 +402,6 @@ fn run_jobs<S: KeyValueStore>(store: &S, epoch_seconds: i64, seconds: bool) -> S
             Err(error)
         };
     }
-    let minute = Minute::of_epoch(epoch_seconds);
     let mut outcome = JobsRun::default();
     for row in rows {
         let (Some(Value::BigInt(id)), Some(schedule), Some(command)) = (
@@ -396,7 +420,13 @@ fn run_jobs<S: KeyValueStore>(store: &S, epoch_seconds: i64, seconds: bool) -> S
         let due = if seconds {
             parsed.fires_at_second(epoch_seconds)
         } else {
-            parsed.fires_in(minute)
+            match local_minute(epoch_seconds, row.get(4).and_then(text_of).as_deref()) {
+                Some(minute) => parsed.fires_in(minute),
+                None => {
+                    outcome.invalid_schedules += 1;
+                    continue;
+                }
+            }
         };
         if !due {
             continue;

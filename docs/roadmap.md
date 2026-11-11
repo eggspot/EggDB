@@ -1169,7 +1169,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   **code written, unbuilt** (code-only mode, 2026-11-12, D577).
 - pg_cron: sub-minute schedules, `$`, `cron.alter_job` and time zones per job (D200). Sub-minute
   schedules, `$` and `cron.alter_job`: **code written, unbuilt** (code-only mode, 2026-11-11,
-  D429). Left: time zones.
+  D429); time zones per job: **code written, unbuilt** (code-only mode, 2026-11-12, D601).
 - pg_cron: schedules checked at `cron.schedule`, a missed minute run after a restart, and jobs run
   as their `username` (D200). Jobs as their `username`: **code written, unbuilt** (D429).
 - NLS: languages beyond the seven, `NLS_TERRITORY` other than `AMERICA`, the NLS decimal character

@@ -176,3 +176,36 @@ fn pg_cron_jobs_run_when_due_and_record_their_runs() {
         run(&mut session, "SELECT 1::bigint AS count")
     );
 }
+
+#[test]
+fn a_job_with_a_time_zone_reads_its_schedule_in_local_time() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(&mut session, "CREATE EXTENSION pg_cron");
+    run(&mut session, "CREATE TABLE ticks (at int)");
+    run(
+        &mut session,
+        "SELECT cron.schedule('tokyo-midnight', '0 0 * * *', 'INSERT INTO ticks VALUES (1)')",
+    );
+    run(
+        &mut session,
+        "SELECT cron.alter_job((SELECT jobid FROM cron.job WHERE jobname = 'tokyo-midnight'), NULL, NULL, NULL, NULL, NULL, 'Asia/Tokyo')",
+    );
+    run(
+        &mut session,
+        "SELECT cron.schedule('nowhere', '* * * * *', 'SELECT 1')",
+    );
+    run(
+        &mut session,
+        "UPDATE cron.job SET timezone = 'Not/AZone' WHERE jobname = 'nowhere'",
+    );
+    let utc_midnight = run_due_jobs(&store, at(0)).unwrap();
+    assert_eq!(utc_midnight.succeeded, 0);
+    assert_eq!(utc_midnight.invalid_schedules, 1);
+    let tokyo_midnight = run_due_jobs(&store, at(15 * 60)).unwrap();
+    assert_eq!(tokyo_midnight.succeeded, 1);
+    assert_eq!(
+        run(&mut session, "SELECT count(*) FROM ticks"),
+        run(&mut session, "SELECT 1::bigint AS count")
+    );
+}
