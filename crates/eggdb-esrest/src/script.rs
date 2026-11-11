@@ -58,6 +58,10 @@ enum Reference {
     Operation,
     Meta(Meta),
     Param(Vec<String>),
+    DocField(String),
+    DocValue(String),
+    DocSize(String),
+    DocEmpty(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -114,6 +118,86 @@ pub(crate) struct Context<'c> {
     pub(crate) upsert: bool,
 }
 
+fn source_and_params(node: &Node) -> Result<(String, Json), String> {
+    let (source, params) = match &node.value {
+        Json::String(source) => (source.clone(), Json::Object(Vec::new())),
+        Json::Object(members) => {
+            let mut source = None;
+            let mut params = Json::Object(Vec::new());
+            for (key, value) in members {
+                match (key.as_str(), &value.value) {
+                    ("source" | "inline", Json::String(text)) => source = Some(text.clone()),
+                    ("lang", Json::String(lang)) if lang == "painless" => {}
+                    ("lang", Json::String(lang)) => {
+                        return Err(format!("script_lang not supported [{lang}]"));
+                    }
+                    ("params", Json::Object(_)) => params = value.value.clone(),
+                    ("id", _) => {
+                        return Err("stored scripts are not supported".to_owned());
+                    }
+                    ("options", _) => {}
+                    (other, _) => return Err(format!("unknown script field [{other}]")),
+                }
+            }
+            let source = source
+                .ok_or_else(|| "must specify <source> for an inline script".to_owned())?;
+            (source, params)
+        }
+        _ => return Err("a script is a string or an object".to_owned()),
+    };
+    Ok((source, params))
+}
+
+/// A compiled value script, as `_script` sorts use: one expression over `doc['field'].value`
+/// (the smallest of a field's values), `.size()`, `.empty`, `params`, literals and arithmetic,
+/// optionally after `return` and before `;`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ValueScript {
+    expression: Expression,
+    script: Script,
+}
+
+impl ValueScript {
+    /// Compiles a `script` member as an expression.
+    pub(crate) fn from_node(node: &Node) -> Result<Self, String> {
+        let (source, params) = source_and_params(node)?;
+        let mut tokens = tokens(&source)?;
+        while tokens.last() == Some(&Token::Semicolon) {
+            tokens.pop();
+        }
+        let start = usize::from(tokens.first() == Some(&Token::Name("return".to_owned())));
+        let mut parser = Parser {
+            tokens: &tokens[start..],
+            at: 0,
+            operations: 0,
+        };
+        let expression = parser.expression(0)?;
+        if parser.at < parser.tokens.len() {
+            return Err("a value script is one expression".to_owned());
+        }
+        Ok(Self {
+            expression,
+            script: Script {
+                statements: Vec::new(),
+                params,
+            },
+        })
+    }
+
+    /// The expression's value for the document whose source is `source`.
+    pub(crate) fn value(&self, source: &Json) -> Result<Json, String> {
+        let context = Context {
+            source: source.clone(),
+            operation: Operation::Noop,
+            index: "",
+            id: "",
+            version: 0,
+            upsert: false,
+        };
+        self.script.evaluate(&self.expression, &context, 0)
+    }
+}
+
 /// A compiled update script: the subset of Painless that changes `ctx._source` and `ctx.op`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Script {
@@ -125,32 +209,7 @@ impl Script {
     /// Compiles the `script` member of a request: a string of source, or an object with
     /// `source`, `lang` (only `painless`) and `params`.
     pub(crate) fn from_node(node: &Node) -> Result<Self, String> {
-        let (source, params) = match &node.value {
-            Json::String(source) => (source.clone(), Json::Object(Vec::new())),
-            Json::Object(members) => {
-                let mut source = None;
-                let mut params = Json::Object(Vec::new());
-                for (key, value) in members {
-                    match (key.as_str(), &value.value) {
-                        ("source" | "inline", Json::String(text)) => source = Some(text.clone()),
-                        ("lang", Json::String(lang)) if lang == "painless" => {}
-                        ("lang", Json::String(lang)) => {
-                            return Err(format!("script_lang not supported [{lang}]"));
-                        }
-                        ("params", Json::Object(_)) => params = value.value.clone(),
-                        ("id", _) => {
-                            return Err("stored scripts are not supported".to_owned());
-                        }
-                        ("options", _) => {}
-                        (other, _) => return Err(format!("unknown script field [{other}]")),
-                    }
-                }
-                let source = source
-                    .ok_or_else(|| "must specify <source> for an inline script".to_owned())?;
-                (source, params)
-            }
-            _ => return Err("a script is a string or an object".to_owned()),
-        };
+        let (source, params) = source_and_params(node)?;
         let tokens = tokens(&source)?;
         let statements = Parser {
             tokens: &tokens,
@@ -287,6 +346,19 @@ impl Script {
             }
             Expression::Read(Reference::Param(path)) => {
                 lookup(&self.params, path).cloned().unwrap_or(Json::Null)
+            }
+            Expression::Read(Reference::DocField(field)) => {
+                return Err(format!("read doc['{field}'] with .value, .size() or .empty"));
+            }
+            Expression::Read(Reference::DocValue(field)) => doc_values(&context.source, field)
+                .into_iter()
+                .next()
+                .ok_or_else(|| format!("A document doesn't have a value for a field! Use doc['{field}'].size()==0 to check if a document is missing a field!"))?,
+            Expression::Read(Reference::DocSize(field)) => {
+                Json::Number(doc_values(&context.source, field).len().to_string())
+            }
+            Expression::Read(Reference::DocEmpty(field)) => {
+                Json::Boolean(doc_values(&context.source, field).is_empty())
             }
             Expression::Read(Reference::Operation) => Json::String(
                 match context.operation {
@@ -467,6 +539,52 @@ fn arithmetic(left: &Json, operator: Arithmetic, right: &Json) -> Result<Json, S
         Arithmetic::Remainder => a % b,
     };
     Ok(Json::Number(float_text(result)?))
+}
+
+fn values_along<'j>(source: &'j Json, field: &str) -> Vec<&'j Json> {
+    let mut current = vec![source];
+    for part in field.split('.') {
+        let mut next = Vec::new();
+        for value in current {
+            let objects: Vec<&Json> = match value {
+                Json::Array(items) => items.iter().map(|item| &item.value).collect(),
+                other => vec![other],
+            };
+            for object in objects {
+                if let Json::Object(members) = object {
+                    next.extend(members.iter().filter(|(key, _)| key == part).map(|(_, member)| &member.value));
+                }
+            }
+        }
+        current = next;
+    }
+    current
+        .into_iter()
+        .flat_map(|value| match value {
+            Json::Array(items) => items.iter().map(|item| &item.value).collect::<Vec<_>>(),
+            other => vec![other],
+        })
+        .filter(|value| matches!(value, Json::Number(_) | Json::String(_) | Json::Boolean(_)))
+        .collect()
+}
+
+fn doc_values(source: &Json, field: &str) -> Vec<Json> {
+    let mut found = values_along(source, field);
+    if found.is_empty()
+        && let Some(base) = field.strip_suffix(".keyword")
+    {
+        found = values_along(source, base);
+    }
+    let mut values: Vec<Json> = found.into_iter().cloned().collect();
+    values.sort_by(|left, right| match (left, right) {
+        (Json::Number(left), Json::Number(right)) => left
+            .parse::<f64>()
+            .unwrap_or(f64::NAN)
+            .total_cmp(&right.parse::<f64>().unwrap_or(f64::NAN)),
+        (Json::String(left), Json::String(right)) => left.cmp(right),
+        _ => std::cmp::Ordering::Equal,
+    });
+    values
 }
 
 fn lookup<'j>(root: &'j Json, path: &[String]) -> Option<&'j Json> {
@@ -900,6 +1018,17 @@ impl Parser<'_> {
             }
             Some(Token::Name(_)) => match self.path(depth)? {
                 Path::Reference(reference) => Ok(Expression::Read(reference)),
+                Path::Call {
+                    target: Reference::DocField(field),
+                    method,
+                    arguments,
+                } if arguments.is_empty() && (method == "size" || method == "isEmpty") => {
+                    Ok(Expression::Read(if method == "size" {
+                        Reference::DocSize(field)
+                    } else {
+                        Reference::DocEmpty(field)
+                    }))
+                }
                 Path::Call { method, .. } => Err(format!(
                     "method [{method}] is not supported in update scripts"
                 )),
@@ -912,6 +1041,15 @@ impl Parser<'_> {
 fn reference(root: &str, steps: Vec<String>) -> Result<Reference, String> {
     match root {
         "params" => Ok(Reference::Param(steps)),
+        "doc" => match <[String; 1]>::try_from(steps.clone()) {
+            Ok([field]) => Ok(Reference::DocField(field)),
+            Err(_) => match steps.as_slice() {
+                [field, read] if read == "value" => Ok(Reference::DocValue(field.clone())),
+                [field, read] if read == "empty" => Ok(Reference::DocEmpty(field.clone())),
+                [field, read] if read == "length" => Ok(Reference::DocSize(field.clone())),
+                _ => Err("doc offers doc['field'].value, .size(), .length and .empty".to_owned()),
+            },
+        },
         "ctx" => {
             let mut steps = steps.into_iter();
             let first = steps.next();

@@ -619,3 +619,4 @@ its full title with its status.
 - [D592](decisions/D592.md) Code-only batch 240 (M7): LRU eviction for memcached items
 - [D593](decisions/D593.md) Code-only batch 241 (M8): stored scripts and stored search templates
 - [D594](decisions/D594.md) Code-only batch 242 (M8): index and component templates
+- [D595](decisions/D595.md) Code-only batch 243 (M8): script sorts, nested sorts and unmapped sort fields

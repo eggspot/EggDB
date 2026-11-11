@@ -1354,6 +1354,19 @@ impl<'k> Api<'k> {
             .unzip();
         let query = expand_wildcard_fields(query, &documents);
         let field_types = self.field_types(gathered.iter().map(|(index, _, _)| index.as_str()))?;
+        if !documents.is_empty() {
+            let sources: Vec<&Node> = documents.iter().map(|(_, source)| source).collect();
+            if let Some(name) = presentation
+                .sort
+                .unmapped_field(&sources, &|name| field_types.resolve(name).is_some())
+            {
+                return Ok(SearchOutcome::Whole(error(
+                    400,
+                    "search_phase_execution_exception",
+                    &format!("No mapping found for [{name}] in order to sort on"),
+                )));
+            }
+        }
         let query = crate::mappings::apply(query, &field_types, now_millis());
         let highlight = match member("highlight") {
             Some(node) if !count_only => match crate::highlight::highlight_of(&node, &query) {

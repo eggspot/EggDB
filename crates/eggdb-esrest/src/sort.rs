@@ -45,6 +45,11 @@ enum Target {
         name: String,
         mode: Option<Mode>,
         missing: Missing,
+        unmapped_type: Option<String>,
+    },
+    Script {
+        script: crate::script::ValueScript,
+        numeric: bool,
     },
     GeoDistance {
         field: String,
@@ -114,13 +119,14 @@ fn target_of(name: &str) -> Result<Target, String> {
     match name {
         "_score" => Ok(Target::Score),
         "_doc" | "_shard_doc" => Ok(Target::Doc),
-        "_script" => Err(format!("sorting by [{name}] is not supported")),
+        "_script" => Err("[_script] needs a script and a type".to_owned()),
         "_geo_distance" => Err("[_geo_distance] needs a field and an origin".to_owned()),
         "" => Err("a sort field has an empty name".to_owned()),
         field => Ok(Target::Field {
             name: field.to_owned(),
             mode: None,
             missing: Missing::Last,
+            unmapped_type: None,
         }),
     }
 }
@@ -252,9 +258,43 @@ fn raw_at<'n>(source: &'n Node, path: &str) -> Option<&'n Node> {
     Some(current)
 }
 
+fn script_sort(spec: &Node) -> Result<SortField, String> {
+    let Json::Object(options) = &spec.value else {
+        return Err("[_script] takes an object".to_owned());
+    };
+    let mut script = None;
+    let mut numeric = None;
+    let mut direction = Direction::Ascending;
+    for (key, value) in options {
+        match (key.as_str(), &value.value) {
+            ("script", _) => script = Some(crate::script::ValueScript::from_node(value)?),
+            ("type", Json::String(kind)) => {
+                numeric = Some(match kind.as_str() {
+                    "number" => true,
+                    "string" => false,
+                    other => return Err(format!("[_script] unknown type [{other}]: use number or string")),
+                });
+            }
+            ("order", Json::String(order)) => direction = direction_of(order)?,
+            ("mode" | "nested", _) => {}
+            (other, _) => return Err(format!("[_script] unknown field [{other}]")),
+        }
+    }
+    Ok(SortField {
+        target: Target::Script {
+            script: script.ok_or("[_script] needs a script")?,
+            numeric: numeric.ok_or("[_script] needs a type")?,
+        },
+        direction,
+    })
+}
+
 fn configured(name: &str, spec: &Node) -> Result<SortField, String> {
     if name == "_geo_distance" {
         return geo_distance(spec);
+    }
+    if name == "_script" {
+        return script_sort(spec);
     }
     let mut field = named(name)?;
     match &spec.value {
@@ -278,7 +318,12 @@ fn configured(name: &str, spec: &Node) -> Result<SortField, String> {
                             };
                         }
                     }
-                    ("unmapped_type" | "numeric_type" | "format", _) => {}
+                    ("unmapped_type", Json::String(kind)) => {
+                        if let Target::Field { unmapped_type: held, .. } = &mut field.target {
+                            *held = Some(kind.clone());
+                        }
+                    }
+                    ("unmapped_type" | "numeric_type" | "format" | "nested", _) => {}
                     ("order" | "mode", _) => {
                         return Err(format!("[{key}] of sort field [{name}] must be a string"));
                     }
@@ -338,6 +383,13 @@ fn numeric(node: &Node) -> Option<(f64, String)> {
             .ok()
             .map(|value: f64| (value, number_text(value))),
         _ => None,
+    }
+}
+
+fn numeric_value(node: &Node) -> SortValue {
+    match numeric(node) {
+        Some((value, shown)) => SortValue::Number { value, shown },
+        None => SortValue::Missing,
     }
 }
 
@@ -510,6 +562,23 @@ impl Sort {
         Ok(Self { fields })
     }
 
+    /// The first field the sort names that neither `is_mapped` knows nor any of `documents`
+    /// holds, unless it gives an `unmapped_type`: Elasticsearch refuses to sort on it.
+    pub(crate) fn unmapped_field(&self, documents: &[&Node], is_mapped: &dyn Fn(&str) -> bool) -> Option<String> {
+        self.fields.iter().find_map(|field| match &field.target {
+            Target::Field {
+                name,
+                unmapped_type: None,
+                ..
+            } if !is_mapped(name)
+                && documents.iter().all(|source| field_values(source, name).is_empty()) =>
+            {
+                Some(name.clone())
+            }
+            _ => None,
+        })
+    }
+
     /// Whether the sort names no field, so hits keep the order of their scores.
     pub(crate) fn is_empty(&self) -> bool {
         self.fields.is_empty()
@@ -531,6 +600,8 @@ impl Sort {
                 Target::Score | Target::Doc | Target::GeoDistance { .. } => {
                     Kind::Numeric { integral: false }
                 }
+                Target::Script { numeric: true, .. } => Kind::Numeric { integral: false },
+                Target::Script { numeric: false, .. } => Kind::Keyword,
                 Target::Field { name, .. } => kind_of(name, matched),
             })
             .collect();
@@ -589,10 +660,23 @@ impl Ordered<'_> {
                         chosen_number(distances, mode, false)
                     }
                 }
+                Target::Script { script, numeric } => {
+                    let computed = script.value(&source.value).ok().map(|value| Node {
+                        value,
+                        start: 0,
+                        end: 0,
+                    });
+                    match computed {
+                        Some(node) if *numeric => numeric_value(&node),
+                        Some(node) => textual(&node).map_or(SortValue::Missing, SortValue::Text),
+                        None => SortValue::Missing,
+                    }
+                }
                 Target::Field {
                     name,
                     mode,
                     missing,
+                    ..
                 } => {
                     let values = field_values(source, name);
                     let picked = match kind {
@@ -688,6 +772,7 @@ impl Ordered<'_> {
                     Target::Field { name, .. } | Target::GeoDistance { field: name, .. } => {
                         name.as_str()
                     }
+                    Target::Script { .. } => "_script",
                 };
                 let unreadable =
                     || format!("Failed to parse search_after value for field [{name}].");
@@ -760,6 +845,52 @@ mod tests {
         let flag = Sort::from_flag("pages:desc,_doc").expect("a URL sort");
         assert_eq!(flag.fields.len(), 2);
         assert!(Sort::from_flag("pages:up").is_err());
+    }
+
+    #[test]
+    fn script_sorts_order_by_the_computed_value() {
+        let sort = sort(
+            "[{\"_script\":{\"type\":\"number\",\"order\":\"desc\",\"script\":{\"source\":\"return doc['pages'].value * params.factor + doc['tags'].size();\",\"params\":{\"factor\":2}}}}]",
+        )
+        .expect("a script sort");
+        let short = document("{\"pages\":[30,10],\"tags\":[\"a\",\"b\"]}");
+        let long = document("{\"pages\":50}");
+        let none = document("{}");
+        let ordered = sort.over(&[&short, &long, &none]);
+        assert_eq!(
+            ordered.values_of(0.0, 0, &short),
+            vec![SortValue::Number { value: 22.0, shown: "22".to_owned() }]
+        );
+        assert_eq!(ordered.values_of(0.0, 2, &none), vec![SortValue::Missing]);
+        let shorter = ordered.values_of(0.0, 0, &short);
+        let longer = ordered.values_of(0.0, 1, &long);
+        assert_eq!(ordered.compare(&longer, &shorter), std::cmp::Ordering::Less);
+        let text = sort_text("[{\"_script\":{\"type\":\"string\",\"script\":\"doc['name.keyword'].value\"}}]");
+        let named = document("{\"name\":\"Ana\"}");
+        assert_eq!(text.over(&[&named]).values_of(0.0, 0, &named), vec![SortValue::Text("Ana".to_owned())]);
+        assert!(sort_result("[{\"_script\":{\"type\":\"date\",\"script\":\"1\"}}]").is_err());
+        assert!(sort_result("[{\"_script\":{\"type\":\"number\",\"script\":\"ctx._source.a = 1\"}}]").is_err());
+    }
+
+    fn sort_text(spec: &str) -> Sort {
+        sort_result(spec).expect("a sort")
+    }
+
+    fn sort_result(spec: &str) -> Result<Sort, String> {
+        Sort::from_node(&parse_document(spec).expect("JSON"))
+    }
+
+    #[test]
+    fn fields_no_document_or_mapping_holds_are_unmapped_unless_typed() {
+        let unmapped = sort_text("[{\"missing_field\":\"asc\"},\"_score\"]");
+        let typed = sort_text("[{\"missing_field\":{\"order\":\"asc\",\"unmapped_type\":\"long\"}}]");
+        let held = sort_text("[\"n\"]");
+        let source = document("{\"n\":1}");
+        let none = |_: &str| false;
+        assert_eq!(unmapped.unmapped_field(&[&source], &none), Some("missing_field".to_owned()));
+        assert_eq!(unmapped.unmapped_field(&[&source], &|name| name == "missing_field"), None);
+        assert_eq!(typed.unmapped_field(&[&source], &none), None);
+        assert_eq!(held.unmapped_field(&[&source], &none), None);
     }
 
     #[test]
