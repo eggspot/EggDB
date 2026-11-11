@@ -1346,7 +1346,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 
 ### M16 Messaging, wide-column, objects and observability
 - Kafka consumer groups (D33, D213). **Code written, unbuilt** (code-only mode, 2026-11-11, D525). Left:
-  static membership, the new rebalance protocol and the group listing APIs.
+  static membership and the new rebalance protocol. The group listing APIs: **code written,
+  unbuilt** (code-only mode, 2026-11-11, D545).
 - Kafka transactions and idempotent producers (D33, D213).
 - Kafka's flexible request versions, SASL, and topic creation and deletion APIs (D213). Topic creation and
   deletion: **code written, unbuilt** (code-only mode, 2026-11-11, D492). SASL/PLAIN: **code written, unbuilt** (code-only mode,

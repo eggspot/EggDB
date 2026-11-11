@@ -13,6 +13,8 @@ const INVALID_GROUP_ID: i16 = 24;
 const UNKNOWN_MEMBER_ID: i16 = 25;
 const INVALID_SESSION_TIMEOUT: i16 = 26;
 const REBALANCE_IN_PROGRESS: i16 = 27;
+const NON_EMPTY_GROUP: i16 = 68;
+const GROUP_ID_NOT_FOUND: i16 = 69;
 const MIN_SESSION_TIMEOUT: Duration = Duration::from_secs(6);
 const MAX_SESSION_TIMEOUT: Duration = Duration::from_secs(1800);
 const MAX_REBALANCE_WAIT: Duration = Duration::from_secs(60);
@@ -104,6 +106,22 @@ impl Group {
 pub(crate) struct Coordinator {
     groups: Mutex<BTreeMap<String, Group>>,
     changed: Condvar,
+}
+
+fn group_offsets_prefix(group: &str) -> Vec<u8> {
+    let mut prefix = vec![OFFSET];
+    prefix.extend_from_slice(group.as_bytes());
+    prefix.push(0);
+    prefix
+}
+
+fn group_state(group: &Group) -> &'static str {
+    match group.phase {
+        _ if group.members.is_empty() => "Empty",
+        Phase::Joining => "PreparingRebalance",
+        Phase::Syncing => "CompletingRebalance",
+        Phase::Stable => "Stable",
+    }
 }
 
 fn offset_key(group: &str, topic: &str, partition: i32) -> Vec<u8> {
@@ -446,6 +464,105 @@ impl Coordinator {
         Ok(())
     }
 
+    pub(crate) fn list_groups(&self, version: i16, body: &mut Writer) -> Parsed<()> {
+        throttle(version, 1, body);
+        let groups = self.locked();
+        body.i16(log::error::NONE).count(groups.len());
+        for (name, group) in groups.iter() {
+            body.string(Some(name)).string(Some(&group.protocol_type));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn describe_groups(&self, version: i16, request: &mut Reader<'_>, body: &mut Writer) -> Parsed<()> {
+        let names = request.array(|reader| Ok(reader.string()?.unwrap_or_default()))?;
+        throttle(version, 1, body);
+        let mut groups = self.locked();
+        body.count(names.len());
+        for name in &names {
+            let Some(group) = groups.get_mut(name) else {
+                body.i16(log::error::NONE)
+                    .string(Some(name))
+                    .string(Some("Dead"))
+                    .string(Some(""))
+                    .string(Some(""))
+                    .count(0);
+                continue;
+            };
+            if group.expire() {
+                group.start_rebalance();
+                self.changed.notify_all();
+            }
+            let protocol = group.protocol.clone().unwrap_or_default();
+            let showing_protocol = group.phase == Phase::Stable && !group.members.is_empty();
+            body.i16(log::error::NONE)
+                .string(Some(name))
+                .string(Some(group_state(group)))
+                .string(Some(&group.protocol_type))
+                .string(Some(if showing_protocol { protocol.as_str() } else { "" }))
+                .count(group.members.len());
+            for (member_id, member) in &group.members {
+                let metadata = member
+                    .protocols
+                    .iter()
+                    .find(|(known, _)| *known == protocol)
+                    .map(|(_, metadata)| metadata.as_slice())
+                    .unwrap_or_default();
+                let assignment: &[u8] = if showing_protocol {
+                    group.assignments.get(member_id).map(Vec::as_slice).unwrap_or_default()
+                } else {
+                    &[]
+                };
+                body.string(Some(member_id))
+                    .string(Some(""))
+                    .string(Some(""))
+                    .bytes(if showing_protocol { metadata } else { &[] })
+                    .bytes(assignment);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn delete_groups(
+        &self,
+        keyspace: &dyn Keyspace,
+        version: i16,
+        request: &mut Reader<'_>,
+        body: &mut Writer,
+    ) -> Parsed<()> {
+        let names = request.array(|reader| Ok(reader.string()?.unwrap_or_default()))?;
+        throttle(version, 0, body);
+        let mut groups = self.locked();
+        body.count(names.len());
+        for name in &names {
+            let has_members = groups.get_mut(name).is_some_and(|group| {
+                group.expire();
+                !group.members.is_empty()
+            });
+            let code = if name.is_empty() {
+                INVALID_GROUP_ID
+            } else if has_members {
+                NON_EMPTY_GROUP
+            } else {
+                let known = groups.remove(name).is_some();
+                let prefix = group_offsets_prefix(name);
+                match log::write(keyspace, |keys| {
+                    let committed = keys.scan(&prefix)?;
+                    for (key, _) in &committed {
+                        keys.delete(key)?;
+                    }
+                    Ok(!committed.is_empty())
+                }) {
+                    Ok(removed) if known || removed => log::error::NONE,
+                    Ok(_) => GROUP_ID_NOT_FOUND,
+                    Err(_) => log::error::CORRUPT_MESSAGE,
+                }
+            };
+            body.string(Some(name)).i16(code);
+        }
+        Ok(())
+    }
+
     pub(crate) fn offset_fetch(
         keyspace: &dyn Keyspace,
         version: i16,
@@ -459,12 +576,7 @@ impl Coordinator {
             Ok((name, partitions))
         })?;
         throttle(version, 3, body);
-        let committed = log::read(keyspace, |keys| {
-            let mut prefix = vec![OFFSET];
-            prefix.extend_from_slice(group_id.as_bytes());
-            prefix.push(0);
-            keys.scan(&prefix)
-        })
+        let committed = log::read(keyspace, |keys| keys.scan(&group_offsets_prefix(&group_id)))
         .unwrap_or_default();
         let mut found: BTreeMap<(String, i32), (i64, String)> = BTreeMap::new();
         let prefix_length = 1 + group_id.len() + 1;

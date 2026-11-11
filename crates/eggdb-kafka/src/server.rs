@@ -37,8 +37,14 @@ const JOIN_GROUP: i16 = 11;
 const HEARTBEAT: i16 = 12;
 const LEAVE_GROUP: i16 = 13;
 const SYNC_GROUP: i16 = 14;
+const DESCRIBE_GROUPS: i16 = 15;
+const LIST_GROUPS: i16 = 16;
+const DELETE_GROUPS: i16 = 42;
 
-const SUPPORTED: [(i16, i16, i16); 16] = [
+const SUPPORTED: [(i16, i16, i16); 19] = [
+    (DESCRIBE_GROUPS, 0, 1),
+    (LIST_GROUPS, 0, 2),
+    (DELETE_GROUPS, 0, 1),
     (OFFSET_COMMIT, 2, 3),
     (OFFSET_FETCH, 1, 3),
     (FIND_COORDINATOR, 0, 2),
@@ -545,6 +551,13 @@ pub(crate) fn answer_for(
             SYNC_GROUP => coordinator.sync_group(version, &mut request, &mut body).map(|()| true),
             HEARTBEAT => coordinator.heartbeat(version, &mut request, &mut body).map(|()| true),
             LEAVE_GROUP => coordinator.leave_group(version, &mut request, &mut body).map(|()| true),
+            DESCRIBE_GROUPS => coordinator
+                .describe_groups(version, &mut request, &mut body)
+                .map(|()| true),
+            LIST_GROUPS => coordinator.list_groups(version, &mut body).map(|()| true),
+            DELETE_GROUPS => coordinator
+                .delete_groups(keyspace, version, &mut request, &mut body)
+                .map(|()| true),
             OFFSET_COMMIT => coordinator
                 .offset_commit(keyspace, version, &mut request, &mut body)
                 .map(|()| true),
