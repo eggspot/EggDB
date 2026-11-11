@@ -6,6 +6,7 @@
 //! (D331), served by our own HTTP crate over EggDB's key-value transactions. Elasticsearch and
 //! OpenSearch are trademarks of their owners; EggDB is compatible with their APIs.
 
+mod aggregations;
 mod api;
 mod json_out;
 mod mustache;

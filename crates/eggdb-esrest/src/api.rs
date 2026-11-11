@@ -4,7 +4,7 @@ mod pit;
 mod scroll;
 
 use crate::json_out::{Out, escaped, written};
-use crate::query::{Stats, numbers, parse, score, term_buckets};
+use crate::query::{Stats, parse, score};
 use crate::script::{Context, Operation, Script};
 use crate::sort::{Sort, SortValue, write_values};
 use crate::source_filter::SourceFilter;
@@ -1499,75 +1499,7 @@ fn presentation_of(
 }
 
 fn aggregate(out: &mut Out, aggregations: &Node, matched: &[&Node]) {
-    out.begin_object();
-    if let Json::Object(members) = &aggregations.value {
-        for (name, spec) in members {
-            out.key(name).begin_object();
-            if let Json::Object(kinds) = &spec.value
-                && let Some((kind, settings)) = kinds.first()
-            {
-                let field = settings.value.clone().into_object().and_then(|members| {
-                    members
-                        .into_iter()
-                        .find(|(key, _)| key == "field")
-                        .and_then(|(_, node)| match node.value {
-                            Json::String(text) => Some(text),
-                            _ => None,
-                        })
-                });
-                let field = field.unwrap_or_default();
-                match kind.as_str() {
-                    "terms" => {
-                        let size = settings.value.clone().into_object().and_then(|members| {
-                            members.into_iter().find(|(key, _)| key == "size").and_then(
-                                |(_, node)| match node.value {
-                                    Json::Number(text) => text.parse().ok(),
-                                    _ => None,
-                                },
-                            )
-                        });
-                        out.key("doc_count_error_upper_bound")
-                            .integer(0)
-                            .key("sum_other_doc_count")
-                            .integer(0)
-                            .key("buckets")
-                            .begin_array();
-                        for (key, numeric, count) in
-                            term_buckets(matched, &field, size.unwrap_or(10))
-                        {
-                            out.begin_object().key("key");
-                            if numeric {
-                                out.raw(&key);
-                            } else {
-                                out.string(&key);
-                            }
-                            out.key("doc_count").integer(count).end_object();
-                        }
-                        out.end_array();
-                    }
-                    "avg" | "sum" | "min" | "max" | "value_count" => {
-                        let values = numbers(matched, &field);
-                        let value = match kind.as_str() {
-                            "sum" => Some(values.iter().sum()),
-                            "avg" => (!values.is_empty())
-                                .then(|| values.iter().sum::<f64>() / values.len() as f64),
-                            "min" => values.iter().copied().reduce(f64::min),
-                            "max" => values.iter().copied().reduce(f64::max),
-                            _ => Some(values.len() as f64),
-                        };
-                        out.key("value");
-                        match value {
-                            Some(value) => out.number(value),
-                            None => out.null(),
-                        };
-                    }
-                    _ => {}
-                }
-            }
-            out.end_object();
-        }
-    }
-    out.end_object();
+    crate::aggregations::write(out, aggregations, matched);
 }
 
 fn script_error(reason: &str) -> Response {

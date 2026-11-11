@@ -1,5 +1,5 @@
 use eggdb_sql::json::{Json, Node};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 const MAX_DEPTH: usize = 32;
 
@@ -474,46 +474,4 @@ pub(crate) fn score(query: &Query, id: &str, source: &Node, stats: &Stats) -> Op
             Some(total)
         }
     }
-}
-
-/// A bucket key's text and the document count.
-pub(crate) fn term_buckets(
-    documents: &[&Node],
-    field: &str,
-    size: usize,
-) -> Vec<(String, bool, u64)> {
-    let mut counts: BTreeMap<(String, bool), u64> = BTreeMap::new();
-    for source in documents {
-        let mut seen = HashSet::new();
-        for node in values_at(source, field) {
-            let key = match &node.value {
-                Json::String(text) => (text.clone(), false),
-                Json::Number(text) => (text.clone(), true),
-                Json::Boolean(value) => (value.to_string(), false),
-                _ => continue,
-            };
-            if seen.insert(key.clone()) {
-                *counts.entry(key).or_default() += 1;
-            }
-        }
-    }
-    let mut buckets: Vec<(String, bool, u64)> = counts
-        .into_iter()
-        .map(|((key, number), count)| (key, number, count))
-        .collect();
-    buckets.sort_by(|left, right| right.2.cmp(&left.2).then_with(|| left.0.cmp(&right.0)));
-    buckets.truncate(size);
-    buckets
-}
-
-/// The numbers at `field` of every document.
-pub(crate) fn numbers(documents: &[&Node], field: &str) -> Vec<f64> {
-    documents
-        .iter()
-        .flat_map(|source| values_at(source, field))
-        .filter_map(|node| match &node.value {
-            Json::Number(text) => text.parse().ok(),
-            _ => None,
-        })
-        .collect()
 }

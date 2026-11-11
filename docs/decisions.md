@@ -495,3 +495,4 @@ its full title with its status.
 - [D468](decisions/D468.md) Code-only batch 116 (M8): Elasticsearch point in time
 - [D469](decisions/D469.md) Code-only batch 117 (M8): text-search weights and `ts_headline`
 - [D470](decisions/D470.md) Code-only batch 118 (M8): fuzzystrmatch and pg_trgm functions
+- [D471](decisions/D471.md) Code-only batch 119 (M8): Elasticsearch sub-aggregations, bucket and stats kinds
