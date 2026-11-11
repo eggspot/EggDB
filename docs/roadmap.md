@@ -772,7 +772,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - OAuth for MCP over HTTP, as the MCP specification describes for remote servers; TLS comes with
   the M6a item for every listener (D189).
 - Writes with confirmation over HTTP (D189, D190).
-- Server-sent event streams (D189).
+- Server-sent event streams (D189). Answers as SSE when the client asks: **code written, unbuilt**
+  (code-only mode, 2026-11-11, D487); progress streams wait for tools that report progress.
 - Per-agent time limits and quotas, and the agent's role in each audit record (D190).
 - Table resources beyond the schema document (D190).
 - The 2026-07-28 protocol revision (D190).

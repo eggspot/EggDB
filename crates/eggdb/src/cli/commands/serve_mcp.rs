@@ -188,9 +188,17 @@ impl<'d> McpEndpoint<'d> {
         if request.method != "POST" {
             return eggdb_http::Response::text(
                 405,
-                "this endpoint takes POST (no event streams yet)",
-            );
+                "this endpoint takes POST; EggDB sends no server-initiated messages, so GET opens no event stream",
+            )
+            .with_header("Allow", "POST, DELETE");
         }
+        let accepted = request
+            .header("accept")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let streamed = accepted.contains("text/event-stream")
+            && !accepted.contains("application/json")
+            && !accepted.contains("*/*");
         let mut sessions = self
             .sessions
             .lock()
@@ -222,6 +230,13 @@ impl<'d> McpEndpoint<'d> {
         };
         let answer = server.handle(&request.body);
         let response = match answer {
+            Some(answer) if streamed => {
+                let mut event = b"event: message\ndata: ".to_vec();
+                event.extend(answer.into_bytes().into_iter().filter(|byte| *byte != b'\n'));
+                event.extend_from_slice(b"\n\n");
+                eggdb_http::Response::ok("text/event-stream", event)
+                    .with_header("Cache-Control", "no-cache")
+            }
             Some(answer) => eggdb_http::Response::ok("application/json", answer),
             None => eggdb_http::Response {
                 status: 202,
