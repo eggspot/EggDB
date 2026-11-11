@@ -9,6 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const COLLECTION_RECORD: u8 = 1;
 const DOCUMENT_RECORD: u8 = 2;
+const CAPPED_ORDER_RECORD: u8 = 3;
+const NEXT_SEQUENCE: &str = "nextSequence";
 const MAX_NESTING_DEPTH: usize = 100;
 const ROLLED_BACK: &str = "the document operation was rolled back";
 
@@ -152,6 +154,153 @@ fn id_key(id: &Bson) -> Vec<u8> {
         ),
     }
     key
+}
+
+fn order_prefix(database: &str, collection: &str) -> Vec<u8> {
+    let mut key = vec![CAPPED_ORDER_RECORD];
+    key.extend_from_slice(database.as_bytes());
+    key.push(0);
+    key.extend_from_slice(collection.as_bytes());
+    key.push(0);
+    key
+}
+
+/// What a collection was created with: capped limits and time-series fields.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct CollectionOptions {
+    capped: Option<(i64, Option<i64>)>,
+    time_field: Option<String>,
+}
+
+fn options_of(info: &Document) -> CollectionOptions {
+    let Some(options) = info.get_document("options") else {
+        return CollectionOptions::default();
+    };
+    CollectionOptions {
+        capped: (options.get_bool("capped") == Some(true)).then(|| {
+            (
+                options.get("size").and_then(Bson::as_i64).unwrap_or(i64::MAX),
+                options.get("max").and_then(Bson::as_i64).filter(|max| *max > 0),
+            )
+        }),
+        time_field: options
+            .get_document("timeseries")
+            .and_then(|timeseries| timeseries.get_str("timeField"))
+            .map(str::to_owned),
+    }
+}
+
+fn collection_options(keys: &dyn KeysRead, database: &str, collection: &str) -> DocumentResult<CollectionOptions> {
+    Ok(match keys.get(&collection_key(database, collection)).map_err(DocumentError::storage)? {
+        Some(bytes) => options_of(&decoded(&bytes)?),
+        None => CollectionOptions::default(),
+    })
+}
+
+/// Checks `createCollection`'s options and keeps the ones EggDB applies: `capped` with `size`
+/// and `max`, and `timeseries` with `timeField`, `metaField` and `granularity`.
+fn checked_options(options: &Document) -> DocumentResult<Document> {
+    let mut kept = Document::new();
+    let capped = options.get_bool("capped") == Some(true);
+    let timeseries = options.get_document("timeseries");
+    if capped {
+        let size = options
+            .get("size")
+            .and_then(Bson::as_i64)
+            .filter(|size| *size > 0)
+            .ok_or_else(|| DocumentError::invalid_options("the 'size' field is required when 'capped' is true"))?;
+        if timeseries.is_some() {
+            return Err(DocumentError::invalid_options("a time-series collection cannot be capped"));
+        }
+        kept.insert("capped", Bson::Boolean(true));
+        kept.insert("size", Bson::Int64(size.max(4096).saturating_add(255) / 256 * 256));
+        if let Some(max) = options.get("max").and_then(Bson::as_i64).filter(|max| *max > 0) {
+            kept.insert("max", Bson::Int64(max));
+        }
+    }
+    if let Some(timeseries) = timeseries {
+        let Some(time_field) = timeseries.get_str("timeField").filter(|field| !field.is_empty() && !field.contains('.')) else {
+            return Err(DocumentError::invalid_options("a time-series collection needs a timeField"));
+        };
+        let mut kept_timeseries = Document::new();
+        kept_timeseries.insert("timeField", Bson::String(time_field.to_owned()));
+        if let Some(meta) = timeseries.get_str("metaField") {
+            if meta == time_field {
+                return Err(DocumentError::invalid_options("timeField and metaField must differ"));
+            }
+            kept_timeseries.insert("metaField", Bson::String(meta.to_owned()));
+        }
+        kept_timeseries.insert(
+            "granularity",
+            Bson::String(timeseries.get_str("granularity").unwrap_or("seconds").to_owned()),
+        );
+        kept.insert("timeseries", Bson::Document(kept_timeseries));
+    }
+    Ok(kept)
+}
+
+fn check_time_series(options: &CollectionOptions, document: &Document) -> DocumentResult<()> {
+    let Some(field) = &options.time_field else {
+        return Ok(());
+    };
+    match document.get(field) {
+        Some(Bson::DateTime(_)) => Ok(()),
+        _ => Err(DocumentError::bad_value(format!(
+            "'{field}' must be present and contain a valid BSON UTC datetime value"
+        ))),
+    }
+}
+
+fn record_capped(
+    keys: &mut dyn KeysWrite,
+    database: &str,
+    collection: &str,
+    id: &Bson,
+    (size, max): (i64, Option<i64>),
+) -> DocumentResult<()> {
+    let info_key = collection_key(database, collection);
+    let mut info = match keys.get(&info_key).map_err(DocumentError::storage)? {
+        Some(bytes) => decoded(&bytes)?,
+        None => Document::new(),
+    };
+    let sequence = info.get(NEXT_SEQUENCE).and_then(Bson::as_i64).unwrap_or(0);
+    info.insert(NEXT_SEQUENCE, Bson::Int64(sequence + 1));
+    keys.put(&info_key, &info.to_bytes()).map_err(DocumentError::storage)?;
+    let mut order = order_prefix(database, collection);
+    order.extend_from_slice(&(sequence as u64).to_be_bytes());
+    keys.put(&order, &id_key(id)).map_err(DocumentError::storage)?;
+    let prefix = documents_prefix(database, collection);
+    let stored = keys.scan(&prefix).map_err(DocumentError::storage)?;
+    let mut count = stored.len() as i64;
+    let mut bytes: i64 = stored.iter().map(|(_, document)| document.len() as i64).sum();
+    for (order_key, id_bytes) in keys.scan(&order_prefix(database, collection)).map_err(DocumentError::storage)? {
+        if bytes <= size && max.is_none_or(|max| count <= max) {
+            break;
+        }
+        let mut document_key = prefix.clone();
+        document_key.extend_from_slice(&id_bytes);
+        if let Some(document) = keys.get(&document_key).map_err(DocumentError::storage)? {
+            keys.delete(&document_key).map_err(DocumentError::storage)?;
+            count -= 1;
+            bytes -= document.len() as i64;
+        }
+        keys.delete(&order_key).map_err(DocumentError::storage)?;
+    }
+    Ok(())
+}
+
+fn natural_order(keys: &dyn KeysRead, database: &str, collection: &str) -> DocumentResult<Vec<Vec<u8>>> {
+    let prefix = documents_prefix(database, collection);
+    Ok(keys
+        .scan(&order_prefix(database, collection))
+        .map_err(DocumentError::storage)?
+        .into_iter()
+        .map(|(_, id_bytes)| {
+            let mut key = prefix.clone();
+            key.extend_from_slice(&id_bytes);
+            key
+        })
+        .collect())
 }
 
 fn document_key(database: &str, collection: &str, id: &Bson) -> Vec<u8> {
@@ -512,6 +661,13 @@ impl<'k> Store<'k> {
 
     /// Creates an empty collection; fails when it exists.
     pub fn create_collection(&self, database: &str, collection: &str) -> DocumentResult<()> {
+        self.create_collection_with(database, collection, &Document::new())
+    }
+
+    /// Creates an empty collection with `createCollection`'s options (`capped`, `size`,
+    /// `max`, `timeseries`); fails when it exists or the options do not hold together.
+    pub fn create_collection_with(&self, database: &str, collection: &str, options: &Document) -> DocumentResult<()> {
+        let kept = checked_options(options)?;
         self.write(|keys| {
             check_database_name(database)?;
             check_collection_name(collection)?;
@@ -524,8 +680,20 @@ impl<'k> Store<'k> {
                     "Collection {database}.{collection} already exists."
                 )));
             }
-            ensure_collection(keys, database, collection)
+            ensure_collection(keys, database, collection)?;
+            if !kept.is_empty() {
+                let mut info = Document::new();
+                info.insert("options", Bson::Document(kept.clone()));
+                keys.put(&collection_key(database, collection), &info.to_bytes())
+                    .map_err(DocumentError::storage)?;
+            }
+            Ok(())
         })
+    }
+
+    /// The options a collection was created with, as `listCollections` shows them.
+    pub fn collection_options_document(info: &Document) -> Document {
+        info.get_document("options").cloned().unwrap_or_default()
     }
 
     /// Drops a collection and its documents; returns whether it existed.
@@ -535,11 +703,10 @@ impl<'k> Store<'k> {
             if keys.get(&key).map_err(DocumentError::storage)?.is_none() {
                 return Ok(false);
             }
-            for (document, _) in keys
-                .scan(&documents_prefix(database, collection))
-                .map_err(DocumentError::storage)?
-            {
-                keys.delete(&document).map_err(DocumentError::storage)?;
+            for prefix in [documents_prefix(database, collection), order_prefix(database, collection)] {
+                for (document, _) in keys.scan(&prefix).map_err(DocumentError::storage)? {
+                    keys.delete(&document).map_err(DocumentError::storage)?;
+                }
             }
             keys.delete(&key).map_err(DocumentError::storage)?;
             Ok(true)
@@ -583,12 +750,16 @@ impl<'k> Store<'k> {
                 }
                 keys.delete(&target).map_err(DocumentError::storage)?;
             }
-            let source_prefix = documents_prefix(from_database, from_collection);
-            for (document, bytes) in keys.scan(&source_prefix).map_err(DocumentError::storage)? {
-                let mut moved = target_prefix.clone();
-                moved.extend_from_slice(&document[source_prefix.len()..]);
-                keys.put(&moved, &bytes).map_err(DocumentError::storage)?;
-                keys.delete(&document).map_err(DocumentError::storage)?;
+            for (source_prefix, target_prefix) in [
+                (documents_prefix(from_database, from_collection), target_prefix.clone()),
+                (order_prefix(from_database, from_collection), order_prefix(to_database, to_collection)),
+            ] {
+                for (document, bytes) in keys.scan(&source_prefix).map_err(DocumentError::storage)? {
+                    let mut moved = target_prefix.clone();
+                    moved.extend_from_slice(&document[source_prefix.len()..]);
+                    keys.put(&moved, &bytes).map_err(DocumentError::storage)?;
+                    keys.delete(&document).map_err(DocumentError::storage)?;
+                }
             }
             keys.put(&target, &record).map_err(DocumentError::storage)?;
             keys.delete(&source).map_err(DocumentError::storage)?;
@@ -760,6 +931,7 @@ impl<'k> Store<'k> {
     ) -> DocumentResult<InsertOutcome> {
         self.write(|keys| {
             ensure_collection(keys, database, collection)?;
+            let options = collection_options(&*keys, database, collection)?;
             let mut outcome = InsertOutcome::default();
             for (at, mut document) in documents.into_iter().enumerate() {
                 match document.get("_id").cloned() {
@@ -773,7 +945,12 @@ impl<'k> Store<'k> {
                         return Err(duplicate(database, collection, &id));
                     }
                     check_unique(&*keys, database, collection, &key, &document)?;
-                    keys.put(&key, &bytes).map_err(DocumentError::storage)
+                    check_time_series(&options, &document)?;
+                    keys.put(&key, &bytes).map_err(DocumentError::storage)?;
+                    match options.capped {
+                        Some(limits) => record_capped(keys, database, collection, &id, limits),
+                        None => Ok(()),
+                    }
                 });
                 match result {
                     Ok(()) => outcome.inserted += 1,
@@ -908,11 +1085,16 @@ impl<'k> Store<'k> {
         filter: &Filter,
         sort: &SortSpec,
     ) -> DocumentResult<Vec<Document>> {
-        let mut documents: Vec<Document> = self
-            .read(|keys| matching(keys, database, collection, filter))?
-            .into_iter()
-            .map(|(_, document)| document)
-            .collect();
+        let mut documents: Vec<Document> = self.read(|keys| {
+            let found = matching(keys, database, collection, filter)?;
+            if !sort.is_empty() || collection_options(keys, database, collection)?.capped.is_none() {
+                return Ok(found.into_iter().map(|(_, document)| document).collect());
+            }
+            let order = natural_order(keys, database, collection)?;
+            let mut found = found;
+            found.sort_by_key(|(key, _)| order.iter().position(|known| known == key).unwrap_or(usize::MAX));
+            Ok(found.into_iter().map(|(_, document)| document).collect())
+        })?;
         sort_documents(&mut documents, sort);
         Ok(documents)
     }

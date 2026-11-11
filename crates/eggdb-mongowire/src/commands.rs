@@ -500,7 +500,7 @@ pub(crate) fn run(
         "listDatabases" => list_databases(shared, body),
         "listCollections" => list_collections(shared, database, body),
         "create" => collection_name(body, "create").and_then(|name| {
-            shared.store.create_collection(database, name)?;
+            shared.store.create_collection_with(database, name, body)?;
             Ok(ok(Document::new()))
         }),
         "drop" => collection_name(body, "drop").and_then(|name| {
@@ -604,10 +604,12 @@ fn list_collections(
     let filter = filter_of(body, "filter")?;
     let name_only = body.get_bool("nameOnly") == Some(true);
     let mut listed = VecDeque::new();
-    for (name, _) in shared.store.collections_of(database)? {
-        let mut entry = document(vec![("name", text(&name)), ("type", text("collection"))]);
+    for (name, info) in shared.store.collections_of(database)? {
+        let options = eggdb_documents::Store::collection_options_document(&info);
+        let kind = if options.get_document("timeseries").is_some() { "timeseries" } else { "collection" };
+        let mut entry = document(vec![("name", text(&name)), ("type", text(kind))]);
         if !name_only {
-            entry.insert("options", Bson::Document(Document::new()));
+            entry.insert("options", Bson::Document(options));
             entry.insert(
                 "info",
                 Bson::Document(document(vec![("readOnly", Bson::Boolean(false))])),

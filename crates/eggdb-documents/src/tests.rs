@@ -1794,3 +1794,29 @@ fn text_searches_need_a_text_index_and_match_stemmed_words_and_phrases() {
     assert_eq!(ids(search("coffee -shop").unwrap()), vec![Bson::Int32(1)]);
     assert_eq!(ids(search("\"coffee shop\"").unwrap()), vec![Bson::Int32(2)]);
 }
+
+#[test]
+fn capped_collections_keep_their_newest_documents_in_insertion_order() {
+    let keyspace = MemoryKeyspace::default();
+    let store = store(&keyspace);
+    let options = doc(vec![("capped", Bson::Boolean(true)), ("size", Bson::Int32(100_000)), ("max", Bson::Int32(2))]);
+    store.create_collection_with("app", "recent", &options).unwrap();
+    for id in [5, 1, 9] {
+        store.insert("app", "recent", vec![doc(vec![("_id", Bson::Int32(id))])], true).unwrap();
+    }
+    let found = store
+        .find("app", "recent", &crate::parse_filter(&Document::new()).unwrap(), &crate::SortSpec::default())
+        .unwrap();
+    let ids: Vec<Bson> = found.iter().filter_map(|document| document.get("_id").cloned()).collect();
+    assert_eq!(ids, vec![Bson::Int32(1), Bson::Int32(9)]);
+    let no_size = doc(vec![("capped", Bson::Boolean(true))]);
+    assert_eq!(store.create_collection_with("app", "bad", &no_size).unwrap_err().code, 72);
+    let series = doc(vec![("timeseries", Bson::Document(doc(vec![("timeField", text("at"))])))]);
+    store.create_collection_with("app", "readings", &series).unwrap();
+    let refused = store.insert("app", "readings", vec![doc(vec![("_id", Bson::Int32(1))])], true).unwrap();
+    assert_eq!(refused.inserted, 0);
+    let accepted = store
+        .insert("app", "readings", vec![doc(vec![("_id", Bson::Int32(2)), ("at", Bson::DateTime(0))])], true)
+        .unwrap();
+    assert_eq!(accepted.inserted, 1);
+}
