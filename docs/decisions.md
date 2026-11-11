@@ -452,3 +452,4 @@ its full title with its status.
 - [D425](decisions/D425.md) Code-only batch 72 (M10): MySQL's `JSON_VALUE` and `JSON_TABLE` with MySQL's path language
 - [D426](decisions/D426.md) Code-only batch 73 (M10): MySQL and TDS clients refuse an infinite date or number
 - [D427](decisions/D427.md) Code-only batch 74 (M10): SQL Server's ranking and offset window functions
+- [D428](decisions/D428.md) Code-only batch 75 (M10): Oracle's `MODIFY col DROP IDENTITY` and `MODIFY col GENERATED ... AS IDENTITY`

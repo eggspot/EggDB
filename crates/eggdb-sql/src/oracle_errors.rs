@@ -172,6 +172,10 @@ pub(crate) fn translate(error: SqlError, text: &str, user: &str) -> SqlError {
             32796,
             "cannot update a generated always identity column".to_owned(),
         )),
+        "55000" if message.contains("is not an identity column") => Some((
+            30673,
+            "column to be modified is not an identity column".to_owned(),
+        )),
         "54000" => Some((
             1489,
             "result of string concatenation is too long".to_owned(),
