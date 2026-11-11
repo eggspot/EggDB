@@ -992,6 +992,18 @@ impl Session<'_> {
                     )
                 }
             });
+            scope.spawn(|| {
+                if let Some(endpoint) = &options.otlp_endpoint {
+                    super::serve_otlp::export_metrics(
+                        endpoint,
+                        &|| {
+                            served_databases
+                                .with_databases(|databases| super::serve_metrics::families(databases))
+                        },
+                        &stop_signals::requested,
+                    );
+                }
+            });
             let metrics_server = scope.spawn(|| match &metrics_listener {
                 Some(listener) => eggdb_http::serve_with_limits(
                     listener,

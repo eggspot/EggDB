@@ -240,6 +240,7 @@ impl CommandName {
             | OptionName::MongoReplicaSet
             | OptionName::BoltListen
             | OptionName::CdcWebhook
+            | OptionName::OtlpEndpoint
             | OptionName::CdcQueue
             | OptionName::CdcTopic
             | OptionName::StompListen
@@ -438,6 +439,7 @@ enum OptionName {
     MongoReplicaSet,
     BoltListen,
     CdcWebhook,
+    OtlpEndpoint,
     CdcQueue,
     CdcTopic,
     StompListen,
@@ -561,6 +563,7 @@ impl OptionName {
             b"mongo-replica-set" => Self::MongoReplicaSet,
             b"bolt-listen" => Self::BoltListen,
             b"cdc-webhook" => Self::CdcWebhook,
+            b"otlp-endpoint" => Self::OtlpEndpoint,
             b"cdc-queue" => Self::CdcQueue,
             b"cdc-topic" => Self::CdcTopic,
             b"stomp-listen" => Self::StompListen,
@@ -883,6 +886,7 @@ pub(crate) struct ServeOptions {
     pub(crate) mongo_replica_set: Option<String>,
     pub(crate) bolt_listen: Option<SocketAddr>,
     pub(crate) cdc_webhook: Option<String>,
+    pub(crate) otlp_endpoint: Option<String>,
     pub(crate) cdc_queue: Option<String>,
     pub(crate) cdc_topic: Option<String>,
     pub(crate) stomp_listen: Option<SocketAddr>,
@@ -1410,6 +1414,11 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 let url = value.to_str().unwrap_or_default();
                 eggdb_http::parse_http_url(url).map_err(usage)?;
                 request.serve.cdc_webhook = Some(url.to_owned());
+            }
+            OptionName::OtlpEndpoint => {
+                let url = value.to_str().unwrap_or_default();
+                eggdb_http::parse_http_url(url).map_err(usage)?;
+                request.serve.otlp_endpoint = Some(url.to_owned());
             }
             OptionName::CdcTopic => {
                 let name = value.to_str().unwrap_or_default();

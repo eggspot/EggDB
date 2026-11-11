@@ -40,6 +40,7 @@ mod serve_databases;
 mod serve_jobs;
 mod serve_mcp;
 mod serve_metrics;
+mod serve_otlp;
 mod serve_mongo;
 mod serve_resp;
 mod serve_tls;
