@@ -35,7 +35,7 @@ fn widened(held: Seen, value: &Json) -> Seen {
     }
 }
 
-fn json_string(text: &str) -> String {
+pub(super) fn json_string(text: &str) -> String {
     let mut out = String::from("\"");
     for character in text.chars() {
         match character {

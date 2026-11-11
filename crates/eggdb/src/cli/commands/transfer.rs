@@ -38,6 +38,9 @@ impl Session<'_> {
         if let Some(target) = self.request.csv.xlsx.clone() {
             return self.export_xlsx(&target);
         }
+        if let Some(target) = self.request.csv.avro.clone() {
+            return self.export_avro(&target);
+        }
         if let Some(dialect) = self.request.csv.sql_dump {
             return self.export_sql(dialect);
         }
@@ -208,6 +211,9 @@ impl Session<'_> {
         }
         if let Some(source) = self.request.csv.dbf.clone() {
             return self.import_dbf(&source);
+        }
+        if let Some(source) = self.request.csv.avro.clone() {
+            return self.import_avro(&source);
         }
         if let (Some(copybook), Some(source)) =
             (self.request.csv.copybook.clone(), self.request.csv.ebcdic.clone())
