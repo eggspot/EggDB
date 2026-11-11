@@ -1,6 +1,9 @@
 use super::collection::collections_count;
 use super::compact::shell_holds_the_file;
 use super::shell_block::{InBlock, key_value_in_block};
+use super::shell_sqlplus::{
+    Spool, SpoolCommand, SqlPlusCommand, Tee, describe_query, describe_text, parse_spool,
+};
 use super::shell_copy::{
     CopyEnd, CopyLines, ShellCopy, backslash_copy_arguments, parse_backslash_copy,
 };
@@ -231,6 +234,9 @@ struct Shell<'s, 'db: 's> {
     pending: VecDeque<String>,
     line_reader: Option<LineReader>,
     collection: Option<String>,
+    spool: Option<Spool>,
+    spool_replaced: bool,
+    spooling_to: Option<String>,
 }
 
 struct CopyFiles {
@@ -275,6 +281,9 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
             pending: VecDeque::new(),
             line_reader: None,
             collection: None,
+            spool: None,
+            spool_replaced: false,
+            spooling_to: None,
         };
         if dialect == Dialect::Oracle {
             shell.sql.enable_server_output(None);
@@ -469,6 +478,41 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
     }
 
     fn line(&mut self, console: &mut Console<'_>, line: &str) -> Step {
+        self.spooling(console, |shell, console| shell.unspooled_line(console, line))
+    }
+
+    fn spooling(
+        &mut self,
+        console: &mut Console<'_>,
+        body: impl FnOnce(&mut Self, &mut Console<'_>) -> Step,
+    ) -> Step {
+        let Some(mut spool) = self.spool.take() else {
+            return body(self, console);
+        };
+        self.spool_replaced = false;
+        self.spooling_to = Some(spool.path.clone());
+        let step = {
+            let mut tee = Tee {
+                first: &mut *console.stdout,
+                second: &mut spool.writer,
+            };
+            let mut teed = Console {
+                stdin: &mut *console.stdin,
+                stdout: &mut tee,
+                stderr: &mut *console.stderr,
+                terminal: console.terminal,
+            };
+            body(self, &mut teed)
+        };
+        let _ = spool.writer.flush();
+        self.spooling_to = None;
+        if !self.spool_replaced {
+            self.spool = Some(spool);
+        }
+        step
+    }
+
+    fn unspooled_line(&mut self, console: &mut Console<'_>, line: &str) -> Step {
         if self.buffer.trim().is_empty() {
             self.buffer.clear();
             let trimmed = line.trim_start();
@@ -526,6 +570,7 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
             let _ = messages.finish();
             return Some(Step::Continue(Exit::Done));
         }
+        let as_typed = line;
         let line = line.strip_suffix(';').unwrap_or(line).trim_end();
         let (first, rest) = match line.split_once(char::is_whitespace) {
             Some((first, rest)) => (first, rest.trim()),
@@ -534,6 +579,18 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
         let first = first.to_ascii_lowercase();
         if first == "exec" || first == "execute" {
             return Some(self.run_sql(console, &format!("BEGIN {rest}; END;")));
+        }
+        match SqlPlusCommand::named(&first) {
+            Some(SqlPlusCommand::Describe) => return Some(self.describe(console, rest)),
+            Some(SqlPlusCommand::Prompt) => {
+                let text = as_typed
+                    .split_once(char::is_whitespace)
+                    .map_or("", |(_, text)| text.trim_start());
+                self.print(console, &format!("{text}\n"));
+                return Some(Step::Continue(Exit::Done));
+            }
+            Some(SqlPlusCommand::Spool) => return Some(self.spool(console, rest)),
+            None => {}
         }
         if first != "set" {
             return None;
@@ -562,6 +619,68 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
         })
     }
 
+    fn describe(&mut self, console: &mut Console<'_>, name: &str) -> Step {
+        let Some(query) = describe_query(name) else {
+            return self.fail(console, "SP2-0565: Illegal identifier.", Exit::Usage);
+        };
+        let mut rows = Vec::new();
+        let outcome = self.sql.execute(&query, &mut |result: QueryResult| {
+            rows.extend(result.rows);
+        });
+        if let Err(error) = outcome {
+            self.print_sql_error(console, &error, "");
+            return Step::Continue(exit_for(&error));
+        }
+        if rows.is_empty() {
+            return self.fail(
+                console,
+                &format!("ORA-04043: object {name} does not exist"),
+                Exit::NotFound,
+            );
+        }
+        self.print(console, &describe_text(&rows));
+        Step::Continue(Exit::Done)
+    }
+
+    fn spool(&mut self, console: &mut Console<'_>, arguments: &str) -> Step {
+        let command = match parse_spool(arguments) {
+            Ok(command) => command,
+            Err(message) => return self.fail(console, &message, Exit::Usage),
+        };
+        match command {
+            SpoolCommand::Status => {
+                let path = self
+                    .spool
+                    .as_ref()
+                    .map(|spool| spool.path.clone())
+                    .or_else(|| self.spooling_to.clone());
+                let text = match path {
+                    Some(path) => format!("currently spooling to {path}\n"),
+                    None => "not spooling currently\n".to_owned(),
+                };
+                self.print_err_styled(console, Style::Dim, &text);
+                Step::Continue(Exit::Done)
+            }
+            SpoolCommand::Off => {
+                if let Some(mut spool) = self.spool.take() {
+                    let _ = spool.writer.flush();
+                }
+                self.spool_replaced = true;
+                Step::Continue(Exit::Done)
+            }
+            SpoolCommand::To { path, mode } => match Spool::open(&path, mode) {
+                Ok(opened) => {
+                    if let Some(mut previous) = self.spool.replace(opened) {
+                        let _ = previous.writer.flush();
+                    }
+                    self.spool_replaced = true;
+                    Step::Continue(Exit::Done)
+                }
+                Err(message) => self.fail(console, &message, Exit::Usage),
+            },
+        }
+    }
+
     fn plsql_unit_line(&mut self, console: &mut Console<'_>, line: &str) -> Option<Step> {
         match starts_plsql_unit(&self.buffer) {
             Some(false) => None,
@@ -586,7 +705,7 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
         if statements.trim().is_empty() {
             return Step::Continue(Exit::Done);
         }
-        self.run_sql(console, &statements)
+        self.spooling(console, |shell, console| shell.run_sql(console, &statements))
     }
 
     fn run_sql(&mut self, console: &mut Console<'_>, text: &str) -> Step {

@@ -592,7 +592,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - JDBC's `DatabaseMetaData`, and a JNI binding for Java before 22 (D16, D182).
 - The Python driver through the CPython C API with buffer-protocol batches (D16, D17).
 - SQL*Plus commands in `eggdb shell`, and `DESCRIBE`, `VARIABLE`/`PRINT`, `SPOOL` and `COLUMN`
-  formatting (D150).
+  formatting (D150). `DESCRIBE`, `PROMPT` and `SPOOL`: **code written, unbuilt** (code-only mode,
+  2026-11-11, D544). Left: `VARIABLE`/`PRINT` (output binds) and `COLUMN` formatting.
 
 ### M6a Server and the PostgreSQL protocol
 - TLS on every listener beyond PostgreSQL, MySQL and TDS, so each may leave loopback once its own

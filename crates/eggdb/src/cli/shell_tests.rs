@@ -1011,3 +1011,35 @@ fn the_shell_lists_collections_in_a_block_and_renames_them_only_outside_one() {
     );
     assert_eq!(lines[4], "logins  no entries");
 }
+
+#[test]
+fn the_oracle_shell_describes_tables_prompts_and_spools_output_to_a_file() {
+    let directory = TempDirectory::new("shell-sqlplus");
+    let file = created(&directory);
+    let spooled = directory.file("run");
+    let script = format!(
+        "create table emp (empno number(4) not null, ename varchar2(10), sal number(7,2));\n\
+         desc emp\n\
+         prompt Rows follow;\n\
+         spool {spooled}\n\
+         insert into emp values (7369, 'SMITH', 800);\n\
+         spool off\n\
+         describe nothing_here\n"
+    );
+    let ran = shell(&file, &["--dialect", "oracle"], &script);
+    assert_eq!(ran.exit, 1, "{}", text(&ran.stderr));
+    let stdout = text(&ran.stdout);
+    assert!(stdout.contains(" Name"), "{stdout}");
+    assert!(stdout.contains("NOT NULL NUMBER(4)"), "{stdout}");
+    assert!(stdout.contains(" ENAME"), "{stdout}");
+    assert!(stdout.contains("VARCHAR2(10 CHAR)"), "{stdout}");
+    assert!(stdout.contains("NUMBER(7,2)"), "{stdout}");
+    assert!(stdout.contains("Rows follow;\n"), "{stdout}");
+    assert!(
+        text(&ran.stderr).contains("ORA-04043: object nothing_here does not exist"),
+        "{}",
+        text(&ran.stderr)
+    );
+    let written = std::fs::read_to_string(format!("{spooled}.lst")).unwrap_or_default();
+    assert_eq!(written, "INSERT 0 1\n");
+}

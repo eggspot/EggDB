@@ -568,3 +568,4 @@ its full title with its status.
 - [D541](decisions/D541.md) Code-only batch 189 (M5): TABLESAMPLE
 - [D542](decisions/D542.md) Code-only batch 190 (M5): APPROX_PERCENTILE_CONT, APPROX_PERCENTILE_DISC and APPROX_PERCENTILE
 - [D543](decisions/D543.md) Code-only batch 191 (M5): CREATE and DROP INDEX CONCURRENTLY and B-tree storage parameters
+- [D544](decisions/D544.md) Code-only batch 192 (M5): SQL*Plus DESCRIBE, PROMPT and SPOOL in eggdb shell

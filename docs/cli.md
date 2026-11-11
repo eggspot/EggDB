@@ -981,7 +981,9 @@ MySQL's, SQLite's, Oracle's or SQL Server's with `--dialect mysql`, `sqlite`, `o
 that dialect's `CREATE TABLE`, and in Oracle's the open transaction is committed when the shell
 ends, as SQL*Plus does; a PL/SQL block or `CREATE PROCEDURE` ends at a line holding `/`,
 `EXEC p` runs a procedure, `SET SERVEROUTPUT ON|OFF` switches the `DBMS_OUTPUT` lines printed
-before each result, on from the start), and a
+before each result, on from the start), `DESC[RIBE] [owner.]name` lists a table's or view's
+columns, `PRO[MPT] text` prints a line, and `SPO[OL] file [CRE|REP|APP]` copies what the shell
+prints to a file (`.lst` added when the name has no extension) until `SPOOL OFF`), and a
 few `.` commands. The file stays open for writing while the shell runs (`--read-only`: open
 read-only), so other writers get the busy message meanwhile. The design is
 [ux/cli.md](ux/cli.md), section 15.
