@@ -2485,7 +2485,8 @@ ORDER BY ts_rank(to_tsvector(body), plainto_tsquery('rat')) DESC;
 
 `to_tsvector` and the `to_tsquery` family (`plainto_`, `phraseto_`, `websearch_`) take the
 `english` (stop words dropped, English stems), `german` (German stop words dropped, Snowball's
-German stems, umlauts folded) or `simple` configuration, and print as PostgreSQL
+German stems, umlauts folded), `spanish` (Spanish stop words dropped, Snowball's Spanish stems,
+accents dropped) or `simple` configuration, and print as PostgreSQL
 prints them; `@@` matches with `&`, `|`, `!`, phrases (`<->`, `<N>`) and prefixes (`:*`).
 `ts_rank` ranks by how often the query's lexemes occur; its values are EggDB's own. There is no
 full-text index yet, so `@@` reads every row.
