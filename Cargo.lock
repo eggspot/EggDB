@@ -249,6 +249,7 @@ dependencies = [
 name = "eggdb-memcached"
 version = "0.5.0"
 dependencies = [
+ "eggdb-crypto",
  "eggdb-keyspace",
  "eggdb-platform",
 ]

@@ -766,6 +766,7 @@ impl Session<'_> {
         let memcached_shared = eggdb_memcached::Shared {
             keyspace: &memcached_database,
             next_cas: std::sync::atomic::AtomicU64::new(1),
+            counters: Default::default(),
         };
         let es_database = super::serve_resp::DatabaseKeyspace {
             db: &db,

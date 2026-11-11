@@ -5,9 +5,10 @@
 mod binary;
 mod commands;
 mod item;
+mod meta;
 mod server;
 
-pub use commands::{Mode, Shared, Stored};
+pub use commands::{Arithmetic, Counters, Mode, Shared, Stored};
 pub use item::{Item, expiry_of};
 pub use server::{ServerConfig, serve, serve_stream};
 
@@ -34,6 +35,7 @@ mod tests {
         let shared = Shared {
             keyspace: &keyspace,
             next_cas: AtomicU64::new(1),
+            counters: Default::default(),
         };
         let answer = converse(
             &shared,
@@ -51,6 +53,7 @@ mod tests {
         let shared = Shared {
             keyspace: &keyspace,
             next_cas: AtomicU64::new(100),
+            counters: Default::default(),
         };
         let answer = converse(
             &shared,
@@ -68,6 +71,7 @@ mod tests {
         let shared = Shared {
             keyspace: &keyspace,
             next_cas: AtomicU64::new(1),
+            counters: Default::default(),
         };
         let budget = MemoryBudget::new(256 * 1024);
         let value = "v".repeat(200 * 1024);
@@ -97,6 +101,7 @@ mod tests {
         let shared = Shared {
             keyspace: &keyspace,
             next_cas: AtomicU64::new(1),
+            counters: Default::default(),
         };
         let budget = MemoryBudget::new(256 * 1024);
         let value = "v".repeat(60 * 1024);
@@ -166,6 +171,7 @@ mod tests {
         let shared = Shared {
             keyspace: &keyspace,
             next_cas: AtomicU64::new(1),
+            counters: Default::default(),
         };
         let mut set_extras = 7u32.to_be_bytes().to_vec();
         set_extras.extend_from_slice(&0u32.to_be_bytes());

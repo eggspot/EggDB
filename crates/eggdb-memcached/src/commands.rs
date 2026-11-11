@@ -11,6 +11,110 @@ pub struct Shared<'k> {
     pub keyspace: &'k (dyn Keyspace + Sync),
     /// The next CAS value.
     pub next_cas: AtomicU64,
+    /// What `stats` reports.
+    pub counters: Counters,
+}
+
+/// The counts `stats` reports, since the server started or `stats reset`.
+#[derive(Debug)]
+pub struct Counters {
+    pub(crate) started: std::time::Instant,
+    pub(crate) curr_connections: AtomicU64,
+    pub(crate) total_connections: AtomicU64,
+    pub(crate) cmd_get: AtomicU64,
+    pub(crate) cmd_set: AtomicU64,
+    pub(crate) cmd_touch: AtomicU64,
+    pub(crate) cmd_flush: AtomicU64,
+    pub(crate) get_hits: AtomicU64,
+    pub(crate) get_misses: AtomicU64,
+    pub(crate) delete_hits: AtomicU64,
+    pub(crate) delete_misses: AtomicU64,
+    pub(crate) incr_hits: AtomicU64,
+    pub(crate) incr_misses: AtomicU64,
+    pub(crate) decr_hits: AtomicU64,
+    pub(crate) decr_misses: AtomicU64,
+    pub(crate) cas_hits: AtomicU64,
+    pub(crate) cas_misses: AtomicU64,
+    pub(crate) cas_badval: AtomicU64,
+    pub(crate) touch_hits: AtomicU64,
+    pub(crate) touch_misses: AtomicU64,
+}
+
+impl Default for Counters {
+    fn default() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            curr_connections: AtomicU64::new(0),
+            total_connections: AtomicU64::new(0),
+            cmd_get: AtomicU64::new(0),
+            cmd_set: AtomicU64::new(0),
+            cmd_touch: AtomicU64::new(0),
+            cmd_flush: AtomicU64::new(0),
+            get_hits: AtomicU64::new(0),
+            get_misses: AtomicU64::new(0),
+            delete_hits: AtomicU64::new(0),
+            delete_misses: AtomicU64::new(0),
+            incr_hits: AtomicU64::new(0),
+            incr_misses: AtomicU64::new(0),
+            decr_hits: AtomicU64::new(0),
+            decr_misses: AtomicU64::new(0),
+            cas_hits: AtomicU64::new(0),
+            cas_misses: AtomicU64::new(0),
+            cas_badval: AtomicU64::new(0),
+            touch_hits: AtomicU64::new(0),
+            touch_misses: AtomicU64::new(0),
+        }
+    }
+}
+
+impl Counters {
+    fn resettable(&self) -> [(&'static str, &AtomicU64); 18] {
+        [
+            ("total_connections", &self.total_connections),
+            ("cmd_get", &self.cmd_get),
+            ("cmd_set", &self.cmd_set),
+            ("cmd_flush", &self.cmd_flush),
+            ("cmd_touch", &self.cmd_touch),
+            ("get_hits", &self.get_hits),
+            ("get_misses", &self.get_misses),
+            ("delete_misses", &self.delete_misses),
+            ("delete_hits", &self.delete_hits),
+            ("incr_misses", &self.incr_misses),
+            ("incr_hits", &self.incr_hits),
+            ("decr_misses", &self.decr_misses),
+            ("decr_hits", &self.decr_hits),
+            ("cas_misses", &self.cas_misses),
+            ("cas_hits", &self.cas_hits),
+            ("cas_badval", &self.cas_badval),
+            ("touch_hits", &self.touch_hits),
+            ("touch_misses", &self.touch_misses),
+        ]
+    }
+
+    /// The `stats` reply: `STAT <name> <value>` lines and `END`.
+    pub(crate) fn report(&self, version: &str) -> Vec<u8> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        let mut out = format!(
+            "STAT pid {}\r\nSTAT uptime {}\r\nSTAT time {now}\r\nSTAT version {version}\r\nSTAT pointer_size 64\r\nSTAT curr_connections {}\r\n",
+            std::process::id(),
+            self.started.elapsed().as_secs(),
+            self.curr_connections.load(Ordering::Relaxed),
+        );
+        for (name, counter) in self.resettable() {
+            out.push_str(&format!("STAT {name} {}\r\n", counter.load(Ordering::Relaxed)));
+        }
+        out.push_str("END\r\n");
+        out.into_bytes()
+    }
+
+    /// `stats reset`: every count back to zero.
+    pub(crate) fn reset(&self) {
+        for (_, counter) in self.resettable() {
+            counter.store(0, Ordering::Relaxed);
+        }
+    }
 }
 
 impl std::fmt::Debug for Shared<'_> {
@@ -218,6 +322,87 @@ pub fn delete(shared: &Shared<'_>, key: &[u8], now: u64) -> Result<bool, String>
             keys.delete(key)?;
         }
         Ok(found)
+    })
+}
+
+/// Deletes `key` when its CAS value is `compare` (or always without one): `None` when it does
+/// not exist, `Some(false)` when the CAS value differs.
+pub fn delete_if(
+    shared: &Shared<'_>,
+    key: &[u8],
+    compare: Option<u64>,
+    now: u64,
+) -> Result<Option<bool>, String> {
+    write(shared, |keys| {
+        let Some(item) = load(keys, key, now)? else {
+            return Ok(None);
+        };
+        if compare.is_some_and(|expected| expected != item.cas) {
+            return Ok(Some(false));
+        }
+        keys.delete(key)?;
+        Ok(Some(true))
+    })
+}
+
+/// A meta arithmetic (`ma`) request.
+#[derive(Debug, Clone, Copy)]
+pub struct Arithmetic {
+    /// How much to add or subtract.
+    pub delta: u64,
+    /// Whether to add.
+    pub increment: bool,
+    /// Create a missing item with this `exptime` and initial value.
+    pub vivify: Option<(i64, u64)>,
+    /// Change only an item with this CAS value.
+    pub compare: Option<u64>,
+    /// A new `exptime` for the item.
+    pub touch: Option<i64>,
+}
+
+/// Runs a meta arithmetic request: `None` when the item does not exist (and is not created),
+/// `Some(Err(()))` when its CAS value differs, else the item after the change.
+pub fn arithmetic_with(
+    shared: &Shared<'_>,
+    key: &[u8],
+    request: Arithmetic,
+    now: u64,
+) -> Result<Option<Result<Item, ()>>, String> {
+    let cas = shared.cas();
+    write(shared, |keys| {
+        let item = match (load(keys, key, now)?, request.vivify) {
+            (Some(mut item), _) => {
+                if request.compare.is_some_and(|expected| expected != item.cas) {
+                    return Ok(Some(Err(())));
+                }
+                let current: u64 = std::str::from_utf8(&item.data)
+                    .ok()
+                    .and_then(|text| text.trim().parse().ok())
+                    .ok_or_else(|| {
+                        "CLIENT_ERROR cannot increment or decrement non-numeric value".to_owned()
+                    })?;
+                let next = if request.increment {
+                    current.wrapping_add(request.delta)
+                } else {
+                    current.saturating_sub(request.delta)
+                };
+                item.data = next.to_string().into_bytes();
+                item.cas = cas;
+                if let Some(exptime) = request.touch {
+                    item.expires_at_ms = expiry_of(exptime, now);
+                }
+                item
+            }
+            (None, Some((exptime, initial))) => Item {
+                data: initial.to_string().into_bytes(),
+                flags: 0,
+                cas,
+                expires_at_ms: expiry_of(exptime, now),
+            },
+            (None, None) => return Ok(None),
+        };
+        store(keys, key, &item)?;
+        Ok(Some(Ok(item)))
     })
 }
 

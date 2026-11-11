@@ -1,5 +1,5 @@
 use crate::commands::{
-    MAX_ITEM_BYTES, Mode, Shared, Stored, arithmetic, check_key, delete, flush_all, get, get_each,
+    MAX_ITEM_BYTES, Mode, Shared, Stored, arithmetic, check_key, delete, flush_all, get_each,
     storage, touch,
 };
 use eggdb_platform::connection_limits::MemoryBudget;
@@ -189,11 +189,25 @@ pub fn serve_stream(
                     },
                     _ => Mode::Set,
                 };
+                let counters = &shared.counters;
+                counters.cmd_set.fetch_add(1, Ordering::Relaxed);
+                let cas_command = matches!(mode, Mode::Cas(_));
                 match storage(shared, mode, words[1], flags, exptime, data, now) {
-                    Ok(Stored::Stored) => b"STORED\r\n".to_vec(),
+                    Ok(Stored::Stored) => {
+                        if cas_command {
+                            counters.cas_hits.fetch_add(1, Ordering::Relaxed);
+                        }
+                        b"STORED\r\n".to_vec()
+                    }
                     Ok(Stored::NotStored) => b"NOT_STORED\r\n".to_vec(),
-                    Ok(Stored::Exists) => b"EXISTS\r\n".to_vec(),
-                    Ok(Stored::NotFound) => b"NOT_FOUND\r\n".to_vec(),
+                    Ok(Stored::Exists) => {
+                        counters.cas_badval.fetch_add(1, Ordering::Relaxed);
+                        b"EXISTS\r\n".to_vec()
+                    }
+                    Ok(Stored::NotFound) => {
+                        counters.cas_misses.fetch_add(1, Ordering::Relaxed);
+                        b"NOT_FOUND\r\n".to_vec()
+                    }
                     Err(error) => server_error(error),
                 }
             }
@@ -212,11 +226,13 @@ pub fn serve_stream(
                 let keys: Vec<Vec<u8>> =
                     words[first_key..].iter().map(|key| key.to_vec()).collect();
                 let mut out = Vec::new();
+                let mut hits = 0u64;
                 let read = get_each(shared, &keys, exptime, now, &mut |key, item| {
                     let room = out.len() + value_block_bound(key, &item.data) + END.len();
                     if !held.hold_if_large(room) {
                         return false;
                     }
+                    hits += 1;
                     value_block(
                         &mut out,
                         key,
@@ -226,6 +242,20 @@ pub fn serve_stream(
                     );
                     true
                 });
+                let counters = &shared.counters;
+                let asked = keys.len() as u64;
+                counters.cmd_get.fetch_add(asked, Ordering::Relaxed);
+                counters.get_hits.fetch_add(hits, Ordering::Relaxed);
+                counters
+                    .get_misses
+                    .fetch_add(asked.saturating_sub(hits), Ordering::Relaxed);
+                if touching {
+                    counters.cmd_touch.fetch_add(asked, Ordering::Relaxed);
+                    counters.touch_hits.fetch_add(hits, Ordering::Relaxed);
+                    counters
+                        .touch_misses
+                        .fetch_add(asked.saturating_sub(hits), Ordering::Relaxed);
+                }
                 match read {
                     Ok(()) => {
                         out.extend_from_slice(END);
@@ -235,14 +265,30 @@ pub fn serve_stream(
                 }
             }
             b"delete" if words.len() >= 2 => match delete(shared, words[1], now) {
-                Ok(true) => b"DELETED\r\n".to_vec(),
-                Ok(false) => b"NOT_FOUND\r\n".to_vec(),
+                Ok(true) => {
+                    shared.counters.delete_hits.fetch_add(1, Ordering::Relaxed);
+                    b"DELETED\r\n".to_vec()
+                }
+                Ok(false) => {
+                    shared.counters.delete_misses.fetch_add(1, Ordering::Relaxed);
+                    b"NOT_FOUND\r\n".to_vec()
+                }
                 Err(error) => server_error(error),
             },
             b"incr" | b"decr" if words.len() >= 3 => match number::<u64>(words.get(2)) {
                 None => b"CLIENT_ERROR invalid numeric delta argument\r\n".to_vec(),
                 Some(delta) => {
-                    match arithmetic(shared, words[1], delta, *command == b"incr", now) {
+                    let increment = *command == b"incr";
+                    let outcome = arithmetic(shared, words[1], delta, increment, now);
+                    let counters = &shared.counters;
+                    let counter = match (increment, matches!(outcome, Ok(Some(_)))) {
+                        (true, true) => &counters.incr_hits,
+                        (true, false) => &counters.incr_misses,
+                        (false, true) => &counters.decr_hits,
+                        (false, false) => &counters.decr_misses,
+                    };
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    match outcome {
                         Ok(Some(value)) => format!("{value}\r\n").into_bytes(),
                         Ok(None) => b"NOT_FOUND\r\n".to_vec(),
                         Err(error) => server_error(error),
@@ -252,65 +298,45 @@ pub fn serve_stream(
             b"touch" if words.len() >= 3 => match number::<i64>(words.get(2)) {
                 None => b"CLIENT_ERROR invalid exptime argument\r\n".to_vec(),
                 Some(exptime) => match touch(shared, words[1], exptime, now) {
-                    Ok(true) => b"TOUCHED\r\n".to_vec(),
-                    Ok(false) => b"NOT_FOUND\r\n".to_vec(),
+                    Ok(true) => {
+                        shared.counters.cmd_touch.fetch_add(1, Ordering::Relaxed);
+                        shared.counters.touch_hits.fetch_add(1, Ordering::Relaxed);
+                        b"TOUCHED\r\n".to_vec()
+                    }
+                    Ok(false) => {
+                        shared.counters.cmd_touch.fetch_add(1, Ordering::Relaxed);
+                        shared.counters.touch_misses.fetch_add(1, Ordering::Relaxed);
+                        b"NOT_FOUND\r\n".to_vec()
+                    }
                     Err(error) => server_error(error),
                 },
             },
-            b"flush_all" => match flush_all(shared) {
+            b"flush_all" => match flush_all(shared).inspect(|()| {
+                shared.counters.cmd_flush.fetch_add(1, Ordering::Relaxed);
+            }) {
                 Ok(()) => b"OK\r\n".to_vec(),
                 Err(error) => server_error(error),
             },
             b"version" => format!("VERSION {VERSION}\r\n").into_bytes(),
             b"verbosity" => b"OK\r\n".to_vec(),
-            b"stats" => b"STAT pid 0\r\nSTAT version 1.6.0\r\nEND\r\n".to_vec(),
+            b"stats" => match words.get(1).copied() {
+                None => shared.counters.report(VERSION),
+                Some(b"reset") => {
+                    shared.counters.reset();
+                    b"RESET\r\n".to_vec()
+                }
+                Some(b"settings") => format!(
+                    "STAT maxbytes 0\r\nSTAT item_size_max {MAX_ITEM_BYTES}\r\nSTAT evictions off\r\nSTAT cas_enabled yes\r\nSTAT binding_protocol auto-negotiate\r\nEND\r\n"
+                )
+                .into_bytes(),
+                Some(b"items" | b"slabs" | b"sizes" | b"conns") => b"END\r\n".to_vec(),
+                Some(_) => b"ERROR\r\n".to_vec(),
+            },
             b"quit" => return Ok(()),
             b"mn" => b"MN\r\n".to_vec(),
             b"mg" if words.len() >= 2 => {
-                let flags = &words[2..];
-                let wants = |flag: u8| flags.iter().any(|word| word.first() == Some(&flag));
-                match get(shared, &[words[1].to_vec()], None, now) {
-                    Ok(found) => match found.into_iter().next() {
-                        None if wants(b'q') => Vec::new(),
-                        None => b"EN\r\n".to_vec(),
-                        Some((key, item)) => {
-                            let mut meta = String::new();
-                            if wants(b'f') {
-                                meta.push_str(&format!(" f{}", item.flags));
-                            }
-                            if wants(b'c') {
-                                meta.push_str(&format!(" c{}", item.cas));
-                            }
-                            if wants(b't') {
-                                let ttl = item
-                                    .expires_at_ms
-                                    .map_or(-1, |at| (at.saturating_sub(now) / 1000) as i64);
-                                meta.push_str(&format!(" t{ttl}"));
-                            }
-                            if wants(b's') {
-                                meta.push_str(&format!(" s{}", item.data.len()));
-                            }
-                            let mut out = Vec::new();
-                            if wants(b'v') {
-                                out.extend_from_slice(format!("VA {}", item.data.len()).as_bytes());
-                            } else {
-                                out.extend_from_slice(b"HD");
-                            }
-                            out.extend_from_slice(meta.as_bytes());
-                            if wants(b'k') {
-                                out.extend_from_slice(b" k");
-                                out.extend_from_slice(&key);
-                            }
-                            out.extend_from_slice(b"\r\n");
-                            if wants(b'v') {
-                                out.extend_from_slice(&item.data);
-                                out.extend_from_slice(b"\r\n");
-                            }
-                            out
-                        }
-                    },
-                    Err(error) => server_error(error),
-                }
+                let reply = crate::meta::meta_get(shared, words[1], &words[2..], now);
+                if reply.quiet { Vec::new() } else { reply.bytes }
             }
             b"ms" if words.len() >= 3 => {
                 let Some(length) =
@@ -326,25 +352,25 @@ pub fn serve_stream(
                 }
                 let mut data = vec![0u8; length + 2];
                 reader.read_exact(&mut data)?;
-                data.truncate(length);
-                let flag_value = |flag: u8| {
-                    words[3..]
-                        .iter()
-                        .find(|word| word.first() == Some(&flag))
-                        .and_then(|word| std::str::from_utf8(&word[1..]).ok()?.parse::<i64>().ok())
-                };
-                let flags = flag_value(b'F').unwrap_or(0) as u32;
-                let exptime = flag_value(b'T').unwrap_or(0);
-                match storage(shared, Mode::Set, words[1], flags, exptime, data, now) {
-                    Ok(_) => b"HD\r\n".to_vec(),
-                    Err(error) => server_error(error),
+                if data[length..] != *b"\r\n" {
+                    writer.write_all(b"CLIENT_ERROR bad data chunk\r\n")?;
+                    continue;
                 }
+                data.truncate(length);
+                let reply = crate::meta::meta_set(shared, words[1], &words[3..], data, now);
+                if reply.quiet { Vec::new() } else { reply.bytes }
             }
-            b"md" if words.len() >= 2 => match delete(shared, words[1], now) {
-                Ok(true) => b"HD\r\n".to_vec(),
-                Ok(false) => b"NF\r\n".to_vec(),
-                Err(error) => server_error(error),
-            },
+            b"md" if words.len() >= 2 => {
+                let reply = crate::meta::meta_delete(shared, words[1], &words[2..], now);
+                if reply.quiet { Vec::new() } else { reply.bytes }
+            }
+            b"ma" if words.len() >= 2 => {
+                let reply = crate::meta::meta_arithmetic(shared, words[1], &words[2..], now);
+                if reply.quiet { Vec::new() } else { reply.bytes }
+            }
+            b"me" if words.len() >= 2 => {
+                crate::meta::meta_debug(shared, words[1], &words[2..], now).bytes
+            }
             _ => b"ERROR\r\n".to_vec(),
         };
         let answer = if held.hold_if_large(answer.len()) {
@@ -401,6 +427,9 @@ pub fn serve(
                 continue;
             }
             let active = &active;
+            let counters = &shared.counters;
+            counters.total_connections.fetch_add(1, Ordering::Relaxed);
+            counters.curr_connections.fetch_add(1, Ordering::Relaxed);
             let spawned = std::thread::Builder::new()
                 .name("eggdb-memcached".to_owned())
                 .spawn_scoped(scope, move || {
@@ -408,8 +437,12 @@ pub fn serve(
                         let _ =
                             serve_stream(shared, budget, StopAware { stream, stop }, &mut writer);
                     }
+                    counters.curr_connections.fetch_sub(1, Ordering::Relaxed);
                     active.fetch_sub(1, Ordering::AcqRel);
                 });
+            if spawned.is_err() {
+                counters.curr_connections.fetch_sub(1, Ordering::Relaxed);
+            }
             if spawned.is_err() {
                 active.fetch_sub(1, Ordering::AcqRel);
             }
