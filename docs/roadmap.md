@@ -1055,7 +1055,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `REGEXP_*` are built (D332). Check: Oracle-dialect tests of each.
 - Oracle's types: `TIMESTAMP WITH TIME ZONE` keeping its offset, `BFILE`, `UROWID`, `XMLType`,
   object types and schema-level collection types (D19).
-- `UTL_RAW`, `DBMS_LOB` and the other Oracle-supplied packages (sql.md).
+- `UTL_RAW`, `DBMS_LOB` and the other Oracle-supplied packages (sql.md). `UTL_RAW`'s and `DBMS_LOB`'s
+  functions: **code written, unbuilt** (code-only mode, 2026-11-11, D434). Left: `DBMS_LOB`'s
+  locator procedures and the other packages.
 - PL/SQL: autonomous transactions (after concurrent writers, M3), compound triggers, the
   mutating-table check, `IS A SET`, `IS EMPTY`, `MULTISET`, `MULTISET (subquery)`, `SET()` and
   `TABLE()` correlated in a join (roadmap item 33e).

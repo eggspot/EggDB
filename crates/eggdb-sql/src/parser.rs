@@ -4837,6 +4837,15 @@ impl<'t> Parser<'t> {
                     position: first.position,
                 });
             }
+            if self.oracle()
+                && self.peek_kind() == &TokenKind::LeftParen
+                && let Some((internal, least, most)) = crate::oracle_packages::internal_name(
+                    &first.text.to_ascii_lowercase(),
+                    &column.text.to_ascii_lowercase(),
+                )
+            {
+                return self.oracle_package_call(internal, least, most, &column);
+            }
             if self.oracle() && self.peek_kind() == &TokenKind::LeftParen {
                 let qualifier = if swap_uniform_case(&first.text) == self.oracle_user() {
                     self.oracle_user_schema()

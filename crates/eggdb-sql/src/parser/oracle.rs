@@ -1362,6 +1362,23 @@ impl<'t> Parser<'t> {
         )))
     }
 
+    pub(super) fn oracle_package_call(
+        &mut self,
+        internal: &'static str,
+        least: usize,
+        most: usize,
+        name: &Name,
+    ) -> SqlResult<Expr> {
+        let arguments = self.oracle_arguments()?;
+        if arguments.len() < least {
+            return Err(wrong_argument_count(name, true));
+        }
+        if arguments.len() > most {
+            return Err(wrong_argument_count(name, false));
+        }
+        Ok(oracle_function(internal, arguments, name.position))
+    }
+
     fn oracle_arguments(&mut self) -> SqlResult<Vec<Expr>> {
         self.expect(&TokenKind::LeftParen)?;
         let mut arguments = Vec::new();

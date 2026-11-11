@@ -880,6 +880,9 @@ pub(crate) fn call(name: &str, values: &[Value], declared: &[Option<SqlType>]) -
             })?;
             Ok(text_or_null(change(&text)))
         };
+    if let Some(result) = crate::oracle_packages::call(name, values) {
+        return result;
+    }
     match (name, values) {
         (WITH_DEFAULT, _) => with_default(values),
         (name, [left, right]) if crate::oracle_collections::is_operator(name) => {
