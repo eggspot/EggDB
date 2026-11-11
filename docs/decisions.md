@@ -663,3 +663,4 @@ its full title with its status.
 - [D636](decisions/D636.md) Code-only batch 284 (M10): handlers and cursors in MySQL trigger bodies
 - [D637](decisions/D637.md) Code-only batch 285 (M11): ASOF JOIN ... USING
 - [D638](decisions/D638.md) Code-only batch 286 (M2): Huffman-coded literals in the Zstandard encoder
+- [D639](decisions/D639.md) Code-only batch 287 (M2): FSE-compressed Huffman weights in the Zstandard encoder

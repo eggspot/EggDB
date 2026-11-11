@@ -139,5 +139,9 @@ fn literals_are_huffman_coded_when_that_pays() {
     round_trip(&skewed);
     let high: Vec<u8> = pseudo_random(3_000, 9).into_iter().map(|byte| byte | 0x80).collect();
     round_trip(&high);
+    let upper_letters: Vec<u8> = letters(6_000, 13).into_iter().map(|byte| byte + 100).collect();
+    let frame = compress(&upper_letters);
+    assert_eq!(decompress(&frame, upper_letters.len()).unwrap(), upper_letters);
+    assert!(frame.len() * 10 < upper_letters.len() * 7, "{}", frame.len());
     round_trip(b"ab");
 }

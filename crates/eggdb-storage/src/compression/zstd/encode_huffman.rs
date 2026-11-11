@@ -1,9 +1,13 @@
 use super::bits::BitWriter;
+use super::fse::EncodeTable;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 const MOST_BITS: u8 = 11;
 const DIRECT_WEIGHTS_MOST: usize = 128;
+const FSE_WEIGHTS_MOST: usize = 254;
+const FSE_WEIGHTS_MOST_BYTES: usize = 127;
+const WEIGHT_ACCURACY: u32 = 6;
 const COMPRESSED_LITERALS: u64 = 2;
 const SINGLE_STREAM_MOST: usize = 1023;
 const MOST_RESCALES: usize = 64;
@@ -58,6 +62,177 @@ fn limited_lengths(counts: &[u64; SYMBOLS]) -> Option<[u8; SYMBOLS]> {
         }
     }
     None
+}
+
+struct PlainBits {
+    bytes: Vec<u8>,
+    pending: u64,
+    pending_bits: u32,
+}
+
+impl PlainBits {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            pending: 0,
+            pending_bits: 0,
+        }
+    }
+
+    fn add(&mut self, value: u64, count: u32) {
+        if count == 0 {
+            return;
+        }
+        self.pending |= (value & ((1_u64 << count) - 1)) << self.pending_bits;
+        self.pending_bits += count;
+        while self.pending_bits >= 8 {
+            self.bytes.push(self.pending as u8);
+            self.pending >>= 8;
+            self.pending_bits -= 8;
+        }
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        if self.pending_bits > 0 {
+            self.bytes.push(self.pending as u8);
+        }
+        self.bytes
+    }
+}
+
+fn normalized_weights(weights: &[u8]) -> Option<Vec<i16>> {
+    let mut histogram = [0_u64; MOST_BITS as usize + 1];
+    for &weight in weights {
+        histogram[usize::from(weight)] += 1;
+    }
+    if histogram.iter().filter(|&&count| count > 0).count() < 2 {
+        return None;
+    }
+    let last = histogram.iter().rposition(|&count| count > 0)?;
+    let size = 1_i64 << WEIGHT_ACCURACY;
+    let total = weights.len() as u64;
+    let mut counts: Vec<i16> = histogram[..=last]
+        .iter()
+        .map(|&count| {
+            if count == 0 {
+                0
+            } else {
+                (count * size as u64 / total).max(1) as i16
+            }
+        })
+        .collect();
+    let mut sum: i64 = counts.iter().map(|&count| i64::from(count)).sum();
+    while sum != size {
+        let largest = (0..counts.len()).max_by_key(|&symbol| counts[symbol])?;
+        if sum < size {
+            counts[largest] += (size - sum) as i16;
+            sum = size;
+        } else {
+            if counts[largest] <= 1 {
+                return None;
+            }
+            let taken = (sum - size).min(i64::from(counts[largest] - 1));
+            counts[largest] -= taken as i16;
+            sum -= taken;
+        }
+    }
+    Some(counts)
+}
+
+fn distribution(counts: &[i16], accuracy: u32) -> Vec<u8> {
+    let mut bits = PlainBits::new();
+    bits.add(u64::from(accuracy - 5), 4);
+    let mut remaining: i32 = (1 << accuracy) + 1;
+    let mut threshold: i32 = 1 << accuracy;
+    let mut width = accuracy + 1;
+    let mut previous_zero = false;
+    let mut symbol = 0;
+    while remaining > 1 && symbol < counts.len() {
+        if previous_zero {
+            let mut run_start = symbol;
+            while symbol < counts.len() && counts[symbol] == 0 {
+                symbol += 1;
+            }
+            while symbol >= run_start + 24 {
+                run_start += 24;
+                bits.add(0xFFFF, 16);
+            }
+            while symbol >= run_start + 3 {
+                run_start += 3;
+                bits.add(3, 2);
+            }
+            bits.add((symbol - run_start) as u64, 2);
+            if symbol >= counts.len() {
+                break;
+            }
+        }
+        let count = i32::from(counts[symbol]);
+        let most = 2 * threshold - 1 - remaining;
+        remaining -= count.abs();
+        let mut value = count + 1;
+        if value >= threshold {
+            value += most;
+        }
+        let written = if value < most { width - 1 } else { width };
+        bits.add(value as u64, written);
+        previous_zero = count == 0;
+        while remaining < threshold && threshold > 1 {
+            width -= 1;
+            threshold >>= 1;
+        }
+        symbol += 1;
+    }
+    bits.finish()
+}
+
+fn fse_tree(weights: &[u8]) -> Option<Vec<u8>> {
+    let count = weights.len();
+    if count <= 2 {
+        return None;
+    }
+    let counts = normalized_weights(weights)?;
+    let table = EncodeTable::new(&counts, WEIGHT_ACCURACY);
+    let mut bits = BitWriter::default();
+    let (mut first, mut second, mut index) = if count % 2 == 1 {
+        let mut first = table.start(weights[count - 1]);
+        let second = table.start(weights[count - 2]);
+        table.encode(&mut first, weights[count - 3], &mut bits);
+        (first, second, count - 3)
+    } else {
+        let second = table.start(weights[count - 1]);
+        let first = table.start(weights[count - 2]);
+        (first, second, count - 2)
+    };
+    while index >= 2 {
+        table.encode(&mut second, weights[index - 1], &mut bits);
+        table.encode(&mut first, weights[index - 2], &mut bits);
+        index -= 2;
+    }
+    table.flush(second, &mut bits);
+    table.flush(first, &mut bits);
+    let header = distribution(&counts, WEIGHT_ACCURACY);
+    let stream = bits.close();
+    let size = header.len() + stream.len();
+    if size > FSE_WEIGHTS_MOST_BYTES {
+        return None;
+    }
+    let mut tree = Vec::with_capacity(1 + size);
+    tree.push(size as u8);
+    tree.extend_from_slice(&header);
+    tree.extend_from_slice(&stream);
+    Some(tree)
+}
+
+fn direct_tree(weights: &[u8]) -> Option<Vec<u8>> {
+    if weights.len() > DIRECT_WEIGHTS_MOST {
+        return None;
+    }
+    let mut tree = Vec::with_capacity(1 + weights.len().div_ceil(2));
+    tree.push(u8::try_from(127 + weights.len()).ok()?);
+    for pair in weights.chunks(2) {
+        tree.push((pair[0] << 4) | pair.get(1).copied().unwrap_or(0));
+    }
+    Some(tree)
 }
 
 struct Code {
@@ -132,24 +307,26 @@ fn four_streams(literals: &[u8], code: &Code) -> Option<Vec<u8>> {
 }
 
 /// The literals section of RFC 8878 for `literals` with a Huffman tree of their own, its weights
-/// written directly, in one stream or four; `None` when the literals have fewer than two
-/// distinct bytes, a byte above 128 (whose weights would need FSE compression), or a size the
-/// section cannot describe.
+/// written directly or FSE-compressed (whichever is shorter), in one stream or four; `None` when
+/// the literals have fewer than two distinct bytes, use byte 255, or need a size the section
+/// cannot describe.
 pub(super) fn compressed_literals(literals: &[u8]) -> Option<Vec<u8>> {
     let mut counts = [0_u64; SYMBOLS];
     for &literal in literals {
         counts[usize::from(literal)] += 1;
     }
     let last = (0..SYMBOLS).rev().find(|&symbol| counts[symbol] > 0)?;
-    if last == 0 || last > DIRECT_WEIGHTS_MOST {
+    if last == 0 || last > FSE_WEIGHTS_MOST {
         return None;
     }
     let code = canonical(&limited_lengths(&counts)?);
-    let mut tree = Vec::with_capacity(1 + last.div_ceil(2));
-    tree.push(u8::try_from(127 + last).ok()?);
-    for pair in code.weights[..last].chunks(2) {
-        tree.push((pair[0] << 4) | pair.get(1).copied().unwrap_or(0));
-    }
+    let transmitted = &code.weights[..last];
+    let tree = match (direct_tree(transmitted), fse_tree(transmitted)) {
+        (Some(direct), Some(compressed)) if compressed.len() < direct.len() => compressed,
+        (Some(direct), _) => direct,
+        (None, Some(compressed)) => compressed,
+        (None, None) => return None,
+    };
     let regenerated = literals.len();
     let single = (regenerated <= SINGLE_STREAM_MOST)
         .then(|| stream(literals, &code))
@@ -203,6 +380,36 @@ mod tests {
             .map(|&length| 1_u64 << (u32::from(MOST_BITS) - u32::from(length)))
             .sum();
         assert_eq!(kraft, 1 << MOST_BITS);
+    }
+
+    #[test]
+    fn weight_distributions_read_back_as_written() {
+        let weights: Vec<u8> = (0..200_u32).map(|at| [0, 0, 1, 2, 2, 3, 0, 5, 1][at as usize % 9]).collect();
+        let counts = normalized_weights(&weights).expect("normalized");
+        assert_eq!(counts.iter().map(|&count| i64::from(count)).sum::<i64>(), 64);
+        let written = distribution(&counts, WEIGHT_ACCURACY);
+        let (read, accuracy, used) =
+            super::super::fse::read_distribution(&written, WEIGHT_ACCURACY, 255).expect("read");
+        assert_eq!(accuracy, WEIGHT_ACCURACY);
+        assert_eq!(used, written.len());
+        assert_eq!(read, counts);
+    }
+
+    #[test]
+    fn fse_compressed_weights_read_back_as_a_huffman_tree() {
+        for used_symbols in [150, 151] {
+            let mut counts = [0_u64; SYMBOLS];
+            for (symbol, count) in counts.iter_mut().enumerate().take(used_symbols) {
+                *count = 1 + (symbol as u64 * 7_919) % 97;
+            }
+            let code = canonical(&limited_lengths(&counts).expect("lengths"));
+            let transmitted = &code.weights[..used_symbols - 1];
+            let tree = fse_tree(transmitted).expect("an FSE tree");
+            assert!(tree[0] < 128);
+            let (_, used) = super::super::huffman::read_table(&tree)
+                .unwrap_or_else(|problem| panic!("{problem}"));
+            assert_eq!(used, tree.len());
+        }
     }
 
     #[test]

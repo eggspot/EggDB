@@ -374,8 +374,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A Zstandard-class codec of our own (RFC 8878) for cold data (D171). Check: RFC test vectors and
   a fuzzer. **Code written, unbuilt** (code-only mode, 2026-11-10, D357): decoder, a simple encoder,
   overflow layout 3; Huffman-coded literals in the encoder: **code written, unbuilt** (code-only mode,
-  2026-11-12, D638). Left: FSE-compressed Huffman weights (literals with bytes above 128), a
-  long-running fuzzer.
+  2026-11-12, D638); FSE-compressed Huffman weights: **code written, unbuilt** (code-only mode,
+  2026-11-12, D639). Left: a long-running fuzzer.
 - Compressed leaf pages and log records, with compression chosen per column and page (D40, D171).
 - Compression options in the CLI and `eggdb serve` (D171). **Code written, unbuilt** (code-only
   mode, 2026-11-10, D357): `--compress lz4|zstd|off`.
