@@ -12,6 +12,7 @@ dependencies = [
  "eggdb-auth",
  "eggdb-bolt",
  "eggdb-commands",
+ "eggdb-content",
  "eggdb-cql",
  "eggdb-crypto",
  "eggdb-documents",

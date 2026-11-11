@@ -2,10 +2,13 @@
 //! (RFC 1951), [`gunzip`] gzip (RFC 1952) and [`zlib_inflate`] the zlib format (RFC 1950) that
 //! HTTP's `deflate` coding names (D343), [`ZipArchive`] reads ZIP archives (PKWARE's APPNOTE, stored and deflated
 //! entries, CRC-checked), and [`extract_text`] returns the text of Office Open XML (ECMA-376:
-//! `.docx`, `.xlsx`, `.pptx`) and OpenDocument (OASIS ODF: `.odt`, `.ods`, `.odp`) files. Every
+//! `.docx`, `.xlsx`, `.pptx`) and OpenDocument (OASIS ODF: `.odt`, `.ods`, `.odp`) files, [`read_sheet`]
+//! and [`write_sheet`] read and write an `.xlsx` worksheet as rows of cells (D506), and
+//! [`write_stored`] writes a ZIP archive of uncompressed entries. Every
 //! reader bounds what it produces, so a hostile file cannot exhaust memory.
 
 mod inflate;
+mod sheet;
 mod text;
 mod zip;
 
@@ -13,7 +16,8 @@ pub use inflate::{
     DecompressError, gunzip, gunzip_within_memory, inflate, zlib_inflate,
     zlib_inflate_within_memory,
 };
-pub use zip::{ZipArchive, ZipEntry, crc32};
+pub use sheet::{SheetCell, read_sheet, write_sheet};
+pub use zip::{ZipArchive, ZipEntry, crc32, write_stored};
 
 /// Why content could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]

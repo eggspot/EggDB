@@ -35,6 +35,9 @@ impl Session<'_> {
         if let Some(target) = self.request.csv.ndjson.clone() {
             return self.export_ndjson(&target);
         }
+        if let Some(target) = self.request.csv.xlsx.clone() {
+            return self.export_xlsx(&target);
+        }
         if let Some(dialect) = self.request.csv.sql_dump {
             return self.export_sql(dialect);
         }
@@ -199,6 +202,9 @@ impl Session<'_> {
         }
         if let Some(source) = self.request.csv.ndjson.clone() {
             return self.import_ndjson(&source);
+        }
+        if let Some(source) = self.request.csv.xlsx.clone() {
+            return self.import_xlsx(&source);
         }
         if let Some(source) = self.request.csv.source.clone() {
             return self.import_csv(source);

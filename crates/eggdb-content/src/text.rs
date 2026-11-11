@@ -35,7 +35,7 @@ const OPEN_DOCUMENT: Style<'static> = Style {
     spaces: &["text:s"],
 };
 
-fn decode_entities(text: &str, out: &mut String) {
+pub(crate) fn decode_entities(text: &str, out: &mut String) {
     let mut rest = text;
     while let Some(start) = rest.find('&') {
         out.push_str(&rest[..start]);

@@ -52,6 +52,62 @@ pub fn crc32(bytes: &[u8]) -> u32 {
     })
 }
 
+const ZIP_VERSION: u16 = 20;
+const UTF8_NAMES_FLAG: u16 = 0x0800;
+const STORED_METHOD: u16 = 0;
+const DOS_DATE_1980_01_01: u16 = 0x0021;
+
+fn too_large() -> ContentError {
+    ContentError("the archive would pass ZIP's 4 GiB or 65,535-entry limits".to_owned())
+}
+
+/// A ZIP archive (PKWARE's APPNOTE) holding `entries`, each a path and its bytes, stored
+/// uncompressed with UTF-8 names and CRC-32 checks, in the order given.
+pub fn write_stored(entries: &[(&str, &[u8])]) -> Result<Vec<u8>, ContentError> {
+    let count = u16::try_from(entries.len()).map_err(|_| too_large())?;
+    let mut out = Vec::new();
+    let mut central = Vec::new();
+    for (name, data) in entries {
+        let offset = u32::try_from(out.len()).map_err(|_| too_large())?;
+        let size = u32::try_from(data.len()).map_err(|_| too_large())?;
+        let name_length = u16::try_from(name.len()).map_err(|_| too_large())?;
+        let crc = crc32(data);
+        let mut shared = Vec::with_capacity(26);
+        for half in [ZIP_VERSION, UTF8_NAMES_FLAG, STORED_METHOD, 0, DOS_DATE_1980_01_01] {
+            shared.extend_from_slice(&half.to_le_bytes());
+        }
+        for word in [crc, size, size] {
+            shared.extend_from_slice(&word.to_le_bytes());
+        }
+        shared.extend_from_slice(&name_length.to_le_bytes());
+        shared.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&LOCAL_SIGNATURE.to_le_bytes());
+        out.extend_from_slice(&shared);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(data);
+        central.extend_from_slice(&CENTRAL_SIGNATURE.to_le_bytes());
+        central.extend_from_slice(&ZIP_VERSION.to_le_bytes());
+        central.extend_from_slice(&shared);
+        for half in [0u16, 0, 0] {
+            central.extend_from_slice(&half.to_le_bytes());
+        }
+        central.extend_from_slice(&0u32.to_le_bytes());
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+    }
+    let central_offset = u32::try_from(out.len()).map_err(|_| too_large())?;
+    let central_size = u32::try_from(central.len()).map_err(|_| too_large())?;
+    out.extend_from_slice(&central);
+    out.extend_from_slice(&END_SIGNATURE.to_le_bytes());
+    for half in [0u16, 0, count, count] {
+        out.extend_from_slice(&half.to_le_bytes());
+    }
+    out.extend_from_slice(&central_size.to_le_bytes());
+    out.extend_from_slice(&central_offset.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    Ok(out)
+}
+
 /// One file in a ZIP archive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZipEntry {
