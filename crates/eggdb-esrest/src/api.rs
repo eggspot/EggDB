@@ -3,6 +3,7 @@ mod by_query;
 mod multi;
 mod pit;
 mod scroll;
+mod tasks;
 
 use crate::json_out::{Out, escaped, written};
 use crate::query::{Stats, parse, score};
@@ -32,6 +33,7 @@ pub struct Api<'k> {
     memory_budget: Arc<MemoryBudget>,
     scrolls: scroll::Scrolls,
     pits: pit::Pits,
+    tasks: tasks::Tasks,
 }
 
 impl std::fmt::Debug for Api<'_> {
@@ -408,6 +410,7 @@ impl<'k> Api<'k> {
             memory_budget: Arc::new(MemoryBudget::default()),
             scrolls: scroll::Scrolls::default(),
             pits: pit::Pits::default(),
+            tasks: tasks::Tasks::default(),
         }
     }
 
@@ -523,6 +526,12 @@ impl<'k> Api<'k> {
             ("GET", ["_cat", "count", index]) => self.cat_count(Some(index)),
             ("GET", ["_cat", "health"]) => Ok(cat_health()),
             ("POST", ["_aliases"]) => self.update_aliases(request),
+            ("GET", ["_tasks"]) => self.list_tasks(),
+            ("GET", ["_tasks", id]) => self.get_task(id),
+            ("POST", ["_tasks", id, "_cancel"]) => self.settle_task(id),
+            ("POST", ["_update_by_query" | "_delete_by_query" | "_reindex", id, "_rethrottle"]) => {
+                self.settle_task(id)
+            }
             ("GET", ["_alias"] | ["_aliases"]) => self.get_aliases(None, None, false),
             ("GET" | "HEAD", ["_alias", alias]) => {
                 self.get_aliases(None, Some(alias), method == "HEAD")

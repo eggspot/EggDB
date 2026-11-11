@@ -337,11 +337,41 @@ fn report(took: u64, tally: &Tally, updates: bool) -> String {
 
 impl Api<'_> {
     pub(super) fn update_by_query(&self, index: &str, request: &Request) -> Answer {
-        self.by_query(index, request, true)
+        self.by_query_task(index, request, true)
     }
 
     pub(super) fn delete_by_query(&self, index: &str, request: &Request) -> Answer {
-        self.by_query(index, request, false)
+        self.by_query_task(index, request, false)
+    }
+
+    fn by_query_task(&self, index: &str, request: &Request, updates: bool) -> Answer {
+        if let Some(slices) = query_flag(request, "slices")
+            && slices != "auto"
+            && !slices.parse::<u32>().is_ok_and(|count| count >= 1)
+        {
+            return Ok(error(
+                400,
+                "illegal_argument_exception",
+                &format!("Failed to parse int parameter [slices] with value [{slices}]"),
+            ));
+        }
+        if query_flag(request, "wait_for_completion").as_deref() != Some("false") {
+            return self.by_query(index, request, updates);
+        }
+        let started = std::time::Instant::now();
+        let response = self.by_query(index, request, updates)?;
+        let running_nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let (action, kind) = if updates {
+            ("indices:data/write/update/byquery", "update-by-query")
+        } else {
+            ("indices:data/write/delete/byquery", "delete-by-query")
+        };
+        Ok(self.keep_finished_task(
+            action,
+            format!("{kind} [{index}]"),
+            running_nanos,
+            &response,
+        ))
     }
 
     fn by_query(&self, index: &str, request: &Request, updates: bool) -> Answer {

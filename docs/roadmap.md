@@ -929,8 +929,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   SQLite's FTS5 (D10, D195).
 - Elasticsearch mappings applied to field types: `text` and `keyword`, dates, `ip`, geo, `nested`,
   `flattened`, `dense_vector`, `sparse_vector` and `completion` (D19, D196).
-- `wait_for_completion=false` tasks for the by-query APIs (D331).
-- `_rethrottle` and parallel `slices` for the by-query APIs (D331).
+- `wait_for_completion=false` tasks for the by-query APIs (D331). **Code written, unbuilt** (code-only
+  mode, 2026-11-11, D473): the task finishes in the request and is kept for `_tasks`.
+- `_rethrottle` and parallel `slices` for the by-query APIs (D331). **Code written, unbuilt** (code-only
+  mode, 2026-11-11, D473): `slices` runs as one slice.
 - `_update_by_query` and `_delete_by_query` over several indices or patterns (D331). **Code
   written, unbuilt** (code-only mode, 2026-11-10, D401), with `_search` and `_count` too.
 - `_search/template` and `_msearch/template` with Mustache `{{var}}` and `{{#toJson}}` (D331,

@@ -497,3 +497,4 @@ its full title with its status.
 - [D470](decisions/D470.md) Code-only batch 118 (M8): fuzzystrmatch and pg_trgm functions
 - [D471](decisions/D471.md) Code-only batch 119 (M8): Elasticsearch sub-aggregations, bucket and stats kinds
 - [D472](decisions/D472.md) Code-only batch 120 (M8): Elasticsearch aliases and more of `_cat`
+- [D473](decisions/D473.md) Code-only batch 121 (M8): by-query tasks, `_tasks`, `_rethrottle` and `slices`
