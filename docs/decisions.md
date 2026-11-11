@@ -450,3 +450,4 @@ its full title with its status.
 - [D423](decisions/D423.md) Code-only batch 70 (M10): MySQL's `LOAD DATA LOCAL INFILE`
 - [D424](decisions/D424.md) Code-only batch 71 (M10): MariaDB's sequences in the MySQL dialect
 - [D425](decisions/D425.md) Code-only batch 72 (M10): MySQL's `JSON_VALUE` and `JSON_TABLE` with MySQL's path language
+- [D426](decisions/D426.md) Code-only batch 73 (M10): MySQL and TDS clients refuse an infinite date or number

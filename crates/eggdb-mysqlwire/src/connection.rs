@@ -85,6 +85,35 @@ fn send_error(wire: &mut Wire<'_>, code: u16, state: &str, message: &str) {
     let _ = wire.flush();
 }
 
+fn unbounded_value_error(columns: &[OutputColumn], rows: &[Vec<Value>]) -> Option<SqlError> {
+    rows.iter().enumerate().find_map(|(row_at, row)| {
+        let (column_at, value) = row
+            .iter()
+            .enumerate()
+            .find(|(_, value)| value.is_unbounded())?;
+        let column = columns
+            .get(column_at)
+            .map_or("?", |column| column.name.as_str());
+        let row_number = row_at + 1;
+        Some(if value.is_date_or_timestamp() {
+            SqlError::new(
+                SqlState::INVALID_DATETIME_FORMAT,
+                format!(
+                    "Incorrect datetime value: '{}' for column '{column}' at row {row_number}",
+                    Dialect::PostgreSql.value_text(value).unwrap_or_default()
+                ),
+            )
+            .with_vendor_code(1292)
+        } else {
+            SqlError::new(
+                SqlState::NUMERIC_VALUE_OUT_OF_RANGE,
+                format!("Out of range value for column '{column}' at row {row_number}"),
+            )
+            .with_vendor_code(1264)
+        })
+    })
+}
+
 fn send_sql_error(wire: &mut Wire<'_>, error: &SqlError) {
     let (code, state) = match error.vendor_code() {
         Some(code) => (code, error.state().code().to_owned()),
@@ -1147,6 +1176,10 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
             ));
             return;
         };
+        if let Some(error) = unbounded_value_error(columns, &result.rows) {
+            send_sql_error(&mut self.wire, &error);
+            return;
+        }
         let definitions = wire_columns(columns, &result.rows);
         let mut count = Payload::new();
         count.length_encoded(definitions.len() as u64);

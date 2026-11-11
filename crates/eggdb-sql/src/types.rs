@@ -430,6 +430,26 @@ pub enum Value {
 }
 
 impl Value {
+    /// Whether the value is an infinite or not-a-number date, time stamp or number, which
+    /// MySQL's and SQL Server's types can't hold.
+    pub fn is_unbounded(&self) -> bool {
+        match self {
+            Self::Date(days) => crate::datetime::is_infinite_date(*days),
+            Self::Timestamp(micros) | Self::TimestampTz(micros) => {
+                crate::datetime::is_infinite_timestamp(*micros)
+            }
+            Self::Numeric(number) => number.is_nan() || number.is_infinite(),
+            Self::Double(number) => !number.is_finite(),
+            Self::Real(number) => !number.is_finite(),
+            _ => false,
+        }
+    }
+
+    /// Whether the value is a date or a time stamp.
+    pub fn is_date_or_timestamp(&self) -> bool {
+        matches!(self, Self::Date(_) | Self::Timestamp(_) | Self::TimestampTz(_))
+    }
+
     /// The value's type, or `None` for NULL.
     pub fn sql_type(&self) -> Option<SqlType> {
         Some(match self {

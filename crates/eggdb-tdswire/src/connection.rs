@@ -24,6 +24,8 @@ use eggdb_sql::{
 };
 use std::time::{Duration, Instant};
 
+const DATETIME_OUT_OF_RANGE: u32 = 242;
+const ARITHMETIC_OVERFLOW: u32 = 8115;
 /// The largest PRELOGIN or LOGIN7 message accepted before a client has logged in.
 pub const MAX_LOGIN_BYTES: usize = 64 * 1024;
 /// The largest SQL batch accepted from a logged-in client, as MySQL's server allows per packet
@@ -1428,6 +1430,37 @@ impl StepWriter<'_, '_> {
                     number: TOO_MANY_RESULT_COLUMNS,
                     severity: 15,
                     text: "The number of elements in the select list exceeds the maximum allowed number of 4096 elements.",
+                    line: 1,
+                    procedure: "",
+                });
+                if !self.write(&token) {
+                    return false;
+                }
+                *self.pending = Some(PendingDone {
+                    status: DONE_ERROR,
+                    command: 0,
+                    rows: 0,
+                });
+                return true;
+            }
+            if let Some(number) = result.rows.iter().flatten().find_map(|value| {
+                value.is_unbounded().then(|| {
+                    if value.is_date_or_timestamp() {
+                        DATETIME_OUT_OF_RANGE
+                    } else {
+                        ARITHMETIC_OVERFLOW
+                    }
+                })
+            }) {
+                let text = if number == DATETIME_OUT_OF_RANGE {
+                    "The conversion of a date data type to a datetime data type resulted in an out-of-range value."
+                } else {
+                    "Arithmetic overflow error converting numeric to data type numeric."
+                };
+                let token = tokens::error(&ServerMessage {
+                    number,
+                    severity: 16,
+                    text,
                     line: 1,
                     procedure: "",
                 });

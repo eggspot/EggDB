@@ -1010,7 +1010,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Following a live MySQL through its binlog for a switch with no downtime (D13).
 - MySQL's own test suite run from outside the repo, with its pass rate published (D1, D10, D45).
 - MySQL and TDS clients refused an infinite `numeric` or date written by a PostgreSQL session, as
-  the dialect's out-of-range error, instead of sent as text (D290).
+  the dialect's out-of-range error, instead of sent as text (D290). **Code written, unbuilt** (code-only mode,
+  2026-11-11, D426).
 - SQL Server's ranking and offset window functions (`ROW_NUMBER`, `RANK`, `DENSE_RANK`, `NTILE`,
   `LAG`, `LEAD`, `FIRST_VALUE`, `LAST_VALUE`) with its errors 10753 and 4112; only aggregates take
   `OVER` in that dialect today (found while building D340).
