@@ -46,6 +46,31 @@ const PROPERTIES_SECTION: u64 = 0x73;
 const DATA_SECTION: u64 = 0x75;
 const VALUE_SECTION: u64 = 0x77;
 
+/// What a receiver's disposition does to a message (AMQP 1.0 section 3.4): `accepted` removes
+/// it; `rejected`, and `modified` with `undeliverable-here`, send it to the queue's dead letters;
+/// `modified` with `delivery-failed` returns it counting the delivery; `released`, and
+/// `modified` without either flag, return it as if it had never been sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Accepted,
+    DeadLetter,
+    Failed,
+    Untouched,
+}
+
+impl Outcome {
+    fn of(state: &Value) -> Self {
+        match state.descriptor() {
+            Some(REJECTED) => Self::DeadLetter,
+            Some(RELEASED) => Self::Untouched,
+            Some(MODIFIED) if state.field(1).flag().unwrap_or(false) => Self::DeadLetter,
+            Some(MODIFIED) if state.field(0).flag().unwrap_or(false) => Self::Failed,
+            Some(MODIFIED) => Self::Untouched,
+            _ => Self::Accepted,
+        }
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -688,8 +713,7 @@ impl Connection<'_, '_> {
         }
         let settled = body.field(3).flag().unwrap_or(false);
         let state = body.field(4).clone();
-        let accepted = !matches!(state.descriptor(), Some(RELEASED | MODIFIED));
-        let rejected = state.descriptor() == Some(REJECTED);
+        let outcome = Outcome::of(&state);
         let session = self.session(channel)?;
         let mut done = Vec::new();
         let mut id = first;
@@ -704,14 +728,12 @@ impl Connection<'_, '_> {
         }
         let now = now_ms();
         for unsettled in done {
-            let _ = if rejected {
-                self.broker.queues.dead_letter(&unsettled.queue, unsettled.id, now)
-            } else if accepted {
-                self.broker.queues.ack(&unsettled.queue, unsettled.id)
-            } else {
-                self.broker
-                    .queues
-                    .release(&unsettled.queue, unsettled.id, now)
+            let queues = &self.broker.queues;
+            let _ = match outcome {
+                Outcome::DeadLetter => queues.dead_letter(&unsettled.queue, unsettled.id, now),
+                Outcome::Accepted => queues.ack(&unsettled.queue, unsettled.id),
+                Outcome::Failed => queues.release(&unsettled.queue, unsettled.id, now),
+                Outcome::Untouched => queues.unlease(&unsettled.queue, unsettled.id, now),
             };
         }
         if !settled {
@@ -1086,4 +1108,25 @@ pub(crate) fn serve_stream(
         let _ = connection.broker.queues.delete(&queue);
     }
     outcome
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::{ACCEPTED, MODIFIED, Outcome, REJECTED, RELEASED};
+    use crate::amqp1::value::Value;
+
+    #[test]
+    fn each_delivery_state_settles_its_message_as_the_specification_says() {
+        let state = |code: u64, fields: Vec<Value>| Outcome::of(&Value::described(code, fields));
+        assert_eq!(state(ACCEPTED, Vec::new()), Outcome::Accepted);
+        assert_eq!(state(REJECTED, Vec::new()), Outcome::DeadLetter);
+        assert_eq!(state(RELEASED, Vec::new()), Outcome::Untouched);
+        assert_eq!(state(MODIFIED, Vec::new()), Outcome::Untouched);
+        assert_eq!(state(MODIFIED, vec![Value::Bool(true)]), Outcome::Failed);
+        assert_eq!(
+            state(MODIFIED, vec![Value::Bool(true), Value::Bool(true)]),
+            Outcome::DeadLetter
+        );
+        assert_eq!(Outcome::of(&Value::Null), Outcome::Accepted);
+    }
 }

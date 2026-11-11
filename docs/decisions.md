@@ -651,3 +651,4 @@ its full title with its status.
 - [D624](decisions/D624.md) Code-only batch 272 (M10): SQL Server Agent step flow and retries
 - [D625](decisions/D625.md) Code-only batch 273 (M10): DBMS_SCHEDULER programs and named schedules
 - [D626](decisions/D626.md) Code-only batch 274 (M8): Elasticsearch's legacy _template API
+- [D627](decisions/D627.md) Code-only batch 275 (M16): AMQP 1.0 released and modified outcomes
