@@ -13,6 +13,7 @@
 //! trademark of its owner; no Neo4j code is used or read.
 
 mod algorithms;
+mod centrality;
 mod cypher;
 mod execute;
 mod procedures;

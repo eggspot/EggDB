@@ -2,19 +2,45 @@ use crate::algorithms::{
     connected_components_in, label_propagation_in, node_similarity_in, pagerank_in,
     shortest_path_in, triangle_count_in,
 };
+use crate::centrality::{
+    betweenness_in, closeness_in, k_core_in, louvain_in, weighted_shortest_path_in,
+};
 use crate::store::GraphRead;
 use crate::{GraphError, GraphResult, Value};
 
 type Records = (Vec<&'static str>, Vec<Vec<Value>>);
 
-const PROCEDURES: [&str; 6] = [
+const PROCEDURES: [&str; 11] = [
     "eggdb.pageRank",
     "eggdb.connectedComponents",
     "eggdb.labelPropagation",
     "eggdb.triangleCount",
     "eggdb.nodeSimilarity",
     "eggdb.shortestPath",
+    "eggdb.betweenness",
+    "eggdb.closeness",
+    "eggdb.kCore",
+    "eggdb.louvain",
+    "eggdb.weightedShortestPath",
 ];
+
+fn direction_argument(value: Option<&Value>, default: bool) -> GraphResult<bool> {
+    match value {
+        None => Ok(default),
+        Some(Value::Boolean(flag)) => Ok(*flag),
+        Some(_) => Err(argument_error("directed must be true or false")),
+    }
+}
+
+fn scores(found: Vec<(u64, f64)>) -> Records {
+    (
+        vec!["nodeId", "score"],
+        found
+            .into_iter()
+            .map(|(node, score)| vec![id(node), Value::Float(score)])
+            .collect(),
+    )
+}
 
 fn argument_error(message: impl Into<String>) -> GraphError {
     GraphError::new("Neo.ClientError.Procedure.ProcedureCallFailed", message)
@@ -60,8 +86,8 @@ pub(crate) fn call(
     arguments: &[Value],
 ) -> GraphResult<Records> {
     let most = match procedure {
-        "eggdb.pageRank" | "eggdb.shortestPath" => 4,
-        "eggdb.labelPropagation" => 1,
+        "eggdb.pageRank" | "eggdb.shortestPath" | "eggdb.weightedShortestPath" => 4,
+        "eggdb.labelPropagation" | "eggdb.betweenness" | "eggdb.closeness" | "eggdb.louvain" => 1,
         _ if PROCEDURES.contains(&procedure) => 0,
         _ => {
             return Err(GraphError::new(
@@ -109,6 +135,40 @@ pub(crate) fn call(
             label_propagation_in(graph, count_argument(arguments.first(), 10, "iterations")?)?,
         ),
         "eggdb.triangleCount" => pairs("nodeId", "triangles", triangle_count_in(graph)?),
+        "eggdb.betweenness" => scores(betweenness_in(
+            graph,
+            direction_argument(arguments.first(), false)?,
+        )?),
+        "eggdb.closeness" => scores(closeness_in(
+            graph,
+            direction_argument(arguments.first(), false)?,
+        )?),
+        "eggdb.kCore" => pairs("nodeId", "coreNumber", k_core_in(graph)?),
+        "eggdb.louvain" => pairs(
+            "nodeId",
+            "communityId",
+            louvain_in(graph, count_argument(arguments.first(), 10, "maxLevels")?)?,
+        ),
+        "eggdb.weightedShortestPath" => {
+            let from = node_argument(arguments.first(), "the start")?;
+            let to = node_argument(arguments.get(1), "the end")?;
+            let property = match arguments.get(2) {
+                None => "weight".to_owned(),
+                Some(Value::String(name)) => name.clone(),
+                Some(_) => return Err(argument_error("the weight property must be a string")),
+            };
+            let directed = direction_argument(arguments.get(3), true)?;
+            let records = weighted_shortest_path_in(graph, from, to, &property, directed)?
+                .map(|(path, cost)| {
+                    vec![
+                        Value::List(path.iter().map(|node| id(*node)).collect()),
+                        Value::Float(cost),
+                    ]
+                })
+                .into_iter()
+                .collect();
+            (vec!["nodeIds", "totalCost"], records)
+        }
         "eggdb.nodeSimilarity" => (
             vec!["node1", "node2", "similarity"],
             node_similarity_in(graph)?

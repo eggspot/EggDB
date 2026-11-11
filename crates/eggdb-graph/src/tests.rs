@@ -305,6 +305,35 @@ fn call_yields_the_algorithms_as_rows() {
 }
 
 #[test]
+fn centrality_communities_cores_and_weighted_paths_come_out_of_call() {
+    let keyspace = two_triangles();
+    let louvain = query(
+        &keyspace,
+        "CALL eggdb.louvain() YIELD communityId AS community RETURN count(DISTINCT community) AS communities",
+    );
+    assert_eq!(louvain.rows, vec![vec![Value::Integer(2)]]);
+    let cores = query(
+        &keyspace,
+        "CALL eggdb.kCore() YIELD coreNumber RETURN max(coreNumber) AS deepest",
+    );
+    assert_eq!(cores.rows, vec![vec![Value::Integer(2)]]);
+    let between = query(
+        &keyspace,
+        "CALL eggdb.betweenness() YIELD nodeId, score MATCH (n) WHERE id(n) = nodeId RETURN n.name AS name ORDER BY score DESC, name LIMIT 1",
+    );
+    assert_eq!(between.rows.len(), 1);
+    let close = query(&keyspace, "CALL eggdb.closeness()");
+    assert_eq!(close.columns, ["nodeId", "score"]);
+    assert_eq!(close.rows.len(), 6);
+    let weighted = query(
+        &keyspace,
+        "MATCH (a:N {name: 'a'}), (f:N {name: 'f'}) CALL eggdb.weightedShortestPath(a, f, 'weight', false) YIELD totalCost RETURN totalCost",
+    );
+    assert_eq!(weighted.rows, vec![vec![Value::Float(3.0)]]);
+    assert!(run(&keyspace, "CALL eggdb.closeness(1)", &[], false).is_err());
+}
+
+#[test]
 fn the_longest_operator_chain_runs_on_a_default_thread_and_a_longer_one_is_refused() {
     let outcome = std::thread::spawn(|| {
         let keyspace = MemoryKeyspace::default();
