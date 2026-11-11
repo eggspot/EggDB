@@ -5,7 +5,7 @@ use crate::packet::{
 };
 use eggdb_keyspace::Keyspace;
 use eggdb_platform::connection_limits::{MemoryBudget, Reservation};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -18,6 +18,13 @@ const CONNECT_WAIT: Duration = Duration::from_secs(10);
 const MAX_SUBSCRIPTIONS: usize = 1_000;
 const PUBLISH_HEADER_BYTES: usize = 16;
 const QUOTA_EXCEEDED: u8 = 0x97;
+const MAX_STORED_SESSIONS: usize = 10_000;
+const MAX_QUEUED_MESSAGES: usize = 1_000;
+const MAX_INFLIGHT: usize = 1_000;
+const LONGEST_SESSION: Duration = Duration::from_secs(7 * 24 * 3600);
+const DUP_FLAG: u8 = 0x08;
+const IDENTIFIER_REJECTED_V4: u8 = 0x02;
+const IDENTIFIER_REJECTED_V5: u8 = 0x85;
 pub(crate) const OUT_OF_MEMORY_BUDGET: &str =
     "the server's connections already hold their memory budget";
 
@@ -94,18 +101,61 @@ fn read_retained(value: &[u8], now: u64) -> Option<(u8, Vec<u8>, Vec<u8>)> {
 
 const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+#[derive(Debug, Clone)]
+struct Message {
+    topic: String,
+    payload: Vec<u8>,
+    qos: u8,
+    properties: Vec<u8>,
+}
+
 struct Subscriber {
     filters: Vec<(String, u8)>,
     writer: SharedWriter,
     version: u8,
     next_id: u16,
+    client: String,
+    keep_for: Option<Duration>,
+    inflight: BTreeMap<u16, (Message, bool)>,
 }
 
-/// What every connection shares: subscriptions and the retained messages.
+impl Subscriber {
+    fn next_packet_id(&mut self) -> u16 {
+        for _ in 0..=u16::MAX {
+            self.next_id = self.next_id.wrapping_add(1).max(1);
+            if !self.inflight.contains_key(&self.next_id) {
+                break;
+            }
+        }
+        self.next_id
+    }
+}
+
+/// A persistent session kept while its client is away: its subscriptions, the QoS 1 and 2
+/// messages sent and not yet acknowledged (and whether a QoS 2 one was released), and the
+/// messages that arrived for it since.
+struct StoredSession {
+    filters: Vec<(String, u8)>,
+    inflight: BTreeMap<u16, (Message, bool)>,
+    queued: VecDeque<Message>,
+    next_id: u16,
+    expires_at: Instant,
+}
+
+/// What every connection shares: subscriptions, persistent sessions and the retained messages.
 pub(crate) struct Broker<'k> {
     keyspace: &'k (dyn Keyspace + Sync),
     subscribers: Mutex<BTreeMap<u64, Subscriber>>,
+    sessions: Mutex<BTreeMap<String, StoredSession>>,
     shared_turn: AtomicUsize,
+}
+
+fn direct_grant(filters: &[(String, u8)], topic: &str) -> Option<u8> {
+    filters
+        .iter()
+        .filter(|(filter, _)| !filter.starts_with("$share/") && filter_matches(filter, topic))
+        .map(|(_, granted)| *granted)
+        .max()
 }
 
 fn shared_filter(filter: &str) -> Option<(&str, &str)> {
@@ -148,7 +198,150 @@ impl<'k> Broker<'k> {
         Self {
             keyspace,
             subscribers: Mutex::new(BTreeMap::new()),
+            sessions: Mutex::new(BTreeMap::new()),
             shared_turn: AtomicUsize::new(0),
+        }
+    }
+
+    fn stored(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, StoredSession>> {
+        self.sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn live(&self) -> std::sync::MutexGuard<'_, BTreeMap<u64, Subscriber>> {
+        self.subscribers.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn keep(&self, subscriber: Subscriber) {
+        let Some(keep_for) = subscriber.keep_for.filter(|_| !subscriber.client.is_empty()) else {
+            return;
+        };
+        let mut sessions = self.stored();
+        let now = Instant::now();
+        sessions.retain(|_, session| session.expires_at > now);
+        if sessions.len() >= MAX_STORED_SESSIONS && !sessions.contains_key(&subscriber.client) {
+            return;
+        }
+        sessions.insert(
+            subscriber.client,
+            StoredSession {
+                filters: subscriber.filters,
+                inflight: subscriber.inflight,
+                queued: VecDeque::new(),
+                next_id: subscriber.next_id,
+                expires_at: now + keep_for,
+            },
+        );
+    }
+
+    fn end_session(&self, id: u64) {
+        let ended = self.live().remove(&id);
+        if let Some(subscriber) = ended {
+            self.keep(subscriber);
+        }
+    }
+
+    fn forget_session(&self, client: &str) {
+        self.stored().remove(client);
+    }
+
+    fn take_over(&self, client: &str) {
+        if client.is_empty() {
+            return;
+        }
+        let taken: Vec<u64> = self
+            .live()
+            .iter()
+            .filter(|(_, subscriber)| subscriber.client == client)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in taken {
+            self.end_session(id);
+        }
+    }
+
+    fn resume(&self, id: u64, client: &str, writer: &SharedWriter, version: u8, keep_for: Duration) -> bool {
+        let now = Instant::now();
+        let Some(stored) = self.stored().remove(client).filter(|session| session.expires_at > now) else {
+            return false;
+        };
+        let mut subscriber = Subscriber {
+            filters: stored.filters,
+            writer: Arc::clone(writer),
+            version,
+            next_id: stored.next_id,
+            client: client.to_owned(),
+            keep_for: Some(keep_for),
+            inflight: stored.inflight,
+        };
+        let mut packets = Vec::new();
+        for (packet_id, (message, released)) in &subscriber.inflight {
+            if *released {
+                packets.push(encode(PUBREL, 2, &packet_id.to_be_bytes()));
+            } else {
+                let mut packet = publish_packet(version, &message.topic, &message.payload, message.qos, false, *packet_id, &message.properties);
+                packet[0] |= DUP_FLAG;
+                packets.push(packet);
+            }
+        }
+        for message in stored.queued {
+            if subscriber.inflight.len() >= MAX_INFLIGHT {
+                break;
+            }
+            let packet_id = subscriber.next_packet_id();
+            packets.push(publish_packet(version, &message.topic, &message.payload, message.qos, false, packet_id, &message.properties));
+            subscriber.inflight.insert(packet_id, (message, false));
+        }
+        self.live().insert(id, subscriber);
+        let mut writer = writer.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for packet in packets {
+            if writer.write_all(&packet).is_err() {
+                break;
+            }
+        }
+        true
+    }
+
+    fn settle(&self, id: u64, kind: u8, packet_id: u16) {
+        let mut live = self.live();
+        let Some(subscriber) = live.get_mut(&id) else {
+            return;
+        };
+        match kind {
+            PUBREC => {
+                if let Some((_, released)) = subscriber.inflight.get_mut(&packet_id) {
+                    *released = true;
+                }
+            }
+            _ => {
+                subscriber.inflight.remove(&packet_id);
+            }
+        }
+    }
+
+    fn queue_for_absent(&self, topic: &str, payload: &[u8], qos: u8, properties: &[u8]) {
+        if qos == 0 {
+            return;
+        }
+        let mut sessions = self.stored();
+        let now = Instant::now();
+        sessions.retain(|_, session| session.expires_at > now);
+        for session in sessions.values_mut() {
+            let Some(granted) = direct_grant(&session.filters, topic) else {
+                continue;
+            };
+            let qos = qos.min(granted);
+            if qos == 0 {
+                continue;
+            }
+            if session.queued.len() >= MAX_QUEUED_MESSAGES {
+                session.queued.pop_front();
+            }
+            session.queued.push_back(Message {
+                topic: topic.to_owned(),
+                payload: payload.to_vec(),
+                qos,
+                properties: properties.to_vec(),
+            });
         }
     }
 
@@ -186,27 +379,36 @@ impl<'k> Broker<'k> {
             *held = (*held).max(granted);
         }
         for (id, subscriber) in subscribers.iter_mut() {
-            let direct = subscriber
-                .filters
-                .iter()
-                .filter(|(filter, _)| !filter.starts_with("$share/") && filter_matches(filter, topic))
-                .map(|(_, granted)| *granted)
-                .max();
+            let direct = direct_grant(&subscriber.filters, topic);
             let Some(granted) = direct.max(chosen.get(id).copied()) else {
                 continue;
             };
             let qos = qos.min(granted);
-            if qos > 0 {
-                subscriber.next_id = subscriber.next_id.wrapping_add(1).max(1);
-            }
-            deliveries.push((
-                Arc::clone(&subscriber.writer),
-                subscriber.version,
-                qos,
-                subscriber.next_id,
-            ));
+            let packet_id = if qos > 0 {
+                if subscriber.inflight.len() >= MAX_INFLIGHT {
+                    continue;
+                }
+                let packet_id = subscriber.next_packet_id();
+                subscriber.inflight.insert(
+                    packet_id,
+                    (
+                        Message {
+                            topic: topic.to_owned(),
+                            payload: payload.to_vec(),
+                            qos,
+                            properties: properties.to_vec(),
+                        },
+                        false,
+                    ),
+                );
+                packet_id
+            } else {
+                0
+            };
+            deliveries.push((Arc::clone(&subscriber.writer), subscriber.version, qos, packet_id));
         }
         drop(subscribers);
+        self.queue_for_absent(topic, payload, qos, properties);
         let packet_bytes = payload
             .len()
             .saturating_add(topic.len())
@@ -304,6 +506,8 @@ struct Session<'b, 'k> {
     broker: &'b Broker<'k>,
     budget: &'b MemoryBudget,
     id: u64,
+    client: String,
+    keep_for: Option<Duration>,
     version: u8,
     writer: SharedWriter,
     will: Option<Will>,
@@ -380,8 +584,9 @@ impl Session<'_, '_> {
                     .map_err(|error| error.to_string())?;
             }
             PUBACK | PUBREC | PUBCOMP => {
+                let packet_id = fields.short()?;
+                self.broker.settle(self.id, kind, packet_id);
                 if kind == PUBREC {
-                    let packet_id = fields.short()?;
                     self.send(&encode(PUBREL, 2, &packet_id.to_be_bytes()))
                         .map_err(|error| error.to_string())?;
                 }
@@ -401,7 +606,7 @@ impl Session<'_, '_> {
                     let options = fields.byte()?;
                     let requested = options & 3;
                     if valid_subscription(&filter) && requested < 3 {
-                        let granted = requested.min(1);
+                        let granted = requested;
                         codes.push(granted);
                         accepted.push((filter, granted));
                     } else {
@@ -422,6 +627,9 @@ impl Session<'_, '_> {
                         writer: Arc::clone(&self.writer),
                         version: self.version,
                         next_id: 0,
+                        client: self.client.clone(),
+                        keep_for: self.keep_for,
+                        inflight: BTreeMap::new(),
                     });
                     for (filter, granted) in &accepted {
                         subscriber.filters.retain(|(known, _)| known != filter);
@@ -502,7 +710,17 @@ impl Session<'_, '_> {
     }
 }
 
-fn connect(config: &ServerConfig, body: &[u8]) -> Parsed<(u8, u16, Option<Will>, bool)> {
+struct Connected {
+    version: u8,
+    keep_alive: u16,
+    will: Option<Will>,
+    allowed: bool,
+    client: String,
+    clean: bool,
+    session_expiry: Option<u32>,
+}
+
+fn connect(config: &ServerConfig, body: &[u8]) -> Parsed<Connected> {
     let mut fields = Fields::new(body);
     let name = fields.string()?;
     let version = fields.byte()?;
@@ -511,10 +729,12 @@ fn connect(config: &ServerConfig, body: &[u8]) -> Parsed<(u8, u16, Option<Will>,
     }
     let flags = fields.byte()?;
     let keep_alive = fields.short()?;
-    if version >= 5 {
-        fields.skip_properties()?;
-    }
-    let _client = fields.string()?;
+    let session_expiry = if version >= 5 {
+        fields.connect_session_expiry()?
+    } else {
+        None
+    };
+    let client = fields.string()?;
     let will = if flags & 0x04 != 0 {
         if version >= 5 {
             fields.skip_properties()?;
@@ -547,7 +767,26 @@ fn connect(config: &ServerConfig, body: &[u8]) -> Parsed<(u8, u16, Option<Will>,
                 &config.password_sha256,
             )
         });
-    Ok((version, keep_alive, will, allowed))
+    Ok(Connected {
+        version,
+        keep_alive,
+        will,
+        allowed,
+        client,
+        clean: flags & 0x02 != 0,
+        session_expiry,
+    })
+}
+
+fn kept_for(connected: &Connected) -> Option<Duration> {
+    if connected.version >= 5 {
+        connected
+            .session_expiry
+            .filter(|seconds| *seconds > 0)
+            .map(|seconds| Duration::from_secs(u64::from(seconds)).min(LONGEST_SESSION))
+    } else {
+        (!connected.clean).then_some(LONGEST_SESSION)
+    }
 }
 
 fn refuse_over_budget(writer: &SharedWriter, session: Option<&Session<'_, '_>>) {
@@ -608,9 +847,7 @@ pub(crate) fn serve_stream(
                                 finished = Some(false);
                                 break;
                             }
-                            let Ok((version, seconds, will, allowed)) =
-                                connect(config, &packet.body)
-                            else {
+                            let Ok(connected) = connect(config, &packet.body) else {
                                 let _ = writer
                                     .lock()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -618,8 +855,32 @@ pub(crate) fn serve_stream(
                                 finished = Some(true);
                                 break;
                             };
+                            let version = connected.version;
+                            let seconds = connected.keep_alive;
+                            let allowed = connected.allowed;
+                            let keep_for = kept_for(&connected);
                             let refused = if version >= 5 { 0x87 } else { 5 };
-                            let mut ack = vec![0, if allowed { 0 } else { refused }];
+                            let identifier_refused = connected.client.is_empty() && !connected.clean && version < 5;
+                            let code = if !allowed {
+                                refused
+                            } else if identifier_refused {
+                                if version >= 5 { IDENTIFIER_REJECTED_V5 } else { IDENTIFIER_REJECTED_V4 }
+                            } else {
+                                0
+                            };
+                            let allowed = code == 0;
+                            if allowed {
+                                broker.take_over(&connected.client);
+                                if connected.clean {
+                                    broker.forget_session(&connected.client);
+                                }
+                            }
+                            let resumed = allowed
+                                && !connected.clean
+                                && keep_for.is_some_and(|keep| {
+                                    broker.resume(id, &connected.client, &writer, version, keep)
+                                });
+                            let mut ack = vec![u8::from(resumed), code];
                             if version >= 5 {
                                 ack.extend_from_slice(&[3, 0x22]);
                                 ack.extend_from_slice(&TOPIC_ALIAS_MAXIMUM.to_be_bytes());
@@ -638,9 +899,11 @@ pub(crate) fn serve_stream(
                                 broker,
                                 budget,
                                 id,
+                                client: connected.client.clone(),
+                                keep_for,
                                 version,
                                 writer: Arc::clone(&writer),
-                                will,
+                                will: connected.will,
                                 incoming_qos2: BTreeSet::new(),
                                 topic_aliases: BTreeMap::new(),
                             });
@@ -697,11 +960,7 @@ pub(crate) fn serve_stream(
         }
     };
     if let Some(active) = session {
-        broker
-            .subscribers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&id);
+        broker.end_session(id);
         if !clean_end && let Some(will) = active.will {
             let _ = broker.publish(
                 &will.topic,

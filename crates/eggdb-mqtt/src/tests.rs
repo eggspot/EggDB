@@ -228,3 +228,38 @@ fn packets_and_retained_replays_past_the_memory_budget_are_refused() {
     );
     assert_eq!(budget.used_bytes(), 0);
 }
+
+fn connect_kept(client: &str) -> Vec<u8> {
+    let mut body = Vec::new();
+    put_string(&mut body, b"MQTT");
+    body.push(4);
+    body.push(0xc0);
+    body.extend_from_slice(&30u16.to_be_bytes());
+    put_string(&mut body, client.as_bytes());
+    put_string(&mut body, b"eggdb");
+    put_string(&mut body, b"secret");
+    encode(1, 0, &body)
+}
+
+#[test]
+fn a_persistent_session_keeps_its_subscriptions_and_messages_while_away() {
+    let keyspace = MemoryKeyspace::default();
+    let broker = Broker::new(&keyspace);
+    let mut input = connect_kept("keeper");
+    input.extend(subscribe(4, "news/#", 2));
+    let (_, answers) = session(&broker, 1, input);
+    assert_eq!(answers[0].1, [0, 0]);
+    assert_eq!(answers[1].1, [0, 1, 2]);
+    let mut input = connect(4, "secret", None);
+    input.extend(publish("news/today", "quiet", 1, false));
+    input.extend(encode(14, 0, &[]));
+    session(&broker, 2, input);
+    let (_, answers) = session(&broker, 3, connect_kept("keeper"));
+    assert_eq!(answers[0], (2, vec![1, 0]));
+    assert_eq!(answers[1].0, 3);
+    assert!(answers[1].1.ends_with(b"quiet"));
+    let mut input = connect(4, "secret", None);
+    input.extend(encode(14, 0, &[]));
+    let (_, answers) = session(&broker, 4, input);
+    assert_eq!(answers[0].1, [0, 0]);
+}

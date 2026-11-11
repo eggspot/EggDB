@@ -250,6 +250,45 @@ impl<'b> Fields<'b> {
         Ok(properties)
     }
 
+    /// Reads a CONNECT's properties, returning its Session Expiry Interval (0x11) if given.
+    pub(crate) fn connect_session_expiry(&mut self) -> Parsed<Option<u32>> {
+        let length = self.variable()?;
+        let end = self
+            .at
+            .checked_add(length)
+            .filter(|end| *end <= self.bytes.len())
+            .ok_or("properties run past the packet")?;
+        let mut inner = Fields::new(&self.bytes[self.at..end]);
+        self.at = end;
+        let mut expiry = None;
+        while !inner.finished() {
+            match inner.variable()? {
+                0x11 => expiry = Some(inner.four()?),
+                0x27 => {
+                    inner.four()?;
+                }
+                0x21 | 0x22 => {
+                    inner.short()?;
+                }
+                0x17 | 0x19 => {
+                    inner.byte()?;
+                }
+                0x15 => {
+                    inner.string()?;
+                }
+                0x16 => {
+                    inner.binary()?;
+                }
+                0x26 => {
+                    inner.string()?;
+                    inner.string()?;
+                }
+                other => return Err(format!("property {other:#04x} is not allowed in CONNECT")),
+            }
+        }
+        Ok(expiry)
+    }
+
     pub(crate) fn skip_properties(&mut self) -> Parsed<()> {
         let mut length = 0usize;
         let mut multiplier = 1usize;
