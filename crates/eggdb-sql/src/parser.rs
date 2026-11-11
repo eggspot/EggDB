@@ -5609,6 +5609,25 @@ impl<'t> Parser<'t> {
             return Ok(regclass_cast(expr, position));
         }
         let sql_type = self.cast_type()?;
+        if self.oracle() && self.take_word("default") {
+            let fallback = self.expression()?;
+            self.expect_word("on")?;
+            self.expect_word("conversion")?;
+            self.expect_word("error")?;
+            if self.peek_kind() == &TokenKind::Comma {
+                return Err(SqlError::not_supported(
+                    "CAST ... DEFAULT ... ON CONVERSION ERROR with a format model",
+                )
+                .at(position));
+            }
+            self.expect(&TokenKind::RightParen)?;
+            return Ok(crate::oracle_functions::type_carrying_call(
+                crate::oracle_functions::CAST_WITH_DEFAULT,
+                vec![expr, fallback],
+                sql_type,
+                position,
+            ));
+        }
         self.expect(&TokenKind::RightParen)?;
         Ok(Expr {
             kind: ExprKind::Cast {

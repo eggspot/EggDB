@@ -756,3 +756,35 @@ fn at_sign_parameters_bind_by_name_in_any_order_in_oracle_sql() {
     let missing = parameterized(&mut session, "SELECT @P2 FROM dual", &parameters);
     assert!(missing.iter().any(Result::is_err), "{missing:?}");
 }
+
+#[test]
+fn cast_takes_a_default_on_conversion_error_and_validate_conversion_tests_it() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    let rows = values(
+        &mut session,
+        "SELECT CAST('abc' AS NUMBER DEFAULT 0 ON CONVERSION ERROR), \
+         CAST('12' AS NUMBER DEFAULT 0 ON CONVERSION ERROR), \
+         VALIDATE_CONVERSION('abc' AS NUMBER), \
+         VALIDATE_CONVERSION('12' AS NUMBER), \
+         VALIDATE_CONVERSION(NULL AS NUMBER) FROM dual",
+    );
+    assert_eq!(
+        rows,
+        vec![vec![
+            number(0),
+            number(12),
+            Value::Integer(0),
+            Value::Integer(1),
+            Value::Integer(1)
+        ]]
+    );
+    let both_bad = failure(
+        &mut session,
+        "SELECT CAST('abc' AS NUMBER DEFAULT 'xyz' ON CONVERSION ERROR) FROM dual",
+    );
+    assert!(both_bad.state().code().starts_with("22"), "{both_bad}");
+    let other = Session::with_dialect(&store, Dialect::PostgreSql)
+        .execute("SELECT CAST('1' AS int DEFAULT 0 ON CONVERSION ERROR)", &mut |_| {});
+    assert!(other.is_err());
+}

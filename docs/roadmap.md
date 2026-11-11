@@ -1147,7 +1147,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `XMLTABLE`, `XMLQUERY`, `EXTRACTVALUE` and `XMLType` left) and `TO_DATE(... DEFAULT ... ON
   CONVERSION ERROR)` (sql.md; the
   conversion functions' `DEFAULT ... ON CONVERSION ERROR`: **code written, unbuilt**, code-only
-  mode, 2026-11-11, D431; `CAST ... DEFAULT` left);
+  mode, 2026-11-11, D431; `CAST ... DEFAULT` and `VALIDATE_CONVERSION`: **code written, unbuilt**, code-only
+  mode, 2026-11-12, D603);
   `DISTINCT` in window aggregates (`LISTAGG (DISTINCT ...) OVER`, `COUNT(DISTINCT x) OVER`) and
   `KEEP` on `LISTAGG`; the rest of Oracle's regex syntax (`\z`, `[=e=]`, `[.ch.]`, `[^...]`
   matching a newline without `n`) (D332). The regex syntax: **code written, unbuilt** (code-only mode,

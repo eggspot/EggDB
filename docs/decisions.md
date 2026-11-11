@@ -627,3 +627,4 @@ its full title with its status.
 - [D600](decisions/D600.md) Code-only batch 248 (M10): Transact-SQL IGNORE NULLS and named windows
 - [D601](decisions/D601.md) Code-only batch 249 (M10): pg_cron time zones per job
 - [D602](decisions/D602.md) Code-only batch 250 (M10): pg_cron schedules checked when set, and the restart minute
+- [D603](decisions/D603.md) Code-only batch 251 (M10): Oracle's CAST ... DEFAULT ON CONVERSION ERROR and VALIDATE_CONVERSION

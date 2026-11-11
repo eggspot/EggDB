@@ -465,6 +465,15 @@ fn oracle_function_type(name: &str, arguments: &[Expr]) -> Option<SqlType> {
     if let Some(sql_type) = crate::oracle_packages::result_type(name) {
         return Some(sql_type);
     }
+    if name == crate::oracle_functions::CAST_WITH_DEFAULT {
+        return match arguments.last().map(|argument| &argument.kind) {
+            Some(ExprKind::Cast { sql_type, .. }) => Some(*sql_type),
+            _ => None,
+        };
+    }
+    if name == crate::oracle_functions::VALIDATE_CONVERSION {
+        return Some(SqlType::Integer);
+    }
     if name == crate::oracle_functions::WITH_DEFAULT {
         let (Some(ExprKind::Literal(Literal::String(inner))), Some(rest)) = (
             arguments.first().map(|argument| &argument.kind),

@@ -619,6 +619,35 @@ impl Evaluator<'_> {
             ExprKind::OracleFunction { name, arguments } if *name == "oracle_decode" => {
                 self.decode(arguments, hint)
             }
+            ExprKind::OracleFunction { name, arguments }
+                if *name == crate::oracle_functions::CAST_WITH_DEFAULT
+                    || *name == crate::oracle_functions::VALIDATE_CONVERSION =>
+            {
+                let (
+                    Some(value),
+                    Some(Expr {
+                        kind: ExprKind::Cast { sql_type, .. },
+                        ..
+                    }),
+                ) = (arguments.first(), arguments.last())
+                else {
+                    return Err(SqlError::not_supported("a malformed conversion call"));
+                };
+                let converted = self.cast(value, *sql_type);
+                if *name == crate::oracle_functions::VALIDATE_CONVERSION {
+                    return match converted {
+                        Ok(_) => Ok(Value::Integer(1)),
+                        Err(error) if error.state().code().starts_with("22") => Ok(Value::Integer(0)),
+                        Err(error) => Err(error),
+                    };
+                }
+                match (converted, arguments.get(1)) {
+                    (Err(error), Some(fallback)) if error.state().code().starts_with("22") => {
+                        self.cast(fallback, *sql_type)
+                    }
+                    (outcome, _) => outcome,
+                }
+            }
             ExprKind::OracleFunction { name, arguments } => {
                 let values = self.arguments(arguments)?;
                 let declared: Vec<Option<SqlType>> =

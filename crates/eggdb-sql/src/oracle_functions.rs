@@ -847,6 +847,39 @@ fn date_unit(values: &[Value]) -> Option<String> {
 /// argument is the inner function's name, then the value, the default and the other arguments.
 pub(crate) const WITH_DEFAULT: &str = "oracle_with_default";
 
+/// `CAST(value AS type DEFAULT fallback ON CONVERSION ERROR)`: the value, the fallback, and a
+/// `CAST(NULL AS type)` that carries the type; the evaluator runs it.
+pub(crate) const CAST_WITH_DEFAULT: &str = "oracle_cast_with_default";
+
+/// `VALIDATE_CONVERSION(value AS type)`: the value and a `CAST(NULL AS type)` that carries the
+/// type; 1 when the value converts (or is NULL), else 0.
+pub(crate) const VALIDATE_CONVERSION: &str = "oracle_validate_conversion";
+
+/// The call the parser builds for [`CAST_WITH_DEFAULT`] and [`VALIDATE_CONVERSION`]: the
+/// arguments, then a cast of NULL to the target type, so the type travels with the call.
+pub(crate) fn type_carrying_call(
+    name: &'static str,
+    mut arguments: Vec<crate::ast::Expr>,
+    sql_type: SqlType,
+    position: usize,
+) -> crate::ast::Expr {
+    use crate::ast::{Expr, ExprKind, Literal};
+    arguments.push(Expr {
+        kind: ExprKind::Cast {
+            expr: Box::new(Expr {
+                kind: ExprKind::Literal(Literal::Null),
+                position,
+            }),
+            sql_type,
+        },
+        position,
+    });
+    Expr {
+        kind: ExprKind::OracleFunction { name, arguments },
+        position,
+    }
+}
+
 fn with_default(values: &[Value]) -> SqlResult<Value> {
     let [Value::Text(inner), value, default, rest @ ..] = values else {
         return Ok(Value::Null);

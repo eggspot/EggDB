@@ -1464,6 +1464,22 @@ impl<'t> Parser<'t> {
         if name.text == "sys_context" {
             return self.sys_context(name).map(Some);
         }
+        if name.text == "validate_conversion" {
+            self.expect(&TokenKind::LeftParen)?;
+            let value = self.expression()?;
+            self.expect_word("as")?;
+            let sql_type = self.cast_type()?;
+            if self.peek_kind() == &TokenKind::Comma {
+                return Err(SqlError::not_supported("VALIDATE_CONVERSION with a format model").at(position));
+            }
+            self.expect(&TokenKind::RightParen)?;
+            return Ok(Some(crate::oracle_functions::type_carrying_call(
+                crate::oracle_functions::VALIDATE_CONVERSION,
+                vec![value],
+                sql_type,
+                position,
+            )));
+        }
         if name.text == "listagg" {
             return self.oracle_listagg(name).map(Some);
         }
