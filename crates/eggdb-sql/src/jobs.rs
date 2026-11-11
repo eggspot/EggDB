@@ -47,6 +47,7 @@ CREATE FUNCTION cron.schedule(job_schedule text, job_command text) RETURNS bigin
 DECLARE
     id bigint;
 BEGIN
+    PERFORM eggdb_cron_schedule_check(job_schedule);
     INSERT INTO cron.job (schedule, command) VALUES (job_schedule, job_command) RETURNING jobid INTO id;
     RETURN id;
 END
@@ -55,6 +56,7 @@ CREATE FUNCTION cron.schedule(job_name text, job_schedule text, job_command text
 DECLARE
     id bigint;
 BEGIN
+    PERFORM eggdb_cron_schedule_check(job_schedule);
     UPDATE cron.job SET schedule = job_schedule, command = job_command, active = true
         WHERE jobname = job_name RETURNING jobid INTO id;
     IF id IS NULL THEN
@@ -65,6 +67,9 @@ END
 $$;
 CREATE FUNCTION cron.alter_job(job_id bigint, schedule text DEFAULT NULL, command text DEFAULT NULL, database text DEFAULT NULL, username text DEFAULT NULL, active boolean DEFAULT NULL, timezone text DEFAULT NULL) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
+    IF alter_job.schedule IS NOT NULL THEN
+        PERFORM eggdb_cron_schedule_check(alter_job.schedule);
+    END IF;
     UPDATE cron.job SET
         schedule = coalesce(alter_job.schedule, cron.job.schedule),
         command = coalesce(alter_job.command, cron.job.command),
@@ -402,6 +407,15 @@ fn run_jobs<S: KeyValueStore>(store: &S, epoch_seconds: i64, seconds: bool) -> S
             Err(error)
         };
     }
+    let mut already_run = Vec::new();
+    if !seconds {
+        session.execute(
+            &format!("SELECT jobid FROM cron.job_run_details WHERE start_time = to_timestamp({epoch_seconds})"),
+            &mut |result| {
+                already_run = result.rows.into_iter().filter_map(|row| row.into_iter().next()).collect();
+            },
+        )?;
+    }
     let mut outcome = JobsRun::default();
     for row in rows {
         let (Some(Value::BigInt(id)), Some(schedule), Some(command)) = (
@@ -411,6 +425,9 @@ fn run_jobs<S: KeyValueStore>(store: &S, epoch_seconds: i64, seconds: bool) -> S
         ) else {
             continue;
         };
+        if already_run.contains(&Value::BigInt(id)) {
+            continue;
+        }
         let Ok(parsed) = CronSchedule::parse(&schedule) else {
             if !seconds {
                 outcome.invalid_schedules += 1;

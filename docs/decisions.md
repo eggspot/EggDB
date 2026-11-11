@@ -626,3 +626,4 @@ its full title with its status.
 - [D599](decisions/D599.md) Code-only batch 247 (M10): MySQL's JSON error numbers
 - [D600](decisions/D600.md) Code-only batch 248 (M10): Transact-SQL IGNORE NULLS and named windows
 - [D601](decisions/D601.md) Code-only batch 249 (M10): pg_cron time zones per job
+- [D602](decisions/D602.md) Code-only batch 250 (M10): pg_cron schedules checked when set, and the restart minute

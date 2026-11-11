@@ -134,9 +134,13 @@ fn pg_cron_jobs_run_when_due_and_record_their_runs() {
         &mut session,
         "SELECT cron.schedule('nightly', '0 0 * * *', 'INSERT INTO ticks VALUES (2)')",
     );
+    let refused = session
+        .execute("SELECT cron.schedule('broken', 'not a schedule', 'SELECT 1')", &mut |_| {})
+        .expect_err("a schedule cron cannot read");
+    assert!(refused.message().contains("not a schedule"), "{refused}");
     run(
         &mut session,
-        "SELECT cron.schedule('broken', 'not a schedule', 'SELECT 1')",
+        "INSERT INTO cron.job (schedule, command, jobname) VALUES ('not a schedule', 'SELECT 1', 'broken')",
     );
     assert_eq!(
         run_due_jobs(&store, at(0)).unwrap(),
@@ -207,5 +211,25 @@ fn a_job_with_a_time_zone_reads_its_schedule_in_local_time() {
     assert_eq!(
         run(&mut session, "SELECT count(*) FROM ticks"),
         run(&mut session, "SELECT 1::bigint AS count")
+    );
+}
+
+#[test]
+fn a_minute_run_twice_after_a_restart_runs_each_job_once() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(&mut session, "CREATE EXTENSION pg_cron");
+    run(&mut session, "CREATE TABLE ticks (at int)");
+    run(
+        &mut session,
+        "SELECT cron.schedule('* * * * *', 'INSERT INTO ticks VALUES (1)')",
+    );
+    assert_eq!(run_due_jobs(&store, at(3)).unwrap().succeeded, 1);
+    assert_eq!(run_due_jobs(&store, at(3)).unwrap().succeeded, 0);
+    assert_eq!(run_due_jobs(&store, at(4)).unwrap().succeeded, 1);
+    assert!(
+        session
+            .execute("SELECT cron.alter_job(1, '61 * * * *')", &mut |_| {})
+            .is_err()
     );
 }

@@ -20,7 +20,7 @@ pub(super) fn run_scheduled_jobs(
     store: &impl eggdb_sql::KeyValueStore,
     stop: &(dyn Fn() -> bool + Sync),
 ) {
-    let mut last = epoch_minute();
+    let mut last = epoch_minute() - 1;
     let mut last_second = epoch_second();
     while !stop() {
         std::thread::sleep(CHECK_EVERY);
