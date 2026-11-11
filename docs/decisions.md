@@ -560,3 +560,4 @@ its full title with its status.
 - [D533](decisions/D533.md) Code-only batch 181 (M9): MongoDB TTL indexes
 - [D534](decisions/D534.md) Code-only batch 182 (M13): Cypher list predicates and shortest-path predicate push-down
 - [D535](decisions/D535.md) Code-only batch 183 (M13): GQL ANY SHORTEST, ALL SHORTEST, SHORTEST k and relationship quantifiers
+- [D536](decisions/D536.md) Code-only batch 184 (M10): MySQL division by zero gives NULL with warning 1365

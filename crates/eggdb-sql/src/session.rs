@@ -2014,6 +2014,8 @@ impl<'s> Session<'s> {
                 if self.batch_resume.is_some() {
                     self.batch_resume = Some(resume);
                 }
+                crate::mysql_errors::clear_evaluation_warnings();
+                crate::mysql_errors::set_strict_write(self.mysql());
                 self.enter_sequences(false);
                 crate::deferred_checks::enter(&self.deferred.modes);
                 let started = crate::statement_statistics::wanted().then(std::time::Instant::now);
@@ -2131,6 +2133,10 @@ impl<'s> Session<'s> {
                 bulk_rows: reborrowed_rows(&mut client.bulk_rows),
             };
             let _catalog = crate::pg_catalog::enter_statement(flags.wants_catalog, &settings);
+            crate::mysql_errors::clear_evaluation_warnings();
+            crate::mysql_errors::set_strict_write(
+                self.mysql() && matches!(statement, Statement::Insert(_) | Statement::Update(_)),
+            );
             self.enter_sequences(flags.uses_sequences);
             self.extra_results.clear();
             crate::deferred_checks::enter(&self.deferred.modes);
@@ -2450,6 +2456,7 @@ impl<'s> Session<'s> {
                 result.warnings.push(note);
             }
         }
+        result.warnings.extend(mysql_errors::take_evaluation_warnings());
         if let Some(id) = result.last_insert_id {
             Arc::make_mut(&mut self.settings).mysql.last_insert_id = id;
         }

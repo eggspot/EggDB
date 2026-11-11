@@ -2415,6 +2415,18 @@ fn division_by_zero() -> SqlError {
     SqlError::new(SqlState::DIVISION_BY_ZERO, "division by zero")
 }
 
+fn mysql_divides_to_null(operator: BinaryOperator, right: &Value) -> bool {
+    matches!(operator, BinaryOperator::Divide | BinaryOperator::Modulo)
+        && crate::constraints::current_dialect() == crate::Dialect::MySql
+        && match right {
+            Value::SmallInt(0) | Value::Integer(0) | Value::BigInt(0) => true,
+            Value::Double(number) => *number == 0.0,
+            Value::Real(number) => *number == 0.0,
+            Value::Numeric(number) => number.is_zero(),
+            _ => false,
+        }
+}
+
 pub(crate) fn arithmetic(
     operator: BinaryOperator,
     left: &Value,
@@ -2427,6 +2439,10 @@ pub(crate) fn arithmetic(
     }
     refuse_infinite_date_without_infinities(left)?;
     refuse_infinite_date_without_infinities(right)?;
+    if mysql_divides_to_null(operator, right) && !matches!(left, Value::Null) && !crate::mysql_errors::strict_write() {
+        crate::mysql_errors::warn_division_by_zero();
+        return Ok(Value::Null);
+    }
     if crate::constraints::current_dialect() == crate::Dialect::Oracle
         && (matches!(left, Value::Interval(_)) || matches!(right, Value::Interval(_)))
         && let Some(result) = crate::oracle_intervals::arithmetic(operator, left, right)

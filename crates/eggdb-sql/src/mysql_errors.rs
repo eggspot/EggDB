@@ -1,6 +1,51 @@
 use crate::error::{SqlError, SqlState};
+use std::cell::RefCell;
 
 const NEAR_TEXT_CHARACTERS: usize = 80;
+const MOST_EVALUATION_WARNINGS: usize = 64;
+const DIVISION_BY_ZERO_CODE: u16 = 1365;
+
+thread_local! {
+    static EVALUATION_WARNINGS: RefCell<Vec<Warning>> = const { RefCell::new(Vec::new()) };
+    static STRICT_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Forgets the warnings expressions raised, as a statement starts, and notes whether the
+/// statement writes rows under MySQL's strict mode, where a division by zero is an error.
+pub(crate) fn clear_evaluation_warnings() {
+    EVALUATION_WARNINGS.with(|warnings| warnings.borrow_mut().clear());
+    STRICT_WRITE.with(|strict| strict.set(false));
+}
+
+/// Marks the running statement as a row write under strict mode (`INSERT`, `UPDATE`,
+/// `REPLACE`), where MySQL's default `ERROR_FOR_DIVISION_BY_ZERO` makes a division by zero fail.
+pub(crate) fn set_strict_write(strict: bool) {
+    STRICT_WRITE.with(|held| held.set(strict));
+}
+
+/// Whether the running statement is a strict row write.
+pub(crate) fn strict_write() -> bool {
+    STRICT_WRITE.with(std::cell::Cell::get)
+}
+
+/// The warnings expressions raised during the statement, such as MySQL's division by zero.
+pub(crate) fn take_evaluation_warnings() -> Vec<Warning> {
+    EVALUATION_WARNINGS.with(|warnings| std::mem::take(&mut *warnings.borrow_mut()))
+}
+
+/// Records MySQL's warning 1365 for a division or modulo by zero, which then gives `NULL`.
+pub(crate) fn warn_division_by_zero() {
+    EVALUATION_WARNINGS.with(|warnings| {
+        let mut warnings = warnings.borrow_mut();
+        if warnings.len() < MOST_EVALUATION_WARNINGS {
+            warnings.push(Warning {
+                level: "Warning",
+                code: DIVISION_BY_ZERO_CODE,
+                message: "Division by 0".to_owned(),
+            });
+        }
+    });
+}
 
 /// A MySQL warning or note, as `SHOW WARNINGS` lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
