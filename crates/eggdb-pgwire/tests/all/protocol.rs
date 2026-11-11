@@ -826,11 +826,11 @@ fn unsupported_startup_settings_and_function_calls_are_answered_without_hanging(
             .iter()
             .any(|message| message.text() == "client_encoding\0UTF8")
     );
-    client.send(b'F', &[0, 0, 0, 1]);
+    client.send(b'F', &[0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
     let answer = client.read_until_ready();
     assert_eq!(
         (tags(&answer), answer[0].code()),
-        ("EZ".to_owned(), "0A000".to_owned())
+        ("EZ".to_owned(), "42883".to_owned())
     );
     client.send(b'd', b"stray copy data");
     assert_eq!(tags(&client.query("SELECT 1")), "TDCZ");
