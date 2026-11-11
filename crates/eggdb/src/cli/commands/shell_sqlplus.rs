@@ -5,6 +5,8 @@ use std::io::{self, BufWriter, Write};
 const DESCRIBE_SHORTEST: usize = "desc".len();
 const PROMPT_SHORTEST: usize = "pro".len();
 const SPOOL_SHORTEST: usize = "spo".len();
+const VARIABLE_SHORTEST: usize = "var".len();
+const PRINT_SHORTEST: usize = "pri".len();
 const NAME_WIDTH: usize = 41;
 const NULL_WIDTH: usize = 8;
 const TYPE_WIDTH: usize = 28;
@@ -15,6 +17,105 @@ pub(super) enum SqlPlusCommand {
     Describe,
     Prompt,
     Spool,
+    Variable,
+    Print,
+}
+
+/// A SQL*Plus bind variable: its name (upper case), its declared type as typed, and its value
+/// as the SQL literal that stands in for `:name`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BindVariable {
+    pub(super) name: String,
+    pub(super) declared: String,
+    pub(super) literal: Option<String>,
+    pub(super) shown: Option<String>,
+}
+
+/// `VARIABLE name type`: the declared variable, or an SP2 message for a bad declaration.
+pub(super) fn declared_variable(text: &str) -> Result<BindVariable, String> {
+    let (name, declared) = text
+        .split_once(char::is_whitespace)
+        .map(|(name, declared)| (name, declared.trim()))
+        .ok_or_else(|| "SP2-0552: Bind variable is missing a type.".to_owned())?;
+    let upper = declared.to_ascii_uppercase();
+    let known = ["NUMBER", "BINARY_FLOAT", "BINARY_DOUBLE", "VARCHAR2", "NVARCHAR2", "CHAR", "NCHAR", "CLOB", "NCLOB"]
+        .iter()
+        .any(|kind| upper == *kind || upper.starts_with(&format!("{kind}(")));
+    if !known || !name.chars().all(|character| character.is_alphanumeric() || character == '_') {
+        return Err(format!("SP2-0553: Illegal variable name \"{name}\"."));
+    }
+    Ok(BindVariable {
+        name: name.to_uppercase(),
+        declared: upper,
+        literal: None,
+        shown: None,
+    })
+}
+
+/// The SQL literal a value takes the place of a bind variable as, and its printed text.
+pub(super) fn bound_value(value: &Value, declared: &str) -> (Option<String>, Option<String>) {
+    if value.is_null() {
+        return (None, None);
+    }
+    let text = value.to_text();
+    let numeric = declared.starts_with("NUMBER") || declared.starts_with("BINARY_");
+    let literal = if numeric && text.parse::<f64>().is_ok() {
+        text.clone()
+    } else {
+        format!("'{}'", text.replace('\'', "''"))
+    };
+    (Some(literal), Some(text))
+}
+
+/// `text` with each `:name` of a declared bind variable, outside quotes and comments, replaced
+/// by the variable's literal (`NULL` before it is set); `:=` and unknown names stay.
+pub(super) fn with_binds(text: &str, binds: &[BindVariable]) -> String {
+    if binds.is_empty() {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut characters = text.char_indices().peekable();
+    let mut quoted = false;
+    while let Some((at, character)) = characters.next() {
+        if character == '\'' {
+            quoted = !quoted;
+            out.push(character);
+            continue;
+        }
+        if quoted || character != ':' {
+            out.push(character);
+            continue;
+        }
+        let rest = &text[at + 1..];
+        let length = rest
+            .char_indices()
+            .take_while(|(_, next)| next.is_alphanumeric() || *next == '_')
+            .last()
+            .map_or(0, |(end, next)| end + next.len_utf8());
+        let name = &rest[..length];
+        match binds.iter().find(|bind| !name.is_empty() && bind.name.eq_ignore_ascii_case(name)) {
+            Some(bind) => {
+                out.push_str(bind.literal.as_deref().unwrap_or("NULL"));
+                for _ in 0..name.chars().count() {
+                    characters.next();
+                }
+            }
+            None => out.push(character),
+        }
+    }
+    out
+}
+
+/// What `PRINT` shows for one variable: its name as a heading, a rule and its value.
+pub(super) fn printed_variable(bind: &BindVariable) -> String {
+    let value = bind.shown.clone().unwrap_or_default();
+    let width = bind.name.chars().count().max(value.chars().count()).max(10);
+    format!(
+        "\n{:>width$}\n{}\n{:>width$}\n\n",
+        bind.name,
+        "-".repeat(width),
+        value
+    )
 }
 
 impl SqlPlusCommand {
@@ -27,6 +128,10 @@ impl SqlPlusCommand {
             Some(Self::Prompt)
         } else if abbreviates("spool", SPOOL_SHORTEST) {
             Some(Self::Spool)
+        } else if abbreviates("variable", VARIABLE_SHORTEST) {
+            Some(Self::Variable)
+        } else if abbreviates("print", PRINT_SHORTEST) {
+            Some(Self::Print)
         } else {
             None
         }
@@ -376,4 +481,30 @@ mod tests {
         assert!(parse_spool("report sideways").is_err());
         assert!(parse_spool("out").is_err());
     }
+
+    #[test]
+    fn bind_variables_are_declared_bound_and_substituted_outside_quotes() {
+        assert_eq!(SqlPlusCommand::named("var"), Some(SqlPlusCommand::Variable));
+        assert_eq!(SqlPlusCommand::named("print"), Some(SqlPlusCommand::Print));
+        let mut total = declared_variable("total number").unwrap();
+        assert_eq!(total.name, "TOTAL");
+        assert!(declared_variable("total").is_err());
+        assert!(declared_variable("total widget").is_err());
+        let (literal, shown) = bound_value(&Value::Integer(42), &total.declared);
+        total.literal = literal;
+        total.shown = shown;
+        let mut label = declared_variable("label varchar2(20)").unwrap();
+        let (literal, shown) = bound_value(&Value::Text("it's".to_owned()), &label.declared);
+        label.literal = literal;
+        label.shown = shown;
+        let binds = vec![total.clone(), label];
+        assert_eq!(
+            with_binds("SELECT :total + 1, ':total', :label, :other FROM dual", &binds),
+            "SELECT 42 + 1, ':total', 'it''s', :other FROM dual"
+        );
+        assert_eq!(with_binds("BEGIN x := :TOTAL; END;", &binds), "BEGIN x := 42; END;");
+        assert!(printed_variable(&total).contains("TOTAL"));
+        assert!(printed_variable(&total).contains("42"));
+    }
+
 }

@@ -237,6 +237,7 @@ struct Shell<'s, 'db: 's> {
     spool: Option<Spool>,
     spool_replaced: bool,
     spooling_to: Option<String>,
+    binds: Vec<super::shell_sqlplus::BindVariable>,
 }
 
 struct CopyFiles {
@@ -282,6 +283,7 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
             line_reader: None,
             collection: None,
             spool: None,
+            binds: Vec::new(),
             spool_replaced: false,
             spooling_to: None,
         };
@@ -578,7 +580,13 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
         };
         let first = first.to_ascii_lowercase();
         if first == "exec" || first == "execute" {
-            return Some(self.run_sql(console, &format!("BEGIN {rest}; END;")));
+            if let Some((target, expression)) = rest.split_once(":=")
+                && let Some(name) = target.trim().strip_prefix(':')
+            {
+                return Some(self.assign_bind(console, name.trim(), expression.trim()));
+            }
+            let block = super::shell_sqlplus::with_binds(&format!("BEGIN {rest}; END;"), &self.binds);
+            return Some(self.run_sql(console, &block));
         }
         match SqlPlusCommand::named(&first) {
             Some(SqlPlusCommand::Describe) => return Some(self.describe(console, rest)),
@@ -590,6 +598,8 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
                 return Some(Step::Continue(Exit::Done));
             }
             Some(SqlPlusCommand::Spool) => return Some(self.spool(console, rest)),
+            Some(SqlPlusCommand::Variable) => return Some(self.variable(console, rest)),
+            Some(SqlPlusCommand::Print) => return Some(self.print_binds(console, rest)),
             None => {}
         }
         if first != "set" {
@@ -617,6 +627,82 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
                 Step::Continue(exit_for(&error))
             }
         })
+    }
+
+    fn variable(&mut self, console: &mut Console<'_>, text: &str) -> Step {
+        if text.is_empty() || !text.contains(char::is_whitespace) {
+            let shown: String = self
+                .binds
+                .iter()
+                .filter(|bind| text.is_empty() || bind.name.eq_ignore_ascii_case(text))
+                .map(|bind| format!("variable   {}\ndatatype   {}\n\n", bind.name, bind.declared))
+                .collect();
+            if shown.is_empty() && !text.is_empty() {
+                return self.fail(console, &format!("SP2-0552: Bind variable \"{}\" not declared.", text.to_uppercase()), Exit::NotFound);
+            }
+            self.print(console, &shown);
+            return Step::Continue(Exit::Done);
+        }
+        match super::shell_sqlplus::declared_variable(text) {
+            Ok(declared) => {
+                self.binds.retain(|bind| bind.name != declared.name);
+                self.binds.push(declared);
+                Step::Continue(Exit::Done)
+            }
+            Err(message) => self.fail(console, &message, Exit::Usage),
+        }
+    }
+
+    fn assign_bind(&mut self, console: &mut Console<'_>, name: &str, expression: &str) -> Step {
+        let Some(at) = self.binds.iter().position(|bind| bind.name.eq_ignore_ascii_case(name)) else {
+            return self.fail(
+                console,
+                &format!("SP2-0552: Bind variable \"{}\" not declared.", name.to_uppercase()),
+                Exit::NotFound,
+            );
+        };
+        let query = super::shell_sqlplus::with_binds(
+            &format!("SELECT {} FROM dual", expression.trim_end_matches(';')),
+            &self.binds,
+        );
+        let mut found = None;
+        let outcome = self.sql.execute(&query, &mut |result: QueryResult| {
+            if let Some(value) = result.rows.into_iter().next().and_then(|row| row.into_iter().next()) {
+                found = Some(value);
+            }
+        });
+        if let Err(error) = outcome {
+            self.print_sql_error(console, &error, expression);
+            return Step::Continue(exit_for(&error));
+        }
+        let value = found.unwrap_or(eggdb_sql::Value::Null);
+        let declared = self.binds[at].declared.clone();
+        let (literal, shown) = super::shell_sqlplus::bound_value(&value, &declared);
+        self.binds[at].literal = literal;
+        self.binds[at].shown = shown;
+        self.print(console, "\nPL/SQL procedure successfully completed.\n\n");
+        Step::Continue(Exit::Done)
+    }
+
+    fn print_binds(&mut self, console: &mut Console<'_>, names: &str) -> Step {
+        let wanted: Vec<String> = names
+            .split_whitespace()
+            .map(|name| name.trim_start_matches(':').to_uppercase())
+            .collect();
+        if let Some(missing) = wanted
+            .iter()
+            .find(|name| !self.binds.iter().any(|bind| &bind.name == *name))
+        {
+            return self.fail(console, &format!("SP2-0552: Bind variable \"{missing}\" not declared."), Exit::NotFound);
+        }
+        let shown: String = self
+            .binds
+            .iter()
+            .filter(|bind| wanted.is_empty() || wanted.contains(&bind.name))
+            .map(super::shell_sqlplus::printed_variable)
+            .collect();
+        self.print(console, &shown);
+        Step::Continue(Exit::Done)
     }
 
     fn describe(&mut self, console: &mut Console<'_>, name: &str) -> Step {
@@ -714,6 +800,10 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
             file_out: None,
             show_copy_tag: false,
         };
+        if self.sql.dialect() == Dialect::Oracle && !self.binds.is_empty() {
+            let bound = super::shell_sqlplus::with_binds(text, &self.binds);
+            return self.run_with_copy(console, &bound, files);
+        }
         self.run_with_copy(console, text, files)
     }
 
