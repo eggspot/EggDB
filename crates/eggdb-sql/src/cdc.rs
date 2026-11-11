@@ -22,6 +22,10 @@ CREATE TABLE eggdb_cdc.outbox (
     after jsonb,
     captured_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE TABLE eggdb_cdc.options (
+    name text PRIMARY KEY,
+    value text NOT NULL
+);
 CREATE FUNCTION eggdb_cdc.capture() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
@@ -83,6 +87,96 @@ pub fn debezium_event(
         json_string(table),
         json_string(op)
     )
+}
+
+/// The Kafka Connect type Debezium's JSON converter gives a column of SQL type `data_type`, as
+/// `information_schema.columns` names it, matching how `to_jsonb` writes the column's values.
+pub fn connect_type(data_type: &str) -> &'static str {
+    match data_type {
+        "smallint" => "int16",
+        "integer" => "int32",
+        "bigint" => "int64",
+        "real" => "float",
+        "double precision" | "numeric" => "double",
+        "boolean" => "boolean",
+        _ => "string",
+    }
+}
+
+fn connect_fields(columns: &[(String, String, bool)]) -> String {
+    columns
+        .iter()
+        .map(|(name, data_type, nullable)| {
+            format!(
+                "{{\"type\":\"{}\",\"optional\":{nullable},\"field\":{}}}",
+                connect_type(data_type),
+                json_string(name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The `schema` section Debezium's JSON converter puts beside the envelope (`schemas.enable`):
+/// the table's columns as the `before` and `after` structs, then `source`, `op` and `ts_ms`.
+/// `columns` are each column's name, SQL type and whether it takes NULL, in table order.
+pub fn debezium_schema(
+    database: &str,
+    schema: &str,
+    table: &str,
+    columns: &[(String, String, bool)],
+) -> String {
+    let record = format!("{database}.{schema}.{table}");
+    let value = format!(
+        "{{\"type\":\"struct\",\"fields\":[{}],\"optional\":true,\"name\":{}",
+        connect_fields(columns),
+        json_string(&format!("{record}.Value"))
+    );
+    let source = "{\"type\":\"struct\",\"fields\":[{\"type\":\"string\",\"optional\":false,\"field\":\"connector\"},{\"type\":\"string\",\"optional\":false,\"field\":\"db\"},{\"type\":\"string\",\"optional\":false,\"field\":\"schema\"},{\"type\":\"string\",\"optional\":false,\"field\":\"table\"},{\"type\":\"int64\",\"optional\":false,\"field\":\"ts_ms\"}],\"optional\":false,\"name\":\"io.debezium.connector.eggdb.Source\",\"field\":\"source\"}";
+    format!(
+        "{{\"type\":\"struct\",\"fields\":[{value},\"field\":\"before\"}},{value},\"field\":\"after\"}},{source},{{\"type\":\"string\",\"optional\":false,\"field\":\"op\"}},{{\"type\":\"int64\",\"optional\":true,\"field\":\"ts_ms\"}}],\"optional\":false,\"name\":{},\"version\":1}}",
+        json_string(&format!("{record}.Envelope"))
+    )
+}
+
+fn schemas_enabled(session: &mut Session<'_>) -> bool {
+    let mut enabled = false;
+    let _ = session.execute(
+        "SELECT value FROM eggdb_cdc.options WHERE name = 'schemas.enable'",
+        &mut |result| {
+            enabled = result
+                .rows
+                .first()
+                .and_then(|row| text_of(row.first()))
+                .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+        },
+    );
+    enabled
+}
+
+fn table_columns(session: &mut Session<'_>, schema: &str, table: &str) -> SqlResult<Vec<(String, String, bool)>> {
+    let mut columns = Vec::new();
+    session.execute(
+        &format!(
+            "SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = {} AND table_name = {} ORDER BY ordinal_position",
+            sql_text(schema),
+            sql_text(table)
+        ),
+        &mut |result| {
+            columns = result
+                .rows
+                .iter()
+                .map(|row| {
+                    (
+                        text_of(row.first()).unwrap_or_default(),
+                        text_of(row.get(1)).unwrap_or_default(),
+                        text_of(row.get(2)).is_none_or(|nullable| nullable == "YES"),
+                    )
+                })
+                .collect();
+        },
+    )?;
+    Ok(columns)
 }
 
 /// Hands up to `limit` of the oldest captured changes to `deliver`, in order, as Debezium-style
@@ -220,6 +314,8 @@ fn deliver_outbox<S: KeyValueStore>(
             Err(error)
         };
     }
+    let with_schemas = schemas_enabled(&mut session);
+    let mut schemas: std::collections::HashMap<(String, String), String> = std::collections::HashMap::new();
     let mut last_delivered = None;
     let mut delivered = 0;
     let mut refused = None;
@@ -236,7 +332,7 @@ fn deliver_outbox<S: KeyValueStore>(
             Some(Value::BigInt(milliseconds)) => *milliseconds,
             _ => 0,
         };
-        let event = debezium_event(
+        let mut event = debezium_event(
             database,
             &schema,
             &table,
@@ -245,6 +341,16 @@ fn deliver_outbox<S: KeyValueStore>(
             after.as_deref(),
             captured_ms,
         );
+        if with_schemas {
+            let key = (schema.clone(), table.clone());
+            if !schemas.contains_key(&key) {
+                let columns = table_columns(&mut session, &schema, &table)?;
+                schemas.insert(key.clone(), debezium_schema(database, &schema, &table, &columns));
+            }
+            if let Some(described) = schemas.get(&key) {
+                event = format!("{{\"schema\":{described},\"payload\":{event}}}");
+            }
+        }
         if !deliver(&event) {
             refused = Some((*id, event));
             break;
@@ -264,7 +370,10 @@ fn deliver_outbox<S: KeyValueStore>(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_DELIVERY_ATTEMPTS, debezium_event, deliver_changes, deliver_changes_with_retries, retry_delay_ms};
+    use super::{
+        MAX_DELIVERY_ATTEMPTS, connect_type, debezium_event, deliver_changes, deliver_changes_with_retries,
+        retry_delay_ms,
+    };
     use crate::memory_store::MemoryStore;
     use crate::session::Session;
 
@@ -379,6 +488,40 @@ mod tests {
     fn events_escape_names() {
         let event = debezium_event("a\"b", "public", "t", "c", None, Some("{}"), 5);
         assert!(event.starts_with("{\"before\":null,\"after\":{},\"source\":{\"connector\":\"eggdb\",\"db\":\"a\\\"b\""), "{event}");
+    }
+
+    #[test]
+    fn the_schema_section_describes_the_table_when_asked_for() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        for statement in [
+            "CREATE EXTENSION eggdb_cdc",
+            "CREATE TABLE accounts (id int PRIMARY KEY, balance bigint, note text)",
+            "CREATE TRIGGER accounts_cdc AFTER INSERT OR UPDATE OR DELETE ON accounts FOR EACH ROW EXECUTE FUNCTION eggdb_cdc.capture()",
+            "INSERT INTO accounts VALUES (1, 100, 'a')",
+            "INSERT INTO eggdb_cdc.options VALUES ('schemas.enable', 'true')",
+            "INSERT INTO accounts VALUES (2, 200, 'b')",
+        ] {
+            session
+                .execute(statement, &mut |_| {})
+                .unwrap_or_else(|error| panic!("{statement}: {error}"));
+        }
+        let mut seen = Vec::new();
+        deliver_changes(&store, "app", 10, &mut |event| {
+            seen.push(event.to_owned());
+            true
+        })
+        .unwrap();
+        assert_eq!(seen.len(), 2);
+        for event in &seen {
+            assert!(event.starts_with("{\"schema\":{\"type\":\"struct\""), "{event}");
+            assert!(event.contains("{\"type\":\"int32\",\"optional\":false,\"field\":\"id\"}"), "{event}");
+            assert!(event.contains("{\"type\":\"int64\",\"optional\":true,\"field\":\"balance\"}"), "{event}");
+            assert!(event.contains("\"name\":\"app.public.accounts.Envelope\""), "{event}");
+            assert!(event.contains(",\"payload\":{\"before\":null,\"after\":"), "{event}");
+        }
+        assert_eq!(connect_type("numeric"), "double");
+        assert_eq!(connect_type("timestamp with time zone"), "string");
     }
 
     #[test]

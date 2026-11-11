@@ -634,3 +634,4 @@ its full title with its status.
 - [D607](decisions/D607.md) Code-only batch 255 (M13): the Leiden community algorithm
 - [D608](decisions/D608.md) Code-only batch 256 (M12): ST_AsMVT
 - [D609](decisions/D609.md) Code-only batch 257 (M12): S2 cell ids
+- [D610](decisions/D610.md) Code-only batch 258 (M14): Debezium's schema section

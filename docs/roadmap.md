@@ -1354,7 +1354,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Retries with backoff and a dead-letter table, Debezium's `schema` section and transaction
   metadata (D210). Check: a consumer test that receives every commit of a workload.
   Retries with backoff and the dead-letter table: **code written, unbuilt** (code-only mode,
-  2026-11-11, D528). Left: Debezium's `schema` section and transaction metadata.
+  2026-11-11, D528); Debezium's `schema` section: **code written, unbuilt** (code-only mode, 2026-11-12,
+  D610). Left: transaction metadata (needs a transaction id per transaction).
 - Change capture without triggers (D210).
 - System-versioned temporal tables (SQL:2011) with `AS OF` over kept history, and SQL Server's
   temporal tables (D28).
