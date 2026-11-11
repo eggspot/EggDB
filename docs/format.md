@@ -665,6 +665,20 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
 - The lock disappears when the process ends, so there are no stale locks.
 - Only on WASI, which has no file locks, does a file open unlocked.
 
+## RESP values
+
+A RESP key's stored value starts with format version `1`, a kind byte and the expiry (u64
+little-endian milliseconds since 1970, `0` for none). Kinds: `0` string (the bytes follow),
+`1` hash, `2` list, `3` set, `4` sorted set, `5` stream, and `6` a stream with consumer groups
+(D512). Kind 6 is kind 5's layout (last id as two u64, a u32 entry count, each entry's id, u32
+pair count and length-prefixed pairs) followed by a u32 group count (at least one) and, per group
+in ascending name order: the length-prefixed name, the last delivered id (two u64), entries read
+(u64, `u64::MAX` when unknown), a u32 pending count and per pending entry in ascending id order
+its id, length-prefixed consumer, delivery time and delivery count (u64 each), then a u32
+consumer count and per consumer in ascending name order its length-prefixed name, seen and
+active times (u64 each). Every pending entry's consumer must be listed; anything else, short
+or left over, is refused as damaged. A stream whose last group is destroyed goes back to kind 5.
+
 ## Compatibility
 - Every later release reads version-1 files.
 - A change that an older release would misread needs a feature flag (see "Feature flags").

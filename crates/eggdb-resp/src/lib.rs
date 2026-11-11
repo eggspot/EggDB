@@ -23,6 +23,7 @@ mod pops;
 mod protocol;
 mod pubsub;
 mod server;
+mod stream_groups;
 mod streams;
 mod transactions;
 mod value;

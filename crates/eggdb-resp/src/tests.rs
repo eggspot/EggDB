@@ -403,3 +403,19 @@ fn debug_object_sleep_and_help_answer_as_redis_does() {
     assert_eq!(redis.text("DEBUG SET-ACTIVE-EXPIRE 0"), "+OK|");
     assert!(redis.text("DEBUG NOPE").starts_with("-ERR unknown subcommand"));
 }
+
+#[test]
+fn consumer_groups_deliver_acknowledge_and_claim() {
+    let mut redis = Harness::new();
+    assert_eq!(redis.text("XGROUP CREATE s g $"), "-ERR The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically.|");
+    assert_eq!(redis.text("XGROUP CREATE s g $ MKSTREAM"), "+OK|");
+    assert_eq!(redis.text("XGROUP CREATE s g $"), "-BUSYGROUP Consumer Group name already exists|");
+    assert_eq!(redis.text("XADD s 1-0 a 1"), "$3|1-0|");
+    assert_eq!(redis.text("XREADGROUP GROUP g c1 STREAMS s >"), "*1|*2|$1|s|*1|*2|$3|1-0|*2|$1|a|$1|1|");
+    assert_eq!(redis.text("XREADGROUP GROUP g c1 STREAMS s >"), "*-1|");
+    assert_eq!(redis.text("XPENDING s g"), "*4|:1|$3|1-0|$3|1-0|*1|*2|$2|c1|$1|1|");
+    redis.now_ms += 5000;
+    assert_eq!(redis.text("XCLAIM s g c2 1000 1-0 JUSTID"), "*1|$3|1-0|");
+    assert_eq!(redis.text("XACK s g 1-0"), ":1|");
+    assert_eq!(redis.text("XPENDING s g"), "*4|:0|$-1|$-1|*-1|");
+}

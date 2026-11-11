@@ -4,6 +4,7 @@ use crate::pops::{
     move_list_item, parse_many_pop, pop_first_list, pop_first_sorted, sorted_many_reply,
 };
 use crate::protocol::Reply;
+use crate::stream_groups::{GroupRead, parse_xreadgroup, read_group};
 use crate::streams::{StreamRead, parse_xread, read_new_entries};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -56,6 +57,7 @@ enum Wanted {
     },
     ManyOfSorted(ManyPop<ScoreEnd>),
     Stream(StreamRead),
+    Group(GroupRead),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +92,14 @@ impl BlockingCommand {
                 let timeout_ms = read.block_ms?;
                 Some(Ok(Self {
                     wanted: Wanted::Stream(read),
+                    timeout_ms,
+                }))
+            }
+            "xreadgroup" => {
+                let read = parse_xreadgroup(args).ok()?;
+                let timeout_ms = read.block_ms?;
+                Some(Ok(Self {
+                    wanted: Wanted::Group(read),
                     timeout_ms,
                 }))
             }
@@ -164,6 +174,7 @@ impl BlockingCommand {
             Wanted::ManyOfLists(pop) => &pop.keys,
             Wanted::ManyOfSorted(pop) => &pop.keys,
             Wanted::Stream(read) => &read.keys,
+            Wanted::Group(read) => &read.keys,
         }
     }
 
@@ -200,7 +211,7 @@ impl BlockingCommand {
                 Wanted::ManyOfSorted(pop) => {
                     any_sorted_to_pop(store, &pop.keys, now, on_wrong_type)?
                 }
-                Wanted::Stream(_) => true,
+                Wanted::Stream(_) | Wanted::Group(_) => true,
             };
             Ok(Reply::ok())
         });
@@ -274,6 +285,10 @@ impl BlockingCommand {
             }),
             Wanted::Stream(read) => reading(context, db, |store| {
                 taken = read_new_entries(store, read, context, on_wrong_type)?;
+                Ok(Reply::ok())
+            }),
+            Wanted::Group(read) => writing(context, db, |store| {
+                taken = read_group(store, read, context, on_wrong_type)?;
                 Ok(Reply::ok())
             }),
         };

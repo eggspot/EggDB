@@ -29,11 +29,11 @@ fn stream_of(entry: Option<&Entry>) -> Result<Stream, String> {
     }
 }
 
-fn id_text(id: StreamId) -> Vec<u8> {
+pub(crate) fn id_text(id: StreamId) -> Vec<u8> {
     format!("{}-{}", id.0, id.1).into_bytes()
 }
 
-fn parse_id(bytes: &[u8], missing_sequence: u64) -> Result<StreamId, String> {
+pub(crate) fn parse_id(bytes: &[u8], missing_sequence: u64) -> Result<StreamId, String> {
     let invalid = || "ERR Invalid stream ID specified as stream command argument".to_owned();
     let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
     match text.split_once('-') {
@@ -45,7 +45,7 @@ fn parse_id(bytes: &[u8], missing_sequence: u64) -> Result<StreamId, String> {
     }
 }
 
-fn bound(bytes: &[u8], low: bool) -> Result<(StreamId, bool), String> {
+pub(crate) fn bound(bytes: &[u8], low: bool) -> Result<(StreamId, bool), String> {
     match bytes {
         b"-" => Ok(((0, 0), false)),
         b"+" => Ok(((u64::MAX, u64::MAX), false)),
@@ -59,7 +59,7 @@ fn bound(bytes: &[u8], low: bool) -> Result<(StreamId, bool), String> {
     }
 }
 
-fn entry_reply_bytes(id: StreamId, pairs: &[(Vec<u8>, Vec<u8>)]) -> usize {
+pub(crate) fn entry_reply_bytes(id: StreamId, pairs: &[(Vec<u8>, Vec<u8>)]) -> usize {
     pairs
         .iter()
         .fold(bulk_reply_bytes(&id_text(id)), |bytes, (field, value)| {
@@ -69,7 +69,7 @@ fn entry_reply_bytes(id: StreamId, pairs: &[(Vec<u8>, Vec<u8>)]) -> usize {
         })
 }
 
-fn entry_reply(id: StreamId, pairs: &[(Vec<u8>, Vec<u8>)]) -> Reply {
+pub(crate) fn entry_reply(id: StreamId, pairs: &[(Vec<u8>, Vec<u8>)]) -> Reply {
     let mut fields = Vec::with_capacity(pairs.len() * 2);
     for (field, value) in pairs {
         fields.push(Reply::bulk(field.clone()));

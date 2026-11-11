@@ -904,7 +904,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Stream consumer groups (`XGROUP`, `XREADGROUP` with `BLOCK`, `XACK`, `XPENDING`, `XCLAIM`,
   `XAUTOCLAIM`, `XINFO`) as their own security-critical format part: group state kept with the
   stream in a new stored value kind 6, with pinned test vectors, truncation and byte-flip tests
-  and `docs/format.md`'s RESP value section (D35, D193, D347).
+  and `docs/format.md`'s RESP value section (D35, D193, D347). **Code written,
+  unbuilt** (code-only mode, 2026-11-11, D512).
 - Geo searches over the geohash ranges of the nine neighbouring cells instead of every member,
   and RESP3 double replies for `GEOPOS`/`WITHCOORD` coordinates (D330). RESP3 doubles: **code
   written, unbuilt** (code-only mode, 2026-11-10, D394).
