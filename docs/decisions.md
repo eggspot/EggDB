@@ -446,3 +446,4 @@ its full title with its status.
 - [D419](decisions/D419.md) Code-only batch 66 (M10): variables set inside MySQL stored programs and `SIGNAL ... SET MYSQL_ERRNO`
 - [D420](decisions/D420.md) Code-only batch 67 (M10): `SHOW CREATE PROCEDURE|FUNCTION`, `SHOW ... STATUS` and MySQL's `ROUTINES` and `PARAMETERS` views
 - [D421](decisions/D421.md) Code-only batch 68 (M10): MySQL events (`CREATE EVENT`) on the job scheduler
+- [D422](decisions/D422.md) Code-only batch 69 (M10): MySQL's named locks (`GET_LOCK` and its family)

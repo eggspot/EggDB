@@ -1498,6 +1498,9 @@ impl Evaluator<'_> {
         if let Some(result) = numeric_function(name, &values) {
             return result;
         }
+        if let Some(result) = crate::mysql_named_locks::function(name, &values) {
+            return result;
+        }
         if let Some(result) = crate::mysql_date_functions::function(name, &values) {
             return result;
         }

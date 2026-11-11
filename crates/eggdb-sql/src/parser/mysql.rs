@@ -1148,6 +1148,9 @@ impl<'t> Parser<'t> {
             "greatest" => "mysql_greatest",
             "least" => "mysql_least",
             "sqrt" => crate::square_root::MYSQL,
+            other if crate::mysql_named_locks::internal_name(other).is_some() => {
+                crate::mysql_named_locks::internal_name(other).map_or("", |(internal, _)| internal)
+            }
             "week" | "weekofyear" => crate::mysql_date_parts::WEEK_FUNCTION,
             "yearweek" => crate::mysql_date_parts::YEARWEEK_FUNCTION,
             "date_format" => crate::mysql_date_parts::DATE_FORMAT_FUNCTION,
@@ -1182,6 +1185,9 @@ impl<'t> Parser<'t> {
             "if" => Some(3),
             "octet_length" | "upper" | "lower" => Some(1),
             crate::square_root::MYSQL | crate::mysql_date_parts::EXTRACT_FUNCTION => Some(1),
+            internal if crate::mysql_named_locks::INTERNAL_NAMES.contains(&internal) => {
+                crate::mysql_named_locks::internal_name(&name.text).map(|(_, count)| count)
+            }
             crate::mysql_date_parts::WEEK_FUNCTION
             | crate::mysql_date_parts::YEARWEEK_FUNCTION
             | crate::mysql_date_parts::DATE_FORMAT_FUNCTION => Some(2),

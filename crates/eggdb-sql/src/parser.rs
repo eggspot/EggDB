@@ -5010,6 +5010,7 @@ impl<'t> Parser<'t> {
             || INTERNAL_FUNCTIONS.contains(&name.text.as_str())
             || crate::square_root::INTERNAL_NAMES.contains(&text)
             || crate::mysql_date_functions::INTERNAL_NAMES.contains(&text)
+            || crate::mysql_named_locks::INTERNAL_NAMES.contains(&text)
         {
             return Err(SqlError::new(
                 SqlState::UNDEFINED_FUNCTION,

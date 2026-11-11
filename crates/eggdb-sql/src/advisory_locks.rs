@@ -691,6 +691,45 @@ pub(crate) fn release_application_lock(resource: &str, lasts: Lasts) -> SqlResul
     Ok(true)
 }
 
+/// The session holding the application lock `resource`, `None` when no session holds it.
+pub(crate) fn application_lock_holder(resource: &str) -> SqlResult<Option<u64>> {
+    let owner = active()?;
+    let held = held();
+    Ok(held
+        .get(&application_name(owner.database, resource))
+        .and_then(|holds| holds.iter().find(|hold| !hold.is_empty()))
+        .map(|hold| hold.owner))
+}
+
+/// The active session's number, as the application locks know it.
+pub(crate) fn active_owner() -> SqlResult<u64> {
+    active().map(|owner| owner.owner)
+}
+
+/// Releases every session-long hold the active session has on an application lock whose
+/// resource starts with `prefix`; the number of holds released.
+pub(crate) fn release_application_locks_starting(prefix: &str) -> SqlResult<i64> {
+    let owner = active()?;
+    let mut held = held();
+    let mut released: i64 = 0;
+    for (name, holds) in held.iter_mut() {
+        let matches = name.database == owner.database
+            && matches!(&name.key, Key::Application(resource) if resource.starts_with(prefix));
+        if !matches {
+            continue;
+        }
+        for hold in holds.iter_mut().filter(|hold| hold.owner == owner.owner) {
+            released += i64::from(hold.session_count);
+            hold.session_count = 0;
+        }
+        holds.retain(|hold| !hold.is_empty());
+    }
+    held.retain(|_, holds| !holds.is_empty());
+    drop(held);
+    registry().released.notify_all();
+    Ok(released)
+}
+
 /// The mode in which the active session holds the application lock `resource` for `lasts`,
 /// as SQL Server's `APPLOCK_MODE` names it: `NoLock` when it holds none.
 pub(crate) fn application_lock_mode(resource: &str, lasts: Lasts) -> SqlResult<&'static str> {
