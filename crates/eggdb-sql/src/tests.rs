@@ -4910,3 +4910,21 @@ fn a_declared_cursor_reports_its_columns_for_a_protocol_describe() {
     assert!(session.declared_cursor_columns("other").is_none());
     last(&mut session, "COMMIT");
 }
+
+#[test]
+fn transact_sql_grants_on_objects_and_columns_use_the_shared_privileges() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "CREATE TABLE items (id integer PRIMARY KEY, secret text)");
+    last(&mut session, "CREATE ROLE reader");
+    let mut tsql = Session::with_dialect(&store, crate::Dialect::SqlServer);
+    tsql.execute("GRANT SELECT ON OBJECT::items (id) TO reader", &mut |_| {})
+        .expect("a column grant runs");
+    assert_eq!(
+        last(&mut session, "SELECT has_column_privilege('reader', 'items', 'id', 'SELECT'), has_column_privilege('reader', 'items', 'secret', 'SELECT')"),
+        "has_column_privilege|has_column_privilege\nt|f\nSELECT 1"
+    );
+    tsql.execute("REVOKE SELECT ON OBJECT::items (id) FROM reader", &mut |_| {})
+        .expect("the revoke runs");
+    assert!(tsql.execute("DENY SELECT ON items TO reader", &mut |_| {}).is_err());
+}

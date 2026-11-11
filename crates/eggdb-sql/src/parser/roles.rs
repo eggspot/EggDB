@@ -267,10 +267,26 @@ impl Parser<'_> {
                 )));
             }
             self.take_word("table");
+            if self.sqlserver() && self.is_word("object") {
+                self.at += 1;
+                self.expect(&TokenKind::DoubleColon)?;
+            }
         }
         let mut tables = Vec::new();
         if role_names.is_empty() {
             tables.push(self.table_name()?);
+            if self.sqlserver() && self.peek_kind() == &TokenKind::LeftParen {
+                let names = self.privilege_columns()?;
+                for privilege in std::mem::take(&mut privileges) {
+                    if !crate::roles::COLUMN_PRIVILEGES.contains(&privilege) {
+                        return Err(self.not_supported(&format!(
+                            "{} on columns",
+                            privilege.keyword().to_ascii_uppercase()
+                        )));
+                    }
+                    columns.push((privilege, names.clone()));
+                }
+            }
             while self.take(&TokenKind::Comma) {
                 tables.push(self.table_name()?);
             }

@@ -610,3 +610,4 @@ its full title with its status.
 - [D583](decisions/D583.md) Code-only batch 231 (M16): CQL prepared statements shared between connections
 - [D584](decisions/D584.md) Code-only batch 232 (M16): CQL ALTER TABLE
 - [D585](decisions/D585.md) Code-only batch 233 (M16): CQL secondary indexes
+- [D586](decisions/D586.md) Code-only batch 234 (M6b): SQL Server's GRANT and REVOKE

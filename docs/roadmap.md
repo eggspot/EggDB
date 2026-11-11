@@ -698,7 +698,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `FORCE ROW LEVEL SECURITY` taking effect once object owners land, and roles with `BYPASSRLS`
   (D326).
 - SQL Server's column `GRANT` and `DENY`, column privileges on sequences, `MERGE` and `ON CONFLICT
-  DO UPDATE` under row security, and row security through updatable views (D285).
+  DO UPDATE` under row security, and row security through updatable views (D285). `GRANT` and `REVOKE` with columns: **code written,
+  unbuilt** (code-only mode, 2026-11-12, D586). Left: `DENY`.
 - Column grants that follow a column renamed by MySQL's `CHANGE COLUMN` (D285). **Code written,
   unbuilt** (code-only mode, 2026-11-11, D484).
 - Oracle VPD and SQL Server's security predicates (D186).

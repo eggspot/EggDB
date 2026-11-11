@@ -249,9 +249,7 @@ const STATEMENT_WORDS: [&str; 35] = [
     "with",
 ];
 
-const NOT_SUPPORTED_STATEMENTS: [&str; 8] = [
-    "grant", "revoke", "deny", "backup", "restore", "dbcc", "kill", "bulk",
-];
+const NOT_SUPPORTED_STATEMENTS: [&str; 6] = ["deny", "backup", "restore", "dbcc", "kill", "bulk"];
 
 const BATCH_LOGIC_STATEMENTS: [&str; 6] = ["if", "while", "break", "continue", "return", "goto"];
 
