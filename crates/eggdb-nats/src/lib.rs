@@ -5,6 +5,7 @@
 //! JetStream's durable streams are not served yet. NATS is a trademark of the Linux Foundation;
 //! EggDB is compatible with its client protocol.
 
+mod nkeys;
 mod protocol;
 mod server;
 

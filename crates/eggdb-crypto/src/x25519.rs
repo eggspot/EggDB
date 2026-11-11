@@ -22,7 +22,7 @@ impl std::fmt::Display for X25519LowOrderPoint {
 
 impl std::error::Error for X25519LowOrderPoint {}
 
-type Element = [u64; 5];
+pub(crate) type Element = [u64; 5];
 
 fn load(bytes: &[u8; 32], at: usize) -> u64 {
     let mut word = [0u8; 8];
@@ -30,7 +30,7 @@ fn load(bytes: &[u8; 32], at: usize) -> u64 {
     u64::from_le_bytes(word)
 }
 
-fn from_bytes(bytes: &[u8; 32]) -> Element {
+pub(crate) fn from_bytes(bytes: &[u8; 32]) -> Element {
     [
         load(bytes, 0) & MASK,
         (load(bytes, 6) >> 3) & MASK,
@@ -59,7 +59,7 @@ fn carry(mut h: Element) -> Element {
     h
 }
 
-fn to_bytes(h: &Element) -> [u8; 32] {
+pub(crate) fn to_bytes(h: &Element) -> [u8; 32] {
     let mut h = carry(carry(*h));
     let mut q = (h[0] + 19) >> 51;
     q = (h[1] + q) >> 51;
@@ -93,7 +93,7 @@ fn to_bytes(h: &Element) -> [u8; 32] {
     out
 }
 
-fn add(a: &Element, b: &Element) -> Element {
+pub(crate) fn add(a: &Element, b: &Element) -> Element {
     carry([
         a[0] + b[0],
         a[1] + b[1],
@@ -103,7 +103,7 @@ fn add(a: &Element, b: &Element) -> Element {
     ])
 }
 
-fn subtract(a: &Element, b: &Element) -> Element {
+pub(crate) fn subtract(a: &Element, b: &Element) -> Element {
     const FOUR_P_LOW: u64 = 0x1f_ffff_ffff_ffb4;
     const FOUR_P_HIGH: u64 = 0x1f_ffff_ffff_fffc;
     carry([
@@ -115,7 +115,7 @@ fn subtract(a: &Element, b: &Element) -> Element {
     ])
 }
 
-fn multiply(a: &Element, b: &Element) -> Element {
+pub(crate) fn multiply(a: &Element, b: &Element) -> Element {
     let [a0, a1, a2, a3, a4] = a.map(u128::from);
     let [b0, b1, b2, b3, b4] = b.map(u128::from);
     let (b1_19, b2_19, b3_19, b4_19) = (b1 * 19, b2 * 19, b3 * 19, b4 * 19);
@@ -140,11 +140,11 @@ fn multiply(a: &Element, b: &Element) -> Element {
     [h0 as u64, h1 as u64, h2 as u64, h3 as u64, h4 as u64]
 }
 
-fn square(a: &Element) -> Element {
+pub(crate) fn square(a: &Element) -> Element {
     multiply(a, a)
 }
 
-fn square_times(a: &Element, times: usize) -> Element {
+pub(crate) fn square_times(a: &Element, times: usize) -> Element {
     let mut result = *a;
     for _ in 0..times {
         result = square(&result);
@@ -152,7 +152,7 @@ fn square_times(a: &Element, times: usize) -> Element {
     result
 }
 
-fn invert(z: &Element) -> Element {
+pub(crate) fn invert(z: &Element) -> Element {
     let z2 = square(z);
     let z8 = square_times(&z2, 2);
     let z9 = multiply(&z8, z);

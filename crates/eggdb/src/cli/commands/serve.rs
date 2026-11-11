@@ -507,6 +507,7 @@ impl Session<'_> {
             password_sha256: eggdb_crypto::sha256(password.as_bytes()),
             max_connections,
             memory_budget: Arc::clone(&memory_budget),
+            nkeys: options.nats_nkeys.clone(),
         };
         let mqtt_config = eggdb_mqtt::ServerConfig {
             user: user.clone(),

@@ -13,6 +13,7 @@
 //!   masked GHASH, so neither looks up memory by a secret;
 //! - [`x25519`], [`x25519_public_key`] and [`x25519_shared_secret`]: the X25519 key exchange
 //!   (RFC 7748), by a constant-time Montgomery ladder;
+//! - [`ed25519_verify`]: Ed25519 signature verification (RFC 8032) on the same field arithmetic;
 //! - [`P256PrivateKey`], [`P256PublicKey`], [`p256_shared_secret`], [`ecdsa_p256_sign`] and
 //!   [`ecdsa_p256_verify`]: ECDH and ECDSA over the NIST P-256 curve (SEC 1, FIPS 186-5), with
 //!   complete addition formulas, a constant-time fixed-window scalar multiplication and
@@ -35,6 +36,7 @@ mod base64;
 mod bignum;
 mod chacha20;
 mod constant_time;
+mod ed25519;
 mod ff1;
 mod gcm;
 mod hash;
@@ -55,6 +57,7 @@ pub use aes::{AES_BLOCK_BYTES, Aes, AesKeyLengthError};
 pub use base64::{Base64Error, base64_decode, base64_encode};
 pub use chacha20::{CHACHA20_BLOCK_BYTES, CHACHA20_KEY_BYTES, CHACHA20_NONCE_BYTES, ChaCha20};
 pub use constant_time::constant_time_eq;
+pub use ed25519::{ED25519_PUBLIC_KEY_BYTES, ED25519_SIGNATURE_BYTES, ed25519_verify};
 pub use ff1::{Ff1, Ff1Error};
 pub use gcm::AesGcm;
 pub use hash::{HashFunction, MAX_HASH_BLOCK_BYTES, MAX_HASH_DIGEST_BYTES};

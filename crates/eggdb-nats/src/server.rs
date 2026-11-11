@@ -31,6 +31,9 @@ pub struct ServerConfig {
     /// The memory every connection's unread messages and deliveries hold together, shared
     /// with the server's other listeners (D284, D307).
     pub memory_budget: Arc<MemoryBudget>,
+    /// The user NKeys (public keys beginning with `U`) that may sign in by signing the
+    /// server's nonce instead of giving the password.
+    pub nkeys: Vec<String>,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -187,6 +190,22 @@ struct Session<'b> {
     writer: SharedWriter,
     connected: bool,
     verbose: bool,
+    nonce: String,
+}
+
+fn fresh_nonce(id: u64) -> String {
+    use std::hash::{BuildHasher, RandomState};
+    let state = RandomState::new();
+    let time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let mut bytes = Vec::with_capacity(16);
+    bytes.extend_from_slice(&state.hash_one((id, time, 0u8)).to_le_bytes());
+    bytes.extend_from_slice(&state.hash_one((id, time, 1u8)).to_le_bytes());
+    eggdb_crypto::base64_encode(&bytes)
+        .trim_end_matches('=')
+        .replace('+', "-")
+        .replace('/', "_")
 }
 
 enum Next {
@@ -245,7 +264,16 @@ impl Session<'_> {
         };
         let user = text(&options, "user").unwrap_or_default();
         let password = text(&options, "pass").unwrap_or_default();
+        let nkey = text(&options, "nkey");
         let authorized = match text(&options, "auth_token") {
+            _ if nkey.is_some() => nkey.as_deref().is_some_and(|nkey| {
+                self.config.nkeys.iter().any(|allowed| allowed == nkey)
+                    && crate::nkeys::signed_nonce(
+                        nkey,
+                        &self.nonce,
+                        &text(&options, "sig").unwrap_or_default(),
+                    )
+            }),
             Some(token) if user.is_empty() => eggdb_crypto::constant_time_eq(
                 &eggdb_crypto::sha256(token.as_bytes()),
                 &self.config.password_sha256,
@@ -420,9 +448,9 @@ impl Session<'_> {
     }
 }
 
-fn info(address: SocketAddr, client_id: u64) -> String {
+fn info(address: SocketAddr, client_id: u64, nonce: &str) -> String {
     format!(
-        "INFO {{\"server_id\":\"EGGDB\",\"server_name\":\"eggdb\",\"version\":\"2.10.0\",\"proto\":1,\"go\":\"eggdb\",\"host\":\"{}\",\"port\":{},\"headers\":true,\"auth_required\":true,\"max_payload\":{MAX_PAYLOAD},\"client_id\":{client_id}}}\r\n",
+        "INFO {{\"server_id\":\"EGGDB\",\"server_name\":\"eggdb\",\"version\":\"2.10.0\",\"proto\":1,\"go\":\"eggdb\",\"host\":\"{}\",\"port\":{},\"headers\":true,\"auth_required\":true,\"max_payload\":{MAX_PAYLOAD},\"client_id\":{client_id},\"nonce\":\"{nonce}\"}}\r\n",
         address.ip(),
         address.port()
     )
@@ -444,9 +472,10 @@ pub(crate) fn serve_stream(
         writer,
         connected: false,
         verbose: false,
+        nonce: fresh_nonce(id),
     };
     let result = session
-        .send(info(address, id).as_bytes())
+        .send(info(address, id, &session.nonce).as_bytes())
         .and_then(|()| session.run(reader, stop));
     broker.clients().remove(&id);
     result

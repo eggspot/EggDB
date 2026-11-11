@@ -13,6 +13,7 @@ fn config() -> ServerConfig {
         password_sha256: eggdb_crypto::sha256(b"secret"),
         max_connections: 8,
         memory_budget: Arc::default(),
+        nkeys: Vec::new(),
     }
 }
 

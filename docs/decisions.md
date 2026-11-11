@@ -641,3 +641,4 @@ its full title with its status.
 - [D614](decisions/D614.md) Code-only batch 262 (M16): AMQP queue TTL (x-expires)
 - [D615](decisions/D615.md) Code-only batch 263 (M16): AMQP priority queues
 - [D616](decisions/D616.md) Code-only batch 264 (M16): Kafka log compaction
+- [D617](decisions/D617.md) Code-only batch 265 (M16): Ed25519 and NATS NKey authentication
