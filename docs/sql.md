@@ -1351,8 +1351,11 @@ name;2` runs the second, and `DROP PROCEDURE name` drops the whole group.
 A procedure named alone as the first statement of a batch runs as if `EXEC` came before it
 (`usp_load 5`), when its name is not a reserved word or a statement's first word.
 
+`EXEC @result = schema.scalar_function args` calls the function with positional or named
+arguments (missing ones take their defaults) and assigns its value.
+
 Not yet: a global temporary procedure (`##name`) is created like a `#name` one, visible only to
-its own session; `EXEC @result = dbo.scalar_function`, numbered procedures in `sys.numbered_procedures`, CLR routines (`AS
+its own session; numbered procedures in `sys.numbered_procedures`, CLR routines (`AS
 EXTERNAL NAME`), and `COMMIT` or `ROLLBACK` of the caller's transaction inside a function.
 
 ## SQL Server metadata for tools

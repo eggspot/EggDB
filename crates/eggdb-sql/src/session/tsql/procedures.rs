@@ -164,6 +164,16 @@ impl<'s> Session<'s> {
         }
         let system = crate::session::sqlserver::is_system_procedure(&call.procedure.text);
         if !system
+            && let Some(variable) = &call.status_variable
+            && let Some(definition) = self.tsql_routine(&call.routine)?
+            && definition.kind == RoutineKind::Function
+        {
+            let value = self.executed_function_value(&definition, call)?;
+            self.assign_variable(&variable.text, value)
+                .map_err(|error| error.at_if_unplaced(variable.position))?;
+            return Ok(QueryResult::command("EXECUTE"));
+        }
+        if !system
             && self.batch_resume.is_some()
             && let Some(procedure) = self.user_procedure_run(call)?
         {
@@ -180,6 +190,56 @@ impl<'s> Session<'s> {
             .unwrap_or_else(|| QueryResult::command("EXECUTE"));
         self.extra_results.extend(results);
         Ok(first)
+    }
+
+    fn executed_function_value(
+        &mut self,
+        definition: &RoutineDefinition,
+        call: &ProcedureCall,
+    ) -> SqlResult<Value> {
+        let position = call.procedure.position;
+        let mut chosen: Vec<Option<Expr>> = vec![None; definition.parameters.len()];
+        for (ordinal, argument) in call.arguments.iter().enumerate() {
+            let index = parameter_index(definition, ordinal, argument, position)?;
+            let slot = chosen
+                .get_mut(index)
+                .ok_or_else(|| too_many_arguments(base_name(&definition.name), position))?;
+            if argument.output_variable.is_some() {
+                return Err(not_declared_output(
+                    definition.parameters[index].name.as_deref().unwrap_or_default(),
+                    position,
+                ));
+            }
+            *slot = argument.value.clone();
+        }
+        let mut arguments = Vec::with_capacity(chosen.len());
+        for (parameter, argument) in definition.parameters.iter().zip(chosen) {
+            let name = parameter.name.clone().unwrap_or_default();
+            arguments.push(match argument {
+                Some(expr) => expr,
+                None => match &parameter.default {
+                    Some(text) => Expr {
+                        kind: crate::ast::ExprKind::Constant {
+                            value: self.tsql_default(text)?,
+                            sql_type: Some(parameter.sql_type),
+                        },
+                        position,
+                    },
+                    None => return Err(not_supplied(base_name(&definition.name), &name, position)),
+                },
+            });
+        }
+        let shown = if definition.name.contains(crate::schemas::QUALIFIER) {
+            crate::schemas::display(&definition.name)
+        } else {
+            format!("dbo.{}", definition.name)
+        };
+        let expr = crate::parser::sqlserver_function_call(&shown, arguments, position)?;
+        Ok(self
+            .evaluate_row(vec![expr])?
+            .into_iter()
+            .next()
+            .unwrap_or(Value::Null))
     }
 
     pub(in crate::session) fn user_procedure_run(

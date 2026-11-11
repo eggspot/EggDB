@@ -669,3 +669,4 @@ its full title with its status.
 - [D642](decisions/D642.md) Code-only batch 290 (M5): SQLite's own table text after RENAME COLUMN and DROP COLUMN
 - [D643](decisions/D643.md) Code-only batch 291 (M10): Transact-SQL numbered procedures
 - [D644](decisions/D644.md) Code-only batch 292 (M10): a T-SQL procedure called by its name alone at a batch's start
+- [D645](decisions/D645.md) Code-only batch 293 (M10): EXEC @result = a T-SQL scalar function

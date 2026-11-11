@@ -355,3 +355,22 @@ fn a_procedure_named_first_in_a_batch_runs_without_exec() {
     fails_with(&mut session, "boom", 50002);
     fails_with(&mut session, "boom; SELECT 1", 50002);
 }
+
+#[test]
+fn exec_assigns_a_scalar_functions_result_to_its_status_variable() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    succeeds(
+        &mut session,
+        "CREATE FUNCTION dbo.add_tax(@amount INT, @rate INT = 10) RETURNS INT AS BEGIN RETURN @amount + @amount * @rate / 100; END",
+    );
+    succeeds(
+        &mut session,
+        "DECLARE @total INT; EXEC @total = dbo.add_tax 200; IF @total <> 220 THROW 50003, 'default rate', 1;",
+    );
+    succeeds(
+        &mut session,
+        "DECLARE @total INT; EXEC @total = dbo.add_tax @rate = 50, @amount = 10; IF @total <> 15 THROW 50004, 'named', 1;",
+    );
+    fails_with(&mut session, "EXEC dbo.add_tax 1", 2809);
+}

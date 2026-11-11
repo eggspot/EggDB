@@ -2129,6 +2129,28 @@ pub(crate) fn parameter_declarations(text: &str) -> SqlResult<Vec<ParameterDecla
     parser.parameter_declaration_list()
 }
 
+/// A call of the scalar function written `name` (`schema.function`) with `arguments`, as the
+/// expression parser builds one, for `EXEC @result = schema.function ...`.
+pub(crate) fn sqlserver_function_call(
+    name: &str,
+    arguments: Vec<Expr>,
+    position: usize,
+) -> SqlResult<Expr> {
+    let text = format!("{name}()");
+    let tokens = tokenize_in(&text, Dialect::SqlServer)?;
+    let mut parser = Parser::new(&text, &tokens).in_dialect(Dialect::SqlServer);
+    let mut expr = parser.expression()?;
+    let ExprKind::Function {
+        arguments: slot, ..
+    } = &mut expr.kind
+    else {
+        return Err(not_supported("EXEC of this function").at(position));
+    };
+    *slot = arguments;
+    expr.position = position;
+    Ok(expr)
+}
+
 pub(crate) fn procedure_routine_name(text: &str) -> SqlResult<String> {
     let tokens = tokenize_in(text, Dialect::SqlServer)?;
     let mut parser = Parser::new(text, &tokens).in_dialect(Dialect::SqlServer);

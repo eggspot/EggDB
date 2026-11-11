@@ -60,7 +60,7 @@ pub(crate) use sqlserver::{
     not_supported as sqlserver_not_supported,
     parameter_declarations as sqlserver_parameter_declarations,
     procedure_routine_name as sqlserver_procedure_routine_name,
-    starts_statement as sqlserver_starts_statement,
+    sqlserver_function_call, starts_statement as sqlserver_starts_statement,
 };
 
 pub(crate) use schemas::Nesting;
