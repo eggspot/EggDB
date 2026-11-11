@@ -228,8 +228,92 @@ const EVENTS: &[CatalogColumn] = &[
     column("event_catalog", NAME),
     column("event_schema", NAME),
     column("event_name", NAME),
+    column("definer", NAME),
+    column("time_zone", NAME),
+    column("event_body", NAME),
+    column("event_definition", TEXT),
+    column("event_type", NAME),
+    column("execute_at", STAMP),
+    column("interval_value", NAME),
+    column("interval_field", NAME),
+    column("sql_mode", TEXT),
+    column("starts", STAMP),
+    column("ends", STAMP),
     column("status", NAME),
+    column("on_completion", NAME),
+    column("created", STAMP),
+    column("last_altered", STAMP),
+    column("last_executed", STAMP),
+    column("event_comment", TEXT),
+    column("originator", NUMBER),
+    column("character_set_client", NAME),
+    column("collation_connection", NAME),
+    column("database_collation", NAME),
 ];
+
+fn event_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let stamp = |seconds: Option<i64>| {
+        seconds
+            .and_then(crate::mysql_date_functions::micros_of_epoch_seconds)
+            .and_then(|utc| crate::datetime::utc_to_local(utc).ok())
+            .map_or(Value::Null, Value::Timestamp)
+    };
+    let mut rows: Vec<Vec<Value>> = snapshot
+        .mysql_events
+        .iter()
+        .map(|event| {
+            let field = |name: &str| {
+                event
+                    .iter()
+                    .find(|(column, _)| column == name)
+                    .map_or(Value::Null, |(_, value)| value.clone())
+            };
+            let number = |name: &str| match field(name) {
+                Value::BigInt(number) => Some(number),
+                Value::Integer(number) => Some(i64::from(number)),
+                _ => None,
+            };
+            let flag = |name: &str| matches!(field(name), Value::Boolean(true));
+            let recurring = !matches!(field("interval_value"), Value::Null);
+            build(
+                EVENTS,
+                vec![
+                    ("event_catalog", text(CATALOG)),
+                    ("event_schema", field("db")),
+                    ("event_name", field("name")),
+                    ("definer", text("root@localhost")),
+                    ("time_zone", text("SYSTEM")),
+                    ("event_body", text("SQL")),
+                    ("event_definition", field("body")),
+                    ("event_type", text(if recurring { "RECURRING" } else { "ONE TIME" })),
+                    ("execute_at", stamp(number("execute_at"))),
+                    ("interval_value", field("interval_value")),
+                    ("interval_field", field("interval_unit")),
+                    ("sql_mode", text("")),
+                    ("starts", stamp(number("starts"))),
+                    ("ends", stamp(number("ends"))),
+                    ("status", text(if flag("enabled") { "ENABLED" } else { "DISABLED" })),
+                    (
+                        "on_completion",
+                        text(if flag("preserve") { "PRESERVE" } else { "NOT PRESERVE" }),
+                    ),
+                    ("created", stamp(number("created"))),
+                    ("last_altered", stamp(number("last_altered"))),
+                    ("last_executed", stamp(number("last_executed"))),
+                    ("event_comment", field("comment")),
+                    ("originator", Value::BigInt(1)),
+                    ("character_set_client", text(CHARACTER_SET)),
+                    ("collation_connection", text(COLLATION)),
+                    ("database_collation", text(COLLATION)),
+                ],
+            )
+        })
+        .collect();
+    rows.sort_by(|left, right| {
+        (left[1].to_text(), left[2].to_text()).cmp(&(right[1].to_text(), right[2].to_text()))
+    });
+    rows
+}
 
 const PARTITIONS: &[CatalogColumn] = &[
     column("table_catalog", NAME),
@@ -1181,10 +1265,8 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MySqlRelation) -> Vec<V
                 result_row.into_iter().chain(parameter_rows).collect::<Vec<_>>()
             })
             .collect(),
-        MySqlRelation::Triggers
-        | MySqlRelation::Events
-        | MySqlRelation::Partitions
-        | MySqlRelation::Plugins => Vec::new(),
+        MySqlRelation::Events => event_rows(snapshot),
+        MySqlRelation::Triggers | MySqlRelation::Partitions | MySqlRelation::Plugins => Vec::new(),
     }
 }
 

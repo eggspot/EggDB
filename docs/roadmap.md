@@ -1075,8 +1075,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   and `PARAMETERS` views: **code written, unbuilt** (code-only mode, 2026-11-11, D420). Left:
   `CASE`, loops, labels, handlers and cursors in trigger bodies, and MySQL's `TRIGGERS` view.
 - MySQL events (`CREATE EVENT`) on the job scheduler (D27, D200). **Code written, unbuilt** (code-only mode,
-  2026-11-11, D421). Left: sub-minute runs, `information_schema.EVENTS`; `event_scheduler`: **code written,
-  unbuilt** (code-only mode, 2026-11-12, D574).
+  2026-11-11, D421). Left: sub-minute runs. `event_scheduler`: **code written, unbuilt** (code-only
+  mode, 2026-11-12, D574); `information_schema.EVENTS`: **code written, unbuilt** (code-only mode,
+  2026-11-12, D575).
 - `GET_LOCK` named locks, and `information_schema` and `SHOW` completeness (D198, D294). Named
   locks: **code written, unbuilt** (code-only mode, 2026-11-11, D422).
 - `LOAD DATA`, and mysqldump's leftovers: deferred foreign keys, `/*M!` comments, `--tab`, `--xml`,

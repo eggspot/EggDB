@@ -476,6 +476,7 @@ pub(crate) struct CatalogSnapshot {
     pub(crate) partitions: crate::partitions::PartitionCatalog,
     pub(crate) row_counts: std::collections::HashMap<String, u64>,
     pub(crate) materialized_views: std::collections::HashSet<String>,
+    pub(crate) mysql_events: Vec<Vec<(String, Value)>>,
     pub(crate) stored_roles: Vec<crate::roles::StoredRole>,
     pub(crate) grants: Vec<crate::roles::TableGrant>,
     pub(crate) column_grants: Vec<crate::roles::ColumnGrant>,
@@ -744,6 +745,7 @@ impl CatalogSnapshot {
             });
         }
         let materialized_views = materialized_view_keys(reader, &relations)?;
+        let mysql_events = internal_rows(reader, &relations, "mysql_events")?;
         let mut snapshot = Self {
             user,
             database,
@@ -769,6 +771,7 @@ impl CatalogSnapshot {
             partitions: crate::partitions::load(reader)?,
             row_counts: crate::statistics::every_row_count(reader)?,
             materialized_views,
+            mysql_events,
             stored_roles: crate::roles::stored_roles(reader)?,
             grants: crate::roles::every_grant(reader)?,
             column_grants: crate::roles::every_column_grant(reader)?,
@@ -1507,22 +1510,40 @@ pub(crate) fn reg_from_oid(kind: RegKind, oid: u32) -> RegValue {
     }
 }
 
+fn internal_rows(
+    reader: &dyn KeyValueRead,
+    relations: &[RelationEntry],
+    name: &str,
+) -> SqlResult<Vec<Vec<(String, Value)>>> {
+    let internal = crate::schemas::qualified("eggdb_internal", name);
+    let Some(table) = relations
+        .iter()
+        .find(|entry| entry.internal == internal)
+        .and_then(RelationEntry::table)
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(crate::execute::every_row(reader, table)?
+        .into_iter()
+        .map(|(_, row)| {
+            table
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .zip(row)
+                .collect()
+        })
+        .collect())
+}
+
 fn materialized_view_keys(
     reader: &dyn KeyValueRead,
     relations: &[RelationEntry],
 ) -> SqlResult<std::collections::HashSet<String>> {
-    let registry = crate::schemas::qualified("eggdb_internal", "materialized_views");
-    let Some(table) = relations
-        .iter()
-        .find(|entry| entry.internal == registry)
-        .and_then(RelationEntry::table)
-    else {
-        return Ok(std::collections::HashSet::new());
-    };
-    Ok(crate::execute::every_row(reader, table)?
+    Ok(internal_rows(reader, relations, "materialized_views")?
         .into_iter()
-        .filter_map(|(_, row)| match row.into_iter().next() {
-            Some(Value::Text(name)) => Some(name),
+        .filter_map(|row| match row.into_iter().next() {
+            Some((_, Value::Text(name))) => Some(name),
             _ => None,
         })
         .collect())

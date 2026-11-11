@@ -599,3 +599,4 @@ its full title with its status.
 - [D572](decisions/D572.md) Code-only batch 220 (M11): Parquet files written with row groups and statistics
 - [D573](decisions/D573.md) Code-only batch 221 (M11): reading Apache Arrow IPC streams and files
 - [D574](decisions/D574.md) Code-only batch 222 (M10): MySQL's event_scheduler switch
+- [D575](decisions/D575.md) Code-only batch 223 (M10): MySQL's information_schema.EVENTS
