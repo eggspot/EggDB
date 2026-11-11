@@ -13,6 +13,7 @@ mod restore;
 mod savepoints;
 mod sqlite;
 pub(crate) mod sqlserver;
+pub(crate) mod sqlserver_agent;
 mod transaction_settings;
 mod triggers;
 mod tsql;

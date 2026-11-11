@@ -102,6 +102,7 @@ pub(crate) struct ParsedStatement {
 pub(super) fn is_system_procedure(name: &str) -> bool {
     name == "sp_unprepare"
         || RPC_PROCEDURES.contains(&name)
+        || super::sqlserver_agent::AgentProcedure::named(name).is_some()
         || crate::sqlserver_catalog::CatalogProcedure::named(name).is_some()
 }
 
@@ -673,6 +674,9 @@ impl<'s> Session<'s> {
         let name = call.procedure.text.as_str();
         if name == "sp_unprepare" {
             return self.unprepare_in_batch(call).map(|()| Vec::new());
+        }
+        if let Some(agent) = super::sqlserver_agent::AgentProcedure::named(name) {
+            return self.agent_procedure(agent, call);
         }
         let Some(procedure) = crate::sqlserver_catalog::CatalogProcedure::named(name) else {
             if RPC_PROCEDURES.contains(&name) {

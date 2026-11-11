@@ -1078,7 +1078,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `INSERT ... EXEC` of dynamic SQL, `EXEC AS`, three-part names and other databases in a batch
   (sql.md).
 - Numbered procedures and temporary functions (roadmap item 33d).
-- SQL Server Agent jobs on the job scheduler (D27, D200).
+- SQL Server Agent jobs on the job scheduler (D27, D200). **Code written, unbuilt** (code-only mode, 2026-11-11, D523).
+  Left: the `msdb` views, step flow options, and operators and alerts.
 - Identity on any column, `NEXT VALUE FOR` returning the sequence's type and its `OVER` form,
   `sp_sequence_get_range`, and extended properties beyond `MS_Description` (D148). `sp_sequence_get_range`:
   **code written, unbuilt** (code-only mode, 2026-11-11, D449).

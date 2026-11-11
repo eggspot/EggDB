@@ -34,6 +34,7 @@ pub(super) fn run_scheduled_jobs(
             last = now;
             let _ = eggdb_sql::jobs::run_due_jobs(store, now * 60);
             let _ = eggdb_sql::jobs::run_due_events(store, now * 60);
+            let _ = eggdb_sql::jobs::run_due_agent_jobs(store, now * 60);
         }
     }
 }

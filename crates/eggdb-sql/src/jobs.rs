@@ -142,7 +142,16 @@ impl Minute {
     }
 }
 
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
+pub(crate) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+pub(crate) fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let shifted = days + 719_468;
     let era = shifted.div_euclid(146_097);
     let day_of_era = shifted - era * 146_097;
@@ -486,6 +495,57 @@ pub fn run_due_events<S: KeyValueStore>(store: &S, epoch_seconds: i64) -> SqlRes
         session.execute(&change, &mut |_| {})?;
     }
     session.close()?;
+    Ok(outcome)
+}
+
+/// Runs every enabled SQL Server Agent job with an enabled schedule that fires in the minute
+/// starting `epoch_seconds` (UTC), each job's steps in a SQL Server session of its own. A file
+/// without Agent jobs has none due.
+pub fn run_due_agent_jobs<S: KeyValueStore>(store: &S, epoch_seconds: i64) -> SqlResult<JobsRun> {
+    use crate::session::sqlserver_agent::{ATTACHED_TABLE, JOBS_TABLE, SCHEDULES_TABLE, schedule_fires};
+    let mut session = Session::with_dialect(store, Dialect::PostgreSql);
+    let mut rows = Vec::new();
+    let listed = session.execute(
+        &format!(
+            "SELECT DISTINCT a.job_name, s.freq_type, s.freq_interval, s.freq_subday_type, s.freq_subday_interval, \
+             s.freq_recurrence_factor, s.active_start_date, s.active_end_date, s.active_start_time, s.active_end_time \
+             FROM {ATTACHED_TABLE} a JOIN {JOBS_TABLE} j ON j.job_name = a.job_name \
+             JOIN {SCHEDULES_TABLE} s ON s.schedule_name = a.schedule_name WHERE j.enabled AND s.enabled ORDER BY 1"
+        ),
+        &mut |result| {
+            if result.columns.is_some() {
+                rows = result.rows;
+            }
+        },
+    );
+    if let Err(error) = listed {
+        return if error.state() == crate::error::SqlState::UNDEFINED_TABLE
+            || error.state() == crate::error::SqlState::INVALID_SCHEMA_NAME
+        {
+            Ok(JobsRun::default())
+        } else {
+            Err(error)
+        };
+    }
+    let _ = session.close();
+    let mut due: Vec<String> = Vec::new();
+    for row in &rows {
+        let Some(job) = row.first().and_then(text_of) else {
+            continue;
+        };
+        if schedule_fires(&row[1..], epoch_seconds) && !due.contains(&job) {
+            due.push(job);
+        }
+    }
+    let mut outcome = JobsRun::default();
+    for job in due {
+        let mut runner = Session::with_dialect(store, Dialect::SqlServer);
+        match runner.run_agent_job(&job) {
+            Ok(true) => outcome.succeeded += 1,
+            _ => outcome.failed += 1,
+        }
+        let _ = runner.close();
+    }
     Ok(outcome)
 }
 

@@ -547,3 +547,4 @@ its full title with its status.
 - [D520](decisions/D520.md) Code-only batch 168 (M12): ST_AsMVTGeom
 - [D521](decisions/D521.md) Code-only batch 169 (M16): InfluxQL over /query
 - [D522](decisions/D522.md) Code-only batch 170 (M6d): MCP writes over HTTP with confirm: true
+- [D523](decisions/D523.md) Code-only batch 171 (M10): SQL Server Agent jobs on the job scheduler
