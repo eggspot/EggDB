@@ -648,3 +648,4 @@ its full title with its status.
 - [D621](decisions/D621.md) Code-only batch 269 (M6b): SQL Server's DENY
 - [D622](decisions/D622.md) Code-only batch 270 (M5): SQL*Plus bind variables in eggdb shell
 - [D623](decisions/D623.md) Code-only batch 271 (M10): msdb's SQL Server Agent views
+- [D624](decisions/D624.md) Code-only batch 272 (M10): SQL Server Agent step flow and retries

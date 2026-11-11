@@ -1978,3 +1978,47 @@ fn msdb_views_show_agent_jobs_steps_and_history() {
         "{history:?}"
     );
 }
+
+#[test]
+fn agent_steps_follow_their_flow_options_and_retries() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(&mut session, "CREATE TABLE ticks (n INT)");
+    values(&mut session, "EXEC msdb.dbo.sp_add_job @job_name = N'flow'");
+    values(
+        &mut session,
+        "EXEC msdb.dbo.sp_add_jobstep @job_name = N'flow', @step_name = N'fails', @command = N'INSERT INTO missing VALUES (1)', @on_fail_action = 4, @on_fail_step_id = 3, @retry_attempts = 1",
+    );
+    values(
+        &mut session,
+        "EXEC msdb.dbo.sp_add_jobstep @job_name = N'flow', @step_name = N'skipped', @command = N'INSERT INTO ticks VALUES (2)'",
+    );
+    values(
+        &mut session,
+        "EXEC msdb.dbo.sp_add_jobstep @job_name = N'flow', @step_name = N'last', @command = N'INSERT INTO ticks VALUES (3)', @on_success_action = 1",
+    );
+    values(&mut session, "EXEC msdb.dbo.sp_start_job @job_name = N'flow'");
+    assert_eq!(
+        values(&mut session, "SELECT n FROM ticks"),
+        vec![vec![Value::Integer(3)]]
+    );
+    assert_eq!(
+        values(
+            &mut session,
+            "SELECT step_name, run_status FROM msdb.dbo.sysjobhistory ORDER BY instance_id"
+        ),
+        vec![
+            vec![Value::Text("fails".to_owned()), Value::Integer(2)],
+            vec![Value::Text("fails".to_owned()), Value::Integer(0)],
+            vec![Value::Text("last".to_owned()), Value::Integer(1)],
+        ]
+    );
+    assert!(
+        session
+            .execute(
+                "EXEC msdb.dbo.sp_add_jobstep @job_name = N'flow', @command = N'SELECT 1', @on_success_action = 9",
+                &mut |_| {}
+            )
+            .is_err()
+    );
+}

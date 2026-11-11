@@ -11,14 +11,22 @@ pub(crate) const STEPS_TABLE: &str = "eggdb_internal.sqlserver_agent_steps";
 pub(crate) const SCHEDULES_TABLE: &str = "eggdb_internal.sqlserver_agent_schedules";
 pub(crate) const ATTACHED_TABLE: &str = "eggdb_internal.sqlserver_agent_job_schedules";
 pub(crate) const HISTORY_TABLE: &str = "eggdb_internal.sqlserver_agent_history";
+const FLOW_TABLE: &str = "eggdb_internal.sqlserver_agent_step_flow";
+const QUIT_WITH_SUCCESS: i64 = 1;
+const QUIT_WITH_FAILURE: i64 = 2;
+const NEXT_STEP: i64 = 3;
+const GO_TO_STEP: i64 = 4;
+const RETRY_STATUS: i64 = 2;
+const MOST_STEPS_RUN: usize = 1_000;
 const CREATE_TABLES: &str = "CREATE SCHEMA IF NOT EXISTS eggdb_internal; \
     CREATE TABLE IF NOT EXISTS eggdb_internal.sqlserver_agent_jobs (job_name text PRIMARY KEY, enabled boolean NOT NULL, description text); \
     CREATE TABLE IF NOT EXISTS eggdb_internal.sqlserver_agent_steps (job_name text NOT NULL, step_id integer NOT NULL, step_name text NOT NULL, database_name text, command text NOT NULL, PRIMARY KEY (job_name, step_id)); \
     CREATE TABLE IF NOT EXISTS eggdb_internal.sqlserver_agent_schedules (schedule_name text PRIMARY KEY, enabled boolean NOT NULL, freq_type integer NOT NULL, freq_interval integer NOT NULL, freq_subday_type integer NOT NULL, freq_subday_interval integer NOT NULL, freq_recurrence_factor integer NOT NULL, active_start_date integer NOT NULL, active_end_date integer NOT NULL, active_start_time integer NOT NULL, active_end_time integer NOT NULL); \
     CREATE TABLE IF NOT EXISTS eggdb_internal.sqlserver_agent_job_schedules (job_name text NOT NULL, schedule_name text NOT NULL, PRIMARY KEY (job_name, schedule_name)); \
     CREATE TABLE IF NOT EXISTS eggdb_internal.sqlserver_agent_history (job_name text NOT NULL, step_id integer NOT NULL, run_status integer NOT NULL, message text, run_time timestamptz NOT NULL DEFAULT now()); \
+    CREATE TABLE IF NOT EXISTS eggdb_internal.sqlserver_agent_step_flow (job_name text NOT NULL, step_id integer NOT NULL, on_success_action integer NOT NULL, on_success_step_id integer NOT NULL, on_fail_action integer NOT NULL, on_fail_step_id integer NOT NULL, retry_attempts integer NOT NULL, retry_interval integer NOT NULL, PRIMARY KEY (job_name, step_id)); \
     CREATE OR REPLACE VIEW eggdb_internal.sqlserver_agent_sysjobs AS SELECT md5(job_name)::uuid AS job_id, job_name AS name, CASE WHEN enabled THEN 1 ELSE 0 END AS enabled, description, 1 AS start_step_id, 0 AS category_id, 0 AS notify_level_eventlog FROM eggdb_internal.sqlserver_agent_jobs; \
-    CREATE OR REPLACE VIEW eggdb_internal.sqlserver_agent_sysjobsteps AS SELECT md5(job_name)::uuid AS job_id, step_id, step_name, 'TSQL' AS subsystem, command, database_name, 1 AS on_success_action, 0 AS on_success_step_id, 2 AS on_fail_action, 0 AS on_fail_step_id, 0 AS retry_attempts, 0 AS retry_interval FROM eggdb_internal.sqlserver_agent_steps; \
+    CREATE OR REPLACE VIEW eggdb_internal.sqlserver_agent_sysjobsteps AS SELECT md5(s.job_name)::uuid AS job_id, s.step_id, s.step_name, 'TSQL' AS subsystem, s.command, s.database_name, coalesce(f.on_success_action, 3) AS on_success_action, coalesce(f.on_success_step_id, 0) AS on_success_step_id, coalesce(f.on_fail_action, 2) AS on_fail_action, coalesce(f.on_fail_step_id, 0) AS on_fail_step_id, coalesce(f.retry_attempts, 0) AS retry_attempts, coalesce(f.retry_interval, 0) AS retry_interval FROM eggdb_internal.sqlserver_agent_steps s LEFT JOIN eggdb_internal.sqlserver_agent_step_flow f ON f.job_name = s.job_name AND f.step_id = s.step_id; \
     CREATE OR REPLACE VIEW eggdb_internal.sqlserver_agent_sysschedules AS SELECT (row_number() OVER (ORDER BY schedule_name))::integer AS schedule_id, md5(schedule_name)::uuid AS schedule_uid, schedule_name AS name, CASE WHEN enabled THEN 1 ELSE 0 END AS enabled, freq_type, freq_interval, freq_subday_type, freq_subday_interval, freq_recurrence_factor, active_start_date, active_end_date, active_start_time, active_end_time FROM eggdb_internal.sqlserver_agent_schedules; \
     CREATE OR REPLACE VIEW eggdb_internal.sqlserver_agent_sysjobschedules AS SELECT s.schedule_id, md5(a.job_name)::uuid AS job_id, 0 AS next_run_date, 0 AS next_run_time FROM eggdb_internal.sqlserver_agent_job_schedules a JOIN eggdb_internal.sqlserver_agent_sysschedules s ON s.name = a.schedule_name; \
     CREATE OR REPLACE VIEW eggdb_internal.sqlserver_agent_sysjobhistory AS SELECT (row_number() OVER (ORDER BY h.run_time, h.job_name, h.step_id))::integer AS instance_id, md5(h.job_name)::uuid AS job_id, h.step_id, coalesce(st.step_name, '(Job outcome)') AS step_name, h.message, h.run_status, to_char(h.run_time, 'YYYYMMDD')::integer AS run_date, to_char(h.run_time, 'HH24MISS')::integer AS run_time, 0 AS run_duration, 0 AS sql_message_id, 0 AS sql_severity FROM eggdb_internal.sqlserver_agent_history h LEFT JOIN eggdb_internal.sqlserver_agent_steps st ON st.job_name = h.job_name AND st.step_id = h.step_id";
@@ -81,7 +89,21 @@ impl AgentProcedure {
             Self::AddJob => &["@job_name", "@enabled", "@description"],
             Self::UpdateJob => &["@job_id", "@job_name", "@new_name", "@enabled", "@description"],
             Self::DeleteJob => &["@job_id", "@job_name"],
-            Self::AddJobStep => &["@job_id", "@job_name", "@step_id", "@step_name", "@subsystem", "@command", "@database_name"],
+            Self::AddJobStep => &[
+                "@job_id",
+                "@job_name",
+                "@step_id",
+                "@step_name",
+                "@subsystem",
+                "@command",
+                "@database_name",
+                "@on_success_action",
+                "@on_success_step_id",
+                "@on_fail_action",
+                "@on_fail_step_id",
+                "@retry_attempts",
+                "@retry_interval",
+            ],
             Self::AddSchedule => &[
                 "@schedule_name",
                 SCHEDULE[0],
@@ -358,6 +380,32 @@ impl Session<'_> {
                     quoted(&database),
                     quoted(&command)
                 ))?;
+                let flow = [
+                    arguments.integer("@on_success_action", NEXT_STEP),
+                    arguments.integer("@on_success_step_id", 0),
+                    arguments.integer("@on_fail_action", QUIT_WITH_FAILURE),
+                    arguments.integer("@on_fail_step_id", 0),
+                    arguments.integer("@retry_attempts", 0),
+                    arguments.integer("@retry_interval", 0),
+                ];
+                if !(QUIT_WITH_SUCCESS..=GO_TO_STEP).contains(&flow[0])
+                    || !(QUIT_WITH_SUCCESS..=GO_TO_STEP).contains(&flow[2])
+                {
+                    return Err(agent_error(14266, "The specified @on_success_action or @on_fail_action is invalid (valid values are: 1, 2, 3, 4).".to_owned()));
+                }
+                if flow[4] < 0 || flow[5] < 0 {
+                    return Err(agent_error(14266, "The specified @retry_attempts or @retry_interval is invalid.".to_owned()));
+                }
+                self.agent_sql(&format!(
+                    "INSERT INTO {FLOW_TABLE} VALUES ({}, {step_id}, {}, {}, {}, {}, {}, {})",
+                    quoted(&job),
+                    flow[0],
+                    flow[1],
+                    flow[2],
+                    flow[3],
+                    flow[4],
+                    flow[5]
+                ))?;
             }
             AgentProcedure::AddSchedule => {
                 let name = arguments.required("@schedule_name", &procedure_name)?;
@@ -421,14 +469,56 @@ impl Session<'_> {
     /// first that fails, and records each step's outcome in the job history. Returns whether
     /// every step succeeded.
     pub(crate) fn run_agent_job(&mut self, job: &str) -> SqlResult<bool> {
+        self.agent_sql(CREATE_TABLES)?;
         let steps = self.agent_rows(&format!(
-            "SELECT step_id, database_name, command FROM {STEPS_TABLE} WHERE job_name = {} ORDER BY step_id",
+            "SELECT s.step_id, s.database_name, s.command, coalesce(f.on_success_action, {NEXT_STEP}), \
+             coalesce(f.on_success_step_id, 0), coalesce(f.on_fail_action, {QUIT_WITH_FAILURE}), \
+             coalesce(f.on_fail_step_id, 0), coalesce(f.retry_attempts, 0) \
+             FROM {STEPS_TABLE} s LEFT JOIN {FLOW_TABLE} f ON f.job_name = s.job_name AND f.step_id = s.step_id \
+             WHERE s.job_name = {} ORDER BY s.step_id",
             quoted(job)
         ))?;
+        let number = |step: &[Value], at: usize| step.get(at).and_then(Value::as_integer).unwrap_or(0);
+        let mut at = 0usize;
+        let mut succeeded = true;
+        let mut runs = 0usize;
+        while let Some(step) = steps.get(at) {
+            runs += 1;
+            if runs > MOST_STEPS_RUN {
+                return Err(agent_error(14266, format!("job '{job}' ran more than {MOST_STEPS_RUN} steps; its step flow loops")));
+            }
+            let mut attempts_left = number(step, 7).max(0);
+            let ran = loop {
+                let ran = self.run_agent_step(job, step)?;
+                if ran || attempts_left == 0 {
+                    break ran;
+                }
+                attempts_left -= 1;
+                self.agent_sql(&format!(
+                    "INSERT INTO {HISTORY_TABLE} (job_name, step_id, run_status, message) VALUES ({}, {}, {RETRY_STATUS}, 'The step is being retried.')",
+                    quoted(job),
+                    number(step, 0)
+                ))?;
+            };
+            succeeded = ran;
+            let (action, target) = if ran { (number(step, 3), number(step, 4)) } else { (number(step, 5), number(step, 6)) };
+            match action {
+                QUIT_WITH_SUCCESS => return Ok(true),
+                QUIT_WITH_FAILURE => return Ok(false),
+                GO_TO_STEP => match steps.iter().position(|other| number(other, 0) == target) {
+                    Some(found) => at = found,
+                    None => return Ok(succeeded),
+                },
+                _ => at += 1,
+            }
+        }
+        Ok(succeeded)
+    }
+
+    fn run_agent_step(&mut self, job: &str, step: &[Value]) -> SqlResult<bool> {
         let home = self.settings.database.clone();
         let dialect = self.dialect;
-        let mut succeeded = true;
-        for step in steps {
+        {
             let step_id = step.first().and_then(Value::as_integer).unwrap_or(0);
             let database = step.get(1).and_then(Value::to_text).unwrap_or_else(|| home.clone());
             let command = step.get(2).and_then(Value::to_text).unwrap_or_default();
@@ -452,12 +542,8 @@ impl Session<'_> {
                 quoted(job),
                 quoted(&message)
             ))?;
-            if ran.is_err() {
-                succeeded = false;
-                break;
-            }
+            Ok(ran.is_ok())
         }
-        Ok(succeeded)
     }
 }
 
