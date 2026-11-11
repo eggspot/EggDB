@@ -655,6 +655,19 @@ impl<'k> Store<'k> {
         }
     }
 
+    /// The sequence number the next change event will take: a change stream opened now starts
+    /// there.
+    pub fn change_position(&self) -> DocumentResult<u64> {
+        self.read(|keys| crate::change_log::position(keys).map_err(DocumentError::storage))
+    }
+
+    /// The change events from sequence number `from` on, oldest first, at most `limit`, each
+    /// as stored: `sequence`, `operationType`, `db`, `coll`, `documentKey`, `wallTime`, and
+    /// `fullDocument` (inserts) or `updateDescription` with the new document (updates).
+    pub fn changes_from(&self, from: u64, limit: usize) -> DocumentResult<Vec<Document>> {
+        self.read(|keys| crate::change_log::events_from(keys, from, limit).map_err(DocumentError::storage))
+    }
+
     /// A new object id.
     pub fn new_object_id(&self) -> [u8; 12] {
         let seconds = (now_ms() / 1000) as u32;
@@ -687,13 +700,18 @@ impl<'k> Store<'k> {
             let Some(body) = body.take() else {
                 return Err(ROLLED_BACK.to_owned());
             };
-            let outcome = body(keys);
+            let mut recording = crate::change_log::Recording {
+                inner: &mut *keys,
+                changes: Vec::new(),
+            };
+            let outcome = body(&mut recording);
             let failed = outcome.is_err();
+            let changes = std::mem::take(&mut recording.changes);
             out = Some(outcome);
             if failed {
                 Err(ROLLED_BACK.to_owned())
             } else {
-                Ok(())
+                crate::change_log::append(keys, changes, now_ms())
             }
         });
         match (result, out) {

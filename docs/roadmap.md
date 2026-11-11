@@ -1030,7 +1030,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   unbuilt** (D407).
 - Change streams and multi-document transactions, with the replica-set handshake (D197). Multi-document
   transactions with the replica-set handshake: **code written, unbuilt** (code-only mode, 2026-11-11,
-  D566). Left: change streams.
+  D566); change streams: **code written, unbuilt** (code-only mode, 2026-11-12, D588).
 - `explain`, `renameCollection`, capped and time-series collections, and GridFS (D197). `renameCollection`:
   **code written, unbuilt** (code-only mode, 2026-11-10, D410); `explain`: **code written,
   unbuilt** (D411); capped and time-series collections: **code written, unbuilt** (D532). Left: tailable

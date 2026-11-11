@@ -801,6 +801,24 @@ fn get_more(
             message: format!("cursor id {id} not found"),
         });
     };
+    if cursor.namespace == namespace
+        && let Some(stream) = cursor.change_stream.take()
+    {
+        drop(cursors);
+        let outcome = crate::change_streams::get_more(shared, id, &namespace, stream, body);
+        let mut cursors = shared
+            .cursors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        return match outcome {
+            Ok((reply, stream)) => {
+                cursor.change_stream = Some(stream);
+                cursors.put_back(id, cursor);
+                Ok(reply)
+            }
+            Err(error) => Err(error),
+        };
+    }
     if cursor.namespace != namespace {
         let message = format!(
             "Requested getMore on namespace '{namespace}', but cursor belongs to a different namespace {}",

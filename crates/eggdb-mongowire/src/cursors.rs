@@ -12,6 +12,7 @@ const IDLE_LIMIT: Duration = Duration::from_secs(10 * 60);
 pub(crate) struct Cursor<'b> {
     pub(crate) namespace: String,
     pub(crate) remaining: VecDeque<Document>,
+    pub(crate) change_stream: Option<crate::change_streams::ChangeStream>,
     held: Reservation<'b>,
     last_used: Instant,
 }
@@ -77,10 +78,25 @@ impl<'b> Cursors<'b> {
             Cursor {
                 namespace,
                 remaining,
+                change_stream: None,
                 held,
                 last_used: now,
             },
         );
+        Some(id)
+    }
+
+    /// Opens a change stream's cursor: it holds no documents, only where the stream reads next,
+    /// and stays open until it is killed or idle.
+    pub(crate) fn open_change_stream(
+        &mut self,
+        namespace: String,
+        stream: crate::change_streams::ChangeStream,
+    ) -> Option<i64> {
+        let id = self.open(namespace, VecDeque::new())?;
+        if let Some(cursor) = self.open.get_mut(&id) {
+            cursor.change_stream = Some(stream);
+        }
         Some(id)
     }
 

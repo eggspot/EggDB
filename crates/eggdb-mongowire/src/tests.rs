@@ -1439,3 +1439,59 @@ fn a_standalone_server_refuses_to_start_a_transaction() {
         assert_eq!(reply.get("code"), Some(&Bson::Int32(20)));
     });
 }
+
+#[test]
+fn a_change_stream_sees_inserts_updates_and_deletes_after_it_opens() {
+    with_harness(|harness| {
+        harness.run(doc(vec![
+            ("insert", text("orders")),
+            ("documents", Bson::Array(vec![sub(vec![("_id", Bson::Int32(1)), ("state", text("new"))])])),
+        ]));
+        let opened = harness.run(doc(vec![
+            ("aggregate", text("orders")),
+            ("pipeline", Bson::Array(vec![sub(vec![("$changeStream", sub(vec![]))])])),
+            ("cursor", sub(vec![])),
+        ]));
+        assert!(ok(&opened), "{opened:?}");
+        assert!(batch(&opened, "firstBatch").is_empty(), "earlier writes are not replayed");
+        let id = opened
+            .get_document("cursor")
+            .and_then(|cursor| cursor.get_i64("id"))
+            .expect("a cursor id");
+        harness.run(doc(vec![
+            ("insert", text("orders")),
+            ("documents", Bson::Array(vec![sub(vec![("_id", Bson::Int32(2)), ("state", text("new"))])])),
+        ]));
+        harness.run(doc(vec![
+            ("update", text("orders")),
+            (
+                "updates",
+                Bson::Array(vec![sub(vec![
+                    ("q", sub(vec![("_id", Bson::Int32(2))])),
+                    ("u", sub(vec![("$set", sub(vec![("state", text("paid"))]))])),
+                ])]),
+            ),
+        ]));
+        harness.run(doc(vec![
+            ("delete", text("orders")),
+            (
+                "deletes",
+                Bson::Array(vec![sub(vec![("q", sub(vec![("_id", Bson::Int32(1))])), ("limit", Bson::Int32(1))])]),
+            ),
+        ]));
+        let more = harness.run(doc(vec![
+            ("getMore", Bson::Int64(id)),
+            ("collection", text("orders")),
+            ("maxTimeMS", Bson::Int32(10)),
+        ]));
+        let events = batch(&more, "nextBatch");
+        let kinds: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Bson::Document(event) => event.get_str("operationType"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, ["insert", "update", "delete"], "{more:?}");
+    });
+}

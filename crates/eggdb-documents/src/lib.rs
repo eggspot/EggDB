@@ -6,6 +6,7 @@
 //! protocol and later SQL over documents share one implementation. No MongoDB code is used or
 //! read.
 
+mod change_log;
 mod error;
 mod expression;
 mod extended_json;
@@ -22,6 +23,7 @@ mod store;
 mod text_search;
 mod update;
 
+pub use change_log::KEPT_CHANGES;
 pub use error::{DocumentError, DocumentResult};
 pub use expression::{evaluate, field_value};
 pub use extended_json::parse_extended_json;

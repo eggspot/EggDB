@@ -16,6 +16,12 @@ pub(crate) fn aggregate(
     database: &str,
     body: &Document,
 ) -> Result<Document, DocumentError> {
+    if let Some(pipeline) = body.get_array("pipeline")
+        && let Some(Bson::Document(first)) = pipeline.first()
+        && first.get("$changeStream").is_some()
+    {
+        return crate::change_streams::open(shared, database, body, pipeline);
+    }
     let collection = match body.get("aggregate") {
         Some(Bson::String(name)) => {
             check_collection_name(name)?;
