@@ -20,12 +20,76 @@ pub(crate) mod error {
 
 const MAX_PARTITIONS: i32 = 1024;
 
-/// Creates `topic` with `partitions` (`-1` for one); returns a Kafka error code. With
-/// `validate_only` nothing is written.
+/// How long and how much a topic's partitions keep: `retention.ms` and `retention.bytes`,
+/// `-1` for no limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Retention {
+    pub(crate) ms: i64,
+    pub(crate) bytes: i64,
+}
+
+impl Retention {
+    pub(crate) const UNLIMITED: Self = Self { ms: -1, bytes: -1 };
+}
+
+fn retention_of(value: &[u8]) -> Retention {
+    let field = |range: std::ops::Range<usize>| {
+        value
+            .get(range)
+            .and_then(|raw| raw.try_into().ok())
+            .map(i64::from_be_bytes)
+    };
+    match (field(4..12), field(12..20)) {
+        (Some(ms), Some(bytes)) => Retention { ms, bytes },
+        _ => Retention::UNLIMITED,
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
+}
+
+fn enforce_retention(
+    keys: &mut dyn KeysWrite,
+    topic: &str,
+    partition: i32,
+    retention: Retention,
+) -> Result<(), String> {
+    if retention == Retention::UNLIMITED {
+        return Ok(());
+    }
+    let batches = keys.scan(&partition_prefix(topic, partition))?;
+    let mut total: i64 = batches.iter().map(|(_, batch)| batch.len() as i64).sum();
+    let oldest_kept = now_ms().saturating_sub(retention.ms);
+    let last = batches.len().saturating_sub(1);
+    for (at, (key, batch)) in batches.iter().enumerate() {
+        if at == last {
+            break;
+        }
+        let newest = batch
+            .get(35..43)
+            .and_then(|raw| raw.try_into().ok())
+            .map_or(i64::MAX, i64::from_be_bytes);
+        let too_old = retention.ms >= 0 && newest < oldest_kept;
+        let too_big = retention.bytes >= 0 && total > retention.bytes;
+        if !too_old && !too_big {
+            break;
+        }
+        keys.delete(key)?;
+        total -= batch.len() as i64;
+    }
+    Ok(())
+}
+
+/// Creates `topic` with `partitions` (`-1` for one) and `retention`; returns a Kafka error
+/// code. With `validate_only` nothing is written.
 pub(crate) fn create_topic(
     keyspace: &dyn Keyspace,
     topic: &str,
     partitions: i32,
+    retention: Retention,
     validate_only: bool,
 ) -> Result<i16, String> {
     if !valid_topic(topic) {
@@ -40,7 +104,10 @@ pub(crate) fn create_topic(
             return Ok(error::TOPIC_ALREADY_EXISTS);
         }
         if !validate_only {
-            keys.put(&topic_key(topic), &partitions.to_be_bytes())?;
+            let mut value = partitions.to_be_bytes().to_vec();
+            value.extend_from_slice(&retention.ms.to_be_bytes());
+            value.extend_from_slice(&retention.bytes.to_be_bytes());
+            keys.put(&topic_key(topic), &value)?;
         }
         Ok(error::NONE)
     })
@@ -210,9 +277,10 @@ pub(crate) fn append(
         at = end;
     }
     write(keyspace, |keys| {
-        if keys.get(&topic_key(topic))?.is_none() {
+        let Some(described) = keys.get(&topic_key(topic))? else {
             return Ok(Err(error::UNKNOWN_TOPIC_OR_PARTITION));
-        }
+        };
+        let retention = retention_of(&described);
         let mut next = next_offset(&*keys, topic, partition)?;
         let first = next;
         for mut batch in batches {
@@ -221,6 +289,7 @@ pub(crate) fn append(
             keys.put(&batch_key(topic, partition, next), &batch)?;
             next += i64::from(last_delta) + 1;
         }
+        enforce_retention(keys, topic, partition, retention)?;
         Ok(Ok(first))
     })
 }

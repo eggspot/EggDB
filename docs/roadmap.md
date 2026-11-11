@@ -1312,7 +1312,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Kafka's flexible request versions, SASL, and topic creation and deletion APIs (D213). Topic creation and
   deletion: **code written, unbuilt** (code-only mode, 2026-11-11, D492). SASL/PLAIN: **code written, unbuilt** (code-only mode,
   2026-11-11, D493).
-- Partitions per topic, retention and compaction (D33, D213).
+- Partitions per topic, retention and compaction (D33, D213). Partitions per topic (D492) and retention:
+  **code written, unbuilt** (code-only mode, 2026-11-11, D494); compaction is not written.
 - Kafka Connect's REST and worker protocol (D46).
 - A benchmark against Kafka (D33, D213).
 - AMQP 0-9-1: durable exchanges and bindings, headers exchanges, exclusive and auto-delete queues

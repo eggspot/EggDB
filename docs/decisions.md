@@ -518,3 +518,4 @@ its full title with its status.
 - [D491](decisions/D491.md) Code-only batch 139 (M6d): per-agent MCP time limits and quotas, and the role in audit records
 - [D492](decisions/D492.md) Code-only batch 140 (M16): Kafka `CreateTopics` and `DeleteTopics`
 - [D493](decisions/D493.md) Code-only batch 141 (M16): Kafka SASL/PLAIN authentication
+- [D494](decisions/D494.md) Code-only batch 142 (M16): Kafka topic retention

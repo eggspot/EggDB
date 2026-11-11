@@ -23,6 +23,7 @@ const SASL_HANDSHAKE: i16 = 17;
 const API_VERSIONS: i16 = 18;
 const SASL_AUTHENTICATE: i16 = 36;
 const UNSUPPORTED_SASL_MECHANISM: i16 = 33;
+const INVALID_CONFIG: i16 = 40;
 const ILLEGAL_SASL_STATE: i16 = 34;
 const SASL_AUTHENTICATION_FAILED: i16 = 58;
 const CREATE_TOPICS: i16 = 19;
@@ -46,6 +47,7 @@ struct CreatedTopic {
     partitions: i32,
     replication: i16,
     assigned: bool,
+    retention: Option<log::Retention>,
 }
 
 fn create_topics(
@@ -62,15 +64,31 @@ fn create_topics(
             let _partition = assignment.i32()?;
             assignment.array(|broker| broker.i32())
         })?;
-        let _configs = reader.array(|config| {
-            let _name = config.string()?;
-            config.string()
-        })?;
+        let configs = reader.array(|config| Ok((config.string()?, config.string()?)))?;
+        let mut retention = Some(log::Retention::UNLIMITED);
+        for (key, value) in configs {
+            let parsed = value.as_deref().and_then(|value| value.parse::<i64>().ok());
+            match (key.as_deref(), parsed) {
+                (Some("retention.ms"), Some(ms)) if ms >= -1 => {
+                    if let Some(kept) = retention.as_mut() {
+                        kept.ms = ms;
+                    }
+                }
+                (Some("retention.bytes"), Some(bytes)) if bytes >= -1 => {
+                    if let Some(kept) = retention.as_mut() {
+                        kept.bytes = bytes;
+                    }
+                }
+                (Some("retention.ms" | "retention.bytes"), _) => retention = None,
+                _ => {}
+            }
+        }
         Ok(CreatedTopic {
             name,
             partitions,
             replication,
             assigned: !assignments.is_empty(),
+            retention,
         })
     })?;
     let _timeout = request.i32()?;
@@ -87,8 +105,20 @@ fn create_topics(
                 log::error::INVALID_REPLICATION_FACTOR,
                 "the replication factor must be 1: EggDB is one broker",
             )
+        } else if topic.retention.is_none() {
+            (
+                INVALID_CONFIG,
+                "retention.ms and retention.bytes take a whole number, -1 for no limit",
+            )
         } else {
-            let code = log::create_topic(keyspace, &topic.name, topic.partitions, validate_only)?;
+            let retention = topic.retention.unwrap_or(log::Retention::UNLIMITED);
+            let code = log::create_topic(
+                keyspace,
+                &topic.name,
+                topic.partitions,
+                retention,
+                validate_only,
+            )?;
             let message = match code {
                 log::error::TOPIC_ALREADY_EXISTS => "the topic already exists",
                 log::error::INVALID_TOPIC => "the topic name is not valid",
