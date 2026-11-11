@@ -1407,3 +1407,37 @@ fn merge_refuses_a_null_property_value() {
         vec![Value::Integer(1)]
     );
 }
+
+#[test]
+fn list_predicates_answer_and_steer_shortest_paths() {
+    let keyspace = MemoryKeyspace::default();
+    query(
+        &keyspace,
+        "CREATE (a:N {name: 'a'}), (b:N {name: 'b'}), (c:N {name: 'c'}), (d:N {name: 'd'}), (e:N {name: 'e'})
+         CREATE (a)-[:R {w: 1}]->(b), (b)-[:R {w: 9}]->(c), (a)-[:R {w: 1}]->(d), (d)-[:R {w: 1}]->(e), (e)-[:R {w: 2}]->(c)",
+    );
+    let predicates = query(
+        &keyspace,
+        "RETURN all(x IN [1, 2] WHERE x > 0), any(x IN [1, 2] WHERE x > 1), none(x IN [1, 2] WHERE x > 5), single(x IN [1, 2] WHERE x > 1), all(x IN [1, null] WHERE x > 0)",
+    );
+    assert_eq!(
+        predicates.rows,
+        vec![vec![
+            Value::Boolean(true),
+            Value::Boolean(true),
+            Value::Boolean(true),
+            Value::Boolean(true),
+            Value::Null
+        ]]
+    );
+    let light = query(
+        &keyspace,
+        "MATCH (a:N {name: 'a'}), (c:N {name: 'c'}), p = shortestPath((a)-[*]->(c))
+         WHERE all(r IN relationships(p) WHERE r.w < 5)
+         RETURN [n IN nodes(p) | n.name]",
+    );
+    assert_eq!(
+        light.rows,
+        vec![vec![Value::List(vec![text("a"), text("d"), text("e"), text("c")])]]
+    );
+}

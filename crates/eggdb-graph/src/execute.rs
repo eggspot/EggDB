@@ -1,6 +1,6 @@
 use crate::cypher::{
     Clause, Direction, Expr, Imports, LabelExpression, NodePattern, Operator, Pattern, Projecting,
-    Query, RelationshipPattern, SetItem, Shortest, Subquery,
+    Quantifier, Query, RelationshipPattern, SetItem, Shortest, Subquery,
 };
 use crate::store::{GraphRead, GraphWrite};
 use crate::value::{Node, Path, Relationship, Value, equals, order};
@@ -234,6 +234,97 @@ pub(crate) struct Executor<'g, 'p> {
     pub(crate) foreach_runs: usize,
     pub(crate) shortest_path_steps: Cell<usize>,
     pub(crate) shortest_path_relationships_returned: Cell<usize>,
+}
+
+/// Whether `expr` reads no variable besides `allowed` ones, so it can be checked during a
+/// search before the rest of the row exists.
+fn reads_only(expr: &Expr, allowed: &dyn Fn(&str) -> bool) -> bool {
+    match expr {
+        Expr::Literal(_) | Expr::Parameter(_) => true,
+        Expr::Variable(name) => allowed(name),
+        Expr::Property(inner, _) | Expr::Not(inner) | Expr::Negate(inner) | Expr::IsNull(inner, _) | Expr::LabelPredicate(inner, _) => {
+            reads_only(inner, allowed)
+        }
+        Expr::Index(left, right) | Expr::Binary(_, left, right) => reads_only(left, allowed) && reads_only(right, allowed),
+        Expr::List(items) => items.iter().all(|item| reads_only(item, allowed)),
+        Expr::Map(entries) => entries.iter().all(|(_, value)| reads_only(value, allowed)),
+        Expr::Call { arguments, name, .. } => !AGGREGATES.contains(&name.as_str()) && arguments.iter().all(|argument| reads_only(argument, allowed)),
+        Expr::Case { subject, arms, otherwise } => {
+            subject.as_deref().is_none_or(|subject| reads_only(subject, allowed))
+                && arms.iter().all(|(when, then)| reads_only(when, allowed) && reads_only(then, allowed))
+                && otherwise.as_deref().is_none_or(|otherwise| reads_only(otherwise, allowed))
+        }
+        Expr::ListComprehension { variable, list, filter, map } => {
+            let inner = |name: &str| name == variable || allowed(name);
+            reads_only(list, allowed)
+                && filter.as_deref().is_none_or(|filter| reads_only(filter, &inner))
+                && map.as_deref().is_none_or(|map| reads_only(map, &inner))
+        }
+        Expr::Quantified { variable, list, predicate, .. } => {
+            let inner = |name: &str| name == variable || allowed(name);
+            reads_only(list, allowed) && reads_only(predicate, &inner)
+        }
+        Expr::PatternComprehension { .. } | Expr::ShortestPath(_) => false,
+    }
+}
+
+/// A condition every relationship (or every node) of a shortest path must meet, taken from a
+/// `MATCH`'s `WHERE` (`all(r IN relationships(p) WHERE ...)`, `all(n IN nodes(p) WHERE ...)`,
+/// or `all(r IN rels WHERE ...)` over the pattern's relationship list), so the search follows
+/// only steps that keep it.
+#[derive(Debug, Clone)]
+pub(crate) struct StepCondition {
+    variable: String,
+    predicate: Expr,
+    on_nodes: bool,
+}
+
+fn conjuncts(expr: &Expr) -> Vec<&Expr> {
+    match expr {
+        Expr::Binary(Operator::And, left, right) => {
+            let mut out = conjuncts(left);
+            out.extend(conjuncts(right));
+            out
+        }
+        other => vec![other],
+    }
+}
+
+fn step_conditions(filter: Option<&Expr>, pattern: &Pattern, row: &Row) -> Vec<StepCondition> {
+    let Some(filter) = filter else {
+        return Vec::new();
+    };
+    let relationships_variable = pattern.steps.first().and_then(|(relationship, _)| relationship.variable.clone());
+    let mut out = Vec::new();
+    for condition in conjuncts(filter) {
+        let Expr::Quantified {
+            kind: Quantifier::All,
+            variable,
+            list,
+            predicate,
+        } = condition
+        else {
+            continue;
+        };
+        let on_nodes = match list.as_ref() {
+            Expr::Call { name, arguments, .. } if arguments.len() == 1 => match (&arguments[0], name.as_str()) {
+                (Expr::Variable(path), "relationships") if pattern.path.as_deref() == Some(path.as_str()) => false,
+                (Expr::Variable(path), "nodes") if pattern.path.as_deref() == Some(path.as_str()) => true,
+                _ => continue,
+            },
+            Expr::Variable(list) if relationships_variable.as_deref() == Some(list.as_str()) => false,
+            _ => continue,
+        };
+        let allowed = |name: &str| name == variable || lookup(row, name).is_some();
+        if reads_only(predicate, &allowed) {
+            out.push(StepCondition {
+                variable: variable.clone(),
+                predicate: predicate.as_ref().clone(),
+                on_nodes,
+            });
+        }
+    }
+    out
 }
 
 fn is_aggregate(expr: &Expr) -> bool {
@@ -509,6 +600,43 @@ impl<'g> Executor<'g, '_> {
                 }
             },
             Expr::ShortestPath(pattern) => self.shortest_path_value(pattern, row)?,
+            Expr::Quantified {
+                kind,
+                variable,
+                list,
+                predicate,
+            } => {
+                let items = match self.evaluate(list, row)? {
+                    Value::List(items) => items,
+                    Value::Null => return Ok(Value::Null),
+                    other => {
+                        return Err(type_error(format!(
+                            "Type mismatch: expected a list but was {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+                let mut scope = row.clone();
+                let (mut held, mut failed, mut unknown) = (0usize, 0usize, false);
+                for item in items {
+                    bind(&mut scope, variable, item);
+                    match self.evaluate(predicate, &scope)? {
+                        Value::Boolean(true) => held += 1,
+                        Value::Null => unknown = true,
+                        _ => failed += 1,
+                    }
+                }
+                match kind {
+                    Quantifier::Any if held > 0 => Value::Boolean(true),
+                    Quantifier::None if held > 0 => Value::Boolean(false),
+                    Quantifier::All if failed > 0 => Value::Boolean(false),
+                    Quantifier::Single if held > 1 => Value::Boolean(false),
+                    _ if unknown => Value::Null,
+                    Quantifier::Any => Value::Boolean(false),
+                    Quantifier::None | Quantifier::All => Value::Boolean(true),
+                    Quantifier::Single => Value::Boolean(held == 1),
+                }
+            }
         })
     }
 
@@ -530,7 +658,7 @@ impl<'g> Executor<'g, '_> {
             }
         }
         let mut paths = Vec::new();
-        for (_, origin, relationships) in self.shortest_walks(row, pattern, shortest, true)? {
+        for (_, origin, relationships) in self.shortest_walks(row, pattern, shortest, true, &[])? {
             paths.push(self.path_value(origin, &relationships)?);
         }
         Ok(match shortest {
@@ -1070,6 +1198,60 @@ impl<'g> Executor<'g, '_> {
         Ok(out)
     }
 
+    fn step_allowed(
+        &self,
+        conditions: &[StepCondition],
+        row: &Row,
+        relationship: &Relationship,
+        next: u64,
+    ) -> GraphResult<bool> {
+        for condition in conditions {
+            let value = if condition.on_nodes {
+                Value::Node(Box::new(self.existing_node(next)?))
+            } else {
+                Value::Relationship(Box::new(relationship.clone()))
+            };
+            let mut scope = row.clone();
+            bind(&mut scope, &condition.variable, value);
+            if !self.evaluate(&condition.predicate, &scope)?.is_true() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn start_allowed(&self, conditions: &[StepCondition], row: &Row, start: &Node) -> GraphResult<bool> {
+        for condition in conditions.iter().filter(|condition| condition.on_nodes) {
+            let mut scope = row.clone();
+            bind(&mut scope, &condition.variable, Value::Node(Box::new(start.clone())));
+            if !self.evaluate(&condition.predicate, &scope)?.is_true() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn match_pattern_with(&self, row: &Row, pattern: &Pattern, filter: Option<&Expr>) -> GraphResult<Vec<Row>> {
+        match pattern.shortest {
+            Some(shortest) => {
+                let conditions = step_conditions(filter, pattern, row);
+                let mut out = Vec::new();
+                for (mut matched, origin, relationships) in
+                    self.shortest_walks(row, pattern, shortest, pattern.path.is_some(), &conditions)?
+                {
+                    if let Some(name) = &pattern.path {
+                        let path = self.path_value(origin, &relationships)?;
+                        bind_path(&mut matched, name, path)?;
+                    }
+                    out.push(matched);
+                }
+                Ok(out)
+            }
+            None => self.match_pattern(row, pattern),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn breadth_first(
         &self,
         origin: u64,
@@ -1078,6 +1260,7 @@ impl<'g> Executor<'g, '_> {
         max: u32,
         target: Option<u64>,
         all: bool,
+        conditions: &[StepCondition],
     ) -> GraphResult<Vec<Reached>> {
         let mut reached = vec![Reached {
             node: origin,
@@ -1093,6 +1276,9 @@ impl<'g> Executor<'g, '_> {
                     continue;
                 };
                 for (relationship, next) in self.steps_from(from, pattern, row, &[])? {
+                    if !conditions.is_empty() && !self.step_allowed(conditions, row, &relationship, next)? {
+                        continue;
+                    }
                     let steps = self.shortest_path_steps.get() + 1;
                     self.shortest_path_steps.set(steps);
                     if steps > MAX_SHORTEST_PATH_STEPS {
@@ -1139,7 +1325,7 @@ impl<'g> Executor<'g, '_> {
     ) -> GraphResult<Vec<Row>> {
         let mut out = Vec::new();
         for (mut matched, origin, relationships) in
-            self.shortest_walks(row, pattern, shortest, pattern.path.is_some())?
+            self.shortest_walks(row, pattern, shortest, pattern.path.is_some(), &[])?
         {
             if let Some(name) = &pattern.path {
                 let path = self.path_value(origin, &relationships)?;
@@ -1156,6 +1342,7 @@ impl<'g> Executor<'g, '_> {
         pattern: &Pattern,
         shortest: Shortest,
         keep_relationships: bool,
+        conditions: &[StepCondition],
     ) -> GraphResult<Vec<(Row, u64, Vec<Relationship>)>> {
         let Some((relationship_pattern, end_pattern)) = pattern.steps.first() else {
             return Ok(Vec::new());
@@ -1169,15 +1356,22 @@ impl<'g> Executor<'g, '_> {
         let all = shortest == Shortest::All;
         let mut out = Vec::new();
         for start in self.start_nodes(&pattern.start, row)? {
-            if !self.node_matches(&start, &pattern.start, row)? {
+            if !self.node_matches(&start, &pattern.start, row)? || !self.start_allowed(conditions, row, &start)? {
                 continue;
             }
             let mut start_row = row.clone();
             if let Some(name) = &pattern.start.variable {
                 bind(&mut start_row, name, Value::Node(Box::new(start.clone())));
             }
-            let reached =
-                self.breadth_first(start.id, relationship_pattern, &start_row, max, target, all)?;
+            let reached = self.breadth_first(
+                start.id,
+                relationship_pattern,
+                &start_row,
+                max,
+                target,
+                all,
+                conditions,
+            )?;
             for (end, step) in reached.iter().enumerate() {
                 if step.distance < min || target.is_some_and(|target| target != step.node) {
                     continue;
@@ -1925,7 +2119,7 @@ impl<'g> Executor<'g, '_> {
                         for pattern in patterns {
                             let mut extended = Vec::new();
                             for partial in matched {
-                                extended.extend(self.match_pattern(&partial, pattern)?);
+                                extended.extend(self.match_pattern_with(&partial, pattern, filter.as_ref())?);
                             }
                             matched = extended;
                         }

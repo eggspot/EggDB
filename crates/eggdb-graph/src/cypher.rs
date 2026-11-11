@@ -240,6 +240,21 @@ pub(crate) enum Expr {
     },
     LabelPredicate(Box<Expr>, LabelExpression),
     ShortestPath(Box<Pattern>),
+    Quantified {
+        kind: Quantifier,
+        variable: String,
+        list: Box<Expr>,
+        predicate: Box<Expr>,
+    },
+}
+
+/// The list predicate functions: `all`, `any`, `none` and `single`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Quantifier {
+    All,
+    Any,
+    None,
+    Single,
 }
 
 /// The labels a node (or the type a relationship) must have: `:A:B` asks for all of them,
@@ -939,6 +954,29 @@ impl Parser<'_> {
         })
     }
 
+    fn quantified(&mut self, name: &str) -> GraphResult<Expr> {
+        let kind = match name {
+            "all" => Quantifier::All,
+            "any" => Quantifier::Any,
+            "none" => Quantifier::None,
+            _ => Quantifier::Single,
+        };
+        self.at += 1;
+        self.expect_symbol("(")?;
+        let variable = self.name()?;
+        self.expect_keyword("in")?;
+        let list = Box::new(self.expression()?);
+        self.expect_keyword("where")?;
+        let predicate = Box::new(self.expression()?);
+        self.expect_symbol(")")?;
+        Ok(Expr::Quantified {
+            kind,
+            variable,
+            list,
+            predicate,
+        })
+    }
+
     fn list_comprehension(&mut self) -> GraphResult<Expr> {
         let variable = self.name()?;
         self.expect_keyword("in")?;
@@ -1279,6 +1317,13 @@ impl Parser<'_> {
                         Ok(Expr::Literal(Value::Null))
                     }
                     "case" => self.case(),
+                    "all" | "any" | "none" | "single"
+                        if matches!(self.peek_at(1), Some(Token::Symbol("(")))
+                            && matches!(self.peek_at(2), Some(Token::Word(_) | Token::Quoted(_)))
+                            && matches!(self.peek_at(3), Some(Token::Word(word)) if word.eq_ignore_ascii_case("in")) =>
+                    {
+                        self.quantified(&lower)
+                    }
                     "shortestpath" | "allshortestpaths"
                         if matches!(self.peek_at(1), Some(Token::Symbol("("))) =>
                     {
