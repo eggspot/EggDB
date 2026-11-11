@@ -471,3 +471,4 @@ its full title with its status.
 - [D444](decisions/D444.md) Code-only batch 92 (M18): tombstone collection and membership changes by epoch in the leaderless quorums
 - [D445](decisions/D445.md) Code-only batch 93 (M16): HL7 v2 building and ACKs, FIX building, FIX and EDIFACT name dictionaries
 - [D446](decisions/D446.md) Code-only batch 94 (M14): `eggdb export --sql` writes sequences, views, comments and check and foreign-key constraints
+- [D447](decisions/D447.md) Code-only batch 95 (M11): ASOF joins

@@ -1,3 +1,4 @@
+mod asof;
 mod constraints;
 mod copy;
 mod create_table_as;
@@ -2988,6 +2989,9 @@ impl<'t> Parser<'t> {
     }
 
     fn at_bare_alias(&self) -> bool {
+        if self.at_asof_join() {
+            return false;
+        }
         matches!(self.peek_kind(), TokenKind::Word(word) if !self.reserved(word) && !self.clause_word(word))
             || matches!(self.peek_kind(), TokenKind::QuotedIdentifier(_))
     }
@@ -3523,6 +3527,18 @@ impl<'t> Parser<'t> {
                     table,
                     condition,
                 });
+                continue;
+            }
+            if self.at_asof_join() {
+                if joins.len() + 1 >= MAX_JOINED_TABLES {
+                    return Err(SqlError::new(
+                        SqlState::PROGRAM_LIMIT_EXCEEDED,
+                        format!("a FROM clause can join at most {MAX_JOINED_TABLES} tables"),
+                    )
+                    .at(self.position()));
+                }
+                let join = self.asof_join()?;
+                joins.push(join);
                 continue;
             }
             let mut natural = false;

@@ -1106,7 +1106,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   PR #86). `first` and `last`: **code written, unbuilt** (code-only mode, 2026-11-11, D435).
 - Retention, downsampling and continuous aggregates for time series and observability data (D39,
   D202, D220). Check: a TSBS benchmark.
-- ASOF and window joins (D50, D243).
+- ASOF and window joins (D50, D243). ASOF joins: **code written, unbuilt** (code-only mode, 2026-11-11,
+  D447). Left: window joins.
 - Bitemporal tables (D50).
 - Order-book and double-entry ledger primitives, with microsecond tail-latency targets in the
   benchmarks (D50).
