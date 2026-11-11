@@ -224,6 +224,13 @@ fn checked_options(options: &Document) -> DocumentResult<Document> {
         };
         let mut kept_timeseries = Document::new();
         kept_timeseries.insert("timeField", Bson::String(time_field.to_owned()));
+        if let Some(seconds) = options.get("expireAfterSeconds") {
+            let seconds = seconds
+                .as_i64()
+                .filter(|seconds| *seconds >= 0)
+                .ok_or_else(|| DocumentError::invalid_options("expireAfterSeconds needs a non-negative whole number"))?;
+            kept.insert("expireAfterSeconds", Bson::Int64(seconds));
+        }
         if let Some(meta) = timeseries.get_str("metaField") {
             if meta == time_field {
                 return Err(DocumentError::invalid_options("timeField and metaField must differ"));
@@ -495,12 +502,89 @@ fn text_index_fields(keys: &dyn KeysRead, database: &str, collection: &str) -> D
     }))
 }
 
+/// The TTL rules of a collection: each field whose dates expire documents and after how many
+/// seconds, from TTL indexes (`expireAfterSeconds` on one field) and a time-series
+/// collection's `expireAfterSeconds` on its `timeField`.
+fn ttl_rules(keys: &dyn KeysRead, database: &str, collection: &str) -> DocumentResult<Vec<(String, i64)>> {
+    let Some(bytes) = keys
+        .get(&collection_key(database, collection))
+        .map_err(DocumentError::storage)?
+    else {
+        return Ok(Vec::new());
+    };
+    let info = decoded(&bytes)?;
+    let mut rules: Vec<(String, i64)> = info
+        .get_array("indexes")
+        .map(|stored| {
+            stored
+                .iter()
+                .filter_map(Bson::as_document)
+                .filter_map(|index| {
+                    let seconds = index.get("expireAfterSeconds").and_then(Bson::as_i64)?;
+                    let key = index.get_document("key")?;
+                    (key.len() == 1).then(|| (key.keys().next().cloned().unwrap_or_default(), seconds))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(options) = info.get_document("options") {
+        if let (Some(field), Some(seconds)) = (
+            options.get_document("timeseries").and_then(|timeseries| timeseries.get_str("timeField")),
+            options.get("expireAfterSeconds").and_then(Bson::as_i64),
+        ) {
+            rules.push((field.to_owned(), seconds));
+        }
+    }
+    Ok(rules)
+}
+
+/// Whether a TTL rule has expired `document` at `now`: a date in the field (the earliest of an
+/// array of dates) plus the rule's seconds is past. Documents without a date never expire.
+fn expired(rules: &[(String, i64)], document: &Document, now: i64) -> bool {
+    rules.iter().any(|(field, seconds)| {
+        let earliest = match crate::path::get_exact(document, field) {
+            Some(Bson::DateTime(at)) => Some(*at),
+            Some(Bson::Array(items)) => items
+                .iter()
+                .filter_map(|item| match item {
+                    Bson::DateTime(at) => Some(*at),
+                    _ => None,
+                })
+                .min(),
+            _ => None,
+        };
+        earliest.is_some_and(|at| at.saturating_add(seconds.saturating_mul(1000)) <= now)
+    })
+}
+
+fn purge_expired(keys: &mut dyn KeysWrite, database: &str, collection: &str) -> DocumentResult<u64> {
+    let rules = ttl_rules(&*keys, database, collection)?;
+    if rules.is_empty() {
+        return Ok(0);
+    }
+    let now = now_ms();
+    let mut purged = 0;
+    for (key, bytes) in keys
+        .scan(&documents_prefix(database, collection))
+        .map_err(DocumentError::storage)?
+    {
+        if expired(&rules, &decoded(&bytes)?, now) {
+            keys.delete(&key).map_err(DocumentError::storage)?;
+            purged += 1;
+        }
+    }
+    Ok(purged)
+}
+
 fn matching(
     keys: &dyn KeysRead,
     database: &str,
     collection: &str,
     filter: &Filter,
 ) -> DocumentResult<Vec<(Vec<u8>, Document)>> {
+    let rules = ttl_rules(keys, database, collection)?;
+    let now = now_ms();
+    let live = |document: &Document| rules.is_empty() || !expired(&rules, document, now);
     let scoped;
     let filter = if crate::filter::has_text(filter) {
         let Some(fields) = text_index_fields(keys, database, collection)? else {
@@ -520,7 +604,7 @@ fn matching(
         return Ok(match keys.get(&key).map_err(DocumentError::storage)? {
             Some(bytes) => {
                 let document = decoded(&bytes)?;
-                if matches(filter, &document) {
+                if live(&document) && matches(filter, &document) {
                     vec![(key, document)]
                 } else {
                     Vec::new()
@@ -535,7 +619,7 @@ fn matching(
         .map_err(DocumentError::storage)?
     {
         let document = decoded(&bytes)?;
-        if matches(filter, &document) {
+        if live(&document) && matches(filter, &document) {
             found.push((key, document));
         }
     }
@@ -843,6 +927,19 @@ impl<'k> Store<'k> {
                 index.insert("v", Bson::Int32(2));
                 index.insert("key", definition.get("key").cloned().unwrap_or(Bson::Null));
                 index.insert("name", Bson::String(name.to_owned()));
+                if let Some(seconds) = definition.get("expireAfterSeconds") {
+                    let fields = definition.get_document("key").map_or(0, Document::len);
+                    match seconds.as_i64() {
+                        Some(seconds) if seconds >= 0 && fields == 1 => {
+                            index.insert("expireAfterSeconds", Bson::Int64(seconds));
+                        }
+                        _ => {
+                            return Err(DocumentError::invalid_options(
+                                "expireAfterSeconds needs a non-negative whole number and an index on one field",
+                            ));
+                        }
+                    }
+                }
                 for option in ["unique", "sparse"] {
                     if definition.get_bool(option) == Some(true) {
                         index.insert(option, Bson::Boolean(true));
@@ -931,6 +1028,7 @@ impl<'k> Store<'k> {
     ) -> DocumentResult<InsertOutcome> {
         self.write(|keys| {
             ensure_collection(keys, database, collection)?;
+            purge_expired(keys, database, collection)?;
             let options = collection_options(&*keys, database, collection)?;
             let mut outcome = InsertOutcome::default();
             for (at, mut document) in documents.into_iter().enumerate() {

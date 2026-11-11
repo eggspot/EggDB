@@ -1820,3 +1820,44 @@ fn capped_collections_keep_their_newest_documents_in_insertion_order() {
         .unwrap();
     assert_eq!(accepted.inserted, 1);
 }
+
+#[test]
+fn ttl_indexes_hide_and_then_remove_expired_documents() {
+    let keyspace = MemoryKeyspace::default();
+    let store = store(&keyspace);
+    store
+        .insert(
+            "app",
+            "sessions",
+            vec![
+                doc(vec![("_id", Bson::Int32(1)), ("seen", Bson::DateTime(0))]),
+                doc(vec![("_id", Bson::Int32(2)), ("seen", Bson::DateTime(i64::MAX / 2))]),
+                doc(vec![("_id", Bson::Int32(3))]),
+            ],
+            true,
+        )
+        .unwrap();
+    store
+        .create_indexes(
+            "app",
+            "sessions",
+            &[doc(vec![
+                ("key", Bson::Document(doc(vec![("seen", Bson::Int32(1))]))),
+                ("name", text("seen_1")),
+                ("expireAfterSeconds", Bson::Int32(60)),
+            ])],
+        )
+        .unwrap();
+    let everything = crate::parse_filter(&Document::new()).unwrap();
+    let ids = |store: &Store<'_>| -> Vec<Bson> {
+        store
+            .find("app", "sessions", &everything, &crate::SortSpec::default())
+            .unwrap()
+            .iter()
+            .filter_map(|document| document.get("_id").cloned())
+            .collect()
+    };
+    assert_eq!(ids(&store), vec![Bson::Int32(2), Bson::Int32(3)]);
+    store.insert("app", "sessions", vec![doc(vec![("_id", Bson::Int32(4))])], true).unwrap();
+    assert_eq!(ids(&store), vec![Bson::Int32(2), Bson::Int32(3), Bson::Int32(4)]);
+}

@@ -557,3 +557,4 @@ its full title with its status.
 - [D530](decisions/D530.md) Code-only batch 178 (M9): MongoDB $text
 - [D531](decisions/D531.md) Code-only batch 179 (M6c): PostgreSQL EXPLAIN (FORMAT JSON | YAML)
 - [D532](decisions/D532.md) Code-only batch 180 (M9): MongoDB capped and time-series collections
+- [D533](decisions/D533.md) Code-only batch 181 (M9): MongoDB TTL indexes
