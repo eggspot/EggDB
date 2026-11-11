@@ -13,6 +13,7 @@ mod cursors;
 mod explain;
 mod message;
 mod server;
+mod tailable;
 mod transactions;
 
 pub use message::MAX_MESSAGE_BYTES;

@@ -749,6 +749,18 @@ fn find(shared: &Shared<'_>, database: &str, body: &Document) -> Result<Document
         ));
     }
     let single = body.get_bool("singleBatch") == Some(true) || limit < 0;
+    let tailable = body.get_bool("tailable") == Some(true);
+    if tailable && (!sort.is_empty() || single || limit != 0) {
+        return Err(DocumentError::bad_value(
+            "a tailable cursor takes no sort, limit or singleBatch",
+        ));
+    }
+    if tailable && !shared.store.is_capped(database, collection)? {
+        return Err(DocumentError::bad_value(&format!(
+            "error processing query: ns={database}.{collection} tailable cursor requested on non capped collection"
+        )));
+    }
+    let tail_from = if tailable { Some(shared.store.change_position()?) } else { None };
     let found = shared.store.find(database, collection, &filter, &sort)?;
     let mut remaining: VecDeque<Document> = found
         .into_iter()
@@ -759,13 +771,26 @@ fn find(shared: &Shared<'_>, database: &str, body: &Document) -> Result<Document
             limit.unsigned_abs() as usize
         })
         .collect();
-    if let Some(projection) = projection {
+    if let Some(projection) = &projection {
         remaining = remaining
             .iter()
             .map(|document| projection.apply_matching(document, &filter))
             .collect();
     }
     let first = batch_size.map_or(DEFAULT_FIRST_BATCH, |size| size as usize);
+    if let Some(next) = tail_from {
+        let tail = crate::tailable::Tail {
+            next,
+            database: database.to_owned(),
+            collection: collection.to_owned(),
+            filter,
+            projection,
+            await_data: body.get_bool("awaitData") == Some(true),
+            returned_until: shared.store.change_position()?,
+            returned_ids: remaining.iter().filter_map(|document| document.get("_id").cloned()).collect(),
+        };
+        return Ok(tailable_reply(shared, format!("{database}.{collection}"), remaining, first, tail));
+    }
     Ok(cursor_reply(
         shared,
         format!("{database}.{collection}"),
@@ -773,6 +798,32 @@ fn find(shared: &Shared<'_>, database: &str, body: &Document) -> Result<Document
         first,
         single,
     ))
+}
+
+fn tailable_reply(
+    shared: &Shared<'_>,
+    namespace: String,
+    mut remaining: VecDeque<Document>,
+    first_batch: usize,
+    tail: crate::tailable::Tail,
+) -> Document {
+    let (first, _) = batch(&mut remaining, first_batch);
+    let opened = shared
+        .cursors
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .open_tailable(namespace.clone(), remaining, tail);
+    let Some(id) = opened else {
+        return exceeded_memory_limit("the tailable cursor");
+    };
+    ok(document(vec![(
+        "cursor",
+        Bson::Document(document(vec![
+            ("firstBatch", Bson::Array(first)),
+            ("id", Bson::Int64(id)),
+            ("ns", text(&namespace)),
+        ])),
+    )]))
 }
 
 fn get_more(
@@ -831,9 +882,32 @@ fn get_more(
             message,
         });
     }
+    if cursor.remaining.is_empty()
+        && let Some(tail) = cursor.tail.take()
+    {
+        drop(cursors);
+        let outcome = crate::tailable::get_more(shared, tail, body);
+        let mut cursors = shared
+            .cursors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (found, tail) = outcome?;
+        cursor.remaining.extend(found);
+        cursor.tail = Some(tail);
+        let (next, _) = batch(&mut cursor.remaining, batch_size);
+        cursors.put_back(id, cursor);
+        return Ok(ok(document(vec![(
+            "cursor",
+            Bson::Document(document(vec![
+                ("nextBatch", Bson::Array(next)),
+                ("id", Bson::Int64(id)),
+                ("ns", text(&namespace)),
+            ])),
+        )])));
+    }
     let (next, sent_bytes) = batch(&mut cursor.remaining, batch_size);
     cursor.release_sent(sent_bytes);
-    let id = if cursor.remaining.is_empty() {
+    let id = if cursor.remaining.is_empty() && cursor.tail.is_none() {
         0
     } else {
         cursors.put_back(id, cursor);

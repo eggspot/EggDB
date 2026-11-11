@@ -13,6 +13,7 @@ pub(crate) struct Cursor<'b> {
     pub(crate) namespace: String,
     pub(crate) remaining: VecDeque<Document>,
     pub(crate) change_stream: Option<crate::change_streams::ChangeStream>,
+    pub(crate) tail: Option<crate::tailable::Tail>,
     held: Reservation<'b>,
     last_used: Instant,
 }
@@ -79,6 +80,7 @@ impl<'b> Cursors<'b> {
                 namespace,
                 remaining,
                 change_stream: None,
+                tail: None,
                 held,
                 last_used: now,
             },
@@ -96,6 +98,21 @@ impl<'b> Cursors<'b> {
         let id = self.open(namespace, VecDeque::new())?;
         if let Some(cursor) = self.open.get_mut(&id) {
             cursor.change_stream = Some(stream);
+        }
+        Some(id)
+    }
+
+    /// Opens a tailable cursor on a capped collection: the first batch's leftovers, then the
+    /// documents inserted after it; it stays open when empty, until it is killed or idle.
+    pub(crate) fn open_tailable(
+        &mut self,
+        namespace: String,
+        remaining: VecDeque<Document>,
+        tail: crate::tailable::Tail,
+    ) -> Option<i64> {
+        let id = self.open(namespace, remaining)?;
+        if let Some(cursor) = self.open.get_mut(&id) {
+            cursor.tail = Some(tail);
         }
         Some(id)
     }

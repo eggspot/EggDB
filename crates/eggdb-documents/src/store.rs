@@ -655,6 +655,11 @@ impl<'k> Store<'k> {
         }
     }
 
+    /// Whether the collection was created `capped`, so a tailable cursor may follow it.
+    pub fn is_capped(&self, database: &str, collection: &str) -> DocumentResult<bool> {
+        self.read(|keys| Ok(collection_options(keys, database, collection)?.capped.is_some()))
+    }
+
     /// The sequence number the next change event will take: a change stream opened now starts
     /// there.
     pub fn change_position(&self) -> DocumentResult<u64> {

@@ -1495,3 +1495,60 @@ fn a_change_stream_sees_inserts_updates_and_deletes_after_it_opens() {
         assert_eq!(kinds, ["insert", "update", "delete"], "{more:?}");
     });
 }
+
+#[test]
+fn a_tailable_cursor_follows_inserts_into_a_capped_collection() {
+    with_harness(|harness| {
+        let created = harness.run(doc(vec![
+            ("create", text("log")),
+            ("capped", Bson::Boolean(true)),
+            ("size", Bson::Int64(1 << 20)),
+        ]));
+        assert!(ok(&created), "{created:?}");
+        harness.run(doc(vec![
+            ("insert", text("log")),
+            ("documents", Bson::Array(vec![sub(vec![("_id", Bson::Int32(1)), ("level", text("info"))])])),
+        ]));
+        let opened = harness.run(doc(vec![
+            ("find", text("log")),
+            ("filter", sub(vec![("level", text("info"))])),
+            ("tailable", Bson::Boolean(true)),
+            ("awaitData", Bson::Boolean(true)),
+        ]));
+        assert!(ok(&opened), "{opened:?}");
+        assert_eq!(batch(&opened, "firstBatch").len(), 1);
+        let id = opened
+            .get_document("cursor")
+            .and_then(|cursor| cursor.get_i64("id"))
+            .expect("a cursor id");
+        assert_ne!(id, 0, "a tailable cursor stays open when it runs dry");
+        harness.run(doc(vec![
+            ("insert", text("log")),
+            (
+                "documents",
+                Bson::Array(vec![
+                    sub(vec![("_id", Bson::Int32(2)), ("level", text("debug"))]),
+                    sub(vec![("_id", Bson::Int32(3)), ("level", text("info"))]),
+                ]),
+            ),
+        ]));
+        let more = harness.run(doc(vec![
+            ("getMore", Bson::Int64(id)),
+            ("collection", text("log")),
+            ("maxTimeMS", Bson::Int32(10)),
+        ]));
+        let found = batch(&more, "nextBatch");
+        assert_eq!(found.len(), 1, "{more:?}");
+        assert!(matches!(&found[0], Bson::Document(found) if found.get("_id") == Some(&Bson::Int32(3))));
+        let idle = harness.run(doc(vec![
+            ("getMore", Bson::Int64(id)),
+            ("collection", text("log")),
+            ("maxTimeMS", Bson::Int32(10)),
+        ]));
+        assert!(batch(&idle, "nextBatch").is_empty());
+        assert_eq!(idle.get_document("cursor").and_then(|cursor| cursor.get_i64("id")), Some(id));
+        harness.run(doc(vec![("create", text("plain"))]));
+        let refused = harness.run(doc(vec![("find", text("plain")), ("tailable", Bson::Boolean(true))]));
+        assert!(!ok(&refused), "{refused:?}");
+    });
+}
