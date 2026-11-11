@@ -1317,7 +1317,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - AMQP 1.0: annotations and properties end to end, transactions, dynamic nodes, link resumption,
   `amqp:modified`, and the `idle-time-out` enforced and heartbeats sent (D217, D352).
 - JMS clients over AMQP 1.0, and Azure Service Bus-style use after D58's legal check (D33).
-- STOMP `/exchange/` destinations and selectors (D217).
+- STOMP `/exchange/` destinations and selectors (D217). **Code written, unbuilt** (code-only mode,
+  2026-11-11, D477); selectors on `/queue/` subscriptions are not written.
 - A dead-letter queue for rejected messages, and an in-process inbox for embedded consumers
   (D217).
 - CQL collections, tuples, user-defined types and counters (D19, D218).

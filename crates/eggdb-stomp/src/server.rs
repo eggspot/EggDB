@@ -110,6 +110,43 @@ struct TopicSubscriber {
     session: u64,
     subscription: String,
     writer: SharedWriter,
+    binding: Option<String>,
+    selector: Option<crate::selector::Selector>,
+}
+
+const SERVER_HEADERS: [&str; 7] = [
+    "destination",
+    "content-length",
+    "transaction",
+    "receipt",
+    "message-id",
+    "subscription",
+    "ack",
+];
+
+fn forwarded_headers(frame: &Frame) -> Vec<(String, String)> {
+    let mut forwarded: Vec<(String, String)> = Vec::new();
+    for (name, value) in &frame.headers {
+        if SERVER_HEADERS.contains(&name.as_str()) || forwarded.iter().any(|(seen, _)| seen == name) {
+            continue;
+        }
+        forwarded.push((name.clone(), value.clone()));
+    }
+    forwarded
+}
+
+fn binding_matches(pattern: &str, key: &str) -> bool {
+    let pattern: Vec<&str> = pattern.split('.').collect();
+    let key: Vec<&str> = if key.is_empty() { Vec::new() } else { key.split('.').collect() };
+    fn matches(pattern: &[&str], key: &[&str]) -> bool {
+        match pattern.split_first() {
+            None => key.is_empty(),
+            Some((&"#", rest)) => (0..=key.len()).any(|skip| matches(rest, &key[skip..])),
+            Some((&"*", rest)) => !key.is_empty() && matches(rest, &key[1..]),
+            Some((word, rest)) => key.first() == Some(word) && matches(rest, &key[1..]),
+        }
+    }
+    matches(&pattern, &key)
 }
 
 /// What every connection shares: the durable queues, the current topic subscribers and the
@@ -132,11 +169,19 @@ fn now_ms() -> u64 {
 enum Destination<'d> {
     Queue(&'d str),
     Topic,
+    Exchange { exchange: &'d str, key: &'d str },
 }
 
 fn destination(text: &str) -> Result<Destination<'_>, String> {
     if let Some(name) = text.strip_prefix("/queue/").filter(|name| !name.is_empty()) {
         return Ok(Destination::Queue(name));
+    }
+    if let Some(rest) = text.strip_prefix("/exchange/").filter(|rest| !rest.is_empty()) {
+        let (exchange, key) = rest.split_once('/').unwrap_or((rest, ""));
+        if exchange.is_empty() {
+            return Err(format!("the destination {text} names no exchange"));
+        }
+        return Ok(Destination::Exchange { exchange, key });
     }
     if text
         .strip_prefix("/topic/")
@@ -145,7 +190,7 @@ fn destination(text: &str) -> Result<Destination<'_>, String> {
         return Ok(Destination::Topic);
     }
     Err(format!(
-        "the destination {text} is not supported: use /queue/<name> or /topic/<name>"
+        "the destination {text} is not supported: use /queue/<name>, /topic/<name> or /exchange/<name>/<key>"
     ))
 }
 
@@ -173,17 +218,31 @@ impl<'k> Broker<'k> {
     fn publish_topic(
         &self,
         topic: &str,
-        content_type: Option<&str>,
+        headers: &[(String, String)],
         body: &[u8],
         budget: &MemoryBudget,
     ) {
+        let (subscribed_to, key) = match destination(topic) {
+            Ok(Destination::Exchange { exchange, key }) => (format!("/exchange/{exchange}"), Some(key)),
+            _ => (topic.to_owned(), None),
+        };
         let topics = self.topics();
-        let Some(subscribers) = topics.get(topic) else {
+        let Some(subscribers) = topics.get(&subscribed_to) else {
             return;
         };
         let id = self.next_topic_message.fetch_add(1, Ordering::Relaxed);
         let deliveries: Vec<(SharedWriter, String)> = subscribers
             .iter()
+            .filter(|subscriber| match (&subscriber.binding, key) {
+                (Some(binding), Some(key)) => binding_matches(binding, key),
+                _ => true,
+            })
+            .filter(|subscriber| {
+                subscriber
+                    .selector
+                    .as_ref()
+                    .is_none_or(|selector| selector.chooses(headers))
+            })
             .map(|subscriber| {
                 (
                     Arc::clone(&subscriber.writer),
@@ -192,10 +251,14 @@ impl<'k> Broker<'k> {
             })
             .collect();
         drop(topics);
+        let header_bytes: usize = headers
+            .iter()
+            .map(|(name, value)| name.len() + value.len() + 2)
+            .sum();
         let frame_bytes = body
             .len()
             .saturating_add(topic.len())
-            .saturating_add(content_type.map_or(0, str::len))
+            .saturating_add(header_bytes)
             .saturating_add(MESSAGE_HEADER_BYTES);
         let mut held = budget.empty_reservation();
         for (writer, subscription) in deliveries {
@@ -206,8 +269,8 @@ impl<'k> Broker<'k> {
                 .with("destination", topic)
                 .with("message-id", &format!("topic-{id}"))
                 .with("subscription", &subscription);
-            if let Some(content_type) = content_type {
-                frame = frame.with("content-type", content_type);
+            for (name, value) in headers {
+                frame = frame.with(name, value);
             }
             let bytes = frame.with_body(body).encode();
             let _ = writer
@@ -250,7 +313,7 @@ struct Pending {
 enum Staged {
     Send {
         destination: String,
-        content_type: Option<String>,
+        headers: Vec<(String, String)>,
         body: Vec<u8>,
     },
     Ack(String),
@@ -366,7 +429,7 @@ impl Session<'_, '_> {
     fn store(
         &self,
         destination_text: &str,
-        content_type: Option<&str>,
+        headers: &[(String, String)],
         body: &[u8],
     ) -> Result<(), String> {
         match destination(destination_text)? {
@@ -380,9 +443,9 @@ impl Session<'_, '_> {
                     .send(name, body, 0, now_ms())
                     .map_err(|error| queue_failure(&error))?;
             }
-            Destination::Topic => self.broker.publish_topic(
+            Destination::Topic | Destination::Exchange { .. } => self.broker.publish_topic(
                 destination_text,
-                content_type,
+                headers,
                 body,
                 &self.config.memory_budget,
             ),
@@ -454,8 +517,19 @@ impl Session<'_, '_> {
             .filter(|count| *count > 0)
             .unwrap_or(PREFETCH)
             .min(PREFETCH);
+        let selector = frame
+            .header("selector")
+            .filter(|text| !text.trim().is_empty())
+            .map(crate::selector::Selector::parse)
+            .transpose()
+            .map_err(|why| format!("the selector cannot be read: {why}"))?;
         let queue = match destination(destination_text)? {
             Destination::Queue(name) => {
+                if selector.is_some() {
+                    return Err(
+                        "selectors apply to /topic/ and /exchange/ subscriptions only".to_owned(),
+                    );
+                }
                 self.broker
                     .queues
                     .declare(name)
@@ -471,6 +545,23 @@ impl Session<'_, '_> {
                         session: self.id,
                         subscription: id.to_owned(),
                         writer: Arc::clone(&self.writer),
+                        binding: None,
+                        selector,
+                    });
+                None
+            }
+            Destination::Exchange { exchange, key } => {
+                let binding = if key.is_empty() { "#" } else { key };
+                self.broker
+                    .topics()
+                    .entry(format!("/exchange/{exchange}"))
+                    .or_default()
+                    .push(TopicSubscriber {
+                        session: self.id,
+                        subscription: id.to_owned(),
+                        writer: Arc::clone(&self.writer),
+                        binding: Some(binding.to_owned()),
+                        selector,
                     });
                 None
             }
@@ -493,8 +584,12 @@ impl Session<'_, '_> {
             .remove(id)
             .ok_or_else(|| format!("no subscription has the id {id}"))?;
         if subscription.queue.is_none() {
+            let key = match destination(&subscription.destination) {
+                Ok(Destination::Exchange { exchange, .. }) => format!("/exchange/{exchange}"),
+                _ => subscription.destination.clone(),
+            };
             let mut topics = self.broker.topics();
-            if let Some(subscribers) = topics.get_mut(&subscription.destination) {
+            if let Some(subscribers) = topics.get_mut(&key) {
                 subscribers.retain(|subscriber| {
                     subscriber.session != self.id || subscriber.subscription != id
                 });
@@ -583,13 +678,16 @@ impl Session<'_, '_> {
             match step {
                 Staged::Send {
                     destination: text,
-                    content_type,
+                    headers,
                     body,
                 } => {
-                    if matches!(destination(&text)?, Destination::Topic) {
+                    if matches!(
+                        destination(&text)?,
+                        Destination::Topic | Destination::Exchange { .. }
+                    ) {
                         self.broker.publish_topic(
                             &text,
-                            content_type.as_deref(),
+                            &headers,
                             &body,
                             &self.config.memory_budget,
                         );
@@ -610,17 +708,17 @@ impl Session<'_, '_> {
                     .header("destination")
                     .ok_or("SEND needs a destination header")?;
                 destination(destination_text)?;
-                let content_type = frame.header("content-type");
+                let headers = forwarded_headers(frame);
                 match transaction {
                     Some(transaction) => self.stage(
                         &transaction,
                         Staged::Send {
                             destination: destination_text.to_owned(),
-                            content_type: content_type.map(str::to_owned),
+                            headers,
                             body: frame.body.clone(),
                         },
                     )?,
-                    None => self.store(destination_text, content_type, &frame.body)?,
+                    None => self.store(destination_text, &headers, &frame.body)?,
                 }
             }
             "SUBSCRIBE" => self.subscribe(frame)?,

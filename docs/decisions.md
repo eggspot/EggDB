@@ -501,3 +501,4 @@ its full title with its status.
 - [D474](decisions/D474.md) Code-only batch 122 (M7): memcached's meta flags, `ma`, `me` and `stats` counts
 - [D475](decisions/D475.md) Code-only batch 123 (M9): SCRAM-SHA-1 for MongoDB drivers
 - [D476](decisions/D476.md) Code-only batch 124 (M16): NATS no-responders and token authentication
+- [D477](decisions/D477.md) Code-only batch 125 (M16): STOMP `/exchange/` destinations, forwarded headers and selectors

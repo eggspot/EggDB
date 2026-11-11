@@ -4,9 +4,13 @@
 //! `SUBSCRIBE` with the `auto`, `client` and `client-individual` acknowledgement modes, `ACK`
 //! and `NACK`, transactions (`BEGIN`, `COMMIT`, `ABORT`), receipts and `DISCONNECT`.
 //! Destinations under `/queue/` are EggDB's durable queues (`eggdb-queues`), shared with AMQP
-//! and SQS clients; destinations under `/topic/` are delivered to every current subscriber.
+//! and SQS clients; destinations under `/topic/` are delivered to every current subscriber, and
+//! `/exchange/<name>/<routing key>` to the subscribers whose binding pattern (`*` one word,
+//! `#` any) matches the key. A subscription's `selector` header filters topic and exchange
+//! messages on their headers.
 
 mod frame;
+mod selector;
 mod server;
 
 pub use server::{ServerConfig, serve};
