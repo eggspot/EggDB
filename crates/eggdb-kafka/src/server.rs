@@ -1,3 +1,4 @@
+use crate::groups::Coordinator;
 use crate::log::{self, error};
 use crate::wire::{Parsed, Reader, Writer};
 use eggdb_keyspace::Keyspace;
@@ -29,8 +30,22 @@ const SASL_AUTHENTICATION_FAILED: i16 = 58;
 const CREATE_TOPICS: i16 = 19;
 const DELETE_TOPICS: i16 = 20;
 const UNSUPPORTED_VERSION: i16 = 35;
+const OFFSET_COMMIT: i16 = 8;
+const OFFSET_FETCH: i16 = 9;
+const FIND_COORDINATOR: i16 = 10;
+const JOIN_GROUP: i16 = 11;
+const HEARTBEAT: i16 = 12;
+const LEAVE_GROUP: i16 = 13;
+const SYNC_GROUP: i16 = 14;
 
-const SUPPORTED: [(i16, i16, i16); 9] = [
+const SUPPORTED: [(i16, i16, i16); 16] = [
+    (OFFSET_COMMIT, 2, 3),
+    (OFFSET_FETCH, 1, 3),
+    (FIND_COORDINATOR, 0, 2),
+    (JOIN_GROUP, 0, 2),
+    (HEARTBEAT, 0, 1),
+    (LEAVE_GROUP, 0, 1),
+    (SYNC_GROUP, 0, 1),
     (SASL_HANDSHAKE, 1, 1),
     (SASL_AUTHENTICATE, 0, 1),
     (PRODUCE, 3, 3),
@@ -474,12 +489,13 @@ pub(crate) fn answer(
     frame: &[u8],
 ) -> Option<Vec<u8>> {
     let mut login = Login::Done;
-    answer_for(keyspace, config, frame, &mut login)
+    answer_for(keyspace, config, &Coordinator::default(), frame, &mut login)
 }
 
 pub(crate) fn answer_for(
     keyspace: &dyn Keyspace,
     config: &ServerConfig,
+    coordinator: &Coordinator,
     frame: &[u8],
     login: &mut Login,
 ) -> Option<Vec<u8>> {
@@ -517,6 +533,22 @@ pub(crate) fn answer_for(
             DELETE_TOPICS => {
                 delete_topics(keyspace, version, &mut request, &mut body).map(|()| true)
             }
+            FIND_COORDINATOR => Coordinator::find_coordinator(
+                version,
+                &mut request,
+                &config.advertised.ip().to_string(),
+                i32::from(config.advertised.port()),
+                &mut body,
+            )
+            .map(|()| true),
+            JOIN_GROUP => coordinator.join_group(version, &mut request, &mut body).map(|()| true),
+            SYNC_GROUP => coordinator.sync_group(version, &mut request, &mut body).map(|()| true),
+            HEARTBEAT => coordinator.heartbeat(version, &mut request, &mut body).map(|()| true),
+            LEAVE_GROUP => coordinator.leave_group(version, &mut request, &mut body).map(|()| true),
+            OFFSET_COMMIT => coordinator
+                .offset_commit(keyspace, version, &mut request, &mut body)
+                .map(|()| true),
+            OFFSET_FETCH => Coordinator::offset_fetch(keyspace, version, &mut request, &mut body).map(|()| true),
             _ => list_offsets(keyspace, &mut request, &mut body).map(|()| true),
         };
         outcome.ok()?
@@ -532,6 +564,7 @@ pub(crate) fn answer_for(
 pub(crate) fn serve_stream(
     keyspace: &dyn Keyspace,
     config: &ServerConfig,
+    coordinator: &Coordinator,
     mut reader: impl Read,
     writer: &mut impl Write,
 ) -> io::Result<()> {
@@ -559,7 +592,7 @@ pub(crate) fn serve_stream(
         }
         let mut frame = vec![0u8; length];
         reader.read_exact(&mut frame)?;
-        let answered = answer_for(keyspace, config, &frame, &mut login);
+        let answered = answer_for(keyspace, config, coordinator, &frame, &mut login);
         drop(frame);
         let Some(response) = answered else {
             return Ok(());
@@ -582,6 +615,7 @@ pub fn serve(
 ) -> io::Result<()> {
     listener.set_nonblocking(true)?;
     let active = AtomicUsize::new(0);
+    let coordinator = Coordinator::default();
     std::thread::scope(|scope| {
         while !stop() {
             let stream = match eggdb_platform::accept_tcp(listener) {
@@ -600,13 +634,13 @@ pub fn serve(
                 active.fetch_sub(1, Ordering::AcqRel);
                 continue;
             }
-            let active = &active;
+            let (active, coordinator) = (&active, &coordinator);
             let spawned = std::thread::Builder::new()
                 .name("eggdb-kafka".to_owned())
                 .spawn_scoped(scope, move || {
                     if let Ok(mut writer) = stream.try_clone() {
                         let _ =
-                            serve_stream(keyspace, config, StopAware { stream, stop }, &mut writer);
+                            serve_stream(keyspace, config, coordinator, StopAware { stream, stop }, &mut writer);
                     }
                     active.fetch_sub(1, Ordering::AcqRel);
                 });

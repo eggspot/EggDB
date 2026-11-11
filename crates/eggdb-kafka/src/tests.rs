@@ -95,7 +95,7 @@ fn api_versions_lists_what_is_supported_and_refuses_newer_versions() {
     let keyspace = MemoryKeyspace::default();
     let body = response(&keyspace, &request(18, 0, |_| {}));
     assert_eq!(i16::from_be_bytes([body[0], body[1]]), 0);
-    assert_eq!(i32::from_be_bytes(body[2..6].try_into().unwrap()), 9);
+    assert_eq!(i32::from_be_bytes(body[2..6].try_into().unwrap()), 16);
     let newer = response(&keyspace, &request(18, 3, |_| {}));
     assert_eq!(i16::from_be_bytes([newer[0], newer[1]]), 35);
     assert!(answer(&keyspace, &config(), &request(1, 99, |_| {})).is_none());
@@ -262,18 +262,94 @@ fn a_request_past_the_memory_budget_ends_its_connection_before_it_is_read() {
     let mut oversized = 200_000u32.to_be_bytes().to_vec();
     oversized.extend_from_slice(&versions);
     let mut answered = Vec::new();
-    serve_stream(&keyspace, &config, &oversized[..], &mut answered).unwrap();
+    serve_stream(&keyspace, &config, &crate::groups::Coordinator::default(), &oversized[..], &mut answered).unwrap();
     assert!(answered.is_empty());
     assert_eq!(budget.used_bytes(), 0);
     let mut answered = Vec::new();
-    serve_stream(&keyspace, &config, &versions[..], &mut answered).unwrap();
+    serve_stream(&keyspace, &config, &crate::groups::Coordinator::default(), &versions[..], &mut answered).unwrap();
     assert!(!answered.is_empty());
     let held = budget.reserve(90_000).unwrap();
     let mut large = request(18, 0, |_| {});
     large.resize(70_000, 0);
     let mut answered = Vec::new();
-    serve_stream(&keyspace, &config, &framed(&large)[..], &mut answered).unwrap();
+    serve_stream(&keyspace, &config, &crate::groups::Coordinator::default(), &framed(&large)[..], &mut answered).unwrap();
     assert!(answered.is_empty());
     drop(held);
     assert_eq!(budget.used_bytes(), 0);
+}
+
+#[test]
+fn a_lone_consumer_joins_syncs_and_commits_offsets() {
+    use crate::groups::Coordinator;
+    use crate::server::{Login, answer_for};
+    let keyspace = MemoryKeyspace::default();
+    let coordinator = Coordinator::default();
+    let call = |frame: Vec<u8>| {
+        let mut login = Login::Done;
+        let framed = answer_for(&keyspace, &config(), &coordinator, &frame, &mut login).expect("an answer");
+        framed[8..].to_vec()
+    };
+    let joined = call(request(11, 0, |writer| {
+        writer
+            .string(Some("readers"))
+            .i32(10_000)
+            .string(Some(""))
+            .string(Some("consumer"))
+            .count(1)
+            .string(Some("range"))
+            .bytes(b"meta");
+    }));
+    let mut reader = Reader::new(&joined);
+    assert_eq!(reader.i16().unwrap(), 0);
+    let generation = reader.i32().unwrap();
+    assert_eq!(generation, 1);
+    assert_eq!(reader.string().unwrap().as_deref(), Some("range"));
+    let leader = reader.string().unwrap().unwrap();
+    let member = reader.string().unwrap().unwrap();
+    assert_eq!(leader, member);
+    assert_eq!(reader.i32().unwrap(), 1);
+    let synced = call(request(14, 0, |writer| {
+        writer
+            .string(Some("readers"))
+            .i32(generation)
+            .string(Some(&member))
+            .count(1)
+            .string(Some(&member))
+            .bytes(b"assigned");
+    }));
+    let mut reader = Reader::new(&synced);
+    assert_eq!(reader.i16().unwrap(), 0);
+    assert_eq!(reader.bytes().unwrap(), Some(&b"assigned"[..]));
+    let committed = call(request(8, 2, |writer| {
+        writer
+            .string(Some("readers"))
+            .i32(generation)
+            .string(Some(&member))
+            .i64(-1)
+            .count(1)
+            .string(Some("events"))
+            .count(1)
+            .i32(0)
+            .i64(42)
+            .string(None);
+    }));
+    let mut reader = Reader::new(&committed);
+    assert_eq!(reader.i32().unwrap(), 1);
+    assert_eq!(reader.string().unwrap().as_deref(), Some("events"));
+    assert_eq!(reader.i32().unwrap(), 1);
+    assert_eq!(reader.i32().unwrap(), 0);
+    assert_eq!(reader.i16().unwrap(), 0);
+    let fetched = call(request(9, 1, |writer| {
+        writer.string(Some("readers")).count(1).string(Some("events")).count(1).i32(0);
+    }));
+    let mut reader = Reader::new(&fetched);
+    reader.i32().unwrap();
+    reader.string().unwrap();
+    reader.i32().unwrap();
+    assert_eq!(reader.i32().unwrap(), 0);
+    assert_eq!(reader.i64().unwrap(), 42);
+    let beat = call(request(12, 0, |writer| {
+        writer.string(Some("readers")).i32(generation).string(Some(&member));
+    }));
+    assert_eq!(Reader::new(&beat).i16().unwrap(), 0);
 }

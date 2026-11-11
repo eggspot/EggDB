@@ -163,7 +163,7 @@ pub(crate) fn valid_topic(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 
-fn read<T>(
+pub(crate) fn read<T>(
     keyspace: &dyn Keyspace,
     body: impl FnOnce(&dyn KeysRead) -> Result<T, String>,
 ) -> Result<T, String> {
@@ -178,7 +178,7 @@ fn read<T>(
     out.ok_or_else(|| "the read did not run".to_owned())
 }
 
-fn write<T>(
+pub(crate) fn write<T>(
     keyspace: &dyn Keyspace,
     body: impl FnOnce(&mut dyn KeysWrite) -> Result<T, String>,
 ) -> Result<T, String> {

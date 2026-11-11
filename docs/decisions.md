@@ -549,3 +549,4 @@ its full title with its status.
 - [D522](decisions/D522.md) Code-only batch 170 (M6d): MCP writes over HTTP with confirm: true
 - [D523](decisions/D523.md) Code-only batch 171 (M10): SQL Server Agent jobs on the job scheduler
 - [D524](decisions/D524.md) Code-only batch 172 (M10): Oracle DBMS_SCHEDULER jobs
+- [D525](decisions/D525.md) Code-only batch 173 (M16): Kafka consumer groups
