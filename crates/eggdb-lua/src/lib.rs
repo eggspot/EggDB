@@ -4,8 +4,16 @@
 //! and no C library is involved.
 
 mod ast;
+mod host;
+mod interpreter;
 mod lexer;
 mod parser;
+mod stdlib;
+mod value;
+
+pub use host::{Host, NoHost, Reply};
+pub use interpreter::{Frame, Interpreter, Native, Unwind};
+pub use value::{Closure, Function, Table, TableRef, Value, number_text, parse_number};
 
 use std::fmt;
 

@@ -940,7 +940,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 ### M7 Caching and Redis
 - Per-element storage for large lists, sets, hashes and sorted sets (D193).
 - Lua scripting (`EVAL`) and Redis Functions on our own Lua interpreter (D27, D193). The interpreter's lexer
-  and parser (`eggdb-lua`): **code written, unbuilt** (code-only mode, 2026-11-12, D667).
+  and parser (`eggdb-lua`): **code written, unbuilt** (code-only mode, 2026-11-12, D667). The interpreter with
+  its step budget and the base, `table` and `math` libraries: **code written, unbuilt** (code-only mode, 2026-11-12,
+  D668).
 - Stream consumer groups (`XGROUP`, `XREADGROUP` with `BLOCK`, `XACK`, `XPENDING`, `XCLAIM`,
   `XAUTOCLAIM`, `XINFO`) as their own security-critical format part: group state kept with the
   stream in a new stored value kind 6, with pinned test vectors, truncation and byte-flip tests
