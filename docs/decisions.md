@@ -622,3 +622,4 @@ its full title with its status.
 - [D595](decisions/D595.md) Code-only batch 243 (M8): script sorts, nested sorts and unmapped sort fields
 - [D596](decisions/D596.md) Code-only batch 244 (M9): tailable cursors on capped collections
 - [D597](decisions/D597.md) Code-only batch 245 (M9): MongoDB text scores
+- [D598](decisions/D598.md) Code-only batch 246 (M10): ON UPDATE CURRENT_TIMESTAMP in SHOW CREATE TABLE

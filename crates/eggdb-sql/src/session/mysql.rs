@@ -194,6 +194,9 @@ fn column_definition(table: &TableSchema, column: &ColumnSchema) -> String {
     } else if !column.not_null && !table.primary_key.contains(&column.name) {
         line.push_str(" DEFAULT NULL");
     }
+    if column.on_update_current_timestamp {
+        line.push_str(" ON UPDATE CURRENT_TIMESTAMP");
+    }
     if let Some(comment) = &column.comment {
         line.push_str(&format!(" COMMENT {}", mysql_string(comment)));
     }

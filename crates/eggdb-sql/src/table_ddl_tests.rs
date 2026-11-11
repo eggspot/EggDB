@@ -109,6 +109,21 @@ fn mysql_show_create_table_lists_foreign_keys_and_checks() {
 }
 
 #[test]
+fn mysql_show_create_table_shows_on_update_current_timestamp() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    last(
+        &mut session,
+        "CREATE TABLE stamped (id INT PRIMARY KEY, changed TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, plain TIMESTAMP NULL)",
+    );
+    let create = last(&mut session, "SHOW CREATE TABLE stamped");
+    let changed = create.lines().find(|line| line.contains("`changed`")).unwrap_or_default();
+    assert!(changed.ends_with(" ON UPDATE CURRENT_TIMESTAMP,"), "{create}");
+    let plain = create.lines().find(|line| line.contains("`plain`")).unwrap_or_default();
+    assert!(!plain.contains("ON UPDATE"), "{create}");
+}
+
+#[test]
 fn sqlite_schema_keeps_the_create_table_text_as_written() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Sqlite);

@@ -222,6 +222,7 @@ mod tests {
             auto_increment: false,
             comment: None,
             generation: None,
+            on_update_current_timestamp: false,
         };
         TableSchema {
             name: "orders".to_owned(),

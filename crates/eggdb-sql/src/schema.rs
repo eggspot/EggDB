@@ -160,6 +160,8 @@ pub struct ColumnSchema {
     pub comment: Option<String>,
     /// How the column computes its value when it is a generated (computed) column.
     pub generation: Option<ColumnGeneration>,
+    /// Whether MySQL's `ON UPDATE CURRENT_TIMESTAMP` stamps it when its row changes.
+    pub on_update_current_timestamp: bool,
 }
 
 /// The expression a generated column (PostgreSQL's `GENERATED ALWAYS AS`, MySQL's and SQLite's
@@ -387,6 +389,7 @@ fn schema_of(definition: &TableDefinition) -> TableSchema {
                         dialect: entry.dialect,
                         stored: entry.stored,
                     }),
+                on_update_current_timestamp: definition.stamps_on_update(position),
             })
             .collect(),
         primary_key: definition

@@ -1066,7 +1066,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `UNIX_TIMESTAMP`, `FROM_UNIXTIME` and the day-number, period and clock functions: **code written,
   unbuilt** (code-only mode, 2026-11-11, D415). `ON UPDATE CURRENT_TIMESTAMP`: **code written,
   unbuilt** (D416; table definition format 16); `date + INTERVAL n unit`: **code written, unbuilt**
-  (D417). Left: the `ON UPDATE` clause in `SHOW CREATE TABLE`.
+  (D417); the `ON UPDATE` clause in `SHOW CREATE TABLE`: **code written, unbuilt** (code-only mode,
+  2026-11-12, D598).
 - MySQL's `WEEK()` with its modes and `DATE_FORMAT()`; `YEAR()`, `MONTH()`, `DAYOFWEEK()` and
   the other date-part functions and `SQRT()` are built (D350) (sql.md). `WEEK()`, `YEARWEEK()`,
   `WEEKOFYEAR()` and `DATE_FORMAT()`: **code written, unbuilt** (code-only mode, 2026-11-10, D414).
