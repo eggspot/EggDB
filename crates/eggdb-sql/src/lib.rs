@@ -74,6 +74,7 @@ pub mod json;
 mod json_functions;
 mod json_path;
 mod json_to_record;
+mod learning;
 mod ledger;
 mod lexer;
 mod md5;
