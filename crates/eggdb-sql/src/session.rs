@@ -1966,6 +1966,7 @@ impl<'s> Session<'s> {
             if self.sqlserver() {
                 self.sync_transaction_count();
             }
+            self.show_requested_isolation();
             let settings = Arc::clone(&self.settings);
             let context = Arc::clone(&self.batch_context);
             let _cancel = crate::cancel::enter(&self.cancel);

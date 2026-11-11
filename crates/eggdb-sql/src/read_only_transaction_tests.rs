@@ -781,3 +781,29 @@ fn lock_timeout_cancels_a_statement_waiting_for_the_writer() {
     answer(&mut holder, "COMMIT");
     answer(&mut waiter, "INSERT INTO lt VALUES (2)");
 }
+
+#[test]
+fn show_transaction_isolation_gives_the_level_the_transaction_asked_for() {
+    let store = MemoryStore::default();
+    let mut session = postgresql_session(&store);
+    let shown = |session: &mut Session<'_>, name: &str| answer(session, &format!("SHOW {name}"));
+    assert!(shown(&mut session, "transaction_isolation").contains("serializable"));
+    answer(&mut session, "BEGIN ISOLATION LEVEL READ COMMITTED");
+    assert!(shown(&mut session, "transaction_isolation").contains("read committed"));
+    answer(&mut session, "COMMIT");
+    assert!(shown(&mut session, "transaction_isolation").contains("serializable"));
+    answer(
+        &mut session,
+        "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+    );
+    assert!(shown(&mut session, "default_transaction_isolation").contains("repeatable read"));
+    answer(&mut session, "BEGIN");
+    assert!(shown(&mut session, "transaction_isolation").contains("repeatable read"));
+    answer(&mut session, "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED");
+    assert!(shown(&mut session, "transaction_isolation").contains("read uncommitted"));
+    answer(&mut session, "ROLLBACK");
+    assert_eq!(
+        refusal(&mut session, "SET default_transaction_isolation = 'sometimes'").state().code(),
+        "22023"
+    );
+}

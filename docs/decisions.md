@@ -579,3 +579,4 @@ its full title with its status.
 - [D552](decisions/D552.md) Code-only batch 200 (M6a): IS JSON accepts \u0000 in a json value
 - [D553](decisions/D553.md) Code-only batch 201 (M6a): IS JSON past the parser's nesting limit
 - [D554](decisions/D554.md) Code-only batch 202 (M6a): DateStyle beyond ISO
+- [D555](decisions/D555.md) Code-only batch 203 (M6a): the requested isolation level in SHOW transaction_isolation

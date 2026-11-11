@@ -443,6 +443,26 @@ impl<'s> Session<'s> {
         self.set_postgresql_transaction(&characteristics)
     }
 
+    /// Keeps `transaction_isolation` at the level the open transaction asked for, else the
+    /// session's `default_transaction_isolation`, so `SHOW` and `current_setting` give what
+    /// PostgreSQL gives; every transaction still runs serializable.
+    pub(super) fn show_requested_isolation(&mut self) {
+        if self.dialect != Dialect::PostgreSql {
+            return;
+        }
+        let default = self
+            .settings
+            .get("default_transaction_isolation")
+            .unwrap_or_else(|_| "serializable".to_owned());
+        let requested = match (&self.block, &self.transaction_mode.isolation) {
+            (Block::None, _) | (_, None) => default,
+            (_, Some(level)) => level.to_ascii_lowercase(),
+        };
+        if self.settings.get("transaction_isolation").ok().as_deref() != Some(requested.as_str()) {
+            Arc::make_mut(&mut self.settings).remember_requested_isolation(requested);
+        }
+    }
+
     fn in_implicit_transaction(&self) -> bool {
         self.implicit_transaction && !self.statement_stands_alone
     }
@@ -469,6 +489,13 @@ impl<'s> Session<'s> {
                 self.change_setting(
                     "default_transaction_read_only",
                     Some(if read_only { "on" } else { "off" }),
+                    SettingScope::Session,
+                )?;
+            }
+            if let Some(level) = &characteristics.isolation {
+                self.change_setting(
+                    "default_transaction_isolation",
+                    Some(level),
                     SettingScope::Session,
                 )?;
             }

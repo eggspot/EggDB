@@ -107,9 +107,9 @@ const KNOWN: &[Known] = &[
     Known {
         name: "default_transaction_isolation",
         default: fixed_text!("serializable"),
-        change: Change::Fixed,
+        change: Change::Free,
         reported: false,
-        description: "One writer at a time and snapshot readers make every transaction serializable.",
+        description: "Remembered and shown; one writer at a time and snapshot readers make every transaction serializable.",
     },
     Known {
         name: "default_transaction_read_only",
@@ -282,9 +282,9 @@ const KNOWN: &[Known] = &[
     Known {
         name: "transaction_isolation",
         default: fixed_text!("serializable"),
-        change: Change::Fixed,
+        change: Change::Free,
         reported: false,
-        description: "One writer at a time and snapshot readers make every transaction serializable.",
+        description: "The level the transaction asked for; one writer at a time and snapshot readers make every transaction serializable.",
     },
     Known {
         name: "transaction_read_only",
@@ -610,7 +610,17 @@ impl Settings {
                 }
             },
         };
-        let value = if known.name == "DateStyle" {
+        let value = if matches!(known.name, "default_transaction_isolation" | "transaction_isolation") {
+            isolation_level(&value).ok_or_else(|| {
+                SqlError::new(
+                    SqlState::INVALID_PARAMETER_VALUE,
+                    format!("invalid value for parameter \"{}\": \"{value}\"", known.name),
+                )
+                .with_hint(
+                    "Available values: serializable, repeatable read, read committed, read uncommitted.",
+                )
+            })?
+        } else if known.name == "DateStyle" {
             let current = crate::date_style::DateStyle::parse(
                 &self.get(known.name).unwrap_or_default(),
                 crate::date_style::DateStyle::DEFAULT,
@@ -639,6 +649,11 @@ impl Settings {
         };
         self.values.insert(known.name, value);
         Ok(())
+    }
+
+    /// Shows `level` as the running transaction's `transaction_isolation`.
+    pub(crate) fn remember_requested_isolation(&mut self, level: String) {
+        self.values.insert("transaction_isolation", level);
     }
 
     pub(crate) fn parameter_values(&self) -> ParameterValues {
@@ -777,4 +792,17 @@ impl Settings {
         rows.sort_by_key(|row| row.0.to_ascii_lowercase());
         rows
     }
+}
+
+fn isolation_level(text: &str) -> Option<String> {
+    let level = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    matches!(
+        level.as_str(),
+        "serializable" | "repeatable read" | "read committed" | "read uncommitted"
+    )
+    .then_some(level)
 }
