@@ -931,7 +931,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   unbuilt** (code-only mode, 2026-11-11, D512).
 - Geo searches over the geohash ranges of the nine neighbouring cells instead of every member,
   and RESP3 double replies for `GEOPOS`/`WITHCOORD` coordinates (D330). RESP3 doubles: **code
-  written, unbuilt** (code-only mode, 2026-11-10, D394).
+  written, unbuilt** (code-only mode, 2026-11-10, D394). Nine cells: **code written, unbuilt** (code-only
+  mode, 2026-11-12, D590).
 - Keyspace notifications, the rest of `CLIENT` (`LIST`, `KILL`, ...), the rest of `INFO`
   (it has only `blocked_clients`, D347), `OBJECT` and `DEBUG` (D12, D193). `OBJECT`: **code
   written, unbuilt** (code-only mode, 2026-11-10, D395); `INFO`'s sections: **code written,

@@ -876,3 +876,49 @@ fn geopos_coordinates_are_doubles_in_resp3_and_redis_text_in_resp2() {
     assert!(answers[1].starts_with("*1\r\n*2\r\n$"), "{}", answers[1]);
     assert!(answers[3].starts_with("*1\r\n*2\r\n,13.36138"), "{}", answers[3]);
 }
+
+#[test]
+fn the_nine_cell_ranges_hold_every_point_inside_the_search_area() {
+    use crate::geohash::{self, Point};
+    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut next = |low: f64, high: f64| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        low + (state >> 11) as f64 / (1_u64 << 53) as f64 * (high - low)
+    };
+    let mut checked = 0;
+    for _ in 0..200 {
+        let center = Point {
+            longitude: next(-170.0, 170.0),
+            latitude: next(-75.0, 75.0),
+        };
+        let radius = next(10.0, 500_000.0);
+        let (width, height) = (next(10.0, 800_000.0), next(10.0, 800_000.0));
+        let circle = geohash::search_ranges(center, radius, radius);
+        let rectangle = geohash::search_ranges(center, width / 2.0, height / 2.0);
+        for _ in 0..200 {
+            let spread_degrees = radius.max(width).max(height) / 111_000.0 * 1.5;
+            let point = Point {
+                longitude: (center.longitude + next(-spread_degrees, spread_degrees)).clamp(-180.0, 180.0),
+                latitude: (center.latitude + next(-spread_degrees, spread_degrees)).clamp(-85.0, 85.0),
+            };
+            let bits = geohash::encode(point);
+            let stored = geohash::decode(bits);
+            let inside = |ranges: &Option<Vec<(u64, u64)>>| {
+                ranges
+                    .as_ref()
+                    .is_none_or(|ranges| ranges.iter().any(|(low, high)| (*low..*high).contains(&bits)))
+            };
+            if geohash::distance_within_radius(center, stored, radius).is_some() {
+                assert!(inside(&circle), "{center:?} {radius} {point:?}");
+                checked += 1;
+            }
+            if geohash::distance_within_box(center, stored, width, height).is_some() {
+                assert!(inside(&rectangle), "{center:?} {width}x{height} {point:?}");
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 1000);
+}

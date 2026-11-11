@@ -498,6 +498,31 @@ impl Search {
         }
     }
 
+    fn candidates(&self, set: &SortedSet, center: Point) -> Vec<(f64, Vec<u8>)> {
+        let ordered = set.ordered();
+        let ranges = match self.area {
+            Some(Area::Radius { meters }) => geohash::search_ranges(center, meters, meters),
+            Some(Area::Box {
+                width_meters,
+                height_meters,
+            }) => geohash::search_ranges(center, width_meters / 2.0, height_meters / 2.0),
+            None => None,
+        };
+        let Some(ranges) = ranges else {
+            return ordered;
+        };
+        let mut chosen = Vec::new();
+        for (low, high) in ranges {
+            let start = ordered.partition_point(|(score, _)| *score < low as f64);
+            let end = ordered.partition_point(|(score, _)| *score < high as f64);
+            chosen.extend(start..end);
+        }
+        chosen.sort_unstable();
+        chosen.dedup();
+        let mut ordered: Vec<Option<(f64, Vec<u8>)>> = ordered.into_iter().map(Some).collect();
+        chosen.into_iter().filter_map(|index| ordered.get_mut(index).and_then(Option::take)).collect()
+    }
+
     fn find(&self, set: &SortedSet) -> Result<Vec<Found>, String> {
         let center = match &self.center {
             Some(Center::Point(point)) => *point,
@@ -508,7 +533,7 @@ impl Search {
         };
         let stop_after = if self.any { self.count } else { None };
         let mut found = Vec::new();
-        for (score, member) in set.ordered() {
+        for (score, member) in self.candidates(set, center) {
             let point = geohash::decode_score(score);
             if let Some(distance_meters) = self.distance_to(center, point) {
                 found.push(Found {
