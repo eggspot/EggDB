@@ -287,6 +287,7 @@ impl Session<'_> {
                 .unwrap_or(address),
             max_connections,
             memory_budget: Arc::clone(&memory_budget),
+            credentials: Some((user.clone(), eggdb_crypto::sha256(password.as_bytes()))),
         };
         let amqp_listener = match options.amqp_listen {
             Some(address) => {

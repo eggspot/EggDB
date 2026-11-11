@@ -19,12 +19,19 @@ const PRODUCE: i16 = 0;
 const FETCH: i16 = 1;
 const LIST_OFFSETS: i16 = 2;
 const METADATA: i16 = 3;
+const SASL_HANDSHAKE: i16 = 17;
 const API_VERSIONS: i16 = 18;
+const SASL_AUTHENTICATE: i16 = 36;
+const UNSUPPORTED_SASL_MECHANISM: i16 = 33;
+const ILLEGAL_SASL_STATE: i16 = 34;
+const SASL_AUTHENTICATION_FAILED: i16 = 58;
 const CREATE_TOPICS: i16 = 19;
 const DELETE_TOPICS: i16 = 20;
 const UNSUPPORTED_VERSION: i16 = 35;
 
-const SUPPORTED: [(i16, i16, i16); 7] = [
+const SUPPORTED: [(i16, i16, i16); 9] = [
+    (SASL_HANDSHAKE, 1, 1),
+    (SASL_AUTHENTICATE, 0, 1),
     (PRODUCE, 3, 3),
     (FETCH, 4, 4),
     (LIST_OFFSETS, 1, 1),
@@ -127,6 +134,73 @@ pub struct ServerConfig {
     /// The memory every connection's requests and responses hold together, shared with the
     /// server's other listeners (D284, D307).
     pub memory_budget: Arc<MemoryBudget>,
+    /// The user and the SHA-256 of the password clients authenticate with over SASL/PLAIN;
+    /// `None` serves clients without authentication.
+    pub credentials: Option<(String, [u8; 32])>,
+}
+
+/// Where one connection stands in its SASL exchange.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Login {
+    Waiting,
+    Handshaken,
+    Done,
+}
+
+fn sasl_handshake(request: &mut Reader<'_>, login: &mut Login, body: &mut Writer) -> Parsed<()> {
+    let mechanism = request.string()?.unwrap_or_default();
+    let code = if mechanism == "PLAIN" {
+        if *login == Login::Waiting {
+            *login = Login::Handshaken;
+        }
+        error::NONE
+    } else {
+        UNSUPPORTED_SASL_MECHANISM
+    };
+    body.i16(code).count(1).string(Some("PLAIN"));
+    Ok(())
+}
+
+fn sasl_authenticate(
+    config: &ServerConfig,
+    version: i16,
+    request: &mut Reader<'_>,
+    login: &mut Login,
+    body: &mut Writer,
+) -> Parsed<()> {
+    let token = request.bytes()?.unwrap_or_default();
+    let (code, message) = if *login != Login::Handshaken {
+        (ILLEGAL_SASL_STATE, "SaslHandshake with PLAIN comes first")
+    } else {
+        let mut parts = token.split(|byte| *byte == 0);
+        let (_identity, user, password) = (parts.next(), parts.next(), parts.next());
+        let accepted = match (&config.credentials, user, password, parts.next()) {
+            (Some((expected, password_sha256)), Some(user), Some(password), None) => {
+                eggdb_crypto::constant_time_eq(user, expected.as_bytes())
+                    && eggdb_crypto::constant_time_eq(
+                        &eggdb_crypto::sha256(password),
+                        password_sha256,
+                    )
+            }
+            _ => false,
+        };
+        if accepted {
+            *login = Login::Done;
+            (error::NONE, "")
+        } else {
+            (
+                SASL_AUTHENTICATION_FAILED,
+                "Authentication failed: Invalid username or password",
+            )
+        }
+    };
+    body.i16(code)
+        .string((code != error::NONE).then_some(message))
+        .bytes(&[]);
+    if version >= 1 {
+        body.i64(0);
+    }
+    Ok(())
 }
 
 struct StopAware<'s> {
@@ -369,6 +443,16 @@ pub(crate) fn answer(
     config: &ServerConfig,
     frame: &[u8],
 ) -> Option<Vec<u8>> {
+    let mut login = Login::Done;
+    answer_for(keyspace, config, frame, &mut login)
+}
+
+pub(crate) fn answer_for(
+    keyspace: &dyn Keyspace,
+    config: &ServerConfig,
+    frame: &[u8],
+    login: &mut Login,
+) -> Option<Vec<u8>> {
     let mut request = Reader::new(frame);
     let key = request.i16().ok()?;
     let version = request.i16().ok()?;
@@ -383,6 +467,14 @@ pub(crate) fn answer(
         api_versions(version, &mut body);
         true
     } else if !supported {
+        return None;
+    } else if key == SASL_HANDSHAKE {
+        sasl_handshake(&mut request, login, &mut body).ok()?;
+        true
+    } else if key == SASL_AUTHENTICATE {
+        sasl_authenticate(config, version, &mut request, login, &mut body).ok()?;
+        true
+    } else if *login != Login::Done {
         return None;
     } else {
         let outcome = match key {
@@ -414,6 +506,11 @@ pub(crate) fn serve_stream(
     writer: &mut impl Write,
 ) -> io::Result<()> {
     let mut held = config.memory_budget.empty_reservation();
+    let mut login = if config.credentials.is_some() {
+        Login::Waiting
+    } else {
+        Login::Done
+    };
     loop {
         let mut size = [0u8; 4];
         match reader.read_exact(&mut size) {
@@ -432,7 +529,7 @@ pub(crate) fn serve_stream(
         }
         let mut frame = vec![0u8; length];
         reader.read_exact(&mut frame)?;
-        let answered = answer(keyspace, config, &frame);
+        let answered = answer_for(keyspace, config, &frame, &mut login);
         drop(frame);
         let Some(response) = answered else {
             return Ok(());

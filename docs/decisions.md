@@ -517,3 +517,4 @@ its full title with its status.
 - [D490](decisions/D490.md) Code-only batch 138 (M6c): `pg_cancel_backend` and `pg_terminate_backend` across sessions
 - [D491](decisions/D491.md) Code-only batch 139 (M6d): per-agent MCP time limits and quotas, and the role in audit records
 - [D492](decisions/D492.md) Code-only batch 140 (M16): Kafka `CreateTopics` and `DeleteTopics`
+- [D493](decisions/D493.md) Code-only batch 141 (M16): Kafka SASL/PLAIN authentication
