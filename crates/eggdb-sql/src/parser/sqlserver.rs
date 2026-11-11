@@ -372,6 +372,12 @@ pub(crate) fn is_reserved(word: &str) -> bool {
     RESERVED.binary_search(&word).is_ok()
 }
 
+const OTHER_STATEMENT_WORDS: [&str; 24] = [
+    "abort", "analyze", "call", "cluster", "comment", "copy", "disable", "discard", "do",
+    "enable", "explain", "listen", "lock", "notify", "pragma", "prepare", "refresh", "reindex",
+    "release", "reset", "savepoint", "show", "start", "values",
+];
+
 pub(crate) fn starts_statement(word: &str) -> bool {
     STATEMENT_WORDS.contains(&word)
 }
@@ -834,9 +840,23 @@ impl<'t> Parser<'t> {
                 return Err(not_supported(&self.keyword_text()).at(position));
             }
             word if NOT_TRANSACT_SQL_STATEMENTS.contains(&word) => return Err(self.unexpected()),
+            word if self.first_in_batch() && self.bare_procedure_call(word) => {
+                self.sqlserver_execute_call(position)?
+            }
             _ => return Ok(None),
         };
         Ok(Some(statement))
+    }
+
+    fn bare_procedure_call(&self, word: &str) -> bool {
+        !is_reserved(word)
+            && !starts_statement(word)
+            && !OTHER_STATEMENT_WORDS.contains(&word)
+            && !self.at_label()
+            && !matches!(
+                self.peek_kind_at(1),
+                TokenKind::LeftParen | TokenKind::Operator(_) | TokenKind::Colon
+            )
     }
 
     pub(super) fn variable_reference(&mut self, name: &str, position: usize) -> SqlResult<Expr> {

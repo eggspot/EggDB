@@ -342,3 +342,16 @@ fn numbered_procedures_are_created_run_and_dropped_as_a_group() {
     fails_with(&mut session, "EXEC note;2", 2812);
     fails_with(&mut session, "EXEC note", 2812);
 }
+
+#[test]
+fn a_procedure_named_first_in_a_batch_runs_without_exec() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    succeeds(&mut session, "CREATE TABLE log (n INT)");
+    succeeds(&mut session, "CREATE PROCEDURE add_entry @n INT AS INSERT INTO log VALUES (@n)");
+    succeeds(&mut session, "CREATE PROCEDURE boom AS THROW 50002, 'boom', 1;");
+    succeeds(&mut session, "add_entry 5");
+    succeeds(&mut session, "dbo.add_entry @n = 6");
+    fails_with(&mut session, "boom", 50002);
+    fails_with(&mut session, "boom; SELECT 1", 50002);
+}

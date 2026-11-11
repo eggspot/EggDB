@@ -668,3 +668,4 @@ its full title with its status.
 - [D641](decisions/D641.md) Code-only batch 289 (M11): reading compressed Arrow batches
 - [D642](decisions/D642.md) Code-only batch 290 (M5): SQLite's own table text after RENAME COLUMN and DROP COLUMN
 - [D643](decisions/D643.md) Code-only batch 291 (M10): Transact-SQL numbered procedures
+- [D644](decisions/D644.md) Code-only batch 292 (M10): a T-SQL procedure called by its name alone at a batch's start

@@ -227,6 +227,10 @@ impl Parser<'_> {
                 },
             )));
         }
+        self.sqlserver_execute_call(position)
+    }
+
+    pub(super) fn sqlserver_execute_call(&mut self, position: usize) -> SqlResult<Statement> {
         let call = self.procedure_call(position)?;
         if call.procedure.text == "sp_executesql" {
             return dynamic_sql(call, position);
