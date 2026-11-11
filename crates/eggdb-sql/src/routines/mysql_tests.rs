@@ -148,3 +148,15 @@ fn unsupported_and_malformed_bodies_are_errors() {
     );
     assert!(session.execute(&deep, &mut |_| {}).is_err());
 }
+
+#[test]
+fn a_function_called_from_a_select_leaves_the_user_variables_it_set() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    run(
+        &mut session,
+        "CREATE FUNCTION counted(x INT) RETURNS INT DETERMINISTIC BEGIN SET @calls = COALESCE(@calls, 0) + 1; RETURN x * 2; END",
+    );
+    run(&mut session, "SELECT counted(1), counted(2)");
+    assert_eq!(run(&mut session, "SELECT @calls"), "2\nSELECT 1");
+}

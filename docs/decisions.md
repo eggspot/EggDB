@@ -681,3 +681,4 @@ its full title with its status.
 - [D654](decisions/D654.md) Code-only batch 302 (M8): a Dutch stemmer and the dutch text-search configuration
 - [D655](decisions/D655.md) Code-only batch 303 (M8): a Portuguese stemmer and the portuguese text-search configuration
 - [D656](decisions/D656.md) Code-only batch 304 (M8): a French stemmer and the french text-search configuration
+- [D657](decisions/D657.md) Code-only batch 305 (M10): variables a MySQL stored function sets outside CALL

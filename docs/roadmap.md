@@ -1097,8 +1097,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - MySQL stored programs: handlers, cursors, named conditions, `RESIGNAL`, `GET DIAGNOSTICS`,
   variables set in bodies, and MySQL's error numbers (D199). Handlers, cursors, named conditions, `RESIGNAL` and
   `GET DIAGNOSTICS`: **code written, unbuilt** (code-only mode, 2026-11-11, D418). Variables
-  set in bodies and `SIGNAL ... SET MYSQL_ERRNO`: **code written, unbuilt** (D419). Left:
-  variables set by a stored function called outside `CALL`.
+  set in bodies and `SIGNAL ... SET MYSQL_ERRNO`: **code written, unbuilt** (D419); variables set by a stored
+  function called outside `CALL`: **code written, unbuilt** (code-only mode, 2026-11-12, D657).
 - `SHOW CREATE PROCEDURE` and `information_schema.ROUTINES` details, and compound bodies in
   triggers (D199). `SHOW CREATE PROCEDURE|FUNCTION`, `SHOW ... STATUS` and the `ROUTINES`
   and `PARAMETERS` views: **code written, unbuilt** (code-only mode, 2026-11-11, D420); handlers and cursors in

@@ -2466,6 +2466,9 @@ impl<'s> Session<'s> {
         if !self.mysql() {
             return result;
         }
+        if let Err(error) = self.apply_routine_assignments() {
+            result.notices.push(error.message().to_owned());
+        }
         let database = self.settings.database.clone();
         for notice in std::mem::take(&mut result.notices) {
             if let Some(note) = mysql_errors::note_for(&notice, &database) {
