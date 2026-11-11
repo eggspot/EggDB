@@ -143,6 +143,12 @@ impl<'a> Resolver<'a> {
     }
 
     fn resolved_name(&self, name: &str) -> SqlResult<Option<String>> {
+        if crate::constraints::current_dialect() == crate::dialect::Dialect::Oracle
+            && !crate::temp_tables::is_temp_table(name)
+            && let Some(target) = crate::synonyms::resolved(self.reader, name)?
+        {
+            return Ok(Some(target));
+        }
         if is_qualified(name) {
             let plain = schemas::normalized(name);
             return Ok((plain.len() != name.len()).then(|| plain.to_owned()));

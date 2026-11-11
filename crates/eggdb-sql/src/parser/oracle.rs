@@ -462,6 +462,49 @@ impl<'t> Parser<'t> {
         };
         let statement = match word.as_ref() {
             "drop" if self.is_word_at(1, "table") => self.oracle_drop_table()?,
+            "create"
+                if self.is_word_at(1, "synonym")
+                    || (self.is_word_at(1, "public") && self.is_word_at(2, "synonym"))
+                    || (self.is_word_at(1, "or")
+                        && self.is_word_at(2, "replace")
+                        && (self.is_word_at(3, "synonym")
+                            || (self.is_word_at(3, "public") && self.is_word_at(4, "synonym")))) =>
+            {
+                self.at += 1;
+                let replace = self.is_word("or");
+                if replace {
+                    self.at += 2;
+                }
+                let public = self.take_word("public");
+                self.expect_word("synonym")?;
+                let name = self.table_name()?;
+                self.expect_word("for")?;
+                let target = self.table_name()?;
+                if self.is_operator("@") {
+                    return Err(self.not_supported("synonyms for objects over database links"));
+                }
+                Statement::Synonym(crate::ast::SynonymCommand::Create {
+                    name,
+                    public,
+                    replace,
+                    target,
+                })
+            }
+            "drop"
+                if self.is_word_at(1, "synonym")
+                    || (self.is_word_at(1, "public") && self.is_word_at(2, "synonym")) =>
+            {
+                self.at += 1;
+                let public = self.take_word("public");
+                self.expect_word("synonym")?;
+                let name = self.table_name()?;
+                let force = self.take_word("force");
+                Statement::Synonym(crate::ast::SynonymCommand::Drop {
+                    name,
+                    public,
+                    force,
+                })
+            }
             "truncate" => {
                 self.at += 1;
                 self.expect_word("table")?;

@@ -3522,6 +3522,13 @@ impl<'s> Session<'s> {
             Statement::Do(block) => self.write("DO", |writer, tables| {
                 crate::routines::run_do(writer, tables, &settings, &block.code)
             }),
+            Statement::Synonym(command) => {
+                let tag = match command {
+                    crate::ast::SynonymCommand::Create { .. } => "CREATE SYNONYM",
+                    crate::ast::SynonymCommand::Drop { .. } => "DROP SYNONYM",
+                };
+                self.write(tag, |writer, _| crate::synonyms::run(writer, command))
+            }
             Statement::PlsqlBlock(block) => self.write_plsql(PLSQL_BLOCK_TAG, |writer, tables| {
                 crate::plpgsql::run_anonymous_block(writer, tables, &settings, block)?;
                 Ok(QueryResult::command(PLSQL_BLOCK_TAG))

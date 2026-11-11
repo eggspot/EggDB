@@ -124,6 +124,7 @@ pub(crate) enum Statement {
     Call(CallRoutine),
     Do(DoBlock),
     PlsqlBlock(Box<PlsqlBlock>),
+    Synonym(SynonymCommand),
     CreatePackage(Box<CreatePackage>),
     DropPackage(DropPackage),
     AlterPackage(AlterPackage),
@@ -1240,6 +1241,21 @@ pub(crate) struct AlterEvent {
     pub(crate) rename: Option<Name>,
     pub(crate) comment: Option<String>,
     pub(crate) body: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SynonymCommand {
+    Create {
+        name: Name,
+        public: bool,
+        replace: bool,
+        target: Name,
+    },
+    Drop {
+        name: Name,
+        public: bool,
+        force: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

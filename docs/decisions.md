@@ -457,3 +457,4 @@ its full title with its status.
 - [D430](decisions/D430.md) Code-only batch 77 (M10): `deleted.` in a Transact-SQL `UPDATE`'s `OUTPUT`
 - [D431](decisions/D431.md) Code-only batch 78 (M10): Oracle's `DEFAULT ... ON CONVERSION ERROR`
 - [D432](decisions/D432.md) Code-only batch 79 (M10): Oracle's `(+)` outer joins
+- [D433](decisions/D433.md) Code-only batch 80 (M10): Oracle synonyms

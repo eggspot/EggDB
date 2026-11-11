@@ -173,6 +173,7 @@ mod statistics;
 mod step_times;
 mod store;
 mod exported_snapshots;
+mod synonyms;
 mod undo_marks;
 mod sqlite_math;
 mod sqlite_json;
