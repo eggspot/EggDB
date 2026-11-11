@@ -17,6 +17,7 @@ const PROTOCOL_HEADER: &[u8; 8] = b"AMQP\x00\x00\x09\x01";
 const ACCEPT_POLL: Duration = Duration::from_millis(100);
 const READ_POLL: Duration = Duration::from_millis(50);
 const LEASE_MS: u64 = 30 * 60 * 1000;
+const PRIORITY_WINDOW: usize = 1000;
 const MAX_CHANNELS: u16 = 2047;
 const MAX_BODY_BYTES: u64 = 16 << 20;
 const MOST_BUFFERED_BYTES: usize = 64 << 20;
@@ -84,6 +85,7 @@ struct QueuePolicy {
     dead_letter_exchange: Option<String>,
     dead_letter_routing_key: Option<String>,
     expires_ms: Option<u64>,
+    max_priority: Option<u8>,
 }
 
 impl QueuePolicy {
@@ -93,6 +95,9 @@ impl QueuePolicy {
             dead_letter_exchange: text_named(arguments, "x-dead-letter-exchange"),
             dead_letter_routing_key: text_named(arguments, "x-dead-letter-routing-key"),
             expires_ms: integer_named(arguments, "x-expires").filter(|expires| *expires > 0),
+            max_priority: integer_named(arguments, "x-max-priority")
+                .filter(|most| *most > 0)
+                .map(|most| u8::try_from(most).unwrap_or(u8::MAX)),
         }
     }
 }
@@ -147,6 +152,46 @@ impl<'s> Broker<'s> {
             policies: Mutex::new(BTreeMap::new()),
             usage: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    fn priority_of(&self, queue: &str, message: &eggdb_queues::Message, most: u8) -> u8 {
+        crate::field_table::message_priority(StoredMessage::read(queue, &message.body).properties).min(most)
+    }
+
+    /// The leased messages in delivery order: by priority, highest first and oldest first among
+    /// equals, on a queue declared with `x-max-priority`; as they came otherwise.
+    fn prioritized(&self, queue: &str, mut messages: Vec<eggdb_queues::Message>) -> Vec<eggdb_queues::Message> {
+        if let Some(most) = self.policy_of(queue).max_priority {
+            messages.sort_by_key(|message| std::cmp::Reverse(self.priority_of(queue, message, most)));
+        }
+        messages
+    }
+
+    /// The next message for `basic.get`: on a priority queue, the highest-priority one among
+    /// the first [`PRIORITY_WINDOW`] ready messages, the others given back unleased.
+    fn receive_next(
+        &self,
+        queue: &str,
+        now: u64,
+    ) -> Result<Vec<eggdb_queues::Message>, eggdb_queues::QueueError> {
+        let Some(most) = self.policy_of(queue).max_priority else {
+            return self.queues.receive(queue, 1, LEASE_MS, now);
+        };
+        let leased = self.queues.receive(queue, PRIORITY_WINDOW, LEASE_MS, now)?;
+        let best = leased
+            .iter()
+            .enumerate()
+            .max_by_key(|(at, message)| (self.priority_of(queue, message, most), std::cmp::Reverse(*at)))
+            .map(|(at, _)| at);
+        let mut chosen = Vec::new();
+        for (at, message) in leased.into_iter().enumerate() {
+            if Some(at) == best {
+                chosen.push(message);
+            } else {
+                let _ = self.queues.unlease(queue, message.id, now);
+            }
+        }
+        Ok(chosen)
     }
 
     fn used(&self, queue: &str, now: u64) {
@@ -652,6 +697,7 @@ impl Connection<'_, '_> {
             let Ok(messages) = leased else {
                 continue;
             };
+            let messages = self.broker.prioritized(&queue, messages);
             if refused && messages.is_empty() && pumped_bytes == 0 {
                 self.close_connection(RESOURCE_ERROR, OUT_OF_MEMORY_BUDGET, 0, 0);
                 return false;
@@ -1090,16 +1136,6 @@ impl Connection<'_, '_> {
                 let no_wait = args.bit()?;
                 let arguments = crate::field_table::decode_table(args.table()?)?;
                 self.broker.delete_expired_queues(now_ms());
-                if arguments.iter().any(|(argument, _)| argument == "x-max-priority") {
-                    self.close_channel(
-                        channel,
-                        NOT_IMPLEMENTED,
-                        "NOT_IMPLEMENTED - priority queues (x-max-priority) are not supported yet",
-                        50,
-                        10,
-                    );
-                    return Ok(true);
-                }
                 if name.is_empty() {
                     name = format!(
                         "amq.gen-{}",
@@ -1341,7 +1377,7 @@ impl Connection<'_, '_> {
                 }
                 self.broker.delete_expired_queues(now_ms());
                 self.broker.used(&queue, now_ms());
-                let messages = match self.broker.queues.receive(&queue, 1, LEASE_MS, now_ms()) {
+                let messages = match self.broker.receive_next(&queue, now_ms()) {
                     Ok(messages) => messages,
                     Err(_) => {
                         self.close_channel(

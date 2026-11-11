@@ -335,6 +335,33 @@ pub(crate) fn with_death(
     headers
 }
 
+/// A message's `priority` property, 0 when it has none or it cannot be read.
+pub(crate) fn message_priority(properties: &[u8]) -> u8 {
+    let mut reader = Reader {
+        bytes: properties,
+        at: 0,
+    };
+    let Ok(flags) = reader.array::<2>().map(u16::from_be_bytes) else {
+        return 0;
+    };
+    let has = |bit: u16| flags & (1 << bit) != 0;
+    if !has(11) {
+        return 0;
+    }
+    for bit in [15, 14] {
+        if has(bit) && reader.shortstr().is_err() {
+            return 0;
+        }
+    }
+    if has(13) && reader.longstr().is_err() {
+        return 0;
+    }
+    if has(12) && reader.take(1).is_err() {
+        return 0;
+    }
+    reader.take(1).map_or(0, |priority| priority[0])
+}
+
 /// The non-negative integer value of argument or header `name`, if it has one.
 pub(crate) fn integer_named(table: &[(String, FieldValue)], name: &str) -> Option<u64> {
     table.iter().find(|(key, _)| key == name).and_then(|(_, value)| match value {
@@ -473,6 +500,19 @@ mod tests {
         assert_eq!(deaths.len(), 2);
         assert_eq!(text_named(&other, "x-first-death-reason").as_deref(), Some("rejected"));
         assert_eq!(text_named(&other, "x-last-death-reason").as_deref(), Some("expired"));
+    }
+
+
+    #[test]
+    fn the_priority_property_is_read_past_the_earlier_ones() {
+        let mut properties = ((1u16 << 15) | (1 << 12) | (1 << 11)).to_be_bytes().to_vec();
+        properties.push(4);
+        properties.extend_from_slice(b"text");
+        properties.push(2);
+        properties.push(7);
+        assert_eq!(message_priority(&properties), 7);
+        assert_eq!(message_priority(&(1u16 << 15).to_be_bytes()), 0);
+        assert_eq!(message_priority(&[]), 0);
     }
 
 }

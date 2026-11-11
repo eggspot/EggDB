@@ -639,3 +639,4 @@ its full title with its status.
 - [D612](decisions/D612.md) Code-only batch 260 (M16): PromQL named capture groups and a query timeout
 - [D613](decisions/D613.md) Code-only batch 261 (M16): AMQP x-death headers
 - [D614](decisions/D614.md) Code-only batch 262 (M16): AMQP queue TTL (x-expires)
+- [D615](decisions/D615.md) Code-only batch 263 (M16): AMQP priority queues
