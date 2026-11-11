@@ -577,3 +577,4 @@ its full title with its status.
 - [D550](decisions/D550.md) Code-only batch 198 (M6e): Tab stops on the keys tab's Back and Next 100
 - [D551](decisions/D551.md) Code-only batch 199 (M6e): menu, menuitem and searchbox accessibility roles
 - [D552](decisions/D552.md) Code-only batch 200 (M6a): IS JSON accepts \u0000 in a json value
+- [D553](decisions/D553.md) Code-only batch 201 (M6a): IS JSON past the parser's nesting limit

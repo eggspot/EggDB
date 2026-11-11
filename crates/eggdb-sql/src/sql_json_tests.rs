@@ -594,6 +594,8 @@ fn is_json_tests_shape_and_unique_keys() {
         ("SELECT '[1, 2]' IS JSON ARRAY", "t"),
         ("SELECT '\"\\u0000\"' IS JSON", "t"),
         ("SELECT '{\"a\": \"\\u0000\"}' IS JSON OBJECT", "t"),
+        ("SELECT repeat('[', 300) || repeat(']', 300) IS JSON ARRAY", "t"),
+        ("SELECT repeat('[', 300) || repeat(']', 299) IS JSON", "f"),
         ("SELECT '[1, 2]' IS JSON OBJECT", "f"),
         ("SELECT '\"x\"' IS JSON SCALAR", "t"),
         ("SELECT '{}' IS JSON SCALAR", "f"),

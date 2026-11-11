@@ -353,6 +353,131 @@ pub(crate) fn parse_json_input(text: &str) -> SqlResult<Node> {
     parse_with(text, false, true)
 }
 
+/// The outermost kind of a JSON document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OuterKind {
+    /// An object.
+    Object,
+    /// An array.
+    Array,
+    /// A string, number, boolean or `null`.
+    Scalar,
+}
+
+/// What [`scan_json_input`] learns of a document without building it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ScannedDocument {
+    pub(crate) outer: OuterKind,
+    pub(crate) repeats_keys: bool,
+}
+
+enum OpenContainer {
+    Array,
+    Object(std::collections::BTreeSet<String>),
+}
+
+/// Checks `text` as `json` input with no nesting limit, keeping open arrays and objects on a
+/// stack instead of recursing, so `IS JSON` answers for documents deeper than [`parse`] reads.
+/// `None` when it is not JSON.
+pub(crate) fn scan_json_input(text: &str) -> Option<ScannedDocument> {
+    let mut parser = Parser {
+        text,
+        bytes: text.as_bytes(),
+        at: 0,
+        type_name: "json",
+        allows_nul: true,
+    };
+    let mut open: Vec<OpenContainer> = Vec::new();
+    let mut repeats_keys = false;
+    parser.spaces();
+    let outer = match parser.bytes.get(parser.at) {
+        Some(b'{') => OuterKind::Object,
+        Some(b'[') => OuterKind::Array,
+        _ => OuterKind::Scalar,
+    };
+    loop {
+        parser.spaces();
+        let mut closed_at_once = false;
+        match parser.bytes.get(parser.at)? {
+            b'{' => {
+                parser.at += 1;
+                parser.spaces();
+                if parser.take(b'}') {
+                    closed_at_once = true;
+                } else {
+                    let key = scan_key(&mut parser)?;
+                    open.push(OpenContainer::Object(std::iter::once(key).collect()));
+                }
+            }
+            b'[' => {
+                parser.at += 1;
+                parser.spaces();
+                if parser.take(b']') {
+                    closed_at_once = true;
+                } else {
+                    open.push(OpenContainer::Array);
+                }
+            }
+            b'"' => {
+                parser.string().ok()?;
+                closed_at_once = true;
+            }
+            b'-' | b'0'..=b'9' => {
+                parser.number().ok()?;
+                closed_at_once = true;
+            }
+            _ => {
+                parser.word().ok()?;
+                closed_at_once = true;
+            }
+        }
+        if !closed_at_once {
+            continue;
+        }
+        loop {
+            parser.spaces();
+            match open.last_mut() {
+                None => {
+                    return (parser.at == text.len()).then_some(ScannedDocument {
+                        outer,
+                        repeats_keys,
+                    });
+                }
+                Some(OpenContainer::Array) => {
+                    if parser.take(b',') {
+                        break;
+                    }
+                    if !parser.take(b']') {
+                        return None;
+                    }
+                    open.pop();
+                }
+                Some(OpenContainer::Object(keys)) => {
+                    if parser.take(b',') {
+                        let key = scan_key(&mut parser)?;
+                        repeats_keys |= !keys.insert(key);
+                        break;
+                    }
+                    if !parser.take(b'}') {
+                        return None;
+                    }
+                    open.pop();
+                }
+            }
+        }
+    }
+}
+
+fn scan_key(parser: &mut Parser<'_>) -> Option<String> {
+    parser.spaces();
+    if parser.bytes.get(parser.at) != Some(&b'"') {
+        return None;
+    }
+    let key = parser.string().ok()?;
+    parser.spaces();
+    parser.take(b':').then_some(key)
+}
+
 fn parse_with(text: &str, binary: bool, allows_nul: bool) -> SqlResult<Node> {
     let mut parser = Parser {
         text,
@@ -836,5 +961,41 @@ mod tests {
         assert!(parse(r#""\u0000""#, false).is_err());
         assert!(parse_json_input(r#"{"a": "x\u0000y"}"#).is_ok());
         assert!(parse_json_input(r#""\u0000"#).is_err());
+    }
+
+    #[test]
+    fn the_scan_reads_documents_deeper_than_the_parser_without_recursing() {
+        let deep = format!("{}{}", "[".repeat(100_000), "]".repeat(100_000));
+        assert!(parse_json_input(&deep).is_err());
+        assert_eq!(
+            scan_json_input(&deep),
+            Some(ScannedDocument {
+                outer: OuterKind::Array,
+                repeats_keys: false
+            })
+        );
+        let objects = format!("{}1{}", r#"{"a": "#.repeat(300), "}".repeat(300));
+        assert_eq!(
+            scan_json_input(&objects).map(|scanned| scanned.outer),
+            Some(OuterKind::Object)
+        );
+        let repeated = format!(r#"{{"a": {}{{"k": 1, "k": 2}}{}}}"#, "[".repeat(300), "]".repeat(300));
+        assert_eq!(
+            scan_json_input(&repeated).map(|scanned| scanned.repeats_keys),
+            Some(true)
+        );
+        for broken in ["[1,]", "[1 2]", r#"{"a" 1}"#, r#"{"a": 1,}"#, "[[]", "[]]", "", " ", "{1: 2}"] {
+            assert_eq!(scan_json_input(broken), None, "{broken:?}");
+        }
+        for scalar in ["1", " \"x\" ", "null", "-2.5e3"] {
+            assert_eq!(scan_json_input(scalar).map(|scanned| scanned.outer), Some(OuterKind::Scalar));
+        }
+        assert_eq!(
+            scan_json_input(r#"{"a": 1, "b": [{}, {"a": 2}]}"#),
+            Some(ScannedDocument {
+                outer: OuterKind::Object,
+                repeats_keys: false
+            })
+        );
     }
 }

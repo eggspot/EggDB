@@ -62,6 +62,15 @@ impl JsonShape {
         })
     }
 
+    fn holds_outer(self, outer: json::OuterKind) -> bool {
+        match self {
+            Self::Value => true,
+            Self::Scalar => outer == json::OuterKind::Scalar,
+            Self::Array => outer == json::OuterKind::Array,
+            Self::Object => outer == json::OuterKind::Object,
+        }
+    }
+
     fn holds(self, value: &Json) -> bool {
         match self {
             Self::Value => true,
@@ -486,9 +495,15 @@ fn is_json(evaluator: &Evaluator<'_>, arguments: &[Expr]) -> SqlResult<Value> {
         Some(Ok(JsonText::Normalized(text))) => {
             json::parse(&text, true).is_ok_and(|node| shape.holds(&node.value))
         }
-        Some(Ok(JsonText::Text(text))) => json::parse_json_input(&text).is_ok_and(|node| {
-            shape.holds(&node.value) && !(unique_keys && has_duplicate_keys(&node))
-        }),
+        Some(Ok(JsonText::Text(text))) => match json::parse_json_input(&text) {
+            Ok(node) => shape.holds(&node.value) && !(unique_keys && has_duplicate_keys(&node)),
+            Err(error) if error.state() == SqlState::STATEMENT_TOO_COMPLEX => {
+                json::scan_json_input(&text).is_some_and(|scanned| {
+                    shape.holds_outer(scanned.outer) && !(unique_keys && scanned.repeats_keys)
+                })
+            }
+            Err(_) => false,
+        },
     };
     Ok(Value::Boolean(holds != negated))
 }
