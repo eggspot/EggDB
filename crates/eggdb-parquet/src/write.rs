@@ -2,6 +2,7 @@ use crate::thrift::Writer;
 use crate::{Cell, Column, ColumnType, ParquetError};
 
 const MAGIC: &[u8] = b"PAR1";
+const ROW_GROUP_ROWS: usize = 131_072;
 const PLAIN: i64 = 0;
 const RLE: i64 = 3;
 
@@ -17,7 +18,7 @@ fn physical(column_type: ColumnType) -> i64 {
     }
 }
 
-fn value_bytes(column: &Column, out: &mut Vec<u8>) -> Result<(), ParquetError> {
+fn value_bytes(column: &Column, cells: &[Cell], out: &mut Vec<u8>) -> Result<(), ParquetError> {
     let mismatch = || {
         ParquetError(format!(
             "column {} holds a value that does not fit its type",
@@ -25,7 +26,7 @@ fn value_bytes(column: &Column, out: &mut Vec<u8>) -> Result<(), ParquetError> {
         ))
     };
     let mut bits = Vec::new();
-    for cell in &column.cells {
+    for cell in cells {
         match (column.column_type, cell) {
             (_, Cell::Null) => {}
             (ColumnType::Boolean, Cell::Boolean(flag)) => bits.push(u64::from(*flag)),
@@ -67,11 +68,10 @@ fn value_bytes(column: &Column, out: &mut Vec<u8>) -> Result<(), ParquetError> {
     Ok(())
 }
 
-fn page(column: &Column) -> Result<Vec<u8>, ParquetError> {
+fn page(column: &Column, cells: &[Cell]) -> Result<Vec<u8>, ParquetError> {
     let mut data = Vec::new();
     if column.nullable {
-        let defined: Vec<u64> = column
-            .cells
+        let defined: Vec<u64> = cells
             .iter()
             .map(|cell| u64::from(*cell != Cell::Null))
             .collect();
@@ -83,14 +83,119 @@ fn page(column: &Column) -> Result<Vec<u8>, ParquetError> {
                 .to_le_bytes(),
         );
         data.extend_from_slice(&levels);
-    } else if column.cells.contains(&Cell::Null) {
+    } else if cells.contains(&Cell::Null) {
         return Err(ParquetError(format!(
             "column {} is not nullable but holds a null",
             column.name
         )));
     }
-    value_bytes(column, &mut data)?;
+    value_bytes(column, cells, &mut data)?;
     Ok(data)
+}
+
+/// A column chunk's statistics: its null count, and its smallest and largest values in their
+/// plain encoding (byte arrays without their length), as Parquet's type-defined order sorts
+/// them; NaN takes no part.
+fn statistics(column: &Column, cells: &[Cell]) -> (i64, Option<(Vec<u8>, Vec<u8>)>) {
+    let nulls = cells.iter().filter(|cell| **cell == Cell::Null).count() as i64;
+    let present = cells.iter().filter(|cell| **cell != Cell::Null);
+    let bounds = match column.column_type {
+        ColumnType::Boolean => {
+            let flags: Vec<bool> = present
+                .filter_map(|cell| match cell {
+                    Cell::Boolean(flag) => Some(*flag),
+                    _ => None,
+                })
+                .collect();
+            let encode = |flag: bool| vec![u8::from(flag)];
+            flags
+                .iter()
+                .min()
+                .zip(flags.iter().max())
+                .map(|(low, high)| (encode(*low), encode(*high)))
+        }
+        ColumnType::Int32 | ColumnType::Date => {
+            let values: Vec<i32> = present
+                .filter_map(|cell| match cell {
+                    Cell::Int(value) => i32::try_from(*value).ok(),
+                    _ => None,
+                })
+                .collect();
+            values
+                .iter()
+                .min()
+                .zip(values.iter().max())
+                .map(|(low, high)| (low.to_le_bytes().to_vec(), high.to_le_bytes().to_vec()))
+        }
+        ColumnType::Int64 | ColumnType::Timestamp { .. } => {
+            let values: Vec<i64> = present
+                .filter_map(|cell| match cell {
+                    Cell::Int(value) => Some(*value),
+                    _ => None,
+                })
+                .collect();
+            values
+                .iter()
+                .min()
+                .zip(values.iter().max())
+                .map(|(low, high)| (low.to_le_bytes().to_vec(), high.to_le_bytes().to_vec()))
+        }
+        ColumnType::Decimal { precision, .. } => {
+            let values: Vec<i128> = present
+                .filter_map(|cell| match cell {
+                    Cell::Decimal(value) => Some(*value),
+                    _ => None,
+                })
+                .collect();
+            let encode = |value: i128| -> Option<Vec<u8>> {
+                if precision <= 18 {
+                    i64::try_from(value).ok().map(|value| value.to_le_bytes().to_vec())
+                } else {
+                    Some(value.to_be_bytes().to_vec())
+                }
+            };
+            values
+                .iter()
+                .min()
+                .zip(values.iter().max())
+                .and_then(|(low, high)| Some((encode(*low)?, encode(*high)?)))
+        }
+        ColumnType::Float | ColumnType::Double => {
+            let values: Vec<f64> = present
+                .filter_map(|cell| match cell {
+                    Cell::Float(value) if !value.is_nan() => Some(*value),
+                    _ => None,
+                })
+                .collect();
+            let encode = |value: f64| {
+                if column.column_type == ColumnType::Float {
+                    (value as f32).to_le_bytes().to_vec()
+                } else {
+                    value.to_le_bytes().to_vec()
+                }
+            };
+            values
+                .iter()
+                .copied()
+                .reduce(f64::min)
+                .zip(values.iter().copied().reduce(f64::max))
+                .map(|(low, high)| (encode(low), encode(high)))
+        }
+        ColumnType::Text | ColumnType::Binary => {
+            let values: Vec<&Vec<u8>> = present
+                .filter_map(|cell| match cell {
+                    Cell::Bytes(bytes) => Some(bytes),
+                    _ => None,
+                })
+                .collect();
+            values
+                .iter()
+                .min()
+                .zip(values.iter().max())
+                .map(|(low, high)| ((*low).clone(), (*high).clone()))
+        }
+    };
+    (nulls, bounds)
 }
 
 fn schema_element(thrift: &mut Writer, column: &Column) {
@@ -139,35 +244,70 @@ fn schema_element(thrift: &mut Writer, column: &Column) {
 
 /// Writes `columns` (all with the same number of values) as a Parquet file: one row group,
 /// one uncompressed plain data page per column.
+/// Writes `columns` as a Parquet file with row groups of up to 131,072 rows, each column chunk
+/// one plain data page with its statistics.
 pub fn write(columns: &[Column]) -> Result<Vec<u8>, ParquetError> {
+    write_with_row_groups(columns, ROW_GROUP_ROWS)
+}
+
+struct Chunk {
+    offset: i64,
+    size: i64,
+    nulls: i64,
+    bounds: Option<(Vec<u8>, Vec<u8>)>,
+}
+
+/// Writes `columns` as [`write`] does, with at most `rows_per_group` rows in each row group.
+pub fn write_with_row_groups(
+    columns: &[Column],
+    rows_per_group: usize,
+) -> Result<Vec<u8>, ParquetError> {
     let rows = columns.first().map_or(0, |column| column.cells.len());
     if columns.iter().any(|column| column.cells.len() != rows) {
         return Err(ParquetError(
             "every column must hold the same number of values".to_owned(),
         ));
     }
+    let rows_per_group = rows_per_group.max(1);
     let mut file = MAGIC.to_vec();
-    let mut chunks = Vec::with_capacity(columns.len());
-    for column in columns {
-        let data = page(column)?;
-        let size = i64::try_from(data.len())
-            .map_err(|_| ParquetError("a column is too large".to_owned()))?;
-        let mut header = Writer::default();
-        header.begin();
-        header.int(1, false, 0);
-        header.int(2, false, size);
-        header.int(3, false, size);
-        header.begin_struct(5);
-        header.int(1, false, rows as i64);
-        header.int(2, false, PLAIN);
-        header.int(3, false, RLE);
-        header.int(4, false, RLE);
-        header.end();
-        header.end();
-        let offset = file.len() as i64;
-        file.extend_from_slice(&header.out);
-        file.extend_from_slice(&data);
-        chunks.push((offset, file.len() as i64 - offset));
+    let mut groups: Vec<(usize, Vec<Chunk>)> = Vec::new();
+    let mut start = 0;
+    loop {
+        let end = (start + rows_per_group).min(rows);
+        let mut chunks = Vec::with_capacity(columns.len());
+        for column in columns {
+            let cells = &column.cells[start..end];
+            let data = page(column, cells)?;
+            let size = i64::try_from(data.len())
+                .map_err(|_| ParquetError("a column is too large".to_owned()))?;
+            let mut header = Writer::default();
+            header.begin();
+            header.int(1, false, 0);
+            header.int(2, false, size);
+            header.int(3, false, size);
+            header.begin_struct(5);
+            header.int(1, false, cells.len() as i64);
+            header.int(2, false, PLAIN);
+            header.int(3, false, RLE);
+            header.int(4, false, RLE);
+            header.end();
+            header.end();
+            let offset = file.len() as i64;
+            file.extend_from_slice(&header.out);
+            file.extend_from_slice(&data);
+            let (nulls, bounds) = statistics(column, cells);
+            chunks.push(Chunk {
+                offset,
+                size: file.len() as i64 - offset,
+                nulls,
+                bounds,
+            });
+        }
+        groups.push((end - start, chunks));
+        start = end;
+        if start >= rows {
+            break;
+        }
     }
     let mut meta = Writer::default();
     meta.begin();
@@ -181,32 +321,48 @@ pub fn write(columns: &[Column]) -> Result<Vec<u8>, ParquetError> {
         schema_element(&mut meta, column);
     }
     meta.int(3, true, rows as i64);
-    meta.begin_list(4, 12, 1);
-    meta.list_struct();
-    meta.begin_list(1, 12, columns.len());
-    for (column, (offset, size)) in columns.iter().zip(&chunks) {
+    meta.begin_list(4, 12, groups.len());
+    for (group_rows, chunks) in &groups {
         meta.list_struct();
-        meta.int(2, true, *offset);
-        meta.begin_struct(3);
-        meta.int(1, false, physical(column.column_type));
-        meta.begin_list(2, 5, 2);
-        meta.list_int(PLAIN);
-        meta.list_int(RLE);
-        meta.begin_list(3, 8, 1);
-        meta.list_binary(column.name.as_bytes());
-        meta.int(4, false, 0);
-        meta.int(5, true, rows as i64);
-        meta.int(6, true, *size);
-        meta.int(7, true, *size);
-        meta.int(9, true, *offset);
+        meta.begin_list(1, 12, columns.len());
+        for (column, chunk) in columns.iter().zip(chunks) {
+            meta.list_struct();
+            meta.int(2, true, chunk.offset);
+            meta.begin_struct(3);
+            meta.int(1, false, physical(column.column_type));
+            meta.begin_list(2, 5, 2);
+            meta.list_int(PLAIN);
+            meta.list_int(RLE);
+            meta.begin_list(3, 8, 1);
+            meta.list_binary(column.name.as_bytes());
+            meta.int(4, false, 0);
+            meta.int(5, true, *group_rows as i64);
+            meta.int(6, true, chunk.size);
+            meta.int(7, true, chunk.size);
+            meta.int(9, true, chunk.offset);
+            meta.begin_struct(12);
+            meta.int(3, true, chunk.nulls);
+            if let Some((low, high)) = &chunk.bounds {
+                meta.binary(5, high);
+                meta.binary(6, low);
+            }
+            meta.end();
+            meta.end();
+            meta.end();
+        }
+        let total: i64 = chunks.iter().map(|chunk| chunk.size).sum();
+        meta.int(2, true, total);
+        meta.int(3, true, *group_rows as i64);
+        meta.end();
+    }
+    meta.binary(6, b"EggDB");
+    meta.begin_list(7, 12, columns.len());
+    for _ in columns {
+        meta.list_struct();
+        meta.begin_struct(1);
         meta.end();
         meta.end();
     }
-    let total: i64 = chunks.iter().map(|(_, size)| size).sum();
-    meta.int(2, true, total);
-    meta.int(3, true, rows as i64);
-    meta.end();
-    meta.binary(6, b"EggDB");
     meta.end();
     let footer = meta.out;
     file.extend_from_slice(&footer);

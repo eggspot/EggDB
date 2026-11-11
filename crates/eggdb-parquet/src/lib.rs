@@ -9,7 +9,7 @@ mod thrift;
 mod write;
 
 pub use read::read;
-pub use write::write;
+pub use write::{write, write_with_row_groups};
 
 /// The most values a file may hold across its columns, to bound memory.
 pub const MAX_VALUES: u64 = 1 << 28;

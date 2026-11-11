@@ -1,4 +1,4 @@
-use crate::{Cell, Column, ColumnType, read, write};
+use crate::{Cell, Column, ColumnType, read, write, write_with_row_groups};
 
 fn sample() -> Vec<Column> {
     let rows = 1_000;
@@ -129,4 +129,24 @@ fn damaged_files_are_errors_not_panics() {
     let length = huge_footer.len();
     huge_footer[length - 8..length - 4].copy_from_slice(&u32::MAX.to_le_bytes());
     assert!(read(&huge_footer).is_err());
+}
+
+#[test]
+fn several_row_groups_read_back_as_one_table() {
+    let columns = sample();
+    let bytes = write_with_row_groups(&columns, 300).expect("the file is written");
+    assert_eq!(read(&bytes).expect("the file reads"), columns);
+    let single = write(&columns).expect("the file is written");
+    assert!(bytes.len() > single.len(), "four row groups carry four sets of chunk headers");
+}
+
+#[test]
+fn chunk_statistics_hold_the_smallest_and_largest_values() {
+    let columns = sample();
+    let bytes = write(&columns).expect("the file is written");
+    let id_low = 0i64.to_le_bytes();
+    let id_high = 999i64.to_le_bytes();
+    let found = |needle: &[u8]| bytes.windows(needle.len()).any(|window| window == needle);
+    assert!(found(&id_low) && found(&id_high));
+    assert!(found(b"user 1") && found(b"user 999"));
 }

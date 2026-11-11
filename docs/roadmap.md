@@ -1209,6 +1209,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   benchmarks (D50).
 - Parquet: nested columns, GZIP (on D249's DEFLATE) and ZSTD, statistics and dictionaries when
   writing, several row groups, streaming (D202). Check: a benchmark against DuckDB's reader.
+  Statistics and several row groups when writing: **code written, unbuilt** (code-only mode,
+  2026-11-12, D572).
 - `read_parquet` and the other file readers in SQL, after D202's decision on which files a
   server's SQL may open (D29, D202).
 - Arrow IPC reading, the `.arrow` file format, several batches, dictionaries and nested types
