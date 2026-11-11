@@ -16,6 +16,7 @@ mod line_protocol;
 mod logql;
 mod loki;
 mod otlp;
+mod otlp_protobuf;
 mod promql;
 mod remote_write;
 mod store;

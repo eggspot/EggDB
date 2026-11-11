@@ -426,22 +426,24 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             ("POST", REMOTE_WRITE_PATH) => self.remote_write(request),
             ("POST", crate::loki::PUSH_PATH) => self.loki_push(request),
             ("POST", crate::otlp::LOGS_PATH | crate::otlp::TRACES_PATH | crate::otlp::METRICS_PATH) => {
-                let decoded = match request.path.as_str() {
-                    crate::otlp::LOGS_PATH => crate::otlp::logs(&request.body),
-                    crate::otlp::TRACES_PATH => crate::otlp::traces(&request.body),
-                    _ => crate::otlp::metrics(&request.body),
-                };
-                let is_json = request
+                let protobuf = request
                     .header("content-type")
-                    .is_none_or(|kind| kind.starts_with("application/json"));
-                if !is_json {
-                    return json(
-                        415,
-                        "{\"code\":3,\"message\":\"send OTLP as application/json (http/json); protobuf is not supported yet\"}"
-                            .to_owned(),
-                    );
-                }
+                    .is_some_and(|kind| kind.starts_with("application/x-protobuf"));
+                let decoded = match (request.path.as_str(), protobuf) {
+                    (crate::otlp::LOGS_PATH, false) => crate::otlp::logs(&request.body),
+                    (crate::otlp::TRACES_PATH, false) => crate::otlp::traces(&request.body),
+                    (_, false) => crate::otlp::metrics(&request.body),
+                    (crate::otlp::LOGS_PATH, true) => crate::otlp_protobuf::logs(&request.body),
+                    (crate::otlp::TRACES_PATH, true) => crate::otlp_protobuf::traces(&request.body),
+                    (_, true) => crate::otlp_protobuf::metrics(&request.body),
+                };
                 match decoded.and_then(|points| store::write(&mut self.session(), &points)) {
+                    Ok(_) if protobuf => Response {
+                        status: 200,
+                        content_type: "application/x-protobuf".to_owned(),
+                        body: Vec::new(),
+                        headers: Vec::new(),
+                    },
                     Ok(_) => json(200, "{}".to_owned()),
                     Err(message) => json(
                         400,
