@@ -756,7 +756,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   STATISTICS PROFILE`; `DISPLAY_CURSOR`, predicates in `PLAN_TABLE`, and `SHOWPLAN_*` alone in
   its batch (D312).
 - `EXPLAIN` with costs, conditions and formats other than text; per-node buffers, `I/O Timings`
-  and planning time (D286, sql.md).
+  and planning time (D286, sql.md). PostgreSQL's `FORMAT JSON` and `YAML`: **code written, unbuilt**
+  (code-only mode, 2026-11-11, D531). Left: costs, `XML`, and measured plans in JSON.
 - `lock_timeout`, and memory, CPU and I/O limits per user, role, tenant and query (D25, PR #86).
   `lock_timeout` on the writer wait: **code written, unbuilt** (code-only mode, 2026-11-10, D393).
 - Quotas by bytes and requests per tenant, and admission control (D25, D234).

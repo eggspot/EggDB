@@ -1088,6 +1088,8 @@ pub(crate) enum ExplainStyle {
     QueryPlan,
     Tree,
     Json,
+    PostgresJson,
+    PostgresYaml,
 }
 
 #[derive(Debug, Clone, PartialEq)]

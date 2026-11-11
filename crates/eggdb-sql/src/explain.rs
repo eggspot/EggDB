@@ -3,6 +3,7 @@ mod expression_text;
 mod mysql_json;
 mod mysql_tree;
 mod oracle_plan;
+mod postgres_formats;
 #[cfg(test)]
 mod session_tests;
 mod showplan;
@@ -60,6 +61,11 @@ pub(crate) fn columns(style: ExplainStyle, dialect: Dialect) -> Vec<OutputColumn
     };
     match (style, dialect) {
         (ExplainStyle::Tree | ExplainStyle::Json, _) => vec![text("EXPLAIN")],
+        (ExplainStyle::PostgresJson, _) => vec![OutputColumn {
+            name: "QUERY PLAN".to_owned(),
+            sql_type: Some(SqlType::Json),
+        }],
+        (ExplainStyle::PostgresYaml, _) => vec![text("QUERY PLAN")],
         (ExplainStyle::QueryPlan, _) | (_, Dialect::Sqlite) => vec![
             number("id"),
             number("parent"),
@@ -82,7 +88,7 @@ pub(crate) fn columns(style: ExplainStyle, dialect: Dialect) -> Vec<OutputColumn
 
 pub(crate) fn shows_subplans(style: ExplainStyle, dialect: Dialect) -> bool {
     match style {
-        ExplainStyle::Tree => true,
+        ExplainStyle::Tree | ExplainStyle::PostgresJson | ExplainStyle::PostgresYaml => true,
         ExplainStyle::Plan => dialect == Dialect::PostgreSql,
         ExplainStyle::QueryPlan | ExplainStyle::Json => false,
     }
@@ -293,6 +299,12 @@ pub(crate) fn render(planned: &Planned, style: ExplainStyle, dialect: Dialect) -
     let rows = match (style, dialect) {
         (ExplainStyle::Tree, _) => vec![vec![Value::Text(mysql_tree::tree_text(planned, None))]],
         (ExplainStyle::Json, _) => vec![vec![Value::Text(mysql_json::json_text(planned))]],
+        (ExplainStyle::PostgresJson, _) => {
+            vec![vec![Value::Json(postgres_formats::json(&postgresql_lines(query)))]]
+        }
+        (ExplainStyle::PostgresYaml, _) => {
+            vec![vec![Value::Text(postgres_formats::yaml(&postgresql_lines(query)))]]
+        }
         (ExplainStyle::QueryPlan, _) | (_, Dialect::Sqlite) => sqlite_rows(query),
         (ExplainStyle::Plan, Dialect::MySql) => mysql_rows(query),
         (ExplainStyle::Plan, _) => postgresql_lines(query)

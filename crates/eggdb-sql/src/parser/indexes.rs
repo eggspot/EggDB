@@ -348,18 +348,25 @@ impl Parser<'_> {
         !off
     }
 
-    fn explain_options(&mut self) -> SqlResult<(bool, bool)> {
+    fn explain_options(&mut self) -> SqlResult<(bool, bool, ExplainStyle)> {
         let mut analyze = false;
         let mut buffers = false;
+        let mut style = ExplainStyle::Plan;
         loop {
             if self.take_word("analyze") || self.take_word("analyse") {
                 analyze = self.explain_switch();
             } else if self.take_word("buffers") {
                 buffers = self.explain_switch();
             } else if self.take_word("format") {
-                if !self.take_word("text") {
-                    return Err(self.not_supported("EXPLAIN formats other than TEXT"));
-                }
+                style = if self.take_word("text") {
+                    ExplainStyle::Plan
+                } else if self.take_word("json") {
+                    ExplainStyle::PostgresJson
+                } else if self.take_word("yaml") {
+                    ExplainStyle::PostgresYaml
+                } else {
+                    return Err(self.not_supported("EXPLAIN formats other than TEXT, JSON and YAML"));
+                };
             } else if ["verbose", "costs", "timing", "summary", "settings", "wal"]
                 .iter()
                 .any(|word| self.is_word(word))
@@ -377,13 +384,17 @@ impl Parser<'_> {
             }
         }
         self.expect(&TokenKind::RightParen)?;
-        Ok((analyze, buffers))
+        if analyze && style != ExplainStyle::Plan {
+            return Err(self.not_supported("EXPLAIN ANALYZE in formats other than TEXT"));
+        }
+        Ok((analyze, buffers, style))
     }
 
     pub(super) fn explain(&mut self) -> SqlResult<Statement> {
         self.expect_word("explain")?;
         let mut analyze = false;
         let mut buffers = false;
+        let mut chosen = ExplainStyle::Plan;
         let style = if self.sqlite() {
             if !(self.is_word("query") && self.is_word_at(1, "plan")) {
                 return Err(self.not_supported("EXPLAIN without QUERY PLAN (bytecode listings)"));
@@ -400,7 +411,7 @@ impl Parser<'_> {
             if self.postgresql() && (self.take_word("analyze") || self.take_word("analyse")) {
                 analyze = true;
             } else if self.postgresql() && self.take(&TokenKind::LeftParen) {
-                (analyze, buffers) = self.explain_options()?;
+                (analyze, buffers, chosen) = self.explain_options()?;
             } else if self.peek_kind() == &TokenKind::LeftParen
                 || self.is_word("analyze")
                 || self.is_word("verbose")
@@ -409,7 +420,7 @@ impl Parser<'_> {
             {
                 return Err(self.not_supported("EXPLAIN options"));
             }
-            ExplainStyle::Plan
+            chosen
         };
         if !(self.is_word("select")
             || self.is_word("update")
