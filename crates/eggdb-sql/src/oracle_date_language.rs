@@ -7,6 +7,12 @@ pub(crate) enum DateLanguage {
     Italian,
     Portuguese,
     Dutch,
+    Swedish,
+    Danish,
+    Norwegian,
+    Finnish,
+    Polish,
+    Catalan,
 }
 
 struct Names {
@@ -208,7 +214,92 @@ const DUTCH: Names = Names {
     day_abbreviations: ["ZO", "MA", "DI", "WO", "DO", "VR", "ZA"],
 };
 
-const LANGUAGES: [DateLanguage; 7] = [
+const SWEDISH: Names = Names {
+    language: "SWEDISH",
+    months: [
+        "JANUARI", "FEBRUARI", "MARS", "APRIL", "MAJ", "JUNI", "JULI", "AUGUSTI", "SEPTEMBER",
+        "OKTOBER", "NOVEMBER", "DECEMBER",
+    ],
+    month_abbreviations: [
+        "JAN", "FEB", "MAR", "APR", "MAJ", "JUN", "JUL", "AUG", "SEP", "OKT", "NOV", "DEC",
+    ],
+    days: ["SÖNDAG", "MÅNDAG", "TISDAG", "ONSDAG", "TORSDAG", "FREDAG", "LÖRDAG"],
+    day_abbreviations: ["SÖ", "MÅ", "TI", "ON", "TO", "FR", "LÖ"],
+};
+
+const DANISH: Names = Names {
+    language: "DANISH",
+    months: [
+        "JANUAR", "FEBRUAR", "MARTS", "APRIL", "MAJ", "JUNI", "JULI", "AUGUST", "SEPTEMBER",
+        "OKTOBER", "NOVEMBER", "DECEMBER",
+    ],
+    month_abbreviations: [
+        "JAN", "FEB", "MAR", "APR", "MAJ", "JUN", "JUL", "AUG", "SEP", "OKT", "NOV", "DEC",
+    ],
+    days: ["SØNDAG", "MANDAG", "TIRSDAG", "ONSDAG", "TORSDAG", "FREDAG", "LØRDAG"],
+    day_abbreviations: ["SØ", "MA", "TI", "ON", "TO", "FR", "LØ"],
+};
+
+const NORWEGIAN: Names = Names {
+    language: "NORWEGIAN",
+    months: [
+        "JANUAR", "FEBRUAR", "MARS", "APRIL", "MAI", "JUNI", "JULI", "AUGUST", "SEPTEMBER",
+        "OKTOBER", "NOVEMBER", "DESEMBER",
+    ],
+    month_abbreviations: [
+        "JAN", "FEB", "MAR", "APR", "MAI", "JUN", "JUL", "AUG", "SEP", "OKT", "NOV", "DES",
+    ],
+    days: ["SØNDAG", "MANDAG", "TIRSDAG", "ONSDAG", "TORSDAG", "FREDAG", "LØRDAG"],
+    day_abbreviations: ["SØ", "MA", "TI", "ON", "TO", "FR", "LØ"],
+};
+
+const FINNISH: Names = Names {
+    language: "FINNISH",
+    months: [
+        "TAMMIKUU", "HELMIKUU", "MAALISKUU", "HUHTIKUU", "TOUKOKUU", "KESÄKUU", "HEINÄKUU",
+        "ELOKUU", "SYYSKUU", "LOKAKUU", "MARRASKUU", "JOULUKUU",
+    ],
+    month_abbreviations: [
+        "TAMMI", "HELMI", "MAALIS", "HUHTI", "TOUKO", "KESÄ", "HEINÄ", "ELO", "SYYS", "LOKA",
+        "MARRAS", "JOULU",
+    ],
+    days: [
+        "SUNNUNTAI", "MAANANTAI", "TIISTAI", "KESKIVIIKKO", "TORSTAI", "PERJANTAI", "LAUANTAI",
+    ],
+    day_abbreviations: ["SU", "MA", "TI", "KE", "TO", "PE", "LA"],
+};
+
+const POLISH: Names = Names {
+    language: "POLISH",
+    months: [
+        "STYCZEŃ", "LUTY", "MARZEC", "KWIECIEŃ", "MAJ", "CZERWIEC", "LIPIEC", "SIERPIEŃ",
+        "WRZESIEŃ", "PAŹDZIERNIK", "LISTOPAD", "GRUDZIEŃ",
+    ],
+    month_abbreviations: [
+        "STY", "LUT", "MAR", "KWI", "MAJ", "CZE", "LIP", "SIE", "WRZ", "PAŹ", "LIS", "GRU",
+    ],
+    days: [
+        "NIEDZIELA", "PONIEDZIAŁEK", "WTOREK", "ŚRODA", "CZWARTEK", "PIĄTEK", "SOBOTA",
+    ],
+    day_abbreviations: ["NIE", "PON", "WTO", "ŚRO", "CZW", "PIĄ", "SOB"],
+};
+
+const CATALAN: Names = Names {
+    language: "CATALAN",
+    months: [
+        "GENER", "FEBRER", "MARÇ", "ABRIL", "MAIG", "JUNY", "JULIOL", "AGOST", "SETEMBRE",
+        "OCTUBRE", "NOVEMBRE", "DESEMBRE",
+    ],
+    month_abbreviations: [
+        "GEN", "FEB", "MAR", "ABR", "MAI", "JUN", "JUL", "AGO", "SET", "OCT", "NOV", "DES",
+    ],
+    days: [
+        "DIUMENGE", "DILLUNS", "DIMARTS", "DIMECRES", "DIJOUS", "DIVENDRES", "DISSABTE",
+    ],
+    day_abbreviations: ["DG", "DL", "DT", "DC", "DJ", "DV", "DS"],
+};
+
+const LANGUAGES: [DateLanguage; 13] = [
     DateLanguage::American,
     DateLanguage::German,
     DateLanguage::French,
@@ -216,6 +307,12 @@ const LANGUAGES: [DateLanguage; 7] = [
     DateLanguage::Italian,
     DateLanguage::Portuguese,
     DateLanguage::Dutch,
+    DateLanguage::Swedish,
+    DateLanguage::Danish,
+    DateLanguage::Norwegian,
+    DateLanguage::Finnish,
+    DateLanguage::Polish,
+    DateLanguage::Catalan,
 ];
 
 fn widest(names: &[&str]) -> usize {
@@ -243,6 +340,12 @@ impl DateLanguage {
             Self::Italian => &ITALIAN,
             Self::Portuguese => &PORTUGUESE,
             Self::Dutch => &DUTCH,
+            Self::Swedish => &SWEDISH,
+            Self::Danish => &DANISH,
+            Self::Norwegian => &NORWEGIAN,
+            Self::Finnish => &FINNISH,
+            Self::Polish => &POLISH,
+            Self::Catalan => &CATALAN,
         }
     }
 

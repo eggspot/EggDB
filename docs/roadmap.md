@@ -1070,7 +1070,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - pg_cron: schedules checked at `cron.schedule`, a missed minute run after a restart, and jobs run
   as their `username` (D200). Jobs as their `username`: **code written, unbuilt** (D429).
 - NLS: languages beyond the seven, `NLS_TERRITORY` other than `AMERICA`, the NLS decimal character
-  (roadmap item 42b).
+  (roadmap item 42b). Six more languages and 13 more territories: **code written, unbuilt**
+  (code-only mode, 2026-11-11, D451); the decimal character was already built.
 - Named `NOT NULL` constraints kept, overloaded package procedures described over RPC, and
   `sp_sproc_columns` rows for PL/SQL functions (D295).
 - Oracle's refusal of values for `GENERATED ALWAYS` identity columns, `ALTER COLUMN ... SET

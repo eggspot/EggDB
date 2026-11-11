@@ -75,6 +75,31 @@ const UNSUPPORTED_PARAMETERS: [&str; 27] = [
     "container",
 ];
 
+struct Territory {
+    name: &'static str,
+    date_format: &'static str,
+    currency: &'static str,
+    decimal: char,
+    group: char,
+}
+
+const TERRITORIES: [Territory; 14] = [
+    Territory { name: "AMERICA", date_format: AMERICA_DATE_FORMAT, currency: "$", decimal: '.', group: ',' },
+    Territory { name: "UNITED KINGDOM", date_format: "DD-MON-RR", currency: "£", decimal: '.', group: ',' },
+    Territory { name: "GERMANY", date_format: "DD.MM.RR", currency: "€", decimal: ',', group: '.' },
+    Territory { name: "AUSTRIA", date_format: "DD.MM.RR", currency: "€", decimal: ',', group: '.' },
+    Territory { name: "FRANCE", date_format: "DD/MM/RR", currency: "€", decimal: ',', group: ' ' },
+    Territory { name: "ITALY", date_format: "DD-MON-RR", currency: "€", decimal: ',', group: '.' },
+    Territory { name: "SPAIN", date_format: "DD/MM/RR", currency: "€", decimal: ',', group: '.' },
+    Territory { name: "THE NETHERLANDS", date_format: "DD-MM-RR", currency: "€", decimal: ',', group: '.' },
+    Territory { name: "SWEDEN", date_format: "RRRR-MM-DD", currency: "Kr", decimal: ',', group: ' ' },
+    Territory { name: "DENMARK", date_format: "RR-MM-DD", currency: "Kr", decimal: ',', group: '.' },
+    Territory { name: "NORWAY", date_format: "DD.MM.RRRR", currency: "Kr", decimal: ',', group: ' ' },
+    Territory { name: "FINLAND", date_format: "DD.MM.RRRR", currency: "€", decimal: ',', group: ' ' },
+    Territory { name: "POLAND", date_format: "RR/MM/DD", currency: "zł", decimal: ',', group: ' ' },
+    Territory { name: "BRAZIL", date_format: "DD/MM/RR", currency: "R$", decimal: ',', group: '.' },
+];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct NlsParameters {
     date_format: String,
@@ -290,10 +315,23 @@ impl NlsParameters {
             }
             "nls_date_language" => next.date_language = language_named(plain)?,
             "nls_territory" => {
-                if !plain.eq_ignore_ascii_case("america") {
-                    return Err(invalid_environment());
-                }
+                let territory = TERRITORIES
+                    .iter()
+                    .find(|territory| territory.name.eq_ignore_ascii_case(plain.trim()))
+                    .ok_or_else(invalid_environment)?;
                 next.reset_territory();
+                if territory.name != "AMERICA" {
+                    next.date_format = territory.date_format.to_owned();
+                    next.timestamp_format = format!("{} HH24:MI:SSXFF", territory.date_format);
+                    next.timestamp_tz_format = format!("{} HH24:MI:SSXFF TZR", territory.date_format);
+                    next.currency = territory.currency.to_owned();
+                    next.decimal_character = territory.decimal;
+                    next.group_separator = territory.group;
+                    if let Ok((name, code)) = iso_currency_of(territory.name) {
+                        next.iso_currency_territory = name;
+                        next.iso_currency = code;
+                    }
+                }
             }
             "nls_currency" => next.currency = checked_currency(plain)?,
             "nls_iso_currency" => {

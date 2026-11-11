@@ -475,3 +475,4 @@ its full title with its status.
 - [D448](decisions/D448.md) Code-only batch 96 (M10): application-lock deadlocks choose one victim
 - [D449](decisions/D449.md) Code-only batch 97 (M10): SQL Server's `sp_sequence_get_range`
 - [D450](decisions/D450.md) Code-only batch 98 (M10): Oracle's lax `IS JSON`, `JSON_SERIALIZE` options and `JSON_SCALAR`
+- [D451](decisions/D451.md) Code-only batch 99 (M10): more NLS languages and territories
