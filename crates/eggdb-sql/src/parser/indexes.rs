@@ -393,8 +393,10 @@ impl Parser<'_> {
                     ExplainStyle::PostgresJson
                 } else if self.take_word("yaml") {
                     ExplainStyle::PostgresYaml
+                } else if self.take_word("xml") {
+                    ExplainStyle::PostgresXml
                 } else {
-                    return Err(self.not_supported("EXPLAIN formats other than TEXT, JSON and YAML"));
+                    return Err(self.not_supported("EXPLAIN formats other than TEXT, JSON, YAML and XML"));
                 };
             } else if ["verbose", "costs", "timing", "summary", "settings", "wal"]
                 .iter()

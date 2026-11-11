@@ -178,6 +178,59 @@ fn node_yaml(nodes: &[Node], index: usize, indent: usize, out: &mut String) {
     }
 }
 
+fn xml_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn xml_element(name: &str) -> String {
+    name.replace(' ', "-")
+}
+
+fn node_xml(nodes: &[Node], index: usize, indent: usize, out: &mut String) {
+    let node = &nodes[index];
+    let pad = " ".repeat(indent);
+    out.push_str(&format!("{pad}<Plan>\n"));
+    let mut field = |name: &str, value: &str| {
+        let element = xml_element(name);
+        out.push_str(&format!("{pad}  <{element}>{}</{element}>\n", xml_text(value)));
+    };
+    field("Node Type", &node.node_type);
+    if let Some(relationship) = &node.relationship {
+        field("Parent Relationship", relationship);
+    }
+    if let Some(name) = &node.subplan_name {
+        field("Subplan Name", name);
+    }
+    for (key, value) in &node.details {
+        field(key, value);
+    }
+    if !node.children.is_empty() {
+        out.push_str(&format!("{pad}  <Plans>\n"));
+        for child in &node.children {
+            node_xml(nodes, *child, indent + 4, out);
+        }
+        out.push_str(&format!("{pad}  </Plans>\n"));
+    }
+    out.push_str(&format!("{pad}</Plan>\n"));
+}
+
+/// The PostgreSQL text plan `lines` as `EXPLAIN (FORMAT XML)` writes a plan: an `explain`
+/// document in PostgreSQL's namespace with one `Query` and its `Plan` tree, each field an
+/// element named as the JSON key with hyphens for spaces.
+pub(crate) fn xml(lines: &[String]) -> String {
+    let (nodes, root) = tree(lines);
+    let mut plan = String::new();
+    if let Some(root) = root {
+        node_xml(&nodes, root, 4, &mut plan);
+    }
+    format!(
+        "<explain xmlns=\"http://www.postgresql.org/2009/explain\">\n  <Query>\n{plan}  </Query>\n</explain>"
+    )
+}
+
 /// The PostgreSQL text plan `lines` as `EXPLAIN (FORMAT JSON)` writes a plan: one object with
 /// its `Plan` tree, each node's type, relation, alias, index, conditions and `Plans`.
 pub(crate) fn json(lines: &[String]) -> String {
@@ -229,5 +282,10 @@ mod tests {
         let written = json(&plan);
         assert!(written.contains("\"Relation Name\": \"onek\""), "{written}");
         assert!(yaml(&plan).starts_with("- Plan: \n    Node Type: \"Seq Scan\""));
+        let document = xml(&plan);
+        assert!(document.starts_with("<explain xmlns=\"http://www.postgresql.org/2009/explain\">\n  <Query>\n    <Plan>\n      <Node-Type>Seq Scan</Node-Type>"), "{document}");
+        assert!(document.contains("<Relation-Name>onek</Relation-Name>"), "{document}");
+        assert!(document.contains("<Filter>(four = t.four)</Filter>"), "{document}");
+        assert!(document.ends_with("  </Query>\n</explain>"), "{document}");
     }
 }

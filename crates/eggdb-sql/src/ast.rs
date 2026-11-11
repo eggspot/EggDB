@@ -1091,6 +1091,7 @@ pub(crate) enum ExplainStyle {
     Json,
     PostgresJson,
     PostgresYaml,
+    PostgresXml,
 }
 
 #[derive(Debug, Clone, PartialEq)]

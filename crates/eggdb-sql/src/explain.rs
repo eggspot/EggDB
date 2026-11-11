@@ -65,7 +65,7 @@ pub(crate) fn columns(style: ExplainStyle, dialect: Dialect) -> Vec<OutputColumn
             name: "QUERY PLAN".to_owned(),
             sql_type: Some(SqlType::Json),
         }],
-        (ExplainStyle::PostgresYaml, _) => vec![text("QUERY PLAN")],
+        (ExplainStyle::PostgresYaml | ExplainStyle::PostgresXml, _) => vec![text("QUERY PLAN")],
         (ExplainStyle::QueryPlan, _) | (_, Dialect::Sqlite) => vec![
             number("id"),
             number("parent"),
@@ -88,7 +88,10 @@ pub(crate) fn columns(style: ExplainStyle, dialect: Dialect) -> Vec<OutputColumn
 
 pub(crate) fn shows_subplans(style: ExplainStyle, dialect: Dialect) -> bool {
     match style {
-        ExplainStyle::Tree | ExplainStyle::PostgresJson | ExplainStyle::PostgresYaml => true,
+        ExplainStyle::Tree
+        | ExplainStyle::PostgresJson
+        | ExplainStyle::PostgresYaml
+        | ExplainStyle::PostgresXml => true,
         ExplainStyle::Plan => dialect == Dialect::PostgreSql,
         ExplainStyle::QueryPlan | ExplainStyle::Json => false,
     }
@@ -304,6 +307,9 @@ pub(crate) fn render(planned: &Planned, style: ExplainStyle, dialect: Dialect) -
         }
         (ExplainStyle::PostgresYaml, _) => {
             vec![vec![Value::Text(postgres_formats::yaml(&postgresql_lines(query)))]]
+        }
+        (ExplainStyle::PostgresXml, _) => {
+            vec![vec![Value::Text(postgres_formats::xml(&postgresql_lines(query)))]]
         }
         (ExplainStyle::QueryPlan, _) | (_, Dialect::Sqlite) => sqlite_rows(query),
         (ExplainStyle::Plan, Dialect::MySql) => mysql_rows(query),
