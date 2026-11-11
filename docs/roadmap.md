@@ -599,7 +599,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - SQL*Plus commands in `eggdb shell`, and `DESCRIBE`, `VARIABLE`/`PRINT`, `SPOOL` and `COLUMN`
   formatting (D150). `DESCRIBE`, `PROMPT` and `SPOOL`: **code written, unbuilt** (code-only mode,
   2026-11-11, D544); `VARIABLE`/`PRINT` with `EXEC :x := …`: **code written, unbuilt** (code-only mode,
-  2026-11-12, D622). Left: output binds assigned inside PL/SQL blocks, and `COLUMN` formatting.
+  2026-11-12, D622); `COLUMN` formatting: **code written, unbuilt** (code-only mode, 2026-11-12, D633). Left:
+  output binds assigned inside PL/SQL blocks, and wrapped (not cut) text columns.
 
 ### M6a Server and the PostgreSQL protocol
 - TLS on every listener beyond PostgreSQL, MySQL and TDS, so each may leave loopback once its own

@@ -238,6 +238,7 @@ struct Shell<'s, 'db: 's> {
     spool_replaced: bool,
     spooling_to: Option<String>,
     binds: Vec<super::shell_sqlplus::BindVariable>,
+    column_formats: super::shell_columns::ColumnFormats,
 }
 
 struct CopyFiles {
@@ -288,6 +289,7 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
             collection: None,
             spool: None,
             binds: Vec::new(),
+            column_formats: super::shell_columns::ColumnFormats::new(),
             spool_replaced: false,
             spooling_to: None,
         };
@@ -592,6 +594,24 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
             let block = super::shell_sqlplus::with_binds(&format!("BEGIN {rest}; END;"), &self.binds);
             return Some(self.run_sql(console, &block));
         }
+        if super::shell_columns::is_column_command(&first) {
+            return Some(
+                match super::shell_columns::column_command(rest, &mut self.column_formats) {
+                    Ok(text) => {
+                        if !text.is_empty() {
+                            self.print(console, &format!("{text}\n"));
+                        }
+                        Step::Continue(Exit::Done)
+                    }
+                    Err(message) => self.fail(console, &message, Exit::Usage),
+                },
+            );
+        }
+        if super::shell_columns::is_clear_columns(&first, rest) {
+            self.column_formats.clear();
+            self.print(console, "columns cleared\n");
+            return Some(Step::Continue(Exit::Done));
+        }
         match SqlPlusCommand::named(&first) {
             Some(SqlPlusCommand::Describe) => return Some(self.describe(console, rest)),
             Some(SqlPlusCommand::Prompt) => {
@@ -816,6 +836,11 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
         let (width, mode, color_err) = (self.width, self.mode, self.color_err);
         let dialect = self.sql.dialect();
         let server_output = (dialect == Dialect::Oracle).then(|| self.sql.server_output_reader());
+        let column_formats = if dialect == Dialect::Oracle {
+            self.column_formats.clone()
+        } else {
+            super::shell_columns::ColumnFormats::new()
+        };
         let Self {
             sql,
             pending,
@@ -853,7 +878,12 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
                     return true;
                 }
                 let mut out = stdout.borrow_mut();
-                out.text(&result_text(&result, mode, width, dialect));
+                if column_formats.is_empty() {
+                    out.text(&result_text(&result, mode, width, dialect));
+                } else {
+                    let shown = super::shell_columns::formatted(&result, &column_formats);
+                    out.text(&result_text(&shown, mode, width, dialect));
+                }
                 closed = out.line_done().is_err();
                 !closed
             },

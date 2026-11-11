@@ -48,6 +48,7 @@ mod serve_tls;
 mod shell;
 mod shell_block;
 mod shell_copy;
+mod shell_columns;
 mod shell_sqlplus;
 pub(super) mod sql;
 mod table;
