@@ -1176,8 +1176,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `TABLE()` correlated in a join (roadmap item 33e). `IS A SET` and `IS EMPTY`: **code written, unbuilt** (code-only mode,
   2026-11-11, D455).
 - `DBMS_SCHEDULER` jobs on the job scheduler (D27, D200). **Code written, unbuilt** (code-only mode, 2026-11-11, D524).
-  Programs and named schedules: **code written, unbuilt** (code-only mode, 2026-11-12, D625). Left: chains;
-  the jobs' dictionary views:
+  Programs and named schedules: **code written, unbuilt** (code-only mode, 2026-11-12, D625); chains:
+  **code written, unbuilt** (code-only mode, 2026-11-12, D634); the jobs' dictionary views:
   **code written, unbuilt** (code-only mode, 2026-11-12, D577).
 - pg_cron: sub-minute schedules, `$`, `cron.alter_job` and time zones per job (D200). Sub-minute
   schedules, `$` and `cron.alter_job`: **code written, unbuilt** (code-only mode, 2026-11-11,

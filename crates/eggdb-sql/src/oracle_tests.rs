@@ -814,6 +814,74 @@ fn listagg_distinct_over_a_partition_lists_each_value_once() {
 }
 
 #[test]
+fn scheduler_chains_run_their_steps_by_their_rules() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    values(&mut session, "CREATE TABLE trail (step VARCHAR2(10))");
+    for (program, action) in [
+        ("p_a", "INSERT INTO trail VALUES (''a'');"),
+        ("p_b", "INSERT INTO trail VALUES (''b'');"),
+        ("p_fail", "INSERT INTO no_such_table VALUES (1);"),
+        ("p_c", "INSERT INTO trail VALUES (''c'');"),
+        ("p_never", "INSERT INTO trail VALUES (''never'');"),
+    ] {
+        values(
+            &mut session,
+            &format!(
+                "BEGIN DBMS_SCHEDULER.CREATE_PROGRAM(program_name => '{program}', program_type => 'PLSQL_BLOCK', program_action => '{action}', enabled => TRUE); END;"
+            ),
+        );
+    }
+    values(&mut session, "BEGIN DBMS_SCHEDULER.CREATE_CHAIN(chain_name => 'load_chain'); END;");
+    for (step, program) in [("a", "p_a"), ("b", "p_b"), ("f", "p_fail"), ("c", "p_c"), ("n", "p_never")] {
+        values(
+            &mut session,
+            &format!(
+                "BEGIN DBMS_SCHEDULER.DEFINE_CHAIN_STEP(chain_name => 'load_chain', step_name => '{step}', program_name => '{program}'); END;"
+            ),
+        );
+    }
+    for (rule, condition, action) in [
+        ("r1", "TRUE", "START a"),
+        ("r2", "a SUCCEEDED", "START b, f"),
+        ("r3", "b COMPLETED AND f FAILED", "START c"),
+        ("r4", "f SUCCEEDED", "START n"),
+        ("r5", "c COMPLETED", "END"),
+    ] {
+        values(
+            &mut session,
+            &format!(
+                "BEGIN DBMS_SCHEDULER.DEFINE_CHAIN_RULE(chain_name => 'load_chain', condition => '{condition}', action => '{action}', rule_name => '{rule}'); END;"
+            ),
+        );
+    }
+    failure(
+        &mut session,
+        "BEGIN DBMS_SCHEDULER.RUN_CHAIN(chain_name => 'load_chain', job_name => NULL); END;",
+    );
+    values(&mut session, "BEGIN DBMS_SCHEDULER.ENABLE('load_chain'); END;");
+    values(
+        &mut session,
+        "BEGIN DBMS_SCHEDULER.CREATE_JOB(job_name => 'chain_job', job_type => 'CHAIN', job_action => 'load_chain', enabled => TRUE); END;",
+    );
+    values(&mut session, "BEGIN DBMS_SCHEDULER.RUN_JOB('chain_job'); END;");
+    assert_eq!(
+        values(&mut session, "SELECT step FROM trail ORDER BY step"),
+        vec![vec![text("a")], vec![text("b")], vec![text("c")]]
+    );
+    failure(
+        &mut session,
+        "BEGIN DBMS_SCHEDULER.DEFINE_CHAIN_RULE(chain_name => 'load_chain', condition => 'a FINISHED', action => 'END'); END;",
+    );
+    failure(
+        &mut session,
+        "BEGIN DBMS_SCHEDULER.CREATE_JOB(job_name => 'lost', job_type => 'CHAIN', job_action => 'no_chain'); END;",
+    );
+    values(&mut session, "BEGIN DBMS_SCHEDULER.DROP_CHAIN('load_chain'); END;");
+    failure(&mut session, "BEGIN DBMS_SCHEDULER.DROP_CHAIN('load_chain'); END;");
+}
+
+#[test]
 fn scheduler_jobs_take_their_action_from_a_program_and_their_timing_from_a_schedule() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Oracle);

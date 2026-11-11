@@ -658,3 +658,4 @@ its full title with its status.
 - [D631](decisions/D631.md) Code-only batch 279 (M5): SQLite's VACUUM INTO and a writer of whole SQLite files
 - [D632](decisions/D632.md) Code-only batch 280 (M10): TOP PERCENT in Transact-SQL DML, and INSERT TOP
 - [D633](decisions/D633.md) Code-only batch 281 (M5): SQL*Plus COLUMN formatting in eggdb shell
+- [D634](decisions/D634.md) Code-only batch 282 (M10): DBMS_SCHEDULER chains

@@ -4,6 +4,8 @@ use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
+mod chains;
+
 const PACKAGE: &str = "dbms_scheduler";
 const OWNER: &str = "sys";
 const UNIX_EPOCH_FROM_2000_SECONDS: i64 = 946_684_800;
@@ -173,6 +175,13 @@ impl Run<'_> {
             "drop_program" => &["program_name", "force"],
             "create_schedule" => &["schedule_name", "start_date", "repeat_interval", "end_date", "comments"],
             "drop_schedule" => &["schedule_name", "force"],
+            "create_chain" => &["chain_name", "rule_set_name", "evaluation_interval", "comments"],
+            "drop_chain" => &["chain_name", "force"],
+            "define_chain_step" => &["chain_name", "step_name", "program_name"],
+            "drop_chain_step" => &["chain_name", "step_name", "force"],
+            "define_chain_rule" => &["chain_name", "condition", "action", "rule_name", "comments"],
+            "drop_chain_rule" => &["chain_name", "rule_name", "force"],
+            "run_chain" => &["chain_name", "job_name", "start_steps"],
             "run_job" => &["job_name", "use_current_session"],
             "drop_job" => &["job_name", "force", "defer"],
             "enable" => &["name", "commit_semantics"],
@@ -194,16 +203,30 @@ impl Run<'_> {
                 .filter(|value| *value != Value::Null)
         };
         let text_of = |name: &str| value(name).and_then(|value| value.to_text());
-        let job = text_of("job_name")
-            .or_else(|| text_of("name"))
-            .or_else(|| text_of("program_name"))
+        let chain_member = chains::CHAIN_MEMBERS.contains(&call.member.as_str());
+        let named = if chain_member {
+            text_of("chain_name")
+        } else {
+            text_of("job_name")
+        };
+        let job = named
+            .or_else(|| text_of("name").filter(|_| !chain_member))
+            .or_else(|| text_of("program_name").filter(|_| !chain_member))
             .or_else(|| text_of("schedule_name"))
             .map(|name| name.trim().to_ascii_uppercase())
             .ok_or_else(|| scheduler_error(27_452, "invalid parameter value for the job name".to_owned()))?;
         self.scheduler_sql(CREATE_SCHEMA)?;
         self.scheduler_sql(CREATE_TABLE)?;
-        for statement in CREATE_OBJECT_TABLES {
+        for statement in CREATE_OBJECT_TABLES.iter().chain(chains::CREATE_CHAIN_TABLES.iter()) {
             self.scheduler_sql(statement)?;
+        }
+        if chain_member {
+            self.scheduler_chain_call(&call.member, &job, &arguments)?;
+            return Ok(Some(Flow::Next));
+        }
+        if matches!(call.member.as_str(), "enable" | "disable") && !self.job_exists(&job)? && self.chain_exists(&job)? {
+            self.set_chain_enabled(&job, call.member == "enable")?;
+            return Ok(Some(Flow::Next));
         }
         let validated_interval = |interval: &str| {
             crate::jobs::CalendarRule::parse(interval)
@@ -304,12 +327,21 @@ impl Run<'_> {
                     .or_else(|| program.as_ref().map(|(kind, _)| kind.clone()))
                     .unwrap_or_else(|| "PLSQL_BLOCK".to_owned())
                     .to_ascii_uppercase();
-                if !JOB_TYPES.contains(&job_type.as_str()) {
-                    return Err(SqlError::not_supported(&format!("DBMS_SCHEDULER jobs of type {job_type}; EggDB runs PLSQL_BLOCK and STORED_PROCEDURE jobs")));
+                if job_type != "CHAIN" && !JOB_TYPES.contains(&job_type.as_str()) {
+                    return Err(SqlError::not_supported(&format!("DBMS_SCHEDULER jobs of type {job_type}; EggDB runs PLSQL_BLOCK, STORED_PROCEDURE and CHAIN jobs")));
                 }
                 let action = text_of("job_action")
                     .or_else(|| program.as_ref().map(|(_, action)| action.clone()))
                     .ok_or_else(|| scheduler_error(27_452, "job_action is required".to_owned()))?;
+                let action = if job_type == "CHAIN" {
+                    let chain = action.trim().to_ascii_uppercase();
+                    if !self.chain_exists(&chain)? {
+                        return Err(scheduler_error(27_476, format!("\"{chain}\" does not exist")));
+                    }
+                    chain
+                } else {
+                    action
+                };
                 let interval = text_of("repeat_interval").or_else(|| schedule.as_ref().and_then(|(_, interval, _)| interval.clone()));
                 if let Some(interval) = &interval {
                     validated_interval(interval)?;

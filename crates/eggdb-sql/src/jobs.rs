@@ -728,6 +728,12 @@ pub(crate) fn scheduler_block(job_type: &str, action: &str) -> String {
     if job_type.eq_ignore_ascii_case("STORED_PROCEDURE") {
         return format!("BEGIN {}; END;", action.trim_end_matches(';'));
     }
+    if job_type.eq_ignore_ascii_case("CHAIN") {
+        return format!(
+            "BEGIN DBMS_SCHEDULER.RUN_CHAIN(chain_name => '{}', job_name => NULL); END;",
+            action.replace('\'', "''")
+        );
+    }
     if starts_block("BEGIN") || starts_block("DECLARE") {
         action.to_owned()
     } else {
