@@ -3608,7 +3608,9 @@ impl<'t> Parser<'t> {
                     )
                     .at(self.position()));
                 }
-                let join = self.asof_join()?;
+                let left_label =
+                    joined_dml::label_of(joins.last().map_or(&first, |join| &join.table)).to_owned();
+                let join = self.asof_join(&left_label)?;
                 joins.push(join);
                 continue;
             }

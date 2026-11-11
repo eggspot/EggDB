@@ -275,6 +275,8 @@ mod oracle_tests;
 #[cfg(test)]
 mod output_into_tests;
 #[cfg(test)]
+mod asof_tests;
+#[cfg(test)]
 mod partition_alter_tests;
 #[cfg(test)]
 mod partition_selection_tests;

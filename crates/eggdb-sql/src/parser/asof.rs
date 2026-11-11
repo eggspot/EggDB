@@ -68,6 +68,49 @@ fn ordering(condition: &Expr, label: &str) -> SqlResult<(Expr, bool)> {
     })
 }
 
+fn qualified(label: &str, column: &Name) -> Expr {
+    Expr {
+        kind: ExprKind::Column {
+            qualifier: Some(label.to_owned()),
+            name: column.text.clone(),
+        },
+        position: column.position,
+    }
+}
+
+fn using_condition(columns: &[Name], left: &str, right: &str, position: usize) -> SqlResult<Expr> {
+    let Some((time, keys)) = columns.split_last() else {
+        return Err(SqlError::syntax("ASOF JOIN ... USING needs a column", position));
+    };
+    if left == right {
+        return Err(SqlError::syntax(
+            "ASOF JOIN ... USING needs an alias for one of the two tables",
+            position,
+        ));
+    }
+    let compared = |operator: BinaryOperator, column: &Name| Expr {
+        kind: ExprKind::Binary(
+            operator,
+            Box::new(qualified(left, column)),
+            Box::new(qualified(right, column)),
+        ),
+        position: column.position,
+    };
+    let mut conjuncts: Vec<Expr> = keys
+        .iter()
+        .map(|column| compared(BinaryOperator::Equal, column))
+        .collect();
+    conjuncts.push(compared(BinaryOperator::GreaterOrEqual, time));
+    Ok(if conjuncts.len() == 1 {
+        conjuncts.remove(0)
+    } else {
+        Expr {
+            kind: ExprKind::And(conjuncts),
+            position,
+        }
+    })
+}
+
 impl Parser<'_> {
     pub(super) fn at_asof_join(&self) -> bool {
         self.postgresql()
@@ -77,9 +120,11 @@ impl Parser<'_> {
                     && (self.is_word_at(2, "join") || self.is_word_at(2, "outer"))))
     }
 
-    /// DuckDB's `ASOF [LEFT] JOIN table ON equalities AND one inequality`, as a lateral subquery
-    /// taking, for each row, the one row of `table` nearest on the inequality's side.
-    pub(super) fn asof_join(&mut self) -> SqlResult<Join> {
+    /// DuckDB's `ASOF [LEFT] JOIN table ON equalities AND one inequality`, or its `USING (keys,
+    /// time)` form, as a lateral subquery taking, for each row, the one row of `table` nearest on
+    /// the inequality's side. `left_label` names the table on the left, which `USING` compares
+    /// with.
+    pub(super) fn asof_join(&mut self, left_label: &str) -> SqlResult<Join> {
         let position = self.position();
         self.at += 1;
         let keep_unmatched = self.take_word("left");
@@ -91,13 +136,18 @@ impl Parser<'_> {
         if table.derived.is_some() || table.generated.is_some() {
             return Err(self.not_supported("ASOF JOIN of a subquery or function"));
         }
-        self.expect_word("on")?;
-        let condition = self.expression()?;
-        let condition = self.condition(condition);
         let label = table
             .alias
             .clone()
             .unwrap_or_else(|| crate::schemas::base_name(&table.name.text).to_owned());
+        let condition = if self.take_word("using") {
+            let columns = self.name_list()?;
+            using_condition(&columns, left_label, &label, position)?
+        } else {
+            self.expect_word("on")?;
+            self.expression()?
+        };
+        let condition = self.condition(condition);
         let (nearest, inner_below) = ordering(&condition, &label)?;
         let inner = TableReference {
             alias: Some(label.clone()),
