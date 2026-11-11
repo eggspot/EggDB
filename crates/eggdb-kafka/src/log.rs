@@ -13,6 +13,57 @@ pub(crate) mod error {
     pub(crate) const CORRUPT_MESSAGE: i16 = 2;
     pub(crate) const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
     pub(crate) const INVALID_TOPIC: i16 = 17;
+    pub(crate) const TOPIC_ALREADY_EXISTS: i16 = 36;
+    pub(crate) const INVALID_PARTITIONS: i16 = 37;
+    pub(crate) const INVALID_REPLICATION_FACTOR: i16 = 38;
+}
+
+const MAX_PARTITIONS: i32 = 1024;
+
+/// Creates `topic` with `partitions` (`-1` for one); returns a Kafka error code. With
+/// `validate_only` nothing is written.
+pub(crate) fn create_topic(
+    keyspace: &dyn Keyspace,
+    topic: &str,
+    partitions: i32,
+    validate_only: bool,
+) -> Result<i16, String> {
+    if !valid_topic(topic) {
+        return Ok(error::INVALID_TOPIC);
+    }
+    let partitions = if partitions == -1 { 1 } else { partitions };
+    if !(1..=MAX_PARTITIONS).contains(&partitions) {
+        return Ok(error::INVALID_PARTITIONS);
+    }
+    write(keyspace, |keys| {
+        if keys.get(&topic_key(topic))?.is_some() {
+            return Ok(error::TOPIC_ALREADY_EXISTS);
+        }
+        if !validate_only {
+            keys.put(&topic_key(topic), &partitions.to_be_bytes())?;
+        }
+        Ok(error::NONE)
+    })
+}
+
+/// Deletes `topic` and every record of its partitions; returns a Kafka error code.
+pub(crate) fn delete_topic(keyspace: &dyn Keyspace, topic: &str) -> Result<i16, String> {
+    write(keyspace, |keys| {
+        let Some(value) = keys.get(&topic_key(topic))? else {
+            return Ok(error::UNKNOWN_TOPIC_OR_PARTITION);
+        };
+        let partitions = value
+            .get(..4)
+            .and_then(|raw| raw.try_into().ok())
+            .map_or(1, i32::from_be_bytes);
+        for partition in 0..partitions.max(1) {
+            for (key, _) in keys.scan(&partition_prefix(topic, partition))? {
+                keys.delete(&key)?;
+            }
+        }
+        keys.delete(&topic_key(topic))?;
+        Ok(error::NONE)
+    })
 }
 
 fn topic_key(topic: &str) -> Vec<u8> {

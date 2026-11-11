@@ -94,7 +94,7 @@ fn api_versions_lists_what_is_supported_and_refuses_newer_versions() {
     let keyspace = MemoryKeyspace::default();
     let body = response(&keyspace, &request(18, 0, |_| {}));
     assert_eq!(i16::from_be_bytes([body[0], body[1]]), 0);
-    assert_eq!(i32::from_be_bytes(body[2..6].try_into().unwrap()), 5);
+    assert_eq!(i32::from_be_bytes(body[2..6].try_into().unwrap()), 7);
     let newer = response(&keyspace, &request(18, 3, |_| {}));
     assert_eq!(i16::from_be_bytes([newer[0], newer[1]]), 35);
     assert!(answer(&keyspace, &config(), &request(1, 99, |_| {})).is_none());

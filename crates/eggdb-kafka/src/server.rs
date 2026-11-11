@@ -20,15 +20,102 @@ const FETCH: i16 = 1;
 const LIST_OFFSETS: i16 = 2;
 const METADATA: i16 = 3;
 const API_VERSIONS: i16 = 18;
+const CREATE_TOPICS: i16 = 19;
+const DELETE_TOPICS: i16 = 20;
 const UNSUPPORTED_VERSION: i16 = 35;
 
-const SUPPORTED: [(i16, i16, i16); 5] = [
+const SUPPORTED: [(i16, i16, i16); 7] = [
     (PRODUCE, 3, 3),
     (FETCH, 4, 4),
     (LIST_OFFSETS, 1, 1),
     (METADATA, 0, 1),
     (API_VERSIONS, 0, 2),
+    (CREATE_TOPICS, 0, 1),
+    (DELETE_TOPICS, 0, 1),
 ];
+
+struct CreatedTopic {
+    name: String,
+    partitions: i32,
+    replication: i16,
+    assigned: bool,
+}
+
+fn create_topics(
+    keyspace: &dyn Keyspace,
+    version: i16,
+    request: &mut Reader<'_>,
+    body: &mut Writer,
+) -> Parsed<()> {
+    let wanted = request.array(|reader| {
+        let name = reader.string()?.unwrap_or_default();
+        let partitions = reader.i32()?;
+        let replication = reader.i16()?;
+        let assignments = reader.array(|assignment| {
+            let _partition = assignment.i32()?;
+            assignment.array(|broker| broker.i32())
+        })?;
+        let _configs = reader.array(|config| {
+            let _name = config.string()?;
+            config.string()
+        })?;
+        Ok(CreatedTopic {
+            name,
+            partitions,
+            replication,
+            assigned: !assignments.is_empty(),
+        })
+    })?;
+    let _timeout = request.i32()?;
+    let validate_only = version >= 1 && request.i8()? != 0;
+    body.count(wanted.len());
+    for topic in wanted {
+        let (code, message) = if topic.assigned {
+            (
+                log::error::INVALID_PARTITIONS,
+                "replica assignments are not supported: EggDB is one broker",
+            )
+        } else if topic.replication != -1 && topic.replication != 1 {
+            (
+                log::error::INVALID_REPLICATION_FACTOR,
+                "the replication factor must be 1: EggDB is one broker",
+            )
+        } else {
+            let code = log::create_topic(keyspace, &topic.name, topic.partitions, validate_only)?;
+            let message = match code {
+                log::error::TOPIC_ALREADY_EXISTS => "the topic already exists",
+                log::error::INVALID_TOPIC => "the topic name is not valid",
+                log::error::INVALID_PARTITIONS => "the partition count must be 1 to 1024",
+                _ => "",
+            };
+            (code, message)
+        };
+        body.string(Some(&topic.name)).i16(code);
+        if version >= 1 {
+            body.string((code != log::error::NONE).then_some(message));
+        }
+    }
+    Ok(())
+}
+
+fn delete_topics(
+    keyspace: &dyn Keyspace,
+    version: i16,
+    request: &mut Reader<'_>,
+    body: &mut Writer,
+) -> Parsed<()> {
+    let names = request.array(|reader| Ok(reader.string()?.unwrap_or_default()))?;
+    let _timeout = request.i32()?;
+    if version >= 1 {
+        body.i32(0);
+    }
+    body.count(names.len());
+    for name in names {
+        let code = log::delete_topic(keyspace, &name)?;
+        body.string(Some(&name)).i16(code);
+    }
+    Ok(())
+}
 
 /// How the Kafka-compatible server runs.
 #[derive(Debug, Clone)]
@@ -302,6 +389,12 @@ pub(crate) fn answer(
             METADATA => metadata(keyspace, config, version, &mut request, &mut body).map(|()| true),
             PRODUCE => produce(keyspace, &mut request, &mut body),
             FETCH => fetch(keyspace, &mut request, &mut body).map(|()| true),
+            CREATE_TOPICS => {
+                create_topics(keyspace, version, &mut request, &mut body).map(|()| true)
+            }
+            DELETE_TOPICS => {
+                delete_topics(keyspace, version, &mut request, &mut body).map(|()| true)
+            }
             _ => list_offsets(keyspace, &mut request, &mut body).map(|()| true),
         };
         outcome.ok()?
