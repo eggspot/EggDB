@@ -826,6 +826,7 @@ pub(crate) fn store_updates_resolving(
     } in planned
     {
         let (old_key, old_row) = &target_rows[target_index];
+        crate::on_update_timestamps::stamp(table, old_row, &mut new_row, updated_columns)?;
         if let Some(firing) = firing.as_mut()
             && firing.has_before()
             && firing.before_row(writer, tables, Some(old_row.as_slice()), Some(&mut new_row))?

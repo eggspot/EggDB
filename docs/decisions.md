@@ -440,3 +440,4 @@ its full title with its status.
 - [D413](decisions/D413.md) Code-only batch 60 (M9): `eggdb restore` of `mongodump --gzip` and `--archive` output
 - [D414](decisions/D414.md) Code-only batch 61 (M10): MySQL's `WEEK()`, `YEARWEEK()`, `WEEKOFYEAR()` and `DATE_FORMAT()`
 - [D415](decisions/D415.md) Code-only batch 62 (M10): the rest of MySQL's date and time functions and `STR_TO_DATE`
+- [D416](decisions/D416.md) Code-only batch 63 (M10): MySQL's `ON UPDATE CURRENT_TIMESTAMP` (table definition format 16)

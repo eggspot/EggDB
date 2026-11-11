@@ -477,7 +477,15 @@ fn generation_extra(
         .iter()
         .find(|entry| entry.schema == schema && entry.name == table)?
         .table()?;
-    let entry = definition.generation_of(definition.column_index(column)?)?;
+    let index = definition.column_index(column)?;
+    if definition.stamps_on_update(index) {
+        return Some(if definition.columns[index].default.is_some() {
+            "DEFAULT_GENERATED on update CURRENT_TIMESTAMP"
+        } else {
+            "on update CURRENT_TIMESTAMP"
+        });
+    }
+    let entry = definition.generation_of(index)?;
     Some(if entry.stored {
         "STORED GENERATED"
     } else {

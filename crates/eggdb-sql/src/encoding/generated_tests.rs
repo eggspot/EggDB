@@ -62,10 +62,10 @@ fn a_table_without_generated_columns_keeps_its_older_version() {
 #[test]
 fn a_record_of_the_next_version_is_refused_by_its_version() {
     let mut encoded = generated_table().encode();
-    encoded[0] = GENERATED_COLUMNS_FORMAT_VERSION + 1;
+    encoded[0] = 17;
     let error = TableDefinition::decode("t", &encoded).unwrap_err();
     assert_eq!(error.state().code(), "0A000");
-    assert!(error.message().contains("format version 15"), "{error}");
+    assert!(error.message().contains("format version 17"), "{error}");
 }
 
 #[test]

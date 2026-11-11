@@ -51,7 +51,8 @@ const BASE_TYPES_FORMAT_VERSION: u8 = 11;
 const AFFINITY_FORMAT_VERSION: u8 = 13;
 const GENERATED_COLUMNS_FORMAT_VERSION: u8 = 14;
 const IDENTITY_ANYWHERE_FORMAT_VERSION: u8 = 15;
-const NEWEST_TABLE_FORMAT_VERSION: u8 = IDENTITY_ANYWHERE_FORMAT_VERSION;
+const ON_UPDATE_FORMAT_VERSION: u8 = 16;
+const NEWEST_TABLE_FORMAT_VERSION: u8 = ON_UPDATE_FORMAT_VERSION;
 pub(crate) const BASE_TYPES_VIEW_FORMAT_VERSION: u8 = 12;
 const _: () = assert!(
     NEWEST_TABLE_FORMAT_VERSION != VIEW_FORMAT_VERSION
@@ -640,6 +641,26 @@ impl ConstraintStatus {
     }
 }
 
+fn decode_on_update(reader: &mut Reader<'_>, columns: &[Column]) -> SqlResult<Vec<usize>> {
+    let count = reader.count()?;
+    if count == 0 || count > columns.len() {
+        return Err(reader.damaged());
+    }
+    let mut stamped: Vec<usize> = Vec::with_capacity(count);
+    for _ in 0..count {
+        let column = usize::try_from(reader.varint()?).map_err(|_| reader.damaged())?;
+        let follows = stamped.last().is_none_or(|&last| column > last);
+        let stampable = columns.get(column).is_some_and(|found| {
+            matches!(found.sql_type, SqlType::Timestamp(_) | SqlType::TimestampTz(_))
+        });
+        if !follows || !stampable {
+            return Err(reader.damaged());
+        }
+        stamped.push(column);
+    }
+    Ok(stamped)
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct TableDefinition {
     pub(crate) id: u32,
@@ -658,6 +679,7 @@ pub(crate) struct TableDefinition {
     pub(crate) domains: Vec<ColumnDomain>,
     pub(crate) constraint_statuses: Vec<ConstraintStatus>,
     pub(crate) generated: Vec<GeneratedColumn>,
+    pub(crate) on_update_current_timestamp: Vec<usize>,
 }
 
 fn dialect_code(dialect: crate::Dialect) -> u8 {
@@ -1041,7 +1063,10 @@ impl TableDefinition {
     }
 
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let version = if self.identity_after_first_key_column() {
+        let stamped = self.stamped_columns();
+        let version = if !stamped.is_empty() {
+            ON_UPDATE_FORMAT_VERSION
+        } else if self.identity_after_first_key_column() {
             IDENTITY_ANYWHERE_FORMAT_VERSION
         } else if !self.generated.is_empty() {
             GENERATED_COLUMNS_FORMAT_VERSION
@@ -1133,6 +1158,12 @@ impl TableDefinition {
         if version >= GENERATED_COLUMNS_FORMAT_VERSION {
             generated::encode_generated(&self.generated, &mut out);
         }
+        if version >= ON_UPDATE_FORMAT_VERSION {
+            put_varint(&mut out, stamped.len() as u64);
+            for &column in &stamped {
+                put_varint(&mut out, column as u64);
+            }
+        }
         out
     }
 
@@ -1182,7 +1213,8 @@ impl TableDefinition {
             | BASE_TYPES_FORMAT_VERSION
             | AFFINITY_FORMAT_VERSION
             | GENERATED_COLUMNS_FORMAT_VERSION
-            | IDENTITY_ANYWHERE_FORMAT_VERSION => true,
+            | IDENTITY_ANYWHERE_FORMAT_VERSION
+            | ON_UPDATE_FORMAT_VERSION => true,
             _ => !qualified,
         };
         if !name_fits_version || !crate::schemas::is_well_formed(name) {
@@ -1293,7 +1325,8 @@ impl TableDefinition {
             | BASE_TYPES_FORMAT_VERSION
             | AFFINITY_FORMAT_VERSION
             | GENERATED_COLUMNS_FORMAT_VERSION
-            | IDENTITY_ANYWHERE_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), true)?,
+            | IDENTITY_ANYWHERE_FORMAT_VERSION
+            | ON_UPDATE_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), true)?,
             _ => Vec::new(),
         };
         let constraints = if version >= CONSTRAINTS_FORMAT_VERSION {
@@ -1318,6 +1351,11 @@ impl TableDefinition {
             Vec::new()
         } else if generated_allowed {
             generated::decode_generated(&mut reader, &columns)?
+        } else {
+            Vec::new()
+        };
+        let on_update_current_timestamp = if version >= ON_UPDATE_FORMAT_VERSION {
+            decode_on_update(&mut reader, &columns)?
         } else {
             Vec::new()
         };
@@ -1388,6 +1426,7 @@ impl TableDefinition {
             domains,
             constraint_statuses,
             generated,
+            on_update_current_timestamp,
         };
         if version == CONSTRAINTS_FORMAT_VERSION && !table.has_constraints() {
             return Err(reader.damaged());

@@ -679,6 +679,7 @@ fn add_column(
     let added = table.columns.len() - 1;
     table.set_default_dialect(added, definition.default_dialect);
     table.set_domain(added, domain);
+    table.set_on_update_current_timestamp(added, definition.on_update_current_timestamp);
     let generator = match &definition.generated {
         Some(spec) if dialect == Dialect::Sqlite && spec.stored => {
             return Err(SqlError::new(
@@ -1117,6 +1118,7 @@ fn drop_column_here(
     new.default_dialects = table.default_dialects_without_column(index);
     new.generated = crate::encoding::generated_without_column(&table.generated, index);
     new.domains = table.domains_without_column(index);
+    new.on_update_current_timestamp = table.on_update_without_column(index);
     if new.auto_increment_column().is_none() {
         new.identity_seed = None;
     }
@@ -1239,6 +1241,10 @@ fn move_column(
         entry.column = at(entry.column);
     }
     new.generated.sort_by_key(|entry| entry.column);
+    for column in &mut new.on_update_current_timestamp {
+        *column = at(*column);
+    }
+    new.on_update_current_timestamp.sort_unstable();
     if crate::constraints::current_dialect() == Dialect::MySql {
         crate::generated_columns::check_mysql_order(&new)?;
     }
@@ -2062,6 +2068,7 @@ fn redefine(
         table.set_default_dialect(index, column.default_dialect);
     }
     table.set_identity(index, None);
+    table.set_on_update_current_timestamp(index, column.on_update_current_timestamp);
     save(writer, &table)?;
     if column.unique.is_some() {
         add_constraint(

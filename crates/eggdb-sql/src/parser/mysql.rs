@@ -716,7 +716,8 @@ impl<'t> Parser<'t> {
             self.take_word("key");
             column.unique = Some(None);
         } else if self.is_word("on") && self.is_word_at(1, "update") {
-            return Err(self.not_supported("ON UPDATE"));
+            self.at += 2;
+            self.mysql_on_update(column)?;
         } else if self.is_word("default") {
             self.at += 1;
             let start = self.position();
@@ -729,6 +730,33 @@ impl<'t> Parser<'t> {
             return Ok(false);
         }
         Ok(true)
+    }
+
+    fn mysql_on_update(&mut self, column: &mut ColumnDefinition) -> SqlResult<()> {
+        let position = self.position();
+        let clock = matches!(
+            self.peek_kind(),
+            TokenKind::Word(word)
+                if matches!(word.as_ref(), "current_timestamp" | "now" | "localtime" | "localtimestamp")
+        );
+        if !clock {
+            return Err(self.not_supported("ON UPDATE other than CURRENT_TIMESTAMP"));
+        }
+        let called = self.is_word("now");
+        self.at += 1;
+        if called || self.peek_kind() == &TokenKind::LeftParen {
+            self.empty_or_precision()?;
+        }
+        if !matches!(column.sql_type, SqlType::Timestamp(_) | SqlType::TimestampTz(_)) {
+            return Err(SqlError::new(
+                SqlState::INVALID_TABLE_DEFINITION,
+                format!("Invalid ON UPDATE clause for '{}' column", column.name.text),
+            )
+            .with_vendor_code(1294)
+            .at(position));
+        }
+        column.on_update_current_timestamp = true;
+        Ok(())
     }
 
     pub(super) fn mysql_index_entry(&mut self) -> SqlResult<Option<IndexSpec>> {

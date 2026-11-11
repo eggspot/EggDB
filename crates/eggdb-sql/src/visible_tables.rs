@@ -1140,6 +1140,7 @@ fn without_column(table: &TableDefinition, removed: usize) -> TableDefinition {
     shown.default_dialects = table.default_dialects_without_column(removed);
     shown.generated = crate::encoding::generated_without_column(&table.generated, removed);
     shown.domains = table.domains_without_column(removed);
+    shown.on_update_current_timestamp = table.on_update_without_column(removed);
     if shown.auto_increment_column().is_none() {
         shown.identity_seed = None;
     }

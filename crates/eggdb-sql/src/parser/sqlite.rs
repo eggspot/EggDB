@@ -525,6 +525,7 @@ impl<'t> Parser<'t> {
             serial: false,
             identity_seed: None,
             generated_always: false,
+            on_update_current_timestamp: false,
             unique: None,
             constraints: Vec::new(),
             comment: None,

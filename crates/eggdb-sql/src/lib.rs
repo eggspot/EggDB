@@ -89,6 +89,7 @@ mod mysql_variables;
 mod name_resolution;
 mod notifications;
 mod numeric;
+mod on_update_timestamps;
 mod oracle_collections;
 mod oracle_conversion;
 mod oracle_date_functions;

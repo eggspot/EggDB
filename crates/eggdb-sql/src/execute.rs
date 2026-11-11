@@ -398,6 +398,9 @@ pub(crate) fn create_table(
         ..TableDefinition::default()
     };
     for (index, definition) in create.columns.iter().enumerate() {
+        if definition.on_update_current_timestamp {
+            table.set_on_update_current_timestamp(index, true);
+        }
         if definition.generated_always && definition.auto_increment {
             table.set_identity(index, Some(IdentityGeneration::Always));
         }
@@ -2242,6 +2245,8 @@ impl<'a> StoredRows<'a> {
                 assign(value, column).map_err(|error| error.at_if_unplaced(expr.position))?;
         }
         combined.truncate(table.columns.len());
+        let assigned: Vec<usize> = updates.iter().map(|(index, _)| *index).collect();
+        crate::on_update_timestamps::stamp(table, &existing, &mut combined, &assigned)?;
         if let Some((firing, tables)) = firing.as_mut()
             && firing.has_before()
             && firing.before_row(
@@ -4653,6 +4658,7 @@ fn update_rows(
             for ((_, value), &index) in update.assignments.iter().zip(&targets) {
                 new_row[index] = assigned_value(&evaluator, value, &table, index, rule)?;
             }
+            crate::on_update_timestamps::stamp(&table, &old_row, &mut new_row, &targets)?;
             checks.generate(&table, &mut new_row)?;
             match settle_row_constraints(&table, &checks, &mut new_row, resolution, may_move) {
                 Ok(true) => {}
