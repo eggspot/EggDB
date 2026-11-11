@@ -47,6 +47,7 @@ fn collect(query: &Query, terms: &mut Vec<(String, FieldTerms)>) {
                 add(terms, field, words, None);
             }
         }
+        Query::Analyzed { query, .. } => collect(query, terms),
         Query::MatchPhrase { field, terms: words } => add(terms, field, words, None),
         Query::Term { field, value: Json::String(text) } => add(terms, field, &analyze(text), None),
         Query::Prefix { field, prefix } => add(terms, field, &[], Some(prefix)),

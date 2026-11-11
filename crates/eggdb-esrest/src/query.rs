@@ -63,6 +63,10 @@ pub(crate) enum Query {
         field: String,
         value: Json,
     },
+    Analyzed {
+        query: Box<Query>,
+        text: String,
+    },
     SparseVector {
         field: String,
         weights: Vec<(String, f64)>,
@@ -171,10 +175,13 @@ pub(crate) fn parse(node: &Node, depth: usize) -> Result<Query, String> {
                     terms: analyze(&query),
                 }
             } else {
-                Query::Match {
-                    fields: vec![field.to_owned()],
-                    terms: analyze(&query),
-                    all,
+                Query::Analyzed {
+                    query: Box::new(Query::Match {
+                        fields: vec![field.to_owned()],
+                        terms: analyze(&query),
+                        all,
+                    }),
+                    text: query,
                 }
             }
         }
@@ -441,6 +448,7 @@ pub(crate) struct Stats {
 fn text_fields(query: &Query, out: &mut HashSet<String>) {
     match query {
         Query::Match { fields, .. } => out.extend(fields.iter().cloned()),
+        Query::Analyzed { query, .. } => text_fields(query, out),
         Query::MatchPhrase { field, .. } => {
             out.insert(field.clone());
         }
@@ -617,6 +625,7 @@ pub(crate) fn score(query: &Query, id: &str, source: &Node, stats: &Stats) -> Op
                     })
             })
             .then_some(1.0),
+        Query::Analyzed { query, .. } => score(query, id, source, stats),
         Query::FlattenedTerm { field, value } => {
             let wanted = match value {
                 Json::String(text) | Json::Number(text) => text.clone(),

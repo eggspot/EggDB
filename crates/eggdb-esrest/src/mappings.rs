@@ -263,6 +263,21 @@ pub(crate) fn apply(query: Query, types: &FieldTypes, now_millis: i64) -> Query 
                 minimum_should_match,
             }
         }
+        Query::Analyzed { query, text } => {
+            let keyword = match query.as_ref() {
+                Query::Match { fields, .. } if fields.len() == 1 => types
+                    .resolve(&fields[0])
+                    .filter(|mapped| mapped.kind == FieldType::Keyword),
+                _ => None,
+            };
+            match keyword {
+                Some(mapped) => Query::Term {
+                    field: mapped.source,
+                    value: Json::String(text),
+                },
+                None => apply(*query, types, now_millis),
+            }
+        }
         Query::Nested { path, query, mode } => Query::Nested {
             path,
             query: Box::new(apply(*query, types, now_millis)),
@@ -650,6 +665,25 @@ mod tests {
         };
         assert_eq!(ip_number("10.1.0.0"), Some(low));
         assert_eq!(ip_number("10.1.255.255"), Some(high));
+    }
+
+    #[test]
+    fn match_on_a_keyword_field_compares_the_whole_text() {
+        let types = types(r#"{"properties": {"status": {"type": "keyword"}, "body": {"type": "text"}}}"#);
+        let parsed = |text: &str| {
+            crate::query::parse(&parse_document(text).expect("query parses"), 0).expect("query reads")
+        };
+        assert_eq!(
+            apply(parsed(r#"{"match": {"status": "In Progress"}}"#), &types, 0),
+            Query::Term {
+                field: "status".to_owned(),
+                value: Json::String("In Progress".to_owned())
+            }
+        );
+        assert!(matches!(
+            apply(parsed(r#"{"match": {"body": "In Progress"}}"#), &types, 0),
+            Query::Match { .. }
+        ));
     }
 
     #[test]
