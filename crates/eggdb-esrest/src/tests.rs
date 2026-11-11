@@ -1490,3 +1490,38 @@ fn dynamic_keyword_subfields_and_mapped_types_shape_term_and_range() {
         "{token}"
     );
 }
+
+#[test]
+fn geo_distance_and_bounding_box_queries_filter_points() {
+    let keyspace = MemoryKeyspace::default();
+    let api = api(&keyspace);
+    for (id, document) in [
+        ("paris", "{\"name\":\"Paris\",\"location\":{\"lat\":48.8566,\"lon\":2.3522}}"),
+        ("versailles", "{\"name\":\"Versailles\",\"location\":\"48.8049,2.1204\"}"),
+        ("berlin", "{\"name\":\"Berlin\",\"location\":[13.405,52.52]}"),
+    ] {
+        let indexed = api.answer(&request("PUT", &format!("/places/_doc/{id}"), document));
+        assert!(indexed.status < 300, "{}", body(&indexed));
+    }
+    let search = |query: &str| body(&api.answer(&request("POST", "/places/_search", query)));
+    let near = search(
+        "{\"query\":{\"geo_distance\":{\"distance\":\"25km\",\"location\":{\"lat\":48.85,\"lon\":2.35}}}}",
+    );
+    assert!(
+        near.contains("\"_id\":\"paris\"") && near.contains("\"_id\":\"versailles\"") && !near.contains("\"_id\":\"berlin\""),
+        "{near}"
+    );
+    let boxed = search(
+        "{\"query\":{\"geo_bounding_box\":{\"location\":{\"top_left\":{\"lat\":53,\"lon\":13},\"bottom_right\":{\"lat\":52,\"lon\":14}}}}}",
+    );
+    assert!(
+        boxed.contains("\"_id\":\"berlin\"") && !boxed.contains("\"_id\":\"paris\""),
+        "{boxed}"
+    );
+    let refused = api.answer(&request(
+        "POST",
+        "/places/_search",
+        "{\"query\":{\"geo_distance\":{\"distance\":\"far\",\"location\":\"48,2\"}}}",
+    ));
+    assert_eq!(refused.status, 400);
+}

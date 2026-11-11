@@ -966,7 +966,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Elasticsearch mappings applied to field types: `text` and `keyword`, dates, `ip`, geo, `nested`,
   `flattened`, `dense_vector`, `sparse_vector` and `completion` (D19, D196). `text`, `keyword`
   (with multi-fields and dynamic `.keyword`), dates and `ip` in `_search`: **code written, unbuilt**
-  (code-only mode, 2026-11-11, D559).
+  (code-only mode, 2026-11-11, D559); geo point queries: **code written, unbuilt** (code-only
+  mode, 2026-11-11, D560).
 - `wait_for_completion=false` tasks for the by-query APIs (D331). **Code written, unbuilt** (code-only
   mode, 2026-11-11, D473): the task finishes in the request and is kept for `_tasks`.
 - `_rethrottle` and parallel `slices` for the by-query APIs (D331). **Code written, unbuilt** (code-only

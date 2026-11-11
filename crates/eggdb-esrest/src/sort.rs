@@ -147,7 +147,7 @@ fn number_of(node: &Node) -> Option<f64> {
     }
 }
 
-fn point_of(node: &Node) -> Option<(f64, f64)> {
+pub(crate) fn point_of(node: &Node) -> Option<(f64, f64)> {
     match &node.value {
         Json::Object(members) => {
             let find = |name: &str| members.iter().find(|(key, _)| key == name).and_then(|(_, value)| number_of(value));
@@ -165,7 +165,7 @@ fn point_of(node: &Node) -> Option<(f64, f64)> {
     .filter(|(lat, lon)| (-90.0..=90.0).contains(lat) && (-180.0..=180.0).contains(lon))
 }
 
-fn points_of(node: &Node) -> Vec<(f64, f64)> {
+pub(crate) fn points_of(node: &Node) -> Vec<(f64, f64)> {
     if let Some(point) = point_of(node) {
         return vec![point];
     }
@@ -175,7 +175,7 @@ fn points_of(node: &Node) -> Vec<(f64, f64)> {
     }
 }
 
-fn meters_per(unit: &str) -> Result<f64, String> {
+pub(crate) fn meters_per(unit: &str) -> Result<f64, String> {
     Ok(match unit {
         "m" | "meters" => 1.0,
         "km" | "kilometers" => 1000.0,
@@ -190,7 +190,7 @@ fn meters_per(unit: &str) -> Result<f64, String> {
     })
 }
 
-fn distance_meters(from: (f64, f64), to: (f64, f64), plane: bool) -> f64 {
+pub(crate) fn distance_meters(from: (f64, f64), to: (f64, f64), plane: bool) -> f64 {
     let (lat1, lon1) = (from.0.to_radians(), from.1.to_radians());
     let (lat2, lon2) = (to.0.to_radians(), to.1.to_radians());
     if plane {

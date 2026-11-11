@@ -584,3 +584,4 @@ its full title with its status.
 - [D557](decisions/D557.md) Code-only batch 205 (M6a): zero-column tables in the PostgreSQL dialect
 - [D558](decisions/D558.md) Code-only batch 206 (M6a): a protocol Describe of a DECLAREd cursor
 - [D559](decisions/D559.md) Code-only batch 207 (M8): Elasticsearch mappings shape term and range in _search
+- [D560](decisions/D560.md) Code-only batch 208 (M8): geo_distance and geo_bounding_box queries

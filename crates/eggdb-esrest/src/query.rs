@@ -49,6 +49,19 @@ pub(crate) enum Query {
         low: u128,
         high: u128,
     },
+    GeoDistance {
+        field: String,
+        center: (f64, f64),
+        meters: f64,
+        plane: bool,
+    },
+    GeoBox {
+        field: String,
+        top: f64,
+        left: f64,
+        bottom: f64,
+        right: f64,
+    },
     Bool {
         must: Vec<Query>,
         filter: Vec<Query>,
@@ -243,9 +256,109 @@ pub(crate) fn parse(node: &Node, depth: usize) -> Result<Query, String> {
                 minimum_should_match: minimum,
             }
         }
+        "geo_distance" => geo_distance(body)?,
+        "geo_bounding_box" => geo_bounding_box(body)?,
         "query_string" => crate::query_string::parse(body, false)?,
         "simple_query_string" => crate::query_string::parse(body, true)?,
         other => return Err(format!("unknown query [{other}]")),
+    })
+}
+
+const GEO_OPTIONS: [&str; 5] = [
+    "distance",
+    "distance_type",
+    "validation_method",
+    "ignore_unmapped",
+    "_name",
+];
+
+fn geo_field<'n>(body: &'n Node, kind: &str) -> Result<(&'n str, &'n Node), String> {
+    let Json::Object(members) = &body.value else {
+        return Err(format!("[{kind}] needs an object"));
+    };
+    let mut fields = members
+        .iter()
+        .filter(|(name, _)| !GEO_OPTIONS.contains(&name.as_str()) && name != "type");
+    match (fields.next(), fields.next()) {
+        (Some((name, spec)), None) => Ok((name.as_str(), spec)),
+        _ => Err(format!("[{kind}] needs exactly one field")),
+    }
+}
+
+fn distance_of(node: &Node) -> Result<f64, String> {
+    let text = match &node.value {
+        Json::Number(text) | Json::String(text) => text.trim().to_owned(),
+        _ => return Err("[geo_distance] distance must be a number or a string".to_owned()),
+    };
+    let split = text
+        .find(|character: char| !(character.is_ascii_digit() || character == '.' || character == '-'))
+        .unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let number: f64 = number
+        .parse()
+        .map_err(|_| format!("failed to parse distance [{text}]"))?;
+    let unit = unit.trim();
+    let meters = if unit.is_empty() {
+        1.0
+    } else {
+        crate::sort::meters_per(unit)?
+    };
+    if !number.is_finite() || number < 0.0 {
+        return Err(format!("failed to parse distance [{text}]"));
+    }
+    Ok(number * meters)
+}
+
+fn geo_distance(body: &Node) -> Result<Query, String> {
+    let (field, point) = geo_field(body, "geo_distance")?;
+    let center = crate::sort::point_of(point)
+        .ok_or_else(|| "[geo_distance] the point is not a valid geo point".to_owned())?;
+    let meters = distance_of(
+        member(body, "distance").ok_or_else(|| "[geo_distance] needs a distance".to_owned())?,
+    )?;
+    let plane = member(body, "distance_type")
+        .and_then(text_of)
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("plane"));
+    Ok(Query::GeoDistance {
+        field: field.to_owned(),
+        center,
+        meters,
+        plane,
+    })
+}
+
+fn geo_bounding_box(body: &Node) -> Result<Query, String> {
+    let (field, spec) = geo_field(body, "geo_bounding_box")?;
+    let corner = |name: &str| member(spec, name).and_then(crate::sort::point_of);
+    let edge = |name: &str| {
+        member(spec, name).and_then(|node| match &node.value {
+            Json::Number(text) | Json::String(text) => text.trim().parse::<f64>().ok(),
+            _ => None,
+        })
+    };
+    let (top, left, bottom, right) = match (corner("top_left"), corner("bottom_right")) {
+        (Some((top, left)), Some((bottom, right))) => (top, left, bottom, right),
+        _ => match (corner("top_right"), corner("bottom_left")) {
+            (Some((top, right)), Some((bottom, left))) => (top, left, bottom, right),
+            _ => (
+                edge("top").ok_or_else(|| "[geo_bounding_box] needs its corners".to_owned())?,
+                edge("left").ok_or_else(|| "[geo_bounding_box] needs its corners".to_owned())?,
+                edge("bottom").ok_or_else(|| "[geo_bounding_box] needs its corners".to_owned())?,
+                edge("right").ok_or_else(|| "[geo_bounding_box] needs its corners".to_owned())?,
+            ),
+        },
+    };
+    if top < bottom {
+        return Err(format!(
+            "top is below bottom corner: {top} vs. {bottom}"
+        ));
+    }
+    Ok(Query::GeoBox {
+        field: field.to_owned(),
+        top,
+        left,
+        bottom,
+        right,
     })
 }
 
@@ -460,6 +573,32 @@ pub(crate) fn score(query: &Query, id: &str, source: &Node, stats: &Stats) -> Op
                     })
             })
             .then_some(1.0),
+        Query::GeoDistance {
+            field,
+            center,
+            meters,
+            plane,
+        } => geo_points_at(source, field)
+            .into_iter()
+            .any(|point| crate::sort::distance_meters(*center, point, *plane) <= *meters)
+            .then_some(1.0),
+        Query::GeoBox {
+            field,
+            top,
+            left,
+            bottom,
+            right,
+        } => geo_points_at(source, field)
+            .into_iter()
+            .any(|(lat, lon)| {
+                let within_longitude = if left <= right {
+                    (*left..=*right).contains(&lon)
+                } else {
+                    lon >= *left || lon <= *right
+                };
+                (*bottom..=*top).contains(&lat) && within_longitude
+            })
+            .then_some(1.0),
         Query::IpRange { field, low, high } => values_at(source, field)
             .into_iter()
             .filter_map(text_of)
@@ -502,4 +641,15 @@ pub(crate) fn score(query: &Query, id: &str, source: &Node, stats: &Stats) -> Op
             Some(total)
         }
     }
+}
+
+fn geo_points_at(source: &Node, field: &str) -> Vec<(f64, f64)> {
+    let mut current = vec![source];
+    for part in field.split('.') {
+        current = current
+            .into_iter()
+            .filter_map(|node| member(node, part))
+            .collect();
+    }
+    current.into_iter().flat_map(crate::sort::points_of).collect()
 }
