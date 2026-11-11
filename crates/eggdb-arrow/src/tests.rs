@@ -165,3 +165,110 @@ fn a_written_file_has_its_magic_footer_and_reads_back() {
     assert!(footer_length > 0 && footer_length < file.len());
     assert_eq!(read(&file).expect("the file reads"), columns);
 }
+
+const HEADER_DICTIONARY_BATCH: u8 = 2;
+
+fn batch_table(
+    builder: &mut crate::flatbuffer::Builder,
+    rows: usize,
+    nodes: &[[i64; 2]],
+    body: &crate::Body,
+) -> crate::flatbuffer::Offset {
+    use crate::flatbuffer::Field;
+    let buffers = builder.structs(&body.buffers);
+    let node_vector = builder.structs(nodes);
+    builder.table(&[
+        Some(Field::I64(rows as i64)),
+        Some(Field::Offset(node_vector)),
+        Some(Field::Offset(buffers)),
+    ])
+}
+
+fn dictionary_message(id: i64, values: &[&str], delta: bool) -> (Vec<u8>, Vec<u8>) {
+    use crate::flatbuffer::{Builder, Field};
+    let column = Column {
+        name: "values".to_owned(),
+        column_type: ColumnType::Text,
+        nullable: false,
+        cells: values.iter().map(|value| Cell::Bytes(value.as_bytes().to_vec())).collect(),
+    };
+    let mut body = crate::Body {
+        bytes: Vec::new(),
+        buffers: Vec::new(),
+    };
+    let nulls = crate::column_buffers(&column, &mut body).expect("buffers");
+    let mut builder = Builder::new();
+    let data = batch_table(&mut builder, values.len(), &[[values.len() as i64, nulls]], &body);
+    let header = builder.table(&[
+        Some(Field::I64(id)),
+        Some(Field::Offset(data)),
+        Some(Field::Bool(delta)),
+    ]);
+    (
+        crate::message(builder, HEADER_DICTIONARY_BATCH, header, body.bytes.len() as i64),
+        body.bytes,
+    )
+}
+
+fn dictionary_stream(with_dictionary: bool) -> Vec<u8> {
+    use crate::flatbuffer::{Builder, Field};
+    let mut builder = Builder::new();
+    let name = builder.string("color");
+    let type_table = builder.table(&[]);
+    let index_type = builder.table(&[Some(Field::I32(8)), Some(Field::Bool(true))]);
+    let encoding = builder.table(&[
+        Some(Field::I64(7)),
+        Some(Field::Offset(index_type)),
+        Some(Field::Bool(false)),
+    ]);
+    let children = builder.offsets(&[]);
+    let field = builder.table(&[
+        Some(Field::Offset(name)),
+        Some(Field::Bool(true)),
+        Some(Field::U8(5)),
+        Some(Field::Offset(type_table)),
+        Some(Field::Offset(encoding)),
+        Some(Field::Offset(children)),
+    ]);
+    let fields = builder.offsets(&[field]);
+    let schema = builder.table(&[Some(Field::I16(0)), Some(Field::Offset(fields))]);
+    let mut out = Vec::new();
+    crate::frame(&crate::message(builder, crate::HEADER_SCHEMA, schema, 0), &[], &mut out);
+    if with_dictionary {
+        let (metadata, body) = dictionary_message(7, &["red", "green", "blue"], false);
+        crate::frame(&metadata, &body, &mut out);
+        let (metadata, body) = dictionary_message(7, &["violet"], true);
+        crate::frame(&metadata, &body, &mut out);
+    }
+    let mut body = crate::Body {
+        bytes: Vec::new(),
+        buffers: Vec::new(),
+    };
+    body.push(&[0b0000_1011]);
+    body.push(&[2, 0, 0, 3]);
+    let mut builder = Builder::new();
+    let batch = batch_table(&mut builder, 4, &[[4, 1]], &body);
+    let metadata = crate::message(builder, crate::HEADER_RECORD_BATCH, batch, body.bytes.len() as i64);
+    crate::frame(&metadata, &body.bytes, &mut out);
+    out.extend_from_slice(&crate::CONTINUATION);
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    out
+}
+
+#[test]
+fn dictionary_encoded_columns_read_through_their_dictionaries_and_deltas() {
+    let columns = read(&dictionary_stream(true)).expect("the stream reads");
+    assert_eq!(columns.len(), 1);
+    assert_eq!(columns[0].name, "color");
+    assert_eq!(columns[0].column_type, ColumnType::Text);
+    assert_eq!(
+        columns[0].cells,
+        vec![
+            Cell::Bytes(b"blue".to_vec()),
+            Cell::Bytes(b"red".to_vec()),
+            Cell::Null,
+            Cell::Bytes(b"violet".to_vec()),
+        ]
+    );
+    assert!(read(&dictionary_stream(false)).is_err());
+}

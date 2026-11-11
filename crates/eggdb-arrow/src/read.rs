@@ -232,6 +232,45 @@ fn kind_of(field: &Table<'_>) -> Result<Kind, String> {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Dictionary {
+    id: i64,
+    index: Kind,
+}
+
+fn dictionary_of(field: &Table<'_>) -> Result<Option<Dictionary>, String> {
+    let Some(encoding) = field.table(4) else {
+        return Ok(None);
+    };
+    let index_type = encoding.table(1);
+    let width = index_type.map_or(32, |table| table.i32(0, 32));
+    if !matches!(width, 8 | 16 | 32 | 64) {
+        return Err(damaged("a dictionary's index type has an unknown width"));
+    }
+    Ok(Some(Dictionary {
+        id: encoding.i64(0, 0),
+        index: Kind::Int {
+            width,
+            signed: index_type.is_none_or(|table| table.u8(1, 0) != 0),
+        },
+    }))
+}
+
+fn looked_up(indices: Vec<Cell>, values: &[Cell], cells: &mut Vec<Cell>) -> Result<(), String> {
+    for index in indices {
+        cells.push(match index {
+            Cell::Null => Cell::Null,
+            Cell::Int(index) => usize::try_from(index)
+                .ok()
+                .and_then(|index| values.get(index))
+                .cloned()
+                .ok_or_else(|| damaged("a dictionary index lies outside its dictionary"))?,
+            _ => return Err(damaged("a dictionary index is not an integer")),
+        });
+    }
+    Ok(())
+}
+
 struct Message<'b> {
     header_type: u8,
     header: Table<'b>,
@@ -378,15 +417,18 @@ fn decode(kind: Kind, batch: &mut Batch<'_>, rows: usize, cells: &mut Vec<Cell>)
 }
 
 /// Reads an Arrow IPC stream, or an Arrow IPC file (`.arrow`, Feather 2), into columns: its
-/// schema's flat fields and every record batch's rows in order. Damaged or hostile input is an
-/// error, never a panic; dictionaries, compressed batches and nested types are refused by name.
+/// schema's flat fields and every record batch's rows in order, dictionary-encoded columns read
+/// through their dictionary batches (deltas appended). Damaged or hostile input is an error,
+/// never a panic; compressed batches and nested types are refused by name.
 pub fn read(bytes: &[u8]) -> Result<Vec<Column>, String> {
     let mut at = if bytes.starts_with(FILE_MAGIC) {
         FILE_MAGIC_PADDED
     } else {
         0
     };
-    let mut columns: Vec<(Kind, Column)> = Vec::new();
+    let mut columns: Vec<(Kind, Option<Dictionary>, Column)> = Vec::new();
+    let mut dictionaries: std::collections::HashMap<i64, Vec<Cell>> = std::collections::HashMap::new();
+    let mut dictionary_cells: u64 = 0;
     let mut have_schema = false;
     let mut total_rows: u64 = 0;
     while let Some(message) = next_message(bytes, &mut at)? {
@@ -396,12 +438,10 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Column>, String> {
                     if field.tables(5).is_some_and(|children| !children.is_empty()) {
                         return Err("nested Arrow types are not supported yet".to_owned());
                     }
-                    if field.table(4).is_some() {
-                        return Err("dictionary-encoded Arrow columns are not supported yet".to_owned());
-                    }
                     let kind = kind_of(&field)?;
                     columns.push((
                         kind,
+                        dictionary_of(&field)?,
                         Column {
                             name: field.string(0).unwrap_or_default().to_owned(),
                             column_type: kind.column_type(),
@@ -429,12 +469,54 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Column>, String> {
                     next_buffer: 0,
                 };
                 let rows = usize::try_from(rows).map_err(|_| damaged("a batch is too long"))?;
-                for (kind, column) in &mut columns {
-                    decode(*kind, &mut batch, rows, &mut column.cells)?;
+                for (kind, dictionary, column) in &mut columns {
+                    match dictionary {
+                        None => decode(*kind, &mut batch, rows, &mut column.cells)?,
+                        Some(dictionary) => {
+                            let mut indices = Vec::with_capacity(rows);
+                            decode(dictionary.index, &mut batch, rows, &mut indices)?;
+                            let values = dictionaries
+                                .get(&dictionary.id)
+                                .ok_or_else(|| damaged("a batch uses a dictionary that was never sent"))?;
+                            looked_up(indices, values, &mut column.cells)?;
+                        }
+                    }
                 }
             }
-            HEADER_DICTIONARY_BATCH => {
-                return Err("dictionary-encoded Arrow columns are not supported yet".to_owned());
+            HEADER_DICTIONARY_BATCH if have_schema => {
+                let id = message.header.i64(0, 0);
+                let data = message
+                    .header
+                    .table(1)
+                    .ok_or_else(|| damaged("a dictionary batch has no data"))?;
+                if data.table(3).is_some() {
+                    return Err("compressed Arrow batches are not supported yet".to_owned());
+                }
+                let kind = columns
+                    .iter()
+                    .find(|(_, dictionary, _)| dictionary.is_some_and(|dictionary| dictionary.id == id))
+                    .map(|(kind, _, _)| *kind)
+                    .ok_or_else(|| damaged("a dictionary batch belongs to no column"))?;
+                let rows = u64::try_from(data.i64(0, 0)).map_err(|_| damaged("a dictionary's length is negative"))?;
+                dictionary_cells = dictionary_cells.saturating_add(rows);
+                if dictionary_cells > MAX_ROWS {
+                    return Err(format!("the stream's dictionaries hold more than {MAX_ROWS} values"));
+                }
+                let mut batch = Batch {
+                    nodes: data.pairs(1).ok_or_else(|| damaged("a dictionary's nodes cannot be read"))?,
+                    buffers: data.pairs(2).ok_or_else(|| damaged("a dictionary's buffers cannot be read"))?,
+                    body: message.body,
+                    next_node: 0,
+                    next_buffer: 0,
+                };
+                let rows = usize::try_from(rows).map_err(|_| damaged("a dictionary is too long"))?;
+                let mut values = Vec::with_capacity(rows);
+                decode(kind, &mut batch, rows, &mut values)?;
+                if message.header.u8(2, 0) != 0 {
+                    dictionaries.entry(id).or_default().extend(values);
+                } else {
+                    dictionaries.insert(id, values);
+                }
             }
             HEADER_SCHEMA => return Err(damaged("a second schema follows the first")),
             _ => return Err(damaged("a message comes before the schema or has an unknown kind")),
@@ -443,5 +525,5 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Column>, String> {
     if !have_schema {
         return Err(damaged("there is no schema"));
     }
-    Ok(columns.into_iter().map(|(_, column)| column).collect())
+    Ok(columns.into_iter().map(|(_, _, column)| column).collect())
 }

@@ -664,3 +664,4 @@ its full title with its status.
 - [D637](decisions/D637.md) Code-only batch 285 (M11): ASOF JOIN ... USING
 - [D638](decisions/D638.md) Code-only batch 286 (M2): Huffman-coded literals in the Zstandard encoder
 - [D639](decisions/D639.md) Code-only batch 287 (M2): FSE-compressed Huffman weights in the Zstandard encoder
+- [D640](decisions/D640.md) Code-only batch 288 (M11): reading dictionary-encoded Arrow columns
