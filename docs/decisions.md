@@ -673,3 +673,4 @@ its full title with its status.
 - [D646](decisions/D646.md) Code-only batch 294 (M10): MySQL BIGINT UNSIGNED, YEAR, BIT, ENUM and SET columns
 - [D647](decisions/D647.md) Code-only batch 295 (M11): TimescaleDB's first and last aggregates
 - [D648](decisions/D648.md) Code-only batch 296 (M10): INSERT ... EXEC into tables
+- [D649](decisions/D649.md) Code-only batch 297 (M8): a German stemmer and the german text-search configuration

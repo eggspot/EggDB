@@ -1,4 +1,4 @@
-use crate::english;
+use crate::{english, german};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -82,10 +82,13 @@ pub enum Config {
     English,
     /// Lower case words, nothing dropped or stemmed.
     Simple,
+    /// Lower case words, German stop words dropped, German stems.
+    German,
 }
 
 impl Config {
-    /// The configuration named `name` (`english`, `simple`, optionally `pg_catalog.`-qualified).
+    /// The configuration named `name` (`english`, `german`, `simple`, optionally
+    /// `pg_catalog.`-qualified).
     pub fn named(name: &str) -> Option<Self> {
         match name
             .trim()
@@ -95,6 +98,7 @@ impl Config {
         {
             "english" => Some(Self::English),
             "simple" => Some(Self::Simple),
+            "german" => Some(Self::German),
             _ => None,
         }
     }
@@ -106,6 +110,8 @@ impl Config {
             Self::Simple => Some(lower),
             Self::English if english::is_stop_word(&lower) => None,
             Self::English => Some(english::stem(&lower)),
+            Self::German if german::is_stop_word(&lower) => None,
+            Self::German => Some(german::stem(&lower)),
         }
     }
 }
