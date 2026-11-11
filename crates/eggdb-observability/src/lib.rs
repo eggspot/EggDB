@@ -19,6 +19,7 @@ mod promql;
 mod remote_write;
 mod store;
 mod syslog;
+mod zipkin;
 
 pub use api::{DEFAULT_MAX_QUERY_SAMPLES, Endpoint, MAX_REQUEST_BYTES, wants_content_decoded};
 pub use syslog::{MAX_SYSLOG_MESSAGE_BYTES, SyslogCollector, syslog_messages_dropped};

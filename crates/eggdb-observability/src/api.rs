@@ -425,6 +425,22 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             }
             ("POST", REMOTE_WRITE_PATH) => self.remote_write(request),
             ("POST", crate::loki::PUSH_PATH) => self.loki_push(request),
+            ("POST", crate::zipkin::SPANS_PATH) => {
+                match crate::zipkin::decode(&request.body)
+                    .and_then(|points| store::write(&mut self.session(), &points))
+                {
+                    Ok(_) => json(202, String::new()),
+                    Err(message) => json(400, format!("{{\"message\":{}}}", json_string(&message))),
+                }
+            }
+            ("GET", "/api/v2/services") => self.zipkin_names("service", None),
+            ("GET", crate::zipkin::SPANS_PATH) => match value("serviceName") {
+                Some(service) => self.zipkin_names("name", Some(service)),
+                None => json(400, "{\"message\":\"serviceName is required\"}".to_owned()),
+            },
+            ("GET", path) if path.starts_with("/api/v2/trace/") => {
+                self.zipkin_trace(path.trim_start_matches("/api/v2/trace/"))
+            }
             ("GET" | "POST", "/loki/api/v1/query_range") => self.loki_query(
                 value("query"),
                 (value("start"), value("end")),
@@ -628,6 +644,103 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             }
         }
         success(&strings_json(&found))
+    }
+
+    fn span_rows(&self, filter: &str) -> Result<Vec<Vec<(String, Value)>>, String> {
+        let sql = format!(
+            "SELECT * FROM {}.{} WHERE {filter} ORDER BY time LIMIT {MAX_LOG_ROWS_READ}",
+            store::SCHEMA,
+            crate::zipkin::MEASUREMENT
+        );
+        let results = match store::run(&mut self.session(), &sql) {
+            Ok(results) => results,
+            Err(message) if message.contains("does not exist") => return Ok(Vec::new()),
+            Err(message) => return Err(message),
+        };
+        let Some(found) = results.into_iter().rev().find(|result| result.columns.is_some()) else {
+            return Ok(Vec::new());
+        };
+        let names: Vec<String> = found
+            .columns
+            .iter()
+            .flatten()
+            .map(|column| column.name.clone())
+            .collect();
+        Ok(found
+            .rows
+            .into_iter()
+            .map(|row| names.iter().cloned().zip(row).collect())
+            .collect())
+    }
+
+    fn zipkin_names(&self, column: &str, service: Option<&str>) -> Response {
+        let filter = match service {
+            Some(service) => format!("service = {}", store::literal(service)),
+            None => "true".to_owned(),
+        };
+        let rows = match self.span_rows(&filter) {
+            Ok(rows) => rows,
+            Err(message) => return json(400, format!("{{\"message\":{}}}", json_string(&message))),
+        };
+        let names: BTreeSet<String> = rows
+            .into_iter()
+            .flat_map(|row| row.into_iter())
+            .filter_map(|(name, value)| match value {
+                Value::Text(text) if name == column => Some(text),
+                _ => None,
+            })
+            .collect();
+        json(200, strings_json(&names))
+    }
+
+    fn zipkin_trace(&self, trace_id: &str) -> Response {
+        let trace_id = trace_id.to_ascii_lowercase();
+        if trace_id.is_empty() || trace_id.len() > 32 || !trace_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return json(400, "{\"message\":\"a trace id is 16 or 32 hex digits\"}".to_owned());
+        }
+        let rows = match self.span_rows(&format!("trace_id = {}", store::literal(&trace_id))) {
+            Ok(rows) => rows,
+            Err(message) => return json(400, format!("{{\"message\":{}}}", json_string(&message))),
+        };
+        if rows.is_empty() {
+            return json(404, format!("{{\"message\":\"trace {trace_id} not found\"}}"));
+        }
+        let spans: Vec<String> = rows
+            .into_iter()
+            .map(|row| {
+                let mut fields = Vec::new();
+                for (name, value) in row {
+                    let key = match name.as_str() {
+                        "trace_id" => "traceId",
+                        "span_id" => "id",
+                        "parent_id" => "parentId",
+                        "name" => "name",
+                        "kind" => "kind",
+                        "duration_us" => "duration",
+                        "time" => "timestamp",
+                        "service" => "localEndpoint",
+                        "remote_service" => "remoteEndpoint",
+                        "tags" => "tags",
+                        _ => continue,
+                    };
+                    let rendered = match (key, value) {
+                        ("timestamp", Value::TimestampTz(micros)) => {
+                            micros.saturating_add(UNIX_EPOCH_FROM_2000_MICROS).to_string()
+                        }
+                        ("duration", Value::BigInt(duration)) => duration.to_string(),
+                        ("tags", Value::Text(text)) => text,
+                        ("localEndpoint" | "remoteEndpoint", Value::Text(service)) => {
+                            format!("{{\"serviceName\":{}}}", json_string(&service))
+                        }
+                        (_, Value::Text(text)) => json_string(&text),
+                        _ => continue,
+                    };
+                    fields.push(format!("{}:{rendered}", json_string(key)));
+                }
+                format!("{{{}}}", fields.join(","))
+            })
+            .collect();
+        json(200, format!("[{}]", spans.join(",")))
     }
 
     fn loki_push(&self, request: &Request) -> Response {
