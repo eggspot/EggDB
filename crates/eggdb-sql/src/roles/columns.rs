@@ -163,6 +163,9 @@ pub(crate) fn column_privilege_reach(
         return Ok(Some(ColumnReach::Every));
     }
     let held = role_closure(reader, role)?;
+    if super::denied(reader, &held, table, privilege)? {
+        return Ok(None);
+    }
     if table_level_held(reader, &held, table, privilege)? {
         return Ok(Some(ColumnReach::Every));
     }

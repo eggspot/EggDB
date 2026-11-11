@@ -645,3 +645,4 @@ its full title with its status.
 - [D618](decisions/D618.md) Code-only batch 266 (M10): MySQL's information_schema.TRIGGERS
 - [D619](decisions/D619.md) Code-only batch 267 (M10): CASE, loops and labels in MySQL trigger bodies
 - [D620](decisions/D620.md) Code-only batch 268 (M5): t-digest sketches for APPROX_PERCENTILE_CONT
+- [D621](decisions/D621.md) Code-only batch 269 (M4): SQL Server's DENY

@@ -175,6 +175,27 @@ impl Parser<'_> {
         }
     }
 
+    pub(super) fn sqlserver_deny(&mut self) -> SqlResult<Statement> {
+        let position = self.position();
+        match self.grant_or_revoke_privileges(true)? {
+            Statement::Role(RoleStatement::Privileges {
+                privileges,
+                columns,
+                tables,
+                grantees,
+                ..
+            }) if columns.is_empty() => Ok(Statement::Role(RoleStatement::Deny {
+                privileges,
+                tables,
+                grantees,
+            })),
+            _ => Err(crate::error::SqlError::not_supported(
+                "DENY of anything but table permissions",
+            )
+            .at(position)),
+        }
+    }
+
     pub(super) fn grant_or_revoke_privileges(&mut self, granting: bool) -> SqlResult<Statement> {
         if let Some(target) = self.privileges_target().filter(|target| {
             matches!(

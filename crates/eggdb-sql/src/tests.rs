@@ -4926,5 +4926,20 @@ fn transact_sql_grants_on_objects_and_columns_use_the_shared_privileges() {
     );
     tsql.execute("REVOKE SELECT ON OBJECT::items (id) FROM reader", &mut |_| {})
         .expect("the revoke runs");
-    assert!(tsql.execute("DENY SELECT ON items TO reader", &mut |_| {}).is_err());
+    tsql.execute("GRANT SELECT ON items TO public", &mut |_| {})
+        .expect("a grant to everyone runs");
+    tsql.execute("DENY SELECT ON items TO reader", &mut |_| {})
+        .expect("a deny runs");
+    assert_eq!(
+        last(&mut session, "SELECT has_table_privilege('reader', 'items', 'SELECT'), has_column_privilege('reader', 'items', 'id', 'SELECT')"),
+        "has_table_privilege|has_column_privilege\nf|f\nSELECT 1",
+        "a deny wins over the grant to everyone"
+    );
+    tsql.execute("REVOKE SELECT ON items FROM reader", &mut |_| {})
+        .expect("the revoke clears the deny");
+    assert_eq!(
+        last(&mut session, "SELECT has_table_privilege('reader', 'items', 'SELECT')"),
+        "has_table_privilege\nt\nSELECT 1"
+    );
+    assert!(tsql.execute("DENY SELECT ON SCHEMA::dbo TO reader", &mut |_| {}).is_err());
 }

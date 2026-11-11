@@ -1,16 +1,17 @@
-use super::{COLUMN_GRANT_SPACE, GRANT_SPACE, ROLE_SPACE, decode_role, encode_role};
+use super::{COLUMN_GRANT_SPACE, DENY_SPACE, GRANT_SPACE, ROLE_SPACE, decode_role, encode_role};
 use crate::encoding::{NAMESPACE, prefix_end};
 use crate::error::SqlResult;
 use crate::row_security::{POLICY_SPACE, ROW_SECURITY_SPACE};
 use crate::store::{EntryVisitor, KeyValueRead, ScanDirection};
 use std::collections::BTreeMap;
 
-const ACCESS_SPACES: [u8; 5] = [
+const ACCESS_SPACES: [u8; 6] = [
     ROLE_SPACE,
     GRANT_SPACE,
     POLICY_SPACE,
     ROW_SECURITY_SPACE,
     COLUMN_GRANT_SPACE,
+    DENY_SPACE,
 ];
 
 /// A copy of the records that decide who may do what (roles without their password verifiers,

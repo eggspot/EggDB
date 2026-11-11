@@ -1067,6 +1067,7 @@ impl<'t> Parser<'t> {
                 self.grant_or_revoke("ALTER DEFAULT PRIVILEGES")
             }
             "grant" if !self.sqlite() => self.grant_or_revoke_privileges(true),
+            "deny" if self.sqlserver() => self.sqlserver_deny(),
             "revoke" if !self.sqlite() => self.grant_or_revoke_privileges(false),
             "alter"
                 if !self.sqlite() && (self.is_word_at(1, "role") || self.is_word_at(1, "user")) =>

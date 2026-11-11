@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 
 pub(crate) const ROLE_SPACE: u8 = 0x11;
 pub(crate) const GRANT_SPACE: u8 = 0x12;
+pub(crate) const DENY_SPACE: u8 = 0x18;
 const RECORD_VERSION: u8 = 1;
 const LOGIN: u8 = 1;
 const SUPERUSER: u8 = 2;
@@ -112,6 +113,11 @@ pub(crate) enum RoleStatement {
         tables: Vec<Name>,
         grantees: Vec<String>,
     },
+    Deny {
+        privileges: Vec<Privilege>,
+        tables: Vec<Name>,
+        grantees: Vec<String>,
+    },
     Membership {
         granting: bool,
         roles: Vec<String>,
@@ -129,6 +135,7 @@ impl RoleStatement {
                 "GRANT"
             }
             Self::Privileges { .. } | Self::Membership { .. } => "REVOKE",
+            Self::Deny { .. } => "DENY",
         }
     }
 
@@ -195,6 +202,48 @@ fn grant_key(table: &str, grantee: &str) -> Vec<u8> {
     let mut key = grant_prefix(table);
     key.extend_from_slice(grantee.as_bytes());
     key
+}
+
+fn deny_key(table: &str, grantee: &str) -> Vec<u8> {
+    let mut key = NAMESPACE.to_vec();
+    key.push(DENY_SPACE);
+    key.extend_from_slice(table.as_bytes());
+    key.push(0);
+    key.extend_from_slice(grantee.as_bytes());
+    key
+}
+
+fn privilege_bits(reader: &dyn KeyValueRead, key: &[u8], what: &str) -> SqlResult<u8> {
+    match reader.get(key)?.as_deref() {
+        Some([RECORD_VERSION, held]) => Ok(*held),
+        Some(_) => Err(crate::encoding::corrupt(what)),
+        None => Ok(0),
+    }
+}
+
+fn store_bits(writer: &mut dyn KeyValueWrite, key: &[u8], bits: u8) -> SqlResult<()> {
+    if bits == 0 {
+        writer.delete(key)?;
+    } else {
+        writer.put(key, &[RECORD_VERSION, bits])?;
+    }
+    Ok(())
+}
+
+/// Whether one of the `held` roles is denied `privilege` on `table` (SQL Server's `DENY`),
+/// which wins over every grant.
+pub(crate) fn denied(
+    reader: &dyn KeyValueRead,
+    held: &BTreeSet<String>,
+    table: &str,
+    privilege: Privilege,
+) -> SqlResult<bool> {
+    for role in held {
+        if privilege_bits(reader, &deny_key(table, role), "deny")? & privilege.bit() != 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn put_text(out: &mut Vec<u8>, text: &str) {
@@ -435,6 +484,36 @@ pub(crate) fn run(
             writer.put(&role_key(&role.name), &encode_role(&role))?;
         }
         RoleStatement::Drop { names, if_exists } => drop_roles(writer, names, *if_exists)?,
+        RoleStatement::Deny {
+            privileges,
+            tables,
+            grantees,
+        } => {
+            let bits = privileges
+                .iter()
+                .fold(0u8, |bits, privilege| bits | privilege.bit());
+            for table in tables {
+                if writer.get(&crate::encoding::table_key(&table.text))?.is_none() {
+                    return Err(SqlError::new(
+                        SqlState::UNDEFINED_TABLE,
+                        format!("relation \"{}\" does not exist", table.text),
+                    )
+                    .at(table.position));
+                }
+                for grantee in grantees {
+                    if grantee != PUBLIC && stored_role(writer, grantee)?.is_none() {
+                        return Err(missing_role(grantee));
+                    }
+                    let key = deny_key(&table.text, grantee);
+                    let current = privilege_bits(writer, &key, "deny")?;
+                    store_bits(writer, &key, current | bits)?;
+                    let granted_key = grant_key(&table.text, grantee);
+                    let granted = privilege_bits(writer, &granted_key, "grant")?;
+                    store_bits(writer, &granted_key, granted & !bits)?;
+                }
+            }
+            Ok(QueryResult::command(tag))
+        }
         RoleStatement::Privileges {
             granting,
             privileges,
@@ -498,6 +577,23 @@ fn drop_roles(writer: &mut dyn KeyValueWrite, names: &[Name], if_exists: bool) -
 pub(crate) fn forget_table(writer: &mut dyn KeyValueWrite, table: &str) -> SqlResult<()> {
     for (grantee, _) in table_grant_records(writer, table)? {
         writer.delete(&grant_key(table, &grantee))?;
+    }
+    let mut prefix = NAMESPACE.to_vec();
+    prefix.push(DENY_SPACE);
+    prefix.extend_from_slice(table.as_bytes());
+    prefix.push(0);
+    let mut denials = Vec::new();
+    writer.scan(
+        &prefix,
+        &prefix_end(&prefix),
+        ScanDirection::Forward,
+        &mut |key, _| {
+            denials.push(key.to_vec());
+            Ok(true)
+        },
+    )?;
+    for key in denials {
+        writer.delete(&key)?;
     }
     columns::forget_table_columns(writer, table)
 }
@@ -681,6 +777,9 @@ fn change_privileges(
             } else {
                 writer.put(&key, &[RECORD_VERSION, changed])?;
             }
+            let denial = deny_key(&table.text, grantee);
+            let denied_bits = privilege_bits(writer, &denial, "deny")?;
+            store_bits(writer, &denial, denied_bits & !bits)?;
             if !granting {
                 columns::revoke_from_every_column(writer, &table.text, grantee, bits)?;
             }
@@ -788,6 +887,9 @@ fn table_level_held(
     table: &str,
     privilege: Privilege,
 ) -> SqlResult<bool> {
+    if denied(reader, held, table, privilege)? {
+        return Ok(false);
+    }
     for role in held {
         if let Some(bytes) = reader.get(&grant_key(table, role))? {
             match bytes.as_slice() {
