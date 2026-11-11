@@ -5167,6 +5167,9 @@ impl<'t> Parser<'t> {
         if let Some(expr) = self.grouping_operation(&name)? {
             return Ok(expr);
         }
+        if self.postgresql() && matches!(name.text.as_str(), "first" | "last") {
+            return self.first_or_last_by_time(name);
+        }
         if name.text == "extract" && !self.sqlite() {
             return self.extract(name);
         }
@@ -5630,6 +5633,43 @@ impl<'t> Parser<'t> {
                 ),
             )
             .at(name.position)
+        })
+    }
+
+    /// TimescaleDB's `first(value, time)` and `last(value, time)`: the value of the row with the
+    /// earliest or latest time, as the first element of `array_agg(value ORDER BY time)`.
+    fn first_or_last_by_time(&mut self, name: Name) -> SqlResult<Expr> {
+        self.expect(&TokenKind::LeftParen)?;
+        let value = self.expression()?;
+        self.expect(&TokenKind::Comma)?;
+        let time = self.expression()?;
+        self.expect(&TokenKind::RightParen)?;
+        let position = name.position;
+        let order = vec![crate::ast::OrderItem {
+            expr: time,
+            descending: name.text == "last",
+            nulls_first: Some(false),
+        }];
+        let collected = Expr {
+            kind: ExprKind::Aggregate {
+                function: AggregateFunction::ArrayAgg,
+                argument: Some(Box::new(crate::aggregate::ordered_arguments(value, order))),
+                distinct: false,
+            },
+            position,
+        };
+        Ok(Expr {
+            kind: ExprKind::Function {
+                name: "array_subscript".to_owned(),
+                arguments: vec![
+                    collected,
+                    Expr {
+                        kind: ExprKind::Literal(Literal::Integer(1)),
+                        position,
+                    },
+                ],
+            },
+            position,
         })
     }
 

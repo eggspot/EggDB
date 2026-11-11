@@ -106,3 +106,22 @@ fn time_bucket_groups_readings() {
         "SELECT TIMESTAMPTZ '2024-01-01 00:00+00' AS bucket, 2::double precision AS avg UNION ALL SELECT TIMESTAMPTZ '2024-01-01 00:15+00', 10",
     );
 }
+
+#[test]
+fn first_and_last_take_the_value_at_the_earliest_and_latest_time() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    session
+        .execute(
+            "CREATE TABLE readings (sensor int, ts int, v text);
+             INSERT INTO readings VALUES (1, 3, 'c'), (1, 1, 'a'), (1, NULL, 'z'), (2, 5, 'q')",
+            &mut |_| {},
+        )
+        .expect("setup");
+    drop(session);
+    same(
+        &store,
+        "SELECT sensor, first(v, ts), last(v, ts) FROM readings GROUP BY sensor ORDER BY sensor",
+        "VALUES (1, 'a', 'c'), (2, 'q', 'q')",
+    );
+}

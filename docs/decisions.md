@@ -671,3 +671,4 @@ its full title with its status.
 - [D644](decisions/D644.md) Code-only batch 292 (M10): a T-SQL procedure called by its name alone at a batch's start
 - [D645](decisions/D645.md) Code-only batch 293 (M10): EXEC @result = a T-SQL scalar function
 - [D646](decisions/D646.md) Code-only batch 294 (M10): MySQL BIGINT UNSIGNED, YEAR, BIT, ENUM and SET columns
+- [D647](decisions/D647.md) Code-only batch 295 (M11): TimescaleDB's first and last aggregates

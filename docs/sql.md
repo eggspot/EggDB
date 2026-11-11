@@ -3321,8 +3321,11 @@ SELECT time_bucket('15 minutes', at) AS bucket, avg(value)
 FROM readings GROUP BY bucket ORDER BY bucket;
 ```
 
-Not yet: `time_bucket_gapfill`, `locf` and `interpolate`, the `first` and `last` aggregates,
-hypertables with automatic time partitions, retention policies and continuous aggregates.
+`first(value, time)` and `last(value, time)` give the value of the row with the earliest or latest
+time in each group (rows whose time is NULL come last).
+
+Not yet: `time_bucket_gapfill`, `locf` and `interpolate`, hypertables with automatic time
+partitions, retention policies and continuous aggregates.
 
 ## Materialized views
 
