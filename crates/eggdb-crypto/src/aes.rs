@@ -5,6 +5,7 @@ const MAX_ROUNDS: usize = 14;
 const LANES: usize = 64;
 const ROUND_CONSTANTS: [u8; 10] = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
 const AFFINE_CONSTANT: u8 = 0x63;
+const INVERSE_AFFINE_CONSTANT: u8 = 0x05;
 
 /// The key given to AES is not 16, 24 or 32 bytes long.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +95,55 @@ fn sub_bytes(bytes: &mut [u8]) {
     }
 }
 
+fn inverse_substitute_planes(planes: &Planes) -> Planes {
+    let mut affine = [0u64; 8];
+    for (bit, plane) in affine.iter_mut().enumerate() {
+        let constant = 0u64.wrapping_sub(u64::from((INVERSE_AFFINE_CONSTANT >> bit) & 1));
+        *plane = planes[(bit + 2) % 8] ^ planes[(bit + 5) % 8] ^ planes[(bit + 7) % 8] ^ constant;
+    }
+    gf_inverse(&affine)
+}
+
+fn inverse_sub_bytes(bytes: &mut [u8]) {
+    for group in bytes.chunks_mut(LANES) {
+        let mut planes = [0u64; 8];
+        for (lane, byte) in group.iter().enumerate() {
+            for (bit, plane) in planes.iter_mut().enumerate() {
+                *plane |= u64::from((byte >> bit) & 1) << lane;
+            }
+        }
+        let substituted = inverse_substitute_planes(&planes);
+        for (lane, byte) in group.iter_mut().enumerate() {
+            let mut value = 0u8;
+            for (bit, plane) in substituted.iter().enumerate() {
+                value |= (((plane >> lane) & 1) as u8) << bit;
+            }
+            *byte = value;
+        }
+    }
+}
+
+fn inverse_shift_rows(state: &mut [u8; AES_BLOCK_BYTES]) {
+    let old = *state;
+    for row in 1..4 {
+        for column in 0..4 {
+            state[row + 4 * column] = old[row + 4 * ((column + 4 - row) % 4)];
+        }
+    }
+}
+
+fn inverse_mix_columns(state: &mut [u8; AES_BLOCK_BYTES]) {
+    for column in state.as_chunks_mut::<4>().0 {
+        let even = double(double(column[0] ^ column[2]));
+        let odd = double(double(column[1] ^ column[3]));
+        column[0] ^= even;
+        column[1] ^= odd;
+        column[2] ^= even;
+        column[3] ^= odd;
+    }
+    mix_columns(state);
+}
+
 fn double(byte: u8) -> u8 {
     (byte << 1) ^ (0x1b & 0u8.wrapping_sub(byte >> 7))
 }
@@ -124,10 +174,9 @@ fn add_round_key(state: &mut [u8; AES_BLOCK_BYTES], round_key: &[u8; AES_BLOCK_B
     }
 }
 
-/// The AES block cipher (FIPS 197) under one key of 128, 192 or 256 bits, encryption only (the
-/// modes TLS uses never decrypt a block). The S-box is computed, not looked up: each byte is
-/// inverted in GF(2^8) on bit planes shared by up to 64 bytes, so no memory access and no branch
-/// depends on the key or the data.
+/// The AES block cipher (FIPS 197) under one key of 128, 192 or 256 bits. The S-box and its
+/// inverse are computed, not looked up: each byte is inverted in GF(2^8) on bit planes shared by
+/// up to 64 bytes, so no memory access and no branch depends on the key or the data.
 #[derive(Clone)]
 pub struct Aes {
     round_keys: [[u8; AES_BLOCK_BYTES]; MAX_ROUNDS + 1],
@@ -204,11 +253,48 @@ impl Aes {
             }
         }
     }
+
+    /// Decrypts one block in place with FIPS 197's inverse cipher.
+    pub fn decrypt_block(&self, block: &mut [u8; AES_BLOCK_BYTES]) {
+        add_round_key(block, &self.round_keys[self.rounds]);
+        for round in (1..self.rounds).rev() {
+            inverse_shift_rows(block);
+            inverse_sub_bytes(block);
+            add_round_key(block, &self.round_keys[round]);
+            inverse_mix_columns(block);
+        }
+        inverse_shift_rows(block);
+        inverse_sub_bytes(block);
+        add_round_key(block, &self.round_keys[0]);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::sub_bytes;
+    use super::{Aes, inverse_sub_bytes, sub_bytes};
+
+    #[test]
+    fn decrypting_undoes_fips_197s_example() {
+        let key: Vec<u8> = (0..16).collect();
+        let cipher = Aes::new(&key).expect("a 128-bit key");
+        let plain: [u8; 16] = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
+        let expected: [u8; 16] = [
+            0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30, 0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4,
+            0xc5, 0x5a,
+        ];
+        let mut block = plain;
+        cipher.encrypt_block(&mut block);
+        assert_eq!(block, expected);
+        cipher.decrypt_block(&mut block);
+        assert_eq!(block, plain);
+        let mut all: Vec<u8> = (0..=255).collect();
+        sub_bytes(&mut all);
+        inverse_sub_bytes(&mut all);
+        assert!(all.iter().enumerate().all(|(index, value)| usize::from(*value) == index));
+    }
 
     #[test]
     fn the_computed_s_box_is_fips_197s_table() {

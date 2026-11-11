@@ -8,7 +8,24 @@ const ORACLE_NUMERIC_OR_VALUE: u16 = 6_502;
 const JARO_WINKLER_PREFIX: usize = 4;
 const LONGEST_RANDOM_BYTES: usize = 32_767;
 const GET_TIME_WRAP: i64 = 1 << 31;
-const CRYPTO_CONSTANTS: [(&str, i64); 11] = [
+const CRYPTO_CONSTANTS: &[(&str, i64)] = &[
+    ("encrypt_des", 1),
+    ("encrypt_3des_2key", 2),
+    ("encrypt_3des", 3),
+    ("encrypt_aes", 4),
+    ("encrypt_aes128", 6),
+    ("encrypt_aes192", 7),
+    ("encrypt_aes256", 8),
+    ("chain_cbc", 256),
+    ("chain_cfb", 512),
+    ("chain_ecb", 768),
+    ("chain_ofb", 1024),
+    ("pad_pkcs5", 4096),
+    ("pad_none", 8192),
+    ("pad_zero", 12288),
+    ("des_cbc_pkcs5", 4353),
+    ("des3_cbc_pkcs5", 4355),
+    ("aes_cbc_pkcs5", 4356),
     ("hash_md4", 1),
     ("hash_md5", 2),
     ("hash_sh1", 3),
@@ -47,6 +64,8 @@ pub(crate) fn internal_name(package: &str, function: &str) -> Option<(&'static s
         ("dbms_crypto", "hash") => ("oracle_dbms_crypto_hash", 2, 2),
         ("dbms_crypto", "mac") => ("oracle_dbms_crypto_mac", 3, 3),
         ("dbms_crypto", "randombytes") => ("oracle_dbms_crypto_randombytes", 1, 1),
+        ("dbms_crypto", "encrypt") => ("oracle_dbms_crypto_encrypt", 3, 4),
+        ("dbms_crypto", "decrypt") => ("oracle_dbms_crypto_decrypt", 3, 4),
         ("dbms_utility", "get_time") => ("oracle_dbms_utility_get_time", 0, 0),
         _ => return None,
     })
@@ -87,11 +106,21 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         | "oracle_dbms_assert_qualified_sql_name"
         | "oracle_dbms_assert_enquote_name"
         | "oracle_dbms_assert_enquote_literal" => SqlType::Text,
-        "oracle_dbms_crypto_hash" | "oracle_dbms_crypto_mac" | "oracle_dbms_crypto_randombytes" => {
+        "oracle_dbms_crypto_hash"
+        | "oracle_dbms_crypto_mac"
+        | "oracle_dbms_crypto_randombytes"
+        | "oracle_dbms_crypto_encrypt"
+        | "oracle_dbms_crypto_decrypt" => {
             SqlType::Bytea
         }
         _ => return None,
     })
+}
+
+fn whole(value: &Value) -> Option<i64> {
+    value
+        .as_integer()
+        .or_else(|| value.as_float().filter(|number| number.is_finite()).map(|number| number.trunc() as i64))
 }
 
 fn number(value: i64) -> Value {
@@ -351,7 +380,7 @@ fn evaluate(name: &str, values: &[Value]) -> SqlResult<Value> {
             let Some(bytes) = crypto_input(source) else {
                 return Ok(Value::Null);
             };
-            let digest = match kind.as_integer() {
+            let digest = match whole(kind) {
                 Some(2) => eggdb_crypto::md5_checksum(&bytes).to_vec(),
                 Some(3) => eggdb_crypto::sha1(&bytes).to_vec(),
                 Some(4) => eggdb_crypto::sha256(&bytes).to_vec(),
@@ -365,7 +394,7 @@ fn evaluate(name: &str, values: &[Value]) -> SqlResult<Value> {
             let (Some(bytes), Some(key)) = (crypto_input(source), crypto_input(key)) else {
                 return Ok(Value::Null);
             };
-            let mac = match kind.as_integer() {
+            let mac = match whole(kind) {
                 Some(2) => eggdb_crypto::hmac::<eggdb_crypto::Sha1>(&key, &bytes).to_vec(),
                 Some(3) => eggdb_crypto::hmac::<eggdb_crypto::Sha256>(&key, &bytes).to_vec(),
                 Some(4) => eggdb_crypto::hmac::<eggdb_crypto::Sha384>(&key, &bytes).to_vec(),
@@ -390,6 +419,20 @@ fn evaluate(name: &str, values: &[Value]) -> SqlResult<Value> {
             crate::random::fill(&mut bytes)?;
             Ok(Value::Bytea(bytes))
         }
+        ("oracle_dbms_crypto_encrypt" | "oracle_dbms_crypto_decrypt", [source, kind, key, rest @ ..]) => {
+            let (Some(source), Some(key)) = (crypto_input(source), crypto_input(key)) else {
+                return Ok(Value::Null);
+            };
+            let kind = whole(kind).ok_or_else(unsupported_algorithm)?;
+            let iv = rest.first().and_then(crypto_input);
+            let suite = CipherSuite::of(kind, &key)?;
+            let done = if name == "oracle_dbms_crypto_encrypt" {
+                suite.encrypt(&key, iv.as_deref(), &source)?
+            } else {
+                suite.decrypt(&key, iv.as_deref(), &source)?
+            };
+            Ok(Value::Bytea(done))
+        }
         ("oracle_dbms_utility_get_time", []) => {
             let hundredths = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -408,6 +451,148 @@ fn crypto_input(value: &Value) -> Option<Vec<u8>> {
         Value::Null => None,
         Value::Bytea(bytes) => Some(bytes.clone()),
         other => other.to_text().map(String::into_bytes),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Chain {
+    Cbc,
+    Ecb,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Padding {
+    Pkcs5,
+    Zero,
+    Nothing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CipherSuite {
+    chain: Chain,
+    padding: Padding,
+}
+
+const BLOCK: usize = eggdb_crypto::AES_BLOCK_BYTES;
+
+fn crypto_error(code: u16, message: &str) -> SqlError {
+    SqlError::new(
+        SqlState::INVALID_PARAMETER_VALUE,
+        format!("ORA-{code:05}: {message}"),
+    )
+    .with_oracle_code(code)
+}
+
+impl CipherSuite {
+    fn of(kind: i64, key: &[u8]) -> SqlResult<Self> {
+        let wanted_key = match kind & 0xff {
+            4 => key.len(),
+            6 => 16,
+            7 => 24,
+            8 => 32,
+            _ => return Err(unsupported_algorithm()),
+        };
+        if key.len() != wanted_key || !matches!(wanted_key, 16 | 24 | 32) {
+            return Err(crypto_error(28_234, "key length too short"));
+        }
+        let chain = match kind & 0xf00 {
+            0 | 256 => Chain::Cbc,
+            768 => Chain::Ecb,
+            _ => return Err(unsupported_algorithm()),
+        };
+        let padding = match kind & 0xf000 {
+            0 | 4096 => Padding::Pkcs5,
+            8192 => Padding::Nothing,
+            12288 => Padding::Zero,
+            _ => return Err(unsupported_algorithm()),
+        };
+        Ok(Self { chain, padding })
+    }
+
+    fn cipher(key: &[u8]) -> SqlResult<eggdb_crypto::Aes> {
+        eggdb_crypto::Aes::new(key).map_err(|_| crypto_error(28_234, "key length too short"))
+    }
+
+    fn start(iv: Option<&[u8]>) -> SqlResult<[u8; BLOCK]> {
+        match iv {
+            None => Ok([0u8; BLOCK]),
+            Some(bytes) => bytes
+                .try_into()
+                .map_err(|_| crypto_error(28_817, "PL/SQL function returned an error")),
+        }
+    }
+
+    fn encrypt(self, key: &[u8], iv: Option<&[u8]>, source: &[u8]) -> SqlResult<Vec<u8>> {
+        let cipher = Self::cipher(key)?;
+        let mut data = source.to_vec();
+        match self.padding {
+            Padding::Pkcs5 => {
+                let pad = BLOCK - data.len() % BLOCK;
+                data.extend(std::iter::repeat_n(pad as u8, pad));
+            }
+            Padding::Zero => {
+                let pad = (BLOCK - data.len() % BLOCK) % BLOCK;
+                data.extend(std::iter::repeat_n(0u8, pad));
+            }
+            Padding::Nothing => {
+                if data.len() % BLOCK != 0 {
+                    return Err(crypto_error(28_817, "PL/SQL function returned an error"));
+                }
+            }
+        }
+        let mut chained = Self::start(iv)?;
+        for chunk in data.chunks_mut(BLOCK) {
+            let mut block: [u8; BLOCK] = chunk.try_into().unwrap_or([0u8; BLOCK]);
+            if self.chain == Chain::Cbc {
+                for (byte, previous) in block.iter_mut().zip(chained) {
+                    *byte ^= previous;
+                }
+            }
+            cipher.encrypt_block(&mut block);
+            chained = block;
+            chunk.copy_from_slice(&block);
+        }
+        Ok(data)
+    }
+
+    fn decrypt(self, key: &[u8], iv: Option<&[u8]>, source: &[u8]) -> SqlResult<Vec<u8>> {
+        if source.is_empty() || source.len() % BLOCK != 0 {
+            return Err(crypto_error(28_817, "PL/SQL function returned an error"));
+        }
+        let cipher = Self::cipher(key)?;
+        let mut data = source.to_vec();
+        let mut chained = Self::start(iv)?;
+        for chunk in data.chunks_mut(BLOCK) {
+            let mut block: [u8; BLOCK] = chunk.try_into().unwrap_or([0u8; BLOCK]);
+            let stored = block;
+            cipher.decrypt_block(&mut block);
+            if self.chain == Chain::Cbc {
+                for (byte, previous) in block.iter_mut().zip(chained) {
+                    *byte ^= previous;
+                }
+            }
+            chained = stored;
+            chunk.copy_from_slice(&block);
+        }
+        match self.padding {
+            Padding::Pkcs5 => {
+                let pad = usize::from(*data.last().unwrap_or(&0));
+                if pad == 0
+                    || pad > BLOCK
+                    || data[data.len() - pad..].iter().any(|byte| usize::from(*byte) != pad)
+                {
+                    return Err(crypto_error(28_817, "PL/SQL function returned an error"));
+                }
+                data.truncate(data.len() - pad);
+            }
+            Padding::Zero => {
+                while data.last() == Some(&0) {
+                    data.pop();
+                }
+            }
+            Padding::Nothing => {}
+        }
+        Ok(data)
     }
 }
 
@@ -454,6 +639,24 @@ mod tests {
         assert_eq!(bytes[..4], [0xba, 0x78, 0x16, 0xbf]);
         assert_eq!(constant("dbms_crypto", "hash_sh256"), Some(4));
         assert!(evaluate("oracle_dbms_crypto_hash", &[Value::Bytea(Vec::new()), number(1)]).is_err());
+    }
+
+    #[test]
+    fn aes_encryption_round_trips_in_cbc_and_ecb() {
+        let key = Value::Bytea((0..32).collect());
+        let plain = Value::Bytea(b"seventeen bytes!!".to_vec());
+        for kind in [8 + 256 + 4096, 8 + 768 + 4096, 8 + 256 + 12288] {
+            let sealed = evaluate("oracle_dbms_crypto_encrypt", &[plain.clone(), number(kind), key.clone()])
+                .expect("encrypted");
+            let Value::Bytea(bytes) = &sealed else {
+                panic!("a RAW");
+            };
+            assert_eq!(bytes.len(), 32);
+            let opened = evaluate("oracle_dbms_crypto_decrypt", &[sealed, number(kind), key.clone()])
+                .expect("decrypted");
+            assert_eq!(opened, plain, "{kind}");
+        }
+        assert!(evaluate("oracle_dbms_crypto_encrypt", &[plain, number(1 + 256 + 4096), key]).is_err());
     }
 
     #[test]

@@ -1188,7 +1188,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   functions: **code written, unbuilt** (code-only mode, 2026-11-11, D434); `DBMS_LOB`'s locator procedures:
   **code written, unbuilt** (code-only mode, 2026-11-12, D658); `DBMS_RANDOM`, `DBMS_ASSERT` and `UTL_MATCH`:
   **code written, unbuilt** (code-only mode, 2026-11-12, D659); `DBMS_CRYPTO`'s hashes and MACs and
-  `DBMS_UTILITY.GET_TIME`: **code written, unbuilt** (code-only mode, 2026-11-12, D660). Left: the other packages.
+  `DBMS_UTILITY.GET_TIME`: **code written, unbuilt** (code-only mode, 2026-11-12, D660); `DBMS_CRYPTO.ENCRYPT` and
+  `DECRYPT` with AES: **code written, unbuilt** (code-only mode, 2026-11-12, D661). Left: the other packages.
 - PL/SQL: autonomous transactions (after concurrent writers, M3), compound triggers, the
   mutating-table check, `IS A SET`, `IS EMPTY`, `MULTISET`, `MULTISET (subquery)`, `SET()` and
   `TABLE()` correlated in a join (roadmap item 33e). `IS A SET` and `IS EMPTY`: **code written, unbuilt** (code-only mode,

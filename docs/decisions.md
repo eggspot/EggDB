@@ -685,3 +685,4 @@ its full title with its status.
 - [D658](decisions/D658.md) Code-only batch 306 (M10): DBMS_LOB's locator procedures in PL/SQL
 - [D659](decisions/D659.md) Code-only batch 307 (M10): DBMS_RANDOM, DBMS_ASSERT and UTL_MATCH
 - [D660](decisions/D660.md) Code-only batch 308 (M10): DBMS_CRYPTO hashes and MACs, and DBMS_UTILITY.GET_TIME
+- [D661](decisions/D661.md) Code-only batch 309 (M10): AES decryption, and DBMS_CRYPTO.ENCRYPT and DECRYPT
