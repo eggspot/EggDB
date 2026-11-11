@@ -499,6 +499,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - TPC-C against PostgreSQL and MySQL (D7).
 - Partial, expression and covering (`INCLUDE`) indexes, `CREATE INDEX CONCURRENTLY` and `NULLS NOT
   DISTINCT` (D32).
+  `CONCURRENTLY` and storage parameters: **code written, unbuilt** (code-only mode, 2026-11-11, D543).
 - GIN, GiST, SP-GiST, BRIN and bitmap index methods, and Oracle's bitmap, function-based and
   reverse-key indexes (D32, sql.md).
 - Oracle's `STATS_*`, `CORR_S` and `CORR_K` functions and its 38-digit `NUMBER` results for the

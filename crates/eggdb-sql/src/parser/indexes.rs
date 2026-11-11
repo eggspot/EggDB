@@ -29,6 +29,8 @@ impl IndexColumns {
     }
 }
 
+const BTREE_STORAGE_PARAMETERS: [&str; 2] = ["fillfactor", "deduplicate_items"];
+
 impl Parser<'_> {
     pub(super) fn at_index_definition(&self) -> bool {
         if self.sqlserver() {
@@ -49,7 +51,10 @@ impl Parser<'_> {
         }
         self.expect_word("index")?;
         if self.is_word("concurrently") {
-            return Err(self.not_supported("CREATE INDEX CONCURRENTLY"));
+            if !self.postgresql() {
+                return Err(self.not_supported("CREATE INDEX CONCURRENTLY"));
+            }
+            self.at += 1;
         }
         let if_not_exists = if self.is_word("if") && self.is_word_at(1, "not") {
             self.at += 1;
@@ -161,6 +166,27 @@ impl Parser<'_> {
                 self.label()?;
             } else if self.is_word("where") && !self.mysql() && !self.oracle() {
                 return Err(self.not_supported("partial indexes (CREATE INDEX ... WHERE)"));
+            } else if self.postgresql() && self.is_word("with") && self.peek_kind_at(1) == &TokenKind::LeftParen {
+                self.at += 2;
+                loop {
+                    let parameter = self.label()?.to_ascii_lowercase();
+                    if !BTREE_STORAGE_PARAMETERS.contains(&parameter.as_str()) {
+                        return Err(self.not_supported(&format!("the index storage parameter {parameter}")));
+                    }
+                    if self.take_operator("=") {
+                        self.expression()?;
+                    }
+                    if !self.take(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RightParen)?;
+            } else if self.postgresql() && self.is_word("tablespace") {
+                self.at += 1;
+                let tablespace = self.label()?.to_ascii_lowercase();
+                if tablespace != "pg_default" {
+                    return Err(self.not_supported("index tablespaces other than pg_default"));
+                }
             } else if !self.mysql()
                 && !self.sqlite()
                 && !self.oracle()
@@ -281,7 +307,10 @@ impl Parser<'_> {
             return self.sqlserver_drop_index();
         }
         if self.is_word("concurrently") {
-            return Err(self.not_supported("DROP INDEX CONCURRENTLY"));
+            if !self.postgresql() {
+                return Err(self.not_supported("DROP INDEX CONCURRENTLY"));
+            }
+            self.at += 1;
         }
         let if_exists = if self.is_word("if") && self.is_word_at(1, "exists") {
             self.at += 2;
