@@ -120,6 +120,8 @@ struct Subscriber {
     client: String,
     keep_for: Option<Duration>,
     inflight: BTreeMap<u16, (Message, bool)>,
+    window: usize,
+    waiting: VecDeque<Message>,
 }
 
 impl Subscriber {
@@ -240,7 +242,7 @@ impl<'k> Broker<'k> {
         let session = StoredSession {
             filters: subscriber.filters,
             inflight: subscriber.inflight,
-            queued: VecDeque::new(),
+            queued: subscriber.waiting,
             next_id: subscriber.next_id,
             expires_at: now + keep_for,
         };
@@ -275,7 +277,8 @@ impl<'k> Broker<'k> {
         }
     }
 
-    fn resume(&self, id: u64, client: &str, writer: &SharedWriter, version: u8, keep_for: Duration) -> Option<Vec<Vec<u8>>> {
+    #[allow(clippy::too_many_arguments)]
+    fn resume(&self, id: u64, client: &str, writer: &SharedWriter, version: u8, keep_for: Duration, window: usize) -> Option<Vec<Vec<u8>>> {
         let now = Instant::now();
         let stored = self.stored().remove(client);
         if stored.is_some() {
@@ -290,6 +293,8 @@ impl<'k> Broker<'k> {
             client: client.to_owned(),
             keep_for: Some(keep_for),
             inflight: stored.inflight,
+            window,
+            waiting: VecDeque::new(),
         };
         let mut packets = Vec::new();
         for (packet_id, (message, released)) in &subscriber.inflight {
@@ -302,8 +307,11 @@ impl<'k> Broker<'k> {
             }
         }
         for message in stored.queued {
-            if subscriber.inflight.len() >= MAX_INFLIGHT {
-                break;
+            if subscriber.inflight.len() >= subscriber.window {
+                if subscriber.waiting.len() < MAX_QUEUED_MESSAGES {
+                    subscriber.waiting.push_back(message);
+                }
+                continue;
             }
             let packet_id = subscriber.next_packet_id();
             packets.push(publish_packet(version, &message.topic, &message.payload, message.qos, false, packet_id, &message.properties));
@@ -313,19 +321,36 @@ impl<'k> Broker<'k> {
         Some(packets)
     }
 
-    fn settle(&self, id: u64, kind: u8, packet_id: u16) {
+    /// Records a client's acknowledgement; when it frees room in the client's window, returns
+    /// the next waiting message's PUBLISH to send.
+    fn settle(&self, id: u64, kind: u8, packet_id: u16) -> Option<Vec<u8>> {
         let mut live = self.live();
-        let Some(subscriber) = live.get_mut(&id) else {
-            return;
-        };
+        let subscriber = live.get_mut(&id)?;
         match kind {
             PUBREC => {
                 if let Some((_, released)) = subscriber.inflight.get_mut(&packet_id) {
                     *released = true;
                 }
+                None
             }
             _ => {
                 subscriber.inflight.remove(&packet_id);
+                if subscriber.inflight.len() >= subscriber.window {
+                    return None;
+                }
+                let message = subscriber.waiting.pop_front()?;
+                let next = subscriber.next_packet_id();
+                let packet = publish_packet(
+                    subscriber.version,
+                    &message.topic,
+                    &message.payload,
+                    message.qos,
+                    false,
+                    next,
+                    &message.properties,
+                );
+                subscriber.inflight.insert(next, (message, false));
+                Some(packet)
             }
         }
     }
@@ -404,7 +429,15 @@ impl<'k> Broker<'k> {
             };
             let qos = qos.min(granted);
             let packet_id = if qos > 0 {
-                if subscriber.inflight.len() >= MAX_INFLIGHT {
+                if subscriber.inflight.len() >= subscriber.window {
+                    if subscriber.waiting.len() < MAX_QUEUED_MESSAGES {
+                        subscriber.waiting.push_back(Message {
+                            topic: topic.to_owned(),
+                            payload: payload.to_vec(),
+                            qos,
+                            properties: properties.to_vec(),
+                        });
+                    }
                     continue;
                 }
                 let packet_id = subscriber.next_packet_id();
@@ -527,6 +560,7 @@ struct Session<'b, 'k> {
     id: u64,
     client: String,
     keep_for: Option<Duration>,
+    window: usize,
     version: u8,
     writer: SharedWriter,
     will: Option<Will>,
@@ -604,7 +638,9 @@ impl Session<'_, '_> {
             }
             PUBACK | PUBREC | PUBCOMP => {
                 let packet_id = fields.short()?;
-                self.broker.settle(self.id, kind, packet_id);
+                if let Some(next) = self.broker.settle(self.id, kind, packet_id) {
+                    self.send(&next).map_err(|error| error.to_string())?;
+                }
                 if kind == PUBREC {
                     self.send(&encode(PUBREL, 2, &packet_id.to_be_bytes()))
                         .map_err(|error| error.to_string())?;
@@ -649,6 +685,8 @@ impl Session<'_, '_> {
                         client: self.client.clone(),
                         keep_for: self.keep_for,
                         inflight: BTreeMap::new(),
+                        window: self.window,
+                        waiting: VecDeque::new(),
                     });
                     for (filter, granted) in &accepted {
                         subscriber.filters.retain(|(known, _)| known != filter);
@@ -737,6 +775,7 @@ struct Connected {
     client: String,
     clean: bool,
     session_expiry: Option<u32>,
+    window: usize,
 }
 
 fn connect(config: &ServerConfig, body: &[u8]) -> Parsed<Connected> {
@@ -748,11 +787,12 @@ fn connect(config: &ServerConfig, body: &[u8]) -> Parsed<Connected> {
     }
     let flags = fields.byte()?;
     let keep_alive = fields.short()?;
-    let session_expiry = if version >= 5 {
-        fields.connect_session_expiry()?
+    let (session_expiry, receive_maximum) = if version >= 5 {
+        fields.connect_properties()?
     } else {
-        None
+        (None, None)
     };
+    let window = receive_maximum.map_or(MAX_INFLIGHT, |maximum| usize::from(maximum).min(MAX_INFLIGHT));
     let client = fields.string()?;
     let will = if flags & 0x04 != 0 {
         if version >= 5 {
@@ -794,6 +834,7 @@ fn connect(config: &ServerConfig, body: &[u8]) -> Parsed<Connected> {
         client,
         clean: flags & 0x02 != 0,
         session_expiry,
+        window,
     })
 }
 
@@ -896,7 +937,7 @@ pub(crate) fn serve_stream(
                             }
                             let resumed = if allowed && !connected.clean {
                                 keep_for.and_then(|keep| {
-                                    broker.resume(id, &connected.client, &writer, version, keep)
+                                    broker.resume(id, &connected.client, &writer, version, keep, connected.window)
                                 })
                             } else {
                                 None
@@ -932,6 +973,7 @@ pub(crate) fn serve_stream(
                                 id,
                                 client: connected.client.clone(),
                                 keep_for,
+                                window: connected.window,
                                 version,
                                 writer: Arc::clone(&writer),
                                 will: connected.will,

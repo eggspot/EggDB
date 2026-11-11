@@ -251,7 +251,9 @@ impl<'b> Fields<'b> {
     }
 
     /// Reads a CONNECT's properties, returning its Session Expiry Interval (0x11) if given.
-    pub(crate) fn connect_session_expiry(&mut self) -> Parsed<Option<u32>> {
+    /// CONNECT's properties that the broker uses: the session expiry interval and the most QoS 1
+    /// and 2 messages the client takes unacknowledged (Receive Maximum).
+    pub(crate) fn connect_properties(&mut self) -> Parsed<(Option<u32>, Option<u16>)> {
         let length = self.variable()?;
         let end = self
             .at
@@ -261,13 +263,21 @@ impl<'b> Fields<'b> {
         let mut inner = Fields::new(&self.bytes[self.at..end]);
         self.at = end;
         let mut expiry = None;
+        let mut receive_maximum = None;
         while !inner.finished() {
             match inner.variable()? {
                 0x11 => expiry = Some(inner.four()?),
                 0x27 => {
                     inner.four()?;
                 }
-                0x21 | 0x22 => {
+                0x21 => {
+                    let maximum = inner.short()?;
+                    if maximum == 0 {
+                        return Err("a Receive Maximum of 0 is a protocol error".to_owned());
+                    }
+                    receive_maximum = Some(maximum);
+                }
+                0x22 => {
                     inner.short()?;
                 }
                 0x17 | 0x19 => {
@@ -286,7 +296,7 @@ impl<'b> Fields<'b> {
                 other => return Err(format!("property {other:#04x} is not allowed in CONNECT")),
             }
         }
-        Ok(expiry)
+        Ok((expiry, receive_maximum))
     }
 
     pub(crate) fn skip_properties(&mut self) -> Parsed<()> {
