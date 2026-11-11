@@ -116,6 +116,10 @@ impl SqlState {
     /// `22031` invalid_argument_for_sql_json_datetime_function: a `.datetime()` input that is
     /// not a recognized date or time.
     pub const INVALID_ARGUMENT_FOR_SQL_JSON_DATETIME_FUNCTION: Self = Self(*b"22031");
+    /// `22032` invalid_json_text: text that is not JSON where JSON is needed.
+    pub const INVALID_JSON_TEXT: Self = Self(*b"22032");
+    /// `22018` invalid_character_value_for_cast: a value the cast's target type cannot hold.
+    pub const INVALID_CHARACTER_VALUE_FOR_CAST: Self = Self(*b"22018");
     /// `22034` more_than_one_sql_json_item: a path that must yield one item yielded several.
     pub const MORE_THAN_ONE_SQL_JSON_ITEM: Self = Self(*b"22034");
     /// `22035` no_sql_json_item: a path with `ERROR ON EMPTY` yielded nothing.

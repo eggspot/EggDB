@@ -220,6 +220,31 @@ pub(crate) fn translate(error: SqlError, text: &str, database: &str) -> SqlError
             SqlState::MYSQL_GENERAL,
             format!("{message} Try increasing @@cte_max_recursion_depth to a larger value."),
         ),
+        "42601" if message.ends_with("jsonpath input") => translated(
+            3143,
+            SqlState::MYSQL_SYNTAX_OR_ACCESS,
+            format!("Invalid JSON path expression. {message}"),
+        ),
+        "22032" => translated(
+            3141,
+            SqlState::INVALID_JSON_TEXT,
+            format!("Invalid JSON text in argument 1: {message}"),
+        ),
+        "22034" => translated(
+            3967,
+            SqlState::MORE_THAN_ONE_SQL_JSON_ITEM,
+            "More than one value was found by 'json_value' on the specified path.".to_owned(),
+        ),
+        "22035" => translated(
+            3966,
+            SqlState::NO_SQL_JSON_ITEM,
+            "No value was found by 'json_value' on the specified path.".to_owned(),
+        ),
+        "2203F" | "2203G" => translated(
+            3156,
+            SqlState::INVALID_CHARACTER_VALUE_FOR_CAST,
+            format!("Invalid JSON value for CAST: {message}"),
+        ),
         "42601" | "2201W" | "2201X" | "42P02" => syntax(),
         "42704" if message.starts_with("type ") => syntax(),
         "42704" if message.starts_with("unrecognized configuration parameter") => translated(
@@ -273,6 +298,11 @@ pub(crate) fn translate(error: SqlError, text: &str, database: &str) -> SqlError
             1292,
             SqlState::INVALID_DATETIME_FORMAT,
             format!("Incorrect datetime value: {message}"),
+        ),
+        "22P02" if message.starts_with("invalid input syntax for type json") => translated(
+            3141,
+            SqlState::INVALID_JSON_TEXT,
+            format!("Invalid JSON text in argument 1: {message}"),
         ),
         "22P02" => {
             let type_name = message
@@ -387,6 +417,24 @@ mod tests {
             translate(duplicate, "", "db").message(),
             "Duplicate entry '1-x' for key 't.PRIMARY'"
         );
+    }
+
+    #[test]
+    fn sql_json_errors_take_mysqls_json_numbers() {
+        let cases = [
+            (SqlState::SYNTAX_ERROR, "syntax error at or near \"]\" of jsonpath input", 3143, "42000"),
+            (SqlState::MORE_THAN_ONE_SQL_JSON_ITEM, "JSON path expression in JSON_VALUE should return single item", 3967, "22034"),
+            (SqlState::NO_SQL_JSON_ITEM, "no SQL/JSON item found for specified path", 3966, "22035"),
+            (SqlState::SQL_JSON_SCALAR_REQUIRED, "JSON path expression in JSON_VALUE should return single scalar item", 3156, "22018"),
+            (SqlState::INVALID_TEXT_REPRESENTATION, "invalid input syntax for type json", 3141, "22032"),
+        ];
+        for (state, message, code, shown_state) in cases {
+            let shown = translate(SqlError::new(state, message), "SELECT 1", "db");
+            assert_eq!(shown.vendor_code(), Some(code), "{message}");
+            assert_eq!(shown.state().code(), shown_state, "{message}");
+        }
+        let plain = translate(SqlError::new(SqlState::SYNTAX_ERROR, "syntax error at or near \"FORM\""), "SELECT 1 FORM t", "db");
+        assert_eq!(plain.vendor_code(), Some(1064));
     }
 
     #[test]

@@ -623,3 +623,4 @@ its full title with its status.
 - [D596](decisions/D596.md) Code-only batch 244 (M9): tailable cursors on capped collections
 - [D597](decisions/D597.md) Code-only batch 245 (M9): MongoDB text scores
 - [D598](decisions/D598.md) Code-only batch 246 (M10): ON UPDATE CURRENT_TIMESTAMP in SHOW CREATE TABLE
+- [D599](decisions/D599.md) Code-only batch 247 (M10): MySQL's JSON error numbers
