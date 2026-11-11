@@ -193,11 +193,11 @@ impl Hold {
 #[derive(Default)]
 struct Registry {
     held: Mutex<HashMap<LockName, Vec<Hold>>>,
-    application_waits: Mutex<HashMap<u64, (LockName, Mode)>>,
+    application_waits: Mutex<HashMap<u64, (LockName, Mode, u64)>>,
     released: Condvar,
 }
 
-fn application_waits() -> MutexGuard<'static, HashMap<u64, (LockName, Mode)>> {
+fn application_waits() -> MutexGuard<'static, HashMap<u64, (LockName, Mode, u64)>> {
     registry()
         .application_waits
         .lock()
@@ -219,29 +219,46 @@ fn blockers(
     })
 }
 
-fn closes_a_cycle(
+fn cycle_through(
     held: &HashMap<LockName, Vec<Hold>>,
-    waits: &HashMap<u64, (LockName, Mode)>,
+    waits: &HashMap<u64, (LockName, Mode, u64)>,
     owner: u64,
-) -> bool {
-    let Some((name, mode)) = waits.get(&owner) else {
-        return false;
-    };
-    let mut seen = vec![owner];
-    let mut next = blockers(held, name, owner, *mode);
-    while let Some(blocker) = next.pop() {
-        if blocker == owner {
-            return true;
+) -> Option<Vec<u64>> {
+    let (name, mode, _) = waits.get(&owner)?;
+    let mut path = vec![owner];
+    let mut pending = vec![blockers(held, name, owner, *mode)];
+    let mut visited = vec![owner];
+    while let Some(choices) = pending.last_mut() {
+        let Some(next) = choices.pop() else {
+            pending.pop();
+            path.pop();
+            continue;
+        };
+        if next == owner {
+            return Some(path);
         }
-        if seen.contains(&blocker) {
+        if visited.contains(&next) {
             continue;
         }
-        seen.push(blocker);
-        if let Some((name, mode)) = waits.get(&blocker) {
-            next.extend(blockers(held, name, blocker, *mode));
-        }
+        visited.push(next);
+        let further = waits
+            .get(&next)
+            .map_or_else(Vec::new, |(name, mode, _)| blockers(held, name, next, *mode));
+        path.push(next);
+        pending.push(further);
     }
-    false
+    None
+}
+
+fn is_the_victim(
+    held: &HashMap<LockName, Vec<Hold>>,
+    waits: &HashMap<u64, (LockName, Mode, u64)>,
+    owner: u64,
+) -> bool {
+    let ticket = |member: &u64| waits.get(member).map_or(0, |(_, _, ticket)| *ticket);
+    cycle_through(held, waits, owner).is_some_and(|members| {
+        members.iter().max_by_key(|member| ticket(member)) == Some(&owner)
+    })
 }
 
 struct ApplicationWait {
@@ -250,12 +267,14 @@ struct ApplicationWait {
 
 impl ApplicationWait {
     fn start(owner: u64, name: LockName, mode: Mode) -> Self {
-        application_waits().insert(owner, (name, mode));
+        static TICKETS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let ticket = TICKETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        application_waits().insert(owner, (name, mode, ticket));
         Self { owner }
     }
 
     fn is_deadlocked(&self, held: &HashMap<LockName, Vec<Hold>>) -> bool {
-        closes_a_cycle(held, &application_waits(), self.owner)
+        is_the_victim(held, &application_waits(), self.owner)
     }
 }
 

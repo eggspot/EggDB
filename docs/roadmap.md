@@ -1028,7 +1028,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   source's identity (`NOT NULL` is built, D342), describing a prepared `OUTPUT ... INTO` that still returns
   rows, and PostgreSQL's `MERGE`; two `WHEN MATCHED` clauses, `$action`, `TOP` and `OUTPUT ...
   INTO` are built (D303).
-- SQL Server's application locks choosing one victim when two waiters close a cycle (PR #91).
+- SQL Server's application locks choosing one victim when two waiters close a cycle (PR #91). **Code
+  written, unbuilt** (code-only mode, 2026-11-11, D448).
 - Cursor variables, `WHERE CURRENT OF` on `FOR UPDATE` cursors (in PostgreSQL too), `sp_cursor*`
   server cursors and cursors reset by `sp_reset_connection` (D291).
 - `INSERT ... EXEC` of dynamic SQL, `EXEC AS`, three-part names and other databases in a batch

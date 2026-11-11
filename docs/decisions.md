@@ -472,3 +472,4 @@ its full title with its status.
 - [D445](decisions/D445.md) Code-only batch 93 (M16): HL7 v2 building and ACKs, FIX building, FIX and EDIFACT name dictionaries
 - [D446](decisions/D446.md) Code-only batch 94 (M14): `eggdb export --sql` writes sequences, views, comments and check and foreign-key constraints
 - [D447](decisions/D447.md) Code-only batch 95 (M11): ASOF joins
+- [D448](decisions/D448.md) Code-only batch 96 (M10): application-lock deadlocks choose one victim
