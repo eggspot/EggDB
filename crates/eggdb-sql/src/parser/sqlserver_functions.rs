@@ -622,8 +622,76 @@ impl Parser<'_> {
         }
     }
 
+    fn over_has_order_by(&self) -> bool {
+        if !self.is_word("over") || self.peek_kind_at(1) != &TokenKind::LeftParen {
+            return false;
+        }
+        let mut depth = 0usize;
+        let mut ahead = 1;
+        loop {
+            match self.peek_kind_at(ahead) {
+                TokenKind::End => return false,
+                TokenKind::LeftParen => depth += 1,
+                TokenKind::RightParen => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                TokenKind::Word(word) if depth == 1 && word == "order" => {
+                    return self.is_word_at(ahead + 1, "by");
+                }
+                _ => {}
+            }
+            ahead += 1;
+        }
+    }
+
+    fn sqlserver_window_function(&mut self, name: &Name) -> SqlResult<Option<Expr>> {
+        use crate::window::WindowFunction;
+        let Some(function) = WindowFunction::named(&name.text) else {
+            return Ok(None);
+        };
+        let count = match function {
+            WindowFunction::RowNumber
+            | WindowFunction::Rank
+            | WindowFunction::DenseRank
+            | WindowFunction::PercentRank
+            | WindowFunction::CumeDist => 0..=0,
+            WindowFunction::Ntile | WindowFunction::FirstValue | WindowFunction::LastValue => 1..=1,
+            WindowFunction::Lag | WindowFunction::Lead => 1..=3,
+            _ => return Ok(None),
+        };
+        let arguments = self.sqlserver_arguments(name, count)?;
+        let shown = name.text.to_ascii_uppercase();
+        if !self.is_word("over") {
+            return Err(SqlError::raised_in_sqlserver(
+                10753,
+                15,
+                1,
+                format!("The function '{shown}' must have an OVER clause."),
+                false,
+            )
+            .at(name.position));
+        }
+        if !self.over_has_order_by() {
+            return Err(SqlError::raised_in_sqlserver(
+                4112,
+                15,
+                1,
+                format!("The function '{shown}' must have an OVER clause with ORDER BY."),
+                false,
+            )
+            .at(name.position));
+        }
+        self.window_call(function, arguments, None, name).map(Some)
+    }
+
     pub(super) fn sqlserver_call(&mut self, name: &Name) -> SqlResult<Option<Expr>> {
         let position = name.position;
+        if let Some(expr) = self.sqlserver_window_function(name)? {
+            return Ok(Some(expr));
+        }
         if let Some(function) = crate::sqlserver_catalog::MetadataFunction::named(&name.text) {
             let mut arguments = self.sqlserver_arguments(name, function.arguments())?;
             if function.takes_the_database() {
