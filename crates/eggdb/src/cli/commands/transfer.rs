@@ -200,6 +200,9 @@ impl Session<'_> {
     }
 
     pub(super) fn import(&mut self) -> Result<Exit, Failure> {
+        if let Some(source) = self.request.csv.arrow.clone() {
+            return self.import_arrow(&source);
+        }
         if let Some(source) = self.request.csv.parquet.clone() {
             return self.import_parquet(&source);
         }

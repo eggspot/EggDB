@@ -6,6 +6,9 @@
 //! Apache Software Foundation; EggDB is compatible with its format.
 
 mod flatbuffer;
+mod read;
+
+pub use read::read;
 
 use eggdb_parquet::{Cell, Column, ColumnType};
 use flatbuffer::{Builder, Field, Offset};

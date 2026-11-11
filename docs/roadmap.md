@@ -1214,7 +1214,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `read_parquet` and the other file readers in SQL, after D202's decision on which files a
   server's SQL may open (D29, D202).
 - Arrow IPC reading, the `.arrow` file format, several batches, dictionaries and nested types
-  (D240).
+  (D240). Reading streams and `.arrow` files with several batches: **code written, unbuilt**
+  (code-only mode, 2026-11-12, D573). Left: writing `.arrow` files, dictionaries, compression and
+  nested types.
 - Arrow Flight SQL and ADBC (D29).
 - NDJSON, ORC and Avro (D29). NDJSON: **code written, unbuilt** (code-only mode, 2026-11-11, D505).
   Avro: **code written, unbuilt** (code-only mode, 2026-11-11, D509). Left: ORC.

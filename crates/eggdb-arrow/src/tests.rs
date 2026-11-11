@@ -1,4 +1,4 @@
-use crate::write_stream;
+use crate::{read, write_stream};
 use eggdb_parquet::{Cell, Column, ColumnType};
 
 fn u32_at(bytes: &[u8], at: usize) -> usize {
@@ -129,4 +129,28 @@ fn columns_of_different_lengths_or_wrong_cells_are_refused() {
     wrong[0].cells[0] = Cell::Bytes(b"x".to_vec());
     assert!(write_stream(&wrong).is_err());
     assert!(write_stream(&[]).is_ok());
+}
+
+#[test]
+fn a_written_stream_reads_back_and_so_does_a_file() {
+    let columns = sample();
+    let stream = write_stream(&columns).expect("the stream is written");
+    assert_eq!(read(&stream).expect("the stream reads"), columns);
+    let mut file = b"ARROW1\0\0".to_vec();
+    file.extend_from_slice(&stream);
+    assert_eq!(read(&file).expect("the file reads"), columns);
+}
+
+#[test]
+fn damaged_streams_are_errors_not_panics() {
+    let stream = write_stream(&sample()).expect("the stream is written");
+    for cut in [0, 3, 8, 40, stream.len() / 2, stream.len() - 9] {
+        let _ = read(&stream[..cut]);
+    }
+    let mut flipped = stream.clone();
+    for at in (0..flipped.len()).step_by(7) {
+        flipped[at] ^= 0x5a;
+        let _ = read(&flipped);
+    }
+    assert!(read(b"").is_err());
 }

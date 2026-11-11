@@ -308,7 +308,7 @@ impl CommandName {
             | OptionName::Avro => {
                 matches!(self, Self::Import | Self::Export)
             }
-            OptionName::Arrow => self == Self::Export,
+            OptionName::Arrow => matches!(self, Self::Export | Self::Import),
             OptionName::Dbf | OptionName::Copybook | OptionName::Ebcdic => self == Self::Import,
             OptionName::SqlDump => self == Self::Export,
             OptionName::OnConflict
@@ -2310,10 +2310,10 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
     }
     if csv.arrow.is_some() {
         if csv.parquet.is_some() || csv.source.is_some() || request.export_file.is_some() {
-            return Err("--arrow <file> writes the table alone: give it without --parquet, --csv or a second argument".to_owned());
+            return Err("--arrow <file> reads or writes the table alone: give it without --parquet, --csv or a second argument".to_owned());
         }
         if csv.table.is_none() {
-            return Err("--arrow needs --table <name>, the table to write".to_owned());
+            return Err("--arrow needs --table <name>, the table to load or write".to_owned());
         }
         return Ok(());
     }

@@ -208,6 +208,29 @@ impl Session<'_> {
         self.import_columns(&shown, &table, &columns)
     }
 
+    pub(super) fn import_arrow(&mut self, source: &Path) -> Result<Exit, Failure> {
+        let usage = |message: String| Failure::usage(message, Some(CommandName::Import));
+        let shown = render::text(source.display().to_string().as_bytes());
+        let table = self.request.csv.table.clone().unwrap_or_default();
+        let size = std::fs::metadata(source)
+            .map_err(|error| usage(format!("cannot read {shown}: {error}")))?
+            .len();
+        if size > MAX_PARQUET_BYTES {
+            return Err(usage(format!(
+                "{shown} is larger than 4 GiB, the most eggdb import --arrow reads at once"
+            )));
+        }
+        let bytes = std::fs::read(source)
+            .map_err(|error| usage(format!("cannot read {shown}: {error}")))?;
+        let columns = eggdb_arrow::read(&bytes).map_err(|error| {
+            Failure::database(
+                format!("cannot import {shown}: {error}"),
+                Exit::DatabaseError,
+            )
+        })?;
+        self.import_columns(&shown, &table, &columns)
+    }
+
     pub(super) fn import_columns(
         &mut self,
         shown: &str,

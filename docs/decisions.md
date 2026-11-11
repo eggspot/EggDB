@@ -597,3 +597,4 @@ its full title with its status.
 - [D570](decisions/D570.md) Code-only batch 218 (M6e): the client remembers its window size
 - [D571](decisions/D571.md) Code-only batch 219 (M6e): eggdb gui in the command model
 - [D572](decisions/D572.md) Code-only batch 220 (M11): Parquet files written with row groups and statistics
+- [D573](decisions/D573.md) Code-only batch 221 (M11): reading Apache Arrow IPC streams and files
