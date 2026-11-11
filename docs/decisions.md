@@ -502,3 +502,4 @@ its full title with its status.
 - [D475](decisions/D475.md) Code-only batch 123 (M9): SCRAM-SHA-1 for MongoDB drivers
 - [D476](decisions/D476.md) Code-only batch 124 (M16): NATS no-responders and token authentication
 - [D477](decisions/D477.md) Code-only batch 125 (M16): STOMP `/exchange/` destinations, forwarded headers and selectors
+- [D478](decisions/D478.md) Code-only batch 126 (M13): Cypher's GQL label expressions

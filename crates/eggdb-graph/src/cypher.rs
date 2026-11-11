@@ -16,9 +16,9 @@ enum Token {
     Symbol(&'static str),
 }
 
-const SYMBOLS: [&str; 26] = [
+const SYMBOLS: [&str; 28] = [
     "..", "<=", ">=", "<>", "=~", "+=", "(", ")", "[", "]", "{", "}", ",", ":", ".", "|", "*", "+",
-    "-", "/", "%", "^", "=", "<", ">", ";",
+    "-", "/", "%", "^", "=", "<", ">", ";", "&", "!",
 ];
 
 fn syntax(message: impl Into<String>) -> GraphError {
@@ -248,6 +248,52 @@ pub(crate) enum Expr {
 pub(crate) enum LabelExpression {
     AllOf(Vec<String>),
     AnyOf(Vec<String>),
+    Tree(LabelTerm),
+}
+
+/// A GQL label expression: `&` (and), `|` (or), `!` (not), `%` (any label) and parentheses.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum LabelTerm {
+    Name(String),
+    Wildcard,
+    Not(Box<LabelTerm>),
+    And(Vec<LabelTerm>),
+    Or(Vec<LabelTerm>),
+}
+
+impl LabelTerm {
+    fn matches(&self, held: &[String]) -> bool {
+        match self {
+            LabelTerm::Name(name) => held.contains(name),
+            LabelTerm::Wildcard => !held.is_empty(),
+            LabelTerm::Not(inner) => !inner.matches(held),
+            LabelTerm::And(items) => items.iter().all(|item| item.matches(held)),
+            LabelTerm::Or(items) => items.iter().any(|item| item.matches(held)),
+        }
+    }
+
+    fn written(&self) -> String {
+        let joined = |items: &[LabelTerm], separator: &str| {
+            let parts: Vec<String> = items
+                .iter()
+                .map(|item| match item {
+                    LabelTerm::And(_) | LabelTerm::Or(_) => format!("({})", item.written()),
+                    other => other.written(),
+                })
+                .collect();
+            parts.join(separator)
+        };
+        match self {
+            LabelTerm::Name(name) => name.clone(),
+            LabelTerm::Wildcard => "%".to_owned(),
+            LabelTerm::Not(inner) => match inner.as_ref() {
+                LabelTerm::And(_) | LabelTerm::Or(_) => format!("!({})", inner.written()),
+                other => format!("!{}", other.written()),
+            },
+            LabelTerm::And(items) => joined(items, "&"),
+            LabelTerm::Or(items) => joined(items, "|"),
+        }
+    }
 }
 
 impl LabelExpression {
@@ -255,12 +301,14 @@ impl LabelExpression {
         match self {
             LabelExpression::AllOf(labels) => labels.iter().all(|label| held.contains(label)),
             LabelExpression::AnyOf(labels) => labels.iter().any(|label| held.contains(label)),
+            LabelExpression::Tree(term) => term.matches(held),
         }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
         match self {
             LabelExpression::AllOf(labels) | LabelExpression::AnyOf(labels) => labels.is_empty(),
+            LabelExpression::Tree(_) => false,
         }
     }
 
@@ -268,6 +316,7 @@ impl LabelExpression {
         let (labels, separator) = match self {
             LabelExpression::AllOf(labels) => (labels, ":"),
             LabelExpression::AnyOf(labels) => (labels, "|"),
+            LabelExpression::Tree(term) => return format!(":{}", term.written()),
         };
         if labels.is_empty() {
             return String::new();
@@ -275,6 +324,8 @@ impl LabelExpression {
         format!(":{}", labels.join(separator))
     }
 }
+
+const MAX_LABEL_DEPTH: usize = 32;
 
 /// The direction a relationship pattern follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -455,7 +506,7 @@ fn refuse_label_alternatives(patterns: &[Pattern]) -> GraphResult<()> {
     let alternatives = patterns.iter().any(|pattern| {
         pattern
             .nodes()
-            .any(|node| matches!(node.labels, LabelExpression::AnyOf(_)))
+            .any(|node| !matches!(node.labels, LabelExpression::AllOf(_)))
     });
     if alternatives {
         return Err(syntax(
@@ -682,29 +733,89 @@ impl Parser<'_> {
 
     fn label_expression(&mut self, bar_may_end_it: bool) -> GraphResult<LabelExpression> {
         self.expect_symbol(":")?;
-        let mut labels = vec![self.name()?];
+        let first = self.label_or(bar_may_end_it, 0)?;
         if self.is_symbol(":") {
+            let LabelTerm::Name(name) = first else {
+                return Err(mixed_label_symbols());
+            };
+            let mut labels = vec![name];
             while self.take_symbol(":") {
                 labels.push(self.name()?);
             }
-            if self.is_symbol("|") && !bar_may_end_it {
+            if (self.is_symbol("|") && !bar_may_end_it)
+                || self.is_symbol("&")
+                || self.is_symbol("!")
+            {
                 return Err(mixed_label_symbols());
             }
             return Ok(LabelExpression::AllOf(labels));
         }
-        if bar_may_end_it || !self.is_symbol("|") {
-            return Ok(LabelExpression::AllOf(labels));
+        Ok(match first {
+            LabelTerm::Name(name) => LabelExpression::AllOf(vec![name]),
+            LabelTerm::Or(items) if items.iter().all(|item| matches!(item, LabelTerm::Name(_))) => {
+                LabelExpression::AnyOf(
+                    items
+                        .into_iter()
+                        .filter_map(|item| match item {
+                            LabelTerm::Name(name) => Some(name),
+                            _ => None,
+                        })
+                        .collect(),
+                )
+            }
+            other => LabelExpression::Tree(other),
+        })
+    }
+
+    fn label_or(&mut self, bar_may_end_it: bool, depth: usize) -> GraphResult<LabelTerm> {
+        if depth > MAX_LABEL_DEPTH {
+            return Err(syntax("the label expression nests too deeply"));
         }
-        while self.take_symbol("|") {
+        let mut items = vec![self.label_and(bar_may_end_it, depth)?];
+        while !bar_may_end_it && self.take_symbol("|") {
             if self.is_symbol(":") {
                 return Err(mixed_label_symbols());
             }
-            labels.push(self.name()?);
+            items.push(self.label_and(bar_may_end_it, depth)?);
         }
-        if self.is_symbol(":") {
-            return Err(mixed_label_symbols());
+        Ok(if items.len() == 1 {
+            items.remove(0)
+        } else {
+            LabelTerm::Or(items)
+        })
+    }
+
+    fn label_and(&mut self, bar_may_end_it: bool, depth: usize) -> GraphResult<LabelTerm> {
+        let mut items = vec![self.label_not(bar_may_end_it, depth)?];
+        while self.take_symbol("&") {
+            items.push(self.label_not(bar_may_end_it, depth)?);
         }
-        Ok(LabelExpression::AnyOf(labels))
+        Ok(if items.len() == 1 {
+            items.remove(0)
+        } else {
+            LabelTerm::And(items)
+        })
+    }
+
+    fn label_not(&mut self, bar_may_end_it: bool, depth: usize) -> GraphResult<LabelTerm> {
+        if self.take_symbol("!") {
+            if depth > MAX_LABEL_DEPTH {
+                return Err(syntax("the label expression nests too deeply"));
+            }
+            return Ok(LabelTerm::Not(Box::new(self.label_not(
+                bar_may_end_it,
+                depth + 1,
+            )?)));
+        }
+        if self.take_symbol("%") {
+            return Ok(LabelTerm::Wildcard);
+        }
+        if self.take_symbol("(") {
+            let inner = self.label_or(false, depth + 1)?;
+            self.expect_symbol(")")?;
+            return Ok(inner);
+        }
+        Ok(LabelTerm::Name(self.name()?))
     }
 
     fn relationship_pattern(&mut self) -> GraphResult<Option<RelationshipPattern>> {
