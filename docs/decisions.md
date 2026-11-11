@@ -486,3 +486,4 @@ its full title with its status.
 - [D459](decisions/D459.md) Code-only batch 107 (M6a): embedded resources in the REST API
 - [D460](decisions/D460.md) Code-only batch 108 (M6a): `--rate-limit` on every generated HTTP API
 - [D461](decisions/D461.md) Code-only batch 109 (M6a): PostgreSQL's function call protocol
+- [D462](decisions/D462.md) Code-only batch 110 (M6a): S3 `GetObject` streamed with `Content-Length`

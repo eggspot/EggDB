@@ -13,6 +13,7 @@ pub struct BodyWriter<'w> {
     out: &'w mut dyn Write,
     chunked: bool,
     pending: Vec<u8>,
+    sent: u64,
 }
 
 impl fmt::Debug for BodyWriter<'_> {
@@ -30,6 +31,7 @@ impl<'w> BodyWriter<'w> {
             out,
             chunked,
             pending: Vec::with_capacity(STREAM_CHUNK_BYTES),
+            sent: 0,
         }
     }
 
@@ -46,16 +48,18 @@ impl<'w> BodyWriter<'w> {
         } else {
             self.out.write_all(&self.pending)?;
         }
+        self.sent = self.sent.saturating_add(self.pending.len() as u64);
         self.pending.clear();
         Ok(())
     }
 
-    pub(crate) fn finish(mut self) -> io::Result<()> {
+    pub(crate) fn finish(mut self) -> io::Result<u64> {
         self.send_pending()?;
         if self.chunked {
             self.out.write_all(b"0\r\n\r\n")?;
         }
-        self.out.flush()
+        self.out.flush()?;
+        Ok(self.sent)
     }
 }
 
@@ -98,6 +102,10 @@ pub struct StreamedResponse<'a> {
     /// rows; the server holds them against its memory budget while it sends the body, and
     /// answers its over-budget response instead when they do not fit.
     pub held_bytes: usize,
+    /// The body's length when it is known before it is written, such as a stored object's:
+    /// the server then sends `Content-Length` instead of the chunked coding, and closes the
+    /// connection when the body writes a different number of bytes.
+    pub content_length: Option<u64>,
 }
 
 impl fmt::Debug for StreamedResponse<'_> {
@@ -107,6 +115,7 @@ impl fmt::Debug for StreamedResponse<'_> {
             .field("content_type", &self.content_type)
             .field("headers", &self.headers)
             .field("held_bytes", &self.held_bytes)
+            .field("content_length", &self.content_length)
             .finish_non_exhaustive()
     }
 }
@@ -124,7 +133,14 @@ impl<'a> StreamedResponse<'a> {
             headers: Vec::new(),
             body: Box::new(body),
             held_bytes: 0,
+            content_length: None,
         }
+    }
+
+    /// The same response, sent with `Content-Length: length`.
+    pub fn with_content_length(mut self, length: u64) -> Self {
+        self.content_length = Some(length);
+        self
     }
 
     /// The same response, holding `bytes` against the server's memory budget while it is sent.
@@ -147,7 +163,7 @@ impl<'a> StreamedResponse<'a> {
         let mut body = Vec::new();
         let written = {
             let mut writer = BodyWriter::new(&mut body, false);
-            (self.body)(&mut writer).and_then(|()| writer.finish())
+            (self.body)(&mut writer).and_then(|()| writer.finish().map(|_| ()))
         };
         match written {
             Ok(()) => Response {

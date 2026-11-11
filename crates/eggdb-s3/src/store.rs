@@ -239,6 +239,7 @@ fn read_chunks(
 }
 
 /// The buckets and objects of one keyspace (its database 0).
+#[derive(Clone, Copy)]
 pub(crate) struct Store<'k> {
     keyspace: &'k (dyn Keyspace + Sync),
 }
@@ -365,7 +366,9 @@ impl<'k> Store<'k> {
         Ok(info)
     }
 
-    pub(crate) fn object(&self, bucket: &str, key: &str) -> Result<ObjectInfo> {
+    /// The object's description and its stored record, which [`Store::read_object_piece`]
+    /// checks is unchanged.
+    pub(crate) fn object_record(&self, bucket: &str, key: &str) -> Result<(ObjectInfo, Vec<u8>)> {
         self.read(|keys| {
             if keys.get(&bucket_key(bucket)).map_err(storage)?.is_none() {
                 return Err(StoreError::NoSuchBucket);
@@ -374,7 +377,29 @@ impl<'k> Store<'k> {
                 .get(&object_key(bucket, key))
                 .map_err(storage)?
                 .ok_or(StoreError::NoSuchKey)?;
-            ObjectInfo::decode(&stored)
+            Ok((ObjectInfo::decode(&stored)?, stored))
+        })
+    }
+
+    /// The bytes of the object whose stored record is still `record` from `range.0` up to
+    /// (not including) `range.1`; an object replaced or deleted since is an error.
+    pub(crate) fn read_object_piece(
+        &self,
+        bucket: &str,
+        key: &str,
+        record: &[u8],
+        size: u64,
+        range: (u64, u64),
+    ) -> Result<Vec<u8>> {
+        self.read(|keys| {
+            let stored = keys
+                .get(&object_key(bucket, key))
+                .map_err(storage)?
+                .ok_or(StoreError::NoSuchKey)?;
+            if stored != record {
+                return Err(storage("the object changed while it was sent".to_owned()));
+            }
+            read_chunks(keys, &data_prefix(bucket, key), size, range)
         })
     }
 

@@ -268,11 +268,14 @@ fn write_streamed(
     version: Version,
     keep: bool,
 ) -> bool {
-    let chunked = version == Version::Http11;
-    let connection = ConnectionHeader::of(version, keep && chunked);
+    let length = streamed.content_length;
+    let chunked = version == Version::Http11 && length.is_none();
+    let connection = ConnectionHeader::of(version, keep && (chunked || length.is_some()));
     let framed = !bodyless(streamed.status);
     let mut head = status_head(streamed.status, &streamed.content_type, connection);
-    if chunked && framed {
+    if let Some(length) = length {
+        head.push_str(&format!("Content-Length: {length}\r\n"));
+    } else if chunked && framed {
         head.push_str("Transfer-Encoding: chunked\r\n");
     }
     for (name, value) in streamed
@@ -291,7 +294,11 @@ fn write_streamed(
     }
     let mut writer = BodyWriter::new(out, chunked);
     let written = (streamed.body)(&mut writer).and_then(|()| writer.finish());
-    written.is_ok() && connection.keeps()
+    match (written, length) {
+        (Ok(sent), Some(length)) => sent == length && connection.keeps(),
+        (Ok(_), None) => connection.keeps(),
+        (Err(_), _) => false,
+    }
 }
 
 fn refusal(error: &HttpError, limits: &Limits<'_>) -> Option<Response> {

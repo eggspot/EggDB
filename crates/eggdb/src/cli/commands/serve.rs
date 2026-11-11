@@ -1025,9 +1025,9 @@ impl Session<'_> {
                 _ => Ok(()),
             });
             let s3_server = scope.spawn(|| match (&s3_listener, &s3_endpoint) {
-                (Some(listener), Some(endpoint)) => eggdb_http::serve_with_limits(
+                (Some(listener), Some(endpoint)) => eggdb_http::serve_replies_with_limits(
                     listener,
-                    &|request| endpoint.answer(request),
+                    &|request| endpoint.reply(request),
                     &stop_signals::requested,
                     &eggdb_http::Limits::new(eggdb_s3::MAX_REQUEST_BYTES, &memory_budget).with_rate_limit(rate_limiter.as_ref())
                         .answering_over_budget_with(eggdb_s3::over_memory_budget),

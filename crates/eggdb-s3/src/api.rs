@@ -1,7 +1,9 @@
 use crate::store::{ObjectInfo, Store, StoreError};
 use crate::xml::{elements, escape, text};
 use eggdb_auth::sigv4::{self, SigV4Error, SignedRequest, uri_encode, utc_time};
-use eggdb_http::{Request, Response};
+use eggdb_http::{Reply, Request, Response, StreamedResponse};
+use std::cell::RefCell;
+use std::io::Write;
 use eggdb_keyspace::Keyspace;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,6 +15,19 @@ const MAX_PART_NUMBER: u32 = 10_000;
 const XMLNS: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
 const DEFAULT_CONTENT_TYPE: &str = "binary/octet-stream";
 const LIST_RESUME_MARK: char = '\u{10FFFF}';
+const STREAMED_FROM_BYTES: u64 = 1 << 20;
+const STREAM_PIECE_BYTES: u64 = 1 << 20;
+
+struct StreamPlan {
+    status: u16,
+    content_type: String,
+    headers: Vec<(String, String)>,
+    bucket: String,
+    key: String,
+    record: Vec<u8>,
+    size: u64,
+    range: (u64, u64),
+}
 
 /// The S3-compatible endpoint over one keyspace's buckets.
 pub struct Endpoint<'k> {
@@ -182,6 +197,7 @@ fn valid_key(key: &str) -> bool {
 
 struct Call<'r> {
     request: &'r Request,
+    stream: &'r RefCell<Option<StreamPlan>>,
     bucket: String,
     key: String,
     query: Vec<(String, String)>,
@@ -272,8 +288,44 @@ impl<'k> Endpoint<'k> {
         }
     }
 
-    /// Answers one HTTP request.
+    /// Answers one HTTP request with its whole response in memory.
     pub fn answer(&self, request: &Request) -> Response {
+        self.reply(request).into_response()
+    }
+
+    /// Answers one HTTP request; the body of a `GetObject` of 1 MiB or more is a
+    /// [`StreamedResponse`] read a piece at a time as it is sent, with its `Content-Length`.
+    pub fn reply(&self, request: &Request) -> Reply<'k> {
+        let plan = RefCell::new(None);
+        let response = self.respond(request, &plan);
+        let Some(plan) = plan.into_inner() else {
+            return Reply::Whole(response);
+        };
+        let store = self.store;
+        let length = plan.range.1 - plan.range.0;
+        let status = plan.status;
+        let content_type = plan.content_type.clone();
+        let headers = plan.headers.clone();
+        let mut streamed = StreamedResponse::new(status, &content_type, move |out| {
+            let mut at = plan.range.0;
+            while at < plan.range.1 {
+                let next = at.saturating_add(STREAM_PIECE_BYTES).min(plan.range.1);
+                let bytes = store
+                    .read_object_piece(&plan.bucket, &plan.key, &plan.record, plan.size, (at, next))
+                    .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
+                out.write_all(&bytes)?;
+                at = next;
+            }
+            Ok(())
+        })
+        .with_content_length(length);
+        for (name, value) in &headers {
+            streamed = streamed.with_header(name, value);
+        }
+        Reply::Streamed(streamed)
+    }
+
+    fn respond(&self, request: &Request, stream: &RefCell<Option<StreamPlan>>) -> Response {
         let signed = SignedRequest {
             method: &request.method,
             path: &request.path,
@@ -332,6 +384,7 @@ impl<'k> Endpoint<'k> {
             .collect();
         let call = Call {
             request,
+            stream,
             bucket: bucket.to_owned(),
             key: key.to_owned(),
             query,
@@ -746,8 +799,8 @@ impl<'k> Endpoint<'k> {
     }
 
     fn get_object(&self, call: &Call<'_>, head_only: bool) -> Response {
-        let info = match self.store.object(&call.bucket, &call.key) {
-            Ok(info) => info,
+        let (info, record) = match self.store.object_record(&call.bucket, &call.key) {
+            Ok(found) => found,
             Err(error) => {
                 return if head_only {
                     empty(store_failure(&error, "").status)
@@ -786,6 +839,25 @@ impl<'k> Endpoint<'k> {
         if head_only {
             let length = range.map_or(info.size, |(start, end)| end - start);
             headers.push(("Content-Length".to_owned(), length.to_string()));
+            return Response {
+                status,
+                content_type,
+                body: Vec::new(),
+                headers,
+            };
+        }
+        let (start, end) = range.unwrap_or((0, info.size));
+        if end.saturating_sub(start) >= STREAMED_FROM_BYTES {
+            *call.stream.borrow_mut() = Some(StreamPlan {
+                status,
+                content_type: content_type.clone(),
+                headers: headers.clone(),
+                bucket: call.bucket.clone(),
+                key: call.key.clone(),
+                record,
+                size: info.size,
+                range: (start, end),
+            });
             return Response {
                 status,
                 content_type,

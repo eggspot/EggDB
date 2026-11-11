@@ -604,7 +604,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - TLS session resumption, and the processor's AES instructions (D161).
 - HTTP/2, gRPC and QUIC as shared crates of our own (D34).
 - Elasticsearch search and scroll hits sent as a stream, like the REST API's rows (D325).
-- S3 `GetObject` of a large object sent as a stream (D325, D188).
+- S3 `GetObject` of a large object sent as a stream (D325, D188). **Code written, unbuilt** (code-only
+  mode, 2026-11-11, D462).
 - Prometheus query results sent as a stream (D325).
 - Large HTTP request bodies handed to the handler as they arrive (D325).
 - PostgreSQL's function call protocol (D103). **Code written, unbuilt** (code-only mode, 2026-11-11,
