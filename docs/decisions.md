@@ -572,3 +572,4 @@ its full title with its status.
 - [D545](decisions/D545.md) Code-only batch 193 (M16): Kafka ListGroups, DescribeGroups and DeleteGroups
 - [D546](decisions/D546.md) Code-only batch 194 (M16): Kafka idempotent producers
 - [D547](decisions/D547.md) Code-only batch 195 (M6e): a RESP connection opens on its first key space
+- [D548](decisions/D548.md) Code-only batch 196 (M6e): the keys tab's prefix caret, and a solid editor caret under its menu

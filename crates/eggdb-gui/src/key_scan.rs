@@ -589,6 +589,8 @@ pub struct KeyPages {
     pub prefix_focused: bool,
     /// Whether the field's text is selected (it is when the field takes the focus).
     pub prefix_selected: bool,
+    /// Where the field's caret is, in characters from the start of its text.
+    pub prefix_caret: usize,
     /// The prefix that was active when the field took the focus, which `Esc` restores.
     pub prefix_on_focus: String,
     /// The start of every page shown before the current one, page 1's first.
@@ -604,7 +606,85 @@ pub struct KeyPages {
     pub land_on_last: bool,
 }
 
+/// Where a caret key moves the prefix field's caret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefixCaretMove {
+    /// `Left`: one character back, or to the start of a selection.
+    Left,
+    /// `Right`: one character on, or to the end of a selection.
+    Right,
+    /// `Home`.
+    Start,
+    /// `End`.
+    End,
+}
+
 impl KeyPages {
+    fn prefix_length(&self) -> usize {
+        self.prefix_text.chars().count()
+    }
+
+    fn prefix_byte_at(&self, characters: usize) -> usize {
+        self.prefix_text
+            .char_indices()
+            .nth(characters)
+            .map_or(self.prefix_text.len(), |(at, _)| at)
+    }
+
+    /// Puts the caret after the field's last character.
+    pub fn prefix_caret_to_end(&mut self) {
+        self.prefix_caret = self.prefix_length();
+    }
+
+    /// Types `text` at the caret, in place of the field's text when it is selected.
+    pub fn type_into_prefix(&mut self, text: &str) {
+        if std::mem::take(&mut self.prefix_selected) {
+            self.prefix_text.clear();
+            self.prefix_caret = 0;
+        }
+        let caret = self.prefix_caret.min(self.prefix_length());
+        let at = self.prefix_byte_at(caret);
+        self.prefix_text.insert_str(at, text);
+        self.prefix_caret = caret + text.chars().count();
+    }
+
+    /// Deletes the selected text, else the character before the caret (`backward`) or after
+    /// it; whether the text changed.
+    pub fn delete_in_prefix(&mut self, backward: bool) -> bool {
+        if std::mem::take(&mut self.prefix_selected) {
+            let changed = !self.prefix_text.is_empty();
+            self.prefix_text.clear();
+            self.prefix_caret = 0;
+            return changed;
+        }
+        let caret = self.prefix_caret.min(self.prefix_length());
+        let target = match (backward, caret) {
+            (true, 0) => return false,
+            (true, caret) => caret - 1,
+            (false, caret) if caret >= self.prefix_length() => return false,
+            (false, caret) => caret,
+        };
+        let at = self.prefix_byte_at(target);
+        self.prefix_text.remove(at);
+        self.prefix_caret = target;
+        true
+    }
+
+    /// Moves the caret; a selection collapses to the side the caret moves towards.
+    pub fn move_prefix_caret(&mut self, to: PrefixCaretMove) {
+        let length = self.prefix_length();
+        let caret = self.prefix_caret.min(length);
+        let selected = std::mem::take(&mut self.prefix_selected);
+        self.prefix_caret = match to {
+            PrefixCaretMove::Left if selected => 0,
+            PrefixCaretMove::Left => caret.saturating_sub(1),
+            PrefixCaretMove::Right if selected => length,
+            PrefixCaretMove::Right => (caret + 1).min(length),
+            PrefixCaretMove::Start => 0,
+            PrefixCaretMove::End => length,
+        };
+    }
+
     /// The field's error line, when its text does not spell bytes.
     pub fn prefix_error(&self) -> Option<String> {
         unspelled(&self.prefix_text)
@@ -825,6 +905,37 @@ mod tests {
         assert_eq!(default.rows[0][1].as_deref(), Some("hello"));
         drop(database);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_prefix_field_types_and_deletes_at_its_caret() {
+        let mut pages = KeyPages {
+            prefix_text: "usr:".to_owned(),
+            prefix_selected: true,
+            ..KeyPages::default()
+        };
+        pages.prefix_caret_to_end();
+        pages.move_prefix_caret(PrefixCaretMove::Left);
+        assert_eq!(pages.prefix_caret, 0, "Left from a selection goes to its start");
+        pages.move_prefix_caret(PrefixCaretMove::Right);
+        pages.type_into_prefix("e");
+        assert_eq!(pages.prefix_text, "uesr:");
+        pages.delete_in_prefix(false);
+        assert_eq!(pages.prefix_text, "uer:");
+        pages.move_prefix_caret(PrefixCaretMove::Start);
+        pages.move_prefix_caret(PrefixCaretMove::Right);
+        pages.type_into_prefix("s");
+        assert_eq!(pages.prefix_text, "user:");
+        pages.prefix_text = "é:".to_owned();
+        pages.move_prefix_caret(PrefixCaretMove::End);
+        assert!(pages.delete_in_prefix(true));
+        assert_eq!(pages.prefix_text, "é");
+        assert!(pages.delete_in_prefix(true));
+        assert!(!pages.delete_in_prefix(true), "nothing before the caret");
+        pages.prefix_text = "ab".to_owned();
+        pages.prefix_selected = true;
+        pages.type_into_prefix("c");
+        assert_eq!((pages.prefix_text.as_str(), pages.prefix_caret), ("c", 1));
     }
 
     #[test]

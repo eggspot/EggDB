@@ -2324,6 +2324,11 @@ pub fn first_visible_line(caret_line: usize, visible_lines: usize) -> usize {
 }
 
 fn editor(paint: &mut Painter<'_, '_>, tab: &QueryTab, caret_look: CaretLook) {
+    let caret_look = if tab.editor_menu.is_some() && caret_look == CaretLook::Off {
+        CaretLook::On
+    } else {
+        caret_look
+    };
     let theme = paint.theme;
     let faces = paint.faces;
     let centre_width = paint.centre_width();
@@ -2728,7 +2733,8 @@ fn keys_header(paint: &mut Painter<'_, '_>, tab: &QueryTab, centre_right: f32) {
         paint.text(faces.ui, &shown, text_left, 393.0, BODY, ink);
     }
     if pages.prefix_focused && !pages.prefix_selected {
-        let caret = text_left + faces.ui.width(&pages.prefix_text, BODY.0).min(room);
+        let before: String = pages.prefix_text.chars().take(pages.prefix_caret).collect();
+        let caret = text_left + faces.ui.width(&before, BODY.0).min(room);
         paint.rect(caret.round(), field.y + 5.0, 1.0, 18.0, theme.accent);
     }
     if let Some(line) = &error {
@@ -3566,6 +3572,7 @@ impl MainWindow {
                 self.tab.focus_prefix();
                 if let AccessAction::SetValue(text) = action {
                     self.tab.key_pages.prefix_text = text.clone();
+                    self.tab.key_pages.prefix_caret_to_end();
                     return Some(vec![KeyPress::plain(Key::Enter)]);
                 }
                 Some(Vec::new())

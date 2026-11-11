@@ -819,8 +819,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - RESP over TLS in the client (`rediss://`, shown as `RESP · TLS`) (D329).
 - A RESP connection opens without an empty `Query 1` tab (D329). **Code written, unbuilt** (code-only
   mode, 2026-11-11, D547).
-- Caret movement in the keys tab's prefix field, and `Tab` stops on `Back` and `Next 100` (D329).
-- The editor keeps its focused look while its menu is open (D329).
+- Caret movement in the keys tab's prefix field, and `Tab` stops on `Back` and `Next 100` (D329). Caret
+  movement: **code written, unbuilt** (code-only mode, 2026-11-11, D548).
+- The editor keeps its focused look while its menu is open (D329). **Code written, unbuilt** (code-only
+  mode, 2026-11-11, D548).
 - `Paste` in the browser reads the clipboard (D329).
 - `menu`, `menuitem` and `searchbox` roles in the platform layer's accessibility (D329).
 - `Stop` interrupting a RESP reconnect's TCP connect itself, which now takes effect when that

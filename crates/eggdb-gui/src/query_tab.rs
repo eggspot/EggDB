@@ -13,7 +13,8 @@ use crate::editor_menu::{
 use crate::grid::{GridAnswer, GridMenuItem, ResultGrid, cell_text, column_widths};
 use crate::grid_menu::{GridMenu, MenuAnswer};
 use crate::key_scan::{
-    KEY_SCAN_LIMIT, KeyPages, KeySpaceScan, PageEnd, PageStart, forget_old_shown_keys, unspelled,
+    KEY_SCAN_LIMIT, KeyPages, KeySpaceScan, PageEnd, PageStart, PrefixCaretMove,
+    forget_old_shown_keys, unspelled,
 };
 use crate::plan_view::{Plan, PlanAnswer, PlanView, explain_statements};
 use crate::sql_format::{comment_edits, format_sql, is_blank_sql};
@@ -1059,6 +1060,7 @@ impl QueryTab {
         pages.prefix_focused = true;
         pages.prefix_selected = true;
         pages.prefix_on_focus = pages.prefix_text.clone();
+        pages.prefix_caret_to_end();
         if let Some(grid) = &mut self.grid {
             grid.focused = false;
         }
@@ -1129,6 +1131,7 @@ impl QueryTab {
             Key::Escape => {
                 let changed = pages.prefix_text != pages.prefix_on_focus;
                 pages.prefix_text = pages.prefix_on_focus.clone();
+                pages.prefix_caret_to_end();
                 pages.due = None;
                 self.leave_prefix();
                 return if changed {
@@ -1150,29 +1153,22 @@ impl QueryTab {
             }
             Key::Character('a' | 'A') if primary => pages.prefix_selected = true,
             Key::Character('f' | 'F') if primary => pages.prefix_selected = true,
-            Key::Backspace => {
-                if pages.prefix_selected {
-                    pages.prefix_text.clear();
-                } else if pages.prefix_text.pop().is_none() {
+            Key::Backspace | Key::Delete => {
+                if !pages.delete_in_prefix(matches!(press.key, Key::Backspace)) {
                     return TabAction::None;
                 }
-                pages.prefix_selected = false;
                 pages.due = Some(now + PREFIX_DEBOUNCE);
             }
+            Key::Left => pages.move_prefix_caret(PrefixCaretMove::Left),
+            Key::Right => pages.move_prefix_caret(PrefixCaretMove::Right),
+            Key::Home => pages.move_prefix_caret(PrefixCaretMove::Start),
+            Key::End => pages.move_prefix_caret(PrefixCaretMove::End),
             Key::Character(letter) if !primary && !letter.is_control() => {
-                if pages.prefix_selected {
-                    pages.prefix_text.clear();
-                }
-                pages.prefix_text.push(letter);
-                pages.prefix_selected = false;
+                pages.type_into_prefix(letter.encode_utf8(&mut [0; 4]));
                 pages.due = Some(now + PREFIX_DEBOUNCE);
             }
             Key::Space if !primary => {
-                if pages.prefix_selected {
-                    pages.prefix_text.clear();
-                }
-                pages.prefix_text.push(' ');
-                pages.prefix_selected = false;
+                pages.type_into_prefix(" ");
                 pages.due = Some(now + PREFIX_DEBOUNCE);
             }
             _ => {}
