@@ -386,11 +386,12 @@ jobs:
           PY
           "$RUNNER_TEMP/resp/bin/python" - <<'PY'
           from confluent_kafka import Consumer, Producer, TopicPartition, OFFSET_BEGINNING
-          producer = Producer({"bootstrap.servers": "127.0.0.1:9093", "api.version.request": True})
+          sasl = {"security.protocol": "SASL_PLAINTEXT", "sasl.mechanism": "PLAIN", "sasl.username": "eggdb", "sasl.password": "ci-resp-password"}
+          producer = Producer({"bootstrap.servers": "127.0.0.1:9093", "api.version.request": True, **sasl})
           for n in range(5):
               producer.produce("events", value=f"event {n}".encode())
           assert producer.flush(10) == 0
-          consumer = Consumer({"bootstrap.servers": "127.0.0.1:9093", "group.id": "ci", "enable.auto.commit": False})
+          consumer = Consumer({"bootstrap.servers": "127.0.0.1:9093", "group.id": "ci", "enable.auto.commit": False, **sasl})
           consumer.assign([TopicPartition("events", 0, OFFSET_BEGINNING)])
           values = []
           while len(values) < 5:
