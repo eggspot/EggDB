@@ -1282,11 +1282,11 @@ fn call_subquery_errors_follow_neo4j() {
             "Neo.ClientError.Statement.SyntaxError",
         ),
         (
-            "UNWIND [1] AS x CALL { WITH x CREATE (:Batch) } IN TRANSACTIONS",
+            "UNWIND [1] AS x CALL { WITH x CREATE (:Batch) } IN TRANSACTIONS ON ERROR CONTINUE",
             "Neo.ClientError.Statement.FeatureNotSupported",
         ),
         (
-            "UNWIND [1] AS x CALL { WITH x CREATE (:Batch) } IN TRANSACTIONS OF 10 ROWS",
+            "UNWIND [1] AS x CALL { WITH x CREATE (:Batch) } IN TRANSACTIONS OF 10 ROWS REPORT STATUS AS s",
             "Neo.ClientError.Statement.FeatureNotSupported",
         ),
         (
