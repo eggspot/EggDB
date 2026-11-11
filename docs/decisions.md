@@ -520,3 +520,4 @@ its full title with its status.
 - [D493](decisions/D493.md) Code-only batch 141 (M16): Kafka SASL/PLAIN authentication
 - [D494](decisions/D494.md) Code-only batch 142 (M16): Kafka topic retention
 - [D495](decisions/D495.md) Code-only batch 143 (M16): Loki's push API
+- [D496](decisions/D496.md) Code-only batch 144 (M16): LogQL log queries and Loki's label endpoints

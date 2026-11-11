@@ -219,6 +219,28 @@ fn form(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+const MAX_LOG_ROWS_READ: usize = 1_000_000;
+const MAX_LOG_LIMIT: usize = 5000;
+const UNIX_EPOCH_FROM_2000_MICROS: i64 = 946_684_800_000_000;
+
+fn loki_time(text: Option<&str>, default_ns: i64) -> Result<i64, String> {
+    let Some(text) = text else {
+        return Ok(default_ns);
+    };
+    if !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) && text.len() >= 16 {
+        return text
+            .parse()
+            .map_err(|_| format!("cannot parse {text:?} to a valid timestamp"));
+    }
+    let seconds: f64 = text
+        .parse()
+        .map_err(|_| format!("cannot parse {text:?} to a valid timestamp: use Unix nanoseconds or seconds"))?;
+    if !seconds.is_finite() {
+        return Err(format!("{text} is not a time"));
+    }
+    Ok((seconds * 1e9).round() as i64)
+}
+
 fn time_param(text: Option<&str>, default: i64) -> Result<i64, String> {
     let Some(text) = text else {
         return Ok(default);
@@ -403,6 +425,21 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             }
             ("POST", REMOTE_WRITE_PATH) => self.remote_write(request),
             ("POST", crate::loki::PUSH_PATH) => self.loki_push(request),
+            ("GET" | "POST", "/loki/api/v1/query_range") => self.loki_query(
+                value("query"),
+                (value("start"), value("end")),
+                value("limit"),
+                value("direction"),
+            ),
+            ("GET" | "POST", "/loki/api/v1/labels") => self.loki_labels(None),
+            ("GET" | "POST", path)
+                if path.starts_with("/loki/api/v1/label/") && path.ends_with("/values") =>
+            {
+                let name = path
+                    .trim_start_matches("/loki/api/v1/label/")
+                    .trim_end_matches("/values");
+                self.loki_labels(Some(&percent_decode(name)))
+            }
             ("GET" | "POST", "/api/v1/query") => self.query(value("query"), value("time")),
             ("GET" | "POST", "/api/v1/query_range") => {
                 self.query_range(value("query"), value("start"), value("end"), value("step"))
@@ -459,6 +496,138 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                 ),
             ),
         }
+    }
+
+    fn log_rows(&self, from_ns: i64, to_ns: i64, forward: bool) -> Result<Vec<(Vec<(String, String)>, i64, String)>, String> {
+        let sql = format!(
+            "SELECT * FROM {}.logs WHERE time >= {} AND time <= {} ORDER BY time {} LIMIT {MAX_LOG_ROWS_READ}",
+            store::SCHEMA,
+            store::timestamp_literal(from_ns.div_euclid(1000)),
+            store::timestamp_literal(to_ns.div_euclid(1000)),
+            if forward { "ASC" } else { "DESC" }
+        );
+        let results = match store::run(&mut self.session(), &sql) {
+            Ok(results) => results,
+            Err(message) if message.contains("does not exist") => return Ok(Vec::new()),
+            Err(message) => return Err(message),
+        };
+        let Some(found) = results.into_iter().rev().find(|result| result.columns.is_some()) else {
+            return Ok(Vec::new());
+        };
+        let names: Vec<String> = found
+            .columns
+            .iter()
+            .flatten()
+            .map(|column| column.name.clone())
+            .collect();
+        let mut rows = Vec::with_capacity(found.rows.len());
+        for row in found.rows {
+            let mut labels = Vec::new();
+            let mut line = String::new();
+            let mut time_ns = 0i64;
+            for (name, value) in names.iter().zip(row) {
+                match (name.as_str(), value) {
+                    ("time", Value::TimestampTz(micros)) => {
+                        time_ns = micros
+                            .saturating_add(UNIX_EPOCH_FROM_2000_MICROS)
+                            .saturating_mul(1000);
+                    }
+                    ("line", Value::Text(text)) => line = text,
+                    (_, Value::Text(text)) if !text.is_empty() => labels.push((name.clone(), text)),
+                    _ => {}
+                }
+            }
+            labels.sort();
+            rows.push((labels, time_ns, line));
+        }
+        Ok(rows)
+    }
+
+    fn loki_query(
+        &self,
+        query: Option<&str>,
+        (start, end): (Option<&str>, Option<&str>),
+        limit: Option<&str>,
+        direction: Option<&str>,
+    ) -> Response {
+        let Some(query) = query else {
+            return bad_data("missing parameter query");
+        };
+        let parsed = match crate::logql::parse(query) {
+            Ok(parsed) => parsed,
+            Err(message) => return bad_data(&message),
+        };
+        let now_ns = now_ms().saturating_mul(1_000_000);
+        let to_ns = match loki_time(end, now_ns) {
+            Ok(value) => value,
+            Err(message) => return bad_data(&message),
+        };
+        let from_ns = match loki_time(start, to_ns.saturating_sub(3_600_000_000_000)) {
+            Ok(value) => value,
+            Err(message) => return bad_data(&message),
+        };
+        let limit = match limit.map(str::parse::<usize>) {
+            None => 100,
+            Some(Ok(limit)) if limit > 0 => limit.min(MAX_LOG_LIMIT),
+            Some(_) => return bad_data("limit must be a positive whole number"),
+        };
+        let forward = direction.is_some_and(|direction| direction.eq_ignore_ascii_case("forward"));
+        let rows = match self.log_rows(from_ns, to_ns, forward) {
+            Ok(rows) => rows,
+            Err(message) => return bad_data(&message),
+        };
+        let mut streams: BTreeMap<Vec<(String, String)>, Vec<(i64, String)>> = BTreeMap::new();
+        let mut kept = 0usize;
+        for (labels, time_ns, line) in rows {
+            if kept >= limit {
+                break;
+            }
+            if parsed.keeps(&labels, &line) {
+                streams.entry(labels).or_default().push((time_ns, line));
+                kept += 1;
+            }
+        }
+        let result: Vec<String> = streams
+            .into_iter()
+            .map(|(labels, values)| {
+                let entries: Vec<String> = values
+                    .iter()
+                    .map(|(time_ns, line)| format!("[\"{time_ns}\",{}]", json_string(line)))
+                    .collect();
+                format!(
+                    "{{\"stream\":{},\"values\":[{}]}}",
+                    labels_json(&labels),
+                    entries.join(",")
+                )
+            })
+            .collect();
+        success(&format!(
+            "{{\"resultType\":\"streams\",\"result\":[{}],\"stats\":{{}}}}",
+            result.join(",")
+        ))
+    }
+
+    fn loki_labels(&self, name: Option<&str>) -> Response {
+        let now_ns = now_ms().saturating_mul(1_000_000);
+        let rows = match self.log_rows(now_ns.saturating_sub(6 * 3_600_000_000_000), now_ns, false) {
+            Ok(rows) => rows,
+            Err(message) => return bad_data(&message),
+        };
+        let mut found: BTreeSet<String> = BTreeSet::new();
+        for (labels, _, _) in rows {
+            for (label, value) in labels {
+                match name {
+                    None => {
+                        found.insert(label);
+                    }
+                    Some(wanted) if wanted == label => {
+                        found.insert(value);
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        success(&strings_json(&found))
     }
 
     fn loki_push(&self, request: &Request) -> Response {
