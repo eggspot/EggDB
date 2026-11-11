@@ -8,9 +8,11 @@
 
 mod aggregations;
 mod api;
+mod highlight;
 mod json_out;
 mod mustache;
 mod query;
+mod query_string;
 mod script;
 mod sort;
 mod source_filter;

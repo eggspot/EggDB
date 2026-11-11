@@ -539,3 +539,4 @@ its full title with its status.
 - [D512](decisions/D512.md) Code-only batch 160 (M7): Redis stream consumer groups
 - [D513](decisions/D513.md) Code-only batch 161 (M8): MySQL MATCH ... AGAINST
 - [D514](decisions/D514.md) Code-only batch 162 (M8): SQL Server CONTAINS and FREETEXT
+- [D515](decisions/D515.md) Code-only batch 163 (M8): Elasticsearch query_string and highlighting

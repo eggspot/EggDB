@@ -58,7 +58,7 @@ fn member<'n>(node: &'n Node, name: &str) -> Option<&'n Node> {
     }
 }
 
-fn text_of(node: &Node) -> Option<String> {
+pub(crate) fn text_of(node: &Node) -> Option<String> {
     match &node.value {
         Json::String(text) => Some(text.clone()),
         Json::Number(text) => Some(text.clone()),
@@ -233,6 +233,8 @@ pub(crate) fn parse(node: &Node, depth: usize) -> Result<Query, String> {
                 minimum_should_match: minimum,
             }
         }
+        "query_string" => crate::query_string::parse(body, false)?,
+        "simple_query_string" => crate::query_string::parse(body, true)?,
         other => return Err(format!("unknown query [{other}]")),
     })
 }

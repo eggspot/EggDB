@@ -1191,11 +1191,20 @@ impl<'k> Api<'k> {
                 }
             },
             None => match query_flag(request, "q") {
-                Some(text) => crate::query::Query::Match {
-                    fields: vec!["*".to_owned()],
-                    terms: crate::query::analyze(&text),
-                    all: false,
-                },
+                Some(text) => {
+                    let options = crate::query_string::Options {
+                        fields: vec![query_flag(request, "df").unwrap_or_else(|| "*".to_owned())],
+                        all_by_default: query_flag(request, "default_operator")
+                            .is_some_and(|operator| operator.eq_ignore_ascii_case("and")),
+                        simple: false,
+                    };
+                    match crate::query_string::query_of(&text, &options) {
+                        Ok(query) => query,
+                        Err(reason) => {
+                            return Ok(SearchOutcome::Whole(error(400, "query_shard_exception", &reason)));
+                        }
+                    }
+                }
                 None => crate::query::Query::MatchAll,
             },
         };
@@ -1265,6 +1274,15 @@ impl<'k> Api<'k> {
             })
             .unzip();
         let query = expand_wildcard_fields(query, &documents);
+        let highlight = match member("highlight") {
+            Some(node) if !count_only => match crate::highlight::highlight_of(&node, &query) {
+                Ok(highlight) => Some(highlight),
+                Err(reason) => {
+                    return Ok(SearchOutcome::Whole(error(400, "parsing_exception", &reason)));
+                }
+            },
+            _ => None,
+        };
         let stats = Stats::of(&query, &documents);
         let mut hits: Vec<(f64, usize)> = documents
             .iter()
@@ -1383,6 +1401,7 @@ impl<'k> Api<'k> {
             gathered,
             hits: page_hits,
             source_filter: presentation.source_filter,
+            highlight,
             tail,
             size,
         }))
@@ -1405,6 +1424,7 @@ struct SearchPage {
     gathered: Arc<Vec<(String, String, String)>>,
     hits: Vec<PageHit>,
     source_filter: SourceFilter,
+    highlight: Option<crate::highlight::Highlight>,
     tail: String,
     size: usize,
 }
@@ -1425,6 +1445,13 @@ impl SearchPage {
         };
         if let Some(filtered) = self.source_filter.apply(source) {
             out.key("_source").raw(&filtered);
+        }
+        if let Some(marked) = self
+            .highlight
+            .as_ref()
+            .and_then(|highlight| highlight.of(&parse_document(source).ok()?))
+        {
+            out.key("highlight").raw(&marked);
         }
         if let Some(values) = &hit.sort_values {
             out.key("sort");
@@ -1473,19 +1500,75 @@ fn expand_wildcard_fields(
     documents: &[(String, Node)],
 ) -> crate::query::Query {
     use crate::query::Query;
+    let names = || {
+        let mut names: Vec<String> = documents
+            .iter()
+            .filter_map(|(_, node)| node.value.clone().into_object())
+            .flat_map(|members| members.into_iter().map(|(key, _)| key))
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    };
+    let any_of = |should: Vec<Query>| Query::Bool {
+        must: Vec::new(),
+        filter: Vec::new(),
+        should,
+        must_not: Vec::new(),
+        minimum_should_match: 1,
+    };
     match query {
-        Query::Match { fields, terms, all } if fields.iter().any(|field| field == "*") => {
-            let mut names: Vec<String> = documents
-                .iter()
-                .filter_map(|(_, node)| node.value.clone().into_object())
-                .flat_map(|members| members.into_iter().map(|(key, _)| key))
-                .collect();
-            names.sort();
-            names.dedup();
-            Query::Match {
-                fields: names,
-                terms,
-                all,
+        Query::Match { fields, terms, all } if fields.iter().any(|field| field == "*") => Query::Match {
+            fields: names(),
+            terms,
+            all,
+        },
+        Query::MatchPhrase { field, terms } if field == "*" => any_of(
+            names()
+                .into_iter()
+                .map(|field| Query::MatchPhrase {
+                    field,
+                    terms: terms.clone(),
+                })
+                .collect(),
+        ),
+        Query::Prefix { field, prefix } if field == "*" => any_of(
+            names()
+                .into_iter()
+                .map(|field| Query::Prefix {
+                    field,
+                    prefix: prefix.clone(),
+                })
+                .collect(),
+        ),
+        Query::Range { field, bounds } if field == "*" => any_of(
+            names()
+                .into_iter()
+                .map(|field| Query::Range {
+                    field,
+                    bounds: bounds.clone(),
+                })
+                .collect(),
+        ),
+        Query::Bool {
+            must,
+            filter,
+            should,
+            must_not,
+            minimum_should_match,
+        } => {
+            let expand = |queries: Vec<Query>| -> Vec<Query> {
+                queries
+                    .into_iter()
+                    .map(|query| expand_wildcard_fields(query, documents))
+                    .collect()
+            };
+            Query::Bool {
+                must: expand(must),
+                filter: expand(filter),
+                should: expand(should),
+                must_not: expand(must_not),
+                minimum_should_match,
             }
         }
         other => other,

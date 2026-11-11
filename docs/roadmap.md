@@ -962,6 +962,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   2026-11-10, D399), with `GET <index>/_source/<id>`.
 - Painless beyond D331's update subset (conditions, loops, comparisons, more methods, stored
   scripts), `query_string` syntax and highlighting (D196, D331).
+  `query_string`, `simple_query_string` and highlighting: **code written, unbuilt** (code-only
+  mode, 2026-11-11, D515).
 - Scroll (`scroll=1m`, `_search/scroll`, `DELETE _search/scroll`) with contexts bounded in count
   and memory and expired by their keep-alive, and point in time (`pit`) for `search_after`
   (D196, D348). Scroll: **code written, unbuilt** (code-only mode, 2026-11-11, D467); point in
