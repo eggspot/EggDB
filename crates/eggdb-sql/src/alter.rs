@@ -264,6 +264,13 @@ fn apply(
             crate::partition_alter::merge(writer, tables, &parent, from, into, dialect)?;
             Ok(None)
         }
+        AlterAction::MergePartitionSpan { first, last, into } => {
+            let parent = current(writer, tables, name)?;
+            let from =
+                crate::partition_alter::range_span(writer, tables, &parent, first, last)?;
+            crate::partition_alter::merge(writer, tables, &parent, &from, into, dialect)?;
+            Ok(None)
+        }
         AlterAction::ModifyPartitionValues {
             partition,
             values,

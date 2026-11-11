@@ -1027,6 +1027,11 @@ pub(crate) enum AlterAction {
         from: Vec<Name>,
         into: Name,
     },
+    MergePartitionSpan {
+        first: Name,
+        last: Name,
+        into: Name,
+    },
     ModifyPartitionValues {
         partition: Name,
         values: Vec<PartitionBoundValue>,

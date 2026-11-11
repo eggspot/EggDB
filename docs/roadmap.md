@@ -407,8 +407,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - MySQL's and Oracle's partition `ALTER`s (add, drop, split, exchange) (D169). **Code written, unbuilt**
   (code-only mode, 2026-11-10, D358). `COALESCE PARTITION`, `MERGE PARTITIONS` and `MODIFY PARTITION
   ... ADD | DROP VALUES`: **code written, unbuilt** (code-only mode, 2026-11-10, D360); `REBUILD`, `ANALYZE`,
-  `CHECK`, `OPTIMIZE` and `REPAIR`: **code written, unbuilt** (code-only mode, 2026-11-12, D629). Left:
-  Oracle's `MERGE PARTITIONS a TO b` range form.
+  `CHECK`, `OPTIMIZE` and `REPAIR`: **code written, unbuilt** (code-only mode, 2026-11-12, D629);
+  Oracle's `MERGE PARTITIONS a TO b` range form: **code written, unbuilt** (code-only mode, 2026-11-12, D630).
 - Online upgrades with a tested downgrade path to the previous minor version (D20, D35). Check:
   the upgrade, downgrade and mixed-version file tests in CI.
 - Online schema changes and reindexing that block neither reads nor writes (D20). Check: a

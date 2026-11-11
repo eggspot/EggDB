@@ -654,3 +654,4 @@ its full title with its status.
 - [D627](decisions/D627.md) Code-only batch 275 (M16): AMQP 1.0 released and modified outcomes
 - [D628](decisions/D628.md) Code-only batch 276 (M6c): EXPLAIN (FORMAT XML)
 - [D629](decisions/D629.md) Code-only batch 277 (M2): MySQL partition maintenance statements
+- [D630](decisions/D630.md) Code-only batch 278 (M2): Oracle MERGE PARTITIONS first TO last

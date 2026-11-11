@@ -1131,6 +1131,7 @@ fn altered(table: &Name, actions: &[AlterAction]) -> Option<DestructiveStatement
             | AlterAction::CoalescePartitions { .. }
             | AlterAction::MaintainPartitions(_)
             | AlterAction::MergePartitions { .. }
+            | AlterAction::MergePartitionSpan { .. }
             | AlterAction::ModifyPartitionValues { .. }
             | AlterAction::RowMovement(_)
             | AlterAction::AttachIndex(_)

@@ -578,8 +578,15 @@ impl Parser<'_> {
         }
         if self.oracle() && self.is_word("merge") && self.is_word_at(1, "partitions") {
             self.at += 2;
-            let mut from = vec![self.name()?];
-            while self.take(&TokenKind::Comma) {
+            let first = self.name()?;
+            let last = if self.is_word("to") {
+                self.at += 1;
+                Some(self.name()?)
+            } else {
+                None
+            };
+            let mut from = vec![first];
+            while last.is_none() && self.take(&TokenKind::Comma) {
                 from.push(self.name()?);
             }
             self.expect_word("into")?;
@@ -587,7 +594,14 @@ impl Parser<'_> {
             let into = self.name()?;
             self.skip_partition_options()?;
             self.skip_oracle_index_clauses();
-            actions.push(AlterAction::MergePartitions { from, into });
+            actions.push(match (last, from.pop()) {
+                (Some(last), Some(first)) => AlterAction::MergePartitionSpan { first, last, into },
+                (_, Some(only)) => {
+                    from.push(only);
+                    AlterAction::MergePartitions { from, into }
+                }
+                (_, None) => AlterAction::MergePartitions { from, into },
+            });
             return Ok(true);
         }
         if self.oracle()

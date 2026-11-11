@@ -610,6 +610,57 @@ pub(crate) fn merge(
     rebuild(writer, tables, parent, &old_names, new, position, dialect)
 }
 
+pub(crate) fn range_span(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    parent: &TableDefinition,
+    first: &Name,
+    last: &Name,
+) -> SqlResult<Vec<Name>> {
+    let state = partitioned(writer, tables, parent, first.position)?;
+    if state.key.strategy != PartitionStrategy::Range {
+        return Err(SqlError::new(
+            SqlState::FEATURE_NOT_SUPPORTED,
+            "MERGE PARTITIONS ... TO is for range partitions",
+        )
+        .with_oracle_code(14255)
+        .at(first.position));
+    }
+    let first_child = existing(&state, parent, first)?.0.clone();
+    let last_child = existing(&state, parent, last)?.0.clone();
+    let mut ordered: Vec<&(String, PartitionBound)> = state.children.iter().collect();
+    ordered.sort_by(|(_, left), (_, right)| {
+        partitions::compare_bound_texts(
+            range_start(left).unwrap_or_default(),
+            range_start(right).unwrap_or_default(),
+            &state.types,
+        )
+    });
+    let index_of = |child: &str| ordered.iter().position(|(name, _)| name == child);
+    let (Some(start), Some(end)) = (index_of(&first_child), index_of(&last_child)) else {
+        return Err(unknown_partition(parent, first));
+    };
+    if start >= end {
+        return Err(SqlError::new(
+            SqlState::INVALID_TABLE_DEFINITION,
+            format!(
+                "partition \"{}\" must come before partition \"{}\"",
+                first.text, last.text
+            ),
+        )
+        .with_oracle_code(14274)
+        .at(last.position));
+    }
+    let prefix = format!("{}{}", parent.name, crate::partition_ddl::MYSQL_PARTITION_MARKER);
+    Ok(ordered[start..=end]
+        .iter()
+        .map(|(name, _)| Name {
+            text: name.strip_prefix(&prefix).unwrap_or(name).to_owned(),
+            position: first.position,
+        })
+        .collect())
+}
+
 fn merged_range(
     old: &mut [(String, PartitionBound)],
     types: &[SqlType],

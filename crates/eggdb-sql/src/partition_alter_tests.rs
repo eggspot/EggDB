@@ -253,6 +253,38 @@ fn oracle_merges_adjacent_range_partitions_and_refuses_gaps() {
 }
 
 #[test]
+fn oracle_merges_a_span_of_range_partitions() {
+    let store = MemoryStore::default();
+    let mut session = years(&store, Dialect::Oracle);
+    answer(
+        &mut session,
+        "ALTER TABLE o ADD PARTITION p2 VALUES LESS THAN (2030)",
+    );
+    answer(
+        &mut session,
+        "ALTER TABLE o ADD PARTITION p3 VALUES LESS THAN (2040)",
+    );
+    answer(&mut session, "INSERT INTO o VALUES (4, 2025), (5, 2035)");
+    let error = failure(
+        &mut session,
+        "ALTER TABLE o MERGE PARTITIONS p2 TO p0 INTO PARTITION p02",
+    );
+    assert_eq!(error.vendor_code(), Some(14274), "{error}");
+    answer(
+        &mut session,
+        "ALTER TABLE o MERGE PARTITIONS p0 TO p2 INTO PARTITION p02",
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT COUNT(*) FROM o PARTITION (p02)"),
+        "COUNT(*)\n4\nSELECT 1"
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT COUNT(*) FROM o PARTITION (p3)"),
+        "COUNT(*)\n1\nSELECT 1"
+    );
+}
+
+#[test]
 fn oracle_merges_list_partitions_into_the_default() {
     let store = MemoryStore::default();
     let mut session = regions(&store);
