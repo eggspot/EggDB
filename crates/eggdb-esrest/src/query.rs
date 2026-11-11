@@ -3,6 +3,16 @@ use std::collections::{HashMap, HashSet};
 
 const MAX_DEPTH: usize = 32;
 
+/// How a `nested` query turns its matching objects' scores into the document's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NestedScore {
+    Avg,
+    Max,
+    Min,
+    Sum,
+    None,
+}
+
 /// A query of the query DSL.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Query {
@@ -48,6 +58,11 @@ pub(crate) enum Query {
         field: String,
         low: u128,
         high: u128,
+    },
+    Nested {
+        path: String,
+        query: Box<Query>,
+        mode: NestedScore,
     },
     GeoDistance {
         field: String,
@@ -254,6 +269,26 @@ pub(crate) fn parse(node: &Node, depth: usize) -> Result<Query, String> {
                 should,
                 must_not: list(member(body, "must_not"), depth)?,
                 minimum_should_match: minimum,
+            }
+        }
+        "nested" => {
+            let path = member(body, "path")
+                .and_then(text_of)
+                .ok_or_else(|| "[nested] requires 'path' field".to_owned())?;
+            let inner = member(body, "query")
+                .ok_or_else(|| "[nested] requires 'query' field".to_owned())?;
+            let mode = match member(body, "score_mode").and_then(text_of).as_deref() {
+                None | Some("avg") => NestedScore::Avg,
+                Some("max") => NestedScore::Max,
+                Some("min") => NestedScore::Min,
+                Some("sum") => NestedScore::Sum,
+                Some("none") => NestedScore::None,
+                Some(other) => return Err(format!("illegal score_mode [{other}]")),
+            };
+            Query::Nested {
+                path,
+                query: Box::new(parse(inner, depth + 1)?),
+                mode,
             }
         }
         "geo_distance" => geo_distance(body)?,
@@ -573,6 +608,22 @@ pub(crate) fn score(query: &Query, id: &str, source: &Node, stats: &Stats) -> Op
                     })
             })
             .then_some(1.0),
+        Query::Nested { path, query, mode } => {
+            let scores: Vec<f64> = nested_objects(source, path)
+                .into_iter()
+                .filter_map(|object| score(query, id, &wrapped(path, object), stats))
+                .collect();
+            if scores.is_empty() {
+                return None;
+            }
+            Some(match mode {
+                NestedScore::Avg => scores.iter().sum::<f64>() / scores.len() as f64,
+                NestedScore::Max => scores.iter().copied().fold(f64::MIN, f64::max),
+                NestedScore::Min => scores.iter().copied().fold(f64::MAX, f64::min),
+                NestedScore::Sum => scores.iter().sum(),
+                NestedScore::None => 0.0,
+            })
+        }
         Query::GeoDistance {
             field,
             center,
@@ -652,4 +703,19 @@ fn geo_points_at(source: &Node, field: &str) -> Vec<(f64, f64)> {
             .collect();
     }
     current.into_iter().flat_map(crate::sort::points_of).collect()
+}
+
+fn nested_objects<'n>(source: &'n Node, path: &str) -> Vec<&'n Node> {
+    values_at(source, path)
+        .into_iter()
+        .filter(|node| matches!(node.value, Json::Object(_)))
+        .collect()
+}
+
+fn wrapped(path: &str, object: &Node) -> Node {
+    path.rsplit('.').fold(object.clone(), |inner, part| Node {
+        value: Json::Object(vec![(part.to_owned(), inner)]),
+        start: 0,
+        end: 0,
+    })
 }

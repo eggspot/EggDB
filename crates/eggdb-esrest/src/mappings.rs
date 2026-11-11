@@ -252,6 +252,11 @@ pub(crate) fn apply(query: Query, types: &FieldTypes, now_millis: i64) -> Query 
                 minimum_should_match,
             }
         }
+        Query::Nested { path, query, mode } => Query::Nested {
+            path,
+            query: Box::new(apply(*query, types, now_millis)),
+            mode,
+        },
         other => other,
     }
 }

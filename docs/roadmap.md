@@ -968,7 +968,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (with multi-fields and dynamic `.keyword`), dates and `ip` in `_search`: **code written, unbuilt**
   (code-only mode, 2026-11-11, D559); geo point queries: **code written, unbuilt** (code-only
   mode, 2026-11-11, D560); `dense_vector` with `knn` search: **code written, unbuilt** (code-only
-  mode, 2026-11-11, D561).
+  mode, 2026-11-11, D561); the `nested` query: **code written, unbuilt** (code-only mode,
+  2026-11-11, D562).
 - `wait_for_completion=false` tasks for the by-query APIs (D331). **Code written, unbuilt** (code-only
   mode, 2026-11-11, D473): the task finishes in the request and is kept for `_tasks`.
 - `_rethrottle` and parallel `slices` for the by-query APIs (D331). **Code written, unbuilt** (code-only

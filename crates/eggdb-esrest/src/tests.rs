@@ -1556,3 +1556,22 @@ fn knn_search_keeps_the_nearest_vectors_by_the_mapped_similarity() {
     let refused = api.answer(&request("POST", "/images/_search", "{\"knn\":{\"field\":\"vector\"}}"));
     assert_eq!(refused.status, 400);
 }
+
+#[test]
+fn a_nested_query_needs_one_object_to_match_every_condition() {
+    let keyspace = MemoryKeyspace::default();
+    let api = api(&keyspace);
+    for (id, document) in [
+        ("1", "{\"comments\":[{\"author\":\"ada\",\"stars\":5},{\"author\":\"bob\",\"stars\":1}]}"),
+        ("2", "{\"comments\":[{\"author\":\"ada\",\"stars\":1},{\"author\":\"bob\",\"stars\":5}]}"),
+    ] {
+        let indexed = api.answer(&request("PUT", &format!("/posts/_doc/{id}"), document));
+        assert!(indexed.status < 300, "{}", body(&indexed));
+    }
+    let found = body(&api.answer(&request(
+        "POST",
+        "/posts/_search",
+        "{\"query\":{\"nested\":{\"path\":\"comments\",\"query\":{\"bool\":{\"must\":[{\"term\":{\"comments.author\":\"ada\"}},{\"term\":{\"comments.stars\":5}}]}}}}}",
+    )));
+    assert!(found.contains("\"_id\":\"1\"") && !found.contains("\"_id\":\"2\""), "{found}");
+}

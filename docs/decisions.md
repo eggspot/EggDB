@@ -586,3 +586,4 @@ its full title with its status.
 - [D559](decisions/D559.md) Code-only batch 207 (M8): Elasticsearch mappings shape term and range in _search
 - [D560](decisions/D560.md) Code-only batch 208 (M8): geo_distance and geo_bounding_box queries
 - [D561](decisions/D561.md) Code-only batch 209 (M8): knn search over dense_vector fields
+- [D562](decisions/D562.md) Code-only batch 210 (M8): the nested query
