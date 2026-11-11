@@ -1005,6 +1005,39 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MySqlRelation) -> Vec<V
                 ],
             ),
         ],
+        MySqlRelation::ProcessList if !crate::session_activity::sessions().is_empty() => {
+            crate::session_activity::sessions()
+                .into_iter()
+                .map(|session| {
+                    let active = session.state == "active";
+                    build(
+                        columns,
+                        vec![
+                            ("id", Value::BigInt(i64::from(session.pid))),
+                            ("user", Value::Text(session.user)),
+                            ("host", Value::Text(session.client)),
+                            ("db", Value::Text(session.database)),
+                            ("command", text(if active { "Query" } else { "Sleep" })),
+                            (
+                                "time",
+                                Value::BigInt(crate::session_activity::seconds_since(
+                                    session.state_change,
+                                )),
+                            ),
+                            ("state", text(if active { "executing" } else { "" })),
+                            (
+                                "info",
+                                if active {
+                                    Value::Text(session.query)
+                                } else {
+                                    Value::Null
+                                },
+                            ),
+                        ],
+                    )
+                })
+                .collect()
+        }
         MySqlRelation::ProcessList => vec![build(
             columns,
             vec![

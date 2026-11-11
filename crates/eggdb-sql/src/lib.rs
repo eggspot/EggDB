@@ -151,6 +151,7 @@ mod search_cycle;
 mod sequences;
 mod served_databases;
 mod session;
+pub mod session_activity;
 mod set_operations;
 mod set_returning;
 mod settings;

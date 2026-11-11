@@ -512,3 +512,4 @@ its full title with its status.
 - [D485](decisions/D485.md) Code-only batch 133 (M7): more of Redis's commands (strings, keys, hashes, lists, sets, sorted sets)
 - [D486](decisions/D486.md) Code-only batch 134 (M7): Redis reverse and lexicographic ranges, SPOP, LINSERT, TIME, CONFIG GET
 - [D487](decisions/D487.md) Code-only batch 135 (M6d): MCP over HTTP answers in Server-Sent Events when asked
+- [D488](decisions/D488.md) Code-only batch 136 (M6c): live activity across sessions in `pg_stat_activity` and MySQL's process list

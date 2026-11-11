@@ -271,6 +271,7 @@ struct Connection<'a, 's, S: KeyValueStore + 's> {
     multi_statements: bool,
     statements: HashMap<u32, Prepared>,
     next_statement: u32,
+    activity: eggdb_sql::session_activity::ActivityHandle,
 }
 
 struct Carried<'a> {
@@ -488,7 +489,17 @@ fn serve_database<'a, 'd, D: DatabaseDirectory>(
             true,
         ),
     };
+    let peer = carried.wire.peer();
+    let activity = eggdb_sql::session_activity::register(eggdb_sql::session_activity::Connected {
+        pid: i32::try_from(connection_id).unwrap_or(i32::MAX),
+        protocol: "mysql",
+        user: &carried.user,
+        database: &database,
+        client: &peer,
+        application: "",
+    });
     let mut connection = Connection {
+        activity,
         wire: carried.wire,
         shared,
         store: attached,
@@ -1250,12 +1261,20 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
     }
 
     fn query(&mut self, text: &str) -> bool {
-        if !self.multi_statements
+        self.activity.started(text);
+        let keep_going = if !self.multi_statements
             && let Err(error) = self.session.prepare(text, &[])
         {
-            return self.sql_error(&error);
-        }
-        self.run_statements(text, None, &Encoding::Text)
+            self.sql_error(&error)
+        } else {
+            self.run_statements(text, None, &Encoding::Text)
+        };
+        let status = self.session.transaction_status();
+        self.activity.finished(
+            !matches!(status, eggdb_sql::TransactionStatus::Idle),
+            matches!(status, eggdb_sql::TransactionStatus::Failed),
+        );
+        keep_going
     }
 
     fn prepare(&mut self, text: String) -> bool {

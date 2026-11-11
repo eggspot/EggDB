@@ -733,7 +733,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 ### M6c Operations
 - OTLP export of EggDB's own metrics, logs and traces (D25, D188).
 - Live activity, locks and wait events: `pg_stat_activity` for every session,
-  `sys.dm_exec_requests` and `SHOW PROCESSLIST` across sessions (D25, D188).
+  `sys.dm_exec_requests` and `SHOW PROCESSLIST` across sessions (D25, D188). `pg_stat_activity` and MySQL's process
+  list across sessions: **code written, unbuilt** (code-only mode, 2026-11-11, D488).
 - Statement statistics in the other dialects' views: `performance_schema`'s digest summary and
   `sys.dm_exec_query_stats` (D25, D286).
 - SQLite's `.scanstats on|off` in `eggdb sql`'s shell: after each `SELECT` the shell prints its

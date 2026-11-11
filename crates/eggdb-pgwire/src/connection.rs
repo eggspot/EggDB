@@ -856,6 +856,7 @@ pub(crate) struct Connection<'a, 's> {
     idle: bool,
     process_id: i32,
     listening: bool,
+    activity: eggdb_sql::session_activity::ActivityHandle,
 }
 
 pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
@@ -1002,7 +1003,22 @@ pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
             .backend_keys
             .register(process_id, secret_key, cancel.clone())
     });
+    let application = startup
+        .parameters
+        .iter()
+        .find(|(name, _)| name == "application_name")
+        .map_or("", |(_, value)| value.as_str());
+    let peer = wire.peer();
+    let activity = eggdb_sql::session_activity::register(eggdb_sql::session_activity::Connected {
+        pid: process_id,
+        protocol: "postgresql",
+        user: &startup.user,
+        database: &startup.database,
+        client: &peer,
+        application,
+    });
     let mut connection = Connection {
+        activity,
         wire,
         shared,
         session,
@@ -1176,6 +1192,9 @@ impl<'a, 's> Connection<'a, 's> {
                     self.extended(|connection| connection.describe(target, &name))
                 }
                 FrontendMessage::Execute { portal, max_rows } => {
+                    if let Some(found) = self.portals.get(&portal) {
+                        self.activity.started(&found.text);
+                    }
                     self.extended(|connection| connection.execute(&portal, max_rows))
                 }
                 FrontendMessage::Close(target, name) => {
@@ -1189,6 +1208,7 @@ impl<'a, 's> Connection<'a, 's> {
                 FrontendMessage::Sync => {
                     let failed = std::mem::take(&mut self.skipping_to_sync);
                     self.finish_implicit_transaction(!failed);
+                    self.report_idle();
                     self.ready_for_query();
                     self.wire.flush().is_ok()
                 }
@@ -1477,9 +1497,19 @@ impl<'a, 's> Connection<'a, 's> {
         }
     }
 
+    fn report_idle(&self) {
+        let status = self.session.transaction_status();
+        self.activity.finished(
+            !matches!(status, TransactionStatus::Idle),
+            matches!(status, TransactionStatus::Failed),
+        );
+    }
+
     fn simple_query(&mut self, text: &str) -> bool {
         let started = Instant::now();
+        self.activity.started(text);
         let keep_going = self.simple_query_timed(text);
+        self.report_idle();
         self.log_if_slow(started, text);
         keep_going
     }

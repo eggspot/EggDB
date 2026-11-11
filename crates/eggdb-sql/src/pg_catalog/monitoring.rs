@@ -628,6 +628,46 @@ pub(crate) fn extension_descriptions() -> [(u32, &'static str); 3] {
 pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MonitoringRelation) -> Vec<Vec<Value>> {
     let row = || CatalogRow::new(relation.columns());
     match relation {
+        MonitoringRelation::StatActivity if !crate::session_activity::sessions().is_empty() => {
+            crate::session_activity::sessions()
+                .into_iter()
+                .map(|session| {
+                    let (address, port) = match session.client.rsplit_once(':') {
+                        Some((address, port)) => (
+                            address.trim_matches(['[', ']']).to_owned(),
+                            port.parse::<i32>().ok(),
+                        ),
+                        None => (session.client.clone(), None),
+                    };
+                    let mut built = row()
+                        .set(
+                            "datid",
+                            Value::Oid(if session.database == snapshot.database {
+                                oids::DATABASE
+                            } else {
+                                0
+                            }),
+                        )
+                        .set("datname", Value::Text(session.database))
+                        .set("pid", Value::Integer(session.pid))
+                        .set("usename", Value::Text(session.user))
+                        .set("application_name", Value::Text(session.application))
+                        .set("client_addr", Value::Text(address))
+                        .set("backend_start", Value::TimestampTz(session.backend_start))
+                        .set("state_change", Value::TimestampTz(session.state_change))
+                        .set("state", Value::Text(session.state.to_owned()))
+                        .set("query", Value::Text(session.query))
+                        .set("backend_type", Value::Text("client backend".to_owned()));
+                    if let Some(port) = port {
+                        built = built.set("client_port", Value::Integer(port));
+                    }
+                    if let Some(start) = session.query_start {
+                        built = built.set("query_start", Value::TimestampTz(start));
+                    }
+                    built.done()
+                })
+                .collect()
+        }
         MonitoringRelation::StatActivity => vec![
             row()
                 .set("datid", Value::Oid(oids::DATABASE))
@@ -650,7 +690,19 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MonitoringRelation) -> 
             let mut built = row()
                 .set("datid", Value::Oid(oids::DATABASE))
                 .set("datname", Value::Text(snapshot.database.clone()))
-                .set("numbackends", Value::Integer(1))
+                .set(
+                    "numbackends",
+                    Value::Integer(
+                        i32::try_from(
+                            crate::session_activity::sessions()
+                                .iter()
+                                .filter(|session| session.database == snapshot.database)
+                                .count()
+                                .max(1),
+                        )
+                        .unwrap_or(i32::MAX),
+                    ),
+                )
                 .set("blk_read_time", Value::Double(0.0))
                 .set("blk_write_time", Value::Double(0.0));
             for counter in [
