@@ -1231,6 +1231,7 @@ impl<'k> Store<'k> {
             found.sort_by_key(|(key, _)| order.iter().position(|known| known == key).unwrap_or(usize::MAX));
             Ok(found.into_iter().map(|(_, document)| document).collect())
         })?;
+        crate::filter::attach_text_scores(filter, &mut documents);
         sort_documents(&mut documents, sort);
         Ok(documents)
     }

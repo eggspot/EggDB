@@ -777,6 +777,9 @@ fn find(shared: &Shared<'_>, database: &str, body: &Document) -> Result<Document
             .map(|document| projection.apply_matching(document, &filter))
             .collect();
     }
+    for document in remaining.iter_mut() {
+        eggdb_documents::without_text_score(document);
+    }
     let first = batch_size.map_or(DEFAULT_FIRST_BATCH, |size| size as usize);
     if let Some(next) = tail_from {
         let tail = crate::tailable::Tail {

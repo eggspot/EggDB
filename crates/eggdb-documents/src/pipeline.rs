@@ -609,8 +609,21 @@ pub fn run_pipeline(
     let mut documents = input;
     for stage in stages {
         documents = match stage {
-            Stage::Match(filter) => documents.into_iter().filter(|document| matches(filter, document)).collect(),
-            Stage::Project(spec) => documents.iter().map(|document| project(document, spec)).collect::<DocumentResult<_>>()?,
+            Stage::Match(filter) => {
+                let mut kept: Vec<Document> = documents.into_iter().filter(|document| matches(filter, document)).collect();
+                crate::filter::attach_text_scores(filter, &mut kept);
+                kept
+            }
+            Stage::Project(spec) => documents
+                .iter()
+                .map(|document| {
+                    let mut projected = project(document, spec)?;
+                    if let Some(score) = document.get(crate::text_search::TEXT_SCORE_FIELD) {
+                        projected.insert(crate::text_search::TEXT_SCORE_FIELD, score.clone());
+                    }
+                    Ok(projected)
+                })
+                .collect::<DocumentResult<_>>()?,
             Stage::AddFields(spec) => documents
                 .into_iter()
                 .map(|mut document| {
@@ -736,6 +749,9 @@ pub fn run_pipeline(
                 })
                 .collect::<DocumentResult<_>>()?,
         };
+    }
+    for document in &mut documents {
+        crate::filter::without_text_score(document);
     }
     Ok(documents)
 }

@@ -1796,6 +1796,60 @@ fn text_searches_need_a_text_index_and_match_stemmed_words_and_phrases() {
 }
 
 #[test]
+fn text_scores_rank_sort_and_project_through_meta() {
+    let keyspace = MemoryKeyspace::default();
+    let store = store(&keyspace);
+    store
+        .insert(
+            "app",
+            "posts",
+            vec![
+                doc(vec![("_id", Bson::Int32(1)), ("body", text("coffee notes and a long list of other words here"))]),
+                doc(vec![("_id", Bson::Int32(2)), ("body", text("coffee coffee coffee"))]),
+                doc(vec![("_id", Bson::Int32(3)), ("body", text("tea"))]),
+            ],
+            true,
+        )
+        .unwrap();
+    store
+        .create_indexes(
+            "app",
+            "posts",
+            &[doc(vec![("key", Bson::Document(doc(vec![("body", text("text"))]))), ("name", text("body_text"))])],
+        )
+        .unwrap();
+    let filter = crate::parse_filter(&doc(vec![("$text", Bson::Document(doc(vec![("$search", text("coffee"))])))])).unwrap();
+    let by_score = crate::parse_sort(&doc(vec![("score", Bson::Document(doc(vec![("$meta", text("textScore"))])))])).unwrap();
+    let found = store.find("app", "posts", &filter, &by_score).unwrap();
+    let ids: Vec<Bson> = found.iter().filter_map(|document| document.get("_id").cloned()).collect();
+    assert_eq!(ids, vec![Bson::Int32(2), Bson::Int32(1)]);
+    let projection = crate::parse_projection(&doc(vec![("score", Bson::Document(doc(vec![("$meta", text("textScore"))])))])).unwrap();
+    let shown = projection.apply_matching(&found[0], &filter);
+    let Some(Bson::Double(score)) = shown.get("score") else {
+        panic!("a score in {shown:?}");
+    };
+    assert!((score - 1.75).abs() < 1e-9, "{score}");
+    assert!(shown.get("body").is_some());
+    let mut sent = shown.clone();
+    crate::without_text_score(&mut sent);
+    assert!(sent.get(crate::text_search::TEXT_SCORE_FIELD).is_none());
+    let pipeline = crate::parse_pipeline(&[
+        Bson::Document(doc(vec![("$match", Bson::Document(doc(vec![("$text", Bson::Document(doc(vec![("$search", text("coffee"))])))])))])),
+        Bson::Document(doc(vec![("$project", Bson::Document(doc(vec![("_id", Bson::Int32(1))])))])),
+        Bson::Document(doc(vec![("$sort", Bson::Document(doc(vec![("s", Bson::Document(doc(vec![("$meta", text("textScore"))])))])))])),
+        Bson::Document(doc(vec![("$addFields", Bson::Document(doc(vec![("s", Bson::Document(doc(vec![("$meta", text("textScore"))])))])))])),
+    ])
+    .unwrap();
+    let nothing = |_: &str| -> crate::DocumentResult<Vec<Document>> { Ok(Vec::new()) };
+    let all = store.find("app", "posts", &crate::parse_filter(&Document::new()).unwrap(), &crate::SortSpec::default()).unwrap();
+    let ranked = crate::run_pipeline(&pipeline, all, &nothing).unwrap();
+    assert_eq!(ranked.len(), 2);
+    assert_eq!(ranked[0].get("_id"), Some(&Bson::Int32(2)));
+    assert!(matches!(ranked[0].get("s"), Some(Bson::Double(_))));
+    assert!(ranked[0].get(crate::text_search::TEXT_SCORE_FIELD).is_none());
+}
+
+#[test]
 fn capped_collections_keep_their_newest_documents_in_insertion_order() {
     let keyspace = MemoryKeyspace::default();
     let store = store(&keyspace);

@@ -118,6 +118,33 @@ pub fn has_text(filter: &Filter) -> bool {
     }
 }
 
+/// The text score of `document` for the filter's `$text` search, if it has one.
+pub(crate) fn text_score(filter: &Filter, document: &Document) -> Option<f64> {
+    match filter {
+        Filter::Text(search) => Some(search.score(document)),
+        Filter::And(all) => all.iter().find_map(|inner| text_score(inner, document)),
+        _ => None,
+    }
+}
+
+/// Puts each document's text score for the filter's `$text` search where `{$meta:
+/// "textScore"}` reads it; does nothing without `$text`.
+pub(crate) fn attach_text_scores(filter: &Filter, documents: &mut [Document]) {
+    if !has_text(filter) {
+        return;
+    }
+    for document in documents {
+        if let Some(score) = text_score(filter, document) {
+            document.insert(crate::text_search::TEXT_SCORE_FIELD, Bson::Double(score));
+        }
+    }
+}
+
+/// Drops the text score a `$text` search attached, before the document leaves the server.
+pub fn without_text_score(document: &mut Document) {
+    document.remove(crate::text_search::TEXT_SCORE_FIELD);
+}
+
 /// The filter with its `$text` search limited to `fields`, the collection's text index.
 pub fn with_text_fields(filter: &Filter, fields: &[String]) -> Filter {
     match filter {

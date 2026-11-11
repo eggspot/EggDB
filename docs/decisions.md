@@ -621,3 +621,4 @@ its full title with its status.
 - [D594](decisions/D594.md) Code-only batch 242 (M8): index and component templates
 - [D595](decisions/D595.md) Code-only batch 243 (M8): script sorts, nested sorts and unmapped sort fields
 - [D596](decisions/D596.md) Code-only batch 244 (M9): tailable cursors on capped collections
+- [D597](decisions/D597.md) Code-only batch 245 (M9): MongoDB text scores

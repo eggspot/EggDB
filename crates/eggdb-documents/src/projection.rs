@@ -88,9 +88,12 @@ pub fn parse_projection(spec: &Document) -> DocumentResult<Projection> {
                         ProjectionOperator::ElemMatch(parse_filter(condition)?),
                     ));
                 }
+                Some((name, Bson::String(kind))) if name == "$meta" && kind == "textScore" && inner.len() == 1 => {
+                    operators.push((path.clone(), ProjectionOperator::Expression(value.clone())));
+                }
                 Some((name, _)) if name == "$meta" => {
                     return Err(DocumentError::not_implemented(
-                        "$meta in a projection is not supported yet",
+                        "$meta in a projection supports only textScore",
                     ));
                 }
                 _ => {

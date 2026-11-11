@@ -27,7 +27,7 @@ pub use change_log::KEPT_CHANGES;
 pub use error::{DocumentError, DocumentResult};
 pub use expression::{evaluate, field_value};
 pub use extended_json::parse_extended_json;
-pub use filter::{Condition, Filter, has_text, matched_array_index, matches, only_id, parse_filter, with_text_fields};
+pub use filter::{Condition, Filter, has_text, matched_array_index, matches, only_id, parse_filter, with_text_fields, without_text_score};
 pub use text_search::TextSearch;
 pub use output::{PipelineOutput, WhenMatched, WhenNotMatched, split_output};
 pub use pipeline::{Stage, parse_pipeline, run_pipeline};

@@ -2,6 +2,11 @@ use crate::error::{DocumentError, DocumentResult};
 use eggdb_bson::{Bson, Document};
 
 const MAX_DEPTH: usize = 100;
+const MOST_COUNTED_REPEATS: usize = 64;
+
+/// Where a `$text` match's score travels with its document until the reply: a top-level name
+/// no stored document can hold, read by `{$meta: "textScore"}` and dropped before sending.
+pub(crate) const TEXT_SCORE_FIELD: &str = "$textScore";
 
 /// A `$text` search: its words (stemmed and lower-cased unless it is case-sensitive or its
 /// language is `none`), its quoted phrases, the words it excludes with `-`, and the fields its
@@ -119,6 +124,44 @@ impl TextSearch {
             _ => collect(&Bson::Document(document.clone()), &mut out, 0),
         }
         out
+    }
+
+    /// The relevance MongoDB's text score measures: for each string and each searched term in
+    /// it, the term's repeats weighted 1, 1/2, 1/4 and so on, times 0.5 plus half the share of
+    /// the string's words the term takes.
+    pub(crate) fn score(&self, document: &Document) -> f64 {
+        let mut terms: Vec<String> = self.words.clone();
+        for phrase in &self.phrases {
+            terms.extend(
+                eggdb_search::words(phrase)
+                    .into_iter()
+                    .filter_map(|word| normalized(word, self.case_sensitive, self.stemmed)),
+            );
+        }
+        terms.sort();
+        terms.dedup();
+        let mut total = 0.0;
+        for text in self.texts(document) {
+            let tokens: Vec<String> = eggdb_search::words(&text)
+                .into_iter()
+                .filter_map(|word| normalized(word, self.case_sensitive, self.stemmed))
+                .collect();
+            if tokens.is_empty() {
+                continue;
+            }
+            for term in &terms {
+                let count = tokens.iter().filter(|token| *token == term).count();
+                if count == 0 {
+                    continue;
+                }
+                let frequency: f64 = (0..count.min(MOST_COUNTED_REPEATS))
+                    .map(|repeat| 0.5_f64.powi(repeat as i32))
+                    .sum();
+                let coefficient = 0.5 * count as f64 / tokens.len() as f64 + 0.5;
+                total += frequency * coefficient;
+            }
+        }
+        total
     }
 
     /// Whether `document` matches: every phrase appears, no excluded word does, and (without

@@ -280,6 +280,16 @@ fn operator(
     };
     Ok(Some(match name {
         "$literal" => argument.clone(),
+        "$meta" => match argument {
+            Bson::String(kind) if kind == "textScore" => {
+                return Ok(root.get(crate::text_search::TEXT_SCORE_FIELD).cloned());
+            }
+            _ => {
+                return Err(DocumentError::not_implemented(
+                    "$meta supports only textScore",
+                ));
+            }
+        },
         "$add" | "$subtract" | "$multiply" | "$divide" | "$mod" => {
             arithmetic(name, &all(argument)?)?
         }

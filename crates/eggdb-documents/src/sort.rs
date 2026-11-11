@@ -23,9 +23,13 @@ pub fn parse_sort(spec: &Document) -> DocumentResult<SortSpec> {
         let descending = match direction.as_i64() {
             Some(1) => false,
             Some(-1) => true,
+            _ if matches!(direction, Bson::Document(inner) if inner.get_str("$meta") == Some("textScore") && inner.len() == 1) => {
+                keys.push((crate::text_search::TEXT_SCORE_FIELD.to_owned(), true));
+                continue;
+            }
             _ if matches!(direction, Bson::Document(inner) if inner.contains_key("$meta")) => {
                 return Err(DocumentError::not_implemented(
-                    "$meta sort keys are not supported yet",
+                    "$meta sort keys other than textScore are not supported",
                 ));
             }
             _ => {
