@@ -1,0 +1,17 @@
+[package]
+name = "eggdb-fuzz"
+description = "EggDB's own long-running fuzzer of its decoders of untrusted bytes: Zstandard, LZ4 frames, SQLite files and Arrow streams, with no third-party crates."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+eggdb-arrow = { path = "../eggdb-arrow" }
+eggdb-parquet = { path = "../eggdb-parquet" }
+eggdb-sqlite-format = { path = "../eggdb-sqlite-format" }
+eggdb-storage = { path = "../eggdb-storage" }
+
+[lints]
+workspace = true

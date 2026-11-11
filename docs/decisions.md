@@ -686,3 +686,4 @@ its full title with its status.
 - [D659](decisions/D659.md) Code-only batch 307 (M10): DBMS_RANDOM, DBMS_ASSERT and UTL_MATCH
 - [D660](decisions/D660.md) Code-only batch 308 (M10): DBMS_CRYPTO hashes and MACs, and DBMS_UTILITY.GET_TIME
 - [D661](decisions/D661.md) Code-only batch 309 (M10): AES decryption, and DBMS_CRYPTO.ENCRYPT and DECRYPT
+- [D662](decisions/D662.md) Code-only batch 310 (M2): eggdb-fuzz, a long-running fuzzer of the decoders of untrusted bytes

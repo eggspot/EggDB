@@ -8,6 +8,16 @@ pub fn decompress_zstd(input: &[u8], expected: usize) -> Result<Vec<u8>, &'stati
     zstd::decompress(input, expected)
 }
 
+/// `input` as one Zstandard frame of EggDB's own encoder.
+pub fn compress_zstd(input: &[u8]) -> Vec<u8> {
+    zstd::compress(input)
+}
+
+/// `input` as one LZ4 frame of independent compressed blocks, with no checksums.
+pub fn compress_lz4_frame(input: &[u8]) -> Vec<u8> {
+    lz4::compress_frame(input)
+}
+
 /// Decompresses one LZ4 frame that must give exactly `expected` bytes, as Arrow's `LZ4_FRAME`
 /// buffers hold them. Hostile input is an error, never a panic.
 pub fn decompress_lz4_frame(input: &[u8], expected: usize) -> Result<Vec<u8>, &'static str> {

@@ -190,6 +190,30 @@ fn frame_bytes<'a>(input: &'a [u8], at: &mut usize, count: usize) -> Result<&'a 
     Ok(bytes)
 }
 
+const FRAME_BLOCK_BYTES: usize = 1 << 16;
+const INDEPENDENT_BLOCKS_FLAG: u8 = 1 << 5;
+const VERSION_FLAGS: u8 = FRAME_VERSION << 6;
+const BLOCK_SIZE_64_KIB: u8 = 4 << 4;
+
+/// `input` as one LZ4 frame: independent 64 KiB blocks, each stored compressed or as it is,
+/// whichever is smaller, with no checksums.
+pub(crate) fn compress_frame(input: &[u8]) -> Vec<u8> {
+    let mut frame = FRAME_MAGIC.to_le_bytes().to_vec();
+    frame.extend_from_slice(&[VERSION_FLAGS | INDEPENDENT_BLOCKS_FLAG, BLOCK_SIZE_64_KIB, 0]);
+    for block in input.chunks(FRAME_BLOCK_BYTES) {
+        let compressed = compress(block);
+        let (size, bytes) = if compressed.len() < block.len() {
+            (compressed.len() as u32, compressed.as_slice())
+        } else {
+            (block.len() as u32 | UNCOMPRESSED_BLOCK, block)
+        };
+        frame.extend_from_slice(&size.to_le_bytes());
+        frame.extend_from_slice(bytes);
+    }
+    frame.extend_from_slice(&0u32.to_le_bytes());
+    frame
+}
+
 /// Decompresses one LZ4 frame (the LZ4 frame format: magic, descriptor, blocks linked or
 /// independent, end mark, optional checksums, which are skipped) that must give exactly
 /// `expected` bytes. Frames that need a dictionary are refused; hostile input is an error.
