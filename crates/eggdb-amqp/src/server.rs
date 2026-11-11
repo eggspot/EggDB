@@ -105,7 +105,7 @@ struct AutoDelete {
 pub(crate) struct Broker<'s> {
     pub(crate) queues: Queues<'s>,
     exchanges: Mutex<BTreeMap<String, Exchange>>,
-    next_name: AtomicU64,
+    pub(crate) next_name: AtomicU64,
     exclusive_owners: Mutex<BTreeMap<String, u64>>,
     auto_delete: Mutex<BTreeMap<String, AutoDelete>>,
     policies: Mutex<BTreeMap<String, QueuePolicy>>,

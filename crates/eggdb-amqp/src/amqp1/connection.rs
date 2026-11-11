@@ -136,6 +136,25 @@ struct Connection<'b, 's> {
     unfinished_held: Reservation<'b>,
     outgoing_held: Reservation<'b>,
     next_link: usize,
+    dynamic_queues: Vec<String>,
+}
+
+const DYNAMIC_FIELD: usize = 4;
+const MAX_DYNAMIC_QUEUES: usize = 1_000;
+
+fn with_address(terminus: &Value, address: &str) -> Value {
+    let Value::Described(descriptor, fields) = terminus else {
+        return terminus.clone();
+    };
+    let mut fields = match fields.as_ref() {
+        Value::List(fields) => fields.clone(),
+        _ => Vec::new(),
+    };
+    if fields.is_empty() {
+        fields.push(Value::Null);
+    }
+    fields[0] = Value::String(address.to_owned());
+    Value::Described(descriptor.clone(), Box::new(Value::List(fields)))
 }
 
 fn delivery_bytes(body_bytes: usize, max_frame: u32) -> usize {
@@ -421,13 +440,24 @@ impl Connection<'_, '_> {
         } else {
             body.field(6)
         };
-        let address = terminus
+        let dynamic = terminus.field(DYNAMIC_FIELD).flag() == Some(true);
+        let mut address = terminus
             .field(0)
             .text()
             .unwrap_or_default()
             .trim_start_matches("/queues/")
             .trim_start_matches("/queue/")
             .to_owned();
+        if dynamic {
+            if self.dynamic_queues.len() >= MAX_DYNAMIC_QUEUES {
+                return Err("this connection holds too many dynamic queues".to_owned());
+            }
+            address = format!(
+                "amq.dynamic-{}",
+                self.broker.next_name.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            );
+            self.dynamic_queues.push(address.clone());
+        }
         let declared = if address.is_empty() {
             Err("the link has no queue address".to_owned())
         } else {
@@ -443,15 +473,15 @@ impl Connection<'_, '_> {
             Value::Bool(!client_receives),
             Value::Ubyte(u8::try_from(snd_settle_mode).unwrap_or(2)),
             Value::Ubyte(0),
-            if declared.is_ok() || client_receives {
-                body.field(5).clone()
-            } else {
-                Value::Null
+            match (declared.is_ok(), client_receives) {
+                (true, true) if dynamic => with_address(body.field(5), &address),
+                (true, _) | (false, true) => body.field(5).clone(),
+                (false, false) => Value::Null,
             },
-            if declared.is_ok() || !client_receives {
-                body.field(6).clone()
-            } else {
-                Value::Null
+            match (declared.is_ok(), client_receives) {
+                (true, false) if dynamic => with_address(body.field(6), &address),
+                (true, _) | (false, false) => body.field(6).clone(),
+                (false, true) => Value::Null,
             },
             Value::Null,
             Value::Bool(false),
@@ -943,6 +973,7 @@ pub(crate) fn serve_stream(
         unfinished_held: config.memory_budget.empty_reservation(),
         outgoing_held: config.memory_budget.empty_reservation(),
         next_link: 0,
+        dynamic_queues: Vec::new(),
     };
     let mut buffer = Vec::new();
     let mut chunk = vec![0u8; 64 * 1024];
@@ -1034,6 +1065,9 @@ pub(crate) fn serve_stream(
     let sessions = std::mem::take(&mut connection.sessions);
     for (_, session) in sessions {
         connection.release_all(session.unsettled);
+    }
+    for queue in std::mem::take(&mut connection.dynamic_queues) {
+        let _ = connection.broker.queues.delete(&queue);
     }
     outcome
 }
