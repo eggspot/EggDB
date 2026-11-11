@@ -1115,8 +1115,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `deleted.` in a Transact-SQL `UPDATE`'s `OUTPUT`, `TOP ... PERCENT` in `UPDATE`, `DELETE` and
   `INSERT`, and global `##temp` tables; `TOP ... PERCENT`, `WITH TIES`, `OUTPUT ... INTO` and
   `SELECT ... INTO` are built (sql.md, D300, D303). `deleted.` in `UPDATE`'s `OUTPUT`: **code
-  written, unbuilt** (code-only mode, 2026-11-11, D430). Left: `TOP` in DML (needs a row limit on
-  `Update`/`Delete`), `##temp` tables.
+  written, unbuilt** (code-only mode, 2026-11-11, D430). `TOP (n)` in `UPDATE` and `DELETE`: **code written,
+  unbuilt** (code-only mode, 2026-11-12, D605). Left: `TOP ... PERCENT` and `INSERT TOP` in DML, `##temp` tables.
 - `MERGE`: `DELETE` triggers fired by its deletes (by-source deletes too), SQL Server's refusal of
   an `OUTPUT ... INTO` target with triggers, checks or foreign keys, `SELECT ... INTO` keeping the
   source's identity (`NOT NULL` is built, D342), describing a prepared `OUTPUT ... INTO` that still returns

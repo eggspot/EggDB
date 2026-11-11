@@ -417,6 +417,25 @@ pub(super) fn ties_without_order_by(position: usize) -> SqlError {
     .at(position)
 }
 
+impl Parser<'_> {
+    fn sqlserver_top_dml(&mut self) -> SqlResult<Statement> {
+        let updates = self.is_word("update");
+        self.at += 1;
+        self.expect_word("top")?;
+        self.expect(&TokenKind::LeftParen)?;
+        let count = self.expression()?;
+        self.expect(&TokenKind::RightParen)?;
+        if self.is_word("percent") {
+            return Err(not_supported("TOP ... PERCENT in UPDATE and DELETE").at(self.position()));
+        }
+        self.at -= 1;
+        let statement = if updates { self.update()? } else { self.delete()? };
+        Ok(Statement::SqlServer(SqlServerStatement::TopRows(Box::new(
+            crate::ast::TopRows { count, statement },
+        ))))
+    }
+}
+
 pub(crate) fn not_supported(what: &str) -> SqlError {
     SqlError::new(
         SqlState::FEATURE_NOT_SUPPORTED,
@@ -794,9 +813,7 @@ impl<'t> Parser<'t> {
                 let name = self.table_name()?;
                 Statement::Truncate(TableReference::named(name, None))
             }
-            "update" | "delete" if self.is_word_at(1, "top") => {
-                return Err(not_supported("TOP in UPDATE and DELETE").at(position));
-            }
+            "update" | "delete" if self.is_word_at(1, "top") => self.sqlserver_top_dml()?,
             "insert" if self.is_word_at(1, "bulk") => self.sqlserver_insert_bulk()?,
             "bulk" if self.is_word_at(1, "insert") => self.sqlserver_bulk_insert()?,
             "merge" => self.sqlserver_merge()?,

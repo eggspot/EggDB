@@ -450,6 +450,7 @@ fn sqlserver(
         | SqlServerStatement::SelectAssign { query, .. } => classify(query, keys),
         SqlServerStatement::DeclareCursor(cursor) => classify(&cursor.query, keys),
         SqlServerStatement::OutputInto(output) => output_into(output, keys),
+        SqlServerStatement::TopRows(top) => classify(&top.statement, keys),
         SqlServerStatement::InsertBulk(bulk) => insert_runs_code(&bulk.table, keys),
         SqlServerStatement::Use(_)
         | SqlServerStatement::NoCount(_)

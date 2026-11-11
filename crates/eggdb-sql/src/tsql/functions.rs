@@ -175,6 +175,9 @@ pub(crate) fn refused_in_function(
             SqlServerStatement::OutputInto(output) => {
                 return refused_in_function(&output.statement, first_word, position);
             }
+            SqlServerStatement::TopRows(top) => {
+                return refused_in_function(&top.statement, first_word, position);
+            }
         },
         Statement::Insert(_) => "INSERT",
         Statement::Update(_) => "UPDATE",

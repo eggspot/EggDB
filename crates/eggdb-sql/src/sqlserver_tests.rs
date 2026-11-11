@@ -1919,3 +1919,34 @@ fn offset_functions_ignore_nulls_and_named_windows_carry_the_order() {
         Ok(steps) => assert!(codes(&steps).contains(&Some(4112))),
     }
 }
+
+#[test]
+fn top_limits_the_rows_an_update_or_delete_changes() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(&mut session, "CREATE TABLE queue (id INT PRIMARY KEY, state VARCHAR(10))");
+    values(
+        &mut session,
+        "INSERT INTO queue VALUES (1, 'new'), (2, 'new'), (3, 'new'), (4, 'done')",
+    );
+    values(&mut session, "UPDATE TOP (2) queue SET state = 'taken' WHERE state = 'new'");
+    assert_eq!(
+        values(&mut session, "SELECT COUNT(*) FROM queue WHERE state = 'taken'"),
+        vec![vec![Value::Integer(2)]]
+    );
+    values(&mut session, "DELETE TOP (1) FROM queue WHERE state = 'taken'");
+    assert_eq!(
+        values(&mut session, "SELECT COUNT(*) FROM queue"),
+        vec![vec![Value::Integer(3)]]
+    );
+    values(&mut session, "DELETE TOP (10) queue");
+    assert_eq!(
+        values(&mut session, "SELECT COUNT(*) FROM queue"),
+        vec![vec![Value::Integer(0)]]
+    );
+    assert!(
+        session
+            .execute("UPDATE TOP (50) PERCENT queue SET state = 'x'", &mut |_| {})
+            .is_err()
+    );
+}

@@ -4574,6 +4574,19 @@ fn update_rows(
     update: &Update,
     moved: Option<&mut Vec<crate::partition_dml::MovedRow>>,
 ) -> SqlResult<QueryResult> {
+    let row_limit = crate::dml_row_limit::take();
+    if row_limit.is_some()
+        && (update.from.is_some()
+            || crate::updatable_views::is_view(writer, tables, &update.table)?
+            || tables
+                .require_target(writer, &update.table.name, "update")
+                .and_then(|table| crate::partitions::partitioned(writer, tables, &table))?
+                .is_some())
+    {
+        return Err(SqlError::not_supported(
+            "TOP in an UPDATE with FROM, of a view or of a partitioned table",
+        ));
+    }
     if let Some(joined) = &update.from {
         return crate::joined_dml::update(writer, tables, update, joined);
     }
@@ -4697,6 +4710,7 @@ fn update_rows(
         if let Some(projection) = &mut returning {
             projection.correlation = correlation.as_ref();
         }
+        let mut taken = 0u64;
         for (old_key, old_row) in matched {
             let evaluator = Evaluator {
                 scope,
@@ -4708,6 +4722,10 @@ fn update_rows(
             {
                 continue;
             }
+            if row_limit.is_some_and(|most| taken >= most) {
+                break;
+            }
+            taken += 1;
             let mut new_row = old_row.clone();
             for ((_, value), &index) in update.assignments.iter().zip(&targets) {
                 new_row[index] = assigned_value(&evaluator, value, &table, index, rule)?;
@@ -5008,7 +5026,7 @@ pub(crate) fn truncate(
         returning: None,
         using: None,
     };
-    delete_matching(writer, tables, &every_row, false)?;
+    delete_matching(writer, tables, &every_row, false, None)?;
     if let Some(firing) = firing {
         firing.finish();
     }
@@ -5020,10 +5038,14 @@ pub(crate) fn delete(
     tables: &mut TableCache,
     delete: &Delete,
 ) -> SqlResult<QueryResult> {
+    let row_limit = crate::dml_row_limit::take();
     if let Some(joined) = &delete.using {
+        if row_limit.is_some() {
+            return Err(SqlError::not_supported("TOP in a DELETE with FROM"));
+        }
         return crate::joined_dml::delete(writer, tables, delete, joined);
     }
-    delete_matching(writer, tables, delete, true)
+    delete_matching(writer, tables, delete, true, row_limit)
 }
 
 fn delete_matching(
@@ -5031,7 +5053,11 @@ fn delete_matching(
     tables: &mut TableCache,
     delete: &Delete,
     fires_triggers: bool,
+    row_limit: Option<u64>,
 ) -> SqlResult<QueryResult> {
+    if row_limit.is_some() && crate::updatable_views::is_view(writer, tables, &delete.table)? {
+        return Err(SqlError::not_supported("TOP in a DELETE of a view"));
+    }
     if crate::updatable_views::is_view(writer, tables, &delete.table)? {
         crate::partition_selection::refuse_on_unpartitioned(&delete.table)?;
         if fires_triggers
@@ -5053,6 +5079,9 @@ fn delete_matching(
     let delete = prepared.as_ref().unwrap_or(delete);
     let table = tables.require_target(writer, &delete.table.name, "delete from")?;
     if let Some(partitioned) = crate::partitions::partitioned(writer, tables, &table)? {
+        if row_limit.is_some() {
+            return Err(SqlError::not_supported("TOP in a DELETE of a partitioned table"));
+        }
         return crate::partition_dml::delete(writer, tables, delete, &partitioned);
     }
     crate::partition_selection::refuse_on_unpartitioned(&delete.table)?;
@@ -5087,6 +5116,9 @@ fn delete_matching(
                 }
             }
             matched = kept;
+        }
+        if let Some(most) = row_limit {
+            matched.truncate(usize::try_from(most).unwrap_or(usize::MAX));
         }
         if let Some(projection) = &returning {
             for (_, row) in &matched {

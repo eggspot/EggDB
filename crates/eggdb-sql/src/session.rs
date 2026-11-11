@@ -3004,6 +3004,11 @@ impl<'s> Session<'s> {
                     return self.run_insert_bulk(bulk, io);
                 }
                 Statement::SqlServer(SqlServerStatement::OutputInto(_)) => {}
+                Statement::SqlServer(SqlServerStatement::TopRows(top)) => {
+                    let count = crate::execute::row_count(Some(&top.count), "TOP")?;
+                    let _limited = crate::dml_row_limit::limit(count);
+                    return self.run_statement(&mut top.statement, io);
+                }
                 Statement::SqlServer(statement) => return self.run_sqlserver(statement),
                 _ => {}
             }

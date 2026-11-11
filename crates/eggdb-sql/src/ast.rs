@@ -590,6 +590,7 @@ pub(crate) struct MergeInsert {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SqlServerStatement {
+    TopRows(Box<TopRows>),
     Use(Name),
     NoCount(bool),
     ImplicitTransactions(bool),
@@ -1858,6 +1859,14 @@ impl ConflictResolution {
     pub(crate) fn resolves_row_by_row(self) -> bool {
         matches!(self, Self::Fail | Self::Ignore | Self::Replace)
     }
+}
+
+/// Transact-SQL's `UPDATE TOP (n)` or `DELETE TOP (n)`: the statement, run on at most `count`
+/// of the rows it matches.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TopRows {
+    pub(crate) count: Expr,
+    pub(crate) statement: Statement,
 }
 
 #[derive(Debug, Clone, PartialEq)]
