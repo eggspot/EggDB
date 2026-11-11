@@ -514,3 +514,4 @@ its full title with its status.
 - [D487](decisions/D487.md) Code-only batch 135 (M6d): MCP over HTTP answers in Server-Sent Events when asked
 - [D488](decisions/D488.md) Code-only batch 136 (M6c): live activity across sessions in `pg_stat_activity` and MySQL's process list
 - [D489](decisions/D489.md) Code-only batch 137 (M6c): SQL Server's session, request and query-statistics views
+- [D490](decisions/D490.md) Code-only batch 138 (M6c): `pg_cancel_backend` and `pg_terminate_backend` across sessions

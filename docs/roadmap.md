@@ -735,7 +735,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Live activity, locks and wait events: `pg_stat_activity` for every session,
   `sys.dm_exec_requests` and `SHOW PROCESSLIST` across sessions (D25, D188). `pg_stat_activity` and MySQL's process
   list across sessions: **code written, unbuilt** (code-only mode, 2026-11-11, D488); `sys.dm_exec_sessions` and
-  `sys.dm_exec_requests` across sessions: **code written, unbuilt** (code-only mode, 2026-11-11, D489).
+  `sys.dm_exec_requests` across sessions: **code written, unbuilt** (code-only mode, 2026-11-11, D489). `pg_cancel_backend` and
+  `pg_terminate_backend`: **code written, unbuilt** (code-only mode, 2026-11-11, D490).
 - Statement statistics in the other dialects' views: `performance_schema`'s digest summary and
   `sys.dm_exec_query_stats` (D25, D286). `sys.dm_exec_query_stats`: **code
   written, unbuilt** (code-only mode, 2026-11-11, D489); `performance_schema` waits for that schema.

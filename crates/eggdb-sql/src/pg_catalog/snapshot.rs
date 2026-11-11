@@ -302,6 +302,16 @@ fn user_of(settings: &Settings) -> String {
     settings.get("session_authorization").unwrap_or_default()
 }
 
+pub(crate) fn session_is_superuser() -> bool {
+    FRAMES.with(|frames| {
+        frames
+            .try_borrow()
+            .ok()
+            .and_then(|frames| frames.last().map(|frame| frame.settings.checked_role.is_none()))
+            .unwrap_or(false)
+    })
+}
+
 pub(crate) fn session_user() -> Option<String> {
     FRAMES.with(|frames| {
         frames

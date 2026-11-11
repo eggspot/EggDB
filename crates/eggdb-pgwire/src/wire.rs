@@ -35,6 +35,7 @@ pub(crate) struct Wire<'a> {
     message_reservation: Option<Reservation<'a>>,
     read_timeout: Duration,
     closed: bool,
+    pub(crate) terminate: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Drop for Wire<'_> {
@@ -64,11 +65,17 @@ impl<'a> Wire<'a> {
             message_reservation: None,
             read_timeout: POLL_INTERVAL,
             closed: false,
+            terminate: None,
         })
     }
 
     fn next_wait(&self) -> Result<Duration, WireError> {
-        if (self.stop)() {
+        if (self.stop)()
+            || self
+                .terminate
+                .as_ref()
+                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+        {
             return Err(WireError::Stopping);
         }
         if self.login.as_ref().is_some_and(LoginTicket::is_evicted) {

@@ -1016,7 +1016,9 @@ pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
         database: &startup.database,
         client: &peer,
         application,
+        cancel: Some(&cancel),
     });
+    wire.terminate = activity.termination();
     let mut connection = Connection {
         activity,
         wire,

@@ -679,6 +679,7 @@ fn serve_databases<'a, 'd, D: DatabaseDirectory>(
             shared.register(connection_id, session.cancel_signal());
             let attention = AttentionWatch::new(wire.socket(), session.cancel_signal());
             let peer = wire.peer();
+            let cancel = session.cancel_signal();
             let activity =
                 eggdb_sql::session_activity::register(eggdb_sql::session_activity::Connected {
                     pid: i32::try_from(connection_id).unwrap_or(i32::MAX),
@@ -687,6 +688,7 @@ fn serve_databases<'a, 'd, D: DatabaseDirectory>(
                     database: &database,
                     client: &peer,
                     application: "",
+                    cancel: Some(&cancel),
                 });
             connection = Some(Connection {
                 activity,

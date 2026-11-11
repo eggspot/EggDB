@@ -490,6 +490,7 @@ fn serve_database<'a, 'd, D: DatabaseDirectory>(
         ),
     };
     let peer = carried.wire.peer();
+    let cancel = session.cancel_signal();
     let activity = eggdb_sql::session_activity::register(eggdb_sql::session_activity::Connected {
         pid: i32::try_from(connection_id).unwrap_or(i32::MAX),
         protocol: "mysql",
@@ -497,6 +498,7 @@ fn serve_database<'a, 'd, D: DatabaseDirectory>(
         database: &database,
         client: &peer,
         application: "",
+        cancel: Some(&cancel),
     });
     let mut connection = Connection {
         activity,

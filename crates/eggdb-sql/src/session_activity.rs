@@ -2,9 +2,11 @@
 //! process list and SQL Server's `sys.dm_exec_sessions`: each connection registers once it
 //! has logged in and reports when each statement starts and ends.
 
+use crate::cancel::CancelSignal;
+use crate::error::{SqlError, SqlResult, SqlState};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::SystemTime;
 
 const MAX_QUERY_CHARS: usize = 1024;
@@ -12,8 +14,10 @@ const MAX_SESSIONS: usize = 65_536;
 const POSTGRESQL_EPOCH_UNIX_SECONDS: i64 = 946_684_800;
 
 /// What one session is doing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct SessionActivity {
+    pub(crate) cancel: Option<CancelSignal>,
+    pub(crate) terminate: Arc<AtomicBool>,
     pub(crate) pid: i32,
     pub(crate) protocol: &'static str,
     pub(crate) user: String,
@@ -55,6 +59,7 @@ fn shortened(text: &str) -> String {
 #[derive(Debug)]
 pub struct ActivityHandle {
     id: Option<u64>,
+    terminate: Option<Arc<AtomicBool>>,
 }
 
 /// Who a connection is, as its protocol server knows it after login.
@@ -72,19 +77,27 @@ pub struct Connected<'c> {
     pub client: &'c str,
     /// The client's application name, if it gave one.
     pub application: &'c str,
+    /// What cancels the session's running statement.
+    pub cancel: Option<&'c CancelSignal>,
 }
 
 /// Registers a session that has just logged in, idle.
 pub fn register(connected: Connected<'_>) -> ActivityHandle {
     let mut sessions = registry().lock().unwrap_or_else(PoisonError::into_inner);
     if sessions.len() >= MAX_SESSIONS {
-        return ActivityHandle { id: None };
+        return ActivityHandle {
+            id: None,
+            terminate: None,
+        };
     }
     let id = next_id();
     let now = now_micros();
+    let terminate = Arc::new(AtomicBool::new(false));
     sessions.insert(
         id,
         SessionActivity {
+            cancel: connected.cancel.cloned(),
+            terminate: Arc::clone(&terminate),
             pid: connected.pid,
             protocol: connected.protocol,
             user: connected.user.to_owned(),
@@ -98,10 +111,50 @@ pub fn register(connected: Connected<'_>) -> ActivityHandle {
             query: String::new(),
         },
     );
-    ActivityHandle { id: Some(id) }
+    ActivityHandle {
+        id: Some(id),
+        terminate: Some(terminate),
+    }
+}
+
+/// Cancels the running statement of the sessions with `pid`, or ends them when `terminate`,
+/// as `pg_cancel_backend` and `pg_terminate_backend` do: `caller` may signal its own sessions,
+/// and a superuser any. Answers whether a session had that pid.
+pub(crate) fn signal(pid: i32, terminate: bool, caller: &str, superuser: bool) -> SqlResult<bool> {
+    let sessions = registry().lock().unwrap_or_else(PoisonError::into_inner);
+    let mut found = false;
+    for session in sessions.values().filter(|session| session.pid == pid) {
+        if !superuser && session.user != caller {
+            return Err(SqlError::new(
+                SqlState::INSUFFICIENT_PRIVILEGE,
+                if terminate {
+                    "permission denied to terminate process"
+                } else {
+                    "permission denied to cancel query"
+                },
+            )
+            .with_detail(format!(
+                "Only roles with the SUPERUSER attribute may signal sessions of role \"{}\".",
+                session.user
+            )));
+        }
+        found = true;
+        if terminate {
+            session.terminate.store(true, Ordering::Release);
+        }
+        if let Some(cancel) = &session.cancel {
+            cancel.cancel();
+        }
+    }
+    Ok(found)
 }
 
 impl ActivityHandle {
+    /// The flag `pg_terminate_backend` sets; the connection ends when it sees it.
+    pub fn termination(&self) -> Option<Arc<AtomicBool>> {
+        self.terminate.clone()
+    }
+
     fn update(&self, change: impl FnOnce(&mut SessionActivity)) {
         let Some(id) = self.id else {
             return;

@@ -979,7 +979,9 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         | "has_any_column_privilege"
         | "pg_has_role"
         | "pg_is_in_recovery"
-        | "pg_is_wal_replay_paused" => SqlType::Boolean,
+        | "pg_is_wal_replay_paused"
+        | "pg_cancel_backend"
+        | "pg_terminate_backend" => SqlType::Boolean,
         "pg_backend_pid" => SqlType::Integer,
         "pg_stat_statements_reset" => SqlType::VOID,
         "pg_postmaster_start_time" | "pg_conf_load_time" => STAMP,
@@ -1027,6 +1029,22 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         return Some(super::privilege_inquiry::function(name, values));
     }
     Some(match name {
+        "pg_cancel_backend" | "pg_terminate_backend" => {
+            let Some(pid) = values.first().and_then(Value::as_integer) else {
+                return Some(Err(SqlError::new(
+                    SqlState::UNDEFINED_FUNCTION,
+                    format!("{name} takes a process id"),
+                )));
+            };
+            let pid = i32::try_from(pid).unwrap_or(i32::MAX);
+            crate::session_activity::signal(
+                pid,
+                name == "pg_terminate_backend",
+                &session_user_name(),
+                snapshot::session_is_superuser(),
+            )
+            .map(Value::Boolean)
+        }
         "pg_is_in_recovery" | "pg_is_wal_replay_paused" => Ok(Value::Boolean(false)),
         "pg_backend_pid" => Ok(Value::Integer(
             i32::try_from(std::process::id()).unwrap_or(i32::MAX),
