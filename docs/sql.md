@@ -1344,11 +1344,13 @@ the caught error came from; over TDS the `ERROR` token carries that procedure's 
 multi-statement) whose arguments read the columns of an earlier `FROM` item: the function runs
 once for each distinct set of argument values. `CREATE PROCEDURE #name` makes a temporary
 procedure that only its session sees and that goes away with the session (`DROP PROCEDURE #name`
-drops it sooner); temporary functions are refused, as SQL Server refuses them.
+drops it sooner); temporary functions are refused, as SQL Server refuses them. Numbered
+procedures (`CREATE PROCEDURE name;2`) form a group with `name` (which is `name;1`): `EXEC
+name;2` runs the second, and `DROP PROCEDURE name` drops the whole group.
 
 Not yet: a global temporary procedure (`##name`) is created like a `#name` one, visible only to
 its own session; a procedure called by its name alone as the first statement of a batch (write
-`EXEC`), `EXEC @result = dbo.scalar_function`, numbered procedures (`name;2`), CLR routines (`AS
+`EXEC`), `EXEC @result = dbo.scalar_function`, numbered procedures in `sys.numbered_procedures`, CLR routines (`AS
 EXTERNAL NAME`), and `COMMIT` or `ROLLBACK` of the caller's transaction inside a function.
 
 ## SQL Server metadata for tools

@@ -166,10 +166,13 @@ impl Parser<'_> {
         if temporary {
             name.text = crate::temporary::internal_name(&name.text);
         }
-        if self.peek_kind() == &TokenKind::Semicolon
-            && matches!(self.peek_kind_at(1), TokenKind::Integer(_))
-        {
-            return Err(not_supported("Numbered procedures (name;number)").at(self.position()));
+        if let Some(number) = self.procedure_number()? {
+            if kind == RoutineKind::Function {
+                return Err(self.unexpected());
+            }
+            if number > 1 {
+                name.text = format!("{};{number}", name.text);
+            }
         }
         let parameters = self.sqlserver_routine_parameters(kind)?;
         let returns = match kind {

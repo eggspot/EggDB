@@ -135,6 +135,18 @@ pub(super) fn drop_routines(
             ));
         }
         save(writer, &named.name, &[])?;
+        if kind == RoutineKind::Procedure {
+            let numbered = format!("{};", named.name);
+            for member in super::every_routine(&*writer)? {
+                let is_member = member
+                    .name
+                    .strip_prefix(&numbered)
+                    .is_some_and(|number| !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()));
+                if is_member {
+                    save(writer, &member.name, &[])?;
+                }
+            }
+        }
     }
     Ok(QueryResult::command(format!("DROP {}", kind.keyword())))
 }

@@ -163,6 +163,32 @@ impl Parser<'_> {
         })
     }
 
+    /// The number after a numbered procedure's name (`name;2`), consumed; `None` when none
+    /// follows.
+    pub(super) fn procedure_number(&mut self) -> SqlResult<Option<u16>> {
+        if self.peek_kind() != &TokenKind::Semicolon {
+            return Ok(None);
+        }
+        let TokenKind::Integer(digits) = self.peek_kind_at(1) else {
+            return Ok(None);
+        };
+        let position = self.tokens.get(self.at + 1).map_or(0, |token| token.start);
+        let number = digits
+            .parse::<u16>()
+            .ok()
+            .filter(|number| (1..=32_767).contains(number))
+            .ok_or_else(|| {
+                SqlError::new(
+                    SqlState::INVALID_PARAMETER_VALUE,
+                    "The procedure number must be between 1 and 32767.",
+                )
+                .with_sqlserver_code(2_730)
+                .at(position)
+            })?;
+        self.at += 2;
+        Ok(Some(number))
+    }
+
     pub(super) fn procedure_name(&mut self) -> SqlResult<(Name, String)> {
         while self.take(&TokenKind::Dot) {}
         let mut schema: Option<String> = None;
@@ -236,7 +262,13 @@ impl Parser<'_> {
         if self.peek_kind() == &TokenKind::LeftParen {
             return Err(not_supported("EXEC of a character string (dynamic SQL)").at(position));
         }
-        let (procedure, routine) = self.procedure_name()?;
+        let (mut procedure, mut routine) = self.procedure_name()?;
+        if let Some(number) = self.procedure_number()?
+            && number > 1
+        {
+            procedure.text = format!("{};{number}", procedure.text);
+            routine = format!("{routine};{number}");
+        }
         let mut arguments: Vec<ProcedureArgument> = Vec::new();
         if self.at_procedure_end() {
             return Ok(ProcedureCall {

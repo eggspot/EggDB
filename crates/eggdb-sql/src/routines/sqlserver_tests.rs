@@ -328,3 +328,17 @@ fn hostile_transact_sql_routines_return_errors_and_never_panic() {
         "DECLARE @b int; EXEC dbo.p_after 5, @b OUTPUT; SELECT dbo.f_after(@b) AS six",
     );
 }
+
+#[test]
+fn numbered_procedures_are_created_run_and_dropped_as_a_group() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    succeeds(&mut session, "CREATE TABLE log (n INT)");
+    succeeds(&mut session, "CREATE PROCEDURE note AS INSERT INTO log VALUES (1)");
+    succeeds(&mut session, "CREATE PROCEDURE note;2 AS THROW 50001, 'second', 1;");
+    succeeds(&mut session, "EXEC note; EXEC note;1");
+    fails_with(&mut session, "EXEC note;2", 50001);
+    succeeds(&mut session, "DROP PROCEDURE note");
+    fails_with(&mut session, "EXEC note;2", 2812);
+    fails_with(&mut session, "EXEC note", 2812);
+}
