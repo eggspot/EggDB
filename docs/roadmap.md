@@ -970,6 +970,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   time: **code written, unbuilt** (code-only mode, 2026-11-11, D468).
 - `_script`, `_geo_distance` and `nested` sorts, and refusing sorts on unmapped fields once
   mappings apply (D348).
+  `_geo_distance`: **code written, unbuilt** (code-only mode, 2026-11-11, D518).
 - Nested and bucket aggregations beyond `terms` (D196). **Code written, unbuilt** (code-only mode,
   2026-11-11, D471); `nested` waits for `nested` mappings.
 - Aliases, index templates and the rest of `_cat` (D196). Aliases, `_cat/aliases`, `count` and `health`:

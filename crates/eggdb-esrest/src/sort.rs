@@ -4,6 +4,16 @@ use eggdb_sql::json::{Json, Node};
 use std::cmp::Ordering;
 
 const KEYWORD_SUBFIELD: &str = ".keyword";
+const EARTH_MEAN_RADIUS_METERS: f64 = 6_371_008.771_4;
+const GEO_SORT_OPTIONS: [&str; 7] = [
+    "order",
+    "unit",
+    "mode",
+    "distance_type",
+    "ignore_unmapped",
+    "validation_method",
+    "nested",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Direction {
@@ -35,6 +45,13 @@ enum Target {
         name: String,
         mode: Option<Mode>,
         missing: Missing,
+    },
+    GeoDistance {
+        field: String,
+        origins: Vec<(f64, f64)>,
+        meters_per_unit: f64,
+        mode: Option<Mode>,
+        plane: bool,
     },
 }
 
@@ -97,7 +114,8 @@ fn target_of(name: &str) -> Result<Target, String> {
     match name {
         "_score" => Ok(Target::Score),
         "_doc" | "_shard_doc" => Ok(Target::Doc),
-        "_script" | "_geo_distance" => Err(format!("sorting by [{name}] is not supported")),
+        "_script" => Err(format!("sorting by [{name}] is not supported")),
+        "_geo_distance" => Err("[_geo_distance] needs a field and an origin".to_owned()),
         "" => Err("a sort field has an empty name".to_owned()),
         field => Ok(Target::Field {
             name: field.to_owned(),
@@ -122,7 +140,122 @@ fn named(name: &str) -> Result<SortField, String> {
     })
 }
 
+fn number_of(node: &Node) -> Option<f64> {
+    match &node.value {
+        Json::Number(text) | Json::String(text) => text.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+fn point_of(node: &Node) -> Option<(f64, f64)> {
+    match &node.value {
+        Json::Object(members) => {
+            let find = |name: &str| members.iter().find(|(key, _)| key == name).and_then(|(_, value)| number_of(value));
+            Some((find("lat")?, find("lon")?))
+        }
+        Json::Array(items) if items.len() >= 2 && items.iter().all(|item| matches!(item.value, Json::Number(_))) => {
+            Some((number_of(&items[1])?, number_of(&items[0])?))
+        }
+        Json::String(text) => {
+            let (lat, lon) = text.split_once(',')?;
+            Some((lat.trim().parse().ok()?, lon.trim().parse().ok()?))
+        }
+        _ => None,
+    }
+    .filter(|(lat, lon)| (-90.0..=90.0).contains(lat) && (-180.0..=180.0).contains(lon))
+}
+
+fn points_of(node: &Node) -> Vec<(f64, f64)> {
+    if let Some(point) = point_of(node) {
+        return vec![point];
+    }
+    match &node.value {
+        Json::Array(items) => items.iter().filter_map(point_of).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn meters_per(unit: &str) -> Result<f64, String> {
+    Ok(match unit {
+        "m" | "meters" => 1.0,
+        "km" | "kilometers" => 1000.0,
+        "cm" | "centimeters" => 0.01,
+        "mm" | "millimeters" => 0.001,
+        "mi" | "miles" => 1609.344,
+        "yd" | "yards" => 0.9144,
+        "ft" | "feet" => 0.3048,
+        "in" | "inch" => 0.0254,
+        "nmi" | "NM" | "nauticalmiles" => 1852.0,
+        other => return Err(format!("unknown distance unit [{other}]")),
+    })
+}
+
+fn distance_meters(from: (f64, f64), to: (f64, f64), plane: bool) -> f64 {
+    let (lat1, lon1) = (from.0.to_radians(), from.1.to_radians());
+    let (lat2, lon2) = (to.0.to_radians(), to.1.to_radians());
+    if plane {
+        let x = (lon2 - lon1) * ((lat1 + lat2) / 2.0).cos();
+        let y = lat2 - lat1;
+        return (x * x + y * y).sqrt() * EARTH_MEAN_RADIUS_METERS;
+    }
+    let half = ((lat2 - lat1) / 2.0).sin().powi(2)
+        + lat1.cos() * lat2.cos() * ((lon2 - lon1) / 2.0).sin().powi(2);
+    2.0 * EARTH_MEAN_RADIUS_METERS * half.sqrt().min(1.0).asin()
+}
+
+fn geo_distance(spec: &Node) -> Result<SortField, String> {
+    let Json::Object(options) = &spec.value else {
+        return Err("[_geo_distance] takes an object".to_owned());
+    };
+    let mut field = None;
+    let mut direction = Direction::Ascending;
+    let mut meters_per_unit = 1.0;
+    let mut mode = None;
+    let mut plane = false;
+    for (key, value) in options {
+        match (key.as_str(), &value.value) {
+            ("order", Json::String(order)) => direction = direction_of(order)?,
+            ("unit", Json::String(unit)) => meters_per_unit = meters_per(unit)?,
+            ("mode", Json::String(text)) => mode = Some(mode_of(text)?),
+            ("distance_type", Json::String(kind)) => plane = kind.eq_ignore_ascii_case("plane"),
+            (option, _) if GEO_SORT_OPTIONS.contains(&option) => {}
+            (name, _) => {
+                let origins = points_of(value);
+                if origins.is_empty() {
+                    return Err(format!("[_geo_distance] cannot read the origin of [{name}]"));
+                }
+                field = Some((name.to_owned(), origins));
+            }
+        }
+    }
+    let (field, origins) = field.ok_or("[_geo_distance] needs a field and an origin")?;
+    Ok(SortField {
+        target: Target::GeoDistance {
+            field,
+            origins,
+            meters_per_unit,
+            mode,
+            plane,
+        },
+        direction,
+    })
+}
+
+fn raw_at<'n>(source: &'n Node, path: &str) -> Option<&'n Node> {
+    let mut current = source;
+    for part in path.split('.') {
+        let Json::Object(members) = &current.value else {
+            return None;
+        };
+        current = members.iter().find(|(key, _)| key == part).map(|(_, value)| value)?;
+    }
+    Some(current)
+}
+
 fn configured(name: &str, spec: &Node) -> Result<SortField, String> {
+    if name == "_geo_distance" {
+        return geo_distance(spec);
+    }
     let mut field = named(name)?;
     match &spec.value {
         Json::String(order) => field.direction = direction_of(order)?,
@@ -395,7 +528,9 @@ impl Sort {
             .fields
             .iter()
             .map(|field| match &field.target {
-                Target::Score | Target::Doc => Kind::Numeric { integral: false },
+                Target::Score | Target::Doc | Target::GeoDistance { .. } => {
+                    Kind::Numeric { integral: false }
+                }
                 Target::Field { name, .. } => kind_of(name, matched),
             })
             .collect();
@@ -421,6 +556,39 @@ impl Ordered<'_> {
                     value: at as f64,
                     shown: at.to_string(),
                 },
+                Target::GeoDistance {
+                    field: name,
+                    origins,
+                    meters_per_unit,
+                    mode,
+                    plane,
+                } => {
+                    let distances: Vec<(f64, String)> = raw_at(source, name)
+                        .map(points_of)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|point| {
+                            let nearest = origins
+                                .iter()
+                                .map(|origin| distance_meters(*origin, point, *plane))
+                                .fold(f64::INFINITY, f64::min);
+                            let value = nearest / meters_per_unit;
+                            (value, number_text(value))
+                        })
+                        .collect();
+                    if distances.is_empty() {
+                        SortValue::Number {
+                            value: f64::INFINITY,
+                            shown: "\"Infinity\"".to_owned(),
+                        }
+                    } else {
+                        let mode = mode.unwrap_or(match field.direction {
+                            Direction::Ascending => Mode::Min,
+                            Direction::Descending => Mode::Max,
+                        });
+                        chosen_number(distances, mode, false)
+                    }
+                }
                 Target::Field {
                     name,
                     mode,
@@ -517,7 +685,9 @@ impl Ordered<'_> {
                 let name = match &field.target {
                     Target::Score => "_score",
                     Target::Doc => "_doc",
-                    Target::Field { name, .. } => name.as_str(),
+                    Target::Field { name, .. } | Target::GeoDistance { field: name, .. } => {
+                        name.as_str()
+                    }
                 };
                 let unreadable =
                     || format!("Failed to parse search_after value for field [{name}].");
@@ -692,5 +862,25 @@ mod tests {
             panic!("an array")
         };
         assert!(ordered.after(&good).is_ok());
+    }
+
+    #[test]
+    fn geo_distance_sorts_by_the_nearest_point() {
+        let geo = sort("[{\"_geo_distance\":{\"pin\":[0,0],\"unit\":\"km\",\"order\":\"asc\"}}]").unwrap();
+        let near = document("{\"pin\":{\"lat\":0,\"lon\":1}}");
+        let far = document("{\"pin\":\"0,2\"}");
+        let none = document("{}");
+        let ordered = geo.over(&[&near, &far, &none]);
+        let distances: Vec<f64> = [&near, &far, &none]
+            .iter()
+            .map(|source| match &ordered.values_of(0.0, 0, source)[0] {
+                SortValue::Number { value, .. } => *value,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert!((distances[0] - 111.195).abs() < 0.01, "{distances:?}");
+        assert!((distances[1] - 222.39).abs() < 0.02, "{distances:?}");
+        assert!(distances[2].is_infinite());
+        assert!(sort("{\"_geo_distance\":{\"unit\":\"km\"}}").is_err());
     }
 }

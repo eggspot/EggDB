@@ -542,3 +542,4 @@ its full title with its status.
 - [D515](decisions/D515.md) Code-only batch 163 (M8): Elasticsearch query_string and highlighting
 - [D516](decisions/D516.md) Code-only batch 164 (M16): AMQP TTL, dead-letter exchanges and delayed messages
 - [D517](decisions/D517.md) Code-only batch 165 (M16): MQTT over WebSockets
+- [D518](decisions/D518.md) Code-only batch 166 (M8): Elasticsearch _geo_distance sort
