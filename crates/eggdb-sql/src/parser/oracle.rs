@@ -937,15 +937,18 @@ impl<'t> Parser<'t> {
         }
         let text = oracle_function("oracle_concat", vec![measure], position);
         let parts = if self.is_word("over") {
-            if distinct {
-                return Err(self.not_supported("LISTAGG (DISTINCT ...) OVER"));
-            }
-            self.whole_partition_aggregate(
+            let partition = self.partition_only_window()?;
+            super::windows::whole_partition_call_treated(
                 AggregateFunction::ArrayAgg,
                 vec![text],
+                partition,
                 order,
+                ValueTreatment {
+                    distinct,
+                    ..ValueTreatment::default()
+                },
                 position,
-            )?
+            )
         } else {
             let argument = if order.is_empty() {
                 text

@@ -1153,8 +1153,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `KEEP` on `LISTAGG`; the rest of Oracle's regex syntax (`\z`, `[=e=]`, `[.ch.]`, `[^...]`
   matching a newline without `n`) (D332). The regex syntax: **code written, unbuilt** (code-only mode,
   2026-11-11, D452). `COUNT(DISTINCT x) OVER` and the other
-  aggregates: **code written, unbuilt** (D453); `LISTAGG (DISTINCT) OVER` and `KEEP` on `LISTAGG`
-  left. Window functions, `RATIO_TO_REPORT`, `KEEP` and
+  aggregates: **code written, unbuilt** (D453); `LISTAGG (DISTINCT) OVER`: **code written, unbuilt**
+  (code-only mode, 2026-11-12, D604); `KEEP` on `LISTAGG` is not in Oracle's reference (D604). Window functions, `RATIO_TO_REPORT`, `KEEP` and
   `REGEXP_*` are built (D332). Check: Oracle-dialect tests of each.
 - Oracle's types: `TIMESTAMP WITH TIME ZONE` keeping its offset, `BFILE`, `UROWID`, `XMLType`,
   object types and schema-level collection types (D19).

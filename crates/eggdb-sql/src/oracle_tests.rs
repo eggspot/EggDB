@@ -788,3 +788,27 @@ fn cast_takes_a_default_on_conversion_error_and_validate_conversion_tests_it() {
         .execute("SELECT CAST('1' AS int DEFAULT 0 ON CONVERSION ERROR)", &mut |_| {});
     assert!(other.is_err());
 }
+
+#[test]
+fn listagg_distinct_over_a_partition_lists_each_value_once() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    values(&mut session, "CREATE TABLE staff (dept NUMBER, name VARCHAR2(10))");
+    for (dept, name) in [(1, "b"), (1, "a"), (1, "b"), (2, "c")] {
+        values(&mut session, &format!("INSERT INTO staff VALUES ({dept}, '{name}')"));
+    }
+    let rows = values(
+        &mut session,
+        "SELECT dept, LISTAGG(DISTINCT name, ',') WITHIN GROUP (ORDER BY name) OVER (PARTITION BY dept) \
+         FROM staff ORDER BY dept, name",
+    );
+    assert_eq!(
+        rows,
+        vec![
+            vec![number(1), text("a,b")],
+            vec![number(1), text("a,b")],
+            vec![number(1), text("a,b")],
+            vec![number(2), text("c")],
+        ]
+    );
+}

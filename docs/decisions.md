@@ -628,3 +628,4 @@ its full title with its status.
 - [D601](decisions/D601.md) Code-only batch 249 (M10): pg_cron time zones per job
 - [D602](decisions/D602.md) Code-only batch 250 (M10): pg_cron schedules checked when set, and the restart minute
 - [D603](decisions/D603.md) Code-only batch 251 (M10): Oracle's CAST ... DEFAULT ON CONVERSION ERROR and VALIDATE_CONVERSION
+- [D604](decisions/D604.md) Code-only batch 252 (M10): LISTAGG (DISTINCT ...) OVER

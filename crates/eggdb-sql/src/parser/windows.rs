@@ -30,6 +30,25 @@ pub(super) fn whole_partition_call(
     order: Vec<OrderItem>,
     position: usize,
 ) -> Expr {
+    whole_partition_call_treated(
+        function,
+        arguments,
+        partition,
+        order,
+        ValueTreatment::default(),
+        position,
+    )
+}
+
+/// An aggregate over its whole partition with a value treatment, such as Oracle's `DISTINCT`.
+pub(super) fn whole_partition_call_treated(
+    function: AggregateFunction,
+    arguments: Vec<Expr>,
+    partition: Vec<Expr>,
+    order: Vec<OrderItem>,
+    treatment: ValueTreatment,
+    position: usize,
+) -> Expr {
     let frame = FrameClause {
         frame: Frame {
             units: FrameUnits::Rows,
@@ -42,7 +61,7 @@ pub(super) fn whole_partition_call(
     };
     crate::window::call(WindowCall {
         function: WindowFunction::Aggregate(function),
-        treatment: ValueTreatment::default(),
+        treatment,
         arguments,
         filter: None,
         window: WindowReference::Inline(WindowDefinition {
