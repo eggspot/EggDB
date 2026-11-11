@@ -691,3 +691,4 @@ its full title with its status.
 - [D664](decisions/D664.md) Code-only batch 312 (M5): eggdb-sqllogictest, a runner of sqllogictest files
 - [D665](decisions/D665.md) Code-only batch 313 (M16): Prometheus remote write 2.0
 - [D666](decisions/D666.md) Code-only batch 314 (M6c): OTLP export of the server's logs and slow statements
+- [D667](decisions/D667.md) Code-only batch 315 (M7): eggdb-lua, part 1: the lexer and parser of Lua 5.1
