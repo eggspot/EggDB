@@ -1088,8 +1088,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   variables set by a stored function called outside `CALL`.
 - `SHOW CREATE PROCEDURE` and `information_schema.ROUTINES` details, and compound bodies in
   triggers (D199). `SHOW CREATE PROCEDURE|FUNCTION`, `SHOW ... STATUS` and the `ROUTINES`
-  and `PARAMETERS` views: **code written, unbuilt** (code-only mode, 2026-11-11, D420). Left:
-  handlers and cursors in trigger bodies. MySQL's `TRIGGERS` view: **code written, unbuilt** (code-only mode,
+  and `PARAMETERS` views: **code written, unbuilt** (code-only mode, 2026-11-11, D420); handlers and cursors in
+  trigger bodies: **code written, unbuilt** (code-only mode, 2026-11-12, D636). MySQL's `TRIGGERS` view: **code written, unbuilt** (code-only mode,
   2026-11-12, D618); `CASE`, loops and labels in trigger bodies: **code written, unbuilt** (D619).
 - MySQL events (`CREATE EVENT`) on the job scheduler (D27, D200). **Code written, unbuilt** (code-only mode,
   2026-11-11, D421). Sub-minute runs: **code written, unbuilt** (code-only mode, 2026-11-12, D576).

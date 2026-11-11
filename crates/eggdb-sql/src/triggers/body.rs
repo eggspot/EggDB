@@ -52,6 +52,72 @@ pub(crate) enum BodyStep {
         label: String,
         steps: Vec<BodyStep>,
     },
+    DeclareHandler {
+        exit: bool,
+        conditions: Vec<HandlerCondition>,
+        body: Box<BodyStep>,
+    },
+    DeclareCursor {
+        name: String,
+        query: usize,
+    },
+    Open(String),
+    Fetch {
+        cursor: String,
+        targets: Vec<StepTarget>,
+    },
+    Close(String),
+}
+
+/// What a MySQL `DECLARE ... HANDLER FOR` catches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HandlerCondition {
+    SqlException,
+    SqlWarning,
+    NotFound,
+    SqlState(String),
+    ErrorCode(u16),
+}
+
+impl HandlerCondition {
+    fn catches(&self, error: &SqlError) -> bool {
+        let state = error.state();
+        let code = state.code();
+        match self {
+            Self::SqlException => !code.starts_with("00") && !code.starts_with("01") && !code.starts_with("02"),
+            Self::SqlWarning => code.starts_with("01"),
+            Self::NotFound => code.starts_with("02"),
+            Self::SqlState(wanted) => code == wanted,
+            Self::ErrorCode(wanted) => error.vendor_code() == Some(*wanted),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Handler {
+    exit: bool,
+    conditions: Vec<HandlerCondition>,
+    body: BodyStep,
+    depth: usize,
+}
+
+#[derive(Debug)]
+struct Cursor {
+    name: String,
+    query: usize,
+    rows: Option<std::vec::IntoIter<Vec<Value>>>,
+}
+
+fn cursor_error(code: u16, message: String) -> SqlError {
+    SqlError::new(SqlState::MYSQL_GENERAL, message).with_vendor_code(code)
+}
+
+fn no_data() -> SqlError {
+    SqlError::new(
+        SqlState::from_text("02000").unwrap_or(SqlState::MYSQL_GENERAL),
+        "No data - zero rows fetched, selected, or processed",
+    )
+    .with_vendor_code(1329)
 }
 
 /// Where control goes after a step: on to the next, or out of the labelled block or loop that
@@ -61,6 +127,7 @@ enum Flow {
     Next,
     Leave(String),
     Iterate(String),
+    ExitTo(usize),
 }
 
 fn named(label: Option<&String>, wanted: &str) -> bool {
@@ -249,6 +316,9 @@ pub(super) fn run_row_trigger(
         dialect: trigger.dialect,
         timing: trigger.timing,
         frame,
+        handlers: Vec::new(),
+        cursors: Vec::new(),
+        depth: 0,
     };
     let text = match &trigger.action {
         TriggerAction::Statements(text) => text,
@@ -291,6 +361,9 @@ struct Run<'r> {
     dialect: Dialect,
     timing: TriggerTiming,
     frame: TriggerFrame,
+    handlers: Vec<Handler>,
+    cursors: Vec<Cursor>,
+    depth: usize,
 }
 
 pub(super) fn statement_condition_holds(
@@ -313,6 +386,9 @@ pub(super) fn statement_condition_holds(
             locals: Vec::new(),
             dialect: trigger.dialect,
         },
+        handlers: Vec::new(),
+        cursors: Vec::new(),
+        depth: 0,
     };
     run.condition_holds(trigger.condition.as_deref())
 }
@@ -336,8 +412,8 @@ impl Run<'_> {
             .with_context(Parameters::Absent, self.settings)
             .in_dialect(self.dialect)
             .trigger_body()?;
-        match self.steps(text, &tokens, &steps)? {
-            Flow::Next => Ok(()),
+        match self.block(text, &tokens, &steps)? {
+            Flow::Next | Flow::ExitTo(_) => Ok(()),
             Flow::Leave(label) => Err(no_such_label("LEAVE", &label)),
             Flow::Iterate(label) => Err(no_such_label("ITERATE", &label)),
         }
@@ -345,12 +421,99 @@ impl Run<'_> {
 
     fn steps(&mut self, text: &str, tokens: &[Token<'_>], steps: &[BodyStep]) -> SqlResult<Flow> {
         for step in steps {
-            let flow = self.step(text, tokens, step)?;
+            let flow = match self.step(text, tokens, step) {
+                Ok(flow) => flow,
+                Err(error) => self.handled(text, tokens, error)?,
+            };
             if flow != Flow::Next {
                 return Ok(flow);
             }
         }
         Ok(Flow::Next)
+    }
+
+    fn handled(&mut self, text: &str, tokens: &[Token<'_>], error: SqlError) -> SqlResult<Flow> {
+        if errors::is_ignored_row(&error) || error.state() == SqlState::QUERY_CANCELED {
+            return Err(error);
+        }
+        let Some(handler) = self
+            .handlers
+            .iter()
+            .rev()
+            .find(|handler| handler.conditions.iter().any(|condition| condition.catches(&error)))
+            .cloned()
+        else {
+            return Err(error);
+        };
+        let outer: Vec<Handler> = self
+            .handlers
+            .iter()
+            .filter(|known| known.depth < handler.depth)
+            .cloned()
+            .collect();
+        let saved = std::mem::replace(&mut self.handlers, outer);
+        let outcome = self.step(text, tokens, &handler.body);
+        self.handlers = saved;
+        let flow = outcome?;
+        if handler.exit {
+            return Ok(Flow::ExitTo(handler.depth));
+        }
+        Ok(flow)
+    }
+
+    fn cursor_index(&self, name: &str) -> SqlResult<usize> {
+        self.cursors
+            .iter()
+            .rposition(|cursor| cursor.name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| cursor_error(1324, format!("Undefined CURSOR: {name}")))
+    }
+
+    fn open_cursor(&mut self, text: &str, tokens: &[Token<'_>], name: &str) -> SqlResult<()> {
+        let index = self.cursor_index(name)?;
+        if self.cursors[index].rows.is_some() {
+            return Err(cursor_error(1325, "Cursor is already open".to_owned()));
+        }
+        let statement = Parser::new(text, tokens)
+            .with_context(Parameters::Absent, self.settings)
+            .in_dialect(self.dialect)
+            .with_trigger_frame(&self.frame)
+            .resuming_at((self.cursors[index].query, 0))
+            .statement()?;
+        let binding = Binding {
+            settings: self.settings,
+            walk_expressions: true,
+            target_privilege: None,
+        };
+        let rows = match statement {
+            Statement::Select(mut select) => {
+                binding.select(&*self.writer, self.tables, &mut select)?;
+                execute::select(&*self.writer, self.tables, &select, false)?.rows
+            }
+            Statement::Query(mut query) => {
+                binding.query(&*self.writer, self.tables, &mut query)?;
+                execute::query(&*self.writer, self.tables, &query, false)?.rows
+            }
+            _ => return Err(errors::not_in_trigger("a cursor that is not a SELECT", self.dialect)),
+        };
+        self.cursors[index].rows = Some(rows.into_iter());
+        Ok(())
+    }
+
+    fn fetch_cursor(&mut self, name: &str, targets: &[StepTarget]) -> SqlResult<()> {
+        let index = self.cursor_index(name)?;
+        let Some(rows) = self.cursors[index].rows.as_mut() else {
+            return Err(cursor_error(1326, "Cursor is not open".to_owned()));
+        };
+        let Some(row) = rows.next() else {
+            return Err(no_data());
+        };
+        if row.len() != targets.len() {
+            return Err(cursor_error(1328, "Incorrect number of FETCH variables".to_owned()));
+        }
+        for (target, value) in targets.iter().zip(row) {
+            self.assign(target, value)?;
+        }
+        Ok(())
     }
 
     fn equal(&mut self, text: &str, tokens: &[Token<'_>], left: usize, right: usize) -> SqlResult<bool> {
@@ -491,14 +654,56 @@ impl Run<'_> {
                 Flow::Leave(wanted) if label.eq_ignore_ascii_case(&wanted) => Flow::Next,
                 other => other,
             }),
+            BodyStep::DeclareHandler {
+                exit,
+                conditions,
+                body,
+            } => {
+                self.handlers.push(Handler {
+                    exit: *exit,
+                    conditions: conditions.clone(),
+                    body: (**body).clone(),
+                    depth: self.depth,
+                });
+                Ok(Flow::Next)
+            }
+            BodyStep::DeclareCursor { name, query } => {
+                self.cursors.push(Cursor {
+                    name: name.clone(),
+                    query: *query,
+                    rows: None,
+                });
+                Ok(Flow::Next)
+            }
+            BodyStep::Open(name) => self.open_cursor(text, tokens, name).map(|()| Flow::Next),
+            BodyStep::Fetch { cursor, targets } => {
+                self.fetch_cursor(cursor, targets).map(|()| Flow::Next)
+            }
+            BodyStep::Close(name) => {
+                let index = self.cursor_index(name)?;
+                if self.cursors[index].rows.take().is_none() {
+                    return Err(cursor_error(1326, "Cursor is not open".to_owned()));
+                }
+                Ok(Flow::Next)
+            }
         }
     }
 
     fn block(&mut self, text: &str, tokens: &[Token<'_>], steps: &[BodyStep]) -> SqlResult<Flow> {
         let declared = self.frame.locals.len();
+        let handlers = self.handlers.len();
+        let cursors = self.cursors.len();
+        self.depth += 1;
+        let depth = self.depth;
         let outcome = self.steps(text, tokens, steps);
+        self.depth -= 1;
         self.frame.locals.truncate(declared);
-        outcome
+        self.handlers.truncate(handlers);
+        self.cursors.truncate(cursors);
+        match outcome {
+            Ok(Flow::ExitTo(target)) if target == depth => Ok(Flow::Next),
+            other => other,
+        }
     }
 
     fn signal(&mut self, text: &str, tokens: &[Token<'_>], signal: &SignalStep) -> SqlResult<()> {

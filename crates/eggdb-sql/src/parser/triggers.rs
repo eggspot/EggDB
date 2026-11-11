@@ -7,7 +7,8 @@ use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
 use crate::triggers::{
-    BodyStep, ConditionalBranch, RAISE_FUNCTION, SignalStep, StepTarget, TriggerAction,
+    BodyStep, ConditionalBranch, HandlerCondition, RAISE_FUNCTION, SignalStep, StepTarget,
+    TriggerAction,
     TriggerDefinition, TriggerEvent, TriggerEvents, TriggerFrame, TriggerLevel, TriggerTiming,
 };
 use crate::types::Value;
@@ -686,7 +687,16 @@ impl<'t> Parser<'t> {
                     self.expect_word("end")?;
                     return Ok(BodyStep::Block(steps));
                 }
-                "declare" => return self.trigger_declare(),
+                "declare" => return self.trigger_declare(depth),
+                "open" => {
+                    self.at += 1;
+                    return Ok(BodyStep::Open(self.name()?.text));
+                }
+                "close" => {
+                    self.at += 1;
+                    return Ok(BodyStep::Close(self.name()?.text));
+                }
+                "fetch" => return self.trigger_fetch(),
                 "set" => return self.trigger_assignment(),
                 "if" => return self.trigger_if(depth),
                 "while" => return self.trigger_while(depth, None),
@@ -746,20 +756,117 @@ impl<'t> Parser<'t> {
         Ok(text)
     }
 
-    fn trigger_declare(&mut self) -> SqlResult<BodyStep> {
-        self.at += 1;
-        if ["continue", "exit", "undo"]
-            .iter()
-            .any(|word| self.is_word(word))
+    fn trigger_handler_condition(&mut self) -> SqlResult<HandlerCondition> {
+        if self.take_word("sqlexception") {
+            return Ok(HandlerCondition::SqlException);
+        }
+        if self.take_word("sqlwarning") {
+            return Ok(HandlerCondition::SqlWarning);
+        }
+        if self.is_word("not") && self.is_word_at(1, "found") {
+            self.at += 2;
+            return Ok(HandlerCondition::NotFound);
+        }
+        if self.take_word("sqlstate") {
+            self.take_word("value");
+            let TokenKind::String(state) = self.peek_kind() else {
+                return Err(self.unexpected());
+            };
+            let state = state.as_ref().to_owned();
+            if state.len() != 5 || state.starts_with("00") {
+                return Err(SqlError::new(
+                    SqlState::MYSQL_GENERAL,
+                    format!("Bad SQLSTATE: '{state}'"),
+                )
+                .with_vendor_code(1407)
+                .at(self.position()));
+            }
+            self.at += 1;
+            return Ok(HandlerCondition::SqlState(state));
+        }
+        if let TokenKind::Integer(digits) = self.peek_kind()
+            && let Ok(code) = digits.parse::<u16>()
         {
-            return Err(self.not_supported("DECLARE ... HANDLER in a trigger"));
+            self.at += 1;
+            return Ok(HandlerCondition::ErrorCode(code));
+        }
+        Err(self.not_supported("named conditions in a trigger's handler"))
+    }
+
+    fn trigger_fetch(&mut self) -> SqlResult<BodyStep> {
+        self.at += 1;
+        if self.take_word("next") {
+            self.expect_word("from")?;
+        } else {
+            self.take_word("from");
+        }
+        let cursor = self.name()?.text;
+        self.expect_word("into")?;
+        let mut targets = vec![self.trigger_target()?];
+        while self.take(&TokenKind::Comma) {
+            targets.push(self.trigger_target()?);
+        }
+        Ok(BodyStep::Fetch { cursor, targets })
+    }
+
+    fn trigger_target(&mut self) -> SqlResult<StepTarget> {
+        if (self.is_word("new") || self.is_word("old")) && self.peek_kind_at(1) == &TokenKind::Dot {
+            let old = self.is_word("old");
+            self.at += 2;
+            let column = self.row_column()?;
+            return Ok(if old {
+                StepTarget::Old(column)
+            } else {
+                StepTarget::New(column)
+            });
+        }
+        if matches!(self.peek_kind(), TokenKind::Variable(_)) {
+            return Err(self.not_supported("user variables (@name) in a trigger"));
+        }
+        Ok(StepTarget::Local(self.name()?.text))
+    }
+
+    fn trigger_declare(&mut self, depth: usize) -> SqlResult<BodyStep> {
+        self.at += 1;
+        if self.is_word("undo") {
+            return Err(self.not_supported("UNDO handlers"));
+        }
+        if self.is_word("continue") || self.is_word("exit") {
+            let exit = self.is_word("exit");
+            self.at += 1;
+            self.expect_word("handler")?;
+            self.expect_word("for")?;
+            let mut conditions = vec![self.trigger_handler_condition()?];
+            while self.take(&TokenKind::Comma) {
+                conditions.push(self.trigger_handler_condition()?);
+            }
+            let body = self.trigger_item(depth + 1)?;
+            return Ok(BodyStep::DeclareHandler {
+                exit,
+                conditions,
+                body: Box::new(body),
+            });
         }
         let mut names = vec![self.name()?.text];
         while self.take(&TokenKind::Comma) {
             names.push(self.name()?.text);
         }
-        if self.is_word("cursor") || self.is_word("condition") {
-            return Err(self.not_supported("DECLARE ... CURSOR and CONDITION in a trigger"));
+        if self.take_word("cursor") {
+            let [name] = names.as_slice() else {
+                return Err(self.unexpected());
+            };
+            let name = name.clone();
+            self.expect_word("for")?;
+            let query = self.at;
+            let position = self.position();
+            let statement = self.statement()?;
+            if !matches!(statement, Statement::Select(_) | Statement::Query(_)) {
+                return Err(SqlError::not_supported("a cursor over anything but a SELECT").at(position));
+            }
+            return Ok(BodyStep::DeclareCursor { name, query });
+        }
+        if self.is_word("condition") {
+            return Err(self.not_supported("DECLARE ... CONDITION in a trigger"));
         }
         let sql_type = self.sql_type()?;
         let default = if self.take_word("default") {

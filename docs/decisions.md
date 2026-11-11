@@ -660,3 +660,4 @@ its full title with its status.
 - [D633](decisions/D633.md) Code-only batch 281 (M5): SQL*Plus COLUMN formatting in eggdb shell
 - [D634](decisions/D634.md) Code-only batch 282 (M10): DBMS_SCHEDULER chains
 - [D635](decisions/D635.md) Code-only batch 283 (M10): SQL Server Agent operators and alerts
+- [D636](decisions/D636.md) Code-only batch 284 (M10): handlers and cursors in MySQL trigger bodies

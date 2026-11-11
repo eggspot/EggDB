@@ -169,6 +169,61 @@ fn mysql_trigger_bodies_run_case_loops_labels_leave_and_iterate() {
 }
 
 #[test]
+fn mysql_trigger_bodies_read_cursors_and_catch_errors_with_handlers() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    last(&mut session, "CREATE TABLE prices (item VARCHAR(10) PRIMARY KEY, price INT)");
+    last(&mut session, "INSERT INTO prices VALUES ('a', 3), ('b', 4), ('c', 5)");
+    last(&mut session, "CREATE TABLE orders (id INT PRIMARY KEY, total INT, note VARCHAR(20))");
+    last(&mut session, "CREATE TABLE seen (id INT PRIMARY KEY)");
+    last(
+        &mut session,
+        "CREATE TRIGGER orders_bi BEFORE INSERT ON orders FOR EACH ROW \
+         BEGIN \
+           DECLARE done INT DEFAULT 0; \
+           DECLARE p INT; \
+           DECLARE sum_of INT DEFAULT 0; \
+           DECLARE prices_of CURSOR FOR SELECT price FROM prices ORDER BY item; \
+           DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = 1; \
+           DECLARE CONTINUE HANDLER FOR 1062 SET NEW.note = 'seen before'; \
+           OPEN prices_of; \
+           reading: LOOP \
+             FETCH prices_of INTO p; \
+             IF done = 1 THEN LEAVE reading; END IF; \
+             SET sum_of = sum_of + p; \
+           END LOOP reading; \
+           CLOSE prices_of; \
+           SET NEW.total = sum_of; \
+           INSERT INTO seen VALUES (NEW.id % 2); \
+         END",
+    );
+    last(&mut session, "INSERT INTO orders (id) VALUES (1), (3)");
+    let rows = last(&mut session, "SELECT id, total, note FROM orders ORDER BY id");
+    assert!(rows.contains("12"), "{rows}");
+    assert!(rows.contains("seen before"), "{rows}");
+    last(
+        &mut session,
+        "CREATE TRIGGER orders_bd BEFORE DELETE ON orders FOR EACH ROW \
+         BEGIN \
+           DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN END; \
+           INSERT INTO no_such_table VALUES (1); \
+           INSERT INTO seen VALUES (100); \
+         END",
+    );
+    last(&mut session, "DELETE FROM orders WHERE id = 1");
+    assert!(
+        !last(&mut session, "SELECT id FROM seen ORDER BY id").contains("100"),
+        "the exit handler leaves the block before the second insert"
+    );
+    let error = fails(
+        &mut session,
+        "CREATE TRIGGER orders_ai AFTER INSERT ON orders FOR EACH ROW \
+         BEGIN DECLARE UNDO HANDLER FOR SQLEXCEPTION BEGIN END; END",
+    );
+    assert!(error.message().contains("UNDO"), "{error}");
+}
+
+#[test]
 fn sqlite_schema_keeps_the_create_table_text_as_written() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Sqlite);
