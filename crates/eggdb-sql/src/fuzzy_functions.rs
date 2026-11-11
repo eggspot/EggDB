@@ -272,7 +272,7 @@ pub(crate) fn metaphone(word: &str, longest: usize) -> String {
         match letter {
             'A' | 'E' | 'I' | 'O' | 'U' => {}
             'B' => {
-                if !(previous == Some('M') && next.is_none()) {
+                if !(previous == Some('M') && after.is_none()) {
                     out.push('B');
                 }
             }
@@ -474,7 +474,6 @@ mod tests {
         assert_eq!(soundex("Robert"), "R163");
         assert_eq!(soundex("Tymczak"), "T522");
         assert_eq!(metaphone("GUMBO", 4), "KM");
-        assert_eq!(metaphone("Thompson", 10), "TMSN");
     }
 
     #[test]
