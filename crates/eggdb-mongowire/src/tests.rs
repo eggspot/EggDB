@@ -27,6 +27,7 @@ fn config() -> ServerConfig {
         max_connections: 4,
         random: fill,
         memory_budget: std::sync::Arc::default(),
+        replica_set: None,
     }
 }
 
@@ -43,6 +44,9 @@ fn session(authenticated: bool) -> Session {
     Session {
         id: 1,
         peer: "127.0.0.1:5000".to_owned(),
+        local: "127.0.0.1:27017".to_owned(),
+        transaction: None,
+        committed_transaction: None,
         authenticated_user: authenticated.then(|| "eggdb".to_owned()),
         conversation: None,
         failed_logins: 0,
@@ -1341,4 +1345,97 @@ fn compressed_replies_restore_to_the_same_message() {
         assert_eq!(used, compressor);
         assert_eq!(body, reply[16..].to_vec());
     }
+}
+
+#[test]
+fn a_transaction_stages_its_writes_until_commit_on_a_replica_set() {
+    let keyspace = MemoryKeyspace::default();
+    let store = Store::new(&keyspace, [1; 8]);
+    let config = ServerConfig {
+        replica_set: Some("rs0".to_owned()),
+        ..config()
+    };
+    let shared = shared(&store, &config);
+    let mut session = session(true);
+    let hello = run(&shared, &mut session, "admin", &doc(vec![("hello", Bson::Int32(1))]));
+    assert_eq!(hello.get_str("setName"), Some("rs0"));
+    let lsid = sub(vec![("id", text("session-1"))]);
+    let in_transaction = |entries: Vec<(&str, Bson)>, start: bool| {
+        let mut body = doc(entries);
+        body.insert("lsid", lsid.clone());
+        body.insert("txnNumber", Bson::Int64(1));
+        body.insert("autocommit", Bson::Boolean(false));
+        if start {
+            body.insert("startTransaction", Bson::Boolean(true));
+        }
+        body.insert("$db", text("app"));
+        body
+    };
+    let inserted = crate::transactions::run_command(
+        &shared,
+        &mut session,
+        "app",
+        &in_transaction(
+            vec![
+                ("insert", text("orders")),
+                ("documents", Bson::Array(vec![sub(vec![("_id", Bson::Int32(1))])])),
+            ],
+            true,
+        ),
+    );
+    assert!(ok(&inserted), "{inserted:?}");
+    let count = |session: &mut Session, body: Document| {
+        let reply = crate::transactions::run_command(&shared, session, "app", &body);
+        batch(&reply, "firstBatch").len()
+    };
+    assert_eq!(
+        count(&mut session, in_transaction(vec![("find", text("orders"))], false)),
+        1,
+        "the transaction reads its own write"
+    );
+    assert_eq!(
+        count(&mut session, doc(vec![("find", text("orders"))])),
+        0,
+        "others do not see it before commit"
+    );
+    let committed = crate::transactions::run_command(
+        &shared,
+        &mut session,
+        "admin",
+        &doc(vec![
+            ("commitTransaction", Bson::Int32(1)),
+            ("lsid", lsid.clone()),
+            ("txnNumber", Bson::Int64(1)),
+            ("autocommit", Bson::Boolean(false)),
+        ]),
+    );
+    assert!(ok(&committed), "{committed:?}");
+    assert_eq!(count(&mut session, doc(vec![("find", text("orders"))])), 1);
+    let unknown = crate::transactions::run_command(
+        &shared,
+        &mut session,
+        "admin",
+        &doc(vec![
+            ("abortTransaction", Bson::Int32(1)),
+            ("lsid", lsid),
+            ("txnNumber", Bson::Int64(9)),
+            ("autocommit", Bson::Boolean(false)),
+        ]),
+    );
+    assert_eq!(unknown.get("code"), Some(&Bson::Int32(251)));
+}
+
+#[test]
+fn a_standalone_server_refuses_to_start_a_transaction() {
+    with_harness(|harness| {
+        let body = doc(vec![
+            ("find", text("orders")),
+            ("txnNumber", Bson::Int64(1)),
+            ("autocommit", Bson::Boolean(false)),
+            ("startTransaction", Bson::Boolean(true)),
+        ]);
+        let reply =
+            crate::transactions::run_command(&harness.shared, &mut harness.session, "app", &body);
+        assert_eq!(reply.get("code"), Some(&Bson::Int32(20)));
+    });
 }

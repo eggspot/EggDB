@@ -640,6 +640,21 @@ impl<'k> Store<'k> {
         }
     }
 
+    /// The keyspace this store keeps its documents in.
+    pub fn keyspace(&self) -> &'k (dyn Keyspace + Sync) {
+        self.keyspace
+    }
+
+    /// A store with this one's object id source over another keyspace, such as a
+    /// transaction's [`eggdb_keyspace::Overlay`].
+    pub fn over<'o>(&self, keyspace: &'o (dyn Keyspace + Sync)) -> Store<'o> {
+        Store {
+            keyspace,
+            process_unique: self.process_unique,
+            counter_start: self.counter_start,
+        }
+    }
+
     /// A new object id.
     pub fn new_object_id(&self) -> [u8; 12] {
         let seconds = (now_ms() / 1000) as u32;

@@ -190,7 +190,8 @@ pub(crate) fn cursor_reply(
     )]))
 }
 
-fn hello(session: &Session, body: &Document, legacy: bool, sha1: bool) -> Document {
+fn hello(shared: &Shared<'_>, session: &Session, body: &Document, legacy: bool) -> Document {
+    let sha1 = shared.config.sha1_verifier.is_some();
     let mut reply = Document::new();
     reply.insert("helloOk", Bson::Boolean(true));
     reply.insert(
@@ -216,6 +217,14 @@ fn hello(session: &Session, body: &Document, legacy: bool, sha1: bool) -> Docume
     reply.insert("minWireVersion", Bson::Int32(0));
     reply.insert("maxWireVersion", Bson::Int32(MAX_WIRE_VERSION));
     reply.insert("readOnly", Bson::Boolean(false));
+    if let Some(set_name) = &shared.config.replica_set {
+        reply.insert("setName", text(set_name));
+        reply.insert("setVersion", Bson::Int32(1));
+        reply.insert("secondary", Bson::Boolean(false));
+        reply.insert("hosts", Bson::Array(vec![text(&session.local)]));
+        reply.insert("primary", text(&session.local));
+        reply.insert("me", text(&session.local));
+    }
     if let Some(Bson::Array(offered)) = body.get("compression") {
         let agreed: Vec<Bson> = offered
             .iter()
@@ -409,10 +418,8 @@ pub(crate) fn run(
         return failure(&error);
     }
     let outcome = match command.as_str() {
-        "hello" => Ok(hello(session, body, false, shared.config.sha1_verifier.is_some())),
-        "isMaster" | "ismaster" => {
-            Ok(hello(session, body, true, shared.config.sha1_verifier.is_some()))
-        }
+        "hello" => Ok(hello(shared, session, body, false)),
+        "isMaster" | "ismaster" => Ok(hello(shared, session, body, true)),
         "ping" => Ok(ok(Document::new())),
         "buildInfo" | "buildinfo" => Ok(ok(document(vec![
             ("version", text(COMPATIBLE_VERSION)),

@@ -529,6 +529,10 @@ impl Session<'_> {
         let mongo_config = match &mongo_listener {
             Some(_) => Some(
                 super::serve_mongo::config(&user, &password, max_connections, &memory_budget)
+                    .map(|config| eggdb_mongowire::ServerConfig {
+                        replica_set: options.mongo_replica_set.clone(),
+                        ..config
+                    })
                     .map_err(|error| {
                         Failure::database(
                             format!("cannot prepare the MongoDB-compatible listener: {error}"),

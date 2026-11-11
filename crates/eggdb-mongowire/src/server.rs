@@ -38,6 +38,9 @@ pub struct ServerConfig {
     /// The memory every connection's messages and open cursors hold together,
     /// shared with the server's other listeners.
     pub memory_budget: std::sync::Arc<MemoryBudget>,
+    /// The replica set name `hello` gives, making the server a one-member replica set so
+    /// drivers allow transactions; `None` answers as a standalone server.
+    pub replica_set: Option<String>,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -85,6 +88,9 @@ pub(crate) enum Conversation {
 pub(crate) struct Session {
     pub(crate) id: i32,
     pub(crate) peer: String,
+    pub(crate) local: String,
+    pub(crate) transaction: Option<crate::transactions::Transaction>,
+    pub(crate) committed_transaction: Option<i64>,
     pub(crate) authenticated_user: Option<String>,
     pub(crate) conversation: Option<Conversation>,
     pub(crate) failed_logins: u32,
@@ -117,7 +123,7 @@ fn database_of(body: &Document) -> String {
     body.get_str("$db").unwrap_or("admin").to_owned()
 }
 
-fn without_generic_fields(body: &Document) -> Document {
+pub(crate) fn without_generic_fields(body: &Document) -> Document {
     Document::from_entries(
         body.iter()
             .filter(|(name, _)| {
@@ -125,6 +131,9 @@ fn without_generic_fields(body: &Document) -> Document {
                     name.as_str(),
                     "$db"
                         | "lsid"
+                        | "txnNumber"
+                        | "autocommit"
+                        | "startTransaction"
                         | "$clusterTime"
                         | "$readPreference"
                         | "apiVersion"
@@ -210,7 +219,7 @@ pub(crate) fn serve_stream(
         let reply = match request {
             Request::Message { body, more_to_come } => {
                 let database = database_of(&body);
-                let reply = run(shared, session, &database, &without_generic_fields(&body));
+                let reply = crate::transactions::run_command(shared, session, &database, &body);
                 if more_to_come {
                     None
                 } else {
@@ -302,9 +311,16 @@ pub fn serve(
                 .name("eggdb-mongo".to_owned())
                 .spawn_scoped(scope, move || {
                     if let Ok(mut writer) = stream.try_clone() {
+                        let local = stream
+                            .local_addr()
+                            .map(|address| address.to_string())
+                            .unwrap_or_default();
                         let mut session = Session {
                             id,
                             peer: peer.to_string(),
+                            local,
+                            transaction: None,
+                            committed_transaction: None,
                             authenticated_user: None,
                             conversation: None,
                             failed_logins: 0,

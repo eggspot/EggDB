@@ -6,6 +6,10 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
+mod overlay;
+
+pub use overlay::{Overlay, StagedChanges, StagedDatabase};
+
 /// Keys and their stored bytes, in key order.
 pub type Entries = Vec<(Vec<u8>, Vec<u8>)>;
 

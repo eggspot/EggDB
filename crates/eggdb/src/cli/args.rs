@@ -237,6 +237,7 @@ impl CommandName {
             | OptionName::MemcachedListen
             | OptionName::EsListen
             | OptionName::MongoListen
+            | OptionName::MongoReplicaSet
             | OptionName::BoltListen
             | OptionName::CdcWebhook
             | OptionName::CdcQueue
@@ -434,6 +435,7 @@ enum OptionName {
     MemcachedListen,
     EsListen,
     MongoListen,
+    MongoReplicaSet,
     BoltListen,
     CdcWebhook,
     CdcQueue,
@@ -556,6 +558,7 @@ impl OptionName {
             b"memcached-listen" => Self::MemcachedListen,
             b"es-listen" => Self::EsListen,
             b"mongo-listen" => Self::MongoListen,
+            b"mongo-replica-set" => Self::MongoReplicaSet,
             b"bolt-listen" => Self::BoltListen,
             b"cdc-webhook" => Self::CdcWebhook,
             b"cdc-queue" => Self::CdcQueue,
@@ -877,6 +880,7 @@ pub(crate) struct ServeOptions {
     pub(crate) memcached_listen: Option<SocketAddr>,
     pub(crate) es_listen: Option<SocketAddr>,
     pub(crate) mongo_listen: Option<SocketAddr>,
+    pub(crate) mongo_replica_set: Option<String>,
     pub(crate) bolt_listen: Option<SocketAddr>,
     pub(crate) cdc_webhook: Option<String>,
     pub(crate) cdc_queue: Option<String>,
@@ -1476,6 +1480,20 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::MongoListen => {
                 request.serve.mongo_listen =
                     Some(parse_listen(&option.spelled, value, 27017).map_err(usage)?);
+            }
+            OptionName::MongoReplicaSet => {
+                let name = value.to_str().unwrap_or_default();
+                if name.is_empty()
+                    || !name
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+                {
+                    return Err(usage(format!(
+                        "{} takes a replica set name of letters, digits, '-', '_' and '.'",
+                        option.spelled
+                    )));
+                }
+                request.serve.mongo_replica_set = Some(name.to_owned());
             }
             OptionName::EsListen => {
                 request.serve.es_listen =

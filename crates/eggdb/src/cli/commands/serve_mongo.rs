@@ -25,6 +25,7 @@ pub(super) fn config(
         max_connections,
         random: eggdb_platform::secure_random::fill,
         memory_budget: std::sync::Arc::clone(memory_budget),
+        replica_set: None,
     })
 }
 

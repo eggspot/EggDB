@@ -12,6 +12,7 @@ mod cursors;
 mod explain;
 mod message;
 mod server;
+mod transactions;
 
 pub use message::MAX_MESSAGE_BYTES;
 pub use server::{ServerConfig, serve};
