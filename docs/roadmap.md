@@ -1005,7 +1005,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   stay refused.
 - MariaDB's sequences (D10, roadmap item 32). **Code written, unbuilt** (code-only mode, 2026-11-11, D424). Left:
   reading a sequence as a table, `CREATE OR REPLACE SEQUENCE`, `SHOW CREATE SEQUENCE`.
-- MySQL's `JSON_VALUE` and `JSON_TABLE` with MySQL's path language (D289).
+- MySQL's `JSON_VALUE` and `JSON_TABLE` with MySQL's path language (D289). **Code written, unbuilt**
+  (code-only mode, 2026-11-11, D425). Left: MySQL's error numbers for them.
 - Following a live MySQL through its binlog for a switch with no downtime (D13).
 - MySQL's own test suite run from outside the repo, with its pass rate published (D1, D10, D45).
 - MySQL and TDS clients refused an infinite `numeric` or date written by a PostgreSQL session, as

@@ -362,7 +362,8 @@ impl Parser<'_> {
     /// `JSON_SCALAR` or `JSON_SERIALIZE` after its name, as PostgreSQL 17 and
     /// Oracle write them; `None` for any other name.
     pub(super) fn sql_json_function(&mut self, name: &Name) -> SqlResult<Option<Expr>> {
-        if !self.sql_json_dialect() || self.peek_kind() != &TokenKind::LeftParen {
+        let mysql_value = self.mysql() && name.text == "json_value";
+        if !(self.sql_json_dialect() || mysql_value) || self.peek_kind() != &TokenKind::LeftParen {
             return Ok(None);
         }
         if self.postgresql()
@@ -379,8 +380,17 @@ impl Parser<'_> {
         self.at += 1;
         let document = self.json_context_item()?;
         self.expect(&TokenKind::Comma)?;
-        let path = self.expression()?;
-        let passing = self.json_passing()?;
+        let mut path = self.expression()?;
+        if self.mysql()
+            && let ExprKind::Literal(Literal::String(text)) = &mut path.kind
+        {
+            *text = mysql_path(text);
+        }
+        let passing = if self.mysql() {
+            Vec::new()
+        } else {
+            self.json_passing()?
+        };
         let mut returning = None;
         if kind != QueryKind::Exists && self.take_word("returning") {
             returning = Some(self.cast_type()?);
@@ -413,7 +423,7 @@ impl Parser<'_> {
     }
 
     pub(super) fn at_json_table(&self) -> bool {
-        self.sql_json_dialect()
+        (self.sql_json_dialect() || self.mysql())
             && self.is_word("json_table")
             && self.peek_kind_at(1) == &TokenKind::LeftParen
     }
@@ -422,7 +432,11 @@ impl Parser<'_> {
         let position = self.position();
         match self.peek_kind() {
             TokenKind::String(text) => {
-                let text = text.as_ref().to_owned();
+                let text = if self.mysql() {
+                    mysql_path(text)
+                } else {
+                    text.as_ref().to_owned()
+                };
                 self.at += 1;
                 Ok(text)
             }
@@ -516,6 +530,8 @@ impl Parser<'_> {
             && (self.is_word("path") || self.is_word("format") || self.is_word("exists"));
         let sql_type = if untyped {
             SqlType::Text
+        } else if self.mysql() {
+            self.mysql_type()?
         } else {
             self.cast_type()?
         };
@@ -671,4 +687,36 @@ impl Parser<'_> {
             Err(error) => Err(error),
         }
     }
+}
+
+/// MySQL's JSON path written as SQL/JSON's: MySQL's recursive wildcard `**` may follow a
+/// member or `$` directly (`$**.b`), where SQL/JSON's lax paths write `.**`.
+pub(crate) fn mysql_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len() + 4);
+    let mut quoted = false;
+    let mut characters = path.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '"' {
+            quoted = !quoted;
+            out.push(character);
+            continue;
+        }
+        if !quoted && character == '\\' {
+            out.push(character);
+            if let Some(next) = characters.next() {
+                out.push(next);
+            }
+            continue;
+        }
+        if !quoted && character == '*' && characters.peek() == Some(&'*') {
+            characters.next();
+            if !out.ends_with('.') {
+                out.push('.');
+            }
+            out.push_str("**");
+            continue;
+        }
+        out.push(character);
+    }
+    out
 }
