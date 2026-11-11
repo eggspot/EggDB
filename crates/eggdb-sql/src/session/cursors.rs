@@ -5,6 +5,12 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::portals::Portal;
 
 impl Session<'_> {
+    /// The columns of the cursor `name` a `DECLARE` opened in this session, which a protocol
+    /// `Describe` of the portal of that name answers with (psycopg's server-side cursors).
+    pub fn declared_cursor_columns(&self, name: &str) -> Option<Vec<crate::OutputColumn>> {
+        self.portals.columns_of(name)
+    }
+
     pub(super) fn cursor_command(
         &mut self,
         command: &mut CursorCommand,

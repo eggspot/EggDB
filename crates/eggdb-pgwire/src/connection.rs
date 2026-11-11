@@ -1773,6 +1773,12 @@ impl<'a, 's> Connection<'a, 's> {
                 self.send_row_description(description.columns.as_deref(), &[])?;
             }
             Target::Portal => {
+                if self.portals.get(name).is_none()
+                    && let Some(columns) = self.session.declared_cursor_columns(name)
+                {
+                    self.send_row_description(Some(&columns), &[])?;
+                    return Ok(());
+                }
                 let Some(portal) = self.portals.get(name) else {
                     return Err((
                         SqlError::new(

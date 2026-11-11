@@ -582,3 +582,4 @@ its full title with its status.
 - [D555](decisions/D555.md) Code-only batch 203 (M6a): the requested isolation level in SHOW transaction_isolation
 - [D556](decisions/D556.md) Code-only batch 204 (M6a): materialized views are relkind m in pg_class
 - [D557](decisions/D557.md) Code-only batch 205 (M6a): zero-column tables in the PostgreSQL dialect
+- [D558](decisions/D558.md) Code-only batch 206 (M6a): a protocol Describe of a DECLAREd cursor

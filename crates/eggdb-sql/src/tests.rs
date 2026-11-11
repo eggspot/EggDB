@@ -4889,3 +4889,24 @@ fn a_postgresql_table_may_have_no_columns() {
     let mut mysql = Session::with_dialect(&store, crate::Dialect::MySql);
     assert!(mysql.execute("CREATE TABLE still_nothing ()", &mut |_| {}).is_err());
 }
+
+#[test]
+fn a_declared_cursor_reports_its_columns_for_a_protocol_describe() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "CREATE TABLE things (id integer, name text)");
+    last(&mut session, "BEGIN");
+    last(
+        &mut session,
+        "DECLARE \"c_1\" NO SCROLL CURSOR WITHOUT HOLD FOR SELECT id, name FROM things",
+    );
+    let names: Vec<String> = session
+        .declared_cursor_columns("c_1")
+        .unwrap_or_default()
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert_eq!(names, ["id", "name"]);
+    assert!(session.declared_cursor_columns("other").is_none());
+    last(&mut session, "COMMIT");
+}
