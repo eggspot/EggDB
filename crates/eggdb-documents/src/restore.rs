@@ -112,6 +112,7 @@ pub fn restore_collection(
     if let Some(metadata) = metadata {
         let metadata = crate::extended_json::parse_extended_json(metadata)?;
         let mut wanted = Vec::new();
+        let mut unique = Vec::new();
         for index in metadata.get_array("indexes").into_iter().flatten() {
             let Some(index) = index.as_document() else {
                 continue;
@@ -120,19 +121,33 @@ pub fn restore_collection(
             if name == "_id_" {
                 continue;
             }
-            if index.get_bool("unique") == Some(true) {
-                outcome.skipped_indexes.push(format!(
-                    "{name}: unique indexes besides _id are not enforced yet"
-                ));
-                continue;
-            }
             let mut definition = Document::new();
             definition.insert("key", index.get("key").cloned().unwrap_or(Bson::Null));
             definition.insert("name", Bson::String(name));
-            wanted.push(definition);
+            for option in ["unique", "sparse"] {
+                if index.get_bool(option) == Some(true) {
+                    definition.insert(option, Bson::Boolean(true));
+                }
+            }
+            if index.get_bool("unique") == Some(true) {
+                unique.push(definition);
+            } else {
+                wanted.push(definition);
+            }
         }
         let (before, after) = store.create_indexes(database, collection, &wanted)?;
         outcome.indexes = (after - before) as u64;
+        for definition in unique {
+            let name = definition.get_str("name").unwrap_or_default().to_owned();
+            match store.create_indexes(database, collection, std::slice::from_ref(&definition)) {
+                Ok((before, after)) => outcome.indexes += (after - before) as u64,
+                Err(error) if error.code == 11000 => outcome.skipped_indexes.push(format!(
+                    "{name}: the restored documents break its uniqueness ({})",
+                    error.message
+                )),
+                Err(error) => return Err(error),
+            }
+        }
     }
     Ok(outcome)
 }

@@ -553,3 +553,4 @@ its full title with its status.
 - [D526](decisions/D526.md) Code-only batch 174 (M16): MQTT persistent sessions and QoS 1 and 2 to subscribers
 - [D527](decisions/D527.md) Code-only batch 175 (M14): change streams into Kafka topics
 - [D528](decisions/D528.md) Code-only batch 176 (M14): change delivery retries with backoff and a dead-letter table
+- [D529](decisions/D529.md) Code-only batch 177 (M9): MongoDB unique indexes enforced

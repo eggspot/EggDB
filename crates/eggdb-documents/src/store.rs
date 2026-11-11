@@ -217,6 +217,103 @@ fn duplicate(database: &str, collection: &str, id: &Bson) -> DocumentError {
     ))
 }
 
+struct UniqueIndex {
+    name: String,
+    fields: Vec<String>,
+    sparse: bool,
+}
+
+fn unique_indexes(keys: &dyn KeysRead, database: &str, collection: &str) -> DocumentResult<Vec<UniqueIndex>> {
+    let Some(bytes) = keys
+        .get(&collection_key(database, collection))
+        .map_err(DocumentError::storage)?
+    else {
+        return Ok(Vec::new());
+    };
+    let info = decoded(&bytes)?;
+    Ok(info
+        .get_array("indexes")
+        .map(|stored| {
+            stored
+                .iter()
+                .filter_map(Bson::as_document)
+                .filter(|index| index.get_bool("unique") == Some(true))
+                .filter_map(|index| {
+                    Some(UniqueIndex {
+                        name: index.get_str("name")?.to_owned(),
+                        fields: index.get_document("key")?.keys().cloned().collect(),
+                        sparse: index.get_bool("sparse") == Some(true),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+fn unique_values(index: &UniqueIndex, document: &Document) -> Option<Vec<Bson>> {
+    let values: Vec<Option<Bson>> = index
+        .fields
+        .iter()
+        .map(|field| crate::path::get_exact(document, field).cloned())
+        .collect();
+    if index.sparse && values.iter().all(Option::is_none) {
+        return None;
+    }
+    Some(values.into_iter().map(|value| value.unwrap_or(Bson::Null)).collect())
+}
+
+fn unique_conflict(database: &str, collection: &str, index: &UniqueIndex, values: &[Bson]) -> DocumentError {
+    let shown: Vec<String> = index
+        .fields
+        .iter()
+        .zip(values)
+        .map(|(field, value)| {
+            let text = eggdb_bson::relaxed_json(&Document::from_entries(vec![(String::new(), value.clone())]));
+            format!("{field}: {}", text.trim_start_matches("{\"\": ").trim_end_matches('}'))
+        })
+        .collect();
+    DocumentError::duplicate_key(format!(
+        "E11000 duplicate key error collection: {database}.{collection} index: {} dup key: {{ {} }}",
+        index.name,
+        shown.join(", ")
+    ))
+}
+
+fn check_unique(
+    keys: &dyn KeysRead,
+    database: &str,
+    collection: &str,
+    own_key: &[u8],
+    document: &Document,
+) -> DocumentResult<()> {
+    let indexes = unique_indexes(keys, database, collection)?;
+    if indexes.is_empty() {
+        return Ok(());
+    }
+    let wanted: Vec<(&UniqueIndex, Vec<Bson>)> = indexes
+        .iter()
+        .filter_map(|index| unique_values(index, document).map(|values| (index, values)))
+        .collect();
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    for (key, bytes) in keys
+        .scan(&documents_prefix(database, collection))
+        .map_err(DocumentError::storage)?
+    {
+        if key == own_key {
+            continue;
+        }
+        let other = decoded(&bytes)?;
+        for (index, values) in &wanted {
+            if unique_values(index, &other).as_ref() == Some(values) {
+                return Err(unique_conflict(database, collection, index, values));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn ensure_collection(
     keys: &mut dyn KeysWrite,
     database: &str,
@@ -513,7 +610,8 @@ impl<'k> Store<'k> {
     }
 
     /// Records index definitions (`createIndexes`); returns how many there were before and
-    /// after. The definitions are kept for listing; queries do not use them yet.
+    /// after. Unique indexes (with `sparse`) are checked against the collection's documents and
+    /// enforced on every later write; queries do not use indexes yet.
     pub fn create_indexes(
         &self,
         database: &str,
@@ -536,9 +634,6 @@ impl<'k> Store<'k> {
                 if !matches!(definition.get("key"), Some(Bson::Document(fields)) if !fields.is_empty()) {
                     return Err(DocumentError::bad_value("an index needs a non-empty key document"));
                 }
-                if definition.get_bool("unique") == Some(true) {
-                    return Err(DocumentError::not_implemented("unique indexes besides _id are not enforced yet"));
-                }
                 if name == "_id_" || stored.iter().any(|index| index.as_document().and_then(|index| index.get_str("name")) == Some(name)) {
                     continue;
                 }
@@ -546,6 +641,30 @@ impl<'k> Store<'k> {
                 index.insert("v", Bson::Int32(2));
                 index.insert("key", definition.get("key").cloned().unwrap_or(Bson::Null));
                 index.insert("name", Bson::String(name.to_owned()));
+                for option in ["unique", "sparse"] {
+                    if definition.get_bool(option) == Some(true) {
+                        index.insert(option, Bson::Boolean(true));
+                    }
+                }
+                if definition.get_bool("unique") == Some(true) {
+                    let candidate = UniqueIndex {
+                        name: name.to_owned(),
+                        fields: definition.get_document("key").map(|key| key.keys().cloned().collect()).unwrap_or_default(),
+                        sparse: definition.get_bool("sparse") == Some(true),
+                    };
+                    let mut seen: Vec<Vec<Bson>> = Vec::new();
+                    for (_, bytes) in keys
+                        .scan(&documents_prefix(database, collection))
+                        .map_err(DocumentError::storage)?
+                    {
+                        if let Some(values) = unique_values(&candidate, &decoded(&bytes)?) {
+                            if seen.contains(&values) {
+                                return Err(unique_conflict(database, collection, &candidate, &values));
+                            }
+                            seen.push(values);
+                        }
+                    }
+                }
                 stored.push(Bson::Document(index));
             }
             let after = stored.len() + 1;
@@ -622,6 +741,7 @@ impl<'k> Store<'k> {
                     if keys.get(&key).map_err(DocumentError::storage)?.is_some() {
                         return Err(duplicate(database, collection, &id));
                     }
+                    check_unique(&*keys, database, collection, &key, &document)?;
                     keys.put(&key, &bytes).map_err(DocumentError::storage)
                 });
                 match result {
@@ -668,6 +788,17 @@ impl<'k> Store<'k> {
                 .map_err(DocumentError::storage)?
             {
                 keys.delete(&key).map_err(DocumentError::storage)?;
+            }
+            for index in unique_indexes(&*keys, database, collection)? {
+                let mut seen: Vec<Vec<Bson>> = Vec::new();
+                for (_, bytes) in &prepared {
+                    if let Some(values) = unique_values(&index, &decoded(bytes)?) {
+                        if seen.contains(&values) {
+                            return Err(unique_conflict(database, collection, &index, &values));
+                        }
+                        seen.push(values);
+                    }
+                }
             }
             let written = prepared.len() as u64;
             for (key, bytes) in prepared {
@@ -718,12 +849,14 @@ impl<'k> Store<'k> {
                                     "$merge failed to update the matching document, the (immutable) field '_id' was found to have been altered",
                                 ));
                             }
+                            check_unique(&*keys, database, collection, &key, &existing)?;
                             keys.put(&key, &check_document(&existing)?)
                                 .map_err(DocumentError::storage)?;
                         }
                     }
                     None => match when_not_matched {
                         WhenNotMatched::Insert => {
+                            check_unique(&*keys, database, collection, &key, &document)?;
                             keys.put(&key, &check_document(&document)?)
                                 .map_err(DocumentError::storage)?;
                         }
@@ -778,6 +911,7 @@ impl<'k> Store<'k> {
             {
                 outcome.matched += 1;
                 if apply_update(update, &mut document, Some(filter), false, now)? {
+                    check_unique(&*keys, database, collection, &key, &document)?;
                     keys.put(&key, &check_document(&document)?)
                         .map_err(DocumentError::storage)?;
                     outcome.modified += 1;
@@ -795,6 +929,7 @@ impl<'k> Store<'k> {
                 if keys.get(&key).map_err(DocumentError::storage)?.is_some() {
                     return Err(duplicate(database, collection, &id));
                 }
+                check_unique(&*keys, database, collection, &key, &document)?;
                 keys.put(&key, &check_document(&document)?)
                     .map_err(DocumentError::storage)?;
                 outcome.upserted = Some(id);
@@ -855,6 +990,7 @@ impl<'k> Store<'k> {
                     let mut changed = document.clone();
                     outcome.matched = 1;
                     if apply_update(update, &mut changed, Some(filter), false, now)? {
+                        check_unique(&*keys, database, collection, &key, &changed)?;
                         keys.put(&key, &check_document(&changed)?)
                             .map_err(DocumentError::storage)?;
                         outcome.modified = 1;
@@ -876,11 +1012,10 @@ impl<'k> Store<'k> {
                         .cloned()
                         .unwrap_or_else(|| Bson::ObjectId(self.new_object_id()));
                     document.insert_first("_id", id.clone());
-                    keys.put(
-                        &document_key(database, collection, &id),
-                        &check_document(&document)?,
-                    )
-                    .map_err(DocumentError::storage)?;
+                    let key = document_key(database, collection, &id);
+                    check_unique(&*keys, database, collection, &key, &document)?;
+                    keys.put(&key, &check_document(&document)?)
+                        .map_err(DocumentError::storage)?;
                     outcome.upserted = Some(id);
                     Ok((new.then_some(document), outcome))
                 }
