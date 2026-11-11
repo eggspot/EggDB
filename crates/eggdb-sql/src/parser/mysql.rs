@@ -559,6 +559,19 @@ impl<'t> Parser<'t> {
             let sql_type = self.mysql_decimal(token.start)?;
             return self.integer_attributes(sql_type);
         }
+        if word == "enum" || word == "set" {
+            let members = self.mysql_type_members()?;
+            let lengths = members.iter().map(|member| member.chars().count());
+            let longest = if word == "enum" {
+                lengths.max().unwrap_or(1)
+            } else {
+                lengths.sum::<usize>() + members.len().saturating_sub(1)
+            };
+            let longest = i64::try_from(longest.max(1)).unwrap_or(i64::MAX);
+            let sql_type = SqlType::Varchar(Some(self.length(longest, token.start)?));
+            self.skip_character_set_and_collation()?;
+            return Ok(sql_type);
+        }
         let width = self.optional_width()?;
         let sql_type = match word {
             "tinyint" if width == Some(1) => SqlType::Boolean,
@@ -600,7 +613,30 @@ impl<'t> Parser<'t> {
                 self.required_length(width, token.start)?;
                 SqlType::Bytea
             }
-            "year" | "bit" | "enum" | "set" | "geometry" | "point" => {
+            "year" => {
+                if width.is_some_and(|digits| digits != 4) {
+                    return Err(SqlError::new(
+                        SqlState::MYSQL_SYNTAX_OR_ACCESS,
+                        "Supports only YEAR or YEAR(4) column.",
+                    )
+                    .with_vendor_code(1818)
+                    .at(token.start));
+                }
+                SqlType::SmallInt
+            }
+            "bit" => match width.unwrap_or(1) {
+                1 => SqlType::Boolean,
+                2..=64 => SqlType::BigInt,
+                _ => {
+                    return Err(SqlError::new(
+                        SqlState::MYSQL_SYNTAX_OR_ACCESS,
+                        "Display width out of range for column (max = 64)",
+                    )
+                    .with_vendor_code(1439)
+                    .at(token.start));
+                }
+            },
+            "geometry" | "point" => {
                 return Err(SqlError::not_supported(format!(
                     "type {} is not supported yet",
                     word.to_ascii_uppercase()
@@ -616,6 +652,11 @@ impl<'t> Parser<'t> {
             }
         };
         let sql_type = self.integer_attributes(sql_type)?;
+        self.skip_character_set_and_collation()?;
+        Ok(sql_type)
+    }
+
+    fn skip_character_set_and_collation(&mut self) -> SqlResult<()> {
         if (self.is_word("character") && self.is_word_at(1, "set")) || self.is_word("charset") {
             self.at += if self.is_word("charset") { 1 } else { 2 };
             self.word_text().ok_or_else(|| self.unexpected())?;
@@ -625,7 +666,24 @@ impl<'t> Parser<'t> {
             self.word_text().ok_or_else(|| self.unexpected())?;
             self.at += 1;
         }
-        Ok(sql_type)
+        Ok(())
+    }
+
+    fn mysql_type_members(&mut self) -> SqlResult<Vec<String>> {
+        self.expect(&TokenKind::LeftParen)?;
+        let mut members = Vec::new();
+        loop {
+            let TokenKind::String(member) = self.peek_kind() else {
+                return Err(self.unexpected());
+            };
+            members.push(member.as_ref().to_owned());
+            self.at += 1;
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RightParen)?;
+        Ok(members)
     }
 
     fn mysql_decimal(&mut self, position: usize) -> SqlResult<SqlType> {
@@ -688,9 +746,6 @@ impl<'t> Parser<'t> {
                 sql_type = match sql_type {
                     SqlType::SmallInt => SqlType::Integer,
                     SqlType::Integer => SqlType::BigInt,
-                    SqlType::BigInt => {
-                        return Err(self.not_supported("BIGINT UNSIGNED"));
-                    }
                     other => other,
                 };
             } else if !(self.take_word("signed") || self.take_word("zerofill")) {

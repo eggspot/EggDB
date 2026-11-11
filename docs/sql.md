@@ -1680,8 +1680,8 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   PostgreSQL does when a full unique index matches, the predicate's columns are checked (`42703`)
   and the full unique index on the columns is the arbiter. An expression in the columns
   (`ON CONFLICT (lower(email))`) is `42P10`, as no index is on an expression yet, and `ASC`,
-  `DESC` and `NULLS` are `42601` (D324). Not yet: `WHERE` on `DO UPDATE`, and `COLLATE` or an
-  operator class on a target column.
+  `DESC` and `NULLS` are `42601` (D324). `WHERE` on `DO UPDATE` skips the rows it rejects. Not
+  yet: `COLLATE` or an operator class on a target column.
 - `VALUES (expr, ...), (expr, ...) [ORDER BY ...] [LIMIT ...] [OFFSET ...]` as a statement, an
   operand of `UNION`, `INTERSECT` and `EXCEPT`, a subquery (`x IN (VALUES (1), (2))`), a `WITH`
   query and a `FROM` item (`(VALUES (1, 'a')) AS v(n, s)`): its columns are `column1`,

@@ -169,6 +169,30 @@ fn mysql_trigger_bodies_run_case_loops_labels_leave_and_iterate() {
 }
 
 #[test]
+fn mysql_columns_of_unsigned_year_bit_enum_and_set_types_load() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    last(
+        &mut session,
+        "CREATE TABLE users (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, born YEAR, \
+         active BIT(1), flags BIT(8), role ENUM('admin', 'member') NOT NULL DEFAULT 'member', \
+         tags SET('a', 'bb', 'ccc') CHARACTER SET utf8mb4)",
+    );
+    last(
+        &mut session,
+        "INSERT INTO users (born, active, flags, tags) VALUES (1999, 1, 5, 'a,bb')",
+    );
+    let rows = last(&mut session, "SELECT id, born, flags, role, tags FROM users");
+    for expected in ["1999", "member", "a,bb"] {
+        assert!(rows.contains(expected), "{expected} in {rows}");
+    }
+    let error = fails(&mut session, "CREATE TABLE y (y YEAR(2))");
+    assert_eq!(error.vendor_code(), Some(1818), "{error}");
+    let error = fails(&mut session, "CREATE TABLE b (b BIT(65))");
+    assert_eq!(error.vendor_code(), Some(1439), "{error}");
+}
+
+#[test]
 fn mysql_trigger_bodies_read_cursors_and_catch_errors_with_handlers() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::MySql);
