@@ -1,3 +1,4 @@
+mod aliases;
 mod by_query;
 mod multi;
 mod pit;
@@ -369,6 +370,15 @@ pub(super) fn resolve_indices(
             if !resolved.iter().any(|name| name == part) {
                 resolved.push(part.to_owned());
             }
+            continue;
+        }
+        let aliased = aliases::indices_of_alias(keys, part)?;
+        if !aliased.is_empty() {
+            for name in aliased {
+                if !resolved.contains(&name) {
+                    resolved.push(name);
+                }
+            }
         } else if !ignore_unavailable {
             return Ok(Err(part.to_owned()));
         }
@@ -508,6 +518,27 @@ impl<'k> Api<'k> {
             ("GET" | "HEAD", []) => Ok(self.root()),
             ("GET", ["_cluster", "health"]) => Ok(json(200, "{\"cluster_name\":\"eggdb\",\"status\":\"green\",\"timed_out\":false,\"number_of_nodes\":1,\"number_of_data_nodes\":1,\"active_primary_shards\":0,\"active_shards\":0,\"relocating_shards\":0,\"initializing_shards\":0,\"unassigned_shards\":0}".to_owned())),
             ("GET", ["_cat", "indices"]) => self.cat_indices(),
+            ("GET", ["_cat", "aliases"]) => self.cat_aliases(),
+            ("GET", ["_cat", "count"]) => self.cat_count(None),
+            ("GET", ["_cat", "count", index]) => self.cat_count(Some(index)),
+            ("GET", ["_cat", "health"]) => Ok(cat_health()),
+            ("POST", ["_aliases"]) => self.update_aliases(request),
+            ("GET", ["_alias"] | ["_aliases"]) => self.get_aliases(None, None, false),
+            ("GET" | "HEAD", ["_alias", alias]) => {
+                self.get_aliases(None, Some(alias), method == "HEAD")
+            }
+            ("GET", [index, "_alias"] | [index, "_aliases"]) if valid_index(index) || index.contains('*') || *index == "_all" => {
+                self.get_aliases(Some(index), None, false)
+            }
+            ("GET" | "HEAD", [index, "_alias", alias]) if valid_index(index) || index.contains('*') || *index == "_all" => {
+                self.get_aliases(Some(index), Some(alias), method == "HEAD")
+            }
+            ("PUT" | "POST", [index, "_alias" | "_aliases", alias]) if valid_index(index) || index.contains('*') => {
+                self.put_alias(index, alias)
+            }
+            ("DELETE", [index, "_alias" | "_aliases", alias]) if valid_index(index) || index.contains('*') => {
+                self.delete_alias(index, alias)
+            }
             ("POST", ["_bulk"]) => self.bulk(None, request),
             ("GET" | "POST", ["_search", "template"]) => self.search_template(None, request),
             ("GET" | "POST", ["_search", "scroll"]) => self.continue_scroll(request, None),
@@ -587,6 +618,34 @@ impl<'k> Api<'k> {
         )
     }
 
+    fn cat_count(&self, index: Option<&str>) -> Answer {
+        let counted = read(self.keyspace, |keys| {
+            let searched = match index {
+                Some(named) => match resolve_indices(keys, &[named], false)? {
+                    Ok(searched) => searched,
+                    Err(missing) => return Ok(Err(missing)),
+                },
+                None => indices_of(keys)?,
+            };
+            let mut total = 0usize;
+            for name in searched {
+                total += documents_of(keys, &name)?.len();
+            }
+            Ok(Ok(total))
+        })?;
+        let total = match counted {
+            Ok(total) => total,
+            Err(missing) => return Ok(missing_index(&missing)),
+        };
+        let (epoch, clock) = epoch_and_clock();
+        Ok(json(
+            200,
+            format!(
+                "[{{\"epoch\":\"{epoch}\",\"timestamp\":\"{clock}\",\"count\":\"{total}\"}}]"
+            ),
+        ))
+    }
+
     fn cat_indices(&self) -> Answer {
         let rows = read(self.keyspace, |keys| {
             let mut rows = Vec::new();
@@ -664,6 +723,7 @@ impl<'k> Api<'k> {
                 keys.delete(&document_key(index, &id))?;
             }
             keys.delete(&index_key(index))?;
+            aliases::forget_index(keys, index)?;
             Ok(true)
         })?;
         Ok(if deleted {
@@ -1907,6 +1967,32 @@ fn refreshed() -> Response {
     json(
         200,
         "{\"_shards\":{\"total\":1,\"successful\":1,\"failed\":0}}".to_owned(),
+    )
+}
+
+fn epoch_and_clock() -> (u64, String) {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let within = seconds % 86_400;
+    (
+        seconds,
+        format!(
+            "{:02}:{:02}:{:02}",
+            within / 3600,
+            within / 60 % 60,
+            within % 60
+        ),
+    )
+}
+
+fn cat_health() -> Response {
+    let (epoch, clock) = epoch_and_clock();
+    json(
+        200,
+        format!(
+            "[{{\"epoch\":\"{epoch}\",\"timestamp\":\"{clock}\",\"cluster\":\"eggdb\",\"status\":\"green\",\"node.total\":\"1\",\"node.data\":\"1\",\"shards\":\"0\",\"pri\":\"0\",\"relo\":\"0\",\"init\":\"0\",\"unassign\":\"0\",\"pending_tasks\":\"0\",\"max_task_wait_time\":\"-\",\"active_shards_percent\":\"100.0%\"}}]"
+        ),
     )
 }
 

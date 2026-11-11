@@ -496,3 +496,4 @@ its full title with its status.
 - [D469](decisions/D469.md) Code-only batch 117 (M8): text-search weights and `ts_headline`
 - [D470](decisions/D470.md) Code-only batch 118 (M8): fuzzystrmatch and pg_trgm functions
 - [D471](decisions/D471.md) Code-only batch 119 (M8): Elasticsearch sub-aggregations, bucket and stats kinds
+- [D472](decisions/D472.md) Code-only batch 120 (M8): Elasticsearch aliases and more of `_cat`
