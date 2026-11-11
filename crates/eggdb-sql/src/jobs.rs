@@ -498,6 +498,260 @@ pub fn run_due_events<S: KeyValueStore>(store: &S, epoch_seconds: i64) -> SqlRes
     Ok(outcome)
 }
 
+/// The internal table Oracle's `DBMS_SCHEDULER` jobs live in.
+pub(crate) const ORACLE_SCHEDULER_TABLE: &str = "eggdb_internal.oracle_scheduler_jobs";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Frequency {
+    Yearly,
+    Monthly,
+    Weekly,
+    Daily,
+    Hourly,
+    Minutely,
+}
+
+/// An Oracle calendaring expression (`FREQ=DAILY; BYHOUR=2; BYMINUTE=0`), as `DBMS_SCHEDULER`'s
+/// `repeat_interval` writes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CalendarRule {
+    frequency: Frequency,
+    interval: i64,
+    by_month: Vec<u32>,
+    by_month_day: Vec<i32>,
+    by_day: Vec<u32>,
+    by_hour: Vec<u32>,
+    by_minute: Vec<u32>,
+}
+
+fn rule_numbers(value: &str, low: i64, high: i64, names: &[&str]) -> Result<Vec<i64>, String> {
+    value
+        .split(',')
+        .map(|item| {
+            let item = item.trim();
+            if let Some(at) = names.iter().position(|name| name.eq_ignore_ascii_case(item)) {
+                return Ok(at as i64 + low);
+            }
+            let number: i64 = item.parse().map_err(|_| format!("{item} is not a value here"))?;
+            if (low..=high).contains(&number) || (-high..=-1).contains(&number) && low == 1 && high == 31 {
+                Ok(number)
+            } else {
+                Err(format!("{item} is out of range"))
+            }
+        })
+        .collect()
+}
+
+impl CalendarRule {
+    /// Reads a calendaring expression: `FREQ` with `INTERVAL`, `BYMONTH`, `BYMONTHDAY` (`-1`
+    /// for the last day), `BYDAY`, `BYHOUR`, `BYMINUTE` and `BYSECOND=0`.
+    pub(crate) fn parse(text: &str) -> Result<Self, String> {
+        let mut rule = Self {
+            frequency: Frequency::Daily,
+            interval: 1,
+            by_month: Vec::new(),
+            by_month_day: Vec::new(),
+            by_day: Vec::new(),
+            by_hour: Vec::new(),
+            by_minute: Vec::new(),
+        };
+        let mut frequency_given = false;
+        for clause in text.split(';').map(str::trim).filter(|clause| !clause.is_empty()) {
+            let (key, value) = clause.split_once('=').ok_or_else(|| format!("{clause} has no ="))?;
+            let value = value.trim();
+            match key.trim().to_ascii_uppercase().as_str() {
+                "FREQ" => {
+                    frequency_given = true;
+                    rule.frequency = match value.to_ascii_uppercase().as_str() {
+                        "YEARLY" => Frequency::Yearly,
+                        "MONTHLY" => Frequency::Monthly,
+                        "WEEKLY" => Frequency::Weekly,
+                        "DAILY" => Frequency::Daily,
+                        "HOURLY" => Frequency::Hourly,
+                        "MINUTELY" => Frequency::Minutely,
+                        "SECONDLY" => return Err("FREQ=SECONDLY is not supported; the scheduler ticks each minute".to_owned()),
+                        other => return Err(format!("FREQ={other} is not a frequency")),
+                    };
+                }
+                "INTERVAL" => {
+                    rule.interval = value.parse().ok().filter(|interval| (1..=1000).contains(interval)).ok_or("INTERVAL takes 1 to 1000")?;
+                }
+                "BYMONTH" => {
+                    rule.by_month = rule_numbers(value, 1, 12, &["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"])?
+                        .into_iter()
+                        .map(|month| month as u32)
+                        .collect();
+                }
+                "BYMONTHDAY" => {
+                    rule.by_month_day = rule_numbers(value, 1, 31, &[])?.into_iter().map(|day| day as i32).collect();
+                    if rule.by_month_day.iter().any(|day| *day < -1) {
+                        return Err("BYMONTHDAY counts back only to -1, the last day".to_owned());
+                    }
+                }
+                "BYDAY" => {
+                    rule.by_day = rule_numbers(value, 0, 6, &["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"])?
+                        .into_iter()
+                        .map(|day| day as u32)
+                        .collect();
+                }
+                "BYHOUR" => rule.by_hour = rule_numbers(value, 0, 23, &[])?.into_iter().map(|hour| hour as u32).collect(),
+                "BYMINUTE" => rule.by_minute = rule_numbers(value, 0, 59, &[])?.into_iter().map(|minute| minute as u32).collect(),
+                "BYSECOND" if value == "0" => {}
+                other => return Err(format!("{other} is not supported")),
+            }
+        }
+        if !frequency_given {
+            return Err("FREQ is required".to_owned());
+        }
+        Ok(rule)
+    }
+
+    /// Whether the rule fires in the minute starting `epoch_seconds`, for a job that starts at
+    /// `start_epoch`: the `BY` lists where given, else the start's minute, hour, weekday and day,
+    /// and every `INTERVAL` units of `FREQ` counted from the start.
+    pub(crate) fn fires(&self, start_epoch: i64, epoch_seconds: i64) -> bool {
+        let start = start_epoch - start_epoch.rem_euclid(60);
+        if epoch_seconds < start {
+            return false;
+        }
+        let (from, at) = (Minute::of_epoch(start), Minute::of_epoch(epoch_seconds));
+        let (start_days, days) = (start.div_euclid(86_400), epoch_seconds.div_euclid(86_400));
+        let (start_year, start_month, _) = civil_from_days(start_days);
+        let (year, month, _) = civil_from_days(days);
+        let months = (year * 12 + i64::from(month)) - (start_year * 12 + i64::from(start_month));
+        let every = |count: i64| count.rem_euclid(self.interval) == 0;
+        let minute_ok = if !self.by_minute.is_empty() {
+            self.by_minute.contains(&at.minute)
+        } else if self.frequency == Frequency::Minutely {
+            every((epoch_seconds - start) / 60)
+        } else {
+            at.minute == from.minute
+        };
+        let hour_ok = if !self.by_hour.is_empty() {
+            self.by_hour.contains(&at.hour)
+        } else {
+            match self.frequency {
+                Frequency::Minutely => true,
+                Frequency::Hourly => every((epoch_seconds - start) / 3600),
+                _ => at.hour == from.hour,
+            }
+        };
+        let month_ok = self.by_month.is_empty() || self.by_month.contains(&at.month);
+        let explicit_day = !self.by_month_day.is_empty() || !self.by_day.is_empty();
+        let day_lists_ok = (self.by_month_day.is_empty()
+            || self.by_month_day.iter().any(|day| {
+                (*day > 0 && *day as u32 == at.day) || (*day == -1 && at.last_day_of_month)
+            }))
+            && (self.by_day.is_empty() || self.by_day.contains(&at.weekday));
+        let period_ok = match self.frequency {
+            Frequency::Minutely | Frequency::Hourly => true,
+            Frequency::Daily => every(days - start_days),
+            Frequency::Weekly => every((days - start_days).div_euclid(7)) && (explicit_day || at.weekday == from.weekday),
+            Frequency::Monthly => every(months) && (explicit_day || at.day == from.day),
+            Frequency::Yearly => {
+                every(months.div_euclid(12)) && (explicit_day || !self.by_month.is_empty() || (at.month == from.month && at.day == from.day))
+            }
+        };
+        minute_ok && hour_ok && month_ok && day_lists_ok && period_ok
+    }
+}
+
+/// The anonymous block a `DBMS_SCHEDULER` job runs: a `PLSQL_BLOCK` action as written (wrapped
+/// in `BEGIN ... END;` when it is not a block), a `STORED_PROCEDURE` as a call of it.
+pub(crate) fn scheduler_block(job_type: &str, action: &str) -> String {
+    let action = action.trim();
+    let starts_block = |word: &str| action.get(..word.len()).is_some_and(|start| start.eq_ignore_ascii_case(word));
+    if job_type.eq_ignore_ascii_case("STORED_PROCEDURE") {
+        return format!("BEGIN {}; END;", action.trim_end_matches(';'));
+    }
+    if starts_block("BEGIN") || starts_block("DECLARE") {
+        action.to_owned()
+    } else {
+        format!("BEGIN {action} END;")
+    }
+}
+
+/// Runs every enabled `DBMS_SCHEDULER` job due in the minute starting `epoch_seconds` (UTC),
+/// each in an Oracle session of its own, then drops (with `auto_drop`) or disables a one-time job
+/// or one past its end date. A file without scheduler jobs has none due.
+pub fn run_due_scheduler_jobs<S: KeyValueStore>(store: &S, epoch_seconds: i64) -> SqlResult<JobsRun> {
+    let mut session = Session::with_dialect(store, Dialect::PostgreSql);
+    let mut rows = Vec::new();
+    let listed = session.execute(
+        &format!(
+            "SELECT job_name, job_type, job_action, start_epoch, repeat_interval, end_epoch, auto_drop, last_run \
+             FROM {ORACLE_SCHEDULER_TABLE} WHERE enabled ORDER BY job_name"
+        ),
+        &mut |result| {
+            if result.columns.is_some() {
+                rows = result.rows;
+            }
+        },
+    );
+    if let Err(error) = listed {
+        return if error.state() == crate::error::SqlState::UNDEFINED_TABLE
+            || error.state() == crate::error::SqlState::INVALID_SCHEMA_NAME
+        {
+            Ok(JobsRun::default())
+        } else {
+            Err(error)
+        };
+    }
+    let number = |value: Option<&Value>| match value {
+        Some(Value::BigInt(number)) => Some(*number),
+        Some(Value::Integer(number)) => Some(i64::from(*number)),
+        _ => None,
+    };
+    let mut outcome = JobsRun::default();
+    for row in &rows {
+        let (Some(job), Some(job_type), Some(action), Some(start)) = (
+            row.first().and_then(text_of),
+            row.get(1).and_then(text_of),
+            row.get(2).and_then(text_of),
+            number(row.get(3)),
+        ) else {
+            continue;
+        };
+        let interval = row.get(4).and_then(text_of);
+        let end = number(row.get(5));
+        let auto_drop = matches!(row.get(6), Some(Value::Boolean(true)));
+        let last_run = number(row.get(7));
+        let past_end = end.is_some_and(|end| epoch_seconds > end);
+        let (due, finished) = match &interval {
+            None => (last_run.is_none() && start <= epoch_seconds + 59, true),
+            Some(text) => match CalendarRule::parse(text) {
+                Ok(rule) => (!past_end && rule.fires(start, epoch_seconds), past_end),
+                Err(_) => {
+                    outcome.invalid_schedules += 1;
+                    (false, false)
+                }
+            },
+        };
+        if due {
+            let mut runner = Session::with_dialect(store, Dialect::Oracle);
+            match runner.execute(&scheduler_block(&job_type, &action), &mut |_| {}) {
+                Ok(()) => outcome.succeeded += 1,
+                Err(_) => outcome.failed += 1,
+            }
+            let _ = runner.close();
+            session.execute(
+                &format!("UPDATE {ORACLE_SCHEDULER_TABLE} SET last_run = {epoch_seconds} WHERE job_name = {}", quoted(&job)),
+                &mut |_| {},
+            )?;
+        }
+        if finished && (due || past_end) {
+            let change = if auto_drop {
+                format!("DELETE FROM {ORACLE_SCHEDULER_TABLE} WHERE job_name = {}", quoted(&job))
+            } else {
+                format!("UPDATE {ORACLE_SCHEDULER_TABLE} SET enabled = false WHERE job_name = {}", quoted(&job))
+            };
+            session.execute(&change, &mut |_| {})?;
+        }
+    }
+    session.close()?;
+    Ok(outcome)
+}
+
 /// Runs every enabled SQL Server Agent job with an enabled schedule that fires in the minute
 /// starting `epoch_seconds` (UTC), each job's steps in a SQL Server session of its own. A file
 /// without Agent jobs has none due.
