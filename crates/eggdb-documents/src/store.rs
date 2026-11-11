@@ -329,12 +329,43 @@ fn ensure_collection(
     Ok(())
 }
 
+fn text_index_fields(keys: &dyn KeysRead, database: &str, collection: &str) -> DocumentResult<Option<Vec<String>>> {
+    let Some(bytes) = keys
+        .get(&collection_key(database, collection))
+        .map_err(DocumentError::storage)?
+    else {
+        return Ok(None);
+    };
+    let info = decoded(&bytes)?;
+    Ok(info.get_array("indexes").and_then(|stored| {
+        stored
+            .iter()
+            .filter_map(Bson::as_document)
+            .filter_map(|index| index.get_document("key"))
+            .find_map(crate::text_search::TextSearch::index_fields)
+    }))
+}
+
 fn matching(
     keys: &dyn KeysRead,
     database: &str,
     collection: &str,
     filter: &Filter,
 ) -> DocumentResult<Vec<(Vec<u8>, Document)>> {
+    let scoped;
+    let filter = if crate::filter::has_text(filter) {
+        let Some(fields) = text_index_fields(keys, database, collection)? else {
+            return Err(DocumentError {
+                code: 27,
+                code_name: "IndexNotFound",
+                message: "text index required for $text query".to_owned(),
+            });
+        };
+        scoped = crate::filter::with_text_fields(filter, &fields);
+        &scoped
+    } else {
+        filter
+    };
     if let Some(id) = only_id(filter) {
         let key = document_key(database, collection, id);
         return Ok(match keys.get(&key).map_err(DocumentError::storage)? {

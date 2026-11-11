@@ -1759,3 +1759,38 @@ fn mongodump_archives_are_read_per_collection_across_interleaved_blocks() {
     assert_eq!(collections[1].metadata, None);
     assert!(crate::read_mongodump_archive(b"not an archive").is_err());
 }
+
+#[test]
+fn text_searches_need_a_text_index_and_match_stemmed_words_and_phrases() {
+    let keyspace = MemoryKeyspace::default();
+    let store = store(&keyspace);
+    store
+        .insert(
+            "app",
+            "posts",
+            vec![
+                doc(vec![("_id", Bson::Int32(1)), ("body", text("Cold brew coffee recipes"))]),
+                doc(vec![("_id", Bson::Int32(2)), ("body", text("The coffee shop opened"))]),
+                doc(vec![("_id", Bson::Int32(3)), ("body", text("Tea leaves")), ("note", text("coffee"))]),
+            ],
+            true,
+        )
+        .unwrap();
+    let search = |query: &str| {
+        let filter = crate::parse_filter(&doc(vec![("$text", Bson::Document(doc(vec![("$search", text(query))])))])).unwrap();
+        store.find("app", "posts", &filter, &crate::SortSpec::default())
+    };
+    assert_eq!(search("coffee").unwrap_err().code, 27);
+    store
+        .create_indexes(
+            "app",
+            "posts",
+            &[doc(vec![("key", Bson::Document(doc(vec![("body", text("text"))]))), ("name", text("body_text"))])],
+        )
+        .unwrap();
+    let ids = |found: Vec<Document>| -> Vec<Bson> { found.iter().filter_map(|document| document.get("_id").cloned()).collect() };
+    assert_eq!(ids(search("coffee").unwrap()), vec![Bson::Int32(1), Bson::Int32(2)]);
+    assert_eq!(ids(search("recipe").unwrap()), vec![Bson::Int32(1)]);
+    assert_eq!(ids(search("coffee -shop").unwrap()), vec![Bson::Int32(1)]);
+    assert_eq!(ids(search("\"coffee shop\"").unwrap()), vec![Bson::Int32(2)]);
+}

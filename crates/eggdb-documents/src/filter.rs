@@ -18,6 +18,8 @@ pub enum Filter {
     Expr(Bson),
     /// `$jsonSchema`: a checked JSON Schema the document must satisfy.
     JsonSchema(Document),
+    /// `$text`: a text search over the fields of the collection's text index.
+    Text(crate::text_search::TextSearch),
     /// The values at a dotted path meet a condition.
     Field {
         /// The dotted path.
@@ -107,6 +109,28 @@ pub fn parse_filter(filter: &Document) -> DocumentResult<Filter> {
     parse_at(filter, 0)
 }
 
+/// Whether the filter holds a `$text` search.
+pub fn has_text(filter: &Filter) -> bool {
+    match filter {
+        Filter::Text(_) => true,
+        Filter::And(all) => all.iter().any(has_text),
+        _ => false,
+    }
+}
+
+/// The filter with its `$text` search limited to `fields`, the collection's text index.
+pub fn with_text_fields(filter: &Filter, fields: &[String]) -> Filter {
+    match filter {
+        Filter::Text(search) => {
+            let mut search = search.clone();
+            search.fields = Some(fields.to_vec());
+            Filter::Text(search)
+        }
+        Filter::And(all) => Filter::And(all.iter().map(|inner| with_text_fields(inner, fields)).collect()),
+        other => other.clone(),
+    }
+}
+
 fn parse_at(filter: &Document, depth: usize) -> DocumentResult<Filter> {
     if depth > MAX_DEPTH {
         return Err(DocumentError::bad_value("the filter is nested too deeply"));
@@ -126,7 +150,11 @@ fn parse_at(filter: &Document, depth: usize) -> DocumentResult<Filter> {
                 crate::json_schema::check_schema(schema, 0)?;
                 all.push(Filter::JsonSchema(schema.clone()));
             }
-            "$where" | "$text" => {
+            "$text" if depth == 0 => all.push(Filter::Text(crate::text_search::TextSearch::parse(value)?)),
+            "$text" => {
+                return Err(DocumentError::bad_value("$text can only be at the top level of a filter"));
+            }
+            "$where" => {
                 return Err(DocumentError::not_implemented(format!(
                     "{name} is not supported yet"
                 )));
@@ -462,6 +490,7 @@ pub fn matches(filter: &Filter, document: &Document) -> bool {
         Filter::JsonSchema(schema) => {
             crate::json_schema::schema_holds(schema, &Bson::Document(document.clone()), 0)
         }
+        Filter::Text(search) => search.matches(document),
         Filter::Field { path, condition } => condition_holds(condition, &reached(document, path)),
     }
 }
@@ -478,7 +507,7 @@ pub fn matched_array_index(filter: &Filter, document: &Document) -> Option<usize
             .iter()
             .filter(|inner| matches(inner, document))
             .find_map(|inner| matched_array_index(inner, document)),
-        Filter::Nor(_) | Filter::Expr(_) | Filter::JsonSchema(_) => None,
+        Filter::Nor(_) | Filter::Expr(_) | Filter::JsonSchema(_) | Filter::Text(_) => None,
         Filter::Field { path, condition } => {
             if !records_position(condition) {
                 return None;

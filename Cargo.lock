@@ -173,6 +173,7 @@ dependencies = [
  "eggdb-content",
  "eggdb-crypto",
  "eggdb-keyspace",
+ "eggdb-search",
  "eggdb-sql",
 ]
 
