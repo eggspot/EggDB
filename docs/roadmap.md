@@ -1301,7 +1301,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Kafka Connect's REST and worker protocol (D46).
 - A benchmark against Kafka (D33, D213).
 - AMQP 0-9-1: durable exchanges and bindings, headers exchanges, exclusive and auto-delete queues
-  (D33, D214).
+  (D33, D214). Headers exchanges and exclusive and auto-delete queues: **code written, unbuilt**
+  (code-only mode, 2026-11-11, D482).
 - AMQP 0-9-1 `tx` transactions (D33, D214).
 - Dead-letter exchanges, message and queue TTL, delayed messages and priorities (D33, D214).
 - Replicated (quorum-style) queues (D33).
