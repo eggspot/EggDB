@@ -996,10 +996,7 @@ impl Session<'_> {
                 if let Some(endpoint) = &options.otlp_endpoint {
                     super::serve_otlp::export_metrics(
                         endpoint,
-                        &|| {
-                            served_databases
-                                .with_databases(|databases| super::serve_metrics::families(databases))
-                        },
+                        &|| served_databases.with_databases(super::serve_metrics::families),
                         &stop_signals::requested,
                     );
                 }
