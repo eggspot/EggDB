@@ -8,6 +8,56 @@ const NODE: u8 = 1;
 const RELATIONSHIP: u8 = 2;
 const OUTGOING: u8 = 3;
 const INCOMING: u8 = 4;
+const SCHEMA_RULE: u8 = 5;
+
+/// What a schema rule asks of nodes with its label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SchemaKind {
+    Unique,
+    Exists,
+    Index,
+}
+
+/// A constraint or an index on a label's properties.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SchemaRule {
+    pub(crate) name: String,
+    pub(crate) kind: SchemaKind,
+    pub(crate) label: String,
+    pub(crate) properties: Vec<String>,
+}
+
+fn rule_key(name: &str) -> Vec<u8> {
+    let mut key = vec![SCHEMA_RULE];
+    key.extend_from_slice(name.as_bytes());
+    key
+}
+
+fn property_of<'n>(node: &'n Node, name: &str) -> Option<&'n Value> {
+    node.properties
+        .iter()
+        .find(|(property, _)| property == name)
+        .map(|(_, value)| value)
+        .filter(|value| !matches!(value, Value::Null))
+}
+
+fn violation(rule: &SchemaRule, node: u64) -> GraphError {
+    GraphError::new(
+        "Neo.ClientError.Schema.ConstraintValidationFailed",
+        match rule.kind {
+            SchemaKind::Exists => format!(
+                "Node({node}) with label `{}` must have the property `{}`",
+                rule.label,
+                rule.properties.join("`, `")
+            ),
+            _ => format!(
+                "Node({node}) already exists with label `{}` and properties `{}`",
+                rule.label,
+                rule.properties.join("`, `")
+            ),
+        },
+    )
+}
 
 fn key(kind: u8, id: u64) -> Vec<u8> {
     let mut key = vec![kind];
@@ -110,6 +160,77 @@ impl GraphRead<'_> {
         }))
     }
 
+    pub(crate) fn schema_rules(&self) -> GraphResult<Vec<SchemaRule>> {
+        let mut rules = Vec::new();
+        for (key, value) in self.keys.scan(&[SCHEMA_RULE]).map_err(storage)? {
+            let document = decode(&value)?;
+            let kind = match document.get_str("k").unwrap_or_default() {
+                "unique" => SchemaKind::Unique,
+                "exists" => SchemaKind::Exists,
+                _ => SchemaKind::Index,
+            };
+            let properties = match document.get("p") {
+                Some(Bson::Array(items)) => items
+                    .iter()
+                    .filter_map(|item| match item {
+                        Bson::String(name) => Some(name.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            rules.push(SchemaRule {
+                name: String::from_utf8_lossy(&key[1..]).into_owned(),
+                kind,
+                label: document.get_str("l").unwrap_or_default().to_owned(),
+                properties,
+            });
+        }
+        Ok(rules)
+    }
+
+    fn violated(&self, rule: &SchemaRule, node: &Node) -> GraphResult<bool> {
+        if !node.labels.contains(&rule.label) {
+            return Ok(false);
+        }
+        match rule.kind {
+            SchemaKind::Index => Ok(false),
+            SchemaKind::Exists => Ok(rule
+                .properties
+                .iter()
+                .any(|property| property_of(node, property).is_none())),
+            SchemaKind::Unique => {
+                let Some(values) = rule
+                    .properties
+                    .iter()
+                    .map(|property| property_of(node, property))
+                    .collect::<Option<Vec<&Value>>>()
+                else {
+                    return Ok(false);
+                };
+                for other in self.node_ids()? {
+                    if other == node.id {
+                        continue;
+                    }
+                    let Some(other) = self.node(other)? else {
+                        continue;
+                    };
+                    if !other.labels.contains(&rule.label) {
+                        continue;
+                    }
+                    let same = rule.properties.iter().zip(&values).all(|(property, value)| {
+                        property_of(&other, property)
+                            .is_some_and(|found| crate::value::equals(found, value) == Some(true))
+                    });
+                    if same {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+        }
+    }
+
     pub(crate) fn node_ids(&self) -> GraphResult<Vec<u64>> {
         Ok(self
             .keys
@@ -175,10 +296,86 @@ impl GraphWrite<'_> {
             Bson::Array(sorted.into_iter().map(Bson::String).collect()),
         );
         document.insert("p", Bson::Document(properties_document(properties)?));
+        let rules = self.read().schema_rules()?;
+        if !rules.is_empty() {
+            let mut kept = labels.to_vec();
+            kept.sort();
+            kept.dedup();
+            let mut shown = properties.to_vec();
+            shown.sort_by(|a, b| a.0.cmp(&b.0));
+            let candidate = Node {
+                id,
+                labels: kept,
+                properties: shown,
+            };
+            for rule in &rules {
+                if self.read().violated(rule, &candidate)? {
+                    return Err(violation(rule, id));
+                }
+            }
+        }
         self.keys
             .put(&key(NODE, id), &document.to_bytes())
             .map_err(storage)?;
         Ok(id)
+    }
+
+    pub(crate) fn check_existing_nodes(&self, rule: &SchemaRule) -> GraphResult<()> {
+        let read = self.read();
+        for id in read.node_ids()? {
+            if let Some(node) = read.node(id)?
+                && read.violated(rule, &node)?
+            {
+                return Err(GraphError::new(
+                    "Neo.ClientError.Schema.ConstraintCreationFailed",
+                    format!(
+                        "Unable to create constraint '{}': {}",
+                        rule.name,
+                        violation(rule, id).message
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn put_schema_rule(&mut self, rule: &SchemaRule) -> GraphResult<()> {
+        let mut document = Document::new();
+        document.insert(
+            "k",
+            Bson::String(
+                match rule.kind {
+                    SchemaKind::Unique => "unique",
+                    SchemaKind::Exists => "exists",
+                    SchemaKind::Index => "index",
+                }
+                .to_owned(),
+            ),
+        );
+        document.insert("l", Bson::String(rule.label.clone()));
+        document.insert(
+            "p",
+            Bson::Array(rule.properties.iter().cloned().map(Bson::String).collect()),
+        );
+        self.keys
+            .put(&rule_key(&rule.name), &document.to_bytes())
+            .map_err(storage)
+    }
+
+    pub(crate) fn delete_schema_rule(&mut self, name: &str, index: bool) -> GraphResult<bool> {
+        let Some(rule) = self
+            .read()
+            .schema_rules()?
+            .into_iter()
+            .find(|rule| rule.name == name)
+        else {
+            return Ok(false);
+        };
+        if (rule.kind == SchemaKind::Index) != index {
+            return Ok(false);
+        }
+        self.keys.delete(&rule_key(name)).map_err(storage)?;
+        Ok(true)
     }
 
     pub(crate) fn put_relationship(

@@ -527,3 +527,4 @@ its full title with its status.
 - [D500](decisions/D500.md) Code-only batch 148 (M10): MariaDB's `CREATE OR REPLACE SEQUENCE`
 - [D501](decisions/D501.md) Code-only batch 149 (M10): MariaDB's `SHOW CREATE SEQUENCE`
 - [D502](decisions/D502.md) Code-only batch 150 (M10): reading a MariaDB sequence as a table
+- [D503](decisions/D503.md) Code-only batch 151 (M13): Cypher constraints and indexes on labels and properties

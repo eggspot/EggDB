@@ -17,6 +17,7 @@ mod centrality;
 mod cypher;
 mod execute;
 mod procedures;
+mod schema;
 mod store;
 mod value;
 
@@ -86,6 +87,44 @@ pub fn run(
     parameters: &[(String, Value)],
     read_only: bool,
 ) -> GraphResult<QueryResult> {
+    if let Some(command) = schema::parse(query) {
+        let command = command?;
+        let mut outcome: Option<GraphResult<QueryResult>> = None;
+        let storage = match &command {
+            schema::SchemaCommand::Show(kind) => keyspace.read(0, &mut |keys| {
+                outcome = Some(schema::show(&store::GraphRead { keys }, *kind));
+                Ok(())
+            }),
+            _ if read_only => {
+                return Err(GraphError::new(
+                    "Neo.ClientError.Statement.AccessMode",
+                    "Schema operations are not allowed in read access mode",
+                ));
+            }
+            _ => keyspace.write(0, &mut |keys| {
+                let result = schema::change(&mut store::GraphWrite { keys }, &command);
+                let failed = result.is_err();
+                outcome = Some(result);
+                if failed {
+                    Err(ROLLED_BACK.to_owned())
+                } else {
+                    Ok(())
+                }
+            }),
+        };
+        return match (storage, outcome) {
+            (_, Some(Err(error))) => Err(error),
+            (Err(message), _) => Err(GraphError::new(
+                "Neo.DatabaseError.General.UnknownError",
+                message,
+            )),
+            (Ok(()), Some(result)) => result,
+            (Ok(()), None) => Err(GraphError::new(
+                "Neo.DatabaseError.General.UnknownError",
+                "the schema command did not run",
+            )),
+        };
+    }
     let parsed = cypher::parse(query)?;
     let writes = parsed.writes();
     let mut outcome: Option<GraphResult<QueryResult>> = None;
