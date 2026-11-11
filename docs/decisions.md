@@ -570,3 +570,4 @@ its full title with its status.
 - [D543](decisions/D543.md) Code-only batch 191 (M5): CREATE and DROP INDEX CONCURRENTLY and B-tree storage parameters
 - [D544](decisions/D544.md) Code-only batch 192 (M5): SQL*Plus DESCRIBE, PROMPT and SPOOL in eggdb shell
 - [D545](decisions/D545.md) Code-only batch 193 (M16): Kafka ListGroups, DescribeGroups and DeleteGroups
+- [D546](decisions/D546.md) Code-only batch 194 (M16): Kafka idempotent producers

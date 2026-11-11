@@ -1,3 +1,4 @@
+use crate::producers::{self, Accepted, BatchProducer, PartitionProducers};
 use crate::wire::crc32c;
 use eggdb_keyspace::{KeysRead, KeysWrite, Keyspace};
 
@@ -128,6 +129,7 @@ pub(crate) fn delete_topic(keyspace: &dyn Keyspace, topic: &str) -> Result<i16, 
                 keys.delete(&key)?;
             }
         }
+        producers::delete_topic_states(keys, topic)?;
         keys.delete(&topic_key(topic))?;
         Ok(error::NONE)
     })
@@ -151,6 +153,11 @@ fn batch_key(topic: &str, partition: i32, base_offset: i64) -> Vec<u8> {
     let mut key = partition_prefix(topic, partition);
     key.extend_from_slice(&(base_offset as u64).to_be_bytes());
     key
+}
+
+/// Hands out a new idempotent producer id with epoch 0.
+pub(crate) fn init_producer(keyspace: &dyn Keyspace) -> Result<i64, String> {
+    write(keyspace, producers::next_producer_id)
 }
 
 pub(crate) fn valid_topic(name: &str) -> bool {
@@ -328,15 +335,36 @@ pub(crate) fn append(
         };
         let retention = retention_of(&described);
         let mut next = next_offset(&*keys, topic, partition)?;
-        let first = next;
-        for mut batch in batches {
-            batch[..8].copy_from_slice(&next.to_be_bytes());
+        let mut first = None;
+        let mut producers = PartitionProducers::read(&*keys, topic, partition)?;
+        let mut accepted = Vec::with_capacity(batches.len());
+        for batch in batches {
+            let producer = BatchProducer::of(&batch);
+            if let Some(producer) = &producer {
+                match producers.check(&*keys, producer)? {
+                    Ok(Accepted::Append) => {}
+                    Ok(Accepted::Duplicate(offset)) => {
+                        first.get_or_insert(offset);
+                        continue;
+                    }
+                    Err(code) => return Ok(Err(code)),
+                }
+            }
             let last_delta = i32::from_be_bytes(batch[23..27].try_into().unwrap_or_default());
-            keys.put(&batch_key(topic, partition, next), &batch)?;
+            if let Some(producer) = &producer {
+                producers.accept(producer, next);
+            }
+            first.get_or_insert(next);
+            accepted.push((next, batch));
             next += i64::from(last_delta) + 1;
         }
+        for (base, mut batch) in accepted {
+            batch[..8].copy_from_slice(&base.to_be_bytes());
+            keys.put(&batch_key(topic, partition, base), &batch)?;
+        }
+        producers.store(keys)?;
         enforce_retention(keys, topic, partition, retention)?;
-        Ok(Ok(first))
+        Ok(Ok(first.unwrap_or(next)))
     })
 }
 

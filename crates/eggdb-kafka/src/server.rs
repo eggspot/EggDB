@@ -40,8 +40,12 @@ const SYNC_GROUP: i16 = 14;
 const DESCRIBE_GROUPS: i16 = 15;
 const LIST_GROUPS: i16 = 16;
 const DELETE_GROUPS: i16 = 42;
+const INIT_PRODUCER_ID: i16 = 22;
+const INVALID_REQUEST: i16 = 42;
+const UNKNOWN_SERVER_ERROR: i16 = -1;
 
-const SUPPORTED: [(i16, i16, i16); 19] = [
+const SUPPORTED: [(i16, i16, i16); 20] = [
+    (INIT_PRODUCER_ID, 0, 1),
     (DESCRIBE_GROUPS, 0, 1),
     (LIST_GROUPS, 0, 2),
     (DELETE_GROUPS, 0, 1),
@@ -398,6 +402,21 @@ fn produce(keyspace: &dyn Keyspace, request: &mut Reader<'_>, body: &mut Writer)
     Ok(acks != 0)
 }
 
+fn init_producer_id(keyspace: &dyn Keyspace, request: &mut Reader<'_>, body: &mut Writer) -> Parsed<()> {
+    let transactional_id = request.string()?;
+    let _transaction_timeout = request.i32()?;
+    body.i32(0);
+    if transactional_id.is_some() {
+        body.i16(INVALID_REQUEST).i64(-1).i16(-1);
+        return Ok(());
+    }
+    match log::init_producer(keyspace) {
+        Ok(id) => body.i16(error::NONE).i64(id).i16(0),
+        Err(_) => body.i16(UNKNOWN_SERVER_ERROR).i64(-1).i16(-1),
+    };
+    Ok(())
+}
+
 fn fetch(keyspace: &dyn Keyspace, request: &mut Reader<'_>, body: &mut Writer) -> Parsed<()> {
     let _replica = request.i32()?;
     let _max_wait = request.i32()?;
@@ -551,6 +570,7 @@ pub(crate) fn answer_for(
             SYNC_GROUP => coordinator.sync_group(version, &mut request, &mut body).map(|()| true),
             HEARTBEAT => coordinator.heartbeat(version, &mut request, &mut body).map(|()| true),
             LEAVE_GROUP => coordinator.leave_group(version, &mut request, &mut body).map(|()| true),
+            INIT_PRODUCER_ID => init_producer_id(keyspace, &mut request, &mut body).map(|()| true),
             DESCRIBE_GROUPS => coordinator
                 .describe_groups(version, &mut request, &mut body)
                 .map(|()| true),

@@ -8,6 +8,7 @@
 
 mod groups;
 mod log;
+mod producers;
 mod server;
 mod wire;
 

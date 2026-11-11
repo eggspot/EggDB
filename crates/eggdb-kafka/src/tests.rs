@@ -95,7 +95,7 @@ fn api_versions_lists_what_is_supported_and_refuses_newer_versions() {
     let keyspace = MemoryKeyspace::default();
     let body = response(&keyspace, &request(18, 0, |_| {}));
     assert_eq!(i16::from_be_bytes([body[0], body[1]]), 0);
-    assert_eq!(i32::from_be_bytes(body[2..6].try_into().unwrap()), 19);
+    assert_eq!(i32::from_be_bytes(body[2..6].try_into().unwrap()), 20);
     let newer = response(&keyspace, &request(18, 3, |_| {}));
     assert_eq!(i16::from_be_bytes([newer[0], newer[1]]), 35);
     assert!(answer(&keyspace, &config(), &request(1, 99, |_| {})).is_none());
@@ -403,4 +403,31 @@ fn group_listing_describes_unknown_groups_as_dead_and_deletes_committed_offsets(
     assert_eq!(reader.i16().unwrap(), 0);
     assert_eq!(reader.string().unwrap().as_deref(), Some("nobody"));
     assert_eq!(reader.i16().unwrap(), 69);
+}
+
+#[test]
+fn init_producer_id_hands_out_new_ids_and_refuses_transactional_ids() {
+    let keyspace = MemoryKeyspace::default();
+    for expected in [0i64, 1] {
+        let body = response(
+            &keyspace,
+            &request(22, 0, |writer| {
+                writer.string(None).i32(60_000);
+            }),
+        );
+        let mut reader = Reader::new(&body);
+        assert_eq!(reader.i32().unwrap(), 0);
+        assert_eq!(reader.i16().unwrap(), 0);
+        assert_eq!(reader.i64().unwrap(), expected);
+        assert_eq!(reader.i16().unwrap(), 0);
+    }
+    let refused = response(
+        &keyspace,
+        &request(22, 0, |writer| {
+            writer.string(Some("payments")).i32(60_000);
+        }),
+    );
+    let mut reader = Reader::new(&refused);
+    assert_eq!(reader.i32().unwrap(), 0);
+    assert_eq!(reader.i16().unwrap(), 42);
 }
