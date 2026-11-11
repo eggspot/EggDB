@@ -150,6 +150,55 @@ pub(crate) fn message_headers(properties: &[u8]) -> Vec<(String, FieldValue)> {
         .unwrap_or_default()
 }
 
+/// A message's `expiration` property in milliseconds, when it has a readable one.
+pub(crate) fn message_expiration(properties: &[u8]) -> Option<u64> {
+    let mut reader = Reader {
+        bytes: properties,
+        at: 0,
+    };
+    let flags = reader.array::<2>().map(u16::from_be_bytes).ok()?;
+    let has = |bit: u16| flags & (1 << bit) != 0;
+    if !has(8) {
+        return None;
+    }
+    for bit in [15, 14] {
+        if has(bit) {
+            reader.shortstr().ok()?;
+        }
+    }
+    if has(13) {
+        reader.longstr().ok()?;
+    }
+    for bit in [12, 11] {
+        if has(bit) {
+            reader.take(1).ok()?;
+        }
+    }
+    for bit in [10, 9] {
+        if has(bit) {
+            reader.shortstr().ok()?;
+        }
+    }
+    reader.shortstr().ok()?.trim().parse().ok()
+}
+
+/// The non-negative integer value of argument or header `name`, if it has one.
+pub(crate) fn integer_named(table: &[(String, FieldValue)], name: &str) -> Option<u64> {
+    table.iter().find(|(key, _)| key == name).and_then(|(_, value)| match value {
+        FieldValue::Integer(number) => u64::try_from(*number).ok(),
+        FieldValue::Bytes(text) => std::str::from_utf8(text).ok()?.trim().parse().ok(),
+        _ => None,
+    })
+}
+
+/// The text value of argument or header `name`, if it has one.
+pub(crate) fn text_named(table: &[(String, FieldValue)], name: &str) -> Option<String> {
+    table.iter().find(|(key, _)| key == name).and_then(|(_, value)| match value {
+        FieldValue::Bytes(text) => String::from_utf8(text.clone()).ok(),
+        _ => None,
+    })
+}
+
 /// Whether a headers exchange binding with `arguments` takes a message with `headers`:
 /// `x-match` `all` (the default) needs every argument, `any` one of them; `all-with-x` and
 /// `any-with-x` also compare arguments starting with `x-`. A `Void` argument asks only that the
@@ -223,5 +272,20 @@ mod tests {
         properties.extend_from_slice(&(table.len() as u32).to_be_bytes());
         properties.extend_from_slice(&table);
         assert_eq!(message_headers(&properties), headers);
+    }
+
+    #[test]
+    fn expiration_and_named_arguments_are_read() {
+        let properties = [0x01, 0x00, 5, b'6', b'0', b'0', b'0', b'0'];
+        assert_eq!(message_expiration(&properties), Some(60_000));
+        let with_type = [0x81, 0x00, 1, b'x', 2, b'1', b'0'];
+        assert_eq!(message_expiration(&with_type), Some(10));
+        assert_eq!(message_expiration(&[0x80, 0x00, 1, b'x']), None);
+        let arguments = vec![
+            ("x-message-ttl".to_owned(), FieldValue::Integer(500)),
+            ("x-dead-letter-exchange".to_owned(), FieldValue::Bytes(b"dlx".to_vec())),
+        ];
+        assert_eq!(integer_named(&arguments, "x-message-ttl"), Some(500));
+        assert_eq!(text_named(&arguments, "x-dead-letter-exchange").as_deref(), Some("dlx"));
     }
 }

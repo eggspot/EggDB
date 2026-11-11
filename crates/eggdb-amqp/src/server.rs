@@ -2,7 +2,7 @@ use crate::codec::{
     Args, FRAME_BODY, FRAME_HEADER, FRAME_HEARTBEAT, FRAME_MAX, FRAME_METHOD, Frame, Out, Parsed,
     frame, take_frame,
 };
-use crate::field_table::{FieldValue, headers_match};
+use crate::field_table::{FieldValue, headers_match, integer_named, message_expiration, text_named};
 use eggdb_keyspace::Keyspace;
 use eggdb_platform::connection_limits::{MemoryBudget, Reservation};
 use eggdb_queues::Queues;
@@ -78,6 +78,23 @@ struct Exchange {
     bindings: Vec<Binding>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct QueuePolicy {
+    message_ttl_ms: Option<u64>,
+    dead_letter_exchange: Option<String>,
+    dead_letter_routing_key: Option<String>,
+}
+
+impl QueuePolicy {
+    fn of(arguments: &[(String, FieldValue)]) -> Self {
+        Self {
+            message_ttl_ms: integer_named(arguments, "x-message-ttl"),
+            dead_letter_exchange: text_named(arguments, "x-dead-letter-exchange"),
+            dead_letter_routing_key: text_named(arguments, "x-dead-letter-routing-key"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct AutoDelete {
     consumers: usize,
@@ -91,6 +108,7 @@ pub(crate) struct Broker<'s> {
     next_name: AtomicU64,
     exclusive_owners: Mutex<BTreeMap<String, u64>>,
     auto_delete: Mutex<BTreeMap<String, AutoDelete>>,
+    policies: Mutex<BTreeMap<String, QueuePolicy>>,
 }
 
 impl<'s> Broker<'s> {
@@ -117,7 +135,62 @@ impl<'s> Broker<'s> {
             next_name: AtomicU64::new(1),
             exclusive_owners: Mutex::new(BTreeMap::new()),
             auto_delete: Mutex::new(BTreeMap::new()),
+            policies: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    fn policy_of(&self, queue: &str) -> QueuePolicy {
+        self.policies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(queue)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn set_policy(&self, queue: &str, policy: QueuePolicy) {
+        let mut policies = self.policies.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if policy == QueuePolicy::default() {
+            policies.remove(queue);
+        } else {
+            policies.insert(queue.to_owned(), policy);
+        }
+    }
+
+    fn dead_letter(&self, queue: &str, stored: &[u8], now: u64) {
+        let policy = self.policy_of(queue);
+        let Some(exchange) = policy.dead_letter_exchange else {
+            return;
+        };
+        let message = StoredMessage::read(queue, stored);
+        let routing_key = policy
+            .dead_letter_routing_key
+            .unwrap_or_else(|| message.routing_key.clone());
+        let headers = crate::field_table::message_headers(message.properties);
+        let Some(targets) = self.route(&exchange, &routing_key, &headers) else {
+            return;
+        };
+        let republished = encode_message(&exchange, &routing_key, message.properties, message.body);
+        for target in targets.iter().filter(|target| target.as_str() != queue) {
+            if self.queues.exists(target).unwrap_or(false) {
+                let _ = self.queues.send(target, &republished, 0, now);
+            }
+        }
+    }
+
+    fn expired(&self, queue: &str, message: &eggdb_queues::Message, now: u64) -> bool {
+        let stored = StoredMessage::read(queue, &message.body);
+        let ttl = match (self.policy_of(queue).message_ttl_ms, message_expiration(stored.properties)) {
+            (Some(queue_ttl), Some(message_ttl)) => queue_ttl.min(message_ttl),
+            (Some(ttl), None) | (None, Some(ttl)) => ttl,
+            (None, None) => return false,
+        };
+        if now.saturating_sub(message.sent_ms) < ttl {
+            return false;
+        }
+        let _ = self.queues.ack(queue, message.id);
+        self.dead_letter(queue, &message.body, now);
+        true
     }
 
     fn owner_of(&self, queue: &str) -> Option<u64> {
@@ -164,6 +237,10 @@ impl<'s> Broker<'s> {
     }
 
     fn forget_queue(&self, queue: &str) {
+        self.policies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(queue);
         self.exclusive_owners
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -328,6 +405,7 @@ struct Channel {
     consumers: Vec<Consumer>,
     prefetch: u16,
     unacked: BTreeMap<u64, (String, u64)>,
+    rejectable: BTreeMap<u64, Vec<u8>>,
     next_tag: u64,
     confirms: Option<u64>,
     publishing: Option<(String, String)>,
@@ -521,7 +599,11 @@ impl Connection<'_, '_> {
         messages: Vec<eggdb_queues::Message>,
     ) {
         let mut messages = messages.into_iter();
+        let dead_lettering = self.broker.policy_of(queue).dead_letter_exchange.is_some();
         while let Some(message) = messages.next() {
+            if self.broker.expired(queue, &message, now_ms()) {
+                continue;
+            }
             let Some(state) = self.channels.get_mut(&channel) else {
                 let now = now_ms();
                 for unsent in std::iter::once(message).chain(messages) {
@@ -537,6 +619,9 @@ impl Connection<'_, '_> {
                 state
                     .unacked
                     .insert(delivery_tag, (queue.to_owned(), message.id));
+                if dead_lettering {
+                    state.rejectable.insert(delivery_tag, message.body.clone());
+                }
             }
             let stored = StoredMessage::read(queue, &message.body);
             let mut out = Out::method(60, 60);
@@ -616,12 +701,19 @@ impl Connection<'_, '_> {
         };
         let now = now_ms();
         for known in tags {
+            let rejected_body = state.rejectable.remove(&known);
             if let Some((queue, id)) = state.unacked.remove(&known) {
                 match outcome {
                     Some(true) => {
                         let _ = self.broker.queues.release(&queue, id, now);
                     }
-                    _ => {
+                    Some(false) => {
+                        let _ = self.broker.queues.ack(&queue, id);
+                        if let Some(body) = rejected_body {
+                            self.broker.dead_letter(&queue, &body, now);
+                        }
+                    }
+                    None => {
                         let _ = self.broker.queues.ack(&queue, id);
                     }
                 }
@@ -657,6 +749,7 @@ impl Connection<'_, '_> {
             );
             return Ok(());
         };
+        let delay_ms = integer_named(&headers, "x-delay").unwrap_or(0);
         let stored = encode_message(&exchange, &routing_key, &properties, &body);
         if let Some(transaction) = self
             .channels
@@ -682,7 +775,7 @@ impl Connection<'_, '_> {
             if self.broker.queues.exists(&queue).unwrap_or(false) {
                 self.broker
                     .queues
-                    .send(&queue, &stored, 0, now)
+                    .send(&queue, &stored, delay_ms, now)
                     .map_err(|error| error.to_string())?;
             }
         }
@@ -917,6 +1010,17 @@ impl Connection<'_, '_> {
                 let exclusive = args.bit()?;
                 let auto_delete = args.bit()?;
                 let no_wait = args.bit()?;
+                let arguments = crate::field_table::decode_table(args.table()?)?;
+                if arguments.iter().any(|(argument, _)| argument == "x-max-priority") {
+                    self.close_channel(
+                        channel,
+                        NOT_IMPLEMENTED,
+                        "NOT_IMPLEMENTED - priority queues (x-max-priority) are not supported yet",
+                        50,
+                        10,
+                    );
+                    return Ok(true);
+                }
                 if name.is_empty() {
                     name = format!(
                         "amq.gen-{}",
@@ -944,6 +1048,9 @@ impl Connection<'_, '_> {
                 if !exists && let Err(error) = self.broker.queues.declare(&name) {
                     self.close_channel(channel, PRECONDITION_FAILED, &error.to_string(), 50, 10);
                     return Ok(true);
+                }
+                if !passive {
+                    self.broker.set_policy(&name, QueuePolicy::of(&arguments));
                 }
                 if !exists && !passive {
                     if exclusive {
@@ -1163,7 +1270,12 @@ impl Connection<'_, '_> {
                         return Ok(true);
                     }
                 };
-                match messages.into_iter().next() {
+                let dead_lettering = self.broker.policy_of(&queue).dead_letter_exchange.is_some();
+                match messages
+                    .into_iter()
+                    .next()
+                    .filter(|message| !self.broker.expired(&queue, message, now_ms()))
+                {
                     None => {
                         let mut out = Out::method(60, 72);
                         out.shortstr("");
@@ -1186,6 +1298,9 @@ impl Connection<'_, '_> {
                             state
                                 .unacked
                                 .insert(delivery_tag, (queue.clone(), message.id));
+                            if dead_lettering {
+                                state.rejectable.insert(delivery_tag, message.body.clone());
+                            }
                         }
                         let stored = StoredMessage::read(&queue, &message.body);
                         let mut out = Out::method(60, 71);

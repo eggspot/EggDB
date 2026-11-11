@@ -540,3 +540,4 @@ its full title with its status.
 - [D513](decisions/D513.md) Code-only batch 161 (M8): MySQL MATCH ... AGAINST
 - [D514](decisions/D514.md) Code-only batch 162 (M8): SQL Server CONTAINS and FREETEXT
 - [D515](decisions/D515.md) Code-only batch 163 (M8): Elasticsearch query_string and highlighting
+- [D516](decisions/D516.md) Code-only batch 164 (M16): AMQP TTL, dead-letter exchanges and delayed messages
