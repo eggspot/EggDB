@@ -116,7 +116,8 @@ Failure messages this slice must produce, by cause (`<path>`, `<host>:<port>` fi
 The main window replaces the card (no motion). The toolbar's connection name is the database's
 name (the file's stem, or the URL's database), the file text the path or `host:port`; the sidebar
 tree has the connection's node expanded with `Tables` expanded (section 4); one tab `Query 1`
-with an empty editor has keyboard focus; the status bar reads `Connected · shop.eggdb ·
+with an empty editor has keyboard focus (on a RESP server, the first key space's keys tab instead,
+scanning it, D547); the status bar reads `Connected · shop.eggdb ·
 read-write` (`read-only` when so; `Connected · db.example.com:5432 · TLS` for a server). The
 status bar's left group shows the toast `Opened shop.eggdb` / `Connected to db.example.com` for
 8 s. Focus is in the editor: `Enter` types a newline there (the card's `Enter` meant `Open`; the

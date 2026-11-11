@@ -1569,8 +1569,12 @@ impl Workspace {
                 let mut window = main_window_for(&connection, catalog);
                 window.layout = self.layout;
                 window.use_sizes(self.saved_sizes(self.layout));
+                let first_scan = window.open_on_first_key_space();
                 self.screen = Screen::Main(Box::new(window));
                 self.connection = Some(connection);
+                if let Some(action) = first_scan {
+                    self.window_action(action, Instant::now());
+                }
             }
             Err(failure) => {
                 if let Some(card) = self.card_mut() {
@@ -1596,7 +1600,8 @@ pub fn opening_catalog(connection: &mut Connection) -> Catalog {
 }
 
 /// The main window as it first shows `connection` (`docs/ux/workspace.md` 1.7): its name and
-/// location in the toolbar, `catalog` in the object tree, one empty `Query 1` editor.
+/// location in the toolbar, `catalog` in the object tree, one empty `Query 1` editor (a RESP
+/// server's first key space replaces it once the window shows, [`MainWindow::open_on_first_key_space`]).
 pub fn main_window_for(connection: &Connection, catalog: Catalog) -> MainWindow {
     MainWindow::with_catalog(
         connection.name(),

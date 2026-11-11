@@ -1092,6 +1092,28 @@ impl MainWindow {
         })
     }
 
+    /// A RESP server's window opens on its first key space's keys tab in place of the empty
+    /// `Query 1`, which can run nothing there; it returns the scan to run, or `None` when the
+    /// window is not over RESP, already has other tabs, or the server lists no key space.
+    pub fn open_on_first_key_space(&mut self) -> Option<WindowAction> {
+        if !self.tree.catalog.over_resp || self.tab_count() != 1 || self.tab.is_keys() {
+            return None;
+        }
+        let key_space = self.tree.catalog.key_spaces.first()?;
+        let scan = KeySpaceScan {
+            over_resp: true,
+            ..KeySpaceScan::new(key_space.collection.clone(), key_space.keys)
+        };
+        let session = self.tab.session;
+        self.tab = QueryTab {
+            session,
+            ..QueryTab::keys(scan)
+        };
+        self.tab
+            .run_request(false)
+            .map(|request| WindowAction::Tab(TabAction::Run(Box::new(request))))
+    }
+
     /// The dialect a new query tab starts in: the showing tab's, or from a keys tab the
     /// nearest query tab's to its left, else to its right, else PostgreSQL's.
     pub fn nearest_query_dialect(&self) -> QueryDialect {
@@ -6205,6 +6227,29 @@ mod tests {
         assert!(read_only.drop_prompt.is_none());
         read_only.open_tree_menu(TreeItem::Table(1), TreeMenuOrigin::CurrentRow);
         assert_eq!(read_only.tree_menu.map(|menu| menu.enabled[5]), Some(false));
+    }
+
+    #[test]
+    fn a_resp_window_opens_on_its_first_key_space_instead_of_an_empty_query_tab() {
+        let catalog = Catalog {
+            key_spaces: vec![KeySpace {
+                collection: Some("resp0".to_owned()),
+                keys: KeyCount::Exactly(3),
+            }],
+            over_resp: true,
+            ..Catalog::default()
+        };
+        let mut window = MainWindow::with_catalog("cache", "localhost:6379", true, catalog);
+        let Some(WindowAction::Tab(TabAction::Run(_))) = window.open_on_first_key_space() else {
+            panic!("the first key space is scanned");
+        };
+        assert!(window.tab.is_keys());
+        assert_eq!(window.tab_count(), 1, "no Query 1 beside it");
+        assert_eq!(window.tab.session, SessionId(1));
+        assert!(window.open_on_first_key_space().is_none(), "only once");
+        let mut sql = MainWindow::sample();
+        assert!(sql.open_on_first_key_space().is_none());
+        assert_eq!(sql.tab.title, "Query 1");
     }
 
     #[test]
