@@ -216,6 +216,13 @@ impl<'s> Session<'s> {
             MySqlStatement::ShowCreateTrigger(_) => Some(create_trigger_columns()),
             MySqlStatement::ShowCreateRoutine { kind, .. } => Some(create_routine_columns(*kind)),
             MySqlStatement::ShowRoutineStatus { .. } => Some(routine_status_columns()),
+            MySqlStatement::ShowEvents { .. } => Some(super::mysql_events::show_events_columns()),
+            MySqlStatement::ShowCreateEvent(_) => {
+                Some(super::mysql_events::show_create_event_columns())
+            }
+            MySqlStatement::CreateEvent(_)
+            | MySqlStatement::AlterEvent(_)
+            | MySqlStatement::DropEvent { .. } => None,
             MySqlStatement::ShowTriggers { .. } => Some(triggers_columns()),
             MySqlStatement::ShowIndex(_) => Some(index_columns()),
             MySqlStatement::ShowVariables { .. } | MySqlStatement::ShowStatus => {
@@ -328,6 +335,11 @@ impl<'s> Session<'s> {
                 }
                 Ok(rows_result(triggers_columns(), rows))
             }
+            MySqlStatement::CreateEvent(definition) => self.create_event(definition),
+            MySqlStatement::AlterEvent(alter) => self.alter_event(alter),
+            MySqlStatement::DropEvent { name, if_exists } => self.drop_event(name, *if_exists),
+            MySqlStatement::ShowEvents { like } => self.show_events(like.as_deref()),
+            MySqlStatement::ShowCreateEvent(name) => self.show_create_event(name),
             MySqlStatement::ShowCreateRoutine { kind, name } => {
                 let wanted = crate::schemas::base_name(&name.text).to_owned();
                 let listed = self.read(|reader, _| crate::routines::every_routine(reader))?;

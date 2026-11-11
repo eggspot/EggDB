@@ -2,6 +2,7 @@ mod classifier_catalog;
 mod cursors;
 pub(crate) mod database_switch;
 mod mysql;
+pub(crate) mod mysql_events;
 mod nonatomic;
 mod oracle;
 mod oracle_over_tds;

@@ -43,7 +43,13 @@ impl<'t> Parser<'t> {
         self.is_word_at(ahead, "procedure") || self.is_word_at(ahead, "function")
     }
 
-    fn skip_definer(&mut self) -> SqlResult<()> {
+    pub(super) fn mysql_compound_body(&mut self) -> SqlResult<String> {
+        let start = self.peek().start;
+        Compiler::new(self).body()?;
+        Ok(self.slice(start, self.previous_end()))
+    }
+
+    pub(super) fn skip_definer(&mut self) -> SqlResult<()> {
         if !self.take_word("definer") {
             return Ok(());
         }

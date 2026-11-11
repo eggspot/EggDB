@@ -490,6 +490,47 @@ fn shifted(local: LocalTime, shift: Shift) -> Option<LocalTime> {
     in_mysql_range(moved).then_some(moved)
 }
 
+/// Moves `micros` (microseconds since 2000-01-01) by `amount` of MySQL's interval `unit`, as
+/// `DATE_ADD` does; `None` when the amount doesn't read or the result leaves MySQL's range.
+pub(crate) fn add_interval(micros: i64, amount: &Value, unit: &str) -> Option<i64> {
+    let shift = shift_of(unit, amount)?;
+    let moved = shifted(LocalTime::of_micros(micros), shift)?;
+    moved
+        .days
+        .checked_mul(MICROS_PER_DAY)?
+        .checked_add(moved.of_day)
+}
+
+/// Seconds since 1970-01-01 UTC of a MySQL date or time value read in the session's time zone.
+pub(crate) fn epoch_seconds_of(value: &Value) -> SqlResult<Option<i64>> {
+    let utc = match value {
+        Value::TimestampTz(utc) => *utc,
+        other => {
+            let Some(local) = local(other)? else {
+                return Ok(None);
+            };
+            let micros = local
+                .days
+                .saturating_mul(MICROS_PER_DAY)
+                .saturating_add(local.of_day);
+            datetime::local_to_utc(micros)?
+        }
+    };
+    Ok(Some((utc - unix_epoch_micros()).div_euclid(MICROS_PER_SECOND)))
+}
+
+/// Microseconds since 2000-01-01 UTC of `seconds` since 1970-01-01 UTC.
+pub(crate) fn micros_of_epoch_seconds(seconds: i64) -> Option<i64> {
+    seconds
+        .checked_mul(MICROS_PER_SECOND)?
+        .checked_add(unix_epoch_micros())
+}
+
+/// Seconds since 1970-01-01 UTC of `micros` since 2000-01-01 UTC.
+pub(crate) fn epoch_seconds_of_micros(micros: i64) -> i64 {
+    (micros - unix_epoch_micros()).div_euclid(MICROS_PER_SECOND)
+}
+
 fn date_add(date: &Value, amount: &Value, unit: &str, subtract: bool) -> SqlResult<Value> {
     let Some(local) = local(date)? else {
         return Ok(Value::Null);

@@ -179,6 +179,9 @@ impl<'t> Parser<'t> {
             return Ok(None);
         };
         let statement = match word.as_ref() {
+            "create" if self.creates_mysql_event() => self.mysql_create_event()?,
+            "alter" if self.alters_mysql_event() => self.mysql_alter_event()?,
+            "drop" if self.is_word_at(1, "event") => self.mysql_drop_event()?,
             "create" if self.creates_mysql_routine() => self.mysql_create_routine()?,
             "drop" if self.is_word_at(1, "procedure") || self.is_word_at(1, "function") => {
                 self.mysql_drop_routine()?
@@ -317,6 +320,14 @@ impl<'t> Parser<'t> {
                 kind,
                 name: self.table_name()?,
             }
+        } else if self.take_word("events") {
+            self.skip_database_qualifier()?;
+            MySqlStatement::ShowEvents {
+                like: self.like_pattern()?,
+            }
+        } else if self.is_word("create") && self.is_word_at(1, "event") {
+            self.at += 2;
+            MySqlStatement::ShowCreateEvent(self.table_name()?)
         } else if (self.is_word("procedure") || self.is_word("function"))
             && self.is_word_at(1, "status")
         {

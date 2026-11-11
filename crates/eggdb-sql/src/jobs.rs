@@ -332,5 +332,64 @@ pub fn run_due_jobs<S: KeyValueStore>(store: &S, epoch_seconds: i64) -> SqlResul
     Ok(outcome)
 }
 
+/// Runs every enabled MySQL event (`CREATE EVENT`) due at `epoch_seconds`, each in its own
+/// MySQL session and transaction, then moves a recurring event to its next run, and disables or
+/// drops a finished one as its `ON COMPLETION` clause says. A file without events has none due.
+pub fn run_due_events<S: KeyValueStore>(store: &S, epoch_seconds: i64) -> SqlResult<JobsRun> {
+    use crate::session::mysql_events::{
+        EVENTS_TABLE, StoredEvent, event_key, number_or_null, quoted,
+    };
+    let mut session = Session::with_dialect(store, Dialect::PostgreSql);
+    let mut rows = Vec::new();
+    let listed = session.execute(
+        &format!(
+            "SELECT db, name, body, execute_at, interval_value, interval_unit, starts, ends, \
+             next_run, preserve, enabled, comment, created FROM {EVENTS_TABLE} \
+             WHERE enabled AND next_run <= {epoch_seconds} ORDER BY next_run, event_key"
+        ),
+        &mut |result| {
+            rows = result.rows;
+        },
+    );
+    if let Err(error) = listed {
+        return if error.state() == crate::error::SqlState::UNDEFINED_TABLE
+            || error.state() == crate::error::SqlState::INVALID_SCHEMA_NAME
+        {
+            Ok(JobsRun::default())
+        } else {
+            Err(error)
+        };
+    }
+    let mut outcome = JobsRun::default();
+    for event in rows.iter().filter_map(|row| StoredEvent::of_row(row)) {
+        let mut job = Session::with_dialect(store, Dialect::MySql);
+        let used = job.execute(
+            &format!("USE `{}`", event.database.replace('`', "``")),
+            &mut |_| {},
+        );
+        let ran = used.and_then(|()| job.run_mysql_event_body(&event.body));
+        let _ = job.close();
+        match ran {
+            Ok(()) => outcome.succeeded += 1,
+            Err(_) => outcome.failed += 1,
+        }
+        let key = quoted(&event_key(&event.database, &event.name));
+        let next = event.following_run(epoch_seconds);
+        let change = match next {
+            Some(next) => format!(
+                "UPDATE {EVENTS_TABLE} SET next_run = {next}, last_executed = {epoch_seconds} WHERE event_key = {key}"
+            ),
+            None if event.preserve => format!(
+                "UPDATE {EVENTS_TABLE} SET enabled = false, next_run = {}, last_executed = {epoch_seconds} WHERE event_key = {key}",
+                number_or_null(None)
+            ),
+            None => format!("DELETE FROM {EVENTS_TABLE} WHERE event_key = {key}"),
+        };
+        session.execute(&change, &mut |_| {})?;
+    }
+    session.close()?;
+    Ok(outcome)
+}
+
 #[cfg(test)]
 mod tests;

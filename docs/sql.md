@@ -898,7 +898,8 @@ procedure fails, only that statement is undone: the statements before it keep th
 (committed in autocommit mode), as in MySQL (D370). `DROP PROCEDURE` and `DROP
 FUNCTION` take `IF EXISTS`. User and system variables set inside a body
 reach the session when the `CALL` ends (D419); a stored function called from a `SELECT` can't
-set them yet. Not yet: events.
+set them yet. Events (`CREATE`, `ALTER`, `DROP EVENT`, `SHOW EVENTS`, `SHOW CREATE EVENT`)
+run on `eggdb serve`'s scheduler once a minute (D421).
 
 ## Connecting with mysql
 

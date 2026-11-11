@@ -296,6 +296,45 @@ fn run_inline_in(
     Ok(())
 }
 
+pub(crate) fn run_mysql_inline(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    settings: &Settings,
+    body: &str,
+) -> SqlResult<()> {
+    let _depth = enter_routine()?;
+    let definition = RoutineDefinition {
+        name: MYSQL_EVENT_NAME.to_owned(),
+        kind: RoutineKind::Procedure,
+        dialect: Dialect::MySql,
+        language: RoutineLanguage::MySql,
+        parameters: Vec::new(),
+        returns: RoutineReturns::Nothing,
+        volatility: Volatility::Volatile,
+        strict: false,
+        security_definer: false,
+        settings: Vec::new(),
+        body: body.to_owned(),
+        text: String::new(),
+        tsql: None,
+        plsql: None,
+    };
+    let program = super::compile_for_run(&definition)?;
+    let label = format!("PROCEDURE {MYSQL_EVENT_NAME}");
+    let mut run = Run::over(
+        RoutineWriter::Atomic(writer),
+        tables,
+        settings,
+        &definition,
+        label,
+    );
+    run.bind_parameters(Vec::new());
+    run.program(&program)?;
+    Ok(())
+}
+
+const MYSQL_EVENT_NAME: &str = "event";
+
 pub(crate) fn run_anonymous_block(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,

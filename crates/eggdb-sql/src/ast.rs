@@ -1142,6 +1142,16 @@ pub(crate) enum MySqlStatement {
         kind: crate::routines::RoutineKind,
         like: Option<String>,
     },
+    CreateEvent(Box<EventDefinition>),
+    AlterEvent(Box<AlterEvent>),
+    DropEvent {
+        name: Name,
+        if_exists: bool,
+    },
+    ShowEvents {
+        like: Option<String>,
+    },
+    ShowCreateEvent(Name),
     ShowTriggers {
         like: Option<String>,
     },
@@ -1163,6 +1173,40 @@ pub(crate) enum MySqlStatement {
     Use(Name),
     Set(Vec<Assignment>),
     Accepted(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum EventSchedule {
+    At(Expr),
+    Every {
+        amount: Expr,
+        unit: String,
+        starts: Option<Expr>,
+        ends: Option<Expr>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct EventDefinition {
+    pub(crate) name: Name,
+    pub(crate) if_not_exists: bool,
+    pub(crate) schedule: EventSchedule,
+    pub(crate) preserve: bool,
+    pub(crate) enabled: bool,
+    pub(crate) comment: Option<String>,
+    pub(crate) body: String,
+    pub(crate) text: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AlterEvent {
+    pub(crate) name: Name,
+    pub(crate) schedule: Option<EventSchedule>,
+    pub(crate) preserve: Option<bool>,
+    pub(crate) enabled: Option<bool>,
+    pub(crate) rename: Option<Name>,
+    pub(crate) comment: Option<String>,
+    pub(crate) body: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
