@@ -8,6 +8,7 @@
 //! any node takes writes, quorums decide success, and replicas converge.
 
 pub mod crdt;
+pub mod merkle;
 pub mod quorum;
 mod shards;
 pub mod transaction;

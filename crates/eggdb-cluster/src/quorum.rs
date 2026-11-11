@@ -10,6 +10,26 @@
 use crate::NodeId;
 use std::collections::{BTreeMap, BTreeSet};
 
+const MERKLE_DEPTH: u32 = 10;
+
+fn versions_digest(versions: &[Version]) -> u128 {
+    let mut digest = crate::merkle::Digest::default();
+    for version in versions {
+        for (node, count) in &version.vector.0 {
+            digest.feed(&node.to_le_bytes());
+            digest.feed(&count.to_le_bytes());
+        }
+        digest.feed(&version.stamp.millis.to_le_bytes());
+        digest.feed(&version.stamp.counter.to_le_bytes());
+        digest.feed(&version.stamp.node.to_le_bytes());
+        match &version.value {
+            Some(value) => digest.feed(value),
+            None => digest.feed(b"\xff deleted"),
+        }
+    }
+    digest.value()
+}
+
 /// A hybrid logical clock stamp: physical milliseconds, a counter for events in the same
 /// millisecond, and the writing node, so every stamp is distinct and totally ordered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -412,14 +432,58 @@ impl Quorum {
         }
     }
 
-    /// Brings every reachable home replica of every key to the same versions.
+    /// Brings every reachable home replica of every key to the same versions. Each pair of
+    /// reachable nodes compares Merkle trees over the keys both are homes of, and only the keys
+    /// under differing leaves are reconciled.
     pub fn anti_entropy(&mut self) {
         let keys: BTreeSet<Vec<u8>> = self
             .replicas
             .values()
             .flat_map(|replica| replica.versions.keys().cloned())
             .collect();
-        for key in keys {
+        let homes_of: BTreeMap<Vec<u8>, Vec<NodeId>> = keys
+            .iter()
+            .map(|key| (key.clone(), self.order(key).into_iter().take(self.n).collect()))
+            .collect();
+        let nodes: Vec<NodeId> = self
+            .replicas
+            .keys()
+            .copied()
+            .filter(|node| self.reachable(*node))
+            .collect();
+        let mut suspects: BTreeSet<Vec<u8>> = BTreeSet::new();
+        for (at, first) in nodes.iter().enumerate() {
+            for second in &nodes[at + 1..] {
+                let shared: Vec<&Vec<u8>> = homes_of
+                    .iter()
+                    .filter(|(_, homes)| homes.contains(first) && homes.contains(second))
+                    .map(|(key, _)| key)
+                    .collect();
+                if shared.is_empty() {
+                    continue;
+                }
+                let tree_of = |node: NodeId| {
+                    let replica = &self.replicas[&node];
+                    crate::merkle::MerkleTree::build(
+                        MERKLE_DEPTH,
+                        shared
+                            .iter()
+                            .map(|key| (key.as_slice(), versions_digest(replica.versions(key)))),
+                    )
+                };
+                let (left, right) = (tree_of(*first), tree_of(*second));
+                if left.root() == right.root() {
+                    continue;
+                }
+                let differing: BTreeSet<usize> = left.differing_leaves(&right).into_iter().collect();
+                for key in &shared {
+                    if differing.contains(&crate::merkle::MerkleTree::leaf_of(key, MERKLE_DEPTH)) {
+                        suspects.insert((*key).clone());
+                    }
+                }
+            }
+        }
+        for key in suspects {
             let homes: Vec<NodeId> = self
                 .order(&key)
                 .into_iter()

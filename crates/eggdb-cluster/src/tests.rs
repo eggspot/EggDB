@@ -411,3 +411,27 @@ mod crdt_tests {
         assert!(OrSet::decode(b"junk").is_none());
     }
 }
+
+#[cfg(test)]
+mod merkle_tests {
+    use crate::merkle::MerkleTree;
+
+    #[test]
+    fn trees_differ_only_at_the_leaves_holding_a_changed_key() {
+        let keys: Vec<Vec<u8>> = (0..500u32).map(|at| at.to_be_bytes().to_vec()).collect();
+        let entries = |changed: Option<usize>| -> Vec<(Vec<u8>, u128)> {
+            keys.iter()
+                .enumerate()
+                .map(|(at, key)| (key.clone(), if Some(at) == changed { 7 } else { 1 }))
+                .collect()
+        };
+        let same = entries(None);
+        let other = entries(Some(42));
+        let left = MerkleTree::build(8, same.iter().map(|(key, value)| (key.as_slice(), *value)));
+        let again = MerkleTree::build(8, same.iter().map(|(key, value)| (key.as_slice(), *value)));
+        let right = MerkleTree::build(8, other.iter().map(|(key, value)| (key.as_slice(), *value)));
+        assert_eq!(left.root(), again.root());
+        assert!(left.differing_leaves(&again).is_empty());
+        assert_eq!(left.differing_leaves(&right), vec![MerkleTree::leaf_of(&keys[42], 8)]);
+    }
+}

@@ -467,3 +467,4 @@ its full title with its status.
 - [D440](decisions/D440.md) Code-only batch 88 (M15): JsonLogic targeting and fractional rollouts for feature flags
 - [D441](decisions/D441.md) Code-only batch 89 (M16): PromQL's remaining functions
 - [D442](decisions/D442.md) Code-only batch 90 (M18): CRDT counters and sets as resolution policies
+- [D443](decisions/D443.md) Code-only batch 91 (M18): Merkle trees for anti-entropy
