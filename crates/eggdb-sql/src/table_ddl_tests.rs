@@ -142,6 +142,33 @@ fn mysql_information_schema_lists_triggers() {
 }
 
 #[test]
+fn mysql_trigger_bodies_run_case_loops_labels_leave_and_iterate() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    last(&mut session, "CREATE TABLE t (kind VARCHAR(1) PRIMARY KEY, n INT)");
+    last(
+        &mut session,
+        "CREATE TRIGGER t_bi BEFORE INSERT ON t FOR EACH ROW \
+         BEGIN \
+           DECLARE i INT DEFAULT 0; \
+           CASE NEW.kind WHEN 'a' THEN SET NEW.n = 1; WHEN 'b' THEN SET NEW.n = 2; ELSE SET NEW.n = 0; END CASE; \
+           counting: LOOP \
+             SET i = i + 1; \
+             IF i >= 3 THEN LEAVE counting; END IF; \
+             ITERATE counting; \
+           END LOOP counting; \
+           REPEAT SET i = i + 1; UNTIL i >= 5 END REPEAT; \
+           SET NEW.n = NEW.n * 10 + i; \
+         END",
+    );
+    last(&mut session, "INSERT INTO t (kind) VALUES ('a'), ('b'), ('z')");
+    let rows = last(&mut session, "SELECT kind, n FROM t ORDER BY kind");
+    for expected in ["15", "25", "5"] {
+        assert!(rows.contains(expected), "{expected} in {rows}");
+    }
+}
+
+#[test]
 fn sqlite_schema_keeps_the_create_table_text_as_written() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Sqlite);

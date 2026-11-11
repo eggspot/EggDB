@@ -666,6 +666,17 @@ impl<'t> Parser<'t> {
             return Err(nested_too_deeply(self.position()));
         }
         if self.mysql()
+            && matches!(self.peek_kind(), TokenKind::Word(_))
+            && self.peek_kind_at(1) == &TokenKind::Colon
+            && ["begin", "loop", "while", "repeat"]
+                .iter()
+                .any(|word| self.is_word_at(2, word))
+        {
+            let label = self.name()?.text;
+            self.at += 1;
+            return self.labeled_trigger_item(depth, label);
+        }
+        if self.mysql()
             && let TokenKind::Word(word) = self.peek_kind()
         {
             match word.as_ref() {
@@ -678,7 +689,18 @@ impl<'t> Parser<'t> {
                 "declare" => return self.trigger_declare(),
                 "set" => return self.trigger_assignment(),
                 "if" => return self.trigger_if(depth),
-                "while" => return self.trigger_while(depth),
+                "while" => return self.trigger_while(depth, None),
+                "loop" => return self.trigger_loop(depth, None),
+                "repeat" => return self.trigger_repeat(depth, None),
+                "case" => return self.trigger_case(depth),
+                "leave" => {
+                    self.at += 1;
+                    return Ok(BodyStep::Leave(self.name()?.text));
+                }
+                "iterate" => {
+                    self.at += 1;
+                    return Ok(BodyStep::Iterate(self.name()?.text));
+                }
                 "signal" => return self.trigger_signal(),
                 _ => {}
             }
@@ -806,14 +828,94 @@ impl<'t> Parser<'t> {
         })
     }
 
-    fn trigger_while(&mut self, depth: usize) -> SqlResult<BodyStep> {
+    fn trigger_label_end(&mut self, label: Option<&str>) {
+        if let Some(label) = label
+            && self.is_word(&label.to_ascii_lowercase())
+        {
+            self.at += 1;
+        }
+    }
+
+    fn labeled_trigger_item(&mut self, depth: usize, label: String) -> SqlResult<BodyStep> {
+        if self.take_word("begin") {
+            let steps = self.trigger_items(depth + 1, &["end"])?;
+            self.expect_word("end")?;
+            self.trigger_label_end(Some(&label));
+            return Ok(BodyStep::LabeledBlock { label, steps });
+        }
+        if self.is_word("loop") {
+            return self.trigger_loop(depth, Some(label));
+        }
+        if self.is_word("repeat") {
+            return self.trigger_repeat(depth, Some(label));
+        }
+        self.trigger_while(depth, Some(label))
+    }
+
+    fn trigger_while(&mut self, depth: usize, label: Option<String>) -> SqlResult<BodyStep> {
         self.at += 1;
         let condition = self.skipped_expression()?;
         self.expect_word("do")?;
         let body = self.trigger_items(depth + 1, &["end"])?;
         self.expect_word("end")?;
         self.expect_word("while")?;
-        Ok(BodyStep::While { condition, body })
+        self.trigger_label_end(label.as_deref());
+        Ok(BodyStep::While {
+            label,
+            condition,
+            body,
+        })
+    }
+
+    fn trigger_loop(&mut self, depth: usize, label: Option<String>) -> SqlResult<BodyStep> {
+        self.at += 1;
+        let body = self.trigger_items(depth + 1, &["end"])?;
+        self.expect_word("end")?;
+        self.expect_word("loop")?;
+        self.trigger_label_end(label.as_deref());
+        Ok(BodyStep::Loop { label, body })
+    }
+
+    fn trigger_repeat(&mut self, depth: usize, label: Option<String>) -> SqlResult<BodyStep> {
+        self.at += 1;
+        let body = self.trigger_items(depth + 1, &["until"])?;
+        self.expect_word("until")?;
+        let until = self.skipped_expression()?;
+        self.expect_word("end")?;
+        self.expect_word("repeat")?;
+        self.trigger_label_end(label.as_deref());
+        Ok(BodyStep::Repeat { label, body, until })
+    }
+
+    fn trigger_case(&mut self, depth: usize) -> SqlResult<BodyStep> {
+        self.at += 1;
+        let operand = if self.is_word("when") {
+            None
+        } else {
+            Some(self.skipped_expression()?)
+        };
+        let mut branches = Vec::new();
+        while self.take_word("when") {
+            let condition = self.skipped_expression()?;
+            self.expect_word("then")?;
+            let steps = self.trigger_items(depth + 1, &["when", "else", "end"])?;
+            branches.push(ConditionalBranch { condition, steps });
+        }
+        if branches.is_empty() {
+            return Err(self.unexpected());
+        }
+        let otherwise = if self.take_word("else") {
+            Some(self.trigger_items(depth + 1, &["end"])?)
+        } else {
+            None
+        };
+        self.expect_word("end")?;
+        self.expect_word("case")?;
+        Ok(BodyStep::Case {
+            operand,
+            branches,
+            otherwise,
+        })
     }
 
     fn trigger_signal(&mut self) -> SqlResult<BodyStep> {

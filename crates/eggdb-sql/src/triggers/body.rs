@@ -26,11 +26,53 @@ pub(crate) enum BodyStep {
         otherwise: Vec<BodyStep>,
     },
     While {
+        label: Option<String>,
         condition: usize,
         body: Vec<BodyStep>,
     },
+    Loop {
+        label: Option<String>,
+        body: Vec<BodyStep>,
+    },
+    Repeat {
+        label: Option<String>,
+        body: Vec<BodyStep>,
+        until: usize,
+    },
+    Case {
+        operand: Option<usize>,
+        branches: Vec<ConditionalBranch>,
+        otherwise: Option<Vec<BodyStep>>,
+    },
+    Leave(String),
+    Iterate(String),
     Signal(SignalStep),
     Block(Vec<BodyStep>),
+    LabeledBlock {
+        label: String,
+        steps: Vec<BodyStep>,
+    },
+}
+
+/// Where control goes after a step: on to the next, or out of the labelled block or loop that
+/// `LEAVE` names, or round again to the loop `ITERATE` names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Flow {
+    Next,
+    Leave(String),
+    Iterate(String),
+}
+
+fn named(label: Option<&String>, wanted: &str) -> bool {
+    label.is_some_and(|label| label.eq_ignore_ascii_case(wanted))
+}
+
+fn no_such_label(kind: &str, label: &str) -> SqlError {
+    SqlError::new(
+        SqlState::MYSQL_SYNTAX_OR_ACCESS,
+        format!("{kind} with no matching label: {label}"),
+    )
+    .with_vendor_code(1308)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -294,19 +336,65 @@ impl Run<'_> {
             .with_context(Parameters::Absent, self.settings)
             .in_dialect(self.dialect)
             .trigger_body()?;
-        self.steps(text, &tokens, &steps)
-    }
-
-    fn steps(&mut self, text: &str, tokens: &[Token<'_>], steps: &[BodyStep]) -> SqlResult<()> {
-        for step in steps {
-            self.step(text, tokens, step)?;
+        match self.steps(text, &tokens, &steps)? {
+            Flow::Next => Ok(()),
+            Flow::Leave(label) => Err(no_such_label("LEAVE", &label)),
+            Flow::Iterate(label) => Err(no_such_label("ITERATE", &label)),
         }
-        Ok(())
     }
 
-    fn step(&mut self, text: &str, tokens: &[Token<'_>], step: &BodyStep) -> SqlResult<()> {
+    fn steps(&mut self, text: &str, tokens: &[Token<'_>], steps: &[BodyStep]) -> SqlResult<Flow> {
+        for step in steps {
+            let flow = self.step(text, tokens, step)?;
+            if flow != Flow::Next {
+                return Ok(flow);
+            }
+        }
+        Ok(Flow::Next)
+    }
+
+    fn equal(&mut self, text: &str, tokens: &[Token<'_>], left: usize, right: usize) -> SqlResult<bool> {
+        let parse = |at: usize, frame: &TriggerFrame| {
+            Parser::new(text, tokens)
+                .with_context(Parameters::Absent, self.settings)
+                .in_dialect(self.dialect)
+                .with_trigger_frame(frame)
+                .resuming_at((at, 0))
+                .expression()
+        };
+        let left = parse(left, &self.frame)?;
+        let right = parse(right, &self.frame)?;
+        let position = left.position;
+        let compared = Expr {
+            kind: ExprKind::Binary(
+                crate::ast::BinaryOperator::Equal,
+                Box::new(left),
+                Box::new(right),
+            ),
+            position,
+        };
+        Ok(truth(&self.evaluated(compared)?))
+    }
+
+    fn looped(
+        &mut self,
+        text: &str,
+        tokens: &[Token<'_>],
+        label: Option<&String>,
+        body: &[BodyStep],
+    ) -> SqlResult<Option<Flow>> {
+        crate::cancel::check()?;
+        Ok(match self.block(text, tokens, body)? {
+            Flow::Next => None,
+            Flow::Iterate(wanted) if named(label, &wanted) => None,
+            Flow::Leave(wanted) if named(label, &wanted) => Some(Flow::Next),
+            other => Some(other),
+        })
+    }
+
+    fn step(&mut self, text: &str, tokens: &[Token<'_>], step: &BodyStep) -> SqlResult<Flow> {
         match step {
-            BodyStep::Statement(at) => self.statement(text, tokens, *at),
+            BodyStep::Statement(at) => self.statement(text, tokens, *at).map(|()| Flow::Next),
             BodyStep::Declare {
                 names,
                 sql_type,
@@ -327,14 +415,14 @@ impl Run<'_> {
                         value: value.clone(),
                     });
                 }
-                Ok(())
+                Ok(Flow::Next)
             }
             BodyStep::Assign(targets) => {
                 for (target, at) in targets {
                     let value = self.value(text, tokens, *at)?;
                     self.assign(target, value)?;
                 }
-                Ok(())
+                Ok(Flow::Next)
             }
             BodyStep::If {
                 branches,
@@ -347,19 +435,66 @@ impl Run<'_> {
                 }
                 self.block(text, tokens, otherwise)
             }
-            BodyStep::While { condition, body } => {
+            BodyStep::While {
+                label,
+                condition,
+                body,
+            } => {
                 while truth(&self.value(text, tokens, *condition)?) {
-                    crate::cancel::check()?;
-                    self.block(text, tokens, body)?;
+                    if let Some(flow) = self.looped(text, tokens, label.as_ref(), body)? {
+                        return Ok(flow);
+                    }
                 }
-                Ok(())
+                Ok(Flow::Next)
             }
-            BodyStep::Signal(signal) => self.signal(text, tokens, signal),
+            BodyStep::Loop { label, body } => loop {
+                if let Some(flow) = self.looped(text, tokens, label.as_ref(), body)? {
+                    return Ok(flow);
+                }
+            },
+            BodyStep::Repeat { label, body, until } => loop {
+                if let Some(flow) = self.looped(text, tokens, label.as_ref(), body)? {
+                    return Ok(flow);
+                }
+                if truth(&self.value(text, tokens, *until)?) {
+                    return Ok(Flow::Next);
+                }
+            },
+            BodyStep::Case {
+                operand,
+                branches,
+                otherwise,
+            } => {
+                for branch in branches {
+                    let hit = match operand {
+                        Some(operand) => self.equal(text, tokens, *operand, branch.condition)?,
+                        None => truth(&self.value(text, tokens, branch.condition)?),
+                    };
+                    if hit {
+                        return self.block(text, tokens, &branch.steps);
+                    }
+                }
+                match otherwise {
+                    Some(steps) => self.block(text, tokens, steps),
+                    None => Err(SqlError::new(
+                        SqlState::from_text("20000").unwrap_or(SqlState::MYSQL_GENERAL),
+                        "Case not found for CASE statement",
+                    )
+                    .with_vendor_code(1339)),
+                }
+            }
+            BodyStep::Leave(label) => Ok(Flow::Leave(label.clone())),
+            BodyStep::Iterate(label) => Ok(Flow::Iterate(label.clone())),
+            BodyStep::Signal(signal) => self.signal(text, tokens, signal).map(|()| Flow::Next),
             BodyStep::Block(steps) => self.block(text, tokens, steps),
+            BodyStep::LabeledBlock { label, steps } => Ok(match self.block(text, tokens, steps)? {
+                Flow::Leave(wanted) if label.eq_ignore_ascii_case(&wanted) => Flow::Next,
+                other => other,
+            }),
         }
     }
 
-    fn block(&mut self, text: &str, tokens: &[Token<'_>], steps: &[BodyStep]) -> SqlResult<()> {
+    fn block(&mut self, text: &str, tokens: &[Token<'_>], steps: &[BodyStep]) -> SqlResult<Flow> {
         let declared = self.frame.locals.len();
         let outcome = self.steps(text, tokens, steps);
         self.frame.locals.truncate(declared);
@@ -439,6 +574,10 @@ impl Run<'_> {
             .with_trigger_frame(&self.frame)
             .resuming_at((at, 0))
             .expression()?;
+        self.evaluated(expr)
+    }
+
+    fn evaluated(&mut self, expr: Expr) -> SqlResult<Value> {
         let mut select = single_value_select(expr);
         let binding = Binding {
             settings: self.settings,
