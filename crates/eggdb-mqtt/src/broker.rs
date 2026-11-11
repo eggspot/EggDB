@@ -753,7 +753,18 @@ pub fn serve(
             let spawned = std::thread::Builder::new()
                 .name("eggdb-mqtt".to_owned())
                 .spawn_scoped(scope, move || {
-                    if let Ok(writer) = stream.try_clone() {
+                    if crate::websocket::starts_http(&stream) {
+                        let mut stream = stream;
+                        if crate::websocket::handshake(&mut stream).is_ok()
+                            && let Ok(writer) = stream.try_clone()
+                        {
+                            let raw = Arc::new(Mutex::new(writer));
+                            let shared: SharedWriter =
+                                Arc::new(Mutex::new(crate::websocket::FrameWriter(Arc::clone(&raw))));
+                            let reader = crate::websocket::FrameReader::new(stream, raw);
+                            let _ = serve_stream(broker, config, id, reader, shared, stop);
+                        }
+                    } else if let Ok(writer) = stream.try_clone() {
                         let shared: SharedWriter = Arc::new(Mutex::new(writer));
                         let _ = serve_stream(broker, config, id, ReadHalf(stream), shared, stop);
                     }

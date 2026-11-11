@@ -7,6 +7,7 @@
 
 mod broker;
 mod packet;
+mod websocket;
 
 pub use broker::{ServerConfig, serve};
 

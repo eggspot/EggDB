@@ -541,3 +541,4 @@ its full title with its status.
 - [D514](decisions/D514.md) Code-only batch 162 (M8): SQL Server CONTAINS and FREETEXT
 - [D515](decisions/D515.md) Code-only batch 163 (M8): Elasticsearch query_string and highlighting
 - [D516](decisions/D516.md) Code-only batch 164 (M16): AMQP TTL, dead-letter exchanges and delayed messages
+- [D517](decisions/D517.md) Code-only batch 165 (M16): MQTT over WebSockets
