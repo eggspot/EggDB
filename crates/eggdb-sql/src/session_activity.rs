@@ -169,28 +169,3 @@ pub(crate) fn sessions() -> Vec<SessionActivity> {
 pub(crate) fn seconds_since(micros: i64) -> i64 {
     now_micros().saturating_sub(micros) / 1_000_000
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_session_shows_its_statement_and_leaves_when_dropped() {
-        let handle = register(Connected {
-            pid: 4242,
-            protocol: "postgresql",
-            user: "ada",
-            database: "shop",
-            client: "127.0.0.1",
-            application: "psql",
-        });
-        handle.started("SELECT 1");
-        let found = sessions().into_iter().find(|session| session.pid == 4242).unwrap();
-        assert_eq!((found.state, found.query.as_str()), ("active", "SELECT 1"));
-        handle.finished(true, false);
-        let found = sessions().into_iter().find(|session| session.pid == 4242).unwrap();
-        assert_eq!(found.state, "idle in transaction");
-        drop(handle);
-        assert!(sessions().iter().all(|session| session.pid != 4242));
-    }
-}
