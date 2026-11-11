@@ -37,12 +37,12 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     (year_of_era + era * 400 + i64::from(month <= 2), month, day)
 }
 
-fn date_text(days_since_1970: i64) -> String {
+pub(super) fn date_text(days_since_1970: i64) -> String {
     let (year, month, day) = civil_from_days(days_since_1970);
     format!("{year:04}-{month:02}-{day:02}")
 }
 
-fn timestamp_text(micros: i64, utc: bool) -> String {
+pub(super) fn timestamp_text(micros: i64, utc: bool) -> String {
     let days = micros.div_euclid(MICROS_PER_DAY);
     let of_day = micros.rem_euclid(MICROS_PER_DAY);
     let seconds = of_day / 1_000_000;
@@ -57,7 +57,7 @@ fn timestamp_text(micros: i64, utc: bool) -> String {
     )
 }
 
-fn decimal_text(unscaled: i128, scale: u32) -> String {
+pub(super) fn decimal_text(unscaled: i128, scale: u32) -> String {
     let digits = unscaled.unsigned_abs().to_string();
     let scale = scale as usize;
     let sign = if unscaled < 0 { "-" } else { "" };
@@ -205,6 +205,15 @@ impl Session<'_> {
                 Exit::DatabaseError,
             )
         })?;
+        self.import_columns(&shown, &table, &columns)
+    }
+
+    pub(super) fn import_columns(
+        &mut self,
+        shown: &str,
+        table: &str,
+        columns: &[Column],
+    ) -> Result<Exit, Failure> {
         let rows = columns.first().map_or(0, |column| column.cells.len()) as u64;
         let definitions: Vec<String> = columns
             .iter()
@@ -228,7 +237,7 @@ impl Session<'_> {
             "COPY {table} ({}) FROM STDIN (FORMAT csv)",
             names.join(", ")
         );
-        let csv = csv_of(&columns);
+        let csv = csv_of(columns);
         let db = self.open(
             Access::Write {
                 create: self.request.create,
@@ -275,8 +284,8 @@ impl Session<'_> {
             Format::Json => self.out.text(
                 &JsonObject::new()
                     .string("file", &self.file_display)
-                    .string("from", &shown)
-                    .string("table", &table)
+                    .string("from", shown)
+                    .string("table", table)
                     .number("rows", rows)
                     .line(),
             ),
@@ -289,7 +298,7 @@ impl Session<'_> {
         Ok(Exit::Done)
     }
 
-    fn table_columns(&mut self) -> Result<TableColumns, Failure> {
+    pub(super) fn table_columns(&mut self) -> Result<TableColumns, Failure> {
         let table = self.request.csv.table.clone().unwrap_or_default();
         let query = format!("SELECT * FROM {table}");
         let db = self.open(Access::ReadOnly, None)?;
@@ -328,7 +337,7 @@ impl Session<'_> {
         Ok(Ok((table, columns, rows)))
     }
 
-    fn written(&mut self, table: &str, shown: &str, rows: u64) -> Exit {
+    pub(super) fn written(&mut self, table: &str, shown: &str, rows: u64) -> Exit {
         match self.format {
             Format::Json => self.out.text(
                 &JsonObject::new()

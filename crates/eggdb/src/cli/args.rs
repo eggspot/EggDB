@@ -291,7 +291,9 @@ impl CommandName {
             OptionName::At => matches!(self, Self::Restore | Self::Sql),
             OptionName::Mode => self == Self::Shell,
             OptionName::DryRun => matches!(self, Self::Import | Self::Restore),
-            OptionName::Table | OptionName::Parquet => matches!(self, Self::Import | Self::Export),
+            OptionName::Table | OptionName::Parquet | OptionName::Ndjson => {
+                matches!(self, Self::Import | Self::Export)
+            }
             OptionName::Arrow => self == Self::Export,
             OptionName::SqlDump => self == Self::Export,
             OptionName::OnConflict
@@ -471,6 +473,7 @@ enum OptionName {
     Mode,
     Csv,
     Parquet,
+    Ndjson,
     Arrow,
     SqlDump,
     Table,
@@ -583,6 +586,7 @@ impl OptionName {
             b"mode" => Self::Mode,
             b"csv" => Self::Csv,
             b"parquet" => Self::Parquet,
+            b"ndjson" => Self::Ndjson,
             b"arrow" => Self::Arrow,
             b"sql" => Self::SqlDump,
             b"table" => Self::Table,
@@ -789,6 +793,7 @@ pub(crate) struct CsvOptions {
     pub(crate) native: bool,
     pub(crate) format_file: Option<PathBuf>,
     pub(crate) parquet: Option<PathBuf>,
+    pub(crate) ndjson: Option<PathBuf>,
     pub(crate) arrow: Option<PathBuf>,
     pub(crate) sql_dump: Option<eggdb_sql::Dialect>,
 }
@@ -1557,6 +1562,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             }
             OptionName::Csv => request.csv.source = Some(export_file(value)),
             OptionName::Parquet => request.csv.parquet = Some(PathBuf::from(value)),
+            OptionName::Ndjson => request.csv.ndjson = Some(PathBuf::from(value)),
             OptionName::Arrow => request.csv.arrow = Some(PathBuf::from(value)),
             OptionName::SqlDump => {
                 request.csv.sql_dump = Some(match value.to_str().unwrap_or_default() {
@@ -2129,6 +2135,19 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
             return Err(
                 "--sql writes every table; it does not go with --parquet or --table".to_owned(),
             );
+        }
+        return Ok(());
+    }
+    if csv.ndjson.is_some() {
+        if csv.parquet.is_some()
+            || csv.arrow.is_some()
+            || csv.source.is_some()
+            || request.export_file.is_some()
+        {
+            return Err("--ndjson <file> goes without --parquet, --arrow, --csv or a second argument".to_owned());
+        }
+        if csv.table.is_none() {
+            return Err("--ndjson needs --table <name>, the table to load or write".to_owned());
         }
         return Ok(());
     }

@@ -25,6 +25,7 @@ mod follow_sql_server;
 mod follow_state;
 mod foreign;
 mod mcp;
+mod ndjson_io;
 mod parquet_io;
 mod restore;
 mod restore_aof;
