@@ -43,6 +43,27 @@ fn duration_sql(number: &str, unit: &str) -> Option<(String, i64)> {
     Some((format!("'{amount} {unit}'::interval"), micros.round() as i64))
 }
 
+fn regex_may_start(found: &[Token]) -> bool {
+    match found.last() {
+        Some(Token::Operator(operator)) => operator == "=~" || operator == "!~",
+        Some(token) if token.keyword("from") => true,
+        Some(Token::Comma) => found
+            .iter()
+            .rev()
+            .find_map(|token| {
+                if token.keyword("from") {
+                    Some(true)
+                } else if ["select", "where", "group", "by"].iter().any(|word| token.keyword(word)) {
+                    Some(false)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
 fn tokens(text: &str) -> Result<Vec<Token>, String> {
     let characters: Vec<char> = text.chars().collect();
     let mut found = Vec::new();
@@ -82,7 +103,7 @@ fn tokens(text: &str) -> Result<Vec<Token>, String> {
                 found.push(Token::Text(text));
                 at = next;
             }
-            '/' if matches!(found.last(), Some(Token::Operator(operator)) if operator == "=~" || operator == "!~") => {
+            '/' if regex_may_start(&found) => {
                 let (text, next) = quoted_until(at, '/')?;
                 found.push(Token::Regex(text));
                 at = next;
@@ -224,10 +245,19 @@ struct Bucket {
     offset_micros: i64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum Source {
+    Name(String),
+    Pattern(String),
+}
+
 #[derive(Debug, Default)]
 struct Select {
     items: Vec<Item>,
-    measurement: String,
+    sources: Vec<Source>,
+    group_all: bool,
+    series_limit: Option<usize>,
+    series_offset: Option<usize>,
     condition: Option<String>,
     lower_time: Option<String>,
     upper_time: Option<String>,
@@ -381,13 +411,21 @@ impl Reader {
             }
         }
         self.expect_keyword("from")?;
-        let measurement = match self.next() {
-            Some(Token::Name { text, quoted: true }) => text,
-            Some(Token::Name { text, quoted: false }) => text.rsplit('.').next().unwrap_or_default().to_owned(),
-            Some(Token::Regex(_)) => return Err("FROM a regular expression is not supported".to_owned()),
-            other => return Err(format!("found {other:?}, expected a measurement")),
-        };
-        select.measurement = measurement;
+        loop {
+            select.sources.push(match self.next() {
+                Some(Token::Name { text, quoted: true }) => Source::Name(text),
+                Some(Token::Name { text, quoted: false }) => {
+                    Source::Name(text.rsplit('.').next().unwrap_or_default().to_owned())
+                }
+                Some(Token::Regex(pattern)) => Source::Pattern(pattern),
+                other => return Err(format!("found {other:?}, expected a measurement")),
+            });
+            if self.peek() == Some(&Token::Comma) {
+                self.at += 1;
+            } else {
+                break;
+            }
+        }
         if self.keyword("where") {
             let start = self.at;
             let mut depth = 0usize;
@@ -434,7 +472,8 @@ impl Reader {
                     }
                     select.bucket = Some(bucket);
                 } else if self.peek() == Some(&Token::Star) {
-                    return Err("GROUP BY * is not supported yet; name the tags".to_owned());
+                    self.at += 1;
+                    select.group_all = true;
                 } else {
                     select.group_tags.push(self.name()?);
                 }
@@ -483,7 +522,16 @@ impl Reader {
             } else if token.keyword("offset") {
                 &mut select.offset
             } else if token.keyword("slimit") || token.keyword("soffset") {
-                self.at += 2;
+                self.at += 1;
+                let count = match self.next() {
+                    Some(Token::Number(number)) => number.parse::<usize>().map_err(|_| format!("invalid count {number}"))?,
+                    other => return Err(format!("found {other:?}, expected a whole number")),
+                };
+                if token.keyword("slimit") {
+                    select.series_limit = Some(count);
+                } else {
+                    select.series_offset = Some(count);
+                }
                 continue;
             } else {
                 return Err(format!("unexpected {token:?}"));
@@ -514,7 +562,6 @@ fn aggregate_sql(function: &str, field: &str, argument: Option<&str>) -> Result<
         "stddev" => format!("stddev_samp({column})"),
         "first" => format!("first({column}, \"time\")"),
         "last" => format!("last({column}, \"time\")"),
-        "distinct" => return Err("distinct() is not supported yet".to_owned()),
         other => return Err(format!("undefined function {other}()")),
     })
 }
@@ -524,7 +571,29 @@ struct Planned {
     tag_count: usize,
 }
 
-fn plan(select: &Select, columns: &[(String, String)]) -> Result<Planned, String> {
+fn distinct_field(select: &Select) -> Option<(&str, Option<&str>)> {
+    select.items.iter().find_map(|item| match item {
+        Item::Call { function, field: Some(field), alias, .. } if function == "distinct" => {
+            Some((field.as_str(), alias.as_deref()))
+        }
+        _ => None,
+    })
+}
+
+fn plan(select: &Select, measurement: &str, columns: &[(String, String)]) -> Result<Planned, String> {
+    let group_tags: Vec<String> = if select.group_all {
+        columns
+            .iter()
+            .filter(|(name, kind)| name != "time" && kind == "text")
+            .map(|(name, _)| name.clone())
+            .collect()
+    } else {
+        select.group_tags.clone()
+    };
+    let distinct = distinct_field(select);
+    if distinct.is_some() && select.items.len() != 1 {
+        return Err("aggregate function distinct() cannot be combined with other functions or fields".to_owned());
+    }
     let aggregate = select.items.iter().any(|item| matches!(item, Item::Call { .. }));
     if aggregate && select.items.iter().any(|item| !matches!(item, Item::Call { .. })) {
         return Err("mixing aggregate and non-aggregate queries is not supported".to_owned());
@@ -533,7 +602,7 @@ fn plan(select: &Select, columns: &[(String, String)]) -> Result<Planned, String
         return Err("GROUP BY time() requires an aggregate function".to_owned());
     }
     let mut outputs = Vec::new();
-    for tag in &select.group_tags {
+    for tag in &group_tags {
         outputs.push(format!("{} AS {}", column(tag), column(tag)));
     }
     outputs.push(match (&select.bucket, aggregate) {
@@ -548,12 +617,19 @@ fn plan(select: &Select, columns: &[(String, String)]) -> Result<Planned, String
     for item in &select.items {
         match item {
             Item::All => {
-                for (name, _) in columns.iter().filter(|(name, _)| name != "time" && !select.group_tags.contains(name)) {
+                for (name, _) in columns.iter().filter(|(name, _)| name != "time" && !group_tags.contains(name)) {
                     outputs.push(column(name));
                 }
             }
             Item::Field { name, alias } => {
                 outputs.push(format!("{} AS {}", column(name), column(alias.as_deref().unwrap_or(name))));
+            }
+            Item::Call { function, .. } if function == "distinct" => {
+                if let Some((field, alias)) = distinct {
+                    outputs.push(format!("{} AS {}", column(field), column(alias.unwrap_or("distinct"))));
+                } else {
+                    return Err("distinct() needs a field".to_owned());
+                }
             }
             Item::Call { function, field, argument, alias } => {
                 let field = match field {
@@ -572,17 +648,20 @@ fn plan(select: &Select, columns: &[(String, String)]) -> Result<Planned, String
     let mut sql = format!(
         "SELECT {} FROM {SCHEMA}.{}",
         outputs.join(", "),
-        identifier(&select.measurement)
+        identifier(measurement)
     );
     if let Some(condition) = &select.condition {
         sql.push_str(&format!(" WHERE {condition}"));
     }
-    let tag_positions: Vec<String> = (1..=select.group_tags.len()).map(|at| at.to_string()).collect();
-    let time_position = select.group_tags.len() + 1;
+    let tag_positions: Vec<String> = (1..=group_tags.len()).map(|at| at.to_string()).collect();
+    let time_position = group_tags.len() + 1;
     if aggregate {
         let mut keys = tag_positions.clone();
         if select.bucket.is_some() {
             keys.push(time_position.to_string());
+        }
+        if distinct.is_some() {
+            keys.push((time_position + 1).to_string());
         }
         if !keys.is_empty() {
             sql.push_str(&format!(" GROUP BY {}", keys.join(", ")));
@@ -590,6 +669,9 @@ fn plan(select: &Select, columns: &[(String, String)]) -> Result<Planned, String
     }
     let mut order = tag_positions;
     order.push(format!("{time_position}{}", if select.descending { " DESC" } else { "" }));
+    if distinct.is_some() {
+        order.push((time_position + 1).to_string());
+    }
     sql.push_str(&format!(" ORDER BY {}", order.join(", ")));
     if !fills(select) {
         if let Some(limit) = &select.limit {
@@ -601,12 +683,14 @@ fn plan(select: &Select, columns: &[(String, String)]) -> Result<Planned, String
     }
     Ok(Planned {
         sql,
-        tag_count: select.group_tags.len(),
+        tag_count: group_tags.len(),
     })
 }
 
 fn fills(select: &Select) -> bool {
-    select.fill != Fill::None && select.bucket.as_ref().is_some_and(|bucket| bucket.micros > 0)
+    select.fill != Fill::None
+        && distinct_field(select).is_none()
+        && select.bucket.as_ref().is_some_and(|bucket| bucket.micros > 0)
 }
 
 fn time_of(row: &[Value]) -> Option<i64> {
@@ -766,12 +850,61 @@ fn series_json(name: &str, tags: Option<&[(String, String)]>, columns: &[String]
     )
 }
 
+fn matching_measurements(session: &mut Session<'_>, catalog: &Catalog, pattern: &str) -> Result<Vec<String>, String> {
+    if catalog.is_empty() {
+        return Ok(Vec::new());
+    }
+    let names: Vec<String> = catalog.keys().map(|name| literal(name)).collect();
+    let sql = format!(
+        "SELECT name FROM unnest(ARRAY[{}]::text[]) AS name WHERE name ~ {} ORDER BY name",
+        names.join(", "),
+        literal(pattern)
+    );
+    let result = run(session, &sql)?
+        .into_iter()
+        .rev()
+        .find(|result| result.columns.is_some())
+        .ok_or("the measurements could not be matched")?;
+    Ok(result
+        .rows
+        .iter()
+        .filter_map(|row| row.first().and_then(Value::to_text))
+        .collect())
+}
+
 fn select_series(session: &mut Session<'_>, select: &Select, epoch: Option<&str>) -> Result<Vec<String>, String> {
     let catalog = crate::store::catalog(session)?;
-    let Some(columns) = catalog.get(&select.measurement) else {
-        return Ok(Vec::new());
-    };
-    let planned = plan(select, columns)?;
+    let mut measurements: Vec<String> = Vec::new();
+    for source in &select.sources {
+        let found = match source {
+            Source::Name(name) => vec![name.clone()],
+            Source::Pattern(pattern) => matching_measurements(session, &catalog, pattern)?,
+        };
+        for name in found {
+            if !measurements.contains(&name) {
+                measurements.push(name);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for measurement in &measurements {
+        if let Some(columns) = catalog.get(measurement) {
+            out.extend(measurement_series(session, select, measurement, columns, epoch)?);
+        }
+    }
+    let skip = select.series_offset.unwrap_or(0);
+    let take = select.series_limit.unwrap_or(usize::MAX);
+    Ok(out.into_iter().skip(skip).take(take).collect())
+}
+
+fn measurement_series(
+    session: &mut Session<'_>,
+    select: &Select,
+    measurement: &str,
+    columns: &[(String, String)],
+    epoch: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let planned = plan(select, measurement, columns)?;
     let result: QueryResult = run(session, &planned.sql)?
         .into_iter()
         .rev()
@@ -800,7 +933,7 @@ fn select_series(session: &mut Session<'_>, select: &Select, epoch: Option<&str>
             .map(|row| row.iter().map(|value| value_json(value, epoch)).collect())
             .collect();
         out.push(series_json(
-            &select.measurement,
+            measurement,
             (planned.tag_count > 0).then_some(tags.as_slice()),
             &shown,
             &rows,
@@ -969,7 +1102,10 @@ mod tests {
         assert!(reader.keyword("select"));
         let select = reader.select().unwrap();
         let columns: Vec<(String, String)> = columns.iter().map(|(name, kind)| ((*name).to_owned(), (*kind).to_owned())).collect();
-        plan(&select, &columns).unwrap().sql
+        let Some(Source::Name(measurement)) = select.sources.first() else {
+            panic!("one measurement");
+        };
+        plan(&select, measurement, &columns).unwrap().sql
     }
 
     #[test]
@@ -995,6 +1131,13 @@ mod tests {
         assert_eq!(time_json(0, None), "\"2000-01-01T00:00:00Z\"");
         assert_eq!(time_json(0, Some("s")), "946684800");
         assert_eq!(statements("SHOW DATABASES; SELECT 'a;b' FROM x").len(), 2);
+        assert_eq!(
+            planned(
+                "SELECT distinct(\"host\") FROM cpu GROUP BY *",
+                &[("time", "x"), ("dc", "text"), ("host", "text"), ("usage", "double precision")]
+            ),
+            "SELECT \"dc\" AS \"dc\", \"host\" AS \"host\", '1970-01-01T00:00:00Z'::timestamptz AS \"time\", \"host\" AS \"distinct\" FROM metrics.\"cpu\" GROUP BY 1, 2, 4 ORDER BY 1, 2, 3, 4"
+        );
     }
 
     fn filled_values(fill: &str, rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {

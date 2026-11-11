@@ -1514,7 +1514,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   descriptions (D219). Check: a benchmark against MinIO.
 - InfluxQL and Flux, and points with the same series and time deduplicated (D220). InfluxQL's core:
   **code written, unbuilt** (code-only mode, 2026-11-11, D521); `fill()` and `GROUP BY time()` offsets: **code
-  written, unbuilt** (code-only mode, 2026-11-12, D675). Left: Flux, deduplication and the rest of InfluxQL.
+  written, unbuilt** (code-only mode, 2026-11-12, D675); `GROUP BY *`, `SLIMIT`, several measurements and
+  `distinct()`: **code written, unbuilt** (code-only mode, 2026-11-12, D676). Left: Flux, deduplication, subqueries,
+  `INTO`, `tz()` and math between fields.
 - Remote write 2.0, native histograms and exemplars (D220). Remote write 2.0 with native histograms kept as
   `_count` and `_sum`: **code written, unbuilt** (code-only mode, 2026-11-12, D665). Left: histogram buckets and
   exemplars.

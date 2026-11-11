@@ -700,3 +700,4 @@ its full title with its status.
 - [D673](decisions/D673.md) Code-only batch 321 (M8): a Finnish stemmer and the `finnish` text-search configuration
 - [D674](decisions/D674.md) Code-only batch 322 (M8): a Hungarian stemmer and the `hungarian` text-search configuration
 - [D675](decisions/D675.md) Code-only batch 323 (M16): InfluxQL `fill()` modes, empty buckets and `GROUP BY time()` offsets
+- [D676](decisions/D676.md) Code-only batch 324 (M16): InfluxQL `GROUP BY *`, `SLIMIT`/`SOFFSET`, several measurements and regular expressions in `FROM`, and `distinct()`
