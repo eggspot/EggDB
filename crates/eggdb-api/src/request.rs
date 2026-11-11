@@ -216,6 +216,22 @@ pub(crate) struct Query {
     order: Vec<String>,
     pub(crate) limit: Option<u64>,
     pub(crate) offset: Option<u64>,
+    pub(crate) on_conflict: Option<Vec<String>>,
+}
+
+pub(crate) fn call_arguments(text: &str) -> Result<Vec<(String, String)>, String> {
+    let mut arguments = Vec::new();
+    for pair in text.split('&').filter(|pair| !pair.is_empty()) {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let (name, value) = (percent_decode(name), percent_decode(value));
+        let parameter =
+            identifier(&name).ok_or_else(|| format!("{name} is not a parameter name"))?;
+        if arguments.len() >= MAX_CONDITIONS {
+            return Err("too many arguments".to_owned());
+        }
+        arguments.push((parameter, value));
+    }
+    Ok(arguments)
 }
 
 impl Query {
@@ -284,6 +300,16 @@ impl Query {
                             .parse()
                             .map_err(|_| format!("offset={value} is not a count"))?,
                     )
+                }
+                "on_conflict" => {
+                    let mut columns = Vec::new();
+                    for column in value.split(',').map(str::trim).filter(|item| !item.is_empty()) {
+                        columns.push(
+                            identifier(column)
+                                .ok_or_else(|| format!("{column} is not a column name"))?,
+                        );
+                    }
+                    query.on_conflict = Some(columns);
                 }
                 "or" | "and" | "not.or" | "not.and" => {
                     let inner = value

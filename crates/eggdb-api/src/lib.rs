@@ -13,7 +13,7 @@ mod request;
 use eggdb_http::{Reply, Request, Response, StreamedResponse};
 use eggdb_sql::json::{Json, Node, parse_document};
 use eggdb_sql::{Dialect, KeyValueStore, QueryResult, Session, Value};
-use request::{Query, identifier, literal};
+use request::{Query, call_arguments, identifier, literal};
 use std::io::{self, Write};
 
 /// The largest request body the API accepts.
@@ -233,7 +233,26 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         }
         let path = request.path.trim_matches('/');
         if path.is_empty() {
-            return self.describe().into();
+            let wants_openapi = request
+                .header("accept")
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .contains("openapi");
+            return if wants_openapi {
+                self.openapi().into()
+            } else {
+                self.describe().into()
+            };
+        }
+        if let Some(function) = path.strip_prefix("rpc/") {
+            let arguments =
+                match call_arguments(request.query.as_deref().unwrap_or_default()) {
+                    Ok(arguments) => arguments,
+                    Err(message) => return failure(400, "PGRST100", &message).into(),
+                };
+            return self
+                .call(function, request.method.as_str(), &request.body, &arguments)
+                .into();
         }
         let Some(table) = identifier(path) else {
             return failure(404, "PGRST205", &format!("no table named {path}")).into();
@@ -251,10 +270,17 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             .unwrap_or_default()
             .to_ascii_lowercase();
         let representation = prefer.contains("return=representation");
+        let resolution = if prefer.contains("resolution=merge-duplicates") {
+            Some(true)
+        } else if prefer.contains("resolution=ignore-duplicates") {
+            Some(false)
+        } else {
+            None
+        };
         match request.method.as_str() {
             "GET" | "HEAD" => self.read(&target, &query, prefer.contains("count=exact")),
             "POST" => self
-                .insert(&target, &request.body, representation, &query)
+                .insert(&target, &request.body, representation, &query, resolution)
                 .into(),
             "PATCH" => self
                 .update(&target, &request.body, &query, representation)
@@ -370,7 +396,33 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         .into()
     }
 
-    fn insert(&self, target: &str, body: &[u8], representation: bool, query: &Query) -> Response {
+    fn primary_key(&self, target: &str) -> Vec<String> {
+        let table = target.rsplit('.').next().unwrap_or(target).trim_matches('"');
+        let sql = format!(
+            "SELECT k.column_name FROM information_schema.table_constraints c JOIN information_schema.key_column_usage k ON k.constraint_name = c.constraint_name AND k.table_schema = c.table_schema AND k.table_name = c.table_name WHERE c.constraint_type = 'PRIMARY KEY' AND c.table_schema = {} AND c.table_name = {} ORDER BY k.ordinal_position",
+            literal(&self.schema),
+            literal(table)
+        );
+        self.run(&sql)
+            .map(|results| {
+                results
+                    .iter()
+                    .flat_map(|result| result.rows.iter())
+                    .filter_map(|row| row.first().and_then(Value::to_text))
+                    .filter_map(|name| identifier(&name))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn insert(
+        &self,
+        target: &str,
+        body: &[u8],
+        representation: bool,
+        query: &Query,
+        resolution: Option<bool>,
+    ) -> Response {
         let text = String::from_utf8_lossy(body).into_owned();
         let Ok(document) = parse_document(&text) else {
             return failure(400, "PGRST102", "the body is not valid JSON");
@@ -424,8 +476,38 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         } else {
             String::new()
         };
+        let conflict = match resolution {
+            None => String::new(),
+            Some(merge) => {
+                let keys = query
+                    .on_conflict
+                    .clone()
+                    .unwrap_or_else(|| self.primary_key(target));
+                if keys.is_empty() {
+                    return failure(
+                        400,
+                        "PGRST109",
+                        "an upsert needs on_conflict=columns or a primary key",
+                    );
+                }
+                let updated: Vec<String> = quoted
+                    .iter()
+                    .filter(|column| !keys.contains(column))
+                    .map(|column| format!("{column} = EXCLUDED.{column}"))
+                    .collect();
+                if merge && !updated.is_empty() {
+                    format!(
+                        " ON CONFLICT ({}) DO UPDATE SET {}",
+                        keys.join(", "),
+                        updated.join(", ")
+                    )
+                } else {
+                    format!(" ON CONFLICT ({}) DO NOTHING", keys.join(", "))
+                }
+            }
+        };
         let sql = format!(
-            "INSERT INTO {target} ({}) VALUES {}{returning}",
+            "INSERT INTO {target} ({}) VALUES {}{conflict}{returning}",
             quoted.join(", "),
             rows.join(", ")
         );
@@ -484,6 +566,150 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             representation,
             200,
         )
+    }
+
+    fn call(
+        &self,
+        function: &str,
+        method: &str,
+        body: &[u8],
+        query_arguments: &[(String, String)],
+    ) -> Response {
+        let Some(name) = identifier(function) else {
+            return failure(404, "PGRST202", &format!("no function named {function}"));
+        };
+        let mut arguments: Vec<String> = Vec::new();
+        match method {
+            "GET" | "HEAD" => {
+                for (parameter, value) in query_arguments {
+                    arguments.push(format!("{parameter} => {}", literal(value)));
+                }
+            }
+            "POST" => {
+                let text = String::from_utf8_lossy(body).into_owned();
+                if !text.trim().is_empty() {
+                    let Ok(document) = parse_document(&text) else {
+                        return failure(400, "PGRST102", "the body is not valid JSON");
+                    };
+                    let Json::Object(members) = &document.value else {
+                        return failure(400, "PGRST102", "send the arguments as one JSON object");
+                    };
+                    for (parameter, node) in members {
+                        let Some(parameter) = identifier(parameter) else {
+                            return failure(400, "PGRST102", &format!("{parameter} is not a parameter name"));
+                        };
+                        match json_literal(node, &text) {
+                            Ok(value) => arguments.push(format!("{parameter} => {value}")),
+                            Err(message) => return failure(400, "PGRST102", &message),
+                        }
+                    }
+                }
+            }
+            _ => return failure(405, "PGRST117", "call a function with GET or POST"),
+        }
+        let schema = identifier(&self.schema).unwrap_or_else(|| "public".to_owned());
+        let sql = format!("SELECT * FROM {schema}.{name}({})", arguments.join(", "));
+        match self.run(&sql) {
+            Ok(results) => {
+                let Some(rows) = results.iter().rev().find(|result| result.columns.is_some()) else {
+                    return json(200, "null".to_owned());
+                };
+                let names = column_names(rows);
+                let scalar = names.len() == 1
+                    && rows.rows.len() == 1
+                    && names[0].eq_ignore_ascii_case(function);
+                if scalar {
+                    return json(200, value_json(&rows.rows[0][0]));
+                }
+                json(200, rows_json(rows))
+            }
+            Err(error) => sql_failure(&error),
+        }
+    }
+
+    fn openapi(&self) -> Response {
+        let sql = format!(
+            "SELECT table_name, column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = {} ORDER BY table_name, ordinal_position",
+            literal(&self.schema)
+        );
+        let results = match self.run(&sql) {
+            Ok(results) => results,
+            Err(error) => return sql_failure(&error),
+        };
+        let mut tables: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
+        for row in results
+            .iter()
+            .filter(|result| result.columns.is_some())
+            .flat_map(|result| result.rows.iter())
+        {
+            let text = |at: usize| row.get(at).and_then(Value::to_text).unwrap_or_default();
+            let kind = match text(2).as_str() {
+                "smallint" | "integer" | "bigint" => "integer",
+                "real" | "double precision" | "numeric" => "number",
+                "boolean" => "boolean",
+                "json" | "jsonb" => "object",
+                _ => "string",
+            };
+            let property = format!("{}:{{\"type\":\"{kind}\",\"format\":{}}}", json_string(&text(1)), json_string(&text(2)));
+            let required = text(3) == "NO";
+            match tables.last_mut() {
+                Some((name, properties, needed)) if *name == text(0) => {
+                    properties.push(property);
+                    if required {
+                        needed.push(json_string(&text(1)));
+                    }
+                }
+                _ => tables.push((
+                    text(0),
+                    vec![property],
+                    if required { vec![json_string(&text(1))] } else { Vec::new() },
+                )),
+            }
+        }
+        let rows_reply = |name: &str| {
+            format!(
+                "{{\"200\":{{\"description\":\"OK\",\"content\":{{\"application/json\":{{\"schema\":{{\"type\":\"array\",\"items\":{{\"$ref\":\"#/components/schemas/{name}\"}}}}}}}}}}}}"
+            )
+        };
+        let paths: Vec<String> = tables
+            .iter()
+            .map(|(name, _, _)| {
+                let body = format!(
+                    "\"requestBody\":{{\"content\":{{\"application/json\":{{\"schema\":{{\"$ref\":\"#/components/schemas/{name}\"}}}}}}}}"
+                );
+                format!(
+                    "{}:{{\"get\":{{\"tags\":[{}],\"responses\":{}}},\"post\":{{\"tags\":[{}],{body},\"responses\":{{\"201\":{{\"description\":\"Created\"}}}}}},\"patch\":{{\"tags\":[{}],{body},\"responses\":{{\"204\":{{\"description\":\"No Content\"}}}}}},\"delete\":{{\"tags\":[{}],\"responses\":{{\"204\":{{\"description\":\"No Content\"}}}}}}}}",
+                    json_string(&format!("/{name}")),
+                    json_string(name),
+                    rows_reply(name),
+                    json_string(name),
+                    json_string(name),
+                    json_string(name),
+                )
+            })
+            .collect();
+        let schemas: Vec<String> = tables
+            .iter()
+            .map(|(name, properties, required)| {
+                format!(
+                    "{}:{{\"type\":\"object\",\"required\":[{}],\"properties\":{{{}}}}}",
+                    json_string(name),
+                    required.join(","),
+                    properties.join(",")
+                )
+            })
+            .collect();
+        let mut response = json(
+            200,
+            format!(
+                "{{\"openapi\":\"3.0.3\",\"info\":{{\"title\":{},\"version\":\"1\"}},\"paths\":{{{}}},\"components\":{{\"schemas\":{{{}}}}}}}",
+                json_string(&format!("EggDB {} {}", self.database, self.schema)),
+                paths.join(","),
+                schemas.join(",")
+            ),
+        );
+        response.content_type = "application/openapi+json; charset=utf-8".to_owned();
+        response
     }
 
     fn changed(&self, sql: &str, representation: bool, status: u16) -> Response {
