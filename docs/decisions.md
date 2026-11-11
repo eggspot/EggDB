@@ -456,3 +456,4 @@ its full title with its status.
 - [D429](decisions/D429.md) Code-only batch 76 (M10): pg_cron's `'n seconds'` and `$` schedules, `cron.alter_job`, and jobs run as their user
 - [D430](decisions/D430.md) Code-only batch 77 (M10): `deleted.` in a Transact-SQL `UPDATE`'s `OUTPUT`
 - [D431](decisions/D431.md) Code-only batch 78 (M10): Oracle's `DEFAULT ... ON CONVERSION ERROR`
+- [D432](decisions/D432.md) Code-only batch 79 (M10): Oracle's `(+)` outer joins

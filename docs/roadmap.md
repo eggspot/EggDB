@@ -1039,7 +1039,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `sp_sequence_get_range`, and extended properties beyond `MS_Description` (D148).
 - bcp native files with `varchar` columns, and untrusted constraints for bulk loads (D291).
 - EF Core 9 in the `tds-apps` job, and mssql-jdbc's `getSchemas()` (D291).
-- Oracle's `(+)` outer joins, `RETURNING ... INTO`, synonyms, database links and `ROWID` (sql.md).
+- Oracle's `(+)` outer joins, `RETURNING ... INTO`, synonyms, database links and `ROWID` (sql.md). `(+)`
+  outer joins in queries: **code written, unbuilt** (code-only mode, 2026-11-11, D432).
 - `CONNECT BY` over a join (the join's conditions in `WHERE` applied first), `PRIOR` beside a
   subquery, `ORDER SIBLINGS BY` a pseudo-column, and a sequence's `NEXTVAL` advancing once per
   source row of `INSERT ALL`; `CONNECT BY`, `INSERT ALL` and `INSERT FIRST` are built (D304).

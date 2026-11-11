@@ -18,6 +18,7 @@ mod mysql_load;
 mod mysql_sequences;
 mod mysql_routines;
 mod oracle;
+mod oracle_outer_joins;
 mod partitions;
 mod plpgsql;
 mod plsql;
@@ -3326,6 +3327,22 @@ impl<'t> Parser<'t> {
         } else {
             items
         };
+        let (from, filter) = if self.oracle() {
+            for item in &items {
+                if let SelectItem::Expr { expr, .. } = item
+                    && oracle_outer_joins::mentions_marker(expr)
+                {
+                    return Err(SqlError::syntax(
+                        "outer join operator (+) is not allowed here",
+                        expr.position,
+                    )
+                    .with_oracle_code(30563));
+                }
+            }
+            oracle_outer_joins::rewrite(from, filter)?
+        } else {
+            (from, filter)
+        };
         let select = Select {
             distinct,
             items,
@@ -4331,6 +4348,15 @@ impl<'t> Parser<'t> {
 
     fn casts(&mut self) -> SqlResult<Expr> {
         let mut expr = self.primary()?;
+        if self.oracle()
+            && matches!(expr.kind, ExprKind::Column { .. })
+            && self.peek_kind() == &TokenKind::LeftParen
+            && matches!(self.peek_kind_at(1), TokenKind::Operator("+"))
+            && self.peek_kind_at(2) == &TokenKind::RightParen
+        {
+            self.at += 3;
+            expr = oracle_outer_joins::marked(expr);
+        }
         loop {
             if self.take(&TokenKind::DoubleColon) {
                 self.depth += 1;
