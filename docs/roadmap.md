@@ -995,7 +995,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   mappings apply (D348).
   `_geo_distance`: **code written, unbuilt** (code-only mode, 2026-11-11, D518).
 - Nested and bucket aggregations beyond `terms` (D196). **Code written, unbuilt** (code-only mode,
-  2026-11-11, D471); `nested` waits for `nested` mappings.
+  2026-11-11, D471); the `nested` aggregation: **code written, unbuilt** (code-only mode, 2026-11-11, D562).
 - Aliases, index templates and the rest of `_cat` (D196). Aliases, `_cat/aliases`, `count` and `health`:
   **code written, unbuilt** (code-only mode, 2026-11-11, D472); index templates wait for mappings.
 - Kibana and OpenSearch Dashboards working against EggDB (D12, D196). Check: `compatibility` job.
