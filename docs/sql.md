@@ -2486,7 +2486,7 @@ ORDER BY ts_rank(to_tsvector(body), plainto_tsquery('rat')) DESC;
 `to_tsvector` and the `to_tsquery` family (`plainto_`, `phraseto_`, `websearch_`) take the
 `english` (stop words dropped, English stems), `german` (German stop words dropped, Snowball's
 German stems, umlauts folded), `spanish` (Spanish stop words dropped, Snowball's Spanish stems,
-accents dropped), `french`, `finnish`, `dutch`, `portuguese`, `italian`, `russian`, `swedish`, `norwegian` and `danish` (each with Snowball's stop words and
+accents dropped), `french`, `finnish`, `hungarian`, `dutch`, `portuguese`, `italian`, `russian`, `swedish`, `norwegian` and `danish` (each with Snowball's stop words and
 stems) or
 `simple` configuration, and print as PostgreSQL
 prints them; `@@` matches with `&`, `|`, `!`, phrases (`<->`, `<N>`) and prefixes (`:*`).

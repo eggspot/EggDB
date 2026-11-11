@@ -1,5 +1,5 @@
 use crate::scandinavian::Language;
-use crate::{dutch, english, finnish, french, german, italian, portuguese, russian, spanish};
+use crate::{dutch, english, finnish, french, german, hungarian, italian, portuguese, russian, spanish};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -105,11 +105,13 @@ pub enum Config {
     French,
     /// Lower case words, Finnish stop words dropped, Finnish stems.
     Finnish,
+    /// Lower case words, Hungarian stop words dropped, Hungarian stems.
+    Hungarian,
 }
 
 impl Config {
     /// The configuration named `name` (`english`, `german`, `spanish`, `swedish`, `norwegian`,
-    /// `danish`, `italian`, `russian`, `dutch`, `portuguese`, `french`, `finnish`, `simple`, optionally
+    /// `danish`, `italian`, `russian`, `dutch`, `portuguese`, `french`, `finnish`, `hungarian`, `simple`, optionally
     /// `pg_catalog.`-qualified).
     pub fn named(name: &str) -> Option<Self> {
         match name
@@ -131,6 +133,7 @@ impl Config {
             "portuguese" => Some(Self::Portuguese),
             "french" => Some(Self::French),
             "finnish" => Some(Self::Finnish),
+            "hungarian" => Some(Self::Hungarian),
             _ => None,
         }
     }
@@ -158,6 +161,8 @@ impl Config {
             Self::French => Some(french::stem(&lower)),
             Self::Finnish if finnish::is_stop_word(&lower) => None,
             Self::Finnish => Some(finnish::stem(&lower)),
+            Self::Hungarian if hungarian::is_stop_word(&lower) => None,
+            Self::Hungarian => Some(hungarian::stem(&lower)),
             Self::Swedish | Self::Norwegian | Self::Danish => {
                 let language = match self {
                     Self::Swedish => Language::Swedish,

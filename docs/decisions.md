@@ -698,3 +698,4 @@ its full title with its status.
 - [D671](decisions/D671.md) Code-only batch 319 (M7): `EVAL`, `EVALSHA`, their `_RO` forms and `SCRIPT` in the RESP server
 - [D672](decisions/D672.md) Code-only batch 320 (M7): Redis Functions: `FUNCTION` and `FCALL`, libraries kept in memory
 - [D673](decisions/D673.md) Code-only batch 321 (M8): a Finnish stemmer and the `finnish` text-search configuration
+- [D674](decisions/D674.md) Code-only batch 322 (M8): a Hungarian stemmer and the `hungarian` text-search configuration
