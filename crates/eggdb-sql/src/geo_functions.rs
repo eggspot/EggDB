@@ -108,6 +108,93 @@ fn spatial_of(value: &Value) -> SqlResult<Option<Spatial>> {
     })
 }
 
+/// The internal function `ST_AsMVT(row, ...)` becomes: `json_agg` of the rows, then the
+/// layer name, extent, geometry column and feature id column.
+pub(crate) const MVT_ENCODE: &str = "eggdb_mvt_encode";
+
+fn mvt_property(value: &crate::json::Json) -> Option<eggdb_geo::MvtValue> {
+    use crate::json::Json;
+    Some(match value {
+        Json::String(text) => eggdb_geo::MvtValue::String(text.clone()),
+        Json::Boolean(flag) => eggdb_geo::MvtValue::Bool(*flag),
+        Json::Number(text) => match text.parse::<i64>() {
+            Ok(whole) => eggdb_geo::MvtValue::Int(whole),
+            Err(_) => eggdb_geo::MvtValue::Double(text.parse().ok()?),
+        },
+        Json::Null => return None,
+        Json::Array(_) | Json::Object(_) => {
+            eggdb_geo::MvtValue::String(crate::json::normalized_value(value).ok()?)
+        }
+    })
+}
+
+/// `ST_AsMVT`'s encoding: each aggregated row's geometry column (named, or the first value
+/// that reads as a geometry) becomes a feature, the other non-NULL columns its properties.
+pub(crate) fn mvt_encode(values: &[Value]) -> SqlResult<Value> {
+    use crate::json::Json;
+    let text_option = |at: usize| match values.get(at) {
+        Some(Value::Text(text)) => Some(text.clone()),
+        _ => None,
+    };
+    let rows = match values.first() {
+        Some(Value::Json(text) | Value::Text(text)) => crate::json::parse(text, false)?,
+        _ => return Ok(Value::Bytea(Vec::new())),
+    };
+    let name = text_option(1).unwrap_or_else(|| "default".to_owned());
+    let extent = match values.get(2) {
+        None | Some(Value::Null) => 4096,
+        Some(value) => u32::try_from(value.as_integer().unwrap_or(4096)).map_err(|_| {
+            SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "ST_AsMVT: the extent must be positive")
+        })?,
+    };
+    let geometry_column = text_option(3);
+    let id_column = text_option(4);
+    let Json::Array(items) = rows.value else {
+        return Ok(Value::Bytea(Vec::new()));
+    };
+    let mut features = Vec::with_capacity(items.len());
+    for item in items {
+        let Json::Object(members) = item.value else {
+            continue;
+        };
+        let geometry_at = members.iter().position(|(key, value)| match (&geometry_column, &value.value) {
+            (Some(wanted), _) => key == wanted,
+            (None, Json::String(text)) => eggdb_geo::from_wkt(text).is_ok(),
+            _ => false,
+        });
+        let Some(geometry_at) = geometry_at else {
+            continue;
+        };
+        let Json::String(geometry_text) = &members[geometry_at].1.value else {
+            continue;
+        };
+        let geometry = eggdb_geo::from_wkt(geometry_text).map_err(geo_error)?.geometry;
+        let mut id = None;
+        let mut properties = Vec::new();
+        for (at, (key, value)) in members.iter().enumerate() {
+            if at == geometry_at {
+                continue;
+            }
+            if id_column.as_deref() == Some(key.as_str()) {
+                id = match &value.value {
+                    Json::Number(text) => text.parse::<u64>().ok(),
+                    _ => None,
+                };
+                continue;
+            }
+            if let Some(property) = mvt_property(&value.value) {
+                properties.push((key.clone(), property));
+            }
+        }
+        features.push(eggdb_geo::MvtFeature {
+            id,
+            geometry,
+            properties,
+        });
+    }
+    Ok(Value::Bytea(eggdb_geo::encode_layer(&name, extent, &features)))
+}
+
 fn geometry_value(spatial: &Spatial) -> Value {
     Value::Text(eggdb_geo::to_wkt(spatial, true))
 }

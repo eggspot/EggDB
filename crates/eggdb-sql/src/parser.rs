@@ -5125,6 +5125,41 @@ impl<'t> Parser<'t> {
         self.call_clauses(expr, &shown)
     }
 
+    fn st_as_mvt(&mut self, name: Name) -> SqlResult<Expr> {
+        let position = name.position;
+        self.expect(&TokenKind::LeftParen)?;
+        let row = self.expression()?;
+        let mut options = Vec::new();
+        while self.take(&TokenKind::Comma) {
+            options.push(self.expression()?);
+        }
+        self.expect(&TokenKind::RightParen)?;
+        if options.len() > 4 {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_FUNCTION,
+                "function st_asmvt takes a row and at most four options",
+            )
+            .at(position));
+        }
+        let rows = Expr {
+            kind: ExprKind::Aggregate {
+                function: AggregateFunction::JsonAgg,
+                argument: Some(Box::new(row)),
+                distinct: false,
+            },
+            position,
+        };
+        let mut arguments = vec![rows];
+        arguments.extend(options);
+        Ok(Expr {
+            kind: ExprKind::Function {
+                name: crate::geo_functions::MVT_ENCODE.to_owned(),
+                arguments,
+            },
+            position,
+        })
+    }
+
     fn function_call(&mut self, name: Name) -> SqlResult<Expr> {
         if let Some(expr) = self.grouping_operation(&name)? {
             return Ok(expr);
@@ -5274,6 +5309,12 @@ impl<'t> Parser<'t> {
             && let Some(expr) = self.session_function(&name)?
         {
             return Ok(expr);
+        }
+        if self.postgresql()
+            && name.text == "st_asmvt"
+            && self.peek_kind() == &TokenKind::LeftParen
+        {
+            return self.st_as_mvt(name);
         }
         if let Some(function) = AggregateFunction::named(&name.text) {
             let expr = self.aggregate(name, function)?;

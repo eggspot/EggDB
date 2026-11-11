@@ -144,3 +144,27 @@ fn tiles_web_mercator_and_geohashes_serve_web_maps() {
         assert!(session.execute(bad, &mut |_| {}).is_err(), "{bad}");
     }
 }
+
+#[test]
+fn st_asmvt_encodes_a_layer_of_the_rows_tile_geometries() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(&mut session, "CREATE EXTENSION IF NOT EXISTS postgis");
+    let size = run(
+        &mut session,
+        "SELECT length(ST_AsMVT(q, 'points', 4096, 'geom')) > 0 FROM \
+         (SELECT 'a' AS name, 7 AS rank, ST_GeomFromText('POINT(25 17)') AS geom \
+          UNION ALL SELECT 'b', 8, ST_GeomFromText('POINT(1 1)')) q",
+    );
+    assert_eq!(size, run(&mut session, "SELECT true"));
+    let point = run(
+        &mut session,
+        "SELECT encode(ST_AsMVT(q, 'p'), 'hex') FROM (SELECT ST_GeomFromText('POINT(25 17)') AS geom) q",
+    );
+    assert!(point.contains("2203093222"), "{point}");
+    let empty = run(
+        &mut session,
+        "SELECT length(ST_AsMVT(q)) FROM (SELECT ST_GeomFromText('POINT(1 1)') AS geom WHERE false) q",
+    );
+    assert_eq!(empty, run(&mut session, "SELECT 0"));
+}

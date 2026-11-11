@@ -186,6 +186,7 @@ fn added_function_type(
         "vector_dims" => Some(SqlType::Integer),
         "eggdb_embed" => Some(SqlType::Text),
         "rrf_score" => Some(SqlType::Double),
+        crate::geo_functions::MVT_ENCODE => Some(SqlType::Bytea),
         name if crate::geo_functions::FUNCTIONS.contains(&name) => {
             crate::geo_functions::result_type(name)
         }

@@ -632,3 +632,4 @@ its full title with its status.
 - [D605](decisions/D605.md) Code-only batch 253 (M10): TOP in Transact-SQL UPDATE and DELETE
 - [D606](decisions/D606.md) Code-only batch 254 (M13): Bolt transactions held open across messages
 - [D607](decisions/D607.md) Code-only batch 255 (M13): the Leiden community algorithm
+- [D608](decisions/D608.md) Code-only batch 256 (M12): ST_AsMVT
