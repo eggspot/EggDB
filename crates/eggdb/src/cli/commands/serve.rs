@@ -875,9 +875,9 @@ impl Session<'_> {
                 }
             });
             let observability_server = scope.spawn(|| match &observability_listener {
-                Some(listener) => eggdb_http::serve_with_limits(
+                Some(listener) => eggdb_http::serve_replies_with_limits(
                     listener,
-                    &|request| observability_endpoint.answer(request),
+                    &|request| observability_endpoint.reply(request),
                     &stop_signals::requested,
                     &eggdb_http::Limits::new(
                         eggdb_observability::MAX_REQUEST_BYTES,

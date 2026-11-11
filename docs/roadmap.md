@@ -607,7 +607,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   **code written, unbuilt** (code-only mode, 2026-11-11, D463); scroll waits for scroll itself.
 - S3 `GetObject` of a large object sent as a stream (D325, D188). **Code written, unbuilt** (code-only
   mode, 2026-11-11, D462).
-- Prometheus query results sent as a stream (D325).
+- Prometheus query results sent as a stream (D325). **Code written, unbuilt** (code-only mode,
+  2026-11-11, D464).
 - Large HTTP request bodies handed to the handler as they arrive (D325).
 - PostgreSQL's function call protocol (D103). **Code written, unbuilt** (code-only mode, 2026-11-11,
   D461).

@@ -1,10 +1,11 @@
 use crate::line_protocol::{self, precision_ns};
 use crate::promql::{self, Data, Evaluator, Failure, Fetched, Labels, Work};
 use crate::store;
-use eggdb_http::{Request, Response};
+use eggdb_http::{Reply, Request, Response, StreamedResponse};
 use eggdb_platform::connection_limits::MemoryBudget;
 use eggdb_sql::{Dialect, KeyValueStore, Session, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -149,23 +150,35 @@ fn strings_json(values: &BTreeSet<String>) -> String {
     format!("[{}]", items.join(","))
 }
 
+fn series_json(labels: &Labels, samples: &[(i64, f64)]) -> String {
+    let points: Vec<String> = samples
+        .iter()
+        .map(|(time, value)| format!("[{},\"{}\"]", seconds_text(*time), number_text(*value)))
+        .collect();
+    format!(
+        "{{\"metric\":{},\"values\":[{}]}}",
+        labels_json(labels),
+        points.join(",")
+    )
+}
+
 fn matrix_json<'m>(series: impl Iterator<Item = (&'m Labels, &'m Vec<(i64, f64)>)>) -> String {
     let items: Vec<String> = series
-        .map(|(labels, samples)| {
-            let points: Vec<String> = samples
-                .iter()
-                .map(|(time, value)| {
-                    format!("[{},\"{}\"]", seconds_text(*time), number_text(*value))
-                })
-                .collect();
-            format!(
-                "{{\"metric\":{},\"values\":[{}]}}",
-                labels_json(labels),
-                points.join(",")
-            )
-        })
+        .map(|(labels, samples)| series_json(labels, samples))
         .collect();
     format!("[{}]", items.join(","))
+}
+
+fn parameters_of(request: &Request) -> Vec<(String, String)> {
+    let mut parameters = form(request.query.as_deref().unwrap_or_default());
+    if request.method == "POST"
+        && request
+            .header("content-type")
+            .is_some_and(|kind| kind.starts_with("application/x-www-form-urlencoded"))
+    {
+        parameters.extend(form(&String::from_utf8_lossy(&request.body)));
+    }
+    parameters
 }
 
 fn percent_decode(text: &str) -> String {
@@ -316,16 +329,46 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         }
     }
 
-    /// Answers one HTTP request.
-    pub fn answer(&self, request: &Request) -> Response {
-        let mut parameters = form(request.query.as_deref().unwrap_or_default());
-        if request.method == "POST"
-            && request
-                .header("content-type")
-                .is_some_and(|kind| kind.starts_with("application/x-www-form-urlencoded"))
-        {
-            parameters.extend(form(&String::from_utf8_lossy(&request.body)));
+    /// Answers one HTTP request; the matrix of a `query_range` is a [`StreamedResponse`],
+    /// one series rendered at a time as it is sent.
+    pub fn reply(&self, request: &Request) -> Reply<'static> {
+        let ranged = matches!(request.method.as_str(), "GET" | "POST")
+            && request.path == "/api/v1/query_range";
+        if !ranged {
+            return Reply::Whole(self.answer(request));
         }
+        let parameters = parameters_of(request);
+        if !self.authorized(request, &parameters) {
+            return Reply::Whole(self.answer(request));
+        }
+        let value = |name: &str| {
+            parameters
+                .iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, value)| value.as_str())
+        };
+        match self.range(value("query"), value("start"), value("end"), value("step")) {
+            Ok(series) => Reply::Streamed(StreamedResponse::new(
+                200,
+                "application/json",
+                move |out| {
+                    out.write_all(b"{\"status\":\"success\",\"data\":{\"resultType\":\"matrix\",\"result\":[")?;
+                    for (at, (labels, samples)) in series.iter().enumerate() {
+                        if at > 0 {
+                            out.write_all(b",")?;
+                        }
+                        out.write_all(series_json(labels, samples).as_bytes())?;
+                    }
+                    out.write_all(b"]}}")
+                },
+            )),
+            Err(failure) => Reply::Whole(failed(&failure)),
+        }
+    }
+
+    /// Answers one HTTP request with its whole response in memory.
+    pub fn answer(&self, request: &Request) -> Response {
+        let parameters = parameters_of(request);
         match (request.method.as_str(), request.path.as_str()) {
             ("GET" | "HEAD", "/ping") => return no_content(),
             ("GET", "/health" | "/-/healthy" | "/-/ready") => {
