@@ -233,6 +233,37 @@ fn remote_write_requests_decode_into_points() {
     );
 }
 
+#[test]
+fn remote_write_two_resolves_symbols_and_splits_histograms() {
+    let mut series = Vec::new();
+    let mut references = Vec::new();
+    for reference in [1u64, 2, 3, 4] {
+        varint(reference, &mut references);
+    }
+    length_delimited(1, &references, &mut series);
+    length_delimited(2, &sample(7.5, 3000), &mut series);
+    let mut histogram = Vec::new();
+    varint(1 << 3, &mut histogram);
+    varint(12, &mut histogram);
+    histogram.push(3 << 3 | 1);
+    histogram.extend_from_slice(&42.0f64.to_bits().to_le_bytes());
+    varint(15 << 3, &mut histogram);
+    varint(4000, &mut histogram);
+    length_delimited(3, &histogram, &mut series);
+    let mut request = Vec::new();
+    for symbol in ["", "__name__", "latency", "job", "api"] {
+        length_delimited(4, symbol.as_bytes(), &mut request);
+    }
+    length_delimited(5, &series, &mut request);
+    let (points, written) =
+        crate::remote_write::decode_v2(&eggdb_columnar::snappy_compress(&request)).unwrap();
+    assert_eq!((written.samples, written.histograms), (1, 1));
+    let names: Vec<&str> = points.iter().map(|point| point.measurement.as_str()).collect();
+    assert_eq!(names, vec!["latency", "latency_count", "latency_sum"]);
+    assert_eq!(points[0].tags, vec![("job".to_owned(), "api".to_owned())]);
+    assert_eq!(points[2].time_ns, 4_000_000_000);
+}
+
 pub(crate) fn evaluate(
     expr: &Expr,
     time_ms: i64,

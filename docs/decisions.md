@@ -689,3 +689,4 @@ its full title with its status.
 - [D662](decisions/D662.md) Code-only batch 310 (M2): eggdb-fuzz, a long-running fuzzer of the decoders of untrusted bytes
 - [D663](decisions/D663.md) Code-only batch 311 (M6c): key_length in MySQL's EXPLAIN FORMAT=JSON
 - [D664](decisions/D664.md) Code-only batch 312 (M5): eggdb-sqllogictest, a runner of sqllogictest files
+- [D665](decisions/D665.md) Code-only batch 313 (M16): Prometheus remote write 2.0

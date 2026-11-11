@@ -789,6 +789,27 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
     }
 
     fn remote_write(&self, request: &Request) -> Response {
+        let version_two = request
+            .header("content-type")
+            .is_some_and(|content_type| content_type.contains("io.prometheus.write.v2.Request"));
+        if version_two {
+            return match crate::remote_write::decode_v2(&request.body).and_then(|(points, written)| {
+                store::write(&mut self.session(), &points).map(|_| written)
+            }) {
+                Ok(written) => {
+                    let mut response = no_content();
+                    for (header, count) in [
+                        ("X-Prometheus-Remote-Write-Samples-Written", written.samples),
+                        ("X-Prometheus-Remote-Write-Histograms-Written", written.histograms),
+                        ("X-Prometheus-Remote-Write-Exemplars-Written", 0),
+                    ] {
+                        response.headers.push((header.to_owned(), count.to_string()));
+                    }
+                    response
+                }
+                Err(message) => json(400, format!("{{\"error\":{}}}", json_string(&message))),
+            };
+        }
         match crate::remote_write::decode(&request.body)
             .and_then(|points| store::write(&mut self.session(), &points))
         {
