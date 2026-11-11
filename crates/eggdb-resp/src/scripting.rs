@@ -6,10 +6,10 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-const STEP_BUDGET: u64 = 100_000_000;
+pub(crate) const STEP_BUDGET: u64 = 100_000_000;
 const SHA1_HEX_LENGTH: usize = 40;
 const NOT_FROM_SCRIPTS: &[&str] = &[
-    "eval", "evalsha", "eval_ro", "evalsha_ro", "script", "multi", "exec", "discard", "watch",
+    "eval", "evalsha", "eval_ro", "evalsha_ro", "script", "function", "fcall", "fcall_ro", "multi", "exec", "discard", "watch",
     "unwatch", "subscribe", "psubscribe", "ssubscribe", "unsubscribe", "punsubscribe",
     "sunsubscribe", "monitor", "auth", "hello", "quit", "reset", "client", "config",
 ];
@@ -17,15 +17,16 @@ const NOT_ALLOWED: &str = "ERR This Redis command is not allowed from script";
 const READ_ONLY_WRITE: &str = "ERR Write commands are not allowed from read-only scripts.";
 const NO_SCRIPT: &str = "NOSCRIPT No matching script. Please use EVAL.";
 
-/// The scripts a server has seen, by the hex SHA-1 of their source, for `EVALSHA` and
-/// `SCRIPT EXISTS`. Shared by every connection of one server; empty after a restart, as in
-/// Redis.
+/// A server's scripting state, shared by its connections: the scripts it has seen, by the
+/// hex SHA-1 of their source, for `EVALSHA` and `SCRIPT EXISTS`, and the function libraries
+/// `FUNCTION LOAD` registered. Empty after a restart.
 #[derive(Debug, Default)]
-pub struct ScriptCache {
+pub struct Scripts {
     scripts: Mutex<BTreeMap<String, Vec<u8>>>,
+    pub(crate) libraries: Mutex<BTreeMap<String, crate::functions::Library>>,
 }
 
-impl ScriptCache {
+impl Scripts {
     /// Keeps `source` and returns its hex SHA-1.
     pub fn load(&self, source: &[u8]) -> String {
         let sha = eggdb_lua::sha1_hex(source);
@@ -160,24 +161,31 @@ fn shebang(source: &[u8]) -> Result<(Shebang, Vec<u8>), Reply> {
     Ok((Shebang { read_only }, source[end..].to_vec()))
 }
 
-fn run(context: &Context<'_>, client: &mut Client, source: &[u8], args: &[Vec<u8>], read_only: bool) -> Reply {
+pub(crate) type ScriptBody<'b> = &'b dyn Fn(&[Vec<u8>], &[Vec<u8>], &mut dyn eggdb_lua::Host) -> eggdb_lua::Reply;
+
+pub(crate) fn split_keys(args: &[Vec<u8>]) -> Result<(&[Vec<u8>], &[Vec<u8>]), Reply> {
     let Some((count, rest)) = args.split_first() else {
-        return Reply::Error("ERR wrong number of arguments".to_owned());
+        return Err(Reply::Error("ERR wrong number of arguments".to_owned()));
     };
     let count = match integer(count) {
-        Ok(count) if count < 0 => return Reply::Error("ERR Number of keys can't be negative".to_owned()),
+        Ok(count) if count < 0 => return Err(Reply::Error("ERR Number of keys can't be negative".to_owned())),
         Ok(count) if count as usize > rest.len() => {
-            return Reply::Error("ERR Number of keys can't be greater than number of args".to_owned());
+            return Err(Reply::Error("ERR Number of keys can't be greater than number of args".to_owned()));
         }
         Ok(count) => count as usize,
-        Err(error) => return Reply::Error(error),
+        Err(error) => return Err(Reply::Error(error)),
     };
-    let (keys, argv) = rest.split_at(count);
-    let (flags, body) = match shebang(source) {
-        Ok(parsed) => parsed,
-        Err(reply) => return reply,
-    };
-    let read_only = read_only || flags.read_only;
+    Ok(rest.split_at(count))
+}
+
+pub(crate) fn run_in_transaction(
+    context: &Context<'_>,
+    client: &mut Client,
+    keys: &[Vec<u8>],
+    argv: &[Vec<u8>],
+    read_only: bool,
+    script: ScriptBody<'_>,
+) -> Reply {
     let db = client.db;
     let mut reply = None;
     let body_of = |keyspace: &dyn Keyspace, client: &mut Client| {
@@ -190,7 +198,7 @@ fn run(context: &Context<'_>, client: &mut Client, source: &[u8], args: &[Vec<u8
             scripts: context.scripts,
         };
         let mut host = ScriptHost { context: &inner, client };
-        resp_reply(eggdb_lua::run_script(&body, keys, argv, &mut host, STEP_BUDGET))
+        resp_reply(script(keys, argv, &mut host))
     };
     let outcome = if read_only {
         context.keyspace.read(db, &mut |keys| {
@@ -213,6 +221,21 @@ fn run(context: &Context<'_>, client: &mut Client, source: &[u8], args: &[Vec<u8
         Err(error) => Reply::Error(error),
         Ok(()) => reply.unwrap_or(Reply::Bulk(None)),
     }
+}
+
+fn run(context: &Context<'_>, client: &mut Client, source: &[u8], args: &[Vec<u8>], read_only: bool) -> Reply {
+    let (keys, argv) = match split_keys(args) {
+        Ok(split) => split,
+        Err(reply) => return reply,
+    };
+    let (flags, body) = match shebang(source) {
+        Ok(parsed) => parsed,
+        Err(reply) => return reply,
+    };
+    let script = |keys: &[Vec<u8>], argv: &[Vec<u8>], host: &mut dyn eggdb_lua::Host| {
+        eggdb_lua::run_script(&body, keys, argv, host, STEP_BUDGET)
+    };
+    run_in_transaction(context, client, keys, argv, read_only || flags.read_only, &script)
 }
 
 fn script_subcommand(context: &Context<'_>, args: &[Vec<u8>]) -> Reply {

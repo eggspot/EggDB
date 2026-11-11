@@ -75,6 +75,7 @@ pub struct Interpreter {
     pub(crate) globals: TableRef,
     pub(crate) string_library: TableRef,
     pub(crate) json_null: TableRef,
+    pub(crate) registered_functions: TableRef,
     steps_left: u64,
     depth: usize,
 }
@@ -102,6 +103,7 @@ impl Interpreter {
             globals: TableRef::new(),
             string_library: TableRef::new(),
             json_null: TableRef::new(),
+            registered_functions: TableRef::new(),
             steps_left: 0,
             depth: 0,
         };

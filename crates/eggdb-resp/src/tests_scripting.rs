@@ -1,12 +1,12 @@
 use crate::commands::{Client, Context};
 use crate::keyspace::MemoryKeyspace;
 use crate::protocol::Reply;
-use crate::scripting::ScriptCache;
+use crate::scripting::Scripts;
 use crate::transactions::execute_with_transactions;
 
 struct Scripted {
     keyspace: MemoryKeyspace,
-    scripts: ScriptCache,
+    scripts: Scripts,
     client: Client,
 }
 
@@ -14,7 +14,7 @@ impl Scripted {
     fn new() -> Self {
         Self {
             keyspace: MemoryKeyspace::default(),
-            scripts: ScriptCache::default(),
+            scripts: Scripts::default(),
             client: Client {
                 authenticated: true,
                 ..Client::default()
@@ -117,4 +117,27 @@ fn eval_runs_inside_multi() {
         redis.run(&["EXEC"]),
         Reply::Array(Some(vec![Reply::Integer(5), Reply::Integer(6)]))
     );
+}
+
+const LIBRARY: &str = "#!lua name=counters\n\
+    redis.register_function('bump', function(keys, args) return redis.call('INCRBY', keys[1], args[1]) end)\n\
+    redis.register_function{function_name='peek', callback=function(keys) return redis.call('GET', keys[1]) end, flags={'no-writes'}}";
+
+#[test]
+fn functions_load_list_and_run() {
+    let mut redis = Scripted::new();
+    assert_eq!(redis.run(&["FUNCTION", "LOAD", LIBRARY]), Reply::Bulk(Some(b"counters".to_vec())));
+    assert!(error_text(&redis.run(&["FUNCTION", "LOAD", LIBRARY])).contains("already exists"));
+    assert_eq!(redis.run(&["FUNCTION", "LOAD", "REPLACE", LIBRARY]), Reply::Bulk(Some(b"counters".to_vec())));
+    assert_eq!(redis.run(&["FCALL", "bump", "1", "n", "4"]), Reply::Integer(4));
+    assert_eq!(redis.run(&["FCALL_RO", "peek", "1", "n"]), Reply::Bulk(Some(b"4".to_vec())));
+    assert!(error_text(&redis.run(&["FCALL_RO", "bump", "1", "n", "1"])).contains("write flag"));
+    assert!(error_text(&redis.run(&["FCALL", "missing", "0"])).contains("Function not found"));
+    let Reply::Array(Some(libraries)) = redis.run(&["FUNCTION", "LIST", "LIBRARYNAME", "count*"]) else {
+        panic!("a list");
+    };
+    assert_eq!(libraries.len(), 1);
+    assert_eq!(redis.run(&["FUNCTION", "DELETE", "counters"]), Reply::Status("OK".to_owned()));
+    assert!(error_text(&redis.run(&["FCALL", "bump", "1", "n", "1"])).contains("Function not found"));
+    assert!(error_text(&redis.run(&["FUNCTION", "LOAD", "return 1"])).contains("metadata"));
 }

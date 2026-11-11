@@ -6,7 +6,7 @@ use crate::notifications::{self, Notifications};
 use crate::pops::OnWrongType;
 use crate::protocol::{ProtocolError, ReadAhead, Reply, RequestReader};
 use crate::pubsub::{Hub, Kind, Queued};
-use crate::scripting::ScriptCache;
+use crate::scripting::Scripts;
 use crate::transactions::execute_with_transactions;
 use eggdb_platform::connection_limits::{MemoryBudget, UNCOUNTED_BUFFER_BYTES};
 use std::cell::RefCell;
@@ -298,7 +298,7 @@ struct Shared<'s> {
     waiters: &'s WaiterRegistry,
     clients: &'s Clients,
     notifications: &'s Notifications,
-    scripts: &'s ScriptCache,
+    scripts: &'s Scripts,
 }
 
 fn config_command(
@@ -554,7 +554,7 @@ pub fn serve(
     let waiters = WaiterRegistry::default();
     let clients = Clients::default();
     let notifications = Notifications::default();
-    let scripts = ScriptCache::default();
+    let scripts = Scripts::default();
     let shared = Shared {
         hub: &hub,
         waiters: &waiters,

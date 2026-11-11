@@ -696,3 +696,4 @@ its full title with its status.
 - [D669](decisions/D669.md) Code-only batch 317 (M7): eggdb-lua, part 3: the `string` library, Lua patterns and `string.format`
 - [D670](decisions/D670.md) Code-only batch 318 (M7): eggdb-lua, part 4: `cjson`, `bit` and `cmsgpack`
 - [D671](decisions/D671.md) Code-only batch 319 (M7): `EVAL`, `EVALSHA`, their `_RO` forms and `SCRIPT` in the RESP server
+- [D672](decisions/D672.md) Code-only batch 320 (M7): Redis Functions: `FUNCTION` and `FCALL`, libraries kept in memory

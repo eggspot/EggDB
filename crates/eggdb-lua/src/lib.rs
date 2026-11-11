@@ -20,7 +20,7 @@ mod value;
 
 pub use host::{Host, NoHost, Reply};
 pub use interpreter::{Frame, Interpreter, Native, Unwind};
-pub use redis_library::{reply_of_value, run_script, sha1_hex};
+pub use redis_library::{RegisteredFunction, call_function, load_library, reply_of_value, run_script, sha1_hex};
 pub use value::{Closure, Function, Table, TableRef, Value, number_text, parse_number};
 
 use std::fmt;

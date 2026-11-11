@@ -1,4 +1,4 @@
-use crate::LuaErrorKind;
+use crate::{LuaError, LuaErrorKind};
 use crate::host::{Host, Reply};
 use crate::interpreter::{Interpreter, Native, Unwind, raise};
 use crate::value::{TableRef, Value, number_text};
@@ -193,6 +193,22 @@ fn first_word_is_code(message: &str) -> bool {
     !word.is_empty() && word.bytes().all(|byte| byte.is_ascii_uppercase())
 }
 
+fn error_reply_of(error: LuaError) -> Reply {
+    let message = match error.kind {
+        LuaErrorKind::Syntax => format!(
+            "ERR Error compiling script (new function): user_script:{}: {}",
+            error.line, error.message
+        ),
+        LuaErrorKind::Runtime if error.message.starts_with("user_script:") => format!("ERR {}", error.message),
+        LuaErrorKind::Runtime if first_word_is_code(&error.message) => error.message,
+        LuaErrorKind::Runtime if error.line > 0 => {
+            format!("ERR user_script:{}: {}", error.line, error.message)
+        }
+        LuaErrorKind::Runtime => format!("ERR {}", error.message),
+    };
+    Reply::Error(message.into_bytes())
+}
+
 /// Runs a Redis script: `KEYS` and `ARGV` set from `keys` and `argv`, the `redis` library
 /// sending commands to `host`, at most `step_budget` steps, and the first returned value
 /// turned into a reply. Errors come back as error replies, in Redis's `user_script:LINE:` form.
@@ -203,20 +219,141 @@ pub fn run_script(source: &[u8], keys: &[Vec<u8>], argv: &[Vec<u8>], host: &mut 
     interpreter.set_global("ARGV", byte_table(argv));
     match interpreter.run(source, host, step_budget) {
         Ok(values) => reply_of_value(values.first().unwrap_or(&Value::Nil)),
-        Err(error) => {
-            let message = match error.kind {
-                LuaErrorKind::Syntax => format!(
-                    "ERR Error compiling script (new function): user_script:{}: {}",
-                    error.line, error.message
-                ),
-                LuaErrorKind::Runtime if error.message.starts_with("user_script:") => format!("ERR {}", error.message),
-                LuaErrorKind::Runtime if first_word_is_code(&error.message) => error.message,
-                LuaErrorKind::Runtime if error.line > 0 => {
-                    format!("ERR user_script:{}: {}", error.line, error.message)
+        Err(error) => error_reply_of(error),
+    }
+}
+
+/// A function a library registered with `redis.register_function`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredFunction {
+    /// Its name, unique across the server's libraries.
+    pub name: String,
+    /// The description it was registered with, if any.
+    pub description: Option<String>,
+    /// Its flags (`no-writes`, `allow-oom`, ...), as registered.
+    pub flags: Vec<String>,
+}
+
+const FUNCTION_NAME_RULE: &str =
+    "Function names can only contain letters, numbers, or underscores(_) and must be at least one character long";
+
+fn valid_function_name(name: &[u8]) -> bool {
+    !name.is_empty() && name.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+}
+
+fn register_function(interpreter: &mut Interpreter, _: &mut dyn Host, arguments: Vec<Value>, line: u32) -> Outcome {
+    let (name, callback, description, flags) = match arguments.as_slice() {
+        [name, callback] => (name.clone(), callback.clone(), Value::Nil, Value::Nil),
+        [Value::Table(options)] => (
+            options.get(&Value::string("function_name")),
+            options.get(&Value::string("callback")),
+            options.get(&Value::string("description")),
+            options.get(&Value::string("flags")),
+        ),
+        _ => return raise(line, "wrong number of arguments to redis.register_function"),
+    };
+    let Some(name) = name.to_bytes().filter(|name| valid_function_name(name)) else {
+        return raise(line, FUNCTION_NAME_RULE);
+    };
+    if !matches!(callback, Value::Function(_)) {
+        return raise(line, "callback argument given to redis.register_function must be a function");
+    }
+    let registered = interpreter.registered_functions.clone();
+    let key = Value::String(name.into());
+    if !matches!(registered.get(&key), Value::Nil) {
+        return raise(line, "Function already exists in the library");
+    }
+    let entry = TableRef::new();
+    let _ = entry.set(Value::string("callback"), callback);
+    let _ = entry.set(Value::string("description"), description);
+    let _ = entry.set(Value::string("flags"), flags);
+    let _ = registered.set(key, Value::Table(entry));
+    Ok(Vec::new())
+}
+
+fn library_interpreter() -> Interpreter {
+    let mut interpreter = Interpreter::new();
+    let library = install(&mut interpreter);
+    interpreter.register(&library, "register_function", register_function);
+    interpreter
+}
+
+fn registered_of(interpreter: &Interpreter) -> Result<Vec<RegisteredFunction>, String> {
+    let mut functions = Vec::new();
+    for (name, entry) in interpreter.registered_functions.pairs() {
+        let Value::Table(entry) = entry else { continue };
+        let description = entry.get(&Value::string("description")).to_bytes();
+        let mut flags = Vec::new();
+        match entry.get(&Value::string("flags")) {
+            Value::Nil => {}
+            Value::Table(list) => {
+                for (_, flag) in list.pairs() {
+                    let flag = flag.to_bytes().ok_or("ERR flags argument to redis.register_function must be a table representing function flags")?;
+                    let flag = String::from_utf8_lossy(&flag).into_owned();
+                    if !matches!(flag.as_str(), "no-writes" | "allow-oom" | "allow-stale" | "no-cluster" | "allow-cross-slot-keys") {
+                        return Err("ERR unknown flag given".to_owned());
+                    }
+                    flags.push(flag);
                 }
-                LuaErrorKind::Runtime => format!("ERR {}", error.message),
-            };
-            Reply::Error(message.into_bytes())
+            }
+            _ => return Err("ERR flags argument to redis.register_function must be a table representing function flags".to_owned()),
         }
+        functions.push(RegisteredFunction {
+            name: String::from_utf8_lossy(&name.to_bytes().unwrap_or_default()).into_owned(),
+            description: description.map(|text| String::from_utf8_lossy(&text).into_owned()),
+            flags,
+        });
+    }
+    Ok(functions)
+}
+
+struct LoadingHost;
+
+impl Host for LoadingHost {
+    fn command(&mut self, _arguments: &[Vec<u8>]) -> Reply {
+        Reply::Error(b"ERR redis.call is not allowed while a library loads".to_vec())
+    }
+}
+
+/// Runs a function library's code (without its `#!lua` line) to learn the functions it
+/// registers, as `FUNCTION LOAD` does. Commands cannot be called while it loads.
+pub fn load_library(code: &[u8], step_budget: u64) -> Result<Vec<RegisteredFunction>, String> {
+    let mut interpreter = library_interpreter();
+    if let Err(error) = interpreter.run(code, &mut LoadingHost, step_budget) {
+        let Reply::Error(message) = error_reply_of(error) else {
+            return Err("ERR the library failed to load".to_owned());
+        };
+        return Err(String::from_utf8_lossy(&message).into_owned());
+    }
+    let functions = registered_of(&interpreter)?;
+    if functions.is_empty() {
+        return Err("ERR No functions registered".to_owned());
+    }
+    Ok(functions)
+}
+
+/// Calls `function` of a library as `FCALL` does: the library's code runs again in a fresh
+/// state, then the function is called with the `keys` and `argv` tables and its first returned
+/// value becomes the reply.
+pub fn call_function(
+    code: &[u8],
+    function: &str,
+    keys: &[Vec<u8>],
+    argv: &[Vec<u8>],
+    host: &mut dyn Host,
+    step_budget: u64,
+) -> Reply {
+    let mut interpreter = library_interpreter();
+    if let Err(error) = interpreter.run(code, &mut LoadingHost, step_budget) {
+        return error_reply_of(error);
+    }
+    let entry = interpreter.registered_functions.get(&Value::string(function));
+    let Value::Table(entry) = entry else {
+        return Reply::Error(b"ERR Function not found".to_vec());
+    };
+    let callback = entry.get(&Value::string("callback"));
+    match interpreter.call(&callback, vec![byte_table(keys), byte_table(argv)], host, 0) {
+        Ok(values) => reply_of_value(values.first().unwrap_or(&Value::Nil)),
+        Err(unwind) => error_reply_of(interpreter.error_of(unwind)),
     }
 }
