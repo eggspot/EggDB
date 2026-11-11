@@ -652,3 +652,16 @@ fn secondary_indexes_become_sql_indexes() {
     let (statement, markers) = parse("CREATE INDEX ON t (missing)").unwrap();
     assert!(translate(&statement, markers, Some("ks"), &mut FixedCatalog).is_err());
 }
+
+#[test]
+fn conditional_updates_and_deletes_report_whether_they_applied() {
+    let updated = sql("UPDATE t SET v = v + 1 WHERE k = 'a' AND c = 1 IF EXISTS", &[]);
+    assert!(updated.starts_with("UPDATE \"ks\".\"t\" SET \"v\" = COALESCE(\"v\", 0) + "), "{updated}");
+    assert!(updated.ends_with(" RETURNING 1"), "{updated}");
+    let checked = sql("UPDATE t SET v = 5 WHERE k = 'a' AND c = 1 IF v = 4", &[]);
+    assert!(checked.contains(" AND \"v\" = "), "{checked}");
+    let deleted = sql("DELETE FROM t WHERE k = 'a' AND c = 1 IF EXISTS", &[]);
+    assert!(deleted.starts_with("DELETE FROM") && deleted.ends_with(" RETURNING 1"), "{deleted}");
+    let (statement, markers) = parse("UPDATE t SET v = 1 WHERE k = 'a' IF EXISTS").unwrap();
+    assert!(translate(&statement, markers, Some("ks"), &mut FixedCatalog).is_err());
+}

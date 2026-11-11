@@ -611,3 +611,4 @@ its full title with its status.
 - [D584](decisions/D584.md) Code-only batch 232 (M16): CQL ALTER TABLE
 - [D585](decisions/D585.md) Code-only batch 233 (M16): CQL secondary indexes
 - [D586](decisions/D586.md) Code-only batch 234 (M6b): SQL Server's GRANT and REVOKE
+- [D587](decisions/D587.md) Code-only batch 235 (M16): CQL conditional UPDATE and DELETE

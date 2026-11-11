@@ -180,6 +180,13 @@ pub(crate) enum Operator {
     In,
 }
 
+/// The `IF` of a lightweight transaction on `UPDATE` or `DELETE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Condition {
+    Exists,
+    Columns(Vec<Relation>),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Relation {
     pub(crate) column: String,
@@ -268,11 +275,13 @@ pub(crate) enum Statement {
         table: TableName,
         assignments: Vec<(String, Assignment)>,
         relations: Vec<Relation>,
+        condition: Option<Condition>,
     },
     Delete {
         table: TableName,
         columns: Vec<String>,
         relations: Vec<Relation>,
+        condition: Option<Condition>,
     },
     Select {
         table: TableName,
@@ -716,15 +725,12 @@ impl Parser {
         }
         self.expect_word("where")?;
         let relations = self.relations()?;
-        if self.word_is("if") {
-            return Err(unsupported(
-                "conditional updates (lightweight transactions)",
-            ));
-        }
+        let condition = self.condition()?;
         Ok(Statement::Update {
             table,
             assignments,
             relations,
+            condition,
         })
     }
 
@@ -741,16 +747,23 @@ impl Parser {
         self.using()?;
         self.expect_word("where")?;
         let relations = self.relations()?;
-        if self.word_is("if") {
-            return Err(unsupported(
-                "conditional deletes (lightweight transactions)",
-            ));
-        }
+        let condition = self.condition()?;
         Ok(Statement::Delete {
             table,
             columns,
             relations,
+            condition,
         })
+    }
+
+    fn condition(&mut self) -> Result<Option<Condition>, String> {
+        if !self.eat_word("if") {
+            return Ok(None);
+        }
+        if self.eat_word("exists") {
+            return Ok(Some(Condition::Exists));
+        }
+        Ok(Some(Condition::Columns(self.relations()?)))
     }
 
     fn select(&mut self) -> Result<Statement, String> {

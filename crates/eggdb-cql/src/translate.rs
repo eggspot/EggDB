@@ -1,5 +1,6 @@
 use crate::cql::{
-    Assignment, ColumnDefinition, Operator, Relation, Selection, Statement, TableName, Term,
+    Assignment, ColumnDefinition, Condition, Operator, Relation, Selection, Statement, TableName,
+    Term,
 };
 use crate::types::CqlType;
 
@@ -171,8 +172,17 @@ fn relations(
     info: &TableInfo,
     relations: &[Relation],
 ) -> Result<(), String> {
+    relations_after(builder, info, relations, " WHERE ")
+}
+
+fn relations_after(
+    builder: &mut Builder,
+    info: &TableInfo,
+    relations: &[Relation],
+    first: &str,
+) -> Result<(), String> {
     for (index, relation) in relations.iter().enumerate() {
-        builder.sql(if index == 0 { " WHERE " } else { " AND " });
+        builder.sql(if index == 0 { first } else { " AND " });
         let cql = column(info, &relation.column)?;
         builder.sql(&identifier(&relation.column));
         if relation.operator == Operator::In {
@@ -730,6 +740,7 @@ fn statement(
             table,
             assignments,
             relations: conditions,
+            condition,
         } => {
             let keyspace = keyspace_of(table, current)?;
             let info = catalog.table(&keyspace, &table.table)?;
@@ -740,19 +751,44 @@ fn statement(
                 column(&info, name)?;
             }
             let keys = key_terms(&info, conditions)?;
-            upsert(
-                builder,
-                &info,
-                &qualified(&keyspace, &table.table),
-                &keys,
-                assignments,
-            )?;
-            (Outcome::Void, keyspace, table.table.clone())
+            let target = qualified(&keyspace, &table.table);
+            let Some(condition) = condition else {
+                upsert(builder, &info, &target, &keys, assignments)?;
+                return Ok((Outcome::Void, keyspace, table.table.clone()));
+            };
+            builder.sql(&format!("UPDATE {target} SET "));
+            for (at, (name, assignment)) in assignments.iter().enumerate() {
+                if at > 0 {
+                    builder.sql(", ");
+                }
+                let cql = column(&info, name)?;
+                match assignment {
+                    Assignment::Set(term) => {
+                        builder.sql(&format!("{} = ", identifier(name)));
+                        builder.term(term, name, cql)?;
+                    }
+                    Assignment::Add(term) => {
+                        builder.sql(&format!("{0} = COALESCE({0}, 0) + ", identifier(name)));
+                        builder.term(term, name, cql)?;
+                    }
+                }
+            }
+            relations(builder, &info, conditions)?;
+            if let Condition::Columns(checks) = condition {
+                relations_after(builder, &info, checks, " AND ")?;
+            }
+            builder.sql(" RETURNING 1");
+            (
+                Outcome::Applied(keyspace.clone(), table.table.clone()),
+                keyspace,
+                table.table.clone(),
+            )
         }
         Statement::Delete {
             table,
             columns,
             relations: conditions,
+            condition,
         } => {
             let keyspace = keyspace_of(table, current)?;
             let info = catalog.table(&keyspace, &table.table)?;
@@ -773,7 +809,21 @@ fn statement(
                 builder.sql(&format!("UPDATE {target} SET {}", cleared.join(", ")));
             }
             relations(builder, &info, conditions)?;
-            (Outcome::Void, keyspace, table.table.clone())
+            match condition {
+                None => (Outcome::Void, keyspace, table.table.clone()),
+                Some(condition) => {
+                    key_terms(&info, conditions)?;
+                    if let Condition::Columns(checks) = condition {
+                        relations_after(builder, &info, checks, " AND ")?;
+                    }
+                    builder.sql(" RETURNING 1");
+                    (
+                        Outcome::Applied(keyspace.clone(), table.table.clone()),
+                        keyspace,
+                        table.table.clone(),
+                    )
+                }
+            }
         }
         Statement::Select {
             table,
