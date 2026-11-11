@@ -307,6 +307,57 @@ const NAMED_PARAMETERS: [(&str, &[&str]); 5] = [
     ),
 ];
 
+fn time_ordered_pick(name: Name, arguments: Vec<Expr>) -> Expr {
+    let position = name.position;
+    let last = name.text == "last";
+    let mut arguments = arguments.into_iter();
+    let (Some(value), Some(time)) = (arguments.next(), arguments.next()) else {
+        return Expr {
+            kind: ExprKind::Literal(Literal::Null),
+            position,
+        };
+    };
+    let order = vec![crate::ast::OrderItem {
+        expr: time.clone(),
+        descending: false,
+        nulls_first: Some(last),
+    }];
+    let gathered = |column: Expr| Expr {
+        kind: ExprKind::Aggregate {
+            function: AggregateFunction::ArrayAgg,
+            argument: Some(Box::new(crate::aggregate::ordered_arguments(
+                column,
+                order.clone(),
+            ))),
+            distinct: false,
+        },
+        position,
+    };
+    let picked = if last {
+        AggregateFunction::Max
+    } else {
+        AggregateFunction::Min
+    };
+    Expr {
+        kind: ExprKind::OracleFunction {
+            name: "oracle_keep",
+            arguments: vec![
+                Expr {
+                    kind: ExprKind::Literal(Literal::String(picked.name().to_owned())),
+                    position,
+                },
+                Expr {
+                    kind: ExprKind::Literal(Literal::Boolean(last)),
+                    position,
+                },
+                gathered(value),
+                gathered(time),
+            ],
+        },
+        position,
+    }
+}
+
 const INTERNAL_FUNCTIONS: [&str; 35] = [
     crate::row_values::ROW_ORDERING,
     crate::row_values::ROW_MEMBERSHIP,
@@ -5149,6 +5200,15 @@ impl<'t> Parser<'t> {
                 }
             }
             self.expect(&TokenKind::RightParen)?;
+        }
+        if self.postgresql()
+            && named.is_empty()
+            && arguments.len() == 2
+            && matches!(name.text.as_str(), "first" | "last")
+            && !self.is_word("over")
+            && !self.is_word("filter")
+        {
+            return Ok(time_ordered_pick(name, arguments));
         }
         if self.is_word("over")
             && named.is_empty()

@@ -1103,7 +1103,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - ClickBench-style queries and TPC-H against DuckDB and ClickHouse in the compare job (D7, D201).
 - Analytical replicas: columnar copies kept in step with row tables (HTAP) (D18).
 - Gap filling, `first` and `last`, and hypertables partitioned by time automatically (D202,
-  PR #86).
+  PR #86). `first` and `last`: **code written, unbuilt** (code-only mode, 2026-11-11, D435).
 - Retention, downsampling and continuous aggregates for time series and observability data (D39,
   D202, D220). Check: a TSBS benchmark.
 - ASOF and window joins (D50, D243).
