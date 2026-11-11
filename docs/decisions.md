@@ -676,3 +676,4 @@ its full title with its status.
 - [D649](decisions/D649.md) Code-only batch 297 (M8): a German stemmer and the german text-search configuration
 - [D650](decisions/D650.md) Code-only batch 298 (M8): a Spanish stemmer and the spanish text-search configuration
 - [D651](decisions/D651.md) Code-only batch 299 (M8): Swedish, Norwegian and Danish stemmers
+- [D652](decisions/D652.md) Code-only batch 300 (M8): an Italian stemmer and the italian text-search configuration

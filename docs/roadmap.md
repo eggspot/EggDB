@@ -978,8 +978,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Stemmers for every major language, and word segmentation for Chinese, Japanese, Korean and Thai
   (D30). German (`german` configuration): **code written, unbuilt** (code-only mode, 2026-11-12, D649);
   Spanish (`spanish`): **code written, unbuilt** (code-only mode, 2026-11-12, D650); Swedish, Norwegian
-  and Danish: **code written, unbuilt** (code-only mode, 2026-11-12, D651).
-  Left: the other languages and word segmentation.
+  and Danish: **code written, unbuilt** (code-only mode, 2026-11-12, D651); Italian: **code written, unbuilt**
+  (code-only mode, 2026-11-12, D652). Left: French, Portuguese, Dutch, Russian, Finnish and the others, and
+  word segmentation.
 - Synonyms, stop words, and fuzzy and phonetic matching (D30). Fuzzy and phonetic functions:
   **code written, unbuilt** (code-only mode, 2026-11-11, D470).
 - MySQL's `MATCH ... AGAINST` with `FULLTEXT` keys, SQL Server's `CONTAINS` and `FREETEXT`, and
