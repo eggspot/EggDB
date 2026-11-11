@@ -2087,6 +2087,7 @@ pub(crate) enum AggregateFunction {
     PercentileCont,
     PercentileDisc,
     Mode,
+    ApproxPercentileCont,
     ApproxCountDistinct,
     Stddev,
     StddevSamp,
@@ -2117,7 +2118,7 @@ pub(crate) enum AggregateFunction {
 }
 
 impl AggregateFunction {
-    pub(crate) const ALL: [Self; 44] = [
+    pub(crate) const ALL: [Self; 45] = [
         Self::Count,
         Self::Sum,
         Self::Avg,
@@ -2135,6 +2136,7 @@ impl AggregateFunction {
         Self::PercentileCont,
         Self::PercentileDisc,
         Self::Mode,
+        Self::ApproxPercentileCont,
         Self::ApproxCountDistinct,
         Self::Stddev,
         Self::StddevSamp,
@@ -2237,7 +2239,8 @@ impl AggregateFunction {
 
     pub(crate) fn ordered_set_named(name: &str) -> Option<Self> {
         Some(match name {
-            "percentile_cont" | "approx_percentile_cont" | "approx_percentile" => Self::PercentileCont,
+            "percentile_cont" => Self::PercentileCont,
+            "approx_percentile_cont" | "approx_percentile" => Self::ApproxPercentileCont,
             "percentile_disc" | "approx_percentile_disc" => Self::PercentileDisc,
             "mode" => Self::Mode,
             _ => return None,
@@ -2247,7 +2250,7 @@ impl AggregateFunction {
     pub(crate) fn is_ordered_set(self) -> bool {
         matches!(
             self,
-            Self::PercentileCont | Self::PercentileDisc | Self::Mode
+            Self::PercentileCont | Self::PercentileDisc | Self::Mode | Self::ApproxPercentileCont
         )
     }
 
@@ -2297,6 +2300,7 @@ impl AggregateFunction {
             Self::PercentileCont => "percentile_cont",
             Self::PercentileDisc => "percentile_disc",
             Self::Mode => "mode",
+            Self::ApproxPercentileCont => "approx_percentile_cont",
             Self::Stddev => "stddev",
             Self::StddevSamp => "stddev_samp",
             Self::StddevPop => "stddev_pop",

@@ -644,3 +644,4 @@ its full title with its status.
 - [D617](decisions/D617.md) Code-only batch 265 (M16): Ed25519 and NATS NKey authentication
 - [D618](decisions/D618.md) Code-only batch 266 (M10): MySQL's information_schema.TRIGGERS
 - [D619](decisions/D619.md) Code-only batch 267 (M10): CASE, loops and labels in MySQL trigger bodies
+- [D620](decisions/D620.md) Code-only batch 268 (M5): t-digest sketches for APPROX_PERCENTILE_CONT

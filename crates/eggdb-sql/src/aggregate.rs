@@ -408,6 +408,7 @@ fn result_type(function: AggregateFunction, argument: Option<SqlType>) -> Option
             Some(SqlType::Interval { .. }) => argument,
             _ => Some(SqlType::Double),
         },
+        AggregateFunction::ApproxPercentileCont => Some(SqlType::Double),
         AggregateFunction::PercentileDisc | AggregateFunction::Mode => {
             argument.map(SqlType::without_modifier)
         }
@@ -558,6 +559,10 @@ fn check_argument_type(function: AggregateFunction, sql_type: SqlType) -> SqlRes
         {
             Err(crate::arrays::unsupported_element(sql_type))
         }
+        AggregateFunction::ApproxPercentileCont if !sql_type.is_numeric() => Err(undefined_aggregate(
+            function,
+            &format!("double precision ORDER BY {}", name()),
+        )),
         AggregateFunction::PercentileCont
             if !sql_type.is_numeric() && !matches!(sql_type, SqlType::Interval { .. }) =>
         {
@@ -1099,6 +1104,7 @@ pub(crate) enum Accumulator {
     Collected { values: Vec<Value>, bytes: usize },
     Truth(Option<bool>),
     Ordered(Vec<OrderedInput>),
+    Digest(Box<crate::tdigest::TDigest>),
     Sketch(crate::hyperloglog::Sketch),
     Moments(crate::statistical_aggregates::Moments),
     Standing(crate::hypothetical_set::Standing),
@@ -1120,6 +1126,7 @@ impl Accumulator {
             Self::Extreme(value) | Self::Joined(Some(value)) => crate::memory::held_bytes(value),
             Self::JsonParts(Some(text)) => text.len(),
             Self::Sketch(_) => crate::hyperloglog::Sketch::BYTES,
+            Self::Digest(_) => crate::tdigest::TDigest::BYTES,
             Self::Standing(standing) => standing.held_bytes(),
             Self::Collected { bytes, .. } => *bytes,
             Self::Ordered(inputs) => inputs
@@ -1150,6 +1157,9 @@ fn add_float(total: f64, value: f64) -> SqlResult<f64> {
 
 impl Call {
     fn start(&self) -> Accumulator {
+        if self.function == AggregateFunction::ApproxPercentileCont {
+            return Accumulator::Digest(Box::default());
+        }
         if self.function.is_ordered_set()
             || self
                 .argument
@@ -1512,7 +1522,8 @@ impl Call {
             }
             Accumulator::Sketch(sketch) => sketch.add(&value),
             Accumulator::Moments(moments) => moments.add(&value)?,
-            Accumulator::Joined(_)
+            Accumulator::Digest(_)
+            | Accumulator::Joined(_)
             | Accumulator::JsonParts(_)
             | Accumulator::Ordered(_)
             | Accumulator::Standing(_)
@@ -1632,6 +1643,18 @@ impl Call {
             }
             Accumulator::Truth(state) => state.map_or(Value::Null, Value::Boolean),
             Accumulator::Sketch(sketch) => Value::BigInt(sketch.estimate()),
+            Accumulator::Digest(mut digest) => {
+                let Some(fraction) = digest.fraction else {
+                    return Ok(Value::Null);
+                };
+                if !(0.0..=1.0).contains(&fraction) {
+                    return Err(SqlError::new(
+                        SqlState::NUMERIC_VALUE_OUT_OF_RANGE,
+                        format!("percentile value {fraction} is not between 0 and 1"),
+                    ));
+                }
+                digest.quantile(fraction).map_or(Value::Null, Value::Double)
+            }
             Accumulator::Ordered(inputs) => self.finish_ordered(inputs)?,
             Accumulator::Moments(moments) => moments.finish(self.function)?,
             Accumulator::Standing(standing) => standing.result(self.function),
@@ -2017,12 +2040,21 @@ impl Grouping {
                         .iter()
                         .map(|key| evaluator.eval(key, None))
                         .collect::<SqlResult<Vec<Value>>>()?;
-                    if let Accumulator::Ordered(inputs) = accumulator {
-                        inputs.push(OrderedInput {
+                    match accumulator {
+                        Accumulator::Ordered(inputs) => inputs.push(OrderedInput {
                             keys,
                             value,
                             extra: delimiter,
-                        });
+                        }),
+                        Accumulator::Digest(digest) => {
+                            if digest.fraction.is_none() {
+                                digest.fraction = delimiter.as_ref().and_then(Value::as_float);
+                            }
+                            if let Some(number) = value.as_float() {
+                                digest.add(number);
+                            }
+                        }
+                        _ => {}
                     }
                     Ok(())
                 }

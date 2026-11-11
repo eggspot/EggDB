@@ -192,6 +192,7 @@ mod subquery;
 mod table_variables;
 mod temp_tables;
 mod temporal;
+mod tdigest;
 mod temporary;
 mod tenancy;
 mod mysql_fulltext;
