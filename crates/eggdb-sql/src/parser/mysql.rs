@@ -902,7 +902,7 @@ impl<'t> Parser<'t> {
             }
             assignments.push((name, self.expression()?));
             if !self.take(&TokenKind::Comma) {
-                return Ok(OnDuplicate::Update(assignments));
+                return Ok(OnDuplicate::Update(assignments, None));
             }
         }
     }

@@ -1828,7 +1828,7 @@ pub(crate) enum OnDuplicate {
     Fail,
     Ignore,
     Replace,
-    Update(Vec<(Name, Expr)>),
+    Update(Vec<(Name, Expr)>, Option<Expr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

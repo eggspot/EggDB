@@ -375,7 +375,7 @@ impl<'a> Resolver<'a> {
             return Ok(());
         }
         let (command, form) = match action {
-            OnDuplicate::Update(assignments) => {
+            OnDuplicate::Update(assignments, _) => {
                 let written: Vec<String> = assignments
                     .iter()
                     .map(|(name, _)| name.text.clone())
@@ -1567,8 +1567,9 @@ impl Binding<'_> {
             resolver.expressions(values)?;
         }
         let mut reads: Vec<&mut Expr> = Vec::new();
-        if let OnDuplicate::Update(assignments) = &mut insert.on_duplicate {
+        if let OnDuplicate::Update(assignments, filter) = &mut insert.on_duplicate {
             reads.extend(assignments.iter_mut().map(|(_, expr)| expr));
+            reads.extend(filter.as_mut());
         }
         let conflict_columns: Vec<Name> = insert
             .conflict_target

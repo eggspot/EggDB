@@ -622,7 +622,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   unbuilt** (D391).
 - Partial unique indexes and indexes on expressions, and their `ON CONFLICT` inference (the
   predicate implying the index's, `ON CONFLICT (lower(email))`); `COLLATE` and operator classes on
-  conflict target columns; `DO UPDATE ... WHERE` (D324).
+  conflict target columns; `DO UPDATE ... WHERE` (D324). `DO UPDATE ... WHERE`: **code written,
+  unbuilt** (code-only mode, 2026-11-11, D466).
 - SQL/JSON: `json_populate_record` in a select list and with a column alias list, a table's own
   row type as its base row, and `JSON_TABLE`'s `PLAN` clause; a non-NULL base row is built (D289,
   D302).

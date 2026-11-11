@@ -644,7 +644,7 @@ fn updated_tables(update: &Update) -> Vec<String> {
 
 fn inserted(insert: &Insert, keys: &mut CatalogLookup<'_>) -> Option<DestructiveStatement> {
     let found = match insert.on_duplicate {
-        OnDuplicate::Replace | OnDuplicate::Update(_) => Some(DestructiveStatement::new(
+        OnDuplicate::Replace | OnDuplicate::Update(..) => Some(DestructiveStatement::new(
             DestructiveKind::InsertOverwritingRows,
             vec![shown(&insert.table.name)],
             false,
@@ -663,9 +663,12 @@ fn inserted(insert: &Insert, keys: &mut CatalogLookup<'_>) -> Option<Destructive
         InsertSource::Query(query) => query_user_functions(query, keys, &mut functions),
         InsertSource::DefaultValues => {}
     }
-    if let OnDuplicate::Update(assignments) = &insert.on_duplicate {
+    if let OnDuplicate::Update(assignments, filter) = &insert.on_duplicate {
         for (_, expr) in assignments {
             user_functions(expr, keys, &mut functions);
+        }
+        if let Some(filter) = filter {
+            user_functions(filter, keys, &mut functions);
         }
     }
     returning_user_functions(insert.returning.as_deref(), keys, &mut functions);

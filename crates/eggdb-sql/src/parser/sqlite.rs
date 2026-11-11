@@ -727,13 +727,17 @@ impl<'t> Parser<'t> {
                 break;
             }
         }
-        if self.is_word("where") {
-            return Err(self.not_supported("DO UPDATE ... WHERE"));
-        }
+        let filter = if self.take_word("where") {
+            let mut filter = self.expression()?;
+            point_excluded_values(&mut filter);
+            Some(filter)
+        } else {
+            None
+        };
         if self.is_word("on") {
             return Err(self.not_supported("more than one ON CONFLICT clause"));
         }
-        Ok((OnDuplicate::Update(assignments), target))
+        Ok((OnDuplicate::Update(assignments, filter), target))
     }
 
     fn conflict_inference(&mut self) -> SqlResult<ConflictTarget> {

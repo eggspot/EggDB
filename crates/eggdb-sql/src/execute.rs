@@ -1392,9 +1392,15 @@ fn insert_rows(
         row: &[],
         correlation: None,
     };
-    let updates = match &insert.on_duplicate {
-        OnDuplicate::Update(assignments) => Some(resolved_updates(&table, scope, assignments)?),
-        _ => None,
+    let (updates, update_filter) = match &insert.on_duplicate {
+        OnDuplicate::Update(assignments, filter) => (
+            Some(resolved_updates(&table, scope, assignments)?),
+            filter
+                .as_ref()
+                .map(|filter| resolved_update_filter(&table, scope, filter))
+                .transpose()?,
+        ),
+        _ => (None, None),
     };
     let arbiter = match &insert.conflict_target {
         Some(target) => Some(ConflictArbiter::of(
@@ -1548,7 +1554,7 @@ fn insert_rows(
                             stored.forget_generated_ids();
                         }
                     }
-                    (OnDuplicate::Update(_), Some(updates)) => {
+                    (OnDuplicate::Update(..), Some(updates)) => {
                         if let Some(changed) = changed_once.as_mut()
                             && !changed.insert(conflict.row_key.clone())
                         {
@@ -1556,6 +1562,7 @@ fn insert_rows(
                         }
                         let upsert = Upsert {
                             updates,
+                            filter: update_filter.as_ref(),
                             inserted: &row,
                             existing_key: &conflict.row_key,
                         };
@@ -1802,6 +1809,18 @@ fn resolved_updates(
         updates.push((index, expr));
     }
     Ok(updates)
+}
+
+fn resolved_update_filter(
+    table: &TableDefinition,
+    scope: Scope<'_>,
+    filter: &Expr,
+) -> SqlResult<Expr> {
+    let mut filter = filter.clone();
+    point_inserted_values(&mut filter, table)?;
+    reject_aggregates(&filter, "ON CONFLICT DO UPDATE ... WHERE")?;
+    check_columns(&filter, scope)?;
+    Ok(filter)
 }
 
 fn point_inserted_values(expr: &mut Expr, table: &TableDefinition) -> SqlResult<()> {
@@ -2220,6 +2239,7 @@ impl<'a> StoredRows<'a> {
     ) -> SqlResult<UpsertOutcome> {
         let Upsert {
             updates,
+            filter,
             inserted,
             existing_key,
         } = upsert;
@@ -2230,6 +2250,17 @@ impl<'a> StoredRows<'a> {
         let existing = decode_row(&existing_bytes, &table.columns)?;
         let mut combined = existing.clone();
         combined.extend_from_slice(inserted);
+        if let Some(filter) = filter {
+            let passes = Evaluator {
+                scope,
+                row: &combined,
+                correlation: None,
+            }
+            .eval(filter, Some(SqlType::Boolean))?;
+            if passes != Value::Boolean(true) {
+                return Ok(UpsertOutcome::Skipped);
+            }
+        }
         for (index, expr) in updates {
             if table.is_generated(*index) {
                 return Err(crate::generated_columns::written(table, *index, true));
@@ -4831,6 +4862,7 @@ pub(crate) type ReturnedRows = (Vec<OutputColumn>, Vec<Vec<Value>>);
 
 struct Upsert<'u> {
     updates: &'u [(usize, Expr)],
+    filter: Option<&'u Expr>,
     inserted: &'u [Value],
     existing_key: &'u [u8],
 }
