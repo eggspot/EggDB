@@ -21,6 +21,9 @@ const QUOTA_EXCEEDED: u8 = 0x97;
 const MAX_STORED_SESSIONS: usize = 10_000;
 const MAX_QUEUED_MESSAGES: usize = 1_000;
 const MAX_INFLIGHT: usize = 1_000;
+const SESSIONS_DATABASE: u32 = 1;
+const SESSION_FORMAT: u8 = 1;
+const MAX_STORED_BYTES: usize = 64 << 20;
 const LONGEST_SESSION: Duration = Duration::from_secs(7 * 24 * 3600);
 const DUP_FLAG: u8 = 0x08;
 const IDENTIFIER_REJECTED_V4: u8 = 0x02;
@@ -198,9 +201,22 @@ impl<'k> Broker<'k> {
         Self {
             keyspace,
             subscribers: Mutex::new(BTreeMap::new()),
-            sessions: Mutex::new(BTreeMap::new()),
+            sessions: Mutex::new(load_sessions(keyspace)),
             shared_turn: AtomicUsize::new(0),
         }
+    }
+
+    fn save_session(&self, client: &str, session: &StoredSession) {
+        let bytes = encode_session(session);
+        let _ = self.keyspace.write(SESSIONS_DATABASE, &mut |keys| {
+            keys.put(client.as_bytes(), &bytes)
+        });
+    }
+
+    fn drop_saved_session(&self, client: &str) {
+        let _ = self.keyspace.write(SESSIONS_DATABASE, &mut |keys| {
+            keys.delete(client.as_bytes()).map(drop)
+        });
     }
 
     fn stored(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, StoredSession>> {
@@ -221,16 +237,15 @@ impl<'k> Broker<'k> {
         if sessions.len() >= MAX_STORED_SESSIONS && !sessions.contains_key(&subscriber.client) {
             return;
         }
-        sessions.insert(
-            subscriber.client,
-            StoredSession {
-                filters: subscriber.filters,
-                inflight: subscriber.inflight,
-                queued: VecDeque::new(),
-                next_id: subscriber.next_id,
-                expires_at: now + keep_for,
-            },
-        );
+        let session = StoredSession {
+            filters: subscriber.filters,
+            inflight: subscriber.inflight,
+            queued: VecDeque::new(),
+            next_id: subscriber.next_id,
+            expires_at: now + keep_for,
+        };
+        self.save_session(&subscriber.client, &session);
+        sessions.insert(subscriber.client, session);
     }
 
     fn end_session(&self, id: u64) {
@@ -242,6 +257,7 @@ impl<'k> Broker<'k> {
 
     fn forget_session(&self, client: &str) {
         self.stored().remove(client);
+        self.drop_saved_session(client);
     }
 
     fn take_over(&self, client: &str) {
@@ -261,7 +277,11 @@ impl<'k> Broker<'k> {
 
     fn resume(&self, id: u64, client: &str, writer: &SharedWriter, version: u8, keep_for: Duration) -> Option<Vec<Vec<u8>>> {
         let now = Instant::now();
-        let stored = self.stored().remove(client).filter(|session| session.expires_at > now)?;
+        let stored = self.stored().remove(client);
+        if stored.is_some() {
+            self.drop_saved_session(client);
+        }
+        let stored = stored.filter(|session| session.expires_at > now)?;
         let mut subscriber = Subscriber {
             filters: stored.filters,
             writer: Arc::clone(writer),
@@ -317,7 +337,8 @@ impl<'k> Broker<'k> {
         let mut sessions = self.stored();
         let now = Instant::now();
         sessions.retain(|_, session| session.expires_at > now);
-        for session in sessions.values_mut() {
+        let mut changed = Vec::new();
+        for (client, session) in sessions.iter_mut() {
             let Some(granted) = direct_grant(&session.filters, topic) else {
                 continue;
             };
@@ -334,6 +355,12 @@ impl<'k> Broker<'k> {
                 qos,
                 properties: properties.to_vec(),
             });
+            changed.push(client.clone());
+        }
+        for client in changed {
+            if let Some(session) = sessions.get(&client) {
+                self.save_session(&client, session);
+            }
         }
     }
 
@@ -1046,5 +1073,188 @@ struct ReadHalf(TcpStream);
 impl Read for ReadHalf {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         self.0.read(buffer)
+    }
+}
+
+fn epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+}
+
+fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&u32::try_from(bytes.len()).unwrap_or(u32::MAX).to_be_bytes());
+    out.extend_from_slice(bytes);
+}
+
+fn put_message(out: &mut Vec<u8>, message: &Message) {
+    put_bytes(out, message.topic.as_bytes());
+    put_bytes(out, &message.payload);
+    out.push(message.qos);
+    put_bytes(out, &message.properties);
+}
+
+/// A kept session as the file stores it: a format byte, when it expires (milliseconds since
+/// 1970), the next packet id, the filters with their granted QoS, the unacknowledged messages
+/// with their packet ids, and the queued messages.
+fn encode_session(session: &StoredSession) -> Vec<u8> {
+    let remaining = session.expires_at.saturating_duration_since(Instant::now());
+    let expires = epoch_millis().saturating_add(u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX));
+    let mut out = vec![SESSION_FORMAT];
+    out.extend_from_slice(&expires.to_be_bytes());
+    out.extend_from_slice(&session.next_id.to_be_bytes());
+    out.extend_from_slice(&u32::try_from(session.filters.len()).unwrap_or(0).to_be_bytes());
+    for (filter, granted) in &session.filters {
+        put_bytes(&mut out, filter.as_bytes());
+        out.push(*granted);
+    }
+    out.extend_from_slice(&u32::try_from(session.inflight.len()).unwrap_or(0).to_be_bytes());
+    for (packet_id, (message, released)) in &session.inflight {
+        out.extend_from_slice(&packet_id.to_be_bytes());
+        out.push(u8::from(*released));
+        put_message(&mut out, message);
+    }
+    out.extend_from_slice(&u32::try_from(session.queued.len()).unwrap_or(0).to_be_bytes());
+    for message in &session.queued {
+        put_message(&mut out, message);
+    }
+    out
+}
+
+struct SessionReader<'b> {
+    bytes: &'b [u8],
+    at: usize,
+}
+
+impl<'b> SessionReader<'b> {
+    fn take(&mut self, count: usize) -> Option<&'b [u8]> {
+        let taken = self.bytes.get(self.at..self.at.checked_add(count)?)?;
+        self.at += count;
+        Some(taken)
+    }
+
+    fn u8(&mut self) -> Option<u8> {
+        self.take(1).map(|bytes| bytes[0])
+    }
+
+    fn u16(&mut self) -> Option<u16> {
+        Some(u16::from_be_bytes(self.take(2)?.try_into().ok()?))
+    }
+
+    fn u32(&mut self) -> Option<usize> {
+        usize::try_from(u32::from_be_bytes(self.take(4)?.try_into().ok()?)).ok()
+    }
+
+    fn u64(&mut self) -> Option<u64> {
+        Some(u64::from_be_bytes(self.take(8)?.try_into().ok()?))
+    }
+
+    fn bytes(&mut self) -> Option<Vec<u8>> {
+        let length = self.u32()?;
+        self.take(length).map(<[u8]>::to_vec)
+    }
+
+    fn message(&mut self) -> Option<Message> {
+        Some(Message {
+            topic: String::from_utf8(self.bytes()?).ok()?,
+            payload: self.bytes()?,
+            qos: self.u8()?,
+            properties: self.bytes()?,
+        })
+    }
+}
+
+fn decode_session(bytes: &[u8]) -> Option<StoredSession> {
+    if bytes.len() > MAX_STORED_BYTES {
+        return None;
+    }
+    let mut reader = SessionReader { bytes, at: 0 };
+    if reader.u8()? != SESSION_FORMAT {
+        return None;
+    }
+    let expires = reader.u64()?;
+    let remaining = Duration::from_millis(expires.checked_sub(epoch_millis())?);
+    let next_id = reader.u16()?;
+    let filter_count = reader.u32()?;
+    let mut filters = Vec::with_capacity(filter_count.min(1024));
+    for _ in 0..filter_count {
+        filters.push((String::from_utf8(reader.bytes()?).ok()?, reader.u8()?));
+    }
+    let inflight_count = reader.u32()?;
+    let mut inflight = BTreeMap::new();
+    for _ in 0..inflight_count {
+        let packet_id = reader.u16()?;
+        let released = reader.u8()? != 0;
+        inflight.insert(packet_id, (reader.message()?, released));
+    }
+    let queued_count = reader.u32()?;
+    let mut queued = VecDeque::new();
+    for _ in 0..queued_count {
+        queued.push_back(reader.message()?);
+    }
+    (reader.at == bytes.len()).then(|| StoredSession {
+        filters,
+        inflight,
+        queued,
+        next_id,
+        expires_at: Instant::now() + remaining,
+    })
+}
+
+/// The sessions kept in the file by an earlier run, those not yet expired, up to the most a
+/// broker keeps; a damaged one is left out.
+fn load_sessions(keyspace: &dyn Keyspace) -> BTreeMap<String, StoredSession> {
+    let mut sessions = BTreeMap::new();
+    let _ = keyspace.read(SESSIONS_DATABASE, &mut |keys| {
+        for (client, bytes) in keys.scan(b"")? {
+            if sessions.len() >= MAX_STORED_SESSIONS {
+                break;
+            }
+            if let (Ok(client), Some(session)) = (String::from_utf8(client), decode_session(&bytes)) {
+                sessions.insert(client, session);
+            }
+        }
+        Ok(())
+    });
+    sessions
+}
+
+
+#[cfg(test)]
+mod session_store_tests {
+    use super::*;
+
+    #[test]
+    fn a_kept_session_round_trips_through_its_stored_form() {
+        let message = |topic: &str| Message {
+            topic: topic.to_owned(),
+            payload: b"payload".to_vec(),
+            qos: 1,
+            properties: vec![1, 2],
+        };
+        let mut inflight = BTreeMap::new();
+        inflight.insert(7, (message("a/b"), true));
+        let session = StoredSession {
+            filters: vec![("a/#".to_owned(), 1), ("c".to_owned(), 2)],
+            inflight,
+            queued: VecDeque::from([message("a/c")]),
+            next_id: 8,
+            expires_at: Instant::now() + Duration::from_secs(600),
+        };
+        let decoded = decode_session(&encode_session(&session)).expect("the session decodes");
+        assert_eq!(decoded.filters, session.filters);
+        assert_eq!(decoded.next_id, 8);
+        assert_eq!(decoded.inflight.len(), 1);
+        assert!(decoded.inflight[&7].1);
+        assert_eq!(decoded.queued[0].topic, "a/c");
+        let bytes = encode_session(&session);
+        for cut in 0..bytes.len() {
+            assert!(decode_session(&bytes[..cut]).is_none());
+        }
+        let expired = StoredSession {
+            expires_at: Instant::now(),
+            ..session
+        };
+        assert!(decode_session(&encode_session(&expired)).is_none_or(|kept| kept.expires_at <= Instant::now() + Duration::from_secs(1)));
     }
 }
