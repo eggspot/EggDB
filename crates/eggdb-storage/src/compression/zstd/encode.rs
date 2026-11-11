@@ -149,6 +149,11 @@ fn compressed_body(sequences: &[Sequence], literals: &[u8]) -> Vec<u8> {
     let mut body = Vec::with_capacity(literals.len() + sequences.len() * 4 + 16);
     literals_header(&mut body, literals.len());
     body.extend_from_slice(literals);
+    if let Some(section) = super::encode_huffman::compressed_literals(literals)
+        && section.len() < body.len()
+    {
+        body = section;
+    }
     let count = sequences.len();
     if count < 128 {
         body.push(count as u8);

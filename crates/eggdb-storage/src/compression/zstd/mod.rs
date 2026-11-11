@@ -1,6 +1,7 @@
 mod bits;
 mod decode;
 mod encode;
+mod encode_huffman;
 mod fse;
 mod huffman;
 mod tables;
@@ -11,7 +12,8 @@ const BLOCK_MAXIMUM: usize = 128 * 1024;
 
 /// Compresses `input` into one Zstandard frame of RFC 8878: a single segment with the content
 /// size and checksum, raw, RLE or compressed blocks of at most 128 KiB, the compressed ones with
-/// raw literals and sequences coded with the predefined distributions.
+/// Huffman-coded literals (raw when that does not pay) and sequences coded with the predefined
+/// distributions.
 pub(crate) fn compress(input: &[u8]) -> Vec<u8> {
     encode::compress(input)
 }

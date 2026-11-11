@@ -112,3 +112,32 @@ fn a_damaged_checksum_is_refused() {
     frame[last] ^= 1;
     assert!(decompress(&frame, 42).is_err());
 }
+
+fn letters(length: usize, seed: u64) -> Vec<u8> {
+    pseudo_random(length, seed)
+        .into_iter()
+        .map(|byte| b'a' + byte % 26)
+        .collect()
+}
+
+#[test]
+fn literals_are_huffman_coded_when_that_pays() {
+    for length in [40, 900, 5_000, 140_000] {
+        let input = letters(length, 11);
+        let frame = compress(&input);
+        assert_eq!(decompress(&frame, input.len()).unwrap(), input);
+        if length >= 900 {
+            assert!(frame.len() * 10 < input.len() * 7, "{length}: {}", frame.len());
+        }
+    }
+    let mut skewed = letters(20_000, 5);
+    for (at, byte) in skewed.iter_mut().enumerate() {
+        if at % 3 != 0 {
+            *byte = b'e';
+        }
+    }
+    round_trip(&skewed);
+    let high: Vec<u8> = pseudo_random(3_000, 9).into_iter().map(|byte| byte | 0x80).collect();
+    round_trip(&high);
+    round_trip(b"ab");
+}
