@@ -1432,7 +1432,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - CQL secondary indexes, materialized views, `ALTER TABLE`, schema events and prepared statements
   shared between connections (D218). Prepared statements shared between connections:
   **code written, unbuilt** (code-only mode, 2026-11-12, D583). `ALTER TABLE`: **code written, unbuilt** (code-only
-  mode, 2026-11-12, D584).
+  mode, 2026-11-12, D584). Secondary indexes: **code written, unbuilt** (code-only
+  mode, 2026-11-12, D585).
 - A benchmark against ScyllaDB and Cassandra (D7, D218).
 - DynamoDB, after D58's legal check: secondary indexes, filter and projection expressions,
   batches, transactions, streams, TTL, all conditions, and PartiQL (D48, D241).

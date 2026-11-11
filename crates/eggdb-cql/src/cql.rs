@@ -247,6 +247,16 @@ pub(crate) enum Statement {
         table: TableName,
         change: AlterChange,
     },
+    CreateIndex {
+        name: Option<String>,
+        table: TableName,
+        column: String,
+        if_not_exists: bool,
+    },
+    DropIndex {
+        index: TableName,
+        if_exists: bool,
+    },
     Truncate(TableName),
     Insert {
         table: TableName,
@@ -503,9 +513,43 @@ impl Parser {
                 if_not_exists,
             });
         }
+        let custom = self.eat_word("custom");
+        if self.eat_word("index") {
+            let if_not_exists = self.if_not_exists()?;
+            let name = if self.eat_word("on") {
+                None
+            } else {
+                let name = self.identifier()?;
+                self.expect_word("on")?;
+                Some(name)
+            };
+            let table = self.table_name()?;
+            self.expect_symbol("(")?;
+            let column = self.identifier()?;
+            if matches!(column.as_str(), "keys" | "values" | "entries" | "full") && self.eat_symbol("(") {
+                return Err(unsupported("indexes on collections"));
+            }
+            self.expect_symbol(")")?;
+            if self.eat_word("using") {
+                if !matches!(self.next(), Some(Token::Quoted(_))) {
+                    return Err("line 1: mismatched input, expecting a quoted index class".to_owned());
+                }
+                if self.eat_word("with") {
+                    self.skip_options();
+                }
+            } else if custom {
+                return Err("line 1: CUSTOM INDEX needs USING '<class>'".to_owned());
+            }
+            return Ok(Statement::CreateIndex {
+                name,
+                table,
+                column,
+                if_not_exists,
+            });
+        }
         if !(self.eat_word("table") || self.eat_word("columnfamily")) {
             return Err(unsupported(
-                "this CREATE statement (only keyspaces and tables are)",
+                "this CREATE statement (only keyspaces, tables and indexes are)",
             ));
         }
         let if_not_exists = self.if_not_exists()?;
@@ -838,9 +882,15 @@ impl Parser {
                         if_exists,
                         table: self.table_name()?,
                     })
+                } else if self.eat_word("index") {
+                    let if_exists = self.if_exists()?;
+                    Ok(Statement::DropIndex {
+                        if_exists,
+                        index: self.table_name()?,
+                    })
                 } else {
                     Err(unsupported(
-                        "this DROP statement (only keyspaces and tables are)",
+                        "this DROP statement (only keyspaces, tables and indexes are)",
                     ))
                 }
             }

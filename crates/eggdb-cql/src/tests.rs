@@ -641,3 +641,14 @@ fn alter_table_adds_drops_and_renames_and_keeps_the_cql_types() {
     assert!(refused("ALTER TABLE t ADD v int").contains("conflicts"));
     assert!(refused("ALTER TABLE t RENAME v TO w").contains("non PRIMARY KEY"));
 }
+
+#[test]
+fn secondary_indexes_become_sql_indexes() {
+    let created = sql("CREATE INDEX IF NOT EXISTS ON t (v)", &[]);
+    assert!(created.contains("CREATE INDEX IF NOT EXISTS \"t_v_idx\" ON \"ks\".\"t\" (\"v\")"), "{created}");
+    let named = sql("CREATE CUSTOM INDEX by_c ON ks.t (c) USING 'StorageAttachedIndex'", &[]);
+    assert!(named.contains("\"by_c\""), "{named}");
+    assert!(sql("DROP INDEX IF EXISTS by_c", &[]).contains("DROP INDEX IF EXISTS \"ks\".\"by_c\""));
+    let (statement, markers) = parse("CREATE INDEX ON t (missing)").unwrap();
+    assert!(translate(&statement, markers, Some("ks"), &mut FixedCatalog).is_err());
+}

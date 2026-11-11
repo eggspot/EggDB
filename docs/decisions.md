@@ -609,3 +609,4 @@ its full title with its status.
 - [D582](decisions/D582.md) Code-only batch 230 (M16): MQTT flow control, Receive Maximum
 - [D583](decisions/D583.md) Code-only batch 231 (M16): CQL prepared statements shared between connections
 - [D584](decisions/D584.md) Code-only batch 232 (M16): CQL ALTER TABLE
+- [D585](decisions/D585.md) Code-only batch 233 (M16): CQL secondary indexes

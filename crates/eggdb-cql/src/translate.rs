@@ -598,6 +598,54 @@ fn statement(
                 table.table.clone(),
             )
         }
+        Statement::CreateIndex {
+            name,
+            table,
+            column: indexed,
+            if_not_exists,
+        } => {
+            let keyspace = keyspace_of(table, current)?;
+            let info = catalog.table(&keyspace, &table.table)?;
+            column(&info, indexed)?;
+            let name = name
+                .clone()
+                .unwrap_or_else(|| format!("{}_{indexed}_idx", table.table));
+            builder.sql(&format!(
+                "CREATE INDEX {}{} ON {} ({})",
+                if *if_not_exists { "IF NOT EXISTS " } else { "" },
+                identifier(&name),
+                qualified(&keyspace, &table.table),
+                identifier(indexed)
+            ));
+            (
+                Outcome::SchemaChange {
+                    change: "UPDATED",
+                    target: "TABLE",
+                    keyspace: keyspace.clone(),
+                    name: Some(table.table.clone()),
+                },
+                keyspace,
+                table.table.clone(),
+            )
+        }
+        Statement::DropIndex { index, if_exists } => {
+            let keyspace = keyspace_of(index, current)?;
+            builder.sql(&format!(
+                "DROP INDEX {}{}",
+                if *if_exists { "IF EXISTS " } else { "" },
+                qualified(&keyspace, &index.table)
+            ));
+            (
+                Outcome::SchemaChange {
+                    change: "UPDATED",
+                    target: "KEYSPACE",
+                    keyspace: keyspace.clone(),
+                    name: None,
+                },
+                keyspace,
+                index.table.clone(),
+            )
+        }
         Statement::DropTable { table, if_exists } => {
             let keyspace = keyspace_of(table, current)?;
             builder.sql(&format!(
