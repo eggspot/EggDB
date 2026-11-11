@@ -6,6 +6,21 @@ const ORACLE_INVALID_SQL_NAME: u16 = 44_003;
 const ORACLE_INVALID_QUALIFIED_NAME: u16 = 44_004;
 const ORACLE_NUMERIC_OR_VALUE: u16 = 6_502;
 const JARO_WINKLER_PREFIX: usize = 4;
+const LONGEST_RANDOM_BYTES: usize = 32_767;
+const GET_TIME_WRAP: i64 = 1 << 31;
+const CRYPTO_CONSTANTS: [(&str, i64); 11] = [
+    ("hash_md4", 1),
+    ("hash_md5", 2),
+    ("hash_sh1", 3),
+    ("hash_sh256", 4),
+    ("hash_sh384", 5),
+    ("hash_sh512", 6),
+    ("hmac_md5", 1),
+    ("hmac_sh1", 2),
+    ("hmac_sh256", 3),
+    ("hmac_sh384", 4),
+    ("hmac_sh512", 5),
+];
 const JARO_WINKLER_SCALE: f64 = 0.1;
 
 /// The internal function and argument counts for a function of `DBMS_RANDOM`, `DBMS_ASSERT` or
@@ -29,6 +44,10 @@ pub(crate) fn internal_name(package: &str, function: &str) -> Option<(&'static s
         ("utl_match", "jaro_winkler_similarity") => {
             ("oracle_utl_match_jaro_winkler_similarity", 2, 2)
         }
+        ("dbms_crypto", "hash") => ("oracle_dbms_crypto_hash", 2, 2),
+        ("dbms_crypto", "mac") => ("oracle_dbms_crypto_mac", 3, 3),
+        ("dbms_crypto", "randombytes") => ("oracle_dbms_crypto_randombytes", 1, 1),
+        ("dbms_utility", "get_time") => ("oracle_dbms_utility_get_time", 0, 0),
         _ => return None,
     })
 }
@@ -36,7 +55,20 @@ pub(crate) fn internal_name(package: &str, function: &str) -> Option<(&'static s
 /// Whether `function` of `package` may be written without parentheses, as
 /// `DBMS_RANDOM.VALUE` often is.
 pub(crate) fn takes_no_parentheses(package: &str, function: &str) -> bool {
-    package == "dbms_random" && matches!(function, "value" | "normal" | "random")
+    (package == "dbms_random" && matches!(function, "value" | "normal" | "random"))
+        || (package == "dbms_utility" && function == "get_time")
+}
+
+/// The value of a package constant such as `DBMS_CRYPTO.HASH_SH256`; `None` for another name.
+pub(crate) fn constant(package: &str, name: &str) -> Option<i64> {
+    (package == "dbms_crypto")
+        .then(|| {
+            CRYPTO_CONSTANTS
+                .iter()
+                .find(|(known, _)| *known == name)
+                .map(|(_, value)| *value)
+        })
+        .flatten()
 }
 
 pub(crate) fn result_type(name: &str) -> Option<SqlType> {
@@ -45,6 +77,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         | "oracle_dbms_random_normal"
         | "oracle_utl_match_jaro_winkler" => SqlType::Double,
         "oracle_dbms_random_random"
+        | "oracle_dbms_utility_get_time"
         | "oracle_utl_match_edit_distance"
         | "oracle_utl_match_edit_distance_similarity"
         | "oracle_utl_match_jaro_winkler_similarity" => SqlType::Numeric(None),
@@ -54,6 +87,9 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         | "oracle_dbms_assert_qualified_sql_name"
         | "oracle_dbms_assert_enquote_name"
         | "oracle_dbms_assert_enquote_literal" => SqlType::Text,
+        "oracle_dbms_crypto_hash" | "oracle_dbms_crypto_mac" | "oracle_dbms_crypto_randombytes" => {
+            SqlType::Bytea
+        }
         _ => return None,
     })
 }
@@ -202,6 +238,8 @@ pub(crate) fn call(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
     if !name.starts_with("oracle_dbms_random_")
         && !name.starts_with("oracle_dbms_assert_")
         && !name.starts_with("oracle_utl_match_")
+        && !name.starts_with("oracle_dbms_crypto_")
+        && !name.starts_with("oracle_dbms_utility_")
     {
         return None;
     }
@@ -309,11 +347,76 @@ fn evaluate(name: &str, values: &[Value]) -> SqlResult<Value> {
             let right: Vec<char> = text(right).unwrap_or_default().chars().collect();
             Ok(number((jaro_winkler(&left, &right) * 100.0).floor() as i64))
         }
+        ("oracle_dbms_crypto_hash", [source, kind]) => {
+            let Some(bytes) = crypto_input(source) else {
+                return Ok(Value::Null);
+            };
+            let digest = match kind.as_integer() {
+                Some(2) => eggdb_crypto::md5_checksum(&bytes).to_vec(),
+                Some(3) => eggdb_crypto::sha1(&bytes).to_vec(),
+                Some(4) => eggdb_crypto::sha256(&bytes).to_vec(),
+                Some(5) => eggdb_crypto::sha384(&bytes).to_vec(),
+                Some(6) => eggdb_crypto::sha512(&bytes).to_vec(),
+                _ => return Err(unsupported_algorithm()),
+            };
+            Ok(Value::Bytea(digest))
+        }
+        ("oracle_dbms_crypto_mac", [source, kind, key]) => {
+            let (Some(bytes), Some(key)) = (crypto_input(source), crypto_input(key)) else {
+                return Ok(Value::Null);
+            };
+            let mac = match kind.as_integer() {
+                Some(2) => eggdb_crypto::hmac::<eggdb_crypto::Sha1>(&key, &bytes).to_vec(),
+                Some(3) => eggdb_crypto::hmac::<eggdb_crypto::Sha256>(&key, &bytes).to_vec(),
+                Some(4) => eggdb_crypto::hmac::<eggdb_crypto::Sha384>(&key, &bytes).to_vec(),
+                Some(5) => eggdb_crypto::hmac::<eggdb_crypto::Sha512>(&key, &bytes).to_vec(),
+                _ => return Err(unsupported_algorithm()),
+            };
+            Ok(Value::Bytea(mac))
+        }
+        ("oracle_dbms_crypto_randombytes", [count]) => {
+            let count = count
+                .as_float()
+                .filter(|count| count.is_finite() && *count >= 1.0)
+                .map_or(0, |count| count as usize);
+            if count == 0 || count > LONGEST_RANDOM_BYTES {
+                return Err(SqlError::new(
+                    SqlState::INVALID_PARAMETER_VALUE,
+                    "ORA-28234: key length too short",
+                )
+                .with_oracle_code(28_234));
+            }
+            let mut bytes = vec![0u8; count];
+            crate::random::fill(&mut bytes)?;
+            Ok(Value::Bytea(bytes))
+        }
+        ("oracle_dbms_utility_get_time", []) => {
+            let hundredths = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| i64::try_from(since.as_millis() / 10).unwrap_or(0));
+            Ok(number(hundredths.rem_euclid(GET_TIME_WRAP)))
+        }
         _ => Err(SqlError::new(
             SqlState::UNDEFINED_FUNCTION,
             format!("wrong number of arguments for {name}"),
         )),
     }
+}
+
+fn crypto_input(value: &Value) -> Option<Vec<u8>> {
+    match value {
+        Value::Null => None,
+        Value::Bytea(bytes) => Some(bytes.clone()),
+        other => other.to_text().map(String::into_bytes),
+    }
+}
+
+fn unsupported_algorithm() -> SqlError {
+    SqlError::new(
+        SqlState::INVALID_PARAMETER_VALUE,
+        "ORA-28827: The specified cipher suite is not defined",
+    )
+    .with_oracle_code(28_827)
 }
 
 #[cfg(test)]
@@ -336,6 +439,21 @@ mod tests {
             &[text_value("MARTHA"), text_value("MARHTA")],
         );
         assert_eq!(similar.unwrap(), number(96));
+    }
+
+    #[test]
+    fn crypto_hashes_match_their_published_digests() {
+        let digest = evaluate(
+            "oracle_dbms_crypto_hash",
+            &[Value::Bytea(b"abc".to_vec()), number(4)],
+        )
+        .unwrap();
+        let Value::Bytea(bytes) = digest else {
+            panic!("a RAW digest");
+        };
+        assert_eq!(bytes[..4], [0xba, 0x78, 0x16, 0xbf]);
+        assert_eq!(constant("dbms_crypto", "hash_sh256"), Some(4));
+        assert!(evaluate("oracle_dbms_crypto_hash", &[Value::Bytea(Vec::new()), number(1)]).is_err());
     }
 
     #[test]

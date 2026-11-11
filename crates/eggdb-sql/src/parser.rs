@@ -5016,6 +5016,18 @@ impl<'t> Parser<'t> {
             }
             if self.oracle()
                 && self.peek_kind() != &TokenKind::LeftParen
+                && let Some(value) = crate::oracle_more_packages::constant(
+                    &first.text.to_ascii_lowercase(),
+                    &column.text.to_ascii_lowercase(),
+                )
+            {
+                return Ok(crate::ast::Expr {
+                    kind: crate::ast::ExprKind::Literal(crate::ast::Literal::Integer(value)),
+                    position: first.position,
+                });
+            }
+            if self.oracle()
+                && self.peek_kind() != &TokenKind::LeftParen
                 && crate::oracle_more_packages::takes_no_parentheses(
                     &first.text.to_ascii_lowercase(),
                     &column.text.to_ascii_lowercase(),
