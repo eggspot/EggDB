@@ -389,6 +389,22 @@ impl Session<'_> {
             None => None,
         };
         let server_password_sha256 = eggdb_crypto::sha256(password.as_bytes());
+        let clickhouse_listener = match options.clickhouse_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--clickhouse-listen {address}: the ClickHouse HTTP interface has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for the ClickHouse HTTP interface on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
         let rest_listener = match options.rest_listen {
             Some(address) => {
                 if !address.ip().is_loopback() {
@@ -671,6 +687,7 @@ impl Session<'_> {
                 dynamodb_listener.as_ref(),
                 observability_listener.as_ref(),
                 rest_listener.as_ref(),
+                clickhouse_listener.as_ref(),
                 cql_listener.as_ref(),
                 stomp_listener.as_ref(),
                 nats_listener.as_ref(),
@@ -746,6 +763,12 @@ impl Session<'_> {
         if let Some(rules) = &config.auth_rules {
             rest_endpoint = rest_endpoint.with_auth_rules(Arc::clone(rules));
         }
+        let clickhouse_endpoint = eggdb_clickhouse::Endpoint::new(
+            &store,
+            &config.user,
+            server_password_sha256,
+            &config.database,
+        );
         let mcp_opener = super::serve_mcp::SharedOpener { db: &db };
         let mcp_endpoint = mcp_listener.as_ref().map(|(_, tokens)| {
             super::serve_mcp::McpEndpoint::new(
@@ -895,6 +918,17 @@ impl Session<'_> {
                     &|request| rest_endpoint.reply(request),
                     &stop_signals::requested,
                     &eggdb_http::Limits::new(eggdb_api::MAX_REQUEST_BYTES, &memory_budget).with_rate_limit(rate_limiter.as_ref())
+                        .decoding_content_encoding(),
+                ),
+                None => Ok(()),
+            });
+            let clickhouse_server = scope.spawn(|| match &clickhouse_listener {
+                Some(listener) => eggdb_http::serve_with_limits(
+                    listener,
+                    &|request| clickhouse_endpoint.answer(request),
+                    &stop_signals::requested,
+                    &eggdb_http::Limits::new(eggdb_clickhouse::MAX_REQUEST_BYTES, &memory_budget)
+                        .with_rate_limit(rate_limiter.as_ref())
                         .decoding_content_encoding(),
                 ),
                 None => Ok(()),
@@ -1138,6 +1172,7 @@ impl Session<'_> {
             let _ = cql_server.join();
             let _ = observability_server.join();
             let _ = rest_server.join();
+            let _ = clickhouse_server.join();
             let _ = cdc_queue_delivery.join();
             let _ = sqs_server.join();
             let _ = s3_server.join();

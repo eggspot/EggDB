@@ -1130,6 +1130,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   HiveServer2 Thrift (D47). Check: Beeline over Thrift and a suite from Spark's SQL reference.
 - ClickHouse SQL: first its HTTP interface with its formats (`TabSeparated`, `JSONEachRow`), then
   the native protocol (D47). Check: clickhouse-connect and `clickhouse client` in CI.
+  HTTP interface and its text formats: **code written, unbuilt** (code-only mode, 2026-11-11,
+  D510). Left: ClickHouse's SQL dialect and the native protocol.
 - Trino/Presto SQL: first the client REST protocol (`/v1/statement`) with Trino's types and
   functions (D47). Check: the Trino CLI and JDBC driver against EggDB in CI.
 - IBM Db2 SQL and SQL PL, after D58's legal check: first DRDA's connect and SQL execution for Db2

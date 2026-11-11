@@ -534,3 +534,4 @@ its full title with its status.
 - [D507](decisions/D507.md) Code-only batch 155 (M11): dBase .dbf import
 - [D508](decisions/D508.md) Code-only batch 156 (M11): COBOL copybooks and EBCDIC records
 - [D509](decisions/D509.md) Code-only batch 157 (M11): Avro import and export
+- [D510](decisions/D510.md) Code-only batch 158 (M10): ClickHouse's HTTP interface
