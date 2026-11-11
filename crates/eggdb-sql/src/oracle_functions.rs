@@ -843,6 +843,26 @@ fn date_unit(values: &[Value]) -> Option<String> {
     values.get(1).and_then(text_of)
 }
 
+/// Oracle's `DEFAULT value ON CONVERSION ERROR` around a conversion function: the call's first
+/// argument is the inner function's name, then the value, the default and the other arguments.
+pub(crate) const WITH_DEFAULT: &str = "oracle_with_default";
+
+fn with_default(values: &[Value]) -> SqlResult<Value> {
+    let [Value::Text(inner), value, default, rest @ ..] = values else {
+        return Ok(Value::Null);
+    };
+    let mut arguments = Vec::with_capacity(rest.len() + 1);
+    arguments.push(value.clone());
+    arguments.extend_from_slice(rest);
+    match call(inner, &arguments, &[]) {
+        Err(error) if error.state().code().starts_with("22") => {
+            arguments[0] = default.clone();
+            call(inner, &arguments, &[])
+        }
+        outcome => outcome,
+    }
+}
+
 pub(crate) fn call(name: &str, values: &[Value], declared: &[Option<SqlType>]) -> SqlResult<Value> {
     if values
         .iter()
@@ -861,6 +881,7 @@ pub(crate) fn call(name: &str, values: &[Value], declared: &[Option<SqlType>]) -
             Ok(text_or_null(change(&text)))
         };
     match (name, values) {
+        (WITH_DEFAULT, _) => with_default(values),
         (name, [left, right]) if crate::oracle_collections::is_operator(name) => {
             crate::oracle_collections::call(name, left, right)
         }

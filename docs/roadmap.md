@@ -1044,7 +1044,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   subquery, `ORDER SIBLINGS BY` a pseudo-column, and a sequence's `NEXTVAL` advancing once per
   source row of `INSERT ALL`; `CONNECT BY`, `INSERT ALL` and `INSERT FIRST` are built (D304).
   Check: a deep hierarchy against a recursive `WITH` on SQLite.
-- Oracle's XML functions and `TO_DATE(... DEFAULT ... ON CONVERSION ERROR)` (sql.md);
+- Oracle's XML functions and `TO_DATE(... DEFAULT ... ON CONVERSION ERROR)` (sql.md; the
+  conversion functions' `DEFAULT ... ON CONVERSION ERROR`: **code written, unbuilt**, code-only
+  mode, 2026-11-11, D431; `CAST ... DEFAULT` left);
   `DISTINCT` in window aggregates (`LISTAGG (DISTINCT ...) OVER`, `COUNT(DISTINCT x) OVER`) and
   `KEEP` on `LISTAGG`; the rest of Oracle's regex syntax (`\z`, `[=e=]`, `[.ch.]`, `[^...]`
   matching a newline without `n`) (D332). Window functions, `RATIO_TO_REPORT`, `KEEP` and

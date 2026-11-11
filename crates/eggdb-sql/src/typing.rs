@@ -435,6 +435,15 @@ fn concatenation_type(left: &Expr, right: &Expr, scope: Scope<'_>) -> SqlType {
 }
 
 fn oracle_function_type(name: &str, arguments: &[Expr]) -> Option<SqlType> {
+    if name == crate::oracle_functions::WITH_DEFAULT {
+        let (Some(ExprKind::Literal(Literal::String(inner))), Some(rest)) = (
+            arguments.first().map(|argument| &argument.kind),
+            arguments.get(1..),
+        ) else {
+            return None;
+        };
+        return oracle_function_type(inner, rest);
+    }
     match name {
         "oracle_to_date" | "oracle_date_literal" | "oracle_add_months" | "oracle_last_day" => {
             Some(SqlType::Timestamp(Some(0)))

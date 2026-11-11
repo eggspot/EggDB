@@ -150,6 +150,15 @@ fn literal(literal: Literal, position: usize) -> Expr {
     }
 }
 
+const CONVERSIONS_WITH_DEFAULT: [&str; 6] = [
+    "oracle_to_date",
+    "oracle_to_number",
+    "oracle_to_timestamp",
+    "oracle_to_timestamp_tz",
+    "oracle_to_dsinterval",
+    "oracle_to_yminterval",
+];
+
 fn oracle_function(name: &'static str, arguments: Vec<Expr>, position: usize) -> Expr {
     Expr {
         kind: ExprKind::OracleFunction { name, arguments },
@@ -1246,6 +1255,70 @@ impl<'t> Parser<'t> {
         Ok(Some(expr))
     }
 
+    fn default_on_conversion_error_ahead(&self) -> bool {
+        if self.peek_kind() != &TokenKind::LeftParen {
+            return false;
+        }
+        let mut depth = 0usize;
+        let mut ahead = 0;
+        loop {
+            match self.peek_kind_at(ahead) {
+                TokenKind::End | TokenKind::Semicolon => return false,
+                TokenKind::LeftParen => depth += 1,
+                TokenKind::RightParen => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                TokenKind::Comma if depth == 1 => return false,
+                TokenKind::Word(word) if depth == 1 && word == "default" => return true,
+                _ => {}
+            }
+            ahead += 1;
+        }
+    }
+
+    fn oracle_conversion_with_default(
+        &mut self,
+        internal: &'static str,
+        most: usize,
+        name: &Name,
+    ) -> SqlResult<Option<Expr>> {
+        if !self.default_on_conversion_error_ahead() {
+            return Ok(None);
+        }
+        self.expect(&TokenKind::LeftParen)?;
+        let value = self.expression()?;
+        self.expect_word("default")?;
+        let default = self.expression()?;
+        self.expect_word("on")?;
+        self.expect_word("conversion")?;
+        self.expect_word("error")?;
+        let mut rest = Vec::new();
+        while self.take(&TokenKind::Comma) {
+            rest.push(self.expression()?);
+        }
+        self.expect(&TokenKind::RightParen)?;
+        if rest.len() + 1 > most {
+            return Err(wrong_argument_count(name, false));
+        }
+        let mut arguments = vec![
+            Expr {
+                kind: ExprKind::Literal(Literal::String(internal.to_owned())),
+                position: name.position,
+            },
+            value,
+            default,
+        ];
+        arguments.extend(rest);
+        Ok(Some(oracle_function(
+            crate::oracle_functions::WITH_DEFAULT,
+            arguments,
+            name.position,
+        )))
+    }
+
     fn oracle_arguments(&mut self) -> SqlResult<Vec<Expr>> {
         self.expect(&TokenKind::LeftParen)?;
         let mut arguments = Vec::new();
@@ -1404,6 +1477,11 @@ impl<'t> Parser<'t> {
             "regexp_replace" => ("oracle_regexp_replace", 2, 6),
             _ => return self.oracle_routine_call(name).map(Some),
         };
+        if CONVERSIONS_WITH_DEFAULT.contains(&internal)
+            && let Some(expr) = self.oracle_conversion_with_default(internal, most, name)?
+        {
+            return Ok(Some(expr));
+        }
         let arguments = self.oracle_arguments()?;
         if arguments.len() < least {
             return Err(wrong_argument_count(name, true));
