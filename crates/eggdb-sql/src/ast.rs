@@ -2228,8 +2228,8 @@ impl AggregateFunction {
 
     pub(crate) fn ordered_set_named(name: &str) -> Option<Self> {
         Some(match name {
-            "percentile_cont" => Self::PercentileCont,
-            "percentile_disc" => Self::PercentileDisc,
+            "percentile_cont" | "approx_percentile_cont" | "approx_percentile" => Self::PercentileCont,
+            "percentile_disc" | "approx_percentile_disc" => Self::PercentileDisc,
             "mode" => Self::Mode,
             _ => return None,
         })

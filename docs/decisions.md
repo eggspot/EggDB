@@ -566,3 +566,4 @@ its full title with its status.
 - [D539](decisions/D539.md) Code-only batch 187 (M16): AMQP 1.0 idle time-out enforced
 - [D540](decisions/D540.md) Code-only batch 188 (M16): a dead-letter queue for rejected messages
 - [D541](decisions/D541.md) Code-only batch 189 (M5): TABLESAMPLE
+- [D542](decisions/D542.md) Code-only batch 190 (M5): APPROX_PERCENTILE_CONT, APPROX_PERCENTILE_DISC and APPROX_PERCENTILE

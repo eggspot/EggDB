@@ -494,7 +494,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A query compiler for hot prepared statements' expressions, compiled to a flat program, after
   parsed plans are kept in prepared statements (below) (D40). Check: TPC-H Q1 and Q6 times.
 - `TABLESAMPLE`, t-digest and the other `APPROX_*` functions (D40). `TABLESAMPLE`: **code written, unbuilt** (code-only
-  mode, 2026-11-11, D541).
+  mode, 2026-11-11, D541); the `APPROX_PERCENTILE` family, exact: **code written, unbuilt** (D542).
+  Left: t-digest sketches.
 - TPC-C against PostgreSQL and MySQL (D7).
 - Partial, expression and covering (`INCLUDE`) indexes, `CREATE INDEX CONCURRENTLY` and `NULLS NOT
   DISTINCT` (D32).
