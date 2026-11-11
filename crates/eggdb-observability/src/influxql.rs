@@ -5,13 +5,14 @@ use eggdb_sql::{QueryResult, Session, Value};
 const UNIX_EPOCH_FROM_2000_MICROS: i64 = 946_684_800_000_000;
 const MICROS_PER_DAY: i64 = 86_400_000_000;
 const STOP_WORDS: [&str; 7] = ["GROUP", "ORDER", "LIMIT", "OFFSET", "SLIMIT", "SOFFSET", "TZ"];
+const MOST_FILLED_BUCKETS: i64 = 100_000;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
     Name { text: String, quoted: bool },
     Text(String),
     Number(String),
-    Duration(String),
+    Duration(String, i64),
     Regex(String),
     Operator(String),
     Open,
@@ -26,19 +27,20 @@ impl Token {
     }
 }
 
-fn duration_sql(number: &str, unit: &str) -> Option<String> {
-    let (amount, unit) = match unit {
-        "ns" => (number.parse::<f64>().ok()? / 1000.0, "microseconds"),
-        "u" | "µ" | "µs" | "us" => (number.parse().ok()?, "microseconds"),
-        "ms" => (number.parse().ok()?, "milliseconds"),
-        "s" => (number.parse().ok()?, "seconds"),
-        "m" => (number.parse().ok()?, "minutes"),
-        "h" => (number.parse().ok()?, "hours"),
-        "d" => (number.parse().ok()?, "days"),
-        "w" => (number.parse().ok()?, "weeks"),
+fn duration_sql(number: &str, unit: &str) -> Option<(String, i64)> {
+    let (amount, unit, micros_per_unit) = match unit {
+        "ns" => (number.parse::<f64>().ok()? / 1000.0, "microseconds", 1.0),
+        "u" | "µ" | "µs" | "us" => (number.parse().ok()?, "microseconds", 1.0),
+        "ms" => (number.parse().ok()?, "milliseconds", 1e3),
+        "s" => (number.parse().ok()?, "seconds", 1e6),
+        "m" => (number.parse().ok()?, "minutes", 6e7),
+        "h" => (number.parse().ok()?, "hours", 3.6e9),
+        "d" => (number.parse().ok()?, "days", 8.64e10),
+        "w" => (number.parse().ok()?, "weeks", 6.048e11),
         _ => return None,
     };
-    Some(format!("'{amount} {unit}'::interval"))
+    let micros: f64 = amount * micros_per_unit;
+    Some((format!("'{amount} {unit}'::interval"), micros.round() as i64))
 }
 
 fn tokens(text: &str) -> Result<Vec<Token>, String> {
@@ -115,9 +117,9 @@ fn tokens(text: &str) -> Result<Vec<Token>, String> {
                 if unit.is_empty() {
                     found.push(Token::Number(number));
                 } else {
-                    found.push(Token::Duration(
-                        duration_sql(&number, &unit).ok_or_else(|| format!("invalid duration {number}{unit}"))?,
-                    ));
+                    let (sql, micros) =
+                        duration_sql(&number, &unit).ok_or_else(|| format!("invalid duration {number}{unit}"))?;
+                    found.push(Token::Duration(sql, micros));
                 }
             }
             letter if letter.is_alphabetic() || letter == '_' => {
@@ -175,7 +177,7 @@ fn condition_sql(tokens: &[Token]) -> Result<String, String> {
             Token::Text(text) => literal(text),
             Token::Number(number) if previous_was_time => format!("to_timestamp({number}::double precision / 1e9)"),
             Token::Number(number) => number.clone(),
-            Token::Duration(interval) => interval.clone(),
+            Token::Duration(interval, _) => interval.clone(),
             Token::Regex(pattern) => literal(pattern),
             Token::Operator(operator) => match operator.as_str() {
                 "=~" => "~".to_owned(),
@@ -204,16 +206,79 @@ enum Item {
     Call { function: String, field: Option<String>, argument: Option<String>, alias: Option<String> },
 }
 
+#[derive(Debug, Default, Clone, PartialEq)]
+enum Fill {
+    #[default]
+    Null,
+    None,
+    Previous,
+    Linear,
+    Number(f64),
+}
+
+#[derive(Debug, Default)]
+struct Bucket {
+    interval: String,
+    micros: i64,
+    offset_sql: Option<String>,
+    offset_micros: i64,
+}
+
 #[derive(Debug, Default)]
 struct Select {
     items: Vec<Item>,
     measurement: String,
     condition: Option<String>,
-    bucket: Option<String>,
+    lower_time: Option<String>,
+    upper_time: Option<String>,
+    bucket: Option<Bucket>,
+    fill: Fill,
     group_tags: Vec<String>,
     descending: bool,
     limit: Option<String>,
     offset: Option<String>,
+}
+
+fn bound_sql(tokens: &[Token]) -> Option<String> {
+    match tokens {
+        [Token::Number(number)] => Some(format!("to_timestamp({number}::double precision / 1e9)")),
+        [Token::Text(text)] => Some(format!("{}::timestamptz", literal(text))),
+        _ => condition_sql(tokens).ok(),
+    }
+}
+
+fn time_bounds(tokens: &[Token]) -> (Option<String>, Option<String>) {
+    let mut conjuncts: Vec<&[Token]> = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (index, token) in tokens.iter().enumerate() {
+        match token {
+            Token::Open => depth += 1,
+            Token::Close => depth = depth.saturating_sub(1),
+            _ if depth == 0 && token.keyword("or") => return (None, None),
+            _ if depth == 0 && token.keyword("and") => {
+                conjuncts.push(&tokens[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    conjuncts.push(&tokens[start..]);
+    let (mut lower, mut upper) = (None, None);
+    for conjunct in conjuncts {
+        let [Token::Name { text, .. }, Token::Operator(operator), rest @ ..] = conjunct else {
+            continue;
+        };
+        if text != "time" || rest.is_empty() {
+            continue;
+        }
+        match operator.as_str() {
+            ">" | ">=" => lower = bound_sql(rest),
+            "<" | "<=" => upper = bound_sql(rest),
+            _ => {}
+        }
+    }
+    (lower, upper)
 }
 
 struct Reader {
@@ -335,23 +400,39 @@ impl Reader {
                 }
                 self.at += 1;
             }
-            select.condition = Some(condition_sql(&self.tokens[start..self.at])?);
+            let condition = &self.tokens[start..self.at];
+            select.condition = Some(condition_sql(condition)?);
+            (select.lower_time, select.upper_time) = time_bounds(condition);
         }
         if self.keyword("group") {
             self.expect_keyword("by")?;
             loop {
                 if self.peek().is_some_and(|token| token.keyword("time")) && self.tokens.get(self.at + 1) == Some(&Token::Open) {
                     self.at += 2;
-                    let Some(Token::Duration(interval)) = self.next() else {
+                    let Some(Token::Duration(interval, micros)) = self.next() else {
                         return Err("GROUP BY time() needs a duration".to_owned());
                     };
+                    let mut bucket = Bucket {
+                        interval,
+                        micros,
+                        ..Bucket::default()
+                    };
                     if self.peek() == Some(&Token::Comma) {
-                        return Err("GROUP BY time() offsets are not supported yet".to_owned());
+                        self.at += 1;
+                        let negative = self.peek() == Some(&Token::Operator("-".to_owned()));
+                        if negative {
+                            self.at += 1;
+                        }
+                        let Some(Token::Duration(offset, offset_micros)) = self.next() else {
+                            return Err("a GROUP BY time() offset must be a duration".to_owned());
+                        };
+                        bucket.offset_sql = Some(format!("{} {offset}", if negative { "-" } else { "+" }));
+                        bucket.offset_micros = if negative { -offset_micros } else { offset_micros };
                     }
                     if self.next() != Some(Token::Close) {
                         return Err("GROUP BY time( is not closed".to_owned());
                     }
-                    select.bucket = Some(interval);
+                    select.bucket = Some(bucket);
                 } else if self.peek() == Some(&Token::Star) {
                     return Err("GROUP BY * is not supported yet; name the tags".to_owned());
                 } else {
@@ -367,10 +448,21 @@ impl Reader {
                 if self.next() != Some(Token::Open) {
                     return Err("fill needs ( ".to_owned());
                 }
-                let mode = self.next();
-                if !matches!(&mode, Some(token) if token.keyword("none") || token.keyword("null")) {
-                    return Err("only fill(none) and fill(null) are supported yet".to_owned());
+                let negative = self.peek() == Some(&Token::Operator("-".to_owned()));
+                if negative {
+                    self.at += 1;
                 }
+                select.fill = match self.next() {
+                    Some(Token::Number(number)) => {
+                        let value: f64 = number.parse().map_err(|_| format!("invalid fill value {number}"))?;
+                        Fill::Number(if negative { -value } else { value })
+                    }
+                    Some(token) if token.keyword("none") => Fill::None,
+                    Some(token) if token.keyword("null") => Fill::Null,
+                    Some(token) if token.keyword("previous") => Fill::Previous,
+                    Some(token) if token.keyword("linear") => Fill::Linear,
+                    other => return Err(format!("found {other:?}, expected none, null, previous, linear or a number in fill()")),
+                };
                 if self.next() != Some(Token::Close) {
                     return Err("fill( is not closed".to_owned());
                 }
@@ -445,7 +537,11 @@ fn plan(select: &Select, columns: &[(String, String)]) -> Result<Planned, String
         outputs.push(format!("{} AS {}", column(tag), column(tag)));
     }
     outputs.push(match (&select.bucket, aggregate) {
-        (Some(interval), _) => format!("time_bucket({interval}, \"time\") AS \"time\""),
+        (Some(bucket), _) => format!(
+            "time_bucket({}, \"time\", '1970-01-01T00:00:00Z'::timestamptz{}) AS \"time\"",
+            bucket.interval,
+            bucket.offset_sql.as_deref().map_or(String::new(), |offset| format!(" {offset}"))
+        ),
         (None, true) => "'1970-01-01T00:00:00Z'::timestamptz AS \"time\"".to_owned(),
         (None, false) => "\"time\"".to_owned(),
     });
@@ -495,15 +591,109 @@ fn plan(select: &Select, columns: &[(String, String)]) -> Result<Planned, String
     let mut order = tag_positions;
     order.push(format!("{time_position}{}", if select.descending { " DESC" } else { "" }));
     sql.push_str(&format!(" ORDER BY {}", order.join(", ")));
-    if let Some(limit) = &select.limit {
-        sql.push_str(&format!(" LIMIT {limit}"));
-    }
-    if let Some(offset) = &select.offset {
-        sql.push_str(&format!(" OFFSET {offset}"));
+    if !fills(select) {
+        if let Some(limit) = &select.limit {
+            sql.push_str(&format!(" LIMIT {limit}"));
+        }
+        if let Some(offset) = &select.offset {
+            sql.push_str(&format!(" OFFSET {offset}"));
+        }
     }
     Ok(Planned {
         sql,
         tag_count: select.group_tags.len(),
+    })
+}
+
+fn fills(select: &Select) -> bool {
+    select.fill != Fill::None && select.bucket.as_ref().is_some_and(|bucket| bucket.micros > 0)
+}
+
+fn time_of(row: &[Value]) -> Option<i64> {
+    match row.first() {
+        Some(Value::TimestampTz(micros) | Value::Timestamp(micros)) => Some(*micros),
+        _ => None,
+    }
+}
+
+fn linear(known: &std::collections::BTreeMap<i64, Vec<Value>>, at: i64, column: usize) -> Value {
+    let present = |row: &&Vec<Value>| !matches!(row.get(column), None | Some(Value::Null));
+    let before = known.range(..at).rev().find(|(_, row)| present(row));
+    let after = known.range(at + 1..).find(|(_, row)| present(row));
+    let (Some((&start, first)), Some((&end, last))) = (before, after) else {
+        return Value::Null;
+    };
+    let (first, last) = (&first[column], &last[column]);
+    let (span, offset) = (i128::from(end - start), i128::from(at - start));
+    if let (Some(first), Some(last)) = (first.as_integer(), last.as_integer()) {
+        let value = i128::from(first) + (i128::from(last) - i128::from(first)) * offset / span;
+        return i64::try_from(value).map_or(Value::Null, Value::BigInt);
+    }
+    match (first.as_float(), last.as_float()) {
+        (Some(first), Some(last)) => Value::Double(first + (last - first) * offset as f64 / span as f64),
+        _ => Value::Null,
+    }
+}
+
+fn filled(select: &Select, rows: Vec<Vec<Value>>, range: Option<(i64, i64)>) -> Result<Vec<Vec<Value>>, String> {
+    let Some(bucket) = select.bucket.as_ref().filter(|_| fills(select)) else {
+        return Ok(rows);
+    };
+    let known: std::collections::BTreeMap<i64, Vec<Value>> =
+        rows.into_iter().filter_map(|row| time_of(&row).map(|at| (at, row))).collect();
+    let (Some(&first_known), Some(&last_known)) = (known.keys().next(), known.keys().next_back()) else {
+        return Ok(Vec::new());
+    };
+    let width = bucket.micros;
+    let origin = bucket.offset_micros - UNIX_EPOCH_FROM_2000_MICROS;
+    let floor = |at: i64| origin + (at - origin).div_euclid(width) * width;
+    let (first, last) = range.map_or((first_known, last_known), |(lower, upper)| (floor(lower), floor(upper)));
+    if (last - first) / width > MOST_FILLED_BUCKETS {
+        return Err(format!("fill() would make more than {MOST_FILLED_BUCKETS} points; narrow the time range"));
+    }
+    let columns = known.values().next().map_or(1, Vec::len);
+    let mut out: Vec<Vec<Value>> = Vec::new();
+    let mut at = first;
+    while at <= last {
+        if let Some(row) = known.get(&at) {
+            out.push(row.clone());
+        } else {
+            let mut row = vec![Value::TimestampTz(at)];
+            for column in 1..columns {
+                row.push(match &select.fill {
+                    Fill::Number(number) if number.fract() == 0.0 && number.abs() < 9e15 => Value::BigInt(*number as i64),
+                    Fill::Number(number) => Value::Double(*number),
+                    Fill::Previous => out.last().map_or(Value::Null, |previous| previous[column].clone()),
+                    Fill::Linear => linear(&known, at, column),
+                    Fill::Null | Fill::None => Value::Null,
+                });
+            }
+            out.push(row);
+        }
+        at += width;
+    }
+    if select.descending {
+        out.reverse();
+    }
+    let skip = select.offset.as_deref().and_then(|offset| offset.parse().ok()).unwrap_or(0);
+    let take = select.limit.as_deref().and_then(|limit| limit.parse().ok()).unwrap_or(usize::MAX);
+    Ok(out.into_iter().skip(skip).take(take).collect())
+}
+
+fn time_range(session: &mut Session<'_>, select: &Select) -> Result<Option<(i64, i64)>, String> {
+    let Some(lower) = &select.lower_time else {
+        return Ok(None);
+    };
+    let upper = select.upper_time.as_deref().unwrap_or("now()");
+    let sql = format!("SELECT ({lower})::timestamptz, ({upper})::timestamptz");
+    let result = run(session, &sql)?
+        .into_iter()
+        .rev()
+        .find(|result| result.columns.is_some())
+        .ok_or("the time range could not be read")?;
+    Ok(match result.rows.first().map(Vec::as_slice) {
+        Some([Value::TimestampTz(lower), Value::TimestampTz(upper)]) if lower <= upper => Some((*lower, *upper)),
+        _ => None,
     })
 }
 
@@ -589,30 +779,34 @@ fn select_series(session: &mut Session<'_>, select: &Select, epoch: Option<&str>
         .ok_or("the query returned no rows")?;
     let names: Vec<String> = result.columns.iter().flatten().map(|column| column.name.clone()).collect();
     let shown: Vec<String> = names[planned.tag_count..].to_vec();
-    let mut series: Vec<(Vec<(String, String)>, Vec<Vec<String>>)> = Vec::new();
-    for row in &result.rows {
+    let mut series: Vec<(Vec<(String, String)>, Vec<Vec<Value>>)> = Vec::new();
+    for row in result.rows {
         let tags: Vec<(String, String)> = names[..planned.tag_count]
             .iter()
-            .zip(row)
+            .zip(&row)
             .map(|(name, value)| (name.clone(), value.to_text().unwrap_or_default()))
             .collect();
-        let values: Vec<String> = row[planned.tag_count..].iter().map(|value| value_json(value, epoch)).collect();
+        let values: Vec<Value> = row.into_iter().skip(planned.tag_count).collect();
         match series.last_mut() {
             Some((held, rows)) if *held == tags => rows.push(values),
             _ => series.push((tags, vec![values])),
         }
     }
-    Ok(series
-        .iter()
-        .map(|(tags, rows)| {
-            series_json(
-                &select.measurement,
-                (planned.tag_count > 0).then_some(tags.as_slice()),
-                &shown,
-                rows,
-            )
-        })
-        .collect())
+    let range = if fills(select) { time_range(session, select)? } else { None };
+    let mut out = Vec::with_capacity(series.len());
+    for (tags, rows) in series {
+        let rows: Vec<Vec<String>> = filled(select, rows, range)?
+            .iter()
+            .map(|row| row.iter().map(|value| value_json(value, epoch)).collect())
+            .collect();
+        out.push(series_json(
+            &select.measurement,
+            (planned.tag_count > 0).then_some(tags.as_slice()),
+            &shown,
+            &rows,
+        ));
+    }
+    Ok(out)
 }
 
 type Catalog = std::collections::BTreeMap<String, Vec<(String, String)>>;
@@ -785,7 +979,14 @@ mod tests {
                 "SELECT mean(\"usage\") FROM cpu WHERE host = 'a' AND time > now() - 1h GROUP BY time(5m), host",
                 &[("time", "timestamp with time zone"), ("host", "text"), ("usage", "double precision")]
             ),
-            "SELECT \"host\" AS \"host\", time_bucket('5 minutes'::interval, \"time\") AS \"time\", avg(\"usage\") AS \"mean\" FROM metrics.\"cpu\" WHERE \"host\" = 'a' AND \"time\" > now() - '1 hours'::interval GROUP BY 1, 2 ORDER BY 1, 2"
+            "SELECT \"host\" AS \"host\", time_bucket('5 minutes'::interval, \"time\", '1970-01-01T00:00:00Z'::timestamptz) AS \"time\", avg(\"usage\") AS \"mean\" FROM metrics.\"cpu\" WHERE \"host\" = 'a' AND \"time\" > now() - '1 hours'::interval GROUP BY 1, 2 ORDER BY 1, 2"
+        );
+        assert_eq!(
+            planned(
+                "SELECT count(v) FROM m WHERE time >= now() - 1h GROUP BY time(10m, -2m) fill(0) LIMIT 3",
+                &[("time", "x"), ("v", "double precision")]
+            ),
+            "SELECT time_bucket('10 minutes'::interval, \"time\", '1970-01-01T00:00:00Z'::timestamptz - '2 minutes'::interval) AS \"time\", count(\"v\") AS \"count\" FROM metrics.\"m\" WHERE \"time\" >= now() - '1 hours'::interval GROUP BY 1 ORDER BY 1"
         );
         assert_eq!(
             planned("SELECT * FROM cpu ORDER BY time DESC LIMIT 2", &[("time", "x"), ("host", "text"), ("usage", "double precision")]),
@@ -794,5 +995,34 @@ mod tests {
         assert_eq!(time_json(0, None), "\"2000-01-01T00:00:00Z\"");
         assert_eq!(time_json(0, Some("s")), "946684800");
         assert_eq!(statements("SHOW DATABASES; SELECT 'a;b' FROM x").len(), 2);
+    }
+
+    fn filled_values(fill: &str, rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+        let mut reader = Reader {
+            tokens: tokens(&format!("SELECT mean(v) FROM m GROUP BY time(1m) fill({fill})")).unwrap(),
+            at: 0,
+        };
+        assert!(reader.keyword("select"));
+        let select = reader.select().unwrap();
+        filled(&select, rows, None).unwrap()
+    }
+
+    #[test]
+    fn fill_makes_the_empty_buckets() {
+        let minute = 60_000_000;
+        let base = -UNIX_EPOCH_FROM_2000_MICROS + 600 * minute;
+        let rows = vec![
+            vec![Value::TimestampTz(base), Value::Double(1.0)],
+            vec![Value::TimestampTz(base + 3 * minute), Value::Double(4.0)],
+        ];
+        let linear = filled_values("linear", rows.clone());
+        assert_eq!(linear.len(), 4);
+        assert_eq!(linear[1], vec![Value::TimestampTz(base + minute), Value::Double(2.0)]);
+        let previous = filled_values("previous", rows.clone());
+        assert_eq!(previous[2][1], Value::Double(1.0));
+        let zero = filled_values("0", rows.clone());
+        assert_eq!(zero[1][1], Value::BigInt(0));
+        assert_eq!(filled_values("null", rows.clone())[2][1], Value::Null);
+        assert_eq!(filled_values("none", rows).len(), 2);
     }
 }
