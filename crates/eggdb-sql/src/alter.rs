@@ -2048,6 +2048,7 @@ fn redefine(
     }
     if old_name.text != column.name.text {
         rename_column(writer, tables, name, old_name, &column.name, dialect)?;
+        crate::roles::move_column(writer, name, &old_name.text, &column.name.text)?;
     }
     set_type(writer, tables, name, &column.name, column.sql_type, None, dialect)?;
     let mut table = current(writer, tables, name)?;

@@ -687,7 +687,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (D326).
 - SQL Server's column `GRANT` and `DENY`, column privileges on sequences, `MERGE` and `ON CONFLICT
   DO UPDATE` under row security, and row security through updatable views (D285).
-- Column grants that follow a column renamed by MySQL's `CHANGE COLUMN` (D285).
+- Column grants that follow a column renamed by MySQL's `CHANGE COLUMN` (D285). **Code written,
+  unbuilt** (code-only mode, 2026-11-11, D484).
 - Oracle VPD and SQL Server's security predicates (D186).
 - Dynamic data masking: SQL Server's `MASKED WITH` and Oracle's redaction, after its decision
   (D22, D285).
