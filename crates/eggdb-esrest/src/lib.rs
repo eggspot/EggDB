@@ -10,6 +10,7 @@ mod aggregations;
 mod api;
 mod highlight;
 mod json_out;
+mod knn;
 mod mappings;
 mod mustache;
 mod query;

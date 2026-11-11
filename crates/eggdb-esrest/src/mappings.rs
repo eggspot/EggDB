@@ -46,6 +46,7 @@ pub(crate) struct MappedField {
 #[derive(Debug, Default)]
 pub(crate) struct FieldTypes {
     fields: HashMap<String, MappedField>,
+    vector_similarities: HashMap<String, String>,
 }
 
 fn member<'n>(node: &'n Node, name: &str) -> Option<&'n Node> {
@@ -92,6 +93,12 @@ impl FieldTypes {
                     kind: FieldType::named(kind),
                     source: path.clone(),
                 });
+                if kind == "dense_vector" {
+                    let similarity = member(spec, "similarity").and_then(text).unwrap_or("cosine");
+                    self.vector_similarities
+                        .entry(path.clone())
+                        .or_insert_with(|| similarity.to_owned());
+                }
             }
             if let Some(Json::Object(subfields)) = member(spec, "fields").map(|node| &node.value) {
                 for (subfield, sub_spec) in subfields {
@@ -109,6 +116,12 @@ impl FieldTypes {
                 self.add_properties(nested, &path, depth + 1);
             }
         }
+    }
+
+    /// The similarity a `dense_vector` field's mapping names, `cosine` when it names none or
+    /// the field is not mapped.
+    pub(crate) fn vector_similarity(&self, name: &str) -> &str {
+        self.vector_similarities.get(name).map_or("cosine", String::as_str)
     }
 
     /// The field `name` resolves to: a mapped field or multi-field, else the `keyword`

@@ -1525,3 +1525,34 @@ fn geo_distance_and_bounding_box_queries_filter_points() {
     ));
     assert_eq!(refused.status, 400);
 }
+
+#[test]
+fn knn_search_keeps_the_nearest_vectors_by_the_mapped_similarity() {
+    let keyspace = MemoryKeyspace::default();
+    let api = api(&keyspace);
+    let created = api.answer(&request(
+        "PUT",
+        "/images",
+        "{\"mappings\":{\"properties\":{\"vector\":{\"type\":\"dense_vector\",\"dims\":2,\"similarity\":\"l2_norm\"},\"kind\":{\"type\":\"keyword\"}}}}",
+    ));
+    assert_eq!(created.status, 200, "{}", body(&created));
+    for (id, document) in [
+        ("near", "{\"vector\":[1.0,1.0],\"kind\":\"cat\"}"),
+        ("middle", "{\"vector\":[2.0,2.0],\"kind\":\"dog\"}"),
+        ("far", "{\"vector\":[9.0,9.0],\"kind\":\"cat\"}"),
+    ] {
+        let indexed = api.answer(&request("PUT", &format!("/images/_doc/{id}"), document));
+        assert!(indexed.status < 300, "{}", body(&indexed));
+    }
+    let search = |query: &str| body(&api.answer(&request("POST", "/images/_search", query)));
+    let two = search("{\"knn\":{\"field\":\"vector\",\"query_vector\":[1.0,1.0],\"k\":2,\"num_candidates\":10}}");
+    let near = two.find("\"_id\":\"near\"").expect("the nearest is found");
+    let middle = two.find("\"_id\":\"middle\"").expect("the second nearest is found");
+    assert!(near < middle && !two.contains("\"_id\":\"far\""), "{two}");
+    let cats = search(
+        "{\"knn\":{\"field\":\"vector\",\"query_vector\":[2.0,2.0],\"k\":1,\"filter\":{\"term\":{\"kind\":\"cat\"}}}}",
+    );
+    assert!(cats.contains("\"_id\":\"near\"") && !cats.contains("\"_id\":\"middle\""), "{cats}");
+    let refused = api.answer(&request("POST", "/images/_search", "{\"knn\":{\"field\":\"vector\"}}"));
+    assert_eq!(refused.status, 400);
+}

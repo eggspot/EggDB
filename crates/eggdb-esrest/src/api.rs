@@ -1203,6 +1203,7 @@ impl<'k> Api<'k> {
                         .map(|(_, node)| node)
                 })
         };
+        let query_given = member("query").is_some() || query_flag(request, "q").is_some();
         let query = match member("query") {
             Some(node) => match parse(&node, 0) {
                 Ok(query) => query,
@@ -1238,6 +1239,15 @@ impl<'k> Api<'k> {
                 .unwrap_or(default)
         };
         let size = number("size", DEFAULT_SIZE);
+        let knn = match member("knn") {
+            Some(node) => match crate::knn::parse_knn(&node, size.max(1)) {
+                Ok(knn) => knn,
+                Err(reason) => {
+                    return Ok(SearchOutcome::Whole(error(400, "parsing_exception", &reason)));
+                }
+            },
+            None => Vec::new(),
+        };
         let from = number("from", 0);
         let window_end = if scrolling { size } else { from.saturating_add(size) };
         if window_end > MAX_RESULT_WINDOW {
@@ -1294,11 +1304,8 @@ impl<'k> Api<'k> {
             })
             .unzip();
         let query = expand_wildcard_fields(query, &documents);
-        let query = crate::mappings::apply(
-            query,
-            &self.field_types(gathered.iter().map(|(index, _, _)| index.as_str()))?,
-            now_millis(),
-        );
+        let field_types = self.field_types(gathered.iter().map(|(index, _, _)| index.as_str()))?;
+        let query = crate::mappings::apply(query, &field_types, now_millis());
         let highlight = match member("highlight") {
             Some(node) if !count_only => match crate::highlight::highlight_of(&node, &query) {
                 Ok(highlight) => Some(highlight),
@@ -1309,13 +1316,32 @@ impl<'k> Api<'k> {
             _ => None,
         };
         let stats = Stats::of(&query, &documents);
-        let mut hits: Vec<(f64, usize)> = documents
-            .iter()
-            .enumerate()
-            .filter_map(|(at, (id, source))| {
-                score(&query, id, source, &stats).map(|value| (value, at))
-            })
-            .collect();
+        let mut hits: Vec<(f64, usize)> = if knn.is_empty() || query_given {
+            documents
+                .iter()
+                .enumerate()
+                .filter_map(|(at, (id, source))| {
+                    score(&query, id, source, &stats).map(|value| (value, at))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !knn.is_empty() {
+            let nearest = crate::knn::nearest(&knn, &documents, &field_types, &stats);
+            for hit in &mut hits {
+                if let Some(value) = nearest.get(&hit.1) {
+                    hit.0 += value;
+                }
+            }
+            let mut added: Vec<(f64, usize)> = nearest
+                .into_iter()
+                .filter(|(at, _)| !hits.iter().any(|hit| hit.1 == *at))
+                .map(|(at, value)| (value, at))
+                .collect();
+            added.sort_by_key(|(_, at)| *at);
+            hits.extend(added);
+        }
         if count_only {
             return Ok(SearchOutcome::Whole(json(
                 200,
