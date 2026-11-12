@@ -622,6 +622,7 @@ pub(crate) fn discovered_columns(name: &str, path: &str) -> SqlResult<Vec<(Strin
             .map(|column| (column.unwrap_or_default().trim().to_owned(), SqlType::Text))
             .collect());
     }
+    let bytes = crate::new_files::read_file(path, MOST_FILE_BYTES)?;
     let columns = if name == "read_arrow" {
         eggdb_arrow::read(&bytes).map_err(|error| SqlError::new(SqlState::DATA_CORRUPTED, format!("{path}: {error}")))?
     } else {
