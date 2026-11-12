@@ -733,7 +733,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Crypto-shredding: per-subject keys whose deletion makes data unreadable in the file, history
   and every backup, with holds that override it (D26, D53, D231, D246).
 - Classification and tagging of personal data (D26). **Code written, unbuilt** (code-only mode, 2026-11-12, D748).
-- Evidence reports for SOC 2, HIPAA and PCI DSS audits (D26).
+- Evidence reports for SOC 2, HIPAA and PCI DSS audits (D26). **Code written, unbuilt** (code-only mode, 2026-11-12,
+  D761), for what SQL can read; the audit log's server events and encryption settings are left.
 - Ledger tables: `TRUNCATE` and `DROP` refused (**code written, unbuilt**, code-only mode,
   2026-11-10, D392), digests published outside the database and checked
   against backups, Merkle proofs, SQL Server's `WITH (LEDGER = ON)` (D38, D236).

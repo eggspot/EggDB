@@ -111,6 +111,7 @@ mod temporal_tables;
 mod finance;
 mod cleanroom;
 mod metering;
+mod compliance;
 mod report_pdf;
 mod zarr;
 mod new_files;

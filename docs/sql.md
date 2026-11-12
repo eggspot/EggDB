@@ -3904,6 +3904,30 @@ SELECT * FROM eggdb_metering.chargeback('2026-11-01', '2026-12-01');
   execution millisecond and per row); `showback(start, end)` shows each tenant's usage and share of execution time;
   `top_statements(tenant, start, end [, n])` lists a tenant's costliest statement shapes.
 
+## Audit evidence (eggdb_compliance)
+
+`CREATE EXTENSION eggdb_compliance` gathers evidence for SOC 2, HIPAA and PCI DSS audits (D761):
+
+```sql
+CREATE EXTENSION eggdb_compliance;
+SELECT control, title, status, evidence FROM eggdb_compliance.evidence('PCI DSS');
+```
+
+`evidence([framework])` runs every check, keeps the results under a new run in `eggdb_compliance.runs` and
+`results`, and returns one row per control in `eggdb_compliance.controls` with the check behind it, its status
+(`pass`, `review` or `fail`) and the evidence as JSON:
+
+- `privileged_roles`: roles that are superusers, create roles or bypass row security (always for review);
+- `login_expiry`: login roles whose password does not expire within 90 days;
+- `public_grants`: table privileges granted to `PUBLIC`, failing when one is on a table `eggdb_privacy` classified or
+  `eggdb_catalog` tagged;
+- `personal_data_inventory`: the classified and tagged columns, failing when neither extension is installed;
+- `tamper_evidence`: every `eggdb_ledger` table verified, failing on a broken chain;
+- `retention`: `eggdb_retention`'s rules, failing when an erasure request without a hold is over 30 days old.
+
+The controls table can be extended with an organization's own control numbers. Being certified stays the deploying
+organization's job; the report is the database's part of the evidence.
+
 ## Resumable copies with verified differences (eggdb_migration)
 
 `CREATE EXTENSION eggdb_migration` moves a large table in batches that survive interruptions,
