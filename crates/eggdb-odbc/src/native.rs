@@ -68,6 +68,7 @@ fn last_failure(status: i32) -> Failure {
 pub(crate) struct Session {
     database: *mut EggdbDb,
     sql: *mut EggdbSql,
+    catalog: *mut EggdbSql,
 }
 
 // SAFETY: the C API's handles may move between threads; an ODBC connection handle is used by
@@ -99,51 +100,83 @@ impl Session {
             unsafe { eggdb_close(database) };
             return Err(failure);
         }
-        Ok(Self { database, sql })
+        Ok(Self {
+            database,
+            sql,
+            catalog: ptr::null_mut(),
+        })
+    }
+
+    fn catalog_session(&mut self) -> Result<*mut EggdbSql, Failure> {
+        if !self.catalog.is_null() {
+            return Ok(self.catalog);
+        }
+        let mut catalog: *mut EggdbSql = ptr::null_mut();
+        // SAFETY: `database` is this session's open database, the dialect a NUL-terminated
+        // literal, and `catalog` a live out-pointer.
+        let started = unsafe { eggdb_sql_open(self.database, c"postgresql".as_ptr(), &raw mut catalog) };
+        if started != 0 {
+            return Err(last_failure(started));
+        }
+        self.catalog = catalog;
+        Ok(catalog)
+    }
+
+    pub(crate) fn run_catalog(&mut self, text: &str, parameters: &[Option<String>]) -> Result<Vec<Outcome>, Failure> {
+        let catalog = self.catalog_session()?;
+        execute_on(catalog, text, parameters)
     }
 
     pub(crate) fn run(&mut self, text: &str, parameters: &[Option<String>]) -> Result<Vec<Outcome>, Failure> {
-        let text = CString::new(text).map_err(|_| Failure::new("HY090", "the statement holds a NUL character"))?;
-        let bound: Vec<EggdbParameter> = parameters
-            .iter()
-            .map(|value| match value {
-                Some(text) => EggdbParameter {
-                    text: text.as_ptr(),
-                    len: text.len(),
-                },
-                None => EggdbParameter {
-                    text: ptr::null(),
-                    len: 0,
-                },
-            })
-            .collect();
-        let mut results: *const EggdbResult = ptr::null();
-        let mut count = 0usize;
-        let first = if bound.is_empty() { ptr::null() } else { bound.as_ptr() };
-        // SAFETY: `self.sql` is this session's live handle, `text` is NUL-terminated, `bound`
-        // holds `bound.len()` parameters whose texts outlive the call, and the out-pointers are
-        // live.
-        let status = unsafe {
-            eggdb_sql_execute_with_parameters(self.sql, text.as_ptr(), first, bound.len(), &raw mut results, &raw mut count)
-        };
-        if status != 0 {
-            return Err(last_failure(status));
-        }
-        if results.is_null() || count == 0 {
-            return Ok(Vec::new());
-        }
-        // SAFETY: the call succeeded, so `results` points to `count` results that stay valid until
-        // the next call on this session, which cannot happen during this copy.
-        let results = unsafe { std::slice::from_raw_parts(results, count) };
-        Ok(results.iter().map(outcome_of).collect())
+        execute_on(self.sql, text, parameters)
     }
 
     pub(crate) fn close(self) {
+        if !self.catalog.is_null() {
+            // SAFETY: the catalog session is this connection's, given up here.
+            unsafe { eggdb_sql_close(self.catalog) };
+        }
         // SAFETY: `sql` is this session's handle, given up here; nothing uses it afterwards.
         unsafe { eggdb_sql_close(self.sql) };
         // SAFETY: as above, for the database handle the session ran on.
         unsafe { eggdb_close(self.database) };
     }
+}
+
+fn execute_on(sql: *mut EggdbSql, text: &str, parameters: &[Option<String>]) -> Result<Vec<Outcome>, Failure> {
+    let text = CString::new(text).map_err(|_| Failure::new("HY090", "the statement holds a NUL character"))?;
+    let bound: Vec<EggdbParameter> = parameters
+        .iter()
+        .map(|value| match value {
+            Some(text) => EggdbParameter {
+                text: text.as_ptr(),
+                len: text.len(),
+            },
+            None => EggdbParameter {
+                text: ptr::null(),
+                len: 0,
+            },
+        })
+        .collect();
+    let mut results: *const EggdbResult = ptr::null();
+    let mut count = 0usize;
+    let first = if bound.is_empty() { ptr::null() } else { bound.as_ptr() };
+    // SAFETY: `sql` is a live session handle of this connection, `text` is NUL-terminated, `bound`
+    // holds `bound.len()` parameters whose texts outlive the call, and the out-pointers are
+    // live.
+    let status = unsafe {
+        eggdb_sql_execute_with_parameters(sql, text.as_ptr(), first, bound.len(), &raw mut results, &raw mut count)
+    };
+    if status != 0 {
+        return Err(last_failure(status));
+    }
+    if results.is_null() || count == 0 {
+        return Ok(Vec::new());
+    }
+    // SAFETY: the call succeeded, so `results` points to `count` results that stay valid until
+    // the next call on this session, which cannot happen during this copy.
+    let results = unsafe { std::slice::from_raw_parts(results, count) };
+    Ok(results.iter().map(outcome_of).collect())
 }
 
 fn bytes_at(data: *const u8, len: usize) -> Vec<u8> {

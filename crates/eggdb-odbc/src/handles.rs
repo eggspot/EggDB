@@ -57,6 +57,13 @@ impl ConnectionHandle {
         session.run(text, parameters)
     }
 
+    pub(crate) fn run_catalog(&mut self, text: &str, parameters: &[Option<String>]) -> Result<Vec<Outcome>, Failure> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| Failure::new("08003", "the connection is not open"))?
+            .run_catalog(text, parameters)
+    }
+
     pub(crate) fn end_transaction(&mut self, commit: bool) -> Result<(), Failure> {
         if !self.in_transaction {
             return Ok(());

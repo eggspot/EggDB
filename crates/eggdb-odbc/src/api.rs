@@ -753,3 +753,106 @@ pub extern "system" fn SQLGetDiagRec(
     store(written, i16::try_from(found.message.len()).unwrap_or(i16::MAX));
     if truncated { SQL_SUCCESS_WITH_INFO } else { SQL_SUCCESS }
 }
+
+const HIDDEN_SCHEMAS: &str = "('pg_catalog', 'information_schema', 'eggdb_internal')";
+
+const ODBC_TYPE_OF_DATA_TYPE: &str = "CASE c.data_type WHEN 'integer' THEN 4 WHEN 'bigint' THEN -5 WHEN 'smallint' THEN 5 \
+    WHEN 'boolean' THEN -7 WHEN 'double precision' THEN 8 WHEN 'real' THEN 7 WHEN 'numeric' THEN 2 \
+    WHEN 'date' THEN 91 WHEN 'time without time zone' THEN 92 WHEN 'timestamp without time zone' THEN 93 \
+    WHEN 'timestamp with time zone' THEN 93 WHEN 'bytea' THEN -3 WHEN 'text' THEN -1 ELSE 12 END";
+
+fn pattern(text: *const u8, length: i16) -> Option<String> {
+    input_text(text, isize::from(length)).filter(|pattern| !pattern.is_empty() && pattern != "%")
+}
+
+fn catalog_query(stmt: &mut StatementHandle, text: &str, parameters: &[Option<String>]) -> SqlReturn {
+    stmt.diagnostics.clear();
+    let Some(dbc) = owning_connection(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    match dbc.run_catalog(text, parameters) {
+        Ok(outcomes) => {
+            stmt.take_outcomes(outcomes);
+            SQL_SUCCESS
+        }
+        Err(failure) => failed(&mut stmt.diagnostics, failure),
+    }
+}
+
+/// Lists the tables and views whose schema and name match the patterns, and whose type is in
+/// the comma-separated list of types when one is given.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLTables(
+    stmt: *mut c_void,
+    _catalog: *const u8,
+    _catalog_length: i16,
+    schema: *const u8,
+    schema_length: i16,
+    table: *const u8,
+    table_length: i16,
+    types: *const u8,
+    types_length: i16,
+) -> SqlReturn {
+    let Some(stmt) = statement(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    let text = format!(
+        "SELECT table_catalog AS \"TABLE_CAT\", table_schema AS \"TABLE_SCHEM\", table_name AS \"TABLE_NAME\", \
+         CASE table_type WHEN 'BASE TABLE' THEN 'TABLE' ELSE table_type END AS \"TABLE_TYPE\", NULL::text AS \"REMARKS\" \
+         FROM information_schema.tables WHERE table_schema NOT IN {HIDDEN_SCHEMAS} \
+         AND ($1::text IS NULL OR table_schema LIKE $1) AND ($2::text IS NULL OR table_name LIKE $2) \
+         ORDER BY 4, 2, 3"
+    );
+    let outcome = catalog_query(stmt, &text, &[pattern(schema, schema_length), pattern(table, table_length)]);
+    if outcome != SQL_SUCCESS {
+        return outcome;
+    }
+    if let Some(types) = pattern(types, types_length) {
+        let wanted: Vec<String> = types
+            .split(',')
+            .map(|kind| kind.trim().trim_matches('\'').to_ascii_uppercase())
+            .collect();
+        stmt.rows.retain(|row| match row.get(3) {
+            Some(crate::native::Cell::Text(kind)) => wanted.contains(kind),
+            _ => false,
+        });
+        stmt.row_count = isize::try_from(stmt.rows.len()).unwrap_or(isize::MAX);
+    }
+    SQL_SUCCESS
+}
+
+/// Lists the columns of the tables matching the patterns, with ODBC's eighteen columns.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLColumns(
+    stmt: *mut c_void,
+    _catalog: *const u8,
+    _catalog_length: i16,
+    schema: *const u8,
+    schema_length: i16,
+    table: *const u8,
+    table_length: i16,
+    column: *const u8,
+    column_length: i16,
+) -> SqlReturn {
+    let Some(stmt) = statement(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    let text = format!(
+        "SELECT c.table_catalog AS \"TABLE_CAT\", c.table_schema AS \"TABLE_SCHEM\", c.table_name AS \"TABLE_NAME\", \
+         c.column_name AS \"COLUMN_NAME\", {ODBC_TYPE_OF_DATA_TYPE} AS \"DATA_TYPE\", c.data_type AS \"TYPE_NAME\", \
+         c.character_maximum_length AS \"COLUMN_SIZE\", c.character_octet_length AS \"BUFFER_LENGTH\", \
+         c.numeric_scale AS \"DECIMAL_DIGITS\", c.numeric_precision_radix AS \"NUM_PREC_RADIX\", \
+         CASE c.is_nullable WHEN 'YES' THEN 1 ELSE 0 END AS \"NULLABLE\", NULL::text AS \"REMARKS\", \
+         c.column_default AS \"COLUMN_DEF\", {ODBC_TYPE_OF_DATA_TYPE} AS \"SQL_DATA_TYPE\", \
+         NULL::integer AS \"SQL_DATETIME_SUB\", c.character_octet_length AS \"CHAR_OCTET_LENGTH\", \
+         c.ordinal_position AS \"ORDINAL_POSITION\", c.is_nullable AS \"IS_NULLABLE\" \
+         FROM information_schema.columns c WHERE c.table_schema NOT IN {HIDDEN_SCHEMAS} \
+         AND ($1::text IS NULL OR c.table_schema LIKE $1) AND ($2::text IS NULL OR c.table_name LIKE $2) \
+         AND ($3::text IS NULL OR c.column_name LIKE $3) ORDER BY 2, 3, 17"
+    );
+    catalog_query(
+        stmt,
+        &text,
+        &[pattern(schema, schema_length), pattern(table, table_length), pattern(column, column_length)],
+    )
+}

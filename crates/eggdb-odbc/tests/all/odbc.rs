@@ -1,7 +1,7 @@
 use eggdb_odbc::{
     SQLAllocHandle, SQLBindParameter, SQLDescribeCol, SQLDisconnect, SQLDriverConnect,
     SQLEndTran, SQLExecDirect, SQLExecute, SQLFetch, SQLFreeHandle, SQLGetData, SQLGetDiagRec,
-    SQLNumResultCols, SQLPrepare, SQLRowCount, SQLSetConnectAttr,
+    SQLColumns, SQLNumResultCols, SQLPrepare, SQLRowCount, SQLSetConnectAttr, SQLTables,
 };
 use std::ffi::c_void;
 use std::ptr;
@@ -87,6 +87,17 @@ fn an_application_connects_runs_binds_fetches_and_rolls_back() {
     let mut message_length = 0i16;
     assert_eq!(SQLGetDiagRec(SQL_HANDLE_STMT, stmt, 1, state.as_mut_ptr(), &raw mut native, message.as_mut_ptr(), 256, &raw mut message_length), 0);
     assert_ne!(&state[..5], b"00000");
+    let eggs = b"eggs\0";
+    assert_eq!(SQLTables(stmt, ptr::null(), 0, ptr::null(), 0, eggs.as_ptr(), -3, ptr::null(), 0), 0);
+    assert_eq!(SQLFetch(stmt), 0);
+    assert_eq!(text_column(stmt, 3).as_deref(), Some("eggs"));
+    assert_eq!(text_column(stmt, 4).as_deref(), Some("TABLE"));
+    assert_eq!(SQLColumns(stmt, ptr::null(), 0, ptr::null(), 0, eggs.as_ptr(), -3, ptr::null(), 0), 0);
+    let mut names = Vec::new();
+    while SQLFetch(stmt) == 0 {
+        names.push(text_column(stmt, 4).unwrap_or_default());
+    }
+    assert_eq!(names, ["id", "colour", "weight"]);
     SQLFreeHandle(SQL_HANDLE_STMT, stmt);
     SQLDisconnect(dbc);
     SQLFreeHandle(SQL_HANDLE_DBC, dbc);
