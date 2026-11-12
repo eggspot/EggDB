@@ -1,4 +1,5 @@
 require "minitest/autorun"
+require "tmpdir"
 require_relative "../lib/eggdb"
 
 class EggDBTest < Minitest::Test
@@ -13,5 +14,33 @@ class EggDBTest < Minitest::Test
     error = assert_raises(EggDB::Error) { db.query("SELECT * FROM nowhere") }
     assert_equal 5, error.sqlstate.size
     db.close
+  end
+
+  def test_key_value_transactions_and_collections
+    path = File.join(Dir.mktmpdir, "kv.eggdb")
+    EggDB::KeyValue.open(path) do |store|
+      store.write do |txn|
+        txn.put("a", "1")
+        txn.put("b", "2")
+        assert txn.create_collection("users")
+        txn.put("u1", "Ada", collection: "users")
+      end
+      store.read do |txn|
+        assert_equal "1", txn.get("a")
+        assert_nil txn.get("missing")
+        assert_equal [%w[a 1], %w[b 2]], txn.scan.to_a
+        assert_equal [%w[b 2]], txn.scan(start: "b").to_a
+        assert_equal ["users"], txn.collections
+        assert_equal 1, txn.collection_stats("users").entries
+      end
+      store.write do |txn|
+        assert txn.delete("a")
+        txn.rename_collection("users", "people")
+      end
+      store.read do |txn|
+        assert_nil txn.get("a")
+        assert_equal "Ada", txn.get("u1", collection: "people")
+      end
+    end
   end
 end

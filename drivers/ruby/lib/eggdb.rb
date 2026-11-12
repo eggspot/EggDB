@@ -24,12 +24,34 @@ module EggDB
     extern "int eggdb_sql_close(void*)"
     extern "const char* eggdb_last_error()"
     extern "const char* eggdb_last_sqlstate()"
+    extern "void eggdb_free(void*, size_t)"
+    extern "int eggdb_begin_read(void*, void*)"
+    extern "int eggdb_begin_write(void*, void*)"
+    extern "int eggdb_commit(void*, void*)"
+    extern "int eggdb_rollback(void*)"
+    extern "int eggdb_get(void*, const char*, void*, size_t, void*, void*)"
+    extern "int eggdb_put(void*, const char*, void*, size_t, void*, size_t)"
+    extern "int eggdb_put_with_expiry(void*, const char*, void*, size_t, void*, size_t, unsigned long long)"
+    extern "int eggdb_delete(void*, const char*, void*, size_t, void*)"
+    extern "int eggdb_scan_open(void*, const char*, void*, size_t, void*, size_t, unsigned int, void*)"
+    extern "int eggdb_scan_next(void*, void*, size_t, void*, void*)"
+    extern "void eggdb_scan_free(void*)"
+    extern "int eggdb_create_collection(void*, const char*, void*)"
+    extern "int eggdb_drop_collection(void*, const char*, void*)"
+    extern "int eggdb_rename_collection(void*, const char*, const char*)"
+    extern "int eggdb_collection_names(void*, void*, void*, void*)"
+    extern "int eggdb_collection_stats(void*, const char*, void*)"
   end
 
   VALUE_BYTES = 40
   PARAMETER_BYTES = 16
   RESULT_BYTES = 40
   POINTER = Fiddle::SIZEOF_VOIDP
+  ENTRY_BYTES = 4 * POINTER
+  SCAN_REVERSE = 1
+  SCAN_END_INCLUSIVE = 2
+  SCAN_PREFIX = 4
+  OPEN_READ_ONLY = 1
 
   def self.check(status)
     return if status.zero?
@@ -92,6 +114,221 @@ module EggDB
       Native.eggdb_sql_close(@session)
       Native.eggdb_close(@database) if @database
       @session = nil
+    end
+  end
+
+  CollectionStats = Struct.new(:entries, :key_bytes, :value_bytes)
+
+  class KeyValue
+    def self.open(path, read_only: false)
+      store = new(path, read_only)
+      return store unless block_given?
+
+      begin
+        yield store
+      ensure
+        store.close
+      end
+    end
+
+    def initialize(path, read_only)
+      options = Fiddle::Pointer.malloc(16)
+      options[0, 16] = [read_only ? OPEN_READ_ONLY : 0, 0, 0].pack("L<L<Q<")
+      out = Fiddle::Pointer.malloc(POINTER)
+      EggDB.check(Native.eggdb_open(path, options, out))
+      @database = Fiddle::Pointer.new(out[0, POINTER].unpack1("J"))
+      @read_only = read_only
+    end
+
+    attr_reader :read_only
+
+    def read
+      transaction = begin_transaction(false)
+      begin
+        yield transaction
+      ensure
+        transaction.rollback
+      end
+    end
+
+    def write
+      transaction = begin_transaction(true)
+      begin
+        result = yield transaction
+        transaction.commit
+        result
+      ensure
+        transaction.rollback
+      end
+    end
+
+    def close
+      return unless @database
+
+      database = @database
+      @database = nil
+      EggDB.check(Native.eggdb_close(database))
+    end
+
+    private
+
+    def begin_transaction(writing)
+      raise Error.new("the store is closed", nil, nil) unless @database
+
+      out = Fiddle::Pointer.malloc(POINTER)
+      EggDB.check(writing ? Native.eggdb_begin_write(@database, out) : Native.eggdb_begin_read(@database, out))
+      Transaction.new(Fiddle::Pointer.new(out[0, POINTER].unpack1("J")), writing)
+    end
+  end
+
+  class Transaction
+    attr_reader :writing
+
+    def initialize(handle, writing)
+      @handle = handle
+      @writing = writing
+    end
+
+    def get(key, collection: nil)
+      key = live_bytes(key)
+      data = Fiddle::Pointer.malloc(POINTER)
+      length = Fiddle::Pointer.malloc(8)
+      EggDB.check(Native.eggdb_get(@handle, collection, key, key.bytesize, data, length))
+      address = data[0, POINTER].unpack1("J")
+      return nil if address.zero?
+
+      size = length[0, 8].unpack1("Q<")
+      value = Fiddle::Pointer.new(address)[0, size].b
+      Native.eggdb_free(Fiddle::Pointer.new(address), size)
+      value
+    end
+
+    def put(key, value, collection: nil, ttl_ms: nil)
+      key = live_bytes(key)
+      value = value.to_s.b
+      status = if ttl_ms && ttl_ms.positive?
+                 Native.eggdb_put_with_expiry(@handle, collection, key, key.bytesize, value, value.bytesize, ttl_ms)
+               else
+                 Native.eggdb_put(@handle, collection, key, key.bytesize, value, value.bytesize)
+               end
+      EggDB.check(status)
+      nil
+    end
+
+    def delete(key, collection: nil)
+      key = live_bytes(key)
+      deleted = Fiddle::Pointer.malloc(4)
+      EggDB.check(Native.eggdb_delete(@handle, collection, key, key.bytesize, deleted))
+      !deleted[0, 4].unpack1("l<").zero?
+    end
+
+    def scan(start: nil, end_key: nil, prefix: nil, reverse: false, end_inclusive: false, collection: nil)
+      return enum_for(:scan, start: start, end_key: end_key, prefix: prefix, reverse: reverse, end_inclusive: end_inclusive, collection: collection) unless block_given?
+
+      live
+      flags = 0
+      flags |= SCAN_REVERSE if reverse
+      flags |= SCAN_END_INCLUSIVE if end_inclusive
+      if prefix
+        flags |= SCAN_PREFIX
+        start = prefix
+        end_key = nil
+      end
+      start = start&.to_s&.b
+      end_key = end_key&.to_s&.b
+      out = Fiddle::Pointer.malloc(POINTER)
+      EggDB.check(Native.eggdb_scan_open(@handle, collection, start, start ? start.bytesize : 0, end_key, end_key ? end_key.bytesize : 0, flags, out))
+      scan = Fiddle::Pointer.new(out[0, POINTER].unpack1("J"))
+      begin
+        entries = Fiddle::Pointer.malloc(POINTER)
+        count = Fiddle::Pointer.malloc(8)
+        loop do
+          EggDB.check(Native.eggdb_scan_next(@handle, scan, 0, entries, count))
+          total = count[0, 8].unpack1("Q<")
+          break if total.zero?
+
+          batch = Fiddle::Pointer.new(entries[0, POINTER].unpack1("J"))
+          pairs = (0...total).map do |index|
+            key_address, key_length, value_address, value_length = batch[index * ENTRY_BYTES, ENTRY_BYTES].unpack("JJJJ")
+            [Fiddle::Pointer.new(key_address)[0, key_length].b, Fiddle::Pointer.new(value_address)[0, value_length].b]
+          end
+          pairs.each { |key, value| yield key, value }
+        end
+      ensure
+        Native.eggdb_scan_free(scan)
+      end
+      nil
+    end
+
+    def create_collection(name)
+      live
+      created = Fiddle::Pointer.malloc(4)
+      EggDB.check(Native.eggdb_create_collection(@handle, name, created))
+      !created[0, 4].unpack1("l<").zero?
+    end
+
+    def drop_collection(name)
+      live
+      dropped = Fiddle::Pointer.malloc(4)
+      EggDB.check(Native.eggdb_drop_collection(@handle, name, dropped))
+      !dropped[0, 4].unpack1("l<").zero?
+    end
+
+    def rename_collection(name, new_name)
+      live
+      EggDB.check(Native.eggdb_rename_collection(@handle, name, new_name))
+      nil
+    end
+
+    def collections
+      live
+      data = Fiddle::Pointer.malloc(POINTER)
+      length = Fiddle::Pointer.malloc(8)
+      count = Fiddle::Pointer.malloc(8)
+      EggDB.check(Native.eggdb_collection_names(@handle, data, length, count))
+      address = data[0, POINTER].unpack1("J")
+      return [] if address.zero?
+
+      size = length[0, 8].unpack1("Q<")
+      joined = Fiddle::Pointer.new(address)[0, size]
+      Native.eggdb_free(Fiddle::Pointer.new(address), size)
+      joined.split("\0").first(count[0, 8].unpack1("Q<")).map { |name| name.force_encoding("UTF-8") }
+    end
+
+    def collection_stats(name)
+      live
+      stats = Fiddle::Pointer.malloc(24)
+      EggDB.check(Native.eggdb_collection_stats(@handle, name, stats))
+      CollectionStats.new(*stats[0, 24].unpack("Q<Q<Q<"))
+    end
+
+    def commit
+      live
+      stamp = Fiddle::Pointer.malloc(8)
+      handle = @handle
+      @handle = nil
+      EggDB.check(Native.eggdb_commit(handle, stamp))
+      stamp[0, 8].unpack1("Q<")
+    end
+
+    def rollback
+      return unless @handle
+
+      handle = @handle
+      @handle = nil
+      Native.eggdb_rollback(handle)
+      nil
+    end
+
+    private
+
+    def live
+      raise Error.new("the transaction has ended", nil, nil) unless @handle
+    end
+
+    def live_bytes(key)
+      live
+      key.to_s.b
     end
   end
 
