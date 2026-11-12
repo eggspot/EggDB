@@ -1643,6 +1643,9 @@ impl Evaluator<'_> {
         if let Some(result) = crate::webauthn::function(name, &values) {
             return result;
         }
+        if let Some(result) = crate::remote_models::function(name, &values) {
+            return result;
+        }
         match (name, values.as_slice()) {
             ("coalesce", [_, ..]) => {
                 let found = values.iter().find(|value| !value.is_null());

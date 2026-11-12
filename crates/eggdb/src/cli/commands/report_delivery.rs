@@ -73,7 +73,7 @@ fn trust_store() -> Option<TrustStore> {
     None
 }
 
-fn connect(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
+pub(super) fn connect(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
     let address = (host.trim_start_matches('[').trim_end_matches(']'), port)
         .to_socket_addrs()?
         .next()
@@ -84,7 +84,7 @@ fn connect(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
     Ok(stream)
 }
 
-fn secured(stream: TcpStream, host: &str) -> io::Result<TlsStream<TcpStream>> {
+pub(super) fn secured(stream: TcpStream, host: &str) -> io::Result<TlsStream<TcpStream>> {
     let trust = trust_store().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no trusted certificates: set EGGDB_REPORT_CA_FILE"))?;
     let server_name = ServerName::parse(host.trim_start_matches('[').trim_end_matches(']'))
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "the host is not a valid server name"))?;
@@ -113,7 +113,7 @@ pub(super) fn post_https(target: &SecureTarget, content_type: &str, body: &[u8],
     }
 }
 
-fn read_line(stream: &mut dyn Read) -> io::Result<String> {
+pub(super) fn read_line(stream: &mut dyn Read) -> io::Result<String> {
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
     while line.len() < MOST_REPLY_BYTES {

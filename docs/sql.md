@@ -3311,6 +3311,16 @@ SELECT id, rrf_score(semantic.rank) + rrf_score(lexical.rank) AS score
 FROM semantic JOIN lexical USING (id) ORDER BY score DESC LIMIT 10;
 ```
 
+Remote models are opt-in (D777): `eggdb_remote_embed(endpoint, model, text [, api_key])` returns the embedding an
+OpenAI-compatible embeddings endpoint gives (`data[0].embedding`, as a vector literal), and
+`eggdb_remote_complete(endpoint, model, prompt [, api_key])` the reply of a chat-completions endpoint
+(`choices[0].message.content`); Ollama's and vLLM's OpenAI-compatible APIs answer the same way. Nothing is sent until
+the operator lists the endpoints in `EGGDB_MODEL_ENDPOINTS` (comma-separated URL prefixes; `https://`, or `http://`
+only to this machine; `#roles=a+b` lets those roles call an endpoint, which otherwise only superusers may), else
+`0A000`. Keep the API key in the secrets store and pass it in: `eggdb_remote_embed('https://api.example.com/v1/embeddings',
+'text-embedding-3-small', body, eggdb_secrets.get('models/key', $1))`. Certificates are checked against
+`EGGDB_REPORT_CA_FILE` or the system's roots.
+
 `CREATE EXTENSION eggdb_ai` adds a semantic cache and agent memory on these functions (D740):
 `eggdb_ai.cache_put(namespace, prompt, answer [, embedding, ttl])` and `cache_get(namespace, prompt [, embedding,
 max_distance])` return a cached answer whose prompt is within the cosine distance (0.1 by default) of the new one;

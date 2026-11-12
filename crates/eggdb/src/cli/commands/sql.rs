@@ -17,6 +17,7 @@ use std::io::Read;
 impl Session<'_> {
     pub(super) fn sql(&mut self) -> Result<Exit, Failure> {
         super::foreign::allow_from_environment();
+        super::model_endpoints::allow_from_environment();
         if let Some(url) = self
             .request
             .file

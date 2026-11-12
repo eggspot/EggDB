@@ -202,6 +202,7 @@ fn added_function_type(
         name if crate::webauthn::FUNCTIONS.contains(&name) => {
             Some(crate::webauthn::result_type(name))
         }
+        name if crate::remote_models::FUNCTIONS.contains(&name) => Some(SqlType::Text),
         "l2_normalize" => Some(SqlType::Text),
         "strpos" | "position" | "ascii" | "regexp_count" | "regexp_instr" => Some(SqlType::Integer),
         "starts_with" | "regexp_like" | "isfinite" | "is_normalized" | "eggdb_cron_schedule_check" => {

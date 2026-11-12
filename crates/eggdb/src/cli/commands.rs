@@ -24,6 +24,7 @@ mod follow;
 mod follow_sql_server;
 mod follow_state;
 mod foreign;
+mod model_endpoints;
 mod mcp;
 mod ndjson_io;
 mod xlsx_io;
