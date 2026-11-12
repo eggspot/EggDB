@@ -17,10 +17,12 @@
 //!   statements (`COM_STMT_PREPARE`, `COM_STMT_EXECUTE` with binary parameters and rows,
 //!   `COM_STMT_SEND_LONG_DATA`, `COM_STMT_RESET`, `COM_STMT_CLOSE`).
 //! - `LOAD DATA LOCAL INFILE`: the server asks the client for the file and reads its content.
+//! - [`client`] is a MySQL client for EggDB's own use (foreign sources and copies).
 //!
 //! The guide is "Connecting with mysql" in `docs/sql.md` in the repository.
 
 mod auth;
+pub mod client;
 mod connection;
 mod local_infile;
 pub mod packets;

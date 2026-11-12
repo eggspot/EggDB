@@ -1768,7 +1768,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Parquet in object storage (D46, D229). Check: a CI copy from PostgreSQL 17, compared by row. Scheduled copies
   (`eggdb_etl`) from PostgreSQL, SQL Server and local CSV and Parquet files: **code written, unbuilt** (code-only
   mode, 2026-11-12, D769); CSV and Parquet objects in S3-compatible storage: **code written, unbuilt** (code-only
-  mode, 2026-11-12, D913). Left: MySQL.
+  mode, 2026-11-12, D913); MySQL: **code written, unbuilt** (code-only mode, 2026-11-12, D914).
 - Transformations in SQL and WebAssembly, first SQL models with `ref()` dependencies, tests and
   lineage in `eggdb_catalog` (D46, D244). Check: a model graph run in dependency order. SQL models (`eggdb_pipelines`): **code written, unbuilt** (code-only mode, 2026-11-12, D750).
 - Pipeline orchestration on the job scheduler, first dependencies, retries with backoff and
@@ -1853,7 +1853,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Sync log compaction, partial sync, per-field merges and CRDTs, and end-to-end encryption (D228).
 - CouchDB's replication protocol (D48).
 - Foreign tables with declared columns and filter pushdown (D29, D229).
-- Foreign sources: MySQL, SQL Server, HTTP, S3 and Parquet over object storage (D29, D229).
+- Foreign sources: MySQL, SQL Server, HTTP, S3 and Parquet over object storage (D29, D229). SQL Server: **code
+  written, unbuilt** (code-only mode, 2026-11-12, D769); CSV and Parquet objects in S3-compatible storage: **code
+  written, unbuilt** (code-only mode, 2026-11-12, D913); MySQL: **code written, unbuilt** (code-only mode, 2026-11-12,
+  D914). Left: HTTP.
 - Credentials per source, permission per role, and a timeout and row limit per call (D229). **Code written, unbuilt**
   (code-only mode, 2026-11-12, D770).
 - Joins across servers planned as one distributed query, and federated SQL across EggDB clusters

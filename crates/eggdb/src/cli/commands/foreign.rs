@@ -3,6 +3,8 @@ use eggdb_parquet::{Cell, Column, ColumnType};
 
 const VARIABLE: &str = "EGGDB_FOREIGN_SOURCES";
 const SQL_SERVER_PASSWORD: &str = "SQLCMDPASSWORD";
+const MYSQL_PASSWORD: &str = "MYSQL_PWD";
+const MYSQL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const PASSWORD_FILE: &str = "EGGDB_FOREIGN_PASSFILE";
 const ROW_LIMIT: &str = "EGGDB_FOREIGN_ROW_LIMIT";
 const TIMEOUT_SECONDS: &str = "EGGDB_FOREIGN_TIMEOUT_SECONDS";
@@ -303,6 +305,30 @@ fn read_sql_server(
     Ok(())
 }
 
+fn read_mysql(
+    url: &str,
+    query: &str,
+    row: &mut dyn FnMut(String) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut options = eggdb_mysqlwire::client::parse_mysql_url(url)?;
+    if options.password.is_none() {
+        options.password = password_from_file(&options.host, options.port, &options.database, &options.user)
+            .or_else(|| std::env::var(MYSQL_PASSWORD).ok());
+    }
+    let mut client = eggdb_mysqlwire::client::MySqlClient::connect(&options, MYSQL_TIMEOUT).map_err(|error| error.to_string())?;
+    let results = client.query(query).map_err(|error| error.to_string())?;
+    let Some(answer) = results.into_iter().rev().find(|result| !result.columns.is_empty()) else {
+        return Ok(());
+    };
+    for values in &answer.rows {
+        row(object(
+            &answer.columns,
+            values.iter().map(|value| value.as_deref().map_or_else(|| "null".to_owned(), json_string)),
+        ))?;
+    }
+    Ok(())
+}
+
 fn csv_fields(line: &str, fields: &mut Vec<String>, field: &mut String, quoted: &mut bool) -> bool {
     let mut characters = line.chars().peekable();
     while let Some(character) = characters.next() {
@@ -374,6 +400,10 @@ fn is_sql_server(source: &str) -> bool {
     source.starts_with("sqlserver://")
 }
 
+fn is_mysql(source: &str) -> bool {
+    source.starts_with("mysql://")
+}
+
 fn is_object(source: &str) -> bool {
     source.starts_with(super::archive::BUCKET_SCHEME)
 }
@@ -424,6 +454,9 @@ fn read(
     if is_sql_server(source) {
         return read_sql_server(source, query, row);
     }
+    if is_mysql(source) {
+        return read_mysql(source, query, row);
+    }
     if is_object(source) && (source.ends_with(".csv") || source.ends_with(".parquet")) {
         return read_object(source, query, row);
     }
@@ -453,7 +486,7 @@ fn read(
         return read_parquet(&checked, query, row);
     }
     Err(format!(
-        "{}: give a postgresql:// URL (EggDB or PostgreSQL), a sqlserver:// URL, a file:...parquet or file:...csv path, or an s3://bucket/...parquet or ...csv object",
+        "{}: give a postgresql:// URL (EggDB or PostgreSQL), a sqlserver:// or mysql:// URL, a file:...parquet or file:...csv path, or an s3://bucket/...parquet or ...csv object",
         shown_source(source)
     ))
 }
@@ -513,6 +546,18 @@ fn allows(allowed: &str, source: &str) -> bool {
             && (!names_database(allowed) || entry.database == wanted.database)
             && wanted.ssl_mode >= entry.ssl_mode
             && (wanted.ssl_root_cert.is_none() || wanted.ssl_root_cert == entry.ssl_root_cert);
+    }
+    if is_mysql(allowed) && is_mysql(source) {
+        let (Ok(entry), Ok(wanted)) = (
+            eggdb_mysqlwire::client::parse_mysql_url(allowed),
+            eggdb_mysqlwire::client::parse_mysql_url(source),
+        ) else {
+            return false;
+        };
+        return entry.host.eq_ignore_ascii_case(&wanted.host)
+            && entry.port == wanted.port
+            && entry.user == wanted.user
+            && (!names_database(allowed) || entry.database == wanted.database);
     }
     if is_object(allowed) || is_object(source) {
         return object_allowed(allowed, source);
@@ -609,6 +654,15 @@ mod tests {
         assert_eq!(decimal_text(12_345, 2), "123.45");
         assert_eq!(decimal_text(-5, 3), "-0.005");
         assert_eq!(decimal_text(7, 0), "7");
+    }
+
+    #[test]
+    fn mysql_entries_allow_their_own_host_port_user_and_database() {
+        assert!(allows("mysql://reader@db.internal:3306/shop", "mysql://reader@DB.internal:3306/shop"));
+        assert!(!allows("mysql://reader@db.internal:3306/shop", "mysql://reader@db.internal:3306/hr"));
+        assert!(!allows("mysql://reader@db.internal:3306/shop", "mysql://root@db.internal:3306/shop"));
+        assert!(allows("mysql://reader@db.internal", "mysql://reader@db.internal:3306/any"));
+        assert!(!allows("mysql://reader@db.internal", "postgresql://reader@db.internal/any"));
     }
 
     #[test]
