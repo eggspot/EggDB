@@ -70,6 +70,7 @@ mod hierarchy;
 mod hstore;
 mod vector_type;
 mod sqlserver_hierarchy;
+mod sqlite_fts;
 mod hstore_functions;
 mod hyperloglog;
 mod hypothetical_set;

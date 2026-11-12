@@ -1013,3 +1013,92 @@ pub(crate) fn is_schema_table(table: &TableReference) -> bool {
             "sqlite_master" | "sqlite_schema" | "sqlite_temp_master" | "sqlite_temp_schema"
         )
 }
+
+impl Parser<'_> {
+    /// SQLite's `CREATE VIRTUAL TABLE [IF NOT EXISTS] name USING fts5(columns and options)`:
+    /// an ordinary table of text columns that `MATCH`, `bm25()`, `highlight()` and `snippet()`
+    /// search (D800). Column options (`UNINDEXED`) and table options (`tokenize = ...`,
+    /// `prefix = ...`, `content = ...`) are accepted and the columns all searched.
+    pub(super) fn create_virtual_table(&mut self, statement_start: usize) -> SqlResult<Statement> {
+        self.at += 2;
+        let if_not_exists = if self.is_word("if") && self.is_word_at(1, "not") {
+            self.at += 2;
+            self.expect_word("exists")?;
+            true
+        } else {
+            false
+        };
+        let name = self.table_name()?;
+        self.expect_word("using")?;
+        let module = self.name()?;
+        if !module.text.eq_ignore_ascii_case("fts5") {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_OBJECT,
+                format!("no such module: {}", module.text),
+            )
+            .with_sqlite_code(1)
+            .at(module.position));
+        }
+        self.expect(&TokenKind::LeftParen)?;
+        let mut columns = Vec::new();
+        loop {
+            let column = self.name()?;
+            if self.take_operator("=") {
+                match self.peek_kind() {
+                    TokenKind::String(_)
+                    | TokenKind::Word(_)
+                    | TokenKind::QuotedIdentifier(_)
+                    | TokenKind::Integer(_) => self.at += 1,
+                    _ => return Err(self.unexpected()),
+                }
+            } else {
+                self.take_word("unindexed");
+                columns.push(ColumnDefinition {
+                    name: column,
+                    sql_type: SqlType::Text,
+                    not_null: false,
+                    primary_key: false,
+                    default: None,
+                    default_dialect: crate::dialect::Dialect::Sqlite,
+                    auto_increment: false,
+                    serial: false,
+                    identity_seed: None,
+                    generated_always: false,
+                    on_update_current_timestamp: false,
+                    unique: None,
+                    constraints: Vec::new(),
+                    comment: None,
+                    generated: None,
+                });
+            }
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RightParen)?;
+        if columns.is_empty() {
+            return Err(SqlError::new(
+                SqlState::INVALID_TABLE_DEFINITION,
+                "fts5: no columns",
+            )
+            .with_sqlite_code(1));
+        }
+        let text = self.slice(statement_start, self.previous_end()).to_owned();
+        Ok(Statement::CreateTable(crate::ast::CreateTable {
+            name,
+            temporary: None,
+            if_not_exists,
+            columns,
+            primary_key: None,
+            primary_key_name: None,
+            indexes: Vec::new(),
+            constraints: Vec::new(),
+            comment: None,
+            partition_by: None,
+            partition_of: None,
+            sqlite_text: Some(text),
+            system_versioning: None,
+            rowversion_column: None,
+        }))
+    }
+}

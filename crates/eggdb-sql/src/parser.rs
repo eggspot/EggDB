@@ -1842,7 +1842,11 @@ impl<'t> Parser<'t> {
     }
 
     fn create(&mut self) -> SqlResult<Statement> {
+        let statement_start = self.peek().start;
         self.at += 1;
+        if self.sqlite() && self.is_word("virtual") && self.is_word_at(1, "table") {
+            return self.create_virtual_table(statement_start);
+        }
         if self.postgresql() && self.is_word("materialized") && self.is_word_at(1, "view") {
             return self.create_materialized_view();
         }
@@ -4272,6 +4276,17 @@ impl<'t> Parser<'t> {
                     self.at += 1;
                     let right = self.expression_above(Level::Additive)?;
                     return Ok(Self::binary(left, operator, right));
+                }
+                if self.sqlite() && self.take_word("match") {
+                    let right = self.expression_above(Level::Additive)?;
+                    let position = left.position;
+                    return Ok(Expr {
+                        kind: ExprKind::Function {
+                            name: crate::sqlite_fts::MATCH_FUNCTION.to_owned(),
+                            arguments: vec![left, right],
+                        },
+                        position,
+                    });
                 }
                 if self.sqlite()
                     && let TokenKind::Operator(symbol) = self.peek_kind()

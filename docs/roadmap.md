@@ -1043,7 +1043,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - MySQL's `MATCH ... AGAINST` with `FULLTEXT` keys, SQL Server's `CONTAINS` and `FREETEXT`, and
   SQLite's FTS5 (D10, D195). `MATCH ... AGAINST` without keys: **code written, unbuilt** (code-only
   mode, 2026-11-11, D513). `CONTAINS` and `FREETEXT` without full-text indexes: **code written,
-  unbuilt** (D514). Left: `FULLTEXT` keys, full-text indexes, `CONTAINSTABLE` and FTS5.
+  unbuilt** (D514). FTS5 without an index (`CREATE VIRTUAL TABLE ... USING fts5`, `MATCH`, `bm25()`, `highlight()`,
+  `snippet()`): **code written, unbuilt** (code-only mode, 2026-11-12, D800). Left: `FULLTEXT` keys, full-text
+  indexes (FTS5's included, with corpus-wide `bm25()` and the hidden `rank` column), and `CONTAINSTABLE`.
 - Elasticsearch mappings applied to field types: `text` and `keyword`, dates, `ip`, geo, `nested`,
   `flattened`, `dense_vector`, `sparse_vector` and `completion` (D19, D196). `text`, `keyword`
   (with multi-fields and dynamic `.keyword`), dates and `ip` in `_search`: **code written, unbuilt**

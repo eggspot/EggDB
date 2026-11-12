@@ -1471,6 +1471,11 @@ impl Evaluator<'_> {
             crate::json_functions::WHOLE_ROW => {
                 return crate::json_functions::whole_row(self, arguments);
             }
+            name if crate::sqlite_fts::is_function(name)
+                && crate::constraints::current_dialect() == crate::Dialect::Sqlite =>
+            {
+                return crate::sqlite_fts::function(self, name, arguments);
+            }
             crate::geo_functions::MVT_ENCODE => {
                 return crate::geo_functions::mvt_encode(&self.arguments(arguments)?);
             }

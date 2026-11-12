@@ -824,3 +824,4 @@ its full title with its status.
 - [D797](decisions/D797.md) Code-only batch 445 (M10): SQL Server's `hierarchyid` with its static and instance methods
 - [D798](decisions/D798.md) Code-only batch 446 (M10): SQL Server's `rowversion` stamped by every write
 - [D799](decisions/D799.md) Code-only batch 447 (M7): Redis Functions kept across restarts, `FUNCTION DUMP` and `RESTORE`
+- [D800](decisions/D800.md) Code-only batch 448 (M8): SQLite FTS5 tables with `MATCH`, `bm25()`, `highlight()` and `snippet()`, searched without an index
