@@ -84,6 +84,108 @@ pub(crate) fn rows(
     Ok(())
 }
 
+fn delimiter_of(header: &str) -> char {
+    [',', ';', '\t', '|']
+        .into_iter()
+        .max_by_key(|candidate| header.matches(*candidate).count())
+        .filter(|candidate| header.contains(*candidate))
+        .unwrap_or(',')
+}
+
+fn csv_records(text: &str, delimiter: char) -> SqlResult<Vec<Vec<Option<String>>>> {
+    let mut records = Vec::new();
+    let mut record: Vec<Option<String>> = Vec::new();
+    let mut field = String::new();
+    let mut quoted_field = false;
+    let mut in_quotes = false;
+    let mut characters = text.chars().peekable();
+    let finish_field = |record: &mut Vec<Option<String>>, field: &mut String, quoted: &mut bool| {
+        let value = std::mem::take(field);
+        record.push(if value.is_empty() && !*quoted { None } else { Some(value) });
+        *quoted = false;
+    };
+    while let Some(character) = characters.next() {
+        if in_quotes {
+            if character == '"' {
+                if characters.peek() == Some(&'"') {
+                    characters.next();
+                    field.push('"');
+                } else {
+                    in_quotes = false;
+                }
+            } else {
+                field.push(character);
+            }
+            continue;
+        }
+        match character {
+            '"' if field.is_empty() => {
+                in_quotes = true;
+                quoted_field = true;
+            }
+            '\r' if characters.peek() == Some(&'\n') => {}
+            '\n' => {
+                finish_field(&mut record, &mut field, &mut quoted_field);
+                records.push(std::mem::take(&mut record));
+            }
+            found if found == delimiter => finish_field(&mut record, &mut field, &mut quoted_field),
+            other => field.push(other),
+        }
+    }
+    if in_quotes {
+        return Err(SqlError::new(SqlState::BAD_COPY_FILE_FORMAT, "unterminated CSV quoted field"));
+    }
+    if !field.is_empty() || quoted_field || !record.is_empty() {
+        finish_field(&mut record, &mut field, &mut quoted_field);
+        records.push(record);
+    }
+    Ok(records)
+}
+
+/// The rows of `read_csv(path) AS t(name type, ...)`: a CSV file (RFC 4180 quoting) whose first
+/// line names its columns and picks its delimiter (`,`, `;`, tab or `|`); each declared column
+/// comes from the file's column of that name (ignoring case), an empty unquoted field is `NULL`,
+/// and values are cast from text to their declared types.
+pub(crate) fn csv_rows(
+    values: &[Value],
+    names: &[String],
+    types: &[Option<SqlType>],
+    sink: &mut RecordSink<'_>,
+) -> SqlResult<()> {
+    let Some(path) = values.first().and_then(Value::to_text) else {
+        return Ok(());
+    };
+    let bytes = crate::new_files::read_file(&path, MOST_FILE_BYTES)?;
+    crate::memory::check_value_bytes(bytes.len())?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| SqlError::new(SqlState::CHARACTER_NOT_IN_REPERTOIRE, format!("{path} is not UTF-8")))?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    let header_line = text.lines().next().unwrap_or_default();
+    let mut records = csv_records(text, delimiter_of(header_line))?.into_iter();
+    let header: Vec<String> = records.next().unwrap_or_default().into_iter().map(Option::unwrap_or_default).collect();
+    let positions: Vec<Option<usize>> = names
+        .iter()
+        .map(|name| header.iter().position(|column| column.trim().eq_ignore_ascii_case(name)))
+        .collect();
+    for record in records {
+        if record.len() == 1 && record[0].is_none() {
+            continue;
+        }
+        let mut row = Vec::with_capacity(names.len());
+        for (at, position) in positions.iter().enumerate() {
+            let text = position.and_then(|position| record.get(position).cloned().flatten());
+            let value = text.map_or(Value::Null, Value::Text);
+            let declared = types.get(at + 1).copied().flatten();
+            row.push(match declared {
+                Some(sql_type) if !value.is_null() && !sql_type.is_string() => convert(value, sql_type, Conversion::Explicit)?,
+                _ => value,
+            });
+        }
+        sink(row)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,6 +240,15 @@ mod tests {
                 vec![Value::Integer(2), Value::Null, Value::Null],
             ]
         );
+    }
+
+    #[test]
+    fn csv_fields_quote_escape_and_leave_empty_ones_null() {
+        let records = csv_records("a,b,c\n1,\"x, \"\"y\"\"\",\n2,,\"\"\n", ',').unwrap();
+        assert_eq!(records[1], vec![Some("1".to_owned()), Some("x, \"y\"".to_owned()), None]);
+        assert_eq!(records[2], vec![Some("2".to_owned()), None, Some(String::new())]);
+        assert_eq!(delimiter_of("a;b;c"), ';');
+        assert!(csv_records("a\n\"open", ',').is_err());
     }
 
     #[test]

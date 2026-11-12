@@ -1287,8 +1287,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   2026-11-12, D572).
 - `read_parquet` and the other file readers in SQL, after D202's decision on which files a
   server's SQL may open (D29, D202). The rule (embedded sessions read local files, servers none) and `read_parquet`
-  with a column definition list: **code written, unbuilt** (code-only mode, 2026-11-12, D703). Left: the file's own
-  column list, `read_csv` and the other readers.
+  with a column definition list: **code written, unbuilt** (code-only mode, 2026-11-12, D703); `read_csv`: **code
+  written, unbuilt** (code-only mode, 2026-11-12, D704). Left: the file's own column list and the other readers.
 - Arrow IPC reading, the `.arrow` file format, several batches, dictionaries and nested types
   (D240). Reading streams and `.arrow` files with several batches: **code written, unbuilt**
   (code-only mode, 2026-11-12, D573), and writing `.arrow` files too; reading dictionary-encoded columns:

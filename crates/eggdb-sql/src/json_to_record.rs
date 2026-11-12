@@ -7,8 +7,9 @@ use crate::types::{Conversion, DefinedKind, DefinedType, SqlType, Value, convert
 
 /// The functions that turn a JSON object (or an array of objects) into rows whose columns the
 /// caller declares in a column definition list: `AS x(a int, b text)`.
-pub(crate) const FUNCTIONS: [&str; 5] = [
+pub(crate) const FUNCTIONS: [&str; 6] = [
     "read_parquet",
+    "read_csv",
     "json_to_record",
     "jsonb_to_record",
     "json_to_recordset",
@@ -89,6 +90,9 @@ pub(crate) fn rows(
 ) -> SqlResult<()> {
     if name == "read_parquet" {
         return crate::parquet_files::rows(values, names, types, sink);
+    }
+    if name == "read_csv" {
+        return crate::parquet_files::csv_rows(values, names, types, sink);
     }
     let Some(document) = values.first() else {
         return Err(definition_list_required());
