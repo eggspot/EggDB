@@ -4,6 +4,8 @@ use crate::x25519::{Element, add, from_bytes, invert, multiply, square, subtract
 pub const ED25519_PUBLIC_KEY_BYTES: usize = 32;
 /// The bytes of an Ed25519 signature.
 pub const ED25519_SIGNATURE_BYTES: usize = 64;
+/// The bytes of an Ed25519 private key's seed.
+pub const ED25519_SEED_BYTES: usize = 32;
 
 const ORDER: [u64; 4] = [0x5812_631a_5cf5_d3ed, 0x14de_f9de_a2f7_9cd6, 0, 0x1000_0000_0000_0000];
 const BASE_POINT: [u8; 32] = [
@@ -208,6 +210,91 @@ fn reduced(bytes: &[u8]) -> [u8; 32] {
     out
 }
 
+fn product_reduced(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let (left, right) = (limbs(left), limbs(right));
+    let mut wide = [0u128; 8];
+    for (i, a) in left.iter().enumerate() {
+        let mut carry = 0u128;
+        for (j, b) in right.iter().enumerate() {
+            let sum = wide[i + j] + u128::from(*a) * u128::from(*b) + carry;
+            wide[i + j] = sum & u128::from(u64::MAX);
+            carry = sum >> 64;
+        }
+        wide[i + 4] += carry;
+    }
+    let mut bytes = [0u8; 64];
+    for (chunk, limb) in bytes.chunks_exact_mut(8).zip(wide) {
+        chunk.copy_from_slice(&(limb as u64).to_le_bytes());
+    }
+    reduced(&bytes)
+}
+
+fn sum_reduced(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let mut bytes = [0u8; 33];
+    let mut carry = 0u16;
+    for at in 0..32 {
+        let sum = u16::from(left[at]) + u16::from(right[at]) + carry;
+        bytes[at] = sum as u8;
+        carry = sum >> 8;
+    }
+    bytes[32] = carry as u8;
+    reduced(&bytes)
+}
+
+struct ExpandedKey {
+    scalar: [u8; 32],
+    prefix: [u8; 32],
+    public: [u8; ED25519_PUBLIC_KEY_BYTES],
+}
+
+fn expanded(seed: &[u8; ED25519_SEED_BYTES], curve: &Curve) -> Option<ExpandedKey> {
+    let mut hashed = crate::sha512::Sha512::new();
+    hashed.update(seed);
+    let digest = hashed.finish();
+    let mut scalar = [0u8; 32];
+    scalar.copy_from_slice(&digest[..32]);
+    scalar[0] &= 248;
+    scalar[31] &= 127;
+    scalar[31] |= 64;
+    let mut prefix = [0u8; 32];
+    prefix.copy_from_slice(&digest[32..64]);
+    let base = Point::decode(&BASE_POINT, curve)?;
+    let public = base.times(&scalar, curve).encode();
+    Some(ExpandedKey { scalar, prefix, public })
+}
+
+/// The Ed25519 public key of the private key `seed` (RFC 8032).
+pub fn ed25519_public_key(seed: &[u8; ED25519_SEED_BYTES]) -> [u8; ED25519_PUBLIC_KEY_BYTES] {
+    let curve = Curve::new();
+    expanded(seed, &curve).map_or([0u8; ED25519_PUBLIC_KEY_BYTES], |key| key.public)
+}
+
+/// The Ed25519 signature (RFC 8032, deterministic) of `message` by the private key `seed`.
+/// It runs on the same variable-time arithmetic as [`ed25519_verify`], so it suits signing
+/// where an attacker cannot time many signatures, such as EggDB's own audit digests, and not
+/// signing on request.
+pub fn ed25519_sign(seed: &[u8; ED25519_SEED_BYTES], message: &[u8]) -> [u8; ED25519_SIGNATURE_BYTES] {
+    let curve = Curve::new();
+    let mut signature = [0u8; ED25519_SIGNATURE_BYTES];
+    let (Some(key), Some(base)) = (expanded(seed, &curve), Point::decode(&BASE_POINT, &curve)) else {
+        return signature;
+    };
+    let mut nonce = crate::sha512::Sha512::new();
+    nonce.update(&key.prefix);
+    nonce.update(message);
+    let r = reduced(&nonce.finish());
+    let encoded_r = base.times(&r, &curve).encode();
+    let mut challenge = crate::sha512::Sha512::new();
+    challenge.update(&encoded_r);
+    challenge.update(&key.public);
+    challenge.update(message);
+    let k = reduced(&challenge.finish());
+    let s = sum_reduced(&r, &product_reduced(&k, &key.scalar));
+    signature[..32].copy_from_slice(&encoded_r);
+    signature[32..].copy_from_slice(&s);
+    signature
+}
+
 /// Whether `signature` is a valid Ed25519 signature (RFC 8032, cofactorless) of `message` by
 /// `public_key`; a key or signature that does not decode, or a scalar not below the group
 /// order, is invalid. Verification only: it handles public data and is not constant-time.
@@ -269,6 +356,32 @@ mod tests {
         let mut big_s = second;
         big_s[63] = 0xff;
         assert!(!ed25519_verify(&second_key, &[0x72], &big_s));
+    }
+
+    #[test]
+    fn the_rfc_8032_test_vectors_sign_and_their_keys_derive() {
+        let seed = array::<32>("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
+        assert_eq!(
+            ed25519_public_key(&seed),
+            array::<32>("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+        );
+        assert_eq!(
+            ed25519_sign(&seed, b""),
+            array::<64>("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b")
+        );
+        let second_seed = array::<32>("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb");
+        let second_key = ed25519_public_key(&second_seed);
+        assert_eq!(
+            second_key,
+            array::<32>("3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c")
+        );
+        let second = ed25519_sign(&second_seed, &[0x72]);
+        assert_eq!(
+            second,
+            array::<64>("92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00")
+        );
+        let long: Vec<u8> = (0..1000u32).map(|value| value as u8).collect();
+        assert!(ed25519_verify(&second_key, &long, &ed25519_sign(&second_seed, &long)));
     }
 
     #[test]

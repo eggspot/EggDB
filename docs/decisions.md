@@ -891,3 +891,4 @@ its full title with its status.
 - [D864](decisions/D864.md) Code-only batch 512 (M5): PostgreSQL table_rewrite event triggers fire
 - [D865](decisions/D865.md) Code-only batch 513 (D57): pgRouting's many-to-many forms and the cost matrix
 - [D866](decisions/D866.md) Code-only batch 514 (M6a): client_encoding on the PostgreSQL wire
+- [D867](decisions/D867.md) Code-only batch 515 (M6b): audit chains signed with the server's Ed25519 key

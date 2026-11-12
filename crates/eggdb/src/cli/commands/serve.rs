@@ -83,7 +83,8 @@ impl Session<'_> {
     pub(super) fn serve(&mut self) -> Result<Exit, Failure> {
         super::foreign::allow_from_environment();
         super::model_endpoints::allow_from_environment();
-        audit_server_events_from_environment(&self.request.file);
+        audit_server_events_from_environment(&self.request.file)
+            .map_err(|message| Failure::usage(message, Some(CommandName::Serve)))?;
         let usage = |message: String| Failure::usage(message, Some(CommandName::Serve));
         let options = self.request.serve.clone();
         if let Some(url) = &options.restore_from
@@ -1875,13 +1876,45 @@ const AUDIT_TABLES_VARIABLE: &str = "EGGDB_AUDIT_TABLES";
 const AUDIT_DIGEST_EVERY: u64 = 1000;
 const AUDIT_ROTATE_VARIABLE: &str = "EGGDB_AUDIT_ROTATE_MB";
 const AUDIT_KEEP_DAYS_VARIABLE: &str = "EGGDB_AUDIT_KEEP_DAYS";
+const AUDIT_SIGNING_KEY_VARIABLE: &str = "EGGDB_AUDIT_SIGNING_KEY";
+
+fn audit_signing_key() -> Result<Option<[u8; eggdb_crypto::ED25519_SEED_BYTES]>, String> {
+    let Some(path) = std::env::var_os(AUDIT_SIGNING_KEY_VARIABLE).filter(|path| !path.is_empty()) else {
+        return Ok(None);
+    };
+    let shown = std::path::Path::new(&path).display().to_string();
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("cannot read {AUDIT_SIGNING_KEY_VARIABLE} {shown}: {error}"))?;
+    let digits = text.trim();
+    if digits.len() != eggdb_crypto::ED25519_SEED_BYTES * 2 {
+        return Err(format!(
+            "{AUDIT_SIGNING_KEY_VARIABLE} {shown} must hold an Ed25519 private key as 64 hexadecimal digits"
+        ));
+    }
+    let mut seed = [0u8; eggdb_crypto::ED25519_SEED_BYTES];
+    for (slot, pair) in seed.iter_mut().zip(digits.as_bytes().chunks_exact(2)) {
+        *slot = std::str::from_utf8(pair)
+            .ok()
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+            .ok_or_else(|| format!("{AUDIT_SIGNING_KEY_VARIABLE} {shown} holds a digit that is not hexadecimal"))?;
+    }
+    Ok(Some(seed))
+}
 const DEFAULT_AUDIT_ROTATE_BYTES: u64 = 512 << 20;
 static AUDIT_RECORDS_WRITTEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-fn audit_server_events_from_environment(database: &std::path::Path) {
+fn audit_server_events_from_environment(database: &std::path::Path) -> Result<(), String> {
     let wanted = std::env::var(AUDIT_VARIABLE).is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "on"));
     if !wanted {
-        return;
+        return Ok(());
+    }
+    let signing_key = audit_signing_key()?;
+    if let Some(seed) = &signing_key {
+        let public: String = eggdb_crypto::ed25519_public_key(seed)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        eprintln!("eggdb serve: audit chain signed every {AUDIT_DIGEST_EVERY} records by key {public}");
     }
     if let Ok(tables) = std::env::var(AUDIT_TABLES_VARIABLE) {
         eggdb_sql::audit_events::set_audited_tables(tables.split(',').map(|name| name.trim().to_owned()).collect());
@@ -1918,9 +1951,15 @@ fn audit_server_events_from_environment(database: &std::path::Path) {
                 let written = AUDIT_RECORDS_WRITTEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 if written % AUDIT_DIGEST_EVERY == 0 {
                     eprintln!("eggdb serve: audit digest after {written} records: {digest}");
+                    if let Some(seed) = &signing_key
+                        && let Err(failure) = log.append_signed(seed)
+                    {
+                        eprintln!("eggdb serve: the audit chain could not be signed: {failure}");
+                    }
                 }
             }
             Err(failure) => eprintln!("eggdb serve: the audit record was not written: {failure}"),
         }
     }));
+    Ok(())
 }

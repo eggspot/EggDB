@@ -80,7 +80,39 @@ impl AuditLog {
         self.append_waiting(record, PROMPT_LOCK_WAIT).map(drop)
     }
 
+    /// Appends a `chain_signed` record: the Ed25519 signature, by the private key `seed`, of
+    /// the chain's newest digest, so a file rewritten whole by someone without the key no
+    /// longer verifies against the key's public half ([`verify_chain_signed`]). Returns the
+    /// digest it signed.
+    pub fn append_signed(&self, seed: &[u8; eggdb_crypto::ED25519_SEED_BYTES]) -> Result<String, AuditFailure> {
+        let public = hex(&eggdb_crypto::ed25519_public_key(seed));
+        let mut signed = String::new();
+        self.append_built(LOCK_WAIT, |previous| {
+            signed = previous.to_owned();
+            let signature = eggdb_crypto::ed25519_sign(seed, signed_message(previous).as_bytes());
+            let mut out = JsonOut::new();
+            out.begin_object()
+                .key("event")
+                .string(CHAIN_SIGNED_EVENT)
+                .key("time")
+                .string(&now_rfc3339())
+                .key("key")
+                .string(&public)
+                .key("signature")
+                .string(&hex(&signature))
+                .key("detail")
+                .string(&format!("key {}", &public[..16]));
+            out.end_object();
+            out.finish()
+        })?;
+        Ok(signed)
+    }
+
     fn append_waiting(&self, record: &str, wait: Duration) -> Result<String, AuditFailure> {
+        self.append_built(wait, |_| record.to_owned())
+    }
+
+    fn append_built(&self, wait: Duration, build: impl FnOnce(&str) -> String) -> Result<String, AuditFailure> {
         let failure = |error: io::Error| AuditFailure {
             reason: describe(&error),
         };
@@ -88,12 +120,13 @@ impl AuditLog {
             .map_err(failure)?;
         lock(&file, wait).map_err(failure)?;
         let size = file.metadata().map_err(failure)?.len();
+        let previous = last_line_digest(&mut file, size).map_err(failure)?;
+        let record = build(&previous);
         if size.saturating_add(record.len() as u64 + 1) > MAX_AUDIT_BYTES {
             return Err(AuditFailure {
                 reason: "the audit file has reached its 1 GiB limit".to_owned(),
             });
         }
-        let previous = last_line_digest(&mut file, size).map_err(failure)?;
         let chained = match record.strip_prefix('{') {
             Some(rest) if rest.trim_start().starts_with('}') => {
                 format!("{{\"prev\":\"{previous}\"}}")
@@ -115,6 +148,52 @@ impl AuditLog {
 }
 
 const GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+const CHAIN_SIGNED_EVENT: &str = "chain_signed";
+
+fn signed_message(digest: &str) -> String {
+    format!("eggdb audit chain {digest}")
+}
+
+fn unhex<const N: usize>(text: &str) -> Option<[u8; N]> {
+    if text.len() != N * 2 {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (slot, pair) in out.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+        *slot = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(out)
+}
+
+fn signature_holds(line: &[u8], previous: &str, trusted: Option<&[u8; eggdb_crypto::ED25519_PUBLIC_KEY_BYTES]>) -> bool {
+    let Ok(text) = std::str::from_utf8(line) else {
+        return false;
+    };
+    let Ok(document) = parse_document(text) else {
+        return false;
+    };
+    let Json::Object(members) = document.value else {
+        return false;
+    };
+    let (Some(key), Some(signature)) = (
+        text_of(&members, "key").and_then(|key| unhex::<{ eggdb_crypto::ED25519_PUBLIC_KEY_BYTES }>(&key)),
+        text_of(&members, "signature")
+            .and_then(|signature| unhex::<{ eggdb_crypto::ED25519_SIGNATURE_BYTES }>(&signature)),
+    ) else {
+        return false;
+    };
+    if trusted.is_some_and(|trusted| *trusted != key) {
+        return false;
+    }
+    eggdb_crypto::ed25519_verify(&key, signed_message(previous).as_bytes(), &signature)
+}
+
+fn is_chain_signed(line: &[u8]) -> bool {
+    std::str::from_utf8(line)
+        .ok()
+        .and_then(|text| text.get(74..))
+        .is_some_and(|rest| rest.starts_with(",\"event\":\"chain_signed\""))
+}
 const ROTATED_EVENT_PREFIX: &str = ",\"event\":\"rotated\"";
 const SECONDS_PER_DAY: u64 = 86_400;
 
@@ -247,6 +326,14 @@ pub struct ChainReport {
     /// The line number of the record whose digest is the anchor checked, when one was given
     /// and found.
     pub anchor_line: Option<u64>,
+    /// How many `chain_signed` records carry a good signature.
+    pub signatures: u64,
+    /// The last line a good signature covers: the line before the newest good
+    /// `chain_signed` record.
+    pub signed_through: Option<u64>,
+    /// The line number of the first `chain_signed` record whose signature does not hold, or
+    /// is by another key than the trusted one.
+    pub bad_signature: Option<u64>,
 }
 
 fn prev_of(line: &[u8]) -> Option<&str> {
@@ -268,6 +355,18 @@ pub fn verify_chain(path: &Path) -> io::Result<ChainReport> {
 /// from an earlier run): when the anchor is given and [`ChainReport::anchor_line`] is `None`,
 /// that record and maybe others after it were cut off or the file was rewritten.
 pub fn verify_chain_to_anchor(path: &Path, anchor: Option<&str>) -> io::Result<ChainReport> {
+    verify_chain_signed(path, anchor, None)
+}
+
+/// [`verify_chain_to_anchor`], also checking every `chain_signed` record: its signature must
+/// hold for the digest before it, and when `trusted` is given, be by that public key. The
+/// first that does not is [`ChainReport::bad_signature`]; [`ChainReport::signed_through`] is
+/// the last line a good signature covers.
+pub fn verify_chain_signed(
+    path: &Path,
+    anchor: Option<&str>,
+    trusted: Option<&[u8; eggdb_crypto::ED25519_PUBLIC_KEY_BYTES]>,
+) -> io::Result<ChainReport> {
     let mut report = ChainReport {
         newest_digest: GENESIS.to_owned(),
         ..ChainReport::default()
@@ -293,6 +392,14 @@ pub fn verify_chain_to_anchor(path: &Path, anchor: Option<&str>) -> io::Result<C
             None if report.chained == 0 && report.first_break.is_none() => report.unchained += 1,
             None => {
                 report.first_break.get_or_insert(number);
+            }
+        }
+        if is_chain_signed(&line) {
+            if signature_holds(&line, &previous, trusted) {
+                report.signatures += 1;
+                report.signed_through = Some(number - 1);
+            } else {
+                report.bad_signature.get_or_insert(number);
             }
         }
         previous = hex(&eggdb_crypto::sha256(&line));
@@ -558,6 +665,9 @@ pub enum AuditEvent {
     /// A server event from `eggdb serve`: a login, a schema change or a privilege change,
     /// with its kind in `tool`, the user in `role` and the statement or client in `arguments`.
     ServerEvent,
+    /// The server signed the chain's newest digest with its key; the key's start is in
+    /// `arguments`.
+    ChainSigned,
 }
 
 /// One record of the audit file, with the fields `eggdb audit` shows.
@@ -758,7 +868,10 @@ pub fn read_audit(
                             continue;
                         }
                     }
-                    AuditEvent::ServerStarted | AuditEvent::TimeLimitExceeded | AuditEvent::ServerEvent => {}
+                    AuditEvent::ServerStarted
+                    | AuditEvent::TimeLimitExceeded
+                    | AuditEvent::ServerEvent
+                    | AuditEvent::ChainSigned => {}
                 }
                 AuditLine::Record {
                     number,
@@ -885,6 +998,7 @@ fn record_of(line: &str) -> Option<(String, AuditEntry)> {
         "call_started" => AuditEvent::CallStarted,
         "time_limit_exceeded" => AuditEvent::TimeLimitExceeded,
         "server_event" => AuditEvent::ServerEvent,
+        CHAIN_SIGNED_EVENT => AuditEvent::ChainSigned,
         _ => return None,
     };
     let client = match member(&members, "client") {
@@ -1291,6 +1405,35 @@ mod chain_tests {
         std::fs::write(&path, format!("{}\n", kept.join("\n"))).unwrap();
         let cut = verify_chain_to_anchor(&path, Some(&anchor)).unwrap();
         assert_eq!((cut.first_break, cut.anchor_line), (None, None));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn signed_chains_verify_against_their_key_and_forgeries_fail() {
+        use super::verify_chain_signed;
+        let directory =
+            std::env::temp_dir().join(format!("eggdb-audit-signed-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("app.eggdb.mcp-audit.jsonl");
+        let log = AuditLog::new(path.clone());
+        let seed = [7u8; 32];
+        let public = eggdb_crypto::ed25519_public_key(&seed);
+        log.append("{\"event\":\"call\",\"n\":0}").unwrap();
+        log.append("{\"event\":\"call\",\"n\":1}").unwrap();
+        let signed = log.append_signed(&seed).unwrap();
+        log.append("{\"event\":\"call\",\"n\":2}").unwrap();
+        let report = verify_chain_signed(&path, None, Some(&public)).unwrap();
+        assert_eq!((report.signatures, report.signed_through, report.bad_signature), (1, Some(2), None));
+        assert_eq!(report.first_break, None);
+        let other = eggdb_crypto::ed25519_public_key(&[8u8; 32]);
+        assert_eq!(verify_chain_signed(&path, None, Some(&other)).unwrap().bad_signature, Some(3));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.lines().nth(2).unwrap().contains(&signed));
+        let forged = text.replacen("\"n\":1", "\"n\":9", 1);
+        std::fs::write(&path, forged).unwrap();
+        let rewritten = verify_chain_signed(&path, None, Some(&public)).unwrap();
+        assert!(rewritten.first_break.is_some() || rewritten.bad_signature.is_some());
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
     }

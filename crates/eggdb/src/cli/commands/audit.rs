@@ -9,6 +9,31 @@ use eggdb_mcp::audit::{
 
 const LINE_COLUMNS: usize = 120;
 const AUDIT_ANCHOR_VARIABLE: &str = "EGGDB_AUDIT_ANCHOR";
+const AUDIT_PUBLIC_KEY_VARIABLE: &str = "EGGDB_AUDIT_PUBLIC_KEY";
+
+fn trusted_audit_key() -> Result<Option<[u8; eggdb_crypto::ED25519_PUBLIC_KEY_BYTES]>, Failure> {
+    let Some(text) = std::env::var(AUDIT_PUBLIC_KEY_VARIABLE).ok().filter(|text| !text.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let digits = text.trim();
+    let mut key = [0u8; eggdb_crypto::ED25519_PUBLIC_KEY_BYTES];
+    let parsed = digits.len() == key.len() * 2
+        && key.iter_mut().zip(digits.as_bytes().chunks_exact(2)).all(|(slot, pair)| {
+            std::str::from_utf8(pair)
+                .ok()
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                .map(|byte| *slot = byte)
+                .is_some()
+        });
+    if !parsed {
+        return Err(Failure::coded(
+            "audit_key_invalid",
+            format!("{AUDIT_PUBLIC_KEY_VARIABLE} must be an Ed25519 public key as 64 hexadecimal digits"),
+            Exit::Usage,
+        ));
+    }
+    Ok(Some(key))
+}
 const TIME_COLUMNS: usize = 23;
 const TOOL_COLUMNS: usize = 14;
 const OUTCOME_COLUMNS: usize = 19;
@@ -154,6 +179,14 @@ impl Session<'_> {
                     printable(entry.arguments.as_deref().unwrap_or(""))
                 );
                 self.out.text(&cut(&sentence));
+                self.out.text("\n");
+            }
+            AuditEvent::ChainSigned => {
+                let sentence = format!(
+                    "{time}  chain signed by the server's {}",
+                    printable(entry.arguments.as_deref().unwrap_or("key"))
+                );
+                self.out.styled(Style::Dim, &cut(&sentence));
                 self.out.text("\n");
             }
             AuditEvent::Call | AuditEvent::CallStarted => self.call_line(&time, entry),
@@ -324,9 +357,27 @@ fn summary(totals: &AuditTotals, shown_calls: u64) -> String {
 impl Session<'_> {
     fn verify_audit(&mut self, path: &std::path::Path, shown: &str) -> Result<Exit, Failure> {
         let anchor = std::env::var(AUDIT_ANCHOR_VARIABLE).ok().filter(|anchor| !anchor.is_empty());
-        let report = eggdb_mcp::audit::verify_chain_to_anchor(path, anchor.as_deref()).map_err(|error| {
+        let trusted = trusted_audit_key()?;
+        let report = eggdb_mcp::audit::verify_chain_signed(path, anchor.as_deref(), trusted.as_ref()).map_err(|error| {
             Failure::database(format!("cannot read {shown}: {error}"), Exit::DatabaseError)
         })?;
+        if let Some(line) = report.bad_signature {
+            return Err(Failure::coded(
+                "audit_signature_invalid",
+                format!(
+                    "{shown} has a chain signature at line {line} that does not hold{}",
+                    if trusted.is_some() { " for the key in EGGDB_AUDIT_PUBLIC_KEY" } else { "" }
+                ),
+                Exit::DatabaseError,
+            ));
+        }
+        if trusted.is_some() && report.signatures == 0 {
+            return Err(Failure::coded(
+                "audit_unsigned",
+                format!("{shown} holds no chain signature by the key in {AUDIT_PUBLIC_KEY_VARIABLE}"),
+                Exit::DatabaseError,
+            ));
+        }
         if let Some(line) = report.first_break {
             return Err(Failure::coded(
                 "audit_changed",
@@ -363,13 +414,23 @@ impl Session<'_> {
                     .number("unchained", report.unchained)
                     .boolean("intact", true)
                     .string("newest_digest", &report.newest_digest)
+                    .number("signatures", report.signatures)
                     .line(),
             ),
-            _ => self.out.text(&format!(
-                "{shown}: {} records, each linked to the one before{older}; intact\nnewest digest: {} (keep it elsewhere; {AUDIT_ANCHOR_VARIABLE}=<digest> checks a later file still holds it)\n",
-                render::count(report.chained),
-                report.newest_digest
-            )),
+            _ => {
+                let signed = match report.signed_through {
+                    Some(line) => format!(
+                        "; {} chain signatures hold, the newest covering lines 1 to {line}",
+                        render::count(report.signatures)
+                    ),
+                    None => String::new(),
+                };
+                self.out.text(&format!(
+                    "{shown}: {} records, each linked to the one before{older}; intact{signed}\nnewest digest: {} (keep it elsewhere; {AUDIT_ANCHOR_VARIABLE}=<digest> checks a later file still holds it)\n",
+                    render::count(report.chained),
+                    report.newest_digest
+                ))
+            }
         }
         Ok(Exit::Done)
     }
