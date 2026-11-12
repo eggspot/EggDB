@@ -20,6 +20,7 @@ mod sqlite_copy;
 pub(crate) mod sqlserver;
 pub(crate) mod sqlserver_agent;
 mod sqlserver_security;
+mod sqlserver_ddl_triggers;
 mod transaction_settings;
 mod triggers;
 mod tsql;
@@ -544,6 +545,7 @@ pub struct Session<'s> {
     keeps_identity_values: bool,
     statement_start: usize,
     shown_statement: Option<String>,
+    ddl_command_text: Option<String>,
     explain_plan_displays: bool,
     scan_stats: bool,
     creating_plan_table: bool,
@@ -634,6 +636,7 @@ impl<'s> Session<'s> {
             keeps_identity_values: false,
             statement_start: 0,
             shown_statement: None,
+            ddl_command_text: None,
             explain_plan_displays: false,
             scan_stats: false,
             creating_plan_table: false,
@@ -2264,6 +2267,13 @@ impl<'s> Session<'s> {
                     .get(self.statement_start..end)
                     .map(|shown| shown.trim().trim_end_matches(';').trim_end().to_owned());
             }
+            self.ddl_command_text = (self.sqlserver()
+                && crate::event_triggers::ddl_tag(&statement).is_some())
+            .then(|| {
+                let end = tokens.get(resume.0).map_or(text.len(), |token| token.start);
+                text.get(self.statement_start..end)
+                    .map_or_else(String::new, |shown| shown.trim().trim_end_matches(';').trim_end().to_owned())
+            });
             let started = crate::statement_statistics::wanted().then(std::time::Instant::now);
             let audited = crate::audit_events::wanted()
                 .then(|| {

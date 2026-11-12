@@ -663,7 +663,20 @@ impl<'s> Session<'s> {
         let tokens = tokenize_in(text, Dialect::SqlServer)?;
         let outer = self.leave_statement_for_trigger();
         let outcome = self.in_trigger_dialect(Dialect::SqlServer, |session| {
-            session.run_trigger_program(text, &tokens, &call)
+            session.run_trigger_program(text, &tokens, Some(&call))
+        });
+        self.return_to_statement(outer);
+        let results = outcome?;
+        self.extra_results.extend(results);
+        Ok(())
+    }
+
+    pub(super) fn run_ddl_trigger_body(&mut self, text: &str) -> SqlResult<()> {
+        let _level = crate::tsql::enter_nesting()?;
+        let tokens = tokenize_in(text, Dialect::SqlServer)?;
+        let outer = self.leave_statement_for_trigger();
+        let outcome = self.in_trigger_dialect(Dialect::SqlServer, |session| {
+            session.run_trigger_program(text, &tokens, None)
         });
         self.return_to_statement(outer);
         let results = outcome?;
@@ -675,16 +688,14 @@ impl<'s> Session<'s> {
         &mut self,
         text: &str,
         tokens: &[Token<'_>],
-        call: &StatementTriggerCall,
+        call: Option<&StatementTriggerCall>,
     ) -> SqlResult<Vec<QueryResult>> {
         let program = self.compile_batch(text, tokens, Parameters::Absent, true)?;
         let scope = self.enter_batch_scope(&program, Parameters::Absent);
-        {
+        if let Some(call) = call {
             let context = Arc::make_mut(&mut self.batch_context);
             context.transition_tables = vec![INSERTED_TABLE.to_owned(), DELETED_TABLE.to_owned()];
             context.updated_columns = Some(call.updated.clone());
-        }
-        {
             let columns = call.columns.as_ref().clone();
             let tables = Arc::make_mut(&mut self.table_variables);
             tables.insert(

@@ -140,6 +140,7 @@ mod report_pdf;
 mod zarr;
 mod geometry_type;
 mod sqlserver_security;
+mod sqlserver_ddl_triggers;
 mod blosc;
 mod new_files;
 mod file_readers;

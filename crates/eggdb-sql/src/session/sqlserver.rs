@@ -553,6 +553,7 @@ impl<'s> Session<'s> {
                 Ok(QueryResult::command("SET"))
             }
             SqlServerStatement::SecurityPolicy(command) => self.run_security_policy(command),
+            SqlServerStatement::DdlTrigger(command) => self.run_ddl_trigger_command(command),
             SqlServerStatement::InsertBulk(_) => Err(SqlError::new(
                 SqlState::INTERNAL_ERROR,
                 "an INSERT BULK statement reached the statement runner",

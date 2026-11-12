@@ -184,6 +184,11 @@ impl<'t> Parser<'t> {
             return Ok(None);
         };
         match word.as_ref() {
+            "create" | "alter" | "drop" | "enable" | "disable"
+                if self.sqlserver() && self.at_ddl_trigger() =>
+            {
+                self.sqlserver_ddl_trigger().map(Some)
+            }
             "create" if self.creates_trigger() => self.create_trigger(false).map(Some),
             "alter" if self.sqlserver() && self.is_word_at(1, "trigger") => {
                 self.create_trigger(true).map(Some)

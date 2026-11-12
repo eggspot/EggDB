@@ -851,6 +851,13 @@ impl Parser<'_> {
                     position,
                 )
             }
+            "eventdata" => Expr {
+                kind: ExprKind::Function {
+                    name: crate::sqlserver_ddl_triggers::EVENT_DATA_FUNCTION.to_owned(),
+                    arguments: self.sqlserver_arguments(name, 0..=0)?,
+                },
+                position,
+            },
             "sqrt" => Expr {
                 kind: ExprKind::Function {
                     name: crate::square_root::SQLSERVER.to_owned(),

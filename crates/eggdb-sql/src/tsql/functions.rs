@@ -167,6 +167,7 @@ pub(crate) fn refused_in_function(
             | SqlServerStatement::XactAbort(_) => "SET ON/OFF",
             SqlServerStatement::InsertBulk(_) => "INSERT BULK",
             SqlServerStatement::SecurityPolicy(_) => "CREATE SECURITY POLICY",
+            SqlServerStatement::DdlTrigger(command) => command.tag(),
             SqlServerStatement::Use(_)
             | SqlServerStatement::DeclareCursor(_)
             | SqlServerStatement::OpenCursor(_)

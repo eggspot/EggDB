@@ -264,6 +264,12 @@ impl Session<'_> {
         io: &mut CopyIo<'_, '_>,
     ) -> SqlResult<QueryResult> {
         let (_depth, outermost) = event_triggers::enter_statement();
+        if outermost
+            && self.dialect == Dialect::SqlServer
+            && let Some(tag) = event_triggers::ddl_tag(statement)
+        {
+            return self.run_with_ddl_triggers(statement, io, tag);
+        }
         let tag = if outermost && self.dialect == Dialect::PostgreSql {
             event_triggers::ddl_tag(statement)
         } else {

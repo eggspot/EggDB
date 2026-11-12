@@ -357,6 +357,9 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
     if name == crate::sqlserver_security::BLOCK_VIOLATION_FUNCTION {
         return Some(SqlType::Boolean);
     }
+    if name == crate::sqlserver_ddl_triggers::EVENT_DATA_FUNCTION {
+        return Some(SqlType::Text);
+    }
     if let Some(sql_type) = crate::arrays::function_type(name, arguments, scope) {
         return sql_type;
     }

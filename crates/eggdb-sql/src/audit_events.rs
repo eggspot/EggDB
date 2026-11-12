@@ -112,6 +112,7 @@ pub(crate) fn statement_kind(statement: &crate::ast::Statement) -> Option<AuditK
         Statement::Role(_)
         | Statement::RowSecurity(_)
         | Statement::SqlServer(crate::ast::SqlServerStatement::SecurityPolicy(_)) => Some(AuditKind::PrivilegeChange),
+        Statement::SqlServer(crate::ast::SqlServerStatement::DdlTrigger(_)) => Some(AuditKind::SchemaChange),
         Statement::CreateTable(_)
         | Statement::DropTable { .. }
         | Statement::Truncate(_)

@@ -461,6 +461,7 @@ fn sqlserver(
         SqlServerStatement::InsertBulk(bulk) => insert_runs_code(&bulk.table, keys),
         SqlServerStatement::Use(_)
         | SqlServerStatement::SecurityPolicy(_)
+        | SqlServerStatement::DdlTrigger(_)
         | SqlServerStatement::NoCount(_)
         | SqlServerStatement::ImplicitTransactions(_)
         | SqlServerStatement::IdentityInsert { .. }

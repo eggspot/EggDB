@@ -1554,6 +1554,9 @@ impl Evaluator<'_> {
         if name == crate::sqlserver_security::BLOCK_VIOLATION_FUNCTION {
             return crate::sqlserver_security::block_violation(&values);
         }
+        if name == crate::sqlserver_ddl_triggers::EVENT_DATA_FUNCTION {
+            return Ok(crate::sqlserver_ddl_triggers::event_data());
+        }
         if let Some(result) = crate::ranges::function(name, &values) {
             return result;
         }
