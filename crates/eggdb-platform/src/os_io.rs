@@ -7,9 +7,10 @@ use crate::os_fs::OsFile;
 use crate::os_io_uring::Ring;
 use crate::os_iocp::Port;
 use crate::threads::{SpawnedThread, ThreadOptions};
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::time::{Duration, Instant};
 
 /// The operating system's asynchronous file I/O, made by
 /// [`OsFileSystem::io_queue`](crate::FileSystem::io_queue).
@@ -30,13 +31,17 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 /// overlapped form) go to its worker threads, or run inline without threads.
 ///
 /// On io_uring, writes and syncs through a read-only handle, empty writes and offsets beyond
-/// `i64::MAX` are answered without the kernel, as [`OsFile`] answers them, and each submit
-/// enters the kernel once. Linux cancels the io_uring operations of a thread that exits, so a
+/// `i64::MAX` are answered without the kernel, as [`OsFile`] answers them, and submissions are
+/// batched: they enter the kernel together at the next reap, or when the submission ring is
+/// full. A canceled operation that already reached a worker, the disk or the kernel's own
+/// workers runs to the end and completes with its own result. Linux cancels the io_uring operations of a thread that exits, so a
 /// queue is submitted to and reaped from by one thread that outlives its operations.
 #[derive(Debug)]
 pub struct OsIoQueue {
     capacity: usize,
     in_flight: usize,
+    tags: HashMap<u64, usize>,
+    canceled: Vec<IoCompletion<OsFile>>,
     backend: Backend,
 }
 
@@ -60,6 +65,7 @@ pub(crate) type Wake = Arc<dyn Fn() + Send + Sync>;
 pub(crate) struct Pool {
     jobs: Option<mpsc::Sender<Job>>,
     completions: mpsc::Receiver<IoCompletion<OsFile>>,
+    canceled: Arc<Mutex<HashSet<u64>>>,
     workers: Vec<SpawnedThread<()>>,
 }
 
@@ -82,6 +88,8 @@ impl OsIoQueue {
         Ok(Self {
             capacity,
             in_flight: 0,
+            tags: HashMap::new(),
+            canceled: Vec::new(),
             backend,
         })
     }
@@ -95,6 +103,49 @@ impl OsIoQueue {
             Backend::Pool(_) => IoBackend::ThreadPool,
             Backend::Uring(_) => IoBackend::IoUring,
             Backend::Port(_) => IoBackend::Iocp,
+        }
+    }
+
+    fn reap_until(
+        &mut self,
+        completions: &mut Vec<IoCompletion<OsFile>>,
+        min: usize,
+        deadline: Option<Instant>,
+    ) -> Result<usize> {
+        check_reap(min, self.in_flight)?;
+        let before = completions.len();
+        completions.append(&mut self.canceled);
+        let left = min.saturating_sub(completions.len() - before);
+        let outcome = match &mut self.backend {
+            Backend::Inline(pending) => {
+                completions.extend(pending.drain(..).map(Job::run));
+                Ok(())
+            }
+            Backend::Pool(pool) => pool.receive(completions, left, deadline),
+            Backend::Uring(ring) => ring.reap(completions, left, deadline),
+            Backend::Port(port) => port.reap(completions, left, deadline),
+        };
+        let reaped = completions.len() - before;
+        self.in_flight -= reaped;
+        for completion in &completions[before..] {
+            self.untag(completion.user_data);
+        }
+        outcome.map(|()| reaped)
+    }
+
+    fn untag(&mut self, user_data: u64) {
+        let Some(count) = self.tags.get_mut(&user_data) else {
+            return;
+        };
+        *count -= 1;
+        if *count > 0 {
+            return;
+        }
+        self.tags.remove(&user_data);
+        match &mut self.backend {
+            Backend::Pool(pool) => pool.forget_cancel(user_data),
+            Backend::Port(port) => port.forget_cancel(user_data),
+            Backend::Inline(_) | Backend::Uring(_) => {}
         }
     }
 }
@@ -118,24 +169,45 @@ impl IoQueue for OsIoQueue {
             Backend::Port(port) => port.submit(job)?,
         }
         self.in_flight += 1;
+        *self.tags.entry(user_data).or_default() += 1;
         Ok(())
     }
 
     fn reap(&mut self, completions: &mut Vec<IoCompletion<OsFile>>, min: usize) -> Result<usize> {
-        check_reap(min, self.in_flight)?;
-        let before = completions.len();
-        let outcome = match &mut self.backend {
+        self.reap_until(completions, min, None)
+    }
+
+    fn reap_timeout(
+        &mut self,
+        completions: &mut Vec<IoCompletion<OsFile>>,
+        min: usize,
+        timeout: Duration,
+    ) -> Result<usize> {
+        let deadline = Instant::now().checked_add(timeout);
+        self.reap_until(completions, min, deadline)
+    }
+
+    fn cancel(&mut self, user_data: u64) -> Result<()> {
+        if !self.tags.contains_key(&user_data) {
+            return Err(Error::new(ErrorKind::NotFound));
+        }
+        match &mut self.backend {
             Backend::Inline(pending) => {
-                completions.extend(pending.drain(..).map(Job::run));
-                Ok(())
+                let mut kept = VecDeque::with_capacity(pending.len());
+                for job in pending.drain(..) {
+                    if job.user_data == user_data {
+                        self.canceled.push(job.canceled());
+                    } else {
+                        kept.push_back(job);
+                    }
+                }
+                *pending = kept;
             }
-            Backend::Pool(pool) => pool.receive(completions, min),
-            Backend::Uring(ring) => ring.reap(completions, min),
-            Backend::Port(port) => port.reap(completions, min),
-        };
-        let reaped = completions.len() - before;
-        self.in_flight -= reaped;
-        outcome.map(|()| reaped)
+            Backend::Pool(pool) => pool.cancel(user_data),
+            Backend::Uring(ring) => ring.cancel(user_data),
+            Backend::Port(port) => port.cancel(user_data),
+        }
+        Ok(())
     }
 
     fn in_flight(&self) -> usize {
@@ -156,6 +228,14 @@ impl Drop for OsIoQueue {
 }
 
 impl Job {
+    pub(crate) fn canceled(self) -> IoCompletion<OsFile> {
+        IoCompletion {
+            user_data: self.user_data,
+            result: Err(Error::new(ErrorKind::Canceled)),
+            op: self.op,
+        }
+    }
+
     pub(crate) fn run(mut self) -> IoCompletion<OsFile> {
         let result = self.op.perform();
         IoCompletion {
@@ -190,6 +270,7 @@ impl Pool {
         let mut pool = Self {
             jobs: Some(jobs),
             completions,
+            canceled: Arc::new(Mutex::new(HashSet::new())),
             workers: Vec::with_capacity(threads),
         };
         let cpus = OsCpus::new();
@@ -197,10 +278,11 @@ impl Pool {
             let queued = Arc::clone(&queued);
             let finished = finished.clone();
             let wake = Arc::clone(&wake);
+            let canceled = Arc::clone(&pool.canceled);
             let worker = ThreadOptions::new()
                 .name(format!("eggdb-io-{number}"))
                 .stack_size(OsIoQueue::WORKER_STACK_SIZE)
-                .spawn(&cpus, move || work(&queued, &finished, &*wake))?;
+                .spawn(&cpus, move || work(&queued, &finished, &canceled, &*wake))?;
             pool.workers.push(worker);
         }
         Ok(pool)
@@ -213,16 +295,47 @@ impl Pool {
         jobs.send(job).map_err(|returned| stopped(returned.0.op))
     }
 
-    fn receive(&self, completions: &mut Vec<IoCompletion<OsFile>>, min: usize) -> Result<()> {
+    fn receive(
+        &self,
+        completions: &mut Vec<IoCompletion<OsFile>>,
+        min: usize,
+        deadline: Option<Instant>,
+    ) -> Result<()> {
         for _ in 0..min {
-            let completion = self
-                .completions
-                .recv()
-                .map_err(|_| Error::new(ErrorKind::Other))?;
-            completions.push(completion);
+            let received = match deadline {
+                None => self
+                    .completions
+                    .recv()
+                    .map_err(|_| Error::new(ErrorKind::Other))?,
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    match self.completions.recv_timeout(left) {
+                        Ok(completion) => completion,
+                        Err(mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            return Err(Error::new(ErrorKind::Other));
+                        }
+                    }
+                }
+            };
+            completions.push(received);
         }
         completions.extend(self.completions.try_iter());
         Ok(())
+    }
+
+    pub(crate) fn cancel(&self, user_data: u64) {
+        self.canceled
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(user_data);
+    }
+
+    pub(crate) fn forget_cancel(&self, user_data: u64) {
+        self.canceled
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&user_data);
     }
 
     #[cfg(windows)]
@@ -245,6 +358,7 @@ impl Drop for Pool {
 fn work(
     queued: &Mutex<mpsc::Receiver<Job>>,
     finished: &mpsc::Sender<IoCompletion<OsFile>>,
+    canceled: &Mutex<HashSet<u64>>,
     wake: &(dyn Fn() + Send + Sync),
 ) {
     loop {
@@ -252,7 +366,16 @@ fn work(
         let Ok(job) = next else {
             return;
         };
-        if finished.send(job.run_catching_panics()).is_ok() {
+        let stopped = canceled
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&job.user_data);
+        let completion = if stopped {
+            job.canceled()
+        } else {
+            job.run_catching_panics()
+        };
+        if finished.send(completion).is_ok() {
             wake();
         }
     }

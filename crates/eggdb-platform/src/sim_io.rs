@@ -5,6 +5,7 @@ use crate::io::{IoCompletion, IoOp, IoQueue, IoQueueOptions, RejectedOp, check_r
 use crate::rng::SplitMix64;
 use crate::sim_fs::SimFile;
 use std::collections::VecDeque;
+use std::time::Duration;
 
 /// Asynchronous file I/O for deterministic tests (D9), made by
 /// [`SimFileSystem::io_queue`](crate::FileSystem::io_queue).
@@ -12,7 +13,10 @@ use std::collections::VecDeque;
 /// It runs no threads. Each operation is pending until the simulation performs it on its
 /// [`SimFile`], then done until it is reaped. Every [`IoQueue::submit`] and [`IoQueue::reap`]
 /// performs a random number of pending operations in a random order, and `reap` performs more
-/// until `min` are done, so engine code meets every completion order. All of it is drawn from a
+/// until `min` are done, so engine code meets every completion order. `reap_timeout` performs
+/// more too, but runs out of time with one chance in four before each one, returning fewer, and
+/// `cancel` stops a pending operation before it is performed, completing it with
+/// [`ErrorKind::Canceled`](crate::ErrorKind::Canceled). All of it is drawn from a
 /// generator seeded by [`SimFileSystem::seed_io_queues`](crate::SimFileSystem::seed_io_queues)
 /// and the queue's creation number, so a run repeats exactly.
 ///
@@ -47,6 +51,8 @@ struct Pending {
 }
 
 impl SimIoQueue {
+    const TIME_RUNS_OUT_ONE_IN: usize = 4;
+
     pub(crate) fn new(options: IoQueueOptions, seed: u64) -> Result<Self> {
         let (capacity, _) = options.validated()?;
         Ok(Self {
@@ -156,6 +162,45 @@ impl IoQueue for SimIoQueue {
         let reaped = self.done.len();
         completions.extend(self.done.drain(..));
         Ok(reaped)
+    }
+
+    fn reap_timeout(
+        &mut self,
+        completions: &mut Vec<IoCompletion<SimFile>>,
+        min: usize,
+        _timeout: Duration,
+    ) -> Result<usize> {
+        check_reap(min, self.in_flight())?;
+        self.perform_some();
+        while self.done.len() < min && self.draw_below(Self::TIME_RUNS_OUT_ONE_IN) != 0 {
+            self.perform_one();
+        }
+        let reaped = self.done.len();
+        completions.extend(self.done.drain(..));
+        Ok(reaped)
+    }
+
+    fn cancel(&mut self, user_data: u64) -> Result<()> {
+        let mut found = self.done.iter().any(|done| done.user_data == user_data);
+        let mut index = 0;
+        while let Some(pending) = self.pending.get(index) {
+            if pending.user_data != user_data {
+                index += 1;
+                continue;
+            }
+            found = true;
+            let pending = self.pending.swap_remove(index);
+            self.done.push_back(IoCompletion {
+                user_data: pending.user_data,
+                result: Err(Error::new(ErrorKind::Canceled)),
+                op: pending.op,
+            });
+        }
+        if found {
+            Ok(())
+        } else {
+            Err(Error::new(ErrorKind::NotFound))
+        }
     }
 
     fn in_flight(&self) -> usize {

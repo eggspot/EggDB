@@ -59,6 +59,7 @@ mod ring {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::ptr::{self, NonNull};
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::{Duration, Instant};
 
     mod net;
 
@@ -75,6 +76,9 @@ mod ring {
     const IORING_ENTER_GETEVENTS: c_uint = 1 << 0;
     const IORING_OFF_SQES: i64 = 0x1000_0000;
     const IORING_OP_FSYNC: u8 = 3;
+    const IORING_OP_TIMEOUT: u8 = 11;
+    const IORING_OP_TIMEOUT_REMOVE: u8 = 12;
+    const IORING_OP_FILE_CANCEL: u8 = 14;
     const IORING_OP_READ: u8 = 22;
     const IORING_OP_WRITE: u8 = 23;
     const IORING_FSYNC_DATASYNC: u32 = 1 << 0;
@@ -84,6 +88,10 @@ mod ring {
     const MAP_SHARED: c_int = 1;
     const MAP_FAILED: *mut c_void = usize::MAX as *mut c_void;
     const EINTR: i32 = 4;
+    const ECANCELED_FILE: i32 = 125;
+    const TIMER_TAG: u64 = 1 << 63;
+    const TIMER_REMOVAL_TAG: u64 = 1 << 62;
+    const CANCEL_TAG: u64 = 1 << 61;
 
     const MAX_TRANSFER: usize = 0x7fff_f000;
     const LARGEST_OFFSET: u64 = i64::MAX as u64;
@@ -336,18 +344,6 @@ mod ring {
             tail
         }
 
-        fn withdraw(&mut self, tail: u32) {
-            // SAFETY: the tail lies in the ring mapping, which lives as long as `self`. The
-            // kernel did not consume the entry and reads the ring only inside io_uring_enter, so
-            // moving the tail back withdraws it.
-            unsafe { &*self.sq_tail }.store(tail, Ordering::Release);
-        }
-
-        fn consumed_since(&self, tail: u32) -> bool {
-            // SAFETY: the head lies in the ring mapping; the kernel moves it as it consumes entries.
-            unsafe { &*self.sq_head }.load(Ordering::Acquire) != tail
-        }
-
         fn take_completions(&mut self, taken: &mut Vec<Completion>) {
             // SAFETY: we are the completion ring head's only writer.
             let mut head = unsafe { &*self.cq_head }.load(Ordering::Relaxed);
@@ -415,6 +411,14 @@ mod ring {
     struct InFlight {
         op: IoOp<OsFile>,
         user_data: u64,
+        canceling: bool,
+    }
+
+    #[repr(C)]
+    #[derive(Debug, Default)]
+    struct KernelTimespec {
+        seconds: i64,
+        nanoseconds: i64,
     }
 
     /// One io_uring instance, used by one queue at a time.
@@ -426,6 +430,10 @@ mod ring {
         in_kernel: usize,
         ready: VecDeque<IoCompletion<OsFile>>,
         taken: Vec<Completion>,
+        timer: KernelTimespec,
+        timer_generation: u64,
+        timer_armed: bool,
+        timer_fired: bool,
     }
 
     impl Ring {
@@ -437,7 +445,100 @@ mod ring {
                 in_kernel: 0,
                 ready: VecDeque::new(),
                 taken: Vec::new(),
+                timer: KernelTimespec::default(),
+                timer_generation: 0,
+                timer_armed: false,
+                timer_fired: false,
             })
+        }
+
+        fn make_room(&mut self) -> Result<()> {
+            if !self.raw.is_full() {
+                return Ok(());
+            }
+            let unsubmitted = self.raw.unsubmitted();
+            self.raw.enter(unsubmitted, 0, 0)?;
+            if self.raw.is_full() {
+                return Err(Error::new(ErrorKind::QueueFull));
+            }
+            Ok(())
+        }
+
+        fn submit_waiting(&mut self) -> Result<()> {
+            let unsubmitted = self.raw.unsubmitted();
+            if unsubmitted > 0 {
+                self.raw.enter(unsubmitted, 0, 0)?;
+            }
+            Ok(())
+        }
+
+        pub(crate) fn cancel(&mut self, user_data: u64) {
+            let mut targets = Vec::new();
+            for (slot, entry) in self.slots.iter_mut().enumerate() {
+                if let Some(in_flight) = entry
+                    && in_flight.user_data == user_data
+                    && !in_flight.canceling
+                {
+                    in_flight.canceling = true;
+                    targets.push(slot);
+                }
+            }
+            for slot in targets {
+                let pushed = self.make_room().map(|()| {
+                    self.raw.push(Submission {
+                        opcode: IORING_OP_FILE_CANCEL,
+                        fd: -1,
+                        addr: slot as u64,
+                        user_data: CANCEL_TAG,
+                        ..Submission::default()
+                    })
+                });
+                if pushed.is_err()
+                    && let Some(Some(in_flight)) = self.slots.get_mut(slot)
+                {
+                    in_flight.canceling = false;
+                }
+            }
+        }
+
+        fn arm_timer(&mut self, left: Duration) -> Result<()> {
+            self.make_room()?;
+            self.timer_generation =
+                self.timer_generation.wrapping_add(1) & !(TIMER_TAG | TIMER_REMOVAL_TAG | CANCEL_TAG);
+            self.timer = KernelTimespec {
+                seconds: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
+                nanoseconds: i64::from(left.subsec_nanos()),
+            };
+            self.raw.push(Submission {
+                opcode: IORING_OP_TIMEOUT,
+                fd: -1,
+                addr: ptr::from_ref(&self.timer).addr() as u64,
+                len: 1,
+                user_data: TIMER_TAG | self.timer_generation,
+                ..Submission::default()
+            });
+            self.timer_armed = true;
+            self.timer_fired = false;
+            Ok(())
+        }
+
+        fn disarm_timer(&mut self) -> Result<()> {
+            if !self.timer_armed {
+                return Ok(());
+            }
+            self.timer_armed = false;
+            if self.timer_fired {
+                return Ok(());
+            }
+            self.make_room()?;
+            self.raw.push(Submission {
+                opcode: IORING_OP_TIMEOUT_REMOVE,
+                fd: -1,
+                addr: TIMER_TAG | self.timer_generation,
+                user_data: TIMER_REMOVAL_TAG,
+                ..Submission::default()
+            });
+            Ok(())
         }
 
         pub(crate) fn submit(
@@ -453,38 +554,67 @@ mod ring {
                 });
                 return Ok(());
             }
+            if let Err(error) = self.make_room() {
+                return Err(RejectedOp { error, op });
+            }
             let mut op = op;
             let slot = self.free_slots.pop().unwrap_or(self.slots.len());
             if slot == self.slots.len() {
                 self.slots.push(None);
             }
-            let tail = self.raw.push(submission_for(&mut op, slot as u64));
-            let entered = self.raw.enter(1, 0, 0);
-            if self.raw.consumed_since(tail) {
-                self.slots[slot] = Some(InFlight { op, user_data });
-                self.in_kernel += 1;
-                return Ok(());
-            }
-            self.raw.withdraw(tail);
-            self.free_slots.push(slot);
-            let error = entered
-                .err()
-                .unwrap_or_else(|| Error::new(ErrorKind::Other));
-            Err(RejectedOp { error, op })
+            self.raw.push(submission_for(&mut op, slot as u64));
+            self.slots[slot] = Some(InFlight {
+                op,
+                user_data,
+                canceling: false,
+            });
+            self.in_kernel += 1;
+            Ok(())
         }
 
         pub(crate) fn reap(
             &mut self,
             completions: &mut Vec<IoCompletion<OsFile>>,
             min: usize,
+            deadline: Option<Instant>,
         ) -> Result<()> {
             let before = completions.len();
             completions.extend(self.ready.drain(..));
             self.drain(completions);
+            let waited = self.wait_for(completions, before, min, deadline);
+            let disarmed = self.disarm_timer();
+            let submitted = self.submit_waiting();
+            self.drain(completions);
+            waited.and(disarmed).and(submitted)
+        }
+
+        fn wait_for(
+            &mut self,
+            completions: &mut Vec<IoCompletion<OsFile>>,
+            before: usize,
+            min: usize,
+            deadline: Option<Instant>,
+        ) -> Result<()> {
             while completions.len() - before < min {
-                let wanted = min - (completions.len() - before);
-                let wanted = c_uint::try_from(wanted).unwrap_or(c_uint::MAX);
-                self.raw.enter(0, wanted, IORING_ENTER_GETEVENTS)?;
+                let unsubmitted = self.raw.unsubmitted();
+                match deadline {
+                    None => {
+                        let wanted = min - (completions.len() - before);
+                        let wanted = c_uint::try_from(wanted).unwrap_or(c_uint::MAX);
+                        self.raw.enter(unsubmitted, wanted, IORING_ENTER_GETEVENTS)?;
+                    }
+                    Some(deadline) => {
+                        if self.timer_fired {
+                            return Ok(());
+                        }
+                        if !self.timer_armed {
+                            let left = deadline.saturating_duration_since(Instant::now());
+                            self.arm_timer(left)?;
+                        }
+                        let unsubmitted = self.raw.unsubmitted();
+                        self.raw.enter(unsubmitted, 1, IORING_ENTER_GETEVENTS)?;
+                    }
+                }
                 self.drain(completions);
             }
             Ok(())
@@ -494,15 +624,28 @@ mod ring {
             let mut taken = std::mem::take(&mut self.taken);
             self.raw.take_completions(&mut taken);
             for completion in taken.drain(..) {
+                if completion.user_data & (TIMER_TAG | TIMER_REMOVAL_TAG | CANCEL_TAG) != 0 {
+                    if completion.user_data == TIMER_TAG | self.timer_generation
+                        && self.timer_armed
+                    {
+                        self.timer_fired = true;
+                    }
+                    continue;
+                }
                 let finished = usize::try_from(completion.user_data)
                     .ok()
                     .and_then(|slot| Some((slot, self.slots.get_mut(slot)?.take()?)));
                 if let Some((slot, in_flight)) = finished {
                     self.free_slots.push(slot);
                     self.in_kernel -= 1;
+                    let result = if completion.res == -ECANCELED_FILE && in_flight.canceling {
+                        Err(Error::new(ErrorKind::Canceled))
+                    } else {
+                        outcome(completion.res)
+                    };
                     completions.push(IoCompletion {
                         user_data: in_flight.user_data,
-                        result: outcome(completion.res),
+                        result,
                         op: in_flight.op,
                     });
                 }
@@ -517,7 +660,13 @@ mod ring {
             while self.in_kernel > 0 {
                 self.drain(&mut finished);
                 finished.clear();
-                if self.in_kernel > 0 && self.raw.enter(0, 1, IORING_ENTER_GETEVENTS).is_err() {
+                let unsubmitted = self.raw.unsubmitted();
+                if self.in_kernel > 0
+                    && self
+                        .raw
+                        .enter(unsubmitted, 1, IORING_ENTER_GETEVENTS)
+                        .is_err()
+                {
                     std::mem::forget(std::mem::take(&mut self.slots));
                     self.raw.leak();
                     return;
@@ -659,7 +808,12 @@ mod unsupported {
             &mut self,
             _completions: &mut Vec<IoCompletion<OsFile>>,
             _min: usize,
+            _deadline: Option<Instant>,
         ) -> Result<()> {
+            match self.0 {}
+        }
+
+        pub(crate) fn cancel(&mut self, _user_data: u64) {
             match self.0 {}
         }
     }

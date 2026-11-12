@@ -19,6 +19,7 @@ mod port {
     use std::ptr;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Weak};
+    use std::time::Instant;
 
     const GENERIC_READ: u32 = 0x8000_0000;
     const GENERIC_WRITE: u32 = 0x4000_0000;
@@ -36,6 +37,7 @@ mod port {
     const ERROR_NOT_SUPPORTED: i32 = 50;
     const ERROR_INVALID_USER_BUFFER: i32 = 1784;
     const ERROR_IO_PENDING: i32 = 997;
+    const ERROR_OPERATION_ABORTED: i32 = 995;
     const POLL_WORKERS_MS: u32 = 10;
     const ENTRIES_PER_WAIT: usize = 64;
 
@@ -105,6 +107,7 @@ mod port {
             transferred: *mut u32,
             wait: i32,
         ) -> i32;
+        fn CancelIoEx(file: RawHandle, overlapped: *mut Overlapped) -> i32;
     }
 
     #[repr(C)]
@@ -210,20 +213,70 @@ mod port {
             &mut self,
             completions: &mut Vec<IoCompletion<OsFile>>,
             min: usize,
+            deadline: Option<Instant>,
         ) -> Result<()> {
             let before = completions.len();
             completions.extend(self.ready.drain(..));
             completions.extend(self.inline.drain(..).map(Job::run));
             self.collect(completions, 0)?;
             while completions.len() - before < min {
+                let left = match deadline {
+                    None => INFINITE,
+                    Some(deadline) => {
+                        let left = deadline.saturating_duration_since(Instant::now());
+                        if left.is_zero() {
+                            return Ok(());
+                        }
+                        u32::try_from(left.as_nanos().div_ceil(1_000_000))
+                            .unwrap_or(INFINITE - 1)
+                            .min(INFINITE - 1)
+                    }
+                };
                 let wait = if self.at_workers > 0 {
-                    POLL_WORKERS_MS
+                    left.min(POLL_WORKERS_MS)
                 } else {
-                    INFINITE
+                    left
                 };
                 self.collect(completions, wait)?;
             }
             Ok(())
+        }
+
+        pub(crate) fn cancel(&mut self, user_data: u64) {
+            let mut kept = VecDeque::with_capacity(self.inline.len());
+            for job in self.inline.drain(..) {
+                if job.user_data == user_data {
+                    self.ready.push_back(job.canceled());
+                } else {
+                    kept.push_back(job);
+                }
+            }
+            self.inline = kept;
+            if let Some(workers) = &self.workers {
+                workers.cancel(user_data);
+            }
+            for &address in &self.in_port {
+                let pending = ptr::with_exposed_provenance_mut::<Pending>(address);
+                // SAFETY: every address in `in_port` names a live `Pending` this port owns until
+                // its packet arrives; the system writes only its overlapped structure, so
+                // reading the tag beside it races with nothing.
+                let tag = unsafe { (*pending).user_data };
+                if tag != user_data {
+                    continue;
+                }
+                // SAFETY: as above, for the handle the operation was started on.
+                let handle = unsafe { (*pending).handle };
+                // SAFETY: `handle` is the overlapped handle the operation was started on and the
+                // live `Pending` starts with its overlapped structure; the operation's packet
+                // still arrives, canceled or finished, and frees it.
+                unsafe { CancelIoEx(handle, pending.cast::<Overlapped>()) };
+            }
+        }
+
+        pub(crate) fn forget_cancel(&mut self, user_data: u64) {
+            if let Some(workers) = &self.workers {
+                workers.forget_cancel(user_data);
+            }
         }
 
         fn hand_to_workers(&mut self, job: Job) -> core::result::Result<(), RejectedOp<OsFile>> {
@@ -276,7 +329,7 @@ mod port {
             let started = unsafe { begin(pending) };
             match started {
                 Ok(Started::InFlight) => {
-                    self.in_port.insert(pending.addr());
+                    self.in_port.insert(pending.expose_provenance());
                     Ok(())
                 }
                 Ok(Started::Finished) => {
@@ -369,7 +422,9 @@ mod port {
             }
             let removed = (removed as usize).min(ENTRIES_PER_WAIT);
             for entry in &entries[..removed] {
-                if entry.overlapped.is_null() || !self.in_port.remove(&entry.overlapped.addr()) {
+                if entry.overlapped.is_null()
+                    || !self.in_port.remove(&entry.overlapped.expose_provenance())
+                {
                     continue;
                 }
                 // SAFETY: the packet names an operation `start` handed to the system and still
@@ -542,10 +597,10 @@ mod port {
             Ok(transferred as usize)
         } else {
             let error = io::Error::last_os_error();
-            if error.raw_os_error() == Some(ERROR_HANDLE_EOF) {
-                Ok(0)
-            } else {
-                Err(error.into())
+            match error.raw_os_error() {
+                Some(ERROR_HANDLE_EOF) => Ok(0),
+                Some(ERROR_OPERATION_ABORTED) => Err(Error::new(ErrorKind::Canceled)),
+                _ => Err(error.into()),
             }
         };
         IoCompletion {
@@ -814,7 +869,16 @@ mod unsupported {
             &mut self,
             _completions: &mut Vec<IoCompletion<OsFile>>,
             _min: usize,
+            _deadline: Option<std::time::Instant>,
         ) -> Result<()> {
+            match self.0 {}
+        }
+
+        pub(crate) fn cancel(&mut self, _user_data: u64) {
+            match self.0 {}
+        }
+
+        pub(crate) fn forget_cancel(&mut self, _user_data: u64) {
             match self.0 {}
         }
     }

@@ -331,7 +331,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - I/O completion ports as Windows' automatic choice, and io_uring and IOCP sockets as the default
   network backends, once the benchmarks show it (D67, D69, D165). Check: the network benchmarks.
 - Batched io_uring submission, and timed reaps and cancel on the file I/O queue (D72, Where we are).
-  Check: simulator tests of a timed reap and a cancel on files.
+  Check: simulator tests of a timed reap and a cancel on files. **Code written, unbuilt** (code-only mode, 2026-11-13, D945).
 - kqueue changes folded into the waiting `kevent` call, so a wait costs no change call (D74).
   Check: system calls per wait, measured on macOS and FreeBSD. **Code written, unbuilt** (code-only mode, 2026-11-10).
 - Acknowledgements that take latency to return, and packet loss, duplication and reordering

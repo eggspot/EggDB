@@ -4,6 +4,7 @@ use crate::fs::File;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// A buffer owned by an operation while it is in flight and handed back when it completes.
 #[derive(Debug)]
@@ -207,6 +208,24 @@ pub trait IoQueue: Send + fmt::Debug {
         completions: &mut Vec<IoCompletion<Self::File>>,
         min: usize,
     ) -> Result<usize>;
+
+    /// [`IoQueue::reap`] that waits at most `timeout` for `min` operations to finish: it
+    /// returns what finished by then, which may be fewer than `min`, and running out of time is
+    /// not an error. It still fails with [`ErrorKind::InvalidInput`] when `min` is more than
+    /// [`IoQueue::in_flight`].
+    fn reap_timeout(
+        &mut self,
+        completions: &mut Vec<IoCompletion<Self::File>>,
+        min: usize,
+        timeout: Duration,
+    ) -> Result<usize>;
+
+    /// Asks the queue to stop the operations tagged `user_data`. Each still comes back once,
+    /// through a later reap: with [`ErrorKind::Canceled`] when it was stopped before it ran, in
+    /// which case it moved no bytes, or with its own result when it had already run or could
+    /// not be stopped. Canceling twice is the same as once. Fails with [`ErrorKind::NotFound`]
+    /// when no operation with that tag is in flight.
+    fn cancel(&mut self, user_data: u64) -> Result<()>;
 
     /// How many operations were submitted and not yet reaped.
     fn in_flight(&self) -> usize;

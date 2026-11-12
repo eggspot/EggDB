@@ -9,6 +9,7 @@ use eggdb_platform::{
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 struct TestDir(PathBuf);
 
@@ -294,6 +295,64 @@ contract!(
         assert!(read > 0);
         let buffer = completion.op.into_buffer().unwrap();
         assert!(buffer[..read].iter().all(|&byte| byte == 7));
+    }
+);
+
+contract!(
+    a_timed_reap_returns_what_finished_and_the_rest_arrive_later,
+    |fs, path, options| {
+        let file = Arc::new(fs.open(&path("data"), OpenMode::CreateNew).unwrap());
+        let mut queue = fs.io_queue(options).unwrap();
+        for block in 0..4_u8 {
+            submit(&mut queue, write(&file, u64::from(block) * 4, &[block; 4]), u64::from(block));
+        }
+        let mut completions = Vec::new();
+        let reaped = queue
+            .reap_timeout(&mut completions, 4, Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(reaped, completions.len());
+        assert!(reaped <= 4);
+        assert_eq!(queue.in_flight(), 4 - reaped);
+        let in_flight = queue.in_flight();
+        queue.reap(&mut completions, in_flight).unwrap();
+        completions.sort_by_key(|completion| completion.user_data);
+        let tags: Vec<u64> = completions.iter().map(|done| done.user_data).collect();
+        assert_eq!(tags, [0, 1, 2, 3]);
+        assert!(completions.iter().all(|done| done.result.is_ok()));
+        let error = queue
+            .reap_timeout(&mut completions, 1, Duration::from_millis(1))
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    }
+);
+
+contract!(
+    a_canceled_operation_comes_back_once_either_canceled_or_done,
+    |fs, path, options| {
+        let file = Arc::new(fs.open(&path("data"), OpenMode::CreateNew).unwrap());
+        let mut queue = fs.io_queue(options).unwrap();
+        write_fully(&mut queue, &file, 0, &[5; 8]);
+        submit(&mut queue, read(&file, 0, 8), 7);
+        submit(&mut queue, write(&file, 16, &[6; 4]), 8);
+        queue.cancel(7).unwrap();
+        queue.cancel(7).unwrap();
+        assert_eq!(queue.cancel(9).unwrap_err().kind(), ErrorKind::NotFound);
+        let completions = reap_all(&mut queue);
+        assert_eq!(completions.len(), 2);
+        let mut completions = completions.into_iter();
+        let canceled = completions.next().unwrap();
+        assert_eq!(canceled.user_data, 7);
+        match canceled.result {
+            Ok(read) => {
+                let buffer = canceled.op.into_buffer().unwrap();
+                assert!(buffer[..read].iter().all(|&byte| byte == 5));
+            }
+            Err(error) => assert_eq!(error.kind(), ErrorKind::Canceled),
+        }
+        let written = completions.next().unwrap();
+        assert_eq!(written.user_data, 8);
+        assert_eq!(written.result.unwrap(), 4);
+        assert_eq!(queue.cancel(7).unwrap_err().kind(), ErrorKind::NotFound);
     }
 );
 
