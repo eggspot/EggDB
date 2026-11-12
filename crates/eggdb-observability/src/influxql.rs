@@ -1,5 +1,6 @@
 use crate::api::json_string;
 use crate::store::{SCHEMA, identifier, literal, run};
+use crate::line_protocol::{FieldValue, Point};
 use eggdb_sql::{QueryResult, Session, Value};
 
 const UNIX_EPOCH_FROM_2000_MICROS: i64 = 946_684_800_000_000;
@@ -157,7 +158,7 @@ fn tokens(text: &str) -> Result<Vec<Token>, String> {
                 let two: String = characters[at..(at + 2).min(characters.len())].iter().collect();
                 let operator = match two.as_str() {
                     "!=" | "<>" | "<=" | ">=" | "=~" | "!~" | "::" => two,
-                    _ if matches!(character, '=' | '<' | '>' | '+' | '-' | '/' | '%') => character.to_string(),
+                    _ if matches!(character, '=' | '<' | '>' | '+' | '-' | '/' | '%' | ':') => character.to_string(),
                     _ => return Err(format!("unexpected {character}")),
                 };
                 at += operator.chars().count();
@@ -314,9 +315,16 @@ enum Source {
     Pattern(String),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum Target {
+    Measurement(String),
+    SameAsSource,
+}
+
 #[derive(Debug, Default)]
 struct Select {
     items: Vec<Item>,
+    into: Option<Target>,
     sources: Vec<Source>,
     group_all: bool,
     series_limit: Option<usize>,
@@ -522,6 +530,22 @@ impl Reader {
             } else {
                 break;
             }
+        }
+        if self.keyword("into") {
+            select.into = Some(match self.next() {
+                Some(Token::Operator(operator)) if operator == ":" => {
+                    let name = self.name()?;
+                    if !name.eq_ignore_ascii_case("measurement") {
+                        return Err(format!("found :{name}, expected :MEASUREMENT"));
+                    }
+                    Target::SameAsSource
+                }
+                Some(Token::Name { text, quoted: true }) => Target::Measurement(text),
+                Some(Token::Name { text, quoted: false }) => {
+                    Target::Measurement(text.rsplit('.').next().unwrap_or_default().to_owned())
+                }
+                other => return Err(format!("found {other:?}, expected a measurement after INTO")),
+            });
         }
         self.expect_keyword("from")?;
         loop {
@@ -1020,19 +1044,11 @@ fn matching_measurements(session: &mut Session<'_>, catalog: &Catalog, pattern: 
 }
 
 fn select_series(session: &mut Session<'_>, select: &Select, epoch: Option<&str>) -> Result<Vec<String>, String> {
-    let catalog = crate::store::catalog(session)?;
-    let mut measurements: Vec<String> = Vec::new();
-    for source in &select.sources {
-        let found = match source {
-            Source::Name(name) => vec![name.clone()],
-            Source::Pattern(pattern) => matching_measurements(session, &catalog, pattern)?,
-        };
-        for name in found {
-            if !measurements.contains(&name) {
-                measurements.push(name);
-            }
-        }
+    if let Some(target) = &select.into {
+        return select_into(session, select, target, epoch);
     }
+    let catalog = crate::store::catalog(session)?;
+    let measurements = measurements_of(session, select, &catalog)?;
     let mut out = Vec::new();
     for measurement in &measurements {
         if let Some(columns) = catalog.get(measurement) {
@@ -1044,13 +1060,14 @@ fn select_series(session: &mut Session<'_>, select: &Select, epoch: Option<&str>
     Ok(out.into_iter().skip(skip).take(take).collect())
 }
 
-fn measurement_series(
+type TaggedRows = Vec<(Vec<(String, String)>, Vec<Vec<Value>>)>;
+
+fn measurement_rows(
     session: &mut Session<'_>,
     select: &Select,
     measurement: &str,
     columns: &[(String, String)],
-    epoch: Option<&str>,
-) -> Result<Vec<String>, String> {
+) -> Result<(Vec<String>, usize, TaggedRows), String> {
     let planned = plan(select, measurement, columns)?;
     let result: QueryResult = run(session, &planned.sql)?
         .into_iter()
@@ -1059,7 +1076,7 @@ fn measurement_series(
         .ok_or("the query returned no rows")?;
     let names: Vec<String> = result.columns.iter().flatten().map(|column| column.name.clone()).collect();
     let shown: Vec<String> = names[planned.tag_count..].to_vec();
-    let mut series: Vec<(Vec<(String, String)>, Vec<Vec<Value>>)> = Vec::new();
+    let mut series: TaggedRows = Vec::new();
     for row in result.rows {
         let tags: Vec<(String, String)> = names[..planned.tag_count]
             .iter()
@@ -1075,18 +1092,104 @@ fn measurement_series(
     let range = if fills(select) { time_range(session, select)? } else { None };
     let mut out = Vec::with_capacity(series.len());
     for (tags, rows) in series {
-        let rows: Vec<Vec<String>> = filled(select, rows, range)?
-            .iter()
-            .map(|row| row.iter().map(|value| value_json(value, epoch)).collect())
-            .collect();
-        out.push(series_json(
-            measurement,
-            (planned.tag_count > 0).then_some(tags.as_slice()),
-            &shown,
-            &rows,
-        ));
+        out.push((tags, filled(select, rows, range)?));
     }
-    Ok(out)
+    Ok((shown, planned.tag_count, out))
+}
+
+fn measurement_series(
+    session: &mut Session<'_>,
+    select: &Select,
+    measurement: &str,
+    columns: &[(String, String)],
+    epoch: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let (shown, tag_count, series) = measurement_rows(session, select, measurement, columns)?;
+    Ok(series
+        .iter()
+        .map(|(tags, rows)| {
+            let rows: Vec<Vec<String>> = rows
+                .iter()
+                .map(|row| row.iter().map(|value| value_json(value, epoch)).collect())
+                .collect();
+            series_json(measurement, (tag_count > 0).then_some(tags.as_slice()), &shown, &rows)
+        })
+        .collect())
+}
+
+fn field_value(value: &Value) -> Option<FieldValue> {
+    Some(match value {
+        Value::Null => return None,
+        Value::Double(number) if number.is_finite() => FieldValue::Float(*number),
+        Value::Real(number) if number.is_finite() => FieldValue::Float(f64::from(*number)),
+        Value::Double(_) | Value::Real(_) => return None,
+        Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_) => FieldValue::Integer(value.as_integer()?),
+        Value::Numeric(_) => FieldValue::Float(value.as_float().filter(|number| number.is_finite())?),
+        Value::Boolean(flag) => FieldValue::Boolean(*flag),
+        other => FieldValue::Text(other.to_text()?),
+    })
+}
+
+fn measurements_of(session: &mut Session<'_>, select: &Select, catalog: &Catalog) -> Result<Vec<String>, String> {
+    let mut measurements: Vec<String> = Vec::new();
+    for source in &select.sources {
+        let found = match source {
+            Source::Name(name) => vec![name.clone()],
+            Source::Pattern(pattern) => matching_measurements(session, catalog, pattern)?,
+        };
+        for name in found {
+            if !measurements.contains(&name) {
+                measurements.push(name);
+            }
+        }
+    }
+    Ok(measurements)
+}
+
+fn select_into(session: &mut Session<'_>, select: &Select, target: &Target, epoch: Option<&str>) -> Result<Vec<String>, String> {
+    let catalog = crate::store::catalog(session)?;
+    let mut points = Vec::new();
+    for measurement in measurements_of(session, select, &catalog)? {
+        let Some(columns) = catalog.get(&measurement) else {
+            continue;
+        };
+        let (shown, _, series) = measurement_rows(session, select, &measurement, columns)?;
+        let destination = match target {
+            Target::Measurement(name) => name.clone(),
+            Target::SameAsSource => measurement.clone(),
+        };
+        for (tags, rows) in series {
+            for row in rows {
+                let Some(micros) = time_of(&row) else {
+                    continue;
+                };
+                let fields: Vec<(String, FieldValue)> = shown
+                    .iter()
+                    .zip(&row)
+                    .skip(1)
+                    .filter_map(|(name, value)| field_value(value).map(|field| (name.clone(), field)))
+                    .collect();
+                if fields.is_empty() {
+                    continue;
+                }
+                points.push(Point {
+                    measurement: destination.clone(),
+                    tags: tags.iter().filter(|(_, value)| !value.is_empty()).cloned().collect(),
+                    fields,
+                    time_ns: (i128::from(micros) + i128::from(UNIX_EPOCH_FROM_2000_MICROS))
+                        .saturating_mul(1000)
+                        .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64,
+                });
+            }
+        }
+    }
+    let written = crate::store::write(session, &points)?;
+    Ok(vec![series_json(
+        "result",
+        None,
+        &["time".to_owned(), "written".to_owned()],
+        &[vec![time_json(-UNIX_EPOCH_FROM_2000_MICROS, epoch), written.to_string()]],
+    )])
 }
 
 type Catalog = std::collections::BTreeMap<String, Vec<(String, String)>>;
