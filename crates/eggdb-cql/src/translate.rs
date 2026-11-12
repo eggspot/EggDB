@@ -2,7 +2,7 @@ use crate::cql::{
     Assignment, ColumnDefinition, Condition, Operator, Relation, Selection, Statement, TableName,
     Term,
 };
-use crate::types::CqlType;
+use crate::types::{CqlType, UserType};
 
 pub(crate) const METADATA_DDL: &str = "CREATE SCHEMA IF NOT EXISTS eggdb_cql; CREATE TABLE IF NOT EXISTS eggdb_cql.tables (keyspace_name text, table_name text, partition_key text NOT NULL, clustering_key text NOT NULL, descending text NOT NULL, column_types text NOT NULL, PRIMARY KEY (keyspace_name, table_name)); CREATE TABLE IF NOT EXISTS eggdb_cql.types (keyspace_name text, type_name text, definition text NOT NULL, PRIMARY KEY (keyspace_name, type_name))";
 
@@ -477,8 +477,56 @@ fn upsert(
     Ok(())
 }
 
+fn field_positions<'a>(
+    name: &str,
+    cql: CqlType,
+    fields: &'a [(String, Term)],
+) -> Result<(&'static UserType, Vec<Option<&'a Term>>), String> {
+    let CqlType::Udt(user_type) = cql else {
+        return Err(format!("Invalid field selection: {name} of type {} is not a user type", cql.name()));
+    };
+    let mut assigned = vec![None; user_type.fields.len()];
+    for (field, term) in fields {
+        let at = user_type
+            .fields
+            .iter()
+            .position(|(known, _)| known == field)
+            .ok_or_else(|| format!("Type {} has no field {field}", user_type.name))?;
+        assigned[at] = Some(term);
+    }
+    Ok((user_type, assigned))
+}
+
+fn field_json(builder: &mut Builder, name: &str, cql: CqlType, term: &Term) -> Result<(), String> {
+    if cql.is_collection() {
+        builder.sql("(");
+        builder.term(term, name, cql)?;
+        builder.sql(")::jsonb");
+    } else {
+        builder.sql("to_jsonb(");
+        builder.term(term, name, cql)?;
+        builder.sql(")");
+    }
+    Ok(())
+}
+
 fn inserted_value(builder: &mut Builder, name: &str, cql: CqlType, assignment: &Assignment) -> Result<(), String> {
     match (assignment, cql) {
+        (Assignment::Fields(fields), _) => {
+            let (user_type, assigned) = field_positions(name, cql, fields)?;
+            builder.sql("jsonb_build_array(");
+            for (at, term) in assigned.iter().enumerate() {
+                if at > 0 {
+                    builder.sql(", ");
+                }
+                match term {
+                    Some(term) => field_json(builder, name, user_type.fields[at].1, term)?,
+                    None => builder.sql("'null'::jsonb"),
+                }
+            }
+            builder.sql(")::text");
+            Ok(())
+        }
         (Assignment::Set(term) | Assignment::Add(term) | Assignment::Prepend(term), _) => builder.term(term, name, cql),
         (Assignment::Remove(term), cql) if !cql.is_collection() => {
             builder.sql("-(");
@@ -532,6 +580,21 @@ fn assigned_value(
     let column = format!("{owner}{}", identifier(name));
     let current = format!("COALESCE({column}, '[]')::jsonb");
     match (assignment, cql) {
+        (Assignment::Fields(fields), _) => {
+            let (user_type, assigned) = field_positions(name, cql, fields)?;
+            builder.sql("jsonb_build_array(");
+            for (at, term) in assigned.iter().enumerate() {
+                if at > 0 {
+                    builder.sql(", ");
+                }
+                match term {
+                    Some(_) if excluded => builder.sql(&format!("(EXCLUDED.{})::jsonb -> {at}", identifier(name))),
+                    Some(term) => field_json(builder, name, user_type.fields[at].1, term)?,
+                    None => builder.sql(&format!("COALESCE(({column})::jsonb -> {at}, 'null'::jsonb)")),
+                }
+            }
+            builder.sql(")::text");
+        }
         (Assignment::Set(term), _) => {
             if excluded {
                 builder.sql(&format!("EXCLUDED.{}", identifier(name)));
@@ -1146,12 +1209,13 @@ fn statement(
                 entries.extend(
                     assignments
                         .iter()
-                        .map(|(name, assignment)| match assignment {
+                        .filter_map(|(name, assignment)| match assignment {
                             Assignment::Set(term)
                             | Assignment::Add(term)
                             | Assignment::Prepend(term)
                             | Assignment::Remove(term)
-                            | Assignment::Element(_, term) => (name.as_str(), term),
+                            | Assignment::Element(_, term) => Some((name.as_str(), term)),
+                            Assignment::Fields(_) => None,
                         }),
                 );
                 let names: Vec<String> = entries.iter().map(|(name, _)| identifier(name)).collect();

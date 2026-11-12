@@ -854,3 +854,21 @@ fn user_type_fields_are_selected_by_name() {
         None
     );
 }
+
+#[test]
+fn single_user_type_fields_are_updated_in_place() {
+    let updated = typed_sql("UPDATE people SET home.number = 9, home.street = 'Elm' WHERE k = 'a'").unwrap();
+    assert!(
+        updated.contains("jsonb_build_array(to_jsonb('Elm'::text), to_jsonb(9::integer))::text"),
+        "{updated}"
+    );
+    assert!(
+        updated.contains("\"home\" = jsonb_build_array((EXCLUDED.\"home\")::jsonb -> 0, (EXCLUDED.\"home\")::jsonb -> 1)::text"),
+        "{updated}"
+    );
+    let one = typed_sql("UPDATE people SET home.number = 9 WHERE k = 'a'").unwrap();
+    assert!(one.contains("COALESCE((\"people\".\"home\")::jsonb -> 0, 'null'::jsonb)"), "{one}");
+    assert!(typed_sql("UPDATE people SET home.floor = 2 WHERE k = 'a'").is_err());
+    assert!(typed_sql("UPDATE people SET k.x = 2 WHERE k = 'a'").is_err());
+    assert!(parse("UPDATE people SET home = {number: 1}, home.street = 'x' WHERE k = 'a'").is_err());
+}

@@ -229,6 +229,7 @@ pub(crate) enum Assignment {
     Prepend(Term),
     Remove(Term),
     Element(Term, Term),
+    Fields(Vec<(String, Term)>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -875,6 +876,20 @@ impl Parser {
         let mut assignments = Vec::new();
         loop {
             let column = self.identifier()?;
+            if self.eat_symbol(".") {
+                let field = self.identifier()?;
+                self.expect_symbol("=")?;
+                let term = self.term()?;
+                match assignments.iter_mut().find(|(name, _)| *name == column) {
+                    Some((_, Assignment::Fields(fields))) => fields.push((field, term)),
+                    Some(_) => return Err(format!("Multiple incompatible setting of column {column}")),
+                    None => assignments.push((column, Assignment::Fields(vec![(field, term)]))),
+                }
+                if !self.eat_symbol(",") {
+                    break;
+                }
+                continue;
+            }
             let element = if self.eat_symbol("[") {
                 let index = self.term()?;
                 self.expect_symbol("]")?;

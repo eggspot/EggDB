@@ -1651,7 +1651,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   mode, 2026-11-12, D808); user-defined types (`CREATE TYPE`, `DROP TYPE`, `{field: value}` values): **code written,
   unbuilt** (code-only mode, 2026-11-12, D809); `ALTER TYPE ... ADD | RENAME`: **code written, unbuilt** (code-only
   mode, 2026-11-12, D843); `system_schema.types`: **code written, unbuilt** (code-only mode, 2026-11-12, D844); field
-  selection (`home.street`): **code written, unbuilt** (code-only mode, 2026-11-12, D853). Left: updating one field.
+  selection (`home.street`): **code written, unbuilt** (code-only mode, 2026-11-12, D853); updating one field: **code
+  written, unbuilt** (code-only mode, 2026-11-12, D854).
 - CQL TTL, `USING TIMESTAMP`, and lightweight transactions beyond `IF NOT EXISTS` (D218). Conditional `UPDATE` and `DELETE`: **code written,
   unbuilt** (code-only mode, 2026-11-12, D587).
 - CQL paging, protocol v5 framing and compression (D218). Paging: **code written, unbuilt** (code-only mode,

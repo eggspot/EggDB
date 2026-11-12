@@ -878,3 +878,4 @@ its full title with its status.
 - [D851](decisions/D851.md) Code-only batch 499 (M6b): Oracle VPD static policies through DBMS_RLS
 - [D852](decisions/D852.md) Code-only batch 500 (D57): Blosc bit shuffle in Zarr chunks
 - [D853](decisions/D853.md) Code-only batch 501 (M16): CQL user-type field selection
+- [D854](decisions/D854.md) Code-only batch 502 (M16): CQL updates of one user-type field
