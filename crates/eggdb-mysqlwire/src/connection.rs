@@ -305,11 +305,94 @@ fn new_session<'s, S: KeyValueStore + 's>(
     user: &str,
     database: &str,
     connection_id: u32,
-) -> Session<'s> {
+    stored_role: bool,
+) -> Option<Session<'s>> {
     let mut session = Session::with_dialect(store, Dialect::MySql);
-    session.identify(user, database);
+    if stored_role {
+        session.identify_role(user, database).ok()?;
+    } else {
+        session.identify(user, database);
+    }
     session.set_connection_id(connection_id);
-    session
+    Some(session)
+}
+
+const MYSQL_CLEAR_PASSWORD: &str = "mysql_clear_password";
+const PERFORM_FULL_AUTHENTICATION: [u8; 2] = [0x01, 0x04];
+
+fn stored_role_verifier<D: DatabaseDirectory>(
+    directory: &D,
+    database: &str,
+    user: &str,
+) -> Option<eggdb_auth::scram::ScramVerifier> {
+    let name = directory.matching_name(database)?;
+    let attached = directory.attach(&name)?;
+    let reader = attached.begin_read().ok()?;
+    let text = eggdb_sql::login_verifier(&reader, user).ok()??;
+    eggdb_auth::scram::ScramVerifier::from_stored(&text)
+}
+
+fn authenticate_stored_role(
+    wire: &mut Wire<'_>,
+    shared: &Shared<'_>,
+    response: &crate::packets::HandshakeResponse,
+    verifier: Option<&eggdb_auth::scram::ScramVerifier>,
+) -> Outcome {
+    if wire.tls().is_none() && !wire.is_local() && !wire.peer_is_loopback() {
+        refuse(
+            wire,
+            1045,
+            "28000",
+            "a stored role sends its password to the server, which needs TLS (--ssl-mode=REQUIRED)",
+        );
+        return Outcome::Refused;
+    }
+    let caching = response.capabilities & CLIENT_PLUGIN_AUTH != 0
+        && response.auth_plugin.as_deref() == Some(CACHING_SHA2_PASSWORD);
+    if caching {
+        wire.send(&PERFORM_FULL_AUTHENTICATION);
+    } else {
+        let mut switch = Payload::new();
+        switch.u8(0xFE).null_terminated(MYSQL_CLEAR_PASSWORD.as_bytes());
+        wire.send(&switch.0);
+    }
+    if wire.flush().is_err() {
+        return Outcome::Refused;
+    }
+    let expected = wire.sequence;
+    let answer = match wire.read_payload(expected, MAX_AUTHENTICATION_PACKET_BYTES) {
+        Ok(answer) => answer,
+        Err(error) => {
+            report_wire_error(wire, &error);
+            return Outcome::Refused;
+        }
+    };
+    let password = answer.strip_suffix(&[0]).unwrap_or(&answer);
+    let accepted = verifier.is_some_and(|verifier| verifier.matches_password(password));
+    eggdb_sql::audit_events::record_login(
+        &response.user,
+        response.database.as_deref().unwrap_or_default(),
+        "mysql",
+        &wire.peer(),
+        if caching { CACHING_SHA2_PASSWORD } else { MYSQL_CLEAR_PASSWORD },
+        accepted,
+    );
+    if !accepted {
+        (shared.log)(&format!(
+            "{}  password authentication failed for stored role \"{}\"",
+            wire.peer(),
+            printable(&response.user)
+        ));
+        sleep_unless_stopped(shared.throttle.delay_after_failure(), shared.stop);
+        refuse(
+            wire,
+            1045,
+            "28000",
+            &format!("Access denied for user '{}'@'localhost' (using password: YES)", response.user),
+        );
+        return Outcome::Refused;
+    }
+    Outcome::Accepted
 }
 
 pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
@@ -384,7 +467,18 @@ pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
             return;
         }
     };
-    if let Outcome::Refused = authenticate(&mut wire, shared, &nonce, &response) {
+    let outcome = if response.user == shared.config.user {
+        authenticate(&mut wire, shared, &nonce, &response)
+    } else {
+        let wanted = response
+            .database
+            .as_deref()
+            .filter(|database| !database.is_empty())
+            .unwrap_or(&shared.config.database);
+        let verifier = stored_role_verifier(directory, wanted, &response.user);
+        authenticate_stored_role(&mut wire, shared, &response, verifier.as_ref())
+    };
+    if let Outcome::Refused = outcome {
         return;
     }
     let requested = response
@@ -494,12 +588,22 @@ fn serve_database<'a, 'd, D: DatabaseDirectory>(
     database: String,
     switched: Option<(DatabaseSwitch, bool)>,
 ) -> Option<Switched<'a, D::Attached<'d>>> {
+    let mut carried = carried;
     let (session, answer_with_ok) = match switched {
         Some((switch, reply)) => (switch.into_session(attached), reply),
-        None => (
-            new_session(attached, &carried.user, &database, connection_id),
-            true,
-        ),
+        None => {
+            let stored_role = carried.user != shared.config.user;
+            let Some(session) = new_session(attached, &carried.user, &database, connection_id, stored_role) else {
+                refuse(
+                    &mut carried.wire,
+                    1045,
+                    "28000",
+                    &format!("Access denied for user '{}': the role may not log in to this database", carried.user),
+                );
+                return None;
+            };
+            (session, true)
+        }
     };
     let peer = carried.wire.peer();
     let cancel = session.cancel_signal();
@@ -1082,8 +1186,12 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                     _ => self.error(1047, "08S01", "Unknown command"),
                 },
                 Command::ResetConnection => {
-                    let mut fresh =
-                        new_session(self.store, &self.user, &self.database, self.connection_id);
+                    let stored_role = self.user != self.shared.config.user;
+                    let Some(mut fresh) =
+                        new_session(self.store, &self.user, &self.database, self.connection_id, stored_role)
+                    else {
+                        return self.error(1045, "28000", "the role may no longer log in");
+                    };
                     if let Some(served) = self.session.served_databases() {
                         fresh.set_served_databases(served);
                     }

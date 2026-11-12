@@ -58,6 +58,19 @@ impl ScramVerifier {
         self.iterations
     }
 
+    /// Whether `password` is the one this verifier was derived from, for protocols that send
+    /// the password itself (over TLS) instead of a SCRAM exchange. The comparison takes the
+    /// same time wherever the keys differ.
+    pub fn matches_password(&self, password: &[u8]) -> bool {
+        let derived = Self::derive(password, &self.salt, self.iterations);
+        derived
+            .stored_key
+            .iter()
+            .zip(&self.stored_key)
+            .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+            == 0
+    }
+
     fn unmatchable(salt: &[u8], iterations: u32, stored_key: [u8; SHA256_DIGEST_BYTES]) -> Self {
         Self {
             salt: salt.to_vec(),
