@@ -196,6 +196,9 @@ fn added_function_type(
         name if crate::privacy::FUNCTIONS.contains(&name) => {
             Some(crate::privacy::result_type(name))
         }
+        name if crate::app_tokens::FUNCTIONS.contains(&name) => {
+            Some(crate::app_tokens::result_type(name))
+        }
         "l2_normalize" => Some(SqlType::Text),
         "strpos" | "position" | "ascii" | "regexp_count" | "regexp_instr" => Some(SqlType::Integer),
         "starts_with" | "regexp_like" | "isfinite" | "is_normalized" | "eggdb_cron_schedule_check" => {

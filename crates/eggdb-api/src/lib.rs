@@ -29,12 +29,30 @@ pub struct Endpoint<'s, S: KeyValueStore> {
     database: String,
     schema: String,
     auth_rules: Option<Arc<AuthRules>>,
+    claims: Option<String>,
 }
 
 enum Caller {
     Server,
-    Role(String),
+    Role(String, Option<String>),
     Refused(String),
+}
+
+fn token_claims(token: &str) -> Option<String> {
+    let payload = token.split('.').nth(1)?;
+    let standard: String = payload
+        .trim_end_matches('=')
+        .chars()
+        .map(|character| match character {
+            '-' => '+',
+            '_' => '/',
+            other => other,
+        })
+        .collect();
+    let padded = format!("{standard}{}", "=".repeat((4 - standard.len() % 4) % 4));
+    let decoded = eggdb_crypto::base64_decode(padded.as_bytes()).ok()?;
+    let text = String::from_utf8(decoded).ok()?;
+    matches!(parse_document(&text).ok()?.value, Json::Object(_)).then_some(text)
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Endpoint<'_, S> {
@@ -189,6 +207,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             database: database.to_owned(),
             schema: schema.to_owned(),
             auth_rules: None,
+            claims: None,
         }
     }
 
@@ -234,7 +253,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                     if !may_log_in {
                         return Caller::Refused(format!("{role} may not log in"));
                     }
-                    return Caller::Role(role);
+                    return Caller::Role(role, token_claims(token.trim()));
                 }
                 Err(error) => why = error.to_string(),
             }
@@ -242,7 +261,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         Caller::Refused(why)
     }
 
-    fn acting_as(&self, role: String) -> Self {
+    fn acting_as(&self, role: String, claims: Option<String>) -> Self {
         Self {
             store: self.store,
             user: role,
@@ -250,6 +269,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             database: self.database.clone(),
             schema: self.schema.clone(),
             auth_rules: None,
+            claims,
         }
     }
 
@@ -277,6 +297,9 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         let mut session = Session::with_dialect(self.store, Dialect::PostgreSql);
         session.identify(&self.user, &self.database);
         session.set_protocol("rest");
+        if let Some(claims) = &self.claims {
+            session.execute(&format!("SELECT set_config('request.jwt.claims', {}, false)", literal(claims)), &mut |_| {})?;
+        }
         let mut results = Vec::new();
         session.execute(sql, &mut |result| results.push(result))?;
         Ok(results)
@@ -292,7 +315,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
     pub fn reply(&self, request: &Request) -> Reply<'static> {
         match self.caller(request) {
             Caller::Server => self.serve(request),
-            Caller::Role(role) => self.acting_as(role).serve(request),
+            Caller::Role(role, claims) => self.acting_as(role, claims).serve(request),
             Caller::Refused(why) => {
                 let mut response = failure(401, "PGRST301", &why);
                 response.headers.push((

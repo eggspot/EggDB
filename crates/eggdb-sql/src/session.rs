@@ -2716,6 +2716,7 @@ impl<'s> Session<'s> {
             "eggdb_sheets" => ("eggdb_sheets", crate::sheets::SHEETS_SCRIPT),
             "eggdb_streams" => ("eggdb_streams", crate::streams::STREAMS_SCRIPT),
             "eggdb_etl" => ("eggdb_etl", crate::etl::ETL_SCRIPT),
+            "eggdb_app_auth" => ("eggdb_app_auth", crate::app_auth::APP_AUTH_SCRIPT),
             _ => ("eggdb_cdc", crate::cdc::CDC_SCRIPT),
         };
         let mut installed = false;

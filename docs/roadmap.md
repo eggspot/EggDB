@@ -687,7 +687,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - gRPC and OData APIs generated from the schema, OData for Excel, Power BI and SAP (D37).
 - Realtime subscriptions over WebSocket and Server-Sent Events on live queries (D37).
 - End-user sign-in for apps: sign-up, password, magic link, social login and OpenID Connect, with
-  JWT sessions mapped onto row-level security (D37).
+  JWT sessions mapped onto row-level security (D37). **Code written, unbuilt** (code-only mode, 2026-11-12, D771), in
+  `eggdb_app_auth`; the OAuth redirect flow and fetching providers' key sets are left.
 - WebAuthn and passkeys for app sign-in (D54).
 - Files in object storage transformed on request (resize, crop, convert) through WebAssembly
   extensions and our own image codecs (D37).

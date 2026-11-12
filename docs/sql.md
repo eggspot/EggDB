@@ -4048,6 +4048,39 @@ SELECT cron.schedule('* * * * *', 'SELECT eggdb_streams.advance(''clicks'')');
   BY at) AS previous FROM ticks', 'symbol', 'at', 'strt down+ up+', '{"down": "price < previous", "up": "price >
   previous"}')`. `row_pattern_matches(rows, pattern)` is the matcher on its own.
 
+## Sign-in for applications (eggdb_app_auth)
+
+`CREATE EXTENSION eggdb_app_auth` signs in an application's end users and issues JWT sessions (D771):
+
+```sql
+CREATE EXTENSION eggdb_app_auth;
+SELECT eggdb_app_auth.setup('app_user');
+SELECT eggdb_app_auth.sign_up('ada@example.com', 'correct horse');
+SELECT eggdb_app_auth.sign_in('ada@example.com', 'correct horse');
+SELECT eggdb_app_auth.request_magic_link('bo@example.com');
+SELECT eggdb_app_auth.sign_in_with_magic_link('<the link''s secret>');
+INSERT INTO eggdb_app_auth.providers (provider, issuer, audience, jwks)
+    VALUES ('google', 'https://accounts.google.com', '<client id>', '<the provider''s JWKS>');
+SELECT eggdb_app_auth.sign_in_with_id_token('google', '<ID token>');
+CREATE POLICY own_notes ON notes USING (owner_id = eggdb_app_auth.current_user_id());
+```
+
+- `setup([app_role])` creates the login role every session acts as (`app_user`), a P-256 signing key, and returns the
+  key set to give the REST API's `--auth-rules` a `jwt` rule for that role; `rotate_signing_key()` replaces the key,
+  and `jwks()` lists the current and recently retired public keys.
+- `sign_up(email, password)` stores the password as PBKDF2-SHA256 (600,000 rounds, `eggdb_password_hash`).
+  `sign_in(email, password)` returns a session token, or NULL for a wrong password or after 5 failures in 15
+  minutes. `request_magic_link(email)` returns a one-time secret for the application to send (it keeps only its
+  hash, for 15 minutes); `sign_in_with_magic_link(secret)` signs in, creating the user on first use.
+  `sign_in_with_id_token(provider, id_token)` checks an OpenID Connect ID token against the provider's issuer,
+  audience and key set, and signs in the user linked to its subject. `sign_out(session_id)` ends a session.
+- A session token is an ES256 JWT (`eggdb_jwt_sign`) whose `sub` is the application role and which carries
+  `user_id`, `email` and the session id `sid`. The REST API runs each request with a bearer token as that role and
+  sets `request.jwt.claims` to the token's claims, so `eggdb_app_auth.current_user_id()` returns the signed-in user
+  (NULL when the session was signed out or expired) for row-level security policies.
+- `eggdb_password_hash(text)`, `eggdb_password_verify(text, text)`, `eggdb_jwt_sign(claims, key)`,
+  `eggdb_jwt_public_jwk(key)` and `eggdb_jwt_verify(token, jwks, issuer, audience)` are available on their own.
+
 ## Resumable copies with verified differences (eggdb_migration)
 
 `CREATE EXTENSION eggdb_migration` moves a large table in batches that survive interruptions,

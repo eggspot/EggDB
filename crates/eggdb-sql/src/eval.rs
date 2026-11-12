@@ -1637,6 +1637,9 @@ impl Evaluator<'_> {
         if let Some(result) = crate::privacy::function(name, &values) {
             return result;
         }
+        if let Some(result) = crate::app_tokens::function(name, &values) {
+            return result;
+        }
         match (name, values.as_slice()) {
             ("coalesce", [_, ..]) => {
                 let found = values.iter().find(|value| !value.is_null());

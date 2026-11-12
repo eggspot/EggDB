@@ -795,3 +795,4 @@ its full title with its status.
 - [D768](decisions/D768.md) Code-only batch 416 (M16): row pattern matching for complex event processing, `row_pattern_matches` and `eggdb_streams.match_recognize`
 - [D769](decisions/D769.md) Code-only batch 417 (M16): scheduled copies (`eggdb_etl`), and SQL Server and CSV sources in `eggdb_foreign`
 - [D770](decisions/D770.md) Code-only batch 418 (M18): `eggdb_foreign` credentials per source, permission per role, and row and time limits per call
+- [D771](decisions/D771.md) Code-only batch 419 (M6a): end-user sign-in for applications with JWT sessions on row-level security, `eggdb_app_auth`
