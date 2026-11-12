@@ -307,6 +307,65 @@ pub(crate) fn single_record_batch(value: &[u8]) -> Vec<u8> {
     out
 }
 
+const CONTROL_ATTRIBUTES: i16 = 0x20 | 0x10;
+const ABORT_MARKER: i16 = 0;
+const COMMIT_MARKER: i16 = 1;
+
+/// A control batch holding one commit or abort marker of `producer_id`'s transaction.
+fn control_batch(producer_id: i64, epoch: i16, commit: bool) -> Vec<u8> {
+    let mut key = 0i16.to_be_bytes().to_vec();
+    key.extend_from_slice(&(if commit { COMMIT_MARKER } else { ABORT_MARKER }).to_be_bytes());
+    let mut value = 0i16.to_be_bytes().to_vec();
+    value.extend_from_slice(&0i32.to_be_bytes());
+    let mut record = vec![0u8];
+    put_varint(&mut record, 0);
+    put_varint(&mut record, 0);
+    put_varint(&mut record, key.len() as i64);
+    record.extend_from_slice(&key);
+    put_varint(&mut record, value.len() as i64);
+    record.extend_from_slice(&value);
+    put_varint(&mut record, 0);
+    let mut records = Vec::with_capacity(record.len() + 5);
+    put_varint(&mut records, record.len() as i64);
+    records.extend(record);
+    let now = now_ms();
+    let mut tail = Vec::with_capacity(records.len() + 40);
+    tail.extend_from_slice(&CONTROL_ATTRIBUTES.to_be_bytes());
+    tail.extend_from_slice(&0i32.to_be_bytes());
+    tail.extend_from_slice(&now.to_be_bytes());
+    tail.extend_from_slice(&now.to_be_bytes());
+    tail.extend_from_slice(&producer_id.to_be_bytes());
+    tail.extend_from_slice(&epoch.to_be_bytes());
+    tail.extend_from_slice(&(-1i32).to_be_bytes());
+    tail.extend_from_slice(&1i32.to_be_bytes());
+    tail.extend(records);
+    let mut out = Vec::with_capacity(tail.len() + 21);
+    out.extend_from_slice(&0i64.to_be_bytes());
+    out.extend_from_slice(&((4 + 1 + 4 + tail.len()) as i32).to_be_bytes());
+    out.extend_from_slice(&0i32.to_be_bytes());
+    out.push(2);
+    out.extend_from_slice(&crc32c(&tail).to_be_bytes());
+    out.extend(tail);
+    out
+}
+
+/// Writes a transaction's commit or abort marker to a partition, inside the caller's write;
+/// returns the marker's offset.
+pub(crate) fn append_marker(
+    keys: &mut dyn KeysWrite,
+    topic: &str,
+    partition: i32,
+    producer_id: i64,
+    epoch: i16,
+    commit: bool,
+) -> Result<i64, String> {
+    let offset = next_offset(&*keys, topic, partition)?;
+    let mut batch = control_batch(producer_id, epoch, commit);
+    batch[..8].copy_from_slice(&offset.to_be_bytes());
+    keys.put(&batch_key(topic, partition, offset), &batch)?;
+    Ok(offset)
+}
+
 /// Appends the record batches in `records` to a partition, assigning offsets; returns the base
 /// offset of the first, or a Kafka error code.
 pub(crate) fn append(
@@ -349,8 +408,14 @@ pub(crate) fn append(
         let mut first = None;
         let mut producers = PartitionProducers::read(&*keys, topic, partition)?;
         let mut accepted = Vec::with_capacity(batches.len());
+        let mut transactional_starts = Vec::new();
         for batch in batches {
             let producer = BatchProducer::of(&batch);
+            if let Some(producer) = producer.filter(|producer| producer.transactional)
+                && !crate::transactions::partition_open(&*keys, topic, partition, producer.id)?
+            {
+                return Ok(Err(producers::INVALID_TXN_STATE));
+            }
             if let Some(producer) = &producer {
                 match producers.check(&*keys, producer)? {
                     Ok(Accepted::Append) => {}
@@ -364,6 +429,9 @@ pub(crate) fn append(
             let last_delta = i32::from_be_bytes(batch[23..27].try_into().unwrap_or_default());
             if let Some(producer) = &producer {
                 producers.accept(producer, next);
+                if producer.transactional {
+                    transactional_starts.push((producer.id, next));
+                }
             }
             first.get_or_insert(next);
             accepted.push((next, batch));
@@ -374,6 +442,9 @@ pub(crate) fn append(
             keys.put(&batch_key(topic, partition, base), &batch)?;
         }
         producers.store(keys)?;
+        for (producer_id, offset) in transactional_starts {
+            crate::transactions::note_first_offset(keys, topic, partition, producer_id, offset)?;
+        }
         enforce_retention(keys, topic, partition, retention)?;
         let every = crate::compaction::COMPACT_EVERY;
         if retention.compact && started / every != next / every {
@@ -398,21 +469,37 @@ pub(crate) fn offsets(
     })
 }
 
-/// The stored batches holding offsets from `from`, up to about `max_bytes`; and the next
-/// offset (the high watermark).
+/// What a fetch of one partition returns: its batches, the high watermark, the last stable
+/// offset, and, for `read_committed`, the aborted transactions among the batches.
+pub(crate) struct Fetched {
+    pub(crate) records: Vec<u8>,
+    pub(crate) high: i64,
+    pub(crate) last_stable: i64,
+    pub(crate) aborted: Option<Vec<(i64, i64)>>,
+}
+
+/// The stored batches holding offsets from `from`, up to about `max_bytes`; with
+/// `read_committed`, only those below the last stable offset, with the aborted transactions
+/// among them.
 pub(crate) fn fetch(
     keyspace: &dyn Keyspace,
     topic: &str,
     partition: i32,
     from: i64,
     max_bytes: usize,
-) -> Result<(Vec<u8>, i64), String> {
+    read_committed: bool,
+) -> Result<Fetched, String> {
     read(keyspace, |keys| {
         let high = next_offset(keys, topic, partition)?;
+        let last_stable = crate::transactions::last_stable_offset(keys, topic, partition, high)?;
+        let below = if read_committed { last_stable } else { high };
         let mut out = Vec::new();
         for (key, batch) in keys.scan(&partition_prefix(topic, partition))? {
             let base =
                 u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap_or_default()) as i64;
+            if base >= below {
+                break;
+            }
             let last_delta = i64::from(i32::from_be_bytes(
                 batch
                     .get(23..27)
@@ -427,6 +514,16 @@ pub(crate) fn fetch(
             }
             out.extend_from_slice(&batch);
         }
-        Ok((out, high))
+        let aborted = if read_committed {
+            Some(crate::transactions::aborted_between(keys, topic, partition, from, below)?)
+        } else {
+            None
+        };
+        Ok(Fetched {
+            records: out,
+            high,
+            last_stable,
+            aborted,
+        })
     })
 }

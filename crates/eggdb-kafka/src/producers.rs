@@ -99,9 +99,6 @@ pub(crate) fn check(
     producer: &BatchProducer,
     allocated: i64,
 ) -> Result<Accepted, i16> {
-    if producer.transactional {
-        return Err(INVALID_TXN_STATE);
-    }
     if producer.id < 0 || producer.id >= allocated || producer.epoch < 0 || producer.base_sequence < 0 {
         return Err(UNKNOWN_PRODUCER_ID);
     }
@@ -253,9 +250,6 @@ mod tests {
         let bumped = accepted_state(&producer(2, 0, 1), 50);
         assert_eq!(check(Some(bumped), &producer(1, 1, 1), 1), Err(INVALID_PRODUCER_EPOCH));
         assert_eq!(check(None, &producer(0, 0, 1), 0), Err(UNKNOWN_PRODUCER_ID));
-        let mut transactional = producer(0, 0, 1);
-        transactional.transactional = true;
-        assert_eq!(check(None, &transactional, 1), Err(INVALID_TXN_STATE));
     }
 
     #[test]

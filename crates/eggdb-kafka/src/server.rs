@@ -41,11 +41,18 @@ const DESCRIBE_GROUPS: i16 = 15;
 const LIST_GROUPS: i16 = 16;
 const DELETE_GROUPS: i16 = 42;
 const INIT_PRODUCER_ID: i16 = 22;
-const INVALID_REQUEST: i16 = 42;
+const ADD_PARTITIONS_TO_TXN: i16 = 24;
+const ADD_OFFSETS_TO_TXN: i16 = 25;
+const END_TXN: i16 = 26;
+const TXN_OFFSET_COMMIT: i16 = 28;
 const UNKNOWN_SERVER_ERROR: i16 = -1;
 
-const SUPPORTED: [(i16, i16, i16); 20] = [
+const SUPPORTED: [(i16, i16, i16); 24] = [
     (INIT_PRODUCER_ID, 0, 1),
+    (ADD_PARTITIONS_TO_TXN, 0, 1),
+    (ADD_OFFSETS_TO_TXN, 0, 1),
+    (END_TXN, 0, 1),
+    (TXN_OFFSET_COMMIT, 0, 2),
     (DESCRIBE_GROUPS, 0, 1),
     (LIST_GROUPS, 0, 2),
     (DELETE_GROUPS, 0, 1),
@@ -415,8 +422,11 @@ fn init_producer_id(keyspace: &dyn Keyspace, request: &mut Reader<'_>, body: &mu
     let transactional_id = request.string()?;
     let _transaction_timeout = request.i32()?;
     body.i32(0);
-    if transactional_id.is_some() {
-        body.i16(INVALID_REQUEST).i64(-1).i16(-1);
+    if let Some(transactional_id) = transactional_id {
+        match crate::transactions::init(keyspace, &transactional_id) {
+            Ok((id, epoch)) => body.i16(error::NONE).i64(id).i16(epoch),
+            Err(_) => body.i16(UNKNOWN_SERVER_ERROR).i64(-1).i16(-1),
+        };
         return Ok(());
     }
     match log::init_producer(keyspace) {
@@ -433,7 +443,7 @@ fn fetch(keyspace: &dyn Keyspace, request: &mut Reader<'_>, body: &mut Writer) -
     let max_bytes = usize::try_from(request.i32()?)
         .unwrap_or(0)
         .clamp(1, MAX_FETCH_BYTES);
-    let _isolation = request.i8()?;
+    let read_committed = request.i8()? == 1;
     let topics = request.array(|reader| {
         let name = reader.string()?.unwrap_or_default();
         let partitions =
@@ -468,18 +478,25 @@ fn fetch(keyspace: &dyn Keyspace, request: &mut Reader<'_>, body: &mut Writer) -
                 .unwrap_or(0)
                 .clamp(1, max_bytes)
                 .min(bytes_left);
-            let (records, high) = if limit == 0 {
-                (Vec::new(), high)
-            } else {
-                log::fetch(keyspace, &name, partition, offset, limit)?
-            };
+            let fetched = log::fetch(keyspace, &name, partition, offset, limit.max(1), read_committed)?;
+            let records = if limit == 0 { Vec::new() } else { fetched.records };
             bytes_left = bytes_left.saturating_sub(records.len());
             body.i32(partition)
                 .i16(error::NONE)
-                .i64(high)
-                .i64(high)
-                .i32(-1)
-                .bytes(&records);
+                .i64(fetched.high)
+                .i64(fetched.last_stable);
+            match fetched.aborted {
+                Some(aborted) => {
+                    body.count(aborted.len());
+                    for (producer_id, first_offset) in aborted {
+                        body.i64(producer_id).i64(first_offset);
+                    }
+                }
+                None => {
+                    body.i32(-1);
+                }
+            }
+            body.bytes(&records);
         }
     }
     Ok(())
@@ -580,6 +597,12 @@ pub(crate) fn answer_for(
             HEARTBEAT => coordinator.heartbeat(version, &mut request, &mut body).map(|()| true),
             LEAVE_GROUP => coordinator.leave_group(version, &mut request, &mut body).map(|()| true),
             INIT_PRODUCER_ID => init_producer_id(keyspace, &mut request, &mut body).map(|()| true),
+            ADD_PARTITIONS_TO_TXN => crate::transactions::add_partitions(keyspace, &mut request, &mut body).map(|()| true),
+            ADD_OFFSETS_TO_TXN => crate::transactions::add_offsets(keyspace, &mut request, &mut body).map(|()| true),
+            END_TXN => crate::transactions::end(keyspace, &mut request, &mut body).map(|()| true),
+            TXN_OFFSET_COMMIT => {
+                crate::transactions::offset_commit(keyspace, version, &mut request, &mut body).map(|()| true)
+            }
             DESCRIBE_GROUPS => coordinator
                 .describe_groups(version, &mut request, &mut body)
                 .map(|()| true),

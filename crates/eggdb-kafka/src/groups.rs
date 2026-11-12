@@ -179,7 +179,7 @@ fn group_state(group: &Group) -> &'static str {
     }
 }
 
-fn offset_key(group: &str, topic: &str, partition: i32) -> Vec<u8> {
+pub(crate) fn offset_key(group: &str, topic: &str, partition: i32) -> Vec<u8> {
     let mut key = vec![OFFSET];
     key.extend_from_slice(group.as_bytes());
     key.push(0);

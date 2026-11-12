@@ -11,6 +11,7 @@ mod groups;
 mod log;
 mod producers;
 mod server;
+mod transactions;
 mod wire;
 
 pub use server::{ServerConfig, serve};
