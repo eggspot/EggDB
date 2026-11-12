@@ -909,3 +909,4 @@ its full title with its status.
 - [D882](decisions/D882.md) Code-only batch 530 (M12): pgRouting TSP and graph analysis
 - [D883](decisions/D883.md) Code-only batch 531 (M12): linear referencing, line intersections and pgr_nodeNetwork
 - [D884](decisions/D884.md) Code-only batch 532 (M13): GQL quantified groups of several relationships
+- [D885](decisions/D885.md) Code-only batch 533 (M13): range conditions read graph property indexes

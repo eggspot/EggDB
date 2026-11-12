@@ -313,8 +313,10 @@ fn conjuncts(expr: &Expr) -> Vec<&Expr> {
 }
 
 /// The pattern with the `WHERE` filter's `start.property = value` conditions copied into its
-/// start node's properties, where `value` reads only what the row already binds, so the start
-/// nodes come from an index; `None` when there are none. The filter still runs afterwards.
+/// start node's properties, and its `start.property < value` (`<=`, `>`, `>=`, `STARTS WITH`)
+/// conditions into its bounds, where `value` reads only what the row already binds, so the
+/// start nodes come from an index; `None` when there are none. The filter still runs
+/// afterwards.
 fn with_equalities(pattern: &Pattern, filter: Option<&Expr>, row: &Row) -> Option<Pattern> {
     let filter = filter?;
     let variable = pattern.start.variable.as_deref()?;
@@ -322,27 +324,54 @@ fn with_equalities(pattern: &Pattern, filter: Option<&Expr>, row: &Row) -> Optio
         return None;
     }
     let bound = |name: &str| lookup(row, name).is_some();
+    let of_start = |side: &Expr| match side {
+        Expr::Property(target, property) if matches!(target.as_ref(), Expr::Variable(name) if name == variable) => {
+            Some(property.clone())
+        }
+        _ => None,
+    };
     let mut added: Vec<(String, Expr)> = Vec::new();
+    let mut bounds: Vec<(String, Operator, Expr)> = Vec::new();
     for condition in conjuncts(filter) {
-        let Expr::Binary(Operator::Equal, left, right) = condition else {
+        let Expr::Binary(operator, left, right) = condition else {
             continue;
         };
-        for (side, other) in [(left, right), (right, left)] {
-            if let Expr::Property(target, property) = side.as_ref()
-                && matches!(target.as_ref(), Expr::Variable(name) if name == variable)
-                && reads_only(other, &bound)
-                && !pattern.start.properties.iter().chain(&added).any(|(known, _)| known == property)
-            {
-                added.push((property.clone(), other.as_ref().clone()));
-                break;
+        if *operator == Operator::Equal {
+            for (side, other) in [(left, right), (right, left)] {
+                if let Some(property) = of_start(side)
+                    && reads_only(other, &bound)
+                    && !pattern.start.properties.iter().chain(&added).any(|(known, _)| *known == property)
+                {
+                    added.push((property, other.as_ref().clone()));
+                    break;
+                }
             }
+            continue;
+        }
+        let flipped = match operator {
+            Operator::Less => Some(Operator::Greater),
+            Operator::LessOrEqual => Some(Operator::GreaterOrEqual),
+            Operator::Greater => Some(Operator::Less),
+            Operator::GreaterOrEqual => Some(Operator::LessOrEqual),
+            _ => None,
+        };
+        if let Some(property) = of_start(left)
+            && reads_only(right, &bound)
+            && (flipped.is_some() || *operator == Operator::StartsWith)
+        {
+            bounds.push((property, *operator, right.as_ref().clone()));
+        } else if let (Some(flipped), Some(property)) = (flipped, of_start(right))
+            && reads_only(left, &bound)
+        {
+            bounds.push((property, flipped, left.as_ref().clone()));
         }
     }
-    if added.is_empty() {
+    if added.is_empty() && bounds.is_empty() {
         return None;
     }
     let mut looked_up = pattern.clone();
     looked_up.start.properties.extend(added);
+    looked_up.start.bounds.extend(bounds);
     Some(looked_up)
 }
 
@@ -1325,6 +1354,28 @@ impl<'g> Executor<'g, '_> {
                 && let Some(found) = read.nodes_by_index(&rule, &values.iter().collect::<Vec<_>>())?
             {
                 return Ok(Some(found));
+            }
+        }
+        if !pattern.bounds.is_empty() {
+            for rule in read.schema_rules()? {
+                let [property] = rule.properties.as_slice() else {
+                    continue;
+                };
+                if !rule.indexes() || !labels.contains(&rule.label) {
+                    continue;
+                }
+                let mut range = crate::store::IndexRange::default();
+                for (name, operator, expr) in &pattern.bounds {
+                    if name == property {
+                        range.narrow(*operator, self.evaluate(expr, row)?);
+                    }
+                }
+                if range.is_open() {
+                    continue;
+                }
+                if let Some(found) = read.nodes_in_range(&rule, &range)? {
+                    return Ok(Some(found));
+                }
             }
         }
         read.nodes_with_label(first)

@@ -69,6 +69,120 @@ fn index_bytes(value: &Value) -> Option<Vec<u8>> {
     Some(out)
 }
 
+fn value_of_index_bytes(bytes: &[u8]) -> Option<Value> {
+    let (tag, rest) = bytes.split_first()?;
+    Some(match tag {
+        b'i' => Value::Integer(i64::from_be_bytes(rest.try_into().ok()?)),
+        b'f' => Value::Float(f64::from_bits(u64::from_be_bytes(rest.try_into().ok()?))),
+        b's' => Value::String(String::from_utf8(rest.to_vec()).ok()?),
+        b'b' => Value::Boolean(rest.first().copied()? != 0),
+        _ => return None,
+    })
+}
+
+/// The bounds `WHERE` puts on one indexed property: a lowest and a highest value, each
+/// inclusive or not, and a text prefix.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct IndexRange {
+    lower: Option<(Value, bool)>,
+    upper: Option<(Value, bool)>,
+    prefix: Option<String>,
+    impossible: bool,
+    unusable: bool,
+}
+
+fn compare_indexed(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+    let number = |value: &Value| match value {
+        Value::Integer(number) => Some(*number as f64),
+        Value::Float(number) => Some(*number),
+        _ => None,
+    };
+    match (left, right) {
+        (Value::Integer(left), Value::Integer(right)) => Some(left.cmp(right)),
+        (Value::String(left), Value::String(right)) => Some(left.cmp(right)),
+        (Value::Boolean(left), Value::Boolean(right)) => Some(left.cmp(right)),
+        _ => number(left)?.partial_cmp(&number(right)?),
+    }
+}
+
+impl IndexRange {
+    /// Narrows the range by `property <operator> value`. A `NULL` bound matches nothing, as
+    /// the comparison does; a bound the index cannot hold (a list, a temporal value) makes the
+    /// range unusable, so the label is scanned instead.
+    pub(crate) fn narrow(&mut self, operator: crate::cypher::Operator, value: Value) {
+        use crate::cypher::Operator;
+        if value == Value::Null {
+            self.impossible = true;
+            return;
+        }
+        if index_bytes(&value).is_none() {
+            self.unusable = true;
+            return;
+        }
+        match operator {
+            Operator::Greater | Operator::GreaterOrEqual => {
+                let inclusive = operator == Operator::GreaterOrEqual;
+                let tighter = match &self.lower {
+                    None => true,
+                    Some((known, _)) => compare_indexed(&value, known) == Some(std::cmp::Ordering::Greater),
+                };
+                if tighter {
+                    self.lower = Some((value, inclusive));
+                }
+            }
+            Operator::Less | Operator::LessOrEqual => {
+                let inclusive = operator == Operator::LessOrEqual;
+                let tighter = match &self.upper {
+                    None => true,
+                    Some((known, _)) => compare_indexed(&value, known) == Some(std::cmp::Ordering::Less),
+                };
+                if tighter {
+                    self.upper = Some((value, inclusive));
+                }
+            }
+            Operator::StartsWith => match value {
+                Value::String(prefix) => {
+                    if self.prefix.as_ref().is_none_or(|known| prefix.len() > known.len()) {
+                        self.prefix = Some(prefix);
+                    }
+                }
+                _ => self.impossible = true,
+            },
+            _ => {}
+        }
+    }
+
+    /// Whether the index cannot serve the range, or the range bounds nothing, so a label scan
+    /// is as good.
+    pub(crate) fn is_open(&self) -> bool {
+        self.unusable || (!self.impossible && self.lower.is_none() && self.upper.is_none() && self.prefix.is_none())
+    }
+
+    fn holds(&self, value: &Value) -> bool {
+        if self.impossible {
+            return false;
+        }
+        if let Some((lower, inclusive)) = &self.lower {
+            match compare_indexed(value, lower) {
+                Some(std::cmp::Ordering::Greater) => {}
+                Some(std::cmp::Ordering::Equal) if *inclusive => {}
+                _ => return false,
+            }
+        }
+        if let Some((upper, inclusive)) = &self.upper {
+            match compare_indexed(value, upper) {
+                Some(std::cmp::Ordering::Less) => {}
+                Some(std::cmp::Ordering::Equal) if *inclusive => {}
+                _ => return false,
+            }
+        }
+        match &self.prefix {
+            Some(prefix) => matches!(value, Value::String(text) if text.starts_with(prefix.as_str())),
+            None => true,
+        }
+    }
+}
+
 fn index_prefix(rule: &str, values: &[&Value]) -> Option<Vec<u8>> {
     let mut key = vec![PROPERTY_INDEX];
     key.extend_from_slice(rule.as_bytes());
@@ -346,6 +460,35 @@ impl GraphRead<'_> {
             return Ok(None);
         };
         ids_under(self.keys, &prefix).map(Some)
+    }
+
+    /// The nodes whose one property under `rule` lies in `range`, read from the rule's index
+    /// entries without reading the nodes, or `None` when the index is not built.
+    pub(crate) fn nodes_in_range(&self, rule: &SchemaRule, range: &IndexRange) -> GraphResult<Option<Vec<u64>>> {
+        if !rule.indexes() || rule.properties.len() != 1 || !self.indexed()? || self.keys.get(&rule_key(&rule.name)).map_err(storage)?.is_none() {
+            return Ok(None);
+        }
+        let prefix = rule_prefix(&rule.name);
+        let mut found = Vec::new();
+        for (key, _) in self.keys.scan(&prefix).map_err(storage)? {
+            let Some(rest) = key.get(prefix.len()..) else {
+                continue;
+            };
+            let Some(length) = rest.get(..4).and_then(|bytes| bytes.try_into().ok()).map(u32::from_be_bytes) else {
+                continue;
+            };
+            let length = length as usize;
+            let (Some(bytes), Some(id)) = (rest.get(4..4 + length), rest.get(4 + length..)) else {
+                continue;
+            };
+            let (Some(value), Ok(id)) = (value_of_index_bytes(bytes), <[u8; 8]>::try_from(id)) else {
+                continue;
+            };
+            if range.holds(&value) {
+                found.push(u64::from_be_bytes(id));
+            }
+        }
+        Ok(Some(found))
     }
 
     pub(crate) fn node_ids(&self) -> GraphResult<Vec<u64>> {

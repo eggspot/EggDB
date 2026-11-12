@@ -347,6 +347,7 @@ fn empty_node() -> NodePattern {
         variable: None,
         labels: LabelExpression::AllOf(Vec::new()),
         properties: Vec::new(),
+        bounds: Vec::new(),
     }
 }
 
@@ -363,6 +364,10 @@ pub(crate) struct NodePattern {
     pub(crate) variable: Option<String>,
     pub(crate) labels: LabelExpression,
     pub(crate) properties: Vec<(String, Expr)>,
+    /// `WHERE` comparisons of a property with a value (`<`, `<=`, `>`, `>=` or `STARTS WITH`,
+    /// the property on the left) that the executor copies here to read a property index's
+    /// range; the parser leaves it empty.
+    pub(crate) bounds: Vec<(String, Operator, Expr)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -778,6 +783,7 @@ impl Parser<'_> {
             variable,
             labels,
             properties,
+            bounds: Vec::new(),
         })
     }
 

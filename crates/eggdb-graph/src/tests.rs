@@ -1485,3 +1485,23 @@ fn quantified_groups_walk_several_relationships_per_repetition() {
         ]
     );
 }
+
+#[test]
+fn range_conditions_read_property_indexes() {
+    let keyspace = MemoryKeyspace::default();
+    query(&keyspace, "CREATE INDEX person_age FOR (p:Person) ON (p.age)");
+    query(&keyspace, "CREATE INDEX person_name FOR (p:Person) ON (p.name)");
+    query(
+        &keyspace,
+        "CREATE (:Person {name: 'Ann', age: 31}), (:Person {name: 'Bob', age: 17}), (:Person {name: 'Abe', age: 45.5}), (:Person {name: 'Cid'})",
+    );
+    let adults = query(
+        &keyspace,
+        "MATCH (p:Person) WHERE p.age >= 18 AND 50 > p.age RETURN p.name AS name ORDER BY name",
+    );
+    assert_eq!(adults.rows, vec![vec![text("Abe")], vec![text("Ann")]]);
+    let named = query(&keyspace, "MATCH (p:Person) WHERE p.name STARTS WITH 'A' RETURN count(p) AS n");
+    assert_eq!(named.rows, vec![vec![Value::Integer(2)]]);
+    let none = query(&keyspace, "MATCH (p:Person) WHERE p.age > null RETURN count(p) AS n");
+    assert_eq!(none.rows, vec![vec![Value::Integer(0)]]);
+}
