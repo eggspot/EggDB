@@ -861,3 +861,4 @@ its full title with its status.
 - [D834](decisions/D834.md) Code-only batch 482 (D50): FHIR structural validation (`fhir_validate`)
 - [D835](decisions/D835.md) Code-only batch 483 (M11): nested Arrow columns as JSON
 - [D836](decisions/D836.md) Code-only batch 484 (D29): nested ORC columns as JSON
+- [D837](decisions/D837.md) Code-only batch 485 (M5): PostgreSQL MERGE

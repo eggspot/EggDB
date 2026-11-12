@@ -1238,7 +1238,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   an `OUTPUT ... INTO` target with triggers, checks or foreign keys, `SELECT ... INTO` keeping the
   source's identity (`NOT NULL` is built, D342), describing a prepared `OUTPUT ... INTO` that still returns
   rows, and PostgreSQL's `MERGE`; two `WHEN MATCHED` clauses, `$action`, `TOP` and `OUTPUT ...
-  INTO` are built (D303).
+  INTO` are built (D303). PostgreSQL's `MERGE` (`WHEN [NOT] MATCHED [BY SOURCE|TARGET] [AND ...] THEN
+  UPDATE | DELETE | INSERT | DO NOTHING`): **code written, unbuilt** (code-only mode, 2026-11-12, D837).
 - SQL Server's application locks choosing one victim when two waiters close a cycle (PR #91). **Code
   written, unbuilt** (code-only mode, 2026-11-11, D448).
 - Cursor variables, `WHERE CURRENT OF` on `FOR UPDATE` cursors (in PostgreSQL too), `sp_cursor*`

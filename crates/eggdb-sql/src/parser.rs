@@ -1012,6 +1012,7 @@ impl<'t> Parser<'t> {
             "alter" if self.at_event_trigger() => self.alter_event_trigger(),
             "create" => self.create(),
             "drop" => self.drop(),
+            "merge" if self.postgresql() => self.postgresql_merge(),
             "insert" => self.insert(),
             "select" | "with" => self.query_or_select_into(),
             "update" => self.update(),

@@ -4943,3 +4943,35 @@ fn transact_sql_grants_on_objects_and_columns_use_the_shared_privileges() {
     );
     assert!(tsql.execute("DENY SELECT ON SCHEMA::dbo TO reader", &mut |_| {}).is_err());
 }
+
+#[test]
+fn postgresql_merge_updates_deletes_inserts_and_does_nothing() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for sql in [
+        "CREATE TABLE stock (item text PRIMARY KEY, qty integer)",
+        "INSERT INTO stock VALUES ('apple', 5), ('pear', 0), ('plum', 3)",
+        "CREATE TABLE delivery (item text, qty integer)",
+        "INSERT INTO delivery VALUES ('apple', 2), ('pear', 0), ('kiwi', 4)",
+    ] {
+        last(&mut session, sql);
+    }
+    last(
+        &mut session,
+        "MERGE INTO stock s USING delivery d ON s.item = d.item \
+         WHEN MATCHED AND d.qty = 0 THEN DELETE \
+         WHEN MATCHED THEN UPDATE SET qty = s.qty + d.qty \
+         WHEN NOT MATCHED THEN INSERT (item, qty) VALUES (d.item, d.qty) \
+         WHEN NOT MATCHED BY SOURCE THEN DO NOTHING",
+    );
+    assert_eq!(
+        last(&mut session, "SELECT item, qty FROM stock ORDER BY item"),
+        "item|qty\napple|7\nkiwi|4\nplum|3\nSELECT 3"
+    );
+    for refused in [
+        "MERGE INTO stock s USING delivery d ON s.item = d.item WHEN MATCHED THEN DO NOTHING WHEN MATCHED THEN DELETE",
+        "MERGE INTO stock s USING delivery d ON s.item = d.item WHEN MATCHED THEN DELETE RETURNING *",
+    ] {
+        assert!(run(&mut session, refused).is_err(), "{refused}");
+    }
+}

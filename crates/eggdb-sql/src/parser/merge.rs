@@ -264,6 +264,86 @@ impl Parser<'_> {
         Ok(sqlserver_functions::with_output_into(statement, into))
     }
 
+    pub(super) fn postgresql_merge(&mut self) -> SqlResult<Statement> {
+        let position = self.position();
+        self.at += 1;
+        self.expect_word("into")?;
+        let name = self.table_name()?;
+        let alias = if !self.is_word("using") && (self.take_word("as") || self.at_bare_alias()) {
+            Some(self.name()?.text)
+        } else {
+            None
+        };
+        let target = TableReference::named(name, alias);
+        let (source, source_label) = self.merge_source()?;
+        self.expect_word("on")?;
+        let on = self.expression()?;
+        let mut matched: Vec<MergeUpdate> = Vec::new();
+        let mut insert = None;
+        let mut by_source: Vec<MergeUpdate> = Vec::new();
+        let mut nothing_after = [false; 3];
+        while self.take_word("when") {
+            let clause_position = self.position();
+            let when_matched = !self.take_word("not");
+            self.expect_word("matched")?;
+            let mut source_side = false;
+            if !when_matched && self.take_word("by") {
+                source_side = self.take_word("source");
+                if !source_side {
+                    self.expect_word("target")?;
+                }
+            }
+            let condition = if self.take_word("and") { Some(self.expression()?) } else { None };
+            self.expect_word("then")?;
+            let group = if source_side { 2 } else if when_matched { 0 } else { 1 };
+            if nothing_after[group] {
+                return Err(self.not_supported("a MERGE clause after a DO NOTHING clause of the same kind"));
+            }
+            if self.is_word("do") && self.is_word_at(1, "nothing") {
+                self.at += 2;
+                nothing_after[group] = true;
+                continue;
+            }
+            if group == 1 {
+                if insert.is_some() {
+                    return Err(self.not_supported("more than one WHEN NOT MATCHED ... INSERT clause"));
+                }
+                if self.is_word("insert") && self.is_word_at(1, "default") {
+                    return Err(self.not_supported("INSERT DEFAULT VALUES in MERGE"));
+                }
+                let (columns, values) = self.merge_insert_values()?;
+                insert = Some(MergeInsert { columns, values, condition });
+                continue;
+            }
+            let clause = self.sqlserver_merge_matched(condition)?;
+            let clauses = if group == 0 { &mut matched } else { &mut by_source };
+            if clauses.len() == 2 || clauses.first().is_some_and(|first| first.condition.is_none()) {
+                return Err(SqlError::not_supported(
+                    "more than two WHEN MATCHED clauses of one kind, or one after a clause without a condition, in MERGE",
+                )
+                .at(clause_position));
+            }
+            clauses.push(clause);
+        }
+        if self.is_word("returning") {
+            return Err(self.not_supported("MERGE ... RETURNING"));
+        }
+        if matched.is_empty() && insert.is_none() && by_source.is_empty() {
+            return Err(SqlError::syntax("MERGE needs at least one WHEN clause that acts", self.position()));
+        }
+        Ok(Statement::Merge(Box::new(MergeStatement {
+            target,
+            source: every_column_of(source, position),
+            source_label,
+            on,
+            matched,
+            insert,
+            by_source,
+            output: None,
+            top: None,
+        })))
+    }
+
     fn sqlserver_merge_top(&mut self) -> SqlResult<Option<Expr>> {
         if !self.take_word("top") {
             return Ok(None);
