@@ -24,6 +24,8 @@ impl std::error::Error for WasmError {}
 const MAX_ITEMS: u32 = 100_000;
 pub(crate) const I32: u8 = 0x7f;
 pub(crate) const I64: u8 = 0x7e;
+pub(crate) const F32: u8 = 0x7d;
+pub(crate) const F64: u8 = 0x7c;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FuncType {
@@ -54,7 +56,12 @@ pub struct Module {
     pub(crate) globals: Vec<Global>,
     pub(crate) exports: Vec<(String, u32)>,
     pub(crate) data: Vec<(u32, Vec<u8>)>,
+    pub(crate) table: Option<(u32, Option<u32>)>,
+    pub(crate) elements: Vec<(u32, Vec<u32>)>,
+    pub(crate) start: Option<u32>,
 }
+
+const MOST_TABLE_ELEMENTS: u32 = 1_000_000;
 
 pub(crate) struct Reader<'b> {
     pub(crate) bytes: &'b [u8],
@@ -145,7 +152,8 @@ impl<'b> Reader<'b> {
         match self.byte()? {
             I32 => Ok(I32),
             I64 => Ok(I64),
-            0x7d | 0x7c => Err(WasmError::Unsupported("floating point")),
+            F32 => Ok(F32),
+            F64 => Ok(F64),
             _ => Err(WasmError::Malformed("an unknown value type")),
         }
     }
@@ -154,6 +162,16 @@ impl<'b> Reader<'b> {
         let value = match (self.byte()?, value_type) {
             (0x41, I32) => u64::from(self.signed(32)? as i32 as u32),
             (0x42, I64) => self.signed(64)? as u64,
+            (0x43, F32) => {
+                let mut word = [0u8; 4];
+                word.copy_from_slice(self.take(4)?);
+                u64::from(u32::from_le_bytes(word))
+            }
+            (0x44, F64) => {
+                let mut word = [0u8; 8];
+                word.copy_from_slice(self.take(8)?);
+                u64::from_le_bytes(word)
+            }
             _ => {
                 return Err(WasmError::Unsupported(
                     "an initializer other than a constant",
@@ -181,6 +199,9 @@ impl Module {
             globals: Vec::new(),
             exports: Vec::new(),
             data: Vec::new(),
+            table: None,
+            elements: Vec::new(),
+            start: None,
         };
         let mut type_indices = Vec::new();
         while reader.at < bytes.len() {
@@ -221,7 +242,40 @@ impl Module {
                         type_indices.push(section.u32()?);
                     }
                 }
-                4 | 9 => return Err(WasmError::Unsupported("tables")),
+                4 => {
+                    let count = section.count()?;
+                    if count > 1 {
+                        return Err(WasmError::Unsupported("more than one table"));
+                    }
+                    if count == 1 {
+                        if section.byte()? != 0x70 {
+                            return Err(WasmError::Unsupported("a table of other than functions"));
+                        }
+                        let flags = section.byte()?;
+                        let minimum = section.u32()?;
+                        let maximum = match flags {
+                            0 => None,
+                            1 => Some(section.u32()?),
+                            _ => return Err(WasmError::Malformed("a table's limits")),
+                        };
+                        if minimum > MOST_TABLE_ELEMENTS {
+                            return Err(WasmError::Unsupported("a table of more than 1,000,000 elements"));
+                        }
+                        module.table = Some((minimum, maximum));
+                    }
+                }
+                9 => {
+                    for _ in 0..section.count()? {
+                        if section.u32()? != 0 {
+                            return Err(WasmError::Unsupported("passive or declared element segments"));
+                        }
+                        let offset = section.constant(I32)? as u32;
+                        let functions = (0..section.count()?)
+                            .map(|_| section.u32())
+                            .collect::<Result<Vec<_>, _>>()?;
+                        module.elements.push((offset, functions));
+                    }
+                }
                 5 => {
                     let count = section.count()?;
                     if count > 1 {
@@ -268,7 +322,7 @@ impl Module {
                         }
                     }
                 }
-                8 => return Err(WasmError::Unsupported("a start function")),
+                8 => module.start = Some(section.u32()?),
                 10 => {
                     let count = section.count()?;
                     if count as usize != type_indices.len() {
@@ -325,6 +379,31 @@ impl Module {
                     "a function names a type that does not exist",
                 ));
             }
+        }
+        for (_, functions) in &module.elements {
+            if functions
+                .iter()
+                .any(|index| *index as usize >= module.functions.len())
+            {
+                return Err(WasmError::Malformed(
+                    "an element names a function that does not exist",
+                ));
+            }
+        }
+        if let Some(start) = module.start {
+            let starts_empty = module
+                .functions
+                .get(start as usize)
+                .and_then(|function| module.types.get(function.type_index as usize))
+                .is_some_and(|signature| signature.params.is_empty() && signature.results.is_empty());
+            if !starts_empty {
+                return Err(WasmError::Malformed(
+                    "the start function is missing or takes or returns values",
+                ));
+            }
+        }
+        if !module.elements.is_empty() && module.table.is_none() {
+            return Err(WasmError::Malformed("elements without a table"));
         }
         for (_, index) in &module.exports {
             if *index as usize >= module.functions.len() {

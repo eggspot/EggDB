@@ -1,4 +1,4 @@
-use crate::decode::{I32, I64, Module, Reader, WasmError};
+use crate::decode::{F32, F64, I32, I64, Module, Reader, WasmError};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -11,12 +11,16 @@ fn native_stack_position() -> usize {
 }
 
 /// A value passed to or returned by a function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Value {
     /// A 32-bit integer.
     I32(i32),
     /// A 64-bit integer.
     I64(i64),
+    /// A 32-bit IEEE 754 float.
+    F32(f32),
+    /// A 64-bit IEEE 754 float.
+    F64(f64),
 }
 
 /// What one call may use.
@@ -52,8 +56,16 @@ pub enum Trap {
     MemoryOutOfBounds,
     /// An integer division by zero.
     DivideByZero,
-    /// An integer division overflowed.
+    /// An integer division overflowed, or a float converted to an integer was out of its range.
     IntegerOverflow,
+    /// A NaN was converted to an integer.
+    InvalidConversion,
+    /// `call_indirect` named a table element past the table's end.
+    UndefinedElement,
+    /// `call_indirect` named a table element no segment filled.
+    UninitializedElement,
+    /// `call_indirect` found a function of another type than the call expects.
+    IndirectCallTypeMismatch,
     /// Calls nested deeper than the limit, or deep enough to use up their native stack budget.
     CallDepth,
     /// No function is exported under that name.
@@ -73,7 +85,15 @@ impl std::fmt::Display for Trap {
             Trap::Unreachable => f.write_str("the function reached unreachable code"),
             Trap::MemoryOutOfBounds => f.write_str("the function read or wrote outside its memory"),
             Trap::DivideByZero => f.write_str("the function divided by zero"),
-            Trap::IntegerOverflow => f.write_str("the function's integer division overflowed"),
+            Trap::IntegerOverflow => f.write_str("the function's integer arithmetic overflowed"),
+            Trap::InvalidConversion => f.write_str("the function converted NaN to an integer"),
+            Trap::UndefinedElement => f.write_str("the function called past the end of its table"),
+            Trap::UninitializedElement => {
+                f.write_str("the function called an empty element of its table")
+            }
+            Trap::IndirectCallTypeMismatch => {
+                f.write_str("the function called a table element of another type")
+            }
             Trap::CallDepth => f.write_str("the function's calls nested too deeply"),
             Trap::NoSuchExport(name) => write!(f, "the module exports no function named {name}"),
             Trap::WrongArguments => {
@@ -119,6 +139,7 @@ pub struct Instance {
     memory: Vec<u8>,
     max_pages: u32,
     globals: Vec<u64>,
+    table: Vec<Option<u32>>,
     targets: Rc<Vec<BTreeMap<usize, Targets>>>,
     entry_stack_position: usize,
 }
@@ -126,9 +147,9 @@ pub struct Instance {
 fn block_arity(reader: &mut Reader<'_>) -> Result<usize, Trap> {
     match reader.byte()? {
         0x40 => Ok(0),
-        I32 | I64 => Ok(1),
+        I32 | I64 | F32 | F64 => Ok(1),
         _ => Err(Trap::Invalid(
-            "a block type other than empty or one integer",
+            "a block type other than empty or one value",
         )),
     }
 }
@@ -140,6 +161,10 @@ fn skip_immediates(opcode: u8, reader: &mut Reader<'_>) -> Result<(), Trap> {
         }
         0x0c | 0x0d | 0x10 | 0x20..=0x24 => {
             reader.u32()?;
+        }
+        0x11 => {
+            reader.u32()?;
+            reader.byte()?;
         }
         0x0e => {
             let count = reader.u32()?;
@@ -160,6 +185,29 @@ fn skip_immediates(opcode: u8, reader: &mut Reader<'_>) -> Result<(), Trap> {
         0x42 => {
             reader.signed(64)?;
         }
+        0x43 => {
+            reader.take(4)?;
+        }
+        0x44 => {
+            reader.take(8)?;
+        }
+        0xfc => match reader.u32()? {
+            8 => {
+                reader.u32()?;
+                reader.byte()?;
+            }
+            9 => {
+                reader.u32()?;
+            }
+            10 => {
+                reader.byte()?;
+                reader.byte()?;
+            }
+            11 => {
+                reader.byte()?;
+            }
+            _ => {}
+        },
         _ => {}
     }
     Ok(())
@@ -240,14 +288,34 @@ impl Instance {
             .map(|function| find_targets(&function.code))
             .collect::<Result<Vec<_>, _>>()?;
         let globals = module.globals.iter().map(|global| global.init).collect();
-        Ok(Self {
+        let mut table = vec![None; module.table.map_or(0, |(minimum, _)| minimum as usize)];
+        for (offset, functions) in &module.elements {
+            let start = *offset as usize;
+            let end = start
+                .checked_add(functions.len())
+                .filter(|end| *end <= table.len())
+                .ok_or(Trap::UndefinedElement)?;
+            for (slot, function) in table[start..end].iter_mut().zip(functions) {
+                *slot = Some(*function);
+            }
+        }
+        let start = module.start;
+        let mut instance = Self {
             module: Rc::new(module),
             memory,
             max_pages,
             globals,
+            table,
             targets: Rc::new(targets),
             entry_stack_position: 0,
-        })
+        };
+        if let Some(start) = start {
+            let mut stack = Vec::new();
+            let mut fuel = limits.fuel;
+            instance.entry_stack_position = native_stack_position();
+            instance.invoke(start, &mut stack, &mut fuel, 0, limits)?;
+        }
+        Ok(instance)
     }
 
     /// Calls the exported function `name` with `arguments`, within `limits`.
@@ -274,6 +342,8 @@ impl Instance {
             match (*parameter, argument) {
                 (I32, Value::I32(value)) => stack.push(from_i32(*value)),
                 (I64, Value::I64(value)) => stack.push(*value as u64),
+                (F32, Value::F32(value)) => stack.push(u64::from(value.to_bits())),
+                (F64, Value::F64(value)) => stack.push(value.to_bits()),
                 _ => return Err(Trap::WrongArguments),
             }
         }
@@ -281,15 +351,16 @@ impl Instance {
         let mut fuel = limits.fuel;
         self.entry_stack_position = native_stack_position();
         self.invoke(index, &mut stack, &mut fuel, 0, limits)?;
-        Ok(match result_type {
-            Some(I32) => Some(Value::I32(as_i32(
-                stack.pop().ok_or(Trap::Invalid("no result"))?,
-            ))),
-            Some(_) => Some(Value::I64(
-                stack.pop().ok_or(Trap::Invalid("no result"))? as i64
-            )),
-            None => None,
-        })
+        let Some(result_type) = result_type else {
+            return Ok(None);
+        };
+        let bits = stack.pop().ok_or(Trap::Invalid("no result"))?;
+        Ok(Some(match result_type {
+            I32 => Value::I32(as_i32(bits)),
+            I64 => Value::I64(bits as i64),
+            F32 => Value::F32(f32::from_bits(bits as u32)),
+            _ => Value::F64(f64::from_bits(bits)),
+        }))
     }
 
     fn invoke(
@@ -483,6 +554,32 @@ impl Instance {
                     let callee = reader.u32()?;
                     self.invoke(callee, stack, fuel, depth + 1, limits)?;
                 }
+                0x11 => {
+                    let expected = reader.u32()? as usize;
+                    if reader.byte()? != 0 {
+                        return Err(Trap::Invalid("call_indirect names a table other than 0"));
+                    }
+                    let element = as_i32(pop(stack)?) as u32 as usize;
+                    let callee = self
+                        .table
+                        .get(element)
+                        .ok_or(Trap::UndefinedElement)?
+                        .ok_or(Trap::UninitializedElement)?;
+                    let module = Rc::clone(&self.module);
+                    let wanted = module
+                        .types
+                        .get(expected)
+                        .ok_or(Trap::Invalid("call_indirect names a type that does not exist"))?;
+                    let found = module
+                        .functions
+                        .get(callee as usize)
+                        .and_then(|function| module.types.get(function.type_index as usize))
+                        .ok_or(Trap::Invalid("a table element names no function"))?;
+                    if wanted != found {
+                        return Err(Trap::IndirectCallTypeMismatch);
+                    }
+                    self.invoke(callee, stack, fuel, depth + 1, limits)?;
+                }
                 0x1a => {
                     pop(stack)?;
                 }
@@ -536,8 +633,8 @@ impl Instance {
                 }
                 0x28..=0x35 => {
                     let (size, signed, wide) = match opcode {
-                        0x28 => (4, false, false),
-                        0x29 => (8, false, true),
+                        0x28 | 0x2a => (4, false, false),
+                        0x29 | 0x2b => (8, false, true),
                         0x2c => (1, true, false),
                         0x2d => (1, false, false),
                         0x2e => (2, true, false),
@@ -562,8 +659,8 @@ impl Instance {
                 }
                 0x36..=0x3e => {
                     let size = match opcode {
-                        0x36 | 0x3e => 4,
-                        0x37 => 8,
+                        0x36 | 0x38 | 0x3e => 4,
+                        0x37 | 0x39 => 8,
                         0x3a | 0x3c => 1,
                         0x3b | 0x3d => 2,
                         _ => return Err(Trap::Unsupported(opcode)),
@@ -593,6 +690,60 @@ impl Instance {
                 }
                 0x41 => stack.push(from_i32(reader.signed(32)? as i32)),
                 0x42 => stack.push(reader.signed(64)? as u64),
+                0x43 => {
+                    let mut word = [0u8; 4];
+                    word.copy_from_slice(reader.take(4)?);
+                    stack.push(u64::from(u32::from_le_bytes(word)));
+                }
+                0x44 => {
+                    let mut word = [0u8; 8];
+                    word.copy_from_slice(reader.take(8)?);
+                    stack.push(u64::from_le_bytes(word));
+                }
+                0x5b..=0x66 | 0x8b..=0xa6 | 0xa8..=0xab | 0xae..=0xbf => {
+                    crate::float::apply(opcode, stack)?;
+                }
+                0xfc => {
+                    let operation = reader.u32()?;
+                    match operation {
+                        0..=7 => crate::float::saturating(operation, stack)?,
+                        10 => {
+                            reader.byte()?;
+                            reader.byte()?;
+                            let length = as_i32(pop(stack)?) as u32 as u64;
+                            let source = as_i32(pop(stack)?) as u32 as u64;
+                            let destination = as_i32(pop(stack)?) as u32 as u64;
+                            let size = self.memory.len() as u64;
+                            if source + length > size || destination + length > size {
+                                return Err(Trap::MemoryOutOfBounds);
+                            }
+                            if *fuel < length / 64 {
+                                return Err(Trap::OutOfFuel);
+                            }
+                            *fuel -= length / 64;
+                            let (source, destination, length) =
+                                (source as usize, destination as usize, length as usize);
+                            self.memory
+                                .copy_within(source..source + length, destination);
+                        }
+                        11 => {
+                            reader.byte()?;
+                            let length = as_i32(pop(stack)?) as u32 as u64;
+                            let value = pop(stack)? as u8;
+                            let destination = as_i32(pop(stack)?) as u32 as u64;
+                            if destination + length > self.memory.len() as u64 {
+                                return Err(Trap::MemoryOutOfBounds);
+                            }
+                            if *fuel < length / 64 {
+                                return Err(Trap::OutOfFuel);
+                            }
+                            *fuel -= length / 64;
+                            let (destination, length) = (destination as usize, length as usize);
+                            self.memory[destination..destination + length].fill(value);
+                        }
+                        _ => return Err(Trap::Unsupported(0xfc)),
+                    }
+                }
                 0x45 => {
                     let value = pop(stack)? as u32;
                     stack.push(u64::from(value == 0));

@@ -297,9 +297,10 @@ fn malformed_and_unsupported_modules_are_refused() {
         Module::parse(b"\0asx\x01\0\0\0"),
         Err(WasmError::Malformed(_))
     ));
+    assert!(Module::parse(b"\0asm\x01\0\0\0\x01\x05\x01\x60\x01\x7d\x00").is_ok());
     assert!(matches!(
-        Module::parse(b"\0asm\x01\0\0\0\x01\x05\x01\x60\x01\x7d\x00"),
-        Err(WasmError::Unsupported("floating point"))
+        Module::parse(b"\0asm\x01\0\0\0\x01\x05\x01\x60\x01\x7b\x00"),
+        Err(WasmError::Malformed(_))
     ));
     assert!(matches!(
         Module::parse(b"\0asm\x01\0\0\0\x02\x01\x01"),
@@ -320,4 +321,133 @@ fn malformed_and_unsupported_modules_are_refused() {
         );
         let _ = Module::parse(&bytes[..cut.min(bytes.len())]);
     }
+}
+
+const F32: u8 = 0x7d;
+const F64: u8 = 0x7c;
+
+fn f64_const(value: f64) -> Vec<u8> {
+    let mut code = vec![0x44];
+    code.extend_from_slice(&value.to_le_bytes());
+    code
+}
+
+fn float_module() -> Instance {
+    let hypotenuse = vec![0x20, 0, 0x20, 0, 0xa2, 0x20, 1, 0x20, 1, 0xa2, 0xa0, 0x9f, 0x0b];
+    let mut halve = vec![0x20, 0, 0x43];
+    halve.extend_from_slice(&2.0f32.to_le_bytes());
+    halve.extend_from_slice(&[0x95, 0x0b]);
+    let nearest = vec![0x20, 0, 0x9e, 0x0b];
+    let mut minimum = f64_const(-0.0);
+    minimum.extend(f64_const(0.0));
+    minimum.extend_from_slice(&[0xa4, 0x0b]);
+    let bytes = module(
+        &[
+            Function {
+                params: vec![F64, F64],
+                results: vec![F64],
+                locals: vec![],
+                code: hypotenuse,
+                export: "hypotenuse",
+            },
+            Function {
+                params: vec![F32],
+                results: vec![F32],
+                locals: vec![],
+                code: halve,
+                export: "halve",
+            },
+            Function {
+                params: vec![F64],
+                results: vec![I32],
+                locals: vec![],
+                code: vec![0x20, 0, 0xaa, 0x0b],
+                export: "to_int",
+            },
+            Function {
+                params: vec![F64],
+                results: vec![I32],
+                locals: vec![],
+                code: vec![0x20, 0, 0xfc, 0x02, 0x0b],
+                export: "to_int_saturating",
+            },
+            Function {
+                params: vec![F64],
+                results: vec![F64],
+                locals: vec![],
+                code: nearest,
+                export: "nearest",
+            },
+            Function {
+                params: vec![],
+                results: vec![F64],
+                locals: vec![],
+                code: minimum,
+                export: "minimum_of_zeros",
+            },
+            Function {
+                params: vec![I64],
+                results: vec![F32],
+                locals: vec![],
+                code: vec![0x20, 0, 0xb5, 0x0b],
+                export: "unsigned_to_f32",
+            },
+        ],
+        None,
+        &[],
+    );
+    Instance::new(Module::parse(&bytes).expect("a float module"), &Limits::default())
+        .expect("an instance")
+}
+
+#[test]
+fn floating_point_arithmetic_follows_ieee_754_and_wasm() {
+    let mut vm = float_module();
+    let limits = Limits::default();
+    assert_eq!(
+        vm.call("hypotenuse", &[Value::F64(3.0), Value::F64(4.0)], &limits),
+        Ok(Some(Value::F64(5.0)))
+    );
+    assert_eq!(
+        vm.call("halve", &[Value::F32(5.0)], &limits),
+        Ok(Some(Value::F32(2.5)))
+    );
+    assert_eq!(
+        vm.call("nearest", &[Value::F64(2.5)], &limits),
+        Ok(Some(Value::F64(2.0)))
+    );
+    let Ok(Some(Value::F64(zero))) = vm.call("minimum_of_zeros", &[], &limits) else {
+        panic!("a float result");
+    };
+    assert!(zero == 0.0 && zero.is_sign_negative());
+    assert_eq!(
+        vm.call("unsigned_to_f32", &[Value::I64(-1)], &limits),
+        Ok(Some(Value::F32(18_446_744_073_709_551_616.0)))
+    );
+}
+
+#[test]
+fn float_to_integer_traps_or_saturates_as_asked() {
+    let mut vm = float_module();
+    let limits = Limits::default();
+    assert_eq!(
+        vm.call("to_int", &[Value::F64(-7.9)], &limits),
+        Ok(Some(Value::I32(-7)))
+    );
+    assert_eq!(
+        vm.call("to_int", &[Value::F64(f64::NAN)], &limits),
+        Err(Trap::InvalidConversion)
+    );
+    assert_eq!(
+        vm.call("to_int", &[Value::F64(3e9)], &limits),
+        Err(Trap::IntegerOverflow)
+    );
+    assert_eq!(
+        vm.call("to_int_saturating", &[Value::F64(3e9)], &limits),
+        Ok(Some(Value::I32(i32::MAX)))
+    );
+    assert_eq!(
+        vm.call("to_int_saturating", &[Value::F64(f64::NAN)], &limits),
+        Ok(Some(Value::I32(0)))
+    );
 }

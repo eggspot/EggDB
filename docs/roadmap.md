@@ -557,7 +557,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Every legacy encoding the supported databases accept, listed per dialect, on the wire and in
   `COPY` (D30).
 - WebAssembly functions: floating point and the rest of the 1.0 instruction set (D232). Check: the
-  official spec test suite in CI.
+  official spec test suite in CI. Floating point, `call_indirect` with a function table, the start function,
+  non-trapping float-to-integer conversions and `memory.copy`/`memory.fill`: **code written, unbuilt** (code-only
+  mode, 2026-11-12, D792). Left: imports (host functions, with the next item), multi-value results, and the spec
+  test suite in CI.
 - `CREATE FUNCTION ... LANGUAGE wasm`, with type mapping and host functions behind permissions
   (D27, D232).
 - An extension API for types, index methods, functions and protocols, loaded as sandboxed
