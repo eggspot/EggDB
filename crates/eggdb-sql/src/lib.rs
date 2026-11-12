@@ -404,7 +404,7 @@ pub use destructive::{
     DestructiveKind, DestructivePart, DestructiveStatement, destructive_statement,
 };
 pub use dialect::Dialect;
-pub use dump::{DumpReport, dump_sql};
+pub use dump::{DumpReport, dump_sql, is_sql_key};
 pub use eggdb_auth::scram::{ScramParts, parse_scram_verifier};
 pub use enums::EnumValue;
 pub use error::{SqlError, SqlResult, SqlState};

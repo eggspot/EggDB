@@ -321,7 +321,7 @@ impl CommandName {
             OptionName::Arrow => matches!(self, Self::Export | Self::Import),
             OptionName::ParquetCompression => self == Self::Export,
             OptionName::Dbf | OptionName::Copybook | OptionName::Ebcdic => self == Self::Import,
-            OptionName::SqlDump => self == Self::Export,
+            OptionName::SqlDump | OptionName::WholeDump => self == Self::Export,
             OptionName::OnConflict
             | OptionName::Csv
             | OptionName::Header
@@ -524,6 +524,7 @@ enum OptionName {
     Avro,
     Arrow,
     SqlDump,
+    WholeDump,
     Table,
     Header,
     Delimiter,
@@ -659,6 +660,7 @@ impl OptionName {
             b"avro" => Self::Avro,
             b"arrow" => Self::Arrow,
             b"sql" => Self::SqlDump,
+            b"dump" => Self::WholeDump,
             b"table" => Self::Table,
             b"header" => Self::Header,
             b"delimiter" => Self::Delimiter,
@@ -719,6 +721,7 @@ impl OptionName {
                 | Self::KeepGoing
                 | Self::Roles
                 | Self::Header
+                | Self::WholeDump
                 | Self::KeepNulls
                 | Self::Unicode
                 | Self::Native
@@ -876,6 +879,7 @@ pub(crate) struct CsvOptions {
     pub(crate) avro: Option<PathBuf>,
     pub(crate) arrow: Option<PathBuf>,
     pub(crate) sql_dump: Option<eggdb_sql::Dialect>,
+    pub(crate) whole_dump: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1793,6 +1797,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 });
             }
             OptionName::Header => request.csv.header = true,
+            OptionName::WholeDump => request.csv.whole_dump = true,
             OptionName::KeepNulls => request.csv.keep_nulls = true,
             OptionName::Unicode => request.csv.unicode = true,
             OptionName::Native => request.csv.native = true,
@@ -2343,6 +2348,23 @@ fn parse_collection_name(option: Option<&str>, value: &OsStr) -> Result<String, 
 
 fn check_csv_options(request: &Request) -> Result<(), String> {
     let csv = &request.csv;
+    if csv.whole_dump {
+        if csv.sql_dump.is_some()
+            || csv.parquet.is_some()
+            || csv.arrow.is_some()
+            || csv.ndjson.is_some()
+            || csv.xlsx.is_some()
+            || csv.avro.is_some()
+            || csv.table.is_some()
+            || request.collection.is_some()
+        {
+            return Err(
+                "--dump writes the whole database; it goes without --sql, the file options, --table or -C"
+                    .to_owned(),
+            );
+        }
+        return Ok(());
+    }
     if csv.sql_dump.is_some() {
         if csv.parquet.is_some() || csv.table.is_some() {
             return Err(

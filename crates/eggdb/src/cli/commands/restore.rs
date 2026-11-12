@@ -218,7 +218,8 @@ impl Session<'_> {
         };
         let head =
             read_head(raw).map_err(|error| usage(format!("cannot read {dump_shown}: {error}")))?;
-        let dialect = self.request.dialect;
+        let whole_dump = super::whole_dump::is_whole_dump(&head);
+        let dialect = if whole_dump { Dialect::PostgreSql } else { self.request.dialect };
         if let Some(archive) = archive_of(&head, dialect) {
             let extension = path
                 .as_ref()
@@ -235,6 +236,14 @@ impl Session<'_> {
             ));
         }
         let mut input = BufReader::with_capacity(READ_BUFFER_BYTES, Cursor::new(head).chain(raw));
+        let sql_bytes = if whole_dump {
+            Some(
+                super::whole_dump::read_header_line(&mut input)
+                    .map_err(|message| usage(format!("cannot restore {dump_shown}: {message}")))?,
+            )
+        } else {
+            None
+        };
         let target = self.request.file.clone();
         let exists = std::fs::symlink_metadata(&target).is_ok();
         let dry_run = self.request.dry_run;
@@ -315,22 +324,38 @@ impl Session<'_> {
             defines: &defines,
             roles: self.request.restore.roles,
         };
-        let mut report = run_restore(
-            &db,
-            &mut input,
-            dialect,
-            options,
-            &mut progress,
-            &dump_shown,
-            &mut self.messages,
-        );
+        let mut report = match sql_bytes {
+            Some(bytes) => run_restore(
+                &db,
+                &mut Read::take(&mut input, bytes),
+                dialect,
+                options,
+                &mut progress,
+                &dump_shown,
+                &mut self.messages,
+            ),
+            None => run_restore(
+                &db,
+                &mut input,
+                dialect,
+                options,
+                &mut progress,
+                &dump_shown,
+                &mut self.messages,
+            ),
+        };
+        let entries = match sql_bytes {
+            Some(_) if report.error.is_none() => Some(super::whole_dump::load_entries(&db, &mut input)),
+            _ => None,
+        };
+        let entries_failure = entries.as_ref().and_then(|loaded| loaded.as_ref().err().cloned());
         match report.scripts.first_mut() {
             Some(first) => first.clone_from(&dump_display),
             None => report.scripts.push(dump_display.clone()),
         }
         progress.clear(&mut self.messages);
         let elapsed = started.elapsed();
-        let stopped = report.error.is_some();
+        let stopped = report.error.is_some() || entries_failure.is_some();
         let closed = db.close();
         let unfinished = stopped || closed.is_err();
         let left_nothing = !exists && unfinished;
@@ -345,6 +370,26 @@ impl Session<'_> {
             return Err(Failure::database(
                 format!("cannot close {}: {error}", self.file),
                 Exit::for_error(error.kind()),
+            ));
+        }
+        if let Some(problem) = entries_failure {
+            let after = if left_nothing {
+                format!("Nothing was created; {} does not exist.", self.file)
+            } else if dry_run {
+                format!("A real run would stop here; {} is as it was.", self.file)
+            } else {
+                format!("Its SQL part is in {}; its key-value entries are not.", self.file)
+            };
+            return Err(Failure::database(
+                format!("cannot restore {dump_shown} into {}: {problem}. {after}", self.file),
+                Exit::DatabaseError,
+            ));
+        }
+        if let Some(Ok(loaded)) = &entries {
+            self.messages.text(&format!(
+                "restored {} and {} collections\n",
+                render::entries(loaded.entries),
+                render::count(loaded.collections)
             ));
         }
         let file = self.file.clone();

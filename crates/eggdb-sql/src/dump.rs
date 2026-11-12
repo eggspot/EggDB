@@ -8,6 +8,13 @@ use std::io::Write;
 
 const ROWS_PER_INSERT: usize = 100;
 
+/// Whether `key` is one of the keys SQL keeps its catalog, rows and indexes under in a
+/// database's default key space, so a dump that writes SQL as statements leaves it out of the
+/// raw key-value entries it writes beside them.
+pub fn is_sql_key(key: &[u8]) -> bool {
+    key.starts_with(crate::encoding::NAMESPACE)
+}
+
 /// What [`dump_sql`] wrote.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DumpReport {

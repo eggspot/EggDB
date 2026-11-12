@@ -1549,7 +1549,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Incremental and parallel backups, encrypted, with retention (D24, D208).
 - Instant snapshots, and copy-on-write clones and branches of a whole database (D24, D28).
 - `eggdb dump`: one logical file of the whole database (schemas, rows, collections, roles,
-  routines), where `eggdb export`'s eggdb-jsonl copies raw key-value entries (D24, D93).
+  routines), where `eggdb export`'s eggdb-jsonl copies raw key-value entries (D24, D93). **Code written, unbuilt**
+  (code-only mode, 2026-11-12, D899) as `eggdb export --dump`, which `eggdb restore` loads.
 - `eggdb export --sql` with views, sequences, comments and every constraint (D24, PR #86). **Code written,
   unbuilt** for the PostgreSQL dialect (code-only mode, 2026-11-11, D446). Roles, memberships, table grants, routines and triggers
   in the PostgreSQL dump: **code written, unbuilt** (code-only mode, 2026-11-12, D842).

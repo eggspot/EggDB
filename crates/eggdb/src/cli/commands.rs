@@ -55,6 +55,7 @@ mod shell_sqlplus;
 pub(super) mod sql;
 mod table;
 mod transfer;
+mod whole_dump;
 
 const DEFAULT_CACHE_BYTES: usize = 16 << 20;
 const DEFAULT_BUSY_TIMEOUT_MS: u64 = 5_000;
