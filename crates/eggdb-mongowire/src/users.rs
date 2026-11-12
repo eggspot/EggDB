@@ -5,13 +5,13 @@ use eggdb_auth::scram_sha1::ScramSha1Verifier;
 use eggdb_bson::{Bson, Document};
 use eggdb_documents::{SortSpec, parse_filter};
 
-const ADMIN: &str = "admin";
+pub(crate) const ADMIN: &str = "admin";
 const USERS: &str = "system.users";
 const SHA256_ITERATIONS: u32 = 15_000;
 const SHA1_ITERATIONS: u32 = 10_000;
 const SALT_BYTES: usize = 16;
 const MOST_ROLES: usize = 1_000;
-const BUILT_IN_ROLES: [&str; 16] = [
+pub(crate) const BUILT_IN_ROLES: [&str; 16] = [
     "read",
     "readWrite",
     "dbAdmin",
@@ -80,7 +80,7 @@ pub(crate) struct StoredUser {
     pub(crate) sha1: Option<ScramSha1Verifier>,
 }
 
-fn failure(code: i32, code_name: &str, message: impl Into<String>) -> Document {
+pub(crate) fn failure(code: i32, code_name: &str, message: impl Into<String>) -> Document {
     document(vec![
         ("ok", Bson::Double(0.0)),
         ("errmsg", text(&message.into())),
@@ -93,7 +93,7 @@ fn user_id(database: &str, user: &str) -> String {
     format!("{database}.{user}")
 }
 
-fn by_id(id: &str) -> Option<eggdb_documents::Filter> {
+pub(crate) fn by_id(id: &str) -> Option<eggdb_documents::Filter> {
     parse_filter(&document(vec![("_id", text(id))])).ok()
 }
 
@@ -102,7 +102,7 @@ fn stored_document(shared: &Shared<'_>, database: &str, user: &str) -> Option<Do
     shared.store.find(ADMIN, USERS, &filter, &SortSpec::default()).ok()?.into_iter().next()
 }
 
-fn roles_of(value: Option<&Bson>, database: &str) -> Result<Vec<(String, String)>, Document> {
+fn roles_of(value: Option<&Bson>, database: &str, checked_by: Option<&Shared<'_>>) -> Result<Vec<(String, String)>, Document> {
     let Some(Bson::Array(items)) = value else {
         return Ok(Vec::new());
     };
@@ -120,7 +120,9 @@ fn roles_of(value: Option<&Bson>, database: &str) -> Result<Vec<(String, String)
                 ),
                 _ => return Err(failure(14, "TypeMismatch", "a role must be a name or a {role, db} document")),
             };
-            if !BUILT_IN_ROLES.contains(&role.as_str()) {
+            if let Some(shared) = checked_by
+                && !crate::roles::exists(shared, &role, &db)
+            {
                 return Err(failure(31, "RoleNotFound", format!("Could not find role: {role}@{db}")));
             }
             Ok((role, db))
@@ -139,7 +141,7 @@ fn roles_bson(roles: &[(String, String)]) -> Bson {
 
 fn stored_roles(found: &Document) -> Vec<(String, String)> {
     let database = found.get_str("db").unwrap_or(ADMIN).to_owned();
-    roles_of(found.get("roles"), &database).unwrap_or_default()
+    roles_of(found.get("roles"), &database, None).unwrap_or_default()
 }
 
 /// The user `user` of `database`, as `admin.system.users` keeps it.
@@ -231,24 +233,8 @@ pub(crate) fn run(shared: &Shared<'_>, command: &str, database: &str, body: &Doc
         }
         "grantRolesToUser" | "revokeRolesFromUser" => change_roles(shared, command, database, body),
         "usersInfo" => users_info(shared, database, body),
-        "rolesInfo" => ok(document(vec![(
-            "roles",
-            Bson::Array(
-                BUILT_IN_ROLES
-                    .iter()
-                    .map(|role| {
-                        Bson::Document(document(vec![
-                            ("role", text(role)),
-                            ("db", text(database)),
-                            ("isBuiltin", Bson::Boolean(true)),
-                            ("roles", Bson::Array(Vec::new())),
-                            ("inheritedRoles", Bson::Array(Vec::new())),
-                        ]))
-                    })
-                    .collect(),
-            ),
-        )])),
-        _ => return None,
+        "rolesInfo" => crate::roles::roles_info(shared, database, body),
+        _ => return crate::roles::run(shared, command, database, body),
     })
 }
 
@@ -265,7 +251,7 @@ fn create_user(shared: &Shared<'_>, database: &str, body: &Document) -> Document
     let Some(password) = body.get_str("pwd") else {
         return failure(2, "BadValue", "createUser needs pwd: EggDB has no external users");
     };
-    let roles = match roles_of(body.get("roles"), database) {
+    let roles = match roles_of(body.get("roles"), database, Some(shared)) {
         Ok(roles) => roles,
         Err(problem) => return problem,
     };
@@ -287,7 +273,7 @@ fn update_user(shared: &Shared<'_>, database: &str, body: &Document) -> Document
         return failure(11, "UserNotFound", format!("User '{user}@{database}' not found"));
     };
     let roles = match body.get("roles") {
-        Some(given) => match roles_of(Some(given), database) {
+        Some(given) => match roles_of(Some(given), database, Some(shared)) {
             Ok(roles) => roles,
             Err(problem) => return problem,
         },
@@ -314,7 +300,7 @@ fn change_roles(shared: &Shared<'_>, command: &str, database: &str, body: &Docum
     let Some(found) = stored_document(shared, database, &user) else {
         return failure(11, "UserNotFound", format!("User '{user}@{database}' not found"));
     };
-    let changed = match roles_of(body.get("roles"), database) {
+    let changed = match roles_of(body.get("roles"), database, Some(shared)) {
         Ok(roles) => roles,
         Err(problem) => return problem,
     };
@@ -440,19 +426,29 @@ pub(crate) fn allowed(shared: &Shared<'_>, session: &mut Session, command: &str,
     if ANY_DATABASE_COMMANDS.contains(&command) || session.authenticated_user.is_none() {
         return true;
     }
-    let roles = session_roles(shared, session);
-    let touches_users = database == ADMIN && body.first().is_some_and(|(_, value)| value.as_str() == Some(USERS));
-    if USER_COMMANDS.contains(&command) || touches_users {
-        return holds(&roles, database, &["userAdmin", "dbOwner"], &["userAdminAnyDatabase"]);
+    let direct = session_roles(shared, session);
+    let custom = direct.iter().any(|(role, _)| !BUILT_IN_ROLES.contains(&role.as_str()));
+    let (roles, privileges) = if custom { crate::roles::expanded(shared, &direct) } else { (direct, Vec::new()) };
+    let collection = body.first().and_then(|(_, value)| value.as_str()).unwrap_or_default();
+    let writing = writes(command, body);
+    built_in_roles_allow(&roles, command, database, body, writing)
+        || crate::roles::privileges_allow(&privileges, command, writing, database, collection)
+}
+
+fn built_in_roles_allow(roles: &[(String, String)], command: &str, database: &str, body: &Document, writing: bool) -> bool {
+    let touches_users = database == ADMIN
+        && body.first().is_some_and(|(_, value)| matches!(value.as_str(), Some(USERS) | Some(crate::roles::ROLES_COLLECTION)));
+    if USER_COMMANDS.contains(&command) || crate::roles::ROLE_COMMANDS.contains(&command) || touches_users {
+        return holds(roles, database, &["userAdmin", "dbOwner"], &["userAdminAnyDatabase"]);
     }
     if command == "usersInfo" || command == "rolesInfo" {
-        return holds(&roles, database, &["userAdmin", "dbOwner", "read", "readWrite", "dbAdmin"], &["userAdminAnyDatabase", "readAnyDatabase", "readWriteAnyDatabase"]);
+        return holds(roles, database, &["userAdmin", "dbOwner", "read", "readWrite", "dbAdmin"], &["userAdminAnyDatabase", "readAnyDatabase", "readWriteAnyDatabase"]);
     }
-    if DEFINITION_COMMANDS.contains(&command) && holds(&roles, database, &["dbAdmin"], &["dbAdminAnyDatabase"]) {
+    if DEFINITION_COMMANDS.contains(&command) && holds(roles, database, &["dbAdmin"], &["dbAdminAnyDatabase"]) {
         return true;
     }
-    if writes(command, body) {
-        return holds(&roles, database, &["readWrite", "dbOwner"], &["readWriteAnyDatabase"]);
+    if writing {
+        return holds(roles, database, &["readWrite", "dbOwner"], &["readWriteAnyDatabase"]);
     }
-    holds(&roles, database, &["read", "readWrite", "dbOwner", "dbAdmin"], &["readAnyDatabase", "readWriteAnyDatabase"])
+    holds(roles, database, &["read", "readWrite", "dbOwner", "dbAdmin"], &["readAnyDatabase", "readWriteAnyDatabase"])
 }

@@ -935,3 +935,4 @@ its full title with its status.
 - [D908](decisions/D908.md) Code-only batch 556 (M5): WebAssembly imported functions and host functions
 - [D909](decisions/D909.md) Code-only batch 557 (M6a): GraphQL nested inserts
 - [D910](decisions/D910.md) Code-only batch 558 (M6a): OData navigation properties and $expand
+- [D911](decisions/D911.md) Code-only batch 559 (M9): MongoDB user-defined roles

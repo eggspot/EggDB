@@ -12,6 +12,7 @@ mod compression;
 mod cursors;
 mod explain;
 mod message;
+mod roles;
 mod server;
 mod tailable;
 mod transactions;
