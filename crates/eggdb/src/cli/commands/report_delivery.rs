@@ -53,8 +53,8 @@ pub(super) fn parse_https_url(url: &str) -> Option<SecureTarget> {
     Some(SecureTarget { host: host.to_owned(), port, path: path.to_owned() })
 }
 
-fn trust_store() -> Option<TrustStore> {
-    let candidates: Vec<String> = match std::env::var(TRUST_FILE) {
+fn trust_store_from(variable: &str) -> Option<TrustStore> {
+    let candidates: Vec<String> = match std::env::var(variable) {
         Ok(path) => vec![path],
         Err(_) => SYSTEM_TRUST_FILES.iter().map(|path| (*path).to_owned()).collect(),
     };
@@ -85,7 +85,13 @@ pub(super) fn connect(host: &str, port: u16, timeout: Duration) -> io::Result<Tc
 }
 
 pub(super) fn secured(stream: TcpStream, host: &str) -> io::Result<TlsStream<TcpStream>> {
-    let trust = trust_store().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no trusted certificates: set EGGDB_REPORT_CA_FILE"))?;
+    secured_trusting(stream, host, TRUST_FILE)
+}
+
+fn secured_trusting(stream: TcpStream, host: &str, variable: &str) -> io::Result<TlsStream<TcpStream>> {
+    let trust = trust_store_from(variable).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, format!("no trusted certificates: set {variable}"))
+    })?;
     let server_name = ServerName::parse(host.trim_start_matches('[').trim_end_matches(']'))
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "the host is not a valid server name"))?;
     let config = ClientConfig::new(ServerVerification::Full { trust, server_name }, host);
@@ -95,7 +101,19 @@ pub(super) fn secured(stream: TcpStream, host: &str) -> io::Result<TlsStream<Tcp
 /// Posts `body` to an `https://` target, checking its certificate against EGGDB_REPORT_CA_FILE
 /// or the system's trusted roots; returns the status code.
 pub(super) fn post_https(target: &SecureTarget, content_type: &str, body: &[u8], timeout: Duration) -> io::Result<u16> {
-    let mut stream = secured(connect(&target.host, target.port, timeout)?, &target.host)?;
+    post_https_trusting(target, content_type, body, timeout, TRUST_FILE)
+}
+
+/// [`post_https`] checking the certificate against the PEM file the environment variable
+/// `variable` names, or the system's trusted roots when it is unset.
+pub(super) fn post_https_trusting(
+    target: &SecureTarget,
+    content_type: &str,
+    body: &[u8],
+    timeout: Duration,
+    variable: &str,
+) -> io::Result<u16> {
+    let mut stream = secured_trusting(connect(&target.host, target.port, timeout)?, &target.host, variable)?;
     let head = format!(
         "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nUser-Agent: eggdb\r\n\r\n",
         target.path,
