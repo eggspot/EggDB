@@ -93,7 +93,138 @@ pub(crate) fn rows(
 
 /// Whether `name` is one of the file-reading functions.
 pub(crate) fn reads_files(name: &str) -> bool {
-    matches!(name, "read_parquet" | "read_arrow" | "read_csv")
+    matches!(name, "read_parquet" | "read_arrow" | "read_csv" | "read_vcf")
+}
+
+const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+const VCF_COLUMNS: [(&str, SqlType); 10] = [
+    ("chrom", SqlType::Text),
+    ("pos", SqlType::BigInt),
+    ("id", SqlType::Text),
+    ("ref", SqlType::Text),
+    ("alt", SqlType::Text),
+    ("qual", SqlType::Double),
+    ("filter", SqlType::Text),
+    ("info", SqlType::Jsonb),
+    ("format", SqlType::Text),
+    ("samples", SqlType::Jsonb),
+];
+
+/// The text of a file read through the session's reader, gunzipped when it is gzip (BGZF
+/// included), as UTF-8.
+fn text_file(path: &str) -> SqlResult<String> {
+    let bytes = crate::new_files::read_file(path, MOST_FILE_BYTES)?;
+    let bytes = if bytes.starts_with(&GZIP_MAGIC) {
+        eggdb_content::gunzip(&bytes, MOST_FILE_BYTES)
+            .map_err(|error| SqlError::new(SqlState::DATA_CORRUPTED, format!("{path}: {error}")))?
+    } else {
+        bytes
+    };
+    crate::memory::check_value_bytes(bytes.len())?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| SqlError::new(SqlState::CHARACTER_NOT_IN_REPERTOIRE, format!("{path} is not UTF-8")))?;
+    Ok(text.strip_prefix('\u{feff}').map(str::to_owned).unwrap_or(text))
+}
+
+fn json_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    crate::json::write_string(text, &mut out);
+    out
+}
+
+fn missing(field: &str) -> Option<&str> {
+    (field != "." && !field.is_empty()).then_some(field)
+}
+
+fn vcf_info(field: &str) -> String {
+    let members: Vec<String> = field
+        .split(';')
+        .filter(|entry| !entry.is_empty() && *entry != ".")
+        .map(|entry| match entry.split_once('=') {
+            Some((key, value)) => format!("{}:{}", json_text(key), json_text(value)),
+            None => format!("{}:true", json_text(entry)),
+        })
+        .collect();
+    format!("{{{}}}", members.join(","))
+}
+
+fn vcf_samples(format: Option<&str>, names: &[&str], values: &[&str]) -> String {
+    let keys: Vec<&str> = format.map(|format| format.split(':').collect()).unwrap_or_default();
+    let members: Vec<String> = names
+        .iter()
+        .zip(values)
+        .map(|(name, value)| {
+            let fields: Vec<String> = keys
+                .iter()
+                .zip(value.split(':'))
+                .map(|(key, field)| format!("{}:{}", json_text(key), missing(field).map_or_else(|| "null".to_owned(), json_text)))
+                .collect();
+            format!("{}:{{{}}}", json_text(name), fields.join(","))
+        })
+        .collect();
+    format!("{{{}}}", members.join(","))
+}
+
+/// The rows of `read_vcf(path)`: one per variant line of a VCF file (gzip and BGZF read too),
+/// with `chrom`, `pos`, `id`, `ref`, `alt`, `qual` and `filter` (`.` read as `NULL`), `info` as a
+/// JSON object (flags as `true`), `format`, and `samples` as `{sample: {key: value}}` by the
+/// header's sample names.
+pub(crate) fn vcf_rows(
+    values: &[Value],
+    names: &[String],
+    types: &[Option<SqlType>],
+    sink: &mut RecordSink<'_>,
+) -> SqlResult<()> {
+    let Some(path) = values.first().and_then(Value::to_text) else {
+        return Ok(());
+    };
+    let text = text_file(&path)?;
+    let mut sample_names: Vec<&str> = Vec::new();
+    let wanted: Vec<Option<usize>> = names
+        .iter()
+        .map(|name| VCF_COLUMNS.iter().position(|(column, _)| column.eq_ignore_ascii_case(name)))
+        .collect();
+    for line in text.lines() {
+        if let Some(header) = line.strip_prefix("#CHROM") {
+            sample_names = header.split('\t').skip(9).collect();
+            continue;
+        }
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 8 {
+            return Err(SqlError::new(SqlState::BAD_COPY_FILE_FORMAT, format!("{path}: a VCF line has fewer than 8 columns")));
+        }
+        let pos = fields[1]
+            .parse::<i64>()
+            .map_err(|_| SqlError::new(SqlState::BAD_COPY_FILE_FORMAT, format!("{path}: POS {} is not a number", fields[1])))?;
+        let format = fields.get(8).copied().and_then(missing);
+        let record: [Value; 10] = [
+            Value::Text(fields[0].to_owned()),
+            Value::BigInt(pos),
+            missing(fields[2]).map_or(Value::Null, |id| Value::Text(id.to_owned())),
+            Value::Text(fields[3].to_owned()),
+            missing(fields[4]).map_or(Value::Null, |alt| Value::Text(alt.to_owned())),
+            missing(fields[5]).and_then(|qual| qual.parse::<f64>().ok()).map_or(Value::Null, Value::Double),
+            missing(fields[6]).map_or(Value::Null, |filter| Value::Text(filter.to_owned())),
+            crate::json::normalize(&vcf_info(fields[7])).map(Value::Jsonb)?,
+            format.map_or(Value::Null, |format| Value::Text(format.to_owned())),
+            crate::json::normalize(&vcf_samples(format, &sample_names, fields.get(9..).unwrap_or_default()))
+                .map(Value::Jsonb)?,
+        ];
+        let mut row = Vec::with_capacity(names.len());
+        for (at, position) in wanted.iter().enumerate() {
+            let value = position.map_or(Value::Null, |position| record[position].clone());
+            let declared = types.get(at + 1).copied().flatten();
+            row.push(match declared {
+                Some(sql_type) if !value.is_null() && value.sql_type() != Some(sql_type) => convert(value, sql_type, Conversion::Explicit)?,
+                _ => value,
+            });
+        }
+        sink(row)?;
+    }
+    Ok(())
 }
 
 fn sql_type_of(column_type: ColumnType) -> SqlType {
@@ -119,10 +250,11 @@ fn sql_type_of(column_type: ColumnType) -> SqlType {
 /// definition list reads, as its parser reads them: the file's names and types (all `text` for
 /// a CSV file's header).
 pub(crate) fn discovered_columns(name: &str, path: &str) -> SqlResult<Vec<(String, SqlType)>> {
-    let bytes = crate::new_files::read_file(path, MOST_FILE_BYTES)?;
+    if name == "read_vcf" {
+        return Ok(VCF_COLUMNS.iter().map(|(column, sql_type)| ((*column).to_owned(), *sql_type)).collect());
+    }
     if name == "read_csv" {
-        let text = String::from_utf8_lossy(&bytes);
-        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        let text = text_file(path)?;
         let header_line = text.lines().next().unwrap_or_default();
         let header = csv_records(header_line, delimiter_of(header_line))?.into_iter().next().unwrap_or_default();
         return Ok(header
@@ -209,13 +341,9 @@ pub(crate) fn csv_rows(
     let Some(path) = values.first().and_then(Value::to_text) else {
         return Ok(());
     };
-    let bytes = crate::new_files::read_file(&path, MOST_FILE_BYTES)?;
-    crate::memory::check_value_bytes(bytes.len())?;
-    let text = String::from_utf8(bytes)
-        .map_err(|_| SqlError::new(SqlState::CHARACTER_NOT_IN_REPERTOIRE, format!("{path} is not UTF-8")))?;
-    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    let text = text_file(&path)?;
     let header_line = text.lines().next().unwrap_or_default();
-    let mut records = csv_records(text, delimiter_of(header_line))?.into_iter();
+    let mut records = csv_records(&text, delimiter_of(header_line))?.into_iter();
     let header: Vec<String> = records.next().unwrap_or_default().into_iter().map(Option::unwrap_or_default).collect();
     let positions: Vec<Option<usize>> = names
         .iter()
@@ -310,6 +438,15 @@ mod tests {
         assert_eq!(records[2], vec![Some("2".to_owned()), None, Some(String::new())]);
         assert_eq!(delimiter_of("a;b;c"), ';');
         assert!(csv_records("a\n\"open", ',').is_err());
+    }
+
+    #[test]
+    fn vcf_info_and_samples_become_json() {
+        assert_eq!(vcf_info("DP=10;AF=0.5,0.3;DB"), "{\"DP\":\"10\",\"AF\":\"0.5,0.3\",\"DB\":true}");
+        assert_eq!(
+            vcf_samples(Some("GT:DP"), &["NA1"], &["0|1:."]),
+            "{\"NA1\":{\"GT\":\"0|1\",\"DP\":null}}"
+        );
     }
 
     #[test]

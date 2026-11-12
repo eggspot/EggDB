@@ -99,7 +99,7 @@ mod mysql_set;
 mod mysql_variables;
 mod name_resolution;
 mod new_files;
-mod parquet_files;
+mod file_readers;
 mod notifications;
 mod numeric;
 mod on_update_timestamps;

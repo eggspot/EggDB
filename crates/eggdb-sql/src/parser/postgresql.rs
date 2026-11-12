@@ -354,8 +354,8 @@ impl Parser<'_> {
             let (names, placeholders) = self.column_definition_list()?;
             arguments.extend(placeholders);
             names
-        } else if let Some(path) = literal_path.filter(|_| crate::parquet_files::reads_files(&name.text)) {
-            let discovered = crate::parquet_files::discovered_columns(&name.text, &path)?;
+        } else if let Some(path) = literal_path.filter(|_| crate::file_readers::reads_files(&name.text)) {
+            let discovered = crate::file_readers::discovered_columns(&name.text, &path)?;
             let mut names = Vec::with_capacity(discovered.len());
             for (column, sql_type) in discovered {
                 arguments.push(Expr {
