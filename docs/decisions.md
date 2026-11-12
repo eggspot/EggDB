@@ -725,3 +725,4 @@ its full title with its status.
 - [D698](decisions/D698.md) Code-only batch 346 (M16): `dicom_parse`, DICOM Part 10 files as DICOM's JSON model
 - [D699](decisions/D699.md) Code-only batch 347 (M16): `iso20022_parse`, ISO 20022 XML messages as JSON
 - [D700](decisions/D700.md) Code-only batch 348 (M10): MySQL `SET` member checks
+- [D701](decisions/D701.md) Code-only batch 349 (M16): `sparkplug_decode` for Sparkplug B payloads

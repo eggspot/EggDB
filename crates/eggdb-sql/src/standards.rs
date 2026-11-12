@@ -1,8 +1,9 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 7] = [
+pub(crate) const FUNCTIONS: [&str; 8] = [
     "dicom_parse",
+    "sparkplug_decode",
     "iso20022_parse",
     "fix_parse",
     "fix_field",
@@ -391,10 +392,11 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     if values.iter().any(Value::is_null) {
         return Some(Ok(Value::Null));
     }
-    if name == "dicom_parse" {
+    if name == "dicom_parse" || name == "sparkplug_decode" {
         return Some(match values {
-            [Value::Bytea(file)] => crate::dicom::parse(file).and_then(jsonb),
-            _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "dicom_parse takes the file as bytea")),
+            [Value::Bytea(file)] if name == "dicom_parse" => crate::dicom::parse(file).and_then(jsonb),
+            [Value::Bytea(payload)] => crate::sparkplug::decode(payload).and_then(jsonb),
+            _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, format!("{name} takes bytea"))),
         });
     }
     if name == "extract_text" {
