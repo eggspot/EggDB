@@ -689,7 +689,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - End-user sign-in for apps: sign-up, password, magic link, social login and OpenID Connect, with
   JWT sessions mapped onto row-level security (D37). **Code written, unbuilt** (code-only mode, 2026-11-12, D771), in
   `eggdb_app_auth`; the OAuth redirect flow and fetching providers' key sets are left.
-- WebAuthn and passkeys for app sign-in (D54).
+- WebAuthn and passkeys for app sign-in (D54). **Code written, unbuilt** (code-only mode, 2026-11-12, D772), ES256
+  passkeys without attestation checks.
 - Files in object storage transformed on request (resize, crop, convert) through WebAssembly
   extensions and our own image codecs (D37).
 - Rate limits on every generated API (D25, D37). **Code written, unbuilt** (code-only mode, 2026-11-11,

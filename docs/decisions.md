@@ -796,3 +796,4 @@ its full title with its status.
 - [D769](decisions/D769.md) Code-only batch 417 (M16): scheduled copies (`eggdb_etl`), and SQL Server and CSV sources in `eggdb_foreign`
 - [D770](decisions/D770.md) Code-only batch 418 (M18): `eggdb_foreign` credentials per source, permission per role, and row and time limits per call
 - [D771](decisions/D771.md) Code-only batch 419 (M6a): end-user sign-in for applications with JWT sessions on row-level security, `eggdb_app_auth`
+- [D772](decisions/D772.md) Code-only batch 420 (M6a): WebAuthn passkeys, `webauthn_registration`, `webauthn_assertion` and passkey sign-in in `eggdb_app_auth`

@@ -13,6 +13,9 @@ CREATE TABLE eggdb_app_auth.identities (provider text NOT NULL REFERENCES eggdb_
 CREATE TABLE eggdb_app_auth.magic_links (token_hash text PRIMARY KEY, email text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), expires_at timestamptz NOT NULL, used_at timestamptz);
 CREATE TABLE eggdb_app_auth.sessions (session_id text PRIMARY KEY, user_id bigint NOT NULL REFERENCES eggdb_app_auth.users (user_id), method text NOT NULL, issued_at timestamptz NOT NULL DEFAULT now(), expires_at timestamptz NOT NULL, revoked_at timestamptz);
 CREATE TABLE eggdb_app_auth.failures (email text NOT NULL, failed_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO eggdb_app_auth.settings VALUES ('relying_party_id', 'localhost'), ('origin', 'http://localhost'), ('passkey_user_verification', 'true');
+CREATE TABLE eggdb_app_auth.passkeys (credential_id text PRIMARY KEY, user_id bigint NOT NULL REFERENCES eggdb_app_auth.users (user_id), public_key bytea NOT NULL, sign_count bigint NOT NULL DEFAULT 0, aaguid text, created_at timestamptz NOT NULL DEFAULT now(), last_used_at timestamptz);
+CREATE TABLE eggdb_app_auth.passkey_challenges (challenge bytea PRIMARY KEY, purpose text NOT NULL CHECK (purpose IN ('register', 'sign_in')), user_id bigint REFERENCES eggdb_app_auth.users (user_id), expires_at timestamptz NOT NULL, used_at timestamptz);
 CREATE FUNCTION eggdb_app_auth.setting(wanted text) RETURNS text LANGUAGE plpgsql AS $$
 BEGIN
     RETURN (SELECT s.value FROM eggdb_app_auth.settings s WHERE s.setting = wanted);
@@ -181,6 +184,56 @@ BEGIN
         INSERT INTO eggdb_app_auth.identities (provider, subject, user_id) VALUES (provider_name, claims ->> 'sub', account);
     END IF;
     RETURN eggdb_app_auth.issue_session(account, 'oidc');
+END
+$$;
+CREATE FUNCTION eggdb_app_auth.passkey_challenge(purpose text, for_user bigint DEFAULT NULL) RETURNS bytea LANGUAGE plpgsql AS $$
+DECLARE
+    challenge bytea := gen_random_bytes(32);
+BEGIN
+    IF purpose = 'register' AND for_user IS NULL THEN
+        RAISE EXCEPTION 'registering a passkey needs the user it is for' USING ERRCODE = '22023';
+    END IF;
+    INSERT INTO eggdb_app_auth.passkey_challenges (challenge, purpose, user_id, expires_at) VALUES (challenge, purpose, for_user, now() + interval '5 minutes');
+    RETURN challenge;
+END
+$$;
+CREATE FUNCTION eggdb_app_auth.used_challenge(given bytea, purpose text) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE
+    found record;
+BEGIN
+    SELECT c.user_id, c.used_at, c.expires_at INTO found FROM eggdb_app_auth.passkey_challenges c WHERE c.challenge = given AND c.purpose = used_challenge.purpose;
+    IF NOT FOUND OR found.used_at IS NOT NULL OR found.expires_at <= now() THEN
+        RAISE EXCEPTION 'the passkey challenge is unknown, used or expired' USING ERRCODE = '28000';
+    END IF;
+    UPDATE eggdb_app_auth.passkey_challenges SET used_at = now() WHERE challenge = given;
+    RETURN found.user_id;
+END
+$$;
+CREATE FUNCTION eggdb_app_auth.register_passkey(challenge bytea, attestation_object bytea, client_data_json bytea) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+    owner bigint;
+    registered jsonb;
+BEGIN
+    owner := eggdb_app_auth.used_challenge(challenge, 'register');
+    registered := webauthn_registration(attestation_object, client_data_json, challenge, eggdb_app_auth.setting('origin'), eggdb_app_auth.setting('relying_party_id'), eggdb_app_auth.setting('passkey_user_verification')::boolean);
+    INSERT INTO eggdb_app_auth.passkeys (credential_id, user_id, public_key, sign_count, aaguid)
+        VALUES (registered ->> 'credential_id', owner, decode(registered ->> 'public_key', 'hex'), (registered ->> 'sign_count')::bigint, registered ->> 'aaguid');
+    RETURN registered ->> 'credential_id';
+END
+$$;
+CREATE FUNCTION eggdb_app_auth.sign_in_with_passkey(challenge bytea, credential_id bytea, authenticator_data bytea, client_data_json bytea, signature bytea) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+    stored record;
+    counted bigint;
+BEGIN
+    PERFORM eggdb_app_auth.used_challenge(challenge, 'sign_in');
+    SELECT p.user_id, p.public_key, p.sign_count INTO stored FROM eggdb_app_auth.passkeys p WHERE p.credential_id = encode(sign_in_with_passkey.credential_id, 'hex');
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'the passkey is not registered' USING ERRCODE = '28000';
+    END IF;
+    counted := webauthn_assertion(stored.public_key, authenticator_data, client_data_json, signature, challenge, eggdb_app_auth.setting('origin'), eggdb_app_auth.setting('relying_party_id'), stored.sign_count, eggdb_app_auth.setting('passkey_user_verification')::boolean);
+    UPDATE eggdb_app_auth.passkeys SET sign_count = counted, last_used_at = now() WHERE passkeys.credential_id = encode(sign_in_with_passkey.credential_id, 'hex');
+    RETURN eggdb_app_auth.issue_session(stored.user_id, 'hwk');
 END
 $$;
 CREATE FUNCTION eggdb_app_auth.sign_out(ended_session text) RETURNS boolean LANGUAGE plpgsql AS $$

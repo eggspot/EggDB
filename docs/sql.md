@@ -4078,6 +4078,12 @@ CREATE POLICY own_notes ON notes USING (owner_id = eggdb_app_auth.current_user_i
   `user_id`, `email` and the session id `sid`. The REST API runs each request with a bearer token as that role and
   sets `request.jwt.claims` to the token's claims, so `eggdb_app_auth.current_user_id()` returns the signed-in user
   (NULL when the session was signed out or expired) for row-level security policies.
+- Passkeys (WebAuthn, D772): set the settings `relying_party_id` (the site's domain) and `origin`; then
+  `passkey_challenge('register', user_id)` gives the challenge for `navigator.credentials.create`, and
+  `register_passkey(challenge, attestation_object, client_data_json)` stores the new ES256 credential;
+  `passkey_challenge('sign_in')` and `sign_in_with_passkey(challenge, credential_id, authenticator_data,
+  client_data_json, signature)` sign in with it. `webauthn_registration` and `webauthn_assertion` are the checks on
+  their own.
 - `eggdb_password_hash(text)`, `eggdb_password_verify(text, text)`, `eggdb_jwt_sign(claims, key)`,
   `eggdb_jwt_public_jwk(key)` and `eggdb_jwt_verify(token, jwks, issuer, audience)` are available on their own.
 
