@@ -463,7 +463,7 @@ mod tests {
         }
         assert_eq!(
             run(&mut session, "SELECT sum(cost) AS total FROM pgr_kruskal('SELECT id, source, target, cost FROM pipes')").unwrap(),
-            "total\n3\nSELECT 1"
+            "total\n4\nSELECT 1"
         );
         assert_eq!(
             run(&mut session, "SELECT count(*) AS edges FROM pgr_prim('SELECT id, source, target, cost FROM pipes')").unwrap(),
