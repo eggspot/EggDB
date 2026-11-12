@@ -773,3 +773,4 @@ its full title with its status.
 - [D746](decisions/D746.md) Code-only batch 394 (M11): `eggdb_bi.render_report` in CSV, HTML and PDF with filters, and `eggdb_pdf_table`
 - [D747](decisions/D747.md) Code-only batch 395 (M11): reports delivered to `https://` targets and by e-mail through the operator's SMTP server
 - [D748](decisions/D748.md) Code-only batch 396 (M6b): personal-data classification, differential-privacy budgets and masked copies in `eggdb_privacy`
+- [D749](decisions/D749.md) Code-only batch 397 (M6c): data profiling, entity resolution and golden records in `eggdb_catalog`

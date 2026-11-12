@@ -3603,6 +3603,17 @@ A rule's condition runs as SQL with the privileges of whoever calls `check_quali
 view's query does, so only roles trusted to write SQL should be granted `INSERT` on
 `quality_rules`.
 
+### Profiling and master data
+
+`eggdb_catalog.profile(schema, table [, top_n])` measures every column (row, null and distinct counts, smallest and
+largest value, average text length and the most common values) and keeps the result in `eggdb_catalog.profiles`
+(D749). For master data, rules in `eggdb_catalog.match_rules` say how an entity's records compare, column by column
+(`exact`, `levenshtein`, `similarity` or `soundex`, each with a weight); `resolve_entities(entity, schema, table,
+key_column [, threshold])` links every pair of records whose weighted score reaches the threshold (0.8) and groups
+linked records into clusters in `eggdb_catalog.entity_members`, and `golden_records(entity, schema, table,
+key_column, target_table [, survivorship])` writes one golden record per cluster, each column taken by its rule
+(`first`, `last`, `longest`, `max` or `min`).
+
 ## Privacy: format-preserving tokens, noise and k-anonymity
 
 Three tools for sharing data without exposing people (D245):

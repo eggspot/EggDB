@@ -805,8 +805,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Column-level lineage captured from queries (D51, D244).
 - The Apache Atlas and OpenMetadata APIs (D51).
 - A schema registry and data contracts (D51).
-- Master data: entity resolution, match and merge, and golden records (D51).
-- Data profiling and data-quality rules at scale (D42, D51).
+- Master data: entity resolution, match and merge, and golden records (D51). **Code written, unbuilt** (code-only mode,
+  2026-11-12, D749).
+- Data profiling and data-quality rules at scale (D42, D51). Profiling (`eggdb_catalog.profile`): **code written,
+  unbuilt** (code-only mode, 2026-11-12, D749). Left: rules at scale.
 
 ### M6d The built-in MCP server
 - OAuth for MCP over HTTP, as the MCP specification describes for remote servers; TLS comes with
