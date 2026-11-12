@@ -26,6 +26,9 @@
 //! - [`pbkdf2_hmac_sha256`]: PBKDF2 with HMAC-SHA-256 (RFC 8018, vectors from RFC 7914);
 //! - [`base64_encode`] and [`base64_decode`]: Base64 with padding, the standard alphabet
 //!   (RFC 4648), decoded strictly;
+//! - [`sha3_256`], [`sha3_512`] and [`shake256`]: SHA-3 and SHAKE (FIPS 202);
+//! - [`mlkem768_key_pair`], [`mlkem768_encapsulate`] and [`mlkem768_decapsulate`]: the ML-KEM-768
+//!   key encapsulation mechanism (FIPS 203), for post-quantum key exchange in TLS;
 //! - [`constant_time_eq`]: comparing secrets in time that depends only on their lengths.
 //!
 //! It has no dependencies and never panics on its input.
@@ -43,6 +46,7 @@ mod hash;
 mod hkdf;
 mod hmac;
 mod md5;
+mod mlkem;
 mod p256;
 mod pbkdf2;
 mod poly1305;
@@ -50,6 +54,7 @@ mod psi;
 mod rsa;
 mod sha1;
 mod sha256;
+mod sha3;
 mod sha512;
 mod x25519;
 
@@ -65,6 +70,11 @@ pub use hash::{HashFunction, MAX_HASH_BLOCK_BYTES, MAX_HASH_DIGEST_BYTES};
 pub use hkdf::{HkdfError, hkdf_expand, hkdf_extract};
 pub use hmac::{Hmac, HmacSha256, hmac, hmac_sha256};
 pub use md5::md5_checksum;
+pub use mlkem::{
+    MLKEM_KEY_GENERATION_SEED_BYTES, MLKEM_SHARED_SECRET_BYTES, MLKEM768_CIPHERTEXT_BYTES,
+    MLKEM768_DECAPSULATION_KEY_BYTES, MLKEM768_ENCAPSULATION_KEY_BYTES, MlKemInvalidKey,
+    mlkem768_decapsulate, mlkem768_encapsulate, mlkem768_key_pair,
+};
 pub use p256::{
     EcdsaP256Signature, P256_COMPRESSED_POINT_BYTES, P256_ELEMENT_BYTES,
     P256_UNCOMPRESSED_POINT_BYTES, P256Error, P256PrivateKey, P256PublicKey, ecdsa_p256_sign,
@@ -80,6 +90,7 @@ pub use rsa::{
 };
 pub use sha1::{SHA1_BLOCK_BYTES, SHA1_DIGEST_BYTES, Sha1, sha1};
 pub use sha256::{SHA256_BLOCK_BYTES, SHA256_DIGEST_BYTES, Sha256, sha256};
+pub use sha3::{SHA3_256_DIGEST_BYTES, SHA3_512_DIGEST_BYTES, sha3_256, sha3_512, shake256};
 pub use sha512::{
     SHA384_DIGEST_BYTES, SHA512_BLOCK_BYTES, SHA512_DIGEST_BYTES, Sha384, Sha512, sha384, sha512,
 };

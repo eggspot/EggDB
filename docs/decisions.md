@@ -828,3 +828,4 @@ its full title with its status.
 - [D801](decisions/D801.md) Code-only batch 449 (M6b): PostgreSQL 18's `OAUTHBEARER` login through `oauth` rules
 - [D802](decisions/D802.md) Code-only batch 450 (M6b): LDAP search-and-bind, StartTLS and LDAPS
 - [D803](decisions/D803.md) Code-only batch 451 (M6b): TLS 1.3 client certificates and the `cert` login method
+- [D804](decisions/D804.md) Code-only batch 452 (M6b): SHA-3, SHAKE and ML-KEM-768 in `eggdb-crypto`

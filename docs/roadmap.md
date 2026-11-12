@@ -750,7 +750,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - KMS, HSM and Vault-compatible key sources (D23, D187).
 - Per-column and per-tenant keys (D23, D187, D234).
 - A mode that uses FIPS-approved algorithms only (D23).
-- A path to post-quantum key exchange in TLS (D23).
+- A path to post-quantum key exchange in TLS (D23). SHA-3 and ML-KEM-768 in `eggdb-crypto`: **code written, unbuilt**
+  (code-only mode, 2026-11-12, D804).
 - Server events (logins, privilege and schema changes, chosen tables' reads) in the hash-chained
   audit log, with anchored digests and retention (D26, D231).
 - Crypto-shredding: per-subject keys whose deletion makes data unreadable in the file, history
