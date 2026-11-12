@@ -445,6 +445,27 @@ impl Session<'_> {
             }
             None => None,
         };
+        let imap_listener = match options.imap_listen {
+            Some(address) => {
+                if self.request.read_only {
+                    return Err(usage(format!(
+                        "--imap-listen {address}: IMAP changes flags and mailboxes, which a read-only server cannot"
+                    )));
+                }
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--imap-listen {address}: the IMAP server has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for IMAP on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
         let sparql_listener = match options.sparql_listen {
             Some(address) => {
                 if !address.ip().is_loopback() {
@@ -772,6 +793,7 @@ impl Session<'_> {
                 trino_listener.as_ref(),
                 sparql_listener.as_ref(),
                 smtp_listener.as_ref(),
+                imap_listener.as_ref(),
                 cql_listener.as_ref(),
                 stomp_listener.as_ref(),
                 nats_listener.as_ref(),
@@ -1078,6 +1100,10 @@ impl Session<'_> {
                 Some(listener) => eggdb_mail::serve_smtp(&mail_database, listener, &mail_config, &stop_signals::requested),
                 None => Ok(()),
             });
+            let imap_server = scope.spawn(|| match &imap_listener {
+                Some(listener) => eggdb_mail::serve_imap(&mail_database, listener, &mail_config, &stop_signals::requested),
+                None => Ok(()),
+            });
             let sparql_server = scope.spawn(|| match &sparql_listener {
                 Some(listener) => eggdb_http::serve_with_limits(
                     listener,
@@ -1382,6 +1408,7 @@ impl Session<'_> {
             let _ = trino_server.join();
             let _ = sparql_server.join();
             let _ = smtp_server.join();
+            let _ = imap_server.join();
             let _ = cdc_queue_delivery.join();
             let _ = cdc_topic_delivery.join();
             let _ = sqs_server.join();

@@ -1,9 +1,11 @@
 //! EggDB's email store (D56, D892): mailboxes and messages kept on EggDB's key-value
 //! transactions through [`eggdb_keyspace::Keyspace`] (database 0 of the keyspace the caller
 //! gives, which the `eggdb` binary keeps in the collection `mail0`), mail received over SMTP
-//! ([`serve_smtp`]). Everything is written from the IETF RFCs (RFC 5321, RFC 5322, RFC 2047);
-//! no other mail server's code is used or read.
+//! ([`serve_smtp`]) and read over IMAP ([`serve_imap`]). Everything is written from the IETF
+//! RFCs (RFC 3501, RFC 4315, RFC 5321, RFC 5322, RFC 2047, RFC 6851, RFC 7888); no other mail
+//! server's code is used or read.
 
+mod imap;
 pub mod message;
 mod smtp;
 pub mod store;
@@ -91,6 +93,17 @@ pub fn serve_smtp(
     accept_loop(listener, config, stop, "eggdb-smtp", &|stream| smtp::serve_connection(keyspace, config, stream, stop))
 }
 
+/// Serves the store over IMAP4rev1 on `listener` until `stop`, to clients signing in as
+/// `config.user`.
+pub fn serve_imap(
+    keyspace: &(dyn Keyspace + Sync),
+    listener: &TcpListener,
+    config: &ServerConfig,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> io::Result<()> {
+    accept_loop(listener, config, stop, "eggdb-imap", &|stream| imap::serve_connection(keyspace, config, stream, stop))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,5 +164,64 @@ mod tests {
         assert!(raw.starts_with("Received: from client.example"), "{raw}");
         assert!(raw.contains("Delivered-To: eggdb@localhost\r\n"), "{raw}");
         assert!(raw.ends_with("Subject: hello\r\n\r\n.dotted\r\n"), "{raw}");
+    }
+
+    #[test]
+    fn imap_clients_sign_in_list_fetch_flag_and_expunge() {
+        let keyspace = MemoryKeyspace::default();
+        keyspace
+            .write(0, &mut |keys| {
+                store::append(keys, store::INBOX, &[], 0, b"From: Ann <ann@example.org>\r\nSubject: First\r\n\r\nHello\r\n").map_err(|error| error.0)?;
+                store::append(keys, store::INBOX, &[], 0, b"Subject: Second\r\n\r\nBye\r\n").map(drop).map_err(|error| error.0)
+            })
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let config = ServerConfig {
+            user: "eggdb".to_owned(),
+            password_sha256: eggdb_crypto::sha256(b"secret"),
+            max_connections: 4,
+            max_message_bytes: 1 << 20,
+        };
+        let stopped = AtomicBool::new(false);
+        let stop = || stopped.load(Ordering::Acquire);
+        std::thread::scope(|scope| {
+            scope.spawn(|| serve_imap(&keyspace, &listener, &config, &stop));
+            let stream = TcpStream::connect(address).unwrap();
+            let mut writer = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut until_tagged = |reader: &mut BufReader<TcpStream>, tag: &str| {
+                let mut seen = String::new();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    seen.push_str(&line);
+                    if line.starts_with(tag) || line.is_empty() {
+                        return seen;
+                    }
+                }
+            };
+            until_tagged(&mut reader, "* OK");
+            let mut ask = |command: &str, tag: &str| {
+                writer.write_all(format!("{tag} {command}\r\n").as_bytes()).unwrap();
+                until_tagged(&mut reader, tag)
+            };
+            assert!(ask("LOGIN eggdb wrong", "a1").contains("a1 NO"));
+            assert!(ask("LOGIN eggdb secret", "a2").contains("a2 OK"));
+            let selected = ask("SELECT INBOX", "a3");
+            assert!(selected.contains("* 2 EXISTS"), "{selected}");
+            let fetched = ask("FETCH 1 (UID FLAGS ENVELOPE BODY[TEXT])", "a4");
+            assert!(fetched.contains("\"First\""), "{fetched}");
+            assert!(fetched.contains("Hello"), "{fetched}");
+            assert!(fetched.contains("\\Seen"), "{fetched}");
+            assert!(ask("SEARCH UNSEEN", "a5").contains("* SEARCH 2\r\n"));
+            assert!(ask("STORE 2 +FLAGS (\\Deleted)", "a6").contains("\\Deleted"));
+            assert!(ask("EXPUNGE", "a7").contains("* 2 EXPUNGE"));
+            assert!(ask("CREATE Archive", "a8").contains("a8 OK"));
+            assert!(ask("UID MOVE 1 Archive", "a9").contains("* 1 EXPUNGE"));
+            assert!(ask("STATUS Archive (MESSAGES UIDNEXT)", "b1").contains("MESSAGES 1 UIDNEXT 2"));
+            assert!(ask("LOGOUT", "b2").contains("b2 OK"));
+            stopped.store(true, Ordering::Release);
+        });
     }
 }

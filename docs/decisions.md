@@ -917,3 +917,4 @@ its full title with its status.
 - [D890](decisions/D890.md) Code-only batch 538 (M10): QUALIFY
 - [D891](decisions/D891.md) Code-only batch 539 (M10): SQL Server global temporary tables
 - [D892](decisions/D892.md) Code-only batch 540 (M16): an email store with an SMTP receiver
+- [D893](decisions/D893.md) Code-only batch 541 (M16): IMAP over the email store
