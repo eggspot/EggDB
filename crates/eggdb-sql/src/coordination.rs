@@ -76,6 +76,62 @@ BEGIN
     RETURN jsonb_build_object('flagKey', wanted, 'value', flag.variants -> flag.default_variant, 'variant', flag.default_variant, 'reason', CASE WHEN jsonb_array_length(flag.targeting) = 0 THEN 'STATIC' ELSE 'DEFAULT' END);
 END
 $$;
+CREATE TABLE eggdb_coordination.services (service_name text NOT NULL, instance_id text NOT NULL, address text NOT NULL, metadata jsonb NOT NULL DEFAULT '{}'::jsonb, registered_at timestamptz NOT NULL DEFAULT now(), expires_at timestamptz NOT NULL, PRIMARY KEY (service_name, instance_id));
+CREATE FUNCTION eggdb_coordination.service_event(service text, instance text, happened text) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM pg_notify('eggdb_services', jsonb_build_object('service', service, 'instance', instance, 'event', happened)::text);
+END
+$$;
+CREATE FUNCTION eggdb_coordination.register(service text, instance text, at_address text, ttl interval, details jsonb DEFAULT '{}'::jsonb) RETURNS void LANGUAGE plpgsql AS $$
+DECLARE
+    known boolean;
+BEGIN
+    SELECT true INTO known FROM eggdb_coordination.services s WHERE s.service_name = service AND s.instance_id = instance AND s.expires_at > now();
+    INSERT INTO eggdb_coordination.services (service_name, instance_id, address, metadata, expires_at)
+        VALUES (service, instance, at_address, coalesce(details, '{}'::jsonb), now() + ttl)
+        ON CONFLICT (service_name, instance_id) DO UPDATE SET address = EXCLUDED.address, metadata = EXCLUDED.metadata, expires_at = EXCLUDED.expires_at;
+    IF known IS NULL THEN
+        PERFORM eggdb_coordination.service_event(service, instance, 'registered');
+    END IF;
+END
+$$;
+CREATE FUNCTION eggdb_coordination.heartbeat(service text, instance text, ttl interval) RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE eggdb_coordination.services s SET expires_at = now() + ttl WHERE s.service_name = service AND s.instance_id = instance AND s.expires_at > now();
+    RETURN FOUND;
+END
+$$;
+CREATE FUNCTION eggdb_coordination.deregister(service text, instance text) RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN
+    DELETE FROM eggdb_coordination.services s WHERE s.service_name = service AND s.instance_id = instance;
+    IF FOUND THEN
+        PERFORM eggdb_coordination.service_event(service, instance, 'deregistered');
+        RETURN true;
+    END IF;
+    RETURN false;
+END
+$$;
+CREATE FUNCTION eggdb_coordination.expire_services() RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE
+    gone record;
+    removed bigint := 0;
+BEGIN
+    FOR gone IN SELECT s.service_name, s.instance_id FROM eggdb_coordination.services s WHERE s.expires_at <= now() ORDER BY s.service_name, s.instance_id LOOP
+        DELETE FROM eggdb_coordination.services s WHERE s.service_name = gone.service_name AND s.instance_id = gone.instance_id AND s.expires_at <= now();
+        IF FOUND THEN
+            PERFORM eggdb_coordination.service_event(gone.service_name, gone.instance_id, 'expired');
+            removed := removed + 1;
+        END IF;
+    END LOOP;
+    RETURN removed;
+END
+$$;
+CREATE FUNCTION eggdb_coordination.discover(service text) RETURNS TABLE (instance_id text, address text, metadata jsonb, expires_at timestamptz) LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN QUERY SELECT s.instance_id, s.address, s.metadata, s.expires_at FROM eggdb_coordination.services s
+        WHERE s.service_name = service AND s.expires_at > now() ORDER BY s.instance_id;
+END
+$$;
 "#;
 
 #[cfg(test)]

@@ -767,3 +767,4 @@ its full title with its status.
 - [D740](decisions/D740.md) Code-only batch 388 (M12): `CREATE EXTENSION eggdb_ai`, a semantic cache and agent memory with hybrid recall
 - [D741](decisions/D741.md) Code-only batch 389 (M12): `ST_Transform` to World Mercator and the WGS 84, ETRS89 and NAD83 UTM zones
 - [D742](decisions/D742.md) Code-only batch 390 (M15): `eggdb-zookeeper`, ZooKeeper's client protocol with sessions, ephemeral and sequential znodes, watches and `multi`
+- [D743](decisions/D743.md) Code-only batch 391 (M15): service discovery in `eggdb_coordination` with heartbeats, expiry and `eggdb_services` notifications

@@ -3659,6 +3659,11 @@ SELECT eggdb_coordination.evaluate_flag('new-checkout', '{"country": "VN"}'::jso
   `variant` and `reason` (`TARGETING_MATCH`, `DEFAULT`, `STATIC`, `DISABLED`), or
   `reason: ERROR` with `errorCode: FLAG_NOT_FOUND`. Targeting rules are tried in order, and each
   matches when a context attribute is one of the listed values.
+- Service discovery (D743): `register(service, instance, address, ttl [, metadata])` adds or refreshes an instance,
+  `heartbeat(service, instance, ttl)` keeps it alive (false once it has expired), `deregister` removes it,
+  `discover(service)` lists the live instances, and `expire_services()` (run by a pg_cron job) removes the ones whose
+  time ran out. Each instance that registers, deregisters or expires is announced on the `eggdb_services` channel
+  (`LISTEN eggdb_services`) as `{"service", "instance", "event"}`.
 
 ## Resumable copies with verified differences (eggdb_migration)
 
