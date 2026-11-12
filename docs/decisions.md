@@ -790,3 +790,4 @@ its full title with its status.
 - [D763](decisions/D763.md) Code-only batch 411 (M6b): marketplace listings of shared data, `CREATE EXTENSION eggdb_marketplace`
 - [D764](decisions/D764.md) Code-only batch 412 (M6b): tenants isolated by schema, copied from a template and upgraded with it
 - [D765](decisions/D765.md) Code-only batch 413 (M11): spreadsheet-style tables with formula columns, `spreadsheet_recalculate` and `eggdb_sheets`
+- [D766](decisions/D766.md) Code-only batch 414 (M16): streaming SQL with event time, watermarks and tumbling, hopping and session windows, `eggdb_streams`

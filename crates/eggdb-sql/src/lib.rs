@@ -115,6 +115,7 @@ mod compliance;
 mod marketplace;
 mod spreadsheet;
 mod sheets;
+mod streams;
 mod report_pdf;
 mod zarr;
 mod new_files;

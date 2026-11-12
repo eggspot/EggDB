@@ -3747,7 +3747,7 @@ SELECT eggdb_retention.export_ediscovery('case-7', 'public', 'trades', 'client =
 - `place_hold`'s optional last argument is a row condition: the hold then stops changes and deletes only of the rows
   it matches. Erasure requests and disposals skip those rows; a request whose rows are held waits.
 - `record_classes` is the records schedule: a retention period, a disposition (`delete`, or `review`, which needs
-  `dispose(schema, table, reviewed => true)`) and the rule it cites. `schedule(schema, table, time_column, class)`
+  `dispose(schema, table, true)`) and the rule it cites. `schedule(schema, table, time_column, class)`
   applies a class to a table as a retention rule. `due_for_disposition()` counts each scheduled table's rows past
   retention and not held, and `dispose(schema, table)` deletes them and logs it in `eggdb_retention.disposals`.
 - `export_ediscovery(matter, schema, table [, condition, key_column])` returns the matching rows as an EDRM XML load
@@ -4011,6 +4011,30 @@ SELECT * FROM eggdb_sheets.grid('orders');
 `set_cell(sheet, cell, raw)` enters a value or formula (an empty one clears the cell), a formula column fills its
 formula down every row from `first_row` (2 by default) with `{row}` replaced by the row number, and `cell_values(sheet)`
 and `grid(sheet)` return the recalculated values per cell and per row.
+
+## Streaming windows (eggdb_streams)
+
+`CREATE EXTENSION eggdb_streams` computes windows over a table of events by event time (D766):
+
+```sql
+CREATE EXTENSION eggdb_streams;
+CREATE TABLE clicks (user_id text NOT NULL, at timestamptz NOT NULL, amount integer NOT NULL);
+SELECT eggdb_streams.create_stream('clicks', 'public', 'clicks', 'at', interval '5 minutes');
+SELECT eggdb_streams.create_window('clicks per hour', 'clicks', 'tumbling', 'count(*) AS events, sum(amount) AS total',
+    'clicks_hourly', interval '1 hour');
+SELECT eggdb_streams.create_window('visits', 'clicks', 'session', 'count(*) AS events', 'clicks_sessions',
+    NULL, NULL, interval '30 minutes', ARRAY['user_id']);
+SELECT cron.schedule('* * * * *', 'SELECT eggdb_streams.advance(''clicks'')');
+```
+
+- `create_stream(name, schema, table, time_column [, allowed_lateness])` makes a table a stream. Its watermark trails
+  the newest event time by the allowed lateness; an inserted event older than the watermark is late: it is kept in
+  `eggdb_streams.late_events` instead of the table.
+- `create_window(name, stream, kind, aggregates, target [, size, slide, gap, group_columns])` defines a `tumbling`
+  window (`size`), a `hopping` one (`size` and a `slide` that divides it) or a `session` one (`gap`, per group), and
+  creates the target table with `window_start`, `window_end`, the group columns and the aggregates.
+- `advance(stream)` moves the watermark and appends to each target the windows that closed: windows whose end the
+  watermark has passed, each emitted once. Run it from pg_cron or after each batch of inserts.
 
 ## Resumable copies with verified differences (eggdb_migration)
 

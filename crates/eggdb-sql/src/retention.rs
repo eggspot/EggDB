@@ -190,7 +190,7 @@ BEGIN
         RAISE EXCEPTION 'table %.% has no records schedule', schema_name, table_name USING ERRCODE = '42704';
     END IF;
     IF scheduled.s_disposition = 'review' AND NOT reviewed THEN
-        RAISE EXCEPTION 'record class % needs a reviewed disposition: call dispose with reviewed => true', scheduled.s_class USING ERRCODE = '55000';
+        RAISE EXCEPTION 'record class % needs a reviewed disposition: call dispose(schema, table, true)', scheduled.s_class USING ERRCODE = '55000';
     END IF;
     SELECT h.hold_name INTO hold FROM eggdb_retention.holds h WHERE h.schema_name = dispose.schema_name AND h.table_name = dispose.table_name AND h.lifted_at IS NULL AND h.row_condition IS NULL ORDER BY h.hold_name LIMIT 1;
     IF hold IS NOT NULL THEN

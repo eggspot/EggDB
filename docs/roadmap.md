@@ -1610,7 +1610,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - LogQL and TraceQL, with the Loki and Tempo query HTTP APIs Grafana uses (D39). LogQL log queries with Loki's
   query and label APIs: **code written, unbuilt** (code-only mode, 2026-11-11, D496).
 - Telegraf and Prometheus in CI, and benchmarks against InfluxDB and Prometheus (D220).
-- Streaming SQL: event time, watermarks, and tumbling, hopping and session windows (D55).
+- Streaming SQL: event time, watermarks, and tumbling, hopping and session windows (D55). **Code written, unbuilt**
+  (code-only mode, 2026-11-12, D766), in `eggdb_streams`.
 - Stream-stream joins and late data (D55).
 - `MATCH_RECOGNIZE` for complex event processing (D55).
 - ETL connectors, first scheduled copies from PostgreSQL, MySQL and SQL Server and from CSV and
