@@ -1017,7 +1017,7 @@ fn zone_suffix(zone: Option<TimeZone>, offset_seconds: i32) -> String {
     }
 }
 
-fn time_json(micros_since_2000: i64, epoch: Option<&str>, zone: Option<TimeZone>) -> String {
+pub(crate) fn time_json(micros_since_2000: i64, epoch: Option<&str>, zone: Option<TimeZone>) -> String {
     let unix_micros = micros_since_2000.saturating_add(UNIX_EPOCH_FROM_2000_MICROS);
     match epoch {
         Some("ns") => (i128::from(unix_micros) * 1000).to_string(),

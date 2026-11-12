@@ -429,6 +429,22 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                 }
                 None => json(400, "{\"error\":\"missing required parameter q\"}".to_owned()),
             },
+            ("POST", "/api/v2/query") => {
+                let answered = crate::flux::query_text(&request.body, request.header("content-type"))
+                    .and_then(|query| crate::flux::answer(&mut self.session(), &query));
+                match answered {
+                    Ok(csv) => Response {
+                        status: 200,
+                        content_type: "text/csv; charset=utf-8".to_owned(),
+                        body: csv.into_bytes(),
+                        headers: Vec::new(),
+                    },
+                    Err(message) => json(
+                        400,
+                        format!("{{\"code\":\"invalid\",\"message\":{}}}", json_string(&message)),
+                    ),
+                }
+            }
             ("POST", "/write" | "/api/v2/write") => {
                 self.write_lines(request, value("precision").unwrap_or("ns"))
             }

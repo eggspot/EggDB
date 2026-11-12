@@ -706,3 +706,4 @@ its full title with its status.
 - [D679](decisions/D679.md) Code-only batch 327 (M16): InfluxQL `SELECT ... INTO`, written back through the metrics store
 - [D680](decisions/D680.md) Code-only batch 328 (M16): InfluxQL subqueries as derived tables
 - [D681](decisions/D681.md) Code-only batch 329 (M16): InfluxQL `tz()`, with local buckets and offset times
+- [D682](decisions/D682.md) Code-only batch 330 (M16): a Flux core over `/api/v2/query` with annotated CSV
