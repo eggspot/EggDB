@@ -3,6 +3,68 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 const MAX_STATUS_LINE: usize = 1024;
+const MOST_TRUST_FILE_BYTES: u64 = 16 << 20;
+const TRUST_VARIABLE: &str = "SSL_CERT_FILE";
+const SYSTEM_TRUST_FILES: [&str; 4] = [
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/cert.pem",
+    "/usr/local/etc/openssl/cert.pem",
+];
+
+trait Duplex: Read + Write {}
+
+impl<T: Read + Write> Duplex for T {}
+
+fn trust_store() -> io::Result<eggdb_tls::verify::TrustStore> {
+    let candidates: Vec<String> = match std::env::var(TRUST_VARIABLE) {
+        Ok(path) => vec![path],
+        Err(_) => SYSTEM_TRUST_FILES.iter().map(|path| (*path).to_owned()).collect(),
+    };
+    for path in candidates {
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        let mut text = String::new();
+        if file.take(MOST_TRUST_FILE_BYTES).read_to_string(&mut text).is_err() {
+            continue;
+        }
+        if let Ok(trust) = eggdb_tls::verify::TrustStore::from_pem(&text) {
+            return Ok(trust);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("no trusted certificates to check an https:// server with: set {TRUST_VARIABLE} to a PEM file of roots"),
+    ))
+}
+
+fn connected(target: &HttpTarget, timeout: Duration) -> io::Result<Box<dyn Duplex>> {
+    let address = (
+        target.host.trim_start_matches('[').trim_end_matches(']'),
+        target.port,
+    )
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "the host has no address"))?;
+    let stream = TcpStream::connect_timeout(&address, timeout)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    if !target.tls {
+        return Ok(Box::new(stream));
+    }
+    let host = target.host.trim_start_matches('[').trim_end_matches(']');
+    let server_name = eggdb_tls::verify::ServerName::parse(host)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+    let verification = eggdb_tls::ServerVerification::Full {
+        trust: trust_store()?,
+        server_name,
+    };
+    let config = eggdb_tls::ClientConfig::new(verification, host);
+    let secured = eggdb_tls::TlsStream::connect(stream, &config)
+        .map_err(|error| io::Error::new(io::ErrorKind::ConnectionAborted, format!("TLS with {host}: {error}")))?;
+    Ok(Box::new(secured))
+}
 
 /// Where a plain `http://` URL points.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,13 +75,22 @@ pub struct HttpTarget {
     pub port: u16,
     /// The path and query, `/` when the URL has none.
     pub path: String,
+    /// Whether the URL is `https://`: the connection runs TLS and checks the server's
+    /// certificate against the roots in `SSL_CERT_FILE`, or the system's.
+    pub tls: bool,
 }
 
-/// Reads an `http://host[:port][/path]` URL; `https` and anything else are refused.
+/// Reads an `http://host[:port][/path]` or `https://host[:port][/path]` URL; anything else is
+/// refused.
 pub fn parse_http_url(url: &str) -> Result<HttpTarget, String> {
-    let rest = url
-        .strip_prefix("http://")
-        .ok_or_else(|| format!("{url}: only http:// URLs are supported yet"))?;
+    let (rest, tls) = match url.strip_prefix("https://") {
+        Some(rest) => (rest, true),
+        None => (
+            url.strip_prefix("http://")
+                .ok_or_else(|| format!("{url}: give an http:// or https:// URL"))?,
+            false,
+        ),
+    };
     let (authority, path) = match rest.find('/') {
         Some(at) => (&rest[..at], &rest[at..]),
         None => (rest, "/"),
@@ -38,12 +109,13 @@ pub fn parse_http_url(url: &str) -> Result<HttpTarget, String> {
             port.parse::<u16>()
                 .map_err(|_| format!("{url} has an invalid port"))?,
         ),
-        _ => (authority.to_owned(), 80),
+        _ => (authority.to_owned(), if tls { 443 } else { 80 }),
     };
     Ok(HttpTarget {
         host,
         port,
         path: path.to_owned(),
+        tls,
     })
 }
 
@@ -55,16 +127,7 @@ pub fn post(
     body: &[u8],
     timeout: Duration,
 ) -> io::Result<u16> {
-    let address = (
-        target.host.trim_start_matches('[').trim_end_matches(']'),
-        target.port,
-    )
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "the host has no address"))?;
-    let mut stream = TcpStream::connect_timeout(&address, timeout)?;
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
+    let mut stream = connected(target, timeout)?;
     let head = format!(
         "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nUser-Agent: eggdb\r\n\r\n",
         target.path,
@@ -156,9 +219,10 @@ fn dechunk(raw: &[u8], max_body: usize) -> io::Result<Vec<u8>> {
     }
 }
 
-/// The `Host` header `target` is sent with: the host, and the port unless it is 80.
+/// The `Host` header `target` is sent with: the host, and the port unless it is the scheme's
+/// default (80, or 443 for `https://`).
 pub fn host_header(target: &HttpTarget) -> String {
-    if target.port == 80 {
+    if target.port == if target.tls { 443 } else { 80 } {
         target.host.clone()
     } else {
         format!("{}:{}", target.host, target.port)
@@ -178,16 +242,7 @@ pub fn request(
     timeout: Duration,
     max_body: usize,
 ) -> io::Result<ClientResponse> {
-    let address = (
-        target.host.trim_start_matches('[').trim_end_matches(']'),
-        target.port,
-    )
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "the host has no address"))?;
-    let mut stream = TcpStream::connect_timeout(&address, timeout)?;
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
+    let mut stream = connected(target, timeout)?;
     let mut head = format!(
         "{method} {path_and_query} HTTP/1.1\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()

@@ -580,6 +580,7 @@ fn gzip_line_protocol_is_decoded_by_the_listener_and_remote_write_stays_snappy()
         host: "127.0.0.1".to_owned(),
         port: listener.local_addr().unwrap().port(),
         path: "/".to_owned(),
+        tls: false,
     };
     let budget = MemoryBudget::default();
     let limits = eggdb_http::Limits::new(crate::MAX_REQUEST_BYTES, &budget)

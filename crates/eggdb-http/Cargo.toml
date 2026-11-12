@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 eggdb-content = { path = "../eggdb-content" }
 eggdb-platform = { path = "../eggdb-platform" }
+eggdb-tls = { path = "../eggdb-tls" }
 
 [lints]
 workspace = true

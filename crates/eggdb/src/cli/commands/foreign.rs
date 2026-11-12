@@ -401,7 +401,7 @@ fn is_sql_server(source: &str) -> bool {
 }
 
 fn is_web(source: &str) -> bool {
-    source.starts_with("http://")
+    source.starts_with("http://") || source.starts_with("https://")
 }
 
 fn web_allowed(allowed: &str, source: &str) -> bool {
@@ -411,7 +411,7 @@ fn web_allowed(allowed: &str, source: &str) -> bool {
     let path = wanted.path.split('?').next().unwrap_or_default();
     let climbs = path.split('/').any(|segment| segment == ".." || segment == ".");
     let prefix = if entry.path.ends_with('/') { entry.path.clone() } else { format!("{}/", entry.path) };
-    entry.host.eq_ignore_ascii_case(&wanted.host) && entry.port == wanted.port && !climbs && (path.starts_with(&prefix) || path == entry.path)
+    entry.host.eq_ignore_ascii_case(&wanted.host) && entry.port == wanted.port && entry.tls == wanted.tls && !climbs && (path.starts_with(&prefix) || path == entry.path)
 }
 
 fn json_rows(bytes: &[u8], shown: &str, row: &mut dyn FnMut(String) -> Result<(), String>) -> Result<(), String> {
@@ -539,7 +539,7 @@ fn read(
         return read_parquet(&checked, query, row);
     }
     Err(format!(
-        "{}: give a postgresql:// URL (EggDB or PostgreSQL), a sqlserver:// or mysql:// URL, a file:...parquet or file:...csv path, an s3://bucket/...parquet or ...csv object, or an http:// URL of CSV, Parquet or a JSON array",
+        "{}: give a postgresql:// URL (EggDB or PostgreSQL), a sqlserver:// or mysql:// URL, a file:...parquet or file:...csv path, an s3://bucket/...parquet or ...csv object, or an http:// or https:// URL of CSV, Parquet or a JSON array",
         shown_source(source)
     ))
 }

@@ -944,3 +944,4 @@ its full title with its status.
 - [D917](decisions/D917.md) Code-only batch 565 (M18): IMPORT FOREIGN SCHEMA
 - [D918](decisions/D918.md) Code-only batch 566 (M5): Transact-SQL character classes in LIKE
 - [D919](decisions/D919.md) Code-only batch 567 (M14): WORM backups through S3 Object Lock
+- [D920](decisions/D920.md) Code-only batch 568 (M18): HTTPS in the shared HTTP client
