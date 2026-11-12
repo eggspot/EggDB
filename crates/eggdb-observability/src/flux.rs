@@ -153,7 +153,7 @@ fn tokens(text: &str) -> Result<Vec<Token>, String> {
         let Some(symbol) = SYMBOLS.iter().find(|symbol| rest.starts_with(**symbol)) else {
             return Err(format!("unexpected {character}"));
         };
-        found.push(Token::Symbol(symbol));
+        found.push(Token::Symbol(*symbol));
         at += symbol.chars().count();
     }
     Ok(found)

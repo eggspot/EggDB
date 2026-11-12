@@ -714,3 +714,4 @@ its full title with its status.
 - [D687](decisions/D687.md) Code-only batch 335 (M8): an Indonesian stemmer and the `indonesian` text-search configuration
 - [D688](decisions/D688.md) Code-only batch 336 (M6c): OTLP protobuf for EggDB's own metrics, logs and traces, chosen by `OTEL_EXPORTER_OTLP_PROTOCOL`
 - [D689](decisions/D689.md) Code-only batch 337 (M10): Oracle `RETURNING ... INTO :bind` in `eggdb shell`, and sql.md's Oracle gaps updated
+- [D690](decisions/D690.md) Code-only batch 338 (M9, M10): an XML parser and XPath 1.0 for `xpath()`, `EXTRACTVALUE` and `EXISTSNODE`

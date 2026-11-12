@@ -81,6 +81,8 @@ impl SqlState {
     pub const DATA_EXCEPTION: Self = Self(*b"22000");
     /// `22023` invalid_parameter_value.
     pub const INVALID_PARAMETER_VALUE: Self = Self(*b"22023");
+    /// `2200M`, `invalid_xml_document`.
+    pub const INVALID_XML_DOCUMENT: Self = Self(*b"2200M");
     /// `22011` substring_error.
     pub const SUBSTRING_ERROR: Self = Self(*b"22011");
     /// `22004` null_value_not_allowed.

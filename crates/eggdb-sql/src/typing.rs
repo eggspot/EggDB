@@ -311,6 +311,9 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
     if let Some(sql_type) = crate::learning::result_type(name) {
         return Some(sql_type);
     }
+    if let Some(sql_type) = crate::xml_path::result_type(name) {
+        return Some(sql_type);
+    }
     if let Some(sql_type) = crate::fuzzy_functions::result_type(name) {
         return Some(sql_type);
     }
