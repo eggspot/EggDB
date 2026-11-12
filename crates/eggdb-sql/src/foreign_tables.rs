@@ -40,6 +40,13 @@ pub(crate) enum ForeignDataCommand {
         names: Vec<Name>,
         if_exists: bool,
     },
+    ImportSchema {
+        remote: String,
+        limit: Option<(bool, Vec<String>)>,
+        server: String,
+        local: String,
+        options: Vec<(String, String)>,
+    },
 }
 
 impl ForeignDataCommand {
@@ -51,6 +58,7 @@ impl ForeignDataCommand {
             Self::DropServer { .. } => "DROP SERVER",
             Self::CreateTable { .. } => "CREATE FOREIGN TABLE",
             Self::DropTable { .. } => "DROP FOREIGN TABLE",
+            Self::ImportSchema { .. } => "IMPORT FOREIGN SCHEMA",
         }
     }
 }
@@ -142,6 +150,38 @@ pub(crate) fn table_source(server_source: &str, table: &str, options: &[(String,
     Ok((server_source.to_owned(), query))
 }
 
+/// The query that lists a remote schema's columns in the source's `information_schema`,
+/// aliased so every dialect names the fields alike.
+pub(crate) fn columns_query(source: &str, schema: &str) -> String {
+    format!(
+        "SELECT table_name AS table_name, column_name AS column_name, data_type AS data_type FROM information_schema.columns WHERE table_schema = {} ORDER BY table_name, ordinal_position",
+        if source.starts_with("sqlserver://") { format!("N{}", literal(schema)) } else { literal(schema) }
+    )
+}
+
+/// The local type for a remote column's `information_schema` data type; text for one EggDB
+/// does not know.
+pub(crate) fn local_type(remote: &str) -> &'static str {
+    match remote.trim().to_ascii_lowercase().as_str() {
+        "smallint" | "tinyint" | "int2" | "year" => "smallint",
+        "integer" | "int" | "int4" | "mediumint" => "integer",
+        "bigint" | "int8" => "bigint",
+        "real" | "float4" | "float" => "real",
+        "double precision" | "double" | "float8" => "double precision",
+        "numeric" | "decimal" | "money" | "smallmoney" => "numeric",
+        "boolean" | "bool" | "bit" => "boolean",
+        "date" => "date",
+        "time" | "time without time zone" => "time",
+        "timestamp" | "timestamp without time zone" | "datetime" | "datetime2" | "smalldatetime" => "timestamp",
+        "timestamp with time zone" | "datetimeoffset" => "timestamptz",
+        "uuid" | "uniqueidentifier" => "uuid",
+        "json" | "jsonb" => "jsonb",
+        "bytea" | "blob" | "longblob" | "mediumblob" | "tinyblob" | "binary" | "varbinary" | "image" => "bytea",
+        "interval" => "interval",
+        _ => "text",
+    }
+}
+
 /// The view a foreign table becomes: each declared column read from the source's JSON rows
 /// and cast to its declared type.
 pub(crate) fn view_sql(table: &str, columns: &[(String, String)], source: &str, query: &str) -> String {
@@ -188,6 +228,15 @@ mod tests {
         assert_eq!(run("SELECT id FROM orders").unwrap_err().state(), SqlState::UNDEFINED_TABLE);
         run("DROP FOREIGN TABLE IF EXISTS orders").unwrap();
         run("CREATE FOREIGN DATA WRAPPER anything HANDLER h").unwrap();
+    }
+
+    #[test]
+    fn remote_types_map_to_local_ones() {
+        assert_eq!(local_type("character varying"), "text");
+        assert_eq!(local_type("datetime2"), "timestamp");
+        assert_eq!(local_type("TINYINT"), "smallint");
+        assert_eq!(local_type("uniqueidentifier"), "uuid");
+        assert!(columns_query("sqlserver://r@h:1433/d", "dbo").contains("table_schema = N'dbo'"));
     }
 
     #[test]

@@ -116,6 +116,42 @@ impl Parser<'_> {
         Ok(Statement::ForeignData(Box::new(command)))
     }
 
+    pub(super) fn import_foreign_schema(&mut self) -> SqlResult<Statement> {
+        self.at += 3;
+        let remote = self.name()?.text;
+        let limit = if self.take_word("limit") {
+            self.expect_word("to")?;
+            Some((false, self.name_list()?))
+        } else if self.take_word("except") {
+            Some((true, self.name_list()?))
+        } else {
+            None
+        };
+        self.expect_word("from")?;
+        self.expect_word("server")?;
+        let server = self.name()?.text;
+        self.expect_word("into")?;
+        let local = self.name()?.text;
+        let options = self.foreign_options()?;
+        Ok(Statement::ForeignData(Box::new(ForeignDataCommand::ImportSchema {
+            remote,
+            limit,
+            server,
+            local,
+            options,
+        })))
+    }
+
+    fn name_list(&mut self) -> SqlResult<Vec<String>> {
+        self.expect(&TokenKind::LeftParen)?;
+        let mut names = vec![self.name()?.text];
+        while self.take(&TokenKind::Comma) {
+            names.push(self.name()?.text);
+        }
+        self.expect(&TokenKind::RightParen)?;
+        Ok(names)
+    }
+
     pub(super) fn drop_foreign_data(&mut self) -> SqlResult<Statement> {
         let server = self.take_word("server");
         if !server {

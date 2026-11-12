@@ -1,7 +1,10 @@
 use super::{QueryResult, Session};
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
-use crate::foreign_tables::{CREATE_REGISTRY, ForeignDataCommand, SERVERS_TABLE, TABLES_TABLE, server_source, table_source, view_sql};
+use crate::foreign_tables::{
+    CREATE_REGISTRY, ForeignDataCommand, SERVERS_TABLE, TABLES_TABLE, columns_query, local_type, server_source, table_source,
+    view_sql,
+};
 use crate::sqlserver_security::{literal, qualified};
 use crate::types::Value;
 
@@ -22,6 +25,78 @@ impl Session<'_> {
             .flat_map(|result| result.rows.iter())
             .filter_map(|row| row.first().and_then(Value::to_text))
             .collect())
+    }
+
+    fn foreign_rows(&mut self, text: &str) -> SqlResult<Vec<Vec<String>>> {
+        Ok(self
+            .foreign_sql(text)?
+            .iter()
+            .filter(|result| result.columns.is_some())
+            .flat_map(|result| result.rows.iter())
+            .map(|row| row.iter().map(|value| value.to_text().unwrap_or_default()).collect())
+            .collect())
+    }
+
+    fn create_foreign_table(
+        &mut self,
+        name: &str,
+        columns: &[(String, String)],
+        server: &str,
+        options: &[(String, String)],
+        if_not_exists: bool,
+    ) -> SqlResult<()> {
+        let Some(source) = self.server_of(server)? else {
+            return Err(SqlError::new(SqlState::UNDEFINED_OBJECT, format!("server \"{server}\" does not exist")));
+        };
+        let known = !self
+            .foreign_texts(&format!("SELECT name FROM {TABLES_TABLE} WHERE name = {}", literal(name)))?
+            .is_empty();
+        if known && if_not_exists {
+            return Ok(());
+        }
+        let (source, query) = table_source(&source, crate::schemas::base_name(name), options)?;
+        self.foreign_sql(&view_sql(name, columns, &source, &query))?;
+        self.foreign_sql(&format!("INSERT INTO {TABLES_TABLE} VALUES ({}, {})", literal(name), literal(server)))?;
+        Ok(())
+    }
+
+    fn import_foreign_schema(&mut self, remote: &str, limit: Option<&(bool, Vec<String>)>, server: &str, local: &str) -> SqlResult<()> {
+        let Some(source) = self.server_of(server)? else {
+            return Err(SqlError::new(SqlState::UNDEFINED_OBJECT, format!("server \"{server}\" does not exist")));
+        };
+        if source == "file:" {
+            return Err(SqlError::new(SqlState::FEATURE_NOT_SUPPORTED, "a file_fdw server has no schema to import"));
+        }
+        let rows = self.foreign_rows(&format!(
+            "SELECT r.o ->> 'table_name', r.o ->> 'column_name', r.o ->> 'data_type' FROM eggdb_foreign({}, {}) AS r(o)",
+            literal(&source),
+            literal(&columns_query(&source, remote))
+        ))?;
+        let mut tables: Vec<(String, Vec<(String, String)>)> = Vec::new();
+        for row in rows {
+            let [table, column, data_type] = row.as_slice() else {
+                continue;
+            };
+            let wanted = match limit {
+                Some((false, names)) => names.iter().any(|name| name == table),
+                Some((true, names)) => !names.iter().any(|name| name == table),
+                None => true,
+            };
+            if !wanted {
+                continue;
+            }
+            let column = (column.clone(), local_type(data_type).to_owned());
+            match tables.last_mut() {
+                Some((known, columns)) if known == table => columns.push(column),
+                _ => tables.push((table.clone(), vec![column])),
+            }
+        }
+        for (table, columns) in tables {
+            let options = vec![("schema_name".to_owned(), remote.to_owned()), ("table_name".to_owned(), table.clone())];
+            let name = crate::schemas::written_qualified(local, &table);
+            self.create_foreign_table(&name, &columns, server, &options, false)?;
+        }
+        Ok(())
     }
 
     fn server_of(&mut self, name: &str) -> SqlResult<Option<String>> {
@@ -83,20 +158,14 @@ impl Session<'_> {
                 server,
                 options,
                 if_not_exists,
-            } => {
-                let Some(source) = self.server_of(server)? else {
-                    return Err(SqlError::new(SqlState::UNDEFINED_OBJECT, format!("server \"{server}\" does not exist")));
-                };
-                let known = !self
-                    .foreign_texts(&format!("SELECT name FROM {TABLES_TABLE} WHERE name = {}", literal(&name.text)))?
-                    .is_empty();
-                if known && *if_not_exists {
-                    return Ok(QueryResult::command(command.tag()));
-                }
-                let (source, query) = table_source(&source, crate::schemas::base_name(&name.text), options)?;
-                self.foreign_sql(&view_sql(&name.text, columns, &source, &query))?;
-                self.foreign_sql(&format!("INSERT INTO {TABLES_TABLE} VALUES ({}, {})", literal(&name.text), literal(server)))?;
-            }
+            } => self.create_foreign_table(&name.text, columns, server, options, *if_not_exists)?,
+            ForeignDataCommand::ImportSchema {
+                remote,
+                limit,
+                server,
+                local,
+                ..
+            } => self.import_foreign_schema(remote, limit.as_ref(), server, local)?,
             ForeignDataCommand::DropTable { names, if_exists } => {
                 for name in names {
                     let known = !self

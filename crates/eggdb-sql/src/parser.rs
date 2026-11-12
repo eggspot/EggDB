@@ -1024,6 +1024,9 @@ impl<'t> Parser<'t> {
             "refresh" if self.postgresql() && self.is_word_at(1, "materialized") => {
                 self.refresh_materialized_view()
             }
+            "import" if self.postgresql() && self.is_word_at(1, "foreign") && self.is_word_at(2, "schema") => {
+                self.import_foreign_schema()
+            }
             "create" if self.at_event_trigger() => self.create_event_trigger(),
             "drop" if self.at_event_trigger() => self.drop_event_trigger(),
             "alter" if self.at_event_trigger() => self.alter_event_trigger(),
