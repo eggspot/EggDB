@@ -34,17 +34,29 @@ fn set_column(constraint: &ConstraintSpec) -> Option<(String, String)> {
     }
 }
 
+fn year_column(constraint: &ConstraintSpec) -> Option<String> {
+    let ConstraintKind::Check { text, .. } = &constraint.kind else {
+        return None;
+    };
+    let column = constraint.column.as_ref()?;
+    let quoted = format!("`{}`", column.text.replace('`', "``"));
+    (*text == format!("{quoted} between 1901 and 2155 or {quoted} = 0")).then(|| column.text.clone())
+}
+
 impl Session<'_> {
     /// Stores the values of `table`'s MySQL `SET` columns as MySQL does, in member order with
-    /// each member once and numbers read as bit masks, through a trigger that runs before the
-    /// columns' checks (D970).
+    /// each member once and numbers read as bit masks, and its `YEAR` columns' two-digit years
+    /// as the years they stand for, through a trigger that runs before the columns' checks
+    /// (D970, D971).
     pub(super) fn keep_set_member_order<'c>(
         &mut self,
         table: &str,
         constraints: impl IntoIterator<Item = &'c ConstraintSpec>,
     ) -> SqlResult<()> {
-        let columns: Vec<(String, String)> = constraints.into_iter().filter_map(set_column).collect();
-        if columns.is_empty() {
+        let constraints: Vec<&ConstraintSpec> = constraints.into_iter().collect();
+        let columns: Vec<(String, String)> = constraints.iter().copied().filter_map(set_column).collect();
+        let years: Vec<String> = constraints.iter().copied().filter_map(year_column).collect();
+        if columns.is_empty() && years.is_empty() {
             return Ok(());
         }
         let schema = schema_of(table);
@@ -59,6 +71,13 @@ impl Session<'_> {
                     members = literal(members)
                 )
             })
+            .chain(years.iter().map(|column| {
+                format!(
+                    "NEW.{column} := CASE WHEN NEW.{column} BETWEEN 1 AND 69 THEN NEW.{column} + 2000 \
+                     WHEN NEW.{column} BETWEEN 70 AND 99 THEN NEW.{column} + 1900 ELSE NEW.{column} END; ",
+                    column = identifier(column)
+                )
+            }))
             .collect();
         let function = identifier(&format!("set_order_{schema}_{name}"));
         let text = format!(
@@ -103,5 +122,15 @@ mod tests {
         assert!(stored.contains("s,l"), "{stored}");
         assert!(stored.contains("s,m"), "{stored}");
         assert!(session.execute("INSERT INTO shirts VALUES (3, 'xl')", &mut |_| {}).is_err());
+    }
+
+    #[test]
+    fn two_digit_years_become_the_years_mysql_reads_them_as() {
+        let store = MemoryStore::default();
+        let mut session = Session::with_dialect(&store, Dialect::MySql);
+        text(&mut session, "CREATE TABLE vintages (id INT PRIMARY KEY, made YEAR)");
+        text(&mut session, "INSERT INTO vintages VALUES (1, 5), (2, 87), (3, 1999), (4, 0)");
+        let stored = text(&mut session, "SELECT made FROM vintages ORDER BY id");
+        assert_eq!(stored, "made\n2005\n1987\n1999\n0\nSELECT 4", "{stored}");
     }
 }

@@ -995,3 +995,4 @@ its full title with its status.
 - [D968](decisions/D968.md) Code-only batch 616 (M6f): an ODBC driver on the C API
 - [D969](decisions/D969.md) Code-only batch 617 (M12): pgRouting's depth-first and breadth-first searches and k shortest paths
 - [D970](decisions/D970.md) Code-only batch 618 (M10): MySQL SET values stored in member order
+- [D971](decisions/D971.md) Code-only batch 619 (M10): MySQL's two-digit YEAR values
