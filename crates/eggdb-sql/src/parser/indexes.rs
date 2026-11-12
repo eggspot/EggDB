@@ -415,9 +415,6 @@ impl Parser<'_> {
             }
         }
         self.expect(&TokenKind::RightParen)?;
-        if analyze && style != ExplainStyle::Plan {
-            return Err(self.not_supported("EXPLAIN ANALYZE in formats other than TEXT"));
-        }
         Ok((analyze, buffers, style))
     }
 

@@ -3069,10 +3069,14 @@ impl<'s> Session<'s> {
             selects,
             subplans,
         };
-        Ok(if explain.style == crate::ast::ExplainStyle::Tree {
-            crate::explain::render_analyzed_tree(&plan, analyzed)
-        } else {
-            crate::explain::render_analyzed(&plan.query, analyzed)
+        Ok(match explain.style {
+            crate::ast::ExplainStyle::Tree => crate::explain::render_analyzed_tree(&plan, analyzed),
+            style @ (crate::ast::ExplainStyle::PostgresJson
+            | crate::ast::ExplainStyle::PostgresYaml
+            | crate::ast::ExplainStyle::PostgresXml) => {
+                crate::explain::render_analyzed_formatted(&plan.query, analyzed, style)
+            }
+            _ => crate::explain::render_analyzed(&plan.query, analyzed),
         })
     }
 

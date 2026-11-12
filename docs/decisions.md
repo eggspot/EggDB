@@ -894,3 +894,4 @@ its full title with its status.
 - [D867](decisions/D867.md) Code-only batch 515 (M6b): audit chains signed with the server's Ed25519 key
 - [D868](decisions/D868.md) Code-only batch 516 (M6c): OTLP export over HTTPS
 - [D869](decisions/D869.md) Code-only batch 517 (M16): CDC webhooks over HTTPS
+- [D870](decisions/D870.md) Code-only batch 518 (M6c): EXPLAIN ANALYZE in JSON, YAML and XML

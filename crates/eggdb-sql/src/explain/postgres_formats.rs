@@ -32,6 +32,37 @@ fn describe(content: &str) -> (String, Vec<(String, String)>) {
     (node_type, details)
 }
 
+const ACTUAL_GROUP: &str = " (actual time=";
+const NEVER_EXECUTED: &str = " (never executed)";
+
+fn measured(content: &str) -> (&str, Vec<(String, String)>) {
+    if let Some(at) = content.find(NEVER_EXECUTED) {
+        return (&content[..at], vec![("Actual Loops".to_owned(), "0".to_owned())]);
+    }
+    let Some(at) = content.find(ACTUAL_GROUP) else {
+        return (content, Vec::new());
+    };
+    let group = content[at + ACTUAL_GROUP.len()..].trim_end_matches(')');
+    let mut details = Vec::new();
+    let mut words = group.split_whitespace();
+    if let Some((startup, total)) = words.next().and_then(|times| times.split_once("..")) {
+        details.push(("Actual Startup Time".to_owned(), startup.to_owned()));
+        details.push(("Actual Total Time".to_owned(), total.to_owned()));
+    }
+    for word in words {
+        match word.split_once('=') {
+            Some(("rows", rows)) => details.push(("Actual Rows".to_owned(), rows.to_owned())),
+            Some(("loops", loops)) => details.push(("Actual Loops".to_owned(), loops.to_owned())),
+            _ => {}
+        }
+    }
+    (&content[..at], details)
+}
+
+fn is_number_field(key: &str) -> bool {
+    key.starts_with("Actual ")
+}
+
 fn tree(lines: &[String]) -> (Vec<Node>, Option<usize>) {
     let mut nodes: Vec<Node> = Vec::new();
     let mut stack: Vec<(usize, usize, Option<String>)> = Vec::new();
@@ -47,7 +78,9 @@ fn tree(lines: &[String]) -> (Vec<Node>, Option<usize>) {
             while stack.last().is_some_and(|(column, _, _)| *column >= arrow && root.is_some()) {
                 stack.pop();
             }
-            let (node_type, details) = describe(rest);
+            let (rest, actual) = measured(rest);
+            let (node_type, mut details) = describe(rest);
+            details.extend(actual);
             let index = nodes.len();
             let mut node = Node {
                 node_type,
@@ -129,7 +162,12 @@ fn node_json(nodes: &[Node], index: usize, indent: usize, out: &mut String) {
         fields.push(format!("{pad}  \"Subplan Name\": {}", json_string(name)));
     }
     for (key, value) in &node.details {
-        fields.push(format!("{pad}  {}: {}", json_string(key), json_string(value)));
+        let shown = if is_number_field(key) && value.parse::<f64>().is_ok() {
+            value.clone()
+        } else {
+            json_string(value)
+        };
+        fields.push(format!("{pad}  {}: {shown}", json_string(key)));
     }
     if !node.children.is_empty() {
         let mut children = String::new();
@@ -159,7 +197,12 @@ fn node_yaml(nodes: &[Node], index: usize, indent: usize, out: &mut String) {
         out.push_str(&format!("{pad}Subplan Name: {}\n", yaml_value(name)));
     }
     for (key, value) in &node.details {
-        out.push_str(&format!("{pad}{key}: {}\n", yaml_value(value)));
+        let shown = if is_number_field(key) && value.parse::<f64>().is_ok() {
+            value.clone()
+        } else {
+            yaml_value(value)
+        };
+        out.push_str(&format!("{pad}{key}: {shown}\n"));
     }
     if !node.children.is_empty() {
         out.push_str(&format!("{pad}Plans: \n"));
@@ -231,6 +274,37 @@ pub(crate) fn xml(lines: &[String]) -> String {
     )
 }
 
+/// An `EXPLAIN (ANALYZE, FORMAT JSON)` plan: [`json`]'s tree with each node's `Actual`
+/// fields as numbers, and the planning and execution times beside the plan.
+pub(crate) fn json_analyzed(lines: &[String], planning_ms: f64, execution_ms: f64) -> String {
+    let plan = json(lines);
+    match plan.rfind("\n  }\n]") {
+        Some(at) => format!(
+            "{},\n    \"Planning Time\": {planning_ms:.3},\n    \"Execution Time\": {execution_ms:.3}{}",
+            &plan[..at],
+            &plan[at..]
+        ),
+        None => plan,
+    }
+}
+
+/// An `EXPLAIN (ANALYZE, FORMAT YAML)` plan, with the planning and execution times.
+pub(crate) fn yaml_analyzed(lines: &[String], planning_ms: f64, execution_ms: f64) -> String {
+    format!(
+        "{}\n  Planning Time: {planning_ms:.3}\n  Execution Time: {execution_ms:.3}",
+        yaml(lines)
+    )
+}
+
+/// An `EXPLAIN (ANALYZE, FORMAT XML)` plan, with the planning and execution times.
+pub(crate) fn xml_analyzed(lines: &[String], planning_ms: f64, execution_ms: f64) -> String {
+    xml(lines).replacen(
+        "  </Query>",
+        &format!("    <Planning-Time>{planning_ms:.3}</Planning-Time>\n    <Execution-Time>{execution_ms:.3}</Execution-Time>\n  </Query>"),
+        1,
+    )
+}
+
 /// The PostgreSQL text plan `lines` as `EXPLAIN (FORMAT JSON)` writes a plan: one object with
 /// its `Plan` tree, each node's type, relation, alias, index, conditions and `Plans`.
 pub(crate) fn json(lines: &[String]) -> String {
@@ -287,5 +361,23 @@ mod tests {
         assert!(document.contains("<Relation-Name>onek</Relation-Name>"), "{document}");
         assert!(document.contains("<Filter>(four = t.four)</Filter>"), "{document}");
         assert!(document.ends_with("  </Query>\n</explain>"), "{document}");
+    }
+
+    #[test]
+    fn measured_plans_carry_actual_fields_and_times() {
+        let plan = lines(&[
+            "Seq Scan on t (actual time=0.010..0.020 rows=3 loops=1)",
+            "  Filter: (a > 1)",
+        ]);
+        let json = json_analyzed(&plan, 0.5, 1.25);
+        assert!(json.contains("\"Relation Name\": \"t\""), "{json}");
+        assert!(json.contains("\"Actual Total Time\": 0.020"), "{json}");
+        assert!(json.contains("\"Actual Rows\": 3"), "{json}");
+        assert!(json.contains("\"Execution Time\": 1.250"), "{json}");
+        assert!(crate::json::parse_document(&json).is_ok(), "{json}");
+        let never = json_analyzed(&lines(&["Seq Scan on t (never executed)"]), 0.0, 0.0);
+        assert!(never.contains("\"Actual Loops\": 0"), "{never}");
+        assert!(yaml_analyzed(&plan, 0.5, 1.25).ends_with("Execution Time: 1.250"));
+        assert!(xml_analyzed(&plan, 0.5, 1.25).contains("<Planning-Time>0.500</Planning-Time>"));
     }
 }

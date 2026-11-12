@@ -504,26 +504,12 @@ fn buffers_line(indent: &str, lookups: PageLookups) -> Option<String> {
 /// the top line, under `BUFFERS` the page lookups of the whole statement under the top node and
 /// those of planning under `Planning:`, and the planning and execution times.
 pub(crate) fn render_analyzed(query: &ExplainedQuery, analyzed: Analyzed) -> QueryResult {
-    let measured = measured_steps(query, &analyzed);
-    let mut lines: Vec<String> = postgresql_step_lines(query, None)
-        .into_iter()
-        .zip(measured)
-        .map(|(mut line, measured)| {
-            if let Some(measured) = measured {
-                line.push_str(&actual_group(measured));
-            }
-            line
-        })
-        .collect();
-    add_subplans(query, None, &mut lines, Some(&analyzed.subplans));
-    if let Some(buffers) = &analyzed.buffers {
-        if let Some(line) = buffers_line("  ", buffers.execution) {
-            lines.insert(top_node_details_end(&lines), line);
-        }
-        if let Some(line) = buffers_line("  ", buffers.planning) {
-            lines.push("Planning:".to_owned());
-            lines.push(line);
-        }
+    let mut lines = analyzed_plan_lines(query, &analyzed);
+    if let Some(buffers) = &analyzed.buffers
+        && let Some(line) = buffers_line("  ", buffers.planning)
+    {
+        lines.push("Planning:".to_owned());
+        lines.push(line);
     }
     lines.push(format!(
         "Planning Time: {:.3} ms",
@@ -541,6 +527,48 @@ pub(crate) fn render_analyzed(query: &ExplainedQuery, analyzed: Analyzed) -> Que
             .map(|line| vec![Value::Text(line)])
             .collect(),
     )
+}
+
+/// `EXPLAIN (ANALYZE, FORMAT JSON | YAML | XML)`: the measured plan as a tree with each node's
+/// actual times, rows and loops, and the planning and execution times beside it.
+pub(crate) fn render_analyzed_formatted(
+    query: &ExplainedQuery,
+    analyzed: Analyzed,
+    style: ExplainStyle,
+) -> QueryResult {
+    let lines = analyzed_plan_lines(query, &analyzed);
+    let (planning, execution) = (milliseconds(analyzed.planning), milliseconds(analyzed.execution));
+    let value = match style {
+        ExplainStyle::PostgresYaml => Value::Text(postgres_formats::yaml_analyzed(&lines, planning, execution)),
+        ExplainStyle::PostgresXml => Value::Text(postgres_formats::xml_analyzed(&lines, planning, execution)),
+        _ => Value::Json(postgres_formats::json_analyzed(&lines, planning, execution)),
+    };
+    QueryResult::rows(
+        "EXPLAIN".to_owned(),
+        columns(style, Dialect::PostgreSql),
+        vec![vec![value]],
+    )
+}
+
+fn analyzed_plan_lines(query: &ExplainedQuery, analyzed: &Analyzed) -> Vec<String> {
+    let measured = measured_steps(query, analyzed);
+    let mut lines: Vec<String> = postgresql_step_lines(query, None)
+        .into_iter()
+        .zip(measured)
+        .map(|(mut line, measured)| {
+            if let Some(measured) = measured {
+                line.push_str(&actual_group(measured));
+            }
+            line
+        })
+        .collect();
+    add_subplans(query, None, &mut lines, Some(&analyzed.subplans));
+    if let Some(buffers) = &analyzed.buffers
+        && let Some(line) = buffers_line("  ", buffers.execution)
+    {
+        lines.insert(top_node_details_end(&lines), line);
+    }
+    lines
 }
 
 fn key_name(table: &TableDefinition, key: KeyChoice, dialect: Dialect) -> String {
