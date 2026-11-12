@@ -8,6 +8,7 @@
 //! they are written out, in HTTP/1.1 chunks, so a large result never sits in memory twice.
 //! PostgREST is a trademark of its owners; EggDB is compatible with its URL conventions.
 
+mod ogc;
 mod request;
 
 use eggdb_http::{Reply, Request, Response, StreamedResponse};
@@ -344,6 +345,9 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             } else {
                 self.describe().into()
             };
+        }
+        if path == "ogc" || path.starts_with("ogc/") {
+            return self.ogc(&path[3..], request).into();
         }
         if let Some(function) = path.strip_prefix("rpc/") {
             let arguments =

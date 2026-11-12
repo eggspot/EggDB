@@ -805,3 +805,4 @@ its full title with its status.
 - [D778](decisions/D778.md) Code-only batch 426 (M12): reranking in hybrid search through remote rerank models, `eggdb_remote_rerank`
 - [D779](decisions/D779.md) Code-only batch 427 (M6d): text-to-SQL through a language model, checked with `EXPLAIN`, `eggdb_ai.text_to_sql`
 - [D780](decisions/D780.md) Code-only batch 428 (M6c): an index advisor from statement statistics, `eggdb_advisor`
+- [D781](decisions/D781.md) Code-only batch 429 (M12): OGC API - Features on the REST listener
