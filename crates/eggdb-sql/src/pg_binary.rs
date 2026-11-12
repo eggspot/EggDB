@@ -595,6 +595,40 @@ fn four(bytes: &[u8]) -> [u8; 4] {
 /// `oid`, as the SQL layer reads a constant of that type: `22P03` when the bytes do not fit
 /// the form, `0A000` for a type whose binary form EggDB does not read.
 pub fn decode_pg_binary_text(bytes: &[u8], oid: u32) -> SqlResult<String> {
+    decode_text(bytes, oid, 0)
+}
+
+fn record_text(bytes: &[u8], depth: usize) -> SqlResult<String> {
+    if depth >= MOST_RECORD_DEPTH {
+        return Err(incorrect_binary());
+    }
+    let count = usize::try_from(header_word(bytes, 0)?).map_err(|_| incorrect_binary())?;
+    let mut at = 4usize;
+    let mut fields = Vec::with_capacity(count.min(MOST_RECORD_FIELDS));
+    for _ in 0..count {
+        let oid = bytes
+            .get(at..at + 4)
+            .map(|word| u32::from_be_bytes(four(word)))
+            .ok_or_else(incorrect_binary)?;
+        let length = header_word(bytes, at + 4)?;
+        at += 8;
+        if length < 0 {
+            fields.push(String::new());
+            continue;
+        }
+        let length = usize::try_from(length).map_err(|_| incorrect_binary())?;
+        let value = bytes.get(at..at + length).ok_or_else(incorrect_binary)?;
+        at += length;
+        let text = decode_text(value, oid, depth + 1)?;
+        fields.push(format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\"")));
+    }
+    if at != bytes.len() {
+        return Err(incorrect_binary());
+    }
+    Ok(format!("({})", fields.join(",")))
+}
+
+fn decode_text(bytes: &[u8], oid: u32, depth: usize) -> SqlResult<String> {
     let value = match oid {
         BOOL_OID => match fixed(bytes, 1)?[0] {
             0 => Value::Boolean(false),
@@ -667,6 +701,11 @@ pub fn decode_pg_binary_text(bytes: &[u8], oid: u32) -> SqlResult<String> {
             let subtype = crate::ranges::builtin(oid).map_or(TEXT_OID, |builtin| crate::pg_catalog::type_oid(builtin.subtype));
             return range_text(bytes, subtype);
         }
+        oid if crate::user_types::range_subtype(oid).is_some() => {
+            let subtype = crate::user_types::range_subtype(oid).map_or(TEXT_OID, crate::pg_catalog::type_oid);
+            return range_text(bytes, subtype);
+        }
+        oid if crate::user_types::composite_attributes(oid).is_some() => return record_text(bytes, depth),
         oid => match ArrayElement::of_array_oid(oid) {
             Some(element) => Value::Array(Box::new(decode_array(bytes, element)?)),
             None => return Err(no_binary_form(oid)),
@@ -695,8 +734,12 @@ pub(crate) fn writes_binary(sql_type: SqlType) -> bool {
 
 pub(crate) fn reads_binary(sql_type: SqlType) -> bool {
     match sql_type {
-        SqlType::Defined(defined) if defined.kind == DefinedKind::Range => crate::ranges::builtin(defined.oid).is_some(),
-        SqlType::Defined(defined) => matches!(defined.kind, DefinedKind::Enum | DefinedKind::Base),
+        SqlType::Defined(defined) if defined.kind == DefinedKind::Range => {
+            crate::user_types::range_subtype(defined.oid).is_some()
+        }
+        SqlType::Defined(defined) => {
+            matches!(defined.kind, DefinedKind::Enum | DefinedKind::Base | DefinedKind::Composite)
+        }
         SqlType::Array(element) => {
             !matches!(element.sql_type(), SqlType::Array(_)) && reads_binary(element.sql_type())
         }
@@ -705,6 +748,9 @@ pub(crate) fn reads_binary(sql_type: SqlType) -> bool {
         _ => true,
     }
 }
+
+const MOST_RECORD_DEPTH: usize = 32;
+const MOST_RECORD_FIELDS: usize = 1600;
 
 fn header_word(bytes: &[u8], at: usize) -> SqlResult<i32> {
     bytes
@@ -1025,5 +1071,25 @@ mod tests {
                 .code(),
             "22P03"
         );
+    }
+
+    #[test]
+    fn records_read_back_with_each_field_quoted() {
+        let mut bytes = 3i32.to_be_bytes().to_vec();
+        bytes.extend_from_slice(&INT4_OID.to_be_bytes());
+        bytes.extend_from_slice(&4i32.to_be_bytes());
+        bytes.extend_from_slice(&7i32.to_be_bytes());
+        bytes.extend_from_slice(&TEXT_OID.to_be_bytes());
+        bytes.extend_from_slice(&5i32.to_be_bytes());
+        bytes.extend_from_slice(b"a\"b,c");
+        bytes.extend_from_slice(&TEXT_OID.to_be_bytes());
+        bytes.extend_from_slice(&(-1i32).to_be_bytes());
+        assert_eq!(record_text(&bytes, 0).unwrap(), "(\"7\",\"a\\\"b,c\",)");
+        assert!(record_text(&bytes[..bytes.len() - 1], 0).is_err());
+        let mut long = bytes.clone();
+        long.push(0);
+        assert!(record_text(&long, 0).is_err());
+        assert!(record_text(&i32::MAX.to_be_bytes(), 0).is_err());
+        assert!(record_text(&bytes, MOST_RECORD_DEPTH).is_err());
     }
 }

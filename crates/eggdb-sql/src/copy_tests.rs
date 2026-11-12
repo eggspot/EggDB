@@ -1440,14 +1440,32 @@ fn binary_data_that_breaks_the_format_fails_with_postgresqls_messages() {
         &mut session,
         "CREATE TABLE spans (id integer PRIMARY KEY, span int4range)",
     );
+    assert!(copy_out(&mut session, "COPY spans TO STDOUT (FORMAT binary)").is_ok());
+}
+
+#[test]
+fn composites_and_user_ranges_round_trip_through_binary_copy() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for sql in [
+        "CREATE TYPE point2 AS (x integer, label text)",
+        "CREATE TYPE floatspan AS RANGE (subtype = float8)",
+        "CREATE TABLE shapes (id integer PRIMARY KEY, at point2, span floatspan)",
+        "INSERT INTO shapes VALUES (1, ROW(3, 'a\"b'), '[1.5,2.5)'), (2, ROW(NULL, ''), 'empty'), (3, NULL, '(,4)')",
+        "CREATE TABLE copied (id integer PRIMARY KEY, at point2, span floatspan)",
+    ] {
+        rows(&mut session, sql);
+    }
+    let data = copy_out_bytes(&mut session, "COPY shapes TO STDOUT (FORMAT binary)").unwrap();
     assert_eq!(
-        failure(copy_out(
-            &mut session,
-            "COPY spans TO STDOUT (FORMAT binary)"
-        ))
-        .state()
-        .code(),
-        "0A000"
+        copy_in_bytes(&mut session, "COPY copied FROM STDIN (FORMAT binary)", &data, 7)
+            .unwrap()
+            .tag,
+        "COPY 3"
+    );
+    assert_eq!(
+        rows(&mut session, "SELECT id, at::text, span::text FROM copied ORDER BY id"),
+        rows(&mut session, "SELECT id, at::text, span::text FROM shapes ORDER BY id")
     );
 }
 

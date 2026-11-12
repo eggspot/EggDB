@@ -880,3 +880,4 @@ its full title with its status.
 - [D853](decisions/D853.md) Code-only batch 501 (M16): CQL user-type field selection
 - [D854](decisions/D854.md) Code-only batch 502 (M16): CQL updates of one user-type field
 - [D855](decisions/D855.md) Code-only batch 503 (M6b): FIPS mode for MySQL logins and serve --fips
+- [D856](decisions/D856.md) Code-only batch 504 (M6a): composites and user-defined ranges read in PostgreSQL's binary format

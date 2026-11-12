@@ -685,7 +685,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Composite and range columns in `COPY`'s binary format, and `LOG_VERBOSITY verbose` notices sent
   before a `REJECT_LIMIT` error (D154, D324). Ranges and composites written in binary, built-in ranges read: **code written,
   unbuilt** (code-only mode, 2026-11-12, D828); the `LOG_VERBOSITY` notices before the error: **code written,
-  unbuilt** (code-only mode, 2026-11-12, D829). Left: reading composites and user-defined ranges in binary.
+  unbuilt** (code-only mode, 2026-11-12, D829); composites and user-defined ranges read in binary: **code written,
+  unbuilt** (code-only mode, 2026-11-12, D856).
 - The catalog: `tableoid` and the other system columns, `pg_cast` rows, composite types'
   `typrelid`, `information_schema.routines` and `parameters`, OIDs kept across renames (D129, D131).
 - pgAdmin, DBeaver and SSMS run in CI, moving from "expected to work" to supported (D12, D163).
