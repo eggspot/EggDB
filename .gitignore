@@ -6,6 +6,7 @@
 /web/eggdb.wasm
 /web/eggdb-gui.wasm
 /crates/eggdb-redis-compare/target
+/crates/eggdb-opensearch-compare/target
 /drivers/dotnet/*/obj/
 /drivers/dotnet/*/bin/
 /crates/eggdb/tests/clients/dbt/target/

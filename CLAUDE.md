@@ -271,7 +271,7 @@ A release comes from the merge commit itself (D353):
 1. The batch PR carries the release: `[workspace.package] version`, `cargo update --workspace
    --offline`, the excluded compare crates' lock files (`cargo update -p eggdb --offline
    --manifest-path crates/eggdb-sqlite-compare/Cargo.toml`, the same for
-   `crates/eggdb-redis-compare`), the version test in `crates/eggdb/src/lib.rs`, `version` and
+   `crates/eggdb-redis-compare`, and `-p eggdb-http` for `crates/eggdb-opensearch-compare`), the version test in `crates/eggdb/src/lib.rs`, `version` and
    `appVersion` in `deploy/helm/eggdb/Chart.yaml`, the version example in `crates/eggdb-capi`,
    the README's version, links, install commands and `EggDB 0.x.0:` sample line, the dated notes
    of D99 to D101 and roadmap row 19e (D99's speed condition is checked at each release, D101),
