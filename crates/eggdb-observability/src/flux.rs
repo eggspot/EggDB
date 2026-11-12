@@ -18,8 +18,9 @@ enum Token {
     Symbol(&'static str),
 }
 
-const SYMBOLS: [&str; 22] = [
+const SYMBOLS: [&str; 25] = [
     "|>", "=>", "==", "!=", "<=", ">=", "=~", "!~", "<", ">", "(", ")", "[", "]", "{", "}", ",", ":", ".", "=", "-", "+",
+    "*", "/", "%",
 ];
 
 fn duration_micros(text: &str) -> Option<i64> {
@@ -172,6 +173,10 @@ enum Expr {
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
     Compare(Box<Expr>, &'static str, Box<Expr>),
+    Arithmetic(Box<Expr>, &'static str, Box<Expr>),
+    Record { extends_row: bool, fields: Vec<(String, Expr)> },
+    Function(String, Vec<Expr>),
+    Conditional(Box<Expr>, Box<Expr>, Box<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -184,6 +189,7 @@ enum Argument {
     Name(String),
     Now,
     List(Vec<Argument>),
+    Record(Vec<(String, Argument)>),
     Predicate { parameter: String, body: Expr },
 }
 
@@ -276,6 +282,19 @@ impl Parser {
                 other => Err(format!("found {other:?} after -")),
             };
         }
+        if self.eat("{") {
+            let mut fields = Vec::new();
+            while !self.eat("}") {
+                let key = self.name()?;
+                self.expect(":")?;
+                fields.push((key, self.argument()?));
+                if !self.eat(",") {
+                    self.expect("}")?;
+                    break;
+                }
+            }
+            return Ok(Argument::Record(fields));
+        }
         if self.eat("[") {
             let mut items = Vec::new();
             while !self.eat("]") {
@@ -349,14 +368,54 @@ impl Parser {
     }
 
     fn comparison(&mut self) -> Result<Expr, String> {
-        let left = self.primary()?;
+        let left = self.additive()?;
         let operator = match self.peek() {
             Some(Token::Symbol(symbol)) if ["==", "!=", "<", "<=", ">", ">=", "=~", "!~"].contains(symbol) => *symbol,
             _ => return Ok(left),
         };
         self.at += 1;
-        let right = self.primary()?;
+        let right = self.additive()?;
         Ok(Expr::Compare(Box::new(left), operator, Box::new(right)))
+    }
+
+    fn additive(&mut self) -> Result<Expr, String> {
+        let mut left = self.multiplicative()?;
+        while let Some(Token::Symbol(symbol @ ("+" | "-"))) = self.peek().cloned() {
+            self.at += 1;
+            left = Expr::Arithmetic(Box::new(left), symbol, Box::new(self.multiplicative()?));
+        }
+        Ok(left)
+    }
+
+    fn multiplicative(&mut self) -> Result<Expr, String> {
+        let mut left = self.primary()?;
+        while let Some(Token::Symbol(symbol @ ("*" | "/" | "%"))) = self.peek().cloned() {
+            self.at += 1;
+            left = Expr::Arithmetic(Box::new(left), symbol, Box::new(self.primary()?));
+        }
+        Ok(left)
+    }
+
+    fn record(&mut self) -> Result<Expr, String> {
+        let extends_row = matches!(self.peek(), Some(Token::Name(_)))
+            && matches!(self.tokens.get(self.at + 1), Some(Token::Name(word)) if word == "with");
+        if extends_row {
+            self.at += 2;
+        }
+        let mut fields = Vec::new();
+        while !self.eat("}") {
+            let key = match self.next() {
+                Some(Token::Name(name) | Token::Text(name)) => name,
+                other => return Err(format!("expected a field name, found {other:?}")),
+            };
+            self.expect(":")?;
+            fields.push((key, self.or()?));
+            if !self.eat(",") {
+                self.expect("}")?;
+                break;
+            }
+        }
+        Ok(Expr::Record { extends_row, fields })
     }
 
     fn primary(&mut self) -> Result<Expr, String> {
@@ -364,6 +423,36 @@ impl Parser {
             let inner = self.or()?;
             self.expect(")")?;
             return Ok(inner);
+        }
+        if self.eat("{") {
+            return self.record();
+        }
+        if matches!(self.peek(), Some(Token::Name(word)) if word == "if") {
+            self.at += 1;
+            let condition = self.or()?;
+            if !matches!(self.next(), Some(Token::Name(word)) if word == "then") {
+                return Err("expected then".to_owned());
+            }
+            let then = self.or()?;
+            if !matches!(self.next(), Some(Token::Name(word)) if word == "else") {
+                return Err("expected else".to_owned());
+            }
+            let otherwise = self.or()?;
+            return Ok(Expr::Conditional(Box::new(condition), Box::new(then), Box::new(otherwise)));
+        }
+        if let (Some(Token::Name(function)), Some(Token::Symbol("("))) = (self.peek().cloned(), self.tokens.get(self.at + 1)) {
+            self.at += 2;
+            let mut arguments = Vec::new();
+            while !self.eat(")") {
+                self.name()?;
+                self.expect(":")?;
+                arguments.push(self.or()?);
+                if !self.eat(",") {
+                    self.expect(")")?;
+                    break;
+                }
+            }
+            return Ok(Expr::Function(function, arguments));
         }
         if self.eat("-") {
             return match self.next() {
@@ -491,8 +580,174 @@ fn partial(expr: &Expr, candidate: &Candidate<'_>) -> Partial {
             };
             Partial::Sql(format!("({} {operator_sql} {})", sql(left), sql(right)))
         }
+        Expr::Arithmetic(left, operator, right) => {
+            let sql = |side: Partial| match side {
+                Partial::Known(known) => literal_sql(&known),
+                Partial::Sql(sql) => sql,
+            };
+            Partial::Sql(format!("({} {operator} {})", sql(partial(left, candidate)), sql(partial(right, candidate))))
+        }
         known => Partial::Known(known.clone()),
     }
+}
+
+fn pushable(expr: &Expr) -> bool {
+    match expr {
+        Expr::Record { .. } | Expr::Function(..) | Expr::Conditional(..) => false,
+        Expr::Not(inner) | Expr::Exists(inner) => pushable(inner),
+        Expr::And(left, right) | Expr::Or(left, right) | Expr::Compare(left, _, right) | Expr::Arithmetic(left, _, right) => {
+            pushable(left) && pushable(right)
+        }
+        _ => true,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Flux {
+    Null,
+    Boolean(bool),
+    Integer(i64),
+    Float(f64),
+    Text(String),
+    Time(i64),
+}
+
+fn flux_of(value: &Value) -> Flux {
+    match value {
+        Value::Null => Flux::Null,
+        Value::Boolean(flag) => Flux::Boolean(*flag),
+        Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_) => value.as_integer().map_or(Flux::Null, Flux::Integer),
+        Value::TimestampTz(micros) | Value::Timestamp(micros) => Flux::Time(*micros),
+        Value::Text(text) => Flux::Text(text.clone()),
+        other => other.as_float().map_or_else(|| other.to_text().map_or(Flux::Null, Flux::Text), Flux::Float),
+    }
+}
+
+fn value_of(flux: Flux) -> Value {
+    match flux {
+        Flux::Null => Value::Null,
+        Flux::Boolean(flag) => Value::Boolean(flag),
+        Flux::Integer(whole) => Value::BigInt(whole),
+        Flux::Float(number) => Value::Double(number),
+        Flux::Text(text) => Value::Text(text),
+        Flux::Time(micros) => Value::TimestampTz(micros),
+    }
+}
+
+fn as_float(flux: &Flux) -> Option<f64> {
+    match flux {
+        Flux::Integer(whole) => Some(*whole as f64),
+        Flux::Float(number) => Some(*number),
+        Flux::Time(micros) => Some(*micros as f64),
+        _ => None,
+    }
+}
+
+fn evaluate(expr: &Expr, row: &Row) -> Result<Flux, String> {
+    Ok(match expr {
+        Expr::Column(name) => row.get(name).map_or(Flux::Null, flux_of),
+        Expr::Text(text) => Flux::Text(text.clone()),
+        Expr::Number(number) if number.fract() == 0.0 && number.abs() < 9e15 => Flux::Integer(*number as i64),
+        Expr::Number(number) => Flux::Float(*number),
+        Expr::Boolean(flag) => Flux::Boolean(*flag),
+        Expr::Null => Flux::Null,
+        Expr::Regex(_) => return Err("regular expressions after a transformation are not supported yet".to_owned()),
+        Expr::Not(inner) => match evaluate(inner, row)? {
+            Flux::Boolean(flag) => Flux::Boolean(!flag),
+            _ => Flux::Null,
+        },
+        Expr::Exists(inner) => Flux::Boolean(evaluate(inner, row)? != Flux::Null),
+        Expr::And(left, right) => Flux::Boolean(
+            evaluate(left, row)? == Flux::Boolean(true) && evaluate(right, row)? == Flux::Boolean(true),
+        ),
+        Expr::Or(left, right) => Flux::Boolean(
+            evaluate(left, row)? == Flux::Boolean(true) || evaluate(right, row)? == Flux::Boolean(true),
+        ),
+        Expr::Compare(left, operator, right) => {
+            let (left, right) = (evaluate(left, row)?, evaluate(right, row)?);
+            let ordering = match (&left, &right) {
+                (Flux::Null, _) | (_, Flux::Null) => return Ok(Flux::Boolean(false)),
+                (Flux::Text(left), Flux::Text(right)) => Some(left.cmp(right)),
+                (Flux::Boolean(left), Flux::Boolean(right)) => Some(left.cmp(right)),
+                _ => match (as_float(&left), as_float(&right)) {
+                    (Some(left), Some(right)) => left.partial_cmp(&right),
+                    _ => None,
+                },
+            };
+            let Some(ordering) = ordering else {
+                return Ok(Flux::Boolean(false));
+            };
+            Flux::Boolean(match *operator {
+                "==" => ordering.is_eq(),
+                "!=" => !ordering.is_eq(),
+                "<" => ordering.is_lt(),
+                "<=" => ordering.is_le(),
+                ">" => ordering.is_gt(),
+                ">=" => ordering.is_ge(),
+                _ => return Err("regular expressions after a transformation are not supported yet".to_owned()),
+            })
+        }
+        Expr::Arithmetic(left, operator, right) => {
+            let (left, right) = (evaluate(left, row)?, evaluate(right, row)?);
+            match (&left, &right, *operator) {
+                (Flux::Null, _, _) | (_, Flux::Null, _) => Flux::Null,
+                (Flux::Text(left), Flux::Text(right), "+") => Flux::Text(format!("{left}{right}")),
+                (Flux::Integer(left), Flux::Integer(right), operator) => match operator {
+                    "+" => Flux::Integer(left.wrapping_add(*right)),
+                    "-" => Flux::Integer(left.wrapping_sub(*right)),
+                    "*" => Flux::Integer(left.wrapping_mul(*right)),
+                    "/" if *right != 0 => Flux::Integer(left / right),
+                    "%" if *right != 0 => Flux::Integer(left % right),
+                    _ => return Err("division by zero".to_owned()),
+                },
+                _ => match (as_float(&left), as_float(&right)) {
+                    (Some(left), Some(right)) => Flux::Float(match *operator {
+                        "+" => left + right,
+                        "-" => left - right,
+                        "*" => left * right,
+                        "/" => left / right,
+                        _ => left % right,
+                    }),
+                    _ => return Err(format!("cannot apply {operator} to {left:?} and {right:?}")),
+                },
+            }
+        }
+        Expr::Conditional(condition, then, otherwise) => {
+            if evaluate(condition, row)? == Flux::Boolean(true) {
+                evaluate(then, row)?
+            } else {
+                evaluate(otherwise, row)?
+            }
+        }
+        Expr::Function(name, arguments) => {
+            let argument = match arguments.first() {
+                Some(argument) => evaluate(argument, row)?,
+                None => Flux::Null,
+            };
+            match (name.as_str(), argument) {
+                (_, Flux::Null) => Flux::Null,
+                ("float", value) => as_float(&value)
+                    .or_else(|| if let Flux::Text(text) = &value { text.trim().parse().ok() } else { None })
+                    .map_or(Flux::Null, Flux::Float),
+                ("int", value) => as_float(&value)
+                    .map(|number| number.trunc() as i64)
+                    .or_else(|| if let Flux::Text(text) = &value { text.trim().parse().ok() } else { None })
+                    .map_or(Flux::Null, Flux::Integer),
+                ("string", value) => Flux::Text(match value {
+                    Flux::Text(text) => text,
+                    Flux::Boolean(flag) => flag.to_string(),
+                    Flux::Integer(whole) => whole.to_string(),
+                    Flux::Float(number) => number.to_string(),
+                    Flux::Time(micros) => micros.to_string(),
+                    Flux::Null => String::new(),
+                }),
+                ("bool", Flux::Text(text)) => Flux::Boolean(text == "true"),
+                ("bool", value) => Flux::Boolean(as_float(&value).is_some_and(|number| number != 0.0)),
+                (other, _) => return Err(format!("function {other}() is not supported yet")),
+            }
+        }
+        Expr::Record { .. } => return Err("a record is not a value here".to_owned()),
+    })
 }
 
 type Row = BTreeMap<String, Value>;
@@ -822,7 +1077,8 @@ fn execute(session: &mut Session<'_>, calls: &[Call]) -> Result<Outcome, String>
     let mut next = range + 1;
     while let Some(call) = calls.get(next).filter(|call| call.name == "filter") {
         match call.argument("fn") {
-            Some(Argument::Predicate { body, .. }) => pushed.push(body.clone()),
+            Some(Argument::Predicate { body, .. }) if pushable(body) => pushed.push(body.clone()),
+            Some(Argument::Predicate { .. }) => break,
             _ => return Err("filter needs fn: (r) => ...".to_owned()),
         }
         next += 1;
@@ -834,7 +1090,127 @@ fn execute(session: &mut Session<'_>, calls: &[Call]) -> Result<Outcome, String>
             continue;
         }
         tables = match call.name.as_str() {
-            "filter" => return Err("filter() after a transformation is not supported yet; filter right after range()".to_owned()),
+            "filter" => {
+                let Some(Argument::Predicate { body, .. }) = call.argument("fn") else {
+                    return Err("filter needs fn: (r) => ...".to_owned());
+                };
+                let mut kept = Vec::with_capacity(tables.len());
+                for mut table in tables {
+                    let mut rows = Vec::with_capacity(table.rows.len());
+                    for row in table.rows {
+                        if evaluate(body, &row)? == Flux::Boolean(true) {
+                            rows.push(row);
+                        }
+                    }
+                    table.rows = rows;
+                    kept.push(table);
+                }
+                kept
+            }
+            "map" => {
+                let Some(Argument::Predicate { body: Expr::Record { extends_row, fields }, .. }) = call.argument("fn") else {
+                    return Err("map needs fn: (r) => ({...})".to_owned());
+                };
+                let mut mapped = Vec::with_capacity(tables.len());
+                for mut table in tables {
+                    let mut rows = Vec::with_capacity(table.rows.len());
+                    for row in table.rows {
+                        let mut out = if *extends_row {
+                            row.clone()
+                        } else {
+                            table.key.iter().filter_map(|column| row.get(column).map(|value| (column.clone(), value.clone()))).collect()
+                        };
+                        for (name, expr) in fields {
+                            out.insert(name.clone(), value_of(evaluate(expr, &row)?));
+                        }
+                        rows.push(out);
+                    }
+                    table.rows = rows;
+                    mapped.push(table);
+                }
+                mapped
+            }
+            "rename" | "duplicate" => {
+                let pairs: Vec<(String, String)> = if call.name == "rename" {
+                    match call.argument("columns") {
+                        Some(Argument::Record(fields)) => fields
+                            .iter()
+                            .map(|(from, to)| match to {
+                                Argument::Text(to) => Ok((from.clone(), to.clone())),
+                                other => Err(format!("rename's columns map names to strings, found {other:?}")),
+                            })
+                            .collect::<Result<_, String>>()?,
+                        _ => return Err("rename needs columns: {old: \"new\"}".to_owned()),
+                    }
+                } else {
+                    match (call.argument("column"), call.argument("as")) {
+                        (Some(Argument::Text(from)), Some(Argument::Text(to))) => vec![(from.clone(), to.clone())],
+                        _ => return Err("duplicate needs column: and as:".to_owned()),
+                    }
+                };
+                let keep = call.name == "duplicate";
+                tables
+                    .into_iter()
+                    .map(|mut table| {
+                        for row in &mut table.rows {
+                            for (from, to) in &pairs {
+                                let value = if keep { row.get(from).cloned() } else { row.remove(from) };
+                                if let Some(value) = value {
+                                    row.insert(to.clone(), value);
+                                }
+                            }
+                        }
+                        if !keep {
+                            for column in &mut table.key {
+                                if let Some((_, to)) = pairs.iter().find(|(from, _)| from == column) {
+                                    column.clone_from(to);
+                                }
+                            }
+                        }
+                        table
+                    })
+                    .collect()
+            }
+            "pivot" => {
+                let row_key = names(call.argument("rowKey"))?;
+                let column_key = names(call.argument("columnKey"))?;
+                let Some(Argument::Text(value_column)) = call.argument("valueColumn") else {
+                    return Err("pivot needs valueColumn:".to_owned());
+                };
+                tables
+                    .into_iter()
+                    .map(|table| {
+                        let key: Vec<String> = table.key.iter().filter(|column| !column_key.contains(column)).cloned().collect();
+                        let mut rows: Vec<(Vec<String>, Row)> = Vec::new();
+                        for row in table.rows {
+                            let identity: Vec<String> = row_key
+                                .iter()
+                                .map(|column| row.get(column).and_then(Value::to_text).unwrap_or_default())
+                                .collect();
+                            let name: Vec<String> = column_key
+                                .iter()
+                                .map(|column| row.get(column).and_then(Value::to_text).unwrap_or_default())
+                                .collect();
+                            let value = row.get(value_column).cloned().unwrap_or(Value::Null);
+                            let at = match rows.iter().position(|(known, _)| *known == identity) {
+                                Some(at) => at,
+                                None => {
+                                    let mut base = Row::new();
+                                    for (column, cell) in &row {
+                                        if key.contains(column) || row_key.contains(column) {
+                                            base.insert(column.clone(), cell.clone());
+                                        }
+                                    }
+                                    rows.push((identity, base));
+                                    rows.len() - 1
+                                }
+                            };
+                            rows[at].1.insert(name.join("_"), value);
+                        }
+                        Table { key, rows: rows.into_iter().map(|(_, row)| row).collect() }
+                    })
+                    .collect()
+            }
             "aggregateWindow" => aggregate_window(tables, call, start, stop)?,
             "mean" | "sum" | "count" | "median" | "spread" | "stddev" | "first" | "last" | "min" | "max" => tables
                 .into_iter()
@@ -1079,5 +1455,21 @@ mod tests {
         let values: Vec<Value> = out[0].rows.iter().map(|row| row["_value"].clone()).collect();
         assert_eq!(values, vec![Value::Double(2.0), Value::Null, Value::Double(5.0)]);
         assert_eq!(out[0].rows[0]["_time"], Value::TimestampTz(start + minute));
+    }
+
+    #[test]
+    fn row_expressions_compute_and_records_extend_rows() {
+        let mut parser = Parser {
+            tokens: tokens(r#"map(fn: (r) => ({r with _value: r._value * 2.0 + 1.0, label: if r._value > 3 then "high" else "low"}))"#).unwrap(),
+            at: 0,
+        };
+        let call = parser.call().unwrap();
+        let Some(Argument::Predicate { body: Expr::Record { extends_row: true, fields }, .. }) = call.argument("fn") else {
+            panic!("a record");
+        };
+        let mut row = Row::new();
+        row.insert("_value".to_owned(), Value::Double(5.0));
+        assert_eq!(evaluate(&fields[0].1, &row).unwrap(), Flux::Float(11.0));
+        assert_eq!(evaluate(&fields[1].1, &row).unwrap(), Flux::Text("high".to_owned()));
     }
 }
