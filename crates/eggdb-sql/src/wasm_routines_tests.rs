@@ -87,3 +87,38 @@ fn text_and_bytea_pass_through_the_modules_memory() {
     .expect_err("one result is not two");
     assert!(refused.to_string().contains("does not match"), "{refused}");
 }
+
+const NOW_MODULE: &str = "\\x0061736d010000000105016000017e\
+0214010565676764620a6e6f775f6d6963726f730000\
+0302010007070103\
+6e6f7700010a06010400\
+10000b";
+
+const FOREIGN_IMPORT_MODULE: &str = "\\x0061736d010000000105016000017e\
+020d0103656e76056c6f63616c0000\
+0302010007070103\
+6e6f7700010a06010400\
+10000b";
+
+#[test]
+fn modules_import_the_host_functions_eggdb_provides_only() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(
+        &mut session,
+        &format!("CREATE FUNCTION wnow() RETURNS bigint LANGUAGE wasm AS '{NOW_MODULE}', 'now'"),
+    )
+    .expect("created");
+    let answer = run(
+        &mut session,
+        "SELECT wnow() = (extract(epoch FROM now()) * 1000000)::bigint AS same",
+    )
+    .expect("called");
+    assert!(answer.contains('t'), "{answer}");
+    let refused = run(
+        &mut session,
+        &format!("CREATE FUNCTION wlocal() RETURNS bigint LANGUAGE wasm AS '{FOREIGN_IMPORT_MODULE}', 'now'"),
+    )
+    .expect_err("env.local is not provided");
+    assert!(refused.to_string().contains("does not provide"), "{refused}");
+}

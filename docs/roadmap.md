@@ -563,12 +563,14 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   official spec test suite in CI. Floating point, `call_indirect` with a function table, the start function,
   non-trapping float-to-integer conversions and `memory.copy`/`memory.fill`: **code written, unbuilt** (code-only
   mode, 2026-11-12, D792); multi-value results and typed blocks: **code written, unbuilt** (code-only mode,
-  2026-11-12, D861). Left: imports (host functions, with the next item), and the spec test suite in CI.
+  2026-11-12, D861); imported functions answered by the host: **code written, unbuilt** (code-only mode, 2026-11-12,
+  D908). Left: the spec test suite in CI.
 - `CREATE FUNCTION ... LANGUAGE wasm`, with type mapping and host functions behind permissions
   (D27, D232). Scalar functions over numbers and booleans (`AS '\x<module>', '<export>'`): **code written,
   unbuilt** (code-only mode, 2026-11-12, D793); text and bytea through the module's memory: **code written, unbuilt**
-  (code-only mode, 2026-11-12, D862). Left: set-returning functions, host functions behind permissions, and per-role
-  limits.
+  (code-only mode, 2026-11-12, D862); the side-effect-free host functions `eggdb.now_micros` and `env.abort`: **code
+  written, unbuilt** (code-only mode, 2026-11-12, D908). Left: set-returning functions, host functions with effects
+  behind permissions, and per-role limits.
 - An extension API for types, index methods, functions and protocols, loaded as sandboxed
   WebAssembly with CPU, memory, time and output limits per role (D27, D45).
 - A native-code compiler for hot WebAssembly functions (D27, D232). Check: benchmarks against

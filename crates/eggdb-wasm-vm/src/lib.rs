@@ -6,14 +6,15 @@
 //! conversions, sign extension and `memory.copy`/`memory.fill`, with every run bounded by
 //! [`Limits`]: fuel per instruction, memory pages and call depth, so a function can neither hang
 //! the server nor exhaust its memory (D45). A function table with `call_indirect` and a start
-//! function run too; imports are refused at parse time for now.
+//! function run too, and imported functions, answered by the host [`Instance::with_host`] is
+//! given; imported tables, memories and globals are refused at parse time.
 
 mod decode;
 mod float;
 mod run;
 
 pub use decode::{Module, ValueType, WasmError};
-pub use run::{Instance, Limits, Trap, Value};
+pub use run::{HostCall, Instance, Limits, Trap, Value};
 
 #[cfg(test)]
 mod tests;

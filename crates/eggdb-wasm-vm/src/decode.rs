@@ -41,6 +41,13 @@ pub(crate) struct Function {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Import {
+    pub(crate) module: String,
+    pub(crate) name: String,
+    pub(crate) type_index: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Global {
     pub(crate) value_type: u8,
     pub(crate) mutable: bool,
@@ -51,6 +58,7 @@ pub(crate) struct Global {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Module {
     pub(crate) types: Vec<FuncType>,
+    pub(crate) imports: Vec<Import>,
     pub(crate) functions: Vec<Function>,
     pub(crate) memory: Option<(u32, Option<u32>)>,
     pub(crate) globals: Vec<Global>,
@@ -194,6 +202,7 @@ impl Module {
         }
         let mut module = Module {
             types: Vec::new(),
+            imports: Vec::new(),
             functions: Vec::new(),
             memory: None,
             globals: Vec::new(),
@@ -230,8 +239,23 @@ impl Module {
                     }
                 }
                 2 => {
-                    if section.count()? > 0 {
-                        return Err(WasmError::Unsupported("imports"));
+                    for _ in 0..section.count()? {
+                        let from = section.name()?;
+                        let name = section.name()?;
+                        match section.byte()? {
+                            0 => {
+                                let type_index = section.u32()?;
+                                module.imports.push(Import {
+                                    module: from,
+                                    name,
+                                    type_index,
+                                });
+                            }
+                            1 => return Err(WasmError::Unsupported("imported tables")),
+                            2 => return Err(WasmError::Unsupported("imported memories")),
+                            3 => return Err(WasmError::Unsupported("imported globals")),
+                            _ => return Err(WasmError::Malformed("an import of an unknown kind")),
+                        }
                     }
                 }
                 3 => {
@@ -370,8 +394,9 @@ impl Module {
         if module.functions.len() != type_indices.len() {
             return Err(WasmError::Malformed("functions have no code"));
         }
-        for function in &module.functions {
-            if function.type_index as usize >= module.types.len() {
+        let import_types = module.imports.iter().map(|import| import.type_index);
+        for type_index in import_types.chain(module.functions.iter().map(|function| function.type_index)) {
+            if type_index as usize >= module.types.len() {
                 return Err(WasmError::Malformed(
                     "a function names a type that does not exist",
                 ));
@@ -380,7 +405,7 @@ impl Module {
         for (_, functions) in &module.elements {
             if functions
                 .iter()
-                .any(|index| *index as usize >= module.functions.len())
+                .any(|index| *index as usize >= module.function_count())
             {
                 return Err(WasmError::Malformed(
                     "an element names a function that does not exist",
@@ -389,9 +414,7 @@ impl Module {
         }
         if let Some(start) = module.start {
             let starts_empty = module
-                .functions
-                .get(start as usize)
-                .and_then(|function| module.types.get(function.type_index as usize))
+                .signature_of(start)
                 .is_some_and(|signature| signature.params.is_empty() && signature.results.is_empty());
             if !starts_empty {
                 return Err(WasmError::Malformed(
@@ -403,13 +426,40 @@ impl Module {
             return Err(WasmError::Malformed("elements without a table"));
         }
         for (_, index) in &module.exports {
-            if *index as usize >= module.functions.len() {
+            if *index as usize >= module.function_count() {
                 return Err(WasmError::Malformed(
                     "an export names a function that does not exist",
                 ));
             }
         }
         Ok(module)
+    }
+
+    pub(crate) fn function_count(&self) -> usize {
+        self.imports.len() + self.functions.len()
+    }
+
+    pub(crate) fn signature_of(&self, index: u32) -> Option<&FuncType> {
+        let index = index as usize;
+        let type_index = match self.imports.get(index) {
+            Some(import) => import.type_index,
+            None => self.functions.get(index.checked_sub(self.imports.len())?)?.type_index,
+        };
+        self.types.get(type_index as usize)
+    }
+
+    /// The functions the module imports, as (module, name) pairs, in their index order.
+    pub fn imports(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.imports.iter().map(|import| (import.module.as_str(), import.name.as_str()))
+    }
+
+    /// The parameter and result types of the imported function `module`.`name`; `None` when it
+    /// is not imported or uses a type outside the four number types.
+    pub fn import_types(&self, module: &str, name: &str) -> Option<(Vec<ValueType>, Vec<ValueType>)> {
+        let import = self.imports.iter().find(|import| import.module == module && import.name == name)?;
+        let signature = self.types.get(import.type_index as usize)?;
+        let types = |codes: &[u8]| codes.iter().map(|code| ValueType::of(*code)).collect::<Option<Vec<_>>>();
+        Some((types(&signature.params)?, types(&signature.results)?))
     }
 
     /// The names of the exported functions.
@@ -425,8 +475,7 @@ impl Module {
             .iter()
             .find(|(export, _)| export == name)
             .map(|(_, index)| *index)?;
-        let function = self.functions.get(index as usize)?;
-        let signature = self.types.get(function.type_index as usize)?;
+        let signature = self.signature_of(index)?;
         let types = |codes: &[u8]| codes.iter().map(|code| ValueType::of(*code)).collect::<Option<Vec<_>>>();
         Some((types(&signature.params)?, types(&signature.results)?))
     }
@@ -439,10 +488,7 @@ impl Module {
             .iter()
             .find(|(export, _)| export == name)
             .map(|(_, index)| *index)?;
-        let function = self.functions.get(index as usize)?;
-        self.types
-            .get(function.type_index as usize)
-            .map(|signature| signature.results.len())
+        self.signature_of(index).map(|signature| signature.results.len())
     }
 
     /// The parameter types and the first result type (`None` for none) of the function
@@ -453,8 +499,7 @@ impl Module {
             .iter()
             .find(|(export, _)| export == name)
             .map(|(_, index)| *index)?;
-        let function = self.functions.get(index as usize)?;
-        let signature = self.types.get(function.type_index as usize)?;
+        let signature = self.signature_of(index)?;
         let params = signature
             .params
             .iter()

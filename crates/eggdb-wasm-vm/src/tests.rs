@@ -524,3 +524,32 @@ fn a_block_naming_a_missing_type_traps() {
     );
     assert!(vm.call("broken", &[], &Limits::default()).is_err());
 }
+
+fn importing_module() -> Vec<u8> {
+    let mut bytes = b"\0asm\x01\0\0\0".to_vec();
+    section(1, &[0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f], &mut bytes);
+    section(2, b"\x01\x03env\x06double\x00\x00", &mut bytes);
+    section(3, &[0x01, 0x00], &mut bytes);
+    section(7, b"\x01\x03run\x00\x01", &mut bytes);
+    section(10, &[0x01, 0x09, 0x00, 0x20, 0x00, 0x10, 0x00, 0x41, 0x01, 0x6a, 0x0b], &mut bytes);
+    bytes
+}
+
+#[test]
+fn imported_functions_are_answered_by_the_host() {
+    let module = Module::parse(&importing_module()).expect("a module importing a function");
+    assert_eq!(module.imports().collect::<Vec<_>>(), vec![("env", "double")]);
+    assert_eq!(module.import_types("env", "double").map(|(params, _)| params.len()), Some(1));
+    let limits = Limits::default();
+    let host = |from: &str, name: &str, arguments: &[Value]| match (from, name, arguments) {
+        ("env", "double", [Value::I32(number)]) => Ok(vec![Value::I32(number * 2)]),
+        _ => Err(Trap::Unreachable),
+    };
+    let mut answered = Instance::with_host(module.clone(), &limits, Box::new(host)).expect("an instance");
+    assert_eq!(answered.call("run", &[Value::I32(5)], &limits), Ok(Some(Value::I32(11))));
+    let mut unanswered = Instance::new(module.clone(), &limits).expect("an instance");
+    assert!(matches!(unanswered.call("run", &[Value::I32(5)], &limits), Err(Trap::Invalid(_))));
+    let wrong = |_: &str, _: &str, _: &[Value]| Ok::<_, Trap>(vec![Value::F64(1.0)]);
+    let mut mistyped = Instance::with_host(module, &limits, Box::new(wrong)).expect("an instance");
+    assert!(matches!(mistyped.call("run", &[Value::I32(5)], &limits), Err(Trap::Invalid(_))));
+}

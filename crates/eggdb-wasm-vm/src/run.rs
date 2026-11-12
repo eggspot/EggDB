@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 const PAGE: usize = 65_536;
+const HOST_CALL_FUEL: u64 = 100;
 const NATIVE_STACK_BUDGET: usize = 1 << 20;
 
 fn native_stack_position() -> usize {
@@ -132,10 +133,42 @@ struct Label {
     target: usize,
 }
 
+/// The host's side of a module's imported functions: called with the import's module and
+/// name and its arguments, it returns the function's results or a trap.
+pub type HostCall = dyn FnMut(&str, &str, &[Value]) -> Result<Vec<Value>, Trap>;
+
+struct Host(Box<HostCall>);
+
+impl std::fmt::Debug for Host {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Host")
+    }
+}
+
+fn value_of(bits: u64, value_type: u8) -> Value {
+    match value_type {
+        I32 => Value::I32(as_i32(bits)),
+        I64 => Value::I64(bits as i64),
+        F32 => Value::F32(f32::from_bits(bits as u32)),
+        _ => Value::F64(f64::from_bits(bits)),
+    }
+}
+
+fn bits_of(value: &Value, value_type: u8) -> Option<u64> {
+    match (value_type, value) {
+        (I32, Value::I32(value)) => Some(from_i32(*value)),
+        (I64, Value::I64(value)) => Some(*value as u64),
+        (F32, Value::F32(value)) => Some(u64::from(value.to_bits())),
+        (F64, Value::F64(value)) => Some(value.to_bits()),
+        _ => None,
+    }
+}
+
 /// A module ready to run: its memory and globals, kept between calls.
 #[derive(Debug)]
 pub struct Instance {
     module: Rc<Module>,
+    host: Option<Host>,
     memory: Vec<u8>,
     max_pages: u32,
     globals: Vec<u64>,
@@ -271,8 +304,18 @@ struct Frame<'c> {
 }
 
 impl Instance {
-    /// Prepares `module` to run, with memory no larger than `limits` allows.
+    /// Prepares `module` to run, with memory no larger than `limits` allows; calling one of its
+    /// imported functions traps, as nothing provides them.
     pub fn new(module: Module, limits: &Limits) -> Result<Self, Trap> {
+        Self::prepare(module, limits, None)
+    }
+
+    /// Prepares `module` to run with `host` answering its imported functions.
+    pub fn with_host(module: Module, limits: &Limits, host: Box<HostCall>) -> Result<Self, Trap> {
+        Self::prepare(module, limits, Some(Host(host)))
+    }
+
+    fn prepare(module: Module, limits: &Limits, host: Option<Host>) -> Result<Self, Trap> {
         let pages = module.memory.map_or(0, |(minimum, _)| minimum);
         let max_pages = module
             .memory
@@ -311,6 +354,7 @@ impl Instance {
         let start = module.start;
         let mut instance = Self {
             module: Rc::new(module),
+            host,
             memory,
             max_pages,
             globals,
@@ -362,20 +406,16 @@ impl Instance {
             .find(|(export, _)| export == name)
             .map(|(_, index)| *index)
             .ok_or_else(|| Trap::NoSuchExport(name.to_owned()))?;
-        let function = &self.module.functions[index as usize];
-        let signature = &self.module.types[function.type_index as usize];
+        let module = Rc::clone(&self.module);
+        let signature = module
+            .signature_of(index)
+            .ok_or(Trap::Invalid("an export names a function that does not exist"))?;
         if signature.params.len() != arguments.len() {
             return Err(Trap::WrongArguments);
         }
         let mut stack = Vec::new();
         for (parameter, argument) in signature.params.iter().zip(arguments) {
-            match (*parameter, argument) {
-                (I32, Value::I32(value)) => stack.push(from_i32(*value)),
-                (I64, Value::I64(value)) => stack.push(*value as u64),
-                (F32, Value::F32(value)) => stack.push(u64::from(value.to_bits())),
-                (F64, Value::F64(value)) => stack.push(value.to_bits()),
-                _ => return Err(Trap::WrongArguments),
-            }
+            stack.push(bits_of(argument, *parameter).ok_or(Trap::WrongArguments)?);
         }
         let result_types = signature.results.clone();
         let mut fuel = limits.fuel;
@@ -389,12 +429,7 @@ impl Instance {
             .split_off(first)
             .into_iter()
             .zip(result_types)
-            .map(|(bits, result_type)| match result_type {
-                I32 => Value::I32(as_i32(bits)),
-                I64 => Value::I64(bits as i64),
-                F32 => Value::F32(f32::from_bits(bits as u32)),
-                _ => Value::F64(f64::from_bits(bits)),
-            })
+            .map(|(bits, result_type)| value_of(bits, result_type))
             .collect())
     }
 
@@ -422,9 +457,14 @@ impl Instance {
             return Err(Trap::CallDepth);
         }
         let module = Rc::clone(&self.module);
+        let imported = module.imports.len();
+        if (index as usize) < imported {
+            return self.call_host(index as usize, stack, fuel);
+        }
+        let defined = index as usize - imported;
         let function = module
             .functions
-            .get(index as usize)
+            .get(defined)
             .ok_or(Trap::Invalid("a call to a function that does not exist"))?;
         let signature = &module.types[function.type_index as usize];
         let parameters = signature.params.len();
@@ -436,13 +476,44 @@ impl Instance {
         let all_targets = Rc::clone(&self.targets);
         let frame = Frame {
             code: &function.code,
-            targets: &all_targets[index as usize],
+            targets: &all_targets[defined],
             locals,
         };
         let base = stack.len();
         self.execute(frame, stack, fuel, depth, limits, signature.results.len())?;
         if stack.len() != base + signature.results.len() {
             return Err(Trap::Invalid("a function left the wrong number of values"));
+        }
+        Ok(())
+    }
+
+    fn call_host(&mut self, index: usize, stack: &mut Vec<u64>, fuel: &mut u64) -> Result<(), Trap> {
+        let module = Rc::clone(&self.module);
+        let import = &module.imports[index];
+        let signature = module
+            .types
+            .get(import.type_index as usize)
+            .ok_or(Trap::Invalid("an import names a type that does not exist"))?;
+        *fuel = fuel.checked_sub(HOST_CALL_FUEL).ok_or(Trap::OutOfFuel)?;
+        if stack.len() < signature.params.len() {
+            return Err(Trap::Invalid("too few values for a call"));
+        }
+        let arguments: Vec<Value> = stack
+            .split_off(stack.len() - signature.params.len())
+            .into_iter()
+            .zip(&signature.params)
+            .map(|(bits, value_type)| value_of(bits, *value_type))
+            .collect();
+        let host = self
+            .host
+            .as_mut()
+            .ok_or(Trap::Invalid("an imported function has no host to answer it"))?;
+        let results = (host.0)(&import.module, &import.name, &arguments)?;
+        if results.len() != signature.results.len() {
+            return Err(Trap::Invalid("a host function returned the wrong number of values"));
+        }
+        for (value, value_type) in results.iter().zip(&signature.results) {
+            stack.push(bits_of(value, *value_type).ok_or(Trap::Invalid("a host function returned a value of the wrong type"))?);
         }
         Ok(())
     }
@@ -625,9 +696,7 @@ impl Instance {
                         .get(expected)
                         .ok_or(Trap::Invalid("call_indirect names a type that does not exist"))?;
                     let found = module
-                        .functions
-                        .get(callee as usize)
-                        .and_then(|function| module.types.get(function.type_index as usize))
+                        .signature_of(callee)
                         .ok_or(Trap::Invalid("a table element names no function"))?;
                     if wanted != found {
                         return Err(Trap::IndirectCallTypeMismatch);

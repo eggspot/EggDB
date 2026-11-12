@@ -12,6 +12,36 @@ use std::rc::Rc;
 pub(crate) const SYMBOL_SEPARATOR: char = '\0';
 const MOST_CACHED_MODULES: usize = 32;
 const MOST_MODULE_BYTES: usize = 64 << 20;
+const MICROS_FROM_1970_TO_2000: i64 = 946_684_800_000_000;
+const NOW_IMPORT: (&str, &str) = ("eggdb", "now_micros");
+const ABORT_IMPORT: (&str, &str) = ("env", "abort");
+
+fn provided(module: &str, name: &str) -> Option<(Vec<ValueType>, Vec<ValueType>)> {
+    match (module, name) {
+        NOW_IMPORT => Some((Vec::new(), vec![ValueType::I64])),
+        ABORT_IMPORT => Some((vec![ValueType::I32; 4], Vec::new())),
+        _ => None,
+    }
+}
+
+fn check_imports(module: &Module) -> SqlResult<()> {
+    for (from, name) in module.imports() {
+        let fits = provided(from, name).is_some_and(|wanted| module.import_types(from, name) == Some(wanted));
+        if !fits {
+            return Err(invalid(format!(
+                "the WebAssembly module imports {from}.{name}, which EggDB does not provide: a module may import eggdb.now_micros() -> i64 (the statement's time in microseconds since 1970) and env.abort(i32, i32, i32, i32), which traps"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn host_for(now_micros: i64) -> Box<eggdb_wasm_vm::HostCall> {
+    Box::new(move |from: &str, name: &str, _: &[eggdb_wasm_vm::Value]| match (from, name) {
+        NOW_IMPORT => Ok(vec![eggdb_wasm_vm::Value::I64(now_micros)]),
+        _ => Err(eggdb_wasm_vm::Trap::Unreachable),
+    })
+}
 
 thread_local! {
     static MODULES: RefCell<HashMap<(usize, u64), (String, Rc<Module>)>> =
@@ -150,6 +180,7 @@ pub(crate) fn check(definition: &RoutineDefinition) -> SqlResult<()> {
     }
     let (written, export) = parts(definition);
     let module = parsed(written)?;
+    check_imports(&module)?;
     let Some((params, results)) = module.export_types(export) else {
         return Err(invalid(format!(
             "the WebAssembly module exports no function named \"{export}\" over number types"
@@ -319,7 +350,9 @@ pub(crate) fn invoke(definition: &RoutineDefinition, arguments: Vec<Value>) -> S
     let (written, export) = parts(definition);
     let module = parsed(written)?;
     let limits = Limits::default();
-    let mut instance = Instance::new((*module).clone(), &limits).map_err(trapped)?;
+    check_imports(&module)?;
+    let now_micros = crate::datetime::statement_now().saturating_add(MICROS_FROM_1970_TO_2000);
+    let mut instance = Instance::with_host((*module).clone(), &limits, host_for(now_micros)).map_err(trapped)?;
     let mut values = Vec::with_capacity(arguments.len());
     for (value, parameter) in arguments.iter().zip(&definition.parameters) {
         if value.is_null() {

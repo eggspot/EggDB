@@ -932,3 +932,4 @@ its full title with its status.
 - [D905](decisions/D905.md) Code-only batch 553 (M12): pgRouting spanning trees and maximum flows
 - [D906](decisions/D906.md) Code-only batch 554 (M12): OGC API Tiles on WorldCRS84Quad
 - [D907](decisions/D907.md) Code-only batch 555 (M5): SQL Server logon triggers and Oracle BEFORE LOGOFF
+- [D908](decisions/D908.md) Code-only batch 556 (M5): WebAssembly imported functions and host functions
