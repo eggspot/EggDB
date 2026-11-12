@@ -443,6 +443,14 @@ fn create(tokens: &[Token]) -> Action {
         "event" if tokens.get(at).is_some_and(|token| token.is_word("trigger")) => {
             Action::Run(Effect::OtherDdl)
         }
+        "text"
+            if tokens.get(at).is_some_and(|token| token.is_word("search"))
+                && tokens
+                    .get(at + 1)
+                    .is_some_and(|token| token.is_word("dictionary") || token.is_word("configuration")) =>
+        {
+            Action::Run(Effect::OtherDdl)
+        }
         "rule" => on_table(tokens, at, "rule", "to", "rules come later"),
         "policy" => on_table(
             tokens,

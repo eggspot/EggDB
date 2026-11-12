@@ -57,6 +57,7 @@ struct CachedTable {
     checked_at: Option<u64>,
     needs_catalog: bool,
     needs_user_types: bool,
+    needs_text_search: bool,
 }
 
 fn stored_expressions_need_user_types(relation: &Relation) -> bool {
@@ -106,6 +107,19 @@ fn stored_expressions_need_catalog(relation: &Relation) -> bool {
     }
 }
 
+fn stored_expressions_need_text_search(relation: &Relation) -> bool {
+    match relation {
+        Relation::Table(table) => table
+            .columns
+            .iter()
+            .filter_map(|column| column.default.as_deref())
+            .chain(table.checks.iter().map(|check| check.expression.as_str()))
+            .chain(table.generated.iter().map(|generated| generated.expression.as_str()))
+            .any(crate::text_search_catalog::text_mentions_text_search),
+        Relation::View(view) => crate::text_search_catalog::text_mentions_text_search(&view.query),
+    }
+}
+
 pub(crate) fn table_needs_catalog(table: &TableDefinition) -> bool {
     table
         .columns
@@ -137,6 +151,7 @@ impl TableCache {
         name: &str,
     ) -> SqlResult<Option<Relation>> {
         crate::pg_catalog::load_if_wanted(reader)?;
+        crate::text_search_catalog::load_if_wanted(reader)?;
         if crate::temp_tables::is_temp_table(name) {
             let Some((definition, needs_catalog)) =
                 crate::temp_tables::temp_definition_and_catalog_need(name)
@@ -176,6 +191,7 @@ impl TableCache {
             bytes,
             needs_catalog: stored_expressions_need_catalog(&relation),
             needs_user_types: stored_expressions_need_user_types(&relation),
+            needs_text_search: stored_expressions_need_text_search(&relation),
             relation,
             checked_at: version,
         };
@@ -190,6 +206,9 @@ impl TableCache {
         }
         if cached.needs_user_types {
             crate::user_types::ensure_loaded(reader)?;
+        }
+        if cached.needs_text_search {
+            crate::text_search_catalog::load_now(reader)?;
         }
         Ok(Some(cached.relation.clone()))
     }

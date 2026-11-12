@@ -173,45 +173,108 @@ impl Config {
     /// The lexeme `word` becomes, or `None` for a stop word.
     pub fn lexeme(self, word: &str) -> Option<String> {
         let lower = word.to_lowercase();
-        match self {
-            Self::Simple | Self::Cjk | Self::Thai => Some(lower),
-            Self::English if english::is_stop_word(&lower) => None,
-            Self::English => Some(english::stem(&lower)),
-            Self::German if german::is_stop_word(&lower) => None,
-            Self::German => Some(german::stem(&lower)),
-            Self::Spanish if spanish::is_stop_word(&lower) => None,
-            Self::Spanish => Some(spanish::stem(&lower)),
-            Self::Italian if italian::is_stop_word(&lower) => None,
-            Self::Italian => Some(italian::stem(&lower)),
-            Self::Russian if russian::is_stop_word(&lower) => None,
-            Self::Russian => Some(russian::stem(&lower)),
-            Self::Dutch if dutch::is_stop_word(&lower) => None,
-            Self::Dutch => Some(dutch::stem(&lower)),
-            Self::Portuguese if portuguese::is_stop_word(&lower) => None,
-            Self::Portuguese => Some(portuguese::stem(&lower)),
-            Self::French if french::is_stop_word(&lower) => None,
-            Self::French => Some(french::stem(&lower)),
-            Self::Finnish if finnish::is_stop_word(&lower) => None,
-            Self::Finnish => Some(finnish::stem(&lower)),
-            Self::Hungarian if hungarian::is_stop_word(&lower) => None,
-            Self::Hungarian => Some(hungarian::stem(&lower)),
-            Self::Indonesian => Some(indonesian::stem(&lower)),
-            Self::Romanian => Some(romanian::stem(&lower)),
-            Self::Turkish if turkish::is_stop_word(&lower) => None,
-            Self::Turkish => Some(turkish::stem(&lower)),
-            Self::Swedish | Self::Norwegian | Self::Danish => {
-                let language = match self {
-                    Self::Swedish => Language::Swedish,
-                    Self::Norwegian => Language::Norwegian,
-                    _ => Language::Danish,
-                };
-                if language.is_stop_word(&lower) {
-                    None
-                } else {
-                    Some(language.stem(&lower))
-                }
-            }
+        if self.is_stop_word(&lower) {
+            None
+        } else {
+            Some(self.stem(&lower))
         }
+    }
+
+    /// Whether `word` (lower case) is on this configuration's stop word list, as PostgreSQL's
+    /// `<language>.stop` file lists them; `simple`, `indonesian`, `romanian`, `cjk` and `thai`
+    /// have none.
+    pub fn is_stop_word(self, word: &str) -> bool {
+        match self {
+            Self::Simple | Self::Cjk | Self::Thai | Self::Indonesian | Self::Romanian => false,
+            Self::English => english::is_stop_word(word),
+            Self::German => german::is_stop_word(word),
+            Self::Spanish => spanish::is_stop_word(word),
+            Self::Italian => italian::is_stop_word(word),
+            Self::Russian => russian::is_stop_word(word),
+            Self::Dutch => dutch::is_stop_word(word),
+            Self::Portuguese => portuguese::is_stop_word(word),
+            Self::French => french::is_stop_word(word),
+            Self::Finnish => finnish::is_stop_word(word),
+            Self::Hungarian => hungarian::is_stop_word(word),
+            Self::Turkish => turkish::is_stop_word(word),
+            Self::Swedish => Language::Swedish.is_stop_word(word),
+            Self::Norwegian => Language::Norwegian.is_stop_word(word),
+            Self::Danish => Language::Danish.is_stop_word(word),
+        }
+    }
+
+    /// The stem of `word` (lower case) by this configuration's Snowball stemmer, the word itself
+    /// for `simple`, `cjk` and `thai`.
+    pub fn stem(self, word: &str) -> String {
+        match self {
+            Self::Simple | Self::Cjk | Self::Thai => word.to_owned(),
+            Self::English => english::stem(word),
+            Self::German => german::stem(word),
+            Self::Spanish => spanish::stem(word),
+            Self::Italian => italian::stem(word),
+            Self::Russian => russian::stem(word),
+            Self::Dutch => dutch::stem(word),
+            Self::Portuguese => portuguese::stem(word),
+            Self::French => french::stem(word),
+            Self::Finnish => finnish::stem(word),
+            Self::Hungarian => hungarian::stem(word),
+            Self::Indonesian => indonesian::stem(word),
+            Self::Romanian => romanian::stem(word),
+            Self::Turkish => turkish::stem(word),
+            Self::Swedish => Language::Swedish.stem(word),
+            Self::Norwegian => Language::Norwegian.stem(word),
+            Self::Danish => Language::Danish.stem(word),
+        }
+    }
+
+    /// The configuration's name, as `Config::named` reads it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::English => "english",
+            Self::Simple => "simple",
+            Self::German => "german",
+            Self::Spanish => "spanish",
+            Self::Swedish => "swedish",
+            Self::Norwegian => "norwegian",
+            Self::Danish => "danish",
+            Self::Italian => "italian",
+            Self::Russian => "russian",
+            Self::Dutch => "dutch",
+            Self::Portuguese => "portuguese",
+            Self::French => "french",
+            Self::Finnish => "finnish",
+            Self::Hungarian => "hungarian",
+            Self::Indonesian => "indonesian",
+            Self::Romanian => "romanian",
+            Self::Turkish => "turkish",
+            Self::Cjk => "cjk",
+            Self::Thai => "thai",
+        }
+    }
+}
+
+/// What turns text into lexemes: a built-in [`Config`] or a configuration built from
+/// dictionaries ([`crate::Analyzer`]).
+pub trait Lexer: Copy {
+    /// The words of `text`, in order.
+    fn words<'t>(self, text: &'t str) -> Vec<&'t str>;
+    /// The lexeme `word` becomes, or `None` when it is dropped.
+    fn lexeme(self, word: &str) -> Option<String>;
+    /// Whether text written without spaces is cut into pieces.
+    fn segments(self) -> bool;
+}
+
+impl Lexer for Config {
+    fn words<'t>(self, text: &'t str) -> Vec<&'t str> {
+        Config::words(self, text)
+    }
+
+    fn lexeme(self, word: &str) -> Option<String> {
+        Config::lexeme(self, word)
+    }
+
+    fn segments(self) -> bool {
+        Config::segments(self)
     }
 }
 
@@ -230,7 +293,7 @@ pub struct TsVector {
 
 impl TsVector {
     /// The vector of `text` under `config`, as `to_tsvector` makes it.
-    pub fn from_text(config: Config, text: &str) -> Self {
+    pub fn from_text(config: impl Lexer, text: &str) -> Self {
         let mut lexemes: BTreeMap<String, Vec<u32>> = BTreeMap::new();
         for (index, word) in config.words(text).into_iter().enumerate() {
             let position = (index as u32 + 1).min(MAX_POSITION);

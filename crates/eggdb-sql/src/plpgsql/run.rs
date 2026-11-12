@@ -461,6 +461,7 @@ fn parsed_changing_settings(
     if dialect == Dialect::PostgreSql {
         crate::pg_catalog::load_for_tokens(reader, &tokens)?;
     }
+    crate::text_search_catalog::load_for_tokens(reader, &tokens)?;
     parsed_tokens(text, &tokens, settings, frame, dialect)
 }
 
@@ -2757,6 +2758,7 @@ impl<'r> Run<'r> {
         let tokens =
             tokenize_in(text, Dialect::PostgreSql).map_err(|error| self.sql_located(error, 1))?;
         crate::pg_catalog::load_for_tokens(self.writer.read(), &tokens)?;
+        crate::text_search_catalog::load_for_tokens(self.writer.read(), &tokens)?;
         let mut resume = (0, 0);
         let mut last = None;
         let mut number = 0;

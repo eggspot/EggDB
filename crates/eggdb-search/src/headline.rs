@@ -1,5 +1,5 @@
 use crate::query::TsQuery;
-use crate::vector::Config;
+use crate::vector::Lexer;
 
 /// The options of `ts_headline`, with PostgreSQL's defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,7 +173,7 @@ fn tokens(document: &str) -> (Vec<Token<'_>>, Vec<usize>) {
     (tokens, word_tokens)
 }
 
-fn matched(config: Config, word: &str, terms: &[(&str, bool)]) -> bool {
+fn matched(config: impl Lexer, word: &str, terms: &[(&str, bool)]) -> bool {
     let Some(lexeme) = config.lexeme(word) else {
         return false;
     };
@@ -229,7 +229,7 @@ fn trimmed_window(
 /// matching words between `start_sel` and `stop_sel`. The excerpt starts at the first match
 /// and holds up to `max_words` words, moved back to fill the window near the end and trimmed of
 /// short words at both ends; without a match it is the first `min_words` words.
-pub fn headline(config: Config, document: &str, query: &TsQuery, options: &HeadlineOptions) -> String {
+pub fn headline(config: impl Lexer, document: &str, query: &TsQuery, options: &HeadlineOptions) -> String {
     let (tokens, word_tokens) = tokens(document);
     let words: Vec<&str> = word_tokens.iter().map(|&at| tokens[at].text).collect();
     let terms = query.terms();
@@ -282,6 +282,7 @@ pub fn headline(config: Config, document: &str, query: &TsQuery, options: &Headl
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vector::Config;
 
     #[test]
     fn matches_are_marked_and_options_are_read() {

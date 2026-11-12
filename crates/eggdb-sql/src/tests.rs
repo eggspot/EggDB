@@ -2914,6 +2914,36 @@ fn full_text_search_matches_and_ranks_rows() {
 }
 
 #[test]
+fn text_search_configurations_map_token_types_to_dictionaries() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for statement in [
+        "CREATE TEXT SEARCH DICTIONARY my_synonyms (TEMPLATE = synonym, SynonymList = 'postgres pgsql, postgresql pgsql')",
+        "CREATE TEXT SEARCH DICTIONARY my_stop (TEMPLATE = simple, StopWordList = 'fat', Accept = false)",
+        "CREATE TEXT SEARCH CONFIGURATION my_search (COPY = english)",
+        "ALTER TEXT SEARCH CONFIGURATION my_search ALTER MAPPING FOR asciiword WITH my_synonyms, my_stop, english_stem",
+    ] {
+        run(&mut session, statement).unwrap();
+    }
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT to_tsvector('my_search', 'Fat Postgres databases') AS v, to_tsquery('public.my_search', 'postgresql & databases') AS q"
+        ),
+        "v|q\n'databas':3 'pgsql':2|'pgsql' & 'databas'\nSELECT 1"
+    );
+    assert_eq!(state(&mut session, "DROP TEXT SEARCH DICTIONARY my_synonyms"), "2BP01");
+    run(&mut session, "ALTER TEXT SEARCH CONFIGURATION my_search DROP MAPPING FOR asciiword").unwrap();
+    assert_eq!(
+        last(&mut session, "SELECT to_tsvector('my_search', 'Postgres databases') AS v"),
+        "v\n\nSELECT 1"
+    );
+    run(&mut session, "DROP TEXT SEARCH CONFIGURATION my_search").unwrap();
+    run(&mut session, "DROP TEXT SEARCH DICTIONARY my_synonyms, my_stop").unwrap();
+    assert_eq!(state(&mut session, "SELECT to_tsvector('my_search', 'x')"), "42704");
+}
+
+#[test]
 fn explain_analyze_runs_the_statement_and_reports_rows_and_times() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);

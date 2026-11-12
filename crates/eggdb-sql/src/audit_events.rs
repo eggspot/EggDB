@@ -148,6 +148,7 @@ pub(crate) fn statement_kind(statement: &crate::ast::Statement) -> Option<AuditK
         | Statement::AlterRoutine(_)
         | Statement::Synonym(_)
         | Statement::OracleContext(_)
+        | Statement::TextSearch(_)
         | Statement::OracleSystemTrigger(_)
         | Statement::ForeignData(_)
         | Statement::CreatePackage(_)

@@ -1154,8 +1154,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   segmentation.
 - Synonyms, stop words, and fuzzy and phonetic matching (D30). Fuzzy and phonetic functions:
   **code written, unbuilt** (code-only mode, 2026-11-11, D470); Elasticsearch analyzers with stop words and synonyms:
-  **code written, unbuilt** (code-only mode, 2026-11-12, D739). Left: synonyms and stop words in SQL text search
-  configurations.
+  **code written, unbuilt** (code-only mode, 2026-11-12, D739). SQL text search dictionaries
+  (`simple`, `snowball`, `synonym`) and configurations with mappings: **code written, unbuilt** (code-only mode,
+  2026-11-13, D983). Left: the `ispell` and `thesaurus` templates, and `pg_ts_config`, `pg_ts_dict` and
+  `pg_ts_config_map` in the catalog.
 - MySQL's `MATCH ... AGAINST` with `FULLTEXT` keys, SQL Server's `CONTAINS` and `FREETEXT`, and
   SQLite's FTS5 (D10, D195). `MATCH ... AGAINST` without keys: **code written, unbuilt** (code-only
   mode, 2026-11-11, D513). `CONTAINS` and `FREETEXT` without full-text indexes: **code written,

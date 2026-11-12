@@ -47,6 +47,7 @@ mod schemas;
 mod select_into;
 mod sql_json;
 mod sqlserver_xml;
+mod text_search;
 mod xml_table;
 mod sqlite;
 mod sqlserver;
@@ -1077,6 +1078,14 @@ impl<'t> Parser<'t> {
                 self.at += 1;
                 self.alter_table()
             }
+            "alter"
+                if self.postgresql()
+                    && self.is_word_at(1, "text")
+                    && self.is_word_at(2, "search") =>
+            {
+                self.at += 1;
+                self.alter_text_search()
+            }
             "alter" if self.postgresql() && self.is_word_at(1, "index") => {
                 self.at += 1;
                 self.alter_index()
@@ -1894,6 +1903,9 @@ impl<'t> Parser<'t> {
         }
         if self.postgresql() && self.is_word("policy") {
             return self.create_policy();
+        }
+        if self.postgresql() && self.at_text_search_object() {
+            return self.create_text_search();
         }
         if self.postgresql() && self.at_foreign_data_definition() {
             return self.create_foreign_data();
@@ -2995,6 +3007,9 @@ impl<'t> Parser<'t> {
         }
         if self.postgresql() && self.is_word("policy") {
             return self.drop_policy();
+        }
+        if self.postgresql() && self.at_text_search_object() {
+            return self.drop_text_search();
         }
         if self.postgresql() && self.at_foreign_data_definition() {
             return self.drop_foreign_data();

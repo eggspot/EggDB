@@ -2496,6 +2496,16 @@ prints them; `@@` matches with `&`, `|`, `!`, phrases (`<->`, `<N>`) and prefixe
 `ts_rank` ranks by how often the query's lexemes occur; its values are EggDB's own. There is no
 full-text index yet, so `@@` reads every row.
 
+`CREATE TEXT SEARCH DICTIONARY` takes the `simple` (`StopWords`, `Accept`), `snowball` (`Language`,
+`StopWords`) and `synonym` (`Synonyms`, `CaseSensitive`) templates. EggDB keeps no `tsearch_data`
+files, so `StopWords` names a built-in language's list and `Synonyms` only `synonym_sample`; EggDB's own
+`StopWordList` and `SynonymList` options give the words inline (`'fat, the'`, `'postgres pgsql,
+postgresql pgsql'`). `CREATE TEXT SEARCH CONFIGURATION ... (COPY = english)` or `(PARSER = default)`,
+`ALTER TEXT SEARCH CONFIGURATION ... ADD`, `ALTER` (`WITH` or `REPLACE`) and `DROP MAPPING FOR` token
+types, `RENAME TO`, `OWNER TO` and `DROP TEXT SEARCH ...` work as in PostgreSQL; each word is given
+its token type (`asciiword`, `word`, `numword` or `uint`) and the type's dictionaries are asked in
+turn. `to_tsvector`, the `to_tsquery` family and `ts_headline` take these configurations by name.
+
 ## EXPLAIN ANALYZE and the slow-statement log
 
 `EXPLAIN ANALYZE` (or `EXPLAIN (ANALYZE[, COSTS OFF, ...])`) runs the statement and prints its

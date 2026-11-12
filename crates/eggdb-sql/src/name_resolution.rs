@@ -1655,6 +1655,7 @@ impl Binding<'_> {
         tables: &'r mut TableCache,
     ) -> SqlResult<Resolver<'r>> {
         crate::pg_catalog::load_if_wanted(reader)?;
+        crate::text_search_catalog::load_if_wanted(reader)?;
         let mut resolver =
             Resolver::new(reader, tables, Some(self.settings), self.walk_expressions)?;
         resolver.target_privilege = self.target_privilege;

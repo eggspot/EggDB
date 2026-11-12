@@ -1,4 +1,4 @@
-use crate::vector::{Config, TsVector, quote, quoted};
+use crate::vector::{Config, Lexer, TsVector, quote, quoted};
 use std::fmt;
 
 const MAX_DEPTH: usize = 64;
@@ -36,7 +36,7 @@ enum Token {
     Close,
 }
 
-fn tokens(text: &str, config: Option<Config>) -> Option<Vec<Token>> {
+fn tokens<L: Lexer>(text: &str, config: Option<L>) -> Option<Vec<Token>> {
     let mut out = Vec::new();
     let mut rest = text;
     loop {
@@ -113,7 +113,7 @@ fn tokens(text: &str, config: Option<Config>) -> Option<Vec<Token>> {
     }
 }
 
-fn push_word(out: &mut Vec<Token>, config: Option<Config>, word: &str, prefix: bool) {
+fn push_word<L: Lexer>(out: &mut Vec<Token>, config: Option<L>, word: &str, prefix: bool) {
     let pieces = match config {
         Some(config) if config.segments() => config.words(word),
         _ => Vec::new(),
@@ -232,13 +232,13 @@ fn combine(
 impl TsQuery {
     /// A query in `to_tsquery`'s syntax (`fat & (rat | cat:*) & !dog`, `a <-> b`), its words
     /// normalized by `config`; `None` when the syntax is wrong.
-    pub fn parse(config: Config, text: &str) -> Option<Self> {
+    pub fn parse(config: impl Lexer, text: &str) -> Option<Self> {
         Self::parse_tokens(tokens(text, Some(config))?)
     }
 
     /// A query written in its own text form (`'fat' & 'rat'`), lexemes taken as they are.
     pub fn parse_literal(text: &str) -> Option<Self> {
-        Self::parse_tokens(tokens(text, None)?)
+        Self::parse_tokens(tokens::<Config>(text, None)?)
     }
 
     fn parse_tokens(tokens: Vec<Token>) -> Option<Self> {
@@ -255,7 +255,7 @@ impl TsQuery {
     }
 
     /// `plainto_tsquery`: every word, all required.
-    pub fn plain(config: Config, text: &str) -> Self {
+    pub fn plain(config: impl Lexer, text: &str) -> Self {
         config
             .words(text)
             .into_iter()
@@ -270,7 +270,7 @@ impl TsQuery {
     }
 
     /// `phraseto_tsquery`: the words in order, each next to the one before.
-    pub fn phrase(config: Config, text: &str) -> Self {
+    pub fn phrase(config: impl Lexer, text: &str) -> Self {
         config
             .words(text)
             .into_iter()
@@ -288,7 +288,7 @@ impl TsQuery {
 
     /// `websearch_to_tsquery`: words all required, `"quoted phrases"`, `or`, and `-word` to
     /// exclude.
-    pub fn web(config: Config, text: &str) -> Self {
+    pub fn web(config: impl Lexer, text: &str) -> Self {
         let mut alternatives = vec![Self::Empty];
         let mut rest = text;
         while !rest.trim_start().is_empty() {

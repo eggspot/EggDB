@@ -1,6 +1,7 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
-use eggdb_search::{Config, HeadlineOptions, TsQuery, TsVector, Weight};
+use eggdb_search::{Analyzer, Config, HeadlineOptions, Lexer, TsQuery, TsVector, Weight};
+use std::sync::Arc;
 
 const DEFAULT_CONFIG: Config = Config::English;
 
@@ -12,13 +13,22 @@ fn text(value: &Value) -> Option<String> {
     }
 }
 
-fn config_named(name: &str) -> SqlResult<Config> {
-    Config::named(name).ok_or_else(|| {
-        SqlError::new(
+enum Chosen {
+    BuiltIn(Config),
+    Defined(Arc<Analyzer>),
+}
+
+fn config_named(name: &str) -> SqlResult<Chosen> {
+    if let Some(config) = Config::named(name) {
+        return Ok(Chosen::BuiltIn(config));
+    }
+    match crate::text_search_catalog::analyzer(name) {
+        Some(analyzer) => analyzer.map(Chosen::Defined),
+        None => Err(SqlError::new(
             SqlState::UNDEFINED_OBJECT,
             format!("text search configuration \"{name}\" does not exist"),
-        )
-    })
+        )),
+    }
 }
 
 fn syntax_error(text: &str) -> SqlError {
@@ -62,9 +72,9 @@ pub(crate) fn matches(left: &Value, right: &Value) -> SqlResult<Value> {
     Ok(Value::Boolean(query_of(&right).matches(&vector_of(&left))))
 }
 
-fn with_config(values: &[Value]) -> SqlResult<Option<(Config, String)>> {
+fn with_config(values: &[Value]) -> SqlResult<Option<(Chosen, String)>> {
     match values {
-        [value] => Ok(text(value).map(|text| (DEFAULT_CONFIG, text))),
+        [value] => Ok(text(value).map(|text| (Chosen::BuiltIn(DEFAULT_CONFIG), text))),
         [config, value] => match (text(config), text(value)) {
             (Some(config), Some(value)) => Ok(Some((config_named(&config)?, value))),
             _ => Ok(None),
@@ -176,7 +186,7 @@ fn ts_headline(values: &[Value]) -> SqlResult<Value> {
         }
     };
     let config = match config.map(text) {
-        None => DEFAULT_CONFIG,
+        None => Chosen::BuiltIn(DEFAULT_CONFIG),
         Some(None) => return Ok(Value::Null),
         Some(Some(name)) => config_named(&name)?,
     };
@@ -189,12 +199,23 @@ fn ts_headline(values: &[Value]) -> SqlResult<Value> {
         Some(Some(written)) => HeadlineOptions::parse(&written)
             .map_err(|message| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, message))?,
     };
-    Ok(Value::Text(eggdb_search::headline(
-        config,
-        &document,
-        &query_of(&query),
-        &options,
-    )))
+    let query = query_of(&query);
+    Ok(Value::Text(match &config {
+        Chosen::BuiltIn(config) => eggdb_search::headline(*config, &document, &query, &options),
+        Chosen::Defined(analyzer) => eggdb_search::headline(&**analyzer, &document, &query, &options),
+    }))
+}
+
+fn written(name: &str, config: impl Lexer, input: &str) -> SqlResult<String> {
+    Ok(match name {
+        "to_tsvector" => TsVector::from_text(config, input).to_string(),
+        "to_tsquery" => TsQuery::parse(config, input)
+            .ok_or_else(|| syntax_error(input))?
+            .to_string(),
+        "plainto_tsquery" => TsQuery::plain(config, input).to_string(),
+        "phraseto_tsquery" => TsQuery::phrase(config, input).to_string(),
+        _ => TsQuery::web(config, input).to_string(),
+    })
 }
 
 /// The text-search functions: `to_tsvector`, `to_tsquery`, `plainto_tsquery`,
@@ -237,14 +258,9 @@ pub(crate) fn function(name: &str, values: &[Value]) -> SqlResult<Value> {
             let Some((config, input)) = with_config(values)? else {
                 return Ok(Value::Null);
             };
-            let written = match name {
-                "to_tsvector" => TsVector::from_text(config, &input).to_string(),
-                "to_tsquery" => TsQuery::parse(config, &input)
-                    .ok_or_else(|| syntax_error(&input))?
-                    .to_string(),
-                "plainto_tsquery" => TsQuery::plain(config, &input).to_string(),
-                "phraseto_tsquery" => TsQuery::phrase(config, &input).to_string(),
-                _ => TsQuery::web(config, &input).to_string(),
+            let written = match &config {
+                Chosen::BuiltIn(config) => written(name, *config, &input)?,
+                Chosen::Defined(analyzer) => written(name, &**analyzer, &input)?,
             };
             Ok(Value::Text(written))
         }

@@ -125,6 +125,7 @@ pub(crate) struct StatementFlags {
     row_locking: Option<&'static str>,
     uses_sequences: bool,
     wants_catalog: bool,
+    wants_text_search: bool,
 }
 
 impl StatementFlags {
@@ -140,6 +141,7 @@ impl StatementFlags {
                 }
                 _ => false,
             },
+            wants_text_search: tokens.is_some_and(crate::text_search_catalog::mentions_text_search),
         }
     }
 
@@ -149,6 +151,7 @@ impl StatementFlags {
             row_locking: self.row_locking.or(other.row_locking),
             uses_sequences: self.uses_sequences || other.uses_sequences,
             wants_catalog: self.wants_catalog || other.wants_catalog,
+            wants_text_search: self.wants_text_search || other.wants_text_search,
         }
     }
 }
@@ -2275,6 +2278,7 @@ impl<'s> Session<'s> {
                 bulk_rows: reborrowed_rows(&mut client.bulk_rows),
             };
             let _catalog = crate::pg_catalog::enter_statement(flags.wants_catalog, &settings);
+            let _text_search = crate::text_search_catalog::enter_statement(flags.wants_text_search);
             crate::mysql_errors::clear_evaluation_warnings();
             crate::table_sample::reset();
             crate::mysql_errors::set_strict_write(
@@ -3885,6 +3889,9 @@ impl<'s> Session<'s> {
                 crate::routines::run_do(writer, tables, &settings, &block.code)
             }),
             Statement::OracleContext(command) => self.run_oracle_context(&command),
+            Statement::TextSearch(command) => self.write(command.tag(), |writer, _| {
+                crate::text_search_catalog::run(writer, &command)
+            }),
             Statement::OracleSystemTrigger(create) => self.create_system_trigger(&create),
             Statement::ForeignData(command) => self.run_foreign_data(&command),
             Statement::Synonym(command) => {

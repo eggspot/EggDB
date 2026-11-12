@@ -127,6 +127,7 @@ pub(crate) enum Statement {
     PlsqlBlock(Box<PlsqlBlock>),
     Synonym(SynonymCommand),
     OracleContext(OracleContextCommand),
+    TextSearch(crate::text_search_catalog::TextSearchCommand),
     OracleSystemTrigger(Box<crate::oracle_system_triggers::CreateSystemTrigger>),
     ForeignData(Box<crate::foreign_tables::ForeignDataCommand>),
     CreatePackage(Box<CreatePackage>),

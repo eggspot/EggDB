@@ -792,11 +792,6 @@ fn every_kind_eggdb_cannot_create_yet_is_reported_with_its_name() {
             "public.c",
         ),
         (
-            "CREATE TEXT SEARCH CONFIGURATION public.ts (COPY = english);",
-            "text search object",
-            "public.ts",
-        ),
-        (
             "CREATE FOREIGN TABLE public.f (a integer) SERVER s;",
             "foreign table",
             "public.f",
