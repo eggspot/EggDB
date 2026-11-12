@@ -85,9 +85,17 @@ const LOCAL_PREFIX: &str = "eggdb_bind_";
 pub(super) fn block_with_output_binds(text: &str, binds: &[BindVariable]) -> Option<String> {
     let trimmed = text.trim().trim_end_matches('/').trim_end();
     let lower = trimmed.to_ascii_lowercase();
-    if !(lower.starts_with("begin") || lower.starts_with("declare")) {
+    let returning_into = ["insert", "update", "delete"].iter().any(|verb| lower.starts_with(verb))
+        && returns_into_binds(&lower);
+    let statement_block;
+    let trimmed = if returning_into {
+        statement_block = format!("BEGIN {}; END;", trimmed.trim_end_matches(';'));
+        statement_block.as_str()
+    } else if lower.starts_with("begin") || lower.starts_with("declare") {
+        trimmed
+    } else {
         return None;
-    }
+    };
     let (renamed, used) = replaced_binds(trimmed, binds, |bind| format!("{LOCAL_PREFIX}{}", bind.name));
     if used.is_empty() {
         return None;
@@ -115,6 +123,14 @@ pub(super) fn block_with_output_binds(text: &str, binds: &[BindVariable]) -> Opt
     }
     out.push_str("END;");
     Some(out)
+}
+
+fn returns_into_binds(lower: &str) -> bool {
+    lower.find(" returning ").is_some_and(|at| {
+        lower[at..]
+            .find(" into ")
+            .is_some_and(|into| lower[at + into + " into ".len()..].trim_start().starts_with(':'))
+    })
 }
 
 /// The variable name and value (`None` for null) an output bind line carries.
@@ -584,5 +600,8 @@ mod tests {
         assert_eq!(output_bind(&format!("{OUTPUT_BIND_MARKER}TOTAL=2")), Some(("TOTAL".to_owned(), Some("2".to_owned()))));
         assert_eq!(output_bind(&format!("{OUTPUT_BIND_MARKER}TOTAL~")), Some(("TOTAL".to_owned(), None)));
         assert_eq!(output_bind("plain output"), None);
+        let insert = block_with_output_binds("INSERT INTO t (a) VALUES (1) RETURNING id INTO :total;", &binds).unwrap();
+        assert!(insert.contains("BEGIN INSERT INTO t (a) VALUES (1) RETURNING id INTO eggdb_bind_TOTAL; END;"), "{insert}");
+        assert!(block_with_output_binds("INSERT INTO t (a) VALUES (:total)", &binds).is_none());
     }
 }

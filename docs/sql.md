@@ -4966,8 +4966,9 @@ And more, not in the suite yet:
 - `SEQUENCE.NEXTVAL` in a multitable insert's `VALUES` advances once per use, where Oracle
   advances it once per source row; rows go into an `INSERT ALL`'s targets one `INTO` clause at a
   time, so identity values follow that order (D304).
-- Not supported yet: outer joins with `(+)`, `RETURNING ... INTO`, synonyms, database links,
-  `ROWID` and the XML functions.
+- Not supported yet: database links, `ROWID`, and `XMLTABLE`, `XMLQUERY`, `EXTRACTVALUE` and
+  `XMLType`. `(+)` outer joins (D432), synonyms for relations (D433) and the SQL/XML publishing functions (D454)
+  are read. `RETURNING ... INTO` works in PL/SQL blocks, and in `eggdb shell` into `VARIABLE` binds (D689).
 - Regular expressions (D332): without `n`, a bracket expression that excludes characters
   (`[^a]`) does not match a newline either, where Oracle's does; `x` also treats `#` as the
   start of a comment; `\Z` is the end of the text only, and `\z` and the equivalence and

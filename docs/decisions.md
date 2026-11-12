@@ -713,3 +713,4 @@ its full title with its status.
 - [D686](decisions/D686.md) Code-only batch 334 (M5): SQL*Plus output binds set inside PL/SQL blocks in `eggdb shell`
 - [D687](decisions/D687.md) Code-only batch 335 (M8): an Indonesian stemmer and the `indonesian` text-search configuration
 - [D688](decisions/D688.md) Code-only batch 336 (M6c): OTLP protobuf for EggDB's own metrics, logs and traces, chosen by `OTEL_EXPORTER_OTLP_PROTOCOL`
+- [D689](decisions/D689.md) Code-only batch 337 (M10): Oracle `RETURNING ... INTO :bind` in `eggdb shell`, and sql.md's Oracle gaps updated

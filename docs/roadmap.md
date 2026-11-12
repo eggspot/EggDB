@@ -1181,7 +1181,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - EF Core 9 in the `tds-apps` job, and mssql-jdbc's `getSchemas()` (D291).
 - Oracle's `(+)` outer joins, `RETURNING ... INTO`, synonyms, database links and `ROWID` (sql.md). `(+)`
   outer joins in queries: **code written, unbuilt** (code-only mode, 2026-11-11, D432). Synonyms
-  for relations: **code written, unbuilt** (D433).
+  for relations: **code written, unbuilt** (D433). `RETURNING ... INTO :bind` in `eggdb shell`: **code written,
+  unbuilt** (code-only mode, 2026-11-12, D689). Left: database links and `ROWID`.
 - `CONNECT BY` over a join (the join's conditions in `WHERE` applied first), `PRIOR` beside a
   subquery, `ORDER SIBLINGS BY` a pseudo-column, and a sequence's `NEXTVAL` advancing once per
   source row of `INSERT ALL`; `CONNECT BY`, `INSERT ALL` and `INSERT FIRST` are built (D304).
