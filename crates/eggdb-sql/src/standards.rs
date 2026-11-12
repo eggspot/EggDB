@@ -1,7 +1,7 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 28] = [
+pub(crate) const FUNCTIONS: [&str; 30] = [
     "eggdb_column_lineage",
     "eggdb_pdf_table",
     "fhir_validate",
@@ -15,6 +15,8 @@ pub(crate) const FUNCTIONS: [&str; 28] = [
     "eggdb_route_node_network",
     "eggdb_route_spanning_tree",
     "eggdb_route_max_flow",
+    "eggdb_route_traversal",
+    "eggdb_route_ksp",
     "modbus_decode",
     "spreadsheet_recalculate",
     "row_pattern_matches",
@@ -466,6 +468,15 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
                 Some("kruskal") | None => crate::routing::spanning_tree(&edges, false).and_then(jsonb),
                 Some("prim") => crate::routing::spanning_tree(&edges, true).and_then(jsonb),
                 Some(_) => Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "eggdb_route_spanning_tree: the algorithm is 'kruskal' or 'prim'")),
+            },
+            ("eggdb_route_traversal", Some(edges)) => match (whole(1), flag(2), whole(3).or(Some(i64::MAX)), values.get(4).and_then(Value::to_text).as_deref()) {
+                (Some(root), Some(directed), Some(max_depth), Some("depth")) => crate::routing::traversal(&edges, root, directed, max_depth, true).and_then(jsonb),
+                (Some(root), Some(directed), Some(max_depth), Some("breadth")) => crate::routing::traversal(&edges, root, directed, max_depth, false).and_then(jsonb),
+                _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "eggdb_route_traversal takes edges, a root, whether the graph is directed, a maximum depth and 'depth' or 'breadth'")),
+            },
+            ("eggdb_route_ksp", Some(edges)) => match (whole(1), whole(2), whole(3), flag(4)) {
+                (Some(start), Some(finish), Some(k), Some(directed)) => crate::routing::k_shortest(&edges, start, finish, k, directed).and_then(jsonb),
+                _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "eggdb_route_ksp takes edges, a start, an end, k and whether the graph is directed")),
             },
             ("eggdb_route_max_flow", Some(edges)) => match (whole(1), whole(2)) {
                 (Some(source), Some(target)) => crate::routing::max_flow(&edges, source, target).and_then(jsonb),

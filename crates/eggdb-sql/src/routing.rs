@@ -820,3 +820,157 @@ mod tests {
         assert!(astar(ROADS, 1, 3, true, estimate).is_err());
     }
 }
+
+const MOST_PATHS: i64 = 1000;
+
+/// The nodes reached from `root`, depth first or breadth first, as pgRouting's
+/// `pgr_depthFirstSearch` and `pgr_breadthFirstSearch` list them: a JSON array of
+/// `{depth, start_vid, node, edge, cost, agg_cost}`, `root` first with edge -1, each node once,
+/// neighbours taken cheapest first and then by edge id, at most `max_depth` edges deep.
+pub(crate) fn traversal(edges_json: &str, root: i64, directed: bool, max_depth: i64, depth_first: bool) -> SqlResult<String> {
+    let arcs = graph(edges_json, directed)?;
+    let mut seen: HashSet<i64> = HashSet::from([root]);
+    let mut rows = vec![format!("{{\"depth\": 0, \"start_vid\": {root}, \"node\": {root}, \"edge\": -1, \"cost\": 0, \"agg_cost\": 0}}")];
+    let mut pending: std::collections::VecDeque<(i64, i64, f64)> = std::collections::VecDeque::from([(root, 0, 0.0)]);
+    while let Some((node, depth, so_far)) = if depth_first { pending.pop_back() } else { pending.pop_front() } {
+        if depth >= max_depth {
+            continue;
+        }
+        let neighbours = arcs.get(&node).map(Vec::as_slice).unwrap_or_default();
+        let fresh: Vec<&Arc> = neighbours.iter().filter(|arc| !seen.contains(&arc.to)).collect();
+        if depth_first {
+            let Some(arc) = fresh.first() else {
+                continue;
+            };
+            seen.insert(arc.to);
+            let reached = so_far + arc.cost;
+            rows.push(format!(
+                "{{\"depth\": {}, \"start_vid\": {root}, \"node\": {}, \"edge\": {}, \"cost\": {}, \"agg_cost\": {reached}}}",
+                depth + 1,
+                arc.to,
+                arc.edge,
+                arc.cost
+            ));
+            pending.push_back((node, depth, so_far));
+            pending.push_back((arc.to, depth + 1, reached));
+        } else {
+            for arc in fresh {
+                if !seen.insert(arc.to) {
+                    continue;
+                }
+                let reached = so_far + arc.cost;
+                rows.push(format!(
+                    "{{\"depth\": {}, \"start_vid\": {root}, \"node\": {}, \"edge\": {}, \"cost\": {}, \"agg_cost\": {reached}}}",
+                    depth + 1,
+                    arc.to,
+                    arc.edge,
+                    arc.cost
+                ));
+                pending.push_back((arc.to, depth + 1, reached));
+            }
+        }
+    }
+    Ok(format!("[{}]", rows.join(", ")))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Path {
+    steps: Vec<(i64, i64, f64)>,
+    total: f64,
+}
+
+fn cheapest_path(arcs: &Graph, start: i64, finish: i64) -> Option<Path> {
+    let best = shortest(arcs, start, None, Some(finish));
+    let (total, _) = *best.get(&finish)?;
+    let mut steps = vec![(finish, -1, 0.0)];
+    let mut at = finish;
+    while let Some((_, Some((previous, edge, cost)))) = best.get(&at) {
+        steps.push((*previous, *edge, *cost));
+        at = *previous;
+        if steps.len() > best.len() + 1 {
+            return None;
+        }
+    }
+    steps.reverse();
+    Some(Path { steps, total })
+}
+
+fn without(arcs: &Graph, removed_arcs: &HashSet<(i64, i64)>, removed_nodes: &HashSet<i64>) -> Graph {
+    arcs.iter()
+        .filter(|(node, _)| !removed_nodes.contains(node))
+        .map(|(node, list)| {
+            let kept = list
+                .iter()
+                .filter(|arc| !removed_nodes.contains(&arc.to) && !removed_arcs.contains(&(*node, arc.edge)))
+                .copied()
+                .collect();
+            (*node, kept)
+        })
+        .collect()
+}
+
+/// Up to `k` loopless paths from `start` to `finish`, cheapest first, by Yen's algorithm, as
+/// pgRouting's `pgr_KSP` returns them: a JSON array of `{path_id, path_seq, node, edge, cost,
+/// agg_cost}`, each path ending with edge -1 at `finish`.
+pub(crate) fn k_shortest(edges_json: &str, start: i64, finish: i64, k: i64, directed: bool) -> SqlResult<String> {
+    if !(1..=MOST_PATHS).contains(&k) {
+        return Err(invalid("k is between 1 and 1000"));
+    }
+    let arcs = graph(edges_json, directed)?;
+    let Some(first) = cheapest_path(&arcs, start, finish) else {
+        return Ok("[]".to_owned());
+    };
+    let mut found = vec![first];
+    let mut candidates: Vec<Path> = Vec::new();
+    while found.len() < usize::try_from(k).unwrap_or(1) {
+        let Some(previous) = found.last().cloned() else {
+            break;
+        };
+        for spur_at in 0..previous.steps.len().saturating_sub(1) {
+            let root = &previous.steps[..=spur_at];
+            let spur_node = root[spur_at].0;
+            let mut removed_arcs = HashSet::new();
+            for path in &found {
+                let shares_root = path.steps.len() > spur_at
+                    && path.steps[..spur_at].iter().map(|step| (step.0, step.1)).eq(root[..spur_at].iter().map(|step| (step.0, step.1)))
+                    && path.steps[spur_at].0 == spur_node;
+                if shares_root {
+                    removed_arcs.insert((spur_node, path.steps[spur_at].1));
+                }
+            }
+            let removed_nodes: HashSet<i64> = root[..spur_at].iter().map(|step| step.0).collect();
+            let pruned = without(&arcs, &removed_arcs, &removed_nodes);
+            let Some(spur) = cheapest_path(&pruned, spur_node, finish) else {
+                continue;
+            };
+            let root_cost: f64 = root[..spur_at].iter().map(|step| step.2).sum();
+            let mut steps: Vec<(i64, i64, f64)> = root[..spur_at].to_vec();
+            steps.extend(spur.steps);
+            let candidate = Path {
+                total: root_cost + spur.total,
+                steps,
+            };
+            if !candidates.contains(&candidate) && !found.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+        if candidates.is_empty() {
+            break;
+        }
+        candidates.sort_by(|left, right| left.total.total_cmp(&right.total).then_with(|| left.steps.len().cmp(&right.steps.len())));
+        found.push(candidates.remove(0));
+    }
+    let mut rows = Vec::new();
+    for (path_id, path) in found.iter().enumerate() {
+        let mut so_far = 0.0;
+        for (path_seq, (node, edge, cost)) in path.steps.iter().enumerate() {
+            rows.push(format!(
+                "{{\"path_id\": {}, \"path_seq\": {}, \"node\": {node}, \"edge\": {edge}, \"cost\": {cost}, \"agg_cost\": {so_far}}}",
+                path_id + 1,
+                path_seq + 1
+            ));
+            so_far += cost;
+        }
+    }
+    Ok(format!("[{}]", rows.join(", ")))
+}

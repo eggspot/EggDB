@@ -6,7 +6,8 @@
 /// number line ends as vertices (D831); `pgr_TSP` and `pgr_TSPeuclidean`, tours by EggDB's own
 /// nearest-neighbour and 2-opt code, and `pgr_analyzeGraph`, which checks a topology (D882);
 /// `pgr_nodeNetwork`, which cuts edges where they cross (D883); and `pgr_kruskal`, `pgr_prim`,
-/// `pgr_maxFlow`, `pgr_pushRelabel`, `pgr_edmondsKarp` and `pgr_boykovKolmogorov` (D905).
+/// `pgr_maxFlow`, `pgr_pushRelabel`, `pgr_edmondsKarp` and `pgr_boykovKolmogorov` (D905); and
+/// `pgr_depthFirstSearch`, `pgr_breadthFirstSearch` and `pgr_KSP`, Yen's k shortest paths (D969).
 pub(crate) const PGROUTING_SCRIPT: &str = r#"
 CREATE SCHEMA pgrouting;
 CREATE FUNCTION public.pgr_edges_json(edges_sql text) RETURNS jsonb LANGUAGE plpgsql AS $$
@@ -147,6 +148,50 @@ BEGIN
     FOR step IN SELECT s.value AS body FROM jsonb_array_elements(chosen) s LOOP
         edge := (step.body ->> 'edge')::bigint;
         cost := (step.body ->> 'cost')::double precision;
+        RETURN NEXT;
+    END LOOP;
+END
+$$;
+CREATE FUNCTION public.pgr_traversal_rows(computed jsonb) RETURNS TABLE (seq bigint, depth bigint, start_vid bigint, node bigint, edge bigint, cost double precision, agg_cost double precision) LANGUAGE plpgsql AS $$
+DECLARE
+    step record;
+    counted bigint := 0;
+BEGIN
+    FOR step IN SELECT s.value AS body FROM jsonb_array_elements(computed) s LOOP
+        counted := counted + 1;
+        seq := counted;
+        depth := (step.body ->> 'depth')::bigint;
+        start_vid := (step.body ->> 'start_vid')::bigint;
+        node := (step.body ->> 'node')::bigint;
+        edge := (step.body ->> 'edge')::bigint;
+        cost := (step.body ->> 'cost')::double precision;
+        agg_cost := (step.body ->> 'agg_cost')::double precision;
+        RETURN NEXT;
+    END LOOP;
+END
+$$;
+CREATE FUNCTION public.pgr_depthfirstsearch(edges_sql text, root_vid bigint, directed boolean DEFAULT true, max_depth bigint DEFAULT 9223372036854775807) RETURNS TABLE (seq bigint, depth bigint, start_vid bigint, node bigint, edge bigint, cost double precision, agg_cost double precision) LANGUAGE sql AS $$
+    SELECT * FROM public.pgr_traversal_rows(eggdb_route_traversal(public.pgr_edges_json(edges_sql), root_vid, directed, max_depth, 'depth'))
+$$;
+CREATE FUNCTION public.pgr_breadthfirstsearch(edges_sql text, root_vid bigint, directed boolean DEFAULT true, max_depth bigint DEFAULT 9223372036854775807) RETURNS TABLE (seq bigint, depth bigint, start_vid bigint, node bigint, edge bigint, cost double precision, agg_cost double precision) LANGUAGE sql AS $$
+    SELECT * FROM public.pgr_traversal_rows(eggdb_route_traversal(public.pgr_edges_json(edges_sql), root_vid, directed, max_depth, 'breadth'))
+$$;
+CREATE FUNCTION public.pgr_ksp(edges_sql text, from_vid bigint, to_vid bigint, k integer, directed boolean DEFAULT true) RETURNS TABLE (seq integer, path_id integer, path_seq integer, start_vid bigint, end_vid bigint, node bigint, edge bigint, cost double precision, agg_cost double precision) LANGUAGE plpgsql AS $$
+DECLARE
+    step record;
+    counted integer := 0;
+BEGIN
+    FOR step IN SELECT s.value AS body FROM jsonb_array_elements(eggdb_route_ksp(public.pgr_edges_json(edges_sql), from_vid, to_vid, k, directed)) s LOOP
+        counted := counted + 1;
+        seq := counted;
+        path_id := (step.body ->> 'path_id')::integer;
+        path_seq := (step.body ->> 'path_seq')::integer;
+        start_vid := from_vid;
+        end_vid := to_vid;
+        node := (step.body ->> 'node')::bigint;
+        edge := (step.body ->> 'edge')::bigint;
+        cost := (step.body ->> 'cost')::double precision;
+        agg_cost := (step.body ->> 'agg_cost')::double precision;
         RETURN NEXT;
     END LOOP;
 END
@@ -448,6 +493,31 @@ mod tests {
             "agg_cost\n2\nSELECT 1"
         );
         assert_eq!(run(&mut session, "SELECT count(*) AS n FROM pgr_bdDijkstra('SELECT id, source, target, cost FROM ways', 1, 3)").unwrap(), "n\n3\nSELECT 1");
+    }
+
+    #[test]
+    fn traversals_and_k_shortest_paths() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        for sql in [
+            "CREATE EXTENSION pgrouting",
+            "CREATE TABLE ways (id bigint, source bigint, target bigint, cost double precision)",
+            "INSERT INTO ways VALUES (1, 1, 2, 1), (2, 2, 4, 1), (3, 1, 3, 2), (4, 3, 4, 1), (5, 2, 3, 1)",
+        ] {
+            run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        assert_eq!(
+            run(&mut session, "SELECT node, depth FROM pgr_breadthFirstSearch('SELECT * FROM ways', 1) ORDER BY seq").unwrap(),
+            "node|depth\n1|0\n2|1\n3|1\n4|2\nSELECT 4"
+        );
+        assert_eq!(
+            run(&mut session, "SELECT node FROM pgr_depthFirstSearch('SELECT * FROM ways', 1) ORDER BY seq").unwrap(),
+            "node\n1\n2\n4\n3\nSELECT 4"
+        );
+        assert_eq!(
+            run(&mut session, "SELECT path_id, max(agg_cost) AS total FROM pgr_KSP('SELECT * FROM ways', 1, 4, 3) GROUP BY path_id ORDER BY path_id").unwrap(),
+            "path_id|total\n1|2\n2|3\n3|3\nSELECT 3"
+        );
     }
 
     #[test]

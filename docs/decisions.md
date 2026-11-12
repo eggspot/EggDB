@@ -993,3 +993,4 @@ its full title with its status.
 - [D966](decisions/D966.md) Code-only batch 614 (M6f): the Dart package as a Flutter plugin and the Swift package on an XCFramework
 - [D967](decisions/D967.md) Code-only batch 615 (M6f): MySQL's protocol as a backend of the C API's network session
 - [D968](decisions/D968.md) Code-only batch 616 (M6f): an ODBC driver on the C API
+- [D969](decisions/D969.md) Code-only batch 617 (M12): pgRouting's depth-first and breadth-first searches and k shortest paths
