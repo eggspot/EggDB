@@ -1,3 +1,4 @@
+use super::report_delivery::WebTarget;
 use super::serve_metrics::Family;
 use std::fmt::Write as _;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -369,33 +370,6 @@ pub(super) fn traces_protobuf(spans: &[StatementSpan]) -> Vec<u8> {
 /// `http/protobuf`, as OpenTelemetry's exporters read it. JSON otherwise.
 const COLLECTOR_CERTIFICATE_VARIABLE: &str = "OTEL_EXPORTER_OTLP_CERTIFICATE";
 
-enum CollectorTarget {
-    Plain(eggdb_http::HttpTarget),
-    Secure(super::report_delivery::SecureTarget),
-}
-
-impl CollectorTarget {
-    fn parse(url: &str) -> Option<Self> {
-        if url.starts_with("https://") {
-            return super::report_delivery::parse_https_url(url).map(Self::Secure);
-        }
-        eggdb_http::parse_http_url(url).ok().map(Self::Plain)
-    }
-
-    fn post(&self, content_type: &str, body: &[u8]) -> std::io::Result<u16> {
-        match self {
-            Self::Plain(target) => eggdb_http::post(target, content_type, body, EXPORT_TIMEOUT),
-            Self::Secure(target) => super::report_delivery::post_https_trusting(
-                target,
-                content_type,
-                body,
-                EXPORT_TIMEOUT,
-                COLLECTOR_CERTIFICATE_VARIABLE,
-            ),
-        }
-    }
-}
-
 fn protobuf_chosen() -> bool {
     std::env::var("OTEL_EXPORTER_OTLP_PROTOCOL").is_ok_and(|protocol| protocol.trim() == "http/protobuf")
 }
@@ -411,7 +385,7 @@ pub(super) fn export_telemetry(
     stop: &(dyn Fn() -> bool + Sync),
 ) {
     let base = endpoint.trim_end_matches('/');
-    let target = |path: &str| CollectorTarget::parse(&format!("{base}{path}"));
+    let target = |path: &str| WebTarget::parse(&format!("{base}{path}"));
     let (Some(metrics), Some(logs), Some(traces)) =
         (target("/v1/metrics"), target("/v1/logs"), target("/v1/traces"))
     else {
@@ -430,16 +404,16 @@ pub(super) fn export_telemetry(
             } else {
                 metrics_request(&families, start, now_nanos()).into_bytes()
             };
-            let _ = metrics.post(content_type, &body);
+            let _ = metrics.post(content_type, &body, EXPORT_TIMEOUT, COLLECTOR_CERTIFICATE_VARIABLE);
             let lines = drained(&held.logs);
             if !lines.is_empty() {
                 let body = if protobuf { logs_protobuf(&lines) } else { logs_request(&lines).into_bytes() };
-                let _ = logs.post(content_type, &body);
+                let _ = logs.post(content_type, &body, EXPORT_TIMEOUT, COLLECTOR_CERTIFICATE_VARIABLE);
             }
             let spans = drained(&held.spans);
             if !spans.is_empty() {
                 let body = if protobuf { traces_protobuf(&spans) } else { traces_request(&spans).into_bytes() };
-                let _ = traces.post(content_type, &body);
+                let _ = traces.post(content_type, &body, EXPORT_TIMEOUT, COLLECTOR_CERTIFICATE_VARIABLE);
             }
             next = Instant::now() + EXPORT_EVERY;
         }
@@ -499,15 +473,15 @@ mod tests {
 
     #[test]
     fn collector_urls_take_http_and_https() {
-        assert!(matches!(CollectorTarget::parse("http://collector:4318/v1/metrics"), Some(CollectorTarget::Plain(_))));
-        match CollectorTarget::parse("https://collector.example.com/v1/logs") {
-            Some(CollectorTarget::Secure(target)) => {
+        assert!(matches!(WebTarget::parse("http://collector:4318/v1/metrics"), Some(WebTarget::Plain(_))));
+        match WebTarget::parse("https://collector.example.com/v1/logs") {
+            Some(WebTarget::Secure(target)) => {
                 assert_eq!((target.host.as_str(), target.port, target.path.as_str()), ("collector.example.com", 443, "/v1/logs"));
             }
             _ => panic!("an https collector"),
         }
-        assert!(CollectorTarget::parse("ftp://collector/").is_none());
-        assert!(CollectorTarget::parse("https://user@collector/").is_none());
+        assert!(WebTarget::parse("ftp://collector/").is_none());
+        assert!(WebTarget::parse("https://user@collector/").is_none());
     }
 
     #[test]

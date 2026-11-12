@@ -42,6 +42,7 @@ pub(super) fn run_scheduled_jobs(
 
 const DELIVER_EVERY: Duration = Duration::from_secs(1);
 const WEBHOOK_TIMEOUT: Duration = Duration::from_secs(5);
+const WEBHOOK_CERTIFICATE_VARIABLE: &str = "EGGDB_CDC_CA_FILE";
 const EVENTS_PER_ROUND: u64 = 100;
 
 pub(super) fn deliver_changes(
@@ -50,19 +51,15 @@ pub(super) fn deliver_changes(
     url: &str,
     stop: &(dyn Fn() -> bool + Sync),
 ) {
-    let Ok(target) = eggdb_http::parse_http_url(url) else {
+    let Some(target) = super::report_delivery::WebTarget::parse(url) else {
         return;
     };
     while !stop() {
         std::thread::sleep(DELIVER_EVERY);
         let _ = eggdb_sql::cdc::deliver_changes_with_retries(store, database, "webhook", EVENTS_PER_ROUND, now_ms(), &mut |event| {
-            eggdb_http::post(
-                &target,
-                "application/json",
-                event.as_bytes(),
-                WEBHOOK_TIMEOUT,
-            )
-            .is_ok_and(|status| (200..300).contains(&status))
+            target
+                .post("application/json", event.as_bytes(), WEBHOOK_TIMEOUT, WEBHOOK_CERTIFICATE_VARIABLE)
+                .is_ok_and(|status| (200..300).contains(&status))
         });
     }
 }

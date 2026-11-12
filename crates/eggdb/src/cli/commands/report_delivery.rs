@@ -131,6 +131,30 @@ pub(super) fn post_https_trusting(
     }
 }
 
+/// An `http://` or `https://` URL to post to: webhooks and collectors take either.
+pub(super) enum WebTarget {
+    Plain(eggdb_http::HttpTarget),
+    Secure(SecureTarget),
+}
+
+impl WebTarget {
+    pub(super) fn parse(url: &str) -> Option<Self> {
+        if url.starts_with("https://") {
+            return parse_https_url(url).map(Self::Secure);
+        }
+        eggdb_http::parse_http_url(url).ok().map(Self::Plain)
+    }
+
+    /// Posts `body`; over HTTPS the certificate is checked against the PEM file
+    /// `trust_variable` names, or the system's trusted roots.
+    pub(super) fn post(&self, content_type: &str, body: &[u8], timeout: Duration, trust_variable: &str) -> io::Result<u16> {
+        match self {
+            Self::Plain(target) => eggdb_http::post(target, content_type, body, timeout),
+            Self::Secure(target) => post_https_trusting(target, content_type, body, timeout, trust_variable),
+        }
+    }
+}
+
 pub(super) fn read_line(stream: &mut dyn Read) -> io::Result<String> {
     let mut line = Vec::new();
     let mut byte = [0u8; 1];

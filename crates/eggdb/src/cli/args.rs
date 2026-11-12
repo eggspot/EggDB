@@ -1462,7 +1462,17 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             }
             OptionName::CdcWebhook => {
                 let url = value.to_str().unwrap_or_default();
-                eggdb_http::parse_http_url(url).map_err(usage)?;
+                match url.strip_prefix("https://") {
+                    Some(rest) => {
+                        let authority = rest.split('/').next().unwrap_or_default();
+                        if authority.is_empty() || authority.contains('@') {
+                            return Err(usage(format!("{url} is not a valid https URL")));
+                        }
+                    }
+                    None => {
+                        eggdb_http::parse_http_url(url).map_err(usage)?;
+                    }
+                }
                 request.serve.cdc_webhook = Some(url.to_owned());
             }
             OptionName::OtlpEndpoint => {
