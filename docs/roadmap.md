@@ -728,7 +728,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - External authentication rules on the MySQL and TDS listeners, and rules by address or database
   (D185). Rules by address or database (`database=`, `address=`) on the PostgreSQL listener: **code written,
   unbuilt** (code-only mode, 2026-11-12, D821). Left: the MySQL and TDS listeners.
-- MySQL and TDS logins for stored roles (D183). MySQL: **code written, unbuilt** (code-only mode, 2026-11-12, D823). Left: TDS.
+- MySQL and TDS logins for stored roles (D183). MySQL: **code written, unbuilt** (code-only mode, 2026-11-12, D823);
+  TDS: **code written, unbuilt** (code-only mode, 2026-11-12, D824).
 - `SET ROLE`, object owners, `WITH GRANT OPTION`, and schema, sequence and routine privileges
   (D183).
 - Schema, type, parameter (`GRANT SET ON PARAMETER`) and tablespace grants stored, so the

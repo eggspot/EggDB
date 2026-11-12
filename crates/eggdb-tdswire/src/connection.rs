@@ -19,8 +19,8 @@ use crate::wire::{DEFAULT_PACKET_SIZE, Message, POLL_INTERVAL, Packet, Wire, Wir
 use eggdb_platform::connection_limits::LoginTicket;
 use eggdb_sql::{
     BatchStep, BulkRows, DatabaseDirectory, DatabaseSwitch, Dialect, InfoMessage, NamedParameter,
-    QueryResult, SQLSERVER_COMPATIBLE_VERSION, ServedDatabases, Session, SqlError, SqlResult,
-    SqlState, Value,
+    KeyValueStore, QueryResult, SQLSERVER_COMPATIBLE_VERSION, ServedDatabases, Session, SqlError,
+    SqlResult, SqlState, Value,
 };
 use std::time::{Duration, Instant};
 
@@ -411,11 +411,23 @@ fn login_refusal(shared: &Shared<'_>, wire: &mut Wire<'_>, user: &str, reason: &
     refuse(wire, &[(LOGIN_FAILED, 14, &login_failed(user))]);
 }
 
-fn log_in(
+fn stored_role_verifier<D: DatabaseDirectory>(
+    directory: &D,
+    database: &str,
+    user: &str,
+) -> Option<eggdb_auth::scram::ScramVerifier> {
+    let name = directory.matching_name(database)?;
+    let attached = directory.attach(&name)?;
+    let reader = attached.begin_read().ok()?;
+    let text = eggdb_sql::login_verifier(&reader, user).ok()??;
+    eggdb_auth::scram::ScramVerifier::from_stored(&text)
+}
+
+fn log_in<D: DatabaseDirectory>(
     shared: &Shared<'_>,
     wire: &mut Wire<'_>,
     encryption: Encryption,
-    served: &dyn ServedDatabases,
+    served: &D,
 ) -> Login {
     let mut message = match wire.read_message(MAX_LOGIN_BYTES) {
         Ok(message) => message,
@@ -458,11 +470,11 @@ fn log_in(
     check_login(shared, wire, login, served)
 }
 
-fn check_login(
+fn check_login<D: DatabaseDirectory>(
     shared: &Shared<'_>,
     wire: &mut Wire<'_>,
     login: Login7,
-    served: &dyn ServedDatabases,
+    served: &D,
 ) -> Login {
     let user = login.user_name.clone();
     if login.tds_version < TDS_7_4 && login.tds_version != TDS_8_0 {
@@ -506,11 +518,21 @@ fn check_login(
     } else {
         &shared.unknown_user
     };
-    let accepted = match &login.password {
-        Some(password) => credentials.verify(password.bytes()),
-        None => {
-            let _ = credentials.verify(&[]);
-            false
+    let stored_role = user != config.user;
+    let accepted = if stored_role {
+        let wanted = if login.database.is_empty() { config.database.as_str() } else { login.database.as_str() };
+        let verifier = stored_role_verifier(served, wanted, &user);
+        match (&login.password, verifier) {
+            (Some(password), Some(verifier)) => verifier.matches_password(password.bytes()),
+            _ => false,
+        }
+    } else {
+        match &login.password {
+            Some(password) => credentials.verify(password.bytes()),
+            None => {
+                let _ = credentials.verify(&[]);
+                false
+            }
         }
     };
     eggdb_sql::audit_events::record_login(
@@ -518,10 +540,10 @@ fn check_login(
         &login.database,
         "tds",
         &wire.peer(),
-        "sql-login",
-        accepted && user == config.user,
+        if stored_role { "stored-role" } else { "sql-login" },
+        accepted,
     );
-    if !accepted || user != config.user {
+    if !accepted {
         (shared.log)(&format!(
             "{}  password authentication failed for user \"{}\"",
             wire.peer(),
@@ -675,7 +697,14 @@ fn serve_databases<'a, 'd, D: DatabaseDirectory>(
             Some(switch) => switch.into_session(&attached),
             None => {
                 let mut session = Session::with_dialect(&attached, Dialect::SqlServer);
-                session.identify(&user, &database);
+                if user == shared.config.user {
+                    session.identify(&user, &database);
+                } else if session.identify_role(&user, &database).is_err() {
+                    if let Some(mut wire) = wire.take() {
+                        refuse(&mut wire, &[(LOGIN_FAILED, 14, &login_failed(&user))]);
+                    }
+                    return;
+                }
                 session.set_connection_id(connection_id);
                 session
             }
