@@ -372,6 +372,34 @@ jobs:
           print("pymongo: passed")
           PY
           "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          import gridfs, hashlib, io, os
+          from pymongo import MongoClient
+          client = MongoClient("mongodb://eggdb:ci-resp-password@127.0.0.1:27018/?authSource=admin&directConnection=true")
+          db = client.files
+          payload = os.urandom(3 * 1024 * 1024 + 17)
+          legacy = gridfs.GridFS(db)
+          file_id = legacy.put(payload, filename="report.bin", metadata={"owner": "ada"})
+          assert legacy.get(file_id).read() == payload
+          assert legacy.exists(filename="report.bin")
+          assert db.fs.chunks.count_documents({"files_id": file_id}) == 13
+          bucket = gridfs.GridFSBucket(db, bucket_name="media", chunk_size_bytes=64 * 1024)
+          uploaded = bucket.upload_from_stream("photo.jpg", io.BytesIO(payload[:200000]))
+          downloaded = io.BytesIO()
+          bucket.download_to_stream_by_name("photo.jpg", downloaded)
+          assert hashlib.sha256(downloaded.getvalue()).digest() == hashlib.sha256(payload[:200000]).digest()
+          stream = bucket.open_download_stream(uploaded)
+          stream.seek(150000)
+          assert stream.read(10) == payload[150000:150010]
+          assert [found.filename for found in bucket.find({"filename": "photo.jpg"})] == ["photo.jpg"]
+          bucket.rename(uploaded, "picture.jpg")
+          bucket.delete(uploaded)
+          assert db.media.chunks.count_documents({"files_id": uploaded}) == 0
+          legacy.delete(file_id)
+          assert not legacy.exists(file_id)
+          client.drop_database("files")
+          print("gridfs: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
           from neo4j import GraphDatabase
           driver = GraphDatabase.driver("bolt://127.0.0.1:7688", auth=("eggdb", "ci-resp-password"))
           with driver.session() as session:
