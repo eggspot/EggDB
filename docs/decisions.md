@@ -914,3 +914,4 @@ its full title with its status.
 - [D887](decisions/D887.md) Code-only batch 535 (M13): a SPARQL 1.1 query and update reader
 - [D888](decisions/D888.md) Code-only batch 536 (M13): SPARQL 1.1 queries evaluated
 - [D889](decisions/D889.md) Code-only batch 537 (M13): SPARQL updates, the SPARQL protocols and eggdb serve --sparql-listen
+- [D890](decisions/D890.md) Code-only batch 538 (M10): QUALIFY

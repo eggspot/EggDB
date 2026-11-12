@@ -1,6 +1,7 @@
 mod asof;
 mod sqlserver_security;
 mod sqlserver_ddl_triggers;
+mod qualify;
 mod oracle_system_triggers;
 mod constraints;
 mod copy;
@@ -3559,6 +3560,13 @@ impl<'t> Parser<'t> {
         } else {
             Vec::new()
         };
+        let qualify = if self.take_word("qualify") {
+            let mut condition = self.expression()?;
+            crate::window::resolve_references(&mut condition, &windows)?;
+            Some(self.condition(condition))
+        } else {
+            None
+        };
         for item in &mut items {
             if let SelectItem::Expr { expr, .. } = item {
                 crate::window::resolve_references(expr, &windows)?;
@@ -3606,14 +3614,18 @@ impl<'t> Parser<'t> {
             grouping_sets,
             distinct_on,
         };
-        match hierarchical {
-            Some(clause) => hierarchy::connect_by(select, clause),
+        let select = match hierarchical {
+            Some(clause) => hierarchy::connect_by(select, clause)?,
             None if self.oracle() => {
                 hierarchy::reject_outside_hierarchy(&select)?;
-                Ok(select)
+                select
             }
-            None => Ok(select),
-        }
+            None => select,
+        };
+        Ok(match qualify {
+            Some(condition) => qualify::wrap(select, condition, self.dialect),
+            None => select,
+        })
     }
 
     fn distinct_on(&mut self) -> SqlResult<Vec<Expr>> {
@@ -6057,6 +6069,7 @@ fn is_clause_word(word: &str) -> bool {
             | "offset"
             | "group"
             | "having"
+            | "qualify"
             | "join"
             | "inner"
             | "left"

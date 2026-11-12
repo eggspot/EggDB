@@ -220,3 +220,30 @@ fn misplaced_or_malformed_windows_fail_like_postgresql() {
         assert_eq!(state(&mut session, sql), expected, "{sql}");
     }
 }
+
+#[test]
+fn qualify_keeps_rows_after_window_functions() {
+    let store = MemoryStore::default();
+    let mut session = with_sales(&store);
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT r, id, a FROM s QUALIFY row_number() OVER (PARTITION BY r ORDER BY a DESC, id) = 1 ORDER BY r"
+        ),
+        "r|id|a\ne|2|20\nw|5|15\nSELECT 2"
+    );
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT r, a, rank() OVER (PARTITION BY r ORDER BY a DESC) AS place FROM s WHERE a > 5 QUALIFY place <= 1 ORDER BY r, a"
+        ),
+        "r|a|place\ne|20|1\ne|20|1\nw|15|1\nSELECT 3"
+    );
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT DISTINCT r FROM s QUALIFY count(*) OVER (PARTITION BY r) > 2"
+        ),
+        "r\ne\nSELECT 1"
+    );
+}

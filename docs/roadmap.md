@@ -1367,7 +1367,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   protocol, Redshift first (D47). Check: a correctness suite per dialect from its own reference.
 - SAP HANA SQL, after D34's and D58's legal checks: first over the PostgreSQL protocol, then its
   SQL Command Network Protocol (D47). Check: a suite from SAP's SQL reference.
-- `QUALIFY` in the dialects that have it (D240).
+- `QUALIFY` in the dialects that have it (D240). **Code written, unbuilt** (code-only mode, 2026-11-12, D890), as a rewrite to a
+  derived table, accepted in every dialect.
 
 ### M11 Columnar analytics and time series
 - Columnar table storage: row groups of chunks, deletes as bitmaps, `CREATE TABLE ... USING
