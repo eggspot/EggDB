@@ -239,6 +239,10 @@ impl<'a> Wire<'a> {
         self.stream.peer_text()
     }
 
+    pub(crate) fn peer_ip(&self) -> Option<std::net::IpAddr> {
+        self.stream.peer_ip()
+    }
+
     pub(crate) fn is_local(&self) -> bool {
         self.stream.is_local()
     }

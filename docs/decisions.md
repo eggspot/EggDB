@@ -845,3 +845,4 @@ its full title with its status.
 - [D818](decisions/D818.md) Code-only batch 466 (M6b): anchored audit digests
 - [D819](decisions/D819.md) Code-only batch 467 (M6b): audit file rotation and retention
 - [D820](decisions/D820.md) Code-only batch 468 (M6b): API keys for roles
+- [D821](decisions/D821.md) Code-only batch 469 (M6b): authentication rules by database and address

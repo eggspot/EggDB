@@ -68,6 +68,14 @@ impl ServerConnection {
         }
     }
 
+    /// The peer's IP address, or `None` on the local socket.
+    pub fn peer_ip(&self) -> Option<std::net::IpAddr> {
+        match self {
+            Self::Local(_) => None,
+            _ => self.tcp().and_then(|stream| stream.peer_addr().ok()).map(|peer| peer.ip()),
+        }
+    }
+
     /// Sets how long a read waits.
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
         match self {

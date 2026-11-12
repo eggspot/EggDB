@@ -1056,7 +1056,9 @@ pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
     };
     let own_user = startup.user == shared.config.user;
     let method = match (&shared.config.auth_rules, own_user) {
-        (Some(rules), false) => rules.method_for(&startup.user).clone(),
+        (Some(rules), false) => rules
+            .method_for_connection(&startup.user, Some(&startup.database), wire.peer_ip())
+            .clone(),
         _ => eggdb_auth::AuthMethod::ScramSha256,
     };
     let is_stored_role = !own_user;

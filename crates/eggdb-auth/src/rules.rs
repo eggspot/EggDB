@@ -16,12 +16,17 @@
 //!   PostgreSQL 18's clients send it; a client without a token is pointed at `discovery` to get one.
 //! - `cert`: a TLS client certificate whose common name is the user name; the server must ask
 //!   clients for certificates (`EGGDB_TLS_CLIENT_CA`).
+//! - `apikey`: an API key of the role (`CREATE EXTENSION eggdb_api_keys`) sent as the password.
 //! - `reject`: the user may not log in.
+//!
+//! Any line may also name `database=<name>` and `address=<ip>[/<prefix>]`; it then applies only
+//! to logins to that database, or from that address range (never on the local socket).
 
 use crate::jwt::{JwtKeys, JwtPolicy};
 use crate::ldap::{LdapConfig, LdapSearch, LdapSecurity};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::net::IpAddr;
 use std::path::Path;
 use std::time::Duration;
 
@@ -86,7 +91,55 @@ impl AuthMethod {
 #[derive(Debug, Clone)]
 struct Rule {
     user: Option<String>,
+    database: Option<String>,
+    address: Option<AddressRange>,
     method: AuthMethod,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AddressRange {
+    network: IpAddr,
+    prefix: u8,
+}
+
+impl AddressRange {
+    fn parse(text: &str) -> Option<Self> {
+        let (address, prefix) = match text.split_once('/') {
+            Some((address, prefix)) => (address, Some(prefix.parse::<u8>().ok()?)),
+            None => (text, None),
+        };
+        let network: IpAddr = address.parse().ok()?;
+        let most = if network.is_ipv4() { 32 } else { 128 };
+        let prefix = prefix.unwrap_or(most);
+        (prefix <= most).then_some(Self { network, prefix })
+    }
+
+    fn contains(self, address: IpAddr) -> bool {
+        let address = match (self.network, address) {
+            (IpAddr::V4(_), IpAddr::V6(v6)) => v6.to_ipv4_mapped().map_or(address, IpAddr::V4),
+            _ => address,
+        };
+        let (network, candidate, bits) = match (self.network, address) {
+            (IpAddr::V4(network), IpAddr::V4(candidate)) => {
+                (u128::from(u32::from(network)), u128::from(u32::from(candidate)), 32u32)
+            }
+            (IpAddr::V6(network), IpAddr::V6(candidate)) => (u128::from(network), u128::from(candidate), 128u32),
+            _ => return false,
+        };
+        let host_bits = bits - u32::from(self.prefix);
+        if host_bits >= 128 {
+            return true;
+        }
+        (network >> host_bits) == (candidate >> host_bits)
+    }
+}
+
+impl Rule {
+    fn applies(&self, user: &str, database: Option<&str>, address: Option<IpAddr>) -> bool {
+        self.user.as_deref().is_none_or(|named| named == user)
+            && self.database.as_deref().is_none_or(|named| database == Some(named))
+            && self.address.is_none_or(|range| address.is_some_and(|address| range.contains(address)))
+    }
 }
 
 /// The rules of a rule file, in order.
@@ -281,8 +334,18 @@ impl AuthRules {
                     });
                 }
             };
+            let database = found.get("database").map(|name| (*name).to_owned()).filter(|name| name != "all");
+            let address = match found.get("address") {
+                None => None,
+                Some(written) => Some(AddressRange::parse(written).ok_or_else(|| RulesError {
+                    line,
+                    message: format!("address={written} is not an IP address or address/prefix"),
+                })?),
+            };
             rules.push(Rule {
                 user: (user != "all").then(|| user.to_owned()),
+                database,
+                address,
                 method,
             });
         }
@@ -312,11 +375,19 @@ impl AuthRules {
         })
     }
 
-    /// The method for `user`.
+    /// The method for `user` when neither the database nor the client's address is known: the
+    /// first rule for the user that names neither `database=` nor `address=`.
     pub fn method_for(&self, user: &str) -> &AuthMethod {
+        self.method_for_connection(user, None, None)
+    }
+
+    /// The method for `user` logging in to `database` from `address` (`None` on the local
+    /// socket): the first rule whose user, `database=` and `address=` (an IP address or
+    /// `address/prefix`) all match; scram-sha-256 when none does.
+    pub fn method_for_connection(&self, user: &str, database: Option<&str>, address: Option<IpAddr>) -> &AuthMethod {
         self.rules
             .iter()
-            .find(|rule| rule.user.as_deref().is_none_or(|named| named == user))
+            .find(|rule| rule.applies(user, database, address))
             .map_or(&AuthMethod::ScramSha256, |rule| &rule.method)
     }
 }
@@ -343,6 +414,26 @@ mod tests {
         assert!(matches!(rules.method_for("grace"), AuthMethod::ScramSha256));
         let everyone = AuthRules::parse("all reject\nada scram-sha-256", &no_files).unwrap();
         assert!(matches!(everyone.method_for("ada"), AuthMethod::Reject));
+    }
+
+    #[test]
+    fn rules_can_name_a_database_and_an_address_range() {
+        let rules = AuthRules::parse(
+            "all reject address=203.0.113.0/24\nada apikey database=reports\nada ldap server=ldap:389 prefix=uid= suffix=,dc=x address=10.0.0.0/8\n",
+            &no_files,
+        )
+        .unwrap();
+        let office: IpAddr = "10.1.2.3".parse().unwrap();
+        let outside: IpAddr = "203.0.113.7".parse().unwrap();
+        let mapped: IpAddr = "::ffff:203.0.113.9".parse().unwrap();
+        assert!(matches!(rules.method_for_connection("ada", Some("reports"), Some(office)), AuthMethod::ApiKey));
+        assert!(matches!(rules.method_for_connection("ada", Some("shop"), Some(office)), AuthMethod::Ldap(_)));
+        assert!(matches!(rules.method_for_connection("ada", Some("shop"), None), AuthMethod::ScramSha256));
+        assert!(matches!(rules.method_for_connection("ada", Some("reports"), Some(outside)), AuthMethod::Reject));
+        assert!(matches!(rules.method_for_connection("grace", None, Some(mapped)), AuthMethod::Reject));
+        assert!(matches!(rules.method_for("ada"), AuthMethod::ScramSha256));
+        assert!(AuthRules::parse("ada reject address=10.0.0.0/33", &no_files).is_err());
+        assert!(AuthRules::parse("ada reject address=nowhere", &no_files).is_err());
     }
 
     #[test]
