@@ -1,5 +1,5 @@
 //! An IMAP4rev1 server (RFC 3501) over the email store (D893), with `UIDPLUS` (RFC 4315),
-//! `MOVE` (RFC 6851) and `LITERAL+` (RFC 7888): sign-in with `LOGIN` or `AUTHENTICATE PLAIN`,
+//! `MOVE` (RFC 6851), `LITERAL+` (RFC 7888) and `IDLE` (RFC 2177): sign-in with `LOGIN` or `AUTHENTICATE PLAIN`,
 //! the mailbox commands, `APPEND`, `SELECT`/`EXAMINE`, `FETCH` with envelopes, body
 //! structures, sections and partial fetches, `STORE`, `SEARCH`, `EXPUNGE`, `COPY`, `MOVE`
 //! and their `UID` forms.
@@ -16,7 +16,8 @@ const MAX_LINE_BYTES: usize = 64 * 1024;
 const MAX_ITEMS: usize = 10_000;
 const MAX_NESTING: usize = 16;
 const SYSTEM_FLAGS: [&str; 5] = ["\\Seen", "\\Answered", "\\Flagged", "\\Deleted", "\\Draft"];
-const CAPABILITIES: &str = "IMAP4rev1 AUTH=PLAIN UIDPLUS MOVE LITERAL+ ID";
+const CAPABILITIES: &str = "IMAP4rev1 AUTH=PLAIN UIDPLUS MOVE LITERAL+ ID IDLE";
+const MOST_DONE_BYTES: usize = 64;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Item {
@@ -1006,6 +1007,57 @@ impl Connection<'_> {
         }
     }
 
+    fn selected_uids(&self) -> Option<Vec<u32>> {
+        self.selected.as_ref()?;
+        self.selected_messages().ok().map(|messages| messages.iter().map(|message| message.uid).collect())
+    }
+
+    fn report_changes(&mut self, known: &mut Vec<u32>) -> io::Result<()> {
+        let Some(now) = self.selected_uids() else {
+            return Ok(());
+        };
+        let mut position = known.len();
+        while position > 0 {
+            position -= 1;
+            if !now.contains(&known[position]) {
+                known.remove(position);
+                self.send(format!("* {} EXPUNGE", position + 1).as_bytes())?;
+            }
+        }
+        if now.iter().any(|uid| !known.contains(uid)) {
+            self.send(format!("* {} EXISTS", now.len()).as_bytes())?;
+        }
+        *known = now;
+        Ok(())
+    }
+
+    fn idle(&mut self, tag: &str) -> io::Result<()> {
+        let mut known = self.selected_uids().unwrap_or_default();
+        self.send(b"+ idling")?;
+        let mut line = Vec::new();
+        loop {
+            if (self.stop)() {
+                return Ok(());
+            }
+            let room = MOST_DONE_BYTES.saturating_sub(line.len()) as u64 + 1;
+            match self.reader.by_ref().take(room).read_until(b'\n', &mut line) {
+                Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "the connection ended while idling")),
+                Ok(_) if line.ends_with(b"\n") => {
+                    let word = String::from_utf8_lossy(&line).trim().to_ascii_uppercase();
+                    return if word == "DONE" {
+                        self.send(format!("{tag} OK IDLE terminated").as_bytes())
+                    } else {
+                        self.send(format!("{tag} BAD IDLE ends with DONE").as_bytes())
+                    };
+                }
+                Ok(_) if line.len() > MOST_DONE_BYTES => return Err(bad("IDLE ends with DONE")),
+                Ok(_) => {}
+                Err(error) if timed_out(&error) => self.report_changes(&mut known)?,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     fn run(&mut self, tag: &str, verb: &str, arguments: &[Item]) -> io::Result<bool> {
         let verb = verb.to_ascii_uppercase();
         match verb.as_str() {
@@ -1071,6 +1123,7 @@ impl Connection<'_> {
             "LSUB" => self.list(tag, arguments, true)?,
             "STATUS" => self.status(tag, arguments)?,
             "APPEND" => self.append(tag, arguments)?,
+            "IDLE" => self.idle(tag)?,
             _ if self.selected.is_none() => self.send(format!("{tag} NO Select a mailbox first").as_bytes())?,
             "CLOSE" | "UNSELECT" => {
                 if verb == "CLOSE" && !self.selected.as_ref().is_some_and(|(_, read_only)| *read_only) {

@@ -927,3 +927,4 @@ its full title with its status.
 - [D900](decisions/D900.md) Code-only batch 548 (M14): SQL Server SYSTEM_VERSIONING = ON in ALTER TABLE and history retention
 - [D901](decisions/D901.md) Code-only batch 549 (M16): CalDAV time-range filters over recurring events
 - [D902](decisions/D902.md) Code-only batch 550 (M16): MIME parts and attachments in the email store
+- [D903](decisions/D903.md) Code-only batch 551 (M16): IMAP IDLE
