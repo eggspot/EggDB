@@ -757,3 +757,4 @@ its full title with its status.
 - [D730](decisions/D730.md) Code-only batch 378 (M16): CQL `list`, `set`, `map` and `tuple` columns, literals and binary values
 - [D731](decisions/D731.md) Code-only batch 379 (M16): `image_metadata`, EXIF and XMP from JPEG, PNG, TIFF and WebP images
 - [D732](decisions/D732.md) Code-only batch 380 (M10): Oracle `UTL_ENCODE`, `UTL_I18N` and `UTL_URL`
+- [D733](decisions/D733.md) Code-only batch 381 (M10): Oracle `UTL_COMPRESS` on a DEFLATE and gzip writer in `eggdb-content`

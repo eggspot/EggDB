@@ -73,6 +73,8 @@ pub(crate) fn internal_name(package: &str, function: &str) -> Option<(&'static s
         ("utl_i18n", "raw_to_char") => ("oracle_utl_i18n_raw_to_char", 1, 2),
         ("utl_url", "escape") => ("oracle_utl_url_escape", 1, 3),
         ("utl_url", "unescape") => ("oracle_utl_url_unescape", 1, 2),
+        ("utl_compress", "lz_compress") => ("oracle_utl_compress_lz_compress", 1, 2),
+        ("utl_compress", "lz_uncompress") => ("oracle_utl_compress_lz_uncompress", 1, 1),
         _ => return None,
     })
 }
@@ -113,9 +115,11 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         | "oracle_dbms_assert_enquote_name"
         | "oracle_dbms_assert_enquote_literal" => SqlType::Text,
         "oracle_utl_i18n_raw_to_char" | "oracle_utl_url_escape" | "oracle_utl_url_unescape" => SqlType::Text,
-        "oracle_utl_encode_base64_encode" | "oracle_utl_encode_base64_decode" | "oracle_utl_i18n_string_to_raw" => {
-            SqlType::Bytea
-        }
+        "oracle_utl_encode_base64_encode"
+        | "oracle_utl_encode_base64_decode"
+        | "oracle_utl_i18n_string_to_raw"
+        | "oracle_utl_compress_lz_compress"
+        | "oracle_utl_compress_lz_uncompress" => SqlType::Bytea,
         "oracle_dbms_crypto_hash"
         | "oracle_dbms_crypto_mac"
         | "oracle_dbms_crypto_randombytes"
@@ -282,6 +286,7 @@ pub(crate) fn call(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
         && !name.starts_with("oracle_utl_encode_")
         && !name.starts_with("oracle_utl_i18n_")
         && !name.starts_with("oracle_utl_url_")
+        && !name.starts_with("oracle_utl_compress_")
     {
         return None;
     }
@@ -292,6 +297,8 @@ pub(crate) fn call(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
 }
 
 const URL_UNRESERVED: &str = "-_.!~*'()";
+const MOST_UNCOMPRESSED_BYTES: usize = 1 << 30;
+const ORACLE_COMPRESSION_ERROR: u16 = 29_294;
 const URL_RESERVED: &str = ";/?:@&=+$,[]";
 
 fn charset_of(values: &[Value], at: usize) -> SqlResult<Charset> {
@@ -335,7 +342,11 @@ fn raw_input(value: &Value) -> Vec<u8> {
 }
 
 fn text_package(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
-    if !name.starts_with("oracle_utl_encode_") && !name.starts_with("oracle_utl_i18n_") && !name.starts_with("oracle_utl_url_") {
+    if !name.starts_with("oracle_utl_encode_")
+        && !name.starts_with("oracle_utl_i18n_")
+        && !name.starts_with("oracle_utl_url_")
+        && !name.starts_with("oracle_utl_compress_")
+    {
         return None;
     }
     let first = values.first()?;
@@ -358,6 +369,16 @@ fn text_package(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
             charset_of(values, 1).map(|charset| Value::Bytea(encoded(&first.to_text().unwrap_or_default(), charset)))
         }
         "oracle_utl_i18n_raw_to_char" => charset_of(values, 1).map(|charset| Value::Text(decoded(&raw_input(first), charset))),
+        "oracle_utl_compress_lz_compress" => {
+            let packed = eggdb_content::gzip(&raw_input(first));
+            crate::memory::check_value_bytes(packed.len()).map(|()| Value::Bytea(packed))
+        }
+        "oracle_utl_compress_lz_uncompress" => eggdb_content::gunzip(&raw_input(first), MOST_UNCOMPRESSED_BYTES)
+            .map_err(|error| {
+                SqlError::new(SqlState::INVALID_PARAMETER_VALUE, format!("ORA-29294: a data error occurred during compression or uncompression: {error}"))
+                    .with_oracle_code(ORACLE_COMPRESSION_ERROR)
+            })
+            .and_then(|plain| crate::memory::check_value_bytes(plain.len()).map(|()| Value::Bytea(plain))),
         "oracle_utl_url_escape" => {
             let escape_reserved = matches!(values.get(1), Some(Value::Boolean(true)));
             charset_of(values, 2).map(|charset| {

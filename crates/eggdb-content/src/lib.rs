@@ -4,15 +4,17 @@
 //! entries, CRC-checked), and [`extract_text`] returns the text of Office Open XML (ECMA-376:
 //! `.docx`, `.xlsx`, `.pptx`), OpenDocument (OASIS ODF: `.odt`, `.ods`, `.odp`) and PDF files, [`read_sheet`]
 //! and [`write_sheet`] read and write an `.xlsx` worksheet as rows of cells (D506), and
-//! [`write_stored`] writes a ZIP archive of uncompressed entries. Every
+//! [`write_stored`] writes a ZIP archive of uncompressed entries, and [`deflate`] and [`gzip`] compress. Every
 //! reader bounds what it produces, so a hostile file cannot exhaust memory.
 
+mod deflate;
 mod inflate;
 mod pdf;
 mod sheet;
 mod text;
 mod zip;
 
+pub use deflate::{deflate, gzip};
 pub use inflate::{
     DecompressError, gunzip, gunzip_within_memory, inflate, zlib_inflate,
     zlib_inflate_within_memory,
