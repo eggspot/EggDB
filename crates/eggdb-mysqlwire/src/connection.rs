@@ -225,6 +225,18 @@ fn authenticate(
             )
         }
     };
+    let method = match named_plugin {
+        Some(CACHING_SHA2_PASSWORD) => CACHING_SHA2_PASSWORD,
+        _ => MYSQL_NATIVE_PASSWORD,
+    };
+    eggdb_sql::audit_events::record_login(
+        &response.user,
+        response.database.as_deref().unwrap_or_default(),
+        "mysql",
+        &wire.peer(),
+        method,
+        accepted,
+    );
     if !accepted {
         (shared.log)(&format!(
             "{}  password authentication failed for user \"{}\"",

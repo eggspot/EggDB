@@ -513,6 +513,14 @@ fn check_login(
             false
         }
     };
+    eggdb_sql::audit_events::record_login(
+        &user,
+        &login.database,
+        "tds",
+        &wire.peer(),
+        "sql-login",
+        accepted && user == config.user,
+    );
     if !accepted || user != config.user {
         (shared.log)(&format!(
             "{}  password authentication failed for user \"{}\"",

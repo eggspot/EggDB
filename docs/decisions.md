@@ -840,3 +840,4 @@ its full title with its status.
 - [D813](decisions/D813.md) Code-only batch 461 (M6c): MySQL `performance_schema.events_statements_summary_by_digest`
 - [D814](decisions/D814.md) Code-only batch 462 (M6c): SQLite `.scanstats` in the shell
 - [D815](decisions/D815.md) Code-only batch 463 (M6b): server events (logins, schema and privilege changes) in the audit log
+- [D816](decisions/D816.md) Code-only batch 464 (M6b): MySQL and TDS logins in the audit log
