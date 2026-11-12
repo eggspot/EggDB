@@ -1084,3 +1084,31 @@ fn application_contexts_are_set_only_by_their_trusted_package() {
     values(&mut session, "DROP CONTEXT app_ctx");
     failure(&mut session, "DROP CONTEXT app_ctx");
 }
+
+#[test]
+fn dbms_metadata_get_ddl_writes_tables_and_views_in_oracle_form() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    values(
+        &mut session,
+        "CREATE TABLE emp (id NUMBER(6) PRIMARY KEY, name VARCHAR2(20) NOT NULL)",
+    );
+    values(&mut session, "CREATE VIEW emp_names AS SELECT name FROM emp");
+    let table = values(&mut session, "SELECT DBMS_METADATA.GET_DDL('TABLE', 'EMP') FROM dual");
+    let Value::Text(table) = &table[0][0] else {
+        panic!("text DDL: {table:?}");
+    };
+    assert!(table.starts_with("CREATE TABLE"), "{table}");
+    assert!(table.contains("EMP"), "{table}");
+    assert!(table.contains("NAME"), "{table}");
+    let view = values(&mut session, "SELECT DBMS_METADATA.GET_DDL('VIEW', 'EMP_NAMES') FROM dual");
+    let Value::Text(view) = &view[0][0] else {
+        panic!("text DDL: {view:?}");
+    };
+    assert!(view.starts_with("CREATE OR REPLACE FORCE VIEW EMP_NAMES AS"), "{view}");
+    let missing = failure(&mut session, "SELECT DBMS_METADATA.GET_DDL('TABLE', 'NOPE') FROM dual");
+    assert!(missing.message().starts_with("ORA-31603"), "{missing}");
+    let wrong = failure(&mut session, "SELECT DBMS_METADATA.GET_DDL('SYNONYMISH', 'EMP') FROM dual");
+    assert!(wrong.message().starts_with("ORA-31600"), "{wrong}");
+    failure(&mut session, "SELECT DBMS_METADATA.GET_DDL('VIEW', 'EMP') FROM dual");
+}

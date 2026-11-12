@@ -5,6 +5,8 @@ const LONGEST_RANDOM_STRING: usize = 4_000;
 const ORACLE_INVALID_SQL_NAME: u16 = 44_003;
 const ORACLE_INVALID_QUALIFIED_NAME: u16 = 44_004;
 const ORACLE_NUMERIC_OR_VALUE: u16 = 6_502;
+const ORACLE_METADATA_INVALID_INPUT: u16 = 31_600;
+const ORACLE_METADATA_NOT_FOUND: u16 = 31_603;
 const JARO_WINKLER_PREFIX: usize = 4;
 const LONGEST_RANDOM_BYTES: usize = 32_767;
 const GET_TIME_WRAP: i64 = 1 << 31;
@@ -75,6 +77,7 @@ pub(crate) fn internal_name(package: &str, function: &str) -> Option<(&'static s
         ("utl_url", "unescape") => ("oracle_utl_url_unescape", 1, 2),
         ("utl_compress", "lz_compress") => ("oracle_utl_compress_lz_compress", 1, 2),
         ("utl_compress", "lz_uncompress") => ("oracle_utl_compress_lz_uncompress", 1, 1),
+        ("dbms_metadata", "get_ddl") => ("oracle_dbms_metadata_get_ddl", 2, 4),
         _ => return None,
     })
 }
@@ -115,6 +118,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         | "oracle_dbms_assert_enquote_name"
         | "oracle_dbms_assert_enquote_literal" => SqlType::Text,
         "oracle_utl_i18n_raw_to_char" | "oracle_utl_url_escape" | "oracle_utl_url_unescape" => SqlType::Text,
+        "oracle_dbms_metadata_get_ddl" => SqlType::Text,
         "oracle_utl_encode_base64_encode"
         | "oracle_utl_encode_base64_decode"
         | "oracle_utl_i18n_string_to_raw"
@@ -277,7 +281,63 @@ fn text(value: &Value) -> Option<String> {
 
 /// Runs the internal function `name` on `values`; `None` when `name` is not one of these
 /// packages' functions.
+fn metadata_error(code: u16, message: String) -> SqlError {
+    SqlError::new(SqlState::INVALID_PARAMETER_VALUE, format!("ORA-{code:05}: {message}")).with_oracle_code(code)
+}
+
+fn get_ddl(values: &[Value]) -> SqlResult<Value> {
+    let text = |at: usize| values.get(at).filter(|value| !matches!(value, Value::Null)).and_then(Value::to_text);
+    let (Some(object_type), Some(name)) = (text(0), text(1)) else {
+        return Ok(Value::Null);
+    };
+    let object_type = object_type.trim().to_ascii_uppercase();
+    if !matches!(object_type.as_str(), "TABLE" | "VIEW") {
+        return Err(metadata_error(
+            ORACLE_METADATA_INVALID_INPUT,
+            format!("invalid input value {object_type} for parameter OBJECT_TYPE in function GET_DDL"),
+        ));
+    }
+    let snapshot = crate::pg_catalog::current_snapshot().ok_or_else(|| {
+        SqlError::new(SqlState::INTERNAL_ERROR, "DBMS_METADATA.GET_DDL ran without the catalog loaded")
+    })?;
+    let schema = text(2).filter(|schema| !schema.eq_ignore_ascii_case(&snapshot.user));
+    let internal_schema = schema.as_deref().map(crate::lexer::swap_uniform_case);
+    let internal_name = crate::lexer::swap_uniform_case(&name);
+    let not_found = || {
+        metadata_error(
+            ORACLE_METADATA_NOT_FOUND,
+            format!(
+                "object \"{name}\" of type {object_type} not found in schema \"{}\"",
+                schema.clone().unwrap_or_else(|| snapshot.user.to_uppercase())
+            ),
+        )
+    };
+    let entry = snapshot
+        .find_relation(internal_schema.as_deref(), &internal_name)
+        .and_then(|at| snapshot.relations.get(at))
+        .ok_or_else(not_found)?;
+    let ddl = match (&entry.source, object_type.as_str()) {
+        (crate::pg_catalog::RelationSource::Table(table), "TABLE") => {
+            let mut shown = crate::schema::schema_of(table);
+            shown.name = crate::schemas::display(&table.name);
+            shown.create_statement_in(crate::Dialect::Oracle)
+        }
+        (crate::pg_catalog::RelationSource::View(view), "VIEW") => {
+            let query = view.shown_query().ok_or_else(not_found)?;
+            format!(
+                "CREATE OR REPLACE FORCE VIEW {} AS\n{query};",
+                crate::lexer::swap_uniform_case(&entry.name)
+            )
+        }
+        _ => return Err(not_found()),
+    };
+    crate::memory::check_value_bytes(ddl.len()).map(|()| Value::Text(ddl))
+}
+
 pub(crate) fn call(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
+    if name == "oracle_dbms_metadata_get_ddl" {
+        return Some(get_ddl(values));
+    }
     if !name.starts_with("oracle_dbms_random_")
         && !name.starts_with("oracle_dbms_assert_")
         && !name.starts_with("oracle_utl_match_")

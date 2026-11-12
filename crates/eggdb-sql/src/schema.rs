@@ -365,7 +365,7 @@ pub(crate) fn read_table(
     Ok(Some(table))
 }
 
-fn schema_of(definition: &TableDefinition) -> TableSchema {
+pub(crate) fn schema_of(definition: &TableDefinition) -> TableSchema {
     TableSchema {
         name: crate::schemas::base_name(&definition.name).to_owned(),
         schema: crate::schemas::schema_of(&definition.name).to_owned(),

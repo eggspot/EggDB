@@ -883,3 +883,4 @@ its full title with its status.
 - [D856](decisions/D856.md) Code-only batch 504 (M6a): composites and user-defined ranges read in PostgreSQL's binary format
 - [D857](decisions/D857.md) Code-only batch 505 (M10): Oracle DBMS_APPLICATION_INFO, DBMS_SESSION, DBMS_LOCK.SLEEP and DBMS_STATS
 - [D858](decisions/D858.md) Code-only batch 506 (M10): Oracle application contexts (CREATE CONTEXT, DBMS_SESSION.SET_CONTEXT)
+- [D859](decisions/D859.md) Code-only batch 507 (M10): Oracle DBMS_METADATA.GET_DDL for tables and views

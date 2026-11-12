@@ -1302,8 +1302,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `UTL_URL`: **code written, unbuilt** (code-only mode, 2026-11-12, D732); `UTL_COMPRESS`: **code written, unbuilt**
   (code-only mode, 2026-11-12, D733); `DBMS_APPLICATION_INFO`, `DBMS_SESSION`, `DBMS_LOCK.SLEEP` and `DBMS_STATS`:
   **code written, unbuilt** (code-only mode, 2026-11-12, D857); application contexts (`CREATE CONTEXT`,
-  `DBMS_SESSION.SET_CONTEXT`): **code written, unbuilt** (code-only mode, 2026-11-12, D858). Left: `DBMS_SQL`,
-  `DBMS_METADATA`, `UTL_FILE` and the rest.
+  `DBMS_SESSION.SET_CONTEXT`): **code written, unbuilt** (code-only mode, 2026-11-12, D858); `DBMS_METADATA.GET_DDL`
+  for tables and views: **code written, unbuilt** (code-only mode, 2026-11-12, D859). Left: `DBMS_SQL`, the other
+  `DBMS_METADATA` object types, `UTL_FILE` and the rest.
 - PL/SQL: autonomous transactions (after concurrent writers, M3), compound triggers, the
   mutating-table check, `IS A SET`, `IS EMPTY`, `MULTISET`, `MULTISET (subquery)`, `SET()` and
   `TABLE()` correlated in a join (roadmap item 33e). `IS A SET` and `IS EMPTY`: **code written, unbuilt** (code-only mode,

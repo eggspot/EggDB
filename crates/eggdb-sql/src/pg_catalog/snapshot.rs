@@ -17,7 +17,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-const SNAPSHOT_FUNCTIONS: [&str; 43] = [
+const SNAPSHOT_FUNCTIONS: [&str; 44] = [
+    "get_ddl",
     "pg_partition_ancestors",
     "pg_partition_tree",
     "pg_partition_root",
@@ -88,7 +89,7 @@ fn names_snapshot_function(word: &str) -> bool {
 
 const SEQUENCE_FUNCTIONS: [&str; 3] = ["nextval", "currval", "setval"];
 
-const CATALOG_TEXT_HINTS: [&str; 5] = ["reg", "pg_", "description", "privilege", "acl"];
+const CATALOG_TEXT_HINTS: [&str; 6] = ["reg", "pg_", "description", "privilege", "acl", "get_ddl"];
 
 pub(crate) fn text_needs_catalog(text: &str) -> bool {
     CATALOG_TEXT_HINTS
