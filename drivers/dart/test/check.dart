@@ -24,5 +24,33 @@ void main() {
     require(error.sqlState?.length == 5, 'the error has a SQLSTATE');
   }
   db.close();
+
+  final path = '${Directory.systemTemp.path}/eggdb-dart-kv-$pid.eggdb';
+  final store = KeyValue.open(path);
+  store.write((txn) {
+    txn.putText('a', '1');
+    txn.put('b'.codeUnits, [0, 2]);
+    require(txn.createCollection('users'), 'a collection is created');
+    txn.putText('u1', 'Ada', collection: 'users');
+  });
+  store.read((txn) {
+    require(txn.getText('a') == '1', 'a stored value');
+    require(txn.get('missing'.codeUnits) == null, 'a missing key');
+    final all = txn.scan();
+    require(all.length == 2 && all[1].value.length == 2 && all[1].value[0] == 0, 'a scan with binary values');
+    require(String.fromCharCodes(txn.scan(reverse: true, limit: 1).single.key) == 'b', 'a reversed scan');
+    require(txn.collections().join(',') == 'users', 'the collection names');
+    require(txn.collectionStats('users').entries == 1, 'the collection stats');
+  });
+  store.write((txn) {
+    require(txn.delete('a'.codeUnits), 'a key is deleted');
+    txn.renameCollection('users', 'people');
+  });
+  store.read((txn) {
+    require(txn.getText('a') == null, 'the deleted key is gone');
+    require(txn.getText('u1', collection: 'people') == 'Ada', 'the renamed collection keeps its keys');
+  });
+  store.close();
+  File(path).deleteSync();
   print('dart driver check: passed');
 }
