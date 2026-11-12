@@ -57,6 +57,9 @@ echo "$("$java" -version 2>&1 | head -n 1); .NET SDK $("$dotnet" --version)"
   fail "the .NET program did not build: $(tail -n 40 "$work/dotnet-build.log")"
 "$dotnet" build "$clients/dotnet/EfCoreAppCheck" -c Release --artifacts-path "$work/dotnet" >> "$work/dotnet-build.log" 2>&1 ||
   fail "the EF Core program did not build: $(tail -n 40 "$work/dotnet-build.log")"
+"$dotnet" build "$clients/dotnet/EfCoreAppCheck" -c Release --artifacts-path "$work/dotnet-ef9" \
+  -p:EfCoreTarget=net9.0 -p:EfCoreVersion=9.0.0 >> "$work/dotnet-build.log" 2>&1 ||
+  fail "the EF Core 9 program did not build: $(tail -n 40 "$work/dotnet-build.log")"
 
 password=apps-secret
 printf '%s\n' "$password" > "$work/password.txt"
@@ -125,11 +128,22 @@ serve efcore efcore
   > "$work/efcore-dotnet.out" 2>&1 || true
 stop
 
+"$eggdb" create "$work/efcore9.db" > /dev/null || fail "eggdb create failed"
+serve efcore9 efcore
+"$dotnet" run --no-build --project "$clients/dotnet/EfCoreAppCheck" -c Release --artifacts-path "$work/dotnet-ef9" \
+  -p:EfCoreTarget=net9.0 -p:EfCoreVersion=9.0.0 -- \
+  "Server=127.0.0.1,$port;Database=efcore;User ID=eggdb;Password=$password;Encrypt=false;Connect Timeout=10" \
+  > "$work/efcore9-dotnet.out" 2>&1 || true
+stop
+cp "$here/expected-efcore-dotnet.out" "$work/expected-efcore9-dotnet.out"
+
 : > "$work/output.diff"
 different=""
-for program in java dotnet logic-dotnet metadata-java metadata-dotnet bulk-dotnet efcore-dotnet; do
-  if ! cmp -s "$here/expected-$program.out" "$work/$program.out"; then
-    diff -u "$here/expected-$program.out" "$work/$program.out" >> "$work/output.diff" || true
+for program in java dotnet logic-dotnet metadata-java metadata-dotnet bulk-dotnet efcore-dotnet efcore9-dotnet; do
+  expected="$here/expected-$program.out"
+  [ -f "$expected" ] || expected="$work/expected-$program.out"
+  if ! cmp -s "$expected" "$work/$program.out"; then
+    diff -u "$expected" "$work/$program.out" >> "$work/output.diff" || true
     different="$different $program"
   fi
 done
@@ -138,4 +152,4 @@ if [ -n "$different" ]; then
   tail -n 40 "$work/serve.err" >&2
   fail "the$different client programs printed something else on EggDB (whole diff in $work/output.diff)"
 fi
-echo "tds-apps check passed: mssql-jdbc and Microsoft.Data.SqlClient run parameterized CRUD, transactions, Transact-SQL batch logic and stored procedures with output parameters, list the restored fixture's metadata and load a bcp file with SqlBulkCopy and eggdb import, and an EF Core app migrates, saves and queries on EggDB"
+echo "tds-apps check passed: mssql-jdbc and Microsoft.Data.SqlClient run parameterized CRUD, transactions, Transact-SQL batch logic and stored procedures with output parameters, list the restored fixture's metadata and load a bcp file with SqlBulkCopy and eggdb import, and an EF Core app migrates, saves and queries on EggDB with EF Core 8 and 9"

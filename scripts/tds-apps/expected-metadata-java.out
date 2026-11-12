@@ -1,5 +1,20 @@
 == catalogs
 shop
+== schemas
+db_accessadmin|NULL
+db_backupoperator|NULL
+db_datareader|NULL
+db_datawriter|NULL
+db_ddladmin|NULL
+db_denydatareader|NULL
+db_denydatawriter|NULL
+db_owner|NULL
+db_securityadmin|NULL
+dbo|NULL
+guest|NULL
+INFORMATION_SCHEMA|NULL
+sales|shop
+sys|NULL
 == user
 eggdb
 == tables

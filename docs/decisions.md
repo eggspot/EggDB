@@ -1020,3 +1020,4 @@ its full title with its status.
 - [D993](decisions/D993.md) Code-only batch 641 (M10): eggdb follow for MySQL through its binary log
 - [D994](decisions/D994.md) Code-only batch 642 (M10): MySQL's test suite run weekly with its pass rate published
 - [D995](decisions/D995.md) Code-only batch 643 (M10): SQL Server's @@DBTS and MIN_ACTIVE_ROWVERSION()
+- [D996](decisions/D996.md) Code-only batch 644 (M10): EF Core 9 and mssql-jdbc getSchemas() in tds-apps

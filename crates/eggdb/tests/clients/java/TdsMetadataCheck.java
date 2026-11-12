@@ -26,6 +26,7 @@ public final class TdsMetadataCheck {
         try (Connection connection = DriverManager.getConnection(arguments[0], arguments[1], arguments[2])) {
             DatabaseMetaData meta = connection.getMetaData();
             step(meta, "catalogs", TdsMetadataCheck::catalogs);
+            step(meta, "schemas", TdsMetadataCheck::schemas);
             step(meta, "user", TdsMetadataCheck::user);
             step(meta, "tables", TdsMetadataCheck::tables);
             step(meta, "columns of dbo.customers", m -> columns(m, "dbo", "customers"));
@@ -64,6 +65,10 @@ public final class TdsMetadataCheck {
 
     private static void catalogs(DatabaseMetaData meta) throws SQLException {
         print(meta.getCatalogs(), "TABLE_CAT");
+    }
+
+    private static void schemas(DatabaseMetaData meta) throws SQLException {
+        print(meta.getSchemas(), "TABLE_SCHEM", "TABLE_CATALOG");
     }
 
     private static void user(DatabaseMetaData meta) throws SQLException {

@@ -42,6 +42,17 @@ pub(crate) const DATABASE_ID: i32 = 5;
 pub(crate) const DBO_PRINCIPAL_ID: i32 = 1;
 pub(crate) const COLLATION: &str = "Latin1_General_100_BIN2";
 const RESERVED_SCHEMAS: [&str; 4] = [DBO, "guest", "information_schema", SYS_SCHEMA];
+const FIXED_ROLE_SCHEMAS: [(i32, &str); 9] = [
+    (16_384, "db_owner"),
+    (16_385, "db_accessadmin"),
+    (16_386, "db_securityadmin"),
+    (16_387, "db_ddladmin"),
+    (16_389, "db_backupoperator"),
+    (16_390, "db_datareader"),
+    (16_391, "db_datawriter"),
+    (16_392, "db_denydatareader"),
+    (16_393, "db_denydatawriter"),
+];
 const HIDDEN_SCHEMAS: [&str; 3] = ["pg_catalog", "pg_toast", "information_schema"];
 
 const fn column(name: &'static str, sql_type: crate::types::SqlType) -> CatalogColumn {
@@ -338,6 +349,11 @@ impl SqlServerObjects {
                 internal: None,
             },
         ];
+        schemas.extend(FIXED_ROLE_SCHEMAS.iter().map(|(schema_id, name)| SqlServerSchema {
+            schema_id: *schema_id,
+            name: (*name).to_owned(),
+            internal: None,
+        }));
         let mut user_schemas: Vec<&str> = snapshot
             .schemas
             .iter()
