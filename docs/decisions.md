@@ -800,3 +800,4 @@ its full title with its status.
 - [D773](decisions/D773.md) Code-only batch 421 (M6b): crypto-shredding with per-subject keys under an outside key-encryption key, `eggdb_shredding`
 - [D774](decisions/D774.md) Code-only batch 422 (M16): W3C Web of Things Thing Descriptions with checked readings and events, `eggdb_iot`
 - [D775](decisions/D775.md) Code-only batch 423 (M16): Modbus TCP and RTU frames decoded in SQL, `modbus_decode`
+- [D776](decisions/D776.md) Code-only batch 424 (M16): an in-process inbox for embedded consumers with a redelivery limit, `eggdb::inbox`

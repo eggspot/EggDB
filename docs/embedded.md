@@ -648,6 +648,33 @@ program), with no file system and no allocation, and refuses a damaged, torn or 
 as the engine does in a file. CI builds it for a Cortex-M4F (`thumbv7em-none-eabihf`). The B-tree,
 transactions and SQL do not run there yet.
 
+## Queues in process
+
+`eggdb::inbox::Inbox` sends to and consumes from the durable queues the AMQP, STOMP and SQS servers of `eggdb serve`
+use, inside the program, without a connection (D776):
+
+```rust
+use eggdb::inbox::{Inbox, Outcome};
+use std::time::Duration;
+
+let inbox = Inbox::open(&db, "jobs")?.with_max_receives(5);
+inbox.send(b"resize photo 7", Duration::ZERO)?;
+inbox.handle(Duration::from_secs(1), |message| {
+    match resize(&message.body) {
+        Ok(()) => Outcome::Done,
+        Err(_) => Outcome::Retry,
+    }
+})?;
+```
+
+`receive(wait)` leases the oldest visible message (30 seconds by default, `with_lease`) and waits up to `wait` for one;
+`settle(message, outcome)` removes it (`Done`), makes it visible again (`Retry`) or moves it to `<queue>.dlq`
+(`Reject`), and `handle` does both around a closure. A message received more often than `with_max_receives` allows
+(5) goes to the dead-letter queue instead of being handed out again; `dead_letters()` opens that queue. A lease that
+runs out (the program stopped) makes the message visible again, so every message is handled at least once.
+`eggdb::keyspace::DatabaseKeyspace` gives the same access to every protocol's stored data for programs that use the
+protocol crates directly.
+
 ## Offline-first sync
 
 `eggdb-sync` lets an embedded database take writes while it is offline and exchange them with a

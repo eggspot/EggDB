@@ -70,6 +70,8 @@ mod concurrent;
 mod database;
 mod error;
 mod expiry;
+pub mod inbox;
+pub mod keyspace;
 mod options;
 mod scan;
 pub mod sql;
